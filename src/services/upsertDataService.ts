@@ -1,0 +1,3 @@
+const upsertStaticData = () => {};
+
+export { upsertStaticData };

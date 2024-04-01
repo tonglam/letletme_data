@@ -35,7 +35,7 @@ model Event {
   can_manage                Boolean?
   released                  Boolean?
   ranked_count              Int?
-  chip_plays                String[]
+  chip_plays                Json[]
   most_selected             Int?
   most_transferred_in       Int?
   top_element               Int?

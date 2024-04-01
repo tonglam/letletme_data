@@ -1,5 +1,5 @@
-import fetch from 'node-fetch';
 import querystring from 'querystring';
+import fetch from 'node-fetch';
 
 const fetchData = async (url: string, options = {}) => {
   try {
@@ -20,37 +20,37 @@ const fetchData = async (url: string, options = {}) => {
 
 const getFetch =
   (url: string) =>
-  (data = {}) =>
-  async (headers = {}) => {
-    const queryParams = querystring.stringify(data);
-    const apiUrl = queryParams ? `${url}?${queryParams}` : url;
-    return await fetchData(apiUrl, { headers });
-  };
+    (data = {}) =>
+      async (headers = {}) => {
+        const queryParams = querystring.stringify(data);
+        const apiUrl = queryParams ? `${url}?${queryParams}` : url;
+        return await fetchData(apiUrl, { headers });
+      };
 
 const postFetch =
   (url: string) =>
-  (data = {}) =>
-  async (headers = {}) => {
-    let options = {};
+    (data = {}) =>
+      async (headers = {}) => {
+        let options = {};
 
-    if (data instanceof FormData) {
-      options = {
-        method: 'POST',
-        body: data,
-        headers: headers,
-      };
-    } else {
-      options = {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...headers,
-        },
-        body: JSON.stringify(data),
-      };
-    }
+        if (data instanceof FormData) {
+          options = {
+            method: 'POST',
+            body: data,
+            headers: headers,
+          };
+        } else {
+          options = {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              ...headers,
+            },
+            body: JSON.stringify(data),
+          };
+        }
 
-    return await fetchData(url, options);
-  };
+        return await fetchData(url, options);
+      };
 
 export { getFetch, postFetch };
