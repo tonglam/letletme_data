@@ -1,31 +1,41 @@
-// import { SafeParseReturnType, ZodTypeAny } from 'zod';
-// import { logger } from '../index';
+import { Prisma } from '@prisma/client';
+import { z } from 'zod';
+import { errorLogger } from '../utils/logger.util';
 
-// type ConvertFunction<T, U> = (data: T) => U;
+const handleZodError = (error: z.ZodError) => {
+  const errorMessage = error.issues
+    .map((issue) => `${issue.path.join('.')}: ${issue.message}`)
+    .join(', ');
+  errorLogger({ message: `Error validating data: ${errorMessage}` });
+};
 
-// /**
-//  * 1. validate the data using the zod schema
-//  * 2. map the data to the prisma schema
-//  * 3. delete all the existing data
-//  * 4. insert the new data
-//  */
-// const truncate_insert = async <T, U>(
-//   inputData: T,
-//   ZodSchema: ZodTypeAny,
-//   convertFunction: ConvertFunction<T, U>,
-// ): Promise<void> => {
-//   const inputResult = safeParse(inputData, ZodSchema);
+/**
+ * 1. validate the data using the zod schema
+ * 2. map the data to the prisma schema
+ * 3. delete all the existing data
+ * 4. insert the new data
+ */
 
-//   if (!inputResult.success) {
-//     logger.error(`Error validating input data: ${inputResult.error.message}`);
-//     return;
-//   }
+export const truncate_insert = async <T extends z.ZodTypeAny, M extends object>(
+  inputData: unknown,
+  schema: z.ZodSchema<T>,
+  mapToPrismaDataCallBack: (data: z.infer<T>) => Prisma.Exact<T, M>,
+  modelType: M,
+): Promise<void> => {
+  const inputResult: z.infer<T> = await parseData(inputData, schema);
 
-//   const convertedData = convertFunction(inputResult);
-// };
+  const prismaData = mapToPrismaData(inputResult.data, modelType, mapToPrismaDataCallBack);
+};
 
-// const safeParse = <T, U>(inputData: T, ZodSchema: ZodTypeAny): SafeParseReturnType<T, U> => {
-//   return ZodSchema.safeParse(inputData);
-// };
+function parseData<T extends z.ZodTypeAny>(inputData: unknown, schema: T): Promise<z.infer<T>> {
+  return schema.parse(inputData) as z.infer<T>;
+}
 
-// export { truncate_insert };
+function mapToPrismaData<T extends z.ZodTypeAny, M extends object>(
+  data: z.infer<T>,
+  modelType: M,
+  mappingCallback: (data: z.infer<T>) => Prisma.Exact<T, M>,
+): Prisma.Exact<T, M> {
+  const mappedData = mappingCallback(data);
+  return mappedData as Prisma.Exact<T, M>;
+}
