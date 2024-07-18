@@ -1,5 +1,5 @@
 import { fpl_api_config } from '../configs/api.config';
-import { upsertEvent } from '../functions/upsertEventDBFunctions';
+import { upsertEvent } from '../functions/upsertFunctions/upsertEvent';
 import { getFetch } from '../utils/fetch.utils';
 
 const upsertStaticData = async () => {

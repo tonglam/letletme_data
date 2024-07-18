@@ -1,7 +1,7 @@
-import { BootStrap } from '../constant/bootStrap.type';
-import { Event, EventSchema } from '../constant/events.type';
-import { prisma } from '../index';
-import { truncate_insert } from './upsertDBFunctions';
+import { BootStrap } from '../../constant/bootStrap.type';
+import { Event, EventSchema } from '../../constant/events.type';
+import { prisma } from '../../index';
+import { truncate_insert } from './baseUpsertFunction';
 
 const transformEventData = (data: Event) => ({
   ...data,

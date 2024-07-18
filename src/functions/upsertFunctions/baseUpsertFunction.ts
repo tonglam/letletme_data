@@ -1,6 +1,6 @@
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
-import { errorLogger } from '../utils/logger.util';
+import { errorLogger } from '../../utils/logger.util';
 
 const handleZodError = (error: z.ZodError) => {
   const errorMessage = error.issues
