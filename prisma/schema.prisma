@@ -31,9 +31,6 @@ model Event {
   is_next                   Boolean?
   cup_leagues_created       Boolean?
   h2h_ko_matches_created    Boolean?
-  can_enter                 Boolean?
-  can_manage                Boolean?
-  released                  Boolean?
   ranked_count              Int?
   chip_plays                Json[]
   most_selected             Int?

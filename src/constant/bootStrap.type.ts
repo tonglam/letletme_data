@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { ElementsSchema } from './element.type';
 import { EventsSchema } from './events.type';
 import { PhasesSchema } from './phase.type';
-import { TeamsSchema } from './team.type';
+import { TeamsSchema } from './teams.type';
 
 const BootStrapSchema = z.object({
   events: EventsSchema,

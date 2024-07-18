@@ -1,6 +1,6 @@
 import { fpl_api_config } from '../configs/api.config';
+import { upsertEvent } from '../functions/upsertEventDBFunctions';
 import { getFetch } from '../utils/fetch.utils';
-import { upsertEvent } from './upsertDbService';
 
 const upsertStaticData = async () => {
   const bootStrapData = await getFetch(fpl_api_config.BOOTSTRAP_STATIC_URL)()();
@@ -9,6 +9,7 @@ const upsertStaticData = async () => {
     return;
   }
 
+  // event data
   await upsertEvent(bootStrapData);
 };
 
