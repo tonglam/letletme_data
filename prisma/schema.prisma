@@ -64,12 +64,25 @@ model Phase {
 }
 
 model Team {
-  id         String   @id @default(auto()) @map("_id") @db.ObjectId
-  team_id    Int      @unique
-  team_code  Int
-  name       String?
-  short_name String?
-  created_at DateTime @default(now())
+  id                    String   @id @default(auto()) @map("_id") @db.ObjectId
+  team_id               Int      @unique
+  team_code             Int
+  name                  String?
+  short_name            String?
+  win                   Int?
+  draw                  Int?
+  loss                  Int?
+  played                Int?
+  points                Int?
+  position              Int?
+  strength              Int?
+  strength_overall_home Int?
+  strength_overall_away Int?
+  strength_attack_home  Int?
+  strength_attack_away  Int?
+  strength_defence_home Int?
+  strength_defence_away Int?
+  created_at            DateTime @default(now())
 
   eventFixtureTeamA EventFixture[] @relation("TeamA")
   eventFixtureTeamH EventFixture[] @relation("TeamH")
@@ -106,7 +119,7 @@ model PlayerStat {
   event_id                             Int
   element                              Player    @relation(fields: [element_id], references: [element_id])
   element_id                           Int
-  can_transact                         Boolean?
+  element_code                         Int
   chance_of_playing_next_round         Int?
   chance_of_playing_this_round         Int?
   cost_change_event                    Int?
@@ -193,6 +206,7 @@ model PlayerStat {
   created_at                           DateTime  @default(now())
   update_at                            DateTime  @updatedAt
 
+  @@unique([element_id, event_id])
   @@map("player_stat")
 }
 
@@ -210,14 +224,12 @@ model PlayerValue {
   event        Event                 @relation(fields: [event_id], references: [event_id])
   event_id     Int
   value        Int
-  last_value   Int?
-  change_date  String?
+  last_value   Int                   @default(0)
+  change_date  String                @default("")
   change_type  PlayerValueChangeType @default(Start)
   created_at   DateTime              @default(now())
-  updated_at   DateTime              @updatedAt
+  updated_at   DateTime              @default(now())
 
-  // @@unique([element_id, change_date], name: "unique_element_id_change_date")
-  // @@index([element_type], name: "index_element_type")
   @@map("player_value")
 }
 

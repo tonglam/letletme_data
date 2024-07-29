@@ -1,8 +1,8 @@
 import { z } from 'zod';
 
 const ElementSchema = z.object({
-  chance_of_playing_next_round: z.number(),
-  chance_of_playing_this_round: z.number(),
+  chance_of_playing_next_round: z.nullable(z.number()),
+  chance_of_playing_this_round: z.nullable(z.number()),
   code: z.number(),
   cost_change_event: z.number(),
   cost_change_event_fall: z.number(),
@@ -10,15 +10,15 @@ const ElementSchema = z.object({
   cost_change_start_fall: z.number(),
   dreamteam_count: z.number(),
   element_type: z.number(),
-  ep_next: z.string(),
-  ep_this: z.string(),
+  ep_next: z.nullable(z.string()),
+  ep_this: z.nullable(z.string()),
   event_points: z.number(),
   first_name: z.string(),
-  form: z.string(),
+  form: z.nullable(z.string()),
   id: z.number(),
   in_dreamteam: z.boolean(),
   news: z.string(),
-  news_added: z.string(),
+  news_added: z.nullable(z.string()),
   now_cost: z.number(),
   photo: z.string(),
   points_per_game: z.string(),
@@ -97,4 +97,4 @@ type Element = z.infer<typeof ElementSchema>;
 
 type Elements = z.infer<typeof ElementsSchema>;
 
-export { Element, ElementSchema, Elements, ElementsSchema };
+export { Element, Elements, ElementSchema, ElementsSchema };

@@ -13,4 +13,4 @@ type Phase = z.infer<typeof PhaseSchema>;
 
 type Phases = z.infer<typeof PhasesSchema>;
 
-export { Phase, PhaseSchema, Phases, PhasesSchema };
+export { Phase, Phases, PhaseSchema, PhasesSchema };
