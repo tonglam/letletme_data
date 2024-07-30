@@ -114,10 +114,10 @@ model Player {
 }
 
 model PlayerStat {
-  id                                   String    @id @default(auto()) @map("_id") @db.ObjectId
-  event                                Event     @relation(fields: [event_id], references: [event_id])
+  id                                   String   @id @default(auto()) @map("_id") @db.ObjectId
+  event                                Event    @relation(fields: [event_id], references: [event_id])
   event_id                             Int
-  element                              Player    @relation(fields: [element_id], references: [element_id])
+  element                              Player   @relation(fields: [element_id], references: [element_id])
   element_id                           Int
   element_code                         Int
   chance_of_playing_next_round         Int?
@@ -134,7 +134,7 @@ model PlayerStat {
   form                                 String?
   in_dreamteam                         Boolean?
   news                                 String?
-  news_added                           DateTime?
+  news_added                           String?
   now_cost                             Int?
   photo                                String?
   points_per_game                      String?
@@ -142,7 +142,7 @@ model PlayerStat {
   special                              Boolean?
   squad_number                         Int?
   status                               String?
-  team                                 Team      @relation(fields: [team_id], references: [team_id])
+  team                                 Team     @relation(fields: [team_id], references: [team_id])
   team_id                              Int
   total_points                         Int?
   transfers_in                         Int?
@@ -203,8 +203,8 @@ model PlayerStat {
   selected_rank_type                   Int?
   starts_per_90                        Int?
   clean_sheets_per_90                  Int?
-  created_at                           DateTime  @default(now())
-  update_at                            DateTime  @updatedAt
+  created_at                           DateTime @default(now())
+  update_at                            DateTime @updatedAt
 
   @@unique([element_id, event_id])
   @@map("player_stat")

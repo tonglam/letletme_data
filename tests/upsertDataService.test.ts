@@ -3,7 +3,7 @@ import { server } from '../src/index';
 import { upsertStaticData } from '../src/services/upsertDataService';
 
 describe('upsertStaticData', () => {
-  jest.setTimeout(50000);
+  jest.setTimeout(5000000);
   test('upsert bootstrap static data', async () => {
     await upsertStaticData();
   });

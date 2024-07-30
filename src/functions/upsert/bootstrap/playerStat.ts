@@ -1,11 +1,37 @@
+import { Prisma } from '@prisma/client';
 import { BootStrap } from '../../../constant/bootStrap.type';
 import { Element, ElementSchema } from '../../../constant/element.type';
-import { IPlayerStat } from '../../../constant/interface';
+import { prisma } from '../../../index';
 import { getCurrentEvent } from '../../../utils/fpl.utils';
-import { safeCreateMany, safeUpdateMany, upsert } from '../base';
+import { upsert } from '../base';
 
-const transformData = (data: Element): IPlayerStat => ({
-  event_id: getCurrentEvent(),
+const eventId = getCurrentEvent();
+
+async function mapEventPlayerStats(): Promise<Prisma.JsonObject> {
+  try {
+    const playerStats = await prisma.playerStat.findMany({
+      where: {
+        event_id: eventId,
+      },
+    });
+
+    const playerStatMap: Prisma.JsonObject = {};
+
+    for (const stat of playerStats) {
+      const transformedStat = transformData(stat as unknown as Element);
+      transformedStat.element_id = stat.element_id;
+      playerStatMap[stat.element_id.toString()] = transformedStat;
+    }
+
+    return playerStatMap;
+  } catch (error) {
+    console.error('Error fetching player stats:', error);
+    throw error;
+  }
+}
+
+const transformData = (data: Element) => ({
+  event_id: eventId,
   element_id: data.id,
   element_code: data.code,
   chance_of_playing_next_round: data.chance_of_playing_next_round,
@@ -22,7 +48,7 @@ const transformData = (data: Element): IPlayerStat => ({
   form: data.form,
   in_dreamteam: data.in_dreamteam,
   news: data.news,
-  news_added: data.news_added ? new Date(data.news_added) : null,
+  news_added: data.news_added || null,
   now_cost: data.now_cost,
   photo: data.photo,
   points_per_game: data.points_per_game,
@@ -90,20 +116,33 @@ const transformData = (data: Element): IPlayerStat => ({
   selected_rank_type: data.selected_rank_type,
   starts_per_90: data.starts_per_90,
   clean_sheets_per_90: data.clean_sheets_per_90,
-  id: undefined,
 });
 
 const upsertPlayerStat = async (bootStrapData: BootStrap) => {
-  const uniqueKey = 'element_id';
   await upsert(
     bootStrapData.elements,
     ElementSchema,
     transformData,
+    mapEventPlayerStats,
+    'element_id',
     async (data) => {
-      await safeCreateMany('player', data);
+      await prisma.playerStat.createMany({
+        data,
+      });
     },
     async (data) => {
-      await safeUpdateMany('player', data);
+      await prisma.playerStat.updateMany({
+        where: {
+          event_id: eventId,
+          element_id: {
+            in: data.map((item) => item.element_id),
+          },
+        },
+        data: data.map((item) => ({
+          where: { element_id: item.element_id },
+          data: item,
+        })),
+      });
     },
   );
 };
