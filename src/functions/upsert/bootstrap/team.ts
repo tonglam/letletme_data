@@ -1,6 +1,8 @@
 import { BootStrap } from '../../../constant/bootStrap.type';
 import { Team, TeamSchema } from '../../../constant/teams.type';
-import { safeCreateMany, safeDelete, truncate_insert } from '../base';
+import { prisma } from '../../../index';
+import { safeDelete } from '../../base/mongoDB';
+import { truncate_insert } from '../base';
 
 const transformData = (data: Team) => ({
   id: undefined,
@@ -32,7 +34,7 @@ const upsertTeam = async (bootStrapData: BootStrap) => {
       await safeDelete('team');
     },
     async (data) => {
-      await safeCreateMany('team', data);
+      await prisma.team.createMany({ data });
     },
   );
 };

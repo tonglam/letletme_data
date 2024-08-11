@@ -1,6 +1,7 @@
 import { fpl_api_config } from '../configs/api.config';
 // import { upsertEvent } from '../functions/upsert/bootstrap/event';
 // import { upsertPhase } from '../functions/upsert/bootstrap/phase';
+// import { upsertTeam } from '../functions/upsert/bootstrap/team';
 // import { upsertPlayer } from '../functions/upsert/bootstrap/player';
 import { upsertPlayerStat } from '../functions/upsert/bootstrap/playerStat';
 // import { upsertPlayerValue } from '../functions/upsert/bootstrap/playerValue';

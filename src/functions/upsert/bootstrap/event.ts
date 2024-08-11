@@ -1,6 +1,8 @@
 import { BootStrap } from '../../../constant/bootStrap.type';
 import { Event, EventSchema } from '../../../constant/events.type';
-import { safeCreateMany, safeDelete, truncate_insert } from '../base';
+import { prisma } from '../../../index';
+import { safeDelete } from '../../base/mongoDB';
+import { truncate_insert } from '../base';
 
 const transformData = (data: Event) => ({
   ...data,
@@ -17,7 +19,7 @@ const upsertEvent = async (bootStrapData: BootStrap) => {
       await safeDelete('event');
     },
     async (data) => {
-      await safeCreateMany('event', data);
+      await prisma.event.createMany({ data });
     },
   );
 };

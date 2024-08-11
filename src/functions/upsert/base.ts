@@ -1,27 +1,6 @@
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
-import { prisma } from '../../index';
 import { errorLogger } from '../../utils/logger.util';
-
-interface ListCollectionsResult {
-  cursor: {
-    firstBatch: Array<{ name: string }>;
-    id: number;
-    ns: string;
-  };
-  ok: number;
-}
-
-interface CreateManyResult {
-  ok: number;
-  n: number;
-}
-
-interface UpdateManyResult {
-  ok: number;
-  n: number;
-  nModified: number;
-}
 
 const handleZodError = (error: z.ZodError): string => {
   const errorMessage = error.issues
@@ -44,116 +23,6 @@ const parseData = <T extends z.ZodTypeAny>(
       return { success: false, error: errorMessage };
     }
     return { success: false, error: 'Unknown error during data parsing' };
-  }
-};
-
-const collectionExists = async (collectionName: string): Promise<boolean> => {
-  try {
-    const result = await prisma.$runCommandRaw({
-      listCollections: 1,
-      filter: { name: collectionName },
-    });
-
-    const typedResult = result as unknown as ListCollectionsResult;
-
-    return typedResult.cursor.firstBatch.length > 0;
-  } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    console.error(`Error checking if collection ${collectionName} exists: ${errorMessage}`);
-    throw error;
-  }
-};
-
-const safeDelete = async (collectionName: string): Promise<void> => {
-  try {
-    const exists = await collectionExists(collectionName);
-    if (!exists) {
-      console.log(`Collection ${collectionName} does not exist. Skipping delete operation.`);
-      return;
-    }
-
-    await prisma.$runCommandRaw({
-      delete: collectionName,
-      deletes: [{ q: {}, limit: 0 }],
-    });
-    console.log(`Successfully deleted all documents from ${collectionName}`);
-  } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    console.error(`Error while deleting ${collectionName} collection: ${errorMessage}`);
-    throw error;
-  }
-};
-
-const safeCreateMany = async <T extends Prisma.JsonObject>(
-  collectionName: string,
-  documents: T[],
-): Promise<number> => {
-  try {
-    if (documents.length === 0) {
-      console.log(`No documents to insert into ${collectionName}. Skipping insert operation.`);
-      return 0;
-    }
-
-    const result = await prisma.$runCommandRaw({
-      insert: collectionName,
-      documents: documents as unknown as Prisma.InputJsonObject,
-      ordered: false,
-    });
-
-    const typedResult = result as unknown as CreateManyResult;
-
-    if (typedResult.ok !== 1) {
-      throw new Error(`Bulk insert operation failed for collection ${collectionName}`);
-    }
-
-    console.log(`Successfully inserted ${typedResult.n} documents into ${collectionName}`);
-    return typedResult.n;
-  } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    console.error(
-      `Error while inserting documents into ${collectionName} collection: ${errorMessage}`,
-    );
-    throw error;
-  }
-};
-
-const safeUpdateMany = async (
-  collectionName: string,
-  filter: Prisma.JsonObject,
-  update: Prisma.JsonObject,
-): Promise<number> => {
-  try {
-    const exists = await collectionExists(collectionName);
-    if (!exists) {
-      console.log(`Collection ${collectionName} does not exist. Skipping update operation.`);
-      return 0;
-    }
-
-    const result = await prisma.$runCommandRaw({
-      update: collectionName,
-      updates: [
-        {
-          q: filter,
-          u: { $set: update },
-          multi: true,
-        },
-      ],
-    });
-
-    const typedResult = result as unknown as UpdateManyResult;
-
-    if (typedResult.ok !== 1) {
-      throw new Error(`Bulk update operation failed for collection ${collectionName}`);
-    }
-
-    console.log(`Successfully updated ${typedResult.n} documents in ${collectionName}`);
-    return typedResult.nModified;
-  } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    console.error(
-      `Error while updating documents in ${collectionName} collection: ${errorMessage}`,
-    );
-    throw error;
   }
 };
 
@@ -207,7 +76,7 @@ const upsert = async <
   inputData: unknown,
   schema: T,
   mapToPrismaDataCallBack: (data: z.infer<T>) => M,
-  mapToExistingDataCallBack: (data: z.infer<T>) => Prisma.JsonObject,
+  mapToExistingDataCallBack: () => Promise<Prisma.JsonObject>,
   uniqueKey: K,
   insertData: (data: M[]) => Promise<void>,
   updateData: (data: M[]) => Promise<void>,
@@ -223,11 +92,11 @@ const upsert = async <
     return;
   }
 
-  const existingData = mappedData.map(mapToExistingDataCallBack);
   const insertDataList: M[] = [];
   const updateDataList: M[] = [];
 
-  const existingKeys = new Set(existingData.map((item) => String(item[uniqueKey])));
+  const existingData = await mapToExistingDataCallBack();
+  const existingKeys = new Set(Object.keys(existingData));
 
   mappedData.forEach((item) => {
     if (existingKeys.has(String(item[uniqueKey]))) {
@@ -282,4 +151,4 @@ const insert = async <T extends z.ZodTypeAny, M extends object>(
   }
 };
 
-export { insert, safeCreateMany, safeDelete, safeUpdateMany, truncate_insert, upsert };
+export { insert, truncate_insert, upsert };

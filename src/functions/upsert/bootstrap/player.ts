@@ -1,6 +1,8 @@
+import { prisma } from '../../..';
 import { BootStrap } from '../../../constant/bootStrap.type';
 import { Element, ElementSchema } from '../../../constant/element.type';
-import { safeCreateMany, safeDelete, truncate_insert } from '../base';
+import { safeDelete } from '../../base/mongoDB';
+import { truncate_insert } from '../base';
 
 const transformData = (data: Element) => ({
   element_id: data.id,
@@ -12,7 +14,6 @@ const transformData = (data: Element) => ({
   second_name: data.second_name,
   web_name: data.web_name,
   team_id: data.team,
-  id: undefined,
 });
 
 const upsertPlayer = async (bootStrapData: BootStrap) => {
@@ -24,7 +25,7 @@ const upsertPlayer = async (bootStrapData: BootStrap) => {
       await safeDelete('player');
     },
     async (data) => {
-      await safeCreateMany('player', data);
+      await prisma.player.createMany({ data });
     },
   );
 };

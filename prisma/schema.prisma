@@ -206,7 +206,7 @@ model PlayerStat {
   created_at                           DateTime @default(now())
   update_at                            DateTime @updatedAt
 
-  @@unique([element_id, event_id])
+  @@unique([event_id, element_id])
   @@map("player_stat")
 }
 

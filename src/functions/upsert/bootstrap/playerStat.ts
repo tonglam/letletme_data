@@ -3,6 +3,7 @@ import { BootStrap } from '../../../constant/bootStrap.type';
 import { Element, ElementSchema } from '../../../constant/element.type';
 import { prisma } from '../../../index';
 import { getCurrentEvent } from '../../../utils/fpl.utils';
+import { getChangedFields } from '../../base/mongoDB';
 import { upsert } from '../base';
 
 const eventId = getCurrentEvent();
@@ -119,30 +120,40 @@ const transformData = (data: Element) => ({
 });
 
 const upsertPlayerStat = async (bootStrapData: BootStrap) => {
+  const existingPlayerStats = await mapEventPlayerStats();
+
   await upsert(
     bootStrapData.elements,
     ElementSchema,
     transformData,
-    mapEventPlayerStats,
+    () => Promise.resolve(existingPlayerStats),
     'element_id',
-    async (data) => {
+    async (insertData) => {
       await prisma.playerStat.createMany({
-        data,
+        data: insertData,
       });
     },
-    async (data) => {
-      await prisma.playerStat.updateMany({
-        where: {
-          event_id: eventId,
-          element_id: {
-            in: data.map((item) => item.element_id),
-          },
-        },
-        data: data.map((item) => ({
-          where: { element_id: item.element_id },
-          data: item,
-        })),
+    async (updateData) => {
+      const updatePromises = updateData.map((newData) => {
+        const existingData = existingPlayerStats[
+          newData.element_id.toString()
+        ] as Prisma.JsonObject;
+
+        if (existingData) {
+          const changedFields = getChangedFields(existingData, newData, ['element_id', 'event_id']);
+
+          if (Object.keys(changedFields).length > 0) {
+            return prisma.playerStat.update({
+              where: { event_id_element_id: { event_id: eventId, element_id: newData.element_id } },
+              data: changedFields,
+            });
+          }
+        }
+
+        return Promise.resolve();
       });
+
+      await Promise.all(updatePromises);
     },
   );
 };

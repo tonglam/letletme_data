@@ -1,9 +1,10 @@
 import { BootStrap } from '../../../constant/bootStrap.type';
 import { Phase, PhaseSchema } from '../../../constant/phase.type';
-import { safeCreateMany, safeDelete, truncate_insert } from '../base';
+import { prisma } from '../../../index';
+import { safeDelete } from '../../base/mongoDB';
+import { truncate_insert } from '../base';
 
 const transformData = (data: Phase) => ({
-  id: undefined,
   phase_id: data.id,
   name: data.name,
   start_event: data.start_event,
@@ -19,7 +20,7 @@ const upsertPhase = async (bootStrapData: BootStrap) => {
       await safeDelete('phase');
     },
     async (data) => {
-      await safeCreateMany('phase', data);
+      await prisma.phase.createMany({ data });
     },
   );
 };
