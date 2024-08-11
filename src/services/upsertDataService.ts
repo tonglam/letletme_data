@@ -1,10 +1,10 @@
 import { fpl_api_config } from '../configs/api.config';
-// import { upsertEvent } from '../functions/upsert/bootstrap/event';
-// import { upsertPhase } from '../functions/upsert/bootstrap/phase';
-// import { upsertTeam } from '../functions/upsert/bootstrap/team';
-// import { upsertPlayer } from '../functions/upsert/bootstrap/player';
+import { upsertEvent } from '../functions/upsert/bootstrap/event';
+import { upsertPhase } from '../functions/upsert/bootstrap/phase';
+import { upsertPlayer } from '../functions/upsert/bootstrap/player';
 import { upsertPlayerStat } from '../functions/upsert/bootstrap/playerStat';
-// import { upsertPlayerValue } from '../functions/upsert/bootstrap/playerValue';
+import { upsertPlayerValue } from '../functions/upsert/bootstrap/playerValue';
+import { upsertTeam } from '../functions/upsert/bootstrap/team';
 import { getFetch } from '../utils/fetch.utils';
 
 const upsertStaticData = async () => {
@@ -14,23 +14,23 @@ const upsertStaticData = async () => {
     return;
   }
 
-  // // event data
-  // await upsertEvent(bootStrapData);
+  // event data
+  await upsertEvent(bootStrapData);
 
-  // // phase data
-  // await upsertPhase(bootStrapData);
+  // phase data
+  await upsertPhase(bootStrapData);
 
-  // // team data
-  // await upsertTeam(bootStrapData);
+  // team data
+  await upsertTeam(bootStrapData);
 
-  // // player data
-  // await upsertPlayer(bootStrapData);
+  // player data
+  await upsertPlayer(bootStrapData);
 
   // player stat data
   await upsertPlayerStat(bootStrapData);
 
-  // // player value data
-  // await upsertPlayerValue(bootStrapData);
+  // player value data
+  await upsertPlayerValue(bootStrapData);
 };
 
 export { upsertStaticData };
