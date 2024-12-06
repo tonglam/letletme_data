@@ -1,0 +1,301 @@
+// Schema for Fantasy Premier League (FPL) data management system
+// Database: PostgreSQL with Prisma ORM
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Represents a gameweek in FPL
+model Event {
+  id                     Int       @id
+  name                   String    @map("name")
+  deadlineTime           DateTime  @map("deadline_time") @db.Timestamptz
+  deadlineTimeEpoch      Int       @default(0) @map("deadline_time_epoch")
+  deadlineTimeGameOffset Int       @default(0) @map("deadline_time_game_offset")
+  releaseTime            DateTime? @map("release_time") @db.Timestamptz
+  averageEntryScore      Int       @default(0) @map("average_entry_score")
+  finished               Boolean   @default(false) @map("finished")
+  dataChecked            Boolean   @default(false) @map("data_checked")
+  highestScore           Int       @default(0) @map("highest_score")
+  highestScoringEntry    Int       @default(0) @map("highest_scoring_entry")
+  isPrevious             Boolean   @default(false) @map("is_previous")
+  isCurrent              Boolean   @default(false) @map("is_current")
+  isNext                 Boolean   @default(false) @map("is_next")
+  cupLeaguesCreated      Boolean   @default(false) @map("cup_leagues_created")
+  h2hKoMatchesCreated    Boolean   @default(false) @map("h2h_ko_matches_created")
+  rankedCount            Int       @default(0) @map("ranked_count")
+  chipPlays              Json?     @map("chip_plays")
+  mostSelected           Int?      @map("most_selected")
+  mostTransferredIn      Int?      @map("most_transferred_in")
+  mostCaptained          Int?      @map("most_captained")
+  mostViceCaptained      Int?      @map("most_vice_captained")
+  topElement             Int?      @map("top_element")
+  topElementInfo         Json?     @map("top_element_info")
+  transfersMade          Int       @default(0) @map("transfers_made")
+  createdAt              DateTime  @default(now()) @map("created_at")
+
+  @@map("events")
+}
+
+// // Represents a Premier League team
+// model Team {
+//   id        String   @id @default(uuid()) @map("id")
+//   teamId    Int      @unique @map("team_id") // Official team ID
+//   name      String   @map("name") // Full team name
+//   shortName String   @map("short_name") // Abbreviated name
+//   strength  Int      @map("strength") // Team strength rating
+//   createdAt DateTime @default(now()) @map("created_at")
+
+//   players       Player[] // Players in team
+//   playerStats   PlayerStat[] // Player performances
+//   teamAFixtures EventFixture[] @relation("TeamA") // Away fixtures
+//   teamHFixtures EventFixture[] @relation("TeamH") // Home fixtures
+
+//   @@index([teamId], name: "idx_teams_team_id")
+//   @@map("teams")
+// }
+
+// // Represents a Premier League player
+// model Player {
+//   id                       String   @id @default(uuid()) @map("id")
+//   elementId                Int      @unique @map("element_id") // Official player ID
+//   elementCode              Int      @map("element_code")
+//   price                    Int?     @map("price") // Current price (in 0.1m)
+//   startPrice               Int?     @map("start_price") // Season start price
+//   elementType              Int      @map("element_type") // Position (1:GK, 2:DEF, 3:MID, 4:FWD)
+//   firstName                String?  @map("first_name")
+//   secondName               String?  @map("second_name")
+//   webName                  String   @map("web_name") // Display name
+//   team                     Team     @relation(fields: [teamId], references: [teamId])
+//   teamId                   Int      @map("team_id")
+//   status                   String?  @map("status") // Availability status
+//   chanceOfPlayingNextRound Int?     @map("chance_of_playing_next_round")
+//   chanceOfPlayingThisRound Int?     @map("chance_of_playing_this_round")
+//   inDreamteam              Boolean  @default(false) @map("in_dreamteam")
+//   dreamteamCount           Int      @default(0) @map("dreamteam_count")
+//   createdAt                DateTime @default(now()) @map("created_at")
+
+//   eventLive    EventLive[] // Live performance data
+//   playerStats  PlayerStat[] // Historical performance data
+//   playerValues PlayerValue[] // Price change history
+
+//   @@index([elementId], name: "idx_players_element_id")
+//   @@index([teamId], name: "idx_players_team_id")
+//   @@map("players")
+// }
+
+// // Player statistics for each gameweek
+// model PlayerStat {
+//   id        String @id @default(uuid()) @map("id")
+//   event     Event  @relation(fields: [eventId], references: [eventId])
+//   eventId   Int    @map("event_id")
+//   element   Player @relation(fields: [elementId], references: [elementId])
+//   elementId Int    @map("element_id")
+//   team      Team   @relation(fields: [teamId], references: [teamId])
+//   teamId    Int    @map("team_id")
+
+//   // Performance metrics
+//   form                     Float?   @map("form")
+//   influence                Float?   @map("influence")
+//   creativity               Float?   @map("creativity")
+//   threat                   Float?   @map("threat")
+//   ictIndex                 Float?   @map("ict_index")
+//   expectedGoals            Decimal? @map("expected_goals") @db.Decimal(10, 2)
+//   expectedAssists          Decimal? @map("expected_assists") @db.Decimal(10, 2)
+//   expectedGoalInvolvements Decimal? @map("expected_goal_involvements") @db.Decimal(10, 2)
+//   expectedGoalsConceded    Decimal? @map("expected_goals_conceded") @db.Decimal(10, 2)
+
+//   // Match statistics
+//   minutes        Int? @map("minutes")
+//   goalsScored    Int? @map("goals_scored")
+//   assists        Int? @map("assists")
+//   cleanSheets    Int? @map("clean_sheets")
+//   goalsConceded  Int? @map("goals_conceded")
+//   ownGoals       Int? @map("own_goals")
+//   penaltiesSaved Int? @map("penalties_saved")
+
+//   createdAt DateTime @default(now()) @map("created_at")
+//   updatedAt DateTime @updatedAt @map("updated_at")
+
+//   @@unique([eventId, elementId], name: "unique_event_element")
+//   @@index([elementId], name: "idx_player_stats_element_id")
+//   @@index([teamId], name: "idx_player_stats_team_id")
+//   @@map("player_stats")
+// }
+
+// // Tracks player price changes throughout the season
+// model PlayerValue {
+//   id          String                @id @default(uuid()) @map("id")
+//   element     Player                @relation(fields: [elementId], references: [elementId])
+//   elementId   Int                   @map("element_id")
+//   elementType Int                   @map("element_type")
+//   event       Event                 @relation(fields: [eventId], references: [eventId])
+//   eventId     Int                   @map("event_id")
+//   value       Int                   @map("value") // Current value in 0.1m
+//   lastValue   Int                   @default(0) @map("last_value")
+//   changeDate  String                @default("") @map("change_date")
+//   changeType  PlayerValueChangeType @default(Start) @map("change_type")
+//   createdAt   DateTime              @default(now()) @map("created_at")
+//   updatedAt   DateTime              @updatedAt @map("updated_at")
+
+//   @@index([elementId], name: "idx_player_values_element_id")
+//   @@index([eventId], name: "idx_player_values_event_id")
+//   @@map("player_values")
+// }
+
+// // Live bonus points and statistics during active gameweek
+// model EventLive {
+//   id           String   @id @default(uuid()) @map("id")
+//   event        Event    @relation(fields: [eventId], references: [eventId])
+//   eventId      Int      @unique @map("event_id")
+//   element      Player   @relation(fields: [elementId], references: [elementId])
+//   elementId    Int      @map("element_id")
+//   stats        Json     @map("stats") // Live performance statistics
+//   explanations Json?    @map("explanations") // Bonus point calculations
+//   createdAt    DateTime @default(now()) @map("created_at")
+//   updatedAt    DateTime @updatedAt @map("updated_at")
+
+//   @@unique([eventId, elementId], name: "unique_event_element_live")
+//   @@index([elementId], name: "idx_event_live_element_id")
+//   @@map("event_lives")
+// }
+
+// // Match details for each gameweek
+// model EventFixture {
+//   id                   String   @id @default(uuid()) @map("id")
+//   event                Event    @relation(fields: [eventId], references: [eventId])
+//   eventId              Int      @map("event_id")
+//   fixtureId            Int      @unique @map("fixture_id")
+//   fixtureCode          Int      @unique @map("fixture_code")
+//   finished             Boolean  @default(false) @map("finished")
+//   finishedProvisional  Boolean  @default(false) @map("finished_provisional")
+//   kickoffTime          DateTime @map("kickoff_time")
+//   minutes              Int      @default(0) @map("minutes")
+//   provisionalStartTime Boolean  @default(false) @map("provisional_start_time")
+//   started              Boolean  @default(false) @map("started")
+//   teamA                Team     @relation("TeamA", fields: [teamAId], references: [teamId])
+//   teamAId              Int      @map("team_a")
+//   teamAScore           Int?     @map("team_a_score")
+//   teamH                Team     @relation("TeamH", fields: [teamHId], references: [teamId])
+//   teamHId              Int      @map("team_h")
+//   teamHScore           Int?     @map("team_h_score")
+//   stats                Json?    @map("stats") // Match statistics
+//   createdAt            DateTime @default(now()) @map("created_at")
+//   updatedAt            DateTime @updatedAt @map("updated_at")
+
+//   @@index([eventId], name: "idx_event_fixtures_event_id")
+//   @@index([teamAId], name: "idx_event_fixtures_team_a")
+//   @@index([teamHId], name: "idx_event_fixtures_team_h")
+//   @@map("event_fixtures")
+// }
+
+// // FPL manager's team entry
+// model Entry {
+//   id                       String  @id @default(uuid()) @map("id")
+//   entryId                  Int     @unique @map("entry_id") // Official team ID
+//   joinedTime               String? @map("joined_time")
+//   startedEvent             Int?    @map("started_event") // First active gameweek
+//   favouriteTeam            Int?    @map("favourite_team")
+//   playerFirstName          String? @map("player_first_name")
+//   playerLastName           String? @map("player_last_name")
+//   playerRegionId           Int?    @map("player_region_id")
+//   playerRegionName         String? @map("player_region_name")
+//   playerRegionIsoCodeShort String? @map("player_region_iso_code_short")
+//   playerRegionIsoCodeLong  String? @map("player_region_iso_code_long")
+//   name                     String  @map("name") // Team name
+//   nameChangeBlocked        Boolean @default(false) @map("name_change_blocked")
+
+//   // League performance
+//   leagueType                String? @map("league_type") // 's' for standard, 'x' for custom
+//   leagueScoring             String? @map("league_scoring") // 'c' for classic
+//   leagueRank                Int?    @map("league_rank")
+//   leagueRankCount           Int?    @map("league_rank_count")
+//   leagueEntryRank           Int?    @map("league_entry_rank")
+//   leagueEntryLastRank       Int?    @map("league_entry_last_rank")
+//   leagueEntryPercentileRank Int?    @map("league_entry_percentile_rank")
+
+//   // Season performance
+//   summaryOverallPoints       Int? @map("summary_overall_points")
+//   summaryOverallRank         Int? @map("summary_overall_rank")
+//   summaryEventPoints         Int? @map("summary_event_points")
+//   summaryEventRank           Int? @map("summary_event_rank")
+//   currentEvent               Int? @map("current_event")
+//   lastDeadlineBank           Int? @map("last_deadline_bank") // Team value in bank
+//   lastDeadlineValue          Int? @map("last_deadline_value") // Total team value
+//   lastDeadlineTotalTransfers Int? @map("last_deadline_total_transfers")
+
+//   enteredEvents Int[] @map("entered_events") // Gameweeks participated in
+//   kit           Json? @map("kit") // Team kit configuration
+
+//   createdAt DateTime @default(now()) @map("created_at")
+//   updatedAt DateTime @updatedAt @map("updated_at")
+
+//   entryEventPicks     EntryEventPick[] // Weekly team selections
+//   entryEventTransfers EntryEventTransfer[] // Weekly transfers
+
+//   @@index([name], name: "idx_entries_name")
+//   @@map("entries")
+// }
+
+// // Weekly team selection for each FPL entry
+// model EntryEventPick {
+//   id      String @id @default(uuid()) @map("id")
+//   entry   Entry  @relation(fields: [entryId], references: [entryId])
+//   entryId Int    @map("entry_id")
+//   event   Event  @relation(fields: [eventId], references: [eventId])
+//   eventId Int    @map("event_id")
+
+//   picks         Json    @map("picks") // Selected players and positions
+//   activeChip    String? @map("active_chip") // Chip used (if any)
+//   automaticSubs Json?   @map("automatic_subs") // Auto-substitutions
+
+//   points        Int @default(0) @map("points") // Points scored
+//   pointsOnBench Int @default(0) @map("points_on_bench") // Points on bench
+
+//   bank  Int @default(0) @map("bank") // Team value in bank
+//   value Int @default(0) @map("value") // Total team value
+
+//   createdAt DateTime @default(now()) @map("created_at")
+//   updatedAt DateTime @updatedAt @map("updated_at")
+
+//   @@unique([entryId, eventId], name: "unique_entry_event_pick")
+//   @@index([eventId], name: "idx_entry_event_picks_event_id")
+//   @@map("entry_event_picks")
+// }
+
+// // Weekly transfers for each FPL entry
+// model EntryEventTransfer {
+//   id      String @id @default(uuid()) @map("id")
+//   entry   Entry  @relation(fields: [entryId], references: [entryId])
+//   entryId Int    @map("entry_id")
+//   event   Event  @relation(fields: [eventId], references: [eventId])
+//   eventId Int    @map("event_id")
+
+//   transfers Json   @map("transfers") // Transfer details
+//   cost      Int    @default(0) @map("cost") // Points cost
+//   status    String @default("confirmed") @map("status")
+//   limit     Int    @default(1) @map("limit") // Free transfers allowed
+//   made      Int    @default(0) @map("made") // Transfers made
+
+//   bank  Int @default(0) @map("bank") // Team value in bank
+//   value Int @default(0) @map("value") // Total team value
+
+//   createdAt DateTime @default(now()) @map("created_at")
+//   updatedAt DateTime @updatedAt @map("updated_at")
+
+//   @@unique([entryId, eventId], name: "unique_entry_event_transfer")
+//   @@index([eventId], name: "idx_entry_event_transfers_event_id")
+//   @@map("entry_event_transfers")
+// }
+
+// // Types of player value changes
+// enum PlayerValueChangeType {
+//   Start // Initial price
+//   Rise // Price increase
+//   Fall // Price decrease
+// }

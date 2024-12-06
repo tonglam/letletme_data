@@ -8,8 +8,15 @@
     "forceConsistentCasingInFileNames": true,
     "noImplicitAny": true,
     "outDir": "./dist",
-    "rootDir": "./src"
+    "rootDir": "./src",
+    "strictNullChecks": true,
+    "noImplicitThis": true,
+    "alwaysStrict": true,
+    "noUnusedLocals": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "moduleResolution": "node"
   },
-  "include": ["src/**/*.ts", "src/functions/redisFunctions"],
+  "include": ["src/**/*.ts"],
   "exclude": ["node_modules"]
 }

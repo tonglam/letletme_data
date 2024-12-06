@@ -1,26 +1,26 @@
 import { BootStrap } from '../../../constant/bootStrap.type';
 import { Phase, PhaseSchema } from '../../../constant/phase.type';
-import { prisma } from '../../../index';
-import { safeDelete } from '../../base/mongoDB';
+import { prisma } from '../../../lib/prisma';
 import { truncate_insert } from '../base';
 
 const transformData = (data: Phase) => ({
-  phase_id: data.id,
+  id: data.id,
+  phaseId: data.phaseId,
   name: data.name,
-  start_event: data.start_event,
-  stop_event: data.stop_event,
+  startEvent: data.startEvent,
+  stopEvent: data.stopEvent,
 });
 
-const upsertPhase = async (bootStrapData: BootStrap) => {
+const upsertPhase = async (bootStrapData: BootStrap): Promise<void> => {
   await truncate_insert(
     bootStrapData.phases,
     PhaseSchema,
     transformData,
     async () => {
-      await safeDelete('phase');
+      await prisma.phases.deleteMany();
     },
     async (data) => {
-      await prisma.phase.createMany({ data });
+      await prisma.phases.createMany({ data });
     },
   );
 };

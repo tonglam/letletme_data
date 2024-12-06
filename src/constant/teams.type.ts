@@ -1,33 +1,50 @@
 import { z } from 'zod';
 
 const TeamSchema = z.object({
+  id: z.string(),
+  teamId: z.number(),
+  name: z.string(),
+  shortName: z.string(),
+  strength: z.number(),
+  createdAt: z.string().transform((val) => new Date(val)),
+});
+
+// Additional fields from FPL API that aren't in the database model
+const TeamStatsSchema = z.object({
   code: z.number(),
   draw: z.number(),
-  form: z.nullable(z.string()),
-  id: z.number(),
+  form: z.string().nullable(),
   loss: z.number(),
-  name: z.string(),
   played: z.number(),
   points: z.number(),
   position: z.number(),
-  short_name: z.string(),
-  strength: z.number(),
-  team_division: z.nullable(z.string()),
+  teamDivision: z.string().nullable(),
   unavailable: z.boolean(),
   win: z.number(),
-  strength_overall_home: z.number(),
-  strength_overall_away: z.number(),
-  strength_attack_home: z.number(),
-  strength_attack_away: z.number(),
-  strength_defence_home: z.number(),
-  strength_defence_away: z.number(),
-  pulse_id: z.number(),
+  strengthOverallHome: z.number(),
+  strengthOverallAway: z.number(),
+  strengthAttackHome: z.number(),
+  strengthAttackAway: z.number(),
+  strengthDefenceHome: z.number(),
+  strengthDefenceAway: z.number(),
+  pulseId: z.number(),
 });
 
 const TeamsSchema = z.array(TeamSchema);
+const TeamStatsListSchema = z.array(TeamStatsSchema);
 
 type Team = z.infer<typeof TeamSchema>;
-
 type Teams = z.infer<typeof TeamsSchema>;
+type TeamStats = z.infer<typeof TeamStatsSchema>;
+type TeamStatsList = z.infer<typeof TeamStatsListSchema>;
 
-export { Team, TeamSchema, Teams, TeamsSchema };
+export {
+  Team,
+  Teams,
+  TeamSchema,
+  TeamsSchema,
+  TeamStats,
+  TeamStatsList,
+  TeamStatsListSchema,
+  TeamStatsSchema,
+};

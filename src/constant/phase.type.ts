@@ -1,10 +1,13 @@
 import { z } from 'zod';
 
 const PhaseSchema = z.object({
-  id: z.number(),
+  id: z.string(),
+  phaseId: z.number(),
   name: z.string(),
-  start_event: z.number(),
-  stop_event: z.number(),
+  startEvent: z.number(),
+  stopEvent: z.number(),
+  createdAt: z.string().transform((val) => new Date(val)),
+  updatedAt: z.string().transform((val) => new Date(val)),
 });
 
 const PhasesSchema = z.array(PhaseSchema);
