@@ -73,13 +73,4 @@ type EventResponse = z.infer<typeof EventResponseSchema>;
 type Event = z.infer<typeof EventSchema>;
 type Events = z.infer<typeof EventsSchema>;
 
-export {
-  ChipPlaySchema,
-  Event,
-  EventResponse,
-  EventResponseSchema,
-  Events,
-  EventSchema,
-  EventsSchema,
-  TopElementInfoSchema,
-};
+export { Event, EventResponse, EventResponseSchema, Events, EventSchema, EventsSchema };

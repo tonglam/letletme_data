@@ -1,26 +1,35 @@
 import { z } from 'zod';
 
+const TeamResponseSchema = z.object({
+  id: z.number(),
+  code: z.number(),
+  name: z.string(),
+  short_name: z.string(),
+  strength: z.number(),
+  strength_overall_home: z.number(),
+  strength_overall_away: z.number(),
+  strength_attack_home: z.number(),
+  strength_attack_away: z.number(),
+  strength_defence_home: z.number(),
+  strength_defence_away: z.number(),
+  pulse_id: z.number(),
+  played: z.number().default(0),
+  position: z.number().default(0),
+  points: z.number().default(0),
+  form: z.string().nullable(),
+  win: z.number().default(0),
+  draw: z.number().default(0),
+  loss: z.number().default(0),
+  team_division: z.string().nullable(),
+  unavailable: z.boolean().default(false),
+});
+
 const TeamSchema = z.object({
-  id: z.string(),
-  teamId: z.number(),
+  id: z.number(),
+  code: z.number(),
   name: z.string(),
   shortName: z.string(),
   strength: z.number(),
-  createdAt: z.string().transform((val) => new Date(val)),
-});
-
-// Additional fields from FPL API that aren't in the database model
-const TeamStatsSchema = z.object({
-  code: z.number(),
-  draw: z.number(),
-  form: z.string().nullable(),
-  loss: z.number(),
-  played: z.number(),
-  points: z.number(),
-  position: z.number(),
-  teamDivision: z.string().nullable(),
-  unavailable: z.boolean(),
-  win: z.number(),
   strengthOverallHome: z.number(),
   strengthOverallAway: z.number(),
   strengthAttackHome: z.number(),
@@ -28,23 +37,21 @@ const TeamStatsSchema = z.object({
   strengthDefenceHome: z.number(),
   strengthDefenceAway: z.number(),
   pulseId: z.number(),
+  played: z.number().default(0),
+  position: z.number().default(0),
+  points: z.number().default(0),
+  form: z.string().nullable(),
+  win: z.number().default(0),
+  draw: z.number().default(0),
+  loss: z.number().default(0),
+  teamDivision: z.string().nullable(),
+  unavailable: z.boolean().default(false),
 });
 
 const TeamsSchema = z.array(TeamSchema);
-const TeamStatsListSchema = z.array(TeamStatsSchema);
 
+type TeamResponse = z.infer<typeof TeamResponseSchema>;
 type Team = z.infer<typeof TeamSchema>;
 type Teams = z.infer<typeof TeamsSchema>;
-type TeamStats = z.infer<typeof TeamStatsSchema>;
-type TeamStatsList = z.infer<typeof TeamStatsListSchema>;
 
-export {
-  Team,
-  Teams,
-  TeamSchema,
-  TeamsSchema,
-  TeamStats,
-  TeamStatsList,
-  TeamStatsListSchema,
-  TeamStatsSchema,
-};
+export { Team, TeamResponse, TeamResponseSchema, Teams, TeamSchema, TeamsSchema };

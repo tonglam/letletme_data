@@ -1,5 +1,6 @@
 import { fpl_api_config } from '../configs/api.config';
 import { upsertEvent } from '../functions/upsert/bootstrap/events';
+import { upsertTeam } from '../functions/upsert/bootstrap/teams';
 import { getFetch } from '../utils/fetch.utils';
 
 const upsertStaticData = async () => {
@@ -15,8 +16,8 @@ const upsertStaticData = async () => {
   // // phase data
   // await upsertPhase(bootStrapData);
 
-  // // team data
-  // await upsertTeam(bootStrapData);
+  // team data
+  await upsertTeam(bootStrapData);
 
   // // player data
   // await upsertPlayer(bootStrapData);

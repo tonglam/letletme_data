@@ -13,13 +13,13 @@ datasource db {
 // Represents a gameweek in FPL
 model Event {
   id                     Int       @id
-  name                   String    @map("name")
+  name                   String
   deadlineTime           DateTime  @map("deadline_time") @db.Timestamptz
   deadlineTimeEpoch      Int       @default(0) @map("deadline_time_epoch")
   deadlineTimeGameOffset Int       @default(0) @map("deadline_time_game_offset")
   releaseTime            DateTime? @map("release_time") @db.Timestamptz
   averageEntryScore      Int       @default(0) @map("average_entry_score")
-  finished               Boolean   @default(false) @map("finished")
+  finished               Boolean   @default(false)
   dataChecked            Boolean   @default(false) @map("data_checked")
   highestScore           Int       @default(0) @map("highest_score")
   highestScoringEntry    Int       @default(0) @map("highest_scoring_entry")
@@ -42,23 +42,33 @@ model Event {
   @@map("events")
 }
 
-// // Represents a Premier League team
-// model Team {
-//   id        String   @id @default(uuid()) @map("id")
-//   teamId    Int      @unique @map("team_id") // Official team ID
-//   name      String   @map("name") // Full team name
-//   shortName String   @map("short_name") // Abbreviated name
-//   strength  Int      @map("strength") // Team strength rating
-//   createdAt DateTime @default(now()) @map("created_at")
+// Represents a Premier League team
+model Team {
+  id                  Int      @id
+  code                Int
+  name                String
+  shortName           String   @map("short_name")
+  strength            Int
+  strengthOverallHome Int      @map("strength_overall_home")
+  strengthOverallAway Int      @map("strength_overall_away")
+  strengthAttackHome  Int      @map("strength_attack_home")
+  strengthAttackAway  Int      @map("strength_attack_away")
+  strengthDefenceHome Int      @map("strength_defence_home")
+  strengthDefenceAway Int      @map("strength_defence_away")
+  pulseId             Int      @map("pulse_id")
+  played              Int      @default(0)
+  position            Int      @default(0)
+  points              Int      @default(0)
+  form                String?
+  win                 Int      @default(0)
+  draw                Int      @default(0)
+  loss                Int      @default(0)
+  teamDivision        String?  @map("team_division")
+  unavailable         Boolean  @default(false)
+  createdAt           DateTime @default(now()) @map("created_at")
 
-//   players       Player[] // Players in team
-//   playerStats   PlayerStat[] // Player performances
-//   teamAFixtures EventFixture[] @relation("TeamA") // Away fixtures
-//   teamHFixtures EventFixture[] @relation("TeamH") // Home fixtures
-
-//   @@index([teamId], name: "idx_teams_team_id")
-//   @@map("teams")
-// }
+  @@map("teams")
+}
 
 // // Represents a Premier League player
 // model Player {

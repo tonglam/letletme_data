@@ -27,27 +27,51 @@ const createEventsTable = async () => {
       "most_captained" INTEGER,
       "most_vice_captained" INTEGER,
       "top_element" INTEGER,
-      "top_element_info" JSONB,
+      "top_element_info" JSONB DEFAULT NULL,
       "transfers_made" INTEGER NOT NULL DEFAULT 0,
       "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
       CONSTRAINT "events_pkey" PRIMARY KEY ("id")
     )
   `;
+
+  await prisma.$executeRaw`ALTER TABLE "events" ENABLE ROW LEVEL SECURITY`;
+  await prisma.$executeRaw`CREATE POLICY "Enable read access for all users" ON "events" FOR SELECT USING (true)`;
+  await prisma.$executeRaw`CREATE POLICY "Enable write access for service role" ON "events" FOR ALL TO service_role USING (true)`;
 };
 
 const createTeamsTable = async () => {
   await prisma.$executeRaw`DROP TABLE IF EXISTS "teams"`;
   await prisma.$executeRaw`
     CREATE TABLE IF NOT EXISTS "teams" (
-      "id" TEXT NOT NULL,
-      "team_id" INTEGER NOT NULL UNIQUE,
+      "id" INTEGER NOT NULL,
+      "code" INTEGER NOT NULL,
       "name" TEXT NOT NULL,
       "short_name" TEXT NOT NULL,
       "strength" INTEGER NOT NULL,
+      "strength_overall_home" INTEGER NOT NULL,
+      "strength_overall_away" INTEGER NOT NULL,
+      "strength_attack_home" INTEGER NOT NULL,
+      "strength_attack_away" INTEGER NOT NULL,
+      "strength_defence_home" INTEGER NOT NULL,
+      "strength_defence_away" INTEGER NOT NULL,
+      "pulse_id" INTEGER NOT NULL,
+      "played" INTEGER NOT NULL DEFAULT 0,
+      "position" INTEGER NOT NULL DEFAULT 0,
+      "points" INTEGER NOT NULL DEFAULT 0,
+      "form" TEXT,
+      "win" INTEGER NOT NULL DEFAULT 0,
+      "draw" INTEGER NOT NULL DEFAULT 0,
+      "loss" INTEGER NOT NULL DEFAULT 0,
+      "team_division" TEXT,
+      "unavailable" BOOLEAN NOT NULL DEFAULT false,
       "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
       CONSTRAINT "teams_pkey" PRIMARY KEY ("id")
     )
   `;
+
+  await prisma.$executeRaw`ALTER TABLE "teams" ENABLE ROW LEVEL SECURITY`;
+  await prisma.$executeRaw`CREATE POLICY "Enable read access for all users" ON "teams" FOR SELECT USING (true)`;
+  await prisma.$executeRaw`CREATE POLICY "Enable write access for service role" ON "teams" FOR ALL TO service_role USING (true)`;
 };
 
 const createPlayersTable = async () => {
@@ -74,9 +98,14 @@ const createPlayersTable = async () => {
       CONSTRAINT "players_team_id_fkey" FOREIGN KEY ("team_id") REFERENCES "teams" ("id") ON DELETE CASCADE
     )
   `;
+
+  await prisma.$executeRaw`ALTER TABLE "players" ENABLE ROW LEVEL SECURITY`;
+  await prisma.$executeRaw`CREATE POLICY "Enable read access for all users" ON "players" FOR SELECT USING (true)`;
+  await prisma.$executeRaw`CREATE POLICY "Enable write access for service role" ON "players" FOR ALL TO service_role USING (true)`;
 };
 
 const createPlayerStatsTable = async () => {
+  await prisma.$executeRaw`DROP TABLE IF EXISTS "player_stats"`;
   await prisma.$executeRaw`
     CREATE TABLE IF NOT EXISTS "player_stats" (
       "id" TEXT NOT NULL,
@@ -106,6 +135,10 @@ const createPlayerStatsTable = async () => {
       CONSTRAINT "player_stats_team_id_fkey" FOREIGN KEY ("team_id") REFERENCES "teams" ("team_id") ON DELETE CASCADE
     )
   `;
+
+  await prisma.$executeRaw`ALTER TABLE "player_stats" ENABLE ROW LEVEL SECURITY`;
+  await prisma.$executeRaw`CREATE POLICY "Enable read access for all users" ON "player_stats" FOR SELECT USING (true)`;
+  await prisma.$executeRaw`CREATE POLICY "Enable write access for service role" ON "player_stats" FOR ALL TO service_role USING (true)`;
 };
 
 const createPlayerValuesTable = async () => {
@@ -123,6 +156,10 @@ const createPlayerValuesTable = async () => {
       CONSTRAINT "player_values_element_id_fkey" FOREIGN KEY ("element_id") REFERENCES "players" ("element_id") ON DELETE CASCADE
     )
   `;
+
+  await prisma.$executeRaw`ALTER TABLE "player_values" ENABLE ROW LEVEL SECURITY`;
+  await prisma.$executeRaw`CREATE POLICY "Enable read access for all users" ON "player_values" FOR SELECT USING (true)`;
+  await prisma.$executeRaw`CREATE POLICY "Enable write access for service role" ON "player_values" FOR ALL TO service_role USING (true)`;
 };
 
 const createEventFixturesTable = async () => {
@@ -149,6 +186,10 @@ const createEventFixturesTable = async () => {
       CONSTRAINT "event_fixtures_team_a_id_fkey" FOREIGN KEY ("team_a_id") REFERENCES "teams" ("team_id") ON DELETE CASCADE
     )
   `;
+
+  await prisma.$executeRaw`ALTER TABLE "event_fixtures" ENABLE ROW LEVEL SECURITY`;
+  await prisma.$executeRaw`CREATE POLICY "Enable read access for all users" ON "event_fixtures" FOR SELECT USING (true)`;
+  await prisma.$executeRaw`CREATE POLICY "Enable write access for service role" ON "event_fixtures" FOR ALL TO service_role USING (true)`;
 };
 
 const createEntriesTable = async () => {
@@ -190,6 +231,10 @@ const createEntriesTable = async () => {
       CONSTRAINT "entries_pkey" PRIMARY KEY ("id")
     )
   `;
+
+  await prisma.$executeRaw`ALTER TABLE "entries" ENABLE ROW LEVEL SECURITY`;
+  await prisma.$executeRaw`CREATE POLICY "Enable read access for all users" ON "entries" FOR SELECT USING (true)`;
+  await prisma.$executeRaw`CREATE POLICY "Enable write access for service role" ON "entries" FOR ALL TO service_role USING (true)`;
 };
 
 const createEntryEventPicksTable = async () => {
@@ -214,6 +259,10 @@ const createEntryEventPicksTable = async () => {
       CONSTRAINT "entry_event_picks_event_id_fkey" FOREIGN KEY ("event_id") REFERENCES "events" ("id") ON DELETE CASCADE
     )
   `;
+
+  await prisma.$executeRaw`ALTER TABLE "entry_event_picks" ENABLE ROW LEVEL SECURITY`;
+  await prisma.$executeRaw`CREATE POLICY "Enable read access for all users" ON "entry_event_picks" FOR SELECT USING (true)`;
+  await prisma.$executeRaw`CREATE POLICY "Enable write access for service role" ON "entry_event_picks" FOR ALL TO service_role USING (true)`;
 };
 
 const createEntryEventTransfersTable = async () => {
