@@ -1,76 +1,70 @@
-// import { format } from 'date-fns';
-// import { BootStrap } from '../../../constant/bootStrap.type';
-// import { Element, ElementValue, PlayerValueChangeType } from '../../../constant/elements.type';
-// import { prisma } from '../../../lib/prisma';
-// import { getCurrentEvent } from '../../../utils/fpl.utils';
+import { format } from 'date-fns';
+import { player_value_change_type_enum } from '../../../constants/enum';
+import { prisma } from '../../../lib/prisma';
+import { BootStrap } from '../../../types/bootstrap.type';
+import {
+  PlayerValue,
+  PlayerValueResponse,
+  PlayerValueResponseSchema,
+} from '../../../types/playerValues.type';
+import { getCurrentEvent } from '../../../utils/common';
+import { truncate_insert } from '../../base/base';
 
-// async function getLatestPlayerValuesByElement(): Promise<Map<number, number>> {
-//   const result = await prisma.playerValue.groupBy({
-//     by: ['elementId'],
-//     _max: {
-//       updatedAt: true,
-//     },
-//   });
+const getLatestPlayerValuesByElement = async (): Promise<Map<number, number>> => {
+  const latestValues = await prisma.playerValue.findMany({
+    orderBy: { createdAt: 'desc' },
+    distinct: ['elementId'],
+    select: { elementId: true, value: true },
+  });
 
-//   const latestValues = await prisma.playerValue.findMany({
-//     where: {
-//       OR: result.reduce<{ elementId: number; updatedAt: Date }[]>((acc, group) => {
-//         if (group._max.updatedAt !== null) {
-//           acc.push({
-//             elementId: group.elementId,
-//             updatedAt: group._max.updatedAt,
-//           });
-//         }
-//         return acc;
-//       }, []),
-//     },
-//     select: {
-//       elementId: true,
-//       value: true,
-//     },
-//   });
+  return new Map(latestValues.map(({ elementId, value }) => [elementId, value]));
+};
 
-//   return new Map(latestValues.map((value) => [value.elementId, value.value]));
-// }
+const transformData = (
+  data: PlayerValueResponse,
+  lastValuesMap: Map<number, number>,
+): PlayerValue | null => {
+  const currentEvent = getCurrentEvent();
+  const lastValue = lastValuesMap.get(data.id) ?? 0;
 
-// const transformData = (
-//   data: Element,
-//   lastValuesMap: Map<number, number>,
-// ): Partial<ElementValue> | null => {
-//   const currentEvent = getCurrentEvent();
-//   const lastValue = lastValuesMap.get(data.elementId) ?? 0;
+  if (lastValue === data.now_cost) {
+    return null;
+  }
 
-//   if (lastValue === data.price) {
-//     return null;
-//   }
+  const changeType =
+    lastValue === 0
+      ? player_value_change_type_enum.Start
+      : data.now_cost > lastValue
+        ? player_value_change_type_enum.Rise
+        : player_value_change_type_enum.Fall;
 
-//   const changeType: PlayerValueChangeType =
-//     lastValue === 0 ? 'Start' : data.price > lastValue ? 'Rise' : 'Fall';
+  return {
+    elementId: data.id,
+    elementType: data.element_type,
+    eventId: currentEvent,
+    value: data.now_cost,
+    changeDate: format(new Date(), 'yyyy-MM-dd'),
+    changeType,
+    lastValue,
+  };
+};
 
-//   return {
-//     id: data.id,
-//     elementId: data.elementId,
-//     elementType: data.elementType,
-//     eventId: currentEvent,
-//     value: data.price,
-//     changeDate: format(new Date(), 'yyyy-MM-dd'),
-//     changeType: changeType,
-//     lastValue: lastValue,
-//   };
-// };
+const upsertPlayerValue = async (bootStrapData: BootStrap): Promise<void> => {
+  const lastValuesMap = await getLatestPlayerValuesByElement();
 
-// const upsertPlayerValue = async (bootStrapData: BootStrap): Promise<void> => {
-//   const lastValuesMap = await getLatestPlayerValuesByElement();
+  await truncate_insert(
+    bootStrapData.elements,
+    PlayerValueResponseSchema,
+    (data) => transformData(data, lastValuesMap),
+    async () => {
+      await prisma.playerValue.deleteMany();
+    },
+    async (data) => {
+      await prisma.playerValue.createMany({
+        data: data.filter((item): item is PlayerValue => item !== null),
+      });
+    },
+  );
+};
 
-//   const transformedData = bootStrapData.elements
-//     .map((element) => transformData(element, lastValuesMap))
-//     .filter((item): item is ElementValue => item !== null);
-
-//   if (transformedData.length > 0) {
-//     await prisma.playerValue.createMany({
-//       data: transformedData,
-//     });
-//   }
-// };
-
-// export { upsertPlayerValue };
+export { upsertPlayerValue };

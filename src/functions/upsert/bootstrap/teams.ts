@@ -1,7 +1,7 @@
-import { BootStrap } from '../../../constant/bootStrap.type';
-import { Team, TeamResponse, TeamResponseSchema } from '../../../constant/teams.type';
 import { prisma } from '../../../lib/prisma';
-import { truncate_insert } from '../base';
+import { BootStrap } from '../../../types/bootStrap.type';
+import { Team, TeamResponse, TeamResponseSchema } from '../../../types/teams.type';
+import { truncate_insert } from '../../base/base';
 
 const transformData = (data: TeamResponse): Team => ({
   id: data.id,
@@ -27,7 +27,7 @@ const transformData = (data: TeamResponse): Team => ({
   unavailable: data.unavailable ?? false,
 });
 
-const upsertTeam = async (bootStrapData: BootStrap): Promise<void> => {
+const upsertTeams = async (bootStrapData: BootStrap): Promise<void> => {
   await truncate_insert(
     bootStrapData.teams,
     TeamResponseSchema,
@@ -41,4 +41,4 @@ const upsertTeam = async (bootStrapData: BootStrap): Promise<void> => {
   );
 };
 
-export { upsertTeam };
+export { upsertTeams };

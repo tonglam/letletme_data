@@ -1,7 +1,6 @@
 import { prisma } from '../src';
 
 const createEventsTable = async () => {
-  await prisma.$executeRaw`DROP TABLE IF EXISTS "events"`;
   await prisma.$executeRaw`
     CREATE TABLE IF NOT EXISTS "events" (
       "id" INTEGER NOT NULL,
@@ -39,8 +38,26 @@ const createEventsTable = async () => {
   await prisma.$executeRaw`CREATE POLICY "Enable write access for service role" ON "events" FOR ALL TO service_role USING (true)`;
 };
 
+const createPhasesTable = async () => {
+  await prisma.$executeRaw`
+    CREATE TABLE IF NOT EXISTS "phases" (
+      "id" INTEGER NOT NULL,
+      "name" TEXT NOT NULL,
+      "start_event" INTEGER NOT NULL,
+      "stop_event" INTEGER NOT NULL,
+      "highest_score" INTEGER,
+      "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "phases_pkey" PRIMARY KEY ("id")
+    )
+  `;
+
+  await prisma.$executeRaw`ALTER TABLE "phases" ENABLE ROW LEVEL SECURITY`;
+  await prisma.$executeRaw`CREATE POLICY "Enable read access for all users" ON "phases" FOR SELECT USING (true)`;
+  await prisma.$executeRaw`CREATE POLICY "Enable write access for service role" ON "phases" FOR ALL TO service_role USING (true)`;
+};
+
 const createTeamsTable = async () => {
-  await prisma.$executeRaw`DROP TABLE IF EXISTS "teams"`;
+  await prisma.$executeRaw`DROP TABLE IF EXISTS "teams" CASCADE`;
   await prisma.$executeRaw`
     CREATE TABLE IF NOT EXISTS "teams" (
       "id" INTEGER NOT NULL,
@@ -75,26 +92,20 @@ const createTeamsTable = async () => {
 };
 
 const createPlayersTable = async () => {
-  await prisma.$executeRaw`DROP TABLE IF EXISTS "players"`;
+  await prisma.$executeRaw`DROP TABLE IF EXISTS "players" CASCADE`;
   await prisma.$executeRaw`
     CREATE TABLE IF NOT EXISTS "players" (
-      "id" TEXT NOT NULL,
-      "element_id" INTEGER NOT NULL UNIQUE,
+      "element" INTEGER NOT NULL,
       "element_code" INTEGER NOT NULL,
       "price" INTEGER NOT NULL,
       "start_price" INTEGER NOT NULL,
       "element_type" INTEGER NOT NULL,
-      "first_name" TEXT NOT NULL,
-      "second_name" TEXT NOT NULL,
+      "first_name" TEXT,
+      "second_name" TEXT,
       "web_name" TEXT NOT NULL,
-      "team_id" TEXT NOT NULL,
-      "status" TEXT NOT NULL,
-      "chance_of_playing_next_round" INTEGER,
-      "chance_of_playing_this_round" INTEGER,
-      "in_dreamteam" BOOLEAN NOT NULL,
-      "dreamteam_count" INTEGER NOT NULL,
+      "team_id" INTEGER NOT NULL,
       "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      CONSTRAINT "players_pkey" PRIMARY KEY ("id"),
+      CONSTRAINT "players_pkey" PRIMARY KEY ("element"),
       CONSTRAINT "players_team_id_fkey" FOREIGN KEY ("team_id") REFERENCES "teams" ("id") ON DELETE CASCADE
     )
   `;
@@ -105,7 +116,6 @@ const createPlayersTable = async () => {
 };
 
 const createPlayerStatsTable = async () => {
-  await prisma.$executeRaw`DROP TABLE IF EXISTS "player_stats"`;
   await prisma.$executeRaw`
     CREATE TABLE IF NOT EXISTS "player_stats" (
       "id" TEXT NOT NULL,
@@ -142,7 +152,6 @@ const createPlayerStatsTable = async () => {
 };
 
 const createPlayerValuesTable = async () => {
-  await prisma.$executeRaw`DROP TABLE IF EXISTS "player_values"`;
   await prisma.$executeRaw`
     CREATE TABLE IF NOT EXISTS "player_values" (
       "id" TEXT NOT NULL,
@@ -163,7 +172,6 @@ const createPlayerValuesTable = async () => {
 };
 
 const createEventFixturesTable = async () => {
-  await prisma.$executeRaw`DROP TABLE IF EXISTS "event_fixtures"`;
   await prisma.$executeRaw`
     CREATE TABLE IF NOT EXISTS "event_fixtures" (
       "id" TEXT NOT NULL,
@@ -193,7 +201,6 @@ const createEventFixturesTable = async () => {
 };
 
 const createEntriesTable = async () => {
-  await prisma.$executeRaw`DROP TABLE IF EXISTS "entries"`;
   await prisma.$executeRaw`
     CREATE TABLE IF NOT EXISTS "entries" (
       "id" TEXT NOT NULL,
@@ -238,7 +245,6 @@ const createEntriesTable = async () => {
 };
 
 const createEntryEventPicksTable = async () => {
-  await prisma.$executeRaw`DROP TABLE IF EXISTS "entry_event_picks"`;
   await prisma.$executeRaw`
     CREATE TABLE IF NOT EXISTS "entry_event_picks" (
       "id" TEXT NOT NULL,
@@ -266,7 +272,6 @@ const createEntryEventPicksTable = async () => {
 };
 
 const createEntryEventTransfersTable = async () => {
-  await prisma.$executeRaw`DROP TABLE IF EXISTS "entry_event_transfers"`;
   await prisma.$executeRaw`
     CREATE TABLE IF NOT EXISTS "entry_event_transfers" (
       "id" TEXT NOT NULL,
@@ -295,6 +300,7 @@ export {
   createEntryEventTransfersTable,
   createEventFixturesTable,
   createEventsTable,
+  createPhasesTable,
   createPlayersTable,
   createPlayerStatsTable,
   createPlayerValuesTable,

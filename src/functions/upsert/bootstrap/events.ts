@@ -1,8 +1,8 @@
 import { Prisma } from '@prisma/client';
-import { BootStrap } from '../../../constant/bootStrap.type';
-import { EventResponse, EventResponseSchema } from '../../../constant/events.type';
 import { prisma } from '../../../lib/prisma';
-import { truncate_insert } from '../base';
+import { BootStrap } from '../../../types/bootStrap.type';
+import { EventResponse, EventResponseSchema } from '../../../types/events.type';
+import { truncate_insert } from '../../base/base';
 
 const transformData = (data: EventResponse): Prisma.EventCreateInput => {
   return {
@@ -38,7 +38,7 @@ const transformData = (data: EventResponse): Prisma.EventCreateInput => {
   };
 };
 
-const upsertEvent = async (bootStrapData: BootStrap): Promise<void> => {
+const upsertEvents = async (bootStrapData: BootStrap): Promise<void> => {
   await truncate_insert(
     bootStrapData.events,
     EventResponseSchema,
@@ -52,4 +52,4 @@ const upsertEvent = async (bootStrapData: BootStrap): Promise<void> => {
   );
 };
 
-export { upsertEvent };
+export { upsertEvents };

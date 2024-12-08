@@ -1,28 +1,27 @@
-import { BootStrap } from '../../../constant/bootStrap.type';
-import { Phase, PhaseSchema } from '../../../constant/phase.type';
 import { prisma } from '../../../lib/prisma';
-import { truncate_insert } from '../base';
+import { BootStrap } from '../../../types/bootStrap.type';
+import { Phase, PhaseResponse, PhaseResponseSchema } from '../../../types/phase.type';
+import { truncate_insert } from '../../base/base';
 
-const transformData = (data: Phase) => ({
+const transformData = (data: PhaseResponse): Phase => ({
   id: data.id,
-  phaseId: data.phaseId,
   name: data.name,
-  startEvent: data.startEvent,
-  stopEvent: data.stopEvent,
+  startEvent: data.start_event,
+  stopEvent: data.stop_event,
+  highestScore: data.highest_score,
 });
 
-const upsertPhase = async (bootStrapData: BootStrap): Promise<void> => {
+const upsertPhases = async (bootStrapData: BootStrap): Promise<void> => {
   await truncate_insert(
     bootStrapData.phases,
-    PhaseSchema,
+    PhaseResponseSchema,
     transformData,
     async () => {
-      await prisma.phases.deleteMany();
+      await prisma.phase.deleteMany();
     },
     async (data) => {
-      await prisma.phases.createMany({ data });
+      await prisma.phase.createMany({ data });
     },
   );
 };
-
-export { upsertPhase };
+export { upsertPhases };

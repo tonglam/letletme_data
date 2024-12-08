@@ -1,4 +1,4 @@
-import { PlayerValueChangeType } from '@prisma/client';
+export type PlayerValueChangeType = 'Start' | 'Rise' | 'Fall';
 
 export interface IPlayerValue {
   id: string;

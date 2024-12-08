@@ -1,7 +1,7 @@
-import { BootStrap } from '../../../constant/bootStrap.type';
-import { ElementStat, ElementStatSchema } from '../../../constant/elements.type';
 import { prisma } from '../../../lib/prisma';
-import { truncate_insert } from '../base';
+import { BootStrap } from '../../../types/bootStrap.type';
+import { ElementStat, ElementStatSchema } from '../../../types/players.type';
+import { truncate_insert } from '../../base/base';
 
 const transformData = (data: ElementStat) => ({
   id: data.id,

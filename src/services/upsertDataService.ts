@@ -1,6 +1,8 @@
 import { fpl_api_config } from '../configs/api.config';
-import { upsertEvent } from '../functions/upsert/bootstrap/events';
-import { upsertTeam } from '../functions/upsert/bootstrap/teams';
+import { upsertEvents } from '../functions/upsert/bootstrap/events';
+import { upsertPhases } from '../functions/upsert/bootstrap/phases';
+import { upsertPlayer } from '../functions/upsert/bootstrap/players';
+import { upsertTeams } from '../functions/upsert/bootstrap/teams';
 import { getFetch } from '../utils/fetch.utils';
 
 const upsertStaticData = async () => {
@@ -10,22 +12,16 @@ const upsertStaticData = async () => {
     return;
   }
 
-  // event data
-  await upsertEvent(bootStrapData);
+  await upsertEvents(bootStrapData);
 
-  // // phase data
-  // await upsertPhase(bootStrapData);
+  await upsertPhases(bootStrapData);
 
-  // team data
-  await upsertTeam(bootStrapData);
+  await upsertTeams(bootStrapData);
 
-  // // player data
-  // await upsertPlayer(bootStrapData);
+  await upsertPlayer(bootStrapData);
 
-  // // player stat data
   // await upsertPlayerStat(bootStrapData);
 
-  // // player value data
   // await upsertPlayerValue(bootStrapData);
 };
 
