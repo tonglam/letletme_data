@@ -1,167 +1,74 @@
 /**
- * FPL API Configuration
- * Contains all API endpoints and base URLs for the Fantasy Premier League API
+ * API Environment configuration
  */
+export const API_ENV = {
+  development: 'development',
+  production: 'production',
+  test: 'test',
+} as const;
 
-// Base URL constants
+export type ApiEnvironment = keyof typeof API_ENV;
+
+/**
+ * HTTP Timeout types
+ */
+export type HTTPTimeout = 'DEFAULT' | 'LONG' | 'SHORT';
+
+/**
+ * Base URLs for different environments
+ */
 export const BASE_URLS = {
-  FPL: 'https://fantasy.premierleague.com/api',
-  FPL_CHALLENGE: 'https://fplchallenge.premierleague.com/api',
-  FPL_RESOURCE: 'https://resources.premierleague.com',
-} as const;
-
-// Type definitions
-export type BaseURL = keyof typeof BASE_URLS;
-export type EndpointKeys = keyof URLParams;
-export type Endpoint<P extends EndpointKeys> = (params: Pick<URLParams, P>) => string;
-
-export interface URLParams {
-  readonly event: number;
-  readonly entry: number;
-  readonly element: number;
-  readonly photoId: number;
-  readonly leagueId: number;
-  readonly page: number;
-  readonly phase: number;
-}
-
-export interface APIEndpointConfig {
-  readonly [key: string]: string | Endpoint<EndpointKeys>;
-}
-
-export interface APIConfig {
-  readonly baseUrl: BaseURL;
-  readonly endpoints: {
-    readonly [category: string]: APIEndpointConfig;
-  };
-}
-
-// Validation functions
-export const validateURLParams = (params: Partial<URLParams>): void => {
-  for (const [key, value] of Object.entries(params)) {
-    if (value !== undefined && typeof value !== 'number') {
-      throw new Error(`Invalid parameter: ${key} must be a number`);
-    }
-    if (value !== undefined && value < 0) {
-      throw new Error(`Invalid parameter: ${key} must be non-negative`);
-    }
-  }
-};
-
-export const validateConfig = (config: APIConfig): void => {
-  if (!Object.keys(BASE_URLS).includes(config.baseUrl)) {
-    throw new Error(`Invalid base URL: ${config.baseUrl}`);
-  }
-  if (!config.endpoints || Object.keys(config.endpoints).length === 0) {
-    throw new Error('Endpoints configuration is required');
-  }
-};
-
-/**
- * Standard FPL API endpoint configuration
- * All endpoints are type-safe and documented
- */
-export const FPL_API_CONFIG = {
-  bootstrap: {
-    static: `${BASE_URLS.FPL}/bootstrap-static/`,
-    gameweek: (params: Pick<URLParams, 'event'>): string => {
-      validateURLParams(params);
-      return `${BASE_URLS.FPL}/bootstrap-static/${params.event}`;
-    },
-  },
-
-  fixtures: {
-    byGameweek: (params: Pick<URLParams, 'event'>): string => {
-      validateURLParams(params);
-      return `${BASE_URLS.FPL}/fixtures/?event=${params.event}`;
-    },
-    live: (params: Pick<URLParams, 'event'>): string => {
-      validateURLParams(params);
-      return `${BASE_URLS.FPL}/event/${params.event}/live/`;
-    },
-  },
-
-  player: {
-    summary: (params: Pick<URLParams, 'element'>): string => {
-      validateURLParams(params);
-      return `${BASE_URLS.FPL}/element-summary/${params.element}/`;
-    },
-    photo: (params: Pick<URLParams, 'photoId'>): string => {
-      validateURLParams(params);
-      return `${BASE_URLS.FPL_RESOURCE}/premierleague/photos/players/110x140/p${params.photoId}.png`;
-    },
-  },
-
-  entry: {
-    details: (params: Pick<URLParams, 'entry'>): string => {
-      validateURLParams(params);
-      return `${BASE_URLS.FPL}/entry/${params.entry}/`;
-    },
-    history: (params: Pick<URLParams, 'entry'>): string => {
-      validateURLParams(params);
-      return `${BASE_URLS.FPL}/entry/${params.entry}/history/`;
-    },
-    picks: (params: Pick<URLParams, 'entry' | 'event'>): string => {
-      validateURLParams(params);
-      return `${BASE_URLS.FPL}/entry/${params.entry}/event/${params.event}/picks/`;
-    },
-    transfers: (params: Pick<URLParams, 'entry'>): string => {
-      validateURLParams(params);
-      return `${BASE_URLS.FPL}/entry/${params.entry}/transfers/`;
-    },
-  },
-
-  league: {
-    classic: (params: Pick<URLParams, 'leagueId' | 'page'>): string => {
-      validateURLParams(params);
-      return `${BASE_URLS.FPL}/leagues-classic/${params.leagueId}/standings/?page_standings=${params.page}`;
-    },
-    headToHead: (params: Pick<URLParams, 'leagueId' | 'page'>): string => {
-      validateURLParams(params);
-      return `${BASE_URLS.FPL}/leagues-h2h/${params.leagueId}/standings/?page_standings=${params.page}`;
-    },
-  },
+  [API_ENV.development]: 'https://fantasy.premierleague.com/api',
+  [API_ENV.production]: 'https://fantasy.premierleague.com/api',
+  [API_ENV.test]: 'http://localhost:3000/mock/api',
 } as const;
 
 /**
- * FPL Challenge API endpoint configuration
- * All endpoints are type-safe and documented
+ * API version configuration
  */
-export const CHALLENGE_API_CONFIG = {
-  bootstrap: {
-    static: `${BASE_URLS.FPL_CHALLENGE}/bootstrap-static/`,
-    gameweek: (params: Pick<URLParams, 'event'>): string => {
-      validateURLParams(params);
-      return `${BASE_URLS.FPL_CHALLENGE}/bootstrap-static/${params.event}`;
-    },
-  },
+export const API_VERSION = {
+  current: 'v1',
+  supported: ['v1'] as const,
+} as const;
 
-  fixtures: {
-    byGameweek: (params: Pick<URLParams, 'event'>): string => {
-      validateURLParams(params);
-      return `${BASE_URLS.FPL_CHALLENGE}/fixtures/?event=${params.event}`;
-    },
+/**
+ * HTTP configuration
+ */
+export const HTTP_CONFIG = {
+  TIMEOUT: {
+    DEFAULT: 30000,
+    LONG: 60000,
+    SHORT: 5000,
   },
-
-  entry: {
-    details: (params: Pick<URLParams, 'entry' | 'event' | 'phase'>): string => {
-      validateURLParams(params);
-      return `${BASE_URLS.FPL_CHALLENGE}/entry/${params.entry}/?event=${params.event}&phase=${params.phase}`;
-    },
-    picks: (params: Pick<URLParams, 'entry' | 'event'>): string => {
-      validateURLParams(params);
-      return `${BASE_URLS.FPL_CHALLENGE}/entry/${params.entry}/event/${params.event}/picks/`;
-    },
-    transfers: (params: Pick<URLParams, 'entry'>): string => {
-      validateURLParams(params);
-      return `${BASE_URLS.FPL_CHALLENGE}/entry/${params.entry}/transfers/`;
-    },
+  RETRY: {
+    DEFAULT_ATTEMPTS: 3,
+    MAX_ATTEMPTS: 5,
+    BASE_DELAY: 1000,
+    MAX_DELAY: 10000,
+    JITTER_MAX: 100,
   },
-
-  league: {
-    standings: (params: Pick<URLParams, 'leagueId' | 'page' | 'phase'>): string => {
-      validateURLParams(params);
-      return `${BASE_URLS.FPL_CHALLENGE}/leagues-classic/${params.leagueId}/standings/?page_standings=${params.page}&phase=${params.phase}`;
-    },
+  STATUS: {
+    OK_MIN: 200,
+    OK_MAX: 299,
+    CLIENT_ERROR_MIN: 400,
+    SERVER_ERROR_MIN: 500,
+  },
+  HEADERS: {
+    ACCEPT: 'application/json',
+    CONTENT_TYPE: 'application/json',
+    CACHE_CONTROL: 'no-cache, no-store, must-revalidate',
+    PRAGMA: 'no-cache',
+    EXPIRES: '0',
+    DEFAULT_USER_AGENT:
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  },
+  CACHE: {
+    TIMESTAMP_PARAM: '_t',
+  },
+  ERROR: {
+    INVALID_REQUEST: 'INVALID_REQUEST',
+    UNKNOWN_ERROR: 'UNKNOWN_ERROR',
+    INTERNAL_ERROR: 'INTERNAL_ERROR',
+    RETRY_EXHAUSTED: 'RETRY_EXHAUSTED',
   },
 } as const;

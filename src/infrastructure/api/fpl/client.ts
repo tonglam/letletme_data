@@ -3,8 +3,10 @@ import { pipe } from 'fp-ts/function';
 import { z } from 'zod';
 import { EventResponseSchema } from '../../../types/events.type';
 import { HTTPClient, HTTPClientConfig, RequestOptions } from '../common/client';
+import { ValidationError } from '../common/errors';
 import { createApiCallContext, createApiLogger, logApiCall } from '../common/logs';
-import { BASE_URLS, FPL_API_CONFIG } from '../config/api.config';
+import { APIResponse } from '../common/types';
+import { BASE_URLS, FPL_API_CONFIG } from './config';
 
 // Types
 export interface FPLClientConfig extends Partial<HTTPClientConfig> {
@@ -27,12 +29,15 @@ const createDefaultHeaders = (userAgent: string): Record<string, string> => ({
 
 const validateResponse =
   <T>(schema: z.ZodType<T>) =>
-  (response: unknown): E.Either<Error, T> => {
+  (response: unknown): APIResponse<T> => {
     try {
       return E.right(schema.parse(response));
     } catch (error) {
       return E.left(
-        new Error(`Validation error: ${error instanceof Error ? error.message : 'Unknown error'}`),
+        new ValidationError(
+          `Schema validation error: ${error instanceof Error ? error.message : 'Unknown error'}`,
+          { schema: schema.description },
+        ),
       );
     }
   };

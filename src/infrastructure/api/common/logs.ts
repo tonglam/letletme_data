@@ -12,203 +12,156 @@
  * @module infrastructure/api/common/logs
  */
 
-import * as E from 'fp-ts/Either';
-import { pipe } from 'fp-ts/function';
-import pino from 'pino';
+import pino, { Logger } from 'pino';
+import { BaseError } from './errors';
+import { APIResponse } from './types';
 
 /**
- * Available log levels in order of increasing severity
+ * Logger configuration interface
  */
-export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
-
-/**
- * Context information added to all logs
- */
-export interface LogContext extends Record<string, unknown> {
-  readonly service: string; // Service/component name
-  readonly environment: string; // Runtime environment
-  readonly timestamp: string; // ISO timestamp
+export interface LoggerConfig {
+  readonly name: string;
+  readonly level: 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal';
+  readonly filepath?: string;
+  readonly prettyPrint?: boolean;
 }
 
 /**
- * Logger configuration options
- */
-export interface LogConfig {
-  readonly name: string; // Logger instance name
-  readonly level: LogLevel; // Minimum log level
-  readonly filepath: string; // Log file path
-  readonly rotation?: {
-    // Log rotation settings
-    readonly size: string; // Max file size before rotation
-    readonly count: number; // Number of files to keep
-    readonly compress: boolean; // Whether to compress rotated logs
-  };
-}
-
-/**
- * Context for API call logging
+ * API call context for logging
  */
 export interface ApiCallContext {
-  readonly endpoint: string; // API endpoint called
-  readonly params: Record<string, unknown>; // Request parameters
-  readonly startTime: number; // Call start timestamp
-  readonly context?: LogContext; // Additional context
+  readonly method: string;
+  readonly path: string;
+  readonly params?: Record<string, unknown>;
+  readonly duration?: number;
+  readonly requestId?: string;
 }
 
 /**
- * Default logging configuration
+ * Creates a configured pino logger instance
  */
-const DEFAULT_LOG_CONFIG: Required<Pick<LogConfig, 'level' | 'rotation'>> = {
-  level: 'info',
-  rotation: {
-    size: '10M',
-    count: 5,
-    compress: true,
-  },
-};
-
-/**
- * Creates a configured logger instance for API operations
- *
- * @param config - Partial logger configuration
- * @returns Configured Pino logger instance
- */
-export const createApiLogger = (config: Partial<LogConfig>) => {
-  const finalConfig = {
-    level: DEFAULT_LOG_CONFIG.level,
-    rotation: DEFAULT_LOG_CONFIG.rotation,
-    ...config,
-    name: config.name ?? 'api',
-    filepath: config.filepath ?? `./logs/${config.name ?? 'api'}.log`,
-  } satisfies LogConfig;
+export function createApiLogger(config: LoggerConfig): Logger {
+  const transport = config.filepath
+    ? {
+        target: 'pino/file',
+        options: { destination: config.filepath },
+      }
+    : config.prettyPrint
+      ? {
+          target: 'pino-pretty',
+          options: {
+            colorize: true,
+            translateTime: 'SYS:standard',
+            ignore: 'pid,hostname',
+          },
+        }
+      : undefined;
 
   return pino({
-    name: finalConfig.name,
-    level: finalConfig.level,
-    transport: {
-      target: 'pino/file',
-      options: {
-        destination: finalConfig.filepath,
-        mkdir: true,
-        sync: false,
-        rotate: finalConfig.rotation,
-      },
+    name: config.name,
+    level: config.level,
+    transport,
+    redact: {
+      paths: ['*.password', '*.token', '*.key', '*.secret'],
+      remove: true,
+    },
+    timestamp: pino.stdTimeFunctions.isoTime,
+    formatters: {
+      level: (label) => ({ level: label }),
+    },
+    base: {
+      env: process.env.NODE_ENV,
     },
   });
-};
+}
 
 /**
- * Higher-order function for logging API calls
- * Handles both successful and failed calls with appropriate logging levels
- *
- * @param logger - Pino logger instance
- * @returns Function that takes context and logs API call results
+ * Creates a context object for API call logging
  */
-export const logApiCall =
-  (logger: pino.Logger) =>
-  (context: ApiCallContext) =>
-  <T>(result: E.Either<Error, T>): E.Either<Error, T> => {
-    const { endpoint, params, startTime, context: logContext } = context;
-    const duration = Date.now() - startTime;
-
-    const baseLogContext = {
-      endpoint,
-      params: sanitizeParams(params),
-      duration,
-      ...(logContext ?? {}),
-    };
-
-    pipe(
-      result,
-      E.fold(
-        (error) => {
-          logger.error(
-            {
-              ...baseLogContext,
-              error: {
-                message: error.message,
-                name: error.name,
-                ...(error instanceof Error && error.cause ? { cause: error.cause } : {}),
-              },
-            },
-            'API call failed',
-          );
-        },
-        () => {
-          // Log successful calls only if they're slow
-          if (duration > 1000) {
-            logger.warn(baseLogContext, 'Slow API call');
-          } else {
-            logger.debug(baseLogContext, 'API call completed');
-          }
-        },
-      ),
-    );
-
-    return result;
+export function createApiCallContext(
+  method: string,
+  params?: Record<string, unknown>,
+): ApiCallContext {
+  return {
+    method,
+    path: `/${method}`,
+    params,
+    requestId: generateRequestId(),
   };
+}
 
 /**
- * Creates context for API call logging
- *
- * @param endpoint - API endpoint being called
- * @param params - Request parameters
- * @param context - Additional context information
- * @returns ApiCallContext object
+ * Higher-order function for logging API calls with timing
  */
-export const createApiCallContext = (
-  endpoint: string,
-  params: Record<string, unknown> = {},
-  context?: LogContext,
-): ApiCallContext => ({
-  endpoint,
-  params,
-  startTime: Date.now(),
-  context,
-});
+export function logApiCall<T>(logger: Logger) {
+  return (context: ApiCallContext) =>
+    (response: APIResponse<T>): APIResponse<T> => {
+      const duration = context.duration ?? 0;
+      const baseLog = {
+        requestId: context.requestId,
+        method: context.method,
+        path: context.path,
+        params: context.params,
+        duration: `${duration}ms`,
+      };
+
+      if (response._tag === 'Left') {
+        const error = response.left as BaseError;
+        logger.error(
+          {
+            ...baseLog,
+            error: {
+              code: error.code,
+              message: error.message,
+              details: error.details,
+            },
+          },
+          'API call failed',
+        );
+      } else {
+        logger.info(
+          {
+            ...baseLog,
+            success: true,
+          },
+          'API call successful',
+        );
+      }
+
+      return response;
+    };
+}
 
 /**
- * Type for API call parameters that will be logged
+ * Generates a unique request ID
  */
-export type ApiCallParams = Record<string, unknown>;
+function generateRequestId(): string {
+  return `req_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+}
 
 /**
- * Sanitizes parameters for logging
- * - Removes sensitive information
- * - Truncates long values
- * - Handles nested objects
- *
- * @param params - Parameters to sanitize
- * @returns Sanitized parameters safe for logging
+ * Creates a child logger with additional context
  */
-export const sanitizeParams = (params: ApiCallParams): ApiCallParams => {
-  const sanitized: ApiCallParams = {};
+export function createContextLogger(logger: Logger, context: Record<string, unknown>): Logger {
+  return logger.child(context);
+}
 
-  for (const [key, value] of Object.entries(params)) {
-    // Skip sensitive fields
-    if (
-      key.toLowerCase().includes('password') ||
-      key.toLowerCase().includes('token') ||
-      key.toLowerCase().includes('secret')
-    ) {
+/**
+ * Sanitizes sensitive data from objects before logging
+ */
+export function sanitizeLogData<T extends Record<string, unknown>>(
+  data: T,
+): Record<string, unknown> {
+  const sensitiveKeys = ['password', 'token', 'key', 'secret', 'authorization'];
+  const sanitized = { ...data } as Record<string, unknown>;
+
+  Object.keys(sanitized).forEach((key) => {
+    if (sensitiveKeys.some((k) => key.toLowerCase().includes(k))) {
       sanitized[key] = '[REDACTED]';
-      continue;
+    } else if (typeof sanitized[key] === 'object' && sanitized[key] !== null) {
+      sanitized[key] = sanitizeLogData(sanitized[key] as Record<string, unknown>);
     }
-
-    // Truncate long strings
-    if (typeof value === 'string' && value.length > 1000) {
-      sanitized[key] = `${value.substring(0, 1000)}...`;
-      continue;
-    }
-
-    // Handle nested objects
-    if (value && typeof value === 'object') {
-      sanitized[key] = sanitizeParams(value as ApiCallParams);
-      continue;
-    }
-
-    sanitized[key] = value;
-  }
+  });
 
   return sanitized;
-};
+}

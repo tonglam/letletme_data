@@ -21,16 +21,26 @@ import axios, {
 } from 'axios';
 import { Either, left, map, right } from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
-import { HTTP_CONFIG, HTTPErrorCode } from '../config/http.config';
+import { HTTP_CONFIG } from '../config/api.config';
+import { ErrorCode } from '../config/error-codes';
+import {
+  BadRequestError,
+  BaseError,
+  ForbiddenError,
+  InternalServerError,
+  NotFoundError,
+  UnauthorizedError,
+  ValidationError,
+} from './errors';
 
 /**
  * Represents an HTTP error with standardized structure
  */
 export type HTTPError = {
-  readonly code: HTTPErrorCode; // Error code from HTTP_CONFIG
-  readonly message: string; // Human-readable error message
-  readonly statusCode?: number; // HTTP status code if available
-  readonly details?: unknown; // Additional error details
+  readonly code: ErrorCode;
+  readonly message: string;
+  readonly statusCode?: number;
+  readonly details?: Record<string, unknown>;
 };
 
 /**
@@ -55,7 +65,7 @@ export interface RetryConfig {
 export class APIError extends Error {
   constructor(
     message: string,
-    public readonly code: HTTPErrorCode,
+    public readonly code: ErrorCode,
     public readonly statusCode?: number,
     public readonly details?: unknown,
   ) {
@@ -69,7 +79,7 @@ export class APIError extends Error {
   static fromAxiosError(error: AxiosError): APIError {
     return new APIError(
       error.message,
-      (error.code as HTTPErrorCode) ?? HTTP_CONFIG.ERROR.UNKNOWN_ERROR,
+      (error.code as ErrorCode) ?? HTTP_CONFIG.ERROR.UNKNOWN_ERROR,
       error.response?.status,
       error.response?.data,
     );
@@ -81,7 +91,7 @@ export class APIError extends Error {
   static fromError(error: Error): APIError {
     return new APIError(
       error.message,
-      HTTP_CONFIG.ERROR.INTERNAL_ERROR,
+      ErrorCode.INTERNAL_SERVER_ERROR,
       HTTP_CONFIG.STATUS.SERVER_ERROR_MIN,
       error,
     );
@@ -161,7 +171,7 @@ export class HTTPClient {
     this.client.interceptors.request.use(
       (config: InternalAxiosRequestConfig) => {
         if (!config.url) {
-          throw new APIError('URL is required', HTTP_CONFIG.ERROR.INVALID_REQUEST);
+          throw new BadRequestError('URL is required');
         }
 
         try {
@@ -172,12 +182,7 @@ export class HTTPClient {
           url.searchParams.append(HTTP_CONFIG.CACHE.TIMESTAMP_PARAM, Date.now().toString());
           config.url = url.toString();
         } catch (error) {
-          throw new APIError(
-            'Invalid URL configuration',
-            HTTP_CONFIG.ERROR.INVALID_REQUEST,
-            HTTP_CONFIG.STATUS.CLIENT_ERROR_MIN,
-            error,
-          );
+          throw new BadRequestError('Invalid URL configuration', { error });
         }
 
         return config;
@@ -185,8 +190,8 @@ export class HTTPClient {
       (error: unknown) => {
         const apiError =
           error instanceof Error
-            ? APIError.fromError(error)
-            : new APIError('Unknown request error', HTTP_CONFIG.ERROR.UNKNOWN_ERROR);
+            ? this.createError(400, error.message, { originalError: error })
+            : new InternalServerError('Unknown request error');
         return Promise.reject(apiError);
       },
     );
@@ -196,16 +201,19 @@ export class HTTPClient {
       (response: AxiosResponse) => response,
       (error: unknown) => {
         const apiError = axios.isAxiosError(error)
-          ? APIError.fromAxiosError(error)
+          ? this.createError(error.response?.status ?? 500, error.message, {
+              response: error.response?.data,
+              code: error.code,
+            })
           : error instanceof Error
-            ? APIError.fromError(error)
-            : new APIError('Unknown response error', HTTP_CONFIG.ERROR.UNKNOWN_ERROR);
+            ? new InternalServerError(error.message, { originalError: error })
+            : new InternalServerError('Unknown response error');
         return Promise.reject(apiError);
       },
     );
   }
 
-  async get<T>(path: string, options?: RequestOptions): Promise<Either<APIError, T>> {
+  async get<T>(path: string, options?: RequestOptions): Promise<Either<BaseError, T>> {
     return this.request<T>('GET', path, undefined, options);
   }
 
@@ -213,7 +221,7 @@ export class HTTPClient {
     path: string,
     data?: unknown,
     options?: RequestOptions,
-  ): Promise<Either<APIError, T>> {
+  ): Promise<Either<BaseError, T>> {
     return this.request<T>('POST', path, data, options);
   }
 
@@ -223,7 +231,7 @@ export class HTTPClient {
   async head(
     path: string,
     options?: RequestOptions,
-  ): Promise<Either<APIError, Record<string, string>>> {
+  ): Promise<Either<BaseError, Record<string, string>>> {
     const result = await this.request<void>('HEAD', path, undefined, options);
     return pipe(
       result,
@@ -237,7 +245,7 @@ export class HTTPClient {
   async options(
     path: string,
     options?: RequestOptions,
-  ): Promise<Either<APIError, Record<string, string>>> {
+  ): Promise<Either<BaseError, Record<string, string>>> {
     const result = await this.request<void>('OPTIONS', path, undefined, options);
     return pipe(
       result,
@@ -257,7 +265,7 @@ export class HTTPClient {
     path: string,
     data?: unknown,
     options?: RequestOptions,
-  ): Promise<Either<APIError, T>> {
+  ): Promise<Either<BaseError, T>> {
     let attempts = 0;
     const requestConfig: AxiosRequestConfig = {
       method,
@@ -273,13 +281,16 @@ export class HTTPClient {
       } catch (error) {
         attempts++;
         const apiError =
-          error instanceof APIError
+          error instanceof BaseError
             ? error
             : axios.isAxiosError(error)
-              ? APIError.fromAxiosError(error)
+              ? this.createError(error.response?.status ?? 500, error.message, {
+                  response: error.response?.data,
+                  code: error.code,
+                })
               : error instanceof Error
-                ? APIError.fromError(error)
-                : new APIError('Unknown error occurred', HTTP_CONFIG.ERROR.UNKNOWN_ERROR);
+                ? new InternalServerError(error.message, { originalError: error })
+                : new InternalServerError('Unknown error occurred');
 
         if (attempts === this.retry.attempts || !this.retry.shouldRetry(apiError)) {
           return left(apiError);
@@ -291,11 +302,9 @@ export class HTTPClient {
     }
 
     return left(
-      new APIError(
-        'Maximum retry attempts exceeded',
-        HTTP_CONFIG.ERROR.RETRY_EXHAUSTED,
-        HTTP_CONFIG.STATUS.SERVER_ERROR_MIN,
-      ),
+      new InternalServerError('Maximum retry attempts exceeded', {
+        attempts: this.retry.attempts,
+      }),
     );
   }
 
@@ -307,5 +316,31 @@ export class HTTPClient {
 
   private delay(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Creates an appropriate error based on status code and message
+   */
+  private createError(
+    status: number,
+    message: string,
+    details?: Record<string, unknown>,
+  ): BaseError {
+    switch (true) {
+      case status === 400:
+        return new BadRequestError(message, details);
+      case status === 401:
+        return new UnauthorizedError(message, details);
+      case status === 403:
+        return new ForbiddenError(message, details);
+      case status === 404:
+        return new NotFoundError(message, details);
+      case status >= 400 && status < 500:
+        return new ValidationError(message, details);
+      case status >= 500:
+        return new InternalServerError(message, details);
+      default:
+        return new InternalServerError(message, details);
+    }
   }
 }
