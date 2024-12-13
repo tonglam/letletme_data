@@ -7,32 +7,29 @@ export class EventBootstrapService {
     private readonly transactionContext: TransactionContext,
   ) {}
 
-  public async initialize(): Promise<Either<Error, void>> {
+  async initialize(): Promise<Either<Error, void>> {
     try {
       await this.transactionContext.start();
 
       // Initialize event service
       const initResult = await this.eventService.initialize();
-
       if (initResult._tag === 'Left') {
         await this.transactionContext.rollback();
-        return left(new Error('Failed to initialize event service'));
+        return left(initResult.left);
       }
 
       // Sync initial events
       const syncResult = await this.eventService.syncEvents();
-
       if (syncResult._tag === 'Left') {
         await this.transactionContext.rollback();
-        return left(new Error('Failed to sync initial events'));
+        return left(syncResult.left);
       }
 
       // Schedule event updates
       const scheduleResult = await this.eventService.scheduleEventUpdates();
-
       if (scheduleResult._tag === 'Left') {
         await this.transactionContext.rollback();
-        return left(new Error('Failed to schedule event updates'));
+        return left(scheduleResult.left);
       }
 
       await this.transactionContext.commit();

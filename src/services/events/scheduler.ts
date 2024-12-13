@@ -1,5 +1,5 @@
 import { Either, left, right } from 'fp-ts/Either';
-import { EventService, FPLEvent, TransactionContext } from './types';
+import { EventService, TransactionContext } from './types';
 
 export class EventSchedulerService {
   private readonly UPDATE_INTERVAL = 300000; // 5 minutes in milliseconds
@@ -10,7 +10,7 @@ export class EventSchedulerService {
     private readonly transactionContext: TransactionContext,
   ) {}
 
-  public async scheduleEventUpdates(): Promise<Either<Error, void>> {
+  async scheduleEventUpdates(): Promise<Either<Error, void>> {
     try {
       await this.transactionContext.start();
 
@@ -19,9 +19,12 @@ export class EventSchedulerService {
         clearInterval(this.updateTimer);
       }
 
+      // Perform initial update without starting a new transaction
+      await this.performScheduledUpdate(false);
+
       // Schedule periodic updates
-      this.updateTimer = setInterval(async () => {
-        await this.performScheduledUpdate();
+      this.updateTimer = setInterval(() => {
+        void this.performScheduledUpdate(true);
       }, this.UPDATE_INTERVAL);
 
       await this.transactionContext.commit();
@@ -32,37 +35,43 @@ export class EventSchedulerService {
     }
   }
 
-  private async performScheduledUpdate(): Promise<void> {
+  private async performScheduledUpdate(startNewTransaction: boolean = true): Promise<void> {
     try {
-      await this.transactionContext.start();
+      if (startNewTransaction) {
+        await this.transactionContext.start();
+      }
 
       // Sync events
       const syncResult = await this.eventService.syncEvents();
-
       if (syncResult._tag === 'Left') {
-        await this.transactionContext.rollback();
+        if (startNewTransaction) {
+          await this.transactionContext.rollback();
+        }
         console.error('Failed to sync events during scheduled update:', syncResult.left);
         return;
       }
 
       // Verify synced events
-      const events = (syncResult as unknown as { right: ReadonlyArray<FPLEvent> }).right;
+      const events = syncResult.right;
       for (const event of events) {
         const verificationResult = await this.eventService.verifyEventData(event.id);
-
         if (verificationResult._tag === 'Left') {
           console.error(`Failed to verify event ${event.id}:`, verificationResult.left);
         }
       }
 
-      await this.transactionContext.commit();
+      if (startNewTransaction) {
+        await this.transactionContext.commit();
+      }
     } catch (error) {
-      await this.transactionContext.rollback();
+      if (startNewTransaction) {
+        await this.transactionContext.rollback();
+      }
       console.error('Error during scheduled update:', error);
     }
   }
 
-  public stopScheduler(): void {
+  stopScheduler(): void {
     if (this.updateTimer) {
       clearInterval(this.updateTimer);
       this.updateTimer = null;
