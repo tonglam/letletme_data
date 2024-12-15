@@ -188,3 +188,54 @@ While the learning curve with TypeScript generics and FP patterns can be steep, 
    docker-compose up -d
    npm run dev
    ```
+
+# Domain-Driven Design
+
+The project follows DDD principles with clear domain boundaries and type-safe implementations.
+
+```mermaid
+graph TB
+    subgraph Core Domain
+        Event[Event Domain]
+        Player[Player Domain]
+        Team[Team Domain]
+        Entry[Entry Domain]
+        League[League Domain]
+    end
+
+    subgraph Supporting Domains
+        Scout[Scout Domain]
+        Stats[Statistics Domain]
+        Live[Live Domain]
+    end
+
+    Event --> Stats
+    Player --> Stats
+    Team --> Stats
+    Entry --> Stats
+    League --> Stats
+
+    Stats --> Live
+    Scout --> Live
+```
+
+Each domain follows a standard structure with entities, repositories, services, and types, ensuring clear separation of concerns and maintainable code. For detailed design documentation, please refer to the design docs.
+
+# Job Management
+
+The system uses BullMQ for robust job queue management, handling various data fetching and processing tasks.
+
+```mermaid
+graph LR
+    subgraph Queue Management
+        Cron[Node-Cron] --> Bull[BullMQ]
+        Bull --> Jobs[Job Processors]
+    end
+
+    subgraph Job Types
+        Jobs --> Bootstrap[Bootstrap]
+        Jobs --> Static[Static Data]
+        Jobs --> Live[Live Data]
+        Jobs --> Event[Event Processing]
+    end
+```
