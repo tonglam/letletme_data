@@ -1,4 +1,14 @@
-## 1. Project Structure
+# Functional Job System Implementation Guide
+
+## 1. Core Principles
+
+- Pure functions over classes
+- Immutable state management
+- Composition over inheritance
+- Type-safe error handling
+- Declarative over imperative
+
+## 2. Project Structure
 
 ```
 src/
@@ -8,219 +18,164 @@ src/
 │   ├── tournament/       # Tournament processing jobs
 │   └── hybrid/          # Complex hybrid jobs
 ├── services/
-│   ├── job/             # Job service
-│   ├── cache/           # Cache service
-│   ├── monitor/         # Monitoring service
-│   └── alert/           # Alert service
+│   └── job/             # Job service and scheduler
 ├── infrastructure/
 │   ├── redis/           # Redis configuration
-│   ├── postgres/        # PostgreSQL setup
-│   ├── queue/           # BullMQ setup
-│   └── monitoring/      # Monitoring infrastructure
+│   └── queue/           # BullMQ setup
 └── utils/
-    ├── logger/          # Logging utilities
-    ├── metrics/         # Metrics collection
-    └── validation/      # Data validation
+    └── fp/              # FP utilities
 ```
 
-## 2. Core Components Implementation
+## 3. Core Components
 
 ### A. Job Service Implementation
 
 ```typescript
 // src/services/job/JobService.ts
-export class JobService {
-  private queues: Map<string, Queue>;
-  private workers: Map<string, Worker>;
-  private cacheService: CacheService;
-  private monitorService: MonitorService;
+import * as E from 'fp-ts/Either';
+import * as TE from 'fp-ts/TaskEither';
+import { pipe } from 'fp-ts/function';
 
-  constructor() {
-    this.initializeQueues();
-    this.setupWorkers();
-    this.registerEventHandlers();
-  }
-
-  private initializeQueues() {
-    // Initialize different job queues with their configurations
-    const queueConfigs = {
-      meta: { priority: 'high' },
-      timeBased: { priority: 'critical' },
-      tournament: { priority: 'medium' },
-      hybrid: { priority: 'low' },
-    };
-    // Implementation details...
-  }
-
-  private setupWorkers() {
-    // Setup worker pools for different job types
-    // Implementation details...
-  }
-
-  private registerEventHandlers() {
-    // Register event handlers for job lifecycle events
-    // Implementation details...
-  }
+// State interface
+interface JobServiceState {
+  readonly queues: JobQueues;
+  readonly workers: JobWorkers;
+  readonly jobDefinitions: JobDefinitionMap;
 }
+
+// Pure functions for job operations
+export const addJob = <TData>(
+  state: JobServiceState,
+  name: string,
+  data: TData,
+  options?: JobOptions,
+): TE.TaskEither<Error, Job<TData>> =>
+  pipe();
+  // Implementation...
+
+export const registerJob = (
+  state: JobServiceState,
+  name: string,
+  definition: JobDefinition,
+): E.Either<Error, JobServiceState> =>
+  pipe();
+  // Implementation...
+
+// Create service instance
+export const createJobService = (
+  processJob: (job: Job) => Promise<JobResult>,
+): TE.TaskEither<Error, JobServiceState> =>
+  pipe();
+  // Implementation...
 ```
 
-### B. Cache Service Implementation
+### B. Job Scheduler Implementation
 
 ```typescript
-// src/services/cache/CacheService.ts
-export class CacheService {
-  private redisClient: Redis;
-  private localCache: Map<string, any>;
+// src/services/job/JobScheduler.ts
+import * as E from 'fp-ts/Either';
+import * as O from 'fp-ts/Option';
+import { pipe } from 'fp-ts/function';
 
-  constructor() {
-    this.initializeRedisClient();
-    this.setupCacheStrategies();
-  }
+// State interface
+interface SchedulerState {
+  readonly cronJobs: Record<string, CronJob>;
+}
 
-  private initializeRedisClient() {
-    // Setup Redis connection
-    // Implementation details...
-  }
+// Pure functions for scheduler operations
+export const registerScheduledJob = (
+  state: SchedulerState,
+  name: string,
+  jobDefinition: JobDefinition,
+  executeJob: () => Promise<void>,
+): E.Either<Error, SchedulerState> =>
+  pipe();
+  // Implementation...
 
-  private setupCacheStrategies() {
-    // Configure caching strategies for different data types
-    // Implementation details...
-  }
+export const startAllJobs = (state: SchedulerState): E.Either<Error, SchedulerState> =>
+  pipe();
+  // Implementation...
+
+// Create scheduler instance
+export const createScheduler = (): SchedulerState => ({
+  cronJobs: {},
+});
+```
+
+## 4. Job Implementation
+
+### A. Job Definition
+
+```typescript
+// src/jobs/types.ts
+import * as E from 'fp-ts/Either';
+import * as TE from 'fp-ts/TaskEither';
+
+export interface JobDefinition<TData = unknown, TResult = unknown> {
+  readonly metadata: JobMetadata;
+  readonly validate?: (data: unknown) => E.Either<Error, TData>;
+  readonly handler: (data: TData) => TE.TaskEither<Error, TResult>;
+  readonly onComplete?: (result: TResult) => Promise<void>;
+  readonly onFailed?: (error: Error) => Promise<void>;
 }
 ```
 
-## 3. Job Implementations
-
-### A. Meta Jobs
+### B. Example Job
 
 ```typescript
 // src/jobs/meta/BootstrapJob.ts
-export class BootstrapJob implements IJob {
-  async execute(data: JobData): Promise<void> {
-    // 1. Validate current meta data
-    // 2. Fetch updates from FPL API
-    // 3. Process and validate updates
-    // 4. Update cache and database
-    // Implementation details...
-  }
+import * as E from 'fp-ts/Either';
+import * as TE from 'fp-ts/TaskEither';
+import { pipe } from 'fp-ts/function';
+import { z } from 'zod';
 
-  private async validateMetaData() {
-    // Validation logic...
-  }
+export const BootstrapJob: JobDefinition<BootstrapData, BootstrapResult> = {
+  metadata: {
+    queue: 'meta',
+    priority: 'high',
+    schedule: '0 0 * * *',
+  },
 
-  private async processUpdates() {
-    // Update processing logic...
-  }
-}
-```
+  validate: (data: unknown) =>
+    pipe(
+      E.tryCatch(
+        () => BootstrapDataSchema.parse(data),
+        (error) => new Error(`Invalid data: ${error}`),
+      ),
+    ),
 
-### B. Time-Based Jobs
-
-```typescript
-// src/jobs/time-based/LiveUpdateJob.ts
-export class LiveUpdateJob implements IJob {
-  async execute(data: JobData): Promise<void> {
-    // 1. Check time window validity
-    // 2. Process live updates
-    // 3. Update caches
-    // 4. Notify subscribers
-    // Implementation details...
-  }
-
-  private async processLiveUpdates() {
-    // Live update processing logic...
-  }
-}
-```
-
-## 4. Infrastructure Setup
-
-### A. Redis Configuration
-
-```typescript
-// src/infrastructure/redis/config.ts
-export const redisConfig = {
-  host: process.env.REDIS_HOST,
-  port: parseInt(process.env.REDIS_PORT),
-  password: process.env.REDIS_PASSWORD,
-  db: 0,
-  maxRetriesPerRequest: 3,
-  retryStrategy: (times: number) => Math.min(times * 50, 2000),
+  handler: (data: BootstrapData) =>
+    pipe(TE.right(data), TE.chain(validateData), TE.chain(processData), TE.chain(saveResults)),
 };
 ```
 
-### B. Queue Configuration
+## 5. Error Handling
+
+### A. Using Either for Synchronous Operations
 
 ```typescript
-// src/infrastructure/queue/config.ts
-export const queueConfig = {
-  defaultJobOptions: {
-    attempts: 3,
-    backoff: {
-      type: 'exponential',
-      delay: 1000,
-    },
-    removeOnComplete: true,
-    removeOnFail: false,
-  },
-  settings: {
-    lockDuration: 30000,
-    stalledInterval: 30000,
-    maxStalledCount: 3,
-  },
-};
+const validateJobData = <T>(data: unknown, schema: z.ZodType<T>): E.Either<Error, T> =>
+  pipe(
+    E.tryCatch(
+      () => schema.parse(data),
+      (error) => new Error(`Validation failed: ${error}`),
+    ),
+  );
 ```
 
-## 5. Monitoring Implementation
-
-### A. Metrics Collection
+### B. Using TaskEither for Async Operations
 
 ```typescript
-// src/services/monitor/MetricsService.ts
-export class MetricsService {
-  private metrics: Map<string, Metric>;
-  private timeseriesDB: TimeSeriesDB;
-
-  constructor() {
-    this.initializeMetrics();
-    this.setupCollectors();
-  }
-
-  private initializeMetrics() {
-    // Setup metrics collectors
-    // Implementation details...
-  }
-
-  private setupCollectors() {
-    // Configure metric collection
-    // Implementation details...
-  }
-}
-```
-
-### B. Alert System
-
-```typescript
-// src/services/alert/AlertService.ts
-export class AlertService {
-  private telegramBot: TelegramBot;
-  private alertRules: AlertRules;
-
-  constructor() {
-    this.initializeTelegramBot();
-    this.setupAlertRules();
-  }
-
-  private initializeTelegramBot() {
-    // Setup Telegram bot
-    // Implementation details...
-  }
-
-  private setupAlertRules() {
-    // Configure alert rules
-    // Implementation details...
-  }
-}
+const processJobData = <T, R>(
+  data: T,
+  processor: (data: T) => Promise<R>,
+): TE.TaskEither<Error, R> =>
+  pipe(
+    TE.tryCatch(
+      () => processor(data),
+      (error) => new Error(`Processing failed: ${error}`),
+    ),
+  );
 ```
 
 ## 6. Testing Strategy
@@ -228,18 +183,18 @@ export class AlertService {
 ### A. Unit Tests
 
 ```typescript
-// tests/unit/jobs/meta/BootstrapJob.test.ts
-describe('BootstrapJob', () => {
-  it('should validate meta data correctly', async () => {
-    // Test implementation...
-  });
+describe('Job Service', () => {
+  it('should handle job registration', () => {
+    const result = pipe(
+      createEmptyState(),
+      (state) => registerJob(state, 'test', TestJob),
+      E.map((state) => state.jobDefinitions['test']),
+    );
 
-  it('should handle API errors gracefully', async () => {
-    // Test implementation...
-  });
-
-  it('should update cache after successful execution', async () => {
-    // Test implementation...
+    expect(E.isRight(result)).toBe(true);
+    if (E.isRight(result)) {
+      expect(result.right).toBeDefined();
+    }
   });
 });
 ```
@@ -247,60 +202,113 @@ describe('BootstrapJob', () => {
 ### B. Integration Tests
 
 ```typescript
-// tests/integration/services/JobService.test.ts
-describe('JobService Integration', () => {
-  it('should process jobs in correct order', async () => {
-    // Test implementation...
-  });
+describe('Job System Integration', () => {
+  it('should process jobs correctly', async () => {
+    const result = await pipe(
+      createJobService(processJob),
+      TE.chain((service) => addJob(service, 'test', testData)),
+    )();
 
-  it('should handle concurrent job execution', async () => {
-    // Test implementation...
+    expect(E.isRight(result)).toBe(true);
   });
 });
 ```
 
-## 7. Troubleshooting Guide
+## 7. Best Practices
 
-### A. Common Issues
+1. State Management:
 
-1. Redis Connection Issues
+   - Keep state immutable
+   - Use pure functions for transformations
+   - Compose operations with pipe
 
-   ```typescript
-   // Check Redis connection
-   async function checkRedisConnection() {
-     try {
-       await redis.ping();
-     } catch (error) {
-       // Handle connection error
-     }
-   }
-   ```
+2. Error Handling:
 
-2. Job Processing Issues
-   ```typescript
-   // Check job status
-   async function checkJobStatus(jobId: string) {
-     const job = await Queue.getJob(jobId);
-     return {
-       status: job.status,
-       progress: job.progress,
-       attempts: job.attemptsMade,
-       logs: await job.logs(),
-     };
-   }
-   ```
+   - Use Either for sync operations
+   - Use TaskEither for async operations
+   - Provide meaningful error context
 
-### B. Recovery Procedures
+3. Type Safety:
+
+   - Define strict interfaces
+   - Use generics appropriately
+   - Validate data at boundaries
+
+4. Testing:
+
+   - Test pure functions in isolation
+   - Use property-based testing
+   - Test composition chains
+
+5. Performance:
+   - Memoize pure functions
+   - Use appropriate data structures
+   - Optimize compositions
+
+## 8. Utilities
+
+### A. Common FP Utilities
 
 ```typescript
-// src/utils/recovery/RecoveryProcedures.ts
-export class RecoveryProcedures {
-  async recoverFailedJobs() {
-    // Implement recovery logic
-  }
+// src/utils/fp/index.ts
 
-  async restoreConsistency() {
-    // Implement consistency checks
-  }
-}
+// Compose multiple TaskEither operations
+export const sequenceOperations = <T>(
+  operations: Array<TE.TaskEither<Error, T>>,
+): TE.TaskEither<Error, Array<T>> => pipe(operations, TE.sequenceArray);
+
+// Safe record access
+export const getRecordValue = <K extends string, V>(record: Record<K, V>, key: K): O.Option<V> =>
+  pipe(record, R.lookup(key));
+
+// Error handling utility
+export const handleErrors = <T>(
+  task: TE.TaskEither<Error, T>,
+  onSuccess: (result: T) => void,
+  onError: (error: Error) => void,
+): Promise<void> =>
+  pipe(
+    task,
+    TE.fold(
+      (error) => T.of(onError(error)),
+      (result) => T.of(onSuccess(result)),
+    ),
+  )();
+```
+
+### B. Job-Specific Utilities
+
+```typescript
+// src/utils/fp/job.ts
+
+// Create a job handler with validation
+export const createJobHandler =
+  <TData, TResult>(
+    validator: (data: unknown) => E.Either<Error, TData>,
+    processor: (data: TData) => Promise<TResult>,
+  ): JobHandler<TData, TResult> =>
+  (data: unknown) =>
+    pipe(
+      data,
+      validator,
+      TE.fromEither,
+      TE.chain((validData) =>
+        TE.tryCatch(
+          () => processor(validData),
+          (error) => new Error(`Processing failed: ${error}`),
+        ),
+      ),
+    );
+
+// Safe job status check
+export const getJobStatusSafe = (scheduler: SchedulerState, jobName: string): O.Option<JobStatus> =>
+  pipe(
+    scheduler.cronJobs,
+    R.lookup(jobName),
+    O.map((job) => ({
+      registered: true,
+      running: job.running,
+      schedule: job.cronTime?.toString(),
+    })),
+  );
 ```
