@@ -14,6 +14,9 @@
   - [Data Accuracy Strategy](#data-accuracy-strategy)
 - [Data Synchronization](#data-synchronization)
   - [Multi-Database Strategy](#multi-database-strategy)
+- [Job Queue Architecture](#job-queue-architecture)
+  - [BullMQ Integration](#bullmq-integration)
+  - [Job Flow Patterns](#job-flow-patterns)
 - [Scheduled Operations](#scheduled-operations)
   - [Update Management](#update-management)
 - [API Design](#api-design)
@@ -311,6 +314,229 @@ The system employs a sophisticated approach to managing data across PostgreSQL a
    - Invalidation based on domain events
    - Atomic updates across stores
    - Consistency verification
+
+## Job Queue Architecture
+
+### BullMQ Integration
+
+```mermaid
+graph TB
+    subgraph Producer[Job Producers]
+        API[API Layer]
+        Scheduler[Scheduler]
+        Events[Domain Events]
+    end
+
+    subgraph Queue[BullMQ]
+        EventQueue[Event Queue]
+        DataQueue[Data Queue]
+        NotificationQueue[Notification Queue]
+    end
+
+    subgraph Workers[Job Workers]
+        EventWorker[Event Worker]
+        DataWorker[Data Worker]
+        NotificationWorker[Notification Worker]
+    end
+
+    API --> EventQueue
+    API --> DataQueue
+    Scheduler --> EventQueue
+    Events --> NotificationQueue
+
+    EventQueue --> EventWorker
+    DataQueue --> DataWorker
+    NotificationQueue --> NotificationWorker
+
+    Redis[(Redis)]
+    EventQueue -.-> Redis
+    DataQueue -.-> Redis
+    NotificationQueue -.-> Redis
+
+    style Queue fill:#f9f,stroke:#333
+    style Workers fill:#bbf,stroke:#333
+    style Redis fill:#fdd,stroke:#333
+```
+
+### Integration Architecture
+
+The job queue system is integrated into the application's layered architecture following DDD principles:
+
+```mermaid
+graph TB
+    API[API Layer]
+    SS[Scheduler Service]
+    SL[Service Layer]
+    JQ[Job Queue - BullMQ]
+    DL[Domain Layer]
+    IL[Infrastructure Layer]
+
+    API --> SL
+    SS --> SL
+    SL --> JQ
+    JQ --> SL
+    SL --> DL
+    DL --> IL
+
+    style SL fill:#f9f,stroke:#333
+    style DL fill:#bbf,stroke:#333
+    style JQ fill:#fdd,stroke:#333
+```
+
+1. **Service Layer as Orchestrator**
+
+   - Controls job creation and scheduling
+   - Manages job execution flow
+   - Coordinates between domains
+   - Handles job completion and errors
+
+2. **Job Trigger Points**
+
+   ```plaintext
+   API-Triggered:
+   API → Service Layer → Queue → Service Layer → Domain Layer
+
+   Scheduled:
+   Scheduler Service → Service Layer → Queue → Service Layer → Domain Layer
+
+   Event-Driven:
+   Domain Events → Service Layer → Queue → Service Layer → Domain Layer
+   ```
+
+3. **Scheduler Service Implementation**
+
+   ```typescript
+   class EventSchedulerService {
+       constructor(
+           private readonly eventService: EventService,
+           private readonly jobQueue: EventJobQueue
+       ) {}
+
+       // Initialize scheduled jobs
+       async initializeScheduledJobs(): Promise<void> {
+           await this.scheduleEventUpdates();
+           await this.scheduleLiveScoreProcessing();
+       }
+
+       private async scheduleEventUpdates(): Promise<void> {
+           await this.eventService.scheduleRecurringEventUpdate({
+               cronExpression: '*/5 * * * *', // Every 5 minutes
+               eventConfig: {...}
+           });
+       }
+   }
+   ```
+
+4. **Service Layer Job Handling**
+
+   ```typescript
+   class EventService {
+     constructor(
+       private readonly eventDomain: EventDomain,
+       private readonly jobQueue: EventJobQueue,
+     ) {}
+
+     async scheduleRecurringEventUpdate(config: EventUpdateConfig): Promise<void> {
+       await this.jobQueue.scheduleRecurring({
+         type: 'UPDATE_EVENT',
+         config,
+         handler: async (job) => {
+           await this.handleEventUpdate(job.data);
+         },
+       });
+     }
+
+     private async handleEventUpdate(data: EventUpdateData): Promise<void> {
+       const event = await this.eventDomain.getEvent(data.eventId);
+       await this.eventDomain.updateEvent(event, data);
+     }
+   }
+   ```
+
+### Queue Management
+
+The system implements a robust job queue architecture using BullMQ:
+
+1. **Queue Types**
+
+   - **Event Queue**: Handles game week events, fixture updates, and live score processing
+   - **Data Queue**: Manages data synchronization, updates, and transformations
+   - **Notification Queue**: Processes notifications and alerts
+
+2. **Job Processing Patterns**
+
+   - Concurrent job processing
+   - Priority-based execution
+   - Delayed job scheduling
+   - Job retry mechanisms
+   - Dead letter queues for failed jobs
+
+3. **Worker Implementation**
+
+   - Domain-specific workers
+   - Scalable worker pools
+   - Resource management
+   - Error handling and recovery
+
+4. **Queue Management**
+   - Queue monitoring
+   - Job progress tracking
+   - Performance metrics
+   - Rate limiting
+   - Concurrency control
+
+### Job Flow Patterns
+
+```mermaid
+sequenceDiagram
+    participant P as Producer
+    participant Q as Queue
+    participant W as Worker
+    participant D as Domain
+
+    P->>Q: Create Job
+    Q->>Q: Validate & Store
+    Q->>W: Process Job
+    W->>D: Execute Domain Logic
+
+    alt Success
+        D-->>W: Operation Complete
+        W-->>Q: Job Complete
+    else Failure
+        D-->>W: Operation Failed
+        W-->>Q: Retry Job
+        Q->>W: Retry Processing
+    end
+```
+
+The system implements several job processing patterns:
+
+1. **Job Creation**
+
+   - Typed job payloads
+   - Job validation
+   - Priority assignment
+   - Scheduling options
+
+2. **Processing Strategies**
+
+   - Single-thread processing
+   - Parallel processing
+   - Batch processing
+   - Rate-limited processing
+
+3. **Error Handling**
+
+   - Automatic retries
+   - Exponential backoff
+   - Dead letter queues
+   - Error notifications
+
+4. **Monitoring**
+   - Job progress tracking
+   - Queue metrics
+   - Worker health
+   - Performance analytics
 
 ## Scheduled Operations
 
