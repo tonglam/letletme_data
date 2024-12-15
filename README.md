@@ -1,27 +1,190 @@
 # Overall
 
-Letletme_data fetches data from the Fantasy Premier League servers, cleans and transforms the data, and then stores it in MongoDB and Redis, providing APIs for querying data.
+Letletme_data is a robust data service that fetches data from the Fantasy Premier League (FPL) servers, cleans and transforms the data, and then stores it in PostgreSQL and Redis, providing RESTful APIs for querying data. The service is built with TypeScript using functional programming principles, ensuring type safety and maintainability.
 
-And, to be honest, it's the first time I've used the Functional Programming (FP) paradigm to design an application. Transitioning from a long-time OOP designer to an FP one isn't easy. Using TypeScript in such an application requires a lot of advanced TS knowledge, especially with generic types, which can make design more difficult.
+Key Features:
 
-However, once all the functions are set, it becomes really easy to use and maintain, and it feels graceful and elegant.
+- Real-time FPL data fetching and transformation
+- Clean, structured data through RESTful APIs
+- Efficient data persistence with PostgreSQL
+- Performance optimization using Redis caching
+- Type-safe implementation with strict TypeScript
+- Docker containerization for easy deployment
+
+# Architecture & Workflow
+
+## System Architecture
+
+```mermaid
+graph TB
+    FPL[FPL API] --> |Raw Data| Fetcher[Data Fetcher]
+    Fetcher --> |JSON| Transform[Data Transformer]
+    Transform --> |Validated Data| Storage[Data Storage]
+    Storage --> |Write| DB[(PostgreSQL)]
+    Storage --> |Cache| Cache[(Redis)]
+    API[REST API] --> |Read| Cache
+    API --> |Read/Write| DB
+    Cron[Cron Jobs] --> |Trigger| Fetcher
+
+    subgraph Data Processing
+        Fetcher
+        Transform
+        Storage
+    end
+
+    subgraph Data Access
+        API
+    end
+
+    subgraph Scheduling
+        Cron
+    end
+```
+
+## Data Flow
+
+```mermaid
+sequenceDiagram
+    participant C as Cron Job
+    participant F as Fetcher
+    participant T as Transformer
+    participant P as PostgreSQL
+    participant R as Redis
+    participant A as API
+
+    C->>F: Trigger data fetch
+    F->>FPL: Request data
+    FPL-->>F: Return raw data
+    F->>T: Pass raw JSON
+    T->>T: Validate & transform
+    T->>P: Store processed data
+    T->>R: Cache frequently accessed data
+
+    Note over A,R: API Data Access Flow
+    A->>R: Check cache
+    alt Cache hit
+        R-->>A: Return cached data
+    else Cache miss
+        A->>P: Query database
+        P-->>A: Return data
+        A->>R: Update cache
+    end
+```
+
+## Data Processing Pipeline
+
+```mermaid
+flowchart LR
+    A[Raw FPL Data] --> B[Validation Layer]
+    B --> C[Transform Layer]
+    C --> D[Business Logic]
+    D --> E[Storage Layer]
+
+    subgraph Validation
+        B --> |io-ts| B1[Type Validation]
+        B --> |zod| B2[Schema Validation]
+    end
+
+    subgraph Transform
+        C --> |fp-ts| C1[Data Mapping]
+        C --> |Either| C2[Error Handling]
+    end
+
+    subgraph Storage
+        E --> E1[PostgreSQL]
+        E --> E2[Redis Cache]
+    end
+```
 
 # Tech Stack
 
-- TypeScript
-- Node.js
-- Express.js
-- Jest
-- Eslint && Prettier
-- Prisma
-- MongoDB
-- Redis
-- Pino
-- Zod
-- Node-cron
-- Node-fetch
-- Docker
+Core:
+
+- TypeScript (with strict type checking)
+- Node.js (v18+)
+- Express.js (REST API framework)
+
+Storage:
+
+- PostgreSQL (primary database)
+- Redis (caching layer)
+- Prisma (type-safe ORM)
+
+Testing & Quality:
+
+- Jest (testing framework)
+- ESLint & Prettier (code quality tools)
+- Husky (git hooks)
+
+Utilities:
+
+- Pino (structured logging)
+- Zod (runtime type validation)
+- Node-cron (scheduled tasks)
+- Axios (HTTP client)
+- fp-ts (functional programming utilities)
+- io-ts (runtime type validation)
+
+DevOps:
+
+- Docker (containerization)
+- Docker Compose (multi-container orchestration)
 
 # Functional Programming
 
-This project focuses on fetching, transforming, and storing data, and functional programming is well-suited for the task.
+This project is designed using functional programming principles, making it particularly well-suited for data transformation workflows. The FP approach offers several benefits:
+
+1. Data Flow:
+
+   - Clear, unidirectional data flow
+   - Immutable data transformations
+   - Pure functions for predictable results
+   - Extensive use of fp-ts for functional patterns
+
+2. Type Safety:
+
+   - Advanced TypeScript generics
+   - No 'any' types allowed
+   - Strong type inference
+   - Runtime type validation with io-ts
+
+3. Benefits:
+   - Highly testable code
+   - Easy to maintain and extend
+   - Reduced side effects
+   - Better error handling through Either and Option types
+   - Composable functions
+
+While the learning curve with TypeScript generics and FP patterns can be steep, especially coming from an OOP background, the resulting codebase is more maintainable, predictable, and elegant.
+
+# Getting Started
+
+1. Prerequisites:
+
+   ```bash
+   Node.js v18+
+   Docker & Docker Compose
+   PostgreSQL
+   Redis
+   ```
+
+2. Installation:
+
+   ```bash
+   git clone [repository-url]
+   cd letletme_data
+   npm install
+   ```
+
+3. Configuration:
+
+   ```bash
+   cp .env.example .env
+   # Edit .env with your settings
+   ```
+
+4. Run:
+   ```bash
+   docker-compose up -d
+   npm run dev
+   ```
