@@ -1,5 +1,5 @@
 import { Logger } from 'pino';
-import { BaseError } from './errors';
+import { APIError } from './errors';
 
 /**
  * Request metrics interface
@@ -67,7 +67,7 @@ export function createRequestMonitor() {
     end(
       path: string,
       method: string,
-      result: { status: number; error?: BaseError },
+      result: { status: number; error?: APIError },
     ): RequestMetrics {
       const duration = Date.now() - startTime;
       const { status, error } = result;
@@ -102,7 +102,7 @@ export function withRequestMonitoring<T>(
       trackRequestMetrics(metrics, logger);
       return result;
     })
-    .catch((error: BaseError) => {
+    .catch((error: APIError) => {
       const metrics = monitor.end(path, method, {
         status: error.httpStatus ?? 500,
         error,

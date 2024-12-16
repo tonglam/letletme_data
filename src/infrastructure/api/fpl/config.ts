@@ -1,3 +1,5 @@
+import { URL } from '../common/Types';
+
 /**
  * FPL API Configuration
  * Contains all API endpoints and base URLs for the Fantasy Premier League API
@@ -5,13 +7,24 @@
 
 // Base URL constants
 export const BASE_URLS = {
-  FPL: 'https://fantasy.premierleague.com/api',
-  FPL_CHALLENGE: 'https://fplchallenge.premierleague.com/api',
-  FPL_RESOURCE: 'https://resources.premierleague.com',
+  FPL: 'https://fantasy.premierleague.com/api' as URL,
+  FPL_CHALLENGE: 'https://fplchallenge.premierleague.com/api' as URL,
+  FPL_RESOURCE: 'https://resources.premierleague.com' as URL,
 } as const;
 
+export interface FPLClientConfig {
+  readonly baseURL?: URL;
+  readonly userAgent?: string;
+}
+
+export const DEFAULT_CONFIG: FPLClientConfig = {
+  baseURL: BASE_URLS.FPL,
+  userAgent:
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+};
+
 // Type definitions
-export type BaseURL = keyof typeof BASE_URLS;
+export type BaseURL = (typeof BASE_URLS)[keyof typeof BASE_URLS];
 export type EndpointKeys = keyof URLParams;
 export type Endpoint<P extends EndpointKeys> = (params: Pick<URLParams, P>) => string;
 

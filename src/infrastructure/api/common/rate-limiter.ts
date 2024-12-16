@@ -1,4 +1,4 @@
-import { BadRequestError } from './errors';
+import { createBadRequestError } from './errors';
 
 /**
  * Configuration interface for the rate limiter
@@ -51,10 +51,13 @@ export class RateLimiter {
    */
   public consume(tokens = 1): void {
     if (!this.tryConsume(tokens)) {
-      throw new BadRequestError('Rate limit exceeded', {
-        remainingTokens: this.tokens,
-        requestedTokens: tokens,
-        nextRefillIn: this.getNextRefillTime(),
+      throw createBadRequestError({
+        message: 'Rate limit exceeded',
+        details: {
+          remainingTokens: this.tokens,
+          requestedTokens: tokens,
+          nextRefillIn: this.getNextRefillTime(),
+        },
       });
     }
   }

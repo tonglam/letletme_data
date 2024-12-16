@@ -8,6 +8,15 @@
  * @module infrastructure/api/config/http.config
  */
 
+/**
+ * Rate limiting configuration
+ * Controls request frequency to external APIs
+ */
+export const RATE_LIMIT = {
+  REQUESTS_PER_MINUTE: 60,
+  BURST_SIZE: 10,
+} as const;
+
 export const HTTP_CONFIG = {
   /**
    * Timeout settings in milliseconds
@@ -60,6 +69,7 @@ export const HTTP_CONFIG = {
     DEFAULT_USER_AGENT:
       'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     ACCEPT: 'application/json',
+    CONTENT_TYPE: 'application/json',
     CACHE_CONTROL: 'no-cache, no-store, must-revalidate',
     PRAGMA: 'no-cache',
     EXPIRES: '0',
@@ -88,3 +98,9 @@ export type HTTPTimeout = keyof typeof HTTP_CONFIG.TIMEOUT;
  * Ensures type safety when working with error codes
  */
 export type HTTPErrorCode = (typeof HTTP_CONFIG.ERROR)[keyof typeof HTTP_CONFIG.ERROR];
+
+/**
+ * Type for rate limit configuration
+ * Ensures type safety when working with rate limits
+ */
+export type RateLimit = typeof RATE_LIMIT;

@@ -1,35 +1,25 @@
 /**
- * API Logging Module
+ * HTTP Request Logging Module
  *
- * Provides structured logging functionality for API operations using Pino.
+ * Provides logging functionality specifically for HTTP requests.
  * Features include:
- * - Structured log format
- * - Log rotation
- * - Log level management
- * - Parameter sanitization
+ * - Request/response logging
  * - Performance tracking
+ * - Error logging
+ * - Request ID tracking
  *
  * @module infrastructure/api/common/logs
  */
 
-import pino, { Logger } from 'pino';
-import { BaseError } from './errors';
-import { APIResponse } from './types';
+import * as E from 'fp-ts/Either';
+import { Logger, pino } from 'pino';
+import { APIError } from './errors';
+import { APIResponse } from './Types';
 
 /**
- * Logger configuration interface
+ * HTTP request context for logging
  */
-export interface LoggerConfig {
-  readonly name: string;
-  readonly level: 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal';
-  readonly filepath?: string;
-  readonly prettyPrint?: boolean;
-}
-
-/**
- * API call context for logging
- */
-export interface ApiCallContext {
+export interface RequestContext {
   readonly method: string;
   readonly path: string;
   readonly params?: Record<string, unknown>;
@@ -38,75 +28,38 @@ export interface ApiCallContext {
 }
 
 /**
- * Creates a configured pino logger instance
+ * Creates a context object for HTTP request logging
  */
-export function createApiLogger(config: LoggerConfig): Logger {
-  const transport = config.filepath
-    ? {
-        target: 'pino/file',
-        options: { destination: config.filepath },
-      }
-    : config.prettyPrint
-      ? {
-          target: 'pino-pretty',
-          options: {
-            colorize: true,
-            translateTime: 'SYS:standard',
-            ignore: 'pid,hostname',
-          },
-        }
-      : undefined;
-
-  return pino({
-    name: config.name,
-    level: config.level,
-    transport,
-    redact: {
-      paths: ['*.password', '*.token', '*.key', '*.secret'],
-      remove: true,
-    },
-    timestamp: pino.stdTimeFunctions.isoTime,
-    formatters: {
-      level: (label) => ({ level: label }),
-    },
-    base: {
-      env: process.env.NODE_ENV,
-    },
-  });
-}
-
-/**
- * Creates a context object for API call logging
- */
-export function createApiCallContext(
+export function createRequestContext(
   method: string,
+  path: string,
   params?: Record<string, unknown>,
-): ApiCallContext {
+): RequestContext {
   return {
     method,
-    path: `/${method}`,
+    path,
     params,
     requestId: generateRequestId(),
   };
 }
 
 /**
- * Higher-order function for logging API calls with timing
+ * Higher-order function for logging HTTP requests with timing
  */
-export function logApiCall<T>(logger: Logger) {
-  return (context: ApiCallContext) =>
+export function logHttpRequest<T>(logger: Logger) {
+  return (context: RequestContext) =>
     (response: APIResponse<T>): APIResponse<T> => {
       const duration = context.duration ?? 0;
       const baseLog = {
         requestId: context.requestId,
         method: context.method,
         path: context.path,
-        params: context.params,
+        params: sanitizeParams(context.params),
         duration: `${duration}ms`,
       };
 
       if (response._tag === 'Left') {
-        const error = response.left as BaseError;
+        const error = response.left as APIError;
         logger.error(
           {
             ...baseLog,
@@ -116,7 +69,7 @@ export function logApiCall<T>(logger: Logger) {
               details: error.details,
             },
           },
-          'API call failed',
+          'HTTP request failed',
         );
       } else {
         logger.info(
@@ -124,7 +77,7 @@ export function logApiCall<T>(logger: Logger) {
             ...baseLog,
             success: true,
           },
-          'API call successful',
+          'HTTP request successful',
         );
       }
 
@@ -140,28 +93,64 @@ function generateRequestId(): string {
 }
 
 /**
- * Creates a child logger with additional context
+ * Sanitizes sensitive data from request parameters
  */
-export function createContextLogger(logger: Logger, context: Record<string, unknown>): Logger {
-  return logger.child(context);
-}
+function sanitizeParams(params?: Record<string, unknown>): Record<string, unknown> | undefined {
+  if (!params) return undefined;
 
-/**
- * Sanitizes sensitive data from objects before logging
- */
-export function sanitizeLogData<T extends Record<string, unknown>>(
-  data: T,
-): Record<string, unknown> {
   const sensitiveKeys = ['password', 'token', 'key', 'secret', 'authorization'];
-  const sanitized = { ...data } as Record<string, unknown>;
+  const sanitized = { ...params };
 
   Object.keys(sanitized).forEach((key) => {
     if (sensitiveKeys.some((k) => key.toLowerCase().includes(k))) {
       sanitized[key] = '[REDACTED]';
     } else if (typeof sanitized[key] === 'object' && sanitized[key] !== null) {
-      sanitized[key] = sanitizeLogData(sanitized[key] as Record<string, unknown>);
+      sanitized[key] = sanitizeParams(sanitized[key] as Record<string, unknown>);
     }
   });
 
   return sanitized;
 }
+
+export interface ApiCallContext {
+  method: string;
+  params?: Record<string, unknown>;
+}
+
+export const createApiCallContext = (
+  method: string,
+  params?: Record<string, unknown>,
+): ApiCallContext => ({
+  method,
+  params,
+});
+
+export const createApiLogger = (config: {
+  name: string;
+  level: string;
+  filepath: string;
+}): Logger => {
+  return pino({
+    name: config.name,
+    level: config.level,
+    transport: {
+      target: 'pino/file',
+      options: { destination: config.filepath },
+    },
+  });
+};
+
+export const logApiCall =
+  (logger: Logger) =>
+  <T>(context: ApiCallContext) =>
+  (result: E.Either<APIError, T>): E.Either<APIError, T> => {
+    const { method, params } = context;
+
+    if (E.isLeft(result)) {
+      logger.error({ error: result.left, params }, `API call failed: ${method}`);
+    } else {
+      logger.info({ params }, `API call succeeded: ${method}`);
+    }
+
+    return result;
+  };

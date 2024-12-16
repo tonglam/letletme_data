@@ -11,49 +11,31 @@ const ChipPlaySchema = z.object({
 });
 
 const EventResponseSchema = z.object({
-  events: z.array(z.object({
-    id: z.number(),
-    name: z.string(),
-    deadline_time: z.string(),
-    deadline_time_epoch: z.number(),
-    deadline_time_game_offset: z.number(),
-    release_time: z.string().nullable(),
-    average_entry_score: z.number().default(0),
-    finished: z.boolean().default(false),
-    data_checked: z.boolean().default(false),
-    highest_score: z.number().nullable().default(0),
-    highest_scoring_entry: z.number().nullable().default(null),
-    is_previous: z.boolean().default(false),
-    is_current: z.boolean().default(false),
-    is_next: z.boolean().default(false),
-    cup_leagues_created: z.boolean().default(false),
-    h2h_ko_matches_created: z.boolean().default(false),
-    ranked_count: z.number().default(0),
-    chip_plays: z.array(ChipPlaySchema).default([]),
-    most_selected: z.number().nullable(),
-    most_transferred_in: z.number().nullable(),
-    most_captained: z.number().nullable(),
-    most_vice_captained: z.number().nullable(),
-    top_element: z.number().nullable(),
-    top_element_info: z.any().nullable(),
-    transfers_made: z.number().default(0),
-  })),
-  teams: z.array(z.object({
-    id: z.number(),
-    name: z.string(),
-    short_name: z.string(),
-    strength: z.number(),
-  })),
-  elements: z.array(z.object({
-    id: z.number(),
-    web_name: z.string(),
-    team: z.number(),
-    element_type: z.number(),
-    selected_by_percent: z.string(),
-    now_cost: z.number(),
-    points_per_game: z.string(),
-    total_points: z.number(),
-  })),
+  id: z.number(),
+  name: z.string(),
+  deadline_time: z.string(),
+  deadline_time_epoch: z.number(),
+  deadline_time_game_offset: z.number(),
+  release_time: z.string().nullable(),
+  average_entry_score: z.number(),
+  finished: z.boolean(),
+  data_checked: z.boolean(),
+  highest_score: z.number().nullable(),
+  highest_scoring_entry: z.number().nullable(),
+  is_previous: z.boolean(),
+  is_current: z.boolean(),
+  is_next: z.boolean(),
+  cup_leagues_created: z.boolean(),
+  h2h_ko_matches_created: z.boolean(),
+  ranked_count: z.number(),
+  chip_plays: z.array(ChipPlaySchema),
+  most_selected: z.number(),
+  most_transferred_in: z.number(),
+  most_captained: z.number(),
+  most_vice_captained: z.number(),
+  top_element: z.number(),
+  top_element_info: z.any(),
+  transfers_made: z.number(),
 });
 
 const EventSchema = z.object({
@@ -82,13 +64,23 @@ const EventSchema = z.object({
   topElement: z.number().nullable(),
   topElementInfo: TopElementInfoSchema.nullable(),
   transfersMade: z.number().default(0),
-  createdAt: z.date(),
 });
 
+const EventsResponseSchema = z.array(EventResponseSchema);
 const EventsSchema = z.array(EventSchema);
 
 type EventResponse = z.infer<typeof EventResponseSchema>;
+type EventsResponse = z.infer<typeof EventsResponseSchema>;
 type Event = z.infer<typeof EventSchema>;
 type Events = z.infer<typeof EventsSchema>;
 
-export { Event, EventResponse, EventResponseSchema, Events, EventSchema, EventsSchema };
+export {
+  Event,
+  EventResponse,
+  EventResponseSchema,
+  Events,
+  EventSchema,
+  EventsResponse,
+  EventsResponseSchema,
+  EventsSchema,
+};
