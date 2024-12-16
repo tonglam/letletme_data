@@ -1,10 +1,25 @@
-import axios, { AxiosResponse, InternalAxiosRequestConfig } from 'axios';
+import { AxiosResponse, InternalAxiosRequestConfig } from 'axios';
 import { IO } from 'fp-ts/IO';
+import pino, { Logger } from 'pino';
+import { v4 as uuidv4 } from 'uuid';
 import { HTTP_CONFIG } from '../../config/http.config';
 import { ErrorCode } from '../../config/http.error.config';
 import { ERROR_CONFIG, createBadRequestError, createInternalServerError } from '../errors';
 import { HTTPClientContext } from '../Types';
 import { createErrorFromStatus } from './helpers';
+
+// Add request ID and timing to Axios config
+declare module 'axios' {
+  export interface InternalAxiosRequestConfig {
+    requestId?: string;
+    startTime?: number;
+    correlationId?: string;
+    metadata?: {
+      correlationId: string;
+      startTime: number;
+    };
+  }
+}
 
 /**
  * Sets up request interceptors
@@ -13,7 +28,19 @@ export const setupRequestInterceptors =
   (context: HTTPClientContext): IO<void> =>
   () => {
     const { client, config } = context;
+    const logger = context.logger ?? pino();
 
+    // Add logging interceptor
+    client.interceptors.request.use(requestInterceptor(logger), (error: unknown) => {
+      logger.error({
+        type: 'request_error',
+        error: error instanceof Error ? error.message : 'Unknown request error',
+        correlationId: error instanceof Error ? error.cause?.toString() : undefined,
+      });
+      return Promise.reject(error);
+    });
+
+    // Add URL processing interceptor
     client.interceptors.request.use(
       (reqConfig: InternalAxiosRequestConfig) => {
         if (!reqConfig.url) {
@@ -56,26 +83,66 @@ export const setupResponseInterceptors =
   (context: HTTPClientContext): IO<void> =>
   () => {
     const { client } = context;
+    const logger = context.logger ?? pino();
 
     client.interceptors.response.use(
-      (response: AxiosResponse) => response,
-      (error: unknown) => {
-        const apiError = axios.isAxiosError(error)
-          ? createErrorFromStatus(
-              error.response?.status ?? ERROR_CONFIG[ErrorCode.INTERNAL_SERVER_ERROR].httpStatus,
-              error.message,
-              {
-                response: error.response?.data,
-                code: error.code,
-              },
-            )
-          : error instanceof Error
-            ? createInternalServerError({
-                message: error.message,
-                details: { originalError: error },
-              })
-            : createInternalServerError({ message: 'Unknown response error' });
-        return Promise.reject(apiError);
-      },
+      responseInterceptor(logger).onFulfilled,
+      responseInterceptor(logger).onRejected,
     );
   };
+
+export const requestInterceptor =
+  (logger: Logger) =>
+  (config: InternalAxiosRequestConfig): InternalAxiosRequestConfig => {
+    const correlationId = uuidv4();
+    const startTime = Date.now();
+
+    config.metadata = { correlationId, startTime };
+
+    logger.info({
+      type: 'external_request',
+      method: config.method?.toUpperCase(),
+      url: config.url,
+      params: config.params,
+      correlationId,
+    });
+
+    return config;
+  };
+
+export const responseInterceptor = (logger: Logger) => ({
+  onFulfilled: (response: AxiosResponse): AxiosResponse => {
+    const { config } = response;
+    const { correlationId, startTime } = config.metadata || {};
+    const duration = startTime ? Date.now() - startTime : undefined;
+
+    logger.info({
+      type: 'external_response',
+      url: config.url,
+      status: response.status,
+      duration,
+      correlationId,
+    });
+
+    return response;
+  },
+  onRejected: (error: unknown): Promise<never> => {
+    const { config, response } = error as {
+      config?: InternalAxiosRequestConfig;
+      response?: AxiosResponse;
+    };
+    const { correlationId, startTime } = config?.metadata || {};
+    const duration = startTime ? Date.now() - startTime : undefined;
+
+    logger.error({
+      type: 'external_response',
+      url: config?.url,
+      status: response?.status,
+      error: error instanceof Error ? error.message : 'Unknown error',
+      duration,
+      correlationId,
+    });
+
+    return Promise.reject(error);
+  },
+});

@@ -40,6 +40,7 @@ export const createHTTPClient = (config: HTTPClientConfig): IOEither<APIError, H
           config,
           client: createAxiosInstance(config),
           retryConfig: { ...DEFAULT_RETRY_CONFIG, ...config.retry },
+          logger: config.logger,
         };
 
         setupRequestInterceptors(context)();

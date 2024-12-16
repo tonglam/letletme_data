@@ -12,7 +12,9 @@
  */
 
 import * as E from 'fp-ts/Either';
+import * as path from 'path';
 import { Logger, pino } from 'pino';
+import { formatLocalTime } from '../../../utils/date';
 import { APIError } from './errors';
 import { APIResponse } from './Types';
 
@@ -46,7 +48,7 @@ export function createRequestContext(
 /**
  * Higher-order function for logging HTTP requests with timing
  */
-export function logHttpRequest<T>(logger: Logger) {
+export function logHttpRequest<T>() {
   return (context: RequestContext) =>
     (response: APIResponse<T>): APIResponse<T> => {
       const duration = context.duration ?? 0;
@@ -60,7 +62,7 @@ export function logHttpRequest<T>(logger: Logger) {
 
       if (response._tag === 'Left') {
         const error = response.left as APIError;
-        logger.error(
+        getSharedLogger(DEFAULT_LOGGER_CONFIG).error(
           {
             ...baseLog,
             error: {
@@ -72,7 +74,7 @@ export function logHttpRequest<T>(logger: Logger) {
           'HTTP request failed',
         );
       } else {
-        logger.info(
+        getSharedLogger(DEFAULT_LOGGER_CONFIG).info(
           {
             ...baseLog,
             success: true,
@@ -112,6 +114,58 @@ function sanitizeParams(params?: Record<string, unknown>): Record<string, unknow
   return sanitized;
 }
 
+interface LoggerConfig {
+  name: string;
+  level: string;
+  filepath: string;
+}
+
+const DEFAULT_LOGGER_CONFIG: LoggerConfig = {
+  name: 'fpl-api',
+  level: process.env.NODE_ENV === 'production' ? 'info' : 'debug',
+  filepath: 'logs',
+};
+
+// Create a singleton logger instance
+let sharedLogger: Logger | undefined;
+
+const getSharedLogger = (config: LoggerConfig): Logger => {
+  if (!sharedLogger) {
+    const logFile = path.join(config.filepath, `${config.name}.log`);
+
+    const transport = pino.transport({
+      target: 'pino-pretty',
+      options: {
+        destination: logFile,
+        mkdir: true,
+        sync: true,
+        translateTime: 'yyyy-mm-dd HH:MM:ss.l',
+        colorize: false,
+        singleLine: true,
+        ignore: 'pid,hostname',
+      },
+    });
+
+    sharedLogger = pino(
+      {
+        name: config.name,
+        level: config.level,
+        base: {},
+        timestamp: () => `,"time":"${formatLocalTime(new Date())}"`,
+        formatters: {
+          level: (label) => ({ level: label.toUpperCase() }),
+        },
+      },
+      transport,
+    );
+  }
+  return sharedLogger;
+};
+
+export const createApiLogger = (config: LoggerConfig): Logger => {
+  return getSharedLogger(config);
+};
+
 export interface ApiCallContext {
   method: string;
   params?: Record<string, unknown>;
@@ -125,31 +179,29 @@ export const createApiCallContext = (
   params,
 });
 
-export const createApiLogger = (config: {
-  name: string;
-  level: string;
-  filepath: string;
-}): Logger => {
-  return pino({
-    name: config.name,
-    level: config.level,
-    transport: {
-      target: 'pino/file',
-      options: { destination: config.filepath },
-    },
-  });
-};
-
 export const logApiCall =
-  (logger: Logger) =>
+  () =>
   <T>(context: ApiCallContext) =>
   (result: E.Either<APIError, T>): E.Either<APIError, T> => {
     const { method, params } = context;
+    const sharedLogger = getSharedLogger(DEFAULT_LOGGER_CONFIG);
 
     if (E.isLeft(result)) {
-      logger.error({ error: result.left, params }, `API call failed: ${method}`);
+      sharedLogger.error({
+        type: 'api_call_error',
+        method,
+        params,
+        error: result.left,
+        correlationId: result.left.correlationId,
+      });
     } else {
-      logger.info({ params }, `API call succeeded: ${method}`);
+      sharedLogger.info({
+        type: 'api_call',
+        method,
+        params,
+        message: 'Data retrieved successfully',
+        correlationId: (result.right as { correlationId?: string })?.correlationId,
+      });
     }
 
     return result;

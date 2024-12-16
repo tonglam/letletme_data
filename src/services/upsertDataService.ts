@@ -1,4 +1,4 @@
-import { fpl_api_config } from '../configs/api.config';
+import { fpl_api_config } from '../config/fpl_api.config';
 import { upsertEvents } from '../functions/upsert/bootstrap/events';
 import { upsertPhases } from '../functions/upsert/bootstrap/phases';
 import { upsertPlayer } from '../functions/upsert/bootstrap/players';

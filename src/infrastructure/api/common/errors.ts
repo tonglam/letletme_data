@@ -4,6 +4,7 @@ export interface ErrorResponse {
   readonly code: ErrorCode;
   readonly message: string;
   readonly details?: Readonly<Record<string, unknown>>;
+  readonly correlationId?: string;
   readonly stack?: string;
 }
 
@@ -16,6 +17,7 @@ export interface APIError extends Error {
   readonly code: ErrorCode;
   readonly httpStatus: number;
   readonly details?: Readonly<Record<string, unknown>>;
+  readonly correlationId?: string;
   readonly isOperational: boolean;
   readonly _tag: string;
   toJSON(): ErrorResponse;
@@ -74,6 +76,7 @@ const createError = (code: ErrorCode, { message, details }: ErrorParams): APIErr
     code: { value: code, enumerable: true },
     httpStatus: { value: config.httpStatus, enumerable: true },
     details: { value: Object.freeze(details), enumerable: true },
+    correlationId: { value: undefined, enumerable: true, writable: true },
     isOperational: { value: config.isOperational, enumerable: true },
     _tag: { value: config._tag, enumerable: true },
     toJSON: {
@@ -82,6 +85,7 @@ const createError = (code: ErrorCode, { message, details }: ErrorParams): APIErr
           code,
           message: error.message,
           details: error.details,
+          correlationId: error.correlationId,
           ...(process.env.NODE_ENV === 'development' && { stack: error.stack }),
         }),
     },
@@ -122,6 +126,6 @@ export const isErrorResponse = (error: unknown): error is ErrorResponse => {
     return false;
   }
 
-  const { code, message } = error as ErrorResponse;
-  return typeof code === 'string' && typeof message === 'string';
+  const { code, message, correlationId } = error as ErrorResponse;
+  return typeof code === 'string' && typeof message === 'string' && (correlationId === undefined || typeof correlationId === 'string');
 };

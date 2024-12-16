@@ -16,7 +16,7 @@ const TeamResponseSchema = z.object({
   played: z.number(),
   position: z.number(),
   points: z.number(),
-  form: z.string(),
+  form: z.string().nullable(),
   win: z.number(),
   draw: z.number(),
   loss: z.number(),

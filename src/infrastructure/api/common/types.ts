@@ -3,9 +3,10 @@
  * @module infrastructure/api/common/Types
  */
 
-import { AxiosInstance, AxiosRequestConfig, CreateAxiosDefaults } from 'axios';
+import { AxiosInstance, AxiosRequestConfig } from 'axios';
 import { Either } from 'fp-ts/Either';
 import { TaskEither } from 'fp-ts/TaskEither';
+import { Logger } from 'pino';
 import { APIError } from './errors';
 
 // ADTs for HTTP Methods
@@ -59,13 +60,15 @@ export interface RetryConfig {
 /**
  * Configuration interface for the HTTP client
  */
-export interface HTTPClientConfig extends Omit<CreateAxiosDefaults, 'baseURL'> {
+export interface HTTPClientConfig {
   readonly baseURL: URL;
   readonly timeout?: number;
   readonly headers?: Headers;
   readonly retry?: RetryConfig;
   readonly validateStatus?: (status: number) => boolean;
   readonly userAgent?: string;
+  readonly logger?: Logger;
+  readonly name?: string;
 }
 
 /**
@@ -75,6 +78,7 @@ export interface HTTPClientContext {
   readonly config: HTTPClientConfig;
   readonly client: AxiosInstance;
   readonly retryConfig: RetryConfig;
+  readonly logger?: Logger;
 }
 
 /**
