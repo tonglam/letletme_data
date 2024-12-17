@@ -1,100 +1,143 @@
+import { Either, left, right } from 'fp-ts/Either';
 import { z } from 'zod';
 
-const FixtureSchema = z.object({
-  chance_of_playing_next_round: z.nullable(z.number()),
-  chance_of_playing_this_round: z.nullable(z.number()),
+// ============ Schemas ============
+/**
+ * API Response Schema - Validates external API data (snake_case)
+ */
+const FixtureResponseSchema = z.object({
   code: z.number(),
-  cost_change_event: z.number(),
-  cost_change_event_fall: z.number(),
-  cost_change_start: z.number(),
-  cost_change_start_fall: z.number(),
-  dreamteam_count: z.number(),
-  element_type: z.number(),
-  ep_next: z.nullable(z.string()),
-  ep_this: z.nullable(z.string()),
-  event_points: z.number(),
-  first_name: z.string(),
-  form: z.nullable(z.string()),
+  event: z.number(),
+  finished: z.boolean(),
+  finished_provisional: z.boolean(),
   id: z.number(),
-  in_dreamteam: z.boolean(),
-  news: z.string(),
-  news_added: z.nullable(z.string()),
-  now_cost: z.number(),
-  photo: z.string(),
-  points_per_game: z.string(),
-  second_name: z.string(),
-  selected_by_percent: z.string(),
-  special: z.boolean(),
-  squad_number: z.nullable(z.number()),
-  status: z.string(),
-  team: z.number(),
-  team_code: z.number(),
-  total_points: z.number(),
-  transfers_in: z.number(),
-  transfers_in_event: z.number(),
-  transfers_out: z.number(),
-  transfers_out_event: z.number(),
-  value_form: z.string(),
-  value_season: z.string(),
-  web_name: z.string(),
+  kickoff_time: z.string(),
   minutes: z.number(),
-  goals_scored: z.number(),
-  assists: z.number(),
-  clean_sheets: z.number(),
-  goals_conceded: z.number(),
-  own_goals: z.number(),
-  penalties_saved: z.number(),
-  penalties_missed: z.number(),
-  yellow_cards: z.number(),
-  red_cards: z.number(),
-  saves: z.number(),
-  bonus: z.number(),
-  bps: z.number(),
-  influence: z.string(),
-  creativity: z.string(),
-  threat: z.string(),
-  ict_index: z.string(),
-  starts: z.number(),
-  expected_goals: z.string(),
-  expected_assists: z.string(),
-  expected_goal_involvements: z.string(),
-  expected_goals_conceded: z.string(),
-  influence_rank: z.nullable(z.number()),
-  influence_rank_type: z.nullable(z.number()),
-  creativity_rank: z.nullable(z.number()),
-  creativity_rank_type: z.nullable(z.number()),
-  threat_rank: z.nullable(z.number()),
-  threat_rank_type: z.nullable(z.number()),
-  ict_index_rank: z.nullable(z.number()),
-  ict_index_rank_type: z.nullable(z.number()),
-  corners_and_indirect_freekicks_order: z.nullable(z.number()),
-  corners_and_indirect_freekicks_text: z.string(),
-  direct_freekicks_order: z.nullable(z.number()),
-  direct_freekicks_text: z.string(),
-  penalties_order: z.nullable(z.number()),
-  penalties_text: z.string(),
-  expected_goals_per_90: z.number(),
-  saves_per_90: z.number(),
-  expected_assists_per_90: z.number(),
-  expected_goal_involvements_per_90: z.number(),
-  expected_goals_conceded_per_90: z.number(),
-  goals_conceded_per_90: z.number(),
-  now_cost_rank: z.nullable(z.number()),
-  now_cost_rank_type: z.nullable(z.number()),
-  form_rank: z.nullable(z.number()),
-  form_rank_type: z.nullable(z.number()),
-  points_per_game_rank: z.nullable(z.number()),
-  points_per_game_rank_type: z.nullable(z.number()),
-  selected_rank: z.nullable(z.number()),
-  selected_rank_type: z.nullable(z.number()),
-  starts_per_90: z.number(),
-  clean_sheets_per_90: z.number(),
+  provisional_start_time: z.boolean(),
+  started: z.boolean(),
+  team_a: z.number(),
+  team_a_score: z.number().nullable(),
+  team_h: z.number(),
+  team_h_score: z.number().nullable(),
+  stats: z.array(
+    z.object({
+      identifier: z.string(),
+      a: z.array(
+        z.object({
+          value: z.number(),
+          element: z.number(),
+        }),
+      ),
+      h: z.array(
+        z.object({
+          value: z.number(),
+          element: z.number(),
+        }),
+      ),
+    }),
+  ),
+  team_h_difficulty: z.number(),
+  team_a_difficulty: z.number(),
+  pulse_id: z.number(),
 });
 
-const FixturesSchema = z.array(FixtureSchema);
+/**
+ * Domain Schema - Internal application model (camelCase)
+ */
+const FixtureSchema = z.object({
+  code: z.number(),
+  event: z.number(),
+  finished: z.boolean(),
+  finishedProvisional: z.boolean(),
+  id: z.number(),
+  kickoffTime: z.string(),
+  minutes: z.number(),
+  provisionalStartTime: z.boolean(),
+  started: z.boolean(),
+  teamAway: z.number(),
+  teamAwayScore: z.number().nullable(),
+  teamHome: z.number(),
+  teamHomeScore: z.number().nullable(),
+  stats: z.array(
+    z.object({
+      identifier: z.string(),
+      away: z.array(
+        z.object({
+          value: z.number(),
+          element: z.number(),
+        }),
+      ),
+      home: z.array(
+        z.object({
+          value: z.number(),
+          element: z.number(),
+        }),
+      ),
+    }),
+  ),
+  teamHomeDifficulty: z.number(),
+  teamAwayDifficulty: z.number(),
+  pulseId: z.number(),
+});
 
-type Fixture = z.infer<typeof FixtureSchema>;
+export const FixturesSchema = z.array(FixtureSchema);
+export const FixturesResponseSchema = z.array(FixtureResponseSchema);
 
-type Fixtures = z.infer<typeof FixturesSchema>;
+// ============ Types ============
+/**
+ * API Response types (snake_case)
+ */
+export type FixtureResponse = z.infer<typeof FixtureResponseSchema>;
+export type FixturesResponse = z.infer<typeof FixturesResponseSchema>;
 
-export { Fixture, Fixtures, FixtureSchema, FixturesSchema };
+/**
+ * Domain types (camelCase)
+ */
+export type Fixture = z.infer<typeof FixtureSchema>;
+export type Fixtures = z.infer<typeof FixturesSchema>;
+
+// ============ Type Transformers ============
+/**
+ * Transform and validate FixtureResponse to Fixture
+ */
+export const toDomainFixture = (raw: FixtureResponse): Either<string, Fixture> => {
+  try {
+    const result = FixtureSchema.safeParse({
+      code: raw.code,
+      event: raw.event,
+      finished: raw.finished,
+      finishedProvisional: raw.finished_provisional,
+      id: raw.id,
+      kickoffTime: raw.kickoff_time,
+      minutes: raw.minutes,
+      provisionalStartTime: raw.provisional_start_time,
+      started: raw.started,
+      teamAway: raw.team_a,
+      teamAwayScore: raw.team_a_score,
+      teamHome: raw.team_h,
+      teamHomeScore: raw.team_h_score,
+      stats: raw.stats.map((stat) => ({
+        identifier: stat.identifier,
+        away: stat.a.map((item) => ({
+          value: item.value,
+          element: item.element,
+        })),
+        home: stat.h.map((item) => ({
+          value: item.value,
+          element: item.element,
+        })),
+      })),
+      teamHomeDifficulty: raw.team_h_difficulty,
+      teamAwayDifficulty: raw.team_a_difficulty,
+      pulseId: raw.pulse_id,
+    });
+
+    return result.success
+      ? right(result.data)
+      : left(`Invalid fixture domain model: ${result.error.message}`);
+  } catch (error) {
+    return left(
+      `Failed to transform fixture data: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+};

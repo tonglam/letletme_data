@@ -1,5 +1,10 @@
+import { Either, left, right } from 'fp-ts/Either';
 import { z } from 'zod';
 
+// ============ Schemas ============
+/**
+ * Sub-schemas for nested objects
+ */
 const TopElementInfoSchema = z.object({
   id: z.number(),
   points: z.number(),
@@ -10,6 +15,9 @@ const ChipPlaySchema = z.object({
   num_played: z.number(),
 });
 
+/**
+ * API Response Schema - Validates external API data (snake_case)
+ */
 const EventResponseSchema = z.object({
   id: z.number(),
   name: z.string(),
@@ -34,10 +42,13 @@ const EventResponseSchema = z.object({
   most_captained: z.number().nullable(),
   most_vice_captained: z.number().nullable(),
   top_element: z.number().nullable(),
-  top_element_info: z.any(),
-  transfers_made: z.number()
+  top_element_info: TopElementInfoSchema.nullable(),
+  transfers_made: z.number(),
 });
 
+/**
+ * Domain Schema - Internal application model (camelCase)
+ */
 const EventSchema = z.object({
   id: z.number(),
   name: z.string(),
@@ -45,43 +56,83 @@ const EventSchema = z.object({
   deadlineTimeEpoch: z.number(),
   deadlineTimeGameOffset: z.number(),
   releaseTime: z.date().nullable(),
-  averageEntryScore: z.number().optional().default(0),
-  finished: z.boolean().optional().default(false),
-  dataChecked: z.boolean().optional().default(false),
+  averageEntryScore: z.number(),
+  finished: z.boolean(),
+  dataChecked: z.boolean(),
   highestScore: z.number().nullable(),
   highestScoringEntry: z.number().nullable(),
-  isPrevious: z.boolean().optional().default(false),
-  isCurrent: z.boolean().optional().default(false),
-  isNext: z.boolean().optional().default(false),
-  cupLeaguesCreated: z.boolean().optional().default(false),
-  h2hKoMatchesCreated: z.boolean().optional().default(false),
-  rankedCount: z.number().optional().default(0),
-  chipPlays: z.array(ChipPlaySchema).optional().default([]),
+  isPrevious: z.boolean(),
+  isCurrent: z.boolean(),
+  isNext: z.boolean(),
+  cupLeaguesCreated: z.boolean(),
+  h2hKoMatchesCreated: z.boolean(),
+  rankedCount: z.number(),
+  chipPlays: z.array(ChipPlaySchema),
   mostSelected: z.number().nullable(),
   mostTransferredIn: z.number().nullable(),
   mostCaptained: z.number().nullable(),
   mostViceCaptained: z.number().nullable(),
   topElement: z.number().nullable(),
-  topElementInfo: z.any(),
-  transfersMade: z.number().optional().default(0),
+  topElementInfo: TopElementInfoSchema.nullable(),
+  transfersMade: z.number(),
 });
 
-const EventsResponseSchema = z.array(EventResponseSchema);
-const EventsSchema = z.array(EventSchema);
+export const EventsResponseSchema = z.array(EventResponseSchema);
+export const EventsSchema = z.array(EventSchema);
 
-type EventResponse = z.infer<typeof EventResponseSchema>;
-type EventsResponse = z.infer<typeof EventsResponseSchema>;
-type Event = z.infer<typeof EventSchema>;
-type Events = z.infer<typeof EventsSchema>;
+// ============ Types ============
+/**
+ * API Response types (snake_case)
+ */
+export type EventResponse = z.infer<typeof EventResponseSchema>;
+export type EventsResponse = z.infer<typeof EventsResponseSchema>;
 
-export {
-  Event,
-  EventResponse,
-  EventResponseSchema,
-  EventSchema,
-  Events,
-  EventsResponse,
-  EventsResponseSchema,
-  EventsSchema,
-  TopElementInfoSchema,
+/**
+ * Domain types (camelCase)
+ */
+export type Event = z.infer<typeof EventSchema>;
+export type Events = z.infer<typeof EventsSchema>;
+
+// ============ Type Transformers ============
+/**
+ * Transform and validate EventResponse to Event
+ */
+export const toDomainEvent = (raw: EventResponse): Either<string, Event> => {
+  try {
+    const result = EventSchema.safeParse({
+      id: raw.id,
+      name: raw.name,
+      deadlineTime: new Date(raw.deadline_time),
+      deadlineTimeEpoch: raw.deadline_time_epoch,
+      deadlineTimeGameOffset: raw.deadline_time_game_offset,
+      releaseTime: raw.release_time ? new Date(raw.release_time) : null,
+      averageEntryScore: raw.average_entry_score,
+      finished: raw.finished,
+      dataChecked: raw.data_checked,
+      highestScore: raw.highest_score,
+      highestScoringEntry: raw.highest_scoring_entry,
+      isPrevious: raw.is_previous,
+      isCurrent: raw.is_current,
+      isNext: raw.is_next,
+      cupLeaguesCreated: raw.cup_leagues_created,
+      h2hKoMatchesCreated: raw.h2h_ko_matches_created,
+      rankedCount: raw.ranked_count,
+      chipPlays: raw.chip_plays,
+      mostSelected: raw.most_selected,
+      mostTransferredIn: raw.most_transferred_in,
+      mostCaptained: raw.most_captained,
+      mostViceCaptained: raw.most_vice_captained,
+      topElement: raw.top_element,
+      topElementInfo: raw.top_element_info,
+      transfersMade: raw.transfers_made,
+    });
+
+    return result.success
+      ? right(result.data)
+      : left(`Invalid event domain model: ${result.error.message}`);
+  } catch (error) {
+    return left(
+      `Failed to transform event data: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 };

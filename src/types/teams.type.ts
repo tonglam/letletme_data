@@ -1,5 +1,10 @@
+import { Either, left, right } from 'fp-ts/Either';
 import { z } from 'zod';
 
+// ============ Schemas ============
+/**
+ * API Response Schema - Validates external API data (snake_case)
+ */
 const TeamResponseSchema = z.object({
   id: z.number(),
   code: z.number(),
@@ -24,6 +29,9 @@ const TeamResponseSchema = z.object({
   unavailable: z.boolean(),
 });
 
+/**
+ * Domain Schema - Internal application model (camelCase)
+ */
 const TeamSchema = z.object({
   id: z.number(),
   code: z.number(),
@@ -37,32 +45,69 @@ const TeamSchema = z.object({
   strengthDefenceHome: z.number(),
   strengthDefenceAway: z.number(),
   pulseId: z.number(),
-  played: z.number().default(0),
-  position: z.number().default(0),
-  points: z.number().default(0),
+  played: z.number(),
+  position: z.number(),
+  points: z.number(),
   form: z.string().nullable(),
-  win: z.number().default(0),
-  draw: z.number().default(0),
-  loss: z.number().default(0),
+  win: z.number(),
+  draw: z.number(),
+  loss: z.number(),
   teamDivision: z.string().nullable(),
-  unavailable: z.boolean().default(false),
+  unavailable: z.boolean(),
 });
 
-const TeamsSchema = z.array(TeamSchema);
-const TeamsResponseSchema = z.array(TeamResponseSchema);
+export const TeamsSchema = z.array(TeamSchema);
+export const TeamsResponseSchema = z.array(TeamResponseSchema);
 
-type TeamResponse = z.infer<typeof TeamResponseSchema>;
-type TeamsResponse = z.infer<typeof TeamsResponseSchema>;
-type Team = z.infer<typeof TeamSchema>;
-type Teams = z.infer<typeof TeamsSchema>;
+// ============ Types ============
+/**
+ * API Response types (snake_case)
+ */
+export type TeamResponse = z.infer<typeof TeamResponseSchema>;
+export type TeamsResponse = z.infer<typeof TeamsResponseSchema>;
 
-export {
-  Team,
-  TeamResponse,
-  TeamResponseSchema,
-  Teams,
-  TeamSchema,
-  TeamsResponse,
-  TeamsResponseSchema,
-  TeamsSchema,
+/**
+ * Domain types (camelCase)
+ */
+export type Team = z.infer<typeof TeamSchema>;
+export type Teams = z.infer<typeof TeamsSchema>;
+
+// ============ Type Transformers ============
+/**
+ * Transform and validate TeamResponse to Team
+ */
+export const toDomainTeam = (raw: TeamResponse): Either<string, Team> => {
+  try {
+    const result = TeamSchema.safeParse({
+      id: raw.id,
+      code: raw.code,
+      name: raw.name,
+      shortName: raw.short_name,
+      strength: raw.strength,
+      strengthOverallHome: raw.strength_overall_home,
+      strengthOverallAway: raw.strength_overall_away,
+      strengthAttackHome: raw.strength_attack_home,
+      strengthAttackAway: raw.strength_attack_away,
+      strengthDefenceHome: raw.strength_defence_home,
+      strengthDefenceAway: raw.strength_defence_away,
+      pulseId: raw.pulse_id,
+      played: raw.played,
+      position: raw.position,
+      points: raw.points,
+      form: raw.form,
+      win: raw.win,
+      draw: raw.draw,
+      loss: raw.loss,
+      teamDivision: raw.team_division,
+      unavailable: raw.unavailable,
+    });
+
+    return result.success
+      ? right(result.data)
+      : left(`Invalid team domain model: ${result.error.message}`);
+  } catch (error) {
+    return left(
+      `Failed to transform team data: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 };

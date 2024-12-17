@@ -1,6 +1,11 @@
+import { Either, left, right } from 'fp-ts/Either';
 import { z } from 'zod';
 
-const PhaseResponseSchema = z.object({
+// ============ Schemas ============
+/**
+ * API Response Schema - Validates external API data (snake_case)
+ */
+export const PhaseResponseSchema = z.object({
   id: z.number(),
   name: z.string(),
   start_event: z.number(),
@@ -8,7 +13,10 @@ const PhaseResponseSchema = z.object({
   highest_score: z.number().nullable(),
 });
 
-const PhaseSchema = z.object({
+/**
+ * Domain Schema - Internal application model (camelCase)
+ */
+export const PhaseSchema = z.object({
   id: z.number(),
   name: z.string(),
   startEvent: z.number(),
@@ -16,21 +24,36 @@ const PhaseSchema = z.object({
   highestScore: z.number().nullable(),
 });
 
-const PhasesSchema = z.array(PhaseSchema);
-const PhasesResponseSchema = z.array(PhaseResponseSchema);
+export const PhasesSchema = z.array(PhaseSchema);
+export const PhasesResponseSchema = z.array(PhaseResponseSchema);
 
-type PhaseResponse = z.infer<typeof PhaseResponseSchema>;
-type PhasesResponse = z.infer<typeof PhasesResponseSchema>;
-type Phase = z.infer<typeof PhaseSchema>;
-type Phases = z.infer<typeof PhasesSchema>;
+// ============ Types ============
+/**
+ * API Response types (snake_case)
+ */
+export type PhaseResponse = z.infer<typeof PhaseResponseSchema>;
+export type PhasesResponse = z.infer<typeof PhasesResponseSchema>;
 
-export {
-  Phase,
-  PhaseResponse,
-  PhaseResponseSchema,
-  Phases,
-  PhaseSchema,
-  PhasesResponse,
-  PhasesResponseSchema,
-  PhasesSchema,
+/**
+ * Domain types (camelCase)
+ */
+export type Phase = z.infer<typeof PhaseSchema>;
+export type Phases = z.infer<typeof PhasesSchema>;
+
+// ============ Type Transformers ============
+/**
+ * Transform and validate PhaseResponse to Phase
+ */
+export const toDomainPhase = (raw: PhaseResponse): Either<string, Phase> => {
+  const result = PhaseSchema.safeParse({
+    id: raw.id,
+    name: raw.name,
+    startEvent: raw.start_event,
+    stopEvent: raw.stop_event,
+    highestScore: raw.highest_score,
+  });
+
+  return result.success
+    ? right(result.data)
+    : left(`Invalid domain model: ${result.error.message}`);
 };
