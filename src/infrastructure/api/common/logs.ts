@@ -122,39 +122,41 @@ interface LoggerConfig {
 
 const DEFAULT_LOGGER_CONFIG: LoggerConfig = {
   name: 'fpl-api',
-  level: process.env.NODE_ENV === 'production' ? 'info' : 'debug',
-  filepath: 'logs',
+  level: process.env.LOG_LEVEL || (process.env.NODE_ENV === 'production' ? 'info' : 'debug'),
+  filepath: process.env.LOG_PATH || 'logs/fpl',
 };
 
-// Create a singleton logger instance
-let sharedLogger: Logger | undefined;
+let sharedLogger: Logger | null = null;
 
 const getSharedLogger = (config: LoggerConfig): Logger => {
   if (!sharedLogger) {
-    const logFile = path.join(config.filepath, `${config.name}.log`);
-
     const transport = pino.transport({
-      target: 'pino-pretty',
-      options: {
-        destination: logFile,
-        mkdir: true,
-        sync: true,
-        translateTime: 'yyyy-mm-dd HH:MM:ss.l',
-        colorize: false,
-        singleLine: true,
-        ignore: 'pid,hostname',
-      },
+      target: process.env.NODE_ENV === 'production' ? 'pino-roll' : 'pino-pretty',
+      options:
+        process.env.NODE_ENV === 'production'
+          ? {
+              file: path.join(config.filepath, `${config.name}-%Y-%m-%d.log`),
+              frequency: 'daily',
+              mkdir: true,
+              sync: true,
+              size: process.env.LOG_MAX_SIZE || '10m',
+              maxFiles: parseInt(process.env.LOG_MAX_FILES || '30', 10),
+            }
+          : {
+              destination: path.join(config.filepath, `${config.name}.log`),
+              mkdir: true,
+              sync: true,
+              translateTime: 'yyyy-mm-dd HH:MM:ss.l',
+              colorize: true,
+              singleLine: true,
+              ignore: 'pid,hostname',
+            },
     });
 
     sharedLogger = pino(
       {
-        name: config.name,
         level: config.level,
-        base: {},
         timestamp: () => `,"time":"${formatLocalTime(new Date())}"`,
-        formatters: {
-          level: (label) => ({ level: label.toUpperCase() }),
-        },
       },
       transport,
     );
