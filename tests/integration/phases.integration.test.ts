@@ -52,9 +52,9 @@ describe('Phase Service Integration', () => {
     });
   });
 
-  // afterAll(async () => {
-  //   await pipe(phaseRepository.deleteAll(), TE.getOrElse(handleError))();
-  // });
+  afterAll(async () => {
+    await pipe(phaseRepository.deleteAll(), TE.getOrElse(handleError))();
+  });
 
   describe('Phase Service Workflow', () => {
     test('1. should sync phases from FPL API to database', async () => {
