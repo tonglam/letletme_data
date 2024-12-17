@@ -123,7 +123,7 @@ interface LoggerConfig {
 const DEFAULT_LOGGER_CONFIG: LoggerConfig = {
   name: 'fpl-api',
   level: process.env.LOG_LEVEL || (process.env.NODE_ENV === 'production' ? 'info' : 'debug'),
-  filepath: process.env.LOG_PATH || 'logs/fpl',
+  filepath: process.env.LOG_PATH || 'logs',
 };
 
 let sharedLogger: Logger | null = null;

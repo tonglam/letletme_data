@@ -1,4 +1,3 @@
-import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import { APIError, createDatabaseError } from '../../infrastructure/api/common/errors';
 import { prisma } from '../../infrastructure/db/prisma';
@@ -16,32 +15,18 @@ export const phaseRepository: PhaseRepository = {
    * @throws APIError with DB_ERROR code if creation fails
    */
   save: (phase: PrismaPhaseCreate): TE.TaskEither<APIError, PrismaPhase> =>
-    pipe(
-      TE.tryCatch(
-        () =>
-          prisma.phase.findMany({
-            orderBy: { id: 'desc' },
-            take: 1,
-          }),
-        (error) =>
-          createDatabaseError({ message: 'Failed to get max phase ID', details: { error } }),
-      ),
-      TE.chain((phases) => {
-        const nextId = phases.length > 0 ? phases[0].id + 1 : 1;
-        return TE.tryCatch(
-          () =>
-            prisma.phase.create({
-              data: {
-                id: nextId,
-                name: phase.name,
-                startEvent: phase.startEvent,
-                stopEvent: phase.stopEvent,
-                highestScore: phase.highestScore,
-              },
-            }),
-          (error) => createDatabaseError({ message: 'Failed to save phase', details: { error } }),
-        );
-      }),
+    TE.tryCatch(
+      () =>
+        prisma.phase.create({
+          data: {
+            id: phase.id as number,
+            name: phase.name,
+            startEvent: phase.startEvent,
+            stopEvent: phase.stopEvent,
+            highestScore: phase.highestScore,
+          },
+        }),
+      (error) => createDatabaseError({ message: 'Failed to save phase', details: { error } }),
     ),
 
   /**
@@ -88,5 +73,21 @@ export const phaseRepository: PhaseRepository = {
           data: phase,
         }),
       (error) => createDatabaseError({ message: 'Failed to update phase', details: { error } }),
+    ),
+
+  /**
+   * Deletes all phases except system defaults
+   * @returns TaskEither with void or error
+   * @throws APIError with DB_ERROR code if deletion fails
+   */
+  deleteAll: (): TE.TaskEither<APIError, void> =>
+    TE.tryCatch(
+      async () => {
+        await prisma.phase.deleteMany({
+          where: { id: { gt: 0 } }, // Preserve system defaults if any
+        });
+      },
+      (error) =>
+        createDatabaseError({ message: 'Failed to delete all phases', details: { error } }),
     ),
 };

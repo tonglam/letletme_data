@@ -83,6 +83,7 @@ export type PrismaPhase = {
  * Note: ID is handled internally by the repository
  */
 export type PrismaPhaseCreate = {
+  readonly id?: number;
   readonly name: string;
   readonly startEvent: number;
   readonly stopEvent: number;
@@ -98,6 +99,7 @@ export interface PhaseRepository {
   findById(id: PhaseId): TE.TaskEither<APIError, PrismaPhase | null>;
   findAll(): TE.TaskEither<APIError, PrismaPhase[]>;
   update(id: PhaseId, phase: Partial<PrismaPhaseCreate>): TE.TaskEither<APIError, PrismaPhase>;
+  deleteAll: () => TE.TaskEither<APIError, void>;
 }
 
 // ============ Type Transformers ============
