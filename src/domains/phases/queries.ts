@@ -1,49 +1,75 @@
-import { createResult } from './operations';
-import { Phase, PhaseOperationResult, PhaseRepository } from './types';
+// External dependencies
+import * as A from 'fp-ts/Array';
+import * as E from 'fp-ts/Either';
+import * as O from 'fp-ts/Option';
+import * as TE from 'fp-ts/TaskEither';
+import { pipe } from 'fp-ts/function';
+
+// Internal dependencies
+import { APIError, createValidationError } from '../../infrastructure/api/common/errors';
+import {
+  PhaseRepository,
+  PrismaPhase,
+  validateEventId,
+  validatePhaseId,
+} from '../../types/phase.type';
 
 /**
- * Get all phases
+ * Retrieves all phases from the repository
+ * @param repository - The phase repository instance
+ * @returns TaskEither with array of phases or error
+ * @throws APIError with DB_ERROR code if database query fails
  */
-export const getAllPhases = async (
-  repository: PhaseRepository,
-): Promise<PhaseOperationResult<Phase[]>> => {
-  try {
-    const phases = await repository.findAll();
-    return createResult(phases);
-  } catch (error) {
-    return createResult(undefined, `Failed to get phases: ${error}`);
-  }
-};
+export const getAllPhases = (repository: PhaseRepository): TE.TaskEither<APIError, PrismaPhase[]> =>
+  repository.findAll();
 
 /**
- * Get phase by ID
+ * Retrieves a specific phase by its ID
+ * @param repository - The phase repository instance
+ * @param id - The phase ID to find
+ * @returns TaskEither with phase or null if not found
+ * @throws APIError with VALIDATION_ERROR code if ID is invalid
+ * @throws APIError with DB_ERROR code if database query fails
  */
-export const getPhaseById = async (
+export const getPhaseById = (
   repository: PhaseRepository,
   id: number,
-): Promise<PhaseOperationResult<Phase | null>> => {
-  try {
-    const phase = await repository.findById(id);
-    return createResult(phase);
-  } catch (error) {
-    return createResult(undefined, `Failed to get phase ${id}: ${error}`);
-  }
-};
+): TE.TaskEither<APIError, PrismaPhase | null> =>
+  pipe(
+    validatePhaseId(id),
+    E.mapLeft((message) => createValidationError({ message })),
+    TE.fromEither,
+    TE.chain(repository.findById),
+  );
 
 /**
- * Get current phase
+ * Finds the current active phase based on event ID
+ * @param repository - The phase repository instance
+ * @param currentEventId - The current event ID to check against phase ranges
+ * @returns TaskEither with current phase or null if not found
+ * @throws APIError with VALIDATION_ERROR code if event ID is invalid
+ * @throws APIError with DB_ERROR code if database query fails
  */
-export const getCurrentPhase = async (
+export const getCurrentPhase = (
   repository: PhaseRepository,
   currentEventId: number,
-): Promise<PhaseOperationResult<Phase | null>> => {
-  try {
-    const phases = await repository.findAll();
-    const currentPhase = phases.find(
-      (phase) => phase.startEventId <= currentEventId && phase.stopEventId >= currentEventId,
-    );
-    return createResult(currentPhase || null);
-  } catch (error) {
-    return createResult(undefined, `Failed to get current phase: ${error}`);
-  }
-};
+): TE.TaskEither<APIError, PrismaPhase | null> =>
+  pipe(
+    validateEventId(currentEventId),
+    E.mapLeft((message) => createValidationError({ message })),
+    TE.fromEither,
+    TE.chain((validEventId) =>
+      pipe(
+        repository.findAll(),
+        TE.map((phases) =>
+          pipe(
+            phases,
+            A.findFirst(
+              (phase) => phase.startEvent <= validEventId && phase.stopEvent >= validEventId,
+            ),
+            O.toNullable,
+          ),
+        ),
+      ),
+    ),
+  );
