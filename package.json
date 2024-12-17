@@ -51,6 +51,7 @@
   "dependencies": {
     "@prisma/client": "^6.0.1",
     "@supabase/supabase-js": "^2.47.8",
+    "@types/pino-http": "^5.8.4",
     "@types/uuid": "^10.0.0",
     "axios": "^1.6.2",
     "bullmq": "^5.34.1",
@@ -60,6 +61,7 @@
     "node-cron": "^3.0.3",
     "node-fetch": "^2.7.0",
     "pino": "^8.19.0",
+    "pino-http": "^10.3.0",
     "pino-roll": "^2.2.0",
     "redis": "^4.6.11",
     "uuid": "^11.0.3",

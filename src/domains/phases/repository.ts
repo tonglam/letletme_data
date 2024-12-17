@@ -82,11 +82,12 @@ export const phaseRepository: PhaseRepository = {
    */
   deleteAll: (): TE.TaskEither<APIError, void> =>
     TE.tryCatch(
-      async () => {
-        await prisma.phase.deleteMany({
-          where: { id: { gt: 0 } }, // Preserve system defaults if any
-        });
-      },
+      () =>
+        prisma.$transaction(async (tx) => {
+          await tx.phase.deleteMany({
+            where: { id: { gt: 0 } }, // Preserve system defaults if any
+          });
+        }),
       (error) =>
         createDatabaseError({ message: 'Failed to delete all phases', details: { error } }),
     ),
