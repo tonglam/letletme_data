@@ -2,24 +2,22 @@
 
 ### 1.1 Purpose
 
-This document outlines the Redis caching strategy for the LetLetMe Data project, following Domain-Driven Design (DDD) and Functional Programming (FP) principles.
+This document outlines the Redis caching strategy for the LetLetMe Data project, focusing on simple key-value storage while following functional programming principles.
 
 ### 1.2 Design Goals
 
-- Ensure data consistency across cache and database
-- Optimize performance for frequently accessed data
+- Maximize Redis's key-value nature
+- Minimize transformations and complexity
+- Ensure type safety
+- Optimize performance
 - Handle failures gracefully
-- Support cache warming and recovery
-- Maintain separation of concerns
-- Follow functional programming paradigms
 
 ### 1.3 Integration Philosophy
 
-- Seamless integration with existing workflows
-- Functional programming approach using TaskEither
-- Error handling with proper type safety
-- Domain-driven design principles
-- Clear separation of infrastructure and domain logic
+- Direct domain model storage
+- Minimal transformations
+- Type-safe operations
+- Clear error handling
 
 ## 2. Architecture
 
@@ -27,328 +25,162 @@ This document outlines the Redis caching strategy for the LetLetMe Data project,
 
 ```mermaid
 graph TD
-    A[Application Layer] --> B[Cache Facade]
-    B --> C[Cache Core]
-    B --> D[Domain-Specific Cache]
-    C --> E[Redis Client]
-    D --> E
+    A[Domain Layer] --> B[Cache Layer]
+    B --> C[Redis Client]
 
-    subgraph "Cache Core"
-        C --> F[Cache Manager]
-        C --> G[Cache Warmer]
-        C --> H[Error Handler]
-    end
-
-    subgraph "Domain Caches"
-        D --> I[Event Cache]
-        D --> J[Phase Cache]
-        D --> K[Team Cache]
+    subgraph "Cache Layer"
+        B --> D[Serialization]
+        B --> E[Error Handling]
+        B --> F[TTL Management]
     end
 ```
 
-### 2.2 Logical Architecture
+### 2.2 Data Storage Strategy
+
+```typescript
+// Simple cache wrapper
+interface CacheWrapper<T> {
+  readonly value: T;
+  readonly timestamp: number;
+}
+
+// Generic cache operations
+interface RedisCache<T> {
+  set(key: string, value: T): TE.TaskEither<CacheError, void>;
+  get(key: string): TE.TaskEither<CacheError, T | null>;
+  del(key: string): TE.TaskEither<CacheError, void>;
+}
+
+// Example usage with domain model
+const phaseCache: RedisCache<Phase> = {
+  set: (key, phase) =>
+    pipe({ value: phase, timestamp: Date.now() }, JSON.stringify, (data) =>
+      redis.set(`phase:${key}`, data),
+    ),
+  get: (key) =>
+    pipe(
+      redis.get(`phase:${key}`),
+      TE.chain((data) =>
+        data
+          ? TE.tryCatch(
+              () => JSON.parse(data).value,
+              (e) => new CacheError('Failed to parse data'),
+            )
+          : TE.of(null),
+      ),
+    ),
+  del: (key) => redis.del(`phase:${key}`),
+};
+```
+
+### 2.3 Cache Flow
 
 ```mermaid
 flowchart LR
-    subgraph "Infrastructure Layer"
-        A[Redis Client]
-        B[Configuration]
-    end
-
-    subgraph "Core Layer"
-        C[Cache Manager]
-        D[Cache Warmer]
-        E[Error Handler]
-    end
-
-    subgraph "Domain Layer"
-        F[Event Cache]
-        G[Phase Cache]
-        H[Team Cache]
-    end
-
-    subgraph "Application Layer"
-        I[Workflows]
-    end
-
-    A --> C
-    B --> A
-    C --> F & G & H
-    F & G & H --> I
+    A[Domain Object] -->|JSON.stringify| B[String]
+    B -->|Store| C[Redis]
+    C -->|Retrieve| D[String]
+    D -->|JSON.parse| E[Domain Object]
 ```
 
 ## 3. Core Components
 
 ### 3.1 Cache Configuration
 
-- TTL Strategies
+- TTL Strategy
+  - Simple time-based expiration
+  - No complex invalidation patterns
+  - Clear key prefixes per domain
 
-  - Metadata (events, phases, teams): 30 days
-  - Derived data: 24 hours
-  - Temporary data: Configurable short-term
+### 3.2 Basic Cache Operations
 
-- Key Patterns
-
-  - Primary keys: `{domain}:{id}`
-  - Related keys: `{domain}:{relatedDomain}:{id}:*`
-  - Pattern-based invalidation support
-
-- Redis Connection Configuration
-  ```typescript
-  interface RedisConfig {
-    host: string;
-    port: number;
-    password?: string;
-    tls?: boolean;
-    maxRetriesPerRequest?: number;
-    retryStrategy?: (times: number) => number | null;
-  }
-  ```
-
-### 3.2 Cache Dependencies
-
-```mermaid
-graph TD
-    A[Event] --> B[Phases]
-    A --> C[Teams]
-    B --> D[Matches]
-    C --> D
-    D --> E[Standings]
+```typescript
+// Simple, direct operations
+const createCache = <T>(prefix: string): RedisCache<T> => ({
+  set: (key, value) =>
+    pipe({ value, timestamp: Date.now() }, JSON.stringify, (data) =>
+      redis.set(`${prefix}:${key}`, data),
+    ),
+  get: (key) =>
+    pipe(
+      redis.get(`${prefix}:${key}`),
+      TE.chain((data) =>
+        data
+          ? TE.tryCatch(
+              () => JSON.parse(data).value,
+              (e) => new CacheError('Parse error'),
+            )
+          : TE.of(null),
+      ),
+    ),
+  del: (key) => redis.del(`${prefix}:${key}`),
+});
 ```
 
-### 3.3 Cache Warming Strategy
+### 3.3 Error Handling
 
-```mermaid
-flowchart TD
-    A[Application Start] --> B[Initialize Cache Warmer]
-    B --> C{Cache Empty?}
-    C -->|Yes| D[Load Primary Data]
-    C -->|No| E[Verify Cache Integrity]
-    D --> F[Load Related Data]
-    E -->|Invalid| D
-    E -->|Valid| G[Schedule Periodic Refresh]
-    F --> G
+```typescript
+type CacheError = {
+  readonly message: string;
+  readonly cause?: unknown;
+};
+
+const handleCacheError = (error: CacheError): TE.TaskEither<CacheError, never> =>
+  pipe(
+    TE.left(error),
+    TE.tap(() => TE.fromIO(logger.error({ message: error.message, error: error.cause }))),
+  );
 ```
 
-### 3.4 Cache Invalidation Strategy
+## 4. Implementation Guidelines
 
-- Cascade Invalidation Rules
+### 4.1 Best Practices
 
-  - Event update → Invalidate phases, teams, matches
-  - Phase update → Invalidate matches, standings
-  - Team update → Invalidate matches, standings
+- Store domain models directly
+- Use simple key patterns
+- Minimize transformations
+- Handle errors gracefully
+- Clear TTL strategy
 
-- Batch Invalidation
-  ```typescript
-  type InvalidationPattern = {
-    primary: string;
-    related: string[];
-    cascade: boolean;
-  };
-  ```
+### 4.2 Key Patterns
 
-## 4. Workflows
+- Simple domain prefixes: `{domain}:{id}`
+- No complex related keys
+- Clear naming conventions
 
-### 4.1 Cache Update Flow
+### 4.3 Testing Strategy
 
-```mermaid
-sequenceDiagram
-    participant W as Workflow
-    participant D as Domain Service
-    participant C as Cache Manager
-    participant R as Redis
+- Unit test cache operations
+- Test error handling
+- Verify serialization/deserialization
+- Monitor performance
 
-    W->>D: Update Data
-    D->>D: Process Update
-    D->>C: Update Cache
-    C->>C: Start Transaction
-    C->>R: Update Primary Cache
-    C->>R: Invalidate Related Caches
-    C->>R: Commit Transaction
-    C-->>W: Return Result
-```
+## 5. Monitoring
 
-### 4.2 Error Handling Flow
+### 5.1 Key Metrics
 
-```mermaid
-flowchart TD
-    A[Operation Start] --> B{Cache Operation}
-    B -->|Success| C[Continue]
-    B -->|Failure| D{Error Type}
-    D -->|Temporary| E[Retry with Backoff]
-    D -->|Permanent| F[Fallback Strategy]
-    E -->|Success| C
-    E -->|Max Retries| F
-    F --> G[Log & Monitor]
-    F --> H[Trigger Recovery]
-```
+- Hit/miss rates
+- Error rates
+- Response times
+- Memory usage
 
-### 4.3 Integration with Domain Workflows
+### 5.2 Health Checks
 
-- Event Workflow Integration
-
-  - Cache updates after successful event modifications
-  - Cascade invalidation of related caches
-  - Error handling with proper recovery
-
-- Phase Workflow Integration
-
-  - Cache updates synchronized with phase state changes
-  - Automatic invalidation of dependent caches
-  - Integration with phase validation logic
-
-- Team Workflow Integration
-  - Cache updates during team data modifications
-  - Related cache invalidation handling
-  - Error recovery procedures
-
-## 5. Implementation Guidelines
-
-### 5.1 Directory Structure
-
-```
-src/
-├── infrastructure/
-│   └── cache/
-│       ├── config/
-│       │   ├── redis.config.ts
-│       │   └── cache.config.ts
-│       ├── core/
-│       │   ├── manager.ts
-│       │   ├── warmer.ts
-│       │   └── error.ts
-│       └── client/
-│           └── redis.client.ts
-├── domain/
-│   ├── event/
-│   │   └── cache/
-│   │       ├── event.cache.ts
-│   │       └── invalidation.ts
-│   ├── phase/
-│   │   └── cache/
-│   │       ├── phase.cache.ts
-│   │       └── invalidation.ts
-│   └── team/
-│       └── cache/
-│           ├── team.cache.ts
-│           └── invalidation.ts
-└── application/
-    └── workflows/
-        ├── event.workflow.ts
-        ├── phase.workflow.ts
-        └── team.workflow.ts
-```
-
-### 5.2 Best Practices
-
-- Follow functional programming principles
-  - Use TaskEither for error handling
-  - Maintain immutability
-  - Compose functions with pipe
-- Implement domain-specific cache logic
-- Keep cache operations atomic
-- Monitor cache health and performance
-- Implement graceful degradation
-
-### 5.3 Testing Strategy
-
-- Unit Testing
-
-  - Mock Redis client for isolated tests
-  - Test cache operations independently
-  - Verify error handling paths
-
-- Integration Testing
-
-  - Test cache with actual Redis instance
-  - Verify cascade invalidation
-  - Test recovery procedures
-
-- Performance Testing
-  - Measure cache hit/miss rates
-  - Test under load
-  - Verify memory usage
-
-## 6. Monitoring and Maintenance
-
-### 6.1 Health Metrics
-
-- Cache hit/miss rates
+- Connection status
 - Memory usage
 - Error rates
-- Invalidation patterns
-- Warming performance
+- Response times
 
-### 6.2 Recovery Procedures
+## 6. Security
 
-```mermaid
-flowchart TD
-    A[Detect Issue] --> B{Issue Type}
-    B -->|Inconsistency| C[Verify Primary Data]
-    B -->|Performance| D[Check Memory/Load]
-    B -->|Connection| E[Check Redis Health]
-    C --> F[Rebuild Cache]
-    D --> G[Optimize Patterns]
-    E --> H[Reconnect/Failover]
-    F & G & H --> I[Verify Resolution]
-```
+- Redis authentication
+- Network security
+- Resource limits
+- Error handling
 
-### 6.3 Operational Procedures
+## 7. Future Considerations
 
-- Startup Procedures
-
-  1. Initialize Redis connection
-  2. Verify configuration
-  3. Start cache warmer
-  4. Begin monitoring
-
-- Shutdown Procedures
-
-  1. Stop accepting new requests
-  2. Flush volatile data
-  3. Close connections
-  4. Backup if needed
-
-- Maintenance Windows
-  - Scheduled cache cleanup
-  - Performance optimization
-  - Configuration updates
-
-## 7. Security Considerations
-
-- Access Control
-
-  - Redis authentication
-  - Network security
-  - Access patterns
-
-- Data Protection
-
-  - Encryption at rest
-  - Encryption in transit
-  - Key rotation
-
-- Resource Management
-  - Memory limits
-  - Connection limits
-  - Operation timeouts
-
-## 8. Future Considerations
-
-- Cluster Support
-
-  - Redis cluster configuration
-  - Sharding strategies
-  - Replication policies
-
-- Advanced Features
-
-  - Cache eviction strategies
-  - Advanced monitoring
-  - Performance optimizations
-  - Scaling strategies
-
-- Integration Enhancements
-  - Additional domain support
-  - Extended workflow integration
-  - Enhanced monitoring capabilities
+- Performance optimization
+- Monitoring improvements
+- Scaling strategies
+- Additional domain support

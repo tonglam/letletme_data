@@ -88,6 +88,7 @@ export type PrismaPhaseCreate = {
   readonly startEvent: number;
   readonly stopEvent: number;
   readonly highestScore?: number | null;
+  readonly createdAt?: Date;
 };
 
 // ============ Repository Types ============
@@ -100,6 +101,9 @@ export interface PhaseRepository {
   findAll(): TE.TaskEither<APIError, PrismaPhase[]>;
   update(id: PhaseId, phase: Partial<PrismaPhaseCreate>): TE.TaskEither<APIError, PrismaPhase>;
   deleteAll: () => TE.TaskEither<APIError, void>;
+  saveBatch(phases: PrismaPhaseCreate[]): TE.TaskEither<APIError, PrismaPhase[]>;
+  findByIds(ids: PhaseId[]): TE.TaskEither<APIError, PrismaPhase[]>;
+  deleteByIds(ids: PhaseId[]): TE.TaskEither<APIError, void>;
 }
 
 // ============ Type Transformers ============
@@ -119,3 +123,9 @@ export const toDomainPhase = (raw: PhaseResponse): Either<string, Phase> => {
     ? right(result.data)
     : left(`Invalid domain model: ${result.error.message}`);
 };
+
+// Add type guards
+export const isPhaseId = (value: unknown): value is PhaseId =>
+  typeof value === 'number' && value > 0;
+
+export const isPhase = (value: unknown): value is Phase => PhaseSchema.safeParse(value).success;

@@ -1,3 +1,4 @@
+import * as O from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
 import { APIError } from '../../infrastructure/api/common/errors';
@@ -17,6 +18,10 @@ export const phaseWorkflows = (phaseService: PhaseService) => {
     pipe(
       // Step 1: Sync phases from API to database
       phaseService.syncPhases(),
+      TE.mapLeft((error) => ({
+        ...error,
+        message: `Phase sync failed: ${error.message}`,
+      })),
       // Step 2: Verify phases are in database
       TE.chain((phasesFromAPI) =>
         pipe(
@@ -47,16 +52,35 @@ export const phaseWorkflows = (phaseService: PhaseService) => {
     currentEventId: number,
   ): TE.TaskEither<APIError, { phase: Phase; isActive: boolean }> =>
     pipe(
+      // Validate inputs
+      TE.fromPredicate(
+        () => currentEventId > 0,
+        () =>
+          ({
+            code: 'VALIDATION_ERROR',
+            message: 'Invalid event ID provided',
+          }) as APIError,
+      )(currentEventId),
       // Step 1: Get specific phase
-      phaseService.getPhase(phaseId),
-      // Step 2: Get current active phase
-      TE.chain((phase) =>
+      TE.chain(() => phaseService.getPhase(phaseId)),
+      TE.chainW((phase) =>
         pipe(
-          phaseService.getCurrentActivePhase(currentEventId),
-          TE.map((activePhase) => ({
-            phase: phase!,
-            isActive: activePhase?.id === phase?.id,
-          })),
+          O.fromNullable(phase),
+          O.fold(
+            () =>
+              TE.left({
+                code: 'NOT_FOUND',
+                message: `Phase ${phaseId} not found`,
+              } as APIError),
+            (phase) =>
+              pipe(
+                phaseService.getCurrentActivePhase(currentEventId),
+                TE.map((activePhase) => ({
+                  phase,
+                  isActive: activePhase?.id === phase.id,
+                })),
+              ),
+          ),
         ),
       ),
     );

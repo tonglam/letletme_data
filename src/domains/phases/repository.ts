@@ -1,3 +1,4 @@
+import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import { APIError, createDatabaseError } from '../../infrastructure/api/common/errors';
 import { prisma } from '../../infrastructure/db/prisma';
@@ -24,6 +25,7 @@ export const phaseRepository: PhaseRepository = {
             startEvent: phase.startEvent,
             stopEvent: phase.stopEvent,
             highestScore: phase.highestScore,
+            createdAt: phase.createdAt ?? new Date(),
           },
         }),
       (error) => createDatabaseError({ message: 'Failed to save phase', details: { error } }),
@@ -90,5 +92,67 @@ export const phaseRepository: PhaseRepository = {
         }),
       (error) =>
         createDatabaseError({ message: 'Failed to delete all phases', details: { error } }),
+    ),
+
+  /**
+   * Creates a batch of new phases
+   * @param phases - The phases data to create
+   * @returns TaskEither with created phases or error
+   * @throws APIError with DB_ERROR code if creation fails
+   */
+  saveBatch: (phases: PrismaPhaseCreate[]): TE.TaskEither<APIError, PrismaPhase[]> =>
+    TE.tryCatch(
+      () =>
+        prisma.$transaction(
+          phases.map((phase) =>
+            prisma.phase.create({
+              data: {
+                id: phase.id as number,
+                name: phase.name,
+                startEvent: phase.startEvent,
+                stopEvent: phase.stopEvent,
+                highestScore: phase.highestScore,
+                createdAt: phase.createdAt ?? new Date(),
+              },
+            }),
+          ),
+        ),
+      (error) =>
+        createDatabaseError({ message: 'Failed to save phases batch', details: { error } }),
+    ),
+
+  /**
+   * Finds phases by their IDs
+   * @param ids - The phase IDs to find
+   * @returns TaskEither with found phases or error
+   * @throws APIError with DB_ERROR code if query fails
+   */
+  findByIds: (ids: PhaseId[]): TE.TaskEither<APIError, PrismaPhase[]> =>
+    TE.tryCatch(
+      () =>
+        prisma.phase.findMany({
+          where: { id: { in: ids.map((id) => id as number) } },
+        }),
+      (error) =>
+        createDatabaseError({ message: 'Failed to find phases by ids', details: { error } }),
+    ),
+
+  /**
+   * Deletes phases by their IDs
+   * @param ids - The phase IDs to delete
+   * @returns TaskEither with void or error
+   * @throws APIError with DB_ERROR code if deletion fails
+   */
+  deleteByIds: (ids: PhaseId[]): TE.TaskEither<APIError, void> =>
+    pipe(
+      TE.tryCatch(
+        () =>
+          prisma.phase.deleteMany({
+            where: { id: { in: ids.map((id) => id as number) } },
+          }),
+        (error) =>
+          createDatabaseError({ message: 'Failed to delete phases by ids', details: { error } }),
+      ),
+      TE.map(() => undefined),
     ),
 };
