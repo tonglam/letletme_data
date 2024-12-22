@@ -3,13 +3,13 @@ import * as E from 'fp-ts/Either';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
 
-import { phaseRepository } from '../../src/domains/phases/repository';
-import { APIError } from '../../src/infrastructure/api/common/errors';
-import { createFPLClient } from '../../src/infrastructure/api/fpl';
-import { connectDB, disconnectDB } from '../../src/infrastructure/db/prisma';
-import { createPhaseService } from '../../src/services/phases';
-import { phaseWorkflows } from '../../src/services/phases/workflow';
-import { PhaseId, toDomainPhase, validatePhaseId } from '../../src/types/phase.type';
+import { phaseRepository } from '../../../src/domains/phases/repository';
+import { APIError } from '../../../src/infrastructure/api/common/errors';
+import { createFPLClient } from '../../../src/infrastructure/api/fpl';
+import { connectDB, disconnectDB } from '../../../src/infrastructure/db/prisma';
+import { createPhaseService } from '../../../src/services/phases';
+import { phaseWorkflows } from '../../../src/services/phases/workflow';
+import { PhaseId, toDomainPhase, validatePhaseId } from '../../../src/types/phase.type';
 
 describe('Phase Service Integration', () => {
   const TEST_EVENT_ID = 15; // Mid-season event for reliable phase testing

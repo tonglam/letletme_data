@@ -4,12 +4,12 @@ import * as T from 'fp-ts/Task';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
 import type { ChainableCommander } from 'ioredis';
-import { createCache } from '../../../../src/infrastructure/cache/core/cache';
+import { createCache } from '../../../../../src/infrastructure/cache/core/cache';
 import {
   CacheError,
   CacheErrorType,
   RedisClient,
-} from '../../../../src/infrastructure/cache/types';
+} from '../../../../../src/infrastructure/cache/types';
 
 describe('Cache', () => {
   const mockRedisClient = {
@@ -142,11 +142,7 @@ describe('Cache', () => {
       )();
 
       expect(result).toBe(true);
-      expect(mockRedisClient.set).toHaveBeenCalledWith(
-        'test:test-key',
-        expect.any(String),
-        60,
-      );
+      expect(mockRedisClient.set).toHaveBeenCalledWith('test:test-key', expect.any(String), 60);
     });
 
     test('should handle Redis errors', async () => {

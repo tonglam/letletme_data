@@ -1,16 +1,16 @@
 import { afterEach, beforeEach, describe, expect, test } from '@jest/globals';
-import type { ChainableCommander } from 'ioredis';
 import * as O from 'fp-ts/Option';
 import * as T from 'fp-ts/Task';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
-import { createCacheOperations } from '../../../../src/infrastructure/cache/core/manager';
+import type { ChainableCommander } from 'ioredis';
+import { createCacheOperations } from '../../../../../src/infrastructure/cache/core/manager';
 import {
   CacheError,
   CacheErrorType,
   DomainType,
   RedisClient,
-} from '../../../../src/infrastructure/cache/types';
+} from '../../../../../src/infrastructure/cache/types';
 
 describe('Cache Manager', () => {
   // Mock Redis client with proper types
@@ -21,14 +21,16 @@ describe('Cache Manager', () => {
     get: jest.fn((): TE.TaskEither<CacheError, O.Option<string>> => TE.right(O.none)),
     del: jest.fn((): TE.TaskEither<CacheError, number> => TE.right(1)),
     keys: jest.fn((): TE.TaskEither<CacheError, string[]> => TE.right(['test'])),
-    multi: jest.fn((): TE.TaskEither<CacheError, ChainableCommander> => 
-      TE.right({
-        exec: () => Promise.resolve([]),
-        length: 0,
-        call: jest.fn(),
-        callBuffer: jest.fn(),
-        acl: jest.fn(),
-      } as unknown as ChainableCommander)),
+    multi: jest.fn(
+      (): TE.TaskEither<CacheError, ChainableCommander> =>
+        TE.right({
+          exec: () => Promise.resolve([]),
+          length: 0,
+          call: jest.fn(),
+          callBuffer: jest.fn(),
+          acl: jest.fn(),
+        } as unknown as ChainableCommander),
+    ),
     isReady: jest.fn(() => true),
     exec: jest.fn((): TE.TaskEither<CacheError, unknown[]> => TE.right([])),
     ping: jest.fn((): TE.TaskEither<CacheError, string> => TE.right('PONG')),

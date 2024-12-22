@@ -3,14 +3,14 @@ import * as IOE from 'fp-ts/IOEither';
 import * as T from 'fp-ts/Task';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
-import { createRedisClient } from '../../src/infrastructure/cache/client/redis.client';
-import { createCache } from '../../src/infrastructure/cache/core/cache';
+import { createRedisClient } from '../../../src/infrastructure/cache/client/redis.client';
+import { createCache } from '../../../src/infrastructure/cache/core/cache';
 import {
   CacheError,
   CacheErrorType,
   RedisClient,
   RedisConfig,
-} from '../../src/infrastructure/cache/types';
+} from '../../../src/infrastructure/cache/types';
 
 describe('Cache Integration Tests', () => {
   let redisClient: RedisClient;
@@ -276,7 +276,7 @@ describe('Cache Integration Tests', () => {
 
       // Concurrent gets
       const results = await Promise.all(
-        operations.map(({ key, value }) =>
+        operations.map(({ key }) =>
           pipe(
             cache.get(key),
             TE.fold(

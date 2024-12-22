@@ -1,8 +1,8 @@
 import * as E from 'fp-ts/Either';
-import { createValidationError } from '../../../src/infrastructure/api/common/errors';
-import { createPhaseService } from '../../../src/services/phases';
-import type { Phase } from '../../../src/types/phase.type';
-import { PhaseId } from '../../../src/types/phase.type';
+import { createValidationError } from '../../../../src/infrastructure/api/common/errors';
+import { createPhaseService } from '../../../../src/services/phases';
+import type { Phase } from '../../../../src/types/phase.type';
+import { PhaseId } from '../../../../src/types/phase.type';
 
 jest.mock('../../../src/services/phases', () => ({
   createPhaseService: jest.fn(() => ({
