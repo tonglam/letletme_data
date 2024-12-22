@@ -2,8 +2,8 @@ import { describe, expect, test } from '@jest/globals';
 import * as E from 'fp-ts/Either';
 import * as IO from 'fp-ts/IO';
 import { pipe } from 'fp-ts/function';
-import { APIError } from '../../../../../src/infrastructure/api/common/errors';
-import { createFPLClient, FPLClient } from '../../../../../src/infrastructure/api/fpl';
+import { APIError } from '../../../../src/infrastructure/api/common/errors';
+import { createFPLClient, FPLClient } from '../../../../src/infrastructure/api/fpl';
 
 describe('FPL API Client', () => {
   let client: FPLClient;

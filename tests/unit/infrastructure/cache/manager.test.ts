@@ -4,13 +4,13 @@ import * as T from 'fp-ts/Task';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
 import type { ChainableCommander } from 'ioredis';
-import { createCacheOperations } from '../../../../../src/infrastructure/cache/core/manager';
+import { createCacheOperations } from '../../../../src/infrastructure/cache/core/manager';
 import {
   CacheError,
   CacheErrorType,
   DomainType,
   RedisClient,
-} from '../../../../../src/infrastructure/cache/types';
+} from '../../../../src/infrastructure/cache/types';
 
 describe('Cache Manager', () => {
   // Mock Redis client with proper types

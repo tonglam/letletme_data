@@ -1,21 +1,36 @@
-import { afterAll, beforeAll, describe, expect, test } from '@jest/globals';
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from '@jest/globals';
 import * as E from 'fp-ts/Either';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
 
 import { phaseRepository } from '../../../src/domains/phases/repository';
 import { APIError } from '../../../src/infrastructure/api/common/errors';
-import { createFPLClient } from '../../../src/infrastructure/api/fpl';
 import { connectDB, disconnectDB } from '../../../src/infrastructure/db/prisma';
 import { createPhaseService } from '../../../src/services/phases';
 import { phaseWorkflows } from '../../../src/services/phases/workflow';
-import { PhaseId, toDomainPhase, validatePhaseId } from '../../../src/types/phase.type';
+import { Phase, validatePhaseId } from '../../../src/types/phase.type';
+
+const TEST_EVENT_ID = 15; // Mid-season event for reliable phase testing
+const TEST_PHASES: Phase[] = [
+  {
+    id: 1,
+    name: 'Phase 1',
+    startEvent: 1,
+    stopEvent: 10,
+    highestScore: null,
+  },
+  {
+    id: 2,
+    name: 'Phase 2',
+    startEvent: 11,
+    stopEvent: 20,
+    highestScore: null,
+  },
+];
 
 describe('Phase Service Integration', () => {
-  const TEST_EVENT_ID = 15; // Mid-season event for reliable phase testing
   let phaseService: ReturnType<typeof createPhaseService>;
   let workflows: ReturnType<typeof phaseWorkflows>;
-  let firstPhaseId: PhaseId;
 
   const handleError = (error: APIError): never => {
     process.stderr.write(
@@ -64,44 +79,9 @@ describe('Phase Service Integration', () => {
         );
       }
 
-      // Clean existing data with error handling
-      const cleanupResult = await pipe(
-        phaseRepository.deleteAll(),
-        TE.mapLeft((error) => {
-          throw new Error(`Failed to clean database: ${error.message}`);
-        }),
-      )();
-
-      if (E.isLeft(cleanupResult)) {
-        throw cleanupResult.left;
-      }
-
-      // Initialize FPL client
-      const fplClient = await pipe(
-        createFPLClient()(),
-        E.getOrElseW((error) => {
-          throw new Error(`FPL client initialization failed: ${error.message}`);
-        }),
-      );
-
-      // Initialize phase service
+      // Initialize phase service with mock bootstrap data
       phaseService = createPhaseService({
-        getBootstrapData: async () => {
-          const bootstrapResult = await fplClient.getBootstrapStatic();
-          if (E.isLeft(bootstrapResult)) {
-            throw new Error(`Failed to get bootstrap data: ${bootstrapResult.left.message}`);
-          }
-          const { phases } = bootstrapResult.right;
-          const domainPhases = phases
-            .map((p) => toDomainPhase(p))
-            .filter(E.isRight)
-            .map((p) => p.right);
-
-          if (domainPhases.length === 0) {
-            throw new Error('No phases data available');
-          }
-          return domainPhases;
-        },
+        getBootstrapData: async () => TEST_PHASES,
       });
 
       // Initialize workflows
@@ -112,6 +92,20 @@ describe('Phase Service Integration', () => {
       throw error;
     }
   }, 30000);
+
+  beforeEach(async () => {
+    // Clean existing data with error handling
+    const cleanupResult = await pipe(
+      phaseRepository.deleteAll(),
+      TE.mapLeft((error) => {
+        throw new Error(`Failed to clean database: ${error.message}`);
+      }),
+    )();
+
+    if (E.isLeft(cleanupResult)) {
+      throw cleanupResult.left;
+    }
+  });
 
   afterAll(async () => {
     try {
@@ -151,17 +145,20 @@ describe('Phase Service Integration', () => {
         syncResult,
         E.fold(handleError, (phases) => phases),
       );
-      expect(phases.length).toBeGreaterThan(0);
-
-      // Store first phase ID for subsequent tests
-      const phaseIdResult = validatePhaseId(phases[0].id);
-      expect(E.isRight(phaseIdResult)).toBe(true);
-      if (E.isLeft(phaseIdResult)) throw new Error(`Invalid phase ID: ${phaseIdResult.left}`);
-      firstPhaseId = phaseIdResult.right;
+      expect(phases.length).toBe(TEST_PHASES.length);
+      expect(phases[0]).toEqual(TEST_PHASES[0]);
     }, 30000);
 
     test('2. should get phase details with active status', async () => {
-      const detailsResult = await workflows.getPhaseDetails(firstPhaseId, TEST_EVENT_ID)();
+      // First sync phases
+      await workflows.syncAndVerifyPhases()();
+
+      // Then get details for Phase 1 with event in Phase 1
+      const phaseIdResult = validatePhaseId(TEST_PHASES[0].id);
+      expect(E.isRight(phaseIdResult)).toBe(true);
+      if (E.isLeft(phaseIdResult)) throw new Error(`Invalid phase ID: ${phaseIdResult.left}`);
+
+      const detailsResult = await workflows.getPhaseDetails(phaseIdResult.right, 5)();
       expect(E.isRight(detailsResult)).toBe(true);
 
       const details = pipe(
@@ -169,8 +166,25 @@ describe('Phase Service Integration', () => {
         E.fold(handleError, (details) => details),
       );
 
-      expect(details.phase.id).toBe(firstPhaseId);
-      expect(typeof details.isActive).toBe('boolean');
+      expect(details.phase).toEqual(TEST_PHASES[0]);
+      expect(details.isActive).toBe(true); // Event ID 5 is in Phase 1
+    }, 10000);
+
+    test('3. should validate phase boundaries', async () => {
+      // First sync phases
+      await workflows.syncAndVerifyPhases()();
+
+      // Then get details for Phase 1 with event in Phase 2
+      const phaseIdResult = validatePhaseId(TEST_PHASES[0].id);
+      expect(E.isRight(phaseIdResult)).toBe(true);
+      if (E.isLeft(phaseIdResult)) throw new Error(`Invalid phase ID: ${phaseIdResult.left}`);
+
+      const detailsResult = await workflows.getPhaseDetails(phaseIdResult.right, TEST_EVENT_ID)();
+      expect(E.isLeft(detailsResult)).toBe(true);
+      if (E.isRight(detailsResult)) throw new Error('Expected validation error');
+
+      expect(detailsResult.left.code).toBe('VALIDATION_ERROR');
+      expect(detailsResult.left.message).toBe('Event ID outside phase boundaries');
     }, 10000);
   });
 });

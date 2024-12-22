@@ -6,13 +6,13 @@ import { pipe } from 'fp-ts/function';
 import {
   createPhaseCache,
   createPhaseOperations,
-} from '../../../../../src/domains/phases/cache/cache';
+} from '../../../../src/domains/phases/cache/cache';
 import {
   CacheError,
   CacheErrorType,
   RedisClient,
-} from '../../../../../src/infrastructure/cache/types';
-import { PrismaPhase } from '../../../../../src/types/phase.type';
+} from '../../../../src/infrastructure/cache/types';
+import { PrismaPhase } from '../../../../src/types/phase.type';
 
 describe('Phase Cache', () => {
   const mockRedisClient = {
