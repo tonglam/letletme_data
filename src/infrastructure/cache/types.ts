@@ -3,7 +3,6 @@ import type { Option } from 'fp-ts/Option';
 import type { TaskEither } from 'fp-ts/TaskEither';
 import * as t from 'io-ts';
 import type { ChainableCommander, Redis, RedisOptions } from 'ioredis';
-import type { ConnectionOptions } from 'tls';
 import type { APIError } from '../api/common/errors';
 
 // Redis types
@@ -36,7 +35,6 @@ export interface RedisConfig extends Omit<RedisOptions, 'tls'> {
   readonly host: string;
   readonly port: number;
   readonly password?: string;
-  readonly tls?: ConnectionOptions;
   readonly maxRetriesPerRequest?: number;
   readonly retryStrategy?: RetryStrategy;
   readonly lazyConnect?: boolean;
@@ -56,7 +54,6 @@ export const RedisConfigCodec = t.intersection([
   }),
   t.partial({
     password: t.string,
-    tls: t.record(t.string, t.unknown),
     maxRetriesPerRequest: t.number,
     lazyConnect: t.boolean,
     enableOfflineQueue: t.boolean,
