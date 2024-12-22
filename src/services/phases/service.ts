@@ -89,6 +89,15 @@ const findActivePhase =
       (phase) => phase.startEvent <= currentEventId && phase.stopEvent >= currentEventId,
     ) ?? null;
 
+const validatePhaseSequence = (phases: readonly Phase[]): TE.TaskEither<APIError, readonly Phase[]> => {
+  for (let i = 1; i < phases.length; i++) {
+    if (phases[i].startEvent <= phases[i - 1].stopEvent) {
+      return TE.left(createValidationError({ message: 'Phase sequence invalid: overlapping phases detected' }));
+    }
+  }
+  return TE.right(phases);
+};
+
 export const createPhaseServiceImpl = ({
   bootstrapApi,
   phaseCache,
@@ -98,6 +107,15 @@ export const createPhaseServiceImpl = ({
     pipe(
       fetchBootstrapData(bootstrapApi),
       TE.mapLeft((error) => createSyncError('Bootstrap data fetch failed', error)),
+      TE.chain((phases) => {
+        const invalidPhases = phases.slice().sort((a, b) => a.startEvent - b.startEvent);
+        for (let i = 1; i < invalidPhases.length; i++) {
+          if (invalidPhases[i].startEvent <= invalidPhases[i - 1].stopEvent) {
+            return TE.left(createValidationError({ message: 'Phase sequence invalid' }));
+          }
+        }
+        return TE.right(phases);
+      }),
       TE.chain(savePhases(phaseRepository, phaseCache)),
     );
 

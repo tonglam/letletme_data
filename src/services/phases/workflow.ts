@@ -72,14 +72,24 @@ export const phaseWorkflows = (phaseService: PhaseService) => {
                 code: 'NOT_FOUND',
                 message: `Phase ${phaseId} not found`,
               } as APIError),
-            (phase) =>
-              pipe(
+            (phase) => {
+              // For explicit phase boundaries validation
+              if (currentEventId < phase.startEvent || currentEventId > phase.stopEvent) {
+                return TE.left({
+                  code: 'VALIDATION_ERROR',
+                  message: 'Event ID outside phase boundaries',
+                } as APIError);
+              }
+              return pipe(
                 phaseService.getCurrentActivePhase(currentEventId),
                 TE.map((activePhase) => ({
                   phase,
-                  isActive: activePhase?.id === phase.id,
+                  isActive: activePhase?.id === phase.id &&
+                    currentEventId >= phase.startEvent &&
+                    currentEventId <= phase.stopEvent,
                 })),
-              ),
+              );
+            },
           ),
         ),
       ),
