@@ -31,12 +31,27 @@ export const phaseWorkflows = (phaseService: PhaseService) => {
       ),
       // Step 3: Verify data integrity
       TE.chain(({ phasesFromAPI, phasesInDB }) => {
-        if (phasesInDB.length !== phasesFromAPI.length) {
+        const sortedAPI = [...phasesFromAPI].sort((a, b) => a.id - b.id);
+        const sortedDB = [...phasesInDB].sort((a, b) => a.id - b.id);
+        
+        if (sortedDB.length !== sortedAPI.length) {
           return TE.left({
             code: 'VALIDATION_ERROR',
             message: 'Data integrity check failed: phase count mismatch',
           } as APIError);
         }
+
+        for (let i = 0; i < sortedAPI.length; i++) {
+          if (sortedAPI[i].id !== sortedDB[i].id || 
+              sortedAPI[i].startEvent !== sortedDB[i].startEvent ||
+              sortedAPI[i].stopEvent !== sortedDB[i].stopEvent) {
+            return TE.left({
+              code: 'VALIDATION_ERROR',
+              message: 'Data integrity check failed: phase data mismatch',
+            } as APIError);
+          }
+        }
+        
         return TE.right(phasesFromAPI);
       }),
     );
@@ -84,9 +99,7 @@ export const phaseWorkflows = (phaseService: PhaseService) => {
                 phaseService.getCurrentActivePhase(currentEventId),
                 TE.map((activePhase) => ({
                   phase,
-                  isActive: activePhase?.id === phase.id &&
-                    currentEventId >= phase.startEvent &&
-                    currentEventId <= phase.stopEvent,
+                  isActive: activePhase?.id === phase.id,
                 })),
               );
             },

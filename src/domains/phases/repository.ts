@@ -18,8 +18,16 @@ export const phaseRepository: PhaseRepository = {
   save: (phase: PrismaPhaseCreate): TE.TaskEither<APIError, PrismaPhase> =>
     TE.tryCatch(
       () =>
-        prisma.phase.create({
-          data: {
+        prisma.phase.upsert({
+          where: { id: phase.id as number },
+          update: {
+            name: phase.name,
+            startEvent: phase.startEvent,
+            stopEvent: phase.stopEvent,
+            highestScore: phase.highestScore,
+            createdAt: phase.createdAt ?? new Date(),
+          },
+          create: {
             id: phase.id as number,
             name: phase.name,
             startEvent: phase.startEvent,

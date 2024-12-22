@@ -107,15 +107,7 @@ export const createPhaseServiceImpl = ({
     pipe(
       fetchBootstrapData(bootstrapApi),
       TE.mapLeft((error) => createSyncError('Bootstrap data fetch failed', error)),
-      TE.chain((phases) => {
-        const invalidPhases = phases.slice().sort((a, b) => a.startEvent - b.startEvent);
-        for (let i = 1; i < invalidPhases.length; i++) {
-          if (invalidPhases[i].startEvent <= invalidPhases[i - 1].stopEvent) {
-            return TE.left(createValidationError({ message: 'Phase sequence invalid' }));
-          }
-        }
-        return TE.right(phases);
-      }),
+      TE.chain(validatePhaseSequence),
       TE.chain(savePhases(phaseRepository, phaseCache)),
     );
 
