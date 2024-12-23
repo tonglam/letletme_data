@@ -28,9 +28,10 @@
   "author": "Tong Lam",
   "license": "MIT",
   "devDependencies": {
+    "@jest/types": "^29.6.3",
     "@types/dotenv": "^8.2.0",
     "@types/express": "^4.17.21",
-    "@types/jest": "^29.5.12",
+    "@types/jest": "^29.5.14",
     "@types/node": "^20.12.2",
     "@typescript-eslint/eslint-plugin": "^7.4.0",
     "@typescript-eslint/parser": "^7.4.0",
@@ -44,7 +45,7 @@
     "pino-pretty": "^13.0.0",
     "prettier": "^3.2.5",
     "prisma": "^6.0.1",
-    "ts-jest": "^29.1.2",
+    "ts-jest": "^29.2.5",
     "ts-node": "^10.9.2",
     "typescript": "^5.4.3"
   },

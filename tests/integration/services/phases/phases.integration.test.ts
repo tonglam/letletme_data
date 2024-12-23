@@ -1,12 +1,12 @@
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { createRedisClient } from '../../../src/infrastructure/cache/client/redis.client';
-import { RedisClient, RedisConfig } from '../../../src/infrastructure/cache/types';
-import { createPhaseService } from '../../../src/services/phases';
-import { phaseWorkflows } from '../../../src/services/phases/workflow';
-import type { Phase } from '../../../src/types/phase.type';
-import { PhaseId } from '../../../src/types/phase.type';
+import { createRedisClient } from '../../../../src/infrastructure/cache/client/redis.client';
+import { RedisClient, RedisConfig } from '../../../../src/infrastructure/cache/types';
+import { createPhaseService } from '../../../../src/services/phases';
+import { phaseWorkflows } from '../../../../src/services/phases/workflow';
+import type { Phase } from '../../../../src/types/phase.type';
+import { PhaseId } from '../../../../src/types/phase.type';
 
 const testPhases: Phase[] = [
   {
