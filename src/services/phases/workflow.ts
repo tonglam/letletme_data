@@ -1,6 +1,6 @@
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
-import { APIError } from '../../infrastructure/api/common/errors';
+import { APIError, createValidationError } from '../../infrastructure/api/common/errors';
 import { Phase, PhaseId } from '../../types/phase.type';
 import { PhaseService } from './index';
 
@@ -50,15 +50,14 @@ export const phaseWorkflows = (phaseService: PhaseService) => {
       TE.fromPredicate(
         () => currentEventId > 0,
         () =>
-          ({
-            code: 'VALIDATION_ERROR',
+          createValidationError({
             message: 'Invalid event ID provided',
-          }) as APIError,
+          }),
       )(currentEventId),
       TE.chain(() => phaseService.getPhase(phaseId)),
       TE.chain((phase) =>
         phase === null
-          ? TE.left({ code: 'NOT_FOUND', message: 'Phase not found' } as APIError)
+          ? TE.left(createValidationError({ message: `Phase ${phaseId} not found` }))
           : pipe(
               phaseService.getCurrentActivePhase(currentEventId),
               TE.map((activePhase) => ({

@@ -26,7 +26,7 @@ const validatePhaseExists =
     phase ? TE.right(phase) : TE.left(createValidationError({ message: `Phase ${id} not found` }));
 
 const toPrismaPhaseCreate = (phase: Phase): PrismaPhaseCreate => ({
-  id: phase.id,
+  id: Number(phase.id),
   name: phase.name,
   startEvent: phase.startEvent,
   stopEvent: phase.stopEvent,
@@ -35,7 +35,7 @@ const toPrismaPhaseCreate = (phase: Phase): PrismaPhaseCreate => ({
 });
 
 const toPrismaPhase = (phase: Phase): PrismaPhase => ({
-  id: phase.id,
+  id: Number(phase.id),
   name: phase.name,
   startEvent: phase.startEvent,
   stopEvent: phase.stopEvent,
@@ -44,7 +44,7 @@ const toPrismaPhase = (phase: Phase): PrismaPhase => ({
 });
 
 const toDomainPhase = (prismaPhase: PrismaPhase): Phase => ({
-  id: prismaPhase.id,
+  id: prismaPhase.id as PhaseId,
   name: prismaPhase.name,
   startEvent: prismaPhase.startEvent,
   stopEvent: prismaPhase.stopEvent,
@@ -55,21 +55,8 @@ const savePhases =
   (repository: PhaseServiceDependencies['phaseRepository'], cache: PhaseCache | undefined) =>
   (phases: readonly Phase[]): TE.TaskEither<APIError, readonly Phase[]> =>
     pipe(
-      TE.tryCatch(
-        async () => {
-          const savedPhases = await Promise.all(
-            phases.map((phase) => repository.save(toPrismaPhaseCreate(phase))()),
-          );
-          const validPhases = savedPhases.reduce<Phase[]>((acc, result) => {
-            if (result._tag === 'Right') {
-              acc.push(toDomainPhase(result.right));
-            }
-            return acc;
-          }, []);
-          return validPhases;
-        },
-        (error) => createValidationError({ message: 'Failed to save phases', details: { error } }),
-      ),
+      repository.saveBatch(phases.map(toPrismaPhaseCreate)),
+      TE.map((savedPhases) => savedPhases.map(toDomainPhase)),
       TE.chainFirst(() =>
         cache
           ? pipe(
@@ -89,10 +76,17 @@ const findActivePhase =
       (phase) => phase.startEvent <= currentEventId && phase.stopEvent >= currentEventId,
     ) ?? null;
 
-const validatePhaseSequence = (phases: readonly Phase[]): TE.TaskEither<APIError, readonly Phase[]> => {
-  for (let i = 1; i < phases.length; i++) {
-    if (phases[i].startEvent <= phases[i - 1].stopEvent) {
-      return TE.left(createValidationError({ message: 'Phase sequence invalid: overlapping phases detected' }));
+const validatePhaseSequence = (
+  phases: readonly Phase[],
+): TE.TaskEither<APIError, readonly Phase[]> => {
+  // Skip the "Overall" phase when checking for overlaps
+  const monthlyPhases = phases.filter((phase) => phase.name !== 'Overall');
+
+  for (let i = 1; i < monthlyPhases.length; i++) {
+    if (monthlyPhases[i].startEvent <= monthlyPhases[i - 1].stopEvent) {
+      return TE.left(
+        createValidationError({ message: 'Phase sequence invalid: overlapping phases detected' }),
+      );
     }
   }
   return TE.right(phases);
