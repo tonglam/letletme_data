@@ -9,13 +9,20 @@
     "noImplicitAny": true,
     "outDir": "./dist",
     "rootDir": ".",
+    "baseUrl": ".",
+    "paths": {
+      "infrastructure/*": ["src/infrastructure/*"],
+      "services/*": ["src/services/*"],
+      "domains/*": ["src/domains/*"]
+    },
     "strictNullChecks": true,
     "noImplicitThis": true,
     "alwaysStrict": true,
     "noUnusedLocals": true,
     "noImplicitReturns": true,
     "noFallthroughCasesInSwitch": true,
-    "moduleResolution": "node"
+    "moduleResolution": "node",
+    "composite": true
   },
   "include": ["src/**/*.ts", "tests/**/*.ts"],
   "exclude": ["node_modules"]

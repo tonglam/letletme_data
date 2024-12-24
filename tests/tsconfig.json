@@ -1,0 +1,15 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "types": ["jest", "node"],
+    "rootDir": "..",
+    "baseUrl": "..",
+    "paths": {
+      "infrastructure/*": ["src/infrastructure/*"],
+      "services/*": ["src/services/*"],
+      "domains/*": ["src/domains/*"]
+    }
+  },
+  "include": ["./**/*.ts"],
+  "references": [{ "path": "../" }]
+}
