@@ -1,5 +1,5 @@
 import { SupabaseClient } from '@supabase/supabase-js';
-import { TransactionContext } from '../events/types';
+import { TransactionContext } from '../../infrastructure/db/types';
 
 export class PostgresTransaction implements TransactionContext {
   private transactionClient: SupabaseClient | null = null;

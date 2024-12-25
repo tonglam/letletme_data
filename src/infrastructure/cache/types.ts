@@ -292,3 +292,11 @@ export interface CacheModuleState {
   readonly cacheOps: Option<CacheOperations>;
   readonly warmerOps: Option<CacheWarmerOperations>;
 }
+
+export interface CacheStrategy {
+  get<T>(key: string): Promise<Option<T>>;
+  set<T>(key: string, value: T, ttl?: number): Promise<void>;
+  invalidate(pattern: string): Promise<void>;
+  clear(): Promise<void>;
+  disconnect(): Promise<void>;
+}

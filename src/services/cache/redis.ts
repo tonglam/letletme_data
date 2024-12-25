@@ -1,13 +1,13 @@
+import { none, Option, some } from 'fp-ts/Option';
 import { createClient } from 'redis';
-import { Option, some, none } from 'fp-ts/Option';
-import { CacheStrategy } from '../events/types';
+import { CacheStrategy } from '../../infrastructure/cache/types';
 
 export class RedisCache implements CacheStrategy {
   private client;
 
   constructor(redisUrl: string) {
     this.client = createClient({
-      url: redisUrl
+      url: redisUrl,
     });
 
     this.client.on('error', (err) => console.error('Redis Client Error:', err));
