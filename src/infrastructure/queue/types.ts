@@ -56,7 +56,7 @@ export interface QueueDependencies {
  * Meta job data type
  */
 export interface MetaJobData extends BaseJobData {
-  readonly type: 'BOOTSTRAP' | 'PHASES' | 'EVENTS';
+  readonly type: 'BOOTSTRAP' | 'PHASES' | 'EVENTS' | 'TEAMS';
   readonly data: {
     readonly operation: JobOperation;
     readonly id?: number;

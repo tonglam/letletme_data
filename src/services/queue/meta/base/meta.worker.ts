@@ -9,6 +9,7 @@ import {
   WorkerDependencies,
 } from '../../../../infrastructure/queue';
 import { WorkerService } from '../../worker.service';
+import { teamJobService } from '../teams.job';
 
 /**
  * Meta worker service interface
@@ -40,9 +41,9 @@ export const createMetaWorkerService = (
       )();
     },
 
-    processTeamsJob: async () => {
+    processTeamsJob: async (job: Job<MetaJobData>) => {
       await pipe(
-        TE.right(undefined),
+        teamJobService.processTeamsJob(job),
         TE.fold(
           (error) => {
             throw error;
@@ -102,6 +103,13 @@ export const createMetaWorkerService = (
               return pipe(
                 TE.tryCatch(
                   () => service.processEventsJob(job),
+                  (error) => error as Error,
+                ),
+              );
+            case QUEUE_JOB_TYPES.TEAMS:
+              return pipe(
+                TE.tryCatch(
+                  () => service.processTeamsJob(job),
                   (error) => error as Error,
                 ),
               );

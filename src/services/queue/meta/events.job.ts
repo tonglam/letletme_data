@@ -29,7 +29,7 @@ export class EventJobService {
   /**
    * Process an event job based on operation type
    */
-  processEventJob = (job: Job<MetaJobData>): TE.TaskEither<Error, void> => {
+  processEventsJob = (job: Job<MetaJobData>): TE.TaskEither<Error, void> => {
     const { operation, id, options } = job.data.data;
 
     switch (operation) {

@@ -15,6 +15,7 @@ export const QUEUE_JOB_TYPES = {
   BOOTSTRAP: 'BOOTSTRAP',
   PHASES: 'PHASES',
   EVENTS: 'EVENTS',
+  TEAMS: 'TEAMS',
 } as const;
 
 /**

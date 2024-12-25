@@ -65,6 +65,13 @@ export const createPhaseServiceImpl = ({
     pipe(
       fetchBootstrapData(bootstrapApi),
       TE.mapLeft((error) => createError('Bootstrap data fetch failed', error)),
+      TE.map((phases) =>
+        phases.map((p) => ({
+          ...p,
+          id: p.id as PhaseId,
+          createdAt: new Date(),
+        })),
+      ),
       TE.chain((phases) => validatePhaseSequence([...phases])),
       TE.chain((phases) =>
         pipe(

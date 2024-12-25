@@ -167,6 +167,7 @@ export const toDomainEvent = (raw: EventResponse): Either<string, Event> => {
       topElement: raw.top_element,
       topElementInfo: raw.top_element_info,
       transfersMade: raw.transfers_made,
+      createdAt: new Date(),
     });
 
     if (!parsed.success) {

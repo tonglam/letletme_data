@@ -7,7 +7,7 @@ import { APIError } from '../../../infrastructure/api/common/errors';
 import { JobOperation, JobOptions, MetaJobData } from '../../../infrastructure/queue';
 import { createQueueProcessingError } from '../../../infrastructure/queue/core/errors';
 import { PhaseId } from '../../../types/phases.type';
-import { MetaQueueService } from './base/meta.queue';
+import { createMetaQueueService, MetaQueueService } from './base/meta.queue';
 
 /**
  * Phase job service
@@ -22,7 +22,7 @@ export class PhaseJobService {
   /**
    * Process a phase job based on operation type
    */
-  processPhaseJob = (job: Job<MetaJobData>): TE.TaskEither<Error, void> => {
+  processPhasesJob = (job: Job<MetaJobData>): TE.TaskEither<Error, void> => {
     const { operation, id, options } = job.data.data;
 
     switch (operation) {
@@ -156,3 +156,7 @@ export class PhaseJobService {
       ),
     );
 }
+
+// Create and export singleton instance
+const metaQueue = createMetaQueueService();
+export const phaseJobService = new PhaseJobService(metaQueue, phaseRepository);

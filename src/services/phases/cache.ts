@@ -8,6 +8,7 @@ import {
 } from '../../domains/phases/cache/cache';
 import { getCacheModule } from '../../infrastructure/cache/cache.module';
 import { CacheError } from '../../infrastructure/cache/types';
+import { Phase } from '../../types/phases.type';
 
 export const initializePhaseCache = (
   bootstrapApi: BootstrapApi,
@@ -29,7 +30,7 @@ export const initializePhaseCache = (
             getAll: async () => {
               const phases = await bootstrapApi.getBootstrapData();
               return (
-                phases?.map((p) => ({
+                (phases?.phases as Phase[])?.map((p) => ({
                   ...p,
                   createdAt: new Date(),
                 })) ?? []
@@ -37,7 +38,7 @@ export const initializePhaseCache = (
             },
             getOne: async (id) => {
               const phases = await bootstrapApi.getBootstrapData();
-              const phase = phases?.find((p) => p.id === Number(id));
+              const phase = (phases?.phases as Phase[])?.find((p) => p.id === Number(id));
               return phase ? { ...phase, createdAt: new Date() } : null;
             },
           }),

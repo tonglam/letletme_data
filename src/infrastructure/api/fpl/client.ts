@@ -1,46 +1,47 @@
 import axios from 'axios';
-import * as E from 'fp-ts/Either';
-import { pipe } from 'fp-ts/function';
 import pino from 'pino';
-import { BootstrapApi } from '../../../domains/bootstrap/operations';
-import { BootStrapResponse, toDomainBootStrap } from '../../../types/bootStrap.type';
-import { Event } from '../../../types/events.type';
-import { Phase } from '../../../types/phases.type';
+import { BootstrapApi, BootstrapData } from '../../../domains/bootstrap/operations';
 import { setupRequestInterceptors, setupResponseInterceptors } from '../common/client/interceptors';
 import { HTTPClientContext, HTTPConfig, RetryConfig } from '../common/types';
-import { HTTP_CONFIG } from '../config/http.config';
 import { BASE_URLS, FPL_API_CONFIG } from './config';
 
 const defaultRetryConfig: RetryConfig = {
-  attempts: HTTP_CONFIG.RETRY.DEFAULT_ATTEMPTS,
-  baseDelay: HTTP_CONFIG.RETRY.BASE_DELAY,
-  maxDelay: HTTP_CONFIG.RETRY.MAX_DELAY,
-  shouldRetry: (error: unknown) => {
-    if (axios.isAxiosError(error)) {
-      const status = error.response?.status;
-      return status === 429 || (status ? status >= 500 && status < 600 : true);
+  attempts: 3,
+  baseDelay: 1000,
+  maxDelay: 10000,
+  shouldRetry: (error) => {
+    if (error instanceof Error) {
+      const status = parseInt(error.message, 10);
+      return status === 429 || (status >= 500 && status < 600);
     }
-    return true;
+    return false;
   },
 };
 
 const defaultConfig: HTTPConfig = {
   baseURL: BASE_URLS.FPL,
-  timeout: HTTP_CONFIG.TIMEOUT.DEFAULT,
+  timeout: 30000,
   headers: {
-    'User-Agent': HTTP_CONFIG.HEADERS.DEFAULT_USER_AGENT,
-    Accept: HTTP_CONFIG.HEADERS.ACCEPT,
-    'Content-Type': HTTP_CONFIG.HEADERS.CONTENT_TYPE,
-    'Cache-Control': HTTP_CONFIG.HEADERS.CACHE_CONTROL,
-    Pragma: HTTP_CONFIG.HEADERS.PRAGMA,
-    Expires: HTTP_CONFIG.HEADERS.EXPIRES,
+    'Content-Type': 'application/json',
+    Accept: 'application/json',
+    'User-Agent':
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Cache-Control': 'no-cache',
+    Pragma: 'no-cache',
+    'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+    'Sec-Ch-Ua-Mobile': '?0',
+    'Sec-Ch-Ua-Platform': '"macOS"',
+    'Sec-Fetch-Dest': 'empty',
+    'Sec-Fetch-Mode': 'cors',
+    'Sec-Fetch-Site': 'same-site',
   },
   retry: defaultRetryConfig,
 };
 
 export const createFPLClient = (): BootstrapApi => {
-  const client = axios.create(defaultConfig);
   const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
+  const client = axios.create(defaultConfig);
 
   const context: HTTPClientContext = {
     client,
@@ -54,41 +55,12 @@ export const createFPLClient = (): BootstrapApi => {
   setupResponseInterceptors(context)();
 
   return {
-    getBootstrapData: async (): Promise<Phase[] | null> => {
+    getBootstrapData: async () => {
       try {
-        const response = await client.get<BootStrapResponse>(FPL_API_CONFIG.bootstrap.static);
-        return pipe(
-          response.data,
-          toDomainBootStrap,
-          E.fold(
-            (error) => {
-              logger.error({ error }, 'Failed to transform bootstrap data');
-              return null;
-            },
-            (data) => data.phases as Phase[],
-          ),
-        );
+        const response = await client.get<BootstrapData>(FPL_API_CONFIG.bootstrap.static);
+        return response.data;
       } catch (error) {
         logger.error({ error }, 'Failed to fetch bootstrap data');
-        return null;
-      }
-    },
-    getBootstrapEvents: async (): Promise<Event[] | null> => {
-      try {
-        const response = await client.get<BootStrapResponse>(FPL_API_CONFIG.bootstrap.static);
-        return pipe(
-          response.data,
-          toDomainBootStrap,
-          E.fold(
-            (error) => {
-              logger.error({ error }, 'Failed to transform bootstrap events');
-              return null;
-            },
-            (data) => data.events as Event[],
-          ),
-        );
-      } catch (error) {
-        logger.error({ error }, 'Failed to fetch bootstrap events');
         return null;
       }
     },

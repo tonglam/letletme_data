@@ -60,7 +60,7 @@ async function main() {
       process: (job) => {
         logger.info({ jobId: job.id, data: job.data }, 'Processing job');
         return pipe(
-          eventJobService.processEventJob(job),
+          eventJobService.processEventsJob(job),
           TE.map((result) => {
             logger.info({ jobId: job.id }, 'Job processed successfully');
             return result;

@@ -1,311 +1,58 @@
 # Domain Development Guide
 
-This guide provides a comprehensive overview of implementing new domains in the system, using the Events domain as a reference implementation. Follow these patterns and practices to ensure consistency across all domain implementations.
+This guide outlines the process of implementing a new domain in the application, using the `teams` domain as a reference implementation.
 
-## Table of Contents
+## 1. Domain Structure
 
-1. [Domain Structure](#domain-structure)
-2. [Type System](#type-system)
-3. [Domain Layer](#domain-layer)
-4. [Service Layer](#service-layer)
-5. [Job Processing](#job-processing)
-6. [Cache Implementation](#cache-implementation)
-7. [Testing Strategy](#testing-strategy)
-
-## Domain Structure
-
-### Directory Layout
+### 1.1 Directory Structure
 
 ```
 src/
-├── domains/[domain-name]/
-│   ├── index.ts          # Public exports
-│   ├── operations.ts     # Domain operations and business logic
-│   ├── repository.ts     # Data access layer
-│   ├── routes.ts         # API route handlers
-│   ├── queries.ts        # Database queries
-│   └── cache/           # Cache operations
-│       ├── index.ts
-│       ├── keys.ts
-│       └── operations.ts
-├── services/[domain-name]/
-│   ├── index.ts         # Service exports
-│   ├── service.ts       # Main service implementation
-│   ├── workflow.ts      # Complex operation flows
-│   ├── types.ts         # Service-specific types
-│   └── cache.ts         # Service-level caching
-└── types/
-    └── [domain].type.ts # Domain-wide type definitions
+├── types/
+│   ├── teams.type.ts      # Domain types and transformers
+│   └── [domain].type.ts   # Each domain has its own type file
+├── domains/
+│   └── [domain]/
+│       ├── index.ts       # Domain exports
+│       ├── routes.ts      # HTTP routes
+│       ├── operations.ts  # Domain operations
+│       ├── repository.ts  # Data access layer
+│       └── cache/
+│           ├── cache.ts        # Cache operations
+│           └── invalidation.ts # Cache invalidation
+└── services/
+    └── [domain]/
+        ├── index.ts    # Service exports
+        ├── types.ts    # Service types
+        ├── service.ts  # Core implementation
+        ├── workflow.ts # Business workflows
+        └── cache.ts    # Cache initialization
 ```
 
-### Implementation Flow
+### 1.2 Layer Responsibilities
 
-```mermaid
-graph TD
-    A[Define Types] --> B[Create Repository]
-    B --> C[Implement Operations]
-    C --> D[Create Service]
-    D --> E[Define Routes]
-    E --> F[Add Jobs]
-    F --> G[Write Tests]
-```
+- **Types**: Domain models, transformers, and validations
+- **Domain**: Core business logic and data access
+- **Service**: Business workflows and orchestration
+- **Cache**: Data caching and invalidation
+- **Repository**: Data persistence and retrieval
 
-## Type System
+## 2. Job Implementation
 
-### 1. Type Hierarchy
+### 2.1 Job Service Structure
 
 ```typescript
-// 1. Branded Types
-declare const DomainIdBrand: unique symbol;
-export type DomainId = number & { readonly _brand: typeof DomainIdBrand };
+// services/queue/meta/[domain].job.ts
 
-// 2. API Response Types (snake_case)
-export type ApiResponse = z.infer<typeof ApiResponseSchema>;
-
-// 3. Domain Types (camelCase)
-export interface DomainEntity {
-  readonly id: DomainId;
-  // ... domain properties
-}
-
-// 4. Persistence Types
-export interface PrismaEntity {
-  // ... database properties
-}
-```
-
-### 2. Schema Validation
-
-```typescript
-// 1. API Schema
-const ApiResponseSchema = z.object({
-  id: z.number(),
-  field_name: z.string(),
-  // ... external API fields
-});
-
-// 2. Domain Schema
-const DomainSchema = z.object({
-  id: z.number(),
-  fieldName: z.string(),
-  // ... domain fields
-});
-
-// 3. Transformers
-export const toDomainEntity = (raw: ApiResponse): Either<string, DomainEntity> => {
-  try {
-    const parsed = DomainSchema.safeParse({
-      id: raw.id,
-      fieldName: raw.field_name,
-      // ... transform fields
-    });
-
-    if (!parsed.success) {
-      return left(`Invalid domain model: ${parsed.error.message}`);
-    }
-
-    return right({
-      ...parsed.data,
-      id: parsed.data.id as DomainId,
-    });
-  } catch (error) {
-    return left(`Transform error: ${error instanceof Error ? error.message : String(error)}`);
-  }
-};
-```
-
-### 3. Type Guards
-
-```typescript
-export const isDomainId = (id: unknown): id is DomainId =>
-  typeof id === 'number' && id > 0 && Number.isInteger(id);
-
-export const validateDomainId = (id: number): Either<string, DomainId> =>
-  isDomainId(id) ? right(id as DomainId) : left(`Invalid ID: ${id}`);
-
-export const isValidEntity = (entity: DomainEntity): boolean =>
-  isDomainId(entity.id) && typeof entity.fieldName === 'string' && entity.fieldName.length > 0;
-```
-
-## Domain Layer
-
-### 1. Repository Implementation
-
-```typescript
-export const repository: DomainRepository = {
-  prisma,
-
-  findById: (id: DomainId): TE.TaskEither<APIError, PrismaEntity | null> =>
-    pipe(
-      TE.tryCatch(
-        () => prisma.domain.findUnique({ where: { id: Number(id) } }),
-        (error) => createRepositoryError(error),
-      ),
-    ),
-
-  save: (data: PrismaEntityCreate): TE.TaskEither<APIError, PrismaEntity> =>
-    pipe(
-      TE.tryCatch(
-        () => prisma.domain.create({ data }),
-        (error) => createRepositoryError(error),
-      ),
-    ),
-
-  // ... other repository methods
-};
-```
-
-#### Timestamp Handling in Repository Layer
-
-When implementing repositories that deal with timestamps:
-
-1. **Database-Level Defaults**
-
-   ```sql
-   -- Let PostgreSQL handle audit timestamps
-   created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-   updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-   ```
-
-2. **Domain-Specific Times**
-
-   ```typescript
-   // For game deadlines or scheduled events, always use UTC
-   save: (data: PrismaEntityCreate) =>
-     TE.tryCatch(
-       () => {
-         const domainData = {
-           ...data,
-           deadlineTime: new Date(data.deadlineTime), // Ensure UTC
-           // created_at handled by PostgreSQL
-         };
-         return prisma.domain.create({ data: domainData });
-       },
-       (error) => createRepositoryError(error),
-     ),
-   ```
-
-3. **Batch Operations**
-   ```typescript
-   // Same principles apply to batch operations
-   saveBatch: (items: PrismaEntityCreate[]) =>
-     TE.tryCatch(
-       () => prisma.$transaction(
-         items.map(item => ({
-           ...item,
-           // Let database handle timestamps
-         }))
-       ),
-       (error) => createRepositoryError(error),
-     ),
-   ```
-
-### 2. Domain Operations
-
-```typescript
-export const saveDomain = (domain: DomainEntity): TE.TaskEither<APIError, DomainEntity> =>
-  pipe(
-    toPrismaEntityWithError(domain),
-    TE.fromEither,
-    TE.chain((prismaEntity) =>
-      pipe(
-        repository.save({ ...prismaEntity, id: Number(domain.id) }),
-        TE.chain((saved) => pipe(toDomainEntityWithError(saved), TE.fromEither)),
-      ),
-    ),
-  );
-```
-
-### 3. Routes
-
-```typescript
-export const router = Router();
-
-router.get('/', async (req, res) => {
-  const result = await pipe(
-    service.getAll(),
-    TE.map((data) => ({ status: 'success', data })),
-    TE.mapLeft((error) => ({ status: 'error', error: error.message })),
-  )();
-
-  if (E.isLeft(result)) {
-    res.status(400).json(result.left);
-    return;
-  }
-
-  res.json(result.right);
-});
-```
-
-## Service Layer
-
-### 1. Service Implementation
-
-```typescript
-export class DomainService {
-  constructor(
-    private readonly api: DomainApi,
-    private readonly operations: DomainOperations,
-  ) {}
-
-  getAll = (): TE.TaskEither<APIError, DomainEntity[]> =>
-    pipe(
-      TE.tryCatch(
-        () => this.api.fetchAll(),
-        (error) => createApiError(error),
-      ),
-      TE.chain((response) =>
-        pipe(
-          response.map(toDomainEntity),
-          TE.traverseArray((entity) => this.operations.save(entity)),
-        ),
-      ),
-    );
-}
-```
-
-### 2. Workflow Implementation
-
-```typescript
-export const complexWorkflow = (params: WorkflowParams): TE.TaskEither<APIError, WorkflowResult> =>
-  pipe(
-    validateParams(params),
-    TE.fromEither,
-    TE.chain(fetchDependencies),
-    TE.chain(processData),
-    TE.chain(saveResults),
-  );
-```
-
-## Job Processing
-
-### 1. Job Types
-
-```typescript
-export enum JobOperation {
-  UPDATE = 'update',
-  SYNC = 'sync',
-  DELETE = 'delete',
-}
-
-export interface DomainJobData extends BaseJobData {
-  operation: JobOperation;
-  id?: number;
-  options?: JobOptions;
-}
-```
-
-### 2. Job Service
-
-```typescript
 export class DomainJobService {
   constructor(
-    private readonly queue: QueueService,
-    private readonly repository: DomainRepository,
+    private readonly metaQueue: MetaQueueService,
+    private readonly domainRepo: DomainRepository,
   ) {}
 
-  processDomainJob = (job: Job<DomainJobData>): TE.TaskEither<Error, void> => {
-    const { operation, id, options } = job.data;
+  // Process job based on operation type
+  processDomainJob = (job: Job<MetaJobData>): TE.TaskEither<Error, void> => {
+    const { operation, id, options } = job.data.data;
 
     switch (operation) {
       case JobOperation.UPDATE:
@@ -315,205 +62,186 @@ export class DomainJobService {
       case JobOperation.DELETE:
         return this.handleDelete(id);
       default:
-        return TE.left(createQueueError(`Unknown operation: ${operation}`));
+        return TE.left(createQueueProcessingError({ message: `Unknown operation: ${operation}` }));
     }
   };
 
+  // Schedule jobs
   scheduleDomainUpdate = (
     id: number,
     options?: JobOptions,
-  ): TE.TaskEither<Error, Job<DomainJobData>> =>
-    this.queue.addJob({
+  ): TE.TaskEither<Error, Job<MetaJobData>> =>
+    this.metaQueue.addDomainJob({
       data: {
         operation: JobOperation.UPDATE,
         id,
         options,
       },
     });
+
+  // ... other scheduling methods
 }
+
+// Create and export singleton instance
+const metaQueue = createMetaQueueService();
+export const domainJobService = new DomainJobService(metaQueue, domainRepository);
 ```
 
-## Cache Implementation
-
-### 1. Cache Keys
+### 2.2 Job Registration
 
 ```typescript
-// cache/keys.ts
-export const CacheKeys = {
-  entity: (id: string) => `domain:${id}`,
-  list: () => 'domain:list',
-  meta: (key: string) => `domain:meta:${key}`,
-} as const;
+// src/index.ts
+
+const worker = createMetaWorkerService(
+  {
+    process: (job) => {
+      switch (job.data.type) {
+        case QUEUE_JOB_TYPES.EVENTS:
+          return eventJobService.processEventsJob(job);
+        case QUEUE_JOB_TYPES.TEAMS:
+          return teamJobService.processTeamsJob(job);
+        case QUEUE_JOB_TYPES.PHASES:
+          return phaseJobService.processPhasesJob(job);
+        default:
+          return TE.left(new Error(`Unknown job type: ${job.data.type}`));
+      }
+    },
+    onCompleted: (job) => logger.info({ jobId: job.id }, 'Job completed'),
+    onFailed: (job, error) => logger.error({ jobId: job.id, error }, 'Job failed'),
+    onError: (error) => logger.error({ error }, 'Worker error'),
+  },
+  META_QUEUE_CONFIG,
+);
 ```
 
-### 2. Cache Operations
+## 3. Route Implementation
+
+### 3.1 Route Structure
 
 ```typescript
-// cache/operations.ts
-export const cacheOperations = {
-  get: <T>(key: string): TE.TaskEither<CacheError, T | null> =>
-    pipe(
-      TE.tryCatch(
-        () => cache.get(key),
-        (error) => createCacheError(error),
-      ),
-    ),
+// domains/[domain]/routes.ts
 
-  set: <T>(key: string, value: T, ttl?: number): TE.TaskEither<CacheError, void> =>
-    pipe(
-      TE.tryCatch(
-        () => cache.set(key, value, ttl),
-        (error) => createCacheError(error),
-      ),
-    ),
+export const domainRouter = Router();
 
-  invalidate: (pattern: string): TE.TaskEither<CacheError, void> =>
-    pipe(
-      TE.tryCatch(
-        () => cache.del(pattern),
-        (error) => createCacheError(error),
-      ),
-    ),
-};
+// Create dependencies
+const bootstrapApi = createFPLClient();
+const domainService = createDomainServiceImpl({
+  bootstrapApi,
+  domainRepository,
+});
+const workflows = domainWorkflows(domainService);
+const operations = createDomainOperations();
+
+// Helper functions
+const handleApiResponse = <T>(task: TE.TaskEither<APIError, T>) =>
+  pipe(
+    task,
+    TE.map((data) => ({ status: 'success', data })),
+    TE.mapLeft((error) => ({ status: 'error', error: error.message })),
+  );
+
+const toAPIError = (error: Error): APIError =>
+  createInternalServerError({ message: error.message });
+
+// Basic CRUD endpoints
+domainRouter.get('/', async (_req, res) => {
+  const result = await handleApiResponse(operations.getAll())();
+  // ... handle response
+});
+
+// Workflow-based endpoints
+domainRouter.post('/sync', async (_req, res) => {
+  const result = await handleApiResponse(workflows.syncAndVerify())();
+  // ... handle response
+});
+
+// Job-based endpoints
+domainRouter.post('/jobs/sync', async (_req, res) => {
+  const result = await handleApiResponse(
+    pipe(domainJobService.scheduleSync(), TE.mapLeft(toAPIError)),
+  )();
+  // ... handle response
+});
 ```
 
-### 3. Repository Cache Integration
+### 3.2 Route Registration
 
 ```typescript
-export const repository = {
-  findById: (id: DomainId): TE.TaskEither<APIError, Entity | null> =>
-    pipe(
-      cacheOperations.get<Entity>(CacheKeys.entity(String(id))),
-      TE.chain((cached) =>
-        cached
-          ? TE.right(cached)
-          : pipe(
-              findInDb(id),
-              TE.chain((entity) =>
-                entity
-                  ? pipe(
-                      cacheOperations.set(CacheKeys.entity(String(id)), entity, CACHE_TTL),
-                      TE.map(() => entity),
-                    )
-                  : TE.right(null),
-              ),
-            ),
-      ),
-    ),
-};
+// src/index.ts
+
+// Register routes
+app.use('/api/phases', phaseRouter);
+app.use('/api/events', eventRouter);
+app.use('/api/teams', teamRouter);
+app.use('/api/monitor', monitorRouter);
 ```
 
-## Testing Strategy
+## 4. Implementation Best Practices
 
-### 1. Unit Tests
+### 4.1 Job Implementation
+
+- Create a dedicated job service for each domain
+- Implement standard operations (UPDATE, SYNC, DELETE)
+- Export a singleton instance
+- Use TaskEither for error handling
+- Follow consistent naming patterns
+
+### 4.2 Route Implementation
+
+- Export a router instance directly (not a factory function)
+- Group endpoints by type (CRUD, workflow, jobs)
+- Use consistent error handling and response formats
+- Implement proper type conversions
+- Follow RESTful conventions
+
+### 4.3 Error Handling
+
+- Use TaskEither for functional error handling
+- Convert between Error and APIError types
+- Provide meaningful error messages
+- Use appropriate HTTP status codes
+
+### 4.4 Dependency Management
+
+- Create dependencies at router level
+- Use dependency injection
+- Follow singleton pattern for services
+- Maintain clear dependency boundaries
+
+## 5. Testing Strategy
+
+### 5.1 Job Tests
 
 ```typescript
-describe('Domain Operations', () => {
-  it('should transform API response to domain entity', () => {
-    const apiResponse = { id: 1, field_name: 'test' };
-    const result = toDomainEntity(apiResponse);
+describe('DomainJobService', () => {
+  describe('processDomainJob', () => {
+    it('should process UPDATE operation', async () => {
+      // Test job processing
+    });
+  });
 
-    expect(E.isRight(result)).toBe(true);
-    if (E.isRight(result)) {
-      expect(result.right).toEqual({
-        id: 1 as DomainId,
-        fieldName: 'test',
-      });
-    }
+  describe('scheduleDomainUpdate', () => {
+    it('should schedule update job', async () => {
+      // Test job scheduling
+    });
   });
 });
 ```
 
-### 2. Integration Tests
+### 5.2 Route Tests
 
 ```typescript
-describe('Domain Repository', () => {
-  beforeEach(async () => {
-    await prisma.domain.deleteMany();
+describe('Domain Routes', () => {
+  describe('GET /', () => {
+    it('should return all items', async () => {
+      // Test GET endpoint
+    });
   });
 
-  it('should save and retrieve entity', async () => {
-    const entity = createTestEntity();
-    const saved = await pipe(
-      repository.save(entity),
-      TE.chain((saved) => repository.findById(saved.id)),
-    )();
-
-    expect(E.isRight(saved)).toBe(true);
-    if (E.isRight(saved)) {
-      expect(saved.right).toMatchObject(entity);
-    }
+  describe('POST /jobs/sync', () => {
+    it('should schedule sync job', async () => {
+      // Test job endpoint
+    });
   });
 });
 ```
-
-## Best Practices Summary
-
-1. **Type Safety**
-
-   - Use branded types for domain identifiers
-   - Implement comprehensive validation
-   - Maintain strict type boundaries
-
-2. **Functional Programming**
-
-   - Use `fp-ts` for error handling
-   - Leverage `pipe` for composition
-   - Implement pure functions
-   - Use `[, value]` instead of `[_, value]` for unused destructuring parameters
-
-3. **Error Handling**
-
-   - Create domain-specific errors
-   - Use `TaskEither` for async operations
-   - Implement proper error boundaries
-
-4. **Cache Strategy**
-
-   - Implement TTL based on data volatility
-   - Use atomic operations
-   - Handle invalidation patterns
-
-5. **Testing**
-
-   - Write comprehensive unit tests
-   - Implement integration tests
-   - Use test factories and helpers
-
-6. **Timestamp Handling**
-
-   - Let PostgreSQL handle `created_at` timestamps with `DEFAULT CURRENT_TIMESTAMP`
-   - Store game-related deadlines (e.g., `deadline_time`) in UTC format
-   - Remove explicit timestamp setting in repository layer when database defaults are available
-   - Example implementation:
-
-     ```typescript
-     // In schema.prisma or SQL
-     model Event {
-       created_at DateTime @default(now())
-     }
-
-     // In repository.ts
-     save: (event: PrismaEventCreate) =>
-       TE.tryCatch(
-         () => {
-           const data = {
-             ...event,
-             // No need to set created_at, let PostgreSQL handle it
-           };
-           return prisma.event.create({ data });
-         },
-         (error) => createDatabaseError(error),
-       ),
-
-     // In domain transformation
-     toDomainEvent = (raw: EventResponse): Either<string, Event> => {
-       const deadlineTime = new Date(raw.deadline_time); // UTC time
-       // ... transform other fields
-       // No need to set created_at
-     }
-     ```
-
-## Conclusion
-
-This guide provides a template for implementing new domains while maintaining consistency with the system's architectural principles and best practices. Use the Events domain implementation as a reference when implementing new domains.

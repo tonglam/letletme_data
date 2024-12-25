@@ -138,7 +138,7 @@ describe('PhaseJobService Integration', () => {
 
         // 3. Process the sync job
         const processResult = await pipe(
-          phaseJobService.processPhaseJob(syncJobResult),
+          phaseJobService.processPhasesJob(syncJobResult),
           TE.mapLeft(toAPIError),
           TE.fold(
             (error: APIError) => T.of(Promise.reject(error)),
