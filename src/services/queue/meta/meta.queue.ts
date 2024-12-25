@@ -1,6 +1,7 @@
 import { Job } from 'bullmq';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
+import { getSharedLogger } from '../../../infrastructure/api/common/logs';
 import {
   META_QUEUE_CONFIG,
   MetaJobData,
@@ -8,6 +9,7 @@ import {
   QUEUE_JOB_STATES,
   QUEUE_JOB_TYPES,
   QUEUE_PRIORITIES,
+  createMonitorService,
   createQueueAdapter,
   createQueueDependencies,
 } from '../../../infrastructure/queue';
@@ -31,12 +33,36 @@ export interface MetaQueueService extends QueueService<MetaJobData> {
 }
 
 /**
- * Creates a meta queue service
+ * Creates a meta queue service with monitoring
  */
 export const createMetaQueueService = (): MetaQueueService => {
   const deps = createQueueDependencies(META_QUEUE_CONFIG);
   const adapter = createQueueAdapter<MetaJobData>(deps);
   const queueService = createQueueService<MetaJobData>(adapter);
+  const logger = getSharedLogger({
+    name: 'meta-queue',
+    level: process.env.LOG_LEVEL || 'info',
+    filepath: process.env.LOG_PATH || 'logs',
+  });
+
+  // Initialize queue monitor
+  const monitor = createMonitorService({
+    queue: deps.queue,
+    events: deps.events,
+    logger,
+    config: {
+      metricsInterval: 60000, // 1 minute
+      historySize: 1440, // 24 hours
+    },
+  });
+
+  // Start monitoring
+  pipe(
+    monitor.start(),
+    TE.mapLeft((error) =>
+      logger.error({ error, queueName: deps.queue.name }, 'Failed to start queue monitoring'),
+    ),
+  )();
 
   return {
     ...queueService,
@@ -71,7 +97,7 @@ export const createMetaQueueService = (): MetaQueueService => {
       pipe(
         TE.tryCatch(
           () => deps.queue.getJobs(QUEUE_JOB_STATES.PENDING),
-          (error) => error as Error,
+          (error) => new Error(`Failed to get pending jobs: ${(error as Error).message}`),
         ),
       ),
 
@@ -79,7 +105,7 @@ export const createMetaQueueService = (): MetaQueueService => {
       pipe(
         TE.tryCatch(
           () => deps.queue.getJobs(QUEUE_JOB_STATES.FAILED),
-          (error) => error as Error,
+          (error) => new Error(`Failed to get failed jobs: ${(error as Error).message}`),
         ),
       ),
 
@@ -87,7 +113,7 @@ export const createMetaQueueService = (): MetaQueueService => {
       pipe(
         TE.tryCatch(
           () => deps.queue.getJobs(QUEUE_JOB_STATES.COMPLETED),
-          (error) => error as Error,
+          (error) => new Error(`Failed to get completed jobs: ${(error as Error).message}`),
         ),
       ),
 
@@ -99,7 +125,8 @@ export const createMetaQueueService = (): MetaQueueService => {
             ? pipe(
                 TE.tryCatch(
                   () => job.remove(),
-                  (error) => error as Error,
+                  (error) =>
+                    new Error(`Failed to remove job ${jobId}: ${(error as Error).message}`),
                 ),
               )
             : TE.right(undefined),
@@ -114,7 +141,7 @@ export const createMetaQueueService = (): MetaQueueService => {
             ? pipe(
                 TE.tryCatch(
                   () => job.retry(),
-                  (error) => error as Error,
+                  (error) => new Error(`Failed to retry job ${jobId}: ${(error as Error).message}`),
                 ),
               )
             : TE.right(undefined),

@@ -11,7 +11,7 @@ import {
 } from '../core/constants';
 import { createQueueProcessingError } from '../core/errors';
 import { createQueueAdapter, createQueueDependencies } from '../core/queue.adapter';
-import { MetaJobData } from '../core/types';
+import { MetaJobData } from '../types';
 
 /**
  * Meta queue service interface

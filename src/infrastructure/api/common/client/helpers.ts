@@ -10,7 +10,7 @@ import {
   createValidationError,
   ERROR_CONFIG,
 } from '../errors';
-import { Headers, RetryConfig } from '../Types';
+import { Headers, RetryConfig } from '../types';
 
 /**
  * Maps HTTP status codes to ErrorCode

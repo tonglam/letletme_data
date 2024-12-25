@@ -23,9 +23,9 @@ export const HTTP_CONFIG = {
    * Different timeouts for different types of operations
    */
   TIMEOUT: {
-    DEFAULT: 30_000, // Standard timeout for most operations
-    LONG: 60_000, // Extended timeout for complex operations
-    SHORT: 5_000, // Quick timeout for simple operations
+    DEFAULT: 30000, // 30 seconds
+    LONG: 60000, // 1 minute
+    SHORT: 5000, // 5 seconds
   },
 
   /**
@@ -35,8 +35,8 @@ export const HTTP_CONFIG = {
   RETRY: {
     DEFAULT_ATTEMPTS: 3, // Standard number of retry attempts
     MAX_ATTEMPTS: 5, // Maximum allowed retry attempts
-    BASE_DELAY: 1_000, // Initial delay between retries (1 second)
-    MAX_DELAY: 10_000, // Maximum delay between retries (10 seconds)
+    BASE_DELAY: 1000, // Initial delay between retries (1 second)
+    MAX_DELAY: 10000, // Maximum delay between retries (10 seconds)
     JITTER_MAX: 100, // Maximum random jitter to add to delay
   },
 

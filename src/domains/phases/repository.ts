@@ -8,6 +8,7 @@ import { PhaseId, PhaseRepository, PrismaPhase, PrismaPhaseCreate } from '../../
  * Provides data access operations for Phase entity
  */
 export const phaseRepository: PhaseRepository = {
+  prisma,
   /**
    * Creates a new phase
    * @param phase - The phase data to create

@@ -3,7 +3,7 @@ import { pipe } from 'fp-ts/function';
 import { IOEither, tryCatch as ioTryCatch } from 'fp-ts/IOEither';
 import { HTTP_CONFIG } from '../../config/http.config';
 import { APIError, createInternalServerError } from '../errors';
-import { HTTPClient, HTTPClientConfig, HTTPClientContext } from '../Types';
+import { HTTPClient, HTTPClientConfig, HTTPClientContext } from '../types';
 import { createDefaultHeaders, DEFAULT_RETRY_CONFIG } from './helpers';
 import { setupRequestInterceptors, setupResponseInterceptors } from './interceptors';
 import { createRequestFunctions } from './operations';
@@ -58,5 +58,5 @@ export const createHTTPClient = (config: HTTPClientConfig): IOEither<APIError, H
 };
 
 // Re-export types and utilities
-export * from '../Types';
+export * from '../types';
 export * from './helpers';

@@ -16,7 +16,7 @@ import * as path from 'path';
 import { Logger, pino } from 'pino';
 import { formatLocalTime } from '../../../utils/date';
 import { APIError } from './errors';
-import { APIResponse } from './Types';
+import { APIResponse } from './types';
 
 /**
  * HTTP request context for logging
@@ -128,38 +128,34 @@ const DEFAULT_LOGGER_CONFIG: LoggerConfig = {
 
 let sharedLogger: Logger | null = null;
 
-const getSharedLogger = (config: LoggerConfig): Logger => {
+export const getSharedLogger = (config: LoggerConfig): Logger => {
   if (!sharedLogger) {
+    const loggerConfig = {
+      level: config.level,
+      timestamp: () => `,"time":"${formatLocalTime(new Date())}"`,
+      formatters: {
+        level: (label: string) => ({ level: label.toUpperCase() }),
+        bindings: () => ({}),
+        log: (object: { type?: string; [key: string]: unknown }) => {
+          const { type, ...rest } = object;
+          return {
+            type,
+            ...rest,
+          };
+        },
+      },
+    };
+
     const transport = pino.transport({
-      target: process.env.NODE_ENV === 'production' ? 'pino-roll' : 'pino-pretty',
-      options:
-        process.env.NODE_ENV === 'production'
-          ? {
-              file: path.join(config.filepath, `${config.name}-%Y-%m-%d.log`),
-              frequency: 'daily',
-              mkdir: true,
-              sync: true,
-              size: process.env.LOG_MAX_SIZE || '10m',
-              maxFiles: parseInt(process.env.LOG_MAX_FILES || '30', 10),
-            }
-          : {
-              destination: path.join(config.filepath, `${config.name}.log`),
-              mkdir: true,
-              sync: true,
-              translateTime: 'yyyy-mm-dd HH:MM:ss.l',
-              colorize: true,
-              singleLine: true,
-              ignore: 'pid,hostname',
-            },
+      target: 'pino/file',
+      options: {
+        destination: path.join(config.filepath, `${config.name}.log`),
+        mkdir: true,
+        sync: true,
+      },
     });
 
-    sharedLogger = pino(
-      {
-        level: config.level,
-        timestamp: () => `,"time":"${formatLocalTime(new Date())}"`,
-      },
-      transport,
-    );
+    sharedLogger = pino(loggerConfig, transport);
   }
   return sharedLogger;
 };

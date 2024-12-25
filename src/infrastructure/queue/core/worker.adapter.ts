@@ -2,8 +2,8 @@ import { Job, Worker } from 'bullmq';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
 import { DEFAULT_QUEUE_OPTIONS } from '../config/queue.config';
+import { BaseJobData, QueueOptions } from '../types';
 import { createQueueProcessingError } from './errors';
-import { BaseJobData, QueueOptions } from './types';
 
 /**
  * Worker adapter dependencies

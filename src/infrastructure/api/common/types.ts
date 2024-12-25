@@ -51,34 +51,30 @@ export type RequestOptions = Omit<AxiosRequestConfig, 'method' | 'url' | 'data'>
  * Configuration for the retry mechanism
  */
 export interface RetryConfig {
-  readonly attempts: number;
-  readonly baseDelay: number;
-  readonly maxDelay: number;
-  readonly shouldRetry: (error: Error) => boolean;
+  attempts: number;
+  baseDelay: number;
+  maxDelay: number;
+  shouldRetry: (error: Error) => boolean;
 }
 
 /**
  * Configuration interface for the HTTP client
  */
-export interface HTTPClientConfig {
-  readonly baseURL: URL;
-  readonly timeout?: number;
-  readonly headers?: Headers;
-  readonly retry?: RetryConfig;
-  readonly validateStatus?: (status: number) => boolean;
-  readonly userAgent?: string;
-  readonly logger?: Logger;
-  readonly name?: string;
+export interface HTTPConfig {
+  baseURL?: string;
+  timeout?: number;
+  headers?: Record<string, string>;
+  retry?: RetryConfig;
 }
 
 /**
  * HTTP Client context containing dependencies
  */
 export interface HTTPClientContext {
-  readonly config: HTTPClientConfig;
-  readonly client: AxiosInstance;
-  readonly retryConfig: RetryConfig;
-  readonly logger?: Logger;
+  client: AxiosInstance;
+  logger: Logger;
+  config: HTTPConfig;
+  retryConfig: RetryConfig;
 }
 
 /**

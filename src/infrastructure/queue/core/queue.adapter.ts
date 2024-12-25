@@ -2,8 +2,8 @@ import { Job, JobsOptions, Queue, QueueEvents } from 'bullmq';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
 import { DEFAULT_QUEUE_OPTIONS } from '../config/queue.config';
+import { BaseJobData, QueueDependencies, QueueOptions } from '../types';
 import { createQueueConnectionError, createQueueProcessingError } from './errors';
-import { BaseJobData, QueueDependencies, QueueOptions } from './types';
 
 /**
  * Job counts type

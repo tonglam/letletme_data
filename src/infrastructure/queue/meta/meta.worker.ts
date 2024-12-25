@@ -4,8 +4,8 @@ import { pipe } from 'fp-ts/function';
 import { WorkerService } from '../../../services/queue/worker.service';
 import { META_QUEUE_CONFIG } from '../config/queue.config';
 import { QUEUE_LOG_MESSAGES, QUEUE_PROGRESS } from '../core/constants';
-import { BaseJobData } from '../core/types';
 import { WorkerDependencies, createWorkerAdapter } from '../core/worker.adapter';
+import { BaseJobData } from '../types';
 
 /**
  * Common job processing wrapper that handles progress updates

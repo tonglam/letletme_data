@@ -4,7 +4,7 @@ import { BootStrapResponse, BootStrapResponseSchema } from '../../../../types/bo
 import { HTTPClient } from '../../common/client';
 import { APIError } from '../../common/errors';
 import { createApiCallContext } from '../../common/logs';
-import { RequestOptions } from '../../common/Types';
+import { RequestOptions } from '../../common/types';
 import { FPL_API_CONFIG } from '../config';
 import { logFplCall, validateResponse } from '../utils';
 

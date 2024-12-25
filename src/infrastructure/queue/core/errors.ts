@@ -1,5 +1,5 @@
 import { Job } from 'bullmq';
-import { BaseJobData } from './types';
+import { BaseJobData } from '../types';
 
 /**
  * Queue error codes enumeration

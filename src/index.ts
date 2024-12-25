@@ -3,6 +3,7 @@ import dotenv from 'dotenv';
 import express, { NextFunction, Request, Response } from 'express';
 import pino from 'pino';
 import expressPinoLogger from 'pino-http';
+import { phaseRouter } from './domains/phases';
 
 dotenv.config();
 
@@ -25,6 +26,9 @@ app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
 app.get('/', (req: Request, res: Response) => {
   res.send('Hello, TypeScript!');
 });
+
+// Register phase routes
+app.use('/api/phases', phaseRouter);
 
 let server: ReturnType<typeof app.listen> | null = null;
 

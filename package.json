@@ -68,6 +68,7 @@
     "pino-http": "^10.3.0",
     "pino-roll": "^2.2.0",
     "redis": "^4.6.11",
+    "rotating-file-stream": "^3.2.5",
     "uuid": "^11.0.3",
     "zod": "^3.22.4"
   }

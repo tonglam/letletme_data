@@ -9,11 +9,11 @@ import {
   createInternalServerError,
 } from '../../../../../src/infrastructure/api/common/errors';
 import { createFPLClient, FPLClient } from '../../../../../src/infrastructure/api/fpl';
-import { MetaJobData } from '../../../../../src/infrastructure/queue/core/types';
 import {
   createMetaQueueService,
   MetaQueueService,
 } from '../../../../../src/infrastructure/queue/meta/meta.queue';
+import { MetaJobData } from '../../../../../src/infrastructure/queue/types';
 import { PhaseJobService } from '../../../../../src/services/queue/meta/phase.job';
 import { PhaseId, PrismaPhase, validatePhaseId } from '../../../../../src/types/phase.type';
 

@@ -5,7 +5,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { HTTP_CONFIG } from '../../config/http.config';
 import { ErrorCode } from '../../config/http.error.config';
 import { ERROR_CONFIG, createBadRequestError, createInternalServerError } from '../errors';
-import { HTTPClientContext } from '../Types';
+import { HTTPClientContext } from '../types';
 import { createErrorFromStatus } from './helpers';
 
 // Add request ID and timing to Axios config
