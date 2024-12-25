@@ -135,10 +135,16 @@ export type Events = z.infer<typeof EventsSchema>;
  */
 export const toDomainEvent = (raw: EventResponse): Either<string, Event> => {
   try {
+    // Ensure deadlineTime is in UTC
+    const deadlineTime = new Date(raw.deadline_time);
+    if (isNaN(deadlineTime.getTime())) {
+      return left(`Invalid deadline time: ${raw.deadline_time}`);
+    }
+
     const parsed = EventSchema.safeParse({
       id: raw.id,
       name: raw.name,
-      deadlineTime: new Date(raw.deadline_time),
+      deadlineTime, // This will be stored as UTC
       deadlineTimeEpoch: raw.deadline_time_epoch,
       deadlineTimeGameOffset: raw.deadline_time_game_offset,
       releaseTime: raw.release_time ? new Date(raw.release_time) : null,
@@ -161,7 +167,6 @@ export const toDomainEvent = (raw: EventResponse): Either<string, Event> => {
       topElement: raw.top_element,
       topElementInfo: raw.top_element_info,
       transfersMade: raw.transfers_made,
-      createdAt: new Date(),
     });
 
     if (!parsed.success) {

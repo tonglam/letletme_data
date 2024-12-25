@@ -155,6 +155,51 @@ export const repository: DomainRepository = {
 };
 ```
 
+#### Timestamp Handling in Repository Layer
+
+When implementing repositories that deal with timestamps:
+
+1. **Database-Level Defaults**
+
+   ```sql
+   -- Let PostgreSQL handle audit timestamps
+   created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+   updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+   ```
+
+2. **Domain-Specific Times**
+
+   ```typescript
+   // For game deadlines or scheduled events, always use UTC
+   save: (data: PrismaEntityCreate) =>
+     TE.tryCatch(
+       () => {
+         const domainData = {
+           ...data,
+           deadlineTime: new Date(data.deadlineTime), // Ensure UTC
+           // created_at handled by PostgreSQL
+         };
+         return prisma.domain.create({ data: domainData });
+       },
+       (error) => createRepositoryError(error),
+     ),
+   ```
+
+3. **Batch Operations**
+   ```typescript
+   // Same principles apply to batch operations
+   saveBatch: (items: PrismaEntityCreate[]) =>
+     TE.tryCatch(
+       () => prisma.$transaction(
+         items.map(item => ({
+           ...item,
+           // Let database handle timestamps
+         }))
+       ),
+       (error) => createRepositoryError(error),
+     ),
+   ```
+
 ### 2. Domain Operations
 
 ```typescript
@@ -430,9 +475,44 @@ describe('Domain Repository', () => {
    - Handle invalidation patterns
 
 5. **Testing**
+
    - Write comprehensive unit tests
    - Implement integration tests
    - Use test factories and helpers
+
+6. **Timestamp Handling**
+
+   - Let PostgreSQL handle `created_at` timestamps with `DEFAULT CURRENT_TIMESTAMP`
+   - Store game-related deadlines (e.g., `deadline_time`) in UTC format
+   - Remove explicit timestamp setting in repository layer when database defaults are available
+   - Example implementation:
+
+     ```typescript
+     // In schema.prisma or SQL
+     model Event {
+       created_at DateTime @default(now())
+     }
+
+     // In repository.ts
+     save: (event: PrismaEventCreate) =>
+       TE.tryCatch(
+         () => {
+           const data = {
+             ...event,
+             // No need to set created_at, let PostgreSQL handle it
+           };
+           return prisma.event.create({ data });
+         },
+         (error) => createDatabaseError(error),
+       ),
+
+     // In domain transformation
+     toDomainEvent = (raw: EventResponse): Either<string, Event> => {
+       const deadlineTime = new Date(raw.deadline_time); // UTC time
+       // ... transform other fields
+       // No need to set created_at
+     }
+     ```
 
 ## Conclusion
 

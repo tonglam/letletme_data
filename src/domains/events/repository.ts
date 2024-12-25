@@ -27,6 +27,7 @@ export const eventRepository: EventRepository = {
       () => {
         const data = {
           ...event,
+          deadlineTime: event.deadlineTime,
           highestScore: event.highestScore ?? undefined,
           highestScoringEntry: event.highestScoringEntry ?? undefined,
           mostSelected: event.mostSelected ?? undefined,
@@ -34,7 +35,6 @@ export const eventRepository: EventRepository = {
           mostCaptained: event.mostCaptained ?? undefined,
           mostViceCaptained: event.mostViceCaptained ?? undefined,
           topElement: event.topElement ?? undefined,
-          createdAt: event.createdAt ?? new Date(),
         };
         return prisma.event.upsert({
           where: { id: Number(event.id) },
@@ -111,7 +111,6 @@ export const eventRepository: EventRepository = {
               mostCaptained: event.mostCaptained ?? undefined,
               mostViceCaptained: event.mostViceCaptained ?? undefined,
               topElement: event.topElement ?? undefined,
-              createdAt: event.createdAt ?? new Date(),
             };
             return prisma.event.upsert({
               where: { id: Number(event.id) },
