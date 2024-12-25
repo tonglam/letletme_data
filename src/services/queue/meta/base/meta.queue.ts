@@ -1,7 +1,7 @@
 import { Job } from 'bullmq';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
-import { getSharedLogger } from '../../../infrastructure/api/common/logs';
+import { getSharedLogger } from '../../../../infrastructure/api/common/logs';
 import {
   META_QUEUE_CONFIG,
   MetaJobData,
@@ -12,8 +12,8 @@ import {
   createMonitorService,
   createQueueAdapter,
   createQueueDependencies,
-} from '../../../infrastructure/queue';
-import { QueueService, createQueueService } from '../queue.service';
+} from '../../../../infrastructure/queue';
+import { QueueService, createQueueService } from '../../queue.service';
 
 /**
  * Meta queue service interface
@@ -23,6 +23,9 @@ export interface MetaQueueService extends QueueService<MetaJobData> {
     data: Omit<MetaJobData, 'type' | 'timestamp'>,
   ) => TE.TaskEither<Error, Job<MetaJobData>>;
   readonly addPhasesJob: (
+    data: Omit<MetaJobData, 'type' | 'timestamp'>,
+  ) => TE.TaskEither<Error, Job<MetaJobData>>;
+  readonly addEventsJob: (
     data: Omit<MetaJobData, 'type' | 'timestamp'>,
   ) => TE.TaskEither<Error, Job<MetaJobData>>;
   readonly getPendingJobs: () => TE.TaskEither<Error, Job<MetaJobData>[]>;
@@ -42,7 +45,7 @@ export const createMetaQueueService = (): MetaQueueService => {
   const logger = getSharedLogger({
     name: 'meta-queue',
     level: process.env.LOG_LEVEL || 'info',
-    filepath: process.env.LOG_PATH || 'logs',
+    filepath: './logs',
   });
 
   // Initialize queue monitor
@@ -84,6 +87,19 @@ export const createMetaQueueService = (): MetaQueueService => {
       queueService.add(
         {
           type: QUEUE_JOB_TYPES.PHASES,
+          timestamp: new Date(),
+          ...data,
+        },
+        {
+          priority: QUEUE_PRIORITIES.MEDIUM,
+          attempts: QUEUE_ATTEMPTS.DEFAULT,
+        },
+      ),
+
+    addEventsJob: (data) =>
+      queueService.add(
+        {
+          type: QUEUE_JOB_TYPES.EVENTS,
           timestamp: new Date(),
           ...data,
         },

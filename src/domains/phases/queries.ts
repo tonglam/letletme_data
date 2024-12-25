@@ -12,7 +12,7 @@ import {
   PrismaPhase,
   validateEventId,
   validatePhaseId,
-} from '../../types/phase.type';
+} from '../../types/phases.type';
 
 /**
  * Retrieves all phases from the repository

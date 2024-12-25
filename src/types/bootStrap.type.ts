@@ -2,7 +2,7 @@ import { Either, left, right } from 'fp-ts/Either';
 import { z } from 'zod';
 import { Element, ElementsResponseSchema, ElementsSchema, toDomainElement } from './element.type';
 import { Event, EventsResponseSchema, EventsSchema, toDomainEvent } from './events.type';
-import { Phase, PhasesResponseSchema, PhasesSchema, toDomainPhase } from './phase.type';
+import { Phase, PhasesResponseSchema, PhasesSchema, toDomainPhase } from './phases.type';
 import { Team, TeamsResponseSchema, TeamsSchema, toDomainTeam } from './teams.type';
 
 // ============ Schemas ============

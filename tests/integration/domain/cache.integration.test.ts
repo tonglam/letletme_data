@@ -5,7 +5,7 @@ import { pipe } from 'fp-ts/function';
 import { createPhaseCache, createPhaseOperations } from '../../../src/domains/phases/cache/cache';
 import { createRedisClient } from '../../../src/infrastructure/cache/client/redis.client';
 import { RedisClient, RedisConfig } from '../../../src/infrastructure/cache/types';
-import { PrismaPhase } from '../../../src/types/phase.type';
+import { PrismaPhase } from '../../../src/types/phases.type';
 
 describe('Phase Cache Integration', () => {
   jest.setTimeout(30000); // Increase timeout to 30 seconds
@@ -23,27 +23,27 @@ describe('Phase Cache Integration', () => {
     host: process.env.REDIS_HOST || 'localhost',
     port: Number(process.env.REDIS_PORT) || 6379,
     password: process.env.REDIS_PASSWORD,
-    maxRetriesPerRequest: 0,
+    maxRetriesPerRequest: 3,
     lazyConnect: true,
-    enableOfflineQueue: false,
-    commandTimeout: 1000,
+    enableOfflineQueue: true,
+    commandTimeout: 5000,
     reconnectStrategy: {
-      maxAttempts: 1,
-      delay: 1000,
+      maxAttempts: 5,
+      delay: 2000,
     },
   };
 
   let redisClient: RedisClient;
   let phaseCache: ReturnType<typeof createPhaseOperations>;
   let mockDataProvider: {
-    getAllPhases: () => Promise<PrismaPhase[]>;
-    getPhase: (id: string) => Promise<PrismaPhase | null>;
+    getAll: () => Promise<readonly PrismaPhase[]>;
+    getOne: (id: string) => Promise<PrismaPhase | null>;
   };
 
   beforeAll(async () => {
     mockDataProvider = {
-      getAllPhases: jest.fn(async () => [mockPhase]),
-      getPhase: jest.fn(async (id: string) => (id === String(mockPhase.id) ? mockPhase : null)),
+      getAll: jest.fn(async () => [mockPhase]),
+      getOne: jest.fn(async (id: string) => (id === String(mockPhase.id) ? mockPhase : null)),
     };
   });
 
@@ -63,11 +63,11 @@ describe('Phase Cache Integration', () => {
   beforeEach(async () => {
     const clientOrError = await createRedisClient({
       ...redisConfig,
-      enableOfflineQueue: true, // Enable offline queue for better command handling
-      maxRetriesPerRequest: 1,
+      enableOfflineQueue: true,
+      maxRetriesPerRequest: 3,
       reconnectStrategy: {
-        maxAttempts: 3,
-        delay: 1000,
+        maxAttempts: 5,
+        delay: 2000,
       },
     })();
 
@@ -77,7 +77,7 @@ describe('Phase Cache Integration', () => {
     redisClient = clientOrError.right;
 
     // Connect to Redis before each test
-    const maxRetries = 3;
+    const maxRetries = 5;
     let retries = 0;
     let connected = false;
 
@@ -97,10 +97,10 @@ describe('Phase Cache Integration', () => {
           ),
         )();
 
-        // Wait for Redis to be ready
+        // Wait for Redis to be ready with increased timeout
         let readyRetries = 0;
-        while (readyRetries < 10 && !redisClient.isReady()) {
-          await new Promise((resolve) => setTimeout(resolve, 500));
+        while (readyRetries < 20 && !redisClient.isReady()) {
+          await new Promise((resolve) => setTimeout(resolve, 1000));
           readyRetries++;
         }
 
@@ -114,20 +114,20 @@ describe('Phase Cache Integration', () => {
         if (retries === maxRetries) {
           throw new Error(`Failed to connect to Redis after ${maxRetries} attempts: ${error}`);
         }
-        await new Promise((resolve) => setTimeout(resolve, 1000));
+        await new Promise((resolve) => setTimeout(resolve, 2000));
       }
     }
 
     const cache = createPhaseCache(redisClient);
     phaseCache = createPhaseOperations(cache, mockDataProvider);
 
-    // Clear all test keys before each test
+    // Clear all test keys before each test with increased retries
     await pipe(
       redisClient.keys('phase:*'),
       TE.chain((keys) => (keys.length > 0 ? redisClient.del(...keys) : TE.right(0))),
       TE.fold(
         (error) => {
-          console.error('Failed to clear test keys:', error);
+          console.warn('Failed to clear test keys:', error);
           return T.of(undefined);
         },
         () => T.of(undefined),
@@ -168,7 +168,7 @@ describe('Phase Cache Integration', () => {
       )();
 
       expect(result).toEqual(mockPhase);
-      expect(mockDataProvider.getPhase).not.toHaveBeenCalled();
+      expect(mockDataProvider.getOne).not.toHaveBeenCalled();
     });
 
     test('should handle non-existent phase', async () => {
@@ -183,7 +183,7 @@ describe('Phase Cache Integration', () => {
       )();
 
       expect(result).toBeNull();
-      expect(mockDataProvider.getPhase).toHaveBeenCalledWith('999');
+      expect(mockDataProvider.getOne).toHaveBeenCalledWith('999');
     });
 
     test('should cache multiple phases', async () => {
@@ -224,7 +224,7 @@ describe('Phase Cache Integration', () => {
       )();
 
       expect(result).toEqual([mockPhase]);
-      expect(mockDataProvider.getAllPhases).toHaveBeenCalled();
+      expect(mockDataProvider.getAll).toHaveBeenCalled();
 
       // Verify phase was cached
       const cachedPhase = await pipe(
@@ -275,7 +275,7 @@ describe('Phase Cache Integration', () => {
       )();
 
       expect(result).toEqual(mockPhase);
-      expect(mockDataProvider.getPhase).toHaveBeenCalledWith(String(mockPhase.id));
+      expect(mockDataProvider.getOne).toHaveBeenCalledWith(String(mockPhase.id));
     });
   });
 
@@ -326,8 +326,8 @@ describe('Phase Cache Integration', () => {
     test('should handle provider errors', async () => {
       // Create a new mock provider that always fails
       const errorProvider = {
-        getAllPhases: jest.fn().mockRejectedValue(new Error('Provider error')),
-        getPhase: jest.fn().mockRejectedValue(new Error('Provider error')),
+        getAll: jest.fn().mockRejectedValue(new Error('Provider error')),
+        getOne: jest.fn().mockRejectedValue(new Error('Provider error')),
       };
 
       // Create a new cache with the error provider

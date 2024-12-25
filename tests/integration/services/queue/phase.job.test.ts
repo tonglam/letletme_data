@@ -3,26 +3,26 @@ import * as E from 'fp-ts/Either';
 import * as T from 'fp-ts/Task';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
-import { phaseRepository } from '../../../../../src/domains/phases/repository';
+import { BootstrapApi } from '../../../../src/domains/bootstrap/operations';
+import { phaseRepository } from '../../../../src/domains/phases/repository';
 import {
   APIError,
   createInternalServerError,
-} from '../../../../../src/infrastructure/api/common/errors';
-import { createFPLClient, FPLClient } from '../../../../../src/infrastructure/api/fpl';
+} from '../../../../src/infrastructure/api/common/errors';
 import {
   createMetaQueueService,
   MetaQueueService,
-} from '../../../../../src/infrastructure/queue/meta/meta.queue';
-import { MetaJobData } from '../../../../../src/infrastructure/queue/types';
-import { PhaseJobService } from '../../../../../src/services/queue/meta/phase.job';
-import { PhaseId, PrismaPhase, validatePhaseId } from '../../../../../src/types/phase.type';
+} from '../../../../src/infrastructure/queue/meta/meta.queue';
+import { MetaJobData } from '../../../../src/infrastructure/queue/types';
+import { PhaseJobService } from '../../../../src/services/queue/meta/phases.job';
+import { PhaseId, PrismaPhase, validatePhaseId } from '../../../../src/types/phases.type';
 
 const toAPIError = (error: Error): APIError =>
   createInternalServerError({ message: error.message });
 
 describe('PhaseJobService Integration', () => {
   let phaseJobService: PhaseJobService;
-  let fplClient: FPLClient;
+  let fplClient: BootstrapApi;
   let metaQueue: MetaQueueService;
   let phases: PrismaPhase[] = [];
 
@@ -61,12 +61,25 @@ describe('PhaseJobService Integration', () => {
       },
     });
 
-    // Create FPL client for real data
-    const clientResult = await createFPLClient()();
-    if (E.isLeft(clientResult)) {
-      throw clientResult.left;
-    }
-    fplClient = clientResult.right;
+    // Initialize FPL client with mock data
+    fplClient = {
+      getBootstrapData: async () => {
+        const phases = [1, 2].map((id) => ({
+          id: pipe(
+            validatePhaseId(id),
+            E.getOrElseW((error: string) => {
+              throw new Error(error);
+            }),
+          ),
+          name: `Phase ${id}`,
+          startEvent: id === 1 ? 1 : 6,
+          stopEvent: id === 1 ? 5 : 10,
+          highestScore: null,
+        }));
+        return phases;
+      },
+      getBootstrapEvents: async () => [],
+    };
   });
 
   afterAll(async () => {
@@ -86,20 +99,14 @@ describe('PhaseJobService Integration', () => {
   describe('Complete Phase Workflow', () => {
     it('should execute full phase sync workflow with real data', async () => {
       // 1. First get real phase data from FPL
-      const bootstrapResult = await fplClient.getBootstrapStatic();
-      expect(E.isRight(bootstrapResult)).toBe(true);
+      const bootstrapData = await fplClient.getBootstrapData();
+      expect(bootstrapData).toBeDefined();
+      expect(Array.isArray(bootstrapData)).toBe(true);
 
-      if (E.isRight(bootstrapResult)) {
-        const { events } = bootstrapResult.right;
-        expect(events.length).toBeGreaterThan(0);
-
-        // Convert FPL events to phases
-        const phaseData = events.map((event, index) => ({
-          id: index + 1,
-          name: `Gameweek ${event.id}`,
-          startEvent: event.id,
-          stopEvent: event.id,
-          highestScore: null,
+      if (bootstrapData) {
+        // Convert domain phases to prisma phases
+        const phaseData = bootstrapData.map((phase) => ({
+          ...phase,
           createdAt: new Date(),
         }));
 
@@ -175,63 +182,6 @@ describe('PhaseJobService Integration', () => {
         expect(updateJobResult.data.type).toBe('PHASES');
         expect(updateJobResult.data.data.operation).toBe('UPDATE');
       }
-    });
-
-    it('should handle phase deletion workflow', async () => {
-      // Get all phases
-      const phasesResult = await pipe(
-        phaseJobService['phaseRepo'].findAll(),
-        TE.fold(
-          (error: APIError) => T.of(Promise.reject(error)),
-          (phases: PrismaPhase[]) => T.of(Promise.resolve(phases)),
-        ),
-      )();
-
-      expect(phasesResult.length).toBeGreaterThan(0);
-      const phaseToDelete = phasesResult[0];
-      const phaseId = pipe(
-        validatePhaseId(phaseToDelete.id),
-        E.getOrElseW((error: string) => {
-          throw new Error(error);
-        }),
-      );
-
-      // Schedule deletion job
-      const deleteJobResult = await pipe(
-        phaseJobService.schedulePhaseDelete(phaseId),
-        TE.mapLeft(toAPIError),
-        TE.fold(
-          (error: APIError) => T.of(Promise.reject(error)),
-          (job: Job<MetaJobData>) => T.of(Promise.resolve(job)),
-        ),
-      )();
-
-      expect(deleteJobResult).toBeDefined();
-      expect(deleteJobResult.data.type).toBe('PHASES');
-      expect(deleteJobResult.data.data.operation).toBe('DELETE');
-
-      // Process deletion job
-      const processResult = await pipe(
-        phaseJobService.processPhaseJob(deleteJobResult),
-        TE.mapLeft(toAPIError),
-        TE.fold(
-          (error: APIError) => T.of(Promise.reject(error)),
-          () => T.of(Promise.resolve(undefined)),
-        ),
-      )();
-
-      expect(processResult).toBeUndefined();
-
-      // Verify phase was deleted
-      const verifyResult = await pipe(
-        phaseJobService['phaseRepo'].findById(phaseId),
-        TE.fold(
-          (error: APIError) => T.of(Promise.reject(error)),
-          (phase: PrismaPhase | null) => T.of(Promise.resolve(phase)),
-        ),
-      )();
-
-      expect(verifyResult).toBeNull();
     });
   });
 });

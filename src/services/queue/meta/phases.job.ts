@@ -4,10 +4,10 @@ import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
 import { phaseRepository } from '../../../domains/phases/repository';
 import { APIError } from '../../../infrastructure/api/common/errors';
-import { JobOptions, MetaJobData } from '../../../infrastructure/queue';
+import { JobOperation, JobOptions, MetaJobData } from '../../../infrastructure/queue';
 import { createQueueProcessingError } from '../../../infrastructure/queue/core/errors';
-import { PhaseId } from '../../../types/phase.type';
-import { MetaQueueService } from './meta.queue';
+import { PhaseId } from '../../../types/phases.type';
+import { MetaQueueService } from './base/meta.queue';
 
 /**
  * Phase job service
@@ -26,11 +26,11 @@ export class PhaseJobService {
     const { operation, id, options } = job.data.data;
 
     switch (operation) {
-      case 'UPDATE':
+      case JobOperation.UPDATE:
         return this.handlePhaseUpdate(id, options);
-      case 'SYNC':
+      case JobOperation.SYNC:
         return this.handlePhaseSync(options);
-      case 'DELETE':
+      case JobOperation.DELETE:
         return this.handlePhaseDelete(id);
       default:
         return TE.left(
@@ -51,7 +51,7 @@ export class PhaseJobService {
   ): TE.TaskEither<Error, Job<MetaJobData>> =>
     this.metaQueue.addPhasesJob({
       data: {
-        operation: 'UPDATE',
+        operation: JobOperation.UPDATE,
         id,
         options,
       },
@@ -63,7 +63,7 @@ export class PhaseJobService {
   schedulePhasesSync = (options?: JobOptions): TE.TaskEither<Error, Job<MetaJobData>> =>
     this.metaQueue.addPhasesJob({
       data: {
-        operation: 'SYNC',
+        operation: JobOperation.SYNC,
         options,
       },
     });
@@ -74,7 +74,7 @@ export class PhaseJobService {
   schedulePhaseDelete = (id: number): TE.TaskEither<Error, Job<MetaJobData>> =>
     this.metaQueue.addPhasesJob({
       data: {
-        operation: 'DELETE',
+        operation: JobOperation.DELETE,
         id,
       },
     });

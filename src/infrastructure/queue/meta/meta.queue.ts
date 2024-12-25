@@ -23,6 +23,9 @@ export interface MetaQueueService extends QueueService<MetaJobData> {
   readonly addPhasesJob: (
     data: Omit<MetaJobData, 'type' | 'timestamp'>,
   ) => TE.TaskEither<Error, Job<MetaJobData>>;
+  readonly addEventsJob: (
+    data: Omit<MetaJobData, 'type' | 'timestamp'>,
+  ) => TE.TaskEither<Error, Job<MetaJobData>>;
   readonly getPendingJobs: () => TE.TaskEither<Error, Job<MetaJobData>[]>;
   readonly getFailedJobs: () => TE.TaskEither<Error, Job<MetaJobData>[]>;
   readonly getCompletedJobs: () => TE.TaskEither<Error, Job<MetaJobData>[]>;
@@ -58,6 +61,19 @@ export const createMetaQueueService = (): MetaQueueService => {
       queueService.add(
         {
           type: QUEUE_JOB_TYPES.PHASES,
+          timestamp: new Date(),
+          ...data,
+        },
+        {
+          priority: QUEUE_PRIORITIES.MEDIUM,
+          attempts: QUEUE_ATTEMPTS.DEFAULT,
+        },
+      ),
+
+    addEventsJob: (data) =>
+      queueService.add(
+        {
+          type: QUEUE_JOB_TYPES.EVENTS,
           timestamp: new Date(),
           ...data,
         },

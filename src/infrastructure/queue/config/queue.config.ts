@@ -22,6 +22,9 @@ export const DEFAULT_CONNECTION_OPTIONS = {
   port: parseInt(process.env.REDIS_PORT ?? '6379', 10),
   password: process.env.REDIS_PASSWORD,
   retryStrategy: (times: number) => Math.min(times * 1000, 10000),
+  maxRetriesPerRequest: undefined,
+  enableOfflineQueue: true,
+  lazyConnect: false,
 } satisfies ConnectionOptions;
 
 /**

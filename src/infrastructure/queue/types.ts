@@ -14,7 +14,11 @@ export interface BaseJobData {
 /**
  * Common job operations
  */
-export type JobOperation = 'UPDATE' | 'SYNC' | 'DELETE';
+export enum JobOperation {
+  UPDATE = 'UPDATE',
+  SYNC = 'SYNC',
+  DELETE = 'DELETE',
+}
 
 /**
  * Common job options
@@ -52,7 +56,7 @@ export interface QueueDependencies {
  * Meta job data type
  */
 export interface MetaJobData extends BaseJobData {
-  readonly type: 'BOOTSTRAP' | 'PHASES';
+  readonly type: 'BOOTSTRAP' | 'PHASES' | 'EVENTS';
   readonly data: {
     readonly operation: JobOperation;
     readonly id?: number;

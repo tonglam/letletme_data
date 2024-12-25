@@ -5,7 +5,7 @@ import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
 import { BaseJobData, JobCounts, QueueAdapter } from 'infrastructure/queue';
 import { mock } from 'jest-mock-extended';
-import { QueueService, createQueueService } from 'services/queue/queue.service';
+import { QueueService, createQueueService } from 'src/services/queue/queue.service';
 
 describe('QueueService', () => {
   // Test data and setup

@@ -5,19 +5,19 @@ import { createRedisClient } from '../../../../src/infrastructure/cache/client/r
 import { RedisClient, RedisConfig } from '../../../../src/infrastructure/cache/types';
 import { createPhaseService } from '../../../../src/services/phases';
 import { phaseWorkflows } from '../../../../src/services/phases/workflow';
-import type { Phase } from '../../../../src/types/phase.type';
-import { PhaseId } from '../../../../src/types/phase.type';
+import type { Phase } from '../../../../src/types/phases.type';
+import { PhaseId } from '../../../../src/types/phases.type';
 
 const testPhases: Phase[] = [
   {
-    id: 1,
+    id: 1 as PhaseId,
     name: 'Phase 1',
     startEvent: 1,
     stopEvent: 10,
     highestScore: null,
   },
   {
-    id: 2,
+    id: 2 as PhaseId,
     name: 'Phase 2',
     startEvent: 11,
     stopEvent: 20,
@@ -64,6 +64,7 @@ describe('Phase Service Integration', () => {
 
     const bootstrapApi = {
       getBootstrapData: async () => testPhases,
+      getBootstrapEvents: async () => [],
     };
 
     phaseService = createPhaseService(bootstrapApi);

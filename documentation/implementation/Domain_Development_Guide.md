@@ -1,156 +1,177 @@
 # Domain Development Guide
 
-This guide provides a comprehensive overview of implementing new domains in the system, using the Phases domain as a reference implementation. Follow these patterns and practices to ensure consistency across all domain implementations.
+This guide provides a comprehensive overview of implementing new domains in the system, using the Events domain as a reference implementation. Follow these patterns and practices to ensure consistency across all domain implementations.
 
 ## Table of Contents
 
-1. [Architecture Overview](#architecture-overview)
-2. [Domain Layer Structure](#domain-layer-structure)
-3. [API Endpoint Implementation](#api-endpoint-implementation)
-4. [Job Implementation](#job-implementation)
-5. [Service Layer](#service-layer)
-6. [Queue Jobs](#queue-jobs)
-7. [Type Definitions](#type-definitions)
-8. [Testing Strategy](#testing-strategy)
+1. [Domain Structure](#domain-structure)
+2. [Type System](#type-system)
+3. [Domain Layer](#domain-layer)
+4. [Service Layer](#service-layer)
+5. [Job Processing](#job-processing)
+6. [Cache Implementation](#cache-implementation)
+7. [Testing Strategy](#testing-strategy)
 
-## Architecture Overview
+## Domain Structure
 
-### Domain-Driven Design Flow
-
-```mermaid
-graph TB
-    subgraph "Domain Layer"
-        D[Domain Operations]
-        R[Repository]
-        RT[Routes]
-    end
-
-    subgraph "Service Layer"
-        S[Service Implementation]
-        W[Workflows]
-    end
-
-    subgraph "Infrastructure"
-        API[API Client]
-        Q[Queue]
-        DB[(Database)]
-    end
-
-    subgraph "Types"
-        DT[Domain Types]
-        PT[Prisma Types]
-        JT[Job Types]
-    end
-
-    Client[HTTP Client] --> RT
-    RT --> W
-    W --> S
-    S --> D
-    D --> R
-    R --> DB
-    API --> S
-    S --> Q
-    DT --> D
-    PT --> R
-    JT --> Q
-```
-
-### Request Flow
-
-```mermaid
-sequenceDiagram
-    participant C as Client
-    participant R as Routes
-    participant S as Service
-    participant D as Domain
-    participant DB as Database
-    participant Q as Queue
-
-    C->>R: HTTP Request
-    R->>S: Service Call
-    S->>D: Domain Operation
-    D->>DB: Database Query
-    D-->>S: Domain Result
-    S->>Q: Schedule Job
-    Q-->>S: Job Scheduled
-    S-->>R: Service Result
-    R-->>C: HTTP Response
-```
-
-### Job Processing Flow
-
-```mermaid
-graph LR
-    subgraph "Job Lifecycle"
-        A[Job Created] --> B[Queued]
-        B --> C[Processing]
-        C --> D[Complete]
-        C --> E[Failed]
-        E --> F[Retry?]
-        F -->|Yes| B
-        F -->|No| G[Dead Letter]
-    end
-```
-
-## Domain Layer Structure
-
-The domain layer is the core of your business logic. Reference: `src/domains/phases`
-
-### Directory Structure
+### Directory Layout
 
 ```
-src/domains/[domain-name]/
-├── index.ts          # Public exports
-├── operations.ts     # Domain operations and business logic
-├── repository.ts     # Data access layer
-└── routes.ts         # API route handlers
+src/
+├── domains/[domain-name]/
+│   ├── index.ts          # Public exports
+│   ├── operations.ts     # Domain operations and business logic
+│   ├── repository.ts     # Data access layer
+│   ├── routes.ts         # API route handlers
+│   ├── queries.ts        # Database queries
+│   └── cache/           # Cache operations
+│       ├── index.ts
+│       ├── keys.ts
+│       └── operations.ts
+├── services/[domain-name]/
+│   ├── index.ts         # Service exports
+│   ├── service.ts       # Main service implementation
+│   ├── workflow.ts      # Complex operation flows
+│   ├── types.ts         # Service-specific types
+│   └── cache.ts         # Service-level caching
+└── types/
+    └── [domain].type.ts # Domain-wide type definitions
 ```
 
 ### Implementation Flow
 
 ```mermaid
 graph TD
-    subgraph "Implementation Steps"
-        A[Define Types] --> B[Create Repository]
-        B --> C[Implement Operations]
-        C --> D[Create Service]
-        D --> E[Define Routes]
-        E --> F[Add Jobs]
-        F --> G[Write Tests]
-    end
+    A[Define Types] --> B[Create Repository]
+    B --> C[Implement Operations]
+    C --> D[Create Service]
+    D --> E[Define Routes]
+    E --> F[Add Jobs]
+    F --> G[Write Tests]
 ```
 
-### Implementation Steps
+## Type System
 
-1. **Create Domain Operations** (`operations.ts`):
+### 1. Type Hierarchy
 
 ```typescript
-// Example from phases/operations.ts
-export const savePhase = (phase: DomainPhase): TE.TaskEither<APIError, DomainPhase> =>
+// 1. Branded Types
+declare const DomainIdBrand: unique symbol;
+export type DomainId = number & { readonly _brand: typeof DomainIdBrand };
+
+// 2. API Response Types (snake_case)
+export type ApiResponse = z.infer<typeof ApiResponseSchema>;
+
+// 3. Domain Types (camelCase)
+export interface DomainEntity {
+  readonly id: DomainId;
+  // ... domain properties
+}
+
+// 4. Persistence Types
+export interface PrismaEntity {
+  // ... database properties
+}
+```
+
+### 2. Schema Validation
+
+```typescript
+// 1. API Schema
+const ApiResponseSchema = z.object({
+  id: z.number(),
+  field_name: z.string(),
+  // ... external API fields
+});
+
+// 2. Domain Schema
+const DomainSchema = z.object({
+  id: z.number(),
+  fieldName: z.string(),
+  // ... domain fields
+});
+
+// 3. Transformers
+export const toDomainEntity = (raw: ApiResponse): Either<string, DomainEntity> => {
+  try {
+    const parsed = DomainSchema.safeParse({
+      id: raw.id,
+      fieldName: raw.field_name,
+      // ... transform fields
+    });
+
+    if (!parsed.success) {
+      return left(`Invalid domain model: ${parsed.error.message}`);
+    }
+
+    return right({
+      ...parsed.data,
+      id: parsed.data.id as DomainId,
+    });
+  } catch (error) {
+    return left(`Transform error: ${error instanceof Error ? error.message : String(error)}`);
+  }
+};
+```
+
+### 3. Type Guards
+
+```typescript
+export const isDomainId = (id: unknown): id is DomainId =>
+  typeof id === 'number' && id > 0 && Number.isInteger(id);
+
+export const validateDomainId = (id: number): Either<string, DomainId> =>
+  isDomainId(id) ? right(id as DomainId) : left(`Invalid ID: ${id}`);
+
+export const isValidEntity = (entity: DomainEntity): boolean =>
+  isDomainId(entity.id) && typeof entity.fieldName === 'string' && entity.fieldName.length > 0;
+```
+
+## Domain Layer
+
+### 1. Repository Implementation
+
+```typescript
+export const repository: DomainRepository = {
+  prisma,
+
+  findById: (id: DomainId): TE.TaskEither<APIError, PrismaEntity | null> =>
+    pipe(
+      TE.tryCatch(
+        () => prisma.domain.findUnique({ where: { id: Number(id) } }),
+        (error) => createRepositoryError(error),
+      ),
+    ),
+
+  save: (data: PrismaEntityCreate): TE.TaskEither<APIError, PrismaEntity> =>
+    pipe(
+      TE.tryCatch(
+        () => prisma.domain.create({ data }),
+        (error) => createRepositoryError(error),
+      ),
+    ),
+
+  // ... other repository methods
+};
+```
+
+### 2. Domain Operations
+
+```typescript
+export const saveDomain = (domain: DomainEntity): TE.TaskEither<APIError, DomainEntity> =>
   pipe(
-    toPrismaPhaseWithError(phase),
+    toPrismaEntityWithError(domain),
     TE.fromEither,
-    TE.chain((prismaPhase) =>
+    TE.chain((prismaEntity) =>
       pipe(
-        phaseRepository.save({ ...prismaPhase, id: Number(phase.id) }),
-        TE.chain((saved) => pipe(toDomainPhaseWithError(saved), TE.fromEither)),
+        repository.save({ ...prismaEntity, id: Number(domain.id) }),
+        TE.chain((saved) => pipe(toDomainEntityWithError(saved), TE.fromEither)),
       ),
     ),
   );
 ```
 
-2. **Implement Repository** (`repository.ts`):
-
-```typescript
-export const repository = {
-  save: (entity: Entity): TE.TaskEither<APIError, Entity> => // ...
-  findById: (id: EntityId): TE.TaskEither<APIError, Entity | null> => // ...
-  findAll: (): TE.TaskEither<APIError, Entity[]> => // ...
-  // Additional repository methods
-};
-```
-
-3. **Define Routes** (`routes.ts`):
+### 3. Routes
 
 ```typescript
 export const router = Router();
@@ -162,156 +183,257 @@ router.get('/', async (req, res) => {
     TE.mapLeft((error) => ({ status: 'error', error: error.message })),
   )();
 
-  if (result._tag === 'Left') {
+  if (E.isLeft(result)) {
     res.status(400).json(result.left);
-  } else {
-    res.json(result.right);
+    return;
   }
+
+  res.json(result.right);
 });
 ```
 
-## API Endpoint Implementation
+## Service Layer
 
-Reference: `src/infrastructure/api/fpl/endpoint`
-
-### API Implementation Flow
-
-```mermaid
-graph TD
-    subgraph "API Implementation"
-        A[Define Endpoints] --> B[Create Client]
-        B --> C[Add Error Handling]
-        C --> D[Implement Retries]
-        D --> E[Add Validation]
-        E --> F[Write Tests]
-    end
-```
-
-### Steps to Add New Endpoints
-
-1. **Define Endpoint Configuration**:
+### 1. Service Implementation
 
 ```typescript
-export const API_CONFIG = {
-  newDomain: {
-    list: '/new-domain',
-    details: (id: string) => `/new-domain/${id}`,
-    // Additional endpoints
-  },
-};
+export class DomainService {
+  constructor(
+    private readonly api: DomainApi,
+    private readonly operations: DomainOperations,
+  ) {}
+
+  getAll = (): TE.TaskEither<APIError, DomainEntity[]> =>
+    pipe(
+      TE.tryCatch(
+        () => this.api.fetchAll(),
+        (error) => createApiError(error),
+      ),
+      TE.chain((response) =>
+        pipe(
+          response.map(toDomainEntity),
+          TE.traverseArray((entity) => this.operations.save(entity)),
+        ),
+      ),
+    );
+}
 ```
 
-2. **Implement API Client**:
+### 2. Workflow Implementation
 
 ```typescript
-export const createClient = (): DomainApi => ({
-  getData: async () => {
-    try {
-      const response = await client.get<ApiResponse>(API_CONFIG.newDomain.list);
-      return response.data;
-    } catch (error) {
-      return null;
-    }
-  },
-});
+export const complexWorkflow = (params: WorkflowParams): TE.TaskEither<APIError, WorkflowResult> =>
+  pipe(
+    validateParams(params),
+    TE.fromEither,
+    TE.chain(fetchDependencies),
+    TE.chain(processData),
+    TE.chain(saveResults),
+  );
 ```
 
-## Job Implementation
+## Job Processing
 
-Reference: `src/infrastructure/queue/meta`
-
-### Job Processing Flow
-
-```mermaid
-stateDiagram-v2
-    [*] --> Queued
-    Queued --> Processing
-    Processing --> Completed
-    Processing --> Failed
-    Failed --> Retry
-    Retry --> Queued
-    Failed --> DeadLetter
-    Completed --> [*]
-    DeadLetter --> [*]
-```
-
-### Steps for New Job Types
-
-1. **Define Job Data Types**:
+### 1. Job Types
 
 ```typescript
-export interface NewDomainJobData extends BaseJobData {
-  operation: 'CREATE' | 'UPDATE' | 'DELETE';
+export enum JobOperation {
+  UPDATE = 'update',
+  SYNC = 'sync',
+  DELETE = 'delete',
+}
+
+export interface DomainJobData extends BaseJobData {
+  operation: JobOperation;
   id?: number;
   options?: JobOptions;
 }
 ```
 
-2. **Create Job Service**:
+### 2. Job Service
 
 ```typescript
-export class NewDomainJobService {
+export class DomainJobService {
   constructor(
     private readonly queue: QueueService,
-    private readonly repository: Repository,
+    private readonly repository: DomainRepository,
   ) {}
 
-  processJob = (job: Job<JobData>): TE.TaskEither<Error, void> => {
+  processDomainJob = (job: Job<DomainJobData>): TE.TaskEither<Error, void> => {
     const { operation, id, options } = job.data;
+
     switch (operation) {
-      case 'CREATE':
-        return this.handleCreate(id, options);
-      // Additional cases
+      case JobOperation.UPDATE:
+        return this.handleUpdate(id, options);
+      case JobOperation.SYNC:
+        return this.handleSync(options);
+      case JobOperation.DELETE:
+        return this.handleDelete(id);
+      default:
+        return TE.left(createQueueError(`Unknown operation: ${operation}`));
     }
   };
+
+  scheduleDomainUpdate = (
+    id: number,
+    options?: JobOptions,
+  ): TE.TaskEither<Error, Job<DomainJobData>> =>
+    this.queue.addJob({
+      data: {
+        operation: JobOperation.UPDATE,
+        id,
+        options,
+      },
+    });
 }
 ```
 
-## Best Practices
+## Cache Implementation
 
-1. **Functional Programming**
+### 1. Cache Keys
 
-   ```mermaid
-   graph LR
-       A[Raw Data] --> B[Validate]
-       B --> C[Transform]
-       C --> D[Process]
-       D --> E[Result]
-   ```
+```typescript
+// cache/keys.ts
+export const CacheKeys = {
+  entity: (id: string) => `domain:${id}`,
+  list: () => 'domain:list',
+  meta: (key: string) => `domain:meta:${key}`,
+} as const;
+```
 
-   - Use `fp-ts` for error handling and composition
-   - Leverage `pipe` for clean function composition
-   - Use `TaskEither` for asynchronous operations
+### 2. Cache Operations
 
-2. **Type Safety**
+```typescript
+// cache/operations.ts
+export const cacheOperations = {
+  get: <T>(key: string): TE.TaskEither<CacheError, T | null> =>
+    pipe(
+      TE.tryCatch(
+        () => cache.get(key),
+        (error) => createCacheError(error),
+      ),
+    ),
 
-   ```mermaid
-   graph LR
-       A[Domain Types] --> B[Validation]
-       B --> C[Type Guards]
-       C --> D[Runtime Checks]
-   ```
+  set: <T>(key: string, value: T, ttl?: number): TE.TaskEither<CacheError, void> =>
+    pipe(
+      TE.tryCatch(
+        () => cache.set(key, value, ttl),
+        (error) => createCacheError(error),
+      ),
+    ),
 
-   - Define branded types for IDs and other critical values
-   - Use strict TypeScript configurations
-   - Implement comprehensive type guards
+  invalidate: (pattern: string): TE.TaskEither<CacheError, void> =>
+    pipe(
+      TE.tryCatch(
+        () => cache.del(pattern),
+        (error) => createCacheError(error),
+      ),
+    ),
+};
+```
+
+### 3. Repository Cache Integration
+
+```typescript
+export const repository = {
+  findById: (id: DomainId): TE.TaskEither<APIError, Entity | null> =>
+    pipe(
+      cacheOperations.get<Entity>(CacheKeys.entity(String(id))),
+      TE.chain((cached) =>
+        cached
+          ? TE.right(cached)
+          : pipe(
+              findInDb(id),
+              TE.chain((entity) =>
+                entity
+                  ? pipe(
+                      cacheOperations.set(CacheKeys.entity(String(id)), entity, CACHE_TTL),
+                      TE.map(() => entity),
+                    )
+                  : TE.right(null),
+              ),
+            ),
+      ),
+    ),
+};
+```
+
+## Testing Strategy
+
+### 1. Unit Tests
+
+```typescript
+describe('Domain Operations', () => {
+  it('should transform API response to domain entity', () => {
+    const apiResponse = { id: 1, field_name: 'test' };
+    const result = toDomainEntity(apiResponse);
+
+    expect(E.isRight(result)).toBe(true);
+    if (E.isRight(result)) {
+      expect(result.right).toEqual({
+        id: 1 as DomainId,
+        fieldName: 'test',
+      });
+    }
+  });
+});
+```
+
+### 2. Integration Tests
+
+```typescript
+describe('Domain Repository', () => {
+  beforeEach(async () => {
+    await prisma.domain.deleteMany();
+  });
+
+  it('should save and retrieve entity', async () => {
+    const entity = createTestEntity();
+    const saved = await pipe(
+      repository.save(entity),
+      TE.chain((saved) => repository.findById(saved.id)),
+    )();
+
+    expect(E.isRight(saved)).toBe(true);
+    if (E.isRight(saved)) {
+      expect(saved.right).toMatchObject(entity);
+    }
+  });
+});
+```
+
+## Best Practices Summary
+
+1. **Type Safety**
+
+   - Use branded types for domain identifiers
+   - Implement comprehensive validation
+   - Maintain strict type boundaries
+
+2. **Functional Programming**
+
+   - Use `fp-ts` for error handling
+   - Leverage `pipe` for composition
+   - Implement pure functions
+   - Use `[, value]` instead of `[_, value]` for unused destructuring parameters
 
 3. **Error Handling**
 
-   ```mermaid
-   graph TD
-       A[Operation] --> B{Success?}
-       B -->|Yes| C[Return Result]
-       B -->|No| D[Error Handler]
-       D --> E[Domain Error]
-       D --> F[System Error]
-       D --> G[Validation Error]
-   ```
-
-   - Use domain-specific error types
+   - Create domain-specific errors
+   - Use `TaskEither` for async operations
    - Implement proper error boundaries
-   - Provide meaningful error messages
+
+4. **Cache Strategy**
+
+   - Implement TTL based on data volatility
+   - Use atomic operations
+   - Handle invalidation patterns
+
+5. **Testing**
+   - Write comprehensive unit tests
+   - Implement integration tests
+   - Use test factories and helpers
 
 ## Conclusion
 
-Follow this guide to maintain consistency across domain implementations. Each section provides a template and reference implementation that can be adapted for new domains while maintaining the system's architectural principles and best practices.
+This guide provides a template for implementing new domains while maintaining consistency with the system's architectural principles and best practices. Use the Events domain implementation as a reference when implementing new domains.

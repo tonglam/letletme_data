@@ -8,7 +8,7 @@ import type {
   PhaseId,
   PrismaPhase,
   PrismaPhaseCreate,
-} from '../../types/phase.type';
+} from '../../types/phases.type';
 import type { PhaseCacheOperations } from './cache/cache';
 import { phaseRepository } from './repository';
 

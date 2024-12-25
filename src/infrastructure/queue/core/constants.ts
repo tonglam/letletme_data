@@ -13,8 +13,8 @@ export const QUEUE_PROGRESS = {
  */
 export const QUEUE_JOB_TYPES = {
   BOOTSTRAP: 'BOOTSTRAP',
-  TEAMS: 'TEAMS',
   PHASES: 'PHASES',
+  EVENTS: 'EVENTS',
 } as const;
 
 /**

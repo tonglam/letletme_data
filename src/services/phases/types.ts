@@ -3,7 +3,7 @@ import type { BootstrapApi } from '../../domains/bootstrap/operations';
 import type { PhaseCache } from '../../domains/phases/cache/cache';
 import { phaseRepository } from '../../domains/phases/repository';
 import type { APIError } from '../../infrastructure/api/common/errors';
-import type { Phase, PhaseId } from '../../types/phase.type';
+import type { Phase, PhaseId } from '../../types/phases.type';
 
 export type PhaseServiceError = APIError & {
   code: 'CACHE_ERROR' | 'VALIDATION_ERROR' | 'NOT_FOUND' | 'SYNC_ERROR';

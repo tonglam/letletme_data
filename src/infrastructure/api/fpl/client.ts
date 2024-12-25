@@ -1,35 +1,24 @@
 import axios from 'axios';
+import * as E from 'fp-ts/Either';
+import { pipe } from 'fp-ts/function';
 import pino from 'pino';
 import { BootstrapApi } from '../../../domains/bootstrap/operations';
-import { Phase, PhaseId, PrismaPhase } from '../../../types/phase.type';
+import { BootStrapResponse, toDomainBootStrap } from '../../../types/bootStrap.type';
+import { Event } from '../../../types/events.type';
+import { Phase } from '../../../types/phases.type';
 import { setupRequestInterceptors, setupResponseInterceptors } from '../common/client/interceptors';
 import { HTTPClientContext, HTTPConfig, RetryConfig } from '../common/types';
 import { HTTP_CONFIG } from '../config/http.config';
 import { BASE_URLS, FPL_API_CONFIG } from './config';
 
-// Using snake_case for API response to match FPL API format
-type APIPhase = Omit<
-  PrismaPhase,
-  'id' | 'startEvent' | 'stopEvent' | 'highestScore' | 'createdAt'
-> & {
-  id: number;
-  start_event: number;
-  stop_event: number;
-  highest_score: number | null;
-};
-
-interface BootstrapResponse {
-  phases: APIPhase[];
-}
-
 const defaultRetryConfig: RetryConfig = {
   attempts: HTTP_CONFIG.RETRY.DEFAULT_ATTEMPTS,
   baseDelay: HTTP_CONFIG.RETRY.BASE_DELAY,
   maxDelay: HTTP_CONFIG.RETRY.MAX_DELAY,
-  shouldRetry: (error: Error) => {
+  shouldRetry: (error: unknown) => {
     if (axios.isAxiosError(error)) {
       const status = error.response?.status;
-      return status ? status >= 500 && status < 600 : true;
+      return status === 429 || (status ? status >= 500 && status < 600 : true);
     }
     return true;
   },
@@ -49,20 +38,13 @@ const defaultConfig: HTTPConfig = {
   retry: defaultRetryConfig,
 };
 
-const transformPhase = (data: APIPhase): Phase => ({
-  id: data.id as PhaseId,
-  name: data.name,
-  startEvent: data.start_event,
-  stopEvent: data.stop_event,
-  highestScore: data.highest_score,
-});
-
 export const createFPLClient = (): BootstrapApi => {
   const client = axios.create(defaultConfig);
+  const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 
   const context: HTTPClientContext = {
     client,
-    logger: pino({ level: process.env.LOG_LEVEL || 'info' }),
+    logger,
     config: defaultConfig,
     retryConfig: defaultRetryConfig,
   };
@@ -72,12 +54,41 @@ export const createFPLClient = (): BootstrapApi => {
   setupResponseInterceptors(context)();
 
   return {
-    getBootstrapData: async () => {
+    getBootstrapData: async (): Promise<Phase[] | null> => {
       try {
-        const response = await client.get<BootstrapResponse>(FPL_API_CONFIG.bootstrap.static);
-        return response.data.phases.map(transformPhase);
+        const response = await client.get<BootStrapResponse>(FPL_API_CONFIG.bootstrap.static);
+        return pipe(
+          response.data,
+          toDomainBootStrap,
+          E.fold(
+            (error) => {
+              logger.error({ error }, 'Failed to transform bootstrap data');
+              return null;
+            },
+            (data) => data.phases as Phase[],
+          ),
+        );
       } catch (error) {
-        console.error('Failed to fetch bootstrap data:', error);
+        logger.error({ error }, 'Failed to fetch bootstrap data');
+        return null;
+      }
+    },
+    getBootstrapEvents: async (): Promise<Event[] | null> => {
+      try {
+        const response = await client.get<BootStrapResponse>(FPL_API_CONFIG.bootstrap.static);
+        return pipe(
+          response.data,
+          toDomainBootStrap,
+          E.fold(
+            (error) => {
+              logger.error({ error }, 'Failed to transform bootstrap events');
+              return null;
+            },
+            (data) => data.events as Event[],
+          ),
+        );
+      } catch (error) {
+        logger.error({ error }, 'Failed to fetch bootstrap events');
         return null;
       }
     },

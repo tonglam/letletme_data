@@ -14,7 +14,7 @@ import {
 } from '../../domains/phases/operations';
 import type { APIError } from '../../infrastructure/api/common/errors';
 import type { CacheError } from '../../infrastructure/cache/types';
-import type { Phase, PhaseId, PrismaPhase } from '../../types/phase.type';
+import type { Phase, PhaseId, PrismaPhase } from '../../types/phases.type';
 import type { PhaseService, PhaseServiceDependencies } from './types';
 
 const convertPrismaPhases = (

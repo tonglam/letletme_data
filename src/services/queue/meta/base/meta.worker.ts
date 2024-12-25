@@ -4,10 +4,11 @@ import { pipe } from 'fp-ts/function';
 import {
   createWorkerAdapter,
   MetaJobData,
+  QUEUE_JOB_TYPES,
   QueueOptions,
   WorkerDependencies,
-} from '../../../infrastructure/queue';
-import { WorkerService } from '../worker.service';
+} from '../../../../infrastructure/queue';
+import { WorkerService } from '../../worker.service';
 
 /**
  * Meta worker service interface
@@ -16,6 +17,7 @@ export interface MetaWorkerService extends WorkerService {
   readonly processBootstrapJob: (job: Job<MetaJobData>) => Promise<void>;
   readonly processTeamsJob: (job: Job<MetaJobData>) => Promise<void>;
   readonly processPhasesJob: (job: Job<MetaJobData>) => Promise<void>;
+  readonly processEventsJob: (job: Job<MetaJobData>) => Promise<void>;
 }
 
 /**
@@ -62,6 +64,18 @@ export const createMetaWorkerService = (
       )();
     },
 
+    processEventsJob: async () => {
+      await pipe(
+        TE.right(undefined),
+        TE.fold(
+          (error) => {
+            throw error;
+          },
+          () => TE.right(undefined),
+        ),
+      )();
+    },
+
     ...createWorkerAdapter<MetaJobData>(
       {
         prefix: 'letletme',
@@ -70,17 +84,24 @@ export const createMetaWorkerService = (
       {
         process: (job: Job<MetaJobData>) => {
           switch (job.data.type) {
-            case 'BOOTSTRAP':
+            case QUEUE_JOB_TYPES.BOOTSTRAP:
               return pipe(
                 TE.tryCatch(
                   () => service.processBootstrapJob(job),
                   (error) => error as Error,
                 ),
               );
-            case 'PHASES':
+            case QUEUE_JOB_TYPES.PHASES:
               return pipe(
                 TE.tryCatch(
                   () => service.processPhasesJob(job),
+                  (error) => error as Error,
+                ),
+              );
+            case QUEUE_JOB_TYPES.EVENTS:
+              return pipe(
+                TE.tryCatch(
+                  () => service.processEventsJob(job),
                   (error) => error as Error,
                 ),
               );

@@ -70,7 +70,7 @@ const monitorLogger = pino(
     level:
       process.env.LOG_LEVEL ||
       (process.env.NODE_ENV === 'production' ? LOG_CONFIG.PROD_LEVEL : LOG_CONFIG.DEFAULT_LEVEL),
-    timestamp: () => `,"time":"${formatLocalTime(new Date())}"`,
+    timestamp: () => `,"time":"${formatLocalTime()}"`,
     formatters: {
       level: (label: string) => ({ level: label.toUpperCase() }),
       bindings: () => ({}),
@@ -106,6 +106,7 @@ export const createMonitorAdapter = ({
 
   const setupEventListeners = (): void => {
     queueEvents.on('active', ({ jobId, type, timestamp }: QueueEventData['active']) => {
+      const now = new Date();
       jobMetrics.set(jobId, {
         jobId,
         type,
@@ -113,7 +114,7 @@ export const createMonitorAdapter = ({
         duration: TIME_CONSTANTS.ZERO_MS,
         progress: TIME_CONSTANTS.ZERO_MS,
         attempts: 0,
-        timestamp,
+        timestamp: timestamp || now,
       });
 
       monitorLogger.info({
@@ -130,7 +131,7 @@ export const createMonitorAdapter = ({
         O.fromNullable(jobMetrics.get(jobId)),
         O.map((metrics) => {
           metrics.status = 'completed';
-          metrics.duration = Date.now() - metrics.timestamp.getTime();
+          metrics.duration = Date.now() - (metrics.timestamp?.getTime() || Date.now());
 
           monitorLogger.info({
             event: EVENT_TYPES.JOB_COMPLETED,
@@ -139,7 +140,7 @@ export const createMonitorAdapter = ({
             type: metrics.type,
             duration: `${metrics.duration}ms`,
             attempts: metrics.attempts,
-            timestamp: formatLocalTime(new Date()),
+            timestamp: formatLocalTime(),
           });
 
           logger.info(
@@ -162,7 +163,7 @@ export const createMonitorAdapter = ({
         O.fromNullable(jobMetrics.get(jobId)),
         O.map((metrics) => {
           metrics.status = 'failed';
-          metrics.duration = Date.now() - metrics.timestamp.getTime();
+          metrics.duration = Date.now() - (metrics.timestamp?.getTime() || Date.now());
 
           monitorLogger.error({
             event: EVENT_TYPES.JOB_FAILED,
@@ -172,7 +173,7 @@ export const createMonitorAdapter = ({
             duration: `${metrics.duration}ms`,
             attempts: metrics.attempts,
             reason: failedReason,
-            timestamp: formatLocalTime(new Date()),
+            timestamp: formatLocalTime(),
           });
 
           logger.error(
@@ -203,7 +204,7 @@ export const createMonitorAdapter = ({
             queueName: queue.name,
             type: metrics.type,
             progress: `${metrics.progress}%`,
-            timestamp: formatLocalTime(new Date()),
+            timestamp: formatLocalTime(),
           });
 
           logger.debug(
@@ -238,7 +239,7 @@ export const createMonitorAdapter = ({
         metrics.filter(
           (m) =>
             m.status === 'completed' &&
-            m.timestamp.getTime() > currentTime - TIME_CONSTANTS.MINUTE_IN_MS,
+            (m.timestamp?.getTime() || 0) > currentTime - TIME_CONSTANTS.MINUTE_IN_MS,
         ),
       (recent) => recent.length,
     );
@@ -279,7 +280,7 @@ export const createMonitorAdapter = ({
           errorRate: `${metrics.errorRate.toFixed(2)}%`,
           throughput: `${metrics.throughput} jobs/minute`,
         },
-        timestamp: formatLocalTime(new Date(currentTime)),
+        timestamp: formatLocalTime(),
       });
 
       logger.info(
@@ -293,51 +294,56 @@ export const createMonitorAdapter = ({
           },
         },
         LOG_MESSAGES.METRICS_COLLECTED,
-        { timestamp: currentTime },
+        { timestamp: Date.now() },
       );
     } catch (error) {
       monitorLogger.error({
         event: EVENT_TYPES.METRICS_ERROR,
         queueName: queue.name,
         error,
-        timestamp: formatLocalTime(new Date()),
+        timestamp: formatLocalTime(),
       });
 
-      logger.error({ error, queueName: queue.name }, LOG_MESSAGES.METRICS_ERROR, {
-        timestamp: Date.now(),
-      });
+      logger.error(
+        {
+          queueName: queue.name,
+          error,
+        },
+        LOG_MESSAGES.METRICS_ERROR,
+        { timestamp: Date.now() },
+      );
     }
   };
 
-  const toJobMetricsData = (metrics: MutableJobMetrics): JobMetricsData => ({
-    ...metrics,
-  });
-
-  setupEventListeners();
-
-  return {
-    start: () =>
+  const start = (): TE.TaskEither<Error, void> =>
+    pipe(
       TE.tryCatch(
-        () => {
-          metricsInterval = setInterval(() => void collectMetrics(), config.metricsInterval);
+        async () => {
+          setupEventListeners();
+          metricsInterval = setInterval(collectMetrics, config.metricsInterval);
 
           monitorLogger.info({
             event: EVENT_TYPES.MONITOR_STARTED,
             queueName: queue.name,
-            timestamp: formatLocalTime(new Date()),
+            timestamp: formatLocalTime(),
           });
 
-          logger.info({ queueName: queue.name }, LOG_MESSAGES.MONITOR_STARTED, {
-            timestamp: Date.now(),
-          });
-          return Promise.resolve();
+          logger.info(
+            {
+              queueName: queue.name,
+            },
+            LOG_MESSAGES.MONITOR_STARTED,
+            { timestamp: Date.now() },
+          );
         },
         (error) => error as Error,
       ),
+    );
 
-    stop: () =>
+  const stop = (): TE.TaskEither<Error, void> =>
+    pipe(
       TE.tryCatch(
-        () => {
+        async () => {
           if (metricsInterval) {
             clearInterval(metricsInterval);
             metricsInterval = null;
@@ -346,30 +352,56 @@ export const createMonitorAdapter = ({
           monitorLogger.info({
             event: EVENT_TYPES.MONITOR_STOPPED,
             queueName: queue.name,
-            timestamp: formatLocalTime(new Date()),
+            timestamp: formatLocalTime(),
           });
 
-          logger.info({ queueName: queue.name }, LOG_MESSAGES.MONITOR_STOPPED, {
-            timestamp: Date.now(),
-          });
-          return Promise.resolve();
+          logger.info(
+            {
+              queueName: queue.name,
+            },
+            LOG_MESSAGES.MONITOR_STOPPED,
+            { timestamp: Date.now() },
+          );
         },
         (error) => error as Error,
       ),
+    );
 
-    getMetrics: () =>
+  const getMetrics = (): TE.TaskEither<Error, QueueMetrics> =>
+    pipe(
       TE.tryCatch(
         () => Promise.resolve(metricsHistory[metricsHistory.length - 1]),
         (error) => error as Error,
       ),
+    );
 
-    getJobMetrics: (jobId: string) =>
+  const getJobMetrics = (jobId: string): TE.TaskEither<Error, JobMetricsData | null> =>
+    pipe(
       TE.tryCatch(
         () =>
           Promise.resolve(
-            pipe(O.fromNullable(jobMetrics.get(jobId)), O.map(toJobMetricsData), O.toNullable),
+            pipe(
+              O.fromNullable(jobMetrics.get(jobId)),
+              O.map((metrics) => ({
+                jobId: metrics.jobId,
+                type: metrics.type,
+                status: metrics.status,
+                duration: metrics.duration,
+                attempts: metrics.attempts,
+                timestamp: metrics.timestamp,
+                progress: metrics.progress,
+              })),
+              O.toNullable,
+            ),
           ),
         (error) => error as Error,
       ),
+    );
+
+  return {
+    start,
+    stop,
+    getMetrics,
+    getJobMetrics,
   };
 };

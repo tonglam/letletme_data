@@ -26,7 +26,7 @@ export const initializePhaseCache = (
         ),
         E.map((phaseCache) =>
           createPhaseOperations(phaseCache, {
-            getAllPhases: async () => {
+            getAll: async () => {
               const phases = await bootstrapApi.getBootstrapData();
               return (
                 phases?.map((p) => ({
@@ -35,7 +35,7 @@ export const initializePhaseCache = (
                 })) ?? []
               );
             },
-            getPhase: async (id) => {
+            getOne: async (id) => {
               const phases = await bootstrapApi.getBootstrapData();
               const phase = phases?.find((p) => p.id === Number(id));
               return phase ? { ...phase, createdAt: new Date() } : null;

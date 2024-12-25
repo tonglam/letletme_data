@@ -8,19 +8,19 @@ import { APIError } from '../../../src/infrastructure/api/common/errors';
 import { connectDB, disconnectDB } from '../../../src/infrastructure/db/prisma';
 import { createPhaseService } from '../../../src/services/phases';
 import { phaseWorkflows } from '../../../src/services/phases/workflow';
-import { Phase, validatePhaseId } from '../../../src/types/phase.type';
+import { Phase, PhaseId, validatePhaseId } from '../../../src/types/phases.type';
 
-const TEST_EVENT_ID = 15; // Mid-season event for reliable phase testing
+const TEST_EVENT_ID = 21; // Event ID outside any phase boundary
 const TEST_PHASES: Phase[] = [
   {
-    id: 1,
+    id: 1 as PhaseId,
     name: 'Phase 1',
     startEvent: 1,
     stopEvent: 10,
     highestScore: null,
   },
   {
-    id: 2,
+    id: 2 as PhaseId,
     name: 'Phase 2',
     startEvent: 11,
     stopEvent: 20,
@@ -82,6 +82,7 @@ describe('Phase Service Integration', () => {
       // Initialize phase service with mock bootstrap data
       phaseService = createPhaseService({
         getBootstrapData: async () => TEST_PHASES,
+        getBootstrapEvents: async () => [],
       });
 
       // Initialize workflows

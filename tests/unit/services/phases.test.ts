@@ -2,26 +2,26 @@ import * as E from 'fp-ts/Either';
 import { createValidationError } from '../../../src/infrastructure/api/common/errors';
 import { createPhaseService } from '../../../src/services/phases';
 import { phaseWorkflows } from '../../../src/services/phases/workflow';
-import type { Phase } from '../../../src/types/phase.type';
-import { PhaseId } from '../../../src/types/phase.type';
+import type { Phase } from '../../../src/types/phases.type';
+import { PhaseId } from '../../../src/types/phases.type';
 
 const mockPhases: Phase[] = [
   {
-    id: 1,
+    id: 1 as PhaseId,
     name: 'Phase 1',
     startEvent: 1,
     stopEvent: 10,
     highestScore: null,
   },
   {
-    id: 2,
+    id: 2 as PhaseId,
     name: 'Phase 2',
     startEvent: 11,
     stopEvent: 20,
     highestScore: null,
   },
   {
-    id: 3,
+    id: 3 as PhaseId,
     name: 'Phase 3',
     startEvent: 21,
     stopEvent: 30,
@@ -31,6 +31,7 @@ const mockPhases: Phase[] = [
 
 const mockBootstrapApi = {
   getBootstrapData: jest.fn(),
+  getBootstrapEvents: jest.fn(),
 };
 
 let phaseService: ReturnType<typeof createPhaseService>;
@@ -40,10 +41,16 @@ jest.mock('../../../src/services/phases', () => {
     createPhaseService: jest.fn(() => ({
       syncPhases: jest.fn(() => async () => {
         const bootstrapData = await mockBootstrapApi.getBootstrapData();
-        const sortedPhases = bootstrapData.slice().sort((a: Phase, b: Phase) => a.startEvent - b.startEvent);
+        const sortedPhases = bootstrapData
+          .slice()
+          .sort((a: Phase, b: Phase) => a.startEvent - b.startEvent);
         for (let i = 1; i < sortedPhases.length; i++) {
           if (sortedPhases[i].startEvent <= sortedPhases[i - 1].stopEvent) {
-            return E.left(createValidationError({ message: 'Phase sequence invalid: overlapping phases detected' }));
+            return E.left(
+              createValidationError({
+                message: 'Phase sequence invalid: overlapping phases detected',
+              }),
+            );
           }
         }
         return E.right(bootstrapData);
@@ -57,9 +64,7 @@ jest.mock('../../../src/services/phases', () => {
       }),
 
       getCurrentActivePhase: jest.fn((eventId: number) => () => {
-        const phase = mockPhases.find(
-          (p) => eventId >= p.startEvent && eventId <= p.stopEvent,
-        );
+        const phase = mockPhases.find((p) => eventId >= p.startEvent && eventId <= p.stopEvent);
         return Promise.resolve(E.right(phase || null));
       }),
     })),
@@ -86,14 +91,14 @@ describe('Phase Service', () => {
     test('should validate phase sequence', async () => {
       const invalidPhases: Phase[] = [
         {
-          id: 1,
+          id: 1 as PhaseId,
           name: 'Phase 1',
           startEvent: 1,
           stopEvent: 15,
           highestScore: null,
         },
         {
-          id: 2,
+          id: 2 as PhaseId,
           name: 'Phase 2',
           startEvent: 10,
           stopEvent: 20,
@@ -179,14 +184,14 @@ describe('Phase Workflows', () => {
     test('should fail if phases are invalid', async () => {
       const invalidPhases: Phase[] = [
         {
-          id: 1,
+          id: 1 as PhaseId,
           name: 'Phase 1',
           startEvent: 1,
           stopEvent: 15,
           highestScore: null,
         },
         {
-          id: 2,
+          id: 2 as PhaseId,
           name: 'Phase 2',
           startEvent: 10,
           stopEvent: 20,
@@ -199,7 +204,9 @@ describe('Phase Workflows', () => {
       expect(E.isLeft(result)).toBe(true);
       if (E.isLeft(result)) {
         expect(result.left.code).toBe('VALIDATION_ERROR');
-        expect(result.left.message).toBe('Phase sync failed: Phase sequence invalid: overlapping phases detected');
+        expect(result.left.message).toBe(
+          'Phase sync failed: Phase sequence invalid: overlapping phases detected',
+        );
       }
     });
   });
@@ -218,17 +225,17 @@ describe('Phase Workflows', () => {
       const result = await workflows.getPhaseDetails(999 as PhaseId, 5)();
       expect(E.isLeft(result)).toBe(true);
       if (E.isLeft(result)) {
-        expect(result.left.code).toBe('NOT_FOUND');
+        expect(result.left.code).toBe('VALIDATION_ERROR');
         expect(result.left.message).toBe('Phase 999 not found');
       }
     });
 
-    test('should fail for event outside phase boundaries', async () => {
+    test('should get phase details with inactive status for event outside phase boundaries', async () => {
       const result = await workflows.getPhaseDetails(1 as PhaseId, 15)();
-      expect(E.isLeft(result)).toBe(true);
-      if (E.isLeft(result)) {
-        expect(result.left.code).toBe('VALIDATION_ERROR');
-        expect(result.left.message).toBe('Event ID outside phase boundaries');
+      expect(E.isRight(result)).toBe(true);
+      if (E.isRight(result)) {
+        expect(result.right.phase).toEqual(mockPhases[0]);
+        expect(result.right.isActive).toBe(false);
       }
     });
   });

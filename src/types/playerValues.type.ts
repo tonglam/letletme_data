@@ -1,6 +1,11 @@
 import { Either, left, right } from 'fp-ts/Either';
 import { z } from 'zod';
-import { player_value_change_type_enum } from '../constants/enum';
+
+// ============ Enums ============
+export enum player_value_change_type_enum {
+  INCREASE = 'INCREASE',
+  DECREASE = 'DECREASE',
+}
 
 // ============ Schemas ============
 /**
@@ -22,7 +27,10 @@ export const PlayerValueSchema = z.object({
   value: z.number(),
   lastValue: z.number(),
   changeDate: z.string(),
-  changeType: z.enum(Object.values(player_value_change_type_enum) as [string, ...string[]]),
+  changeType: z.enum([
+    player_value_change_type_enum.INCREASE,
+    player_value_change_type_enum.DECREASE,
+  ]),
 });
 
 export const PlayerValuesSchema = z.array(PlayerValueSchema);

@@ -1,7 +1,7 @@
 import * as TE from 'fp-ts/TaskEither';
 import { APIError, createDatabaseError } from '../../infrastructure/api/common/errors';
 import { prisma } from '../../infrastructure/db/prisma';
-import { PhaseId, PhaseRepository, PrismaPhase, PrismaPhaseCreate } from '../../types/phase.type';
+import { PhaseId, PhaseRepository, PrismaPhase, PrismaPhaseCreate } from '../../types/phases.type';
 
 /**
  * Phase repository implementation

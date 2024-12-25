@@ -3,16 +3,9 @@ import * as O from 'fp-ts/Option';
 import * as T from 'fp-ts/Task';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
-import {
-  createPhaseCache,
-  createPhaseOperations,
-} from '../../../../src/domains/phases/cache/cache';
-import {
-  CacheError,
-  CacheErrorType,
-  RedisClient,
-} from '../../../../src/infrastructure/cache/types';
-import { PrismaPhase } from '../../../../src/types/phase.type';
+import { createPhaseCache, createPhaseOperations } from '../../../src/domains/phases/cache/cache';
+import { CacheError, CacheErrorType, RedisClient } from '../../../src/infrastructure/cache/types';
+import { PrismaPhase } from '../../../src/types/phases.type';
 
 describe('Phase Cache', () => {
   const mockRedisClient = {
@@ -38,8 +31,8 @@ describe('Phase Cache', () => {
   };
 
   const mockDataProvider = {
-    getAllPhases: jest.fn(async () => [mockPhase]),
-    getPhase: jest.fn(async (id: string) => (id === String(mockPhase.id) ? mockPhase : null)),
+    getAll: jest.fn(async () => [mockPhase]),
+    getOne: jest.fn(async (id: string) => (id === String(mockPhase.id) ? mockPhase : null)),
   };
 
   const cache = createPhaseCache(mockRedisClient);
@@ -106,7 +99,7 @@ describe('Phase Cache', () => {
 
       expect(result).toEqual(mockPhase);
       expect(mockRedisClient.get).toHaveBeenCalledWith('phase:1');
-      expect(mockDataProvider.getPhase).not.toHaveBeenCalled();
+      expect(mockDataProvider.getOne).not.toHaveBeenCalled();
     });
 
     test('should fetch from provider when not in cache', async () => {
@@ -122,7 +115,7 @@ describe('Phase Cache', () => {
 
       expect(result).toEqual(mockPhase);
       expect(mockRedisClient.get).toHaveBeenCalledWith('phase:1');
-      expect(mockDataProvider.getPhase).toHaveBeenCalledWith('1');
+      expect(mockDataProvider.getOne).toHaveBeenCalledWith('1');
       expect(mockRedisClient.set).toHaveBeenCalledWith(
         'phase:1',
         expect.any(String),
@@ -132,7 +125,7 @@ describe('Phase Cache', () => {
 
     test('should handle non-existent phase', async () => {
       mockRedisClient.get.mockReturnValueOnce(TE.right(O.none));
-      mockDataProvider.getPhase.mockResolvedValueOnce(null);
+      mockDataProvider.getOne.mockResolvedValueOnce(null);
 
       const result = await pipe(
         phaseCache.getPhase('999'),
@@ -144,7 +137,7 @@ describe('Phase Cache', () => {
 
       expect(result).toBeNull();
       expect(mockRedisClient.get).toHaveBeenCalledWith('phase:999');
-      expect(mockDataProvider.getPhase).toHaveBeenCalledWith('999');
+      expect(mockDataProvider.getOne).toHaveBeenCalledWith('999');
     });
 
     test('should handle invalid cache data', async () => {
@@ -167,7 +160,7 @@ describe('Phase Cache', () => {
   describe('Get All Phases', () => {
     test('should get all phases from provider and cache them', async () => {
       const phases = [mockPhase];
-      mockDataProvider.getAllPhases.mockResolvedValueOnce(phases);
+      mockDataProvider.getAll.mockResolvedValueOnce(phases);
 
       const result = await pipe(
         phaseCache.getAllPhases(),
@@ -178,7 +171,7 @@ describe('Phase Cache', () => {
       )();
 
       expect(result).toEqual(phases);
-      expect(mockDataProvider.getAllPhases).toHaveBeenCalled();
+      expect(mockDataProvider.getAll).toHaveBeenCalled();
       expect(mockRedisClient.set).toHaveBeenCalledWith(
         'phase:1',
         expect.any(String),
@@ -188,7 +181,7 @@ describe('Phase Cache', () => {
 
     test('should handle provider error', async () => {
       const providerError = new Error('Provider error');
-      mockDataProvider.getAllPhases.mockRejectedValueOnce(providerError);
+      mockDataProvider.getAll.mockRejectedValueOnce(providerError);
 
       const result = await pipe(
         phaseCache.getAllPhases(),

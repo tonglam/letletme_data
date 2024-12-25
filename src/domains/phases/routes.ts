@@ -5,7 +5,7 @@ import * as TE from 'fp-ts/TaskEither';
 import { createFPLClient } from '../../infrastructure/api/fpl';
 import { createPhaseServiceImpl } from '../../services/phases/service';
 import { phaseWorkflows } from '../../services/phases/workflow';
-import { validatePhaseId } from '../../types/phase.type';
+import { validatePhaseId } from '../../types/phases.type';
 import { phaseRepository } from './repository';
 
 export const phaseRouter = Router();

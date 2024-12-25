@@ -1,6 +1,7 @@
 import { PrismaClient } from '@prisma/client';
 import * as E from 'fp-ts/Either';
 import * as TE from 'fp-ts/TaskEither';
+import { z } from 'zod';
 import { APIError } from '../infrastructure/api/common/errors';
 
 // ============ Branded Types ============
@@ -10,6 +11,36 @@ export type PhaseId = number & { readonly _brand: typeof PhaseIdBrand };
 declare const EventIdBrand: unique symbol;
 export type EventId = number & { readonly _brand: typeof EventIdBrand };
 
+// ============ Schemas ============
+/**
+ * API Response Schema - Validates external API data (snake_case)
+ */
+const PhaseResponseSchema = z.object({
+  id: z.number(),
+  name: z.string(),
+  start_event: z.number(),
+  stop_event: z.number(),
+  highest_score: z.number().nullable(),
+});
+
+export const PhasesResponseSchema = z.array(PhaseResponseSchema);
+export const PhasesSchema = z.array(
+  z.object({
+    id: z.number(),
+    name: z.string(),
+    startEvent: z.number(),
+    stopEvent: z.number(),
+    highestScore: z.number().nullable(),
+  }),
+);
+
+// ============ Types ============
+/**
+ * API Response types (snake_case)
+ */
+export type PhaseResponse = z.infer<typeof PhaseResponseSchema>;
+export type PhasesResponse = z.infer<typeof PhasesResponseSchema>;
+
 // ============ Domain Types ============
 export interface Phase {
   readonly id: PhaseId;
@@ -18,6 +49,38 @@ export interface Phase {
   readonly stopEvent: number;
   readonly highestScore: number | null;
 }
+
+export type Phases = readonly Phase[];
+
+// ============ Type Transformers ============
+/**
+ * Transform and validate PhaseResponse to Phase
+ */
+export const toDomainPhase = (raw: PhaseResponse): E.Either<string, Phase> => {
+  try {
+    if (!isPhaseId(raw.id)) {
+      return E.left(`Invalid phase ID: ${raw.id}`);
+    }
+
+    const phase: Phase = {
+      id: raw.id as PhaseId,
+      name: raw.name,
+      startEvent: raw.start_event,
+      stopEvent: raw.stop_event,
+      highestScore: raw.highest_score,
+    };
+
+    if (!isValidPhase(phase)) {
+      return E.left('Invalid phase data');
+    }
+
+    return E.right(phase);
+  } catch (error) {
+    return E.left(
+      `Failed to transform phase data: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+};
 
 // ============ Persistence Types ============
 export interface PrismaPhase {
