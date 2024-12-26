@@ -11,33 +11,32 @@ datasource db {
 }
 
 model Event {
-  id                     Int           @id
+  id                     Int       @id
   name                   String
-  deadlineTime           DateTime      @map("deadline_time") @db.Timestamptz
-  deadlineTimeEpoch      Int           @default(0) @map("deadline_time_epoch")
-  deadlineTimeGameOffset Int           @default(0) @map("deadline_time_game_offset")
-  releaseTime            DateTime?     @map("release_time") @db.Timestamptz
-  averageEntryScore      Int           @default(0) @map("average_entry_score")
-  finished               Boolean       @default(false)
-  dataChecked            Boolean       @default(false) @map("data_checked")
-  highestScore           Int           @default(0) @map("highest_score")
-  highestScoringEntry    Int           @default(0) @map("highest_scoring_entry")
-  isPrevious             Boolean       @default(false) @map("is_previous")
-  isCurrent              Boolean       @default(false) @map("is_current")
-  isNext                 Boolean       @default(false) @map("is_next")
-  cupLeaguesCreated      Boolean       @default(false) @map("cup_leagues_created")
-  h2hKoMatchesCreated    Boolean       @default(false) @map("h2h_ko_matches_created")
-  rankedCount            Int           @default(0) @map("ranked_count")
-  chipPlays              Json?         @map("chip_plays")
-  mostSelected           Int?          @map("most_selected")
-  mostTransferredIn      Int?          @map("most_transferred_in")
-  mostCaptained          Int?          @map("most_captained")
-  mostViceCaptained      Int?          @map("most_vice_captained")
-  topElement             Int?          @map("top_element")
-  topElementInfo         Json?         @map("top_element_info")
-  transfersMade          Int           @default(0) @map("transfers_made")
-  createdAt              DateTime      @default(now()) @map("created_at")
-  PlayerValue            PlayerValue[]
+  deadlineTime           DateTime  @map("deadline_time") @db.Timestamptz
+  deadlineTimeEpoch      Int       @default(0) @map("deadline_time_epoch")
+  deadlineTimeGameOffset Int       @default(0) @map("deadline_time_game_offset")
+  releaseTime            DateTime? @map("release_time") @db.Timestamptz
+  averageEntryScore      Int       @default(0) @map("average_entry_score")
+  finished               Boolean   @default(false)
+  dataChecked            Boolean   @default(false) @map("data_checked")
+  highestScore           Int       @default(0) @map("highest_score")
+  highestScoringEntry    Int       @default(0) @map("highest_scoring_entry")
+  isPrevious             Boolean   @default(false) @map("is_previous")
+  isCurrent              Boolean   @default(false) @map("is_current")
+  isNext                 Boolean   @default(false) @map("is_next")
+  cupLeaguesCreated      Boolean   @default(false) @map("cup_leagues_created")
+  h2hKoMatchesCreated    Boolean   @default(false) @map("h2h_ko_matches_created")
+  rankedCount            Int       @default(0) @map("ranked_count")
+  chipPlays              Json?     @map("chip_plays")
+  mostSelected           Int?      @map("most_selected")
+  mostTransferredIn      Int?      @map("most_transferred_in")
+  mostCaptained          Int?      @map("most_captained")
+  mostViceCaptained      Int?      @map("most_vice_captained")
+  topElement             Int?      @map("top_element")
+  topElementInfo         Json?     @map("top_element_info")
+  transfersMade          Int       @default(0) @map("transfers_made")
+  createdAt              DateTime  @default(now()) @map("created_at")
 
   @@map("events")
 }
@@ -76,91 +75,126 @@ model Team {
   teamDivision        String?  @map("team_division")
   unavailable         Boolean  @default(false)
   createdAt           DateTime @default(now()) @map("created_at")
-  Player              Player[]
 
   @@map("teams")
 }
 
+enum ElementType {
+  GKP @map("1")
+  DEF @map("2")
+  MID @map("3")
+  FWD @map("4")
+}
+
 model Player {
-  element     Int           @id
-  elementCode Int           @unique @map("element_code")
-  price       Int           @default(0)
-  startPrice  Int           @default(0) @map("start_price")
-  elementType Int           @map("element_type")
-  firstName   String?       @map("first_name")
-  secondName  String?       @map("second_name")
-  webName     String        @map("web_name")
-  teamId      Int           @map("team_id")
-  team        Team          @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  createdAt   DateTime      @default(now()) @map("created_at")
-  PlayerValue PlayerValue[]
+  element     Int         @id
+  elementCode Int         @unique @map("element_code")
+  price       Int         @default(0)
+  startPrice  Int         @default(0) @map("start_price")
+  elementType ElementType @map("element_type")
+  firstName   String?     @map("first_name")
+  secondName  String?     @map("second_name")
+  webName     String      @map("web_name")
+  teamId      Int         @map("team_id")
+  createdAt   DateTime    @default(now()) @map("created_at")
 
   @@index([teamId], name: "idx_players_team_id")
   @@map("players")
 }
 
+enum ValueChangeType {
+  Start
+  Rise
+  Fall
+}
+
 model PlayerValue {
-  id          String                @id @default(uuid())
-  elementId   Int                   @map("element_id")
-  element     Player                @relation(fields: [elementId], references: [element], onDelete: Cascade)
-  elementType Int                   @map("element_type")
-  eventId     Int                   @map("event_id")
-  event       Event                 @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  id          String          @id @default(uuid()) @db.Uuid
+  elementId   Int             @map("element_id")
+  elementType Int             @map("element_type")
+  eventId     Int             @map("event_id")
   value       Int
-  lastValue   Int                   @default(0) @map("last_value")
-  changeDate  String                @map("change_date")
-  changeType  PlayerValueChangeType @map("change_type")
-  createdAt   DateTime              @default(now()) @map("created_at")
-  updatedAt   DateTime              @updatedAt @map("updated_at")
+  /// Format: yyyyMMdd
+  changeDate  String          @map("change_date") @db.Char(8)
+  changeType  ValueChangeType @map("change_type")
+  lastValue   Int             @default(0) @map("last_value")
+  createdAt   DateTime        @default(now()) @map("created_at")
 
   @@index([elementId], name: "idx_player_values_element_id")
   @@index([changeDate], name: "idx_player_values_change_date")
   @@map("player_values")
 }
 
-enum PlayerValueChangeType {
-  Start // Initial price
-  Rise // Price increase
-  Fall // Price decrease
+model PlayerStat {
+  id        String @id @default(uuid()) @db.Uuid
+  eventId   Int    @map("event_id")
+  elementId Int    @map("element_id")
+  teamId    Int    @map("team_id")
+
+  // Performance metrics
+  form                     Float?   @map("form")
+  influence                Float?   @map("influence")
+  creativity               Float?   @map("creativity")
+  threat                   Float?   @map("threat")
+  ictIndex                 Float?   @map("ict_index")
+  expectedGoals            Decimal? @map("expected_goals") @db.Decimal(10, 2)
+  expectedAssists          Decimal? @map("expected_assists") @db.Decimal(10, 2)
+  expectedGoalInvolvements Decimal? @map("expected_goal_involvements") @db.Decimal(10, 2)
+  expectedGoalsConceded    Decimal? @map("expected_goals_conceded") @db.Decimal(10, 2)
+
+  // Match statistics
+  minutes        Int? @map("minutes")
+  goalsScored    Int? @map("goals_scored")
+  assists        Int? @map("assists")
+  cleanSheets    Int? @map("clean_sheets")
+  goalsConceded  Int? @map("goals_conceded")
+  ownGoals       Int? @map("own_goals")
+  penaltiesSaved Int? @map("penalties_saved")
+
+  // Additional statistics
+  yellowCards Int? @default(0) @map("yellow_cards")
+  redCards    Int? @default(0) @map("red_cards")
+  saves       Int? @default(0) @map("saves")
+  bonus       Int? @default(0) @map("bonus")
+  bps         Int? @default(0) @map("bps")
+  starts      Int? @default(0) @map("starts")
+
+  // Rank statistics
+  influenceRank      Int? @map("influence_rank")
+  influenceRankType  Int? @map("influence_rank_type")
+  creativityRank     Int? @map("creativity_rank")
+  creativityRankType Int? @map("creativity_rank_type")
+  threatRank         Int? @map("threat_rank")
+  threatRankType     Int? @map("threat_rank_type")
+  ictIndexRank       Int? @map("ict_index_rank")
+  ictIndexRankType   Int? @map("ict_index_rank_type")
+
+  // Per 90 statistics
+  expectedGoalsPer90            Decimal? @map("expected_goals_per_90") @db.Decimal(10, 2)
+  savesPer90                    Decimal? @map("saves_per_90") @db.Decimal(10, 2)
+  expectedAssistsPer90          Decimal? @map("expected_assists_per_90") @db.Decimal(10, 2)
+  expectedGoalInvolvementsPer90 Decimal? @map("expected_goal_involvements_per_90") @db.Decimal(10, 2)
+  expectedGoalsConcededPer90    Decimal? @map("expected_goals_conceded_per_90") @db.Decimal(10, 2)
+  goalsConcededPer90            Decimal? @map("goals_conceded_per_90") @db.Decimal(10, 2)
+  startsPer90                   Decimal? @map("starts_per_90") @db.Decimal(10, 2)
+  cleanSheetsPer90              Decimal? @map("clean_sheets_per_90") @db.Decimal(10, 2)
+
+  // Set piece info
+  cornersAndIndirectFreekicksOrder Int?    @map("corners_and_indirect_freekicks_order")
+  cornersAndIndirectFreekicksText  String? @map("corners_and_indirect_freekicks_text")
+  directFreekicksOrder             Int?    @map("direct_freekicks_order")
+  directFreekicksText              String? @map("direct_freekicks_text")
+  penaltiesOrder                   Int?    @map("penalties_order")
+  penaltiesText                    String? @map("penalties_text")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @map("updated_at")
+
+  @@unique([eventId, elementId], name: "unique_event_element")
+  @@index([elementId], name: "idx_player_stats_element_id")
+  @@index([teamId], name: "idx_player_stats_team_id")
+  @@map("player_stats")
 }
-
-// model PlayerStat {
-//   id        String @id @default(uuid()) @map("id")
-//   event     Event  @relation(fields: [eventId], references: [eventId])
-//   eventId   Int    @map("event_id")
-//   element   Player @relation(fields: [elementId], references: [elementId])
-//   elementId Int    @map("element_id")
-//   team      Team   @relation(fields: [teamId], references: [teamId])
-//   teamId    Int    @map("team_id")
-
-//   // Performance metrics
-//   form                     Float?   @map("form")
-//   influence                Float?   @map("influence")
-//   creativity               Float?   @map("creativity")
-//   threat                   Float?   @map("threat")
-//   ictIndex                 Float?   @map("ict_index")
-//   expectedGoals            Decimal? @map("expected_goals") @db.Decimal(10, 2)
-//   expectedAssists          Decimal? @map("expected_assists") @db.Decimal(10, 2)
-//   expectedGoalInvolvements Decimal? @map("expected_goal_involvements") @db.Decimal(10, 2)
-//   expectedGoalsConceded    Decimal? @map("expected_goals_conceded") @db.Decimal(10, 2)
-
-//   // Match statistics
-//   minutes        Int? @map("minutes")
-//   goalsScored    Int? @map("goals_scored")
-//   assists        Int? @map("assists")
-//   cleanSheets    Int? @map("clean_sheets")
-//   goalsConceded  Int? @map("goals_conceded")
-//   ownGoals       Int? @map("own_goals")
-//   penaltiesSaved Int? @map("penalties_saved")
-
-//   createdAt DateTime @default(now()) @map("created_at")
-//   updatedAt DateTime @updatedAt @map("updated_at")
-
-//   @@unique([eventId, elementId], name: "unique_event_element")
-//   @@index([elementId], name: "idx_player_stats_element_id")
-//   @@index([teamId], name: "idx_player_stats_team_id")
-//   @@map("player_stats")
-// }
 
 // model EventLive {
 //   id           String   @id @default(uuid()) @map("id")
