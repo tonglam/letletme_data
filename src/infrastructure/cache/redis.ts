@@ -1,6 +1,6 @@
 import * as E from 'fp-ts/Either';
 import type { RedisClientType, RedisDefaultModules } from 'redis';
-import type { Cache } from '../../types/cache.type';
+import type { Cache } from './types';
 
 export const createRedisCache = (client: RedisClientType<RedisDefaultModules>): Cache => ({
   get:

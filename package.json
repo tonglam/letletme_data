@@ -11,8 +11,7 @@
     "coverage": "jest --coverage",
     "prisma": "npx prisma generate",
     "lint": "eslint . src --cache --fix",
-    "format": "prettier --write . src",
-    "test:db": "ts-node test-db.ts"
+    "format": "prettier --write . src"
   },
   "repository": {
     "type": "git",

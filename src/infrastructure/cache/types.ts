@@ -293,6 +293,12 @@ export interface CacheModuleState {
   readonly warmerOps: Option<CacheWarmerOperations>;
 }
 
+export interface Cache {
+  get: <T>(key: string) => TaskEither<Error, T>;
+  set: <T>(key: string, value: T) => TaskEither<Error, void>;
+  del: (key: string) => TaskEither<Error, void>;
+}
+
 export interface CacheStrategy {
   get<T>(key: string): Promise<Option<T>>;
   set<T>(key: string, value: T, ttl?: number): Promise<void>;
