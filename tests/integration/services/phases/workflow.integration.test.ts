@@ -11,8 +11,19 @@ describe('Phase Workflows Integration', () => {
 
   beforeAll(async () => {
     const bootstrapApi: BootstrapApi = {
-      getBootstrapData,
-      getBootstrapEvents: async () => [],
+      getBootstrapData: async () => {
+        const phases = await getBootstrapData();
+        return {
+          teams: [],
+          phases: phases.map((p) => ({
+            id: p.id,
+            name: p.name,
+            start_event: p.startEvent,
+            stop_event: p.stopEvent,
+          })),
+          events: [],
+        };
+      },
     };
 
     phaseService = createPhaseService(bootstrapApi);

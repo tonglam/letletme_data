@@ -81,8 +81,16 @@ describe('Phase Service Integration', () => {
 
       // Initialize phase service with mock bootstrap data
       phaseService = createPhaseService({
-        getBootstrapData: async () => TEST_PHASES,
-        getBootstrapEvents: async () => [],
+        getBootstrapData: async () => ({
+          teams: [],
+          phases: TEST_PHASES.map((p) => ({
+            id: p.id,
+            name: p.name,
+            start_event: p.startEvent,
+            stop_event: p.stopEvent,
+          })),
+          events: [],
+        }),
       });
 
       // Initialize workflows

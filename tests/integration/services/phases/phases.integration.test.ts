@@ -63,8 +63,16 @@ describe('Phase Service Integration', () => {
     )();
 
     const bootstrapApi = {
-      getBootstrapData: async () => testPhases,
-      getBootstrapEvents: async () => [],
+      getBootstrapData: async () => ({
+        teams: [],
+        phases: testPhases.map((p) => ({
+          id: p.id,
+          name: p.name,
+          start_event: p.startEvent,
+          stop_event: p.stopEvent,
+        })),
+        events: [],
+      }),
     };
 
     phaseService = createPhaseService(bootstrapApi);
