@@ -50,11 +50,7 @@ export interface Player {
 export type Players = readonly Player[];
 
 // ============ Repository Interface ============
-export interface PlayerRepository
-  extends BaseRepository<PrismaPlayer, PrismaPlayerCreate, PlayerId> {
-  findByTeamId(teamId: number): TE.TaskEither<APIError, PrismaPlayer[]>;
-  findByElementType(elementType: ElementType): TE.TaskEither<APIError, PrismaPlayer[]>;
-}
+export type PlayerRepository = BaseRepository<PrismaPlayer, PrismaPlayerCreate, PlayerId>;
 
 // ============ Persistence Types ============
 export interface PrismaPlayer {
@@ -70,8 +66,8 @@ export interface PrismaPlayer {
   readonly createdAt: Date;
 }
 
-export type PrismaPlayerCreate = Omit<PrismaPlayer, 'element' | 'createdAt'>;
-export type PrismaPlayerUpdate = Omit<PrismaPlayer, 'element' | 'createdAt'>;
+export type PrismaPlayerCreate = Omit<PrismaPlayer, 'createdAt'>;
+export type PrismaPlayerUpdate = Omit<PrismaPlayer, 'createdAt'>;
 
 // ============ Type Transformers ============
 export const fromElementResponse = (raw: ElementResponse): E.Either<string, Player> =>
@@ -116,6 +112,7 @@ export const toDomainPlayer = (data: ElementResponse | PrismaPlayer): Player => 
 };
 
 export const toPrismaPlayer = (player: Player): PrismaPlayerCreate => ({
+  element: player.id,
   elementCode: player.elementCode,
   price: player.price,
   startPrice: player.startPrice,

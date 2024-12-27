@@ -68,11 +68,10 @@ export interface PrismaPlayerValue {
   readonly changeType: ValueChangeType;
   readonly lastValue: number;
   readonly createdAt: Date;
-  readonly updatedAt: Date;
 }
 
-export type PrismaPlayerValueCreate = Omit<PrismaPlayerValue, 'id' | 'createdAt' | 'updatedAt'>;
-export type PrismaPlayerValueUpdate = Omit<PrismaPlayerValue, 'id' | 'createdAt' | 'updatedAt'>;
+export type PrismaPlayerValueCreate = Omit<PrismaPlayerValue, 'id' | 'createdAt'>;
+export type PrismaPlayerValueUpdate = Omit<PrismaPlayerValue, 'id' | 'createdAt'>;
 
 // ============ Converters ============
 export const toDomainPlayerValue = (data: ElementResponse | PrismaPlayerValue): PlayerValue => {

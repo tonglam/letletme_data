@@ -1,4 +1,4 @@
-import { ElementType, PrismaClient } from '@prisma/client';
+import { ElementType, PrismaClient, ValueChangeType } from '@prisma/client';
 import * as E from 'fp-ts/Either';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
@@ -16,7 +16,7 @@ export const ELEMENT_STATUS = {
 
 export type ElementStatus = (typeof ELEMENT_STATUS)[keyof typeof ELEMENT_STATUS];
 
-export { ElementType };
+export { ElementType, ValueChangeType };
 
 export const ElementTypeConfig = {
   [ElementType.GKP]: { id: 1, name: 'Goalkeeper' },
@@ -32,12 +32,6 @@ export const getElementTypeById = (id: number): ElementType | undefined => {
 };
 
 export const getElementTypeName = (type: ElementType): string => ElementTypeConfig[type].name;
-
-export enum ValueChangeType {
-  Start = 'Start',
-  Rise = 'Rise',
-  Fall = 'Fall',
-}
 
 // Branded Types System
 export interface Brand<K extends string> {

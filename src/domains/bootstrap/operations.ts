@@ -1,8 +1,8 @@
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
+import { createValidationError } from '../../infrastructure/http/common/errors';
 import { BootStrap, BootStrapResponse, toDomainBootStrap } from '../../types/bootstrap.type';
-import { createError } from '../phases/operations';
 
 export interface BootstrapApi {
   getBootstrapData: () => Promise<BootStrapResponse>;
@@ -12,12 +12,13 @@ export const fetchBootstrap = (api: BootstrapApi): TE.TaskEither<Error, BootStra
   pipe(
     TE.tryCatch(
       () => api.getBootstrapData(),
-      (error) => createError('Failed to fetch bootstrap data', error),
+      (error) =>
+        createValidationError({ message: 'Failed to fetch bootstrap data', details: { error } }),
     ),
     TE.chain((response) =>
       pipe(
         toDomainBootStrap(response),
-        E.mapLeft((msg) => new Error(msg)),
+        E.mapLeft((msg) => createValidationError({ message: msg })),
         TE.fromEither,
       ),
     ),
