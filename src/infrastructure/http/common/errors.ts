@@ -1,4 +1,4 @@
-import { ErrorCode } from '../config/http.error.config';
+import { ErrorCode } from '../../../config/http/http.error.config';
 
 export interface ErrorResponse {
   readonly code: ErrorCode;

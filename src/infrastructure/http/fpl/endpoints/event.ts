@@ -1,6 +1,7 @@
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import { z } from 'zod';
+import { FPL_API_CONFIG } from '../../../../config/api/api.config';
 import { EventFixture } from '../../../../types/event-fixture.type';
 import {
   EventLiveResponseSchema,
@@ -9,7 +10,6 @@ import {
 import { HTTPClient } from '../../common/client';
 import { createApiCallContext } from '../../common/logs';
 import { RequestOptions } from '../../common/types';
-import { FPL_API_CONFIG } from '../config/api.config';
 import { logFplCall } from '../logger';
 import { EventEndpoints, validateEndpointResponse } from '../types';
 

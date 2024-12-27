@@ -1,65 +1,62 @@
-This guide explains how we implement domain layers in our application, using the `phases` domain as an example.
+# Domain Implementation Guide
+
+This guide explains how we implement domain layers in our application, using the `events` domain as an example.
 
 ## Architecture Overview
 
 Our domain-driven architecture follows these principles:
 
 - Functional programming with fp-ts
-- Type-safe boundaries
+- Type-safe boundaries with branded types
 - Clear separation of concerns
 - Immutable data structures
-- Explicit error handling
+- Explicit error handling with TaskEither
 
 ```mermaid
 graph TB
     subgraph "Domain Layer"
-        R[Repository] --> |Data Access| DB[(Database)]
+        O[Operations] --> |Uses| R[Repository]
         Q[Queries] --> |Uses| R
-        A[API Routes] --> |Uses| Q
+        R --> |Data Access| DB[(Database)]
+        C[Cache] --> |Caches| R
     end
 
     subgraph "Types"
         DT[Domain Types] --> |Extends| PT[Prisma Types]
-        DT --> |Transforms| AT[API Types]
         BT[Branded Types] --> |Validates| DT
+        VF[Validation Functions] --> |Validates| DT
     end
-
-    Client --> |HTTP| A
-    A --> |Response| Client
 ```
 
 ## Domain Structure
 
 ```
-src/domains/phases/
+src/domains/events/
+├── operations.ts    # Pure business logic
 ├── repository.ts    # Data access layer
-├── queries.ts       # Business logic
-└── routes.ts        # API endpoints
+├── queries.ts       # Business queries
+└── cache.ts        # Cache operations
 
 src/types/
-└── phase.type.ts    # Type definitions
+└── events.type.ts   # Type definitions
 ```
 
 ### Data Flow
 
 ```mermaid
 sequenceDiagram
-    participant C as Client
-    participant A as API Route
+    participant O as Operation
     participant Q as Query
     participant R as Repository
     participant DB as Database
+    participant C as Cache
 
-    C->>A: HTTP Request
-    A->>A: Validate Input
-    A->>Q: Call Query
-    Q->>Q: Business Logic
-    Q->>R: Data Operation
+    O->>O: Validate Input
+    O->>R: Data Operation
     R->>DB: Prisma Query
     DB-->>R: Raw Data
-    R-->>Q: Domain Type
-    Q-->>A: Result
-    A-->>C: HTTP Response
+    R-->>O: Domain Type
+    O->>C: Cache Result
 ```
 
 ## Type System
@@ -67,212 +64,104 @@ sequenceDiagram
 ### Domain Types
 
 ```typescript
-// Branded Types for type safety
-export type PhaseId = number & { readonly _brand: unique symbol };
+// Branded types for type safety
 export type EventId = number & { readonly _brand: unique symbol };
 
-// Domain Types
-export type Phase = {
-  readonly id: PhaseId;
+// Domain models
+export type Event = {
+  readonly id: EventId;
   readonly name: string;
-  readonly startEvent: EventId;
-  readonly stopEvent: EventId;
-  readonly highestScore: number | null;
+  readonly isCurrent: boolean;
+  readonly isNext: boolean;
+  // ... other fields
 };
 
-// Database Types
-export type PrismaPhase = {
+// Prisma models
+export type PrismaEvent = {
   readonly id: number;
   readonly name: string;
-  readonly startEvent: number;
-  readonly stopEvent: number;
-  readonly highestScore: number | null;
+  readonly isCurrent: boolean;
+  readonly isNext: boolean;
   readonly createdAt: Date;
 };
 
-// API Types
-export type PhaseResponse = {
-  id: number;
-  name: string;
-  start_event: number;
-  stop_event: number;
-  highest_score: number | null;
-};
+// Validation functions
+export const validateEventId = (id: number): E.Either<string, EventId> =>
+  id > 0 ? E.right(id as EventId) : E.left(`Invalid event ID: ${id}`);
 ```
 
-### Type Validation
+## Operations Layer
 
 ```typescript
-// Validation schemas using Zod
-export const PhaseSchema = z.object({
-  id: z.number().positive(),
-  name: z.string().min(1),
-  startEvent: z.number().positive(),
-  stopEvent: z.number().positive(),
-  highestScore: z.number().nullable(),
-});
+// Pure business logic with explicit error handling
+export const saveEvent = (event: DomainEvent): TE.TaskEither<APIError, DomainEvent> =>
+  pipe(
+    eventRepository.save(single.fromDomain(event)),
+    TE.map(single.toDomain),
+    TE.chain((result) =>
+      result
+        ? TE.right(result)
+        : TE.left(createValidationError({ message: 'Failed to save event' })),
+    ),
+  );
 
-// Type guards
-export const isPhaseId = (id: unknown): id is PhaseId => typeof id === 'number' && id > 0;
-
-// Validation functions
-export const validatePhaseId = (id: number): Either<string, PhaseId> =>
-  id > 0 ? right(id as PhaseId) : left(`Invalid phase ID: ${id}`);
-
-export const validateEventId = (id: number): Either<string, EventId> =>
-  id > 0 ? right(id as EventId) : left(`Invalid event ID: ${id}`);
+export const findCurrentEvent = (): TE.TaskEither<APIError, DomainEvent | null> =>
+  pipe(eventRepository.findCurrent(), TE.map(single.toDomain));
 ```
 
 ## Repository Layer
 
-### Interface
-
 ```typescript
-export interface PhaseRepository {
-  save(phase: PrismaPhaseCreate): TE.TaskEither<APIError, PrismaPhase>;
-  findById(id: PhaseId): TE.TaskEither<APIError, PrismaPhase | null>;
-  findAll(): TE.TaskEither<APIError, PrismaPhase[]>;
-  update(id: PhaseId, phase: Partial<PrismaPhaseCreate>): TE.TaskEither<APIError, PrismaPhase>;
+// Repository interface
+export interface EventRepository {
+  save(event: PrismaEventCreate): TE.TaskEither<APIError, PrismaEvent>;
+  findById(id: EventId): TE.TaskEither<APIError, PrismaEvent | null>;
+  findAll(): TE.TaskEither<APIError, PrismaEvent[]>;
+  findCurrent(): TE.TaskEither<APIError, PrismaEvent | null>;
+  findNext(): TE.TaskEither<APIError, PrismaEvent | null>;
+  update(id: EventId, event: PrismaEventUpdate): TE.TaskEither<APIError, PrismaEvent>;
 }
-```
 
-### Implementation
-
-```typescript
-export const phaseRepository: PhaseRepository = {
-  save: (phase: PrismaPhaseCreate): TE.TaskEither<APIError, PrismaPhase> =>
-    pipe(
-      TE.tryCatch(
-        () => prisma.phase.create({ data: phase }),
-        (error) => handleDatabaseError(error, 'save'),
-      ),
+// Repository implementation
+export const eventRepository: EventRepository = {
+  save: (event: PrismaEventCreate): TE.TaskEither<APIError, PrismaEvent> =>
+    TE.tryCatch(
+      () => prisma.event.create({ data: event }),
+      (error) => createDatabaseError({ message: 'Failed to save event', details: { error } }),
     ),
 
-  findById: (id: PhaseId): TE.TaskEither<APIError, PrismaPhase | null> =>
-    pipe(
-      TE.tryCatch(
-        () => prisma.phase.findUnique({ where: { id: id as number } }),
-        (error) => handleDatabaseError(error, 'findById'),
-      ),
+  findById: (id: EventId): TE.TaskEither<APIError, PrismaEvent | null> =>
+    TE.tryCatch(
+      () => prisma.event.findUnique({ where: { id: Number(id) } }),
+      (error) => createDatabaseError({ message: 'Failed to find event', details: { error } }),
     ),
 
-  // ... other implementations
+  findCurrent: (): TE.TaskEither<APIError, PrismaEvent | null> =>
+    TE.tryCatch(
+      () => prisma.event.findFirst({ where: { isCurrent: true } }),
+      (error) =>
+        createDatabaseError({ message: 'Failed to find current event', details: { error } }),
+    ),
 };
 ```
 
 ## Query Layer
 
-### Business Logic
-
 ```typescript
-export const getCurrentPhase = (
-  repository: PhaseRepository,
-  currentEventId: number,
-): TE.TaskEither<APIError, PrismaPhase | null> =>
+// Business query operations with validation
+export const getEventById = (
+  repository: EventRepository,
+  id: number,
+): TE.TaskEither<APIError, PrismaEvent | null> =>
   pipe(
-    validateEventId(currentEventId),
+    validateEventId(id),
     E.mapLeft((message) => createValidationError({ message })),
     TE.fromEither,
-    TE.chain((validEventId) =>
-      pipe(
-        repository.findAll(),
-        TE.map((phases) =>
-          pipe(
-            phases,
-            A.findFirst(
-              (phase) => phase.startEvent <= validEventId && phase.stopEvent >= validEventId,
-            ),
-            O.toNullable,
-          ),
-        ),
-      ),
-    ),
+    TE.chain(repository.findById),
   );
-```
 
-## API Layer
-
-### Route Handlers
-
-```typescript
-export const phaseRouter = Router();
-
-phaseRouter.get('/current/:eventId', async (req, res) => {
-  const result = await pipe(
-    parseInt(req.params.eventId, 10),
-    (eventId) => getCurrentPhase(phaseRepository, eventId),
-    TE.map((phase) => ({
-      status: 'success',
-      data: phase,
-    })),
-    TE.mapLeft((error) => ({
-      status: 'error',
-      error: error.message,
-    })),
-  )();
-
-  if (result._tag === 'Left') {
-    res.status(400).json(result.left);
-  } else {
-    res.json(result.right);
-  }
-});
-```
-
-## Testing Strategy
-
-### Unit Tests
-
-```typescript
-describe('Phase Domain', () => {
-  describe('Validation', () => {
-    it('should validate phase ID', () => {
-      expect(validatePhaseId(-1)._tag).toBe('Left');
-      expect(validatePhaseId(1)._tag).toBe('Right');
-    });
-  });
-
-  describe('Repository', () => {
-    const mockRepository: PhaseRepository = {
-      findById: jest.fn(),
-      // ... other methods
-    };
-
-    it('should find phase by ID', async () => {
-      const phase = { id: 1, name: 'Test' };
-      mockRepository.findById.mockResolvedValue(right(phase));
-
-      const result = await getPhaseById(mockRepository, 1)();
-      expect(result._tag).toBe('Right');
-    });
-  });
-});
-```
-
-### Integration Tests
-
-```typescript
-describe('Phase Integration', () => {
-  const repository = phaseRepository;
-
-  beforeAll(async () => {
-    await setupTestDatabase();
-  });
-
-  it('should create and retrieve phase', async () => {
-    const phase = {
-      name: 'Test Phase',
-      startEvent: 1,
-      stopEvent: 2,
-    };
-
-    const saved = await repository.save(phase)();
-    expect(saved._tag).toBe('Right');
-
-    const retrieved = await repository.findById(saved.right.id)();
-    expect(retrieved.right).toEqual(saved.right);
-  });
-});
+export const getAllEvents = (repository: EventRepository): TE.TaskEither<APIError, PrismaEvent[]> =>
+  repository.findAll();
 ```
 
 ## Error Handling
@@ -280,345 +169,146 @@ describe('Phase Integration', () => {
 ### Error Types
 
 ```typescript
-export type PhaseError =
-  | { type: 'INVALID_PHASE_ID'; message: string }
-  | { type: 'INVALID_EVENT_RANGE'; message: string }
-  | { type: 'PHASE_NOT_FOUND'; message: string }
-  | { type: 'PHASE_OVERLAP'; message: string };
+// API Error type
+export type APIError = {
+  code: string;
+  message: string;
+  details?: unknown;
+};
 
-export const createPhaseError = (error: PhaseError): APIError => ({
-  code: `PHASE_${error.type}`,
-  message: error.message,
-  status: 400,
+// Error creators
+export const createDatabaseError = (params: { message: string; details?: unknown }): APIError => ({
+  code: 'DB_ERROR',
+  message: params.message,
+  details: params.details,
+});
+
+export const createValidationError = (params: { message: string }): APIError => ({
+  code: 'VALIDATION_ERROR',
+  message: params.message,
 });
 ```
 
 ### Error Handling Flow
 
-```mermaid
-graph TD
-    subgraph "Input Validation"
-        I[Input] --> V{Validate}
-        V -->|Invalid| VE[Validation Error]
-        V -->|Valid| P[Process]
-    end
-
-    subgraph "Business Logic"
-        P --> B{Business Rules}
-        B -->|Fail| BE[Business Error]
-        B -->|Pass| D[Database Op]
-    end
-
-    subgraph "Data Access"
-        D --> DB{Database}
-        DB -->|Error| DE[DB Error]
-        DB -->|Success| S[Success]
-    end
-
-    VE & BE & DE --> |Transform| AE[API Error]
-    S --> |Transform| R[API Response]
-```
-
-## Performance
-
-### Caching
-
 ```typescript
-export const phaseRepository: PhaseRepository = {
-  findAll: (): TE.TaskEither<APIError, PrismaPhase[]> =>
-    pipe(
-      TE.tryCatch(
-        async () => {
-          const cached = await cache.get('phases:all');
-          if (cached) return JSON.parse(cached);
-
-          const phases = await prisma.phase.findMany({
-            orderBy: { startEvent: 'asc' },
-          });
-
-          await cache.set('phases:all', JSON.stringify(phases), 60 * 5);
-          return phases;
-        },
-        (error) => createDatabaseError({ message: 'Failed to find phases', details: { error } }),
-      ),
-    ),
-};
-```
-
-### Query Optimization
-
-```typescript
-export const findByEventRange = (
-  start: EventId,
-  end: EventId,
-): TE.TaskEither<APIError, PrismaPhase[]> =>
-  TE.tryCatch(
-    () =>
-      prisma.phase.findMany({
-        where: {
-          AND: [{ startEvent: { gte: start as number } }, { stopEvent: { lte: end as number } }],
-        },
-        select: {
-          id: true,
-          name: true,
-          startEvent: true,
-          stopEvent: true,
-          highestScore: true,
-        },
-      }),
-    (error) => handleDatabaseError(error, 'findByEventRange'),
+// Repository error handling
+const withErrorHandling = <T>(
+  operation: () => Promise<T>,
+  errorMessage: string,
+): TE.TaskEither<APIError, T> =>
+  TE.tryCatch(operation, (error) =>
+    createDatabaseError({ message: errorMessage, details: { error } }),
   );
-```
 
-## Maintenance
-
-### Logging
-
-```typescript
-export const phaseRepository: PhaseRepository = {
-  save: (phase: PrismaPhaseCreate): TE.TaskEither<APIError, PrismaPhase> =>
+// Operation error handling
+const withValidation =
+  <T, U>(
+    validate: (input: T) => E.Either<string, U>,
+    operation: (valid: U) => TE.TaskEither<APIError, U>,
+  ) =>
+  (input: T): TE.TaskEither<APIError, U> =>
     pipe(
-      TE.tryCatch(
-        async () => {
-          logger.info('Creating new phase', { phase });
-          const result = await prisma.phase.create({ data: phase });
-          logger.info('Phase created successfully', { id: result.id });
-          return result;
-        },
-        (error) => {
-          logger.error('Failed to create phase', { error, phase });
-          return handleDatabaseError(error, 'save');
-        },
-      ),
-    ),
-};
-```
-
-### Health Checks
-
-```typescript
-export const checkPhaseHealth = (): TE.TaskEither<APIError, boolean> =>
-  pipe(
-    phaseRepository.findAll(),
-    TE.map(() => true),
-    TE.mapLeft((error) => {
-      logger.error('Phase health check failed', { error });
-      return error;
-    }),
-  );
+      validate(input),
+      E.mapLeft((message) => createValidationError({ message })),
+      TE.fromEither,
+      TE.chain(operation),
+    );
 ```
 
 ## Common Patterns
 
-### Validation Helper
+### Type Transformations
 
 ```typescript
-export const withValidation =
-  <T, U>(schema: z.Schema<T>, transform: (valid: T) => U) =>
-  (input: unknown): Either<string, U> =>
-    pipe(
-      E.tryCatch(
-        () => schema.parse(input),
-        (error) => `Validation failed: ${error}`,
-      ),
-      E.map(transform),
-    );
+// Domain operations helper
+const { single, array } = createDomainOperations<DomainEvent, PrismaEvent>({
+  toDomain: toDomainEvent,
+  toPrisma: toPrismaEvent,
+});
+
+// Using transformations
+export const findAllEvents = (): TE.TaskEither<APIError, readonly DomainEvent[]> =>
+  pipe(eventRepository.findAll(), TE.map(array.toDomain));
 ```
 
-### Type Guards
+### Validation Pattern
 
 ```typescript
-export const asPhaseId = (id: number): PhaseId | undefined =>
-  isPhaseId(id) ? (id as PhaseId) : undefined;
-
-export const ensurePhaseId = (id: number): Either<string, PhaseId> =>
+// Validation helper
+const validateEvent = (event: unknown): E.Either<string, Event> =>
   pipe(
-    id,
-    validatePhaseId,
-    E.mapLeft(() => `Invalid phase ID: ${id}`),
+    event,
+    EventSchema.safeParse(),
+    E.fromEither,
+    E.mapLeft((error) => `Invalid event: ${error.message}`),
   );
-```
 
-### Error Transformation
-
-```typescript
-export const handleDatabaseError = (error: unknown, operation: string): APIError => {
-  if (error instanceof Prisma.PrismaClientKnownRequestError) {
-    switch (error.code) {
-      case 'P2002':
-        return createPhaseError({
-          type: 'PHASE_OVERLAP',
-          message: 'Phase dates overlap with existing phase',
-        });
-      default:
-        return createDatabaseError({
-          message: `Database error during ${operation}`,
-          details: { error },
-        });
-    }
-  }
-  return createDatabaseError({
-    message: `Unexpected error during ${operation}`,
-    details: { error },
-  });
-};
-```
-
-## Modifying Domain Actions
-
-### Adding Repository Actions
-
-```mermaid
-graph TD
-    subgraph "Adding Repository Action"
-        A1[Update Interface] --> A2[Add Types]
-        A2 --> A3[Implement]
-        A3 --> A4[Add Tests]
-    end
-```
-
-1. **Update Repository Interface**
-
-```typescript
-export interface PhaseRepository {
-  // Existing actions...
-  findByEventRange(start: EventId, end: EventId): TE.TaskEither<APIError, PrismaPhase[]>;
-}
-```
-
-2. **Add Required Types**
-
-```typescript
-export type PhaseEventRange = {
-  readonly start: EventId;
-  readonly end: EventId;
-};
-```
-
-3. **Implement in Repository**
-
-```typescript
-export const phaseRepository: PhaseRepository = {
-  // Existing implementations...
-  findByEventRange: (start: EventId, end: EventId): TE.TaskEither<APIError, PrismaPhase[]> =>
-    pipe(
-      TE.tryCatch(
-        () =>
-          prisma.phase.findMany({
-            where: {
-              AND: [
-                { startEvent: { gte: start as number } },
-                { stopEvent: { lte: end as number } },
-              ],
-            },
-            orderBy: { startEvent: 'asc' },
-          }),
-        (error) => handleDatabaseError(error, 'findByEventRange'),
-      ),
-    ),
-};
-```
-
-### Adding Query Actions
-
-```mermaid
-graph TD
-    subgraph "Adding Query Action"
-        Q1[Define Function] --> Q2[Add Validation]
-        Q2 --> Q3[Add Logic]
-        Q3 --> Q4[Add Tests]
-    end
-```
-
-1. **Define Query Function**
-
-```typescript
-export const getPhasesInRange = (
-  repository: PhaseRepository,
-  start: number,
-  end: number,
-): TE.TaskEither<APIError, PrismaPhase[]> => // Implementation
-```
-
-2. **Add Input Validation**
-
-```typescript
-export const getPhasesInRange = (
-  repository: PhaseRepository,
-  start: number,
-  end: number,
-): TE.TaskEither<APIError, PrismaPhase[]> =>
+// Using validation
+const saveValidatedEvent = (event: unknown): TE.TaskEither<APIError, Event> =>
   pipe(
-    sequenceT(E.Apply)(validateEventId(start), validateEventId(end)),
+    validateEvent(event),
     E.mapLeft((message) => createValidationError({ message })),
     TE.fromEither,
-    TE.chain(([validStart, validEnd]) => repository.findByEventRange(validStart, validEnd)),
+    TE.chain(saveEvent),
   );
 ```
 
-### Removing Actions
+### Repository Pattern
 
-```mermaid
-graph TD
-    subgraph "Removal Steps"
-        R1[Check Dependencies] --> R2[Update Users]
-        R2 --> R3[Remove Code]
-        R3 --> R4[Update Tests]
-    end
+```typescript
+// Repository factory
+const createEventRepository = (prisma: PrismaClient): EventRepository => ({
+  save: (event) =>
+    withErrorHandling(() => prisma.event.create({ data: event }), 'Failed to save event'),
+  // ... other methods
+});
+
+// Using repository
+const eventRepository = createEventRepository(prisma);
 ```
 
-#### Checklist for Removal
+## Testing
 
-1. **Check Dependencies**
+### Unit Tests
 
-   - Search codebase for usage
-   - Identify affected modules
-   - Plan migration path
+```typescript
+describe('Event Operations', () => {
+  const mockRepository: EventRepository = {
+    save: jest.fn(),
+    findById: jest.fn(),
+    // ... other methods
+  };
 
-2. **Update Dependent Code**
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
 
-   ```typescript
-   // Before: Using deprecated action
-   const phases = await repository.findByEventRange(start, end)();
+  it('should save valid event', async () => {
+    const event = createTestEvent();
+    mockRepository.save.mockResolvedValue(E.right(event));
 
-   // After: Using alternative
-   const phases = await pipe(
-     repository.findAll(),
-     TE.map((phases) =>
-       phases.filter((phase) => phase.startEvent >= start && phase.stopEvent <= end),
-     ),
-   )();
-   ```
+    const result = await saveEvent(mockRepository)(event)();
+    expect(E.isRight(result)).toBe(true);
+  });
+});
+```
 
-3. **Remove Implementation**
-   - Remove from repository implementation
-   - Remove from interface
-   - Remove unused types
-   - Update tests
+### Integration Tests
 
-### Best Practices
+```typescript
+describe('Event Repository', () => {
+  beforeEach(async () => {
+    await clearDatabase();
+  });
 
-1. **Adding Actions**
+  it('should create and retrieve event', async () => {
+    const event = createTestEvent();
+    const saved = await eventRepository.save(event)();
+    expect(E.isRight(saved)).toBe(true);
 
-   - Update interface first
-   - Add proper types
-   - Include error handling
-   - Add validation
-   - Write tests
-   - Update docs
-
-2. **Removing Actions**
-
-   - Check dependencies
-   - Plan migration
-   - Remove code
-   - Clean up types
-   - Update tests
-   - Update docs
-
-3. **Modifying Actions**
-   - Consider compatibility
-   - Update interface
-   - Update implementation
-   - Update tests
-   - Document changes
+    const retrieved = await eventRepository.findById(saved.right.id)();
+    expect(retrieved.right).toEqual(saved.right);
+  });
+});
+```

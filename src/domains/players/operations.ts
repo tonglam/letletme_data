@@ -1,6 +1,6 @@
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { createDomainOperations } from '../../infrastructure/db/operations';
+import { createDomainOperations } from 'src/utils/domain';
 import type { APIError } from '../../infrastructure/http/common/errors';
 import { createValidationError } from '../../infrastructure/http/common/errors';
 import { ElementResponse } from '../../types/elements.type';

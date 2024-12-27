@@ -1,7 +1,7 @@
 import axios from 'axios';
 import { pipe } from 'fp-ts/function';
 import { IOEither, tryCatch as ioTryCatch } from 'fp-ts/IOEither';
-import { HTTP_CONFIG } from '../../config/http.config';
+import { HTTP_CONFIG } from '../../../../config/http/http.config';
 import { APIError, createInternalServerError } from '../errors';
 import { HTTPClient, HTTPClientConfig, HTTPClientContext } from '../types';
 import { createDefaultHeaders, DEFAULT_RETRY_CONFIG } from './helpers';

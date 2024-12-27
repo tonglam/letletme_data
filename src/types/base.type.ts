@@ -54,9 +54,9 @@ export interface BaseRepository<T, TCreate, TId> {
   prisma: PrismaClient;
   findById(id: TId): TE.TaskEither<APIError, T | null>;
   findAll(): TE.TaskEither<APIError, T[]>;
-  save(data: TCreate): TE.TaskEither<APIError, T>;
-  saveBatch(data: TCreate[]): TE.TaskEither<APIError, T[]>;
-  update(id: TId, data: Partial<TCreate>): TE.TaskEither<APIError, T>;
+  save(data: Omit<TCreate, 'id'>): TE.TaskEither<APIError, T>;
+  saveBatch(data: Omit<TCreate, 'id'>[]): TE.TaskEither<APIError, T[]>;
+  update(id: TId, data: Partial<Omit<TCreate, 'id'>>): TE.TaskEither<APIError, T>;
   deleteAll(): TE.TaskEither<APIError, void>;
   findByIds(ids: TId[]): TE.TaskEither<APIError, T[]>;
   deleteByIds(ids: TId[]): TE.TaskEither<APIError, void>;

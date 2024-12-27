@@ -2,6 +2,7 @@ import * as TE from 'fp-ts/TaskEither';
 import { prisma } from '../../infrastructure/db/prisma';
 import { APIError, createDatabaseError } from '../../infrastructure/http/common/errors';
 import { PhaseId, PhaseRepository, PrismaPhase, PrismaPhaseCreate } from '../../types/phases.type';
+import { getDefinedValue } from '../../utils/domain';
 
 /**
  * Phase repository implementation
@@ -65,7 +66,9 @@ export const phaseRepository: PhaseRepository = {
       () =>
         prisma.phase.update({
           where: { id: Number(id) },
-          data: phase,
+          data: Object.fromEntries(
+            Object.entries(phase).map(([key, val]) => [key, getDefinedValue(val)]),
+          ),
         }),
       (error) => createDatabaseError({ message: 'Failed to update phase', details: { error } }),
     ),

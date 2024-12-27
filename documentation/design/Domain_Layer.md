@@ -2,7 +2,7 @@
 
 ## Overview
 
-The domain layer represents the core business logic of our FPL data service. Following Domain-Driven Design (DDD) principles, each domain is self-contained and implements pure business logic without external dependencies.
+The domain layer represents the core business logic of our FPL data service. Following Domain-Driven Design (DDD) principles and Functional Programming (FP) patterns, each domain is self-contained and implements pure business logic with explicit error handling.
 
 ## Core Design Philosophy
 
@@ -29,126 +29,148 @@ The choice of DDD stems from the inherent complexity of FPL data management:
 
 ### Functional Programming Integration
 
-FP principles complement the DDD approach by providing:
+FP principles are core to our implementation:
 
-1. **Immutability**
+1. **TaskEither for Error Handling**
 
-   - All domain models are immutable
-   - Prevents unexpected state changes
-   - Makes the system more predictable
+   - All operations return TaskEither for explicit error handling
+   - Clear separation between success and failure paths
+   - Composable error handling with fp-ts
 
 2. **Pure Functions**
 
    - Business logic implemented as pure functions
+   - Operations are side-effect free
    - Easier to test and maintain
-   - Clear reasoning about behavior
 
 3. **Type Safety**
-   - Strong typing with FP concepts
-   - Option for nullable values
-   - Either for error handling
+   - Branded types for domain identifiers
+   - Strict validation at domain boundaries
+   - No implicit type coercion
 
 ## Domain Structure
 
 Each domain follows a consistent four-file structure:
 
-### 1. Types (types.ts)
+### 1. Operations (operations.ts)
 
-- Domain models and interfaces
-- Value objects
-- Operation types
-- Result types
-- Validation schemas
+```typescript
+// Pure business logic functions
+export const saveEvent = (event: DomainEvent): TE.TaskEither<APIError, DomainEvent> =>
+  pipe(
+    eventRepository.save(single.fromDomain(event)),
+    TE.map(single.toDomain),
+    TE.chain((result) =>
+      result
+        ? TE.right(result)
+        : TE.left(createValidationError({ message: 'Failed to save event' })),
+    ),
+  );
+```
 
-### 2. Operations (operations.ts)
+### 2. Repository (repository.ts)
 
-- Pure business logic
-- Validation rules
-- Transformation functions
-- Domain-specific calculations
-- State transitions
+```typescript
+// Data access layer with explicit error handling
+export const eventRepository: EventRepository = {
+  save: (event: PrismaEventCreate): TE.TaskEither<APIError, PrismaEvent> =>
+    TE.tryCatch(
+      () => prisma.event.create({ data: event }),
+      (error) => createDatabaseError({ message: 'Failed to save event', details: { error } }),
+    ),
+};
+```
 
 ### 3. Queries (queries.ts)
 
-- Read operations
-- Data filtering
-- Search functionality
-- Aggregations
-- View models
+```typescript
+// Business query operations
+export const getEventById = (
+  repository: EventRepository,
+  id: number,
+): TE.TaskEither<APIError, PrismaEvent | null> =>
+  pipe(
+    validateEventId(id),
+    E.mapLeft((message) => createValidationError({ message })),
+    TE.fromEither,
+    TE.chain(repository.findById),
+  );
+```
 
-### 4. Repository (repository.ts)
+### 4. Types (types.ts)
 
-- Data persistence
-- Data retrieval
-- Transaction handling
-- Cache coordination
-- Data mapping
+```typescript
+// Domain types and validations
+export type EventId = number & { readonly _brand: unique symbol };
+export const validateEventId = (id: number): E.Either<string, EventId> =>
+  id > 0 ? E.right(id as EventId) : E.left(`Invalid event ID: ${id}`);
+```
 
 ## Implementation Guidelines
 
 ### 1. Domain Isolation
 
-- Self-contained domains
-- Clear dependencies
-- Explicit interfaces
-- No cross-domain knowledge
+- Self-contained domains with explicit interfaces
+- Clear dependencies through repository pattern
+- No cross-domain knowledge leakage
+- Pure functional core with side effects at edges
 
 ### 2. Type Safety
 
-- Strict TypeScript configuration
+- Branded types for domain identifiers
+- Explicit validation at boundaries
+- No implicit type coercion
 - Comprehensive type definitions
-- No type assertions
-- Union types for state
 
 ### 3. Error Handling
 
-- Domain-specific errors
-- Either for operation results
-- Meaningful error messages
-- Error recovery patterns
+- TaskEither for all operations
+- Explicit error types and messages
+- Consistent error creation patterns
+- Error transformation at boundaries
 
 ## Testing Strategy
 
 ### 1. Unit Tests
 
-- Pure operations
-- Business rules
-- Error handling
-- Type safety
+- Pure operations testing
+- Error handling scenarios
+- Type validation
+- Business rule verification
 
 ### 2. Integration Tests
 
 - Repository operations
-- Cache integration
-- Database operations
-- API integration
+- Database interactions
+- Error propagation
+- Transaction handling
 
 ### 3. Property Tests
 
-- Business rules
+- Input validation
+- Business rule invariants
+- Error conditions
 - Edge cases
-- State transitions
-- Invariants
 
 ## Best Practices
 
 ### 1. Code Organization
 
-- Consistent structure
-- Clear naming
-- Proper documentation
-- Separation of concerns
+- Consistent file structure
+- Clear module boundaries
+- Explicit dependencies
+- Functional composition
 
 ### 2. Performance
 
-- Efficient algorithms
-- Appropriate data structures
-- Caching strategy
-- Query optimization
+- Efficient data access patterns
+- Transaction management
+- Error handling optimization
+- Type-safe transformations
 
 ### 3. Maintainability
 
-- Clear documentation
-- Consistent patterns
-- Proper logging
-- Test coverage
+- Pure functions
+- Explicit error handling
+- Clear type boundaries
+- Comprehensive documentation

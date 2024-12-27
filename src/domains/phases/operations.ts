@@ -1,6 +1,6 @@
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { createDomainOperations } from '../../infrastructure/db/operations';
+import { createDomainOperations } from 'src/utils/domain';
 import type { APIError } from '../../infrastructure/http/common/errors';
 import { createValidationError } from '../../infrastructure/http/common/errors';
 import {
@@ -45,22 +45,6 @@ export const findActivePhase =
     phases.find(
       (phase) => phase.startEvent <= currentEventId && phase.stopEvent >= currentEventId,
     ) ?? null;
-
-export const validatePhaseSequence = (
-  phases: readonly DomainPhase[],
-): TE.TaskEither<APIError, readonly DomainPhase[]> => {
-  // Skip the "Overall" phase when checking for overlaps
-  const monthlyPhases = phases.filter((phase) => phase.name !== 'Overall');
-
-  for (let i = 1; i < monthlyPhases.length; i++) {
-    if (monthlyPhases[i].startEvent <= monthlyPhases[i - 1].stopEvent) {
-      return TE.left(
-        createValidationError({ message: 'Phase sequence invalid: overlapping phases detected' }),
-      );
-    }
-  }
-  return TE.right(phases);
-};
 
 export const saveBatchPhases = (
   phases: readonly DomainPhase[],

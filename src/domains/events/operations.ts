@@ -1,6 +1,5 @@
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { createDomainOperations } from '../../infrastructure/db/operations';
 import type { APIError } from '../../infrastructure/http/common/errors';
 import { createValidationError } from '../../infrastructure/http/common/errors';
 import {
@@ -10,6 +9,7 @@ import {
   toDomainEvent,
   toPrismaEvent,
 } from '../../types/events.type';
+import { createDomainOperations } from '../../utils/domain';
 import type { EventCacheOperations } from './cache';
 import { eventRepository } from './repository';
 

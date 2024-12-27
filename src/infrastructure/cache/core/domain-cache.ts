@@ -1,5 +1,5 @@
 import * as TE from 'fp-ts/TaskEither';
-import { CachePrefix } from '../config/cache.config';
+import { CachePrefix } from '../../../config/cache/cache.config';
 import { CacheError, RedisClient } from '../types';
 import {
   createBaseCacheOperations,

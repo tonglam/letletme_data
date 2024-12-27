@@ -1,5 +1,6 @@
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
+import { FPL_API_CONFIG } from '../../../../config/api/api.config';
 import {
   EntryHistoryResponseSchema,
   EntryResponseSchema,
@@ -8,7 +9,6 @@ import {
 import { HTTPClient } from '../../common/client';
 import { createApiCallContext } from '../../common/logs';
 import { RequestOptions } from '../../common/types';
-import { FPL_API_CONFIG } from '../config/api.config';
 import { logFplCall } from '../logger';
 import { EntryEndpoints, validateEndpointResponse } from '../types';
 

@@ -1,7 +1,7 @@
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
+import { RedisConfig, RedisConfigCodec, RetryStrategy } from 'infrastructure/cache/types';
 import { failure } from 'io-ts/lib/PathReporter';
-import { RedisConfig, RedisConfigCodec, RetryStrategy } from '../types';
 
 // Default configuration values
 const DEFAULT_CONFIG = {

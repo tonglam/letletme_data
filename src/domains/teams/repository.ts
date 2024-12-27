@@ -3,6 +3,7 @@ import * as TE from 'fp-ts/TaskEither';
 import { prisma } from '../../infrastructure/db/prisma';
 import { APIError, createDatabaseError } from '../../infrastructure/http/common/errors';
 import { PrismaTeam, PrismaTeamCreate, TeamId, TeamRepository } from '../../types/teams.type';
+import { getDefinedValue } from '../../utils/domain';
 
 /**
  * Team repository implementation
@@ -67,32 +68,26 @@ export const teamRepository: TeamRepository = {
     TE.tryCatch(
       async () => {
         const data: Prisma.TeamUpdateInput = {
-          code: team.code !== undefined ? team.code : undefined,
-          name: team.name !== undefined ? team.name : undefined,
-          shortName: team.shortName !== undefined ? team.shortName : undefined,
-          strength: team.strength !== undefined ? team.strength : undefined,
-          strengthOverallHome:
-            team.strengthOverallHome !== undefined ? team.strengthOverallHome : undefined,
-          strengthOverallAway:
-            team.strengthOverallAway !== undefined ? team.strengthOverallAway : undefined,
-          strengthAttackHome:
-            team.strengthAttackHome !== undefined ? team.strengthAttackHome : undefined,
-          strengthAttackAway:
-            team.strengthAttackAway !== undefined ? team.strengthAttackAway : undefined,
-          strengthDefenceHome:
-            team.strengthDefenceHome !== undefined ? team.strengthDefenceHome : undefined,
-          strengthDefenceAway:
-            team.strengthDefenceAway !== undefined ? team.strengthDefenceAway : undefined,
-          pulseId: team.pulseId !== undefined ? team.pulseId : undefined,
-          played: team.played !== undefined ? team.played : undefined,
-          position: team.position !== undefined ? team.position : undefined,
-          points: team.points !== undefined ? team.points : undefined,
-          form: team.form !== undefined ? team.form : undefined,
-          win: team.win !== undefined ? team.win : undefined,
-          draw: team.draw !== undefined ? team.draw : undefined,
-          loss: team.loss !== undefined ? team.loss : undefined,
-          teamDivision: team.teamDivision !== undefined ? team.teamDivision : undefined,
-          unavailable: team.unavailable !== undefined ? team.unavailable : undefined,
+          code: getDefinedValue(team.code),
+          name: getDefinedValue(team.name),
+          shortName: getDefinedValue(team.shortName),
+          strength: getDefinedValue(team.strength),
+          strengthOverallHome: getDefinedValue(team.strengthOverallHome),
+          strengthOverallAway: getDefinedValue(team.strengthOverallAway),
+          strengthAttackHome: getDefinedValue(team.strengthAttackHome),
+          strengthAttackAway: getDefinedValue(team.strengthAttackAway),
+          strengthDefenceHome: getDefinedValue(team.strengthDefenceHome),
+          strengthDefenceAway: getDefinedValue(team.strengthDefenceAway),
+          pulseId: getDefinedValue(team.pulseId),
+          played: getDefinedValue(team.played),
+          position: getDefinedValue(team.position),
+          points: getDefinedValue(team.points),
+          form: getDefinedValue(team.form),
+          win: getDefinedValue(team.win),
+          draw: getDefinedValue(team.draw),
+          loss: getDefinedValue(team.loss),
+          teamDivision: getDefinedValue(team.teamDivision),
+          unavailable: getDefinedValue(team.unavailable),
         };
         return prisma.team.update({
           where: { id: Number(id) },

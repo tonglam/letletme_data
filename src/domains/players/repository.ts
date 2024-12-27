@@ -7,6 +7,7 @@ import {
   PrismaPlayer,
   PrismaPlayerCreate,
 } from '../../types/players.type';
+import { getDefinedValue } from '../../utils/domain';
 
 /**
  * Player repository implementation
@@ -75,7 +76,9 @@ export const playerRepository: PlayerRepository = {
       () =>
         prisma.player.update({
           where: { element: id },
-          data: player,
+          data: Object.fromEntries(
+            Object.entries(player).map(([key, val]) => [key, getDefinedValue(val)]),
+          ),
         }),
       (error) => createDatabaseError({ message: 'Failed to update player', details: { error } }),
     ),

@@ -1,7 +1,7 @@
 import { pipe } from 'fp-ts/function';
 import * as O from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
-import { CacheTTL } from '../config/cache.config';
+import { CacheTTL } from '../../../config/cache/cache.config';
 import { CacheError, CacheErrorType, CacheWrapper, RedisClient } from '../types';
 import { createCacheError } from './utils';
 

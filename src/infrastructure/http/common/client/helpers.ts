@@ -1,5 +1,5 @@
-import { HTTP_CONFIG } from '../../config/http.config';
-import { ErrorCode } from '../../config/http.error.config';
+import { HTTP_CONFIG } from '../../../../config/http/http.config';
+import { ErrorCode } from '../../../../config/http/http.error.config';
 import {
   APIError,
   createBadRequestError,

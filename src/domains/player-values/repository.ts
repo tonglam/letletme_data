@@ -7,6 +7,7 @@ import {
   PrismaPlayerValue,
   PrismaPlayerValueCreate,
 } from '../../types/player-values.type';
+import { getDefinedValue } from '../../utils/domain';
 
 /**
  * Player value repository implementation
@@ -76,7 +77,9 @@ export const playerValueRepository: PlayerValueRepository = {
       () =>
         prisma.playerValue.update({
           where: { id },
-          data: value,
+          data: Object.fromEntries(
+            Object.entries(value).map(([key, val]) => [key, getDefinedValue(val)]),
+          ),
         }),
       (error) =>
         createDatabaseError({ message: 'Failed to update player value', details: { error } }),

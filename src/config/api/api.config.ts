@@ -1,4 +1,4 @@
-import { FPLClientConfig } from '../types';
+import { FPLClientConfig } from '../../infrastructure/http/fpl/types';
 
 /**
  * FPL API Configuration

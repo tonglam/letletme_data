@@ -148,7 +148,9 @@ export interface PrismaPlayerStat {
 }
 
 export type PrismaPlayerStatCreate = Omit<PrismaPlayerStat, 'id' | 'createdAt' | 'updatedAt'>;
-export type PrismaPlayerStatUpdate = Omit<PrismaPlayerStat, 'id' | 'createdAt' | 'updatedAt'>;
+export type PrismaPlayerStatUpdate = Partial<
+  Omit<PrismaPlayerStat, 'id' | 'createdAt' | 'updatedAt'>
+>;
 
 // ============ Converters ============
 export const toDomainPlayerStat = (data: ElementResponse | PrismaPlayerStat): PlayerStat => {

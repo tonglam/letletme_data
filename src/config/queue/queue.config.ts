@@ -1,5 +1,5 @@
 import { ConnectionOptions, JobsOptions } from 'bullmq';
-import { QueueOptions } from '../types';
+import { QueueOptions } from 'infrastructure/queue/types';
 
 /**
  * Default job options

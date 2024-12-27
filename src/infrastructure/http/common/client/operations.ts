@@ -1,7 +1,7 @@
 import axios, { AxiosRequestConfig } from 'axios';
 import { ReaderTaskEither } from 'fp-ts/ReaderTaskEither';
 import { tryCatch } from 'fp-ts/TaskEither';
-import { ErrorCode } from '../../config/http.error.config';
+import { ErrorCode } from '../../../../config/http/http.error.config';
 import { APIError, ERROR_CONFIG, createInternalServerError, isAPIError } from '../errors';
 import { HTTPClient, HTTPClientContext, HttpMethod, RequestBody, RequestOptions } from '../types';
 import { calculateRetryDelay, delay } from './helpers';

@@ -71,7 +71,7 @@ export interface PrismaPlayerValue {
 }
 
 export type PrismaPlayerValueCreate = Omit<PrismaPlayerValue, 'id' | 'createdAt'>;
-export type PrismaPlayerValueUpdate = Omit<PrismaPlayerValue, 'id' | 'createdAt'>;
+export type PrismaPlayerValueUpdate = Partial<Omit<PrismaPlayerValue, 'id' | 'createdAt'>>;
 
 // ============ Converters ============
 export const toDomainPlayerValue = (data: ElementResponse | PrismaPlayerValue): PlayerValue => {
