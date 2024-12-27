@@ -1,5 +1,5 @@
+import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
-import * as TE from 'fp-ts/TaskEither';
 import { BaseRepository, Branded, createBrandedType, isApiResponse } from './base.type';
 
 // ============ Branded Types ============
@@ -10,6 +10,16 @@ export const TeamId = createBrandedType<number, 'TeamId'>(
   (value: unknown): value is number =>
     typeof value === 'number' && value > 0 && Number.isInteger(value),
 );
+
+export const validateTeamId = (value: unknown): E.Either<string, TeamId> =>
+  pipe(
+    value,
+    E.fromPredicate(
+      (v): v is number => typeof v === 'number' && v > 0 && Number.isInteger(v),
+      () => 'Invalid team ID: must be a positive integer',
+    ),
+    E.map((v) => v as TeamId),
+  );
 
 // ============ Types ============
 /**
@@ -100,6 +110,7 @@ export interface PrismaTeam {
 }
 
 export type PrismaTeamCreate = Omit<PrismaTeam, 'createdAt'>;
+export type PrismaTeamUpdate = Omit<PrismaTeam, 'createdAt'>;
 
 // ============ Converters ============
 export const toDomainTeam = (data: TeamResponse | PrismaTeam): Team => {
@@ -143,12 +154,26 @@ export const toDomainTeam = (data: TeamResponse | PrismaTeam): Team => {
   };
 };
 
-export const convertPrismaTeams = (teams: readonly PrismaTeam[]): TE.TaskEither<string, Teams> =>
-  pipe(
-    teams,
-    TE.right,
-    TE.map((values) => values.map(toDomainTeam)),
-  );
-
-export const convertPrismaTeam = (team: PrismaTeam | null): TE.TaskEither<string, Team | null> =>
-  TE.right(team ? toDomainTeam(team) : null);
+export const toPrismaTeam = (team: Team): PrismaTeamCreate => ({
+  id: Number(team.id),
+  code: team.code,
+  name: team.name,
+  shortName: team.shortName,
+  strength: team.strength,
+  strengthOverallHome: team.strengthOverallHome,
+  strengthOverallAway: team.strengthOverallAway,
+  strengthAttackHome: team.strengthAttackHome,
+  strengthAttackAway: team.strengthAttackAway,
+  strengthDefenceHome: team.strengthDefenceHome,
+  strengthDefenceAway: team.strengthDefenceAway,
+  pulseId: team.pulseId,
+  played: team.played,
+  position: team.position,
+  points: team.points,
+  form: team.form,
+  win: team.win,
+  draw: team.draw,
+  loss: team.loss,
+  teamDivision: team.teamDivision,
+  unavailable: team.unavailable,
+});

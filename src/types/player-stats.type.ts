@@ -1,15 +1,35 @@
 import { Prisma } from '@prisma/client';
+import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import type { APIError } from '../infrastructure/http/common/errors';
-import { BaseRepository } from './base.type';
+import { APIError } from '../infrastructure/http/common/errors';
+import { BaseRepository, Branded, createBrandedType, isApiResponse } from './base.type';
+import { ElementResponse } from './elements.type';
+
+// ============ Branded Types ============
+export type PlayerStatId = Branded<string, 'PlayerStatId'>;
+
+export const PlayerStatId = createBrandedType<string, 'PlayerStatId'>(
+  'PlayerStatId',
+  (value: unknown): value is string => typeof value === 'string' && value.length > 0,
+);
+
+export const validatePlayerStatId = (value: unknown): E.Either<string, PlayerStatId> =>
+  pipe(
+    value,
+    E.fromPredicate(
+      (v): v is string => typeof v === 'string' && v.length > 0,
+      () => 'Invalid player stat ID: must be a non-empty string',
+    ),
+    E.map((v) => v as PlayerStatId),
+  );
 
 // ============ Types ============
 /**
  * Domain types (camelCase)
  */
 export interface PlayerStat {
-  readonly id: string;
+  readonly id: PlayerStatId;
   readonly eventId: number;
   readonly elementId: number;
   readonly teamId: number;
@@ -63,37 +83,13 @@ export type PlayerStats = readonly PlayerStat[];
 
 // ============ Repository Interface ============
 export interface PlayerStatRepository
-  extends BaseRepository<PrismaPlayerStat, PrismaPlayerStatCreate, string> {
-  /**
-   * Finds player stats by element ID
-   * @param elementId - The element ID to find stats for
-   * @returns TaskEither with found player stats or error
-   */
+  extends BaseRepository<PrismaPlayerStat, PrismaPlayerStatCreate, PlayerStatId> {
   findByElementId: (elementId: number) => TE.TaskEither<APIError, PrismaPlayerStat[]>;
-
-  /**
-   * Finds player stats by event ID
-   * @param eventId - The event ID to find stats for
-   * @returns TaskEither with found player stats or error
-   */
   findByEventId: (eventId: number) => TE.TaskEither<APIError, PrismaPlayerStat[]>;
-
-  /**
-   * Finds player stats by element ID and event ID
-   * @param elementId - The element ID to find stats for
-   * @param eventId - The event ID to find stats for
-   * @returns TaskEither with found player stat or null if not found
-   */
   findByElementAndEvent: (
     elementId: number,
     eventId: number,
   ) => TE.TaskEither<APIError, PrismaPlayerStat | null>;
-
-  /**
-   * Finds player stats by team ID
-   * @param teamId - The team ID to find stats for
-   * @returns TaskEither with found player stats or error
-   */
   findByTeamId: (teamId: number) => TE.TaskEither<APIError, PrismaPlayerStat[]>;
 }
 
@@ -152,57 +148,143 @@ export interface PrismaPlayerStat {
 }
 
 export type PrismaPlayerStatCreate = Omit<PrismaPlayerStat, 'id' | 'createdAt' | 'updatedAt'>;
+export type PrismaPlayerStatUpdate = Omit<PrismaPlayerStat, 'id' | 'createdAt' | 'updatedAt'>;
 
 // ============ Converters ============
-export const toDomainPlayerStat = (prisma: PrismaPlayerStat): PlayerStat => ({
-  id: prisma.id,
-  eventId: prisma.eventId,
-  elementId: prisma.elementId,
-  teamId: prisma.teamId,
-  form: prisma.form,
-  influence: prisma.influence,
-  creativity: prisma.creativity,
-  threat: prisma.threat,
-  ictIndex: prisma.ictIndex,
-  expectedGoals: prisma.expectedGoals?.toNumber() ?? null,
-  expectedAssists: prisma.expectedAssists?.toNumber() ?? null,
-  expectedGoalInvolvements: prisma.expectedGoalInvolvements?.toNumber() ?? null,
-  expectedGoalsConceded: prisma.expectedGoalsConceded?.toNumber() ?? null,
-  minutes: prisma.minutes,
-  goalsScored: prisma.goalsScored,
-  assists: prisma.assists,
-  cleanSheets: prisma.cleanSheets,
-  goalsConceded: prisma.goalsConceded,
-  ownGoals: prisma.ownGoals,
-  penaltiesSaved: prisma.penaltiesSaved,
-  yellowCards: prisma.yellowCards,
-  redCards: prisma.redCards,
-  saves: prisma.saves,
-  bonus: prisma.bonus,
-  bps: prisma.bps,
-  starts: prisma.starts,
-  influenceRank: prisma.influenceRank,
-  influenceRankType: prisma.influenceRankType,
-  creativityRank: prisma.creativityRank,
-  creativityRankType: prisma.creativityRankType,
-  threatRank: prisma.threatRank,
-  threatRankType: prisma.threatRankType,
-  ictIndexRank: prisma.ictIndexRank,
-  ictIndexRankType: prisma.ictIndexRankType,
-  expectedGoalsPer90: prisma.expectedGoalsPer90?.toNumber() ?? null,
-  savesPer90: prisma.savesPer90?.toNumber() ?? null,
-  expectedAssistsPer90: prisma.expectedAssistsPer90?.toNumber() ?? null,
-  expectedGoalInvolvementsPer90: prisma.expectedGoalInvolvementsPer90?.toNumber() ?? null,
-  expectedGoalsConcededPer90: prisma.expectedGoalsConcededPer90?.toNumber() ?? null,
-  goalsConcededPer90: prisma.goalsConcededPer90?.toNumber() ?? null,
-  startsPer90: prisma.startsPer90?.toNumber() ?? null,
-  cleanSheetsPer90: prisma.cleanSheetsPer90?.toNumber() ?? null,
-  cornersAndIndirectFreekicksOrder: prisma.cornersAndIndirectFreekicksOrder,
-  cornersAndIndirectFreekicksText: prisma.cornersAndIndirectFreekicksText,
-  directFreekicksOrder: prisma.directFreekicksOrder,
-  directFreekicksText: prisma.directFreekicksText,
-  penaltiesOrder: prisma.penaltiesOrder,
-  penaltiesText: prisma.penaltiesText,
+export const toDomainPlayerStat = (data: ElementResponse | PrismaPlayerStat): PlayerStat => {
+  const isElementResponse = (d: ElementResponse | PrismaPlayerStat): d is ElementResponse =>
+    isApiResponse(d, 'element_type');
+
+  const parseNumber = (value: string | null): number | null => (value ? parseFloat(value) : null);
+
+  return {
+    id: data.id as PlayerStatId,
+    eventId: isElementResponse(data) ? data.event_points : data.eventId,
+    elementId: isElementResponse(data) ? data.id : data.elementId,
+    teamId: isElementResponse(data) ? data.team : data.teamId,
+    form: isElementResponse(data) ? parseNumber(data.form) : data.form,
+    influence: isElementResponse(data) ? parseNumber(data.influence) : data.influence,
+    creativity: isElementResponse(data) ? parseNumber(data.creativity) : data.creativity,
+    threat: isElementResponse(data) ? parseNumber(data.threat) : data.threat,
+    ictIndex: isElementResponse(data) ? parseNumber(data.ict_index) : data.ictIndex,
+    expectedGoals: isElementResponse(data)
+      ? parseNumber(data.expected_goals)
+      : data.expectedGoals?.toNumber() ?? null,
+    expectedAssists: isElementResponse(data)
+      ? parseNumber(data.expected_assists)
+      : data.expectedAssists?.toNumber() ?? null,
+    expectedGoalInvolvements: isElementResponse(data)
+      ? parseNumber(data.expected_goal_involvements)
+      : data.expectedGoalInvolvements?.toNumber() ?? null,
+    expectedGoalsConceded: isElementResponse(data)
+      ? parseNumber(data.expected_goals_conceded)
+      : data.expectedGoalsConceded?.toNumber() ?? null,
+    minutes: isElementResponse(data) ? data.minutes : data.minutes,
+    goalsScored: isElementResponse(data) ? data.goals_scored : data.goalsScored,
+    assists: isElementResponse(data) ? data.assists : data.assists,
+    cleanSheets: isElementResponse(data) ? data.clean_sheets : data.cleanSheets,
+    goalsConceded: isElementResponse(data) ? data.goals_conceded : data.goalsConceded,
+    ownGoals: isElementResponse(data) ? data.own_goals : data.ownGoals,
+    penaltiesSaved: isElementResponse(data) ? data.penalties_saved : data.penaltiesSaved,
+    yellowCards: isElementResponse(data) ? data.yellow_cards : data.yellowCards,
+    redCards: isElementResponse(data) ? data.red_cards : data.redCards,
+    saves: isElementResponse(data) ? data.saves : data.saves,
+    bonus: isElementResponse(data) ? data.bonus : data.bonus,
+    bps: isElementResponse(data) ? data.bps : data.bps,
+    starts: isElementResponse(data) ? data.starts : data.starts,
+    influenceRank: isElementResponse(data) ? data.influence_rank : data.influenceRank,
+    influenceRankType: isElementResponse(data) ? data.influence_rank_type : data.influenceRankType,
+    creativityRank: isElementResponse(data) ? data.creativity_rank : data.creativityRank,
+    creativityRankType: isElementResponse(data)
+      ? data.creativity_rank_type
+      : data.creativityRankType,
+    threatRank: isElementResponse(data) ? data.threat_rank : data.threatRank,
+    threatRankType: isElementResponse(data) ? data.threat_rank_type : data.threatRankType,
+    ictIndexRank: isElementResponse(data) ? data.ict_index_rank : data.ictIndexRank,
+    ictIndexRankType: isElementResponse(data) ? data.ict_index_rank_type : data.ictIndexRankType,
+    expectedGoalsPer90: null, // Not available in ElementResponse
+    savesPer90: null, // Not available in ElementResponse
+    expectedAssistsPer90: null, // Not available in ElementResponse
+    expectedGoalInvolvementsPer90: null, // Not available in ElementResponse
+    expectedGoalsConcededPer90: null, // Not available in ElementResponse
+    goalsConcededPer90: null, // Not available in ElementResponse
+    startsPer90: null, // Not available in ElementResponse
+    cleanSheetsPer90: null, // Not available in ElementResponse
+    cornersAndIndirectFreekicksOrder: isElementResponse(data)
+      ? data.corners_and_indirect_freekicks_order
+      : data.cornersAndIndirectFreekicksOrder,
+    cornersAndIndirectFreekicksText: isElementResponse(data)
+      ? data.corners_and_indirect_freekicks_text
+      : data.cornersAndIndirectFreekicksText,
+    directFreekicksOrder: isElementResponse(data)
+      ? data.direct_freekicks_order
+      : data.directFreekicksOrder,
+    directFreekicksText: isElementResponse(data)
+      ? data.direct_freekicks_text
+      : data.directFreekicksText,
+    penaltiesOrder: isElementResponse(data) ? data.penalties_order : data.penaltiesOrder,
+    penaltiesText: null, // Not available in ElementResponse
+  };
+};
+
+export const toPrismaPlayerStat = (stat: PlayerStat): PrismaPlayerStatCreate => ({
+  eventId: stat.eventId,
+  elementId: stat.elementId,
+  teamId: stat.teamId,
+  form: stat.form,
+  influence: stat.influence,
+  creativity: stat.creativity,
+  threat: stat.threat,
+  ictIndex: stat.ictIndex,
+  expectedGoals: stat.expectedGoals ? new Prisma.Decimal(stat.expectedGoals) : null,
+  expectedAssists: stat.expectedAssists ? new Prisma.Decimal(stat.expectedAssists) : null,
+  expectedGoalInvolvements: stat.expectedGoalInvolvements
+    ? new Prisma.Decimal(stat.expectedGoalInvolvements)
+    : null,
+  expectedGoalsConceded: stat.expectedGoalsConceded
+    ? new Prisma.Decimal(stat.expectedGoalsConceded)
+    : null,
+  minutes: stat.minutes,
+  goalsScored: stat.goalsScored,
+  assists: stat.assists,
+  cleanSheets: stat.cleanSheets,
+  goalsConceded: stat.goalsConceded,
+  ownGoals: stat.ownGoals,
+  penaltiesSaved: stat.penaltiesSaved,
+  yellowCards: stat.yellowCards,
+  redCards: stat.redCards,
+  saves: stat.saves,
+  bonus: stat.bonus,
+  bps: stat.bps,
+  starts: stat.starts,
+  influenceRank: stat.influenceRank,
+  influenceRankType: stat.influenceRankType,
+  creativityRank: stat.creativityRank,
+  creativityRankType: stat.creativityRankType,
+  threatRank: stat.threatRank,
+  threatRankType: stat.threatRankType,
+  ictIndexRank: stat.ictIndexRank,
+  ictIndexRankType: stat.ictIndexRankType,
+  expectedGoalsPer90: stat.expectedGoalsPer90 ? new Prisma.Decimal(stat.expectedGoalsPer90) : null,
+  savesPer90: stat.savesPer90 ? new Prisma.Decimal(stat.savesPer90) : null,
+  expectedAssistsPer90: stat.expectedAssistsPer90
+    ? new Prisma.Decimal(stat.expectedAssistsPer90)
+    : null,
+  expectedGoalInvolvementsPer90: stat.expectedGoalInvolvementsPer90
+    ? new Prisma.Decimal(stat.expectedGoalInvolvementsPer90)
+    : null,
+  expectedGoalsConcededPer90: stat.expectedGoalsConcededPer90
+    ? new Prisma.Decimal(stat.expectedGoalsConcededPer90)
+    : null,
+  goalsConcededPer90: stat.goalsConcededPer90 ? new Prisma.Decimal(stat.goalsConcededPer90) : null,
+  startsPer90: stat.startsPer90 ? new Prisma.Decimal(stat.startsPer90) : null,
+  cleanSheetsPer90: stat.cleanSheetsPer90 ? new Prisma.Decimal(stat.cleanSheetsPer90) : null,
+  cornersAndIndirectFreekicksOrder: stat.cornersAndIndirectFreekicksOrder,
+  cornersAndIndirectFreekicksText: stat.cornersAndIndirectFreekicksText,
+  directFreekicksOrder: stat.directFreekicksOrder,
+  directFreekicksText: stat.directFreekicksText,
+  penaltiesOrder: stat.penaltiesOrder,
+  penaltiesText: stat.penaltiesText,
 });
 
 export const convertPrismaPlayerStats = (

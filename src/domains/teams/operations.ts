@@ -1,28 +1,56 @@
+import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { APIError } from '../../infrastructure/http/common/errors';
-import { createFPLClient } from '../../infrastructure/http/fpl/client';
-import { createTeamServiceImpl } from '../../services/teams/service';
-import { teamWorkflows } from '../../services/teams/workflow';
-import { Team, TeamId } from '../../types/teams.type';
+import { createDomainOperations } from '../../infrastructure/db/operations';
+import type { APIError } from '../../infrastructure/http/common/errors';
+import { createValidationError } from '../../infrastructure/http/common/errors';
+import {
+  Team as DomainTeam,
+  PrismaTeam,
+  TeamId,
+  toDomainTeam,
+  toPrismaTeam,
+} from '../../types/teams.type';
+import type { TeamCacheOperations } from './cache';
 import { teamRepository } from './repository';
 
-export interface TeamOperations {
-  readonly syncTeams: () => TE.TaskEither<APIError, readonly Team[]>;
-  readonly getTeams: () => TE.TaskEither<APIError, readonly Team[]>;
-  readonly getTeam: (id: TeamId) => TE.TaskEither<APIError, Team>;
-}
+const { single, array } = createDomainOperations<DomainTeam, PrismaTeam>({
+  toDomain: toDomainTeam,
+  toPrisma: toPrismaTeam,
+});
 
-export const createTeamOperations = (): TeamOperations => {
-  const bootstrapApi = createFPLClient();
-  const teamService = createTeamServiceImpl({
-    bootstrapApi,
-    teamRepository,
-  });
-  const workflow = teamWorkflows(teamService);
+export const saveTeam = (team: DomainTeam): TE.TaskEither<APIError, DomainTeam> =>
+  pipe(
+    teamRepository.save(single.fromDomain(team)),
+    TE.map(single.toDomain),
+    TE.chain((result) =>
+      result
+        ? TE.right(result)
+        : TE.left(createValidationError({ message: 'Failed to save team' })),
+    ),
+  );
 
-  return {
-    syncTeams: () => workflow.syncAndVerifyTeams(),
-    getTeams: () => workflow.syncAndVerifyTeams(),
-    getTeam: (id) => workflow.getTeamWithValidation(id),
-  };
-};
+export const cacheTeam =
+  (cache: TeamCacheOperations) =>
+  (team: DomainTeam): TE.TaskEither<APIError, void> =>
+    pipe(
+      cache.cacheTeam({ ...single.fromDomain(team), createdAt: new Date() }),
+      TE.mapLeft((error) =>
+        createValidationError({ message: 'Failed to cache team', details: { error } }),
+      ),
+    );
+
+export const findAllTeams = (): TE.TaskEither<APIError, readonly DomainTeam[]> =>
+  pipe(teamRepository.findAll(), TE.map(array.toDomain));
+
+export const findTeamById = (id: TeamId): TE.TaskEither<APIError, DomainTeam | null> =>
+  pipe(teamRepository.findById(id), TE.map(single.toDomain));
+
+export const saveBatchTeams = (
+  teams: readonly DomainTeam[],
+): TE.TaskEither<APIError, readonly DomainTeam[]> =>
+  pipe(
+    teams,
+    TE.of,
+    TE.map(array.fromDomain),
+    TE.chain((prismaTeams) => pipe(teamRepository.saveBatch(prismaTeams), TE.map(array.toDomain))),
+  );

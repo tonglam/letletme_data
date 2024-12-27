@@ -1,70 +1,82 @@
-import { APIError, createInternalServerError } from '@infrastructure/errors';
-import { PlayerValue, PlayerValuesResponse } from '@types/playerValues.type';
+import { ValueChangeType } from '@prisma/client';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { PlayerValuesCache } from './cache';
-import { PlayerValuesInvalidation } from './cache/invalidation';
-import { PlayerValuesRepository } from './repository';
+import { createDomainOperations } from '../../infrastructure/db/operations';
+import type { APIError } from '../../infrastructure/http/common/errors';
+import { createValidationError } from '../../infrastructure/http/common/errors';
+import {
+  PlayerValue as DomainPlayerValue,
+  PrismaPlayerValue,
+  toDomainPlayerValue,
+  toPrismaPlayerValue,
+} from '../../types/player-values.type';
+import type { PlayerValueCacheOperations } from './cache';
+import { playerValueRepository } from './repository';
 
-export const createPlayerValuesOperations = (
-  repository: PlayerValuesRepository,
-  cache: PlayerValuesCache,
-  cacheInvalidation: PlayerValuesInvalidation,
-) => {
-  // Core processing functions
-  const processValues = (
-    response: PlayerValuesResponse,
-    eventId: number,
-  ): TE.TaskEither<APIError, void> =>
-    pipe(
-      repository.processValuesResponse(response, eventId),
-      TE.chain(() => cacheInvalidation.invalidatePlayerValues(eventId, eventId)),
-      TE.mapLeft((error) => createInternalServerError({ message: error.message })),
-    );
+const { single, array } = createDomainOperations<DomainPlayerValue, PrismaPlayerValue>({
+  toDomain: toDomainPlayerValue,
+  toPrisma: toPrismaPlayerValue,
+});
 
-  // Query operations
-  const getPlayerValues = (
-    playerId: number,
-    eventId: number,
-  ): TE.TaskEither<APIError, ReadonlyArray<PlayerValue>> =>
+export const savePlayerValue = (
+  value: DomainPlayerValue,
+): TE.TaskEither<APIError, DomainPlayerValue> =>
+  pipe(
+    playerValueRepository.save(single.fromDomain(value)),
+    TE.map(single.toDomain),
+    TE.chain((result) =>
+      result
+        ? TE.right(result)
+        : TE.left(createValidationError({ message: 'Failed to save player value' })),
+    ),
+  );
+
+export const cachePlayerValue =
+  (cache: PlayerValueCacheOperations) =>
+  (value: DomainPlayerValue): TE.TaskEither<APIError, void> =>
     pipe(
-      cache.getPlayerValues(playerId, eventId),
-      TE.orElse(() =>
-        pipe(
-          repository.findByPlayerId(playerId, eventId),
-          TE.chain((values) =>
-            pipe(
-              cache.setPlayerValues(playerId, eventId, values),
-              TE.map(() => values),
-            ),
-          ),
-        ),
+      cache.setPlayerValues(value.elementId, value.eventId, [value]),
+      TE.mapLeft((error) =>
+        createValidationError({ message: 'Failed to cache player value', details: { error } }),
       ),
     );
 
-  const getLatestPlayerValue = (playerId: number): TE.TaskEither<APIError, PlayerValue | null> =>
-    pipe(
-      cache.getLatestPlayerValue(playerId),
-      TE.orElse(() =>
-        pipe(
-          repository.findLatestByPlayerId(playerId),
-          TE.chain((value) =>
-            value
-              ? pipe(
-                  cache.setLatestPlayerValue(playerId, value),
-                  TE.map(() => value),
-                )
-              : TE.right(null),
-          ),
-        ),
-      ),
-    );
+export const findAllPlayerValues = (): TE.TaskEither<APIError, readonly DomainPlayerValue[]> =>
+  pipe(playerValueRepository.findAll(), TE.map(array.toDomain));
 
-  return {
-    processValues,
-    getPlayerValues,
-    getLatestPlayerValue,
-  } as const;
-};
+export const findPlayerValueById = (
+  id: string,
+): TE.TaskEither<APIError, DomainPlayerValue | null> =>
+  pipe(playerValueRepository.findById(id), TE.map(single.toDomain));
 
-export type PlayerValuesOperations = ReturnType<typeof createPlayerValuesOperations>;
+export const saveBatchPlayerValues = (
+  values: readonly DomainPlayerValue[],
+): TE.TaskEither<APIError, readonly DomainPlayerValue[]> =>
+  pipe(
+    values,
+    TE.of,
+    TE.map(array.fromDomain),
+    TE.chain((prismaValues) =>
+      pipe(playerValueRepository.saveBatch(prismaValues), TE.map(array.toDomain)),
+    ),
+  );
+
+export const findPlayerValuesByChangeDate = (
+  changeDate: string,
+): TE.TaskEither<APIError, readonly DomainPlayerValue[]> =>
+  pipe(playerValueRepository.findByChangeDate(changeDate), TE.map(array.toDomain));
+
+export const findPlayerValuesByElementType = (
+  elementType: number,
+): TE.TaskEither<APIError, readonly DomainPlayerValue[]> =>
+  pipe(playerValueRepository.findByElementType(elementType), TE.map(array.toDomain));
+
+export const findPlayerValuesByChangeType = (
+  changeType: ValueChangeType,
+): TE.TaskEither<APIError, readonly DomainPlayerValue[]> =>
+  pipe(playerValueRepository.findByChangeType(changeType), TE.map(array.toDomain));
+
+export const findPlayerValuesByEventId = (
+  eventId: number,
+): TE.TaskEither<APIError, readonly DomainPlayerValue[]> =>
+  pipe(playerValueRepository.findByEventId(eventId), TE.map(array.toDomain));

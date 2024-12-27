@@ -1,5 +1,5 @@
+import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
-import * as TE from 'fp-ts/TaskEither';
 import { BaseRepository, Branded, createBrandedType, isApiResponse } from './base.type';
 
 // ============ Branded Types ============
@@ -10,6 +10,16 @@ export const PhaseId = createBrandedType<number, 'PhaseId'>(
   (value: unknown): value is number =>
     typeof value === 'number' && value > 0 && Number.isInteger(value),
 );
+
+export const validatePhaseId = (value: unknown): E.Either<string, PhaseId> =>
+  pipe(
+    value,
+    E.fromPredicate(
+      (v): v is number => typeof v === 'number' && v > 0 && Number.isInteger(v),
+      () => 'Invalid phase ID: must be a positive integer',
+    ),
+    E.map((v) => v as PhaseId),
+  );
 
 // ============ Types ============
 /**
@@ -52,6 +62,7 @@ export interface PrismaPhase {
 }
 
 export type PrismaPhaseCreate = Omit<PrismaPhase, 'createdAt'>;
+export type PrismaPhaseUpdate = Omit<PrismaPhase, 'createdAt'>;
 
 // ============ Converters ============
 export const toDomainPhase = (data: PhaseResponse | PrismaPhase): Phase => {
@@ -67,15 +78,10 @@ export const toDomainPhase = (data: PhaseResponse | PrismaPhase): Phase => {
   };
 };
 
-export const convertPrismaPhases = (
-  phases: readonly PrismaPhase[],
-): TE.TaskEither<string, Phases> =>
-  pipe(
-    phases,
-    TE.right,
-    TE.map((values) => values.map(toDomainPhase)),
-  );
-
-export const convertPrismaPhase = (
-  phase: PrismaPhase | null,
-): TE.TaskEither<string, Phase | null> => TE.right(phase ? toDomainPhase(phase) : null);
+export const toPrismaPhase = (phase: Phase): PrismaPhaseCreate => ({
+  id: Number(phase.id),
+  name: phase.name,
+  startEvent: phase.startEvent,
+  stopEvent: phase.stopEvent,
+  highestScore: phase.highestScore,
+});

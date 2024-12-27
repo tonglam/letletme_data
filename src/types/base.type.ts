@@ -1,10 +1,9 @@
-import { PrismaClient } from '@prisma/client';
+import { ElementType, PrismaClient } from '@prisma/client';
 import * as E from 'fp-ts/Either';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
 import { z } from 'zod';
-import { createError } from '../domains/phases/operations';
-import { CacheError } from '../infrastructure/cache/types';
+import { CacheError, convertTaskEither } from '../infrastructure/cache/types';
 import { APIError } from '../infrastructure/http/common/errors';
 
 // ============ Constants ============
@@ -17,19 +16,22 @@ export const ELEMENT_STATUS = {
 
 export type ElementStatus = (typeof ELEMENT_STATUS)[keyof typeof ELEMENT_STATUS];
 
-export enum ElementType {
-  GKP = 1,
-  DEF = 2,
-  MID = 3,
-  FWD = 4,
-}
+export { ElementType };
 
-export const ElementTypeNames: Record<ElementType, string> = {
-  [ElementType.GKP]: 'Goalkeeper',
-  [ElementType.DEF]: 'Defender',
-  [ElementType.MID]: 'Midfielder',
-  [ElementType.FWD]: 'Forward',
+export const ElementTypeConfig = {
+  [ElementType.GKP]: { id: 1, name: 'Goalkeeper' },
+  [ElementType.DEF]: { id: 2, name: 'Defender' },
+  [ElementType.MID]: { id: 3, name: 'Midfielder' },
+  [ElementType.FWD]: { id: 4, name: 'Forward' },
+} as const;
+
+// Derived maps for specific use cases
+export const getElementTypeById = (id: number): ElementType | undefined => {
+  const entry = Object.entries(ElementTypeConfig).find((entry) => entry[1].id === id);
+  return entry ? (entry[0] as ElementType) : undefined;
 };
+
+export const getElementTypeName = (type: ElementType): string => ElementTypeConfig[type].name;
 
 export enum ValueChangeType {
   Start = 'Start',
@@ -85,11 +87,7 @@ export const getCachedOrFallbackMany = <T, P>(
   converter: (items: readonly P[]) => TE.TaskEither<APIError, readonly T[]>,
 ): TE.TaskEither<APIError, readonly T[]> =>
   cachedValue
-    ? pipe(
-        cachedValue,
-        TE.mapLeft((error) => createError('Cache operation failed', error)),
-        TE.chain(converter),
-      )
+    ? pipe(cachedValue, convertTaskEither, TE.chain(converter))
     : pipe(fallback, TE.chain(converter));
 
 export const getCachedOrFallbackOne = <T, P>(
@@ -98,11 +96,7 @@ export const getCachedOrFallbackOne = <T, P>(
   converter: (item: P | null) => TE.TaskEither<APIError, T | null>,
 ): TE.TaskEither<APIError, T | null> =>
   cachedValue
-    ? pipe(
-        cachedValue,
-        TE.mapLeft((error) => createError('Cache operation failed', error)),
-        TE.chain(converter),
-      )
+    ? pipe(cachedValue, convertTaskEither, TE.chain(converter))
     : pipe(fallback, TE.chain(converter));
 
 /**

@@ -145,7 +145,7 @@ export interface PrismaEvent {
 }
 
 export type PrismaEventCreate = Omit<PrismaEvent, 'createdAt'>;
-export type PrismaEventUpdate = Partial<Omit<PrismaEvent, 'id' | 'createdAt'>>;
+export type PrismaEventUpdate = Omit<PrismaEvent, 'createdAt'>;
 
 // ============ Converters ============
 export const toDomainEvent = (data: EventResponse | PrismaEvent): Event => {
@@ -211,15 +211,30 @@ export const toDomainEvent = (data: EventResponse | PrismaEvent): Event => {
   };
 };
 
-export const convertPrismaEvents = (
-  events: readonly PrismaEvent[],
-): TE.TaskEither<APIError, Events> =>
-  pipe(
-    events,
-    TE.right,
-    TE.map((values) => values.map(toDomainEvent)),
-  );
-
-export const convertPrismaEvent = (
-  event: PrismaEvent | null,
-): TE.TaskEither<APIError, Event | null> => TE.right(event ? toDomainEvent(event) : null);
+export const toPrismaEvent = (event: Event): PrismaEventCreate => ({
+  id: Number(event.id),
+  name: event.name,
+  deadlineTime: event.deadlineTime,
+  deadlineTimeEpoch: event.deadlineTimeEpoch,
+  deadlineTimeGameOffset: event.deadlineTimeGameOffset,
+  releaseTime: event.releaseTime,
+  averageEntryScore: event.averageEntryScore,
+  finished: event.finished,
+  dataChecked: event.dataChecked,
+  highestScore: event.highestScore,
+  highestScoringEntry: event.highestScoringEntry,
+  isPrevious: event.isPrevious,
+  isCurrent: event.isCurrent,
+  isNext: event.isNext,
+  cupLeaguesCreated: event.cupLeaguesCreated,
+  h2hKoMatchesCreated: event.h2hKoMatchesCreated,
+  rankedCount: event.rankedCount,
+  chipPlays: event.chipPlays as unknown as Prisma.JsonValue,
+  mostSelected: event.mostSelected,
+  mostTransferredIn: event.mostTransferredIn,
+  mostCaptained: event.mostCaptained,
+  mostViceCaptained: event.mostViceCaptained,
+  topElement: event.topElement,
+  topElementInfo: event.topElementInfo as unknown as Prisma.JsonValue,
+  transfersMade: event.transfersMade,
+});

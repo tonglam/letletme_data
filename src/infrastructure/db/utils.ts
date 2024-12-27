@@ -1,4 +1,6 @@
 import { Prisma } from '@prisma/client';
+import * as E from 'fp-ts/Either';
+import { APIError, createValidationError } from '../http/common/errors';
 
 /**
  * Converts numeric fields to Prisma.Decimal for data
@@ -65,4 +67,48 @@ export const parseJsonObject = <T>(
 ): T | null => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   return parser(value as Prisma.JsonObject);
+};
+
+export const ensurePrismaEntity = <T>(
+  data: unknown,
+  requiredFields: readonly (keyof T)[],
+  entityName: string,
+): E.Either<APIError, T> => {
+  if (typeof data === 'object' && data !== null && requiredFields.every((field) => field in data)) {
+    return E.right(data as T);
+  }
+  return E.left(
+    createValidationError({
+      message: `Invalid ${entityName} object`,
+      details: {
+        missingFields: requiredFields.filter((field) => {
+          const obj = data as { [key: string]: unknown } | null;
+          return !obj || !(field in obj);
+        }),
+      },
+    }),
+  );
+};
+
+export const ensurePrismaEntityArray = <T>(
+  data: unknown,
+  requiredFields: readonly (keyof T)[],
+  entityName: string,
+): E.Either<APIError, T[]> => {
+  if (Array.isArray(data)) {
+    const validatedEntities = data.map((item) =>
+      ensurePrismaEntity<T>(item, requiredFields, entityName),
+    );
+    const errors = validatedEntities.filter(E.isLeft).map((e) => e.left);
+    if (errors.length > 0) {
+      return E.left(
+        createValidationError({
+          message: `Invalid ${entityName} array`,
+          details: { errors },
+        }),
+      );
+    }
+    return E.right(validatedEntities.filter(E.isRight).map((p) => p.right));
+  }
+  return E.left(createValidationError({ message: `Expected array of ${entityName} objects` }));
 };
