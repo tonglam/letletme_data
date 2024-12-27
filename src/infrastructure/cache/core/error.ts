@@ -1,6 +1,6 @@
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
-import { logger } from '../../logger/logger';
+import { getApiLogger } from '../../logger';
 import { CacheError, CacheErrorType, DEFAULT_RETRY_CONFIG, RetryConfig } from '../types';
 
 const calculateRetryDelay = (attempt: number, config: RetryConfig): number =>
@@ -20,15 +20,21 @@ const logError = (error: CacheError, source: string): TE.TaskEither<CacheError, 
     ...error.context,
   };
 
-  return TE.fromIO(() =>
-    shouldWarnOnly(error)
-      ? logger.warn({ message: error.message, context: logContext })()
-      : logger.error({ message: error.message, context: logContext })(),
-  );
+  const logger = getApiLogger();
+
+  return TE.fromIO(() => {
+    if (shouldWarnOnly(error)) {
+      logger.warn({ message: error.message, context: logContext });
+    } else {
+      logger.error({ message: error.message, context: logContext });
+    }
+  });
 };
 
-const logFinalError = (error: CacheError): TE.TaskEither<CacheError, void> =>
-  TE.fromIO(() =>
+const logFinalError = (error: CacheError): TE.TaskEither<CacheError, void> => {
+  const logger = getApiLogger();
+
+  return TE.fromIO(() => {
     logger.error({
       message: 'Final cache error after retries',
       context: {
@@ -38,8 +44,9 @@ const logFinalError = (error: CacheError): TE.TaskEither<CacheError, void> =>
         source: 'retryOperation',
         ...error.context,
       },
-    })(),
-  );
+    });
+  });
+};
 
 const createTimeoutPromise = (ms: number): Promise<never> =>
   new Promise((_, reject) =>

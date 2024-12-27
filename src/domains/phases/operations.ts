@@ -9,7 +9,7 @@ import type {
   PrismaPhase,
   PrismaPhaseCreate,
 } from '../../types/phases.type';
-import type { PhaseCacheOperations } from './cache/cache';
+import type { PhaseCacheOperations } from './cache';
 import { phaseRepository } from './repository';
 
 export const createError = (message: string, cause?: unknown): APIError =>

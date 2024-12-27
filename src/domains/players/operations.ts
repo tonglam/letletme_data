@@ -9,7 +9,7 @@ import {
 } from '@types/players.type';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { PlayerCache } from './cache/cache';
+import { PlayerCache } from './cache';
 import { CacheInvalidation } from './cache/invalidation';
 import { PlayerRepository } from './repository';
 

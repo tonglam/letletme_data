@@ -1,6 +1,6 @@
 import * as TE from 'fp-ts/TaskEither';
 import type { BootstrapApi } from '../../domains/bootstrap/operations';
-import type { PhaseCache } from '../../domains/phases/cache/cache';
+import type { PhaseCache } from '../../domains/phases/cache';
 import { phaseRepository } from '../../domains/phases/repository';
 import type { APIError } from '../../infrastructure/http/common/errors';
 import type { Phase, PhaseId } from '../../types/phases.type';

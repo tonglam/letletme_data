@@ -2,7 +2,7 @@ import * as A from 'fp-ts/Array';
 import { pipe } from 'fp-ts/function';
 import * as O from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
-import { logger } from '../../logger/logger';
+import { getApiLogger } from '../../logger';
 import {
   CacheError,
   CacheErrorType,
@@ -76,8 +76,10 @@ export const createWarmerOperations = (
       TE.map(() => undefined),
     );
 
-  const schedulePeriodicRefresh = (): TE.TaskEither<CacheError, void> =>
-    pipe(
+  const schedulePeriodicRefresh = (): TE.TaskEither<CacheError, void> => {
+    const logger = getApiLogger();
+
+    return pipe(
       TE.fromIO(() => {
         setInterval(() => {
           pipe(
@@ -86,12 +88,13 @@ export const createWarmerOperations = (
               logger.error({
                 message: 'Periodic cache refresh failed',
                 context: { error },
-              })(),
+              }),
             ),
           )();
         }, WarmingConfig.periodicRefreshInterval);
       }),
     );
+  };
 
   const verifyDomainIntegrity = <T extends CacheItem>(
     provider: DataProvider<T>,

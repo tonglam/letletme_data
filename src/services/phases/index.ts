@@ -1,5 +1,5 @@
 import type { BootstrapApi } from '../../domains/bootstrap/operations';
-import type { PhaseCacheOperations } from '../../domains/phases/cache/cache';
+import type { PhaseCacheOperations } from '../../domains/phases/cache';
 import { phaseRepository } from '../../domains/phases/repository';
 import { initializePhaseCache } from './cache';
 import { createPhaseServiceImpl } from './service';

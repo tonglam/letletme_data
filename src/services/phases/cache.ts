@@ -5,7 +5,7 @@ import {
   createPhaseCache,
   createPhaseOperations,
   type PhaseCacheOperations,
-} from '../../domains/phases/cache/cache';
+} from '../../domains/phases/cache';
 import { getCacheModule } from '../../infrastructure/cache/cache.module';
 import { CacheError } from '../../infrastructure/cache/types';
 import { Phase } from '../../types/phases.type';

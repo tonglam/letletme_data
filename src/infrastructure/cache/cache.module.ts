@@ -6,6 +6,7 @@ import * as TE from 'fp-ts/TaskEither';
 import { createRedisClient } from './client/redis.client';
 import { loadRedisConfig } from './config/redis.config';
 import { createCache } from './core/manager';
+import { createCacheError, logCacheError, logCacheInfo } from './core/utils';
 import { createWarmer } from './core/warmer';
 import {
   CacheError,
@@ -18,7 +19,6 @@ import {
   DataProvider,
   RedisClient,
 } from './types';
-import { createCacheError, logCacheError, logCacheInfo } from './utils';
 
 const createInitialState = (): CacheModuleState =>
   ({

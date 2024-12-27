@@ -2,7 +2,7 @@ import { APIError, createInternalServerError } from '@infrastructure/errors';
 import { PlayerStat, PlayerStatsResponse } from '@types/playerStats.type';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { PlayerStatsCache } from './cache/cache';
+import { PlayerStatsCache } from './cache';
 import { PlayerStatsInvalidation } from './cache/invalidation';
 import { PlayerStatsRepository } from './repository';
 

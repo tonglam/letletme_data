@@ -1,5 +1,5 @@
 import type { BootstrapApi } from '../../domains/bootstrap/operations';
-import type { TeamCache } from '../../domains/teams/cache/cache';
+import type { TeamCache } from '../../domains/teams/cache';
 import { teamRepository } from '../../domains/teams/repository';
 import { initializeTeamCache } from './cache';
 import { createTeamServiceImpl } from './service';

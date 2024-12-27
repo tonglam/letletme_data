@@ -2,7 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from '@jest/g
 import * as T from 'fp-ts/Task';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
-import { createPhaseCache, createPhaseOperations } from '../../../src/domains/phases/cache/cache';
+import { createPhaseCache, createPhaseOperations } from '../../../src/domains/phases/cache';
 import { createRedisClient } from '../../../src/infrastructure/cache/client/redis.client';
 import { RedisClient, RedisConfig } from '../../../src/infrastructure/cache/types';
 import { PrismaPhase } from '../../../src/types/phases.type';

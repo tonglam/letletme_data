@@ -5,7 +5,7 @@ import {
   createTeamCache,
   createTeamOperations,
   type TeamCacheOperations,
-} from '../../domains/teams/cache/cache';
+} from '../../domains/teams/cache';
 import { getCacheModule } from '../../infrastructure/cache/cache.module';
 import { CacheError } from '../../infrastructure/cache/types';
 import { Team } from '../../types/teams.type';

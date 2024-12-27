@@ -1,6 +1,6 @@
 import * as TE from 'fp-ts/TaskEither';
 import type { BootstrapApi } from '../../domains/bootstrap/operations';
-import type { TeamCache } from '../../domains/teams/cache/cache';
+import type { TeamCache } from '../../domains/teams/cache';
 import { teamRepository } from '../../domains/teams/repository';
 import type { APIError } from '../../infrastructure/http/common/errors';
 import type { Team, TeamId } from '../../types/teams.type';

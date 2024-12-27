@@ -2,7 +2,7 @@ import { APIError, createInternalServerError } from '@infrastructure/errors';
 import { PlayerValue, PlayerValuesResponse } from '@types/playerValues.type';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { PlayerValuesCache } from './cache/cache';
+import { PlayerValuesCache } from './cache';
 import { PlayerValuesInvalidation } from './cache/invalidation';
 import { PlayerValuesRepository } from './repository';
 

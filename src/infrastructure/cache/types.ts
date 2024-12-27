@@ -1,9 +1,12 @@
 import type { Either } from 'fp-ts/Either';
 import type { Option } from 'fp-ts/Option';
 import type { TaskEither } from 'fp-ts/TaskEither';
+import * as TE from 'fp-ts/TaskEither';
+import { pipe } from 'fp-ts/function';
 import * as t from 'io-ts';
 import type { ChainableCommander, Redis, RedisOptions } from 'ioredis';
 import type { APIError } from '../http/common/errors';
+import { createValidationError } from '../http/common/errors';
 
 // Redis types
 export type RetryStrategy = (retryAttempt: number) => number | null;
@@ -155,6 +158,9 @@ export const DomainType = {
   PHASE: 'phases',
   TEAM: 'teams',
   STANDING: 'standings',
+  PLAYER: 'players',
+  PLAYER_VALUE: 'player-values',
+  PLAYER_STAT: 'player-stats',
 } as const;
 
 export type DomainType = (typeof DomainType)[keyof typeof DomainType];
@@ -201,6 +207,18 @@ export const CacheDependencyConfig: Record<DomainType, CacheDependencyInfo> = {
       retryAttempts: 2,
       refreshInterval: 6 * 60 * 60 * 1000, // 6 hours
     },
+  },
+  [DomainType.PLAYER]: {
+    invalidates: [DomainType.PLAYER_VALUE, DomainType.PLAYER_STAT],
+    ttl: TTLConfig.METADATA,
+  },
+  [DomainType.PLAYER_VALUE]: {
+    invalidates: [],
+    ttl: TTLConfig.DERIVED_DATA,
+  },
+  [DomainType.PLAYER_STAT]: {
+    invalidates: [],
+    ttl: TTLConfig.DERIVED_DATA,
   },
 } as const;
 
@@ -306,3 +324,12 @@ export interface CacheStrategy {
   clear(): Promise<void>;
   disconnect(): Promise<void>;
 }
+
+// Utility Functions
+export const convertTaskEither = <T>(task: TaskEither<CacheError, T>): TaskEither<APIError, T> =>
+  pipe(
+    task,
+    TE.mapLeft((error: CacheError) =>
+      createValidationError({ message: error.message, details: { cause: error } }),
+    ),
+  );

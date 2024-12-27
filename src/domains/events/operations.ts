@@ -12,7 +12,7 @@ import type {
   PrismaEventCreate,
   TopElementInfo,
 } from '../../types/events.type';
-import type { EventCacheOperations } from './cache/cache';
+import type { EventCacheOperations } from './cache';
 import { eventRepository } from './repository';
 
 export const createError = (message: string, cause?: unknown): APIError =>

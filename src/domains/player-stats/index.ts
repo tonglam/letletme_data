@@ -1,6 +1,6 @@
 import { redis } from '@infrastructure/cache/redis';
 import { prisma } from '@infrastructure/db/prisma';
-import { createPlayerStatsCache } from './cache/cache';
+import { createPlayerStatsCache } from './cache';
 import { createPlayerStatsInvalidation } from './cache/invalidation';
 import { createPlayerStatsOperations } from './operations';
 import { createPlayerStatsRepository } from './repository';
@@ -19,7 +19,7 @@ export {
 };
 
 // Export types
-export type { PlayerStatsCache } from './cache/cache';
+export type { PlayerStatsCache } from './cache';
 export type { PlayerStatsInvalidation } from './cache/invalidation';
 export type { PlayerStatsOperations } from './operations';
 export type { PlayerStatsRepository } from './repository';

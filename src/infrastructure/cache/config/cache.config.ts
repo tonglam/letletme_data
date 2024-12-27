@@ -11,4 +11,7 @@ export const CachePrefix = {
   EVENT: 'event',
   TEAM: 'team',
   STANDING: 'standing',
+  PLAYER: 'player',
+  PLAYER_VALUE: 'player-value',
+  PLAYER_STAT: 'player-stat',
 } as const;

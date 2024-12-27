@@ -5,7 +5,7 @@ import {
   createEventCache,
   createEventOperations,
   type EventCacheOperations,
-} from '../../domains/events/cache/cache';
+} from '../../domains/events/cache';
 import { toPrismaEventCreate } from '../../domains/events/operations';
 import { getCacheModule } from '../../infrastructure/cache/cache.module';
 import { CacheError } from '../../infrastructure/cache/types';

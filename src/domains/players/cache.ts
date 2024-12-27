@@ -1,65 +1,119 @@
-import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { RedisClientType } from 'redis';
-import { createDatabaseError } from '../../infrastructure/http/common/errors';
+import { pipe } from 'fp-ts/function';
+import { type BaseDataProvider } from '../../infrastructure/cache/core/cache';
+import {
+  createDomainCache,
+  type DomainCacheOperations,
+} from '../../infrastructure/cache/core/domain-cache';
+import { createCacheInvalidation } from '../../infrastructure/cache/core/invalidation';
+import {
+  CacheError,
+  CacheOperations,
+  DomainType,
+  RedisClient,
+} from '../../infrastructure/cache/types';
 import { Player } from '../../types/players.type';
 
-const PLAYER_KEY_PREFIX = 'player';
-const PLAYER_TTL = 3600; // 1 hour
+export type PlayerDataProvider = BaseDataProvider<Player>;
 
-export const createPlayerCache = (redis: RedisClientType) => {
-  const createKey = (id: number): string => `${PLAYER_KEY_PREFIX}:${id}`;
+export interface PlayerCacheOperations extends DomainCacheOperations<Player> {
+  readonly getPlayers: () => TE.TaskEither<CacheError, readonly Player[]>;
+  readonly setPlayers: (players: readonly Player[]) => TE.TaskEither<CacheError, void>;
+  readonly getPlayer: (id: number) => TE.TaskEither<CacheError, Player | null>;
+  readonly setPlayer: (id: number, player: Player) => TE.TaskEither<CacheError, void>;
+  readonly setMany: (players: readonly Player[]) => TE.TaskEither<CacheError, void>;
+  readonly remove: (id: number) => TE.TaskEither<CacheError, void>;
+}
 
-  const get = (id: number): TE.TaskEither<Error, Player | null> =>
-    pipe(
+export const createPlayerOperations = (
+  redis: RedisClient,
+  dataProvider: PlayerDataProvider,
+): PlayerCacheOperations => {
+  const createKey = (id?: number) => (id ? `players:${id}` : 'players:all');
+
+  const domainCache = createDomainCache(redis, 'PLAYER', dataProvider, 'player', (baseOps) => ({
+    ...baseOps,
+    getPlayers: () =>
       TE.tryCatch(
         async () => {
-          const data = await redis.get(createKey(id));
-          return data ? (JSON.parse(data) as Player) : null;
+          const result = await redis.get(createKey())();
+          return result._tag === 'Right' && result.right._tag === 'Some'
+            ? (JSON.parse(result.right.value) as readonly Player[])
+            : [];
         },
-        (error) => createDatabaseError({ message: `Failed to get player from cache: ${error}` }),
+        (error) => ({
+          type: 'OPERATION',
+          message: `Failed to get players: ${error}`,
+        }),
       ),
-    );
-
-  const set = (player: Player): TE.TaskEither<Error, void> =>
-    pipe(
+    setPlayers: (players: readonly Player[]) =>
       TE.tryCatch(
         async () => {
-          await redis.set(createKey(player.element), JSON.stringify(player), { EX: PLAYER_TTL });
+          await redis.set(createKey(), JSON.stringify(players))();
         },
-        (error) => createDatabaseError({ message: `Failed to set player in cache: ${error}` }),
+        (error) => ({
+          type: 'OPERATION',
+          message: `Failed to set players: ${error}`,
+        }),
       ),
-    );
-
-  const setMany = (players: ReadonlyArray<Player>): TE.TaskEither<Error, void> =>
-    pipe(
+    getPlayer: (id: number) =>
       TE.tryCatch(
         async () => {
-          const pipeline = redis.multi();
-          players.forEach((player) => {
-            pipeline.set(createKey(player.element), JSON.stringify(player), { EX: PLAYER_TTL });
-          });
-          await pipeline.exec();
+          const result = await redis.get(createKey(id))();
+          return result._tag === 'Right' && result.right._tag === 'Some'
+            ? (JSON.parse(result.right.value) as Player)
+            : null;
         },
-        (error) => createDatabaseError({ message: `Failed to set players in cache: ${error}` }),
+        (error) => ({
+          type: 'OPERATION',
+          message: `Failed to get player: ${error}`,
+        }),
       ),
-    );
-
-  const remove = (id: number): TE.TaskEither<Error, void> =>
-    pipe(
+    setPlayer: (id: number, player: Player) =>
       TE.tryCatch(
-        () => redis.del(createKey(id)),
-        (error) => createDatabaseError({ message: `Failed to remove player from cache: ${error}` }),
+        async () => {
+          await redis.set(createKey(id), JSON.stringify(player))();
+        },
+        (error) => ({
+          type: 'OPERATION',
+          message: `Failed to set player: ${error}`,
+        }),
       ),
-      TE.map(() => undefined),
-    );
+    setMany: (players: readonly Player[]) =>
+      pipe(
+        redis.multi(),
+        TE.chain((multi) =>
+          TE.tryCatch(
+            async () => {
+              players.forEach((player) => {
+                multi.set(createKey(player.id), JSON.stringify(player));
+              });
+              await redis.exec(multi)();
+            },
+            (error) => ({
+              type: 'OPERATION',
+              message: `Failed to set multiple players: ${error}`,
+            }),
+          ),
+        ),
+      ),
+    remove: (id: number) =>
+      TE.tryCatch(
+        async () => {
+          await redis.del(createKey(id))();
+        },
+        (error) => ({
+          type: 'OPERATION',
+          message: `Failed to remove player: ${error}`,
+        }),
+      ),
+  }));
 
-  return {
-    get,
-    set,
-    setMany,
-    remove,
-  } as const;
+  return domainCache as PlayerCacheOperations;
 };
 
-export type PlayerCache = ReturnType<typeof createPlayerCache>;
+export const createPlayerInvalidation = (cache: CacheOperations) => ({
+  ...createCacheInvalidation(cache, DomainType.PLAYER),
+});
+
+export type PlayerCache = ReturnType<typeof createPlayerOperations>;

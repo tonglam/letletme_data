@@ -1,5 +1,5 @@
 import type { BootstrapApi } from '../../domains/bootstrap/operations';
-import type { EventCacheOperations } from '../../domains/events/cache/cache';
+import type { EventCacheOperations } from '../../domains/events/cache';
 import { eventRepository } from '../../domains/events/repository';
 import { initializeEventCache } from './cache';
 import { createEventServiceImpl } from './service';

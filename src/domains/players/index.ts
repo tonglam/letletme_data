@@ -3,7 +3,7 @@ import { redis } from '@infrastructure/cache/redis';
 import { prisma } from '@infrastructure/db/prisma';
 import { metaQueue } from '@infrastructure/queue/meta';
 import { createPlayerJob, registerPlayerJobs } from '@services/queue/meta/players.job';
-import { createPlayerCache } from './cache/cache';
+import { createPlayerCache } from './cache';
 import { createCacheInvalidation } from './cache/invalidation';
 import { createPlayerOperations } from './operations';
 import { createPlayerRepository } from './repository';
@@ -31,6 +31,6 @@ export {
 
 // Export types
 export type { PlayerJob } from '@services/queue/meta/players.job';
-export type { PlayerCache } from './cache/cache';
+export type { PlayerCache } from './cache';
 export type { PlayerOperations } from './operations';
 export type { PlayerRepository } from './repository';
