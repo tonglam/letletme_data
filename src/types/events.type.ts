@@ -1,6 +1,9 @@
+import { Prisma } from '@prisma/client';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
+import { parseJsonArray, parseJsonObject } from '../infrastructure/db/utils';
+import { APIError } from '../infrastructure/http/common/errors';
 import { BaseRepository, Branded, createBrandedType, isApiResponse } from './base.type';
 
 // ============ Branded Types ============
@@ -106,7 +109,10 @@ export interface Event {
 export type Events = readonly Event[];
 
 // ============ Repository Interface ============
-export type EventRepository = BaseRepository<PrismaEvent, PrismaEventCreate, EventId>;
+export interface EventRepository extends BaseRepository<PrismaEvent, PrismaEventCreate, EventId> {
+  findCurrent(): TE.TaskEither<APIError, PrismaEvent | null>;
+  findNext(): TE.TaskEither<APIError, PrismaEvent | null>;
+}
 
 // ============ Persistence Types ============
 export interface PrismaEvent {
@@ -127,26 +133,37 @@ export interface PrismaEvent {
   readonly cupLeaguesCreated: boolean;
   readonly h2hKoMatchesCreated: boolean;
   readonly rankedCount: number;
-  readonly chipPlays: readonly ChipPlay[];
+  readonly chipPlays: Prisma.JsonValue | null;
   readonly mostSelected: number | null;
   readonly mostTransferredIn: number | null;
   readonly mostCaptained: number | null;
   readonly mostViceCaptained: number | null;
   readonly topElement: number | null;
-  readonly topElementInfo: TopElementInfo | null;
+  readonly topElementInfo: Prisma.JsonValue | null;
   readonly transfersMade: number;
-  readonly canEnter: boolean;
-  readonly canManage: boolean;
-  readonly released: boolean;
   readonly createdAt: Date;
 }
 
-export type PrismaEventCreate = Omit<PrismaEvent, 'id' | 'createdAt'>;
+export type PrismaEventCreate = Omit<PrismaEvent, 'createdAt'>;
+export type PrismaEventUpdate = Partial<Omit<PrismaEvent, 'id' | 'createdAt'>>;
 
 // ============ Converters ============
 export const toDomainEvent = (data: EventResponse | PrismaEvent): Event => {
   const isEventApiResponse = (d: EventResponse | PrismaEvent): d is EventResponse =>
     isApiResponse(d, 'deadline_time');
+
+  const parseChipPlay = (item: Prisma.JsonObject): ChipPlay => ({
+    chip_name: String(item.chip_name || ''),
+    num_played: Number(item.num_played || 0),
+  });
+
+  const parseTopElement = (obj: Prisma.JsonObject): TopElementInfo | null => {
+    if (!obj.id || !obj.points) return null;
+    return {
+      id: Number(obj.id),
+      points: Number(obj.points),
+    };
+  };
 
   return {
     id: data.id as EventId,
@@ -176,23 +193,27 @@ export const toDomainEvent = (data: EventResponse | PrismaEvent): Event => {
       ? data.h2h_ko_matches_created
       : data.h2hKoMatchesCreated,
     rankedCount: isEventApiResponse(data) ? data.ranked_count : data.rankedCount,
-    chipPlays: isEventApiResponse(data) ? data.chip_plays : data.chipPlays,
+    chipPlays: isEventApiResponse(data)
+      ? data.chip_plays
+      : parseJsonArray(data.chipPlays, parseChipPlay),
     mostSelected: isEventApiResponse(data) ? data.most_selected : data.mostSelected,
     mostTransferredIn: isEventApiResponse(data) ? data.most_transferred_in : data.mostTransferredIn,
     mostCaptained: isEventApiResponse(data) ? data.most_captained : data.mostCaptained,
     mostViceCaptained: isEventApiResponse(data) ? data.most_vice_captained : data.mostViceCaptained,
     topElement: isEventApiResponse(data) ? data.top_element : data.topElement,
-    topElementInfo: isEventApiResponse(data) ? data.top_element_info : data.topElementInfo,
+    topElementInfo: isEventApiResponse(data)
+      ? data.top_element_info
+      : parseJsonObject(data.topElementInfo, parseTopElement),
     transfersMade: isEventApiResponse(data) ? data.transfers_made : data.transfersMade,
-    canEnter: isEventApiResponse(data) ? data.can_enter : data.canEnter,
-    canManage: isEventApiResponse(data) ? data.can_manage : data.canManage,
-    released: isEventApiResponse(data) ? data.released : data.released,
+    canEnter: isEventApiResponse(data) ? data.can_enter : false,
+    canManage: isEventApiResponse(data) ? data.can_manage : false,
+    released: isEventApiResponse(data) ? data.released : false,
   };
 };
 
 export const convertPrismaEvents = (
   events: readonly PrismaEvent[],
-): TE.TaskEither<string, Events> =>
+): TE.TaskEither<APIError, Events> =>
   pipe(
     events,
     TE.right,
@@ -201,4 +222,4 @@ export const convertPrismaEvents = (
 
 export const convertPrismaEvent = (
   event: PrismaEvent | null,
-): TE.TaskEither<string, Event | null> => TE.right(event ? toDomainEvent(event) : null);
+): TE.TaskEither<APIError, Event | null> => TE.right(event ? toDomainEvent(event) : null);

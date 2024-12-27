@@ -1,7 +1,8 @@
+import { ValueChangeType } from '@prisma/client';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import type { APIError } from '../infrastructure/http/common/errors';
-import { BaseRepository, ElementType, ValueChangeType } from './base.type';
+import { BaseRepository, ElementType } from './base.type';
 
 // ============ Types ============
 /**
@@ -21,17 +22,19 @@ export interface PlayerValue {
 export type PlayerValues = readonly PlayerValue[];
 
 // ============ Repository Interface ============
-export type PlayerValueRepository = BaseRepository<
-  PrismaPlayerValue,
-  PrismaPlayerValueCreate,
-  string
->;
+export interface PlayerValueRepository
+  extends BaseRepository<PrismaPlayerValue, PrismaPlayerValueCreate, string> {
+  findByChangeDate: (changeDate: string) => TE.TaskEither<APIError, PrismaPlayerValue[]>;
+  findByElementType: (elementType: number) => TE.TaskEither<APIError, PrismaPlayerValue[]>;
+  findByChangeType: (changeType: ValueChangeType) => TE.TaskEither<APIError, PrismaPlayerValue[]>;
+  findByEventId: (eventId: number) => TE.TaskEither<APIError, PrismaPlayerValue[]>;
+}
 
 // ============ Persistence Types ============
 export interface PrismaPlayerValue {
   readonly id: string;
   readonly elementId: number;
-  readonly elementType: ElementType;
+  readonly elementType: number;
   readonly eventId: number;
   readonly value: number;
   readonly changeDate: string;
@@ -46,7 +49,7 @@ export type PrismaPlayerValueCreate = Omit<PrismaPlayerValue, 'id' | 'createdAt'
 export const toDomainPlayerValue = (prisma: PrismaPlayerValue): PlayerValue => ({
   id: prisma.id,
   elementId: prisma.elementId,
-  elementType: prisma.elementType,
+  elementType: prisma.elementType as ElementType,
   eventId: prisma.eventId,
   value: prisma.value,
   changeDate: prisma.changeDate,

@@ -1,7 +1,8 @@
+import { ElementType } from '@prisma/client';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { BaseRepository, Branded, createBrandedType, ElementType } from './base.type';
+import { BaseRepository, Branded, createBrandedType } from './base.type';
 import { ElementResponse } from './elements.type';
 
 // ============ Branded Types ============
@@ -36,7 +37,7 @@ export type PlayerRepository = BaseRepository<PrismaPlayer, PrismaPlayerCreate, 
 
 // ============ Persistence Types ============
 export interface PrismaPlayer {
-  readonly id: number;
+  readonly element: number;
   readonly elementCode: number;
   readonly price: number;
   readonly startPrice: number;
@@ -48,28 +49,39 @@ export interface PrismaPlayer {
   readonly createdAt: Date;
 }
 
-export type PrismaPlayerCreate = Omit<PrismaPlayer, 'id' | 'createdAt'>;
+export type PrismaPlayerCreate = Omit<PrismaPlayer, 'createdAt'>;
 
 // ============ Type Transformers ============
+const elementTypeMap: Record<number, ElementType> = {
+  1: ElementType.GKP,
+  2: ElementType.DEF,
+  3: ElementType.MID,
+  4: ElementType.FWD,
+};
+
 export const fromElementResponse = (raw: ElementResponse): E.Either<string, Player> =>
   pipe(
     PlayerId.validate(raw.id),
-    E.map((id) => ({
-      id,
-      elementCode: raw.code,
-      price: raw.now_cost,
-      startPrice: raw.cost_change_start,
-      elementType: raw.element_type as ElementType,
-      firstName: raw.first_name,
-      secondName: raw.second_name,
-      webName: raw.web_name,
-      teamId: raw.team,
-    })),
+    E.chain((id) =>
+      elementTypeMap[raw.element_type]
+        ? E.right({
+            id,
+            elementCode: raw.code,
+            price: raw.now_cost,
+            startPrice: raw.cost_change_start,
+            elementType: elementTypeMap[raw.element_type],
+            firstName: raw.first_name,
+            secondName: raw.second_name,
+            webName: raw.web_name,
+            teamId: raw.team,
+          })
+        : E.left(`Invalid element type: ${raw.element_type}`),
+    ),
   );
 
 // ============ Converters ============
 export const toDomainPlayer = (prisma: PrismaPlayer): Player => ({
-  id: prisma.id as PlayerId,
+  id: prisma.element as PlayerId,
   elementCode: prisma.elementCode,
   price: prisma.price,
   startPrice: prisma.startPrice,

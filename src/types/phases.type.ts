@@ -51,7 +51,7 @@ export interface PrismaPhase {
   readonly createdAt: Date;
 }
 
-export type PrismaPhaseCreate = Omit<PrismaPhase, 'id' | 'createdAt'>;
+export type PrismaPhaseCreate = Omit<PrismaPhase, 'createdAt'>;
 
 // ============ Converters ============
 export const toDomainPhase = (data: PhaseResponse | PrismaPhase): Phase => {

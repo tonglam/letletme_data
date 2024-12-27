@@ -18,23 +18,8 @@ export const phaseRepository: PhaseRepository = {
   save: (phase: PrismaPhaseCreate): TE.TaskEither<APIError, PrismaPhase> =>
     TE.tryCatch(
       () =>
-        prisma.phase.upsert({
-          where: { id: Number(phase.id) },
-          update: {
-            name: phase.name,
-            startEvent: phase.startEvent,
-            stopEvent: phase.stopEvent,
-            highestScore: phase.highestScore,
-            createdAt: phase.createdAt ?? new Date(),
-          },
-          create: {
-            id: Number(phase.id),
-            name: phase.name,
-            startEvent: phase.startEvent,
-            stopEvent: phase.stopEvent,
-            highestScore: phase.highestScore,
-            createdAt: phase.createdAt ?? new Date(),
-          },
+        prisma.phase.create({
+          data: phase,
         }),
       (error) => createDatabaseError({ message: 'Failed to save phase', details: { error } }),
     ),
@@ -55,7 +40,7 @@ export const phaseRepository: PhaseRepository = {
     ),
 
   /**
-   * Retrieves all phases ordered by startEventId
+   * Retrieves all phases ordered by id
    * @returns TaskEither with array of phases or error
    * @throws APIError with DB_ERROR code if query fails
    */
@@ -63,7 +48,7 @@ export const phaseRepository: PhaseRepository = {
     TE.tryCatch(
       () =>
         prisma.phase.findMany({
-          orderBy: { startEvent: 'asc' },
+          orderBy: { id: 'asc' },
         }),
       (error) => createDatabaseError({ message: 'Failed to find phases', details: { error } }),
     ),
@@ -86,22 +71,6 @@ export const phaseRepository: PhaseRepository = {
     ),
 
   /**
-   * Deletes all phases except system defaults
-   * @returns TaskEither with void or error
-   * @throws APIError with DB_ERROR code if deletion fails
-   */
-  deleteAll: (): TE.TaskEither<APIError, void> =>
-    TE.tryCatch(
-      () =>
-        prisma.$transaction(async (tx) => {
-          await tx.phase.deleteMany({
-            where: { id: { gt: 0 } }, // Preserve system defaults if any
-          });
-        }),
-      (error) => createDatabaseError({ message: 'Failed to delete phases', details: { error } }),
-    ),
-
-  /**
    * Creates a batch of new phases
    * @param phases - The phases data to create
    * @returns TaskEither with created phases or error
@@ -112,23 +81,8 @@ export const phaseRepository: PhaseRepository = {
       () =>
         prisma.$transaction(
           phases.map((phase) =>
-            prisma.phase.upsert({
-              where: { id: Number(phase.id) },
-              update: {
-                name: phase.name,
-                startEvent: phase.startEvent,
-                stopEvent: phase.stopEvent,
-                highestScore: phase.highestScore,
-                createdAt: phase.createdAt ?? new Date(),
-              },
-              create: {
-                id: Number(phase.id),
-                name: phase.name,
-                startEvent: phase.startEvent,
-                stopEvent: phase.stopEvent,
-                highestScore: phase.highestScore,
-                createdAt: phase.createdAt ?? new Date(),
-              },
+            prisma.phase.create({
+              data: phase,
             }),
           ),
         ),
@@ -151,6 +105,17 @@ export const phaseRepository: PhaseRepository = {
     ),
 
   /**
+   * Deletes all phases
+   * @returns TaskEither with void or error
+   * @throws APIError with DB_ERROR code if deletion fails
+   */
+  deleteAll: (): TE.TaskEither<APIError, void> =>
+    TE.tryCatch(
+      () => prisma.phase.deleteMany().then(() => undefined),
+      (error) => createDatabaseError({ message: 'Failed to delete phases', details: { error } }),
+    ),
+
+  /**
    * Deletes phases by their IDs
    * @param ids - The phase IDs to delete
    * @returns TaskEither with void or error
@@ -159,11 +124,11 @@ export const phaseRepository: PhaseRepository = {
   deleteByIds: (ids: PhaseId[]): TE.TaskEither<APIError, void> =>
     TE.tryCatch(
       () =>
-        prisma.$transaction(async (tx) => {
-          await tx.phase.deleteMany({
+        prisma.phase
+          .deleteMany({
             where: { id: { in: ids.map(Number) } },
-          });
-        }),
+          })
+          .then(() => undefined),
       (error) => createDatabaseError({ message: 'Failed to delete phases', details: { error } }),
     ),
 };

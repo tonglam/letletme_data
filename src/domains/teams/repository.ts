@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import * as TE from 'fp-ts/TaskEither';
 import { prisma } from '../../infrastructure/db/prisma';
 import { APIError, createDatabaseError } from '../../infrastructure/http/common/errors';
@@ -17,58 +18,11 @@ export const teamRepository: TeamRepository = {
    */
   save: (team: PrismaTeamCreate): TE.TaskEither<APIError, PrismaTeam> =>
     TE.tryCatch(
-      () =>
-        prisma.team.upsert({
-          where: { id: Number(team.id) },
-          update: {
-            code: team.code,
-            name: team.name,
-            shortName: team.shortName,
-            strength: team.strength,
-            strengthOverallHome: team.strengthOverallHome,
-            strengthOverallAway: team.strengthOverallAway,
-            strengthAttackHome: team.strengthAttackHome,
-            strengthAttackAway: team.strengthAttackAway,
-            strengthDefenceHome: team.strengthDefenceHome,
-            strengthDefenceAway: team.strengthDefenceAway,
-            pulseId: team.pulseId,
-            played: team.played,
-            position: team.position,
-            points: team.points,
-            form: team.form,
-            win: team.win,
-            draw: team.draw,
-            loss: team.loss,
-            teamDivision: team.teamDivision,
-            unavailable: team.unavailable,
-            createdAt: team.createdAt ?? new Date(),
-          },
-          create: {
-            id: Number(team.id),
-            code: team.code,
-            name: team.name,
-            shortName: team.shortName,
-            strength: team.strength,
-            strengthOverallHome: team.strengthOverallHome,
-            strengthOverallAway: team.strengthOverallAway,
-            strengthAttackHome: team.strengthAttackHome,
-            strengthAttackAway: team.strengthAttackAway,
-            strengthDefenceHome: team.strengthDefenceHome,
-            strengthDefenceAway: team.strengthDefenceAway,
-            pulseId: team.pulseId,
-            played: team.played,
-            position: team.position,
-            points: team.points,
-            form: team.form,
-            win: team.win,
-            draw: team.draw,
-            loss: team.loss,
-            teamDivision: team.teamDivision,
-            unavailable: team.unavailable,
-            createdAt: team.createdAt ?? new Date(),
-          },
-        }),
-      (error) => createDatabaseError({ message: 'Failed to save team', details: { error } }),
+      async () => {
+        return prisma.team.create({ data: team });
+      },
+      (error: unknown) =>
+        createDatabaseError({ message: 'Failed to save team', details: { error } }),
     ),
 
   /**
@@ -83,23 +37,8 @@ export const teamRepository: TeamRepository = {
         prisma.team.findUnique({
           where: { id: Number(id) },
         }),
-      (error) => createDatabaseError({ message: 'Failed to find team', details: { error } }),
-    ),
-
-  /**
-   * Finds a team by its code
-   * @param code - The team code to find
-   * @returns TaskEither with found team or null if not found
-   * @throws APIError with DB_ERROR code if query fails
-   */
-  findByCode: (code: number): TE.TaskEither<APIError, PrismaTeam | null> =>
-    TE.tryCatch(
-      () =>
-        prisma.team.findFirst({
-          where: { code },
-        }),
-      (error) =>
-        createDatabaseError({ message: 'Failed to find team by code', details: { error } }),
+      (error: unknown) =>
+        createDatabaseError({ message: 'Failed to find team', details: { error } }),
     ),
 
   /**
@@ -113,7 +52,8 @@ export const teamRepository: TeamRepository = {
         prisma.team.findMany({
           orderBy: { position: 'asc' },
         }),
-      (error) => createDatabaseError({ message: 'Failed to find teams', details: { error } }),
+      (error: unknown) =>
+        createDatabaseError({ message: 'Failed to find teams', details: { error } }),
     ),
 
   /**
@@ -125,50 +65,58 @@ export const teamRepository: TeamRepository = {
    */
   update: (id: TeamId, team: Partial<PrismaTeamCreate>): TE.TaskEither<APIError, PrismaTeam> =>
     TE.tryCatch(
-      () =>
-        prisma.team.update({
+      async () => {
+        const data: Prisma.TeamUpdateInput = {
+          code: team.code !== undefined ? team.code : undefined,
+          name: team.name !== undefined ? team.name : undefined,
+          shortName: team.shortName !== undefined ? team.shortName : undefined,
+          strength: team.strength !== undefined ? team.strength : undefined,
+          strengthOverallHome:
+            team.strengthOverallHome !== undefined ? team.strengthOverallHome : undefined,
+          strengthOverallAway:
+            team.strengthOverallAway !== undefined ? team.strengthOverallAway : undefined,
+          strengthAttackHome:
+            team.strengthAttackHome !== undefined ? team.strengthAttackHome : undefined,
+          strengthAttackAway:
+            team.strengthAttackAway !== undefined ? team.strengthAttackAway : undefined,
+          strengthDefenceHome:
+            team.strengthDefenceHome !== undefined ? team.strengthDefenceHome : undefined,
+          strengthDefenceAway:
+            team.strengthDefenceAway !== undefined ? team.strengthDefenceAway : undefined,
+          pulseId: team.pulseId !== undefined ? team.pulseId : undefined,
+          played: team.played !== undefined ? team.played : undefined,
+          position: team.position !== undefined ? team.position : undefined,
+          points: team.points !== undefined ? team.points : undefined,
+          form: team.form !== undefined ? team.form : undefined,
+          win: team.win !== undefined ? team.win : undefined,
+          draw: team.draw !== undefined ? team.draw : undefined,
+          loss: team.loss !== undefined ? team.loss : undefined,
+          teamDivision: team.teamDivision !== undefined ? team.teamDivision : undefined,
+          unavailable: team.unavailable !== undefined ? team.unavailable : undefined,
+        };
+        return prisma.team.update({
           where: { id: Number(id) },
-          data: team,
-        }),
-      (error) => createDatabaseError({ message: 'Failed to update team', details: { error } }),
+          data,
+        });
+      },
+      (error: unknown) =>
+        createDatabaseError({ message: 'Failed to update team', details: { error } }),
     ),
 
   /**
-   * Saves multiple teams in a transaction
-   * @param teams - Array of teams to save
-   * @returns TaskEither with saved teams or error
-   * @throws APIError with DB_ERROR code if save fails
+   * Creates a batch of new teams
+   * @param teams - The teams data to create
+   * @returns TaskEither with created teams or error
+   * @throws APIError with DB_ERROR code if creation fails
    */
   saveBatch: (teams: PrismaTeamCreate[]): TE.TaskEither<APIError, PrismaTeam[]> =>
     TE.tryCatch(
-      () =>
-        prisma.$transaction(
-          teams.map((team) =>
-            prisma.team.upsert({
-              where: { id: Number(team.id) },
-              update: team,
-              create: {
-                id: Number(team.id),
-                ...team,
-              },
-            }),
-          ),
-        ),
-      (error) => createDatabaseError({ message: 'Failed to save teams', details: { error } }),
-    ),
-
-  /**
-   * Deletes all teams from the database
-   * @returns TaskEither with void or error
-   * @throws APIError with DB_ERROR code if deletion fails
-   */
-  deleteAll: (): TE.TaskEither<APIError, void> =>
-    TE.tryCatch(
-      () =>
-        prisma.$transaction(async (tx) => {
-          await tx.team.deleteMany();
-        }),
-      (error) => createDatabaseError({ message: 'Failed to delete teams', details: { error } }),
+      async () => {
+        const createTeams = teams.map((team) => prisma.team.create({ data: team }));
+        return prisma.$transaction(createTeams);
+      },
+      (error: unknown) =>
+        createDatabaseError({ message: 'Failed to save teams', details: { error } }),
     ),
 
   /**
@@ -183,7 +131,22 @@ export const teamRepository: TeamRepository = {
         prisma.team.findMany({
           where: { id: { in: ids.map(Number) } },
         }),
-      (error) => createDatabaseError({ message: 'Failed to find teams', details: { error } }),
+      (error: unknown) =>
+        createDatabaseError({ message: 'Failed to find teams', details: { error } }),
+    ),
+
+  /**
+   * Deletes all teams
+   * @returns TaskEither with void or error
+   * @throws APIError with DB_ERROR code if deletion fails
+   */
+  deleteAll: (): TE.TaskEither<APIError, void> =>
+    TE.tryCatch(
+      async () => {
+        await prisma.team.deleteMany();
+      },
+      (error: unknown) =>
+        createDatabaseError({ message: 'Failed to delete teams', details: { error } }),
     ),
 
   /**
@@ -194,12 +157,12 @@ export const teamRepository: TeamRepository = {
    */
   deleteByIds: (ids: TeamId[]): TE.TaskEither<APIError, void> =>
     TE.tryCatch(
-      () =>
-        prisma.$transaction(async (tx) => {
-          await tx.team.deleteMany({
-            where: { id: { in: ids.map(Number) } },
-          });
-        }),
-      (error) => createDatabaseError({ message: 'Failed to delete teams', details: { error } }),
+      async () => {
+        await prisma.team.deleteMany({
+          where: { id: { in: ids.map(Number) } },
+        });
+      },
+      (error: unknown) =>
+        createDatabaseError({ message: 'Failed to delete teams', details: { error } }),
     ),
 };

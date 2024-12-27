@@ -98,7 +98,6 @@ model Player {
   teamId      Int         @map("team_id")
   createdAt   DateTime    @default(now()) @map("created_at")
 
-  @@index([teamId], name: "idx_players_team_id")
   @@map("players")
 }
 
@@ -122,6 +121,8 @@ model PlayerValue {
 
   @@index([elementId], name: "idx_player_values_element_id")
   @@index([changeDate], name: "idx_player_values_change_date")
+  @@index([eventId], name: "idx_player_values_event_id")
+  @@index([elementType], name: "idx_player_values_element_type")
   @@map("player_values")
 }
 
@@ -193,6 +194,7 @@ model PlayerStat {
   @@unique([eventId, elementId], name: "unique_event_element")
   @@index([elementId], name: "idx_player_stats_element_id")
   @@index([teamId], name: "idx_player_stats_team_id")
+  @@index([eventId], name: "idx_player_stats_event_id")
   @@map("player_stats")
 }
 

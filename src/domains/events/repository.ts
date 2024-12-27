@@ -1,6 +1,6 @@
-import { Prisma } from '@prisma/client';
 import * as TE from 'fp-ts/TaskEither';
 import { prisma } from '../../infrastructure/db/prisma';
+import { toNullableJson } from '../../infrastructure/db/utils';
 import { APIError, createDatabaseError } from '../../infrastructure/http/common/errors';
 import {
   EventId,
@@ -24,24 +24,14 @@ export const eventRepository: EventRepository = {
    */
   save: (event: PrismaEventCreate): TE.TaskEither<APIError, PrismaEvent> =>
     TE.tryCatch(
-      () => {
-        const data = {
-          ...event,
-          deadlineTime: event.deadlineTime,
-          highestScore: event.highestScore ?? undefined,
-          highestScoringEntry: event.highestScoringEntry ?? undefined,
-          mostSelected: event.mostSelected ?? undefined,
-          mostTransferredIn: event.mostTransferredIn ?? undefined,
-          mostCaptained: event.mostCaptained ?? undefined,
-          mostViceCaptained: event.mostViceCaptained ?? undefined,
-          topElement: event.topElement ?? undefined,
-        };
-        return prisma.event.upsert({
-          where: { id: Number(event.id) },
-          update: data,
-          create: data,
-        });
-      },
+      () =>
+        prisma.event.create({
+          data: {
+            ...event,
+            chipPlays: toNullableJson(event.chipPlays),
+            topElementInfo: toNullableJson(event.topElementInfo),
+          },
+        }),
       (error) => createDatabaseError({ message: 'Failed to save event', details: { error } }),
     ),
 
@@ -86,7 +76,12 @@ export const eventRepository: EventRepository = {
       () =>
         prisma.event.update({
           where: { id: Number(id) },
-          data: event as unknown as Prisma.EventUpdateInput,
+          data: {
+            ...event,
+            chipPlays: event.chipPlays !== undefined ? toNullableJson(event.chipPlays) : undefined,
+            topElementInfo:
+              event.topElementInfo !== undefined ? toNullableJson(event.topElementInfo) : undefined,
+          },
         }),
       (error) => createDatabaseError({ message: 'Failed to update event', details: { error } }),
     ),
@@ -101,23 +96,15 @@ export const eventRepository: EventRepository = {
     TE.tryCatch(
       () =>
         prisma.$transaction(
-          events.map((event) => {
-            const data = {
-              ...event,
-              highestScore: event.highestScore ?? undefined,
-              highestScoringEntry: event.highestScoringEntry ?? undefined,
-              mostSelected: event.mostSelected ?? undefined,
-              mostTransferredIn: event.mostTransferredIn ?? undefined,
-              mostCaptained: event.mostCaptained ?? undefined,
-              mostViceCaptained: event.mostViceCaptained ?? undefined,
-              topElement: event.topElement ?? undefined,
-            };
-            return prisma.event.upsert({
-              where: { id: Number(event.id) },
-              update: data,
-              create: data,
-            });
-          }),
+          events.map((event) =>
+            prisma.event.create({
+              data: {
+                ...event,
+                chipPlays: toNullableJson(event.chipPlays),
+                topElementInfo: toNullableJson(event.topElementInfo),
+              },
+            }),
+          ),
         ),
       (error) => createDatabaseError({ message: 'Failed to save events', details: { error } }),
     ),
@@ -176,7 +163,7 @@ export const eventRepository: EventRepository = {
       () =>
         prisma.$transaction(async (tx) => {
           await tx.event.deleteMany({
-            where: { id: { gt: 0 } }, // Preserve system defaults if any
+            where: { id: { gt: 0 } },
           });
         }),
       (error) => createDatabaseError({ message: 'Failed to delete events', details: { error } }),

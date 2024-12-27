@@ -1,77 +1,64 @@
-import { ElementType, Player, Prisma } from '@prisma/client';
 import * as TE from 'fp-ts/TaskEither';
 import { prisma } from '../../infrastructure/db/prisma';
-import { APIError, createDatabaseError } from '../../infrastructure/errors';
+import { APIError, createDatabaseError } from '../../infrastructure/http/common/errors';
+import {
+  PlayerId,
+  PlayerRepository,
+  PrismaPlayer,
+  PrismaPlayerCreate,
+} from '../../types/players.type';
 
 /**
  * Player repository implementation
  * Provides data access operations for Player entity
  */
-export const createPlayerRepository = (prismaClient: typeof prisma) => {
+export const playerRepository: PlayerRepository = {
+  prisma,
   /**
-   * Creates or updates a player
-   * @param player - The player data to create or update
-   * @returns TaskEither with created/updated player or error
-   * @throws APIError with DB_ERROR code if operation fails
+   * Creates a new player
+   * @param player - The player data to create
+   * @returns TaskEither with created player or error
+   * @throws APIError with DB_ERROR code if creation fails
    */
-  const save = (player: Prisma.PlayerUncheckedCreateInput): TE.TaskEither<APIError, Player> =>
+  save: (player: PrismaPlayerCreate): TE.TaskEither<APIError, PrismaPlayer> =>
     TE.tryCatch(
       () =>
-        prismaClient.player.upsert({
+        prisma.player.upsert({
           where: { element: player.element },
-          update: {
-            elementCode: player.elementCode,
-            elementType: player.elementType,
-            firstName: player.firstName,
-            secondName: player.secondName,
-            webName: player.webName,
-            teamId: player.teamId,
-            price: player.price,
-            startPrice: player.startPrice,
-          },
-          create: {
-            element: player.element,
-            elementCode: player.elementCode,
-            elementType: player.elementType,
-            firstName: player.firstName,
-            secondName: player.secondName,
-            webName: player.webName,
-            teamId: player.teamId,
-            price: player.price,
-            startPrice: player.startPrice,
-          },
+          update: player,
+          create: player,
         }),
       (error) => createDatabaseError({ message: 'Failed to save player', details: { error } }),
-    );
+    ),
 
   /**
-   * Finds a player by ID
+   * Finds a player by its ID
    * @param id - The player ID to find
    * @returns TaskEither with found player or null if not found
    * @throws APIError with DB_ERROR code if query fails
    */
-  const findById = (id: number): TE.TaskEither<APIError, Player | null> =>
+  findById: (id: PlayerId): TE.TaskEither<APIError, PrismaPlayer | null> =>
     TE.tryCatch(
       () =>
-        prismaClient.player.findUnique({
+        prisma.player.findUnique({
           where: { element: id },
         }),
       (error) => createDatabaseError({ message: 'Failed to find player', details: { error } }),
-    );
+    ),
 
   /**
-   * Retrieves all players
+   * Retrieves all players ordered by element type and team ID
    * @returns TaskEither with array of players or error
    * @throws APIError with DB_ERROR code if query fails
    */
-  const findAll = (): TE.TaskEither<APIError, Player[]> =>
+  findAll: (): TE.TaskEither<APIError, PrismaPlayer[]> =>
     TE.tryCatch(
       () =>
-        prismaClient.player.findMany({
-          orderBy: { element: 'asc' },
+        prisma.player.findMany({
+          orderBy: [{ elementType: 'asc' }, { teamId: 'asc' }],
         }),
       (error) => createDatabaseError({ message: 'Failed to find players', details: { error } }),
-    );
+    ),
 
   /**
    * Updates an existing player
@@ -80,104 +67,80 @@ export const createPlayerRepository = (prismaClient: typeof prisma) => {
    * @returns TaskEither with updated player or error
    * @throws APIError with DB_ERROR code if update fails
    */
-  const update = (
-    id: number,
-    player: Partial<Prisma.PlayerUncheckedUpdateInput>,
-  ): TE.TaskEither<APIError, Player> =>
+  update: (
+    id: PlayerId,
+    player: Partial<PrismaPlayerCreate>,
+  ): TE.TaskEither<APIError, PrismaPlayer> =>
     TE.tryCatch(
       () =>
-        prismaClient.player.update({
+        prisma.player.update({
           where: { element: id },
           data: player,
         }),
       (error) => createDatabaseError({ message: 'Failed to update player', details: { error } }),
-    );
+    ),
 
   /**
-   * Creates or updates multiple players in a transaction
-   * @param players - Array of player data to create or update
-   * @returns TaskEither with array of created/updated players or error
-   * @throws APIError with DB_ERROR code if operation fails
+   * Creates a batch of new players
+   * @param players - The players data to create
+   * @returns TaskEither with created players or error
+   * @throws APIError with DB_ERROR code if creation fails
    */
-  const saveBatch = (
-    players: Prisma.PlayerUncheckedCreateInput[],
-  ): TE.TaskEither<APIError, Player[]> =>
+  saveBatch: (players: PrismaPlayerCreate[]): TE.TaskEither<APIError, PrismaPlayer[]> =>
     TE.tryCatch(
       () =>
-        prismaClient.$transaction(
+        prisma.$transaction(
           players.map((player) =>
-            prismaClient.player.upsert({
+            prisma.player.upsert({
               where: { element: player.element },
-              update: {
-                elementCode: player.elementCode,
-                elementType: player.elementType,
-                firstName: player.firstName,
-                secondName: player.secondName,
-                webName: player.webName,
-                teamId: player.teamId,
-                price: player.price,
-                startPrice: player.startPrice,
-              },
-              create: {
-                element: player.element,
-                elementCode: player.elementCode,
-                elementType: player.elementType,
-                firstName: player.firstName,
-                secondName: player.secondName,
-                webName: player.webName,
-                teamId: player.teamId,
-                price: player.price,
-                startPrice: player.startPrice,
-              },
+              update: player,
+              create: player,
             }),
           ),
         ),
       (error) => createDatabaseError({ message: 'Failed to save players', details: { error } }),
-    );
+    ),
 
   /**
-   * Finds players by team ID
-   * @param teamId - The team ID to find players for
-   * @returns TaskEither with array of players or error
+   * Finds players by their IDs
+   * @param ids - The player IDs to find
+   * @returns TaskEither with found players or error
    * @throws APIError with DB_ERROR code if query fails
    */
-  const findByTeamId = (teamId: number): TE.TaskEither<APIError, Player[]> =>
+  findByIds: (ids: PlayerId[]): TE.TaskEither<APIError, PrismaPlayer[]> =>
     TE.tryCatch(
       () =>
-        prismaClient.player.findMany({
-          where: { teamId },
-          orderBy: { element: 'asc' },
+        prisma.player.findMany({
+          where: { element: { in: ids } },
         }),
-      (error) =>
-        createDatabaseError({ message: 'Failed to find players by team', details: { error } }),
-    );
+      (error) => createDatabaseError({ message: 'Failed to find players', details: { error } }),
+    ),
 
   /**
-   * Finds players by position (elementType)
-   * @param position - The position to find players for
-   * @returns TaskEither with array of players or error
-   * @throws APIError with DB_ERROR code if query fails
+   * Deletes all players
+   * @returns TaskEither with void or error
+   * @throws APIError with DB_ERROR code if deletion fails
    */
-  const findByPosition = (position: ElementType): TE.TaskEither<APIError, Player[]> =>
+  deleteAll: (): TE.TaskEither<APIError, void> =>
+    TE.tryCatch(
+      () => prisma.player.deleteMany().then(() => undefined),
+      (error) => createDatabaseError({ message: 'Failed to delete players', details: { error } }),
+    ),
+
+  /**
+   * Deletes players by their IDs
+   * @param ids - The player IDs to delete
+   * @returns TaskEither with void or error
+   * @throws APIError with DB_ERROR code if deletion fails
+   */
+  deleteByIds: (ids: PlayerId[]): TE.TaskEither<APIError, void> =>
     TE.tryCatch(
       () =>
-        prismaClient.player.findMany({
-          where: { elementType: position },
-          orderBy: { price: 'desc' },
-        }),
-      (error) =>
-        createDatabaseError({ message: 'Failed to find players by position', details: { error } }),
-    );
-
-  return {
-    save,
-    findById,
-    findAll,
-    update,
-    saveBatch,
-    findByTeamId,
-    findByPosition,
-  } as const;
+        prisma.player
+          .deleteMany({
+            where: { element: { in: ids } },
+          })
+          .then(() => undefined),
+      (error) => createDatabaseError({ message: 'Failed to delete players', details: { error } }),
+    ),
 };
-
-export type PlayerRepository = ReturnType<typeof createPlayerRepository>;

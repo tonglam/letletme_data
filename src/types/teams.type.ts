@@ -1,6 +1,5 @@
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { APIError } from '../infrastructure/http/common/errors';
 import { BaseRepository, Branded, createBrandedType, isApiResponse } from './base.type';
 
 // ============ Branded Types ============
@@ -36,7 +35,7 @@ export interface TeamResponse {
   readonly win: number;
   readonly draw: number;
   readonly loss: number;
-  readonly team_division: number | null;
+  readonly team_division: string | null;
   readonly unavailable: boolean;
 }
 
@@ -65,16 +64,14 @@ export interface Team {
   readonly win: number;
   readonly draw: number;
   readonly loss: number;
-  readonly teamDivision: number | null;
+  readonly teamDivision: string | null;
   readonly unavailable: boolean;
 }
 
 export type Teams = readonly Team[];
 
 // ============ Repository Interface ============
-export interface TeamRepository extends BaseRepository<PrismaTeam, PrismaTeamCreate, TeamId> {
-  readonly findByCode: (code: number) => TE.TaskEither<APIError, PrismaTeam | null>;
-}
+export type TeamRepository = BaseRepository<PrismaTeam, PrismaTeamCreate, TeamId>;
 
 // ============ Persistence Types ============
 export interface PrismaTeam {
@@ -97,12 +94,12 @@ export interface PrismaTeam {
   readonly win: number;
   readonly draw: number;
   readonly loss: number;
-  readonly teamDivision: number | null;
+  readonly teamDivision: string | null;
   readonly unavailable: boolean;
   readonly createdAt: Date;
 }
 
-export type PrismaTeamCreate = Omit<PrismaTeam, 'id' | 'createdAt'>;
+export type PrismaTeamCreate = Omit<PrismaTeam, 'createdAt'>;
 
 // ============ Converters ============
 export const toDomainTeam = (data: TeamResponse | PrismaTeam): Team => {
