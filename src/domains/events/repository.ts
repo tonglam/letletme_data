@@ -1,7 +1,7 @@
 import { Prisma } from '@prisma/client';
 import * as TE from 'fp-ts/TaskEither';
-import { APIError, createDatabaseError } from '../../infrastructure/api/common/errors';
 import { prisma } from '../../infrastructure/db/prisma';
+import { APIError, createDatabaseError } from '../../infrastructure/http/common/errors';
 import {
   EventId,
   EventRepository,

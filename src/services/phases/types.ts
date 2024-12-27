@@ -2,7 +2,7 @@ import * as TE from 'fp-ts/TaskEither';
 import type { BootstrapApi } from '../../domains/bootstrap/operations';
 import type { PhaseCache } from '../../domains/phases/cache/cache';
 import { phaseRepository } from '../../domains/phases/repository';
-import type { APIError } from '../../infrastructure/api/common/errors';
+import type { APIError } from '../../infrastructure/http/common/errors';
 import type { Phase, PhaseId } from '../../types/phases.type';
 
 export type PhaseServiceError = APIError & {

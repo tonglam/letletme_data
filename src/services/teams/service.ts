@@ -3,7 +3,7 @@ import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import type { BootstrapApi } from '../../domains/bootstrap/operations';
 import { createError } from '../../domains/phases/operations';
-import type { APIError } from '../../infrastructure/api/common/errors';
+import type { APIError } from '../../infrastructure/http/common/errors';
 import type { TeamId, Teams } from '../../types/teams.type';
 import {
   convertPrismaTeams,
@@ -18,7 +18,7 @@ const fetchBootstrapTeams = (api: BootstrapApi): TE.TaskEither<APIError, Teams> 
   pipe(
     TE.tryCatch(
       () => api.getBootstrapData(),
-      (error) => createError('Failed to fetch bootstrap data', error),
+      (error) => createError('Failed to fetch bootstrap data', error as Error),
     ),
     TE.chain((data) => {
       if (!data) {
@@ -73,9 +73,24 @@ export const createTeamServiceImpl = ({
   const getTeam = (id: TeamId) =>
     getCachedOrFallbackOne(teamCache?.getTeam(String(id)), teamRepository.findById(id));
 
+  const getTeamByCode = (code: number) =>
+    pipe(
+      teamRepository.findByCode(code),
+      TE.chain((team) =>
+        team
+          ? pipe(
+              TE.right(team),
+              TE.chain(convertPrismaTeam),
+              TE.mapLeft((error) => createError('Failed to convert team', error)),
+            )
+          : TE.right(null),
+      ),
+    );
+
   return {
     syncTeams,
     getTeams,
     getTeam,
+    getTeamByCode,
   };
 };

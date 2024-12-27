@@ -5,7 +5,7 @@ import pino from 'pino';
 import { fetchBootstrapEvents } from '../domains/bootstrap/operations';
 import { saveBatchEvents } from '../domains/events/operations';
 import { eventRepository } from '../domains/events/repository';
-import { createFPLClient } from '../infrastructure/api/fpl';
+import { createFPLClient } from '../infrastructure/http/fpl';
 import { META_QUEUE_CONFIG } from '../infrastructure/queue/config/queue.config';
 import { createMetaWorkerService } from '../services/queue/meta/base/meta.worker';
 import { eventJobService } from '../services/queue/meta/events.job';

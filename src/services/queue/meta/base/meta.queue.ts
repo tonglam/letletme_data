@@ -1,7 +1,6 @@
 import { Job } from 'bullmq';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
-import { getSharedLogger } from '../../../../infrastructure/api/common/logs';
 import {
   META_QUEUE_CONFIG,
   MetaJobData,
@@ -13,6 +12,7 @@ import {
   createQueueAdapter,
   createQueueDependencies,
 } from '../../../../infrastructure/queue';
+import { getQueueLogger, logQueueError } from '../../../../utils/logger';
 import { QueueService, createQueueService } from '../../queue.service';
 
 /**
@@ -45,11 +45,7 @@ export const createMetaQueueService = (): MetaQueueService => {
   const deps = createQueueDependencies(META_QUEUE_CONFIG);
   const adapter = createQueueAdapter<MetaJobData>(deps);
   const queueService = createQueueService<MetaJobData>(adapter);
-  const logger = getSharedLogger({
-    name: 'meta-queue',
-    level: process.env.LOG_LEVEL || 'info',
-    filepath: './logs',
-  });
+  const logger = getQueueLogger();
 
   // Initialize queue monitor
   const monitor = createMonitorService({
@@ -66,7 +62,10 @@ export const createMetaQueueService = (): MetaQueueService => {
   pipe(
     monitor.start(),
     TE.mapLeft((error) =>
-      logger.error({ error, queueName: deps.queue.name }, 'Failed to start queue monitoring'),
+      logQueueError(error, {
+        queueName: deps.queue.name,
+        jobId: 'monitor-start',
+      }),
     ),
   )();
 

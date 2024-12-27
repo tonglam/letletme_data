@@ -2,7 +2,7 @@ import * as A from 'fp-ts/Array';
 import * as E from 'fp-ts/Either';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
-import { APIError, createValidationError } from '../../infrastructure/api/common/errors';
+import { APIError, createValidationError } from '../../infrastructure/http/common/errors';
 import { PrismaTeam, TeamRepository, validateTeamId } from '../../types/teams.type';
 
 /**

@@ -4,8 +4,8 @@ import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
 
 import { phaseRepository } from '../../../src/domains/phases/repository';
-import { APIError } from '../../../src/infrastructure/api/common/errors';
 import { connectDB, disconnectDB } from '../../../src/infrastructure/db/prisma';
+import { APIError } from '../../../src/infrastructure/http/common/errors';
 import { createPhaseService } from '../../../src/services/phases';
 import { phaseWorkflows } from '../../../src/services/phases/workflow';
 import { Phase, PhaseId, validatePhaseId } from '../../../src/types/phases.type';

@@ -8,7 +8,7 @@ import { phaseRepository } from '../../../../src/domains/phases/repository';
 import {
   APIError,
   createInternalServerError,
-} from '../../../../src/infrastructure/api/common/errors';
+} from '../../../../src/infrastructure/http/common/errors';
 import {
   createMetaQueueService,
   MetaQueueService,

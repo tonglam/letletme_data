@@ -1,6 +1,6 @@
 import * as TE from 'fp-ts/TaskEither';
-import { APIError } from '../../infrastructure/api/common/errors';
-import { createFPLClient } from '../../infrastructure/api/fpl/client';
+import { APIError } from '../../infrastructure/http/common/errors';
+import { createFPLClient } from '../../infrastructure/http/fpl/client';
 import { createTeamServiceImpl } from '../../services/teams/service';
 import { teamWorkflows } from '../../services/teams/workflow';
 import { Team, TeamId } from '../../types/teams.type';

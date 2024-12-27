@@ -12,8 +12,8 @@ import {
   saveBatchEvents,
   toDomainEvent,
 } from '../../domains/events/operations';
-import type { APIError } from '../../infrastructure/api/common/errors';
 import type { CacheError } from '../../infrastructure/cache/types';
+import type { APIError } from '../../infrastructure/http/common/errors';
 import type { Event, EventId, PrismaEvent } from '../../types/events.type';
 import type { EventService, EventServiceDependencies } from './types';
 

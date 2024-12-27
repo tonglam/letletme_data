@@ -1,6 +1,6 @@
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
-import { APIError, createValidationError } from '../../infrastructure/api/common/errors';
+import { APIError, createValidationError } from '../../infrastructure/http/common/errors';
 import { Phase, PhaseId } from '../../types/phases.type';
 import { PhaseService } from './index';
 

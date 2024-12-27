@@ -1,6 +1,6 @@
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
-import { APIError, createValidationError } from '../../infrastructure/api/common/errors';
+import { APIError, createValidationError } from '../../infrastructure/http/common/errors';
 import type { Event, EventId } from '../../types/events.type';
 import type { EventService } from './types';
 

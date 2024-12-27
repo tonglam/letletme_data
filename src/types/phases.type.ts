@@ -1,47 +1,33 @@
-import { PrismaClient } from '@prisma/client';
-import * as E from 'fp-ts/Either';
+import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { z } from 'zod';
-import { APIError } from '../infrastructure/api/common/errors';
+import { BaseRepository, Branded, createBrandedType, isApiResponse } from './base.type';
 
 // ============ Branded Types ============
-declare const PhaseIdBrand: unique symbol;
-export type PhaseId = number & { readonly _brand: typeof PhaseIdBrand };
+export type PhaseId = Branded<number, 'PhaseId'>;
 
-declare const EventIdBrand: unique symbol;
-export type EventId = number & { readonly _brand: typeof EventIdBrand };
-
-// ============ Schemas ============
-/**
- * API Response Schema - Validates external API data (snake_case)
- */
-const PhaseResponseSchema = z.object({
-  id: z.number(),
-  name: z.string(),
-  start_event: z.number(),
-  stop_event: z.number(),
-  highest_score: z.number().nullable(),
-});
-
-export const PhasesResponseSchema = z.array(PhaseResponseSchema);
-export const PhasesSchema = z.array(
-  z.object({
-    id: z.number(),
-    name: z.string(),
-    startEvent: z.number(),
-    stopEvent: z.number(),
-    highestScore: z.number().nullable(),
-  }),
+export const PhaseId = createBrandedType<number, 'PhaseId'>(
+  'PhaseId',
+  (value: unknown): value is number =>
+    typeof value === 'number' && value > 0 && Number.isInteger(value),
 );
 
 // ============ Types ============
 /**
  * API Response types (snake_case)
  */
-export type PhaseResponse = z.infer<typeof PhaseResponseSchema>;
-export type PhasesResponse = z.infer<typeof PhasesResponseSchema>;
+export interface PhaseResponse {
+  readonly id: number;
+  readonly name: string;
+  readonly start_event: number;
+  readonly stop_event: number;
+  readonly highest_score: number | null;
+}
 
-// ============ Domain Types ============
+export type PhasesResponse = readonly PhaseResponse[];
+
+/**
+ * Domain types (camelCase)
+ */
 export interface Phase {
   readonly id: PhaseId;
   readonly name: string;
@@ -52,35 +38,8 @@ export interface Phase {
 
 export type Phases = readonly Phase[];
 
-// ============ Type Transformers ============
-/**
- * Transform and validate PhaseResponse to Phase
- */
-export const toDomainPhase = (raw: PhaseResponse): E.Either<string, Phase> => {
-  try {
-    if (!isPhaseId(raw.id)) {
-      return E.left(`Invalid phase ID: ${raw.id}`);
-    }
-
-    const phase: Phase = {
-      id: raw.id as PhaseId,
-      name: raw.name,
-      startEvent: raw.start_event,
-      stopEvent: raw.stop_event,
-      highestScore: raw.highest_score,
-    };
-
-    if (!isValidPhase(phase)) {
-      return E.left('Invalid phase data');
-    }
-
-    return E.right(phase);
-  } catch (error) {
-    return E.left(
-      `Failed to transform phase data: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-};
+// ============ Repository Interface ============
+export type PhaseRepository = BaseRepository<PrismaPhase, PrismaPhaseCreate, PhaseId>;
 
 // ============ Persistence Types ============
 export interface PrismaPhase {
@@ -92,42 +51,31 @@ export interface PrismaPhase {
   readonly createdAt: Date;
 }
 
-export interface PrismaPhaseCreate extends Omit<PrismaPhase, 'id'> {
-  readonly id?: number;
-}
+export type PrismaPhaseCreate = Omit<PrismaPhase, 'id' | 'createdAt'>;
 
-// ============ Type Guards & Validation ============
-export const isPhaseId = (id: unknown): id is PhaseId =>
-  typeof id === 'number' && id > 0 && Number.isInteger(id);
+// ============ Converters ============
+export const toDomainPhase = (data: PhaseResponse | PrismaPhase): Phase => {
+  const isPhaseApiResponse = (d: PhaseResponse | PrismaPhase): d is PhaseResponse =>
+    isApiResponse(d, 'start_event');
 
-export const validatePhaseId = (id: number): E.Either<string, PhaseId> =>
-  isPhaseId(id) ? E.right(id as PhaseId) : E.left(`Invalid phase ID: ${id}`);
+  return {
+    id: data.id as PhaseId,
+    name: data.name,
+    startEvent: isPhaseApiResponse(data) ? data.start_event : data.startEvent,
+    stopEvent: isPhaseApiResponse(data) ? data.stop_event : data.stopEvent,
+    highestScore: isPhaseApiResponse(data) ? data.highest_score : data.highestScore,
+  };
+};
 
-export const isEventId = (id: unknown): id is EventId =>
-  typeof id === 'number' && id > 0 && Number.isInteger(id);
+export const convertPrismaPhases = (
+  phases: readonly PrismaPhase[],
+): TE.TaskEither<string, Phases> =>
+  pipe(
+    phases,
+    TE.right,
+    TE.map((values) => values.map(toDomainPhase)),
+  );
 
-export const validateEventId = (id: number): E.Either<string, EventId> =>
-  isEventId(id) ? E.right(id as EventId) : E.left(`Invalid event ID: ${id}`);
-
-export const isValidPhase = (phase: Phase): boolean =>
-  isPhaseId(phase.id) &&
-  typeof phase.name === 'string' &&
-  phase.name.length > 0 &&
-  Number.isInteger(phase.startEvent) &&
-  phase.startEvent > 0 &&
-  Number.isInteger(phase.stopEvent) &&
-  phase.stopEvent >= phase.startEvent &&
-  (phase.highestScore === null ||
-    (typeof phase.highestScore === 'number' && phase.highestScore >= 0));
-
-export interface PhaseRepository {
-  prisma: PrismaClient;
-  findById(id: PhaseId): TE.TaskEither<APIError, PrismaPhase | null>;
-  findAll(): TE.TaskEither<APIError, PrismaPhase[]>;
-  save(data: PrismaPhaseCreate): TE.TaskEither<APIError, PrismaPhase>;
-  saveBatch(data: PrismaPhaseCreate[]): TE.TaskEither<APIError, PrismaPhase[]>;
-  update(id: PhaseId, data: Partial<PrismaPhaseCreate>): TE.TaskEither<APIError, PrismaPhase>;
-  deleteAll(): TE.TaskEither<APIError, void>;
-  findByIds(ids: PhaseId[]): TE.TaskEither<APIError, PrismaPhase[]>;
-  deleteByIds(ids: PhaseId[]): TE.TaskEither<APIError, void>;
-}
+export const convertPrismaPhase = (
+  phase: PrismaPhase | null,
+): TE.TaskEither<string, Phase | null> => TE.right(phase ? toDomainPhase(phase) : null);

@@ -3,7 +3,7 @@ import * as E from 'fp-ts/Either';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
 import { phaseRepository } from '../../../domains/phases/repository';
-import { APIError } from '../../../infrastructure/api/common/errors';
+import { APIError } from '../../../infrastructure/http/common/errors';
 import { JobOperation, JobOptions, MetaJobData } from '../../../infrastructure/queue';
 import { createQueueProcessingError } from '../../../infrastructure/queue/core/errors';
 import { PhaseId } from '../../../types/phases.type';

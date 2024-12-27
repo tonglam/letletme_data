@@ -1,5 +1,5 @@
 import * as E from 'fp-ts/Either';
-import { createValidationError } from '../../../src/infrastructure/api/common/errors';
+import { createValidationError } from '../../../src/infrastructure/http/common/errors';
 import { createPhaseService } from '../../../src/services/phases';
 import { phaseWorkflows } from '../../../src/services/phases/workflow';
 import type { Phase } from '../../../src/types/phases.type';

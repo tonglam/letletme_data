@@ -3,7 +3,7 @@ import type { Option } from 'fp-ts/Option';
 import type { TaskEither } from 'fp-ts/TaskEither';
 import * as t from 'io-ts';
 import type { ChainableCommander, Redis, RedisOptions } from 'ioredis';
-import type { APIError } from '../api/common/errors';
+import type { APIError } from '../http/common/errors';
 
 // Redis types
 export type RetryStrategy = (retryAttempt: number) => number | null;

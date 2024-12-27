@@ -97,11 +97,28 @@ The system follows a layered architecture with clear responsibilities:
 
 1. **API Layer**
 
-   - RESTful endpoints
-   - Request validation
-   - Response formatting
-   - Rate limiting
-   - Authentication/Authorization
+   - RESTful endpoints organized by domain
+   - Consistent response formatting using fp-ts
+   - Request validation and error handling
+   - Rate limiting and authentication
+   - Clear separation from domain logic
+   - Dependency injection for services and clients
+
+   ```typescript
+   // Example API Layer Structure
+   src/api/
+   ├── routes/           # Route handlers by domain
+   ├── responses/        # Response formatting
+   └── middleware/       # Express middleware
+   ```
+
+   The API layer follows these principles:
+
+   - Routes are organized by domain (events, phases, etc.)
+   - Response formatting is consistent across all endpoints
+   - Error handling uses functional programming patterns
+   - Dependencies are injected rather than created
+   - HTTP concerns are isolated from business logic
 
 2. **Service Layer**
 

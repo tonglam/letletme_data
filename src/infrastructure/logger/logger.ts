@@ -1,38 +1,25 @@
-import { pino } from 'pino';
+import { Logger } from 'pino';
+import { LOG_CONFIG, createLogger } from '../../config/logger.config';
 
-export type LogLevel = 'error' | 'warn' | 'info' | 'debug';
+// Logger instances cache
+const loggerInstances = new Map<string, Logger>();
 
-export interface LogContext {
-  [key: string]: unknown;
-}
+// Core logger factory function
+const getOrCreateLogger = (name: keyof typeof LOG_CONFIG.loggers): Logger => {
+  const existing = loggerInstances.get(name);
+  if (existing) return existing;
 
-export interface LogMessage {
-  message: string;
-  context?: LogContext;
-}
-
-const createLogger = () => {
-  const logger = pino({
-    level: 'info',
-    timestamp: () => `,"timestamp":"${new Date().toISOString()}"`,
+  const logger = createLogger({
+    name: LOG_CONFIG.loggers[name].name,
+    level: LOG_CONFIG.level,
+    filepath: LOG_CONFIG.path,
   });
 
-  const createPureLogger = (level: LogLevel) => (logMessage: LogMessage) => () => {
-    const { message, context } = logMessage;
-    logger[level]({ message, ...(context || {}) });
-  };
-
-  const setLogLevel = (level: LogLevel) => () => {
-    logger.level = level;
-  };
-
-  return {
-    error: createPureLogger('error'),
-    warn: createPureLogger('warn'),
-    info: createPureLogger('info'),
-    debug: createPureLogger('debug'),
-    setLogLevel,
-  };
+  loggerInstances.set(name, logger);
+  return logger;
 };
 
-export const logger = createLogger();
+// Public logger getters
+export const getApiLogger = (): Logger => getOrCreateLogger('api');
+export const getFplApiLogger = (): Logger => getOrCreateLogger('fpl');
+export const getQueueLogger = (): Logger => getOrCreateLogger('queue');

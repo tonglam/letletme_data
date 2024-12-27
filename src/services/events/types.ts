@@ -2,7 +2,7 @@ import * as TE from 'fp-ts/TaskEither';
 import type { BootstrapApi } from '../../domains/bootstrap/operations';
 import type { EventCache } from '../../domains/events/cache/cache';
 import { eventRepository } from '../../domains/events/repository';
-import type { APIError } from '../../infrastructure/api/common/errors';
+import type { APIError } from '../../infrastructure/http/common/errors';
 import type { Event, EventId } from '../../types/events.type';
 
 export type EventServiceError = APIError & {

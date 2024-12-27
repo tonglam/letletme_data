@@ -6,7 +6,7 @@ import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
 
 // Internal dependencies
-import { APIError, createValidationError } from '../../infrastructure/api/common/errors';
+import { APIError, createValidationError } from '../../infrastructure/http/common/errors';
 import {
   PhaseRepository,
   PrismaPhase,

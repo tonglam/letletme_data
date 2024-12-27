@@ -1,6 +1,6 @@
 import * as TE from 'fp-ts/TaskEither';
-import { APIError, createDatabaseError } from '../../infrastructure/api/common/errors';
 import { prisma } from '../../infrastructure/db/prisma';
+import { APIError, createDatabaseError } from '../../infrastructure/http/common/errors';
 import { PrismaTeam, PrismaTeamCreate, TeamId, TeamRepository } from '../../types/teams.type';
 
 /**
@@ -87,6 +87,22 @@ export const teamRepository: TeamRepository = {
     ),
 
   /**
+   * Finds a team by its code
+   * @param code - The team code to find
+   * @returns TaskEither with found team or null if not found
+   * @throws APIError with DB_ERROR code if query fails
+   */
+  findByCode: (code: number): TE.TaskEither<APIError, PrismaTeam | null> =>
+    TE.tryCatch(
+      () =>
+        prisma.team.findFirst({
+          where: { code },
+        }),
+      (error) =>
+        createDatabaseError({ message: 'Failed to find team by code', details: { error } }),
+    ),
+
+  /**
    * Retrieves all teams ordered by position
    * @returns TaskEither with array of teams or error
    * @throws APIError with DB_ERROR code if query fails
@@ -118,24 +134,10 @@ export const teamRepository: TeamRepository = {
     ),
 
   /**
-   * Deletes all teams
-   * @returns TaskEither with void or error
-   * @throws APIError with DB_ERROR code if deletion fails
-   */
-  deleteAll: (): TE.TaskEither<APIError, void> =>
-    TE.tryCatch(
-      () =>
-        prisma.$transaction(async (tx) => {
-          await tx.team.deleteMany({});
-        }),
-      (error) => createDatabaseError({ message: 'Failed to delete teams', details: { error } }),
-    ),
-
-  /**
-   * Creates a batch of new teams
-   * @param teams - The teams data to create
-   * @returns TaskEither with created teams or error
-   * @throws APIError with DB_ERROR code if creation fails
+   * Saves multiple teams in a transaction
+   * @param teams - Array of teams to save
+   * @returns TaskEither with saved teams or error
+   * @throws APIError with DB_ERROR code if save fails
    */
   saveBatch: (teams: PrismaTeamCreate[]): TE.TaskEither<APIError, PrismaTeam[]> =>
     TE.tryCatch(
@@ -144,57 +146,29 @@ export const teamRepository: TeamRepository = {
           teams.map((team) =>
             prisma.team.upsert({
               where: { id: Number(team.id) },
-              update: {
-                code: team.code,
-                name: team.name,
-                shortName: team.shortName,
-                strength: team.strength,
-                strengthOverallHome: team.strengthOverallHome,
-                strengthOverallAway: team.strengthOverallAway,
-                strengthAttackHome: team.strengthAttackHome,
-                strengthAttackAway: team.strengthAttackAway,
-                strengthDefenceHome: team.strengthDefenceHome,
-                strengthDefenceAway: team.strengthDefenceAway,
-                pulseId: team.pulseId,
-                played: team.played,
-                position: team.position,
-                points: team.points,
-                form: team.form,
-                win: team.win,
-                draw: team.draw,
-                loss: team.loss,
-                teamDivision: team.teamDivision,
-                unavailable: team.unavailable,
-                createdAt: team.createdAt ?? new Date(),
-              },
+              update: team,
               create: {
                 id: Number(team.id),
-                code: team.code,
-                name: team.name,
-                shortName: team.shortName,
-                strength: team.strength,
-                strengthOverallHome: team.strengthOverallHome,
-                strengthOverallAway: team.strengthOverallAway,
-                strengthAttackHome: team.strengthAttackHome,
-                strengthAttackAway: team.strengthAttackAway,
-                strengthDefenceHome: team.strengthDefenceHome,
-                strengthDefenceAway: team.strengthDefenceAway,
-                pulseId: team.pulseId,
-                played: team.played,
-                position: team.position,
-                points: team.points,
-                form: team.form,
-                win: team.win,
-                draw: team.draw,
-                loss: team.loss,
-                teamDivision: team.teamDivision,
-                unavailable: team.unavailable,
-                createdAt: team.createdAt ?? new Date(),
+                ...team,
               },
             }),
           ),
         ),
       (error) => createDatabaseError({ message: 'Failed to save teams', details: { error } }),
+    ),
+
+  /**
+   * Deletes all teams from the database
+   * @returns TaskEither with void or error
+   * @throws APIError with DB_ERROR code if deletion fails
+   */
+  deleteAll: (): TE.TaskEither<APIError, void> =>
+    TE.tryCatch(
+      () =>
+        prisma.$transaction(async (tx) => {
+          await tx.team.deleteMany();
+        }),
+      (error) => createDatabaseError({ message: 'Failed to delete teams', details: { error } }),
     ),
 
   /**

@@ -1,6 +1,6 @@
 import { describe, expect, test } from '@jest/globals';
 import { BootstrapApi } from '../../../../src/domains/bootstrap/operations';
-import { createFPLClient } from '../../../../src/infrastructure/api/fpl/client';
+import { createFPLClient } from '../../../../src/infrastructure/http/fpl/client';
 import { Phase } from '../../../../src/types/phases.type';
 
 describe('FPL API Client', () => {

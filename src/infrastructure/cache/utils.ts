@@ -2,8 +2,8 @@ import * as E from 'fp-ts/Either';
 import { flow, pipe } from 'fp-ts/function';
 import * as IO from 'fp-ts/IO';
 import * as TE from 'fp-ts/TaskEither';
-import type { APIError } from '../api/common/errors';
-import { createDatabaseError } from '../api/common/errors';
+import type { APIError } from '../http/common/errors';
+import { createDatabaseError } from '../http/common/errors';
 import { logger } from '../logger/logger';
 import {
   APIErrorTransformer,

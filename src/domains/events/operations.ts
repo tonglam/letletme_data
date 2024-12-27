@@ -2,8 +2,8 @@ import { Prisma } from '@prisma/client';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import type { APIError } from '../../infrastructure/api/common/errors';
-import { createValidationError } from '../../infrastructure/api/common/errors';
+import type { APIError } from '../../infrastructure/http/common/errors';
+import { createValidationError } from '../../infrastructure/http/common/errors';
 import type {
   ChipPlay,
   Event as DomainEvent,

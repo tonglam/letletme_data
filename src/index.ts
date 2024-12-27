@@ -1,15 +1,15 @@
 import { PrismaClient } from '@prisma/client';
 import dotenv from 'dotenv';
 import express, { NextFunction, Request, Response } from 'express';
+import * as E from 'fp-ts/Either';
 import * as TE from 'fp-ts/TaskEither';
 import pino from 'pino';
 import expressPinoLogger from 'pino-http';
-import { eventRouter } from './domains/events';
-import { monitorRouter } from './domains/monitor/routes';
-import { phaseRouter } from './domains/phases';
-import { teamRouter } from './domains/teams';
+import router from './api/routes';
+import { createFPLClient } from './infrastructure/http/fpl';
 import { QUEUE_JOB_TYPES } from './infrastructure/queue';
 import { META_QUEUE_CONFIG } from './infrastructure/queue/config/queue.config';
+import { initializeServices } from './services';
 import { createMetaWorkerService } from './services/queue/meta/base/meta.worker';
 import { eventJobService } from './services/queue/meta/events.job';
 import { phaseJobService } from './services/queue/meta/phases.job';
@@ -65,16 +65,23 @@ app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
   next();
 });
 
+// Initialize services
+const fplClient = createFPLClient();
+initializeServices({
+  getBootstrapData: async () => {
+    const result = await fplClient.bootstrap.getBootstrapStatic();
+    if (E.isLeft(result)) throw new Error(result.left.message);
+    return result.right;
+  },
+});
+
 // Routes
 app.get('/', (req: Request, res: Response) => {
   res.send('Hello, Let let me data!');
 });
 
 // Register routes
-app.use('/api/phases', phaseRouter);
-app.use('/api/events', eventRouter);
-app.use('/api/teams', teamRouter);
-app.use('/api/monitor', monitorRouter);
+app.use('/api', router);
 
 let server: ReturnType<typeof app.listen> | null = null;
 

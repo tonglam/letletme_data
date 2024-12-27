@@ -196,6 +196,29 @@ model PlayerStat {
   @@map("player_stats")
 }
 
+model EventFixture {
+  id                   String    @id @default(uuid()) @db.Uuid
+  code                 Int
+  event                Int
+  kickoffTime          DateTime? @map("kickoff_time") @db.Timestamptz
+  started              Boolean   @default(false)
+  finished             Boolean   @default(false)
+  provisionalStartTime Boolean   @default(false) @map("provisional_start_time")
+  finishedProvisional  Boolean   @default(false) @map("finished_provisional")
+  minutes              Int       @default(0)
+  teamH                Int?      @map("team_h")
+  teamHDifficulty      Int       @default(0) @map("team_h_difficulty")
+  teamHScore           Int       @default(0) @map("team_h_score")
+  teamA                Int?      @map("team_a")
+  teamADifficulty      Int       @default(0) @map("team_a_difficulty")
+  teamAScore           Int       @default(0) @map("team_a_score")
+  createdAt            DateTime  @default(now()) @map("created_at")
+
+  @@index([event, teamH], name: "idx_home")
+  @@index([event, teamA], name: "idx_away")
+  @@map("event_fixtures")
+}
+
 // model EventLive {
 //   id           String   @id @default(uuid()) @map("id")
 //   event        Event    @relation(fields: [eventId], references: [eventId])

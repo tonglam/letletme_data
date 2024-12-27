@@ -1,102 +1,64 @@
-import { Either, left, right } from 'fp-ts/Either';
+import * as A from 'fp-ts/Array';
+import * as E from 'fp-ts/Either';
+import { pipe } from 'fp-ts/function';
 import { z } from 'zod';
-import { Element, ElementsResponseSchema, ElementsSchema, toDomainElement } from './element.type';
-import { Event, EventsResponseSchema, EventsSchema, toDomainEvent } from './events.type';
-import { Phase, PhasesResponseSchema, PhasesSchema, toDomainPhase } from './phases.type';
-import { Team, TeamsResponseSchema, TeamsSchema, toDomainTeam } from './teams.type';
+import type { ElementResponse } from './elements.type';
+import type { EventResponse } from './events.type';
+import type { PhaseResponse } from './phases.type';
+import type { TeamResponse } from './teams.type';
 
-// ============ Schemas ============
-/**
- * API Response Schema - Validates external API data (snake_case)
- */
-export const BootStrapResponseSchema = z
-  .object({
-    events: EventsResponseSchema,
-    phases: PhasesResponseSchema,
-    teams: TeamsResponseSchema,
-    elements: ElementsResponseSchema,
-  })
-  .passthrough();
-
-/**
- * Domain Schema - Internal application model (camelCase)
- */
-export const BootStrapSchema = z
-  .object({
-    events: EventsSchema,
-    phases: PhasesSchema,
-    teams: TeamsSchema,
-    elements: ElementsSchema,
-  })
-  .passthrough();
+export const BootStrapResponseSchema = z.object({
+  events: z.array(z.custom<EventResponse>()),
+  phases: z.array(z.custom<PhaseResponse>()),
+  teams: z.array(z.custom<TeamResponse>()),
+  elements: z.array(z.custom<ElementResponse>()),
+});
 
 // ============ Types ============
 /**
  * API Response types (snake_case)
  */
-export type BootStrapResponse = z.infer<typeof BootStrapResponseSchema>;
+export interface BootStrapResponse {
+  readonly events: EventResponse[];
+  readonly phases: PhaseResponse[];
+  readonly teams: TeamResponse[];
+  readonly elements: ElementResponse[];
+}
 
 /**
  * Domain types (camelCase)
  */
-export type BootStrap = z.infer<typeof BootStrapSchema>;
+export interface BootStrap {
+  readonly events: readonly EventResponse[];
+  readonly phases: readonly PhaseResponse[];
+  readonly teams: readonly TeamResponse[];
+  readonly elements: readonly ElementResponse[];
+}
 
 // ============ Type Transformers ============
-/**
- * Transform and validate BootStrapResponse to BootStrap
- */
-export const toDomainBootStrap = (raw: BootStrapResponse): Either<string, BootStrap> => {
-  try {
-    // Transform each section using their respective transformers
-    const eventsResults = raw.events.map(toDomainEvent);
-    const phasesResults = raw.phases.map(toDomainPhase);
-    const teamsResults = raw.teams.map(toDomainTeam);
-    const elementsResults = raw.elements.map(toDomainElement);
+const transformArray = <T, U>(
+  arr: T[],
+  transform: (item: T) => E.Either<string, U>,
+  entityName: string,
+): E.Either<string, readonly U[]> =>
+  pipe(
+    arr,
+    A.traverse(E.Applicative)(transform),
+    E.mapLeft((error) => `Failed to transform ${entityName}: ${error}`),
+  );
 
-    // Check for any transformation errors
-    const errors: string[] = [];
-    const events: Event[] = [];
-    const phases: Phase[] = [];
-    const teams: Team[] = [];
-    const elements: Element[] = [];
-
-    eventsResults.forEach((result) => {
-      if (result._tag === 'Left') errors.push(result.left);
-      else events.push(result.right);
-    });
-
-    phasesResults.forEach((result) => {
-      if (result._tag === 'Left') errors.push(result.left);
-      else phases.push(result.right);
-    });
-
-    teamsResults.forEach((result) => {
-      if (result._tag === 'Left') errors.push(result.left);
-      else teams.push(result.right);
-    });
-
-    elementsResults.forEach((result) => {
-      if (result._tag === 'Left') errors.push(result.left);
-      else elements.push(result.right);
-    });
-
-    if (errors.length > 0) {
-      return left(`Failed to transform bootstrap data: ${errors.join(', ')}`);
-    }
-
-    const result = BootStrapSchema.safeParse({
-      events,
-      phases,
-      teams,
-      elements,
-    });
-
-    return result.success
-      ? right(result.data)
-      : left(`Invalid bootstrap domain model: ${result.error.message}`);
-  } catch (error) {
-    return left(
-      `Failed to transform bootstrap data: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-};
+export const toDomainBootStrap = (raw: BootStrapResponse): E.Either<string, BootStrap> =>
+  pipe(
+    E.Do,
+    E.bind('events', () => transformArray(raw.events, (e) => E.right(e), 'events')),
+    E.bind('phases', () => transformArray(raw.phases, (p) => E.right(p), 'phases')),
+    E.bind('teams', () => transformArray(raw.teams, (t) => E.right(t), 'teams')),
+    E.bind('elements', () => transformArray(raw.elements, (e) => E.right(e), 'elements')),
+    E.map((data) => ({
+      events: data.events,
+      phases: data.phases,
+      teams: data.teams,
+      elements: data.elements,
+    })),
+    E.mapLeft((error) => `Failed to transform bootstrap data: ${error}`),
+  );
