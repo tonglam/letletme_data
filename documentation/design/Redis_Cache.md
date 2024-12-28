@@ -1,23 +1,29 @@
+# Redis Cache Design
+
 ## 1. Overview
 
 ### 1.1 Purpose
 
-This document outlines the Redis caching strategy for the LetLetMe Data project, focusing on simple key-value storage while following functional programming principles.
+This document outlines the Redis caching strategy for the LetLetMe Data project, focusing on domain-driven caching with support for multiple Redis data structures while following functional programming principles.
 
 ### 1.2 Design Goals
 
-- Maximize Redis's key-value nature
-- Minimize transformations and complexity
-- Ensure type safety
-- Optimize performance
-- Handle failures gracefully
+- Domain-driven cache design
+- Support for multiple Redis data structures (Hash, Sorted Set, String)
+- Direct domain model storage without persistence type transformations
+- Type-safe operations with fp-ts
+- Graceful fallback to data providers
+- Clear error handling with TaskEither
+- Bridge between service and domain layers
 
 ### 1.3 Integration Philosophy
 
-- Direct domain model storage
-- Minimal transformations
+- Domain-specific cache implementations
+- Flexible data structure choice per domain
+- Zero transformation between cache and domain models
 - Type-safe operations
-- Clear error handling
+- Explicit error handling
+- Cache as a bridge between service and domain layers
 
 ## 2. Architecture
 
@@ -25,162 +31,248 @@ This document outlines the Redis caching strategy for the LetLetMe Data project,
 
 ```mermaid
 graph TD
-    A[Domain Layer] --> B[Cache Layer]
+    A[Service Layer] --> B[Domain Cache]
     B --> C[Redis Client]
+    B --> D[Data Provider]
+    E[Domain Layer] --> B
 
-    subgraph "Cache Layer"
-        B --> D[Serialization]
-        B --> E[Error Handling]
-        B --> F[TTL Management]
+    subgraph "Domain Cache Layer"
+        B --> F[Cache Operations]
+        B --> G[Error Handling]
+        B --> H[Data Structure Handling]
     end
+
+    style B fill:#f9f,stroke:#333,stroke-width:2px
 ```
 
-### 2.2 Data Storage Strategy
+### 2.2 Design Patterns
+
+#### Bridge Pattern Implementation
+
+The cache layer implements the Bridge Pattern to decouple the abstraction (domain interfaces) from implementation (service layer):
 
 ```typescript
-// Simple cache wrapper
-interface CacheWrapper<T> {
-  readonly value: T;
-  readonly timestamp: number;
+// Abstraction (Domain Layer)
+interface DomainCache<T> {
+  readonly getItem: (id: string) => TE.TaskEither<CacheError, T | null>;
+  // ... other methods
 }
 
-// Generic cache operations
-interface RedisCache<T> {
-  set(key: string, value: T): TE.TaskEither<CacheError, void>;
-  get(key: string): TE.TaskEither<CacheError, T | null>;
-  del(key: string): TE.TaskEither<CacheError, void>;
+// Implementation (Service Layer)
+interface DataProvider<T> {
+  readonly getOne: (id: string) => Promise<T | null>;
+  // ... other methods
 }
 
-// Example usage with domain model
-const phaseCache: RedisCache<Phase> = {
-  set: (key, phase) =>
-    pipe({ value: phase, timestamp: Date.now() }, JSON.stringify, (data) =>
-      redis.set(`phase:${key}`, data),
-    ),
-  get: (key) =>
-    pipe(
-      redis.get(`phase:${key}`),
-      TE.chain((data) =>
-        data
-          ? TE.tryCatch(
-              () => JSON.parse(data).value,
-              (e) => new CacheError('Failed to parse data'),
-            )
-          : TE.of(null),
-      ),
-    ),
-  del: (key) => redis.del(`phase:${key}`),
+// Bridge (Cache Layer)
+const createDomainCache = <T>(
+  redis: RedisCache<T>,
+  dataProvider: DataProvider<T>,
+  config: CacheConfig,
+): DomainCache<T> => {
+  // Implementation connecting domain and service layers
 };
 ```
+
+Benefits:
+
+- Decouples domain abstractions from service implementations
+- Allows both sides to vary independently
+- Maintains clean architecture principles
+- Provides type-safe operations
+
+#### Mediator Pattern Aspects
+
+The cache layer also acts as a mediator:
+
+- Centralizes data flow between service and domain layers
+- Manages caching logic and data provider fallback
+- Handles transformations and error mapping
+- Reduces direct dependencies between components
 
 ### 2.3 Cache Flow
 
 ```mermaid
-flowchart LR
-    A[Domain Object] -->|JSON.stringify| B[String]
-    B -->|Store| C[Redis]
-    C -->|Retrieve| D[String]
-    D -->|JSON.parse| E[Domain Object]
+sequenceDiagram
+    participant SL as Service Layer
+    participant C as Cache Bridge
+    participant R as Redis
+    participant D as Data Provider
+    participant DL as Domain Layer
+
+    SL->>C: Request Data
+    C->>R: Check Cache
+    alt Cache Hit
+        R-->>C: Return Data
+        C-->>SL: Return Domain Model
+    else Cache Miss
+        C->>D: Fetch from Provider
+        D-->>C: Return Data
+        C->>R: Cache Data
+        C-->>SL: Return Domain Model
+    end
+    DL->>C: Define Interfaces
+```
+
+### 2.2 Cache Configuration
+
+```typescript
+interface CacheConfig {
+  dataStructure: RedisDataStructure;
+  keyPrefix: string;
+}
+
+enum RedisDataStructure {
+  STRING = 'string',
+  HASH = 'hash',
+  SORTED_SET = 'sorted_set',
+}
+
+// Domain-specific cache configuration
+const config: CacheConfig = {
+  dataStructure: RedisDataStructure.HASH,
+  keyPrefix: 'domain-prefix',
+};
 ```
 
 ## 3. Core Components
 
-### 3.1 Cache Configuration
-
-- TTL Strategy
-  - Simple time-based expiration
-  - No complex invalidation patterns
-  - Clear key prefixes per domain
-
-### 3.2 Basic Cache Operations
+### 3.1 Domain Cache Interface
 
 ```typescript
-// Simple, direct operations
-const createCache = <T>(prefix: string): RedisCache<T> => ({
-  set: (key, value) =>
-    pipe({ value, timestamp: Date.now() }, JSON.stringify, (data) =>
-      redis.set(`${prefix}:${key}`, data),
-    ),
-  get: (key) =>
-    pipe(
-      redis.get(`${prefix}:${key}`),
-      TE.chain((data) =>
-        data
-          ? TE.tryCatch(
-              () => JSON.parse(data).value,
-              (e) => new CacheError('Parse error'),
-            )
-          : TE.of(null),
-      ),
-    ),
-  del: (key) => redis.del(`${prefix}:${key}`),
-});
+interface DomainCache<T> {
+  readonly cacheItem: (item: T) => TE.TaskEither<CacheError, void>;
+  readonly getItem: (id: string) => TE.TaskEither<CacheError, T | null>;
+  readonly cacheItems: (items: readonly T[]) => TE.TaskEither<CacheError, void>;
+  readonly getAllItems: () => TE.TaskEither<CacheError, readonly T[]>;
+  readonly warmUp: () => TE.TaskEither<CacheError, void>;
+}
 ```
 
-### 3.3 Error Handling
+### 3.2 Data Provider Interface
 
 ```typescript
-type CacheError = {
-  readonly message: string;
-  readonly cause?: unknown;
-};
+interface DataProvider<T> {
+  readonly getOne: (id: string) => Promise<T | null>;
+  readonly getAll: () => Promise<readonly T[]>;
+}
+```
 
-const handleCacheError = (error: CacheError): TE.TaskEither<CacheError, never> =>
-  pipe(
-    TE.left(error),
-    TE.tap(() => TE.fromIO(logger.error({ message: error.message, error: error.cause }))),
-  );
+### 3.3 Cache Operations
+
+```typescript
+const createDomainCache = <T>(
+  redis: RedisCache<T>,
+  dataProvider: DataProvider<T>,
+  config: CacheConfig,
+): DomainCache<T> => {
+  const cacheItem = (item: T): TE.TaskEither<CacheError, void> => {
+    switch (config.dataStructure) {
+      case RedisDataStructure.HASH:
+        return redis.hSet(makeKey(), item.id.toString(), item);
+      case RedisDataStructure.SORTED_SET:
+        return redis.zAdd(makeKey(), Number(item.id), item);
+      case RedisDataStructure.STRING:
+        return redis.set(makeKey(item.id), item);
+    }
+  };
+
+  // ... other operations
+};
 ```
 
 ## 4. Implementation Guidelines
 
-### 4.1 Best Practices
+### 4.1 Data Structure Selection
 
-- Store domain models directly
-- Use simple key patterns
-- Minimize transformations
-- Handle errors gracefully
-- Clear TTL strategy
+- **Hash**: For collections with frequent individual item access
+- **Sorted Set**: For ordered collections with range queries
+- **String**: For simple key-value storage
 
 ### 4.2 Key Patterns
 
-- Simple domain prefixes: `{domain}:{id}`
-- No complex related keys
-- Clear naming conventions
+- Hash: `{domain}` for key, `{id}` for field
+- Sorted Set: `{domain}` for key, score based on id
+- String: `{domain}:{id}` for each item
 
-### 4.3 Testing Strategy
+### 4.3 Error Handling
 
-- Unit test cache operations
-- Test error handling
-- Verify serialization/deserialization
-- Monitor performance
+```typescript
+type CacheError = {
+  readonly type: CacheErrorType;
+  readonly message: string;
+};
 
-## 5. Monitoring
+enum CacheErrorType {
+  CONNECTION = 'CONNECTION',
+  OPERATION = 'OPERATION',
+}
+```
 
-### 5.1 Key Metrics
+## 5. Best Practices
 
-- Hit/miss rates
-- Error rates
-- Response times
+### 5.1 Domain Model Storage
+
+- Store domain models directly
+- Avoid persistence type transformations
+- Use consistent serialization/deserialization
+
+### 5.2 Cache Operations
+
+- Implement write-through caching
+- Provide bulk operations
+- Support cache warming
+- Handle cache misses gracefully
+
+### 5.3 Type Safety
+
+- Use generic types for domain models
+- Leverage fp-ts for functional operations
+- Ensure type-safe data structure operations
+
+## 6. Testing Strategy
+
+### 6.1 Unit Tests
+
+- Test each data structure operation
+- Verify cache miss handling
+- Test bulk operations
+- Validate error scenarios
+
+### 6.2 Integration Tests
+
+- Test with actual Redis instance
+- Verify data provider fallback
+- Test concurrent operations
+- Measure performance
+
+## 7. Monitoring
+
+### 7.1 Key Metrics
+
+- Cache hit/miss rates per data structure
+- Operation latency
 - Memory usage
-
-### 5.2 Health Checks
-
-- Connection status
-- Memory usage
 - Error rates
-- Response times
 
-## 6. Security
+### 7.2 Health Checks
+
+- Redis connection status
+- Data structure integrity
+- Memory thresholds
+- Error patterns
+
+## 8. Security
 
 - Redis authentication
-- Network security
+- Network isolation
 - Resource limits
-- Error handling
+- Error exposure control
 
-## 7. Future Considerations
+## 9. Future Considerations
 
-- Performance optimization
-- Monitoring improvements
+- Additional data structures support
+- Performance optimizations
+- Monitoring enhancements
 - Scaling strategies
-- Additional domain support
+- TTL policies per domain

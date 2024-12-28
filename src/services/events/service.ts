@@ -1,103 +1,164 @@
-import * as E from 'fp-ts/Either';
+/**
+ * Event Service Implementation Module
+ *
+ * Implements the core event service functionality with caching and data persistence.
+ * Provides high-level operations for event management in the FPL system.
+ *
+ * Features:
+ * - Integration with Bootstrap API
+ * - Cache management with warm-up
+ * - Data validation and transformation
+ * - Error handling with fp-ts
+ * - Atomic database operations
+ * - Cache consistency maintenance
+ *
+ * The service ensures data consistency across cache and database layers
+ * while providing a clean interface for event operations.
+ */
+
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { fetchBootstrapEvents } from '../../domains/bootstrap/operations';
+import type { BootstrapApi } from '../../domains/bootstrap/operations';
+import type { EventCache } from '../../domains/events/cache';
 import {
-  cacheEvent,
-  createError,
+  deleteAllEvents,
   findAllEvents,
   findCurrentEvent,
   findEventById,
   findNextEvent,
   saveBatchEvents,
-  toDomainEvent,
 } from '../../domains/events/operations';
-import type { CacheError } from '../../infrastructure/cache/types';
 import type { APIError } from '../../infrastructure/http/common/errors';
-import type { Event, EventId, PrismaEvent } from '../../types/events.type';
-import type { EventService, EventServiceDependencies } from './types';
+import { createValidationError } from '../../infrastructure/http/common/errors';
+import type { Event, EventId, EventRepository } from '../../types/events.type';
+import { toDomainEvent } from '../../types/events.type';
+import type { EventService } from './types';
 
-const convertPrismaEvents = (
-  events: readonly PrismaEvent[],
-): TE.TaskEither<APIError, readonly Event[]> =>
-  pipe(
-    events,
-    TE.traverseArray((event) =>
-      pipe(
-        E.tryCatch(
-          () => toDomainEvent(event),
-          (error) => createError('Failed to convert event', error),
-        ),
-        TE.fromEither,
-      ),
-    ),
-  );
+/**
+ * Required dependencies for event service implementation.
+ * Follows dependency injection pattern for better testability.
+ */
+export interface EventServiceDependencies {
+  readonly bootstrapApi: BootstrapApi;
+  readonly eventCache: EventCache;
+  readonly eventRepository: EventRepository;
+}
 
-const convertPrismaEvent = (event: PrismaEvent | null): TE.TaskEither<APIError, Event | null> =>
-  event
-    ? pipe(
-        E.tryCatch(
-          () => toDomainEvent(event),
-          (error) => createError('Failed to convert event', error),
-        ),
-        TE.fromEither,
-      )
-    : TE.right(null);
-
-const getCachedOrFallback = <T, R>(
-  cachedValue: TE.TaskEither<CacheError, T> | undefined,
-  fallback: TE.TaskEither<APIError, R>,
-  convert: (value: T) => TE.TaskEither<APIError, R>,
-): TE.TaskEither<APIError, R> =>
-  cachedValue
-    ? pipe(
-        cachedValue,
-        TE.mapLeft((error) => createError('Cache operation failed', error)),
-        TE.chain(convert),
-      )
-    : fallback;
-
+/**
+ * Creates an event service implementation.
+ * Implements EventService interface with provided dependencies.
+ *
+ * @param dependencies - Required service dependencies
+ * @returns Configured event service instance
+ */
 export const createEventServiceImpl = ({
   bootstrapApi,
   eventCache,
+  eventRepository,
 }: EventServiceDependencies): EventService => {
-  const syncEvents = (): TE.TaskEither<APIError, readonly Event[]> =>
+  /**
+   * Warms up the event cache.
+   * Ensures cache is populated for optimal performance.
+   */
+  const warmUp = (): TE.TaskEither<APIError, void> =>
     pipe(
-      fetchBootstrapEvents(bootstrapApi),
-      TE.mapLeft((error) => createError('Bootstrap data fetch failed', error)),
-      TE.chain((events) =>
-        pipe(
-          saveBatchEvents(events),
-          TE.chainFirst((savedEvents) =>
-            eventCache
-              ? pipe(
-                  savedEvents,
-                  TE.traverseArray((event) => cacheEvent(eventCache)(event)),
-                  TE.mapLeft((error) => createError('Failed to cache events', error)),
-                )
-              : TE.right(undefined),
-          ),
-        ),
+      eventCache.warmUp(),
+      TE.mapLeft((error) =>
+        createValidationError({ message: `Cache warm-up failed: ${error.message}` }),
       ),
     );
 
+  /**
+   * Retrieves all events from cache with database fallback.
+   */
   const getEvents = (): TE.TaskEither<APIError, readonly Event[]> =>
-    getCachedOrFallback(eventCache?.getAllEvents(), findAllEvents(), convertPrismaEvents);
+    findAllEvents(eventRepository, eventCache);
 
+  /**
+   * Retrieves a specific event by ID from cache with database fallback.
+   */
   const getEvent = (id: EventId): TE.TaskEither<APIError, Event | null> =>
-    getCachedOrFallback(eventCache?.getEvent(String(id)), findEventById(id), convertPrismaEvent);
+    findEventById(eventRepository, eventCache, id);
 
+  /**
+   * Retrieves the current active event from cache with database fallback.
+   */
   const getCurrentEvent = (): TE.TaskEither<APIError, Event | null> =>
-    getCachedOrFallback(eventCache?.getCurrentEvent(), findCurrentEvent(), convertPrismaEvent);
+    findCurrentEvent(eventRepository, eventCache);
 
+  /**
+   * Retrieves the next scheduled event from cache with database fallback.
+   */
   const getNextEvent = (): TE.TaskEither<APIError, Event | null> =>
-    getCachedOrFallback(eventCache?.getNextEvent(), findNextEvent(), convertPrismaEvent);
+    findNextEvent(eventRepository, eventCache);
+
+  /**
+   * Fetches fresh event data from the FPL API.
+   * Transforms API response to domain events.
+   */
+  const fetchFromApi = (): TE.TaskEither<APIError, readonly Event[]> =>
+    pipe(
+      TE.tryCatch(
+        () => bootstrapApi.getBootstrapData(),
+        (error) =>
+          createValidationError({ message: `Failed to fetch events from API: ${String(error)}` }),
+      ),
+      TE.map((response) => response.events.map(toDomainEvent)),
+    );
+
+  /**
+   * Validates event data and ensures required fields are present.
+   * Transforms data to ensure type safety.
+   */
+  const validateAndTransform = (
+    events: readonly Event[],
+  ): TE.TaskEither<APIError, readonly Event[]> =>
+    pipe(
+      events,
+      TE.right,
+      TE.chain((events) =>
+        events.every((event) => event.id && event.name && event.deadlineTime)
+          ? TE.right(events)
+          : TE.left(createValidationError({ message: 'Invalid event data received from API' })),
+      ),
+    );
+
+  /**
+   * Saves events to database after clearing existing data.
+   * Ensures atomic operation with proper error handling.
+   */
+  const saveToDb = (events: readonly Event[]): TE.TaskEither<APIError, readonly Event[]> =>
+    pipe(
+      deleteAllEvents(eventRepository, eventCache),
+      TE.chain(() => saveBatchEvents(eventRepository, eventCache, events)),
+      TE.mapLeft((error) =>
+        createValidationError({ message: `Failed to save events to database: ${error.message}` }),
+      ),
+    );
+
+  /**
+   * Updates the cache with new event data.
+   * Ensures cache consistency after database updates.
+   */
+  const updateCache = (events: readonly Event[]): TE.TaskEither<APIError, readonly Event[]> =>
+    pipe(
+      eventCache.warmUp(),
+      TE.chain(() => eventCache.cacheEvents(events)),
+      TE.map(() => events),
+      TE.mapLeft((error) =>
+        createValidationError({ message: `Failed to update cache: ${error.message}` }),
+      ),
+    );
 
   return {
-    syncEvents,
+    warmUp,
     getEvents,
     getEvent,
     getCurrentEvent,
     getNextEvent,
+    fetchFromApi,
+    validateAndTransform,
+    saveToDb,
+    updateCache,
   };
 };

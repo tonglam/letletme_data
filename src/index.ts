@@ -2,13 +2,16 @@ import { PrismaClient } from '@prisma/client';
 import dotenv from 'dotenv';
 import express, { NextFunction, Request, Response } from 'express';
 import * as E from 'fp-ts/Either';
+import { pipe } from 'fp-ts/function';
+import * as T from 'fp-ts/Task';
 import * as TE from 'fp-ts/TaskEither';
 import pino from 'pino';
 import expressPinoLogger from 'pino-http';
 import router from './api/routes';
+import { META_QUEUE_CONFIG } from './config/queue/queue.config';
+import { getGlobalCacheModule } from './infrastructure/cache/cache';
 import { createFPLClient } from './infrastructure/http/fpl';
 import { QUEUE_JOB_TYPES } from './infrastructure/queue';
-import { META_QUEUE_CONFIG } from './infrastructure/queue/config/queue.config';
 import { initializeServices } from './services';
 import { createMetaWorkerService } from './services/queue/meta/base/meta.worker';
 import { eventJobService } from './services/queue/meta/events.job';
@@ -65,16 +68,6 @@ app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
   next();
 });
 
-// Initialize services
-const fplClient = createFPLClient();
-initializeServices({
-  getBootstrapData: async () => {
-    const result = await fplClient.bootstrap.getBootstrapStatic();
-    if (E.isLeft(result)) throw new Error(result.left.message);
-    return result.right;
-  },
-});
-
 // Routes
 app.get('/', (req: Request, res: Response) => {
   res.send('Hello, Let let me data!');
@@ -83,17 +76,39 @@ app.get('/', (req: Request, res: Response) => {
 // Register routes
 app.use('/api', router);
 
-let server: ReturnType<typeof app.listen> | null = null;
+// Initialize services
+const fplClient = createFPLClient();
 
-// Start server function
+// Initialize cache and services
 const startServer = async (customPort?: number) => {
   const serverPort = customPort || port;
   try {
+    // Initialize cache module
+    await pipe(
+      getGlobalCacheModule().initialize(),
+      TE.fold(
+        (error) => {
+          logger.error({ error }, 'Failed to initialize cache module');
+          throw error;
+        },
+        () => T.of(undefined),
+      ),
+    )();
+
+    // Initialize services after cache is ready
+    initializeServices({
+      getBootstrapData: async () => {
+        const result = await fplClient.bootstrap.getBootstrapStatic();
+        if (E.isLeft(result)) throw new Error(result.left.message);
+        return result.right;
+      },
+    });
+
     // Connect to the database
     await prisma.$connect();
     logger.info('Connected to database successfully');
 
-    server = app.listen(serverPort, () => {
+    const server = app.listen(serverPort, () => {
       logger.info(`Server is listening at http://localhost:${serverPort}`);
     });
 
@@ -111,50 +126,30 @@ const startServer = async (customPort?: number) => {
   }
 };
 
-// Stop server function
-const stopServer = async () => {
-  if (server) {
-    try {
-      await new Promise<void>((resolve, reject) => {
-        server?.close((err) => {
-          if (err) reject(err);
-          else resolve();
-        });
-      });
-      server = null;
-      // Disconnect from the database
-      await prisma.$disconnect();
-      logger.info('Server stopped and disconnected from database successfully');
-    } catch (error) {
-      logger.error({ error }, 'Failed to stop server');
-      throw error;
+// Graceful shutdown
+const stopServer = async (server?: ReturnType<typeof app.listen>) => {
+  try {
+    if (server) {
+      await new Promise((resolve) => server.close(resolve));
+      logger.info('HTTP server closed');
     }
+
+    // Shutdown cache
+    await pipe(
+      getGlobalCacheModule().shutdown(),
+      TE.fold(
+        (error) => T.of(Promise.reject(error)),
+        () => T.of(undefined),
+      ),
+    )();
+
+    // Disconnect from database
+    await prisma.$disconnect();
+    logger.info('Disconnected from database');
+  } catch (error) {
+    logger.error({ error }, 'Error during shutdown');
+    throw error;
   }
 };
-
-// Only start server if this file is run directly
-if (require.main === module) {
-  void startServer().catch((error) => {
-    logger.error({ error }, 'Failed to start server');
-    process.exit(1);
-  });
-}
-
-// Handle process termination
-process.on('SIGTERM', () => {
-  logger.info('SIGTERM received. Shutting down gracefully');
-  void stopServer().catch((error) => {
-    logger.error({ error }, 'Failed to stop server gracefully');
-    process.exit(1);
-  });
-});
-
-process.on('SIGINT', () => {
-  logger.info('SIGINT received. Shutting down gracefully');
-  void stopServer().catch((error) => {
-    logger.error({ error }, 'Failed to stop server gracefully');
-    process.exit(1);
-  });
-});
 
 export { app, logger, prisma, startServer, stopServer };

@@ -3,7 +3,7 @@ import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import type { ServiceContainer } from '../../services';
 import { EventId } from '../../types/events.type';
-import { logApiError, logApiRequest } from '../../utils/logger';
+import { logApiError, logApiRequest } from '../../utils/logger.util';
 import { formatErrorResponse, formatResponse } from '../responses';
 import { ApiRequest } from '../types';
 

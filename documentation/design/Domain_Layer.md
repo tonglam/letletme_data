@@ -50,15 +50,18 @@ FP principles are core to our implementation:
 
 ## Domain Structure
 
-Each domain follows a consistent four-file structure:
+Each domain follows a consistent three-file structure:
 
 ### 1. Operations (operations.ts)
 
 ```typescript
-// Pure business logic functions
+// High-level domain operations
+// Combines repository and cache operations
+// Handles domain-level validations
+// Example:
 export const saveEvent = (event: DomainEvent): TE.TaskEither<APIError, DomainEvent> =>
   pipe(
-    eventRepository.save(single.fromDomain(event)),
+    createEvent(eventRepository, single.fromDomain(event)),
     TE.map(single.toDomain),
     TE.chain((result) =>
       result
@@ -68,26 +71,16 @@ export const saveEvent = (event: DomainEvent): TE.TaskEither<APIError, DomainEve
   );
 ```
 
-### 2. Repository (repository.ts)
-
-```typescript
-// Data access layer with explicit error handling
-export const eventRepository: EventRepository = {
-  save: (event: PrismaEventCreate): TE.TaskEither<APIError, PrismaEvent> =>
-    TE.tryCatch(
-      () => prisma.event.create({ data: event }),
-      (error) => createDatabaseError({ message: 'Failed to save event', details: { error } }),
-    ),
-};
-```
-
-### 3. Queries (queries.ts)
+### 2. Queries (queries.ts)
 
 ```typescript
 // Business query operations
+// Handles data access validation
+// Provides a clean interface to repository operations
+// Example:
 export const getEventById = (
   repository: EventRepository,
-  id: number,
+  id: string,
 ): TE.TaskEither<APIError, PrismaEvent | null> =>
   pipe(
     validateEventId(id),
@@ -97,13 +90,28 @@ export const getEventById = (
   );
 ```
 
-### 4. Types (types.ts)
+### 3. Repository (repository.ts)
 
 ```typescript
-// Domain types and validations
-export type EventId = number & { readonly _brand: unique symbol };
-export const validateEventId = (id: number): E.Either<string, EventId> =>
-  id > 0 ? E.right(id as EventId) : E.left(`Invalid event ID: ${id}`);
+// Data access layer with explicit error handling
+// Direct database operations
+// No business logic
+// Example:
+export const eventRepository: EventRepository = {
+  save: (event: PrismaEventCreate): TE.TaskEither<APIError, PrismaEvent> =>
+    TE.tryCatch(
+      () => prisma.event.create({ data: event }),
+      (error) => createDatabaseError({ message: 'Failed to save event', details: { error } }),
+    ),
+};
+```
+
+### 4. Cache (cache.ts) [Optional]
+
+```typescript
+// Cache operations for the domain
+// Handles caching strategy
+// Provides fallback mechanisms
 ```
 
 ## Implementation Guidelines

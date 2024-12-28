@@ -1,5 +1,5 @@
 import { Request, Response } from 'express';
-import { logApiError } from '../../utils/logger';
+import { logApiError } from '../../utils/logger.util';
 import { formatErrorResponse } from '../responses';
 
 interface ErrorWithStatus extends Error {

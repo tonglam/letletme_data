@@ -133,3 +133,7 @@ export const isErrorResponse = (error: unknown): error is ErrorResponse => {
     (correlationId === undefined || typeof correlationId === 'string')
   );
 };
+
+// Common error handlers
+export const handleCacheError = (error: unknown): APIError =>
+  createValidationError({ message: String(error) });

@@ -1,6 +1,6 @@
 import * as path from 'path';
 import { Logger, pino } from 'pino';
-import { formatLocalTime } from '../../utils/date';
+import { formatLocalTime } from '../../utils/date.util';
 
 export type LogLevel = 'error' | 'warn' | 'info' | 'debug';
 
@@ -42,5 +42,6 @@ export const LOG_CONFIG = {
     api: { name: 'api' },
     fpl: { name: 'fpl' },
     queue: { name: 'queue' },
+    workflow: { name: 'workflow' },
   },
 } as const;

@@ -4,7 +4,7 @@ import { pipe } from 'fp-ts/function';
 import type { ServiceContainer } from '../../services';
 import { PlayerId } from '../../types/players.type';
 import { TeamId } from '../../types/teams.type';
-import { logApiError, logApiRequest } from '../../utils/logger';
+import { logApiError, logApiRequest } from '../../utils/logger.util';
 import { formatErrorResponse, formatResponse } from '../responses';
 import { ApiRequest } from '../types';
 

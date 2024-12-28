@@ -1,10 +1,12 @@
 import { ElementType, PrismaClient, ValueChangeType } from '@prisma/client';
 import * as E from 'fp-ts/Either';
+import * as O from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
 import { z } from 'zod';
-import { CacheError, convertTaskEither } from '../infrastructure/cache/types';
-import { APIError } from '../infrastructure/http/common/errors';
+import { AppConfig } from '../config/app/app.config';
+import { CacheError } from '../infrastructure/cache/types';
+import { APIError, createValidationError } from '../infrastructure/http/common/errors';
 
 // ============ Constants ============
 export const ELEMENT_STATUS = {
@@ -81,7 +83,11 @@ export const getCachedOrFallbackMany = <T, P>(
   converter: (items: readonly P[]) => TE.TaskEither<APIError, readonly T[]>,
 ): TE.TaskEither<APIError, readonly T[]> =>
   cachedValue
-    ? pipe(cachedValue, convertTaskEither, TE.chain(converter))
+    ? pipe(
+        cachedValue,
+        TE.mapLeft((error) => createValidationError({ message: error.message })),
+        TE.chain(converter),
+      )
     : pipe(fallback, TE.chain(converter));
 
 export const getCachedOrFallbackOne = <T, P>(
@@ -90,7 +96,11 @@ export const getCachedOrFallbackOne = <T, P>(
   converter: (item: P | null) => TE.TaskEither<APIError, T | null>,
 ): TE.TaskEither<APIError, T | null> =>
   cachedValue
-    ? pipe(cachedValue, convertTaskEither, TE.chain(converter))
+    ? pipe(
+        cachedValue,
+        TE.mapLeft((error) => createValidationError({ message: error.message })),
+        TE.chain(converter),
+      )
     : pipe(fallback, TE.chain(converter));
 
 /**
@@ -100,3 +110,34 @@ export const isApiResponse = <T extends object, K extends string>(
   data: T,
   snakeCaseKey: K,
 ): data is T & Record<K, unknown> => snakeCaseKey in data;
+
+/**
+ * Global Season enum for FPL seasons
+ */
+export enum Season {
+  Season_1617 = '1617',
+  Season_1718 = '1718',
+  Season_1819 = '1819',
+  Season_1920 = '1920',
+  Season_2021 = '2021',
+  Season_2122 = '2122',
+  Season_2223 = '2223',
+  Season_2324 = '2324',
+  Season_2425 = '2425',
+}
+
+/**
+ * Get the current FPL season
+ * @returns The current season value from config or the latest season from enum
+ */
+export const getCurrentSeason = (): Season =>
+  pipe(
+    O.fromNullable(AppConfig.currentSeason),
+    O.getOrElse(() => getAllSeasons().slice(-1)[0]),
+  );
+
+/**
+ * Get all available seasons
+ * @returns Array of all seasons in chronological order
+ */
+export const getAllSeasons = (): Season[] => Object.values(Season);
