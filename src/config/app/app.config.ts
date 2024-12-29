@@ -1,4 +1,4 @@
-import { getCurrentSeason } from '../../types/base.type';
+import { getCurrentSeason } from '../../types/domain/base.type';
 
 /**
  * Application-wide configuration
