@@ -4,37 +4,7 @@
  */
 
 import * as TE from 'fp-ts/TaskEither';
-
-/**
- * Cache Error Types
- *
- * Defines error types and configurations for cache operations.
- * Provides type-safe error handling for Redis operations.
- */
-
-/**
- * Cache error types for different operation failures
- */
-export enum CacheErrorType {
-  CONNECTION = 'CONNECTION',
-  SET = 'SET',
-  GET = 'GET',
-  DELETE = 'DELETE',
-  EXISTS = 'EXISTS',
-  TTL = 'TTL',
-  SERIALIZATION = 'SERIALIZATION',
-  DESERIALIZATION = 'DESERIALIZATION',
-  OPERATION = 'OPERATION',
-}
-
-/**
- * Cache error structure for operation failures
- */
-export interface CacheError {
-  type: CacheErrorType;
-  message: string;
-  cause?: unknown;
-}
+import type { CacheError } from '../../types/errors.type';
 
 /**
  * Redis connection configuration

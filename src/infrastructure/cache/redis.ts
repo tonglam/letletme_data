@@ -6,8 +6,9 @@
 
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
+import { CacheError } from '../../types/errors.type';
+import { createCacheOperationError } from '../../utils/error.util';
 import { redisClient } from './client';
-import { CacheError, CacheErrorType } from './types';
 
 // Redis cache interface for type-safe operations
 export interface RedisCache<T> {
@@ -37,25 +38,21 @@ export const createRedisCache = <T>(config: RedisCacheConfig = {}): RedisCache<T
           const cacheKey = makeKey(key);
           const ttlValue = ttl ?? config.defaultTTL;
           if (ttlValue) {
-            await redisClient.setEx(cacheKey, ttlValue, serialized);
+            await redisClient.setex(cacheKey, ttlValue, serialized);
           } else {
             await redisClient.set(cacheKey, serialized);
           }
         },
-        (error): CacheError => ({
-          type: CacheErrorType.SET,
-          message: `Failed to set cache key ${key}: ${error}`,
-        }),
+        (error) =>
+          createCacheOperationError({ message: `Failed to set cache key ${key}`, cause: error }),
       ),
 
     get: (key: string) =>
       pipe(
         TE.tryCatch(
           () => redisClient.get(makeKey(key)),
-          (error): CacheError => ({
-            type: CacheErrorType.GET,
-            message: `Failed to get cache key ${key}: ${error}`,
-          }),
+          (error) =>
+            createCacheOperationError({ message: `Failed to get cache key ${key}`, cause: error }),
         ),
         TE.map((value) => (value ? (JSON.parse(value) as T) : null)),
       ),
@@ -66,20 +63,22 @@ export const createRedisCache = <T>(config: RedisCacheConfig = {}): RedisCache<T
           const serialized = JSON.stringify(value);
           await redisClient.set(makeHashKey(key, field), serialized);
         },
-        (error): CacheError => ({
-          type: CacheErrorType.SET,
-          message: `Failed to set hash field ${field} for key ${key}: ${error}`,
-        }),
+        (error) =>
+          createCacheOperationError({
+            message: `Failed to set hash field ${field} for key ${key}`,
+            cause: error,
+          }),
       ),
 
     hGet: (key: string, field: string) =>
       pipe(
         TE.tryCatch(
           () => redisClient.get(makeHashKey(key, field)),
-          (error): CacheError => ({
-            type: CacheErrorType.GET,
-            message: `Failed to get hash field ${field} for key ${key}: ${error}`,
-          }),
+          (error) =>
+            createCacheOperationError({
+              message: `Failed to get hash field ${field} for key ${key}`,
+              cause: error,
+            }),
         ),
         TE.map((value) => (value ? (JSON.parse(value) as T) : null)),
       ),
@@ -100,10 +99,11 @@ export const createRedisCache = <T>(config: RedisCacheConfig = {}): RedisCache<T
               return acc;
             }, {});
           },
-          (error): CacheError => ({
-            type: CacheErrorType.GET,
-            message: `Failed to get all hash fields for key ${key}: ${error}`,
-          }),
+          (error) =>
+            createCacheOperationError({
+              message: `Failed to get all hash fields for key ${key}`,
+              cause: error,
+            }),
         ),
       ),
   };

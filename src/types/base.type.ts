@@ -3,15 +3,14 @@
  * Includes branded types, base interfaces, and common type utilities.
  */
 
-import { ElementType, PrismaClient, ValueChangeType } from '@prisma/client';
+import { ElementType, ValueChangeType } from '@prisma/client';
 import * as E from 'fp-ts/Either';
 import * as O from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
 import { z } from 'zod';
 import { AppConfig } from '../config/app/app.config';
-import { CacheError } from '../infrastructure/cache/types';
-import { APIError, createValidationError } from './errors.type';
+import { APIError, CacheError, DBError, createValidationError } from './errors.type';
 
 // ============ Constants ============
 /**
@@ -82,18 +81,16 @@ export const createBrandedType = <T, K extends string>(
 
 // Base Repository Interface
 /**
- * Base repository interface for data access operations
+ * Base repository interface
+ * All repository operations return DBError for database-related errors
  */
-export interface BaseRepository<T, TCreate, TId> {
-  prisma: PrismaClient;
-  findById(id: TId): TE.TaskEither<APIError, T | null>;
-  findAll(): TE.TaskEither<APIError, T[]>;
-  save(data: Omit<TCreate, 'id'>): TE.TaskEither<APIError, T>;
-  saveBatch(data: Omit<TCreate, 'id'>[]): TE.TaskEither<APIError, T[]>;
-  update(id: TId, data: Partial<Omit<TCreate, 'id'>>): TE.TaskEither<APIError, T>;
-  deleteAll(): TE.TaskEither<APIError, void>;
-  findByIds(ids: TId[]): TE.TaskEither<APIError, T[]>;
-  deleteByIds(ids: TId[]): TE.TaskEither<APIError, void>;
+export interface BaseRepository<T, CreateT, IdT> {
+  readonly findAll: () => TE.TaskEither<DBError, T[]>;
+  readonly findById: (id: IdT) => TE.TaskEither<DBError, T | null>;
+  readonly save: (data: CreateT) => TE.TaskEither<DBError, T>;
+  readonly saveBatch: (data: CreateT[]) => TE.TaskEither<DBError, T[]>;
+  readonly deleteAll: () => TE.TaskEither<DBError, void>;
+  readonly deleteByIds: (ids: IdT[]) => TE.TaskEither<DBError, void>;
 }
 
 // Schema Validation Helper

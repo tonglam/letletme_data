@@ -1,120 +1,130 @@
-# Domain Layer Implementation Guide
+# Domain Layer Design
 
 ## Overview
 
-The domain layer represents the core business logic of our FPL data service. Following Domain-Driven Design (DDD) principles and Functional Programming (FP) patterns, each domain is self-contained and implements pure business logic with explicit error handling.
+The domain layer is the core of our application, implementing business logic using Domain-Driven Design (DDD) principles and Functional Programming (FP) patterns. This document outlines the high-level architecture and design decisions.
 
-## Core Design Philosophy
+## Architecture
 
-### Domain-Driven Design Choice
+```mermaid
+graph TD
+    A[API Layer] --> B[Domain Layer]
+    B --> C[Infrastructure Layer]
+    B --> D[Repository Layer]
+    B --> E[Cache Layer]
+    D --> F[Database]
+    E --> G[Cache]
 
-The choice of DDD stems from the inherent complexity of FPL data management:
+    subgraph Domain Layer
+        H[Domain Operations]
+        I[Domain Types]
+        J[Domain Logic]
+        K[Domain Events]
 
-1. **Complex Domain Logic**
-
-   - Intricate business rules around game weeks, player values, and team management
-   - DDD helps model these complexities explicitly
-   - Makes the system more maintainable and adaptable to changes
-
-2. **Natural Domain Boundaries**
-
-   - FPL naturally divides into distinct domains (events, teams, players, entries)
-   - Each domain has its own lifecycle and rules
-   - DDD's bounded contexts map perfectly to these divisions
-
-3. **Data Evolution Management**
-   - FPL data constantly evolves throughout the season
-   - Domain models help manage this evolution
-   - Maintains data consistency and historical tracking
-
-### Functional Programming Integration
-
-FP principles are core to our implementation:
-
-1. **TaskEither for Error Handling**
-
-   - All operations return TaskEither for explicit error handling
-   - Clear separation between success and failure paths
-   - Composable error handling with fp-ts
-
-2. **Pure Functions**
-
-   - Business logic implemented as pure functions
-   - Operations are side-effect free
-   - Easier to test and maintain
-
-3. **Type Safety**
-   - Branded types for domain identifiers
-   - Strict validation at domain boundaries
-   - No implicit type coercion
-
-## Domain Structure
-
-Each domain follows a consistent three-file structure:
-
-### 1. Operations (operations.ts)
-
-```typescript
-// High-level domain operations
-// Combines repository and cache operations
-// Handles domain-level validations
-// Example:
-export const saveEvent = (event: DomainEvent): TE.TaskEither<APIError, DomainEvent> =>
-  pipe(
-    createEvent(eventRepository, single.fromDomain(event)),
-    TE.map(single.toDomain),
-    TE.chain((result) =>
-      result
-        ? TE.right(result)
-        : TE.left(createValidationError({ message: 'Failed to save event' })),
-    ),
-  );
+        H --> I
+        H --> J
+        J --> K
+    end
 ```
 
-### 2. Queries (queries.ts)
+## Domain Layer Structure
 
-```typescript
-// Business query operations
-// Handles data access validation
-// Provides a clean interface to repository operations
-// Example:
-export const getEventById = (
-  repository: EventRepository,
-  id: string,
-): TE.TaskEither<APIError, PrismaEvent | null> =>
-  pipe(
-    validateEventId(id),
-    E.mapLeft((message) => createValidationError({ message })),
-    TE.fromEither,
-    TE.chain(repository.findById),
-  );
+```mermaid
+graph LR
+    A[Domain Operations] --> B[Cache Layer]
+    A --> C[Repository Layer]
+    A --> D[Infrastructure Layer]
+    B --> E[Cache Store]
+    C --> F[Database]
+
+    subgraph Domain Core
+        G[Domain Types]
+        H[Business Rules]
+        I[Value Objects]
+        J[Domain Events]
+
+        G --> H
+        H --> I
+        I --> J
+    end
 ```
 
-### 3. Repository (repository.ts)
+## Design Principles
 
-```typescript
-// Data access layer with explicit error handling
-// Direct database operations
-// No business logic
-// Example:
-export const eventRepository: EventRepository = {
-  save: (event: PrismaEventCreate): TE.TaskEither<APIError, PrismaEvent> =>
-    TE.tryCatch(
-      () => prisma.event.create({ data: event }),
-      (error) => createDatabaseError({ message: 'Failed to save event', details: { error } }),
-    ),
-};
+### 1. Domain-Driven Design
+
+- **Bounded Contexts**: Each domain is self-contained with clear boundaries
+- **Ubiquitous Language**: Consistent terminology throughout the codebase
+- **Value Objects**: Immutable domain objects with identity
+- **Domain Events**: State changes represented as events
+
+### 2. Functional Programming
+
+- **Pure Functions**: No side effects in core business logic
+- **Immutability**: All state changes create new objects
+- **Type Safety**: Strong typing with branded types
+- **Error Handling**: Explicit error handling with TaskEither
+
+### 3. Layered Architecture
+
+```mermaid
+graph TD
+    A[API Layer] --> B[Domain Layer]
+    B --> C[Infrastructure Layer]
+
+    subgraph Domain Layer
+        D[Operations]
+        E[Repository]
+        F[Cache]
+        G[Types]
+
+        D --> E
+        D --> F
+        D --> G
+    end
 ```
 
-### 4. Cache (cache.ts) [Optional]
+## Data Flow
 
-```typescript
-// Cache operations for the domain
-// Handles caching strategy
-// Provides fallback mechanisms
+```mermaid
+sequenceDiagram
+    participant A as API Layer
+    participant O as Domain Operations
+    participant C as Cache Layer
+    participant R as Repository Layer
+    participant D as Database
+
+    A->>O: Request Data
+    O->>C: Check Cache
+    alt Cache Hit
+        C-->>O: Return Cached Data
+    else Cache Miss
+        O->>R: Fetch Data
+        R->>D: Query Database
+        D-->>R: Return Data
+        R-->>O: Transform Data
+        O->>C: Update Cache
+    end
+    O-->>A: Return Domain Model
 ```
 
-## Implementation Guidelines
+## Domain Organization
+
+### 1. Core Components
+
+- **Domain Types**: Core business models and types
+- **Domain Operations**: Business logic implementation
+- **Repository Layer**: Data access abstraction
+- **Cache Layer**: Performance optimization
+
+### 2. Cross-Cutting Concerns
+
+- **Error Handling**: Consistent error types and handling
+- **Validation**: Input validation and business rules
+- **Type Safety**: Branded types and type guards
+- **Performance**: Caching and optimization strategies
+
+## Implementation Strategy
 
 ### 1. Domain Isolation
 
@@ -137,30 +147,53 @@ export const eventRepository: EventRepository = {
 - Consistent error creation patterns
 - Error transformation at boundaries
 
+## Performance Considerations
+
+### 1. Caching Strategy
+
+```mermaid
+graph TD
+    A[Request] --> B{Cache?}
+    B -- Yes --> C[Return Cached]
+    B -- No --> D[Fetch Data]
+    D --> E[Update Cache]
+    E --> F[Return Data]
+```
+
+### 2. Data Access Patterns
+
+- Cache-first architecture
+- Batch operations for bulk data
+- Optimized database queries
+- Connection pooling
+
 ## Testing Strategy
 
-### 1. Unit Tests
+### 1. Test Pyramid
 
-- Pure operations testing
-- Error handling scenarios
-- Type validation
-- Business rule verification
+```mermaid
+graph TD
+    A[E2E Tests] --> B[Integration Tests]
+    B --> C[Unit Tests]
 
-### 2. Integration Tests
+    subgraph Test Coverage
+        D[Domain Logic]
+        E[Repository Layer]
+        F[Cache Layer]
 
-- Repository operations
-- Database interactions
-- Error propagation
-- Transaction handling
+        D --> E
+        E --> F
+    end
+```
 
-### 3. Property Tests
+### 2. Test Types
 
-- Input validation
-- Business rule invariants
-- Error conditions
-- Edge cases
+- Unit tests for pure functions
+- Integration tests for repositories
+- E2E tests for domain operations
+- Property-based tests for validation
 
-## Best Practices
+## Maintenance and Evolution
 
 ### 1. Code Organization
 
@@ -169,16 +202,16 @@ export const eventRepository: EventRepository = {
 - Explicit dependencies
 - Functional composition
 
-### 2. Performance
+### 2. Documentation
 
-- Efficient data access patterns
-- Transaction management
-- Error handling optimization
-- Type-safe transformations
+- API documentation
+- Domain model documentation
+- Implementation guides
+- Architecture decision records
 
-### 3. Maintainability
+### 3. Monitoring
 
-- Pure functions
-- Explicit error handling
-- Clear type boundaries
-- Comprehensive documentation
+- Performance metrics
+- Error tracking
+- Cache hit rates
+- Database performance

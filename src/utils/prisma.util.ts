@@ -6,7 +6,10 @@ import { Prisma } from '@prisma/client';
 import * as E from 'fp-ts/Either';
 import * as O from 'fp-ts/Option';
 import { pipe } from 'fp-ts/function';
-import { APIError, createValidationError } from '../types/errors.type';
+import { APIErrorCode, DBError, DBErrorCode } from '../types/errors.type';
+import { createDatabaseValidationError } from './error.util';
+
+// ============ Prisma Data Transformations ============
 
 // Converts numeric fields to Prisma.Decimal
 // Transforms numeric values in an object to Prisma-compatible decimal format
@@ -73,13 +76,15 @@ export const parseJsonObject = <T>(
     O.fold(() => null, parser),
   );
 
-// Validates a Prisma entity
-// Ensures required fields are present in the entity
+/**
+ * Validates a Prisma entity
+ * Ensures required fields are present in the entity
+ */
 export const ensurePrismaEntity = <T>(
   data: unknown,
   requiredFields: readonly (keyof T)[],
   entityName: string,
-): E.Either<APIError, T> =>
+): E.Either<DBError, T> =>
   pipe(
     data,
     O.fromPredicate(
@@ -95,7 +100,7 @@ export const ensurePrismaEntity = <T>(
           (d) => requiredFields.filter((f) => !(f in d)),
         ),
       );
-      return createValidationError({
+      return createDatabaseValidationError({
         message: `Invalid ${entityName} object`,
         details: { missingFields },
       });
@@ -103,18 +108,22 @@ export const ensurePrismaEntity = <T>(
     E.map((d) => d as T),
   );
 
-// Validates an array of Prisma entities
-// Ensures all items in array are valid entities
+/**
+ * Validates an array of Prisma entities
+ * Ensures all items in array are valid entities
+ */
 export const ensurePrismaEntityArray = <T>(
   data: unknown,
   requiredFields: readonly (keyof T)[],
   entityName: string,
-): E.Either<APIError, T[]> =>
+): E.Either<DBError, T[]> =>
   pipe(
     data,
     O.fromPredicate(Array.isArray),
     E.fromOption(() =>
-      createValidationError({ message: `Expected array of ${entityName} objects` }),
+      createDatabaseValidationError({
+        message: `Expected array of ${entityName} objects`,
+      }),
     ),
     E.chain((arr) =>
       pipe(
@@ -122,7 +131,7 @@ export const ensurePrismaEntityArray = <T>(
         E.traverseArray((item) => ensurePrismaEntity<T>(item, requiredFields, entityName)),
         E.map((items) => [...items]),
         E.mapLeft((errors) =>
-          createValidationError({
+          createDatabaseValidationError({
             message: `Invalid ${entityName} array`,
             details: { errors },
           }),
@@ -130,3 +139,47 @@ export const ensurePrismaEntityArray = <T>(
       ),
     ),
   );
+
+// ============ Database Error Handling ============
+
+/**
+ * Maps database error codes to API error codes
+ */
+export const dbErrorToApiErrorCode: Record<DBErrorCode, APIErrorCode> = {
+  [DBErrorCode.CONNECTION_ERROR]: APIErrorCode.SERVICE_ERROR,
+  [DBErrorCode.OPERATION_ERROR]: APIErrorCode.INTERNAL_SERVER_ERROR,
+  [DBErrorCode.VALIDATION_ERROR]: APIErrorCode.VALIDATION_ERROR,
+  [DBErrorCode.TRANSFORMATION_ERROR]: APIErrorCode.BAD_REQUEST,
+};
+
+/**
+ * Type guard for DBError
+ */
+export const isDBError = (error: unknown): error is DBError =>
+  typeof error === 'object' &&
+  error !== null &&
+  'code' in error &&
+  Object.values(DBErrorCode).includes((error as DBError).code);
+
+type TransformedType<T, K extends keyof T> = Omit<T, K> &
+  Record<K, Prisma.InputJsonValue | Prisma.NullableJsonNullValueInput | undefined>;
+
+/**
+ * Transforms JSON fields in a domain model to Prisma-compatible nullable JSON format
+ * @param data The domain model data
+ * @param jsonFields Array of field names that should be transformed to nullable JSON
+ * @returns A new object with transformed JSON fields
+ */
+export const transformJsonFields = <T extends object, K extends keyof T>(
+  data: T,
+  jsonFields: K[],
+): TransformedType<T, K> =>
+  ({
+    ...data,
+    ...Object.fromEntries(
+      jsonFields.map((field) => [
+        field,
+        data[field] ? (data[field] as Prisma.InputJsonValue) : Prisma.JsonNull,
+      ]),
+    ),
+  }) as TransformedType<T, K>;

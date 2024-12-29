@@ -6,7 +6,7 @@
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
 import { prisma } from '../../infrastructure/db/prisma';
-import { APIError, APIErrorCode, createAPIError } from '../../types/errors.type';
+import { DBError } from '../../types/errors.type';
 import {
   EventId,
   EventRepository,
@@ -14,126 +14,100 @@ import {
   PrismaEventCreate,
   PrismaEventUpdate,
 } from '../../types/events.type';
-import { toNullableJson } from '../../utils/prisma.util';
+import { handlePrismaError } from '../../utils/error.util';
+import { transformJsonFields } from '../../utils/prisma.util';
 
-// Creates a database error
-const createDatabaseError = (error: unknown): APIError =>
-  createAPIError({
-    code: APIErrorCode.INTERNAL_SERVER_ERROR,
-    message: 'Database operation failed',
-    details: error,
-  });
+const JSON_FIELDS: Array<keyof Pick<PrismaEventCreate, 'chipPlays' | 'topElementInfo'>> = [
+  'chipPlays',
+  'topElementInfo',
+];
 
 // Event repository implementation
 export const eventRepository: EventRepository = {
-  prisma,
+  findAll: (): TE.TaskEither<DBError, PrismaEvent[]> =>
+    pipe(TE.tryCatch(() => prisma.event.findMany(), handlePrismaError)),
 
-  findAll: (): TE.TaskEither<APIError, PrismaEvent[]> =>
-    pipe(TE.tryCatch(() => prisma.event.findMany(), createDatabaseError)),
+  findById: (id: EventId): TE.TaskEither<DBError, PrismaEvent | null> =>
+    pipe(TE.tryCatch(() => prisma.event.findUnique({ where: { id } }), handlePrismaError)),
 
-  findById: (id: EventId): TE.TaskEither<APIError, PrismaEvent | null> =>
-    pipe(
-      TE.tryCatch(
-        () => prisma.event.findUnique({ where: { id: Number(id) } }),
-        createDatabaseError,
-      ),
-    ),
-
-  findByIds: (ids: EventId[]): TE.TaskEither<APIError, PrismaEvent[]> =>
+  findByIds: (ids: EventId[]): TE.TaskEither<DBError, PrismaEvent[]> =>
     pipe(
       TE.tryCatch(
         () =>
           prisma.event.findMany({
-            where: { id: { in: ids.map((id) => Number(id)) } },
+            where: { id: { in: ids } },
           }),
-        createDatabaseError,
+        handlePrismaError,
       ),
     ),
 
-  findCurrent: (): TE.TaskEither<APIError, PrismaEvent | null> =>
+  findCurrent: (): TE.TaskEither<DBError, PrismaEvent | null> =>
     pipe(
-      TE.tryCatch(
-        () => prisma.event.findFirst({ where: { isCurrent: true } }),
-        createDatabaseError,
-      ),
+      TE.tryCatch(() => prisma.event.findFirst({ where: { isCurrent: true } }), handlePrismaError),
     ),
 
-  findNext: (): TE.TaskEither<APIError, PrismaEvent | null> =>
-    pipe(
-      TE.tryCatch(() => prisma.event.findFirst({ where: { isNext: true } }), createDatabaseError),
-    ),
+  findNext: (): TE.TaskEither<DBError, PrismaEvent | null> =>
+    pipe(TE.tryCatch(() => prisma.event.findFirst({ where: { isNext: true } }), handlePrismaError)),
 
-  save: (event: PrismaEventCreate): TE.TaskEither<APIError, PrismaEvent> =>
+  save: (event: PrismaEventCreate): TE.TaskEither<DBError, PrismaEvent> =>
     pipe(
       TE.tryCatch(
         () =>
           prisma.event.create({
-            data: {
-              ...event,
-              chipPlays: toNullableJson(event.chipPlays),
-              topElementInfo: toNullableJson(event.topElementInfo),
-            },
+            data: transformJsonFields(event, JSON_FIELDS),
           }),
-        createDatabaseError,
+        handlePrismaError,
       ),
     ),
 
-  saveBatch: (events: PrismaEventCreate[]): TE.TaskEither<APIError, PrismaEvent[]> =>
+  saveBatch: (events: PrismaEventCreate[]): TE.TaskEither<DBError, PrismaEvent[]> =>
     pipe(
       TE.tryCatch(
         () =>
           prisma.event.createMany({
-            data: events.map((event) => ({
-              ...event,
-              chipPlays: toNullableJson(event.chipPlays),
-              topElementInfo: toNullableJson(event.topElementInfo),
-            })),
+            data: events.map((event) => transformJsonFields(event, JSON_FIELDS)),
           }),
-        createDatabaseError,
+        handlePrismaError,
       ),
       TE.chain(() =>
         pipe(
           TE.tryCatch(
             () =>
               prisma.event.findMany({
-                where: { id: { in: events.map((e) => Number(e.id)) } },
+                where: { id: { in: events.map((e) => e.id) } },
               }),
-            createDatabaseError,
+            handlePrismaError,
           ),
         ),
       ),
     ),
 
-  update: (id: EventId, event: PrismaEventUpdate): TE.TaskEither<APIError, PrismaEvent> =>
+  update: (id: EventId, event: PrismaEventUpdate): TE.TaskEither<DBError, PrismaEvent> =>
     pipe(
       TE.tryCatch(
         () =>
           prisma.event.update({
-            where: { id: Number(id) },
-            data: {
-              ...event,
-              chipPlays: toNullableJson(event.chipPlays),
-              topElementInfo: toNullableJson(event.topElementInfo),
-            },
+            where: { id },
+            data: transformJsonFields(event, JSON_FIELDS),
           }),
-        createDatabaseError,
+        handlePrismaError,
       ),
     ),
 
-  deleteAll: (): TE.TaskEither<APIError, void> =>
+  deleteAll: (): TE.TaskEither<DBError, void> =>
     pipe(
-      TE.tryCatch(() => prisma.event.deleteMany(), createDatabaseError),
+      TE.tryCatch(() => prisma.event.deleteMany(), handlePrismaError),
       TE.map(() => undefined),
     ),
 
-  deleteByIds: (ids: EventId[]): TE.TaskEither<APIError, void> =>
+  deleteByIds: (ids: EventId[]): TE.TaskEither<DBError, void> =>
     pipe(
       TE.tryCatch(
         () =>
           prisma.event.deleteMany({
-            where: { id: { in: ids.map((id) => Number(id)) } },
+            where: { id: { in: ids } },
           }),
-        createDatabaseError,
+        handlePrismaError,
       ),
       TE.map(() => undefined),
     ),

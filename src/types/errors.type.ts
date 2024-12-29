@@ -30,8 +30,14 @@ export type DBErrorCode = (typeof DBErrorCode)[keyof typeof DBErrorCode];
 // Cache error codes
 export const CacheErrorCode = {
   CONNECTION_ERROR: 'CONNECTION_ERROR',
+  SET_ERROR: 'SET_ERROR',
+  GET_ERROR: 'GET_ERROR',
+  DELETE_ERROR: 'DELETE_ERROR',
+  EXISTS_ERROR: 'EXISTS_ERROR',
+  TTL_ERROR: 'TTL_ERROR',
   SERIALIZATION_ERROR: 'SERIALIZATION_ERROR',
   DESERIALIZATION_ERROR: 'DESERIALIZATION_ERROR',
+  OPERATION_ERROR: 'OPERATION_ERROR',
 } as const;
 
 export type CacheErrorCode = (typeof CacheErrorCode)[keyof typeof CacheErrorCode];
@@ -51,7 +57,7 @@ export type ServiceErrorCode = APIErrorCode | CacheErrorCode | DomainErrorCode |
 // ============ Error Types ============
 
 // Base error interface
-export interface BaseError {
+export interface BaseError extends Error {
   readonly code: string;
   readonly message: string;
   readonly details?: unknown;
@@ -106,6 +112,7 @@ export const createAPIError = (params: {
   details?: unknown;
   cause?: Error;
 }): APIError => ({
+  name: 'APIError',
   code: params.code,
   message: params.message,
   details: params.details,
@@ -130,6 +137,7 @@ export const createCacheError = (params: {
   details?: unknown;
   cause?: Error;
 }): CacheError => ({
+  name: 'CacheError',
   code: params.code,
   message: params.message,
   details: params.details,
@@ -143,6 +151,7 @@ export const createDomainError = (params: {
   details?: unknown;
   cause?: Error;
 }): DomainError => ({
+  name: 'DomainError',
   code: params.code,
   message: params.message,
   details: params.details,
@@ -156,6 +165,7 @@ export const createDBError = (params: {
   details?: unknown;
   cause?: Error;
 }): DBError => ({
+  name: 'DBError',
   ...params,
 });
 
@@ -166,6 +176,7 @@ export const createServiceError = (params: {
   details?: unknown;
   cause?: Error;
 }): ServiceError => ({
+  name: 'ServiceError',
   code: params.code,
   message: params.message,
   details: params.details,

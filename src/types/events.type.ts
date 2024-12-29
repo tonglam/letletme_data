@@ -9,12 +9,13 @@ import { Prisma } from '@prisma/client';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
+import { TaskEither } from 'fp-ts/TaskEither';
 import type { BootstrapApi } from '../domains/bootstrap/operations';
-import type { EventCache } from '../domains/events/cache';
+import type { EventCache } from '../domains/events/types';
 import { parseJsonArray, parseJsonObject } from '../utils/prisma.util';
 import type { BaseRepository } from './base.type';
 import { Branded, createBrandedType, isApiResponse } from './base.type';
-import { APIError } from './errors.type';
+import { APIError, DBError } from './errors.type';
 
 /**
  * Branded type for Event ID ensuring type safety
@@ -138,11 +139,14 @@ export interface Event {
 export type Events = readonly Event[];
 
 /**
- * Repository interface for Event entity
+ * Event repository interface
+ * Extends base repository with event-specific operations
  */
 export interface EventRepository extends BaseRepository<PrismaEvent, PrismaEventCreate, EventId> {
-  findCurrent(): TE.TaskEither<APIError, PrismaEvent | null>;
-  findNext(): TE.TaskEither<APIError, PrismaEvent | null>;
+  readonly findCurrent: () => TaskEither<DBError, PrismaEvent | null>;
+  readonly findNext: () => TaskEither<DBError, PrismaEvent | null>;
+  readonly findByIds: (ids: EventId[]) => TaskEither<DBError, PrismaEvent[]>;
+  readonly update: (id: EventId, event: PrismaEventUpdate) => TaskEither<DBError, PrismaEvent>;
 }
 
 /**

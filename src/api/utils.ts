@@ -65,7 +65,7 @@ export const createRequestHandler = <T>(operation: string, handler: AsyncHandler
       TE.chain(TE.fromEither),
       TE.fold(
         (error) => async () => {
-          logApiError(apiReq, { name: 'APIError', ...error });
+          logApiError(apiReq, error);
           handleError(res)(error);
         },
         (data) => async () => handleSuccess(res)(data),

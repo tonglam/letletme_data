@@ -6,61 +6,13 @@
 
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
+import { CacheError } from 'src/types/errors.type';
 import { CachePrefix } from '../../config/cache/cache.config';
+import { withCacheErrorHandling, withPipeline } from '../../infrastructure/cache/operations';
 import { type RedisCache } from '../../infrastructure/cache/redis';
-import { CacheError, CacheErrorType } from '../../infrastructure/cache/types';
 import { getCurrentSeason } from '../../types/base.type';
-import { type Event } from '../../types/events.type';
-
-// Data provider interface for fetching event data.
-// Abstracts the underlying data source for the cache layer.
-export interface EventDataProvider {
-  // Retrieves a single event by ID
-  readonly getOne: (id: string) => Promise<Event | null>;
-
-  // Retrieves all events for the current season
-  readonly getAll: () => Promise<readonly Event[]>;
-
-  // Retrieves the current active event
-  readonly getCurrentEvent: () => Promise<Event | null>;
-
-  // Retrieves the next scheduled event
-  readonly getNextEvent: () => Promise<Event | null>;
-}
-
-// Configuration for event cache.
-// Defines cache behavior and segmentation parameters.
-export interface EventCacheConfig {
-  // Redis key prefix for event cache namespace
-  keyPrefix: string;
-  // FPL season identifier for cache segmentation
-  season: string;
-}
-
-// Event cache interface.
-// Provides methods for caching and retrieving event data.
-export interface EventCache {
-  // Caches a single event
-  readonly cacheEvent: (event: Event) => TE.TaskEither<CacheError, void>;
-
-  // Retrieves a cached event by ID, falls back to data provider if not in cache
-  readonly getEvent: (id: string) => TE.TaskEither<CacheError, Event | null>;
-
-  // Caches multiple events atomically
-  readonly cacheEvents: (events: readonly Event[]) => TE.TaskEither<CacheError, void>;
-
-  // Retrieves all cached events for the current season, falls back to data provider if cache is empty
-  readonly getAllEvents: () => TE.TaskEither<CacheError, readonly Event[]>;
-
-  // Retrieves the current event from cache, falls back to data provider if not in cache
-  readonly getCurrentEvent: () => TE.TaskEither<CacheError, Event | null>;
-
-  // Retrieves the next event from cache, falls back to data provider if not in cache
-  readonly getNextEvent: () => TE.TaskEither<CacheError, Event | null>;
-
-  // Warms up the cache by pre-loading all events
-  readonly warmUp: () => TE.TaskEither<CacheError, void>;
-}
+import { type Event, type EventId } from '../../types/events.type';
+import { type EventCache, type EventCacheConfig, type EventDataProvider } from './types';
 
 // Creates an event cache instance.
 // Implements the EventCache interface with Redis as the backing store.
@@ -87,11 +39,9 @@ export const createEventCache = (
 
   // Caches multiple events atomically in Redis
   const cacheEvents = (events: readonly Event[]): TE.TaskEither<CacheError, void> =>
-    pipe(
-      events,
-      TE.traverseArray((event) => cacheEvent(event)),
-      TE.map(() => undefined),
-    );
+    withPipeline(events, (pipeline, event) => {
+      pipeline.hset(makeKey(), event.id.toString(), JSON.stringify(event));
+    });
 
   // Retrieves a cached event by ID with fallback
   const getEvent = (id: string): TE.TaskEither<CacheError, Event | null> =>
@@ -101,12 +51,9 @@ export const createEventCache = (
         cached
           ? TE.right(cached)
           : pipe(
-              TE.tryCatch(
-                () => dataProvider.getOne(id),
-                (error) => ({
-                  type: CacheErrorType.OPERATION,
-                  message: String(error),
-                }),
+              withCacheErrorHandling(
+                () => dataProvider.getOne(Number(id) as EventId),
+                `Failed to fetch event ${id}`,
               ),
               TE.chain((event) =>
                 event
@@ -129,13 +76,7 @@ export const createEventCache = (
         cached.length > 0
           ? TE.right(cached)
           : pipe(
-              TE.tryCatch(
-                () => dataProvider.getAll(),
-                (error) => ({
-                  type: CacheErrorType.OPERATION,
-                  message: String(error),
-                }),
-              ),
+              withCacheErrorHandling(() => dataProvider.getAll(), 'Failed to fetch all events'),
               TE.chain((events) =>
                 pipe(
                   cacheEvents(events),
@@ -154,12 +95,9 @@ export const createEventCache = (
         cached
           ? TE.right(cached)
           : pipe(
-              TE.tryCatch(
+              withCacheErrorHandling(
                 () => dataProvider.getCurrentEvent(),
-                (error) => ({
-                  type: CacheErrorType.OPERATION,
-                  message: String(error),
-                }),
+                'Failed to fetch current event',
               ),
               TE.chain((event) =>
                 event
@@ -181,12 +119,9 @@ export const createEventCache = (
         cached
           ? TE.right(cached)
           : pipe(
-              TE.tryCatch(
+              withCacheErrorHandling(
                 () => dataProvider.getNextEvent(),
-                (error) => ({
-                  type: CacheErrorType.OPERATION,
-                  message: String(error),
-                }),
+                'Failed to fetch next event',
               ),
               TE.chain((event) =>
                 event
@@ -203,13 +138,7 @@ export const createEventCache = (
   // Warms up the cache by pre-loading all events
   const warmUp = (): TE.TaskEither<CacheError, void> =>
     pipe(
-      TE.tryCatch(
-        () => dataProvider.getAll(),
-        (error) => ({
-          type: CacheErrorType.OPERATION,
-          message: String(error),
-        }),
-      ),
+      withCacheErrorHandling(() => dataProvider.getAll(), 'Failed to warm up events cache'),
       TE.chain((events) => cacheEvents(events)),
     );
 

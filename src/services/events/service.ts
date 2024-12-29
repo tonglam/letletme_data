@@ -16,6 +16,7 @@ import {
   PrismaEventCreate,
   toDomainEvent,
 } from '../../types/events.type';
+import { toAPIError } from '../../utils/error.util';
 import { EventService } from './types';
 
 // Dependencies required for the event service
@@ -56,6 +57,7 @@ const findAllEvents = (
         ? TE.right(cached)
         : pipe(
             repository.findAll(),
+            TE.mapLeft(toAPIError),
             TE.chain((events) =>
               pipe(events.map(toDomainEvent), (domainEvents) =>
                 pipe(
@@ -85,6 +87,7 @@ const findEventById = (
         ? TE.right(cached)
         : pipe(
             repository.findById(id),
+            TE.mapLeft(toAPIError),
             TE.chain((event) =>
               event
                 ? pipe(toDomainEvent(event), (domainEvent) =>
@@ -115,6 +118,7 @@ const findCurrentEvent = (
         ? TE.right(cached)
         : pipe(
             repository.findCurrent(),
+            TE.mapLeft(toAPIError),
             TE.chain((event) =>
               event
                 ? pipe(toDomainEvent(event), (domainEvent) =>
@@ -145,6 +149,7 @@ const findNextEvent = (
         ? TE.right(cached)
         : pipe(
             repository.findNext(),
+            TE.mapLeft(toAPIError),
             TE.chain((event) =>
               event
                 ? pipe(toDomainEvent(event), (domainEvent) =>
@@ -178,6 +183,7 @@ const saveBatchEvents = (
     (prismaEvents) =>
       pipe(
         repository.saveBatch(prismaEvents),
+        TE.mapLeft(toAPIError),
         TE.chain((saved) =>
           pipe(saved.map(toDomainEvent), (domainEvents) =>
             pipe(

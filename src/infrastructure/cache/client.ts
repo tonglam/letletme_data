@@ -5,20 +5,23 @@
 // Uses fp-ts for functional error handling patterns.
 
 import * as TE from 'fp-ts/TaskEither';
-import { createClient } from 'redis';
-import { REDIS_CLIENT_OPTIONS } from '../../config/cache/redis.config';
-import type { CacheError, CacheErrorType } from './types';
+import Redis from 'ioredis';
+import { REDIS_CONFIG } from '../../config/cache/redis.config';
+import { CacheError, CacheErrorCode, createCacheError } from '../../types/errors.type';
 
 // Global Redis client instance
 // Ensures single client instance across the application
-const globalForRedis = global as { redisClient?: ReturnType<typeof createClient> };
+const globalForRedis = global as { redisClient?: Redis };
 
 // Singleton Redis client instance
 // Creates a new Redis client with configured options if none exists
 export const redisClient =
   globalForRedis.redisClient ??
-  createClient({
-    ...REDIS_CLIENT_OPTIONS,
+  new Redis({
+    host: REDIS_CONFIG.host,
+    port: REDIS_CONFIG.port,
+    password: REDIS_CONFIG.password,
+    db: REDIS_CONFIG.db,
   });
 
 // Development environment handling
@@ -27,23 +30,25 @@ if (process.env.NODE_ENV !== 'production') {
   globalForRedis.redisClient = redisClient;
 }
 
-// Error event handler for Redis client
-// Logs Redis client errors for monitoring and debugging
-redisClient.on('error', (error: Error) => console.error('Redis Client Error:', error));
+// Error handling
+redisClient.on('error', (error) => {
+  console.error('Redis connection error:', error);
+});
 
 // Establishes Redis connection
 // Connects to Redis server if not already connected
 export const connectRedis = (): TE.TaskEither<CacheError, void> =>
   TE.tryCatch(
     async () => {
-      if (!redisClient.isOpen) {
+      if (redisClient.status !== 'ready') {
         await redisClient.connect();
       }
     },
-    (error): CacheError => ({
-      type: CacheErrorType.CONNECTION,
-      message: `Failed to connect to Redis: ${error}`,
-    }),
+    (error) =>
+      createCacheError({
+        code: CacheErrorCode.CONNECTION_ERROR,
+        message: `Failed to connect to Redis: ${error}`,
+      }),
   );
 
 // Disconnects from Redis
@@ -51,12 +56,13 @@ export const connectRedis = (): TE.TaskEither<CacheError, void> =>
 export const disconnectRedis = (): TE.TaskEither<CacheError, void> =>
   TE.tryCatch(
     async () => {
-      if (redisClient.isOpen) {
+      if (redisClient.status === 'ready') {
         await redisClient.quit();
       }
     },
-    (error): CacheError => ({
-      type: CacheErrorType.CONNECTION,
-      message: `Failed to disconnect from Redis: ${error}`,
-    }),
+    (error) =>
+      createCacheError({
+        code: CacheErrorCode.CONNECTION_ERROR,
+        message: `Failed to disconnect from Redis: ${error}`,
+      }),
   );

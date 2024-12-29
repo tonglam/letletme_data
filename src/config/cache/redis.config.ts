@@ -15,3 +15,11 @@ export const REDIS_CLIENT_OPTIONS = {
   }`,
   database: REDIS_CONFIG.db,
 } as const;
+
+// Cache operation configurations
+export const CACHE_CONFIG = {
+  defaultTTL: 60 * 60, // 1 hour
+  retryAttempts: 3,
+  retryDelay: 1000, // 1 second
+  batchSize: 100,
+} as const;
