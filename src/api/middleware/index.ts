@@ -1,8 +1,18 @@
 /**
- * Middleware module exports
+ * Middleware Module Exports
+ *
+ * Central export point for all middleware functions used in the API layer.
+ * Provides access to core middleware functions including security, validation,
+ * error handling, and request processing utilities.
+ *
  * @module api/middleware
+ * @category API
  */
 
-export { errorMiddleware } from './error';
-export { securityMiddleware } from './security';
-export { validateRequest } from './validation';
+export {
+  addSecurityHeaders,
+  createHandler,
+  handleError,
+  toNotFoundError,
+  validateRequest,
+} from './core';

@@ -6,7 +6,7 @@
 
 import { Prisma } from '@prisma/client';
 import * as E from 'fp-ts/Either';
-import { APIError, createValidationError } from '../http/common/errors';
+import { APIError, createValidationError } from '../../types/errors.type';
 
 /**
  * Converts numeric fields to Prisma.Decimal

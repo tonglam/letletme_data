@@ -9,9 +9,9 @@
 
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
-import { APIError } from '../../infrastructure/http/common/errors';
 import { getWorkflowLogger } from '../../infrastructure/logger';
-import type { Event } from '../../types/events.type';
+import type { Event } from '../../types/domain/events.type';
+import { APIError } from '../../types/errors.type';
 import type { EventService } from './types';
 
 const logger = getWorkflowLogger();

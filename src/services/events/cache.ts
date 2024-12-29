@@ -25,7 +25,7 @@ import { createRedisCache } from '../../infrastructure/cache/redis';
 import { CacheError, CacheErrorType } from '../../infrastructure/cache/types';
 import { getCurrentSeason } from '../../types/base.type';
 import type { BootStrapResponse } from '../../types/bootstrap.type';
-import { toDomainEvent, type Event } from '../../types/events.type';
+import { toDomainEvent, type Event } from '../../types/domain/events.type';
 import { toNullable } from '../../utils/service.util';
 
 /**

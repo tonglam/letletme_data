@@ -5,10 +5,10 @@ import { pipe } from 'fp-ts/function';
 
 import { phaseRepository } from '../../../src/domains/phases/repository';
 import { connectDB, disconnectDB } from '../../../src/infrastructure/db/prisma';
-import { APIError } from '../../../src/infrastructure/http/common/errors';
 import { createPhaseService } from '../../../src/services/phases';
 import { phaseWorkflows } from '../../../src/services/phases/workflow';
-import { Phase, PhaseId, validatePhaseId } from '../../../src/types/phases.type';
+import { Phase, PhaseId, validatePhaseId } from '../../../src/types/domain/phases.type';
+import { APIError } from '../../../src/types/errors.type';
 
 const TEST_EVENT_ID = 21; // Event ID outside any phase boundary
 const TEST_PHASES: Phase[] = [

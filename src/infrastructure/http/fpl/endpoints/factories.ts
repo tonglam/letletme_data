@@ -1,4 +1,4 @@
-import { HTTPClient } from '../../common/client';
+import { HTTPClient } from '../../client';
 import { FPLEndpoints } from '../types';
 import { createBootstrapEndpoints } from './bootstrap';
 import { createElementEndpoints } from './element';

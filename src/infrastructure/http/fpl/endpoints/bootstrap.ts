@@ -2,9 +2,9 @@ import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import { FPL_API_CONFIG } from '../../../../config/api/api.config';
 import { BootStrapResponseSchema } from '../../../../types/bootstrap.type';
-import { HTTPClient } from '../../common/client';
+import { HTTPClient } from '../../client';
+import { RequestOptions } from '../../client/types';
 import { createApiCallContext } from '../../common/logs';
-import { RequestOptions } from '../../common/types';
 import { logFplCall } from '../logger';
 import { BootstrapEndpoints, validateEndpointResponse } from '../types';
 

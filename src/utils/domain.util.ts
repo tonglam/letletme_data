@@ -7,13 +7,47 @@
 import * as E from 'fp-ts/Either';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
-import { APIError, createInternalServerError } from '../infrastructure/http/common/errors';
+import { APIError, APIErrorCode, createAPIError } from '../types/errors.type';
 
 /**
- * Converts unknown errors to APIError
+ * Converts any error to an API error
  */
-export const toAPIError = (error: unknown): APIError =>
-  createInternalServerError({ message: String(error) });
+export const toAPIError = (error: unknown): APIError => {
+  if (error instanceof Error) {
+    return createAPIError({
+      code: APIErrorCode.INTERNAL_SERVER_ERROR,
+      message: error.message,
+      cause: error,
+    });
+  }
+  return createAPIError({
+    code: APIErrorCode.INTERNAL_SERVER_ERROR,
+    message: 'An unknown error occurred',
+  });
+};
+
+/**
+ * Converts a domain error to a TaskEither
+ */
+export const toDomainError = <T>(error: Error): TE.TaskEither<APIError, T> =>
+  TE.left(toAPIError(error));
+
+/**
+ * Validates a domain model
+ */
+export const validateDomainModel = <T>(
+  model: T | null,
+  modelName: string,
+): E.Either<APIError, T | null> =>
+  pipe(
+    model,
+    E.fromNullable(
+      createAPIError({
+        code: APIErrorCode.NOT_FOUND,
+        message: `${modelName} not found`,
+      }),
+    ),
+  );
 
 /**
  * Domain error interface

@@ -2,17 +2,21 @@ import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import { z } from 'zod';
 import { BootStrapResponse } from '../../../types/bootstrap.type';
+import { EventFixture } from '../../../types/domain/event-fixture.type';
+import { EventLiveResponse, EventPicksResponse } from '../../../types/domain/event-live.type';
+import {
+  ClassicLeagueResponse,
+  CupResponse,
+  H2hLeagueResponse,
+} from '../../../types/domain/leagues.type';
 import { ElementSummaryResponse } from '../../../types/element-summary.type';
 import {
   EntryHistoryResponse,
   EntryResponse,
   EntryTransfersResponse,
 } from '../../../types/entry.type';
-import { EventFixture } from '../../../types/event-fixture.type';
-import { EventLiveResponse, EventPicksResponse } from '../../../types/event-live.type';
-import { ClassicLeagueResponse, CupResponse, H2hLeagueResponse } from '../../../types/leagues.type';
-import { APIError, createValidationError } from '../common/errors';
-import { RequestOptions, URL } from '../common/types';
+import { APIError, createValidationError } from '../../../types/errors.type';
+import { RequestOptions, URL } from '../client/types';
 
 /**
  * Client Configuration Types

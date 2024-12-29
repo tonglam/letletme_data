@@ -15,7 +15,6 @@ import {
   withCreateBatch,
   withValidatedCache,
 } from '../../infrastructure/cache/utils';
-import { APIError, createValidationError } from '../../infrastructure/http/common/errors';
 import {
   Event as DomainEvent,
   EventId,
@@ -24,7 +23,8 @@ import {
   toDomainEvent,
   toPrismaEvent,
   validateEventId,
-} from '../../types/events.type';
+} from '../../types/domain/events.type';
+import { APIError, createValidationError } from '../../types/errors.type';
 import { toAPIError } from '../../utils/domain.util';
 import { type EventCache } from './cache';
 

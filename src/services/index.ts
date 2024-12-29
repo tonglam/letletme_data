@@ -5,13 +5,20 @@
  * @module Services
  */
 
-import type { EventService } from './events/types';
+import type { EventService } from './events';
 
-// Event Service
-export { createEventService } from './events';
-export type { EventService } from './events/types';
+/**
+ * Service keys for type-safe access
+ */
+export const ServiceKey = {
+  EVENT: 'eventService',
+} as const;
 
-/** Container for all application services */
+/**
+ * Service container interface
+ */
 export interface ServiceContainer {
-  readonly eventService: EventService;
+  readonly [ServiceKey.EVENT]: EventService;
 }
+
+export type { EventService } from './events';

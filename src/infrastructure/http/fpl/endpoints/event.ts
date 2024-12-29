@@ -2,14 +2,14 @@ import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import { z } from 'zod';
 import { FPL_API_CONFIG } from '../../../../config/api/api.config';
-import { EventFixture } from '../../../../types/event-fixture.type';
+import { EventFixture } from '../../../../types/domain/event-fixture.type';
 import {
   EventLiveResponseSchema,
   EventPicksResponseSchema,
-} from '../../../../types/event-live.type';
-import { HTTPClient } from '../../common/client';
+} from '../../../../types/domain/event-live.type';
+import { HTTPClient } from '../../client';
+import { RequestOptions } from '../../client/types';
 import { createApiCallContext } from '../../common/logs';
-import { RequestOptions } from '../../common/types';
 import { logFplCall } from '../logger';
 import { EventEndpoints, validateEndpointResponse } from '../types';
 

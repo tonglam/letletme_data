@@ -6,9 +6,9 @@ import {
   EntryResponseSchema,
   EntryTransfersResponseSchema,
 } from '../../../../types/entry.type';
-import { HTTPClient } from '../../common/client';
+import { HTTPClient } from '../../client';
+import { RequestOptions } from '../../client/types';
 import { createApiCallContext } from '../../common/logs';
-import { RequestOptions } from '../../common/types';
 import { logFplCall } from '../logger';
 import { EntryEndpoints, validateEndpointResponse } from '../types';
 

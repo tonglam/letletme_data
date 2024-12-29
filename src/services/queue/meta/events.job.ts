@@ -4,11 +4,11 @@ import * as E from 'fp-ts/Either';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
 import { eventRepository } from '../../../domains/events/repository';
-import { APIError } from '../../../infrastructure/http/common/errors';
 import { createFPLClient } from '../../../infrastructure/http/fpl';
 import { JobOperation, JobOptions, MetaJobData } from '../../../infrastructure/queue';
 import { createQueueProcessingError } from '../../../infrastructure/queue/core/errors';
-import { EventId, PrismaEventUpdate } from '../../../types/events.type';
+import { EventId, PrismaEventUpdate } from '../../../types/domain/events.type';
+import { APIError } from '../../../types/errors.type';
 import { createEventServiceImpl } from '../../events/service';
 import { createMetaQueueService, MetaQueueService } from './base/meta.queue';
 
@@ -23,6 +23,15 @@ export class EventJobService {
     this.eventService = createEventServiceImpl({
       bootstrapApi,
       eventRepository,
+      eventCache: {
+        warmUp: () => TE.right(undefined),
+        getAllEvents: () => TE.right([]),
+        getEvent: () => TE.right(null),
+        getCurrentEvent: () => TE.right(null),
+        getNextEvent: () => TE.right(null),
+        cacheEvent: () => TE.right(undefined),
+        cacheEvents: () => TE.right(undefined),
+      },
     });
   }
 
@@ -120,13 +129,13 @@ export class EventJobService {
                     cupLeaguesCreated: event.cupLeaguesCreated,
                     h2hKoMatchesCreated: event.h2hKoMatchesCreated,
                     rankedCount: event.rankedCount,
-                    chipPlays: event.chipPlays as Prisma.InputJsonValue,
+                    chipPlays: event.chipPlays as Prisma.JsonValue,
                     mostSelected: event.mostSelected,
                     mostTransferredIn: event.mostTransferredIn,
                     mostCaptained: event.mostCaptained,
                     mostViceCaptained: event.mostViceCaptained,
                     topElement: event.topElement,
-                    topElementInfo: event.topElementInfo as Prisma.InputJsonValue,
+                    topElementInfo: event.topElementInfo as Prisma.JsonValue,
                     transfersMade: event.transfersMade,
                     createdAt: event.createdAt,
                     ...(options?.forceUpdate && { forceUpdate: options.forceUpdate }),
@@ -145,8 +154,8 @@ export class EventJobService {
    */
   private handleEventSync = (): TE.TaskEither<Error, void> =>
     pipe(
-      this.eventService.syncEvents(),
-      TE.mapLeft((error) => new Error(`Failed to sync events: ${error.message}`)),
+      this.eventService.getEvents(),
+      TE.mapLeft((error: APIError) => new Error(`Failed to sync events: ${error.message}`)),
       TE.map(() => undefined),
     );
 

@@ -5,10 +5,10 @@ import {
   ClassicLeagueResponseSchema,
   CupResponseSchema,
   H2hLeagueResponseSchema,
-} from '../../../../types/leagues.type';
-import { HTTPClient } from '../../common/client';
+} from '../../../../types/domain/leagues.type';
+import { HTTPClient } from '../../client';
+import { RequestOptions } from '../../client/types';
 import { createApiCallContext } from '../../common/logs';
-import { RequestOptions } from '../../common/types';
 import { logFplCall } from '../logger';
 import { LeaguesEndpoints, validateEndpointResponse } from '../types';
 

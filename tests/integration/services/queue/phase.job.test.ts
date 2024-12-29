@@ -15,7 +15,7 @@ import {
 } from '../../../../src/infrastructure/queue/meta/meta.queue';
 import { MetaJobData } from '../../../../src/infrastructure/queue/types';
 import { PhaseJobService } from '../../../../src/services/queue/meta/phases.job';
-import { PhaseId, PrismaPhase, validatePhaseId } from '../../../../src/types/phases.type';
+import { PhaseId, PrismaPhase, validatePhaseId } from '../../../../src/types/domain/phases.type';
 
 const toAPIError = (error: Error): APIError =>
   createInternalServerError({ message: error.message });

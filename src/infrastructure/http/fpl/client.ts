@@ -3,7 +3,7 @@ import * as IOE from 'fp-ts/IOEither';
 import pino from 'pino';
 import { BASE_URLS } from '../../../config/api/api.config';
 import { HTTP_CONFIG } from '../../../config/http/http.config';
-import { createHTTPClient } from '../common/client';
+import { createHTTPClient } from '../client';
 import { createFPLEndpoints } from './endpoints';
 import { FPLEndpoints } from './types';
 

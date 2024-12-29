@@ -15,7 +15,7 @@ import { CachePrefix } from '../../config/cache/cache.config';
 import { type RedisCache } from '../../infrastructure/cache/redis';
 import { CacheError, CacheErrorType } from '../../infrastructure/cache/types';
 import { getCurrentSeason } from '../../types/base.type';
-import { type Event } from '../../types/events.type';
+import { type Event } from '../../types/domain/events.type';
 
 /**
  * Data provider interface for fetching event data.

@@ -7,254 +7,198 @@
   - [Introduction](#introduction)
   - [Directory Structure](#directory-structure)
   - [Core Components](#core-components)
-    - [Types](#types)
-    - [Response Formatting](#response-formatting)
-    - [Middleware](#middleware)
-    - [Routes](#routes)
-  - [Route Implementation Guide](#route-implementation-guide)
-    - [Basic Structure](#basic-structure)
-    - [Handler Implementation](#handler-implementation)
-    - [Error Handling](#error-handling)
-    - [Logging](#logging)
+    - [1. Handler Module (`handlers/{domain}.handler.ts`)](#1-handler-module-handlersdomainhandlerts)
+    - [2. Route Module (`routes/{domain}.route.ts`)](#2-route-module-routesdomainroutets)
+    - [3. Types (in `src/types/api.type.ts`)](#3-types-in-srctypesapitypets)
+  - [Implementation Steps](#implementation-steps)
+  - [Type Definitions](#type-definitions)
+  - [Handler Implementation](#handler-implementation)
+  - [Route Implementation](#route-implementation)
   - [Best Practices](#best-practices)
-  - [Security Considerations](#security-considerations)
-  - [Validation](#validation)
-  - [Examples](#examples)
+  - [Example Implementation](#example-implementation)
+    - [Handler (`handlers/events.handler.ts`):](#handler-handlerseventshandlerts)
+    - [Route (`routes/events.route.ts`):](#route-routeseventsroutets)
 
 ## Introduction
 
-This guide outlines the standard practices and patterns for implementing API routes in the application. It follows functional programming principles, emphasizes type safety, and maintains consistent error handling and response formatting.
+This guide provides detailed instructions for implementing new API endpoints following the functional programming approach with fp-ts. It ensures type safety, consistent error handling, and maintainable code structure.
 
 ## Directory Structure
 
+For each new domain API, you need to create the following structure:
+
 ```
 src/api/
-├── middleware/     # API middleware components
-├── responses/      # Response formatting utilities
-├── routes/         # API route handlers
-└── types.ts        # API-specific type definitions
+├── handlers/
+│   └── {domain}.handler.ts    # Domain-specific handlers
+├── routes/
+│   └── {domain}.route.ts      # Domain-specific routes
+├── middleware/
+│   ├── core.ts                # Core middleware functions
+│   └── index.ts               # Middleware exports
+└── index.ts                   # API router configuration
 ```
 
 ## Core Components
 
-### Types
+### 1. Handler Module (`handlers/{domain}.handler.ts`)
 
-All API-related types should be defined in `src/api/types.ts`. Key types include:
+- Contains business logic for API endpoints
+- Uses fp-ts for functional error handling
+- Implements domain-specific operations
+
+### 2. Route Module (`routes/{domain}.route.ts`)
+
+- Defines API endpoints
+- Configures route middleware
+- Maps handlers to routes
+
+### 3. Types (in `src/types/api.type.ts`)
+
+- Defines request/response types
+- Implements validation codecs
+- Declares handler interfaces
+
+## Implementation Steps
+
+1. Define domain-specific types in `src/types/api.type.ts`
+2. Create handler implementation in `handlers/{domain}.handler.ts`
+3. Create route configuration in `routes/{domain}.route.ts`
+4. Register routes in `src/api/index.ts`
+
+## Type Definitions
+
+Add your domain-specific types to `src/types/api.type.ts`:
 
 ```typescript
-// Success response wrapper
-interface APIResponse<T> {
-  readonly status: 'success';
-  readonly data: T;
-}
+// Request validation codec
+export const DomainIdParams = t.type({
+  params: t.type({
+    id: t.string,
+  }),
+});
 
-// Error response structure
-interface ErrorResponse {
-  readonly status: 'error';
-  readonly error: string;
-  readonly details?: unknown;
+// Handler response interface
+export interface DomainHandlerResponse {
+  readonly getAllItems: () => TaskEither<APIError, Item[]>;
+  readonly getItemById: (req: Request) => TaskEither<APIError, Item>;
+  // Add other operations
 }
-
-// Extended Express Request
-type ApiRequest = Request & { id: string };
 ```
 
-### Response Formatting
+## Handler Implementation
 
-Consistent response formatting using utility functions from `src/api/responses`:
+Create `handlers/{domain}.handler.ts`:
 
 ```typescript
-// Success response
-formatResponse<T>(data: T): APIResponse<T>
+export const createDomainHandlers = (
+  domainService: ServiceContainer[typeof ServiceKey.DOMAIN],
+): DomainHandlerResponse => ({
+  getAllItems: () => {
+    const task = domainService.getItems();
+    return pipe(
+      () => task(),
+      TE.map((items) => [...items]),
+    );
+  },
 
-// Error response
-formatErrorResponse(error: Error | string): ErrorResponse
+  getItemById: (req: Request) => {
+    const itemId = Number(req.params.id) as ItemId;
+    return pipe(
+      () => domainService.getItem(itemId)(),
+      TE.chain((item) => () => Promise.resolve(handleNullable<Item>(`Item not found`)(item))),
+    );
+  },
+});
 ```
 
-### Middleware
+## Route Implementation
 
-Standard middleware components:
-
-1. **Error Handling**: Global error middleware for consistent error responses
-2. **Security**:
-   - Helmet for HTTP headers
-   - CORS configuration
-   - Rate limiting
-3. **Validation**: Request validation using Zod schemas
-
-### Routes
-
-Routes should follow a modular structure with clear separation of concerns:
-
-1. Router configuration
-2. Handler implementations
-3. Route registration
-
-## Route Implementation Guide
-
-### Basic Structure
-
-Follow this template for new route files:
+Create `routes/{domain}.route.ts`:
 
 ```typescript
-/**
- * Domain-specific API routes module
- * @module api/routes/domain
- */
-
-import { RequestHandler, Router } from 'express';
-import * as E from 'fp-ts/Either';
-import { pipe } from 'fp-ts/function';
-import type { ServiceContainer } from '../../services';
-import { formatErrorResponse, formatResponse } from '../responses';
-import { ApiRequest } from '../types';
-
 export const domainRouter = ({ domainService }: ServiceContainer): Router => {
   const router = Router();
+  const handlers = createDomainHandlers(domainService);
 
-  // Handler implementations
-
-  // Route registration
+  router.get('/', createHandler(handlers.getAllItems));
+  router.get('/:id', validateRequest(DomainIdParams), createHandler(handlers.getItemById));
 
   return router;
 };
 ```
 
-### Handler Implementation
-
-1. **Function Signature**:
-
-```typescript
-const handlerName: RequestHandler = async (req, res) => {
-  // Implementation
-};
-```
-
-2. **Functional Approach**:
-
-- Use `fp-ts` for error handling and composition
-- Implement with `pipe` and `Either` for type-safe error handling
-
-Example:
-
-```typescript
-const getResource: RequestHandler = async (req, res) => {
-  logApiRequest(req as ApiRequest, 'Get resource');
-
-  pipe(
-    await service.getResource()(),
-    E.fold(
-      (error) => {
-        logApiError(req as ApiRequest, error as Error);
-        res.status(500).json(formatErrorResponse(error as Error));
-      },
-      (resource) => res.json(formatResponse(resource)),
-    ),
-  );
-};
-```
-
-### Error Handling
-
-1. Use `Either` for error handling
-2. Log errors with context
-3. Return formatted error responses
-4. Maintain consistent HTTP status codes
-
-### Logging
-
-Always include request logging:
-
-1. Log requests with context
-2. Log errors with full details
-3. Include request ID for tracing
-
 ## Best Practices
 
-1. **Type Safety**:
+1. **Type Safety**
 
-   - Avoid `any` type
-   - Use proper type definitions
-   - Leverage TypeScript's type system
+   - Use io-ts for runtime type validation
+   - Define explicit return types
+   - Avoid type `any`
 
-2. **Functional Programming**:
+2. **Error Handling**
 
-   - Use immutable data structures
-   - Implement pure functions
-   - Leverage `fp-ts` for functional patterns
+   - Use TaskEither for async operations
+   - Implement consistent error responses
+   - Handle null cases with `handleNullable`
 
-3. **Code Organization**:
+3. **Code Organization**
 
+   - One handler file per domain
    - One route file per domain
-   - Clear function naming
-   - Proper JSDoc documentation
+   - Clear separation of concerns
 
-4. **Error Handling**:
-   - Consistent error formatting
-   - Proper error logging
-   - Type-safe error handling with `Either`
+4. **Functional Programming**
+   - Use fp-ts operators (pipe, chain, map)
+   - Implement pure functions
+   - Handle side effects in TaskEither
 
-## Security Considerations
+## Example Implementation
 
-1. **Request Validation**:
+Here's a complete example using the Events API implementation:
 
-   - Validate all inputs
-   - Use Zod schemas
-   - Implement proper type checking
-
-2. **Security Headers**:
-
-   - Use Helmet middleware
-   - Configure CORS properly
-   - Implement rate limiting
-
-3. **Error Responses**:
-   - Don't expose internal errors
-   - Sanitize error messages
-   - Use appropriate status codes
-
-## Validation
-
-Implement request validation using Zod schemas:
+### Handler (`handlers/events.handler.ts`):
 
 ```typescript
-const validateRequest = (schema: AnyZodObject) => {
-  return (req: Request, res: Response, next: NextFunction): void => {
-    // Validation implementation
-  };
+export const createEventHandlers = (
+  eventService: ServiceContainer[typeof ServiceKey.EVENT],
+): EventHandlerResponse => ({
+  getAllEvents: () => {
+    const task = eventService.getEvents();
+    return pipe(
+      () => task(),
+      TE.map((events) => [...events]),
+    );
+  },
+
+  getEventById: (req: Request) => {
+    const eventId = Number(req.params.id) as EventId;
+    return pipe(
+      () => eventService.getEvent(eventId)(),
+      TE.chain((event) => () => Promise.resolve(handleNullable<Event>(`Event not found`)(event))),
+    );
+  },
+});
+```
+
+### Route (`routes/events.route.ts`):
+
+```typescript
+export const eventRouter = ({ eventService }: ServiceContainer): Router => {
+  const router = Router();
+  const handlers = createEventHandlers(eventService);
+
+  router.get('/', createHandler(handlers.getAllEvents));
+  router.get('/:id', validateRequest(EventIdParams), createHandler(handlers.getEventById));
+
+  return router;
 };
 ```
 
-## Examples
-
-Reference implementation from `events.route.ts`:
-
-```typescript
-// Route handler example
-const getEventById: RequestHandler = async (req, res) => {
-  const eventId = Number(req.params.id) as EventId;
-  logApiRequest(req as ApiRequest, 'Get event by ID', { eventId });
-
-  pipe(
-    await eventService.getEvent(eventId)(),
-    E.fold(
-      (error) => {
-        logApiError(req as ApiRequest, error as Error);
-        res.status(500).json(formatErrorResponse(error as Error));
-      },
-      (event) => res.json(formatResponse(event)),
-    ),
-  );
-};
-
-// Route registration
-router.get('/events/:id', getEventById);
-```
-
-This example demonstrates:
+This implementation demonstrates:
 
 - Proper type safety
 - Functional error handling
-- Request logging
-- Response formatting
-- Clean route registration
+- Clean separation of concerns
+- Consistent response formatting
+- Middleware integration
