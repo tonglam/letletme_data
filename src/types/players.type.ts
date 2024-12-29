@@ -2,7 +2,6 @@ import { ElementType } from '@prisma/client';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { APIError } from '../errors.type';
 import {
   BaseRepository,
   Branded,
@@ -11,6 +10,7 @@ import {
   isApiResponse,
 } from './base.type';
 import { ElementResponse } from './elements.type';
+import { APIError } from './errors.type';
 
 // ============ Branded Types ============
 export type PlayerId = Branded<number, 'PlayerId'>;
@@ -32,9 +32,7 @@ export const validatePlayerId = (value: unknown): E.Either<string, PlayerId> =>
   );
 
 // ============ Types ============
-/**
- * Domain types (camelCase)
- */
+// Domain types representing player data in our system
 export interface Player {
   readonly id: PlayerId;
   readonly elementCode: number;
@@ -49,10 +47,10 @@ export interface Player {
 
 export type Players = readonly Player[];
 
-// ============ Repository Interface ============
+// Repository interface for player data access
 export type PlayerRepository = BaseRepository<PrismaPlayer, PrismaPlayerCreate, PlayerId>;
 
-// ============ Persistence Types ============
+// Persistence types for database operations
 export interface PrismaPlayer {
   readonly element: number;
   readonly elementCode: number;
@@ -69,7 +67,7 @@ export interface PrismaPlayer {
 export type PrismaPlayerCreate = Omit<PrismaPlayer, 'createdAt'>;
 export type PrismaPlayerUpdate = Omit<PrismaPlayer, 'createdAt'>;
 
-// ============ Type Transformers ============
+// Type transformers for converting between API and domain models
 export const fromElementResponse = (raw: ElementResponse): E.Either<string, Player> =>
   pipe(
     PlayerId.validate(raw.id),

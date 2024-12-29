@@ -1,14 +1,17 @@
+// Element (player) specific endpoints for retrieving player data
+
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
+import { Logger } from 'pino';
 import { FPL_API_CONFIG } from '../../../../config/api/api.config';
 import { ElementSummaryResponseSchema } from '../../../../types/element-summary.type';
 import { HTTPClient } from '../../client';
 import { RequestOptions } from '../../client/types';
-import { createApiCallContext } from '../../common/logs';
-import { logFplCall } from '../logger';
 import { ElementEndpoints, validateEndpointResponse } from '../types';
 
-export const createElementEndpoints = (client: HTTPClient): ElementEndpoints => ({
+// Creates endpoints for retrieving player-specific data
+export const createElementEndpoints = (client: HTTPClient, logger: Logger): ElementEndpoints => ({
+  // Retrieves detailed statistics and information for a specific player
   getElementSummary: async (elementId: number, options?: RequestOptions) => {
     const result = await client.get<unknown>(
       FPL_API_CONFIG.element.summary({ elementId }),
@@ -17,7 +20,20 @@ export const createElementEndpoints = (client: HTTPClient): ElementEndpoints => 
     return pipe(
       result,
       E.chain(validateEndpointResponse(ElementSummaryResponseSchema)),
-      logFplCall(createApiCallContext('getElementSummary', { elementId })),
+      E.map((data) => {
+        logger.info(
+          { operation: 'getElementSummary', elementId, success: true },
+          'FPL API call successful',
+        );
+        return data;
+      }),
+      E.mapLeft((error) => {
+        logger.error(
+          { operation: 'getElementSummary', elementId, error, success: false },
+          'FPL API call failed',
+        );
+        return error;
+      }),
     );
   },
 });

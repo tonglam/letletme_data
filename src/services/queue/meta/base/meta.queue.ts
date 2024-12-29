@@ -15,9 +15,7 @@ import {
 import { getQueueLogger, logQueueError } from '../../../../utils/logger.util';
 import { QueueService, createQueueService } from '../../queue.service';
 
-/**
- * Meta queue service interface
- */
+// Meta queue service interface
 export interface MetaQueueService extends QueueService<MetaJobData> {
   readonly addBootstrapJob: (
     data: Omit<MetaJobData, 'type' | 'timestamp'>,
@@ -38,9 +36,7 @@ export interface MetaQueueService extends QueueService<MetaJobData> {
   readonly retryJob: (jobId: string) => TE.TaskEither<Error, void>;
 }
 
-/**
- * Creates a meta queue service with monitoring
- */
+// Creates a meta queue service with monitoring
 export const createMetaQueueService = (): MetaQueueService => {
   const deps = createQueueDependencies(META_QUEUE_CONFIG);
   const adapter = createQueueAdapter<MetaJobData>(deps);

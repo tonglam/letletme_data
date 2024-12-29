@@ -1,16 +1,12 @@
 import { JobType } from 'bullmq';
 
-/**
- * Queue progress constants
- */
+// Queue progress constants
 export const QUEUE_PROGRESS = {
   START: 0,
   COMPLETE: 100,
 } as const;
 
-/**
- * Queue job types
- */
+// Queue job types
 export const QUEUE_JOB_TYPES = {
   BOOTSTRAP: 'BOOTSTRAP',
   PHASES: 'PHASES',
@@ -18,35 +14,27 @@ export const QUEUE_JOB_TYPES = {
   TEAMS: 'TEAMS',
 } as const;
 
-/**
- * Queue job priorities
- */
+// Queue job priorities
 export const QUEUE_PRIORITIES = {
   HIGH: 1,
   MEDIUM: 2,
   LOW: 3,
 } as const;
 
-/**
- * Queue job attempts
- */
+// Queue job attempts
 export const QUEUE_ATTEMPTS = {
   BOOTSTRAP: 5,
   DEFAULT: 3,
 } as const;
 
-/**
- * Queue job states
- */
+// Queue job states
 export const QUEUE_JOB_STATES: Record<string, JobType[]> = {
   PENDING: ['waiting', 'active', 'delayed'],
   FAILED: ['failed'],
   COMPLETED: ['completed'],
 };
 
-/**
- * Queue logging constants
- */
+// Queue logging constants
 export const QUEUE_LOG_MESSAGES = {
   JOB_COMPLETED: (jobId: string, queueName: string) =>
     `${queueName} job ${jobId} completed successfully`,

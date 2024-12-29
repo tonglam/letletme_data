@@ -1,7 +1,4 @@
-/**
- * HTTP Configuration
- * @module config/http
- */
+// HTTP Configuration Module
 
 import { RetryConfig } from '../../infrastructure/http/client/types';
 

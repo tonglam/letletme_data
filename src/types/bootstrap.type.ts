@@ -1,8 +1,4 @@
-/**
- * Bootstrap Types Module
- *
- * Type definitions and transformers for game data initialization.
- */
+// Type definitions and transformers for game data initialization.
 
 import * as A from 'fp-ts/Array';
 import * as E from 'fp-ts/Either';
@@ -13,9 +9,7 @@ import type { EventResponse } from './events.type';
 import type { PhaseResponse } from './phases.type';
 import type { TeamResponse } from './teams.type';
 
-/**
- * Zod schema for bootstrap response data
- */
+// Zod schema for validating bootstrap response data
 export const BootStrapResponseSchema = z.object({
   events: z.array(z.custom<EventResponse>()),
   phases: z.array(z.custom<PhaseResponse>()),
@@ -23,9 +17,7 @@ export const BootStrapResponseSchema = z.object({
   elements: z.array(z.custom<ElementResponse>()),
 });
 
-/**
- * Raw API response structure for bootstrap data
- */
+// Raw API response structure for bootstrap data
 export interface BootStrapResponse {
   readonly events: EventResponse[];
   readonly phases: PhaseResponse[];
@@ -33,9 +25,7 @@ export interface BootStrapResponse {
   readonly elements: ElementResponse[];
 }
 
-/**
- * Domain model for bootstrap data
- */
+// Domain model for bootstrap data
 export interface BootStrap {
   readonly events: readonly EventResponse[];
   readonly phases: readonly PhaseResponse[];
@@ -43,9 +33,7 @@ export interface BootStrap {
   readonly elements: readonly ElementResponse[];
 }
 
-/**
- * Generic array transformation utility
- */
+// Generic array transformation utility
 const transformArray = <T, U>(
   arr: T[],
   transform: (item: T) => E.Either<string, U>,
@@ -57,9 +45,7 @@ const transformArray = <T, U>(
     E.mapLeft((error) => `Failed to transform ${entityName}: ${error}`),
   );
 
-/**
- * Transforms raw bootstrap response data into domain model
- */
+// Transforms raw bootstrap response data into domain model
 export const toDomainBootStrap = (raw: BootStrapResponse): E.Either<string, BootStrap> =>
   pipe(
     E.Do,

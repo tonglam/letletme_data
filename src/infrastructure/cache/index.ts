@@ -8,5 +8,7 @@
  * @module infrastructure/cache
  */
 
+export * from './client';
 export * from './redis';
 export * from './types';
+export * from './utils';

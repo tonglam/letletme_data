@@ -1,9 +1,6 @@
-import { getCurrentSeason } from '../../types/domain/base.type';
+import { getCurrentSeason } from '../../types/base.type';
 
-/**
- * Application-wide configuration
- * @const {Readonly<{currentSeason: number}>}
- */
+// Application-wide configuration
 export const AppConfig = {
   currentSeason: getCurrentSeason(),
 } as const;

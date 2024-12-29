@@ -1,38 +1,31 @@
-/**
- * Event Service Module
- *
- * Provides business logic for Event operations, implementing caching and error handling.
- * Uses functional programming principles for type-safe operations.
- *
- * @module EventService
- */
+// Event Service Module
+// Provides business logic for Event operations, implementing caching and error handling.
+// Uses functional programming principles for type-safe operations.
 
 import { Prisma } from '@prisma/client';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
+import { BootstrapApi } from '../../domains/bootstrap/operations';
 import { EventCache } from '../../domains/events/cache';
 import { CacheError } from '../../infrastructure/cache/types';
+import { APIError, APIErrorCode, createAPIError } from '../../types/errors.type';
 import {
   Event,
   EventId,
   EventRepository,
   PrismaEventCreate,
   toDomainEvent,
-} from '../../types/domain/events.type';
-import { APIError, APIErrorCode, createAPIError } from '../../types/errors.type';
+} from '../../types/events.type';
 import { EventService } from './types';
 
-/**
- * Dependencies required for the event service
- */
+// Dependencies required for the event service
 export interface EventServiceDependencies {
+  readonly bootstrapApi: BootstrapApi;
   readonly eventRepository: EventRepository;
   readonly eventCache: EventCache;
 }
 
-/**
- * Creates a service error from an API error
- */
+// Creates a service error from an API error
 const createEventServiceError = (error: APIError): APIError =>
   createAPIError({
     code: APIErrorCode.SERVICE_ERROR,
@@ -40,9 +33,7 @@ const createEventServiceError = (error: APIError): APIError =>
     details: error,
   });
 
-/**
- * Creates an API error from a cache error
- */
+// Creates an API error from a cache error
 const createCacheError = (error: CacheError): APIError =>
   createAPIError({
     code: APIErrorCode.SERVICE_ERROR,

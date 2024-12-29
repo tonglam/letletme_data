@@ -1,7 +1,4 @@
-/**
- * Error code constants for HTTP and API errors
- * @const {Readonly<{VALIDATION_ERROR: string, NOT_FOUND: string, UNAUTHORIZED: string, FORBIDDEN: string, CONFLICT: string, INTERNAL_SERVER_ERROR: string, DATABASE_ERROR: string, BAD_REQUEST: string}>}
- */
+// Error code constants for HTTP and API errors
 export const ErrorCode = {
   VALIDATION_ERROR: 'VALIDATION_ERROR',
   NOT_FOUND: 'NOT_FOUND',
@@ -13,8 +10,5 @@ export const ErrorCode = {
   BAD_REQUEST: 'BAD_REQUEST',
 } as const;
 
-/**
- * Type for error codes
- * @type {(typeof ErrorCode)[keyof typeof ErrorCode]}
- */
+// Type for error codes
 export type ErrorCode = (typeof ErrorCode)[keyof typeof ErrorCode];

@@ -5,9 +5,7 @@ import { DEFAULT_QUEUE_OPTIONS } from '../config/queue.config';
 import { BaseJobData, QueueOptions } from '../types';
 import { createQueueProcessingError } from './errors';
 
-/**
- * Worker adapter dependencies
- */
+// Worker adapter dependencies
 export interface WorkerDependencies<T extends BaseJobData> {
   readonly process: (job: Job<T>) => TE.TaskEither<Error, void>;
   readonly onCompleted?: (job: Job<T>) => void;
@@ -15,17 +13,13 @@ export interface WorkerDependencies<T extends BaseJobData> {
   readonly onError?: (error: Error) => void;
 }
 
-/**
- * Worker adapter interface
- */
+// Worker adapter interface
 export interface WorkerAdapter {
   readonly start: () => TE.TaskEither<Error, void>;
   readonly stop: () => TE.TaskEither<Error, void>;
 }
 
-/**
- * Creates a worker adapter
- */
+// Creates a worker adapter
 export const createWorkerAdapter = <T extends BaseJobData>(
   options: QueueOptions,
   deps: WorkerDependencies<T>,

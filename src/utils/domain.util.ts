@@ -1,17 +1,12 @@
-/**
- * Domain Utility Module
- *
- * Utility functions for domain layer operations.
- */
+// Domain Utility Module
+// Utility functions for domain layer operations.
 
 import * as E from 'fp-ts/Either';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
 import { APIError, APIErrorCode, createAPIError } from '../types/errors.type';
 
-/**
- * Converts any error to an API error
- */
+// Converts any error to an API error
 export const toAPIError = (error: unknown): APIError => {
   if (error instanceof Error) {
     return createAPIError({
@@ -26,15 +21,11 @@ export const toAPIError = (error: unknown): APIError => {
   });
 };
 
-/**
- * Converts a domain error to a TaskEither
- */
+// Converts a domain error to a TaskEither
 export const toDomainError = <T>(error: Error): TE.TaskEither<APIError, T> =>
   TE.left(toAPIError(error));
 
-/**
- * Validates a domain model
- */
+// Validates a domain model
 export const validateDomainModel = <T>(
   model: T | null,
   modelName: string,
@@ -49,17 +40,13 @@ export const validateDomainModel = <T>(
     ),
   );
 
-/**
- * Domain error interface
- */
+// Domain error interface
 export interface DomainError {
   readonly message: string;
   readonly cause?: unknown;
 }
 
-/**
- * Creates domain operations utilities
- */
+// Creates domain operations utilities
 export const createDomainOperations = <D, P, E extends DomainError = DomainError>({
   toDomain,
   toPrisma,
@@ -96,8 +83,6 @@ export const createDomainOperations = <D, P, E extends DomainError = DomainError
   },
 });
 
-/**
- * Returns the value if defined
- */
+// Returns the value if defined
 export const getDefinedValue = <T>(value: T | undefined): T | undefined =>
   value !== undefined ? value : undefined;

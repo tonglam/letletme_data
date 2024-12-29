@@ -2,16 +2,10 @@ import * as path from 'path';
 import { Logger, pino } from 'pino';
 import { formatLocalTime } from '../../utils/date.util';
 
-/**
- * Available log levels
- * @type {('error' | 'warn' | 'info' | 'debug')}
- */
+// Available log levels
 export type LogLevel = 'error' | 'warn' | 'info' | 'debug';
 
-/**
- * Logger configuration interface
- * @interface
- */
+// Logger configuration interface
 export interface LoggerConfig {
   /** Logger name identifier */
   name: string;
@@ -21,12 +15,7 @@ export interface LoggerConfig {
   filepath: string;
 }
 
-/**
- * Creates base configuration for pino logger
- * @param {LoggerConfig} config - Logger configuration
- * @returns {Object} Base pino configuration
- * @private
- */
+// Creates base configuration for pino logger
 const createBaseConfig = (config: LoggerConfig) => ({
   level: config.level,
   timestamp: () => `,"time":"${formatLocalTime(new Date())}"`,
@@ -36,11 +25,7 @@ const createBaseConfig = (config: LoggerConfig) => ({
   },
 });
 
-/**
- * Creates a configured pino logger instance
- * @param {LoggerConfig} config - Logger configuration
- * @returns {Logger} Configured pino logger instance
- */
+// Creates a configured pino logger instance
 export const createLogger = (config: LoggerConfig): Logger => {
   const transport = pino.transport({
     target: 'pino/file',
@@ -54,10 +39,7 @@ export const createLogger = (config: LoggerConfig): Logger => {
   return pino(createBaseConfig(config), transport);
 };
 
-/**
- * Default logger configurations
- * @const {Readonly<{path: string, level: LogLevel, loggers: {api: {name: string}, fpl: {name: string}, queue: {name: string}, workflow: {name: string}}}>}
- */
+// Default logger configurations
 export const LOG_CONFIG = {
   path: process.env.LOG_PATH || 'logs',
   level:

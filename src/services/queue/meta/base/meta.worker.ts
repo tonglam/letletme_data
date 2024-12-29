@@ -9,27 +9,22 @@ import {
   WorkerDependencies,
 } from '../../../../infrastructure/queue';
 import { WorkerService } from '../../worker.service';
-import { teamJobService } from '../teams.job';
 
-/**
- * Meta worker service interface
- */
+// Meta worker service interface for processing various job types
 export interface MetaWorkerService extends WorkerService {
-  readonly processBootstrapJob: (job: Job<MetaJobData>) => Promise<void>;
-  readonly processTeamsJob: (job: Job<MetaJobData>) => Promise<void>;
-  readonly processPhasesJob: (job: Job<MetaJobData>) => Promise<void>;
-  readonly processEventsJob: (job: Job<MetaJobData>) => Promise<void>;
+  processBootstrapJob: (job: Job<MetaJobData>) => Promise<void>;
+  processTeamsJob: (job: Job<MetaJobData>) => Promise<void>;
+  processPhasesJob: (job: Job<MetaJobData>) => Promise<void>;
+  processEventsJob: (job: Job<MetaJobData>) => Promise<void>;
 }
 
-/**
- * Creates a meta worker service
- */
+// Creates a meta worker service with the provided dependencies
 export const createMetaWorkerService = (
   deps: WorkerDependencies<MetaJobData>,
   options: QueueOptions,
 ): MetaWorkerService => {
   const service: MetaWorkerService = {
-    processBootstrapJob: async () => {
+    processBootstrapJob: async (_job: Job<MetaJobData>) => {
       await pipe(
         TE.right(undefined),
         TE.fold(
@@ -41,19 +36,7 @@ export const createMetaWorkerService = (
       )();
     },
 
-    processTeamsJob: async (job: Job<MetaJobData>) => {
-      await pipe(
-        teamJobService.processTeamsJob(job),
-        TE.fold(
-          (error) => {
-            throw error;
-          },
-          () => TE.right(undefined),
-        ),
-      )();
-    },
-
-    processPhasesJob: async () => {
+    processTeamsJob: async (_job: Job<MetaJobData>) => {
       await pipe(
         TE.right(undefined),
         TE.fold(
@@ -65,7 +48,19 @@ export const createMetaWorkerService = (
       )();
     },
 
-    processEventsJob: async () => {
+    processPhasesJob: async (_job: Job<MetaJobData>) => {
+      await pipe(
+        TE.right(undefined),
+        TE.fold(
+          (error) => {
+            throw error;
+          },
+          () => TE.right(undefined),
+        ),
+      )();
+    },
+
+    processEventsJob: async (_job: Job<MetaJobData>) => {
       await pipe(
         TE.right(undefined),
         TE.fold(

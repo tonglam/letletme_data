@@ -1,12 +1,8 @@
-/**
- * Event Service Cache Module
- *
- * Provides service-level caching functionality for FPL events using Redis.
- * Implements adapter pattern to connect bootstrap API with domain cache,
- * ensuring data consistency and proper error handling throughout the caching layer.
- *
- * @module EventServiceCache
- */
+// Event Service Cache Module
+//
+// Provides service-level caching functionality for FPL events using Redis.
+// Implements adapter pattern to connect bootstrap API with domain cache,
+// ensuring data consistency and proper error handling throughout the caching layer.
 
 import * as A from 'fp-ts/Array';
 import * as O from 'fp-ts/Option';
@@ -25,22 +21,13 @@ import { createRedisCache } from '../../infrastructure/cache/redis';
 import { CacheError, CacheErrorType } from '../../infrastructure/cache/types';
 import { getCurrentSeason } from '../../types/base.type';
 import type { BootStrapResponse } from '../../types/bootstrap.type';
-import { toDomainEvent, type Event } from '../../types/domain/events.type';
+import { toDomainEvent, type Event } from '../../types/events.type';
 import { toNullable } from '../../utils/service.util';
 
-/**
- * Creates an event data provider using the Bootstrap API.
- *
- * @param {BootstrapApi & { getBootstrapEvents: () => Promise<BootStrapResponse['events']> }} bootstrapApi - Bootstrap API client
- * @returns {EventDataProvider} Event data provider instance
- */
 const createEventDataProvider = (
   bootstrapApi: BootstrapApi & { getBootstrapEvents: () => Promise<BootStrapResponse['events']> },
 ): EventDataProvider => {
-  /**
-   * Core operation to fetch bootstrap events.
-   * @returns {TaskEither<CacheError, BootStrapResponse['events']>} Bootstrap events or error
-   */
+  // Core operation to fetch bootstrap events
   const getBootstrapEvents: TE.TaskEither<CacheError, BootStrapResponse['events']> = TE.tryCatch(
     () => bootstrapApi.getBootstrapEvents(),
     (error): CacheError => ({
@@ -50,21 +37,11 @@ const createEventDataProvider = (
     }),
   );
 
-  /**
-   * Helper function to find events by predicate.
-   * @param {(event: BootStrapResponse['events'][number]) => boolean} predicate - Event filter
-   * @returns {(events: BootStrapResponse['events']) => Option<Event>} Event finder function
-   */
+  // Helper function to find events by predicate
   const findEvent = (predicate: (event: BootStrapResponse['events'][number]) => boolean) =>
     flow(A.findFirst(predicate), O.map(toDomainEvent));
 
-  /**
-   * Processes bootstrap events with error handling.
-   * @template T Result type
-   * @param {(events: BootStrapResponse['events']) => Option<T>} transform - Event transformer
-   * @param {T} defaultValue - Fallback value
-   * @returns {Promise<T>} Processed result or default value
-   */
+  // Processes bootstrap events with error handling
   const processBootstrapEvents = <T>(
     transform: (events: BootStrapResponse['events']) => O.Option<T>,
     defaultValue: T,
@@ -103,12 +80,7 @@ const createEventDataProvider = (
   };
 };
 
-/**
- * Creates an event cache instance for the service layer.
- *
- * @param {BootstrapApi & { getBootstrapEvents: () => Promise<BootStrapResponse['events']> }} bootstrapApi - Bootstrap API client
- * @returns {EventCache} Event cache instance
- */
+// Creates an event cache instance for the service layer
 export const createEventCache = (
   bootstrapApi: BootstrapApi & { getBootstrapEvents: () => Promise<BootStrapResponse['events']> },
 ): EventCache => {

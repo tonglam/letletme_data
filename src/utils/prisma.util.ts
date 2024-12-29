@@ -1,9 +1,6 @@
-/**
- * Prisma Utility Module
- *
- * Utility functions for Prisma data transformations and validations.
- * Implements type-safe data handling with fp-ts patterns.
- */
+// Prisma Utility Module
+// Utility functions for Prisma data transformations and validations.
+// Implements type-safe data handling with fp-ts patterns.
 
 import { Prisma } from '@prisma/client';
 import * as E from 'fp-ts/Either';
@@ -11,14 +8,8 @@ import * as O from 'fp-ts/Option';
 import { pipe } from 'fp-ts/function';
 import { APIError, createValidationError } from '../types/errors.type';
 
-/**
- * Converts numeric fields to Prisma.Decimal
- * Transforms numeric values in an object to Prisma-compatible decimal format
- *
- * @param data - Object containing numeric fields
- * @param isUpdate - Whether the conversion is for an update operation
- * @returns Transformed object with Prisma.Decimal values
- */
+// Converts numeric fields to Prisma.Decimal
+// Transforms numeric values in an object to Prisma-compatible decimal format
 export const convertToDecimal = <T extends Record<string, unknown>>(
   data: T,
   isUpdate = false,
@@ -34,13 +25,8 @@ export const convertToDecimal = <T extends Record<string, unknown>>(
   return result as { [K in keyof T]: T[K] | Prisma.Decimal | null | undefined };
 };
 
-/**
- * Converts a value to Prisma-compatible JSON
- * Transforms values to Prisma JSON format with null handling
- *
- * @param value - Value to convert to JSON
- * @returns Prisma-compatible JSON value
- */
+// Converts a value to Prisma-compatible JSON
+// Transforms values to Prisma JSON format with null handling
 export const toNullableJson = (
   value: unknown,
 ): Prisma.InputJsonValue | Prisma.NullableJsonNullValueInput =>
@@ -53,14 +39,8 @@ export const toNullableJson = (
     ),
   );
 
-/**
- * Parses a JSON array into typed objects
- * Safely transforms JSON array into typed objects with validation
- *
- * @param value - JSON array to parse
- * @param parser - Function to parse individual items
- * @returns Array of parsed objects
- */
+// Parses a JSON array into typed objects
+// Safely transforms JSON array into typed objects with validation
 export const parseJsonArray = <T>(
   value: Prisma.JsonValue | null,
   parser: (item: Prisma.JsonObject) => T,
@@ -78,14 +58,8 @@ export const parseJsonArray = <T>(
     ),
   );
 
-/**
- * Parses a JSON object into a typed object
- * Safely transforms JSON object with validation
- *
- * @param value - JSON object to parse
- * @param parser - Function to parse the object
- * @returns Parsed object or null
- */
+// Parses a JSON object into a typed object
+// Safely transforms JSON object with validation
 export const parseJsonObject = <T>(
   value: Prisma.JsonValue | null,
   parser: (obj: Prisma.JsonObject) => T | null,
@@ -99,15 +73,8 @@ export const parseJsonObject = <T>(
     O.fold(() => null, parser),
   );
 
-/**
- * Validates a Prisma entity
- * Ensures required fields are present in the entity
- *
- * @param data - Entity to validate
- * @param requiredFields - Array of required field keys
- * @param entityName - Name of the entity for error messages
- * @returns Either with validated entity or validation error
- */
+// Validates a Prisma entity
+// Ensures required fields are present in the entity
 export const ensurePrismaEntity = <T>(
   data: unknown,
   requiredFields: readonly (keyof T)[],
@@ -136,15 +103,8 @@ export const ensurePrismaEntity = <T>(
     E.map((d) => d as T),
   );
 
-/**
- * Validates an array of Prisma entities
- * Ensures all items in array are valid entities
- *
- * @param data - Array of entities to validate
- * @param requiredFields - Array of required field keys
- * @param entityName - Name of the entity for error messages
- * @returns Either with validated array or validation error
- */
+// Validates an array of Prisma entities
+// Ensures all items in array are valid entities
 export const ensurePrismaEntityArray = <T>(
   data: unknown,
   requiredFields: readonly (keyof T)[],

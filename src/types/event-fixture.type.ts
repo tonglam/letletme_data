@@ -12,9 +12,7 @@ export const EventFixtureId = createBrandedType<string, 'EventFixtureId'>(
 );
 
 // ============ Types ============
-/**
- * API Response types (snake_case)
- */
+// API response types representing raw data from external API
 export interface EventFixtureResponse {
   readonly code: number;
   readonly event: number;
@@ -35,9 +33,7 @@ export interface EventFixtureResponse {
 
 export type EventFixturesResponse = readonly EventFixtureResponse[];
 
-/**
- * Domain types (camelCase)
- */
+// Domain types representing event fixture data in our system
 export interface EventFixture {
   readonly id: EventFixtureId;
   readonly code: number;
@@ -58,14 +54,14 @@ export interface EventFixture {
 
 export type EventFixtures = readonly EventFixture[];
 
-// ============ Repository Interface ============
+// Repository interface for event fixture data access
 export type EventFixtureRepository = BaseRepository<
   PrismaEventFixture,
   PrismaEventFixtureCreate,
   EventFixtureId
 >;
 
-// ============ Persistence Types ============
+// Persistence types for database operations
 export interface PrismaEventFixture {
   readonly id: string;
   readonly code: number;
@@ -87,7 +83,7 @@ export interface PrismaEventFixture {
 
 export type PrismaEventFixtureCreate = Omit<PrismaEventFixture, 'id' | 'createdAt'>;
 
-// ============ Converters ============
+// Type transformers for converting between API and domain models
 export const toDomainEventFixture = (
   data: EventFixtureResponse | PrismaEventFixture,
 ): EventFixture => {

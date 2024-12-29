@@ -1,34 +1,21 @@
-/**
- * Event Handlers Module
- *
- * Provides handlers for event-related API endpoints using functional programming
- * patterns with fp-ts. Handles event retrieval operations including getting all events,
- * current event, next event, and specific events by ID.
- *
- * @module api/handlers/event
- * @category API
- */
+// Event Handlers Module
+// Provides handlers for event-related API endpoints using functional programming
+// patterns with fp-ts. Handles event retrieval operations including getting all events,
+// current event, next event, and specific events by ID.
 
 import { Request } from 'express';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
 import { ServiceContainer, ServiceKey } from '../../services';
-import { Event, EventId } from '../../types/domain/events.type';
+import { Event, EventId } from '../../types/events.type';
 import { handleNullable } from '../../utils/error.util';
 import { EventHandlerResponse } from '../types';
 
-/**
- * Creates event handlers with dependency injection
- * @param {ServiceContainer[typeof ServiceKey.EVENT]} eventService - Injected event service
- * @returns {EventHandlerResponse} Object containing all event handler functions
- */
+// Creates event handlers with dependency injection
 export const createEventHandlers = (
   eventService: ServiceContainer[typeof ServiceKey.EVENT],
 ): EventHandlerResponse => ({
-  /**
-   * Retrieves all events
-   * @returns {TaskEither<APIError, Event[]>} Array of events or error
-   */
+  // Retrieves all events
   getAllEvents: () => {
     const task = eventService.getEvents();
     return pipe(
@@ -37,10 +24,7 @@ export const createEventHandlers = (
     );
   },
 
-  /**
-   * Gets the current active event
-   * @returns {TaskEither<APIError, Event>} Current event or error if not found
-   */
+  // Gets the current active event
   getCurrentEvent: () => {
     const task = eventService.getCurrentEvent();
     return pipe(
@@ -51,10 +35,7 @@ export const createEventHandlers = (
     );
   },
 
-  /**
-   * Gets the next scheduled event
-   * @returns {TaskEither<APIError, Event>} Next event or error if not found
-   */
+  // Gets the next scheduled event
   getNextEvent: () => {
     const task = eventService.getNextEvent();
     return pipe(
@@ -65,11 +46,7 @@ export const createEventHandlers = (
     );
   },
 
-  /**
-   * Retrieves a specific event by ID
-   * @param {Request} req - Express request object containing event ID
-   * @returns {TaskEither<APIError, Event>} Event matching ID or error if not found
-   */
+  // Retrieves a specific event by ID
   getEventById: (req: Request) => {
     const eventId = Number(req.params.id) as EventId;
     const task = eventService.getEvent(eventId);

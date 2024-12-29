@@ -1,40 +1,29 @@
-/**
- * HTTP Types Module
- * Comprehensive type definitions for the HTTP client infrastructure.
- * Includes request/response types, client interfaces, and configuration types.
- * Ensures type safety and consistent interfaces across the HTTP client implementation.
- * @module infrastructure/http/client/types
- */
+// HTTP Types Module
+// Comprehensive type definitions for the HTTP client infrastructure.
+// Includes request/response types, client interfaces, and configuration types.
+// Ensures type safety and consistent interfaces across the HTTP client implementation.
 
 import { AxiosInstance } from 'axios';
 import type { TaskEither } from 'fp-ts/TaskEither';
 import { Logger } from 'pino';
 import { APIError } from '../../../types/errors.type';
 
-/**
- * HTTP headers type
- */
+// HTTP headers type
 export type Headers = Record<string, string>;
 
-/**
- * Standard API response structure
- */
+// Standard API response structure
 export interface APIResponse<T = unknown> {
   readonly data: T;
   readonly status: number;
   readonly headers: Record<string, string>;
 }
 
-/**
- * Error details for HTTP responses with status code information
- */
+// Error details for HTTP responses with status code information
 export interface ErrorDetails extends Record<string, unknown> {
   httpStatus?: number;
 }
 
-/**
- * Supported HTTP methods for client operations
- */
+// Supported HTTP methods for client operations
 export enum HttpMethod {
   GET = 'GET',
   POST = 'POST',
@@ -47,9 +36,7 @@ export enum HttpMethod {
   CONNECT = 'CONNECT',
 }
 
-/**
- * Generic request body type that can be undefined
- */
+// Generic request body type that can be undefined
 export type RequestBody<T> = T | undefined;
 
 /**

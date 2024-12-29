@@ -1,18 +1,15 @@
+// Monitor service for queue operations
 import * as O from 'fp-ts/Option';
 import { pipe } from 'fp-ts/function';
 import { MonitorDependencies, MonitorOperations } from '../types';
 import { createMonitorAdapter } from './monitor.adapter';
 
-/**
- * Monitor service interface
- */
+// Monitor service interface extending monitor operations
 export interface MonitorService extends MonitorOperations {
   readonly getMonitor: (queueName: string) => O.Option<MonitorOperations>;
 }
 
-/**
- * Creates a monitor service
- */
+// Creates a monitor service with the given dependencies
 export const createMonitorService = (deps: MonitorDependencies): MonitorService => {
   const monitors = new Map<string, MonitorOperations>();
 

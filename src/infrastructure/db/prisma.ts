@@ -1,44 +1,26 @@
-/**
- * Prisma Client Module
- *
- * Provides a singleton Prisma client instance for database operations.
- * Implements functional programming patterns with fp-ts for type-safe error handling.
- */
+// Prisma client module providing a singleton instance for database operations.
+// Implements functional programming patterns with fp-ts for type-safe error handling.
 
 import { PrismaClient } from '@prisma/client';
 import * as TE from 'fp-ts/TaskEither';
 import { DBError, DBErrorCode, createDBError } from '../../types/errors.type';
 
-/**
- * Global Prisma client instance
- * Ensures single client instance across the application
- */
+// Global Prisma client instance
 const globalForPrisma = global as { prisma?: PrismaClient };
 
-/**
- * Singleton Prisma client instance
- * Creates a new Prisma client with configured options if none exists
- */
+// Singleton Prisma client instance with configured options
 export const prisma =
   globalForPrisma.prisma ??
   new PrismaClient({
     log: ['error', 'warn'],
   });
 
-/**
- * Development environment handling
- * Preserves client instance during development hot reloads
- */
+// Preserve client instance during development hot reloads
 if (process.env.NODE_ENV !== 'production') {
   globalForPrisma.prisma = prisma;
 }
 
-/**
- * Establishes database connection
- * Connects to database if not already connected
- *
- * @returns TaskEither resolving to void on success, or DBError on failure
- */
+// Establishes database connection if not already connected
 export const connectDB = (): TE.TaskEither<DBError, void> =>
   TE.tryCatch(
     async () => {
@@ -52,12 +34,8 @@ export const connectDB = (): TE.TaskEither<DBError, void> =>
       }),
   );
 
-/**
- * Disconnects from database
- * Gracefully closes database connection if open
- *
- * @returns TaskEither resolving to void on success, or DBError on failure
- */
+// Disconnects from database
+// Gracefully closes database connection if open
 export const disconnectDB = (): TE.TaskEither<DBError, void> =>
   TE.tryCatch(
     async () => {

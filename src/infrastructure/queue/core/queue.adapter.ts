@@ -5,9 +5,7 @@ import { DEFAULT_QUEUE_OPTIONS } from '../config/queue.config';
 import { BaseJobData, QueueDependencies, QueueOptions } from '../types';
 import { createQueueConnectionError, createQueueProcessingError } from './errors';
 
-/**
- * Job counts type
- */
+// Job counts type
 export interface JobCounts {
   readonly waiting: number;
   readonly active: number;
@@ -17,9 +15,7 @@ export interface JobCounts {
   readonly paused: number;
 }
 
-/**
- * Queue adapter for BullMQ operations
- */
+// Queue adapter for BullMQ operations
 export interface QueueAdapter<T extends BaseJobData> {
   readonly add: (data: T, opts?: JobsOptions) => TE.TaskEither<Error, Job<T>>;
   readonly addBulk: (
@@ -33,9 +29,7 @@ export interface QueueAdapter<T extends BaseJobData> {
   readonly getJobCounts: () => TE.TaskEither<Error, JobCounts>;
 }
 
-/**
- * Creates queue dependencies
- */
+// Creates queue dependencies
 export const createQueueDependencies = (options: QueueOptions): QueueDependencies => ({
   queue: new Queue(options.name, {
     ...DEFAULT_QUEUE_OPTIONS,
@@ -47,9 +41,7 @@ export const createQueueDependencies = (options: QueueOptions): QueueDependencie
   }),
 });
 
-/**
- * Creates a queue adapter
- */
+// Creates a queue adapter
 export const createQueueAdapter = <T extends BaseJobData>(
   deps: QueueDependencies,
 ): QueueAdapter<T> => {

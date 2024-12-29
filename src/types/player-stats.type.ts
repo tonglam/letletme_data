@@ -2,9 +2,9 @@ import { Prisma } from '@prisma/client';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { APIError } from '../errors.type';
 import { BaseRepository, Branded, createBrandedType, isApiResponse } from './base.type';
 import { ElementResponse } from './elements.type';
+import { APIError } from './errors.type';
 
 // ============ Branded Types ============
 export type PlayerStatId = Branded<string, 'PlayerStatId'>;
@@ -25,9 +25,7 @@ export const validatePlayerStatId = (value: unknown): E.Either<string, PlayerSta
   );
 
 // ============ Types ============
-/**
- * Domain types (camelCase)
- */
+// Domain types representing player statistics in our system
 export interface PlayerStat {
   readonly id: PlayerStatId;
   readonly eventId: number;
@@ -38,10 +36,10 @@ export interface PlayerStat {
   readonly creativity: number | null;
   readonly threat: number | null;
   readonly ictIndex: number | null;
-  readonly expectedGoals: number | null;
-  readonly expectedAssists: number | null;
-  readonly expectedGoalInvolvements: number | null;
-  readonly expectedGoalsConceded: number | null;
+  readonly expectedGoals: Prisma.Decimal | null;
+  readonly expectedAssists: Prisma.Decimal | null;
+  readonly expectedGoalInvolvements: Prisma.Decimal | null;
+  readonly expectedGoalsConceded: Prisma.Decimal | null;
   readonly minutes: number | null;
   readonly goalsScored: number | null;
   readonly assists: number | null;
@@ -63,37 +61,23 @@ export interface PlayerStat {
   readonly threatRankType: number | null;
   readonly ictIndexRank: number | null;
   readonly ictIndexRankType: number | null;
-  readonly expectedGoalsPer90: number | null;
-  readonly savesPer90: number | null;
-  readonly expectedAssistsPer90: number | null;
-  readonly expectedGoalInvolvementsPer90: number | null;
-  readonly expectedGoalsConcededPer90: number | null;
-  readonly goalsConcededPer90: number | null;
-  readonly startsPer90: number | null;
-  readonly cleanSheetsPer90: number | null;
-  readonly cornersAndIndirectFreekicksOrder: number | null;
-  readonly cornersAndIndirectFreekicksText: string | null;
-  readonly directFreekicksOrder: number | null;
-  readonly directFreekicksText: string | null;
-  readonly penaltiesOrder: number | null;
-  readonly penaltiesText: string | null;
+  readonly expectedGoalsPer90: Prisma.Decimal | null;
+  readonly savesPer90: Prisma.Decimal | null;
+  readonly expectedAssistsPer90: Prisma.Decimal | null;
+  readonly expectedGoalInvolvementsPer90: Prisma.Decimal | null;
 }
 
 export type PlayerStats = readonly PlayerStat[];
 
-// ============ Repository Interface ============
+// Repository interface for player statistics data access
 export interface PlayerStatRepository
   extends BaseRepository<PrismaPlayerStat, PrismaPlayerStatCreate, PlayerStatId> {
-  findByElementId: (elementId: number) => TE.TaskEither<APIError, PrismaPlayerStat[]>;
   findByEventId: (eventId: number) => TE.TaskEither<APIError, PrismaPlayerStat[]>;
-  findByElementAndEvent: (
-    elementId: number,
-    eventId: number,
-  ) => TE.TaskEither<APIError, PrismaPlayerStat | null>;
+  findByElementId: (elementId: number) => TE.TaskEither<APIError, PrismaPlayerStat[]>;
   findByTeamId: (teamId: number) => TE.TaskEither<APIError, PrismaPlayerStat[]>;
 }
 
-// ============ Persistence Types ============
+// Persistence types for database operations
 export interface PrismaPlayerStat {
   readonly id: string;
   readonly eventId: number;
@@ -133,54 +117,59 @@ export interface PrismaPlayerStat {
   readonly savesPer90: Prisma.Decimal | null;
   readonly expectedAssistsPer90: Prisma.Decimal | null;
   readonly expectedGoalInvolvementsPer90: Prisma.Decimal | null;
-  readonly expectedGoalsConcededPer90: Prisma.Decimal | null;
-  readonly goalsConcededPer90: Prisma.Decimal | null;
-  readonly startsPer90: Prisma.Decimal | null;
-  readonly cleanSheetsPer90: Prisma.Decimal | null;
-  readonly cornersAndIndirectFreekicksOrder: number | null;
-  readonly cornersAndIndirectFreekicksText: string | null;
-  readonly directFreekicksOrder: number | null;
-  readonly directFreekicksText: string | null;
-  readonly penaltiesOrder: number | null;
-  readonly penaltiesText: string | null;
   readonly createdAt: Date;
-  readonly updatedAt: Date;
 }
 
-export type PrismaPlayerStatCreate = Omit<PrismaPlayerStat, 'id' | 'createdAt' | 'updatedAt'>;
-export type PrismaPlayerStatUpdate = Partial<
-  Omit<PrismaPlayerStat, 'id' | 'createdAt' | 'updatedAt'>
->;
+export type PrismaPlayerStatCreate = Omit<PrismaPlayerStat, 'id' | 'createdAt'>;
+export type PrismaPlayerStatUpdate = Partial<Omit<PrismaPlayerStat, 'id' | 'createdAt'>>;
 
-// ============ Converters ============
+// Type transformers for converting between API and domain models
 export const toDomainPlayerStat = (data: ElementResponse | PrismaPlayerStat): PlayerStat => {
   const isElementResponse = (d: ElementResponse | PrismaPlayerStat): d is ElementResponse =>
     isApiResponse(d, 'element_type');
-
-  const parseNumber = (value: string | null): number | null => (value ? parseFloat(value) : null);
 
   return {
     id: data.id as PlayerStatId,
     eventId: isElementResponse(data) ? data.event_points : data.eventId,
     elementId: isElementResponse(data) ? data.id : data.elementId,
     teamId: isElementResponse(data) ? data.team : data.teamId,
-    form: isElementResponse(data) ? parseNumber(data.form) : data.form,
-    influence: isElementResponse(data) ? parseNumber(data.influence) : data.influence,
-    creativity: isElementResponse(data) ? parseNumber(data.creativity) : data.creativity,
-    threat: isElementResponse(data) ? parseNumber(data.threat) : data.threat,
-    ictIndex: isElementResponse(data) ? parseNumber(data.ict_index) : data.ictIndex,
+    form: isElementResponse(data) ? (data.form ? Number(data.form) : null) : data.form,
+    influence: isElementResponse(data)
+      ? data.influence
+        ? Number(data.influence)
+        : null
+      : data.influence,
+    creativity: isElementResponse(data)
+      ? data.creativity
+        ? Number(data.creativity)
+        : null
+      : data.creativity,
+    threat: isElementResponse(data) ? (data.threat ? Number(data.threat) : null) : data.threat,
+    ictIndex: isElementResponse(data)
+      ? data.ict_index
+        ? Number(data.ict_index)
+        : null
+      : data.ictIndex,
     expectedGoals: isElementResponse(data)
-      ? parseNumber(data.expected_goals)
-      : data.expectedGoals?.toNumber() ?? null,
+      ? data.expected_goals
+        ? new Prisma.Decimal(data.expected_goals)
+        : null
+      : data.expectedGoals,
     expectedAssists: isElementResponse(data)
-      ? parseNumber(data.expected_assists)
-      : data.expectedAssists?.toNumber() ?? null,
+      ? data.expected_assists
+        ? new Prisma.Decimal(data.expected_assists)
+        : null
+      : data.expectedAssists,
     expectedGoalInvolvements: isElementResponse(data)
-      ? parseNumber(data.expected_goal_involvements)
-      : data.expectedGoalInvolvements?.toNumber() ?? null,
+      ? data.expected_goal_involvements
+        ? new Prisma.Decimal(data.expected_goal_involvements)
+        : null
+      : data.expectedGoalInvolvements,
     expectedGoalsConceded: isElementResponse(data)
-      ? parseNumber(data.expected_goals_conceded)
-      : data.expectedGoalsConceded?.toNumber() ?? null,
+      ? data.expected_goals_conceded
+        ? new Prisma.Decimal(data.expected_goals_conceded)
+        : null
+      : data.expectedGoalsConceded,
     minutes: isElementResponse(data) ? data.minutes : data.minutes,
     goalsScored: isElementResponse(data) ? data.goals_scored : data.goalsScored,
     assists: isElementResponse(data) ? data.assists : data.assists,
@@ -204,28 +193,12 @@ export const toDomainPlayerStat = (data: ElementResponse | PrismaPlayerStat): Pl
     threatRankType: isElementResponse(data) ? data.threat_rank_type : data.threatRankType,
     ictIndexRank: isElementResponse(data) ? data.ict_index_rank : data.ictIndexRank,
     ictIndexRankType: isElementResponse(data) ? data.ict_index_rank_type : data.ictIndexRankType,
-    expectedGoalsPer90: null, // Not available in ElementResponse
-    savesPer90: null, // Not available in ElementResponse
-    expectedAssistsPer90: null, // Not available in ElementResponse
-    expectedGoalInvolvementsPer90: null, // Not available in ElementResponse
-    expectedGoalsConcededPer90: null, // Not available in ElementResponse
-    goalsConcededPer90: null, // Not available in ElementResponse
-    startsPer90: null, // Not available in ElementResponse
-    cleanSheetsPer90: null, // Not available in ElementResponse
-    cornersAndIndirectFreekicksOrder: isElementResponse(data)
-      ? data.corners_and_indirect_freekicks_order
-      : data.cornersAndIndirectFreekicksOrder,
-    cornersAndIndirectFreekicksText: isElementResponse(data)
-      ? data.corners_and_indirect_freekicks_text
-      : data.cornersAndIndirectFreekicksText,
-    directFreekicksOrder: isElementResponse(data)
-      ? data.direct_freekicks_order
-      : data.directFreekicksOrder,
-    directFreekicksText: isElementResponse(data)
-      ? data.direct_freekicks_text
-      : data.directFreekicksText,
-    penaltiesOrder: isElementResponse(data) ? data.penalties_order : data.penaltiesOrder,
-    penaltiesText: null, // Not available in ElementResponse
+    expectedGoalsPer90: isElementResponse(data) ? null : data.expectedGoalsPer90,
+    savesPer90: isElementResponse(data) ? null : data.savesPer90,
+    expectedAssistsPer90: isElementResponse(data) ? null : data.expectedAssistsPer90,
+    expectedGoalInvolvementsPer90: isElementResponse(data)
+      ? null
+      : data.expectedGoalInvolvementsPer90,
   };
 };
 
@@ -238,14 +211,10 @@ export const toPrismaPlayerStat = (stat: PlayerStat): PrismaPlayerStatCreate => 
   creativity: stat.creativity,
   threat: stat.threat,
   ictIndex: stat.ictIndex,
-  expectedGoals: stat.expectedGoals ? new Prisma.Decimal(stat.expectedGoals) : null,
-  expectedAssists: stat.expectedAssists ? new Prisma.Decimal(stat.expectedAssists) : null,
-  expectedGoalInvolvements: stat.expectedGoalInvolvements
-    ? new Prisma.Decimal(stat.expectedGoalInvolvements)
-    : null,
-  expectedGoalsConceded: stat.expectedGoalsConceded
-    ? new Prisma.Decimal(stat.expectedGoalsConceded)
-    : null,
+  expectedGoals: stat.expectedGoals,
+  expectedAssists: stat.expectedAssists,
+  expectedGoalInvolvements: stat.expectedGoalInvolvements,
+  expectedGoalsConceded: stat.expectedGoalsConceded,
   minutes: stat.minutes,
   goalsScored: stat.goalsScored,
   assists: stat.assists,
@@ -267,26 +236,10 @@ export const toPrismaPlayerStat = (stat: PlayerStat): PrismaPlayerStatCreate => 
   threatRankType: stat.threatRankType,
   ictIndexRank: stat.ictIndexRank,
   ictIndexRankType: stat.ictIndexRankType,
-  expectedGoalsPer90: stat.expectedGoalsPer90 ? new Prisma.Decimal(stat.expectedGoalsPer90) : null,
-  savesPer90: stat.savesPer90 ? new Prisma.Decimal(stat.savesPer90) : null,
-  expectedAssistsPer90: stat.expectedAssistsPer90
-    ? new Prisma.Decimal(stat.expectedAssistsPer90)
-    : null,
-  expectedGoalInvolvementsPer90: stat.expectedGoalInvolvementsPer90
-    ? new Prisma.Decimal(stat.expectedGoalInvolvementsPer90)
-    : null,
-  expectedGoalsConcededPer90: stat.expectedGoalsConcededPer90
-    ? new Prisma.Decimal(stat.expectedGoalsConcededPer90)
-    : null,
-  goalsConcededPer90: stat.goalsConcededPer90 ? new Prisma.Decimal(stat.goalsConcededPer90) : null,
-  startsPer90: stat.startsPer90 ? new Prisma.Decimal(stat.startsPer90) : null,
-  cleanSheetsPer90: stat.cleanSheetsPer90 ? new Prisma.Decimal(stat.cleanSheetsPer90) : null,
-  cornersAndIndirectFreekicksOrder: stat.cornersAndIndirectFreekicksOrder,
-  cornersAndIndirectFreekicksText: stat.cornersAndIndirectFreekicksText,
-  directFreekicksOrder: stat.directFreekicksOrder,
-  directFreekicksText: stat.directFreekicksText,
-  penaltiesOrder: stat.penaltiesOrder,
-  penaltiesText: stat.penaltiesText,
+  expectedGoalsPer90: stat.expectedGoalsPer90,
+  savesPer90: stat.savesPer90,
+  expectedAssistsPer90: stat.expectedAssistsPer90,
+  expectedGoalInvolvementsPer90: stat.expectedGoalInvolvementsPer90,
 });
 
 export const convertPrismaPlayerStats = (
@@ -295,7 +248,7 @@ export const convertPrismaPlayerStats = (
   pipe(
     playerStats,
     TE.right,
-    TE.map((values) => values.map(toDomainPlayerStat)),
+    TE.map((stats) => stats.map(toDomainPlayerStat)),
   );
 
 export const convertPrismaPlayerStat = (

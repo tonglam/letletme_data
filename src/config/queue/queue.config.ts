@@ -1,10 +1,7 @@
 import { ConnectionOptions, JobsOptions } from 'bullmq';
 import { QueueOptions } from 'infrastructure/queue/types';
 
-/**
- * Default job configuration options for BullMQ
- * @const {Readonly<JobsOptions>}
- */
+// Default job configuration options for BullMQ
 export const DEFAULT_JOB_OPTIONS: JobsOptions = {
   attempts: 3,
   backoff: {
@@ -15,10 +12,7 @@ export const DEFAULT_JOB_OPTIONS: JobsOptions = {
   removeOnFail: 100,
 } as const;
 
-/**
- * Default Redis connection options for BullMQ
- * @const {ConnectionOptions}
- */
+// Default Redis connection options for BullMQ
 export const DEFAULT_CONNECTION_OPTIONS = {
   host: process.env.REDIS_HOST ?? 'localhost',
   port: parseInt(process.env.REDIS_PORT ?? '6379', 10),
@@ -29,20 +23,14 @@ export const DEFAULT_CONNECTION_OPTIONS = {
   lazyConnect: false,
 } satisfies ConnectionOptions;
 
-/**
- * Default queue configuration options
- * @const {QueueOptions}
- */
+// Default queue configuration options
 export const DEFAULT_QUEUE_OPTIONS = {
   name: 'default',
   connection: DEFAULT_CONNECTION_OPTIONS,
   defaultJobOptions: DEFAULT_JOB_OPTIONS,
 } satisfies QueueOptions;
 
-/**
- * Meta queue configuration for system-level jobs
- * @const {Readonly<QueueOptions>}
- */
+// Meta queue configuration for system-level jobs
 export const META_QUEUE_CONFIG: QueueOptions = {
   name: 'meta-jobs',
   prefix: 'letletme',
@@ -53,11 +41,7 @@ export const META_QUEUE_CONFIG: QueueOptions = {
   connection: DEFAULT_CONNECTION_OPTIONS,
 } as const;
 
-/**
- * Creates queue options by merging default options with custom configuration
- * @param {Partial<QueueOptions>} options - Custom queue options
- * @returns {QueueOptions} Merged queue configuration
- */
+// Creates queue options by merging default options with custom configuration
 export const createQueueOptions = (options: Partial<QueueOptions>): QueueOptions => ({
   ...DEFAULT_QUEUE_OPTIONS,
   ...options,

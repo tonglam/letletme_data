@@ -7,10 +7,8 @@ import { QUEUE_LOG_MESSAGES, QUEUE_PROGRESS } from '../core/constants';
 import { WorkerDependencies, createWorkerAdapter } from '../core/worker.adapter';
 import { BaseJobData } from '../types';
 
-/**
- * Common job processing wrapper that handles progress updates
- * Infrastructure layer utility for progress tracking
- */
+// Common job processing wrapper that handles progress updates
+// Infrastructure layer utility for progress tracking
 const processWithProgress = <T extends BaseJobData>(
   job: Job<T>,
   process: () => Promise<void>,
@@ -26,10 +24,8 @@ const processWithProgress = <T extends BaseJobData>(
     ),
   );
 
-/**
- * Creates a worker service with progress tracking
- * Infrastructure layer only - handles job mechanics, error handling, and logging
- */
+// Creates a worker service with progress tracking
+// Infrastructure layer only - handles job mechanics, error handling, and logging
 export const createWorkerWithProgress = <T extends BaseJobData>(
   config: typeof META_QUEUE_CONFIG,
   processJob: (job: Job<T>) => Promise<void>,
@@ -52,9 +48,7 @@ export const createWorkerWithProgress = <T extends BaseJobData>(
   return createWorkerAdapter<T>(config, deps);
 };
 
-/**
- * Creates a meta worker service using the generic worker infrastructure
- */
+// Creates a meta worker service using the generic worker infrastructure
 export const createMetaWorkerService = (
   processJob: (job: Job<BaseJobData>) => Promise<void>,
 ): WorkerService => createWorkerWithProgress(META_QUEUE_CONFIG, processJob);

@@ -1,15 +1,9 @@
-/**
- * Error Types Module
- *
- * Core type definitions for error handling across the application.
- * Follows functional programming principles and provides type safety.
- */
+// Core type definitions for error handling across the application.
+// Follows functional programming principles and provides type safety.
 
 // ============ Error Codes ============
 
-/**
- * API error codes
- */
+// API error codes
 export const APIErrorCode = {
   VALIDATION_ERROR: 'VALIDATION_ERROR',
   NOT_FOUND: 'NOT_FOUND',
@@ -23,9 +17,7 @@ export const APIErrorCode = {
 
 export type APIErrorCode = (typeof APIErrorCode)[keyof typeof APIErrorCode];
 
-/**
- * Database error codes
- */
+// Database error codes
 export const DBErrorCode = {
   CONNECTION_ERROR: 'CONNECTION_ERROR',
   OPERATION_ERROR: 'OPERATION_ERROR',
@@ -35,9 +27,7 @@ export const DBErrorCode = {
 
 export type DBErrorCode = (typeof DBErrorCode)[keyof typeof DBErrorCode];
 
-/**
- * Cache error codes
- */
+// Cache error codes
 export const CacheErrorCode = {
   CONNECTION_ERROR: 'CONNECTION_ERROR',
   SERIALIZATION_ERROR: 'SERIALIZATION_ERROR',
@@ -46,9 +36,7 @@ export const CacheErrorCode = {
 
 export type CacheErrorCode = (typeof CacheErrorCode)[keyof typeof CacheErrorCode];
 
-/**
- * Domain error codes
- */
+// Domain error codes
 export const DomainErrorCode = {
   VALIDATION_ERROR: 'VALIDATION_ERROR',
   NOT_FOUND: 'NOT_FOUND',
@@ -57,16 +45,12 @@ export const DomainErrorCode = {
 
 export type DomainErrorCode = (typeof DomainErrorCode)[keyof typeof DomainErrorCode];
 
-/**
- * Service error codes combining all error types
- */
+// Service error codes combining all error types
 export type ServiceErrorCode = APIErrorCode | CacheErrorCode | DomainErrorCode | DBErrorCode;
 
 // ============ Error Types ============
 
-/**
- * Base error interface
- */
+// Base error interface
 export interface BaseError {
   readonly code: string;
   readonly message: string;
@@ -74,64 +58,48 @@ export interface BaseError {
   readonly cause?: Error;
 }
 
-/**
- * API error interface
- */
+// API error interface
 export interface APIError extends BaseError {
   readonly code: APIErrorCode;
 }
 
-/**
- * Cache error interface
- */
+// Cache error interface
 export interface CacheError extends BaseError {
   readonly code: CacheErrorCode;
 }
 
-/**
- * Domain error interface
- */
+// Domain error interface
 export interface DomainError extends BaseError {
   readonly code: DomainErrorCode;
 }
 
-/**
- * Database error interface
- */
+// Database error interface
 export interface DBError extends BaseError {
   readonly code: DBErrorCode;
 }
 
-/**
- * Service error interface
- */
+// Service error interface
 export interface ServiceError extends BaseError {
   readonly code: ServiceErrorCode;
 }
 
 // ============ Response Types ============
 
-/**
- * Standard error response structure
- */
+// Standard error response structure
 export interface ErrorResponse {
   readonly status: 'error';
   readonly error: string;
   readonly details?: unknown;
 }
 
-/**
- * Standard API error response format
- */
+// Standard API error response format
 export interface APIErrorResponse {
   readonly error: string;
 }
 
 // ============ Error Creators ============
 
-/**
- * Creates an API error
- */
+// Creates an API error
 export const createAPIError = (params: {
   code: APIErrorCode;
   message: string;
@@ -144,9 +112,7 @@ export const createAPIError = (params: {
   cause: params.cause,
 });
 
-/**
- * Creates a validation error
- */
+// Creates a validation error
 export const createValidationError = (params: {
   message: string;
   details?: unknown;
@@ -157,9 +123,7 @@ export const createValidationError = (params: {
     ...params,
   });
 
-/**
- * Creates a cache error
- */
+// Creates a cache error
 export const createCacheError = (params: {
   code: CacheErrorCode;
   message: string;
@@ -172,9 +136,7 @@ export const createCacheError = (params: {
   cause: params.cause,
 });
 
-/**
- * Creates a domain error
- */
+// Creates a domain error
 export const createDomainError = (params: {
   code: DomainErrorCode;
   message: string;
@@ -187,9 +149,7 @@ export const createDomainError = (params: {
   cause: params.cause,
 });
 
-/**
- * Creates a database error
- */
+// Creates a database error
 export const createDBError = (params: {
   code: DBErrorCode;
   message: string;
@@ -199,9 +159,7 @@ export const createDBError = (params: {
   ...params,
 });
 
-/**
- * Creates a service error
- */
+// Creates a service error
 export const createServiceError = (params: {
   code: ServiceErrorCode;
   message: string;
@@ -216,9 +174,7 @@ export const createServiceError = (params: {
 
 // ============ Error Utilities ============
 
-/**
- * Converts any error to a service error
- */
+// Converts any error to a service error
 export const toServiceError = (error: unknown): ServiceError => {
   if (isServiceError(error)) return error;
   if (isAPIError(error)) return { ...error, code: error.code };
@@ -235,9 +191,7 @@ export const toServiceError = (error: unknown): ServiceError => {
 
 // ============ Type Guards ============
 
-/**
- * Type guard for APIError
- */
+// Type guard for APIError
 export const isAPIError = (error: unknown): error is APIError =>
   typeof error === 'object' &&
   error !== null &&
@@ -245,9 +199,7 @@ export const isAPIError = (error: unknown): error is APIError =>
   'message' in error &&
   Object.values(APIErrorCode).includes((error as APIError).code);
 
-/**
- * Type guard for CacheError
- */
+// Type guard for CacheError
 export const isCacheError = (error: unknown): error is CacheError =>
   typeof error === 'object' &&
   error !== null &&
@@ -255,9 +207,7 @@ export const isCacheError = (error: unknown): error is CacheError =>
   'message' in error &&
   Object.values(CacheErrorCode).includes((error as CacheError).code);
 
-/**
- * Type guard for DomainError
- */
+// Type guard for DomainError
 export const isDomainError = (error: unknown): error is DomainError =>
   typeof error === 'object' &&
   error !== null &&
@@ -265,20 +215,21 @@ export const isDomainError = (error: unknown): error is DomainError =>
   'message' in error &&
   Object.values(DomainErrorCode).includes((error as DomainError).code);
 
-/**
- * Type guard for Database error
- */
+// Type guard for DBError
 export const isDBError = (error: unknown): error is DBError =>
   typeof error === 'object' &&
   error !== null &&
   'code' in error &&
+  'message' in error &&
   Object.values(DBErrorCode).includes((error as DBError).code);
 
-/**
- * Type guard for ServiceError
- */
+// Type guard for ServiceError
 export const isServiceError = (error: unknown): error is ServiceError =>
-  isAPIError(error) || isCacheError(error) || isDomainError(error) || isDBError(error);
+  typeof error === 'object' &&
+  error !== null &&
+  'code' in error &&
+  'message' in error &&
+  (isAPIError(error) || isCacheError(error) || isDomainError(error) || isDBError(error));
 
 /**
  * Gets HTTP status code from API error

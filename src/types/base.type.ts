@@ -1,6 +1,4 @@
 /**
- * Base Types Module
- *
  * Core type definitions and utilities for the application.
  * Includes branded types, base interfaces, and common type utilities.
  */

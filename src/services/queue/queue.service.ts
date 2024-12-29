@@ -2,9 +2,7 @@ import { Job, JobsOptions } from 'bullmq';
 import * as TE from 'fp-ts/TaskEither';
 import { BaseJobData, QueueAdapter } from '../../infrastructure/queue';
 
-/**
- * Job counts type
- */
+// Job counts type
 export interface JobCounts {
   readonly waiting: number;
   readonly active: number;
@@ -14,9 +12,7 @@ export interface JobCounts {
   readonly paused: number;
 }
 
-/**
- * Job operations interface
- */
+// Job operations interface
 export interface JobOperations<T extends BaseJobData> {
   readonly add: (data: T, opts?: JobsOptions) => TE.TaskEither<Error, Job<T>>;
   readonly addBulk: (
@@ -26,9 +22,7 @@ export interface JobOperations<T extends BaseJobData> {
   readonly getJobCounts: () => TE.TaskEither<Error, JobCounts>;
 }
 
-/**
- * Queue management interface
- */
+// Queue management interface
 export interface QueueManagement {
   readonly pause: () => TE.TaskEither<Error, void>;
   readonly resume: () => TE.TaskEither<Error, void>;
@@ -36,14 +30,10 @@ export interface QueueManagement {
   readonly close: () => TE.TaskEither<Error, void>;
 }
 
-/**
- * Queue service interface
- */
+// Queue service interface
 export interface QueueService<T extends BaseJobData> extends JobOperations<T>, QueueManagement {}
 
-/**
- * Creates a queue service
- */
+// Creates a queue service
 export const createQueueService = <T extends BaseJobData>(
   adapter: QueueAdapter<T>,
 ): QueueService<T> => ({

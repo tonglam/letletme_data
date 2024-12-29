@@ -22,9 +22,7 @@ export const validatePhaseId = (value: unknown): E.Either<string, PhaseId> =>
   );
 
 // ============ Types ============
-/**
- * API Response types (snake_case)
- */
+// API response types representing raw data from external API
 export interface PhaseResponse {
   readonly id: number;
   readonly name: string;
@@ -35,9 +33,7 @@ export interface PhaseResponse {
 
 export type PhasesResponse = readonly PhaseResponse[];
 
-/**
- * Domain types (camelCase)
- */
+// Domain types representing phase data in our system
 export interface Phase {
   readonly id: PhaseId;
   readonly name: string;

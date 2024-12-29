@@ -1,9 +1,7 @@
 import { ElementStatus } from './base.type';
 
 // ============ Types ============
-/**
- * API Response types (snake_case)
- */
+// API response types representing raw data from external API
 export interface ElementResponse {
   readonly id: number;
   readonly can_transact: boolean;

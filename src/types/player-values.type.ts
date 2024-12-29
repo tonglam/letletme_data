@@ -1,7 +1,6 @@
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { APIError } from '../errors.type';
 import {
   BaseRepository,
   Branded,
@@ -12,6 +11,7 @@ import {
   ValueChangeType,
 } from './base.type';
 import { ElementResponse } from './elements.type';
+import { APIError } from './errors.type';
 
 // ============ Branded Types ============
 export type PlayerValueId = Branded<string, 'PlayerValueId'>;
@@ -32,9 +32,7 @@ export const validatePlayerValueId = (value: unknown): E.Either<string, PlayerVa
   );
 
 // ============ Types ============
-/**
- * Domain types (camelCase)
- */
+// Domain types representing player value data in our system
 export interface PlayerValue {
   readonly id: PlayerValueId;
   readonly elementId: number;
@@ -48,7 +46,7 @@ export interface PlayerValue {
 
 export type PlayerValues = readonly PlayerValue[];
 
-// ============ Repository Interface ============
+// Repository interface for player value data access
 export interface PlayerValueRepository
   extends BaseRepository<PrismaPlayerValue, PrismaPlayerValueCreate, PlayerValueId> {
   findByChangeDate: (changeDate: string) => TE.TaskEither<APIError, PrismaPlayerValue[]>;
@@ -57,7 +55,7 @@ export interface PlayerValueRepository
   findByEventId: (eventId: number) => TE.TaskEither<APIError, PrismaPlayerValue[]>;
 }
 
-// ============ Persistence Types ============
+// Persistence types for database operations
 export interface PrismaPlayerValue {
   readonly id: string;
   readonly elementId: number;
@@ -73,7 +71,7 @@ export interface PrismaPlayerValue {
 export type PrismaPlayerValueCreate = Omit<PrismaPlayerValue, 'id' | 'createdAt'>;
 export type PrismaPlayerValueUpdate = Partial<Omit<PrismaPlayerValue, 'id' | 'createdAt'>>;
 
-// ============ Converters ============
+// Type transformers for converting between API and domain models
 export const toDomainPlayerValue = (data: ElementResponse | PrismaPlayerValue): PlayerValue => {
   const isElementResponse = (d: ElementResponse | PrismaPlayerValue): d is ElementResponse =>
     isApiResponse(d, 'element_type');

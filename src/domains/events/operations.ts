@@ -15,7 +15,8 @@ import {
   withCreate,
   withCreateBatch,
   withValidatedCache,
-} from 'src/infrastructure/cache/utils';
+} from '../../infrastructure/cache/core/operations';
+import { APIError, createValidationError } from '../../types/errors.type';
 import {
   Event as DomainEvent,
   EventId,
@@ -24,8 +25,7 @@ import {
   toDomainEvent,
   toPrismaEvent,
   validateEventId,
-} from '../../types/domain/events.type';
-import { APIError, createValidationError } from '../../types/errors.type';
+} from '../../types/events.type';
 import { toAPIError } from '../../utils/domain.util';
 import { type EventCache } from './cache';
 
@@ -74,8 +74,13 @@ export const getEventById = (
   cache: EventCache,
   id: string,
 ): TE.TaskEither<APIError, DomainEvent | null> =>
-  withValidatedCache(
-    (id) => TE.fromEither(validateEventId(Number(id))),
+  withValidatedCache<EventId, DomainEvent>(
+    (id) =>
+      pipe(
+        validateEventId(Number(id)),
+        TE.fromEither,
+        TE.mapLeft((error) => createValidationError({ message: error })),
+      ),
     (validId) => cache.getEvent(String(validId)),
     (validId) =>
       pipe(
@@ -83,7 +88,7 @@ export const getEventById = (
         TE.mapLeft(toAPIError),
         TE.map((event) => (event ? toDomainEvent(event) : null)),
       ),
-    (event) => safeCacheEvent(cache, event),
+    (event) => cache.cacheEvent(event),
   )(id);
 
 /**

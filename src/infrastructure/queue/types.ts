@@ -1,37 +1,34 @@
+// Queue Types Module
+//
+// Defines core types and interfaces for the queue infrastructure.
+// Includes job data structures, queue operations, and monitoring interfaces.
+
 import { JobsOptions, Queue, QueueEvents } from 'bullmq';
 import * as TE from 'fp-ts/TaskEither';
 import { Logger } from 'pino';
 
-/**
- * Base job data that all jobs must extend
- */
+// Base job data that all jobs must extend
 export interface BaseJobData {
   readonly type: string;
   readonly timestamp: Date;
   readonly priority?: number;
 }
 
-/**
- * Common job operations
- */
+// Common job operations
 export enum JobOperation {
   UPDATE = 'UPDATE',
   SYNC = 'SYNC',
   DELETE = 'DELETE',
 }
 
-/**
- * Common job options
- */
+// Common job options
 export interface JobOptions {
   readonly forceUpdate?: boolean;
   readonly validateOnly?: boolean;
   readonly targetIds?: ReadonlyArray<number>;
 }
 
-/**
- * Queue options type
- */
+// Queue options type
 export interface QueueOptions {
   readonly name: string;
   readonly prefix?: string;
@@ -44,17 +41,13 @@ export interface QueueOptions {
   readonly defaultJobOptions?: JobsOptions;
 }
 
-/**
- * Queue dependencies
- */
+// Queue dependencies
 export interface QueueDependencies {
   readonly queue: Queue;
   readonly events: QueueEvents;
 }
 
-/**
- * Meta job data type
- */
+// Meta job data type
 export interface MetaJobData extends BaseJobData {
   readonly type: 'BOOTSTRAP' | 'PHASES' | 'EVENTS' | 'TEAMS';
   readonly data: {
@@ -64,9 +57,7 @@ export interface MetaJobData extends BaseJobData {
   };
 }
 
-/**
- * Monitor metrics for a queue
- */
+// Monitor metrics for a queue
 export interface QueueMetrics {
   readonly activeJobs: number;
   readonly waitingJobs: number;
@@ -78,14 +69,10 @@ export interface QueueMetrics {
   readonly throughput: number;
 }
 
-/**
- * Job status type
- */
+// Job status type
 export type JobStatus = 'waiting' | 'active' | 'completed' | 'failed' | 'delayed';
 
-/**
- * Monitor metrics for a job
- */
+// Monitor metrics for a job
 export interface JobMetricsData {
   readonly jobId: string;
   readonly type: string;
@@ -96,9 +83,7 @@ export interface JobMetricsData {
   readonly progress: number;
 }
 
-/**
- * Mutable job metrics for internal use
- */
+// Mutable job metrics for internal use
 export interface MutableJobMetrics {
   status: JobStatus;
   duration: number;
@@ -109,17 +94,13 @@ export interface MutableJobMetrics {
   readonly timestamp: Date;
 }
 
-/**
- * Monitor configuration
- */
+// Monitor configuration
 export interface MonitorConfig {
   readonly metricsInterval: number;
   readonly historySize: number;
 }
 
-/**
- * Monitor operations interface
- */
+// Monitor operations interface
 export interface MonitorOperations {
   readonly start: () => TE.TaskEither<Error, void>;
   readonly stop: () => TE.TaskEither<Error, void>;
@@ -127,9 +108,7 @@ export interface MonitorOperations {
   readonly getJobMetrics: (jobId: string) => TE.TaskEither<Error, JobMetricsData | null>;
 }
 
-/**
- * Monitor dependencies
- */
+// Monitor dependencies
 export interface MonitorDependencies {
   readonly queue: Queue;
   readonly events: QueueEvents;
@@ -137,9 +116,7 @@ export interface MonitorDependencies {
   readonly config?: MonitorConfig;
 }
 
-/**
- * Queue event data types
- */
+// Queue event data types
 export interface QueueEventData {
   active: { jobId: string; type: string; timestamp: Date };
   completed: { jobId: string; returnvalue: string };
@@ -147,14 +124,10 @@ export interface QueueEventData {
   progress: { jobId: string; data: number };
 }
 
-/**
- * Queue event listener type
- */
+// Queue event listener type
 export type QueueEventListener<K extends keyof QueueEventData> = (data: QueueEventData[K]) => void;
 
-/**
- * Queue event emitter type
- */
+// Queue event emitter type
 export type QueueEventEmitter = {
   on<K extends keyof QueueEventData>(event: K, listener: QueueEventListener<K>): void;
   emit<K extends keyof QueueEventData>(event: K, data: QueueEventData[K]): boolean;

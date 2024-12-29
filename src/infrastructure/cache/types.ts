@@ -1,23 +1,39 @@
 /**
- * Cache Types Module
- *
- * Defines core types and interfaces for the cache infrastructure layer.
+ * Core types and interfaces for the cache infrastructure layer.
  * Implements a type-safe, functional programming approach to caching operations.
  */
 
 import * as TE from 'fp-ts/TaskEither';
 
 /**
- * Core cache configuration for infrastructure layer
- * Defines global settings for cache operations
+ * Cache Error Types
+ *
+ * Defines error types and configurations for cache operations.
+ * Provides type-safe error handling for Redis operations.
  */
-export interface InfrastructureCacheConfig {
-  /** Global prefix for all cache keys */
-  keyPrefix?: string;
-  /** Global default Time-To-Live in seconds */
-  defaultTTL?: number;
-  /** Global retry configuration for cache operations */
-  defaultRetry?: RetryOptions;
+
+/**
+ * Cache error types for different operation failures
+ */
+export enum CacheErrorType {
+  CONNECTION = 'CONNECTION',
+  SET = 'SET',
+  GET = 'GET',
+  DELETE = 'DELETE',
+  EXISTS = 'EXISTS',
+  TTL = 'TTL',
+  SERIALIZATION = 'SERIALIZATION',
+  DESERIALIZATION = 'DESERIALIZATION',
+  OPERATION = 'OPERATION',
+}
+
+/**
+ * Cache error structure for operation failures
+ */
+export interface CacheError {
+  type: CacheErrorType;
+  message: string;
+  cause?: unknown;
 }
 
 /**
@@ -55,34 +71,6 @@ export interface InfrastructureCacheOptions {
   ttl?: number;
   /** Operation-specific retry configuration */
   retry?: RetryOptions;
-}
-
-/**
- * Cache error type enumeration
- * Categorizes different types of cache-related errors
- */
-export enum CacheErrorType {
-  /** Redis connection failures */
-  CONNECTION = 'CONNECTION',
-  /** Cache operation failures */
-  OPERATION = 'OPERATION',
-  /** Data serialization failures */
-  SERIALIZATION = 'SERIALIZATION',
-  /** Data deserialization failures */
-  DESERIALIZATION = 'DESERIALIZATION',
-}
-
-/**
- * Cache error structure
- * Provides detailed information about cache operation failures
- */
-export interface CacheError {
-  /** Specific type of cache error */
-  type: CacheErrorType;
-  /** Descriptive error message */
-  message: string;
-  /** Original error or additional error context */
-  cause?: unknown;
 }
 
 /**
@@ -189,4 +177,19 @@ export interface CommonOperations {
   ttl: (key: string) => TE.TaskEither<CacheError, number>;
   /** Closes the cache connection */
   disconnect: () => TE.TaskEither<CacheError, void>;
+}
+
+/**
+ * Infrastructure cache configuration
+ * Defines global settings for cache operations
+ */
+export interface InfrastructureCacheConfig {
+  /** Global prefix for all cache keys */
+  keyPrefix?: string;
+  /** Global default Time-To-Live in seconds */
+  defaultTTL?: number;
+  /** Global retry configuration for cache operations */
+  defaultRetry?: RetryOptions;
+  /** Redis connection configuration */
+  connection: RedisConnectionConfig;
 }
