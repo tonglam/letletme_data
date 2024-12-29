@@ -11,8 +11,8 @@ import {
   createMonitorService,
   createQueueAdapter,
   createQueueDependencies,
-} from '../../../../infrastructure/queue';
-import { getQueueLogger, logQueueError } from '../../../../utils/logger.util';
+} from '../../../infrastructure/queue';
+import { getQueueLogger, logQueueError } from '../../../utils/logger.util';
 import { QueueService, createQueueService } from '../../queue.service';
 
 // Meta queue service interface

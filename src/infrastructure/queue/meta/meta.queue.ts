@@ -1,7 +1,7 @@
 import { Job } from 'bullmq';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
-import { QueueService } from '../../../services/queue/queue.service';
+import { QueueService } from '../../../jobs/queue.service';
 import { createQueueAdapter } from '../core';
 import { QUEUE_JOB_TYPES } from '../core/constants';
 import { JobOperation, MetaJobData, QueueDependencies } from '../types';

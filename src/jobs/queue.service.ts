@@ -1,6 +1,6 @@
 import { Job, JobsOptions } from 'bullmq';
 import * as TE from 'fp-ts/TaskEither';
-import { BaseJobData, QueueAdapter } from '../../infrastructure/queue';
+import { BaseJobData, QueueAdapter } from '../infrastructure/queue';
 
 // Job counts type
 export interface JobCounts {

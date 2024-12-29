@@ -3,13 +3,13 @@ import { Job } from 'bullmq';
 import * as E from 'fp-ts/Either';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
-import { eventRepository } from '../../../domains/events/repository';
 import { createFPLClient } from '../../../infrastructure/http/fpl';
-import { JobOperation, JobOptions, MetaJobData } from '../../../infrastructure/queue';
-import { createQueueProcessingError } from '../../../infrastructure/queue/core/errors';
 import { EventId, PrismaEventUpdate } from '../../../types/domain/events.type';
-import { APIError } from '../../../types/errors.type';
-import { createEventServiceImpl } from '../../events/service';
+import { eventRepository } from '../../domains/events/repository';
+import { JobOperation, JobOptions, MetaJobData } from '../../infrastructure/queue';
+import { createQueueProcessingError } from '../../infrastructure/queue/core/errors';
+import { createEventServiceImpl } from '../../services/events/service';
+import { APIError } from '../../types/errors.type';
 import { createMetaQueueService, MetaQueueService } from './base/meta.queue';
 
 export class EventJobService {

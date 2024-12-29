@@ -12,11 +12,11 @@ import { META_QUEUE_CONFIG } from './config/queue/queue.config';
 import { getGlobalCacheModule } from './infrastructure/cache/cache';
 import { createFPLClient } from './infrastructure/http/fpl';
 import { QUEUE_JOB_TYPES } from './infrastructure/queue';
+import { createMetaWorkerService } from './jobs/meta/base/meta.worker';
+import { eventJobService } from './jobs/meta/events.job';
+import { phaseJobService } from './jobs/meta/phases.job';
+import { teamJobService } from './jobs/meta/teams.job';
 import { initializeServices } from './services';
-import { createMetaWorkerService } from './services/queue/meta/base/meta.worker';
-import { eventJobService } from './services/queue/meta/events.job';
-import { phaseJobService } from './services/queue/meta/phases.job';
-import { teamJobService } from './services/queue/meta/teams.job';
 
 dotenv.config();
 

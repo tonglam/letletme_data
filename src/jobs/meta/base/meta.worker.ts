@@ -7,7 +7,7 @@ import {
   QUEUE_JOB_TYPES,
   QueueOptions,
   WorkerDependencies,
-} from '../../../../infrastructure/queue';
+} from '../../../infrastructure/queue';
 import { WorkerService } from '../../worker.service';
 
 // Meta worker service interface for processing various job types

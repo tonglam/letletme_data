@@ -1,223 +1,236 @@
-# Service Layer Implementation Guide
+# Service Layer Design
 
 ## Overview
 
-The service layer orchestrates domain operations and implements use cases for the FPL data service. It acts as a coordinator between the API layer and domain layer, managing transactions, error handling, and cross-domain operations.
+The service layer is designed as a thin orchestration layer that coordinates between the API layer and domain layer, implementing business use cases while maintaining functional programming principles. It provides a clean separation of concerns and ensures type safety through fp-ts integration.
 
-## Core Responsibilities
+## Architecture
 
-### 1. Use Case Orchestration
+```mermaid
+graph TD
+    A[API Layer] --> B[Service Layer]
+    B --> C[Domain Layer]
+    B --> D[Infrastructure Layer]
 
-The service layer implements complete business use cases by:
+    subgraph Service Layer
+        E[Service Interface]
+        F[Cache Adapter]
+        G[Error Handler]
+        H[Workflow]
 
-- Coordinating multiple domain operations
-- Managing transaction boundaries
-- Handling cross-cutting concerns
-- Implementing retry policies
+        E --> F
+        E --> G
+        E --> H
+    end
 
-### 2. Event Service Structure
+    subgraph Domain Layer
+        I[Domain Logic]
+        J[Repository]
+        K[Domain Types]
+    end
+
+    subgraph Infrastructure
+        L[Cache Store]
+        M[Database]
+        N[External APIs]
+    end
+
+    B --> I
+    B --> J
+    F --> L
+    J --> M
+    B --> N
+```
+
+## Core Design Principles
+
+### 1. Functional Core
+
+- Pure functions for business logic
+- Immutable data structures
+- Effect handling with TaskEither
+- Type-safe operations
+
+### 2. Clean Architecture
+
+```mermaid
+graph LR
+    A[API] --> B[Service]
+    B --> C[Domain]
+    B --> D[Infrastructure]
+
+    subgraph Service Boundaries
+        B
+        E[Cache]
+        F[Error]
+        G[Workflow]
+    end
+```
+
+### 3. Error Management
+
+```mermaid
+sequenceDiagram
+    participant A as API
+    participant S as Service
+    participant D as Domain
+    participant I as Infrastructure
+
+    A->>S: Request
+    S->>D: Domain Operation
+    D->>I: Infrastructure Call
+    I-->>D: Error/Result
+    D-->>S: Domain Error/Result
+    S-->>A: Service Error/Result
+```
+
+## Service Layer Components
+
+### 1. Service Interface
+
+- Defines public API contract
+- Handles type transformations
+- Manages error boundaries
+- Coordinates operations
+
+### 2. Cache Adapter
+
+- Implements caching strategy
+- Handles cache invalidation
+- Provides data consistency
+- Manages TTL policies
+
+### 3. Workflow Management
+
+- Orchestrates complex operations
+- Manages transaction boundaries
+- Handles cross-domain coordination
+- Implements retry policies
+
+## Data Flow Patterns
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Service
+    participant Ca as Cache
+    participant D as Domain
+    participant R as Repository
+
+    C->>S: Request
+    S->>Ca: Check Cache
+    alt Cache Hit
+        Ca-->>S: Return Data
+    else Cache Miss
+        S->>D: Domain Operation
+        D->>R: Repository Query
+        R-->>D: Data
+        D-->>S: Domain Result
+        S->>Ca: Update Cache
+    end
+    S-->>C: Response
+```
+
+## Error Handling Strategy
+
+### 1. Error Categories
+
+```mermaid
+graph TD
+    A[Service Error] --> B[Operation Error]
+    A --> C[Integration Error]
+    A --> D[Validation Error]
+
+    B --> E[Domain Error]
+    C --> F[Infrastructure Error]
+    D --> G[Input Error]
+```
+
+### 2. Error Flow
+
+- Capture at boundaries
+- Transform to service errors
+- Provide context
+- Maintain type safety
+
+## Performance Considerations
+
+### 1. Caching Strategy
+
+```mermaid
+graph TD
+    A[Request] --> B{Cache?}
+    B -- Hit --> C[Return Cached]
+    B -- Miss --> D[Fetch Fresh]
+    D --> E[Update Cache]
+    E --> F[Return Fresh]
+```
+
+### 2. Resource Management
+
+- Connection pooling
+- Batch operations
+- Lazy evaluation
+- Resource cleanup
+
+## Service Organization
+
+### 1. Module Structure
 
 ```plaintext
-src/services/events/
-├── index.ts # Service exports
-├── types.ts # Service-specific types
-├── bootstrap.ts # Event initialization
-├── scheduler.ts # Event scheduling
-├── sync.ts # Data synchronization
-└── verification.ts # Data verification
+services/
+├── domain1/
+│   ├── index.ts
+│   ├── types.ts
+│   ├── service.ts
+│   ├── cache.ts
+│   └── workflow.ts
+└── domain2/
+    ├── index.ts
+    └── ...
 ```
 
-### 3. Data Flow Patterns
+### 2. Dependency Flow
 
-The service layer implements several key patterns:
+```mermaid
+graph LR
+    A[Service] --> B[Domain]
+    A --> C[Infrastructure]
+    A --> D[Cache]
 
-1. **Bootstrap Pattern**
-
-   - Initial data loading
-   - Data validation
-   - Domain distribution
-   - Error recovery
-
-2. **Sync Pattern**
-
-   - Periodic updates
-   - Differential sync
-   - Conflict resolution
-   - Cache invalidation
-
-3. **Verification Pattern**
-   - Data consistency checks
-   - Cross-validation
-   - Error correction
-   - Audit logging
-
-## Implementation Guidelines
-
-### 1. Event Service Implementation
-
-```typescript
-interface EventService {
-  // Bootstrap operations
-  initialize(): Promise<Either<Error, void>>;
-
-  // Sync operations
-  syncEvents(): Promise<Either<Error, ReadonlyArray<Event>>>;
-  syncEventDetails(eventId: number): Promise<Either<Error, Event>>;
-
-  // Verification operations
-  verifyEventData(eventId: number): Promise<Either<Error, boolean>>;
-
-  // Schedule operations
-  scheduleEventUpdates(): Promise<Either<Error, void>>;
-}
+    B --> E[Repository]
+    C --> F[External]
+    D --> G[Store]
 ```
 
-### 2. Error Handling Strategy
+## Monitoring and Metrics
 
-The service layer implements comprehensive error handling following the established flow:
+### 1. Key Metrics
 
-1. **Error Categories**
+- Operation latency
+- Cache effectiveness
+- Error rates
+- Resource utilization
 
-   - Domain errors (validation, business rules)
-   - Infrastructure errors (DB, cache, API)
-   - Integration errors (cross-domain operations)
-   - System errors (unexpected failures)
+### 2. Health Checks
 
-2. **Error Flow**
-   Reference to Design_Guide.md error flow diagram:
-
-### 3. Transaction Management
-
-```typescript
-interface TransactionContext {
-  readonly start: () => Promise<void>;
-  readonly commit: () => Promise<void>;
-  readonly rollback: () => Promise<void>;
-  readonly isActive: boolean;
-}
-```
-
-### 4. Recovery Mechanisms
-
-- Automatic retries with exponential backoff
-- Circuit breaker pattern for external services
-- Fallback strategies for degraded operation
-- Comprehensive error logging and monitoring
-
-## Service Layer Integration
-
-### 1. Domain Integration
-
-The service layer integrates with domains through:
-
-1. **Event Domain**
-
-   - Event operations (reference: src/domains/events/operations.ts)
-   - Event queries (reference: src/domains/events/queries.ts)
-   - Event repository (reference: src/domains/events/repository.ts)
-
-2. **Infrastructure Integration**
-   - FPL API client
-   - Database operations
-   - Cache management
-
-### 2. Cache Management
-
-```typescript
-interface CacheStrategy {
-  readonly get: <T>(key: string) => Promise<Option<T>>;
-  readonly set: <T>(key: string, value: T, ttl?: number) => Promise<void>;
-  readonly invalidate: (pattern: string) => Promise<void>;
-  readonly clear: () => Promise<void>;
-}
-```
-
-## Best Practices
-
-### 1. Type Safety
-
-- Use strict TypeScript configuration
-- Leverage fp-ts for functional programming
-- Implement proper error types
-- Avoid type assertions
-
-### 2. Error Handling
-
-### 3. Performance Optimization
-
-1. **Caching Strategy**
-
-   - Implement multi-level caching
-   - Use appropriate TTLs
-   - Handle cache invalidation
-   - Monitor cache hit rates
-
-2. **Query Optimization**
-   - Batch operations
-   - Efficient data loading
-   - Query result caching
-   - Connection pooling
-
-### 4. Monitoring
-
-1. **Service Metrics**
-
-   - Operation latency
-   - Success/failure rates
-   - Cache hit ratios
-   - Resource utilization
-
-2. **Business Metrics**
-
-   - Event processing rates
-   - Data synchronization status
-   - Update frequencies
-   - Data consistency metrics
-
-3. **Health Checks**
-
-   - Service availability
-   - Dependency status
-   - Resource availability
-   - System capacity
-
-4. **Alerting**
-   Reference to Design_Guide.md monitoring section:
-
-## Testing Strategy
-
-### 1. Unit Tests
-
-- Test service methods in isolation
-- Mock domain dependencies
-- Test error scenarios
-- Verify type safety
-
-### 2. Integration Tests
-
-- Test complete use cases
-- Verify transaction handling
-- Test cache integration
-- Validate error recovery
-
-### 3. Performance Tests
-
-- Measure response times
-- Test under load
-- Verify cache effectiveness
-- Monitor resource usage
+- Service availability
+- Dependency status
+- Resource status
+- Cache health
 
 ## Future Considerations
 
-1. **Scalability**
+### 1. Scalability
 
-   - Horizontal scaling
-   - Load balancing
-   - Service discovery
-   - Distributed caching
+- Horizontal scaling
+- Load balancing
+- Service discovery
+- Distributed caching
 
-2. **Extensibility**
-   - New use cases
-   - Additional services
-   - Enhanced monitoring
-   - Advanced caching
+### 2. Extensibility
+
+- Plugin architecture
+- Service composition
+- Feature toggles
+- API versioning

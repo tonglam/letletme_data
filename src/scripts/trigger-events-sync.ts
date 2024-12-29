@@ -3,7 +3,7 @@ import * as TE from 'fp-ts/TaskEither';
 import pino from 'pino';
 import { fetchBootstrapEvents } from '../domains/bootstrap/operations';
 import { createFPLClient } from '../infrastructure/http/fpl';
-import { eventJobService } from '../services/queue/meta/events.job';
+import { eventJobService } from '../jobs/meta/events.job';
 
 const logger = pino({ level: 'info' });
 

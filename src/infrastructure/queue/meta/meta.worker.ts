@@ -1,7 +1,7 @@
 import { Job } from 'bullmq';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
-import { WorkerService } from '../../../services/queue/worker.service';
+import { WorkerService } from '../../../jobs/worker.service';
 import { META_QUEUE_CONFIG } from '../config/queue.config';
 import { QUEUE_LOG_MESSAGES, QUEUE_PROGRESS } from '../core/constants';
 import { WorkerDependencies, createWorkerAdapter } from '../core/worker.adapter';
