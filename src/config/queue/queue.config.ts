@@ -2,7 +2,8 @@ import { ConnectionOptions, JobsOptions } from 'bullmq';
 import { QueueOptions } from 'infrastructure/queue/types';
 
 /**
- * Default job options
+ * Default job configuration options for BullMQ
+ * @const {Readonly<JobsOptions>}
  */
 export const DEFAULT_JOB_OPTIONS: JobsOptions = {
   attempts: 3,
@@ -15,7 +16,8 @@ export const DEFAULT_JOB_OPTIONS: JobsOptions = {
 } as const;
 
 /**
- * Default connection options
+ * Default Redis connection options for BullMQ
+ * @const {ConnectionOptions}
  */
 export const DEFAULT_CONNECTION_OPTIONS = {
   host: process.env.REDIS_HOST ?? 'localhost',
@@ -28,7 +30,8 @@ export const DEFAULT_CONNECTION_OPTIONS = {
 } satisfies ConnectionOptions;
 
 /**
- * Default queue options
+ * Default queue configuration options
+ * @const {QueueOptions}
  */
 export const DEFAULT_QUEUE_OPTIONS = {
   name: 'default',
@@ -37,20 +40,23 @@ export const DEFAULT_QUEUE_OPTIONS = {
 } satisfies QueueOptions;
 
 /**
- * Meta queue configuration
+ * Meta queue configuration for system-level jobs
+ * @const {Readonly<QueueOptions>}
  */
 export const META_QUEUE_CONFIG: QueueOptions = {
   name: 'meta-jobs',
   prefix: 'letletme',
   defaultJobOptions: {
     ...DEFAULT_JOB_OPTIONS,
-    attempts: 5, // More attempts for meta jobs
+    attempts: 5,
   },
   connection: DEFAULT_CONNECTION_OPTIONS,
 } as const;
 
 /**
- * Creates queue options with custom configuration
+ * Creates queue options by merging default options with custom configuration
+ * @param {Partial<QueueOptions>} options - Custom queue options
+ * @returns {QueueOptions} Merged queue configuration
  */
 export const createQueueOptions = (options: Partial<QueueOptions>): QueueOptions => ({
   ...DEFAULT_QUEUE_OPTIONS,

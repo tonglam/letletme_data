@@ -1,44 +1,27 @@
 /**
  * Database Types Module
  *
- * Defines core types and interfaces for database operations.
- * Provides type definitions for transaction management.
- *
- * Features:
- * - Transaction context types
- * - Client management interfaces
- * - Type-safe operation definitions
- * - Database client abstraction
- *
- * This module ensures type safety and consistent interfaces
- * across the database infrastructure layer.
+ * Core types and interfaces for database operations.
  */
 
 import { SupabaseClient } from '@supabase/supabase-js';
 
 /**
- * Transaction context interface.
- * Provides transaction lifecycle management and client access.
- *
- * Features:
- * - Transaction state tracking
- * - Atomic operation support
- * - Client access management
- * - Explicit transaction control
+ * Transaction context interface
  */
 export interface TransactionContext {
-  /** Indicates if a transaction is currently active */
+  /** Active transaction state */
   isActive: boolean;
 
-  /** Starts a new transaction */
+  /** Starts a transaction */
   start(): Promise<void>;
 
-  /** Commits the current transaction */
+  /** Commits a transaction */
   commit(): Promise<void>;
 
-  /** Rolls back the current transaction */
+  /** Rolls back a transaction */
   rollback(): Promise<void>;
 
-  /** Gets the database client for transaction operations */
+  /** Gets database client */
   getClient(): SupabaseClient;
 }

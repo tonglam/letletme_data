@@ -1,3 +1,10 @@
+/**
+ * Base Types Module
+ *
+ * Core type definitions and utilities for the application.
+ * Includes branded types, base interfaces, and common type utilities.
+ */
+
 import { ElementType, PrismaClient, ValueChangeType } from '@prisma/client';
 import * as E from 'fp-ts/Either';
 import * as O from 'fp-ts/Option';
@@ -9,6 +16,9 @@ import { CacheError } from '../infrastructure/cache/types';
 import { APIError, createValidationError } from '../infrastructure/http/common/errors';
 
 // ============ Constants ============
+/**
+ * Element status constants for player availability
+ */
 export const ELEMENT_STATUS = {
   AVAILABLE: 'a',
   UNAVAILABLE: 'u',
@@ -16,10 +26,16 @@ export const ELEMENT_STATUS = {
   DOUBTFUL: 'd',
 } as const;
 
+/**
+ * Element status type derived from status constants
+ */
 export type ElementStatus = (typeof ELEMENT_STATUS)[keyof typeof ELEMENT_STATUS];
 
 export { ElementType, ValueChangeType };
 
+/**
+ * Configuration for element types with their IDs and names
+ */
 export const ElementTypeConfig = {
   [ElementType.GKP]: { id: 1, name: 'Goalkeeper' },
   [ElementType.DEF]: { id: 2, name: 'Defender' },
@@ -28,20 +44,35 @@ export const ElementTypeConfig = {
 } as const;
 
 // Derived maps for specific use cases
+/**
+ * Gets element type by its numeric ID
+ */
 export const getElementTypeById = (id: number): ElementType | undefined => {
   const entry = Object.entries(ElementTypeConfig).find((entry) => entry[1].id === id);
   return entry ? (entry[0] as ElementType) : undefined;
 };
 
+/**
+ * Gets element type display name
+ */
 export const getElementTypeName = (type: ElementType): string => ElementTypeConfig[type].name;
 
 // Branded Types System
+/**
+ * Brand interface for type branding
+ */
 export interface Brand<K extends string> {
   readonly __brand: K;
 }
 
+/**
+ * Branded type combining a base type with a brand
+ */
 export type Branded<T, K extends string> = T & Brand<K>;
 
+/**
+ * Creates a branded type with validation
+ */
 export const createBrandedType = <T, K extends string>(
   brand: K,
   validator: (value: unknown) => value is T,
@@ -52,6 +83,9 @@ export const createBrandedType = <T, K extends string>(
 });
 
 // Base Repository Interface
+/**
+ * Base repository interface for data access operations
+ */
 export interface BaseRepository<T, TCreate, TId> {
   prisma: PrismaClient;
   findById(id: TId): TE.TaskEither<APIError, T | null>;
@@ -65,6 +99,9 @@ export interface BaseRepository<T, TCreate, TId> {
 }
 
 // Schema Validation Helper
+/**
+ * Validates data against a Zod schema
+ */
 export const validateWithSchema = <T>(
   schema: z.ZodType<T>,
   data: unknown,
@@ -77,6 +114,9 @@ export const validateWithSchema = <T>(
 };
 
 // Common Cache Handlers
+/**
+ * Gets cached data or falls back to fetching many items
+ */
 export const getCachedOrFallbackMany = <T, P>(
   cachedValue: TE.TaskEither<CacheError, readonly P[]> | undefined,
   fallback: TE.TaskEither<APIError, readonly P[]>,
@@ -90,6 +130,9 @@ export const getCachedOrFallbackMany = <T, P>(
       )
     : pipe(fallback, TE.chain(converter));
 
+/**
+ * Gets cached data or falls back to fetching a single item
+ */
 export const getCachedOrFallbackOne = <T, P>(
   cachedValue: TE.TaskEither<CacheError, P | null> | undefined,
   fallback: TE.TaskEither<APIError, P | null>,
@@ -104,7 +147,7 @@ export const getCachedOrFallbackOne = <T, P>(
     : pipe(fallback, TE.chain(converter));
 
 /**
- * Type guard to check if an object is an API response (snake_case) vs domain/persistence model (camelCase)
+ * Type guard for API responses
  */
 export const isApiResponse = <T extends object, K extends string>(
   data: T,
@@ -112,7 +155,7 @@ export const isApiResponse = <T extends object, K extends string>(
 ): data is T & Record<K, unknown> => snakeCaseKey in data;
 
 /**
- * Global Season enum for FPL seasons
+ * FPL season enumeration
  */
 export enum Season {
   Season_1617 = '1617',
@@ -127,8 +170,7 @@ export enum Season {
 }
 
 /**
- * Get the current FPL season
- * @returns The current season value from config or the latest season from enum
+ * Gets current FPL season
  */
 export const getCurrentSeason = (): Season =>
   pipe(
@@ -137,7 +179,6 @@ export const getCurrentSeason = (): Season =>
   );
 
 /**
- * Get all available seasons
- * @returns Array of all seasons in chronological order
+ * Gets all available FPL seasons
  */
 export const getAllSeasons = (): Season[] => Object.values(Season);

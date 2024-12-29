@@ -1,8 +1,8 @@
 /**
  * Event Types Module
  *
- * This module defines the core types and interfaces for the Fantasy Premier League event system.
- * It includes branded types for type safety, domain models, repository interfaces, and data converters.
+ * Core type definitions for the Fantasy Premier League event system.
+ * Includes branded types, domain models, and data converters.
  */
 
 import { Prisma } from '@prisma/client';
@@ -16,15 +16,13 @@ import { APIError } from '../infrastructure/http/common/errors';
 import type { BaseRepository } from './base.type';
 import { Branded, createBrandedType, isApiResponse } from './base.type';
 
-// ============ Branded Types ============
 /**
- * Branded type for Event ID to ensure type safety and validation
- * Ensures IDs are always positive integers
+ * Branded type for Event ID ensuring type safety
  */
 export type EventId = Branded<number, 'EventId'>;
 
 /**
- * Creates a branded EventId with runtime validation
+ * Creates a branded EventId with validation
  */
 export const createEventId = createBrandedType<number, 'EventId'>(
   'EventId',
@@ -34,8 +32,6 @@ export const createEventId = createBrandedType<number, 'EventId'>(
 
 /**
  * Validates and converts a value to EventId
- * @param value - The value to validate as an EventId
- * @returns Either with validated EventId or error message
  */
 export const validateEventId = (value: unknown): E.Either<string, EventId> =>
   pipe(
@@ -47,14 +43,8 @@ export const validateEventId = (value: unknown): E.Either<string, EventId> =>
     E.map((v) => v as EventId),
   );
 
-// ============ Types ============
 /**
- * API Response Types
- * These types match the exact structure of the Fantasy Premier League API responses
- */
-
-/**
- * Information about the top performing element (player) in an event
+ * Information about the top performing element in an event
  */
 export interface TopElementInfo {
   readonly id: number;
@@ -70,7 +60,7 @@ export interface ChipPlay {
 }
 
 /**
- * Raw event data as received from the API
+ * Raw event data from the API
  */
 export interface EventResponse {
   readonly id: number;
@@ -103,15 +93,13 @@ export interface EventResponse {
   readonly released: boolean;
 }
 
+/**
+ * Array of event responses
+ */
 export type EventsResponse = readonly EventResponse[];
 
 /**
- * Domain Types
- * These types represent the internal domain model with proper TypeScript naming conventions
- */
-
-/**
- * Core event domain model with properly typed and validated fields
+ * Core event domain model
  */
 export interface Event {
   readonly id: EventId;
@@ -144,31 +132,21 @@ export interface Event {
   readonly released: boolean;
 }
 
+/**
+ * Array of event domain models
+ */
 export type Events = readonly Event[];
 
-// ============ Repository Interface ============
 /**
  * Repository interface for Event entity
- * Extends BaseRepository with event-specific operations
  */
 export interface EventRepository extends BaseRepository<PrismaEvent, PrismaEventCreate, EventId> {
-  /**
-   * Finds the currently active event
-   * @returns TaskEither with current event or null if not found
-   */
   findCurrent(): TE.TaskEither<APIError, PrismaEvent | null>;
-
-  /**
-   * Finds the next scheduled event
-   * @returns TaskEither with next event or null if not found
-   */
   findNext(): TE.TaskEither<APIError, PrismaEvent | null>;
 }
 
-// ============ Persistence Types ============
 /**
  * Prisma database model for Event
- * Represents the actual database schema
  */
 export interface PrismaEvent {
   readonly id: number;
@@ -199,15 +177,18 @@ export interface PrismaEvent {
   readonly createdAt: Date;
 }
 
+/**
+ * Prisma event creation type
+ */
 export type PrismaEventCreate = Omit<PrismaEvent, 'createdAt'>;
+
+/**
+ * Prisma event update type
+ */
 export type PrismaEventUpdate = Omit<PrismaEvent, 'createdAt'>;
 
-// ============ Converters ============
 /**
  * Converts API response or database model to domain model
- * Handles both snake_case (API) and camelCase (database) formats
- * @param data - The data to convert (either API response or database model)
- * @returns Domain Event model
  */
 export const toDomainEvent = (data: EventResponse | PrismaEvent): Event => {
   const isEventApiResponse = (d: EventResponse | PrismaEvent): d is EventResponse =>
@@ -274,8 +255,6 @@ export const toDomainEvent = (data: EventResponse | PrismaEvent): Event => {
 
 /**
  * Converts domain model to database model
- * @param event - The domain event to convert
- * @returns Database model ready for persistence
  */
 export const toPrismaEvent = (event: Event): PrismaEventCreate => ({
   id: Number(event.id),
@@ -305,41 +284,19 @@ export const toPrismaEvent = (event: Event): PrismaEventCreate => ({
   transfersMade: event.transfersMade,
 });
 
-// Domain types
 /**
  * Service interface for Event operations
- * Provides high-level business operations for events
  */
 export interface EventService {
-  /**
-   * Initializes and warms up the event cache
-   */
   readonly warmUp: () => TE.TaskEither<APIError, void>;
-
-  /**
-   * Retrieves all events
-   */
   readonly getEvents: () => TE.TaskEither<APIError, readonly Event[]>;
-
-  /**
-   * Retrieves a specific event by ID
-   */
   readonly getEvent: (id: EventId) => TE.TaskEither<APIError, Event | null>;
-
-  /**
-   * Retrieves the current active event
-   */
   readonly getCurrentEvent: () => TE.TaskEither<APIError, Event | null>;
-
-  /**
-   * Retrieves the next scheduled event
-   */
   readonly getNextEvent: () => TE.TaskEither<APIError, Event | null>;
 }
 
 /**
  * Dependencies required by the EventService
- * Following dependency injection pattern
  */
 export interface EventServiceDependencies {
   readonly bootstrapApi: BootstrapApi;

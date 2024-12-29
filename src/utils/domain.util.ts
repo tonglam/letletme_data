@@ -1,3 +1,9 @@
+/**
+ * Domain Utility Module
+ *
+ * Utility functions for domain layer operations.
+ */
+
 import * as E from 'fp-ts/Either';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
@@ -5,19 +11,20 @@ import { APIError, createInternalServerError } from '../infrastructure/http/comm
 
 /**
  * Converts unknown errors to APIError
- * @param error - The error to convert
- * @returns An APIError instance
  */
 export const toAPIError = (error: unknown): APIError =>
   createInternalServerError({ message: String(error) });
 
+/**
+ * Domain error interface
+ */
 export interface DomainError {
   readonly message: string;
   readonly cause?: unknown;
 }
 
 /**
- * Creates domain operations utilities for converting between domain and persistence models
+ * Creates domain operations utilities
  */
 export const createDomainOperations = <D, P, E extends DomainError = DomainError>({
   toDomain,
@@ -56,10 +63,7 @@ export const createDomainOperations = <D, P, E extends DomainError = DomainError
 });
 
 /**
- * Returns the value if it's defined, otherwise returns undefined
- * Useful for handling optional updates in repositories
- * @param value - The value to check
- * @returns The value if defined, undefined otherwise
+ * Returns the value if defined
  */
 export const getDefinedValue = <T>(value: T | undefined): T | undefined =>
   value !== undefined ? value : undefined;

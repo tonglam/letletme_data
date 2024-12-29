@@ -2,6 +2,8 @@
  * Events domain operations module.
  * Provides high-level operations for managing events with caching support.
  * Follows functional programming principles using fp-ts.
+ *
+ * @module EventOperations
  */
 
 import { pipe } from 'fp-ts/function';
@@ -26,12 +28,13 @@ import {
 import { toAPIError } from '../../utils/domain.util';
 import { type EventCache } from './cache';
 
-// Repository operations
 /**
  * Retrieves all events with caching support.
- * @param repository - Event repository instance
- * @param cache - Event cache instance
- * @returns TaskEither containing array of domain events or APIError
+ * Implements cache-aside pattern with automatic cache population.
+ *
+ * @param {EventRepository} repository - Event repository instance for database operations
+ * @param {EventCache} cache - Event cache instance for caching operations
+ * @returns {TaskEither<APIError, readonly DomainEvent[]>} Array of domain events or API error
  */
 export const getAllEvents = (
   repository: EventRepository,
@@ -52,11 +55,13 @@ export const getAllEvents = (
   );
 
 /**
- * Retrieves a single event by ID with caching support.
- * @param repository - Event repository instance
- * @param cache - Event cache instance
- * @param id - Event identifier
- * @returns TaskEither containing optional domain event or APIError
+ * Retrieves a specific event by ID with caching support.
+ * Validates event ID before processing.
+ *
+ * @param {EventRepository} repository - Event repository instance
+ * @param {EventCache} cache - Event cache instance
+ * @param {string} id - Event identifier
+ * @returns {TaskEither<APIError, DomainEvent | null>} Event if found or null
  */
 export const getEventById = (
   repository: EventRepository,
@@ -80,9 +85,11 @@ export const getEventById = (
 
 /**
  * Retrieves the current active event with caching support.
- * @param repository - Event repository instance
- * @param cache - Event cache instance
- * @returns TaskEither containing optional domain event or APIError
+ * Uses cache-aside pattern for efficient data access.
+ *
+ * @param {EventRepository} repository - Event repository instance
+ * @param {EventCache} cache - Event cache instance
+ * @returns {TaskEither<APIError, DomainEvent | null>} Current event if exists or null
  */
 export const getCurrentEvent = (
   repository: EventRepository,
@@ -104,9 +111,10 @@ export const getCurrentEvent = (
 
 /**
  * Retrieves the next scheduled event with caching support.
- * @param repository - Event repository instance
- * @param cache - Event cache instance
- * @returns TaskEither containing optional domain event or APIError
+ *
+ * @param {EventRepository} repository - Event repository instance
+ * @param {EventCache} cache - Event cache instance
+ * @returns {TaskEither<APIError, DomainEvent | null>} Next event if exists or null
  */
 export const getNextEvent = (
   repository: EventRepository,
@@ -127,11 +135,12 @@ export const getNextEvent = (
   );
 
 /**
- * Creates a new event and updates cache.
- * @param repository - Event repository instance
- * @param cache - Event cache instance
- * @param event - Event data to create
- * @returns TaskEither containing created domain event or APIError
+ * Creates a new event with automatic cache invalidation.
+ *
+ * @param {EventRepository} repository - Event repository instance
+ * @param {EventCache} cache - Event cache instance
+ * @param {PrismaEventCreate} event - Event data to create
+ * @returns {TaskEither<APIError, DomainEvent>} Created event or error
  */
 export const createEvent = (
   repository: EventRepository,
@@ -147,11 +156,13 @@ export const createEvent = (
   );
 
 /**
- * Creates multiple events in batch and updates cache.
- * @param repository - Event repository instance
- * @param cache - Event cache instance
- * @param events - Array of event data to create
- * @returns TaskEither containing array of created domain events or APIError
+ * Creates multiple events in a batch operation.
+ * Handles cache invalidation for all affected events.
+ *
+ * @param {EventRepository} repository - Event repository instance
+ * @param {EventCache} cache - Event cache instance
+ * @param {PrismaEventCreate[]} events - Array of events to create
+ * @returns {TaskEither<APIError, readonly DomainEvent[]>} Created events or error
  */
 export const createEvents = (
   repository: EventRepository,
@@ -172,10 +183,11 @@ export const createEvents = (
   );
 
 /**
- * Deletes all events and clears cache.
- * @param repository - Event repository instance
- * @param cache - Event cache instance
- * @returns TaskEither containing void or APIError
+ * Deletes all events and invalidates cache.
+ *
+ * @param {EventRepository} repository - Event repository instance
+ * @param {EventCache} cache - Event cache instance
+ * @returns {TaskEither<APIError, void>} Success or error
  */
 export const deleteAllEvents = (
   repository: EventRepository,
@@ -192,13 +204,12 @@ export const deleteAllEvents = (
     ),
   );
 
-// Domain operations
 /**
- * Domain operation to find all events.
- * Provides a domain-specific interface for retrieving all events.
- * @param repository - Event repository instance
- * @param cache - Event cache instance
- * @returns TaskEither containing array of domain events or APIError
+ * Alias for getAllEvents. Provides semantic clarity for find operations.
+ *
+ * @param {EventRepository} repository - Event repository instance
+ * @param {EventCache} cache - Event cache instance
+ * @returns {TaskEither<APIError, readonly DomainEvent[]>} Array of domain events or error
  */
 export const findAllEvents = (
   repository: EventRepository,
@@ -206,12 +217,12 @@ export const findAllEvents = (
 ): TE.TaskEither<APIError, readonly DomainEvent[]> => getAllEvents(repository, cache);
 
 /**
- * Domain operation to find event by ID.
- * Provides a domain-specific interface for retrieving a single event.
- * @param repository - Event repository instance
- * @param cache - Event cache instance
- * @param id - Event identifier
- * @returns TaskEither containing optional domain event or APIError
+ * Alias for getEventById with type-safe EventId parameter.
+ *
+ * @param {EventRepository} repository - Event repository instance
+ * @param {EventCache} cache - Event cache instance
+ * @param {EventId} id - Typed event identifier
+ * @returns {TaskEither<APIError, DomainEvent | null>} Event if found or null
  */
 export const findEventById = (
   repository: EventRepository,
@@ -220,11 +231,11 @@ export const findEventById = (
 ): TE.TaskEither<APIError, DomainEvent | null> => getEventById(repository, cache, String(id));
 
 /**
- * Domain operation to find current active event.
- * Provides a domain-specific interface for retrieving current event.
- * @param repository - Event repository instance
- * @param cache - Event cache instance
- * @returns TaskEither containing optional domain event or APIError
+ * Alias for getCurrentEvent. Provides semantic clarity for find operations.
+ *
+ * @param {EventRepository} repository - Event repository instance
+ * @param {EventCache} cache - Event cache instance
+ * @returns {TaskEither<APIError, DomainEvent | null>} Current event if exists or null
  */
 export const findCurrentEvent = (
   repository: EventRepository,
@@ -232,11 +243,11 @@ export const findCurrentEvent = (
 ): TE.TaskEither<APIError, DomainEvent | null> => getCurrentEvent(repository, cache);
 
 /**
- * Domain operation to find next scheduled event.
- * Provides a domain-specific interface for retrieving next event.
- * @param repository - Event repository instance
- * @param cache - Event cache instance
- * @returns TaskEither containing optional domain event or APIError
+ * Alias for getNextEvent. Provides semantic clarity for find operations.
+ *
+ * @param {EventRepository} repository - Event repository instance
+ * @param {EventCache} cache - Event cache instance
+ * @returns {TaskEither<APIError, DomainEvent | null>} Next event if exists or null
  */
 export const findNextEvent = (
   repository: EventRepository,
@@ -244,12 +255,12 @@ export const findNextEvent = (
 ): TE.TaskEither<APIError, DomainEvent | null> => getNextEvent(repository, cache);
 
 /**
- * Domain operation to save a single event.
- * Provides a domain-specific interface for creating an event.
- * @param repository - Event repository instance
- * @param cache - Event cache instance
- * @param event - Domain event to save
- * @returns TaskEither containing saved domain event or APIError
+ * Saves an existing event with cache invalidation.
+ *
+ * @param {EventRepository} repository - Event repository instance
+ * @param {EventCache} cache - Event cache instance
+ * @param {DomainEvent} event - Event to save
+ * @returns {TaskEither<APIError, DomainEvent>} Saved event or error
  */
 export const saveEvent = (
   repository: EventRepository,
@@ -266,12 +277,12 @@ export const saveEvent = (
   );
 
 /**
- * Domain operation to save multiple events in batch.
- * Provides a domain-specific interface for creating multiple events.
- * @param repository - Event repository instance
- * @param cache - Event cache instance
- * @param events - Array of domain events to save
- * @returns TaskEither containing array of saved domain events or APIError
+ * Saves multiple events in a batch operation with cache invalidation.
+ *
+ * @param {EventRepository} repository - Event repository instance
+ * @param {EventCache} cache - Event cache instance
+ * @param {readonly DomainEvent[]} events - Events to save
+ * @returns {TaskEither<APIError, readonly DomainEvent[]>} Saved events or error
  */
 export const saveBatchEvents = (
   repository: EventRepository,

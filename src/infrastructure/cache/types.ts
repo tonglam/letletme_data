@@ -1,202 +1,179 @@
 /**
  * Cache Types Module
  *
- * Defines core types and interfaces for the cache infrastructure.
- * Provides comprehensive type definitions for cache operations.
- *
- * Features:
- * - Cache configuration types
- * - Error handling types
- * - Redis operation interfaces
- * - Type-safe operation definitions
- * - Retry mechanism types
- *
- * This module ensures type safety and consistent interfaces
- * across the cache infrastructure layer.
+ * Core types and interfaces for the cache infrastructure.
  */
 
 import * as TE from 'fp-ts/TaskEither';
 
 /**
- * Core cache configuration interface.
- * Defines basic cache behavior settings.
+ * Core cache configuration interface
  */
 export interface InfrastructureCacheConfig {
-  /** Optional prefix for cache keys */
+  /** Cache key prefix */
   keyPrefix?: string;
-  /** Default time-to-live in seconds */
+  /** Default TTL in seconds */
   defaultTTL?: number;
-  /** Default retry configuration */
+  /** Retry configuration */
   defaultRetry?: RetryOptions;
 }
 
 /**
- * Redis connection configuration.
- * Defines connection parameters for Redis server.
+ * Redis connection configuration
  */
 export interface RedisConnectionConfig {
-  /** Redis server host */
+  /** Server host */
   host: string;
-  /** Redis server port */
+  /** Server port */
   port: number;
-  /** Optional Redis authentication password */
+  /** Auth password */
   password?: string;
-  /** Optional Redis database number */
+  /** Database number */
   db?: number;
 }
 
 /**
- * Retry mechanism configuration.
- * Defines retry behavior for failed operations.
+ * Retry mechanism configuration
  */
 export interface RetryOptions {
-  /** Number of retry attempts */
+  /** Retry attempts */
   attempts?: number;
-  /** Delay between retries in milliseconds */
+  /** Retry delay in ms */
   delay?: number;
 }
 
 /**
- * Cache operation options.
- * Defines behavior for individual cache operations.
+ * Cache operation options
  */
 export interface InfrastructureCacheOptions {
-  /** Time-to-live in seconds for the operation */
+  /** TTL in seconds */
   ttl?: number;
-  /** Retry configuration for the operation */
+  /** Retry config */
   retry?: RetryOptions;
 }
 
 /**
- * Cache error types enumeration.
- * Defines possible error categories.
+ * Cache error types
  */
 export enum CacheErrorType {
-  /** Connection-related errors */
+  /** Connection errors */
   CONNECTION = 'CONNECTION',
-  /** Operation-specific errors */
+  /** Operation errors */
   OPERATION = 'OPERATION',
-  /** Data serialization errors */
+  /** Serialization errors */
   SERIALIZATION = 'SERIALIZATION',
-  /** Data deserialization errors */
+  /** Deserialization errors */
   DESERIALIZATION = 'DESERIALIZATION',
 }
 
 /**
- * Cache error interface.
- * Provides structured error information.
+ * Cache error interface
  */
 export interface CacheError {
-  /** Type of cache error */
+  /** Error type */
   type: CacheErrorType;
   /** Error message */
   message: string;
-  /** Optional error cause */
+  /** Error cause */
   cause?: unknown;
 }
 
 /**
- * String operations interface.
- * Defines operations for string data type.
+ * String operations interface
  */
 export interface StringOperations<T> {
-  /** Sets a string value with optional TTL */
+  /** Sets string value */
   set: (
     key: string,
     value: T,
     options?: InfrastructureCacheOptions,
   ) => TE.TaskEither<CacheError, void>;
-  /** Gets a string value */
+  /** Gets string value */
   get: (key: string) => TE.TaskEither<CacheError, T | null>;
 }
 
 /**
- * Hash operations interface.
- * Defines operations for hash data type.
+ * Hash operations interface
  */
 export interface HashOperations<T> {
-  /** Sets a hash field */
+  /** Sets hash field */
   hSet: (
     key: string,
     field: string,
     value: T,
     options?: InfrastructureCacheOptions,
   ) => TE.TaskEither<CacheError, void>;
-  /** Gets a hash field */
+  /** Gets hash field */
   hGet: (key: string, field: string) => TE.TaskEither<CacheError, T | null>;
   /** Gets all hash fields */
   hGetAll: (key: string) => TE.TaskEither<CacheError, Record<string, T>>;
-  /** Deletes a hash field */
+  /** Deletes hash field */
   hDel: (key: string, field: string) => TE.TaskEither<CacheError, void>;
 }
 
 /**
- * List operations interface.
- * Defines operations for list data type.
+ * List operations interface
  */
 export interface ListOperations<T> {
-  /** Pushes a value to the list */
+  /** Pushes value to list */
   lPush: (
     key: string,
     value: T,
     options?: InfrastructureCacheOptions,
   ) => TE.TaskEither<CacheError, void>;
-  /** Gets a range of list values */
+  /** Gets list range */
   lRange: (key: string, start: number, stop: number) => TE.TaskEither<CacheError, readonly T[]>;
-  /** Removes list elements by value */
+  /** Removes list elements */
   lRem: (key: string, count: number, value: T) => TE.TaskEither<CacheError, void>;
 }
 
 /**
- * Set operations interface.
- * Defines operations for set data type.
+ * Set operations interface
  */
 export interface SetOperations<T> {
-  /** Adds a value to the set */
+  /** Adds set value */
   sAdd: (
     key: string,
     value: T,
     options?: InfrastructureCacheOptions,
   ) => TE.TaskEither<CacheError, void>;
-  /** Gets all set members */
+  /** Gets set members */
   sMembers: (key: string) => TE.TaskEither<CacheError, readonly T[]>;
-  /** Removes a value from the set */
+  /** Removes set value */
   sRem: (key: string, value: T) => TE.TaskEither<CacheError, void>;
 }
 
 /**
- * Sorted set operations interface.
- * Defines operations for sorted set data type.
+ * Sorted set operations interface
  */
 export interface SortedSetOperations<T> {
-  /** Adds a scored value to the sorted set */
+  /** Adds scored value */
   zAdd: (
     key: string,
     score: number,
     value: T,
     options?: InfrastructureCacheOptions,
   ) => TE.TaskEither<CacheError, void>;
-  /** Gets a range of sorted set values */
+  /** Gets score range */
   zRange: (key: string, min: number, max: number) => TE.TaskEither<CacheError, readonly T[]>;
-  /** Removes a value from the sorted set */
+  /** Removes value */
   zRem: (key: string, value: T) => TE.TaskEither<CacheError, void>;
 }
 
 /**
- * Common cache operations interface.
- * Defines operations available for all data types.
+ * Common cache operations interface
  */
 export interface CommonOperations {
-  /** Deletes a key */
+  /** Deletes key */
   del: (key: string) => TE.TaskEither<CacheError, void>;
-  /** Gets keys matching a pattern */
+  /** Gets matching keys */
   keys: (pattern: string) => TE.TaskEither<CacheError, readonly string[]>;
-  /** Checks if a key exists */
+  /** Checks key existence */
   exists: (key: string) => TE.TaskEither<CacheError, boolean>;
-  /** Sets key expiration */
+  /** Sets expiration */
   expire: (key: string, seconds: number) => TE.TaskEither<CacheError, void>;
-  /** Gets key time-to-live */
+  /** Gets TTL */
   ttl: (key: string) => TE.TaskEither<CacheError, number>;
-  /** Disconnects from cache */
+  /** Disconnects cache */
   disconnect: () => TE.TaskEither<CacheError, void>;
 }

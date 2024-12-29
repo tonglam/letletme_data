@@ -1,20 +1,7 @@
 /**
  * Redis Cache Implementation Module
  *
- * Provides a type-safe, functional programming approach to Redis operations.
- * Implements various Redis data structures with comprehensive error handling.
- *
- * Features:
- * - Type-safe Redis operations
- * - Functional error handling with fp-ts
- * - Automatic serialization/deserialization
- * - Retry mechanism for operations
- * - Comprehensive Redis data type support
- * - TTL management
- * - Key prefixing
- *
- * The module provides a robust Redis implementation with proper error
- * handling and type safety throughout all operations.
+ * Type-safe Redis operations with functional programming approach.
  */
 
 import * as TE from 'fp-ts/TaskEither';
@@ -35,9 +22,6 @@ import {
 
 /**
  * Redis Cache Interface
- * Combines all Redis operations into a single interface.
- *
- * @template T - The type of values stored in the cache
  */
 export interface RedisCache<T = unknown>
   extends StringOperations<T>,
@@ -48,14 +32,7 @@ export interface RedisCache<T = unknown>
     CommonOperations {}
 
 /**
- * Implements retry mechanism for Redis operations.
- * Handles transient failures with configurable retry attempts.
- *
- * @template T - The type of the operation result
- * @param operation - The async operation to retry
- * @param options - Retry configuration options
- * @returns Promise of the operation result
- * @throws Last encountered error if all retries fail
+ * Implements retry mechanism for Redis operations
  */
 const withRetry = async <T>(operation: () => Promise<T>, options?: CacheOptions): Promise<T> => {
   const attempts = options?.retry?.attempts ?? 1;
@@ -76,12 +53,7 @@ const withRetry = async <T>(operation: () => Promise<T>, options?: CacheOptions)
 };
 
 /**
- * Creates a Redis cache instance with the provided configuration.
- * Implements all Redis operations with type safety and error handling.
- *
- * @template T - The type of values stored in the cache
- * @param config - Redis cache configuration
- * @returns Redis cache instance with all supported operations
+ * Creates a Redis cache instance
  */
 export const createRedisCache = <T>(config: CacheConfig): RedisCache<T> => {
   const client = redisClient;
@@ -90,14 +62,12 @@ export const createRedisCache = <T>(config: CacheConfig): RedisCache<T> => {
   const defaultRetry = config.defaultRetry;
 
   /**
-   * Generates prefixed key for Redis operations.
-   * Ensures key namespace isolation.
+   * Generates prefixed key
    */
   const makeKey = (key: string) => `${keyPrefix}${key}`;
 
   /**
-   * Serializes value to string for Redis storage.
-   * Handles complex data types.
+   * Serializes value to string
    */
   const serialize = (value: T): TE.TaskEither<CacheError, string> =>
     TE.tryCatch(
@@ -110,8 +80,7 @@ export const createRedisCache = <T>(config: CacheConfig): RedisCache<T> => {
     );
 
   /**
-   * Deserializes string from Redis to typed value.
-   * Handles complex data types.
+   * Deserializes string to value
    */
   const deserialize = (value: string): TE.TaskEither<CacheError, T> =>
     TE.tryCatch(
@@ -248,8 +217,8 @@ export const createRedisCache = <T>(config: CacheConfig): RedisCache<T> => {
       serialize(value),
       TE.chain((serialized) =>
         TE.tryCatch(
-          async () => {
-            await withRetry(
+          () =>
+            withRetry(
               async () => {
                 await client.lPush(makeKey(key), serialized);
                 if (options?.ttl) {
@@ -257,8 +226,7 @@ export const createRedisCache = <T>(config: CacheConfig): RedisCache<T> => {
                 }
               },
               { ...options, retry: options?.retry ?? defaultRetry },
-            );
-          },
+            ),
           (error): CacheError => ({
             type: CacheErrorType.OPERATION,
             message: 'Failed to push to list',
@@ -289,17 +257,19 @@ export const createRedisCache = <T>(config: CacheConfig): RedisCache<T> => {
     pipe(
       serialize(value),
       TE.chain((serialized) =>
-        TE.tryCatch(
-          async () => {
-            await withRetry(() => client.lRem(makeKey(key), count, serialized), {
-              retry: defaultRetry,
-            });
-          },
-          (error): CacheError => ({
-            type: CacheErrorType.OPERATION,
-            message: 'Failed to remove from list',
-            cause: error,
-          }),
+        pipe(
+          TE.tryCatch(
+            () =>
+              withRetry(() => client.lRem(makeKey(key), count, serialized), {
+                retry: defaultRetry,
+              }),
+            (error): CacheError => ({
+              type: CacheErrorType.OPERATION,
+              message: 'Failed to remove from list',
+              cause: error,
+            }),
+          ),
+          TE.map(() => undefined),
         ),
       ),
     );
@@ -310,8 +280,8 @@ export const createRedisCache = <T>(config: CacheConfig): RedisCache<T> => {
       serialize(value),
       TE.chain((serialized) =>
         TE.tryCatch(
-          async () => {
-            await withRetry(
+          () =>
+            withRetry(
               async () => {
                 await client.sAdd(makeKey(key), serialized);
                 if (options?.ttl) {
@@ -319,8 +289,7 @@ export const createRedisCache = <T>(config: CacheConfig): RedisCache<T> => {
                 }
               },
               { ...options, retry: options?.retry ?? defaultRetry },
-            );
-          },
+            ),
           (error): CacheError => ({
             type: CacheErrorType.OPERATION,
             message: 'Failed to add to set',
@@ -347,20 +316,21 @@ export const createRedisCache = <T>(config: CacheConfig): RedisCache<T> => {
     pipe(
       serialize(value),
       TE.chain((serialized) =>
-        TE.tryCatch(
-          async () => {
-            await withRetry(() => client.sRem(makeKey(key), serialized), { retry: defaultRetry });
-          },
-          (error): CacheError => ({
-            type: CacheErrorType.OPERATION,
-            message: 'Failed to remove from set',
-            cause: error,
-          }),
+        pipe(
+          TE.tryCatch(
+            () => withRetry(() => client.sRem(makeKey(key), serialized), { retry: defaultRetry }),
+            (error): CacheError => ({
+              type: CacheErrorType.OPERATION,
+              message: 'Failed to remove from set',
+              cause: error,
+            }),
+          ),
+          TE.map(() => undefined),
         ),
       ),
     );
 
-  // Sorted Set operations
+  // Sorted set operations
   const zAdd = (
     key: string,
     score: number,
@@ -371,8 +341,8 @@ export const createRedisCache = <T>(config: CacheConfig): RedisCache<T> => {
       serialize(value),
       TE.chain((serialized) =>
         TE.tryCatch(
-          async () => {
-            await withRetry(
+          () =>
+            withRetry(
               async () => {
                 await client.zAdd(makeKey(key), [{ score, value: serialized }]);
                 if (options?.ttl) {
@@ -380,8 +350,7 @@ export const createRedisCache = <T>(config: CacheConfig): RedisCache<T> => {
                 }
               },
               { ...options, retry: options?.retry ?? defaultRetry },
-            );
-          },
+            ),
           (error): CacheError => ({
             type: CacheErrorType.OPERATION,
             message: 'Failed to add to sorted set',
@@ -408,15 +377,16 @@ export const createRedisCache = <T>(config: CacheConfig): RedisCache<T> => {
     pipe(
       serialize(value),
       TE.chain((serialized) =>
-        TE.tryCatch(
-          async () => {
-            await withRetry(() => client.zRem(makeKey(key), serialized), { retry: defaultRetry });
-          },
-          (error): CacheError => ({
-            type: CacheErrorType.OPERATION,
-            message: 'Failed to remove from sorted set',
-            cause: error,
-          }),
+        pipe(
+          TE.tryCatch(
+            () => withRetry(() => client.zRem(makeKey(key), serialized), { retry: defaultRetry }),
+            (error): CacheError => ({
+              type: CacheErrorType.OPERATION,
+              message: 'Failed to remove from sorted set',
+              cause: error,
+            }),
+          ),
+          TE.map(() => undefined),
         ),
       ),
     );
@@ -464,7 +434,7 @@ export const createRedisCache = <T>(config: CacheConfig): RedisCache<T> => {
       },
       (error): CacheError => ({
         type: CacheErrorType.OPERATION,
-        message: 'Failed to set expiry',
+        message: 'Failed to set expiration',
         cause: error,
       }),
     );
@@ -482,7 +452,7 @@ export const createRedisCache = <T>(config: CacheConfig): RedisCache<T> => {
   const disconnect = (): TE.TaskEither<CacheError, void> =>
     TE.tryCatch(
       async () => {
-        await client.quit();
+        await withRetry(() => client.quit(), { retry: defaultRetry });
       },
       (error): CacheError => ({
         type: CacheErrorType.CONNECTION,
@@ -508,7 +478,7 @@ export const createRedisCache = <T>(config: CacheConfig): RedisCache<T> => {
     sAdd,
     sMembers,
     sRem,
-    // Sorted Set operations
+    // Sorted set operations
     zAdd,
     zRange,
     zRem,

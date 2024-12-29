@@ -1,69 +1,58 @@
 /**
- * HTTP Client Configuration Module
- *
- * Contains all configuration values and constants for the HTTP client.
- * This centralized configuration allows for easy maintenance and consistency
- * across the application.
- *
- * @module infrastructure/api/config/http.config
- */
-
-/**
- * Rate limiting configuration
- * Controls request frequency to external APIs
+ * HTTP client configuration constants
+ * @const {Readonly<{REQUESTS_PER_MINUTE: number, BURST_SIZE: number}>}
  */
 export const RATE_LIMIT = {
   REQUESTS_PER_MINUTE: 60,
   BURST_SIZE: 10,
 } as const;
 
+/**
+ * HTTP client configuration settings
+ * @const {Readonly<{TIMEOUT: Object, RETRY: Object, CACHE: Object, STATUS: Object, HEADERS: Object, ERROR: Object}>}
+ */
 export const HTTP_CONFIG = {
   /**
-   * Timeout settings in milliseconds
-   * Different timeouts for different types of operations
+   * @const {Readonly<{DEFAULT: number, LONG: number, SHORT: number}>}
    */
   TIMEOUT: {
-    DEFAULT: 30000, // 30 seconds
-    LONG: 60000, // 1 minute
-    SHORT: 5000, // 5 seconds
+    DEFAULT: 30000,
+    LONG: 60000,
+    SHORT: 5000,
   },
 
   /**
-   * Retry mechanism configuration
-   * Implements exponential backoff with jitter
+   * @const {Readonly<{DEFAULT_ATTEMPTS: number, MAX_ATTEMPTS: number, BASE_DELAY: number, MAX_DELAY: number, JITTER_MAX: number}>}
    */
   RETRY: {
-    DEFAULT_ATTEMPTS: 3, // Standard number of retry attempts
-    MAX_ATTEMPTS: 5, // Maximum allowed retry attempts
-    BASE_DELAY: 1000, // Initial delay between retries (1 second)
-    MAX_DELAY: 10000, // Maximum delay between retries (10 seconds)
-    JITTER_MAX: 100, // Maximum random jitter to add to delay
+    DEFAULT_ATTEMPTS: 3,
+    MAX_ATTEMPTS: 5,
+    BASE_DELAY: 1000,
+    MAX_DELAY: 10000,
+    JITTER_MAX: 100,
   },
 
   /**
-   * Cache control settings
-   * Used to prevent caching of dynamic content
+   * @const {Readonly<{TIMESTAMP_PARAM: string}>}
    */
   CACHE: {
-    TIMESTAMP_PARAM: '_t', // Query parameter for cache busting
+    TIMESTAMP_PARAM: '_t',
   },
 
   /**
-   * HTTP Status code ranges
-   * Used for response validation and error handling
+   * @const {Readonly<{OK_MIN: number, OK_MAX: number, CLIENT_ERROR_MIN: number, CLIENT_ERROR_MAX: number, SERVER_ERROR_MIN: number, SERVER_ERROR_MAX: number}>}
    */
   STATUS: {
-    OK_MIN: 200, // Minimum success status code
-    OK_MAX: 299, // Maximum success status code
-    CLIENT_ERROR_MIN: 400, // Minimum client error status code
-    CLIENT_ERROR_MAX: 499, // Maximum client error status code
-    SERVER_ERROR_MIN: 500, // Minimum server error status code
-    SERVER_ERROR_MAX: 599, // Maximum server error status code
+    OK_MIN: 200,
+    OK_MAX: 299,
+    CLIENT_ERROR_MIN: 400,
+    CLIENT_ERROR_MAX: 499,
+    SERVER_ERROR_MIN: 500,
+    SERVER_ERROR_MAX: 599,
   },
 
   /**
-   * Default HTTP headers
-   * Applied to all requests unless overridden
+   * @const {Readonly<Record<string, string>>}
    */
   HEADERS: {
     DEFAULT_USER_AGENT:
@@ -83,31 +72,30 @@ export const HTTP_CONFIG = {
   },
 
   /**
-   * Error codes for API errors
-   * Used for consistent error handling across the application
+   * @const {Readonly<{INVALID_REQUEST: string, UNKNOWN_ERROR: string, INTERNAL_ERROR: string, RETRY_EXHAUSTED: string}>}
    */
   ERROR: {
-    INVALID_REQUEST: 'INVALID_REQUEST', // Missing or invalid request parameters
-    UNKNOWN_ERROR: 'UNKNOWN_ERROR', // Unhandled or unexpected errors
-    INTERNAL_ERROR: 'INTERNAL_ERROR', // Internal server errors
-    RETRY_EXHAUSTED: 'RETRY_EXHAUSTED', // Maximum retry attempts reached
+    INVALID_REQUEST: 'INVALID_REQUEST',
+    UNKNOWN_ERROR: 'UNKNOWN_ERROR',
+    INTERNAL_ERROR: 'INTERNAL_ERROR',
+    RETRY_EXHAUSTED: 'RETRY_EXHAUSTED',
   },
 } as const;
 
 /**
  * Type for timeout configuration keys
- * Used for type-safe timeout selection
+ * @type {keyof typeof HTTP_CONFIG.TIMEOUT}
  */
 export type HTTPTimeout = keyof typeof HTTP_CONFIG.TIMEOUT;
 
 /**
  * Type for error codes
- * Ensures type safety when working with error codes
+ * @type {(typeof HTTP_CONFIG.ERROR)[keyof typeof HTTP_CONFIG.ERROR]}
  */
 export type HTTPErrorCode = (typeof HTTP_CONFIG.ERROR)[keyof typeof HTTP_CONFIG.ERROR];
 
 /**
  * Type for rate limit configuration
- * Ensures type safety when working with rate limits
+ * @type {typeof RATE_LIMIT}
  */
 export type RateLimit = typeof RATE_LIMIT;

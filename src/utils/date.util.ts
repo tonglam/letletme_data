@@ -1,4 +1,10 @@
 /**
+ * Date Utility Module
+ *
+ * Utility functions for date operations.
+ */
+
+/**
  * Formats a date to local time string
  * @param date - The date to format
  * @returns Formatted date string in local time

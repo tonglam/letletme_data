@@ -1,18 +1,7 @@
 /**
  * Cache Utilities Module
  *
- * Provides utility functions for cache operations and error handling.
- * Implements common cache patterns and error transformations.
- *
- * Features:
- * - Cache-aside pattern implementation
- * - Error transformation utilities
- * - Validation handling
- * - Batch operation support
- * - Functional composition utilities
- *
- * This module provides reusable utilities for implementing
- * cache patterns and handling common cache scenarios.
+ * Utility functions for cache operations and error handling.
  */
 
 import * as E from 'fp-ts/Either';
@@ -22,11 +11,7 @@ import { APIError, createInternalServerError } from '../http/common/errors';
 import { CacheError, CacheErrorType } from './types';
 
 /**
- * Converts unknown errors to CacheError type.
- * Provides consistent error handling for cache operations.
- *
- * @param error - Unknown error to convert
- * @returns Structured cache error
+ * Converts unknown errors to CacheError
  */
 const toCacheError = (error: unknown): CacheError => ({
   type: CacheErrorType.OPERATION,
@@ -34,24 +19,13 @@ const toCacheError = (error: unknown): CacheError => ({
 });
 
 /**
- * Converts CacheError to APIError type.
- * Ensures consistent error reporting in API responses.
- *
- * @param error - Cache error to convert
- * @returns API error representation
+ * Converts CacheError to APIError
  */
 const toAPIError = (error: CacheError): APIError =>
   createInternalServerError({ message: error.message });
 
 /**
- * Implements cache-aside pattern with fallback to repository.
- * Handles cache misses and updates cache with repository data.
- *
- * @template T - Type of cached data
- * @param getCacheData - Function to retrieve data from cache
- * @param getRepositoryData - Function to retrieve data from repository
- * @param cacheData - Function to cache repository data
- * @returns TaskEither with data or error
+ * Implements cache-aside pattern with fallback
  */
 export const withCache = <T>(
   getCacheData: () => TE.TaskEither<CacheError, readonly T[]>,
@@ -79,14 +53,7 @@ export const withCache = <T>(
   );
 
 /**
- * Implements cache-aside pattern for single item operations.
- * Handles cache misses and updates cache with repository data.
- *
- * @template T - Type of cached data
- * @param getCacheData - Function to retrieve item from cache
- * @param getRepositoryData - Function to retrieve item from repository
- * @param cacheData - Function to cache repository data
- * @returns TaskEither with data or error
+ * Implements cache-aside pattern for single items
  */
 export const withCacheSingle = <T>(
   getCacheData: () => TE.TaskEither<CacheError, T | null>,
@@ -116,13 +83,7 @@ export const withCacheSingle = <T>(
   );
 
 /**
- * Handles create operations with cache updates.
- * Ensures data consistency between repository and cache.
- *
- * @template T - Type of data to create
- * @param saveData - Function to save data to repository
- * @param cacheData - Function to cache saved data
- * @returns TaskEither with created data or error
+ * Handles create operations with cache updates
  */
 export const withCreate = <T>(
   saveData: () => TE.TaskEither<unknown, T>,
@@ -141,13 +102,7 @@ export const withCreate = <T>(
   );
 
 /**
- * Handles batch create operations with cache updates.
- * Ensures data consistency for multiple items.
- *
- * @template T - Type of data to create
- * @param saveData - Function to save batch data to repository
- * @param cacheData - Function to cache saved data
- * @returns TaskEither with created data or error
+ * Handles batch create operations with cache updates
  */
 export const withCreateBatch = <T>(
   saveData: () => TE.TaskEither<unknown, readonly T[]>,
@@ -166,17 +121,7 @@ export const withCreateBatch = <T>(
   );
 
 /**
- * Implements validation before cache operations.
- * Ensures data integrity and type safety.
- *
- * @template I - Input type
- * @template V - Validated type
- * @template T - Result type
- * @param validate - Function to validate input
- * @param getCacheData - Function to retrieve validated data from cache
- * @param getRepositoryData - Function to retrieve validated data from repository
- * @param cacheData - Function to cache validated data
- * @returns Function that processes validated cache operations
+ * Implements validation before cache operations
  */
 export const withValidatedCache =
   <I, V, T>(

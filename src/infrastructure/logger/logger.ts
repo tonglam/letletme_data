@@ -2,34 +2,18 @@
  * Logger Infrastructure Module
  *
  * Provides a centralized logging system with multiple logger instances.
- * Implements a factory pattern for logger management.
- *
- * Features:
- * - Cached logger instances
- * - Multiple logger types
- * - Configuration-driven setup
- * - Singleton pattern per logger type
- * - Type-safe logger access
- *
- * The module ensures consistent logging across the application
- * with proper configuration and instance management.
  */
 
 import { Logger } from 'pino';
 import { LOG_CONFIG, createLogger } from '../../config/logger/logger.config';
 
 /**
- * Cache for logger instances.
- * Ensures single instance per logger type.
+ * Cache for logger instances
  */
 const loggerInstances = new Map<string, Logger>();
 
 /**
- * Core logger factory function.
- * Creates or retrieves cached logger instances.
- *
- * @param name - The name of the logger from configuration
- * @returns Configured logger instance
+ * Core logger factory function
  */
 const getOrCreateLogger = (name: keyof typeof LOG_CONFIG.loggers): Logger => {
   const existing = loggerInstances.get(name);
@@ -46,33 +30,21 @@ const getOrCreateLogger = (name: keyof typeof LOG_CONFIG.loggers): Logger => {
 };
 
 /**
- * Gets the API logger instance.
- * Used for logging API-related operations.
- *
- * @returns Configured API logger
+ * Gets the API logger instance
  */
 export const getApiLogger = (): Logger => getOrCreateLogger('api');
 
 /**
- * Gets the FPL API logger instance.
- * Used for logging FPL API interactions.
- *
- * @returns Configured FPL API logger
+ * Gets the FPL API logger instance
  */
 export const getFplApiLogger = (): Logger => getOrCreateLogger('fpl');
 
 /**
- * Gets the Queue logger instance.
- * Used for logging queue operations.
- *
- * @returns Configured queue logger
+ * Gets the Queue logger instance
  */
 export const getQueueLogger = (): Logger => getOrCreateLogger('queue');
 
 /**
- * Gets the Workflow logger instance.
- * Used for logging workflow executions.
- *
- * @returns Configured workflow logger
+ * Gets the Workflow logger instance
  */
 export const getWorkflowLogger = (): Logger => getOrCreateLogger('workflow');

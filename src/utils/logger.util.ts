@@ -1,25 +1,44 @@
+/**
+ * Logger Utility Module
+ *
+ * Utility functions for logging operations.
+ */
+
 import { Request } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { getApiLogger, getFplApiLogger, getQueueLogger } from '../infrastructure/logger';
 
-// Types
+/**
+ * Base logging context interface
+ */
 export interface LogContext {
   [key: string]: unknown;
 }
 
+/**
+ * FPL API logging context interface
+ */
 export interface FplApiContext extends LogContext {
   service: string;
   endpoint: string;
 }
 
+/**
+ * Queue logging context interface
+ */
 export interface QueueContext extends LogContext {
   queueName: string;
   jobId: string;
 }
 
-// Common utilities
+/**
+ * Generates a unique request ID
+ */
 export const generateRequestId = (): string => uuidv4();
 
+/**
+ * Sanitizes request headers by redacting sensitive information
+ */
 export const sanitizeHeaders = (headers: Record<string, unknown>): Record<string, unknown> => {
   const sanitized = { ...headers };
   const sensitiveKeys = ['authorization', 'cookie', 'token'];
@@ -33,7 +52,9 @@ export const sanitizeHeaders = (headers: Record<string, unknown>): Record<string
   return sanitized;
 };
 
-// Request details helper
+/**
+ * Extracts relevant details from a request
+ */
 export const getRequestDetails = (req: Request): Record<string, unknown> => ({
   ...(req.method !== 'GET' && { body: req.body }),
   userAgent: req.get('user-agent'),
@@ -41,7 +62,9 @@ export const getRequestDetails = (req: Request): Record<string, unknown> => ({
   headers: sanitizeHeaders(req.headers as Record<string, unknown>),
 });
 
-// API Logging
+/**
+ * Logs API request information
+ */
 export const logApiRequest = (req: Request, message: string, context?: LogContext): void => {
   getApiLogger().info(
     {
@@ -55,6 +78,9 @@ export const logApiRequest = (req: Request, message: string, context?: LogContex
   );
 };
 
+/**
+ * Logs API error information
+ */
 export const logApiError = (req: Request, error: Error, context?: LogContext): void => {
   getApiLogger().error({
     err: error,
@@ -66,7 +92,9 @@ export const logApiError = (req: Request, error: Error, context?: LogContext): v
   });
 };
 
-// Fpl API Logging
+/**
+ * Logs FPL API call information
+ */
 export const logFplApiCall = (message: string, context: FplApiContext): void => {
   getFplApiLogger().info(
     {
@@ -78,6 +106,9 @@ export const logFplApiCall = (message: string, context: FplApiContext): void => 
   );
 };
 
+/**
+ * Logs FPL API error information
+ */
 export const logFplApiError = (error: Error, context: FplApiContext): void => {
   getFplApiLogger().error({
     err: error,
@@ -87,7 +118,9 @@ export const logFplApiError = (error: Error, context: FplApiContext): void => {
   });
 };
 
-// Queue Logging
+/**
+ * Logs queue job information
+ */
 export const logQueueJob = (message: string, context: QueueContext): void => {
   getQueueLogger().info(
     {
@@ -98,6 +131,9 @@ export const logQueueJob = (message: string, context: QueueContext): void => {
   );
 };
 
+/**
+ * Logs queue error information
+ */
 export const logQueueError = (error: Error, context: QueueContext): void => {
   getQueueLogger().error({
     err: error,

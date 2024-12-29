@@ -2,16 +2,10 @@
  * Event Service Types Module
  *
  * Defines the core types and interfaces for the event service layer.
- * Provides type definitions for service operations and dependencies.
+ * Provides type definitions for service operations and dependencies,
+ * ensuring type safety and clear contracts between the service layer and its consumers.
  *
- * Features:
- * - Type-safe service interface
- * - Functional error handling with TaskEither
- * - Clear dependency specifications
- * - Comprehensive operation contracts
- *
- * This module ensures type safety and clear contracts between
- * the service layer and its consumers.
+ * @module EventServiceTypes
  */
 
 import type * as TE from 'fp-ts/TaskEither';
@@ -23,64 +17,51 @@ import type { Event, EventId, EventRepository } from '../../types/events.type';
 /**
  * Event Service Interface
  * Provides high-level operations for event management.
- * All operations use TaskEither for functional error handling.
+ *
+ * @interface EventService
  */
 export interface EventService {
   /**
    * Warms up the event cache.
-   * Ensures optimal performance for subsequent operations.
-   *
-   * @returns TaskEither indicating success or failure
+   * @returns {TaskEither<APIError, void>} Success or error
    */
   readonly warmUp: () => TE.TaskEither<APIError, void>;
 
   /**
    * Retrieves all events from the system.
-   * Uses cache with database fallback.
-   *
-   * @returns TaskEither with array of events or error
+   * @returns {TaskEither<APIError, readonly Event[]>} Array of events or error
    */
   readonly getEvents: () => TE.TaskEither<APIError, readonly Event[]>;
 
   /**
    * Retrieves a specific event by ID.
-   * Uses cache with database fallback.
-   *
-   * @param id - Event identifier
-   * @returns TaskEither with event or null if not found
+   * @param {EventId} id - Event identifier
+   * @returns {TaskEither<APIError, Event | null>} Event if found or error
    */
   readonly getEvent: (id: EventId) => TE.TaskEither<APIError, Event | null>;
 
   /**
    * Retrieves the current active event.
-   * Uses cache with database fallback.
-   *
-   * @returns TaskEither with current event or null
+   * @returns {TaskEither<APIError, Event | null>} Current event or error
    */
   readonly getCurrentEvent: () => TE.TaskEither<APIError, Event | null>;
 
   /**
    * Retrieves the next scheduled event.
-   * Uses cache with database fallback.
-   *
-   * @returns TaskEither with next event or null
+   * @returns {TaskEither<APIError, Event | null>} Next event or error
    */
   readonly getNextEvent: () => TE.TaskEither<APIError, Event | null>;
 
   /**
    * Fetches fresh event data from FPL API.
-   * Transforms API response to domain events.
-   *
-   * @returns TaskEither with array of events from API
+   * @returns {TaskEither<APIError, readonly Event[]>} Array of events or error
    */
   readonly fetchFromApi: () => TE.TaskEither<APIError, readonly Event[]>;
 
   /**
    * Validates and transforms event data.
-   * Ensures data integrity and type safety.
-   *
-   * @param events - Events to validate and transform
-   * @returns TaskEither with validated events or error
+   * @param {readonly Event[]} events - Events to validate
+   * @returns {TaskEither<APIError, readonly Event[]>} Validated events or error
    */
   readonly validateAndTransform: (
     events: readonly Event[],
@@ -88,26 +69,23 @@ export interface EventService {
 
   /**
    * Saves events to database.
-   * Performs atomic operation, clearing existing data first.
-   *
-   * @param events - Events to save
-   * @returns TaskEither with saved events or error
+   * @param {readonly Event[]} events - Events to save
+   * @returns {TaskEither<APIError, readonly Event[]>} Saved events or error
    */
   readonly saveToDb: (events: readonly Event[]) => TE.TaskEither<APIError, readonly Event[]>;
 
   /**
    * Updates the cache with new event data.
-   * Ensures cache consistency after database updates.
-   *
-   * @param events - Events to cache
-   * @returns TaskEither with cached events or error
+   * @param {readonly Event[]} events - Events to cache
+   * @returns {TaskEither<APIError, readonly Event[]>} Cached events or error
    */
   readonly updateCache: (events: readonly Event[]) => TE.TaskEither<APIError, readonly Event[]>;
 }
 
 /**
- * Dependencies required by the Event Service implementation.
- * Follows dependency injection pattern for better testability.
+ * Required dependencies for event service.
+ *
+ * @interface EventServiceDependencies
  */
 export interface EventServiceDependencies {
   /** Bootstrap API client for fetching FPL data */

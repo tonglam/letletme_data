@@ -2,18 +2,10 @@
  * Event Service Implementation Module
  *
  * Implements the core event service functionality with caching and data persistence.
- * Provides high-level operations for event management in the FPL system.
+ * Provides high-level operations for event management in the FPL system,
+ * ensuring data consistency across cache and database layers.
  *
- * Features:
- * - Integration with Bootstrap API
- * - Cache management with warm-up
- * - Data validation and transformation
- * - Error handling with fp-ts
- * - Atomic database operations
- * - Cache consistency maintenance
- *
- * The service ensures data consistency across cache and database layers
- * while providing a clean interface for event operations.
+ * @module EventService
  */
 
 import { pipe } from 'fp-ts/function';
@@ -36,20 +28,23 @@ import type { EventService } from './types';
 
 /**
  * Required dependencies for event service implementation.
- * Follows dependency injection pattern for better testability.
+ *
+ * @interface EventServiceDependencies
  */
 export interface EventServiceDependencies {
+  /** Bootstrap API client for fetching FPL data */
   readonly bootstrapApi: BootstrapApi;
+  /** Event cache for optimized data access */
   readonly eventCache: EventCache;
+  /** Event repository for data persistence */
   readonly eventRepository: EventRepository;
 }
 
 /**
  * Creates an event service implementation.
- * Implements EventService interface with provided dependencies.
  *
- * @param dependencies - Required service dependencies
- * @returns Configured event service instance
+ * @param {EventServiceDependencies} dependencies - Required service dependencies
+ * @returns {EventService} Event service instance
  */
 export const createEventServiceImpl = ({
   bootstrapApi,
@@ -58,57 +53,63 @@ export const createEventServiceImpl = ({
 }: EventServiceDependencies): EventService => {
   /**
    * Warms up the event cache.
-   * Ensures cache is populated for optimal performance.
+   * @returns {TaskEither<APIError, void>} Success or error
    */
   const warmUp = (): TE.TaskEither<APIError, void> =>
     pipe(
       eventCache.warmUp(),
       TE.mapLeft((error) =>
-        createValidationError({ message: `Cache warm-up failed: ${error.message}` }),
+        createValidationError({ message: 'Cache warm-up failed', details: { error } }),
       ),
     );
 
   /**
-   * Retrieves all events from cache with database fallback.
+   * Retrieves all events from the system.
+   * @returns {TaskEither<APIError, readonly Event[]>} Array of events or error
    */
   const getEvents = (): TE.TaskEither<APIError, readonly Event[]> =>
     findAllEvents(eventRepository, eventCache);
 
   /**
-   * Retrieves a specific event by ID from cache with database fallback.
+   * Retrieves a specific event by ID.
+   * @param {EventId} id - Event identifier
+   * @returns {TaskEither<APIError, Event | null>} Event if found or error
    */
   const getEvent = (id: EventId): TE.TaskEither<APIError, Event | null> =>
     findEventById(eventRepository, eventCache, id);
 
   /**
-   * Retrieves the current active event from cache with database fallback.
+   * Retrieves the current active event.
+   * @returns {TaskEither<APIError, Event | null>} Current event or error
    */
   const getCurrentEvent = (): TE.TaskEither<APIError, Event | null> =>
     findCurrentEvent(eventRepository, eventCache);
 
   /**
-   * Retrieves the next scheduled event from cache with database fallback.
+   * Retrieves the next scheduled event.
+   * @returns {TaskEither<APIError, Event | null>} Next event or error
    */
   const getNextEvent = (): TE.TaskEither<APIError, Event | null> =>
     findNextEvent(eventRepository, eventCache);
 
   /**
-   * Fetches fresh event data from the FPL API.
-   * Transforms API response to domain events.
+   * Fetches fresh event data from FPL API.
+   * @returns {TaskEither<APIError, readonly Event[]>} Array of events or error
    */
   const fetchFromApi = (): TE.TaskEither<APIError, readonly Event[]> =>
     pipe(
       TE.tryCatch(
         () => bootstrapApi.getBootstrapData(),
         (error) =>
-          createValidationError({ message: `Failed to fetch events from API: ${String(error)}` }),
+          createValidationError({ message: 'Failed to fetch from API', details: { error } }),
       ),
       TE.map((response) => response.events.map(toDomainEvent)),
     );
 
   /**
-   * Validates event data and ensures required fields are present.
-   * Transforms data to ensure type safety.
+   * Validates and transforms event data.
+   * @param {readonly Event[]} events - Events to validate
+   * @returns {TaskEither<APIError, readonly Event[]>} Validated events or error
    */
   const validateAndTransform = (
     events: readonly Event[],
@@ -117,37 +118,35 @@ export const createEventServiceImpl = ({
       events,
       TE.right,
       TE.chain((events) =>
-        events.every((event) => event.id && event.name && event.deadlineTime)
+        events.length > 0
           ? TE.right(events)
-          : TE.left(createValidationError({ message: 'Invalid event data received from API' })),
+          : TE.left(createValidationError({ message: 'No events to process' })),
       ),
     );
 
   /**
-   * Saves events to database after clearing existing data.
-   * Ensures atomic operation with proper error handling.
+   * Saves events to database.
+   * @param {readonly Event[]} events - Events to save
+   * @returns {TaskEither<APIError, readonly Event[]>} Saved events or error
    */
   const saveToDb = (events: readonly Event[]): TE.TaskEither<APIError, readonly Event[]> =>
     pipe(
       deleteAllEvents(eventRepository, eventCache),
       TE.chain(() => saveBatchEvents(eventRepository, eventCache, events)),
-      TE.mapLeft((error) =>
-        createValidationError({ message: `Failed to save events to database: ${error.message}` }),
-      ),
     );
 
   /**
    * Updates the cache with new event data.
-   * Ensures cache consistency after database updates.
+   * @param {readonly Event[]} events - Events to cache
+   * @returns {TaskEither<APIError, readonly Event[]>} Cached events or error
    */
   const updateCache = (events: readonly Event[]): TE.TaskEither<APIError, readonly Event[]> =>
     pipe(
-      eventCache.warmUp(),
-      TE.chain(() => eventCache.cacheEvents(events)),
-      TE.map(() => events),
+      eventCache.cacheEvents(events),
       TE.mapLeft((error) =>
-        createValidationError({ message: `Failed to update cache: ${error.message}` }),
+        createValidationError({ message: 'Failed to update cache', details: { error } }),
       ),
+      TE.map(() => events),
     );
 
   return {

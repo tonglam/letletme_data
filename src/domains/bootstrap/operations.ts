@@ -4,10 +4,24 @@ import * as TE from 'fp-ts/TaskEither';
 import { createValidationError } from '../../infrastructure/http/common/errors';
 import { BootStrap, BootStrapResponse, toDomainBootStrap } from '../../types/bootstrap.type';
 
+/**
+ * Interface for bootstrap API operations
+ * @interface BootstrapApi
+ */
 export interface BootstrapApi {
+  /**
+   * Retrieves bootstrap data from the API
+   * @async
+   * @returns {Promise<BootStrapResponse>} A promise that resolves to bootstrap response data
+   */
   getBootstrapData: () => Promise<BootStrapResponse>;
 }
 
+/**
+ * Fetches and transforms bootstrap data from the API
+ * @param {BootstrapApi} api - The bootstrap API instance
+ * @returns {TaskEither<Error, BootStrap>} A TaskEither containing either an Error or the transformed BootStrap data
+ */
 export const fetchBootstrap = (api: BootstrapApi): TE.TaskEither<Error, BootStrap> =>
   pipe(
     TE.tryCatch(
