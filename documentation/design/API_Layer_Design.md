@@ -79,8 +79,11 @@ graph LR
 ```
 src/api/
 ├── handlers/       # Business logic handlers
+├── middleware/     # Shared middleware
 ├── routes/         # Route definitions
-└── middleware/     # Shared middleware
+├── types.ts        # API-specific type definitions
+├── utils.ts        # API utility functions
+└── index.ts        # API router configuration
 ```
 
 ### Flow

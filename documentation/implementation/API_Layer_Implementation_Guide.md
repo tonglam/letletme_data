@@ -7,17 +7,12 @@
   - [Introduction](#introduction)
   - [Directory Structure](#directory-structure)
   - [Core Components](#core-components)
-    - [1. Handler Module (`handlers/{domain}.handler.ts`)](#1-handler-module-handlersdomainhandlerts)
-    - [2. Route Module (`routes/{domain}.route.ts`)](#2-route-module-routesdomainroutets)
-    - [3. Types (in `src/types/api.type.ts`)](#3-types-in-srctypesapitypets)
   - [Implementation Steps](#implementation-steps)
   - [Type Definitions](#type-definitions)
   - [Handler Implementation](#handler-implementation)
   - [Route Implementation](#route-implementation)
   - [Best Practices](#best-practices)
   - [Example Implementation](#example-implementation)
-    - [Handler (`handlers/events.handler.ts`):](#handler-handlerseventshandlerts)
-    - [Route (`routes/events.route.ts`):](#route-routeseventsroutets)
 
 ## Introduction
 
@@ -31,44 +26,51 @@ For each new domain API, you need to create the following structure:
 src/api/
 ├── handlers/
 │   └── {domain}.handler.ts    # Domain-specific handlers
-├── routes/
-│   └── {domain}.route.ts      # Domain-specific routes
 ├── middleware/
 │   ├── core.ts                # Core middleware functions
 │   └── index.ts               # Middleware exports
+├── routes/
+│   └── {domain}.route.ts      # Domain-specific routes
+├── types.ts                   # API-specific type definitions
+├── utils.ts                   # API utility functions
 └── index.ts                   # API router configuration
 ```
 
 ## Core Components
 
-### 1. Handler Module (`handlers/{domain}.handler.ts`)
+1. **Types Module (`types.ts`)**
 
-- Contains business logic for API endpoints
-- Uses fp-ts for functional error handling
-- Implements domain-specific operations
+   - Defines API-specific types and interfaces
+   - Implements validation codecs
+   - Declares handler interfaces
 
-### 2. Route Module (`routes/{domain}.route.ts`)
+2. **Utils Module (`utils.ts`)**
 
-- Defines API endpoints
-- Configures route middleware
-- Maps handlers to routes
+   - Provides utility functions for API operations
+   - Implements error handling and response formatting
+   - Contains functional programming helpers
 
-### 3. Types (in `src/types/api.type.ts`)
+3. **Handler Module (`handlers/{domain}.handler.ts`)**
 
-- Defines request/response types
-- Implements validation codecs
-- Declares handler interfaces
+   - Contains business logic for API endpoints
+   - Uses fp-ts for functional error handling
+   - Implements domain-specific operations
+
+4. **Route Module (`routes/{domain}.route.ts`)**
+   - Defines API endpoints
+   - Configures route middleware
+   - Maps handlers to routes
 
 ## Implementation Steps
 
-1. Define domain-specific types in `src/types/api.type.ts`
+1. Define API-specific types in `src/api/types.ts`
 2. Create handler implementation in `handlers/{domain}.handler.ts`
 3. Create route configuration in `routes/{domain}.route.ts`
 4. Register routes in `src/api/index.ts`
 
 ## Type Definitions
 
-Add your domain-specific types to `src/types/api.type.ts`:
+Add your domain-specific types to `src/api/types.ts`:
 
 ```typescript
 // Request validation codec
@@ -144,9 +146,10 @@ export const domainRouter = ({ domainService }: ServiceContainer): Router => {
 
 3. **Code Organization**
 
+   - Keep API-specific types in `types.ts`
+   - Place common utilities in `utils.ts`
    - One handler file per domain
    - One route file per domain
-   - Clear separation of concerns
 
 4. **Functional Programming**
    - Use fp-ts operators (pipe, chain, map)

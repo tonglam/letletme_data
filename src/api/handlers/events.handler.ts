@@ -13,9 +13,9 @@ import { Request } from 'express';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
 import { ServiceContainer, ServiceKey } from '../../services';
-import { EventHandlerResponse } from '../../types/api.type';
 import { Event, EventId } from '../../types/domain/events.type';
 import { handleNullable } from '../../utils/error.util';
+import { EventHandlerResponse } from '../types';
 
 /**
  * Creates event handlers with dependency injection

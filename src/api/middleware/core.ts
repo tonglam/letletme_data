@@ -18,19 +18,14 @@ import { flow, pipe } from 'fp-ts/function';
 import * as t from 'io-ts';
 import { PathReporter } from 'io-ts/PathReporter';
 import {
-  AsyncMiddlewareHandler,
-  ErrorHandler,
-  Middleware,
-  SecurityHeaders,
-} from '../../types/api.type';
-import {
   APIError,
   APIErrorCode,
   createAPIError,
   formatErrorResponse,
   getErrorStatus,
 } from '../../types/errors.type';
-import { sendResponse } from '../../utils/api.util';
+import { AsyncMiddlewareHandler, ErrorHandler, Middleware, SecurityHeaders } from '../types';
+import { sendResponse } from '../utils';
 
 /**
  * Converts unknown errors to APIError type

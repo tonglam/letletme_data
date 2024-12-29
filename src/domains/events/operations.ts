@@ -8,13 +8,14 @@
 
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
+import { CacheError } from 'src/infrastructure/cache/types';
 import {
   withCache,
   withCacheSingle,
   withCreate,
   withCreateBatch,
   withValidatedCache,
-} from '../../infrastructure/cache/utils';
+} from 'src/infrastructure/cache/utils';
 import {
   Event as DomainEvent,
   EventId,
@@ -29,6 +30,14 @@ import { toAPIError } from '../../utils/domain.util';
 import { type EventCache } from './cache';
 
 /**
+ * Safely caches an event, handling null values
+ */
+const safeCacheEvent = (
+  cache: EventCache,
+  event: DomainEvent | null,
+): TE.TaskEither<CacheError, void> => (event ? cache.cacheEvent(event) : TE.right(undefined));
+
+/**
  * Retrieves all events with caching support.
  * Implements cache-aside pattern with automatic cache population.
  *
@@ -40,18 +49,15 @@ export const getAllEvents = (
   repository: EventRepository,
   cache: EventCache,
 ): TE.TaskEither<APIError, readonly DomainEvent[]> =>
-  pipe(
-    withCache(
-      () => cache.getAllEvents(),
-      () =>
-        pipe(
-          repository.findAll(),
-          TE.mapLeft(toAPIError),
-          TE.map((events) => events.map(toDomainEvent)),
-        ),
-      (events) => cache.cacheEvents(events),
-    ),
-    TE.mapLeft(toAPIError),
+  withCache(
+    () => cache.getAllEvents(),
+    () =>
+      pipe(
+        repository.findAll(),
+        TE.mapLeft(toAPIError),
+        TE.map((events) => events.map(toDomainEvent)),
+      ),
+    (events) => cache.cacheEvents(events),
   );
 
 /**
@@ -68,20 +74,17 @@ export const getEventById = (
   cache: EventCache,
   id: string,
 ): TE.TaskEither<APIError, DomainEvent | null> =>
-  pipe(
-    withValidatedCache(
-      (id: string) => validateEventId(Number(id)),
-      (validId) => cache.getEvent(String(validId)),
-      (validId) =>
-        pipe(
-          repository.findById(validId),
-          TE.mapLeft(toAPIError),
-          TE.map((event) => (event ? toDomainEvent(event) : null)),
-        ),
-      (event) => cache.cacheEvent(event),
-    )(id),
-    TE.mapLeft(toAPIError),
-  );
+  withValidatedCache(
+    (id) => TE.fromEither(validateEventId(Number(id))),
+    (validId) => cache.getEvent(String(validId)),
+    (validId) =>
+      pipe(
+        repository.findById(validId),
+        TE.mapLeft(toAPIError),
+        TE.map((event) => (event ? toDomainEvent(event) : null)),
+      ),
+    (event) => safeCacheEvent(cache, event),
+  )(id);
 
 /**
  * Retrieves the current active event with caching support.
@@ -95,18 +98,15 @@ export const getCurrentEvent = (
   repository: EventRepository,
   cache: EventCache,
 ): TE.TaskEither<APIError, DomainEvent | null> =>
-  pipe(
-    withCacheSingle(
-      () => cache.getCurrentEvent(),
-      () =>
-        pipe(
-          repository.findCurrent(),
-          TE.mapLeft(toAPIError),
-          TE.map((event) => (event ? toDomainEvent(event) : null)),
-        ),
-      (event) => cache.cacheEvent(event),
-    ),
-    TE.mapLeft(toAPIError),
+  withCacheSingle(
+    () => cache.getCurrentEvent(),
+    () =>
+      pipe(
+        repository.findCurrent(),
+        TE.mapLeft(toAPIError),
+        TE.map((event) => (event ? toDomainEvent(event) : null)),
+      ),
+    (event) => safeCacheEvent(cache, event),
   );
 
 /**
@@ -120,18 +120,15 @@ export const getNextEvent = (
   repository: EventRepository,
   cache: EventCache,
 ): TE.TaskEither<APIError, DomainEvent | null> =>
-  pipe(
-    withCacheSingle(
-      () => cache.getNextEvent(),
-      () =>
-        pipe(
-          repository.findNext(),
-          TE.mapLeft(toAPIError),
-          TE.map((event) => (event ? toDomainEvent(event) : null)),
-        ),
-      (event) => cache.cacheEvent(event),
-    ),
-    TE.mapLeft(toAPIError),
+  withCacheSingle(
+    () => cache.getNextEvent(),
+    () =>
+      pipe(
+        repository.findNext(),
+        TE.mapLeft(toAPIError),
+        TE.map((event) => (event ? toDomainEvent(event) : null)),
+      ),
+    (event) => safeCacheEvent(cache, event),
   );
 
 /**
@@ -147,12 +144,9 @@ export const createEvent = (
   cache: EventCache,
   event: PrismaEventCreate,
 ): TE.TaskEither<APIError, DomainEvent> =>
-  pipe(
-    withCreate(
-      () => pipe(repository.save(event), TE.mapLeft(toAPIError), TE.map(toDomainEvent)),
-      (savedEvent) => cache.cacheEvent(savedEvent),
-    ),
-    TE.mapLeft(toAPIError),
+  withCreate(
+    () => pipe(repository.save(event), TE.mapLeft(toAPIError), TE.map(toDomainEvent)),
+    (savedEvent) => cache.cacheEvent(savedEvent),
   );
 
 /**
@@ -169,17 +163,14 @@ export const createEvents = (
   cache: EventCache,
   events: PrismaEventCreate[],
 ): TE.TaskEither<APIError, readonly DomainEvent[]> =>
-  pipe(
-    withCreateBatch(
-      () =>
-        pipe(
-          repository.saveBatch(events),
-          TE.mapLeft(toAPIError),
-          TE.map((events) => events.map(toDomainEvent)),
-        ),
-      (savedEvents) => cache.cacheEvents(savedEvents),
-    ),
-    TE.mapLeft(toAPIError),
+  withCreateBatch(
+    () =>
+      pipe(
+        repository.saveBatch(events),
+        TE.mapLeft(toAPIError),
+        TE.map((events) => events.map(toDomainEvent)),
+      ),
+    (savedEvents) => cache.cacheEvents(savedEvents),
   );
 
 /**

@@ -5,9 +5,9 @@
 
 import { Router } from 'express';
 import type { ServiceContainer } from '../../services';
-import { EventIdParams } from '../../types/api.type';
 import { createEventHandlers } from '../handlers/events.handler';
 import { createHandler, validateRequest } from '../middleware/core';
+import { EventIdParams } from '../types';
 
 /**
  * Creates and configures the events router

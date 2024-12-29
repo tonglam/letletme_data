@@ -14,7 +14,7 @@ import * as TE from 'fp-ts/TaskEither';
 import { CachePrefix } from '../../config/cache/cache.config';
 import { type RedisCache } from '../../infrastructure/cache/redis';
 import { CacheError, CacheErrorType } from '../../infrastructure/cache/types';
-import { getCurrentSeason } from '../../types/base.type';
+import { getCurrentSeason } from '../../types/domain/base.type';
 import { type Event } from '../../types/domain/events.type';
 
 /**
