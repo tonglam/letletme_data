@@ -6,8 +6,7 @@
 import type { BootstrapApi } from '../../domains/bootstrap/operations';
 import { eventRepository } from '../../domains/events/repository';
 import type { BootStrapResponse } from '../../types/bootstrap.type';
-import { createEventCache } from './cache';
-import { createEventServiceImpl } from './service';
+import { createEventService as createEventServiceImpl } from './service';
 import type { EventService } from './types';
 
 // Creates a fully configured event service instance.
@@ -15,14 +14,6 @@ export const createEventService = (
   bootstrapApi: BootstrapApi & {
     getBootstrapEvents: () => Promise<BootStrapResponse['events']>;
   },
-): EventService => {
-  const eventCache = createEventCache(bootstrapApi);
-
-  return createEventServiceImpl({
-    bootstrapApi,
-    eventCache,
-    eventRepository,
-  });
-};
+): EventService => createEventServiceImpl(bootstrapApi, eventRepository);
 
 export type { EventService } from './types';

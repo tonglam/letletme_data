@@ -2,67 +2,56 @@
 // Provides business logic for Event operations, implementing caching and error handling.
 // Uses functional programming principles for type-safe operations.
 
-import { Prisma } from '@prisma/client';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
 import { BootstrapApi } from '../../domains/bootstrap/operations';
-import { EventCache } from '../../domains/events/cache';
-import { CacheError } from '../../infrastructure/cache/types';
-import { APIError, APIErrorCode, createAPIError } from '../../types/errors.type';
-import {
-  Event,
-  EventId,
-  EventRepository,
-  PrismaEventCreate,
-  toDomainEvent,
-} from '../../types/events.type';
-import { toAPIError } from '../../utils/error.util';
-import { EventService } from './types';
+import { EventCache, EventRepositoryOperations } from '../../domains/events/types';
+import { ServiceError } from '../../types/errors.type';
+import { Event, EventId, EventResponse, toDomainEvent } from '../../types/events.type';
+import { createServiceIntegrationError, createServiceOperationError } from '../../utils/error.util';
+import { createEventServiceCache } from './cache';
 
-// Dependencies required for the event service
-export interface EventServiceDependencies {
-  readonly bootstrapApi: BootstrapApi;
-  readonly eventRepository: EventRepository;
-  readonly eventCache: EventCache;
+export interface EventService {
+  readonly getEvents: () => TE.TaskEither<ServiceError, readonly Event[]>;
+  readonly getEvent: (id: EventId) => TE.TaskEither<ServiceError, Event | null>;
+  readonly getCurrentEvent: () => TE.TaskEither<ServiceError, Event | null>;
+  readonly getNextEvent: () => TE.TaskEither<ServiceError, Event | null>;
+  readonly saveEvents: (events: readonly Event[]) => TE.TaskEither<ServiceError, readonly Event[]>;
 }
 
-// Creates a service error from an API error
-const createEventServiceError = (error: APIError): APIError =>
-  createAPIError({
-    code: APIErrorCode.SERVICE_ERROR,
-    message: 'Event service operation failed',
-    details: error,
-  });
-
-// Creates an API error from a cache error
-const createCacheError = (error: CacheError): APIError =>
-  createAPIError({
-    code: APIErrorCode.SERVICE_ERROR,
-    message: error.message,
-    cause: error.cause instanceof Error ? error.cause : undefined,
-  });
-
-/**
- * Finds all events using repository and cache
- */
 const findAllEvents = (
-  repository: EventRepository,
+  repository: EventRepositoryOperations,
   cache: EventCache,
-): TE.TaskEither<APIError, readonly Event[]> =>
+): TE.TaskEither<ServiceError, readonly Event[]> =>
   pipe(
     cache.getAllEvents(),
-    TE.mapLeft(createCacheError),
+    TE.mapLeft((error) =>
+      createServiceIntegrationError({
+        message: 'Failed to fetch events from cache',
+        cause: error,
+      }),
+    ),
     TE.chain((cached) =>
       cached.length > 0
         ? TE.right(cached)
         : pipe(
             repository.findAll(),
-            TE.mapLeft(toAPIError),
+            TE.mapLeft((error) =>
+              createServiceOperationError({
+                message: 'Failed to fetch events from repository',
+                cause: error,
+              }),
+            ),
             TE.chain((events) =>
               pipe(events.map(toDomainEvent), (domainEvents) =>
                 pipe(
                   cache.cacheEvents(domainEvents),
-                  TE.mapLeft(createCacheError),
+                  TE.mapLeft((error) =>
+                    createServiceIntegrationError({
+                      message: 'Failed to cache events',
+                      cause: error,
+                    }),
+                  ),
                   TE.map(() => domainEvents),
                 ),
               ),
@@ -71,31 +60,42 @@ const findAllEvents = (
     ),
   );
 
-/**
- * Finds an event by ID using repository and cache
- */
 const findEventById = (
-  repository: EventRepository,
+  repository: EventRepositoryOperations,
   cache: EventCache,
   id: EventId,
-): TE.TaskEither<APIError, Event | null> =>
+): TE.TaskEither<ServiceError, Event | null> =>
   pipe(
-    cache.getEvent(id.toString()),
-    TE.mapLeft(createCacheError),
+    cache.getEvent(String(id)),
+    TE.mapLeft((error) =>
+      createServiceIntegrationError({
+        message: `Failed to fetch event ${id} from cache`,
+        cause: error,
+      }),
+    ),
     TE.chain((cached) =>
       cached
         ? TE.right(cached)
         : pipe(
             repository.findById(id),
-            TE.mapLeft(toAPIError),
+            TE.mapLeft((error) =>
+              createServiceOperationError({
+                message: `Failed to fetch event ${id} from repository`,
+                cause: error,
+              }),
+            ),
+            TE.map((event) => (event ? toDomainEvent(event) : null)),
             TE.chain((event) =>
               event
-                ? pipe(toDomainEvent(event), (domainEvent) =>
-                    pipe(
-                      cache.cacheEvent(domainEvent),
-                      TE.mapLeft(createCacheError),
-                      TE.map(() => domainEvent),
+                ? pipe(
+                    cache.cacheEvent(event),
+                    TE.mapLeft((error) =>
+                      createServiceIntegrationError({
+                        message: `Failed to cache event ${id}`,
+                        cause: error,
+                      }),
                     ),
+                    TE.map(() => event),
                   )
                 : TE.right(null),
             ),
@@ -103,30 +103,41 @@ const findEventById = (
     ),
   );
 
-/**
- * Finds the current event using repository and cache
- */
 const findCurrentEvent = (
-  repository: EventRepository,
+  repository: EventRepositoryOperations,
   cache: EventCache,
-): TE.TaskEither<APIError, Event | null> =>
+): TE.TaskEither<ServiceError, Event | null> =>
   pipe(
     cache.getCurrentEvent(),
-    TE.mapLeft(createCacheError),
+    TE.mapLeft((error) =>
+      createServiceIntegrationError({
+        message: 'Failed to fetch current event from cache',
+        cause: error,
+      }),
+    ),
     TE.chain((cached) =>
       cached
         ? TE.right(cached)
         : pipe(
             repository.findCurrent(),
-            TE.mapLeft(toAPIError),
+            TE.mapLeft((error) =>
+              createServiceOperationError({
+                message: 'Failed to fetch current event from repository',
+                cause: error,
+              }),
+            ),
+            TE.map((event) => (event ? toDomainEvent(event) : null)),
             TE.chain((event) =>
               event
-                ? pipe(toDomainEvent(event), (domainEvent) =>
-                    pipe(
-                      cache.cacheEvent(domainEvent),
-                      TE.mapLeft(createCacheError),
-                      TE.map(() => domainEvent),
+                ? pipe(
+                    cache.cacheEvent(event),
+                    TE.mapLeft((error) =>
+                      createServiceIntegrationError({
+                        message: 'Failed to cache current event',
+                        cause: error,
+                      }),
                     ),
+                    TE.map(() => event),
                   )
                 : TE.right(null),
             ),
@@ -134,30 +145,41 @@ const findCurrentEvent = (
     ),
   );
 
-/**
- * Finds the next event using repository and cache
- */
 const findNextEvent = (
-  repository: EventRepository,
+  repository: EventRepositoryOperations,
   cache: EventCache,
-): TE.TaskEither<APIError, Event | null> =>
+): TE.TaskEither<ServiceError, Event | null> =>
   pipe(
     cache.getNextEvent(),
-    TE.mapLeft(createCacheError),
+    TE.mapLeft((error) =>
+      createServiceIntegrationError({
+        message: 'Failed to fetch next event from cache',
+        cause: error,
+      }),
+    ),
     TE.chain((cached) =>
       cached
         ? TE.right(cached)
         : pipe(
             repository.findNext(),
-            TE.mapLeft(toAPIError),
+            TE.mapLeft((error) =>
+              createServiceOperationError({
+                message: 'Failed to fetch next event from repository',
+                cause: error,
+              }),
+            ),
+            TE.map((event) => (event ? toDomainEvent(event) : null)),
             TE.chain((event) =>
               event
-                ? pipe(toDomainEvent(event), (domainEvent) =>
-                    pipe(
-                      cache.cacheEvent(domainEvent),
-                      TE.mapLeft(createCacheError),
-                      TE.map(() => domainEvent),
+                ? pipe(
+                    cache.cacheEvent(event),
+                    TE.mapLeft((error) =>
+                      createServiceIntegrationError({
+                        message: 'Failed to cache next event',
+                        cause: error,
+                      }),
                     ),
+                    TE.map(() => event),
                   )
                 : TE.right(null),
             ),
@@ -165,52 +187,27 @@ const findNextEvent = (
     ),
   );
 
-/**
- * Saves a batch of events using repository and updates cache
- */
-const saveBatchEvents = (
-  repository: EventRepository,
-  cache: EventCache,
-  events: readonly Event[],
-): TE.TaskEither<APIError, readonly Event[]> =>
-  pipe(
-    events.map((event) => ({
-      ...event,
-      id: Number(event.id),
-      chipPlays: event.chipPlays as unknown as Prisma.JsonValue,
-      topElementInfo: event.topElementInfo as unknown as Prisma.JsonValue,
-    })) as PrismaEventCreate[],
-    (prismaEvents) =>
-      pipe(
-        repository.saveBatch(prismaEvents),
-        TE.mapLeft(toAPIError),
-        TE.chain((saved) =>
-          pipe(saved.map(toDomainEvent), (domainEvents) =>
-            pipe(
-              cache.cacheEvents(domainEvents),
-              TE.mapLeft(createCacheError),
-              TE.map(() => domainEvents),
-            ),
-          ),
-        ),
-      ),
-  );
+export const createEventService = (
+  bootstrapApi: BootstrapApi & { getBootstrapEvents: () => Promise<EventResponse[]> },
+  repository: EventRepositoryOperations,
+): EventService => {
+  const cache = createEventServiceCache(bootstrapApi);
 
-/**
- * Creates an event service implementation
- */
-export const createEventServiceImpl = ({
-  eventRepository,
-  eventCache,
-}: EventServiceDependencies): EventService => ({
-  getEvents: () =>
-    pipe(findAllEvents(eventRepository, eventCache), TE.mapLeft(createEventServiceError)),
-  getEvent: (id: EventId) =>
-    pipe(findEventById(eventRepository, eventCache, id), TE.mapLeft(createEventServiceError)),
-  getCurrentEvent: () =>
-    pipe(findCurrentEvent(eventRepository, eventCache), TE.mapLeft(createEventServiceError)),
-  getNextEvent: () =>
-    pipe(findNextEvent(eventRepository, eventCache), TE.mapLeft(createEventServiceError)),
-  saveEvents: (events: readonly Event[]) =>
-    pipe(saveBatchEvents(eventRepository, eventCache, events), TE.mapLeft(createEventServiceError)),
-});
+  return {
+    getEvents: () => findAllEvents(repository, cache),
+    getEvent: (id: EventId) => findEventById(repository, cache, id),
+    getCurrentEvent: () => findCurrentEvent(repository, cache),
+    getNextEvent: () => findNextEvent(repository, cache),
+    saveEvents: (events: readonly Event[]) =>
+      pipe(
+        repository.createMany(events),
+        TE.mapLeft((error) =>
+          createServiceOperationError({
+            message: 'Failed to save events',
+            cause: error,
+          }),
+        ),
+        TE.map((savedEvents) => savedEvents.map(toDomainEvent)),
+      ),
+  };
+};

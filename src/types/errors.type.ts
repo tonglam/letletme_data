@@ -51,8 +51,20 @@ export const DomainErrorCode = {
 
 export type DomainErrorCode = (typeof DomainErrorCode)[keyof typeof DomainErrorCode];
 
-// Service error codes combining all error types
-export type ServiceErrorCode = APIErrorCode | CacheErrorCode | DomainErrorCode | DBErrorCode;
+// Service error codes
+export const ServiceErrorCode = {
+  OPERATION_ERROR: 'OPERATION_ERROR',
+  VALIDATION_ERROR: 'VALIDATION_ERROR',
+  INTEGRATION_ERROR: 'INTEGRATION_ERROR',
+  TRANSFORMATION_ERROR: 'TRANSFORMATION_ERROR',
+} as const;
+
+export type ServiceErrorCode = (typeof ServiceErrorCode)[keyof typeof ServiceErrorCode];
+
+// Service error interface
+export interface ServiceError extends BaseError {
+  readonly code: ServiceErrorCode;
+}
 
 // ============ Error Types ============
 
@@ -177,30 +189,10 @@ export const createServiceError = (params: {
   cause?: Error;
 }): ServiceError => ({
   name: 'ServiceError',
-  code: params.code,
-  message: params.message,
-  details: params.details,
-  cause: params.cause,
+  ...params,
 });
 
-// ============ Error Utilities ============
-
-// Converts any error to a service error
-export const toServiceError = (error: unknown): ServiceError => {
-  if (isServiceError(error)) return error;
-  if (isAPIError(error)) return { ...error, code: error.code };
-  if (isCacheError(error)) return { ...error, code: error.code };
-  if (isDomainError(error)) return { ...error, code: error.code };
-  if (isDBError(error)) return { ...error, code: error.code };
-
-  return createServiceError({
-    code: APIErrorCode.INTERNAL_SERVER_ERROR,
-    message: error instanceof Error ? error.message : 'Unknown error occurred',
-    cause: error instanceof Error ? error : undefined,
-  });
-};
-
-// ============ Type Guards ============
+// ============ Error Type Guards ============
 
 // Type guard for APIError
 export const isAPIError = (error: unknown): error is APIError =>

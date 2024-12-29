@@ -12,8 +12,11 @@ import {
   createAPIError,
   createCacheError,
   createDBError,
+  createServiceError,
   DBError,
   DBErrorCode,
+  ServiceError,
+  ServiceErrorCode,
 } from '../types/errors.type';
 
 // ============ API Error Handlers ============
@@ -224,6 +227,60 @@ export const createCacheDeserializationError = (error: unknown): CacheError => {
   const message = error instanceof Error ? error.message : 'Failed to deserialize cache data';
   return createCacheError({
     code: CacheErrorCode.DESERIALIZATION_ERROR,
+    message,
+    details: error,
+  });
+};
+
+// ============ Service Error Handlers ============
+
+/**
+ * Creates a service operation error
+ * Used for general service operation failures
+ */
+export const createServiceOperationError = (error: unknown): ServiceError => {
+  const message = error instanceof Error ? error.message : 'Service operation failed';
+  return createServiceError({
+    code: ServiceErrorCode.OPERATION_ERROR,
+    message,
+    details: error,
+  });
+};
+
+/**
+ * Creates a service validation error
+ * Used for service-level validation failures
+ */
+export const createServiceValidationError = (error: unknown): ServiceError => {
+  const message = error instanceof Error ? error.message : 'Service validation failed';
+  return createServiceError({
+    code: ServiceErrorCode.VALIDATION_ERROR,
+    message,
+    details: error,
+  });
+};
+
+/**
+ * Creates a service integration error
+ * Used for external service integration failures
+ */
+export const createServiceIntegrationError = (error: unknown): ServiceError => {
+  const message = error instanceof Error ? error.message : 'Service integration failed';
+  return createServiceError({
+    code: ServiceErrorCode.INTEGRATION_ERROR,
+    message,
+    details: error,
+  });
+};
+
+/**
+ * Creates a service transformation error
+ * Used for data transformation failures at service level
+ */
+export const createServiceTransformationError = (error: unknown): ServiceError => {
+  const message = error instanceof Error ? error.message : 'Service transformation failed';
+  return createServiceError({
+    code: ServiceErrorCode.TRANSFORMATION_ERROR,
     message,
     details: error,
   });

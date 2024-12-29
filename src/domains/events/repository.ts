@@ -3,27 +3,47 @@
 // Implements repository pattern with functional programming principles,
 // ensuring type-safe database operations and consistent error handling.
 
+import { Prisma } from '@prisma/client';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
 import { prisma } from '../../infrastructure/db/prisma';
 import { DBError } from '../../types/errors.type';
-import {
-  EventId,
-  EventRepository,
-  PrismaEvent,
-  PrismaEventCreate,
-  PrismaEventUpdate,
-} from '../../types/events.type';
+import { Event, EventId, PrismaEvent } from '../../types/events.type';
 import { handlePrismaError } from '../../utils/error.util';
-import { transformJsonFields } from '../../utils/prisma.util';
+import { EventRepositoryOperations } from './types';
 
-const JSON_FIELDS: Array<keyof Pick<PrismaEventCreate, 'chipPlays' | 'topElementInfo'>> = [
-  'chipPlays',
-  'topElementInfo',
-];
+const toPrismaCreateInput = (event: Event): Prisma.EventCreateInput => ({
+  id: event.id,
+  name: event.name,
+  deadlineTime: event.deadlineTime,
+  deadlineTimeEpoch: event.deadlineTimeEpoch,
+  deadlineTimeGameOffset: event.deadlineTimeGameOffset,
+  releaseTime: event.releaseTime,
+  averageEntryScore: event.averageEntryScore,
+  finished: event.finished,
+  dataChecked: event.dataChecked,
+  highestScore: event.highestScore,
+  highestScoringEntry: event.highestScoringEntry,
+  isPrevious: event.isPrevious,
+  isCurrent: event.isCurrent,
+  isNext: event.isNext,
+  cupLeaguesCreated: event.cupLeaguesCreated,
+  h2hKoMatchesCreated: event.h2hKoMatchesCreated,
+  rankedCount: event.rankedCount,
+  chipPlays: event.chipPlays ? JSON.parse(JSON.stringify(event.chipPlays)) : undefined,
+  mostSelected: event.mostSelected,
+  mostTransferredIn: event.mostTransferredIn,
+  mostCaptained: event.mostCaptained,
+  mostViceCaptained: event.mostViceCaptained,
+  topElement: event.topElement,
+  topElementInfo: event.topElementInfo
+    ? JSON.parse(JSON.stringify(event.topElementInfo))
+    : undefined,
+  transfersMade: event.transfersMade,
+});
 
 // Event repository implementation
-export const eventRepository: EventRepository = {
+export const eventRepository: EventRepositoryOperations = {
   findAll: (): TE.TaskEither<DBError, PrismaEvent[]> =>
     pipe(TE.tryCatch(() => prisma.event.findMany(), handlePrismaError)),
 
@@ -49,23 +69,23 @@ export const eventRepository: EventRepository = {
   findNext: (): TE.TaskEither<DBError, PrismaEvent | null> =>
     pipe(TE.tryCatch(() => prisma.event.findFirst({ where: { isNext: true } }), handlePrismaError)),
 
-  save: (event: PrismaEventCreate): TE.TaskEither<DBError, PrismaEvent> =>
+  create: (event: Event): TE.TaskEither<DBError, PrismaEvent> =>
     pipe(
       TE.tryCatch(
         () =>
           prisma.event.create({
-            data: transformJsonFields(event, JSON_FIELDS),
+            data: toPrismaCreateInput(event),
           }),
         handlePrismaError,
       ),
     ),
 
-  saveBatch: (events: PrismaEventCreate[]): TE.TaskEither<DBError, PrismaEvent[]> =>
+  createMany: (events: readonly Event[]): TE.TaskEither<DBError, PrismaEvent[]> =>
     pipe(
       TE.tryCatch(
         () =>
           prisma.event.createMany({
-            data: events.map((event) => transformJsonFields(event, JSON_FIELDS)),
+            data: events.map(toPrismaCreateInput),
           }),
         handlePrismaError,
       ),
@@ -82,33 +102,33 @@ export const eventRepository: EventRepository = {
       ),
     ),
 
-  update: (id: EventId, event: PrismaEventUpdate): TE.TaskEither<DBError, PrismaEvent> =>
+  update: (id: EventId, event: Partial<Event>): TE.TaskEither<DBError, PrismaEvent> =>
     pipe(
       TE.tryCatch(
         () =>
           prisma.event.update({
             where: { id },
-            data: transformJsonFields(event, JSON_FIELDS),
+            data: {
+              ...event,
+              id: undefined,
+              chipPlays: event.chipPlays ? JSON.parse(JSON.stringify(event.chipPlays)) : undefined,
+              topElementInfo: event.topElementInfo
+                ? JSON.parse(JSON.stringify(event.topElementInfo))
+                : undefined,
+            },
           }),
         handlePrismaError,
       ),
     ),
 
-  deleteAll: (): TE.TaskEither<DBError, void> =>
-    pipe(
-      TE.tryCatch(() => prisma.event.deleteMany(), handlePrismaError),
-      TE.map(() => undefined),
-    ),
-
-  deleteByIds: (ids: EventId[]): TE.TaskEither<DBError, void> =>
+  delete: (id: EventId): TE.TaskEither<DBError, PrismaEvent> =>
     pipe(
       TE.tryCatch(
         () =>
-          prisma.event.deleteMany({
-            where: { id: { in: ids } },
+          prisma.event.delete({
+            where: { id },
           }),
         handlePrismaError,
       ),
-      TE.map(() => undefined),
     ),
 };

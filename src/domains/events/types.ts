@@ -5,7 +5,7 @@
  */
 
 import { TaskEither } from 'fp-ts/TaskEither';
-import { APIError, CacheError } from '../../types/errors.type';
+import { CacheError, DBError, DomainError } from '../../types/errors.type';
 import { Event, EventId, PrismaEvent } from '../../types/events.type';
 
 /**
@@ -47,12 +47,12 @@ export interface EventCache {
  * Defines high-level domain operations for events.
  */
 export interface EventOperations {
-  readonly getAllEvents: () => TaskEither<APIError, readonly Event[]>;
-  readonly getEventById: (id: EventId) => TaskEither<APIError, Event | null>;
-  readonly getCurrentEvent: () => TaskEither<APIError, Event | null>;
-  readonly getNextEvent: () => TaskEither<APIError, Event | null>;
-  readonly createEvent: (event: Event) => TaskEither<APIError, Event>;
-  readonly createEvents: (events: readonly Event[]) => TaskEither<APIError, readonly Event[]>;
+  readonly getAllEvents: () => TaskEither<DomainError, readonly Event[]>;
+  readonly getEventById: (id: EventId) => TaskEither<DomainError, Event | null>;
+  readonly getCurrentEvent: () => TaskEither<DomainError, Event | null>;
+  readonly getNextEvent: () => TaskEither<DomainError, Event | null>;
+  readonly createEvent: (event: Event) => TaskEither<DomainError, Event>;
+  readonly createEvents: (events: readonly Event[]) => TaskEither<DomainError, readonly Event[]>;
 }
 
 /**
@@ -60,13 +60,13 @@ export interface EventOperations {
  * Defines low-level data access operations for events.
  */
 export interface EventRepositoryOperations {
-  readonly findAll: () => TaskEither<APIError, PrismaEvent[]>;
-  readonly findById: (id: EventId) => TaskEither<APIError, PrismaEvent | null>;
-  readonly findByIds: (ids: EventId[]) => TaskEither<APIError, PrismaEvent[]>;
-  readonly findCurrent: () => TaskEither<APIError, PrismaEvent | null>;
-  readonly findNext: () => TaskEither<APIError, PrismaEvent | null>;
-  readonly create: (event: Event) => TaskEither<APIError, PrismaEvent>;
-  readonly createMany: (events: readonly Event[]) => TaskEither<APIError, PrismaEvent[]>;
-  readonly update: (id: EventId, event: Partial<Event>) => TaskEither<APIError, PrismaEvent>;
-  readonly delete: (id: EventId) => TaskEither<APIError, PrismaEvent>;
+  readonly findAll: () => TaskEither<DBError, PrismaEvent[]>;
+  readonly findById: (id: EventId) => TaskEither<DBError, PrismaEvent | null>;
+  readonly findByIds: (ids: EventId[]) => TaskEither<DBError, PrismaEvent[]>;
+  readonly findCurrent: () => TaskEither<DBError, PrismaEvent | null>;
+  readonly findNext: () => TaskEither<DBError, PrismaEvent | null>;
+  readonly create: (event: Event) => TaskEither<DBError, PrismaEvent>;
+  readonly createMany: (events: readonly Event[]) => TaskEither<DBError, PrismaEvent[]>;
+  readonly update: (id: EventId, event: Partial<Event>) => TaskEither<DBError, PrismaEvent>;
+  readonly delete: (id: EventId) => TaskEither<DBError, PrismaEvent>;
 }

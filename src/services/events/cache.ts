@@ -11,30 +11,31 @@ import * as TE from 'fp-ts/TaskEither';
 import { flow, pipe } from 'fp-ts/function';
 import { CachePrefix, DefaultTTL } from '../../config/cache/cache.config';
 import type { BootstrapApi } from '../../domains/bootstrap/operations';
+import { createEventCache } from '../../domains/events/cache';
 import {
-  createEventCache as createDomainEventCache,
   type EventCache,
   type EventCacheConfig,
   type EventDataProvider,
-} from '../../domains/events/cache';
+} from '../../domains/events/types';
 import { createRedisCache } from '../../infrastructure/cache/redis';
-import { CacheError, CacheErrorType } from '../../infrastructure/cache/types';
 import { getCurrentSeason } from '../../types/base.type';
 import type { BootStrapResponse } from '../../types/bootstrap.type';
-import { toDomainEvent, type Event } from '../../types/events.type';
+import { ServiceError } from '../../types/errors.type';
+import { toDomainEvent, type Event, type EventId } from '../../types/events.type';
+import { createServiceIntegrationError } from '../../utils/error.util';
 import { toNullable } from '../../utils/service.util';
 
 const createEventDataProvider = (
   bootstrapApi: BootstrapApi & { getBootstrapEvents: () => Promise<BootStrapResponse['events']> },
 ): EventDataProvider => {
   // Core operation to fetch bootstrap events
-  const getBootstrapEvents: TE.TaskEither<CacheError, BootStrapResponse['events']> = TE.tryCatch(
+  const getBootstrapEvents: TE.TaskEither<ServiceError, BootStrapResponse['events']> = TE.tryCatch(
     () => bootstrapApi.getBootstrapEvents(),
-    (error): CacheError => ({
-      type: CacheErrorType.OPERATION,
-      message: 'Failed to fetch bootstrap events',
-      cause: error,
-    }),
+    (error) =>
+      createServiceIntegrationError({
+        message: 'Failed to fetch bootstrap events',
+        cause: error instanceof Error ? error : new Error(String(error)),
+      }),
   );
 
   // Helper function to find events by predicate
@@ -57,7 +58,7 @@ const createEventDataProvider = (
     )();
 
   return {
-    getOne: (id: string) =>
+    getOne: (id: EventId) =>
       processBootstrapEvents(
         findEvent((e) => e.id === Number(id)),
         null,
@@ -81,7 +82,7 @@ const createEventDataProvider = (
 };
 
 // Creates an event cache instance for the service layer
-export const createEventCache = (
+export const createEventServiceCache = (
   bootstrapApi: BootstrapApi & { getBootstrapEvents: () => Promise<BootStrapResponse['events']> },
 ): EventCache => {
   const redis = createRedisCache<Event>({
@@ -96,5 +97,5 @@ export const createEventCache = (
 
   const dataProvider = createEventDataProvider(bootstrapApi);
 
-  return createDomainEventCache(redis, dataProvider, config);
+  return createEventCache(redis, dataProvider, config);
 };

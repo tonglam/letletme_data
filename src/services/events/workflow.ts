@@ -5,7 +5,7 @@
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
 import { getWorkflowLogger } from '../../infrastructure/logger';
-import { APIError } from '../../types/errors.type';
+import { ServiceError } from '../../types/errors.type';
 import type { Event } from '../../types/events.type';
 import type { EventService } from './types';
 
@@ -14,13 +14,13 @@ const logger = getWorkflowLogger();
 // Creates event workflow operations
 export const eventWorkflows = (eventService: EventService) => {
   // Syncs events from FPL API to local database
-  const syncEvents = (): TE.TaskEither<APIError, readonly Event[]> =>
+  const syncEvents = (): TE.TaskEither<ServiceError, readonly Event[]> =>
     pipe(
       logger.info({ workflow: 'event-sync' }, 'Starting event sync'),
       () =>
         pipe(
           eventService.getEvents(),
-          TE.mapLeft((error: APIError) => ({
+          TE.mapLeft((error: ServiceError) => ({
             ...error,
             message: `Failed to fetch events: ${error.message}`,
           })),
@@ -29,7 +29,7 @@ export const eventWorkflows = (eventService: EventService) => {
         logger.info({ workflow: 'event-sync', count: events.length }, 'Syncing events to database');
         return pipe(
           eventService.saveEvents(events),
-          TE.mapLeft((error: APIError) => ({
+          TE.mapLeft((error: ServiceError) => ({
             ...error,
             message: `Failed to save events: ${error.message}`,
           })),
