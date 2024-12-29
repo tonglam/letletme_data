@@ -3,13 +3,9 @@
  * @module infrastructure/http/client/utils
  */
 
-import {
-  DEFAULT_CONFIG,
-  ERROR_CONFIG,
-  ErrorCode,
-  HTTP_STATUS,
-} from '../../../config/http/http.config';
-import { APIError, Headers, ResponseMetrics, RetryConfig } from '../../../types/http.type';
+import { DEFAULT_CONFIG, ERROR_CONFIG, HTTP_STATUS } from '../../../config/http/http.config';
+import { APIError, APIErrorCode } from '../../../types/errors.type';
+import { ErrorDetails, HttpMethod, RequestMetrics, RetryConfig } from './types';
 
 /**
  * Creates a monitoring context for request metrics
@@ -19,16 +15,14 @@ export const createMonitor = () => {
   return {
     end: (
       path: string,
-      method: string,
+      method: HttpMethod,
       result: { status: number; error?: APIError },
-    ): ResponseMetrics => ({
+    ): RequestMetrics => ({
       path,
       method,
-      startTime,
       duration: Date.now() - startTime,
       status: result.status,
-      success: !result.error,
-      ...(result.error && { errorCode: result.error.code }),
+      error: result.error,
     }),
   };
 };
@@ -44,16 +38,18 @@ export const createErrorFromStatus = (
   const errorConfig = Object.entries(ERROR_CONFIG).find(
     ([, config]) => config.httpStatus === status,
   );
-  const errorCode = errorConfig ? (errorConfig[0] as ErrorCode) : ErrorCode.INTERNAL_SERVER_ERROR;
+  const errorCode = errorConfig
+    ? (errorConfig[0] as APIErrorCode)
+    : APIErrorCode.INTERNAL_SERVER_ERROR;
 
-  // Create error object with all properties defined at construction
-  const error = {
-    ...new Error(message),
-    name: 'APIError',
+  const error: APIError = {
     code: errorCode,
-    httpStatus: status,
-    details: details || {},
-  } as APIError;
+    message,
+    details: {
+      ...(details || {}),
+      httpStatus: status,
+    } as ErrorDetails,
+  };
 
   return error;
 };
@@ -64,9 +60,9 @@ export const createErrorFromStatus = (
 export const HTTP_STATUS_TO_ERROR = Object.entries(ERROR_CONFIG).reduce(
   (acc, [code, config]) => ({
     ...acc,
-    [config.httpStatus]: code as ErrorCode,
+    [config.httpStatus]: code as APIErrorCode,
   }),
-  {} as Record<number, ErrorCode>,
+  {} as Record<number, APIErrorCode>,
 );
 
 /**
@@ -76,17 +72,16 @@ export const DEFAULT_RETRY_CONFIG: Readonly<RetryConfig> = {
   attempts: DEFAULT_CONFIG.retry.attempts,
   baseDelay: DEFAULT_CONFIG.retry.baseDelay,
   maxDelay: DEFAULT_CONFIG.retry.maxDelay,
-  shouldRetry: (error: Error) => {
-    const status =
-      'httpStatus' in error ? (error as { httpStatus?: number }).httpStatus : undefined;
-    return status === undefined || status >= HTTP_STATUS.SERVER_ERROR_MIN;
+  shouldRetry: (error: APIError) => {
+    const details = error.details as ErrorDetails;
+    return details.httpStatus === undefined || details.httpStatus >= HTTP_STATUS.SERVER_ERROR_MIN;
   },
 };
 
 /**
  * Creates default headers for HTTP requests
  */
-export const createDefaultHeaders = (userAgent: string): Headers => ({
+export const createDefaultHeaders = (userAgent: string): Record<string, string> => ({
   'User-Agent': userAgent,
   Accept: DEFAULT_CONFIG.headers.Accept,
   'Content-Type': DEFAULT_CONFIG.headers['Content-Type'],

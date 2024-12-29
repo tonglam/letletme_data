@@ -1,5 +1,7 @@
 /**
  * Rate Limiter Implementation
+ * Implements token bucket algorithm for request rate limiting.
+ * Provides configurable rate limiting with automatic token refill.
  * @module infrastructure/http/client/rate-limiter
  */
 

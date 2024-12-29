@@ -1,7 +1,9 @@
 /**
  * Redis Cache Implementation Module
  *
- * Type-safe Redis operations with functional programming approach.
+ * Implements a type-safe Redis cache client using functional programming principles.
+ * Provides strongly-typed operations for various Redis data structures with error handling
+ * and retry mechanisms. All operations return TaskEither for composable error handling.
  */
 
 import * as TE from 'fp-ts/TaskEither';
@@ -22,6 +24,7 @@ import {
 
 /**
  * Redis Cache Interface
+ * Combines all Redis operation interfaces into a single comprehensive interface
  */
 export interface RedisCache<T = unknown>
   extends StringOperations<T>,
@@ -33,6 +36,12 @@ export interface RedisCache<T = unknown>
 
 /**
  * Implements retry mechanism for Redis operations
+ * Executes an operation with configurable retry attempts and delay
+ *
+ * @param operation - Async operation to execute with retry
+ * @param options - Optional retry configuration
+ * @returns Promise resolving to operation result
+ * @throws Last encountered error after all retry attempts fail
  */
 const withRetry = async <T>(operation: () => Promise<T>, options?: CacheOptions): Promise<T> => {
   const attempts = options?.retry?.attempts ?? 1;

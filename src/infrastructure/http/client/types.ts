@@ -1,18 +1,39 @@
 /**
  * HTTP Types Module
- *
- * Core type definitions for HTTP client operations.
- * Includes client interfaces, request/response types, and configuration.
- * @module types/http
+ * Comprehensive type definitions for the HTTP client infrastructure.
+ * Includes request/response types, client interfaces, and configuration types.
+ * Ensures type safety and consistent interfaces across the HTTP client implementation.
+ * @module infrastructure/http/client/types
  */
 
 import { AxiosInstance } from 'axios';
 import type { TaskEither } from 'fp-ts/TaskEither';
 import { Logger } from 'pino';
-import { APIError } from './errors.type';
+import { APIError } from '../../../types/errors.type';
 
 /**
- * HTTP Methods supported by the client
+ * HTTP headers type
+ */
+export type Headers = Record<string, string>;
+
+/**
+ * Standard API response structure
+ */
+export interface APIResponse<T = unknown> {
+  readonly data: T;
+  readonly status: number;
+  readonly headers: Record<string, string>;
+}
+
+/**
+ * Error details for HTTP responses with status code information
+ */
+export interface ErrorDetails extends Record<string, unknown> {
+  httpStatus?: number;
+}
+
+/**
+ * Supported HTTP methods for client operations
  */
 export enum HttpMethod {
   GET = 'GET',
@@ -27,17 +48,17 @@ export enum HttpMethod {
 }
 
 /**
- * Request body type
+ * Generic request body type that can be undefined
  */
 export type RequestBody<T> = T | undefined;
 
 /**
- * Request options type extending axios config
+ * Request options extending Axios configuration
  */
 export type RequestOptions = Record<string, unknown>;
 
 /**
- * Retry configuration for HTTP requests
+ * Configuration for request retry behavior
  */
 export interface RetryConfig {
   readonly attempts: number;
@@ -47,7 +68,7 @@ export interface RetryConfig {
 }
 
 /**
- * Context for HTTP client operations
+ * Context required for HTTP client operations
  */
 export interface HTTPClientContext {
   readonly client: AxiosInstance;
@@ -56,7 +77,7 @@ export interface HTTPClientContext {
 }
 
 /**
- * HTTP client interface
+ * Core HTTP client interface with type-safe methods
  */
 export interface HTTPClient {
   readonly get: <T>(path: string, options?: RequestOptions) => TaskEither<APIError, T>;
@@ -95,7 +116,7 @@ export interface HTTPClient {
 }
 
 /**
- * Request metrics for monitoring
+ * Metrics collected for request monitoring
  */
 export interface RequestMetrics {
   readonly path: string;
@@ -106,7 +127,7 @@ export interface RequestMetrics {
 }
 
 /**
- * Monitor interface for request tracking
+ * Interface for request monitoring and metrics collection
  */
 export interface RequestMonitor {
   readonly start: number;
@@ -116,3 +137,6 @@ export interface RequestMonitor {
     result: { status: number; error?: APIError },
   ) => RequestMetrics;
 }
+
+// Re-export types needed by consumers
+export type { APIError } from '../../../types/errors.type';

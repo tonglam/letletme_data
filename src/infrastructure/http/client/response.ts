@@ -10,7 +10,7 @@ import * as TE from 'fp-ts/TaskEither';
 import { flow, pipe } from 'fp-ts/function';
 import { Logger } from 'pino';
 import { HTTP_STATUS } from '../../../config/http/http.config';
-import { APIError, APIResponse, ResponseMetrics } from '../../../types/http.type';
+import { APIError, APIResponse, ResponseMetrics } from './types';
 import { createErrorFromStatus, createMonitor } from './utils';
 
 /**

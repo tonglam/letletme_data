@@ -1,19 +1,27 @@
 /**
  * Logger Infrastructure Module
  *
- * Provides a centralized logging system with multiple logger instances.
+ * A centralized logging system that manages multiple logger instances using pino.
+ * Implements a singleton pattern per logger type to ensure consistent logging across the application.
+ *
+ * @module Logger
  */
 
 import { Logger } from 'pino';
 import { LOG_CONFIG, createLogger } from '../../config/logger/logger.config';
 
 /**
- * Cache for logger instances
+ * Internal cache to store and manage logger instances
+ * @private
  */
 const loggerInstances = new Map<string, Logger>();
 
 /**
- * Core logger factory function
+ * Creates or retrieves an existing logger instance
+ *
+ * @private
+ * @param {keyof typeof LOG_CONFIG.loggers} name - The identifier for the logger configuration
+ * @returns {Logger} The logger instance
  */
 const getOrCreateLogger = (name: keyof typeof LOG_CONFIG.loggers): Logger => {
   const existing = loggerInstances.get(name);
@@ -30,21 +38,29 @@ const getOrCreateLogger = (name: keyof typeof LOG_CONFIG.loggers): Logger => {
 };
 
 /**
- * Gets the API logger instance
+ * Retrieves the API logger instance for general API operations logging
+ *
+ * @returns {Logger} The API logger instance
  */
 export const getApiLogger = (): Logger => getOrCreateLogger('api');
 
 /**
- * Gets the FPL API logger instance
+ * Retrieves the FPL API logger instance for FPL-specific operations logging
+ *
+ * @returns {Logger} The FPL API logger instance
  */
 export const getFplApiLogger = (): Logger => getOrCreateLogger('fpl');
 
 /**
- * Gets the Queue logger instance
+ * Retrieves the Queue logger instance for queue processing operations logging
+ *
+ * @returns {Logger} The Queue logger instance
  */
 export const getQueueLogger = (): Logger => getOrCreateLogger('queue');
 
 /**
- * Gets the Workflow logger instance
+ * Retrieves the Workflow logger instance for workflow execution logging
+ *
+ * @returns {Logger} The Workflow logger instance
  */
 export const getWorkflowLogger = (): Logger => getOrCreateLogger('workflow');

@@ -11,9 +11,9 @@ import * as O from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
 import { z } from 'zod';
-import { AppConfig } from '../../config/app/app.config';
-import { CacheError } from '../../infrastructure/cache/types';
-import { APIError, createValidationError } from '../errors.type';
+import { AppConfig } from '../config/app/app.config';
+import { CacheError } from '../infrastructure/cache/types';
+import { APIError, createValidationError } from './errors.type';
 
 // ============ Constants ============
 /**

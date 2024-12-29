@@ -1,7 +1,8 @@
 /**
  * Cache Utilities Module
  *
- * Utility functions for cache operations and error handling.
+ * Provides utility functions for cache operations and key management.
+ * Implements common patterns and helper functions used across the cache infrastructure.
  */
 
 import * as TE from 'fp-ts/TaskEither';

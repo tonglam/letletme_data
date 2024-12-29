@@ -1,5 +1,7 @@
 /**
  * HTTP Request Interceptors
+ * Provides middleware functions for request preprocessing.
+ * Handles default headers, timeouts, and cache control.
  * @module infrastructure/http/client/request-interceptors
  */
 

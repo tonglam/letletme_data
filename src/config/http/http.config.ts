@@ -3,7 +3,7 @@
  * @module config/http
  */
 
-import { RetryConfig } from '../../types/http.type';
+import { RetryConfig } from '../../infrastructure/http/client/types';
 
 // HTTP Status Codes
 export const HTTP_STATUS = {

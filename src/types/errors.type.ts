@@ -24,6 +24,18 @@ export const APIErrorCode = {
 export type APIErrorCode = (typeof APIErrorCode)[keyof typeof APIErrorCode];
 
 /**
+ * Database error codes
+ */
+export const DBErrorCode = {
+  CONNECTION_ERROR: 'CONNECTION_ERROR',
+  OPERATION_ERROR: 'OPERATION_ERROR',
+  VALIDATION_ERROR: 'VALIDATION_ERROR',
+  TRANSFORMATION_ERROR: 'TRANSFORMATION_ERROR',
+} as const;
+
+export type DBErrorCode = (typeof DBErrorCode)[keyof typeof DBErrorCode];
+
+/**
  * Cache error codes
  */
 export const CacheErrorCode = {
@@ -48,7 +60,7 @@ export type DomainErrorCode = (typeof DomainErrorCode)[keyof typeof DomainErrorC
 /**
  * Service error codes combining all error types
  */
-export type ServiceErrorCode = APIErrorCode | CacheErrorCode | DomainErrorCode;
+export type ServiceErrorCode = APIErrorCode | CacheErrorCode | DomainErrorCode | DBErrorCode;
 
 // ============ Error Types ============
 
@@ -81,6 +93,13 @@ export interface CacheError extends BaseError {
  */
 export interface DomainError extends BaseError {
   readonly code: DomainErrorCode;
+}
+
+/**
+ * Database error interface
+ */
+export interface DBError extends BaseError {
+  readonly code: DBErrorCode;
 }
 
 /**
@@ -169,6 +188,18 @@ export const createDomainError = (params: {
 });
 
 /**
+ * Creates a database error
+ */
+export const createDBError = (params: {
+  code: DBErrorCode;
+  message: string;
+  details?: unknown;
+  cause?: Error;
+}): DBError => ({
+  ...params,
+});
+
+/**
  * Creates a service error
  */
 export const createServiceError = (params: {
@@ -193,6 +224,7 @@ export const toServiceError = (error: unknown): ServiceError => {
   if (isAPIError(error)) return { ...error, code: error.code };
   if (isCacheError(error)) return { ...error, code: error.code };
   if (isDomainError(error)) return { ...error, code: error.code };
+  if (isDBError(error)) return { ...error, code: error.code };
 
   return createServiceError({
     code: APIErrorCode.INTERNAL_SERVER_ERROR,
@@ -234,10 +266,19 @@ export const isDomainError = (error: unknown): error is DomainError =>
   Object.values(DomainErrorCode).includes((error as DomainError).code);
 
 /**
+ * Type guard for Database error
+ */
+export const isDBError = (error: unknown): error is DBError =>
+  typeof error === 'object' &&
+  error !== null &&
+  'code' in error &&
+  Object.values(DBErrorCode).includes((error as DBError).code);
+
+/**
  * Type guard for ServiceError
  */
 export const isServiceError = (error: unknown): error is ServiceError =>
-  isAPIError(error) || isCacheError(error) || isDomainError(error);
+  isAPIError(error) || isCacheError(error) || isDomainError(error) || isDBError(error);
 
 /**
  * Gets HTTP status code from API error
