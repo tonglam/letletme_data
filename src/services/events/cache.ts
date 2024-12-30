@@ -23,7 +23,7 @@ import type { BootStrapResponse } from '../../types/bootstrap.type';
 import { ServiceError } from '../../types/errors.type';
 import { toDomainEvent, type Event, type EventId } from '../../types/events.type';
 import { createServiceIntegrationError } from '../../utils/error.util';
-import { toNullable } from '../../utils/service.util';
+import { toNullable } from '../utils';
 
 const createEventDataProvider = (
   bootstrapApi: BootstrapApi & { getBootstrapEvents: () => Promise<BootStrapResponse['events']> },

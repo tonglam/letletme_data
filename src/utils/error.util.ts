@@ -5,7 +5,7 @@ import { Job } from 'bullmq';
 import * as E from 'fp-ts/Either';
 import * as O from 'fp-ts/Option';
 import { pipe } from 'fp-ts/function';
-import { BaseJobData } from '../infrastructures/queue/types';
+import { BaseJobData } from '../queues/types';
 import {
   APIError,
   APIErrorCode,
@@ -15,6 +15,7 @@ import {
   DBErrorCode,
   QueueError,
   QueueErrorCode,
+  QueueOperation,
   ServiceError,
   ServiceErrorCode,
   createAPIError,
@@ -299,6 +300,8 @@ export const createServiceTransformationError = (error: unknown): ServiceError =
  */
 export const createQueueConnectionError = (params: {
   message: string;
+  queueName: string;
+  operation: QueueOperation;
   job?: Job<BaseJobData>;
   cause?: Error;
 }): QueueError =>
@@ -312,6 +315,8 @@ export const createQueueConnectionError = (params: {
  */
 export const createQueueProcessingError = (params: {
   message: string;
+  queueName: string;
+  operation: QueueOperation;
   job?: Job<BaseJobData>;
   cause?: Error;
 }): QueueError =>
@@ -325,6 +330,8 @@ export const createQueueProcessingError = (params: {
  */
 export const createQueueValidationError = (params: {
   message: string;
+  queueName: string;
+  operation: QueueOperation;
   job?: Job<BaseJobData>;
   cause?: Error;
 }): QueueError =>
@@ -338,6 +345,8 @@ export const createQueueValidationError = (params: {
  */
 export const createQueueTimeoutError = (params: {
   message: string;
+  queueName: string;
+  operation: QueueOperation;
   job?: Job<BaseJobData>;
   cause?: Error;
 }): QueueError =>
@@ -391,12 +400,11 @@ export const toAPIError = (error: unknown): APIError => {
     });
   }
   if (isQueueError(error)) {
-    const queueError = error as QueueError;
     return createAPIError({
-      code: queueErrorToApiErrorCode[queueError.code],
-      message: queueError.message,
-      details: { job: queueError.job },
-      cause: queueError.cause,
+      code: queueErrorToApiErrorCode[error.code as QueueErrorCode],
+      message: error.message,
+      details: { queueName: error.queueName, operation: error.operation },
+      cause: error.cause,
     });
   }
   if (error instanceof Error) {

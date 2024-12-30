@@ -3,7 +3,7 @@ import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import { BootStrap, BootStrapResponse, toDomainBootStrap } from '../../types/bootstrap.type';
 import { DomainError, DomainErrorCode } from '../../types/errors.type';
-import { createStandardDomainError } from '../../utils/domain.util';
+import { createStandardDomainError } from '../utils';
 
 // Interface for bootstrap API operations
 export interface BootstrapApi {

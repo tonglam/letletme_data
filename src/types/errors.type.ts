@@ -1,20 +1,76 @@
 // Core type definitions for error handling across the application.
 // Follows functional programming principles and provides type safety.
 
-import { Job } from 'bullmq';
-import { BaseJobData } from '../infrastructures/queue/types';
+// Queue operation types
+export enum QueueOperation {
+  ADD_JOB = 'addJob',
+  REMOVE_JOB = 'removeJob',
+  PAUSE_QUEUE = 'pauseQueue',
+  RESUME_QUEUE = 'resumeQueue',
+  CLEAN_QUEUE = 'cleanQueue',
+  CREATE_QUEUE = 'createQueue',
+  CREATE_SCHEDULE = 'createSchedule',
+  CLEANUP_JOBS = 'cleanupJobs',
+  GET_JOB_STATUS = 'getJobStatus',
+  GET_QUEUE_METRICS = 'getQueueMetrics',
+  PROCESS_JOB = 'processJob',
+  VALIDATE_JOB = 'validateJob',
+  CONNECT_QUEUE = 'connectQueue',
+  TIMEOUT_JOB = 'timeoutJob',
+  START_WORKER = 'startWorker',
+  STOP_WORKER = 'stopWorker',
+  CREATE_WORKER = 'createWorker',
+  GET_WORKER = 'getWorker',
+  GET_QUEUE = 'getQueue',
+}
+
+// Job type enums
+export enum MetaJobType {
+  BOOTSTRAP = 'BOOTSTRAP',
+  EVENTS = 'EVENTS',
+}
+
+export enum LiveJobType {
+  LIVE_SCORE = 'LIVE_SCORE',
+  LIVE_CACHE = 'LIVE_CACHE',
+}
+
+export enum PostMatchJobType {
+  MATCH_RESULT = 'MATCH_RESULT',
+  PLAYER_STATS = 'PLAYER_STATS',
+  TEAM_STATS = 'TEAM_STATS',
+}
+
+export enum DailyJobType {
+  CLEANUP = 'CLEANUP',
+  MAINTENANCE = 'MAINTENANCE',
+  REPORT = 'REPORT',
+}
+
+export enum JobOperationType {
+  UPDATE = 'UPDATE',
+  SYNC = 'SYNC',
+}
+
+// Queue operation error codes
+export enum QueueOperationErrorCode {
+  QUEUE_PAUSE_ALL_ERROR = 'QUEUE_PAUSE_ALL_ERROR',
+  QUEUE_RESUME_ALL_ERROR = 'QUEUE_RESUME_ALL_ERROR',
+  QUEUE_CLEANUP_ALL_ERROR = 'QUEUE_CLEANUP_ALL_ERROR',
+  QUEUE_GET_ERROR = 'QUEUE_GET_ERROR',
+  QUEUE_INIT_ERROR = 'QUEUE_INIT_ERROR',
+  QUEUE_OPERATION_ERROR = 'QUEUE_OPERATION_ERROR',
+}
 
 // ============ Error Codes ============
 
 // Queue error codes
-export const QueueErrorCode = {
-  CONNECTION_ERROR: 'QUEUE_CONNECTION_ERROR',
-  PROCESSING_ERROR: 'QUEUE_PROCESSING_ERROR',
-  VALIDATION_ERROR: 'QUEUE_VALIDATION_ERROR',
-  TIMEOUT_ERROR: 'QUEUE_TIMEOUT_ERROR',
-} as const;
-
-export type QueueErrorCode = (typeof QueueErrorCode)[keyof typeof QueueErrorCode];
+export enum QueueErrorCode {
+  VALIDATION_ERROR = 'VALIDATION_ERROR',
+  PROCESSING_ERROR = 'PROCESSING_ERROR',
+  CONNECTION_ERROR = 'CONNECTION_ERROR',
+  TIMEOUT_ERROR = 'TIMEOUT_ERROR',
+}
 
 // API error codes
 export const APIErrorCode = {
@@ -82,9 +138,10 @@ export interface ServiceError extends BaseError {
 // ============ Error Types ============
 
 // Base error interface
-export interface BaseError extends Error {
-  readonly code: string;
+export interface BaseError {
+  readonly name: string;
   readonly message: string;
+  readonly code: string;
   readonly details?: unknown;
   readonly cause?: Error;
 }
@@ -116,8 +173,8 @@ export interface ServiceError extends BaseError {
 
 // Queue error interface
 export interface QueueError extends BaseError {
-  readonly code: QueueErrorCode;
-  readonly job?: Job<BaseJobData>;
+  readonly queueName: string;
+  readonly operation: QueueOperation;
 }
 
 // ============ Response Types ============
@@ -215,12 +272,16 @@ export const createServiceError = (params: {
 export const createQueueError = (params: {
   code: QueueErrorCode;
   message: string;
-  job?: Job<BaseJobData>;
-  details?: unknown;
+  queueName: string;
+  operation: QueueOperation;
   cause?: Error;
 }): QueueError => ({
   name: 'QueueError',
-  ...params,
+  message: params.message,
+  code: params.code,
+  queueName: params.queueName,
+  operation: params.operation,
+  cause: params.cause,
 });
 
 // ============ Error Type Guards ============
@@ -271,7 +332,10 @@ export const isQueueError = (error: unknown): error is QueueError =>
   error !== null &&
   'code' in error &&
   'message' in error &&
-  Object.values(QueueErrorCode).includes((error as QueueError).code);
+  'queueName' in error &&
+  'operation' in error &&
+  Object.values(QueueErrorCode).includes((error as { code: QueueErrorCode }).code) &&
+  Object.values(QueueOperation).includes((error as { operation: QueueOperation }).operation);
 
 /**
  * Gets HTTP status code from API error

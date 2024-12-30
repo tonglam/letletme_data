@@ -1,100 +1,94 @@
-import { ConnectionOptions, JobsOptions, JobType } from 'bullmq';
-import { QueueOptions } from 'src/infrastructures/queue/types';
+/**
+ * Queue configuration interface
+ */
+export interface QueueConfig {
+  readonly name: string;
+  readonly prefix: string;
+  readonly connection: {
+    readonly host: string;
+    readonly port: number;
+    readonly password?: string;
+  };
+}
 
-// Queue progress constants
-export const QUEUE_PROGRESS = {
-  START: 0,
-  COMPLETE: 100,
-} as const;
+/**
+ * Queue cleanup options interface
+ */
+export interface QueueCleanupOptions {
+  readonly age?: number;
+  readonly limit?: number;
+}
 
-// Queue job types
-export const QUEUE_JOB_TYPES = {
-  BOOTSTRAP: 'BOOTSTRAP',
-  PHASES: 'PHASES',
-  EVENTS: 'EVENTS',
-  TEAMS: 'TEAMS',
-} as const;
-
-// Queue job priorities
-export const QUEUE_PRIORITIES = {
-  HIGH: 1,
-  MEDIUM: 2,
-  LOW: 3,
-} as const;
-
-// Queue job attempts
-export const QUEUE_ATTEMPTS = {
-  BOOTSTRAP: 5,
-  DEFAULT: 3,
-} as const;
-
-// Queue job states
-export const QUEUE_JOB_STATES: Record<string, JobType[]> = {
-  PENDING: ['waiting', 'active', 'delayed'],
-  FAILED: ['failed'],
-  COMPLETED: ['completed'],
-};
-
-// Queue logging constants
-export const QUEUE_LOG_MESSAGES = {
-  JOB_COMPLETED: (jobId: string, queueName: string) =>
-    `${queueName} job ${jobId} completed successfully`,
-  JOB_FAILED: (jobId: string, queueName: string) => `${queueName} job ${jobId} failed with error:`,
-  WORKER_ERROR: (queueName: string) => `${queueName} worker error:`,
-  JOB_DATA: 'Job data:',
-  UNKNOWN_JOB_TYPE: (type: string) => `Unknown job type: ${type}`,
-} as const;
-
-// Default job configuration options for BullMQ
-export const DEFAULT_JOB_OPTIONS: JobsOptions = {
-  attempts: 3,
-  backoff: {
-    type: 'exponential',
-    delay: 1000,
+/**
+ * Queue configuration constants
+ */
+export const QUEUE_CONSTANTS = {
+  PRIORITIES: {
+    HIGH: 1,
+    MEDIUM: 2,
+    LOW: 3,
   },
-  removeOnComplete: 100,
-  removeOnFail: 100,
+  ATTEMPTS: {
+    HIGH: 5,
+    MEDIUM: 3,
+    LOW: 1,
+  },
+  BACKOFF: {
+    TYPE: 'exponential' as const,
+    DELAY: 1000, // 1 second
+  },
+  CLEANUP: {
+    AGE: 24 * 60 * 60 * 1000, // 24 hours
+    LIMIT: 1000,
+  },
+  LOCK_DURATION: 30000, // 30 seconds
 } as const;
 
-// Default Redis connection options for BullMQ
-export const DEFAULT_CONNECTION_OPTIONS = {
-  host: process.env.REDIS_HOST ?? 'localhost',
-  port: parseInt(process.env.REDIS_PORT ?? '6379', 10),
+/**
+ * Job schedule patterns (cron expressions)
+ */
+export const JOB_SCHEDULES = {
+  // Meta jobs
+  META_UPDATE: '35 6 * * *', // 6:35 AM UTC daily
+
+  // Live jobs
+  LIVE_UPDATE: '*/1 * * * *', // Every minute
+
+  // Post-match jobs
+  POST_MATCH_UPDATE: '*/5 * * * *', // Every 5 minutes
+
+  // Post-gameweek jobs
+  POST_GAMEWEEK_UPDATE: '0 */6 * * *', // Every 6 hours
+
+  // Daily jobs
+  DAILY_UPDATE: '0 0 * * *', // Midnight UTC
+} as const;
+
+/**
+ * Queue names
+ */
+export const QUEUE_NAMES = {
+  META: 'meta',
+  LIVE: 'live',
+  POST_MATCH: 'post-match',
+  POST_GAMEWEEK: 'post-gameweek',
+  DAILY: 'daily',
+} as const;
+
+/**
+ * Redis configuration
+ */
+export const REDIS_CONFIG = {
+  host: process.env.REDIS_HOST || 'localhost',
+  port: parseInt(process.env.REDIS_PORT || '6379', 10),
   password: process.env.REDIS_PASSWORD,
-  retryStrategy: (times: number) => Math.min(times * 1000, 10000),
-  maxRetriesPerRequest: undefined,
-  enableOfflineQueue: true,
-  lazyConnect: false,
-} satisfies ConnectionOptions;
-
-// Default queue configuration options
-export const DEFAULT_QUEUE_OPTIONS = {
-  name: 'default',
-  connection: DEFAULT_CONNECTION_OPTIONS,
-  defaultJobOptions: DEFAULT_JOB_OPTIONS,
-} satisfies QueueOptions;
-
-// Meta queue configuration for system-level jobs
-export const META_QUEUE_CONFIG: QueueOptions = {
-  name: 'meta-jobs',
-  prefix: 'letletme',
-  defaultJobOptions: {
-    ...DEFAULT_JOB_OPTIONS,
-    attempts: 5,
-  },
-  connection: DEFAULT_CONNECTION_OPTIONS,
 } as const;
 
-// Creates queue options by merging default options with custom configuration
-export const createQueueOptions = (options: Partial<QueueOptions>): QueueOptions => ({
-  ...DEFAULT_QUEUE_OPTIONS,
-  ...options,
-  defaultJobOptions: {
-    ...DEFAULT_JOB_OPTIONS,
-    ...options.defaultJobOptions,
-  },
-  connection: {
-    ...DEFAULT_CONNECTION_OPTIONS,
-    ...options.connection,
-  },
+/**
+ * Queue configuration factory
+ */
+export const createQueueConfig = (queueName: string) => ({
+  name: queueName,
+  prefix: process.env.NODE_ENV === 'production' ? 'prod' : 'dev',
+  connection: REDIS_CONFIG,
 });

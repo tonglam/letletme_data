@@ -1,107 +1,198 @@
-import { Job } from 'bullmq';
+import { Job, Queue, QueueOptions } from 'bullmq';
 import { pipe } from 'fp-ts/function';
-import * as O from 'fp-ts/Option';
+import * as RTE from 'fp-ts/ReaderTaskEither';
 import * as TE from 'fp-ts/TaskEither';
-import { BaseJobData, JobMetricsData, QueueError, WorkerMetrics } from './types';
+import { QueueConfig } from '../../configs/queue/queue.config';
+import { BaseJobData, QueueError } from '../../queues/types';
+import { createStandardQueueError } from '../../queues/utils';
+import { QueueErrorCode, QueueOperation } from '../../types/errors.type';
+import { logQueueJob } from '../../utils/logger.util';
+import { WorkerAdapter, WorkerEnv } from './types';
 
-// Error creation utilities
-export const createQueueError = (
-  message: string,
-  queueName: string,
-  operation: string,
-  cause?: Error,
-): QueueError => ({
-  name: 'QueueError',
-  message,
-  queueName,
-  operation,
-  cause,
-});
-
-// Job utilities
-export const isJobValid = <T extends BaseJobData>(job: Job<T>): boolean =>
+/**
+ * Executes an operation on all workers in the registry
+ */
+export const executeOnAll = (
+  operation: (adapter: WorkerAdapter<BaseJobData>) => TE.TaskEither<QueueError, void>,
+  opType: QueueOperation,
+): RTE.ReaderTaskEither<WorkerEnv, QueueError, void> =>
   pipe(
-    O.fromNullable(job),
-    O.map((j) => Boolean(j.id && j.data)),
-    O.getOrElse(() => false),
+    RTE.ask<WorkerEnv>(),
+    RTE.chainTaskEitherK((env) =>
+      pipe(
+        TE.sequenceArray(
+          Object.values(env.registry).map((adapter) =>
+            operation(adapter as WorkerAdapter<BaseJobData>),
+          ),
+        ),
+        TE.mapLeft((error) =>
+          createStandardQueueError({
+            code: QueueErrorCode.PROCESSING_ERROR,
+            message: 'Failed to execute operation on all workers',
+            queueName: 'all',
+            operation: opType,
+            cause: error,
+          }),
+        ),
+        TE.map(() => undefined),
+      ),
+    ),
   );
 
-// Metrics utilities
-export const calculateWorkerMetrics = (
-  metrics: ReadonlyArray<JobMetricsData>,
-): TE.TaskEither<Error, WorkerMetrics> =>
-  pipe(
-    TE.right(metrics),
-    TE.map((data) => ({
-      processedCount: data.filter((m) => m.status === 'completed').length,
-      failedCount: data.filter((m) => m.status === 'failed').length,
-      activeCount: data.filter((m) => m.status === 'active').length,
-      completedCount: data.filter((m) => m.status === 'completed').length,
-      stallCount: 0, // This would need to be tracked separately
-      waitTimeAvg: calculateAverageWaitTime(data),
-    })),
-  );
-
-// Helper function for calculating average wait time
-const calculateAverageWaitTime = (metrics: ReadonlyArray<JobMetricsData>): number =>
-  pipe(
-    metrics,
-    (data) => data.reduce((acc, curr) => acc + curr.duration, 0),
-    (total) => (metrics.length > 0 ? total / metrics.length : 0),
-  );
-
-// Rate limiting utilities
-export const checkRateLimit = (
-  currentCount: number,
-  rateLimit: { max: number; duration: number },
+/**
+ * Creates a repeatable job schedule
+ */
+export const createSchedule = <T extends BaseJobData>(
+  config: QueueConfig,
+  schedule: string,
+  jobData: T,
+  options: {
+    priority?: number;
+    attempts?: number;
+  } = {},
 ): TE.TaskEither<QueueError, void> =>
   pipe(
-    currentCount >= rateLimit.max
-      ? TE.left(
-          createQueueError(
-            `Rate limit exceeded: ${currentCount}/${rateLimit.max}`,
-            'rate-limiter',
-            'check-rate-limit',
-          ),
-        )
-      : TE.right(undefined),
+    TE.tryCatch(
+      async () => {
+        const queueOptions: QueueOptions = {
+          connection: config.connection,
+          prefix: config.prefix,
+          defaultJobOptions: {
+            removeOnComplete: true,
+            removeOnFail: 1000,
+            ...options,
+          },
+        };
+
+        const queue = new Queue(jobData.type, queueOptions);
+
+        await queue.add(jobData.type, jobData, {
+          repeat: {
+            pattern: schedule,
+          },
+          ...options,
+        });
+
+        logQueueJob('Schedule created', {
+          queueName: jobData.type,
+          jobId: 'schedule',
+        });
+      },
+      (error): QueueError => ({
+        name: 'QueueError',
+        message: 'Failed to create schedule',
+        code: 'SCHEDULE_CREATE_ERROR',
+        queueName: jobData.type,
+        operation: QueueOperation.CREATE_SCHEDULE,
+        cause: error as Error,
+      }),
+    ),
   );
 
-// Job operation utilities
-export const retryOperation = <T>(
-  operation: () => Promise<T>,
-  retries: number,
-  delay: number,
-): TE.TaskEither<Error, T> => {
-  const retry = (attemptsLeft: number): TE.TaskEither<Error, T> =>
-    pipe(
-      TE.tryCatch(
-        () => operation(),
-        (error) => error as Error,
-      ),
-      TE.fold(
-        (error) =>
-          attemptsLeft > 0
-            ? pipe(
-                TE.fromIO(() => new Promise((resolve) => setTimeout(resolve, delay))),
-                TE.chain(() => retry(attemptsLeft - 1)),
-              )
-            : TE.left(error),
-        (result) => TE.right(result),
-      ),
-    );
+/**
+ * Cleans up completed and failed jobs
+ */
+export const cleanupJobs = (
+  queue: Queue,
+  options: {
+    age?: number; // in milliseconds
+    limit?: number;
+  } = {},
+): TE.TaskEither<QueueError, void> =>
+  pipe(
+    TE.tryCatch(
+      async () => {
+        const { age = 24 * 60 * 60 * 1000, limit = 1000 } = options;
+        await queue.clean(age, limit);
+        logQueueJob('Jobs cleaned up', {
+          queueName: queue.name,
+          jobId: 'system',
+        });
+      },
+      (error): QueueError => ({
+        name: 'QueueError',
+        message: 'Failed to cleanup jobs',
+        code: 'CLEANUP_ERROR',
+        queueName: queue.name,
+        operation: QueueOperation.CLEANUP_JOBS,
+        cause: error as Error,
+      }),
+    ),
+  );
 
-  return retry(retries);
-};
+/**
+ * Gets job status and details
+ */
+export const getJobStatus = (queue: Queue, jobId: string): TE.TaskEither<QueueError, Job | null> =>
+  pipe(
+    TE.tryCatch(
+      async () => {
+        const job = await queue.getJob(jobId);
+        if (job) {
+          logQueueJob('Job status retrieved', {
+            queueName: queue.name,
+            jobId,
+          });
+        }
+        return job;
+      },
+      (error): QueueError => ({
+        name: 'QueueError',
+        message: 'Failed to get job status',
+        code: 'JOB_STATUS_ERROR',
+        queueName: queue.name,
+        operation: QueueOperation.GET_JOB_STATUS,
+        cause: error as Error,
+      }),
+    ),
+  );
 
-// Logging utilities
-export const createStructuredLog = (
-  operation: string,
-  status: 'success' | 'error',
-  details: Record<string, unknown>,
-): Record<string, unknown> => ({
-  timestamp: new Date().toISOString(),
-  operation,
-  status,
-  ...details,
-});
+/**
+ * Gets queue metrics
+ */
+export const getQueueMetrics = (
+  queue: Queue,
+): TE.TaskEither<
+  QueueError,
+  {
+    waiting: number;
+    active: number;
+    completed: number;
+    failed: number;
+    delayed: number;
+  }
+> =>
+  pipe(
+    TE.tryCatch(
+      async () => {
+        const [waiting, active, completed, failed, delayed] = await Promise.all([
+          queue.getWaitingCount(),
+          queue.getActiveCount(),
+          queue.getCompletedCount(),
+          queue.getFailedCount(),
+          queue.getDelayedCount(),
+        ]);
+
+        logQueueJob('Queue metrics retrieved', {
+          queueName: queue.name,
+          jobId: 'system',
+        });
+
+        return {
+          waiting,
+          active,
+          completed,
+          failed,
+          delayed,
+        };
+      },
+      (error): QueueError => ({
+        name: 'QueueError',
+        message: 'Failed to get queue metrics',
+        code: 'QUEUE_METRICS_ERROR',
+        queueName: queue.name,
+        operation: QueueOperation.GET_QUEUE_METRICS,
+        cause: error as Error,
+      }),
+    ),
+  );

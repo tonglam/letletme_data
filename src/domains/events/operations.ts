@@ -16,7 +16,7 @@ import {
 } from '../../infrastructures/cache/operations';
 import { DomainErrorCode } from '../../types/errors.type';
 import { Event as DomainEvent, EventId, toDomainEvent } from '../../types/events.type';
-import { createSafeCacheOperation, createStandardDomainError } from '../../utils/domain.util';
+import { createSafeCacheOperation, createStandardDomainError } from '../utils';
 import { EventCache, EventOperations, EventRepositoryOperations } from './types';
 
 /**

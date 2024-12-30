@@ -13,7 +13,7 @@ import {
   createAPIError,
   createDomainError,
 } from '../types/errors.type';
-import { dbErrorToApiErrorCode, isDBError } from './prisma.util';
+import { dbErrorToApiErrorCode, isDBError } from '../utils/prisma.util';
 
 /**
  * Creates a domain error with consistent formatting
