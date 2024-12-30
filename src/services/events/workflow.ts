@@ -4,7 +4,7 @@
 
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
-import { getWorkflowLogger } from '../../infrastructure/logger';
+import { getWorkflowLogger } from '../../infrastructures/logger';
 import { ServiceError } from '../../types/errors.type';
 import type { Event } from '../../types/events.type';
 import type { EventService } from './types';

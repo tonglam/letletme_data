@@ -11,7 +11,7 @@
     "rootDir": ".",
     "baseUrl": ".",
     "paths": {
-      "infrastructure/*": ["src/infrastructure/*"],
+      "infrastructure/*": ["src/infrastructures/*"],
       "services/*": ["src/services/*"],
       "domains/*": ["src/domains/*"]
     },

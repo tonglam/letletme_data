@@ -9,7 +9,7 @@ import * as O from 'fp-ts/Option';
 import * as T from 'fp-ts/Task';
 import * as TE from 'fp-ts/TaskEither';
 import { flow, pipe } from 'fp-ts/function';
-import { CachePrefix, DefaultTTL } from '../../config/cache/cache.config';
+import { CachePrefix, DefaultTTL } from '../../configs/cache/cache.config';
 import type { BootstrapApi } from '../../domains/bootstrap/operations';
 import { createEventCache } from '../../domains/events/cache';
 import {
@@ -17,7 +17,7 @@ import {
   type EventCacheConfig,
   type EventDataProvider,
 } from '../../domains/events/types';
-import { createRedisCache } from '../../infrastructure/cache/redis';
+import { createRedisCache } from '../../infrastructures/cache/redis';
 import { getCurrentSeason } from '../../types/base.type';
 import type { BootStrapResponse } from '../../types/bootstrap.type';
 import { ServiceError } from '../../types/errors.type';

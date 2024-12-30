@@ -1,22 +1,28 @@
 // Error utility functions
 
 import { Prisma } from '@prisma/client';
+import { Job } from 'bullmq';
 import * as E from 'fp-ts/Either';
 import * as O from 'fp-ts/Option';
 import { pipe } from 'fp-ts/function';
+import { BaseJobData } from '../infrastructures/queue/types';
 import {
   APIError,
   APIErrorCode,
   CacheError,
   CacheErrorCode,
+  DBError,
+  DBErrorCode,
+  QueueError,
+  QueueErrorCode,
+  ServiceError,
+  ServiceErrorCode,
   createAPIError,
   createCacheError,
   createDBError,
+  createQueueError,
   createServiceError,
-  DBError,
-  DBErrorCode,
-  ServiceError,
-  ServiceErrorCode,
+  isQueueError,
 } from '../types/errors.type';
 
 // ============ API Error Handlers ============
@@ -286,6 +292,60 @@ export const createServiceTransformationError = (error: unknown): ServiceError =
   });
 };
 
+// ============ Queue Error Handlers ============
+
+/**
+ * Creates a queue connection error
+ */
+export const createQueueConnectionError = (params: {
+  message: string;
+  job?: Job<BaseJobData>;
+  cause?: Error;
+}): QueueError =>
+  createQueueError({
+    code: QueueErrorCode.CONNECTION_ERROR,
+    ...params,
+  });
+
+/**
+ * Creates a queue processing error
+ */
+export const createQueueProcessingError = (params: {
+  message: string;
+  job?: Job<BaseJobData>;
+  cause?: Error;
+}): QueueError =>
+  createQueueError({
+    code: QueueErrorCode.PROCESSING_ERROR,
+    ...params,
+  });
+
+/**
+ * Creates a queue validation error
+ */
+export const createQueueValidationError = (params: {
+  message: string;
+  job?: Job<BaseJobData>;
+  cause?: Error;
+}): QueueError =>
+  createQueueError({
+    code: QueueErrorCode.VALIDATION_ERROR,
+    ...params,
+  });
+
+/**
+ * Creates a queue timeout error
+ */
+export const createQueueTimeoutError = (params: {
+  message: string;
+  job?: Job<BaseJobData>;
+  cause?: Error;
+}): QueueError =>
+  createQueueError({
+    code: QueueErrorCode.TIMEOUT_ERROR,
+    ...params,
+  });
+
 // ============ Error Type Conversions ============
 
 /**
@@ -299,6 +359,16 @@ const dbErrorToApiErrorCode: Record<DBErrorCode, APIErrorCode> = {
 };
 
 /**
+ * Maps queue error codes to API error codes
+ */
+const queueErrorToApiErrorCode: Record<QueueErrorCode, APIErrorCode> = {
+  [QueueErrorCode.CONNECTION_ERROR]: APIErrorCode.SERVICE_ERROR,
+  [QueueErrorCode.PROCESSING_ERROR]: APIErrorCode.INTERNAL_SERVER_ERROR,
+  [QueueErrorCode.VALIDATION_ERROR]: APIErrorCode.VALIDATION_ERROR,
+  [QueueErrorCode.TIMEOUT_ERROR]: APIErrorCode.SERVICE_ERROR,
+};
+
+/**
  * Type guard for DBError
  */
 const isDBError = (error: unknown): error is DBError =>
@@ -309,7 +379,7 @@ const isDBError = (error: unknown): error is DBError =>
 
 /**
  * Converts any error to an API error
- * Handles specific error types (DBError, Error) appropriately
+ * Handles specific error types (DBError, QueueError, Error) appropriately
  */
 export const toAPIError = (error: unknown): APIError => {
   if (isDBError(error)) {
@@ -318,6 +388,15 @@ export const toAPIError = (error: unknown): APIError => {
       message: error.message,
       details: error.details,
       cause: error.cause,
+    });
+  }
+  if (isQueueError(error)) {
+    const queueError = error as QueueError;
+    return createAPIError({
+      code: queueErrorToApiErrorCode[queueError.code],
+      message: queueError.message,
+      details: { job: queueError.job },
+      cause: queueError.cause,
     });
   }
   if (error instanceof Error) {

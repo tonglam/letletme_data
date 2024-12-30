@@ -3,8 +3,8 @@ import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import pino from 'pino';
 import { teamRepository } from '../domains/teams/repository';
-import { connectDB, disconnectDB } from '../infrastructure/db/prisma';
-import { createFPLClient } from '../infrastructure/http/fpl';
+import { connectDB, disconnectDB } from '../infrastructures/db/prisma';
+import { createFPLClient } from '../infrastructures/http/fpl';
 import { createTeamServiceImpl } from '../services/teams/service';
 
 dotenv.config();

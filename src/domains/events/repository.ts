@@ -6,7 +6,7 @@
 import { Prisma } from '@prisma/client';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
-import { prisma } from '../../infrastructure/db/prisma';
+import { prisma } from '../../infrastructures/db/prisma';
 import { DBError } from '../../types/errors.type';
 import { Event, EventId, PrismaEvent } from '../../types/events.type';
 import { handlePrismaError } from '../../utils/error.util';

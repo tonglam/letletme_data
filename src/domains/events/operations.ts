@@ -13,7 +13,7 @@ import {
   withCacheSingle,
   withCreate,
   withCreateBatch,
-} from '../../infrastructure/cache/operations';
+} from '../../infrastructures/cache/operations';
 import { DomainErrorCode } from '../../types/errors.type';
 import { Event as DomainEvent, EventId, toDomainEvent } from '../../types/events.type';
 import { createSafeCacheOperation, createStandardDomainError } from '../../utils/domain.util';

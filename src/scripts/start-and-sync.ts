@@ -5,10 +5,10 @@ import pino from 'pino';
 import { fetchBootstrapEvents } from '../domains/bootstrap/operations';
 import { saveBatchEvents } from '../domains/events/operations';
 import { eventRepository } from '../domains/events/repository';
-import { createFPLClient } from '../infrastructure/http/fpl';
-import { META_QUEUE_CONFIG } from '../infrastructure/queue/config/queue.config';
-import { createMetaWorkerService } from '../jobs/meta/base/meta.worker';
-import { eventJobService } from '../jobs/meta/events.job';
+import { createFPLClient } from '../infrastructures/http/fpl';
+import { META_QUEUE_CONFIG } from '../infrastructures/queue/config/queue.config';
+import { createMetaWorkerService } from '../queues/meta/base/meta.worker';
+import { eventJobService } from '../queues/meta/events.job';
 
 dotenv.config();
 

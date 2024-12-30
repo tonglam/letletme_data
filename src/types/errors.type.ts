@@ -1,7 +1,20 @@
 // Core type definitions for error handling across the application.
 // Follows functional programming principles and provides type safety.
 
+import { Job } from 'bullmq';
+import { BaseJobData } from '../infrastructures/queue/types';
+
 // ============ Error Codes ============
+
+// Queue error codes
+export const QueueErrorCode = {
+  CONNECTION_ERROR: 'QUEUE_CONNECTION_ERROR',
+  PROCESSING_ERROR: 'QUEUE_PROCESSING_ERROR',
+  VALIDATION_ERROR: 'QUEUE_VALIDATION_ERROR',
+  TIMEOUT_ERROR: 'QUEUE_TIMEOUT_ERROR',
+} as const;
+
+export type QueueErrorCode = (typeof QueueErrorCode)[keyof typeof QueueErrorCode];
 
 // API error codes
 export const APIErrorCode = {
@@ -101,6 +114,12 @@ export interface ServiceError extends BaseError {
   readonly code: ServiceErrorCode;
 }
 
+// Queue error interface
+export interface QueueError extends BaseError {
+  readonly code: QueueErrorCode;
+  readonly job?: Job<BaseJobData>;
+}
+
 // ============ Response Types ============
 
 // Standard error response structure
@@ -192,6 +211,18 @@ export const createServiceError = (params: {
   ...params,
 });
 
+// Creates a queue error
+export const createQueueError = (params: {
+  code: QueueErrorCode;
+  message: string;
+  job?: Job<BaseJobData>;
+  details?: unknown;
+  cause?: Error;
+}): QueueError => ({
+  name: 'QueueError',
+  ...params,
+});
+
 // ============ Error Type Guards ============
 
 // Type guard for APIError
@@ -233,6 +264,14 @@ export const isServiceError = (error: unknown): error is ServiceError =>
   'code' in error &&
   'message' in error &&
   (isAPIError(error) || isCacheError(error) || isDomainError(error) || isDBError(error));
+
+// Type guard for QueueError
+export const isQueueError = (error: unknown): error is QueueError =>
+  typeof error === 'object' &&
+  error !== null &&
+  'code' in error &&
+  'message' in error &&
+  Object.values(QueueErrorCode).includes((error as QueueError).code);
 
 /**
  * Gets HTTP status code from API error

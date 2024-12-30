@@ -9,7 +9,7 @@ import * as O from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
 import { z } from 'zod';
-import { AppConfig } from '../config/app/app.config';
+import { AppConfig } from '../configs/app/app.config';
 import { APIError, CacheError, DBError, createValidationError } from './errors.type';
 
 // ============ Constants ============

@@ -7,9 +7,9 @@
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import { CacheError } from 'src/types/errors.type';
-import { CachePrefix } from '../../config/cache/cache.config';
-import { withCacheErrorHandling, withPipeline } from '../../infrastructure/cache/operations';
-import { type RedisCache } from '../../infrastructure/cache/redis';
+import { CachePrefix } from '../../configs/cache/cache.config';
+import { withCacheErrorHandling, withPipeline } from '../../infrastructures/cache/operations';
+import { type RedisCache } from '../../infrastructures/cache/redis';
 import { getCurrentSeason } from '../../types/base.type';
 import { type Event, type EventId } from '../../types/events.type';
 import { type EventCache, type EventCacheConfig, type EventDataProvider } from './types';

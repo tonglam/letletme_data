@@ -4,7 +4,7 @@ import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import pino from 'pino';
 import { fetchBootstrapEvents } from '../domains/bootstrap/operations';
-import { createFPLClient } from '../infrastructure/http/fpl';
+import { createFPLClient } from '../infrastructures/http/fpl';
 
 dotenv.config();
 
