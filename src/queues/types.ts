@@ -4,9 +4,9 @@ import {
   DailyJobType,
   JobOperationType,
   LiveJobType,
-  MetaJobType,
   PostMatchJobType,
 } from '../types/errors.type';
+import { MetaJobType } from './jobs/core/meta.job';
 
 // Base job data interface
 export interface BaseJobData {

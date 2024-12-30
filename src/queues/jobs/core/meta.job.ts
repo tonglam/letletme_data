@@ -5,22 +5,20 @@ import * as TE from 'fp-ts/TaskEither';
 import { MetaJobData } from 'src/queues/types';
 import { JOB_SCHEDULES, QUEUE_CONSTANTS, QueueConfig } from '../../../configs/queue/queue.config';
 import { createSchedule } from '../../../infrastructures/queue/utils';
-import {
-  JobOperationType,
-  MetaJobType,
-  QueueError,
-  QueueOperation,
-} from '../../../types/errors.type';
+import { JobOperationType, QueueError, QueueOperation } from '../../../types/errors.type';
 import { createQueueProcessingError } from '../../../utils/error.util';
-import { processBootstrap } from '../processors/meta/bootstrap.processor';
 import { processEvents } from '../processors/meta/events.processor';
+
+// Meta job types
+export enum MetaJobType {
+  EVENTS = 'EVENTS',
+}
 
 // Job type processor map
 const processors: Record<
   MetaJobType,
   (data: MetaJobData['data']) => TE.TaskEither<QueueError, void>
 > = {
-  [MetaJobType.BOOTSTRAP]: processBootstrap,
   [MetaJobType.EVENTS]: processEvents,
 };
 
@@ -52,7 +50,7 @@ const createMetaScheduleConfig = (config: QueueConfig): TE.TaskEither<QueueError
       config,
       JOB_SCHEDULES.META_UPDATE,
       {
-        type: MetaJobType.BOOTSTRAP,
+        type: MetaJobType.EVENTS,
         timestamp: new Date(),
         data: {
           operation: JobOperationType.SYNC,

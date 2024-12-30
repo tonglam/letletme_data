@@ -25,11 +25,6 @@ export enum QueueOperation {
 }
 
 // Job type enums
-export enum MetaJobType {
-  BOOTSTRAP = 'BOOTSTRAP',
-  EVENTS = 'EVENTS',
-}
-
 export enum LiveJobType {
   LIVE_SCORE = 'LIVE_SCORE',
   LIVE_CACHE = 'LIVE_CACHE',
