@@ -1,4 +1,4 @@
-import { QueueOperation } from './queue.type';
+import { BaseError, ErrorDetails, QueueOperation } from './shared.type';
 
 /**
  * DB Error Types
@@ -10,20 +10,6 @@ export enum DBErrorCode {
   OPERATION_ERROR = 'OPERATION_ERROR',
   VALIDATION_ERROR = 'VALIDATION_ERROR',
   TRANSFORMATION_ERROR = 'TRANSFORMATION_ERROR',
-}
-
-export interface ErrorDetails {
-  [key: string]: unknown;
-}
-
-export interface BaseError {
-  readonly name: string;
-  readonly message: string;
-  readonly code: string;
-  readonly timestamp: Date;
-  readonly stack?: string;
-  readonly cause?: Error;
-  readonly details?: ErrorDetails;
 }
 
 export interface DBError extends BaseError {

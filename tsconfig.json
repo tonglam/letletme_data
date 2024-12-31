@@ -13,7 +13,8 @@
     "paths": {
       "infrastructure/*": ["src/infrastructures/*"],
       "services/*": ["src/services/*"],
-      "domains/*": ["src/domains/*"]
+      "domains/*": ["src/domains/*"],
+      "src/*": ["src/*"]
     },
     "strictNullChecks": true,
     "noImplicitThis": true,

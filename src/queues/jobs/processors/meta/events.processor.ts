@@ -1,7 +1,7 @@
 import * as TE from 'fp-ts/TaskEither';
-import { QueueOperation } from 'src/types/queue.type';
-import { QueueError } from '../../../../types/errors.type';
-import { createQueueProcessingError } from '../../../../utils/error.util';
+import { QueueError } from 'src/types/errors.type';
+import { QueueOperation } from 'src/types/shared.type';
+import { createQueueProcessingError } from 'src/utils/error.util';
 
 /**
  * Process events job

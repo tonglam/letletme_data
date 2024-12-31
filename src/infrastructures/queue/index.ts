@@ -1,2 +1,2 @@
-export * from './core/queue.adapter';
-export * from './core/worker.adapter';
+export { createQueueAdapter } from './core/queue.adapter';
+export { createWorkerAdapter } from './core/worker.adapter';

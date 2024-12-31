@@ -22,7 +22,8 @@ import {
   createQueueError,
   createServiceError,
 } from '../types/errors.type';
-import { BaseJobData, QueueOperation } from '../types/queue.type';
+import { BaseJobData } from '../types/queue.type';
+import { QueueOperation } from '../types/shared.type';
 
 // Type guard for QueueError
 const isQueueError = (error: unknown): error is QueueError =>

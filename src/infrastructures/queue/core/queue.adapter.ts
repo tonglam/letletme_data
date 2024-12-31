@@ -5,12 +5,14 @@ import * as O from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
 import { QueueCleanupOptions, createQueueConfig } from '../../../configs/queue/queue.config';
 import { QueueError, QueueErrorCode } from '../../../types/errors.type';
-import { BaseJobData, JobStatus, QueueAdapter, QueueOperation } from '../../../types/queue.type';
+import { BaseJobData, JobStatus, QueueAdapter } from '../../../types/queue.type';
+import { QueueOperation } from '../../../types/shared.type';
 import { createStandardQueueError } from '../../../utils/queue.utils';
 
 const createQueueConnection = (host: string, port: number) => ({
   host,
   port,
+  password: process.env.REDIS_PASSWORD,
   maxRetriesPerRequest: null,
   enableReadyCheck: true,
   connectTimeout: 5000,

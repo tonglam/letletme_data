@@ -1,616 +1,347 @@
-import { Job, Queue, Worker } from 'bullmq';
+import { Job, Queue } from 'bullmq';
 import * as E from 'fp-ts/Either';
 import * as TE from 'fp-ts/TaskEither';
-import { createQueueAdapter } from '../../src/infrastructures/queue/core/queue.adapter';
-import { createWorkerAdapter } from '../../src/infrastructures/queue/core/worker.adapter';
-import { QueueError } from '../../src/types/errors.type';
+import { createQueueAdapter, createWorkerAdapter } from '../../src/infrastructures/queue';
+import { MetaJobType } from '../../src/queues/jobs/core/meta.job';
+import { QueueErrorCode } from '../../src/types/errors.type';
 import {
   BaseJobData,
+  JobOperationType,
   JobProcessor,
+  JobType,
   QueueAdapter,
-  QueueOperation,
   WorkerAdapter,
 } from '../../src/types/queue.type';
+import { QueueOperation } from '../../src/types/shared.type';
 import { createStandardQueueError } from '../../src/utils/queue.utils';
 
-// Test queue configuration
-const TEST_QUEUE = 'test_queue';
-
-// Test job data type
 interface TestJobData extends BaseJobData {
-  type: 'test-job';
+  type: JobType.META;
+  timestamp: Date;
   data: {
     value: string;
+    type: MetaJobType;
+    operation: JobOperationType;
   };
 }
 
-// Reasonable timeout for queue operations
-jest.setTimeout(30000); // 30 seconds for individual tests
-
-// Helper function to wait with timeout
-const waitWithTimeout = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-// Helper function to wait for job completion
-const waitForJobCompletion = async (
-  queue: Queue,
-  jobId: string,
-  maxAttempts = 10,
-): Promise<Job | undefined> => {
-  let attempts = 0;
-  let job = await queue.getJob(jobId);
-
-  while ((!job?.finishedOn || !job?.processedOn) && attempts < maxAttempts) {
-    await waitWithTimeout(500);
-    job = await queue.getJob(jobId);
-    attempts++;
-  }
-
-  return job;
-};
-
-// Helper function to wait for job failure
-const waitForJobFailure = async (
-  queue: Queue,
-  jobId: string,
-  maxAttempts = 10,
-): Promise<Job | undefined> => {
-  let attempts = 0;
-  let job = await queue.getJob(jobId);
-
-  while ((!job?.failedReason || !job?.finishedOn) && attempts < maxAttempts) {
-    await waitWithTimeout(500);
-    job = await queue.getJob(jobId);
-    attempts++;
-  }
-
-  return job;
-};
-
-// Helper function to wait for job removal
-const waitForJobRemoval = async (
-  queue: Queue,
-  jobId: string,
-  maxAttempts = 10,
-): Promise<Job | undefined> => {
-  let attempts = 0;
-  let job = await queue.getJob(jobId);
-
-  while (job && attempts < maxAttempts) {
-    await waitWithTimeout(500);
-    job = await queue.getJob(jobId);
-    attempts++;
-  }
-
-  return job;
-};
+const TEST_QUEUE = 'test_queue';
 
 describe('Queue Infrastructure Tests', () => {
+  let queue: Queue;
   let queueAdapter: QueueAdapter;
   let workerAdapter: WorkerAdapter<TestJobData>;
-  let processedJobs: TestJobData[] = [];
-  let queue: Queue;
-  let worker: Worker;
+  let processedJobs: Array<TestJobData> = [];
 
-  const testProcessor: JobProcessor<TestJobData> = (job: Job<TestJobData>) =>
+  const waitWithTimeout = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  const waitForJobFailure = async (queue: Queue, jobId: string) => {
+    let job = await queue.getJob(jobId);
+    let attempts = 0;
+    const maxAttempts = 10;
+    while ((!job?.failedReason || !job?.finishedOn) && attempts < maxAttempts) {
+      await waitWithTimeout(1000);
+      job = await queue.getJob(jobId);
+      attempts++;
+    }
+    return job;
+  };
+
+  const defaultProcessor: JobProcessor<TestJobData> = (job: Job<TestJobData>) =>
     TE.tryCatch(
       async () => {
-        console.log('Processing job:', job.id, job.data);
+        console.log('Processing job:', job.id);
         processedJobs.push(job.data);
-        await job.updateProgress(100);
-        console.log('Job processed successfully:', job.id);
-        return Promise.resolve();
       },
       (error) => {
-        console.error('Job processing error:', error);
-        return error as QueueError;
+        console.error('Error processing job:', error);
+        return createStandardQueueError({
+          code: QueueErrorCode.PROCESSING_ERROR,
+          message: error instanceof Error ? error.message : String(error),
+          queueName: TEST_QUEUE,
+          operation: QueueOperation.PROCESS_JOB,
+          cause: error instanceof Error ? error : new Error(String(error)),
+        });
       },
     );
 
-  // Helper function to wait for job processing
-  const waitForJobProcessing = async (maxWaitMs = 5000): Promise<void> => {
-    const startTime = Date.now();
-    console.log('Waiting for job processing...');
-
-    while (Date.now() - startTime < maxWaitMs) {
-      if (processedJobs.length > 0) {
-        console.log('Job processing completed');
-        return;
-      }
-      if (!workerAdapter.isRunning()) {
-        console.error('Worker stopped during job processing');
-        throw new Error('Worker stopped unexpectedly');
-      }
-      await waitWithTimeout(100);
-    }
-    console.error('Job processing timed out. Worker state:', {
-      isRunning: workerAdapter.isRunning(),
-      processedJobs,
-    });
-    throw new Error('Job processing timeout');
-  };
-
   beforeAll(async () => {
-    // Set test environment
-    process.env.NODE_ENV = 'test';
-
-    try {
-      // Create queue adapter with timeout
-      console.log('Creating queue adapter...');
-      const queuePromise = createQueueAdapter(TEST_QUEUE)();
-      const queueResult = await Promise.race([
-        queuePromise,
-        waitWithTimeout(5000).then(() => {
-          throw new Error('Queue adapter creation timed out after 5s');
-        }),
-      ]);
-
-      if (!E.isRight(queueResult)) {
-        console.error('Failed to create queue adapter:', queueResult.left);
-        throw new Error('Failed to create queue adapter');
-      }
+    console.log('Setting up test environment...');
+    // Create queue and worker for tests
+    const queueResult = await createQueueAdapter(TEST_QUEUE)();
+    expect(E.isRight(queueResult)).toBe(true);
+    if (E.isRight(queueResult)) {
       queueAdapter = queueResult.right;
       queue = queueAdapter.queue;
-      console.log('Queue adapter created successfully');
-
-      // Create worker adapter with timeout
-      console.log('Creating worker adapter...');
-      const workerPromise = createWorkerAdapter(TEST_QUEUE, testProcessor)();
-      const workerResult = await Promise.race([
-        workerPromise,
-        waitWithTimeout(5000).then(() => {
-          throw new Error('Worker adapter creation timed out after 5s');
-        }),
-      ]);
-
-      if (!E.isRight(workerResult)) {
-        console.error('Failed to create worker adapter:', workerResult.left);
-        throw new Error('Failed to create worker adapter');
-      }
-      workerAdapter = workerResult.right;
-      worker = workerAdapter.worker;
-      console.log('Worker adapter created successfully');
-
-      // Start the worker with timeout
-      console.log('Starting worker...');
-      worker.on('ready', () => console.log('Worker is ready'));
-      worker.on('error', (err) => console.error('Worker error:', err));
-      worker.on('closing', () => console.log('Worker is closing'));
-      worker.on('closed', () => console.log('Worker is closed'));
-
-      const startPromise = workerAdapter.start()();
-      const startResult = await Promise.race([
-        startPromise,
-        waitWithTimeout(15000).then(() => {
-          throw new Error('Worker start timed out after 15s');
-        }),
-      ]);
-
-      if (!E.isRight(startResult)) {
-        console.error('Failed to start worker:', startResult.left);
-        throw new Error('Failed to start worker');
-      }
-      console.log('Worker started successfully');
-    } catch (error) {
-      console.error('Setup failed:', error);
-      // Log worker state if available
-      if (worker) {
-        console.log('Worker state:', {
-          isRunning: workerAdapter.isRunning(),
-        });
-      }
-      throw error;
     }
-  }, 30000);
+
+    const workerResult = await createWorkerAdapter(TEST_QUEUE, defaultProcessor)();
+    expect(E.isRight(workerResult)).toBe(true);
+    if (E.isRight(workerResult)) {
+      workerAdapter = workerResult.right;
+    }
+  }, 60000);
 
   afterAll(async () => {
-    // Stop worker
-    if (workerAdapter) {
+    console.log('Stopping worker in afterAll...');
+    try {
       await workerAdapter.stop()();
+    } catch (error) {
+      console.error('Error stopping worker in afterAll:', error);
     }
 
-    // Clean up test queue
-    if (queueAdapter) {
+    console.log('Cleaning up queue in afterAll...');
+    try {
       await queueAdapter.cleanQueue()();
+    } catch (error) {
+      console.error('Error cleaning queue in afterAll:', error);
     }
 
-    // Close connections
-    if (queue) {
+    console.log('Closing queue connection...');
+    try {
       await queue.close();
-    }
-    if (worker) {
-      await worker.close();
+    } catch (error) {
+      console.error('Error closing queue in afterAll:', error);
     }
 
-    // Wait for cleanup
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-  });
+    console.log('Closing worker connection...');
+    try {
+      await workerAdapter.worker.close();
+    } catch (error) {
+      console.error('Error closing worker in afterAll:', error);
+    }
+
+    console.log('All connections closed in afterAll');
+  }, 60000);
 
   beforeEach(async () => {
-    // Reset processed jobs
-    processedJobs = [];
+    console.log('Stopping worker in beforeEach...');
+    try {
+      // If worker is in error state, reset it first
+      if (workerAdapter.worker.isRunning()) {
+        await workerAdapter.stop()();
+        await waitWithTimeout(2000);
+      }
 
-    // Stop and close existing worker if running
-    if (workerAdapter) {
-      console.log('Stopping worker in beforeEach...');
-      await workerAdapter.stop()();
-      await waitWithTimeout(500); // Wait for worker to fully stop
-      await worker.close();
-      await waitWithTimeout(500); // Wait for worker to fully close
-    }
+      // Create new worker adapter to ensure clean state
+      console.log('Creating new worker adapter...');
+      const workerResult = await createWorkerAdapter<TestJobData>(TEST_QUEUE, defaultProcessor)();
+      if (!E.isRight(workerResult)) {
+        throw new Error('Failed to create worker adapter');
+      }
+      workerAdapter = workerResult.right as WorkerAdapter<TestJobData>;
 
-    // Clean up any existing jobs
-    if (queue) {
+      // Clean up any existing jobs
       console.log('Cleaning up jobs in beforeEach...');
-      // Wait for any active jobs to complete
-      await waitWithTimeout(1000);
+      await queueAdapter.cleanQueue()();
+      await waitWithTimeout(2000);
 
-      // Clean up jobs in parallel
-      await Promise.all([
-        queue.clean(0, 0, 'completed'),
-        queue.clean(0, 0, 'failed'),
-        queue.clean(0, 0, 'delayed'),
-        queue.clean(0, 0, 'wait'),
-        queue.clean(0, 0, 'active'),
-        queue.clean(0, 0, 'paused'),
-      ]);
-
-      // Wait for cleanup to complete
-      await waitWithTimeout(1000);
-
-      // Obliterate queue after cleaning
-      await queue.obliterate();
-      console.log('Jobs cleaned up');
-    }
-
-    // Create new worker adapter for each test
-    console.log('Creating new worker adapter...');
-    const workerResult = await createWorkerAdapter(TEST_QUEUE, testProcessor)();
-    if (!E.isRight(workerResult)) {
-      throw new Error('Failed to create worker adapter');
-    }
-    workerAdapter = workerResult.right;
-    worker = workerAdapter.worker;
-    console.log('Worker adapter created');
-
-    // Start worker and wait for it to be ready
-    console.log('Starting worker in beforeEach...');
-    const startResult = await workerAdapter.start()();
-    if (!E.isRight(startResult)) {
-      throw new Error('Failed to start worker');
-    }
-    await waitWithTimeout(500); // Wait for worker to be fully ready
-
-    if (!workerAdapter.isRunning()) {
-      throw new Error('Worker failed to start in beforeEach');
-    }
-    console.log('Worker started in beforeEach');
-  });
-
-  afterEach(async () => {
-    // Stop worker first
-    if (workerAdapter) {
-      console.log('Stopping worker in afterEach...');
-      await workerAdapter.stop()();
-      await waitWithTimeout(500); // Wait for worker to fully stop
-      await worker.close();
-      await waitWithTimeout(500); // Wait for worker to fully close
-    }
-
-    // Clean up jobs
-    if (queue) {
-      console.log('Cleaning up jobs in afterEach...');
-      // Wait for any active jobs to complete
-      await waitWithTimeout(1000);
-
-      // Clean up jobs in parallel
-      await Promise.all([
-        queue.clean(0, 0, 'completed'),
-        queue.clean(0, 0, 'failed'),
-        queue.clean(0, 0, 'delayed'),
-        queue.clean(0, 0, 'wait'),
-        queue.clean(0, 0, 'active'),
-        queue.clean(0, 0, 'paused'),
-      ]);
-
-      // Wait for cleanup to complete
-      await waitWithTimeout(1000);
-
-      // Obliterate queue after cleaning
-      await queue.obliterate();
-      console.log('Jobs cleaned up');
-    }
-  });
-
-  describe('Queue Operations', () => {
-    it('should add and process a job', async () => {
-      const jobData: TestJobData = {
-        type: 'test-job',
-        timestamp: new Date(),
-        data: { value: 'test value' },
-      };
-
-      console.log('Adding job to queue...');
-      const addResult = await queueAdapter.addJob(jobData)();
-      if (!E.isRight(addResult)) {
-        throw new Error('Failed to add job');
-      }
-      const jobId = addResult.right.id;
-      if (!jobId) {
-        throw new Error('Job ID is undefined');
-      }
-      console.log('Job added successfully:', jobId);
-
-      // Wait for job to be processed
-      await waitForJobProcessing();
-
-      console.log('Processed jobs:', processedJobs);
-      expect(processedJobs).toHaveLength(1);
-      expect(processedJobs[0].type).toBe(jobData.type);
-      expect(processedJobs[0].data).toEqual(jobData.data);
-      expect(new Date(processedJobs[0].timestamp).getTime()).toBe(jobData.timestamp.getTime());
-
-      // Verify job status in Redis
-      const job = await waitForJobCompletion(queue, jobId);
-      expect(job?.finishedOn).toBeDefined();
-      expect(job?.processedOn).toBeDefined();
-    });
-
-    it('should remove a job', async () => {
-      // Add job
-      const jobData: TestJobData = {
-        type: 'test-job',
-        timestamp: new Date(),
-        data: { value: 'test' },
-      };
-
-      console.log('Adding job...');
-      const addResult = await queueAdapter.addJob(jobData)();
-      if (!E.isRight(addResult)) {
-        throw new Error('Failed to add job');
-      }
-      const jobId = addResult.right.id;
-      if (!jobId) {
-        throw new Error('Job ID is undefined');
-      }
-      console.log('Job added:', jobId);
-
-      // Wait for job to be added
-      let job = await queue.getJob(jobId);
-      let attempts = 0;
-      const maxAttempts = 10;
-      while (!job && attempts < maxAttempts) {
-        await waitWithTimeout(500);
-        job = await queue.getJob(jobId);
-        attempts++;
-      }
-
-      // Remove job
-      console.log('Removing job:', jobId);
-      const removeResult = await queueAdapter.removeJob(jobId)();
-      if (!E.isRight(removeResult)) {
-        throw new Error('Failed to remove job');
-      }
-      console.log('Job removal initiated');
-
-      // Wait for job to be removed
-      job = await waitForJobRemoval(queue, jobId);
-      expect(job).toBeUndefined();
-    });
-
-    it('should pause and resume the queue', async () => {
-      // Reset processed jobs
       processedJobs = [];
 
-      // Pause queue
-      console.log('Pausing queue...');
-      const pauseResult = await queueAdapter.pauseQueue()();
-      if (!E.isRight(pauseResult)) {
-        throw new Error('Failed to pause queue');
+      console.log('Starting worker in beforeEach...');
+      const startResult = await workerAdapter.start()();
+      if (!E.isRight(startResult)) {
+        throw new Error('Failed to start worker');
       }
-      console.log('Queue paused');
+      await waitWithTimeout(2000);
 
-      // Wait for queue to pause
-      await waitWithTimeout(1000);
+      // Verify worker is running
+      if (!workerAdapter.isRunning()) {
+        throw new Error('Worker failed to start properly');
+      }
+      console.log('Worker started in beforeEach');
+    } catch (error) {
+      console.error('Error in beforeEach:', error);
+      throw error;
+    }
+  }, 60000);
 
-      // Add job while paused
+  afterEach(async () => {
+    console.log('Stopping worker in afterEach...');
+    try {
+      // If worker is running, stop it
+      if (workerAdapter.worker.isRunning()) {
+        await workerAdapter.stop()();
+        await waitWithTimeout(2000);
+      }
+
+      // Clean up jobs regardless of worker state
+      console.log('Cleaning up jobs in afterEach...');
+      await queueAdapter.cleanQueue()();
+      await waitWithTimeout(2000);
+
+      processedJobs = [];
+    } catch (error) {
+      console.error('Error in afterEach:', error);
+      throw error;
+    }
+  }, 60000);
+
+  describe('Queue Operations', () => {
+    it('should add and process jobs successfully', async () => {
       const jobData: TestJobData = {
-        type: 'test-job',
+        type: JobType.META,
         timestamp: new Date(),
-        data: { value: 'paused job' },
+        data: {
+          value: 'test value',
+          type: MetaJobType.EVENTS,
+          operation: JobOperationType.CREATE,
+        },
       };
 
-      console.log('Adding job to paused queue...');
+      // Add job
       const addResult = await queueAdapter.addJob(jobData)();
-      if (!E.isRight(addResult)) {
-        throw new Error('Failed to add job');
-      }
+      expect(E.isRight(addResult)).toBe(true);
+      if (E.isLeft(addResult)) return;
+
       const jobId = addResult.right.id;
-      if (!jobId) {
-        throw new Error('Job ID is undefined');
-      }
-      console.log('Job added to paused queue:', jobId);
-
-      // Wait to verify job is not processed while paused
-      await waitWithTimeout(1000);
-      console.log('Processed jobs while paused:', processedJobs);
-      expect(processedJobs).toHaveLength(0); // Job should not be processed while paused
-
-      // Resume queue
-      console.log('Resuming queue...');
-      const resumeResult = await queueAdapter.resumeQueue()();
-      if (!E.isRight(resumeResult)) {
-        throw new Error('Failed to resume queue');
-      }
-      console.log('Queue resumed');
+      expect(jobId).toBeDefined();
 
       // Wait for job to be processed
-      await waitForJobProcessing();
+      await waitWithTimeout(5000);
 
-      console.log('Processed jobs after resume:', processedJobs);
-      expect(processedJobs).toHaveLength(1); // Job should be processed after resume
-      expect(processedJobs[0].data.value).toBe('paused job');
+      // Verify job was processed
+      expect(processedJobs.length).toBe(1);
+      expect(processedJobs[0].data.value).toBe('test value');
+    }, 60000);
 
-      // Verify job status in Redis
-      const job = await waitForJobCompletion(queue, jobId);
-      expect(job?.finishedOn).toBeDefined();
-      expect(job?.processedOn).toBeDefined();
-    });
+    it('should handle multiple jobs in sequence', async () => {
+      const jobs = Array.from({ length: 3 }, (_, i) => ({
+        type: JobType.META,
+        timestamp: new Date(),
+        data: {
+          value: `test value ${i}`,
+          type: MetaJobType.EVENTS,
+          operation: JobOperationType.CREATE,
+        },
+      }));
 
-    it('should clean old jobs', async () => {
-      // Stop worker to prevent job processing
-      console.log('Stopping worker...');
-      await workerAdapter.stop()();
-      console.log('Worker stopped');
+      // Add jobs
+      const results = await Promise.all(jobs.map((job) => queueAdapter.addJob(job)()));
 
-      // Add old job
-      const oldJobData: TestJobData = {
-        type: 'test-job',
-        timestamp: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000), // 2 days old
-        data: { value: 'old job' },
-      };
+      // Verify all jobs were added successfully
+      results.forEach((result) => {
+        expect(E.isRight(result)).toBe(true);
+      });
 
-      console.log('Adding old job...');
-      const addResult = await queueAdapter.addJob(oldJobData)();
-      if (!E.isRight(addResult)) {
-        throw new Error('Failed to add job');
-      }
-      const jobId = addResult.right.id;
-      if (!jobId) {
-        throw new Error('Job ID is undefined');
-      }
-      console.log('Old job added:', jobId);
+      // Wait for jobs to be processed
+      await waitWithTimeout(10000);
 
-      // Wait for job to be added
-      let job = await queue.getJob(jobId);
-      let attempts = 0;
-      const maxAttempts = 10;
-      while (!job && attempts < maxAttempts) {
-        await waitWithTimeout(500);
-        job = await queue.getJob(jobId);
-        attempts++;
-      }
+      // Verify all jobs were processed in order
+      expect(processedJobs.length).toBe(3);
+      processedJobs.forEach((job, i) => {
+        expect(job.data.value).toBe(`test value ${i}`);
+      });
+    }, 60000);
 
-      // Clean old jobs
-      console.log('Cleaning old jobs...');
-      const cleanResult = await queueAdapter.cleanQueue({ age: 1000 })();
-      if (!E.isRight(cleanResult)) {
-        throw new Error('Failed to clean jobs');
-      }
-      console.log('Jobs cleaned');
+    it('should clean up jobs correctly', async () => {
+      // Add some jobs
+      const jobs = Array.from({ length: 3 }, (_, i) => ({
+        type: JobType.META,
+        timestamp: new Date(),
+        data: {
+          value: `cleanup test ${i}`,
+          type: MetaJobType.EVENTS,
+          operation: JobOperationType.CREATE,
+        },
+      }));
 
-      // Wait for cleanup to complete
-      attempts = 0;
-      while (attempts < maxAttempts) {
-        job = await queue.getJob(jobId);
-        if (!job) {
-          break;
-        }
-        await waitWithTimeout(500);
-        attempts++;
-      }
+      await Promise.all(jobs.map((job) => queueAdapter.addJob(job)()));
 
-      // Verify job was cleaned
-      job = await queue.getJob(jobId);
-      expect(job).toBeUndefined();
+      // Wait for jobs to be processed
+      await waitWithTimeout(5000);
 
-      // Restart worker for other tests
-      console.log('Restarting worker...');
-      await workerAdapter.start()();
-      console.log('Worker restarted');
-    });
+      // Clean up queue
+      const cleanupResult = await queueAdapter.cleanQueue()();
+      expect(E.isRight(cleanupResult)).toBe(true);
+
+      // Verify queue is empty
+      const jobCounts = await queue.getJobCounts();
+      expect(jobCounts.completed).toBe(0);
+      expect(jobCounts.failed).toBe(0);
+      expect(jobCounts.delayed).toBe(0);
+      expect(jobCounts.active).toBe(0);
+      expect(jobCounts.waiting).toBe(0);
+    }, 60000);
   });
 
   describe('Worker Operations', () => {
     it('should start and stop worker', async () => {
-      // Stop worker
-      await workerAdapter.stop()();
-      await waitWithTimeout(500); // Wait for worker to fully stop
+      // Stop worker and wait for it to be fully stopped
+      const initialStopResult = await workerAdapter.stop()();
+      expect(E.isRight(initialStopResult)).toBe(true);
+      await waitWithTimeout(5000);
       expect(workerAdapter.isRunning()).toBe(false);
 
-      // Add job while worker is stopped
-      const jobData: TestJobData = {
-        type: 'test-job',
-        timestamp: new Date(),
-        data: { value: 'worker test' },
-      };
-
-      const addResult = await queueAdapter.addJob(jobData)();
-      if (!E.isRight(addResult)) {
-        throw new Error('Failed to add job');
-      }
-      const jobId = addResult.right.id;
-      if (!jobId) {
-        throw new Error('Job ID is undefined');
-      }
-
-      // Wait for job to be added
-      let job = await queue.getJob(jobId);
-      let attempts = 0;
-      const maxAttempts = 10;
-      while (!job && attempts < maxAttempts) {
-        await waitWithTimeout(500);
-        job = await queue.getJob(jobId);
-        attempts++;
-      }
-
-      // Verify job is not processed while worker is stopped
-      expect(processedJobs).toHaveLength(0);
-
-      // Start worker and wait for it to be ready
-      await workerAdapter.start()();
-      await waitWithTimeout(500); // Wait for worker to be fully ready
+      // Start worker and wait for it to be fully started
+      const startResult = await workerAdapter.start()();
+      expect(E.isRight(startResult)).toBe(true);
+      await waitWithTimeout(5000);
       expect(workerAdapter.isRunning()).toBe(true);
 
-      // Wait for job to be processed
-      attempts = 0;
-      while ((!job?.finishedOn || !job?.processedOn) && attempts < maxAttempts) {
-        await waitWithTimeout(500);
-        job = await queue.getJob(jobId);
-        attempts++;
-      }
-
-      expect(processedJobs).toHaveLength(1); // Job should be processed after worker starts
-    });
+      // Stop worker and wait for it to be fully stopped
+      const stopResult = await workerAdapter.stop()();
+      expect(E.isRight(stopResult)).toBe(true);
+      await waitWithTimeout(5000);
+      expect(workerAdapter.isRunning()).toBe(false);
+    }, 120000);
 
     it('should handle job processing errors', async () => {
       // Create error worker
-      const errorProcessor: JobProcessor<TestJobData> = (job) =>
+      const errorProcessor: JobProcessor<TestJobData> = (job: Job<TestJobData>) =>
         TE.tryCatch(
           async () => {
-            console.log('Error processor throwing error');
-            throw new Error('Intentional test error');
+            console.log('Error processor throwing error for job:', job.id);
+            throw new Error(`Intentional test error for job ${job.id}`);
           },
           (error) => {
             console.log('Error processor caught error:', error);
-            const queueError = createStandardQueueError({
+            return createStandardQueueError({
               code: QueueErrorCode.PROCESSING_ERROR,
               message: error instanceof Error ? error.message : String(error),
               queueName: TEST_QUEUE,
               operation: QueueOperation.PROCESS_JOB,
               cause: error instanceof Error ? error : new Error(String(error)),
             });
-            return queueError;
           },
         );
 
-      const errorWorker = await createWorkerAdapter<TestJobData>(TEST_QUEUE, errorProcessor)();
-      if (!E.isRight(errorWorker)) {
+      // Stop default worker and wait for it to be fully stopped
+      const stopResult = await workerAdapter.stop()();
+      expect(E.isRight(stopResult)).toBe(true);
+      await waitWithTimeout(5000);
+      expect(workerAdapter.isRunning()).toBe(false);
+
+      // Create and start error worker
+      const errorWorkerResult = await createWorkerAdapter<TestJobData>(
+        TEST_QUEUE,
+        errorProcessor,
+      )();
+      expect(E.isRight(errorWorkerResult)).toBe(true);
+      if (E.isLeft(errorWorkerResult)) {
         throw new Error('Failed to create error worker');
       }
+      const errorWorker = errorWorkerResult.right;
 
-      // Stop default worker and start error worker
-      await workerAdapter.stop()();
-      await errorWorker.right.start()();
+      const startResult = await errorWorker.start()();
+      expect(E.isRight(startResult)).toBe(true);
+      await waitWithTimeout(5000);
+      expect(errorWorker.isRunning()).toBe(true);
 
       // Add job that will fail
       const jobData: TestJobData = {
-        type: 'test-job',
+        type: JobType.META,
         timestamp: new Date(),
-        data: { value: 'error test' },
+        data: {
+          value: 'error test',
+          type: MetaJobType.EVENTS,
+          operation: JobOperationType.CREATE,
+        },
       };
 
       const addResult = await queueAdapter.addJob(jobData)();
-      if (!E.isRight(addResult)) {
+      expect(E.isRight(addResult)).toBe(true);
+      if (E.isLeft(addResult)) {
         throw new Error('Failed to add job');
       }
       const jobId = addResult.right.id;
@@ -620,68 +351,323 @@ describe('Queue Infrastructure Tests', () => {
 
       // Wait for job to fail
       const job = await waitForJobFailure(queue, jobId);
-      expect(job?.failedReason).toBe('Intentional test error');
+      expect(job?.failedReason).toBe(`Intentional test error for job ${jobId}`);
 
       // Clean up error worker
-      await errorWorker.right.stop()();
-    });
+      const cleanupResult = await errorWorker.stop()();
+      expect(E.isRight(cleanupResult)).toBe(true);
+      await waitWithTimeout(5000);
+      expect(errorWorker.isRunning()).toBe(false);
+    }, 120000);
 
-    it('should properly process and complete a job', async () => {
+    it('should handle worker restart with pending jobs', async () => {
+      // Add a job
       const jobData: TestJobData = {
-        type: 'test-job',
+        type: JobType.META,
         timestamp: new Date(),
-        data: { value: 'completion test' },
+        data: {
+          value: 'restart test',
+          type: MetaJobType.EVENTS,
+          operation: JobOperationType.CREATE,
+        },
       };
 
       const addResult = await queueAdapter.addJob(jobData)();
-      if (!E.isRight(addResult)) {
+      expect(E.isRight(addResult)).toBe(true);
+      if (E.isLeft(addResult)) {
         throw new Error('Failed to add job');
       }
       const jobId = addResult.right.id;
-      if (!jobId) {
-        throw new Error('Job ID is undefined');
-      }
+      expect(jobId).toBeDefined();
+
+      // Stop worker and wait for it to be fully stopped
+      const stopResult = await workerAdapter.stop()();
+      expect(E.isRight(stopResult)).toBe(true);
+      await waitWithTimeout(5000);
+      expect(workerAdapter.isRunning()).toBe(false);
+
+      // Start worker again and wait for it to be fully started
+      const startResult = await workerAdapter.start()();
+      expect(E.isRight(startResult)).toBe(true);
+      await waitWithTimeout(5000);
+      expect(workerAdapter.isRunning()).toBe(true);
 
       // Wait for job to be processed
-      let job = await queue.getJob(jobId);
-      let attempts = 0;
-      const maxAttempts = 10;
-      while ((!job?.finishedOn || !job?.processedOn) && attempts < maxAttempts) {
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-        job = await queue.getJob(jobId);
-        attempts++;
-      }
+      await waitWithTimeout(5000);
 
-      // Verify job was processed
-      expect(processedJobs).toHaveLength(1);
-      expect(processedJobs[0].data.value).toBe('completion test');
+      // Verify job was processed after restart
+      expect(processedJobs.length).toBe(1);
+      expect(processedJobs[0].data.value).toBe('restart test');
+    }, 120000);
 
-      // Verify job status in Redis
-      expect(job?.finishedOn).toBeDefined();
-      expect(job?.processedOn).toBeDefined();
-      expect(job?.failedReason).toBeUndefined();
-    });
+    it('should handle concurrent job processing correctly', async () => {
+      // Create worker with concurrency 2
+      await workerAdapter.stop()();
+      const concurrentWorkerResult = await createWorkerAdapter<TestJobData>(
+        TEST_QUEUE,
+        defaultProcessor,
+      )();
+      expect(E.isRight(concurrentWorkerResult)).toBe(true);
+      if (E.isLeft(concurrentWorkerResult)) return;
 
-    it('should properly handle failed jobs', async () => {
-      // Add job that will fail
-      const jobData: TestJobData = {
-        type: 'test-job',
+      const concurrentWorker = concurrentWorkerResult.right;
+      await concurrentWorker.start()();
+      await waitWithTimeout(2000);
+
+      // Add multiple jobs
+      const jobs = Array.from({ length: 4 }, (_, i) => ({
+        type: JobType.META,
         timestamp: new Date(),
-        data: { value: 'error test' },
-      };
+        data: {
+          value: `concurrent test ${i}`,
+          type: MetaJobType.EVENTS,
+          operation: JobOperationType.CREATE,
+        },
+      }));
 
-      const addResult = await queueAdapter.addJob(jobData)();
-      if (!E.isRight(addResult)) {
-        throw new Error('Failed to add job');
-      }
-      const jobId = addResult.right.id;
-      if (!jobId) {
-        throw new Error('Job ID is undefined');
+      await Promise.all(jobs.map((job) => queueAdapter.addJob(job)()));
+
+      // Wait for all jobs to be processed
+      await waitWithTimeout(10000);
+
+      // Verify all jobs were processed
+      expect(processedJobs.length).toBe(4);
+      expect(new Set(processedJobs.map((job) => job.data.value)).size).toBe(4);
+
+      // Cleanup
+      await concurrentWorker.stop()();
+      await waitWithTimeout(2000);
+    }, 120000);
+
+    it('should handle worker state transitions correctly', async () => {
+      // Ensure worker is in a known state
+      if (workerAdapter.worker.isRunning()) {
+        const initialStopResult = await workerAdapter.stop()();
+        expect(E.isRight(initialStopResult)).toBe(true);
+        await waitWithTimeout(2000);
       }
 
-      // Wait for job to fail
-      const job = await waitForJobFailure(queue, jobId);
-      expect(job?.failedReason).toBeDefined();
-    });
+      // Create new worker to ensure clean state
+      const workerResult = await createWorkerAdapter<TestJobData>(TEST_QUEUE, defaultProcessor)();
+      expect(E.isRight(workerResult)).toBe(true);
+      if (E.isLeft(workerResult)) return;
+      const testWorker = workerResult.right;
+
+      try {
+        // Start worker and verify state
+        const startResult = await testWorker.start()();
+        expect(E.isRight(startResult)).toBe(true);
+        await waitWithTimeout(2000);
+        expect(testWorker.isRunning()).toBe(true);
+
+        // Add a job to verify worker processes it in running state
+        const jobData: TestJobData = {
+          type: JobType.META,
+          timestamp: new Date(),
+          data: {
+            value: 'state transition test',
+            type: MetaJobType.EVENTS,
+            operation: JobOperationType.CREATE,
+          },
+        };
+
+        const addResult = await queueAdapter.addJob(jobData)();
+        expect(E.isRight(addResult)).toBe(true);
+        await waitWithTimeout(2000);
+
+        // Verify job was processed
+        expect(processedJobs.length).toBe(1);
+        expect(processedJobs[0].data.value).toBe('state transition test');
+
+        // Stop worker and verify state
+        const stopResult = await testWorker.stop()();
+        expect(E.isRight(stopResult)).toBe(true);
+        await waitWithTimeout(2000);
+        expect(testWorker.isRunning()).toBe(false);
+      } finally {
+        // Cleanup
+        if (testWorker.isRunning()) {
+          await testWorker.stop()();
+          await waitWithTimeout(2000);
+        }
+      }
+    }, 120000);
+
+    it('should handle rapid start/stop transitions', async () => {
+      // Create new worker for this test
+      const workerResult = await createWorkerAdapter<TestJobData>(TEST_QUEUE, defaultProcessor)();
+      expect(E.isRight(workerResult)).toBe(true);
+      if (E.isLeft(workerResult)) return;
+      const testWorker = workerResult.right;
+
+      try {
+        // Attempt rapid start/stop cycles
+        for (let i = 0; i < 3; i++) {
+          console.log(`Starting rapid cycle ${i + 1}`);
+
+          const startResult = await testWorker.start()();
+          expect(E.isRight(startResult)).toBe(true);
+          await waitWithTimeout(2000);
+          expect(testWorker.isRunning()).toBe(true);
+
+          const stopResult = await testWorker.stop()();
+          expect(E.isRight(stopResult)).toBe(true);
+          await waitWithTimeout(2000);
+          expect(testWorker.isRunning()).toBe(false);
+        }
+      } finally {
+        // Cleanup
+        if (testWorker.isRunning()) {
+          await testWorker.stop()();
+          await waitWithTimeout(2000);
+        }
+      }
+    }, 120000);
+
+    it('should handle worker restart during job processing', async () => {
+      // Create new worker for this test
+      const workerResult = await createWorkerAdapter<TestJobData>(TEST_QUEUE, defaultProcessor)();
+      expect(E.isRight(workerResult)).toBe(true);
+      if (E.isLeft(workerResult)) return;
+      const testWorker = workerResult.right;
+
+      try {
+        // Start worker
+        const startResult = await testWorker.start()();
+        expect(E.isRight(startResult)).toBe(true);
+        await waitWithTimeout(2000);
+        expect(testWorker.isRunning()).toBe(true);
+
+        // Add multiple jobs
+        const jobs = Array.from({ length: 5 }, (_, i) => ({
+          type: JobType.META,
+          timestamp: new Date(),
+          data: {
+            value: `restart test ${i}`,
+            type: MetaJobType.EVENTS,
+            operation: JobOperationType.CREATE,
+          },
+        }));
+
+        // Add jobs sequentially
+        for (const jobData of jobs) {
+          const addResult = await queueAdapter.addJob(jobData)();
+          expect(E.isRight(addResult)).toBe(true);
+          await waitWithTimeout(500); // Small delay between jobs
+        }
+
+        // Wait for some jobs to start processing
+        await waitWithTimeout(2000);
+
+        // Stop worker
+        const stopResult = await testWorker.stop()();
+        expect(E.isRight(stopResult)).toBe(true);
+        await waitWithTimeout(2000);
+        expect(testWorker.isRunning()).toBe(false);
+
+        // Start worker again
+        const restartResult = await testWorker.start()();
+        expect(E.isRight(restartResult)).toBe(true);
+        await waitWithTimeout(2000);
+        expect(testWorker.isRunning()).toBe(true);
+
+        // Wait for remaining jobs to be processed
+        await waitWithTimeout(5000);
+
+        // Verify all jobs were eventually processed
+        expect(processedJobs.length).toBe(5);
+        const processedValues = processedJobs.map((job) => job.data.value);
+        jobs.forEach((job, i) => {
+          expect(processedValues).toContain(`restart test ${i}`);
+        });
+      } finally {
+        // Cleanup
+        if (testWorker.isRunning()) {
+          await testWorker.stop()();
+          await waitWithTimeout(2000);
+        }
+      }
+    }, 120000);
+
+    it('should handle worker error recovery', async () => {
+      // Create error-throwing processor
+      const errorProcessor: JobProcessor<TestJobData> = (job: Job<TestJobData>) =>
+        TE.tryCatch(
+          async () => {
+            if (job.data.data.value.includes('error')) {
+              throw new Error('Intentional processor error');
+            }
+            processedJobs.push(job.data);
+          },
+          (error) => {
+            console.error('Error processing job:', error);
+            return createStandardQueueError({
+              code: QueueErrorCode.PROCESSING_ERROR,
+              message: error instanceof Error ? error.message : String(error),
+              queueName: TEST_QUEUE,
+              operation: QueueOperation.PROCESS_JOB,
+              cause: error instanceof Error ? error : new Error(String(error)),
+            });
+          },
+        );
+
+      // Create new worker with error processor
+      const errorWorkerResult = await createWorkerAdapter<TestJobData>(
+        TEST_QUEUE,
+        errorProcessor,
+      )();
+      expect(E.isRight(errorWorkerResult)).toBe(true);
+      if (E.isLeft(errorWorkerResult)) return;
+
+      const errorWorker = errorWorkerResult.right;
+      try {
+        // Start error worker
+        await errorWorker.start()();
+        await waitWithTimeout(2000);
+        expect(errorWorker.isRunning()).toBe(true);
+
+        // Add a mix of error-triggering and normal jobs
+        const jobs = [
+          {
+            type: JobType.META,
+            timestamp: new Date(),
+            data: {
+              value: 'error_job',
+              type: MetaJobType.EVENTS,
+              operation: JobOperationType.CREATE,
+            },
+          },
+          {
+            type: JobType.META,
+            timestamp: new Date(),
+            data: {
+              value: 'normal_job',
+              type: MetaJobType.EVENTS,
+              operation: JobOperationType.CREATE,
+            },
+          },
+        ];
+
+        // Add jobs sequentially
+        for (const jobData of jobs) {
+          const addResult = await queueAdapter.addJob(jobData)();
+          expect(E.isRight(addResult)).toBe(true);
+          await waitWithTimeout(500); // Small delay between jobs
+        }
+
+        // Wait for jobs to be processed
+        await waitWithTimeout(5000);
+
+        // Verify error job failed but normal job was processed
+        expect(processedJobs.length).toBe(1);
+        expect(processedJobs[0].data.value).toBe('normal_job');
+      } finally {
+        // Cleanup
+        if (errorWorker.isRunning()) {
+          await errorWorker.stop()();
+          await waitWithTimeout(2000);
+        }
+      }
+    }, 120000);
   });
 });

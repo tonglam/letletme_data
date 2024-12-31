@@ -3,35 +3,39 @@ import { pipe } from 'fp-ts/function';
 import * as RTE from 'fp-ts/ReaderTaskEither';
 import * as TE from 'fp-ts/TaskEither';
 import { QueueConfig } from '../../configs/queue/queue.config';
-import { createStandardQueueError } from '../../queues/utils';
 import { QueueError, QueueErrorCode } from '../../types/errors.type';
-import { BaseJobData, QueueOperation, WorkerAdapter, WorkerEnv } from '../../types/queue.type';
+import { BaseJobData, WorkerAdapter, WorkerEnv } from '../../types/queue.type';
+import { QueueOperation } from '../../types/shared.type';
 import { logQueueJob } from '../../utils/logger.util';
+import { createStandardQueueError } from '../../utils/queue.utils';
 
 /**
- * Executes an operation on all workers in the registry
+ * Executes a queue operation with logging and error handling
  */
-export const executeOnAll = (
+export const executeQueueOperation = (
   operation: (adapter: WorkerAdapter<BaseJobData>) => TE.TaskEither<QueueError, void>,
   opType: QueueOperation,
 ): RTE.ReaderTaskEither<WorkerEnv, QueueError, void> =>
   pipe(
     RTE.ask<WorkerEnv>(),
-    RTE.chainTaskEitherK((env) =>
+    RTE.chainTaskEitherK((env: WorkerEnv) =>
       pipe(
         TE.sequenceArray(
-          Object.values(env.registry).map((adapter) =>
-            operation(adapter as WorkerAdapter<BaseJobData>),
+          Object.values(env.registry).map((adapter: WorkerAdapter<BaseJobData>) =>
+            pipe(
+              operation(adapter),
+              TE.mapLeft((error: QueueError) => {
+                logQueueJob(
+                  `Failed to execute queue operation ${opType} for adapter ${adapter.worker.name}`,
+                  {
+                    queueName: adapter.worker.name,
+                    jobId: 'system',
+                  },
+                );
+                return error;
+              }),
+            ),
           ),
-        ),
-        TE.mapLeft((error) =>
-          createStandardQueueError({
-            code: QueueErrorCode.PROCESSING_ERROR,
-            message: 'Failed to execute operation on all workers',
-            queueName: 'all',
-            operation: opType,
-            cause: error,
-          }),
         ),
         TE.map(() => undefined),
       ),

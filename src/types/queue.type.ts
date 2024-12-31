@@ -4,25 +4,6 @@ import { RedisOptions } from 'ioredis';
 import { MetaJobType } from '../queues/jobs/core/meta.job';
 import { QueueError } from './errors.type';
 
-// Error and Operation Enums
-export enum QueueOperation {
-  ADD_JOB = 'ADD_JOB',
-  REMOVE_JOB = 'REMOVE_JOB',
-  PROCESS_JOB = 'PROCESS_JOB',
-  PAUSE_QUEUE = 'PAUSE_QUEUE',
-  RESUME_QUEUE = 'RESUME_QUEUE',
-  CLEAN_QUEUE = 'CLEAN_QUEUE',
-  CREATE_WORKER = 'CREATE_WORKER',
-  START_WORKER = 'START_WORKER',
-  STOP_WORKER = 'STOP_WORKER',
-  GET_WORKER = 'GET_WORKER',
-  GET_QUEUE = 'GET_QUEUE',
-  CREATE_SCHEDULE = 'CREATE_SCHEDULE',
-  CLEANUP_JOBS = 'CLEANUP_JOBS',
-  GET_JOB_STATUS = 'GET_JOB_STATUS',
-  GET_QUEUE_METRICS = 'GET_QUEUE_METRICS',
-}
-
 export enum JobStatus {
   COMPLETED = 'completed',
   FAILED = 'failed',
@@ -91,10 +72,21 @@ export interface WorkerAdapter<T extends BaseJobData = BaseJobData> {
 }
 
 // Worker State Types
-export interface WorkerState {
-  readonly isRunning: boolean;
-  readonly isClosing: boolean;
+export interface WorkerStateData {
+  currentState: string;
+  isRunning: boolean;
+  isClosing: boolean;
+  lastError: Error | null;
+  lastStateChange: Date;
+  stateHistory: Array<{
+    from: string;
+    to: string;
+    timestamp: Date;
+    error?: string;
+  }>;
 }
+
+export interface WorkerState extends Readonly<WorkerStateData> {}
 
 export interface WorkerContext<T extends BaseJobData = BaseJobData> {
   readonly worker: Worker<T, void, string>;
@@ -108,7 +100,9 @@ export type WorkerRegistry = Record<JobType, WorkerAdapter>;
 export type WorkerEnv = { readonly registry: WorkerRegistry };
 
 // Job Processor Types
-export type JobProcessor<T extends BaseJobData> = (job: Job<T>) => TE.TaskEither<QueueError, void>;
+export type JobProcessor<T extends BaseJobData> = (
+  job: Job<T>,
+) => TE.TaskEither<Error | QueueError, void>;
 
 // Specific Job Data Types
 export interface MetaJobData extends BaseJobData {
