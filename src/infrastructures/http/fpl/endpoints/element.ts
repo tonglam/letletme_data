@@ -3,7 +3,7 @@
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import { Logger } from 'pino';
-import { FPL_API_CONFIG } from '../../../../configs/api/api.config';
+import { apiConfig } from '../../../../configs/api/api.config';
 import { ElementSummaryResponseSchema } from '../../../../types/element-summary.type';
 import { HTTPClient } from '../../client';
 import { RequestOptions } from '../../client/types';
@@ -14,7 +14,7 @@ export const createElementEndpoints = (client: HTTPClient, logger: Logger): Elem
   // Retrieves detailed statistics and information for a specific player
   getElementSummary: async (elementId: number, options?: RequestOptions) => {
     const result = await client.get<unknown>(
-      FPL_API_CONFIG.element.summary({ elementId }),
+      apiConfig.endpoints.element.summary({ elementId }),
       options,
     )();
     return pipe(

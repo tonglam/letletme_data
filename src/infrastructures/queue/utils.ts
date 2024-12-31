@@ -3,11 +3,10 @@ import { pipe } from 'fp-ts/function';
 import * as RTE from 'fp-ts/ReaderTaskEither';
 import * as TE from 'fp-ts/TaskEither';
 import { QueueConfig } from '../../configs/queue/queue.config';
-import { BaseJobData, QueueError } from '../../queues/types';
 import { createStandardQueueError } from '../../queues/utils';
-import { QueueErrorCode, QueueOperation } from '../../types/errors.type';
+import { QueueError, QueueErrorCode } from '../../types/errors.type';
+import { BaseJobData, QueueOperation, WorkerAdapter, WorkerEnv } from '../../types/queue.type';
 import { logQueueJob } from '../../utils/logger.util';
-import { WorkerAdapter, WorkerEnv } from './types';
 
 /**
  * Executes an operation on all workers in the registry
@@ -78,14 +77,14 @@ export const createSchedule = <T extends BaseJobData>(
           jobId: 'schedule',
         });
       },
-      (error): QueueError => ({
-        name: 'QueueError',
-        message: 'Failed to create schedule',
-        code: 'SCHEDULE_CREATE_ERROR',
-        queueName: jobData.type,
-        operation: QueueOperation.CREATE_SCHEDULE,
-        cause: error as Error,
-      }),
+      (error): QueueError =>
+        createStandardQueueError({
+          code: QueueErrorCode.PROCESSING_ERROR,
+          message: 'Failed to create schedule',
+          queueName: jobData.type,
+          operation: QueueOperation.CREATE_SCHEDULE,
+          cause: error as Error,
+        }),
     ),
   );
 
@@ -109,14 +108,14 @@ export const cleanupJobs = (
           jobId: 'system',
         });
       },
-      (error): QueueError => ({
-        name: 'QueueError',
-        message: 'Failed to cleanup jobs',
-        code: 'CLEANUP_ERROR',
-        queueName: queue.name,
-        operation: QueueOperation.CLEANUP_JOBS,
-        cause: error as Error,
-      }),
+      (error): QueueError =>
+        createStandardQueueError({
+          code: QueueErrorCode.PROCESSING_ERROR,
+          message: 'Failed to cleanup jobs',
+          queueName: queue.name,
+          operation: QueueOperation.CLEANUP_JOBS,
+          cause: error as Error,
+        }),
     ),
   );
 
@@ -136,14 +135,14 @@ export const getJobStatus = (queue: Queue, jobId: string): TE.TaskEither<QueueEr
         }
         return job;
       },
-      (error): QueueError => ({
-        name: 'QueueError',
-        message: 'Failed to get job status',
-        code: 'JOB_STATUS_ERROR',
-        queueName: queue.name,
-        operation: QueueOperation.GET_JOB_STATUS,
-        cause: error as Error,
-      }),
+      (error): QueueError =>
+        createStandardQueueError({
+          code: QueueErrorCode.PROCESSING_ERROR,
+          message: 'Failed to get job status',
+          queueName: queue.name,
+          operation: QueueOperation.GET_JOB_STATUS,
+          cause: error as Error,
+        }),
     ),
   );
 
@@ -186,13 +185,13 @@ export const getQueueMetrics = (
           delayed,
         };
       },
-      (error): QueueError => ({
-        name: 'QueueError',
-        message: 'Failed to get queue metrics',
-        code: 'QUEUE_METRICS_ERROR',
-        queueName: queue.name,
-        operation: QueueOperation.GET_QUEUE_METRICS,
-        cause: error as Error,
-      }),
+      (error): QueueError =>
+        createStandardQueueError({
+          code: QueueErrorCode.PROCESSING_ERROR,
+          message: 'Failed to get queue metrics',
+          queueName: queue.name,
+          operation: QueueOperation.GET_QUEUE_METRICS,
+          cause: error as Error,
+        }),
     ),
   );

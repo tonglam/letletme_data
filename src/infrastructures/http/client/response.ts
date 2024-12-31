@@ -10,7 +10,7 @@ import * as TE from 'fp-ts/TaskEither';
 import { flow, pipe } from 'fp-ts/function';
 import { Logger } from 'pino';
 import { HTTP_STATUS } from '../../../configs/http/http.config';
-import { APIError, APIResponse, ResponseMetrics } from './types';
+import { APIError, APIResponse, ErrorDetails, HttpMethod, RequestMetrics } from './types';
 import { createErrorFromStatus, createMonitor } from './utils';
 
 /**
@@ -23,22 +23,21 @@ const logMetricsByDuration = (logData: Record<string, unknown>, logger: Logger) 
     else if (duration >= 2000)
       logger.error({ ...logData, severity: 'ERROR' }, 'High response time');
     else if (duration >= 1000) logger.warn({ ...logData, severity: 'WARN' }, 'Slow response');
-    else if (!logData.success) logger.error(logData, 'Request failed');
+    else if (logData.error) logger.error(logData, 'Request failed');
     else logger.info(logData, 'Request completed');
   });
 
 /**
  * Tracks response metrics
  */
-const trackMetrics = (metrics: ResponseMetrics, logger: Logger): void => {
-  const { path, method, duration, status, success, errorCode } = metrics;
+const trackMetrics = (metrics: RequestMetrics, logger: Logger): void => {
+  const { path, method, duration, status, error } = metrics;
   const logData = {
     path,
     method,
     duration: `${duration}ms`,
     status,
-    success,
-    ...(errorCode && { errorCode }),
+    ...(error && { error }),
   };
 
   logMetricsByDuration(logData, logger)(duration);
@@ -106,21 +105,27 @@ export const handleAPIResponse =
       task,
       TE.fold(
         (error) => {
-          const metrics = createMonitor().end(res.req.path, res.req.method, {
-            status: error.httpStatus,
+          const details = error.details as ErrorDetails;
+          const metrics = createMonitor().end(res.req.path, res.req.method as HttpMethod, {
+            status: details.httpStatus || HTTP_STATUS.INTERNAL_SERVER_ERROR,
             error,
           });
           trackMetrics(metrics, logger);
+          const errorResponse = {
+            status: 'error' as const,
+            error: error.message,
+          };
+          if (error.details) {
+            Object.assign(errorResponse, { details: error.details as Record<string, unknown> });
+          }
           return T.of(
-            res.status(error.httpStatus).json({
-              status: 'error' as const,
-              error: error.message,
-              ...(error.details && { details: error.details }),
-            }),
+            res.status(details.httpStatus || HTTP_STATUS.INTERNAL_SERVER_ERROR).json(errorResponse),
           );
         },
         (success) => {
-          const metrics = createMonitor().end(res.req.path, res.req.method, { status: 200 });
+          const metrics = createMonitor().end(res.req.path, res.req.method as HttpMethod, {
+            status: 200,
+          });
           trackMetrics(metrics, logger);
           return T.of(res.status(200).json(success));
         },

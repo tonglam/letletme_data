@@ -46,7 +46,7 @@ const makeRequestWithRetry = <T>(
         } catch (error) {
           attempts++;
           if (axios.isAxiosError(error)) {
-            const status = error.response?.status ?? HTTP_STATUS.INTERNAL_SERVER_ERROR;
+            const status = error.response?.status ?? HTTP_STATUS.SERVICE_UNAVAILABLE;
             const apiError = createErrorFromStatus(status, error.message, {
               response: error.response?.data,
               code: error.code,
@@ -66,11 +66,11 @@ const makeRequestWithRetry = <T>(
             await delay(retryDelay);
           } else {
             const apiError = createErrorFromStatus(
-              HTTP_STATUS.INTERNAL_SERVER_ERROR,
+              HTTP_STATUS.SERVICE_UNAVAILABLE,
               error instanceof Error ? error.message : 'Unknown error',
             );
             const metrics = monitor.end(path, method, {
-              status: HTTP_STATUS.INTERNAL_SERVER_ERROR,
+              status: HTTP_STATUS.SERVICE_UNAVAILABLE,
               error: apiError,
             });
             logger.error({ error: apiError, metrics }, 'Request failed');
@@ -94,7 +94,7 @@ const makeRequestWithRetry = <T>(
       error instanceof Error && 'code' in error
         ? (error as APIError)
         : createErrorFromStatus(
-            HTTP_STATUS.INTERNAL_SERVER_ERROR,
+            HTTP_STATUS.SERVICE_UNAVAILABLE,
             error instanceof Error ? error.message : 'Unknown error',
           ),
   );

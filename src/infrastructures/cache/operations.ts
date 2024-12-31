@@ -31,7 +31,8 @@ export const createStandardCacheError = (error: unknown, message?: string): Cach
   code: CacheErrorCode.OPERATION_ERROR,
   message: message || String(error),
   cause: error instanceof Error ? error : undefined,
-  stack: error instanceof Error ? error.stack : new Error().stack,
+  stack: new Error().stack,
+  timestamp: new Date(),
 });
 
 /**

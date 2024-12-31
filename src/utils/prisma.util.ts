@@ -147,9 +147,11 @@ export const ensurePrismaEntityArray = <T>(
  */
 export const dbErrorToApiErrorCode: Record<DBErrorCode, APIErrorCode> = {
   [DBErrorCode.CONNECTION_ERROR]: APIErrorCode.SERVICE_ERROR,
+  [DBErrorCode.QUERY_ERROR]: APIErrorCode.INTERNAL_SERVER_ERROR,
+  [DBErrorCode.CONSTRAINT_ERROR]: APIErrorCode.VALIDATION_ERROR,
   [DBErrorCode.OPERATION_ERROR]: APIErrorCode.INTERNAL_SERVER_ERROR,
   [DBErrorCode.VALIDATION_ERROR]: APIErrorCode.VALIDATION_ERROR,
-  [DBErrorCode.TRANSFORMATION_ERROR]: APIErrorCode.BAD_REQUEST,
+  [DBErrorCode.TRANSFORMATION_ERROR]: APIErrorCode.INTERNAL_SERVER_ERROR,
 };
 
 /**

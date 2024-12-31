@@ -2,10 +2,10 @@ import { Job } from 'bullmq';
 import { pipe } from 'fp-ts/function';
 import * as O from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
-import { MetaJobData } from 'src/queues/types';
+import { QueueError } from 'src/types/errors.type';
+import { JobOperationType, JobType, MetaJobData, QueueOperation } from 'src/types/queue.type';
 import { JOB_SCHEDULES, QUEUE_CONSTANTS, QueueConfig } from '../../../configs/queue/queue.config';
 import { createSchedule } from '../../../infrastructures/queue/utils';
-import { JobOperationType, QueueError, QueueOperation } from '../../../types/errors.type';
 import { createQueueProcessingError } from '../../../utils/error.util';
 import { processEvents } from '../processors/meta/events.processor';
 
@@ -27,12 +27,12 @@ const processors: Record<
  */
 export const processMetaJob = (job: Job<MetaJobData>): TE.TaskEither<QueueError, void> =>
   pipe(
-    O.fromNullable(processors[job.data.type]),
+    O.fromNullable(processors[job.data.data.type as MetaJobType]),
     O.fold(
       () =>
         TE.left(
           createQueueProcessingError({
-            message: `Unknown meta job type: ${job.data.type}`,
+            message: `Unknown meta job type: ${job.data.data.type}`,
             queueName: 'meta',
             operation: QueueOperation.PROCESS_JOB,
           }),
@@ -50,10 +50,11 @@ const createMetaScheduleConfig = (config: QueueConfig): TE.TaskEither<QueueError
       config,
       JOB_SCHEDULES.META_UPDATE,
       {
-        type: MetaJobType.EVENTS,
+        type: JobType.META,
         timestamp: new Date(),
         data: {
-          operation: JobOperationType.SYNC,
+          operation: JobOperationType.CREATE,
+          type: MetaJobType.EVENTS,
         },
       } as MetaJobData,
       {

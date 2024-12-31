@@ -4,7 +4,7 @@ import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import { Logger } from 'pino';
 import { z } from 'zod';
-import { FPL_API_CONFIG } from '../../../../configs/api/api.config';
+import { apiConfig } from '../../../../configs/api/api.config';
 import { EventFixture } from '../../../../types/event-fixture.type';
 import {
   EventLiveResponseSchema,
@@ -18,7 +18,7 @@ import { EventEndpoints, validateEndpointResponse } from '../types';
 export const createEventEndpoints = (client: HTTPClient, logger: Logger): EventEndpoints => ({
   // Retrieves live performance data for all players in a specific gameweek
   getLive: async (event: number, options?: RequestOptions) => {
-    const result = await client.get<unknown>(FPL_API_CONFIG.event.live({ event }), options)();
+    const result = await client.get<unknown>(apiConfig.endpoints.event.live({ event }), options)();
     return pipe(
       result,
       E.chain(validateEndpointResponse(EventLiveResponseSchema)),
@@ -36,7 +36,7 @@ export const createEventEndpoints = (client: HTTPClient, logger: Logger): EventE
   // Retrieves team selection data for a specific team in a gameweek
   getPicks: async (entryId: number, event: number, options?: RequestOptions) => {
     const result = await client.get<unknown>(
-      FPL_API_CONFIG.event.picks({ entryId, event }),
+      apiConfig.endpoints.event.picks({ entryId, event }),
       options,
     )();
     return pipe(
@@ -61,7 +61,10 @@ export const createEventEndpoints = (client: HTTPClient, logger: Logger): EventE
 
   // Retrieves fixture data for a specific gameweek
   getFixtures: async (event: number, options?: RequestOptions) => {
-    const result = await client.get<unknown>(FPL_API_CONFIG.event.fixtures({ event }), options)();
+    const result = await client.get<unknown>(
+      apiConfig.endpoints.event.fixtures({ event }),
+      options,
+    )();
     return pipe(
       result,
       E.chain(validateEndpointResponse(z.array(z.custom<EventFixture>()))),

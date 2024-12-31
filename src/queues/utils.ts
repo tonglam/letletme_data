@@ -1,8 +1,8 @@
 import { Job } from 'bullmq';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { QueueError, QueueErrorCode, QueueOperation, createQueueError } from '../types/errors.type';
-import { BaseJobData } from './types';
+import { BaseJobData, QueueOperation } from 'src/types/queue.type';
+import { QueueError, QueueErrorCode, createQueueError } from '../types/errors.type';
 
 /**
  * Creates a standardized queue error with consistent formatting

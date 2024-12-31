@@ -3,21 +3,23 @@ import * as O from 'fp-ts/Option';
 import * as R from 'fp-ts/Reader';
 import * as RTE from 'fp-ts/ReaderTaskEither';
 import * as TE from 'fp-ts/TaskEither';
-import { BaseJobData } from 'src/queues/types';
-import { createWorkerAdapter } from '../../infrastructures/queue/core/worker.adapter';
 import {
+  BaseJobData,
   JobProcessor,
+  JobType,
+  QueueOperation,
   WorkerAdapter,
   WorkerEnv,
   WorkerRegistry,
-} from '../../infrastructures/queue/types';
+} from 'src/types/queue.type';
+import { createWorkerAdapter } from '../../infrastructures/queue/core/worker.adapter';
 import { executeOnAll } from '../../infrastructures/queue/utils';
-import { QueueError, QueueOperation } from '../../types/errors.type';
+import { QueueError } from '../../types/errors.type';
 import { createQueueProcessingError } from '../../utils/error.util';
 
 // Core operations
 export const initWorker = <T extends BaseJobData>(
-  queueName: string,
+  queueName: JobType,
   processor: JobProcessor<T>,
 ): RTE.ReaderTaskEither<WorkerEnv, QueueError, WorkerAdapter<T>> =>
   pipe(
@@ -38,7 +40,7 @@ export const initWorker = <T extends BaseJobData>(
   );
 
 export const getWorker = (
-  queueName: string,
+  queueName: JobType,
 ): RTE.ReaderTaskEither<WorkerEnv, QueueError, WorkerAdapter> =>
   pipe(
     RTE.ask<WorkerEnv>(),
@@ -74,9 +76,11 @@ export const getStatus: R.Reader<WorkerEnv, Record<string, boolean>> = (env) =>
 export const getAllWorkers: R.Reader<WorkerEnv, WorkerRegistry> = (env) => env.registry;
 
 export const hasWorker =
-  (queueName: string): R.Reader<WorkerEnv, boolean> =>
+  (queueName: JobType): R.Reader<WorkerEnv, boolean> =>
   (env) =>
     queueName in env.registry;
 
 // Create initial environment
-export const createWorkerEnv = (): WorkerEnv => ({ registry: {} });
+export const createWorkerEnv = (): WorkerEnv => ({
+  registry: {} as Record<JobType, WorkerAdapter<BaseJobData>>,
+});

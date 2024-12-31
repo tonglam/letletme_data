@@ -1,5 +1,6 @@
 import * as TE from 'fp-ts/TaskEither';
-import { QueueError, QueueOperation } from '../../../../types/errors.type';
+import { QueueOperation } from 'src/types/queue.type';
+import { QueueError } from '../../../../types/errors.type';
 import { createQueueProcessingError } from '../../../../utils/error.util';
 
 /**

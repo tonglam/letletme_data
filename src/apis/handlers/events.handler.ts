@@ -7,9 +7,18 @@ import { Request } from 'express';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
 import { ServiceContainer, ServiceKey } from '../../services';
+import { APIError, APIErrorCode, ServiceError, createAPIError } from '../../types/errors.type';
 import { Event, EventId } from '../../types/events.type';
 import { handleNullable } from '../../utils/error.util';
 import { EventHandlerResponse } from '../types';
+
+const toAPIError = (error: ServiceError): APIError =>
+  createAPIError({
+    code: APIErrorCode.SERVICE_ERROR,
+    message: error.message,
+    cause: error.cause,
+    details: error.details,
+  });
 
 // Creates event handlers with dependency injection
 export const createEventHandlers = (
@@ -20,6 +29,7 @@ export const createEventHandlers = (
     const task = eventService.getEvents();
     return pipe(
       () => task(),
+      TE.mapLeft(toAPIError),
       TE.map((events) => [...events]),
     );
   },
@@ -29,6 +39,7 @@ export const createEventHandlers = (
     const task = eventService.getCurrentEvent();
     return pipe(
       () => task(),
+      TE.mapLeft(toAPIError),
       TE.chain(
         (event) => () => Promise.resolve(handleNullable<Event>('Current event not found')(event)),
       ),
@@ -40,6 +51,7 @@ export const createEventHandlers = (
     const task = eventService.getNextEvent();
     return pipe(
       () => task(),
+      TE.mapLeft(toAPIError),
       TE.chain(
         (event) => () => Promise.resolve(handleNullable<Event>('Next event not found')(event)),
       ),
@@ -52,6 +64,7 @@ export const createEventHandlers = (
     const task = eventService.getEvent(eventId);
     return pipe(
       () => task(),
+      TE.mapLeft(toAPIError),
       TE.chain(
         (event) => () =>
           Promise.resolve(handleNullable<Event>(`Event with ID ${eventId} not found`)(event)),

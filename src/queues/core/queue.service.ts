@@ -4,13 +4,19 @@ import * as R from 'fp-ts/Reader';
 import * as RTE from 'fp-ts/ReaderTaskEither';
 import * as TE from 'fp-ts/TaskEither';
 import { createQueueAdapter } from '../../infrastructures/queue/core/queue.adapter';
-import { QueueAdapter, QueueEnv, QueueRegistry } from '../../infrastructures/queue/types';
-import { QueueError, QueueOperation, QueueOperationErrorCode } from '../../types/errors.type';
+import { QueueError, QueueErrorCode } from '../../types/errors.type';
+import {
+  JobType,
+  QueueAdapter,
+  QueueEnv,
+  QueueOperation,
+  QueueRegistry,
+} from '../../types/queue.type';
 import { createQueueProcessingError } from '../../utils/error.util';
 
 // Core operations
 export const initQueue = (
-  queueName: string,
+  queueName: JobType,
 ): RTE.ReaderTaskEither<QueueEnv, QueueError, QueueAdapter> =>
   pipe(
     RTE.ask<QueueEnv>(),
@@ -27,7 +33,7 @@ export const initQueue = (
   );
 
 export const getQueue = (
-  queueName: string,
+  queueName: JobType,
 ): RTE.ReaderTaskEither<QueueEnv, QueueError, QueueAdapter> =>
   pipe(
     RTE.ask<QueueEnv>(),
@@ -43,7 +49,7 @@ export const getQueue = (
 // Helper for executing operations on all queues
 const executeOnAll = (
   operation: (adapter: QueueAdapter) => TE.TaskEither<QueueError, void>,
-  errorCode: QueueOperationErrorCode,
+  errorCode: QueueErrorCode,
   opType: QueueOperation,
 ): RTE.ReaderTaskEither<QueueEnv, QueueError, void> =>
   pipe(
@@ -68,21 +74,21 @@ const executeOnAll = (
 export const pauseAll = (): RTE.ReaderTaskEither<QueueEnv, QueueError, void> =>
   executeOnAll(
     (adapter) => adapter.pauseQueue(),
-    QueueOperationErrorCode.QUEUE_PAUSE_ALL_ERROR,
+    QueueErrorCode.PROCESSING_ERROR,
     QueueOperation.PAUSE_QUEUE,
   );
 
 export const resumeAll = (): RTE.ReaderTaskEither<QueueEnv, QueueError, void> =>
   executeOnAll(
     (adapter) => adapter.resumeQueue(),
-    QueueOperationErrorCode.QUEUE_RESUME_ALL_ERROR,
+    QueueErrorCode.PROCESSING_ERROR,
     QueueOperation.RESUME_QUEUE,
   );
 
 export const cleanupAll = (): RTE.ReaderTaskEither<QueueEnv, QueueError, void> =>
   executeOnAll(
     (adapter) => adapter.cleanQueue(),
-    QueueOperationErrorCode.QUEUE_CLEANUP_ALL_ERROR,
+    QueueErrorCode.PROCESSING_ERROR,
     QueueOperation.CLEAN_QUEUE,
   );
 
@@ -95,4 +101,6 @@ export const hasQueue =
     queueName in env.registry;
 
 // Create initial environment
-export const createQueueEnv = (): QueueEnv => ({ registry: {} });
+export const createQueueEnv = (): QueueEnv => ({
+  registry: {} as Record<JobType, QueueAdapter>,
+});

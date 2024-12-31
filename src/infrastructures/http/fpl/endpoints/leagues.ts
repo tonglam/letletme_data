@@ -3,7 +3,7 @@
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import { Logger } from 'pino';
-import { FPL_API_CONFIG } from '../../../../configs/api/api.config';
+import { apiConfig } from '../../../../configs/api/api.config';
 import {
   ClassicLeagueResponseSchema,
   CupResponseSchema,
@@ -18,7 +18,7 @@ export const createLeaguesEndpoints = (client: HTTPClient, logger: Logger): Leag
   // Retrieves standings and information for a classic league
   getClassicLeague: async (leagueId: number, page: number, options?: RequestOptions) => {
     const result = await client.get<unknown>(
-      FPL_API_CONFIG.leagues.classic({ leagueId, page }),
+      apiConfig.endpoints.leagues.classic({ leagueId, page }),
       options,
     )();
     return pipe(
@@ -44,7 +44,7 @@ export const createLeaguesEndpoints = (client: HTTPClient, logger: Logger): Leag
   // Retrieves standings and information for a head-to-head league
   getH2hLeague: async (leagueId: number, page: number, options?: RequestOptions) => {
     const result = await client.get<unknown>(
-      FPL_API_CONFIG.leagues.h2h({ leagueId, page }),
+      apiConfig.endpoints.leagues.h2h({ leagueId, page }),
       options,
     )();
     return pipe(
@@ -70,7 +70,7 @@ export const createLeaguesEndpoints = (client: HTTPClient, logger: Logger): Leag
   // Retrieves cup match information for a specific team
   getCup: async (leagueId: number, page: number, entryId: number, options?: RequestOptions) => {
     const result = await client.get<unknown>(
-      FPL_API_CONFIG.leagues.cup({ leagueId, page, entryId }),
+      apiConfig.endpoints.leagues.cup({ leagueId, page, entryId }),
       options,
     )();
     return pipe(

@@ -19,7 +19,10 @@ export const formatResponse = <T>(data: T): APIResponseData<T> => ({
 
 // Creates a standard API error response
 export const formatErrorResponse = (message: string): APIErrorResponse => ({
-  error: message,
+  error: {
+    code: APIErrorCode.INTERNAL_SERVER_ERROR,
+    message,
+  },
 });
 
 // Maps API error codes to HTTP status codes

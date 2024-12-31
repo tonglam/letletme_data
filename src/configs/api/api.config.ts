@@ -41,5 +41,19 @@ export const apiConfig = {
         return `/element-summary/${params.elementId}/`;
       },
     },
+    leagues: {
+      // Get classic league standings
+      classic: (params: { leagueId: number; page: number }): string => {
+        return `/leagues-classic/${params.leagueId}/standings/?page_standings=${params.page}`;
+      },
+      // Get H2H league standings
+      h2h: (params: { leagueId: number; page: number }): string => {
+        return `/leagues-h2h/${params.leagueId}/standings/?page_standings=${params.page}`;
+      },
+      // Get cup matches
+      cup: (params: { leagueId: number; page: number; entryId: number }): string => {
+        return `/leagues-h2h-matches/cup/${params.leagueId}?page=${params.page}&entry=${params.entryId}`;
+      },
+    },
   },
 } as const;

@@ -35,14 +35,19 @@ export const createErrorFromStatus = (
   message: string,
   details?: Record<string, unknown>,
 ): APIError => {
-  const errorConfig = Object.entries(ERROR_CONFIG).find(
-    ([, config]) => config.httpStatus === status,
-  );
-  const errorCode = errorConfig
-    ? (errorConfig[0] as APIErrorCode)
-    : APIErrorCode.INTERNAL_SERVER_ERROR;
+  let errorCode: APIErrorCode;
+
+  if (status >= HTTP_STATUS.CLIENT_ERROR_MIN && status <= HTTP_STATUS.CLIENT_ERROR_MAX) {
+    errorCode = APIErrorCode.SERVICE_ERROR;
+  } else {
+    const errorConfig = Object.entries(ERROR_CONFIG).find(
+      ([, config]) => config.httpStatus === status,
+    );
+    errorCode = errorConfig ? (errorConfig[0] as APIErrorCode) : APIErrorCode.INTERNAL_SERVER_ERROR;
+  }
 
   const error: APIError = {
+    name: 'APIError',
     code: errorCode,
     message,
     details: {

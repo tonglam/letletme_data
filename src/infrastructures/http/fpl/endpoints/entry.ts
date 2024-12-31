@@ -3,7 +3,7 @@
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import { Logger } from 'pino';
-import { FPL_API_CONFIG } from '../../../../configs/api/api.config';
+import { apiConfig } from '../../../../configs/api/api.config';
 import {
   EntryHistoryResponseSchema,
   EntryResponseSchema,
@@ -17,7 +17,10 @@ import { EntryEndpoints, validateEndpointResponse } from '../types';
 export const createEntryEndpoints = (client: HTTPClient, logger: Logger): EntryEndpoints => ({
   // Retrieves basic information about a specific FPL team
   getEntry: async (entryId: number, options?: RequestOptions) => {
-    const result = await client.get<unknown>(FPL_API_CONFIG.entry.info({ entryId }), options)();
+    const result = await client.get<unknown>(
+      apiConfig.endpoints.entry.info({ entryId }),
+      options,
+    )();
     return pipe(
       result,
       E.chain(validateEndpointResponse(EntryResponseSchema)),
@@ -38,7 +41,7 @@ export const createEntryEndpoints = (client: HTTPClient, logger: Logger): EntryE
   // Retrieves transfer history for a specific FPL team
   getEntryTransfers: async (entryId: number, options?: RequestOptions) => {
     const result = await client.get<unknown>(
-      FPL_API_CONFIG.entry.transfers({ entryId }),
+      apiConfig.endpoints.entry.transfers({ entryId }),
       options,
     )();
     return pipe(
@@ -63,7 +66,10 @@ export const createEntryEndpoints = (client: HTTPClient, logger: Logger): EntryE
 
   // Retrieves gameweek and season history for a specific FPL team
   getEntryHistory: async (entryId: number, options?: RequestOptions) => {
-    const result = await client.get<unknown>(FPL_API_CONFIG.entry.history({ entryId }), options)();
+    const result = await client.get<unknown>(
+      apiConfig.endpoints.entry.history({ entryId }),
+      options,
+    )();
     return pipe(
       result,
       E.chain(validateEndpointResponse(EntryHistoryResponseSchema)),

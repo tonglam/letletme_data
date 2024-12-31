@@ -5,7 +5,6 @@ import { Job } from 'bullmq';
 import * as E from 'fp-ts/Either';
 import * as O from 'fp-ts/Option';
 import { pipe } from 'fp-ts/function';
-import { BaseJobData } from '../queues/types';
 import {
   APIError,
   APIErrorCode,
@@ -15,7 +14,6 @@ import {
   DBErrorCode,
   QueueError,
   QueueErrorCode,
-  QueueOperation,
   ServiceError,
   ServiceErrorCode,
   createAPIError,
@@ -23,8 +21,17 @@ import {
   createDBError,
   createQueueError,
   createServiceError,
-  isQueueError,
 } from '../types/errors.type';
+import { BaseJobData, QueueOperation } from '../types/queue.type';
+
+// Type guard for QueueError
+const isQueueError = (error: unknown): error is QueueError =>
+  typeof error === 'object' &&
+  error !== null &&
+  'code' in error &&
+  'queueName' in error &&
+  'operation' in error &&
+  Object.values(QueueErrorCode).includes((error as QueueError).code);
 
 // ============ API Error Handlers ============
 
@@ -56,7 +63,8 @@ export const createDatabaseOperationError = (error: unknown): DBError => {
   return createDBError({
     code: DBErrorCode.OPERATION_ERROR,
     message,
-    details: error,
+    details: { error: error instanceof Error ? error.message : String(error) },
+    cause: error instanceof Error ? error : undefined,
   });
 };
 
@@ -69,7 +77,8 @@ export const createDatabaseValidationError = (error: unknown): DBError => {
   return createDBError({
     code: DBErrorCode.VALIDATION_ERROR,
     message,
-    details: error,
+    details: { error: error instanceof Error ? error.message : String(error) },
+    cause: error instanceof Error ? error : undefined,
   });
 };
 
@@ -82,7 +91,8 @@ export const createDatabaseTransformationError = (error: unknown): DBError => {
   return createDBError({
     code: DBErrorCode.TRANSFORMATION_ERROR,
     message,
-    details: error,
+    details: { error: error instanceof Error ? error.message : String(error) },
+    cause: error instanceof Error ? error : undefined,
   });
 };
 
@@ -95,7 +105,8 @@ export const createDatabaseConnectionError = (error: unknown): DBError => {
   return createDBError({
     code: DBErrorCode.CONNECTION_ERROR,
     message,
-    details: error,
+    details: { error: error instanceof Error ? error.message : String(error) },
+    cause: error instanceof Error ? error : undefined,
   });
 };
 
@@ -196,7 +207,8 @@ export const createCacheConnectionError = (error: unknown): CacheError => {
   return createCacheError({
     code: CacheErrorCode.CONNECTION_ERROR,
     message,
-    details: error,
+    details: { error: error instanceof Error ? error.message : String(error) },
+    cause: error instanceof Error ? error : undefined,
   });
 };
 
@@ -209,7 +221,8 @@ export const createCacheOperationError = (error: unknown): CacheError => {
   return createCacheError({
     code: CacheErrorCode.OPERATION_ERROR,
     message,
-    details: error,
+    details: { error: error instanceof Error ? error.message : String(error) },
+    cause: error instanceof Error ? error : undefined,
   });
 };
 
@@ -222,7 +235,8 @@ export const createCacheSerializationError = (error: unknown): CacheError => {
   return createCacheError({
     code: CacheErrorCode.SERIALIZATION_ERROR,
     message,
-    details: error,
+    details: { error: error instanceof Error ? error.message : String(error) },
+    cause: error instanceof Error ? error : undefined,
   });
 };
 
@@ -235,7 +249,8 @@ export const createCacheDeserializationError = (error: unknown): CacheError => {
   return createCacheError({
     code: CacheErrorCode.DESERIALIZATION_ERROR,
     message,
-    details: error,
+    details: { error: error instanceof Error ? error.message : String(error) },
+    cause: error instanceof Error ? error : undefined,
   });
 };
 
@@ -250,7 +265,8 @@ export const createServiceOperationError = (error: unknown): ServiceError => {
   return createServiceError({
     code: ServiceErrorCode.OPERATION_ERROR,
     message,
-    details: error,
+    details: { error: error instanceof Error ? error.message : String(error) },
+    cause: error instanceof Error ? error : undefined,
   });
 };
 
@@ -263,7 +279,8 @@ export const createServiceValidationError = (error: unknown): ServiceError => {
   return createServiceError({
     code: ServiceErrorCode.VALIDATION_ERROR,
     message,
-    details: error,
+    details: { error: error instanceof Error ? error.message : String(error) },
+    cause: error instanceof Error ? error : undefined,
   });
 };
 
@@ -276,7 +293,8 @@ export const createServiceIntegrationError = (error: unknown): ServiceError => {
   return createServiceError({
     code: ServiceErrorCode.INTEGRATION_ERROR,
     message,
-    details: error,
+    details: { error: error instanceof Error ? error.message : String(error) },
+    cause: error instanceof Error ? error : undefined,
   });
 };
 
@@ -289,7 +307,8 @@ export const createServiceTransformationError = (error: unknown): ServiceError =
   return createServiceError({
     code: ServiceErrorCode.TRANSFORMATION_ERROR,
     message,
-    details: error,
+    details: { error: error instanceof Error ? error.message : String(error) },
+    cause: error instanceof Error ? error : undefined,
   });
 };
 
@@ -362,9 +381,11 @@ export const createQueueTimeoutError = (params: {
  */
 const dbErrorToApiErrorCode: Record<DBErrorCode, APIErrorCode> = {
   [DBErrorCode.CONNECTION_ERROR]: APIErrorCode.SERVICE_ERROR,
+  [DBErrorCode.QUERY_ERROR]: APIErrorCode.INTERNAL_SERVER_ERROR,
+  [DBErrorCode.CONSTRAINT_ERROR]: APIErrorCode.VALIDATION_ERROR,
   [DBErrorCode.OPERATION_ERROR]: APIErrorCode.INTERNAL_SERVER_ERROR,
   [DBErrorCode.VALIDATION_ERROR]: APIErrorCode.VALIDATION_ERROR,
-  [DBErrorCode.TRANSFORMATION_ERROR]: APIErrorCode.BAD_REQUEST,
+  [DBErrorCode.TRANSFORMATION_ERROR]: APIErrorCode.INTERNAL_SERVER_ERROR,
 };
 
 /**

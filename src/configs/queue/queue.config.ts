@@ -1,3 +1,5 @@
+import { JobStatus } from '../../types/queue.type';
+
 /**
  * Queue configuration interface
  */
@@ -17,6 +19,7 @@ export interface QueueConfig {
 export interface QueueCleanupOptions {
   readonly age?: number;
   readonly limit?: number;
+  readonly status?: JobStatus;
 }
 
 /**
