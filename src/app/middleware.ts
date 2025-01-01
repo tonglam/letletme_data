@@ -1,9 +1,14 @@
-import express from 'express';
+import { Application, json, urlencoded } from 'express';
+import { Logger } from 'pino';
 import expressPinoLogger from 'pino-http';
 import { logger } from '../configs/app/app.config';
 
-export const setupMiddleware = (app: express.Application): void => {
-  app.use(express.json());
-  app.use(express.urlencoded({ extended: true }));
-  app.use(expressPinoLogger({ logger }));
+export const setupMiddleware = (app: Application): void => {
+  app.use(json());
+  app.use(urlencoded({ extended: true }));
+  app.use(
+    expressPinoLogger({
+      logger: logger as unknown as Logger<string>,
+    }),
+  );
 };

@@ -11,9 +11,6 @@ src/
 │       │   ├── worker.adapter.ts   # BullMQ worker integration
 │       │   ├── queue.service.ts    # Queue operations service
 │       │   └── worker.service.ts   # Worker management service
-│       ├── types/                  # Queue-related types
-│       │   ├── job.types.ts        # Job-specific types
-│       │   └── queue.types.ts      # Queue-specific types
 │       └── index.ts                # Public exports
 ├── types/                          # Centralized type definitions
 │   ├── queue.type.ts              # Queue-related types

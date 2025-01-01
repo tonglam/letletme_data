@@ -92,7 +92,7 @@ export const createEventServiceCache = (
 
   const config: EventCacheConfig = {
     keyPrefix: CachePrefix.EVENT,
-    season: getCurrentSeason(),
+    season: getCurrentSeason().toString(),
   };
 
   const dataProvider = createEventDataProvider(bootstrapApi);

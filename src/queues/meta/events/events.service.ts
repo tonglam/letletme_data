@@ -1,50 +1,49 @@
-import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
-import { QUEUE_NAMES, createQueueConfig } from '../../../configs/queue/queue.config';
-import {
-  QueueService,
-  createQueueService,
-} from '../../../infrastructures/queue/core/queue.service';
-import { EventService } from '../../../services/events/types';
-import { eventWorkflows } from '../../../services/events/workflow';
+import * as TE from 'fp-ts/TaskEither';
+import { QueueConfig } from '../../../configs/queue/queue.config';
+import { SequentialQueueService } from '../../../infrastructures/queue/core/queue.service';
 import { QueueError } from '../../../types/errors.type';
-import { MetaJobData } from '../../types';
-import { createEventsProcessor } from './events.processor';
+import { BaseJobData } from '../../../types/queue.type';
+import { type MetaJobData } from '../../types';
 
-export interface EventsJobService {
-  readonly syncEvents: () => TE.TaskEither<QueueError, void>;
+export interface EventsService {
   readonly startWorker: () => TE.TaskEither<QueueError, void>;
   readonly stopWorker: () => TE.TaskEither<QueueError, void>;
 }
 
+export interface EventsJobService extends EventsService {
+  readonly queueService: SequentialQueueService<MetaJobData>;
+}
+
+export const createEventsProcessor = (
+  service: EventsService,
+): SequentialQueueService<BaseJobData> => ({
+  addJob: () => TE.right(undefined),
+  removeJob: () => TE.right(undefined),
+  startWorker: () => service.startWorker(),
+  stopWorker: () => service.stopWorker(),
+});
+
 export const createEventsJobService = (
-  queueService: QueueService<MetaJobData>,
+  queueService: SequentialQueueService<BaseJobData>,
 ): EventsJobService => ({
-  syncEvents: () =>
-    queueService.addJob({
-      type: 'META',
-      timestamp: new Date(),
-      data: {
-        operation: 'SYNC',
-        type: 'EVENTS',
-      },
-    }),
+  queueService: {
+    ...queueService,
+    addJob: (queueName: string, data: MetaJobData) => queueService.addJob(queueName, data),
+    removeJob: queueService.removeJob,
+    startWorker: queueService.startWorker,
+    stopWorker: queueService.stopWorker,
+  },
   startWorker: () => queueService.startWorker(),
   stopWorker: () => queueService.stopWorker(),
 });
 
 export const initializeEventsQueue = (
-  eventService: EventService,
-): TE.TaskEither<QueueError, EventsJobService> => {
-  // Create workflow service
-  const workflows = eventWorkflows(eventService);
-
-  // Create queue config
-  const queueConfig = createQueueConfig(QUEUE_NAMES.META);
-
-  // Create queue service with processor
-  return pipe(
-    createQueueService(queueConfig, createEventsProcessor(workflows)),
-    TE.map(createEventsJobService),
+  config: QueueConfig,
+  service: EventsService,
+): TE.TaskEither<QueueError, EventsJobService> =>
+  pipe(
+    TE.Do,
+    TE.bind('processor', () => TE.right(createEventsProcessor(service))),
+    TE.map(({ processor }) => createEventsJobService(processor)),
   );
-};

@@ -1,13 +1,15 @@
-import express, { Request, Response } from 'express';
+import { Request, Response, Router } from 'express';
 import { createRouter } from '../apis';
 import { ServiceContainer } from '../services';
 
-export const setupRoutes = (app: express.Application, services: ServiceContainer): void => {
-  // Health check route
-  app.get('/', (_req: Request, res: Response) => {
-    res.send('Hello, Let let me data!');
+export const setupRoutes = (services: ServiceContainer): Router => {
+  const router = Router();
+
+  router.get('/health', (_: Request, res: Response) => {
+    res.json({ status: 'ok' });
   });
 
-  // API routes
-  app.use('/api', createRouter(services));
+  router.use('/api', createRouter(services));
+
+  return router;
 };

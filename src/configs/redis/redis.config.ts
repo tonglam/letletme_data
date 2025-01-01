@@ -1,4 +1,4 @@
-import { QueueConnection } from '../../infrastructures/queue/types';
+import { QueueConnection } from '../../types/queue.type';
 
 // Base Redis configuration
 const BASE_REDIS_CONFIG = {

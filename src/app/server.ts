@@ -1,14 +1,14 @@
-import express from 'express';
-import { setupErrorHandler, setupMiddleware, setupRoutes } from '.';
+import { Application } from 'express';
+import { Server } from 'http';
 import { ServiceContainer } from '../services';
+import { setupErrorHandler } from './error-handler';
+import { setupMiddleware } from './middleware';
+import { setupRoutes } from './routes';
 
-export const createServer = (services: ServiceContainer) => {
-  const app = express();
-
-  // Setup application
+export const createServer = (app: Application, services: ServiceContainer): Server => {
   setupMiddleware(app);
-  setupRoutes(app, services);
+  app.use(setupRoutes(services));
   setupErrorHandler(app);
 
-  return app;
+  return app.listen(process.env.PORT || 3000);
 };

@@ -1,4 +1,4 @@
-import dotenv from 'dotenv';
+import * as dotenv from 'dotenv';
 import pino from 'pino';
 import { getCurrentSeason } from '../../types/base.type';
 

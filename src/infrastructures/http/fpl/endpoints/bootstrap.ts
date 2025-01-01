@@ -59,7 +59,12 @@ export const createBootstrapEndpoints = (
       E.chain(validateEndpointResponse(BootStrapResponseSchema)),
       E.map((data) => {
         logger.info({ operation: 'getBootstrapStatic', success: true }, 'FPL API call successful');
-        return data;
+        return {
+          events: data.events,
+          phases: data.phases,
+          teams: data.teams,
+          elements: data.elements,
+        };
       }),
       E.mapLeft((error) => {
         logger.error(

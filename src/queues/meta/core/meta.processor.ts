@@ -1,10 +1,11 @@
 import { Job } from 'bullmq';
-import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
+import * as TE from 'fp-ts/TaskEither';
 import { getQueueLogger } from '../../../infrastructures/logger';
 import { createQueueError, QueueErrorCode } from '../../../types/errors.type';
 import { JobProcessor } from '../../../types/queue.type';
-import { MetaJobData, MetaService } from '../../types';
+import { MetaJobData } from '../../types';
+import { type MetaService } from './types';
 
 const logger = getQueueLogger();
 
@@ -17,15 +18,15 @@ export const createMetaProcessor =
           const { data } = job.data;
           logger.info({ jobId: job.id, operation: data.operation }, 'Processing meta job');
 
-          switch (data.type) {
-            case 'EVENTS':
-              await metaService.eventsService.syncEvents()();
+          switch (data.operation) {
+            case 'SYNC':
+              await metaService.startWorker()();
               break;
             case 'CLEANUP':
-              await metaService.cleanup();
+              // Handle cleanup operation
               break;
             default:
-              throw new Error(`Unknown meta job type: ${data.type}`);
+              throw new Error(`Unknown operation: ${data.operation}`);
           }
         },
         (error) => createQueueError(QueueErrorCode.JOB_PROCESSING_ERROR, 'meta', error as Error),

@@ -6,11 +6,11 @@
 
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { CacheError } from 'src/types/errors.type';
 import { CachePrefix } from '../../configs/cache/cache.config';
 import { withCacheErrorHandling, withPipeline } from '../../infrastructures/cache/operations';
 import { type RedisCache } from '../../infrastructures/cache/redis-cache';
 import { getCurrentSeason } from '../../types/base.type';
+import { CacheError } from '../../types/errors.type';
 import { type Event, type EventId } from '../../types/events.type';
 import { type EventCache, type EventCacheConfig, type EventDataProvider } from './types';
 
@@ -21,7 +21,7 @@ export const createEventCache = (
   dataProvider: EventDataProvider,
   config: EventCacheConfig = {
     keyPrefix: CachePrefix.EVENT,
-    season: getCurrentSeason(),
+    season: getCurrentSeason().toString(),
   },
 ): EventCache => {
   // Generates the base cache key for the current season

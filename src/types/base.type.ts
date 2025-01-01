@@ -5,12 +5,10 @@
 
 import { ElementType, ValueChangeType } from '@prisma/client';
 import * as E from 'fp-ts/Either';
-import * as O from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
 import { z } from 'zod';
-import { AppConfig } from '../configs/app/app.config';
-import { APIError, CacheError, DBError, createValidationError } from './errors.type';
+import { APIError, APIErrorCode, CacheError, DBError, createAPIError } from './errors.type';
 
 // ============ Constants ============
 /**
@@ -97,16 +95,18 @@ export interface BaseRepository<T, CreateT, IdT> {
 /**
  * Validates data against a Zod schema
  */
-export const validateWithSchema = <T>(
-  schema: z.ZodType<T>,
-  data: unknown,
-  entityName: string,
-): E.Either<string, T> => {
-  const result = schema.safeParse(data);
-  return result.success
-    ? E.right(result.data)
-    : E.left(`Invalid ${entityName} domain model: ${result.error.message}`);
-};
+export const validateSchema =
+  <T>(schema: z.Schema<T>, entityName: string) =>
+  (data: unknown): E.Either<string, T> => {
+    const result = schema.safeParse(data);
+    if (result.success) {
+      return E.right(result.data);
+    }
+    const error = result as z.SafeParseError<T>;
+    return E.left(
+      `Invalid ${entityName} domain model: ${error.error.errors[0]?.message || 'Unknown error'}`,
+    );
+  };
 
 // Common Cache Handlers
 /**
@@ -120,7 +120,12 @@ export const getCachedOrFallbackMany = <T, P>(
   cachedValue
     ? pipe(
         cachedValue,
-        TE.mapLeft((error) => createValidationError({ message: error.message })),
+        TE.mapLeft((error: CacheError) =>
+          createAPIError({
+            code: APIErrorCode.SERVICE_ERROR,
+            message: error.message,
+          }),
+        ),
         TE.chain(converter),
       )
     : pipe(fallback, TE.chain(converter));
@@ -136,7 +141,12 @@ export const getCachedOrFallbackOne = <T, P>(
   cachedValue
     ? pipe(
         cachedValue,
-        TE.mapLeft((error) => createValidationError({ message: error.message })),
+        TE.mapLeft((error: CacheError) =>
+          createAPIError({
+            code: APIErrorCode.SERVICE_ERROR,
+            message: error.message,
+          }),
+        ),
         TE.chain(converter),
       )
     : pipe(fallback, TE.chain(converter));
@@ -167,11 +177,13 @@ export enum Season {
 /**
  * Gets current FPL season
  */
-export const getCurrentSeason = (): Season =>
-  pipe(
-    O.fromNullable(AppConfig.currentSeason),
-    O.getOrElse(() => getAllSeasons().slice(-1)[0]),
-  );
+export const getCurrentSeason = (): number => {
+  const currentDate = new Date();
+  const currentYear = currentDate.getFullYear();
+  const currentMonth = currentDate.getMonth() + 1;
+
+  return currentMonth >= 8 ? currentYear : currentYear - 1;
+};
 
 /**
  * Gets all available FPL seasons

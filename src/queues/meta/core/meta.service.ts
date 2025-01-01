@@ -1,42 +1,29 @@
-import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
+import * as TE from 'fp-ts/TaskEither';
 import { QueueConfig } from '../../../configs/queue/queue.config';
-import {
-  QueueService,
-  createQueueService,
-} from '../../../infrastructures/queue/core/queue.service';
+import { SequentialQueueService } from '../../../infrastructures/queue/core/queue.service';
 import { QueueError } from '../../../types/errors.type';
-import { MetaJobData, MetaService } from '../../types';
-import { createMetaProcessor } from './meta.processor';
+import { BaseJobData } from '../../../types/queue.type';
+import { type MetaJobData } from '../../types';
+import { type MetaService } from './types';
 
 export interface MetaJobService {
-  readonly queueService: QueueService<MetaJobData>;
-  readonly addSyncJob: () => TE.TaskEither<QueueError, void>;
-  readonly addCleanupJob: () => TE.TaskEither<QueueError, void>;
+  readonly queueService: SequentialQueueService<MetaJobData>;
   readonly startWorker: () => TE.TaskEither<QueueError, void>;
   readonly stopWorker: () => TE.TaskEither<QueueError, void>;
 }
 
-export const createMetaJobService = (queueService: QueueService<MetaJobData>): MetaJobService => ({
-  queueService,
-  addSyncJob: () =>
-    queueService.addJob({
-      type: 'META',
-      timestamp: new Date(),
-      data: {
-        operation: 'SYNC',
-        type: 'EVENTS',
-      },
-    }),
-  addCleanupJob: () =>
-    queueService.addJob({
-      type: 'META',
-      timestamp: new Date(),
-      data: {
-        operation: 'CLEANUP',
-        type: 'CLEANUP',
-      },
-    }),
+export const createMetaProcessor = (service: MetaService): SequentialQueueService<BaseJobData> => ({
+  addJob: () => TE.right(undefined),
+  removeJob: () => TE.right(undefined),
+  startWorker: () => service.startWorker(),
+  stopWorker: () => service.stopWorker(),
+});
+
+export const createMetaJobService = (
+  queueService: SequentialQueueService<BaseJobData>,
+): MetaJobService => ({
+  queueService: queueService as SequentialQueueService<MetaJobData>,
   startWorker: () => queueService.startWorker(),
   stopWorker: () => queueService.stopWorker(),
 });
@@ -45,4 +32,8 @@ export const initializeMetaQueue = (
   config: QueueConfig,
   service: MetaService,
 ): TE.TaskEither<QueueError, MetaJobService> =>
-  pipe(createQueueService(config, createMetaProcessor(service)), TE.map(createMetaJobService));
+  pipe(
+    TE.Do,
+    TE.bind('processor', () => TE.right(createMetaProcessor(service))),
+    TE.map(({ processor }) => createMetaJobService(processor)),
+  );
