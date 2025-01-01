@@ -199,3 +199,15 @@ export const getQueueMetrics = (
         }),
     ),
   );
+
+interface QueueErrorParams {
+  readonly code: QueueError['code'];
+  readonly message: string;
+  readonly queueName: string;
+  readonly cause?: Error;
+}
+
+export const createQueueError = (params: QueueErrorParams): QueueError => ({
+  ...params,
+  type: 'QUEUE_ERROR',
+});

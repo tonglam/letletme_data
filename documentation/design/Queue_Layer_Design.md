@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Queue Layer provides job scheduling and processing capabilities for the FPL data system, handling various types of jobs from real-time updates to scheduled tasks.
+The Queue Layer provides job scheduling and processing capabilities for the FPL data system, leveraging BullMQ's robust features while maintaining type safety and functional programming principles.
 
 ## System Integration Overview
 
@@ -14,30 +14,21 @@ graph TB
         Domain[Domain Layer]
     end
 
-    subgraph Infrastructure Layer
-        subgraph Queue Infrastructure
+    subgraph Queue Layer
+        QS[Queue Service]
+        WS[Worker Service]
+        subgraph BullMQ Integration
             QA[Queue Adapter]
             WA[Worker Adapter]
-            SA[Scheduler Adapter]
+            BQ[BullMQ]
         end
-
         subgraph Error Handling
             EH[Error Handler]
-            EM[Error Mapper]
             EL[Error Logger]
-        end
-
-        subgraph Redis Management
-            RC[Redis Connection]
-            KM[Key Manager]
-            TM[TTL Manager]
         end
     end
 
-    subgraph Queue System
-        QS[Queue Service]
-        WS[Worker Service]
-        BQ[BullMQ]
+    subgraph Storage
         Redis[(Redis)]
     end
 
@@ -46,94 +37,52 @@ graph TB
     Service --> QS
     QS --> QA
     WS --> WA
-    QA & WA & SA --> BQ
+    QA & WA --> BQ
     BQ --> Redis
-
-    QA & WA & SA --> EH
-    EH --> EM
+    QA & WA --> EH
     EH --> EL
-
-    BQ --> RC
-    RC --> KM
-    RC --> TM
 ```
 
 ## Core Components
 
-### 1. Infrastructure Layer
+### 1. Queue Layer Components
 
-- **Queue Adapter**: BullMQ integration and queue operations
-- **Worker Adapter**: Job processing and worker management
-- **Scheduler Adapter**: Cron-based job scheduling
-- **Error Handler**: Comprehensive error management
-- **Redis Manager**: Key and TTL management
-- **Cleanup Manager**: Automated cleanup operations and state management
-- **Recovery Manager**: System resilience and recovery procedures
+- **Queue Service**: Simplified job management using BullMQ's native features
+- **Worker Service**: Streamlined job processing with built-in error handling
+- **Error Handler**: Essential error management with functional approach
+- **Job Processors**: Type-safe job processing implementations
 
-### 2. Queue Services
+### 2. BullMQ Integration
 
-- **Queue Service**: Job lifecycle and scheduling
-- **Worker Service**: Job execution and monitoring
-- **Scheduler Service**: Job timing and recurrence
-- **Maintenance Service**: Cleanup and recovery orchestration
+- Leverages BullMQ's built-in features for:
+  - Queue management
+  - Job scheduling
+  - Worker processing
+  - Error handling and retries
+  - Event management
 
-## System Resilience
+## Job Processing Flow
 
 ```mermaid
-graph TB
-    subgraph Core Services
-        QS[Queue Service]
-        WS[Worker Service]
-        MS[Maintenance Service]
-    end
+sequenceDiagram
+    participant S as Service Layer
+    participant Q as Queue Service
+    participant W as Worker Service
+    participant B as BullMQ
+    participant R as Redis
 
-    subgraph Resilience Layer
-        CM[Cleanup Manager]
-        RM[Recovery Manager]
-        HM[Health Monitor]
+    S->>Q: Add Job
+    Q->>B: Queue Job
+    B->>R: Store Job
+    W->>B: Poll Jobs
+    B->>W: Process Job
+    alt Success
+        W->>B: Complete Job
+    else Error
+        W->>B: Handle Retry
+        B->>W: Retry Job
     end
-
-    subgraph State Management
-        JC[Job Cleanup]
-        KM[Key Management]
-        WC[Worker Cleanup]
-    end
-
-    QS & WS --> HM
-    HM --> RM
-    MS --> CM
-    CM --> JC & KM & WC
-    RM --> QS & WS
 ```
-
-### Cleanup Integration
-
-1. **Automated Cleanup**
-
-   - Job state monitoring and cleanup triggers
-   - TTL-based key expiration
-   - Stale worker detection and cleanup
-   - Memory optimization routines
-
-2. **State Management**
-   - Job state transitions with cleanup hooks
-   - Worker state tracking with auto-recovery
-   - Redis key lifecycle management
-
-### Recovery Integration
-
-1. **Health Monitoring**
-
-   - Continuous system health checks
-   - Worker heartbeat monitoring
-   - Redis connection state tracking
-   - Job progress verification
-
-2. **Automatic Recovery**
-   - Worker failure detection and restart
-   - Job state recovery and reprocessing
-   - Redis connection management
-   - System state reconciliation
 
 ## Job Categories
 
@@ -147,10 +96,10 @@ graph TB
         D[Daily Jobs<br>Regular Updates]
     end
 
-    subgraph Priority
-        HP[High Priority]
-        MP[Medium Priority]
-        LP[Low Priority]
+    subgraph Processing
+        HP[High Priority Queue]
+        MP[Medium Priority Queue]
+        LP[Low Priority Queue]
     end
 
     M & L --> HP
@@ -158,123 +107,29 @@ graph TB
     D --> LP
 ```
 
-### Job Scheduling Patterns
-
-1. **Meta Jobs**
-
-   - Daily core data synchronization
-   - Early morning execution (6:35 AM UTC)
-   - High priority, max retries: 5
-
-2. **Live Jobs**
-
-   - Real-time match updates
-   - 1-minute intervals during matches
-   - High priority, quick retries
-
-3. **Post-Match Jobs**
-
-   - Result processing after matches
-   - Dependent on match completion
-   - Medium priority
-
-4. **Post-Gameweek Jobs**
-
-   - Tournament and league updates
-   - After gameweek completion
-   - Medium priority
-
-5. **Daily Jobs**
-   - Regular maintenance tasks
-   - Fixed daily schedule
-   - Lower priority
-
 ## Error Handling Strategy
 
 ```mermaid
 sequenceDiagram
-    participant Job
-    participant Handler
-    participant Logger
-    participant Retry
+    participant J as Job
+    participant W as Worker
+    participant B as BullMQ
+    participant L as Logger
 
-    Job->>Handler: Execute
+    J->>W: Process
     alt Success
-        Handler->>Logger: Log Success
+        W->>B: Complete
+        B->>L: Log Success
     else Error
-        Handler->>Logger: Log Error
+        W->>B: Handle Error
+        B->>L: Log Error
         alt Retryable
-            Handler->>Retry: Apply Strategy
-            Retry->>Job: Retry
+            B->>J: Retry with Backoff
         else Non-Retryable
-            Handler->>Logger: Log Final Failure
+            B->>L: Log Final Failure
         end
     end
 ```
-
-### Error Categories
-
-1. **Transient Errors**
-
-   - Network issues
-   - Redis timeouts
-   - Strategy: Exponential backoff
-
-2. **Validation Errors**
-
-   - Invalid job data
-   - Configuration issues
-   - Strategy: No retry
-
-3. **System Errors**
-   - Resource exhaustion
-   - Worker crashes
-   - Strategy: Retry with delay
-
-## Redis Management
-
-### Key Structure
-
-- Environment-based prefixing
-- Category-based organization
-- Job-specific identifiers
-
-### TTL Strategy
-
-1. **Short-lived Keys**
-
-   - Live match data: 1 hour
-   - Temporary states: 30 minutes
-
-2. **Medium-lived Keys**
-
-   - Match results: 12 hours
-   - Daily updates: 24 hours
-
-3. **Long-lived Keys**
-   - Historical data: 7 days
-   - Error logs: 30 days
-
-## Monitoring and Metrics
-
-### Key Metrics
-
-1. **Performance Metrics**
-
-   - Job processing time
-   - Queue length
-   - Worker utilization
-
-2. **Error Metrics**
-
-   - Failure rates
-   - Retry counts
-   - Error types distribution
-
-3. **System Metrics**
-   - Redis memory usage
-   - Connection status
-   - Worker health
 
 ## Implementation Guidelines
 
@@ -282,16 +137,43 @@ sequenceDiagram
 
 - Use TaskEither for operations
 - Maintain immutability
-- Pure function composition
+- Leverage BullMQ's promise-based API with fp-ts
 
-### 2. Error Handling
+### 2. Type Safety
 
+- Strong typing for job data
+- Type-safe queue operations
 - Comprehensive error types
+
+### 3. Error Handling
+
+- Utilize BullMQ's built-in retry mechanisms
+- Functional error handling with TaskEither
 - Structured logging
-- Retry strategies
 
-### 3. Performance
+### 4. Performance
 
-- Efficient Redis usage
-- Worker pool management
-- Resource optimization
+- Efficient queue configuration
+- Optimal concurrency settings
+- Resource-aware job processing
+
+## Monitoring
+
+### Key Metrics
+
+1. **Queue Metrics**
+
+   - Queue length
+   - Processing time
+   - Success/failure rates
+
+2. **Worker Metrics**
+
+   - Active workers
+   - Job completion rate
+   - Error distribution
+
+3. **System Health**
+   - Redis connection status
+   - Memory usage
+   - Job backlog

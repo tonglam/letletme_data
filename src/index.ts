@@ -8,14 +8,23 @@ import { Server } from 'http';
 import pino from 'pino';
 import expressPinoLogger from 'pino-http';
 import { createRouter } from './apis';
+import { createQueueConfig, QUEUE_NAMES } from './configs/queue/queue.config';
 import { BootstrapApi } from './domains/bootstrap/operations';
 import { createFPLClient } from './infrastructures/http/fpl/client';
 import { FPLEndpoints } from './infrastructures/http/fpl/types';
-import { WorkerAdapter } from './infrastructures/queue/types';
+import { closeRedisClient, createRedisClient } from './infrastructures/redis/client';
+import { MetaJobData } from './queues/jobs/processors/meta.processor';
+import { createQueueService } from './queues/services/queue.service';
+import { WorkerService } from './queues/services/worker.service';
 import { ServiceContainer } from './services';
 import { createEventService } from './services/events';
 import { BootStrapResponse } from './types/bootstrap.type';
-import { createServiceError, ServiceError } from './types/errors.type';
+import {
+  createServiceError,
+  QueueError,
+  ServiceError,
+  ServiceErrorCode,
+} from './types/errors.type';
 
 // Load environment variables
 dotenv.config();
@@ -28,7 +37,7 @@ const APP_CONSTANTS = {
 
 // Custom type for server with worker
 interface ServerWithWorker extends Server {
-  worker?: WorkerAdapter;
+  worker?: WorkerService<MetaJobData>;
 }
 
 // Initialize core dependencies
@@ -93,43 +102,101 @@ const setupRoutes = (application: express.Application): void => {
   application.use('/api', createRouter(services));
 };
 
+// Create services
+const metaService = {
+  sync: () =>
+    TE.tryCatch(
+      async () => {
+        // Implement your sync logic here
+        logger.info('Meta sync started');
+      },
+      (error) => error as Error,
+    ),
+  cleanup: () =>
+    TE.tryCatch(
+      async () => {
+        // Implement your cleanup logic here
+        logger.info('Meta cleanup started');
+      },
+      (error) => error as Error,
+    ),
+};
+
 // Initialize application
 const initializeApplication = (port: number): TE.TaskEither<ServiceError, ServerWithWorker> =>
   pipe(
-    TE.tryCatch(
-      async () => {
-        // Setup application
-        setupMiddleware(app);
-        setupRoutes(app);
-        setupErrorHandler(app);
+    TE.Do,
+    TE.bind('redis', () =>
+      pipe(
+        createRedisClient(),
+        TE.mapLeft((error) =>
+          createServiceError({
+            code: ServiceErrorCode.INTEGRATION_ERROR,
+            message: 'Failed to initialize Redis',
+            cause: error,
+          }),
+        ),
+      ),
+    ),
+    TE.bind('queueService', () =>
+      pipe(
+        createQueueService(createQueueConfig(QUEUE_NAMES.META), metaService),
+        TE.mapLeft((error: QueueError) =>
+          createServiceError({
+            code: ServiceErrorCode.INTEGRATION_ERROR,
+            message: error.message,
+            cause: error.cause,
+          }),
+        ),
+      ),
+    ),
+    TE.chain((deps) =>
+      TE.tryCatch(
+        async () => {
+          // Setup application
+          setupMiddleware(app);
+          setupRoutes(app);
+          setupErrorHandler(app);
 
-        // Start server
-        return new Promise<ServerWithWorker>((resolve, reject) => {
-          const server = app.listen(port, () => {
-            logger.info({ port }, 'Server started successfully');
-            resolve(server as ServerWithWorker);
-          });
+          // Start queue worker
+          await deps.queueService.worker.start()();
+          logger.info('Queue worker started successfully');
 
-          server.on('error', (error) => {
-            logger.error({ error }, 'Server failed to start');
-            reject(error);
+          // Start server
+          return new Promise<ServerWithWorker>((resolve, reject) => {
+            const server = app.listen(port, () => {
+              logger.info({ port }, 'Server started successfully');
+              const serverWithWorker = server as ServerWithWorker;
+              serverWithWorker.worker = deps.queueService.worker;
+              resolve(serverWithWorker);
+            });
+
+            server.on('error', (error) => {
+              logger.error({ error }, 'Server failed to start');
+              reject(error);
+            });
           });
-        });
-      },
-      (error) =>
-        createServiceError({
-          code: 'OPERATION_ERROR',
-          message: 'Failed to initialize application',
-          cause: error as Error,
-        }),
+        },
+        (error) =>
+          createServiceError({
+            code: ServiceErrorCode.INTEGRATION_ERROR,
+            message: 'Failed to initialize application',
+            cause: error as Error,
+          }),
+      ),
     ),
   );
 
-// Shutdown application
-const shutdownApplication = (server?: Server): TE.TaskEither<ServiceError, void> =>
+// Update shutdown to include Redis cleanup
+const shutdownApplication = (server?: ServerWithWorker): TE.TaskEither<ServiceError, void> =>
   pipe(
     TE.tryCatch(
       async () => {
+        if (server?.worker) {
+          await server.worker.stop()();
+          logger.info('Queue worker stopped successfully');
+        }
+
         if (server) {
           await new Promise<void>((resolve, reject) => {
             server.close((err) => {
@@ -138,12 +205,13 @@ const shutdownApplication = (server?: Server): TE.TaskEither<ServiceError, void>
             });
           });
         }
+        await closeRedisClient();
         await prisma.$disconnect();
         logger.info('Application shutdown completed');
       },
       (error) =>
         createServiceError({
-          code: 'OPERATION_ERROR',
+          code: ServiceErrorCode.INTEGRATION_ERROR,
           message: 'Failed to shutdown application',
           cause: error as Error,
         }),

@@ -1,4 +1,5 @@
 import { JobStatus } from '../../types/queue.type';
+import { REDIS_CONFIG, REDIS_KEY_PREFIXES } from '../redis/redis.config';
 
 /**
  * Queue configuration interface
@@ -6,11 +7,7 @@ import { JobStatus } from '../../types/queue.type';
 export interface QueueConfig {
   readonly name: string;
   readonly prefix: string;
-  readonly connection: {
-    readonly host: string;
-    readonly port: number;
-    readonly password?: string;
-  };
+  readonly connection: typeof REDIS_CONFIG;
 }
 
 /**
@@ -79,19 +76,10 @@ export const QUEUE_NAMES = {
 } as const;
 
 /**
- * Redis configuration
- */
-export const REDIS_CONFIG = {
-  host: process.env.REDIS_HOST || 'localhost',
-  port: parseInt(process.env.REDIS_PORT || '6379', 10),
-  password: process.env.REDIS_PASSWORD,
-} as const;
-
-/**
  * Queue configuration factory
  */
-export const createQueueConfig = (queueName: string) => ({
+export const createQueueConfig = (queueName: string): QueueConfig => ({
   name: queueName,
-  prefix: process.env.NODE_ENV === 'production' ? 'prod' : 'dev',
+  prefix: REDIS_KEY_PREFIXES.QUEUE,
   connection: REDIS_CONFIG,
 });

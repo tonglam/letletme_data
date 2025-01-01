@@ -1,9 +1,24 @@
 import { Job, Queue, Worker } from 'bullmq';
 import * as TE from 'fp-ts/TaskEither';
 import { RedisOptions } from 'ioredis';
-import { MetaJobType } from '../queues/jobs/core/meta.job';
+import { MetaJobType } from '../queues/jobs/processors/meta.processor';
 import { QueueError } from './errors.type';
 
+// Operation Types
+export enum QueueOperation {
+  ADD_JOB = 'ADD_JOB',
+  GET_JOB = 'GET_JOB',
+  REMOVE_JOB = 'REMOVE_JOB',
+  CLEAN_QUEUE = 'CLEAN_QUEUE',
+  CLOSE_QUEUE = 'CLOSE_QUEUE',
+  GET_WORKER = 'GET_WORKER',
+  START_WORKER = 'START_WORKER',
+  STOP_WORKER = 'STOP_WORKER',
+  RESET_WORKER = 'RESET_WORKER',
+  PROCESS_JOB = 'PROCESS_JOB',
+}
+
+// Status Types
 export enum JobStatus {
   COMPLETED = 'completed',
   FAILED = 'failed',
@@ -30,9 +45,9 @@ export enum JobOperationType {
 
 // Base Job Types
 export interface BaseJobData {
-  readonly type: JobType;
+  readonly type: string;
   readonly timestamp: Date;
-  readonly data: Record<string, unknown>;
+  readonly data: unknown;
 }
 
 export interface JobOptions {
@@ -47,6 +62,13 @@ export interface JobOptions {
   readonly removeOnFail?: boolean | number;
 }
 
+// Connection Types
+export interface QueueConnection {
+  readonly host: string;
+  readonly port: number;
+  readonly password?: string;
+}
+
 // Queue Configuration Types
 export interface QueueConfig {
   readonly name: string;
@@ -55,20 +77,16 @@ export interface QueueConfig {
 }
 
 // Queue and Worker Adapter Types
-export interface QueueAdapter {
+export interface QueueAdapter<T extends BaseJobData = BaseJobData> {
   readonly queue: Queue;
-  readonly addJob: <T extends BaseJobData>(data: T) => TE.TaskEither<QueueError, Job<T>>;
+  readonly addJob: (data: T) => TE.TaskEither<QueueError, Job<T>>;
   readonly removeJob: (jobId: string) => TE.TaskEither<QueueError, void>;
-  readonly pauseQueue: () => TE.TaskEither<QueueError, void>;
-  readonly resumeQueue: () => TE.TaskEither<QueueError, void>;
-  readonly cleanQueue: (options?: QueueCleanupOptions) => TE.TaskEither<QueueError, void>;
 }
 
 export interface WorkerAdapter<T extends BaseJobData = BaseJobData> {
-  readonly worker: Worker<T, void, string>;
+  readonly worker: Worker<T>;
   readonly start: () => TE.TaskEither<QueueError, void>;
   readonly stop: () => TE.TaskEither<QueueError, void>;
-  readonly isRunning: () => boolean;
 }
 
 // Worker State Types
@@ -89,7 +107,7 @@ export interface WorkerStateData {
 export interface WorkerState extends Readonly<WorkerStateData> {}
 
 export interface WorkerContext<T extends BaseJobData = BaseJobData> {
-  readonly worker: Worker<T, void, string>;
+  readonly worker: Worker<T>;
   readonly state: WorkerState;
 }
 
@@ -100,9 +118,7 @@ export type WorkerRegistry = Record<JobType, WorkerAdapter>;
 export type WorkerEnv = { readonly registry: WorkerRegistry };
 
 // Job Processor Types
-export type JobProcessor<T extends BaseJobData> = (
-  job: Job<T>,
-) => TE.TaskEither<Error | QueueError, void>;
+export type JobProcessor<T extends BaseJobData> = (job: Job<T>) => TE.TaskEither<QueueError, void>;
 
 // Specific Job Data Types
 export interface MetaJobData extends BaseJobData {

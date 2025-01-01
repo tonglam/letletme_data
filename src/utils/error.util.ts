@@ -1,7 +1,6 @@
 // Error utility functions
 
 import { Prisma } from '@prisma/client';
-import { Job } from 'bullmq';
 import * as E from 'fp-ts/Either';
 import * as O from 'fp-ts/Option';
 import { pipe } from 'fp-ts/function';
@@ -19,19 +18,19 @@ import {
   createAPIError,
   createCacheError,
   createDBError,
-  createQueueError,
   createServiceError,
 } from '../types/errors.type';
-import { BaseJobData } from '../types/queue.type';
-import { QueueOperation } from '../types/shared.type';
 
 // Type guard for QueueError
 const isQueueError = (error: unknown): error is QueueError =>
   typeof error === 'object' &&
   error !== null &&
+  'type' in error &&
+  error !== null &&
   'code' in error &&
+  'message' in error &&
   'queueName' in error &&
-  'operation' in error &&
+  (error as QueueError).type === 'QUEUE_ERROR' &&
   Object.values(QueueErrorCode).includes((error as QueueError).code);
 
 // ============ API Error Handlers ============
@@ -321,14 +320,12 @@ export const createServiceTransformationError = (error: unknown): ServiceError =
 export const createQueueConnectionError = (params: {
   message: string;
   queueName: string;
-  operation: QueueOperation;
-  job?: Job<BaseJobData>;
   cause?: Error;
-}): QueueError =>
-  createQueueError({
-    code: QueueErrorCode.CONNECTION_ERROR,
-    ...params,
-  });
+}): QueueError => ({
+  type: 'QUEUE_ERROR',
+  code: QueueErrorCode.QUEUE_CONNECTION_ERROR,
+  ...params,
+});
 
 /**
  * Creates a queue processing error
@@ -336,44 +333,12 @@ export const createQueueConnectionError = (params: {
 export const createQueueProcessingError = (params: {
   message: string;
   queueName: string;
-  operation: QueueOperation;
-  job?: Job<BaseJobData>;
   cause?: Error;
-}): QueueError =>
-  createQueueError({
-    code: QueueErrorCode.PROCESSING_ERROR,
-    ...params,
-  });
-
-/**
- * Creates a queue validation error
- */
-export const createQueueValidationError = (params: {
-  message: string;
-  queueName: string;
-  operation: QueueOperation;
-  job?: Job<BaseJobData>;
-  cause?: Error;
-}): QueueError =>
-  createQueueError({
-    code: QueueErrorCode.VALIDATION_ERROR,
-    ...params,
-  });
-
-/**
- * Creates a queue timeout error
- */
-export const createQueueTimeoutError = (params: {
-  message: string;
-  queueName: string;
-  operation: QueueOperation;
-  job?: Job<BaseJobData>;
-  cause?: Error;
-}): QueueError =>
-  createQueueError({
-    code: QueueErrorCode.TIMEOUT_ERROR,
-    ...params,
-  });
+}): QueueError => ({
+  type: 'QUEUE_ERROR',
+  code: QueueErrorCode.JOB_PROCESSING_ERROR,
+  ...params,
+});
 
 // ============ Error Type Conversions ============
 
@@ -393,10 +358,19 @@ const dbErrorToApiErrorCode: Record<DBErrorCode, APIErrorCode> = {
  * Maps queue error codes to API error codes
  */
 const queueErrorToApiErrorCode: Record<QueueErrorCode, APIErrorCode> = {
-  [QueueErrorCode.CONNECTION_ERROR]: APIErrorCode.SERVICE_ERROR,
+  [QueueErrorCode.QUEUE_CONNECTION_ERROR]: APIErrorCode.SERVICE_ERROR,
+  [QueueErrorCode.QUEUE_INITIALIZATION_ERROR]: APIErrorCode.INTERNAL_SERVER_ERROR,
+  [QueueErrorCode.WORKER_START_ERROR]: APIErrorCode.INTERNAL_SERVER_ERROR,
+  [QueueErrorCode.WORKER_STOP_ERROR]: APIErrorCode.INTERNAL_SERVER_ERROR,
+  [QueueErrorCode.JOB_PROCESSING_ERROR]: APIErrorCode.INTERNAL_SERVER_ERROR,
+  [QueueErrorCode.INVALID_JOB_DATA]: APIErrorCode.VALIDATION_ERROR,
+  [QueueErrorCode.REMOVE_JOB]: APIErrorCode.INTERNAL_SERVER_ERROR,
   [QueueErrorCode.PROCESSING_ERROR]: APIErrorCode.INTERNAL_SERVER_ERROR,
-  [QueueErrorCode.VALIDATION_ERROR]: APIErrorCode.VALIDATION_ERROR,
-  [QueueErrorCode.TIMEOUT_ERROR]: APIErrorCode.SERVICE_ERROR,
+  [QueueErrorCode.START_WORKER]: APIErrorCode.INTERNAL_SERVER_ERROR,
+  [QueueErrorCode.CREATE_QUEUE]: APIErrorCode.INTERNAL_SERVER_ERROR,
+  [QueueErrorCode.ADD_JOB]: APIErrorCode.INTERNAL_SERVER_ERROR,
+  [QueueErrorCode.STOP_WORKER]: APIErrorCode.INTERNAL_SERVER_ERROR,
+  [QueueErrorCode.CREATE_WORKER]: APIErrorCode.INTERNAL_SERVER_ERROR,
 };
 
 /**
@@ -423,9 +397,9 @@ export const toAPIError = (error: unknown): APIError => {
   }
   if (isQueueError(error)) {
     return createAPIError({
-      code: queueErrorToApiErrorCode[error.code as QueueErrorCode],
+      code: queueErrorToApiErrorCode[error.code],
       message: error.message,
-      details: { queueName: error.queueName, operation: error.operation },
+      details: { queueName: error.queueName },
       cause: error.cause,
     });
   }

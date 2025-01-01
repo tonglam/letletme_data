@@ -1,4 +1,4 @@
-import { BaseError, ErrorDetails, QueueOperation } from './shared.type';
+import { BaseError, ErrorDetails } from './shared.type';
 
 /**
  * DB Error Types
@@ -138,41 +138,39 @@ export const getErrorStatus = (error: APIError): number => {
  * Queue Error Types
  */
 export enum QueueErrorCode {
-  CONNECTION_ERROR = 'CONNECTION_ERROR',
+  QUEUE_CONNECTION_ERROR = 'QUEUE_CONNECTION_ERROR',
+  QUEUE_INITIALIZATION_ERROR = 'QUEUE_INITIALIZATION_ERROR',
+  WORKER_START_ERROR = 'WORKER_START_ERROR',
+  WORKER_STOP_ERROR = 'WORKER_STOP_ERROR',
+  JOB_PROCESSING_ERROR = 'JOB_PROCESSING_ERROR',
+  INVALID_JOB_DATA = 'INVALID_JOB_DATA',
+  REMOVE_JOB = 'REMOVE_JOB',
   PROCESSING_ERROR = 'PROCESSING_ERROR',
-  VALIDATION_ERROR = 'VALIDATION_ERROR',
-  TIMEOUT_ERROR = 'TIMEOUT_ERROR',
+  START_WORKER = 'START_WORKER',
+  CREATE_QUEUE = 'CREATE_QUEUE',
+  ADD_JOB = 'ADD_JOB',
+  STOP_WORKER = 'STOP_WORKER',
+  CREATE_WORKER = 'CREATE_WORKER',
 }
 
-export interface QueueError extends Error {
+export interface QueueError {
+  readonly type: 'QUEUE_ERROR';
   readonly code: QueueErrorCode;
+  readonly message: string;
   readonly queueName: string;
-  readonly operation: QueueOperation;
   readonly cause?: Error;
-  readonly timestamp: Date;
 }
 
-export const createValidationError = (params: {
-  message: string;
-  details?: ErrorDetails;
-}): APIError => ({
-  name: 'APIError',
-  code: APIErrorCode.VALIDATION_ERROR,
-  stack: new Error().stack,
-  ...params,
-});
-
-export const createQueueError = (params: {
-  code: QueueErrorCode;
-  message: string;
-  queueName: string;
-  operation: QueueOperation;
-  cause?: Error;
-}): QueueError => ({
-  name: 'QueueError',
-  stack: new Error().stack,
-  timestamp: new Date(),
-  ...params,
+export const createQueueError = (
+  code: QueueErrorCode,
+  queueName: string,
+  error: Error,
+): QueueError => ({
+  type: 'QUEUE_ERROR',
+  code,
+  message: error.message,
+  queueName,
+  cause: error,
 });
 
 /**
