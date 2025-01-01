@@ -5,7 +5,7 @@ import { createServiceError, ServiceErrorCode } from '../../types/errors.type';
 
 let redisClient: Redis | null = null;
 
-const DEFAULT_OPTIONS: RedisOptions = {
+export const DEFAULT_OPTIONS: RedisOptions = {
   host: process.env.REDIS_HOST || 'localhost',
   port: parseInt(process.env.REDIS_PORT || '6379'),
   password: process.env.REDIS_PASSWORD,

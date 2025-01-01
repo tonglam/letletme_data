@@ -1,4 +1,17 @@
-import { BaseError, ErrorDetails } from './shared.type';
+// Base error types
+export interface ErrorDetails {
+  [key: string]: unknown;
+}
+
+export interface BaseError {
+  readonly name: string;
+  readonly message: string;
+  readonly code: string;
+  readonly timestamp: Date;
+  readonly stack?: string;
+  readonly cause?: Error;
+  readonly details?: ErrorDetails;
+}
 
 /**
  * DB Error Types

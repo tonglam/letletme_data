@@ -1,21 +1,26 @@
 import { Job, Queue, Worker } from 'bullmq';
 import * as TE from 'fp-ts/TaskEither';
 import { RedisOptions } from 'ioredis';
-import { MetaJobType } from '../queues/jobs/processors/meta.processor';
+import { MetaJobType } from '../queues/types';
 import { QueueError } from './errors.type';
 
 // Operation Types
 export enum QueueOperation {
   ADD_JOB = 'ADD_JOB',
-  GET_JOB = 'GET_JOB',
   REMOVE_JOB = 'REMOVE_JOB',
+  PROCESS_JOB = 'PROCESS_JOB',
+  PAUSE_QUEUE = 'PAUSE_QUEUE',
+  RESUME_QUEUE = 'RESUME_QUEUE',
   CLEAN_QUEUE = 'CLEAN_QUEUE',
-  CLOSE_QUEUE = 'CLOSE_QUEUE',
-  GET_WORKER = 'GET_WORKER',
+  CREATE_WORKER = 'CREATE_WORKER',
   START_WORKER = 'START_WORKER',
   STOP_WORKER = 'STOP_WORKER',
-  RESET_WORKER = 'RESET_WORKER',
-  PROCESS_JOB = 'PROCESS_JOB',
+  GET_WORKER = 'GET_WORKER',
+  GET_QUEUE = 'GET_QUEUE',
+  CREATE_SCHEDULE = 'CREATE_SCHEDULE',
+  CLEANUP_JOBS = 'CLEANUP_JOBS',
+  GET_JOB_STATUS = 'GET_JOB_STATUS',
+  GET_QUEUE_METRICS = 'GET_QUEUE_METRICS',
 }
 
 // Status Types

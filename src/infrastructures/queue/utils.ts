@@ -4,8 +4,7 @@ import * as RTE from 'fp-ts/ReaderTaskEither';
 import * as TE from 'fp-ts/TaskEither';
 import { QueueConfig } from '../../configs/queue/queue.config';
 import { QueueError, QueueErrorCode } from '../../types/errors.type';
-import { BaseJobData, WorkerAdapter, WorkerEnv } from '../../types/queue.type';
-import { QueueOperation } from '../../types/shared.type';
+import { BaseJobData, QueueOperation, WorkerAdapter, WorkerEnv } from '../../types/queue.type';
 import { logQueueJob } from '../../utils/logger.util';
 import { createStandardQueueError } from '../../utils/queue.utils';
 

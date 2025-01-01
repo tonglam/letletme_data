@@ -2,15 +2,13 @@ import { Queue, QueueOptions } from 'bullmq';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import { QueueError, QueueErrorCode, createQueueError } from '../../../types/errors.type';
+import { DEFAULT_OPTIONS } from '../../redis/client';
 import { BaseJobData, QueueAdapter } from '../types';
 
 const createQueueOptions = (): QueueOptions => ({
   connection: {
-    host: process.env.REDIS_HOST || 'localhost',
-    port: parseInt(process.env.REDIS_PORT || '6379'),
-    password: process.env.REDIS_PASSWORD,
+    ...DEFAULT_OPTIONS,
     maxRetriesPerRequest: null,
-    retryStrategy: (times: number) => Math.min(times * 1000, 3000),
   },
   defaultJobOptions: {
     removeOnComplete: true,

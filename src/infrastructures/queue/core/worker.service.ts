@@ -1,9 +1,9 @@
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { createWorkerAdapter } from '../../infrastructures/queue/core/worker.adapter';
-import { QueueConnection } from '../../infrastructures/queue/types';
-import { QueueError } from '../../types/errors.type';
-import { BaseJobData, JobProcessor } from '../../types/queue.type';
+import { QueueError } from '../../../types/errors.type';
+import { BaseJobData, JobProcessor } from '../../../types/queue.type';
+import { QueueConnection } from '../types';
+import { createWorkerAdapter } from './worker.adapter';
 
 export interface WorkerService<T extends BaseJobData> {
   readonly start: () => TE.TaskEither<QueueError, void>;
@@ -24,10 +24,3 @@ export const createWorkerService = <T extends BaseJobData>(
       jobType: queueName as T['type'],
     })),
   );
-
-// Usage example:
-// const workerService = await createWorkerService(
-//   'meta',
-//   connection,
-//   createMetaProcessor(metaService),
-// )();

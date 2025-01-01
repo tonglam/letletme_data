@@ -14,7 +14,7 @@ import {
   EntryResponse,
   EntryTransfersResponse,
 } from '../../../types/entry.type';
-import { APIError, createValidationError } from '../../../types/errors.type';
+import { APIError, APIErrorCode, createAPIError } from '../../../types/errors.type';
 import { EventFixture } from '../../../types/event-fixture.type';
 import { EventLiveResponse, EventPicksResponse } from '../../../types/event-live.type';
 import { ClassicLeagueResponse, CupResponse, H2hLeagueResponse } from '../../../types/leagues.type';
@@ -173,7 +173,8 @@ export const validateEndpointResponse =
       E.tryCatch(
         () => schema.parse(data),
         (error) =>
-          createValidationError({
+          createAPIError({
+            code: APIErrorCode.VALIDATION_ERROR,
             message: 'Invalid response data',
             details: { error },
           }),

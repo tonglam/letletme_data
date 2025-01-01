@@ -1,14 +1,14 @@
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
-import { BootstrapApi } from '../../../domains/bootstrap/operations';
-import { EventRepositoryOperations } from '../../../domains/events/types';
-import { getQueueLogger } from '../../../infrastructures/logger';
-import { ServiceError } from '../../../types/errors.type';
-import { Event, toDomainEvent } from '../../../types/events.type';
+import { BootstrapApi } from '../../../../domains/bootstrap/operations';
+import { EventRepositoryOperations } from '../../../../domains/events/types';
+import { getQueueLogger } from '../../../../infrastructures/logger';
+import { ServiceError } from '../../../../types/errors.type';
+import { Event, toDomainEvent } from '../../../../types/events.type';
 import {
   createServiceIntegrationError,
   createServiceOperationError,
-} from '../../../utils/error.util';
+} from '../../../../utils/error.util';
 
 const logger = getQueueLogger();
 
