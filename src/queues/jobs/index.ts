@@ -24,15 +24,3 @@ export const createJobServices = (
       meta,
     })),
   );
-
-// Usage example:
-// const jobServices = await createJobServices(
-//   { meta: metaQueueConfig },
-//   { meta: metaService },
-// )();
-//
-// // Start worker
-// await jobServices.meta.queueService.startWorker()();
-//
-// // Schedule jobs
-// await jobServices.meta.scheduleEventsSync()();
