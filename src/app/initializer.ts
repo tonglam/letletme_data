@@ -2,19 +2,24 @@ import { PrismaClient } from '@prisma/client';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
 import { Server } from 'http';
-import { createMetaJobService } from 'src/queues/jobs/meta/core/meta.service';
 import { logger } from '../configs/app/app.config';
 import { createQueueConfig, QUEUE_NAMES } from '../configs/queue/queue.config';
 import { createBootstrapApiAdapter } from '../domains/bootstrap/adapter';
-import { eventRepository } from '../domains/events/repository';
 import { createFPLClient } from '../infrastructures/http/fpl/client';
 import { QueueService } from '../infrastructures/queue/core/queue.service';
 import { closeRedisClient, createRedisClient } from '../infrastructures/redis/client';
-import { createEventsJobService } from '../queues/jobs/meta/events/events.service';
+import { initializeMetaQueue } from '../queues/meta/core/meta.service';
 import { MetaJobData } from '../queues/types';
 import { ServiceContainer } from '../services';
 import { createEventService } from '../services/events';
-import { createServiceError, ServiceError, ServiceErrorCode } from '../types/errors.type';
+import { eventWorkflows } from '../services/events/workflow';
+import {
+  createQueueError,
+  createServiceError,
+  QueueErrorCode,
+  ServiceError,
+  ServiceErrorCode,
+} from '../types/errors.type';
 import { createServer } from './server';
 
 // Custom type for server with queue service
@@ -55,8 +60,19 @@ export const initializeApplication = (port: number): TE.TaskEither<ServiceError,
     // 3. Create job services
     TE.bind('metaJobService', () =>
       pipe(
-        createMetaJobService(createQueueConfig(QUEUE_NAMES.META), {
-          eventsService: createEventsJobService(bootstrapApi, eventRepository),
+        initializeMetaQueue(createQueueConfig(QUEUE_NAMES.META), {
+          eventsService: pipe(createEventService(bootstrapApi), eventWorkflows, (workflows) => ({
+            syncEvents: () =>
+              pipe(
+                workflows.syncEvents(),
+                TE.mapLeft((error) =>
+                  createQueueError(QueueErrorCode.JOB_PROCESSING_ERROR, 'meta', error),
+                ),
+                TE.map(() => undefined),
+              ),
+            startWorker: () => TE.right(undefined),
+            stopWorker: () => TE.right(undefined),
+          })),
           cleanup: async () => {
             logger.info('Meta cleanup started');
             // Implement cleanup logic
@@ -79,7 +95,7 @@ export const initializeApplication = (port: number): TE.TaskEither<ServiceError,
           const app = createServer(deps.services);
 
           // Start queue worker
-          await deps.metaJobService.queueService.startWorker()();
+          await deps.metaJobService.startWorker()();
           logger.info('Queue worker started successfully');
 
           // Start server

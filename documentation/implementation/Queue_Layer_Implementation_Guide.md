@@ -19,16 +19,15 @@ src/
 │   ├── queue.type.ts              # Queue-related types
 │   └── job.type.ts                # Job-related types
 └── queues/                         # Queue implementation layer
-    └── jobs/                       # Job implementations
-        ├── meta/                   # Meta jobs group
-        │   ├── core/               # Core meta job functionality
-        │   │   ├── meta.processor.ts    # Meta job processor
-        │   │   └── meta.service.ts      # Meta job service
-        │   └── events/             # Events-specific jobs
-        │       ├── events.processor.ts   # Events processor
-        │       └── events.service.ts     # Events service
-        ├── live/                   # Live update jobs
-        └── daily/                  # Daily update jobs
+    ├── meta/                       # Meta jobs group
+    │   ├── core/                   # Core meta job functionality
+    │   │   ├── meta.processor.ts   # Meta job processor
+    │   │   └── meta.service.ts     # Meta job service
+    │   └── events/                 # Events-specific jobs
+    │       ├── events.processor.ts # Events processor
+    │       └── events.service.ts   # Events service
+    ├── live/                       # Live update jobs
+    └── daily/                      # Daily update jobs
 
 ```
 
