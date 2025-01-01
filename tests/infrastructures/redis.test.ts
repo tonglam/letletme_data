@@ -2,7 +2,7 @@ import * as E from 'fp-ts/Either';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
 import { redisClient } from '../../src/infrastructures/cache/client';
-import { createRedisCache, RedisCache } from '../../src/infrastructures/cache/redis';
+import { createRedisCache, RedisCache } from '../../src/infrastructures/cache/redis-cache';
 
 const TEST_PREFIX = 'test:redis:';
 let cache: RedisCache<string>;

@@ -17,7 +17,7 @@ import {
   type EventCacheConfig,
   type EventDataProvider,
 } from '../../domains/events/types';
-import { createRedisCache } from '../../infrastructures/cache/redis';
+import { createRedisCache } from '../../infrastructures/cache/redis-cache';
 import { getCurrentSeason } from '../../types/base.type';
 import type { BootStrapResponse } from '../../types/bootstrap.type';
 import { ServiceError } from '../../types/errors.type';
