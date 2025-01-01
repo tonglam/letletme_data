@@ -2,7 +2,12 @@ import { Worker, WorkerOptions } from 'bullmq';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import { QueueError, QueueErrorCode, createQueueError } from '../../../types/errors.type';
-import { BaseJobData, JobProcessor, QueueConnection, WorkerAdapter } from '../types';
+import {
+  BaseJobData,
+  JobProcessor,
+  QueueConnection,
+  WorkerAdapter,
+} from '../../../types/queue.type';
 
 const createWorkerOptions = (connection: QueueConnection): WorkerOptions => ({
   connection: {

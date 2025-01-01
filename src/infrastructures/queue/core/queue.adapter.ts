@@ -2,13 +2,13 @@ import { Queue, QueueOptions } from 'bullmq';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import { QueueError, QueueErrorCode, createQueueError } from '../../../types/errors.type';
-import { BaseJobData, QueueAdapter, QueueConnection } from '../types';
+import { BaseJobData, QueueAdapter } from '../types';
 
-const createQueueOptions = (connection: QueueConnection): QueueOptions => ({
+const createQueueOptions = (): QueueOptions => ({
   connection: {
-    host: connection.host,
-    port: connection.port,
-    password: connection.password,
+    host: process.env.REDIS_HOST || 'localhost',
+    port: parseInt(process.env.REDIS_PORT || '6379'),
+    password: process.env.REDIS_PASSWORD,
     maxRetriesPerRequest: null,
     retryStrategy: (times: number) => Math.min(times * 1000, 3000),
   },
@@ -25,12 +25,11 @@ const createQueueOptions = (connection: QueueConnection): QueueOptions => ({
 
 export const createQueueAdapter = <T extends BaseJobData>(
   name: string,
-  connection: QueueConnection,
 ): TE.TaskEither<QueueError, QueueAdapter<T>> =>
   pipe(
     TE.tryCatch(
       async () => {
-        const queue = new Queue(name, createQueueOptions(connection));
+        const queue = new Queue(name, createQueueOptions());
 
         return {
           queue,

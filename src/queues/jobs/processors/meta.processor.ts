@@ -1,9 +1,9 @@
 import { Job } from 'bullmq';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { BaseJobData, JobProcessor } from '../../../infrastructures/queue/types';
 import { createQueueError } from '../../../infrastructures/queue/utils';
 import { QueueError, QueueErrorCode } from '../../../types/errors.type';
+import { JobProcessor, JobType } from '../../../types/queue.type';
 
 export interface MetaService {
   readonly sync: () => TE.TaskEither<Error, void>;
@@ -12,18 +12,21 @@ export interface MetaService {
 
 export type MetaJobType = 'BOOTSTRAP' | 'CLEANUP';
 
-export interface MetaJobData extends BaseJobData {
-  readonly type: MetaJobType;
+export interface MetaJobData {
+  readonly type: JobType.META;
+  readonly timestamp: Date;
   readonly data: {
     readonly operation: 'SYNC' | 'CLEANUP';
+    readonly type: MetaJobType;
   };
 }
 
-export const createMetaProcessor = (metaService: MetaService): JobProcessor<MetaJobData> => {
-  return (job: Job<MetaJobData>): TE.TaskEither<QueueError, void> => {
-    const { type, data } = job.data;
+export const createMetaProcessor =
+  (metaService: MetaService): JobProcessor<MetaJobData> =>
+  (job: Job<MetaJobData>): TE.TaskEither<QueueError, void> => {
+    const { data } = job.data;
 
-    switch (type) {
+    switch (data.type) {
       case 'BOOTSTRAP':
         if (data.operation === 'SYNC') {
           return pipe(
@@ -59,9 +62,8 @@ export const createMetaProcessor = (metaService: MetaService): JobProcessor<Meta
     return TE.left(
       createQueueError({
         code: QueueErrorCode.INVALID_JOB_DATA,
-        message: `Invalid job type or operation: ${type} - ${data.operation}`,
+        message: `Invalid job type or operation: ${data.type} - ${data.operation}`,
         queueName: job.queueName,
       }),
     );
   };
-};

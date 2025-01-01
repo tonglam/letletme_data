@@ -1,17 +1,17 @@
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import { createWorkerAdapter } from '../../infrastructures/queue/core/worker.adapter';
-import { JobProcessor, QueueConnection } from '../../infrastructures/queue/types';
+import { QueueConnection } from '../../infrastructures/queue/types';
 import { QueueError } from '../../types/errors.type';
-import { MetaJobData } from '../jobs/processors/meta.processor';
+import { BaseJobData, JobProcessor } from '../../types/queue.type';
 
-export interface WorkerService<T extends MetaJobData> {
+export interface WorkerService<T extends BaseJobData> {
   readonly start: () => TE.TaskEither<QueueError, void>;
   readonly stop: () => TE.TaskEither<QueueError, void>;
   readonly jobType: T['type'];
 }
 
-export const createWorkerService = <T extends MetaJobData>(
+export const createWorkerService = <T extends BaseJobData>(
   queueName: string,
   connection: QueueConnection,
   processor: JobProcessor<T>,
@@ -21,7 +21,7 @@ export const createWorkerService = <T extends MetaJobData>(
     TE.map((worker) => ({
       start: () => worker.start(),
       stop: () => worker.stop(),
-      jobType: 'BOOTSTRAP' as T['type'],
+      jobType: queueName as T['type'],
     })),
   );
 
