@@ -1,7 +1,7 @@
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import { initializeApp } from './app/initializer';
-import { logger } from './configs/app/app.config';
+import { logger } from './config/app/app.config';
 
 const main = async () => {
   try {

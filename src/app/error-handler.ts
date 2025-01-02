@@ -1,5 +1,5 @@
 import { Application, Request, Response } from 'express';
-import { logger } from '../configs/app/app.config';
+import { logger } from '../config/app/app.config';
 
 export const setupErrorHandler = (app: Application): void => {
   app.use((err: Error, _req: Request, res: Response) => {

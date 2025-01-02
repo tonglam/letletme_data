@@ -1,6 +1,6 @@
 import { Application } from 'express';
 import { Server } from 'http';
-import { ServiceContainer } from '../services';
+import { ServiceContainer } from '../service';
 import { setupErrorHandler } from './error-handler';
 import { setupMiddleware } from './middleware';
 import { setupRoutes } from './routes';

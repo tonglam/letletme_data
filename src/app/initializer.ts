@@ -1,10 +1,10 @@
 import { Application } from 'express';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { createFPLClient } from '../infrastructures/http/fpl/client';
-import { FPLEndpoints } from '../infrastructures/http/fpl/types';
-import { ServiceContainer, ServiceKey } from '../services';
-import { createEventService } from '../services/events';
+import { createFPLClient } from '../infrastructure/http/fpl/client';
+import { FPLEndpoints } from '../infrastructure/http/fpl/types';
+import { ServiceContainer, ServiceKey } from '../service';
+import { createEventService } from '../service/event';
 import { APIError, APIErrorCode, createAPIError } from '../types/errors.type';
 import { createServer } from './server';
 

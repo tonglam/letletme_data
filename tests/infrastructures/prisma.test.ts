@@ -1,6 +1,6 @@
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
-import { connectDB, disconnectDB, prisma } from '../../src/infrastructures/db/prisma';
+import { connectDB, disconnectDB, prisma } from '../../src/infrastructure/db/prisma';
 
 interface QueryResult {
   result: number;

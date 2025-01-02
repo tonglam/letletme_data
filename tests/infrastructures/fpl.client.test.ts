@@ -1,6 +1,6 @@
 import * as E from 'fp-ts/Either';
-import { createFPLClient } from '../../src/infrastructures/http/fpl/client';
-import { FPLEndpoints } from '../../src/infrastructures/http/fpl/types';
+import { createFPLClient } from '../../src/infrastructure/http/fpl/client';
+import { FPLEndpoints } from '../../src/infrastructure/http/fpl/types';
 
 describe('FPL Client Integration Tests', () => {
   let fplClient: FPLEndpoints;

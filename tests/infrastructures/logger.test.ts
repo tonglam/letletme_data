@@ -3,7 +3,7 @@ import {
   getFplApiLogger,
   getQueueLogger,
   getWorkflowLogger,
-} from '../../src/infrastructures/logger';
+} from '../../src/infrastructure/logger';
 
 describe('Logger Infrastructure Tests', () => {
   describe('Logger Creation', () => {

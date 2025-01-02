@@ -11,9 +11,9 @@
     "rootDir": ".",
     "baseUrl": ".",
     "paths": {
-      "infrastructure/*": ["src/infrastructures/*"],
-      "services/*": ["src/services/*"],
-      "domains/*": ["src/domains/*"],
+      "infrastructure/*": ["src/infrastructure/*"],
+      "services/*": ["src/service/*"],
+      "domains/*": ["src/domain/*"],
       "src/*": ["src/*"]
     },
     "strictNullChecks": true,
