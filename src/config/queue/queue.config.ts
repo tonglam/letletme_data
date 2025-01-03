@@ -1,85 +1,34 @@
-import { JobStatus } from '../../types/queue.type';
-import { REDIS_CONFIG, REDIS_KEY_PREFIXES } from '../redis/redis.config';
+import IORedis from 'ioredis';
+import { QueueConnection } from '../../types/queue.type';
 
-/**
- * Queue configuration interface
- */
 export interface QueueConfig {
-  readonly name: string;
-  readonly prefix: string;
-  readonly connection: typeof REDIS_CONFIG;
+  readonly producerConnection: QueueConnection;
+  readonly consumerConnection: QueueConnection;
 }
 
-/**
- * Queue cleanup options interface
- */
-export interface QueueCleanupOptions {
-  readonly age?: number;
-  readonly limit?: number;
-  readonly status?: JobStatus;
-}
+// Create reusable Redis connections
+const createProducerConnection = () =>
+  new IORedis({
+    host: process.env.REDIS_HOST || 'localhost',
+    port: parseInt(process.env.REDIS_PORT || '6379', 10),
+    maxRetriesPerRequest: 1, // Fast failure for producers (e.g., HTTP endpoints)
+  });
 
-/**
- * Queue configuration constants
- */
-export const QUEUE_CONSTANTS = {
-  PRIORITIES: {
-    HIGH: 1,
-    MEDIUM: 2,
-    LOW: 3,
-  },
-  ATTEMPTS: {
-    HIGH: 5,
-    MEDIUM: 3,
-    LOW: 1,
-  },
-  BACKOFF: {
-    TYPE: 'exponential' as const,
-    DELAY: 1000, // 1 second
-  },
-  CLEANUP: {
-    AGE: 24 * 60 * 60 * 1000, // 24 hours
-    LIMIT: 1000,
-  },
-  LOCK_DURATION: 30000, // 30 seconds
-} as const;
+const createConsumerConnection = () =>
+  new IORedis({
+    host: process.env.REDIS_HOST || 'localhost',
+    port: parseInt(process.env.REDIS_PORT || '6379', 10),
+    maxRetriesPerRequest: null, // Persistent connections for consumers
+    enableReadyCheck: true,
+  });
 
-/**
- * Job schedule patterns (cron expressions)
- */
-export const JOB_SCHEDULES = {
-  // Meta jobs
-  META_UPDATE: '35 6 * * *', // 6:35 AM UTC daily
+// Shared connections for reuse
+export const sharedConnections = {
+  producer: createProducerConnection(),
+  consumer: createConsumerConnection(),
+};
 
-  // Live jobs
-  LIVE_UPDATE: '*/1 * * * *', // Every minute
-
-  // Post-match jobs
-  POST_MATCH_UPDATE: '*/5 * * * *', // Every 5 minutes
-
-  // Post-gameweek jobs
-  POST_GAMEWEEK_UPDATE: '0 */6 * * *', // Every 6 hours
-
-  // Daily jobs
-  DAILY_UPDATE: '0 0 * * *', // Midnight UTC
-} as const;
-
-/**
- * Queue names
- */
-export const QUEUE_NAMES = {
-  META: 'meta',
-  LIVE: 'live',
-  POST_MATCH: 'post-match',
-  POST_GAMEWEEK: 'post-gameweek',
-  DAILY: 'daily',
-} as const;
-
-/**
- * Queue configuration factory
- */
-export const createQueueConfig = (queueName: string): QueueConfig => ({
-  name: queueName,
-  prefix: REDIS_KEY_PREFIXES.QUEUE,
-  connection: REDIS_CONFIG,
-});
+export const queueConfig: QueueConfig = {
+  producerConnection: sharedConnections.producer,
+  consumerConnection: sharedConnections.consumer,
+};

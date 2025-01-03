@@ -1,5 +1,6 @@
 import { Job, Queue, Worker } from 'bullmq';
 import * as TE from 'fp-ts/TaskEither';
+import { Redis } from 'ioredis';
 import { QueueError } from './errors.type';
 
 // Base Job Data
@@ -53,8 +54,9 @@ export interface SequentialQueueAdapter<T extends BaseJobData> {
 export type JobProcessor<T extends BaseJobData> = (job: Job<T>) => TE.TaskEither<QueueError, void>;
 
 // Queue Connection Type
-export interface QueueConnection {
-  readonly host: string;
-  readonly port: number;
-  readonly password?: string;
-}
+export type QueueConnection =
+  | Redis
+  | {
+      host: string;
+      port: number;
+    };

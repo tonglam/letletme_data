@@ -16,6 +16,25 @@ export const DEFAULT_OPTIONS: RedisOptions = {
     }
     return Math.min(times * 1000, 3000);
   },
+  enableReadyCheck: true,
+  maxRetriesPerRequest: 3,
+  connectTimeout: 5000,
+};
+
+export const TEST_OPTIONS: RedisOptions = {
+  ...DEFAULT_OPTIONS,
+  keyPrefix: 'test:',
+  retryStrategy: (times: number) => {
+    if (times > 5) {
+      return null;
+    }
+    return Math.min(times * 1000, 5000);
+  },
+  maxRetriesPerRequest: 5,
+  connectTimeout: 10000,
+  commandTimeout: 10000,
+  lazyConnect: false,
+  enableOfflineQueue: true,
 };
 
 export const createRedisClient = (options: RedisOptions = {}): TE.TaskEither<Error, Redis> =>
@@ -26,6 +45,12 @@ export const createRedisClient = (options: RedisOptions = {}): TE.TaskEither<Err
           redisClient = new IORedis({
             ...DEFAULT_OPTIONS,
             ...options,
+          });
+
+          // Wait for ready event
+          await new Promise<void>((resolve, reject) => {
+            redisClient?.once('ready', () => resolve());
+            redisClient?.once('error', (err) => reject(err));
           });
         }
         return redisClient;
