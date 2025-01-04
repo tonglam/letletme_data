@@ -9,7 +9,7 @@ import { JobScheduler, JobSchedulerOptions, JobTemplate, SchedulerService } from
 const logger = getQueueLogger();
 
 const mapToJobScheduler = (job: { key: string; nextRun?: Date; lastRun?: Date }): JobScheduler => ({
-  jobId: job.key,
+  jobId: job.key.split(':')[0],
   nextRun: job.nextRun,
   lastRun: job.lastRun,
 });
@@ -56,10 +56,17 @@ export const createSchedulerService = <T extends BaseJobData>(
     pipe(
       TE.tryCatch(
         async () => {
-          const start = options?.page ? (options.page - 1) * (options.pageSize || 10) : 0;
-          const end = options?.page ? start + (options.pageSize || 10) : -1;
-          const repeatable = await queue.getRepeatableJobs(start, end, false);
-          return repeatable.map(mapToJobScheduler);
+          // Get all repeatable jobs first
+          const allJobs = await queue.getRepeatableJobs();
+
+          // Then handle pagination in memory
+          if (options?.page && options?.pageSize) {
+            const start = (options.page - 1) * options.pageSize;
+            const end = start + options.pageSize;
+            return allJobs.slice(start, end).map(mapToJobScheduler);
+          }
+
+          return allJobs.map(mapToJobScheduler);
         },
         (error) => createQueueError(QueueErrorCode.GET_JOB_SCHEDULERS, name, error as Error),
       ),
