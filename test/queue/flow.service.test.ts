@@ -13,7 +13,7 @@ interface TestJobData extends BaseJobData {
 }
 
 describe('Flow Service', () => {
-  const queueName = 'test-flow-queue';
+  const queueName = 'test-queue';
   let queueService: QueueServiceImpl<TestJobData>;
   let flowService: FlowService<TestJobData>;
   let worker: Worker<TestJobData>;
@@ -63,6 +63,7 @@ describe('Flow Service', () => {
     it('should handle parent-child relationship correctly', async () => {
       // Create parent job with specific jobId
       const parentJobId = 'parent-job-1';
+      const childJobId = 'child-job-1';
       const parentFlow: FlowJob<TestJobData> = {
         name: 'flow' as JobName,
         queueName,
@@ -83,7 +84,7 @@ describe('Flow Service', () => {
               name: 'flow' as JobName,
               data: { value: 'child' },
             },
-            opts: { jobId: 'child-job-1' },
+            opts: { jobId: childJobId },
           },
         ],
       };
@@ -106,14 +107,35 @@ describe('Flow Service', () => {
 
           if (E.isRight(dependencies)) {
             const deps = dependencies.right;
-            expect(deps).toHaveLength(1);
-            expect(deps[0].name).toBe('flow');
-            expect(deps[0].data).toEqual({
-              type: 'META',
-              timestamp: expect.any(Date),
-              name: 'flow',
-              data: { value: 'child' },
-            });
+            expect(deps).toHaveLength(2); // Should have both parent and child
+
+            // Verify parent job
+            const parentDep = deps.find((d) => d.opts?.jobId === parentJobId);
+            expect(parentDep).toBeDefined();
+            if (parentDep) {
+              expect(parentDep.name).toBe('flow');
+              expect(parentDep.data).toEqual({
+                type: 'META',
+                timestamp: expect.any(Date),
+                name: 'flow',
+                data: { value: 'parent' },
+              });
+            }
+
+            // Verify child job
+            const childDep = deps.find((d) => d.opts?.jobId === childJobId);
+            expect(childDep).toBeDefined();
+            if (childDep && childDep.opts) {
+              expect(childDep.name).toBe('flow');
+              expect(childDep.data).toEqual({
+                type: 'META',
+                timestamp: expect.any(Date),
+                name: 'flow',
+                data: { value: 'child' },
+              });
+              // BullMQ adds 'bull:' prefix to queue names
+              expect(childDep.opts.parent?.queue).toBe('test-queue');
+            }
           }
 
           // Verify child values can be accessed from parent

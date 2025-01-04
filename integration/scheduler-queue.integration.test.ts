@@ -4,12 +4,12 @@ config();
 import { Job } from 'bullmq';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { QueueConfig } from '../../../src/config/queue/queue.config';
-import { createQueueService } from '../../../src/infrastructure/queue/core/queue.service';
-import { createWorkerService } from '../../../src/infrastructure/queue/core/worker.service';
-import { JobScheduler } from '../../../src/infrastructure/queue/types';
-import { QueueError } from '../../../src/types/errors.type';
-import { JobData } from '../../../src/types/job.type';
+import { QueueConfig } from '../src/config/queue/queue.config';
+import { createQueueService } from '../src/infrastructure/queue/core/queue.service';
+import { createWorkerService } from '../src/infrastructure/queue/core/worker.service';
+import { JobScheduler } from '../src/infrastructure/queue/types';
+import { QueueError } from '../src/types/errors.type';
+import { JobData } from '../src/types/job.type';
 
 describe('Scheduler-Queue Integration Tests', () => {
   const queueName = 'test-scheduler-queue';
