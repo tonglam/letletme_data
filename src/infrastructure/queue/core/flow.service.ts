@@ -57,24 +57,45 @@ export const createFlowService = <T extends BaseJobData>(
           );
 
           // Convert to FlowJob array with explicit typing
-          const flowJobs: FlowJob<T>[] = children.map((child) => {
-            const childData = child.data as T;
-            return {
-              name: childData.name as JobName,
+          const flowJobs: FlowJob<T>[] = [];
+
+          // Add parent job if it exists
+          if (job && job.id) {
+            const jobData = job.data as T;
+            flowJobs.push({
+              name: jobData.name as JobName,
               queueName: queue.name,
               data: {
-                ...childData,
-                timestamp: new Date(childData.timestamp),
+                ...jobData,
+                timestamp: new Date(jobData.timestamp),
               } as T,
               opts: {
-                jobId: child.id,
-                parent: {
-                  id: jobId,
-                  queue: queue.name,
-                },
+                jobId: job.id,
               },
-            };
-          });
+            });
+          }
+
+          // Add child jobs
+          flowJobs.push(
+            ...children.map((child) => {
+              const childData = child.data as T;
+              return {
+                name: childData.name as JobName,
+                queueName: queue.name,
+                data: {
+                  ...childData,
+                  timestamp: new Date(childData.timestamp),
+                } as T,
+                opts: {
+                  jobId: child.id,
+                  parent: {
+                    id: jobId,
+                    queue: queue.name,
+                  },
+                },
+              };
+            }),
+          );
 
           return flowJobs;
         },

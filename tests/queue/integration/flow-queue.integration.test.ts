@@ -1,3 +1,6 @@
+import { config } from 'dotenv';
+config();
+
 import { Job } from 'bullmq';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
@@ -14,18 +17,57 @@ describe('Flow-Queue Integration Tests', () => {
   const defaultJobName = 'meta' as JobName;
   const config: QueueConfig = {
     producerConnection: {
-      host: 'localhost',
-      port: 6379,
+      host: process.env.REDIS_HOST || '',
+      port: Number(process.env.REDIS_PORT) || 6379,
+      password: process.env.REDIS_PASSWORD || '',
     },
     consumerConnection: {
-      host: 'localhost',
-      port: 6379,
+      host: process.env.REDIS_HOST || '',
+      port: Number(process.env.REDIS_PORT) || 6379,
+      password: process.env.REDIS_PASSWORD || '',
     },
   };
+
+  // Validate Redis configuration
+  beforeAll(() => {
+    if (!process.env.REDIS_HOST || !process.env.REDIS_PASSWORD) {
+      throw new Error('Redis configuration is missing. Please check your .env file.');
+    }
+  });
+
+  // Cleanup before each test
+  beforeEach(async () => {
+    const cleanup = await pipe(
+      createQueueService<JobData>(queueName, config),
+      TE.chain((service) => service.obliterate()),
+    )();
+    expect(cleanup._tag).toBe('Right');
+  });
 
   describe('Flow Job Processing', () => {
     test('should process flow jobs in correct order', async () => {
       const processedJobs: string[] = [];
+      let checkInterval: NodeJS.Timeout;
+
+      const jobsProcessed = new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          clearInterval(checkInterval);
+          reject(
+            new Error(
+              'Flow jobs processing timeout - jobs were not processed within the expected timeframe',
+            ),
+          );
+        }, 20000);
+
+        checkInterval = setInterval(() => {
+          if (processedJobs.length === 3) {
+            // parent + 2 children
+            clearInterval(checkInterval);
+            clearTimeout(timeout);
+            resolve();
+          }
+        }, 500);
+      });
 
       const result = await pipe(
         TE.Do,
@@ -38,9 +80,14 @@ describe('Flow-Queue Integration Tests', () => {
           ),
         ),
         TE.bind('workerService', () =>
-          createWorkerService<JobData>(queueName, config, async (job: Job<JobData>) => {
-            processedJobs.push(job.name);
-          }),
+          createWorkerService<JobData>(
+            queueName,
+            config,
+            async (job: Job<JobData>) => {
+              processedJobs.push(job.name);
+            },
+            { autorun: true },
+          ),
         ),
         TE.chain(({ flowService, workerService }) =>
           pipe(
@@ -77,10 +124,9 @@ describe('Flow-Queue Integration Tests', () => {
                 ],
               },
             ),
-            // Wait for job processing
             TE.chain(() =>
               TE.tryCatch(
-                () => new Promise((resolve) => setTimeout(resolve, 2000)),
+                () => jobsProcessed,
                 (error) => error as QueueError,
               ),
             ),
@@ -92,15 +138,35 @@ describe('Flow-Queue Integration Tests', () => {
       expect(result._tag).toBe('Right');
       expect(processedJobs).toContain('child1');
       expect(processedJobs).toContain('child2');
-      expect(processedJobs).toContain('parent');
+      expect(processedJobs).toContain('meta');
       // Parent should be processed after children
-      expect(processedJobs.indexOf('parent')).toBeGreaterThan(processedJobs.indexOf('child1'));
-      expect(processedJobs.indexOf('parent')).toBeGreaterThan(processedJobs.indexOf('child2'));
-    });
+      expect(processedJobs.indexOf('meta')).toBeGreaterThan(processedJobs.indexOf('child1'));
+      expect(processedJobs.indexOf('meta')).toBeGreaterThan(processedJobs.indexOf('child2'));
+    }, 30000);
 
     test('should handle flow job failure', async () => {
       const processedJobs: string[] = [];
       const failedJobs: string[] = [];
+      let checkInterval: NodeJS.Timeout;
+
+      const jobsProcessed = new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          clearInterval(checkInterval);
+          reject(
+            new Error(
+              'Flow jobs processing timeout - jobs were not processed within the expected timeframe',
+            ),
+          );
+        }, 20000);
+
+        checkInterval = setInterval(() => {
+          if (failedJobs.includes('child1') && processedJobs.includes('child2')) {
+            clearInterval(checkInterval);
+            clearTimeout(timeout);
+            resolve();
+          }
+        }, 500);
+      });
 
       const result = await pipe(
         TE.Do,
@@ -113,13 +179,18 @@ describe('Flow-Queue Integration Tests', () => {
           ),
         ),
         TE.bind('workerService', () =>
-          createWorkerService<JobData>(queueName, config, async (job: Job<JobData>) => {
-            if (job.name === 'child1') {
-              failedJobs.push(job.name);
-              throw new Error('Simulated child failure');
-            }
-            processedJobs.push(job.name);
-          }),
+          createWorkerService<JobData>(
+            queueName,
+            config,
+            async (job: Job<JobData>) => {
+              if (job.name === 'child1') {
+                failedJobs.push(job.name);
+                throw new Error('Simulated child failure');
+              }
+              processedJobs.push(job.name);
+            },
+            { autorun: true },
+          ),
         ),
         TE.chain(({ flowService, workerService }) =>
           pipe(
@@ -156,10 +227,9 @@ describe('Flow-Queue Integration Tests', () => {
                 ],
               },
             ),
-            // Wait for job processing
             TE.chain(() =>
               TE.tryCatch(
-                () => new Promise((resolve) => setTimeout(resolve, 2000)),
+                () => jobsProcessed,
                 (error) => error as QueueError,
               ),
             ),
@@ -173,7 +243,7 @@ describe('Flow-Queue Integration Tests', () => {
       expect(processedJobs).toContain('child2');
       // Parent should not be processed due to child failure
       expect(processedJobs).not.toContain('parent');
-    });
+    }, 30000);
 
     test('should get flow dependencies', async () => {
       const result = await pipe(
@@ -191,7 +261,7 @@ describe('Flow-Queue Integration Tests', () => {
             flowService.addJob(
               {
                 type: 'META',
-                name: 'parent' as JobName,
+                name: defaultJobName,
                 data: { value: 1 },
                 timestamp: new Date(),
               },
@@ -220,10 +290,10 @@ describe('Flow-Queue Integration Tests', () => {
       if (result._tag === 'Right') {
         const dependencies = result.right as FlowJob<JobData>[];
         expect(dependencies.length).toBe(2); // Parent and one child
-        expect(dependencies.find((d: FlowJob<JobData>) => d.name === 'parent')).toBeDefined();
+        expect(dependencies.find((d: FlowJob<JobData>) => d.name === defaultJobName)).toBeDefined();
         expect(dependencies.find((d: FlowJob<JobData>) => d.name === 'child1')).toBeDefined();
       }
-    });
+    }, 30000);
   });
 
   // Cleanup after each test
