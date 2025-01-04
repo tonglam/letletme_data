@@ -8,7 +8,6 @@ import { getQueueLogger } from '../../logger';
 import { WorkerOptions, WorkerService } from '../types';
 
 const logger = getQueueLogger();
-const isTest = process.env.NODE_ENV === 'test';
 
 export const createWorkerService = <T extends JobData>(
   name: string,
@@ -22,27 +21,21 @@ export const createWorkerService = <T extends JobData>(
         const worker = new Worker<T>(
           name,
           async (job: Job<T>) => {
-            if (!isTest) {
-              logger.info({ jobId: job.id, type: job.name }, 'Processing job');
-            }
+            logger.info({ jobId: job.id, type: job.name }, 'Processing job');
 
             try {
               await processor(job);
-              if (!isTest) {
-                logger.info({ jobId: job.id, type: job.name }, 'Job completed');
-              }
+              logger.info({ jobId: job.id, type: job.name }, 'Job completed');
             } catch (error) {
               const queueError = createQueueError(
                 QueueErrorCode.PROCESSING_ERROR,
                 name,
                 error as Error,
               );
-              if (!isTest) {
-                logger.error(
-                  { jobId: job.id, type: job.name, error: queueError },
-                  'Job processing failed',
-                );
-              }
+              logger.error(
+                { jobId: job.id, type: job.name, error: queueError },
+                'Job processing failed',
+              );
               throw queueError;
             }
           },
@@ -59,9 +52,7 @@ export const createWorkerService = <T extends JobData>(
         await new Promise<void>((resolve) => worker.once('ready', resolve));
 
         worker.on('error', (error: Error) => {
-          if (!isTest) {
-            logger.error({ name, error }, 'Worker error occurred');
-          }
+          logger.error({ name, error }, 'Worker error occurred');
         });
 
         const start = (): TE.TaskEither<QueueError, void> =>
@@ -69,9 +60,7 @@ export const createWorkerService = <T extends JobData>(
             TE.tryCatch(
               async () => {
                 await worker.run();
-                if (!isTest) {
-                  logger.info({ name }, 'Worker started');
-                }
+                logger.info({ name }, 'Worker started');
               },
               (error) => createQueueError(QueueErrorCode.START_WORKER, name, error as Error),
             ),
@@ -82,9 +71,7 @@ export const createWorkerService = <T extends JobData>(
             TE.tryCatch(
               async () => {
                 await worker.close();
-                if (!isTest) {
-                  logger.info({ name }, 'Worker stopped');
-                }
+                logger.info({ name }, 'Worker stopped');
               },
               (error) => createQueueError(QueueErrorCode.STOP_WORKER, name, error as Error),
             ),
@@ -100,9 +87,7 @@ export const createWorkerService = <T extends JobData>(
               TE.tryCatch(
                 async () => {
                   await worker.pause(force);
-                  if (!isTest) {
-                    logger.info({ name }, 'Worker paused');
-                  }
+                  logger.info({ name }, 'Worker paused');
                 },
                 (error) => createQueueError(QueueErrorCode.PAUSE_QUEUE, name, error as Error),
               ),
@@ -112,18 +97,14 @@ export const createWorkerService = <T extends JobData>(
               TE.tryCatch(
                 async () => {
                   await worker.resume();
-                  if (!isTest) {
-                    logger.info({ name }, 'Worker resumed');
-                  }
+                  logger.info({ name }, 'Worker resumed');
                 },
                 (error) => createQueueError(QueueErrorCode.RESUME_QUEUE, name, error as Error),
               ),
             ),
           setConcurrency: (concurrency: number) => {
             worker.concurrency = concurrency;
-            if (!isTest) {
-              logger.info({ name, concurrency }, 'Worker concurrency updated');
-            }
+            logger.info({ name, concurrency }, 'Worker concurrency updated');
           },
         };
       },
