@@ -25,13 +25,9 @@ import {
 const isQueueError = (error: unknown): error is QueueError =>
   typeof error === 'object' &&
   error !== null &&
-  'type' in error &&
-  error !== null &&
   'code' in error &&
-  'message' in error &&
-  'queueName' in error &&
-  (error as QueueError).type === 'QUEUE_ERROR' &&
-  Object.values(QueueErrorCode).includes((error as QueueError).code);
+  'context' in error &&
+  'error' in error;
 
 // ============ API Error Handlers ============
 
@@ -322,9 +318,9 @@ export const createQueueConnectionError = (params: {
   queueName: string;
   cause?: Error;
 }): QueueError => ({
-  type: 'QUEUE_ERROR',
-  code: QueueErrorCode.QUEUE_CONNECTION_ERROR,
-  ...params,
+  code: QueueErrorCode.CREATE_QUEUE,
+  context: params.queueName,
+  error: new Error(params.message, { cause: params.cause }),
 });
 
 /**
@@ -335,9 +331,9 @@ export const createQueueProcessingError = (params: {
   queueName: string;
   cause?: Error;
 }): QueueError => ({
-  type: 'QUEUE_ERROR',
-  code: QueueErrorCode.JOB_PROCESSING_ERROR,
-  ...params,
+  code: QueueErrorCode.PROCESSING_ERROR,
+  context: params.queueName,
+  error: new Error(params.message, { cause: params.cause }),
 });
 
 // ============ Error Type Conversions ============
@@ -358,19 +354,20 @@ const dbErrorToApiErrorCode: Record<DBErrorCode, APIErrorCode> = {
  * Maps queue error codes to API error codes
  */
 const queueErrorToApiErrorCode: Record<QueueErrorCode, APIErrorCode> = {
-  [QueueErrorCode.QUEUE_CONNECTION_ERROR]: APIErrorCode.SERVICE_ERROR,
-  [QueueErrorCode.QUEUE_INITIALIZATION_ERROR]: APIErrorCode.INTERNAL_SERVER_ERROR,
-  [QueueErrorCode.WORKER_START_ERROR]: APIErrorCode.INTERNAL_SERVER_ERROR,
-  [QueueErrorCode.WORKER_STOP_ERROR]: APIErrorCode.INTERNAL_SERVER_ERROR,
-  [QueueErrorCode.JOB_PROCESSING_ERROR]: APIErrorCode.INTERNAL_SERVER_ERROR,
-  [QueueErrorCode.INVALID_JOB_DATA]: APIErrorCode.VALIDATION_ERROR,
-  [QueueErrorCode.REMOVE_JOB]: APIErrorCode.INTERNAL_SERVER_ERROR,
-  [QueueErrorCode.PROCESSING_ERROR]: APIErrorCode.INTERNAL_SERVER_ERROR,
-  [QueueErrorCode.START_WORKER]: APIErrorCode.INTERNAL_SERVER_ERROR,
   [QueueErrorCode.CREATE_QUEUE]: APIErrorCode.INTERNAL_SERVER_ERROR,
   [QueueErrorCode.ADD_JOB]: APIErrorCode.INTERNAL_SERVER_ERROR,
-  [QueueErrorCode.STOP_WORKER]: APIErrorCode.INTERNAL_SERVER_ERROR,
+  [QueueErrorCode.REMOVE_JOB]: APIErrorCode.INTERNAL_SERVER_ERROR,
+  [QueueErrorCode.PAUSE_QUEUE]: APIErrorCode.INTERNAL_SERVER_ERROR,
+  [QueueErrorCode.RESUME_QUEUE]: APIErrorCode.INTERNAL_SERVER_ERROR,
+  [QueueErrorCode.INVALID_JOB_DATA]: APIErrorCode.VALIDATION_ERROR,
   [QueueErrorCode.CREATE_WORKER]: APIErrorCode.INTERNAL_SERVER_ERROR,
+  [QueueErrorCode.START_WORKER]: APIErrorCode.INTERNAL_SERVER_ERROR,
+  [QueueErrorCode.STOP_WORKER]: APIErrorCode.INTERNAL_SERVER_ERROR,
+  [QueueErrorCode.PROCESSING_ERROR]: APIErrorCode.INTERNAL_SERVER_ERROR,
+  [QueueErrorCode.GET_FLOW_DEPENDENCIES]: APIErrorCode.INTERNAL_SERVER_ERROR,
+  [QueueErrorCode.GET_CHILDREN_VALUES]: APIErrorCode.INTERNAL_SERVER_ERROR,
+  [QueueErrorCode.CREATE_JOB_SCHEDULER]: APIErrorCode.INTERNAL_SERVER_ERROR,
+  [QueueErrorCode.GET_JOB_SCHEDULERS]: APIErrorCode.INTERNAL_SERVER_ERROR,
 };
 
 /**
@@ -381,6 +378,18 @@ const isDBError = (error: unknown): error is DBError =>
   error !== null &&
   'code' in error &&
   Object.values(DBErrorCode).includes((error as DBError).code);
+
+/**
+ * Converts queue error to API error
+ */
+export const queueErrorToApiError = (error: QueueError): APIError => ({
+  name: 'APIError',
+  code: queueErrorToApiErrorCode[error.code],
+  message: error.error.message,
+  details: { context: error.context },
+  cause: error.error,
+  stack: error.error.stack,
+});
 
 /**
  * Converts any error to an API error
@@ -396,12 +405,7 @@ export const toAPIError = (error: unknown): APIError => {
     });
   }
   if (isQueueError(error)) {
-    return createAPIError({
-      code: queueErrorToApiErrorCode[error.code],
-      message: error.message,
-      details: { queueName: error.queueName },
-      cause: error.cause,
-    });
+    return queueErrorToApiError(error);
   }
   if (error instanceof Error) {
     return createAPIError({
