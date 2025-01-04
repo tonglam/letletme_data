@@ -1,30 +1,20 @@
-import { Queue, RepeatableJob } from 'bullmq';
-import { pipe } from 'fp-ts/function';
+import { Queue } from 'bullmq';
 import * as TE from 'fp-ts/TaskEither';
-import { QueueError, QueueErrorCode, createQueueError } from '../../../types/errors.type';
-import { JobData } from '../../../types/job.type';
+import { pipe } from 'fp-ts/function';
+import { createQueueError, QueueError, QueueErrorCode } from '../../../types/errors.type';
+import { BaseJobData } from '../../../types/job.type';
 import { getQueueLogger } from '../../logger';
-import {
-  BullMQQueueMethods,
-  JobScheduler,
-  JobSchedulerOptions,
-  JobTemplate,
-  SchedulerService,
-} from '../types';
+import { JobScheduler, JobSchedulerOptions, JobTemplate, SchedulerService } from '../types';
 
 const logger = getQueueLogger();
 
-const toJobScheduler = (job: RepeatableJob): JobScheduler => ({
-  id: job.id ?? job.name,
-  name: job.name,
-  options: {
-    every: job.every ? parseInt(job.every, 10) : undefined,
-    pattern: job.pattern ?? undefined,
-  },
-  nextRun: job.next ? new Date(job.next) : undefined,
+const mapToJobScheduler = (job: { key: string; nextRun?: Date; lastRun?: Date }): JobScheduler => ({
+  jobId: job.key,
+  nextRun: job.nextRun,
+  lastRun: job.lastRun,
 });
 
-export const createSchedulerService = <T extends JobData>(
+export const createSchedulerService = <T extends BaseJobData>(
   name: string,
   queue: Queue<T>,
 ): SchedulerService<T> => {
@@ -36,38 +26,42 @@ export const createSchedulerService = <T extends JobData>(
     pipe(
       TE.tryCatch(
         async () => {
-          const jobName = template?.name ?? schedulerId;
-          const jobData = template?.data ?? ({} as T);
-          const jobOpts = {
-            repeat: {
-              every: scheduleOptions.every,
-              pattern: scheduleOptions.pattern,
+          await queue.add(
+            template?.name || schedulerId,
+            (template?.data || {
+              type: 'META',
+              timestamp: new Date(),
+              data: {},
+            }) as T,
+            {
+              ...template?.opts,
+              jobId: schedulerId,
+              repeat: {
+                pattern: scheduleOptions.pattern,
+                every: scheduleOptions.every,
+                limit: scheduleOptions.limit,
+              },
             },
-            jobId: schedulerId,
-            priority: template?.opts?.priority,
-            lifo: template?.opts?.lifo,
-            delay: template?.opts?.delay,
-          };
-
-          await (queue as unknown as BullMQQueueMethods<T>).add(jobName, jobData, jobOpts);
-          logger.info({ name, schedulerId, scheduleOptions }, 'Job scheduler created or updated');
+          );
+          logger.info({ name, schedulerId, scheduleOptions }, 'Job scheduler created/updated');
         },
-        (error) => createQueueError(QueueErrorCode.UPSERT_JOB_SCHEDULER, name, error as Error),
+        (error) => createQueueError(QueueErrorCode.CREATE_JOB_SCHEDULER, name, error as Error),
       ),
     );
 
-  const getJobSchedulers = (
-    start = 0,
-    end = -1,
-    asc = true,
-  ): TE.TaskEither<QueueError, JobScheduler[]> =>
+  const getJobSchedulers = (options?: {
+    page?: number;
+    pageSize?: number;
+  }): TE.TaskEither<QueueError, JobScheduler[]> =>
     pipe(
       TE.tryCatch(
         async () => {
-          const repeatableJobs = await queue.getRepeatableJobs(start, end, asc);
-          return repeatableJobs.map(toJobScheduler);
+          const start = options?.page ? (options.page - 1) * (options.pageSize || 10) : 0;
+          const end = options?.page ? start + (options.pageSize || 10) : -1;
+          const repeatable = await queue.getRepeatableJobs(start, end, false);
+          return repeatable.map(mapToJobScheduler);
         },
-        (error) => createQueueError(QueueErrorCode.GET_JOB_SCHEDULER, name, error as Error),
+        (error) => createQueueError(QueueErrorCode.GET_JOB_SCHEDULERS, name, error as Error),
       ),
     );
 

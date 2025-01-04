@@ -1,6 +1,7 @@
 import { Job, Queue, Worker } from 'bullmq';
 import * as TE from 'fp-ts/TaskEither';
 import { Redis } from 'ioredis';
+import { FlowJob, FlowOpts } from '../infrastructure/queue/types';
 import { QueueError } from './errors.type';
 
 // Base Job Data
@@ -60,3 +61,9 @@ export type QueueConnection =
       host: string;
       port: number;
     };
+
+export interface FlowService<T> {
+  getFlowDependencies: (jobId: string) => TE.TaskEither<QueueError, FlowJob<T>[]>;
+  getChildrenValues: (jobId: string) => TE.TaskEither<QueueError, Record<string, unknown>>;
+  addJob: (data: T, opts?: FlowOpts) => TE.TaskEither<QueueError, FlowJob<T>>;
+}

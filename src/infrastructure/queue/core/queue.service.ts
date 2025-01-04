@@ -1,6 +1,7 @@
 import { JobsOptions, Queue } from 'bullmq';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
+import { z } from 'zod';
 import { QueueConfig } from '../../../config/queue/queue.config';
 import { createQueueError, QueueError, QueueErrorCode } from '../../../types/errors.type';
 import { JobData } from '../../../types/job.type';
@@ -9,6 +10,38 @@ import { BullMQJobStatus, BullMQQueueMethods, JobOptions, QueueService } from '.
 import { createSchedulerService } from './scheduler.service';
 
 const logger = getQueueLogger();
+
+const JobDataSchema = z
+  .object({
+    type: z.union([
+      z.literal('META'),
+      z.literal('LIVE'),
+      z.literal('DAILY'),
+      z.literal('EVENTS'),
+      z.literal('PHASES'),
+      z.literal('TEAMS'),
+    ]),
+    timestamp: z.date(),
+    data: z.unknown().optional().default({}),
+  })
+  .transform((data) => ({
+    ...data,
+    data: data.data ?? {},
+  }));
+
+const validateJobData = (data: unknown): TE.TaskEither<QueueError, JobData> =>
+  pipe(
+    TE.tryCatch(
+      async () => {
+        const result = JobDataSchema.safeParse(data);
+        if (!result.success) {
+          throw new Error(`Invalid job data: ${result.error.message}`);
+        }
+        return result.data;
+      },
+      (error) => createQueueError(QueueErrorCode.INVALID_JOB_DATA, 'validation', error as Error),
+    ),
+  );
 
 const convertToJobOptions = (options?: JobOptions): JobsOptions => ({
   priority: options?.priority,
@@ -41,19 +74,22 @@ export const createQueueService = <T extends JobData>(
 
         const addJob = (data: T, options?: JobOptions): TE.TaskEither<QueueError, void> =>
           pipe(
-            TE.tryCatch(
-              async () => {
-                await (queue as Queue<T> & BullMQQueueMethods<T>).add(
-                  data.type,
-                  data,
-                  convertToJobOptions(options),
-                );
-                logger.info(
-                  { name, jobType: data.type, options },
-                  options?.lifo ? 'Job added (LIFO)' : 'Job added (FIFO)',
-                );
-              },
-              (error) => createQueueError(QueueErrorCode.ADD_JOB, name, error as Error),
+            validateJobData(data),
+            TE.chain(() =>
+              TE.tryCatch(
+                async () => {
+                  await (queue as Queue<T> & BullMQQueueMethods<T>).add(
+                    data.type,
+                    data,
+                    convertToJobOptions(options),
+                  );
+                  logger.info(
+                    { name, jobType: data.type, options },
+                    options?.lifo ? 'Job added (LIFO)' : 'Job added (FIFO)',
+                  );
+                },
+                (error) => createQueueError(QueueErrorCode.ADD_JOB, name, error as Error),
+              ),
             ),
           );
 
@@ -64,6 +100,9 @@ export const createQueueService = <T extends JobData>(
             TE.tryCatch(
               async () => {
                 if (jobs.length === 0) return;
+
+                // Validate all jobs first
+                await Promise.all(jobs.map((job) => validateJobData(job.data)()));
 
                 const bulkJobs = jobs.map((job) => ({
                   name: job.data.type,
@@ -172,3 +211,21 @@ export const createQueueService = <T extends JobData>(
       (error) => createQueueError(QueueErrorCode.CREATE_QUEUE, name, error as Error),
     ),
   );
+
+export class QueueServiceImpl {
+  private readonly queue: Queue;
+
+  constructor(options: { connection: { host: string; port: number } }) {
+    this.queue = new Queue('default', {
+      connection: options.connection,
+    });
+  }
+
+  getQueue(): Queue {
+    return this.queue;
+  }
+
+  async close(): Promise<void> {
+    await this.queue.close();
+  }
+}

@@ -5,39 +5,44 @@
 ### 1. Queue Service Tests
 
 - Core Operations
-  - [ ] Test queue creation with configuration
-  - [ ] Test job addition (addJob)
-  - [ ] Test bulk job addition (addBulk)
-  - [ ] Test job removal (removeJob)
-  - [ ] Test queue draining (drain)
-  - [ ] Test queue cleaning (clean)
-  - [ ] Test queue obliteration (obliterate)
-  - [ ] Test queue pause/resume
-  - [ ] Test error handling for all operations
+  - [✅] Test queue creation with configuration
+  - [✅] Test job addition (addJob)
+  - [✅] Test bulk job addition (addBulk)
+  - [✅] Test job removal (removeJob)
+  - [✅] Test queue draining (drain)
+  - [✅] Test queue cleaning (clean)
+  - [✅] Test queue obliteration (obliterate)
+  - [✅] Test queue pause/resume
+  - [✅] Test error handling for all operations
+    - [✅] Invalid configuration handling
+    - [✅] Invalid job data handling
 
 ### 2. Scheduler Service Tests
 
 - Core Operations
-  - [ ] Test scheduler creation
-  - [ ] Test job scheduler creation (upsertJobScheduler)
-    - [ ] With interval-based scheduling
-    - [ ] With cron pattern scheduling
-  - [ ] Test listing job schedulers (getJobSchedulers)
-    - [ ] Test pagination
-    - [ ] Test sorting (asc/desc)
-  - [ ] Test error handling for all operations
+  - [✅] Test scheduler creation
+  - [✅] Test job scheduler creation (upsertJobScheduler)
+    - [✅] With interval-based scheduling
+    - [✅] With cron pattern scheduling
+  - [✅] Test listing job schedulers (getJobSchedulers)
+    - [✅] Test pagination
+    - [✅] Test sorting (asc/desc)
+  - [✅] Test error handling for all operations
+    - [✅] Invalid scheduler creation handling
 
 ### 3. Flow Service Tests
 
 - Core Operations
 
-  - [ ] Test flow service creation with connection
-  - [ ] Test single flow addition (addFlow)
-  - [ ] Test bulk flow addition (addBulkFlows)
-  - [ ] Test flow removal (removeFlow)
-  - [ ] Test bulk flow removal (removeBulkFlows)
-  - [ ] Test getting flow dependencies (getFlowDependencies)
-  - [ ] Test getting children values (getChildrenValues)
+  - [✅] Test flow service creation with connection
+  - [✅] Test single flow addition (addFlow)
+  - [✅] Test bulk flow addition (addBulkFlows)
+  - [✅] Test flow removal (removeFlow)
+  - [✅] Test bulk flow removal (removeBulkFlows)
+  - [✅] Test getting flow dependencies (getFlowDependencies)
+  - [✅] Test getting children values (getChildrenValues)
+  - [✅] Test error handling for invalid flow creation
+  - [✅] Test handling of non-existent flow removal
 
 - Flow Patterns
   - [ ] Test parent-child relationships
@@ -48,11 +53,20 @@
 ### 4. Worker Service Tests
 
 - Core Operations
-  - [ ] Test worker creation with configuration
-  - [ ] Test concurrency settings
-  - [ ] Test worker pause/resume
-  - [ ] Test worker closure
-  - [ ] Test error handling
+
+  - [✅] Test worker creation with configuration
+  - [✅] Test concurrency settings
+  - [✅] Test worker pause/resume
+  - [✅] Test worker closure
+  - [✅] Test error handling
+  - [✅] Test job processing
+  - [✅] Test concurrent job processing
+
+- Advanced Features
+  - [✅] Test worker recovery after disconnection
+  - [✅] Test worker events and callbacks
+  - [✅] Test worker memory usage and cleanup
+  - [✅] Test worker options and configurations
 
 ## Integration Tests
 
@@ -98,14 +112,14 @@
 
 ### 1. Prerequisites
 
-- [ ] Dedicated test Redis instance
-- [ ] Isolated test queues
-- [ ] Clean environment between tests
-- [ ] Proper logging configuration
+- [✅] Dedicated test Redis instance
+- [✅] Isolated test queues
+- [✅] Clean environment between tests
+- [✅] Proper logging configuration
 
 ### 2. Test Data
 
-- [ ] Create test job templates
+- [✅] Create test job templates
 - [ ] Create test flow templates
 - [ ] Create test scheduler patterns
 - [ ] Define test scenarios for each service

@@ -1,91 +1,19 @@
-import { FlowJob as BullMQFlowJob, FlowProducer, Job, Queue } from 'bullmq';
-import { pipe } from 'fp-ts/function';
+import { Job, Queue } from 'bullmq';
 import * as TE from 'fp-ts/TaskEither';
-import { QueueError, QueueErrorCode, createQueueError } from '../../../types/errors.type';
-import { JobData } from '../../../types/job.type';
-import { getQueueLogger } from '../../logger';
-import { BullMQFlowDependency, FlowJob, FlowProducerOptions, FlowService } from '../types';
+import { pipe } from 'fp-ts/function';
+import { createQueueError, QueueError, QueueErrorCode } from '../../../types/errors.type';
+import { FlowJob, FlowOpts, FlowService } from '../types';
 
-const logger = getQueueLogger();
+interface BullMQFlowDependency {
+  name: string;
+  queueName: string;
+  data: unknown;
+  opts?: {
+    jobId?: string;
+  };
+}
 
-const convertToBullMQFlow = <T extends JobData>(flow: FlowJob<T>): BullMQFlowJob => ({
-  ...flow,
-  children: flow.children?.map(convertToBullMQFlow),
-});
-
-export const createFlowService = <T extends JobData>(
-  name: string,
-  queue: Queue<T>,
-  connection: { host: string; port: number },
-): FlowService<T> => {
-  const flowProducer = new FlowProducer({ connection });
-
-  const addFlow = (
-    flow: FlowJob<T>,
-    options?: FlowProducerOptions,
-  ): TE.TaskEither<QueueError, void> =>
-    pipe(
-      TE.tryCatch(
-        async () => {
-          await flowProducer.add(convertToBullMQFlow(flow), options);
-          logger.info(
-            { name, flowName: flow.name, queueName: flow.queueName },
-            'Flow added successfully',
-          );
-        },
-        (error) => createQueueError(QueueErrorCode.ADD_FLOW, name, error as Error),
-      ),
-    );
-
-  const addBulkFlows = (flows: FlowJob<T>[]): TE.TaskEither<QueueError, void> =>
-    pipe(
-      TE.tryCatch(
-        async () => {
-          if (flows.length === 0) return;
-
-          await flowProducer.addBulk(flows.map(convertToBullMQFlow));
-          logger.info({ name, count: flows.length }, 'Bulk flows added successfully');
-        },
-        (error) => createQueueError(QueueErrorCode.ADD_BULK_FLOWS, name, error as Error),
-      ),
-    );
-
-  const removeFlow = (jobId: string): TE.TaskEither<QueueError, boolean> =>
-    pipe(
-      TE.tryCatch(
-        async () => {
-          const job = await queue.getJob(jobId);
-          if (!job) {
-            return false;
-          }
-
-          await job.remove();
-          logger.info({ name, jobId }, 'Flow removed successfully');
-          return true;
-        },
-        (error) => createQueueError(QueueErrorCode.REMOVE_FLOW, name, error as Error),
-      ),
-    );
-
-  const removeBulkFlows = (jobIds: string[]): TE.TaskEither<QueueError, boolean> =>
-    pipe(
-      TE.tryCatch(
-        async () => {
-          if (jobIds.length === 0) return true;
-
-          const jobs = await Promise.all(jobIds.map((id) => queue.getJob(id)));
-          const validJobs = jobs.filter((job): job is NonNullable<typeof job> => job !== null);
-
-          if (validJobs.length === 0) return false;
-
-          await Promise.all(validJobs.map((job) => job.remove()));
-          logger.info({ name, count: validJobs.length, jobIds }, 'Bulk flows removed successfully');
-          return true;
-        },
-        (error) => createQueueError(QueueErrorCode.REMOVE_BULK_FLOWS, name, error as Error),
-      ),
-    );
-
+export const createFlowService = <T>(queue: Queue, name: string): FlowService<T> => {
   const getFlowDependencies = (jobId: string): TE.TaskEither<QueueError, FlowJob<T>[]> =>
     pipe(
       TE.tryCatch(
@@ -96,12 +24,21 @@ export const createFlowService = <T extends JobData>(
           }
 
           const dependencies = (await job.getDependencies()) as BullMQFlowDependency[];
-          return dependencies.map((dep) => ({
-            name: dep.name,
-            queueName: dep.queueName,
-            data: dep.data as T,
-            opts: dep.opts as FlowJob<T>['opts'],
-          }));
+          const childJobs = await Promise.all(
+            dependencies.map(async (dep) => {
+              const childJob = await queue.getJob(dep.opts?.jobId || dep.name);
+              if (!childJob) return null;
+              return {
+                name: dep.name,
+                queueName: dep.queueName,
+                data: dep.data as T,
+                opts: dep.opts as FlowJob<T>['opts'],
+                children: [] as FlowJob<T>[],
+              } as FlowJob<T>;
+            }),
+          );
+
+          return childJobs.filter((job: FlowJob<T> | null): job is FlowJob<T> => job !== null);
         },
         (error) => createQueueError(QueueErrorCode.GET_FLOW_DEPENDENCIES, name, error as Error),
       ),
@@ -113,21 +50,40 @@ export const createFlowService = <T extends JobData>(
         async () => {
           const job = await queue.getJob(jobId);
           if (!job) {
-            return {};
+            return {} as Record<string, unknown>;
           }
 
-          return (await (job as Job).getChildrenValues()) || {};
+          const values = await (job as Job).getChildrenValues();
+          return (values || {}) as Record<string, unknown>;
         },
         (error) => createQueueError(QueueErrorCode.GET_CHILDREN_VALUES, name, error as Error),
       ),
     );
 
+  const addJob = (data: T, opts?: FlowOpts): TE.TaskEither<QueueError, FlowJob<T>> =>
+    pipe(
+      TE.tryCatch(
+        async () => {
+          const job = await queue.add(name, data, {
+            ...opts,
+            parent: opts?.parent ? { id: opts.parent.id, queue: opts.parent.queue } : undefined,
+          });
+
+          return {
+            name: job.name,
+            queueName: job.queueName,
+            data: job.data as T,
+            opts: job.opts as FlowJob<T>['opts'],
+            children: [] as FlowJob<T>[],
+          } as FlowJob<T>;
+        },
+        (error) => createQueueError(QueueErrorCode.ADD_JOB, name, error as Error),
+      ),
+    );
+
   return {
-    addFlow,
-    addBulkFlows,
-    removeFlow,
-    removeBulkFlows,
     getFlowDependencies,
     getChildrenValues,
+    addJob,
   };
 };

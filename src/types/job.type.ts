@@ -1,16 +1,9 @@
-import { JobType, MetaJobType } from './queue.type';
-
-export interface JobData {
-  readonly type: JobType | MetaJobType;
+export interface BaseJobData {
+  readonly type: string;
   readonly timestamp: Date;
   readonly data: unknown;
 }
 
-// Helper type for BullMQ compatibility
-export type ExtractJobData<T> = T extends JobData
-  ? {
-      readonly type: T['type'];
-      readonly timestamp: Date;
-      readonly data: T['data'];
-    }
-  : never;
+export interface JobData extends BaseJobData {
+  readonly type: 'META' | 'LIVE' | 'DAILY' | 'EVENTS' | 'PHASES' | 'TEAMS';
+}

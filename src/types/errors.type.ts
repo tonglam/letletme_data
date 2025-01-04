@@ -151,53 +151,43 @@ export const getErrorStatus = (error: APIError): number => {
  * Queue Error Types
  */
 export enum QueueErrorCode {
-  QUEUE_CONNECTION_ERROR = 'QUEUE_CONNECTION_ERROR',
-  QUEUE_INITIALIZATION_ERROR = 'QUEUE_INITIALIZATION_ERROR',
-  WORKER_START_ERROR = 'WORKER_START_ERROR',
-  WORKER_STOP_ERROR = 'WORKER_STOP_ERROR',
-  JOB_PROCESSING_ERROR = 'JOB_PROCESSING_ERROR',
-  INVALID_JOB_DATA = 'INVALID_JOB_DATA',
-  REMOVE_JOB = 'REMOVE_JOB',
-  PROCESSING_ERROR = 'PROCESSING_ERROR',
-  START_WORKER = 'START_WORKER',
+  // Queue errors
   CREATE_QUEUE = 'CREATE_QUEUE',
   ADD_JOB = 'ADD_JOB',
-  STOP_WORKER = 'STOP_WORKER',
-  CREATE_WORKER = 'CREATE_WORKER',
-  CLOSE_WORKER = 'CLOSE_WORKER',
+  REMOVE_JOB = 'REMOVE_JOB',
   PAUSE_QUEUE = 'PAUSE_QUEUE',
   RESUME_QUEUE = 'RESUME_QUEUE',
-  PAUSE_WORKER = 'PAUSE_WORKER',
-  RESUME_WORKER = 'RESUME_WORKER',
-  UPSERT_JOB_SCHEDULER = 'UPSERT_JOB_SCHEDULER',
-  REMOVE_JOB_SCHEDULER = 'REMOVE_JOB_SCHEDULER',
-  GET_JOB_SCHEDULER = 'GET_JOB_SCHEDULER',
-  ADD_FLOW = 'ADD_FLOW',
-  ADD_BULK_FLOWS = 'ADD_BULK_FLOWS',
-  REMOVE_FLOW = 'REMOVE_FLOW',
-  REMOVE_BULK_FLOWS = 'REMOVE_BULK_FLOWS',
+  INVALID_JOB_DATA = 'INVALID_JOB_DATA',
+
+  // Worker errors
+  CREATE_WORKER = 'CREATE_WORKER',
+  START_WORKER = 'START_WORKER',
+  STOP_WORKER = 'STOP_WORKER',
+  PROCESSING_ERROR = 'PROCESSING_ERROR',
+
+  // Flow errors
   GET_FLOW_DEPENDENCIES = 'GET_FLOW_DEPENDENCIES',
   GET_CHILDREN_VALUES = 'GET_CHILDREN_VALUES',
+
+  // Scheduler errors
+  CREATE_JOB_SCHEDULER = 'CREATE_JOB_SCHEDULER',
+  GET_JOB_SCHEDULERS = 'GET_JOB_SCHEDULERS',
 }
 
 export interface QueueError {
-  readonly type: 'QUEUE_ERROR';
-  readonly code: QueueErrorCode;
-  readonly message: string;
-  readonly queueName: string;
-  readonly cause?: Error;
+  code: QueueErrorCode;
+  context: string;
+  error: Error;
 }
 
 export const createQueueError = (
   code: QueueErrorCode,
-  queueName: string,
+  context: string,
   error: Error,
 ): QueueError => ({
-  type: 'QUEUE_ERROR',
   code,
-  message: error.message,
-  queueName,
-  cause: error,
+  context,
+  error,
 });
 
 /**

@@ -8,92 +8,123 @@ import { getQueueLogger } from '../../logger';
 import { WorkerOptions, WorkerService } from '../types';
 
 const logger = getQueueLogger();
+const isTest = process.env.NODE_ENV === 'test';
 
-export const createWorkerService = <T extends JobData, R = void>(
+export const createWorkerService = <T extends JobData>(
   name: string,
   config: QueueConfig,
-  processor: (job: Job<T>) => Promise<R>,
+  processor: (job: Job<T>) => Promise<void>,
   options: WorkerOptions = {},
 ): TE.TaskEither<QueueError, WorkerService<T>> =>
   pipe(
     TE.tryCatch(
       async () => {
-        const worker = new Worker<T, R>(
+        const worker = new Worker<T>(
           name,
           async (job: Job<T>) => {
-            logger.info({ jobId: job.id, type: job.name }, 'Processing job');
+            if (!isTest) {
+              logger.info({ jobId: job.id, type: job.name }, 'Processing job');
+            }
 
             try {
-              const result = await processor(job);
-              logger.info({ jobId: job.id, type: job.name }, 'Job completed');
-              return result;
+              await processor(job);
+              if (!isTest) {
+                logger.info({ jobId: job.id, type: job.name }, 'Job completed');
+              }
             } catch (error) {
               const queueError = createQueueError(
-                QueueErrorCode.JOB_PROCESSING_ERROR,
+                QueueErrorCode.PROCESSING_ERROR,
                 name,
                 error as Error,
               );
-              logger.error(
-                { jobId: job.id, type: job.name, error: queueError },
-                'Job processing failed',
-              );
+              if (!isTest) {
+                logger.error(
+                  { jobId: job.id, type: job.name, error: queueError },
+                  'Job processing failed',
+                );
+              }
               throw queueError;
             }
           },
           {
             connection: config.consumerConnection,
-            autorun: false,
-            concurrency: options.concurrency || 1,
+            concurrency: options.concurrency ?? 1,
+            autorun: options.autorun ?? true,
+            maxStalledCount: options.maxStalledCount,
+            stalledInterval: options.stalledInterval,
           },
         );
 
-        // Required error handler to prevent worker from stopping
+        // Wait for worker to be ready before returning
+        await new Promise<void>((resolve) => worker.once('ready', resolve));
+
         worker.on('error', (error: Error) => {
-          logger.error({ name, error }, 'Worker error occurred');
+          if (!isTest) {
+            logger.error({ name, error }, 'Worker error occurred');
+          }
         });
 
-        await worker.run();
-        logger.info({ name, concurrency: worker.concurrency }, 'Worker started');
+        const start = (): TE.TaskEither<QueueError, void> =>
+          pipe(
+            TE.tryCatch(
+              async () => {
+                await worker.run();
+                if (!isTest) {
+                  logger.info({ name }, 'Worker started');
+                }
+              },
+              (error) => createQueueError(QueueErrorCode.START_WORKER, name, error as Error),
+            ),
+          );
+
+        const stop = (): TE.TaskEither<QueueError, void> =>
+          pipe(
+            TE.tryCatch(
+              async () => {
+                await worker.close();
+                if (!isTest) {
+                  logger.info({ name }, 'Worker stopped');
+                }
+              },
+              (error) => createQueueError(QueueErrorCode.STOP_WORKER, name, error as Error),
+            ),
+          );
 
         return {
+          start,
+          stop,
           getWorker: () => worker,
-          setConcurrency: (value: number) => {
-            worker.concurrency = value;
-            logger.info({ name, concurrency: value }, 'Worker concurrency updated');
-          },
-          close: () =>
+          close: () => stop(),
+          pause: (force?: boolean): TE.TaskEither<QueueError, void> =>
             pipe(
               TE.tryCatch(
                 async () => {
-                  logger.info({ name }, 'Worker closing...');
-                  await worker.close();
-                  logger.info({ name }, 'Worker closed');
-                },
-                (error) => createQueueError(QueueErrorCode.CLOSE_WORKER, name, error as Error),
-              ),
-            ),
-          pause: (force?: boolean) =>
-            pipe(
-              TE.tryCatch(
-                async () => {
-                  logger.info({ name, force }, 'Worker pausing...');
                   await worker.pause(force);
-                  logger.info({ name }, 'Worker paused');
+                  if (!isTest) {
+                    logger.info({ name }, 'Worker paused');
+                  }
                 },
-                (error) => createQueueError(QueueErrorCode.PAUSE_WORKER, name, error as Error),
+                (error) => createQueueError(QueueErrorCode.PAUSE_QUEUE, name, error as Error),
               ),
             ),
-          resume: () =>
+          resume: (): TE.TaskEither<QueueError, void> =>
             pipe(
               TE.tryCatch(
                 async () => {
-                  logger.info({ name }, 'Worker resuming...');
                   await worker.resume();
-                  logger.info({ name }, 'Worker resumed');
+                  if (!isTest) {
+                    logger.info({ name }, 'Worker resumed');
+                  }
                 },
-                (error) => createQueueError(QueueErrorCode.RESUME_WORKER, name, error as Error),
+                (error) => createQueueError(QueueErrorCode.RESUME_QUEUE, name, error as Error),
               ),
             ),
+          setConcurrency: (concurrency: number) => {
+            worker.concurrency = concurrency;
+            if (!isTest) {
+              logger.info({ name, concurrency }, 'Worker concurrency updated');
+            }
+          },
         };
       },
       (error) => createQueueError(QueueErrorCode.CREATE_WORKER, name, error as Error),
