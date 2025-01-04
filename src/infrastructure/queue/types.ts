@@ -1,8 +1,30 @@
 import { Job, Queue, Worker } from 'bullmq';
 import * as TE from 'fp-ts/TaskEither';
+import { Redis } from 'ioredis';
 import { QueueError } from '../../types/errors.type';
-import { BaseJobData } from '../../types/job.type';
 
+// Base Job Data
+export interface BaseJobData {
+  readonly type: string;
+  readonly timestamp: Date;
+  readonly data: unknown;
+}
+
+// Job Status and Operation Types
+export type BullMQJobStatus =
+  | 'completed'
+  | 'failed'
+  | 'delayed'
+  | 'active'
+  | 'paused'
+  | 'wait'
+  | 'prioritized';
+
+export type JobOperation = 'SYNC' | 'UPDATE' | 'CLEANUP';
+export type JobType = 'META' | 'LIVE' | 'DAILY';
+export type MetaJobType = 'EVENTS' | 'PHASES' | 'TEAMS';
+
+// Flow Types
 export interface FlowJob<T> {
   name: string;
   queueName: string;
@@ -10,6 +32,34 @@ export interface FlowJob<T> {
   opts?: FlowOpts<T>;
   children?: FlowJob<T>[];
 }
+
+export interface FlowJobWithParent {
+  name: string;
+  queueName: string;
+  data: unknown;
+  opts: {
+    jobId: string;
+    parent?: {
+      id: string;
+      queue: string;
+    };
+  };
+  children?: Array<{
+    name: string;
+    queueName: string;
+    data: unknown;
+    opts: {
+      jobId: string;
+      parent: {
+        id: string;
+        queue: string;
+      };
+    };
+  }>;
+}
+
+// Type guard for job ID
+export const hasJobId = (job: { id?: string }): job is { id: string } => typeof job.id === 'string';
 
 export interface FlowOpts<T = unknown> {
   jobId: string;
@@ -25,6 +75,7 @@ export interface FlowOpts<T = unknown> {
   };
 }
 
+// Service Interfaces
 export interface FlowService<T> {
   getFlowDependencies: (jobId: string) => TE.TaskEither<QueueError, FlowJob<T>[]>;
   getChildrenValues: (jobId: string) => TE.TaskEither<QueueError, Record<string, unknown>>;
@@ -56,6 +107,7 @@ export interface QueueService<T> {
   }) => TE.TaskEither<QueueError, JobScheduler[]>;
 }
 
+// Worker Types
 export interface WorkerOptions {
   concurrency?: number;
   autorun?: boolean;
@@ -73,20 +125,32 @@ export interface WorkerService<T> {
   setConcurrency: (concurrency: number) => void;
 }
 
-export type BullMQJobStatus =
-  | 'completed'
-  | 'failed'
-  | 'delayed'
-  | 'active'
-  | 'paused'
-  | 'wait'
-  | 'prioritized';
-
-export interface BullMQQueueMethods<T> {
-  add: (name: string, data: T, opts?: JobOptions) => Promise<Job<T>>;
-  addBulk: (jobs: Array<{ name: string; data: T; opts?: JobOptions }>) => Promise<Job<T>[]>;
+// Adapter Types
+export interface QueueAdapter<T extends BaseJobData> {
+  readonly queue: Queue;
+  readonly addJob: (data: T) => TE.TaskEither<QueueError, Job<T>>;
+  readonly removeJob: (jobId: string) => TE.TaskEither<QueueError, void>;
 }
 
+export interface WorkerAdapter {
+  readonly worker: Worker;
+  readonly start: () => TE.TaskEither<QueueError, void>;
+  readonly stop: () => TE.TaskEither<QueueError, void>;
+}
+
+export interface MultiWorkerAdapter {
+  readonly workers: Worker[];
+  readonly start: () => TE.TaskEither<QueueError, void>;
+  readonly stop: () => TE.TaskEither<QueueError, void>;
+}
+
+export interface SequentialQueueAdapter<T extends BaseJobData> {
+  readonly queues: Record<string, Queue>;
+  readonly addJob: (queueName: string, data: T) => TE.TaskEither<QueueError, Job<T>>;
+  readonly removeJob: (queueName: string, jobId: string) => TE.TaskEither<QueueError, void>;
+}
+
+// Job Related Types
 export interface JobOptions {
   priority?: number;
   lifo?: boolean;
@@ -136,4 +200,21 @@ export interface SchedulerService<T extends BaseJobData> {
     page?: number;
     pageSize?: number;
   }) => TE.TaskEither<QueueError, JobScheduler[]>;
+}
+
+// Queue Connection Type
+export type QueueConnection =
+  | Redis
+  | {
+      host: string;
+      port: number;
+    };
+
+// Job Processor Type
+export type JobProcessor<T extends BaseJobData> = (job: Job<T>) => TE.TaskEither<QueueError, void>;
+
+// BullMQ Queue Methods Interface
+export interface BullMQQueueMethods<T> {
+  add: (name: string, data: T, opts?: JobOptions) => Promise<Job<T>>;
+  addBulk: (jobs: Array<{ name: string; data: T; opts?: JobOptions }>) => Promise<Job<T>[]>;
 }

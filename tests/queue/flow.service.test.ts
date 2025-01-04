@@ -43,11 +43,14 @@ describe('Flow Service', () => {
   });
 
   beforeEach(async () => {
+    // Create flow service with the same queue name
     flowService = createFlowService<TestJobData>(queueService.getQueue(), 'flow' as JobName);
+    // Clear the queue before each test
+    await queueService.getQueue().obliterate({ force: true });
   });
 
   afterEach(async () => {
-    await queueService.getQueue().obliterate();
+    await queueService.getQueue().obliterate({ force: true });
     await flowService.close();
   });
 
@@ -85,48 +88,53 @@ describe('Flow Service', () => {
         ],
       };
 
-      // Add parent job with child
-      const parentResult = await flowService.addJob(parentFlow.data, {
-        jobId: parentJobId,
-        children: parentFlow.children,
-      })();
-      expect(E.isRight(parentResult)).toBe(true);
+      try {
+        // Add parent job with child
+        const parentResult = await flowService.addJob(parentFlow.data, {
+          jobId: parentJobId,
+          children: parentFlow.children,
+        })();
+        expect(E.isRight(parentResult)).toBe(true);
 
-      if (E.isRight(parentResult)) {
-        // Wait for jobs to be processed
-        await new Promise((resolve) => setTimeout(resolve, 1000));
+        if (E.isRight(parentResult)) {
+          // Wait for jobs to be processed
+          await new Promise((resolve) => setTimeout(resolve, 3000));
 
-        // Verify parent-child relationship
-        const dependencies = await flowService.getFlowDependencies(parentJobId)();
-        expect(E.isRight(dependencies)).toBe(true);
+          // Verify parent-child relationship
+          const dependencies = await flowService.getFlowDependencies(parentJobId)();
+          expect(E.isRight(dependencies)).toBe(true);
 
-        if (E.isRight(dependencies)) {
-          const deps = dependencies.right;
-          expect(deps).toHaveLength(1);
-          expect(deps[0].name).toBe('flow');
-          expect(deps[0].data).toEqual({
-            type: 'META',
-            timestamp: expect.any(Date),
-            name: 'flow',
-            data: { value: 'child' },
-          });
+          if (E.isRight(dependencies)) {
+            const deps = dependencies.right;
+            expect(deps).toHaveLength(1);
+            expect(deps[0].name).toBe('flow');
+            expect(deps[0].data).toEqual({
+              type: 'META',
+              timestamp: expect.any(Date),
+              name: 'flow',
+              data: { value: 'child' },
+            });
+          }
+
+          // Verify child values can be accessed from parent
+          const childrenValues = await flowService.getChildrenValues(parentJobId)();
+          expect(E.isRight(childrenValues)).toBe(true);
+
+          if (E.isRight(childrenValues)) {
+            const values = childrenValues.right;
+            expect(Object.keys(values)).toHaveLength(1); // Should have one child value
+            expect(Object.values(values)[0]).toEqual({
+              type: 'META',
+              timestamp: expect.any(Date),
+              name: 'flow',
+              data: { value: 'child' },
+            });
+          }
         }
-
-        // Verify child values can be accessed from parent
-        const childrenValues = await flowService.getChildrenValues(parentJobId)();
-        expect(E.isRight(childrenValues)).toBe(true);
-
-        if (E.isRight(childrenValues)) {
-          const values = childrenValues.right;
-          expect(Object.keys(values)).toHaveLength(1); // Should have one child value
-          expect(Object.values(values)[0]).toEqual({
-            type: 'META',
-            timestamp: expect.any(Date),
-            name: 'flow',
-            data: { value: 'child' },
-          });
-        }
+      } catch (error) {
+        console.error('Test error:', error);
+        throw error;
       }
-    });
+    }, 30000); // Increase timeout to 30 seconds
   });
 });

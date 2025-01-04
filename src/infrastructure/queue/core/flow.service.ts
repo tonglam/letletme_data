@@ -3,18 +3,7 @@ import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
 import { createQueueError, QueueError, QueueErrorCode } from '../../../types/errors.type';
 import { BaseJobData, isJobName, JobName } from '../../../types/job.type';
-import { FlowJob, FlowOpts, FlowService } from '../types';
-
-// Custom type for flow job with required parent ID
-type FlowJobWithParent = Omit<BullMQFlowJob, 'opts'> & {
-  opts?: {
-    parent?: {
-      id: string;
-      queue: string;
-    };
-    [key: string]: unknown;
-  };
-};
+import { FlowJob, FlowJobWithParent, FlowOpts, FlowService, hasJobId } from '../types';
 
 export const createFlowService = <T extends BaseJobData>(
   queue: Queue<T>,
@@ -38,24 +27,55 @@ export const createFlowService = <T extends BaseJobData>(
           }
           console.log('Found job:', job.id, 'with data:', job.data);
 
-          // Get child jobs using BullMQ's getChildrenValues method
-          const childrenValues = await job.getChildrenValues();
-          console.log('Children values:', childrenValues);
-          if (!childrenValues) {
-            console.log('No children values found');
-            return [];
-          }
+          // Try to get child jobs directly from the queue
+          const childJobs = await queue.getJobs(['active', 'completed', 'waiting', 'delayed']);
+          console.log(
+            'Found jobs in queue:',
+            childJobs.map((j) => ({
+              id: j.id,
+              data: j.data,
+              parent: j.opts.parent,
+            })),
+          );
 
-          // Convert child jobs to FlowJob array
-          const flowJobs = Object.entries(childrenValues).map(([childId, childData]) => ({
-            name: (childData as T).name as JobName,
-            queueName: queue.name,
-            data: childData as T,
-            opts: {
-              jobId: childId,
-            },
-          }));
-          console.log('Converted flow jobs:', flowJobs);
+          // Filter child jobs by parent ID and ensure they have IDs
+          const children = childJobs.filter((j): j is typeof j & { id: string } => {
+            const parent = j.opts.parent;
+            if (!parent) return false;
+            // Handle both prefixed and unprefixed queue names
+            const parentQueue = parent.queue.replace(/^bull:/, '');
+            const currentQueue = queue.name.replace(/^bull:/, '');
+            return parent.id === jobId && parentQueue === currentQueue && hasJobId(j);
+          });
+          console.log(
+            'Found child jobs:',
+            children.map((j) => ({
+              id: j.id,
+              data: j.data,
+              parent: j.opts.parent,
+            })),
+          );
+
+          // Convert to FlowJob array with explicit typing
+          const flowJobs: FlowJob<T>[] = children.map((child) => {
+            const childData = child.data as T;
+            return {
+              name: childData.name as JobName,
+              queueName: queue.name,
+              data: {
+                ...childData,
+                timestamp: new Date(childData.timestamp),
+              } as T,
+              opts: {
+                jobId: child.id,
+                parent: {
+                  id: jobId,
+                  queue: queue.name,
+                },
+              },
+            };
+          });
+
           return flowJobs;
         },
         (error) => {
@@ -78,8 +98,46 @@ export const createFlowService = <T extends BaseJobData>(
             return {} as Record<string, unknown>;
           }
 
-          const values = await job.getChildrenValues();
-          return (values || {}) as Record<string, unknown>;
+          // Get child jobs directly
+          const childJobs = await queue.getJobs(['completed', 'active', 'waiting', 'delayed']);
+          console.log(
+            'Found jobs for children values:',
+            childJobs.map((j) => ({
+              id: j.id,
+              data: j.data,
+              parent: j.opts.parent,
+            })),
+          );
+
+          const children = childJobs.filter((j) => {
+            const parent = j.opts.parent;
+            if (!parent) return false;
+            // Handle both prefixed and unprefixed queue names
+            const parentQueue = parent.queue.replace(/^bull:/, '');
+            const currentQueue = queue.name.replace(/^bull:/, '');
+            return parent.id === jobId && parentQueue === currentQueue;
+          });
+          console.log(
+            'Found child jobs for values:',
+            children.map((j) => ({
+              id: j.id,
+              data: j.data,
+              parent: j.opts.parent,
+            })),
+          );
+
+          // Create a record of child values
+          const values: Record<string, unknown> = {};
+          for (const child of children) {
+            if (child.id) {
+              values[child.id] = {
+                ...child.data,
+                timestamp: new Date((child.data as T).timestamp),
+              };
+            }
+          }
+
+          return values;
         },
         (error) =>
           createQueueError(QueueErrorCode.GET_CHILDREN_VALUES, defaultName, error as Error),
@@ -111,17 +169,21 @@ export const createFlowService = <T extends BaseJobData>(
               queueName: queue.name,
               data: jobData,
               opts: {
-                ...opts,
+                jobId: opts.jobId,
                 parent: opts?.parent,
               },
               children: opts?.children?.map((child) => {
                 console.log('Processing child job:', child);
+                const childJobId = child.opts?.jobId || `child-${Date.now()}`;
                 return {
                   name: child.name,
                   queueName: queue.name, // Use the same queue name as parent
-                  data: child.data,
+                  data: {
+                    ...child.data,
+                    name: child.name, // Ensure name is set in data
+                  },
                   opts: {
-                    ...child.opts,
+                    jobId: childJobId,
                     parent: {
                       id: opts.jobId,
                       queue: queue.name,
@@ -134,34 +196,73 @@ export const createFlowService = <T extends BaseJobData>(
 
             // Add the job using FlowProducer
             const result = await flowProducer.add(flowJob as BullMQFlowJob);
-            console.log('Job added successfully:', result.job.id);
-
-            // Wait for the flow to be established and jobs to be processed
-            await new Promise((resolve) => setTimeout(resolve, 2000));
-
-            // Verify the job was added
-            if (!result.job.id) {
+            if (!hasJobId(result.job)) {
               throw new Error('Job ID is undefined');
             }
 
+            console.log('Job added successfully:', result.job.id);
+
+            // Wait for the flow to be established and jobs to be processed
+            await new Promise((resolve) => setTimeout(resolve, 3000));
+
             // Try multiple times to get the job
             let job = null;
-            for (let i = 0; i < 3; i++) {
+            for (let i = 0; i < 5; i++) {
               job = await queue.getJob(result.job.id);
-              if (job) break;
+              if (job) {
+                console.log('Job found in queue:', job.id);
+                break;
+              }
+              console.log('Job not found, retrying...');
               await new Promise((resolve) => setTimeout(resolve, 500));
             }
 
             if (!job) {
               throw new Error('Job was not added successfully');
             }
-            console.log('Job verified in queue:', job.id);
+
+            // Wait for child jobs to be processed and verify they exist
+            await new Promise((resolve) => setTimeout(resolve, 2000));
+            const childJobs = await queue.getJobs(['active', 'completed', 'waiting', 'delayed']);
+            console.log(
+              'All jobs in queue:',
+              childJobs.map((j) => ({
+                id: j.id,
+                data: j.data,
+                parent: j.opts.parent,
+              })),
+            );
+
+            const children = childJobs.filter((j) => {
+              const parent = j.opts.parent;
+              if (!parent) return false;
+              // Handle both prefixed and unprefixed queue names
+              const parentQueue = parent.queue.replace(/^bull:/, '');
+              const currentQueue = queue.name.replace(/^bull:/, '');
+              return parent.id === result.job.id && parentQueue === currentQueue;
+            });
+            console.log(
+              'Found child jobs after processing:',
+              children.map((j) => ({
+                id: j.id,
+                data: j.data,
+                parent: j.opts.parent,
+              })),
+            );
+
+            if (children.length === 0 && opts?.children && opts.children.length > 0) {
+              console.error('Child jobs were not created. Expected children:', opts.children);
+              throw new Error('Child jobs were not created successfully');
+            }
 
             return {
               name: result.job.name as JobName,
               queueName: result.job.queueName,
               data: result.job.data as T,
-              opts: result.job.opts as FlowOpts<T>,
+              opts: {
+                jobId: result.job.id,
+                parent: result.job.opts.parent,
+              },
             } as FlowJob<T>;
           } catch (error) {
             console.error('Error adding job:', error);
@@ -176,9 +277,29 @@ export const createFlowService = <T extends BaseJobData>(
     );
 
   const close = async (): Promise<void> => {
-    await queueEvents.close();
-    await flowProducer.disconnect();
+    try {
+      // Close all connections in sequence
+      await queueEvents.close();
+      await flowProducer.disconnect();
+      await queue.disconnect();
+    } catch (error) {
+      console.error('Error closing flow service:', error);
+    }
   };
+
+  // Ensure connections are established
+  const init = async (): Promise<void> => {
+    try {
+      await queue.waitUntilReady();
+      await queueEvents.waitUntilReady();
+    } catch (error) {
+      console.error('Error initializing flow service:', error);
+      throw error;
+    }
+  };
+
+  // Initialize connections
+  void init();
 
   return {
     getFlowDependencies,
