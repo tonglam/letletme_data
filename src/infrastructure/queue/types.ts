@@ -7,21 +7,29 @@ export interface FlowJob<T> {
   name: string;
   queueName: string;
   data: T;
-  opts: FlowOpts;
-  children: FlowJob<T>[];
+  opts?: FlowOpts<T>;
+  children?: FlowJob<T>[];
 }
 
-export interface FlowOpts {
+export interface FlowOpts<T = unknown> {
+  jobId: string;
+  priority?: number;
+  lifo?: boolean;
+  delay?: number;
+  timestamp?: number;
+  children?: FlowJob<T>[];
   parent?: {
     id: string;
     queue: string;
+    waitChildrenKey?: string;
   };
 }
 
 export interface FlowService<T> {
   getFlowDependencies: (jobId: string) => TE.TaskEither<QueueError, FlowJob<T>[]>;
   getChildrenValues: (jobId: string) => TE.TaskEither<QueueError, Record<string, unknown>>;
-  addJob: (data: T, opts?: FlowOpts) => TE.TaskEither<QueueError, FlowJob<T>>;
+  addJob: (data: T, opts?: FlowOpts<T>) => TE.TaskEither<QueueError, FlowJob<T>>;
+  close: () => Promise<void>;
 }
 
 export interface QueueService<T> {
@@ -90,6 +98,11 @@ export interface JobOptions {
   };
   jobId?: string;
   timestamp?: number;
+  parent?: {
+    id: string;
+    queue: string;
+    waitChildrenKey?: string;
+  };
 }
 
 export interface JobSchedulerOptions {

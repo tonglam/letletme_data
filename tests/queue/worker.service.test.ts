@@ -3,7 +3,7 @@ import { QueueConfig } from '../../src/config/queue/queue.config';
 import { createQueueService } from '../../src/infrastructure/queue/core/queue.service';
 import { createWorkerService } from '../../src/infrastructure/queue/core/worker.service';
 import { QueueError, QueueErrorCode } from '../../src/types/errors.type';
-import { JobData } from '../../src/types/job.type';
+import { JobData, JobName } from '../../src/types/job.type';
 
 jest.setTimeout(10000); // Reduce timeout to 10 seconds since tests run in ~9 seconds
 
@@ -283,6 +283,7 @@ describe('Worker Service Tests', () => {
           // Add job to trigger error and wait for it to be added
           const job = await queueService?.add('test', {
             type: 'META',
+            name: 'meta' as JobName,
             timestamp: new Date(),
             data: {},
           });

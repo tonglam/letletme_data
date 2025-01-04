@@ -4,7 +4,7 @@ import { QueueConfig } from '../../src/config/queue/queue.config';
 import { createQueueService } from '../../src/infrastructure/queue/core/queue.service';
 import { createSchedulerService } from '../../src/infrastructure/queue/core/scheduler.service';
 import { QueueError, QueueErrorCode } from '../../src/types/errors.type';
-import { JobData } from '../../src/types/job.type';
+import { JobData, JobName } from '../../src/types/job.type';
 
 describe('Scheduler Service Tests', () => {
   const queueName = 'test-scheduler-queue';
@@ -41,6 +41,7 @@ describe('Scheduler Service Tests', () => {
               name: 'interval-test',
               data: {
                 type: 'META' as const,
+                name: 'meta' as JobName,
                 data: { value: 1 },
                 timestamp: new Date(),
               },
@@ -64,6 +65,7 @@ describe('Scheduler Service Tests', () => {
               name: 'cron-test',
               data: {
                 type: 'META' as const,
+                name: 'meta' as JobName,
                 data: { value: 1 },
                 timestamp: new Date(),
               },
@@ -89,6 +91,7 @@ describe('Scheduler Service Tests', () => {
                 name: 'test-1',
                 data: {
                   type: 'META' as const,
+                  name: 'meta' as JobName,
                   data: { value: 1 },
                   timestamp: new Date(),
                 },
@@ -102,6 +105,7 @@ describe('Scheduler Service Tests', () => {
                   name: 'test-2',
                   data: {
                     type: 'META' as const,
+                    name: 'meta' as JobName,
                     data: { value: 2 },
                     timestamp: new Date(),
                   },
@@ -138,6 +142,7 @@ describe('Scheduler Service Tests', () => {
                 name: 'fast-test',
                 data: {
                   type: 'META' as const,
+                  name: 'meta' as JobName,
                   data: { value: 1 },
                   timestamp: new Date(),
                 },
@@ -151,6 +156,7 @@ describe('Scheduler Service Tests', () => {
                   name: 'slow-test',
                   data: {
                     type: 'META' as const,
+                    name: 'meta' as JobName,
                     data: { value: 2 },
                     timestamp: new Date(),
                   },
@@ -189,6 +195,7 @@ describe('Scheduler Service Tests', () => {
               name: 'invalid-test',
               data: {
                 type: 'META' as const,
+                name: 'meta' as JobName,
                 data: { value: 1 },
                 timestamp: new Date(),
               },

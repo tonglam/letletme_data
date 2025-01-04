@@ -3,7 +3,7 @@ import * as TE from 'fp-ts/TaskEither';
 import { QueueConfig } from '../../src/config/queue/queue.config';
 import { createQueueService } from '../../src/infrastructure/queue/core/queue.service';
 import { QueueError, QueueErrorCode } from '../../src/types/errors.type';
-import { JobData } from '../../src/types/job.type';
+import { JobData, JobName } from '../../src/types/job.type';
 
 describe('Queue Service Tests', () => {
   const queueName = 'test-queue';
@@ -38,6 +38,7 @@ describe('Queue Service Tests', () => {
         TE.chain((service) =>
           service.addJob({
             type: 'META',
+            name: 'meta' as JobName,
             data: { value: 1 },
             timestamp: new Date(),
           }),
@@ -52,6 +53,7 @@ describe('Queue Service Tests', () => {
         {
           data: {
             type: 'META' as const,
+            name: 'meta' as JobName,
             data: { value: 1 },
             timestamp: new Date(),
           },
@@ -59,6 +61,7 @@ describe('Queue Service Tests', () => {
         {
           data: {
             type: 'LIVE' as const,
+            name: 'live' as JobName,
             data: { value: 2 },
             timestamp: new Date(),
           },
@@ -80,6 +83,7 @@ describe('Queue Service Tests', () => {
           pipe(
             service.addJob({
               type: 'META',
+              name: 'meta' as JobName,
               data: { value: 1 },
               timestamp: new Date(),
             }),
@@ -151,6 +155,7 @@ describe('Queue Service Tests', () => {
         TE.chain((service) =>
           service.addJob({
             type: 'META',
+            name: 'meta' as JobName,
             data: { value: 1 },
             timestamp: new Date(),
           }),
@@ -170,6 +175,7 @@ describe('Queue Service Tests', () => {
         TE.chain((service) =>
           service.addJob({
             type: 'INVALID_TYPE' as JobData['type'],
+            name: 'meta' as JobName,
             data: { value: 'not a number' },
             timestamp: 'not a date' as unknown as Date,
           }),

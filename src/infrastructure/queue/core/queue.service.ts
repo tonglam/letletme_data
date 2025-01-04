@@ -23,6 +23,17 @@ const JobDataSchema = z
     ]),
     timestamp: z.date(),
     data: z.unknown().optional().default({}),
+    name: z.union([
+      z.literal('scheduler'),
+      z.literal('flow'),
+      z.literal('worker'),
+      z.literal('meta'),
+      z.literal('live'),
+      z.literal('daily'),
+      z.literal('events'),
+      z.literal('phases'),
+      z.literal('teams'),
+    ]),
   })
   .transform((data) => ({
     ...data,
@@ -212,16 +223,20 @@ export const createQueueService = <T extends JobData>(
     ),
   );
 
-export class QueueServiceImpl {
-  private readonly queue: Queue;
+export class QueueServiceImpl<T extends JobData> {
+  private readonly queue: Queue<T>;
 
   constructor(options: { connection: { host: string; port: number } }) {
-    this.queue = new Queue('default', {
+    this.queue = new Queue<T>('test-queue', {
       connection: options.connection,
+      defaultJobOptions: {
+        removeOnComplete: true,
+        removeOnFail: true,
+      },
     });
   }
 
-  getQueue(): Queue {
+  getQueue(): Queue<T> {
     return this.queue;
   }
 
