@@ -61,13 +61,44 @@ Test domain logic and business rules:
 
 ### 1.3 Repository Tests (`tests/event/repository.test.ts`)
 
-Test database operations:
+Test database operations with real bootstrap data:
 
-- [x] Event Repository
-  - [x] CRUD operations
-  - [x] Query operations
-  - [x] Transaction handling
-  - [x] Error handling
+- [x] Event Repository CRUD Operations
+
+  - [x] Create single event with validation
+  - [x] Create multiple events in batch
+  - [x] Find event by ID with proper type safety
+  - [x] Find multiple events by IDs
+  - [x] Update event with partial data
+  - [x] Delete event with verification
+  - [x] Find all events with pagination
+
+- [x] Special Query Operations
+
+  - [x] Find current event (isCurrent flag)
+  - [x] Find next event (isNext flag)
+  - [x] Handle JSON fields properly (chipPlays, topElementInfo)
+  - [x] Validate EventId branded type
+
+- [x] Data Integrity
+
+  - [x] Proper cleanup before and after tests
+  - [x] Verify all event fields after operations
+  - [x] Handle null and optional fields correctly
+  - [x] Maintain data consistency in transactions
+
+- [x] Error Handling & Type Safety
+
+  - [x] Use Either type for error handling
+  - [x] Proper type validation for EventId
+  - [x] Handle JSON serialization/deserialization
+  - [x] Follow functional programming principles
+
+- [x] Test Data Management
+  - [x] Use real data from bootstrap.json
+  - [x] Proper test isolation
+  - [x] Clean database state between tests
+  - [x] Track created records for cleanup
 
 ### 1.4 Cache Tests (`tests/event/cache.test.ts`)
 

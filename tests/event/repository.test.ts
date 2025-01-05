@@ -3,40 +3,49 @@ import { pipe } from 'fp-ts/function';
 import { eventRepository } from '../../src/domain/event/repository';
 import { prisma } from '../../src/infrastructure/db/prisma';
 import type { Event, EventId } from '../../src/types/events.type';
+import { validateEventId } from '../../src/types/events.type';
+import bootstrapData from '../data/bootstrap.json';
 
 describe('Event Repository Tests', () => {
   let testEvents: Event[];
   let createdEventIds: number[] = [];
 
   beforeAll(() => {
-    // Create test events
-    testEvents = Array.from({ length: 3 }, (_, i) => ({
-      id: (i + 1) as EventId,
-      name: `Gameweek ${i + 1}`,
-      deadlineTime: new Date(Date.now() + (i + 1) * 24 * 60 * 60 * 1000).toISOString(),
-      deadlineTimeEpoch: Math.floor(Date.now() / 1000) + (i + 1) * 24 * 60 * 60,
-      deadlineTimeGameOffset: 0,
-      releaseTime: null,
-      averageEntryScore: 0,
-      finished: i === 0,
-      dataChecked: i === 0,
-      highestScore: 0,
-      highestScoringEntry: 0,
-      isPrevious: i === 0,
-      isCurrent: i === 1,
-      isNext: i === 2,
-      cupLeaguesCreated: false,
-      h2hKoMatchesCreated: false,
-      rankedCount: 0,
-      chipPlays: [],
-      mostSelected: null,
-      mostTransferredIn: null,
-      mostCaptained: null,
-      mostViceCaptained: null,
-      topElement: null,
-      topElementInfo: null,
-      transfersMade: 0,
-    }));
+    // Use real event data from bootstrap.json and convert to domain model
+    testEvents = bootstrapData.events.slice(0, 3).map((event) => {
+      const eventIdResult = validateEventId(event.id);
+      if (E.isLeft(eventIdResult)) {
+        throw new Error(`Invalid event ID: ${event.id}`);
+      }
+
+      return {
+        id: eventIdResult.right,
+        name: event.name,
+        deadlineTime: event.deadline_time,
+        deadlineTimeEpoch: event.deadline_time_epoch,
+        deadlineTimeGameOffset: event.deadline_time_game_offset ?? 0,
+        releaseTime: event.release_time,
+        averageEntryScore: event.average_entry_score ?? 0,
+        finished: event.finished,
+        dataChecked: event.data_checked ?? false,
+        highestScore: event.highest_score ?? 0,
+        highestScoringEntry: event.highest_scoring_entry ?? 0,
+        isPrevious: event.is_previous,
+        isCurrent: event.is_current,
+        isNext: event.is_next,
+        cupLeaguesCreated: event.cup_leagues_created ?? false,
+        h2hKoMatchesCreated: event.h2h_ko_matches_created ?? false,
+        rankedCount: event.ranked_count ?? 0,
+        chipPlays: event.chip_plays ?? [],
+        mostSelected: event.most_selected ?? null,
+        mostTransferredIn: event.most_transferred_in ?? null,
+        mostCaptained: event.most_captained ?? null,
+        mostViceCaptained: event.most_vice_captained ?? null,
+        topElement: event.top_element ?? null,
+        topElementInfo: event.top_element_info ?? null,
+        transfersMade: event.transfers_made ?? 0,
+      };
+    });
   });
 
   beforeEach(async () => {
@@ -75,10 +84,36 @@ describe('Event Repository Tests', () => {
         expect(createdEvent).toMatchObject({
           id: testEvent.id,
           name: testEvent.name,
-          deadlineTime: expect.any(String),
+          deadlineTime: testEvent.deadlineTime,
+          deadlineTimeEpoch: testEvent.deadlineTimeEpoch,
+          deadlineTimeGameOffset: testEvent.deadlineTimeGameOffset,
+          releaseTime: testEvent.releaseTime,
+          averageEntryScore: testEvent.averageEntryScore,
           finished: testEvent.finished,
           dataChecked: testEvent.dataChecked,
+          highestScore: testEvent.highestScore,
+          highestScoringEntry: testEvent.highestScoringEntry,
+          isPrevious: testEvent.isPrevious,
+          isCurrent: testEvent.isCurrent,
+          isNext: testEvent.isNext,
+          cupLeaguesCreated: testEvent.cupLeaguesCreated,
+          h2hKoMatchesCreated: testEvent.h2hKoMatchesCreated,
+          rankedCount: testEvent.rankedCount,
+          chipPlays: testEvent.chipPlays,
+          mostSelected: testEvent.mostSelected,
+          mostTransferredIn: testEvent.mostTransferredIn,
+          mostCaptained: testEvent.mostCaptained,
+          mostViceCaptained: testEvent.mostViceCaptained,
+          topElement: testEvent.topElement,
+          topElementInfo: testEvent.topElementInfo,
+          transfersMade: testEvent.transfersMade,
         });
+
+        // Verify JSON fields
+        expect(JSON.parse(JSON.stringify(createdEvent.chipPlays))).toEqual(testEvent.chipPlays);
+        expect(JSON.parse(JSON.stringify(createdEvent.topElementInfo))).toEqual(
+          testEvent.topElementInfo,
+        );
       }
     });
 
@@ -92,13 +127,33 @@ describe('Event Repository Tests', () => {
 
         expect(createdEvents).toHaveLength(testEvents.length);
         createdEvents.forEach((event, index) => {
+          const testEvent = testEvents[index];
           expect(event).toMatchObject({
-            id: testEvents[index].id,
-            name: testEvents[index].name,
-            deadlineTime: expect.any(String),
-            finished: testEvents[index].finished,
-            dataChecked: testEvents[index].dataChecked,
+            id: testEvent.id,
+            name: testEvent.name,
+            deadlineTime: testEvent.deadlineTime,
+            deadlineTimeEpoch: testEvent.deadlineTimeEpoch,
+            deadlineTimeGameOffset: testEvent.deadlineTimeGameOffset,
+            releaseTime: testEvent.releaseTime,
+            averageEntryScore: testEvent.averageEntryScore,
+            finished: testEvent.finished,
+            dataChecked: testEvent.dataChecked,
+            highestScore: testEvent.highestScore,
+            highestScoringEntry: testEvent.highestScoringEntry,
+            isPrevious: testEvent.isPrevious,
+            isCurrent: testEvent.isCurrent,
+            isNext: testEvent.isNext,
+            cupLeaguesCreated: testEvent.cupLeaguesCreated,
+            h2hKoMatchesCreated: testEvent.h2hKoMatchesCreated,
+            rankedCount: testEvent.rankedCount,
+            transfersMade: testEvent.transfersMade,
           });
+
+          // Verify JSON fields
+          expect(JSON.parse(JSON.stringify(event.chipPlays))).toEqual(testEvent.chipPlays);
+          expect(JSON.parse(JSON.stringify(event.topElementInfo))).toEqual(
+            testEvent.topElementInfo,
+          );
         });
       }
     });
@@ -116,10 +171,26 @@ describe('Event Repository Tests', () => {
         expect(E.isRight(findResult)).toBe(true);
         if (E.isRight(findResult)) {
           const foundEvent = findResult.right;
-          expect(foundEvent).toMatchObject({
-            id: testEvent.id,
-            name: testEvent.name,
-          });
+          expect(foundEvent).not.toBeNull();
+          if (foundEvent) {
+            expect(foundEvent).toMatchObject({
+              id: testEvent.id,
+              name: testEvent.name,
+              deadlineTime: testEvent.deadlineTime,
+              deadlineTimeEpoch: testEvent.deadlineTimeEpoch,
+              deadlineTimeGameOffset: testEvent.deadlineTimeGameOffset,
+              releaseTime: testEvent.releaseTime,
+              averageEntryScore: testEvent.averageEntryScore,
+              finished: testEvent.finished,
+              dataChecked: testEvent.dataChecked,
+            });
+
+            // Verify JSON fields
+            expect(JSON.parse(JSON.stringify(foundEvent.chipPlays))).toEqual(testEvent.chipPlays);
+            expect(JSON.parse(JSON.stringify(foundEvent.topElementInfo))).toEqual(
+              testEvent.topElementInfo,
+            );
+          }
         }
       }
     });
@@ -139,13 +210,24 @@ describe('Event Repository Tests', () => {
           const foundEvents = findResult.right;
           expect(foundEvents).toHaveLength(testEvents.length);
           foundEvents.forEach((event, index) => {
+            const testEvent = testEvents[index];
             expect(event).toMatchObject({
-              id: testEvents[index].id,
-              name: testEvents[index].name,
-              deadlineTime: expect.any(String),
-              finished: testEvents[index].finished,
-              dataChecked: testEvents[index].dataChecked,
+              id: testEvent.id,
+              name: testEvent.name,
+              deadlineTime: testEvent.deadlineTime,
+              deadlineTimeEpoch: testEvent.deadlineTimeEpoch,
+              deadlineTimeGameOffset: testEvent.deadlineTimeGameOffset,
+              releaseTime: testEvent.releaseTime,
+              averageEntryScore: testEvent.averageEntryScore,
+              finished: testEvent.finished,
+              dataChecked: testEvent.dataChecked,
             });
+
+            // Verify JSON fields
+            expect(JSON.parse(JSON.stringify(event.chipPlays))).toEqual(testEvent.chipPlays);
+            expect(JSON.parse(JSON.stringify(event.topElementInfo))).toEqual(
+              testEvent.topElementInfo,
+            );
           });
         }
       }
@@ -197,12 +279,17 @@ describe('Event Repository Tests', () => {
       if (E.isRight(createResult)) {
         createdEventIds.push(createResult.right.id);
 
-        // Then update it
+        // Then update it with data from another event
         const updateData = {
           finished: !testEvent.finished,
           dataChecked: !testEvent.dataChecked,
-          averageEntryScore: 100,
+          averageEntryScore: testEvents[1].averageEntryScore,
+          highestScore: testEvents[1].highestScore,
+          highestScoringEntry: testEvents[1].highestScoringEntry,
+          chipPlays: testEvents[1].chipPlays,
+          topElementInfo: testEvents[1].topElementInfo,
         };
+
         const updateResult = await pipe(eventRepository.update(testEvent.id, updateData))();
         expect(E.isRight(updateResult)).toBe(true);
         if (E.isRight(updateResult)) {
@@ -212,7 +299,15 @@ describe('Event Repository Tests', () => {
             finished: updateData.finished,
             dataChecked: updateData.dataChecked,
             averageEntryScore: updateData.averageEntryScore,
+            highestScore: updateData.highestScore,
+            highestScoringEntry: updateData.highestScoringEntry,
           });
+
+          // Verify JSON fields
+          expect(JSON.parse(JSON.stringify(updatedEvent.chipPlays))).toEqual(updateData.chipPlays);
+          expect(JSON.parse(JSON.stringify(updatedEvent.topElementInfo))).toEqual(
+            updateData.topElementInfo,
+          );
         }
       }
     });
@@ -238,6 +333,57 @@ describe('Event Repository Tests', () => {
           if (E.isRight(findResult)) {
             expect(findResult.right).toBeNull();
           }
+        }
+      }
+    });
+
+    it('should find all events', async () => {
+      // First create multiple events
+      const createResult = await pipe(eventRepository.createMany(testEvents))();
+      expect(E.isRight(createResult)).toBe(true);
+      if (E.isRight(createResult)) {
+        createdEventIds.push(...createResult.right.map((e) => e.id));
+
+        // Then find all events
+        const findResult = await pipe(eventRepository.findAll())();
+        expect(E.isRight(findResult)).toBe(true);
+        if (E.isRight(findResult)) {
+          const foundEvents = findResult.right;
+          expect(foundEvents.length).toBeGreaterThanOrEqual(testEvents.length);
+
+          // Verify the test events are included in the results
+          const testEventIds = testEvents.map((e) => e.id);
+          const foundTestEvents = foundEvents.filter((e) => testEventIds.includes(e.id as EventId));
+          expect(foundTestEvents).toHaveLength(testEvents.length);
+
+          foundTestEvents.forEach((event) => {
+            const testEvent = testEvents.find((e) => e.id === event.id);
+            expect(testEvent).toBeDefined();
+            if (testEvent) {
+              expect(event).toMatchObject({
+                id: testEvent.id,
+                name: testEvent.name,
+                deadlineTime: testEvent.deadlineTime,
+                deadlineTimeEpoch: testEvent.deadlineTimeEpoch,
+                deadlineTimeGameOffset: testEvent.deadlineTimeGameOffset,
+                releaseTime: testEvent.releaseTime,
+                averageEntryScore: testEvent.averageEntryScore,
+                finished: testEvent.finished,
+                dataChecked: testEvent.dataChecked,
+                highestScore: testEvent.highestScore,
+                highestScoringEntry: testEvent.highestScoringEntry,
+                isPrevious: testEvent.isPrevious,
+                isCurrent: testEvent.isCurrent,
+                isNext: testEvent.isNext,
+              });
+
+              // Verify JSON fields
+              expect(JSON.parse(JSON.stringify(event.chipPlays))).toEqual(testEvent.chipPlays);
+              expect(JSON.parse(JSON.stringify(event.topElementInfo))).toEqual(
+                testEvent.topElementInfo,
+              );
+            }
+          });
         }
       }
     });
