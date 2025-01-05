@@ -1,19 +1,29 @@
 // Event Service Entry Module
 // Provides the main entry point for the event service layer.
-// Handles service composition and dependency injection,
-// wiring together all required dependencies.
+// Handles service composition and dependency injection.
 
-import { BootstrapApi } from 'domains/bootstrap/types';
-import { eventRepository } from '../../domain/event/repository';
-import type { BootStrapResponse } from '../../types/bootstrap.type';
+import { ExtendedBootstrapApi } from 'domains/bootstrap/types';
+import { EventRepositoryOperations } from '../../domain/event/types';
 import { createEventService as createEventServiceImpl } from './service';
 import type { EventService } from './types';
+import type { EventWorkflows } from './workflow';
+import { eventWorkflows } from './workflow';
 
-// Creates a fully configured event service instance.
+// Event workflow keys for type-safe access
+export const EventWorkflowKey = {
+  SYNC: 'syncEvents',
+} as const;
+
+// Create core event service
 export const createEventService = (
-  bootstrapApi: BootstrapApi & {
-    getBootstrapEvents: () => Promise<BootStrapResponse['events']>;
-  },
-): EventService => createEventServiceImpl(bootstrapApi, eventRepository);
+  bootstrapApi: ExtendedBootstrapApi,
+  repository: EventRepositoryOperations,
+): EventService => createEventServiceImpl(bootstrapApi, repository);
 
+// Create event workflows
+export const createEventWorkflows = (service: EventService): EventWorkflows =>
+  eventWorkflows(service);
+
+// Re-export types
 export type { EventService } from './types';
+export type { EventWorkflows } from './workflow';

@@ -8,19 +8,40 @@
 
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
+import { CachePrefix, DefaultTTL } from '../../config/cache/cache.config';
+import { createRedisCache } from '../../infrastructure/cache/redis-cache';
+import { getCurrentSeason } from '../../types/base.type';
 import { DomainErrorCode } from '../../types/errors.type';
 import { Event as DomainEvent, EventId, toDomainEvent } from '../../types/events.type';
 import { createStandardDomainError } from '../utils';
-import { EventCache, EventOperations, EventRepositoryOperations } from './types';
+import { createEventCache } from './cache';
+import { EventOperations, EventRepositoryOperations } from './types';
 
 /**
  * Creates event operations instance.
  * Implements high-level domain operations with caching support.
  */
-export const createEventOperations = (
-  repository: EventRepositoryOperations,
-  cache: EventCache,
-): EventOperations => {
+export const createEventOperations = (repository: EventRepositoryOperations): EventOperations => {
+  // Create cache instance
+  const redis = createRedisCache<DomainEvent>({
+    keyPrefix: CachePrefix.EVENT,
+    defaultTTL: DefaultTTL.EVENT,
+  });
+
+  const cache = createEventCache(
+    redis,
+    {
+      getOne: async () => null,
+      getAll: async () => [],
+      getCurrentEvent: async () => null,
+      getNextEvent: async () => null,
+    },
+    {
+      keyPrefix: CachePrefix.EVENT,
+      season: getCurrentSeason(),
+    },
+  );
+
   const handleRepositoryError = (message: string) => (error: unknown) =>
     createStandardDomainError({
       code: DomainErrorCode.VALIDATION_ERROR,

@@ -1,33 +1,66 @@
-// Event Service Workflow Module
-// Provides high-level workflow operations combining multiple event service operations.
-// Implements orchestration of complex event management tasks.
+/**
+ * Event Service Workflow Module
+ * Implements high-level workflows that orchestrate multiple event service operations.
+ * Provides logging, error handling, and workflow context management.
+ */
 
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
 import { getWorkflowLogger } from '../../infrastructure/logger';
 import { ServiceError } from '../../types/errors.type';
 import type { Event } from '../../types/events.type';
-import type { EventService } from './types';
+import { createServiceOperationError } from '../../utils/error.util';
+import type { EventService, WorkflowContext, WorkflowResult } from './types';
 
 const logger = getWorkflowLogger();
 
-// Creates event workflow operations
+/**
+ * Creates workflow context for tracking and logging
+ */
+const createWorkflowContext = (workflowId: string): WorkflowContext => ({
+  workflowId,
+  startTime: new Date(),
+});
+
+/**
+ * Creates event workflow operations.
+ * Implements high-level workflows that combine multiple service operations.
+ */
 export const eventWorkflows = (eventService: EventService) => {
-  // Syncs events from FPL API to local database
-  const syncEvents = (): TE.TaskEither<ServiceError, readonly Event[]> => {
-    logger.info({ workflow: 'event-sync' }, 'Starting event sync from API');
+  /**
+   * Syncs events from FPL API to local database.
+   * Handles logging, error mapping, and workflow context.
+   */
+  const syncEvents = (): TE.TaskEither<ServiceError, WorkflowResult<readonly Event[]>> => {
+    const context = createWorkflowContext('event-sync');
+
+    logger.info({ workflow: context.workflowId }, 'Starting event sync workflow');
+
     return pipe(
       eventService.syncEventsFromApi(),
-      TE.mapLeft((error: ServiceError) => ({
-        ...error,
-        message: `Failed to sync events from API: ${error.message}`,
-      })),
+      TE.mapLeft((error: ServiceError) =>
+        createServiceOperationError({
+          message: `Event sync workflow failed: ${error.message}`,
+          cause: error,
+        }),
+      ),
       TE.map((events) => {
+        const duration = new Date().getTime() - context.startTime.getTime();
+
         logger.info(
-          { workflow: 'event-sync', count: events.length },
-          'Successfully synced events from API',
+          {
+            workflow: context.workflowId,
+            count: events.length,
+            durationMs: duration,
+          },
+          'Event sync workflow completed successfully',
         );
-        return events;
+
+        return {
+          context,
+          result: events,
+          duration,
+        };
       }),
     );
   };
