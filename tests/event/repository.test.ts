@@ -12,7 +12,7 @@ describe('Event Repository Tests', () => {
 
   beforeAll(() => {
     // Use real event data from bootstrap.json and convert to domain model
-    testEvents = bootstrapData.events.slice(0, 3).map((event) => {
+    testEvents = bootstrapData.events.slice(0, 3).map((event, index) => {
       const eventIdResult = validateEventId(event.id);
       if (E.isLeft(eventIdResult)) {
         throw new Error(`Invalid event ID: ${event.id}`);
@@ -30,9 +30,9 @@ describe('Event Repository Tests', () => {
         dataChecked: event.data_checked ?? false,
         highestScore: event.highest_score ?? 0,
         highestScoringEntry: event.highest_scoring_entry ?? 0,
-        isPrevious: event.is_previous,
-        isCurrent: event.is_current,
-        isNext: event.is_next,
+        isPrevious: index === 0,
+        isCurrent: index === 1,
+        isNext: index === 2,
         cupLeaguesCreated: event.cup_leagues_created ?? false,
         h2hKoMatchesCreated: event.h2h_ko_matches_created ?? false,
         rankedCount: event.ranked_count ?? 0,
@@ -62,13 +62,7 @@ describe('Event Repository Tests', () => {
 
   afterAll(async () => {
     // Final cleanup
-    await prisma.event.deleteMany({
-      where: {
-        id: {
-          in: [...testEvents.map((e) => Number(e.id)), ...createdEventIds],
-        },
-      },
-    });
+    await prisma.event.deleteMany();
   });
 
   describe('Event Repository Operations', () => {

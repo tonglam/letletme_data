@@ -10,7 +10,7 @@ import bootstrapData from '../data/bootstrap.json';
 describe('Event Cache Tests', () => {
   let testEvents: Event[];
   const TEST_PREFIX = 'test:event';
-  const TEST_SEASON = '2023';
+  const TEST_SEASON = '2425';
 
   beforeAll(() => {
     // Convert bootstrap events to domain events
@@ -44,14 +44,8 @@ describe('Event Cache Tests', () => {
   });
 
   describe('Cache Operations', () => {
-    const getDateString = (date: Date | string): string => {
-      return new Date(date).toISOString();
-    };
-
     const compareEvents = (a: Event, b: Event): boolean => {
-      const aWithoutDate = { ...a, deadlineTime: getDateString(a.deadlineTime) };
-      const bWithoutDate = { ...b, deadlineTime: getDateString(b.deadlineTime) };
-      return JSON.stringify(aWithoutDate) === JSON.stringify(bWithoutDate);
+      return JSON.stringify(a) === JSON.stringify(b);
     };
 
     const compareEventArrays = (a: readonly Event[], b: readonly Event[]): boolean => {
@@ -284,6 +278,124 @@ describe('Event Cache Tests', () => {
         // Should not call data provider again
         expect(mockDataProvider.getAll).toHaveBeenCalledTimes(1);
       }
+    });
+
+    it('should handle different seasons and key prefixes', async () => {
+      const customPrefix = 'custom:prefix';
+      const customSeason = '2024';
+      const redis = createRedisCache<Event>({ keyPrefix: customPrefix });
+      const mockDataProvider = {
+        getOne: jest.fn().mockResolvedValue(testEvents[0]),
+        getAll: jest.fn().mockResolvedValue([]),
+        getCurrentEvent: jest.fn().mockResolvedValue(null),
+        getNextEvent: jest.fn().mockResolvedValue(null),
+      };
+
+      const eventCache = createEventCache(redis, mockDataProvider, {
+        keyPrefix: customPrefix,
+        season: customSeason,
+      });
+
+      // Cache multiple events to test multi command
+      const cacheResult = await pipe(eventCache.cacheEvents([testEvents[0], testEvents[1]]))();
+      expect(E.isRight(cacheResult)).toBe(true);
+
+      // Verify the events are stored in Redis with correct key
+      const key = `${customPrefix}::${customSeason}`;
+      const values = await redisClient.hgetall(key);
+      expect(values).toBeTruthy();
+      expect(Object.keys(values).length).toBe(2);
+
+      // Verify we can retrieve them through the cache
+      const getResult = await pipe(eventCache.getAllEvents())();
+      expect(E.isRight(getResult)).toBe(true);
+      if (E.isRight(getResult) && getResult.right) {
+        expect(getResult.right.length).toBe(2);
+        expect(compareEventArrays(getResult.right, [testEvents[0], testEvents[1]])).toBe(true);
+      }
+    });
+
+    it('should handle empty event data gracefully', async () => {
+      const redis = createRedisCache<Event>({ keyPrefix: TEST_PREFIX });
+      const mockDataProvider = {
+        getOne: jest.fn().mockResolvedValue(null),
+        getAll: jest.fn().mockResolvedValue([]),
+        getCurrentEvent: jest.fn().mockResolvedValue(null),
+        getNextEvent: jest.fn().mockResolvedValue(null),
+      };
+
+      const eventCache = createEventCache(redis, mockDataProvider, {
+        keyPrefix: TEST_PREFIX,
+        season: TEST_SEASON,
+      });
+
+      // Test caching empty array
+      const cacheResult = await pipe(eventCache.cacheEvents([]))();
+      expect(E.isRight(cacheResult)).toBe(true);
+
+      // Test getting events when cache is empty
+      const getResult = await pipe(eventCache.getAllEvents())();
+      expect(E.isRight(getResult)).toBe(true);
+      if (E.isRight(getResult)) {
+        expect(getResult.right).toEqual([]);
+      }
+    });
+
+    it('should handle malformed event data', async () => {
+      const redis = createRedisCache<Event>({ keyPrefix: TEST_PREFIX });
+      const key = `${TEST_PREFIX}::${TEST_SEASON}`;
+
+      // Manually insert malformed data
+      await redisClient.hset(key, '999', 'invalid-json');
+
+      const mockDataProvider = {
+        getOne: jest.fn().mockResolvedValue(null),
+        getAll: jest.fn().mockResolvedValue([]),
+        getCurrentEvent: jest.fn().mockResolvedValue(null),
+        getNextEvent: jest.fn().mockResolvedValue(null),
+      };
+
+      const eventCache = createEventCache(redis, mockDataProvider, {
+        keyPrefix: TEST_PREFIX,
+        season: TEST_SEASON,
+      });
+
+      // Test getting all events with malformed data
+      const getResult = await pipe(eventCache.getAllEvents())();
+      expect(E.isRight(getResult)).toBe(true);
+      if (E.isRight(getResult)) {
+        // Malformed data should be filtered out
+        expect(getResult.right).toEqual([]);
+      }
+    });
+
+    it('should handle concurrent cache operations', async () => {
+      const redis = createRedisCache<Event>({ keyPrefix: TEST_PREFIX });
+      const mockDataProvider = {
+        getOne: jest.fn().mockResolvedValue(testEvents[0]),
+        getAll: jest.fn().mockResolvedValue(testEvents),
+        getCurrentEvent: jest.fn().mockResolvedValue(null),
+        getNextEvent: jest.fn().mockResolvedValue(null),
+      };
+
+      const eventCache = createEventCache(redis, mockDataProvider, {
+        keyPrefix: TEST_PREFIX,
+        season: TEST_SEASON,
+      });
+
+      // Perform multiple cache operations concurrently
+      const [cacheResult, getAllResult, getCurrentResult, getNextResult] = await Promise.all([
+        eventCache.cacheEvent(testEvents[0])(),
+        eventCache.getAllEvents()(),
+        eventCache.getCurrentEvent()(),
+        eventCache.getNextEvent()(),
+      ]);
+
+      // Verify each operation succeeded
+      expect(E.isRight(cacheResult)).toBe(true);
+      expect(E.isRight(getAllResult)).toBe(true);
+      expect(E.isRight(getCurrentResult)).toBe(true);
+      expect(E.isRight(getNextResult)).toBe(true);
     });
   });
 });

@@ -104,11 +104,40 @@ Test database operations with real bootstrap data:
 
 Test caching operations:
 
-- [x] Redis Operations
-  - [x] Basic operations (get/set)
-  - [x] TTL handling
-  - [x] Serialization
-  - [x] Error handling
+- [x] Basic Cache Operations
+
+  - [x] Set and get single event
+  - [x] Set and get multiple events
+  - [x] Cache miss handling with data provider fallback
+  - [x] Current and next event caching
+  - [x] Warm up cache with initial data
+
+- [x] Error Handling & Edge Cases
+
+  - [x] Handle error cases gracefully (data provider errors)
+  - [x] Handle empty event data
+  - [x] Handle malformed event data
+  - [x] Handle concurrent cache operations
+
+- [x] Configuration & Setup
+
+  - [x] Handle different seasons and key prefixes
+  - [x] Proper cleanup before and after tests
+  - [x] Redis key management
+  - [x] Test isolation
+
+- [x] Data Integrity
+
+  - [x] Consistent event comparison
+  - [x] Order-independent array comparison
+  - [x] Proper serialization/deserialization
+  - [x] Detailed mismatch logging
+
+- [x] Mock Data Provider
+  - [x] Fallback for cache misses
+  - [x] Verify provider call counts
+  - [x] Mock different response scenarios
+  - [x] Test provider integration
 
 ## 2. Integration Tests
 
