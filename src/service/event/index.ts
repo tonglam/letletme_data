@@ -3,7 +3,7 @@
 // Handles service composition and dependency injection,
 // wiring together all required dependencies.
 
-import type { BootstrapApi } from '../../domain/bootstrap/operations';
+import { BootstrapApi } from 'domains/bootstrap/types';
 import { eventRepository } from '../../domain/event/repository';
 import type { BootStrapResponse } from '../../types/bootstrap.type';
 import { createEventService as createEventServiceImpl } from './service';

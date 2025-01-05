@@ -13,8 +13,8 @@ import { Event, EventId, PrismaEvent } from '../../types/events.type';
  * Abstracts the underlying data source for the cache layer.
  */
 export interface EventDataProvider {
-  readonly getOne: (id: EventId) => Promise<Event | null>;
-  readonly getAll: () => Promise<readonly Event[]>;
+  readonly getOne: (id: number) => Promise<Event | null>;
+  readonly getAll: () => Promise<Event[]>;
   readonly getCurrentEvent: () => Promise<Event | null>;
   readonly getNextEvent: () => Promise<Event | null>;
 }
@@ -33,13 +33,13 @@ export interface EventCacheConfig {
  * Defines all caching operations available for events.
  */
 export interface EventCache {
+  readonly warmUp: () => TaskEither<CacheError, void>;
   readonly cacheEvent: (event: Event) => TaskEither<CacheError, void>;
   readonly getEvent: (id: string) => TaskEither<CacheError, Event | null>;
   readonly cacheEvents: (events: readonly Event[]) => TaskEither<CacheError, void>;
   readonly getAllEvents: () => TaskEither<CacheError, readonly Event[]>;
   readonly getCurrentEvent: () => TaskEither<CacheError, Event | null>;
   readonly getNextEvent: () => TaskEither<CacheError, Event | null>;
-  readonly warmUp: () => TaskEither<CacheError, void>;
 }
 
 /**

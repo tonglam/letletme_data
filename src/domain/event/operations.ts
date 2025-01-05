@@ -8,15 +8,9 @@
 
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import {
-  withCache,
-  withCacheSingle,
-  withCreate,
-  withCreateBatch,
-} from '../../infrastructure/cache/operations';
 import { DomainErrorCode } from '../../types/errors.type';
 import { Event as DomainEvent, EventId, toDomainEvent } from '../../types/events.type';
-import { createSafeCacheOperation, createStandardDomainError } from '../utils';
+import { createStandardDomainError } from '../utils';
 import { EventCache, EventOperations, EventRepositoryOperations } from './types';
 
 /**
@@ -27,137 +21,123 @@ export const createEventOperations = (
   repository: EventRepositoryOperations,
   cache: EventCache,
 ): EventOperations => {
-  const safeCacheEvent = createSafeCacheOperation(cache.cacheEvent);
+  const handleRepositoryError = (message: string) => (error: unknown) =>
+    createStandardDomainError({
+      code: DomainErrorCode.VALIDATION_ERROR,
+      message,
+      details: error,
+    });
+
+  const mapCacheError = (message: string) => (error: unknown) =>
+    createStandardDomainError({
+      code: DomainErrorCode.PROCESSING_ERROR,
+      message,
+      details: error,
+    });
+
+  const withCacheErrorMapping = <T>(message: string, task: TE.TaskEither<unknown, T>) =>
+    pipe(task, TE.mapLeft(mapCacheError(message)));
 
   return {
     getAllEvents: () =>
-      withCache(
-        () => cache.getAllEvents(),
-        () =>
-          pipe(
-            repository.findAll(),
-            TE.mapLeft((error) =>
-              createStandardDomainError({
-                code: DomainErrorCode.VALIDATION_ERROR,
-                message: 'Failed to fetch all events',
-                details: error,
-              }),
-            ),
-            TE.map((events) => events.map(toDomainEvent)),
-          ),
-        (events) => cache.cacheEvents(events),
+      pipe(
+        cache.getAllEvents(),
+        TE.mapLeft(mapCacheError('Failed to get events from cache')),
+        TE.chain((cachedEvents) =>
+          cachedEvents.length > 0
+            ? TE.right(cachedEvents)
+            : pipe(
+                repository.findAll(),
+                TE.mapLeft(handleRepositoryError('Failed to fetch all events')),
+                TE.map((events) => events.map(toDomainEvent)),
+                TE.chainFirst((events) =>
+                  withCacheErrorMapping('Failed to cache events', cache.cacheEvents(events)),
+                ),
+              ),
+        ),
       ),
 
     getEventById: (id: EventId) =>
       pipe(
         cache.getEvent(String(Number(id))),
-        TE.mapLeft((error) =>
-          createStandardDomainError({
-            code: DomainErrorCode.VALIDATION_ERROR,
-            message: `Failed to fetch event ${id}`,
-            details: error,
-          }),
-        ),
+        TE.mapLeft(mapCacheError('Failed to get event from cache')),
         TE.chain((cached) =>
           cached
             ? TE.right(cached)
             : pipe(
                 repository.findById(id),
-                TE.mapLeft((error) =>
-                  createStandardDomainError({
-                    code: DomainErrorCode.VALIDATION_ERROR,
-                    message: `Failed to fetch event ${id} from repository`,
-                    details: error,
-                  }),
-                ),
+                TE.mapLeft(handleRepositoryError(`Failed to fetch event ${id} from repository`)),
                 TE.map((event) => (event ? toDomainEvent(event) : null)),
-                TE.chain((event) =>
+                TE.chainFirst((event) =>
                   event
-                    ? pipe(
-                        cache.cacheEvent(event),
-                        TE.mapLeft((error) =>
-                          createStandardDomainError({
-                            code: DomainErrorCode.VALIDATION_ERROR,
-                            message: `Failed to cache event ${id}`,
-                            details: error,
-                          }),
-                        ),
-                        TE.map(() => event),
-                      )
-                    : TE.right(null),
+                    ? withCacheErrorMapping('Failed to cache event', cache.cacheEvent(event))
+                    : TE.right(undefined),
                 ),
               ),
         ),
       ),
 
     getCurrentEvent: () =>
-      withCacheSingle(
-        () => cache.getCurrentEvent(),
-        () =>
-          pipe(
-            repository.findCurrent(),
-            TE.mapLeft((error) =>
-              createStandardDomainError({
-                code: DomainErrorCode.VALIDATION_ERROR,
-                message: 'Failed to fetch current event',
-                details: error,
-              }),
-            ),
-            TE.map((event) => (event ? toDomainEvent(event) : null)),
-          ),
-        (event) => safeCacheEvent(event),
+      pipe(
+        cache.getCurrentEvent(),
+        TE.mapLeft(mapCacheError('Failed to get current event from cache')),
+        TE.chain((cached) =>
+          cached
+            ? TE.right(cached)
+            : pipe(
+                repository.findCurrent(),
+                TE.mapLeft(handleRepositoryError('Failed to fetch current event')),
+                TE.map((event) => (event ? toDomainEvent(event) : null)),
+                TE.chainFirst((event) =>
+                  event
+                    ? withCacheErrorMapping(
+                        'Failed to cache current event',
+                        cache.cacheEvent(event),
+                      )
+                    : TE.right(undefined),
+                ),
+              ),
+        ),
       ),
 
     getNextEvent: () =>
-      withCacheSingle(
-        () => cache.getNextEvent(),
-        () =>
-          pipe(
-            repository.findNext(),
-            TE.mapLeft((error) =>
-              createStandardDomainError({
-                code: DomainErrorCode.VALIDATION_ERROR,
-                message: 'Failed to fetch next event',
-                details: error,
-              }),
-            ),
-            TE.map((event) => (event ? toDomainEvent(event) : null)),
-          ),
-        (event) => safeCacheEvent(event),
+      pipe(
+        cache.getNextEvent(),
+        TE.mapLeft(mapCacheError('Failed to get next event from cache')),
+        TE.chain((cached) =>
+          cached
+            ? TE.right(cached)
+            : pipe(
+                repository.findNext(),
+                TE.mapLeft(handleRepositoryError('Failed to fetch next event')),
+                TE.map((event) => (event ? toDomainEvent(event) : null)),
+                TE.chainFirst((event) =>
+                  event
+                    ? withCacheErrorMapping('Failed to cache next event', cache.cacheEvent(event))
+                    : TE.right(undefined),
+                ),
+              ),
+        ),
       ),
 
     createEvent: (event: DomainEvent) =>
-      withCreate(
-        () =>
-          pipe(
-            repository.create(event),
-            TE.mapLeft((error) =>
-              createStandardDomainError({
-                code: DomainErrorCode.VALIDATION_ERROR,
-                message: 'Failed to create event',
-                details: error,
-              }),
-            ),
-            TE.map(toDomainEvent),
-          ),
-        (savedEvent) => cache.cacheEvent(savedEvent),
+      pipe(
+        repository.create(event),
+        TE.mapLeft(handleRepositoryError('Failed to create event')),
+        TE.map(toDomainEvent),
+        TE.chainFirst((savedEvent) =>
+          withCacheErrorMapping('Failed to cache created event', cache.cacheEvent(savedEvent)),
+        ),
       ),
 
     createEvents: (events: readonly DomainEvent[]) =>
-      withCreateBatch(
-        () =>
-          pipe(
-            repository.createMany(events),
-            TE.mapLeft((error) =>
-              createStandardDomainError({
-                code: DomainErrorCode.VALIDATION_ERROR,
-                message: 'Failed to create events',
-                details: error,
-              }),
-            ),
-            TE.map((events) => events.map(toDomainEvent)),
-          ),
-        (savedEvents) => cache.cacheEvents(savedEvents),
+      pipe(
+        repository.createMany(events),
+        TE.mapLeft(handleRepositoryError('Failed to create events')),
+        TE.map((events) => events.map(toDomainEvent)),
+        TE.chainFirst((savedEvents) =>
+          withCacheErrorMapping('Failed to cache created events', cache.cacheEvents(savedEvents)),
+        ),
       ),
   };
 };

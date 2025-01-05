@@ -1,15 +1,10 @@
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { BootStrap, BootStrapResponse, toDomainBootStrap } from '../../types/bootstrap.type';
+import { BootStrap, toDomainBootStrap } from '../../types/bootstrap.type';
 import { DomainError, DomainErrorCode } from '../../types/errors.type';
 import { createStandardDomainError } from '../utils';
-
-// Interface for bootstrap API operations
-export interface BootstrapApi {
-  // Retrieves bootstrap data from the API
-  getBootstrapData: () => Promise<BootStrapResponse>;
-}
+import { BootstrapApi } from './types';
 
 // Fetches and transforms bootstrap data from the API
 export const fetchBootstrap = (api: BootstrapApi): TE.TaskEither<DomainError, BootStrap> =>

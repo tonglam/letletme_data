@@ -1,104 +1,128 @@
-import * as E from 'fp-ts/Either';
-import { ElementResponse } from 'src/types/elements.type';
-import { TeamResponse } from 'src/types/teams.type';
+import * as O from 'fp-ts/Option';
+import * as TE from 'fp-ts/TaskEither';
+import { pipe } from 'fp-ts/function';
 import { FPLEndpoints } from '../../infrastructure/http/fpl/types';
 import { BootStrapResponse } from '../../types/bootstrap.type';
-import { APIError } from '../../types/errors.type';
+import { ElementResponse } from '../../types/elements.type';
+import { APIError, APIErrorCode, createAPIError } from '../../types/errors.type';
 import { EventResponse } from '../../types/events.type';
 import { PhaseResponse } from '../../types/phases.type';
-import { BootstrapApi } from './operations';
+import { TeamResponse } from '../../types/teams.type';
+import { ExtendedBootstrapApi } from './types';
 
-// Minimal type for raw API response
-interface RawBootstrapResponse {
-  events?: unknown[];
-  phases?: unknown[];
-  teams?: unknown[];
-  elements?: unknown[];
-}
+const createBootstrapError = (message: string, cause?: unknown): APIError =>
+  createAPIError({
+    code: APIErrorCode.INTERNAL_SERVER_ERROR,
+    message,
+    cause: cause instanceof Error ? cause : undefined,
+  });
 
-export interface ExtendedBootstrapApi extends BootstrapApi {
-  getBootstrapEvents: () => Promise<EventResponse[]>;
-  getBootstrapPhases: () => Promise<BootStrapResponse['phases']>;
-  getBootstrapTeams: () => Promise<BootStrapResponse['teams']>;
-  getBootstrapElements: () => Promise<BootStrapResponse['elements']>;
-}
+const isAPIError = (error: unknown): error is APIError =>
+  error !== null &&
+  typeof error === 'object' &&
+  'code' in error &&
+  'message' in error &&
+  typeof (error as APIError).code === 'string' &&
+  typeof (error as APIError).message === 'string';
 
 export const createBootstrapApiAdapter = (client: FPLEndpoints): ExtendedBootstrapApi => {
-  // Cache the bootstrap data promise to avoid multiple API calls
-  let bootstrapDataPromise: Promise<unknown> | null = null;
+  let bootstrapDataPromise: Promise<BootStrapResponse> | null = null;
 
   const getBootstrapData = async (): Promise<BootStrapResponse> => {
     if (!bootstrapDataPromise) {
-      bootstrapDataPromise = client.bootstrap.getBootstrapStatic().then(
-        E.fold(
-          (error: APIError) => {
-            bootstrapDataPromise = null; // Reset cache on error
-            throw error;
-          },
-          // Accept flexible API response, we'll validate fields when transforming to domain models
-          (data: RawBootstrapResponse) => ({
-            events: data.events || [],
-            phases: data.phases || [],
-            teams: data.teams || [],
-            elements: data.elements || [],
-          }),
+      bootstrapDataPromise = client.bootstrap.getBootstrapStatic().then((result) => {
+        if (result._tag === 'Left') {
+          throw result.left;
+        }
+        const response = result.right;
+        if (!response || typeof response !== 'object') {
+          throw createBootstrapError('Invalid bootstrap response format');
+        }
+        const typedResponse = response as Record<string, unknown>;
+        return {
+          events: Array.isArray(typedResponse.events) ? typedResponse.events : [],
+          phases: Array.isArray(typedResponse.phases) ? typedResponse.phases : [],
+          teams: Array.isArray(typedResponse.teams) ? typedResponse.teams : [],
+          elements: Array.isArray(typedResponse.elements) ? typedResponse.elements : [],
+        };
+      });
+    }
+    return bootstrapDataPromise;
+  };
+
+  const getBootstrapEvents = (): TE.TaskEither<APIError, readonly EventResponse[]> =>
+    pipe(
+      TE.tryCatch(
+        () => getBootstrapData(),
+        (error): APIError =>
+          isAPIError(error) ? error : createBootstrapError('Failed to get bootstrap events', error),
+      ),
+      TE.chain((data) =>
+        pipe(
+          O.fromNullable(data.events),
+          O.fold(
+            () => TE.left(createBootstrapError('No events data in bootstrap response')),
+            (events) => TE.right(events as readonly EventResponse[]),
+          ),
         ),
-      );
-    }
-    return bootstrapDataPromise as Promise<BootStrapResponse>;
-  };
+      ),
+    );
 
-  const getBootstrapEvents = async (): Promise<EventResponse[]> => {
-    try {
-      const data = await getBootstrapData();
-      if (!data || !data.events) {
-        throw new Error('No events data in bootstrap response');
-      }
-      return data.events;
-    } catch (error) {
-      console.error('Failed to get bootstrap events:', error);
-      throw error;
-    }
-  };
+  const getBootstrapPhases = (): TE.TaskEither<APIError, readonly PhaseResponse[]> =>
+    pipe(
+      TE.tryCatch(
+        () => getBootstrapData(),
+        (error): APIError =>
+          isAPIError(error) ? error : createBootstrapError('Failed to get bootstrap phases', error),
+      ),
+      TE.chain((data) =>
+        pipe(
+          O.fromNullable(data.phases),
+          O.fold(
+            () => TE.left(createBootstrapError('No phases data in bootstrap response')),
+            (phases) => TE.right(phases as readonly PhaseResponse[]),
+          ),
+        ),
+      ),
+    );
 
-  const getBootstrapPhases = async (): Promise<PhaseResponse[]> => {
-    try {
-      const data = await getBootstrapData();
-      if (!data || !data.phases) {
-        throw new Error('No phases data in bootstrap response');
-      }
-      return data.phases;
-    } catch (error) {
-      console.error('Failed to get bootstrap phases:', error);
-      throw error;
-    }
-  };
+  const getBootstrapTeams = (): TE.TaskEither<APIError, readonly TeamResponse[]> =>
+    pipe(
+      TE.tryCatch(
+        () => getBootstrapData(),
+        (error): APIError =>
+          isAPIError(error) ? error : createBootstrapError('Failed to get bootstrap teams', error),
+      ),
+      TE.chain((data) =>
+        pipe(
+          O.fromNullable(data.teams),
+          O.fold(
+            () => TE.left(createBootstrapError('No teams data in bootstrap response')),
+            (teams) => TE.right(teams as readonly TeamResponse[]),
+          ),
+        ),
+      ),
+    );
 
-  const getBootstrapTeams = async (): Promise<TeamResponse[]> => {
-    try {
-      const data = await getBootstrapData();
-      if (!data || !data.teams) {
-        throw new Error('No teams data in bootstrap response');
-      }
-      return data.teams;
-    } catch (error) {
-      console.error('Failed to get bootstrap teams:', error);
-      throw error;
-    }
-  };
-
-  const getBootstrapElements = async (): Promise<ElementResponse[]> => {
-    try {
-      const data = await getBootstrapData();
-      if (!data || !data.elements) {
-        throw new Error('No elements data in bootstrap response');
-      }
-      return data.elements;
-    } catch (error) {
-      console.error('Failed to get bootstrap elements:', error);
-      throw error;
-    }
-  };
+  const getBootstrapElements = (): TE.TaskEither<APIError, readonly ElementResponse[]> =>
+    pipe(
+      TE.tryCatch(
+        () => getBootstrapData(),
+        (error): APIError =>
+          isAPIError(error)
+            ? error
+            : createBootstrapError('Failed to get bootstrap elements', error),
+      ),
+      TE.chain((data) =>
+        pipe(
+          O.fromNullable(data.elements),
+          O.fold(
+            () => TE.left(createBootstrapError('No elements data in bootstrap response')),
+            (elements) => TE.right(elements as readonly ElementResponse[]),
+          ),
+        ),
+      ),
+    );
 
   return {
     getBootstrapData,

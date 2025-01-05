@@ -11,7 +11,7 @@ import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import { TaskEither } from 'fp-ts/TaskEither';
 import { z } from 'zod';
-import type { BootstrapApi } from '../domain/bootstrap/operations';
+import type { BootstrapApi } from '../domain/bootstrap/types';
 import type { EventCache } from '../domain/event/types';
 import type { BaseRepository } from './base.type';
 import { Branded, createBrandedType, isApiResponse } from './base.type';
