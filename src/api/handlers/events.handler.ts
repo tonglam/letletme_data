@@ -60,10 +60,18 @@ export const createEventHandlers = (
 
   // Retrieves a specific event by ID
   getEventById: (req: Request) => {
-    const eventId = Number(req.params.id) as EventId;
-    const task = eventService.getEvent(eventId);
+    const eventId = Number(req.params.id);
+    if (isNaN(eventId) || eventId <= 0) {
+      return TE.left(
+        createAPIError({
+          code: APIErrorCode.VALIDATION_ERROR,
+          message: 'Invalid event ID: must be a positive integer',
+        }),
+      );
+    }
+    const task = eventService.getEvent(eventId as EventId);
     return pipe(
-      () => task(),
+      task,
       TE.mapLeft(toAPIError),
       TE.chain(
         (event) => () =>

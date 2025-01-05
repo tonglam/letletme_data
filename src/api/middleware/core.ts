@@ -8,28 +8,41 @@ import * as E from 'fp-ts/Either';
 import * as O from 'fp-ts/Option';
 import * as T from 'fp-ts/Task';
 import * as TE from 'fp-ts/TaskEither';
-import { flow, pipe } from 'fp-ts/function';
+import { pipe } from 'fp-ts/function';
 import * as t from 'io-ts';
 import { PathReporter } from 'io-ts/PathReporter';
 import {
   APIError,
   APIErrorCode,
   createAPIError,
-  formatErrorResponse,
   getErrorStatus,
+  ServiceError,
 } from '../../types/errors.type';
 import { AsyncMiddlewareHandler, ErrorHandler, Middleware, SecurityHeaders } from '../types';
 import { sendResponse } from '../utils';
 
 // Converts unknown errors to APIError type
-const toAPIError = (error: unknown): APIError =>
-  error instanceof Error && 'code' in error
-    ? (error as APIError)
-    : createAPIError({
-        code: APIErrorCode.INTERNAL_SERVER_ERROR,
-        message: error instanceof Error ? error.message : 'Internal server error',
-        cause: error instanceof Error ? error : undefined,
-      });
+const toAPIError = (error: unknown): APIError => {
+  if (error instanceof Error) {
+    if ('code' in error) {
+      if (error.name === 'ServiceError') {
+        const serviceError = error as ServiceError;
+        return createAPIError({
+          code: APIErrorCode.SERVICE_ERROR,
+          message: serviceError.message,
+          cause: serviceError.cause,
+          details: serviceError.details,
+        });
+      }
+      return error as APIError;
+    }
+  }
+  return createAPIError({
+    code: APIErrorCode.INTERNAL_SERVER_ERROR,
+    message: error instanceof Error ? error.message : 'Internal server error',
+    cause: error instanceof Error ? error : undefined,
+  });
+};
 
 // Creates a task that handles API errors by passing them to the next middleware
 const handleAPIError =
@@ -44,7 +57,7 @@ export const createHandler = <T>(handler: AsyncMiddlewareHandler<T>): Middleware
     await pipe(
       handler(req),
       TE.fold(
-        flow(toAPIError, handleAPIError(next)),
+        (error) => () => Promise.resolve(handleError(error, req, res, next)),
         (result) => () => Promise.resolve(sendResponse(res, E.right(result))),
       ),
     )();
@@ -119,14 +132,19 @@ export const addSecurityHeaders = (): Middleware => {
 };
 
 // Global error handler middleware
-export const handleError: ErrorHandler = (error: Error, _req: Request, res: Response): void => {
-  pipe(
-    error,
-    toAPIError,
-    (apiError) => ({
-      status: getErrorStatus(apiError),
-      response: formatErrorResponse(apiError),
-    }),
-    ({ status, response }) => res.status(status).json(response),
-  );
+export const handleError: ErrorHandler = (
+  error: Error | APIError,
+  _req: Request,
+  res: Response,
+): void => {
+  const apiError =
+    error instanceof Error && !('code' in error) ? toAPIError(error) : (error as APIError);
+  const status = getErrorStatus(apiError);
+  const response = {
+    error: {
+      code: apiError.code,
+      message: apiError.message,
+    },
+  };
+  res.status(status).json(response);
 };

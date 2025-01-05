@@ -6,7 +6,54 @@ This document outlines the test plan for the event functionality in the FPL data
 
 ## 1. Unit Tests
 
-### 1.1 FPL Client Tests (`tests/event/client.test.ts`)
+### 1.1 Route Tests (`tests/event/route.test.ts`)
+
+Test API routes and handlers:
+
+- [x] Route Configuration
+
+  - [x] Verify router setup and middleware
+  - [x] Test route parameter validation
+  - [x] Validate request handling
+  - [x] Test error middleware integration
+
+- [x] Route Handlers
+
+  - [x] GET /events
+    - [x] Return all events successfully
+    - [x] Handle service errors (503 status)
+    - [x] Validate response structure with data wrapper
+  - [x] GET /events/current
+    - [x] Return current event with data wrapper
+    - [x] Handle not found case (404 status)
+    - [x] Validate response format
+  - [x] GET /events/next
+    - [x] Return next event with data wrapper
+    - [x] Handle not found case (404 status)
+    - [x] Validate response structure
+  - [x] GET /events/:id
+    - [x] Return specific event by ID with data wrapper
+    - [x] Validate ID parameter (400 status for invalid format)
+    - [x] Handle non-existent event (404 status)
+    - [x] Handle service errors (503 status)
+
+- [x] Error Handling
+
+  - [x] Test validation middleware (400 status)
+  - [x] Handle service layer errors (503 status)
+  - [x] Handle not found errors (404 status)
+  - [x] Verify error response format
+    - [x] Consistent error object structure
+    - [x] Proper error codes (VALIDATION_ERROR, NOT_FOUND, SERVICE_ERROR)
+    - [x] Descriptive error messages
+
+- [x] Response Format
+  - [x] Success responses wrapped in data object
+  - [x] Error responses with error object
+  - [x] Validate Content-Type header
+  - [x] Verify HTTP status codes match error types
+
+### 1.2 FPL Client Tests (`tests/event/client.test.ts`)
 
 Test FPL API client functionality with mock data:
 
@@ -28,7 +75,7 @@ Test FPL API client functionality with mock data:
     - Verify retry attempts
     - Confirm successful recovery
 
-### 1.2 Domain Tests (`tests/event/domain.test.ts`)
+### 1.3 Domain Tests (`tests/event/domain.test.ts`)
 
 Test domain logic and business rules:
 
@@ -59,7 +106,7 @@ Test domain logic and business rules:
   - [x] Test chronological ordering
   - [x] Validate relationships between events
 
-### 1.3 Repository Tests (`tests/event/repository.test.ts`)
+### 1.4 Repository Tests (`tests/event/repository.test.ts`)
 
 Test database operations with real bootstrap data:
 
@@ -100,7 +147,7 @@ Test database operations with real bootstrap data:
   - [x] Clean database state between tests
   - [x] Track created records for cleanup
 
-### 1.4 Cache Tests (`tests/event/cache.test.ts`)
+### 1.5 Cache Tests (`tests/event/cache.test.ts`)
 
 Test caching operations:
 

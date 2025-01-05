@@ -140,6 +140,8 @@ export const getErrorStatus = (error: APIError): number => {
       return 400;
     case APIErrorCode.NOT_FOUND:
       return 404;
+    case APIErrorCode.SERVICE_ERROR:
+      return 503;
     default:
       return 500;
   }
