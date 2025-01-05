@@ -14,22 +14,19 @@ import type { TeamResponse } from './teams.type';
 import { TeamResponseSchema } from './teams.type';
 
 // Zod schema for validating bootstrap response data
-export const BootStrapResponseSchema = z.object({
-  events: z.array(EventResponseSchema),
-  phases: z.array(PhaseResponseSchema),
-  teams: z.array(TeamResponseSchema),
-  elements: z.array(ElementResponseSchema),
-});
+export const BootStrapResponseSchema = z
+  .object({
+    events: z.array(EventResponseSchema),
+    phases: z.array(PhaseResponseSchema),
+    teams: z.array(TeamResponseSchema),
+    elements: z.array(ElementResponseSchema),
+  })
+  .passthrough();
 
-// Raw API response structure for bootstrap data
-export interface BootStrapResponse {
-  readonly events: EventResponse[];
-  readonly phases: PhaseResponse[];
-  readonly teams: TeamResponse[];
-  readonly elements: ElementResponse[];
-}
+// Type for raw API response, inferred from schema
+export type BootStrapResponse = z.infer<typeof BootStrapResponseSchema>;
 
-// Domain model for bootstrap data
+// Domain model for bootstrap data (strict interface for our application)
 export interface BootStrap {
   readonly events: readonly EventResponse[];
   readonly phases: readonly PhaseResponse[];

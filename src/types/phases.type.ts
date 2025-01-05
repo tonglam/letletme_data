@@ -24,21 +24,28 @@ export const validatePhaseId = (value: unknown): E.Either<string, PhaseId> =>
 
 // ============ Types ============
 // API response types representing raw data from external API
-export const PhaseResponseSchema = z.object({
-  id: z.number(),
-  name: z.string(),
-  start_event: z.number(),
-  stop_event: z.number(),
-  highest_score: z.number().nullable(),
-});
+export const PhaseResponseSchema = z
+  .object({
+    // Required fields (must exist in API response)
+    id: z.number(),
+    name: z.string(),
+    start_event: z.number(),
+    stop_event: z.number(),
 
-export interface PhaseResponse {
-  readonly id: number;
-  readonly name: string;
-  readonly start_event: number;
-  readonly stop_event: number;
-  readonly highest_score: number | null;
-}
+    // Optional fields (nullable in Prisma)
+    highest_score: z.number().nullable(),
+
+    // Other API fields that we don't store
+    start_time: z.string().optional(),
+    stop_time: z.string().optional(),
+  })
+  .passthrough();
+
+/**
+ * Type for phase response data from the FPL API
+ * Inferred from schema to allow additional fields
+ */
+export type PhaseResponse = z.infer<typeof PhaseResponseSchema>;
 
 export type PhasesResponse = readonly PhaseResponse[];
 

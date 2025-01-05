@@ -5,10 +5,10 @@ CREATE TYPE "PlayerValueChangeType" AS ENUM ('Start', 'Rise', 'Fall');
 CREATE TABLE "events" (
     "id" INTEGER PRIMARY KEY,
     "name" TEXT NOT NULL,
-    "deadline_time" TIMESTAMPTZ NOT NULL,
+    "deadline_time" TEXT NOT NULL,
     "deadline_time_epoch" INTEGER NOT NULL DEFAULT 0,
     "deadline_time_game_offset" INTEGER NOT NULL DEFAULT 0,
-    "release_time" TIMESTAMPTZ,
+    "release_time" TEXT,
     "average_entry_score" INTEGER NOT NULL DEFAULT 0,
     "finished" BOOLEAN NOT NULL DEFAULT false,
     "data_checked" BOOLEAN NOT NULL DEFAULT false,

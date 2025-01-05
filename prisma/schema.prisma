@@ -11,32 +11,32 @@ datasource db {
 }
 
 model Event {
-  id                     Int       @id
+  id                     Int      @id
   name                   String
-  deadlineTime           DateTime  @map("deadline_time") @db.Timestamptz
-  deadlineTimeEpoch      Int       @default(0) @map("deadline_time_epoch")
-  deadlineTimeGameOffset Int       @default(0) @map("deadline_time_game_offset")
-  releaseTime            DateTime? @map("release_time") @db.Timestamptz
-  averageEntryScore      Int       @default(0) @map("average_entry_score")
-  finished               Boolean   @default(false)
-  dataChecked            Boolean   @default(false) @map("data_checked")
-  highestScore           Int       @default(0) @map("highest_score")
-  highestScoringEntry    Int       @default(0) @map("highest_scoring_entry")
-  isPrevious             Boolean   @default(false) @map("is_previous")
-  isCurrent              Boolean   @default(false) @map("is_current")
-  isNext                 Boolean   @default(false) @map("is_next")
-  cupLeaguesCreated      Boolean   @default(false) @map("cup_leagues_created")
-  h2hKoMatchesCreated    Boolean   @default(false) @map("h2h_ko_matches_created")
-  rankedCount            Int       @default(0) @map("ranked_count")
-  chipPlays              Json?     @map("chip_plays")
-  mostSelected           Int?      @map("most_selected")
-  mostTransferredIn      Int?      @map("most_transferred_in")
-  mostCaptained          Int?      @map("most_captained")
-  mostViceCaptained      Int?      @map("most_vice_captained")
-  topElement             Int?      @map("top_element")
-  topElementInfo         Json?     @map("top_element_info")
-  transfersMade          Int       @default(0) @map("transfers_made")
-  createdAt              DateTime  @default(now()) @map("created_at")
+  deadlineTime           String   @map("deadline_time")
+  deadlineTimeEpoch      Int      @default(0) @map("deadline_time_epoch")
+  deadlineTimeGameOffset Int      @default(0) @map("deadline_time_game_offset")
+  releaseTime            String?  @map("release_time")
+  averageEntryScore      Int      @default(0) @map("average_entry_score")
+  finished               Boolean  @default(false)
+  dataChecked            Boolean  @default(false) @map("data_checked")
+  highestScore           Int      @default(0) @map("highest_score")
+  highestScoringEntry    Int      @default(0) @map("highest_scoring_entry")
+  isPrevious             Boolean  @default(false) @map("is_previous")
+  isCurrent              Boolean  @default(false) @map("is_current")
+  isNext                 Boolean  @default(false) @map("is_next")
+  cupLeaguesCreated      Boolean  @default(false) @map("cup_leagues_created")
+  h2hKoMatchesCreated    Boolean  @default(false) @map("h2h_ko_matches_created")
+  rankedCount            Int      @default(0) @map("ranked_count")
+  chipPlays              Json?    @map("chip_plays")
+  mostSelected           Int?     @map("most_selected")
+  mostTransferredIn      Int?     @map("most_transferred_in")
+  mostCaptained          Int?     @map("most_captained")
+  mostViceCaptained      Int?     @map("most_vice_captained")
+  topElement             Int?     @map("top_element")
+  topElementInfo         Json?    @map("top_element_info")
+  transfersMade          Int      @default(0) @map("transfers_made")
+  createdAt              DateTime @default(now()) @map("created_at")
 
   @@map("events")
 }

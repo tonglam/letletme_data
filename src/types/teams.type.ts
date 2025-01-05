@@ -26,53 +26,52 @@ export const validateTeamId = (value: unknown): E.Either<string, TeamId> =>
 /**
  * API Response types (snake_case)
  */
-export const TeamResponseSchema = z.object({
-  id: z.number(),
-  code: z.number(),
-  name: z.string(),
-  short_name: z.string(),
-  strength: z.number(),
-  strength_overall_home: z.number(),
-  strength_overall_away: z.number(),
-  strength_attack_home: z.number(),
-  strength_attack_away: z.number(),
-  strength_defence_home: z.number(),
-  strength_defence_away: z.number(),
-  pulse_id: z.number(),
-  played: z.number(),
-  position: z.number(),
-  points: z.number(),
-  form: z.string().nullable(),
-  win: z.number(),
-  draw: z.number(),
-  loss: z.number(),
-  team_division: z.string().nullable(),
-  unavailable: z.boolean(),
-});
+export const TeamResponseSchema = z
+  .object({
+    // Required fields (must exist in API response)
+    id: z.number(),
+    code: z.number(),
+    name: z.string(),
+    short_name: z.string(),
+    strength: z.number(),
+    strength_overall_home: z.number(),
+    strength_overall_away: z.number(),
+    strength_attack_home: z.number(),
+    strength_attack_away: z.number(),
+    strength_defence_home: z.number(),
+    strength_defence_away: z.number(),
+    pulse_id: z.number(),
+    played: z.number(),
+    position: z.number(),
+    points: z.number(),
+    win: z.number(),
+    draw: z.number(),
+    loss: z.number(),
+    unavailable: z.boolean(),
 
-export interface TeamResponse {
-  readonly id: number;
-  readonly code: number;
-  readonly name: string;
-  readonly short_name: string;
-  readonly strength: number;
-  readonly strength_overall_home: number;
-  readonly strength_overall_away: number;
-  readonly strength_attack_home: number;
-  readonly strength_attack_away: number;
-  readonly strength_defence_home: number;
-  readonly strength_defence_away: number;
-  readonly pulse_id: number;
-  readonly played: number;
-  readonly position: number;
-  readonly points: number;
-  readonly form: string | null;
-  readonly win: number;
-  readonly draw: number;
-  readonly loss: number;
-  readonly team_division: string | null;
-  readonly unavailable: boolean;
-}
+    // Optional fields (nullable in Prisma)
+    form: z.string().nullable(),
+    team_division: z.string().nullable(),
+
+    // Other API fields that we don't store
+    draw_rank: z.number().optional(),
+    form_rank: z.number().optional(),
+    loss_rank: z.number().optional(),
+    played_rank: z.number().optional(),
+    points_rank: z.number().optional(),
+    position_rank: z.number().optional(),
+    strength_rank: z.number().optional(),
+    win_rank: z.number().optional(),
+    strength_attack_rank: z.number().optional(),
+    strength_defence_rank: z.number().optional(),
+  })
+  .passthrough();
+
+/**
+ * Type for team response data from the FPL API
+ * Inferred from schema to allow additional fields
+ */
+export type TeamResponse = z.infer<typeof TeamResponseSchema>;
 
 export type TeamsResponse = readonly TeamResponse[];
 

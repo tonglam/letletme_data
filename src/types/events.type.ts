@@ -73,40 +73,51 @@ export const ChipPlaySchema = z.object({
 
 /**
  * Schema for validating event response data from the FPL API
+ * Only strictly validates fields required by Prisma model
  */
-export const EventResponseSchema = z.object({
-  id: z.number(),
-  name: z.string(),
-  deadline_time: z.string(),
-  deadline_time_epoch: z.number(),
-  deadline_time_game_offset: z.number(),
-  release_time: z.string().nullable(),
-  release_time_epoch: z.number().nullable(),
-  release_time_game_offset: z.number().nullable(),
-  is_previous: z.boolean(),
-  is_current: z.boolean(),
-  is_next: z.boolean(),
-  cup_leagues_created: z.boolean(),
-  h2h_ko_matches_created: z.boolean(),
-  chip_plays: z.array(ChipPlaySchema).default([]),
-  most_selected: z.number().nullable(),
-  most_transferred_in: z.number().nullable(),
-  top_element: z.number().nullable(),
-  top_element_info: TopElementInfoSchema.nullable(),
-  transfers_made: z.number().nullable(),
-  most_captained: z.number().nullable(),
-  most_vice_captained: z.number().nullable(),
-  average_entry_score: z.number().nullable(),
-  highest_score: z.number().nullable(),
-  highest_scoring_entry: z.number().nullable(),
-  finished: z.boolean(),
-  data_checked: z.boolean(),
-  chip_plays_processed: z.boolean(),
-  released: z.boolean(),
-});
+export const EventResponseSchema = z
+  .object({
+    // Required fields (must exist in API response)
+    id: z.number(),
+    name: z.string(),
+    deadline_time: z.string(),
+    deadline_time_epoch: z.number(),
+    finished: z.boolean(),
+    is_previous: z.boolean(),
+    is_current: z.boolean(),
+    is_next: z.boolean(),
+
+    // Fields with default values (required in Prisma but can have defaults)
+    deadline_time_game_offset: z.number().default(0),
+    average_entry_score: z.number().default(0),
+    data_checked: z.boolean().default(false),
+    highest_score: z.number().default(0),
+    highest_scoring_entry: z.number().default(0),
+    cup_leagues_created: z.boolean().default(false),
+    h2h_ko_matches_created: z.boolean().default(false),
+    transfers_made: z.number().default(0),
+
+    // Optional fields (nullable in Prisma)
+    release_time: z.string().nullable().optional(),
+    chip_plays: z.array(ChipPlaySchema).default([]),
+    most_selected: z.number().nullable().optional(),
+    most_transferred_in: z.number().nullable().optional(),
+    most_captained: z.number().nullable().optional(),
+    most_vice_captained: z.number().nullable().optional(),
+    top_element: z.number().nullable().optional(),
+    top_element_info: TopElementInfoSchema.nullable().optional(),
+
+    // Other API fields that we don't store
+    release_time_epoch: z.number().nullable().optional(),
+    release_time_game_offset: z.number().nullable().optional(),
+    chip_plays_processed: z.boolean().optional(),
+    released: z.boolean().optional(),
+  })
+  .passthrough();
 
 /**
  * Type for event response data from the FPL API
+ * Inferred from schema to allow additional fields
  */
 export type EventResponse = z.infer<typeof EventResponseSchema>;
 
@@ -121,10 +132,10 @@ export type EventsResponse = readonly EventResponse[];
 export interface Event {
   readonly id: EventId;
   readonly name: string;
-  readonly deadlineTime: Date;
+  readonly deadlineTime: string;
   readonly deadlineTimeEpoch: number;
   readonly deadlineTimeGameOffset: number;
-  readonly releaseTime: Date | null;
+  readonly releaseTime: string | null;
   readonly averageEntryScore: number;
   readonly finished: boolean;
   readonly dataChecked: boolean;
@@ -168,10 +179,10 @@ export interface EventRepository extends BaseRepository<PrismaEvent, PrismaEvent
 export interface PrismaEvent {
   readonly id: number;
   readonly name: string;
-  readonly deadlineTime: Date;
+  readonly deadlineTime: string;
   readonly deadlineTimeEpoch: number;
   readonly deadlineTimeGameOffset: number;
-  readonly releaseTime: Date | null;
+  readonly releaseTime: string | null;
   readonly averageEntryScore: number;
   readonly finished: boolean;
   readonly dataChecked: boolean;
@@ -234,21 +245,17 @@ export const toDomainEvent = (data: EventResponse | PrismaEvent): Event => {
   return {
     id: data.id as EventId,
     name: data.name,
-    deadlineTime: isEventApiResponse(data) ? new Date(data.deadline_time) : data.deadlineTime,
+    deadlineTime: isEventApiResponse(data) ? data.deadline_time : data.deadlineTime,
     deadlineTimeEpoch: isEventApiResponse(data) ? data.deadline_time_epoch : data.deadlineTimeEpoch,
     deadlineTimeGameOffset: isEventApiResponse(data)
-      ? data.deadline_time_game_offset
+      ? data.deadline_time_game_offset ?? 0
       : data.deadlineTimeGameOffset,
-    releaseTime: isEventApiResponse(data)
-      ? data.release_time
-        ? new Date(data.release_time)
-        : null
-      : data.releaseTime,
+    releaseTime: isEventApiResponse(data) ? data.release_time ?? null : data.releaseTime,
     averageEntryScore: isEventApiResponse(data)
       ? data.average_entry_score ?? 0
       : data.averageEntryScore,
     finished: data.finished,
-    dataChecked: isEventApiResponse(data) ? data.data_checked : data.dataChecked,
+    dataChecked: isEventApiResponse(data) ? data.data_checked ?? false : data.dataChecked,
     highestScore: isEventApiResponse(data) ? data.highest_score ?? 0 : data.highestScore,
     highestScoringEntry: isEventApiResponse(data)
       ? data.highest_scoring_entry ?? 0
@@ -256,23 +263,29 @@ export const toDomainEvent = (data: EventResponse | PrismaEvent): Event => {
     isPrevious: isEventApiResponse(data) ? data.is_previous : data.isPrevious,
     isCurrent: isEventApiResponse(data) ? data.is_current : data.isCurrent,
     isNext: isEventApiResponse(data) ? data.is_next : data.isNext,
-    cupLeaguesCreated: isEventApiResponse(data) ? data.cup_leagues_created : data.cupLeaguesCreated,
+    cupLeaguesCreated: isEventApiResponse(data)
+      ? data.cup_leagues_created ?? false
+      : data.cupLeaguesCreated,
     h2hKoMatchesCreated: isEventApiResponse(data)
-      ? data.h2h_ko_matches_created
+      ? data.h2h_ko_matches_created ?? false
       : data.h2hKoMatchesCreated,
     rankedCount: isEventApiResponse(data) ? 0 : data.rankedCount,
     chipPlays: isEventApiResponse(data) ? data.chip_plays : parseChipPlays(data.chipPlays),
-    mostSelected: isEventApiResponse(data) ? data.most_selected : data.mostSelected,
-    mostTransferredIn: isEventApiResponse(data) ? data.most_transferred_in : data.mostTransferredIn,
-    topElement: isEventApiResponse(data) ? data.top_element : data.topElement,
+    mostSelected: isEventApiResponse(data) ? data.most_selected ?? null : data.mostSelected,
+    mostTransferredIn: isEventApiResponse(data)
+      ? data.most_transferred_in ?? null
+      : data.mostTransferredIn,
+    topElement: isEventApiResponse(data) ? data.top_element ?? null : data.topElement,
     topElementInfo: isEventApiResponse(data)
-      ? data.top_element_info
+      ? data.top_element_info ?? null
       : data.topElementInfo
         ? parseTopElement(JSON.parse(JSON.stringify(data.topElementInfo)) as Prisma.JsonObject)
         : null,
     transfersMade: isEventApiResponse(data) ? data.transfers_made ?? 0 : data.transfersMade,
-    mostCaptained: isEventApiResponse(data) ? data.most_captained : data.mostCaptained,
-    mostViceCaptained: isEventApiResponse(data) ? data.most_vice_captained : data.mostViceCaptained,
+    mostCaptained: isEventApiResponse(data) ? data.most_captained ?? null : data.mostCaptained,
+    mostViceCaptained: isEventApiResponse(data)
+      ? data.most_vice_captained ?? null
+      : data.mostViceCaptained,
   };
 };
 

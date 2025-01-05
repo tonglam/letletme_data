@@ -46,7 +46,7 @@ export const createErrorFromStatus = (
     errorCode = errorConfig ? (errorConfig[0] as APIErrorCode) : APIErrorCode.INTERNAL_SERVER_ERROR;
   }
 
-  const error: APIError = {
+  return {
     name: 'APIError',
     code: errorCode,
     message,
@@ -54,9 +54,8 @@ export const createErrorFromStatus = (
       ...(details || {}),
       httpStatus: status,
     } as ErrorDetails,
+    timestamp: new Date(),
   };
-
-  return error;
 };
 
 /**
@@ -106,3 +105,18 @@ export const calculateRetryDelay = (attempt: number, config: RetryConfig): numbe
  */
 export const delay = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Creates an API error based on status code and message
+ */
+export const createHTTPError = (
+  code: APIErrorCode,
+  message: string,
+  details: ErrorDetails,
+): APIError => ({
+  name: 'APIError',
+  code,
+  message,
+  details,
+  timestamp: new Date(),
+});

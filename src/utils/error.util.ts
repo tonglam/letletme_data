@@ -389,6 +389,7 @@ export const queueErrorToApiError = (error: QueueError): APIError => ({
   details: { context: error.context },
   cause: error.error,
   stack: error.error.stack,
+  timestamp: new Date(),
 });
 
 /**

@@ -13,7 +13,7 @@ import { BootStrapResponseSchema } from '../../../../types/bootstrap.type';
 import { APIErrorCode, createAPIError } from '../../../../types/errors.type';
 import { HTTPClient } from '../../client';
 import { RequestOptions } from '../../client/types';
-import { BootstrapEndpoints, validateEndpointResponse } from '../types';
+import { BootstrapEndpoints } from '../types';
 
 /**
  * Creates endpoints for retrieving static FPL game data
@@ -78,50 +78,42 @@ export const createBootstrapEndpoints = (
         );
         return error;
       }),
-      E.chain((response) =>
-        pipe(
-          validateEndpointResponse(BootStrapResponseSchema)(response),
-          E.mapLeft((error) => {
-            logger.error(
-              {
-                operation: 'getBootstrapStatic',
-                error: {
-                  message: 'Invalid response data',
-                  code: 'VALIDATION_ERROR',
-                  details: error,
-                },
-                success: false,
+      E.chain((response) => {
+        const parsed = BootStrapResponseSchema.safeParse(response);
+        if (!parsed.success) {
+          logger.error(
+            {
+              operation: 'getBootstrapStatic',
+              error: {
+                message: 'Invalid response data',
+                code: 'VALIDATION_ERROR',
+                details: parsed.error,
               },
-              'FPL API response validation failed',
-            );
-            return createAPIError({
+              success: false,
+            },
+            'FPL API response validation failed',
+          );
+          return E.left(
+            createAPIError({
               code: APIErrorCode.VALIDATION_ERROR,
               message: 'Invalid response data from FPL API',
-              details: { validationError: error },
-            });
-          }),
-        ),
-      ),
-      E.map((data) => {
+              details: { validationError: parsed.error },
+            }),
+          );
+        }
+
         logger.info(
           {
             operation: 'getBootstrapStatic',
             success: true,
-            eventCount: data.events.length,
-            teamCount: data.teams.length,
-            elementCount: data.elements.length,
+            eventCount: parsed.data.events.length,
+            teamCount: parsed.data.teams.length,
+            elementCount: parsed.data.elements.length,
           },
           'FPL API call successful',
         );
-        return {
-          events: data.events.map((event) => ({
-            ...event,
-            chip_plays: event.chip_plays || [],
-          })),
-          phases: data.phases,
-          teams: data.teams,
-          elements: data.elements,
-        };
+
+        return E.right(parsed.data);
       }),
     );
   },

@@ -104,11 +104,8 @@ export enum APIErrorCode {
   SERVICE_ERROR = 'SERVICE_ERROR',
 }
 
-export interface APIError extends Error {
+export interface APIError extends BaseError {
   readonly code: APIErrorCode;
-  readonly message: string;
-  readonly cause?: Error;
-  readonly details?: ErrorDetails;
 }
 
 export interface APIErrorResponse {
@@ -125,7 +122,8 @@ export const createAPIError = (params: {
   details?: ErrorDetails;
 }): APIError => ({
   name: 'APIError',
-  stack: new Error().stack,
+  stack: params.cause?.stack || undefined,
+  timestamp: new Date(),
   ...params,
 });
 

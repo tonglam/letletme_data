@@ -8,164 +8,147 @@ This document outlines the test plan for the event functionality in the FPL data
 
 ### 1.1 FPL Client Tests (`tests/event/client.test.ts`)
 
-Test FPL API client in isolation:
+Test FPL API client functionality with real API:
 
 - [x] Bootstrap API Integration
-  - [x] Successful response with valid data structure
-  - [x] Events array validation
+  - [x] Successful data fetching
+  - [x] Basic structure validation (arrays exist)
+  - [x] Required field presence
   - [x] Rate limit handling
-  - [x] Timeout scenarios
-  - [x] Network error recovery
-  - [x] Retry mechanism verification
+  - [x] Error recovery
+  - [x] Timeout handling
 
-### 1.2 Domain Tests (`tests/event/domain.test.ts`)
+### 1.2 Adapter Tests (`tests/event/adapter.test.ts`)
 
-Test domain logic and data transformations in isolation:
+Test data transformation and validation:
 
-- [x] Event Domain Operations
+- [x] Bootstrap Adapter
+  - [x] Data transformation (API → Domain)
+  - [x] Field mapping
+  - [x] Flexible validation
+  - [x] Error handling
+  - [x] Edge cases (null, undefined, empty arrays)
 
-  - [x] Event data transformation (API → Domain)
-  - [x] Event state transitions
-  - [x] Event validation rules
-  - [x] Business logic constraints
-  - [x] Edge cases handling
+### 1.3 Domain Tests (`tests/event/domain.test.ts`)
 
-- [x] Event Aggregates
+Test domain logic and business rules:
 
-  - [x] Event relationships
-  - [x] Event lifecycle rules
-  - [x] Domain event handling
-  - [x] Invariant validations
+- [x] Event Domain Model
 
-- [ ] Value Objects
-  - [ ] Event status transitions
-  - [ ] Event date calculations
-  - [ ] Event scoring rules
-  - [ ] Immutability checks
+  - [x] Event state management
+  - [x] Business rules
+  - [x] Validation rules
+  - [x] Edge cases
 
-### 1.3 Repository Tests (`tests/event/repository.test.ts`)
+- [x] Event Operations
+  - [x] Event lifecycle
+  - [x] State transitions
+  - [x] Invariant checks
 
-Test database operations in isolation:
+### 1.4 Repository Tests (`tests/event/repository.test.ts`)
 
-- [x] Event Repository Operations
-  - [x] Find all events with pagination
-  - [x] Find event by ID
-  - [x] Find current/next event
-  - [x] Create/Update/Delete operations
-  - [x] Constraint validations
+Test database operations:
+
+- [x] Event Repository
+  - [x] CRUD operations
+  - [x] Query operations
   - [x] Transaction handling
+  - [x] Error handling
 
-### 1.4 Cache Tests (`tests/event/cache.test.ts`)
+### 1.5 Cache Tests (`tests/event/cache.test.ts`)
 
-Test caching operations in isolation:
+Test caching operations:
 
-- [ ] Redis Operations
-  - [ ] Set/Get operations with TTL
-  - [ ] Cache hit/miss scenarios
-  - [ ] Key pattern validation
-  - [ ] Lock mechanism
-  - [ ] Cache invalidation
-  - [ ] Error handling
+- [x] Redis Operations
+  - [x] Basic operations (get/set)
+  - [x] TTL handling
+  - [x] Serialization
+  - [x] Error handling
 
 ## 2. Integration Tests
 
 ### 2.1 Service Integration (`tests/event/service.integration.test.ts`)
 
-Test service layer that coordinates between cache, database, and API:
+Test service layer coordination:
 
 - [x] Service Operations
-  - [x] Data flow between cache and database
-  - [x] API fallback on cache miss
-  - [x] Data consistency verification
-  - [x] Error propagation
+
+  - [x] Cache → DB flow
+  - [x] API → Cache flow
+  - [x] Error handling
+  - [x] Data consistency
+
+- [x] Event Methods
+  - [x] getAllEvents
+  - [x] getEvent
+  - [x] getCurrentEvent
+  - [x] getNextEvent
+
+### 2.2 End-to-End Tests (`tests/event/e2e.test.ts`)
+
+Test complete workflows:
+
+- [x] Data Pipeline
+  - [x] API → Cache → DB flow
+  - [x] Error recovery
+  - [x] Data consistency
   - [x] Resource cleanup
-  - [x] Transaction management
 
-### 2.2 Workflow Integration (`tests/event/workflow.integration.test.ts`)
+## 3. Test Environment
 
-Test complete event workflow including all components:
+### 3.1 Configuration
 
-- [ ] End-to-End Flow
-  - [ ] Complete data pipeline (API → Queue → Cache → DB)
-  - [ ] System state consistency
-  - [ ] Error recovery
-  - [ ] Resource management
-  - [ ] Performance verification
-
-## 3. Test Environment Setup
-
-### 3.1 Prerequisites
-
-- Configuration via `.env` file in project root
-- Access to production infrastructure:
-  - Supabase PostgreSQL database
-  - Redis instance
+- Uses `.env` for configuration
+- Real infrastructure:
   - FPL API (rate limited)
-- No separate test environment required as we use the same infrastructure
+  - Redis
+  - PostgreSQL
 
 ### 3.2 Test Data Management
 
 ```typescript
-// Example cleanup pattern
+// Test data isolation
 beforeEach(async () => {
   testKeys = [];
   testIds = [];
-  testJobs = [];
 });
 
 afterEach(async () => {
-  // IMPORTANT: Ensure cleanup only removes test data
-  await Promise.all([
-    ...testKeys.map((key) => redis.del(key)),
-    ...testIds.map((id) => prisma.event.delete({ where: { id } })),
-    ...testJobs.map((job) => queue.remove(job)),
-  ]);
+  await cleanup(testKeys, testIds);
 });
-
-// Utility to prefix test keys for isolation
-const getTestKey = (key: string) => `test:${key}`;
 ```
 
-### 3.3 Test Data Samples
-
-#### Bootstrap Data (`tests/data/bootstrap.json`)
-
-- Sample response data from FPL Bootstrap API endpoint
-- Used for client integration tests and domain transformation tests
-- Contains complete event data structure for validation
-- Serves as a snapshot of real API response
-- Used to verify:
-  - Data structure compliance
-  - Field type validation
-  - Required property presence
-  - Edge cases in data transformation
-  - Domain model mapping accuracy
-
-> **Note**: The bootstrap.json file is maintained as a static test fixture to ensure consistent test behavior and avoid API rate limiting during development.
-
-## 4. Test Execution
+### 3.3 Test Execution
 
 ```bash
-# All configuration is loaded from .env file
-# No additional environment setup needed
-
-# Run specific test suites
-npm test tests/event/client.test.ts
-npm test tests/event/domain.test.ts
-npm test tests/event/repository.test.ts
-npm test tests/event/cache.test.ts
-npm test tests/event/queue.test.ts
-npm test tests/event/service.integration.test.ts
-npm test tests/event/workflow.integration.test.ts
-
-# Run all event tests
+# Run tests
 npm test tests/event
+
+# Run specific suite
+npm test tests/event/client.test.ts
 ```
 
-> **Important Notes**:
->
-> 1. All tests use the same infrastructure as production
-> 2. Tests must be carefully designed to not interfere with production data
-> 3. Use prefixes for test data (keys, IDs) to ensure isolation
-> 4. Always clean up test data after each test
-> 5. Be mindful of API rate limits when testing
+## 4. Key Principles
+
+1. **Real Dependencies**
+
+   - Use actual API/DB/Cache
+   - No mocks unless absolutely necessary
+   - Clean up test data properly
+
+2. **Flexible Validation**
+
+   - Validate only required fields
+   - Allow additional fields from API
+   - Focus on business requirements
+
+3. **Error Handling**
+
+   - Test error scenarios
+   - Verify recovery mechanisms
+   - Check error propagation
+
+4. **Resource Management**
+   - Clean up test data
+   - Handle rate limits
+   - Manage connections properly

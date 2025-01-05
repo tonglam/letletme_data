@@ -10,6 +10,26 @@ import { CacheError } from '../../types/errors.type';
 import { createCacheOperationError } from '../../utils/error.util';
 import { redisClient } from './client';
 
+// Custom serializer to handle Date objects
+const serialize = (value: unknown): string => {
+  return JSON.stringify(value, (_, v) => {
+    if (v instanceof Date) {
+      return { __type: 'Date', value: v.toISOString() };
+    }
+    return v;
+  });
+};
+
+// Custom deserializer to handle Date objects
+const deserialize = <T>(value: string): T => {
+  return JSON.parse(value, (_, v) => {
+    if (v && typeof v === 'object' && v.__type === 'Date') {
+      return new Date(v.value);
+    }
+    return v;
+  });
+};
+
 // Redis cache interface for type-safe operations
 export interface RedisCache<T> {
   set: (key: string, value: T, ttl?: number) => TE.TaskEither<CacheError, void>;
@@ -33,7 +53,7 @@ export const createRedisCache = <T>(config: RedisCacheConfig = {}): RedisCache<T
     set: (key: string, value: T, ttl?: number) =>
       TE.tryCatch(
         async () => {
-          const serialized = JSON.stringify(value);
+          const serialized = serialize(value);
           const cacheKey = makeKey(key);
           const ttlValue = ttl ?? config.defaultTTL;
           if (ttlValue) {
@@ -49,18 +69,23 @@ export const createRedisCache = <T>(config: RedisCacheConfig = {}): RedisCache<T
     get: (key: string) =>
       pipe(
         TE.tryCatch(
-          () => redisClient.get(makeKey(key)),
+          async () => {
+            const cacheKey = makeKey(key);
+            const value = await redisClient.get(cacheKey);
+            if (!value) return null;
+            return deserialize<T>(value);
+          },
           (error) =>
             createCacheOperationError({ message: `Failed to get cache key ${key}`, cause: error }),
         ),
-        TE.map((value) => (value ? (JSON.parse(value) as T) : null)),
       ),
 
     hSet: (key: string, field: string, value: T) =>
       TE.tryCatch(
         async () => {
-          const serialized = JSON.stringify(value);
-          await redisClient.hset(makeKey(key), field, serialized);
+          const cacheKey = makeKey(key);
+          const serialized = serialize(value);
+          await redisClient.hset(cacheKey, field, serialized);
         },
         (error) =>
           createCacheOperationError({
@@ -72,32 +97,30 @@ export const createRedisCache = <T>(config: RedisCacheConfig = {}): RedisCache<T
     hGet: (key: string, field: string) =>
       pipe(
         TE.tryCatch(
-          () => redisClient.hget(makeKey(key), field),
+          async () => {
+            const cacheKey = makeKey(key);
+            const value = await redisClient.hget(cacheKey, field);
+            if (!value) return null;
+            return deserialize<T>(value);
+          },
           (error) =>
             createCacheOperationError({
               message: `Failed to get hash field ${field} for key ${key}`,
               cause: error,
             }),
         ),
-        TE.map((value) => (value ? (JSON.parse(value) as T) : null)),
       ),
 
     hGetAll: (key: string) =>
       pipe(
         TE.tryCatch(
           async () => {
-            const fields = await redisClient.hgetall(makeKey(key));
-            if (!fields) return {};
-            return Object.entries(fields).reduce<Record<string, T>>((acc, [field, value]) => {
-              try {
-                if (value) {
-                  acc[field] = JSON.parse(value) as T;
-                }
-              } catch (error) {
-                console.error(`Failed to parse value for field ${field}:`, error);
-              }
-              return acc;
-            }, {});
+            const cacheKey = makeKey(key);
+            const values = await redisClient.hgetall(cacheKey);
+            if (!values) return {};
+            return Object.fromEntries(
+              Object.entries(values).map(([k, v]) => [k, deserialize<T>(v)]),
+            );
           },
           (error) =>
             createCacheOperationError({
