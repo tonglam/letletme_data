@@ -87,7 +87,10 @@ export const createBootstrapEndpoints = (
               error: {
                 message: 'Invalid response data',
                 code: 'VALIDATION_ERROR',
-                details: parsed.error,
+                details: {
+                  errors: parsed.error.errors,
+                  response: JSON.stringify(response, null, 2),
+                },
               },
               success: false,
             },
@@ -97,7 +100,10 @@ export const createBootstrapEndpoints = (
             createAPIError({
               code: APIErrorCode.VALIDATION_ERROR,
               message: 'Invalid response data from FPL API',
-              details: { validationError: parsed.error },
+              details: {
+                validationError: parsed.error,
+                response: JSON.stringify(response, null, 2),
+              },
             }),
           );
         }
