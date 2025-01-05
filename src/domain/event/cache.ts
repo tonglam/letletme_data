@@ -57,25 +57,48 @@ export const createEventCache = (
 ): EventCache => {
   const { keyPrefix, season } = config;
 
-  const cacheKey = `${keyPrefix}::${season}`;
-  const currentEventKey = `${cacheKey}::current`;
-  const nextEventKey = `${cacheKey}::next`;
+  const baseKey = `${keyPrefix}::${season}`;
+  const currentEventKey = `${baseKey}::current`;
+  const nextEventKey = `${baseKey}::next`;
 
   const warmUp = (): TE.TaskEither<CacheError, void> =>
     pipe(
       TE.tryCatch(
-        () => dataProvider.getAll(),
+        async () => {
+          const events = await dataProvider.getAll();
+
+          // Delete all related keys before caching
+          const multi = redisClient.multi();
+          multi.del(baseKey);
+          multi.del(currentEventKey);
+          multi.del(nextEventKey);
+          await multi.exec();
+
+          // Cache all events
+          const cacheMulti = redisClient.multi();
+          events.forEach((event) => {
+            cacheMulti.hset(baseKey, event.id.toString(), JSON.stringify(event));
+          });
+          await cacheMulti.exec();
+
+          const currentEvent = events.find((e) => e.isCurrent);
+          const nextEvent = events.find((e) => e.isNext);
+
+          if (currentEvent) {
+            await redisClient.set(currentEventKey, JSON.stringify(currentEvent));
+          }
+          if (nextEvent) {
+            await redisClient.set(nextEventKey, JSON.stringify(nextEvent));
+          }
+        },
         (error) => createError('Failed to warm up cache', error),
       ),
-      TE.chain((events) => (events.length > 0 ? cacheEvents(events) : TE.right(undefined))),
-      TE.chainFirst(() => getCurrentEvent()),
-      TE.chainFirst(() => getNextEvent()),
     );
 
   const cacheEvent = (event: Event): TE.TaskEither<CacheError, void> =>
     pipe(
       TE.tryCatch(
-        () => redisClient.hset(cacheKey, event.id.toString(), JSON.stringify(event)),
+        () => redisClient.hset(baseKey, event.id.toString(), JSON.stringify(event)),
         (error) => createError('Failed to cache event', error),
       ),
       TE.map(() => undefined),
@@ -86,11 +109,18 @@ export const createEventCache = (
       TE.tryCatch(
         async () => {
           if (events.length === 0) return;
+
+          // Delete base key before caching
           const multi = redisClient.multi();
-          events.forEach((event) => {
-            multi.hset(cacheKey, event.id.toString(), JSON.stringify(event));
-          });
+          multi.del(baseKey);
           await multi.exec();
+
+          // Cache all events
+          const cacheMulti = redisClient.multi();
+          events.forEach((event) => {
+            cacheMulti.hset(baseKey, event.id.toString(), JSON.stringify(event));
+          });
+          await cacheMulti.exec();
         },
         (error) => createError('Failed to cache events', error),
       ),
@@ -99,7 +129,7 @@ export const createEventCache = (
   const getEvent = (id: string): TE.TaskEither<CacheError, Event | null> =>
     pipe(
       TE.tryCatch(
-        () => redisClient.hget(cacheKey, id),
+        () => redisClient.hget(baseKey, id),
         (error) => createError('Failed to get event from cache', error),
       ),
       TE.chain(
@@ -138,7 +168,7 @@ export const createEventCache = (
   const getAllEvents = (): TE.TaskEither<CacheError, readonly Event[]> =>
     pipe(
       TE.tryCatch(
-        () => redisClient.hgetall(cacheKey),
+        () => redisClient.hgetall(baseKey),
         (error) => createError('Failed to get events from cache', error),
       ),
       TE.chain(

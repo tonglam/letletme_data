@@ -24,7 +24,6 @@ import { EventOperations, EventRepositoryOperations } from './types';
 export const createEventOperations = (repository: EventRepositoryOperations): EventOperations => {
   // Create cache instance
   const redis = createRedisCache<DomainEvent>({
-    keyPrefix: CachePrefix.EVENT,
     defaultTTL: DefaultTTL.EVENT,
   });
 
