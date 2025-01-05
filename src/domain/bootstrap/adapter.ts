@@ -1,8 +1,11 @@
 import * as E from 'fp-ts/Either';
+import { ElementResponse } from 'src/types/elements.type';
+import { TeamResponse } from 'src/types/teams.type';
 import { FPLEndpoints } from '../../infrastructure/http/fpl/types';
 import { BootStrapResponse } from '../../types/bootstrap.type';
 import { APIError } from '../../types/errors.type';
 import { EventResponse } from '../../types/events.type';
+import { PhaseResponse } from '../../types/phases.type';
 import { BootstrapApi } from './operations';
 
 // Minimal type for raw API response
@@ -45,23 +48,63 @@ export const createBootstrapApiAdapter = (client: FPLEndpoints): ExtendedBootstr
     return bootstrapDataPromise as Promise<BootStrapResponse>;
   };
 
+  const getBootstrapEvents = async (): Promise<EventResponse[]> => {
+    try {
+      const data = await getBootstrapData();
+      if (!data || !data.events) {
+        throw new Error('No events data in bootstrap response');
+      }
+      return data.events;
+    } catch (error) {
+      console.error('Failed to get bootstrap events:', error);
+      throw error;
+    }
+  };
+
+  const getBootstrapPhases = async (): Promise<PhaseResponse[]> => {
+    try {
+      const data = await getBootstrapData();
+      if (!data || !data.phases) {
+        throw new Error('No phases data in bootstrap response');
+      }
+      return data.phases;
+    } catch (error) {
+      console.error('Failed to get bootstrap phases:', error);
+      throw error;
+    }
+  };
+
+  const getBootstrapTeams = async (): Promise<TeamResponse[]> => {
+    try {
+      const data = await getBootstrapData();
+      if (!data || !data.teams) {
+        throw new Error('No teams data in bootstrap response');
+      }
+      return data.teams;
+    } catch (error) {
+      console.error('Failed to get bootstrap teams:', error);
+      throw error;
+    }
+  };
+
+  const getBootstrapElements = async (): Promise<ElementResponse[]> => {
+    try {
+      const data = await getBootstrapData();
+      if (!data || !data.elements) {
+        throw new Error('No elements data in bootstrap response');
+      }
+      return data.elements;
+    } catch (error) {
+      console.error('Failed to get bootstrap elements:', error);
+      throw error;
+    }
+  };
+
   return {
     getBootstrapData,
-    getBootstrapEvents: async () => {
-      const data = await getBootstrapData();
-      return data.events;
-    },
-    getBootstrapPhases: async () => {
-      const data = await getBootstrapData();
-      return data.phases;
-    },
-    getBootstrapTeams: async () => {
-      const data = await getBootstrapData();
-      return data.teams;
-    },
-    getBootstrapElements: async () => {
-      const data = await getBootstrapData();
-      return data.elements;
-    },
+    getBootstrapEvents,
+    getBootstrapPhases,
+    getBootstrapTeams,
+    getBootstrapElements,
   };
 };

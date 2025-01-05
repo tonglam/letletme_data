@@ -4,12 +4,15 @@ import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
 import { CachePrefix } from '../../src/config/cache/cache.config';
 import { createBootstrapApiAdapter } from '../../src/domain/bootstrap/adapter';
+import { createEventCache } from '../../src/domain/event/cache';
 import { eventRepository } from '../../src/domain/event/repository';
 import type { EventCache } from '../../src/domain/event/types';
 import { redisClient } from '../../src/infrastructure/cache/client';
+import { createRedisCache } from '../../src/infrastructure/cache/redis-cache';
 import { DEFAULT_RETRY_CONFIG } from '../../src/infrastructure/http/client/utils';
 import { createFPLClient } from '../../src/infrastructure/http/fpl/client';
 import { createEventServiceCache } from '../../src/service/event/cache';
+import { getCurrentSeason } from '../../src/types/base.type';
 import type { CacheError } from '../../src/types/errors.type';
 import type { Event, EventId, EventResponse } from '../../src/types/events.type';
 import { EventResponseSchema, toDomainEvent } from '../../src/types/events.type';
@@ -87,6 +90,14 @@ describe('Event Service Integration Tests', () => {
       }),
     );
   });
+
+  // Helper function to clear Redis cache for a specific key pattern
+  const clearRedisCache = async (pattern: string) => {
+    const keys = await redisClient.keys(pattern);
+    if (keys.length > 0) {
+      await Promise.all(keys.map((key) => redisClient.del(key)));
+    }
+  };
 
   describe('API Response Validation', () => {
     it('should receive valid event data from the API', async () => {
@@ -310,34 +321,114 @@ describe('Event Service Integration Tests', () => {
       }, 10000);
 
       it('should handle cache errors gracefully', async () => {
-        const invalidEvents = [{ id: 9999 as EventId }] as Event[];
+        // Mock Redis client to simulate a cache error
+        const originalHset = redisClient.hset;
+        redisClient.hset = jest.fn().mockRejectedValue(new Error('Redis connection error'));
+
         const result = await pipe(
-          eventService.cacheEvents(invalidEvents),
+          eventService.cacheEvents([testEvents[0]]),
           TE.fold<CacheError, void, boolean>(
-            () => T.of(false), // Error case should return false
+            (error) => {
+              expect(error.message).toContain('Cache operation failed');
+              return T.of(false);
+            },
             () => T.of(true),
           ),
         )();
+
+        // Restore original Redis client
+        redisClient.hset = originalHset;
         expect(result).toBe(false);
+      }, 10000);
+
+      it('should handle API errors gracefully', async () => {
+        // Create a data provider that always fails
+        const errorDataProvider = {
+          getOne: jest.fn().mockRejectedValue(new Error('API Error')),
+          getAll: jest.fn().mockRejectedValue(new Error('API Error')),
+          getCurrentEvent: jest.fn().mockRejectedValue(new Error('API Error')),
+          getNextEvent: jest.fn().mockRejectedValue(new Error('API Error')),
+        };
+
+        // Create Redis cache with error data provider
+        const redis = createRedisCache<Event>({
+          keyPrefix: CachePrefix.EVENT,
+          defaultTTL: 3600,
+        });
+
+        const errorService = createEventCache(redis, errorDataProvider, {
+          keyPrefix: CachePrefix.EVENT,
+          season: getCurrentSeason(),
+        });
+
+        // Clear all event-related cache keys
+        await clearRedisCache(`${CachePrefix.EVENT}::*`);
+
+        // Try to get the current event
+        const result = await pipe(
+          errorService.getCurrentEvent(),
+          TE.fold<CacheError, Event | null, boolean>(
+            (error) => {
+              expect(error.message).toContain('Failed to fetch current event from data provider');
+              expect(error.cause).toBeInstanceOf(Error);
+              if (error.cause instanceof Error) {
+                expect(error.cause.message).toBe('API Error');
+              }
+              return T.of(true);
+            },
+            () => T.of(false), // If we get here, the API error wasn't properly propagated
+          ),
+        )();
+        expect(result).toBe(true);
+
+        // Verify that the data provider was called
+        expect(errorDataProvider.getCurrentEvent).toHaveBeenCalled();
       }, 10000);
     });
 
     describe('Error Handling', () => {
       it('should handle API errors gracefully', async () => {
-        const brokenApi = {
-          ...bootstrapApi,
-          getBootstrapEvents: () => Promise.reject(new Error('API Error')),
+        // Create a data provider that always fails
+        const errorDataProvider = {
+          getOne: jest.fn().mockRejectedValue(new Error('API Error')),
+          getAll: jest.fn().mockRejectedValue(new Error('API Error')),
+          getCurrentEvent: jest.fn().mockRejectedValue(new Error('API Error')),
+          getNextEvent: jest.fn().mockRejectedValue(new Error('API Error')),
         };
-        const errorService = createEventServiceCache(brokenApi) as EventCache;
 
+        // Create Redis cache with error data provider
+        const redis = createRedisCache<Event>({
+          keyPrefix: CachePrefix.EVENT,
+          defaultTTL: 3600,
+        });
+
+        const errorService = createEventCache(redis, errorDataProvider, {
+          keyPrefix: CachePrefix.EVENT,
+          season: getCurrentSeason(),
+        });
+
+        // Clear all event-related cache keys
+        await clearRedisCache(`${CachePrefix.EVENT}::*`);
+
+        // Try to get the current event
         const result = await pipe(
           errorService.getCurrentEvent(),
-          TE.fold<CacheError, Event | null, O.Option<Event>>(
-            () => T.of(O.none),
-            (event) => T.of(O.fromNullable(event)),
+          TE.fold<CacheError, Event | null, boolean>(
+            (error) => {
+              expect(error.message).toContain('Failed to fetch current event from data provider');
+              expect(error.cause).toBeInstanceOf(Error);
+              if (error.cause instanceof Error) {
+                expect(error.cause.message).toBe('API Error');
+              }
+              return T.of(true);
+            },
+            () => T.of(false), // If we get here, the API error wasn't properly propagated
           ),
         )();
-        expect(O.isNone(result)).toBe(true);
+        expect(result).toBe(true);
+
+        // Verify that the data provider was called
+        expect(errorDataProvider.getCurrentEvent).toHaveBeenCalled();
       }, 10000);
 
       it('should handle timeout scenarios', async () => {
@@ -362,5 +453,62 @@ describe('Event Service Integration Tests', () => {
         expect(O.isSome(result) || O.isNone(result)).toBe(true);
       }, 10000);
     });
+  });
+
+  it('should get event by id', async () => {
+    const testEvent = testEvents[0];
+    const eventKey = `${CachePrefix.EVENT}:${testEvent.id}`;
+    testKeys.push(eventKey);
+
+    const result = await pipe(
+      eventService.getEvent(testEvent.id.toString()),
+      TE.map((event: Event | null): O.Option<Event> => O.fromNullable(event)),
+      TE.fold<CacheError, O.Option<Event>, O.Option<Event>>(
+        () => T.of(O.none),
+        (eventOption) => T.of(eventOption),
+      ),
+    )();
+    expect(O.isSome(result)).toBe(true);
+    if (O.isSome(result)) {
+      expect(result.value).toMatchObject({
+        id: testEvent.id,
+        name: expect.any(String),
+        deadlineTime: expect.any(String),
+        finished: expect.any(Boolean),
+        dataChecked: expect.any(Boolean),
+        season: getCurrentSeason(),
+      });
+    }
+  });
+
+  it('should get events by ids', async () => {
+    const eventsKey = `${CachePrefix.EVENT}:all`;
+    testKeys.push(eventsKey);
+
+    const result1 = await pipe(
+      eventService.getAllEvents(),
+      TE.fold<CacheError, readonly Event[], readonly Event[]>(
+        () => T.of([]),
+        (events) => T.of(events),
+      ),
+    )();
+    expect(result1.length).toBeGreaterThan(0);
+    expect(result1[0]).toMatchObject({
+      id: expect.any(Number),
+      name: expect.any(String),
+      deadlineTime: expect.any(String),
+      finished: expect.any(Boolean),
+      dataChecked: expect.any(Boolean),
+      season: getCurrentSeason(),
+    });
+
+    const result2 = await pipe(
+      eventService.getAllEvents(),
+      TE.fold<CacheError, readonly Event[], readonly Event[]>(
+        () => T.of([]),
+        (events) => T.of(events),
+      ),
+    )();
+    expect(result2).toEqual(result1);
   });
 });

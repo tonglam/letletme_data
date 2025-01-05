@@ -14,35 +14,23 @@ const logger = getWorkflowLogger();
 // Creates event workflow operations
 export const eventWorkflows = (eventService: EventService) => {
   // Syncs events from FPL API to local database
-  const syncEvents = (): TE.TaskEither<ServiceError, readonly Event[]> =>
-    pipe(
-      logger.info({ workflow: 'event-sync' }, 'Starting event sync'),
-      () =>
-        pipe(
-          eventService.getEvents(),
-          TE.mapLeft((error: ServiceError) => ({
-            ...error,
-            message: `Failed to fetch events: ${error.message}`,
-          })),
-        ),
-      TE.chain((events: readonly Event[]) => {
-        logger.info({ workflow: 'event-sync', count: events.length }, 'Syncing events to database');
-        return pipe(
-          eventService.saveEvents(events),
-          TE.mapLeft((error: ServiceError) => ({
-            ...error,
-            message: `Failed to save events: ${error.message}`,
-          })),
-          TE.map((savedEvents: readonly Event[]) => {
-            logger.info(
-              { workflow: 'event-sync', count: savedEvents.length },
-              'Successfully synced events',
-            );
-            return savedEvents;
-          }),
+  const syncEvents = (): TE.TaskEither<ServiceError, readonly Event[]> => {
+    logger.info({ workflow: 'event-sync' }, 'Starting event sync from API');
+    return pipe(
+      eventService.syncEventsFromApi(),
+      TE.mapLeft((error: ServiceError) => ({
+        ...error,
+        message: `Failed to sync events from API: ${error.message}`,
+      })),
+      TE.map((events) => {
+        logger.info(
+          { workflow: 'event-sync', count: events.length },
+          'Successfully synced events from API',
         );
+        return events;
       }),
     );
+  };
 
   return {
     syncEvents,

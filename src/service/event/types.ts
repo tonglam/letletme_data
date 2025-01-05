@@ -13,6 +13,7 @@ export interface EventService {
   readonly getCurrentEvent: () => TE.TaskEither<ServiceError, Event | null>;
   readonly getNextEvent: () => TE.TaskEither<ServiceError, Event | null>;
   readonly saveEvents: (events: readonly Event[]) => TE.TaskEither<ServiceError, readonly Event[]>;
+  readonly syncEventsFromApi: () => TE.TaskEither<ServiceError, readonly Event[]>;
 }
 
 // Event service dependencies

@@ -12,22 +12,43 @@ import { redisClient } from './client';
 
 // Custom serializer to handle Date objects
 const serialize = (value: unknown): string => {
-  return JSON.stringify(value, (_, v) => {
-    if (v instanceof Date) {
-      return { __type: 'Date', value: v.toISOString() };
-    }
-    return v;
-  });
+  try {
+    return JSON.stringify(value, (_, v) => {
+      if (v instanceof Date) {
+        return { __type: 'Date', value: v.toISOString() };
+      }
+      // Validate that the value can be properly serialized
+      if (typeof v === 'number' && !Number.isFinite(v)) {
+        throw new Error('Cannot serialize non-finite number');
+      }
+      if (v === undefined) {
+        throw new Error('Cannot serialize undefined value');
+      }
+      return v;
+    });
+  } catch (error) {
+    throw createCacheOperationError({
+      message: 'Failed to serialize value',
+      cause: error instanceof Error ? error : new Error(String(error)),
+    });
+  }
 };
 
 // Custom deserializer to handle Date objects
 const deserialize = <T>(value: string): T => {
-  return JSON.parse(value, (_, v) => {
-    if (v && typeof v === 'object' && v.__type === 'Date') {
-      return new Date(v.value);
-    }
-    return v;
-  });
+  try {
+    return JSON.parse(value, (_, v) => {
+      if (v && typeof v === 'object' && v.__type === 'Date') {
+        return new Date(v.value);
+      }
+      return v;
+    });
+  } catch (error) {
+    throw createCacheOperationError({
+      message: 'Failed to deserialize value',
+      cause: error instanceof Error ? error : new Error(String(error)),
+    });
+  }
 };
 
 // Redis cache interface for type-safe operations
@@ -51,19 +72,33 @@ export const createRedisCache = <T>(config: RedisCacheConfig = {}): RedisCache<T
 
   const cacheInstance: RedisCache<T> = {
     set: (key: string, value: T, ttl?: number) =>
-      TE.tryCatch(
-        async () => {
-          const serialized = serialize(value);
-          const cacheKey = makeKey(key);
-          const ttlValue = ttl ?? config.defaultTTL;
-          if (ttlValue) {
-            await redisClient.setex(cacheKey, ttlValue, serialized);
-          } else {
-            await redisClient.set(cacheKey, serialized);
-          }
-        },
-        (error) =>
-          createCacheOperationError({ message: `Failed to set cache key ${key}`, cause: error }),
+      pipe(
+        TE.tryCatch(
+          () => Promise.resolve(serialize(value)),
+          (error) =>
+            createCacheOperationError({
+              message: `Failed to serialize value for key ${key}`,
+              cause: error instanceof Error ? error : new Error(String(error)),
+            }),
+        ),
+        TE.chain((serialized) =>
+          TE.tryCatch(
+            async () => {
+              const cacheKey = makeKey(key);
+              const ttlValue = ttl ?? config.defaultTTL;
+              if (ttlValue) {
+                await redisClient.setex(cacheKey, ttlValue, serialized);
+              } else {
+                await redisClient.set(cacheKey, serialized);
+              }
+            },
+            (error) =>
+              createCacheOperationError({
+                message: `Failed to set cache key ${key}`,
+                cause: error instanceof Error ? error : new Error(String(error)),
+              }),
+          ),
+        ),
       ),
 
     get: (key: string) =>
@@ -76,22 +111,36 @@ export const createRedisCache = <T>(config: RedisCacheConfig = {}): RedisCache<T
             return deserialize<T>(value);
           },
           (error) =>
-            createCacheOperationError({ message: `Failed to get cache key ${key}`, cause: error }),
+            createCacheOperationError({
+              message: `Failed to get cache key ${key}`,
+              cause: error instanceof Error ? error : new Error(String(error)),
+            }),
         ),
       ),
 
     hSet: (key: string, field: string, value: T) =>
-      TE.tryCatch(
-        async () => {
-          const cacheKey = makeKey(key);
-          const serialized = serialize(value);
-          await redisClient.hset(cacheKey, field, serialized);
-        },
-        (error) =>
-          createCacheOperationError({
-            message: `Failed to set hash field ${field} for key ${key}`,
-            cause: error,
-          }),
+      pipe(
+        TE.tryCatch(
+          () => Promise.resolve(serialize(value)),
+          (error) =>
+            createCacheOperationError({
+              message: `Failed to serialize value for hash field ${field} in key ${key}`,
+              cause: error instanceof Error ? error : new Error(String(error)),
+            }),
+        ),
+        TE.chain((serialized) =>
+          TE.tryCatch(
+            async () => {
+              const cacheKey = makeKey(key);
+              await redisClient.hset(cacheKey, field, serialized);
+            },
+            (error) =>
+              createCacheOperationError({
+                message: `Failed to set hash field ${field} for key ${key}`,
+                cause: error instanceof Error ? error : new Error(String(error)),
+              }),
+          ),
+        ),
       ),
 
     hGet: (key: string, field: string) =>

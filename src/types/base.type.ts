@@ -172,14 +172,21 @@ export enum Season {
 }
 
 /**
- * Gets current FPL season
+ * Gets current FPL season in format 'YYZZ' (e.g., '2324' for 2023/24 season)
+ * For example:
+ * - August 2023 to July 2024 returns '2324'
+ * - August 2024 to July 2025 returns '2425'
  */
-export const getCurrentSeason = (): number => {
+export const getCurrentSeason = (): string => {
   const currentDate = new Date();
   const currentYear = currentDate.getFullYear();
   const currentMonth = currentDate.getMonth() + 1;
 
-  return currentMonth >= 8 ? currentYear : currentYear - 1;
+  const startYear = currentMonth >= 8 ? currentYear : currentYear - 1;
+  const endYear = startYear + 1;
+  const startYearStr = startYear.toString().slice(-2);
+  const endYearStr = endYear.toString().slice(-2);
+  return `${startYearStr}${endYearStr}`;
 };
 
 /**

@@ -23,7 +23,7 @@ export const createEventCache = (
   dataProvider: EventDataProvider,
   config: EventCacheConfig = {
     keyPrefix: CachePrefix.EVENT,
-    season: getCurrentSeason().toString(),
+    season: getCurrentSeason(),
   },
 ): EventCache => {
   // Generates the base cache key for the current season
@@ -46,16 +46,22 @@ export const createEventCache = (
         async () => {
           if (events.length === 0) return;
           const key = makeKey();
-          const multi = redisClient.multi();
-          events.forEach((event) => {
-            multi.hset(key, event.id.toString(), JSON.stringify(event));
-          });
-          await multi.exec();
+          for (const event of events) {
+            try {
+              const serialized = JSON.stringify(event);
+              await redisClient.hset(key, event.id.toString(), serialized);
+            } catch (error) {
+              throw createCacheOperationError({
+                message: `Failed to cache event ${event.id}`,
+                cause: error instanceof Error ? error : new Error(String(error)),
+              });
+            }
+          }
         },
         (error) =>
           createCacheOperationError({
             message: 'Failed to cache multiple events',
-            cause: error,
+            cause: error instanceof Error ? error : new Error(String(error)),
           }),
       ),
     );
@@ -68,15 +74,22 @@ export const createEventCache = (
         cached
           ? TE.right(cached)
           : pipe(
-              withCacheErrorHandling(
+              TE.tryCatch(
                 () => dataProvider.getOne(Number(id) as EventId),
-                `Failed to fetch event ${id}`,
+                (error) =>
+                  createCacheOperationError({
+                    message: `Failed to fetch event ${id} from data provider`,
+                    cause: error instanceof Error ? error : new Error(String(error)),
+                  }),
               ),
               TE.chain((event) =>
                 event
                   ? pipe(
                       cacheEvent(event),
-                      TE.map(() => event),
+                      TE.bimap(
+                        (error) => error,
+                        () => event,
+                      ),
                     )
                   : TE.right(null),
               ),
@@ -105,14 +118,21 @@ export const createEventCache = (
         (error) =>
           createCacheOperationError({
             message: 'Failed to get all events from cache',
-            cause: error,
+            cause: error instanceof Error ? error : new Error(String(error)),
           }),
       ),
       TE.chain((cached) =>
         cached.length > 0
           ? TE.right(cached)
           : pipe(
-              withCacheErrorHandling(() => dataProvider.getAll(), 'Failed to fetch all events'),
+              TE.tryCatch(
+                () => dataProvider.getAll(),
+                (error) =>
+                  createCacheOperationError({
+                    message: 'Failed to fetch all events from data provider',
+                    cause: error instanceof Error ? error : new Error(String(error)),
+                  }),
+              ),
               TE.chain((events) =>
                 pipe(
                   cacheEvents(events),
@@ -134,18 +154,26 @@ export const createEventCache = (
         cached
           ? TE.right(cached)
           : pipe(
-              withCacheErrorHandling(
+              TE.tryCatch(
                 () => dataProvider.getCurrentEvent(),
-                'Failed to fetch current event',
+                (error) =>
+                  createCacheOperationError({
+                    message: 'Failed to fetch current event from data provider',
+                    cause: error instanceof Error ? error : new Error(String(error)),
+                  }),
               ),
               TE.chain((event) =>
-                event
-                  ? pipe(
+                event === null
+                  ? TE.right(null)
+                  : pipe(
                       redis.set(makeCurrentKey(), event),
-                      TE.map(() => event),
-                    )
-                  : TE.right(null),
+                      TE.fold(
+                        () => TE.right(event), // Still return event even if caching fails
+                        () => TE.right(event),
+                      ),
+                    ),
               ),
+              TE.mapLeft((error) => error), // Ensure API errors are properly propagated
             ),
       ),
     );
@@ -158,15 +186,22 @@ export const createEventCache = (
         cached
           ? TE.right(cached)
           : pipe(
-              withCacheErrorHandling(
+              TE.tryCatch(
                 () => dataProvider.getNextEvent(),
-                'Failed to fetch next event',
+                (error) =>
+                  createCacheOperationError({
+                    message: 'Failed to fetch next event from data provider',
+                    cause: error instanceof Error ? error : new Error(String(error)),
+                  }),
               ),
               TE.chain((event) =>
                 event
                   ? pipe(
                       redis.set(makeNextKey(), event),
-                      TE.map(() => event),
+                      TE.bimap(
+                        (error) => error,
+                        () => event,
+                      ),
                     )
                   : TE.right(null),
               ),
