@@ -7,11 +7,13 @@
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import { CachePrefix } from '../../config/cache/cache.config';
-import { withCacheErrorHandling, withPipeline } from '../../infrastructure/cache/operations';
+import { redisClient } from '../../infrastructure/cache/client';
+import { withCacheErrorHandling } from '../../infrastructure/cache/operations';
 import { type RedisCache } from '../../infrastructure/cache/redis-cache';
 import { getCurrentSeason } from '../../types/base.type';
 import { CacheError } from '../../types/errors.type';
 import { type Event, type EventId } from '../../types/events.type';
+import { createCacheOperationError } from '../../utils/error.util';
 import { type EventCache, type EventCacheConfig, type EventDataProvider } from './types';
 
 // Creates an event cache instance.
@@ -39,9 +41,24 @@ export const createEventCache = (
 
   // Caches multiple events atomically in Redis
   const cacheEvents = (events: readonly Event[]): TE.TaskEither<CacheError, void> =>
-    withPipeline(events, (pipeline, event) => {
-      pipeline.hset(makeKey(), event.id.toString(), JSON.stringify(event));
-    });
+    pipe(
+      TE.tryCatch(
+        async () => {
+          if (events.length === 0) return;
+          const key = makeKey();
+          const multi = redisClient.multi();
+          events.forEach((event) => {
+            multi.hset(key, event.id.toString(), JSON.stringify(event));
+          });
+          await multi.exec();
+        },
+        (error) =>
+          createCacheOperationError({
+            message: 'Failed to cache multiple events',
+            cause: error,
+          }),
+      ),
+    );
 
   // Retrieves a cached event by ID with fallback
   const getEvent = (id: string): TE.TaskEither<CacheError, Event | null> =>
@@ -70,8 +87,27 @@ export const createEventCache = (
   // Retrieves all cached events with fallback
   const getAllEvents = (): TE.TaskEither<CacheError, readonly Event[]> =>
     pipe(
-      redis.hGetAll(makeKey()),
-      TE.map((events) => Object.values(events)),
+      TE.tryCatch(
+        async () => {
+          const key = makeKey();
+          const fields = await redisClient.hgetall(key);
+          if (!fields) return [];
+          return Object.entries(fields)
+            .map(([, value]) => {
+              try {
+                return JSON.parse(value as string) as Event;
+              } catch {
+                return null;
+              }
+            })
+            .filter((event): event is Event => event !== null);
+        },
+        (error) =>
+          createCacheOperationError({
+            message: 'Failed to get all events from cache',
+            cause: error,
+          }),
+      ),
       TE.chain((cached) =>
         cached.length > 0
           ? TE.right(cached)
@@ -80,7 +116,10 @@ export const createEventCache = (
               TE.chain((events) =>
                 pipe(
                   cacheEvents(events),
-                  TE.map(() => events),
+                  TE.bimap(
+                    (error) => error,
+                    () => events,
+                  ),
                 ),
               ),
             ),

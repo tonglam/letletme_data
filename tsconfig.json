@@ -23,8 +23,9 @@
     "noImplicitReturns": true,
     "noFallthroughCasesInSwitch": true,
     "moduleResolution": "node",
-    "composite": true
+    "composite": true,
+    "resolveJsonModule": true
   },
-  "include": ["src/**/*.ts", "tests/**/*.ts"],
+  "include": ["src/**/*.ts", "tests/**/*.ts", "tests/**/*.json"],
   "exclude": ["node_modules"]
 }

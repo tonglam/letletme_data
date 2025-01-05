@@ -10,32 +10,32 @@ This document outlines the test plan for the event functionality in the FPL data
 
 Test FPL API client in isolation:
 
-- [ ] Bootstrap API Integration
-  - [ ] Successful response with valid data structure
-  - [ ] Events array validation
-  - [ ] Rate limit handling
-  - [ ] Timeout scenarios
-  - [ ] Network error recovery
-  - [ ] Retry mechanism verification
+- [x] Bootstrap API Integration
+  - [x] Successful response with valid data structure
+  - [x] Events array validation
+  - [x] Rate limit handling
+  - [x] Timeout scenarios
+  - [x] Network error recovery
+  - [x] Retry mechanism verification
 
 ### 1.2 Domain Tests (`tests/event/domain.test.ts`)
 
 Test domain logic and data transformations in isolation:
 
-- [ ] Event Domain Operations
+- [x] Event Domain Operations
 
-  - [ ] Event data transformation (API → Domain)
-  - [ ] Event state transitions
-  - [ ] Event validation rules
-  - [ ] Business logic constraints
-  - [ ] Edge cases handling
+  - [x] Event data transformation (API → Domain)
+  - [x] Event state transitions
+  - [x] Event validation rules
+  - [x] Business logic constraints
+  - [x] Edge cases handling
 
-- [ ] Event Aggregates
+- [x] Event Aggregates
 
-  - [ ] Event relationships
-  - [ ] Event lifecycle rules
-  - [ ] Domain event handling
-  - [ ] Invariant validations
+  - [x] Event relationships
+  - [x] Event lifecycle rules
+  - [x] Domain event handling
+  - [x] Invariant validations
 
 - [ ] Value Objects
   - [ ] Event status transitions
@@ -47,13 +47,13 @@ Test domain logic and data transformations in isolation:
 
 Test database operations in isolation:
 
-- [ ] Event Repository Operations
-  - [ ] Find all events with pagination
-  - [ ] Find event by ID
-  - [ ] Find current/next event
-  - [ ] Create/Update/Delete operations
-  - [ ] Constraint validations
-  - [ ] Transaction handling
+- [x] Event Repository Operations
+  - [x] Find all events with pagination
+  - [x] Find event by ID
+  - [x] Find current/next event
+  - [x] Create/Update/Delete operations
+  - [x] Constraint validations
+  - [x] Transaction handling
 
 ### 1.4 Cache Tests (`tests/event/cache.test.ts`)
 
@@ -67,32 +67,19 @@ Test caching operations in isolation:
   - [ ] Cache invalidation
   - [ ] Error handling
 
-### 1.5 Queue Job Tests (`tests/event/queue.test.ts`)
-
-Test event queue jobs in isolation:
-
-- [ ] Job Processing
-  - [ ] Job creation and queuing
-  - [ ] Job execution
-  - [ ] Retry mechanisms
-  - [ ] Error handling
-  - [ ] Job status updates
-  - [ ] Concurrent job handling
-  - [ ] Job cleanup
-
 ## 2. Integration Tests
 
 ### 2.1 Service Integration (`tests/event/service.integration.test.ts`)
 
 Test service layer that coordinates between cache, database, and API:
 
-- [ ] Service Operations
-  - [ ] Data flow between cache and database
-  - [ ] API fallback on cache miss
-  - [ ] Data consistency verification
-  - [ ] Error propagation
-  - [ ] Resource cleanup
-  - [ ] Transaction management
+- [x] Service Operations
+  - [x] Data flow between cache and database
+  - [x] API fallback on cache miss
+  - [x] Data consistency verification
+  - [x] Error propagation
+  - [x] Resource cleanup
+  - [x] Transaction management
 
 ### 2.2 Workflow Integration (`tests/event/workflow.integration.test.ts`)
 
@@ -138,6 +125,23 @@ afterEach(async () => {
 // Utility to prefix test keys for isolation
 const getTestKey = (key: string) => `test:${key}`;
 ```
+
+### 3.3 Test Data Samples
+
+#### Bootstrap Data (`tests/data/bootstrap.json`)
+
+- Sample response data from FPL Bootstrap API endpoint
+- Used for client integration tests and domain transformation tests
+- Contains complete event data structure for validation
+- Serves as a snapshot of real API response
+- Used to verify:
+  - Data structure compliance
+  - Field type validation
+  - Required property presence
+  - Edge cases in data transformation
+  - Domain model mapping accuracy
+
+> **Note**: The bootstrap.json file is maintained as a static test fixture to ensure consistent test behavior and avoid API rate limiting during development.
 
 ## 4. Test Execution
 

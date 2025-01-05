@@ -28,7 +28,6 @@ interface RedisCacheConfig {
 // Creates a type-safe Redis cache instance
 export const createRedisCache = <T>(config: RedisCacheConfig = {}): RedisCache<T> => {
   const makeKey = (key: string) => `${config.keyPrefix ?? ''}${key}`;
-  const makeHashKey = (key: string, field: string) => `${makeKey(key)}:${field}`;
 
   const cacheInstance: RedisCache<T> = {
     set: (key: string, value: T, ttl?: number) =>
@@ -61,7 +60,7 @@ export const createRedisCache = <T>(config: RedisCacheConfig = {}): RedisCache<T
       TE.tryCatch(
         async () => {
           const serialized = JSON.stringify(value);
-          await redisClient.set(makeHashKey(key, field), serialized);
+          await redisClient.hset(makeKey(key), field, serialized);
         },
         (error) =>
           createCacheOperationError({
@@ -73,7 +72,7 @@ export const createRedisCache = <T>(config: RedisCacheConfig = {}): RedisCache<T
     hGet: (key: string, field: string) =>
       pipe(
         TE.tryCatch(
-          () => redisClient.get(makeHashKey(key, field)),
+          () => redisClient.hget(makeKey(key), field),
           (error) =>
             createCacheOperationError({
               message: `Failed to get hash field ${field} for key ${key}`,
@@ -87,14 +86,15 @@ export const createRedisCache = <T>(config: RedisCacheConfig = {}): RedisCache<T
       pipe(
         TE.tryCatch(
           async () => {
-            const pattern = `${makeKey(key)}:*`;
-            const keys = await redisClient.keys(pattern);
-            const values = await Promise.all(keys.map((k) => redisClient.get(k)));
-            return keys.reduce<Record<string, T>>((acc, key, i) => {
-              const value = values[i];
-              if (value) {
-                const fieldKey = key.split(':').pop() ?? '';
-                acc[fieldKey] = JSON.parse(value) as T;
+            const fields = await redisClient.hgetall(makeKey(key));
+            if (!fields) return {};
+            return Object.entries(fields).reduce<Record<string, T>>((acc, [field, value]) => {
+              try {
+                if (value) {
+                  acc[field] = JSON.parse(value) as T;
+                }
+              } catch (error) {
+                console.error(`Failed to parse value for field ${field}:`, error);
               }
               return acc;
             }, {});
