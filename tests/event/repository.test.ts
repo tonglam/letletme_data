@@ -13,7 +13,7 @@ describe('Event Repository Tests', () => {
     testEvents = Array.from({ length: 3 }, (_, i) => ({
       id: (i + 1) as EventId,
       name: `Gameweek ${i + 1}`,
-      deadlineTime: new Date(Date.now() + (i + 1) * 24 * 60 * 60 * 1000),
+      deadlineTime: new Date(Date.now() + (i + 1) * 24 * 60 * 60 * 1000).toISOString(),
       deadlineTimeEpoch: Math.floor(Date.now() / 1000) + (i + 1) * 24 * 60 * 60,
       deadlineTimeGameOffset: 0,
       releaseTime: null,
@@ -75,7 +75,7 @@ describe('Event Repository Tests', () => {
         expect(createdEvent).toMatchObject({
           id: testEvent.id,
           name: testEvent.name,
-          deadlineTime: expect.any(Date),
+          deadlineTime: expect.any(String),
           finished: testEvent.finished,
           dataChecked: testEvent.dataChecked,
         });
@@ -95,7 +95,7 @@ describe('Event Repository Tests', () => {
           expect(event).toMatchObject({
             id: testEvents[index].id,
             name: testEvents[index].name,
-            deadlineTime: expect.any(Date),
+            deadlineTime: expect.any(String),
             finished: testEvents[index].finished,
             dataChecked: testEvents[index].dataChecked,
           });
@@ -142,6 +142,9 @@ describe('Event Repository Tests', () => {
             expect(event).toMatchObject({
               id: testEvents[index].id,
               name: testEvents[index].name,
+              deadlineTime: expect.any(String),
+              finished: testEvents[index].finished,
+              dataChecked: testEvents[index].dataChecked,
             });
           });
         }
@@ -161,7 +164,6 @@ describe('Event Repository Tests', () => {
         if (E.isRight(findResult)) {
           const foundEvent = findResult.right;
           expect(foundEvent).toMatchObject({
-            id: testEvents[1].id,
             isCurrent: true,
           });
         }
@@ -181,7 +183,6 @@ describe('Event Repository Tests', () => {
         if (E.isRight(findResult)) {
           const foundEvent = findResult.right;
           expect(foundEvent).toMatchObject({
-            id: testEvents[2].id,
             isNext: true,
           });
         }

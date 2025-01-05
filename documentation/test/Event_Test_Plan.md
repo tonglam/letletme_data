@@ -32,17 +32,32 @@ Test FPL API client functionality with mock data:
 
 Test domain logic and business rules:
 
-- [x] Event Domain Model
+- [x] Event Domain Model Transformation
 
-  - [x] Event state management
-  - [x] Business rules
-  - [x] Validation rules
-  - [x] Edge cases
+  - [x] Transform API response to domain model
+  - [x] Validate required fields (id, name, deadline_time)
+  - [x] Validate data types and formats
+  - [x] Handle optional fields gracefully
 
-- [x] Event Operations
-  - [x] Event lifecycle
-  - [x] State transitions
-  - [x] Invariant checks
+- [x] Event State Management
+
+  - [x] Validate event state transitions (previous, current, next)
+  - [x] Verify state exclusivity (only one event in each state)
+  - [x] Validate state relationships
+  - [x] Test state transitions correctness
+
+- [x] Business Logic Constraints
+
+  - [x] Finished events should be in the past
+  - [x] Future events should not be finished or data_checked
+  - [x] Validate chronological order of deadlines
+  - [x] Test event lifecycle rules
+
+- [x] Event Aggregates
+  - [x] Validate sequential event IDs (1 to 38)
+  - [x] Verify gameweek naming convention
+  - [x] Test chronological ordering
+  - [x] Validate relationships between events
 
 ### 1.3 Repository Tests (`tests/event/repository.test.ts`)
 
