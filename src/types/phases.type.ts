@@ -1,5 +1,6 @@
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
+import { z } from 'zod';
 import { BaseRepository, Branded, createBrandedType, isApiResponse } from './base.type';
 
 // ============ Branded Types ============
@@ -23,6 +24,14 @@ export const validatePhaseId = (value: unknown): E.Either<string, PhaseId> =>
 
 // ============ Types ============
 // API response types representing raw data from external API
+export const PhaseResponseSchema = z.object({
+  id: z.number(),
+  name: z.string(),
+  start_event: z.number(),
+  stop_event: z.number(),
+  highest_score: z.number().nullable(),
+});
+
 export interface PhaseResponse {
   readonly id: number;
   readonly name: string;

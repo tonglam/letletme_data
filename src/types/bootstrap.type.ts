@@ -5,16 +5,20 @@ import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import { z } from 'zod';
 import type { ElementResponse } from './elements.type';
+import { ElementResponseSchema } from './elements.type';
 import type { EventResponse } from './events.type';
+import { EventResponseSchema } from './events.type';
 import type { PhaseResponse } from './phases.type';
+import { PhaseResponseSchema } from './phases.type';
 import type { TeamResponse } from './teams.type';
+import { TeamResponseSchema } from './teams.type';
 
 // Zod schema for validating bootstrap response data
 export const BootStrapResponseSchema = z.object({
-  events: z.array(z.custom<EventResponse>()),
-  phases: z.array(z.custom<PhaseResponse>()),
-  teams: z.array(z.custom<TeamResponse>()),
-  elements: z.array(z.custom<ElementResponse>()),
+  events: z.array(EventResponseSchema),
+  phases: z.array(PhaseResponseSchema),
+  teams: z.array(TeamResponseSchema),
+  elements: z.array(ElementResponseSchema),
 });
 
 // Raw API response structure for bootstrap data

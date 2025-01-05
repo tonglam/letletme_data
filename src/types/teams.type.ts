@@ -1,5 +1,6 @@
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
+import { z } from 'zod';
 import { BaseRepository, Branded, createBrandedType, isApiResponse } from './base.type';
 
 // ============ Branded Types ============
@@ -25,6 +26,30 @@ export const validateTeamId = (value: unknown): E.Either<string, TeamId> =>
 /**
  * API Response types (snake_case)
  */
+export const TeamResponseSchema = z.object({
+  id: z.number(),
+  code: z.number(),
+  name: z.string(),
+  short_name: z.string(),
+  strength: z.number(),
+  strength_overall_home: z.number(),
+  strength_overall_away: z.number(),
+  strength_attack_home: z.number(),
+  strength_attack_away: z.number(),
+  strength_defence_home: z.number(),
+  strength_defence_away: z.number(),
+  pulse_id: z.number(),
+  played: z.number(),
+  position: z.number(),
+  points: z.number(),
+  form: z.string().nullable(),
+  win: z.number(),
+  draw: z.number(),
+  loss: z.number(),
+  team_division: z.string().nullable(),
+  unavailable: z.boolean(),
+});
+
 export interface TeamResponse {
   readonly id: number;
   readonly code: number;

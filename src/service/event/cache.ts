@@ -52,7 +52,13 @@ const createEventDataProvider = (
       TE.map(transform),
       TE.map(toNullable(defaultValue)),
       TE.fold((error) => {
-        console.warn('Bootstrap data fetch failed:', error);
+        console.error('Bootstrap data fetch failed:', {
+          message: error.message,
+          code: error.code,
+          details: error.details,
+          cause: error.cause,
+          stack: error.stack,
+        });
         return T.of(defaultValue);
       }, T.of),
     )();

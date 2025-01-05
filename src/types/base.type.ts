@@ -14,17 +14,14 @@ import { APIError, APIErrorCode, CacheError, DBError, createAPIError } from './e
 /**
  * Element status constants for player availability
  */
-export const ELEMENT_STATUS = {
-  AVAILABLE: 'a',
-  UNAVAILABLE: 'u',
-  INJURED: 'i',
-  DOUBTFUL: 'd',
-} as const;
-
-/**
- * Element status type derived from status constants
- */
-export type ElementStatus = (typeof ELEMENT_STATUS)[keyof typeof ELEMENT_STATUS];
+export enum ElementStatus {
+  Available = 'a',
+  Unavailable = 'u',
+  Injured = 'i',
+  Suspended = 's',
+  NotAvailable = 'n',
+  Departed = 'd',
+}
 
 export { ElementType, ValueChangeType };
 

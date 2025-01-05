@@ -13,7 +13,7 @@ import { handlePrismaError } from '../../utils/error.util';
 import { EventRepositoryOperations } from './types';
 
 const toPrismaCreateInput = (event: Event): Prisma.EventCreateInput => ({
-  id: event.id,
+  id: Number(event.id),
   name: event.name,
   deadlineTime: event.deadlineTime,
   deadlineTimeEpoch: event.deadlineTimeEpoch,
@@ -30,7 +30,7 @@ const toPrismaCreateInput = (event: Event): Prisma.EventCreateInput => ({
   cupLeaguesCreated: event.cupLeaguesCreated,
   h2hKoMatchesCreated: event.h2hKoMatchesCreated,
   rankedCount: event.rankedCount,
-  chipPlays: event.chipPlays ? JSON.parse(JSON.stringify(event.chipPlays)) : undefined,
+  chipPlays: event.chipPlays.length > 0 ? JSON.parse(JSON.stringify(event.chipPlays)) : undefined,
   mostSelected: event.mostSelected,
   mostTransferredIn: event.mostTransferredIn,
   mostCaptained: event.mostCaptained,
@@ -45,17 +45,34 @@ const toPrismaCreateInput = (event: Event): Prisma.EventCreateInput => ({
 // Event repository implementation
 export const eventRepository: EventRepositoryOperations = {
   findAll: (): TE.TaskEither<DBError, PrismaEvent[]> =>
-    pipe(TE.tryCatch(() => prisma.event.findMany(), handlePrismaError)),
+    pipe(
+      TE.tryCatch(
+        () =>
+          prisma.event.findMany({
+            orderBy: { id: 'asc' },
+          }),
+        handlePrismaError,
+      ),
+    ),
 
   findById: (id: EventId): TE.TaskEither<DBError, PrismaEvent | null> =>
-    pipe(TE.tryCatch(() => prisma.event.findUnique({ where: { id } }), handlePrismaError)),
+    pipe(
+      TE.tryCatch(
+        () =>
+          prisma.event.findUnique({
+            where: { id: Number(id) },
+          }),
+        handlePrismaError,
+      ),
+    ),
 
   findByIds: (ids: EventId[]): TE.TaskEither<DBError, PrismaEvent[]> =>
     pipe(
       TE.tryCatch(
         () =>
           prisma.event.findMany({
-            where: { id: { in: ids } },
+            where: { id: { in: ids.map(Number) } },
+            orderBy: { id: 'asc' },
           }),
         handlePrismaError,
       ),
@@ -63,11 +80,25 @@ export const eventRepository: EventRepositoryOperations = {
 
   findCurrent: (): TE.TaskEither<DBError, PrismaEvent | null> =>
     pipe(
-      TE.tryCatch(() => prisma.event.findFirst({ where: { isCurrent: true } }), handlePrismaError),
+      TE.tryCatch(
+        () =>
+          prisma.event.findFirst({
+            where: { isCurrent: true },
+          }),
+        handlePrismaError,
+      ),
     ),
 
   findNext: (): TE.TaskEither<DBError, PrismaEvent | null> =>
-    pipe(TE.tryCatch(() => prisma.event.findFirst({ where: { isNext: true } }), handlePrismaError)),
+    pipe(
+      TE.tryCatch(
+        () =>
+          prisma.event.findFirst({
+            where: { isNext: true },
+          }),
+        handlePrismaError,
+      ),
+    ),
 
   create: (event: Event): TE.TaskEither<DBError, PrismaEvent> =>
     pipe(
@@ -94,7 +125,8 @@ export const eventRepository: EventRepositoryOperations = {
           TE.tryCatch(
             () =>
               prisma.event.findMany({
-                where: { id: { in: events.map((e) => e.id) } },
+                where: { id: { in: events.map((e) => Number(e.id)) } },
+                orderBy: { id: 'asc' },
               }),
             handlePrismaError,
           ),
@@ -107,14 +139,34 @@ export const eventRepository: EventRepositoryOperations = {
       TE.tryCatch(
         () =>
           prisma.event.update({
-            where: { id },
+            where: { id: Number(id) },
             data: {
-              ...event,
-              id: undefined,
+              name: event.name,
+              deadlineTime: event.deadlineTime,
+              deadlineTimeEpoch: event.deadlineTimeEpoch,
+              deadlineTimeGameOffset: event.deadlineTimeGameOffset,
+              releaseTime: event.releaseTime,
+              averageEntryScore: event.averageEntryScore,
+              finished: event.finished,
+              dataChecked: event.dataChecked,
+              highestScore: event.highestScore,
+              highestScoringEntry: event.highestScoringEntry,
+              isPrevious: event.isPrevious,
+              isCurrent: event.isCurrent,
+              isNext: event.isNext,
+              cupLeaguesCreated: event.cupLeaguesCreated,
+              h2hKoMatchesCreated: event.h2hKoMatchesCreated,
+              rankedCount: event.rankedCount,
               chipPlays: event.chipPlays ? JSON.parse(JSON.stringify(event.chipPlays)) : undefined,
+              mostSelected: event.mostSelected,
+              mostTransferredIn: event.mostTransferredIn,
+              mostCaptained: event.mostCaptained,
+              mostViceCaptained: event.mostViceCaptained,
+              topElement: event.topElement,
               topElementInfo: event.topElementInfo
                 ? JSON.parse(JSON.stringify(event.topElementInfo))
                 : undefined,
+              transfersMade: event.transfersMade,
             },
           }),
         handlePrismaError,
@@ -126,7 +178,7 @@ export const eventRepository: EventRepositoryOperations = {
       TE.tryCatch(
         () =>
           prisma.event.delete({
-            where: { id },
+            where: { id: Number(id) },
           }),
         handlePrismaError,
       ),

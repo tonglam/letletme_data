@@ -10,9 +10,9 @@ import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import { TaskEither } from 'fp-ts/TaskEither';
+import { z } from 'zod';
 import type { BootstrapApi } from '../domain/bootstrap/operations';
 import type { EventCache } from '../domain/event/types';
-import { parseJsonArray, parseJsonObject } from '../utils/prisma.util';
 import type { BaseRepository } from './base.type';
 import { Branded, createBrandedType, isApiResponse } from './base.type';
 import { APIError, DBError } from './errors.type';
@@ -60,39 +60,55 @@ export interface ChipPlay {
   readonly num_played: number;
 }
 
+// Zod schemas for nested types
+export const TopElementInfoSchema = z.object({
+  id: z.number(),
+  points: z.number(),
+});
+
+export const ChipPlaySchema = z.object({
+  chip_name: z.string(),
+  num_played: z.number(),
+});
+
 /**
- * Raw event data from the API
+ * Schema for validating event response data from the FPL API
  */
-export interface EventResponse {
-  readonly id: number;
-  readonly name: string;
-  readonly deadline_time: string;
-  readonly deadline_time_epoch: number;
-  readonly deadline_time_game_offset: number;
-  readonly release_time: string | null;
-  readonly average_entry_score: number;
-  readonly finished: boolean;
-  readonly data_checked: boolean;
-  readonly highest_score: number;
-  readonly highest_scoring_entry: number;
-  readonly is_previous: boolean;
-  readonly is_current: boolean;
-  readonly is_next: boolean;
-  readonly cup_leagues_created: boolean;
-  readonly h2h_ko_matches_created: boolean;
-  readonly ranked_count: number;
-  readonly chip_plays: readonly ChipPlay[];
-  readonly most_selected: number | null;
-  readonly most_transferred_in: number | null;
-  readonly most_captained: number | null;
-  readonly most_vice_captained: number | null;
-  readonly top_element: number | null;
-  readonly top_element_info: TopElementInfo | null;
-  readonly transfers_made: number;
-  readonly can_enter: boolean;
-  readonly can_manage: boolean;
-  readonly released: boolean;
-}
+export const EventResponseSchema = z.object({
+  id: z.number(),
+  name: z.string(),
+  deadline_time: z.string(),
+  deadline_time_epoch: z.number(),
+  deadline_time_game_offset: z.number(),
+  release_time: z.string().nullable(),
+  release_time_epoch: z.number().nullable(),
+  release_time_game_offset: z.number().nullable(),
+  is_previous: z.boolean(),
+  is_current: z.boolean(),
+  is_next: z.boolean(),
+  cup_leagues_created: z.boolean(),
+  h2h_ko_matches_created: z.boolean(),
+  chip_plays: z.array(ChipPlaySchema).default([]),
+  most_selected: z.number().nullable(),
+  most_transferred_in: z.number().nullable(),
+  top_element: z.number().nullable(),
+  top_element_info: TopElementInfoSchema.nullable(),
+  transfers_made: z.number().nullable(),
+  most_captained: z.number().nullable(),
+  most_vice_captained: z.number().nullable(),
+  average_entry_score: z.number().nullable(),
+  highest_score: z.number().nullable(),
+  highest_scoring_entry: z.number().nullable(),
+  finished: z.boolean(),
+  data_checked: z.boolean(),
+  chip_plays_processed: z.boolean(),
+  released: z.boolean(),
+});
+
+/**
+ * Type for event response data from the FPL API
+ */
+export type EventResponse = z.infer<typeof EventResponseSchema>;
 
 /**
  * Array of event responses
@@ -128,9 +144,6 @@ export interface Event {
   readonly topElement: number | null;
   readonly topElementInfo: TopElementInfo | null;
   readonly transfersMade: number;
-  readonly canEnter: boolean;
-  readonly canManage: boolean;
-  readonly released: boolean;
 }
 
 /**
@@ -211,6 +224,13 @@ export const toDomainEvent = (data: EventResponse | PrismaEvent): Event => {
     };
   };
 
+  const parseChipPlays = (data: Prisma.JsonValue | null): ChipPlay[] => {
+    if (!data) return [];
+    const array = JSON.parse(JSON.stringify(data));
+    if (!Array.isArray(array)) return [];
+    return array.map((item) => parseChipPlay(item as Prisma.JsonObject));
+  };
+
   return {
     id: data.id as EventId,
     name: data.name,
@@ -224,12 +244,14 @@ export const toDomainEvent = (data: EventResponse | PrismaEvent): Event => {
         ? new Date(data.release_time)
         : null
       : data.releaseTime,
-    averageEntryScore: isEventApiResponse(data) ? data.average_entry_score : data.averageEntryScore,
+    averageEntryScore: isEventApiResponse(data)
+      ? data.average_entry_score ?? 0
+      : data.averageEntryScore,
     finished: data.finished,
     dataChecked: isEventApiResponse(data) ? data.data_checked : data.dataChecked,
-    highestScore: isEventApiResponse(data) ? data.highest_score : data.highestScore,
+    highestScore: isEventApiResponse(data) ? data.highest_score ?? 0 : data.highestScore,
     highestScoringEntry: isEventApiResponse(data)
-      ? data.highest_scoring_entry
+      ? data.highest_scoring_entry ?? 0
       : data.highestScoringEntry,
     isPrevious: isEventApiResponse(data) ? data.is_previous : data.isPrevious,
     isCurrent: isEventApiResponse(data) ? data.is_current : data.isCurrent,
@@ -238,22 +260,19 @@ export const toDomainEvent = (data: EventResponse | PrismaEvent): Event => {
     h2hKoMatchesCreated: isEventApiResponse(data)
       ? data.h2h_ko_matches_created
       : data.h2hKoMatchesCreated,
-    rankedCount: isEventApiResponse(data) ? data.ranked_count : data.rankedCount,
-    chipPlays: isEventApiResponse(data)
-      ? data.chip_plays
-      : parseJsonArray(data.chipPlays, parseChipPlay),
+    rankedCount: isEventApiResponse(data) ? 0 : data.rankedCount,
+    chipPlays: isEventApiResponse(data) ? data.chip_plays : parseChipPlays(data.chipPlays),
     mostSelected: isEventApiResponse(data) ? data.most_selected : data.mostSelected,
     mostTransferredIn: isEventApiResponse(data) ? data.most_transferred_in : data.mostTransferredIn,
-    mostCaptained: isEventApiResponse(data) ? data.most_captained : data.mostCaptained,
-    mostViceCaptained: isEventApiResponse(data) ? data.most_vice_captained : data.mostViceCaptained,
     topElement: isEventApiResponse(data) ? data.top_element : data.topElement,
     topElementInfo: isEventApiResponse(data)
       ? data.top_element_info
-      : parseJsonObject(data.topElementInfo, parseTopElement),
-    transfersMade: isEventApiResponse(data) ? data.transfers_made : data.transfersMade,
-    canEnter: isEventApiResponse(data) ? data.can_enter : false,
-    canManage: isEventApiResponse(data) ? data.can_manage : false,
-    released: isEventApiResponse(data) ? data.released : false,
+      : data.topElementInfo
+        ? parseTopElement(JSON.parse(JSON.stringify(data.topElementInfo)) as Prisma.JsonObject)
+        : null,
+    transfersMade: isEventApiResponse(data) ? data.transfers_made ?? 0 : data.transfersMade,
+    mostCaptained: isEventApiResponse(data) ? data.most_captained : data.mostCaptained,
+    mostViceCaptained: isEventApiResponse(data) ? data.most_vice_captained : data.mostViceCaptained,
   };
 };
 
@@ -278,13 +297,15 @@ export const toPrismaEvent = (event: Event): PrismaEventCreate => ({
   cupLeaguesCreated: event.cupLeaguesCreated,
   h2hKoMatchesCreated: event.h2hKoMatchesCreated,
   rankedCount: event.rankedCount,
-  chipPlays: event.chipPlays as unknown as Prisma.JsonValue,
+  chipPlays: event.chipPlays.length > 0 ? JSON.parse(JSON.stringify(event.chipPlays)) : undefined,
   mostSelected: event.mostSelected,
   mostTransferredIn: event.mostTransferredIn,
   mostCaptained: event.mostCaptained,
   mostViceCaptained: event.mostViceCaptained,
   topElement: event.topElement,
-  topElementInfo: event.topElementInfo as unknown as Prisma.JsonValue,
+  topElementInfo: event.topElementInfo
+    ? JSON.parse(JSON.stringify(event.topElementInfo))
+    : undefined,
   transfersMade: event.transfersMade,
 });
 

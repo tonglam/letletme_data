@@ -10,6 +10,7 @@ import { pipe } from 'fp-ts/function';
 import { Logger } from 'pino';
 import { apiConfig } from '../../../../config/api/api.config';
 import { BootStrapResponseSchema } from '../../../../types/bootstrap.type';
+import { APIErrorCode, createAPIError } from '../../../../types/errors.type';
 import { HTTPClient } from '../../client';
 import { RequestOptions } from '../../client/types';
 import { BootstrapEndpoints, validateEndpointResponse } from '../types';
@@ -52,26 +53,75 @@ export const createBootstrapEndpoints = (
    * @returns {Promise<Either<APIError, BootStrapResponse>>} Either an error or the bootstrap data
    */
   getBootstrapStatic: async (options?: RequestOptions) => {
+    logger.info(
+      { operation: 'getBootstrapStatic', url: apiConfig.endpoints.bootstrap.static },
+      'Fetching bootstrap data from FPL API',
+    );
+
     const result = await client.get<unknown>(apiConfig.endpoints.bootstrap.static, options)();
 
     return pipe(
       result,
-      E.chain(validateEndpointResponse(BootStrapResponseSchema)),
+      E.mapLeft((error) => {
+        logger.error(
+          {
+            operation: 'getBootstrapStatic',
+            error: {
+              message: error.message,
+              code: error.code,
+              details: error.details,
+              cause: error.cause,
+            },
+            success: false,
+          },
+          'FPL API call failed',
+        );
+        return error;
+      }),
+      E.chain((response) =>
+        pipe(
+          validateEndpointResponse(BootStrapResponseSchema)(response),
+          E.mapLeft((error) => {
+            logger.error(
+              {
+                operation: 'getBootstrapStatic',
+                error: {
+                  message: 'Invalid response data',
+                  code: 'VALIDATION_ERROR',
+                  details: error,
+                },
+                success: false,
+              },
+              'FPL API response validation failed',
+            );
+            return createAPIError({
+              code: APIErrorCode.VALIDATION_ERROR,
+              message: 'Invalid response data from FPL API',
+              details: { validationError: error },
+            });
+          }),
+        ),
+      ),
       E.map((data) => {
-        logger.info({ operation: 'getBootstrapStatic', success: true }, 'FPL API call successful');
+        logger.info(
+          {
+            operation: 'getBootstrapStatic',
+            success: true,
+            eventCount: data.events.length,
+            teamCount: data.teams.length,
+            elementCount: data.elements.length,
+          },
+          'FPL API call successful',
+        );
         return {
-          events: data.events,
+          events: data.events.map((event) => ({
+            ...event,
+            chip_plays: event.chip_plays || [],
+          })),
           phases: data.phases,
           teams: data.teams,
           elements: data.elements,
         };
-      }),
-      E.mapLeft((error) => {
-        logger.error(
-          { operation: 'getBootstrapStatic', error, success: false },
-          'FPL API call failed',
-        );
-        return error;
       }),
     );
   },
