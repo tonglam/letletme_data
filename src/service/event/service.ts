@@ -38,7 +38,13 @@ const eventServiceOperations = (domainOps: EventOperations): EventServiceOperati
         }),
       ),
       TE.map((events: readonly EventResponse[]) => events.map(toDomainEvent)),
-      TE.chain((events) => pipe(domainOps.createEvents(events), TE.mapLeft(mapDomainError))),
+      TE.chain((events) =>
+        pipe(
+          domainOps.deleteAll(),
+          TE.mapLeft(mapDomainError),
+          TE.chain(() => pipe(domainOps.createEvents(events), TE.mapLeft(mapDomainError))),
+        ),
+      ),
     ),
 });
 

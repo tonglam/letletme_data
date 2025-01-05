@@ -22,6 +22,7 @@ export interface EventRepositoryOperations {
   readonly createMany: (events: readonly Event[]) => TaskEither<DBError, PrismaEvent[]>;
   readonly update: (id: EventId, event: Partial<Event>) => TaskEither<DBError, PrismaEvent>;
   readonly delete: (id: EventId) => TaskEither<DBError, PrismaEvent>;
+  readonly deleteAll: () => TaskEither<DBError, void>;
 }
 
 /**
@@ -70,4 +71,5 @@ export interface EventOperations {
   readonly getNextEvent: () => TaskEither<DomainError, Event | null>;
   readonly createEvent: (event: Event) => TaskEither<DomainError, Event>;
   readonly createEvents: (events: readonly Event[]) => TaskEither<DomainError, readonly Event[]>;
+  readonly deleteAll: () => TaskEither<DomainError, void>;
 }

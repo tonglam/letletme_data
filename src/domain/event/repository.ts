@@ -183,4 +183,10 @@ export const eventRepository: EventRepositoryOperations = {
         handlePrismaError,
       ),
     ),
+
+  deleteAll: (): TE.TaskEither<DBError, void> =>
+    pipe(
+      TE.tryCatch(() => prisma.event.deleteMany({}), handlePrismaError),
+      TE.map(() => undefined),
+    ),
 };

@@ -7,9 +7,8 @@
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
 import { getWorkflowLogger } from '../../infrastructure/logger';
-import { ServiceError } from '../../types/errors.type';
+import { ServiceError, ServiceErrorCode, createServiceError } from '../../types/errors.type';
 import type { Event } from '../../types/events.type';
-import { createServiceOperationError } from '../../utils/error.util';
 import type { EventService, WorkflowContext, WorkflowResult } from './types';
 
 const logger = getWorkflowLogger();
@@ -39,7 +38,8 @@ export const eventWorkflows = (eventService: EventService) => {
     return pipe(
       eventService.syncEventsFromApi(),
       TE.mapLeft((error: ServiceError) =>
-        createServiceOperationError({
+        createServiceError({
+          code: ServiceErrorCode.INTEGRATION_ERROR,
           message: `Event sync workflow failed: ${error.message}`,
           cause: error,
         }),

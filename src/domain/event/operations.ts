@@ -159,5 +159,11 @@ export const createEventOperations = (repository: EventRepositoryOperations): Ev
           withCacheErrorMapping('Failed to cache created events', cache.cacheEvents(savedEvents)),
         ),
       ),
+
+    deleteAll: () =>
+      pipe(
+        repository.deleteAll(),
+        TE.mapLeft(handleRepositoryError('Failed to delete all events')),
+      ),
   };
 };
