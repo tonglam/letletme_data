@@ -22,7 +22,7 @@ This document outlines the architectural design of the FPL data system, built us
 
 ### 1. Domain-Driven Design
 
-- **Bounded Contexts**: Clear domain boundaries (events, teams, players)
+- **Bounded Contexts**: Clear domain boundaries (event, team, player)
 - **Ubiquitous Language**: Consistent terminology across codebase
 - **Value Objects**: Immutable domain models
 - **Domain Events**: State changes as events
@@ -161,7 +161,7 @@ interface CacheService<T> {
 ```plaintext
 src/domain/{domain-name}/
 ├── types.ts       # Domain types and interfaces
-├── operations.ts  # Pure domain operations
+├── operation.ts  # Pure domain operations
 ├── repository.ts  # Data access layer
 └── cache.ts      # Caching layer
 ```
@@ -312,23 +312,22 @@ describe('Event Service Integration', () => {
 
 ```plaintext
 src/
-├── api/                    # API layer
-│   ├── routes/            # Route handlers
-│   ├── middleware/        # Express middleware
-│   └── responses/         # Response formatting
-├── services/              # Service layer
+├── api/                  # API layer
+│   ├── routes/           # Route handlers
+│   └── middleware/       # Express middleware
+├── service/              # Service layer
 │   ├── event/            # Event services
 │   ├── team/             # Team services
 │   └── player/           # Player services
 ├── domain/               # Domain layer
-│   ├── event/           # Event domain
-│   ├── team/            # Team domain
-│   └── player/          # Player domain
-└── infrastructure/      # Infrastructure layer
-    ├── http/           # HTTP clients
-    ├── queue/          # Queue system
-    ├── cache/          # Cache system
-    └── db/             # Database access
+│   ├── event/            # Event domain
+│   ├── team/             # Team domain
+│   └── player/           # Player domain
+└── infrastructure/       # Infrastructure layer
+    ├── http/             # HTTP clients
+    ├── queue/            # Queue system
+    ├── cache/            # Cache system
+    └── db/               # Database access
 ```
 
 ### Implementation Guidelines

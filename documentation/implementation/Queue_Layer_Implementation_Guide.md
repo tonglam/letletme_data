@@ -15,9 +15,9 @@ src/
 │       └── index.ts                 # Public exports
 └── queue/
     ├── meta/                        # Meta job implementations
-    │   ├── events/                  # Event-specific jobs
-    │   ├── phases/                  # Phase-specific jobs
-    │   └── teams/                   # Team-specific jobs
+    │   ├── event/                   # Event-specific jobs
+    │   ├── phase/                   # Phase-specific jobs
+    │   └── team/                    # Team-specific jobs
     ├── live/                        # Live update jobs
     └── daily/                       # Daily update jobs
 ```

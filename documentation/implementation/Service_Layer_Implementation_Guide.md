@@ -4,17 +4,19 @@
 
 This guide demonstrates how to implement a service layer following functional programming principles using fp-ts. The guide uses the Events service as a reference implementation.
 
-## File Structure
+## Directory Structure
 
 A service module should follow this structure:
 
 ```plaintext
-src/service/{service-name}/
-├── index.ts     # Public API exports
-├── types.ts     # Service interfaces and types
-├── service.ts   # Main service implementation
-├── operations.ts # Service operations
-└── workflow.ts  # Complex business workflows
+src/service/
+├── index.ts                 # Service container and exports
+├── utils.ts                 # Shared service utilities
+└── {service-name}/         # Service module directory
+    ├── index.ts            # Service module exports
+    ├── service.ts          # Core service implementation
+    ├── types.ts            # Service interfaces and types
+    └── workflow.ts         # Complex business workflows
 ```
 
 ## Service Types
@@ -32,13 +34,6 @@ export interface EventService {
   readonly syncEventsFromApi: () => TE.TaskEither<ServiceError, readonly Event[]>;
 }
 
-// Service with workflow capabilities
-export interface EventServiceWithWorkflows extends EventService {
-  readonly workflows: {
-    readonly syncEvents: () => TE.TaskEither<ServiceError, WorkflowResult<readonly Event[]>>;
-  };
-}
-
 // Service dependencies
 export interface EventServiceDependencies {
   readonly bootstrapApi: ExtendedBootstrapApi;
@@ -54,18 +49,6 @@ export interface EventServiceOperations {
     bootstrapApi: EventServiceDependencies['bootstrapApi'],
   ) => TE.TaskEither<ServiceError, readonly Event[]>;
 }
-
-// Workflow types
-export interface WorkflowContext {
-  readonly workflowId: string;
-  readonly startTime: Date;
-}
-
-export interface WorkflowResult<T> {
-  readonly context: WorkflowContext;
-  readonly result: T;
-  readonly duration: number;
-}
 ```
 
 ## Service Implementation
@@ -73,39 +56,19 @@ export interface WorkflowResult<T> {
 Implement the service in `service.ts`:
 
 ```typescript
-export const createEventService = (
-  bootstrapApi: EventServiceDependencies['bootstrapApi'],
-  repository: EventRepositoryOperations,
-): EventService => {
-  const domainOps = createEventOperations(repository);
-  const ops = eventServiceOperations(domainOps);
+// Maps domain errors to service errors
+const mapDomainError = (error: DomainError): ServiceError =>
+  createServiceOperationError({
+    message: error.message,
+    cause: error,
+  });
 
-  return {
-    getEvents: () => ops.findAllEvents(),
-    getEvent: (id: EventId) => ops.findEventById(id),
-    getCurrentEvent: () => ops.findCurrentEvent(),
-    getNextEvent: () => ops.findNextEvent(),
-    saveEvents: (events: readonly Event[]) =>
-      pipe(domainOps.createEvents(events), TE.mapLeft(mapDomainError)),
-    syncEventsFromApi: () => ops.syncEventsFromApi(bootstrapApi),
-  };
-};
-```
-
-## Service Operations
-
-Implement operations in `operations.ts`:
-
-```typescript
+// Implementation of service operations
 const eventServiceOperations = (domainOps: EventOperations): EventServiceOperations => ({
   findAllEvents: () => pipe(domainOps.getAllEvents(), TE.mapLeft(mapDomainError)),
-
   findEventById: (id: EventId) => pipe(domainOps.getEventById(id), TE.mapLeft(mapDomainError)),
-
   findCurrentEvent: () => pipe(domainOps.getCurrentEvent(), TE.mapLeft(mapDomainError)),
-
   findNextEvent: () => pipe(domainOps.getNextEvent(), TE.mapLeft(mapDomainError)),
-
   syncEventsFromApi: (bootstrapApi: EventServiceDependencies['bootstrapApi']) =>
     pipe(
       bootstrapApi.getBootstrapEvents(),
@@ -125,20 +88,34 @@ const eventServiceOperations = (domainOps: EventOperations): EventServiceOperati
       ),
     ),
 });
+
+export const createEventService = (
+  bootstrapApi: EventServiceDependencies['bootstrapApi'],
+  repository: EventRepositoryOperations,
+): EventService => {
+  const domainOps = createEventOperations(repository);
+  const ops = eventServiceOperations(domainOps);
+
+  return {
+    getEvents: () => ops.findAllEvents(),
+    getEvent: (id: EventId) => ops.findEventById(id),
+    getCurrentEvent: () => ops.findCurrentEvent(),
+    getNextEvent: () => ops.findNextEvent(),
+    saveEvents: (events: readonly Event[]) =>
+      pipe(domainOps.createEvents(events), TE.mapLeft(mapDomainError)),
+    syncEventsFromApi: () => ops.syncEventsFromApi(bootstrapApi),
+  };
+};
 ```
 
 ## Workflow Implementation
 
-Implement workflows in `workflow.ts`:
+Complex business workflows should be implemented in `workflow.ts`:
 
 ```typescript
-export const eventWorkflows = (eventService: EventService) => {
-  const syncEvents = (): TE.TaskEither<ServiceError, WorkflowResult<readonly Event[]>> => {
-    const context = createWorkflowContext('event-sync');
-
-    logger.info({ workflow: context.workflowId }, 'Starting event sync workflow');
-
-    return pipe(
+export const createEventWorkflow = (eventService: EventService) => {
+  const syncEvents = () =>
+    pipe(
       eventService.syncEventsFromApi(),
       TE.mapLeft((error: ServiceError) =>
         createServiceError({
@@ -147,52 +124,12 @@ export const eventWorkflows = (eventService: EventService) => {
           cause: error,
         }),
       ),
-      TE.map((events) => {
-        const duration = new Date().getTime() - context.startTime.getTime();
-
-        logger.info(
-          {
-            workflow: context.workflowId,
-            count: events.length,
-            durationMs: duration,
-          },
-          'Event sync workflow completed successfully',
-        );
-
-        return {
-          context,
-          result: events,
-          duration,
-        };
-      }),
     );
-  };
 
   return {
     syncEvents,
   } as const;
 };
-```
-
-## Error Handling
-
-```typescript
-// Map domain errors to service errors
-const mapDomainError = (error: DomainError): ServiceError =>
-  createServiceOperationError({
-    message: error.message,
-    cause: error,
-  });
-
-// Create service integration error
-const createServiceIntegrationError = (params: {
-  message: string;
-  cause?: unknown;
-}): ServiceError => ({
-  code: ServiceErrorCode.INTEGRATION_ERROR,
-  message: params.message,
-  cause: params.cause,
-});
 ```
 
 ## Best Practices
@@ -209,36 +146,20 @@ const createServiceIntegrationError = (params: {
    - Map domain errors to service errors
    - Provide detailed error messages
    - Include error causes
-   - Log errors appropriately
+   - Use appropriate error types
 
-3. **Workflow Management**
+3. **Functional Programming**
 
-   - Create workflow context
-   - Track workflow duration
-   - Log workflow progress
-   - Handle workflow errors
+   - Use pipe for composition
+   - Keep functions pure
+   - Use readonly types
+   - Avoid side effects
 
 4. **Testing**
-
    - Unit test service operations
    - Integration test workflows
    - Mock external dependencies
    - Test error scenarios
-
-5. **Performance**
-   - Track operation metrics
-   - Monitor workflow duration
-   - Log performance data
-   - Handle timeouts
-
-## Implementation Steps
-
-1. Define service types and interfaces
-2. Create service operations
-3. Implement workflows
-4. Add error handling
-5. Set up logging
-6. Add tests
 
 ## Common Patterns
 
@@ -247,7 +168,7 @@ const createServiceIntegrationError = (params: {
 ```typescript
 export const createService = (deps: Dependencies): Service => {
   const domainOps = createDomainOperations(deps.repository);
-  const ops = createServiceOperations(domainOps);
+  const ops = serviceOperations(domainOps);
   return createServiceInterface(ops);
 };
 ```
@@ -263,21 +184,22 @@ const mapError = (error: DomainError): ServiceError =>
   });
 ```
 
-3. **Workflow Pattern**
+3. **Operation Composition Pattern**
 
 ```typescript
-const executeWorkflow = <T>(
-  workflowId: string,
-  operation: () => TE.TaskEither<ServiceError, T>,
-) => {
-  const context = createWorkflowContext(workflowId);
-  return pipe(
-    operation(),
-    TE.map((result) => ({
-      context,
-      result,
-      duration: new Date().getTime() - context.startTime.getTime(),
-    })),
+const operation = () =>
+  pipe(
+    domainOperation(),
+    TE.mapLeft(mapDomainError),
+    TE.chain((result) => nextOperation(result)),
   );
-};
 ```
+
+## Implementation Steps
+
+1. Create service directory structure
+2. Define service types and interfaces
+3. Implement core service operations
+4. Add error handling
+5. Implement complex workflows
+6. Add tests

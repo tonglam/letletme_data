@@ -8,20 +8,63 @@ This guide demonstrates how to implement API endpoints following functional prog
 
 ```plaintext
 src/api/
-├── routes/
-│   └── events/
-│       ├── index.ts        # Route configuration
-│       ├── handlers.ts     # Request handlers
-│       └── validation.ts   # Request validation
+├── handlers/
+│   └── event.handler.ts    # Request handlers implementation
 ├── middleware/
-│   ├── error.ts           # Error handling middleware
-│   └── validation.ts      # Validation middleware
-└── types.ts               # Shared API types
+│   ├── core.ts            # Core middleware functions
+│   └── index.ts           # Middleware exports
+├── routes/
+│   └── event.route.ts     # Route definitions
+├── index.ts               # Main API setup
+├── types.ts               # API types definitions
+└── utils.ts               # API utilities
 ```
 
 ## Core Components
 
-### 1. Route Types
+### 1. Route Implementation (routes/event.route.ts)
+
+```typescript
+export const eventRouter = ({ eventService }: ServiceContainer): Router => {
+  const router = Router();
+  const handlers = createEventHandlers(eventService);
+
+  router.get('/', createHandler(handlers.getAllEvents));
+  router.get('/current', createHandler(handlers.getCurrentEvent));
+  router.get('/next', createHandler(handlers.getNextEvent));
+  router.get('/:id', validateRequest(EventIdParams), createHandler(handlers.getEventById));
+
+  return router;
+};
+```
+
+### 2. Handler Implementation (handlers/event.handler.ts)
+
+```typescript
+const createEventHandlers = (eventService: EventService) => ({
+  getAllEvents: () =>
+    pipe(
+      eventService.getEvents(),
+      TE.map((events) => ({ status: 'success', data: events })),
+    ),
+
+  getCurrentEvent: () =>
+    pipe(
+      eventService.getCurrentEvent(),
+      TE.map((event) => ({ status: 'success', data: event })),
+    ),
+
+  getEventById: (req: Request) =>
+    pipe(
+      validateEventId(Number(req.params.id)),
+      TE.fromEither,
+      TE.chain((id) => eventService.getEvent(id)),
+      TE.map((event) => ({ status: 'success', data: event })),
+    ),
+});
+```
+
+### 3. Types (types.ts)
 
 ```typescript
 // API response types
@@ -48,49 +91,7 @@ const EventIdParams = z.object({
 type EventIdParamsType = z.infer<typeof EventIdParams>;
 ```
 
-### 2. Route Implementation
-
-```typescript
-export const eventRouter = ({ eventService }: ServiceContainer): Router => {
-  const router = Router();
-  const handlers = createEventHandlers(eventService);
-
-  router.get('/', createHandler(handlers.getAllEvents));
-  router.get('/current', createHandler(handlers.getCurrentEvent));
-  router.get('/next', createHandler(handlers.getNextEvent));
-  router.get('/:id', validateRequest(EventIdParams), createHandler(handlers.getEventById));
-
-  return router;
-};
-```
-
-### 3. Handler Implementation
-
-```typescript
-const createEventHandlers = (eventService: EventService) => ({
-  getAllEvents: () =>
-    pipe(
-      eventService.getEvents(),
-      TE.map((events) => ({ status: 'success', data: events })),
-    ),
-
-  getCurrentEvent: () =>
-    pipe(
-      eventService.getCurrentEvent(),
-      TE.map((event) => ({ status: 'success', data: event })),
-    ),
-
-  getEventById: (req: Request) =>
-    pipe(
-      validateEventId(Number(req.params.id)),
-      TE.fromEither,
-      TE.chain((id) => eventService.getEvent(id)),
-      TE.map((event) => ({ status: 'success', data: event })),
-    ),
-});
-```
-
-### 4. Error Handling
+### 4. Middleware (middleware/core.ts)
 
 ```typescript
 const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
@@ -126,7 +127,7 @@ const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
 
 ## Implementation Steps
 
-1. **Define Route Types**
+1. **Define Types in types.ts**
 
 ```typescript
 // Request validation
@@ -141,7 +142,7 @@ type EventResponse = APIResponse<Event>;
 type EventsResponse = APIResponse<readonly Event[]>;
 ```
 
-2. **Create Request Handlers**
+2. **Create Handlers in handlers/event.handler.ts**
 
 ```typescript
 const getEventById = (req: Request) =>
@@ -155,7 +156,7 @@ const getEventById = (req: Request) =>
   );
 ```
 
-3. **Configure Routes**
+3. **Configure Routes in routes/event.route.ts**
 
 ```typescript
 const router = Router();
@@ -164,7 +165,7 @@ router.get('/', validateRequest(EventQuerySchema), createHandler(handlers.getAll
 router.get('/current', createHandler(handlers.getCurrentEvent));
 ```
 
-4. **Add Error Handling**
+4. **Add Error Handling in middleware/core.ts**
 
 ```typescript
 router.use(errorHandler);

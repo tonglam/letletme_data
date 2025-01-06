@@ -11,7 +11,7 @@ A domain implementation requires the following files:
 ```plaintext
 src/domain/{domain-name}/
 ├── types.ts       # Domain-specific interfaces and types
-├── operations.ts  # High-level domain operations
+├── operation.ts  # High-level domain operations
 ├── repository.ts  # Data access layer
 └── cache.ts      # Caching layer
 ```
