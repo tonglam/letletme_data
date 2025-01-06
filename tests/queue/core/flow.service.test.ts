@@ -1,50 +1,37 @@
 import { Worker } from 'bullmq';
 import * as E from 'fp-ts/Either';
-import { createFlowService } from '../../src/infrastructure/queue/core/flow.service';
-import { QueueServiceImpl } from '../../src/infrastructure/queue/core/queue.service';
-import { FlowJob, FlowService } from '../../src/infrastructure/queue/types';
-import { BaseJobData, JobName } from '../../src/types/job.type';
-
-// Define test job data type
-interface TestJobData extends BaseJobData {
-  readonly type: 'META';
-  readonly name: JobName;
-  readonly data: { value: string };
-}
+import { createFlowService } from '../../../src/infrastructure/queue/core/flow.service';
+import { QueueServiceImpl } from '../../../src/infrastructure/queue/core/queue.service';
+import { FlowJob, FlowService } from '../../../src/infrastructure/queue/types';
+import { JobName, MetaJobData } from '../../../src/types/job.type';
+import { createTestMetaJobData, createTestQueueConfig } from '../../utils/queue.test.utils';
 
 describe('Flow Service', () => {
   const queueName = 'test-queue';
-  let queueService: QueueServiceImpl<TestJobData>;
-  let flowService: FlowService<TestJobData>;
-  let worker: Worker<TestJobData>;
+  let queueService: QueueServiceImpl<MetaJobData>;
+  let flowService: FlowService<MetaJobData>;
+  let worker: Worker<MetaJobData>;
 
   beforeAll(async () => {
-    queueService = new QueueServiceImpl<TestJobData>({
-      connection: {
-        host: 'localhost',
-        port: 6379,
-      },
-    });
+    const config = createTestQueueConfig();
+    queueService = new QueueServiceImpl<MetaJobData>(config);
 
     // Create a worker to process jobs
-    worker = new Worker<TestJobData>(
+    worker = new Worker<MetaJobData>(
       queueName,
       async (job) => {
         console.log('Processing job:', job.id, job.data);
         return job.data;
       },
       {
-        connection: {
-          host: 'localhost',
-          port: 6379,
-        },
+        connection: config.connection,
       },
     );
   });
 
   beforeEach(async () => {
     // Create flow service with the same queue name
-    flowService = createFlowService<TestJobData>(queueService.getQueue(), 'flow' as JobName);
+    flowService = createFlowService<MetaJobData>(queueService.getQueue(), 'flow' as JobName);
     // Clear the queue before each test
     await queueService.getQueue().obliterate({ force: true });
   });
@@ -64,26 +51,16 @@ describe('Flow Service', () => {
       // Create parent job with specific jobId
       const parentJobId = 'parent-job-1';
       const childJobId = 'child-job-1';
-      const parentFlow: FlowJob<TestJobData> = {
+      const parentFlow: FlowJob<MetaJobData> = {
         name: 'flow' as JobName,
         queueName,
-        data: {
-          type: 'META',
-          timestamp: new Date(),
-          name: 'flow' as JobName,
-          data: { value: 'parent' },
-        },
+        data: createTestMetaJobData({ name: 'flow' as JobName }),
         opts: { jobId: parentJobId },
         children: [
           {
             name: 'flow' as JobName,
             queueName,
-            data: {
-              type: 'META',
-              timestamp: new Date(),
-              name: 'flow' as JobName,
-              data: { value: 'child' },
-            },
+            data: createTestMetaJobData({ name: 'flow' as JobName }),
             opts: { jobId: childJobId },
           },
         ],
@@ -118,7 +95,10 @@ describe('Flow Service', () => {
                 type: 'META',
                 timestamp: expect.any(Date),
                 name: 'flow',
-                data: { value: 'parent' },
+                data: {
+                  operation: 'SYNC',
+                  metaType: 'EVENTS',
+                },
               });
             }
 
@@ -131,7 +111,10 @@ describe('Flow Service', () => {
                 type: 'META',
                 timestamp: expect.any(Date),
                 name: 'flow',
-                data: { value: 'child' },
+                data: {
+                  operation: 'SYNC',
+                  metaType: 'EVENTS',
+                },
               });
               // BullMQ adds 'bull:' prefix to queue names
               expect(childDep.opts.parent?.queue).toBe('test-queue');
@@ -149,7 +132,10 @@ describe('Flow Service', () => {
               type: 'META',
               timestamp: expect.any(Date),
               name: 'flow',
-              data: { value: 'child' },
+              data: {
+                operation: 'SYNC',
+                metaType: 'EVENTS',
+              },
             });
           }
         }

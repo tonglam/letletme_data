@@ -4,26 +4,16 @@ config();
 import { Job } from 'bullmq';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { QueueConfig } from '../../src/config/queue/queue.config';
-import { createQueueService } from '../../src/infrastructure/queue/core/queue.service';
-import { createWorkerService } from '../../src/infrastructure/queue/core/worker.service';
-import { QueueError } from '../../src/types/errors.type';
-import { JobData, JobName } from '../../src/types/job.type';
+import { createQueueService } from '../../../src/infrastructure/queue/core/queue.service';
+import { createWorkerService } from '../../../src/infrastructure/queue/core/worker.service';
+import { QueueError } from '../../../src/types/errors.type';
+import { JobData, JobName } from '../../../src/types/job.type';
+import { createTestMetaJobData, createTestQueueConfig } from '../../utils/queue.test.utils';
 
 describe('Queue-Worker Integration Tests', () => {
-  const queueName = 'test-integration-queue';
-  const config: QueueConfig = {
-    producerConnection: {
-      host: process.env.REDIS_HOST || '',
-      port: Number(process.env.REDIS_PORT) || 6379,
-      password: process.env.REDIS_PASSWORD || '',
-    },
-    consumerConnection: {
-      host: process.env.REDIS_HOST || '',
-      port: Number(process.env.REDIS_PORT) || 6379,
-      password: process.env.REDIS_PASSWORD || '',
-    },
-  };
+  const queueName = 'test-worker-queue';
+  const defaultJobName = 'meta' as JobName;
+  const config = createTestQueueConfig();
 
   // Validate Redis configuration
   beforeAll(() => {
@@ -32,12 +22,7 @@ describe('Queue-Worker Integration Tests', () => {
     }
   });
 
-  const createTestJob = (value: number): JobData => ({
-    type: 'META',
-    name: 'meta' as JobName,
-    timestamp: new Date(),
-    data: { value },
-  });
+  const createTestJob = (): JobData => createTestMetaJobData({ name: defaultJobName });
 
   // Cleanup before and after each test
   beforeEach(async () => {
@@ -100,7 +85,7 @@ describe('Queue-Worker Integration Tests', () => {
             TE.right(undefined),
             TE.chain(() => {
               console.log('Adding job to queue');
-              return queueService.addJob(createTestJob(1));
+              return queueService.addJob(createTestJob());
             }),
             TE.chain(() => {
               console.log('Job added to queue successfully');
@@ -168,8 +153,8 @@ describe('Queue-Worker Integration Tests', () => {
             TE.chain(() => {
               console.log('Adding jobs to queue');
               return queueService.addBulk(
-                Array.from({ length: 5 }, (_, i) => ({
-                  data: createTestJob(i),
+                Array.from({ length: 5 }, () => ({
+                  data: createTestJob(),
                 })),
               );
             }),
@@ -235,7 +220,7 @@ describe('Queue-Worker Integration Tests', () => {
             TE.right(undefined),
             TE.chain(() => {
               console.log('Adding job to queue');
-              return queueService.addJob(createTestJob(1), {
+              return queueService.addJob(createTestJob(), {
                 jobId: 'retry-test-job',
                 delay: 0,
                 repeat: {
@@ -318,7 +303,7 @@ describe('Queue-Worker Integration Tests', () => {
                 TE.right(undefined),
                 TE.chain(() => {
                   console.log('Adding job to queue');
-                  return queueService.addJob(createTestJob(1), {
+                  return queueService.addJob(createTestJob(), {
                     jobId: 'recovery-test-job',
                   });
                 }),
@@ -342,5 +327,32 @@ describe('Queue-Worker Integration Tests', () => {
       expect(result._tag).toBe('Right');
       expect(processedJobs.length).toBe(1);
     }, 30000);
+
+    test('should process jobs with worker', async () => {
+      const jobData = createTestMetaJobData({ name: defaultJobName });
+
+      const result = await pipe(
+        TE.Do,
+        TE.bind('queueService', () => createQueueService<JobData>(queueName, config)),
+        TE.bind('workerService', () =>
+          createWorkerService<JobData>(
+            queueName,
+            config,
+            async (job: Job<JobData>) => {
+              expect(job.data).toEqual(jobData);
+            },
+            { autorun: true },
+          ),
+        ),
+        TE.chain(({ queueService, workerService }) =>
+          pipe(
+            queueService.addJob(jobData),
+            TE.chain(() => workerService.close()),
+          ),
+        ),
+      )();
+
+      expect(result._tag).toBe('Right');
+    });
   });
 });

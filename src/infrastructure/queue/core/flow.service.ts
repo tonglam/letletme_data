@@ -2,10 +2,10 @@ import { FlowJob as BullMQFlowJob, FlowProducer, Queue, QueueEvents } from 'bull
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
 import { createQueueError, QueueError, QueueErrorCode } from '../../../types/errors.type';
-import { BaseJobData, isJobName, JobName } from '../../../types/job.type';
+import { isJobName, JobName, MetaJobData } from '../../../types/job.type';
 import { FlowJob, FlowJobWithParent, FlowOpts, FlowService, hasJobId } from '../types';
 
-export const createFlowService = <T extends BaseJobData>(
+export const createFlowService = <T extends MetaJobData>(
   queue: Queue<T>,
   defaultName: JobName,
 ): FlowService<T> => {

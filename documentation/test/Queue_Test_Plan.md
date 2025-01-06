@@ -63,6 +63,27 @@
   - [✅] Test worker memory usage and cleanup
   - [✅] Test worker options and configurations
 
+### 5. Meta Queue Tests
+
+- Core Operations
+  - [⏳] Test meta job data creation (createMetaJobData)
+    - [⏳] Test with different operations and meta types
+    - [⏳] Test timestamp generation
+  - [⏳] Test meta job processor creation (createMetaJobProcessor)
+    - [⏳] Test with valid processor mapping
+    - [⏳] Test with missing processor
+    - [⏳] Test error handling
+  - [⏳] Test meta queue service creation (createMetaQueueService)
+    - [⏳] Test service initialization
+    - [⏳] Test job processing integration
+    - [⏳] Test syncMeta operation
+    - [⏳] Test comprehensive error handling
+  - [⏳] Test Auto Run and Cleanup
+    - [⏳] Test automatic job processing on service creation
+    - [⏳] Test automatic resource cleanup on service closure
+    - [⏳] Test handling of multiple jobs before cleanup
+    - [⏳] Test error handling during cleanup
+
 ## Integration Tests
 
 ### 1. Queue-Worker Integration
@@ -86,6 +107,34 @@
 - [✅] Test repeatable job patterns
 - [✅] Test scheduler-worker coordination
 - [✅] Test scheduled job failure handling
+
+### 4. Meta Queue Integration
+
+- [✅] Test end-to-end event sync workflow
+  - [✅] Test successful sync operation
+  - [✅] Test error handling and recovery
+  - [✅] Test concurrent sync operations
+  - [✅] Test queue state after sync
+- [⏳] Test integration with event service
+  - [⏳] Test data consistency after sync
+  - [⏳] Test cache invalidation
+  - [⏳] Test error propagation
+- [⏳] Test meta queue performance
+  - [⏳] Test under high load
+  - [⏳] Test memory usage
+  - [⏳] Test Redis connection stability
+
+### 5. Event Meta Queue Tests
+
+- Core Operations
+  - [⏳] Test event-specific job processor (processEventSync)
+    - [⏳] Test successful event sync
+    - [⏳] Test error handling during sync
+    - [⏳] Test logging behavior
+  - [⏳] Test event meta queue service creation
+    - [⏳] Test service initialization with config
+    - [⏳] Test processor registration
+    - [⏳] Test integration with base meta queue
 
 ## Performance Tests
 

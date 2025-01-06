@@ -1,22 +1,14 @@
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { QueueConfig } from '../../src/config/queue/queue.config';
-import { createQueueService } from '../../src/infrastructure/queue/core/queue.service';
-import { QueueError, QueueErrorCode } from '../../src/types/errors.type';
-import { JobData, JobName } from '../../src/types/job.type';
+import { createQueueService } from '../../../src/infrastructure/queue/core/queue.service';
+import { QueueError, QueueErrorCode } from '../../../src/types/errors.type';
+import { JobData, JobName } from '../../../src/types/job.type';
+import { createTestMetaJobData, createTestQueueConfig } from '../../utils/queue.test.utils';
 
 describe('Queue Service Tests', () => {
   const queueName = 'test-queue';
-  const config: QueueConfig = {
-    producerConnection: {
-      host: 'localhost',
-      port: 6379,
-    },
-    consumerConnection: {
-      host: 'localhost',
-      port: 6379,
-    },
-  };
+  const defaultJobName = 'meta' as JobName;
+  const config = createTestQueueConfig();
 
   describe('Core Operations', () => {
     test('should create queue with configuration', async () => {
@@ -35,38 +27,16 @@ describe('Queue Service Tests', () => {
     test('should add job successfully', async () => {
       const result = await pipe(
         createQueueService<JobData>(queueName, config),
-        TE.chain((service) =>
-          service.addJob({
-            type: 'META',
-            name: 'meta' as JobName,
-            data: { value: 1 },
-            timestamp: new Date(),
-          }),
-        ),
+        TE.chain((service) => service.addJob(createTestMetaJobData({ name: defaultJobName }))),
       )();
 
       expect(result._tag).toBe('Right');
     });
 
     test('should add bulk jobs successfully', async () => {
-      const jobs = [
-        {
-          data: {
-            type: 'META' as const,
-            name: 'meta' as JobName,
-            data: { value: 1 },
-            timestamp: new Date(),
-          },
-        },
-        {
-          data: {
-            type: 'LIVE' as const,
-            name: 'live' as JobName,
-            data: { value: 2 },
-            timestamp: new Date(),
-          },
-        },
-      ];
+      const jobs = Array.from({ length: 2 }, () => ({
+        data: createTestMetaJobData({ name: defaultJobName }),
+      }));
 
       const result = await pipe(
         createQueueService<JobData>(queueName, config),
@@ -81,12 +51,7 @@ describe('Queue Service Tests', () => {
         createQueueService<JobData>(queueName, config),
         TE.chain((service) =>
           pipe(
-            service.addJob({
-              type: 'META',
-              name: 'meta' as JobName,
-              data: { value: 1 },
-              timestamp: new Date(),
-            }),
+            service.addJob(createTestMetaJobData({ name: defaultJobName })),
             TE.chain(() => service.removeJob('meta-job')),
           ),
         ),
@@ -139,27 +104,27 @@ describe('Queue Service Tests', () => {
 
   describe('Error Handling', () => {
     test('should handle invalid configuration', async () => {
-      const invalidConfig: QueueConfig = {
+      const invalidConfig = {
+        connection: {
+          host: 'invalid-host',
+          port: -1,
+          password: 'test',
+        },
         producerConnection: {
           host: 'invalid-host',
           port: -1,
+          password: 'test',
         },
         consumerConnection: {
           host: 'invalid-host',
           port: -1,
+          password: 'test',
         },
       };
 
       const result = await pipe(
         createQueueService<JobData>(queueName, invalidConfig),
-        TE.chain((service) =>
-          service.addJob({
-            type: 'META',
-            name: 'meta' as JobName,
-            data: { value: 1 },
-            timestamp: new Date(),
-          }),
-        ),
+        TE.chain((service) => service.addJob(createTestMetaJobData({ name: defaultJobName }))),
       )();
 
       expect(result._tag).toBe('Left');
@@ -175,8 +140,11 @@ describe('Queue Service Tests', () => {
         TE.chain((service) =>
           service.addJob({
             type: 'INVALID_TYPE' as JobData['type'],
-            name: 'meta' as JobName,
-            data: { value: 'not a number' },
+            name: defaultJobName,
+            data: {
+              operation: 'SYNC',
+              metaType: 'EVENTS',
+            },
             timestamp: 'not a date' as unknown as Date,
           }),
         ),
@@ -187,6 +155,56 @@ describe('Queue Service Tests', () => {
         const error = result.left as QueueError;
         expect(error.code).toBe(QueueErrorCode.INVALID_JOB_DATA);
       }
+    });
+  });
+
+  describe('Job Operations', () => {
+    test('should add job to queue', async () => {
+      const result = await pipe(
+        createQueueService<JobData>(queueName, config),
+        TE.chain((service) =>
+          pipe(
+            service.addJob(createTestMetaJobData({ name: defaultJobName })),
+            TE.chain(() => service.obliterate()),
+          ),
+        ),
+      )();
+
+      expect(result._tag).toBe('Right');
+    });
+
+    test('should add bulk jobs to queue', async () => {
+      const jobs = Array.from({ length: 3 }, () => ({
+        data: createTestMetaJobData({ name: defaultJobName }),
+      }));
+
+      const result = await pipe(
+        createQueueService<JobData>(queueName, config),
+        TE.chain((service) =>
+          pipe(
+            service.addBulk(jobs),
+            TE.chain(() => service.obliterate()),
+          ),
+        ),
+      )();
+
+      expect(result._tag).toBe('Right');
+    });
+
+    test('should handle invalid job data', async () => {
+      const invalidConfig = createTestQueueConfig();
+
+      const result = await pipe(
+        createQueueService<JobData>(queueName, invalidConfig),
+        TE.chain((service) =>
+          pipe(
+            service.addJob(createTestMetaJobData({ name: defaultJobName })),
+            TE.chain(() => service.obliterate()),
+          ),
+        ),
+      )();
+
+      expect(result._tag).toBe('Right');
     });
   });
 

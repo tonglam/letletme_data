@@ -2,19 +2,20 @@ import IORedis from 'ioredis';
 import { QueueConnection } from '../../types/queue.type';
 
 export interface QueueConfig {
-  readonly producerConnection: QueueConnection;
-  readonly consumerConnection: QueueConnection;
+  readonly connection: QueueConnection;
+  readonly producerConnection?: QueueConnection;
+  readonly consumerConnection?: QueueConnection;
 }
 
 // Create reusable Redis connections
-const createProducerConnection = () =>
+export const createProducerConnection = (): QueueConnection =>
   new IORedis({
     host: process.env.REDIS_HOST || 'localhost',
     port: parseInt(process.env.REDIS_PORT || '6379', 10),
     maxRetriesPerRequest: 1, // Fast failure for producers (e.g., HTTP endpoints)
   });
 
-const createConsumerConnection = () =>
+export const createConsumerConnection = (): QueueConnection =>
   new IORedis({
     host: process.env.REDIS_HOST || 'localhost',
     port: parseInt(process.env.REDIS_PORT || '6379', 10),
@@ -26,9 +27,8 @@ const createConsumerConnection = () =>
 export const sharedConnections = {
   producer: createProducerConnection(),
   consumer: createConsumerConnection(),
-};
+} as const;
 
 export const queueConfig: QueueConfig = {
-  producerConnection: sharedConnections.producer,
-  consumerConnection: sharedConnections.consumer,
+  connection: sharedConnections.producer,
 };

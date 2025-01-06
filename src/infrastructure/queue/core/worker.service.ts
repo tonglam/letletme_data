@@ -1,15 +1,15 @@
 import { Job, Worker } from 'bullmq';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { QueueConfig } from '../../../config/queue/queue.config';
 import { QueueError, QueueErrorCode, createQueueError } from '../../../types/errors.type';
-import { JobData } from '../../../types/job.type';
+import { MetaJobData } from '../../../types/job.type';
+import { QueueConfig } from '../../../types/queue.type';
 import { getQueueLogger } from '../../logger';
 import { WorkerOptions, WorkerService } from '../types';
 
 const logger = getQueueLogger();
 
-export const createWorkerService = <T extends JobData>(
+export const createWorkerService = <T extends MetaJobData>(
   name: string,
   config: QueueConfig,
   processor: (job: Job<T>) => Promise<void>,
@@ -27,24 +27,22 @@ export const createWorkerService = <T extends JobData>(
               await processor(job);
               logger.info({ jobId: job.id, type: job.name }, 'Job completed');
             } catch (error) {
-              const queueError = createQueueError(
-                QueueErrorCode.PROCESSING_ERROR,
-                name,
-                error as Error,
-              );
-              logger.error(
-                { jobId: job.id, type: job.name, error: queueError },
-                'Job processing failed',
-              );
-              throw queueError;
+              logger.error({ jobId: job.id, type: job.name, error }, 'Job processing failed');
+              // Re-throw the original error to allow BullMQ to handle retries
+              throw error;
             }
           },
           {
-            connection: config.consumerConnection,
+            connection: config.connection,
             concurrency: options.concurrency ?? 1,
-            autorun: options.autorun ?? true,
-            maxStalledCount: options.maxStalledCount,
-            stalledInterval: options.stalledInterval,
+            maxStalledCount: options.maxStalledCount ?? 1,
+            stalledInterval: options.stalledInterval ?? 30000,
+            lockDuration: 30000, // 30 seconds
+            settings: {
+              backoffStrategy: (attemptsMade: number) => {
+                return Math.min(1000 * Math.pow(2, attemptsMade), 30000);
+              },
+            },
           },
         );
 
@@ -55,11 +53,24 @@ export const createWorkerService = <T extends JobData>(
           logger.error({ name, error }, 'Worker error occurred');
         });
 
+        worker.on('failed', (job: Job<T> | undefined, error: Error) => {
+          if (job) {
+            logger.error({ jobId: job.id, type: job.name, error }, 'Job failed');
+          } else {
+            logger.error({ name, error }, 'Job failed without job reference');
+          }
+        });
+
+        worker.on('completed', (job: Job<T> | undefined) => {
+          if (job) {
+            logger.info({ jobId: job.id, type: job.name }, 'Job completed');
+          }
+        });
+
         const start = (): TE.TaskEither<QueueError, void> =>
           pipe(
             TE.tryCatch(
               async () => {
-                await worker.run();
                 logger.info({ name }, 'Worker started');
               },
               (error) => createQueueError(QueueErrorCode.START_WORKER, name, error as Error),
@@ -70,8 +81,19 @@ export const createWorkerService = <T extends JobData>(
           pipe(
             TE.tryCatch(
               async () => {
-                await worker.close();
+                await worker.pause(true);
                 logger.info({ name }, 'Worker stopped');
+              },
+              (error) => createQueueError(QueueErrorCode.STOP_WORKER, name, error as Error),
+            ),
+          );
+
+        const close = (): TE.TaskEither<QueueError, void> =>
+          pipe(
+            TE.tryCatch(
+              async () => {
+                await worker.close();
+                logger.info({ name }, 'Worker closed');
               },
               (error) => createQueueError(QueueErrorCode.STOP_WORKER, name, error as Error),
             ),
@@ -81,7 +103,7 @@ export const createWorkerService = <T extends JobData>(
           start,
           stop,
           getWorker: () => worker,
-          close: () => stop(),
+          close,
           pause: (force?: boolean): TE.TaskEither<QueueError, void> =>
             pipe(
               TE.tryCatch(

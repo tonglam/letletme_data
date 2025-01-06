@@ -110,7 +110,6 @@ export interface QueueService<T> {
 // Worker Types
 export interface WorkerOptions {
   concurrency?: number;
-  autorun?: boolean;
   maxStalledCount?: number;
   stalledInterval?: number;
 }
@@ -166,6 +165,11 @@ export interface JobOptions {
     id: string;
     queue: string;
     waitChildrenKey?: string;
+  };
+  attempts?: number;
+  backoff?: {
+    type: 'exponential' | 'fixed';
+    delay: number;
   };
 }
 

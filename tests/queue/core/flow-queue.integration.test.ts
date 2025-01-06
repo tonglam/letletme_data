@@ -4,29 +4,18 @@ config();
 import { Job } from 'bullmq';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { QueueConfig } from '../../src/config/queue/queue.config';
-import { createFlowService } from '../../src/infrastructure/queue/core/flow.service';
-import { createQueueService } from '../../src/infrastructure/queue/core/queue.service';
-import { createWorkerService } from '../../src/infrastructure/queue/core/worker.service';
-import { FlowJob } from '../../src/infrastructure/queue/types';
-import { QueueError } from '../../src/types/errors.type';
-import { JobData, JobName } from '../../src/types/job.type';
+import { createFlowService } from '../../../src/infrastructure/queue/core/flow.service';
+import { createQueueService } from '../../../src/infrastructure/queue/core/queue.service';
+import { createWorkerService } from '../../../src/infrastructure/queue/core/worker.service';
+import { FlowJob } from '../../../src/infrastructure/queue/types';
+import { QueueError } from '../../../src/types/errors.type';
+import { JobData, JobName } from '../../../src/types/job.type';
+import { createTestMetaJobData, createTestQueueConfig } from '../../utils/queue.test.utils';
 
 describe('Flow-Queue Integration Tests', () => {
   const queueName = 'test-flow-queue';
   const defaultJobName = 'meta' as JobName;
-  const config: QueueConfig = {
-    producerConnection: {
-      host: process.env.REDIS_HOST || '',
-      port: Number(process.env.REDIS_PORT) || 6379,
-      password: process.env.REDIS_PASSWORD || '',
-    },
-    consumerConnection: {
-      host: process.env.REDIS_HOST || '',
-      port: Number(process.env.REDIS_PORT) || 6379,
-      password: process.env.REDIS_PASSWORD || '',
-    },
-  };
+  const config = createTestQueueConfig();
 
   // Validate Redis configuration
   beforeAll(() => {
@@ -91,39 +80,21 @@ describe('Flow-Queue Integration Tests', () => {
         ),
         TE.chain(({ flowService, workerService }) =>
           pipe(
-            flowService.addJob(
-              {
-                type: 'META',
-                name: 'parent' as JobName,
-                data: { value: 1 },
-                timestamp: new Date(),
-              },
-              {
-                jobId: 'parent-job',
-                children: [
-                  {
-                    name: 'child1',
-                    queueName,
-                    data: {
-                      type: 'META',
-                      name: 'child1' as JobName,
-                      data: { value: 2 },
-                      timestamp: new Date(),
-                    },
-                  },
-                  {
-                    name: 'child2',
-                    queueName,
-                    data: {
-                      type: 'META',
-                      name: 'child2' as JobName,
-                      data: { value: 3 },
-                      timestamp: new Date(),
-                    },
-                  },
-                ],
-              },
-            ),
+            flowService.addJob(createTestMetaJobData({ name: 'parent' as JobName }), {
+              jobId: 'parent-job',
+              children: [
+                {
+                  name: 'child1',
+                  queueName,
+                  data: createTestMetaJobData({ name: 'child1' as JobName }),
+                },
+                {
+                  name: 'child2',
+                  queueName,
+                  data: createTestMetaJobData({ name: 'child2' as JobName }),
+                },
+              ],
+            }),
             TE.chain(() =>
               TE.tryCatch(
                 () => jobsProcessed,
@@ -194,39 +165,21 @@ describe('Flow-Queue Integration Tests', () => {
         ),
         TE.chain(({ flowService, workerService }) =>
           pipe(
-            flowService.addJob(
-              {
-                type: 'META',
-                name: 'parent' as JobName,
-                data: { value: 1 },
-                timestamp: new Date(),
-              },
-              {
-                jobId: 'parent-job',
-                children: [
-                  {
-                    name: 'child1',
-                    queueName,
-                    data: {
-                      type: 'META',
-                      name: 'child1' as JobName,
-                      data: { value: 2 },
-                      timestamp: new Date(),
-                    },
-                  },
-                  {
-                    name: 'child2',
-                    queueName,
-                    data: {
-                      type: 'META',
-                      name: 'child2' as JobName,
-                      data: { value: 3 },
-                      timestamp: new Date(),
-                    },
-                  },
-                ],
-              },
-            ),
+            flowService.addJob(createTestMetaJobData({ name: 'parent' as JobName }), {
+              jobId: 'parent-job',
+              children: [
+                {
+                  name: 'child1',
+                  queueName,
+                  data: createTestMetaJobData({ name: 'child1' as JobName }),
+                },
+                {
+                  name: 'child2',
+                  queueName,
+                  data: createTestMetaJobData({ name: 'child2' as JobName }),
+                },
+              ],
+            }),
             TE.chain(() =>
               TE.tryCatch(
                 () => jobsProcessed,
@@ -258,29 +211,16 @@ describe('Flow-Queue Integration Tests', () => {
         ),
         TE.chain(({ flowService }) =>
           pipe(
-            flowService.addJob(
-              {
-                type: 'META',
-                name: defaultJobName,
-                data: { value: 1 },
-                timestamp: new Date(),
-              },
-              {
-                jobId: 'parent-job',
-                children: [
-                  {
-                    name: 'child1',
-                    queueName,
-                    data: {
-                      type: 'META',
-                      name: 'child1' as JobName,
-                      data: { value: 2 },
-                      timestamp: new Date(),
-                    },
-                  },
-                ],
-              },
-            ),
+            flowService.addJob(createTestMetaJobData({ name: defaultJobName }), {
+              jobId: 'parent-job',
+              children: [
+                {
+                  name: 'child1',
+                  queueName,
+                  data: createTestMetaJobData({ name: 'child1' as JobName }),
+                },
+              ],
+            }),
             TE.chain(() => flowService.getFlowDependencies('parent-job')),
           ),
         ),

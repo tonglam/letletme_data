@@ -13,9 +13,7 @@ export const createStandardQueueError = (params: {
   job?: Job<BaseJobData>;
   cause?: Error;
 }): QueueError => ({
-  type: 'QUEUE_ERROR',
   code: params.code,
-  message: params.message,
-  queueName: params.queueName,
-  cause: params.cause,
+  context: `${params.queueName}:${params.operation}`,
+  error: new Error(params.message, { cause: params.cause }),
 });

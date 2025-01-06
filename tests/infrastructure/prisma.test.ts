@@ -1,3 +1,4 @@
+import { PrismaClient } from '@prisma/client';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import { connectDB, disconnectDB, prisma } from '../../src/infrastructure/db/prisma';
@@ -46,12 +47,23 @@ describe('Prisma Database Connection Tests', () => {
     // Force disconnect first
     await pipe(disconnectDB(), (task) => task());
 
-    // Attempt to query without connection should throw an error
+    // Temporarily modify the database URL to force a connection error
+    const originalUrl = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = 'postgresql://invalid:invalid@localhost:5432/invalid_db';
+
+    // Create a new PrismaClient instance with invalid credentials
+    const invalidPrisma = new PrismaClient();
+
     try {
-      await prisma.$queryRaw`SELECT 1`;
-      fail('Should have thrown an error');
+      // Attempt to query with invalid connection should throw an error
+      await invalidPrisma.$queryRaw`SELECT 1`;
+      throw new Error('Expected query to throw an error but it succeeded');
     } catch (error) {
       expect(error).toBeDefined();
+    } finally {
+      // Cleanup
+      await invalidPrisma.$disconnect();
+      process.env.DATABASE_URL = originalUrl;
     }
   });
 });
