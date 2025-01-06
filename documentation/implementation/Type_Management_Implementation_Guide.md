@@ -1,74 +1,91 @@
-# Type Management Guide
-
-## Table of Contents
-
-- [Type Management Guide](#type-management-guide)
-  - [Table of Contents](#table-of-contents)
-  - [Overview](#overview)
-  - [File Structure](#file-structure)
-  - [Type Categories](#type-categories)
-  - [Branded Types](#branded-types)
-  - [Domain Models](#domain-models)
-  - [API Types](#api-types)
-  - [Repository Types](#repository-types)
-  - [Type Converters](#type-converters)
-  - [Service Types](#service-types)
+# Type Management Implementation Guide
 
 ## Overview
 
-This guide demonstrates how to manage types in the project following functional programming principles. The Events type system serves as our reference implementation.
+This guide demonstrates how to implement a type system following functional programming principles using fp-ts and zod. The guide uses the Events type system as a reference implementation.
 
 ## File Structure
 
-```
+```plaintext
 src/types/
-├── base.type.ts         # Base types and utilities
-├── {domain-name}.type.ts # Domain-specific types
-└── bootstrap.type.ts    # External API types
+├── base.type.ts         # Core type system and utilities
+├── errors.type.ts       # Error type hierarchy
+├── {domain}.type.ts     # Domain-specific types
+└── validation.type.ts   # Validation utilities
 ```
 
-## Type Categories
+## Core Type System
 
-Types should be organized into clear categories:
+### 1. Branded Types (`base.type.ts`)
 
 ```typescript
-// Branded types for type safety
-export type EventId = Branded<number, 'EventId'>;
+// Brand interface for type branding
+export interface Brand<K extends string> {
+  readonly __brand: K;
+}
 
-// Domain models
-export interface Event { ... }
+// Branded type combining a base type with a brand
+export type Branded<T, K extends string> = T & Brand<K>;
 
-// API response types
-export interface EventResponse { ... }
-
-// Repository types
-export interface EventRepository { ... }
-
-// Service interfaces
-export interface EventService { ... }
-
-// Cache interfaces
-export interface EventCache { ... }
+// Creates a branded type with validation
+export const createBrandedType = <T, K extends string>(
+  brand: K,
+  validator: (value: unknown) => value is T,
+) => ({
+  validate: (value: unknown): E.Either<string, Branded<T, K>> =>
+    validator(value) ? E.right(value as Branded<T, K>) : E.left(`Invalid ${brand}: ${value}`),
+  is: (value: unknown): value is Branded<T, K> => validator(value),
+});
 ```
 
-## Branded Types
-
-Use branded types for type-safe identifiers:
+### 2. Base Repository Interface
 
 ```typescript
-import { Branded } from './base.type';
+export interface BaseRepository<T, CreateT, IdT> {
+  readonly findAll: () => TE.TaskEither<DBError, T[]>;
+  readonly findById: (id: IdT) => TE.TaskEither<DBError, T | null>;
+  readonly save: (data: CreateT) => TE.TaskEither<DBError, T>;
+  readonly saveBatch: (data: CreateT[]) => TE.TaskEither<DBError, T[]>;
+  readonly deleteAll: () => TE.TaskEither<DBError, void>;
+  readonly deleteByIds: (ids: IdT[]) => TE.TaskEither<DBError, void>;
+}
+```
 
-// Type definition
+### 3. Schema Validation
+
+```typescript
+export const validateSchema =
+  <T>(schema: z.Schema<T>, entityName: string) =>
+  (data: unknown): E.Either<string, T> => {
+    const result = schema.safeParse(data);
+    if (result.success) {
+      return E.right(result.data);
+    }
+    const error = result as z.SafeParseError<T>;
+    return E.left(
+      `Invalid ${entityName} domain model: ${error.error.errors[0]?.message || 'Unknown error'}`,
+    );
+  };
+```
+
+## Domain Types Implementation
+
+Using Events as an example (`events.type.ts`):
+
+### 1. Domain ID Type
+
+```typescript
+// Branded type for Event ID
 export type EventId = Branded<number, 'EventId'>;
 
-// Type creator with validation
+// Creates a branded EventId with validation
 export const createEventId = createBrandedType<number, 'EventId'>(
   'EventId',
   (value: unknown): value is number =>
     typeof value === 'number' && value > 0 && Number.isInteger(value),
 );
 
-// Validator function
+// Validates and converts a value to EventId
 export const validateEventId = (value: unknown): E.Either<string, EventId> =>
   pipe(
     value,
@@ -80,95 +97,86 @@ export const validateEventId = (value: unknown): E.Either<string, EventId> =>
   );
 ```
 
-## Domain Models
+### 2. API Response Types
 
-Define domain models with immutable properties and proper types:
+```typescript
+// Zod schemas for nested types
+export const TopElementInfoSchema = z.object({
+  id: z.number(),
+  points: z.number(),
+});
+
+export const ChipPlaySchema = z.object({
+  chip_name: z.string(),
+  num_played: z.number(),
+});
+
+// Schema for validating event response data
+export const EventResponseSchema = z
+  .object({
+    // Required fields
+    id: z.number(),
+    name: z.string(),
+    deadline_time: z.string(),
+    deadline_time_epoch: z.number(),
+    finished: z.boolean(),
+    is_previous: z.boolean(),
+    is_current: z.boolean(),
+    is_next: z.boolean(),
+
+    // Fields with defaults
+    deadline_time_game_offset: z.number().default(0),
+    average_entry_score: z.number().default(0),
+    data_checked: z.boolean().default(false),
+
+    // Optional fields
+    release_time: z.string().nullable().optional(),
+    chip_plays: z.array(ChipPlaySchema).default([]),
+    top_element_info: TopElementInfoSchema.nullable().optional(),
+  })
+  .passthrough();
+
+export type EventResponse = z.infer<typeof EventResponseSchema>;
+```
+
+### 3. Domain Model
 
 ```typescript
 export interface Event {
   readonly id: EventId;
   readonly name: string;
-  readonly deadlineTime: Date;
+  readonly deadlineTime: string;
   readonly deadlineTimeEpoch: number;
   readonly deadlineTimeGameOffset: number;
-  readonly releaseTime: Date | null;
+  readonly releaseTime: string | null;
   readonly averageEntryScore: number;
   readonly finished: boolean;
   readonly dataChecked: boolean;
-  readonly highestScore: number;
-  readonly highestScoringEntry: number;
   readonly isPrevious: boolean;
   readonly isCurrent: boolean;
   readonly isNext: boolean;
   readonly chipPlays: readonly ChipPlay[];
   readonly topElementInfo: TopElementInfo | null;
 }
-
-// Nested types should also be immutable
-export interface ChipPlay {
-  readonly chip_name: string;
-  readonly num_played: number;
-}
-
-export interface TopElementInfo {
-  readonly id: number;
-  readonly points: number;
-}
 ```
 
-## API Types
-
-Define types that match external API responses:
+### 4. Database Model
 
 ```typescript
-export interface EventResponse {
-  readonly id: number;
-  readonly name: string;
-  readonly deadline_time: string;
-  readonly deadline_time_epoch: number;
-  readonly deadline_time_game_offset: number;
-  readonly release_time: string | null;
-  readonly average_entry_score: number;
-  readonly finished: boolean;
-  readonly data_checked: boolean;
-  readonly highest_score: number;
-  readonly highest_scoring_entry: number;
-  readonly is_previous: boolean;
-  readonly is_current: boolean;
-  readonly is_next: boolean;
-  readonly chip_plays: readonly ChipPlay[];
-  readonly top_element_info: TopElementInfo | null;
-}
-
-export type EventsResponse = readonly EventResponse[];
-```
-
-## Repository Types
-
-Define repository types with Prisma integration:
-
-```typescript
-// Base repository interface
-export interface BaseRepository<T, CreateT, IdT> {
-  readonly findAll: () => Promise<T[]>;
-  readonly findById: (id: IdT) => Promise<T | null>;
-  readonly save: (data: CreateT) => Promise<T>;
-  readonly saveBatch: (data: CreateT[]) => Promise<T[]>;
-  readonly deleteAll: () => Promise<void>;
-}
-
-// Domain-specific repository interface
-export interface EventRepository extends BaseRepository<PrismaEvent, PrismaEventCreate, EventId> {
-  readonly findCurrent: () => Promise<PrismaEvent | null>;
-  readonly findNext: () => Promise<PrismaEvent | null>;
-}
-
-// Prisma model types
 export interface PrismaEvent {
   readonly id: number;
   readonly name: string;
-  readonly deadlineTime: Date;
-  readonly chipPlays: Prisma.JsonValue;
+  readonly deadlineTime: string;
+  readonly deadlineTimeEpoch: number;
+  readonly deadlineTimeGameOffset: number;
+  readonly releaseTime: string | null;
+  readonly averageEntryScore: number;
+  readonly finished: boolean;
+  readonly dataChecked: boolean;
+  readonly isPrevious: boolean;
+  readonly isCurrent: boolean;
+  readonly isNext: boolean;
+  readonly chipPlays: Prisma.JsonValue | null;
   readonly topElementInfo: Prisma.JsonValue | null;
   readonly createdAt: Date;
 }
@@ -176,9 +184,7 @@ export interface PrismaEvent {
 export type PrismaEventCreate = Omit<PrismaEvent, 'createdAt'>;
 ```
 
-## Type Converters
-
-Implement type converters for transforming between different type representations:
+### 5. Type Converters
 
 ```typescript
 export const toDomainEvent = (data: EventResponse | PrismaEvent): Event => {
@@ -193,49 +199,109 @@ export const toDomainEvent = (data: EventResponse | PrismaEvent): Event => {
   return {
     id: data.id as EventId,
     name: data.name,
-    deadlineTime: isEventApiResponse(data) ? new Date(data.deadline_time) : data.deadlineTime,
-    chipPlays: isEventApiResponse(data)
-      ? data.chip_plays
-      : parseJsonArray(data.chipPlays, parseChipPlay),
-    // ... other conversions
+    deadlineTime: isEventApiResponse(data) ? data.deadline_time : data.deadlineTime,
+    // ... other field conversions
   };
 };
-
-export const toPrismaEvent = (event: Event): PrismaEventCreate => ({
-  id: Number(event.id),
-  name: event.name,
-  deadlineTime: event.deadlineTime,
-  chipPlays: event.chipPlays as unknown as Prisma.JsonValue,
-  // ... other conversions
-});
 ```
 
-## Service Types
+## Best Practices
 
-Define service interfaces with TaskEither for error handling:
+### 1. Type Safety
 
 ```typescript
-export interface EventService {
-  readonly warmUp: () => TE.TaskEither<APIError, void>;
-  readonly getEvents: () => TE.TaskEither<APIError, readonly Event[]>;
-  readonly getEvent: (id: EventId) => TE.TaskEither<APIError, Event | null>;
-  readonly getCurrentEvent: () => TE.TaskEither<APIError, Event | null>;
-}
+// Use branded types for IDs
+type UserId = Branded<number, 'UserId'>;
 
-export interface EventServiceDependencies {
-  readonly bootstrapApi: BootstrapApi;
-  readonly eventCache: EventCache;
-  readonly eventRepository: EventRepository;
-}
+// Validate at runtime
+const validateUser = (data: unknown): E.Either<string, User> =>
+  pipe(
+    UserSchema.safeParse(data),
+    E.fromPredicate(
+      (result): result is z.SafeParseSuccess<User> => result.success,
+      (error) => `Invalid user: ${error}`,
+    ),
+    E.map((result) => result.data),
+  );
 ```
 
-Key principles demonstrated in the Events type system:
+### 2. Error Handling
 
-- Branded types for type safety
-- Immutable data structures with readonly properties
-- Clear type hierarchies and organization
-- Proper type conversions between layers
-- Integration with external types (Prisma, API)
-- TaskEither for functional error handling
-- Type predicates for type narrowing
-- JSON parsing with type safety
+```typescript
+// Define specific error types
+interface ValidationError extends Error {
+  readonly code: 'VALIDATION_ERROR';
+  readonly details: z.ZodError;
+}
+
+// Use Either for sync operations
+const validateId = (id: unknown): E.Either<ValidationError, UserId> =>
+  pipe(
+    id,
+    E.fromPredicate(
+      (v): v is number => typeof v === 'number' && v > 0,
+      () => new ValidationError('Invalid ID'),
+    ),
+  );
+```
+
+### 3. Type Guards
+
+```typescript
+// Type guard for API responses
+export const isApiResponse = <T extends object, K extends string>(
+  data: T,
+  snakeCaseKey: K,
+): data is T & Record<K, unknown> => snakeCaseKey in data;
+
+// Type guard for domain models
+const isDomainEvent = (value: unknown): value is Event =>
+  value !== null && typeof value === 'object' && 'id' in value && createEventId.is(value.id);
+```
+
+## Common Patterns
+
+### 1. Validation Pattern
+
+```typescript
+const validateData =
+  <T>(schema: z.Schema<T>) =>
+  (data: unknown): E.Either<string, T> =>
+    pipe(
+      schema.safeParse(data),
+      E.fromPredicate(
+        (result): result is z.SafeParseSuccess<T> => result.success,
+        (error) => `Validation failed: ${error}`,
+      ),
+      E.map((result) => result.data),
+    );
+```
+
+### 2. Type Conversion Pattern
+
+```typescript
+const convertType =
+  <From, To>(converter: (value: From) => To, validator: (value: To) => boolean) =>
+  (value: From): E.Either<string, To> =>
+    pipe(
+      value,
+      converter,
+      E.fromPredicate(validator, () => 'Conversion validation failed'),
+    );
+```
+
+### 3. Repository Pattern
+
+```typescript
+const createRepository = <T, CreateT, IdT>(
+  prisma: PrismaClient,
+  converter: (data: PrismaModel) => T,
+): BaseRepository<T, CreateT, IdT> => ({
+  findAll: () =>
+    pipe(
+      TE.tryCatch(() => prisma.model.findMany(), handlePrismaError),
+      TE.map((items) => items.map(converter)),
+    ),
+  // ... other operations
+});
+```

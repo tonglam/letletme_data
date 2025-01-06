@@ -1,690 +1,310 @@
+# Design Guide
+
 ## Table of Contents
 
 - [Table of Contents](#table-of-contents)
 - [Introduction](#introduction)
 - [Core Design Philosophy](#core-design-philosophy)
-  - [Domain-Driven Design Choice](#domain-driven-design-choice)
-  - [Functional Programming Integration](#functional-programming-integration)
 - [Architecture Overview](#architecture-overview)
-  - [System Architecture](#system-architecture)
-  - [Data Flow Patterns](#data-flow-patterns)
+- [Layer Design](#layer-design)
 - [Domain Implementation](#domain-implementation)
-  - [Domain Structure](#domain-structure)
-- [Data Reliability and Verification](#data-reliability-and-verification)
-  - [Data Accuracy Strategy](#data-accuracy-strategy)
-- [Data Synchronization](#data-synchronization)
-  - [Multi-Database Strategy](#multi-database-strategy)
-- [Job Queue Architecture](#job-queue-architecture)
-  - [BullMQ Integration](#bullmq-integration)
-  - [Job Flow Patterns](#job-flow-patterns)
-- [Scheduled Operations](#scheduled-operations)
-  - [Update Management](#update-management)
-- [API Design](#api-design)
-  - [RESTful Interface](#restful-interface)
-- [Performance Optimization](#performance-optimization)
-  - [Caching Strategy](#caching-strategy)
+- [Infrastructure Design](#infrastructure-design)
+- [Data Management](#data-management)
 - [Error Handling](#error-handling)
-  - [Comprehensive Strategy](#comprehensive-strategy)
-  - [Error Handling Flow](#error-handling-flow)
-- [Monitoring and Observability](#monitoring-and-observability)
-  - [System Health](#system-health)
-- [Future Considerations](#future-considerations)
+- [Testing Strategy](#testing-strategy)
 - [Project Structure](#project-structure)
-  - [Directory Organization](#directory-organization)
-  - [Key Directory Responsibilities](#key-directory-responsibilities)
-  - [Implementation Guidelines](#implementation-guidelines)
 
 ## Introduction
 
-This document outlines the architectural design of Letletme Data Service, built using Domain-Driven Design (DDD) and Functional Programming (FP) principles. The service manages complex data flows from the FPL API, transforms and validates data, and provides reliable data access through multiple interfaces.
+This document outlines the architectural design of the FPL data system, built using Domain-Driven Design (DDD) and Functional Programming (FP) principles with fp-ts. The system manages complex data flows from the FPL API, transforms and validates data, and provides reliable data access through multiple interfaces.
 
 ## Core Design Philosophy
 
-### Domain-Driven Design Choice
+### 1. Domain-Driven Design
 
-The choice of DDD stems from the inherent complexity of FPL data management:
+- **Bounded Contexts**: Clear domain boundaries (events, teams, players)
+- **Ubiquitous Language**: Consistent terminology across codebase
+- **Value Objects**: Immutable domain models
+- **Domain Events**: State changes as events
 
-1. **Complex Domain Logic**
-   The FPL system contains intricate business rules around game weeks, player values, and team management. DDD helps model these complexities explicitly, making the system more maintainable and adaptable to changes in FPL rules.
+### 2. Functional Programming
 
-2. **Natural Domain Boundaries**
-   FPL naturally divides into distinct domains (events, teams, players, entries), each with its own lifecycle and rules. DDD's bounded contexts concept perfectly maps to these natural divisions.
+```typescript
+// Example of functional approach
+const processEvent = (event: Event): TaskEither<DomainError, ProcessedEvent> =>
+  pipe(
+    validateEvent(event),
+    TE.chain(transformEvent),
+    TE.chain(saveEvent),
+    TE.chain(notifySubscribers),
+  );
+```
 
-3. **Data Evolution Management**
-   FPL data constantly evolves throughout the season. DDD's focus on domain models helps manage this evolution while maintaining data consistency and historical tracking.
+### 3. Type Safety
 
-### Functional Programming Integration
-
-FP principles complement the DDD approach by providing:
-
-1. **Immutability**
-   All domain models are immutable, preventing unexpected state changes and making the system more predictable.
-
-2. **Pure Functions**
-   Business logic is implemented as pure functions, making it easier to test, reason about, and maintain.
-
-3. **Type Safety**
-   Strong typing combined with FP concepts like Option and Either provides compile-time safety and explicit error handling.
+- Branded types for domain identifiers
+- Runtime validation with zod
+- Comprehensive error types
+- Generic type constraints
 
 ## Architecture Overview
 
-### System Architecture
+### System Layers
 
 ```mermaid
-graph TB
-    Client[Client Applications]
-    API[API Layer]
-    Service[Service Layer]
-    Domain[Domain Layer]
-    Infra[Infrastructure Layer]
-    DB[(PostgreSQL)]
-    Cache[(Redis)]
-    FPL[FPL API]
+graph TD
+    A[API Layer] --> B[Service Layer]
+    B --> C[Domain Layer]
+    C --> D[Infrastructure Layer]
+    D --> E[(External Systems)]
 
-    Client --> API
-    API --> Service
-    Service --> Domain
-    Domain --> Infra
-    Infra --> DB
-    Infra --> Cache
-    Infra --> FPL
+    subgraph External Systems
+        F[PostgreSQL]
+        G[Redis]
+        H[FPL API]
+    end
 
-    style Domain fill:#f9f,stroke:#333
-    style Infra fill:#bbf,stroke:#333
+    E --> F
+    E --> G
+    E --> H
 ```
 
-The system follows a layered architecture with clear responsibilities:
+### Layer Responsibilities
 
 1. **API Layer**
 
-   - RESTful endpoints organized by domain
-   - Consistent response formatting using fp-ts
-   - Request validation and error handling
-   - Rate limiting and authentication
-   - Clear separation from domain logic
-   - Dependency injection for services and clients
-
-   ```typescript
-   // Example API Layer Structure
-   src/api/
-   ├── routes/           # Route handlers by domain
-   ├── responses/        # Response formatting
-   └── middleware/       # Express middleware
-   ```
-
-   The API layer follows these principles:
-
-   - Routes are organized by domain (events, phases, etc.)
-   - Response formatting is consistent across all endpoints
-   - Error handling uses functional programming patterns
-   - Dependencies are injected rather than created
-   - HTTP concerns are isolated from business logic
+   - Request handling
+   - Response formatting
+   - Input validation
+   - Rate limiting
 
 2. **Service Layer**
 
    - Use case orchestration
-   - Cross-domain coordination
    - Transaction management
-   - Error handling and recovery
+   - Cross-domain coordination
+   - Error handling
 
 3. **Domain Layer**
 
-   - Pure business logic
-   - Domain models and types
+   - Business logic
+   - Domain models
    - Validation rules
-   - Domain-specific operations
+   - State management
 
 4. **Infrastructure Layer**
-   - Database operations (PostgreSQL)
-   - Cache management (Redis)
-   - External API integration (FPL)
+   - Data persistence
+   - Caching
+   - External communication
    - Cross-cutting concerns
 
-This architecture ensures:
+## Layer Design
 
-- Clear separation of concerns
-- Domain isolation
-- Testable components
-- Scalable structure
+### 1. API Layer Design
 
-### Data Flow Patterns
-
-```mermaid
-sequenceDiagram
-    participant FPL as FPL API
-    participant Boot as Bootstrap
-    participant Domain as Domain Layer
-    participant DB as Database
-    participant Cache as Redis
-
-    FPL->>Boot: Fetch Data
-    Boot->>Boot: Validate & Transform
-    Boot->>Domain: Process Domain Data
-    Domain->>DB: Persist Data
-    Domain->>Cache: Update Cache
-    Note over Domain,Cache: Write-through caching pattern
-
-    alt Data Validation Failed
-        Boot-->>FPL: Request Retry
-    end
-
-    alt Cache Update Failed
-        Domain-->>Cache: Retry Cache Update
-        Note over Domain,Cache: Retry with exponential backoff
-    end
-
-    loop Every Game Week
-        FPL->>Boot: Fetch Updates
-        Boot->>Domain: Process Updates
-        Domain->>DB: Update Data
-        Domain->>Cache: Invalidate Cache
-    end
+```typescript
+// Route handler example
+const getEvent =
+  (eventService: EventService) =>
+  (req: Request): TaskEither<APIError, APIResponse<Event>> =>
+    pipe(
+      validateEventId(req.params.id),
+      TE.chain(eventService.getEvent),
+      TE.map(formatResponse),
+      TE.mapLeft(handleAPIError),
+    );
 ```
 
-The system implements several key data flow patterns:
+### 2. Service Layer Design
 
-1. **Bootstrap Pattern**
+```typescript
+// Service implementation example
+interface EventService {
+  getEvent: (id: EventId) => TaskEither<ServiceError, Event>;
+  updateEvent: (event: Event) => TaskEither<ServiceError, Event>;
+  syncEvents: () => TaskEither<ServiceError, readonly Event[]>;
+}
+```
 
-   - Centralizes data fetching from FPL API
-   - Validates incoming data
-   - Distributes data to appropriate domains
-   - Manages data synchronization
+### 3. Domain Layer Design
 
-2. **Repository Pattern**
+```typescript
+// Domain model example
+interface Event {
+  readonly id: EventId;
+  readonly name: string;
+  readonly deadlineTime: string;
+  readonly finished: boolean;
+  readonly data: EventData;
+}
 
-   - Abstracts data persistence
-   - Provides domain-specific data access
-   - Handles data mapping
-   - Manages transactions
+// Domain operation example
+const validateEvent = (event: Event): Either<ValidationError, Event> =>
+  pipe(event, validateEventId, E.chain(validateDeadlineTime), E.chain(validateEventData));
+```
 
-3. **Verification Pattern**
-   - Ensures data accuracy
-   - Implements cross-validation
-   - Manages discrepancy resolution
-   - Provides audit trails
+### 4. Infrastructure Layer Design
+
+```typescript
+// Infrastructure service example
+interface CacheService<T> {
+  get: (key: string) => TaskEither<CacheError, T | null>;
+  set: (key: string, value: T) => TaskEither<CacheError, void>;
+  del: (key: string) => TaskEither<CacheError, void>;
+}
+```
 
 ## Domain Implementation
 
-### Domain Structure
+### 1. Domain Structure
 
-```mermaid
-graph LR
-    subgraph Domain[Domain Package]
-        Types[Domain Types]
-        Ops[Pure Operations]
-        Queries[Read Queries]
-        Repo[Repository]
-    end
-
-    Types --> Ops
-    Types --> Queries
-    Types --> Repo
-    Ops --> Repo
-    Queries --> Repo
-
-    style Domain fill:#f9f,stroke:#333
-    style Types fill:#fff,stroke:#333
-    style Ops fill:#fff,stroke:#333
-    style Queries fill:#fff,stroke:#333
-    style Repo fill:#fff,stroke:#333
+```plaintext
+src/domain/{domain-name}/
+├── types.ts       # Domain types and interfaces
+├── operations.ts  # Pure domain operations
+├── repository.ts  # Data access layer
+└── cache.ts      # Caching layer
 ```
 
-Each domain follows a consistent structure:
+### 2. Domain Operations
 
-1. **Types**
-
-   - Domain models
-   - Value objects
-   - Operation types
-   - Result types
-
-2. **Operations**
-
-   - Pure business logic
-   - Validation rules
-   - Transformation functions
-   - Domain-specific calculations
-
-3. **Queries**
-
-   - Read operations
-   - Data filtering
-   - Aggregation logic
-   - Search functionality
-
-4. **Repository**
-   - Data access patterns
-   - Persistence logic
-   - Data mapping
-   - Transaction management
-
-## Data Reliability and Verification
-
-### Data Accuracy Strategy
-
-The system implements a multi-layered approach to ensure data reliability:
-
-1. **Source Data Verification**
-   Data from the FPL API undergoes strict validation before entering our system. This includes type checking, range validation, and business rule verification. Each domain implements specific validation rules relevant to its context.
-
-2. **Calculation Verification**
-   All calculated values (e.g., player statistics, team performance metrics) are cross-validated against the source data. The system maintains audit trails of calculations and flags discrepancies for review.
-
-3. **Historical Consistency**
-   The system tracks data evolution over time, enabling historical consistency checks and anomaly detection. This is particularly important for player values and performance metrics.
-
-## Data Synchronization
-
-### Multi-Database Strategy
-
-```mermaid
-flowchart TD
-    subgraph Write[Write Flow]
-        W_Service[Service Layer]
-        W_Domain[Domain Layer]
-        W_DB[(PostgreSQL)]
-        W_Cache[(Redis)]
-    end
-
-    subgraph Read[Read Flow]
-        R_Service[Service Layer]
-        R_Domain[Domain Layer]
-        R_DB[(PostgreSQL)]
-        R_Cache[(Redis)]
-    end
-
-    W_Service --> W_Domain
-    W_Domain --> W_DB
-    W_Domain --> W_Cache
-    R_Service --> R_Domain
-    R_Domain --> R_Cache
-    R_Cache -- Cache Miss --> R_DB
-
-    style Write fill:#f5f5f5,stroke:#333
-    style Read fill:#f5f5f5,stroke:#333
-    style W_Domain fill:#f9f,stroke:#333
-    style R_Domain fill:#f9f,stroke:#333
-    style W_DB fill:#ddf,stroke:#333
-    style R_DB fill:#ddf,stroke:#333
-    style W_Cache fill:#fdd,stroke:#333
-    style R_Cache fill:#fdd,stroke:#333
+```typescript
+// Pure domain operation example
+const calculatePoints = (event: Event, picks: PlayerPicks): Either<CalculationError, Points> =>
+  pipe(
+    validateInputs(event, picks),
+    E.chain(calculateBasePoints),
+    E.chain(applyBonuses),
+    E.chain(applyPenalties),
+  );
 ```
 
-The system employs a sophisticated approach to managing data across PostgreSQL and Redis:
+## Infrastructure Design
 
-1. **PostgreSQL as Source of Truth**
+### 1. HTTP Client
 
-   - Stores all permanent data
-   - Maintains historical records
-   - Handles complex relationships
-   - Ensures ACID compliance
-
-2. **Redis as Performance Layer**
-
-   - Caches frequently accessed data
-   - Stores temporary calculations
-   - Manages session data
-   - Improves response times
-
-3. **Synchronization Patterns**
-   - Write-through caching
-   - Invalidation based on domain events
-   - Atomic updates across stores
-   - Consistency verification
-
-## Job Queue Architecture
-
-### BullMQ Integration
-
-```mermaid
-graph TB
-    subgraph Producer[Job Producers]
-        API[API Layer]
-        Scheduler[Scheduler]
-        Events[Domain Events]
-    end
-
-    subgraph Queue[BullMQ]
-        EventQueue[Event Queue]
-        DataQueue[Data Queue]
-        NotificationQueue[Notification Queue]
-    end
-
-    subgraph Workers[Job Workers]
-        EventWorker[Event Worker]
-        DataWorker[Data Worker]
-        NotificationWorker[Notification Worker]
-    end
-
-    API --> EventQueue
-    API --> DataQueue
-    Scheduler --> EventQueue
-    Events --> NotificationQueue
-
-    EventQueue --> EventWorker
-    DataQueue --> DataWorker
-    NotificationQueue --> NotificationWorker
-
-    Redis[(Redis)]
-    EventQueue -.-> Redis
-    DataQueue -.-> Redis
-    NotificationQueue -.-> Redis
-
-    style Queue fill:#f9f,stroke:#333
-    style Workers fill:#bbf,stroke:#333
-    style Redis fill:#fdd,stroke:#333
+```typescript
+interface HTTPClient {
+  get: <T>(url: string) => TaskEither<HTTPError, T>;
+  post: <T>(url: string, data: unknown) => TaskEither<HTTPError, T>;
+  put: <T>(url: string, data: unknown) => TaskEither<HTTPError, T>;
+}
 ```
 
-### Integration Architecture
+### 2. Queue System
 
-The job queue system is integrated into the application's layered architecture following DDD principles:
-
-```mermaid
-graph TB
-    API[API Layer]
-    SS[Scheduler Service]
-    SL[Service Layer]
-    JQ[Job Queue - BullMQ]
-    DL[Domain Layer]
-    IL[Infrastructure Layer]
-
-    API --> SL
-    SS --> SL
-    SL --> JQ
-    JQ --> SL
-    SL --> DL
-    DL --> IL
-
-    style SL fill:#f9f,stroke:#333
-    style DL fill:#bbf,stroke:#333
-    style JQ fill:#fdd,stroke:#333
+```typescript
+interface QueueService<T> {
+  addJob: (data: T) => TaskEither<QueueError, void>;
+  processJob: (handler: JobHandler<T>) => TaskEither<QueueError, void>;
+  removeJob: (jobId: string) => TaskEither<QueueError, void>;
+}
 ```
 
-1. **Service Layer as Orchestrator**
+### 3. Cache System
 
-   - Controls job creation and scheduling
-   - Manages job execution flow
-   - Coordinates between domains
-   - Handles job completion and errors
+```typescript
+interface CacheConfig {
+  prefix: string;
+  ttl: number;
+  connection: RedisConnection;
+}
 
-2. **Job Trigger Points**
+interface CacheOperations<T> {
+  get: (key: string) => TaskEither<CacheError, T | null>;
+  set: (key: string, value: T) => TaskEither<CacheError, void>;
+  del: (key: string) => TaskEither<CacheError, void>;
+}
+```
 
-   ```plaintext
-   API-Triggered:
-   API → Service Layer → Queue → Service Layer → Domain Layer
+## Data Management
 
-   Scheduled:
-   Scheduler Service → Service Layer → Queue → Service Layer → Domain Layer
-
-   Event-Driven:
-   Domain Events → Service Layer → Queue → Service Layer → Domain Layer
-   ```
-
-3. **Scheduler Service Implementation**
-
-   ```typescript
-   class EventSchedulerService {
-       constructor(
-           private readonly eventService: EventService,
-           private readonly jobQueue: EventJobQueue
-       ) {}
-
-       // Initialize scheduled jobs
-       async initializeScheduledJobs(): Promise<void> {
-           await this.scheduleEventUpdates();
-           await this.scheduleLiveScoreProcessing();
-       }
-
-       private async scheduleEventUpdates(): Promise<void> {
-           await this.eventService.scheduleRecurringEventUpdate({
-               cronExpression: '*/5 * * * *', // Every 5 minutes
-               eventConfig: {...}
-           });
-       }
-   }
-   ```
-
-4. **Service Layer Job Handling**
-
-   ```typescript
-   class EventService {
-     constructor(
-       private readonly eventDomain: EventDomain,
-       private readonly jobQueue: EventJobQueue,
-     ) {}
-
-     async scheduleRecurringEventUpdate(config: EventUpdateConfig): Promise<void> {
-       await this.jobQueue.scheduleRecurring({
-         type: 'UPDATE_EVENT',
-         config,
-         handler: async (job) => {
-           await this.handleEventUpdate(job.data);
-         },
-       });
-     }
-
-     private async handleEventUpdate(data: EventUpdateData): Promise<void> {
-       const event = await this.eventDomain.getEvent(data.eventId);
-       await this.eventDomain.updateEvent(event, data);
-     }
-   }
-   ```
-
-### Queue Management
-
-The system implements a robust job queue architecture using BullMQ:
-
-1. **Queue Types**
-
-   - **Event Queue**: Handles game week events, fixture updates, and live score processing
-   - **Data Queue**: Manages data synchronization, updates, and transformations
-   - **Notification Queue**: Processes notifications and alerts
-
-2. **Job Processing Patterns**
-
-   - Concurrent job processing
-   - Priority-based execution
-   - Delayed job scheduling
-   - Job retry mechanisms
-   - Dead letter queues for failed jobs
-
-3. **Worker Implementation**
-
-   - Domain-specific workers
-   - Scalable worker pools
-   - Resource management
-   - Error handling and recovery
-
-4. **Queue Management**
-   - Queue monitoring
-   - Job progress tracking
-   - Performance metrics
-   - Rate limiting
-   - Concurrency control
-
-### Job Flow Patterns
+### 1. Data Flow
 
 ```mermaid
 sequenceDiagram
-    participant P as Producer
-    participant Q as Queue
-    participant W as Worker
-    participant D as Domain
+    participant API as FPL API
+    participant Service as Service Layer
+    participant Domain as Domain Layer
+    participant Cache as Cache Layer
+    participant DB as Database
 
-    P->>Q: Create Job
-    Q->>Q: Validate & Store
-    Q->>W: Process Job
-    W->>D: Execute Domain Logic
-
-    alt Success
-        D-->>W: Operation Complete
-        W-->>Q: Job Complete
-    else Failure
-        D-->>W: Operation Failed
-        W-->>Q: Retry Job
-        Q->>W: Retry Processing
-    end
+    API->>Service: Fetch Data
+    Service->>Domain: Process Data
+    Domain->>Cache: Update Cache
+    Domain->>DB: Persist Data
 ```
 
-The system implements several job processing patterns:
+### 2. Caching Strategy
 
-1. **Job Creation**
-
-   - Typed job payloads
-   - Job validation
-   - Priority assignment
-   - Scheduling options
-
-2. **Processing Strategies**
-
-   - Single-thread processing
-   - Parallel processing
-   - Batch processing
-   - Rate-limited processing
-
-3. **Error Handling**
-
-   - Automatic retries
-   - Exponential backoff
-   - Dead letter queues
-   - Error notifications
-
-4. **Monitoring**
-   - Job progress tracking
-   - Queue metrics
-   - Worker health
-   - Performance analytics
-
-## Scheduled Operations
-
-### Update Management
-
-The system handles periodic data updates through:
-
-1. **Domain-Specific Schedules**
-
-   - Each domain defines its update requirements
-   - Configurable update frequencies
-   - Dependency management between updates
-   - Failure recovery mechanisms
-
-2. **Coordination Strategy**
-   - Transaction coordination across domains
-   - Update order management
-   - Conflict resolution
-   - Rollback procedures
-
-## API Design
-
-### RESTful Interface
-
-The system exposes domain functionality through a well-structured API:
-
-1. **Resource Organization**
-
-   - Domain-aligned endpoints
-   - Clear resource hierarchies
-   - Consistent naming conventions
-   - Versioning strategy
-
-2. **Response Patterns**
-   - Standardized response formats
-   - Error handling conventions
-   - Pagination support
-   - Caching headers
-
-## Performance Optimization
-
-### Caching Strategy
-
-1. **Multi-Level Caching**
-
-   - Application-level caching
-   - Database query caching
-   - HTTP response caching
-   - Cache invalidation patterns
-
-2. **Query Optimization**
-   - Efficient database queries
-   - Materialized views
-   - Index optimization
-   - Query result caching
+```typescript
+// Cache implementation example
+const cacheEvent = (event: Event, cache: CacheService): TaskEither<CacheError, void> =>
+  pipe(
+    validateEvent(event),
+    TE.fromEither,
+    TE.chain((event) => cache.set(`event:${event.id}`, event)),
+  );
+```
 
 ## Error Handling
 
-### Comprehensive Strategy
+### 1. Error Types
 
-1. **Domain-Level Errors**
+```typescript
+type DomainErrorCode = 'VALIDATION_ERROR' | 'PROCESSING_ERROR' | 'NOT_FOUND';
 
-   - Business rule violations
-   - Validation failures
-   - State transition errors
-   - Domain-specific exceptions
-
-2. **Infrastructure Errors**
-
-   - Database connection issues
-   - Cache synchronization failures
-   - API communication errors
-   - Network timeouts
-
-3. **Error Recovery**
-   - Automatic retry mechanisms
-   - Fallback strategies
-   - Circuit breakers
-   - Error logging and monitoring
-
-### Error Handling Flow
-
-```mermaid
-stateDiagram-v2
-    [*] --> ValidateInput
-    ValidateInput --> ProcessDomain
-    ProcessDomain --> UpdateData
-    UpdateData --> [*]
-
-    ValidateInput --> HandleError
-    ProcessDomain --> HandleError
-    UpdateData --> HandleError
-
-    HandleError --> RetryOperation
-    HandleError --> LogError
-    HandleError --> NotifySystem
-
-    RetryOperation --> ProcessDomain
+interface DomainError {
+  code: DomainErrorCode;
+  message: string;
+  details?: unknown;
+}
 ```
 
-## Monitoring and Observability
+### 2. Error Flow
 
-### System Health
+```mermaid
+graph TD
+    A[Operation] --> B{Error Check}
+    B -->|Success| C[Return Result]
+    B -->|Failure| D[Create Error]
+    D --> E[Log Error]
+    E --> F[Return Error]
+```
 
-1. **Metrics Collection**
+## Testing Strategy
 
-   - Performance metrics
-   - Error rates
-   - Data consistency metrics
-   - Cache hit rates
+### 1. Test Types
 
-2. **Alerting System**
-   - Critical error alerts
-   - Performance degradation warnings
-   - Data inconsistency notifications
-   - System health status
+```typescript
+// Unit test example
+describe('Event Domain', () => {
+  describe('validateEvent', () => {
+    it('should validate valid event', () => {
+      const event = mockEvent();
+      const result = validateEvent(event);
+      expect(E.isRight(result)).toBe(true);
+    });
+  });
+});
+```
 
-## Future Considerations
+### 2. Integration Tests
 
-1. **Scalability**
+```typescript
+// Integration test example
+describe('Event Service Integration', () => {
+  beforeEach(async () => {
+    await clearDatabase();
+    await clearCache();
+  });
 
-   - Horizontal scaling strategies
-   - Load balancing approaches
-   - Database partitioning
-   - Cache distribution
-
-2. **Extensibility**
-   - New domain integration
-   - Additional data sources
-   - Feature expansion
-   - API evolution
+  it('should sync events from API', async () => {
+    const result = await eventService.syncEvents()();
+    expect(E.isRight(result)).toBe(true);
+  });
+});
+```
 
 ## Project Structure
 
@@ -692,98 +312,50 @@ stateDiagram-v2
 
 ```plaintext
 src/
-├── domains/ # Core domain logic
-│ ├── events/ # Game weeks & fixtures
-│ │ ├── types.ts # Domain types & interfaces
-│ │ ├── operations.ts # Pure business logic
-│ │ ├── queries.ts # Read operations
-│ │ └── repository.ts # Data access
-│ ├── players/ # Player management
-│ │ ├── types.ts # Player domain types
-│ │ ├── operations.ts # Player operations
-│ │ ├── queries.ts # Player queries
-│ │ └── repository.ts # Player persistence
-│ └── teams/ # Team management
-│ ├── types.ts # Team domain types
-│ ├── operations.ts # Team operations
-│ └── repository.ts # Team persistence
-├── infrastructure/ # Technical concerns
-│ ├── db/ # Database management
-│ │ ├── prisma/ # Prisma configuration
-│ │ └── redis/ # Redis configuration
-│ ├── api/ # External API integration
-│ │ ├── fpl/ # FPL API client
-│ │ └── types/ # API response types
-│ └── validation/ # Data validation
-│ ├── schemas/ # Validation schemas
-│ └── utils/ # Validation utilities
-├── services/ # Application services
-│ ├── bootstrap/ # System initialization
-│ ├── scheduler/ # Update scheduling
-│ └── verification/ # Data verification
-└── shared/ # Shared utilities
-├── fp/ # FP utilities
-│ ├── either.ts # Either monad
-│ └── option.ts # Option monad
-└── utils/ # Common utilities
-├── time.ts # Time operations
-└── logger.ts # Logging utilities
+├── api/                    # API layer
+│   ├── routes/            # Route handlers
+│   ├── middleware/        # Express middleware
+│   └── responses/         # Response formatting
+├── services/              # Service layer
+│   ├── event/            # Event services
+│   ├── team/             # Team services
+│   └── player/           # Player services
+├── domain/               # Domain layer
+│   ├── event/           # Event domain
+│   ├── team/            # Team domain
+│   └── player/          # Player domain
+└── infrastructure/      # Infrastructure layer
+    ├── http/           # HTTP clients
+    ├── queue/          # Queue system
+    ├── cache/          # Cache system
+    └── db/             # Database access
 ```
-
-### Key Directory Responsibilities
-
-1. **Domains Directory**
-
-   - Core business logic
-   - Domain models and types
-   - Pure operations
-   - Repository implementations
-
-2. **Infrastructure Directory**
-
-   - Technical implementations
-   - Database connections
-   - External API clients
-   - Cross-cutting concerns
-
-3. **Services Directory**
-
-   - Use case implementations
-   - Domain orchestration
-   - Process coordination
-   - External integrations
-
-4. **Shared Directory**
-   - Common utilities
-   - FP patterns
-   - Shared types
-   - Helper functions
 
 ### Implementation Guidelines
 
-1. **Domain Organization**
+1. **Type Safety**
 
-   - Each domain is self-contained
-   - Clear separation of concerns
-   - Consistent file naming
-   - Type-first approach
+   - Use branded types for IDs
+   - Implement proper error types
+   - Maintain type safety across boundaries
+   - Use generics for operations
 
-2. **Infrastructure Patterns**
+2. **Error Handling**
 
-   - Clear abstraction layers
-   - Dependency injection
-   - Configuration management
-   - Error handling
+   - Use TaskEither for operations
+   - Implement proper error types
+   - Provide error context
+   - Log errors appropriately
 
-3. **Service Implementation**
+3. **Performance**
 
-   - Use case focused
-   - Domain coordination
-   - Transaction management
-   - Error recovery
+   - Implement connection pooling
+   - Use appropriate caching
+   - Monitor resource usage
+   - Handle timeouts properly
 
-4. **Shared Utilities**
-   - Pure functions
-   - Reusable patterns
-   - Type safety
-   - Documentation
+4. **Testing**
+   - Unit test core functionality
+   - Integration test with dependencies
+   - Test error scenarios
+   - Verify retry behavior

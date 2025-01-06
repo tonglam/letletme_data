@@ -2,13 +2,13 @@
 
 ## Overview
 
-The Queue Layer provides job scheduling and processing capabilities for the FPL data system, leveraging BullMQ's robust features while maintaining type safety and functional programming principles.
+The Queue Layer provides job scheduling and processing capabilities for the FPL data system, leveraging BullMQ's robust features while maintaining type safety and functional programming principles using fp-ts.
 
-## System Integration Overview
+## System Architecture
 
 ```mermaid
-graph TB
-    subgraph Application Layers
+graph TD
+    subgraph Application Layer
         API[API Layer]
         Service[Service Layer]
         Domain[Domain Layer]
@@ -17,99 +17,134 @@ graph TB
     subgraph Queue Layer
         QS[Queue Service]
         WS[Worker Service]
-        subgraph BullMQ Integration
+        FS[Flow Service]
+        SS[Scheduler Service]
+
+        subgraph Core Services
             QA[Queue Adapter]
             WA[Worker Adapter]
-            BQ[BullMQ]
+            FA[Flow Adapter]
+            SA[Scheduler Adapter]
         end
-        subgraph Error Handling
-            EH[Error Handler]
-            EL[Error Logger]
-        end
-    end
 
-    subgraph Storage
-        Redis[(Redis)]
+        subgraph BullMQ Integration
+            BQ[BullMQ]
+            Redis[(Redis)]
+        end
     end
 
     API --> Service
-    Service --> Domain
     Service --> QS
     QS --> QA
     WS --> WA
-    QA & WA --> BQ
+    FS --> FA
+    SS --> SA
+    QA & WA & FA & SA --> BQ
     BQ --> Redis
-    QA & WA --> EH
-    EH --> EL
 ```
 
 ## Core Components
 
-### 1. Queue Layer Components
+### 1. Queue Layer Services
 
-- **Queue Service**: Simplified job management using BullMQ's native features
-- **Worker Service**: Streamlined job processing with built-in error handling
-- **Error Handler**: Essential error management with functional approach
-- **Job Processors**: Type-safe job processing implementations
+- **Queue Service**: Job management and scheduling
+- **Worker Service**: Job processing and concurrency control
+- **Flow Service**: Job flow and dependency management
+- **Scheduler Service**: Recurring job scheduling
 
-### 2. BullMQ Integration
+### 2. Job Types
 
-- Leverages BullMQ's built-in features for:
-  - Queue management
-  - Job scheduling
-  - Worker processing
-  - Error handling and retries
-  - Event management
+```typescript
+type JobType = 'META' | 'LIVE' | 'DAILY';
+type JobOperation = 'SYNC' | 'UPDATE' | 'CLEANUP';
+type MetaJobType = 'EVENTS' | 'PHASES' | 'TEAMS';
+
+interface BaseJobData {
+  readonly type: string;
+  readonly timestamp: Date;
+  readonly data: unknown;
+}
+```
 
 ## Queue Processing Patterns
 
 ### 1. Single Queue-Single Worker (1:1)
 
-- Basic pattern for independent job types
-- Each queue has its dedicated worker
-- Used for simple, isolated job processing
-- Best for jobs that need dedicated resources
+```mermaid
+graph LR
+    Q[Queue] --> W[Worker]
+    W --> P[Processor]
+```
 
 ### 2. Single Queue-Multiple Workers (1:N)
 
-- For I/O intensive operations
-- Multiple workers process jobs from one queue
-- Enables parallel processing and better resource utilization
-- Example use cases:
-  - Heavy data processing
-  - Batch operations
-  - Network-intensive tasks
-  - Large-scale data synchronization
+```mermaid
+graph TD
+    Q[Queue] --> W1[Worker 1]
+    Q --> W2[Worker 2]
+    Q --> W3[Worker 3]
+```
 
-### 3. Multiple Queues-Single Worker (N:1)
-
-- For sequential processing requirements
-- One worker handles multiple queues
-- Ensures ordered processing across related operations
-- Example use cases:
-  - Data validation → transformation → persistence
-  - Sequential workflow steps
-  - Dependencies between jobs
+### 3. Job Flow Pattern
 
 ```mermaid
-graph TB
-    subgraph "Queue Processing Patterns"
-        subgraph "1:1 Pattern"
-            Q1[Queue] --> W1[Worker]
-        end
+graph TD
+    P[Parent Job] --> C1[Child Job 1]
+    P --> C2[Child Job 2]
+    C1 --> GC[Grandchild Job]
+```
 
-        subgraph "1:N Pattern"
-            Q2[Queue] --> W2_1[Worker 1]
-            Q2 --> W2_2[Worker 2]
-            Q2 --> W2_3[Worker 3]
-        end
+## Service Interfaces
 
-        subgraph "N:1 Pattern"
-            Q3_1[Queue 1] --> W3[Worker]
-            Q3_2[Queue 2] --> W3
-            Q3_3[Queue 3] --> W3
-        end
-    end
+### 1. Queue Service
+
+```typescript
+interface QueueService<T> {
+  addJob: (data: T, options?: JobOptions) => TaskEither<QueueError, void>;
+  addBulk: (jobs: Array<{ data: T; options?: JobOptions }>) => TaskEither<QueueError, void>;
+  removeJob: (jobId: string) => TaskEither<QueueError, void>;
+  drain: () => TaskEither<QueueError, void>;
+  pause: () => TaskEither<QueueError, void>;
+  resume: () => TaskEither<QueueError, void>;
+}
+```
+
+### 2. Worker Service
+
+```typescript
+interface WorkerService<T> {
+  start: () => TaskEither<QueueError, void>;
+  stop: () => TaskEither<QueueError, void>;
+  pause: (force?: boolean) => TaskEither<QueueError, void>;
+  resume: () => TaskEither<QueueError, void>;
+  setConcurrency: (concurrency: number) => void;
+}
+```
+
+### 3. Flow Service
+
+```typescript
+interface FlowService<T> {
+  getFlowDependencies: (jobId: string) => TaskEither<QueueError, FlowJob<T>[]>;
+  getChildrenValues: (jobId: string) => TaskEither<QueueError, Record<string, unknown>>;
+  addJob: (data: T, opts?: FlowOpts<T>) => TaskEither<QueueError, FlowJob<T>>;
+}
+```
+
+### 4. Scheduler Service
+
+```typescript
+interface SchedulerService<T> {
+  upsertJobScheduler: (
+    schedulerId: string,
+    scheduleOptions: JobSchedulerOptions,
+    template?: JobTemplate<T>,
+  ) => TaskEither<QueueError, void>;
+  getJobSchedulers: (options?: {
+    page?: number;
+    pageSize?: number;
+  }) => TaskEither<QueueError, JobScheduler[]>;
+}
 ```
 
 ## Job Processing Flow
@@ -119,128 +154,110 @@ sequenceDiagram
     participant S as Service Layer
     participant Q as Queue Service
     participant W as Worker Service
-    participant B as BullMQ
+    participant P as Processor
     participant R as Redis
 
     S->>Q: Add Job
-    Q->>B: Queue Job
-    B->>R: Store Job
-    W->>B: Poll Jobs
-    B->>W: Process Job
+    Q->>R: Store Job
+    W->>R: Poll Jobs
+    W->>P: Process Job
     alt Success
-        W->>B: Complete Job
+        P-->>W: Complete
+        W-->>R: Mark Complete
     else Error
-        W->>B: Handle Retry
-        B->>W: Retry Job
+        P-->>W: Fail
+        W->>R: Schedule Retry
     end
 ```
 
-## Job Categories
+## Error Handling Strategy
+
+### 1. Error Types
+
+```typescript
+type QueueErrorCode =
+  | 'QUEUE_CONNECTION_ERROR'
+  | 'JOB_PROCESSING_ERROR'
+  | 'QUEUE_OPERATION_ERROR'
+  | 'WORKER_ERROR';
+```
+
+### 2. Error Flow
 
 ```mermaid
-graph TB
-    subgraph Job Types
-        M[Meta Jobs<br>Core Data Sync]
-        L[Live Jobs<br>Real-time Updates]
-        PM[Post-Match Jobs<br>Results Processing]
-        PG[Post-Gameweek Jobs<br>Tournament Updates]
-        D[Daily Jobs<br>Regular Updates]
-    end
+graph TD
+    E[Error] --> QE[Queue Error]
+    QE --> PE[Processing Error]
+    QE --> CE[Connection Error]
 
-    subgraph Processing
-        HP[High Priority Queue]
-        MP[Medium Priority Queue]
-        LP[Low Priority Queue]
-    end
+    subgraph Error Handling
+        R[Retry]
+        L[Log]
+        N[Notify]
 
-    M & L --> HP
-    PM & PG --> MP
-    D --> LP
+        PE --> R
+        PE --> L
+        CE --> N
+    end
 ```
 
-## Implementation Considerations
+## Performance Considerations
 
 ### 1. Resource Management
 
-- CPU/Memory allocation per worker
-- I/O capacity planning
-- Redis connection pooling
-- Worker concurrency settings
+- Connection pooling
+- Worker concurrency
+- Memory limits
+- Rate limiting
 
-### 2. Job Priority Management
+### 2. Scaling Strategy
 
-- Queue priority levels
-- Job priority within queues
-- Resource allocation based on priority
-- Handling priority conflicts
+```mermaid
+graph TD
+    L[Load] --> A{Analysis}
+    A -->|High CPU| W[Add Workers]
+    A -->|High Memory| M[Increase Memory]
+    A -->|High Load| Q[Add Queues]
+```
 
-### 3. Scaling Strategies
+## Monitoring and Metrics
 
-- When to use each pattern
-- Monitoring and metrics
-- Dynamic scaling based on load
-- Resource limits and constraints
+### 1. Key Metrics
 
-### 4. Error Handling Strategy
+- Queue length
+- Processing time
+- Error rates
+- Worker status
 
-- Retry mechanisms
-- Error logging and monitoring
-- Circuit breakers
-- Fallback strategies
+### 2. Health Checks
 
-### 5. Performance Optimization
-
-- Queue configuration tuning
-- Worker pool management
-- Job batching strategies
-- Memory management
-
-## Monitoring
-
-### Key Metrics
-
-1. **Queue Metrics**
-
-   - Queue length
-   - Processing time
-   - Success/failure rates
-   - Job distribution
-
-2. **Worker Metrics**
-
-   - Active workers
-   - Job completion rate
-   - Error distribution
-   - Resource utilization
-
-3. **System Health**
-   - Redis connection status
-   - Memory usage
-   - Job backlog
-   - System load
+```mermaid
+graph TD
+    H[Health Check] --> Q[Queue Status]
+    H --> W[Worker Status]
+    H --> R[Redis Status]
+    H --> P[Processing Rate]
+```
 
 ## Implementation Guidelines
 
-### 1. Functional Programming
+### 1. Type Safety
+
+- Use branded types
+- Validate job data
+- Type-safe processors
+- Error type checking
+
+### 2. Functional Programming
 
 - Use TaskEither for operations
-- Maintain immutability
-- Leverage BullMQ's promise-based API with fp-ts
+- Pure job processors
+- Immutable job data
+- Composition with fp-ts
 
-### 2. Type Safety
+### 3. Testing Strategy
 
-- Strong typing for job data
-- Type-safe queue operations
-- Comprehensive error types
-
-### 3. Error Handling
-
-- Utilize BullMQ's built-in retry mechanisms
-- Functional error handling with TaskEither
-- Structured logging
-
-### 4. Performance
-
-- Efficient queue configuration
-- Optimal concurrency settings
-- Resource-aware job processing
+- Unit test processors
+- Integration test flows
+- Mock Redis for tests
+- Test error scenarios

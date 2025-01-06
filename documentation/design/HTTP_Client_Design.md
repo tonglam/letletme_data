@@ -2,7 +2,26 @@
 
 ## Overview
 
-The HTTP client is designed with functional programming principles, providing a type-safe, resilient, and maintainable way to handle HTTP communications. It features retry mechanisms, rate limiting, comprehensive error handling, and performance monitoring.
+The HTTP client is designed with functional programming principles using fp-ts, providing a type-safe, resilient, and maintainable way to handle HTTP communications. It features retry mechanisms, rate limiting, comprehensive error handling, and performance monitoring.
+
+## Directory Structure
+
+```plaintext
+src/infrastructure/http/
+├── client/                  # Core HTTP client implementation
+│   ├── core.ts             # Core HTTP client functionality
+│   ├── types.ts            # Client type definitions
+│   ├── rate-limiter.ts     # Rate limiting implementation
+│   ├── response.ts         # Response handling
+│   ├── request-interceptors.ts # Request interceptors
+│   ├── utils.ts            # Utility functions
+│   └── index.ts            # Public exports
+└── fpl/                    # FPL API client implementation
+    ├── client.ts           # FPL client implementation
+    ├── types.ts            # FPL-specific types
+    ├── factories.ts        # Client factories
+    └── endpoints/          # FPL API endpoints
+```
 
 ## Core Architecture
 
@@ -15,23 +34,37 @@ graph TD
     E --> F[Response Interceptors]
     F --> G[Client Response]
 
-    style A fill:#f9f,stroke:#333
-    style G fill:#f9f,stroke:#333
+    subgraph Core Components
+        H[Core Client]
+        I[Rate Limiter]
+        J[Response Handler]
+        K[Interceptors]
+
+        H --> I
+        I --> J
+        J --> K
+    end
 ```
 
 ## Request Flow
 
 ```mermaid
 graph LR
-    A[Request] --> B[Add Headers]
-    B --> C[Add Timeout]
-    C --> D[Cache Busting]
-    D --> E[Rate Check]
-    E --> F[Make Request]
-    F --> G[Retry if Failed]
+    A[Request] --> B[Validate]
+    B --> C[Rate Check]
+    C --> D[Transform]
+    D --> E[Execute]
+    E --> F[Handle Response]
+    F --> G[Parse Result]
 
-    style A fill:#f96,stroke:#333
-    style G fill:#f96,stroke:#333
+    subgraph Request Pipeline
+        H[Headers]
+        I[Timeout]
+        J[Retry]
+
+        H --> I
+        I --> J
+    end
 ```
 
 ## Response Processing
@@ -39,157 +72,201 @@ graph LR
 ```mermaid
 graph TD
     A[HTTP Response] --> B{Status Check}
-    B -->|Success| C[Extract Data]
+    B -->|Success| C[Parse Data]
     B -->|Error| D[Error Handler]
-    C --> E[Monitor Metrics]
-    D --> E
-    E --> F[Return Response]
+    C --> E[Validate Schema]
+    D --> F[Map Error]
+    E & F --> G[Return Result]
 
-    style A fill:#9f6,stroke:#333
-    style F fill:#9f6,stroke:#333
+    subgraph Response Pipeline
+        H[Parse]
+        I[Validate]
+        J[Transform]
+
+        H --> I
+        I --> J
+    end
+```
+
+## Type System
+
+### 1. Core Types
+
+```typescript
+interface HTTPClientConfig {
+  baseURL?: string;
+  timeout?: number;
+  headers?: Record<string, string>;
+  retryConfig?: RetryConfig;
+  rateLimitConfig?: RateLimitConfig;
+}
+
+interface RetryConfig {
+  maxRetries: number;
+  baseDelay: number;
+  maxDelay: number;
+  shouldRetry: (error: HTTPError) => boolean;
+}
+
+interface RateLimitConfig {
+  maxRequests: number;
+  interval: number;
+  burst?: number;
+}
+```
+
+### 2. Error Types
+
+```typescript
+type HTTPErrorCode =
+  | 'REQUEST_ERROR'
+  | 'RESPONSE_ERROR'
+  | 'VALIDATION_ERROR'
+  | 'RATE_LIMIT_ERROR'
+  | 'TIMEOUT_ERROR';
+
+interface HTTPError {
+  code: HTTPErrorCode;
+  message: string;
+  status?: number;
+  cause?: unknown;
+}
+```
+
+## Rate Limiting Implementation
+
+```typescript
+interface RateLimiter {
+  checkLimit: () => TaskEither<HTTPError, void>;
+  resetLimit: () => void;
+  getRemainingTokens: () => number;
+}
+
+const createRateLimiter = (config: RateLimitConfig): RateLimiter => ({
+  checkLimit: () =>
+    pipe(
+      TE.tryCatch(
+        () => checkRateLimit(config),
+        (error) => createHTTPError('RATE_LIMIT_ERROR', error as Error),
+      ),
+    ),
+  // ... other methods
+});
+```
+
+## Response Handling
+
+```typescript
+interface ResponseHandler<T> {
+  parse: (response: AxiosResponse) => TaskEither<HTTPError, T>;
+  validate: (data: unknown) => TaskEither<HTTPError, T>;
+}
+
+const createResponseHandler = <T>(schema: z.Schema<T>): ResponseHandler<T> => ({
+  parse: (response) =>
+    pipe(
+      TE.tryCatch(
+        () => parseResponse(response),
+        (error) => createHTTPError('RESPONSE_ERROR', error as Error),
+      ),
+      TE.chain((data) => validateResponse(data, schema)),
+    ),
+  // ... other methods
+});
 ```
 
 ## Error Handling Strategy
 
 ```mermaid
 graph TD
-    A[Error Occurs] --> B{Error Type}
-    B -->|HTTP Error| C[Map Status Code]
-    B -->|Network Error| D[Create Network Error]
-    B -->|Unknown Error| E[Create Internal Error]
-    C --> F[Create API Error]
-    D --> F
-    E --> F
-    F --> G[Add Metrics]
-    G --> H[Return Error]
+    A[Error] --> B{Error Type}
+    B -->|HTTP| C[Map Status]
+    B -->|Network| D[Retry Logic]
+    B -->|Validation| E[Schema Error]
+    C & D & E --> F[Error Response]
 
-    style A fill:#f66,stroke:#333
-    style H fill:#f66,stroke:#333
+    subgraph Error Handling
+        G[Retry]
+        H[Log]
+        I[Report]
+
+        G --> H
+        H --> I
+    end
 ```
 
-## Rate Limiting Design
+## Performance Optimization
+
+### 1. Connection Management
+
+```typescript
+interface ConnectionManager {
+  getConnection: () => TaskEither<HTTPError, AxiosInstance>;
+  releaseConnection: (instance: AxiosInstance) => void;
+  closeAll: () => Promise<void>;
+}
+```
+
+### 2. Request Batching
+
+```typescript
+interface BatchProcessor<T> {
+  addToBatch: (request: HTTPRequest) => void;
+  processBatch: () => TaskEither<HTTPError, T[]>;
+  flush: () => TaskEither<HTTPError, void>;
+}
+```
+
+## Monitoring and Metrics
+
+### 1. Request Metrics
+
+```typescript
+interface RequestMetrics {
+  duration: number;
+  status: number;
+  endpoint: string;
+  timestamp: Date;
+  success: boolean;
+}
+```
+
+### 2. Health Checks
 
 ```mermaid
-graph LR
-    A[Request] --> B[Token Bucket]
-    B -->|Has Tokens| C[Consume Token]
-    B -->|No Tokens| D[Rate Limit Error]
-    C --> E[Proceed]
-    D --> F[Reject]
-
-    style A fill:#69f,stroke:#333
-    style E fill:#69f,stroke:#333
-    style F fill:#69f,stroke:#333
+graph TD
+    A[Health Check] --> B[Connection]
+    A --> C[Rate Limits]
+    A --> D[Response Times]
+    B & C & D --> E[Health Status]
 ```
 
-## Key Components
+## Implementation Guidelines
 
-### Core Client
+### 1. Type Safety
 
-- Manages HTTP operations (GET, POST, PUT, etc.)
-- Implements retry mechanism with exponential backoff
-- Handles request configuration and execution
+- Use zod for runtime validation
+- Implement proper error types
+- Maintain type safety across boundaries
+- Use generics for request/response types
 
-### Request Processing
+### 2. Error Handling
 
-- Adds default headers
-- Sets timeouts
-- Implements cache busting for GET requests
-- Enforces rate limiting
+- Implement retry mechanisms
+- Handle rate limiting gracefully
+- Provide detailed error context
+- Log errors appropriately
 
-### Response Handling
+### 3. Performance
 
-- Validates response status
-- Extracts response data
-- Tracks performance metrics
-- Handles errors consistently
+- Implement connection pooling
+- Use request batching where appropriate
+- Monitor response times
+- Handle timeouts properly
 
-### Error Management
+### 4. Testing
 
-- Type-safe error creation
-- Consistent error structure
-- Detailed error information
-- Error code mapping
-
-### Monitoring
-
-- Request duration tracking
-- Success/failure metrics
-- Performance thresholds
-- Detailed logging
-
-## Design Principles
-
-### Functional Programming
-
-- Pure functions where possible
-- Immutable data structures
-- Effect handling with TaskEither
-- Function composition with pipe/flow
-
-### Type Safety
-
-- Comprehensive type definitions
-- Runtime type validation
-- Type-safe error handling
-- Generic request/response types
-
-### Resilience
-
-- Automatic retries
-- Rate limiting protection
-- Circuit breaking capability
-- Timeout management
-
-### Maintainability
-
-- Clear separation of concerns
-- Centralized configuration
-- Consistent error handling
-- Comprehensive monitoring
-
-## Configuration Management
-
-### HTTP Configuration
-
-- Status codes
-- Error codes
-- Default headers
-- Timeout settings
-
-### Retry Configuration
-
-- Attempt limits
-- Base delay
-- Maximum delay
-- Retry conditions
-
-### Rate Limiting
-
-- Token bucket algorithm
-- Configurable limits
-- Burst handling
-- Recovery periods
-
-## Performance Considerations
-
-### Monitoring
-
-- Request duration tracking
-- Error rate monitoring
-- Performance thresholds
-- Detailed metrics
-
-### Optimization
-
-- Cache busting for GET requests
-- Connection pooling
-- Request queuing
-- Response streaming
-
-### Resource Management
-
-- Connection timeouts
-- Request timeouts
-- Rate limiting
-- Memory usage control
+- Unit test core functionality
+- Integration test with mock server
+- Test error scenarios
+- Verify retry behavior

@@ -48,9 +48,9 @@ graph LR
 
 ### 2. Type Safety
 
-- Runtime type validation with io-ts
+- Runtime type validation with io-ts/zod
 - Compile-time type checking
-- No implicit any types
+- Branded types for domain identifiers
 - Strict null checks
 
 ### 3. Separation of Concerns
@@ -106,21 +106,24 @@ sequenceDiagram
 
 ## Response Format
 
-### Success
+### Success Response
 
 ```typescript
-{
-  status: 'success',
-  data: T  // Generic type parameter
+interface SuccessResponse<T> {
+  status: 'success';
+  data: T;
 }
 ```
 
-### Error
+### Error Response
 
 ```typescript
-{
-  status: 'error',
-  error: string
+interface ErrorResponse {
+  status: 'error';
+  error: {
+    code: string;
+    message: string;
+  };
 }
 ```
 
@@ -140,9 +143,9 @@ graph LR
 
 ### Steps
 
-1. Define domain types
-2. Create handlers
-3. Configure routes
+1. Define domain types with branded IDs
+2. Create handlers with TaskEither
+3. Configure routes with validation
 4. Register with main router
 
 ### Pattern
@@ -165,7 +168,7 @@ graph TD
 
 ### 2. Validation
 
-- Request validation
+- Request validation with zod
 - Response validation
 - Runtime type checking
 
@@ -193,7 +196,7 @@ graph TD
 
 ### 1. Response Time
 
-- Async operations
+- Async operations with TaskEither
 - Parallel processing
 - Caching strategy
 

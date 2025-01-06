@@ -2,7 +2,7 @@
 
 ## Overview
 
-The domain layer is the core of our application, implementing business logic using Domain-Driven Design (DDD) principles and Functional Programming (FP) patterns. This document outlines the high-level architecture and design decisions.
+The domain layer is the core of our application, implementing business logic using Domain-Driven Design (DDD) principles and Functional Programming (FP) patterns with fp-ts. This document outlines the high-level architecture and design decisions.
 
 ## Architecture
 
@@ -13,17 +13,19 @@ graph TD
     B --> D[Repository Layer]
     B --> E[Cache Layer]
     D --> F[Database]
-    E --> G[Cache]
+    E --> G[Cache Store]
 
     subgraph Domain Layer
         H[Domain Operations]
         I[Domain Types]
         J[Domain Logic]
         K[Domain Events]
+        L[Type Converters]
 
         H --> I
         H --> J
         J --> K
+        I --> L
     end
 ```
 
@@ -42,10 +44,12 @@ graph LR
         H[Business Rules]
         I[Value Objects]
         J[Domain Events]
+        K[Type Converters]
 
         G --> H
         H --> I
         I --> J
+        G --> K
     end
 ```
 
@@ -53,34 +57,49 @@ graph LR
 
 ### 1. Domain-Driven Design
 
-- **Bounded Contexts**: Each domain is self-contained with clear boundaries
-- **Ubiquitous Language**: Consistent terminology throughout the codebase
-- **Value Objects**: Immutable domain objects with identity
-- **Domain Events**: State changes represented as events
+- **Bounded Contexts**: Each domain is self-contained (e.g., Event domain)
+- **Ubiquitous Language**: Consistent terminology (e.g., Event, GameWeek)
+- **Value Objects**: Immutable domain objects (e.g., EventId)
+- **Domain Events**: State changes as events
 
 ### 2. Functional Programming
 
-- **Pure Functions**: No side effects in core business logic
-- **Immutability**: All state changes create new objects
-- **Type Safety**: Strong typing with branded types
-- **Error Handling**: Explicit error handling with TaskEither
+```mermaid
+graph TD
+    A[Pure Functions] --> B[TaskEither]
+    B --> C[Error Handling]
+    C --> D[Side Effects]
+
+    subgraph FP Principles
+        E[Immutability]
+        F[Composition]
+        G[Type Safety]
+        H[Error Types]
+
+        E --> F
+        F --> G
+        G --> H
+    end
+```
 
 ### 3. Layered Architecture
 
 ```mermaid
 graph TD
-    A[API Layer] --> B[Domain Layer]
-    B --> C[Infrastructure Layer]
+    A[Domain Operations] --> B[Cache]
+    A --> C[Repository]
+    B --> D[Redis]
+    C --> E[Prisma]
 
     subgraph Domain Layer
-        D[Operations]
-        E[Repository]
-        F[Cache]
-        G[Types]
+        F[Types]
+        G[Converters]
+        H[Validators]
+        I[Error Handlers]
 
-        D --> E
-        D --> F
-        D --> G
+        F --> G
+        G --> H
+        H --> I
     end
 ```
 
@@ -88,13 +107,13 @@ graph TD
 
 ```mermaid
 sequenceDiagram
-    participant A as API Layer
+    participant S as Service Layer
     participant O as Domain Operations
     participant C as Cache Layer
     participant R as Repository Layer
     participant D as Database
 
-    A->>O: Request Data
+    S->>O: Request Data
     O->>C: Check Cache
     alt Cache Hit
         C-->>O: Return Cached Data
@@ -105,47 +124,83 @@ sequenceDiagram
         R-->>O: Transform Data
         O->>C: Update Cache
     end
-    O-->>A: Return Domain Model
+    O-->>S: Return Domain Model
 ```
 
 ## Domain Organization
 
 ### 1. Core Components
 
-- **Domain Types**: Core business models and types
-- **Domain Operations**: Business logic implementation
-- **Repository Layer**: Data access abstraction
-- **Cache Layer**: Performance optimization
+```mermaid
+graph TD
+    A[Domain Types] --> B[Value Objects]
+    A --> C[Entities]
+    A --> D[Aggregates]
+
+    subgraph Type System
+        E[Branded Types]
+        F[Validation]
+        G[Conversion]
+
+        E --> F
+        F --> G
+    end
+```
 
 ### 2. Cross-Cutting Concerns
 
-- **Error Handling**: Consistent error types and handling
-- **Validation**: Input validation and business rules
-- **Type Safety**: Branded types and type guards
-- **Performance**: Caching and optimization strategies
+- **Error Handling**: Domain-specific error types
+- **Validation**: Input/output validation
+- **Type Safety**: Branded types and guards
+- **Performance**: Caching strategies
 
 ## Implementation Strategy
 
 ### 1. Domain Isolation
 
-- Self-contained domains with explicit interfaces
-- Clear dependencies through repository pattern
-- No cross-domain knowledge leakage
-- Pure functional core with side effects at edges
+```mermaid
+graph TD
+    A[Domain Module] --> B[Types]
+    A --> C[Operations]
+    A --> D[Repository]
+    A --> E[Cache]
+
+    subgraph Isolation
+        F[Self Contained]
+        G[Clear Boundaries]
+        H[Pure Core]
+        I[Side Effects]
+
+        F --> G
+        G --> H
+        H --> I
+    end
+```
 
 ### 2. Type Safety
 
-- Branded types for domain identifiers
+- Branded types for identifiers
 - Explicit validation at boundaries
 - No implicit type coercion
 - Comprehensive type definitions
 
 ### 3. Error Handling
 
-- TaskEither for all operations
-- Explicit error types and messages
-- Consistent error creation patterns
-- Error transformation at boundaries
+```mermaid
+graph LR
+    A[Operation] --> B[TaskEither]
+    B --> C[Domain Error]
+    C --> D[Error Chain]
+
+    subgraph Error Types
+        E[Validation]
+        F[Processing]
+        G[Infrastructure]
+
+        E --> F
+        F --> G
+    end
+```
 
 ## Performance Considerations
 
@@ -197,10 +252,24 @@ graph TD
 
 ### 1. Code Organization
 
-- Consistent file structure
-- Clear module boundaries
-- Explicit dependencies
-- Functional composition
+```mermaid
+graph TD
+    A[Domain Module] --> B[Types]
+    B --> C[Operations]
+    C --> D[Repository]
+    D --> E[Cache]
+
+    subgraph Organization
+        F[Clear Structure]
+        G[Explicit Deps]
+        H[Type Safety]
+        I[Error Handling]
+
+        F --> G
+        G --> H
+        H --> I
+    end
+```
 
 ### 2. Documentation
 

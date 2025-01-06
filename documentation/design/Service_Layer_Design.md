@@ -2,7 +2,7 @@
 
 ## Overview
 
-The service layer is designed as a thin orchestration layer that coordinates between the API layer and domain layer, implementing business use cases while maintaining functional programming principles. It provides a clean separation of concerns and ensures type safety through fp-ts integration.
+The service layer acts as an orchestration layer between the API and domain layers, implementing business workflows while maintaining functional programming principles using fp-ts. It provides error handling, workflow management, and integration with external services.
 
 ## Architecture
 
@@ -14,42 +14,57 @@ graph TD
 
     subgraph Service Layer
         E[Service Interface]
-        F[Cache Adapter]
+        F[Service Operations]
         G[Error Handler]
         H[Workflow]
+        I[Dependencies]
 
         E --> F
-        E --> G
-        E --> H
+        F --> G
+        F --> H
+        F --> I
     end
 
     subgraph Domain Layer
-        I[Domain Logic]
-        J[Repository]
-        K[Domain Types]
+        J[Domain Logic]
+        K[Repository]
+        L[Domain Types]
     end
 
     subgraph Infrastructure
-        L[Cache Store]
-        M[Database]
-        N[External APIs]
+        M[Cache Store]
+        N[Database]
+        O[External APIs]
     end
 
-    B --> I
     B --> J
-    F --> L
-    J --> M
-    B --> N
+    B --> K
+    F --> M
+    K --> N
+    I --> O
 ```
 
 ## Core Design Principles
 
 ### 1. Functional Core
 
-- Pure functions for business logic
-- Immutable data structures
-- Effect handling with TaskEither
-- Type-safe operations
+```mermaid
+graph TD
+    A[Service Operations] --> B[TaskEither]
+    B --> C[Error Mapping]
+    C --> D[Domain Integration]
+
+    subgraph FP Principles
+        E[Pure Functions]
+        F[Composition]
+        G[Error Types]
+        H[Type Safety]
+
+        E --> F
+        F --> G
+        G --> H
+    end
+```
 
 ### 2. Clean Architecture
 
@@ -59,11 +74,15 @@ graph LR
     B --> C[Domain]
     B --> D[Infrastructure]
 
-    subgraph Service Boundaries
-        B
-        E[Cache]
-        F[Error]
-        G[Workflow]
+    subgraph Service Layer
+        E[Interface]
+        F[Operations]
+        G[Workflows]
+        H[Error Handling]
+
+        E --> F
+        F --> G
+        F --> H
     end
 ```
 
@@ -73,39 +92,58 @@ graph LR
 sequenceDiagram
     participant A as API
     participant S as Service
+    participant W as Workflow
     participant D as Domain
     participant I as Infrastructure
 
     A->>S: Request
-    S->>D: Domain Operation
+    S->>W: Start Workflow
+    W->>D: Domain Operation
     D->>I: Infrastructure Call
     I-->>D: Error/Result
-    D-->>S: Domain Error/Result
-    S-->>A: Service Error/Result
+    D-->>W: Domain Error/Result
+    W-->>S: Service Error/Result
+    S-->>A: API Response
 ```
 
 ## Service Layer Components
 
 ### 1. Service Interface
 
-- Defines public API contract
-- Handles type transformations
-- Manages error boundaries
-- Coordinates operations
+```typescript
+interface Service<T, ID> {
+  readonly getAll: () => TaskEither<ServiceError, readonly T[]>;
+  readonly getById: (id: ID) => TaskEither<ServiceError, T | null>;
+  readonly save: (entity: T) => TaskEither<ServiceError, T>;
+  readonly saveMany: (entities: readonly T[]) => TaskEither<ServiceError, readonly T[]>;
+}
+```
 
-### 2. Cache Adapter
+### 2. Service Operations
 
-- Implements caching strategy
-- Handles cache invalidation
-- Provides data consistency
-- Manages TTL policies
+```typescript
+interface ServiceOperations<T, ID> {
+  readonly findAll: () => TaskEither<ServiceError, readonly T[]>;
+  readonly findById: (id: ID) => TaskEither<ServiceError, T | null>;
+  readonly create: (entity: T) => TaskEither<ServiceError, T>;
+  readonly createMany: (entities: readonly T[]) => TaskEither<ServiceError, readonly T[]>;
+}
+```
 
 ### 3. Workflow Management
 
-- Orchestrates complex operations
-- Manages transaction boundaries
-- Handles cross-domain coordination
-- Implements retry policies
+```typescript
+interface WorkflowResult<T> {
+  readonly context: WorkflowContext;
+  readonly result: T;
+  readonly duration: number;
+}
+
+interface WorkflowContext {
+  readonly workflowId: string;
+  readonly startTime: Date;
+}
+```
 
 ## Data Flow Patterns
 
@@ -113,21 +151,17 @@ sequenceDiagram
 sequenceDiagram
     participant C as Client
     participant S as Service
-    participant Ca as Cache
+    participant W as Workflow
     participant D as Domain
     participant R as Repository
 
     C->>S: Request
-    S->>Ca: Check Cache
-    alt Cache Hit
-        Ca-->>S: Return Data
-    else Cache Miss
-        S->>D: Domain Operation
-        D->>R: Repository Query
-        R-->>D: Data
-        D-->>S: Domain Result
-        S->>Ca: Update Cache
-    end
+    S->>W: Start Workflow
+    W->>D: Domain Operation
+    D->>R: Repository Query
+    R-->>D: Data
+    D-->>W: Domain Result
+    W-->>S: Workflow Result
     S-->>C: Response
 ```
 
@@ -139,31 +173,44 @@ sequenceDiagram
 graph TD
     A[Service Error] --> B[Operation Error]
     A --> C[Integration Error]
-    A --> D[Validation Error]
+    A --> D[Workflow Error]
 
     B --> E[Domain Error]
     C --> F[Infrastructure Error]
-    D --> G[Input Error]
+    D --> G[Process Error]
 ```
 
 ### 2. Error Flow
 
-- Capture at boundaries
-- Transform to service errors
-- Provide context
-- Maintain type safety
+```mermaid
+graph LR
+    A[Domain Error] -->|Map| B[Service Error]
+    C[Infrastructure Error] -->|Map| B
+    D[External API Error] -->|Map| B
+    B -->|Transform| E[API Response]
+```
 
 ## Performance Considerations
 
-### 1. Caching Strategy
+### 1. Workflow Optimization
 
 ```mermaid
 graph TD
-    A[Request] --> B{Cache?}
-    B -- Hit --> C[Return Cached]
-    B -- Miss --> D[Fetch Fresh]
-    D --> E[Update Cache]
-    E --> F[Return Fresh]
+    A[Request] --> B[Validate]
+    B --> C[Execute]
+    C --> D[Monitor]
+    D --> E[Log]
+
+    subgraph Workflow
+        F[Context]
+        G[Metrics]
+        H[Duration]
+        I[Result]
+
+        F --> G
+        G --> H
+        H --> I
+    end
 ```
 
 ### 2. Resource Management
@@ -183,7 +230,7 @@ services/
 │   ├── index.ts
 │   ├── types.ts
 │   ├── service.ts
-│   ├── cache.ts
+│   ├── operations.ts
 │   └── workflow.ts
 └── domain2/
     ├── index.ts
@@ -196,37 +243,60 @@ services/
 graph LR
     A[Service] --> B[Domain]
     A --> C[Infrastructure]
-    A --> D[Cache]
+    A --> D[External API]
 
     B --> E[Repository]
-    C --> F[External]
-    D --> G[Store]
+    C --> F[Cache]
+    D --> G[Integration]
 ```
 
 ## Monitoring and Metrics
 
 ### 1. Key Metrics
 
-- Operation latency
-- Cache effectiveness
-- Error rates
-- Resource utilization
+```mermaid
+graph TD
+    A[Workflow Metrics] --> B[Duration]
+    A --> C[Success Rate]
+    A --> D[Error Rate]
+    A --> E[Resource Usage]
+
+    subgraph Monitoring
+        F[Logging]
+        G[Tracing]
+        H[Alerting]
+
+        F --> G
+        G --> H
+    end
+```
 
 ### 2. Health Checks
 
 - Service availability
 - Dependency status
 - Resource status
-- Cache health
+- Workflow health
 
 ## Future Considerations
 
 ### 1. Scalability
 
-- Horizontal scaling
-- Load balancing
-- Service discovery
-- Distributed caching
+```mermaid
+graph TD
+    A[Service Layer] --> B[Load Balancing]
+    A --> C[Service Discovery]
+    A --> D[Circuit Breaking]
+
+    subgraph Scale
+        E[Horizontal]
+        F[Vertical]
+        G[Distributed]
+
+        E --> F
+        F --> G
+    end
+```
 
 ### 2. Extensibility
 

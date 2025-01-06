@@ -2,594 +2,356 @@
 
 ## Directory Structure
 
-```
+```plaintext
 src/
-├── infrastructures/
-│   └── queue/                      # Queue infrastructure layer
-│       ├── core/                   # Core queue infrastructure
-│       │   ├── queue.adapter.ts    # BullMQ queue integration
-│       │   ├── worker.adapter.ts   # BullMQ worker integration
-│       │   ├── queue.service.ts    # Queue operations service
-│       │   └── worker.service.ts   # Worker management service
-│       └── index.ts                # Public exports
-├── types/                          # Centralized type definitions
-│   ├── queue.type.ts              # Queue-related types
-│   └── job.type.ts                # Job-related types
-└── queues/                         # Queue implementation layer
-    ├── meta/                       # Meta jobs group
-    │   ├── core/                   # Core meta job functionality
-    │   │   ├── meta.processor.ts   # Meta job processor
-    │   │   └── meta.service.ts     # Meta job service
-    │   └── events/                 # Events-specific jobs
-    │       ├── events.processor.ts # Events processor
-    │       └── events.service.ts   # Events service
-    ├── live/                       # Live update jobs
-    └── daily/                      # Daily update jobs
-
+├── infrastructure/
+│   └── queue/
+│       ├── core/
+│       │   ├── queue.service.ts     # Queue service implementation
+│       │   ├── worker.service.ts    # Worker service implementation
+│       │   ├── flow.service.ts      # Flow service implementation
+│       │   └── scheduler.service.ts  # Scheduler service implementation
+│       ├── types.ts                 # Queue-related types
+│       └── index.ts                 # Public exports
+└── queue/
+    ├── meta/                        # Meta job implementations
+    │   ├── events/                  # Event-specific jobs
+    │   ├── phases/                  # Phase-specific jobs
+    │   └── teams/                   # Team-specific jobs
+    ├── live/                        # Live update jobs
+    └── daily/                       # Daily update jobs
 ```
 
-## Type Management
+## Core Service Implementations
 
-### 1. Centralized Job Types (`src/types/job.type.ts`)
-
-```typescript
-import { BaseJobData } from '@infrastructures/queue/types';
-
-// Job Operation Types
-export type JobOperation = 'SYNC' | 'UPDATE' | 'CLEANUP';
-
-// Job Types
-export type JobType = 'META' | 'LIVE' | 'DAILY';
-
-// Meta Job Types
-export type MetaJobType = 'EVENTS' | 'PHASES' | 'TEAMS';
-
-// Meta Job Data
-export interface MetaJobData extends BaseJobData {
-  readonly type: JobType.META;
-  readonly data: {
-    readonly operation: JobOperation;
-    readonly type: MetaJobType;
-  };
-}
-
-// Events Job Data (specific implementation of MetaJobData)
-export interface EventsJobData extends MetaJobData {
-  readonly data: {
-    readonly operation: JobOperation;
-    readonly type: MetaJobType.EVENTS;
-  };
-}
-```
-
-### 2. Events Service (`queues/jobs/meta/events/events.service.ts`)
+### 1. Queue Service (`core/queue.service.ts`)
 
 ```typescript
-import * as TE from 'fp-ts/TaskEither';
-import { pipe } from 'fp-ts/function';
-import { EventsJobData, JobType, MetaJobType } from '@types/job.type';
-import { QueueService } from '@infrastructures/queue/core/queue.service';
-
-export interface EventsJobService {
-  readonly syncEvents: () => TE.TaskEither<QueueError, void>;
-}
-
-export const createEventsJobService = (
-  queueService: QueueService<EventsJobData>,
-): EventsJobService => ({
-  syncEvents: () =>
-    queueService.addJob({
-      type: JobType.META,
-      timestamp: new Date(),
-      data: {
-        operation: 'SYNC',
-        type: MetaJobType.EVENTS,
-      },
-    }),
-});
-```
-
-### 3. Events Processor (`queues/jobs/meta/events/events.processor.ts`)
-
-```typescript
-import { Job } from 'bullmq';
-import * as TE from 'fp-ts/TaskEither';
-import { pipe } from 'fp-ts/function';
-import { EventsJobData } from '@types/job.type';
-import { JobProcessor } from '@infrastructures/queue/types';
-import { EventWorkflows } from '@services/events/workflow';
-import { getQueueLogger } from '@infrastructures/logger';
-
-const logger = getQueueLogger();
-
-export const createEventsProcessor =
-  (
-    eventWorkflows: EventWorkflows, // Inject the actual workflow service
-  ): JobProcessor<EventsJobData> =>
-  (job: Job<EventsJobData>) =>
-    pipe(
-      TE.tryCatch(
-        async () => {
-          const { data } = job.data;
-          logger.info({ jobId: job.id, operation: data.operation }, 'Processing events job');
-
-          switch (data.operation) {
-            case 'SYNC':
-              // Use the actual workflow service for syncing
-              const result = await eventWorkflows.syncEvents()();
-              if (result._tag === 'Left') {
-                throw result.left;
-              }
-              break;
-            default:
-              throw new Error(`Unknown operation: ${data.operation}`);
-          }
-        },
-        (error) => createQueueError('PROCESS_JOB', error as Error),
-      ),
-    );
-
-// Usage example showing the complete integration
-const initializeEventsQueue = (
-  queueConfig: QueueConfig,
-  eventService: EventService, // Inject the event service
-) => {
-  // Create the workflow service
-  const workflows = eventWorkflows(eventService);
-
-  // Create the queue service with the processor
-  return pipe(
-    createQueueService(queueConfig, createEventsProcessor(workflows)),
-    TE.map((queueService) => ({
-      queueService,
-      jobService: createEventsJobService(queueService),
-    })),
-  );
-};
-```
-
-This integration demonstrates:
-
-1. Using the actual workflow service for business logic
-2. Proper error handling and logging
-3. Clean separation between queue processing and business logic
-4. Type-safe integration of services
-
-### 4. Usage Example
-
-```typescript
-// Initialize events queue service
-const eventsQueueConfig = createQueueConfig(QUEUE_NAMES.META_EVENTS);
-const eventsQueueService = await createQueueService(
-  eventsQueueConfig,
-  createEventsProcessor(eventsService),
-)();
-
-// Create events job service
-const eventsJobService = createEventsJobService(eventsQueueService);
-
-// Schedule events sync
-await eventsJobService.syncEvents()();
-```
-
-This example demonstrates:
-
-1. Clear separation of concerns:
-   - Infrastructure (queue/worker) in `/infrastructures/queue`
-   - Job implementation in `/queues/jobs/meta/events`
-2. Type safety through job-specific types
-3. Functional approach using `fp-ts`
-4. Clean service and processor organization
-
-## Queue Pattern Implementations
-
-### 1. Single Queue-Single Worker (1:1)
-
-```typescript
-// Basic queue adapter type
-interface QueueAdapter<T extends BaseJobData> {
-  readonly queue: Queue;
-  readonly addJob: (data: T) => TE.TaskEither<QueueError, Job<T>>;
-  readonly removeJob: (jobId: string) => TE.TaskEither<QueueError, void>;
-}
-
-// Basic worker adapter type
-interface WorkerAdapter<T extends BaseJobData> {
-  readonly worker: Worker;
-  readonly start: () => TE.TaskEither<QueueError, void>;
-  readonly stop: () => TE.TaskEither<QueueError, void>;
-}
-
-// Basic implementation
-const createBasicQueue = <T extends BaseJobData>(
-  name: string,
+export const createQueueService = <T extends BaseJobData>(
+  config: QueueConfig,
   processor: JobProcessor<T>,
 ): TE.TaskEither<QueueError, QueueService<T>> =>
   pipe(
     TE.Do,
-    TE.bind('queue', () => createQueueAdapter<T>(name)),
-    TE.bind('worker', () => createWorkerAdapter(name, processor)),
+    TE.bind('queue', () => createQueue(config)),
+    TE.bind('worker', () => createWorker(config, processor)),
     TE.map(({ queue, worker }) => ({
-      addJob: queue.addJob,
-      removeJob: queue.removeJob,
-      startWorker: worker.start,
-      stopWorker: worker.stop,
+      addJob: (data: T, options?: JobOptions) =>
+        pipe(
+          TE.tryCatch(
+            () => queue.add(config.name, data, options),
+            (error) => createQueueError('QUEUE_OPERATION_ERROR', error as Error),
+          ),
+          TE.map(() => undefined),
+        ),
+      addBulk: (jobs: Array<{ data: T; options?: JobOptions }>) =>
+        pipe(
+          TE.tryCatch(
+            () =>
+              queue.addBulk(
+                jobs.map((job) => ({
+                  name: config.name,
+                  data: job.data,
+                  opts: job.options,
+                })),
+              ),
+            (error) => createQueueError('QUEUE_OPERATION_ERROR', error as Error),
+          ),
+          TE.map(() => undefined),
+        ),
+      // ... other methods
     })),
   );
 ```
 
-### 2. Single Queue-Multiple Workers (1:N)
+### 2. Worker Service (`core/worker.service.ts`)
 
 ```typescript
-// Multi-worker adapter type
-interface MultiWorkerAdapter<T extends BaseJobData> {
-  readonly workers: Worker[];
-  readonly start: () => TE.TaskEither<QueueError, void>;
-  readonly stop: () => TE.TaskEither<QueueError, void>;
-}
-
-// Implementation for I/O intensive operations
-const createScalableQueue = <T extends BaseJobData>(
-  name: string,
+export const createWorkerService = <T extends BaseJobData>(
+  config: QueueConfig,
   processor: JobProcessor<T>,
-  options: {
-    numWorkers: number;
-    concurrency: number;
-  },
-): TE.TaskEither<QueueError, ScalableQueueService<T>> =>
+  options: WorkerOptions = {},
+): TE.TaskEither<QueueError, WorkerService<T>> =>
   pipe(
     TE.Do,
-    TE.bind('queue', () => createQueueAdapter<T>(name)),
-    TE.bind('workers', () =>
-      pipe(
-        Array.from({ length: options.numWorkers }, () =>
-          createWorkerAdapter(name, processor, {
-            concurrency: options.concurrency,
-          }),
-        ),
-        TE.sequenceArray,
-      ),
-    ),
-    TE.map(({ queue, workers }) => ({
-      addJob: queue.addJob,
-      removeJob: queue.removeJob,
-      startWorkers: () => TE.sequenceArray(workers.map((w) => w.start())),
-      stopWorkers: () => TE.sequenceArray(workers.map((w) => w.stop())),
-    })),
-  );
-```
-
-### 3. Multiple Queues-Single Worker (N:1)
-
-```typescript
-// Sequential queue adapter type
-interface SequentialQueueAdapter<T extends BaseJobData> {
-  readonly queues: Record<string, Queue>;
-  readonly addJob: (queueName: string, data: T) => TE.TaskEither<QueueError, Job<T>>;
-  readonly removeJob: (queueName: string, jobId: string) => TE.TaskEither<QueueError, void>;
-}
-
-// Implementation for sequential processing
-const createSequentialQueues = <T extends BaseJobData>(
-  queueNames: string[],
-  processor: JobProcessor<T>,
-  options: {
-    priorities?: Record<string, number>;
-  } = {},
-): TE.TaskEither<QueueError, SequentialQueueService<T>> =>
-  pipe(
-    TE.Do,
-    TE.bind('queues', () =>
-      pipe(
-        queueNames,
-        TE.traverseArray((name) =>
-          createQueueAdapter<T>(name, {
-            defaultJobOptions: {
-              priority: options.priorities?.[name],
-            },
-          }),
-        ),
-      ),
-    ),
     TE.bind('worker', () =>
-      createWorkerAdapter(queueNames, processor, {
-        concurrency: 1,
-      }),
+      TE.tryCatch(
+        () =>
+          new Worker(
+            config.name,
+            async (job) => {
+              const result = await processor(job)();
+              if (result._tag === 'Left') {
+                throw result.left;
+              }
+            },
+            {
+              connection: config.connection,
+              concurrency: options.concurrency,
+              maxStalledCount: options.maxStalledCount,
+              stalledInterval: options.stalledInterval,
+            },
+          ),
+        (error) => createQueueError('WORKER_ERROR', error as Error),
+      ),
     ),
-    TE.map(({ queues, worker }) => ({
-      addJob: (queueName: string, data: T) =>
-        pipe(
-          TE.fromOption(() => createQueueError('QUEUE_NOT_FOUND'))(queues[queueName]),
-          TE.chain((queue) => queue.addJob(data)),
+    TE.map((deps) => ({
+      start: () =>
+        TE.tryCatch(
+          () => Promise.resolve(deps.worker.run()),
+          (error) => createQueueError('WORKER_ERROR', error as Error),
         ),
-      removeJob: (queueName: string, jobId: string) =>
-        pipe(
-          TE.fromOption(() => createQueueError('QUEUE_NOT_FOUND'))(queues[queueName]),
-          TE.chain((queue) => queue.removeJob(jobId)),
+      stop: () =>
+        TE.tryCatch(
+          () => deps.worker.close(),
+          (error) => createQueueError('WORKER_ERROR', error as Error),
         ),
-      startWorker: worker.start,
-      stopWorker: worker.stop,
+      // ... other methods
     })),
   );
 ```
 
-### Configuration Examples
+### 3. Flow Service (`core/flow.service.ts`)
 
 ```typescript
-import {
-  QueueConfig,
-  QUEUE_NAMES,
-  QUEUE_CONSTANTS,
-  createQueueConfig,
-  JOB_SCHEDULES,
-} from '@configs/queue/queue.config';
+export const createFlowService = <T extends BaseJobData>(
+  config: QueueConfig,
+): TE.TaskEither<QueueError, FlowService<T>> =>
+  pipe(
+    TE.Do,
+    TE.bind('flow', () => createFlowProducer(config)),
+    TE.map((deps) => ({
+      addJob: (data: T, opts?: FlowOpts<T>) =>
+        pipe(
+          TE.tryCatch(
+            () =>
+              deps.flow.add({
+                name: opts?.name || config.name,
+                queueName: config.name,
+                data,
+                opts: {
+                  jobId: opts?.jobId,
+                  priority: opts?.priority,
+                  delay: opts?.delay,
+                  timestamp: opts?.timestamp,
+                  parent: opts?.parent,
+                },
+                children: opts?.children,
+              }),
+            (error) => createQueueError('QUEUE_OPERATION_ERROR', error as Error),
+          ),
+        ),
+      // ... other methods
+    })),
+  );
+```
 
-// 1. Basic Queue Configuration
-const metaQueueConfig = createQueueConfig(QUEUE_NAMES.META);
+### 4. Scheduler Service (`core/scheduler.service.ts`)
 
-// 2. I/O Intensive Queue Configuration (1:N)
-const createScalableQueueConfig = (queueName: string) => ({
-  ...createQueueConfig(queueName),
-  options: {
-    numWorkers: 3,
-    concurrency: 5,
-    attempts: QUEUE_CONSTANTS.ATTEMPTS.HIGH,
-    backoff: QUEUE_CONSTANTS.BACKOFF,
-    removeOnComplete: true,
-    lockDuration: QUEUE_CONSTANTS.LOCK_DURATION,
-  },
-});
+```typescript
+export const createSchedulerService = <T extends BaseJobData>(
+  config: QueueConfig,
+): TE.TaskEither<QueueError, SchedulerService<T>> =>
+  pipe(
+    TE.Do,
+    TE.bind('queue', () => createQueue(config)),
+    TE.map((deps) => ({
+      upsertJobScheduler: (
+        schedulerId: string,
+        scheduleOptions: JobSchedulerOptions,
+        template?: JobTemplate<T>,
+      ) =>
+        pipe(
+          TE.tryCatch(
+            () =>
+              deps.queue.add(template?.name || config.name, template?.data || {}, {
+                jobId: schedulerId,
+                repeat: {
+                  pattern: scheduleOptions.pattern,
+                  every: scheduleOptions.every,
+                  limit: scheduleOptions.limit,
+                },
+                ...template?.opts,
+              }),
+            (error) => createQueueError('QUEUE_OPERATION_ERROR', error as Error),
+          ),
+          TE.map(() => undefined),
+        ),
+      // ... other methods
+    })),
+  );
+```
 
-// Example usage for data processing
-const dataProcessingQueue = await createScalableQueue(
-  QUEUE_NAMES.META,
-  dataProcessor,
-  createScalableQueueConfig(QUEUE_NAMES.META).options,
-)();
+## Job Implementation Examples
 
-// 3. Sequential Queue Configuration (N:1)
-const createSequentialQueueConfigs = (queueNames: string[]) =>
-  queueNames.map((name, index) => ({
-    ...createQueueConfig(name),
-    options: {
-      priority: index + 1, // Priority based on order
-      attempts: QUEUE_CONSTANTS.ATTEMPTS.MEDIUM,
-      backoff: QUEUE_CONSTANTS.BACKOFF,
-    },
-  }));
+### 1. Event Job Processor
 
-// Example usage for workflow
-const workflowQueues = await createSequentialQueues(
-  [QUEUE_NAMES.META, QUEUE_NAMES.LIVE],
-  workflowProcessor,
-  {
-    priorities: {
-      [QUEUE_NAMES.META]: QUEUE_CONSTANTS.PRIORITIES.HIGH,
-      [QUEUE_NAMES.LIVE]: QUEUE_CONSTANTS.PRIORITIES.MEDIUM,
-    },
-  },
-)();
+```typescript
+export const createEventProcessor =
+  (eventService: EventService): JobProcessor<EventJobData> =>
+  (job: Job<EventJobData>) =>
+    pipe(
+      TE.Do,
+      TE.bind('operation', () => validateOperation(job.data.data.operation)),
+      TE.chain(({ operation }) => {
+        switch (operation) {
+          case 'SYNC':
+            return pipe(
+              eventService.syncEventsFromApi(),
+              TE.mapLeft((error) => createQueueError('JOB_PROCESSING_ERROR', error as Error)),
+              TE.map(() => undefined),
+            );
+          default:
+            return TE.left(
+              createQueueError(
+                'JOB_PROCESSING_ERROR',
+                new Error(`Unknown operation: ${operation}`),
+              ),
+            );
+        }
+      }),
+    );
+```
 
-// 4. Scheduled Job Configuration
-const scheduleMetaJob = (queueService: QueueService<MetaJobData>) => {
-  // Use predefined schedule from config
-  return scheduleJob(
-    queueService,
-    JOB_SCHEDULES.META_UPDATE, // '35 6 * * *' (6:35 AM UTC daily)
+### 2. Job Flow Example
+
+```typescript
+export const createEventSyncFlow = (
+  flowService: FlowService<EventJobData>,
+): TE.TaskEither<QueueError, FlowJob<EventJobData>> =>
+  flowService.addJob(
     {
       type: 'META',
+      timestamp: new Date(),
       data: {
         operation: 'SYNC',
         type: 'EVENTS',
       },
     },
+    {
+      jobId: `event-sync-${Date.now()}`,
+      children: [
+        {
+          name: 'event-validation',
+          queueName: 'event-validation',
+          data: {
+            type: 'META',
+            timestamp: new Date(),
+            data: {
+              operation: 'VALIDATE',
+              type: 'EVENTS',
+            },
+          },
+        },
+      ],
+    },
   );
-};
 ```
 
-Key points about configuration:
-
-1. **Use Predefined Constants**:
-
-   - `QUEUE_NAMES` for queue identification
-   - `QUEUE_CONSTANTS` for queue settings
-   - `JOB_SCHEDULES` for cron patterns
-
-2. **Queue Configuration Factory**:
-
-   - Use `createQueueConfig` for base configuration
-   - Extend with specific options as needed
-
-3. **Priority Management**:
-
-   ```typescript
-   QUEUE_CONSTANTS.PRIORITIES: {
-     HIGH: 1,
-     MEDIUM: 2,
-     LOW: 3
-   }
-   ```
-
-4. **Retry Strategy**:
-
-   ```typescript
-   QUEUE_CONSTANTS.ATTEMPTS: {
-     HIGH: 5,
-     MEDIUM: 3,
-     LOW: 1
-   }
-   ```
-
-5. **Job Scheduling**:
-   ```typescript
-   JOB_SCHEDULES: {
-     META_UPDATE: '35 6 * * *',
-     LIVE_UPDATE: '*/1 * * * *',
-     // ...
-   }
-   ```
-
-Remember:
-
-- Always use configuration from `queue.config.ts`
-- Don't hardcode queue names or settings
-- Use appropriate constants for different queue types
-- Follow the predefined scheduling patterns
-
-## Error Handling and Monitoring
+## Error Handling
 
 ```typescript
-import {
-  QueueError,
-  QueueErrorCode,
-  ServiceError,
-  createQueueError,
-  createServiceError,
-  createServiceOperationError,
-} from '@types/errors.type';
-import { createQueueProcessingError, createQueueConnectionError } from '@utils/error.util';
+const handleQueueError = (error: QueueError): TE.TaskEither<QueueError, void> => {
+  logger.error({ error }, 'Queue error occurred');
 
-// Example of proper error handling in processor
-export const createEventsProcessor =
-  (eventWorkflows: EventWorkflows): JobProcessor<EventsJobData> =>
-  (job: Job<EventsJobData>) =>
-    pipe(
-      TE.tryCatch(
-        async () => {
-          const { data } = job.data;
-
-          // Handle workflow errors
-          const result = await eventWorkflows.syncEvents()();
-          if (result._tag === 'Left') {
-            // Convert service errors to queue errors
-            throw createQueueProcessingError({
-              message: `Event sync failed: ${result.left.message}`,
-              queueName: 'meta-events',
-              cause: result.left,
-            });
-          }
-        },
-        (error) => {
-          // Use existing error utilities
-          if (error instanceof Error) {
-            return createQueueError(QueueErrorCode.JOB_PROCESSING_ERROR, 'meta-events', error);
-          }
-          return createQueueProcessingError({
-            message: 'Unknown error during job processing',
-            queueName: 'meta-events',
-          });
-        },
-      ),
-    );
-
-// Example of connection error handling
-const initializeQueue = (config: QueueConfig) =>
-  pipe(
-    TE.tryCatch(
-      () => connectToRedis(config),
-      (error) =>
-        createQueueConnectionError({
-          message: 'Failed to connect to Redis',
-          queueName: config.name,
-          cause: error as Error,
-        }),
-    ),
-  );
-
-// Example of monitoring with error tracking
-const setupQueueMonitoring = (queue: Queue, worker: Worker) => {
-  // Error metrics with proper error typing
-  worker.on('failed', (job, error) => {
-    if (error instanceof Error) {
-      const queueError = createQueueProcessingError({
-        message: error.message,
-        queueName: queue.name,
-        cause: error,
-      });
-      logger.error({ error: queueError }, 'Job processing failed');
-      metrics.recordJobFailure(worker.name, queueError);
-    }
-  });
+  switch (error.code) {
+    case 'QUEUE_CONNECTION_ERROR':
+      return pipe(
+        reconnectQueue(),
+        TE.chain(() => retryOperation()),
+      );
+    case 'JOB_PROCESSING_ERROR':
+      return pipe(
+        notifyError(error),
+        TE.chain(() => scheduleRetry()),
+      );
+    default:
+      return TE.left(error);
+  }
 };
 ```
 
-Key points about error handling:
+## Testing
 
-1. **Use Existing Error Types**:
+### 1. Unit Tests
 
-   - `QueueError` for queue-related errors
-   - `ServiceError` for service-level errors
-   - Proper error code enums (`QueueErrorCode`, `ServiceErrorCode`)
+```typescript
+describe('Event Processor', () => {
+  it('should process sync operation', async () => {
+    const mockEventService = createMockEventService();
+    const processor = createEventProcessor(mockEventService);
 
-2. **Use Error Utilities**:
+    const result = await processor({
+      data: {
+        type: 'META',
+        timestamp: new Date(),
+        data: {
+          operation: 'SYNC',
+          type: 'EVENTS',
+        },
+      },
+    } as Job<EventJobData>)();
 
-   - `createQueueError` for basic queue errors
-   - `createQueueProcessingError` for job processing errors
-   - `createQueueConnectionError` for connection issues
-   - `createServiceError` for service-level errors
+    expect(E.isRight(result)).toBe(true);
+    expect(mockEventService.syncEventsFromApi).toHaveBeenCalled();
+  });
+});
+```
 
-3. **Error Conversion**:
+### 2. Integration Tests
 
-   - Convert service errors to queue errors when crossing boundaries
-   - Maintain error chain using `cause` property
-   - Preserve error context and details
+```typescript
+describe('Event Queue Integration', () => {
+  beforeEach(async () => {
+    await redis.flushDb();
+  });
 
-4. **Error Logging**:
+  it('should process event sync job', async () => {
+    const queueService = await createQueueService(config, processor)();
+    const result = await queueService.addJob({
+      type: 'META',
+      timestamp: new Date(),
+      data: {
+        operation: 'SYNC',
+        type: 'EVENTS',
+      },
+    })();
 
-   - Use structured logging with error types
-   - Include relevant context (queue name, job ID)
-   - Maintain error hierarchy
-
-5. **Error Monitoring**:
-   - Track errors by type and queue
-   - Monitor error rates and patterns
-   - Alert on error thresholds
-
-Remember:
-
-- Never create new error types - use existing ones from `@types/errors.type.ts`
-- Use error utilities from `@utils/error.util.ts`
-- Maintain proper error hierarchy and context
-- Always include appropriate error codes
+    expect(E.isRight(result)).toBe(true);
+    // Verify job completion and side effects
+  });
+});
+```
 
 ## Best Practices
 
-1. **Type Safety**
+### 1. Type Safety
 
-   - Always use proper typing for job data
-   - Define clear interfaces for queue and worker adapters
-   - Use TypeScript's strict mode
+- Use branded types for job IDs
+- Define explicit job data types
+- Validate job data at runtime
+- Use type guards for narrowing
 
-2. **Error Handling**
+### 2. Error Handling
 
-   - Use TaskEither for all operations
-   - Implement proper error recovery strategies
-   - Log errors with context
+- Use TaskEither for all operations
+- Define specific error types
+- Implement retry strategies
+- Log errors with context
 
-3. **Resource Management**
+### 3. Performance
 
-   - Configure appropriate concurrency levels
-   - Monitor memory usage
-   - Implement graceful shutdown
+- Configure appropriate concurrency
+- Implement job batching
+- Use connection pooling
+- Monitor queue metrics
 
-4. **Monitoring**
+### 4. Testing
 
-   - Track queue lengths
-   - Monitor worker health
-   - Set up alerts for anomalies
-
-5. **Testing**
-   - Mock Redis for unit tests
-   - Test error scenarios
-   - Verify job processing logic
-
-Remember to:
-
-- Keep job processors pure and isolated
-- Handle errors gracefully
-- Monitor queue health
-- Scale based on metrics
-- Test thoroughly
+- Mock Redis for unit tests
+- Test error scenarios
+- Verify job completion
+- Test retry mechanisms
 
 ```
 
