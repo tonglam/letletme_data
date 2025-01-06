@@ -1,12 +1,21 @@
 import { Application } from 'express';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
+import { queueConfig } from '../config/queue/queue.config';
 import { eventRepository } from '../domain/event/repository';
 import { createFPLClient } from '../infrastructure/http/fpl/client';
 import { FPLEndpoints } from '../infrastructure/http/fpl/types';
+import { createEventMetaQueueService } from '../queue/meta/event.meta.queue';
 import { ServiceContainer, ServiceKey } from '../service';
 import { createEventService } from '../service/event';
-import { APIError, APIErrorCode, createAPIError } from '../types/errors.type';
+import {
+  APIError,
+  APIErrorCode,
+  createAPIError,
+  createQueueError,
+  QueueErrorCode,
+} from '../types/errors.type';
+import { EventMetaService } from '../types/job.type';
 import { createServer } from './server';
 
 const express = require('express');
@@ -87,6 +96,41 @@ export const initializeApp = (): TE.TaskEither<APIError, void> =>
           eventRepository,
         ),
       }),
+    ),
+    // Initialize event meta queue service
+    TE.bind('queueService', ({ services }) =>
+      pipe(
+        TE.tryCatch(
+          async () => {
+            const eventService = services[ServiceKey.EVENT];
+            const eventMetaService: EventMetaService = {
+              syncMeta: () => TE.right(undefined),
+              syncEvents: () =>
+                pipe(
+                  eventService.syncEventsFromApi(),
+                  TE.map(() => undefined),
+                  TE.mapLeft((error) =>
+                    createQueueError(QueueErrorCode.PROCESSING_ERROR, 'meta', error as Error),
+                  ),
+                ),
+            };
+
+            const queueResult = await createEventMetaQueueService(queueConfig, eventMetaService)();
+            if (queueResult._tag === 'Left') {
+              throw queueResult.left;
+            }
+
+            // Schedule the event sync job
+            await queueResult.right.syncMeta('EVENTS')();
+            return queueResult.right;
+          },
+          (error) =>
+            createAPIError({
+              code: APIErrorCode.INTERNAL_SERVER_ERROR,
+              message: error instanceof Error ? error.message : 'Unknown error',
+            }),
+        ),
+      ),
     ),
     TE.chain(({ app, services }) =>
       TE.tryCatch(

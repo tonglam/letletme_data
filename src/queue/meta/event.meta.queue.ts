@@ -22,7 +22,7 @@ const processEventSync =
       TE.chain(() => {
         logger.info(
           { jobId: job.id, attemptsMade: job.attemptsMade },
-          'Starting events sync, attempt ${job.attemptsMade + 1}',
+          `Starting events sync, attempt ${job.attemptsMade + 1}`,
         );
         return eventService.syncEvents();
       }),
@@ -35,7 +35,7 @@ const processEventSync =
       TE.mapLeft((error: QueueError) => {
         logger.error(
           { error, jobId: job.id, attemptsMade: job.attemptsMade },
-          'Failed to process event sync on attempt ${job.attemptsMade + 1}',
+          `Failed to process event sync on attempt ${job.attemptsMade + 1}`,
         );
         return error;
       }),
