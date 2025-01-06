@@ -20,14 +20,23 @@ const processEventSync =
     pipe(
       TE.Do,
       TE.chain(() => {
-        logger.info({ jobId: job.id }, 'Starting events sync');
+        logger.info(
+          { jobId: job.id, attemptsMade: job.attemptsMade },
+          'Starting events sync, attempt ${job.attemptsMade + 1}',
+        );
         return eventService.syncEvents();
       }),
       TE.map(() => {
-        logger.info({ jobId: job.id }, 'Events sync completed');
+        logger.info(
+          { jobId: job.id, attemptsMade: job.attemptsMade },
+          'Events sync completed successfully',
+        );
       }),
       TE.mapLeft((error: QueueError) => {
-        logger.error({ error }, 'Failed to process event sync');
+        logger.error(
+          { error, jobId: job.id, attemptsMade: job.attemptsMade },
+          'Failed to process event sync on attempt ${job.attemptsMade + 1}',
+        );
         return error;
       }),
     );
@@ -37,10 +46,20 @@ export const createEventMetaQueueService = (
   config: { connection: QueueConnection },
   eventMetaService: EventMetaService,
 ) =>
-  createMetaQueueService(
-    config,
-    eventMetaService,
-    createMetaJobProcessor({
-      EVENTS: processEventSync(eventMetaService),
+  pipe(
+    createMetaQueueService(
+      config,
+      eventMetaService,
+      createMetaJobProcessor({
+        EVENTS: processEventSync(eventMetaService),
+      }),
+    ),
+    TE.map((service) => {
+      logger.info('Event meta queue service created successfully');
+      return service;
+    }),
+    TE.mapLeft((error) => {
+      logger.error({ error }, 'Failed to create event meta queue service');
+      return error;
     }),
   );
