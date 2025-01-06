@@ -1,7 +1,8 @@
--- Create custom types
-CREATE TYPE "PlayerValueChangeType" AS ENUM ('Start', 'Rise', 'Fall');
+-- Custom types
+CREATE TYPE "ElementType" AS ENUM ('GKP', 'DEF', 'MID', 'FWD');
+CREATE TYPE "ValueChangeType" AS ENUM ('Start', 'Rise', 'Fall');
 
--- Create tables
+-- Events table
 CREATE TABLE "events" (
     "id" INTEGER PRIMARY KEY,
     "name" TEXT NOT NULL,
@@ -30,7 +31,9 @@ CREATE TABLE "events" (
     "transfers_made" INTEGER NOT NULL DEFAULT 0,
     "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+ALTER TABLE "events" ENABLE ROW LEVEL SECURITY;
 
+-- Phases table
 CREATE TABLE "phases" (
     "id" INTEGER PRIMARY KEY,
     "name" TEXT NOT NULL,
@@ -39,7 +42,9 @@ CREATE TABLE "phases" (
     "highest_score" INTEGER,
     "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+ALTER TABLE "phases" ENABLE ROW LEVEL SECURITY;
 
+-- Teams table
 CREATE TABLE "teams" (
     "id" INTEGER PRIMARY KEY,
     "code" INTEGER NOT NULL,
@@ -64,41 +69,119 @@ CREATE TABLE "teams" (
     "unavailable" BOOLEAN NOT NULL DEFAULT false,
     "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+ALTER TABLE "teams" ENABLE ROW LEVEL SECURITY;
 
+-- Players table
 CREATE TABLE "players" (
     "element" INTEGER PRIMARY KEY,
     "element_code" INTEGER UNIQUE NOT NULL,
     "price" INTEGER NOT NULL DEFAULT 0,
     "start_price" INTEGER NOT NULL DEFAULT 0,
-    "element_type" INTEGER NOT NULL,
+    "element_type" "ElementType" NOT NULL,
     "first_name" TEXT,
     "second_name" TEXT,
     "web_name" TEXT NOT NULL,
-    "team_id" INTEGER NOT NULL REFERENCES "teams" ("id") ON DELETE CASCADE,
+    "team_id" INTEGER NOT NULL,
     "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+ALTER TABLE "players" ENABLE ROW LEVEL SECURITY;
 
+-- Player Values table
 CREATE TABLE "player_values" (
     "id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    "element_id" INTEGER NOT NULL REFERENCES "players" ("element") ON DELETE CASCADE,
+    "element_id" INTEGER NOT NULL,
     "element_type" INTEGER NOT NULL,
-    "event_id" INTEGER NOT NULL REFERENCES "events" ("id") ON DELETE CASCADE,
+    "event_id" INTEGER NOT NULL,
     "value" INTEGER NOT NULL,
+    "change_date" CHAR(8) NOT NULL,
+    "change_type" "ValueChangeType" NOT NULL,
     "last_value" INTEGER NOT NULL DEFAULT 0,
-    "change_date" TEXT NOT NULL,
-    "change_type" "PlayerValueChangeType" NOT NULL,
+    "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX "idx_player_values_element_id" ON "player_values" ("element_id");
+CREATE INDEX "idx_player_values_change_date" ON "player_values" ("change_date");
+CREATE INDEX "idx_player_values_event_id" ON "player_values" ("event_id");
+CREATE INDEX "idx_player_values_element_type" ON "player_values" ("element_type");
+ALTER TABLE "player_values" ENABLE ROW LEVEL SECURITY;
+
+-- Player Stats table
+CREATE TABLE "player_stats" (
+    "id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    "event_id" INTEGER NOT NULL,
+    "element_id" INTEGER NOT NULL,
+    "team_id" INTEGER NOT NULL,
+    "form" FLOAT,
+    "influence" FLOAT,
+    "creativity" FLOAT,
+    "threat" FLOAT,
+    "ict_index" FLOAT,
+    "expected_goals" DECIMAL(10,2),
+    "expected_assists" DECIMAL(10,2),
+    "expected_goal_involvements" DECIMAL(10,2),
+    "expected_goals_conceded" DECIMAL(10,2),
+    "minutes" INTEGER,
+    "goals_scored" INTEGER,
+    "assists" INTEGER,
+    "clean_sheets" INTEGER,
+    "goals_conceded" INTEGER,
+    "own_goals" INTEGER,
+    "penalties_saved" INTEGER,
+    "yellow_cards" INTEGER DEFAULT 0,
+    "red_cards" INTEGER DEFAULT 0,
+    "saves" INTEGER DEFAULT 0,
+    "bonus" INTEGER DEFAULT 0,
+    "bps" INTEGER DEFAULT 0,
+    "starts" INTEGER DEFAULT 0,
+    "influence_rank" INTEGER,
+    "influence_rank_type" INTEGER,
+    "creativity_rank" INTEGER,
+    "creativity_rank_type" INTEGER,
+    "threat_rank" INTEGER,
+    "threat_rank_type" INTEGER,
+    "ict_index_rank" INTEGER,
+    "ict_index_rank_type" INTEGER,
+    "expected_goals_per_90" DECIMAL(10,2),
+    "saves_per_90" DECIMAL(10,2),
+    "expected_assists_per_90" DECIMAL(10,2),
+    "expected_goal_involvements_per_90" DECIMAL(10,2),
+    "expected_goals_conceded_per_90" DECIMAL(10,2),
+    "goals_conceded_per_90" DECIMAL(10,2),
+    "starts_per_90" DECIMAL(10,2),
+    "clean_sheets_per_90" DECIMAL(10,2),
+    "corners_and_indirect_freekicks_order" INTEGER,
+    "corners_and_indirect_freekicks_text" TEXT,
+    "direct_freekicks_order" INTEGER,
+    "direct_freekicks_text" TEXT,
+    "penalties_order" INTEGER,
+    "penalties_text" TEXT,
     "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updated_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+CREATE UNIQUE INDEX "unique_event_element" ON "player_stats" ("event_id", "element_id");
+CREATE INDEX "idx_player_stats_element_id" ON "player_stats" ("element_id");
+CREATE INDEX "idx_player_stats_team_id" ON "player_stats" ("team_id");
+CREATE INDEX "idx_player_stats_event_id" ON "player_stats" ("event_id");
+ALTER TABLE "player_stats" ENABLE ROW LEVEL SECURITY;
 
--- Create indexes
-CREATE INDEX "idx_players_team_id" ON "players" ("team_id");
-CREATE INDEX "idx_player_values_element_id" ON "player_values" ("element_id");
-CREATE INDEX "idx_player_values_change_date" ON "player_values" ("change_date");
-
--- Enable Row Level Security
-ALTER TABLE "events" ENABLE ROW LEVEL SECURITY;
-ALTER TABLE "phases" ENABLE ROW LEVEL SECURITY;
-ALTER TABLE "teams" ENABLE ROW LEVEL SECURITY;
-ALTER TABLE "players" ENABLE ROW LEVEL SECURITY;
-ALTER TABLE "player_values" ENABLE ROW LEVEL SECURITY;
+-- Event Fixtures table
+CREATE TABLE "event_fixtures" (
+    "id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    "code" INTEGER NOT NULL,
+    "event" INTEGER NOT NULL,
+    "kickoff_time" TIMESTAMPTZ,
+    "started" BOOLEAN NOT NULL DEFAULT false,
+    "finished" BOOLEAN NOT NULL DEFAULT false,
+    "provisional_start_time" BOOLEAN NOT NULL DEFAULT false,
+    "finished_provisional" BOOLEAN NOT NULL DEFAULT false,
+    "minutes" INTEGER NOT NULL DEFAULT 0,
+    "team_h" INTEGER,
+    "team_h_difficulty" INTEGER NOT NULL DEFAULT 0,
+    "team_h_score" INTEGER NOT NULL DEFAULT 0,
+    "team_a" INTEGER,
+    "team_a_difficulty" INTEGER NOT NULL DEFAULT 0,
+    "team_a_score" INTEGER NOT NULL DEFAULT 0,
+    "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX "idx_home" ON "event_fixtures" ("event", "team_h");
+CREATE INDEX "idx_away" ON "event_fixtures" ("event", "team_a");
+ALTER TABLE "event_fixtures" ENABLE ROW LEVEL SECURITY;
