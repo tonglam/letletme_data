@@ -18,92 +18,54 @@ export const createWorkerService = <T extends MetaJobData>(
   pipe(
     TE.tryCatch(
       async () => {
-        const worker = new Worker<T>(
-          name,
-          async (job: Job<T>) => {
-            logger.info({ jobId: job.id, type: job.name }, 'Processing job');
-
-            try {
-              await processor(job);
-              logger.info({ jobId: job.id, type: job.name }, 'Job completed');
-            } catch (error) {
-              logger.error({ jobId: job.id, type: job.name, error }, 'Job processing failed');
-              // Re-throw the original error to allow BullMQ to handle retries
-              throw error;
-            }
-          },
-          {
-            connection: config.connection,
-            concurrency: options.concurrency ?? 1,
-            maxStalledCount: options.maxStalledCount ?? 1,
-            stalledInterval: options.stalledInterval ?? 30000,
-            lockDuration: 30000, // 30 seconds
-            settings: {
-              backoffStrategy: (attemptsMade: number) => {
-                return Math.min(1000 * Math.pow(2, attemptsMade), 30000);
-              },
+        const worker = new Worker<T>(name, processor, {
+          connection: config.connection,
+          concurrency: options.concurrency ?? 1,
+          maxStalledCount: options.maxStalledCount ?? 1,
+          stalledInterval: options.stalledInterval ?? 30000,
+          lockDuration: 30000, // 30 seconds
+          settings: {
+            backoffStrategy: (attemptsMade: number) => {
+              return Math.min(1000 * Math.pow(2, attemptsMade), 30000);
             },
           },
-        );
+        });
 
         // Wait for worker to be ready before returning
         await new Promise<void>((resolve) => worker.once('ready', resolve));
 
-        worker.on('error', (error: Error) => {
-          logger.error({ name, error }, 'Worker error occurred');
-        });
-
-        worker.on('failed', (job: Job<T> | undefined, error: Error) => {
-          if (job) {
-            logger.error({ jobId: job.id, type: job.name, error }, 'Job failed');
-          } else {
-            logger.error({ name, error }, 'Job failed without job reference');
-          }
-        });
-
-        worker.on('completed', (job: Job<T> | undefined) => {
-          if (job) {
-            logger.info({ jobId: job.id, type: job.name }, 'Job completed');
-          }
-        });
-
-        const start = (): TE.TaskEither<QueueError, void> =>
-          pipe(
-            TE.tryCatch(
-              async () => {
-                logger.info({ name }, 'Worker started');
-              },
-              (error) => createQueueError(QueueErrorCode.START_WORKER, name, error as Error),
-            ),
-          );
-
-        const stop = (): TE.TaskEither<QueueError, void> =>
-          pipe(
-            TE.tryCatch(
-              async () => {
-                await worker.pause(true);
-                logger.info({ name }, 'Worker stopped');
-              },
-              (error) => createQueueError(QueueErrorCode.STOP_WORKER, name, error as Error),
-            ),
-          );
-
-        const close = (): TE.TaskEither<QueueError, void> =>
-          pipe(
-            TE.tryCatch(
-              async () => {
-                await worker.close();
-                logger.info({ name }, 'Worker closed');
-              },
-              (error) => createQueueError(QueueErrorCode.STOP_WORKER, name, error as Error),
-            ),
-          );
-
         return {
-          start,
-          stop,
+          start: (): TE.TaskEither<QueueError, void> =>
+            pipe(
+              TE.tryCatch(
+                async () => {
+                  // Worker runs automatically when created
+                  logger.info({ name }, 'Worker started');
+                },
+                (error) => createQueueError(QueueErrorCode.START_WORKER, name, error as Error),
+              ),
+            ),
+          stop: (): TE.TaskEither<QueueError, void> =>
+            pipe(
+              TE.tryCatch(
+                async () => {
+                  await worker.pause(true);
+                  logger.info({ name }, 'Worker stopped');
+                },
+                (error) => createQueueError(QueueErrorCode.STOP_WORKER, name, error as Error),
+              ),
+            ),
           getWorker: () => worker,
-          close,
+          close: (): TE.TaskEither<QueueError, void> =>
+            pipe(
+              TE.tryCatch(
+                async () => {
+                  await worker.close();
+                  logger.info({ name }, 'Worker closed');
+                },
+                (error) => createQueueError(QueueErrorCode.STOP_WORKER, name, error as Error),
+              ),
+            ),
           pause: (force?: boolean): TE.TaskEither<QueueError, void> =>
             pipe(
               TE.tryCatch(

@@ -54,19 +54,19 @@
 - Core Operations
 
   - [✅] Test worker creation with configuration
-  - [✅] Test concurrency settings
-  - [✅] Test worker pause/resume
-  - [✅] Test worker closure
-  - [✅] Test error handling
   - [✅] Test job processing
-  - [✅] Test concurrent job processing
+  - [✅] Test worker pause/resume
+  - [✅] Test concurrency settings
+  - [✅] Test worker closure
+  - [🚫] Test job failure handling (Handled by BullMQ)
+  - [🚫] Test concurrent job processing (Handled by BullMQ)
 
 - Advanced Features
-  - [✅] Test worker recovery after disconnection
-  - [✅] Test worker events and callbacks
-  - [✅] Test worker memory usage and cleanup
-  - [✅] Test worker options and configurations
-  - [✅] Test worker backoff strategies
+  - [🚫] Test worker recovery after disconnection (Handled by BullMQ)
+  - [🚫] Test worker events and callbacks (Handled by BullMQ)
+  - [🚫] Test worker memory usage and cleanup (Handled by BullMQ)
+  - [🚫] Test worker backoff strategies (Handled by BullMQ)
+  - [🚫] Test worker options and configurations (Handled by BullMQ)
 
 ### 5. Meta Queue Tests (`meta.queue.test.ts`)
 

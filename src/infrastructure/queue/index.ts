@@ -3,7 +3,7 @@ export type { FlowService, QueueService, WorkerOptions, WorkerService } from './
 
 // Export core services
 export { createFlowService } from './core/flow.service';
-export { createQueueService } from './core/queue.service';
+export { createQueueServiceImpl } from './core/queue.service';
 export { createWorkerService } from './core/worker.service';
 
 // Export error types

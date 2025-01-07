@@ -1,20 +1,35 @@
+import { config } from 'dotenv';
+config();
+
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { createQueueService } from '../../../src/infrastructure/queue/core/queue.service';
+import { createQueueServiceImpl } from '../../../src/infrastructure/queue/core/queue.service';
+import { QueueService } from '../../../src/infrastructure/queue/types';
 import { QueueError, QueueErrorCode } from '../../../src/types/errors.type';
 import { JobData, JobName } from '../../../src/types/job.type';
 import { createTestMetaJobData, createTestQueueConfig } from '../../utils/queue.test.utils';
 
 describe('Queue Service Tests', () => {
+  // Validate Redis configuration
+  beforeAll(() => {
+    if (!process.env.REDIS_HOST || !process.env.REDIS_PASSWORD) {
+      throw new Error('Redis configuration is missing. Please check your .env file.');
+    }
+  });
+
   const queueName = 'test-queue';
-  const defaultJobName = 'meta' as JobName;
-  const config = createTestQueueConfig();
+  const defaultJobName: JobName = 'meta';
+  const queueConfig = createTestQueueConfig({
+    host: process.env.REDIS_HOST,
+    port: process.env.REDIS_PORT ? parseInt(process.env.REDIS_PORT) : 6379,
+    password: process.env.REDIS_PASSWORD,
+  });
 
   describe('Core Operations', () => {
     test('should create queue with configuration', async () => {
       const result = await pipe(
-        createQueueService<JobData>(queueName, config),
-        TE.map((service) => service.getQueue()),
+        createQueueServiceImpl<JobData>(queueName, queueConfig),
+        TE.map((service: QueueService<JobData>) => service.getQueue()),
       )();
 
       expect(result._tag).toBe('Right');
@@ -26,8 +41,10 @@ describe('Queue Service Tests', () => {
 
     test('should add job successfully', async () => {
       const result = await pipe(
-        createQueueService<JobData>(queueName, config),
-        TE.chain((service) => service.addJob(createTestMetaJobData({ name: defaultJobName }))),
+        createQueueServiceImpl<JobData>(queueName, queueConfig),
+        TE.chain((service: QueueService<JobData>) =>
+          service.addJob(createTestMetaJobData({ name: defaultJobName })),
+        ),
       )();
 
       expect(result._tag).toBe('Right');
@@ -39,8 +56,8 @@ describe('Queue Service Tests', () => {
       }));
 
       const result = await pipe(
-        createQueueService<JobData>(queueName, config),
-        TE.chain((service) => service.addBulk(jobs)),
+        createQueueServiceImpl<JobData>(queueName, queueConfig),
+        TE.chain((service: QueueService<JobData>) => service.addBulk(jobs)),
       )();
 
       expect(result._tag).toBe('Right');
@@ -48,8 +65,8 @@ describe('Queue Service Tests', () => {
 
     test('should remove job successfully', async () => {
       const result = await pipe(
-        createQueueService<JobData>(queueName, config),
-        TE.chain((service) =>
+        createQueueServiceImpl<JobData>(queueName, queueConfig),
+        TE.chain((service: QueueService<JobData>) =>
           pipe(
             service.addJob(createTestMetaJobData({ name: defaultJobName })),
             TE.chain(() => service.removeJob('meta-job')),
@@ -62,8 +79,8 @@ describe('Queue Service Tests', () => {
 
     test('should drain queue successfully', async () => {
       const result = await pipe(
-        createQueueService<JobData>(queueName, config),
-        TE.chain((service) => service.drain()),
+        createQueueServiceImpl<JobData>(queueName, queueConfig),
+        TE.chain((service: QueueService<JobData>) => service.drain()),
       )();
 
       expect(result._tag).toBe('Right');
@@ -71,8 +88,8 @@ describe('Queue Service Tests', () => {
 
     test('should clean queue successfully', async () => {
       const result = await pipe(
-        createQueueService<JobData>(queueName, config),
-        TE.chain((service) => service.clean(1000, 100, 'completed')),
+        createQueueServiceImpl<JobData>(queueName, queueConfig),
+        TE.chain((service: QueueService<JobData>) => service.clean(1000, 100, 'completed')),
       )();
 
       expect(result._tag).toBe('Right');
@@ -80,8 +97,8 @@ describe('Queue Service Tests', () => {
 
     test('should obliterate queue successfully', async () => {
       const result = await pipe(
-        createQueueService<JobData>(queueName, config),
-        TE.chain((service) => service.obliterate()),
+        createQueueServiceImpl<JobData>(queueName, queueConfig),
+        TE.chain((service: QueueService<JobData>) => service.obliterate()),
       )();
 
       expect(result._tag).toBe('Right');
@@ -89,8 +106,8 @@ describe('Queue Service Tests', () => {
 
     test('should pause and resume queue successfully', async () => {
       const result = await pipe(
-        createQueueService<JobData>(queueName, config),
-        TE.chain((service) =>
+        createQueueServiceImpl<JobData>(queueName, queueConfig),
+        TE.chain((service: QueueService<JobData>) =>
           pipe(
             service.pause(),
             TE.chain(() => service.resume()),
@@ -123,8 +140,10 @@ describe('Queue Service Tests', () => {
       };
 
       const result = await pipe(
-        createQueueService<JobData>(queueName, invalidConfig),
-        TE.chain((service) => service.addJob(createTestMetaJobData({ name: defaultJobName }))),
+        createQueueServiceImpl<JobData>(queueName, invalidConfig),
+        TE.chain((service: QueueService<JobData>) =>
+          service.addJob(createTestMetaJobData({ name: defaultJobName })),
+        ),
       )();
 
       expect(result._tag).toBe('Left');
@@ -136,8 +155,8 @@ describe('Queue Service Tests', () => {
 
     test('should handle job addition with invalid data', async () => {
       const result = await pipe(
-        createQueueService<JobData>(queueName, config),
-        TE.chain((service) =>
+        createQueueServiceImpl<JobData>(queueName, queueConfig),
+        TE.chain((service: QueueService<JobData>) =>
           service.addJob({
             type: 'INVALID_TYPE' as JobData['type'],
             name: defaultJobName,
@@ -161,8 +180,8 @@ describe('Queue Service Tests', () => {
   describe('Job Operations', () => {
     test('should add job to queue', async () => {
       const result = await pipe(
-        createQueueService<JobData>(queueName, config),
-        TE.chain((service) =>
+        createQueueServiceImpl<JobData>(queueName, queueConfig),
+        TE.chain((service: QueueService<JobData>) =>
           pipe(
             service.addJob(createTestMetaJobData({ name: defaultJobName })),
             TE.chain(() => service.obliterate()),
@@ -179,8 +198,8 @@ describe('Queue Service Tests', () => {
       }));
 
       const result = await pipe(
-        createQueueService<JobData>(queueName, config),
-        TE.chain((service) =>
+        createQueueServiceImpl<JobData>(queueName, queueConfig),
+        TE.chain((service: QueueService<JobData>) =>
           pipe(
             service.addBulk(jobs),
             TE.chain(() => service.obliterate()),
@@ -192,11 +211,9 @@ describe('Queue Service Tests', () => {
     });
 
     test('should handle invalid job data', async () => {
-      const invalidConfig = createTestQueueConfig();
-
       const result = await pipe(
-        createQueueService<JobData>(queueName, invalidConfig),
-        TE.chain((service) =>
+        createQueueServiceImpl<JobData>(queueName, queueConfig),
+        TE.chain((service: QueueService<JobData>) =>
           pipe(
             service.addJob(createTestMetaJobData({ name: defaultJobName })),
             TE.chain(() => service.obliterate()),
@@ -211,8 +228,8 @@ describe('Queue Service Tests', () => {
   // Cleanup after each test
   afterEach(async () => {
     const cleanup = await pipe(
-      createQueueService<JobData>(queueName, config),
-      TE.chain((service) => service.obliterate()),
+      createQueueServiceImpl<JobData>(queueName, queueConfig),
+      TE.chain((service: QueueService<JobData>) => service.obliterate()),
     )();
     expect(cleanup._tag).toBe('Right');
   });

@@ -51,7 +51,7 @@ const convertToJobOptions = (options?: JobOptions): JobsOptions => ({
   backoff: options?.backoff,
 });
 
-export const createQueueService = <T extends MetaJobData>(
+export const createQueueServiceImpl = <T extends MetaJobData>(
   name: string,
   config: QueueConfig,
 ): TE.TaskEither<QueueError, QueueService<T>> =>
@@ -67,9 +67,20 @@ export const createQueueService = <T extends MetaJobData>(
           },
         }) as QueueType;
 
-        logger.info({ name }, 'Queue created with producer connection');
+        logger.info({ name }, 'Queue service initialized');
 
         const scheduler = createSchedulerService<T>(name, queue);
+
+        const close = (): TE.TaskEither<QueueError, void> =>
+          pipe(
+            TE.tryCatch(
+              async () => {
+                await queue.close();
+                logger.info({ name }, 'Queue service closed');
+              },
+              (error) => createQueueError(QueueErrorCode.STOP_WORKER, name, error as Error),
+            ),
+          );
 
         const addJob = (data: T, options?: JobOptions): TE.TaskEither<QueueError, void> =>
           pipe(
@@ -78,7 +89,7 @@ export const createQueueService = <T extends MetaJobData>(
               TE.tryCatch(
                 async () => {
                   await (queue as Queue<T> & BullMQQueueMethods<T>).add(
-                    data.type,
+                    data.name,
                     data,
                     convertToJobOptions(options),
                   );
@@ -193,7 +204,11 @@ export const createQueueService = <T extends MetaJobData>(
             ),
           );
 
+        const getQueue = (): Queue<T> => queue;
+
         return {
+          getQueue,
+          close,
           addJob,
           addBulk,
           removeJob,
@@ -202,7 +217,6 @@ export const createQueueService = <T extends MetaJobData>(
           obliterate,
           pause,
           resume,
-          getQueue: () => queue,
           upsertJobScheduler: scheduler.upsertJobScheduler,
           getJobSchedulers: scheduler.getJobSchedulers,
         };
@@ -210,164 +224,3 @@ export const createQueueService = <T extends MetaJobData>(
       (error) => createQueueError(QueueErrorCode.CREATE_QUEUE, name, error as Error),
     ),
   );
-
-export class QueueServiceImpl<T extends MetaJobData> {
-  private readonly queue: Queue<T>;
-  private readonly name: string;
-
-  constructor(config: QueueConfig) {
-    this.name = 'test-queue';
-    this.queue = new Queue<T>(this.name, {
-      connection: config.connection,
-      defaultJobOptions: {
-        removeOnComplete: true,
-        removeOnFail: true,
-      },
-    });
-    logger.info({ name: this.name }, 'Queue service initialized');
-  }
-
-  getQueue(): Queue<T> {
-    return this.queue;
-  }
-
-  close(): TE.TaskEither<QueueError, void> {
-    return pipe(
-      TE.tryCatch(
-        async () => {
-          await this.queue.close();
-          logger.info({ name: this.name }, 'Queue service closed');
-        },
-        (error) => createQueueError(QueueErrorCode.STOP_WORKER, this.name, error as Error),
-      ),
-    );
-  }
-
-  addJob(data: T, options?: JobOptions): TE.TaskEither<QueueError, void> {
-    return pipe(
-      validateJobData(data),
-      TE.chain(() =>
-        TE.tryCatch(
-          async () => {
-            await (this.queue as Queue<T> & BullMQQueueMethods<T>).add(
-              data.type,
-              data,
-              convertToJobOptions(options),
-            );
-            logger.info(
-              { name: this.name, jobType: data.type, options },
-              options?.lifo ? 'Job added (LIFO)' : 'Job added (FIFO)',
-            );
-          },
-          (error) => createQueueError(QueueErrorCode.ADD_JOB, this.name, error as Error),
-        ),
-      ),
-    );
-  }
-
-  addBulk(jobs: Array<{ data: T; options?: JobOptions }>): TE.TaskEither<QueueError, void> {
-    return pipe(
-      TE.tryCatch(
-        async () => {
-          if (jobs.length === 0) return;
-
-          // Validate all jobs first
-          await Promise.all(jobs.map((job) => validateJobData(job.data)()));
-
-          const bulkJobs = jobs.map((job) => ({
-            name: job.data.type,
-            data: job.data,
-            opts: convertToJobOptions(job.options),
-          }));
-
-          await (this.queue as Queue<T> & BullMQQueueMethods<T>).addBulk(bulkJobs);
-          logger.info({ name: this.name, count: jobs.length }, 'Bulk jobs added');
-        },
-        (error) => createQueueError(QueueErrorCode.ADD_JOB, this.name, error as Error),
-      ),
-    );
-  }
-
-  removeJob(jobId: string): TE.TaskEither<QueueError, void> {
-    return pipe(
-      TE.tryCatch(
-        async () => {
-          const job = await this.queue.getJob(jobId);
-          if (job) {
-            await job.remove();
-            logger.info({ name: this.name, jobId }, 'Job removed');
-          }
-        },
-        (error) => createQueueError(QueueErrorCode.REMOVE_JOB, this.name, error as Error),
-      ),
-    );
-  }
-
-  drain(): TE.TaskEither<QueueError, void> {
-    return pipe(
-      TE.tryCatch(
-        async () => {
-          await this.queue.drain();
-          logger.info({ name: this.name }, 'Queue drained (removed waiting and delayed jobs)');
-        },
-        (error) => createQueueError(QueueErrorCode.REMOVE_JOB, this.name, error as Error),
-      ),
-    );
-  }
-
-  clean(
-    gracePeriod: number,
-    limit: number,
-    status: BullMQJobStatus,
-  ): TE.TaskEither<QueueError, string[]> {
-    return pipe(
-      TE.tryCatch(
-        async () => {
-          const removedJobs = await this.queue.clean(gracePeriod, limit, status);
-          logger.info(
-            { name: this.name, gracePeriod, limit, status, count: removedJobs.length },
-            'Cleaned jobs with status',
-          );
-          return removedJobs;
-        },
-        (error) => createQueueError(QueueErrorCode.REMOVE_JOB, this.name, error as Error),
-      ),
-    );
-  }
-
-  obliterate(): TE.TaskEither<QueueError, void> {
-    return pipe(
-      TE.tryCatch(
-        async () => {
-          await this.queue.obliterate();
-          logger.info({ name: this.name }, 'Queue completely obliterated');
-        },
-        (error) => createQueueError(QueueErrorCode.REMOVE_JOB, this.name, error as Error),
-      ),
-    );
-  }
-
-  pause(): TE.TaskEither<QueueError, void> {
-    return pipe(
-      TE.tryCatch(
-        async () => {
-          await this.queue.pause();
-          logger.info({ name: this.name }, 'Queue paused');
-        },
-        (error) => createQueueError(QueueErrorCode.PAUSE_QUEUE, this.name, error as Error),
-      ),
-    );
-  }
-
-  resume(): TE.TaskEither<QueueError, void> {
-    return pipe(
-      TE.tryCatch(
-        async () => {
-          await this.queue.resume();
-          logger.info({ name: this.name }, 'Queue resumed');
-        },
-        (error) => createQueueError(QueueErrorCode.RESUME_QUEUE, this.name, error as Error),
-      ),
-    );
-  }
-}

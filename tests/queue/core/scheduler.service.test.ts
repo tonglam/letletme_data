@@ -1,7 +1,8 @@
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { createQueueService } from '../../../src/infrastructure/queue/core/queue.service';
+import { createQueueServiceImpl } from '../../../src/infrastructure/queue/core/queue.service';
 import { createSchedulerService } from '../../../src/infrastructure/queue/core/scheduler.service';
+import { QueueService } from '../../../src/infrastructure/queue/types';
 import { QueueError, QueueErrorCode } from '../../../src/types/errors.type';
 import { JobName, MetaJobData } from '../../../src/types/job.type';
 import { createTestMetaJobData, createTestQueueConfig } from '../../utils/queue.test.utils';
@@ -14,8 +15,8 @@ describe('Scheduler Service Tests', () => {
   describe('Job Scheduling', () => {
     test('should schedule job successfully', async () => {
       const result = await pipe(
-        createQueueService<MetaJobData>(queueName, config),
-        TE.chain((queueService) =>
+        createQueueServiceImpl<MetaJobData>(queueName, config),
+        TE.chain((queueService: QueueService<MetaJobData>) =>
           pipe(
             TE.right(createSchedulerService(queueName, queueService.getQueue())),
             TE.chain((schedulerService) =>
@@ -37,8 +38,8 @@ describe('Scheduler Service Tests', () => {
 
     test('should get job schedulers', async () => {
       const result = await pipe(
-        createQueueService<MetaJobData>(queueName, config),
-        TE.chain((queueService) =>
+        createQueueServiceImpl<MetaJobData>(queueName, config),
+        TE.chain((queueService: QueueService<MetaJobData>) =>
           pipe(
             TE.right(createSchedulerService(queueName, queueService.getQueue())),
             TE.chain((schedulerService) =>
@@ -67,8 +68,8 @@ describe('Scheduler Service Tests', () => {
 
     test('should handle invalid scheduler creation', async () => {
       const result = await pipe(
-        createQueueService<MetaJobData>(queueName, config),
-        TE.chain((queueService) =>
+        createQueueServiceImpl<MetaJobData>(queueName, config),
+        TE.chain((queueService: QueueService<MetaJobData>) =>
           pipe(
             TE.right(createSchedulerService(queueName, queueService.getQueue())),
             TE.chain((schedulerService) =>
@@ -96,8 +97,8 @@ describe('Scheduler Service Tests', () => {
   // Cleanup after each test
   afterEach(async () => {
     const cleanup = await pipe(
-      createQueueService<MetaJobData>(queueName, config),
-      TE.chain((service) => service.obliterate()),
+      createQueueServiceImpl<MetaJobData>(queueName, config),
+      TE.chain((service: QueueService<MetaJobData>) => service.obliterate()),
     )();
     expect(cleanup._tag).toBe('Right');
   });

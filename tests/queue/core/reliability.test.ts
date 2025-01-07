@@ -1,8 +1,9 @@
 import { Job } from 'bullmq';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { createQueueService } from '../../../src/infrastructure/queue/core/queue.service';
+import { createQueueServiceImpl } from '../../../src/infrastructure/queue/core/queue.service';
 import { createWorkerService } from '../../../src/infrastructure/queue/core/worker.service';
+import { QueueService } from '../../../src/infrastructure/queue/types';
 import { QueueError } from '../../../src/types/errors.type';
 import { JobName, MetaJobData } from '../../../src/types/job.type';
 import { createTestMetaJobData, createTestQueueConfig } from '../../utils/queue.test.utils';
@@ -27,8 +28,8 @@ describe('Queue Reliability Tests', () => {
   beforeEach(async () => {
     try {
       const cleanup = await pipe(
-        createQueueService<MetaJobData>(queueName, config),
-        TE.chain((service) => service.obliterate()),
+        createQueueServiceImpl<MetaJobData>(queueName, config),
+        TE.chain((service: QueueService<MetaJobData>) => service.obliterate()),
       )();
       expect(cleanup._tag).toBe('Right');
     } catch (error) {
@@ -60,7 +61,7 @@ describe('Queue Reliability Tests', () => {
 
       const result = await pipe(
         TE.Do,
-        TE.bind('queueService', () => createQueueService<MetaJobData>(queueName, config)),
+        TE.bind('queueService', () => createQueueServiceImpl<MetaJobData>(queueName, config)),
         TE.bind('workerService', () =>
           createWorkerService<MetaJobData>(queueName, config, async (job: Job<MetaJobData>) => {
             processedJobs.push(job.data);
@@ -108,7 +109,7 @@ describe('Queue Reliability Tests', () => {
 
       const result = await pipe(
         TE.Do,
-        TE.bind('queueService', () => createQueueService<MetaJobData>(queueName, config)),
+        TE.bind('queueService', () => createQueueServiceImpl<MetaJobData>(queueName, config)),
         TE.bind('workerService', () =>
           createWorkerService<MetaJobData>(queueName, config, async (job: Job<MetaJobData>) => {
             processedJobs.push(job.data);
@@ -143,8 +144,8 @@ describe('Queue Reliability Tests', () => {
   // Cleanup after each test
   afterEach(async () => {
     const cleanup = await pipe(
-      createQueueService<MetaJobData>(queueName, config),
-      TE.chain((service) => service.obliterate()),
+      createQueueServiceImpl<MetaJobData>(queueName, config),
+      TE.chain((service: QueueService<MetaJobData>) => service.obliterate()),
     )();
     expect(cleanup._tag).toBe('Right');
   });

@@ -1,9 +1,10 @@
 import { Job } from 'bullmq';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { createQueueService } from '../../../src/infrastructure/queue/core/queue.service';
+import { createQueueServiceImpl } from '../../../src/infrastructure/queue/core/queue.service';
 import { createSchedulerService } from '../../../src/infrastructure/queue/core/scheduler.service';
 import { createWorkerService } from '../../../src/infrastructure/queue/core/worker.service';
+import { QueueService } from '../../../src/infrastructure/queue/types';
 import { QueueError } from '../../../src/types/errors.type';
 import { JobName, MetaJobData } from '../../../src/types/job.type';
 import { createTestMetaJobData, createTestQueueConfig } from '../../utils/queue.test.utils';
@@ -27,16 +28,16 @@ describe('Scheduler Queue Integration Tests', () => {
   // Cleanup before and after each test
   beforeEach(async () => {
     const cleanup = await pipe(
-      createQueueService<MetaJobData>(queueName, config),
-      TE.chain((service) => service.obliterate()),
+      createQueueServiceImpl<MetaJobData>(queueName, config),
+      TE.chain((service: QueueService<MetaJobData>) => service.obliterate()),
     )();
     expect(cleanup._tag).toBe('Right');
   });
 
   afterEach(async () => {
     const cleanup = await pipe(
-      createQueueService<MetaJobData>(queueName, config),
-      TE.chain((service) => service.obliterate()),
+      createQueueServiceImpl<MetaJobData>(queueName, config),
+      TE.chain((service: QueueService<MetaJobData>) => service.obliterate()),
     )();
     expect(cleanup._tag).toBe('Right');
   });
@@ -63,7 +64,7 @@ describe('Scheduler Queue Integration Tests', () => {
 
       const result = await pipe(
         TE.Do,
-        TE.bind('queueService', () => createQueueService<MetaJobData>(queueName, config)),
+        TE.bind('queueService', () => createQueueServiceImpl<MetaJobData>(queueName, config)),
         TE.bind('workerService', () =>
           createWorkerService<MetaJobData>(queueName, config, async (job: Job<MetaJobData>) => {
             console.log(`Processing job ${job.id} with data:`, job.data);
@@ -71,12 +72,16 @@ describe('Scheduler Queue Integration Tests', () => {
             console.log(`Job ${job.id} processed successfully`);
           }),
         ),
-        TE.bind('schedulerService', ({ queueService }) =>
-          TE.right(createSchedulerService(queueName, queueService.getQueue())),
-        ),
-        TE.chain(({ schedulerService, workerService }) =>
+        TE.chain((services) => {
+          const schedulerService = createSchedulerService<MetaJobData>(
+            queueName,
+            services.queueService.getQueue(),
+          );
+          return TE.right({ ...services, schedulerService });
+        }),
+        TE.chain((services) =>
           pipe(
-            schedulerService.upsertJobScheduler(
+            services.schedulerService.upsertJobScheduler(
               'test-scheduler',
               { every: 1000 },
               {
@@ -90,7 +95,7 @@ describe('Scheduler Queue Integration Tests', () => {
                 (error) => error as QueueError,
               ),
             ),
-            TE.chain(() => workerService.close()),
+            TE.chain(() => services.workerService.close()),
           ),
         ),
       )();

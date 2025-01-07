@@ -3,7 +3,7 @@ import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import { QUEUE_CONFIG } from '../../config/queue/queue.config';
 import { getQueueLogger } from '../../infrastructure/logger';
-import { createQueueService } from '../../infrastructure/queue/core/queue.service';
+import { createQueueServiceImpl } from '../../infrastructure/queue/core/queue.service';
 import { JobOptions } from '../../infrastructure/queue/types';
 import { createQueueError, QueueError, QueueErrorCode } from '../../types/errors.type';
 import {
@@ -76,7 +76,7 @@ export const createMetaQueueService = (
     TE.Do,
     TE.bind('queueService', () =>
       pipe(
-        createQueueService<MetaJobData>('meta', config),
+        createQueueServiceImpl<MetaJobData>('meta', config),
         TE.mapLeft((error) => {
           logger.error({ error }, 'Failed to create queue service');
           return error;

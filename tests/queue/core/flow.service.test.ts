@@ -1,20 +1,24 @@
 import { Worker } from 'bullmq';
 import * as E from 'fp-ts/Either';
 import { createFlowService } from '../../../src/infrastructure/queue/core/flow.service';
-import { QueueServiceImpl } from '../../../src/infrastructure/queue/core/queue.service';
-import { FlowJob, FlowService } from '../../../src/infrastructure/queue/types';
+import { createQueueServiceImpl } from '../../../src/infrastructure/queue/core/queue.service';
+import { FlowJob, FlowService, QueueService } from '../../../src/infrastructure/queue/types';
 import { JobName, MetaJobData } from '../../../src/types/job.type';
 import { createTestMetaJobData, createTestQueueConfig } from '../../utils/queue.test.utils';
 
 describe('Flow Service', () => {
   const queueName = 'test-queue';
-  let queueService: QueueServiceImpl<MetaJobData>;
+  let queueService: QueueService<MetaJobData>;
   let flowService: FlowService<MetaJobData>;
   let worker: Worker<MetaJobData>;
 
   beforeAll(async () => {
     const config = createTestQueueConfig();
-    queueService = new QueueServiceImpl<MetaJobData>(config);
+    const queueServiceResult = await createQueueServiceImpl<MetaJobData>(queueName, config)();
+    if (queueServiceResult._tag === 'Left') {
+      throw queueServiceResult.left;
+    }
+    queueService = queueServiceResult.right;
 
     // Create a worker to process jobs
     worker = new Worker<MetaJobData>(
@@ -43,7 +47,7 @@ describe('Flow Service', () => {
 
   afterAll(async () => {
     await worker.close();
-    await queueService.close();
+    await queueService.getQueue().disconnect();
   });
 
   describe('Parent-Child Relationship', () => {

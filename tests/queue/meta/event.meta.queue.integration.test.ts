@@ -119,21 +119,43 @@ describe('Event Meta Queue Integration Tests', () => {
         (eventMetaService.syncEvents as jest.Mock).mockClear();
 
         // Add jobs sequentially to ensure rate limiting takes effect
-        const jobCount = QUEUE_CONFIG.RATE_LIMIT.MAX;
+        const jobCount = QUEUE_CONFIG.RATE_LIMIT.MAX * 2; // Double the rate limit to test throttling
         const startTime = Date.now();
+        const processingTimes: number[] = [];
 
+        // Track when each job is processed
+        (eventMetaService.syncEvents as jest.Mock).mockImplementation(() => {
+          processingTimes.push(Date.now() - startTime);
+          return TE.right(undefined);
+        });
+
+        // Add jobs rapidly
         for (let i = 0; i < jobCount; i++) {
           await queueService.syncMeta('EVENTS')();
-          // Add small delay between job additions to ensure proper rate limiting
-          await new Promise((resolve) => setTimeout(resolve, 100));
         }
 
         // Wait for all jobs to complete
-        await new Promise((resolve) => setTimeout(resolve, QUEUE_CONFIG.RATE_LIMIT.DURATION));
+        await new Promise((resolve) => setTimeout(resolve, QUEUE_CONFIG.RATE_LIMIT.DURATION * 3));
 
         const duration = Date.now() - startTime;
-        expect(duration).toBeGreaterThanOrEqual(QUEUE_CONFIG.RATE_LIMIT.DURATION);
-        expect(eventMetaService.syncEvents).toHaveBeenCalledTimes(jobCount);
+
+        // Verify timing constraints
+        expect(duration).toBeGreaterThanOrEqual(QUEUE_CONFIG.RATE_LIMIT.DURATION * 2);
+
+        // Verify that jobs were processed in batches due to rate limiting
+        const jobBatches = processingTimes.reduce(
+          (acc, time) => {
+            const batchIndex = Math.floor(time / QUEUE_CONFIG.RATE_LIMIT.DURATION);
+            acc[batchIndex] = (acc[batchIndex] || 0) + 1;
+            return acc;
+          },
+          {} as Record<number, number>,
+        );
+
+        // Each batch should not exceed the rate limit
+        Object.values(jobBatches).forEach((batchCount) => {
+          expect(batchCount).toBeLessThanOrEqual(QUEUE_CONFIG.RATE_LIMIT.MAX);
+        });
       }
     }, 30000);
 

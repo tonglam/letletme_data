@@ -4,8 +4,9 @@ config();
 import { Job } from 'bullmq';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { createQueueService } from '../../../src/infrastructure/queue/core/queue.service';
+import { createQueueServiceImpl } from '../../../src/infrastructure/queue/core/queue.service';
 import { createWorkerService } from '../../../src/infrastructure/queue/core/worker.service';
+import { QueueService } from '../../../src/infrastructure/queue/types';
 import { QueueError } from '../../../src/types/errors.type';
 import { JobData, JobName } from '../../../src/types/job.type';
 import { createTestMetaJobData, createTestQueueConfig } from '../../utils/queue.test.utils';
@@ -27,16 +28,16 @@ describe('Queue-Worker Integration Tests', () => {
   // Cleanup before and after each test
   beforeEach(async () => {
     const cleanup = await pipe(
-      createQueueService<JobData>(queueName, config),
-      TE.chain((service) => service.obliterate()),
+      createQueueServiceImpl<JobData>(queueName, config),
+      TE.chain((service: QueueService<JobData>) => service.obliterate()),
     )();
     expect(cleanup._tag).toBe('Right');
   });
 
   afterEach(async () => {
     const cleanup = await pipe(
-      createQueueService<JobData>(queueName, config),
-      TE.chain((service) => service.obliterate()),
+      createQueueServiceImpl<JobData>(queueName, config),
+      TE.chain((service: QueueService<JobData>) => service.obliterate()),
     )();
     expect(cleanup._tag).toBe('Right');
   });
@@ -67,7 +68,7 @@ describe('Queue-Worker Integration Tests', () => {
 
       const result = await pipe(
         TE.Do,
-        TE.bind('queueService', () => createQueueService<JobData>(queueName, config)),
+        TE.bind('queueService', () => createQueueServiceImpl<JobData>(queueName, config)),
         TE.bind('workerService', () =>
           createWorkerService<JobData>(
             queueName,
@@ -77,7 +78,7 @@ describe('Queue-Worker Integration Tests', () => {
               processedJobs.push(job.data);
               console.log(`Job ${job.id} processed successfully`);
             },
-            { autorun: true },
+            { concurrency: 1 },
           ),
         ),
         TE.chain(({ queueService, workerService }) =>
@@ -133,7 +134,7 @@ describe('Queue-Worker Integration Tests', () => {
 
       const result = await pipe(
         TE.Do,
-        TE.bind('queueService', () => createQueueService<JobData>(queueName, config)),
+        TE.bind('queueService', () => createQueueServiceImpl<JobData>(queueName, config)),
         TE.bind('workerService', () =>
           createWorkerService<JobData>(
             queueName,
@@ -144,7 +145,7 @@ describe('Queue-Worker Integration Tests', () => {
               processedJobs.push(job.data);
               console.log(`Job ${job.id} processed successfully`);
             },
-            { concurrency, autorun: true },
+            { concurrency },
           ),
         ),
         TE.chain(({ queueService, workerService }) =>
@@ -198,7 +199,7 @@ describe('Queue-Worker Integration Tests', () => {
 
       const result = await pipe(
         TE.Do,
-        TE.bind('queueService', () => createQueueService<JobData>(queueName, config)),
+        TE.bind('queueService', () => createQueueServiceImpl<JobData>(queueName, config)),
         TE.bind('workerService', () =>
           createWorkerService<JobData>(
             queueName,
@@ -212,7 +213,7 @@ describe('Queue-Worker Integration Tests', () => {
               }
               console.log(`Job ${job.id} processed successfully on attempt ${attempts}`);
             },
-            { autorun: true },
+            { concurrency: 1 },
           ),
         ),
         TE.chain(({ queueService, workerService }) =>
@@ -269,7 +270,7 @@ describe('Queue-Worker Integration Tests', () => {
 
       const result = await pipe(
         TE.Do,
-        TE.bind('queueService', () => createQueueService<JobData>(queueName, config)),
+        TE.bind('queueService', () => createQueueServiceImpl<JobData>(queueName, config)),
         TE.bind('workerService', () =>
           createWorkerService<JobData>(
             queueName,
@@ -279,7 +280,7 @@ describe('Queue-Worker Integration Tests', () => {
               processedJobs.push(job.data);
               console.log(`Job ${job.id} processed successfully`);
             },
-            { autorun: true },
+            { concurrency: 1 },
           ),
         ),
         TE.chain(({ queueService, workerService }) =>
@@ -295,7 +296,7 @@ describe('Queue-Worker Integration Tests', () => {
                   processedJobs.push(job.data);
                   console.log(`Job ${job.id} processed successfully`);
                 },
-                { autorun: true },
+                { concurrency: 1 },
               );
             }),
             TE.chain((newWorker) =>
@@ -333,7 +334,7 @@ describe('Queue-Worker Integration Tests', () => {
 
       const result = await pipe(
         TE.Do,
-        TE.bind('queueService', () => createQueueService<JobData>(queueName, config)),
+        TE.bind('queueService', () => createQueueServiceImpl<JobData>(queueName, config)),
         TE.bind('workerService', () =>
           createWorkerService<JobData>(
             queueName,
@@ -341,7 +342,7 @@ describe('Queue-Worker Integration Tests', () => {
             async (job: Job<JobData>) => {
               expect(job.data).toEqual(jobData);
             },
-            { autorun: true },
+            { concurrency: 1 },
           ),
         ),
         TE.chain(({ queueService, workerService }) =>
