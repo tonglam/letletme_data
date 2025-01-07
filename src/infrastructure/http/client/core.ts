@@ -8,7 +8,7 @@
 import axios, { AxiosRequestConfig } from 'axios';
 import * as TE from 'fp-ts/TaskEither';
 import { HTTP_STATUS } from '../../../config/http/http.config';
-import { APIError } from '../../../types/errors.type';
+import { APIError } from '../../../types/error.type';
 import { HTTPClient, HTTPClientContext, HttpMethod, RequestBody, RequestOptions } from './types';
 import { calculateRetryDelay, createErrorFromStatus, createMonitor, delay } from './utils';
 

@@ -8,7 +8,7 @@ import * as E from 'fp-ts/Either';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
 import { z } from 'zod';
-import { APIError, APIErrorCode, CacheError, DBError, createAPIError } from './errors.type';
+import { APIError, APIErrorCode, CacheError, DBError, createAPIError } from './error.type';
 
 // ============ Constants ============
 /**

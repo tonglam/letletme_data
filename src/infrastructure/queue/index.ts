@@ -7,8 +7,8 @@ export { createQueueServiceImpl } from './core/queue.service';
 export { createWorkerService } from './core/worker.service';
 
 // Export error types
-export { QueueErrorCode } from '../../types/errors.type';
-export type { QueueError } from '../../types/errors.type';
+export { QueueErrorCode } from '../../types/error.type';
+export type { QueueError } from '../../types/error.type';
 
 // Export flow types
 export type { FlowJob, FlowOpts } from './types';

@@ -5,7 +5,7 @@ import { QUEUE_CONFIG } from '../../config/queue/queue.config';
 import { getQueueLogger } from '../../infrastructure/logger';
 import { createQueueServiceImpl } from '../../infrastructure/queue/core/queue.service';
 import { JobOptions } from '../../infrastructure/queue/types';
-import { createQueueError, QueueError, QueueErrorCode } from '../../types/errors.type';
+import { createQueueError, QueueError, QueueErrorCode } from '../../types/error.type';
 import {
   MetaJobData,
   MetaOperation,

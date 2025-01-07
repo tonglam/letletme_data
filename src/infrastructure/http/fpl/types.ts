@@ -14,10 +14,10 @@ import {
   EntryResponse,
   EntryTransfersResponse,
 } from '../../../types/entry.type';
-import { APIError, APIErrorCode, createAPIError } from '../../../types/errors.type';
+import { APIError, APIErrorCode, createAPIError } from '../../../types/error.type';
 import { EventFixture } from '../../../types/event-fixture.type';
 import { EventLiveResponse, EventPicksResponse } from '../../../types/event-live.type';
-import { ClassicLeagueResponse, CupResponse, H2hLeagueResponse } from '../../../types/leagues.type';
+import { ClassicLeagueResponse, CupResponse, H2hLeagueResponse } from '../../../types/league.type';
 import { RequestOptions } from '../client/types';
 
 /**

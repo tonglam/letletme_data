@@ -19,8 +19,8 @@ import {
   createAPIError,
   ServiceError,
   ServiceErrorCode,
-} from '../../src/types/errors.type';
-import { Event } from '../../src/types/events.type';
+} from '../../src/types/error.type';
+import { Event } from '../../src/types/event.type';
 
 describe('Event Workflow Integration Tests', () => {
   // Service and workflow instances

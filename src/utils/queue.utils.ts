@@ -1,5 +1,5 @@
 import { Job } from 'bullmq';
-import { QueueError, QueueErrorCode } from '../types/errors.type';
+import { QueueError, QueueErrorCode } from '../types/error.type';
 import { BaseJobData } from '../types/queue.type';
 
 /**

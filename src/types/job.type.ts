@@ -32,7 +32,7 @@ export const isJobName = (name: string): name is JobName => name === 'meta';
 import { Job, Worker } from 'bullmq';
 import * as TE from 'fp-ts/TaskEither';
 import { QueueService } from '../infrastructure/queue/types';
-import { QueueError } from './errors.type';
+import { QueueError } from './error.type';
 
 export interface MetaQueueService extends QueueService<MetaJobData> {
   readonly processJob: (job: Job<MetaJobData>) => TE.TaskEither<QueueError, void>;

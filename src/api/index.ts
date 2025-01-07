@@ -6,7 +6,7 @@
 
 import { Router } from 'express';
 import type { ServiceContainer } from '../service';
-import { eventRouter } from './routes/events.route';
+import { eventRouter } from './routes/event.route';
 
 // Creates and configures the main API router with all domain routes
 export const createRouter = (services: ServiceContainer): Router => {

@@ -5,8 +5,8 @@
  */
 
 import { TaskEither } from 'fp-ts/TaskEither';
-import { CacheError, DBError, DomainError } from '../../types/errors.type';
-import { Event, EventId, PrismaEvent } from '../../types/events.type';
+import { CacheError, DBError, DomainError } from '../../types/error.type';
+import { Event, EventId, PrismaEvent } from '../../types/event.type';
 
 /**
  * Low-level repository operations.

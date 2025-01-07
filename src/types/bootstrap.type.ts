@@ -4,12 +4,12 @@ import * as A from 'fp-ts/Array';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import { z } from 'zod';
-import type { ElementResponse } from './elements.type';
-import { ElementResponseSchema } from './elements.type';
-import type { EventResponse } from './events.type';
-import { EventResponseSchema } from './events.type';
-import type { PhaseResponse } from './phases.type';
-import { PhaseResponseSchema } from './phases.type';
+import type { ElementResponse } from './element.type';
+import { ElementResponseSchema } from './element.type';
+import type { EventResponse } from './event.type';
+import { EventResponseSchema } from './event.type';
+import type { PhaseResponse } from './phase.type';
+import { PhaseResponseSchema } from './phase.type';
 import type { TeamResponse } from './teams.type';
 import { TeamResponseSchema } from './teams.type';
 

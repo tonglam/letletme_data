@@ -6,7 +6,7 @@ import { Prisma } from '@prisma/client';
 import * as E from 'fp-ts/Either';
 import * as O from 'fp-ts/Option';
 import { pipe } from 'fp-ts/function';
-import { APIErrorCode, DBError, DBErrorCode } from '../types/errors.type';
+import { APIErrorCode, DBError, DBErrorCode } from '../types/error.type';
 import { createDatabaseValidationError } from './error.util';
 
 // ============ Prisma Data Transformations ============

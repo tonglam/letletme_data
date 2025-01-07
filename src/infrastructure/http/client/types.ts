@@ -6,7 +6,7 @@
 import { AxiosInstance } from 'axios';
 import type { TaskEither } from 'fp-ts/TaskEither';
 import { Logger } from 'pino';
-import { APIError } from '../../../types/errors.type';
+import { APIError } from '../../../types/error.type';
 
 // HTTP headers type
 export type Headers = Record<string, string>;
@@ -126,4 +126,4 @@ export interface RequestMonitor {
 }
 
 // Re-export types needed by consumers
-export type { APIError } from '../../../types/errors.type';
+export type { APIError } from '../../../types/error.type';

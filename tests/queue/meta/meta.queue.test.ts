@@ -8,7 +8,7 @@ import {
   createMetaQueueService,
   MetaJobProcessor,
 } from '../../../src/queue/meta/meta.queue';
-import { createQueueError, QueueErrorCode } from '../../../src/types/errors.type';
+import { createQueueError, QueueErrorCode } from '../../../src/types/error.type';
 import { MetaJobData, MetaService, MetaType } from '../../../src/types/job.type';
 import { QueueConfig } from '../../../src/types/queue.type';
 

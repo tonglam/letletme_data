@@ -7,7 +7,7 @@
 import * as TE from 'fp-ts/TaskEither';
 import Redis from 'ioredis';
 import { REDIS_CONFIG } from '../../config/cache/redis.config';
-import { CacheError, CacheErrorCode, createCacheError } from '../../types/errors.type';
+import { CacheError, CacheErrorCode, createCacheError } from '../../types/error.type';
 
 // Global Redis client instance
 // Ensures single client instance across the application

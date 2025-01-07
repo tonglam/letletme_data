@@ -1,7 +1,7 @@
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import IORedis, { Redis, RedisOptions } from 'ioredis';
-import { createServiceError, ServiceErrorCode } from '../../types/errors.type';
+import { createServiceError, ServiceErrorCode } from '../../types/error.type';
 
 let redisClient: Redis | null = null;
 

@@ -12,7 +12,7 @@ import {
   DomainError,
   DomainErrorCode,
   createDomainError,
-} from '../../types/errors.type';
+} from '../../types/error.type';
 import { redisClient } from './client';
 
 // Convert CacheError to DomainError

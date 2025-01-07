@@ -8,7 +8,7 @@ import * as A from 'fp-ts/Array';
 import * as E from 'fp-ts/Either';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
-import { CacheError } from '../../types/errors.type';
+import { CacheError } from '../../types/error.type';
 import { createCacheOperationError } from '../../utils/error.util';
 import { redisClient } from './client';
 

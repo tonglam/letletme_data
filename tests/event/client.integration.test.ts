@@ -4,7 +4,7 @@ import { createBootstrapApiAdapter } from '../../src/domain/bootstrap/adapter';
 import { DEFAULT_RETRY_CONFIG } from '../../src/infrastructure/http/client/utils';
 import { createFPLClient } from '../../src/infrastructure/http/fpl/client';
 import type { FPLEndpoints } from '../../src/infrastructure/http/fpl/types';
-import { APIErrorCode, type APIError } from '../../src/types/errors.type';
+import { APIErrorCode, type APIError } from '../../src/types/error.type';
 
 describe('FPL Client Integration Tests', () => {
   let fplClient: FPLEndpoints;

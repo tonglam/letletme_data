@@ -12,8 +12,8 @@ import { CachePrefix } from '../../config/cache/cache.config';
 import { redisClient } from '../../infrastructure/cache/client';
 import type { RedisCache } from '../../infrastructure/cache/redis-cache';
 import { getCurrentSeason } from '../../types/base.type';
-import { CacheError } from '../../types/errors.type';
-import type { Event } from '../../types/events.type';
+import { CacheError } from '../../types/error.type';
+import type { Event } from '../../types/event.type';
 import { createCacheOperationError } from '../../utils/error.util';
 import { EventCache, EventCacheConfig, EventDataProvider } from './types';
 

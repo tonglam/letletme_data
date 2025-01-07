@@ -14,7 +14,7 @@ import {
   createAPIError,
   createQueueError,
   QueueErrorCode,
-} from '../types/errors.type';
+} from '../types/error.type';
 import { EventMetaService } from '../types/job.type';
 import { createServer } from './server';
 

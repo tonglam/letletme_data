@@ -8,7 +8,7 @@ import {
   ClassicLeagueResponseSchema,
   CupResponseSchema,
   H2hLeagueResponseSchema,
-} from '../../../../types/leagues.type';
+} from '../../../../types/league.type';
 import { HTTPClient } from '../../client';
 import { RequestOptions } from '../../client/types';
 import { LeaguesEndpoints, validateEndpointResponse } from '../types';

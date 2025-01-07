@@ -3,8 +3,8 @@ import { pipe } from 'fp-ts/function';
 import { createEventCache } from '../../src/domain/event/cache';
 import { redisClient } from '../../src/infrastructure/cache/client';
 import { createRedisCache } from '../../src/infrastructure/cache/redis-cache';
-import type { Event, EventResponse } from '../../src/types/events.type';
-import { toDomainEvent } from '../../src/types/events.type';
+import type { Event, EventResponse } from '../../src/types/event.type';
+import { toDomainEvent } from '../../src/types/event.type';
 import bootstrapData from '../data/bootstrap.json';
 
 describe('Event Cache Tests', () => {

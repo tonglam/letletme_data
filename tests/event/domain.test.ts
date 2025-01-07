@@ -1,7 +1,7 @@
 import * as E from 'fp-ts/Either';
 import { createBootstrapApiAdapter } from '../../src/domain/bootstrap/adapter';
 import type { FPLEndpoints } from '../../src/infrastructure/http/fpl/types';
-import type { EventResponse } from '../../src/types/events.type';
+import type { EventResponse } from '../../src/types/event.type';
 import bootstrapData from '../data/bootstrap.json';
 
 describe('Event Domain Tests', () => {

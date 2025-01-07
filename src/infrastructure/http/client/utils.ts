@@ -4,7 +4,7 @@
  */
 
 import { DEFAULT_CONFIG, ERROR_CONFIG, HTTP_STATUS } from '../../../config/http/http.config';
-import { APIError, APIErrorCode } from '../../../types/errors.type';
+import { APIError, APIErrorCode } from '../../../types/error.type';
 import { ErrorDetails, HttpMethod, RequestMetrics, RetryConfig } from './types';
 
 /**

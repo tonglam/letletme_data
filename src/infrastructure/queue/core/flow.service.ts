@@ -1,7 +1,7 @@
 import { FlowJob as BullMQFlowJob, FlowProducer, Queue, QueueEvents } from 'bullmq';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
-import { createQueueError, QueueError, QueueErrorCode } from '../../../types/errors.type';
+import { createQueueError, QueueError, QueueErrorCode } from '../../../types/error.type';
 import { isJobName, JobName, MetaJobData } from '../../../types/job.type';
 import { FlowJob, FlowJobWithParent, FlowOpts, FlowService, hasJobId } from '../types';
 

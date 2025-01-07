@@ -4,8 +4,8 @@
 import { NextFunction, Request, Response } from 'express';
 import { Either } from 'fp-ts/Either';
 import { TaskEither } from 'fp-ts/TaskEither';
-import { APIError } from '../types/errors.type';
-import { Event } from '../types/events.type';
+import { APIError } from '../types/error.type';
+import { Event } from '../types/event.type';
 
 // Standard API response format with generic data payload
 export interface APIResponseData<T> {

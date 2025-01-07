@@ -7,8 +7,8 @@ import { Request } from 'express';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
 import { ServiceContainer, ServiceKey } from '../../service';
-import { APIError, APIErrorCode, ServiceError, createAPIError } from '../../types/errors.type';
-import { Event, EventId } from '../../types/events.type';
+import { APIError, APIErrorCode, ServiceError, createAPIError } from '../../types/error.type';
+import { Event, EventId } from '../../types/event.type';
 import { handleNullable } from '../../utils/error.util';
 import { EventHandlerResponse } from '../types';
 

@@ -3,8 +3,8 @@ import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import { BaseRepository, Branded, createBrandedType, isApiResponse } from './base.type';
-import { ElementResponse } from './elements.type';
-import { APIError } from './errors.type';
+import { ElementResponse } from './element.type';
+import { APIError } from './error.type';
 
 // ============ Branded Types ============
 export type PlayerStatId = Branded<string, 'PlayerStatId'>;

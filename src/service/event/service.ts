@@ -4,10 +4,10 @@
 
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
-import { createEventOperations } from '../../domain/event/operations';
+import { createEventOperations } from '../../domain/event/operation';
 import { EventOperations, EventRepositoryOperations } from '../../domain/event/types';
-import { APIError, DomainError, ServiceError } from '../../types/errors.type';
-import { Event, EventId, EventResponse, toDomainEvent } from '../../types/events.type';
+import { APIError, DomainError, ServiceError } from '../../types/error.type';
+import { Event, EventId, EventResponse, toDomainEvent } from '../../types/event.type';
 import { createServiceIntegrationError, createServiceOperationError } from '../../utils/error.util';
 import { EventService, EventServiceDependencies, EventServiceOperations } from './types';
 

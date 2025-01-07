@@ -19,7 +19,7 @@ import {
   createCacheError,
   createDBError,
   createServiceError,
-} from '../types/errors.type';
+} from '../types/error.type';
 
 // Type guard for QueueError
 const isQueueError = (error: unknown): error is QueueError =>

@@ -2,8 +2,8 @@ import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import { eventRepository } from '../../src/domain/event/repository';
 import { prisma } from '../../src/infrastructure/db/prisma';
-import type { Event, EventId } from '../../src/types/events.type';
-import { validateEventId } from '../../src/types/events.type';
+import type { Event, EventId } from '../../src/types/event.type';
+import { validateEventId } from '../../src/types/event.type';
 import bootstrapData from '../data/bootstrap.json';
 
 describe('Event Repository Tests', () => {

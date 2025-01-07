@@ -1,7 +1,7 @@
 import { Job, Queue, Worker } from 'bullmq';
 import * as TE from 'fp-ts/TaskEither';
 import { Redis } from 'ioredis';
-import { QueueError } from '../../types/errors.type';
+import { QueueError } from '../../types/error.type';
 
 // Base Job Data
 export interface BaseJobData {

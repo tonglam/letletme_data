@@ -5,7 +5,7 @@ import { createQueueServiceImpl } from '../../../src/infrastructure/queue/core/q
 import { createSchedulerService } from '../../../src/infrastructure/queue/core/scheduler.service';
 import { createWorkerService } from '../../../src/infrastructure/queue/core/worker.service';
 import { QueueService } from '../../../src/infrastructure/queue/types';
-import { QueueError } from '../../../src/types/errors.type';
+import { QueueError } from '../../../src/types/error.type';
 import { JobName, MetaJobData } from '../../../src/types/job.type';
 import { createTestMetaJobData, createTestQueueConfig } from '../../utils/queue.test.utils';
 

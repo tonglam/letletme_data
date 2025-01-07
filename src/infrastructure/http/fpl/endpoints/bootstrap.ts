@@ -10,7 +10,7 @@ import { pipe } from 'fp-ts/function';
 import { Logger } from 'pino';
 import { apiConfig } from '../../../../config/api/api.config';
 import { BootStrapResponseSchema } from '../../../../types/bootstrap.type';
-import { APIErrorCode, createAPIError } from '../../../../types/errors.type';
+import { APIErrorCode, createAPIError } from '../../../../types/error.type';
 import { HTTPClient } from '../../client';
 import { RequestOptions } from '../../client/types';
 import { BootstrapEndpoints } from '../types';

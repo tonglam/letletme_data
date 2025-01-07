@@ -17,7 +17,7 @@ import {
   createAPIError,
   getErrorStatus,
   ServiceError,
-} from '../../types/errors.type';
+} from '../../types/error.type';
 import { AsyncMiddlewareHandler, ErrorHandler, Middleware, SecurityHeaders } from '../types';
 import { sendResponse } from '../utils';
 

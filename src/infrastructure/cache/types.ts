@@ -4,7 +4,7 @@
  */
 
 import * as TE from 'fp-ts/TaskEither';
-import type { CacheError } from '../../types/errors.type';
+import type { CacheError } from '../../types/error.type';
 
 /**
  * Redis connection configuration

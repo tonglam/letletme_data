@@ -3,7 +3,7 @@ import * as TE from 'fp-ts/TaskEither';
 import { createQueueServiceImpl } from '../../../src/infrastructure/queue/core/queue.service';
 import { createSchedulerService } from '../../../src/infrastructure/queue/core/scheduler.service';
 import { QueueService } from '../../../src/infrastructure/queue/types';
-import { QueueError, QueueErrorCode } from '../../../src/types/errors.type';
+import { QueueError, QueueErrorCode } from '../../../src/types/error.type';
 import { JobName, MetaJobData } from '../../../src/types/job.type';
 import { createTestMetaJobData, createTestQueueConfig } from '../../utils/queue.test.utils';
 

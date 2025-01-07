@@ -2,7 +2,7 @@ import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import { BootStrap, toDomainBootStrap } from '../../types/bootstrap.type';
-import { DomainError, DomainErrorCode } from '../../types/errors.type';
+import { DomainError, DomainErrorCode } from '../../types/error.type';
 import { createStandardDomainError } from '../utils';
 import { BootstrapApi } from './types';
 

@@ -7,8 +7,8 @@
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
 import { getWorkflowLogger } from '../../infrastructure/logger';
-import { ServiceError, ServiceErrorCode, createServiceError } from '../../types/errors.type';
-import type { Event } from '../../types/events.type';
+import { ServiceError, ServiceErrorCode, createServiceError } from '../../types/error.type';
+import type { Event } from '../../types/event.type';
 import type { EventService, WorkflowContext, WorkflowResult } from './types';
 
 const logger = getWorkflowLogger();

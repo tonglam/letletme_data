@@ -13,8 +13,8 @@ import { createFPLClient } from '../../src/infrastructure/http/fpl/client';
 import type { FPLEndpoints } from '../../src/infrastructure/http/fpl/types';
 import { createEventService } from '../../src/service/event';
 import { getCurrentSeason } from '../../src/types/base.type';
-import { APIError, APIErrorCode, ServiceError } from '../../src/types/errors.type';
-import type { Event, EventId } from '../../src/types/events.type';
+import { APIError, APIErrorCode, ServiceError } from '../../src/types/error.type';
+import type { Event, EventId } from '../../src/types/event.type';
 
 describe('Event Service Integration Tests', () => {
   const TEST_TIMEOUT = 30000;

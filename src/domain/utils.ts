@@ -12,7 +12,7 @@ import {
   DomainErrorCode,
   createAPIError,
   createDomainError,
-} from '../types/errors.type';
+} from '../types/error.type';
 import { dbErrorToApiErrorCode, isDBError } from '../utils/prisma.util';
 
 /**

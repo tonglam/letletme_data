@@ -9,7 +9,7 @@ This guide demonstrates how to implement a type system following functional prog
 ```plaintext
 src/types/
 ├── base.type.ts         # Core type system and utilities
-├── errors.type.ts       # Error type hierarchy
+├── error.type.ts        # Error type hierarchy
 ├── {domain}.type.ts     # Domain-specific types
 └── validation.type.ts   # Validation utilities
 ```
@@ -70,7 +70,7 @@ export const validateSchema =
 
 ## Domain Types Implementation
 
-Using Events as an example (`events.type.ts`):
+Using Events as an example (`event.type.ts`):
 
 ### 1. Domain ID Type
 

@@ -1,7 +1,7 @@
 import { Queue } from 'bullmq';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
-import { createQueueError, QueueError, QueueErrorCode } from '../../../types/errors.type';
+import { createQueueError, QueueError, QueueErrorCode } from '../../../types/error.type';
 import { BaseJobData } from '../../../types/job.type';
 import { getQueueLogger } from '../../logger';
 import { JobScheduler, JobSchedulerOptions, JobTemplate, SchedulerService } from '../types';

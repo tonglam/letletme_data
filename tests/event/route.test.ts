@@ -4,11 +4,11 @@ import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import request from 'supertest';
 import { createRouter } from '../../src/api';
-import { handleError } from '../../src/api/middleware/core';
+import { handleError } from '../../src/api/middlewares/core';
 import { ServiceContainer, ServiceKey } from '../../src/service';
 import { Branded } from '../../src/types/base.type';
-import { ServiceErrorCode, createServiceError } from '../../src/types/errors.type';
-import { Event, createEventId } from '../../src/types/events.type';
+import { ServiceErrorCode, createServiceError } from '../../src/types/error.type';
+import { Event, createEventId } from '../../src/types/event.type';
 
 // Test fixtures
 const createMockEvent = (id: number, isCurrent = false, isNext = false): Event => ({

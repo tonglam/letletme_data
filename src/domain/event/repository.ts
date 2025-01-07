@@ -7,8 +7,8 @@ import { Prisma } from '@prisma/client';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
 import { prisma } from '../../infrastructure/db/prisma';
-import { DBError } from '../../types/errors.type';
-import { Event, EventId, PrismaEvent } from '../../types/events.type';
+import { DBError } from '../../types/error.type';
+import { Event, EventId, PrismaEvent } from '../../types/event.type';
 import { handlePrismaError } from '../../utils/error.util';
 import { EventRepositoryOperations } from './types';
 

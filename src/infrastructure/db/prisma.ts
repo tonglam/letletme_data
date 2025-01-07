@@ -3,7 +3,7 @@
 
 import { PrismaClient } from '@prisma/client';
 import * as TE from 'fp-ts/TaskEither';
-import { DBError, DBErrorCode, createDBError } from '../../types/errors.type';
+import { DBError, DBErrorCode, createDBError } from '../../types/error.type';
 
 // Global Prisma client instance
 const globalForPrisma = global as { prisma?: PrismaClient };

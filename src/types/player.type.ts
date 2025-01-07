@@ -9,8 +9,8 @@ import {
   getElementTypeById,
   isApiResponse,
 } from './base.type';
-import { ElementResponse } from './elements.type';
-import { APIError } from './errors.type';
+import { ElementResponse } from './element.type';
+import { APIError } from './error.type';
 
 // ============ Branded Types ============
 export type PlayerId = Branded<number, 'PlayerId'>;

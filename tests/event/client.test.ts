@@ -1,6 +1,6 @@
 import * as E from 'fp-ts/Either';
 import type { FPLEndpoints } from '../../src/infrastructure/http/fpl/types';
-import { APIErrorCode } from '../../src/types/errors.type';
+import { APIErrorCode } from '../../src/types/error.type';
 import bootstrapData from '../data/bootstrap.json';
 
 describe('FPL Client Mock Tests', () => {

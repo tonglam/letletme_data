@@ -1,9 +1,9 @@
 import * as TE from 'fp-ts/TaskEither';
 import { BootStrapResponse } from '../../types/bootstrap.type';
-import { ElementResponse } from '../../types/elements.type';
-import { APIError } from '../../types/errors.type';
-import { EventResponse } from '../../types/events.type';
-import { PhaseResponse } from '../../types/phases.type';
+import { ElementResponse } from '../../types/element.type';
+import { APIError } from '../../types/error.type';
+import { EventResponse } from '../../types/event.type';
+import { PhaseResponse } from '../../types/phase.type';
 import { TeamResponse } from '../../types/teams.type';
 
 /**

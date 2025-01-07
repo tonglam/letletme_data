@@ -2,7 +2,7 @@ import { JobsOptions, Queue } from 'bullmq';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import { z } from 'zod';
-import { createQueueError, QueueError, QueueErrorCode } from '../../../types/errors.type';
+import { createQueueError, QueueError, QueueErrorCode } from '../../../types/error.type';
 import { MetaJobData } from '../../../types/job.type';
 import { QueueConfig } from '../../../types/queue.type';
 import { getQueueLogger } from '../../logger';

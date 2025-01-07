@@ -15,7 +15,7 @@ import type { BootstrapApi } from '../domain/bootstrap/types';
 import type { EventCache } from '../domain/event/types';
 import type { BaseRepository } from './base.type';
 import { Branded, createBrandedType, isApiResponse } from './base.type';
-import { APIError, DBError } from './errors.type';
+import { APIError, DBError } from './error.type';
 
 /**
  * Branded type for Event ID ensuring type safety

@@ -12,8 +12,8 @@
 import { Router } from 'express';
 import * as t from 'io-ts';
 import type { ServiceContainer } from '../../service';
-import { createEventHandlers } from '../handlers/events.handler';
-import { createHandler, validateRequest } from '../middleware/core';
+import { createEventHandlers } from '../handlers/event.handler';
+import { createHandler, validateRequest } from '../middlewares/core';
 
 // io-ts codec for validating event ID parameters
 // Ensures the ID is a positive integer as required by the FPL API

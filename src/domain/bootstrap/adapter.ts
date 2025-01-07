@@ -3,10 +3,10 @@ import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
 import { FPLEndpoints } from '../../infrastructure/http/fpl/types';
 import { BootStrapResponse } from '../../types/bootstrap.type';
-import { ElementResponse } from '../../types/elements.type';
-import { APIError, APIErrorCode, createAPIError } from '../../types/errors.type';
-import { EventResponse } from '../../types/events.type';
-import { PhaseResponse } from '../../types/phases.type';
+import { ElementResponse } from '../../types/element.type';
+import { APIError, APIErrorCode, createAPIError } from '../../types/error.type';
+import { EventResponse } from '../../types/event.type';
+import { PhaseResponse } from '../../types/phase.type';
 import { TeamResponse } from '../../types/teams.type';
 import { ExtendedBootstrapApi } from './types';
 

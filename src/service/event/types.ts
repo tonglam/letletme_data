@@ -5,8 +5,8 @@
 
 import { ExtendedBootstrapApi } from 'domains/bootstrap/types';
 import * as TE from 'fp-ts/TaskEither';
-import type { ServiceError } from '../../types/errors.type';
-import type { Event, EventId } from '../../types/events.type';
+import type { ServiceError } from '../../types/error.type';
+import type { Event, EventId } from '../../types/event.type';
 
 /**
  * Public interface for the event service.

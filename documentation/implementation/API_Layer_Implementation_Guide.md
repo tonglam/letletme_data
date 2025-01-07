@@ -10,7 +10,7 @@ This guide demonstrates how to implement API endpoints following functional prog
 src/api/
 ├── handlers/
 │   └── event.handler.ts    # Request handlers implementation
-├── middleware/
+├── middlewares/
 │   ├── core.ts            # Core middleware functions
 │   └── index.ts           # Middleware exports
 ├── routes/
@@ -91,7 +91,7 @@ const EventIdParams = z.object({
 type EventIdParamsType = z.infer<typeof EventIdParams>;
 ```
 
-### 4. Middleware (middleware/core.ts)
+### 4. Middleware (middlewares/core.ts)
 
 ```typescript
 const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {

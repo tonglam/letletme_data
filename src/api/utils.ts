@@ -8,7 +8,7 @@ import * as E from 'fp-ts/Either';
 import * as O from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
-import { APIError, APIErrorCode, APIErrorResponse, createAPIError } from '../types/errors.type';
+import { APIError, APIErrorCode, APIErrorResponse, createAPIError } from '../types/error.type';
 import { logApiError, logApiRequest } from '../utils/logger.util';
 import { ApiRequest, APIResponseData, AsyncEither, AsyncHandler } from './types';
 
