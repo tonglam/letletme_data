@@ -1,5 +1,7 @@
-import { toDomainPhase } from '../../src/domain/phase/types';
-import { getTestPhase, getTestPhases } from '../data/bootstrap.test';
+import { readFileSync } from 'fs';
+import { join } from 'path';
+import { Phase, PhaseResponse, toDomainPhase } from '../../src/domain/phase/types';
+import { ServiceError, ServiceErrorCode } from '../../src/types/error.type';
 
 // Mock Express and supertest
 jest.mock('supertest', () => {
@@ -12,6 +14,14 @@ jest.mock('supertest', () => {
   }));
 });
 
+// Load test data directly from JSON
+const loadTestPhases = (): PhaseResponse[] => {
+  const filePath = join(__dirname, '../data/bootstrap.json');
+  const fileContent = readFileSync(filePath, 'utf-8');
+  const data = JSON.parse(fileContent);
+  return data.phases;
+};
+
 // Mock phase service
 jest.mock('../../src/service/phase/service', () => ({
   createPhaseService: jest.fn(() => ({
@@ -22,74 +32,88 @@ jest.mock('../../src/service/phase/service', () => ({
   })),
 }));
 
-const mockPhaseService = {
-  getPhases: jest.fn(),
-  getPhase: jest.fn(),
-  savePhases: jest.fn(),
-  syncPhasesFromApi: jest.fn(),
-};
-
 describe('Phase Routes', () => {
+  let testPhases: Phase[];
+  const mockPhaseService = {
+    getPhases: jest.fn(),
+    getPhase: jest.fn(),
+    savePhases: jest.fn(),
+    syncPhasesFromApi: jest.fn(),
+  };
+
+  beforeAll(() => {
+    // Convert test data to domain models
+    const phases = loadTestPhases().slice(0, 3);
+    testPhases = phases.map((phase: PhaseResponse) => toDomainPhase(phase));
+  });
+
   beforeEach(() => {
     jest.clearAllMocks();
   });
 
   describe('GET /phases', () => {
-    it('should return all phases', async () => {
-      const phaseResponses = getTestPhases().slice(0, 3);
-      const phases = phaseResponses.map(toDomainPhase);
+    it('should return all phases', () => {
       mockPhaseService.getPhases.mockResolvedValue({
         _tag: 'Right',
-        right: phases,
+        right: testPhases,
       });
 
       const response = {
         status: 200,
         body: {
           status: 'success',
-          data: phases,
+          data: testPhases,
         },
       };
 
       expect(response.status).toBe(200);
       expect(response.body.status).toBe('success');
       expect(Array.isArray(response.body.data)).toBe(true);
-      expect(response.body.data).toHaveLength(3);
-      expect(response.body.data[0]).toHaveProperty('id', phases[0].id);
-      expect(response.body.data[0]).toHaveProperty('name', phases[0].name);
-      expect(response.body.data[0]).toHaveProperty('startEvent', phases[0].startEvent);
-      expect(response.body.data[0]).toHaveProperty('stopEvent', phases[0].stopEvent);
+      expect(response.body.data).toHaveLength(testPhases.length);
+
+      const firstPhase = response.body.data[0];
+      expect(firstPhase).toMatchObject({
+        id: testPhases[0].id,
+        name: testPhases[0].name,
+        startEvent: testPhases[0].startEvent,
+        stopEvent: testPhases[0].stopEvent,
+        highestScore: testPhases[0].highestScore,
+      });
     });
 
-    it('should handle service errors', async () => {
+    it('should handle service errors', () => {
+      const error: ServiceError = {
+        code: ServiceErrorCode.OPERATION_ERROR,
+        message: 'Failed to fetch phases',
+        name: 'ServiceError',
+        timestamp: new Date(),
+      };
       mockPhaseService.getPhases.mockResolvedValue({
         _tag: 'Left',
-        left: {
-          code: 'SERVICE_ERROR',
-          message: 'Service error',
-        },
+        left: error,
       });
 
       const response = {
         status: 503,
         body: {
           error: {
-            code: 'SERVICE_ERROR',
-            message: 'Service error',
+            code: error.code,
+            message: error.message,
           },
         },
       };
 
       expect(response.status).toBe(503);
-      expect(response.body.error.code).toBe('SERVICE_ERROR');
-      expect(response.body.error.message).toBe('Service error');
+      expect(response.body.error).toMatchObject({
+        code: error.code,
+        message: error.message,
+      });
     });
   });
 
   describe('GET /phases/:id', () => {
-    it('should return phase by ID', async () => {
-      const phaseResponse = getTestPhase(1)!;
-      const phase = toDomainPhase(phaseResponse);
+    it('should return phase by ID', () => {
+      const phase = testPhases[0];
       mockPhaseService.getPhase.mockResolvedValue({
         _tag: 'Right',
         right: phase,
@@ -105,13 +129,16 @@ describe('Phase Routes', () => {
 
       expect(response.status).toBe(200);
       expect(response.body.status).toBe('success');
-      expect(response.body.data).toHaveProperty('id', phase.id);
-      expect(response.body.data).toHaveProperty('name', phase.name);
-      expect(response.body.data).toHaveProperty('startEvent', phase.startEvent);
-      expect(response.body.data).toHaveProperty('stopEvent', phase.stopEvent);
+      expect(response.body.data).toMatchObject({
+        id: phase.id,
+        name: phase.name,
+        startEvent: phase.startEvent,
+        stopEvent: phase.stopEvent,
+        highestScore: phase.highestScore,
+      });
     });
 
-    it('should validate phase ID', async () => {
+    it('should validate phase ID', () => {
       const response = {
         status: 400,
         body: {
@@ -123,11 +150,13 @@ describe('Phase Routes', () => {
       };
 
       expect(response.status).toBe(400);
-      expect(response.body.error.code).toBe('VALIDATION_ERROR');
-      expect(response.body.error.message).toContain('Invalid phase ID');
+      expect(response.body.error).toMatchObject({
+        code: 'VALIDATION_ERROR',
+        message: expect.stringContaining('Invalid phase ID'),
+      });
     });
 
-    it('should handle not found', async () => {
+    it('should handle not found', () => {
       mockPhaseService.getPhase.mockResolvedValue({
         _tag: 'Right',
         right: null,
@@ -144,32 +173,39 @@ describe('Phase Routes', () => {
       };
 
       expect(response.status).toBe(404);
-      expect(response.body.error.code).toBe('NOT_FOUND');
-      expect(response.body.error.message).toContain('Phase not found');
+      expect(response.body.error).toMatchObject({
+        code: 'NOT_FOUND',
+        message: expect.stringContaining('Phase not found'),
+      });
     });
 
-    it('should handle service errors', async () => {
+    it('should handle service errors', () => {
+      const error: ServiceError = {
+        code: ServiceErrorCode.OPERATION_ERROR,
+        message: 'Failed to fetch phase',
+        name: 'ServiceError',
+        timestamp: new Date(),
+      };
       mockPhaseService.getPhase.mockResolvedValue({
         _tag: 'Left',
-        left: {
-          code: 'SERVICE_ERROR',
-          message: 'Service error',
-        },
+        left: error,
       });
 
       const response = {
         status: 503,
         body: {
           error: {
-            code: 'SERVICE_ERROR',
-            message: 'Service error',
+            code: error.code,
+            message: error.message,
           },
         },
       };
 
       expect(response.status).toBe(503);
-      expect(response.body.error.code).toBe('SERVICE_ERROR');
-      expect(response.body.error.message).toBe('Service error');
+      expect(response.body.error).toMatchObject({
+        code: error.code,
+        message: error.message,
+      });
     });
   });
 });

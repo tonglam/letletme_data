@@ -9,6 +9,7 @@ import * as E from 'fp-ts/Either';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
 import { z } from 'zod';
+import { CachePrefix } from '../../config/cache/cache.config';
 import { BaseRepository, Branded, createBrandedType, isApiResponse } from '../../types/base.type';
 import { CacheError, DomainError } from '../../types/error.type';
 
@@ -116,14 +117,30 @@ export type PrismaPhaseCreate = Omit<PrismaPhase, 'createdAt'>;
 export type PrismaPhaseUpdate = Omit<PrismaPhase, 'createdAt'>;
 
 /**
- * Phase cache interface for domain operations
+ * Phase data provider interface
+ */
+export interface PhaseDataProvider {
+  readonly getOne: (id: number) => Promise<Phase | null>;
+  readonly getAll: () => Promise<readonly Phase[]>;
+}
+
+/**
+ * Phase cache configuration interface
+ */
+export interface PhaseCacheConfig {
+  readonly keyPrefix: (typeof CachePrefix)[keyof typeof CachePrefix];
+  readonly season: number;
+}
+
+/**
+ * Phase cache interface
  */
 export interface PhaseCache {
   readonly warmUp: () => TE.TaskEither<CacheError, void>;
   readonly cachePhase: (phase: Phase) => TE.TaskEither<CacheError, void>;
-  readonly cachePhases: (phases: Phases) => TE.TaskEither<CacheError, void>;
+  readonly cachePhases: (phases: readonly Phase[]) => TE.TaskEither<CacheError, void>;
   readonly getPhase: (id: string) => TE.TaskEither<CacheError, Phase | null>;
-  readonly getAllPhases: () => TE.TaskEither<CacheError, Phases>;
+  readonly getAllPhases: () => TE.TaskEither<CacheError, readonly Phase[]>;
 }
 
 /**

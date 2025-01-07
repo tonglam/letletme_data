@@ -2,6 +2,7 @@
 // Provides business logic for Event operations, implementing caching and error handling.
 // Uses functional programming principles for type-safe operations.
 
+import * as E from 'fp-ts/Either';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
 import { createEventOperations } from '../../domain/event/operation';
@@ -17,6 +18,9 @@ const mapDomainError = (error: DomainError): ServiceError =>
     message: error.message,
     cause: error,
   });
+
+const filterValidEvents = (events: E.Either<string, Event>[]): Event[] =>
+  events.filter(E.isRight).map((e) => e.right);
 
 // Implementation of service operations
 const eventServiceOperations = (domainOps: EventOperations): EventServiceOperations => ({
@@ -38,6 +42,7 @@ const eventServiceOperations = (domainOps: EventOperations): EventServiceOperati
         }),
       ),
       TE.map((events: readonly EventResponse[]) => events.map(toDomainEvent)),
+      TE.map(filterValidEvents),
       TE.chain((events) =>
         pipe(
           domainOps.deleteAll(),

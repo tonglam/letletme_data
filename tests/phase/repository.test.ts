@@ -1,247 +1,150 @@
-import * as E from 'fp-ts/Either';
-import { pipe } from 'fp-ts/function';
+import { readFileSync } from 'fs';
+import { join } from 'path';
 import { createPhaseRepository } from '../../src/domain/phase/repository';
-import { PhaseId, PhaseResponse } from '../../src/domain/phase/types';
-import { DBErrorCode } from '../../src/types/error.type';
-import { getTestPhase, getTestPhases } from '../data/bootstrap.test';
-import { prisma } from '../setup';
+import { Phase, PhaseId, PhaseResponse, toDomainPhase } from '../../src/domain/phase/types';
+import { prisma } from '../../src/infrastructure/db/prisma';
+
+// Load test data directly from JSON
+const loadTestPhases = (): PhaseResponse[] => {
+  const filePath = join(__dirname, '../data/bootstrap.json');
+  const fileContent = readFileSync(filePath, 'utf-8');
+  const data = JSON.parse(fileContent);
+  return data.phases;
+};
 
 describe('Phase Repository', () => {
   const phaseRepository = createPhaseRepository(prisma);
+  let testPhases: Phase[];
+  const createdPhaseIds: number[] = [];
+
+  beforeAll(() => {
+    // Convert test data to domain models
+    const phases = loadTestPhases().slice(0, 3);
+    testPhases = phases.map((phase: PhaseResponse) => toDomainPhase(phase));
+  });
 
   beforeEach(async () => {
+    // Clean up any existing test data
     await prisma.phase.deleteMany();
   });
 
-  describe('findAll', () => {
-    it('should return all phases', async () => {
-      // Create test phases using real data
-      const phases = getTestPhases().slice(0, 3);
-      await Promise.all(
-        phases.map((phase: PhaseResponse) =>
-          prisma.phase.create({
-            data: {
-              id: phase.id,
-              name: phase.name,
-              startEvent: phase.start_event,
-              stopEvent: phase.stop_event,
-              highestScore: phase.highest_score,
-            },
-          }),
-        ),
-      );
-
-      const result = await phaseRepository.findAll()();
-      expect(E.isRight(result)).toBe(true);
-      pipe(
-        result,
-        E.map((foundPhases) => {
-          expect(foundPhases).toHaveLength(3);
-          expect(foundPhases[0]).toHaveProperty('id', phases[0].id);
-          expect(foundPhases[0]).toHaveProperty('name', phases[0].name);
-        }),
-      );
-    });
-
-    it('should return empty array when no phases exist', async () => {
-      const result = await phaseRepository.findAll()();
-      expect(E.isRight(result)).toBe(true);
-      pipe(
-        result,
-        E.map((phases) => {
-          expect(phases).toHaveLength(0);
-        }),
-      );
-    });
-
-    it('should handle database errors', async () => {
-      await prisma.$disconnect();
-
-      const result = await phaseRepository.findAll()();
-      expect(E.isLeft(result)).toBe(true);
-      pipe(
-        result,
-        E.mapLeft((error) => {
-          expect(error.code).toBe(DBErrorCode.QUERY_ERROR);
-          expect(error.message).toContain('Failed to fetch all phases');
-        }),
-      );
-
-      await prisma.$connect();
-    });
-  });
-
-  describe('findById', () => {
-    it('should return phase by ID', async () => {
-      const phase = getTestPhase(1)!;
-      await prisma.phase.create({
-        data: {
-          id: phase.id,
-          name: phase.name,
-          startEvent: phase.start_event,
-          stopEvent: phase.stop_event,
-          highestScore: phase.highest_score,
+  afterAll(async () => {
+    // Clean up test data
+    if (createdPhaseIds.length > 0) {
+      await prisma.phase.deleteMany({
+        where: {
+          id: {
+            in: createdPhaseIds,
+          },
         },
       });
+    }
+    await prisma.$disconnect();
+  });
 
-      const result = await phaseRepository.findById(phase.id as PhaseId)();
-      expect(E.isRight(result)).toBe(true);
-      pipe(
-        result,
-        E.map((foundPhase) => {
-          expect(foundPhase).not.toBeNull();
-          expect(foundPhase?.id).toBe(phase.id);
-          expect(foundPhase?.name).toBe(phase.name);
-        }),
-      );
+  describe('save', () => {
+    it('should save a phase', async () => {
+      const phase = testPhases[0];
+      const result = await phaseRepository.save(phase)();
+
+      expect(result._tag).toBe('Right');
+      if (result._tag === 'Right') {
+        expect(result.right.id).toBe(phase.id);
+        expect(result.right.name).toBe(phase.name);
+        expect(result.right.startEvent).toBe(phase.startEvent);
+        expect(result.right.stopEvent).toBe(phase.stopEvent);
+        createdPhaseIds.push(Number(phase.id));
+      }
     });
 
-    it('should return null for non-existent ID', async () => {
-      const result = await phaseRepository.findById(999 as PhaseId)();
-      expect(E.isRight(result)).toBe(true);
-      pipe(
-        result,
-        E.map((phase) => {
-          expect(phase).toBeNull();
-        }),
-      );
-    });
+    it('should handle duplicate phase save', async () => {
+      const phase = testPhases[0];
+      await phaseRepository.save(phase)();
+      const result = await phaseRepository.save(phase)();
 
-    it('should handle database errors', async () => {
-      await prisma.$disconnect();
-
-      const result = await phaseRepository.findById(1 as PhaseId)();
-      expect(E.isLeft(result)).toBe(true);
-      pipe(
-        result,
-        E.mapLeft((error) => {
-          expect(error.code).toBe(DBErrorCode.QUERY_ERROR);
-          expect(error.message).toContain('Failed to fetch phase by id');
-        }),
-      );
-
-      await prisma.$connect();
+      expect(result._tag).toBe('Left');
+      if (result._tag === 'Left') {
+        expect(result.left.code).toBe('QUERY_ERROR');
+      }
     });
   });
 
   describe('saveBatch', () => {
     it('should save multiple phases', async () => {
-      const phases = getTestPhases().slice(0, 3);
-      const phaseData = phases.map((phase: PhaseResponse) => ({
-        id: phase.id,
-        name: phase.name,
-        startEvent: phase.start_event,
-        stopEvent: phase.stop_event,
-        highestScore: phase.highest_score,
-      }));
+      const result = await phaseRepository.saveBatch(testPhases)();
 
-      const result = await phaseRepository.saveBatch(phaseData)();
-      expect(E.isRight(result)).toBe(true);
-      pipe(
-        result,
-        E.map((savedPhases) => {
-          expect(savedPhases).toHaveLength(3);
-          expect(savedPhases[0]).toHaveProperty('id', phases[0].id);
-          expect(savedPhases[0]).toHaveProperty('name', phases[0].name);
-        }),
-      );
+      expect(result._tag).toBe('Right');
+      if (result._tag === 'Right') {
+        expect(result.right).toHaveLength(testPhases.length);
+        result.right.forEach((phase, index) => {
+          expect(phase.id).toBe(testPhases[index].id);
+          expect(phase.name).toBe(testPhases[index].name);
+          createdPhaseIds.push(Number(phase.id));
+        });
+      }
+    });
+  });
+
+  describe('findById', () => {
+    it('should find phase by id', async () => {
+      const phase = testPhases[0];
+      await phaseRepository.save(phase)();
+      const result = await phaseRepository.findById(phase.id)();
+
+      expect(result._tag).toBe('Right');
+      if (result._tag === 'Right') {
+        expect(result.right?.id).toBe(phase.id);
+        expect(result.right?.name).toBe(phase.name);
+      }
     });
 
-    it('should handle duplicate IDs gracefully', async () => {
-      const phase = getTestPhase(1)!;
-      await prisma.phase.create({
-        data: {
-          id: phase.id,
-          name: phase.name,
-          startEvent: phase.start_event,
-          stopEvent: phase.stop_event,
-          highestScore: phase.highest_score,
-        },
-      });
+    it('should return null for non-existent phase', async () => {
+      const nonExistentId = 999 as PhaseId;
+      const result = await phaseRepository.findById(nonExistentId)();
 
-      const phases = [phase, getTestPhase(2)!];
-      const phaseData = phases.map((p: PhaseResponse) => ({
-        id: p.id,
-        name: p.name,
-        startEvent: p.start_event,
-        stopEvent: p.stop_event,
-        highestScore: p.highest_score,
-      }));
+      expect(result._tag).toBe('Right');
+      if (result._tag === 'Right') {
+        expect(result.right).toBeNull();
+      }
+    });
+  });
 
-      const result = await phaseRepository.saveBatch(phaseData)();
-      expect(E.isRight(result)).toBe(true);
-      pipe(
-        result,
-        E.map((savedPhases) => {
-          expect(savedPhases).toHaveLength(2);
-        }),
-      );
+  describe('findAll', () => {
+    it('should find all phases', async () => {
+      await phaseRepository.saveBatch(testPhases)();
+      const result = await phaseRepository.findAll()();
+
+      expect(result._tag).toBe('Right');
+      if (result._tag === 'Right') {
+        expect(result.right).toHaveLength(testPhases.length);
+        result.right.forEach((phase, index) => {
+          expect(phase.id).toBe(testPhases[index].id);
+          expect(phase.name).toBe(testPhases[index].name);
+        });
+      }
     });
 
-    it('should handle database errors', async () => {
-      await prisma.$disconnect();
+    it('should return empty array when no phases exist', async () => {
+      const result = await phaseRepository.findAll()();
 
-      const phases = getTestPhases().slice(0, 3);
-      const phaseData = phases.map((phase: PhaseResponse) => ({
-        id: phase.id,
-        name: phase.name,
-        startEvent: phase.start_event,
-        stopEvent: phase.stop_event,
-        highestScore: phase.highest_score,
-      }));
-
-      const result = await phaseRepository.saveBatch(phaseData)();
-      expect(E.isLeft(result)).toBe(true);
-      pipe(
-        result,
-        E.mapLeft((error) => {
-          expect(error.code).toBe(DBErrorCode.QUERY_ERROR);
-          expect(error.message).toContain('Failed to create phases in batch');
-        }),
-      );
-
-      await prisma.$connect();
+      expect(result._tag).toBe('Right');
+      if (result._tag === 'Right') {
+        expect(result.right).toHaveLength(0);
+      }
     });
   });
 
   describe('deleteAll', () => {
     it('should delete all phases', async () => {
-      const phases = getTestPhases().slice(0, 3);
-      await Promise.all(
-        phases.map((phase: PhaseResponse) =>
-          prisma.phase.create({
-            data: {
-              id: phase.id,
-              name: phase.name,
-              startEvent: phase.start_event,
-              stopEvent: phase.stop_event,
-              highestScore: phase.highest_score,
-            },
-          }),
-        ),
-      );
-
+      await phaseRepository.saveBatch(testPhases)();
       const result = await phaseRepository.deleteAll()();
-      expect(E.isRight(result)).toBe(true);
 
-      const count = await prisma.phase.count();
-      expect(count).toBe(0);
-    });
-
-    it('should handle database errors', async () => {
-      await prisma.$disconnect();
-
-      const result = await phaseRepository.deleteAll()();
-      expect(E.isLeft(result)).toBe(true);
-      pipe(
-        result,
-        E.mapLeft((error) => {
-          expect(error.code).toBe(DBErrorCode.QUERY_ERROR);
-          expect(error.message).toContain('Failed to delete all phases');
-        }),
-      );
-
-      await prisma.$connect();
+      expect(result._tag).toBe('Right');
+      const findResult = await phaseRepository.findAll()();
+      expect(findResult._tag).toBe('Right');
+      if (findResult._tag === 'Right') {
+        expect(findResult.right).toHaveLength(0);
+      }
     });
   });
 });

@@ -13,17 +13,20 @@ describe('Event Cache Tests', () => {
   const TEST_SEASON = '2425';
 
   beforeAll(() => {
-    // Convert bootstrap events to domain events
-    testEvents = bootstrapData.events.map((event) =>
-      toDomainEvent({
-        ...event,
-        deadline_time_game_offset: 0,
-        release_time_epoch: null,
-        release_time_game_offset: null,
-        chip_plays_processed: false,
-        released: false,
-      } as EventResponse),
-    );
+    // Convert bootstrap events to domain events and filter out any failed conversions
+    testEvents = bootstrapData.events
+      .map((event) =>
+        toDomainEvent({
+          ...event,
+          deadline_time_game_offset: 0,
+          release_time_epoch: null,
+          release_time_game_offset: null,
+          chip_plays_processed: false,
+          released: false,
+        } as EventResponse),
+      )
+      .filter(E.isRight)
+      .map((e) => e.right);
   });
 
   beforeEach(async () => {
