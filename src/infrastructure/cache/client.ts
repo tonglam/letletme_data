@@ -6,7 +6,6 @@
 
 import * as TE from 'fp-ts/TaskEither';
 import Redis from 'ioredis';
-import { REDIS_CONFIG } from '../../config/cache/redis.config';
 import { CacheError, CacheErrorCode, createCacheError } from '../../types/error.type';
 
 // Global Redis client instance
@@ -18,10 +17,10 @@ const globalForRedis = global as { redisClient?: Redis };
 export const redisClient =
   globalForRedis.redisClient ??
   new Redis({
-    host: REDIS_CONFIG.host,
-    port: REDIS_CONFIG.port,
-    password: REDIS_CONFIG.password,
-    db: REDIS_CONFIG.db,
+    host: process.env.REDIS_HOST ?? 'localhost',
+    port: Number(process.env.REDIS_PORT ?? 6379),
+    password: process.env.REDIS_PASSWORD,
+    db: Number(process.env.REDIS_DB ?? 0),
   });
 
 // Development environment handling

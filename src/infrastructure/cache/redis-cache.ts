@@ -8,6 +8,7 @@ import * as A from 'fp-ts/Array';
 import * as E from 'fp-ts/Either';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
+import Redis from 'ioredis';
 import { CacheError } from '../../types/error.type';
 import { createCacheOperationError } from '../../utils/error.util';
 import { redisClient } from './client';
@@ -67,12 +68,17 @@ export interface RedisCache<T> {
   hSet: (key: string, field: string, value: T) => TE.TaskEither<CacheError, void>;
   hGet: (key: string, field: string) => TE.TaskEither<CacheError, T | null>;
   hGetAll: (key: string) => TE.TaskEither<CacheError, Record<string, T>>;
+  client: Redis;
 }
 
 // Redis cache configuration
 interface RedisCacheConfig {
   keyPrefix?: string;
   defaultTTL?: number;
+  host?: string;
+  port?: number;
+  password?: string;
+  db?: number;
 }
 
 // Helper for Redis operations with error handling
@@ -87,6 +93,16 @@ const withRedis = <T>(
 // Creates a type-safe Redis cache instance
 export const createRedisCache = <T>(config: RedisCacheConfig = {}): RedisCache<T> => {
   const makeKey = (key: string) => `${config.keyPrefix ?? ''}${key}`;
+
+  // Create a new Redis client if connection options are provided
+  const client = config.host
+    ? new Redis({
+        host: config.host,
+        port: config.port ?? 6379,
+        password: config.password,
+        db: config.db ?? 0,
+      })
+    : redisClient;
 
   const set = (key: string, value: T, ttl?: number): TE.TaskEither<CacheError, void> =>
     pipe(
@@ -103,9 +119,9 @@ export const createRedisCache = <T>(config: RedisCacheConfig = {}): RedisCache<T
           const cacheKey = makeKey(key);
           const ttlValue = ttl ?? config.defaultTTL;
           if (ttlValue) {
-            await redisClient.setex(cacheKey, ttlValue, serialized);
+            await client.setex(cacheKey, ttlValue, serialized);
           } else {
-            await redisClient.set(cacheKey, serialized);
+            await client.set(cacheKey, serialized);
           }
         }, `Failed to set cache key ${key}`),
       ),
@@ -113,7 +129,7 @@ export const createRedisCache = <T>(config: RedisCacheConfig = {}): RedisCache<T
 
   const get = (key: string): TE.TaskEither<CacheError, T | null> =>
     pipe(
-      withRedis(() => redisClient.get(makeKey(key)), `Failed to get cache key ${key}`),
+      withRedis(() => client.get(makeKey(key)), `Failed to get cache key ${key}`),
       TE.chain((value) =>
         value
           ? pipe(
@@ -142,7 +158,7 @@ export const createRedisCache = <T>(config: RedisCacheConfig = {}): RedisCache<T
       TE.fromEither,
       TE.chain((serialized) =>
         withRedis(
-          () => redisClient.hset(makeKey(key), field, serialized),
+          () => client.hset(makeKey(key), field, serialized),
           `Failed to set hash field ${field} for key ${key}`,
         ),
       ),
@@ -152,7 +168,7 @@ export const createRedisCache = <T>(config: RedisCacheConfig = {}): RedisCache<T
   const hGet = (key: string, field: string): TE.TaskEither<CacheError, T | null> =>
     pipe(
       withRedis(
-        () => redisClient.hget(makeKey(key), field),
+        () => client.hget(makeKey(key), field),
         `Failed to get hash field ${field} for key ${key}`,
       ),
       TE.chain((value) =>
@@ -173,10 +189,7 @@ export const createRedisCache = <T>(config: RedisCacheConfig = {}): RedisCache<T
 
   const hGetAll = (key: string): TE.TaskEither<CacheError, Record<string, T>> =>
     pipe(
-      withRedis(
-        () => redisClient.hgetall(makeKey(key)),
-        `Failed to get all hash fields for key ${key}`,
-      ),
+      withRedis(() => client.hgetall(makeKey(key)), `Failed to get all hash fields for key ${key}`),
       TE.chain((values) =>
         values
           ? pipe(
@@ -206,5 +219,6 @@ export const createRedisCache = <T>(config: RedisCacheConfig = {}): RedisCache<T
     hSet,
     hGet,
     hGetAll,
+    client,
   };
 };

@@ -75,16 +75,15 @@ const phaseServiceOperations = (domainOps: PhaseOperations): PhaseServiceOperati
 export const createPhaseService = (
   bootstrapApi: PhaseServiceDependencies['bootstrapApi'],
   repository: PhaseRepository,
-): PhaseServiceWithWorkflows => {
-  const emptyCache: PhaseCache = {
+  cache: PhaseCache = {
     getAllPhases: () => TE.right([]),
     getPhase: () => TE.right(null),
     warmUp: () => TE.right(undefined),
     cachePhase: () => TE.right(undefined),
     cachePhases: () => TE.right(undefined),
-  };
-
-  const domainOps = createPhaseOperations(repository, emptyCache);
+  },
+): PhaseServiceWithWorkflows => {
+  const domainOps = createPhaseOperations(repository, cache);
   const ops = phaseServiceOperations(domainOps);
 
   const service: PhaseService = {

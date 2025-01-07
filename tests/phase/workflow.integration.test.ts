@@ -1,20 +1,18 @@
+import * as E from 'fp-ts/Either';
+import { pipe } from 'fp-ts/function';
 import * as T from 'fp-ts/Task';
 import * as TE from 'fp-ts/TaskEither';
-import { pipe } from 'fp-ts/function';
-import { CachePrefix } from '../../src/config/cache/cache.config';
 import { createBootstrapApiAdapter } from '../../src/domain/bootstrap/adapter';
 import { ExtendedBootstrapApi } from '../../src/domain/bootstrap/types';
-import { eventRepository } from '../../src/domain/event/repository';
-import { redisClient } from '../../src/infrastructure/cache/client';
+import { createPhaseCache } from '../../src/domain/phase/cache';
+import { createPhaseRepository } from '../../src/domain/phase/repository';
+import { toDomainPhase } from '../../src/domain/phase/types';
+import { createRedisCache } from '../../src/infrastructure/cache/redis-cache';
 import { prisma } from '../../src/infrastructure/db/prisma';
 import { DEFAULT_RETRY_CONFIG } from '../../src/infrastructure/http/client/utils';
 import { createFPLClient } from '../../src/infrastructure/http/fpl/client';
-import {
-  createEventService,
-  createEventWorkflows,
-  EventWorkflowKey,
-} from '../../src/service/event';
-import { WorkflowResult } from '../../src/service/event/types';
+import { createPhaseService } from '../../src/service/phase';
+import type { WorkflowResult } from '../../src/service/phase/types';
 import { getCurrentSeason } from '../../src/types/base.type';
 import {
   APIErrorCode,
@@ -22,17 +20,10 @@ import {
   ServiceError,
   ServiceErrorCode,
 } from '../../src/types/error.type';
-import { Event } from '../../src/types/event.type';
+import type { PhaseId } from '../../src/types/phase.type';
+import { Phase } from '../../src/types/phase.type';
 
-describe('Event Workflow Integration Tests', () => {
-  const TEST_TIMEOUT = 30000;
-
-  // Test-specific cache keys
-  const TEST_CACHE_PREFIX = `${CachePrefix.EVENT}::test`;
-  const testCacheKey = `${TEST_CACHE_PREFIX}::${getCurrentSeason()}`;
-  const testCurrentEventKey = `${testCacheKey}::current`;
-  const testNextEventKey = `${testCacheKey}::next`;
-
+describe('Phase Workflow Integration Tests', () => {
   // Service and workflow instances
   const fplClient = createFPLClient({
     retryConfig: {
@@ -43,43 +34,67 @@ describe('Event Workflow Integration Tests', () => {
     },
   });
   const bootstrapApi = createBootstrapApiAdapter(fplClient);
-  const eventService = createEventService(bootstrapApi, eventRepository);
-  const workflows = createEventWorkflows(eventService);
+  const phaseRepository = createPhaseRepository(prisma);
+
+  // Create Redis cache with remote configuration
+  const redisCache = createRedisCache<Phase>({
+    host: process.env.REDIS_HOST ?? 'localhost',
+    port: Number(process.env.REDIS_PORT ?? 6379),
+    password: process.env.REDIS_PASSWORD,
+    db: Number(process.env.REDIS_DB ?? 0),
+  });
+
+  const phaseCache = createPhaseCache(redisCache, {
+    getOne: async (id: number) => {
+      const result = await phaseRepository.findById(id as PhaseId)();
+      if (E.isRight(result) && result.right) {
+        return toDomainPhase(result.right);
+      }
+      return null;
+    },
+    getAll: async () => {
+      const result = await phaseRepository.findAll()();
+      if (E.isRight(result)) {
+        return result.right.map(toDomainPhase);
+      }
+      return [];
+    },
+  });
+
+  const phaseService = createPhaseService(bootstrapApi, phaseRepository, phaseCache);
+  const workflows = phaseService.workflows;
 
   beforeAll(async () => {
     try {
       // Wait for Redis connection
       await new Promise((resolve) => setTimeout(resolve, 1000));
 
-      // Clear existing data
-      await prisma.event.deleteMany();
+      // Clear test data
+      await prisma.phase.deleteMany();
 
       // Clear test-specific cache keys
-      const multi = redisClient.multi();
-      multi.del(testCacheKey);
-      multi.del(testCurrentEventKey);
-      multi.del(testNextEventKey);
+      const season = getCurrentSeason();
+      const baseKey = `phase::${season}`;
+
+      const multi = redisCache.client.multi();
+      multi.del(baseKey);
       await multi.exec();
     } catch (error) {
       console.error('Error in beforeAll:', error);
       throw error;
     }
-  }, TEST_TIMEOUT);
+  });
 
   afterAll(async () => {
     try {
       // Clean up test data
-      await prisma.event.deleteMany();
+      await prisma.phase.deleteMany();
 
-      // Clean up test-specific cache keys
-      const multi = redisClient.multi();
-      multi.del(testCacheKey);
-      multi.del(testCurrentEventKey);
-      multi.del(testNextEventKey);
-      await multi.exec();
+      // Verify cleanup
+      await redisCache.client.keys('*phase*');
 
       // Close connections
-      await redisClient.quit();
+      await redisCache.client.quit();
       await prisma.$disconnect();
     } catch (error) {
       console.error('Error in afterAll:', error);
@@ -90,19 +105,19 @@ describe('Event Workflow Integration Tests', () => {
   describe('Workflow Setup', () => {
     it('should create workflows with proper interface', () => {
       expect(workflows).toBeDefined();
-      expect(workflows[EventWorkflowKey.SYNC]).toBeDefined();
-      expect(typeof workflows[EventWorkflowKey.SYNC]).toBe('function');
+      expect(workflows.syncPhases).toBeDefined();
+      expect(typeof workflows.syncPhases).toBe('function');
     });
   });
 
-  describe('Event Sync Workflow', () => {
+  describe('Phase Sync Workflow', () => {
     it('should execute sync workflow successfully', async () => {
       const result = await pipe(
-        workflows[EventWorkflowKey.SYNC](),
+        workflows.syncPhases(),
         TE.fold<
           ServiceError,
-          WorkflowResult<readonly Event[]>,
-          WorkflowResult<readonly Event[]> | null
+          WorkflowResult<readonly Phase[]>,
+          WorkflowResult<readonly Phase[]> | null
         >(
           () => T.of(null),
           (result) => T.of(result),
@@ -113,7 +128,7 @@ describe('Event Workflow Integration Tests', () => {
       if (result) {
         // Verify workflow context
         expect(result.context).toBeDefined();
-        expect(result.context.workflowId).toBe('event-sync');
+        expect(result.context.workflowId).toBe('phase-sync');
         expect(result.context.startTime).toBeInstanceOf(Date);
 
         // Verify workflow metrics
@@ -125,7 +140,8 @@ describe('Event Workflow Integration Tests', () => {
         expect(result.result[0]).toMatchObject({
           id: expect.any(Number),
           name: expect.any(String),
-          deadlineTime: expect.any(String),
+          startEvent: expect.any(Number),
+          stopEvent: expect.any(Number),
         });
       }
     }, 30000);
@@ -134,9 +150,9 @@ describe('Event Workflow Integration Tests', () => {
       // Create mock API that always fails
       const mockError = createAPIError({
         code: APIErrorCode.SERVICE_ERROR,
-        message: 'Failed to fetch events from API',
+        message: 'Failed to fetch phases from API',
         cause: new Error('Network error'),
-        details: { endpoint: '/bootstrap/events' },
+        details: { endpoint: '/bootstrap/phases' },
       });
 
       const failingApi: ExtendedBootstrapApi = {
@@ -149,12 +165,12 @@ describe('Event Workflow Integration Tests', () => {
         },
       };
 
-      const failingService = createEventService(failingApi, eventRepository);
-      const failingWorkflows = createEventWorkflows(failingService);
+      const failingService = createPhaseService(failingApi, phaseRepository);
+      const failingWorkflows = failingService.workflows;
 
       const result = await pipe(
-        failingWorkflows[EventWorkflowKey.SYNC](),
-        TE.fold<ServiceError, WorkflowResult<readonly Event[]>, ServiceError>(
+        failingWorkflows.syncPhases(),
+        TE.fold<ServiceError, WorkflowResult<readonly Phase[]>, ServiceError>(
           (error) => T.of(error),
           () => {
             throw new Error('Expected workflow to fail but it succeeded');
@@ -166,30 +182,26 @@ describe('Event Workflow Integration Tests', () => {
       expect(result).toBeDefined();
       expect(result.name).toBe('ServiceError');
       expect(result.code).toBe(ServiceErrorCode.INTEGRATION_ERROR);
-      expect(result.message).toBe('Event sync workflow failed: Service integration failed');
+      expect(result.message).toBe('Phase sync workflow failed: Failed to fetch phases from API');
       expect(result.timestamp).toBeInstanceOf(Date);
     }, 10000);
   });
 
   describe('Workflow Metrics', () => {
     beforeEach(async () => {
-      // Clear only event-related cache keys
+      // Clear only phase-related cache keys
       const season = getCurrentSeason();
-      const baseKey = `event::${season}`;
-      const currentKey = `${baseKey}::current`;
-      const nextKey = `${baseKey}::next`;
+      const baseKey = `phase::${season}`;
 
-      const multi = redisClient.multi();
+      const multi = redisCache.client.multi();
       multi.del(baseKey);
-      multi.del(currentKey);
-      multi.del(nextKey);
       await multi.exec();
     });
 
     it('should track workflow execution time', async () => {
       const result = await pipe(
-        workflows[EventWorkflowKey.SYNC](),
-        TE.fold<ServiceError, WorkflowResult<readonly Event[]>, WorkflowResult<readonly Event[]>>(
+        workflows.syncPhases(),
+        TE.fold<ServiceError, WorkflowResult<readonly Phase[]>, WorkflowResult<readonly Phase[]>>(
           (error) =>
             T.of({
               duration: 0,
@@ -207,12 +219,12 @@ describe('Event Workflow Integration Tests', () => {
 
     it('should include workflow context in results', async () => {
       const result = await pipe(
-        workflows[EventWorkflowKey.SYNC](),
-        TE.fold<ServiceError, WorkflowResult<readonly Event[]>, WorkflowResult<readonly Event[]>>(
+        workflows.syncPhases(),
+        TE.fold<ServiceError, WorkflowResult<readonly Phase[]>, WorkflowResult<readonly Phase[]>>(
           (error) =>
             T.of({
               duration: 0,
-              context: { workflowId: 'event-sync', startTime: new Date() },
+              context: { workflowId: 'phase-sync', startTime: new Date() },
               result: [],
               error,
             }),
@@ -221,7 +233,7 @@ describe('Event Workflow Integration Tests', () => {
       )();
 
       expect(result.context).toMatchObject({
-        workflowId: 'event-sync',
+        workflowId: 'phase-sync',
         startTime: expect.any(Date),
       });
     }, 30000);

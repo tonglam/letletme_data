@@ -38,42 +38,56 @@ describe('Event Service Integration Tests', () => {
   const eventService = createEventService(bootstrapApi, eventRepository);
 
   beforeAll(async () => {
-    // Clear existing data
-    await prisma.event.deleteMany();
+    try {
+      // Wait for Redis connection
+      await new Promise((resolve) => setTimeout(resolve, 1000));
 
-    // Clear test-specific cache keys
-    await Promise.all([
-      redisClient.del(testCacheKey),
-      redisClient.del(testCurrentEventKey),
-      redisClient.del(testNextEventKey),
-    ]);
+      // Clear existing data
+      await prisma.event.deleteMany();
 
-    // Sync events from API
-    await pipe(
-      eventService.syncEventsFromApi(),
-      TE.fold<ServiceError, readonly Event[], void>(
-        (error) => {
-          console.error('Failed to sync events:', error);
-          return T.of(undefined);
-        },
-        () => T.of(undefined),
-      ),
-    )();
+      // Clear test-specific cache keys
+      const multi = redisClient.multi();
+      multi.del(testCacheKey);
+      multi.del(testCurrentEventKey);
+      multi.del(testNextEventKey);
+      await multi.exec();
+
+      // Sync events from API
+      await pipe(
+        eventService.syncEventsFromApi(),
+        TE.fold<ServiceError, readonly Event[], void>(
+          (error) => {
+            console.error('Failed to sync events:', error);
+            return T.of(undefined);
+          },
+          () => T.of(undefined),
+        ),
+      )();
+    } catch (error) {
+      console.error('Error in beforeAll:', error);
+      throw error;
+    }
   }, TEST_TIMEOUT);
 
   afterAll(async () => {
-    // Clean up test data
-    await prisma.event.deleteMany();
+    try {
+      // Clean up test data
+      await prisma.event.deleteMany();
 
-    // Clean up test-specific cache keys
-    await Promise.all([
-      redisClient.del(testCacheKey),
-      redisClient.del(testCurrentEventKey),
-      redisClient.del(testNextEventKey),
-    ]);
+      // Clean up test-specific cache keys
+      const multi = redisClient.multi();
+      multi.del(testCacheKey);
+      multi.del(testCurrentEventKey);
+      multi.del(testNextEventKey);
+      await multi.exec();
 
-    await redisClient.quit();
-    await prisma.$disconnect();
+      // Close connections
+      await redisClient.quit();
+      await prisma.$disconnect();
+    } catch (error) {
+      console.error('Error in afterAll:', error);
+      throw error;
+    }
   });
 
   describe('Service Setup', () => {
