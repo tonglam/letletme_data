@@ -72,26 +72,30 @@ export const createCacheError = (params: {
  */
 export enum DomainErrorCode {
   VALIDATION_ERROR = 'VALIDATION_ERROR',
-  NOT_FOUND = 'NOT_FOUND',
-  PROCESSING_ERROR = 'PROCESSING_ERROR',
+  CACHE_ERROR = 'CACHE_ERROR',
+  DATABASE_ERROR = 'DATABASE_ERROR',
 }
 
-export interface DomainError extends Error {
+export interface DomainError {
   readonly code: DomainErrorCode;
   readonly message: string;
-  readonly details?: unknown;
   readonly cause?: Error;
+  readonly timestamp: Date;
 }
 
-export const createDomainError = (params: {
+export const createDomainError = ({
+  code,
+  message,
+  cause,
+}: {
   code: DomainErrorCode;
   message: string;
-  details?: unknown;
   cause?: Error;
 }): DomainError => ({
-  name: 'DomainError',
-  stack: new Error().stack,
-  ...params,
+  code,
+  message,
+  cause,
+  timestamp: new Date(),
 });
 
 /**

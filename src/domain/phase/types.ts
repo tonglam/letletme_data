@@ -1,18 +1,16 @@
 /**
- * Phase Types Module
+ * Phase Domain Types Module
  *
- * Core type definitions for the Fantasy Premier League phase system.
- * Includes branded types, domain models, and data converters.
+ * Core type definitions for the phase domain layer.
+ * Includes branded types, domain models, data converters, and domain operations.
  */
 
 import * as E from 'fp-ts/Either';
-import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
+import { pipe } from 'fp-ts/function';
 import { z } from 'zod';
-import type { BootstrapApi } from '../domain/bootstrap/types';
-import type { PhaseCache } from '../domain/phase/types';
-import { BaseRepository, Branded, createBrandedType, isApiResponse } from './base.type';
-import { APIError, DBError } from './error.type';
+import { BaseRepository, Branded, createBrandedType, isApiResponse } from '../../types/base.type';
+import { CacheError, DomainError } from '../../types/error.type';
 
 /**
  * Branded type for Phase ID ensuring type safety
@@ -22,7 +20,7 @@ export type PhaseId = Branded<number, 'PhaseId'>;
 /**
  * Creates a branded PhaseId with validation
  */
-export const createPhaseId = createBrandedType<number, 'PhaseId'>(
+export const PhaseId = createBrandedType<number, 'PhaseId'>(
   'PhaseId',
   (value: unknown): value is number =>
     typeof value === 'number' && value > 0 && Number.isInteger(value),
@@ -93,10 +91,7 @@ export type Phases = readonly Phase[];
  * Phase repository interface
  * Extends base repository with phase-specific operations
  */
-export interface PhaseRepository extends BaseRepository<PrismaPhase, PrismaPhaseCreate, PhaseId> {
-  readonly findByIds: (ids: PhaseId[]) => TE.TaskEither<DBError, PrismaPhase[]>;
-  readonly update: (id: PhaseId, phase: PrismaPhaseUpdate) => TE.TaskEither<DBError, PrismaPhase>;
-}
+export type PhaseRepository = BaseRepository<PrismaPhase, PrismaPhaseCreate, PhaseId>;
 
 /**
  * Prisma database model for Phase
@@ -119,6 +114,27 @@ export type PrismaPhaseCreate = Omit<PrismaPhase, 'createdAt'>;
  * Prisma phase update type
  */
 export type PrismaPhaseUpdate = Omit<PrismaPhase, 'createdAt'>;
+
+/**
+ * Phase cache interface for domain operations
+ */
+export interface PhaseCache {
+  readonly warmUp: () => TE.TaskEither<CacheError, void>;
+  readonly cachePhase: (phase: Phase) => TE.TaskEither<CacheError, void>;
+  readonly cachePhases: (phases: Phases) => TE.TaskEither<CacheError, void>;
+  readonly getPhase: (id: string) => TE.TaskEither<CacheError, Phase | null>;
+  readonly getAllPhases: () => TE.TaskEither<CacheError, Phases>;
+}
+
+/**
+ * Phase operations interface for domain logic
+ */
+export interface PhaseOperations {
+  readonly getAllPhases: () => TE.TaskEither<DomainError, Phases>;
+  readonly getPhaseById: (id: PhaseId) => TE.TaskEither<DomainError, Phase | null>;
+  readonly createPhases: (phases: Phases) => TE.TaskEither<DomainError, Phases>;
+  readonly deleteAll: () => TE.TaskEither<DomainError, void>;
+}
 
 /**
  * Converts API response or database model to domain model
@@ -146,21 +162,3 @@ export const toPrismaPhase = (phase: Phase): PrismaPhaseCreate => ({
   stopEvent: phase.stopEvent,
   highestScore: phase.highestScore,
 });
-
-/**
- * Service interface for Phase operations
- */
-export interface PhaseService {
-  readonly warmUp: () => TE.TaskEither<APIError, void>;
-  readonly getPhases: () => TE.TaskEither<APIError, Phases>;
-  readonly getPhase: (id: PhaseId) => TE.TaskEither<APIError, Phase | null>;
-}
-
-/**
- * Dependencies required by the PhaseService
- */
-export interface PhaseServiceDependencies {
-  bootstrapApi: BootstrapApi;
-  phaseCache: PhaseCache;
-  phaseRepository: PhaseRepository;
-}

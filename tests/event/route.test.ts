@@ -1,48 +1,30 @@
 import express, { Express } from 'express';
 import * as E from 'fp-ts/Either';
-import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import request from 'supertest';
 import { createRouter } from '../../src/api';
 import { handleError } from '../../src/api/middlewares/core';
 import { ServiceContainer, ServiceKey } from '../../src/service';
-import { Branded } from '../../src/types/base.type';
 import { ServiceErrorCode, createServiceError } from '../../src/types/error.type';
-import { Event, createEventId } from '../../src/types/event.type';
+import { Event, EventResponse, toDomainEvent } from '../../src/types/event.type';
+import bootstrapData from '../data/bootstrap.json';
 
 // Test fixtures
-const createMockEvent = (id: number, isCurrent = false, isNext = false): Event => ({
-  id: pipe(
-    createEventId.validate(id),
-    E.getOrElse<string, Branded<number, 'EventId'>>(() => {
-      throw new Error('Invalid event ID');
-    }),
-  ),
-  name: `Event ${id}`,
-  deadlineTime: '2023-08-11T17:30:00Z',
-  deadlineTimeEpoch: 1691774200,
-  deadlineTimeGameOffset: 0,
-  releaseTime: null,
-  averageEntryScore: 0,
-  finished: false,
-  dataChecked: false,
-  highestScore: 0,
-  highestScoringEntry: 0,
-  isPrevious: false,
-  isCurrent,
-  isNext,
-  cupLeaguesCreated: false,
-  h2hKoMatchesCreated: false,
-  rankedCount: 0,
-  chipPlays: [],
-  mostSelected: null,
-  mostTransferredIn: null,
-  mostCaptained: null,
-  mostViceCaptained: null,
-  topElement: null,
-  topElementInfo: null,
-  transfersMade: 0,
-});
+const getTestEvent = (id: number, isCurrent = false, isNext = false): Event => {
+  const baseEvent = bootstrapData.events.find((event) => event.id === id);
+  if (!baseEvent) {
+    throw new Error(`Event with ID ${id} not found in bootstrap data`);
+  }
+
+  const eventResponse: EventResponse = {
+    ...baseEvent,
+    is_current: isCurrent,
+    is_next: isNext,
+    is_previous: false,
+  };
+
+  return toDomainEvent(eventResponse);
+};
 
 describe('Event Routes', () => {
   let app: Express;
@@ -56,10 +38,15 @@ describe('Event Routes', () => {
       getNextEvent: jest.fn(),
       saveEvents: jest.fn(),
       syncEventsFromApi: jest.fn(),
+      warmUp: jest.fn(),
+    } as jest.Mocked<ServiceContainer[typeof ServiceKey.EVENT]>;
+
+    const container: Partial<ServiceContainer> = {
+      [ServiceKey.EVENT]: mockEventService,
     };
 
     app = express();
-    app.use('/api', createRouter({ [ServiceKey.EVENT]: mockEventService }));
+    app.use('/api', createRouter(container as ServiceContainer));
     app.use(handleError);
   });
 
@@ -68,7 +55,7 @@ describe('Event Routes', () => {
   });
 
   describe('GET /api/events', () => {
-    const mockEvents = [createMockEvent(1, true), createMockEvent(2, false, true)];
+    const mockEvents = [getTestEvent(1, true), getTestEvent(2, false, true)];
 
     it('should successfully return all events when available', async () => {
       mockEventService.getEvents.mockImplementation(
@@ -107,7 +94,7 @@ describe('Event Routes', () => {
   });
 
   describe('GET /api/events/current', () => {
-    const mockCurrentEvent = createMockEvent(1, true);
+    const mockCurrentEvent = getTestEvent(1, true);
 
     it('should successfully return current event when available', async () => {
       mockEventService.getCurrentEvent.mockImplementation(
@@ -140,7 +127,7 @@ describe('Event Routes', () => {
   });
 
   describe('GET /api/events/next', () => {
-    const mockNextEvent = createMockEvent(2, false, true);
+    const mockNextEvent = getTestEvent(2, false, true);
 
     it('should successfully return next event when available', async () => {
       mockEventService.getNextEvent.mockImplementation(
@@ -171,7 +158,7 @@ describe('Event Routes', () => {
   });
 
   describe('GET /api/events/:id', () => {
-    const mockEvent = createMockEvent(1);
+    const mockEvent = getTestEvent(1);
 
     it('should successfully return event by valid ID', async () => {
       mockEventService.getEvent.mockImplementation(() => () => Promise.resolve(E.right(mockEvent)));

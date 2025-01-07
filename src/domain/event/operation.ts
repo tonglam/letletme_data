@@ -50,7 +50,7 @@ export const createEventOperations = (repository: EventRepositoryOperations): Ev
 
   const mapCacheError = (message: string) => (error: unknown) =>
     createStandardDomainError({
-      code: DomainErrorCode.PROCESSING_ERROR,
+      code: DomainErrorCode.CACHE_ERROR,
       message,
       details: error,
     });

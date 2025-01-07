@@ -5,7 +5,8 @@ import { NextFunction, Request, Response } from 'express';
 import { Either } from 'fp-ts/Either';
 import { TaskEither } from 'fp-ts/TaskEither';
 import { APIError } from '../types/error.type';
-import { Event } from '../types/event.type';
+import { Event, Events } from '../types/event.type';
+import { Phase, Phases } from '../types/phase.type';
 
 // Standard API response format with generic data payload
 export interface APIResponseData<T> {
@@ -20,10 +21,16 @@ export type NullableEventHandler = NullableHandler<Event>;
 
 // Event handler responses defining all available event operations
 export interface EventHandlerResponse {
-  readonly getAllEvents: () => TaskEither<APIError, Event[]>;
+  readonly getAllEvents: () => TaskEither<APIError, Events>;
   readonly getCurrentEvent: () => TaskEither<APIError, Event>;
   readonly getNextEvent: () => TaskEither<APIError, Event>;
   readonly getEventById: (req: Request) => TaskEither<APIError, Event>;
+}
+
+// Phase handler response types
+export interface PhaseHandlerResponse {
+  readonly getAllPhases: () => TaskEither<APIError, Phases>;
+  readonly getPhaseById: (req: Request) => TaskEither<APIError, Phase>;
 }
 
 // Handler for asynchronous middleware operations

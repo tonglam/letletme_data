@@ -22,11 +22,12 @@ export const createStandardDomainError = (params: {
   code: DomainErrorCode;
   message: string;
   details?: unknown;
+  cause?: Error;
 }): DomainError =>
   createDomainError({
     code: params.code,
     message: params.message,
-    details: params.details,
+    cause: params.cause,
   });
 
 /**
