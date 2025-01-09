@@ -4,7 +4,7 @@ import { ElementResponse } from '../../types/element.type';
 import { APIError } from '../../types/error.type';
 import { EventResponse } from '../../types/event.type';
 import { PhaseResponse } from '../../types/phase.type';
-import { TeamResponse } from '../../types/teams.type';
+import { TeamResponse } from '../../types/team.type';
 
 /**
  * Interface for bootstrap API operations

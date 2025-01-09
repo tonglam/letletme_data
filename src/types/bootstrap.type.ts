@@ -10,8 +10,8 @@ import type { EventResponse } from './event.type';
 import { EventResponseSchema } from './event.type';
 import type { PhaseResponse } from './phase.type';
 import { PhaseResponseSchema } from './phase.type';
-import type { TeamResponse } from './teams.type';
-import { TeamResponseSchema } from './teams.type';
+import type { TeamResponse } from './team.type';
+import { TeamResponseSchema } from './team.type';
 
 // Zod schema for validating bootstrap response data
 export const BootStrapResponseSchema = z
