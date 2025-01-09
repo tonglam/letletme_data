@@ -151,9 +151,10 @@ export const toPrismaPhase = (phase: Phase): PrismaPhaseCreate => ({
  * Service interface for Phase operations
  */
 export interface PhaseService {
-  readonly warmUp: () => TE.TaskEither<APIError, void>;
   readonly getPhases: () => TE.TaskEither<APIError, Phases>;
   readonly getPhase: (id: PhaseId) => TE.TaskEither<APIError, Phase | null>;
+  readonly savePhases: (phases: Phases) => TE.TaskEither<APIError, Phases>;
+  readonly syncPhasesFromApi: () => TE.TaskEither<APIError, Phases>;
 }
 
 /**

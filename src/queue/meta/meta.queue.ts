@@ -13,7 +13,6 @@ import {
   MetaService,
   MetaType,
 } from '../../types/job.type';
-import { QueueConfig } from '../../types/queue.type';
 
 const logger = getQueueLogger();
 
@@ -68,7 +67,6 @@ export const createMetaJobProcessor =
 
 // Base meta queue service creator
 export const createMetaQueueService = (
-  config: QueueConfig,
   metaService: MetaService,
   processor: MetaJobProcessor,
 ): TE.TaskEither<QueueError, MetaQueueService> =>
@@ -76,7 +74,7 @@ export const createMetaQueueService = (
     TE.Do,
     TE.bind('queueService', () =>
       pipe(
-        createQueueServiceImpl<MetaJobData>('meta', config),
+        createQueueServiceImpl<MetaJobData>('meta'),
         TE.mapLeft((error) => {
           logger.error({ error }, 'Failed to create queue service');
           return error;
@@ -86,24 +84,41 @@ export const createMetaQueueService = (
     TE.chain(({ queueService }) =>
       TE.tryCatch(
         async () => {
+          logger.info('Creating worker with configuration:', {
+            concurrency: QUEUE_CONFIG.CONCURRENCY,
+            limiter: {
+              max: QUEUE_CONFIG.RATE_LIMIT.MAX,
+              duration: QUEUE_CONFIG.RATE_LIMIT.DURATION,
+            },
+            connection: {
+              host: QUEUE_CONFIG.REDIS.HOST,
+              port: QUEUE_CONFIG.REDIS.PORT,
+            },
+          });
+
           const worker = new Worker<MetaJobData>(
             'meta',
             async (job) => {
+              logger.info({ jobId: job.id }, 'Worker received job');
               const result = await processor(job, metaService)();
               if (result._tag === 'Left') {
                 logger.error({ jobId: job.id, error: result.left }, 'Job processing failed');
                 throw result.left;
               }
+              logger.info({ jobId: job.id }, 'Job processing completed successfully');
+              return result.right;
             },
             {
-              connection: config.connection,
               concurrency: QUEUE_CONFIG.CONCURRENCY,
               limiter: {
                 max: QUEUE_CONFIG.RATE_LIMIT.MAX,
                 duration: QUEUE_CONFIG.RATE_LIMIT.DURATION,
               },
-              stalledInterval: QUEUE_CONFIG.STALLED_CHECK_INTERVAL,
-              maxStalledCount: QUEUE_CONFIG.MAX_ATTEMPTS,
+              connection: {
+                host: QUEUE_CONFIG.REDIS.HOST,
+                port: QUEUE_CONFIG.REDIS.PORT,
+                password: QUEUE_CONFIG.REDIS.PASSWORD,
+              },
               removeOnComplete: {
                 count: QUEUE_CONFIG.RETENTION.COUNT,
                 age: QUEUE_CONFIG.RETENTION.AGE,
@@ -112,31 +127,22 @@ export const createMetaQueueService = (
                 count: QUEUE_CONFIG.RETENTION.COUNT,
                 age: QUEUE_CONFIG.RETENTION.AGE,
               },
-              settings: {
-                backoffStrategy: (attemptsMade: number) => {
-                  // Exponential backoff with max limit
-                  return Math.min(
-                    QUEUE_CONFIG.INITIAL_BACKOFF * Math.pow(2, attemptsMade),
-                    QUEUE_CONFIG.MAX_BACKOFF,
-                  );
-                },
-              },
+              lockDuration: QUEUE_CONFIG.JOB_TIMEOUT,
+              stalledInterval: QUEUE_CONFIG.STALLED_CHECK_INTERVAL,
+              maxStalledCount: 1,
             },
           );
 
-          worker.on('error', (error) => {
-            logger.error({ error }, 'Worker error');
+          worker.on('completed', (job) => {
+            logger.info({ jobId: job.id }, 'Worker completed job');
           });
 
           worker.on('failed', (job, error) => {
-            if (job) {
-              logger.error(
-                { jobId: job.id, error, attemptsMade: job.attemptsMade },
-                `Job failed, attempts made: ${job.attemptsMade}`,
-              );
-            } else {
-              logger.error({ error }, 'Job failed without job data');
-            }
+            logger.error({ jobId: job?.id, error }, 'Worker failed to process job');
+          });
+
+          worker.on('error', (error) => {
+            logger.error({ error }, 'Worker encountered an error');
           });
 
           worker.on('stalled', (jobId) => {
@@ -151,12 +157,20 @@ export const createMetaQueueService = (
             });
           });
 
-          const close = async () => {
-            logger.info('Closing worker and queue');
-            await worker.close();
-            await queueService.getQueue().close();
-            logger.info('Worker and queue closed');
-          };
+          // Start processing jobs
+          await worker.run();
+          logger.info('Worker started processing jobs');
+
+          const close = (): TE.TaskEither<QueueError, void> =>
+            TE.tryCatch(
+              async () => {
+                logger.info('Closing worker and queue');
+                await worker.close();
+                await queueService.getQueue().close();
+                logger.info('Worker and queue closed');
+              },
+              (error) => createQueueError(QueueErrorCode.CLOSE_QUEUE, 'meta', error as Error),
+            );
 
           const pause = (isImmediate = false): TE.TaskEither<QueueError, void> =>
             TE.tryCatch(

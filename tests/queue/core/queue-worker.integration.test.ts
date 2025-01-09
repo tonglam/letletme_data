@@ -1,104 +1,146 @@
 import { config } from 'dotenv';
 config();
 
-import { Job } from 'bullmq';
+import { Job, QueueEvents } from 'bullmq';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import { createQueueServiceImpl } from '../../../src/infrastructure/queue/core/queue.service';
 import { createWorkerService } from '../../../src/infrastructure/queue/core/worker.service';
 import { QueueService } from '../../../src/infrastructure/queue/types';
-import { QueueError } from '../../../src/types/error.type';
-import { JobData, JobName } from '../../../src/types/job.type';
-import { createTestMetaJobData, createTestQueueConfig } from '../../utils/queue.test.utils';
+import { QueueError, QueueErrorCode, createQueueError } from '../../../src/types/error.type';
+import { JobData, JobName, MetaType } from '../../../src/types/job.type';
 
 describe('Queue-Worker Integration Tests', () => {
   const queueName = 'test-worker-queue';
   const defaultJobName = 'meta' as JobName;
-  const config = createTestQueueConfig();
+  let queueService: QueueService<JobData>;
+  let queueEvents: QueueEvents;
 
   // Validate Redis configuration
   beforeAll(() => {
     if (!process.env.REDIS_HOST || !process.env.REDIS_PASSWORD) {
       throw new Error('Redis configuration is missing. Please check your .env file.');
     }
+
+    queueEvents = new QueueEvents(queueName, {
+      connection: {
+        host: process.env.REDIS_HOST,
+        port: parseInt(process.env.REDIS_PORT || '6379', 10),
+        password: process.env.REDIS_PASSWORD,
+      },
+    });
+  }, 10000);
+
+  afterAll(async () => {
+    await queueEvents.close();
+  }, 10000);
+
+  const createTestJob = (): JobData => ({
+    type: 'META',
+    name: defaultJobName,
+    timestamp: new Date(),
+    data: {
+      operation: 'SYNC',
+      metaType: 'EVENTS' as MetaType,
+    },
   });
 
-  const createTestJob = (): JobData => createTestMetaJobData({ name: defaultJobName });
+  // Helper function to clean up queue
+  const cleanupQueue = async (): Promise<void> => {
+    if (!queueService) return;
 
-  // Cleanup before and after each test
+    try {
+      const queue = queueService.getQueue();
+      await queue.pause();
+      await queue.obliterate();
+      await queue.resume();
+    } catch (error) {
+      console.warn('Queue cleanup warning:', error);
+    }
+  };
+
+  // Helper function to wait for job completion
+  const waitForJobCompletion = async (jobCount: number): Promise<void> => {
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(
+          createQueueError(
+            QueueErrorCode.PROCESSING_ERROR,
+            queueName,
+            new Error('Job completion timeout'),
+          ),
+        );
+      }, 10000);
+
+      let completed = 0;
+      const onCompleted = async () => {
+        completed++;
+        if (completed === jobCount) {
+          clearTimeout(timeout);
+          queueEvents.off('completed', onCompleted);
+          queueEvents.off('failed', onFailed);
+          resolve();
+        }
+      };
+
+      const onFailed = async ({ failedReason }: { failedReason: string }) => {
+        clearTimeout(timeout);
+        queueEvents.off('completed', onCompleted);
+        queueEvents.off('failed', onFailed);
+        reject(
+          createQueueError(QueueErrorCode.PROCESSING_ERROR, queueName, new Error(failedReason)),
+        );
+      };
+
+      queueEvents.on('completed', onCompleted);
+      queueEvents.on('failed', onFailed);
+    });
+  };
+
+  // Setup before each test
   beforeEach(async () => {
-    const cleanup = await pipe(
-      createQueueServiceImpl<JobData>(queueName, config),
-      TE.chain((service: QueueService<JobData>) => service.obliterate()),
-    )();
-    expect(cleanup._tag).toBe('Right');
-  });
+    const queueServiceResult = await createQueueServiceImpl<JobData>(queueName)();
+    if (queueServiceResult._tag === 'Left') {
+      throw new Error('Failed to create queue service');
+    }
+    queueService = queueServiceResult.right;
+    await cleanupQueue();
+  }, 30000);
 
+  // Cleanup after each test
   afterEach(async () => {
-    const cleanup = await pipe(
-      createQueueServiceImpl<JobData>(queueName, config),
-      TE.chain((service: QueueService<JobData>) => service.obliterate()),
-    )();
-    expect(cleanup._tag).toBe('Right');
-  });
+    if (queueService) {
+      await cleanupQueue();
+      await queueService.close()();
+    }
+  }, 30000);
 
   describe('End-to-End Job Processing', () => {
     test('should process job successfully', async () => {
       const processedJobs: JobData[] = [];
-      let checkInterval: NodeJS.Timeout;
-
-      const jobProcessed = new Promise<void>((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          clearInterval(checkInterval);
-          reject(
-            new Error(
-              'Job processing timeout - job was not processed within the expected timeframe',
-            ),
-          );
-        }, 20000);
-
-        checkInterval = setInterval(() => {
-          if (processedJobs.length > 0) {
-            clearInterval(checkInterval);
-            clearTimeout(timeout);
-            resolve();
-          }
-        }, 500);
-      });
 
       const result = await pipe(
         TE.Do,
-        TE.bind('queueService', () => createQueueServiceImpl<JobData>(queueName, config)),
         TE.bind('workerService', () =>
           createWorkerService<JobData>(
             queueName,
-            config,
-            async (job: Job<JobData>) => {
-              console.log(`Processing job ${job.id} with data:`, job.data);
-              processedJobs.push(job.data);
-              console.log(`Job ${job.id} processed successfully`);
+            async ({ data }: Job<JobData>) => {
+              processedJobs.push(data);
             },
             { concurrency: 1 },
           ),
         ),
-        TE.chain(({ queueService, workerService }) =>
+        TE.chain(({ workerService }) =>
           pipe(
-            TE.right(undefined),
-            TE.chain(() => {
-              console.log('Adding job to queue');
-              return queueService.addJob(createTestJob());
-            }),
-            TE.chain(() => {
-              console.log('Job added to queue successfully');
-              return TE.tryCatch(
-                () => jobProcessed,
-                (error) => {
-                  console.error('Error during job processing:', error);
-                  return error as QueueError;
-                },
-              );
-            }),
-            TE.chain(() => workerService.close()),
+            TE.tryCatch(
+              async () => {
+                const job = createTestJob();
+                await queueService.addJob(job)();
+                await waitForJobCompletion(1);
+                return workerService.close()();
+              },
+              (error) => error as QueueError,
+            ),
           ),
         ),
       )();
@@ -111,136 +153,75 @@ describe('Queue-Worker Integration Tests', () => {
     test('should handle concurrent job processing', async () => {
       const processedJobs: JobData[] = [];
       const concurrency = 3;
-      let checkInterval: NodeJS.Timeout;
-
-      const jobsProcessed = new Promise<void>((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          clearInterval(checkInterval);
-          reject(
-            new Error(
-              'Jobs processing timeout - jobs were not processed within the expected timeframe',
-            ),
-          );
-        }, 20000);
-
-        checkInterval = setInterval(() => {
-          if (processedJobs.length === 5) {
-            clearInterval(checkInterval);
-            clearTimeout(timeout);
-            resolve();
-          }
-        }, 500);
-      });
+      const jobCount = 5;
 
       const result = await pipe(
         TE.Do,
-        TE.bind('queueService', () => createQueueServiceImpl<JobData>(queueName, config)),
         TE.bind('workerService', () =>
           createWorkerService<JobData>(
             queueName,
-            config,
-            async (job: Job<JobData>) => {
-              console.log(`Processing job ${job.id} with data:`, job.data);
+            async ({ data }: Job<JobData>) => {
               await new Promise((resolve) => setTimeout(resolve, 100)); // Simulate work
-              processedJobs.push(job.data);
-              console.log(`Job ${job.id} processed successfully`);
+              processedJobs.push(data);
             },
             { concurrency },
           ),
         ),
-        TE.chain(({ queueService, workerService }) =>
+        TE.chain(({ workerService }) =>
           pipe(
-            TE.right(undefined),
-            TE.chain(() => {
-              console.log('Adding jobs to queue');
-              return queueService.addBulk(
-                Array.from({ length: 5 }, () => ({
+            TE.tryCatch(
+              async () => {
+                const jobs = Array.from({ length: jobCount }, () => ({
                   data: createTestJob(),
-                })),
-              );
-            }),
-            TE.chain(() => {
-              console.log('Jobs added to queue successfully');
-              return TE.tryCatch(
-                () => jobsProcessed,
-                (error) => {
-                  console.error('Error during jobs processing:', error);
-                  return error as QueueError;
-                },
-              );
-            }),
-            TE.chain(() => workerService.close()),
+                }));
+                await queueService.addBulk(jobs)();
+                await waitForJobCompletion(jobCount);
+                return workerService.close()();
+              },
+              (error) => error as QueueError,
+            ),
           ),
         ),
       )();
 
       expect(result._tag).toBe('Right');
-      expect(processedJobs.length).toBe(5);
+      expect(processedJobs.length).toBe(jobCount);
     }, 30000);
 
     test('should handle job failure and retry', async () => {
       let attempts = 0;
-      let checkInterval: NodeJS.Timeout;
-
-      const jobAttempted = new Promise<void>((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          clearInterval(checkInterval);
-          reject(new Error('Job retry timeout - job did not retry within the expected timeframe'));
-        }, 20000);
-
-        checkInterval = setInterval(() => {
-          if (attempts === 2) {
-            clearInterval(checkInterval);
-            clearTimeout(timeout);
-            resolve();
-          }
-        }, 500);
-      });
 
       const result = await pipe(
         TE.Do,
-        TE.bind('queueService', () => createQueueServiceImpl<JobData>(queueName, config)),
         TE.bind('workerService', () =>
           createWorkerService<JobData>(
             queueName,
-            config,
-            async (job: Job<JobData>) => {
-              console.log(`Processing job ${job.id}, attempt ${attempts + 1}`);
+            async () => {
               attempts++;
               if (attempts === 1) {
-                console.log(`Job ${job.id} failed on first attempt`);
                 throw new Error('Simulated failure');
               }
-              console.log(`Job ${job.id} processed successfully on attempt ${attempts}`);
             },
             { concurrency: 1 },
           ),
         ),
-        TE.chain(({ queueService, workerService }) =>
+        TE.chain(({ workerService }) =>
           pipe(
-            TE.right(undefined),
-            TE.chain(() => {
-              console.log('Adding job to queue');
-              return queueService.addJob(createTestJob(), {
-                jobId: 'retry-test-job',
-                delay: 0,
-                repeat: {
-                  every: 1000,
-                  limit: 2,
-                },
-              });
-            }),
-            TE.chain(() => {
-              console.log('Job added to queue successfully');
-              return TE.tryCatch(
-                () => jobAttempted,
-                (error) => {
-                  console.error('Error during job retry:', error);
-                  return error as QueueError;
-                },
-              );
-            }),
-            TE.chain(() => workerService.close()),
+            TE.tryCatch(
+              async () => {
+                const job = createTestJob();
+                await queueService.addJob(job, {
+                  attempts: 2,
+                  backoff: {
+                    type: 'fixed',
+                    delay: 1000,
+                  },
+                })();
+                await waitForJobCompletion(1);
+                return workerService.close()();
+              },
+              (error) => error as QueueError,
+            ),
           ),
         ),
       )();
@@ -251,74 +232,41 @@ describe('Queue-Worker Integration Tests', () => {
 
     test('should handle worker recovery after disconnection', async () => {
       const processedJobs: JobData[] = [];
-      let checkInterval: NodeJS.Timeout;
-
-      const jobProcessed = new Promise<void>((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          clearInterval(checkInterval);
-          reject(new Error('Job processing timeout - job was not processed after worker recovery'));
-        }, 20000);
-
-        checkInterval = setInterval(() => {
-          if (processedJobs.length > 0) {
-            clearInterval(checkInterval);
-            clearTimeout(timeout);
-            resolve();
-          }
-        }, 500);
-      });
 
       const result = await pipe(
         TE.Do,
-        TE.bind('queueService', () => createQueueServiceImpl<JobData>(queueName, config)),
         TE.bind('workerService', () =>
           createWorkerService<JobData>(
             queueName,
-            config,
-            async (job: Job<JobData>) => {
-              console.log(`Processing job ${job.id} with data:`, job.data);
-              processedJobs.push(job.data);
-              console.log(`Job ${job.id} processed successfully`);
+            async ({ data }: Job<JobData>) => {
+              processedJobs.push(data);
             },
             { concurrency: 1 },
           ),
         ),
-        TE.chain(({ queueService, workerService }) =>
+        TE.chain(({ workerService }) =>
           pipe(
             workerService.close(),
             TE.chain(() => {
-              console.log('First worker closed successfully');
               return createWorkerService<JobData>(
                 queueName,
-                config,
-                async (job: Job<JobData>) => {
-                  console.log(`Processing job ${job.id} with data:`, job.data);
-                  processedJobs.push(job.data);
-                  console.log(`Job ${job.id} processed successfully`);
+                async ({ data }: Job<JobData>) => {
+                  processedJobs.push(data);
                 },
                 { concurrency: 1 },
               );
             }),
             TE.chain((newWorker) =>
               pipe(
-                TE.right(undefined),
-                TE.chain(() => {
-                  console.log('Adding job to queue');
-                  return queueService.addJob(createTestJob(), {
-                    jobId: 'recovery-test-job',
-                  });
-                }),
-                TE.chain(() => {
-                  console.log('Job added to queue successfully');
-                  return TE.tryCatch(
-                    () => jobProcessed,
-                    (error) => {
-                      console.error('Error during job processing after recovery:', error);
-                      return error as QueueError;
-                    },
-                  );
-                }),
-                TE.chain(() => newWorker.close()),
+                TE.tryCatch(
+                  async () => {
+                    const job = createTestJob();
+                    await queueService.addJob(job)();
+                    await waitForJobCompletion(1);
+                    return newWorker.close()();
+                  },
+                  (error) => error as QueueError,
+                ),
               ),
             ),
           ),
@@ -330,30 +278,39 @@ describe('Queue-Worker Integration Tests', () => {
     }, 30000);
 
     test('should process jobs with worker', async () => {
-      const jobData = createTestMetaJobData({ name: defaultJobName });
+      const jobData = createTestJob();
+      const processedJobs: JobData[] = [];
 
       const result = await pipe(
         TE.Do,
-        TE.bind('queueService', () => createQueueServiceImpl<JobData>(queueName, config)),
         TE.bind('workerService', () =>
           createWorkerService<JobData>(
             queueName,
-            config,
-            async (job: Job<JobData>) => {
-              expect(job.data).toEqual(jobData);
+            async ({ data }: Job<JobData>) => {
+              processedJobs.push(data);
             },
             { concurrency: 1 },
           ),
         ),
-        TE.chain(({ queueService, workerService }) =>
+        TE.chain(({ workerService }) =>
           pipe(
-            queueService.addJob(jobData),
-            TE.chain(() => workerService.close()),
+            TE.tryCatch(
+              async () => {
+                await queueService.addJob(jobData)();
+                await waitForJobCompletion(1);
+                return workerService.close()();
+              },
+              (error) => error as QueueError,
+            ),
           ),
         ),
       )();
 
       expect(result._tag).toBe('Right');
-    });
+      expect(processedJobs.length).toBe(1);
+      expect(processedJobs[0].type).toBe(jobData.type);
+      expect(processedJobs[0].name).toBe(jobData.name);
+      expect(processedJobs[0].data).toEqual(jobData.data);
+    }, 30000);
   });
 });

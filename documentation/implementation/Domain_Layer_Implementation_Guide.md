@@ -11,9 +11,10 @@ A domain implementation requires the following files:
 ```plaintext
 src/domain/{domain-name}/
 ├── types.ts       # Domain-specific interfaces and types
-├── operation.ts  # High-level domain operations
+├── operation.ts   # High-level domain operations
 ├── repository.ts  # Data access layer
-└── cache.ts      # Caching layer
+├── cache.ts      # Caching layer
+└── utils.ts      # Domain-specific utilities and helpers
 ```
 
 ## Core Domain Types
@@ -36,6 +37,7 @@ export interface EventRepositoryOperations {
 export interface EventCache {
   readonly warmUp: () => TaskEither<CacheError, void>;
   readonly cacheEvent: (event: Event) => TaskEither<CacheError, void>;
+  readonly cacheEvents: (events: readonly Event[]) => TaskEither<CacheError, void>;
   readonly getEvent: (id: string) => TaskEither<CacheError, Event | null>;
   readonly getAllEvents: () => TaskEither<CacheError, readonly Event[]>;
   readonly getCurrentEvent: () => TaskEither<CacheError, Event | null>;
@@ -52,6 +54,20 @@ export interface EventOperations {
   readonly createEvents: (events: readonly Event[]) => TaskEither<DomainError, readonly Event[]>;
   readonly deleteAll: () => TaskEither<DomainError, void>;
 }
+
+// Cache configuration
+export interface EventCacheConfig {
+  readonly keyPrefix: string;
+  readonly season: number;
+}
+
+// Data provider for cache
+export interface EventDataProvider {
+  readonly getOne: (id: number) => Promise<Event | null>;
+  readonly getAll: () => Promise<Event[]>;
+  readonly getCurrentEvent: () => Promise<Event | null>;
+  readonly getNextEvent: () => Promise<Event | null>;
+}
 ```
 
 ## Repository Implementation
@@ -60,11 +76,19 @@ export interface EventOperations {
 // Repository implementation with Prisma
 export const eventRepository: EventRepositoryOperations = {
   findAll: (): TE.TaskEither<DBError, PrismaEvent[]> =>
-    pipe(TE.tryCatch(() => prisma.event.findMany({ orderBy: { id: 'asc' } }), handlePrismaError)),
+    pipe(
+      TE.tryCatch(
+        () => prisma.event.findMany({ orderBy: { id: 'asc' } }),
+        (error) => handlePrismaError('Failed to fetch all events', error),
+      ),
+    ),
 
   findById: (id: EventId): TE.TaskEither<DBError, PrismaEvent | null> =>
     pipe(
-      TE.tryCatch(() => prisma.event.findUnique({ where: { id: Number(id) } }), handlePrismaError),
+      TE.tryCatch(
+        () => prisma.event.findUnique({ where: { id: Number(id) } }),
+        (error) => handlePrismaError(`Failed to fetch event ${id}`, error),
+      ),
     ),
 
   // ... other repository methods
@@ -79,37 +103,54 @@ export const createEventCache = (
   dataProvider: EventDataProvider,
   config: EventCacheConfig,
 ): EventCache => {
-  const makeKey = (id?: string) =>
-    id ? `${config.keyPrefix}::${config.season}::${id}` : `${config.keyPrefix}::${config.season}`;
+  const { keyPrefix, season } = config;
+  const baseKey = `${keyPrefix}::${season}`;
 
-  return {
-    cacheEvent: (event: Event): TE.TaskEither<CacheError, void> =>
-      redis.hSet(makeKey(), event.id.toString(), event),
-
-    getEvent: (id: string): TE.TaskEither<CacheError, Event | null> =>
-      pipe(
-        redis.hGet(makeKey(), id),
-        TE.chain((cached) =>
-          cached
-            ? TE.right(cached)
-            : pipe(
-                withCacheErrorHandling(
-                  () => dataProvider.getOne(Number(id) as EventId),
-                  `Failed to fetch event ${id}`,
-                ),
-                TE.chain((event) =>
-                  event
-                    ? pipe(
-                        cacheEvent(event),
-                        TE.map(() => event),
-                      )
-                    : TE.right(null),
-                ),
-              ),
-        ),
+  const parseEvent = (eventStr: string): E.Either<CacheError, Event | null> =>
+    pipe(
+      E.tryCatch(
+        () => JSON.parse(eventStr),
+        (error) => createError('Failed to parse event JSON', error),
       ),
-    // ... other cache methods
-  };
+      E.chain((parsed) =>
+        parsed && typeof parsed === 'object' && 'id' in parsed
+          ? E.right(parsed as Event)
+          : E.right(null),
+      ),
+    );
+
+  const cacheEvent = (event: Event): TE.TaskEither<CacheError, void> =>
+    pipe(
+      TE.tryCatch(
+        () => redisClient.hset(baseKey, event.id.toString(), JSON.stringify(event)),
+        (error) => createError('Failed to cache event', error),
+      ),
+      TE.map(() => undefined),
+    );
+
+  const cacheEvents = (events: readonly Event[]): TE.TaskEither<CacheError, void> =>
+    pipe(
+      TE.tryCatch(
+        async () => {
+          if (events.length === 0) return;
+
+          // Delete base key before caching
+          const multi = redisClient.multi();
+          multi.del(baseKey);
+          await multi.exec();
+
+          // Cache all events in a single transaction
+          const cacheMulti = redisClient.multi();
+          events.forEach((event) => {
+            cacheMulti.hset(baseKey, event.id.toString(), JSON.stringify(event));
+          });
+          await cacheMulti.exec();
+        },
+        (error) => createError('Failed to cache events', error),
+      ),
+    );
+
+  // ... other cache methods
 };
 ```
 
@@ -124,10 +165,10 @@ export const createEventOperations = (repository: EventRepositoryOperations): Ev
   const cache = createEventCache(
     redis,
     {
-      getOne: async () => null,
-      getAll: async () => [],
-      getCurrentEvent: async () => null,
-      getNextEvent: async () => null,
+      getOne: repository.findById,
+      getAll: repository.findAll,
+      getCurrentEvent: repository.findCurrent,
+      getNextEvent: repository.findNext,
     },
     {
       keyPrefix: CachePrefix.EVENT,
@@ -161,6 +202,11 @@ export const createEventOperations = (repository: EventRepositoryOperations): Ev
 ## Error Handling
 
 ```typescript
+// Error creation
+const createError = (message: string, cause?: unknown): CacheError =>
+  createCacheOperationError({ message, cause });
+
+// Repository error handling
 const handleRepositoryError = (message: string) => (error: unknown) =>
   createStandardDomainError({
     code: DomainErrorCode.VALIDATION_ERROR,
@@ -168,6 +214,7 @@ const handleRepositoryError = (message: string) => (error: unknown) =>
     details: error,
   });
 
+// Cache error mapping
 const mapCacheError = (message: string) => (error: unknown) =>
   createStandardDomainError({
     code: DomainErrorCode.PROCESSING_ERROR,
@@ -175,6 +222,7 @@ const mapCacheError = (message: string) => (error: unknown) =>
     details: error,
   });
 
+// Error mapping helper
 const withCacheErrorMapping = <T>(message: string, task: TE.TaskEither<unknown, T>) =>
   pipe(task, TE.mapLeft(mapCacheError(message)));
 ```
@@ -187,6 +235,7 @@ const withCacheErrorMapping = <T>(message: string, task: TE.TaskEither<unknown, 
    - Make all properties readonly
    - Avoid any type
    - Use strict type checking
+   - Validate data at domain boundaries
 
 2. **Error Handling**
 
@@ -194,6 +243,7 @@ const withCacheErrorMapping = <T>(message: string, task: TE.TaskEither<unknown, 
    - Define specific error types
    - Handle errors explicitly at domain boundaries
    - Provide meaningful error messages
+   - Use error mapping for consistent error types
 
 3. **Functional Programming**
 
@@ -201,6 +251,7 @@ const withCacheErrorMapping = <T>(message: string, task: TE.TaskEither<unknown, 
    - Compose operations with pipe
    - Avoid side effects in core logic
    - Use immutable data structures
+   - Leverage fp-ts utilities (Option, Either, TaskEither)
 
 4. **Testing**
 
@@ -208,38 +259,52 @@ const withCacheErrorMapping = <T>(message: string, task: TE.TaskEither<unknown, 
    - Mock external dependencies
    - Test error cases
    - Use property-based testing for validation
+   - Test cache and repository layers separately
 
 5. **Performance**
+
    - Implement caching for frequently accessed data
    - Use batch operations where possible
    - Optimize database queries
    - Monitor performance metrics
+   - Use Redis transactions for atomic operations
+
+6. **Caching**
+   - Use Redis transactions for atomic operations
+   - Handle JSON serialization/deserialization explicitly
+   - Clean up stale data before caching
+   - Implement proper cache warming
+   - Use proper key prefixes and namespacing
 
 ## Implementation Steps
 
-1. Define domain types in `types.ts`
+1. Define domain types and interfaces in `types.ts`
 2. Create repository layer with Prisma
-3. Add cache layer if needed
-4. Implement high-level operations
-5. Add tests for all components
-6. Document public APIs and important implementation details
+3. Implement cache layer with Redis
+4. Add data parsing and validation
+5. Implement high-level operations
+6. Add comprehensive tests
+7. Document public APIs and implementation details
 
 ## Common Patterns
 
-1. **Cache-Aside Pattern**
+1. **Cache-Aside Pattern with Error Handling**
 
 ```typescript
 const getData = (id: string) =>
   pipe(
     cache.get(id),
+    TE.mapLeft(mapCacheError('Failed to get from cache')),
     TE.chain((cached) =>
       cached
         ? TE.right(cached)
         : pipe(
             repository.findById(id),
+            TE.mapLeft(handleRepositoryError('Failed to fetch from repository')),
             TE.chain((data) =>
               pipe(
                 cache.set(id, data),
+                TE.mapLeft(mapCacheError('Failed to cache data')),
                 TE.map(() => data),
               ),
             ),
@@ -248,24 +313,49 @@ const getData = (id: string) =>
   );
 ```
 
-2. **Repository Pattern**
+2. **Repository Pattern with Transactions**
 
 ```typescript
 interface Repository<T, ID> {
   findById: (id: ID) => TaskEither<Error, T | null>;
   findAll: () => TaskEither<Error, T[]>;
   save: (entity: T) => TaskEither<Error, T>;
-  // ... other methods
+  saveMany: (entities: readonly T[]) => TaskEither<Error, T[]>;
+  transaction: <R>(operations: (tx: Transaction) => Promise<R>) => TaskEither<Error, R>;
 }
 ```
 
-3. **Domain Operations Pattern**
+3. **Cache Pattern with Redis Transactions**
+
+```typescript
+const cacheMany = (entities: readonly T[]): TaskEither<CacheError, void> =>
+  pipe(
+    TE.tryCatch(
+      async () => {
+        const multi = redisClient.multi();
+        multi.del(baseKey);
+        await multi.exec();
+
+        const cacheMulti = redisClient.multi();
+        entities.forEach((entity) => {
+          cacheMulti.hset(baseKey, entity.id.toString(), JSON.stringify(entity));
+        });
+        await cacheMulti.exec();
+      },
+      (error) => createError('Failed to cache entities', error),
+    ),
+  );
+```
+
+4. **Domain Operations Pattern with Error Mapping**
 
 ```typescript
 interface DomainOperations<T, ID> {
-  getById: (id: ID) => TaskEither<Error, T | null>;
-  getAll: () => TaskEither<Error, readonly T[]>;
-  create: (entity: T) => TaskEither<Error, T>;
-  // ... other operations
+  getById: (id: ID) => TaskEither<DomainError, T | null>;
+  getAll: () => TaskEither<DomainError, readonly T[]>;
+  create: (entity: T) => TaskEither<DomainError, T>;
+  createMany: (entities: readonly T[]) => TaskEither<DomainError, readonly T[]>;
+  update: (id: ID, entity: T) => TaskEither<DomainError, T>;
+  delete: (id: ID) => TaskEither<DomainError, void>;
 }
 ```

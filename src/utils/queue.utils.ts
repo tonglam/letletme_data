@@ -1,6 +1,6 @@
 import { Job } from 'bullmq';
+import { BaseJobData } from 'infrastructure/queue/types';
 import { QueueError, QueueErrorCode } from '../types/error.type';
-import { BaseJobData } from '../types/queue.type';
 
 /**
  * Creates a standardized queue error

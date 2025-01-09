@@ -4,7 +4,7 @@ import { createFlowService } from '../../../src/infrastructure/queue/core/flow.s
 import { createQueueServiceImpl } from '../../../src/infrastructure/queue/core/queue.service';
 import { FlowJob, FlowService, QueueService } from '../../../src/infrastructure/queue/types';
 import { JobName, MetaJobData } from '../../../src/types/job.type';
-import { createTestMetaJobData, createTestQueueConfig } from '../../utils/queue.test.utils';
+import { createTestMetaJobData } from '../../utils/queue.test.utils';
 
 describe('Flow Service', () => {
   const queueName = 'test-queue';
@@ -13,24 +13,17 @@ describe('Flow Service', () => {
   let worker: Worker<MetaJobData>;
 
   beforeAll(async () => {
-    const config = createTestQueueConfig();
-    const queueServiceResult = await createQueueServiceImpl<MetaJobData>(queueName, config)();
+    const queueServiceResult = await createQueueServiceImpl<MetaJobData>(queueName)();
     if (queueServiceResult._tag === 'Left') {
       throw queueServiceResult.left;
     }
     queueService = queueServiceResult.right;
 
     // Create a worker to process jobs
-    worker = new Worker<MetaJobData>(
-      queueName,
-      async (job) => {
-        console.log('Processing job:', job.id, job.data);
-        return job.data;
-      },
-      {
-        connection: config.connection,
-      },
-    );
+    worker = new Worker<MetaJobData>(queueName, async (job) => {
+      console.log('Processing job:', job.id, job.data);
+      return job.data;
+    });
   });
 
   beforeEach(async () => {

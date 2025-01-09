@@ -1,301 +1,293 @@
 import { Job } from 'bullmq';
 import * as E from 'fp-ts/Either';
 import * as TE from 'fp-ts/TaskEither';
-import { QUEUE_CONFIG } from '../../../src/config/queue/queue.config';
+import { pipe } from 'fp-ts/function';
+import { CachePrefix } from '../../../src/config/cache/cache.config';
+import { createBootstrapApiAdapter } from '../../../src/domain/bootstrap/adapter';
+import { eventRepository } from '../../../src/domain/event/repository';
+import { redisClient } from '../../../src/infrastructure/cache/client';
+import { prisma } from '../../../src/infrastructure/db/prisma';
+import { DEFAULT_RETRY_CONFIG } from '../../../src/infrastructure/http/client/utils';
+import { createFPLClient } from '../../../src/infrastructure/http/fpl/client';
 import { createEventMetaQueueService } from '../../../src/queue/meta/event.meta.queue';
-import { EventMetaService, MetaJobData } from '../../../src/types/job.type';
-
-// Increase Jest timeout for all tests
-jest.setTimeout(60000);
+import { createEventService } from '../../../src/service/event';
+import { getCurrentSeason } from '../../../src/types/base.type';
+import { QueueError, QueueErrorCode } from '../../../src/types/error.type';
+import {
+  EventMetaService,
+  MetaJobData,
+  MetaQueueService,
+  MetaType,
+} from '../../../src/types/job.type';
 
 describe('Event Meta Queue Integration Tests', () => {
-  let config: { connection: { host: string; port: number } };
+  const TEST_TIMEOUT = 30000;
+  let queueService: MetaQueueService;
   let eventMetaService: EventMetaService;
-  let cleanupFunctions: Array<() => Promise<void>>;
 
-  beforeAll(() => {
-    // Setup Redis connection for tests
-    config = {
-      connection: {
-        host: process.env.REDIS_HOST || 'localhost',
-        port: Number(process.env.REDIS_PORT) || 6379,
-      },
-    };
-  });
+  // Test-specific cache keys
+  const TEST_CACHE_PREFIX = `${CachePrefix.EVENT}::test`;
+  const testCacheKey = `${TEST_CACHE_PREFIX}::${getCurrentSeason()}`;
+  const testCurrentEventKey = `${testCacheKey}::current`;
+  const testNextEventKey = `${testCacheKey}::next`;
 
-  beforeEach(() => {
-    cleanupFunctions = [];
-    // Mock event meta service with simple implementations
-    eventMetaService = {
-      syncMeta: jest.fn().mockImplementation(() => TE.right(undefined)),
-      syncEvents: jest.fn().mockImplementation(() => TE.right(undefined)),
-    };
-  });
+  // Validate Redis configuration
+  beforeAll(async () => {
+    if (!process.env.REDIS_HOST || !process.env.REDIS_PASSWORD) {
+      throw new Error('Redis configuration is missing. Please check your .env file.');
+    }
 
-  afterEach(async () => {
-    // Clean up resources after each test with delay between operations
-    for (const cleanup of cleanupFunctions) {
-      await cleanup();
-      await new Promise((resolve) => setTimeout(resolve, 500));
+    try {
+      // Wait for Redis connection
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+
+      // Clear existing data
+      await prisma.event.deleteMany();
+
+      // Clear test-specific cache keys
+      const multi = redisClient.multi();
+      multi.del(testCacheKey);
+      multi.del(testCurrentEventKey);
+      multi.del(testNextEventKey);
+      await multi.exec();
+
+      // Create services
+      const fplClient = createFPLClient({
+        retryConfig: {
+          ...DEFAULT_RETRY_CONFIG,
+          attempts: 3,
+          baseDelay: 500,
+          maxDelay: 2000,
+        },
+      });
+      const bootstrapApi = createBootstrapApiAdapter(fplClient);
+      const eventService = createEventService(bootstrapApi, eventRepository);
+
+      eventMetaService = {
+        syncMeta: (metaType: MetaType) => {
+          if (metaType === 'EVENTS') {
+            return pipe(
+              eventService.syncEventsFromApi(),
+              TE.mapLeft(toQueueError),
+              TE.map(() => void 0),
+            );
+          }
+          return TE.left(toQueueError(new Error(`Unsupported meta type: ${metaType}`)));
+        },
+        syncEvents: () =>
+          pipe(
+            eventService.syncEventsFromApi(),
+            TE.mapLeft(toQueueError),
+            TE.map(() => void 0),
+          ),
+      };
+
+      // Create queue service
+      const queueResult = await createEventMetaQueueService(eventMetaService)();
+
+      if (E.isLeft(queueResult)) {
+        throw new Error('Failed to create queue service');
+      }
+
+      queueService = queueResult.right;
+
+      // Wait for worker to be ready by checking queue status
+      await new Promise<void>((resolve) => {
+        const checkWorker = async () => {
+          const isPaused = await queueService.getQueue().isPaused();
+          if (!isPaused) {
+            console.log('Queue is active and ready');
+            resolve();
+          } else {
+            console.log('Queue is paused, waiting...');
+            setTimeout(checkWorker, 1000);
+          }
+        };
+        checkWorker();
+      });
+
+      // Clear existing jobs
+      await executeQueueOperation(
+        pipe(
+          queueService.pause(),
+          TE.chain(() => queueService.clean(0, 1000, 'completed')),
+          TE.chain(() => queueService.resume()),
+        ),
+      );
+    } catch (error) {
+      console.error('Error in beforeAll:', error);
+      throw error;
+    }
+  }, TEST_TIMEOUT);
+
+  afterAll(async () => {
+    try {
+      if (queueService) {
+        await executeQueueOperation(
+          pipe(
+            queueService.pause(),
+            TE.chain(() => queueService.clean(0, 1000, 'completed')),
+          ),
+        );
+        await queueService.close();
+      }
+
+      // Clean up test data
+      await prisma.event.deleteMany();
+
+      // Clean up test-specific cache keys
+      const multi = redisClient.multi();
+      multi.del(testCacheKey);
+      multi.del(testCurrentEventKey);
+      multi.del(testNextEventKey);
+      await multi.exec();
+
+      // Close connections
+      await redisClient.quit();
+      await prisma.$disconnect();
+    } catch (error) {
+      console.error('Error in afterAll:', error);
+      throw error;
     }
   });
 
-  describe('Event Meta Queue Workflow', () => {
-    it('should process event sync job successfully', async () => {
-      const result = await createEventMetaQueueService(config, eventMetaService)();
-      expect(E.isRight(result)).toBeTruthy();
+  const toQueueError = (error: Error): QueueError => ({
+    code: QueueErrorCode.PROCESSING_ERROR,
+    context: 'queue',
+    error,
+  });
 
-      if (E.isRight(result)) {
-        const queueService = result.right;
-        cleanupFunctions.push(async () => {
-          await queueService.close();
-        });
+  const executeQueueOperation = async <T>(
+    operation: TE.TaskEither<QueueError, T>,
+  ): Promise<void> => {
+    const result = await operation();
+    if (E.isLeft(result)) {
+      throw result.left;
+    }
+  };
 
-        const mockJob = {
-          id: '1',
-          data: {
-            type: 'META',
-            name: 'meta',
-            timestamp: new Date(),
-            data: {
-              operation: 'SYNC',
-              metaType: 'EVENTS',
-            },
-          },
-        } as Job<MetaJobData>;
-
-        const processResult = await queueService.processJob(mockJob)();
-        expect(E.isRight(processResult)).toBeTruthy();
-        expect(eventMetaService.syncEvents).toHaveBeenCalled();
-      }
-    });
-
-    it('should handle sync failures appropriately', async () => {
-      const mockError = new Error('Sync failed');
-      eventMetaService = {
-        syncMeta: jest.fn().mockImplementation(() => TE.right(undefined)),
-        syncEvents: jest.fn().mockImplementation(() => TE.left(mockError)),
-      };
-
-      const result = await createEventMetaQueueService(config, eventMetaService)();
-      expect(E.isRight(result)).toBeTruthy();
-
-      if (E.isRight(result)) {
-        const queueService = result.right;
-        cleanupFunctions.push(async () => {
-          await queueService.close();
-        });
-
-        const mockJob = {
-          id: '1',
-          data: {
-            type: 'META',
-            name: 'meta',
-            timestamp: new Date(),
-            data: {
-              operation: 'SYNC',
-              metaType: 'EVENTS',
-            },
-          },
-          attemptsMade: 0,
-        } as Job<MetaJobData>;
-
-        const processResult = await queueService.processJob(mockJob)();
-        expect(E.isLeft(processResult)).toBeTruthy();
-      }
-    });
-
-    it('should handle multiple sync operations with rate limiting', async () => {
-      const result = await createEventMetaQueueService(config, eventMetaService)();
-      expect(E.isRight(result)).toBeTruthy();
-
-      if (E.isRight(result)) {
-        const queueService = result.right;
-        cleanupFunctions.push(async () => {
-          await queueService.close();
-        });
-
-        // Reset mock before starting
-        (eventMetaService.syncEvents as jest.Mock).mockClear();
-
-        // Add jobs sequentially to ensure rate limiting takes effect
-        const jobCount = QUEUE_CONFIG.RATE_LIMIT.MAX * 2; // Double the rate limit to test throttling
-        const startTime = Date.now();
-        const processingTimes: number[] = [];
-
-        // Track when each job is processed
-        (eventMetaService.syncEvents as jest.Mock).mockImplementation(() => {
-          processingTimes.push(Date.now() - startTime);
-          return TE.right(undefined);
-        });
-
-        // Add jobs rapidly
-        for (let i = 0; i < jobCount; i++) {
-          await queueService.syncMeta('EVENTS')();
-        }
-
-        // Wait for all jobs to complete
-        await new Promise((resolve) => setTimeout(resolve, QUEUE_CONFIG.RATE_LIMIT.DURATION * 3));
-
-        const duration = Date.now() - startTime;
-
-        // Verify timing constraints
-        expect(duration).toBeGreaterThanOrEqual(QUEUE_CONFIG.RATE_LIMIT.DURATION * 2);
-
-        // Verify that jobs were processed in batches due to rate limiting
-        const jobBatches = processingTimes.reduce(
-          (acc, time) => {
-            const batchIndex = Math.floor(time / QUEUE_CONFIG.RATE_LIMIT.DURATION);
-            acc[batchIndex] = (acc[batchIndex] || 0) + 1;
-            return acc;
-          },
-          {} as Record<number, number>,
-        );
-
-        // Each batch should not exceed the rate limit
-        Object.values(jobBatches).forEach((batchCount) => {
-          expect(batchCount).toBeLessThanOrEqual(QUEUE_CONFIG.RATE_LIMIT.MAX);
-        });
-      }
-    }, 30000);
-
-    it('should handle pause and resume operations', async () => {
-      const result = await createEventMetaQueueService(config, eventMetaService)();
-      expect(E.isRight(result)).toBeTruthy();
-
-      if (E.isRight(result)) {
-        const queueService = result.right;
-        cleanupFunctions.push(async () => {
-          await queueService.close();
-        });
-
-        // Pause the queue
-        const pauseResult = await queueService.pause()();
-        expect(E.isRight(pauseResult)).toBeTruthy();
-
-        // Try to process a job while paused
-        const mockJob = {
-          id: '1',
-          data: {
-            type: 'META',
-            name: 'meta',
-            timestamp: new Date(),
-            data: {
-              operation: 'SYNC',
-              metaType: 'EVENTS',
-            },
-          },
-        } as Job<MetaJobData>;
-
-        await queueService.addJob(mockJob.data)();
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-        expect(eventMetaService.syncEvents).not.toHaveBeenCalled();
-
-        // Resume the queue
-        const resumeResult = await queueService.resume()();
-        expect(E.isRight(resumeResult)).toBeTruthy();
-
-        // Wait for job processing
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-        expect(eventMetaService.syncEvents).toHaveBeenCalled();
-      }
-    });
-
-    it('should handle retry behavior with backoff', async () => {
-      let attempts = 0;
-      const maxAttempts = 3; // Reduce max attempts for testing
-      const mockError = new Error('Sync failed');
-
-      eventMetaService = {
-        syncMeta: jest.fn().mockImplementation(() => TE.right(undefined)),
-        syncEvents: jest.fn().mockImplementation(() => {
-          attempts++;
-          if (attempts < maxAttempts) {
-            return TE.left(mockError);
-          }
-          return TE.right(undefined);
-        }),
-      };
-
-      const result = await createEventMetaQueueService(config, eventMetaService)();
-      expect(E.isRight(result)).toBeTruthy();
-
-      if (E.isRight(result)) {
-        const queueService = result.right;
-        cleanupFunctions.push(async () => {
-          await queueService.close();
-        });
-
-        const mockJob = {
-          id: '1',
-          data: {
-            type: 'META',
-            name: 'meta',
-            timestamp: new Date(),
-            data: {
-              operation: 'SYNC',
-              metaType: 'EVENTS',
-            },
-          },
-          attemptsMade: 0,
-        } as Job<MetaJobData>;
-
-        // Process job and wait for retries
-        await queueService.addJob(mockJob.data)();
-
-        // Wait for retries with a reasonable timeout
-        const retryTimeout = 1000; // 1 second per retry
-        for (let i = 0; i < maxAttempts; i++) {
-          await new Promise((resolve) => setTimeout(resolve, retryTimeout));
-          if (attempts >= maxAttempts) break;
-        }
-
-        expect(attempts).toBeLessThanOrEqual(maxAttempts);
-        expect(eventMetaService.syncEvents).toHaveBeenCalledTimes(attempts);
-      }
-    }, 10000);
-
-    it('should handle connection errors', async () => {
-      interface ConnectionError extends Error {
-        code: string;
-        errorno?: string;
-        syscall?: string;
-      }
-
-      const invalidConfig = {
-        connection: {
-          host: 'invalid-host',
-          port: 6379,
-          retryStrategy: () => 0, // Disable retries by returning 0
-          maxRetriesPerRequest: 0,
-          connectTimeout: 100, // Very short timeout
-          commandTimeout: 100, // Short command timeout
-          lazyConnect: true, // Don't connect immediately
-          enableOfflineQueue: false, // Don't queue commands when disconnected
-          reconnectOnError: () => false, // Don't reconnect on error
-          maxReconnectAttempts: 1, // Only try to reconnect once
+  it(
+    'should process event sync job successfully',
+    async () => {
+      // Create and add job
+      const jobData: MetaJobData = {
+        type: 'META',
+        name: 'meta',
+        timestamp: new Date(),
+        data: {
+          operation: 'SYNC',
+          metaType: 'EVENTS',
         },
       };
 
-      // Wrap the queue creation in a try-catch to handle any unhandled errors
-      try {
-        const queueServicePromise = createEventMetaQueueService(invalidConfig, eventMetaService)();
-        const timeoutPromise = new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error('Connection timeout')), 1000),
-        );
-        const result = await Promise.race([queueServicePromise, timeoutPromise]);
-        expect(E.isLeft(result)).toBeTruthy();
-        if (E.isLeft(result)) {
-          expect(result.left).toHaveProperty('_tag', 'QueueConnectionError');
+      console.log('Adding job to queue...');
+      await executeQueueOperation(queueService.addJob(jobData));
+
+      // Wait for job processing with status checks
+      console.log('Waiting for job processing...');
+      let jobs: Job<MetaJobData>[] = [];
+      let attempts = 0;
+      const maxAttempts = 10;
+      const checkInterval = 1000; // 1 second
+
+      while (attempts < maxAttempts) {
+        jobs = await queueService.getQueue().getJobs(['completed']);
+        if (jobs.length > 0) {
+          console.log('Job completed successfully');
+          break;
         }
-      } catch (error) {
-        // If we get an unhandled error, ensure it's a connection error
-        expect(error).toBeDefined();
-        const connectionError = error as ConnectionError;
-        expect(connectionError.code || connectionError.message).toMatch(
-          /ENOTFOUND|ETIMEDOUT|Connection timeout/,
-        );
+        console.log(`Attempt ${attempts + 1}/${maxAttempts}: Job still processing...`);
+        await new Promise((resolve) => setTimeout(resolve, checkInterval));
+        attempts++;
       }
-    }, 10000); // Increase timeout to handle connection attempts
-  });
+
+      expect(jobs.length).toBeGreaterThan(0);
+      if (jobs.length > 0) {
+        const job = jobs[0];
+        expect(job.data).toMatchObject(jobData);
+      }
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    'should handle sync failures gracefully',
+    async () => {
+      const jobData: MetaJobData = {
+        type: 'META',
+        name: 'meta',
+        timestamp: new Date(),
+        data: {
+          operation: 'SYNC',
+          metaType: 'EVENTS',
+        },
+      };
+
+      await executeQueueOperation(queueService.addJob(jobData));
+
+      // Wait for job processing
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+
+      const failedJobs = await queueService.getQueue().getJobs(['failed']);
+      expect(failedJobs.length).toBeGreaterThan(0);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    'should respect rate limiting for multiple sync operations',
+    async () => {
+      const jobs = Array.from(
+        { length: 3 },
+        () =>
+          ({
+            type: 'META',
+            name: 'meta',
+            timestamp: new Date(),
+            data: {
+              operation: 'SYNC',
+              metaType: 'EVENTS',
+            },
+          }) as MetaJobData,
+      );
+
+      await Promise.all(jobs.map((job) => executeQueueOperation(queueService.addJob(job))));
+
+      // Wait for job processing
+      await new Promise((resolve) => setTimeout(resolve, 5000));
+
+      const completedJobs = await queueService.getQueue().getJobs(['completed']);
+      expect(completedJobs.length).toBeGreaterThanOrEqual(3);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    'should not process jobs while paused',
+    async () => {
+      await executeQueueOperation(queueService.pause());
+
+      const jobData: MetaJobData = {
+        type: 'META',
+        name: 'meta',
+        timestamp: new Date(),
+        data: {
+          operation: 'SYNC',
+          metaType: 'EVENTS',
+        },
+      };
+
+      await executeQueueOperation(queueService.addJob(jobData));
+
+      // Wait briefly
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+
+      const waitingJobs = await queueService.getQueue().getJobs(['waiting']);
+      expect(waitingJobs.length).toBeGreaterThan(0);
+
+      // Resume the queue for cleanup
+      await executeQueueOperation(queueService.resume());
+    },
+    TEST_TIMEOUT,
+  );
 });

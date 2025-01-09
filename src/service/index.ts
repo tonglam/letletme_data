@@ -1,9 +1,9 @@
 // Service Exports Module
 // Provides centralized exports for all application services.
 
-import { PhaseService } from '../types/phase.type';
 import type { EventService } from './event';
 import type { EventWorkflows } from './event/workflow';
+import type { PhaseService } from './phase';
 
 // Service keys for type-safe access
 export const ServiceKey = {

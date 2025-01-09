@@ -368,6 +368,7 @@ const queueErrorToApiErrorCode: Record<QueueErrorCode, APIErrorCode> = {
   [QueueErrorCode.GET_CHILDREN_VALUES]: APIErrorCode.INTERNAL_SERVER_ERROR,
   [QueueErrorCode.CREATE_JOB_SCHEDULER]: APIErrorCode.INTERNAL_SERVER_ERROR,
   [QueueErrorCode.GET_JOB_SCHEDULERS]: APIErrorCode.INTERNAL_SERVER_ERROR,
+  [QueueErrorCode.CLOSE_QUEUE]: APIErrorCode.INTERNAL_SERVER_ERROR,
 };
 
 /**

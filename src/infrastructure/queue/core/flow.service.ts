@@ -247,8 +247,9 @@ export const createFlowService = <T extends MetaJobData>(
         async () => {
           await queue.waitUntilReady();
           await queueEvents.waitUntilReady();
+          // Flow producer is ready when created
         },
-        (error) => createQueueError(QueueErrorCode.CREATE_QUEUE, defaultName, error as Error),
+        (error) => createQueueError(QueueErrorCode.START_WORKER, defaultName, error as Error),
       ),
     )();
     if (result._tag === 'Left') {
@@ -256,13 +257,11 @@ export const createFlowService = <T extends MetaJobData>(
     }
   };
 
-  // Initialize connections
-  void init();
-
   return {
     getFlowDependencies,
     getChildrenValues,
     addJob,
     close,
+    init,
   };
 };

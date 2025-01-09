@@ -161,6 +161,7 @@ export enum QueueErrorCode {
   REMOVE_JOB = 'REMOVE_JOB',
   PAUSE_QUEUE = 'PAUSE_QUEUE',
   RESUME_QUEUE = 'RESUME_QUEUE',
+  CLOSE_QUEUE = 'CLOSE_QUEUE',
   INVALID_JOB_DATA = 'INVALID_JOB_DATA',
 
   // Worker errors

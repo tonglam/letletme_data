@@ -1,44 +1,14 @@
 import { JobsOptions, Queue } from 'bullmq';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { z } from 'zod';
+import { QUEUE_CONFIG } from '../../../config/queue/queue.config';
 import { createQueueError, QueueError, QueueErrorCode } from '../../../types/error.type';
 import { MetaJobData } from '../../../types/job.type';
-import { QueueConfig } from '../../../types/queue.type';
 import { getQueueLogger } from '../../logger';
 import { BullMQJobStatus, BullMQQueueMethods, JobOptions, QueueService } from '../types';
 import { createSchedulerService } from './scheduler.service';
 
 const logger = getQueueLogger();
-
-const JobDataSchema = z
-  .object({
-    type: z.literal('META'),
-    timestamp: z.date(),
-    data: z.object({
-      operation: z.literal('SYNC'),
-      metaType: z.union([z.literal('EVENTS'), z.literal('PHASES'), z.literal('TEAMS')]),
-    }),
-    name: z.literal('meta'),
-  })
-  .transform((data) => ({
-    ...data,
-    data: data.data ?? {},
-  }));
-
-const validateJobData = (data: unknown): TE.TaskEither<QueueError, MetaJobData> =>
-  pipe(
-    TE.tryCatch(
-      async () => {
-        const result = JobDataSchema.safeParse(data);
-        if (!result.success) {
-          throw new Error(`Invalid job data: ${result.error.message}`);
-        }
-        return result.data as MetaJobData;
-      },
-      (error) => createQueueError(QueueErrorCode.INVALID_JOB_DATA, 'validation', error as Error),
-    ),
-  );
 
 const convertToJobOptions = (options?: JobOptions): JobsOptions => ({
   priority: options?.priority,
@@ -53,23 +23,81 @@ const convertToJobOptions = (options?: JobOptions): JobsOptions => ({
 
 export const createQueueServiceImpl = <T extends MetaJobData>(
   name: string,
-  config: QueueConfig,
 ): TE.TaskEither<QueueError, QueueService<T>> =>
   pipe(
     TE.tryCatch(
       async () => {
         type QueueType = Queue<T>;
         const queue = new Queue<T>(name, {
-          connection: config.connection,
+          connection: {
+            host: QUEUE_CONFIG.REDIS.HOST,
+            port: QUEUE_CONFIG.REDIS.PORT,
+            password: QUEUE_CONFIG.REDIS.PASSWORD,
+          },
           defaultJobOptions: {
             removeOnComplete: true,
             removeOnFail: true,
           },
+          prefix: 'test',
         }) as QueueType;
 
         logger.info({ name }, 'Queue service initialized');
 
         const scheduler = createSchedulerService<T>(name, queue);
+
+        const validateJobData = (data: T): TE.TaskEither<QueueError, T> => {
+          if (!data || typeof data !== 'object') {
+            return TE.left(
+              createQueueError(
+                QueueErrorCode.INVALID_JOB_DATA,
+                name,
+                new Error('Job data must be a non-null object'),
+              ),
+            );
+          }
+
+          if (!('name' in data)) {
+            return TE.left(
+              createQueueError(
+                QueueErrorCode.INVALID_JOB_DATA,
+                name,
+                new Error('Job data must contain a name'),
+              ),
+            );
+          }
+
+          if (!('type' in data)) {
+            return TE.left(
+              createQueueError(
+                QueueErrorCode.INVALID_JOB_DATA,
+                name,
+                new Error('Job data must contain a type'),
+              ),
+            );
+          }
+
+          if (!('timestamp' in data)) {
+            return TE.left(
+              createQueueError(
+                QueueErrorCode.INVALID_JOB_DATA,
+                name,
+                new Error('Job data must contain a timestamp'),
+              ),
+            );
+          }
+
+          if (!('data' in data)) {
+            return TE.left(
+              createQueueError(
+                QueueErrorCode.INVALID_JOB_DATA,
+                name,
+                new Error('Job data must contain a data field'),
+              ),
+            );
+          }
+
+          return TE.right(data);
+        };
 
         const close = (): TE.TaskEither<QueueError, void> =>
           pipe(
@@ -111,11 +139,8 @@ export const createQueueServiceImpl = <T extends MetaJobData>(
               async () => {
                 if (jobs.length === 0) return;
 
-                // Validate all jobs first
-                await Promise.all(jobs.map((job) => validateJobData(job.data)()));
-
                 const bulkJobs = jobs.map((job) => ({
-                  name: job.data.type,
+                  name: job.data.name,
                   data: job.data,
                   opts: convertToJobOptions(job.options),
                 }));

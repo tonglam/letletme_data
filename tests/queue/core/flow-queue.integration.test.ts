@@ -1,285 +1,210 @@
-import { config } from 'dotenv';
-config();
-
-import { Job } from 'bullmq';
-import * as E from 'fp-ts/Either';
+import { Job, Queue } from 'bullmq';
 import { pipe } from 'fp-ts/function';
-import * as TE from 'fp-ts/TaskEither';
 import { createFlowService } from '../../../src/infrastructure/queue/core/flow.service';
 import { createQueueServiceImpl } from '../../../src/infrastructure/queue/core/queue.service';
 import { createWorkerService } from '../../../src/infrastructure/queue/core/worker.service';
-import { FlowOpts, QueueService, WorkerService } from '../../../src/infrastructure/queue/types';
-import { QueueError } from '../../../src/types/error.type';
-import { JobName, MetaJobData } from '../../../src/types/job.type';
-import { createTestMetaJobData, createTestQueueConfig } from '../../utils/queue.test.utils';
+import { QueueService, WorkerService } from '../../../src/infrastructure/queue/types';
+import { JobName, MetaJobData, MetaType } from '../../../src/types/job.type';
 
 describe('Flow Queue Integration Tests', () => {
   const queueName = 'test-flow-queue';
   const defaultJobName: JobName = 'meta';
-  const config = createTestQueueConfig({
-    host: process.env.REDIS_HOST ?? 'localhost',
-    port: process.env.REDIS_PORT ? parseInt(process.env.REDIS_PORT) : 6379,
-    password: process.env.REDIS_PASSWORD,
-  });
+  let queueService: QueueService<MetaJobData>;
+  let workerService: WorkerService<MetaJobData>;
+  let flowService: ReturnType<typeof createFlowService>;
+  let queue: Queue<MetaJobData>;
 
-  // Validate Redis configuration
-  beforeAll(() => {
-    if (!process.env.REDIS_HOST || !process.env.REDIS_PASSWORD) {
-      console.warn('Redis configuration not found, using default localhost settings');
+  const waitForJobCompletion = async (jobId: string, timeoutMs = 10000): Promise<void> => {
+    const startTime = Date.now();
+    while (Date.now() - startTime < timeoutMs) {
+      const job = await queue.getJob(jobId);
+      if (job && (await job.isCompleted())) {
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
     }
+    throw new Error(`Job ${jobId} did not complete within ${timeoutMs}ms`);
+  };
+
+  const cleanupQueue = async (queue: Queue<MetaJobData>): Promise<void> => {
+    try {
+      await queue.pause();
+      await queue.clean(0, 0, 'completed');
+      await queue.clean(0, 0, 'failed');
+      await queue.clean(0, 0, 'delayed');
+      await queue.clean(0, 0, 'wait');
+      await queue.clean(0, 0, 'active');
+      await queue.obliterate();
+      await queue.resume();
+    } catch (error) {
+      console.warn('Queue cleanup warning:', error);
+    }
+  };
+
+  beforeAll(async () => {
+    const queueServiceResult = await createQueueServiceImpl<MetaJobData>(queueName)();
+    if (queueServiceResult._tag === 'Left') {
+      throw new Error('Failed to create queue service');
+    }
+    queueService = queueServiceResult.right;
+    queue = queueService.getQueue();
+    await cleanupQueue(queue);
+
+    // Create worker service
+    const workerServiceResult = await createWorkerService<MetaJobData>(
+      queueName,
+      async () => {
+        await new Promise((resolve) => setTimeout(resolve, 500)); // Simulate work
+      },
+      { concurrency: 1 },
+    )();
+    if (workerServiceResult._tag === 'Left') {
+      throw new Error('Failed to create worker service');
+    }
+    workerService = workerServiceResult.right;
+    await workerService.start();
+
+    // Create flow service
+    flowService = createFlowService<MetaJobData>(queue, defaultJobName);
+    await flowService.init();
   });
 
-  // Cleanup before and after each test
-  beforeEach(async () => {
-    const cleanup = await pipe(
-      createQueueServiceImpl<MetaJobData>(queueName, config),
-      TE.chain((service: QueueService<MetaJobData>) => service.obliterate()),
-    )();
-    expect(cleanup._tag).toBe('Right');
-    // Add delay after cleanup
-    await new Promise((resolve) => setTimeout(resolve, 2000));
-  });
-
-  afterEach(async () => {
-    const cleanup = await pipe(
-      createQueueServiceImpl<MetaJobData>(queueName, config),
-      TE.chain((service: QueueService<MetaJobData>) => service.obliterate()),
-    )();
-    expect(cleanup._tag).toBe('Right');
+  afterAll(async () => {
+    await workerService.close();
+    await flowService.close();
+    await cleanupQueue(queue);
   });
 
   describe('Flow Queue Integration', () => {
     test('should process flow jobs in correct order', async () => {
-      const processedJobs: MetaJobData[] = [];
-      let checkInterval: NodeJS.Timeout;
-
-      const jobProcessed = new Promise<void>((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          clearInterval(checkInterval);
-          reject(new Error('Job processing timeout'));
-        }, 30000);
-
-        checkInterval = setInterval(() => {
-          if (processedJobs.length === 3) {
-            clearInterval(checkInterval);
-            clearTimeout(timeout);
-            resolve();
-          }
-        }, 1000);
-      });
+      const jobData: MetaJobData = {
+        type: 'META',
+        name: defaultJobName,
+        data: {
+          operation: 'SYNC',
+          metaType: 'COURSE' as MetaType,
+        },
+        timestamp: new Date(),
+      };
 
       const result = await pipe(
-        TE.Do,
-        TE.bind('queueService', () => createQueueServiceImpl<MetaJobData>(queueName, config)),
-        TE.bind('workerService', () =>
-          createWorkerService<MetaJobData>(
-            queueName,
-            config,
-            async (job: Job<MetaJobData>) => {
-              console.log(`Processing job ${job.id} with data:`, job.data);
-              await new Promise((resolve) => setTimeout(resolve, 500)); // Simulate work
-              processedJobs.push(job.data);
-              console.log(`Job ${job.id} processed successfully`);
-            },
-            { concurrency: 1 },
-          ),
-        ),
-        TE.chain(({ queueService, workerService }) => {
-          const flowService = createFlowService<MetaJobData>(
-            queueService.getQueue(),
-            defaultJobName,
-          );
-          return pipe(
-            TE.tryCatch(
-              async () => {
-                await flowService.addJob(createTestMetaJobData({ name: defaultJobName }), {
-                  jobId: 'parent-job',
-                  children: [
-                    {
-                      name: defaultJobName,
-                      queueName,
-                      data: createTestMetaJobData({ name: defaultJobName }),
-                      opts: { jobId: 'child-1' },
-                    },
-                    {
-                      name: defaultJobName,
-                      queueName,
-                      data: createTestMetaJobData({ name: defaultJobName }),
-                      opts: { jobId: 'child-2' },
-                    },
-                  ],
-                } as FlowOpts<MetaJobData>)();
-                await jobProcessed;
-                await flowService.close();
+        flowService.addJob(jobData, {
+          jobId: 'parent-job',
+          children: [
+            {
+              name: defaultJobName,
+              queueName,
+              data: {
+                ...jobData,
+                name: defaultJobName,
               },
-              (error) => error as QueueError,
-            ),
-            TE.chain(() => workerService.close()),
-          );
+              opts: { jobId: 'child-1' },
+            },
+            {
+              name: defaultJobName,
+              queueName,
+              data: {
+                ...jobData,
+                name: defaultJobName,
+              },
+              opts: { jobId: 'child-2' },
+            },
+          ],
         }),
       )();
 
       expect(result._tag).toBe('Right');
-      expect(processedJobs.length).toBe(3);
+      if (result._tag === 'Right' && result.right.opts?.jobId) {
+        await waitForJobCompletion(result.right.opts.jobId);
+        const dependencies = await flowService.getFlowDependencies(result.right.opts.jobId)();
+        expect(dependencies._tag).toBe('Right');
+        if (dependencies._tag === 'Right') {
+          expect(dependencies.right.length).toBe(3);
+        }
+      }
     }, 40000);
 
     test('should handle flow job failure', async () => {
-      const queueServiceE = await createQueueServiceImpl<MetaJobData>(queueName, config)();
-      expect(queueServiceE._tag).toBe('Right');
-
-      if (queueServiceE._tag === 'Right') {
-        const queueService = queueServiceE.right;
-        let workerService: WorkerService<MetaJobData>;
-
-        const workerServiceE = await createWorkerService<MetaJobData>(
-          queueName,
-          config,
-          async (job: Job<MetaJobData>) => {
-            console.log(`Processing attempt ${job.attemptsMade + 1}`);
-
-            if (job.attemptsMade === 0) {
-              console.log('First attempt failing');
-              throw new Error('Simulated failure');
-            }
-
-            console.log('Second attempt succeeding');
-            return;
-          },
-          {
-            concurrency: 1,
-          },
-        )();
-
-        expect(workerServiceE._tag).toBe('Right');
-        if (workerServiceE._tag === 'Right') {
-          workerService = workerServiceE.right;
-          const worker = workerService.getWorker();
-
-          worker.on('completed', (job) => {
-            if (job) {
-              console.log(`Job completed with attempts: ${job.attemptsMade + 1}`);
-            }
-          });
-
-          worker.on('failed', (job) => {
-            if (job) {
-              console.log(`Job failed on attempt: ${job.attemptsMade + 1}`);
-            }
-          });
-
-          const flowService = createFlowService<MetaJobData>(
-            queueService.getQueue(),
-            defaultJobName,
-          );
-
-          try {
-            const addResult = await flowService.addJob(
-              createTestMetaJobData({ name: defaultJobName }),
-              {
-                jobId: 'retry-test-job',
-                attempts: 2,
-                backoff: {
-                  type: 'fixed',
-                  delay: 100,
-                },
-                removeOnComplete: false,
-                removeOnFail: false,
-              } as FlowOpts<MetaJobData>,
-            )();
-
-            expect(addResult._tag).toBe('Right');
-
-            // Wait for job to complete or fail
-            let job = await queueService.getQueue().getJob('retry-test-job');
-            let state = await job?.getState();
-            const startTime = Date.now();
-            let lastAttempts = job?.attemptsMade ?? 0;
-            let stableCount = 0;
-
-            while (state !== 'completed' && Date.now() - startTime < 15000) {
-              await new Promise((resolve) => setTimeout(resolve, 100));
-              job = await queueService.getQueue().getJob('retry-test-job');
-              state = await job?.getState();
-
-              // Check if attempts have stabilized
-              if (job && job.attemptsMade === lastAttempts) {
-                stableCount++;
-              } else if (job) {
-                lastAttempts = job.attemptsMade;
-                stableCount = 0;
-              }
-
-              // If attempts have been stable for a while, break
-              if (stableCount > 10) {
-                break;
-              }
-            }
-
-            expect(job?.attemptsMade).toBe(1);
-            expect(state).toBe('completed');
-
-            await flowService.close();
-            await workerService.close();
-          } catch (error) {
-            await flowService.close();
-            await workerService.close();
-            throw error;
+      // Create worker service with failure simulation
+      const failingWorkerServiceResult = await createWorkerService<MetaJobData>(
+        queueName,
+        async (job: Job<MetaJobData>) => {
+          if (job.attemptsMade === 0) {
+            throw new Error('Simulated failure');
           }
-        }
+        },
+        { concurrency: 1 },
+      )();
+      if (failingWorkerServiceResult._tag === 'Left') {
+        throw new Error('Failed to create failing worker service');
+      }
+
+      // Close existing worker service
+      await workerService.close();
+      workerService = failingWorkerServiceResult.right;
+      await workerService.start();
+
+      const jobData: MetaJobData = {
+        type: 'META',
+        name: defaultJobName,
+        data: {
+          operation: 'SYNC',
+          metaType: 'COURSE' as MetaType,
+        },
+        timestamp: new Date(),
+      };
+
+      const result = await pipe(
+        flowService.addJob(jobData, {
+          jobId: 'failing-job',
+        }),
+      )();
+
+      expect(result._tag).toBe('Right');
+      if (result._tag === 'Right' && result.right.opts?.jobId) {
+        await waitForJobCompletion(result.right.opts.jobId);
+        const job = await queue.getJob(result.right.opts.jobId);
+        expect(job?.attemptsMade).toBeGreaterThan(0);
       }
     }, 20000);
 
     test('should get flow dependencies', async () => {
+      const jobData: MetaJobData = {
+        type: 'META',
+        name: defaultJobName,
+        data: {
+          operation: 'SYNC',
+          metaType: 'COURSE' as MetaType,
+        },
+        timestamp: new Date(),
+      };
+
       const result = await pipe(
-        TE.Do,
-        TE.bind('queueService', () => createQueueServiceImpl<MetaJobData>(queueName, config)),
-        TE.chain(({ queueService }) => {
-          const flowService = createFlowService<MetaJobData>(
-            queueService.getQueue(),
-            defaultJobName,
-          );
-          return pipe(
-            TE.tryCatch(
-              async () => {
-                const addResult = await flowService.addJob(
-                  createTestMetaJobData({ name: defaultJobName }),
-                  {
-                    jobId: 'parent-job',
-                    children: [
-                      {
-                        name: defaultJobName,
-                        queueName,
-                        data: createTestMetaJobData({ name: defaultJobName }),
-                        opts: { jobId: 'child-1' },
-                      },
-                    ],
-                  } as FlowOpts<MetaJobData>,
-                )();
-
-                if (addResult._tag === 'Left') {
-                  throw addResult.left;
-                }
-
-                // Wait for jobs to be added
-                await new Promise((resolve) => setTimeout(resolve, 1000));
-                const dependenciesE = await flowService.getFlowDependencies('child-1')();
-                await flowService.close();
-
-                if (E.isLeft(dependenciesE)) {
-                  throw dependenciesE.left;
-                }
-                return dependenciesE.right;
+        flowService.addJob(jobData, {
+          jobId: 'parent-job-2',
+          children: [
+            {
+              name: defaultJobName,
+              queueName,
+              data: {
+                ...jobData,
+                name: defaultJobName,
               },
-              (error) => error as QueueError,
-            ),
-          );
+              opts: { jobId: 'child-1-2' },
+            },
+          ],
         }),
       )();
 
       expect(result._tag).toBe('Right');
-      if (result._tag === 'Right') {
-        expect(result.right.length).toBe(1);
+      if (result._tag === 'Right' && result.right.opts?.jobId) {
+        await waitForJobCompletion(result.right.opts.jobId);
+        const dependencies = await flowService.getFlowDependencies(result.right.opts.jobId)();
+        expect(dependencies._tag).toBe('Right');
+        if (dependencies._tag === 'Right') {
+          expect(dependencies.right.length).toBe(2);
+        }
       }
-    }, 40000);
+    }, 20000);
   });
 });

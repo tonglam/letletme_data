@@ -81,6 +81,7 @@ export interface FlowService<T> {
   getChildrenValues: (jobId: string) => TE.TaskEither<QueueError, Record<string, unknown>>;
   addJob: (data: T, opts?: FlowOpts<T>) => TE.TaskEither<QueueError, FlowJob<T>>;
   close: () => Promise<void>;
+  init: () => Promise<void>;
 }
 
 export interface QueueService<T> {
@@ -97,6 +98,7 @@ export interface QueueService<T> {
   pause: () => TE.TaskEither<QueueError, void>;
   resume: () => TE.TaskEither<QueueError, void>;
   getQueue: () => Queue<T>;
+  close: () => TE.TaskEither<QueueError, void>;
   upsertJobScheduler: (
     jobId: string,
     options: JobSchedulerOptions,
@@ -112,6 +114,10 @@ export interface WorkerOptions {
   concurrency?: number;
   maxStalledCount?: number;
   stalledInterval?: number;
+  limiter?: {
+    max: number;
+    duration: number;
+  };
 }
 
 export interface WorkerService<T> {
@@ -207,12 +213,7 @@ export interface SchedulerService<T extends BaseJobData> {
 }
 
 // Queue Connection Type
-export type QueueConnection =
-  | Redis
-  | {
-      host: string;
-      port: number;
-    };
+export type QueueConnection = Redis;
 
 // Job Processor Type
 export type JobProcessor<T extends BaseJobData> = (job: Job<T>) => TE.TaskEither<QueueError, void>;
