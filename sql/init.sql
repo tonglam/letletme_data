@@ -98,6 +98,7 @@ CREATE TABLE "player_values" (
     "last_value" INTEGER NOT NULL DEFAULT 0,
     "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+CREATE UNIQUE INDEX "unique_player_value" ON "player_values" ("element_id", "change_date");
 CREATE INDEX "idx_player_values_element_id" ON "player_values" ("element_id");
 CREATE INDEX "idx_player_values_change_date" ON "player_values" ("change_date");
 CREATE INDEX "idx_player_values_event_id" ON "player_values" ("event_id");

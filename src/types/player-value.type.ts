@@ -6,12 +6,13 @@ import {
   Branded,
   createBrandedType,
   ElementType,
+  ElementTypeConfig,
   getElementTypeById,
   isApiResponse,
   ValueChangeType,
 } from './base.type';
 import { ElementResponse } from './element.type';
-import { APIError } from './error.type';
+import { APIError, DBError } from './error.type';
 
 // ============ Branded Types ============
 export type PlayerValueId = Branded<string, 'PlayerValueId'>;
@@ -25,8 +26,9 @@ export const validatePlayerValueId = (value: unknown): E.Either<string, PlayerVa
   pipe(
     value,
     E.fromPredicate(
-      (v): v is string => typeof v === 'string' && v.length > 0,
-      () => 'Invalid player value ID: must be a non-empty string',
+      (v): v is string =>
+        typeof v === 'string' && v.trim().length > 0 && /^\d+_\d{4}-\d{2}-\d{2}$/.test(v),
+      () => 'Invalid player value ID: must be a non-empty string in format {number}_{YYYY-MM-DD}',
     ),
     E.map((v) => v as PlayerValueId),
   );
@@ -49,10 +51,10 @@ export type PlayerValues = readonly PlayerValue[];
 // Repository interface for player value data access
 export interface PlayerValueRepository
   extends BaseRepository<PrismaPlayerValue, PrismaPlayerValueCreate, PlayerValueId> {
-  findByChangeDate: (changeDate: string) => TE.TaskEither<APIError, PrismaPlayerValue[]>;
-  findByElementType: (elementType: number) => TE.TaskEither<APIError, PrismaPlayerValue[]>;
-  findByChangeType: (changeType: ValueChangeType) => TE.TaskEither<APIError, PrismaPlayerValue[]>;
-  findByEventId: (eventId: number) => TE.TaskEither<APIError, PrismaPlayerValue[]>;
+  findByChangeDate: (changeDate: string) => TE.TaskEither<DBError, PrismaPlayerValue[]>;
+  findByElementType: (elementType: number) => TE.TaskEither<DBError, PrismaPlayerValue[]>;
+  findByChangeType: (changeType: ValueChangeType) => TE.TaskEither<DBError, PrismaPlayerValue[]>;
+  findByEventId: (eventId: number) => TE.TaskEither<DBError, PrismaPlayerValue[]>;
 }
 
 // Persistence types for database operations
@@ -76,15 +78,19 @@ export const toDomainPlayerValue = (data: ElementResponse | PrismaPlayerValue): 
   const isElementResponse = (d: ElementResponse | PrismaPlayerValue): d is ElementResponse =>
     isApiResponse(d, 'element_type');
 
+  const today = new Date().toISOString().slice(0, 10);
+
   return {
-    id: data.id as PlayerValueId,
+    id: isElementResponse(data)
+      ? (`${data.id}_${today}` as PlayerValueId)
+      : (data.id as PlayerValueId),
     elementId: isElementResponse(data) ? data.id : data.elementId,
     elementType: isElementResponse(data)
       ? getElementTypeById(data.element_type) ?? ElementType.GKP
       : getElementTypeById(data.elementType) ?? ElementType.GKP,
     eventId: isElementResponse(data) ? data.event_points : data.eventId,
     value: isElementResponse(data) ? data.now_cost : data.value,
-    changeDate: isElementResponse(data) ? new Date().toISOString().slice(0, 10) : data.changeDate,
+    changeDate: isElementResponse(data) ? today : data.changeDate,
     changeType: isElementResponse(data) ? ValueChangeType.Start : data.changeType,
     lastValue: isElementResponse(data) ? data.cost_change_start : data.lastValue,
   };
@@ -92,7 +98,7 @@ export const toDomainPlayerValue = (data: ElementResponse | PrismaPlayerValue): 
 
 export const toPrismaPlayerValue = (value: PlayerValue): PrismaPlayerValueCreate => ({
   elementId: value.elementId,
-  elementType: Number(value.elementType),
+  elementType: ElementTypeConfig[value.elementType].id,
   eventId: value.eventId,
   value: value.value,
   changeDate: value.changeDate,

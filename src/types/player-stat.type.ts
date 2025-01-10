@@ -4,7 +4,7 @@ import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import { BaseRepository, Branded, createBrandedType, isApiResponse } from './base.type';
 import { ElementResponse } from './element.type';
-import { APIError } from './error.type';
+import { APIError, DBError } from './error.type';
 
 // ============ Branded Types ============
 export type PlayerStatId = Branded<string, 'PlayerStatId'>;
@@ -72,9 +72,9 @@ export type PlayerStats = readonly PlayerStat[];
 // Repository interface for player statistics data access
 export interface PlayerStatRepository
   extends BaseRepository<PrismaPlayerStat, PrismaPlayerStatCreate, PlayerStatId> {
-  findByEventId: (eventId: number) => TE.TaskEither<APIError, PrismaPlayerStat[]>;
-  findByElementId: (elementId: number) => TE.TaskEither<APIError, PrismaPlayerStat[]>;
-  findByTeamId: (teamId: number) => TE.TaskEither<APIError, PrismaPlayerStat[]>;
+  findByEventId: (eventId: number) => TE.TaskEither<DBError, PrismaPlayerStat[]>;
+  findByElementId: (elementId: number) => TE.TaskEither<DBError, PrismaPlayerStat[]>;
+  findByTeamId: (teamId: number) => TE.TaskEither<DBError, PrismaPlayerStat[]>;
 }
 
 // Persistence types for database operations
@@ -248,7 +248,7 @@ export const convertPrismaPlayerStats = (
   pipe(
     playerStats,
     TE.right,
-    TE.map((stats) => stats.map(toDomainPlayerStat)),
+    TE.map((values) => values.map(toDomainPlayerStat)),
   );
 
 export const convertPrismaPlayerStat = (

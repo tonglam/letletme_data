@@ -119,6 +119,7 @@ model PlayerValue {
   lastValue   Int             @default(0) @map("last_value")
   createdAt   DateTime        @default(now()) @map("created_at")
 
+  @@unique([elementId, changeDate], name: "unique_player_value")
   @@index([elementId], name: "idx_player_values_element_id")
   @@index([changeDate], name: "idx_player_values_change_date")
   @@index([eventId], name: "idx_player_values_event_id")
