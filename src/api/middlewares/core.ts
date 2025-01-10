@@ -18,31 +18,9 @@ import {
   getErrorStatus,
   ServiceError,
 } from '../../types/error.type';
+import { toAPIError } from '../../utils/error.util';
 import { AsyncMiddlewareHandler, ErrorHandler, Middleware, SecurityHeaders } from '../types';
 import { sendResponse } from '../utils';
-
-// Converts unknown errors to APIError type
-const toAPIError = (error: unknown): APIError => {
-  if (error instanceof Error) {
-    if ('code' in error) {
-      if (error.name === 'ServiceError') {
-        const serviceError = error as ServiceError;
-        return createAPIError({
-          code: APIErrorCode.SERVICE_ERROR,
-          message: serviceError.message,
-          cause: serviceError.cause,
-          details: serviceError.details,
-        });
-      }
-      return error as APIError;
-    }
-  }
-  return createAPIError({
-    code: APIErrorCode.INTERNAL_SERVER_ERROR,
-    message: error instanceof Error ? error.message : 'Internal server error',
-    cause: error instanceof Error ? error : undefined,
-  });
-};
 
 // Creates a task that handles API errors by passing them to the next middleware
 const handleAPIError =
@@ -133,12 +111,16 @@ export const addSecurityHeaders = (): Middleware => {
 
 // Global error handler middleware
 export const handleError: ErrorHandler = (
-  error: Error | APIError,
+  error: Error | APIError | ServiceError,
   _req: Request,
   res: Response,
 ): void => {
   const apiError =
-    error instanceof Error && !('code' in error) ? toAPIError(error) : (error as APIError);
+    error instanceof Error && !('code' in error)
+      ? toAPIError(error)
+      : error.name === 'ServiceError'
+        ? toAPIError(error)
+        : (error as APIError);
   const status = getErrorStatus(apiError);
   const response = {
     error: {

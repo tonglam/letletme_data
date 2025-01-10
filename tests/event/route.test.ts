@@ -23,11 +23,7 @@ const getTestEvent = (id: number, isCurrent = false, isNext = false): Event => {
     is_previous: false,
   };
 
-  const result = toDomainEvent(eventResponse);
-  if (E.isLeft(result)) {
-    throw new Error(`Failed to convert event: ${result.left}`);
-  }
-  return result.right;
+  return toDomainEvent(eventResponse);
 };
 
 describe('Event Routes', () => {

@@ -1,9 +1,9 @@
 /**
- * Phase Cache Module
- *
- * Provides caching functionality for phase data using Redis.
- * Implements cache warming, phase retrieval, and batch operations
- * with proper type safety and error handling.
+ * Team Cache Module
+ * Provides caching functionality for FPL teams using Redis as the cache store.
+ * Implements Cache-Aside pattern for efficient data access and reduced database load.
+ * Uses TaskEither for error handling and functional composition,
+ * ensuring type-safety and predictable error states throughout the caching layer.
  */
 
 import * as E from 'fp-ts/Either';
@@ -15,49 +15,49 @@ import { redisClient } from '../../infrastructure/cache/client';
 import type { RedisCache } from '../../infrastructure/cache/redis-cache';
 import { getCurrentSeason } from '../../types/base.type';
 import { CacheError, CacheErrorCode, createCacheError } from '../../types/error.type';
-import type { Phase } from '../../types/phase.type';
-import { PhaseCache, PhaseCacheConfig, PhaseDataProvider } from './types';
+import type { Team } from '../../types/team.type';
+import { TeamCache, TeamCacheConfig, TeamDataProvider } from './types';
 
-const parsePhase = (phaseStr: string): E.Either<CacheError, Phase | null> =>
+const parseTeam = (teamStr: string): E.Either<CacheError, Team | null> =>
   pipe(
     E.tryCatch(
-      () => JSON.parse(phaseStr),
-      (error: unknown) =>
+      () => JSON.parse(teamStr),
+      (error) =>
         createCacheError({
           code: CacheErrorCode.DESERIALIZATION_ERROR,
-          message: 'Failed to parse phase JSON',
+          message: 'Failed to parse team JSON',
           cause: error as Error,
         }),
     ),
     E.chain((parsed) =>
       parsed && typeof parsed === 'object' && 'id' in parsed && typeof parsed.id === 'number'
-        ? E.right(parsed as Phase)
+        ? E.right(parsed as Team)
         : E.right(null),
     ),
   );
 
-const parsePhases = (phases: Record<string, string>): E.Either<CacheError, Phase[]> =>
+const parseTeams = (teams: Record<string, string>): E.Either<CacheError, Team[]> =>
   pipe(
-    Object.values(phases),
-    (phaseStrs) =>
-      phaseStrs.map((str) =>
+    Object.values(teams),
+    (teamStrs) =>
+      teamStrs.map((str) =>
         pipe(
-          parsePhase(str),
-          E.getOrElse<CacheError, Phase | null>(() => null),
+          parseTeam(str),
+          E.getOrElse<CacheError, Team | null>(() => null),
         ),
       ),
-    (parsedPhases) => parsedPhases.filter((phase): phase is Phase => phase !== null),
-    (validPhases) => E.right(validPhases),
+    (parsedTeams) => parsedTeams.filter((team): team is Team => team !== null),
+    (validTeams) => E.right(validTeams),
   );
 
-export const createPhaseCache = (
-  cache: RedisCache<Phase>,
-  dataProvider: PhaseDataProvider,
-  config: PhaseCacheConfig = {
-    keyPrefix: CachePrefix.PHASE,
+export const createTeamCache = (
+  cache: RedisCache<Team>,
+  dataProvider: TeamDataProvider,
+  config: TeamCacheConfig = {
+    keyPrefix: CachePrefix.TEAM,
     season: getCurrentSeason(),
   },
-): PhaseCache => {
+): TeamCache => {
   const { keyPrefix, season } = config;
   const baseKey = `${keyPrefix}::${season}`;
 
@@ -65,17 +65,15 @@ export const createPhaseCache = (
     pipe(
       TE.tryCatch(
         async () => {
-          const phases = await dataProvider.getAll();
-          const multi = redisClient.multi();
-          multi.del(baseKey);
-          await multi.exec();
+          const teams = await dataProvider.getAll();
+          await redisClient.del(baseKey);
           const cacheMulti = redisClient.multi();
-          phases.forEach((phase) => {
-            cacheMulti.hset(baseKey, phase.id.toString(), JSON.stringify(phase));
+          teams.forEach((team) => {
+            cacheMulti.hset(baseKey, team.id.toString(), JSON.stringify(team));
           });
           await cacheMulti.exec();
         },
-        (error: unknown) =>
+        (error) =>
           createCacheError({
             code: CacheErrorCode.OPERATION_ERROR,
             message: 'Failed to warm up cache',
@@ -84,51 +82,49 @@ export const createPhaseCache = (
       ),
     );
 
-  const cachePhase = (phase: Phase): TE.TaskEither<CacheError, void> =>
+  const cacheTeam = (team: Team): TE.TaskEither<CacheError, void> =>
     pipe(
       TE.tryCatch(
-        () => redisClient.hset(baseKey, phase.id.toString(), JSON.stringify(phase)),
-        (error: unknown) =>
+        () => redisClient.hset(baseKey, team.id.toString(), JSON.stringify(team)),
+        (error) =>
           createCacheError({
             code: CacheErrorCode.OPERATION_ERROR,
-            message: 'Failed to cache phase',
+            message: 'Failed to cache team',
             cause: error as Error,
           }),
       ),
       TE.map(() => undefined),
     );
 
-  const cachePhases = (phases: readonly Phase[]): TE.TaskEither<CacheError, void> =>
+  const cacheTeams = (teams: readonly Team[]): TE.TaskEither<CacheError, void> =>
     pipe(
       TE.tryCatch(
         async () => {
-          if (phases.length === 0) return;
-          const multi = redisClient.multi();
-          multi.del(baseKey);
-          await multi.exec();
+          if (teams.length === 0) return;
+          await redisClient.del(baseKey);
           const cacheMulti = redisClient.multi();
-          phases.forEach((phase) => {
-            cacheMulti.hset(baseKey, phase.id.toString(), JSON.stringify(phase));
+          teams.forEach((team) => {
+            cacheMulti.hset(baseKey, team.id.toString(), JSON.stringify(team));
           });
           await cacheMulti.exec();
         },
-        (error: unknown) =>
+        (error) =>
           createCacheError({
             code: CacheErrorCode.OPERATION_ERROR,
-            message: 'Failed to cache phases',
+            message: 'Failed to cache teams',
             cause: error as Error,
           }),
       ),
     );
 
-  const getPhase = (id: string): TE.TaskEither<CacheError, Phase | null> =>
+  const getTeam = (id: string): TE.TaskEither<CacheError, Team | null> =>
     pipe(
       TE.tryCatch(
         () => redisClient.hget(baseKey, id),
-        (error: unknown) =>
+        (error) =>
           createCacheError({
             code: CacheErrorCode.OPERATION_ERROR,
-            message: 'Failed to get phase from cache',
+            message: 'Failed to get team from cache',
             cause: error as Error,
           }),
       ),
@@ -140,33 +136,33 @@ export const createPhaseCache = (
               pipe(
                 TE.tryCatch(
                   () => dataProvider.getOne(Number(id)),
-                  (error: unknown) =>
+                  (error) =>
                     createCacheError({
                       code: CacheErrorCode.OPERATION_ERROR,
-                      message: 'Failed to get phase from provider',
+                      message: 'Failed to get team from provider',
                       cause: error as Error,
                     }),
                 ),
-                TE.chainFirst((phase) => (phase ? cachePhase(phase) : TE.right(undefined))),
+                TE.chainFirst((team) => (team ? cacheTeam(team) : TE.right(undefined))),
               ),
-            (phaseStr) =>
+            (teamStr) =>
               pipe(
-                parsePhase(phaseStr),
+                parseTeam(teamStr),
                 TE.fromEither,
-                TE.chain((phase) =>
-                  phase
-                    ? TE.right(phase)
+                TE.chain((team) =>
+                  team
+                    ? TE.right(team)
                     : pipe(
                         TE.tryCatch(
                           () => dataProvider.getOne(Number(id)),
-                          (error: unknown) =>
+                          (error) =>
                             createCacheError({
                               code: CacheErrorCode.OPERATION_ERROR,
-                              message: 'Failed to get phase from provider',
+                              message: 'Failed to get team from provider',
                               cause: error as Error,
                             }),
                         ),
-                        TE.chainFirst((phase) => (phase ? cachePhase(phase) : TE.right(undefined))),
+                        TE.chainFirst((team) => (team ? cacheTeam(team) : TE.right(undefined))),
                       ),
                 ),
               ),
@@ -175,14 +171,14 @@ export const createPhaseCache = (
       ),
     );
 
-  const getAllPhases = (): TE.TaskEither<CacheError, readonly Phase[]> =>
+  const getAllTeams = (): TE.TaskEither<CacheError, readonly Team[]> =>
     pipe(
       TE.tryCatch(
         () => redisClient.hgetall(baseKey),
-        (error: unknown) =>
+        (error) =>
           createCacheError({
             code: CacheErrorCode.OPERATION_ERROR,
-            message: 'Failed to get phases from cache',
+            message: 'Failed to get teams from cache',
             cause: error as Error,
           }),
       ),
@@ -194,41 +190,41 @@ export const createPhaseCache = (
               pipe(
                 TE.tryCatch(
                   () => dataProvider.getAll(),
-                  (error: unknown) =>
+                  (error) =>
                     createCacheError({
                       code: CacheErrorCode.OPERATION_ERROR,
-                      message: 'Failed to get phases from provider',
+                      message: 'Failed to get teams from provider',
                       cause: error as Error,
                     }),
                 ),
-                TE.chain((phases) =>
+                TE.chain((teams) =>
                   pipe(
-                    cachePhases(phases),
-                    TE.map(() => phases),
+                    cacheTeams(teams),
+                    TE.map(() => teams),
                   ),
                 ),
               ),
-            (cachedPhases) =>
+            (cachedTeams) =>
               pipe(
-                parsePhases(cachedPhases),
+                parseTeams(cachedTeams),
                 TE.fromEither,
-                TE.chain((phases) =>
-                  phases.length > 0
-                    ? TE.right(phases)
+                TE.chain((teams) =>
+                  teams.length > 0
+                    ? TE.right(teams)
                     : pipe(
                         TE.tryCatch(
                           () => dataProvider.getAll(),
-                          (error: unknown) =>
+                          (error) =>
                             createCacheError({
                               code: CacheErrorCode.OPERATION_ERROR,
-                              message: 'Failed to get phases from provider',
+                              message: 'Failed to get teams from provider',
                               cause: error as Error,
                             }),
                         ),
-                        TE.chain((phases) =>
+                        TE.chain((teams) =>
                           pipe(
-                            cachePhases(phases),
-                            TE.map(() => phases),
+                            cacheTeams(teams),
+                            TE.map(() => teams),
                           ),
                         ),
                       ),
@@ -241,9 +237,9 @@ export const createPhaseCache = (
 
   return {
     warmUp,
-    cachePhase,
-    cachePhases,
-    getPhase,
-    getAllPhases,
+    cacheTeam,
+    cacheTeams,
+    getTeam,
+    getAllTeams,
   };
 };

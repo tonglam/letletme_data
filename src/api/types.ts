@@ -4,7 +4,7 @@
 import { NextFunction, Request, Response } from 'express';
 import { Either } from 'fp-ts/Either';
 import { TaskEither } from 'fp-ts/TaskEither';
-import { APIError } from '../types/error.type';
+import { APIError } from 'src/types/error.type';
 import { Event, Events } from '../types/event.type';
 import { Phase, Phases } from '../types/phase.type';
 

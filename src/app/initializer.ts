@@ -1,7 +1,7 @@
 import { Application } from 'express';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { eventRepository } from '../domain/event/repository';
+import { createEventRepository } from '../domain/event/repository';
 import { createPhaseRepository } from '../domain/phase/repository';
 import { prisma } from '../infrastructure/db/prisma';
 import { createFPLClient } from '../infrastructure/http/fpl/client';
@@ -24,6 +24,7 @@ import { createServer } from './server';
 const express = require('express');
 
 // Create repositories
+const eventRepository = createEventRepository(prisma);
 const phaseRepository = createPhaseRepository(prisma);
 
 export const initializeApp = (): TE.TaskEither<APIError, void> =>

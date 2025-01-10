@@ -9,16 +9,25 @@ import { pipe } from 'fp-ts/function';
 import { ServiceContainer, ServiceKey } from '../../service';
 import { APIError, APIErrorCode, ServiceError, createAPIError } from '../../types/error.type';
 import { Event, EventId } from '../../types/event.type';
-import { handleNullable } from '../../utils/error.util';
+import { handleNullable, toAPIError } from '../../utils/error.util';
 import { EventHandlerResponse } from '../types';
 
-const toAPIError = (error: ServiceError): APIError =>
-  createAPIError({
-    code: APIErrorCode.SERVICE_ERROR,
-    message: error.message,
-    cause: error.cause,
-    details: error.details,
-  });
+// Helper function to convert service errors to API errors while preserving error information
+const handleServiceError = <T>(task: TE.TaskEither<ServiceError, T>): TE.TaskEither<APIError, T> =>
+  pipe(
+    task,
+    TE.mapLeft((error) => {
+      if (error.name === 'ServiceError') {
+        return createAPIError({
+          code: APIErrorCode.SERVICE_ERROR,
+          message: error.message,
+          details: error.details,
+          cause: error.cause,
+        });
+      }
+      return toAPIError(error);
+    }),
+  );
 
 // Creates event handlers with dependency injection
 export const createEventHandlers = (
@@ -29,7 +38,7 @@ export const createEventHandlers = (
     const task = eventService.getEvents();
     return pipe(
       () => task(),
-      TE.mapLeft(toAPIError),
+      handleServiceError,
       TE.map((events) => [...events]),
     );
   },
@@ -39,7 +48,7 @@ export const createEventHandlers = (
     const task = eventService.getCurrentEvent();
     return pipe(
       () => task(),
-      TE.mapLeft(toAPIError),
+      handleServiceError,
       TE.chain(
         (event) => () => Promise.resolve(handleNullable<Event>('Current event not found')(event)),
       ),
@@ -51,7 +60,7 @@ export const createEventHandlers = (
     const task = eventService.getNextEvent();
     return pipe(
       () => task(),
-      TE.mapLeft(toAPIError),
+      handleServiceError,
       TE.chain(
         (event) => () => Promise.resolve(handleNullable<Event>('Next event not found')(event)),
       ),
@@ -72,7 +81,7 @@ export const createEventHandlers = (
     const task = eventService.getEvent(eventId as EventId);
     return pipe(
       task,
-      TE.mapLeft(toAPIError),
+      handleServiceError,
       TE.chain(
         (event) => () =>
           Promise.resolve(handleNullable<Event>(`Event with ID ${eventId} not found`)(event)),

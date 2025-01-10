@@ -11,7 +11,7 @@ import bootstrapData from '../data/bootstrap.json';
 describe('Phase Cache Tests', () => {
   let testPhases: Phase[];
   const TEST_PREFIX = CachePrefix.PHASE;
-  const TEST_SEASON = 2425;
+  const TEST_SEASON = '2425';
 
   beforeAll(() => {
     // Convert bootstrap phases to domain phases
@@ -223,7 +223,7 @@ describe('Phase Cache Tests', () => {
 
     it('should handle different seasons and key prefixes', async () => {
       const customPrefix = CachePrefix.PHASE;
-      const customSeason = 2024;
+      const customSeason = '2024';
       const redis = createRedisCache<Phase>({ keyPrefix: customPrefix });
       const mockDataProvider = {
         getOne: jest.fn().mockResolvedValue(testPhases[0]),

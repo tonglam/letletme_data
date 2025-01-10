@@ -12,19 +12,20 @@ import { CachePrefix } from '../../config/cache/cache.config';
 import { redisClient } from '../../infrastructure/cache/client';
 import type { RedisCache } from '../../infrastructure/cache/redis-cache';
 import { getCurrentSeason } from '../../types/base.type';
-import { CacheError } from '../../types/error.type';
+import { CacheError, CacheErrorCode, createCacheError } from '../../types/error.type';
 import type { Event } from '../../types/event.type';
-import { createCacheOperationError } from '../../utils/error.util';
 import { EventCache, EventCacheConfig, EventDataProvider } from './types';
-
-const createError = (message: string, cause?: unknown): CacheError =>
-  createCacheOperationError({ message, cause });
 
 const parseEvent = (eventStr: string): E.Either<CacheError, Event | null> =>
   pipe(
     E.tryCatch(
       () => JSON.parse(eventStr),
-      (error) => createError('Failed to parse event JSON', error),
+      (error) =>
+        createCacheError({
+          code: CacheErrorCode.DESERIALIZATION_ERROR,
+          message: 'Failed to parse event JSON',
+          cause: error as Error,
+        }),
     ),
     E.chain((parsed) =>
       parsed && typeof parsed === 'object' && 'id' in parsed && typeof parsed.id === 'number'
@@ -66,15 +67,12 @@ export const createEventCache = (
       TE.tryCatch(
         async () => {
           const events = await dataProvider.getAll();
-
-          // Delete all related keys before caching
           const multi = redisClient.multi();
           multi.del(baseKey);
           multi.del(currentEventKey);
           multi.del(nextEventKey);
           await multi.exec();
 
-          // Cache all events
           const cacheMulti = redisClient.multi();
           events.forEach((event) => {
             cacheMulti.hset(baseKey, event.id.toString(), JSON.stringify(event));
@@ -91,7 +89,12 @@ export const createEventCache = (
             await redisClient.set(nextEventKey, JSON.stringify(nextEvent));
           }
         },
-        (error) => createError('Failed to warm up cache', error),
+        (error) =>
+          createCacheError({
+            code: CacheErrorCode.OPERATION_ERROR,
+            message: 'Failed to warm up cache',
+            cause: error as Error,
+          }),
       ),
     );
 
@@ -99,7 +102,12 @@ export const createEventCache = (
     pipe(
       TE.tryCatch(
         () => redisClient.hset(baseKey, event.id.toString(), JSON.stringify(event)),
-        (error) => createError('Failed to cache event', error),
+        (error: unknown) =>
+          createCacheError({
+            code: CacheErrorCode.OPERATION_ERROR,
+            message: 'Failed to cache event',
+            cause: error as Error,
+          }),
       ),
       TE.map(() => undefined),
     );
@@ -110,27 +118,35 @@ export const createEventCache = (
         async () => {
           if (events.length === 0) return;
 
-          // Delete base key before caching
           const multi = redisClient.multi();
           multi.del(baseKey);
           await multi.exec();
 
-          // Cache all events
           const cacheMulti = redisClient.multi();
           events.forEach((event) => {
             cacheMulti.hset(baseKey, event.id.toString(), JSON.stringify(event));
           });
           await cacheMulti.exec();
         },
-        (error) => createError('Failed to cache events', error),
+        (error: unknown) =>
+          createCacheError({
+            code: CacheErrorCode.OPERATION_ERROR,
+            message: 'Failed to cache events',
+            cause: error as Error,
+          }),
       ),
     );
 
   const getEvent = (id: string): TE.TaskEither<CacheError, Event | null> =>
     pipe(
       TE.tryCatch(
-        () => redisClient.hget(baseKey, id),
-        (error) => createError('Failed to get event from cache', error),
+        () => redisClient.hget(baseKey, id.toString()),
+        (error) =>
+          createCacheError({
+            code: CacheErrorCode.OPERATION_ERROR,
+            message: 'Failed to get event from cache',
+            cause: error as Error,
+          }),
       ),
       TE.chain(
         flow(
@@ -140,7 +156,12 @@ export const createEventCache = (
               pipe(
                 TE.tryCatch(
                   () => dataProvider.getOne(Number(id)),
-                  (error) => createError('Failed to get event from provider', error),
+                  (error: unknown) =>
+                    createCacheError({
+                      code: CacheErrorCode.OPERATION_ERROR,
+                      message: 'Failed to get event from provider',
+                      cause: error as Error,
+                    }),
                 ),
                 TE.chainFirst((event) => (event ? cacheEvent(event) : TE.right(undefined))),
               ),
@@ -154,7 +175,12 @@ export const createEventCache = (
                     : pipe(
                         TE.tryCatch(
                           () => dataProvider.getOne(Number(id)),
-                          (error) => createError('Failed to get event from provider', error),
+                          (error: unknown) =>
+                            createCacheError({
+                              code: CacheErrorCode.OPERATION_ERROR,
+                              message: 'Failed to get event from provider',
+                              cause: error as Error,
+                            }),
                         ),
                         TE.chainFirst((event) => (event ? cacheEvent(event) : TE.right(undefined))),
                       ),
@@ -169,7 +195,12 @@ export const createEventCache = (
     pipe(
       TE.tryCatch(
         () => redisClient.hgetall(baseKey),
-        (error) => createError('Failed to get events from cache', error),
+        (error: unknown) =>
+          createCacheError({
+            code: CacheErrorCode.OPERATION_ERROR,
+            message: 'Failed to get events from cache',
+            cause: error as Error,
+          }),
       ),
       TE.chain(
         flow(
@@ -179,7 +210,12 @@ export const createEventCache = (
               pipe(
                 TE.tryCatch(
                   () => dataProvider.getAll(),
-                  (error) => createError('Failed to get events from provider', error),
+                  (error: unknown) =>
+                    createCacheError({
+                      code: CacheErrorCode.OPERATION_ERROR,
+                      message: 'Failed to get events from provider',
+                      cause: error as Error,
+                    }),
                 ),
                 TE.chain((events) =>
                   pipe(
@@ -198,7 +234,12 @@ export const createEventCache = (
                     : pipe(
                         TE.tryCatch(
                           () => dataProvider.getAll(),
-                          (error) => createError('Failed to get events from provider', error),
+                          (error: unknown) =>
+                            createCacheError({
+                              code: CacheErrorCode.OPERATION_ERROR,
+                              message: 'Failed to get events from provider',
+                              cause: error as Error,
+                            }),
                         ),
                         TE.chain((events) =>
                           pipe(
@@ -218,7 +259,12 @@ export const createEventCache = (
     pipe(
       TE.tryCatch(
         () => redisClient.get(currentEventKey),
-        (error) => createError('Failed to get current event from cache', error),
+        (error: unknown) =>
+          createCacheError({
+            code: CacheErrorCode.OPERATION_ERROR,
+            message: 'Failed to get current event from cache',
+            cause: error as Error,
+          }),
       ),
       TE.chain(
         flow(
@@ -227,14 +273,24 @@ export const createEventCache = (
             () =>
               pipe(
                 TE.tryCatch(
-                  () => dataProvider.getCurrentEvent(),
-                  (error) => createError('Failed to get current event from provider', error),
+                  () => dataProvider.getCurrent(),
+                  (error: unknown) =>
+                    createCacheError({
+                      code: CacheErrorCode.OPERATION_ERROR,
+                      message: 'Failed to get current event from provider',
+                      cause: error as Error,
+                    }),
                 ),
                 TE.chainFirst((event) =>
                   event
                     ? TE.tryCatch(
                         () => redisClient.set(currentEventKey, JSON.stringify(event)),
-                        (error) => createError('Failed to cache current event', error),
+                        (error: unknown) =>
+                          createCacheError({
+                            code: CacheErrorCode.OPERATION_ERROR,
+                            message: 'Failed to cache current event',
+                            cause: error as Error,
+                          }),
                       )
                     : TE.right(undefined),
                 ),
@@ -248,15 +304,24 @@ export const createEventCache = (
                     ? TE.right(event)
                     : pipe(
                         TE.tryCatch(
-                          () => dataProvider.getCurrentEvent(),
-                          (error) =>
-                            createError('Failed to get current event from provider', error),
+                          () => dataProvider.getCurrent(),
+                          (error: unknown) =>
+                            createCacheError({
+                              code: CacheErrorCode.OPERATION_ERROR,
+                              message: 'Failed to get current event from provider',
+                              cause: error as Error,
+                            }),
                         ),
                         TE.chainFirst((event) =>
                           event
                             ? TE.tryCatch(
                                 () => redisClient.set(currentEventKey, JSON.stringify(event)),
-                                (error) => createError('Failed to cache current event', error),
+                                (error: unknown) =>
+                                  createCacheError({
+                                    code: CacheErrorCode.OPERATION_ERROR,
+                                    message: 'Failed to cache current event',
+                                    cause: error as Error,
+                                  }),
                               )
                             : TE.right(undefined),
                         ),
@@ -272,7 +337,12 @@ export const createEventCache = (
     pipe(
       TE.tryCatch(
         () => redisClient.get(nextEventKey),
-        (error) => createError('Failed to get next event from cache', error),
+        (error: unknown) =>
+          createCacheError({
+            code: CacheErrorCode.OPERATION_ERROR,
+            message: 'Failed to get next event from cache',
+            cause: error as Error,
+          }),
       ),
       TE.chain(
         flow(
@@ -281,14 +351,24 @@ export const createEventCache = (
             () =>
               pipe(
                 TE.tryCatch(
-                  () => dataProvider.getNextEvent(),
-                  (error) => createError('Failed to get next event from provider', error),
+                  () => dataProvider.getNext(),
+                  (error: unknown) =>
+                    createCacheError({
+                      code: CacheErrorCode.OPERATION_ERROR,
+                      message: 'Failed to get next event from provider',
+                      cause: error as Error,
+                    }),
                 ),
                 TE.chainFirst((event) =>
                   event
                     ? TE.tryCatch(
                         () => redisClient.set(nextEventKey, JSON.stringify(event)),
-                        (error) => createError('Failed to cache next event', error),
+                        (error: unknown) =>
+                          createCacheError({
+                            code: CacheErrorCode.OPERATION_ERROR,
+                            message: 'Failed to cache next event',
+                            cause: error as Error,
+                          }),
                       )
                     : TE.right(undefined),
                 ),
@@ -302,14 +382,24 @@ export const createEventCache = (
                     ? TE.right(event)
                     : pipe(
                         TE.tryCatch(
-                          () => dataProvider.getNextEvent(),
-                          (error) => createError('Failed to get next event from provider', error),
+                          () => dataProvider.getNext(),
+                          (error: unknown) =>
+                            createCacheError({
+                              code: CacheErrorCode.OPERATION_ERROR,
+                              message: 'Failed to get next event from provider',
+                              cause: error as Error,
+                            }),
                         ),
                         TE.chainFirst((event) =>
                           event
                             ? TE.tryCatch(
                                 () => redisClient.set(nextEventKey, JSON.stringify(event)),
-                                (error) => createError('Failed to cache next event', error),
+                                (error: unknown) =>
+                                  createCacheError({
+                                    code: CacheErrorCode.OPERATION_ERROR,
+                                    message: 'Failed to cache next event',
+                                    cause: error as Error,
+                                  }),
                               )
                             : TE.right(undefined),
                         ),

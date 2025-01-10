@@ -394,8 +394,29 @@ export const queueErrorToApiError = (error: QueueError): APIError => ({
 });
 
 /**
+ * Type guard for ServiceError
+ */
+const isServiceError = (error: unknown): error is ServiceError =>
+  typeof error === 'object' &&
+  error !== null &&
+  'name' in error &&
+  (error as ServiceError).name === 'ServiceError' &&
+  'code' in error &&
+  Object.values(ServiceErrorCode).includes((error as ServiceError).code);
+
+/**
+ * Maps service error codes to API error codes
+ */
+const serviceErrorToApiErrorCode: Record<ServiceErrorCode, APIErrorCode> = {
+  [ServiceErrorCode.INTEGRATION_ERROR]: APIErrorCode.SERVICE_ERROR,
+  [ServiceErrorCode.VALIDATION_ERROR]: APIErrorCode.VALIDATION_ERROR,
+  [ServiceErrorCode.OPERATION_ERROR]: APIErrorCode.SERVICE_ERROR,
+  [ServiceErrorCode.TRANSFORMATION_ERROR]: APIErrorCode.SERVICE_ERROR,
+};
+
+/**
  * Converts any error to an API error
- * Handles specific error types (DBError, QueueError, Error) appropriately
+ * Handles specific error types (DBError, QueueError, ServiceError, Error) appropriately
  */
 export const toAPIError = (error: unknown): APIError => {
   if (isDBError(error)) {
@@ -408,6 +429,14 @@ export const toAPIError = (error: unknown): APIError => {
   }
   if (isQueueError(error)) {
     return queueErrorToApiError(error);
+  }
+  if (isServiceError(error)) {
+    return createAPIError({
+      code: serviceErrorToApiErrorCode[error.code],
+      message: error.message,
+      details: error.details,
+      cause: error.cause,
+    });
   }
   if (error instanceof Error) {
     return createAPIError({

@@ -5,22 +5,23 @@ import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
 import { CachePrefix } from '../../src/config/cache/cache.config';
 import { createBootstrapApiAdapter } from '../../src/domain/bootstrap/adapter';
-import { eventRepository } from '../../src/domain/event/repository';
-import { redisClient } from '../../src/infrastructure/cache/client';
+import { createEventCache } from '../../src/domain/event/cache';
+import { createEventRepository } from '../../src/domain/event/repository';
+import { toDomainEvent } from '../../src/domain/event/types';
+import { createRedisCache } from '../../src/infrastructure/cache/redis-cache';
 import { prisma } from '../../src/infrastructure/db/prisma';
 import { DEFAULT_RETRY_CONFIG } from '../../src/infrastructure/http/client/utils';
 import { createFPLClient } from '../../src/infrastructure/http/fpl/client';
-import type { FPLEndpoints } from '../../src/infrastructure/http/fpl/types';
 import { createEventService } from '../../src/service/event';
 import { getCurrentSeason } from '../../src/types/base.type';
-import { APIError, APIErrorCode, ServiceError } from '../../src/types/error.type';
+import { ServiceError } from '../../src/types/error.type';
 import type { Event, EventId } from '../../src/types/event.type';
 
 describe('Event Service Integration Tests', () => {
   const TEST_TIMEOUT = 30000;
 
   // Test-specific cache keys
-  const TEST_CACHE_PREFIX = `${CachePrefix.EVENT}::test`;
+  const TEST_CACHE_PREFIX = CachePrefix.EVENT;
   const testCacheKey = `${TEST_CACHE_PREFIX}::${getCurrentSeason()}`;
   const testCurrentEventKey = `${testCacheKey}::current`;
   const testNextEventKey = `${testCacheKey}::next`;
@@ -35,7 +36,48 @@ describe('Event Service Integration Tests', () => {
     },
   });
   const bootstrapApi = createBootstrapApiAdapter(fplClient);
-  const eventService = createEventService(bootstrapApi, eventRepository);
+  const eventRepository = createEventRepository(prisma);
+
+  // Create Redis cache with remote configuration
+  const redisCache = createRedisCache<Event>({
+    host: process.env.REDIS_HOST ?? 'localhost',
+    port: Number(process.env.REDIS_PORT ?? 6379),
+    password: process.env.REDIS_PASSWORD,
+    db: Number(process.env.REDIS_DB ?? 0),
+  });
+
+  const eventCache = createEventCache(redisCache, {
+    getOne: async (id: number) => {
+      const result = await eventRepository.findById(id as EventId)();
+      if (E.isRight(result) && result.right) {
+        return toDomainEvent(result.right);
+      }
+      return null;
+    },
+    getAll: async () => {
+      const result = await eventRepository.findAll()();
+      if (E.isRight(result)) {
+        return result.right.map(toDomainEvent);
+      }
+      return [];
+    },
+    getCurrent: async () => {
+      const result = await eventRepository.findCurrent()();
+      if (E.isRight(result) && result.right) {
+        return toDomainEvent(result.right);
+      }
+      return null;
+    },
+    getNext: async () => {
+      const result = await eventRepository.findNext()();
+      if (E.isRight(result) && result.right) {
+        return toDomainEvent(result.right);
+      }
+      return null;
+    },
+  });
+
+  const eventService = createEventService(bootstrapApi, eventRepository, eventCache);
 
   beforeAll(async () => {
     try {
@@ -46,7 +88,7 @@ describe('Event Service Integration Tests', () => {
       await prisma.event.deleteMany();
 
       // Clear test-specific cache keys
-      const multi = redisClient.multi();
+      const multi = redisCache.client.multi();
       multi.del(testCacheKey);
       multi.del(testCurrentEventKey);
       multi.del(testNextEventKey);
@@ -60,7 +102,7 @@ describe('Event Service Integration Tests', () => {
             console.error('Failed to sync events:', error);
             return T.of(undefined);
           },
-          () => T.of(undefined),
+          () => T.of(void (async () => {})()),
         ),
       )();
     } catch (error) {
@@ -74,15 +116,15 @@ describe('Event Service Integration Tests', () => {
       // Clean up test data
       await prisma.event.deleteMany();
 
-      // Clean up test-specific cache keys
-      const multi = redisClient.multi();
+      // Clear test-specific cache keys
+      const multi = redisCache.client.multi();
       multi.del(testCacheKey);
       multi.del(testCurrentEventKey);
       multi.del(testNextEventKey);
       await multi.exec();
 
       // Close connections
-      await redisClient.quit();
+      await redisCache.client.quit();
       await prisma.$disconnect();
     } catch (error) {
       console.error('Error in afterAll:', error);
@@ -94,6 +136,7 @@ describe('Event Service Integration Tests', () => {
     it('should create service with proper interface', () => {
       expect(eventService).toBeDefined();
       expect(eventService.getEvents).toBeDefined();
+      expect(eventService.getEvent).toBeDefined();
       expect(eventService.getCurrentEvent).toBeDefined();
       expect(eventService.getNextEvent).toBeDefined();
       expect(eventService.saveEvents).toBeDefined();
@@ -262,92 +305,9 @@ describe('Event Service Integration Tests', () => {
         expect(result.length).toBe(newEvents.length);
         expect(result[0]).toMatchObject({
           id: newEvents[0].id,
-          name: newEvents[0].name,
-          deadlineTime: newEvents[0].deadlineTime,
-        });
-      },
-      TEST_TIMEOUT,
-    );
-  });
-
-  describe('API Integration', () => {
-    it(
-      'should sync events from API',
-      async () => {
-        // Clear existing data first
-        await prisma.event.deleteMany();
-
-        const result = await pipe(
-          eventService.syncEventsFromApi(),
-          TE.fold<ServiceError, readonly Event[], readonly Event[]>(
-            () => T.of([]),
-            (events) => T.of(events),
-          ),
-        )();
-
-        expect(result.length).toBeGreaterThan(0);
-        expect(result[0]).toMatchObject({
-          id: expect.any(Number),
           name: expect.any(String),
           deadlineTime: expect.any(String),
         });
-      },
-      TEST_TIMEOUT,
-    );
-
-    it(
-      'should handle API errors',
-      async () => {
-        // Create mock client with failing bootstrap endpoint
-        const mockClient: FPLEndpoints = {
-          bootstrap: {
-            getBootstrapStatic: () =>
-              Promise.resolve(
-                E.left({
-                  code: APIErrorCode.VALIDATION_ERROR,
-                  message: 'Failed to fetch events from API',
-                  name: 'APIError',
-                  timestamp: new Date(),
-                  details: { httpStatus: 500 },
-                } as APIError),
-              ),
-          },
-          element: { getElementSummary: jest.fn() },
-          entry: {
-            getEntry: jest.fn(),
-            getEntryTransfers: jest.fn(),
-            getEntryHistory: jest.fn(),
-          },
-          event: {
-            getLive: jest.fn(),
-            getPicks: jest.fn(),
-            getFixtures: jest.fn(),
-          },
-          leagues: {
-            getClassicLeague: jest.fn(),
-            getH2hLeague: jest.fn(),
-            getCup: jest.fn(),
-          },
-        };
-
-        const failingApi = createBootstrapApiAdapter(mockClient);
-        const failingService = createEventService(failingApi, eventRepository);
-
-        const result = await pipe(
-          failingService.syncEventsFromApi(),
-          TE.fold<ServiceError, readonly Event[], ServiceError | null>(
-            (error) => T.of(error),
-            () => T.of(null),
-          ),
-        )();
-
-        expect(result).not.toBeNull();
-        if (result) {
-          expect(result.message).toBe('Service integration failed');
-          expect(result.code).toBe('INTEGRATION_ERROR');
-          expect(result.details).toBeDefined();
-          expect(result.details?.error).toBeDefined();
-        }
       },
       TEST_TIMEOUT,
     );

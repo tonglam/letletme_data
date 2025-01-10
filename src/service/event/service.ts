@@ -2,35 +2,48 @@
 // Provides business logic for Event operations, implementing caching and error handling.
 // Uses functional programming principles for type-safe operations.
 
-import * as E from 'fp-ts/Either';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
 import { createEventOperations } from '../../domain/event/operation';
-import { EventOperations, EventRepositoryOperations } from '../../domain/event/types';
-import { APIError, DomainError, ServiceError } from '../../types/error.type';
-import { Event, EventId, EventResponse, toDomainEvent } from '../../types/event.type';
-import { createServiceIntegrationError, createServiceOperationError } from '../../utils/error.util';
+import { EventCache, EventOperations } from '../../domain/event/types';
+import { APIError, ServiceError } from '../../types/error.type';
+import {
+  Event,
+  EventId,
+  EventRepository,
+  EventResponse,
+  Events,
+  toDomainEvent,
+} from '../../types/event.type';
+import { createServiceIntegrationError } from '../../utils/error.util';
+import { mapDomainError } from '../utils';
 import { EventService, EventServiceDependencies, EventServiceOperations } from './types';
-
-// Maps domain errors to service errors
-const mapDomainError = (error: DomainError): ServiceError =>
-  createServiceOperationError({
-    message: error.message,
-    cause: error,
-  });
-
-const filterValidEvents = (events: E.Either<string, Event>[]): Event[] =>
-  events.filter(E.isRight).map((e) => e.right);
 
 // Implementation of service operations
 const eventServiceOperations = (domainOps: EventOperations): EventServiceOperations => ({
-  findAllEvents: () => pipe(domainOps.getAllEvents(), TE.mapLeft(mapDomainError)),
+  findAllEvents: () =>
+    pipe(domainOps.getAllEvents(), TE.mapLeft(mapDomainError)) as TE.TaskEither<
+      ServiceError,
+      Events
+    >,
 
-  findEventById: (id: EventId) => pipe(domainOps.getEventById(id), TE.mapLeft(mapDomainError)),
+  findEventById: (id: EventId) =>
+    pipe(domainOps.getEventById(id), TE.mapLeft(mapDomainError)) as TE.TaskEither<
+      ServiceError,
+      Event | null
+    >,
 
-  findCurrentEvent: () => pipe(domainOps.getCurrentEvent(), TE.mapLeft(mapDomainError)),
+  findCurrentEvent: () =>
+    pipe(domainOps.getCurrentEvent(), TE.mapLeft(mapDomainError)) as TE.TaskEither<
+      ServiceError,
+      Event | null
+    >,
 
-  findNextEvent: () => pipe(domainOps.getNextEvent(), TE.mapLeft(mapDomainError)),
+  findNextEvent: () =>
+    pipe(domainOps.getNextEvent(), TE.mapLeft(mapDomainError)) as TE.TaskEither<
+      ServiceError,
+      Event | null
+    >,
 
   syncEventsFromApi: (bootstrapApi: EventServiceDependencies['bootstrapApi']) =>
     pipe(
@@ -41,23 +54,37 @@ const eventServiceOperations = (domainOps: EventOperations): EventServiceOperati
           cause: error,
         }),
       ),
-      TE.map((events: readonly EventResponse[]) => events.map(toDomainEvent)),
-      TE.map(filterValidEvents),
-      TE.chain((events) =>
+      TE.chain((events: readonly EventResponse[]) =>
         pipe(
-          domainOps.deleteAll(),
-          TE.mapLeft(mapDomainError),
-          TE.chain(() => pipe(domainOps.createEvents(events), TE.mapLeft(mapDomainError))),
+          TE.right(events.map(toDomainEvent)),
+          TE.chain((domainEvents) =>
+            pipe(
+              domainOps.deleteAll(),
+              TE.mapLeft(mapDomainError),
+              TE.chain(() =>
+                pipe(domainOps.createEvents(domainEvents), TE.mapLeft(mapDomainError)),
+              ),
+            ),
+          ),
         ),
       ),
-    ),
+    ) as TE.TaskEither<ServiceError, Events>,
 });
 
 export const createEventService = (
   bootstrapApi: EventServiceDependencies['bootstrapApi'],
-  repository: EventRepositoryOperations,
+  repository: EventRepository,
+  cache: EventCache = {
+    warmUp: () => TE.right(undefined),
+    cacheEvent: () => TE.right(undefined),
+    cacheEvents: () => TE.right(undefined),
+    getEvent: () => TE.right(null),
+    getAllEvents: () => TE.right([]),
+    getCurrentEvent: () => TE.right(null),
+    getNextEvent: () => TE.right(null),
+  },
 ): EventService => {
-  const domainOps = createEventOperations(repository);
+  const domainOps = createEventOperations(repository, cache);
   const ops = eventServiceOperations(domainOps);
 
   return {

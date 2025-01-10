@@ -4,7 +4,7 @@ import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
 import { CachePrefix } from '../../../src/config/cache/cache.config';
 import { createBootstrapApiAdapter } from '../../../src/domain/bootstrap/adapter';
-import { eventRepository } from '../../../src/domain/event/repository';
+import { createEventRepository } from '../../../src/domain/event/repository';
 import { redisClient } from '../../../src/infrastructure/cache/client';
 import { prisma } from '../../../src/infrastructure/db/prisma';
 import { DEFAULT_RETRY_CONFIG } from '../../../src/infrastructure/http/client/utils';
@@ -19,6 +19,9 @@ import {
   MetaQueueService,
   MetaType,
 } from '../../../src/types/job.type';
+
+// Create repositories
+const eventRepository = createEventRepository(prisma);
 
 describe('Event Meta Queue Integration Tests', () => {
   const TEST_TIMEOUT = 30000;

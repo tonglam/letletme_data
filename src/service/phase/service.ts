@@ -1,14 +1,12 @@
+// Phase Service Module
+// Provides business logic for Phase operations, implementing caching and error handling.
+// Uses functional programming principles for type-safe operations.
+
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
 import { createPhaseOperations } from '../../domain/phase/operation';
 import { PhaseCache, PhaseOperations } from '../../domain/phase/types';
-import {
-  APIError,
-  createServiceError,
-  DomainError,
-  ServiceError,
-  ServiceErrorCode,
-} from '../../types/error.type';
+import { APIError, ServiceError } from '../../types/error.type';
 import {
   Phase,
   PhaseId,
@@ -17,6 +15,8 @@ import {
   Phases,
   toDomainPhase,
 } from '../../types/phase.type';
+import { createServiceIntegrationError } from '../../utils/error.util';
+import { mapDomainError } from '../utils';
 import type {
   PhaseService,
   PhaseServiceDependencies,
@@ -25,14 +25,6 @@ import type {
 } from './types';
 import { phaseWorkflows } from './workflow';
 
-// Maps domain errors to service errors
-const mapDomainError = (error: DomainError): ServiceError =>
-  createServiceError({
-    code: ServiceErrorCode.OPERATION_ERROR,
-    message: error.message,
-    cause: error as unknown as Error,
-  });
-
 // Implementation of service operations
 const phaseServiceOperations = (domainOps: PhaseOperations): PhaseServiceOperations => ({
   findAllPhases: () =>
@@ -40,17 +32,18 @@ const phaseServiceOperations = (domainOps: PhaseOperations): PhaseServiceOperati
       ServiceError,
       Phases
     >,
+
   findPhaseById: (id: PhaseId) =>
     pipe(domainOps.getPhaseById(id), TE.mapLeft(mapDomainError)) as TE.TaskEither<
       ServiceError,
       Phase | null
     >,
+
   syncPhasesFromApi: (bootstrapApi: PhaseServiceDependencies['bootstrapApi']) =>
     pipe(
       bootstrapApi.getBootstrapPhases(),
       TE.mapLeft((error: APIError) =>
-        createServiceError({
-          code: ServiceErrorCode.INTEGRATION_ERROR,
+        createServiceIntegrationError({
           message: 'Failed to fetch phases from API',
           cause: error,
         }),

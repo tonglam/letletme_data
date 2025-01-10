@@ -1,384 +1,221 @@
-import * as E from 'fp-ts/Either';
-import { pipe } from 'fp-ts/function';
-import { eventRepository } from '../../src/domain/event/repository';
+import { readFileSync } from 'fs';
+import { join } from 'path';
+import { createEventRepository } from '../../src/domain/event/repository';
 import { prisma } from '../../src/infrastructure/db/prisma';
-import type { Event, EventId } from '../../src/types/event.type';
-import { validateEventId } from '../../src/types/event.type';
-import bootstrapData from '../data/bootstrap.json';
+import {
+  Event,
+  EventResponse,
+  PrismaEvent,
+  PrismaEventCreate,
+  toDomainEvent,
+  toPrismaEvent,
+} from '../../src/types/event.type';
 
-describe('Event Repository Tests', () => {
+// Load test data directly from JSON
+const loadTestEvents = (): EventResponse[] => {
+  const filePath = join(__dirname, '../data/bootstrap.json');
+  const fileContent = readFileSync(filePath, 'utf-8');
+  const data = JSON.parse(fileContent);
+  return data.events;
+};
+
+describe('Event Repository', () => {
+  const eventRepository = createEventRepository(prisma);
   let testEvents: Event[];
-  let createdEventIds: number[] = [];
+  let testPrismaEvents: PrismaEventCreate[];
+  const createdEventIds: number[] = [];
 
   beforeAll(() => {
-    // Use real event data from bootstrap.json and convert to domain model
-    testEvents = bootstrapData.events.slice(0, 3).map((event, index) => {
-      const eventIdResult = validateEventId(event.id);
-      if (E.isLeft(eventIdResult)) {
-        throw new Error(`Invalid event ID: ${event.id}`);
-      }
+    // Convert test data to domain models
+    const events = loadTestEvents().slice(0, 3);
+    testEvents = events.map((event) => toDomainEvent(event));
 
-      return {
-        id: eventIdResult.right,
-        name: event.name,
-        deadlineTime: event.deadline_time,
-        deadlineTimeEpoch: event.deadline_time_epoch,
-        deadlineTimeGameOffset: event.deadline_time_game_offset ?? 0,
-        releaseTime: event.release_time,
-        averageEntryScore: event.average_entry_score ?? 0,
-        finished: event.finished,
-        dataChecked: event.data_checked ?? false,
-        highestScore: event.highest_score ?? 0,
-        highestScoringEntry: event.highest_scoring_entry ?? 0,
-        isPrevious: index === 0,
-        isCurrent: index === 1,
-        isNext: index === 2,
-        cupLeaguesCreated: event.cup_leagues_created ?? false,
-        h2hKoMatchesCreated: event.h2h_ko_matches_created ?? false,
-        rankedCount: event.ranked_count ?? 0,
-        chipPlays: event.chip_plays ?? [],
-        mostSelected: event.most_selected ?? null,
-        mostTransferredIn: event.most_transferred_in ?? null,
-        mostCaptained: event.most_captained ?? null,
-        mostViceCaptained: event.most_vice_captained ?? null,
-        topElement: event.top_element ?? null,
-        topElementInfo: event.top_element_info ?? null,
-        transfersMade: event.transfers_made ?? 0,
-      };
-    });
+    // Convert domain models to Prisma models
+    testPrismaEvents = testEvents.map((event) => toPrismaEvent(event));
   });
 
   beforeEach(async () => {
     // Clean up any existing test data
-    await prisma.event.deleteMany({
-      where: {
-        id: {
-          in: [...testEvents.map((e) => Number(e.id)), ...createdEventIds],
-        },
-      },
-    });
-    createdEventIds = [];
-  });
-
-  afterAll(async () => {
-    // Final cleanup
     await prisma.event.deleteMany();
   });
 
-  describe('Event Repository Operations', () => {
-    it('should create a single event', async () => {
-      const testEvent = testEvents[0];
-      const result = await pipe(eventRepository.create(testEvent))();
+  afterAll(async () => {
+    // Clean up test data
+    if (createdEventIds.length > 0) {
+      await prisma.event.deleteMany({
+        where: {
+          id: {
+            in: createdEventIds,
+          },
+        },
+      });
+    }
+    await prisma.$disconnect();
+  });
 
-      expect(E.isRight(result)).toBe(true);
-      if (E.isRight(result)) {
-        const createdEvent = result.right;
-        createdEventIds.push(createdEvent.id);
+  describe('save', () => {
+    it('should save an event', async () => {
+      const event = testPrismaEvents[0];
+      const result = await eventRepository.save(event)();
 
-        expect(createdEvent).toMatchObject({
-          id: testEvent.id,
-          name: testEvent.name,
-          deadlineTime: testEvent.deadlineTime,
-          deadlineTimeEpoch: testEvent.deadlineTimeEpoch,
-          deadlineTimeGameOffset: testEvent.deadlineTimeGameOffset,
-          releaseTime: testEvent.releaseTime,
-          averageEntryScore: testEvent.averageEntryScore,
-          finished: testEvent.finished,
-          dataChecked: testEvent.dataChecked,
-          highestScore: testEvent.highestScore,
-          highestScoringEntry: testEvent.highestScoringEntry,
-          isPrevious: testEvent.isPrevious,
-          isCurrent: testEvent.isCurrent,
-          isNext: testEvent.isNext,
-          cupLeaguesCreated: testEvent.cupLeaguesCreated,
-          h2hKoMatchesCreated: testEvent.h2hKoMatchesCreated,
-          rankedCount: testEvent.rankedCount,
-          chipPlays: testEvent.chipPlays,
-          mostSelected: testEvent.mostSelected,
-          mostTransferredIn: testEvent.mostTransferredIn,
-          mostCaptained: testEvent.mostCaptained,
-          mostViceCaptained: testEvent.mostViceCaptained,
-          topElement: testEvent.topElement,
-          topElementInfo: testEvent.topElementInfo,
-          transfersMade: testEvent.transfersMade,
-        });
-
-        // Verify JSON fields
-        expect(JSON.parse(JSON.stringify(createdEvent.chipPlays))).toEqual(testEvent.chipPlays);
-        expect(JSON.parse(JSON.stringify(createdEvent.topElementInfo))).toEqual(
-          testEvent.topElementInfo,
-        );
+      expect(result._tag).toBe('Right');
+      if (result._tag === 'Right') {
+        const savedEvent = result.right as PrismaEvent;
+        expect(savedEvent.id).toBe(event.id);
+        expect(savedEvent.name).toBe(event.name);
+        expect(savedEvent.deadlineTime).toBe(event.deadlineTime);
+        expect(savedEvent.deadlineTimeEpoch).toBe(event.deadlineTimeEpoch);
+        createdEventIds.push(event.id);
       }
     });
 
-    it('should create multiple events', async () => {
-      const result = await pipe(eventRepository.createMany(testEvents))();
+    it('should handle duplicate event save', async () => {
+      const event = testPrismaEvents[0];
+      await eventRepository.save(event)();
+      const result = await eventRepository.save(event)();
 
-      expect(E.isRight(result)).toBe(true);
-      if (E.isRight(result)) {
-        const createdEvents = result.right;
-        createdEventIds.push(...createdEvents.map((e) => e.id));
+      expect(result._tag).toBe('Left');
+      if (result._tag === 'Left') {
+        expect(result.left.code).toBe('QUERY_ERROR');
+      }
+    });
+  });
 
-        expect(createdEvents).toHaveLength(testEvents.length);
-        createdEvents.forEach((event, index) => {
-          const testEvent = testEvents[index];
-          expect(event).toMatchObject({
-            id: testEvent.id,
-            name: testEvent.name,
-            deadlineTime: testEvent.deadlineTime,
-            deadlineTimeEpoch: testEvent.deadlineTimeEpoch,
-            deadlineTimeGameOffset: testEvent.deadlineTimeGameOffset,
-            releaseTime: testEvent.releaseTime,
-            averageEntryScore: testEvent.averageEntryScore,
-            finished: testEvent.finished,
-            dataChecked: testEvent.dataChecked,
-            highestScore: testEvent.highestScore,
-            highestScoringEntry: testEvent.highestScoringEntry,
-            isPrevious: testEvent.isPrevious,
-            isCurrent: testEvent.isCurrent,
-            isNext: testEvent.isNext,
-            cupLeaguesCreated: testEvent.cupLeaguesCreated,
-            h2hKoMatchesCreated: testEvent.h2hKoMatchesCreated,
-            rankedCount: testEvent.rankedCount,
-            transfersMade: testEvent.transfersMade,
-          });
+  describe('saveBatch', () => {
+    it('should save multiple events', async () => {
+      const result = await eventRepository.saveBatch(testPrismaEvents)();
 
-          // Verify JSON fields
-          expect(JSON.parse(JSON.stringify(event.chipPlays))).toEqual(testEvent.chipPlays);
-          expect(JSON.parse(JSON.stringify(event.topElementInfo))).toEqual(
-            testEvent.topElementInfo,
-          );
+      expect(result._tag).toBe('Right');
+      if (result._tag === 'Right') {
+        const savedEvents = result.right as PrismaEvent[];
+        expect(savedEvents).toHaveLength(testPrismaEvents.length);
+        savedEvents.forEach((event, index) => {
+          expect(event.id).toBe(testPrismaEvents[index].id);
+          expect(event.name).toBe(testPrismaEvents[index].name);
+          createdEventIds.push(event.id);
         });
       }
     });
+  });
 
-    it('should find event by ID', async () => {
-      // First create an event
-      const testEvent = testEvents[0];
-      const createResult = await pipe(eventRepository.create(testEvent))();
-      expect(E.isRight(createResult)).toBe(true);
-      if (E.isRight(createResult)) {
-        createdEventIds.push(createResult.right.id);
+  describe('findById', () => {
+    it('should find event by id', async () => {
+      const event = testPrismaEvents[0];
+      await eventRepository.save(event)();
+      const result = await eventRepository.findById(testEvents[0].id)();
 
-        // Then find it by ID
-        const findResult = await pipe(eventRepository.findById(testEvent.id))();
-        expect(E.isRight(findResult)).toBe(true);
-        if (E.isRight(findResult)) {
-          const foundEvent = findResult.right;
-          expect(foundEvent).not.toBeNull();
-          if (foundEvent) {
-            expect(foundEvent).toMatchObject({
-              id: testEvent.id,
-              name: testEvent.name,
-              deadlineTime: testEvent.deadlineTime,
-              deadlineTimeEpoch: testEvent.deadlineTimeEpoch,
-              deadlineTimeGameOffset: testEvent.deadlineTimeGameOffset,
-              releaseTime: testEvent.releaseTime,
-              averageEntryScore: testEvent.averageEntryScore,
-              finished: testEvent.finished,
-              dataChecked: testEvent.dataChecked,
-            });
-
-            // Verify JSON fields
-            expect(JSON.parse(JSON.stringify(foundEvent.chipPlays))).toEqual(testEvent.chipPlays);
-            expect(JSON.parse(JSON.stringify(foundEvent.topElementInfo))).toEqual(
-              testEvent.topElementInfo,
-            );
-          }
-        }
+      expect(result._tag).toBe('Right');
+      if (result._tag === 'Right') {
+        const foundEvent = result.right as PrismaEvent | null;
+        expect(foundEvent?.id).toBe(event.id);
+        expect(foundEvent?.name).toBe(event.name);
       }
     });
 
-    it('should find events by IDs', async () => {
-      // First create multiple events
-      const createResult = await pipe(eventRepository.createMany(testEvents))();
-      expect(E.isRight(createResult)).toBe(true);
-      if (E.isRight(createResult)) {
-        const createdEvents = createResult.right;
-        createdEventIds.push(...createdEvents.map((e) => e.id));
+    it('should return null for non-existent event', async () => {
+      const nonExistentId = testEvents[0].id;
+      const result = await eventRepository.findById(nonExistentId)();
 
-        // Then find them by IDs
-        const findResult = await pipe(eventRepository.findByIds(testEvents.map((e) => e.id)))();
-        expect(E.isRight(findResult)).toBe(true);
-        if (E.isRight(findResult)) {
-          const foundEvents = findResult.right;
-          expect(foundEvents).toHaveLength(testEvents.length);
-          foundEvents.forEach((event, index) => {
-            const testEvent = testEvents[index];
-            expect(event).toMatchObject({
-              id: testEvent.id,
-              name: testEvent.name,
-              deadlineTime: testEvent.deadlineTime,
-              deadlineTimeEpoch: testEvent.deadlineTimeEpoch,
-              deadlineTimeGameOffset: testEvent.deadlineTimeGameOffset,
-              releaseTime: testEvent.releaseTime,
-              averageEntryScore: testEvent.averageEntryScore,
-              finished: testEvent.finished,
-              dataChecked: testEvent.dataChecked,
-            });
-
-            // Verify JSON fields
-            expect(JSON.parse(JSON.stringify(event.chipPlays))).toEqual(testEvent.chipPlays);
-            expect(JSON.parse(JSON.stringify(event.topElementInfo))).toEqual(
-              testEvent.topElementInfo,
-            );
-          });
-        }
+      expect(result._tag).toBe('Right');
+      if (result._tag === 'Right') {
+        expect(result.right).toBeNull();
       }
     });
+  });
 
-    it('should find current event', async () => {
-      // First create multiple events
-      const createResult = await pipe(eventRepository.createMany(testEvents))();
-      expect(E.isRight(createResult)).toBe(true);
-      if (E.isRight(createResult)) {
-        createdEventIds.push(...createResult.right.map((e) => e.id));
-
-        // Then find current event
-        const findResult = await pipe(eventRepository.findCurrent())();
-        expect(E.isRight(findResult)).toBe(true);
-        if (E.isRight(findResult)) {
-          const foundEvent = findResult.right;
-          expect(foundEvent).toMatchObject({
-            isCurrent: true,
-          });
-        }
-      }
-    });
-
-    it('should find next event', async () => {
-      // First create multiple events
-      const createResult = await pipe(eventRepository.createMany(testEvents))();
-      expect(E.isRight(createResult)).toBe(true);
-      if (E.isRight(createResult)) {
-        createdEventIds.push(...createResult.right.map((e) => e.id));
-
-        // Then find next event
-        const findResult = await pipe(eventRepository.findNext())();
-        expect(E.isRight(findResult)).toBe(true);
-        if (E.isRight(findResult)) {
-          const foundEvent = findResult.right;
-          expect(foundEvent).toMatchObject({
-            isNext: true,
-          });
-        }
-      }
-    });
-
-    it('should update event', async () => {
-      // First create an event
-      const testEvent = testEvents[0];
-      const createResult = await pipe(eventRepository.create(testEvent))();
-      expect(E.isRight(createResult)).toBe(true);
-      if (E.isRight(createResult)) {
-        createdEventIds.push(createResult.right.id);
-
-        // Then update it with data from another event
-        const updateData = {
-          finished: !testEvent.finished,
-          dataChecked: !testEvent.dataChecked,
-          averageEntryScore: testEvents[1].averageEntryScore,
-          highestScore: testEvents[1].highestScore,
-          highestScoringEntry: testEvents[1].highestScoringEntry,
-          chipPlays: testEvents[1].chipPlays,
-          topElementInfo: testEvents[1].topElementInfo,
-        };
-
-        const updateResult = await pipe(eventRepository.update(testEvent.id, updateData))();
-        expect(E.isRight(updateResult)).toBe(true);
-        if (E.isRight(updateResult)) {
-          const updatedEvent = updateResult.right;
-          expect(updatedEvent).toMatchObject({
-            id: testEvent.id,
-            finished: updateData.finished,
-            dataChecked: updateData.dataChecked,
-            averageEntryScore: updateData.averageEntryScore,
-            highestScore: updateData.highestScore,
-            highestScoringEntry: updateData.highestScoringEntry,
-          });
-
-          // Verify JSON fields
-          expect(JSON.parse(JSON.stringify(updatedEvent.chipPlays))).toEqual(updateData.chipPlays);
-          expect(JSON.parse(JSON.stringify(updatedEvent.topElementInfo))).toEqual(
-            updateData.topElementInfo,
-          );
-        }
-      }
-    });
-
-    it('should delete event', async () => {
-      // First create an event
-      const testEvent = testEvents[0];
-      const createResult = await pipe(eventRepository.create(testEvent))();
-      expect(E.isRight(createResult)).toBe(true);
-      if (E.isRight(createResult)) {
-        const createdEvent = createResult.right;
-
-        // Then delete it
-        const deleteResult = await pipe(eventRepository.delete(testEvent.id))();
-        expect(E.isRight(deleteResult)).toBe(true);
-        if (E.isRight(deleteResult)) {
-          const deletedEvent = deleteResult.right;
-          expect(deletedEvent.id).toBe(createdEvent.id);
-
-          // Verify it's deleted
-          const findResult = await pipe(eventRepository.findById(testEvent.id))();
-          expect(E.isRight(findResult)).toBe(true);
-          if (E.isRight(findResult)) {
-            expect(findResult.right).toBeNull();
-          }
-        }
-      }
-    });
-
+  describe('findAll', () => {
     it('should find all events', async () => {
-      // First create multiple events
-      const createResult = await pipe(eventRepository.createMany(testEvents))();
-      expect(E.isRight(createResult)).toBe(true);
-      if (E.isRight(createResult)) {
-        createdEventIds.push(...createResult.right.map((e) => e.id));
+      await eventRepository.saveBatch(testPrismaEvents)();
+      const result = await eventRepository.findAll()();
 
-        // Then find all events
-        const findResult = await pipe(eventRepository.findAll())();
-        expect(E.isRight(findResult)).toBe(true);
-        if (E.isRight(findResult)) {
-          const foundEvents = findResult.right;
-          expect(foundEvents.length).toBeGreaterThanOrEqual(testEvents.length);
+      expect(result._tag).toBe('Right');
+      if (result._tag === 'Right') {
+        const foundEvents = result.right as PrismaEvent[];
+        expect(foundEvents).toHaveLength(testPrismaEvents.length);
+        foundEvents.forEach((event, index) => {
+          expect(event.id).toBe(testPrismaEvents[index].id);
+          expect(event.name).toBe(testPrismaEvents[index].name);
+        });
+      }
+    });
 
-          // Verify the test events are included in the results
-          const testEventIds = testEvents.map((e) => e.id);
-          const foundTestEvents = foundEvents.filter((e) => testEventIds.includes(e.id as EventId));
-          expect(foundTestEvents).toHaveLength(testEvents.length);
+    it('should return empty array when no events exist', async () => {
+      const result = await eventRepository.findAll()();
 
-          foundTestEvents.forEach((event) => {
-            const testEvent = testEvents.find((e) => e.id === event.id);
-            expect(testEvent).toBeDefined();
-            if (testEvent) {
-              expect(event).toMatchObject({
-                id: testEvent.id,
-                name: testEvent.name,
-                deadlineTime: testEvent.deadlineTime,
-                deadlineTimeEpoch: testEvent.deadlineTimeEpoch,
-                deadlineTimeGameOffset: testEvent.deadlineTimeGameOffset,
-                releaseTime: testEvent.releaseTime,
-                averageEntryScore: testEvent.averageEntryScore,
-                finished: testEvent.finished,
-                dataChecked: testEvent.dataChecked,
-                highestScore: testEvent.highestScore,
-                highestScoringEntry: testEvent.highestScoringEntry,
-                isPrevious: testEvent.isPrevious,
-                isCurrent: testEvent.isCurrent,
-                isNext: testEvent.isNext,
-              });
+      expect(result._tag).toBe('Right');
+      if (result._tag === 'Right') {
+        expect(result.right).toHaveLength(0);
+      }
+    });
+  });
 
-              // Verify JSON fields
-              expect(JSON.parse(JSON.stringify(event.chipPlays))).toEqual(testEvent.chipPlays);
-              expect(JSON.parse(JSON.stringify(event.topElementInfo))).toEqual(
-                testEvent.topElementInfo,
-              );
-            }
-          });
-        }
+  describe('findCurrent', () => {
+    it('should find current event', async () => {
+      const currentEvent = {
+        ...testPrismaEvents[0],
+        isCurrent: true,
+        isNext: false,
+      };
+      await eventRepository.save(currentEvent)();
+      const result = await eventRepository.findCurrent()();
+
+      expect(result._tag).toBe('Right');
+      if (result._tag === 'Right') {
+        const foundEvent = result.right as PrismaEvent | null;
+        expect(foundEvent?.isCurrent).toBe(true);
+      }
+    });
+  });
+
+  describe('findNext', () => {
+    it('should find next event', async () => {
+      const nextEvent = {
+        ...testPrismaEvents[1],
+        isCurrent: false,
+        isNext: true,
+      };
+      await eventRepository.save(nextEvent)();
+      const result = await eventRepository.findNext()();
+
+      expect(result._tag).toBe('Right');
+      if (result._tag === 'Right') {
+        const foundEvent = result.right as PrismaEvent | null;
+        expect(foundEvent?.isNext).toBe(true);
+      }
+    });
+  });
+
+  describe('update', () => {
+    it('should update event', async () => {
+      const event = testPrismaEvents[0];
+      await eventRepository.save(event)();
+
+      const updateData = {
+        name: 'Updated Event',
+        finished: !event.finished,
+      };
+
+      const result = await eventRepository.update(testEvents[0].id, updateData)();
+
+      expect(result._tag).toBe('Right');
+      if (result._tag === 'Right') {
+        const updatedEvent = result.right as PrismaEvent;
+        expect(updatedEvent.name).toBe(updateData.name);
+        expect(updatedEvent.finished).toBe(updateData.finished);
+      }
+    });
+  });
+
+  describe('deleteAll', () => {
+    it('should delete all events', async () => {
+      await eventRepository.saveBatch(testPrismaEvents)();
+      const result = await eventRepository.deleteAll()();
+
+      expect(result._tag).toBe('Right');
+      const findResult = await eventRepository.findAll()();
+      expect(findResult._tag).toBe('Right');
+      if (findResult._tag === 'Right') {
+        expect(findResult.right).toHaveLength(0);
       }
     });
   });

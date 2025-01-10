@@ -6,19 +6,19 @@
 import { ExtendedBootstrapApi } from 'domains/bootstrap/types';
 import * as TE from 'fp-ts/TaskEither';
 import type { ServiceError } from '../../types/error.type';
-import type { Event, EventId } from '../../types/event.type';
+import type { Event, EventId, Events } from '../../types/event.type';
 
 /**
  * Public interface for the event service.
  * Provides high-level operations for event management.
  */
 export interface EventService {
-  readonly getEvents: () => TE.TaskEither<ServiceError, readonly Event[]>;
+  readonly getEvents: () => TE.TaskEither<ServiceError, Events>;
   readonly getEvent: (id: EventId) => TE.TaskEither<ServiceError, Event | null>;
   readonly getCurrentEvent: () => TE.TaskEither<ServiceError, Event | null>;
   readonly getNextEvent: () => TE.TaskEither<ServiceError, Event | null>;
-  readonly saveEvents: (events: readonly Event[]) => TE.TaskEither<ServiceError, readonly Event[]>;
-  readonly syncEventsFromApi: () => TE.TaskEither<ServiceError, readonly Event[]>;
+  readonly saveEvents: (events: Events) => TE.TaskEither<ServiceError, Events>;
+  readonly syncEventsFromApi: () => TE.TaskEither<ServiceError, Events>;
 }
 
 /**
@@ -27,7 +27,7 @@ export interface EventService {
  */
 export interface EventServiceWithWorkflows extends EventService {
   readonly workflows: {
-    readonly syncEvents: () => TE.TaskEither<ServiceError, WorkflowResult<readonly Event[]>>;
+    readonly syncEvents: () => TE.TaskEither<ServiceError, WorkflowResult<Events>>;
   };
 }
 
@@ -43,13 +43,13 @@ export interface EventServiceDependencies {
  * Maps closely to domain operations but with service-level error handling.
  */
 export interface EventServiceOperations {
-  readonly findAllEvents: () => TE.TaskEither<ServiceError, readonly Event[]>;
+  readonly findAllEvents: () => TE.TaskEither<ServiceError, Events>;
   readonly findEventById: (id: EventId) => TE.TaskEither<ServiceError, Event | null>;
   readonly findCurrentEvent: () => TE.TaskEither<ServiceError, Event | null>;
   readonly findNextEvent: () => TE.TaskEither<ServiceError, Event | null>;
   readonly syncEventsFromApi: (
     bootstrapApi: EventServiceDependencies['bootstrapApi'],
-  ) => TE.TaskEither<ServiceError, readonly Event[]>;
+  ) => TE.TaskEither<ServiceError, Events>;
 }
 
 /**

@@ -7,18 +7,11 @@
 import { Request } from 'express';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
+import { toAPIError } from 'src/utils/error.util';
 import { ServiceContainer, ServiceKey } from '../../service';
-import { APIError, APIErrorCode, ServiceError, createAPIError } from '../../types/error.type';
+import { APIErrorCode, ServiceError, createAPIError } from '../../types/error.type';
 import { Phase, PhaseId } from '../../types/phase.type';
 import { PhaseHandlerResponse } from '../types';
-
-const toAPIError = (error: ServiceError): APIError =>
-  createAPIError({
-    code: APIErrorCode.SERVICE_ERROR,
-    message: error.message,
-    cause: error.cause,
-    details: error.details,
-  });
 
 // Creates phase handlers with dependency injection
 export const createPhaseHandlers = (

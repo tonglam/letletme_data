@@ -7,12 +7,8 @@
 
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
-import * as TE from 'fp-ts/TaskEither';
 import { z } from 'zod';
-import type { BootstrapApi } from '../domain/bootstrap/types';
-import type { PhaseCache } from '../domain/phase/types';
 import { BaseRepository, Branded, createBrandedType, isApiResponse } from './base.type';
-import { APIError, DBError } from './error.type';
 
 /**
  * Branded type for Phase ID ensuring type safety
@@ -93,10 +89,7 @@ export type Phases = readonly Phase[];
  * Phase repository interface
  * Extends base repository with phase-specific operations
  */
-export interface PhaseRepository extends BaseRepository<PrismaPhase, PrismaPhaseCreate, PhaseId> {
-  readonly findByIds: (ids: PhaseId[]) => TE.TaskEither<DBError, PrismaPhase[]>;
-  readonly update: (id: PhaseId, phase: PrismaPhaseUpdate) => TE.TaskEither<DBError, PrismaPhase>;
-}
+export type PhaseRepository = BaseRepository<PrismaPhase, PrismaPhaseCreate, PhaseId>;
 
 /**
  * Prisma database model for Phase
@@ -146,22 +139,3 @@ export const toPrismaPhase = (phase: Phase): PrismaPhaseCreate => ({
   stopEvent: phase.stopEvent,
   highestScore: phase.highestScore,
 });
-
-/**
- * Service interface for Phase operations
- */
-export interface PhaseService {
-  readonly getPhases: () => TE.TaskEither<APIError, Phases>;
-  readonly getPhase: (id: PhaseId) => TE.TaskEither<APIError, Phase | null>;
-  readonly savePhases: (phases: Phases) => TE.TaskEither<APIError, Phases>;
-  readonly syncPhasesFromApi: () => TE.TaskEither<APIError, Phases>;
-}
-
-/**
- * Dependencies required by the PhaseService
- */
-export interface PhaseServiceDependencies {
-  bootstrapApi: BootstrapApi;
-  phaseCache: PhaseCache;
-  phaseRepository: PhaseRepository;
-}

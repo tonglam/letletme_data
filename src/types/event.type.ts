@@ -9,15 +9,10 @@ import { Prisma } from '@prisma/client';
 import * as A from 'fp-ts/Array';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
-import * as O from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
-import { TaskEither } from 'fp-ts/TaskEither';
+import { DBError } from 'src/types/error.type';
 import { z } from 'zod';
-import type { BootstrapApi } from '../domain/bootstrap/types';
-import type { EventCache } from '../domain/event/types';
-import type { BaseRepository } from './base.type';
-import { Branded, createBrandedType, isApiResponse } from './base.type';
-import { APIError, DBError } from './error.type';
+import { BaseRepository, Branded, createBrandedType, isApiResponse } from './base.type';
 
 /**
  * Branded type for Event ID ensuring type safety
@@ -168,12 +163,14 @@ export type Events = readonly Event[];
  * Event repository interface
  * Extends base repository with event-specific operations
  */
-export interface EventRepository extends BaseRepository<PrismaEvent, PrismaEventCreate, EventId> {
-  readonly findCurrent: () => TaskEither<DBError, PrismaEvent | null>;
-  readonly findNext: () => TaskEither<DBError, PrismaEvent | null>;
-  readonly findByIds: (ids: EventId[]) => TaskEither<DBError, PrismaEvent[]>;
-  readonly update: (id: EventId, event: PrismaEventUpdate) => TaskEither<DBError, PrismaEvent>;
-}
+export type EventRepository = Omit<
+  BaseRepository<PrismaEvent, PrismaEventCreate, EventId>,
+  'update'
+> & {
+  readonly findCurrent: () => TE.TaskEither<DBError, PrismaEvent | null>;
+  readonly findNext: () => TE.TaskEither<DBError, PrismaEvent | null>;
+  readonly update: (id: EventId, event: PrismaEventUpdate) => TE.TaskEither<DBError, PrismaEvent>;
+};
 
 /**
  * Prisma database model for Event
@@ -215,27 +212,16 @@ export type PrismaEventCreate = Omit<PrismaEvent, 'createdAt'>;
 /**
  * Prisma event update type
  */
-export type PrismaEventUpdate = Omit<PrismaEvent, 'createdAt'>;
-
-/**
- * Type guard for API response
- */
-const isEventApiResponse = (d: EventResponse | PrismaEvent): d is EventResponse =>
-  isApiResponse(d, 'deadline_time');
+export type PrismaEventUpdate = Partial<Omit<PrismaEvent, 'createdAt'>>;
 
 /**
  * Transform functions for nested types
  */
 const transformChipPlay = (item: Prisma.JsonObject): E.Either<string, ChipPlay> =>
-  pipe(
-    E.Do,
-    E.bind('chip_name', () => E.right(String(item.chip_name || ''))),
-    E.bind('num_played', () => E.right(Number(item.num_played || 0))),
-    E.map(({ chip_name, num_played }) => ({
-      chip_name,
-      num_played,
-    })),
-  );
+  E.right({
+    chip_name: String(item.chip_name || ''),
+    num_played: Number(item.num_played || 0),
+  });
 
 const transformTopElement = (obj: Prisma.JsonObject): E.Either<string, TopElementInfo | null> => {
   const id = obj.id;
@@ -254,7 +240,7 @@ const transformChipPlays = (
   if (!data) return E.right([]);
 
   try {
-    const parsed = JSON.parse(JSON.stringify(data));
+    const parsed = Array.isArray(data) ? data : JSON.parse(JSON.stringify(data));
     if (!Array.isArray(parsed)) return E.right([]);
 
     return pipe(parsed as Prisma.JsonObject[], A.traverse(E.Applicative)(transformChipPlay));
@@ -269,10 +255,8 @@ const transformTopElementInfo = (
   if (!data) return E.right(null);
 
   try {
-    const parsed = JSON.parse(JSON.stringify(data)) as Prisma.JsonObject;
-    const result = transformTopElement(parsed);
-    if (E.isLeft(result)) return E.right(null);
-    return result;
+    const parsed = typeof data === 'object' ? data : JSON.parse(JSON.stringify(data));
+    return transformTopElement(parsed as Prisma.JsonObject);
   } catch {
     return E.right(null);
   }
@@ -281,145 +265,95 @@ const transformTopElementInfo = (
 /**
  * Converts API response or database model to domain model
  */
-export const toDomainEvent = (data: EventResponse | PrismaEvent): E.Either<string, Event> =>
-  pipe(
-    E.Do,
-    E.bind('id', () => validateEventId(data.id)),
-    E.bind('chipPlays', () =>
-      isEventApiResponse(data) ? E.right(data.chip_plays) : transformChipPlays(data.chipPlays),
+export const toDomainEvent = (data: EventResponse | PrismaEvent): Event => {
+  const isEventApiResponse = (d: EventResponse | PrismaEvent): d is EventResponse =>
+    isApiResponse(d, 'deadline_time');
+
+  return {
+    id: data.id as EventId,
+    name: data.name,
+    deadlineTime: isEventApiResponse(data) ? data.deadline_time : data.deadlineTime,
+    deadlineTimeEpoch: isEventApiResponse(data) ? data.deadline_time_epoch : data.deadlineTimeEpoch,
+    deadlineTimeGameOffset: isEventApiResponse(data)
+      ? data.deadline_time_game_offset ?? 0
+      : data.deadlineTimeGameOffset,
+    releaseTime: isEventApiResponse(data) ? data.release_time ?? null : data.releaseTime,
+    averageEntryScore: isEventApiResponse(data)
+      ? data.average_entry_score ?? 0
+      : data.averageEntryScore,
+    finished: data.finished,
+    dataChecked: isEventApiResponse(data) ? data.data_checked ?? false : data.dataChecked,
+    highestScore: isEventApiResponse(data) ? data.highest_score ?? 0 : data.highestScore,
+    highestScoringEntry: isEventApiResponse(data)
+      ? data.highest_scoring_entry ?? 0
+      : data.highestScoringEntry,
+    isPrevious: isEventApiResponse(data) ? data.is_previous : data.isPrevious,
+    isCurrent: isEventApiResponse(data) ? data.is_current : data.isCurrent,
+    isNext: isEventApiResponse(data) ? data.is_next : data.isNext,
+    cupLeaguesCreated: isEventApiResponse(data)
+      ? data.cup_leagues_created ?? false
+      : data.cupLeaguesCreated,
+    h2hKoMatchesCreated: isEventApiResponse(data)
+      ? data.h2h_ko_matches_created ?? false
+      : data.h2hKoMatchesCreated,
+    rankedCount: isEventApiResponse(data) ? 0 : data.rankedCount,
+    chipPlays: pipe(
+      transformChipPlays(isEventApiResponse(data) ? data.chip_plays : data.chipPlays),
+      E.getOrElse((): readonly ChipPlay[] => []),
     ),
-    E.bind('topElementInfo', () =>
-      isEventApiResponse(data)
-        ? E.right(data.top_element_info ?? null)
-        : transformTopElementInfo(data.topElementInfo),
+    mostSelected: isEventApiResponse(data) ? data.most_selected ?? null : data.mostSelected,
+    mostTransferredIn: isEventApiResponse(data)
+      ? data.most_transferred_in ?? null
+      : data.mostTransferredIn,
+    mostCaptained: isEventApiResponse(data) ? data.most_captained ?? null : data.mostCaptained,
+    mostViceCaptained: isEventApiResponse(data)
+      ? data.most_vice_captained ?? null
+      : data.mostViceCaptained,
+    topElement: isEventApiResponse(data) ? data.top_element ?? null : data.topElement,
+    topElementInfo: pipe(
+      transformTopElementInfo(
+        isEventApiResponse(data)
+          ? (data.top_element_info as Prisma.JsonValue)
+          : data.topElementInfo,
+      ),
+      E.getOrElse((): TopElementInfo | null => null),
     ),
-    E.map(
-      (transformed): Event => ({
-        id: transformed.id,
-        name: data.name,
-        deadlineTime: isEventApiResponse(data) ? data.deadline_time : data.deadlineTime,
-        deadlineTimeEpoch: isEventApiResponse(data)
-          ? data.deadline_time_epoch
-          : data.deadlineTimeEpoch,
-        deadlineTimeGameOffset: isEventApiResponse(data)
-          ? data.deadline_time_game_offset ?? 0
-          : data.deadlineTimeGameOffset,
-        releaseTime: isEventApiResponse(data) ? data.release_time ?? null : data.releaseTime,
-        averageEntryScore: isEventApiResponse(data)
-          ? data.average_entry_score ?? 0
-          : data.averageEntryScore,
-        finished: data.finished,
-        dataChecked: isEventApiResponse(data) ? data.data_checked ?? false : data.dataChecked,
-        highestScore: isEventApiResponse(data) ? data.highest_score ?? 0 : data.highestScore,
-        highestScoringEntry: isEventApiResponse(data)
-          ? data.highest_scoring_entry ?? 0
-          : data.highestScoringEntry,
-        isPrevious: isEventApiResponse(data) ? data.is_previous : data.isPrevious,
-        isCurrent: isEventApiResponse(data) ? data.is_current : data.isCurrent,
-        isNext: isEventApiResponse(data) ? data.is_next : data.isNext,
-        cupLeaguesCreated: isEventApiResponse(data)
-          ? data.cup_leagues_created ?? false
-          : data.cupLeaguesCreated,
-        h2hKoMatchesCreated: isEventApiResponse(data)
-          ? data.h2h_ko_matches_created ?? false
-          : data.h2hKoMatchesCreated,
-        rankedCount: isEventApiResponse(data) ? 0 : data.rankedCount,
-        chipPlays: transformed.chipPlays,
-        mostSelected: isEventApiResponse(data) ? data.most_selected ?? null : data.mostSelected,
-        mostTransferredIn: isEventApiResponse(data)
-          ? data.most_transferred_in ?? null
-          : data.mostTransferredIn,
-        mostCaptained: isEventApiResponse(data) ? data.most_captained ?? null : data.mostCaptained,
-        mostViceCaptained: isEventApiResponse(data)
-          ? data.most_vice_captained ?? null
-          : data.mostViceCaptained,
-        topElement: isEventApiResponse(data) ? data.top_element ?? null : data.topElement,
-        topElementInfo: transformed.topElementInfo,
-        transfersMade: isEventApiResponse(data) ? data.transfers_made ?? 0 : data.transfersMade,
-      }),
-    ),
-  );
+    transfersMade: isEventApiResponse(data) ? data.transfers_made ?? 0 : data.transfersMade,
+  };
+};
 
 /**
  * Converts domain model to database model with validation
  */
-export const toPrismaEvent = (event: Event): E.Either<string, PrismaEventCreate> =>
-  pipe(
-    E.Do,
-    E.bind('chipPlays', () =>
-      E.right(event.chipPlays.length > 0 ? JSON.parse(JSON.stringify(event.chipPlays)) : undefined),
-    ),
-    E.bind('topElementInfo', () =>
-      E.right(event.topElementInfo ? JSON.parse(JSON.stringify(event.topElementInfo)) : undefined),
-    ),
-    E.map(
-      (transformed): PrismaEventCreate => ({
-        id: Number(event.id),
-        name: event.name,
-        deadlineTime: event.deadlineTime,
-        deadlineTimeEpoch: event.deadlineTimeEpoch,
-        deadlineTimeGameOffset: event.deadlineTimeGameOffset,
-        releaseTime: event.releaseTime,
-        averageEntryScore: event.averageEntryScore,
-        finished: event.finished,
-        dataChecked: event.dataChecked,
-        highestScore: event.highestScore,
-        highestScoringEntry: event.highestScoringEntry,
-        isPrevious: event.isPrevious,
-        isCurrent: event.isCurrent,
-        isNext: event.isNext,
-        cupLeaguesCreated: event.cupLeaguesCreated,
-        h2hKoMatchesCreated: event.h2hKoMatchesCreated,
-        rankedCount: event.rankedCount,
-        chipPlays: transformed.chipPlays,
-        mostSelected: event.mostSelected,
-        mostTransferredIn: event.mostTransferredIn,
-        mostCaptained: event.mostCaptained,
-        mostViceCaptained: event.mostViceCaptained,
-        topElement: event.topElement,
-        topElementInfo: transformed.topElementInfo,
-        transfersMade: event.transfersMade,
-      }),
-    ),
-  );
-
-/**
- * Helper functions for array transformations
- */
-export const convertPrismaEvents = (events: PrismaEvent[]): TE.TaskEither<string, Events> =>
-  pipe(
-    events,
-    A.traverse(E.Applicative)(toDomainEvent),
-    TE.fromEither,
-    TE.map((events) => events as Events),
-  );
-
-export const convertPrismaEvent = (
-  event: PrismaEvent | null,
-): TE.TaskEither<string, Event | null> =>
-  pipe(
-    O.fromNullable(event),
-    O.traverse(E.Applicative)(toDomainEvent),
-    E.map(O.toNullable),
-    TE.fromEither,
-  );
-
-/**
- * Service interface for Event operations
- */
-export interface EventService {
-  readonly warmUp: () => TE.TaskEither<APIError, void>;
-  readonly getEvents: () => TE.TaskEither<APIError, readonly Event[]>;
-  readonly getEvent: (id: EventId) => TE.TaskEither<APIError, Event | null>;
-  readonly getCurrentEvent: () => TE.TaskEither<APIError, Event | null>;
-  readonly getNextEvent: () => TE.TaskEither<APIError, Event | null>;
-}
-
-/**
- * Dependencies required by the EventService
- */
-export interface EventServiceDependencies {
-  bootstrapApi: BootstrapApi;
-  eventCache: EventCache;
-  eventRepository: EventRepository;
-}
+export const toPrismaEvent = (event: Event): PrismaEventCreate => ({
+  id: Number(event.id),
+  name: event.name,
+  deadlineTime: event.deadlineTime,
+  deadlineTimeEpoch: event.deadlineTimeEpoch,
+  deadlineTimeGameOffset: event.deadlineTimeGameOffset,
+  releaseTime: event.releaseTime,
+  averageEntryScore: event.averageEntryScore,
+  finished: event.finished,
+  dataChecked: event.dataChecked,
+  highestScore: event.highestScore,
+  highestScoringEntry: event.highestScoringEntry,
+  isPrevious: event.isPrevious,
+  isCurrent: event.isCurrent,
+  isNext: event.isNext,
+  cupLeaguesCreated: event.cupLeaguesCreated,
+  h2hKoMatchesCreated: event.h2hKoMatchesCreated,
+  rankedCount: event.rankedCount,
+  chipPlays:
+    event.chipPlays.length > 0
+      ? (JSON.parse(JSON.stringify(event.chipPlays)) as Prisma.JsonValue)
+      : null,
+  mostSelected: event.mostSelected,
+  mostTransferredIn: event.mostTransferredIn,
+  mostCaptained: event.mostCaptained,
+  mostViceCaptained: event.mostViceCaptained,
+  topElement: event.topElement,
+  topElementInfo: event.topElementInfo
+    ? (JSON.parse(JSON.stringify(event.topElementInfo)) as Prisma.JsonValue)
+    : null,
+  transfersMade: event.transfersMade,
+});

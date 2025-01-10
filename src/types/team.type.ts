@@ -1,3 +1,10 @@
+/**
+ * Team Types Module
+ *
+ * Core type definitions for the Fantasy Premier League team system.
+ * Includes branded types, domain models, and data converters.
+ */
+
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import { z } from 'zod';
@@ -6,7 +13,7 @@ import { BaseRepository, Branded, createBrandedType, isApiResponse } from './bas
 // ============ Branded Types ============
 export type TeamId = Branded<number, 'TeamId'>;
 
-export const TeamId = createBrandedType<number, 'TeamId'>(
+export const createTeamId = createBrandedType<number, 'TeamId'>(
   'TeamId',
   (value: unknown): value is number =>
     typeof value === 'number' && value > 0 && Number.isInteger(value),
@@ -22,10 +29,7 @@ export const validateTeamId = (value: unknown): E.Either<string, TeamId> =>
     E.map((v) => v as TeamId),
   );
 
-// ============ Types ============
-/**
- * API Response types (snake_case)
- */
+// ============ API Response Types ============
 export const TeamResponseSchema = z
   .object({
     // Required fields (must exist in API response)
@@ -67,17 +71,10 @@ export const TeamResponseSchema = z
   })
   .passthrough();
 
-/**
- * Type for team response data from the FPL API
- * Inferred from schema to allow additional fields
- */
 export type TeamResponse = z.infer<typeof TeamResponseSchema>;
-
 export type TeamsResponse = readonly TeamResponse[];
 
-/**
- * Domain types (camelCase)
- */
+// ============ Domain Types ============
 export interface Team {
   readonly id: TeamId;
   readonly code: number;
@@ -104,10 +101,9 @@ export interface Team {
 
 export type Teams = readonly Team[];
 
-// ============ Repository Interface ============
+// ============ Repository Types ============
 export type TeamRepository = BaseRepository<PrismaTeam, PrismaTeamCreate, TeamId>;
 
-// ============ Persistence Types ============
 export interface PrismaTeam {
   readonly id: number;
   readonly code: number;
@@ -136,7 +132,6 @@ export interface PrismaTeam {
 export type PrismaTeamCreate = Omit<PrismaTeam, 'createdAt'>;
 export type PrismaTeamUpdate = Omit<PrismaTeam, 'createdAt'>;
 
-// ============ Converters ============
 export const toDomainTeam = (data: TeamResponse | PrismaTeam): Team => {
   const isTeamApiResponse = (d: TeamResponse | PrismaTeam): d is TeamResponse =>
     isApiResponse(d, 'short_name');

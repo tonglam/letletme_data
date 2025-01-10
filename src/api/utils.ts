@@ -8,7 +8,13 @@ import * as E from 'fp-ts/Either';
 import * as O from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
-import { APIError, APIErrorCode, APIErrorResponse, createAPIError } from '../types/error.type';
+import {
+  APIError,
+  APIErrorCode,
+  APIErrorResponse,
+  createAPIError,
+  getErrorStatus,
+} from '../types/error.type';
 import { logApiError, logApiRequest } from '../utils/logger.util';
 import { ApiRequest, APIResponseData, AsyncEither, AsyncHandler } from './types';
 
@@ -24,10 +30,6 @@ export const formatErrorResponse = (message: string): APIErrorResponse => ({
     message,
   },
 });
-
-// Maps API error codes to HTTP status codes
-const getErrorStatus = (error: APIError): number =>
-  error.code === APIErrorCode.NOT_FOUND ? 404 : 500;
 
 // Handles API error responses by formatting and sending the error
 const handleError =

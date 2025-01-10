@@ -182,7 +182,7 @@ describe('Phase Workflow Integration Tests', () => {
       expect(result).toBeDefined();
       expect(result.name).toBe('ServiceError');
       expect(result.code).toBe(ServiceErrorCode.INTEGRATION_ERROR);
-      expect(result.message).toBe('Phase sync workflow failed: Failed to fetch phases from API');
+      expect(result.message).toBe('Phase sync workflow failed: Service integration failed');
       expect(result.timestamp).toBeInstanceOf(Date);
     }, 10000);
   });

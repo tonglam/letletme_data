@@ -82,8 +82,10 @@ export const createBrandedType = <T, K extends string>(
 export interface BaseRepository<T, CreateT, IdT> {
   readonly findAll: () => TE.TaskEither<DBError, T[]>;
   readonly findById: (id: IdT) => TE.TaskEither<DBError, T | null>;
+  readonly findByIds: (ids: IdT[]) => TE.TaskEither<DBError, T[]>;
   readonly save: (data: CreateT) => TE.TaskEither<DBError, T>;
   readonly saveBatch: (data: CreateT[]) => TE.TaskEither<DBError, T[]>;
+  readonly update: (id: IdT, data: T) => TE.TaskEither<DBError, T>;
   readonly deleteAll: () => TE.TaskEither<DBError, void>;
   readonly deleteByIds: (ids: IdT[]) => TE.TaskEither<DBError, void>;
 }

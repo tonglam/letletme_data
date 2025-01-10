@@ -7,11 +7,11 @@ export type LogLevel = 'error' | 'warn' | 'info' | 'debug';
 
 // Logger configuration interface
 export interface LoggerConfig {
-  /** Logger name identifier */
+  // Logger name identifier
   name: string;
-  /** Logging level */
+  // Logging level
   level: LogLevel;
-  /** Path to log file */
+  // Path to log file
   filepath: string;
 }
 
