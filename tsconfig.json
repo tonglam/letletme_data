@@ -26,6 +26,6 @@
     "composite": true,
     "resolveJsonModule": true
   },
-  "include": ["src/**/*.ts", "tests/**/*.ts", "tests/**/*.json", "jest.config.ts", "jest.setup.ts"],
+  "include": ["src/**/*.ts", "tests/**/*.ts", "tests/**/*.json", "jest.config.js", "jest.setup.ts"],
   "exclude": ["node_modules"]
 }

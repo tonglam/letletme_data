@@ -290,14 +290,33 @@ describe('Team Repository Tests', () => {
   });
 
   describe('Error Handling', () => {
-    it('should handle database errors gracefully', async () => {
-      const invalidId = -1;
-      const result = await repository.findById(invalidId as TeamId)();
+    it('should handle real database errors gracefully', async () => {
+      // Create a repository with a broken prisma client to simulate DB error
+      const brokenPrisma = {
+        team: {
+          findUnique: () => {
+            throw new Error('Database connection failed');
+          },
+        },
+      } as unknown as PrismaClient;
+
+      const errorRepo = createTeamRepository(brokenPrisma);
+      const result = await errorRepo.findById(1 as TeamId)();
 
       expect(E.isLeft(result)).toBe(true);
       if (E.isLeft(result)) {
         expect(result.left.code).toBe(DBErrorCode.QUERY_ERROR);
         expect(result.left.message).toContain('Failed to fetch team');
+      }
+    });
+
+    it('should handle non-existent ID as a successful null result', async () => {
+      const nonExistentId = 999999;
+      const result = await repository.findById(nonExistentId as TeamId)();
+
+      expect(E.isRight(result)).toBe(true);
+      if (E.isRight(result)) {
+        expect(result.right).toBeNull();
       }
     });
 

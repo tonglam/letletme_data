@@ -1,6 +1,5 @@
-import type { JestConfigWithTsJest } from 'ts-jest';
-
-const config: JestConfigWithTsJest = {
+/** @type {import('ts-jest').JestConfigWithTsJest} */
+module.exports = {
   preset: 'ts-jest',
   testEnvironment: 'node',
   roots: ['<rootDir>/src', '<rootDir>/tests'],
@@ -27,5 +26,3 @@ const config: JestConfigWithTsJest = {
   moduleFileExtensions: ['ts', 'js', 'json', 'node'],
   moduleDirectories: ['node_modules', 'src'],
 };
-
-export default config;

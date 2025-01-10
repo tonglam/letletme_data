@@ -7,6 +7,7 @@ import { createTeamCache } from '../../src/domain/team/cache';
 import { TeamDataProvider } from '../../src/domain/team/types';
 import { redisClient } from '../../src/infrastructure/cache/client';
 import { RedisCache } from '../../src/infrastructure/cache/redis-cache';
+import { getCurrentSeason } from '../../src/types/base.type';
 import { CacheErrorCode } from '../../src/types/error.type';
 import { Team, toDomainTeam } from '../../src/types/team.type';
 import bootstrapData from '../data/bootstrap.json';
@@ -15,10 +16,14 @@ describe('Team Cache Tests', () => {
   let cache: RedisCache<Team>;
   let dataProvider: TeamDataProvider;
   let testTeams: Team[];
+  const season = getCurrentSeason();
+  const cacheKey = `${CachePrefix.TEAM}::${season}`;
 
-  beforeAll(() => {
+  beforeAll(async () => {
+    // Initialize test data
     testTeams = bootstrapData.teams.map((team) => toDomainTeam(team));
 
+    // Setup mock data provider
     dataProvider = {
       getOne: jest.fn().mockImplementation(async (id: number) => {
         const team = testTeams.find((t) => t.id === id);
@@ -27,6 +32,7 @@ describe('Team Cache Tests', () => {
       getAll: jest.fn().mockImplementation(async () => testTeams),
     };
 
+    // Setup mock cache
     cache = {
       client: redisClient,
       get: jest.fn().mockReturnValue(TE.right(null)),
@@ -35,6 +41,15 @@ describe('Team Cache Tests', () => {
       hSet: jest.fn().mockReturnValue(TE.right(undefined)),
       hGetAll: jest.fn().mockReturnValue(TE.right({})),
     };
+
+    // Wait for Redis to be ready
+    await new Promise<void>((resolve) => {
+      if (redisClient.status === 'ready') {
+        resolve();
+      } else {
+        redisClient.once('ready', () => resolve());
+      }
+    });
   });
 
   beforeEach(async () => {
@@ -50,7 +65,7 @@ describe('Team Cache Tests', () => {
     it('should warm up cache with all teams', async () => {
       const teamCache = createTeamCache(cache, dataProvider);
 
-      await pipe(
+      const result = await pipe(
         teamCache.warmUp(),
         TE.fold(
           (error) => T.of(E.left(error)),
@@ -58,8 +73,9 @@ describe('Team Cache Tests', () => {
         ),
       )();
 
+      expect(E.isRight(result)).toBe(true);
       expect(dataProvider.getAll).toHaveBeenCalled();
-      const cachedTeams = await redisClient.hgetall(`${CachePrefix.TEAM}::2023`);
+      const cachedTeams = await redisClient.hgetall(cacheKey);
       expect(Object.keys(cachedTeams).length).toBe(testTeams.length);
     });
 
@@ -67,7 +83,7 @@ describe('Team Cache Tests', () => {
       const teamCache = createTeamCache(cache, dataProvider);
       const testTeam = testTeams[0];
 
-      await pipe(
+      const result = await pipe(
         teamCache.cacheTeam(testTeam),
         TE.fold(
           (error) => T.of(E.left(error)),
@@ -75,10 +91,8 @@ describe('Team Cache Tests', () => {
         ),
       )();
 
-      const teamFromCache = await redisClient.hget(
-        `${CachePrefix.TEAM}::2023`,
-        testTeam.id.toString(),
-      );
+      expect(E.isRight(result)).toBe(true);
+      const teamFromCache = await redisClient.hget(cacheKey, testTeam.id.toString());
       expect(teamFromCache).toBeDefined();
       expect(JSON.parse(teamFromCache!)).toMatchObject({
         id: testTeam.id,
@@ -90,7 +104,7 @@ describe('Team Cache Tests', () => {
       const teamCache = createTeamCache(cache, dataProvider);
       const testTeamsSubset = testTeams.slice(0, 3);
 
-      await pipe(
+      const result = await pipe(
         teamCache.cacheTeams(testTeamsSubset),
         TE.fold(
           (error) => T.of(E.left(error)),
@@ -98,7 +112,8 @@ describe('Team Cache Tests', () => {
         ),
       )();
 
-      const cachedTeams = await redisClient.hgetall(`${CachePrefix.TEAM}::2023`);
+      expect(E.isRight(result)).toBe(true);
+      const cachedTeams = await redisClient.hgetall(cacheKey);
       expect(Object.keys(cachedTeams).length).toBe(testTeamsSubset.length);
     });
 
@@ -106,7 +121,7 @@ describe('Team Cache Tests', () => {
       const teamCache = createTeamCache(cache, dataProvider);
       const testTeam = testTeams[0];
 
-      await teamCache.cacheTeam(testTeam)();
+      await redisClient.hset(cacheKey, testTeam.id.toString(), JSON.stringify(testTeam));
 
       const result = await pipe(
         teamCache.getTeam(testTeam.id.toString()),
@@ -127,7 +142,11 @@ describe('Team Cache Tests', () => {
 
     it('should get all teams from cache', async () => {
       const teamCache = createTeamCache(cache, dataProvider);
-      await teamCache.cacheTeams(testTeams)();
+      const cacheMulti = redisClient.multi();
+      testTeams.forEach((team) => {
+        cacheMulti.hset(cacheKey, team.id.toString(), JSON.stringify(team));
+      });
+      await cacheMulti.exec();
 
       const result = await pipe(
         teamCache.getAllTeams(),
@@ -220,7 +239,7 @@ describe('Team Cache Tests', () => {
 
     it('should handle JSON parsing errors', async () => {
       const teamCache = createTeamCache(cache, dataProvider);
-      await redisClient.hset(`${CachePrefix.TEAM}::2023`, '1', 'invalid json');
+      await redisClient.hset(cacheKey, '1', 'invalid json');
 
       const result = await teamCache.getTeam('1')();
 

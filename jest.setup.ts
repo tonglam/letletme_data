@@ -12,7 +12,7 @@ if (result.error) {
 }
 
 // Verify required environment variables
-const requiredEnvVars = ['BOOTSTRAP_API_URL', 'REDIS_HOST', 'REDIS_PORT'];
+const requiredEnvVars = ['REDIS_HOST', 'REDIS_PORT'];
 const missingEnvVars = requiredEnvVars.filter((envVar) => !process.env[envVar]);
 
 if (missingEnvVars.length > 0) {
