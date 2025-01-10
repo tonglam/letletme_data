@@ -97,14 +97,14 @@ describe('Phase Service Integration Tests', () => {
 
   afterAll(async () => {
     try {
-      // Clean up test data
-      await prisma.phase.deleteMany();
+      // // Clean up test data
+      // await prisma.phase.deleteMany();
 
-      // Clean up test-specific cache keys
-      const multi = redisCache.client.multi();
-      multi.del(testCacheKey);
-      multi.del(testCurrentPhaseKey);
-      await multi.exec();
+      // // Clean up test-specific cache keys
+      // const multi = redisCache.client.multi();
+      // multi.del(testCacheKey);
+      // multi.del(testCurrentPhaseKey);
+      // await multi.exec();
 
       // Close connections
       await redisCache.client.quit();
