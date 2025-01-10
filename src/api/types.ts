@@ -7,6 +7,9 @@ import { TaskEither } from 'fp-ts/TaskEither';
 import { APIError } from 'src/types/error.type';
 import { Event, Events } from '../types/event.type';
 import { Phase, Phases } from '../types/phase.type';
+import { PlayerStat } from '../types/player-stat.type';
+import { PlayerValue } from '../types/player-value.type';
+import { Player } from '../types/player.type';
 import { Team, Teams } from '../types/team.type';
 
 // Standard API response format with generic data payload
@@ -64,4 +67,22 @@ export interface SecurityHeaders {
   readonly 'X-Frame-Options': string;
   readonly 'X-XSS-Protection': string;
   readonly 'Strict-Transport-Security': string;
+}
+
+// Player handler response type
+export interface PlayerHandlerResponse {
+  readonly getAllPlayers: () => TaskEither<APIError, Player[]>;
+  readonly getPlayerById: (req: Request) => TaskEither<APIError, Player>;
+}
+
+// Player value handler response type
+export interface PlayerValueHandlerResponse {
+  readonly getAllPlayerValues: () => TaskEither<APIError, PlayerValue[]>;
+  readonly getPlayerValueById: (req: Request) => TaskEither<APIError, PlayerValue>;
+}
+
+// Player stat handler response type
+export interface PlayerStatHandlerResponse {
+  readonly getAllPlayerStats: () => TaskEither<APIError, PlayerStat[]>;
+  readonly getPlayerStatById: (req: Request) => TaskEither<APIError, PlayerStat>;
 }

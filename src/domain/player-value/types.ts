@@ -6,6 +6,7 @@
 
 import * as TE from 'fp-ts/TaskEither';
 import { CachePrefix } from 'src/config/cache/cache.config';
+import { ValueChangeType } from 'src/types/base.type';
 import { APIError, CacheError, DomainError } from 'src/types/error.type';
 import {
   PlayerValue,
@@ -20,7 +21,8 @@ import { BootstrapApi } from '../bootstrap/types';
  */
 export interface PlayerValueDataProvider {
   readonly getOne: (id: number) => Promise<PlayerValue | null>;
-  readonly getAll: () => Promise<readonly PlayerValue[]>;
+  readonly getAll: () => Promise<PlayerValues>;
+  readonly getByChangeDate: (changeDate: string) => Promise<PlayerValues>;
 }
 
 /**
@@ -35,27 +37,29 @@ export interface PlayerValueCacheConfig {
  * Player value cache interface
  */
 export interface PlayerValueCache {
-  readonly warmUp: () => TE.TaskEither<CacheError, void>;
-  readonly cachePlayerValue: (playerValue: PlayerValue) => TE.TaskEither<CacheError, void>;
-  readonly cachePlayerValues: (
-    playerValues: readonly PlayerValue[],
-  ) => TE.TaskEither<CacheError, void>;
-  readonly getPlayerValue: (id: string) => TE.TaskEither<CacheError, PlayerValue | null>;
-  readonly getAllPlayerValues: () => TE.TaskEither<CacheError, readonly PlayerValue[]>;
+  readonly findByChangeDate: (changeDate: string) => TE.TaskEither<CacheError, PlayerValues>;
 }
 
 /**
  * Player value operations interface for domain logic
  */
 export interface PlayerValueOperations {
-  readonly getAllPlayerValues: () => TE.TaskEither<DomainError, PlayerValues>;
-  readonly getPlayerValueById: (
-    id: PlayerValueId,
-  ) => TE.TaskEither<DomainError, PlayerValue | null>;
+  readonly getPlayerValueByChangeDate: (
+    changeDate: string,
+  ) => TE.TaskEither<DomainError, PlayerValues>;
+  readonly getPlayerValueByElementId: (
+    elementId: number,
+  ) => TE.TaskEither<DomainError, PlayerValues>;
+  readonly getPlayerValueByElementType: (
+    elementType: number,
+  ) => TE.TaskEither<DomainError, PlayerValues>;
+  readonly getPlayerValueByEventId: (eventId: number) => TE.TaskEither<DomainError, PlayerValues>;
+  readonly getPlayerValueByChangeType: (
+    changeType: ValueChangeType,
+  ) => TE.TaskEither<DomainError, PlayerValues>;
   readonly createPlayerValues: (
     playerValues: PlayerValues,
   ) => TE.TaskEither<DomainError, PlayerValues>;
-  readonly deleteAll: () => TE.TaskEither<DomainError, void>;
 }
 
 /**

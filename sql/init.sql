@@ -101,7 +101,6 @@ CREATE TABLE "player_values" (
 CREATE UNIQUE INDEX "unique_player_value" ON "player_values" ("element_id", "change_date");
 CREATE INDEX "idx_player_values_element_id" ON "player_values" ("element_id");
 CREATE INDEX "idx_player_values_change_date" ON "player_values" ("change_date");
-CREATE INDEX "idx_player_values_event_id" ON "player_values" ("event_id");
 CREATE INDEX "idx_player_values_element_type" ON "player_values" ("element_type");
 ALTER TABLE "player_values" ENABLE ROW LEVEL SECURITY;
 

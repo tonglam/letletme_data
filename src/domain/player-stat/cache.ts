@@ -58,22 +58,27 @@ export const createPlayerStatCache = (
   config: PlayerStatCacheConfig = {
     keyPrefix: CachePrefix.PLAYER_STAT,
     season: getCurrentSeason(),
+    eventId: 0,
   },
 ): PlayerStatCache => {
-  const { keyPrefix, season } = config;
-  const baseKey = `${keyPrefix}::${season}`;
+  const { keyPrefix, season, eventId } = config;
+  const getCacheKey = (targetEventId: number) => `${keyPrefix}::${season}::${targetEventId}`;
 
-  const warmUp = (): TE.TaskEither<CacheError, void> =>
+  const warmUp = (targetEventId: number = eventId): TE.TaskEither<CacheError, void> =>
     pipe(
       TE.tryCatch(
         async () => {
-          const playerStats = await dataProvider.getAll();
+          const playerStats = await dataProvider.getAllByEvent(targetEventId);
           const multi = redisClient.multi();
-          multi.del(baseKey);
+          multi.del(getCacheKey(targetEventId));
           await multi.exec();
           const cacheMulti = redisClient.multi();
-          playerStats.forEach((playerStat) => {
-            cacheMulti.hset(baseKey, playerStat.id.toString(), JSON.stringify(playerStat));
+          playerStats.forEach((playerStat: PlayerStat) => {
+            cacheMulti.hset(
+              getCacheKey(targetEventId),
+              `${playerStat.elementId}_${targetEventId}`,
+              JSON.stringify(playerStat),
+            );
           });
           await cacheMulti.exec();
         },
@@ -86,10 +91,18 @@ export const createPlayerStatCache = (
       ),
     );
 
-  const cachePlayerStat = (playerStat: PlayerStat): TE.TaskEither<CacheError, void> =>
+  const cachePlayerStat = (
+    playerStat: PlayerStat,
+    targetEventId: number = eventId,
+  ): TE.TaskEither<CacheError, void> =>
     pipe(
       TE.tryCatch(
-        () => redisClient.hset(baseKey, playerStat.id.toString(), JSON.stringify(playerStat)),
+        () =>
+          redisClient.hset(
+            getCacheKey(targetEventId),
+            `${playerStat.elementId}_${targetEventId}`,
+            JSON.stringify(playerStat),
+          ),
         (error: unknown) =>
           createCacheError({
             code: CacheErrorCode.OPERATION_ERROR,
@@ -100,17 +113,24 @@ export const createPlayerStatCache = (
       TE.map(() => undefined),
     );
 
-  const cachePlayerStats = (playerStats: readonly PlayerStat[]): TE.TaskEither<CacheError, void> =>
+  const cachePlayerStats = (
+    playerStats: readonly PlayerStat[],
+    targetEventId: number = eventId,
+  ): TE.TaskEither<CacheError, void> =>
     pipe(
       TE.tryCatch(
         async () => {
           if (playerStats.length === 0) return;
           const multi = redisClient.multi();
-          multi.del(baseKey);
+          multi.del(getCacheKey(targetEventId));
           await multi.exec();
           const cacheMulti = redisClient.multi();
-          playerStats.forEach((playerStat) => {
-            cacheMulti.hset(baseKey, playerStat.id.toString(), JSON.stringify(playerStat));
+          playerStats.forEach((playerStat: PlayerStat) => {
+            cacheMulti.hset(
+              getCacheKey(targetEventId),
+              `${playerStat.elementId}_${targetEventId}`,
+              JSON.stringify(playerStat),
+            );
           });
           await cacheMulti.exec();
         },
@@ -123,10 +143,13 @@ export const createPlayerStatCache = (
       ),
     );
 
-  const getPlayerStat = (id: string): TE.TaskEither<CacheError, PlayerStat | null> =>
+  const getPlayerStat = (
+    id: string,
+    targetEventId: number = eventId,
+  ): TE.TaskEither<CacheError, PlayerStat | null> =>
     pipe(
       TE.tryCatch(
-        () => redisClient.hget(baseKey, id),
+        () => redisClient.hget(getCacheKey(targetEventId), `${id}_${targetEventId}`),
         (error: unknown) =>
           createCacheError({
             code: CacheErrorCode.OPERATION_ERROR,
@@ -141,7 +164,7 @@ export const createPlayerStatCache = (
             () =>
               pipe(
                 TE.tryCatch(
-                  () => dataProvider.getOne(Number(id)),
+                  () => dataProvider.getOneByEvent(Number(id), targetEventId),
                   (error: unknown) =>
                     createCacheError({
                       code: CacheErrorCode.OPERATION_ERROR,
@@ -149,8 +172,9 @@ export const createPlayerStatCache = (
                       cause: error as Error,
                     }),
                 ),
+                TE.chain((playerStat) => TE.right(playerStat)),
                 TE.chainFirst((playerStat) =>
-                  playerStat ? cachePlayerStat(playerStat) : TE.right(undefined),
+                  playerStat ? cachePlayerStat(playerStat, targetEventId) : TE.right(undefined),
                 ),
               ),
             (playerStatStr) =>
@@ -162,7 +186,7 @@ export const createPlayerStatCache = (
                     ? TE.right(playerStat)
                     : pipe(
                         TE.tryCatch(
-                          () => dataProvider.getOne(Number(id)),
+                          () => dataProvider.getOneByEvent(Number(id), targetEventId),
                           (error: unknown) =>
                             createCacheError({
                               code: CacheErrorCode.OPERATION_ERROR,
@@ -170,8 +194,11 @@ export const createPlayerStatCache = (
                               cause: error as Error,
                             }),
                         ),
+                        TE.chain((playerStat) => TE.right(playerStat)),
                         TE.chainFirst((playerStat) =>
-                          playerStat ? cachePlayerStat(playerStat) : TE.right(undefined),
+                          playerStat
+                            ? cachePlayerStat(playerStat, targetEventId)
+                            : TE.right(undefined),
                         ),
                       ),
                 ),
@@ -181,10 +208,12 @@ export const createPlayerStatCache = (
       ),
     );
 
-  const getAllPlayerStats = (): TE.TaskEither<CacheError, readonly PlayerStat[]> =>
+  const getAllPlayerStats = (
+    targetEventId: number = eventId,
+  ): TE.TaskEither<CacheError, readonly PlayerStat[]> =>
     pipe(
       TE.tryCatch(
-        () => redisClient.hgetall(baseKey),
+        () => redisClient.hgetall(getCacheKey(targetEventId)),
         (error: unknown) =>
           createCacheError({
             code: CacheErrorCode.OPERATION_ERROR,
@@ -199,7 +228,7 @@ export const createPlayerStatCache = (
             () =>
               pipe(
                 TE.tryCatch(
-                  () => dataProvider.getAll(),
+                  () => dataProvider.getAllByEvent(targetEventId),
                   (error: unknown) =>
                     createCacheError({
                       code: CacheErrorCode.OPERATION_ERROR,
@@ -207,9 +236,10 @@ export const createPlayerStatCache = (
                       cause: error as Error,
                     }),
                 ),
-                TE.chain((playerStats) =>
+                TE.chain((playerStats) => TE.right(playerStats as readonly PlayerStat[])),
+                TE.chainFirst((playerStats) =>
                   pipe(
-                    cachePlayerStats(playerStats),
+                    cachePlayerStats(playerStats, targetEventId),
                     TE.map(() => playerStats),
                   ),
                 ),
@@ -223,7 +253,7 @@ export const createPlayerStatCache = (
                     ? TE.right(playerStats)
                     : pipe(
                         TE.tryCatch(
-                          () => dataProvider.getAll(),
+                          () => dataProvider.getAllByEvent(targetEventId),
                           (error: unknown) =>
                             createCacheError({
                               code: CacheErrorCode.OPERATION_ERROR,
@@ -231,9 +261,10 @@ export const createPlayerStatCache = (
                               cause: error as Error,
                             }),
                         ),
-                        TE.chain((playerStats) =>
+                        TE.chain((playerStats) => TE.right(playerStats as readonly PlayerStat[])),
+                        TE.chainFirst((playerStats) =>
                           pipe(
-                            cachePlayerStats(playerStats),
+                            cachePlayerStats(playerStats, targetEventId),
                             TE.map(() => playerStats),
                           ),
                         ),

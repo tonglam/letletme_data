@@ -5,72 +5,51 @@
  */
 
 import * as TE from 'fp-ts/TaskEither';
-import { CachePrefix } from 'src/config/cache/cache.config';
-import { APIError, CacheError, DomainError } from 'src/types/error.type';
-import {
-  PlayerStat,
-  PlayerStatId,
-  PlayerStatRepository,
-  PlayerStats,
-} from 'src/types/player-stat.type';
-import { BootstrapApi } from '../bootstrap/types';
+import type { CacheError, DomainError } from '../../types/error.type';
+import type { PlayerStat, PlayerStatId, PlayerStats } from '../../types/player-stat.type';
 
 /**
  * Player stat data provider interface
  */
 export interface PlayerStatDataProvider {
-  readonly getOne: (id: number) => Promise<PlayerStat | null>;
-  readonly getAll: () => Promise<readonly PlayerStat[]>;
+  getOneByEvent: (id: number, eventId: number) => Promise<PlayerStat | null>;
+  getAllByEvent: (eventId: number) => Promise<PlayerStat[]>;
 }
 
 /**
  * Player stat cache configuration interface
  */
 export interface PlayerStatCacheConfig {
-  readonly keyPrefix: (typeof CachePrefix)[keyof typeof CachePrefix];
-  readonly season: string;
+  keyPrefix: string;
+  season: string;
+  eventId: number;
 }
 
 /**
  * Player stat cache interface
  */
 export interface PlayerStatCache {
-  readonly warmUp: () => TE.TaskEither<CacheError, void>;
-  readonly cachePlayerStat: (playerStat: PlayerStat) => TE.TaskEither<CacheError, void>;
-  readonly cachePlayerStats: (
+  warmUp: (eventId?: number) => TE.TaskEither<CacheError, void>;
+  cachePlayerStat: (playerStat: PlayerStat, eventId?: number) => TE.TaskEither<CacheError, void>;
+  cachePlayerStats: (
     playerStats: readonly PlayerStat[],
+    eventId?: number,
   ) => TE.TaskEither<CacheError, void>;
-  readonly getPlayerStat: (id: string) => TE.TaskEither<CacheError, PlayerStat | null>;
-  readonly getAllPlayerStats: () => TE.TaskEither<CacheError, readonly PlayerStat[]>;
+  getPlayerStat: (id: string, eventId?: number) => TE.TaskEither<CacheError, PlayerStat | null>;
+  getAllPlayerStats: (eventId?: number) => TE.TaskEither<CacheError, readonly PlayerStat[]>;
 }
 
 /**
- * Player stat operations interface for domain logic
+ * Player stat operations interface
  */
 export interface PlayerStatOperations {
   readonly getAllPlayerStats: () => TE.TaskEither<DomainError, PlayerStats>;
   readonly getPlayerStatById: (id: PlayerStatId) => TE.TaskEither<DomainError, PlayerStat | null>;
+  readonly getPlayerStatByEventId: (eventId: number) => TE.TaskEither<DomainError, PlayerStats>;
+  readonly getPlayerStatByElementId: (elementId: number) => TE.TaskEither<DomainError, PlayerStats>;
+  readonly getPlayerStatByTeamId: (teamId: number) => TE.TaskEither<DomainError, PlayerStats>;
   readonly createPlayerStats: (playerStats: PlayerStats) => TE.TaskEither<DomainError, PlayerStats>;
   readonly deleteAll: () => TE.TaskEither<DomainError, void>;
-}
-
-/**
- * Service interface for Player Stat operations
- */
-export interface PlayerStatService {
-  readonly getPlayerStats: () => TE.TaskEither<APIError, PlayerStats>;
-  readonly getPlayerStat: (id: PlayerStatId) => TE.TaskEither<APIError, PlayerStat | null>;
-  readonly savePlayerStats: (playerStats: PlayerStats) => TE.TaskEither<APIError, PlayerStats>;
-  readonly syncPlayerStatsFromApi: () => TE.TaskEither<APIError, PlayerStats>;
-}
-
-/**
- * Dependencies required by the PlayerStatService
- */
-export interface PlayerStatServiceDependencies {
-  bootstrapApi: BootstrapApi;
-  playerStatCache: PlayerStatCache;
-  playerStatRepository: PlayerStatRepository;
 }
 
 export * from '../../types/player-stat.type';

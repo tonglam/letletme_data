@@ -14,6 +14,7 @@ describe('Player Stat Cache Tests', () => {
   let testPlayerStats: PlayerStat[];
   const TEST_PREFIX = CachePrefix.PLAYER_STAT;
   const TEST_SEASON = '2425';
+  const TEST_EVENT_ID = 1;
 
   beforeAll(() => {
     // Convert bootstrap players to domain player stats with valid IDs
@@ -26,7 +27,7 @@ describe('Player Stat Cache Tests', () => {
         }),
       );
       return {
-        ...toDomainPlayerStat(player as ElementResponse),
+        ...toDomainPlayerStat(player as ElementResponse, TEST_EVENT_ID),
         id,
       };
     });
@@ -86,12 +87,13 @@ describe('Player Stat Cache Tests', () => {
       const playerStatCache = createPlayerStatCache(
         redis,
         {
-          getOne: async () => null,
-          getAll: async () => [],
+          getOneByEvent: async () => null,
+          getAllByEvent: async () => [],
         },
         {
           keyPrefix: TEST_PREFIX,
           season: TEST_SEASON,
+          eventId: TEST_EVENT_ID,
         },
       );
 
@@ -111,12 +113,13 @@ describe('Player Stat Cache Tests', () => {
       const playerStatCache = createPlayerStatCache(
         redis,
         {
-          getOne: async () => null,
-          getAll: async () => [],
+          getOneByEvent: async () => null,
+          getAllByEvent: async () => [],
         },
         {
           keyPrefix: TEST_PREFIX,
           season: TEST_SEASON,
+          eventId: TEST_EVENT_ID,
         },
       );
 
@@ -135,16 +138,19 @@ describe('Player Stat Cache Tests', () => {
       const redis = createRedisCache<PlayerStat>({ keyPrefix: TEST_PREFIX });
       const testPlayerStat = testPlayerStats[0];
       const mockDataProvider = {
-        getOne: jest.fn().mockImplementation(async (id: number) => {
-          const playerStat = testPlayerStats.find((e) => e.elementId === id);
+        getOneByEvent: jest.fn().mockImplementation(async (id: number, eventId: number) => {
+          const playerStat = testPlayerStats.find(
+            (e) => e.elementId === id && e.eventId === eventId,
+          );
           return playerStat || null;
         }),
-        getAll: jest.fn().mockImplementation(async () => testPlayerStats),
+        getAllByEvent: jest.fn().mockImplementation(async () => testPlayerStats),
       };
 
       const playerStatCache = createPlayerStatCache(redis, mockDataProvider, {
         keyPrefix: TEST_PREFIX,
         season: TEST_SEASON,
+        eventId: TEST_EVENT_ID,
       });
 
       // Test cache miss for single player stat
@@ -152,7 +158,7 @@ describe('Player Stat Cache Tests', () => {
       expect(E.isRight(getResult)).toBe(true);
       if (E.isRight(getResult) && getResult.right) {
         expect(comparePlayerStat(getResult.right, testPlayerStat)).toBe(true);
-        expect(mockDataProvider.getOne).toHaveBeenCalled();
+        expect(mockDataProvider.getOneByEvent).toHaveBeenCalled();
       }
 
       // Test cache miss for all player stats
@@ -161,20 +167,21 @@ describe('Player Stat Cache Tests', () => {
       if (E.isRight(getAllResult) && getAllResult.right) {
         const cachedPlayerStats = getAllResult.right;
         expect(comparePlayerStatArrays(cachedPlayerStats, testPlayerStats)).toBe(true);
-        expect(mockDataProvider.getAll).toHaveBeenCalled();
+        expect(mockDataProvider.getAllByEvent).toHaveBeenCalled();
       }
     });
 
     it('should handle error cases gracefully', async () => {
       const redis = createRedisCache<PlayerStat>({ keyPrefix: TEST_PREFIX });
       const mockDataProvider = {
-        getOne: jest.fn().mockRejectedValue(new Error('Data provider error')),
-        getAll: jest.fn().mockRejectedValue(new Error('Data provider error')),
+        getOneByEvent: jest.fn().mockRejectedValue(new Error('Data provider error')),
+        getAllByEvent: jest.fn().mockRejectedValue(new Error('Data provider error')),
       };
 
       const playerStatCache = createPlayerStatCache(redis, mockDataProvider, {
         keyPrefix: TEST_PREFIX,
         season: TEST_SEASON,
+        eventId: TEST_EVENT_ID,
       });
 
       // Test error handling for single player stat
@@ -189,13 +196,14 @@ describe('Player Stat Cache Tests', () => {
     it('should warm up cache with initial data', async () => {
       const redis = createRedisCache<PlayerStat>({ keyPrefix: TEST_PREFIX });
       const mockDataProvider = {
-        getOne: jest.fn().mockResolvedValue(null),
-        getAll: jest.fn().mockResolvedValue(testPlayerStats),
+        getOneByEvent: jest.fn().mockResolvedValue(null),
+        getAllByEvent: jest.fn().mockResolvedValue(testPlayerStats),
       };
 
       const playerStatCache = createPlayerStatCache(redis, mockDataProvider, {
         keyPrefix: TEST_PREFIX,
         season: TEST_SEASON,
+        eventId: TEST_EVENT_ID,
       });
 
       const warmUpResult = await pipe(playerStatCache.warmUp())();
@@ -213,12 +221,13 @@ describe('Player Stat Cache Tests', () => {
       const playerStatCache = createPlayerStatCache(
         redis,
         {
-          getOne: async () => null,
-          getAll: async () => [],
+          getOneByEvent: async () => null,
+          getAllByEvent: async () => [],
         },
         {
           keyPrefix: TEST_PREFIX,
           season: TEST_SEASON,
+          eventId: TEST_EVENT_ID,
         },
       );
 
@@ -234,18 +243,19 @@ describe('Player Stat Cache Tests', () => {
       const playerStatCache = createPlayerStatCache(
         redis,
         {
-          getOne: async () => null,
-          getAll: async () => [],
+          getOneByEvent: async () => null,
+          getAllByEvent: async () => [],
         },
         {
           keyPrefix: TEST_PREFIX,
           season: TEST_SEASON,
+          eventId: TEST_EVENT_ID,
         },
       );
 
       // Store malformed data directly in Redis
       await redisClient.hset(
-        `${TEST_PREFIX}::${TEST_SEASON}`,
+        `${TEST_PREFIX}::${TEST_SEASON}::${TEST_EVENT_ID}`,
         'invalid',
         JSON.stringify({ invalid: 'data' }),
       );
@@ -262,12 +272,13 @@ describe('Player Stat Cache Tests', () => {
       const playerStatCache = createPlayerStatCache(
         redis,
         {
-          getOne: async () => null,
-          getAll: async () => [],
+          getOneByEvent: async () => null,
+          getAllByEvent: async () => [],
         },
         {
           keyPrefix: TEST_PREFIX,
           season: TEST_SEASON,
+          eventId: TEST_EVENT_ID,
         },
       );
 
@@ -284,6 +295,125 @@ describe('Player Stat Cache Tests', () => {
       if (E.isRight(getResult)) {
         expect(comparePlayerStatArrays(getResult.right, testPlayerStats)).toBe(true);
       }
+    });
+
+    it('should handle event-specific caching', async () => {
+      const redis = createRedisCache<PlayerStat>({ keyPrefix: TEST_PREFIX });
+      const mockDataProvider = {
+        getOneByEvent: jest.fn().mockImplementation(async (id: number, eventId: number) => {
+          const playerStat = testPlayerStats.find(
+            (e) => e.elementId === id && e.eventId === eventId,
+          );
+          return playerStat || null;
+        }),
+        getAllByEvent: jest
+          .fn()
+          .mockImplementation(async (eventId: number) =>
+            testPlayerStats.filter((stat) => stat.eventId === eventId),
+          ),
+      };
+
+      const playerStatCache = createPlayerStatCache(redis, mockDataProvider, {
+        keyPrefix: TEST_PREFIX,
+        season: TEST_SEASON,
+        eventId: TEST_EVENT_ID,
+      });
+
+      // Cache player stats for specific event
+      const testEventStats = testPlayerStats.map((stat) => ({ ...stat, eventId: TEST_EVENT_ID }));
+      const cacheResult = await pipe(
+        playerStatCache.cachePlayerStats(testEventStats, TEST_EVENT_ID),
+      )();
+      expect(E.isRight(cacheResult)).toBe(true);
+
+      // Get player stats for the specific event
+      const getResult = await pipe(playerStatCache.getAllPlayerStats(TEST_EVENT_ID))();
+      expect(E.isRight(getResult)).toBe(true);
+      if (E.isRight(getResult) && getResult.right) {
+        expect(comparePlayerStatArrays(getResult.right, testEventStats)).toBe(true);
+      }
+
+      // Verify different event returns empty and triggers data provider
+      const differentEventId = TEST_EVENT_ID + 1;
+      const differentEventResult = await pipe(
+        playerStatCache.getAllPlayerStats(differentEventId),
+      )();
+      expect(E.isRight(differentEventResult)).toBe(true);
+      expect(mockDataProvider.getAllByEvent).toHaveBeenCalledWith(differentEventId);
+    });
+
+    it('should handle event-specific player stat retrieval', async () => {
+      const redis = createRedisCache<PlayerStat>({ keyPrefix: TEST_PREFIX });
+      const testPlayerStat = { ...testPlayerStats[0], eventId: TEST_EVENT_ID };
+      const mockDataProvider = {
+        getOneByEvent: jest.fn().mockImplementation(async (id: number, eventId: number) => {
+          return testPlayerStat.elementId === id && testPlayerStat.eventId === eventId
+            ? testPlayerStat
+            : null;
+        }),
+        getAllByEvent: jest.fn().mockImplementation(async () => []),
+      };
+
+      const playerStatCache = createPlayerStatCache(redis, mockDataProvider, {
+        keyPrefix: TEST_PREFIX,
+        season: TEST_SEASON,
+        eventId: TEST_EVENT_ID,
+      });
+
+      // Cache a player stat for specific event
+      const cacheResult = await pipe(
+        playerStatCache.cachePlayerStat(testPlayerStat, TEST_EVENT_ID),
+      )();
+      expect(E.isRight(cacheResult)).toBe(true);
+
+      // Get the player stat for the specific event
+      const getResult = await pipe(
+        playerStatCache.getPlayerStat(testPlayerStat.elementId.toString(), TEST_EVENT_ID),
+      )();
+      expect(E.isRight(getResult)).toBe(true);
+      if (E.isRight(getResult) && getResult.right) {
+        expect(comparePlayerStat(getResult.right, testPlayerStat)).toBe(true);
+      }
+
+      // Verify different event triggers data provider
+      const differentEventId = TEST_EVENT_ID + 1;
+      const differentEventResult = await pipe(
+        playerStatCache.getPlayerStat(testPlayerStat.elementId.toString(), differentEventId),
+      )();
+      expect(E.isRight(differentEventResult)).toBe(true);
+      expect(mockDataProvider.getOneByEvent).toHaveBeenCalledWith(
+        testPlayerStat.elementId,
+        differentEventId,
+      );
+    });
+
+    it('should warm up cache for specific event', async () => {
+      const redis = createRedisCache<PlayerStat>({ keyPrefix: TEST_PREFIX });
+      const testEventStats = testPlayerStats.map((stat) => ({ ...stat, eventId: TEST_EVENT_ID }));
+      const mockDataProvider = {
+        getOneByEvent: jest.fn().mockResolvedValue(null),
+        getAllByEvent: jest
+          .fn()
+          .mockImplementation(async (eventId: number) =>
+            eventId === TEST_EVENT_ID ? testEventStats : [],
+          ),
+      };
+
+      const playerStatCache = createPlayerStatCache(redis, mockDataProvider, {
+        keyPrefix: TEST_PREFIX,
+        season: TEST_SEASON,
+        eventId: TEST_EVENT_ID,
+      });
+
+      const warmUpResult = await pipe(playerStatCache.warmUp(TEST_EVENT_ID))();
+      expect(E.isRight(warmUpResult)).toBe(true);
+
+      const getResult = await pipe(playerStatCache.getAllPlayerStats(TEST_EVENT_ID))();
+      expect(E.isRight(getResult)).toBe(true);
+      if (E.isRight(getResult) && getResult.right) {
+        expect(comparePlayerStatArrays(getResult.right, testEventStats)).toBe(true);
+      }
+      expect(mockDataProvider.getAllByEvent).toHaveBeenCalledWith(TEST_EVENT_ID);
     });
   });
 });

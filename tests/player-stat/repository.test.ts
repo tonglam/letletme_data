@@ -184,5 +184,100 @@ describe('Player Stat Repository Tests', () => {
       const saveResult = await pipe(repository.save(invalidPrismaPlayerStat))();
       expect(E.isLeft(saveResult)).toBe(true);
     });
+
+    it('should find player stats by event ID', async () => {
+      const repository = createPlayerStatRepository(prisma);
+      const testEventId = testPrismaPlayerStats[0].eventId;
+
+      // Save multiple player stats
+      await pipe(repository.saveBatch(testPrismaPlayerStats))();
+
+      const findResult = await pipe(repository.findByEventId(testEventId))();
+      expect(E.isRight(findResult)).toBe(true);
+      if (E.isRight(findResult) && findResult.right) {
+        const matchingStats = testPrismaPlayerStats.filter((stat) => stat.eventId === testEventId);
+        expect(findResult.right.length).toBe(matchingStats.length);
+        // Verify each stat exists by checking unique identifiers
+        matchingStats.forEach((expected) => {
+          const found = findResult.right.some((actual) => comparePlayerStat(actual, expected));
+          expect(found).toBe(true);
+        });
+      }
+    });
+
+    it('should find player stats by element ID', async () => {
+      const repository = createPlayerStatRepository(prisma);
+      const testElementId = testPrismaPlayerStats[0].elementId;
+
+      // Save multiple player stats
+      await pipe(repository.saveBatch(testPrismaPlayerStats))();
+
+      const findResult = await pipe(repository.findByElementId(testElementId))();
+      expect(E.isRight(findResult)).toBe(true);
+      if (E.isRight(findResult) && findResult.right) {
+        const matchingStats = testPrismaPlayerStats.filter(
+          (stat) => stat.elementId === testElementId,
+        );
+        expect(findResult.right.length).toBe(matchingStats.length);
+        // Verify each stat exists by checking unique identifiers
+        matchingStats.forEach((expected) => {
+          const found = findResult.right.some((actual) => comparePlayerStat(actual, expected));
+          expect(found).toBe(true);
+        });
+      }
+    });
+
+    it('should find player stats by team ID', async () => {
+      const repository = createPlayerStatRepository(prisma);
+      const testTeamId = testPrismaPlayerStats[0].teamId;
+
+      // Save multiple player stats
+      await pipe(repository.saveBatch(testPrismaPlayerStats))();
+
+      const findResult = await pipe(repository.findByTeamId(testTeamId))();
+      expect(E.isRight(findResult)).toBe(true);
+      if (E.isRight(findResult) && findResult.right) {
+        const matchingStats = testPrismaPlayerStats.filter((stat) => stat.teamId === testTeamId);
+        expect(findResult.right.length).toBe(matchingStats.length);
+        // Verify each stat exists by checking unique identifiers
+        matchingStats.forEach((expected) => {
+          const found = findResult.right.some((actual) => comparePlayerStat(actual, expected));
+          expect(found).toBe(true);
+        });
+      }
+    });
+
+    it('should return empty array when finding by non-existent event ID', async () => {
+      const repository = createPlayerStatRepository(prisma);
+      const nonExistentEventId = 999999;
+
+      const findResult = await pipe(repository.findByEventId(nonExistentEventId))();
+      expect(E.isRight(findResult)).toBe(true);
+      if (E.isRight(findResult)) {
+        expect(findResult.right).toEqual([]);
+      }
+    });
+
+    it('should return empty array when finding by non-existent element ID', async () => {
+      const repository = createPlayerStatRepository(prisma);
+      const nonExistentElementId = 999999;
+
+      const findResult = await pipe(repository.findByElementId(nonExistentElementId))();
+      expect(E.isRight(findResult)).toBe(true);
+      if (E.isRight(findResult)) {
+        expect(findResult.right).toEqual([]);
+      }
+    });
+
+    it('should return empty array when finding by non-existent team ID', async () => {
+      const repository = createPlayerStatRepository(prisma);
+      const nonExistentTeamId = 999999;
+
+      const findResult = await pipe(repository.findByTeamId(nonExistentTeamId))();
+      expect(E.isRight(findResult)).toBe(true);
+      if (E.isRight(findResult)) {
+        expect(findResult.right).toEqual([]);
+      }
+    });
   });
 });

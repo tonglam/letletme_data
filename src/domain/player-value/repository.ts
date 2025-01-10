@@ -87,6 +87,26 @@ export const createPlayerValueRepository = (prisma: PrismaClient): PlayerValueRe
       ),
     ),
 
+  findByElementId: (elementId: number) =>
+    pipe(
+      TE.tryCatch(
+        () =>
+          prisma.playerValue.findMany({
+            where: {
+              elementId,
+            },
+            orderBy: {
+              changeDate: 'desc',
+            },
+          }),
+        (error) =>
+          createDBError({
+            code: DBErrorCode.QUERY_ERROR,
+            message: `Failed to fetch player values by element id ${elementId}: ${error}`,
+          }),
+      ),
+    ),
+
   findByElementType: (elementType: number) =>
     pipe(
       TE.tryCatch(

@@ -1,9 +1,24 @@
 import { Prisma } from '@prisma/client';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
+import * as TE from 'fp-ts/TaskEither';
+import type { EventOperations } from '../../src/domain/event/types';
+import { createPlayerStatOperations } from '../../src/domain/player-stat/operation';
 import { toDomainPlayerStat, toPrismaPlayerStat } from '../../src/domain/player-stat/types';
 import type { ElementResponse } from '../../src/types/element.type';
-import type { PlayerStat } from '../../src/types/player-stat.type';
+import {
+  CacheErrorCode,
+  createCacheError,
+  createDBError,
+  DBErrorCode,
+  DomainErrorCode,
+} from '../../src/types/error.type';
+import type { Event } from '../../src/types/event.type';
+import type {
+  PlayerStat,
+  PlayerStatRepository,
+  PrismaPlayerStat,
+} from '../../src/types/player-stat.type';
 import { validatePlayerStatId } from '../../src/types/player-stat.type';
 import bootstrapData from '../data/bootstrap.json';
 
@@ -295,6 +310,224 @@ describe('Player Stat Domain Tests', () => {
       expect(playerStat.elementId).toBeGreaterThan(0);
       expect(playerStat.teamId).toBeGreaterThan(0);
       expect(playerStat.eventId).toBeGreaterThan(0);
+    });
+
+    it('should handle event-specific operations', () => {
+      const playerStat = testPlayerStats[0];
+      const testEventId = 1;
+
+      // Verify event ID is properly set
+      expect(playerStat.eventId).toBe(testEventId);
+
+      // Verify event-specific fields are properly handled
+      if (playerStat.expectedGoals) {
+        expect(playerStat.expectedGoalsPer90).toBeDefined();
+      }
+      if (playerStat.expectedAssists) {
+        expect(playerStat.expectedAssistsPer90).toBeDefined();
+      }
+      if (playerStat.expectedGoalInvolvements) {
+        expect(playerStat.expectedGoalInvolvementsPer90).toBeDefined();
+      }
+      if (playerStat.saves) {
+        expect(playerStat.savesPer90).toBeDefined();
+      }
+    });
+
+    it('should handle element-specific operations', () => {
+      const playerStat = testPlayerStats[0];
+
+      // Verify element ID is properly set
+      expect(playerStat.elementId).toBeGreaterThan(0);
+
+      // Verify element-specific fields
+      expect(playerStat.form).toBeDefined();
+      expect(playerStat.influence).toBeDefined();
+      expect(playerStat.creativity).toBeDefined();
+      expect(playerStat.threat).toBeDefined();
+      expect(playerStat.ictIndex).toBeDefined();
+    });
+
+    it('should handle team-specific operations', () => {
+      const playerStat = testPlayerStats[0];
+
+      // Verify team ID is properly set
+      expect(playerStat.teamId).toBeGreaterThan(0);
+
+      // Verify team-specific fields
+      expect(playerStat.minutes).toBeDefined();
+      expect(playerStat.starts).toBeDefined();
+      expect(playerStat.cleanSheets).toBeDefined();
+      expect(playerStat.goalsConceded).toBeDefined();
+    });
+
+    it('should validate ID format for different operations', () => {
+      const playerStat = testPlayerStats[0];
+      const idParts = playerStat.id.split('_');
+
+      // Verify ID format for event operations
+      expect(idParts).toHaveLength(2);
+      expect(Number(idParts[0])).toBeGreaterThan(0); // element ID part
+      expect(idParts[1]).toMatch(/^\d{4}-\d{2}-\d{2}$/); // date part
+    });
+  });
+
+  describe('Domain Operations', () => {
+    const mockCache = {
+      warmUp: jest.fn().mockReturnValue(TE.right(undefined)),
+      cachePlayerStat: jest.fn().mockReturnValue(TE.right(undefined)),
+      cachePlayerStats: jest.fn().mockReturnValue(TE.right(undefined)),
+      getPlayerStat: jest.fn().mockReturnValue(TE.right(null)),
+      getAllPlayerStats: jest.fn().mockReturnValue(TE.right([])),
+    };
+
+    const mockRepository: PlayerStatRepository = {
+      findAll: jest.fn().mockReturnValue(TE.right([] as PrismaPlayerStat[])),
+      findById: jest.fn().mockReturnValue(TE.right(null)),
+      findByIds: jest.fn().mockReturnValue(TE.right([] as PrismaPlayerStat[])),
+      findByEventId: jest.fn().mockReturnValue(TE.right([] as PrismaPlayerStat[])),
+      findByElementId: jest.fn().mockReturnValue(TE.right([] as PrismaPlayerStat[])),
+      findByTeamId: jest.fn().mockReturnValue(TE.right([] as PrismaPlayerStat[])),
+      save: jest.fn().mockReturnValue(TE.right({} as PrismaPlayerStat)),
+      saveBatch: jest.fn().mockReturnValue(TE.right([] as PrismaPlayerStat[])),
+      update: jest.fn().mockReturnValue(TE.right({} as PrismaPlayerStat)),
+      deleteAll: jest.fn().mockReturnValue(TE.right(undefined)),
+      deleteByIds: jest.fn().mockReturnValue(TE.right(undefined)),
+    };
+
+    const mockEventOperations: EventOperations = {
+      getCurrentEvent: jest.fn().mockReturnValue(TE.right({ id: 1 } as Event)),
+      getAllEvents: jest.fn().mockReturnValue(TE.right([] as Event[])),
+      getEventById: jest.fn().mockReturnValue(TE.right(null)),
+      getNextEvent: jest.fn().mockReturnValue(TE.right(null)),
+      createEvents: jest.fn().mockReturnValue(TE.right([] as Event[])),
+      deleteAll: jest.fn().mockReturnValue(TE.right(undefined)),
+    };
+
+    const operations = createPlayerStatOperations(mockRepository, mockCache, mockEventOperations);
+
+    beforeEach(() => {
+      jest.clearAllMocks();
+      (mockEventOperations.getCurrentEvent as jest.Mock).mockReturnValue(
+        TE.right({ id: 1 } as Event),
+      );
+    });
+
+    it('should use cache first when getting player stat by id', async () => {
+      const testPlayerStat = testPlayerStats[0];
+      (mockCache.getPlayerStat as jest.Mock).mockReturnValue(TE.right(testPlayerStat));
+
+      const result = await operations.getPlayerStatById(testPlayerStat.id)();
+      expect(E.isRight(result)).toBe(true);
+      if (E.isRight(result)) {
+        expect(result.right).toEqual(testPlayerStat);
+      }
+      expect(mockCache.getPlayerStat).toHaveBeenCalledWith(testPlayerStat.id.toString(), 1);
+      expect(mockRepository.findById).not.toHaveBeenCalled();
+    });
+
+    it('should use cache first when getting player stats by team id', async () => {
+      const teamId = 1;
+      const teamStats = testPlayerStats.filter((stat) => stat.teamId === teamId);
+      (mockCache.getAllPlayerStats as jest.Mock).mockReturnValue(TE.right(teamStats));
+
+      const result = await operations.getPlayerStatByTeamId(teamId)();
+      expect(E.isRight(result)).toBe(true);
+      if (E.isRight(result)) {
+        expect(result.right).toEqual(teamStats);
+      }
+      expect(mockCache.getAllPlayerStats).toHaveBeenCalledWith(1);
+      expect(mockRepository.findByTeamId).not.toHaveBeenCalled();
+    });
+
+    it('should handle cache errors gracefully', async () => {
+      const testPlayerStat = testPlayerStats[0];
+      (mockCache.getPlayerStat as jest.Mock).mockReturnValue(
+        TE.left(
+          createCacheError({
+            code: CacheErrorCode.OPERATION_ERROR,
+            message: 'Cache error',
+          }),
+        ),
+      );
+
+      const result = await operations.getPlayerStatById(testPlayerStat.id)();
+      expect(E.isLeft(result)).toBe(true);
+      if (E.isLeft(result)) {
+        expect(result.left.code).toBe(DomainErrorCode.CACHE_ERROR);
+      }
+    });
+
+    it('should handle missing current event', async () => {
+      (mockEventOperations.getCurrentEvent as jest.Mock).mockReturnValue(TE.right(null));
+      const testPlayerStat = testPlayerStats[0];
+
+      const result = await operations.getPlayerStatById(testPlayerStat.id)();
+      expect(E.isRight(result)).toBe(true);
+      if (E.isRight(result)) {
+        expect(result.right).toBeNull();
+      }
+      expect(mockCache.getPlayerStat).not.toHaveBeenCalled();
+    });
+
+    it('should create player stats and update cache', async () => {
+      const newStats = testPlayerStats;
+      const prismaStats = newStats.map((stat) => ({
+        ...toPrismaPlayerStat(stat),
+        createdAt: new Date(),
+      }));
+      (mockRepository.saveBatch as jest.Mock).mockReturnValue(TE.right(prismaStats));
+      (mockCache.cachePlayerStats as jest.Mock).mockReturnValue(TE.right(undefined));
+
+      const result = await operations.createPlayerStats(newStats)();
+      expect(E.isRight(result)).toBe(true);
+      if (E.isRight(result)) {
+        expect(result.right).toHaveLength(newStats.length);
+      }
+      expect(mockRepository.saveBatch).toHaveBeenCalled();
+      expect(mockCache.cachePlayerStats).toHaveBeenCalled();
+    });
+
+    it('should handle database errors during creation', async () => {
+      const newStats = testPlayerStats;
+      (mockRepository.saveBatch as jest.Mock).mockReturnValue(
+        TE.left(
+          createDBError({
+            code: DBErrorCode.QUERY_ERROR,
+            message: 'Database error',
+          }),
+        ),
+      );
+
+      const result = await operations.createPlayerStats(newStats)();
+      expect(E.isLeft(result)).toBe(true);
+      if (E.isLeft(result)) {
+        expect(result.left.code).toBe(DomainErrorCode.DATABASE_ERROR);
+      }
+      expect(mockCache.cachePlayerStats).not.toHaveBeenCalled();
+    });
+
+    it('should handle cache errors during creation', async () => {
+      const newStats = testPlayerStats;
+      const prismaStats = newStats.map((stat) => ({
+        ...toPrismaPlayerStat(stat),
+        createdAt: new Date(),
+      }));
+      (mockRepository.saveBatch as jest.Mock).mockReturnValue(TE.right(prismaStats));
+      (mockCache.cachePlayerStats as jest.Mock).mockReturnValue(
+        TE.left(
+          createCacheError({
+            code: CacheErrorCode.OPERATION_ERROR,
+            message: 'Cache error',
+          }),
+        ),
+      );
+
+      const result = await operations.createPlayerStats(newStats)();
+      expect(E.isLeft(result)).toBe(true);
+      if (E.isLeft(result)) {
+        expect(result.left.code).toBe(DomainErrorCode.CACHE_ERROR);
+      }
     });
   });
 });

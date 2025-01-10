@@ -52,6 +52,7 @@ export type PlayerValues = readonly PlayerValue[];
 export interface PlayerValueRepository
   extends BaseRepository<PrismaPlayerValue, PrismaPlayerValueCreate, PlayerValueId> {
   findByChangeDate: (changeDate: string) => TE.TaskEither<DBError, PrismaPlayerValue[]>;
+  findByElementId: (elementId: number) => TE.TaskEither<DBError, PrismaPlayerValue[]>;
   findByElementType: (elementType: number) => TE.TaskEither<DBError, PrismaPlayerValue[]>;
   findByChangeType: (changeType: ValueChangeType) => TE.TaskEither<DBError, PrismaPlayerValue[]>;
   findByEventId: (eventId: number) => TE.TaskEither<DBError, PrismaPlayerValue[]>;

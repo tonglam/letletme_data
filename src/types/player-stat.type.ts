@@ -124,13 +124,16 @@ export type PrismaPlayerStatCreate = Omit<PrismaPlayerStat, 'id' | 'createdAt'>;
 export type PrismaPlayerStatUpdate = Partial<Omit<PrismaPlayerStat, 'id' | 'createdAt'>>;
 
 // Type transformers for converting between API and domain models
-export const toDomainPlayerStat = (data: ElementResponse | PrismaPlayerStat): PlayerStat => {
+export const toDomainPlayerStat = (
+  data: ElementResponse | PrismaPlayerStat,
+  currentEventId?: number,
+): PlayerStat => {
   const isElementResponse = (d: ElementResponse | PrismaPlayerStat): d is ElementResponse =>
     isApiResponse(d, 'element_type');
 
   return {
     id: data.id as PlayerStatId,
-    eventId: isElementResponse(data) ? data.event_points : data.eventId,
+    eventId: currentEventId ?? 0,
     elementId: isElementResponse(data) ? data.id : data.elementId,
     teamId: isElementResponse(data) ? data.team : data.teamId,
     form: isElementResponse(data) ? (data.form ? Number(data.form) : null) : data.form,

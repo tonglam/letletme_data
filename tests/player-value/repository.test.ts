@@ -5,6 +5,7 @@ import { createPlayerValueRepository } from '../../src/domain/player-value/repos
 import {
   PlayerValue,
   PlayerValueId,
+  PrismaPlayerValue,
   toPrismaPlayerValue,
 } from '../../src/domain/player-value/types';
 import { prisma } from '../../src/infrastructure/db/prisma';
@@ -177,6 +178,23 @@ describe('Player Value Repository', () => {
         expect(result.right.length).toBeGreaterThan(0);
         result.right.forEach((playerValue) => {
           expect(playerValue.changeDate).toBe(changeDate);
+        });
+      }
+    });
+  });
+
+  describe('findByElementId', () => {
+    it('should find player values by element id', async () => {
+      const prismaPlayerValues = testPlayerValues.map(toPrismaPlayerValue);
+      await playerValueRepository.saveBatch(prismaPlayerValues)();
+      const elementId = testPlayerValues[0].elementId;
+      const result = await playerValueRepository.findByElementId(elementId)();
+
+      expect(result._tag).toBe('Right');
+      if (result._tag === 'Right') {
+        expect(result.right.length).toBeGreaterThan(0);
+        result.right.forEach((playerValue: PrismaPlayerValue) => {
+          expect(playerValue.elementId).toBe(elementId);
         });
       }
     });
