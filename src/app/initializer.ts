@@ -3,14 +3,15 @@ import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import { createEventRepository } from '../domain/event/repository';
 import { createPhaseRepository } from '../domain/phase/repository';
+import { createTeamRepository } from '../domain/team/repository';
 import { prisma } from '../infrastructure/db/prisma';
 import { createFPLClient } from '../infrastructure/http/fpl/client';
 import { FPLEndpoints } from '../infrastructure/http/fpl/types';
 import { createEventMetaQueueService } from '../queue/meta/event.meta.queue';
 import { createMetaJobData } from '../queue/meta/meta.queue';
-import { ServiceContainer, ServiceKey } from '../service';
-import { createEventService } from '../service/event';
-import { createPhaseService } from '../service/phase';
+import { ServiceKey } from '../service';
+import { registry, ServiceDependencies } from '../service/registry';
+import { createBootstrapApiDependencies } from '../service/utils';
 import {
   APIError,
   APIErrorCode,
@@ -26,152 +27,22 @@ const express = require('express');
 // Create repositories
 const eventRepository = createEventRepository(prisma);
 const phaseRepository = createPhaseRepository(prisma);
+const teamRepository = createTeamRepository(prisma);
 
 export const initializeApp = (): TE.TaskEither<APIError, void> =>
   pipe(
     TE.Do,
     TE.bind('app', () => TE.right<APIError, Application>(express())),
     TE.bind('fplClient', () => TE.right<APIError, FPLEndpoints>(createFPLClient())),
-    TE.bind('services', ({ fplClient }) =>
-      TE.right<APIError, ServiceContainer>({
-        [ServiceKey.EVENT]: createEventService(
-          {
-            getBootstrapData: async () => {
-              const result = await fplClient.bootstrap.getBootstrapStatic();
-              if ('left' in result) {
-                throw result.left;
-              }
-              return result.right;
-            },
-            getBootstrapEvents: () =>
-              pipe(
-                TE.tryCatch(
-                  () => fplClient.bootstrap.getBootstrapStatic(),
-                  (error) =>
-                    createAPIError({
-                      code: APIErrorCode.INTERNAL_SERVER_ERROR,
-                      message: error instanceof Error ? error.message : 'Unknown error',
-                    }),
-                ),
-                TE.chain((result) =>
-                  'left' in result ? TE.left(result.left) : TE.right(result.right.events),
-                ),
-              ),
-            getBootstrapPhases: () =>
-              pipe(
-                TE.tryCatch(
-                  () => fplClient.bootstrap.getBootstrapStatic(),
-                  (error) =>
-                    createAPIError({
-                      code: APIErrorCode.INTERNAL_SERVER_ERROR,
-                      message: error instanceof Error ? error.message : 'Unknown error',
-                    }),
-                ),
-                TE.chain((result) =>
-                  'left' in result ? TE.left(result.left) : TE.right(result.right.phases),
-                ),
-              ),
-            getBootstrapTeams: () =>
-              pipe(
-                TE.tryCatch(
-                  () => fplClient.bootstrap.getBootstrapStatic(),
-                  (error) =>
-                    createAPIError({
-                      code: APIErrorCode.INTERNAL_SERVER_ERROR,
-                      message: error instanceof Error ? error.message : 'Unknown error',
-                    }),
-                ),
-                TE.chain((result) =>
-                  'left' in result ? TE.left(result.left) : TE.right(result.right.teams),
-                ),
-              ),
-            getBootstrapElements: () =>
-              pipe(
-                TE.tryCatch(
-                  () => fplClient.bootstrap.getBootstrapStatic(),
-                  (error) =>
-                    createAPIError({
-                      code: APIErrorCode.INTERNAL_SERVER_ERROR,
-                      message: error instanceof Error ? error.message : 'Unknown error',
-                    }),
-                ),
-                TE.chain((result) =>
-                  'left' in result ? TE.left(result.left) : TE.right(result.right.elements),
-                ),
-              ),
-          },
-          eventRepository,
-        ),
-        [ServiceKey.PHASE]: createPhaseService(
-          {
-            getBootstrapData: async () => {
-              const result = await fplClient.bootstrap.getBootstrapStatic();
-              if ('left' in result) {
-                throw result.left;
-              }
-              return result.right;
-            },
-            getBootstrapEvents: () =>
-              pipe(
-                TE.tryCatch(
-                  () => fplClient.bootstrap.getBootstrapStatic(),
-                  (error) =>
-                    createAPIError({
-                      code: APIErrorCode.INTERNAL_SERVER_ERROR,
-                      message: error instanceof Error ? error.message : 'Unknown error',
-                    }),
-                ),
-                TE.chain((result) =>
-                  'left' in result ? TE.left(result.left) : TE.right(result.right.events),
-                ),
-              ),
-            getBootstrapPhases: () =>
-              pipe(
-                TE.tryCatch(
-                  () => fplClient.bootstrap.getBootstrapStatic(),
-                  (error) =>
-                    createAPIError({
-                      code: APIErrorCode.INTERNAL_SERVER_ERROR,
-                      message: error instanceof Error ? error.message : 'Unknown error',
-                    }),
-                ),
-                TE.chain((result) =>
-                  'left' in result ? TE.left(result.left) : TE.right(result.right.phases),
-                ),
-              ),
-            getBootstrapTeams: () =>
-              pipe(
-                TE.tryCatch(
-                  () => fplClient.bootstrap.getBootstrapStatic(),
-                  (error) =>
-                    createAPIError({
-                      code: APIErrorCode.INTERNAL_SERVER_ERROR,
-                      message: error instanceof Error ? error.message : 'Unknown error',
-                    }),
-                ),
-                TE.chain((result) =>
-                  'left' in result ? TE.left(result.left) : TE.right(result.right.teams),
-                ),
-              ),
-            getBootstrapElements: () =>
-              pipe(
-                TE.tryCatch(
-                  () => fplClient.bootstrap.getBootstrapStatic(),
-                  (error) =>
-                    createAPIError({
-                      code: APIErrorCode.INTERNAL_SERVER_ERROR,
-                      message: error instanceof Error ? error.message : 'Unknown error',
-                    }),
-                ),
-                TE.chain((result) =>
-                  'left' in result ? TE.left(result.left) : TE.right(result.right.elements),
-                ),
-              ),
-          },
-          phaseRepository,
-        ),
-      }),
-    ),
+    TE.bind('services', ({ fplClient }) => {
+      const deps: ServiceDependencies = {
+        bootstrapApi: createBootstrapApiDependencies(fplClient),
+        eventRepository,
+        phaseRepository,
+        teamRepository,
+      };
+      return registry.createAll(deps);
+    }),
     // Initialize event meta queue service
     TE.bind('queueService', ({ services }) =>
       pipe(

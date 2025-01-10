@@ -3,11 +3,16 @@
 
 import * as O from 'fp-ts/Option';
 import * as T from 'fp-ts/Task';
-import { flow } from 'fp-ts/function';
+import * as TE from 'fp-ts/TaskEither';
+import { flow, pipe } from 'fp-ts/function';
+import { ExtendedBootstrapApi } from '../domain/bootstrap/types';
+import { FPLEndpoints } from '../infrastructure/http/fpl/types';
 import {
+  APIErrorCode,
   DomainError,
   ServiceError,
   ServiceErrorCode,
+  createAPIError,
   createServiceError,
 } from '../types/error.type';
 
@@ -31,3 +36,69 @@ export const mapDomainError = (error: DomainError): ServiceError =>
     message: error.message,
     cause: error as unknown as Error,
   });
+
+export const createBootstrapApiDependencies = (fplClient: FPLEndpoints): ExtendedBootstrapApi => ({
+  getBootstrapData: async () => {
+    const result = await fplClient.bootstrap.getBootstrapStatic();
+    if ('left' in result) {
+      throw result.left;
+    }
+    return result.right;
+  },
+  getBootstrapEvents: () =>
+    pipe(
+      TE.tryCatch(
+        () => fplClient.bootstrap.getBootstrapStatic(),
+        (error) =>
+          createAPIError({
+            code: APIErrorCode.INTERNAL_SERVER_ERROR,
+            message: error instanceof Error ? error.message : 'Unknown error',
+          }),
+      ),
+      TE.chain((result) =>
+        'left' in result ? TE.left(result.left) : TE.right(result.right.events),
+      ),
+    ),
+  getBootstrapPhases: () =>
+    pipe(
+      TE.tryCatch(
+        () => fplClient.bootstrap.getBootstrapStatic(),
+        (error) =>
+          createAPIError({
+            code: APIErrorCode.INTERNAL_SERVER_ERROR,
+            message: error instanceof Error ? error.message : 'Unknown error',
+          }),
+      ),
+      TE.chain((result) =>
+        'left' in result ? TE.left(result.left) : TE.right(result.right.phases),
+      ),
+    ),
+  getBootstrapTeams: () =>
+    pipe(
+      TE.tryCatch(
+        () => fplClient.bootstrap.getBootstrapStatic(),
+        (error) =>
+          createAPIError({
+            code: APIErrorCode.INTERNAL_SERVER_ERROR,
+            message: error instanceof Error ? error.message : 'Unknown error',
+          }),
+      ),
+      TE.chain((result) =>
+        'left' in result ? TE.left(result.left) : TE.right(result.right.teams),
+      ),
+    ),
+  getBootstrapElements: () =>
+    pipe(
+      TE.tryCatch(
+        () => fplClient.bootstrap.getBootstrapStatic(),
+        (error) =>
+          createAPIError({
+            code: APIErrorCode.INTERNAL_SERVER_ERROR,
+            message: error instanceof Error ? error.message : 'Unknown error',
+          }),
+      ),
+      TE.chain((result) =>
+        'left' in result ? TE.left(result.left) : TE.right(result.right.elements),
+      ),
+    ),
+});

@@ -7,6 +7,7 @@ import { TaskEither } from 'fp-ts/TaskEither';
 import { APIError } from 'src/types/error.type';
 import { Event, Events } from '../types/event.type';
 import { Phase, Phases } from '../types/phase.type';
+import { Team, Teams } from '../types/team.type';
 
 // Standard API response format with generic data payload
 export interface APIResponseData<T> {
@@ -31,6 +32,12 @@ export interface EventHandlerResponse {
 export interface PhaseHandlerResponse {
   readonly getAllPhases: () => TaskEither<APIError, Phases>;
   readonly getPhaseById: (req: Request) => TaskEither<APIError, Phase>;
+}
+
+// Team handler response types
+export interface TeamHandlerResponse {
+  readonly getAllTeams: () => TaskEither<APIError, Teams>;
+  readonly getTeamById: (req: Request) => TaskEither<APIError, Team>;
 }
 
 // Handler for asynchronous middleware operations
