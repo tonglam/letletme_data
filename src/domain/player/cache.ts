@@ -15,7 +15,11 @@ import type { RedisCache } from '../../infrastructure/cache/redis-cache';
 import { getCurrentSeason } from '../../types/base.type';
 import { CacheError, CacheErrorCode, createCacheError } from '../../types/error.type';
 import type { Player } from '../../types/player.type';
-import { PlayerCache, PlayerCacheConfig, PlayerDataProvider } from '../../types/player/types';
+import {
+  PlayerCache,
+  PlayerCacheConfig,
+  PlayerDataProvider,
+} from '../../types/player/operations.type';
 
 const parsePlayer = (playerStr: string): E.Either<CacheError, Player | null> =>
   pipe(

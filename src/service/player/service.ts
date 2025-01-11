@@ -7,7 +7,7 @@ import { pipe } from 'fp-ts/function';
 import { ElementResponse } from '../../types/element.type';
 import { APIError, ServiceError } from '../../types/error.type';
 import { PlayerId, Players, toDomainPlayer } from '../../types/player.type';
-import { PlayerCommandOperations, PlayerQueryOperations } from '../../types/player/types';
+import { PlayerCommandOperations, PlayerQueryOperations } from '../../types/player/operations.type';
 import { createServiceIntegrationError } from '../../utils/error.util';
 import { mapDomainError } from '../utils';
 import type {
