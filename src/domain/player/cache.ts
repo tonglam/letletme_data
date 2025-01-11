@@ -11,7 +11,6 @@ import * as O from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
 import { flow, pipe } from 'fp-ts/function';
 import { CachePrefix } from '../../config/cache/cache.config';
-import { redisClient } from '../../infrastructure/cache/client';
 import type { RedisCache } from '../../infrastructure/cache/redis-cache';
 import { getCurrentSeason } from '../../types/base.type';
 import { CacheError, CacheErrorCode, createCacheError } from '../../types/error.type';
@@ -66,14 +65,14 @@ export const createPlayerCache = (
       TE.tryCatch(
         async () => {
           const players = await dataProvider.getAll();
-          const multi = redisClient.multi();
-          multi.del(baseKey);
-          await multi.exec();
-          const cacheMulti = redisClient.multi();
+          if (players.length === 0) return;
+
+          await cache.client.del(baseKey);
+          const multi = cache.client.multi();
           players.forEach((player) => {
-            cacheMulti.hset(baseKey, player.id.toString(), JSON.stringify(player));
+            multi.hset(baseKey, player.id.toString(), JSON.stringify(player));
           });
-          await cacheMulti.exec();
+          await multi.exec();
         },
         (error: unknown) =>
           createCacheError({
@@ -87,7 +86,7 @@ export const createPlayerCache = (
   const cachePlayer = (player: Player): TE.TaskEither<CacheError, void> =>
     pipe(
       TE.tryCatch(
-        () => redisClient.hset(baseKey, player.id.toString(), JSON.stringify(player)),
+        () => cache.client.hset(baseKey, player.id.toString(), JSON.stringify(player)),
         (error: unknown) =>
           createCacheError({
             code: CacheErrorCode.OPERATION_ERROR,
@@ -103,14 +102,13 @@ export const createPlayerCache = (
       TE.tryCatch(
         async () => {
           if (players.length === 0) return;
-          const multi = redisClient.multi();
-          multi.del(baseKey);
-          await multi.exec();
-          const cacheMulti = redisClient.multi();
+
+          await cache.client.del(baseKey);
+          const multi = cache.client.multi();
           players.forEach((player) => {
-            cacheMulti.hset(baseKey, player.id.toString(), JSON.stringify(player));
+            multi.hset(baseKey, player.id.toString(), JSON.stringify(player));
           });
-          await cacheMulti.exec();
+          await multi.exec();
         },
         (error: unknown) =>
           createCacheError({
@@ -124,7 +122,7 @@ export const createPlayerCache = (
   const getPlayer = (id: string): TE.TaskEither<CacheError, Player | null> =>
     pipe(
       TE.tryCatch(
-        () => redisClient.hget(baseKey, id),
+        () => cache.client.hget(baseKey, id),
         (error: unknown) =>
           createCacheError({
             code: CacheErrorCode.OPERATION_ERROR,
@@ -180,7 +178,7 @@ export const createPlayerCache = (
   const getAllPlayers = (): TE.TaskEither<CacheError, readonly Player[]> =>
     pipe(
       TE.tryCatch(
-        () => redisClient.hgetall(baseKey),
+        () => cache.client.hgetall(baseKey),
         (error: unknown) =>
           createCacheError({
             code: CacheErrorCode.OPERATION_ERROR,

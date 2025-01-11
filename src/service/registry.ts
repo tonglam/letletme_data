@@ -5,10 +5,11 @@ import { EventOperations, EventRepository } from '../domain/event/types';
 import { PhaseRepository } from '../domain/phase/types';
 import { PlayerStatRepository } from '../domain/player-stat/types';
 import { PlayerValueRepository } from '../domain/player-value/types';
-import { PlayerRepository } from '../domain/player/types';
-import { TeamRepository } from '../domain/team/types';
 import { APIError, APIErrorCode, createAPIError } from '../types/error.type';
+import { PlayerRepository } from '../types/player.type';
+import { TeamRepository } from '../types/team.type';
 import { ServiceContainer, ServiceKey } from './index';
+import { TeamService } from './team';
 
 export interface ServiceDependencies {
   readonly bootstrapApi: ExtendedBootstrapApi;
@@ -19,6 +20,7 @@ export interface ServiceDependencies {
   readonly playerStatRepository: PlayerStatRepository;
   readonly playerValueRepository: PlayerValueRepository;
   readonly teamRepository: TeamRepository;
+  readonly teamService: TeamService;
 }
 
 export interface ServiceFactory<T> {

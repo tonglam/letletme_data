@@ -6,12 +6,13 @@ import { createBootstrapApiAdapter } from '../../src/domain/bootstrap/adapter';
 import { ExtendedBootstrapApi } from '../../src/domain/bootstrap/types';
 import { createPlayerCache } from '../../src/domain/player/cache';
 import { createPlayerRepository } from '../../src/domain/player/repository';
+import { createTeamRepository } from '../../src/domain/team/repository';
 import { createRedisCache } from '../../src/infrastructure/cache/redis-cache';
 import { prisma } from '../../src/infrastructure/db/prisma';
 import { DEFAULT_RETRY_CONFIG } from '../../src/infrastructure/http/client/utils';
 import { createFPLClient } from '../../src/infrastructure/http/fpl/client';
 import { createPlayerService } from '../../src/service/player';
-import type { WorkflowResult } from '../../src/service/player/types';
+import { createTeamService } from '../../src/service/team';
 import { getCurrentSeason } from '../../src/types/base.type';
 import {
   APIErrorCode,
@@ -21,6 +22,13 @@ import {
 } from '../../src/types/error.type';
 import type { Player, PlayerId } from '../../src/types/player.type';
 import { toDomainPlayer } from '../../src/types/player.type';
+import { TeamId } from '../../src/types/team.type';
+
+// Define workflow result type
+interface PlayerWorkflowResult {
+  readonly duration: number;
+  readonly result: readonly Player[];
+}
 
 describe('Player Workflow Integration Tests', () => {
   // Service and workflow instances
@@ -60,7 +68,21 @@ describe('Player Workflow Integration Tests', () => {
     },
   });
 
-  const playerService = createPlayerService(bootstrapApi, playerRepository, playerCache);
+  // Create team service for player enhancement
+  const teamRepository = createTeamRepository(prisma);
+  const teamService = createTeamService(bootstrapApi, teamRepository);
+
+  const playerService = createPlayerService(
+    bootstrapApi,
+    playerRepository,
+    {
+      bootstrapApi,
+      teamService: {
+        getTeam: (id: number) => teamService.getTeam(id as TeamId),
+      },
+    },
+    playerCache,
+  );
   const workflows = playerService.workflows;
 
   beforeAll(async () => {
@@ -86,11 +108,11 @@ describe('Player Workflow Integration Tests', () => {
 
   afterAll(async () => {
     try {
-      // Clean up test data
-      await prisma.player.deleteMany();
+      // // Clean up test data
+      // await prisma.player.deleteMany();
 
-      // Verify cleanup
-      await redisCache.client.keys('*player*');
+      // // Verify cleanup
+      // await redisCache.client.keys('*player*');
 
       // Close connections
       await redisCache.client.quit();
@@ -113,11 +135,7 @@ describe('Player Workflow Integration Tests', () => {
     it('should execute sync workflow successfully', async () => {
       const result = await pipe(
         workflows.syncPlayers(),
-        TE.fold<
-          ServiceError,
-          WorkflowResult<readonly Player[]>,
-          WorkflowResult<readonly Player[]> | null
-        >(
+        TE.fold<ServiceError, PlayerWorkflowResult, PlayerWorkflowResult | null>(
           () => T.of(null),
           (result) => T.of(result),
         ),
@@ -125,11 +143,6 @@ describe('Player Workflow Integration Tests', () => {
 
       expect(result).not.toBeNull();
       if (result) {
-        // Verify workflow context
-        expect(result.context).toBeDefined();
-        expect(result.context.workflowId).toBe('player-sync');
-        expect(result.context.startTime).toBeInstanceOf(Date);
-
         // Verify workflow metrics
         expect(result.duration).toBeGreaterThan(0);
 
@@ -167,12 +180,17 @@ describe('Player Workflow Integration Tests', () => {
         },
       };
 
-      const failingService = createPlayerService(failingApi, playerRepository);
+      const failingService = createPlayerService(failingApi, playerRepository, {
+        bootstrapApi: failingApi,
+        teamService: {
+          getTeam: (id: number) => teamService.getTeam(id as TeamId),
+        },
+      });
       const failingWorkflows = failingService.workflows;
 
       const result = await pipe(
         failingWorkflows.syncPlayers(),
-        TE.fold<ServiceError, WorkflowResult<readonly Player[]>, ServiceError>(
+        TE.fold<ServiceError, PlayerWorkflowResult, ServiceError>(
           (error) => T.of(error),
           () => {
             throw new Error('Expected workflow to fail but it succeeded');
@@ -203,13 +221,11 @@ describe('Player Workflow Integration Tests', () => {
     it('should track workflow execution time', async () => {
       const result = await pipe(
         workflows.syncPlayers(),
-        TE.fold<ServiceError, WorkflowResult<readonly Player[]>, WorkflowResult<readonly Player[]>>(
-          (error) =>
+        TE.fold<ServiceError, PlayerWorkflowResult, PlayerWorkflowResult>(
+          () =>
             T.of({
               duration: 0,
-              context: { workflowId: '', startTime: new Date() },
               result: [],
-              error,
             }),
           (result) => T.of(result),
         ),
@@ -219,25 +235,21 @@ describe('Player Workflow Integration Tests', () => {
       expect(result.duration).toBeLessThan(30000); // Reasonable timeout
     }, 30000);
 
-    it('should include workflow context in results', async () => {
+    it('should include workflow result', async () => {
       const result = await pipe(
         workflows.syncPlayers(),
-        TE.fold<ServiceError, WorkflowResult<readonly Player[]>, WorkflowResult<readonly Player[]>>(
-          (error) =>
+        TE.fold<ServiceError, PlayerWorkflowResult, PlayerWorkflowResult>(
+          () =>
             T.of({
               duration: 0,
-              context: { workflowId: 'player-sync', startTime: new Date() },
               result: [],
-              error,
             }),
           (result) => T.of(result),
         ),
       )();
 
-      expect(result.context).toMatchObject({
-        workflowId: 'player-sync',
-        startTime: expect.any(Date),
-      });
+      expect(result.result).toBeDefined();
+      expect(Array.isArray(result.result)).toBe(true);
     }, 30000);
   });
 });

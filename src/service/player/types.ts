@@ -1,17 +1,21 @@
-import { ExtendedBootstrapApi } from 'domains/bootstrap/types';
 import * as TE from 'fp-ts/TaskEither';
-import type { ServiceError } from '../../types/error.type';
-import type { Player, PlayerId, Players } from '../../types/player.type';
+import { ExtendedBootstrapApi } from '../../domain/bootstrap/types';
+import { ServiceError } from '../../types/error.type';
+import { Player, PlayerId, Players } from '../../types/player.type';
+import { Team } from '../../types/team.type';
+
+export type EnhancedPlayers = readonly EnhancedPlayer[];
 
 /**
  * Public interface for the player service.
  * Provides high-level operations for player management.
  */
 export interface PlayerService {
-  readonly getPlayers: () => TE.TaskEither<ServiceError, Players>;
+  readonly getPlayers: () => TE.TaskEither<ServiceError, EnhancedPlayers>;
   readonly getPlayer: (id: PlayerId) => TE.TaskEither<ServiceError, Player | null>;
   readonly savePlayers: (players: Players) => TE.TaskEither<ServiceError, Players>;
   readonly syncPlayersFromApi: () => TE.TaskEither<ServiceError, Players>;
+  readonly findPlayerById: (id: PlayerId) => TE.TaskEither<ServiceError, EnhancedPlayer | null>;
 }
 
 /**
@@ -29,6 +33,9 @@ export interface PlayerServiceWithWorkflows extends PlayerService {
  */
 export interface PlayerServiceDependencies {
   readonly bootstrapApi: ExtendedBootstrapApi;
+  readonly teamService: {
+    readonly getTeam: (id: number) => TE.TaskEither<ServiceError, Team | null>;
+  };
 }
 
 /**
@@ -36,8 +43,8 @@ export interface PlayerServiceDependencies {
  * Maps closely to domain operations but with service-level error handling.
  */
 export interface PlayerServiceOperations {
-  readonly findAllPlayers: () => TE.TaskEither<ServiceError, Players>;
-  readonly findPlayerById: (id: PlayerId) => TE.TaskEither<ServiceError, Player | null>;
+  readonly findAllPlayers: () => TE.TaskEither<ServiceError, EnhancedPlayers>;
+  readonly findPlayerById: (id: PlayerId) => TE.TaskEither<ServiceError, EnhancedPlayer | null>;
   readonly syncPlayersFromApi: (
     bootstrapApi: PlayerServiceDependencies['bootstrapApi'],
   ) => TE.TaskEither<ServiceError, Players>;
@@ -56,7 +63,18 @@ export interface WorkflowContext {
  * Includes execution context and metrics.
  */
 export interface WorkflowResult<T> {
-  readonly context: WorkflowContext;
   readonly result: T;
   readonly duration: number;
+}
+
+/**
+ * Enhanced player type with team information
+ */
+export interface EnhancedPlayer extends Omit<Player, 'teamId' | 'elementType'> {
+  readonly elementType: string;
+  readonly team: {
+    readonly id: number;
+    readonly name: string;
+    readonly shortName: string;
+  };
 }
