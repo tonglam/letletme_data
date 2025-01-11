@@ -44,6 +44,9 @@ export interface PlayerOperations {
   readonly getAllPlayers: () => TE.TaskEither<DomainError, Players>;
   readonly getPlayerById: (id: PlayerId) => TE.TaskEither<DomainError, Player | null>;
   readonly createPlayers: (players: Players) => TE.TaskEither<DomainError, Players>;
+  readonly updatePrices: (
+    updates: readonly { id: PlayerId; price: number }[],
+  ) => TE.TaskEither<DomainError, void>;
   readonly deleteAll: () => TE.TaskEither<DomainError, void>;
 }
 

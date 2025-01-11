@@ -10,7 +10,7 @@ import {
   isApiResponse,
 } from './base.type';
 import { ElementResponse } from './element.type';
-import { APIError } from './error.type';
+import { APIError, DBError } from './error.type';
 
 // ============ Branded Types ============
 export type PlayerId = Branded<number, 'PlayerId'>;
@@ -48,7 +48,12 @@ export interface Player {
 export type Players = readonly Player[];
 
 // Repository interface for player data access
-export type PlayerRepository = BaseRepository<PrismaPlayer, PrismaPlayerCreate, PlayerId>;
+export interface PlayerRepository
+  extends BaseRepository<PrismaPlayer, PrismaPlayerCreate, PlayerId> {
+  updatePrices: (
+    updates: readonly { id: PlayerId; price: number }[],
+  ) => TE.TaskEither<DBError, void>;
+}
 
 // Persistence types for database operations
 export interface PrismaPlayer {

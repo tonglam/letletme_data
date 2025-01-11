@@ -56,6 +56,7 @@ export interface PlayerValueRepository
   findByElementType: (elementType: number) => TE.TaskEither<DBError, PrismaPlayerValue[]>;
   findByChangeType: (changeType: ValueChangeType) => TE.TaskEither<DBError, PrismaPlayerValue[]>;
   findByEventId: (eventId: number) => TE.TaskEither<DBError, PrismaPlayerValue[]>;
+  findLatestByElements: () => TE.TaskEither<DBError, PrismaPlayerValue[]>;
 }
 
 // Persistence types for database operations

@@ -1,28 +1,24 @@
 import { PrismaClient } from '@prisma/client';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
-import { createDBError, DBErrorCode } from '../../types/error.type';
+import { DBErrorCode, createDBError } from '../../types/error.type';
 import {
   PlayerId,
   PlayerRepository,
+  PrismaPlayer,
   PrismaPlayerCreate,
-  PrismaPlayerUpdate,
 } from '../../types/player.type';
 
 export const createPlayerRepository = (prisma: PrismaClient): PlayerRepository => ({
   findAll: () =>
     pipe(
       TE.tryCatch(
-        () =>
-          prisma.player.findMany({
-            orderBy: {
-              element: 'asc',
-            },
-          }),
+        () => prisma.player.findMany(),
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to fetch all players: ${error}`,
+            message: 'Failed to fetch all players',
+            cause: error instanceof Error ? error : new Error(String(error)),
           }),
       ),
     ),
@@ -30,16 +26,12 @@ export const createPlayerRepository = (prisma: PrismaClient): PlayerRepository =
   findById: (id: PlayerId) =>
     pipe(
       TE.tryCatch(
-        () =>
-          prisma.player.findUnique({
-            where: {
-              element: Number(id),
-            },
-          }),
+        () => prisma.player.findUnique({ where: { element: id } }),
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to fetch player by id ${id}: ${error}`,
+            message: `Failed to fetch player by id: ${id}`,
+            cause: error instanceof Error ? error : new Error(String(error)),
           }),
       ),
     ),
@@ -47,21 +39,12 @@ export const createPlayerRepository = (prisma: PrismaClient): PlayerRepository =
   findByIds: (ids: PlayerId[]) =>
     pipe(
       TE.tryCatch(
-        () =>
-          prisma.player.findMany({
-            where: {
-              element: {
-                in: ids.map((id) => Number(id)),
-              },
-            },
-            orderBy: {
-              element: 'asc',
-            },
-          }),
+        () => prisma.player.findMany({ where: { element: { in: ids } } }),
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to fetch players by ids: ${error}`,
+            message: `Failed to fetch players by ids: ${ids.join(', ')}`,
+            cause: error instanceof Error ? error : new Error(String(error)),
           }),
       ),
     ),
@@ -69,14 +52,12 @@ export const createPlayerRepository = (prisma: PrismaClient): PlayerRepository =
   save: (data: PrismaPlayerCreate) =>
     pipe(
       TE.tryCatch(
-        () =>
-          prisma.player.create({
-            data,
-          }),
+        () => prisma.player.create({ data }),
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to create player: ${error}`,
+            message: 'Failed to create player',
+            cause: error instanceof Error ? error : new Error(String(error)),
           }),
       ),
     ),
@@ -84,15 +65,12 @@ export const createPlayerRepository = (prisma: PrismaClient): PlayerRepository =
   saveBatch: (data: PrismaPlayerCreate[]) =>
     pipe(
       TE.tryCatch(
-        () =>
-          prisma.player.createMany({
-            data,
-            skipDuplicates: true,
-          }),
+        () => prisma.player.createMany({ data }),
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to create players in batch: ${error}`,
+            message: 'Failed to create players',
+            cause: error instanceof Error ? error : new Error(String(error)),
           }),
       ),
       TE.chain(() =>
@@ -102,37 +80,52 @@ export const createPlayerRepository = (prisma: PrismaClient): PlayerRepository =
               prisma.player.findMany({
                 where: {
                   element: {
-                    in: data.map((player) => player.element),
+                    in: data.map((d) => d.element),
                   },
-                },
-                orderBy: {
-                  element: 'asc',
                 },
               }),
             (error) =>
               createDBError({
                 code: DBErrorCode.QUERY_ERROR,
-                message: `Failed to fetch created players: ${error}`,
+                message: 'Failed to fetch created players',
+                cause: error instanceof Error ? error : new Error(String(error)),
               }),
           ),
         ),
       ),
     ),
 
-  update: (id: PlayerId, player: PrismaPlayerUpdate) =>
+  update: (id: PlayerId, data: PrismaPlayer) =>
     pipe(
       TE.tryCatch(
-        () =>
-          prisma.player.update({
-            where: {
-              element: Number(id),
-            },
-            data: player,
-          }),
+        () => prisma.player.update({ where: { element: id }, data }),
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to update player ${id}: ${error}`,
+            message: `Failed to update player: ${id}`,
+            cause: error instanceof Error ? error : new Error(String(error)),
+          }),
+      ),
+    ),
+
+  updatePrices: (updates: readonly { id: PlayerId; price: number }[]) =>
+    pipe(
+      TE.tryCatch(
+        async () => {
+          await prisma.$transaction(
+            updates.map((update) =>
+              prisma.player.update({
+                where: { element: update.id },
+                data: { price: update.price },
+              }),
+            ),
+          );
+        },
+        (error) =>
+          createDBError({
+            code: DBErrorCode.QUERY_ERROR,
+            message: 'Failed to update player prices',
+            cause: error instanceof Error ? error : new Error(String(error)),
           }),
       ),
     ),
@@ -140,33 +133,28 @@ export const createPlayerRepository = (prisma: PrismaClient): PlayerRepository =
   deleteAll: () =>
     pipe(
       TE.tryCatch(
-        () => prisma.player.deleteMany({}),
+        () => prisma.player.deleteMany(),
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to delete all players: ${error}`,
+            message: 'Failed to delete all players',
+            cause: error instanceof Error ? error : new Error(String(error)),
           }),
       ),
-      TE.map(() => void 0),
+      TE.map(() => undefined),
     ),
 
-  deleteByIds: (ids: readonly PlayerId[]) =>
+  deleteByIds: (ids: PlayerId[]) =>
     pipe(
       TE.tryCatch(
-        () =>
-          prisma.player.deleteMany({
-            where: {
-              element: {
-                in: ids.map((id) => Number(id)),
-              },
-            },
-          }),
+        () => prisma.player.deleteMany({ where: { element: { in: ids } } }),
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to delete players by ids: ${error}`,
+            message: `Failed to delete players by ids: ${ids.join(', ')}`,
+            cause: error instanceof Error ? error : new Error(String(error)),
           }),
       ),
-      TE.map(() => void 0),
+      TE.map(() => undefined),
     ),
 });

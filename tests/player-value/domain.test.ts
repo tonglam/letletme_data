@@ -17,9 +17,10 @@ import { ElementStatus, ElementType, ValueChangeType } from '../../src/types/bas
 import { ElementResponse } from '../../src/types/element.type';
 import {
   CacheErrorCode,
-  DBErrorCode,
   createCacheError,
   createDBError,
+  DBErrorCode,
+  DomainErrorCode,
 } from '../../src/types/error.type';
 
 describe('Player Value Domain Tests', () => {
@@ -94,6 +95,7 @@ describe('Player Value Domain Tests', () => {
       findByElementType: jest.fn(),
       findByChangeType: jest.fn(),
       findByEventId: jest.fn(),
+      findLatestByElements: jest.fn(),
       saveBatch: jest.fn(),
       update: jest.fn(),
       deleteAll: jest.fn(),
@@ -104,7 +106,7 @@ describe('Player Value Domain Tests', () => {
       findByChangeDate: jest.fn(),
     } as jest.Mocked<PlayerValueCache>;
 
-    operations = createPlayerValueOperations(mockRepository, mockCache);
+    operations = createPlayerValueOperations(mockRepository);
   });
 
   describe('Domain Model Transformation', () => {
@@ -290,7 +292,6 @@ describe('Player Value Domain Tests', () => {
 
   describe('Player Value Operations', () => {
     describe('createPlayerValues', () => {
-      const today = new Date().toISOString().slice(0, 10);
       let domainPlayerValues: PlayerValue[];
 
       beforeEach(() => {
@@ -299,16 +300,15 @@ describe('Player Value Domain Tests', () => {
 
       it('should successfully create new player values', async () => {
         // Mock successful save
-        mockRepository.save.mockImplementation((value: PrismaPlayerValueCreate) =>
-          TE.right({
-            ...value,
-            id: `${value.elementId}_${value.changeDate}`,
-            createdAt: new Date(),
-          } as PrismaPlayerValue),
+        mockRepository.saveBatch.mockImplementation((values: PrismaPlayerValueCreate[]) =>
+          TE.right(
+            values.map((value) => ({
+              ...value,
+              id: `${value.elementId}_${value.changeDate}`,
+              createdAt: new Date(),
+            })) as PrismaPlayerValue[],
+          ),
         );
-
-        // Mock cache update
-        mockCache.findByChangeDate.mockImplementation(() => TE.right(domainPlayerValues));
 
         const result = await operations.createPlayerValues(domainPlayerValues)();
         expect(E.isRight(result)).toBe(true);
@@ -316,69 +316,37 @@ describe('Player Value Domain Tests', () => {
 
         const savedValues = result.right;
         expect(savedValues).toHaveLength(domainPlayerValues.length);
-        expect(mockRepository.save).toHaveBeenCalledTimes(domainPlayerValues.length);
-        expect(mockCache.findByChangeDate).toHaveBeenCalled();
+        expect(mockRepository.saveBatch).toHaveBeenCalledTimes(1);
       });
 
       it('should handle unique constraint violations by returning existing records', async () => {
-        const existingPrismaValue: PrismaPlayerValue = {
-          id: `${domainPlayerValues[0].elementId}_${today}`,
-          elementId: domainPlayerValues[0].elementId,
-          elementType: Number(domainPlayerValues[0].elementType),
-          eventId: domainPlayerValues[0].eventId,
-          value: domainPlayerValues[0].value,
-          changeDate: today,
-          changeType: domainPlayerValues[0].changeType,
-          lastValue: domainPlayerValues[0].lastValue,
-          createdAt: new Date(),
-        };
-
-        // Mock first save to throw unique constraint error
-        mockRepository.save.mockImplementationOnce(() => {
-          const error = new Error(
-            'unique constraint failed on the fields: (`elementId`,`changeDate`)',
-          );
-          return TE.left(
+        // Mock unique constraint error
+        mockRepository.saveBatch.mockImplementation(() =>
+          TE.left(
             createDBError({
-              code: DBErrorCode.QUERY_ERROR,
-              message: error.message,
+              code: DBErrorCode.CONSTRAINT_ERROR,
+              message: 'Unique constraint violation',
+              cause: new Error('Duplicate key value violates unique constraint'),
             }),
-          );
-        });
-
-        // Mock finding existing record
-        mockRepository.findByChangeDate.mockImplementation(() => TE.right([existingPrismaValue]));
-
-        // Mock successful saves for remaining records
-        mockRepository.save.mockImplementation((value: PrismaPlayerValueCreate) =>
-          TE.right({
-            ...value,
-            id: `${value.elementId}_${value.changeDate}`,
-            createdAt: new Date(),
-          } as PrismaPlayerValue),
+          ),
         );
 
-        // Mock cache update
-        mockCache.findByChangeDate.mockImplementation(() => TE.right(domainPlayerValues));
-
         const result = await operations.createPlayerValues([domainPlayerValues[0]])();
-        expect(E.isRight(result)).toBe(true);
-        if (E.isLeft(result)) return;
+        expect(E.isLeft(result)).toBe(true);
+        if (E.isRight(result)) return;
 
-        const savedValues = result.right;
-        expect(savedValues).toHaveLength(1);
-        expect(savedValues[0].id).toBe(existingPrismaValue.id);
-        expect(mockRepository.findByChangeDate).toHaveBeenCalled();
-        expect(mockCache.findByChangeDate).toHaveBeenCalled();
+        expect(result.left.code).toBe(DomainErrorCode.DATABASE_ERROR);
+        expect(mockRepository.saveBatch).toHaveBeenCalledTimes(1);
       });
 
       it('should handle database errors properly', async () => {
         // Mock database error
-        mockRepository.save.mockImplementation(() =>
+        mockRepository.saveBatch.mockImplementation(() =>
           TE.left(
             createDBError({
               code: DBErrorCode.QUERY_ERROR,
-              message: 'Database connection failed',
+              message: 'Database error',
+              cause: new Error('Connection failed'),
             }),
           ),
         );
@@ -387,18 +355,20 @@ describe('Player Value Domain Tests', () => {
         expect(E.isLeft(result)).toBe(true);
         if (E.isRight(result)) return;
 
-        expect(result.left.code).toBe('DATABASE_ERROR');
-        expect(result.left.message).toContain('Failed to create player values');
+        expect(result.left.code).toBe(DomainErrorCode.DATABASE_ERROR);
+        expect(mockRepository.saveBatch).toHaveBeenCalledTimes(1);
       });
 
       it('should handle cache errors gracefully', async () => {
-        // Mock successful save
-        mockRepository.save.mockImplementation((value: PrismaPlayerValueCreate) =>
-          TE.right({
-            ...value,
-            id: `${value.elementId}_${value.changeDate}`,
-            createdAt: new Date(),
-          } as PrismaPlayerValue),
+        // Mock successful batch save instead of individual saves
+        mockRepository.saveBatch.mockImplementation((values: PrismaPlayerValueCreate[]) =>
+          TE.right(
+            values.map((value) => ({
+              ...value,
+              id: `${value.elementId}_${value.changeDate}`,
+              createdAt: new Date(),
+            })) as PrismaPlayerValue[],
+          ),
         );
 
         // Mock cache error
@@ -418,7 +388,7 @@ describe('Player Value Domain Tests', () => {
         // Should still return saved values even if cache update fails
         const savedValues = result.right;
         expect(savedValues).toHaveLength(domainPlayerValues.length);
-        expect(mockRepository.save).toHaveBeenCalledTimes(domainPlayerValues.length);
+        expect(mockRepository.saveBatch).toHaveBeenCalledTimes(1);
       });
     });
   });

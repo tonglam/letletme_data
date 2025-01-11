@@ -6,24 +6,20 @@ import { DBErrorCode, createDBError } from '../../types/error.type';
 import {
   PlayerValueId,
   PlayerValueRepository,
+  PrismaPlayerValue,
   PrismaPlayerValueCreate,
-  PrismaPlayerValueUpdate,
 } from '../../types/player-value.type';
 
 export const createPlayerValueRepository = (prisma: PrismaClient): PlayerValueRepository => ({
   findAll: () =>
     pipe(
       TE.tryCatch(
-        () =>
-          prisma.playerValue.findMany({
-            orderBy: {
-              changeDate: 'desc',
-            },
-          }),
+        () => prisma.playerValue.findMany(),
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to fetch all player values: ${error}`,
+            message: 'Failed to fetch all player values',
+            cause: error instanceof Error ? error : new Error(String(error)),
           }),
       ),
     ),
@@ -31,16 +27,12 @@ export const createPlayerValueRepository = (prisma: PrismaClient): PlayerValueRe
   findById: (id: PlayerValueId) =>
     pipe(
       TE.tryCatch(
-        () =>
-          prisma.playerValue.findUnique({
-            where: {
-              id: id,
-            },
-          }),
+        () => prisma.playerValue.findUnique({ where: { id } }),
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to fetch player value by id ${id}: ${error}`,
+            message: `Failed to fetch player value by id: ${id}`,
+            cause: error instanceof Error ? error : new Error(String(error)),
           }),
       ),
     ),
@@ -48,21 +40,12 @@ export const createPlayerValueRepository = (prisma: PrismaClient): PlayerValueRe
   findByIds: (ids: PlayerValueId[]) =>
     pipe(
       TE.tryCatch(
-        () =>
-          prisma.playerValue.findMany({
-            where: {
-              id: {
-                in: [...ids],
-              },
-            },
-            orderBy: {
-              changeDate: 'desc',
-            },
-          }),
+        () => prisma.playerValue.findMany({ where: { id: { in: ids } } }),
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to fetch player values by ids: ${error}`,
+            message: `Failed to fetch player values by ids: ${ids.join(', ')}`,
+            cause: error instanceof Error ? error : new Error(String(error)),
           }),
       ),
     ),
@@ -70,19 +53,12 @@ export const createPlayerValueRepository = (prisma: PrismaClient): PlayerValueRe
   findByChangeDate: (changeDate: string) =>
     pipe(
       TE.tryCatch(
-        () =>
-          prisma.playerValue.findMany({
-            where: {
-              changeDate,
-            },
-            orderBy: {
-              elementId: 'asc',
-            },
-          }),
+        () => prisma.playerValue.findMany({ where: { changeDate } }),
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to fetch player values by change date ${changeDate}: ${error}`,
+            message: `Failed to fetch player values by change date: ${changeDate}`,
+            cause: error instanceof Error ? error : new Error(String(error)),
           }),
       ),
     ),
@@ -92,17 +68,14 @@ export const createPlayerValueRepository = (prisma: PrismaClient): PlayerValueRe
       TE.tryCatch(
         () =>
           prisma.playerValue.findMany({
-            where: {
-              elementId,
-            },
-            orderBy: {
-              changeDate: 'desc',
-            },
+            where: { elementId },
+            orderBy: { changeDate: 'asc' },
           }),
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to fetch player values by element id ${elementId}: ${error}`,
+            message: `Failed to fetch player values by element id: ${elementId}`,
+            cause: error instanceof Error ? error : new Error(String(error)),
           }),
       ),
     ),
@@ -110,19 +83,12 @@ export const createPlayerValueRepository = (prisma: PrismaClient): PlayerValueRe
   findByElementType: (elementType: number) =>
     pipe(
       TE.tryCatch(
-        () =>
-          prisma.playerValue.findMany({
-            where: {
-              elementType: elementType,
-            },
-            orderBy: {
-              changeDate: 'desc',
-            },
-          }),
+        () => prisma.playerValue.findMany({ where: { elementType } }),
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to fetch player values by element type ${elementType}: ${error}`,
+            message: `Failed to fetch player values by element type: ${elementType}`,
+            cause: error instanceof Error ? error : new Error(String(error)),
           }),
       ),
     ),
@@ -130,19 +96,12 @@ export const createPlayerValueRepository = (prisma: PrismaClient): PlayerValueRe
   findByChangeType: (changeType: ValueChangeType) =>
     pipe(
       TE.tryCatch(
-        () =>
-          prisma.playerValue.findMany({
-            where: {
-              changeType,
-            },
-            orderBy: {
-              changeDate: 'desc',
-            },
-          }),
+        () => prisma.playerValue.findMany({ where: { changeType } }),
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to fetch player values by change type ${changeType}: ${error}`,
+            message: `Failed to fetch player values by change type: ${changeType}`,
+            cause: error instanceof Error ? error : new Error(String(error)),
           }),
       ),
     ),
@@ -150,19 +109,29 @@ export const createPlayerValueRepository = (prisma: PrismaClient): PlayerValueRe
   findByEventId: (eventId: number) =>
     pipe(
       TE.tryCatch(
+        () => prisma.playerValue.findMany({ where: { eventId } }),
+        (error) =>
+          createDBError({
+            code: DBErrorCode.QUERY_ERROR,
+            message: `Failed to fetch player values by event id: ${eventId}`,
+            cause: error instanceof Error ? error : new Error(String(error)),
+          }),
+      ),
+    ),
+
+  findLatestByElements: () =>
+    pipe(
+      TE.tryCatch(
         () =>
           prisma.playerValue.findMany({
-            where: {
-              eventId,
-            },
-            orderBy: {
-              elementId: 'asc',
-            },
+            orderBy: [{ elementId: 'asc' }, { changeDate: 'desc' }],
+            distinct: ['elementId'],
           }),
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to fetch player values by event id ${eventId}: ${error}`,
+            message: 'Failed to fetch latest player values',
+            cause: error instanceof Error ? error : new Error(String(error)),
           }),
       ),
     ),
@@ -170,69 +139,59 @@ export const createPlayerValueRepository = (prisma: PrismaClient): PlayerValueRe
   save: (data: PrismaPlayerValueCreate) =>
     pipe(
       TE.tryCatch(
-        async () => {
-          try {
-            return await prisma.playerValue.create({
-              data,
-            });
-          } catch (error) {
-            console.log('Prisma error:', error);
-            if (error instanceof Error && error.message.includes('Unique constraint')) {
-              throw new Error('Duplicate player value');
-            }
-            throw error;
-          }
-        },
-        (error) => {
-          if (error instanceof Error && error.message === 'Duplicate player value') {
-            return createDBError({
-              code: DBErrorCode.QUERY_ERROR,
-              message: 'Duplicate player value',
-            });
-          }
-          return createDBError({
+        () => prisma.playerValue.create({ data }),
+        (error) =>
+          createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to create player value: ${error}`,
-          });
-        },
+            message: 'Failed to create player value',
+            cause: error instanceof Error ? error : new Error(String(error)),
+          }),
       ),
     ),
 
   saveBatch: (data: PrismaPlayerValueCreate[]) =>
     pipe(
       TE.tryCatch(
-        async () => {
-          const results = await Promise.all(
-            data.map((item) =>
-              prisma.playerValue.create({
-                data: item,
-              }),
-            ),
-          );
-          return results;
-        },
+        () => prisma.playerValue.createMany({ data }),
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to create player values in batch: ${error}`,
+            message: 'Failed to create player values',
+            cause: error instanceof Error ? error : new Error(String(error)),
           }),
+      ),
+      TE.chain(() =>
+        pipe(
+          TE.tryCatch(
+            () =>
+              prisma.playerValue.findMany({
+                where: {
+                  OR: data.map((d) => ({
+                    elementId: d.elementId,
+                    changeDate: d.changeDate,
+                  })),
+                },
+              }),
+            (error) =>
+              createDBError({
+                code: DBErrorCode.QUERY_ERROR,
+                message: 'Failed to fetch created player values',
+                cause: error instanceof Error ? error : new Error(String(error)),
+              }),
+          ),
+        ),
       ),
     ),
 
-  update: (id: PlayerValueId, playerValue: PrismaPlayerValueUpdate) =>
+  update: (id: PlayerValueId, data: PrismaPlayerValue) =>
     pipe(
       TE.tryCatch(
-        () =>
-          prisma.playerValue.update({
-            where: {
-              id,
-            },
-            data: playerValue,
-          }),
+        () => prisma.playerValue.update({ where: { id }, data }),
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to update player value ${id}: ${error}`,
+            message: `Failed to update player value: ${id}`,
+            cause: error instanceof Error ? error : new Error(String(error)),
           }),
       ),
     ),
@@ -240,33 +199,28 @@ export const createPlayerValueRepository = (prisma: PrismaClient): PlayerValueRe
   deleteAll: () =>
     pipe(
       TE.tryCatch(
-        () => prisma.playerValue.deleteMany({}),
+        () => prisma.playerValue.deleteMany(),
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to delete all player values: ${error}`,
+            message: 'Failed to delete all player values',
+            cause: error instanceof Error ? error : new Error(String(error)),
           }),
       ),
-      TE.map(() => void 0),
+      TE.map(() => undefined),
     ),
 
   deleteByIds: (ids: PlayerValueId[]) =>
     pipe(
       TE.tryCatch(
-        () =>
-          prisma.playerValue.deleteMany({
-            where: {
-              id: {
-                in: [...ids],
-              },
-            },
-          }),
+        () => prisma.playerValue.deleteMany({ where: { id: { in: ids } } }),
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to delete player values by ids: ${error}`,
+            message: `Failed to delete player values by ids: ${ids.join(', ')}`,
+            cause: error instanceof Error ? error : new Error(String(error)),
           }),
       ),
-      TE.map(() => void 0),
+      TE.map(() => undefined),
     ),
 });

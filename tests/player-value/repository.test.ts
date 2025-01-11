@@ -251,6 +251,56 @@ describe('Player Value Repository', () => {
     });
   });
 
+  describe('findLatestByElements', () => {
+    it('should find latest player values for each element', async () => {
+      // Create test data with multiple values per element
+      const elementId = testPlayerValues[0].elementId;
+      const olderDate = '20230101';
+      const newerDate = '20230102';
+
+      const olderValue = {
+        ...testPlayerValues[0],
+        changeDate: olderDate,
+        value: 50,
+      };
+
+      const newerValue = {
+        ...testPlayerValues[0],
+        changeDate: newerDate,
+        value: 60,
+      };
+
+      // Save both values
+      await playerValueRepository.saveBatch([
+        toPrismaPlayerValue(olderValue),
+        toPrismaPlayerValue(newerValue),
+      ])();
+
+      const result = await playerValueRepository.findLatestByElements()();
+
+      expect(result._tag).toBe('Right');
+      if (result._tag === 'Right') {
+        // Should only get one value per element (the latest)
+        const valuesForElement = result.right.filter((pv) => pv.elementId === elementId);
+        expect(valuesForElement).toHaveLength(1);
+
+        // Should be the newer value
+        const latestValue = valuesForElement[0];
+        expect(latestValue.changeDate).toBe(newerDate);
+        expect(latestValue.value).toBe(60);
+      }
+    });
+
+    it('should handle empty database', async () => {
+      const result = await playerValueRepository.findLatestByElements()();
+
+      expect(result._tag).toBe('Right');
+      if (result._tag === 'Right') {
+        expect(result.right).toHaveLength(0);
+      }
+    });
+  });
+
   describe('deleteAll', () => {
     it('should delete all player values', async () => {
       const prismaPlayerValues = testPlayerValues.map(toPrismaPlayerValue);

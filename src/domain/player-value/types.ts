@@ -57,6 +57,7 @@ export interface PlayerValueOperations {
   readonly getPlayerValueByChangeType: (
     changeType: ValueChangeType,
   ) => TE.TaskEither<DomainError, PlayerValues>;
+  readonly getLatestPlayerValues: () => TE.TaskEither<DomainError, PlayerValues>;
   readonly createPlayerValues: (
     playerValues: PlayerValues,
   ) => TE.TaskEither<DomainError, PlayerValues>;
