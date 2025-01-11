@@ -11,6 +11,8 @@ import {
   CacheErrorCode,
   DBError,
   DBErrorCode,
+  DomainError,
+  DomainErrorCode,
   QueueError,
   QueueErrorCode,
   ServiceError,
@@ -18,6 +20,7 @@ import {
   createAPIError,
   createCacheError,
   createDBError,
+  createDomainError,
   createServiceError,
 } from '../types/error.type';
 
@@ -28,6 +31,20 @@ const isQueueError = (error: unknown): error is QueueError =>
   'code' in error &&
   'context' in error &&
   'error' in error;
+
+// ============ Domain Error Handlers ============
+
+/**
+ * Creates a domain error with a formatted message
+ */
+export const handleDomainError =
+  (message: string) =>
+  (error: Error | unknown): DomainError =>
+    createDomainError({
+      code: DomainErrorCode.DATABASE_ERROR,
+      message: `${message}: ${error instanceof Error ? error.message : String(error)}`,
+      cause: error instanceof Error ? error : new Error(String(error)),
+    });
 
 // ============ API Error Handlers ============
 

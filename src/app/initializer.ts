@@ -40,6 +40,10 @@ export const initializeApp = (): TE.TaskEither<APIError, void> =>
         eventRepository,
         phaseRepository,
         teamRepository,
+        playerRepository,
+        playerStatRepository,
+        playerValueRepository,
+        teamService,
       };
       return registry.createAll(deps);
     }),

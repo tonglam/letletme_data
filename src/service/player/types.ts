@@ -2,20 +2,19 @@ import * as TE from 'fp-ts/TaskEither';
 import { ExtendedBootstrapApi } from '../../domain/bootstrap/types';
 import { ServiceError } from '../../types/error.type';
 import { Player, PlayerId, Players } from '../../types/player.type';
+import { PlayerView, PlayerViews } from '../../types/player/query.type';
 import { Team } from '../../types/team.type';
-
-export type EnhancedPlayers = readonly EnhancedPlayer[];
 
 /**
  * Public interface for the player service.
  * Provides high-level operations for player management.
  */
 export interface PlayerService {
-  readonly getPlayers: () => TE.TaskEither<ServiceError, EnhancedPlayers>;
+  readonly getPlayers: () => TE.TaskEither<ServiceError, PlayerViews>;
   readonly getPlayer: (id: PlayerId) => TE.TaskEither<ServiceError, Player | null>;
   readonly savePlayers: (players: Players) => TE.TaskEither<ServiceError, Players>;
   readonly syncPlayersFromApi: () => TE.TaskEither<ServiceError, Players>;
-  readonly findPlayerById: (id: PlayerId) => TE.TaskEither<ServiceError, EnhancedPlayer | null>;
+  readonly findPlayerById: (id: PlayerId) => TE.TaskEither<ServiceError, PlayerView | null>;
 }
 
 /**
@@ -43,8 +42,8 @@ export interface PlayerServiceDependencies {
  * Maps closely to domain operations but with service-level error handling.
  */
 export interface PlayerServiceOperations {
-  readonly findAllPlayers: () => TE.TaskEither<ServiceError, EnhancedPlayers>;
-  readonly findPlayerById: (id: PlayerId) => TE.TaskEither<ServiceError, EnhancedPlayer | null>;
+  readonly findAllPlayers: () => TE.TaskEither<ServiceError, PlayerViews>;
+  readonly findPlayerById: (id: PlayerId) => TE.TaskEither<ServiceError, PlayerView | null>;
   readonly syncPlayersFromApi: (
     bootstrapApi: PlayerServiceDependencies['bootstrapApi'],
   ) => TE.TaskEither<ServiceError, Players>;
@@ -65,16 +64,4 @@ export interface WorkflowContext {
 export interface WorkflowResult<T> {
   readonly result: T;
   readonly duration: number;
-}
-
-/**
- * Enhanced player type with team information
- */
-export interface EnhancedPlayer extends Omit<Player, 'teamId' | 'elementType'> {
-  readonly elementType: string;
-  readonly team: {
-    readonly id: number;
-    readonly name: string;
-    readonly shortName: string;
-  };
 }

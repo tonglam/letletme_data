@@ -4,22 +4,48 @@
  */
 
 import * as TE from 'fp-ts/TaskEither';
-import { TeamId } from '../../types/team.type';
+import { pipe } from 'fp-ts/function';
+import {
+  createPlayerCommandOperations,
+  createPlayerQueryOperations,
+} from '../../domain/player/operation';
+import { DBError, DBErrorCode, ServiceError } from '../../types/error.type';
+import { Team, TeamId } from '../../types/team.type';
+import { TeamRepository } from '../../types/team/repository.type';
 import { ServiceKey } from '../index';
-import { registry, ServiceFactory } from '../registry';
+import { registry, ServiceDependencies, ServiceFactory } from '../registry';
 import { createPlayerService } from './service';
 import { PlayerService } from './types';
 
-export const playerServiceFactory: ServiceFactory<PlayerService> = {
-  create: ({ bootstrapApi, playerRepository, teamService }) =>
-    TE.right(
-      createPlayerService(bootstrapApi, playerRepository, {
-        bootstrapApi,
-        teamService: {
-          getTeam: (id: number) => teamService.getTeam(id as TeamId),
-        },
-      }),
+const mapServiceErrorToDBError = (error: ServiceError): DBError => ({
+  name: 'DBError',
+  code: DBErrorCode.OPERATION_ERROR,
+  message: error.message,
+  timestamp: new Date(),
+  cause: error.cause,
+});
+
+const createTeamRepositoryAdapter = (deps: ServiceDependencies): TeamRepository => ({
+  findById: (id: TeamId) =>
+    pipe(deps.teamService.getTeam(id), TE.mapLeft(mapServiceErrorToDBError)),
+  findAll: () =>
+    pipe(
+      deps.teamService.getTeams(),
+      TE.mapLeft(mapServiceErrorToDBError),
+      TE.map((teams) => Array.from(teams) as Team[]),
     ),
+});
+
+export const playerServiceFactory: ServiceFactory<PlayerService> = {
+  create: (deps: ServiceDependencies) => {
+    // Create domain operations
+    const teamRepository = createTeamRepositoryAdapter(deps);
+    const queryOps = createPlayerQueryOperations(deps.playerRepository, teamRepository);
+    const commandOps = createPlayerCommandOperations(deps.playerRepository);
+
+    // Create and return the service
+    return TE.right(createPlayerService(deps.bootstrapApi, queryOps, commandOps));
+  },
   dependencies: ['bootstrapApi', 'playerRepository', 'teamService'],
 };
 

@@ -6,7 +6,7 @@ import { PhaseRepository } from '../domain/phase/types';
 import { PlayerStatRepository } from '../domain/player-stat/types';
 import { PlayerValueRepository } from '../domain/player-value/types';
 import { APIError, APIErrorCode, createAPIError } from '../types/error.type';
-import { PlayerRepository } from '../types/player.type';
+import { PlayerRepository } from '../types/player/repository.type';
 import { TeamRepository } from '../types/team.type';
 import { ServiceContainer, ServiceKey } from './index';
 import { TeamService } from './team';
