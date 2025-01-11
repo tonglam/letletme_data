@@ -1,4 +1,4 @@
-import { ElementType, PrismaClient } from '@prisma/client';
+import { PrismaClient } from '@prisma/client';
 import * as E from 'fp-ts/Either';
 import { DeepMockProxy, mockDeep } from 'jest-mock-extended';
 import { createPlayerRepository } from '../../src/domain/player/repository';
@@ -12,7 +12,7 @@ describe('Player Repository Tests', () => {
     elementCode: 12345,
     price: 100,
     startPrice: 100,
-    elementType: ElementType.GKP,
+    elementType: 1,
     firstName: 'Test',
     secondName: 'Player',
     webName: 'T.Player',

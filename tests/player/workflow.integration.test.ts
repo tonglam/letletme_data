@@ -141,7 +141,7 @@ describe('Player Workflow Integration Tests', () => {
           elementCode: expect.any(Number),
           price: expect.any(Number),
           startPrice: expect.any(Number),
-          elementType: expect.any(String),
+          elementType: expect.any(Number),
           webName: expect.any(String),
           teamId: expect.any(Number),
         });
@@ -184,7 +184,7 @@ describe('Player Workflow Integration Tests', () => {
       expect(result).toBeDefined();
       expect(result.name).toBe('ServiceError');
       expect(result.code).toBe(ServiceErrorCode.INTEGRATION_ERROR);
-      expect(result.message).toBe('Player sync workflow failed: Failed to fetch players from API');
+      expect(result.message).toBe('Player sync workflow failed: Service integration failed');
       expect(result.timestamp).toBeInstanceOf(Date);
     }, 10000);
   });

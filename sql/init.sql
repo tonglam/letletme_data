@@ -1,5 +1,4 @@
 -- Custom types
-CREATE TYPE "ElementType" AS ENUM ('GKP', 'DEF', 'MID', 'FWD');
 CREATE TYPE "ValueChangeType" AS ENUM ('Start', 'Rise', 'Fall');
 
 -- Events table
@@ -77,7 +76,7 @@ CREATE TABLE "players" (
     "element_code" INTEGER UNIQUE NOT NULL,
     "price" INTEGER NOT NULL DEFAULT 0,
     "start_price" INTEGER NOT NULL DEFAULT 0,
-    "element_type" "ElementType" NOT NULL,
+    "element_type" INTEGER NOT NULL,
     "first_name" TEXT,
     "second_name" TEXT,
     "web_name" TEXT NOT NULL,

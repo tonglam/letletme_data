@@ -1,4 +1,3 @@
-import { ElementType } from '@prisma/client';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import {
@@ -7,6 +6,7 @@ import {
   toDomainPlayer,
   validatePlayerId,
 } from '../../src/domain/player/types';
+import { ElementType } from '../../src/types/base.type';
 import { ElementResponse, ElementResponseSchema } from '../../src/types/element.type';
 import bootstrapData from '../data/bootstrap.json';
 
@@ -28,7 +28,7 @@ describe('Player Domain Tests', () => {
         elementCode: expect.any(Number),
         price: expect.any(Number),
         startPrice: expect.any(Number),
-        elementType: expect.any(String),
+        elementType: expect.any(Number),
         webName: expect.any(String),
       });
 

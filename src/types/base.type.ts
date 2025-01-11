@@ -3,7 +3,7 @@
  * Includes branded types, base interfaces, and common type utilities.
  */
 
-import { ElementType, ValueChangeType } from '@prisma/client';
+import { ValueChangeType } from '@prisma/client';
 import * as E from 'fp-ts/Either';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
@@ -23,25 +23,45 @@ export enum ElementStatus {
   Departed = 'd',
 }
 
-export { ElementType, ValueChangeType };
+export { ValueChangeType };
+
+/**
+ * Element type constants
+ */
+export enum ElementType {
+  GKP = 1,
+  DEF = 2,
+  MID = 3,
+  FWD = 4,
+}
 
 /**
  * Configuration for element types with their IDs and names
  */
 export const ElementTypeConfig = {
-  [ElementType.GKP]: { id: 1, name: 'Goalkeeper' },
-  [ElementType.DEF]: { id: 2, name: 'Defender' },
-  [ElementType.MID]: { id: 3, name: 'Midfielder' },
-  [ElementType.FWD]: { id: 4, name: 'Forward' },
+  [ElementType.GKP]: { id: ElementType.GKP, name: 'Goalkeeper' },
+  [ElementType.DEF]: { id: ElementType.DEF, name: 'Defender' },
+  [ElementType.MID]: { id: ElementType.MID, name: 'Midfielder' },
+  [ElementType.FWD]: { id: ElementType.FWD, name: 'Forward' },
 } as const;
 
 // Derived maps for specific use cases
 /**
  * Gets element type by its numeric ID
  */
-export const getElementTypeById = (id: number): ElementType | undefined => {
-  const entry = Object.entries(ElementTypeConfig).find((entry) => entry[1].id === id);
-  return entry ? (entry[0] as ElementType) : undefined;
+export const getElementTypeById = (id: number): ElementType | null => {
+  switch (id) {
+    case ElementType.GKP:
+      return ElementType.GKP;
+    case ElementType.DEF:
+      return ElementType.DEF;
+    case ElementType.MID:
+      return ElementType.MID;
+    case ElementType.FWD:
+      return ElementType.FWD;
+    default:
+      return null;
+  }
 };
 
 /**

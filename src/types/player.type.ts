@@ -1,4 +1,3 @@
-import { ElementType } from '@prisma/client';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
@@ -6,6 +5,7 @@ import {
   BaseRepository,
   Branded,
   createBrandedType,
+  ElementType,
   getElementTypeById,
   isApiResponse,
 } from './base.type';
@@ -78,19 +78,20 @@ export const fromElementResponse = (raw: ElementResponse): E.Either<string, Play
     PlayerId.validate(raw.id),
     E.chain((id) => {
       const elementType = getElementTypeById(raw.element_type);
-      return elementType
-        ? E.right({
-            id,
-            elementCode: raw.code,
-            price: raw.now_cost,
-            startPrice: raw.cost_change_start,
-            elementType,
-            firstName: raw.first_name,
-            secondName: raw.second_name,
-            webName: raw.web_name,
-            teamId: raw.team,
-          })
-        : E.left(`Invalid element type: ${raw.element_type}`);
+      if (!elementType) {
+        return E.left(`Invalid element type: ${raw.element_type}`);
+      }
+      return E.right({
+        id,
+        elementCode: raw.code,
+        price: raw.now_cost,
+        startPrice: raw.cost_change_start,
+        elementType,
+        firstName: raw.first_name,
+        secondName: raw.second_name,
+        webName: raw.web_name,
+        teamId: raw.team,
+      });
     }),
   );
 
@@ -99,14 +100,22 @@ export const toDomainPlayer = (data: ElementResponse | PrismaPlayer): Player => 
   const isElementResponse = (d: ElementResponse | PrismaPlayer): d is ElementResponse =>
     isApiResponse(d, 'element_type');
 
+  const elementType = isElementResponse(data)
+    ? getElementTypeById(data.element_type)
+    : data.elementType;
+
+  if (!elementType) {
+    throw new Error(
+      `Invalid element type: ${isElementResponse(data) ? data.element_type : data.elementType}`,
+    );
+  }
+
   return {
     id: (isElementResponse(data) ? data.id : data.element) as PlayerId,
     elementCode: isElementResponse(data) ? data.code : data.elementCode,
     price: isElementResponse(data) ? data.now_cost : data.price,
     startPrice: isElementResponse(data) ? data.cost_change_start : data.startPrice,
-    elementType: isElementResponse(data)
-      ? getElementTypeById(data.element_type) ?? ElementType.GKP
-      : data.elementType,
+    elementType,
     firstName: isElementResponse(data) ? data.first_name : data.firstName,
     secondName: isElementResponse(data) ? data.second_name : data.secondName,
     webName: isElementResponse(data) ? data.web_name : data.webName,

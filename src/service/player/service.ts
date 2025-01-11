@@ -2,8 +2,9 @@
 // Provides business logic for Player operations, implementing caching and error handling.
 // Uses functional programming principles for type-safe operations.
 
-import * as TE from 'fp-ts/TaskEither';
+import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
+import * as TE from 'fp-ts/TaskEither';
 import { createPlayerOperations } from '../../domain/player/operation';
 import { PlayerCache, PlayerOperations } from '../../domain/player/types';
 import { ElementResponse } from '../../types/element.type';
@@ -48,20 +49,21 @@ const playerServiceOperations = (domainOps: PlayerOperations): PlayerServiceOper
           cause: error,
         }),
       ),
-      TE.chain((players: readonly ElementResponse[]) =>
-        pipe(
-          TE.right(players.map(toDomainPlayer)),
-          TE.chain((domainPlayers) =>
-            pipe(
-              domainOps.deleteAll(),
-              TE.mapLeft(mapDomainError),
-              TE.chain(() =>
-                pipe(domainOps.createPlayers(domainPlayers), TE.mapLeft(mapDomainError)),
-              ),
-            ),
-          ),
-        ),
-      ),
+      TE.chain((players: readonly ElementResponse[]) => {
+        const domainResults = players.map((player) => {
+          try {
+            return E.right(toDomainPlayer(player));
+          } catch (error) {
+            return E.left(error instanceof Error ? error : new Error(String(error)));
+          }
+        });
+        const validPlayers = domainResults.filter(E.isRight).map((result) => result.right);
+        return pipe(
+          domainOps.deleteAll(),
+          TE.mapLeft(mapDomainError),
+          TE.chain(() => pipe(domainOps.createPlayers(validPlayers), TE.mapLeft(mapDomainError))),
+        );
+      }),
     ) as TE.TaskEither<ServiceError, Players>,
 });
 

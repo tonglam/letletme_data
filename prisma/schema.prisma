@@ -79,24 +79,17 @@ model Team {
   @@map("teams")
 }
 
-enum ElementType {
-  GKP @map("1")
-  DEF @map("2")
-  MID @map("3")
-  FWD @map("4")
-}
-
 model Player {
-  element     Int         @id
-  elementCode Int         @unique @map("element_code")
-  price       Int         @default(0)
-  startPrice  Int         @default(0) @map("start_price")
-  elementType ElementType @map("element_type")
-  firstName   String?     @map("first_name")
-  secondName  String?     @map("second_name")
-  webName     String      @map("web_name")
-  teamId      Int         @map("team_id")
-  createdAt   DateTime    @default(now()) @map("created_at")
+  element     Int      @id
+  elementCode Int      @unique @map("element_code")
+  price       Int      @default(0)
+  startPrice  Int      @default(0) @map("start_price")
+  elementType Int      @map("element_type")
+  firstName   String?  @map("first_name")
+  secondName  String?  @map("second_name")
+  webName     String   @map("web_name")
+  teamId      Int      @map("team_id")
+  createdAt   DateTime @default(now()) @map("created_at")
 
   @@map("players")
 }
