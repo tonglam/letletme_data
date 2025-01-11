@@ -1,8 +1,11 @@
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
 import { ExtendedBootstrapApi } from '../domain/bootstrap/types';
-import { EventRepository } from '../domain/event/types';
+import { EventOperations, EventRepository } from '../domain/event/types';
 import { PhaseRepository } from '../domain/phase/types';
+import { PlayerStatRepository } from '../domain/player-stat/types';
+import { PlayerValueRepository } from '../domain/player-value/types';
+import { PlayerRepository } from '../domain/player/types';
 import { TeamRepository } from '../domain/team/types';
 import { APIError, APIErrorCode, createAPIError } from '../types/error.type';
 import { ServiceContainer, ServiceKey } from './index';
@@ -10,7 +13,11 @@ import { ServiceContainer, ServiceKey } from './index';
 export interface ServiceDependencies {
   readonly bootstrapApi: ExtendedBootstrapApi;
   readonly eventRepository: EventRepository;
+  readonly eventOperations: EventOperations;
   readonly phaseRepository: PhaseRepository;
+  readonly playerRepository: PlayerRepository;
+  readonly playerStatRepository: PlayerStatRepository;
+  readonly playerValueRepository: PlayerValueRepository;
   readonly teamRepository: TeamRepository;
 }
 
@@ -66,6 +73,9 @@ const createRegistry = (): Registry => {
               switch (key) {
                 case ServiceKey.EVENT:
                 case ServiceKey.PHASE:
+                case ServiceKey.PLAYER:
+                case ServiceKey.PLAYER_STAT:
+                case ServiceKey.PLAYER_VALUE:
                 case ServiceKey.TEAM:
                   (container as Record<(typeof ServiceKey)[keyof typeof ServiceKey], unknown>)[
                     key
