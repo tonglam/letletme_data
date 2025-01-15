@@ -1,12 +1,17 @@
-import { ElementTypeConfig } from '../../../types/base.type';
+import { ElementTypeConfig, getElementTypeById } from '../../../types/base.type';
 import { Player } from '../../../types/player.type';
 import { PlayerView } from '../../../types/player/query.type';
 import { Team } from '../../../types/team.type';
 
 export const buildPlayerView = (player: Player, team: Team): PlayerView => {
-  const elementTypeInfo = ElementTypeConfig[player.elementType];
+  const elementType = getElementTypeById(player.elementType);
+  if (!elementType) {
+    throw new Error(`Invalid element type: ${player.elementType}`);
+  }
+  const elementTypeInfo = ElementTypeConfig[elementType];
+  const { ...playerWithoutTeamId } = player;
   return {
-    ...player,
+    ...playerWithoutTeamId,
     elementType: elementTypeInfo.name,
     team: {
       id: Number(team.id),

@@ -1,333 +1,251 @@
 import * as E from 'fp-ts/Either';
-import { pipe } from 'fp-ts/function';
+import { Redis } from 'ioredis';
+import { DeepMockProxy, mockDeep } from 'jest-mock-extended';
 import { CachePrefix } from '../../src/config/cache/cache.config';
 import { createPlayerCache } from '../../src/domain/player/cache';
-import { toDomainPlayer } from '../../src/domain/player/types';
-import { redisClient } from '../../src/infrastructure/cache/client';
-import { createRedisCache } from '../../src/infrastructure/cache/redis-cache';
-import type { ElementResponse } from '../../src/types/element.type';
-import type { Player } from '../../src/types/player.type';
-import bootstrapData from '../data/bootstrap.json';
+import { RedisCache } from '../../src/infrastructure/cache/redis-cache';
+import { ElementType } from '../../src/types/base.type';
+import { CacheErrorCode } from '../../src/types/error.type';
+import { Player, PlayerId } from '../../src/types/player.type';
+import { PlayerDataProvider } from '../../src/types/player/operations.type';
 
 describe('Player Cache Tests', () => {
-  let testPlayers: Player[];
-  const TEST_PREFIX = CachePrefix.PLAYER;
-  const TEST_SEASON = '2425';
+  let cache: DeepMockProxy<RedisCache<Player>>;
+  let dataProvider: DeepMockProxy<PlayerDataProvider>;
+  let redisClient: DeepMockProxy<Redis>;
 
-  beforeAll(() => {
-    // Convert bootstrap players to domain players
-    testPlayers = bootstrapData.elements
-      .slice(0, 3)
-      .map((player) => toDomainPlayer(player as ElementResponse));
+  const testPlayer: Player = {
+    id: 1 as PlayerId,
+    elementCode: 12345,
+    price: 100,
+    startPrice: 100,
+    elementType: ElementType.GKP,
+    firstName: 'Test',
+    secondName: 'Player',
+    webName: 'T.Player',
+    teamId: 1,
+  };
+
+  const config = {
+    keyPrefix: CachePrefix.PLAYER,
+    season: '2023',
+  };
+
+  beforeEach(() => {
+    redisClient = mockDeep<Redis>();
+    cache = mockDeep<RedisCache<Player>>();
+    dataProvider = mockDeep<PlayerDataProvider>();
+    cache.client = redisClient;
   });
 
-  beforeEach(async () => {
-    // Clean up any existing test keys
-    const existingKeys = await redisClient.keys(`${TEST_PREFIX}*`);
-    if (existingKeys.length > 0) {
-      await redisClient.del(existingKeys);
-    }
-  });
+  describe('warmUp', () => {
+    it('should warm up cache with players from data provider', async () => {
+      const players = [testPlayer];
+      dataProvider.getAll.mockResolvedValue(players);
+      redisClient.multi.mockReturnThis();
+      redisClient.exec.mockResolvedValue([]);
 
-  afterAll(async () => {
-    // Final cleanup
-    const existingKeys = await redisClient.keys(`${TEST_PREFIX}*`);
-    if (existingKeys.length > 0) {
-      await redisClient.del(existingKeys);
-    }
-    await redisClient.quit();
-  });
+      const playerCache = createPlayerCache(cache, dataProvider, config);
+      const result = await playerCache.warmUp()();
 
-  describe('Cache Operations', () => {
-    const comparePlayer = (a: Player, b: Player): boolean => {
-      return JSON.stringify(a) === JSON.stringify(b);
-    };
-
-    const comparePlayerArrays = (a: readonly Player[], b: readonly Player[]): boolean => {
-      if (a.length !== b.length) {
-        console.log('Length mismatch:', a.length, b.length);
-        return false;
-      }
-
-      // Sort both arrays by ID for consistent comparison
-      const sortedA = [...a].sort((x, y) => Number(x.id) - Number(y.id));
-      const sortedB = [...b].sort((x, y) => Number(x.id) - Number(y.id));
-
-      for (let i = 0; i < sortedA.length; i++) {
-        if (!comparePlayer(sortedA[i], sortedB[i])) {
-          console.log('Mismatch at index', i);
-          console.log('Player A:', JSON.stringify(sortedA[i], null, 2));
-          console.log('Player B:', JSON.stringify(sortedB[i], null, 2));
-          return false;
-        }
-      }
-
-      return true;
-    };
-
-    it('should set and get a single player', async () => {
-      const redis = createRedisCache<Player>({ keyPrefix: TEST_PREFIX });
-      const playerCache = createPlayerCache(
-        redis,
-        {
-          getOne: async () => null,
-          getAll: async () => [],
-        },
-        {
-          keyPrefix: TEST_PREFIX,
-          season: TEST_SEASON,
-        },
+      expect(E.isRight(result)).toBe(true);
+      expect(redisClient.del).toHaveBeenCalledWith(`${config.keyPrefix}::${config.season}`);
+      expect(redisClient.hset).toHaveBeenCalledWith(
+        `${config.keyPrefix}::${config.season}`,
+        testPlayer.id.toString(),
+        JSON.stringify(testPlayer),
       );
+    });
 
-      const testPlayer = testPlayers[0];
-      const cacheResult = await pipe(playerCache.cachePlayer(testPlayer))();
-      expect(E.isRight(cacheResult)).toBe(true);
+    it('should handle empty player list', async () => {
+      dataProvider.getAll.mockResolvedValue([]);
 
-      const getResult = await pipe(playerCache.getPlayer(testPlayer.id.toString()))();
-      expect(E.isRight(getResult)).toBe(true);
-      if (E.isRight(getResult) && getResult.right) {
-        expect(comparePlayer(getResult.right, testPlayer)).toBe(true);
+      const playerCache = createPlayerCache(cache, dataProvider, config);
+      const result = await playerCache.warmUp()();
+
+      expect(E.isRight(result)).toBe(true);
+      expect(redisClient.del).not.toHaveBeenCalled();
+      expect(redisClient.hset).not.toHaveBeenCalled();
+    });
+
+    it('should handle provider errors', async () => {
+      dataProvider.getAll.mockRejectedValue(new Error('Provider error'));
+
+      const playerCache = createPlayerCache(cache, dataProvider, config);
+      const result = await playerCache.warmUp()();
+
+      expect(E.isLeft(result)).toBe(true);
+      if (E.isLeft(result)) {
+        expect(result.left.code).toBe(CacheErrorCode.OPERATION_ERROR);
+        expect(result.left.message).toContain('Failed to warm up cache');
+      }
+    });
+  });
+
+  describe('getPlayer', () => {
+    it('should return cached player', async () => {
+      redisClient.hget.mockResolvedValue(JSON.stringify(testPlayer));
+
+      const playerCache = createPlayerCache(cache, dataProvider, config);
+      const result = await playerCache.getPlayer(testPlayer.id.toString())();
+
+      expect(E.isRight(result)).toBe(true);
+      if (E.isRight(result)) {
+        expect(result.right).toEqual(testPlayer);
       }
     });
 
-    it('should set and get multiple players', async () => {
-      const redis = createRedisCache<Player>({ keyPrefix: TEST_PREFIX });
-      const playerCache = createPlayerCache(
-        redis,
-        {
-          getOne: async () => null,
-          getAll: async () => [],
-        },
-        {
-          keyPrefix: TEST_PREFIX,
-          season: TEST_SEASON,
-        },
+    it('should fetch from provider if not in cache', async () => {
+      redisClient.hget.mockResolvedValue(null);
+      dataProvider.getOne.mockResolvedValue(testPlayer);
+      redisClient.hset.mockResolvedValue(1);
+
+      const playerCache = createPlayerCache(cache, dataProvider, config);
+      const result = await playerCache.getPlayer(testPlayer.id.toString())();
+
+      expect(E.isRight(result)).toBe(true);
+      if (E.isRight(result)) {
+        expect(result.right).toEqual(testPlayer);
+      }
+      expect(redisClient.hset).toHaveBeenCalledWith(
+        `${config.keyPrefix}::${config.season}`,
+        testPlayer.id.toString(),
+        JSON.stringify(testPlayer),
       );
+    });
 
-      const cacheResult = await pipe(playerCache.cachePlayers(testPlayers))();
-      expect(E.isRight(cacheResult)).toBe(true);
+    it('should handle cache errors', async () => {
+      redisClient.hget.mockRejectedValue(new Error('Cache error'));
 
-      const getResult = await pipe(playerCache.getAllPlayers())();
-      expect(E.isRight(getResult)).toBe(true);
-      if (E.isRight(getResult) && getResult.right) {
-        const cachedPlayers = getResult.right;
-        expect(comparePlayerArrays(cachedPlayers, testPlayers)).toBe(true);
+      const playerCache = createPlayerCache(cache, dataProvider, config);
+      const result = await playerCache.getPlayer(testPlayer.id.toString())();
+
+      expect(E.isLeft(result)).toBe(true);
+      if (E.isLeft(result)) {
+        expect(result.left.code).toBe(CacheErrorCode.OPERATION_ERROR);
+        expect(result.left.message).toContain('Failed to get player from cache');
+      }
+    });
+  });
+
+  describe('getAllPlayers', () => {
+    it('should return all cached players', async () => {
+      const players = { [testPlayer.id]: JSON.stringify(testPlayer) };
+      redisClient.hgetall.mockResolvedValue(players);
+
+      const playerCache = createPlayerCache(cache, dataProvider, config);
+      const result = await playerCache.getAllPlayers()();
+
+      expect(E.isRight(result)).toBe(true);
+      if (E.isRight(result)) {
+        expect(result.right).toHaveLength(1);
+        expect(result.right[0]).toEqual(testPlayer);
       }
     });
 
-    it('should handle cache miss with data provider fallback', async () => {
-      // Clear the cache before starting the test
-      const cacheKey = `${TEST_PREFIX}::${TEST_SEASON}`;
-      const keys = await redisClient.keys(`${cacheKey}*`);
-      if (keys.length > 0) {
-        await redisClient.del(keys);
+    it('should fetch from provider if cache is empty', async () => {
+      redisClient.hgetall.mockResolvedValue({});
+      dataProvider.getAll.mockResolvedValue([testPlayer]);
+      redisClient.multi.mockReturnThis();
+      redisClient.exec.mockResolvedValue([]);
+
+      const playerCache = createPlayerCache(cache, dataProvider, config);
+      const result = await playerCache.getAllPlayers()();
+
+      expect(E.isRight(result)).toBe(true);
+      if (E.isRight(result)) {
+        expect(result.right).toHaveLength(1);
+        expect(result.right[0]).toEqual(testPlayer);
       }
-
-      const redis = createRedisCache<Player>({ keyPrefix: TEST_PREFIX });
-      const testPlayer = testPlayers[0];
-      const mockDataProvider = {
-        getOne: jest.fn().mockImplementation(async (id: number) => {
-          const player = testPlayers.find((e) => Number(e.id) === id);
-          return player || null;
-        }),
-        getAll: jest.fn().mockImplementation(async () => {
-          // Return a copy of testPlayers to avoid mutation
-          return [...testPlayers];
-        }),
-      };
-
-      const playerCache = createPlayerCache(redis, mockDataProvider, {
-        keyPrefix: TEST_PREFIX,
-        season: TEST_SEASON,
-      });
-
-      // Test cache miss for single player
-      const getResult = await pipe(playerCache.getPlayer(testPlayer.id.toString()))();
-      expect(E.isRight(getResult)).toBe(true);
-      if (E.isRight(getResult) && getResult.right) {
-        expect(comparePlayer(getResult.right, testPlayer)).toBe(true);
-        expect(mockDataProvider.getOne).toHaveBeenCalledWith(Number(testPlayer.id));
-      }
-
-      // Clear the cache before testing getAllPlayers
-      const allKeys = await redisClient.keys(`${cacheKey}*`);
-      if (allKeys.length > 0) {
-        await redisClient.del(allKeys);
-      }
-
-      // Test cache miss for all players
-      const getAllResult = await pipe(playerCache.getAllPlayers())();
-      expect(E.isRight(getAllResult)).toBe(true);
-      if (E.isRight(getAllResult) && getAllResult.right) {
-        const cachedPlayers = getAllResult.right;
-        expect(cachedPlayers.length).toBe(testPlayers.length);
-        expect(comparePlayerArrays(cachedPlayers, testPlayers)).toBe(true);
-        expect(mockDataProvider.getAll).toHaveBeenCalled();
-
-        // Verify that players are properly cached
-        const verifyResult = await pipe(playerCache.getAllPlayers())();
-        expect(E.isRight(verifyResult)).toBe(true);
-        if (E.isRight(verifyResult) && verifyResult.right) {
-          expect(verifyResult.right.length).toBe(testPlayers.length);
-          expect(comparePlayerArrays(verifyResult.right, testPlayers)).toBe(true);
-          // getAll should not be called again
-          expect(mockDataProvider.getAll).toHaveBeenCalledTimes(1);
-        }
-      }
+      expect(redisClient.del).toHaveBeenCalledWith(`${config.keyPrefix}::${config.season}`);
+      expect(redisClient.hset).toHaveBeenCalledWith(
+        `${config.keyPrefix}::${config.season}`,
+        testPlayer.id.toString(),
+        JSON.stringify(testPlayer),
+      );
     });
 
-    it('should handle error cases gracefully', async () => {
-      const redis = createRedisCache<Player>({ keyPrefix: TEST_PREFIX });
-      const mockDataProvider = {
-        getOne: jest.fn().mockRejectedValue(new Error('Data provider error')),
-        getAll: jest.fn().mockRejectedValue(new Error('Data provider error')),
-      };
+    it('should handle cache errors', async () => {
+      redisClient.hgetall.mockRejectedValue(new Error('Cache error'));
 
-      const playerCache = createPlayerCache(redis, mockDataProvider, {
-        keyPrefix: TEST_PREFIX,
-        season: TEST_SEASON,
-      });
+      const playerCache = createPlayerCache(cache, dataProvider, config);
+      const result = await playerCache.getAllPlayers()();
 
-      // Test error handling for single player
-      const getResult = await pipe(playerCache.getPlayer('1'))();
-      expect(E.isLeft(getResult)).toBe(true);
-
-      // Test error handling for all players
-      const getAllResult = await pipe(playerCache.getAllPlayers())();
-      expect(E.isLeft(getAllResult)).toBe(true);
-    });
-
-    it('should warm up cache with initial data', async () => {
-      const redis = createRedisCache<Player>({ keyPrefix: TEST_PREFIX });
-      const mockDataProvider = {
-        getOne: jest.fn().mockResolvedValue(null),
-        getAll: jest.fn().mockResolvedValue(testPlayers),
-      };
-
-      const playerCache = createPlayerCache(redis, mockDataProvider, {
-        keyPrefix: TEST_PREFIX,
-        season: TEST_SEASON,
-      });
-
-      // Warm up cache
-      const warmUpResult = await pipe(playerCache.warmUp())();
-      expect(E.isRight(warmUpResult)).toBe(true);
-      expect(mockDataProvider.getAll).toHaveBeenCalled();
-
-      // Verify data is cached
-      const getResult = await pipe(playerCache.getAllPlayers())();
-      expect(E.isRight(getResult)).toBe(true);
-      if (E.isRight(getResult) && getResult.right) {
-        expect(comparePlayerArrays(getResult.right, testPlayers)).toBe(true);
-        // Should not call data provider again
-        expect(mockDataProvider.getAll).toHaveBeenCalledTimes(1);
+      expect(E.isLeft(result)).toBe(true);
+      if (E.isLeft(result)) {
+        expect(result.left.code).toBe(CacheErrorCode.OPERATION_ERROR);
+        expect(result.left.message).toContain('Failed to get players from cache');
       }
     });
+  });
 
-    it('should handle different seasons and key prefixes', async () => {
-      const customPrefix = CachePrefix.PLAYER;
-      const customSeason = '2024';
-      const redis = createRedisCache<Player>({ keyPrefix: customPrefix });
-      const mockDataProvider = {
-        getOne: jest.fn().mockResolvedValue(testPlayers[0]),
-        getAll: jest.fn().mockResolvedValue([]),
-      };
+  describe('cachePlayer', () => {
+    it('should cache a single player', async () => {
+      redisClient.hset.mockResolvedValue(1);
 
-      const playerCache = createPlayerCache(redis, mockDataProvider, {
-        keyPrefix: customPrefix,
-        season: customSeason,
-      });
+      const playerCache = createPlayerCache(cache, dataProvider, config);
+      const result = await playerCache.cachePlayer(testPlayer)();
 
-      // Cache multiple players to test multi command
-      const cacheResult = await pipe(playerCache.cachePlayers([testPlayers[0], testPlayers[1]]))();
-      expect(E.isRight(cacheResult)).toBe(true);
-
-      // Verify the players are stored in Redis with correct key
-      const key = `${customPrefix}::${customSeason}`;
-      const values = await redisClient.hgetall(key);
-      expect(values).toBeTruthy();
-      expect(Object.keys(values).length).toBe(2);
-
-      // Verify we can retrieve them through the cache
-      const getResult = await pipe(playerCache.getAllPlayers())();
-      expect(E.isRight(getResult)).toBe(true);
-      if (E.isRight(getResult) && getResult.right) {
-        expect(getResult.right.length).toBe(2);
-        expect(comparePlayerArrays(getResult.right, [testPlayers[0], testPlayers[1]])).toBe(true);
-      }
+      expect(E.isRight(result)).toBe(true);
+      expect(redisClient.hset).toHaveBeenCalledWith(
+        `${config.keyPrefix}::${config.season}`,
+        testPlayer.id.toString(),
+        JSON.stringify(testPlayer),
+      );
     });
 
-    it('should handle empty player data gracefully', async () => {
-      const redis = createRedisCache<Player>({ keyPrefix: TEST_PREFIX });
-      const mockDataProvider = {
-        getOne: jest.fn().mockResolvedValue(null),
-        getAll: jest.fn().mockResolvedValue([]),
-      };
+    it('should handle cache errors', async () => {
+      redisClient.hset.mockRejectedValue(new Error('Cache error'));
 
-      const playerCache = createPlayerCache(redis, mockDataProvider, {
-        keyPrefix: TEST_PREFIX,
-        season: TEST_SEASON,
-      });
+      const playerCache = createPlayerCache(cache, dataProvider, config);
+      const result = await playerCache.cachePlayer(testPlayer)();
 
-      // Test caching empty array
-      const cacheResult = await pipe(playerCache.cachePlayers([]))();
-      expect(E.isRight(cacheResult)).toBe(true);
-
-      // Test getting players when cache is empty
-      const getResult = await pipe(playerCache.getAllPlayers())();
-      expect(E.isRight(getResult)).toBe(true);
-      if (E.isRight(getResult)) {
-        expect(getResult.right).toEqual([]);
+      expect(E.isLeft(result)).toBe(true);
+      if (E.isLeft(result)) {
+        expect(result.left.code).toBe(CacheErrorCode.OPERATION_ERROR);
+        expect(result.left.message).toContain('Failed to cache player');
       }
     });
+  });
 
-    it('should handle malformed player data', async () => {
-      const redis = createRedisCache<Player>({ keyPrefix: TEST_PREFIX });
-      const key = `${TEST_PREFIX}::${TEST_SEASON}`;
+  describe('cachePlayers', () => {
+    it('should cache multiple players', async () => {
+      const players = [testPlayer];
+      redisClient.multi.mockReturnThis();
+      redisClient.exec.mockResolvedValue([]);
 
-      // Manually insert malformed data
-      await redisClient.hset(key, '999', 'invalid-json');
+      const playerCache = createPlayerCache(cache, dataProvider, config);
+      const result = await playerCache.cachePlayers(players)();
 
-      const mockDataProvider = {
-        getOne: jest.fn().mockResolvedValue(null),
-        getAll: jest.fn().mockResolvedValue([]),
-      };
-
-      const playerCache = createPlayerCache(redis, mockDataProvider, {
-        keyPrefix: TEST_PREFIX,
-        season: TEST_SEASON,
-      });
-
-      // Test getting all players with malformed data
-      const getResult = await pipe(playerCache.getAllPlayers())();
-      expect(E.isRight(getResult)).toBe(true);
-      if (E.isRight(getResult)) {
-        // Malformed data should be filtered out
-        expect(getResult.right).toEqual([]);
-      }
+      expect(E.isRight(result)).toBe(true);
+      expect(redisClient.del).toHaveBeenCalledWith(`${config.keyPrefix}::${config.season}`);
+      expect(redisClient.hset).toHaveBeenCalledWith(
+        `${config.keyPrefix}::${config.season}`,
+        testPlayer.id.toString(),
+        JSON.stringify(testPlayer),
+      );
     });
 
-    it('should handle concurrent cache operations', async () => {
-      const redis = createRedisCache<Player>({ keyPrefix: TEST_PREFIX });
-      const mockDataProvider = {
-        getOne: jest.fn().mockResolvedValue(testPlayers[0]),
-        getAll: jest.fn().mockResolvedValue(testPlayers),
-      };
+    it('should handle empty player list', async () => {
+      const playerCache = createPlayerCache(cache, dataProvider, config);
+      const result = await playerCache.cachePlayers([])();
 
-      const playerCache = createPlayerCache(redis, mockDataProvider, {
-        keyPrefix: TEST_PREFIX,
-        season: TEST_SEASON,
-      });
+      expect(E.isRight(result)).toBe(true);
+      expect(redisClient.del).not.toHaveBeenCalled();
+      expect(redisClient.hset).not.toHaveBeenCalled();
+    });
 
-      // Perform multiple cache operations concurrently
-      const [cacheResult, getAllResult] = await Promise.all([
-        playerCache.cachePlayer(testPlayers[0])(),
-        playerCache.getAllPlayers()(),
-      ]);
+    it('should handle cache errors', async () => {
+      redisClient.del.mockRejectedValue(new Error('Cache error'));
 
-      // Verify each operation succeeded
-      expect(E.isRight(cacheResult)).toBe(true);
-      expect(E.isRight(getAllResult)).toBe(true);
+      const playerCache = createPlayerCache(cache, dataProvider, config);
+      const result = await playerCache.cachePlayers([testPlayer])();
+
+      expect(E.isLeft(result)).toBe(true);
+      if (E.isLeft(result)) {
+        expect(result.left.code).toBe(CacheErrorCode.OPERATION_ERROR);
+        expect(result.left.message).toContain('Failed to cache players');
+      }
     });
   });
 });

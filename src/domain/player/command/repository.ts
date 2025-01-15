@@ -17,7 +17,25 @@ export const createPlayerCommandRepository = (
   createPlayer: (data: PlayerCreate) =>
     pipe(
       TE.tryCatch(
-        () => prisma.player.create({ data: toPrismaPlayerCreate(data) }),
+        async () => {
+          // Check if player exists
+          const existingPlayer = await prisma.player.findUnique({
+            where: { element: Number(data.id) },
+          });
+
+          if (existingPlayer) {
+            // If player exists, update it
+            return prisma.player.update({
+              where: { element: Number(data.id) },
+              data: toPrismaPlayerCreate(data),
+            });
+          }
+
+          // If player doesn't exist, create it
+          return prisma.player.create({
+            data: toPrismaPlayerCreate(data),
+          });
+        },
         (error) =>
           createDomainError({
             code: DomainErrorCode.DATABASE_ERROR,
@@ -81,20 +99,50 @@ export const createPlayerCommandRepository = (
   saveBatch: (players: readonly PlayerCreate[]) =>
     pipe(
       TE.tryCatch(
-        () =>
-          prisma.player.createMany({
-            data: players.map((p) => ({
-              element: Number(p.id),
-              elementCode: p.elementCode,
-              elementType: p.elementType,
-              webName: p.webName,
-              teamId: p.teamId,
-              price: p.price ?? 0,
-              startPrice: p.startPrice ?? 0,
-              firstName: p.firstName ?? null,
-              secondName: p.secondName ?? null,
-            })),
-          }),
+        async () => {
+          // Get all existing players
+          const existingPlayers = await prisma.player.findMany({
+            where: {
+              element: {
+                in: [...players].map((p) => Number(p.id)),
+              },
+            },
+          });
+
+          const existingIds = new Set(existingPlayers.map((p) => p.element));
+
+          // Split players into new and existing
+          const newPlayers = [...players].filter((p) => !existingIds.has(Number(p.id)));
+          const updatePlayers = [...players].filter((p) => existingIds.has(Number(p.id)));
+
+          // Create new players
+          const createPromise =
+            newPlayers.length > 0
+              ? prisma.player.createMany({
+                  data: newPlayers.map(toPrismaPlayerCreate),
+                })
+              : Promise.resolve();
+
+          // Update existing players
+          const updatePromises = updatePlayers.map((player) =>
+            prisma.player.update({
+              where: { element: Number(player.id) },
+              data: toPrismaPlayerCreate(player),
+            }),
+          );
+
+          // Execute all operations
+          await Promise.all([createPromise, ...updatePromises]);
+
+          // Return all players
+          return prisma.player.findMany({
+            where: {
+              element: {
+                in: [...players].map((p) => Number(p.id)),
+              },
+            },
+          });
+        },
         (error) =>
           createDomainError({
             code: DomainErrorCode.DATABASE_ERROR,
@@ -102,7 +150,13 @@ export const createPlayerCommandRepository = (
             cause: error instanceof Error ? error : new Error(String(error)),
           }),
       ),
-      TE.chain(() => eventBus.publish({ type: 'PLAYERS_CREATED', payload: players })),
+      TE.chain((createdPlayers) =>
+        pipe(
+          eventBus.publish({ type: 'PLAYERS_CREATED', payload: players }),
+          TE.map(() => createdPlayers),
+        ),
+      ),
+      TE.map(() => undefined),
     ),
 
   updatePrices: (updates: readonly { id: PlayerId; price: number }[]) =>
