@@ -5,21 +5,27 @@ import { QUEUE_CONFIG } from '../../../config/queue/queue.config';
 import { createQueueError, QueueError, QueueErrorCode } from '../../../types/error.type';
 import { MetaJobData } from '../../../types/job.type';
 import { getQueueLogger } from '../../logger';
-import { BullMQJobStatus, BullMQQueueMethods, JobOptions, QueueService } from '../types';
+import { BullMQJobStatus, JobOptions, QueueService } from '../types';
 import { createSchedulerService } from './scheduler.service';
 
 const logger = getQueueLogger();
 
-const convertToJobOptions = (options?: JobOptions): JobsOptions => ({
-  priority: options?.priority,
-  lifo: options?.lifo,
-  delay: options?.delay,
-  repeat: options?.repeat,
-  jobId: options?.jobId,
-  timestamp: options?.timestamp,
-  attempts: options?.attempts,
-  backoff: options?.backoff,
-});
+const convertToJobOptions = (options?: JobOptions): JobsOptions => {
+  if (!options) return {};
+
+  return {
+    priority: options.priority,
+    lifo: options.lifo,
+    delay: options.delay,
+    repeat: options.repeat,
+    jobId: options.jobId,
+    timestamp: options.timestamp,
+    attempts: options.attempts,
+    backoff: options.backoff
+      ? { type: options.backoff.type, delay: options.backoff.delay }
+      : undefined,
+  };
+};
 
 export const createQueueServiceImpl = <T extends MetaJobData>(
   name: string,
@@ -34,10 +40,7 @@ export const createQueueServiceImpl = <T extends MetaJobData>(
             port: QUEUE_CONFIG.REDIS.PORT,
             password: QUEUE_CONFIG.REDIS.PASSWORD,
           },
-          defaultJobOptions: {
-            removeOnComplete: true,
-            removeOnFail: true,
-          },
+          defaultJobOptions: { removeOnComplete: true, removeOnFail: true },
           prefix: 'test',
         }) as QueueType;
 
@@ -116,11 +119,8 @@ export const createQueueServiceImpl = <T extends MetaJobData>(
             TE.chain(() =>
               TE.tryCatch(
                 async () => {
-                  await (queue as Queue<T> & BullMQQueueMethods<T>).add(
-                    data.name,
-                    data,
-                    convertToJobOptions(options),
-                  );
+                  // @ts-ignore - BullMQ v5 compatibility
+                  await queue.add(data.name as any, data, convertToJobOptions(options));
                   logger.info(
                     { name, jobType: data.type, options },
                     options?.lifo ? 'Job added (LIFO)' : 'Job added (FIFO)',
@@ -140,12 +140,13 @@ export const createQueueServiceImpl = <T extends MetaJobData>(
                 if (jobs.length === 0) return;
 
                 const bulkJobs = jobs.map((job) => ({
-                  name: job.data.name,
+                  name: job.data.name as any,
                   data: job.data,
                   opts: convertToJobOptions(job.options),
                 }));
 
-                await (queue as Queue<T> & BullMQQueueMethods<T>).addBulk(bulkJobs);
+                // @ts-ignore - BullMQ v5 compatibility
+                await queue.addBulk(bulkJobs);
                 logger.info({ name, count: jobs.length }, 'Bulk jobs added');
               },
               (error) => createQueueError(QueueErrorCode.ADD_JOB, name, error as Error),

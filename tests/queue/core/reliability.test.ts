@@ -6,8 +6,14 @@ import { QueueService, WorkerService } from '../../../src/infrastructure/queue/t
 import { MetaJobData, MetaOperation } from '../../../src/types/job.type';
 import { createTestMetaJobData } from '../../utils/queue.test.utils';
 
+/**
+ * Queue Reliability Tests
+ *
+ * These tests can be run on demand using:
+ * - npm test -- -t "Queue Reliability Tests" to run all tests in this file
+ * - npm test -- -t "should validate job data correctly" to run a specific test
+ */
 describe('Queue Reliability Tests', () => {
-  const TEST_TIMEOUT = 180000; // 3 minutes
   const queueName = 'test-reliability-queue';
   let queueService: QueueService<MetaJobData>;
   let workerService: WorkerService<MetaJobData>;
@@ -66,6 +72,8 @@ describe('Queue Reliability Tests', () => {
   });
 
   describe('Job Data Validation', () => {
+    // Use test.concurrent to run tests in parallel if needed
+    // Use .only() to run only this test when needed
     it('should validate job data correctly', async () => {
       // Create and start worker service
       const workerResult = await createWorkerService<MetaJobData>(queueName, async (job) => {
@@ -124,7 +132,7 @@ describe('Queue Reliability Tests', () => {
       // Verify job was processed
       const completedJobs = await queue.getJobs(['completed']);
       expect(completedJobs.length).toBe(1);
-    }, 60000); // Increased timeout
+    }); // Removed timeout
   });
 
   // ... rest of the tests remain unchanged ...

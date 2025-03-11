@@ -6,6 +6,25 @@ import { BaseJobData } from '../../../types/job.type';
 import { getQueueLogger } from '../../logger';
 import { JobScheduler, JobSchedulerOptions, JobTemplate, SchedulerService } from '../types';
 
+// Define a custom interface for the queue add method to handle type compatibility with BullMQ v5
+interface QueueWithAddMethod<T> extends Omit<Queue<T>, 'add'> {
+  add(
+    name: string,
+    data: T,
+    opts?: {
+      priority?: number;
+      lifo?: boolean;
+      delay?: number;
+      repeat?: { pattern?: string; every?: number; limit?: number };
+      jobId?: string;
+      timestamp?: number;
+      parent?: { id: string; queue: string; waitChildrenKey?: string };
+      attempts?: number;
+      backoff?: { type: 'exponential' | 'fixed'; delay: number };
+    },
+  ): Promise<unknown>;
+}
+
 const logger = getQueueLogger();
 
 const mapToJobScheduler = (job: { key: string; nextRun?: Date; lastRun?: Date }): JobScheduler => ({
@@ -26,13 +45,11 @@ export const createSchedulerService = <T extends BaseJobData>(
     pipe(
       TE.tryCatch(
         async () => {
-          await queue.add(
+          // Cast the queue to our custom interface to resolve type issues
+          const typedQueue = queue as unknown as QueueWithAddMethod<T>;
+          await typedQueue.add(
             template?.name || schedulerId,
-            (template?.data || {
-              type: 'META',
-              timestamp: new Date(),
-              data: {},
-            }) as T,
+            (template?.data || { type: 'META', timestamp: new Date(), data: {} }) as T,
             {
               ...template?.opts,
               jobId: schedulerId,
@@ -72,8 +89,5 @@ export const createSchedulerService = <T extends BaseJobData>(
       ),
     );
 
-  return {
-    upsertJobScheduler,
-    getJobSchedulers,
-  };
+  return { upsertJobScheduler, getJobSchedulers };
 };

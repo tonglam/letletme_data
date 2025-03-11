@@ -34,7 +34,20 @@ export const createWorkerService = <T extends MetaJobData>(
           },
           limiter: options.limiter,
           autorun: false, // Prevent auto-start
-          prefix: 'test', // Use test prefix for test environment
+          prefix: process.env.NODE_ENV === 'test' ? 'test' : 'bull',
+        });
+
+        // Add more events for debugging
+        worker.on('error', (error) => {
+          logger.error({ name, error }, 'Worker encountered an error');
+        });
+
+        worker.on('stalled', (jobId) => {
+          logger.warn({ name, jobId }, 'Job stalled');
+        });
+
+        worker.on('drained', () => {
+          logger.info({ name }, 'Queue is drained, no more jobs to process');
         });
 
         // Track active jobs for proper cleanup

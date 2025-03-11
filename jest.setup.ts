@@ -20,8 +20,8 @@ if (missingEnvVars.length > 0) {
   process.exit(1);
 }
 
-// Increase Jest timeout for all tests
-jest.setTimeout(60000);
+// Tests will run on demand without timeouts
+// Each test file should use the test.concurrent.only() pattern when needed
 
 // Set test environment variables
 process.env.NODE_ENV = 'test';

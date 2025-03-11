@@ -37,24 +37,12 @@ export interface FlowJobWithParent {
   name: string;
   queueName: string;
   data: unknown;
-  opts: {
-    jobId: string;
-    parent?: {
-      id: string;
-      queue: string;
-    };
-  };
+  opts: { jobId: string; parent?: { id: string; queue: string } };
   children?: Array<{
     name: string;
     queueName: string;
     data: unknown;
-    opts: {
-      jobId: string;
-      parent: {
-        id: string;
-        queue: string;
-      };
-    };
+    opts: { jobId: string; parent: { id: string; queue: string } };
   }>;
 }
 
@@ -68,11 +56,7 @@ export interface FlowOpts<T = unknown> {
   delay?: number;
   timestamp?: number;
   children?: FlowJob<T>[];
-  parent?: {
-    id: string;
-    queue: string;
-    waitChildrenKey?: string;
-  };
+  parent?: { id: string; queue: string; waitChildrenKey?: string };
 }
 
 // Service Interfaces
@@ -114,10 +98,7 @@ export interface WorkerOptions {
   concurrency?: number;
   maxStalledCount?: number;
   stalledInterval?: number;
-  limiter?: {
-    max: number;
-    duration: number;
-  };
+  limiter?: { max: number; duration: number };
 }
 
 export interface WorkerService<T> {
@@ -160,23 +141,12 @@ export interface JobOptions {
   priority?: number;
   lifo?: boolean;
   delay?: number;
-  repeat?: {
-    pattern?: string;
-    every?: number;
-    limit?: number;
-  };
+  repeat?: { pattern?: string; every?: number; limit?: number };
   jobId?: string;
   timestamp?: number;
-  parent?: {
-    id: string;
-    queue: string;
-    waitChildrenKey?: string;
-  };
+  parent?: { id: string; queue: string; waitChildrenKey?: string };
   attempts?: number;
-  backoff?: {
-    type: 'exponential' | 'fixed';
-    delay: number;
-  };
+  backoff?: { type: 'exponential' | 'fixed'; delay: number };
 }
 
 export interface JobSchedulerOptions {
@@ -220,6 +190,36 @@ export type JobProcessor<T extends BaseJobData> = (job: Job<T>) => TE.TaskEither
 
 // BullMQ Queue Methods Interface
 export interface BullMQQueueMethods<T> {
-  add: (name: string, data: T, opts?: JobOptions) => Promise<Job<T>>;
-  addBulk: (jobs: Array<{ name: string; data: T; opts?: JobOptions }>) => Promise<Job<T>[]>;
+  add: (
+    name: string,
+    data: T,
+    opts?: {
+      priority?: number;
+      lifo?: boolean;
+      delay?: number;
+      repeat?: { pattern?: string; every?: number; limit?: number };
+      jobId?: string;
+      timestamp?: number;
+      parent?: { id: string; queue: string; waitChildrenKey?: string };
+      attempts?: number;
+      backoff?: { type: 'exponential' | 'fixed'; delay: number };
+    },
+  ) => Promise<Job<T>>;
+  addBulk: (
+    jobs: Array<{
+      name: string;
+      data: T;
+      opts?: {
+        priority?: number;
+        lifo?: boolean;
+        delay?: number;
+        repeat?: { pattern?: string; every?: number; limit?: number };
+        jobId?: string;
+        timestamp?: number;
+        parent?: { id: string; queue: string; waitChildrenKey?: string };
+        attempts?: number;
+        backoff?: { type: 'exponential' | 'fixed'; delay: number };
+      };
+    }>,
+  ) => Promise<Job<T>[]>;
 }
