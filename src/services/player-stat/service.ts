@@ -9,7 +9,8 @@ import * as TE from 'fp-ts/TaskEither';
 import { EventService } from 'services/event/types';
 import { PlayerStatService, PlayerStatServiceOperations } from 'services/player-stat/types';
 import { FplBootstrapDataService } from 'src/data/types';
-import { PrismaPlayerStatCreate } from 'src/repositories/player-stat/type';
+import { mapDomainStatToPrismaCreateInput } from 'src/repositories/player-stat/mapper';
+import { PrismaPlayerStatCreateInput } from 'src/repositories/player-stat/type';
 import { PlayerStat, PlayerStatId, PlayerStats } from 'src/types/domain/player-stat.type';
 import {
   DataLayerError,
@@ -56,7 +57,12 @@ const playerStatServiceOperations = (
               }),
             ),
       ),
-      TE.chainW((eventId) => fplDataService.getPlayerStats(eventId)),
+      TE.chainW((eventId) =>
+        pipe(
+          fplDataService.getPlayerStats(eventId),
+          TE.map((stats) => ({ eventId, stats })),
+        ),
+      ),
       TE.mapLeft((error: DataLayerError | ServiceError) =>
         createServiceIntegrationError({
           message: 'Failed to fetch/map player stats via data layer',
@@ -64,22 +70,27 @@ const playerStatServiceOperations = (
           details: error.details,
         }),
       ),
-      TE.map((rawData: readonly Omit<PlayerStat, 'id'>[]) =>
-        mapRawDataToPlayerStatCreateArray(rawData),
-      ),
-      TE.chain((playerStatCreateData) =>
+      TE.map(({ eventId, stats }) => ({
+        eventId,
+        mappedStats: mapRawDataToPlayerStatCreateArray(stats),
+      })),
+      TE.chainW(({ eventId, mappedStats }) =>
         pipe(
-          domainOps.savePlayerStats(playerStatCreateData),
+          domainOps.deletePlayerStatsByEventId(eventId),
           TE.mapLeft(mapDomainErrorToServiceError),
+          TE.map(() => mappedStats),
         ),
+      ),
+      TE.chain((mappedStats) =>
+        pipe(domainOps.savePlayerStats(mappedStats), TE.mapLeft(mapDomainErrorToServiceError)),
       ),
     ),
 });
 
 const mapRawDataToPlayerStatCreateArray = (
   rawData: readonly Omit<PlayerStat, 'id'>[],
-): PrismaPlayerStatCreate[] => {
-  return rawData.map((playerStat) => playerStat as PrismaPlayerStatCreate);
+): PrismaPlayerStatCreateInput[] => {
+  return rawData.map(mapDomainStatToPrismaCreateInput);
 };
 
 export const createPlayerStatService = (

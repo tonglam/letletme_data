@@ -9,6 +9,7 @@ import * as TE from 'fp-ts/TaskEither';
 import { EventService } from 'services/event/types';
 import { PlayerValueService, PlayerValueServiceOperations } from 'services/player-value/types';
 import { FplBootstrapDataService } from 'src/data/types';
+import { mapMappedPlayerValueToPrismaCreate } from 'src/repositories/player-value/mapper';
 import { PrismaPlayerValueCreate } from 'src/repositories/player-value/type';
 import {
   MappedPlayerValue,
@@ -48,7 +49,7 @@ export const playerValueServiceOperations = (
         createServiceError({
           code: ServiceErrorCode.OPERATION_ERROR,
           message: 'Failed to fetch current event',
-          cause: error,
+          cause: error.cause,
         }),
       ),
       TE.chainW((event) =>
@@ -78,13 +79,13 @@ export const playerValueServiceOperations = (
           TE.mapLeft(mapDomainErrorToServiceError),
         ),
       ),
-    ) as TE.TaskEither<ServiceError, PlayerValues>,
+    ),
 });
 
 const mapRawDataToPlayerValueCreateArray = (
   rawData: readonly MappedPlayerValue[],
 ): PrismaPlayerValueCreate[] => {
-  return rawData.map((playerValue) => playerValue as PrismaPlayerValueCreate);
+  return rawData.map(mapMappedPlayerValueToPrismaCreate);
 };
 
 export const createPlayerValueService = (

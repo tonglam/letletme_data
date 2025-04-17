@@ -7,7 +7,6 @@ import { PrismaPlayerCreate } from 'src/repositories/player/type';
 import { Player, PlayerId, Players } from 'src/types/domain/player.type';
 import { DataLayerError, ServiceError } from 'src/types/error.type';
 import { createServiceIntegrationError, mapDomainErrorToServiceError } from 'src/utils/error.util';
-
 import { PlayerService, PlayerServiceOperations } from './types';
 
 const playerServiceOperations = (
@@ -37,6 +36,13 @@ const playerServiceOperations = (
         }),
       ),
       TE.map((rawData) => mapRawDataToPlayerCreateArray(rawData)),
+      TE.chainFirstW((playerCreateData) =>
+        pipe(
+          domainOps.deleteAllPlayers(),
+          TE.mapLeft(mapDomainErrorToServiceError),
+          TE.map(() => playerCreateData),
+        ),
+      ),
       TE.chain((playerCreateData) =>
         pipe(domainOps.savePlayers(playerCreateData), TE.mapLeft(mapDomainErrorToServiceError)),
       ),

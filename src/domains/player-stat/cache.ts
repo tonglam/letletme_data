@@ -10,6 +10,7 @@ import * as TE from 'fp-ts/TaskEither';
 import { CachePrefix } from 'src/configs/cache/cache.config';
 import { redisClient } from 'src/infrastructures/cache/client';
 import { getCurrentSeason } from 'src/types/base.type';
+import { EventId } from 'src/types/domain/event.type';
 import { PlayerStat, PlayerStatId, PlayerStats } from 'src/types/domain/player-stat.type';
 import { CacheError, CacheErrorCode, createCacheError, DomainError } from 'src/types/error.type';
 import { mapCacheErrorToDomainError, mapRepositoryErrorToCacheError } from 'src/utils/error.util';
@@ -167,10 +168,26 @@ export const createPlayerStatCache = (
       TE.mapLeft(mapCacheErrorToDomainError),
     );
 
+  const deletePlayerStatsByEventId = (eventId: EventId): TE.TaskEither<DomainError, void> =>
+    pipe(
+      TE.tryCatch(
+        () => redisClient.del(`${keyPrefix}::${season}::${eventId}`),
+        (error: unknown) =>
+          createCacheError({
+            code: CacheErrorCode.OPERATION_ERROR,
+            message: 'Cache Write Error: Failed to delete player stats by event id',
+            cause: error as Error,
+          }),
+      ),
+      TE.map(() => undefined),
+      TE.mapLeft(mapCacheErrorToDomainError),
+    );
+
   return {
     getPlayerStat,
     getAllPlayerStats,
     setAllPlayerStats,
     deleteAllPlayerStats,
+    deletePlayerStatsByEventId,
   };
 };

@@ -60,6 +60,7 @@ export interface PlayerStat {
   readonly savesPer90: Prisma.Decimal | null;
   readonly expectedAssistsPer90: Prisma.Decimal | null;
   readonly expectedGoalInvolvementsPer90: Prisma.Decimal | null;
+  readonly totalPoints: number | null;
 }
 
 export type PlayerStats = readonly PlayerStat[];

@@ -4,12 +4,12 @@ import 'dotenv/config';
 import { Redis } from 'ioredis';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-// Create direct Redis client for testing
+// Create direct Redis client for testing using environment variables
 const testRedisClient = new Redis({
-  host: '118.194.234.17',
-  port: 6379,
-  password: 'letletguanlaoshiRedis1414',
-  db: 0,
+  host: process.env.REDIS_HOST || '127.0.0.1', // Fallback for safety, though dotenv should load
+  port: parseInt(process.env.REDIS_PORT || '6379', 10),
+  password: process.env.REDIS_PASSWORD, // Must be loaded from .env
+  db: parseInt(process.env.REDIS_DB || '0', 10),
 });
 
 // This test uses the actual Redis connection from .env

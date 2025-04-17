@@ -1,4 +1,4 @@
-import { Prisma, PrismaClient } from '@prisma/client';
+import { PrismaClient, Player as PrismaPlayerType } from '@prisma/client';
 import { PlayerRepository } from 'domains/player/types';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
@@ -8,7 +8,6 @@ import {
 } from 'src/repositories/player/mapper';
 import { PrismaPlayerCreate } from 'src/repositories/player/type';
 import { PlayerId } from 'src/types/domain/player.type';
-
 import { createDBError, DBErrorCode } from '../../types/error.type';
 
 export const createPlayerRepository = (prisma: PrismaClient): PlayerRepository => ({
@@ -22,7 +21,7 @@ export const createPlayerRepository = (prisma: PrismaClient): PlayerRepository =
             message: `Failed to fetch all players: ${error}`,
           }),
       ),
-      TE.map((players) => players.map(mapPrismaPlayerToDomain)),
+      TE.map((players: PrismaPlayerType[]) => players.map(mapPrismaPlayerToDomain)),
     ),
 
   findById: (id: PlayerId) =>
@@ -35,7 +34,9 @@ export const createPlayerRepository = (prisma: PrismaClient): PlayerRepository =
             message: `Failed to fetch player by id ${id}: ${error}`,
           }),
       ),
-      TE.map((player) => (player ? mapPrismaPlayerToDomain(player) : null)),
+      TE.map((player: PrismaPlayerType | null) =>
+        player ? mapPrismaPlayerToDomain(player) : null,
+      ),
     ),
 
   saveBatch: (players: readonly PrismaPlayerCreate[]) =>
@@ -44,11 +45,11 @@ export const createPlayerRepository = (prisma: PrismaClient): PlayerRepository =
         async () => {
           const dataToCreate = players.map(mapDomainPlayerToPrismaCreate);
           await prisma.player.createMany({
-            data: dataToCreate as unknown as Prisma.PlayerCreateManyInput[],
+            data: dataToCreate,
             skipDuplicates: true,
           });
 
-          const ids = players.map((p) => Number(p.element));
+          const ids = players.map((p) => p.id as number);
 
           return prisma.player.findMany({
             where: { element: { in: ids } },
@@ -61,7 +62,7 @@ export const createPlayerRepository = (prisma: PrismaClient): PlayerRepository =
             message: `Failed to create players in batch: ${error}`,
           }),
       ),
-      TE.map((prismaPlayers) => prismaPlayers.map(mapPrismaPlayerToDomain)),
+      TE.map((prismaPlayers: PrismaPlayerType[]) => prismaPlayers.map(mapPrismaPlayerToDomain)),
     ),
 
   deleteAll: () =>
@@ -72,8 +73,9 @@ export const createPlayerRepository = (prisma: PrismaClient): PlayerRepository =
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
             message: `Failed to delete all players: ${error}`,
+            cause: error instanceof Error ? error : undefined,
           }),
       ),
-      TE.map(() => undefined),
+      TE.map(() => undefined as void),
     ),
 });

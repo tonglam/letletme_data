@@ -1,12 +1,10 @@
-import { PrismaClient } from '@prisma/client';
+import { PrismaClient, PlayerStat as PrismaPlayerStatType } from '@prisma/client';
+import { PlayerStatRepository } from 'domains/player-stat/types';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { PlayerStatRepository } from 'src/domains/player-stat/types';
-import {
-  mapDomainPlayerStatToPrismaCreate,
-  mapPrismaPlayerStatToDomain,
-} from 'src/repositories/player-stat/mapper';
-import { PrismaPlayerStatCreate } from 'src/repositories/player-stat/type';
+import { mapPrismaPlayerStatToDomain } from 'src/repositories/player-stat/mapper';
+import { PrismaPlayerStatCreateInput } from 'src/repositories/player-stat/type';
+import { EventId } from 'src/types/domain/event.type';
 import { PlayerStatId } from 'src/types/domain/player-stat.type';
 import { createDBError, DBErrorCode } from 'src/types/error.type';
 
@@ -14,20 +12,20 @@ export const createPlayerStatRepository = (prisma: PrismaClient): PlayerStatRepo
   findAll: () =>
     pipe(
       TE.tryCatch(
-        () => prisma.playerStat.findMany(),
+        () => prisma.playerStat.findMany({ orderBy: { id: 'asc' } }),
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
             message: `Failed to fetch all player stats: ${error}`,
           }),
       ),
-      TE.map((playerStats) => playerStats.map(mapPrismaPlayerStatToDomain)),
+      TE.map((playerStats: PrismaPlayerStatType[]) => playerStats.map(mapPrismaPlayerStatToDomain)),
     ),
 
   findById: (id: PlayerStatId) =>
     pipe(
       TE.tryCatch(
-        () => prisma.playerStat.findUnique({ where: { id } }),
+        () => prisma.playerStat.findUnique({ where: { id: parseInt(id, 10) } }),
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
@@ -38,28 +36,34 @@ export const createPlayerStatRepository = (prisma: PrismaClient): PlayerStatRepo
       TE.map((playerStat) => (playerStat ? mapPrismaPlayerStatToDomain(playerStat) : null)),
     ),
 
-  saveBatch: (playerStats: readonly PrismaPlayerStatCreate[]) =>
+  saveBatch: (playerStats: readonly PrismaPlayerStatCreateInput[]) =>
     pipe(
       TE.tryCatch(
         async () => {
-          const dataToCreate = playerStats.map(mapDomainPlayerStatToPrismaCreate);
-          await prisma.playerStat.createMany({ data: dataToCreate });
+          await prisma.playerStat.createMany({ data: [...playerStats] });
 
-          const ids = playerStats.map((p) => Number(p.elementId));
+          const uniqueIdentifiers = playerStats.map((p) => ({
+            eventId: p.eventId,
+            elementId: p.elementId,
+          }));
 
           return prisma.playerStat.findMany({
-            where: { elementId: { in: ids } },
-            orderBy: { elementId: 'asc' },
+            where: {
+              OR: uniqueIdentifiers,
+            },
+            orderBy: { id: 'asc' },
           });
         },
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to save player stats: ${error}`,
+            message: `Failed to save player stats batch: ${error}`,
             cause: error instanceof Error ? error : undefined,
           }),
       ),
-      TE.map((playerStats) => playerStats.map(mapPrismaPlayerStatToDomain)),
+      TE.map((createdPlayerStats: PrismaPlayerStatType[]) =>
+        createdPlayerStats.map(mapPrismaPlayerStatToDomain),
+      ),
     ),
 
   deleteAll: () =>
@@ -73,6 +77,20 @@ export const createPlayerStatRepository = (prisma: PrismaClient): PlayerStatRepo
             cause: error instanceof Error ? error : undefined,
           }),
       ),
-      TE.map(() => undefined),
+      TE.map(() => undefined as void),
+    ),
+
+  deleteByEventId: (eventId: EventId) =>
+    pipe(
+      TE.tryCatch(
+        () => prisma.playerStat.deleteMany({ where: { eventId: eventId } }),
+        (error) =>
+          createDBError({
+            code: DBErrorCode.QUERY_ERROR,
+            message: `Failed to delete player stats by event id ${eventId}: ${error}`,
+            cause: error instanceof Error ? error : undefined,
+          }),
+      ),
+      TE.map(() => undefined as void),
     ),
 });

@@ -5,7 +5,8 @@ import {
 } from 'domains/player-stat/types';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { PrismaPlayerStatCreate } from 'src/repositories/player-stat/type';
+import { PrismaPlayerStatCreateInput } from 'src/repositories/player-stat/type';
+import { EventId } from 'src/types/domain/event.type';
 import { PlayerStatId } from 'src/types/domain/player-stat.type';
 import { createDomainError, DomainErrorCode } from 'src/types/error.type';
 import { getErrorMessage } from 'src/utils/error.util';
@@ -70,7 +71,7 @@ export const createPlayerStatOperations = (
       ),
     ),
 
-  savePlayerStats: (playerStats: readonly PrismaPlayerStatCreate[]) =>
+  savePlayerStats: (playerStats: readonly PrismaPlayerStatCreateInput[]) =>
     pipe(
       repository.saveBatch(playerStats),
       TE.mapLeft((dbError) =>
@@ -103,5 +104,18 @@ export const createPlayerStatOperations = (
         }),
       ),
       TE.chainFirst(() => pipe(cache.deleteAllPlayerStats())),
+    ),
+
+  deletePlayerStatsByEventId: (eventId: EventId) =>
+    pipe(
+      repository.deleteByEventId(eventId),
+      TE.mapLeft((dbError) =>
+        createDomainError({
+          code: DomainErrorCode.DATABASE_ERROR,
+          message: `DB Error (deletePlayerStatsByEventId ${eventId}): ${getErrorMessage(dbError)}`,
+          cause: dbError,
+        }),
+      ),
+      TE.chainFirst(() => pipe(cache.deletePlayerStatsByEventId(eventId))),
     ),
 });

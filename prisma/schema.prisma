@@ -101,7 +101,7 @@ enum ValueChangeType {
 }
 
 model PlayerValue {
-  id          String          @id @default(uuid()) @db.Uuid
+  id          Int             @id @default(autoincrement())
   elementId   Int             @map("element_id")
   elementType Int             @map("element_type")
   eventId     Int             @map("event_id")
@@ -120,10 +120,10 @@ model PlayerValue {
 }
 
 model PlayerStat {
-  id        String @id @default(uuid()) @db.Uuid
-  eventId   Int    @map("event_id")
-  elementId Int    @map("element_id")
-  teamId    Int    @map("team_id")
+  id        Int @id @default(autoincrement())
+  eventId   Int @map("event_id")
+  elementId Int @map("element_id")
+  teamId    Int @map("team_id")
 
   // Performance metrics
   form                     Float?   @map("form")
@@ -144,6 +144,7 @@ model PlayerStat {
   goalsConceded  Int? @map("goals_conceded")
   ownGoals       Int? @map("own_goals")
   penaltiesSaved Int? @map("penalties_saved")
+  totalPoints    Int? @map("total_points")
 
   // Additional statistics
   yellowCards Int? @default(0) @map("yellow_cards")

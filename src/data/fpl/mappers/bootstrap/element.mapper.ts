@@ -110,6 +110,7 @@ export const mapElementResponseToPlayerStat = (
         savesPer90: null,
         expectedAssistsPer90: null,
         expectedGoalInvolvementsPer90: null,
+        totalPoints: raw.total_points,
       }),
     ),
   );

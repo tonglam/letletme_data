@@ -87,7 +87,7 @@ ALTER TABLE "players" ENABLE ROW LEVEL SECURITY;
 
 -- Player Values table
 CREATE TABLE "player_values" (
-    "id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    "id" SERIAL PRIMARY KEY,
     "element_id" INTEGER NOT NULL,
     "element_type" INTEGER NOT NULL,
     "event_id" INTEGER NOT NULL,
@@ -105,7 +105,7 @@ ALTER TABLE "player_values" ENABLE ROW LEVEL SECURITY;
 
 -- Player Stats table
 CREATE TABLE "player_stats" (
-    "id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    "id" SERIAL PRIMARY KEY,
     "event_id" INTEGER NOT NULL,
     "element_id" INTEGER NOT NULL,
     "team_id" INTEGER NOT NULL,
@@ -125,6 +125,7 @@ CREATE TABLE "player_stats" (
     "goals_conceded" INTEGER,
     "own_goals" INTEGER,
     "penalties_saved" INTEGER,
+    "total_points" INTEGER,
     "yellow_cards" INTEGER DEFAULT 0,
     "red_cards" INTEGER DEFAULT 0,
     "saves" INTEGER DEFAULT 0,
