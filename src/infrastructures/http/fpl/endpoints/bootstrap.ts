@@ -2,6 +2,7 @@ import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import { Logger } from 'pino';
 import { BootStrapResponseSchema } from 'src/data/fpl/schemas/bootstrap/bootstrap.schema';
+
 import { apiConfig } from '../../../../configs/api/api.config';
 import { APIErrorCode, createAPIError } from '../../../../types/error.type';
 import { HTTPClient } from '../../client';

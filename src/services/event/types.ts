@@ -1,4 +1,5 @@
 import * as TE from 'fp-ts/TaskEither';
+
 import type { FplBootstrapDataService } from '../../data/types';
 import type { Event, EventId, Events } from '../../types/domain/event.type';
 import type { ServiceError } from '../../types/error.type';

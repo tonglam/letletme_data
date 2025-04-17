@@ -1,5 +1,6 @@
 import * as TE from 'fp-ts/TaskEither';
 import Redis from 'ioredis';
+
 import { CacheError, CacheErrorCode, createCacheError } from '../../types/error.type';
 
 const globalForRedis = global as { redisClient?: Redis };

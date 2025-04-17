@@ -1,12 +1,13 @@
 import { Job, Worker, WorkerOptions } from 'bullmq';
 import { Redis } from 'ioredis';
+
 import { getQueueLogger } from '../../infrastructures/logger';
 import { BaseJobPayload } from '../../types/jobs.type';
 import { QueueName } from '../../types/queues.type';
 
 const logger = getQueueLogger();
 
-export type JobProcessor<T extends BaseJobPayload = any> = (job: Job<T>) => Promise<any>;
+export type JobProcessor<T extends BaseJobPayload> = (job: Job<T>) => Promise<unknown>;
 
 export const createWorker = <T extends BaseJobPayload>(
   queueName: QueueName,
@@ -24,7 +25,7 @@ export const createWorker = <T extends BaseJobPayload>(
     connection: connection,
   });
 
-  worker.on('completed', (job: Job, result: any) => {
+  worker.on('completed', (job: Job, result: unknown) => {
     logger.info(`Job COMPLETED: [${queueName}] ID=${job?.id}, Result=${JSON.stringify(result)}`);
   });
 

@@ -1,13 +1,14 @@
 import { Prisma, PrismaClient } from '@prisma/client';
 import { PlayerRepository } from 'domains/player/types';
-import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
+import * as TE from 'fp-ts/TaskEither';
 import {
   mapDomainPlayerToPrismaCreate,
   mapPrismaPlayerToDomain,
 } from 'src/repositories/player/mapper';
 import { PrismaPlayerCreate } from 'src/repositories/player/type';
 import { PlayerId } from 'src/types/domain/player.type';
+
 import { createDBError, DBErrorCode } from '../../types/error.type';
 
 export const createPlayerRepository = (prisma: PrismaClient): PlayerRepository => ({

@@ -1,11 +1,12 @@
 import { Prisma, PrismaClient } from '@prisma/client';
-import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
+import * as TE from 'fp-ts/TaskEither';
+
+import { mapDomainPhaseToPrismaCreate, mapPrismaPhaseToDomain } from './mapper';
+import { PrismaPhaseCreate } from './type';
 import { PhaseRepository } from '../../domains/phase/types';
 import { PhaseId } from '../../types/domain/phase.type';
 import { createDBError, DBErrorCode } from '../../types/error.type';
-import { mapDomainPhaseToPrismaCreate, mapPrismaPhaseToDomain } from './mapper';
-import { PrismaPhaseCreate } from './type';
 
 export const createPhaseRepository = (prisma: PrismaClient): PhaseRepository => ({
   findAll: () =>

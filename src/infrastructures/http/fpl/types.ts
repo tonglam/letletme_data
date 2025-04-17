@@ -2,6 +2,7 @@ import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import { BootStrapResponse } from 'src/data/fpl/schemas/bootstrap/bootstrap.schema';
 import { z } from 'zod';
+
 import { ElementSummaryResponse } from '../../../types/element-summary.type';
 import {
   EntryHistoryResponse,

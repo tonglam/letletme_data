@@ -3,8 +3,8 @@ import {
   PlayerStatOperations,
   PlayerStatRepository,
 } from 'domains/player-stat/types';
-import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
+import * as TE from 'fp-ts/TaskEither';
 import { PrismaPlayerStatCreate } from 'src/repositories/player-stat/type';
 import { PlayerStatId } from 'src/types/domain/player-stat.type';
 import { createDomainError, DomainErrorCode } from 'src/types/error.type';

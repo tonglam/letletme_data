@@ -1,7 +1,7 @@
 import { PrismaClient } from '@prisma/client';
 import { PlayerValueRepository } from 'domains/player-value/types';
-import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
+import * as TE from 'fp-ts/TaskEither';
 import {
   mapDomainPlayerValueToPrismaCreate,
   mapPrismaPlayerValueToDomain,

@@ -1,5 +1,6 @@
 import { PrismaClient } from '@prisma/client';
 import * as TE from 'fp-ts/TaskEither';
+
 import { DBError, DBErrorCode, createDBError } from '../../types/error.type';
 
 const globalForPrisma = global as { prisma?: PrismaClient };

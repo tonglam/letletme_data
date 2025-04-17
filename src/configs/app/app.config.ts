@@ -1,6 +1,8 @@
-import * as dotenv from 'dotenv';
 import * as path from 'path';
+
+import * as dotenv from 'dotenv';
 import pino from 'pino';
+
 import { getCurrentSeason } from '../../types/base.type';
 
 dotenv.config();

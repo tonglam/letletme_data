@@ -3,8 +3,8 @@ import {
   PlayerValueOperations,
   PlayerValueRepository,
 } from 'domains/player-value/types';
-import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
+import * as TE from 'fp-ts/TaskEither';
 import { PrismaPlayerValueCreate } from 'src/repositories/player-value/type';
 import { PlayerValueId } from 'src/types/domain/player-value.type';
 import { createDomainError, DomainErrorCode } from 'src/types/error.type';

@@ -1,6 +1,6 @@
 import { PrismaClient } from '@prisma/client';
-import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
+import * as TE from 'fp-ts/TaskEither';
 import { PlayerStatRepository } from 'src/domains/player-stat/types';
 import {
   mapDomainPlayerStatToPrismaCreate,

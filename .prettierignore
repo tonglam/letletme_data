@@ -1,1 +1,8 @@
 node_modules/
+dist/
+coverage/
+.cursor/
+.git/
+*.md
+logs/
+.eslintcache

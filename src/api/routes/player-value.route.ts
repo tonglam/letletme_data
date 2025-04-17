@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import * as t from 'io-ts';
 import { ServiceContainer } from 'services/types';
+
 import { createPlayerValueHandlers } from '../handlers/player-value.handler';
 import { createHandler, validateRequest } from '../middlewares/core';
 

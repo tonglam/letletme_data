@@ -2,6 +2,7 @@ import { NextFunction, Request, Response } from 'express';
 import { Either } from 'fp-ts/Either';
 import { TaskEither } from 'fp-ts/TaskEither';
 import { APIError } from 'src/types/error.type';
+
 import { Event, Events } from '../types/domain/event.type';
 import { Phase, Phases } from '../types/domain/phase.type';
 import { PlayerStat } from '../types/domain/player-stat.type';

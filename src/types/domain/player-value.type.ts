@@ -1,5 +1,6 @@
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
+
 import { Branded, createBrandedType, ElementType, ValueChangeType } from '../base.type';
 
 export type PlayerValueId = Branded<string, 'PlayerValueId'>;

@@ -1,6 +1,8 @@
 import { createEventOperations } from 'domains/event/operation';
-import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
+import * as TE from 'fp-ts/TaskEither';
+
+import { EventService, EventServiceOperations } from './types';
 import { FplBootstrapDataService } from '../../data/types';
 import { EventCache, EventOperations, EventRepository } from '../../domains/event/types';
 import { PrismaEventCreate } from '../../repositories/event/type';
@@ -10,7 +12,6 @@ import {
   createServiceIntegrationError,
   mapDomainErrorToServiceError,
 } from '../../utils/error.util';
-import { EventService, EventServiceOperations } from './types';
 
 const eventServiceOperations = (
   domainOps: EventOperations,

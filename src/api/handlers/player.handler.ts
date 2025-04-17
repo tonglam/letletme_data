@@ -1,6 +1,7 @@
 import { Request } from 'express';
-import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
+import * as TE from 'fp-ts/TaskEither';
+
 import { ServiceContainer } from '../../services/types';
 import { Player, validatePlayerId } from '../../types/domain/player.type';
 import { APIErrorCode, ServiceError, createAPIError } from '../../types/error.type';

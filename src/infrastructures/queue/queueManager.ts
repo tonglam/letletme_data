@@ -1,6 +1,8 @@
 import { Queue, QueueOptions } from 'bullmq';
 import { Redis } from 'ioredis';
+
 import { getQueueLogger } from '../../infrastructures/logger';
+import { BaseJobPayload } from '../../types/jobs.type';
 import { QueueName } from '../../types/queues.type';
 
 const logger = getQueueLogger();
@@ -9,7 +11,7 @@ const getDefaultQueueOptions = (connection: Redis): QueueOptions => ({
   connection,
 });
 
-export const createQueue = <T = any>(
+export const createQueue = <T extends BaseJobPayload = BaseJobPayload>(
   connection: Redis,
   name: QueueName,
   options?: Omit<QueueOptions, 'connection'>,
@@ -74,7 +76,7 @@ export const closeManagedQueues = async (queues: Map<QueueName, Queue>): Promise
   logger.info('Finished closing managed queues.');
 };
 
-export const getQueue = <T = any>(
+export const getQueue = <T extends BaseJobPayload = BaseJobPayload>(
   queues: Map<QueueName, Queue>,
   queueName: QueueName,
 ): Queue<T> => {

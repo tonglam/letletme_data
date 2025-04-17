@@ -1,12 +1,13 @@
 import { createPlayerOperations } from 'domains/player/operation';
 import { PlayerCache, PlayerOperations, PlayerRepository } from 'domains/player/types';
-import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
+import * as TE from 'fp-ts/TaskEither';
 import { FplBootstrapDataService } from 'src/data/types';
 import { PrismaPlayerCreate } from 'src/repositories/player/type';
 import { Player, PlayerId, Players } from 'src/types/domain/player.type';
 import { DataLayerError, ServiceError } from 'src/types/error.type';
 import { createServiceIntegrationError, mapDomainErrorToServiceError } from 'src/utils/error.util';
+
 import { PlayerService, PlayerServiceOperations } from './types';
 
 const playerServiceOperations = (

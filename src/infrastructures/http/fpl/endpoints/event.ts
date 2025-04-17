@@ -2,6 +2,7 @@ import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import { Logger } from 'pino';
 import { z } from 'zod';
+
 import { apiConfig } from '../../../../configs/api/api.config';
 import { EventFixture } from '../../../../types/event-fixture.type';
 import {

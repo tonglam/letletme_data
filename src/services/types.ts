@@ -1,8 +1,8 @@
 import type { EventService } from './event/types';
 import type { PhaseService } from './phase/types';
+import type { PlayerService } from './player/types';
 import type { PlayerStatService } from './player-stat/types';
 import type { PlayerValueService } from './player-value/types';
-import type { PlayerService } from './player/types';
 import type { TeamService } from './team/types';
 
 export const ServiceKey = {

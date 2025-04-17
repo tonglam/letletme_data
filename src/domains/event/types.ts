@@ -1,5 +1,6 @@
 import * as TE from 'fp-ts/TaskEither';
 import { Event, EventId, Events } from 'src/types/domain/event.type';
+
 import type { PrismaEventCreate } from '../../repositories/event/type';
 import { DBError, DomainError } from '../../types/error.type';
 

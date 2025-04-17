@@ -1,5 +1,7 @@
-import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
+import * as TE from 'fp-ts/TaskEither';
+
+import { redisClient } from './client';
 import { CACHE_CONFIG } from '../../configs/cache/redis.config';
 import {
   CacheError,
@@ -8,7 +10,6 @@ import {
   DomainErrorCode,
   createDomainError,
 } from '../../types/error.type';
-import { redisClient } from './client';
 
 const toCacheDomainError = (error: CacheError): DomainError =>
   createDomainError({

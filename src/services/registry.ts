@@ -1,10 +1,11 @@
-import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
+import * as TE from 'fp-ts/TaskEither';
+
+import { ServiceContainer, ServiceKey } from './types';
 import { FplBootstrapDataService } from '../data/types';
 import { EventCache, EventRepository } from '../domains/event/types';
 import { PhaseCache, PhaseRepository } from '../domains/phase/types';
 import { APIError, APIErrorCode, createAPIError } from '../types/error.type';
-import { ServiceContainer, ServiceKey } from './types';
 
 export interface ServiceDependencies {
   readonly fplDataService: FplBootstrapDataService;

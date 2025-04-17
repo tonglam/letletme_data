@@ -24,8 +24,15 @@
     "noFallthroughCasesInSwitch": true,
     "moduleResolution": "node",
     "composite": true,
-    "resolveJsonModule": true
+    "resolveJsonModule": true,
+    "types": ["vitest/globals"]
   },
-  "include": ["src/**/*.ts", "tests/**/*.ts", "tests/**/*.json", "jest.config.js", "jest.setup.ts"],
+  "include": [
+    "src/**/*.ts",
+    "tests/**/*.ts",
+    "tests/**/*.json",
+    "vitest.config.ts",
+    "vitest.setup.ts"
+  ],
   "exclude": ["node_modules"]
 }

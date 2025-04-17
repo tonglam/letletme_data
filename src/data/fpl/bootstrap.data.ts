@@ -1,6 +1,6 @@
 import * as E from 'fp-ts/Either';
-import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
+import * as TE from 'fp-ts/TaskEither';
 import { Logger } from 'pino';
 import { Events } from 'src/types/domain/event.type';
 import { Phases } from 'src/types/domain/phase.type';
@@ -10,6 +10,7 @@ import { Players } from 'src/types/domain/player.type';
 import { Teams } from 'src/types/domain/team.type';
 import { DataLayerError, DataLayerErrorCode } from 'src/types/error.type';
 import { createDataLayerError } from 'src/utils/error.util';
+
 import { apiConfig } from '../../configs/api/api.config';
 import { HTTPClient } from '../../infrastructures/http/client';
 import { FplBootstrapDataService } from '../types';

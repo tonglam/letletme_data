@@ -1,5 +1,7 @@
 import * as path from 'path';
+
 import { Logger, pino } from 'pino';
+
 import { formatLocalTime } from '../../utils/date.util';
 
 export type LogLevel = 'error' | 'warn' | 'info' | 'debug';

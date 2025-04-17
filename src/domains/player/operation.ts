@@ -1,9 +1,10 @@
-import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
+import * as TE from 'fp-ts/TaskEither';
 import { PrismaPlayerCreate } from 'src/repositories/player/type';
 import { PlayerId } from 'src/types/domain/player.type';
 import { createDomainError, DomainErrorCode } from 'src/types/error.type';
 import { getErrorMessage } from 'src/utils/error.util';
+
 import { PlayerCache, PlayerOperations, PlayerRepository } from './types';
 
 export const createPlayerOperations = (

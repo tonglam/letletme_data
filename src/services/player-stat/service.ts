@@ -4,8 +4,8 @@ import {
   PlayerStatOperations,
   PlayerStatRepository,
 } from 'domains/player-stat/types';
-import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
+import * as TE from 'fp-ts/TaskEither';
 import { EventService } from 'services/event/types';
 import { PlayerStatService, PlayerStatServiceOperations } from 'services/player-stat/types';
 import { FplBootstrapDataService } from 'src/data/types';

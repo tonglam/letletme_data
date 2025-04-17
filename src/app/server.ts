@@ -1,9 +1,11 @@
-import { Application } from 'express';
 import { Server } from 'http';
-import { ServiceContainer } from '../services/types';
+
+import { Application } from 'express';
+
 import { setupErrorHandler } from './error-handler';
 import { setupMiddleware } from './middleware';
 import { setupRoutes } from './routes';
+import { ServiceContainer } from '../services/types';
 
 export const createServer = (app: Application, services: ServiceContainer): Server => {
   setupMiddleware(app);

@@ -1,11 +1,12 @@
 import { PrismaClient } from '@prisma/client';
-import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
+import * as TE from 'fp-ts/TaskEither';
 import { EventId } from 'src/types/domain/event.type';
-import { EventRepository } from '../../domains/event/types';
-import { createDBError, DBErrorCode } from '../../types/error.type';
+
 import { mapDomainEventToPrismaCreate, mapPrismaEventToDomain } from './mapper';
 import { PrismaEventCreate } from './type';
+import { EventRepository } from '../../domains/event/types';
+import { createDBError, DBErrorCode } from '../../types/error.type';
 
 export const createEventRepository = (prisma: PrismaClient): EventRepository => ({
   findAll: () =>

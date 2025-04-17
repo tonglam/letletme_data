@@ -1,8 +1,10 @@
 import { Request, Response } from 'express';
 import * as E from 'fp-ts/Either';
+import { pipe } from 'fp-ts/function';
 import * as O from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
-import { pipe } from 'fp-ts/function';
+
+import { ApiRequest, APIResponseData, AsyncEither, AsyncHandler } from './types';
 import {
   APIError,
   APIErrorCode,
@@ -11,7 +13,6 @@ import {
   getErrorStatus,
 } from '../types/error.type';
 import { logApiError, logApiRequest } from '../utils/logger.util';
-import { ApiRequest, APIResponseData, AsyncEither, AsyncHandler } from './types';
 
 export const formatResponse = <T>(data: T): APIResponseData<T> => ({
   data,

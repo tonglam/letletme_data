@@ -1,6 +1,7 @@
 import { AxiosInstance } from 'axios';
 import type { TaskEither } from 'fp-ts/TaskEither';
 import { Logger } from 'pino';
+
 import { APIError } from '../../../types/error.type';
 
 export type Headers = Record<string, string>;

@@ -1,5 +1,6 @@
-import dotenv from 'dotenv';
 import { resolve } from 'path';
+
+import dotenv from 'dotenv';
 
 // Load environment variables
 const result = dotenv.config({
@@ -19,9 +20,6 @@ if (missingEnvVars.length > 0) {
   console.error('Missing required environment variables:', missingEnvVars);
   process.exit(1);
 }
-
-// Tests will run on demand without timeouts
-// Each test file should use the test.concurrent.only() pattern when needed
 
 // Set test environment variables
 process.env.NODE_ENV = 'test';

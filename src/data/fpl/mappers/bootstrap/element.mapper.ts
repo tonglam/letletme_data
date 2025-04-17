@@ -1,12 +1,13 @@
 import { format } from 'date-fns';
 import * as E from 'fp-ts/Either';
-import * as O from 'fp-ts/Option';
 import { pipe } from 'fp-ts/function';
+import * as O from 'fp-ts/Option';
 import { ElementType } from 'src/types/base.type';
 import { PlayerStat } from 'src/types/domain/player-stat.type';
 import { MappedPlayerValue } from 'src/types/domain/player-value.type';
 import { Player, PlayerId } from 'src/types/domain/player.type';
 import { safeStringToDecimal, safeStringToNumber } from 'src/utils/common.util';
+
 import { ElementResponse } from '../../schemas/bootstrap/element.schema';
 
 export const mapElementResponseToPlayer = (raw: ElementResponse): E.Either<string, Player> =>

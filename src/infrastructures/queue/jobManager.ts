@@ -1,5 +1,7 @@
-import { Job, JobsOptions, Queue, RepeatOptions } from 'bullmq';
 import crypto from 'crypto';
+
+import { Job, JobsOptions, Queue, RepeatOptions } from 'bullmq';
+
 import { BaseJobPayload } from '../../types/jobs.type';
 import { getQueueLogger } from '../logger';
 
@@ -18,7 +20,7 @@ export const addJob = async <P extends BaseJobPayload>(
   options?: JobsOptions,
 ): Promise<Job<P>> => {
   try {
-    const job = await queue.add(jobName as any, data as any, options);
+    const job = await queue.add(jobName, data, options);
     logger.info(`Job added: [${queue.name}] Name=${jobName}, ID=${job.id}`);
     return job;
   } catch (error) {
@@ -45,7 +47,7 @@ export const addRepeatableJob = async <P extends BaseJobPayload>(
   };
 
   try {
-    const job = await queue.add(jobName as any, data as any, jobOptions);
+    const job = await queue.add(jobName, data, jobOptions);
     logger.info(
       `Repeatable job added/updated: [${queue.name}] Name=${jobName}, Key=${repeatableJobId}`,
     );
@@ -60,8 +62,8 @@ export const addRepeatableJob = async <P extends BaseJobPayload>(
   }
 };
 
-export const removeRepeatableJob = async (
-  queue: Queue<any>,
+export const removeRepeatableJob = async <P extends BaseJobPayload>(
+  queue: Queue<P>,
   jobName: string,
   repeat: RepeatOptions,
 ): Promise<boolean> => {
@@ -86,7 +88,10 @@ export const removeRepeatableJob = async (
   }
 };
 
-export const removeJob = async (queue: Queue<any>, jobId: string): Promise<void> => {
+export const removeJob = async <P extends BaseJobPayload>(
+  queue: Queue<P>,
+  jobId: string,
+): Promise<void> => {
   try {
     const job = await queue.getJob(jobId);
     if (job) {

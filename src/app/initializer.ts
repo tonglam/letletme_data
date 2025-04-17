@@ -1,15 +1,16 @@
-import { Application } from 'express';
+import express, { Application } from 'express';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { createEventRepository } from '../repositories/event/repository';
-import { createPhaseRepository } from '../repositories/phase/repository';
-// import { createTeamRepository } from '../repositories/team/repository';
+
+import { createServer } from './server';
 import { createFplBootstrapDataService } from '../data/fpl/bootstrap.data';
 import { createEventCache } from '../domains/event/cache';
 import { createPhaseCache } from '../domains/phase/cache';
 import { prisma } from '../infrastructures/db/prisma';
 import { HTTPClient } from '../infrastructures/http/client';
 import { getFplApiLogger } from '../infrastructures/logger';
+import { createEventRepository } from '../repositories/event/repository';
+import { createPhaseRepository } from '../repositories/phase/repository';
 import { registry, ServiceDependencies } from '../services/registry';
 import {
   APIError,
@@ -19,7 +20,10 @@ import {
   QueueError,
   QueueErrorCode,
 } from '../types/error.type';
-import { createServer } from './server';
+// import { createTeamRepository } from '../repositories/team/repository';
+// import { createPlayerRepository } from '../repositories/player/repository';
+// import { createPlayerStatRepository } from '../repositories/player-stat/repository';
+// import { createPlayerValueRepository } from '../repositories/player-value/repository';
 
 // Create logger instance
 const logger = getFplApiLogger();
@@ -34,9 +38,9 @@ const eventCache = createEventCache(eventRepository);
 const phaseCache = createPhaseCache(phaseRepository);
 
 // Define queue service creator function with proper parameter
-const createEventMetaQueueService = (eventMetaService: EventMetaService) =>
+const createEventMetaQueueService = (_eventMetaService: EventMetaService) =>
   TE.right({
-    addJob: (jobData: any) => () => Promise.resolve(),
+    addJob: (_jobData: Record<string, string>) => () => Promise.resolve(),
   });
 
 // Define job data creator with proper parameters
@@ -141,7 +145,7 @@ const createTestHTTPClient = (): HTTPClient => {
 export const initializeApp = (): TE.TaskEither<APIError, void> =>
   pipe(
     TE.Do,
-    TE.bind('app', () => TE.right<APIError, Application>(require('express')())),
+    TE.bind('app', () => TE.right<APIError, Application>(express())),
     TE.bind('fplClient', () => TE.right(createTestHTTPClient())),
     TE.bind('services', ({ fplClient }) => {
       const fplDataService = createFplBootstrapDataService(fplClient, logger);

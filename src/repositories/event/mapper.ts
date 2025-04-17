@@ -1,5 +1,6 @@
 import { Prisma } from '@prisma/client';
 import { ChipPlay, Event, EventId, TopElementInfo } from 'src/types/domain/event.type';
+
 import { PrismaEvent, PrismaEventCreate, PrismaEventCreateInput } from './type';
 
 function isObject(value: unknown): value is Record<string, unknown> {

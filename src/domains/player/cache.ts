@@ -1,8 +1,8 @@
 import { PlayerCache, PlayerCacheConfig, PlayerRepository } from 'domains/player/types';
 import * as E from 'fp-ts/Either';
+import { flow, pipe } from 'fp-ts/function';
 import * as O from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
-import { flow, pipe } from 'fp-ts/function';
 import { CachePrefix } from 'src/configs/cache/cache.config';
 import { redisClient } from 'src/infrastructures/cache/client';
 import { getCurrentSeason } from 'src/types/base.type';

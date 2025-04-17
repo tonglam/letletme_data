@@ -1,12 +1,13 @@
 import { AxiosError, AxiosResponse } from 'axios';
 import { Response } from 'express';
+import { flow, pipe } from 'fp-ts/function';
 import * as T from 'fp-ts/Task';
 import * as TE from 'fp-ts/TaskEither';
-import { flow, pipe } from 'fp-ts/function';
 import { Logger } from 'pino';
-import { HTTP_STATUS } from '../../../configs/http/http.config';
+
 import { APIError, APIResponse, ErrorDetails, HttpMethod, RequestMetrics } from './types';
 import { createErrorFromStatus, createMonitor } from './utils';
+import { HTTP_STATUS } from '../../../configs/http/http.config';
 
 const logMetricsByDuration = (logData: Record<string, unknown>, logger: Logger) =>
   flow((duration: number) => {

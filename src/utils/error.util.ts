@@ -1,7 +1,8 @@
 import { Prisma } from '@prisma/client';
 import * as E from 'fp-ts/Either';
-import * as O from 'fp-ts/Option';
 import { pipe } from 'fp-ts/function';
+import * as O from 'fp-ts/Option';
+
 import {
   APIError,
   APIErrorCode,

@@ -1,6 +1,6 @@
 import { Prisma } from '@prisma/client';
-import * as O from 'fp-ts/Option';
 import { pipe } from 'fp-ts/function';
+import * as O from 'fp-ts/Option';
 
 export const safeStringToNumber = (s: string | null | undefined): O.Option<number> =>
   pipe(

@@ -1,6 +1,7 @@
 import { Prisma } from '@prisma/client';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
+
 import { Branded, createBrandedType } from '../base.type';
 
 export type PlayerStatId = Branded<string, 'PlayerStatId'>;

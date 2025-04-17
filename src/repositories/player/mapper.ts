@@ -1,5 +1,6 @@
 import { ElementType } from 'src/types/base.type';
 import { Player, PlayerId } from 'src/types/domain/player.type';
+
 import { PrismaPlayer, PrismaPlayerCreate, PrismaPlayerCreateInput } from './type';
 
 export const mapPrismaPlayerToDomain = (prismaPlayer: PrismaPlayer): Player => ({

@@ -1,12 +1,13 @@
 import axios from 'axios';
+
 import { apiConfig } from '../../../configs/api/api.config';
 import { DEFAULT_CONFIG } from '../../../configs/http/http.config';
 import { getFplApiLogger } from '../../logger';
 import { createHTTPClient } from '../client';
-import { HTTPClientContext, RetryConfig } from '../client/types';
-import { DEFAULT_RETRY_CONFIG } from '../client/utils';
 import { createFPLEndpoints } from './endpoints';
 import { FPLEndpoints } from './types';
+import { HTTPClientContext, RetryConfig } from '../client/types';
+import { DEFAULT_RETRY_CONFIG } from '../client/utils';
 
 interface FPLClientConfig {
   readonly retryConfig?: Partial<RetryConfig>;

@@ -1,6 +1,7 @@
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import { z } from 'zod';
+
 import { BaseRepository, Branded, createBrandedType, isApiResponse } from './base.type';
 
 // ============ Branded Types ============
@@ -109,12 +110,12 @@ export const toDomainEventFixture = (
     teamHDifficulty: isEventFixtureApiResponse(data)
       ? data.team_h_difficulty
       : data.teamHDifficulty,
-    teamHScore: isEventFixtureApiResponse(data) ? data.team_h_score ?? 0 : data.teamHScore,
+    teamHScore: isEventFixtureApiResponse(data) ? (data.team_h_score ?? 0) : data.teamHScore,
     teamA: isEventFixtureApiResponse(data) ? data.team_a : data.teamA,
     teamADifficulty: isEventFixtureApiResponse(data)
       ? data.team_a_difficulty
       : data.teamADifficulty,
-    teamAScore: isEventFixtureApiResponse(data) ? data.team_a_score ?? 0 : data.teamAScore,
+    teamAScore: isEventFixtureApiResponse(data) ? (data.team_a_score ?? 0) : data.teamAScore,
   };
 };
 

@@ -1,10 +1,11 @@
-import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
+import * as TE from 'fp-ts/TaskEither';
+
+import { EventCache, EventOperations, EventRepository } from './types';
 import { PrismaEventCreate } from '../../repositories/event/type';
 import { EventId } from '../../types/domain/event.type';
 import { DomainErrorCode, createDomainError } from '../../types/error.type';
 import { getErrorMessage } from '../../utils/error.util';
-import { EventCache, EventOperations, EventRepository } from './types';
 
 export const createEventOperations = (
   repository: EventRepository,

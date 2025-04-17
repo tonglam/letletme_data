@@ -1,6 +1,6 @@
 import { TeamCache, TeamOperations, TeamRepository } from 'domains/team/types';
-import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
+import * as TE from 'fp-ts/TaskEither';
 import { PrismaTeamCreate } from 'src/repositories/team/type';
 import { TeamId } from 'src/types/domain/team.type';
 import { createDomainError, DomainErrorCode } from 'src/types/error.type';

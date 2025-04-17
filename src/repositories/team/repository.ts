@@ -1,10 +1,11 @@
 import { PrismaClient } from '@prisma/client';
 import { TeamRepository } from 'domains/team/types';
-import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
+import * as TE from 'fp-ts/TaskEither';
 import { mapDomainTeamToPrismaCreate, mapPrismaTeamToDomain } from 'src/repositories/team/mapper';
 import { PrismaTeamCreate } from 'src/repositories/team/type';
 import { TeamId } from 'src/types/domain/team.type';
+
 import { createDBError, DBErrorCode } from '../../types/error.type';
 
 export const createTeamRepository = (prismaClient: PrismaClient): TeamRepository => ({

@@ -1,4 +1,5 @@
 import { Logger } from 'pino';
+
 import { HTTPClient } from '../client';
 import { createBootstrapEndpoints } from './endpoints/bootstrap';
 import { createElementEndpoints } from './endpoints/element';

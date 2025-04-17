@@ -1,4 +1,5 @@
 import * as TE from 'fp-ts/TaskEither';
+
 import type { CacheError } from '../../types/error.type';
 
 export interface RedisConnectionConfig {

@@ -1,14 +1,15 @@
 import * as E from 'fp-ts/Either';
+import { flow, pipe } from 'fp-ts/function';
 import * as O from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
-import { flow, pipe } from 'fp-ts/function';
 import { Event, EventId, Events } from 'src/types/domain/event.type';
+
+import { EventCache, EventCacheConfig, EventRepository } from './types';
 import { CachePrefix } from '../../configs/cache/cache.config';
 import { redisClient } from '../../infrastructures/cache/client';
 import { getCurrentSeason } from '../../types/base.type';
 import { CacheError, CacheErrorCode, createCacheError, DomainError } from '../../types/error.type';
 import { mapCacheErrorToDomainError, mapRepositoryErrorToCacheError } from '../../utils/error.util';
-import { EventCache, EventCacheConfig, EventRepository } from './types';
 
 const parseEvent = (eventStr: string): E.Either<CacheError, Event | null> =>
   pipe(

@@ -1,5 +1,6 @@
-import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
+import * as TE from 'fp-ts/TaskEither';
+
 import { getWorkflowLogger } from '../../infrastructures/logger';
 import type { Phase } from '../../types/domain/phase.type';
 import { createServiceError, ServiceError, ServiceErrorCode } from '../../types/error.type';

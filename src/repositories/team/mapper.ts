@@ -1,4 +1,5 @@
 import { PrismaTeam, PrismaTeamCreate, PrismaTeamCreateInput } from 'src/repositories/team/type';
+
 import { Team, TeamId } from '../../types/domain/team.type';
 
 export const mapPrismaTeamToDomain = (prismaTeam: PrismaTeam): Team => ({

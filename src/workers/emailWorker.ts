@@ -1,4 +1,5 @@
 import { Job } from 'bullmq';
+
 import { QUEUE_CONFIG } from '../configs/queue/queue.config';
 import { getQueueLogger } from '../infrastructures/logger';
 import { createWorker, setupGracefulShutdown } from '../infrastructures/queue/workerFactory';
@@ -38,10 +39,16 @@ const emailProcessor = async (
   try {
     const result = await sendEmail(payload);
     return result;
-  } catch (error: any) {
-    logger.error(`Error processing email job ID ${job.id}: ${error.message}`, {
-      stack: error.stack,
-    });
+  } catch (error: unknown) {
+    if (error instanceof Error) {
+      logger.error(`Error processing email job ID ${job.id}: ${error.message}`, {
+        stack: error.stack,
+      });
+    } else {
+      logger.error(`Error processing email job ID ${job.id}: Unknown error`, {
+        error,
+      });
+    }
     throw error;
   }
 };

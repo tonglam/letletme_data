@@ -1,6 +1,6 @@
+import { ErrorDetails, HttpMethod, RequestMetrics, RetryConfig } from './types';
 import { DEFAULT_CONFIG, ERROR_CONFIG, HTTP_STATUS } from '../../../configs/http/http.config';
 import { APIError, APIErrorCode } from '../../../types/error.type';
-import { ErrorDetails, HttpMethod, RequestMetrics, RetryConfig } from './types';
 
 export const createMonitor = () => {
   const startTime = Date.now();

@@ -1,9 +1,10 @@
 import axios, { AxiosRequestConfig } from 'axios';
 import * as TE from 'fp-ts/TaskEither';
-import { HTTP_STATUS } from '../../../configs/http/http.config';
-import { APIError } from '../../../types/error.type';
+
 import { HTTPClient, HTTPClientContext, HttpMethod, RequestBody, RequestOptions } from './types';
 import { calculateRetryDelay, createErrorFromStatus, createMonitor, delay } from './utils';
+import { HTTP_STATUS } from '../../../configs/http/http.config';
+import { APIError } from '../../../types/error.type';
 
 const makeRequestWithRetry = <T>(
   context: HTTPClientContext,

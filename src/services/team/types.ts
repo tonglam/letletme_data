@@ -1,6 +1,7 @@
 import * as TE from 'fp-ts/TaskEither';
 import { WorkflowResult } from 'services/types';
 import { FplBootstrapDataService } from 'src/data/types';
+
 import type { Team, TeamId, Teams } from '../../types/domain/team.type';
 import type { ServiceError } from '../../types/error.type';
 

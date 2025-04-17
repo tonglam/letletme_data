@@ -1,5 +1,7 @@
-import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
+import * as TE from 'fp-ts/TaskEither';
+
+import { PhaseService, PhaseServiceOperations } from './types';
 import { FplBootstrapDataService } from '../../data/types';
 import { createPhaseOperations } from '../../domains/phase/operation';
 import { PhaseCache, PhaseOperations, PhaseRepository } from '../../domains/phase/types';
@@ -10,7 +12,6 @@ import {
   createServiceIntegrationError,
   mapDomainErrorToServiceError,
 } from '../../utils/error.util';
-import { PhaseService, PhaseServiceOperations } from './types';
 
 const phaseServiceOperations = (
   domainOps: PhaseOperations,
