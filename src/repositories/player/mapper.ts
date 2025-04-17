@@ -13,6 +13,13 @@ export const mapPrismaPlayerToDomain = (prismaPlayer: PrismaPlayer): Player => (
   secondName: prismaPlayer.secondName ?? null,
   webName: prismaPlayer.webName,
   teamId: prismaPlayer.teamId,
+  mngWin: prismaPlayer.mngWin ?? undefined,
+  mngDraw: prismaPlayer.mngDraw ?? undefined,
+  mngLoss: prismaPlayer.mngLoss ?? undefined,
+  mngUnderdogWin: prismaPlayer.mngUnderdogWin ?? undefined,
+  mngUnderdogDraw: prismaPlayer.mngUnderdogDraw ?? undefined,
+  mngCleanSheets: prismaPlayer.mngCleanSheets ?? undefined,
+  mngGoalsScored: prismaPlayer.mngGoalsScored ?? undefined,
 });
 
 export const mapDomainPlayerToPrismaCreate = (
@@ -27,4 +34,11 @@ export const mapDomainPlayerToPrismaCreate = (
   secondName: domainPlayer.secondName,
   webName: domainPlayer.webName,
   teamId: domainPlayer.teamId,
+  mngWin: domainPlayer.mngWin ?? null,
+  mngDraw: domainPlayer.mngDraw ?? null,
+  mngLoss: domainPlayer.mngLoss ?? null,
+  mngUnderdogWin: domainPlayer.mngUnderdogWin ?? null,
+  mngUnderdogDraw: domainPlayer.mngUnderdogDraw ?? null,
+  mngCleanSheets: domainPlayer.mngCleanSheets ?? null,
+  mngGoalsScored: domainPlayer.mngGoalsScored ?? null,
 });

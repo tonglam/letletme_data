@@ -60,6 +60,16 @@ export interface PlayerStat {
   readonly savesPer90: Prisma.Decimal | null;
   readonly expectedAssistsPer90: Prisma.Decimal | null;
   readonly expectedGoalInvolvementsPer90: Prisma.Decimal | null;
+  readonly expectedGoalsConcededPer90: Prisma.Decimal | null;
+  readonly goalsConcededPer90: Prisma.Decimal | null;
+  readonly startsPer90: Prisma.Decimal | null;
+  readonly cleanSheetsPer90: Prisma.Decimal | null;
+  readonly cornersAndIndirectFreekicksOrder: number | null;
+  readonly cornersAndIndirectFreekicksText: string | null;
+  readonly directFreekicksOrder: number | null;
+  readonly directFreekicksText: string | null;
+  readonly penaltiesOrder: number | null;
+  readonly penaltiesText: string | null;
   readonly totalPoints: number | null;
 }
 

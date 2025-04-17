@@ -80,16 +80,23 @@ model Team {
 }
 
 model Player {
-  element     Int      @id
-  elementCode Int      @unique @map("element_code")
-  price       Int      @default(0)
-  startPrice  Int      @default(0) @map("start_price")
-  elementType Int      @map("element_type")
-  firstName   String?  @map("first_name")
-  secondName  String?  @map("second_name")
-  webName     String   @map("web_name")
-  teamId      Int      @map("team_id")
-  createdAt   DateTime @default(now()) @map("created_at")
+  element         Int      @id
+  elementCode     Int      @unique @map("element_code")
+  price           Int      @default(0)
+  startPrice      Int      @default(0) @map("start_price")
+  elementType     Int      @map("element_type")
+  firstName       String?  @map("first_name")
+  secondName      String?  @map("second_name")
+  webName         String   @map("web_name")
+  teamId          Int      @map("team_id")
+  mngWin          Int?     @map("mng_win")
+  mngDraw         Int?     @map("mng_draw")
+  mngLoss         Int?     @map("mng_loss")
+  mngUnderdogWin  Int?     @map("mng_underdog_win")
+  mngUnderdogDraw Int?     @map("mng_underdog_draw")
+  mngCleanSheets  Int?     @map("mng_clean_sheets")
+  mngGoalsScored  Int?     @map("mng_goals_scored")
+  createdAt       DateTime @default(now()) @map("created_at")
 
   @@map("players")
 }

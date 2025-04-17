@@ -32,7 +32,8 @@
     "tests/**/*.ts",
     "tests/**/*.json",
     "vitest.config.ts",
-    "vitest.setup.ts"
+    "vitest.setup.ts",
+    "scripts/**/*.ts"
   ],
   "exclude": ["node_modules"]
 }

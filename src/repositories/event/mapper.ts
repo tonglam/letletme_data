@@ -62,22 +62,41 @@ export const mapPrismaEventToDomain = (prismaEvent: PrismaEvent): Event => ({
 
 export const mapDomainEventToPrismaCreate = (
   domainEvent: PrismaEventCreate,
-): PrismaEventCreateInput => ({
-  id: Number(domainEvent.id),
-  name: domainEvent.name,
-  deadlineTime: domainEvent.deadlineTime,
-  deadlineTimeEpoch: domainEvent.deadlineTimeEpoch,
-  finished: domainEvent.finished,
-  isPrevious: domainEvent.isPrevious,
-  isCurrent: domainEvent.isCurrent,
-  isNext: domainEvent.isNext,
-  averageEntryScore: domainEvent.averageEntryScore,
-  dataChecked: domainEvent.dataChecked,
-  highestScore: domainEvent.highestScore ?? undefined,
-  highestScoringEntry: domainEvent.highestScoringEntry ?? undefined,
-  cupLeaguesCreated: domainEvent.cupLeaguesCreated,
-  h2hKoMatchesCreated: domainEvent.h2hKoMatchesCreated,
-  transfersMade: domainEvent.transfersMade,
-  deadlineTimeGameOffset: domainEvent.deadlineTimeGameOffset,
-  releaseTime: domainEvent.releaseTime ?? null,
-});
+): PrismaEventCreateInput => {
+  const chipPlaysInput =
+    domainEvent.chipPlays && domainEvent.chipPlays.length > 0
+      ? (domainEvent.chipPlays as unknown as Prisma.InputJsonValue)
+      : Prisma.JsonNull;
+
+  const topElementInfoInput = domainEvent.topElementInfo
+    ? (domainEvent.topElementInfo as unknown as Prisma.InputJsonValue)
+    : Prisma.JsonNull;
+
+  return {
+    id: Number(domainEvent.id),
+    name: domainEvent.name,
+    deadlineTime: domainEvent.deadlineTime,
+    deadlineTimeEpoch: domainEvent.deadlineTimeEpoch,
+    finished: domainEvent.finished,
+    isPrevious: domainEvent.isPrevious,
+    isCurrent: domainEvent.isCurrent,
+    isNext: domainEvent.isNext,
+    averageEntryScore: domainEvent.averageEntryScore,
+    dataChecked: domainEvent.dataChecked,
+    highestScore: domainEvent.highestScore ?? undefined,
+    highestScoringEntry: domainEvent.highestScoringEntry ?? undefined,
+    cupLeaguesCreated: domainEvent.cupLeaguesCreated,
+    h2hKoMatchesCreated: domainEvent.h2hKoMatchesCreated,
+    transfersMade: domainEvent.transfersMade,
+    deadlineTimeGameOffset: domainEvent.deadlineTimeGameOffset,
+    releaseTime: domainEvent.releaseTime ?? null,
+    rankedCount: domainEvent.rankedCount,
+    chipPlays: chipPlaysInput,
+    topElementInfo: topElementInfoInput,
+    mostSelected: domainEvent.mostSelected ?? null,
+    mostTransferredIn: domainEvent.mostTransferredIn ?? null,
+    mostCaptained: domainEvent.mostCaptained ?? null,
+    mostViceCaptained: domainEvent.mostViceCaptained ?? null,
+    topElement: domainEvent.topElement ?? null,
+  };
+};

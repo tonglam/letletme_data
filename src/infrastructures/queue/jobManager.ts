@@ -20,7 +20,7 @@ export const addJob = async <P extends BaseJobPayload>(
   options?: JobsOptions,
 ): Promise<Job<P>> => {
   try {
-    const job = await queue.add(jobName, data, options);
+    const job = await queue.add(jobName as ExtractNameType<P, string>, data, options);
     logger.info(`Job added: [${queue.name}] Name=${jobName}, ID=${job.id}`);
     return job;
   } catch (error) {

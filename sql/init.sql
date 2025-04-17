@@ -81,6 +81,13 @@ CREATE TABLE "players" (
     "second_name" TEXT,
     "web_name" TEXT NOT NULL,
     "team_id" INTEGER NOT NULL,
+    "mng_win" INTEGER,
+    "mng_draw" INTEGER,
+    "mng_loss" INTEGER,
+    "mng_underdog_win" INTEGER,
+    "mng_underdog_draw" INTEGER,
+    "mng_clean_sheets" INTEGER,
+    "mng_goals_scored" INTEGER,
     "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 ALTER TABLE "players" ENABLE ROW LEVEL SECURITY;
