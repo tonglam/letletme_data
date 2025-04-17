@@ -1,33 +1,24 @@
-// Phase Handlers Module
-//
-// Provides handlers for phase-related API endpoints using functional programming
-// patterns with fp-ts. Handles phase retrieval operations including getting all phases
-// and specific phases by ID.
-
 import { Request } from 'express';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
-import { toAPIError } from 'src/utils/error.util';
-import { ServiceContainer, ServiceKey } from '../../service';
+import { ServiceContainer } from '../../services/types';
+import { Phase, PhaseId } from '../../types/domain/phase.type';
 import { APIErrorCode, ServiceError, createAPIError } from '../../types/error.type';
-import { Phase, PhaseId } from '../../types/phase.type';
+import { toAPIError } from '../../utils/error.util';
 import { PhaseHandlerResponse } from '../types';
 
-// Creates phase handlers with dependency injection
 export const createPhaseHandlers = (
-  phaseService: ServiceContainer[typeof ServiceKey.PHASE],
+  phaseService: ServiceContainer['phaseService'],
 ): PhaseHandlerResponse => ({
-  // Retrieves all phases
   getAllPhases: () => {
-    const task = phaseService.getPhases() as unknown as TE.TaskEither<ServiceError, Phase[]>;
+    const task = phaseService.getPhases() as TE.TaskEither<ServiceError, Phase[]>;
     return pipe(
       task,
       TE.mapLeft(toAPIError),
-      TE.map((phases) => phases.slice()),
+      TE.map((phases) => [...phases]),
     );
   },
 
-  // Retrieves a specific phase by ID
   getPhaseById: (req: Request) => {
     const phaseId = Number(req.params.id);
     if (isNaN(phaseId) || phaseId <= 0) {
@@ -39,12 +30,8 @@ export const createPhaseHandlers = (
       );
     }
 
-    const task = phaseService.getPhase(phaseId as PhaseId) as unknown as TE.TaskEither<
-      ServiceError,
-      Phase | null
-    >;
     return pipe(
-      task,
+      phaseService.getPhase(phaseId as PhaseId) as TE.TaskEither<ServiceError, Phase | null>,
       TE.mapLeft(toAPIError),
       TE.chain((phase) =>
         phase === null

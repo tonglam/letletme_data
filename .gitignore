@@ -132,3 +132,46 @@ dist
 
 # cursor files
 assistant_*.txt
+
+# Prisma
+prisma/.env
+prisma/migrations/*_init/migration.sql
+*.db
+*.db-journal
+
+# Redis
+dump.rdb
+redis-data/
+*.aof
+
+# Build
+build/
+dist/
+lib/
+
+# Docker
+.dockerignore
+docker-compose.override.yml
+
+# JetBrains IDEs
+.idea/
+*.iml
+*.iws
+*.ipr
+.idea_modules/
+
+# MacOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Temp files
+*.swp
+*.swo
+*~

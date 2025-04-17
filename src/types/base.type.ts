@@ -1,8 +1,3 @@
-/**
- * Core type definitions and utilities for the application.
- * Includes branded types, base interfaces, and common type utilities.
- */
-
 import { ValueChangeType } from '@prisma/client';
 import * as E from 'fp-ts/Either';
 import * as TE from 'fp-ts/TaskEither';
@@ -10,10 +5,6 @@ import { pipe } from 'fp-ts/function';
 import { z } from 'zod';
 import { APIError, APIErrorCode, CacheError, DBError, createAPIError } from './error.type';
 
-// ============ Constants ============
-/**
- * Element status constants for player availability
- */
 export enum ElementStatus {
   Available = 'a',
   Unavailable = 'u',
@@ -25,66 +16,47 @@ export enum ElementStatus {
 
 export { ValueChangeType };
 
-/**
- * Element type constants
- */
 export enum ElementType {
-  GKP = 1,
-  DEF = 2,
-  MID = 3,
-  FWD = 4,
+  GOALKEEPER = 1,
+  DEFENDER = 2,
+  MIDFIELDER = 3,
+  FORWARD = 4,
+  MANAGER = 5,
 }
 
-/**
- * Configuration for element types with their IDs and names
- */
 export const ElementTypeConfig = {
-  [ElementType.GKP]: { id: ElementType.GKP, name: 'Goalkeeper' },
-  [ElementType.DEF]: { id: ElementType.DEF, name: 'Defender' },
-  [ElementType.MID]: { id: ElementType.MID, name: 'Midfielder' },
-  [ElementType.FWD]: { id: ElementType.FWD, name: 'Forward' },
+  [ElementType.GOALKEEPER]: { id: ElementType.GOALKEEPER, name: 'Goalkeeper' },
+  [ElementType.DEFENDER]: { id: ElementType.DEFENDER, name: 'Defender' },
+  [ElementType.MIDFIELDER]: { id: ElementType.MIDFIELDER, name: 'Midfielder' },
+  [ElementType.FORWARD]: { id: ElementType.FORWARD, name: 'Forward' },
+  [ElementType.MANAGER]: { id: ElementType.MANAGER, name: 'Manager' },
 } as const;
 
-// Derived maps for specific use cases
-/**
- * Gets element type by its numeric ID
- */
 export const getElementTypeById = (id: number): ElementType | null => {
   switch (id) {
-    case ElementType.GKP:
-      return ElementType.GKP;
-    case ElementType.DEF:
-      return ElementType.DEF;
-    case ElementType.MID:
-      return ElementType.MID;
-    case ElementType.FWD:
-      return ElementType.FWD;
+    case ElementType.GOALKEEPER:
+      return ElementType.GOALKEEPER;
+    case ElementType.DEFENDER:
+      return ElementType.DEFENDER;
+    case ElementType.MIDFIELDER:
+      return ElementType.MIDFIELDER;
+    case ElementType.FORWARD:
+      return ElementType.FORWARD;
+    case ElementType.MANAGER:
+      return ElementType.MANAGER;
     default:
       return null;
   }
 };
 
-/**
- * Gets element type display name
- */
 export const getElementTypeName = (type: ElementType): string => ElementTypeConfig[type].name;
 
-// Branded Types System
-/**
- * Brand interface for type branding
- */
 export interface Brand<K extends string> {
   readonly __brand: K;
 }
 
-/**
- * Branded type combining a base type with a brand
- */
 export type Branded<T, K extends string> = T & Brand<K>;
 
-/**
- * Creates a branded type with validation
- */
 export const createBrandedType = <T, K extends string>(
   brand: K,
   validator: (value: unknown) => value is T,
@@ -94,11 +66,6 @@ export const createBrandedType = <T, K extends string>(
   is: (value: unknown): value is Branded<T, K> => validator(value),
 });
 
-// Base Repository Interface
-/**
- * Base repository interface
- * All repository operations return DBError for database-related errors
- */
 export interface BaseRepository<T, CreateT, IdT> {
   readonly findAll: () => TE.TaskEither<DBError, T[]>;
   readonly findById: (id: IdT) => TE.TaskEither<DBError, T | null>;
@@ -110,10 +77,6 @@ export interface BaseRepository<T, CreateT, IdT> {
   readonly deleteByIds: (ids: IdT[]) => TE.TaskEither<DBError, void>;
 }
 
-// Schema Validation Helper
-/**
- * Validates data against a Zod schema
- */
 export const validateSchema =
   <T>(schema: z.Schema<T>, entityName: string) =>
   (data: unknown): E.Either<string, T> => {
@@ -127,10 +90,6 @@ export const validateSchema =
     );
   };
 
-// Common Cache Handlers
-/**
- * Gets cached data or falls back to fetching many items
- */
 export const getCachedOrFallbackMany = <T, P>(
   cachedValue: TE.TaskEither<CacheError, readonly P[]> | undefined,
   fallback: TE.TaskEither<APIError, readonly P[]>,
@@ -149,9 +108,6 @@ export const getCachedOrFallbackMany = <T, P>(
       )
     : pipe(fallback, TE.chain(converter));
 
-/**
- * Gets cached data or falls back to fetching a single item
- */
 export const getCachedOrFallbackOne = <T, P>(
   cachedValue: TE.TaskEither<CacheError, P | null> | undefined,
   fallback: TE.TaskEither<APIError, P | null>,
@@ -170,17 +126,11 @@ export const getCachedOrFallbackOne = <T, P>(
       )
     : pipe(fallback, TE.chain(converter));
 
-/**
- * Type guard for API responses
- */
 export const isApiResponse = <T extends object, K extends string>(
   data: T,
   snakeCaseKey: K,
 ): data is T & Record<K, unknown> => snakeCaseKey in data;
 
-/**
- * FPL season enumeration
- */
 export enum Season {
   Season_1617 = '1617',
   Season_1718 = '1718',
@@ -193,12 +143,6 @@ export enum Season {
   Season_2425 = '2425',
 }
 
-/**
- * Gets current FPL season in format 'YYZZ' (e.g., '2324' for 2023/24 season)
- * For example:
- * - August 2023 to July 2024 returns '2324'
- * - August 2024 to July 2025 returns '2425'
- */
 export const getCurrentSeason = (): string => {
   const currentDate = new Date();
   const currentYear = currentDate.getFullYear();
@@ -211,7 +155,4 @@ export const getCurrentSeason = (): string => {
   return `${startYearStr}${endYearStr}`;
 };
 
-/**
- * Gets all available FPL seasons
- */
 export const getAllSeasons = (): Season[] => Object.values(Season);

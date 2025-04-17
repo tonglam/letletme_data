@@ -1,33 +1,24 @@
-// Team Handlers Module
-//
-// Provides handlers for team-related API endpoints using functional programming
-// patterns with fp-ts. Handles team retrieval operations including getting all teams
-// and specific teams by ID.
-
 import { Request } from 'express';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
-import { toAPIError } from 'src/utils/error.util';
-import { ServiceContainer, ServiceKey } from '../../service';
+import { ServiceContainer } from '../../services/types';
+import { Team, TeamId } from '../../types/domain/team.type';
 import { APIErrorCode, ServiceError, createAPIError } from '../../types/error.type';
-import { Team, TeamId } from '../../types/team.type';
+import { toAPIError } from '../../utils/error.util';
 import { TeamHandlerResponse } from '../types';
 
-// Creates team handlers with dependency injection
 export const createTeamHandlers = (
-  teamService: ServiceContainer[typeof ServiceKey.TEAM],
+  teamService: ServiceContainer['teamService'],
 ): TeamHandlerResponse => ({
-  // Retrieves all teams
   getAllTeams: () => {
-    const task = teamService.getTeams() as unknown as TE.TaskEither<ServiceError, Team[]>;
+    const task = teamService.getTeams() as TE.TaskEither<ServiceError, Team[]>;
     return pipe(
       task,
       TE.mapLeft(toAPIError),
-      TE.map((teams) => teams.slice()),
+      TE.map((teams) => [...teams]),
     );
   },
 
-  // Retrieves a specific team by ID
   getTeamById: (req: Request) => {
     const teamId = Number(req.params.id);
     if (isNaN(teamId) || teamId <= 0) {
@@ -39,12 +30,8 @@ export const createTeamHandlers = (
       );
     }
 
-    const task = teamService.getTeam(teamId as TeamId) as unknown as TE.TaskEither<
-      ServiceError,
-      Team | null
-    >;
     return pipe(
-      task,
+      teamService.getTeam(teamId as TeamId) as TE.TaskEither<ServiceError, Team | null>,
       TE.mapLeft(toAPIError),
       TE.chain((team) =>
         team === null

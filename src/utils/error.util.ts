@@ -1,5 +1,3 @@
-// Error utility functions
-
 import { Prisma } from '@prisma/client';
 import * as E from 'fp-ts/Either';
 import * as O from 'fp-ts/Option';
@@ -9,22 +7,24 @@ import {
   APIErrorCode,
   CacheError,
   CacheErrorCode,
-  DBError,
-  DBErrorCode,
-  DomainError,
-  DomainErrorCode,
-  QueueError,
-  QueueErrorCode,
-  ServiceError,
-  ServiceErrorCode,
   createAPIError,
   createCacheError,
   createDBError,
   createDomainError,
   createServiceError,
+  DataLayerError,
+  DataLayerErrorCode,
+  DBError,
+  DBErrorCode,
+  DomainError,
+  DomainErrorCode,
+  ErrorDetails,
+  QueueError,
+  QueueErrorCode,
+  ServiceError,
+  ServiceErrorCode,
 } from '../types/error.type';
 
-// Type guard for QueueError
 const isQueueError = (error: unknown): error is QueueError =>
   typeof error === 'object' &&
   error !== null &&
@@ -34,9 +34,6 @@ const isQueueError = (error: unknown): error is QueueError =>
 
 // ============ Domain Error Handlers ============
 
-/**
- * Creates a domain error with a formatted message
- */
 export const handleDomainError =
   (message: string) =>
   (error: Error | unknown): DomainError =>
@@ -48,18 +45,12 @@ export const handleDomainError =
 
 // ============ API Error Handlers ============
 
-/**
- * Creates a Not Found error
- */
 export const handleNotFound = (message: string): APIError =>
   createAPIError({
     code: APIErrorCode.NOT_FOUND,
     message,
   });
 
-/**
- * Handles nullable values by converting them to Either
- */
 export const handleNullable =
   <T>(message: string): ((value: T | null) => E.Either<APIError, T>) =>
   (value: T | null) =>
@@ -67,10 +58,6 @@ export const handleNullable =
 
 // ============ Database Error Handlers ============
 
-/**
- * Creates a database operation error
- * Used for general CRUD operation failures
- */
 export const createDatabaseOperationError = (error: unknown): DBError => {
   const message = error instanceof Error ? error.message : 'Database operation failed';
   return createDBError({
@@ -81,10 +68,6 @@ export const createDatabaseOperationError = (error: unknown): DBError => {
   });
 };
 
-/**
- * Creates a database validation error
- * Used for constraint violations and invalid data
- */
 export const createDatabaseValidationError = (error: unknown): DBError => {
   const message = error instanceof Error ? error.message : 'Database validation failed';
   return createDBError({
@@ -95,10 +78,6 @@ export const createDatabaseValidationError = (error: unknown): DBError => {
   });
 };
 
-/**
- * Creates a database transformation error
- * Used for JSON serialization/deserialization failures
- */
 export const createDatabaseTransformationError = (error: unknown): DBError => {
   const message = error instanceof Error ? error.message : 'Failed to transform database data';
   return createDBError({
@@ -109,10 +88,6 @@ export const createDatabaseTransformationError = (error: unknown): DBError => {
   });
 };
 
-/**
- * Creates a database connection error
- * Used for database connectivity issues
- */
 export const createDatabaseConnectionError = (error: unknown): DBError => {
   const message = error instanceof Error ? error.message : 'Failed to connect to database';
   return createDBError({
@@ -123,14 +98,9 @@ export const createDatabaseConnectionError = (error: unknown): DBError => {
   });
 };
 
-/**
- * Handles Prisma errors and converts them to appropriate DBError types
- * Preserves original error messages and details for debugging
- */
 export const handlePrismaError = (error: unknown): DBError =>
   pipe(
     error,
-    // Handle Prisma validation errors
     O.fromPredicate(
       (e): e is Prisma.PrismaClientValidationError =>
         e instanceof Prisma.PrismaClientValidationError,
@@ -211,10 +181,6 @@ export const handlePrismaError = (error: unknown): DBError =>
 
 // ============ Cache Error Handlers ============
 
-/**
- * Creates a cache connection error
- * Used for cache connectivity issues
- */
 export const createCacheConnectionError = (error: unknown): CacheError => {
   const message = error instanceof Error ? error.message : 'Failed to connect to cache';
   return createCacheError({
@@ -225,10 +191,6 @@ export const createCacheConnectionError = (error: unknown): CacheError => {
   });
 };
 
-/**
- * Creates a cache operation error
- * Used for general cache operation failures
- */
 export const createCacheOperationError = (error: unknown): CacheError => {
   const message = error instanceof Error ? error.message : 'Cache operation failed';
   return createCacheError({
@@ -239,10 +201,6 @@ export const createCacheOperationError = (error: unknown): CacheError => {
   });
 };
 
-/**
- * Creates a cache serialization error
- * Used for data serialization failures
- */
 export const createCacheSerializationError = (error: unknown): CacheError => {
   const message = error instanceof Error ? error.message : 'Failed to serialize cache data';
   return createCacheError({
@@ -253,10 +211,6 @@ export const createCacheSerializationError = (error: unknown): CacheError => {
   });
 };
 
-/**
- * Creates a cache deserialization error
- * Used for data deserialization failures
- */
 export const createCacheDeserializationError = (error: unknown): CacheError => {
   const message = error instanceof Error ? error.message : 'Failed to deserialize cache data';
   return createCacheError({
@@ -269,10 +223,6 @@ export const createCacheDeserializationError = (error: unknown): CacheError => {
 
 // ============ Service Error Handlers ============
 
-/**
- * Creates a service operation error
- * Used for general service operation failures
- */
 export const createServiceOperationError = (error: unknown): ServiceError => {
   const message = error instanceof Error ? error.message : 'Service operation failed';
   return createServiceError({
@@ -283,10 +233,6 @@ export const createServiceOperationError = (error: unknown): ServiceError => {
   });
 };
 
-/**
- * Creates a service validation error
- * Used for service-level validation failures
- */
 export const createServiceValidationError = (error: unknown): ServiceError => {
   const message = error instanceof Error ? error.message : 'Service validation failed';
   return createServiceError({
@@ -297,10 +243,6 @@ export const createServiceValidationError = (error: unknown): ServiceError => {
   });
 };
 
-/**
- * Creates a service integration error
- * Used for external service integration failures
- */
 export const createServiceIntegrationError = (error: unknown): ServiceError => {
   const message = error instanceof Error ? error.message : 'Service integration failed';
   return createServiceError({
@@ -311,10 +253,6 @@ export const createServiceIntegrationError = (error: unknown): ServiceError => {
   });
 };
 
-/**
- * Creates a service transformation error
- * Used for data transformation failures at service level
- */
 export const createServiceTransformationError = (error: unknown): ServiceError => {
   const message = error instanceof Error ? error.message : 'Service transformation failed';
   return createServiceError({
@@ -327,9 +265,6 @@ export const createServiceTransformationError = (error: unknown): ServiceError =
 
 // ============ Queue Error Handlers ============
 
-/**
- * Creates a queue connection error
- */
 export const createQueueConnectionError = (params: {
   message: string;
   queueName: string;
@@ -340,9 +275,6 @@ export const createQueueConnectionError = (params: {
   error: new Error(params.message, { cause: params.cause }),
 });
 
-/**
- * Creates a queue processing error
- */
 export const createQueueProcessingError = (params: {
   message: string;
   queueName: string;
@@ -355,9 +287,6 @@ export const createQueueProcessingError = (params: {
 
 // ============ Error Type Conversions ============
 
-/**
- * Maps database error codes to API error codes
- */
 const dbErrorToApiErrorCode: Record<DBErrorCode, APIErrorCode> = {
   [DBErrorCode.CONNECTION_ERROR]: APIErrorCode.SERVICE_ERROR,
   [DBErrorCode.QUERY_ERROR]: APIErrorCode.INTERNAL_SERVER_ERROR,
@@ -365,17 +294,17 @@ const dbErrorToApiErrorCode: Record<DBErrorCode, APIErrorCode> = {
   [DBErrorCode.OPERATION_ERROR]: APIErrorCode.INTERNAL_SERVER_ERROR,
   [DBErrorCode.VALIDATION_ERROR]: APIErrorCode.VALIDATION_ERROR,
   [DBErrorCode.TRANSFORMATION_ERROR]: APIErrorCode.INTERNAL_SERVER_ERROR,
+  [DBErrorCode.NOT_FOUND]: APIErrorCode.NOT_FOUND,
 };
 
-/**
- * Maps queue error codes to API error codes
- */
 const queueErrorToApiErrorCode: Record<QueueErrorCode, APIErrorCode> = {
   [QueueErrorCode.CREATE_QUEUE]: APIErrorCode.INTERNAL_SERVER_ERROR,
+  [QueueErrorCode.INIT_QUEUE]: APIErrorCode.INTERNAL_SERVER_ERROR,
   [QueueErrorCode.ADD_JOB]: APIErrorCode.INTERNAL_SERVER_ERROR,
   [QueueErrorCode.REMOVE_JOB]: APIErrorCode.INTERNAL_SERVER_ERROR,
   [QueueErrorCode.PAUSE_QUEUE]: APIErrorCode.INTERNAL_SERVER_ERROR,
   [QueueErrorCode.RESUME_QUEUE]: APIErrorCode.INTERNAL_SERVER_ERROR,
+  [QueueErrorCode.CLOSE_QUEUE]: APIErrorCode.INTERNAL_SERVER_ERROR,
   [QueueErrorCode.INVALID_JOB_DATA]: APIErrorCode.VALIDATION_ERROR,
   [QueueErrorCode.CREATE_WORKER]: APIErrorCode.INTERNAL_SERVER_ERROR,
   [QueueErrorCode.START_WORKER]: APIErrorCode.INTERNAL_SERVER_ERROR,
@@ -385,21 +314,14 @@ const queueErrorToApiErrorCode: Record<QueueErrorCode, APIErrorCode> = {
   [QueueErrorCode.GET_CHILDREN_VALUES]: APIErrorCode.INTERNAL_SERVER_ERROR,
   [QueueErrorCode.CREATE_JOB_SCHEDULER]: APIErrorCode.INTERNAL_SERVER_ERROR,
   [QueueErrorCode.GET_JOB_SCHEDULERS]: APIErrorCode.INTERNAL_SERVER_ERROR,
-  [QueueErrorCode.CLOSE_QUEUE]: APIErrorCode.INTERNAL_SERVER_ERROR,
 };
 
-/**
- * Type guard for DBError
- */
 const isDBError = (error: unknown): error is DBError =>
   typeof error === 'object' &&
   error !== null &&
   'code' in error &&
   Object.values(DBErrorCode).includes((error as DBError).code);
 
-/**
- * Converts queue error to API error
- */
 export const queueErrorToApiError = (error: QueueError): APIError => ({
   name: 'APIError',
   code: queueErrorToApiErrorCode[error.code],
@@ -410,9 +332,6 @@ export const queueErrorToApiError = (error: QueueError): APIError => ({
   timestamp: new Date(),
 });
 
-/**
- * Type guard for ServiceError
- */
 const isServiceError = (error: unknown): error is ServiceError =>
   typeof error === 'object' &&
   error !== null &&
@@ -421,9 +340,6 @@ const isServiceError = (error: unknown): error is ServiceError =>
   'code' in error &&
   Object.values(ServiceErrorCode).includes((error as ServiceError).code);
 
-/**
- * Maps service error codes to API error codes
- */
 const serviceErrorToApiErrorCode: Record<ServiceErrorCode, APIErrorCode> = {
   [ServiceErrorCode.INTEGRATION_ERROR]: APIErrorCode.SERVICE_ERROR,
   [ServiceErrorCode.VALIDATION_ERROR]: APIErrorCode.VALIDATION_ERROR,
@@ -431,10 +347,6 @@ const serviceErrorToApiErrorCode: Record<ServiceErrorCode, APIErrorCode> = {
   [ServiceErrorCode.TRANSFORMATION_ERROR]: APIErrorCode.SERVICE_ERROR,
 };
 
-/**
- * Converts any error to an API error
- * Handles specific error types (DBError, QueueError, ServiceError, Error) appropriately
- */
 export const toAPIError = (error: unknown): APIError => {
   if (isDBError(error)) {
     return createAPIError({
@@ -467,3 +379,41 @@ export const toAPIError = (error: unknown): APIError => {
     message: 'An unknown error occurred',
   });
 };
+
+export const createDataLayerError = (params: {
+  code: DataLayerErrorCode;
+  message: string;
+  cause?: Error;
+  details?: ErrorDetails;
+}): DataLayerError => ({
+  name: 'DataLayerError',
+  stack: new Error().stack,
+  timestamp: new Date(),
+  ...params,
+});
+
+export const mapRepositoryErrorToCacheError =
+  (message: string) =>
+  (error: DBError): CacheError =>
+    createCacheError({
+      code: CacheErrorCode.DATA_PROVIDER_ERROR,
+      message: `${message}: ${error.message}`,
+      cause: error.cause,
+    });
+
+export const mapCacheErrorToDomainError = (cacheError: CacheError): DomainError =>
+  createDomainError({
+    code: DomainErrorCode.CACHE_ERROR,
+    message: `Cache Error: ${cacheError.message}`,
+    cause: cacheError.cause,
+  });
+
+export const mapDomainErrorToServiceError = (error: DomainError): ServiceError =>
+  createServiceError({
+    code: ServiceErrorCode.OPERATION_ERROR,
+    message: `Domain Operation Failed: ${error.message}`,
+    cause: error.cause,
+  });
+
+export const getErrorMessage = (error: unknown): string =>
+  error instanceof Error ? error.message : 'Unknown error';

@@ -1,4 +1,3 @@
-// Base error types
 export interface ErrorDetails {
   [key: string]: unknown;
 }
@@ -13,9 +12,6 @@ export interface BaseError {
   readonly details?: ErrorDetails;
 }
 
-/**
- * DB Error Types
- */
 export enum DBErrorCode {
   CONNECTION_ERROR = 'CONNECTION_ERROR',
   QUERY_ERROR = 'QUERY_ERROR',
@@ -23,6 +19,7 @@ export enum DBErrorCode {
   OPERATION_ERROR = 'OPERATION_ERROR',
   VALIDATION_ERROR = 'VALIDATION_ERROR',
   TRANSFORMATION_ERROR = 'TRANSFORMATION_ERROR',
+  NOT_FOUND = 'NOT_FOUND',
 }
 
 export interface DBError extends BaseError {
@@ -41,14 +38,12 @@ export const createDBError = (params: {
   ...params,
 });
 
-/**
- * Cache Error Types
- */
 export enum CacheErrorCode {
   CONNECTION_ERROR = 'CONNECTION_ERROR',
-  OPERATION_ERROR = 'OPERATION_ERROR',
+  OPERATION_ERROR = 'CACHE_OPERATION_ERROR',
   SERIALIZATION_ERROR = 'SERIALIZATION_ERROR',
-  DESERIALIZATION_ERROR = 'DESERIALIZATION_ERROR',
+  DESERIALIZATION_ERROR = 'CACHE_DESERIALIZATION_ERROR',
+  DATA_PROVIDER_ERROR = 'CACHE_DATA_PROVIDER_ERROR',
 }
 
 export interface CacheError extends BaseError {
@@ -67,9 +62,6 @@ export const createCacheError = (params: {
   ...params,
 });
 
-/**
- * Domain Error Types
- */
 export enum DomainErrorCode {
   VALIDATION_ERROR = 'VALIDATION_ERROR',
   CACHE_ERROR = 'CACHE_ERROR',
@@ -77,6 +69,7 @@ export enum DomainErrorCode {
 }
 
 export interface DomainError {
+  readonly name: 'DomainError';
   readonly code: DomainErrorCode;
   readonly message: string;
   readonly cause?: Error;
@@ -92,15 +85,13 @@ export const createDomainError = ({
   message: string;
   cause?: Error;
 }): DomainError => ({
+  name: 'DomainError',
   code,
   message,
   cause,
   timestamp: new Date(),
 });
 
-/**
- * API Error Types
- */
 export enum APIErrorCode {
   VALIDATION_ERROR = 'VALIDATION_ERROR',
   NOT_FOUND = 'NOT_FOUND',
@@ -151,12 +142,10 @@ export const getErrorStatus = (error: APIError): number => {
   }
 };
 
-/**
- * Queue Error Types
- */
 export enum QueueErrorCode {
   // Queue errors
   CREATE_QUEUE = 'CREATE_QUEUE',
+  INIT_QUEUE = 'INIT_QUEUE',
   ADD_JOB = 'ADD_JOB',
   REMOVE_JOB = 'REMOVE_JOB',
   PAUSE_QUEUE = 'PAUSE_QUEUE',
@@ -195,9 +184,6 @@ export const createQueueError = (
   error,
 });
 
-/**
- * Service Error Types
- */
 export enum ServiceErrorCode {
   INTEGRATION_ERROR = 'INTEGRATION_ERROR',
   VALIDATION_ERROR = 'VALIDATION_ERROR',
@@ -220,3 +206,14 @@ export const createServiceError = (params: {
   timestamp: new Date(),
   ...params,
 });
+
+export enum DataLayerErrorCode {
+  FETCH_ERROR = 'FETCH_ERROR',
+  VALIDATION_ERROR = 'VALIDATION_ERROR',
+  MAPPING_ERROR = 'MAPPING_ERROR',
+  INTERNAL_ERROR = 'INTERNAL_ERROR',
+}
+
+export interface DataLayerError extends BaseError {
+  readonly code: DataLayerErrorCode;
+}

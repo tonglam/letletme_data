@@ -1,0 +1,114 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# Cursor Project Rule: TypeScript Backend App with Express, Prisma, BullMQ, and DDD (FP-Based)
+
+## Core Principles
+- **Functional Programming Only:** Stick to FP patterns—no classes, no `this`, no OOP constructs.
+- **Domain-Driven Design (DDD):** Follow a strict layered structure to enforce separation of concerns.
+- **Type Safety First:** Leverage TypeScript, `zod`, and `prisma` types for maximum correctness.
+- **Consistency > Cleverness:** Prefer convention and consistency over novelty.
+
+---
+
+## Tech Stack
+- **Runtime:** Node.js (Express)
+- **Language:** TypeScript
+- **ORM:** Prisma
+- **Validation:** Zod
+- **Job Queue:** BullMQ
+- **Logging:** Pino
+
+---
+
+## Project Structure
+- `/api` – Express routes and handlers
+- `/config` – Configuration files and environment bindings
+- `/domain` – Pure business logic, domain models, and types
+- `/infrastructure` – Initialization code (e.g., DB, queues, Redis, logger)
+- `/service` – Application service logic orchestrating domain and infrastructure
+- `/tests` – All tests, mirroring project structure
+- `/documentation` – Architecture, process, and public/internal usage guides
+
+---
+
+## File Creation Discipline
+- **Check First Before Creating:**
+  - **Files:** Do not duplicate logic—check if a file already exists before creating a new one.
+  - **Types:** Always check for existing types or schemas before introducing new ones (e.g., `z.infer<typeof X>` instead of rewriting types).
+  - **Avoid Silos:** Reuse shared modules and domain logic, especially for types and zod schemas.
+
+---
+
+## Layers & Responsibilities
+- **Domain Layer (`/domain`)**
+  - Pure functions and types
+  - No external dependencies
+  - Reusable across services
+
+- **Service Layer (`/service`)**
+  - Composable logic
+  - Orchestrates domain and infrastructure
+  - Stateless and testable
+
+- **Infrastructure Layer (`/infrastructure`)**
+  - Initialize and configure external resources (DB, logger, queues)
+  - Set up Prisma, BullMQ, Redis, and Pino
+
+- **API Layer (`/api`)**
+  - Route-level logic
+  - Input validation with Zod
+  - Logging side-effects with Pino
+  - Passes sanitized input to the service layer
+
+---
+
+## Testing Strategy
+- **Unit Tests:**
+  - Mock all external dependencies
+  - Fast, isolated, run frequently
+
+- **Integration Tests:**
+  - Use real resources: real database, real queues, real Redis
+  - Useful for end-to-end validation of flow
+  - Located in `/tests/integration`
+
+- **Test Structure Mirrors Source Structure:**
+  - For every module in `/src`, there should be a corresponding folder in `/tests`
+
+---
+
+## Logging
+- Use **Pino** for structured, performant logging
+- All logging should occur at the API or infrastructure layer
+- Never log sensitive data
+- Use contextual logs with request identifiers when possible
+
+---
+
+## Validation & Types
+- **Zod** is the single source of truth for input validation
+- Infer types using `z.infer` instead of manually duplicating interfaces
+- Validate all user input at the edge (API layer)
+
+---
+
+## Configuration
+- Config lives in `/config`
+- Load environment variables using safe wrappers
+- Export config as plain objects with proper types
+
+---
+
+## Best Practices
+- **Pure Functions:** Pure by default, side-effect only in infrastructure layer
+- **Avoid `any` or `unknown`:** Use narrow types and refine with Zod
+- **Composable Services:** Functions take input and return data or throw
+- **Layered Dependencies Only:** Domain is isolated; infra should not be imported into domain
+
+---
+
+## Summary
+This project follows DDD and FP principles with strong typing and isolation. All code should be predictable, testable, and separated by responsibility. Stick to the structure, reuse what exists, and always validate assumptions with types and tests.

@@ -1,8 +1,3 @@
-// Core Middleware Module
-// Provides essential middleware functions for the API layer including request validation,
-// error handling, security headers, and response formatting. Implements functional
-// programming patterns using fp-ts for robust error handling and type safety.
-
 import { NextFunction, Request, Response } from 'express';
 import * as E from 'fp-ts/Either';
 import * as O from 'fp-ts/Option';
@@ -22,14 +17,12 @@ import { toAPIError } from '../../utils/error.util';
 import { AsyncMiddlewareHandler, ErrorHandler, Middleware, SecurityHeaders } from '../types';
 import { sendResponse } from '../utils';
 
-// Creates a task that handles API errors by passing them to the next middleware
 const handleAPIError =
   (next: NextFunction) =>
   (error: APIError): T.Task<void> => {
     return () => Promise.resolve(next(error));
   };
 
-// Creates a route handler with standard response formatting and error handling
 export const createHandler = <T>(handler: AsyncMiddlewareHandler<T>): Middleware => {
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     await pipe(
@@ -42,7 +35,6 @@ export const createHandler = <T>(handler: AsyncMiddlewareHandler<T>): Middleware
   };
 };
 
-// Validates request using io-ts codec
 const validateWithCodec = <C extends t.Mixed>(
   codec: C,
   req: Request,
@@ -58,7 +50,6 @@ const validateWithCodec = <C extends t.Mixed>(
     E.map(() => req),
   );
 
-// Creates a validation middleware using io-ts codec
 export const validateRequest = <C extends t.Mixed>(codec: C): Middleware => {
   return (req: Request, _res: Response, next: NextFunction): void => {
     pipe(
@@ -68,7 +59,6 @@ export const validateRequest = <C extends t.Mixed>(codec: C): Middleware => {
   };
 };
 
-// Converts null values to Not Found errors using fp-ts Option
 export const toNotFoundError =
   <T>(message: string) =>
   (value: T | null): E.Either<APIError, T> =>
@@ -86,7 +76,6 @@ export const toNotFoundError =
       ),
     );
 
-// Security headers configuration
 const securityHeaders: SecurityHeaders = {
   'X-Content-Type-Options': 'nosniff',
   'X-Frame-Options': 'DENY',
@@ -94,14 +83,12 @@ const securityHeaders: SecurityHeaders = {
   'Strict-Transport-Security': 'max-age=31536000; includeSubDomains',
 } as const;
 
-// Adds security headers to response
 const addHeaders =
   (res: Response) =>
   (headers: SecurityHeaders): void => {
     Object.entries(headers).forEach(([key, value]) => res.setHeader(key, value));
   };
 
-// Security middleware that adds standard security headers
 export const addSecurityHeaders = (): Middleware => {
   return (_req: Request, res: Response, next: NextFunction): void => {
     pipe(securityHeaders, addHeaders(res));
@@ -109,7 +96,6 @@ export const addSecurityHeaders = (): Middleware => {
   };
 };
 
-// Global error handler middleware
 export const handleError: ErrorHandler = (
   error: Error | APIError | ServiceError,
   _req: Request,

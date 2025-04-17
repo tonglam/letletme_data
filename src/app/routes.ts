@@ -1,6 +1,6 @@
 import { Request, Response, Router } from 'express';
 import { createRouter } from '../api';
-import { ServiceContainer } from '../service';
+import { ServiceContainer } from '../services/types';
 
 export const setupRoutes = (services: ServiceContainer): Router => {
   const router = Router();

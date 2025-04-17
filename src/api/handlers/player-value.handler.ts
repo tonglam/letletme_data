@@ -1,36 +1,24 @@
-// Player Value Handlers Module
-//
-// Provides handlers for player value-related API endpoints using functional programming
-// patterns with fp-ts. Handles player value retrieval operations including getting all player values
-// and specific player values by ID.
-
 import { Request } from 'express';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
-import { toAPIError } from 'src/utils/error.util';
-import { ServiceContainer, ServiceKey } from '../../service';
+import { ServiceContainer } from '../../services/types';
+import { PlayerValue, validatePlayerValueId } from '../../types/domain/player-value.type';
 import { APIErrorCode, ServiceError, createAPIError } from '../../types/error.type';
-import { PlayerValue, validatePlayerValueId } from '../../types/player-value.type';
+import { toAPIError } from '../../utils/error.util';
 import { PlayerValueHandlerResponse } from '../types';
 
-// Creates player value handlers with dependency injection
 export const createPlayerValueHandlers = (
-  playerValueService: ServiceContainer[typeof ServiceKey.PLAYER_VALUE],
+  playerValueService: ServiceContainer['playerValueService'],
 ): PlayerValueHandlerResponse => ({
-  // Retrieves all player values
   getAllPlayerValues: () => {
-    const task = playerValueService.getPlayerValues() as unknown as TE.TaskEither<
-      ServiceError,
-      PlayerValue[]
-    >;
+    const task = playerValueService.getPlayerValues() as TE.TaskEither<ServiceError, PlayerValue[]>;
     return pipe(
       task,
       TE.mapLeft(toAPIError),
-      TE.map((playerValues) => playerValues.slice()),
+      TE.map((playerValues) => [...playerValues]),
     );
   },
 
-  // Retrieves a specific player value by ID
   getPlayerValueById: (req: Request) => {
     const playerValueId = req.params.id;
     const validatedId = validatePlayerValueId(playerValueId);
@@ -44,12 +32,11 @@ export const createPlayerValueHandlers = (
       );
     }
 
-    const task = playerValueService.getPlayerValue(validatedId.right) as unknown as TE.TaskEither<
-      ServiceError,
-      PlayerValue | null
-    >;
     return pipe(
-      task,
+      playerValueService.getPlayerValue(validatedId.right) as TE.TaskEither<
+        ServiceError,
+        PlayerValue | null
+      >,
       TE.mapLeft(toAPIError),
       TE.chain((playerValue) =>
         playerValue === null

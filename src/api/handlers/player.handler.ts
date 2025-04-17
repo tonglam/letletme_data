@@ -1,33 +1,24 @@
-// Player Handlers Module
-//
-// Provides handlers for player-related API endpoints using functional programming
-// patterns with fp-ts. Handles player retrieval operations including getting all players
-// and specific players by ID.
-
 import { Request } from 'express';
 import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
-import { toAPIError } from 'src/utils/error.util';
-import { ServiceContainer, ServiceKey } from '../../service';
+import { ServiceContainer } from '../../services/types';
+import { Player, validatePlayerId } from '../../types/domain/player.type';
 import { APIErrorCode, ServiceError, createAPIError } from '../../types/error.type';
-import { Player, validatePlayerId } from '../../types/player.type';
+import { toAPIError } from '../../utils/error.util';
 import { PlayerHandlerResponse } from '../types';
 
-// Creates player handlers with dependency injection
 export const createPlayerHandlers = (
-  playerService: ServiceContainer[typeof ServiceKey.PLAYER],
+  playerService: ServiceContainer['playerService'],
 ): PlayerHandlerResponse => ({
-  // Retrieves all players
   getAllPlayers: () => {
-    const task = playerService.getPlayers() as unknown as TE.TaskEither<ServiceError, Player[]>;
+    const task = playerService.getPlayers() as TE.TaskEither<ServiceError, Player[]>;
     return pipe(
       task,
       TE.mapLeft(toAPIError),
-      TE.map((players) => players.slice()),
+      TE.map((players) => [...players]),
     );
   },
 
-  // Retrieves a specific player by ID
   getPlayerById: (req: Request) => {
     const playerId = Number(req.params.id);
     const validatedId = validatePlayerId(playerId);
@@ -41,12 +32,8 @@ export const createPlayerHandlers = (
       );
     }
 
-    const task = playerService.getPlayer(validatedId.right) as unknown as TE.TaskEither<
-      ServiceError,
-      Player | null
-    >;
     return pipe(
-      task,
+      playerService.getPlayer(validatedId.right) as TE.TaskEither<ServiceError, Player | null>,
       TE.mapLeft(toAPIError),
       TE.chain((player) =>
         player === null
