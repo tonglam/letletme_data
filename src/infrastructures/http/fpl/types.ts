@@ -3,6 +3,8 @@ import { pipe } from 'fp-ts/function';
 import { BootStrapResponse } from 'src/data/fpl/schemas/bootstrap/bootstrap.schema';
 import { z } from 'zod';
 
+import { EventFixture } from '../../../types/domain/event-fixture.type';
+import { EventLiveResponse, EventPicksResponse } from '../../../types/domain/event-live.type';
 import { ElementSummaryResponse } from '../../../types/element-summary.type';
 import {
   EntryHistoryResponse,
@@ -10,8 +12,6 @@ import {
   EntryTransfersResponse,
 } from '../../../types/entry.type';
 import { APIError, APIErrorCode, createAPIError } from '../../../types/error.type';
-import { EventFixture } from '../../../types/event-fixture.type';
-import { EventLiveResponse, EventPicksResponse } from '../../../types/event-live.type';
 import { ClassicLeagueResponse, CupResponse, H2hLeagueResponse } from '../../../types/league.type';
 import { RequestOptions } from '../client/types';
 

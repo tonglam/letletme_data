@@ -50,31 +50,21 @@ export const ElementResponseSchema = z
     total_points: z.number().default(0),
     event_points: z.number().default(0),
     cost_change_event: z.number().default(0),
+    mng_win: z.number().default(0),
+    mng_draw: z.number().default(0),
+    mng_loss: z.number().default(0),
+    mng_underdog_win: z.number().default(0),
+    mng_underdog_draw: z.number().default(0),
+    mng_clean_sheets: z.number().default(0),
+    mng_goals_scored: z.number().default(0),
 
     // Fields needed for player-value.type.ts
     value_form: z.string().nullable(),
     value_season: z.string().nullable(),
     transfers_in: z.number().default(0),
     transfers_out: z.number().default(0),
-
-    // Optional manager stats (not always present)
-    mng_win: z.number().optional(),
-    mng_draw: z.number().optional(),
-    mng_loss: z.number().optional(),
-    mng_underdog_win: z.number().optional(),
-    mng_underdog_draw: z.number().optional(),
-    mng_clean_sheets: z.number().optional(),
-    mng_goals_scored: z.number().optional(),
-
-    // Other fields from API
-    region: z.number().nullable(),
-    team_join_date: z.string().nullable(),
-    birth_date: z.string().nullable(),
-    has_temporary_code: z.boolean().optional(),
-    opta_code: z.string().optional(),
   })
   .passthrough();
 
 export type ElementResponse = z.infer<typeof ElementResponseSchema>;
-
 export type ElementsResponse = readonly ElementResponse[];

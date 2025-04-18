@@ -24,9 +24,8 @@ export const validatePlayerStatIdInput = (value: unknown): E.Either<string, Play
 
 export interface PlayerStat {
   readonly id: PlayerStatId;
-  readonly eventId: number;
-  readonly elementId: number;
-  readonly teamId: number;
+  readonly event: number;
+  readonly element: number;
   readonly form: number | null;
   readonly influence: number | null;
   readonly creativity: number | null;
@@ -57,21 +56,14 @@ export interface PlayerStat {
   readonly threatRankType: number | null;
   readonly ictIndexRank: number | null;
   readonly ictIndexRankType: number | null;
-  readonly expectedGoalsPer90: Prisma.Decimal | null;
-  readonly savesPer90: Prisma.Decimal | null;
-  readonly expectedAssistsPer90: Prisma.Decimal | null;
-  readonly expectedGoalInvolvementsPer90: Prisma.Decimal | null;
-  readonly expectedGoalsConcededPer90: Prisma.Decimal | null;
-  readonly goalsConcededPer90: Prisma.Decimal | null;
-  readonly startsPer90: Prisma.Decimal | null;
-  readonly cleanSheetsPer90: Prisma.Decimal | null;
-  readonly cornersAndIndirectFreekicksOrder: number | null;
-  readonly cornersAndIndirectFreekicksText: string | null;
-  readonly directFreekicksOrder: number | null;
-  readonly directFreekicksText: string | null;
-  readonly penaltiesOrder: number | null;
-  readonly penaltiesText: string | null;
   readonly totalPoints: number | null;
+  readonly mngWin: number | null;
+  readonly mngDraw: number | null;
+  readonly mngLoss: number | null;
+  readonly mngUnderdogWin: number | null;
+  readonly mngUnderdogDraw: number | null;
+  readonly mngCleanSheets: number | null;
+  readonly mngGoalsScored: number | null;
 }
 
 export type PlayerStats = readonly PlayerStat[];

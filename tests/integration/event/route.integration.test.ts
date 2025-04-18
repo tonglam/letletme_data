@@ -18,7 +18,7 @@ import { redisClient } from '../../../src/infrastructures/cache/client';
 // Specific imports for this test suite
 import { eventRouter } from '../../../src/api/routes/event.route';
 import { CachePrefix } from '../../../src/configs/cache/cache.config';
-import { createFplBootstrapDataService } from '../../../src/data/fpl/bootstrap.data';
+import { createFplBootstrapDataService } from '../../../src/data/fpl/fetches/bootstrap/bootstrap.data';
 import { FplBootstrapDataService } from '../../../src/data/types';
 import { createEventCache } from '../../../src/domains/event/cache';
 import { EventCache, EventRepository } from '../../../src/domains/event/types';

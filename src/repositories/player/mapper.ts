@@ -4,8 +4,8 @@ import { Player, PlayerId } from 'src/types/domain/player.type';
 import { PrismaPlayer, PrismaPlayerCreate, PrismaPlayerCreateInput } from './type';
 
 export const mapPrismaPlayerToDomain = (prismaPlayer: PrismaPlayer): Player => ({
-  id: prismaPlayer.element as PlayerId,
-  elementCode: prismaPlayer.elementCode,
+  element: prismaPlayer.element as PlayerId,
+  code: prismaPlayer.elementCode,
   price: prismaPlayer.price / 10,
   startPrice: prismaPlayer.startPrice / 10,
   elementType: prismaPlayer.elementType as ElementType,

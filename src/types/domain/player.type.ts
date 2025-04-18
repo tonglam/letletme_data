@@ -22,22 +22,15 @@ export const validatePlayerId = (value: unknown): E.Either<string, PlayerId> =>
   );
 
 export type Player = {
-  readonly id: PlayerId;
-  readonly elementCode: number;
+  readonly element: PlayerId;
+  readonly code: number;
+  readonly elementType: ElementType;
+  readonly team: number;
   readonly price: number;
   readonly startPrice: number;
-  readonly elementType: ElementType;
   readonly firstName: string | null;
   readonly secondName: string | null;
   readonly webName: string;
-  readonly teamId: number;
-  readonly mngWin?: number;
-  readonly mngDraw?: number;
-  readonly mngLoss?: number;
-  readonly mngUnderdogWin?: number;
-  readonly mngUnderdogDraw?: number;
-  readonly mngCleanSheets?: number;
-  readonly mngGoalsScored?: number;
 };
 
 export type Players = readonly Player[];

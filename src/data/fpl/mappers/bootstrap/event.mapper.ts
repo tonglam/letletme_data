@@ -1,7 +1,6 @@
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import { ChipPlay, Event, EventId, TopElementInfo } from 'src/types/domain/event.type';
-
 import { EventResponse } from '../../schemas/bootstrap/event.schema';
 
 const transformChipPlays = (
@@ -30,9 +29,6 @@ export const mapEventResponseToEvent = (raw: EventResponse): E.Either<string, Ev
         id: data.id,
         name: raw.name,
         deadlineTime: raw.deadline_time,
-        deadlineTimeEpoch: raw.deadline_time_epoch,
-        deadlineTimeGameOffset: raw.deadline_time_game_offset,
-        releaseTime: raw.release_time ?? null,
         averageEntryScore: raw.average_entry_score,
         finished: raw.finished,
         dataChecked: raw.data_checked,

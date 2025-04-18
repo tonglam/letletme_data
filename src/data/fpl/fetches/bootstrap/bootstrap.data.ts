@@ -11,18 +11,21 @@ import { Teams } from 'src/types/domain/team.type';
 import { DataLayerError, DataLayerErrorCode } from 'src/types/error.type';
 import { createDataLayerError } from 'src/utils/error.util';
 
-import { apiConfig } from '../../configs/api/api.config';
-import { HTTPClient } from '../../infrastructures/http/client';
-import { FplBootstrapDataService } from '../types';
+import { apiConfig } from '../../../../configs/api/api.config';
+import { HTTPClient } from '../../../../infrastructures/http/client';
+import { FplBootstrapDataService } from '../../../types';
 import {
   mapElementResponseToPlayer,
   mapElementResponseToPlayerStat,
   mapElementResponseToPlayerValue,
-} from './mappers/bootstrap/element.mapper';
-import { mapEventResponseToEvent } from './mappers/bootstrap/event.mapper';
-import { mapPhaseResponseToPhase } from './mappers/bootstrap/phase.mapper';
-import { mapTeamResponseToTeam } from './mappers/bootstrap/team.mapper';
-import { BootStrapResponse, BootStrapResponseSchema } from './schemas/bootstrap/bootstrap.schema';
+} from '../../mappers/bootstrap/element.mapper';
+import { mapEventResponseToEvent } from '../../mappers/bootstrap/event.mapper';
+import { mapPhaseResponseToPhase } from '../../mappers/bootstrap/phase.mapper';
+import { mapTeamResponseToTeam } from '../../mappers/bootstrap/team.mapper';
+import {
+  BootStrapResponse,
+  BootStrapResponseSchema,
+} from '../../schemas/bootstrap/bootstrap.schema';
 
 export const createFplBootstrapDataService = (
   client: HTTPClient,

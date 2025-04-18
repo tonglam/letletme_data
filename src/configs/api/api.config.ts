@@ -4,42 +4,46 @@ export const apiConfig = {
     bootstrap: {
       static: '/bootstrap-static/',
     },
-    entry: {
-      info: (params: { entryId: number }): string => {
-        return `/entry/${params.entryId}/`;
-      },
-      transfers: (params: { entryId: number }): string => {
-        return `/entry/${params.entryId}/transfers/`;
-      },
-      history: (params: { entryId: number }): string => {
-        return `/entry/${params.entryId}/history/`;
-      },
-    },
+
     event: {
       live: (params: { event: number }): string => {
         return `/event/${params.event}/live/`;
-      },
-      picks: (params: { entryId: number; event: number }): string => {
-        return `/entry/${params.entryId}/event/${params.event}/picks/`;
       },
       fixtures: (params: { event: number }): string => {
         return `/fixtures/?event=${params.event}`;
       },
     },
-    element: {
-      summary: (params: { elementId: number }): string => {
-        return `/element-summary/${params.elementId}/`;
+
+    entry: {
+      info: (params: { entry: number }): string => {
+        return `/entry/${params.entry}/`;
+      },
+      history: (params: { entry: number }): string => {
+        return `/entry/${params.entry}/history/`;
+      },
+      picks: (params: { entry: number; event: number }): string => {
+        return `/entry/${params.entry}/event/${params.event}/picks/`;
+      },
+      transfers: (params: { entry: number }): string => {
+        return `/entry/${params.entry}/transfers/`;
       },
     },
+
+    element: {
+      summary: (params: { element: number }): string => {
+        return `/element-summary/${params.element}/`;
+      },
+    },
+
     leagues: {
-      classic: (params: { leagueId: number; page: number }): string => {
-        return `/leagues-classic/${params.leagueId}/standings/?page_standings=${params.page}`;
+      classic: (params: { league: number; page: number }): string => {
+        return `/leagues-classic/${params.league}/standings/?page_standings=${params.page}`;
       },
-      h2h: (params: { leagueId: number; page: number }): string => {
-        return `/leagues-h2h/${params.leagueId}/standings/?page_standings=${params.page}`;
+      h2h: (params: { league: number; page: number }): string => {
+        return `/leagues-h2h/${params.league}/standings/?page_standings=${params.page}`;
       },
-      cup: (params: { leagueId: number; page: number; entryId: number }): string => {
-        return `/leagues-h2h-matches/cup/${params.leagueId}?page=${params.page}&entry=${params.entryId}`;
+      cup: (params: { league: number; page: number; entry: number }): string => {
+        return `/leagues-h2h-matches/cup/${params.league}?page=${params.page}&entry=${params.entry}`;
       },
     },
   },

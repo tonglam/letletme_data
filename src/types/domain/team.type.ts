@@ -27,22 +27,11 @@ export interface Team {
   readonly name: string;
   readonly shortName: string;
   readonly strength: number;
-  readonly strengthOverallHome: number;
-  readonly strengthOverallAway: number;
-  readonly strengthAttackHome: number;
-  readonly strengthAttackAway: number;
-  readonly strengthDefenceHome: number;
-  readonly strengthDefenceAway: number;
-  readonly pulseId: number;
-  readonly played: number;
   readonly position: number;
   readonly points: number;
-  readonly form: string | null;
   readonly win: number;
   readonly draw: number;
   readonly loss: number;
-  readonly teamDivision: string | null;
-  readonly unavailable: boolean;
 }
 
 export type Teams = readonly Team[];

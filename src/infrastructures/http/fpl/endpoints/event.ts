@@ -4,11 +4,11 @@ import { Logger } from 'pino';
 import { z } from 'zod';
 
 import { apiConfig } from '../../../../configs/api/api.config';
-import { EventFixture } from '../../../../types/event-fixture.type';
+import { EventFixture } from '../../../../types/domain/event-fixture.type';
 import {
   EventLiveResponseSchema,
   EventPicksResponseSchema,
-} from '../../../../types/event-live.type';
+} from '../../../../types/domain/event-live.type';
 import { HTTPClient } from '../../client';
 import { RequestOptions } from '../../client/types';
 import { EventEndpoints, validateEndpointResponse } from '../types';

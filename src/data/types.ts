@@ -1,4 +1,5 @@
 import * as TE from 'fp-ts/TaskEither';
+import { EventFixtures } from 'src/types/domain/event-fixture.type';
 import { Events } from 'src/types/domain/event.type';
 import { Phases } from 'src/types/domain/phase.type';
 import { PlayerStat } from 'src/types/domain/player-stat.type';
@@ -18,4 +19,8 @@ export interface FplBootstrapDataService {
   readonly getPlayerValues: (
     eventId: number,
   ) => TE.TaskEither<DataLayerError, readonly MappedPlayerValue[]>;
+}
+
+export interface FplEventFixtureDataService {
+  readonly getEventFixtures: (eventId: number) => TE.TaskEither<DataLayerError, EventFixtures>;
 }

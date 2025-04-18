@@ -16,7 +16,7 @@ import {
 // Specific imports
 import { playerRouter } from '../../../src/api/routes/player.route'; // Import the router
 import { CachePrefix } from '../../../src/configs/cache/cache.config';
-import { createFplBootstrapDataService } from '../../../src/data/fpl/bootstrap.data';
+import { createFplBootstrapDataService } from '../../../src/data/fpl/fetches/bootstrap/bootstrap.data';
 import { FplBootstrapDataService } from '../../../src/data/types';
 import { createPlayerCache } from '../../../src/domains/player/cache';
 import { PlayerCache, PlayerRepository } from '../../../src/domains/player/types';
@@ -102,7 +102,7 @@ describe('Player Routes Integration Tests', () => {
       allPlayersResult.right &&
       allPlayersResult.right.length > 0
     ) {
-      targetPlayerId = allPlayersResult.right[0].id;
+      targetPlayerId = allPlayersResult.right[0].element;
     } else {
       throw new Error('Could not retrieve players to get an ID for testing');
     }

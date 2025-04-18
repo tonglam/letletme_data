@@ -15,7 +15,7 @@ import { EntryEndpoints, validateEndpointResponse } from '../types';
 export const createEntryEndpoints = (client: HTTPClient, logger: Logger): EntryEndpoints => ({
   getEntry: async (entryId: number, options?: RequestOptions) => {
     const result = await client.get<unknown>(
-      apiConfig.endpoints.entry.info({ entryId }),
+      apiConfig.endpoints.entry.info({ entry: entryId }),
       options,
     )();
     return pipe(

@@ -25,9 +25,9 @@ export const validatePlayerValueIdInput = (value: unknown): E.Either<string, Pla
 
 export interface PlayerValue {
   readonly id: PlayerValueId;
-  readonly elementId: number;
+  readonly element: number;
   readonly elementType: ElementType;
-  readonly eventId: number;
+  readonly event: number;
   readonly value: number;
   readonly changeDate: string;
   readonly changeType: ValueChangeType;

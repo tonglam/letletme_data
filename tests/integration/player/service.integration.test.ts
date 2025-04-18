@@ -16,7 +16,7 @@ import { redisClient } from '../../../src/infrastructures/cache/client';
 
 // Specific imports for this test suite
 import { CachePrefix } from '../../../src/configs/cache/cache.config';
-import { createFplBootstrapDataService } from '../../../src/data/fpl/bootstrap.data';
+import { createFplBootstrapDataService } from '../../../src/data/fpl/fetches/bootstrap/bootstrap.data';
 import { FplBootstrapDataService } from '../../../src/data/types';
 import { createPlayerCache } from '../../../src/domains/player/cache'; // Player specific
 import { PlayerCache, PlayerRepository } from '../../../src/domains/player/types'; // Player specific
@@ -108,7 +108,7 @@ describe('Player Integration Tests', () => {
       if (E.isRight(syncResult)) {
         const players = syncResult.right;
         if (players.length > 0) {
-          const firstPlayerId = players[0]?.id;
+          const firstPlayerId = players[0]?.element;
           if (firstPlayerId === undefined) {
             throw new Error('First player or its ID is undefined after sync');
           }
@@ -116,7 +116,7 @@ describe('Player Integration Tests', () => {
 
           expect(E.isRight(playerResult)).toBe(true);
           if (E.isRight(playerResult) && playerResult.right) {
-            expect(playerResult.right.id).toEqual(firstPlayerId);
+            expect(playerResult.right.element).toEqual(firstPlayerId);
           }
         }
       }

@@ -39,8 +39,6 @@ export type Event = {
   readonly isPrevious: boolean;
   readonly isCurrent: boolean;
   readonly isNext: boolean;
-  readonly deadlineTimeEpoch: number;
-  readonly deadlineTimeGameOffset: number;
   readonly averageEntryScore: number;
   readonly dataChecked: boolean;
   readonly highestScore: number | null;
@@ -48,7 +46,6 @@ export type Event = {
   readonly cupLeaguesCreated: boolean;
   readonly h2hKoMatchesCreated: boolean;
   readonly transfersMade: number;
-  readonly releaseTime: string | null;
   readonly rankedCount: number;
   readonly chipPlays: readonly ChipPlay[];
   readonly mostSelected: number | null;

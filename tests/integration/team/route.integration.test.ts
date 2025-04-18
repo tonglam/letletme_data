@@ -16,7 +16,7 @@ import {
 // Specific imports
 import { teamRouter } from '../../../src/api/routes/team.route'; // Import the router
 import { CachePrefix } from '../../../src/configs/cache/cache.config';
-import { createFplBootstrapDataService } from '../../../src/data/fpl/bootstrap.data';
+import { createFplBootstrapDataService } from '../../../src/data/fpl/fetches/bootstrap/bootstrap.data';
 import { FplBootstrapDataService } from '../../../src/data/types';
 import { createTeamCache } from '../../../src/domains/team/cache';
 import { TeamCache, TeamRepository } from '../../../src/domains/team/types';

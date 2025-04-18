@@ -7,7 +7,6 @@ import { PlayerStat } from 'src/types/domain/player-stat.type';
 import { MappedPlayerValue } from 'src/types/domain/player-value.type';
 import { Player, PlayerId } from 'src/types/domain/player.type';
 import { safeStringToDecimal, safeStringToNumber } from 'src/utils/common.util';
-
 import { ElementResponse } from '../../schemas/bootstrap/element.schema';
 
 export const mapElementResponseToPlayer = (raw: ElementResponse): E.Either<string, Player> =>
@@ -17,38 +16,53 @@ export const mapElementResponseToPlayer = (raw: ElementResponse): E.Either<strin
     E.bind('elementType', () => E.right(raw.element_type as ElementType)),
     E.map((data): Player => {
       return {
-        id: data.id,
-        elementCode: raw.code,
+        element: data.id,
+        code: raw.code,
+        elementType: data.elementType,
+        team: raw.team,
         price: raw.now_cost / 10,
         startPrice: (raw.now_cost - raw.cost_change_start) / 10,
-        elementType: data.elementType,
         firstName: raw.first_name,
         secondName: raw.second_name,
         webName: raw.web_name,
-        teamId: raw.team,
-        mngWin: raw.mng_win,
-        mngDraw: raw.mng_draw,
-        mngLoss: raw.mng_loss,
-        mngUnderdogWin: raw.mng_underdog_win,
-        mngUnderdogDraw: raw.mng_underdog_draw,
-        mngCleanSheets: raw.mng_clean_sheets,
-        mngGoalsScored: raw.mng_goals_scored,
       };
     }),
   );
 
+export const mapElementResponseToPlayerValue = (
+  raw: ElementResponse,
+  event: number,
+): E.Either<string, MappedPlayerValue> => {
+  const currentDateStr = format(new Date(), 'yyyyMMdd');
+  const value = raw.now_cost / 10;
+
+  return pipe(
+    E.Do,
+    E.bind('element', () => E.right(raw.id)),
+    E.bind('elementType', () => E.right(raw.element_type as ElementType)),
+    E.map(
+      ({ element, elementType }): MappedPlayerValue => ({
+        element: element,
+        elementType: elementType,
+        event: event,
+        value: value,
+        changeDate: currentDateStr,
+      }),
+    ),
+  );
+};
+
 export const mapElementResponseToPlayerStat = (
   raw: ElementResponse,
-  eventId: number,
+  event: number,
 ): E.Either<string, Omit<PlayerStat, 'id'>> =>
   pipe(
     E.Do,
-    E.bind('elementId', () => E.right(raw.id as PlayerId)),
+    E.bind('element', () => E.right(raw.id as PlayerId)),
     E.map(
-      ({ elementId }): Omit<PlayerStat, 'id'> => ({
-        eventId: eventId,
-        elementId: elementId as number,
-        teamId: raw.team,
+      ({ element }): Omit<PlayerStat, 'id'> => ({
+        event: event,
+        element: element as number,
         form: pipe(
           safeStringToNumber(raw.form),
           O.getOrElseW(() => null),
@@ -106,34 +120,14 @@ export const mapElementResponseToPlayerStat = (
         threatRankType: raw.threat_rank_type,
         ictIndexRank: raw.ict_index_rank,
         ictIndexRankType: raw.ict_index_rank_type,
-        expectedGoalsPer90: null,
-        savesPer90: null,
-        expectedAssistsPer90: null,
-        expectedGoalInvolvementsPer90: null,
         totalPoints: raw.total_points,
+        mngWin: raw.mng_win,
+        mngDraw: raw.mng_draw,
+        mngLoss: raw.mng_loss,
+        mngUnderdogWin: raw.mng_underdog_win,
+        mngUnderdogDraw: raw.mng_underdog_draw,
+        mngCleanSheets: raw.mng_clean_sheets,
+        mngGoalsScored: raw.mng_goals_scored,
       }),
     ),
   );
-
-export const mapElementResponseToPlayerValue = (
-  raw: ElementResponse,
-  eventId: number,
-): E.Either<string, MappedPlayerValue> => {
-  const currentDateStr = format(new Date(), 'yyyyMMdd');
-  const value = raw.now_cost / 10;
-
-  return pipe(
-    E.Do,
-    E.bind('elementId', () => E.right(raw.id)),
-    E.bind('elementType', () => E.right(raw.element_type as ElementType)),
-    E.map(
-      ({ elementId, elementType }): MappedPlayerValue => ({
-        elementId: elementId,
-        elementType: elementType,
-        eventId: eventId,
-        value: value,
-        changeDate: currentDateStr,
-      }),
-    ),
-  );
-};

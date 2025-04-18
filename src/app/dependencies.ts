@@ -8,7 +8,7 @@ import { TeamCache, TeamRepository } from 'domains/team/types';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import { Logger } from 'pino';
-import { createFplBootstrapDataService } from '../data/fpl/bootstrap.data';
+import { createFplBootstrapDataService } from '../data/fpl/fetches/bootstrap/bootstrap.data';
 import { FplBootstrapDataService } from '../data/types';
 import { createEventCache } from '../domains/event/cache';
 import { EventCache, EventRepository } from '../domains/event/types';

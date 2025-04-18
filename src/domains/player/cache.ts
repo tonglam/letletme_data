@@ -128,7 +128,7 @@ export const createPlayerCache = (
           if (players.length > 0) {
             const items: Record<string, string> = {};
             players.forEach((player) => {
-              items[player.id.toString()] = JSON.stringify(player);
+              items[player.element.toString()] = JSON.stringify(player);
             });
             multi.hset(baseKey, items);
           }
