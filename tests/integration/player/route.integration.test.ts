@@ -1,0 +1,127 @@
+import { PrismaClient } from '@prisma/client';
+import express, { Express } from 'express';
+import * as E from 'fp-ts/Either';
+import { Logger } from 'pino';
+import request from 'supertest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+
+// Setup
+import { redisClient } from '../../../src/infrastructures/cache/client';
+import {
+  IntegrationTestSetupResult,
+  setupIntegrationTest,
+  teardownIntegrationTest,
+} from '../../setup/integrationTestSetup';
+
+// Specific imports
+import { playerRouter } from '../../../src/api/routes/player.route'; // Import the router
+import { CachePrefix } from '../../../src/configs/cache/cache.config';
+import { createFplBootstrapDataService } from '../../../src/data/fpl/bootstrap.data';
+import { FplBootstrapDataService } from '../../../src/data/types';
+import { createPlayerCache } from '../../../src/domains/player/cache';
+import { PlayerCache, PlayerRepository } from '../../../src/domains/player/types';
+import { HTTPClient } from '../../../src/infrastructures/http/client';
+import { createPlayerRepository } from '../../../src/repositories/player/repository';
+import { createPlayerService } from '../../../src/services/player/service';
+import { PlayerService } from '../../../src/services/player/types';
+import { Player, PlayerId } from '../../../src/types/domain/player.type';
+
+describe('Player Routes Integration Tests', () => {
+  let setup: IntegrationTestSetupResult;
+  let app: Express;
+  let prisma: PrismaClient;
+  let logger: Logger;
+  let httpClient: HTTPClient;
+  let playerRepository: PlayerRepository;
+  let playerCache: PlayerCache;
+  let fplDataService: FplBootstrapDataService;
+  let playerService: PlayerService;
+
+  const cachePrefix = CachePrefix.PLAYER;
+  const testSeason = '2425';
+
+  beforeAll(async () => {
+    setup = await setupIntegrationTest();
+    prisma = setup.prisma;
+    logger = setup.logger;
+    httpClient = setup.httpClient;
+
+    try {
+      await redisClient.ping();
+    } catch (error) {
+      logger.error({ err: error }, 'Shared redisClient ping failed in beforeAll.');
+    }
+
+    playerRepository = createPlayerRepository(prisma);
+    playerCache = createPlayerCache(playerRepository, {
+      keyPrefix: cachePrefix,
+      season: testSeason,
+    });
+    fplDataService = createFplBootstrapDataService(httpClient, logger);
+    playerService = createPlayerService(fplDataService, playerRepository, playerCache);
+
+    // Create Express app and mount only the player router
+    app = express();
+    app.use(express.json());
+    app.use('/players', playerRouter(playerService)); // Mount router
+  });
+
+  beforeEach(async () => {
+    await prisma.player.deleteMany({});
+    const keys = await redisClient.keys(`${cachePrefix}::${testSeason}*`);
+    if (keys.length > 0) {
+      await redisClient.del(keys);
+    }
+    // Ensure data exists for GET requests by syncing
+    await playerService.syncPlayersFromApi()();
+  });
+
+  afterAll(async () => {
+    await teardownIntegrationTest(setup);
+  });
+
+  // --- Test Cases ---
+
+  it('GET /players should return all players within a data object', async () => {
+    const res = await request(app).get('/players');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty('data');
+    expect(Array.isArray(res.body.data)).toBe(true);
+    const players = res.body.data as Player[];
+    expect(players.length).toBeGreaterThan(0);
+    expect(players[0]).toHaveProperty('id');
+    expect(players[0]).toHaveProperty('webName');
+  });
+
+  it('GET /players/:id should return the player with the specified ID', async () => {
+    const allPlayersResult = await playerService.getPlayers()();
+    let targetPlayerId: PlayerId | null = null;
+    if (
+      E.isRight(allPlayersResult) &&
+      allPlayersResult.right &&
+      allPlayersResult.right.length > 0
+    ) {
+      targetPlayerId = allPlayersResult.right[0].id;
+    } else {
+      throw new Error('Could not retrieve players to get an ID for testing');
+    }
+
+    // Convert numeric PlayerId to string for the URL path
+    const res = await request(app).get(`/players/${String(targetPlayerId)}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toBeDefined();
+    expect(res.body).toHaveProperty('data');
+    expect(res.body.data.id).toBe(targetPlayerId); // Compare with original numeric ID
+    expect(res.body.data).toHaveProperty('webName');
+  });
+
+  it('GET /players/:id should return 404 if player ID does not exist', async () => {
+    const nonExistentPlayerId = 99999 as PlayerId;
+    // Convert numeric PlayerId to string for the URL path
+    const res = await request(app).get(`/players/${String(nonExistentPlayerId)}`);
+
+    expect(res.status).toBe(404);
+  });
+});

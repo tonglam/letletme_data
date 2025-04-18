@@ -5,7 +5,7 @@ import { PlayerStat, PlayerStatId } from 'src/types/domain/player-stat.type';
 export const mapPrismaPlayerStatToDomain = (
   prismaPlayerStat: PrismaPlayerStatType,
 ): PlayerStat => ({
-  id: prismaPlayerStat.id.toString() as PlayerStatId,
+  id: prismaPlayerStat.id as PlayerStatId,
   eventId: prismaPlayerStat.eventId,
   elementId: prismaPlayerStat.elementId,
   teamId: prismaPlayerStat.teamId,

@@ -1,16 +1,13 @@
-import { Request, Response, Router } from 'express';
+import { Router } from 'express';
 
-import { createRouter } from '../api';
-import { ServiceContainer } from '../services/types';
+// Import the main API router creator function
+import { createRouter } from '../api/index';
+// Import the ApplicationServices type
+import { ApplicationServices } from './services';
 
-export const setupRoutes = (services: ServiceContainer): Router => {
-  const router = Router();
-
-  router.get('/health', (_: Request, res: Response) => {
-    res.json({ status: 'ok' });
-  });
-
-  router.use('/api', createRouter(services));
-
-  return router;
+// Function to set up the main application router
+export const setupRoutes = (services: ApplicationServices): Router => {
+  // Create the main API router, passing in the required services
+  const apiRouter = createRouter(services);
+  return apiRouter;
 };

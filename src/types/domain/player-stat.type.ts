@@ -1,25 +1,26 @@
 import { Prisma } from '@prisma/client';
 import * as E from 'fp-ts/Either';
-import { pipe } from 'fp-ts/function';
 
 import { Branded, createBrandedType } from '../base.type';
 
-export type PlayerStatId = Branded<string, 'PlayerStatId'>;
+export type PlayerStatId = Branded<number, 'PlayerStatId'>;
 
-export const PlayerStatId = createBrandedType<string, 'PlayerStatId'>(
+export const PlayerStatId = createBrandedType<number, 'PlayerStatId'>(
   'PlayerStatId',
-  (value: unknown): value is string => typeof value === 'string' && value.length > 0,
+  (value: unknown): value is number =>
+    typeof value === 'number' && Number.isInteger(value) && value > 0,
 );
 
-export const validatePlayerStatId = (value: unknown): E.Either<string, PlayerStatId> =>
-  pipe(
-    value,
-    E.fromPredicate(
-      (v): v is string => typeof v === 'string' && v.length > 0,
-      () => 'Invalid player stat ID: must be a non-empty string',
-    ),
-    E.map((v) => v as PlayerStatId),
-  );
+export const validatePlayerStatIdInput = (value: unknown): E.Either<string, PlayerStatId> => {
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    return E.left('Invalid player stat ID: input must be a non-empty string');
+  }
+  const numericId = parseInt(value, 10);
+  if (isNaN(numericId) || !Number.isInteger(numericId) || numericId <= 0) {
+    return E.left('Invalid player stat ID: input must be a string representing a positive integer');
+  }
+  return E.right(numericId as PlayerStatId);
+};
 
 export interface PlayerStat {
   readonly id: PlayerStatId;

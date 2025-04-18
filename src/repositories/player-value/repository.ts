@@ -2,11 +2,8 @@ import { Prisma, PrismaClient, PlayerValue as PrismaPlayerValueType } from '@pri
 import { PlayerValueRepository } from 'domains/player-value/types';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import {
-  mapDomainPlayerValueToPrismaCreate,
-  mapPrismaPlayerValueToDomain,
-} from 'src/repositories/player-value/mapper';
-import { PrismaPlayerValueCreate } from 'src/repositories/player-value/type';
+import { mapPrismaPlayerValueToDomain } from 'src/repositories/player-value/mapper';
+import { PrismaPlayerValueCreateInput } from 'src/repositories/player-value/type';
 import { PlayerValueId } from 'src/types/domain/player-value.type';
 import { createDBError, DBErrorCode } from 'src/types/error.type';
 import { getErrorMessage } from 'src/utils/error.util';
@@ -31,7 +28,7 @@ export const createPlayerValueRepository = (prisma: PrismaClient): PlayerValueRe
   findById: (id: PlayerValueId) =>
     pipe(
       TE.tryCatch(
-        () => prisma.playerValue.findUnique({ where: { id: parseInt(id, 10) } }),
+        () => prisma.playerValue.findUnique({ where: { id } }),
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
@@ -42,17 +39,16 @@ export const createPlayerValueRepository = (prisma: PrismaClient): PlayerValueRe
       TE.map((playerValue) => (playerValue ? mapPrismaPlayerValueToDomain(playerValue) : null)),
     ),
 
-  saveBatch: (playerValues: readonly PrismaPlayerValueCreate[]) =>
+  saveBatch: (playerValues: readonly PrismaPlayerValueCreateInput[]) =>
     pipe(
       TE.tryCatch(
         async () => {
-          const dataToCreate = playerValues.map(mapDomainPlayerValueToPrismaCreate);
           await prisma.playerValue.createMany({
-            data: dataToCreate as unknown as Prisma.PlayerValueCreateManyInput[],
+            data: [...playerValues] as Prisma.PlayerValueCreateManyInput[],
             skipDuplicates: true,
           });
 
-          const uniqueIdentifiers = dataToCreate.map((p) => ({
+          const uniqueIdentifiers = playerValues.map((p) => ({
             elementId: p.elementId,
             changeDate: p.changeDate,
           }));

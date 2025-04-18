@@ -1,6 +1,6 @@
 import * as TE from 'fp-ts/TaskEither';
 import { CachePrefix } from 'src/configs/cache/cache.config';
-import { PrismaPlayerValueCreate } from 'src/repositories/player-value/type';
+import { PrismaPlayerValueCreateInput } from 'src/repositories/player-value/type';
 import { PlayerValue, PlayerValueId, PlayerValues } from 'src/types/domain/player-value.type';
 import { DBError, DomainError } from 'src/types/error.type';
 
@@ -10,7 +10,7 @@ export interface PlayerValueRepository {
   readonly findAll: () => TE.TaskEither<DBError, PlayerValues>;
   readonly findById: (id: PlayerValueId) => TE.TaskEither<DBError, PlayerValue | null>;
   readonly saveBatch: (
-    playerValues: readonly PrismaPlayerValueCreate[],
+    playerValues: readonly PrismaPlayerValueCreateInput[],
   ) => TE.TaskEither<DBError, PlayerValues>;
   readonly deleteAll: () => TE.TaskEither<DBError, void>;
 }
@@ -37,7 +37,7 @@ export interface PlayerValueOperations {
     id: PlayerValueId,
   ) => TE.TaskEither<DomainError, PlayerValue | null>;
   readonly savePlayerValues: (
-    playerValues: readonly PrismaPlayerValueCreate[],
+    playerValues: readonly PrismaPlayerValueCreateInput[],
   ) => TE.TaskEither<DomainError, PlayerValues>;
   readonly deleteAllPlayerValues: () => TE.TaskEither<DomainError, void>;
 }

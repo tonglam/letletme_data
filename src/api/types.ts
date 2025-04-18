@@ -14,9 +14,22 @@ export interface APIResponseData<T> {
   readonly data: T;
 }
 
-export type NullableHandler<T> = (message: string) => (value: T | null) => Either<APIError, T>;
+export type AsyncMiddlewareHandler<T> = (req: Request) => TaskEither<APIError, T>;
 
-export type NullableEventHandler = NullableHandler<Event>;
+export type ApiRequest = Request;
+
+export type AsyncHandler<T> = (req: ApiRequest) => Promise<Either<APIError, T>>;
+
+export type AsyncEither<E, A> = Promise<Either<E, A>>;
+
+export type Middleware = (req: Request, res: Response, next: NextFunction) => void | Promise<void>;
+
+export interface SecurityHeaders {
+  readonly 'X-Content-Type-Options': string;
+  readonly 'X-Frame-Options': string;
+  readonly 'X-XSS-Protection': string;
+  readonly 'Strict-Transport-Security': string;
+}
 
 export interface EventHandlerResponse {
   readonly getAllEvents: () => TaskEither<APIError, Events>;
@@ -33,25 +46,6 @@ export interface PhaseHandlerResponse {
 export interface TeamHandlerResponse {
   readonly getAllTeams: () => TaskEither<APIError, Teams>;
   readonly getTeamById: (req: Request) => TaskEither<APIError, Team>;
-}
-
-export type AsyncMiddlewareHandler<T> = (req: Request) => TaskEither<APIError, T>;
-
-export type ApiRequest = Request;
-
-export type AsyncHandler<T> = (req: ApiRequest) => Promise<Either<APIError, T>>;
-
-export type AsyncEither<E, A> = Promise<Either<E, A>>;
-
-export type Middleware = (req: Request, res: Response, next: NextFunction) => void | Promise<void>;
-
-export type ErrorHandler = (error: Error, req: Request, res: Response, next: NextFunction) => void;
-
-export interface SecurityHeaders {
-  readonly 'X-Content-Type-Options': string;
-  readonly 'X-Frame-Options': string;
-  readonly 'X-XSS-Protection': string;
-  readonly 'Strict-Transport-Security': string;
 }
 
 export interface PlayerHandlerResponse {

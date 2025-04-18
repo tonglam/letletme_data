@@ -2,7 +2,6 @@ import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import { FplBootstrapDataService } from 'src/data/types';
 import { PrismaTeamCreate } from 'src/repositories/team/type';
-
 import { createTeamOperations } from '../../domains/team/operation';
 import { TeamCache, TeamOperations, TeamRepository } from '../../domains/team/types';
 import { Team, TeamId, Teams } from '../../types/domain/team.type';

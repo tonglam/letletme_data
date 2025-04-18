@@ -71,6 +71,7 @@
     "fp-ts": "^2.16.9",
     "helmet": "^8.1.0",
     "io-ts": "^2.2.22",
+    "io-ts-types": "^0.5.19",
     "ioredis": "^5.6.1",
     "node-cron": "^3.0.3",
     "node-fetch": "^3.3.2",

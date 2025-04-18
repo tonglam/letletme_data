@@ -14,6 +14,7 @@ import { PrismaPlayerStatCreateInput } from 'src/repositories/player-stat/type';
 import { PlayerStat, PlayerStatId, PlayerStats } from 'src/types/domain/player-stat.type';
 import {
   DataLayerError,
+  DomainError,
   ServiceError,
   ServiceErrorCode,
   createServiceError,
@@ -34,7 +35,9 @@ const playerStatServiceOperations = (
   findPlayerStatById: (id: PlayerStatId) =>
     pipe(
       domainOps.getPlayerStatById(id),
-      TE.mapLeft(mapDomainErrorToServiceError),
+      TE.mapLeft((error: DomainError) => {
+        return mapDomainErrorToServiceError(error);
+      }),
     ) as TE.TaskEither<ServiceError, PlayerStat | null>,
 
   syncPlayerStatsFromApi: () =>

@@ -2,11 +2,7 @@ import { NextFunction, Request, Response } from 'express';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as O from 'fp-ts/Option';
-import * as T from 'fp-ts/Task';
 import * as TE from 'fp-ts/TaskEither';
-import * as t from 'io-ts';
-import { PathReporter } from 'io-ts/PathReporter';
-
 import {
   APIError,
   APIErrorCode,
@@ -15,14 +11,8 @@ import {
   ServiceError,
 } from '../../types/error.type';
 import { toAPIError } from '../../utils/error.util';
-import { AsyncMiddlewareHandler, ErrorHandler, Middleware, SecurityHeaders } from '../types';
+import { AsyncMiddlewareHandler, Middleware, SecurityHeaders } from '../types';
 import { sendResponse } from '../utils';
-
-const handleAPIError =
-  (next: NextFunction) =>
-  (error: APIError): T.Task<void> => {
-    return () => Promise.resolve(next(error));
-  };
 
 export const createHandler = <T>(handler: AsyncMiddlewareHandler<T>): Middleware => {
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
@@ -32,30 +22,6 @@ export const createHandler = <T>(handler: AsyncMiddlewareHandler<T>): Middleware
         (error) => () => Promise.resolve(handleError(error, req, res, next)),
         (result) => () => Promise.resolve(sendResponse(res, E.right(result))),
       ),
-    )();
-  };
-};
-
-const validateWithCodec = <C extends t.Mixed>(
-  codec: C,
-  req: Request,
-): E.Either<APIError, Request> =>
-  pipe(
-    codec.decode(req),
-    E.mapLeft((errors) =>
-      createAPIError({
-        code: APIErrorCode.VALIDATION_ERROR,
-        message: PathReporter.report(E.left(errors)).join(', '),
-      }),
-    ),
-    E.map(() => req),
-  );
-
-export const validateRequest = <C extends t.Mixed>(codec: C): Middleware => {
-  return (req: Request, _res: Response, next: NextFunction): void => {
-    pipe(
-      validateWithCodec(codec, req),
-      E.fold(handleAPIError(next), () => T.of(next())),
     )();
   };
 };
@@ -77,13 +43,6 @@ export const toNotFoundError =
       ),
     );
 
-const securityHeaders: SecurityHeaders = {
-  'X-Content-Type-Options': 'nosniff',
-  'X-Frame-Options': 'DENY',
-  'X-XSS-Protection': '1; mode=block',
-  'Strict-Transport-Security': 'max-age=31536000; includeSubDomains',
-} as const;
-
 const addHeaders =
   (res: Response) =>
   (headers: SecurityHeaders): void => {
@@ -91,16 +50,24 @@ const addHeaders =
   };
 
 export const addSecurityHeaders = (): Middleware => {
+  const securityHeaders: SecurityHeaders = {
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'DENY',
+    'X-XSS-Protection': '1; mode=block',
+    'Strict-Transport-Security': 'max-age=31536000; includeSubDomains',
+  } as const;
+
   return (_req: Request, res: Response, next: NextFunction): void => {
     pipe(securityHeaders, addHeaders(res));
     next();
   };
 };
 
-export const handleError: ErrorHandler = (
+export const handleError = (
   error: Error | APIError | ServiceError,
   _req: Request,
   res: Response,
+  _next: NextFunction,
 ): void => {
   const apiError =
     error instanceof Error && !('code' in error)

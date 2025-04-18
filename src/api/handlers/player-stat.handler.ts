@@ -1,50 +1,48 @@
 import { Request } from 'express';
+import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 
-import { ServiceContainer } from '../../services/types';
-import { PlayerStat, validatePlayerStatId } from '../../types/domain/player-stat.type';
-import { APIErrorCode, ServiceError, createAPIError } from '../../types/error.type';
+import { PlayerStatService } from '../../services/player-stat/types';
+import {
+  PlayerStat,
+  PlayerStats,
+  validatePlayerStatIdInput,
+} from '../../types/domain/player-stat.type';
+import { APIError, APIErrorCode, createAPIError } from '../../types/error.type';
 import { toAPIError } from '../../utils/error.util';
 import { PlayerStatHandlerResponse } from '../types';
 
 export const createPlayerStatHandlers = (
-  playerStatService: ServiceContainer['playerStatService'],
+  playerStatService: PlayerStatService,
 ): PlayerStatHandlerResponse => ({
-  getAllPlayerStats: () => {
-    const task = playerStatService.getPlayerStats() as TE.TaskEither<ServiceError, PlayerStat[]>;
+  getAllPlayerStats: (): TE.TaskEither<APIError, PlayerStat[]> => {
     return pipe(
-      task,
+      playerStatService.getPlayerStats(),
       TE.mapLeft(toAPIError),
-      TE.map((playerStats) => [...playerStats]),
+      TE.map((playerStats: PlayerStats) => [...playerStats]),
     );
   },
 
-  getPlayerStatById: (req: Request) => {
-    const playerStatId = req.params.id;
-    const validatedId = validatePlayerStatId(playerStatId);
+  getPlayerStatById: (req: Request): TE.TaskEither<APIError, PlayerStat> => {
+    const playerStatIdInput = req.params.id;
+    const validatedId = validatePlayerStatIdInput(playerStatIdInput);
 
-    if (validatedId._tag === 'Left') {
+    if (E.isLeft(validatedId)) {
       return TE.left(
-        createAPIError({
-          code: APIErrorCode.VALIDATION_ERROR,
-          message: validatedId.left,
-        }),
+        createAPIError({ code: APIErrorCode.VALIDATION_ERROR, message: validatedId.left }),
       );
     }
 
     return pipe(
-      playerStatService.getPlayerStat(validatedId.right) as TE.TaskEither<
-        ServiceError,
-        PlayerStat | null
-      >,
+      playerStatService.getPlayerStat(validatedId.right),
       TE.mapLeft(toAPIError),
       TE.chain((playerStat) =>
         playerStat === null
           ? TE.left(
               createAPIError({
                 code: APIErrorCode.NOT_FOUND,
-                message: `Player stat with ID ${playerStatId} not found`,
+                message: `Player stat with ID ${playerStatIdInput} not found`,
               }),
             )
           : TE.right(playerStat),

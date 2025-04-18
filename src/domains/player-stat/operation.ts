@@ -8,7 +8,7 @@ import * as TE from 'fp-ts/TaskEither';
 import { PrismaPlayerStatCreateInput } from 'src/repositories/player-stat/type';
 import { EventId } from 'src/types/domain/event.type';
 import { PlayerStatId } from 'src/types/domain/player-stat.type';
-import { createDomainError, DomainErrorCode } from 'src/types/error.type';
+import { createDomainError, DomainError, DomainErrorCode } from 'src/types/error.type';
 import { getErrorMessage } from 'src/utils/error.util';
 
 export const createPlayerStatOperations = (
@@ -55,6 +55,13 @@ export const createPlayerStatOperations = (
   getPlayerStatById: (id: PlayerStatId) =>
     pipe(
       cache.getPlayerStat(id),
+      TE.mapLeft((cacheError: DomainError) =>
+        createDomainError({
+          code: DomainErrorCode.CACHE_ERROR,
+          message: `Cache Error (getPlayerStat ${id}): ${getErrorMessage(cacheError)}`,
+          cause: cacheError,
+        }),
+      ),
       TE.chain((cachedPlayerStat) =>
         cachedPlayerStat
           ? TE.right(cachedPlayerStat)

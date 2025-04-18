@@ -22,10 +22,13 @@ export const createPlayerStatRepository = (prisma: PrismaClient): PlayerStatRepo
       TE.map((playerStats: PrismaPlayerStatType[]) => playerStats.map(mapPrismaPlayerStatToDomain)),
     ),
 
-  findById: (id: PlayerStatId) =>
-    pipe(
+  findById: (id: PlayerStatId) => {
+    return pipe(
       TE.tryCatch(
-        () => prisma.playerStat.findUnique({ where: { id: parseInt(id, 10) } }),
+        async () => {
+          const result = await prisma.playerStat.findUnique({ where: { id } });
+          return result;
+        },
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
@@ -34,7 +37,8 @@ export const createPlayerStatRepository = (prisma: PrismaClient): PlayerStatRepo
           }),
       ),
       TE.map((playerStat) => (playerStat ? mapPrismaPlayerStatToDomain(playerStat) : null)),
-    ),
+    );
+  },
 
   saveBatch: (playerStats: readonly PrismaPlayerStatCreateInput[]) =>
     pipe(

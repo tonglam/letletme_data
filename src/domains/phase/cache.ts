@@ -4,12 +4,12 @@ import * as O from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
 import { Phase, PhaseId, Phases } from 'src/types/domain/phase.type';
 
-import { PhaseCache, PhaseCacheConfig, PhaseRepository } from './types';
 import { CachePrefix } from '../../configs/cache/cache.config';
 import { redisClient } from '../../infrastructures/cache/client';
 import { getCurrentSeason } from '../../types/base.type';
 import { CacheError, CacheErrorCode, createCacheError, DomainError } from '../../types/error.type';
 import { mapCacheErrorToDomainError, mapRepositoryErrorToCacheError } from '../../utils/error.util';
+import { PhaseCache, PhaseCacheConfig, PhaseRepository } from './types';
 
 const parsePhase = (phaseStr: string): E.Either<CacheError, Phase | null> =>
   pipe(

@@ -9,7 +9,7 @@ import { MappedPlayerValue, PlayerValue, PlayerValueId } from 'src/types/domain/
 export const mapPrismaPlayerValueToDomain = (
   prismaPlayerValue: PrismaPlayerValueType,
 ): PlayerValue => ({
-  id: prismaPlayerValue.id.toString() as PlayerValueId,
+  id: prismaPlayerValue.id as PlayerValueId,
   elementId: prismaPlayerValue.elementId,
   elementType: prismaPlayerValue.elementType as ElementType,
   eventId: prismaPlayerValue.eventId,

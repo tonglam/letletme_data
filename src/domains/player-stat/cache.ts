@@ -60,10 +60,11 @@ export const createPlayerStatCache = (
   const { keyPrefix, season } = config;
   const baseKey = `${keyPrefix}::${season}`;
 
-  const getPlayerStat = (id: PlayerStatId): TE.TaskEither<DomainError, PlayerStat | null> =>
-    pipe(
+  const getPlayerStat = (id: PlayerStatId): TE.TaskEither<DomainError, PlayerStat | null> => {
+    const key = id.toString();
+    return pipe(
       TE.tryCatch(
-        () => redisClient.hget(baseKey, id.toString()),
+        () => redisClient.hget(baseKey, key),
         (error: unknown) =>
           createCacheError({
             code: CacheErrorCode.OPERATION_ERROR,
@@ -75,19 +76,23 @@ export const createPlayerStatCache = (
         flow(
           O.fromNullable,
           O.fold(
-            () =>
-              pipe(
+            () => {
+              return pipe(
                 repository.findById(id),
                 TE.mapLeft(
                   mapRepositoryErrorToCacheError('Repository Error: Failed to get player stat'),
                 ),
-              ),
-            (playerStatStr) => pipe(parsePlayerStat(playerStatStr), TE.fromEither),
+              );
+            },
+            (playerStatStr) => {
+              return pipe(parsePlayerStat(playerStatStr), TE.fromEither);
+            },
           ),
         ),
       ),
       TE.mapLeft(mapCacheErrorToDomainError),
     );
+  };
 
   const getAllPlayerStats = (): TE.TaskEither<DomainError, PlayerStats | null> =>
     pipe(

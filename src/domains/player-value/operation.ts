@@ -5,7 +5,7 @@ import {
 } from 'domains/player-value/types';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { PrismaPlayerValueCreate } from 'src/repositories/player-value/type';
+import { PrismaPlayerValueCreateInput } from 'src/repositories/player-value/type';
 import { PlayerValueId } from 'src/types/domain/player-value.type';
 import { createDomainError, DomainErrorCode } from 'src/types/error.type';
 import { getErrorMessage } from 'src/utils/error.util';
@@ -70,7 +70,7 @@ export const createPlayerValueOperations = (
       ),
     ),
 
-  savePlayerValues: (playerValues: readonly PrismaPlayerValueCreate[]) =>
+  savePlayerValues: (playerValues: readonly PrismaPlayerValueCreateInput[]) =>
     pipe(
       repository.saveBatch(playerValues),
       TE.mapLeft((dbError) =>

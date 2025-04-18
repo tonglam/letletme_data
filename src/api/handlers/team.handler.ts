@@ -2,28 +2,25 @@ import { Request } from 'express';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 
-import { ServiceContainer } from '../../services/types';
-import { Team, TeamId } from '../../types/domain/team.type';
-import { APIErrorCode, ServiceError, createAPIError } from '../../types/error.type';
+import { TeamService } from '../../services/team/types';
+import { Team, TeamId, Teams } from '../../types/domain/team.type';
+import { APIError, APIErrorCode, createAPIError } from '../../types/error.type';
 import { toAPIError } from '../../utils/error.util';
 import { TeamHandlerResponse } from '../types';
 
-export const createTeamHandlers = (
-  teamService: ServiceContainer['teamService'],
-): TeamHandlerResponse => ({
-  getAllTeams: () => {
-    const task = teamService.getTeams() as TE.TaskEither<ServiceError, Team[]>;
+export const createTeamHandlers = (teamService: TeamService): TeamHandlerResponse => ({
+  getAllTeams: (): TE.TaskEither<APIError, Team[]> => {
     return pipe(
-      task,
+      teamService.getTeams(),
       TE.mapLeft(toAPIError),
-      TE.map((teams) => [...teams]),
+      TE.map((teams: Teams) => [...teams]),
     );
   },
 
-  getTeamById: (req: Request) => {
+  getTeamById: (req: Request): TE.TaskEither<APIError, Team> => {
     const teamId = Number(req.params.id);
     if (isNaN(teamId) || teamId <= 0) {
-      return TE.left(
+      return TE.left<APIError>(
         createAPIError({
           code: APIErrorCode.VALIDATION_ERROR,
           message: 'Invalid team ID: must be a positive integer',
@@ -32,7 +29,7 @@ export const createTeamHandlers = (
     }
 
     return pipe(
-      teamService.getTeam(teamId as TeamId) as TE.TaskEither<ServiceError, Team | null>,
+      teamService.getTeam(teamId as TeamId),
       TE.mapLeft(toAPIError),
       TE.chain((team) =>
         team === null

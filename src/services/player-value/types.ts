@@ -1,8 +1,8 @@
 import * as TE from 'fp-ts/TaskEither';
 import { WorkflowResult } from 'services/types';
 import { FplBootstrapDataService } from 'src/data/types';
-import { PlayerValue, PlayerValueId, PlayerValues } from 'src/types/domain/player-value.type';
 import { ServiceError } from 'src/types/error.type';
+import { PlayerValue, PlayerValueId, PlayerValues } from '../../types/domain/player-value.type';
 
 export interface PlayerValueService {
   readonly getPlayerValues: () => TE.TaskEither<ServiceError, PlayerValues>;

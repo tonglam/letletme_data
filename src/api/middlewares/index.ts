@@ -1,7 +1,1 @@
-export {
-  addSecurityHeaders,
-  createHandler,
-  handleError,
-  toNotFoundError,
-  validateRequest,
-} from './core';
+export { addSecurityHeaders, createHandler, handleError, toNotFoundError } from './core';

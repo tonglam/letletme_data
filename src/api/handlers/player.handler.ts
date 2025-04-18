@@ -1,30 +1,38 @@
 import { Request } from 'express';
+import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 
-import { ServiceContainer } from '../../services/types';
-import { Player, validatePlayerId } from '../../types/domain/player.type';
-import { APIErrorCode, ServiceError, createAPIError } from '../../types/error.type';
+import { PlayerService } from '../../services/player/types';
+import { Player, PlayerId, Players, validatePlayerId } from '../../types/domain/player.type';
+import { APIError, APIErrorCode, createAPIError } from '../../types/error.type';
 import { toAPIError } from '../../utils/error.util';
 import { PlayerHandlerResponse } from '../types';
 
-export const createPlayerHandlers = (
-  playerService: ServiceContainer['playerService'],
-): PlayerHandlerResponse => ({
-  getAllPlayers: () => {
-    const task = playerService.getPlayers() as TE.TaskEither<ServiceError, Player[]>;
+export const createPlayerHandlers = (playerService: PlayerService): PlayerHandlerResponse => ({
+  getAllPlayers: (): TE.TaskEither<APIError, Player[]> => {
     return pipe(
-      task,
+      playerService.getPlayers(),
       TE.mapLeft(toAPIError),
-      TE.map((players) => [...players]),
+      TE.map((players: Players) => [...players]),
     );
   },
 
-  getPlayerById: (req: Request) => {
-    const playerId = Number(req.params.id);
-    const validatedId = validatePlayerId(playerId);
+  getPlayerById: (req: Request): TE.TaskEither<APIError, Player> => {
+    const idParam = req.params.id;
+    const parsedId = parseInt(idParam, 10);
 
-    if (validatedId._tag === 'Left') {
+    if (isNaN(parsedId)) {
+      return TE.left(
+        createAPIError({
+          code: APIErrorCode.VALIDATION_ERROR,
+          message: 'Invalid player ID format: must be a numeric string',
+        }),
+      );
+    }
+
+    const validatedId = validatePlayerId(parsedId);
+    if (E.isLeft(validatedId)) {
       return TE.left(
         createAPIError({
           code: APIErrorCode.VALIDATION_ERROR,
@@ -34,14 +42,14 @@ export const createPlayerHandlers = (
     }
 
     return pipe(
-      playerService.getPlayer(validatedId.right) as TE.TaskEither<ServiceError, Player | null>,
+      playerService.getPlayer(validatedId.right as PlayerId),
       TE.mapLeft(toAPIError),
       TE.chain((player) =>
         player === null
           ? TE.left(
               createAPIError({
                 code: APIErrorCode.NOT_FOUND,
-                message: `Player with ID ${playerId} not found`,
+                message: `Player with ID ${validatedId.right} not found`,
               }),
             )
           : TE.right(player),

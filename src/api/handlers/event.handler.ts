@@ -2,18 +2,16 @@ import { Request } from 'express';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 
-import { ServiceContainer } from '../../services/types';
-import { Event, EventId, Events } from '../../types/domain/event.type';
-import { APIErrorCode, ServiceError, createAPIError } from '../../types/error.type';
+import { EventService } from '../../services/event/types';
+import { EventId } from '../../types/domain/event.type';
+import { APIErrorCode, createAPIError } from '../../types/error.type';
 import { toAPIError } from '../../utils/error.util';
 import { EventHandlerResponse } from '../types';
 
-export const createEventHandlers = (
-  eventService: ServiceContainer['eventService'],
-): EventHandlerResponse => ({
+export const createEventHandlers = (eventService: EventService): EventHandlerResponse => ({
   getAllEvents: () => {
     return pipe(
-      eventService.getEvents() as TE.TaskEither<ServiceError, Events>,
+      eventService.getEvents(),
       TE.mapLeft(toAPIError),
       TE.map((events) => events),
     );
@@ -21,7 +19,7 @@ export const createEventHandlers = (
 
   getCurrentEvent: () => {
     return pipe(
-      eventService.getCurrentEvent() as TE.TaskEither<ServiceError, Event | null>,
+      eventService.getCurrentEvent(),
       TE.mapLeft(toAPIError),
       TE.chain((event) =>
         event === null
@@ -38,7 +36,7 @@ export const createEventHandlers = (
 
   getNextEvent: () => {
     return pipe(
-      eventService.getNextEvent() as TE.TaskEither<ServiceError, Event | null>,
+      eventService.getNextEvent(),
       TE.mapLeft(toAPIError),
       TE.chain((event) =>
         event === null
@@ -65,7 +63,7 @@ export const createEventHandlers = (
     }
 
     return pipe(
-      eventService.getEvent(eventId as EventId) as TE.TaskEither<ServiceError, Event | null>,
+      eventService.getEvent(eventId as EventId),
       TE.mapLeft(toAPIError),
       TE.chain((event) =>
         event === null

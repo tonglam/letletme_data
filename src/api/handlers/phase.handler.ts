@@ -2,21 +2,18 @@ import { Request } from 'express';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 
-import { ServiceContainer } from '../../services/types';
-import { Phase, PhaseId } from '../../types/domain/phase.type';
-import { APIErrorCode, ServiceError, createAPIError } from '../../types/error.type';
+import { PhaseService } from '../../services/phase/types';
+import { PhaseId } from '../../types/domain/phase.type';
+import { APIErrorCode, createAPIError } from '../../types/error.type';
 import { toAPIError } from '../../utils/error.util';
 import { PhaseHandlerResponse } from '../types';
 
-export const createPhaseHandlers = (
-  phaseService: ServiceContainer['phaseService'],
-): PhaseHandlerResponse => ({
+export const createPhaseHandlers = (phaseService: PhaseService): PhaseHandlerResponse => ({
   getAllPhases: () => {
-    const task = phaseService.getPhases() as TE.TaskEither<ServiceError, Phase[]>;
     return pipe(
-      task,
+      phaseService.getPhases(),
       TE.mapLeft(toAPIError),
-      TE.map((phases) => [...phases]),
+      TE.map((phases) => phases),
     );
   },
 
@@ -32,7 +29,7 @@ export const createPhaseHandlers = (
     }
 
     return pipe(
-      phaseService.getPhase(phaseId as PhaseId) as TE.TaskEither<ServiceError, Phase | null>,
+      phaseService.getPhase(phaseId as PhaseId),
       TE.mapLeft(toAPIError),
       TE.chain((phase) =>
         phase === null

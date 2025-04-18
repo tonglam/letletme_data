@@ -93,7 +93,7 @@ export const createFplBootstrapDataService = (
     );
   };
 
-  const getBootstrapData = (): TE.TaskEither<DataLayerError, BootStrapResponse> => {
+  const getBootstrapDataInternal = (): TE.TaskEither<DataLayerError, BootStrapResponse> => {
     if (cachedBootstrapResponse) {
       return TE.right(cachedBootstrapResponse);
     }
@@ -102,7 +102,7 @@ export const createFplBootstrapDataService = (
 
   const getEvents = (): TE.TaskEither<DataLayerError, Events> =>
     pipe(
-      getBootstrapData(),
+      getBootstrapDataInternal(),
       TE.chain((bootstrapData) =>
         pipe(
           bootstrapData.events,
@@ -124,7 +124,7 @@ export const createFplBootstrapDataService = (
 
   const getPhases = (): TE.TaskEither<DataLayerError, Phases> =>
     pipe(
-      getBootstrapData(),
+      getBootstrapDataInternal(),
       TE.chain((bootstrapData) =>
         pipe(
           bootstrapData.phases,
@@ -146,7 +146,7 @@ export const createFplBootstrapDataService = (
 
   const getTeams = (): TE.TaskEither<DataLayerError, Teams> =>
     pipe(
-      getBootstrapData(),
+      getBootstrapDataInternal(),
       TE.chain((bootstrapData) =>
         pipe(
           bootstrapData.teams,
@@ -168,7 +168,7 @@ export const createFplBootstrapDataService = (
 
   const getPlayers = (): TE.TaskEither<DataLayerError, Players> =>
     pipe(
-      getBootstrapData(),
+      getBootstrapDataInternal(),
       TE.chain((bootstrapData) =>
         pipe(
           bootstrapData.elements,
@@ -192,7 +192,7 @@ export const createFplBootstrapDataService = (
     eventId: number,
   ): TE.TaskEither<DataLayerError, readonly Omit<PlayerStat, 'id'>[]> =>
     pipe(
-      getBootstrapData(),
+      getBootstrapDataInternal(),
       TE.chain((bootstrapData) =>
         pipe(
           bootstrapData.elements,
@@ -216,7 +216,7 @@ export const createFplBootstrapDataService = (
     eventId: number,
   ): TE.TaskEither<DataLayerError, readonly MappedPlayerValue[]> =>
     pipe(
-      getBootstrapData(),
+      getBootstrapDataInternal(),
       TE.chain((bootstrapData) =>
         pipe(
           bootstrapData.elements,
