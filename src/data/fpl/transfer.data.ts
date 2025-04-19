@@ -9,7 +9,7 @@ import {
   TransfersResponse,
 } from 'src/data/fpl/schemas/transfer/transfer.schema';
 import { FplTransferDataService } from 'src/data/types';
-import { HTTPClient } from 'src/infrastructures/http/client';
+import { HTTPClient } from 'src/infrastructures/http';
 import { EntryEventTransfers } from 'src/types/domain/entry-event-transfer.type';
 import { DataLayerError, DataLayerErrorCode } from 'src/types/error.type';
 import { createDataLayerError } from 'src/utils/error.util';

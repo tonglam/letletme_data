@@ -20,7 +20,7 @@ import { createFplBootstrapDataService } from '../../../src/data/fpl/bootstrap.d
 import { FplBootstrapDataService } from '../../../src/data/types';
 import { createPhaseCache } from '../../../src/domains/phase/cache';
 import { PhaseCache, PhaseRepository } from '../../../src/domains/phase/types';
-import { HTTPClient } from '../../../src/infrastructures/http/client';
+import { HTTPClient } from '../../../src/infrastructures/http';
 import { createPhaseRepository } from '../../../src/repositories/phase/repository';
 import { createPhaseService } from '../../../src/services/phase/service';
 import { PhaseService } from '../../../src/services/phase/types';

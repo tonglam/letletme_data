@@ -2,8 +2,8 @@ import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 
+import { ERROR_CONFIG, ErrorCode, HTTP_STATUS } from '../../configs/http/http.config';
 import { createErrorFromStatus } from './utils';
-import { ERROR_CONFIG, ErrorCode, HTTP_STATUS } from '../../../configs/http/http.config';
 
 export interface RateLimiterConfig {
   readonly tokensPerInterval: number;

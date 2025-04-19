@@ -1,7 +1,7 @@
 import { AxiosRequestConfig } from 'axios';
 import { pipe } from 'fp-ts/function';
 
-import { DEFAULT_CONFIG } from '../../../configs/http/http.config';
+import { DEFAULT_CONFIG } from '../../configs/http/http.config';
 
 const addDefaultHeaders = (config: AxiosRequestConfig): AxiosRequestConfig => ({
   ...config,

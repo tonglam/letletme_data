@@ -12,7 +12,7 @@ import { createDataLayerError } from 'src/utils/error.util';
 
 import { PlayerValues } from 'src/types/domain/player-value.type';
 import { apiConfig } from '../../configs/api/api.config';
-import { HTTPClient } from '../../infrastructures/http/client';
+import { HTTPClient } from '../../infrastructures/http';
 import { FplBootstrapDataService } from '../types';
 import {
   mapElementResponseToPlayer,

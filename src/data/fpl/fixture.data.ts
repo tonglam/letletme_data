@@ -10,7 +10,7 @@ import { EventFixtures } from 'src/types/domain/event-fixture.type';
 import { DataLayerError, DataLayerErrorCode } from 'src/types/error.type';
 import { createDataLayerError } from 'src/utils/error.util';
 import { apiConfig } from '../../configs/api/api.config';
-import { HTTPClient } from '../../infrastructures/http/client';
+import { HTTPClient } from '../../infrastructures/http';
 import { FplFixtureDataService } from '../types';
 import { mapEventFixtureResponseToDomain } from './mappers/fixture/fixture.mapper';
 

@@ -20,7 +20,7 @@ import { createFplBootstrapDataService } from '../../../src/data/fpl/bootstrap.d
 import { FplBootstrapDataService } from '../../../src/data/types';
 import { createTeamCache } from '../../../src/domains/team/cache'; // Team specific
 import { TeamCache, TeamRepository } from '../../../src/domains/team/types'; // Team specific
-import { HTTPClient } from '../../../src/infrastructures/http/client';
+import { HTTPClient } from '../../../src/infrastructures/http';
 import { createTeamRepository } from '../../../src/repositories/team/repository'; // Team specific
 import { createTeamService } from '../../../src/services/team/service'; // Team specific
 import { TeamService } from '../../../src/services/team/types'; // Team specific

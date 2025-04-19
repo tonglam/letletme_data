@@ -2,7 +2,7 @@ import { AxiosInstance } from 'axios';
 import type { TaskEither } from 'fp-ts/TaskEither';
 import { Logger } from 'pino';
 
-import { APIError } from '../../../types/error.type';
+import { APIError } from '../../types/error.type';
 
 export type Headers = Record<string, string>;
 
@@ -98,4 +98,4 @@ export interface RequestMonitor {
   ) => RequestMetrics;
 }
 
-export type { APIError } from '../../../types/error.type';
+export type { APIError } from '../../types/error.type';

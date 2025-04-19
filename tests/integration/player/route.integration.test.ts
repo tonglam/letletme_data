@@ -20,7 +20,7 @@ import { createFplBootstrapDataService } from '../../../src/data/fpl/bootstrap.d
 import { FplBootstrapDataService } from '../../../src/data/types';
 import { createPlayerCache } from '../../../src/domains/player/cache';
 import { PlayerCache, PlayerRepository } from '../../../src/domains/player/types';
-import { HTTPClient } from '../../../src/infrastructures/http/client';
+import { HTTPClient } from '../../../src/infrastructures/http';
 import { createPlayerRepository } from '../../../src/repositories/player/repository';
 import { createPlayerService } from '../../../src/services/player/service';
 import { PlayerService } from '../../../src/services/player/types';

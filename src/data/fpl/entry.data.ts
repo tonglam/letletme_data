@@ -8,7 +8,7 @@ import { mapEntryInfoResponseToEntryInfo } from 'src/data/fpl/mappers/entry/info
 import { mapLeagueInfoResponseToEntryLeague } from 'src/data/fpl/mappers/entry/league.mapper';
 import { EntryResponse, EntryResponseSchema } from 'src/data/fpl/schemas/entry/entry.schema';
 import { FplEntryDataService } from 'src/data/types';
-import { HTTPClient } from 'src/infrastructures/http/client';
+import { HTTPClient } from 'src/infrastructures/http';
 import { LeagueType } from 'src/types/base.type';
 import { EntryInfos } from 'src/types/domain/entry-info.type';
 import { EntryLeagueInfos } from 'src/types/domain/entry-league-info.type';

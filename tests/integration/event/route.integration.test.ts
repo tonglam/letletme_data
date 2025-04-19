@@ -22,7 +22,7 @@ import { createFplBootstrapDataService } from '../../../src/data/fpl/bootstrap.d
 import { FplBootstrapDataService } from '../../../src/data/types';
 import { createEventCache } from '../../../src/domains/event/cache';
 import { EventCache, EventRepository } from '../../../src/domains/event/types';
-import { HTTPClient } from '../../../src/infrastructures/http/client';
+import { HTTPClient } from '../../../src/infrastructures/http';
 import { createEventRepository } from '../../../src/repositories/event/repository';
 import { createEventService } from '../../../src/services/event/service';
 import { EventService } from '../../../src/services/event/types';

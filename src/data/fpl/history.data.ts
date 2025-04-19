@@ -8,7 +8,7 @@ import {
   EntryHistoryResponse,
   EntryHistoryResponseSchema,
 } from 'src/data/fpl/schemas/history/history.schema';
-import { HTTPClient } from 'src/infrastructures/http/client';
+import { HTTPClient } from 'src/infrastructures/http';
 import { EntryHistoryInfos } from 'src/types/domain/entry-history-info.type';
 import { DataLayerError, DataLayerErrorCode } from 'src/types/error.type';
 import { createDataLayerError } from 'src/utils/error.util';

@@ -6,7 +6,7 @@ import { apiConfig } from 'src/configs/api/api.config';
 import { mapPickResponseToEntryEventPick } from 'src/data/fpl/mappers/pick/pick.mapper';
 import { PickResponse, PickResponseSchema } from 'src/data/fpl/schemas/pick/pick.schema';
 import { FplPickDataService } from 'src/data/types';
-import { HTTPClient } from 'src/infrastructures/http/client';
+import { HTTPClient } from 'src/infrastructures/http';
 import { EntryEventPicks } from 'src/types/domain/entry-event-pick.type';
 import { DataLayerError, DataLayerErrorCode } from 'src/types/error.type';
 import { createDataLayerError } from 'src/utils/error.util';

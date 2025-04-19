@@ -17,12 +17,8 @@ import { PhaseCache, PhaseRepository } from '../domains/phase/types';
 import { createPlayerCache } from '../domains/player/cache';
 import { createTeamCache } from '../domains/team/cache';
 import { prisma } from '../infrastructures/db/prisma';
-import {
-  createHTTPClient,
-  HTTPClient,
-  HTTPClientContext,
-} from '../infrastructures/http/client/index';
-import { RetryConfig } from '../infrastructures/http/client/types';
+import { createHTTPClient, HTTPClient, HTTPClientContext } from '../infrastructures/http/index';
+import { RetryConfig } from '../infrastructures/http/types';
 import { getFplApiLogger } from '../infrastructures/logger';
 import { createEventRepository } from '../repositories/event/repository';
 import { createPhaseRepository } from '../repositories/phase/repository';

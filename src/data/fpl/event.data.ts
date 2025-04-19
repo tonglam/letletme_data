@@ -6,7 +6,7 @@ import { apiConfig } from 'src/configs/api/api.config';
 import { mapEventLiveExplainResponseToDomain } from 'src/data/fpl/mappers/event/explain.mapper';
 import { EventResponse, EventResponseSchema } from 'src/data/fpl/schemas/event/event.schema';
 import { FplEventDataService } from 'src/data/types';
-import { HTTPClient } from 'src/infrastructures/http/client/types';
+import { HTTPClient } from 'src/infrastructures/http/types';
 import { EventLiveExplains } from 'src/types/domain/event-live-explain.type';
 import { EventLives } from 'src/types/domain/event-live.type';
 import { DataLayerError, DataLayerErrorCode } from 'src/types/error.type';

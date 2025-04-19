@@ -5,8 +5,8 @@ import pino, { Logger } from 'pino';
 // Configs
 import { apiConfig } from '../../src/configs/api/api.config';
 // Infrastructures
-import { createHTTPClient, HTTPClient } from '../../src/infrastructures/http/client';
-import { DEFAULT_RETRY_CONFIG } from '../../src/infrastructures/http/client/utils';
+import { createHTTPClient, HTTPClient } from '../../src/infrastructures/http';
+import { DEFAULT_RETRY_CONFIG } from '../../src/infrastructures/http/utils';
 
 // --- Interfaces ---
 
