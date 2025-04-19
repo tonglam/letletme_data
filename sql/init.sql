@@ -1,6 +1,5 @@
 CREATE TYPE IF NOT EXISTS "Chip" AS ENUM ('None', 'Wildcard', 'FreeHit', 'TripleCaptain', 'BenchBoost', 'Manager');
 CREATE TYPE IF NOT EXISTS "ValueChangeType" AS ENUM ('Start', 'Rise', 'Fall');
-CREATE TYPE IF NOT EXISTS "LeagueAccessType" AS ENUM ('Public', 'Private');
 CREATE TYPE IF NOT EXISTS "LeagueType" AS ENUM ('Classic', 'H2H');
 CREATE TYPE IF NOT EXISTS "CupResult" AS ENUM ('Win', 'Loss');
 
@@ -167,8 +166,6 @@ CREATE TABLE IF NOT EXISTS "event_fixtures" (
     "kickoff_time" TIMESTAMPTZ,
     "started" BOOLEAN NOT NULL DEFAULT false,
     "finished" BOOLEAN NOT NULL DEFAULT false,
-    "provisional_start_time" BOOLEAN NOT NULL DEFAULT false,
-    "finished_provisional" BOOLEAN NOT NULL DEFAULT false,
     "minutes" INTEGER NOT NULL DEFAULT 0,
     "team_h" INTEGER,
     "team_h_difficulty" INTEGER NOT NULL DEFAULT 0,
@@ -188,10 +185,7 @@ CREATE TABLE IF NOT EXISTS "event_lives" (
     "id" SERIAL PRIMARY KEY,
     "event" INTEGER NOT NULL,
     "element" INTEGER NOT NULL,
-    "element_type" INTEGER NOT NULL,
-    "team" INTEGER NOT NULL,
-    "fixture" INTEGER NOT NULL,
-    "minutes" INTEGER NOT NULL DEFAULT 0,
+    "minutes" INTEGER,
     "goals_scored" INTEGER,
     "assists" INTEGER,
     "clean_sheets" INTEGER,
@@ -204,7 +198,11 @@ CREATE TABLE IF NOT EXISTS "event_lives" (
     "saves" INTEGER,
     "bonus" INTEGER,
     "bps" INTEGER,
-    "total_points" INTEGER NOT NULL DEFAULT 0,
+    "starts" BOOLEAN,
+    "expected_goals" DECIMAL(10,2),
+    "expected_assists" DECIMAL(10,2),
+    "expected_goal_involvements" DECIMAL(10,2),
+    "expected_goals_conceded" DECIMAL(10,2),
     "mng_win" INTEGER,
     "mng_draw" INTEGER,
     "mng_loss" INTEGER,
@@ -212,6 +210,8 @@ CREATE TABLE IF NOT EXISTS "event_lives" (
     "mng_underdog_draw" INTEGER,
     "mng_clean_sheets" INTEGER,
     "mng_goals_scored" INTEGER,
+    "in_dream_team" BOOLEAN,
+    "total_points" INTEGER NOT NULL DEFAULT 0,
     "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updated_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -224,10 +224,6 @@ CREATE TABLE IF NOT EXISTS "event_live_explains" (
     "id" SERIAL PRIMARY KEY,
     "event" INTEGER NOT NULL,
     "element" INTEGER NOT NULL,
-    "element_type" INTEGER NOT NULL,
-    "team" INTEGER NOT NULL,
-    "fixture" INTEGER NOT NULL,
-    "total_points" INTEGER NOT NULL DEFAULT 0,
     "bps" INTEGER,
     "bonus" INTEGER,
     "minutes" INTEGER,
@@ -274,36 +270,6 @@ CREATE INDEX IF NOT EXISTS "idx_event_live_explain_element_id" ON "event_live_ex
 CREATE INDEX IF NOT EXISTS "idx_event_live_explain_event_id" ON "event_live_explains" ("event");
 ALTER TABLE "event_live_explains" ENABLE ROW LEVEL SECURITY;
 
-CREATE TABLE IF NOT EXISTS "event_live_summaries" (
-    "element" INTEGER PRIMARY KEY,
-    "element_type" INTEGER NOT NULL,
-    "team" INTEGER NOT NULL,
-    "minutes" INTEGER,
-    "goals_scored" INTEGER,
-    "assists" INTEGER,
-    "clean_sheets" INTEGER,
-    "goals_conceded" INTEGER,
-    "own_goals" INTEGER,
-    "penalties_saved" INTEGER,
-    "penalties_missed" INTEGER,
-    "yellow_cards" INTEGER,
-    "red_cards" INTEGER,
-    "saves" INTEGER,
-    "bps" INTEGER,
-    "bonus" INTEGER,
-    "mng_win" INTEGER,
-    "mng_draw" INTEGER,
-    "mng_loss" INTEGER,
-    "mng_underdog_win" INTEGER,
-    "mng_underdog_draw" INTEGER,
-    "mng_clean_sheets" INTEGER,
-    "mng_goals_scored" INTEGER,
-    "total_points" INTEGER NOT NULL DEFAULT 0,
-    "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updated_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-ALTER TABLE "event_live_summaries" ENABLE ROW LEVEL SECURITY;
-
 CREATE TABLE IF NOT EXISTS "entry_infos" (
     "entry" INTEGER PRIMARY KEY,
     "entry_name" TEXT NOT NULL,
@@ -331,11 +297,10 @@ CREATE TABLE IF NOT EXISTS "entry_league_infos" (
     "entry" INTEGER NOT NULL,
     "league_id" INTEGER NOT NULL,
     "league_name" TEXT NOT NULL,
-    "access_type" "LeagueAccessType" NOT NULL,
     "league_type" "LeagueType" NOT NULL,
+    "started_event" INTEGER,
     "entry_rank" INTEGER,
     "entry_last_rank" INTEGER,
-    "started_event" INTEGER,
     "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updated_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -360,10 +325,10 @@ CREATE TABLE IF NOT EXISTS "entry_event_picks" (
     "id" SERIAL PRIMARY KEY,
     "entry" INTEGER NOT NULL,
     "event" INTEGER NOT NULL,
-    "transfers" INTEGER NOT NULL DEFAULT 0,
-    "transfers_cost" INTEGER NOT NULL DEFAULT 0,
     "chip" "Chip" NOT NULL,
     "picks" JSONB NOT NULL,
+    "transfers" INTEGER NOT NULL DEFAULT 0,
+    "transfers_cost" INTEGER NOT NULL DEFAULT 0,
     "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE UNIQUE INDEX IF NOT EXISTS "unique_entry_event_pick" ON "entry_event_picks" ("entry", "event");
@@ -381,6 +346,7 @@ CREATE TABLE IF NOT EXISTS "entry_event_transfers" (
     "element_out" INTEGER NOT NULL,
     "element_out_cost" INTEGER NOT NULL,
     "element_out_points" INTEGER NOT NULL DEFAULT 0,
+    "transfer_time" TIMESTAMPTZ NOT NULL,
     "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE UNIQUE INDEX IF NOT EXISTS "unique_entry_event_transfer" ON "entry_event_transfers" ("entry", "event");

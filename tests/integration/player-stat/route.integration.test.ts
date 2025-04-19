@@ -16,7 +16,7 @@ import {
 // Specific imports
 import { playerStatRouter } from '../../../src/api/routes/player-stat.route'; // Import the router
 import { CachePrefix } from '../../../src/configs/cache/cache.config';
-import { createFplBootstrapDataService } from '../../../src/data/fpl/fetches/bootstrap/bootstrap.data';
+import { createFplBootstrapDataService } from '../../../src/data/fpl/bootstrap.data';
 import { FplBootstrapDataService } from '../../../src/data/types';
 import { createPlayerStatCache } from '../../../src/domains/player-stat/cache';
 import { PlayerStatCache, PlayerStatRepository } from '../../../src/domains/player-stat/types';

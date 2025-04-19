@@ -1,6 +1,6 @@
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
-import { ChipPlay, Event, EventId, TopElementInfo } from 'src/types/domain/event.type';
+import { ChipPlay, Event, TopElementInfo, validateEventId } from 'src/types/domain/event.type';
 import { EventResponse } from '../../schemas/bootstrap/event.schema';
 
 const transformChipPlays = (
@@ -20,7 +20,7 @@ const transformTopElementInfo = (
 export const mapEventResponseToEvent = (raw: EventResponse): E.Either<string, Event> =>
   pipe(
     E.Do,
-    E.bind('id', () => E.right(raw.id as EventId)),
+    E.bind('id', () => validateEventId(raw.id)),
     E.map((data) => {
       const chipPlays = transformChipPlays(raw.chip_plays);
       const topElementInfo = transformTopElementInfo(raw.top_element_info);
@@ -48,6 +48,6 @@ export const mapEventResponseToEvent = (raw: EventResponse): E.Either<string, Ev
         topElement: raw.top_element ?? null,
         topElementInfo: topElementInfo,
         transfersMade: raw.transfers_made,
-      } satisfies Event;
+      };
     }),
   );

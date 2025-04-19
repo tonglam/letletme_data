@@ -1,12 +1,12 @@
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
-import { Team, TeamId } from 'src/types/domain/team.type';
+import { Team, validateTeamId } from 'src/types/domain/team.type';
 import { TeamResponse } from '../../schemas/bootstrap/team.schema';
 
 export const mapTeamResponseToTeam = (raw: TeamResponse): E.Either<string, Team> =>
   pipe(
     E.Do,
-    E.bind('id', () => E.right(raw.id as TeamId)),
+    E.bind('id', () => validateTeamId(raw.id)),
     E.map((data) => {
       return {
         id: data.id,
@@ -19,6 +19,6 @@ export const mapTeamResponseToTeam = (raw: TeamResponse): E.Either<string, Team>
         win: raw.win,
         draw: raw.draw,
         loss: raw.loss,
-      } satisfies Team;
+      };
     }),
   );

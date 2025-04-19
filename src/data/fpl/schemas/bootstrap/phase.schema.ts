@@ -18,4 +18,3 @@ export const PhaseResponseSchema = z
   .passthrough();
 
 export type PhaseResponse = z.infer<typeof PhaseResponseSchema>;
-export type PhasesResponse = readonly PhaseResponse[];

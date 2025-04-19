@@ -67,4 +67,3 @@ export const ElementResponseSchema = z
   .passthrough();
 
 export type ElementResponse = z.infer<typeof ElementResponseSchema>;
-export type ElementsResponse = readonly ElementResponse[];

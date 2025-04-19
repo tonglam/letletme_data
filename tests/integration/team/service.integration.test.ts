@@ -16,7 +16,7 @@ import { redisClient } from '../../../src/infrastructures/cache/client';
 
 // Specific imports for this test suite
 import { CachePrefix } from '../../../src/configs/cache/cache.config';
-import { createFplBootstrapDataService } from '../../../src/data/fpl/fetches/bootstrap/bootstrap.data';
+import { createFplBootstrapDataService } from '../../../src/data/fpl/bootstrap.data';
 import { FplBootstrapDataService } from '../../../src/data/types';
 import { createTeamCache } from '../../../src/domains/team/cache'; // Team specific
 import { TeamCache, TeamRepository } from '../../../src/domains/team/types'; // Team specific

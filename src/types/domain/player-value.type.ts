@@ -34,5 +34,5 @@ export interface PlayerValue {
   readonly lastValue: number;
 }
 
-export type PlayerValues = readonly PlayerValue[];
 export type MappedPlayerValue = Omit<PlayerValue, 'id' | 'lastValue' | 'changeType'>;
+export type PlayerValues = readonly MappedPlayerValue[];

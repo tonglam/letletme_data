@@ -3,22 +3,21 @@ import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as O from 'fp-ts/Option';
 import { ElementType } from 'src/types/base.type';
-import { PlayerStat } from 'src/types/domain/player-stat.type';
+import { MappedPlayerStat } from 'src/types/domain/player-stat.type';
 import { MappedPlayerValue } from 'src/types/domain/player-value.type';
-import { Player, PlayerId } from 'src/types/domain/player.type';
+import { Player, validatePlayerId } from 'src/types/domain/player.type';
 import { safeStringToDecimal, safeStringToNumber } from 'src/utils/common.util';
 import { ElementResponse } from '../../schemas/bootstrap/element.schema';
 
 export const mapElementResponseToPlayer = (raw: ElementResponse): E.Either<string, Player> =>
   pipe(
     E.Do,
-    E.bind('id', () => E.right(raw.id as PlayerId)),
-    E.bind('elementType', () => E.right(raw.element_type as ElementType)),
+    E.bind('element', () => validatePlayerId(raw.id)),
     E.map((data): Player => {
       return {
-        element: data.id,
+        element: data.element,
         code: raw.code,
-        elementType: data.elementType,
+        elementType: raw.element_type as ElementType,
         team: raw.team,
         price: raw.now_cost / 10,
         startPrice: (raw.now_cost - raw.cost_change_start) / 10,
@@ -30,20 +29,19 @@ export const mapElementResponseToPlayer = (raw: ElementResponse): E.Either<strin
   );
 
 export const mapElementResponseToPlayerValue = (
-  raw: ElementResponse,
   event: number,
+  raw: ElementResponse,
 ): E.Either<string, MappedPlayerValue> => {
   const currentDateStr = format(new Date(), 'yyyyMMdd');
   const value = raw.now_cost / 10;
 
   return pipe(
     E.Do,
-    E.bind('element', () => E.right(raw.id)),
-    E.bind('elementType', () => E.right(raw.element_type as ElementType)),
+    E.bind('element', () => validatePlayerId(raw.id)),
     E.map(
-      ({ element, elementType }): MappedPlayerValue => ({
+      ({ element }): MappedPlayerValue => ({
         element: element,
-        elementType: elementType,
+        elementType: raw.element_type as ElementType,
         event: event,
         value: value,
         changeDate: currentDateStr,
@@ -53,16 +51,16 @@ export const mapElementResponseToPlayerValue = (
 };
 
 export const mapElementResponseToPlayerStat = (
-  raw: ElementResponse,
   event: number,
-): E.Either<string, Omit<PlayerStat, 'id'>> =>
+  raw: ElementResponse,
+): E.Either<string, MappedPlayerStat> =>
   pipe(
     E.Do,
-    E.bind('element', () => E.right(raw.id as PlayerId)),
+    E.bind('element', () => validatePlayerId(raw.id)),
     E.map(
-      ({ element }): Omit<PlayerStat, 'id'> => ({
+      ({ element }): MappedPlayerStat => ({
         event: event,
-        element: element as number,
+        element: element,
         form: pipe(
           safeStringToNumber(raw.form),
           O.getOrElseW(() => null),

@@ -47,4 +47,3 @@ export const EventResponseSchema = z
   .passthrough();
 
 export type EventResponse = z.infer<typeof EventResponseSchema>;
-export type EventsResponse = readonly EventResponse[];

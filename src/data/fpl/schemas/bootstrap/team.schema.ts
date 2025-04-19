@@ -17,4 +17,3 @@ export const TeamResponseSchema = z
   .passthrough();
 
 export type TeamResponse = z.infer<typeof TeamResponseSchema>;
-export type TeamsResponse = readonly TeamResponse[];

@@ -66,4 +66,5 @@ export interface PlayerStat {
   readonly mngGoalsScored: number | null;
 }
 
-export type PlayerStats = readonly PlayerStat[];
+export type MappedPlayerStat = Omit<PlayerStat, 'id'>;
+export type PlayerStats = readonly MappedPlayerStat[];

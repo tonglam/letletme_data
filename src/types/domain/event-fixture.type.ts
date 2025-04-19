@@ -26,8 +26,6 @@ export type EventFixture = {
   readonly kickoffTime: Date | null;
   readonly started: boolean;
   readonly finished: boolean;
-  readonly provisionalStartTime: boolean;
-  readonly finishedProvisional: boolean;
   readonly minutes: number;
   readonly teamH: number | null;
   readonly teamHDifficulty: number;
