@@ -1,5 +1,6 @@
-import * as E from 'fp-ts/Either';
 import { Server } from 'http';
+
+import * as E from 'fp-ts/Either';
 
 import { initializeApp } from './app/initializer';
 import { addJob } from './infrastructures/queue/jobManager';

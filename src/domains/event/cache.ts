@@ -1,17 +1,18 @@
+import { EventCache, EventCacheConfig } from 'domains/event/types';
 import * as E from 'fp-ts/Either';
 import { flow, pipe } from 'fp-ts/function';
 import * as O from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
-import { Event, EventId, Events } from 'src/types/domain/event.type';
+import { EventRepository } from 'src/repositories/event/type';
+import { Event, Events } from 'src/types/domain/event.type';
+import { getCurrentSeason } from 'src/utils/common.util';
 
 import { CachePrefix } from '../../configs/cache/cache.config';
 import { redisClient } from '../../infrastructures/cache/client';
-import { getCurrentSeason } from '../../types/base.type';
 import { CacheError, CacheErrorCode, createCacheError, DomainError } from '../../types/error.type';
 import { mapCacheErrorToDomainError, mapRepositoryErrorToCacheError } from '../../utils/error.util';
-import { EventCache, EventCacheConfig, EventRepository } from './types';
 
-const parseEvent = (eventStr: string): E.Either<CacheError, Event | null> =>
+const parseEvent = (eventStr: string): E.Either<CacheError, Event> =>
   pipe(
     E.tryCatch(
       () => JSON.parse(eventStr),
@@ -25,11 +26,16 @@ const parseEvent = (eventStr: string): E.Either<CacheError, Event | null> =>
     E.chain((parsed) =>
       parsed && typeof parsed === 'object' && 'id' in parsed && typeof parsed.id === 'number'
         ? E.right(parsed as Event)
-        : E.right(null),
+        : E.left(
+            createCacheError({
+              code: CacheErrorCode.DESERIALIZATION_ERROR,
+              message: 'Parsed object is not a valid Event structure',
+            }),
+          ),
     ),
   );
 
-const parseEvents = (events: Record<string, string>): E.Either<CacheError, Event[]> =>
+const parseEvents = (events: Record<string, string>): E.Either<CacheError, Events> =>
   pipe(
     Object.values(events),
     (eventStrs) =>
@@ -52,35 +58,65 @@ export const createEventCache = (
 ): EventCache => {
   const { keyPrefix, season } = config;
   const baseKey = `${keyPrefix}::${season}`;
+  const currentEventKey = 'current';
 
-  const getEvent = (id: EventId): TE.TaskEither<DomainError, Event | null> =>
+  const getCurrentEvent = (): TE.TaskEither<DomainError, Event> =>
     pipe(
       TE.tryCatch(
-        () => redisClient.hget(baseKey, id.toString()),
-        (error) =>
+        () => redisClient.get(currentEventKey),
+        (error: unknown) =>
           createCacheError({
             code: CacheErrorCode.OPERATION_ERROR,
-            message: 'Cache Read Error: Failed to get event',
+            message: 'Cache Read Error: Failed to get current event',
             cause: error as Error,
           }),
       ),
-      TE.chain(
-        flow(
-          O.fromNullable,
-          O.fold(
-            () =>
+      TE.mapLeft(mapCacheErrorToDomainError),
+      TE.chainW((cachedEventStrOrNull) =>
+        pipe(
+          O.fromNullable(cachedEventStrOrNull),
+          O.match(
+            (): TE.TaskEither<DomainError, Event> =>
               pipe(
-                repository.findById(id),
-                TE.mapLeft(mapRepositoryErrorToCacheError('Repository Error: Failed to get event')),
+                repository.findCurrent(),
+                TE.mapLeft(
+                  mapRepositoryErrorToCacheError('Repository Error: Failed to find current event'),
+                ),
+                TE.mapLeft(mapCacheErrorToDomainError),
+                TE.chainW((eventFromRepo: Event) =>
+                  pipe(
+                    setCurrentEvent(eventFromRepo),
+                    TE.map(() => eventFromRepo),
+                  ),
+                ),
               ),
-            (eventStr) => pipe(parseEvent(eventStr), TE.fromEither),
+            (cachedEventStr: string): TE.TaskEither<DomainError, Event> =>
+              pipe(
+                parseEvent(cachedEventStr),
+                TE.fromEither,
+                TE.mapLeft(mapCacheErrorToDomainError),
+              ),
           ),
         ),
       ),
+    );
+
+  const setCurrentEvent = (event: Event): TE.TaskEither<DomainError, void> =>
+    pipe(
+      TE.tryCatch(
+        () => redisClient.set(currentEventKey, JSON.stringify(event)),
+        (error: unknown) =>
+          createCacheError({
+            code: CacheErrorCode.OPERATION_ERROR,
+            message: `Cache Write Error: Failed to set current event ${event.id}`,
+            cause: error as Error,
+          }),
+      ),
+      TE.map(() => undefined),
       TE.mapLeft(mapCacheErrorToDomainError),
     );
 
-  const getAllEvents = (): TE.TaskEither<DomainError, Events | null> =>
+  const getAllEvents = (): TE.TaskEither<DomainError, Events> =>
     pipe(
       TE.tryCatch(
         () => redisClient.hgetall(baseKey),
@@ -115,7 +151,6 @@ export const createEventCache = (
           ),
         ),
       ),
-      TE.map((events) => (events.length > 0 ? events : null)),
     );
 
   const setAllEvents = (events: Events): TE.TaskEither<DomainError, void> =>
@@ -159,9 +194,10 @@ export const createEventCache = (
     );
 
   return {
-    getEvent,
     getAllEvents,
+    getCurrentEvent,
     setAllEvents,
+    setCurrentEvent,
     deleteAllEvents,
   };
 };

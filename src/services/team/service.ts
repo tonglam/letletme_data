@@ -1,34 +1,47 @@
 import { pipe } from 'fp-ts/function';
+import * as O from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
+import { TeamService, TeamServiceOperations } from 'services/team/types';
 import { FplBootstrapDataService } from 'src/data/types';
-import { PrismaTeamCreate } from 'src/repositories/team/type';
+import { TeamCreateInputs, TeamRepository } from 'src/repositories/team/type';
+
 import { createTeamOperations } from '../../domains/team/operation';
-import { TeamCache, TeamOperations, TeamRepository } from '../../domains/team/types';
+import { TeamCache, TeamOperations } from '../../domains/team/types';
 import { Team, TeamId, Teams } from '../../types/domain/team.type';
-import { DataLayerError, ServiceError } from '../../types/error.type';
+import {
+  createDomainError,
+  DataLayerError,
+  DomainErrorCode,
+  ServiceError,
+} from '../../types/error.type';
 import {
   createServiceIntegrationError,
   mapDomainErrorToServiceError,
 } from '../../utils/error.util';
-import { TeamService, TeamServiceOperations } from './types';
 
 const teamServiceOperations = (
-  domainOps: TeamOperations,
   fplDataService: FplBootstrapDataService,
+  domainOps: TeamOperations,
+  cache: TeamCache,
 ): TeamServiceOperations => ({
-  findAllTeams: () =>
-    pipe(domainOps.getAllTeams(), TE.mapLeft(mapDomainErrorToServiceError)) as TE.TaskEither<
-      ServiceError,
-      Teams
-    >,
+  findAllTeams: (): TE.TaskEither<ServiceError, Teams> =>
+    pipe(cache.getAllTeams(), TE.mapLeft(mapDomainErrorToServiceError)),
 
-  findTeamById: (id: TeamId) =>
-    pipe(domainOps.getTeamById(id), TE.mapLeft(mapDomainErrorToServiceError)) as TE.TaskEither<
-      ServiceError,
-      Team | null
-    >,
+  findTeamById: (id: TeamId): TE.TaskEither<ServiceError, Team> =>
+    pipe(
+      cache.getAllTeams(),
+      TE.mapLeft(mapDomainErrorToServiceError),
+      TE.chainOptionK(() =>
+        mapDomainErrorToServiceError(
+          createDomainError({
+            code: DomainErrorCode.NOT_FOUND,
+            message: `Team with ID ${id} not found in cache after fetching all.`,
+          }),
+        ),
+      )((teams) => O.fromNullable(teams.find((team) => team.id === id))),
+    ),
 
-  syncTeamsFromApi: () =>
+  syncTeamsFromApi: (): TE.TaskEither<ServiceError, void> =>
     pipe(
       fplDataService.getTeams(),
       TE.mapLeft((error: DataLayerError) =>
@@ -38,35 +51,30 @@ const teamServiceOperations = (
           details: error.details,
         }),
       ),
-      TE.map((rawData) => mapRawDataToTeamCreateArray(rawData)),
-      TE.chainFirstW((teamCreateData) =>
-        pipe(
-          domainOps.deleteAllTeams(),
-          TE.mapLeft(mapDomainErrorToServiceError),
-          TE.map(() => teamCreateData),
-        ),
+      TE.chainFirstW(() =>
+        pipe(domainOps.deleteAllTeams(), TE.mapLeft(mapDomainErrorToServiceError)),
       ),
-      TE.chain((teamCreateData) =>
-        pipe(domainOps.saveTeams(teamCreateData), TE.mapLeft(mapDomainErrorToServiceError)),
+      TE.chainW((teamsCreateData: TeamCreateInputs) =>
+        pipe(domainOps.saveTeams(teamsCreateData), TE.mapLeft(mapDomainErrorToServiceError)),
       ),
-    ) as TE.TaskEither<ServiceError, Teams>,
+      TE.chainFirstW((savedTeams: Teams) =>
+        pipe(cache.setAllTeams(savedTeams), TE.mapLeft(mapDomainErrorToServiceError)),
+      ),
+      TE.map(() => void 0),
+    ),
 });
-
-const mapRawDataToTeamCreateArray = (rawData: Teams): PrismaTeamCreate[] => {
-  return rawData.map((team) => team as PrismaTeamCreate);
-};
 
 export const createTeamService = (
   fplDataService: FplBootstrapDataService,
   repository: TeamRepository,
   cache: TeamCache,
 ): TeamService => {
-  const domainOps = createTeamOperations(repository, cache);
-  const ops = teamServiceOperations(domainOps, fplDataService);
+  const domainOps = createTeamOperations(repository);
+  const ops = teamServiceOperations(fplDataService, domainOps, cache);
 
   return {
-    getTeams: () => ops.findAllTeams(),
-    getTeam: (id: TeamId) => ops.findTeamById(id),
-    syncTeamsFromApi: () => ops.syncTeamsFromApi(),
+    getTeams: (): TE.TaskEither<ServiceError, Teams> => ops.findAllTeams(),
+    getTeam: (id: TeamId): TE.TaskEither<ServiceError, Team> => ops.findTeamById(id),
+    syncTeamsFromApi: (): TE.TaskEither<ServiceError, void> => ops.syncTeamsFromApi(),
   };
 };

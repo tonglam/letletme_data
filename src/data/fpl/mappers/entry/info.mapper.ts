@@ -1,6 +1,7 @@
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import { MappedEntryInfo, validateEntryInfoId } from 'src/types/domain/entry-info.type';
+
 import { EntryInfoResponse } from '../../schemas/entry/info.schema';
 
 export const mapEntryInfoResponseToEntryInfo = (

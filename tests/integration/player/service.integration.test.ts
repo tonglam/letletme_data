@@ -5,14 +5,8 @@ import { Logger } from 'pino';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 // Use the generic setup
-import {
-  IntegrationTestSetupResult,
-  setupIntegrationTest,
-  teardownIntegrationTest,
-} from '../../setup/integrationTestSetup';
 
 // Import the SHARED redis client used by the application
-import { redisClient } from '../../../src/infrastructures/cache/client';
 
 // Specific imports for this test suite
 import { CachePrefix } from '../../../src/configs/cache/cache.config';
@@ -20,11 +14,17 @@ import { createFplBootstrapDataService } from '../../../src/data/fpl/bootstrap.d
 import { FplBootstrapDataService } from '../../../src/data/types';
 import { createPlayerCache } from '../../../src/domains/player/cache'; // Player specific
 import { PlayerCache, PlayerRepository } from '../../../src/domains/player/types'; // Player specific
+import { redisClient } from '../../../src/infrastructures/cache/client';
 import { HTTPClient } from '../../../src/infrastructures/http';
 import { createPlayerRepository } from '../../../src/repositories/player/repository'; // Player specific
 import { createPlayerService } from '../../../src/services/player/service'; // Player specific
 import { PlayerService } from '../../../src/services/player/types'; // Player specific
 import { playerWorkflows } from '../../../src/services/player/workflow'; // Player specific
+import {
+  IntegrationTestSetupResult,
+  setupIntegrationTest,
+  teardownIntegrationTest,
+} from '../../setup/integrationTestSetup';
 
 describe('Player Integration Tests', () => {
   let setup: IntegrationTestSetupResult;
@@ -87,7 +87,7 @@ describe('Player Integration Tests', () => {
         const players = syncResult.right;
         expect(players.length).toBeGreaterThan(0);
         const firstPlayer = players[0];
-        expect(firstPlayer).toHaveProperty('id');
+        expect(firstPlayer).toHaveProperty('element');
         expect(firstPlayer).toHaveProperty('firstName');
         expect(firstPlayer).toHaveProperty('secondName');
         expect(firstPlayer).toHaveProperty('webName');

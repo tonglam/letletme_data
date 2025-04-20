@@ -1,13 +1,15 @@
+import { Server } from 'http';
+
 import cors from 'cors';
 import express, { Application, Router } from 'express';
 import * as TE from 'fp-ts/TaskEither';
-import { Server } from 'http';
+
+import { setupRoutes } from './routes';
+import { ApplicationServices } from './services';
 import { handleError } from '../api/middlewares/core';
 import { AppConfig } from '../configs/app/app.config';
 import { getApiLogger } from '../infrastructures/logger';
 import { APIError, APIErrorCode, createAPIError } from '../types/error.type';
-import { setupRoutes } from './routes';
-import { ApplicationServices } from './services';
 
 const logger = getApiLogger();
 

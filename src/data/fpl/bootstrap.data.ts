@@ -5,12 +5,12 @@ import { Logger } from 'pino';
 import { Events } from 'src/types/domain/event.type';
 import { Phases } from 'src/types/domain/phase.type';
 import { PlayerStats } from 'src/types/domain/player-stat.type';
+import { PlayerValues } from 'src/types/domain/player-value.type';
 import { Players } from 'src/types/domain/player.type';
 import { Teams } from 'src/types/domain/team.type';
 import { DataLayerError, DataLayerErrorCode } from 'src/types/error.type';
 import { createDataLayerError } from 'src/utils/error.util';
 
-import { PlayerValues } from 'src/types/domain/player-value.type';
 import { apiConfig } from '../../configs/api/api.config';
 import { HTTPClient } from '../../infrastructures/http';
 import { FplBootstrapDataService } from '../types';
@@ -72,6 +72,7 @@ export const createFplBootstrapDataService = (
               message: 'Invalid bootstrap data received from FPL API',
               cause: undefined,
               details: {
+                errorMessage: parsed.error.message,
                 validationError: parsed.error.format(),
               },
             }),

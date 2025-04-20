@@ -1,6 +1,7 @@
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import { EventFixture, validateEventFixtureId } from 'src/types/domain/event-fixture.type';
+
 import { EventFixtureResponse } from '../../schemas/fixture/fixture.schema';
 
 export const mapEventFixtureResponseToDomain = (

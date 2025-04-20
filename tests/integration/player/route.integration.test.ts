@@ -6,12 +6,6 @@ import request from 'supertest';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 // Setup
-import { redisClient } from '../../../src/infrastructures/cache/client';
-import {
-  IntegrationTestSetupResult,
-  setupIntegrationTest,
-  teardownIntegrationTest,
-} from '../../setup/integrationTestSetup';
 
 // Specific imports
 import { playerRouter } from '../../../src/api/routes/player.route'; // Import the router
@@ -20,11 +14,17 @@ import { createFplBootstrapDataService } from '../../../src/data/fpl/bootstrap.d
 import { FplBootstrapDataService } from '../../../src/data/types';
 import { createPlayerCache } from '../../../src/domains/player/cache';
 import { PlayerCache, PlayerRepository } from '../../../src/domains/player/types';
+import { redisClient } from '../../../src/infrastructures/cache/client';
 import { HTTPClient } from '../../../src/infrastructures/http';
 import { createPlayerRepository } from '../../../src/repositories/player/repository';
 import { createPlayerService } from '../../../src/services/player/service';
 import { PlayerService } from '../../../src/services/player/types';
 import { Player, PlayerId } from '../../../src/types/domain/player.type';
+import {
+  IntegrationTestSetupResult,
+  setupIntegrationTest,
+  teardownIntegrationTest,
+} from '../../setup/integrationTestSetup';
 
 describe('Player Routes Integration Tests', () => {
   let setup: IntegrationTestSetupResult;
@@ -72,8 +72,16 @@ describe('Player Routes Integration Tests', () => {
     if (keys.length > 0) {
       await redisClient.del(keys);
     }
-    // Ensure data exists for GET requests by syncing
-    await playerService.syncPlayersFromApi()();
+    // Sync and verify before tests
+    const syncResult = await playerService.syncPlayersFromApi()();
+    if (E.isLeft(syncResult)) {
+      logger.error({ error: syncResult.left }, 'Sync failed in beforeEach');
+      throw new Error('Player sync failed in beforeEach, cannot proceed with tests.');
+    }
+    if (syncResult.right.length === 0) {
+      throw new Error('Player sync succeeded but returned 0 players in beforeEach.');
+    }
+    logger.info('Sync completed successfully in beforeEach');
   });
 
   afterAll(async () => {
@@ -90,7 +98,7 @@ describe('Player Routes Integration Tests', () => {
     expect(Array.isArray(res.body.data)).toBe(true);
     const players = res.body.data as Player[];
     expect(players.length).toBeGreaterThan(0);
-    expect(players[0]).toHaveProperty('id');
+    expect(players[0]).toHaveProperty('element');
     expect(players[0]).toHaveProperty('webName');
   });
 
@@ -107,21 +115,18 @@ describe('Player Routes Integration Tests', () => {
       throw new Error('Could not retrieve players to get an ID for testing');
     }
 
-    // Convert numeric PlayerId to string for the URL path
     const res = await request(app).get(`/players/${String(targetPlayerId)}`);
 
     expect(res.status).toBe(200);
     expect(res.body).toBeDefined();
     expect(res.body).toHaveProperty('data');
-    expect(res.body.data.id).toBe(targetPlayerId); // Compare with original numeric ID
+    expect(res.body.data.element).toBe(targetPlayerId);
     expect(res.body.data).toHaveProperty('webName');
   });
 
   it('GET /players/:id should return 404 if player ID does not exist', async () => {
     const nonExistentPlayerId = 99999 as PlayerId;
-    // Convert numeric PlayerId to string for the URL path
     const res = await request(app).get(`/players/${String(nonExistentPlayerId)}`);
-
     expect(res.status).toBe(404);
   });
 });

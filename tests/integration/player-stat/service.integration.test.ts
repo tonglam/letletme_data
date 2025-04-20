@@ -5,32 +5,32 @@ import { Logger } from 'pino';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 // Use the generic setup
-import {
-  IntegrationTestSetupResult,
-  setupIntegrationTest,
-  teardownIntegrationTest,
-} from '../../setup/integrationTestSetup';
 
 // Import the SHARED redis client used by the application
-import { redisClient } from '../../../src/infrastructures/cache/client';
 
 // Specific imports for this test suite
 import { CachePrefix } from '../../../src/configs/cache/cache.config';
 import { createFplBootstrapDataService } from '../../../src/data/fpl/bootstrap.data';
 import { FplBootstrapDataService } from '../../../src/data/types';
+import { createEventCache } from '../../../src/domains/event/cache';
+import { EventCache, EventRepository } from '../../../src/domains/event/types';
 import { createPlayerStatCache } from '../../../src/domains/player-stat/cache';
 import { PlayerStatCache, PlayerStatRepository } from '../../../src/domains/player-stat/types';
+import { redisClient } from '../../../src/infrastructures/cache/client';
 import { HTTPClient } from '../../../src/infrastructures/http';
+import { createEventRepository } from '../../../src/repositories/event/repository';
 import { createPlayerStatRepository } from '../../../src/repositories/player-stat/repository';
+import { createEventService } from '../../../src/services/event/service';
+import { EventService } from '../../../src/services/event/types';
 import { createPlayerStatService } from '../../../src/services/player-stat/service';
 import { PlayerStatService } from '../../../src/services/player-stat/types';
 import { playerStatWorkflows } from '../../../src/services/player-stat/workflow';
 // Need Event service dependency for PlayerStatService
-import { createEventCache } from '../../../src/domains/event/cache';
-import { EventCache, EventRepository } from '../../../src/domains/event/types';
-import { createEventRepository } from '../../../src/repositories/event/repository';
-import { createEventService } from '../../../src/services/event/service';
-import { EventService } from '../../../src/services/event/types';
+import {
+  IntegrationTestSetupResult,
+  setupIntegrationTest,
+  teardownIntegrationTest,
+} from '../../setup/integrationTestSetup';
 
 // Increase timeout for this describe block to 30 seconds
 describe('PlayerStat Integration Tests', { timeout: 30000 }, () => {

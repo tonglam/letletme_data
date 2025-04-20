@@ -2,14 +2,15 @@ import { createEventService } from 'services/event/service';
 import { EventService } from 'services/event/types';
 import { createPhaseService } from 'services/phase/service';
 import { PhaseService } from 'services/phase/types';
+import { createPlayerService } from 'services/player/service';
+import { PlayerService } from 'services/player/types';
 import { createPlayerStatService } from 'services/player-stat/service';
 import { PlayerStatService } from 'services/player-stat/types';
 import { createPlayerValueService } from 'services/player-value/service';
 import { PlayerValueService } from 'services/player-value/types';
-import { createPlayerService } from 'services/player/service';
-import { PlayerService } from 'services/player/types';
 import { createTeamService } from 'services/team/service';
 import { TeamService } from 'services/team/types';
+
 import { ServiceDependencies } from './dependencies';
 
 export interface ApplicationServices {

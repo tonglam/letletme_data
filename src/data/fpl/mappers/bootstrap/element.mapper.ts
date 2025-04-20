@@ -3,10 +3,11 @@ import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as O from 'fp-ts/Option';
 import { ElementType } from 'src/types/base.type';
-import { MappedPlayerStat } from 'src/types/domain/player-stat.type';
+import { PlayerStat } from 'src/types/domain/player-stat.type';
 import { MappedPlayerValue } from 'src/types/domain/player-value.type';
 import { Player, validatePlayerId } from 'src/types/domain/player.type';
 import { safeStringToDecimal, safeStringToNumber } from 'src/utils/common.util';
+
 import { ElementResponse } from '../../schemas/bootstrap/element.schema';
 
 export const mapElementResponseToPlayer = (raw: ElementResponse): E.Either<string, Player> =>
@@ -53,14 +54,15 @@ export const mapElementResponseToPlayerValue = (
 export const mapElementResponseToPlayerStat = (
   event: number,
   raw: ElementResponse,
-): E.Either<string, MappedPlayerStat> =>
+): E.Either<string, PlayerStat> =>
   pipe(
     E.Do,
     E.bind('element', () => validatePlayerId(raw.id)),
     E.map(
-      ({ element }): MappedPlayerStat => ({
+      ({ element }): PlayerStat => ({
         event: event,
         element: element,
+        totalPoints: raw.total_points,
         form: pipe(
           safeStringToNumber(raw.form),
           O.getOrElseW(() => null),
@@ -118,7 +120,6 @@ export const mapElementResponseToPlayerStat = (
         threatRankType: raw.threat_rank_type,
         ictIndexRank: raw.ict_index_rank,
         ictIndexRankType: raw.ict_index_rank_type,
-        totalPoints: raw.total_points,
         mngWin: raw.mng_win,
         mngDraw: raw.mng_draw,
         mngLoss: raw.mng_loss,

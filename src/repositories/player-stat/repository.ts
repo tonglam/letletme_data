@@ -1,14 +1,54 @@
 import { PrismaClient, PlayerStat as PrismaPlayerStatType } from '@prisma/client';
-import { PlayerStatRepository } from 'domains/player-stat/types';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { mapPrismaPlayerStatToDomain } from 'src/repositories/player-stat/mapper';
-import { PrismaPlayerStatCreateInput } from 'src/repositories/player-stat/type';
-import { EventId } from 'src/types/domain/event.type';
-import { PlayerStatId } from 'src/types/domain/player-stat.type';
-import { createDBError, DBErrorCode } from 'src/types/error.type';
+import {
+  mapDomainStatToPrismaCreateInput,
+  mapPrismaPlayerStatToDomain,
+} from 'src/repositories/player-stat/mapper';
+import { PlayerStatRepository } from 'src/repositories/player-stat/type';
+import { PlayerStats } from 'src/types/domain/player-stat.type';
+import { createDBError, DBError, DBErrorCode } from 'src/types/error.type';
 
 export const createPlayerStatRepository = (prisma: PrismaClient): PlayerStatRepository => ({
+  findByElement: (element: number): TE.TaskEither<DBError, PlayerStats> =>
+    pipe(
+      TE.tryCatch(
+        () => prisma.playerStat.findMany({ where: { element } }),
+        (error) =>
+          createDBError({
+            code: DBErrorCode.QUERY_ERROR,
+            message: `Failed findByElement for PlayerStat with element ${element}: ${error}`,
+          }),
+      ),
+      TE.map((prismaPlayerStats) => prismaPlayerStats.map(mapPrismaPlayerStatToDomain)),
+    ),
+
+  findByElements: (elements: number[]): TE.TaskEither<DBError, PlayerStats> =>
+    pipe(
+      TE.tryCatch(
+        () => prisma.playerStat.findMany({ where: { element: { in: elements } } }),
+        (error) =>
+          createDBError({
+            code: DBErrorCode.QUERY_ERROR,
+            message: `Failed findByElements for PlayerStat with elements ${elements}: ${error}`,
+          }),
+      ),
+      TE.map((prismaPlayerStats) => prismaPlayerStats.map(mapPrismaPlayerStatToDomain)),
+    ),
+
+  findByEvent: (event: number): TE.TaskEither<DBError, PlayerStats> =>
+    pipe(
+      TE.tryCatch(
+        () => prisma.playerStat.findMany({ where: { event } }),
+        (error) =>
+          createDBError({
+            code: DBErrorCode.QUERY_ERROR,
+            message: `Failed findByEvent for PlayerStat with event ${event}: ${error}`,
+          }),
+      ),
+      TE.map((prismaPlayerStats) => prismaPlayerStats.map(mapPrismaPlayerStatToDomain)),
+    ),
+
   findAll: () =>
     pipe(
       TE.tryCatch(
@@ -22,79 +62,39 @@ export const createPlayerStatRepository = (prisma: PrismaClient): PlayerStatRepo
       TE.map((playerStats: PrismaPlayerStatType[]) => playerStats.map(mapPrismaPlayerStatToDomain)),
     ),
 
-  findById: (id: PlayerStatId) => {
-    return pipe(
-      TE.tryCatch(
-        async () => {
-          const result = await prisma.playerStat.findUnique({ where: { id } });
-          return result;
-        },
-        (error) =>
-          createDBError({
-            code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to fetch player stat by id ${id}: ${error}`,
-            cause: error instanceof Error ? error : undefined,
-          }),
-      ),
-      TE.map((playerStat) => (playerStat ? mapPrismaPlayerStatToDomain(playerStat) : null)),
-    );
-  },
-
-  saveBatch: (playerStats: readonly PrismaPlayerStatCreateInput[]) =>
+  saveBatch: (playerStats: PlayerStats): TE.TaskEither<DBError, PlayerStats> =>
     pipe(
       TE.tryCatch(
         async () => {
-          await prisma.playerStat.createMany({ data: [...playerStats] });
-
-          const uniqueIdentifiers = playerStats.map((p) => ({
-            eventId: p.eventId,
-            elementId: p.elementId,
-          }));
-
-          return prisma.playerStat.findMany({
-            where: {
-              OR: uniqueIdentifiers,
-            },
-            orderBy: { id: 'asc' },
+          const prismaData = playerStats.map((stat) => mapDomainStatToPrismaCreateInput(stat));
+          await prisma.playerStat.createMany({
+            data: prismaData,
+            skipDuplicates: true,
           });
+          return playerStats;
         },
         (error) =>
           createDBError({
-            code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to save player stats batch: ${error}`,
+            code: DBErrorCode.OPERATION_ERROR,
+            message: 'Failed saveBatch for PlayerStat',
             cause: error instanceof Error ? error : undefined,
           }),
-      ),
-      TE.map((createdPlayerStats: PrismaPlayerStatType[]) =>
-        createdPlayerStats.map(mapPrismaPlayerStatToDomain),
       ),
     ),
 
-  deleteAll: () =>
+  deleteAll: (): TE.TaskEither<DBError, void> =>
     pipe(
       TE.tryCatch(
-        () => prisma.playerStat.deleteMany(),
+        async () => {
+          await prisma.playerStat.deleteMany({});
+        },
         (error) =>
           createDBError({
-            code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to delete all player stats: ${error}`,
+            code: DBErrorCode.OPERATION_ERROR,
+            message: 'Failed deleteAll for PlayerStat',
             cause: error instanceof Error ? error : undefined,
           }),
       ),
-      TE.map(() => undefined as void),
-    ),
-
-  deleteByEventId: (eventId: EventId) =>
-    pipe(
-      TE.tryCatch(
-        () => prisma.playerStat.deleteMany({ where: { eventId: eventId } }),
-        (error) =>
-          createDBError({
-            code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to delete player stats by event id ${eventId}: ${error}`,
-            cause: error instanceof Error ? error : undefined,
-          }),
-      ),
-      TE.map(() => undefined as void),
+      TE.map(() => void 0),
     ),
 });

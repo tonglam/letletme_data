@@ -23,9 +23,11 @@ export const validatePlayerStatIdInput = (value: unknown): E.Either<string, Play
 };
 
 export interface PlayerStat {
-  readonly id: PlayerStatId;
   readonly event: number;
   readonly element: number;
+  readonly elementType: number;
+  readonly team: number;
+  readonly totalPoints: number | null;
   readonly form: number | null;
   readonly influence: number | null;
   readonly creativity: number | null;
@@ -56,7 +58,6 @@ export interface PlayerStat {
   readonly threatRankType: number | null;
   readonly ictIndexRank: number | null;
   readonly ictIndexRankType: number | null;
-  readonly totalPoints: number | null;
   readonly mngWin: number | null;
   readonly mngDraw: number | null;
   readonly mngLoss: number | null;
@@ -66,5 +67,4 @@ export interface PlayerStat {
   readonly mngGoalsScored: number | null;
 }
 
-export type MappedPlayerStat = Omit<PlayerStat, 'id'>;
-export type PlayerStats = readonly MappedPlayerStat[];
+export type PlayerStats = readonly PlayerStat[];

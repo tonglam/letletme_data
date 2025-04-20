@@ -24,7 +24,6 @@ export const validatePlayerValueIdInput = (value: unknown): E.Either<string, Pla
 };
 
 export interface PlayerValue {
-  readonly id: PlayerValueId;
   readonly element: number;
   readonly elementType: ElementType;
   readonly event: number;
@@ -34,5 +33,5 @@ export interface PlayerValue {
   readonly lastValue: number;
 }
 
-export type MappedPlayerValue = Omit<PlayerValue, 'id' | 'lastValue' | 'changeType'>;
+export type MappedPlayerValue = Omit<PlayerValue, 'lastValue' | 'changeType'>;
 export type PlayerValues = readonly MappedPlayerValue[];

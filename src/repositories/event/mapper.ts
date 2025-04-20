@@ -1,7 +1,7 @@
 import { Prisma } from '@prisma/client';
 import { ChipPlay, Event, EventId, TopElementInfo } from 'src/types/domain/event.type';
 
-import { PrismaEvent, PrismaEventCreate, PrismaEventCreateInput } from './type';
+import { EventCreateInput, PrismaEvent, PrismaEventCreateInput } from './type';
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -35,21 +35,17 @@ function parseTopElementInfo(data: Prisma.JsonValue): TopElementInfo | null {
 export const mapPrismaEventToDomain = (prismaEvent: PrismaEvent): Event => ({
   id: prismaEvent.id as EventId,
   name: prismaEvent.name,
-  deadlineTime: prismaEvent.deadlineTime,
-  finished: prismaEvent.finished,
-  isPrevious: prismaEvent.isPrevious,
-  isCurrent: prismaEvent.isCurrent,
-  isNext: prismaEvent.isNext,
-  deadlineTimeEpoch: prismaEvent.deadlineTimeEpoch,
-  deadlineTimeGameOffset: prismaEvent.deadlineTimeGameOffset,
+  deadlineTime: prismaEvent.deadlineTime.toISOString(),
   averageEntryScore: prismaEvent.averageEntryScore,
+  finished: prismaEvent.finished,
   dataChecked: prismaEvent.dataChecked,
   highestScore: prismaEvent.highestScore,
   highestScoringEntry: prismaEvent.highestScoringEntry,
+  isPrevious: prismaEvent.isPrevious,
+  isCurrent: prismaEvent.isCurrent,
+  isNext: prismaEvent.isNext,
   cupLeaguesCreated: prismaEvent.cupLeaguesCreated,
   h2hKoMatchesCreated: prismaEvent.h2hKoMatchesCreated,
-  transfersMade: prismaEvent.transfersMade,
-  releaseTime: prismaEvent.releaseTime,
   rankedCount: prismaEvent.rankedCount,
   chipPlays: parseChipPlays(prismaEvent.chipPlays),
   mostSelected: prismaEvent.mostSelected,
@@ -58,10 +54,11 @@ export const mapPrismaEventToDomain = (prismaEvent: PrismaEvent): Event => ({
   mostViceCaptained: prismaEvent.mostViceCaptained,
   topElement: prismaEvent.topElement,
   topElementInfo: parseTopElementInfo(prismaEvent.topElementInfo),
+  transfersMade: prismaEvent.transfersMade,
 });
 
 export const mapDomainEventToPrismaCreate = (
-  domainEvent: PrismaEventCreate,
+  domainEvent: EventCreateInput,
 ): PrismaEventCreateInput => {
   const chipPlaysInput =
     domainEvent.chipPlays && domainEvent.chipPlays.length > 0
@@ -76,27 +73,24 @@ export const mapDomainEventToPrismaCreate = (
     id: Number(domainEvent.id),
     name: domainEvent.name,
     deadlineTime: domainEvent.deadlineTime,
-    deadlineTimeEpoch: domainEvent.deadlineTimeEpoch,
-    finished: domainEvent.finished,
-    isPrevious: domainEvent.isPrevious,
-    isCurrent: domainEvent.isCurrent,
-    isNext: domainEvent.isNext,
     averageEntryScore: domainEvent.averageEntryScore,
+    finished: domainEvent.finished,
     dataChecked: domainEvent.dataChecked,
     highestScore: domainEvent.highestScore ?? undefined,
     highestScoringEntry: domainEvent.highestScoringEntry ?? undefined,
+    isPrevious: domainEvent.isPrevious,
+    isCurrent: domainEvent.isCurrent,
+    isNext: domainEvent.isNext,
     cupLeaguesCreated: domainEvent.cupLeaguesCreated,
     h2hKoMatchesCreated: domainEvent.h2hKoMatchesCreated,
-    transfersMade: domainEvent.transfersMade,
-    deadlineTimeGameOffset: domainEvent.deadlineTimeGameOffset,
-    releaseTime: domainEvent.releaseTime ?? null,
     rankedCount: domainEvent.rankedCount,
     chipPlays: chipPlaysInput,
-    topElementInfo: topElementInfoInput,
     mostSelected: domainEvent.mostSelected ?? null,
     mostTransferredIn: domainEvent.mostTransferredIn ?? null,
     mostCaptained: domainEvent.mostCaptained ?? null,
     mostViceCaptained: domainEvent.mostViceCaptained ?? null,
     topElement: domainEvent.topElement ?? null,
+    topElementInfo: topElementInfoInput,
+    transfersMade: domainEvent.transfersMade,
   };
 };

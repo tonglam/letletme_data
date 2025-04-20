@@ -1,4 +1,4 @@
-import { PrismaPhase, PrismaPhaseCreate, PrismaPhaseCreateInput } from './type';
+import { PhaseCreateInput, PrismaPhase, PrismaPhaseCreateInput } from './type';
 import { Phase, PhaseId } from '../../types/domain/phase.type';
 
 export const mapPrismaPhaseToDomain = (prismaPhase: PrismaPhase): Phase => ({
@@ -10,7 +10,7 @@ export const mapPrismaPhaseToDomain = (prismaPhase: PrismaPhase): Phase => ({
 });
 
 export const mapDomainPhaseToPrismaCreate = (
-  domainPhase: PrismaPhaseCreate,
+  domainPhase: PhaseCreateInput,
 ): PrismaPhaseCreateInput => ({
   id: Number(domainPhase.id),
   name: domainPhase.name,

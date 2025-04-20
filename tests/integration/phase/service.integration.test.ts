@@ -4,14 +4,8 @@ import { Logger } from 'pino';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 // Use the generic setup
-import {
-  IntegrationTestSetupResult,
-  setupIntegrationTest,
-  teardownIntegrationTest,
-} from '../../setup/integrationTestSetup';
 
 // Import the SHARED redis client used by the application
-import { redisClient } from '../../../src/infrastructures/cache/client';
 
 // Specific imports for this test suite
 import { CachePrefix } from '../../../src/configs/cache/cache.config';
@@ -19,11 +13,17 @@ import { createFplBootstrapDataService } from '../../../src/data/fpl/bootstrap.d
 import { FplBootstrapDataService } from '../../../src/data/types';
 import { createPhaseCache } from '../../../src/domains/phase/cache';
 import { PhaseCache, PhaseRepository } from '../../../src/domains/phase/types';
+import { redisClient } from '../../../src/infrastructures/cache/client';
 import { HTTPClient } from '../../../src/infrastructures/http';
 import { createPhaseRepository } from '../../../src/repositories/phase/repository';
 import { createPhaseService } from '../../../src/services/phase/service';
 import { PhaseService } from '../../../src/services/phase/types';
 import { phaseWorkflows } from '../../../src/services/phase/workflow';
+import {
+  IntegrationTestSetupResult,
+  setupIntegrationTest,
+  teardownIntegrationTest,
+} from '../../setup/integrationTestSetup';
 
 describe('Phase Integration Tests', () => {
   let setup: IntegrationTestSetupResult;

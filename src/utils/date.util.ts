@@ -21,3 +21,11 @@ export const formatLocalTime = (date?: Date): string => {
     hour12: false,
   });
 };
+
+export const formatYYYYMMDD = (date?: Date): string => {
+  const d = date || new Date();
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0'); // Months are 0-indexed
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}${month}${day}`;
+};

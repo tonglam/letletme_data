@@ -3,20 +3,7 @@ import * as TE from 'fp-ts/TaskEither';
 
 import { redisClient } from './client';
 import { CACHE_CONFIG } from '../../configs/cache/redis.config';
-import {
-  CacheError,
-  CacheErrorCode,
-  DomainError,
-  DomainErrorCode,
-  createDomainError,
-} from '../../types/error.type';
-
-const toCacheDomainError = (error: CacheError): DomainError =>
-  createDomainError({
-    code: DomainErrorCode.VALIDATION_ERROR,
-    message: error.message,
-    cause: error.cause instanceof Error ? error.cause : new Error(String(error.cause)),
-  });
+import { CacheError, CacheErrorCode, DomainError, DomainErrorCode } from '../../types/error.type';
 
 export const createStandardCacheError = (error: unknown, message?: string): CacheError => ({
   name: 'CacheError',
@@ -24,6 +11,14 @@ export const createStandardCacheError = (error: unknown, message?: string): Cach
   message: message || String(error),
   cause: error instanceof Error ? error : undefined,
   stack: new Error().stack,
+  timestamp: new Date(),
+});
+
+export const toCacheDomainError = (error: CacheError): DomainError => ({
+  name: 'DomainError',
+  code: DomainErrorCode.CACHE_ERROR,
+  message: `Cache operation failed: ${error.message}`,
+  cause: error,
   timestamp: new Date(),
 });
 

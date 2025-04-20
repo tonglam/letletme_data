@@ -1,28 +1,17 @@
 import { PrismaClient } from '@prisma/client';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { EventId } from 'src/types/domain/event.type';
+import {
+  mapDomainEventToPrismaCreate,
+  mapPrismaEventToDomain,
+} from 'src/repositories/event/mapper';
+import { EventCreateInputs, EventRepository } from 'src/repositories/event/type';
+import { Event, EventId, Events } from 'src/types/domain/event.type';
 
-import { mapDomainEventToPrismaCreate, mapPrismaEventToDomain } from './mapper';
-import { PrismaEventCreate } from './type';
-import { EventRepository } from '../../domains/event/types';
-import { createDBError, DBErrorCode } from '../../types/error.type';
+import { createDBError, DBError, DBErrorCode } from '../../types/error.type';
 
 export const createEventRepository = (prisma: PrismaClient): EventRepository => ({
-  findAll: () =>
-    pipe(
-      TE.tryCatch(
-        () => prisma.event.findMany({ orderBy: { id: 'asc' } }),
-        (error) =>
-          createDBError({
-            code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to fetch all events: ${error}`,
-          }),
-      ),
-      TE.map((prismaEvents) => prismaEvents.map(mapPrismaEventToDomain)),
-    ),
-
-  findById: (id: EventId) =>
+  findById: (id: EventId): TE.TaskEither<DBError, Event> =>
     pipe(
       TE.tryCatch(
         () => prisma.event.findUnique({ where: { id: Number(id) } }),
@@ -32,36 +21,54 @@ export const createEventRepository = (prisma: PrismaClient): EventRepository => 
             message: `Failed to fetch event by id ${id}: ${error}`,
           }),
       ),
-      TE.map((prismaEvent) => (prismaEvent ? mapPrismaEventToDomain(prismaEvent) : null)),
+      TE.chainW((prismaEventOrNull) =>
+        prismaEventOrNull
+          ? TE.right(mapPrismaEventToDomain(prismaEventOrNull))
+          : TE.left(
+              createDBError({
+                code: DBErrorCode.NOT_FOUND,
+                message: `Event with ID ${id} not found in database`,
+              }),
+            ),
+      ),
     ),
 
-  findCurrent: () =>
+  findCurrent: (): TE.TaskEither<DBError, Event> =>
     pipe(
       TE.tryCatch(
         () => prisma.event.findFirst({ where: { isCurrent: true } }),
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to fetch current event: ${error}`,
+            message: `Failed to fetch current event (isCurrent: true): ${error}`,
           }),
       ),
-      TE.map((prismaEvent) => (prismaEvent ? mapPrismaEventToDomain(prismaEvent) : null)),
+      TE.chainW((prismaEventOrNull) =>
+        prismaEventOrNull
+          ? TE.right(mapPrismaEventToDomain(prismaEventOrNull))
+          : TE.left(
+              createDBError({
+                code: DBErrorCode.NOT_FOUND,
+                message: 'No event found with isCurrent: true.',
+              }),
+            ),
+      ),
     ),
 
-  findNext: () =>
+  findAll: (): TE.TaskEither<DBError, Events> =>
     pipe(
       TE.tryCatch(
-        () => prisma.event.findFirst({ where: { isNext: true } }),
+        () => prisma.event.findMany({ orderBy: { deadlineTime: 'asc' } }),
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to fetch next event: ${error}`,
+            message: `Failed to fetch all events: ${error}`,
           }),
       ),
-      TE.map((prismaEvent) => (prismaEvent ? mapPrismaEventToDomain(prismaEvent) : null)),
+      TE.map((prismaEvents) => prismaEvents.map(mapPrismaEventToDomain)),
     ),
 
-  saveBatch: (events: readonly PrismaEventCreate[]) =>
+  saveBatch: (events: EventCreateInputs): TE.TaskEither<DBError, Events> =>
     pipe(
       TE.tryCatch(
         async () => {
@@ -70,13 +77,7 @@ export const createEventRepository = (prisma: PrismaClient): EventRepository => 
             data: dataToCreate,
             skipDuplicates: true,
           });
-
-          const ids = events.map((e) => Number(e.id));
-
-          return prisma.event.findMany({
-            where: { id: { in: ids } },
-            orderBy: { id: 'asc' },
-          });
+          return events;
         },
         (error) =>
           createDBError({
@@ -84,10 +85,9 @@ export const createEventRepository = (prisma: PrismaClient): EventRepository => 
             message: `Failed to create events in batch: ${error}`,
           }),
       ),
-      TE.map((prismaEvents) => prismaEvents.map(mapPrismaEventToDomain)),
     ),
 
-  deleteAll: () =>
+  deleteAll: (): TE.TaskEither<DBError, void> =>
     pipe(
       TE.tryCatch(
         () => prisma.event.deleteMany({}),

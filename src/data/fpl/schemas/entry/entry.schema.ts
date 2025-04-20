@@ -1,4 +1,5 @@
 import { z } from 'zod';
+
 import { EntryInfoResponseSchema } from './info.schema';
 import { EntryLeagueResponseSchema } from './league.schema';
 

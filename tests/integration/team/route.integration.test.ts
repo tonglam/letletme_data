@@ -6,12 +6,6 @@ import request from 'supertest';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 // Setup
-import { redisClient } from '../../../src/infrastructures/cache/client';
-import {
-  IntegrationTestSetupResult,
-  setupIntegrationTest,
-  teardownIntegrationTest,
-} from '../../setup/integrationTestSetup';
 
 // Specific imports
 import { teamRouter } from '../../../src/api/routes/team.route'; // Import the router
@@ -20,11 +14,17 @@ import { createFplBootstrapDataService } from '../../../src/data/fpl/bootstrap.d
 import { FplBootstrapDataService } from '../../../src/data/types';
 import { createTeamCache } from '../../../src/domains/team/cache';
 import { TeamCache, TeamRepository } from '../../../src/domains/team/types';
+import { redisClient } from '../../../src/infrastructures/cache/client';
 import { HTTPClient } from '../../../src/infrastructures/http';
 import { createTeamRepository } from '../../../src/repositories/team/repository';
 import { createTeamService } from '../../../src/services/team/service';
 import { TeamService } from '../../../src/services/team/types';
 import { Team, TeamId } from '../../../src/types/domain/team.type';
+import {
+  IntegrationTestSetupResult,
+  setupIntegrationTest,
+  teardownIntegrationTest,
+} from '../../setup/integrationTestSetup';
 
 describe('Team Routes Integration Tests', () => {
   let setup: IntegrationTestSetupResult;

@@ -1,15 +1,36 @@
 import { PrismaClient } from '@prisma/client';
-import { TeamRepository } from 'domains/team/types';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import { mapDomainTeamToPrismaCreate, mapPrismaTeamToDomain } from 'src/repositories/team/mapper';
-import { PrismaTeamCreate } from 'src/repositories/team/type';
-import { TeamId } from 'src/types/domain/team.type';
+import { TeamCreateInputs, TeamRepository } from 'src/repositories/team/type';
+import { Team, TeamId, Teams } from 'src/types/domain/team.type';
 
-import { createDBError, DBErrorCode } from '../../types/error.type';
+import { createDBError, DBError, DBErrorCode } from '../../types/error.type';
 
 export const createTeamRepository = (prismaClient: PrismaClient): TeamRepository => ({
-  findAll: () =>
+  findById: (id: TeamId): TE.TaskEither<DBError, Team> =>
+    pipe(
+      TE.tryCatch(
+        () => prismaClient.team.findUnique({ where: { id: Number(id) } }),
+        (error) =>
+          createDBError({
+            code: DBErrorCode.QUERY_ERROR,
+            message: `Failed to fetch team by id ${id}: ${error}`,
+          }),
+      ),
+      TE.chainW((prismaTeamOrNull) =>
+        prismaTeamOrNull
+          ? TE.right(mapPrismaTeamToDomain(prismaTeamOrNull))
+          : TE.left(
+              createDBError({
+                code: DBErrorCode.NOT_FOUND,
+                message: `Team with ID ${id} not found in database`,
+              }),
+            ),
+      ),
+    ),
+
+  findAll: (): TE.TaskEither<DBError, Teams> =>
     pipe(
       TE.tryCatch(
         () => prismaClient.team.findMany({ orderBy: { id: 'asc' } }),
@@ -22,35 +43,16 @@ export const createTeamRepository = (prismaClient: PrismaClient): TeamRepository
       TE.map((prismaTeams) => prismaTeams.map(mapPrismaTeamToDomain)),
     ),
 
-  findById: (id: TeamId) =>
-    pipe(
-      TE.tryCatch(
-        () => prismaClient.team.findUnique({ where: { id: Number(id) } }),
-        (error) =>
-          createDBError({
-            code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to fetch team by id ${id}: ${error}`,
-          }),
-      ),
-      TE.map((prismaTeam) => (prismaTeam ? mapPrismaTeamToDomain(prismaTeam) : null)),
-    ),
-
-  saveBatch: (data: readonly PrismaTeamCreate[]) =>
+  saveBatch: (teams: TeamCreateInputs): TE.TaskEither<DBError, Teams> =>
     pipe(
       TE.tryCatch(
         async () => {
-          const dataToCreate = data.map(mapDomainTeamToPrismaCreate);
+          const dataToCreate = teams.map(mapDomainTeamToPrismaCreate);
           await prismaClient.team.createMany({
             data: dataToCreate,
             skipDuplicates: true,
           });
-
-          const ids = data.map((d) => Number(d.id));
-
-          return prismaClient.team.findMany({
-            where: { id: { in: ids } },
-            orderBy: { id: 'asc' },
-          });
+          return teams;
         },
         (error) =>
           createDBError({
@@ -58,10 +60,9 @@ export const createTeamRepository = (prismaClient: PrismaClient): TeamRepository
             message: `Failed to create teams in batch: ${error}`,
           }),
       ),
-      TE.map((prismaTeams) => prismaTeams.map(mapPrismaTeamToDomain)),
     ),
 
-  deleteAll: () =>
+  deleteAll: (): TE.TaskEither<DBError, void> =>
     pipe(
       TE.tryCatch(
         () => prismaClient.team.deleteMany({}),

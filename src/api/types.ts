@@ -3,7 +3,6 @@ import { Either } from 'fp-ts/Either';
 import { TaskEither } from 'fp-ts/TaskEither';
 import { APIError } from 'src/types/error.type';
 
-import { Event, Events } from '../types/domain/event.type';
 import { Phase, Phases } from '../types/domain/phase.type';
 import { PlayerStat } from '../types/domain/player-stat.type';
 import { PlayerValue } from '../types/domain/player-value.type';
@@ -29,13 +28,6 @@ export interface SecurityHeaders {
   readonly 'X-Frame-Options': string;
   readonly 'X-XSS-Protection': string;
   readonly 'Strict-Transport-Security': string;
-}
-
-export interface EventHandlerResponse {
-  readonly getAllEvents: () => TaskEither<APIError, Events>;
-  readonly getCurrentEvent: () => TaskEither<APIError, Event>;
-  readonly getNextEvent: () => TaskEither<APIError, Event>;
-  readonly getEventById: (req: Request) => TaskEither<APIError, Event>;
 }
 
 export interface PhaseHandlerResponse {

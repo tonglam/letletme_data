@@ -25,13 +25,13 @@ export type TeardownIntegrationTest = (setup: IntegrationTestSetupResult) => Pro
 
 export const setupIntegrationTest = async (): Promise<IntegrationTestSetupResult> => {
   const prisma = new PrismaClient();
-  const logger = pino({ level: process.env.LOG_LEVEL || 'silent' });
+  const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
   await prisma.$connect();
 
   const httpClient = createHTTPClient({
     client: axios.create({ baseURL: apiConfig.baseUrl }),
     logger,
-    retryConfig: { ...DEFAULT_RETRY_CONFIG, attempts: 1 },
+    retryConfig: { ...DEFAULT_RETRY_CONFIG, attempts: 3 },
   });
 
   // Instantiate common repositories if desired

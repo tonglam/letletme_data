@@ -125,9 +125,10 @@ model PlayerValueTrack {
 }
 
 model PlayerStat {
-  id      Int @id @default(autoincrement())
-  event   Int @map("event")
-  element Int @map("element")
+  id          Int  @id @default(autoincrement())
+  event       Int  @map("event")
+  element     Int  @map("element")
+  totalPoints Int? @map("total_points")
 
   // Performance metrics
   form                     Float?   @map("form")
@@ -148,7 +149,6 @@ model PlayerStat {
   goalsConceded  Int? @map("goals_conceded")
   ownGoals       Int? @map("own_goals")
   penaltiesSaved Int? @map("penalties_saved")
-  totalPoints    Int? @map("total_points")
 
   // Additional statistics
   yellowCards Int? @default(0) @map("yellow_cards")

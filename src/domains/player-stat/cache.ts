@@ -1,21 +1,17 @@
-import {
-  PlayerStatCache,
-  PlayerStatCacheConfig,
-  PlayerStatRepository,
-} from 'domains/player-stat/types';
+import { PlayerStatCache, PlayerStatCacheConfig } from 'domains/player-stat/types';
 import * as E from 'fp-ts/Either';
 import { flow, pipe } from 'fp-ts/function';
 import * as O from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
 import { CachePrefix } from 'src/configs/cache/cache.config';
 import { redisClient } from 'src/infrastructures/cache/client';
-import { getCurrentSeason } from 'src/types/base.type';
-import { EventId } from 'src/types/domain/event.type';
-import { PlayerStat, PlayerStatId, PlayerStats } from 'src/types/domain/player-stat.type';
+import { PlayerStatRepository } from 'src/repositories/player-stat/type';
+import { PlayerStat, PlayerStats } from 'src/types/domain/player-stat.type';
 import { CacheError, CacheErrorCode, createCacheError, DomainError } from 'src/types/error.type';
+import { getCurrentSeason } from 'src/utils/common.util';
 import { mapCacheErrorToDomainError, mapRepositoryErrorToCacheError } from 'src/utils/error.util';
 
-const parsePlayerStat = (playerStatStr: string): E.Either<CacheError, PlayerStat | null> =>
+const parsePlayerStat = (playerStatStr: string): E.Either<CacheError, PlayerStat> =>
   pipe(
     E.tryCatch(
       () => JSON.parse(playerStatStr),
@@ -29,7 +25,12 @@ const parsePlayerStat = (playerStatStr: string): E.Either<CacheError, PlayerStat
     E.chain((parsed) =>
       parsed && typeof parsed === 'object' && 'id' in parsed && typeof parsed.id === 'number'
         ? E.right(parsed as PlayerStat)
-        : E.right(null),
+        : E.left(
+            createCacheError({
+              code: CacheErrorCode.DESERIALIZATION_ERROR,
+              message: 'Parsed object is not a valid PlayerStat structure',
+            }),
+          ),
     ),
   );
 
@@ -60,41 +61,7 @@ export const createPlayerStatCache = (
   const { keyPrefix, season } = config;
   const baseKey = `${keyPrefix}::${season}`;
 
-  const getPlayerStat = (id: PlayerStatId): TE.TaskEither<DomainError, PlayerStat | null> => {
-    const key = id.toString();
-    return pipe(
-      TE.tryCatch(
-        () => redisClient.hget(baseKey, key),
-        (error: unknown) =>
-          createCacheError({
-            code: CacheErrorCode.OPERATION_ERROR,
-            message: 'Cache Read Error: Failed to get player stat',
-            cause: error as Error,
-          }),
-      ),
-      TE.chain(
-        flow(
-          O.fromNullable,
-          O.fold(
-            () => {
-              return pipe(
-                repository.findById(id),
-                TE.mapLeft(
-                  mapRepositoryErrorToCacheError('Repository Error: Failed to get player stat'),
-                ),
-              );
-            },
-            (playerStatStr) => {
-              return pipe(parsePlayerStat(playerStatStr), TE.fromEither);
-            },
-          ),
-        ),
-      ),
-      TE.mapLeft(mapCacheErrorToDomainError),
-    );
-  };
-
-  const getAllPlayerStats = (): TE.TaskEither<DomainError, PlayerStats | null> =>
+  const getAllPlayerStats = (): TE.TaskEither<DomainError, PlayerStats> =>
     pipe(
       TE.tryCatch(
         () => redisClient.hgetall(baseKey),
@@ -142,7 +109,7 @@ export const createPlayerStatCache = (
           if (playerStats.length > 0) {
             const items: Record<string, string> = {};
             playerStats.forEach((playerStat) => {
-              items[playerStat.id.toString()] = JSON.stringify(playerStat);
+              items[playerStat.element.toString()] = JSON.stringify(playerStat);
             });
             multi.hset(baseKey, items);
           }
@@ -173,26 +140,9 @@ export const createPlayerStatCache = (
       TE.mapLeft(mapCacheErrorToDomainError),
     );
 
-  const deletePlayerStatsByEventId = (eventId: EventId): TE.TaskEither<DomainError, void> =>
-    pipe(
-      TE.tryCatch(
-        () => redisClient.del(`${keyPrefix}::${season}::${eventId}`),
-        (error: unknown) =>
-          createCacheError({
-            code: CacheErrorCode.OPERATION_ERROR,
-            message: 'Cache Write Error: Failed to delete player stats by event id',
-            cause: error as Error,
-          }),
-      ),
-      TE.map(() => undefined),
-      TE.mapLeft(mapCacheErrorToDomainError),
-    );
-
   return {
-    getPlayerStat,
     getAllPlayerStats,
     setAllPlayerStats,
     deleteAllPlayerStats,
-    deletePlayerStatsByEventId,
   };
 };

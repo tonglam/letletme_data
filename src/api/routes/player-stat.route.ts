@@ -1,6 +1,6 @@
 import { Router } from 'express';
-import { PlayerStatService } from '../../services/player-stat/types';
 
+import { PlayerStatService } from '../../services/player-stat/types';
 import { createPlayerStatHandlers } from '../handlers/player-stat.handler';
 import { createHandler } from '../middlewares/core';
 

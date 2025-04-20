@@ -348,8 +348,39 @@ const serviceErrorToApiErrorCode: Record<ServiceErrorCode, APIErrorCode> = {
   [ServiceErrorCode.TRANSFORMATION_ERROR]: APIErrorCode.SERVICE_ERROR,
 };
 
+const isDomainError = (error: unknown): error is DomainError =>
+  typeof error === 'object' && error !== null && (error as DomainError).name === 'DomainError';
+
 export const toAPIError = (error: unknown): APIError => {
+  // Check underlying cause first if available and it's a known error type
+  if (typeof error === 'object' && error !== null && 'cause' in error && error.cause) {
+    const cause = error.cause;
+    if (isDBError(cause) && cause.code === DBErrorCode.NOT_FOUND) {
+      return createAPIError({
+        code: APIErrorCode.NOT_FOUND,
+        message: (error as Error).message || 'Resource not found due to database lookup failure',
+        cause: cause,
+      });
+    }
+    if (isDomainError(cause) && cause.code === DomainErrorCode.NOT_FOUND) {
+      return createAPIError({
+        code: APIErrorCode.NOT_FOUND,
+        message: (error as Error).message || 'Resource not found due to domain logic failure',
+        cause: cause,
+      });
+    }
+  }
+
+  // Now handle the top-level error type
   if (isDBError(error)) {
+    // Specific check for top-level DB NOT_FOUND
+    if (error.code === DBErrorCode.NOT_FOUND) {
+      return createAPIError({
+        code: APIErrorCode.NOT_FOUND,
+        message: error.message,
+        cause: error.cause,
+      });
+    }
     return createAPIError({
       code: dbErrorToApiErrorCode[error.code],
       message: error.message,
@@ -361,6 +392,7 @@ export const toAPIError = (error: unknown): APIError => {
     return queueErrorToApiError(error);
   }
   if (isServiceError(error)) {
+    // No need to re-check cause here, already handled above
     return createAPIError({
       code: serviceErrorToApiErrorCode[error.code],
       message: error.message,

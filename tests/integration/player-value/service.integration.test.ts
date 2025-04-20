@@ -5,32 +5,32 @@ import { Logger } from 'pino';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 // Use the generic setup
-import {
-  IntegrationTestSetupResult,
-  setupIntegrationTest,
-  teardownIntegrationTest,
-} from '../../setup/integrationTestSetup';
 
 // Import the SHARED redis client used by the application
-import { redisClient } from '../../../src/infrastructures/cache/client';
 
 // Specific imports for this test suite
 import { CachePrefix } from '../../../src/configs/cache/cache.config';
 import { createFplBootstrapDataService } from '../../../src/data/fpl/bootstrap.data';
 import { FplBootstrapDataService } from '../../../src/data/types';
+import { createEventCache } from '../../../src/domains/event/cache';
+import { EventCache, EventRepository } from '../../../src/domains/event/types';
 import { createPlayerValueCache } from '../../../src/domains/player-value/cache';
 import { PlayerValueCache, PlayerValueRepository } from '../../../src/domains/player-value/types';
+import { redisClient } from '../../../src/infrastructures/cache/client';
 import { HTTPClient } from '../../../src/infrastructures/http';
+import { createEventRepository } from '../../../src/repositories/event/repository';
 import { createPlayerValueRepository } from '../../../src/repositories/player-value/repository';
+import { createEventService } from '../../../src/services/event/service';
+import { EventService } from '../../../src/services/event/types';
 import { createPlayerValueService } from '../../../src/services/player-value/service';
 import { PlayerValueService } from '../../../src/services/player-value/types';
 import { playerValueWorkflows } from '../../../src/services/player-value/workflow';
 // Need Event service dependency
-import { createEventCache } from '../../../src/domains/event/cache';
-import { EventCache, EventRepository } from '../../../src/domains/event/types';
-import { createEventRepository } from '../../../src/repositories/event/repository';
-import { createEventService } from '../../../src/services/event/service';
-import { EventService } from '../../../src/services/event/types';
+import {
+  IntegrationTestSetupResult,
+  setupIntegrationTest,
+  teardownIntegrationTest,
+} from '../../setup/integrationTestSetup';
 
 describe('PlayerValue Integration Tests', () => {
   let setup: IntegrationTestSetupResult;

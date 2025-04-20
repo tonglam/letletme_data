@@ -1,15 +1,16 @@
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
+import { TeamService, TeamWorkflowsOperations } from 'services/team/types';
 import { createWorkflowContext, WorkflowResult } from 'services/types';
 
-import type { TeamService } from './types';
 import { getWorkflowLogger } from '../../infrastructures/logger';
-import type { Teams } from '../../types/domain/team.type';
 import { createServiceError, ServiceError, ServiceErrorCode } from '../../types/error.type';
+
+import type { Teams } from '../../types/domain/team.type';
 
 const logger = getWorkflowLogger();
 
-export const teamWorkflows = (teamService: TeamService) => {
+export const teamWorkflows = (teamService: TeamService): TeamWorkflowsOperations => {
   const syncTeams = (): TE.TaskEither<ServiceError, WorkflowResult<Teams>> => {
     const context = createWorkflowContext('team-sync');
 
@@ -47,7 +48,5 @@ export const teamWorkflows = (teamService: TeamService) => {
 
   return {
     syncTeams,
-  } as const;
+  };
 };
-
-export type TeamWorkflows = ReturnType<typeof teamWorkflows>;

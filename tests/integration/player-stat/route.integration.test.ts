@@ -6,31 +6,31 @@ import request from 'supertest';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Setup
-import { redisClient } from '../../../src/infrastructures/cache/client';
-import {
-  IntegrationTestSetupResult,
-  setupIntegrationTest,
-  teardownIntegrationTest,
-} from '../../setup/integrationTestSetup';
 
 // Specific imports
 import { playerStatRouter } from '../../../src/api/routes/player-stat.route'; // Import the router
 import { CachePrefix } from '../../../src/configs/cache/cache.config';
 import { createFplBootstrapDataService } from '../../../src/data/fpl/bootstrap.data';
 import { FplBootstrapDataService } from '../../../src/data/types';
+import { createEventCache } from '../../../src/domains/event/cache';
+import { EventCache, EventRepository } from '../../../src/domains/event/types';
 import { createPlayerStatCache } from '../../../src/domains/player-stat/cache';
 import { PlayerStatCache, PlayerStatRepository } from '../../../src/domains/player-stat/types';
+import { redisClient } from '../../../src/infrastructures/cache/client';
 import { HTTPClient } from '../../../src/infrastructures/http';
+import { createEventRepository } from '../../../src/repositories/event/repository';
 import { createPlayerStatRepository } from '../../../src/repositories/player-stat/repository';
+import { createEventService } from '../../../src/services/event/service';
+import { EventService } from '../../../src/services/event/types';
 import { createPlayerStatService } from '../../../src/services/player-stat/service';
 import { PlayerStatService } from '../../../src/services/player-stat/types';
 import { PlayerStat, PlayerStatId } from '../../../src/types/domain/player-stat.type';
 // Event service dependency
-import { createEventCache } from '../../../src/domains/event/cache';
-import { EventCache, EventRepository } from '../../../src/domains/event/types';
-import { createEventRepository } from '../../../src/repositories/event/repository';
-import { createEventService } from '../../../src/services/event/service';
-import { EventService } from '../../../src/services/event/types';
+import {
+  IntegrationTestSetupResult,
+  setupIntegrationTest,
+  teardownIntegrationTest,
+} from '../../setup/integrationTestSetup';
 
 // Set timeouts using vi.setConfig inside beforeAll
 describe('PlayerStat Routes Integration Tests', () => {
@@ -132,20 +132,20 @@ describe('PlayerStat Routes Integration Tests', () => {
   });
 
   it('GET /player-stats/:id should return the player stat within a data object', async () => {
-    // Sync first
+    // Sync first to ensure data exists in the DB
     const syncResult = await playerStatService.syncPlayerStatsFromApi()();
+    // Log the error if sync fails
+    if (E.isLeft(syncResult)) {
+      logger.error({ error: syncResult.left }, 'syncPlayerStatsFromApi failed in test');
+    }
     expect(E.isRight(syncResult)).toBe(true);
 
-    let targetStatId: PlayerStatId | null = null;
-    if (E.isRight(syncResult) && syncResult.right && syncResult.right.length > 0) {
-      // Use ID from the sync result directly
-      targetStatId = syncResult.right[0].id;
-    } else {
-      throw new Error('Sync did not return any player stats to get an ID for testing');
+    // Fetch one record directly from the database to get a valid ID
+    const dbStat = await prisma.playerStat.findFirst();
+    if (!dbStat) {
+      throw new Error('Could not find any player stats in the database after sync');
     }
-
-    // Add a small delay to allow Redis operations to settle
-    await new Promise((resolve) => setTimeout(resolve, 100)); // 100ms delay
+    const targetStatId = dbStat.id as PlayerStatId; // Cast the db ID to PlayerStatId
 
     const res = await request(app).get(`/player-stats/${targetStatId}`);
 
@@ -155,7 +155,7 @@ describe('PlayerStat Routes Integration Tests', () => {
     expect(res.body.data.id).toBe(targetStatId);
     expect(res.body.data).toHaveProperty('elementId');
     expect(res.body.data).toHaveProperty('eventId');
-  }, 30000); // Set timeout for this test to 30 seconds
+  }, 30000);
 
   it('GET /player-stats/:id should return 404 if player stat ID does not exist', async () => {
     const nonExistentStatId = 999999999 as PlayerStatId;

@@ -1,8 +1,9 @@
 import * as E from 'fp-ts/Either';
-import * as O from 'fp-ts/Option';
 import { pipe } from 'fp-ts/function';
+import * as O from 'fp-ts/Option';
 import { MappedEventLive, validateEventLiveId } from 'src/types/domain/event-live.type';
 import { safeStringToDecimal } from 'src/utils/common.util';
+
 import { EventLiveResponse } from '../../schemas/event/live.schema';
 
 export const mapEventLiveResponseToDomain = (

@@ -1,6 +1,6 @@
 import { Router } from 'express';
-import { TeamService } from '../../services/team/types';
 
+import { TeamService } from '../../services/team/types';
 import { createTeamHandlers } from '../handlers/team.handler';
 import { createHandler } from '../middlewares/core';
 

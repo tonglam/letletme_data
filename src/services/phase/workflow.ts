@@ -2,22 +2,24 @@ import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 
 import { getWorkflowLogger } from '../../infrastructures/logger';
-import type { Phase } from '../../types/domain/phase.type';
 import { createServiceError, ServiceError, ServiceErrorCode } from '../../types/error.type';
-import type { WorkflowResult } from '../types';
 import { createWorkflowContext } from '../types';
-import type { PhaseService } from './types';
+
+import type { Phases } from '../../types/domain/phase.type';
+import type { WorkflowResult } from '../types';
+import type { PhaseService, PhaseWorkflowOperations } from './types';
 
 const logger = getWorkflowLogger();
 
-export const phaseWorkflows = (phaseService: PhaseService) => {
-  const syncPhases = (): TE.TaskEither<ServiceError, WorkflowResult<readonly Phase[]>> => {
+export const phaseWorkflows = (phaseService: PhaseService): PhaseWorkflowOperations => {
+  const syncPhases = (): TE.TaskEither<ServiceError, WorkflowResult<Phases>> => {
     const context = createWorkflowContext('phase-sync');
 
     logger.info({ workflow: context.workflowId }, 'Starting phase sync workflow');
 
     return pipe(
       phaseService.syncPhasesFromApi(),
+      TE.chainW(() => phaseService.getPhases()),
       TE.mapLeft((error: ServiceError) =>
         createServiceError({
           code: ServiceErrorCode.INTEGRATION_ERROR,
@@ -48,7 +50,5 @@ export const phaseWorkflows = (phaseService: PhaseService) => {
 
   return {
     syncPhases,
-  } as const;
+  };
 };
-
-export type PhaseWorkflows = ReturnType<typeof phaseWorkflows>;

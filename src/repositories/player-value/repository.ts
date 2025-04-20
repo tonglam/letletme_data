@@ -1,45 +1,53 @@
-import { Prisma, PrismaClient, PlayerValue as PrismaPlayerValueType } from '@prisma/client';
-import { PlayerValueRepository } from 'domains/player-value/types';
+import { Prisma, PrismaClient } from '@prisma/client';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import { mapPrismaPlayerValueToDomain } from 'src/repositories/player-value/mapper';
-import { PrismaPlayerValueCreateInput } from 'src/repositories/player-value/type';
-import { PlayerValueId } from 'src/types/domain/player-value.type';
-import { createDBError, DBErrorCode } from 'src/types/error.type';
+import { PlayerValueRepository } from 'src/repositories/player-value/type';
+import { PlayerValues } from 'src/types/domain/player-value.type';
+import { createDBError, DBError, DBErrorCode } from 'src/types/error.type';
 import { getErrorMessage } from 'src/utils/error.util';
 
 export const createPlayerValueRepository = (prisma: PrismaClient): PlayerValueRepository => ({
-  findAll: () =>
+  findByChangeDate: (changeDate: string): TE.TaskEither<DBError, PlayerValues> =>
     pipe(
       TE.tryCatch(
-        () => prisma.playerValue.findMany({ orderBy: { id: 'asc' } }),
+        () => prisma.playerValue.findMany({ where: { changeDate: { equals: changeDate } } }),
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to fetch all player values: ${getErrorMessage(error)}`,
-            cause: error instanceof Error ? error : undefined,
+            message: `Failed to fetch player values by change date ${changeDate}: ${error}`,
           }),
       ),
-      TE.map((playerValues: PrismaPlayerValueType[]) =>
-        playerValues.map(mapPrismaPlayerValueToDomain),
-      ),
+      TE.map((prismaPlayerValues) => prismaPlayerValues.map(mapPrismaPlayerValueToDomain)),
     ),
 
-  findById: (id: PlayerValueId) =>
+  findByElement: (element: number): TE.TaskEither<DBError, PlayerValues> =>
     pipe(
       TE.tryCatch(
-        () => prisma.playerValue.findUnique({ where: { id } }),
+        () => prisma.playerValue.findMany({ where: { element: { equals: element } } }),
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to fetch player value by id ${id}: ${getErrorMessage(error)}`,
-            cause: error instanceof Error ? error : undefined,
+            message: `Failed to fetch player values by element ${element}: ${error}`,
           }),
       ),
-      TE.map((playerValue) => (playerValue ? mapPrismaPlayerValueToDomain(playerValue) : null)),
+      TE.map((prismaPlayerValues) => prismaPlayerValues.map(mapPrismaPlayerValueToDomain)),
     ),
 
-  saveBatch: (playerValues: readonly PrismaPlayerValueCreateInput[]) =>
+  findByElements: (elements: number[]): TE.TaskEither<DBError, PlayerValues> =>
+    pipe(
+      TE.tryCatch(
+        () => prisma.playerValue.findMany({ where: { element: { in: elements } } }),
+        (error) =>
+          createDBError({
+            code: DBErrorCode.QUERY_ERROR,
+            message: `Failed to fetch player values by elements ${elements}: ${error}`,
+          }),
+      ),
+      TE.map((prismaPlayerValues) => prismaPlayerValues.map(mapPrismaPlayerValueToDomain)),
+    ),
+
+  saveBatch: (playerValues: PlayerValues): TE.TaskEither<DBError, PlayerValues> =>
     pipe(
       TE.tryCatch(
         async () => {
@@ -48,17 +56,7 @@ export const createPlayerValueRepository = (prisma: PrismaClient): PlayerValueRe
             skipDuplicates: true,
           });
 
-          const uniqueIdentifiers = playerValues.map((p) => ({
-            elementId: p.elementId,
-            changeDate: p.changeDate,
-          }));
-
-          return prisma.playerValue.findMany({
-            where: {
-              OR: uniqueIdentifiers,
-            },
-            orderBy: { id: 'asc' },
-          });
+          return playerValues;
         },
         (error) =>
           createDBError({
@@ -66,10 +64,9 @@ export const createPlayerValueRepository = (prisma: PrismaClient): PlayerValueRe
             message: `Failed to save player values: ${getErrorMessage(error)}`,
           }),
       ),
-      TE.map((prismaPlayerValues) => prismaPlayerValues.map(mapPrismaPlayerValueToDomain)),
     ),
 
-  deleteAll: () =>
+  deleteAll: (): TE.TaskEither<DBError, void> =>
     pipe(
       TE.tryCatch(
         () => prisma.playerValue.deleteMany(),
@@ -80,6 +77,6 @@ export const createPlayerValueRepository = (prisma: PrismaClient): PlayerValueRe
             cause: error instanceof Error ? error : undefined,
           }),
       ),
-      TE.map(() => undefined as void),
+      TE.map(() => void 0),
     ),
 });

@@ -1,6 +1,6 @@
 import * as E from 'fp-ts/Either';
-import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
+import * as TE from 'fp-ts/TaskEither';
 import { Logger } from 'pino';
 import { apiConfig } from 'src/configs/api/api.config';
 import { mapPickResponseToEntryEventPick } from 'src/data/fpl/mappers/pick/pick.mapper';
@@ -60,7 +60,10 @@ export const createFplPickDataService = (
               code: DataLayerErrorCode.VALIDATION_ERROR,
               message: 'Failed to validate FPL picks',
               cause: parsed.error,
-              details: { validationError: parsed.error.format() },
+              details: {
+                errorMessage: parsed.error.message,
+                validationError: parsed.error.format(),
+              },
             }),
           );
         }

@@ -1,6 +1,7 @@
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import { ChipPlay, Event, TopElementInfo, validateEventId } from 'src/types/domain/event.type';
+
 import { EventResponse } from '../../schemas/bootstrap/event.schema';
 
 const transformChipPlays = (

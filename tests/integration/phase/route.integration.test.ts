@@ -6,12 +6,6 @@ import request from 'supertest';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 // Setup
-import { redisClient } from '../../../src/infrastructures/cache/client';
-import {
-  IntegrationTestSetupResult,
-  setupIntegrationTest,
-  teardownIntegrationTest,
-} from '../../setup/integrationTestSetup';
 
 // Specific imports
 import { phaseRouter } from '../../../src/api/routes/phase.route'; // Import the router
@@ -20,11 +14,17 @@ import { createFplBootstrapDataService } from '../../../src/data/fpl/bootstrap.d
 import { FplBootstrapDataService } from '../../../src/data/types';
 import { createPhaseCache } from '../../../src/domains/phase/cache';
 import { PhaseCache, PhaseRepository } from '../../../src/domains/phase/types';
+import { redisClient } from '../../../src/infrastructures/cache/client';
 import { HTTPClient } from '../../../src/infrastructures/http';
 import { createPhaseRepository } from '../../../src/repositories/phase/repository';
 import { createPhaseService } from '../../../src/services/phase/service';
 import { PhaseService } from '../../../src/services/phase/types';
 import { Phase, PhaseId } from '../../../src/types/domain/phase.type';
+import {
+  IntegrationTestSetupResult,
+  setupIntegrationTest,
+  teardownIntegrationTest,
+} from '../../setup/integrationTestSetup';
 
 describe('Phase Routes Integration Tests', () => {
   let setup: IntegrationTestSetupResult;

@@ -1,6 +1,6 @@
 import * as E from 'fp-ts/Either';
-import * as TE from 'fp-ts/TaskEither';
 import { pipe } from 'fp-ts/function';
+import * as TE from 'fp-ts/TaskEither';
 import { Logger } from 'pino';
 import { apiConfig } from 'src/configs/api/api.config';
 import { mapEntryHistoryResponseToDomain } from 'src/data/fpl/mappers/history/history.mapper';
@@ -12,6 +12,7 @@ import { HTTPClient } from 'src/infrastructures/http';
 import { EntryHistoryInfos } from 'src/types/domain/entry-history-info.type';
 import { DataLayerError, DataLayerErrorCode } from 'src/types/error.type';
 import { createDataLayerError } from 'src/utils/error.util';
+
 import { FplHistoryDataService } from '../types';
 
 export const createFplHistoryDataService = (
@@ -64,6 +65,7 @@ export const createFplHistoryDataService = (
               message: 'Invalid response data',
               cause: parsed.error,
               details: {
+                errorMessage: parsed.error.message,
                 validationError: parsed.error.format(),
               },
             }),

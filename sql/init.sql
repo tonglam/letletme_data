@@ -1,7 +1,30 @@
-CREATE TYPE IF NOT EXISTS "Chip" AS ENUM ('None', 'Wildcard', 'FreeHit', 'TripleCaptain', 'BenchBoost', 'Manager');
-CREATE TYPE IF NOT EXISTS "ValueChangeType" AS ENUM ('Start', 'Rise', 'Fall');
-CREATE TYPE IF NOT EXISTS "LeagueType" AS ENUM ('Classic', 'H2H');
-CREATE TYPE IF NOT EXISTS "CupResult" AS ENUM ('Win', 'Loss');
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'chip') THEN
+        CREATE TYPE "Chip" AS ENUM ('None', 'Wildcard', 'FreeHit', 'TripleCaptain', 'BenchBoost', 'Manager');
+    END IF;
+END$$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'valuechangetype') THEN
+        CREATE TYPE "ValueChangeType" AS ENUM ('Start', 'Rise', 'Fall');
+    END IF;
+END$$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'leaguetype') THEN
+        CREATE TYPE "LeagueType" AS ENUM ('Classic', 'H2H');
+    END IF;
+END$$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'cupresult') THEN
+        CREATE TYPE "CupResult" AS ENUM ('Win', 'Loss');
+    END IF;
+END$$;
 
 CREATE TABLE IF NOT EXISTS "events" (
     "id" INTEGER PRIMARY KEY,

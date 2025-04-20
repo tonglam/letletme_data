@@ -1,44 +1,31 @@
 import { PlayerValue as PrismaPlayerValueType } from '@prisma/client';
 import {
-  PrismaPlayerValueCreate,
+  PlayerValueCreateInput,
   PrismaPlayerValueCreateInput,
 } from 'src/repositories/player-value/type';
 import { ElementType, ValueChangeType } from 'src/types/base.type';
-import { MappedPlayerValue, PlayerValue, PlayerValueId } from 'src/types/domain/player-value.type';
+import { PlayerValue } from 'src/types/domain/player-value.type';
 
 export const mapPrismaPlayerValueToDomain = (
   prismaPlayerValue: PrismaPlayerValueType,
 ): PlayerValue => ({
-  id: prismaPlayerValue.id as PlayerValueId,
-  elementId: prismaPlayerValue.elementId,
+  element: prismaPlayerValue.element,
   elementType: prismaPlayerValue.elementType as ElementType,
-  eventId: prismaPlayerValue.eventId,
+  event: prismaPlayerValue.event,
   value: prismaPlayerValue.value,
   changeDate: prismaPlayerValue.changeDate,
-  changeType: prismaPlayerValue.changeType,
+  changeType: prismaPlayerValue.changeType as ValueChangeType,
   lastValue: prismaPlayerValue.lastValue,
 });
 
 export const mapDomainPlayerValueToPrismaCreate = (
-  domainPlayerValue: PrismaPlayerValueCreate,
+  domainPlayerValue: PlayerValueCreateInput,
 ): PrismaPlayerValueCreateInput => ({
-  elementId: domainPlayerValue.elementId,
+  element: domainPlayerValue.element,
   elementType: domainPlayerValue.elementType as number,
-  eventId: domainPlayerValue.eventId,
+  event: domainPlayerValue.event,
   value: domainPlayerValue.value,
   changeDate: domainPlayerValue.changeDate,
-  changeType: domainPlayerValue.changeType,
+  changeType: domainPlayerValue.changeType as ValueChangeType,
   lastValue: domainPlayerValue.lastValue,
-});
-
-export const mapMappedPlayerValueToPrismaCreate = (
-  mappedPlayerValue: MappedPlayerValue,
-): PrismaPlayerValueCreate => ({
-  elementId: mappedPlayerValue.elementId,
-  elementType: mappedPlayerValue.elementType,
-  eventId: mappedPlayerValue.eventId,
-  value: mappedPlayerValue.value,
-  changeDate: mappedPlayerValue.changeDate,
-  changeType: ValueChangeType.Start,
-  lastValue: 0,
 });

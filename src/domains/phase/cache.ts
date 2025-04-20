@@ -1,17 +1,18 @@
+import { PhaseCache, PhaseCacheConfig } from 'domains/phase/types';
 import * as E from 'fp-ts/Either';
 import { flow, pipe } from 'fp-ts/function';
 import * as O from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
-import { Phase, PhaseId, Phases } from 'src/types/domain/phase.type';
+import { PhaseRepository } from 'src/repositories/phase/type';
+import { Phase, Phases } from 'src/types/domain/phase.type';
+import { getCurrentSeason } from 'src/utils/common.util';
 
 import { CachePrefix } from '../../configs/cache/cache.config';
 import { redisClient } from '../../infrastructures/cache/client';
-import { getCurrentSeason } from '../../types/base.type';
 import { CacheError, CacheErrorCode, createCacheError, DomainError } from '../../types/error.type';
 import { mapCacheErrorToDomainError, mapRepositoryErrorToCacheError } from '../../utils/error.util';
-import { PhaseCache, PhaseCacheConfig, PhaseRepository } from './types';
 
-const parsePhase = (phaseStr: string): E.Either<CacheError, Phase | null> =>
+const parsePhase = (phaseStr: string): E.Either<CacheError, Phase> =>
   pipe(
     E.tryCatch(
       () => JSON.parse(phaseStr),
@@ -25,11 +26,16 @@ const parsePhase = (phaseStr: string): E.Either<CacheError, Phase | null> =>
     E.chain((parsed) =>
       parsed && typeof parsed === 'object' && 'id' in parsed && typeof parsed.id === 'number'
         ? E.right(parsed as Phase)
-        : E.right(null),
+        : E.left(
+            createCacheError({
+              code: CacheErrorCode.DESERIALIZATION_ERROR,
+              message: 'Parsed object is not a valid Phase structure',
+            }),
+          ),
     ),
   );
 
-const parsePhases = (phasesMap: Record<string, string>): E.Either<CacheError, Phase[]> =>
+const parsePhases = (phasesMap: Record<string, string>): E.Either<CacheError, Phases> =>
   pipe(
     Object.values(phasesMap),
     (phaseStrs) =>
@@ -53,34 +59,7 @@ export const createPhaseCache = (
   const { keyPrefix, season } = config;
   const baseKey = `${keyPrefix}::${season}`;
 
-  const getPhase = (id: PhaseId): TE.TaskEither<DomainError, Phase | null> =>
-    pipe(
-      TE.tryCatch(
-        () => redisClient.hget(baseKey, id.toString()),
-        (error: unknown) =>
-          createCacheError({
-            code: CacheErrorCode.OPERATION_ERROR,
-            message: 'Cache Read Error: Failed to get phase',
-            cause: error as Error,
-          }),
-      ),
-      TE.chain(
-        flow(
-          O.fromNullable,
-          O.fold(
-            () =>
-              pipe(
-                repository.findById(id),
-                TE.mapLeft(mapRepositoryErrorToCacheError('Repository Error: Failed to get phase')),
-              ),
-            (phaseStr) => pipe(parsePhase(phaseStr), TE.fromEither),
-          ),
-        ),
-      ),
-      TE.mapLeft(mapCacheErrorToDomainError),
-    );
-
-  const getAllPhases = (): TE.TaskEither<DomainError, Phases | null> =>
+  const getAllPhases = (): TE.TaskEither<DomainError, Phases> =>
     pipe(
       TE.tryCatch(
         () => redisClient.hgetall(baseKey),
@@ -115,7 +94,6 @@ export const createPhaseCache = (
           ),
         ),
       ),
-      TE.map((phases) => (phases.length > 0 ? phases : [])),
     );
 
   const setAllPhases = (phases: Phases): TE.TaskEither<DomainError, void> =>
@@ -159,7 +137,6 @@ export const createPhaseCache = (
     );
 
   return {
-    getPhase,
     getAllPhases,
     setAllPhases,
     deleteAllPhases,

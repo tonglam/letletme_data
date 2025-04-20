@@ -11,6 +11,7 @@ import { EventLiveExplains } from 'src/types/domain/event-live-explain.type';
 import { EventLives } from 'src/types/domain/event-live.type';
 import { DataLayerError, DataLayerErrorCode } from 'src/types/error.type';
 import { createDataLayerError } from 'src/utils/error.util';
+
 import { mapEventLiveResponseToDomain } from './mappers/event/live.mapper';
 
 export const createFplEventDataService = (
@@ -61,6 +62,7 @@ export const createFplEventDataService = (
               message: 'Invalid event live data received from FPL API',
               cause: undefined,
               details: {
+                errorMessage: parsed.error.message,
                 validationError: parsed.error.format(),
               },
             }),

@@ -1,6 +1,6 @@
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { PlayerValueService } from 'services/player-value/types';
+import { PlayerValueService, PlayerValueWorkflowsOperations } from 'services/player-value/types';
 import { createWorkflowContext, WorkflowResult } from 'services/types';
 import { getWorkflowLogger } from 'src/infrastructures/logger';
 import { PlayerValues } from 'src/types/domain/player-value.type';
@@ -8,7 +8,9 @@ import { createServiceError, ServiceError, ServiceErrorCode } from 'src/types/er
 
 const logger = getWorkflowLogger();
 
-export const playerValueWorkflows = (playerValueService: PlayerValueService) => {
+export const playerValueWorkflows = (
+  playerValueService: PlayerValueService,
+): PlayerValueWorkflowsOperations => {
   const syncPlayerValues = (): TE.TaskEither<ServiceError, WorkflowResult<PlayerValues>> => {
     const context = createWorkflowContext('player-value-sync');
 
@@ -43,7 +45,5 @@ export const playerValueWorkflows = (playerValueService: PlayerValueService) => 
 
   return {
     syncPlayerValues,
-  } as const;
+  };
 };
-
-export type PlayerValueWorkflows = ReturnType<typeof playerValueWorkflows>;

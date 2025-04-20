@@ -62,7 +62,10 @@ export const createFplEntryDataService = (
               code: DataLayerErrorCode.VALIDATION_ERROR,
               message: 'Invalid response data',
               cause: parsed.error,
-              details: { validationError: parsed.error.format() },
+              details: {
+                errorMessage: parsed.error.message,
+                validationError: parsed.error.format(),
+              },
             }),
           );
         }

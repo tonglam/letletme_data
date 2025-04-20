@@ -1,48 +1,70 @@
+import { EventCache } from 'domains/event/types';
 import { createPlayerStatOperations } from 'domains/player-stat/operation';
-import {
-  PlayerStatCache,
-  PlayerStatOperations,
-  PlayerStatRepository,
-} from 'domains/player-stat/types';
+import { PlayerStatCache, PlayerStatOperations } from 'domains/player-stat/types';
 import { pipe } from 'fp-ts/function';
+import * as O from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
-import { EventService } from 'services/event/types';
 import { PlayerStatService, PlayerStatServiceOperations } from 'services/player-stat/types';
 import { FplBootstrapDataService } from 'src/data/types';
-import { mapDomainStatToPrismaCreateInput } from 'src/repositories/player-stat/mapper';
-import { PrismaPlayerStatCreateInput } from 'src/repositories/player-stat/type';
-import { PlayerStat, PlayerStatId, PlayerStats } from 'src/types/domain/player-stat.type';
+import { PlayerStatRepository } from 'src/repositories/player-stat/type';
+import { PlayerStat, PlayerStats } from 'src/types/domain/player-stat.type';
 import {
   DataLayerError,
   DomainError,
+  DomainErrorCode,
   ServiceError,
   ServiceErrorCode,
+  createDomainError,
   createServiceError,
 } from 'src/types/error.type';
 import { createServiceIntegrationError, mapDomainErrorToServiceError } from 'src/utils/error.util';
 
 const playerStatServiceOperations = (
-  domainOps: PlayerStatOperations,
   fplDataService: FplBootstrapDataService,
-  eventService: EventService,
+  domainOps: PlayerStatOperations,
+  playerStatCache: PlayerStatCache,
+  eventCache: EventCache,
 ): PlayerStatServiceOperations => ({
-  findAllPlayerStats: () =>
-    pipe(domainOps.getAllPlayerStats(), TE.mapLeft(mapDomainErrorToServiceError)) as TE.TaskEither<
-      ServiceError,
-      PlayerStats
-    >,
-
-  findPlayerStatById: (id: PlayerStatId) =>
+  findPlayerStat: (element: number): TE.TaskEither<ServiceError, PlayerStat> =>
     pipe(
-      domainOps.getPlayerStatById(id),
+      playerStatCache.getAllPlayerStats(),
       TE.mapLeft((error: DomainError) => {
         return mapDomainErrorToServiceError(error);
       }),
-    ) as TE.TaskEither<ServiceError, PlayerStat | null>,
+      TE.chainOptionK(() =>
+        mapDomainErrorToServiceError(
+          createDomainError({
+            code: DomainErrorCode.NOT_FOUND,
+            message: `Player stat with element ${element} not found in cache after fetching all.`,
+          }),
+        ),
+      )((playerStats) =>
+        O.fromNullable(playerStats.find((playerStat) => playerStat.element === element)),
+      ),
+    ),
 
-  syncPlayerStatsFromApi: () =>
+  findPlayerStatsByElementType: (elementType: number): TE.TaskEither<ServiceError, PlayerStats> =>
     pipe(
-      eventService.getCurrentEvent(),
+      playerStatCache.getAllPlayerStats(),
+      TE.mapLeft(mapDomainErrorToServiceError),
+      TE.map((playerStats) =>
+        playerStats.filter((playerStat) => playerStat.elementType === elementType),
+      ),
+    ),
+
+  findPlayerStatsByTeam: (team: number): TE.TaskEither<ServiceError, PlayerStats> =>
+    pipe(
+      playerStatCache.getAllPlayerStats(),
+      TE.mapLeft(mapDomainErrorToServiceError),
+      TE.map((playerStats) => playerStats.filter((playerStat) => playerStat.team === team)),
+    ),
+
+  findAllPlayerStats: (): TE.TaskEither<ServiceError, PlayerStats> =>
+    pipe(playerStatCache.getAllPlayerStats(), TE.mapLeft(mapDomainErrorToServiceError)),
+
+  syncPlayerStatsFromApi: (): TE.TaskEither<ServiceError, void> =>
+    pipe(
+      eventCache.getCurrentEvent(),
       TE.mapLeft((error: ServiceError) =>
         createServiceError({
           code: ServiceErrorCode.OPERATION_ERROR,
@@ -60,10 +82,10 @@ const playerStatServiceOperations = (
               }),
             ),
       ),
-      TE.chainW((eventId) =>
+      TE.chainW((event) =>
         pipe(
-          fplDataService.getPlayerStats(eventId),
-          TE.map((stats) => ({ eventId, stats })),
+          fplDataService.getPlayerStats(event),
+          TE.map((stats) => ({ event, stats })),
         ),
       ),
       TE.mapLeft((error: DataLayerError | ServiceError) =>
@@ -85,29 +107,32 @@ const playerStatServiceOperations = (
         ),
       ),
       TE.chain((mappedStats) =>
-        pipe(domainOps.savePlayerStats(mappedStats), TE.mapLeft(mapDomainErrorToServiceError)),
+        pipe(
+          domainOps.savePlayerStats(mappedStats),
+          TE.mapLeft(mapDomainErrorToServiceError),
+          TE.map(() => undefined),
+        ),
       ),
     ),
 });
 
-const mapRawDataToPlayerStatCreateArray = (
-  rawData: readonly Omit<PlayerStat, 'id'>[],
-): PrismaPlayerStatCreateInput[] => {
-  return rawData.map(mapDomainStatToPrismaCreateInput);
-};
-
 export const createPlayerStatService = (
   fplDataService: FplBootstrapDataService,
   repository: PlayerStatRepository,
-  cache: PlayerStatCache,
-  eventService: EventService,
+  playerStatCache: PlayerStatCache,
+  eventCache: EventCache,
 ): PlayerStatService => {
-  const domainOps = createPlayerStatOperations(repository, cache);
-  const ops = playerStatServiceOperations(domainOps, fplDataService, eventService);
+  const domainOps = createPlayerStatOperations(repository);
+  const ops = playerStatServiceOperations(fplDataService, domainOps, playerStatCache, eventCache);
 
   return {
-    getPlayerStats: () => ops.findAllPlayerStats(),
-    getPlayerStat: (id: PlayerStatId) => ops.findPlayerStatById(id),
-    syncPlayerStatsFromApi: () => ops.syncPlayerStatsFromApi(),
+    getPlayerStat: (element: number): TE.TaskEither<ServiceError, PlayerStat> =>
+      ops.findPlayerStat(element),
+    getPlayerStatsByElementType: (elementType: number): TE.TaskEither<ServiceError, PlayerStats> =>
+      ops.findPlayerStatsByElementType(elementType),
+    getPlayerStatsByTeam: (team: number): TE.TaskEither<ServiceError, PlayerStats> =>
+      ops.findPlayerStatsByTeam(team),
+    getPlayerStats: (): TE.TaskEither<ServiceError, PlayerStats> => ops.findAllPlayerStats(),
+    syncPlayerStatsFromApi: (): TE.TaskEither<ServiceError, void> => ops.syncPlayerStatsFromApi(),
   };
 };

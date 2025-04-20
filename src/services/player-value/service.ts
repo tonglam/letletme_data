@@ -10,7 +10,7 @@ import { EventService } from 'services/event/types';
 import { PlayerValueService, PlayerValueServiceOperations } from 'services/player-value/types';
 import { FplBootstrapDataService } from 'src/data/types';
 import { mapMappedPlayerValueToPrismaCreate } from 'src/repositories/player-value/mapper';
-import { PrismaPlayerValueCreate } from 'src/repositories/player-value/type';
+import { PlayerValueCreateInput } from 'src/repositories/player-value/type';
 import {
   MappedPlayerValue,
   PlayerValue,
@@ -84,7 +84,7 @@ export const playerValueServiceOperations = (
 
 const mapRawDataToPlayerValueCreateArray = (
   rawData: readonly MappedPlayerValue[],
-): PrismaPlayerValueCreate[] => {
+): PlayerValueCreateInput[] => {
   return rawData.map(mapMappedPlayerValueToPrismaCreate);
 };
 

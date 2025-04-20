@@ -66,6 +66,7 @@ export enum DomainErrorCode {
   VALIDATION_ERROR = 'VALIDATION_ERROR',
   CACHE_ERROR = 'CACHE_ERROR',
   DATABASE_ERROR = 'DATABASE_ERROR',
+  NOT_FOUND = 'NOT_FOUND',
 }
 
 export interface DomainError {

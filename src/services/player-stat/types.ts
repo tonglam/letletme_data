@@ -1,27 +1,29 @@
 import * as TE from 'fp-ts/TaskEither';
-import type { WorkflowResult } from 'services/types';
-import { FplBootstrapDataService } from 'src/data/types';
-import { PlayerStat, PlayerStatId, PlayerStats } from 'src/types/domain/player-stat.type';
+import { PlayerStat, PlayerStats } from 'src/types/domain/player-stat.type';
 import { ServiceError } from 'src/types/error.type';
 
-export interface PlayerStatService {
-  readonly getPlayerStats: () => TE.TaskEither<ServiceError, PlayerStats>;
-  readonly getPlayerStat: (id: PlayerStatId) => TE.TaskEither<ServiceError, PlayerStat | null>;
-  readonly syncPlayerStatsFromApi: () => TE.TaskEither<ServiceError, PlayerStats>;
-}
-
-export interface PlayerStatServiceWithWorkflows extends PlayerStatService {
-  readonly workflows: {
-    readonly syncPlayerStats: () => TE.TaskEither<ServiceError, WorkflowResult<PlayerStats>>;
-  };
-}
-
-export interface PlayerStatServiceOpDependencies {
-  readonly fplDataService: FplBootstrapDataService;
-}
+import type { WorkflowResult } from 'services/types';
 
 export interface PlayerStatServiceOperations {
+  readonly findPlayerStat: (element: number) => TE.TaskEither<ServiceError, PlayerStat>;
+  readonly findPlayerStatsByElementType: (
+    elementType: number,
+  ) => TE.TaskEither<ServiceError, PlayerStats>;
+  readonly findPlayerStatsByTeam: (team: number) => TE.TaskEither<ServiceError, PlayerStats>;
   readonly findAllPlayerStats: () => TE.TaskEither<ServiceError, PlayerStats>;
-  readonly findPlayerStatById: (id: PlayerStatId) => TE.TaskEither<ServiceError, PlayerStat | null>;
-  readonly syncPlayerStatsFromApi: () => TE.TaskEither<ServiceError, PlayerStats>;
+  readonly syncPlayerStatsFromApi: () => TE.TaskEither<ServiceError, void>;
+}
+
+export interface PlayerStatService {
+  readonly getPlayerStat: (element: number) => TE.TaskEither<ServiceError, PlayerStat>;
+  readonly getPlayerStatsByElementType: (
+    elementType: number,
+  ) => TE.TaskEither<ServiceError, PlayerStats>;
+  readonly getPlayerStatsByTeam: (team: number) => TE.TaskEither<ServiceError, PlayerStats>;
+  readonly getPlayerStats: () => TE.TaskEither<ServiceError, PlayerStats>;
+  readonly syncPlayerStatsFromApi: () => TE.TaskEither<ServiceError, void>;
+}
+
+export interface PlayerStatWorkflowsOperations {
+  readonly syncPlayerStats: () => TE.TaskEither<ServiceError, WorkflowResult<PlayerStats>>;
 }

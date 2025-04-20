@@ -1,16 +1,17 @@
-import { TeamCache, TeamCacheConfig, TeamRepository } from 'domains/team/types';
+import { TeamCache, TeamCacheConfig } from 'domains/team/types';
 import * as E from 'fp-ts/Either';
 import { flow, pipe } from 'fp-ts/function';
 import * as O from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
 import { CachePrefix } from 'src/configs/cache/cache.config';
 import { redisClient } from 'src/infrastructures/cache/client';
-import { getCurrentSeason } from 'src/types/base.type';
-import { Team, TeamId, Teams } from 'src/types/domain/team.type';
+import { TeamRepository } from 'src/repositories/team/type';
+import { Team, Teams } from 'src/types/domain/team.type';
 import { CacheError, CacheErrorCode, createCacheError, DomainError } from 'src/types/error.type';
+import { getCurrentSeason } from 'src/utils/common.util';
 import { mapCacheErrorToDomainError, mapRepositoryErrorToCacheError } from 'src/utils/error.util';
 
-const parseTeam = (teamStr: string): E.Either<CacheError, Team | null> =>
+const parseTeam = (teamStr: string): E.Either<CacheError, Team> =>
   pipe(
     E.tryCatch(
       () => JSON.parse(teamStr),
@@ -24,11 +25,16 @@ const parseTeam = (teamStr: string): E.Either<CacheError, Team | null> =>
     E.chain((parsed) =>
       parsed && typeof parsed === 'object' && 'id' in parsed && typeof parsed.id === 'number'
         ? E.right(parsed as Team)
-        : E.right(null),
+        : E.left(
+            createCacheError({
+              code: CacheErrorCode.DESERIALIZATION_ERROR,
+              message: 'Parsed object is not a valid Team structure',
+            }),
+          ),
     ),
   );
 
-const parseTeams = (teams: Record<string, string>): E.Either<CacheError, Team[]> =>
+const parseTeams = (teams: Record<string, string>): E.Either<CacheError, Teams> =>
   pipe(
     Object.values(teams),
     (teamStrs) =>
@@ -52,34 +58,7 @@ export const createTeamCache = (
   const { keyPrefix, season } = config;
   const baseKey = `${keyPrefix}::${season}`;
 
-  const getTeam = (id: TeamId): TE.TaskEither<DomainError, Team | null> =>
-    pipe(
-      TE.tryCatch(
-        () => redisClient.hget(baseKey, id.toString()),
-        (error: unknown) =>
-          createCacheError({
-            code: CacheErrorCode.OPERATION_ERROR,
-            message: 'Cache Read Error: Failed to get team',
-            cause: error as Error,
-          }),
-      ),
-      TE.chain(
-        flow(
-          O.fromNullable,
-          O.fold(
-            () =>
-              pipe(
-                repository.findById(id),
-                TE.mapLeft(mapRepositoryErrorToCacheError('Repository Error: Failed to get team')),
-              ),
-            (teamStr) => pipe(parseTeam(teamStr), TE.fromEither),
-          ),
-        ),
-      ),
-      TE.mapLeft(mapCacheErrorToDomainError),
-    );
-
-  const getAllTeams = (): TE.TaskEither<DomainError, Teams | null> =>
+  const getAllTeams = (): TE.TaskEither<DomainError, Teams> =>
     pipe(
       TE.tryCatch(
         () => redisClient.hgetall(baseKey),
@@ -110,7 +89,6 @@ export const createTeamCache = (
           ),
         ),
       ),
-      TE.map((teams) => (teams.length > 0 ? teams : null)),
     );
 
   const setAllTeams = (teams: Teams): TE.TaskEither<DomainError, void> =>
@@ -154,7 +132,6 @@ export const createTeamCache = (
     );
 
   return {
-    getTeam,
     getAllTeams,
     setAllTeams,
     deleteAllTeams,

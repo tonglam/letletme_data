@@ -1,4 +1,5 @@
 import { z } from 'zod';
+
 import { EntryHistoryInfoResponseSchema } from './info.schema';
 
 export const EntryHistoryResponseSchema = z

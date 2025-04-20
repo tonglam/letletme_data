@@ -1,18 +1,17 @@
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { PlayerStatService } from 'services/player-stat/types';
+import { PlayerStatService, PlayerStatWorkflowsOperations } from 'services/player-stat/types';
 import { createWorkflowContext, WorkflowResult } from 'services/types';
 import { getWorkflowLogger } from 'src/infrastructures/logger';
-import { PlayerStat } from 'src/types/domain/player-stat.type';
+import { PlayerStats } from 'src/types/domain/player-stat.type';
 import { createServiceError, ServiceError, ServiceErrorCode } from 'src/types/error.type';
 
 const logger = getWorkflowLogger();
 
-export const playerStatWorkflows = (playerStatService: PlayerStatService) => {
-  const syncPlayerStats = (): TE.TaskEither<
-    ServiceError,
-    WorkflowResult<readonly PlayerStat[]>
-  > => {
+export const playerStatWorkflows = (
+  playerStatService: PlayerStatService,
+): PlayerStatWorkflowsOperations => {
+  const syncPlayerStats = (): TE.TaskEither<ServiceError, WorkflowResult<PlayerStats>> => {
     const context = createWorkflowContext('player-stat-sync');
 
     logger.info({ workflow: context.workflowId }, 'Starting player stat sync workflow');
@@ -46,7 +45,5 @@ export const playerStatWorkflows = (playerStatService: PlayerStatService) => {
 
   return {
     syncPlayerStats,
-  } as const;
+  };
 };
-
-export type PlayerStatWorkflows = ReturnType<typeof playerStatWorkflows>;

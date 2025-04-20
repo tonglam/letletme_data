@@ -1,13 +1,14 @@
 import axios, { AxiosInstance } from 'axios';
+import { PlayerCache, PlayerRepository } from 'domains/player/types';
 import { createPlayerStatCache } from 'domains/player-stat/cache';
 import { PlayerStatCache, PlayerStatRepository } from 'domains/player-stat/types';
 import { createPlayerValueCache } from 'domains/player-value/cache';
 import { PlayerValueCache, PlayerValueRepository } from 'domains/player-value/types';
-import { PlayerCache, PlayerRepository } from 'domains/player/types';
 import { TeamCache, TeamRepository } from 'domains/team/types';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import { Logger } from 'pino';
+
 import { createFplBootstrapDataService } from '../data/fpl/bootstrap.data';
 import { FplBootstrapDataService } from '../data/types';
 import { createEventCache } from '../domains/event/cache';
@@ -22,9 +23,9 @@ import { RetryConfig } from '../infrastructures/http/types';
 import { getFplApiLogger } from '../infrastructures/logger';
 import { createEventRepository } from '../repositories/event/repository';
 import { createPhaseRepository } from '../repositories/phase/repository';
+import { createPlayerRepository } from '../repositories/player/repository';
 import { createPlayerStatRepository } from '../repositories/player-stat/repository';
 import { createPlayerValueRepository } from '../repositories/player-value/repository';
-import { createPlayerRepository } from '../repositories/player/repository';
 import { createTeamRepository } from '../repositories/team/repository';
 import { APIError } from '../types/error.type';
 

@@ -5,14 +5,8 @@ import { Logger } from 'pino';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 // Use the generic setup
-import {
-  IntegrationTestSetupResult,
-  setupIntegrationTest,
-  teardownIntegrationTest,
-} from '../../setup/integrationTestSetup';
 
 // Import the SHARED redis client used by the application
-import { redisClient } from '../../../src/infrastructures/cache/client';
 
 // Specific imports for this test suite
 import { CachePrefix } from '../../../src/configs/cache/cache.config';
@@ -20,11 +14,17 @@ import { createFplBootstrapDataService } from '../../../src/data/fpl/bootstrap.d
 import { FplBootstrapDataService } from '../../../src/data/types';
 import { createTeamCache } from '../../../src/domains/team/cache'; // Team specific
 import { TeamCache, TeamRepository } from '../../../src/domains/team/types'; // Team specific
+import { redisClient } from '../../../src/infrastructures/cache/client';
 import { HTTPClient } from '../../../src/infrastructures/http';
 import { createTeamRepository } from '../../../src/repositories/team/repository'; // Team specific
 import { createTeamService } from '../../../src/services/team/service'; // Team specific
 import { TeamService } from '../../../src/services/team/types'; // Team specific
 import { teamWorkflows } from '../../../src/services/team/workflow'; // Team specific
+import {
+  IntegrationTestSetupResult,
+  setupIntegrationTest,
+  teardownIntegrationTest,
+} from '../../setup/integrationTestSetup';
 
 describe('Team Integration Tests', () => {
   let setup: IntegrationTestSetupResult;

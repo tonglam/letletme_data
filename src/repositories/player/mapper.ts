@@ -1,44 +1,27 @@
-import { ElementType } from 'src/types/base.type';
 import { Player, PlayerId } from 'src/types/domain/player.type';
 
-import { PrismaPlayer, PrismaPlayerCreate, PrismaPlayerCreateInput } from './type';
+import { PrismaPlayer, PrismaPlayerCreateInput } from './type';
 
 export const mapPrismaPlayerToDomain = (prismaPlayer: PrismaPlayer): Player => ({
   element: prismaPlayer.element as PlayerId,
-  code: prismaPlayer.elementCode,
-  price: prismaPlayer.price / 10,
-  startPrice: prismaPlayer.startPrice / 10,
-  elementType: prismaPlayer.elementType as ElementType,
-  firstName: prismaPlayer.firstName ?? null,
-  secondName: prismaPlayer.secondName ?? null,
+  code: prismaPlayer.code,
+  elementType: prismaPlayer.elementType,
+  team: prismaPlayer.team,
+  price: prismaPlayer.price,
+  startPrice: prismaPlayer.startPrice,
+  firstName: prismaPlayer.firstName,
+  secondName: prismaPlayer.secondName,
   webName: prismaPlayer.webName,
-  teamId: prismaPlayer.teamId,
-  mngWin: prismaPlayer.mngWin ?? undefined,
-  mngDraw: prismaPlayer.mngDraw ?? undefined,
-  mngLoss: prismaPlayer.mngLoss ?? undefined,
-  mngUnderdogWin: prismaPlayer.mngUnderdogWin ?? undefined,
-  mngUnderdogDraw: prismaPlayer.mngUnderdogDraw ?? undefined,
-  mngCleanSheets: prismaPlayer.mngCleanSheets ?? undefined,
-  mngGoalsScored: prismaPlayer.mngGoalsScored ?? undefined,
 });
 
-export const mapDomainPlayerToPrismaCreate = (
-  domainPlayer: PrismaPlayerCreate,
-): PrismaPlayerCreateInput => ({
-  element: domainPlayer.id as number,
-  elementCode: domainPlayer.elementCode,
-  price: Math.round(domainPlayer.price * 10),
-  startPrice: Math.round(domainPlayer.startPrice * 10),
-  elementType: domainPlayer.elementType as number,
+export const mapDomainPlayerToPrismaCreate = (domainPlayer: Player): PrismaPlayerCreateInput => ({
+  element: domainPlayer.element,
+  code: domainPlayer.code,
+  elementType: domainPlayer.elementType,
+  team: domainPlayer.team,
+  price: domainPlayer.price,
+  startPrice: domainPlayer.startPrice,
   firstName: domainPlayer.firstName,
   secondName: domainPlayer.secondName,
   webName: domainPlayer.webName,
-  teamId: domainPlayer.teamId,
-  mngWin: domainPlayer.mngWin ?? null,
-  mngDraw: domainPlayer.mngDraw ?? null,
-  mngLoss: domainPlayer.mngLoss ?? null,
-  mngUnderdogWin: domainPlayer.mngUnderdogWin ?? null,
-  mngUnderdogDraw: domainPlayer.mngUnderdogDraw ?? null,
-  mngCleanSheets: domainPlayer.mngCleanSheets ?? null,
-  mngGoalsScored: domainPlayer.mngGoalsScored ?? null,
 });

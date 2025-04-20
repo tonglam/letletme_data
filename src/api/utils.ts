@@ -2,8 +2,8 @@ import { Response } from 'express';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 
-import { APIError, APIErrorCode, APIErrorResponse, getErrorStatus } from '../types/error.type';
 import { APIResponseData } from './types';
+import { APIError, APIErrorCode, APIErrorResponse, getErrorStatus } from '../types/error.type';
 
 export const formatResponse = <T>(data: T): APIResponseData<T> => ({
   data,

@@ -1,16 +1,17 @@
-import { PlayerCache, PlayerCacheConfig, PlayerRepository } from 'domains/player/types';
+import { PlayerCache, PlayerCacheConfig } from 'domains/player/types';
 import * as E from 'fp-ts/Either';
 import { flow, pipe } from 'fp-ts/function';
 import * as O from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
 import { CachePrefix } from 'src/configs/cache/cache.config';
 import { redisClient } from 'src/infrastructures/cache/client';
-import { getCurrentSeason } from 'src/types/base.type';
-import { Player, PlayerId, Players } from 'src/types/domain/player.type';
+import { PlayerRepository } from 'src/repositories/player/type';
+import { Player, Players } from 'src/types/domain/player.type';
 import { CacheError, CacheErrorCode, createCacheError, DomainError } from 'src/types/error.type';
+import { getCurrentSeason } from 'src/utils/common.util';
 import { mapCacheErrorToDomainError, mapRepositoryErrorToCacheError } from 'src/utils/error.util';
 
-const parsePlayer = (playerStr: string): E.Either<CacheError, Player | null> =>
+const parsePlayer = (playerStr: string): E.Either<CacheError, Player> =>
   pipe(
     E.tryCatch(
       () => JSON.parse(playerStr),
@@ -24,11 +25,16 @@ const parsePlayer = (playerStr: string): E.Either<CacheError, Player | null> =>
     E.chain((parsed) =>
       parsed && typeof parsed === 'object' && 'id' in parsed && typeof parsed.id === 'number'
         ? E.right(parsed as Player)
-        : E.right(null),
+        : E.left(
+            createCacheError({
+              code: CacheErrorCode.DESERIALIZATION_ERROR,
+              message: 'Parsed object is not a valid Player structure',
+            }),
+          ),
     ),
   );
 
-const parsePlayers = (playersMap: Record<string, string>): E.Either<CacheError, Player[]> =>
+const parsePlayers = (playersMap: Record<string, string>): E.Either<CacheError, Players> =>
   pipe(
     Object.values(playersMap),
     (playerStrs) =>
@@ -52,36 +58,7 @@ export const createPlayerCache = (
   const { keyPrefix, season } = config;
   const baseKey = `${keyPrefix}::${season}`;
 
-  const getPlayer = (id: PlayerId): TE.TaskEither<DomainError, Player | null> =>
-    pipe(
-      TE.tryCatch(
-        () => redisClient.hget(baseKey, id.toString()),
-        (error: unknown) =>
-          createCacheError({
-            code: CacheErrorCode.OPERATION_ERROR,
-            message: 'Cache Read Error: Failed to get player',
-            cause: error as Error,
-          }),
-      ),
-      TE.chain(
-        flow(
-          O.fromNullable,
-          O.fold(
-            () =>
-              pipe(
-                repository.findById(id),
-                TE.mapLeft(
-                  mapRepositoryErrorToCacheError('Repository Error: Failed to get player'),
-                ),
-              ),
-            (playerStr) => pipe(parsePlayer(playerStr), TE.fromEither),
-          ),
-        ),
-      ),
-      TE.mapLeft(mapCacheErrorToDomainError),
-    );
-
-  const getAllPlayers = (): TE.TaskEither<DomainError, Players | null> =>
+  const getAllPlayers = (): TE.TaskEither<DomainError, Players> =>
     pipe(
       TE.tryCatch(
         () => redisClient.hgetall(baseKey),
@@ -104,6 +81,7 @@ export const createPlayerCache = (
                 TE.mapLeft(
                   mapRepositoryErrorToCacheError('Repository Error: Failed to get all players'),
                 ),
+                (task: TE.TaskEither<CacheError, Players>) => task,
                 TE.mapLeft(mapCacheErrorToDomainError),
                 TE.chainFirst((players) => setAllPlayers(players)),
               ),
@@ -116,7 +94,6 @@ export const createPlayerCache = (
           ),
         ),
       ),
-      TE.map((players) => (players.length > 0 ? players : [])),
     );
 
   const setAllPlayers = (players: Players): TE.TaskEither<DomainError, void> =>
@@ -160,7 +137,6 @@ export const createPlayerCache = (
     );
 
   return {
-    getPlayer,
     getAllPlayers,
     setAllPlayers,
     deleteAllPlayers,

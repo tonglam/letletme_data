@@ -1,31 +1,59 @@
 import { createPlayerOperations } from 'domains/player/operation';
-import { PlayerCache, PlayerOperations, PlayerRepository } from 'domains/player/types';
+import { PlayerCache, PlayerOperations } from 'domains/player/types';
 import { pipe } from 'fp-ts/function';
+import * as RA from 'fp-ts/ReadonlyArray';
 import * as TE from 'fp-ts/TaskEither';
 import { FplBootstrapDataService } from 'src/data/types';
-import { PrismaPlayerCreate } from 'src/repositories/player/type';
+import { PlayerCreateInputs, PlayerRepository } from 'src/repositories/player/type';
 import { Player, PlayerId, Players } from 'src/types/domain/player.type';
-import { DataLayerError, ServiceError } from 'src/types/error.type';
+import { TeamId } from 'src/types/domain/team.type';
+import {
+  createDomainError,
+  DataLayerError,
+  DomainErrorCode,
+  ServiceError,
+} from 'src/types/error.type';
 import { createServiceIntegrationError, mapDomainErrorToServiceError } from 'src/utils/error.util';
+
 import { PlayerService, PlayerServiceOperations } from './types';
 
 const playerServiceOperations = (
-  domainOps: PlayerOperations,
   fplDataService: FplBootstrapDataService,
+  domainOps: PlayerOperations,
+  cache: PlayerCache,
 ): PlayerServiceOperations => ({
-  findAllPlayers: () =>
-    pipe(domainOps.getAllPlayers(), TE.mapLeft(mapDomainErrorToServiceError)) as TE.TaskEither<
-      ServiceError,
-      Players
-    >,
+  findAllPlayers: (): TE.TaskEither<ServiceError, Players> =>
+    pipe(cache.getAllPlayers(), TE.mapLeft(mapDomainErrorToServiceError)),
 
-  findPlayerById: (id: PlayerId) =>
-    pipe(domainOps.getPlayerById(id), TE.mapLeft(mapDomainErrorToServiceError)) as TE.TaskEither<
-      ServiceError,
-      Player | null
-    >,
+  findPlayerById: (element: PlayerId): TE.TaskEither<ServiceError, Player> =>
+    pipe(
+      cache.getAllPlayers(),
+      TE.mapLeft(mapDomainErrorToServiceError),
+      TE.chainOptionK(() =>
+        mapDomainErrorToServiceError(
+          createDomainError({
+            code: DomainErrorCode.NOT_FOUND,
+            message: `Player with ID ${element} not found in cache.`,
+          }),
+        ),
+      )((players) => RA.findFirst((p: Player) => p.element === element)(players)),
+    ),
 
-  syncPlayersFromApi: () =>
+  findPlayerByElementType: (elementType: number): TE.TaskEither<ServiceError, Players> =>
+    pipe(
+      cache.getAllPlayers(),
+      TE.mapLeft(mapDomainErrorToServiceError),
+      TE.map((players) => RA.filter((p: Player) => p.elementType === elementType)(players)),
+    ),
+
+  findPlayerByTeam: (team: TeamId): TE.TaskEither<ServiceError, Players> =>
+    pipe(
+      cache.getAllPlayers(),
+      TE.mapLeft(mapDomainErrorToServiceError),
+      TE.map((players) => RA.filter((p: Player) => p.team === team)(players)),
+    ),
+
+  syncPlayersFromApi: (): TE.TaskEither<ServiceError, void> =>
     pipe(
       fplDataService.getPlayers(),
       TE.mapLeft((error: DataLayerError) =>
@@ -35,35 +63,34 @@ const playerServiceOperations = (
           details: error.details,
         }),
       ),
-      TE.map((rawData) => mapRawDataToPlayerCreateArray(rawData)),
-      TE.chainFirstW((playerCreateData) =>
-        pipe(
-          domainOps.deleteAllPlayers(),
-          TE.mapLeft(mapDomainErrorToServiceError),
-          TE.map(() => playerCreateData),
-        ),
+      TE.chainFirstW(() =>
+        pipe(domainOps.deleteAllPlayers(), TE.mapLeft(mapDomainErrorToServiceError)),
       ),
-      TE.chain((playerCreateData) =>
+      TE.chainW((playerCreateData: PlayerCreateInputs) =>
         pipe(domainOps.savePlayers(playerCreateData), TE.mapLeft(mapDomainErrorToServiceError)),
       ),
-    ) as TE.TaskEither<ServiceError, Players>,
+      TE.chainFirstW((savedPlayers: Players) =>
+        pipe(cache.setAllPlayers(savedPlayers), TE.mapLeft(mapDomainErrorToServiceError)),
+      ),
+      TE.map(() => void 0),
+    ),
 });
-
-const mapRawDataToPlayerCreateArray = (rawData: Players): PrismaPlayerCreate[] => {
-  return rawData.map((player) => player as PrismaPlayerCreate);
-};
 
 export const createPlayerService = (
   fplDataService: FplBootstrapDataService,
   repository: PlayerRepository,
   cache: PlayerCache,
 ): PlayerService => {
-  const domainOps = createPlayerOperations(repository, cache);
-  const ops = playerServiceOperations(domainOps, fplDataService);
+  const domainOps = createPlayerOperations(repository);
+  const ops = playerServiceOperations(fplDataService, domainOps, cache);
 
   return {
-    getPlayers: () => ops.findAllPlayers(),
-    getPlayer: (id: PlayerId) => ops.findPlayerById(id),
-    syncPlayersFromApi: () => ops.syncPlayersFromApi(),
+    getPlayers: (): TE.TaskEither<ServiceError, Players> => ops.findAllPlayers(),
+    getPlayer: (id: PlayerId): TE.TaskEither<ServiceError, Player> => ops.findPlayerById(id),
+    getPlayerByElementType: (elementType: number): TE.TaskEither<ServiceError, Players> =>
+      ops.findPlayerByElementType(elementType),
+    getPlayerByTeam: (team: TeamId): TE.TaskEither<ServiceError, Players> =>
+      ops.findPlayerByTeam(team),
+    syncPlayersFromApi: (): TE.TaskEither<ServiceError, void> => ops.syncPlayersFromApi(),
   };
 };

@@ -1,6 +1,6 @@
 import { Router } from 'express';
-import { PlayerValueService } from '../../services/player-value/types';
 
+import { PlayerValueService } from '../../services/player-value/types';
 import { createPlayerValueHandlers } from '../handlers/player-value.handler';
 import { createHandler } from '../middlewares/core';
 

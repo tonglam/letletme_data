@@ -6,27 +6,29 @@ import request from 'supertest';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 // Use the generic setup
+
+// Import the SHARED redis client used by the application
+
+// Specific imports for this test suite
+import { eventRouter } from '../../../src/api/event/event.route';
+import { CachePrefix } from '../../../src/configs/cache/cache.config';
+import { createFplBootstrapDataService } from '../../../src/data/fpl/bootstrap.data';
+import { FplBootstrapDataService } from '../../../src/data/types';
+import { createEventCache } from '../../../src/domains/event/cache';
+import { EventCache } from '../../../src/domains/event/types';
+import { redisClient } from '../../../src/infrastructures/cache/client';
+import { HTTPClient } from '../../../src/infrastructures/http';
+import { createEventRepository } from '../../../src/repositories/event/repository';
+import { EventRepository } from '../../../src/repositories/event/type';
+import { createEventService } from '../../../src/services/event/service';
+import { EventService } from '../../../src/services/event/types';
+import { Event, EventId } from '../../../src/types/domain/event.type';
+import { APIErrorCode } from '../../../src/types/error.type';
 import {
   IntegrationTestSetupResult,
   setupIntegrationTest,
   teardownIntegrationTest,
 } from '../../setup/integrationTestSetup';
-
-// Import the SHARED redis client used by the application
-import { redisClient } from '../../../src/infrastructures/cache/client';
-
-// Specific imports for this test suite
-import { eventRouter } from '../../../src/api/routes/event.route';
-import { CachePrefix } from '../../../src/configs/cache/cache.config';
-import { createFplBootstrapDataService } from '../../../src/data/fpl/bootstrap.data';
-import { FplBootstrapDataService } from '../../../src/data/types';
-import { createEventCache } from '../../../src/domains/event/cache';
-import { EventCache, EventRepository } from '../../../src/domains/event/types';
-import { HTTPClient } from '../../../src/infrastructures/http';
-import { createEventRepository } from '../../../src/repositories/event/repository';
-import { createEventService } from '../../../src/services/event/service';
-import { EventService } from '../../../src/services/event/types';
-import { Event, EventId } from '../../../src/types/domain/event.type';
 
 describe('Event Routes Integration Tests', () => {
   let setup: IntegrationTestSetupResult;
@@ -103,17 +105,19 @@ describe('Event Routes Integration Tests', () => {
 
     expect(res.status).toBe(200);
     expect(res.body).toBeDefined();
-    expect(res.body).toHaveProperty('data'); // Check data property exists
-    expect(res.body.data).toHaveProperty('isCurrent', true); // Check nested property
+    expect(res.body).toHaveProperty('data');
+    expect(res.body.data).toHaveProperty('isCurrent', true);
   });
 
-  it('GET /events/next should return the next event within a data object', async () => {
-    const res = await request(app).get('/events/next');
+  it('GET /events/next-id should return the next event ID within a data object', async () => {
+    const res = await request(app).get('/events/next-id');
 
     expect(res.status).toBe(200);
     expect(res.body).toBeDefined();
-    expect(res.body).toHaveProperty('data'); // Check data property exists
-    expect(res.body.data).toHaveProperty('isNext', true); // Check nested property
+    expect(res.body).toHaveProperty('data');
+    // Check that the data is a number (the ID)
+    expect(typeof res.body.data).toBe('number');
+    expect(res.body.data).toBeGreaterThan(0); // Basic sanity check for the ID
   });
 
   it('GET /events/:id should return the event within a data object', async () => {
@@ -134,12 +138,12 @@ describe('Event Routes Integration Tests', () => {
     expect(res.body.data).toHaveProperty('name');
   });
 
-  it('GET /events/:id should return 404 if event ID does not exist', async () => {
-    const nonExistentEventId = 99999 as EventId;
-    const res = await request(app).get(`/events/${nonExistentEventId}`);
+  it('GET /events/:id should return 400 if event ID is invalid', async () => {
+    const invalidEventId = 9999 as EventId;
+    const res = await request(app).get(`/events/${invalidEventId}`);
 
-    expect(res.status).toBe(404);
-    // Optionally check the error response structure if your API provides one
-    // expect(res.body).toHaveProperty('error');
+    expect(res.status).toBe(400);
+    expect(res.body).toHaveProperty('error');
+    expect(res.body.error.code).toEqual(APIErrorCode.VALIDATION_ERROR);
   });
 });

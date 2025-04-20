@@ -1,35 +1,47 @@
 import { pipe } from 'fp-ts/function';
+import * as O from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
+import { PhaseService, PhaseServiceOperations } from 'services/phase/types';
 
 import { FplBootstrapDataService } from '../../data/types';
 import { createPhaseOperations } from '../../domains/phase/operation';
-import { PhaseCache, PhaseOperations, PhaseRepository } from '../../domains/phase/types';
-import { PrismaPhaseCreate } from '../../repositories/phase/type';
+import { PhaseCache, PhaseOperations } from '../../domains/phase/types';
+import { PhaseCreateInputs, PhaseRepository } from '../../repositories/phase/type';
 import { Phase, PhaseId, Phases } from '../../types/domain/phase.type';
-import { DataLayerError, ServiceError } from '../../types/error.type';
+import {
+  createDomainError,
+  DataLayerError,
+  DomainErrorCode,
+  ServiceError,
+} from '../../types/error.type';
 import {
   createServiceIntegrationError,
   mapDomainErrorToServiceError,
 } from '../../utils/error.util';
-import { PhaseService, PhaseServiceOperations } from './types';
 
 const phaseServiceOperations = (
-  domainOps: PhaseOperations,
   fplDataService: FplBootstrapDataService,
+  domainOps: PhaseOperations,
+  cache: PhaseCache,
 ): PhaseServiceOperations => ({
-  findAllPhases: () =>
-    pipe(domainOps.getAllPhases(), TE.mapLeft(mapDomainErrorToServiceError)) as TE.TaskEither<
-      ServiceError,
-      Phases
-    >,
+  findPhaseById: (id: PhaseId): TE.TaskEither<ServiceError, Phase> =>
+    pipe(
+      cache.getAllPhases(),
+      TE.mapLeft(mapDomainErrorToServiceError),
+      TE.chainOptionK(() =>
+        mapDomainErrorToServiceError(
+          createDomainError({
+            code: DomainErrorCode.NOT_FOUND,
+            message: `Phase with ID ${id} not found in cache after fetching all.`,
+          }),
+        ),
+      )((phases) => O.fromNullable(phases.find((phase) => phase.id === id))),
+    ),
 
-  findPhaseById: (id: PhaseId) =>
-    pipe(domainOps.getPhaseById(id), TE.mapLeft(mapDomainErrorToServiceError)) as TE.TaskEither<
-      ServiceError,
-      Phase | null
-    >,
+  findAllPhases: (): TE.TaskEither<ServiceError, Phases> =>
+    pipe(cache.getAllPhases(), TE.mapLeft(mapDomainErrorToServiceError)),
 
-  syncPhasesFromApi: () =>
+  syncPhasesFromApi: (): TE.TaskEither<ServiceError, void> =>
     pipe(
       fplDataService.getPhases(),
       TE.mapLeft((error: DataLayerError) =>
@@ -39,35 +51,30 @@ const phaseServiceOperations = (
           details: error.details,
         }),
       ),
-      TE.map((rawData) => mapRawDataToPhaseCreateArray(rawData)),
-      TE.chainFirstW((phaseCreateData) =>
-        pipe(
-          domainOps.deleteAllPhases(),
-          TE.mapLeft(mapDomainErrorToServiceError),
-          TE.map(() => phaseCreateData),
-        ),
+      TE.chainFirstW(() =>
+        pipe(domainOps.deleteAllPhases(), TE.mapLeft(mapDomainErrorToServiceError)),
       ),
-      TE.chain((phaseCreateData) =>
-        pipe(domainOps.savePhases(phaseCreateData), TE.mapLeft(mapDomainErrorToServiceError)),
+      TE.chainW((phasesCreateData: PhaseCreateInputs) =>
+        pipe(domainOps.savePhases(phasesCreateData), TE.mapLeft(mapDomainErrorToServiceError)),
       ),
-    ) as TE.TaskEither<ServiceError, Phases>,
+      TE.chainFirstW((savedPhases: Phases) =>
+        pipe(cache.setAllPhases(savedPhases), TE.mapLeft(mapDomainErrorToServiceError)),
+      ),
+      TE.map(() => void 0),
+    ),
 });
-
-const mapRawDataToPhaseCreateArray = (rawData: Phases): PrismaPhaseCreate[] => {
-  return rawData.map((phase) => phase as PrismaPhaseCreate);
-};
 
 export const createPhaseService = (
   fplDataService: FplBootstrapDataService,
   repository: PhaseRepository,
   cache: PhaseCache,
 ): PhaseService => {
-  const domainOps = createPhaseOperations(repository, cache);
-  const ops = phaseServiceOperations(domainOps, fplDataService);
+  const domainOps = createPhaseOperations(repository);
+  const ops = phaseServiceOperations(fplDataService, domainOps, cache);
 
   return {
-    getPhases: () => ops.findAllPhases(),
-    getPhase: (id: PhaseId) => ops.findPhaseById(id),
-    syncPhasesFromApi: () => ops.syncPhasesFromApi(),
+    getPhases: (): TE.TaskEither<ServiceError, Phases> => ops.findAllPhases(),
+    getPhase: (id: PhaseId): TE.TaskEither<ServiceError, Phase> => ops.findPhaseById(id),
+    syncPhasesFromApi: (): TE.TaskEither<ServiceError, void> => ops.syncPhasesFromApi(),
   };
 };

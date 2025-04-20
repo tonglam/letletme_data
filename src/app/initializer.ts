@@ -1,11 +1,13 @@
+import { Server } from 'http';
+
 import express, { Application } from 'express';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { Server } from 'http';
-import { APIError } from '../types/error.type';
+
 import { createDependencies } from './dependencies';
 import { createServer } from './server';
 import { ApplicationServices, createApplicationServices } from './services';
+import { APIError } from '../types/error.type';
 
 export const setupApplication = (): TE.TaskEither<
   APIError,
