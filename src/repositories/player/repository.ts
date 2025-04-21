@@ -55,7 +55,6 @@ export const createPlayerRepository = (prisma: PrismaClient): PlayerRepository =
             data: dataToCreate,
             skipDuplicates: true,
           });
-          return players;
         },
         (error) =>
           createDBError({

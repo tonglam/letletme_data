@@ -1,11 +1,11 @@
 import { Router } from 'express';
 
 import { eventRouter } from './event/event.route';
-import { phaseRouter } from './routes/phase.route';
-import { playerStatRouter } from './routes/player-stat.route';
-import { playerValueRouter } from './routes/player-value.route';
-import { playerRouter } from './routes/player.route';
-import { teamRouter } from './routes/team.route';
+import { phaseRouter } from './phase/phase.route';
+import { playerStatRouter } from './player-stat/player-stat.route';
+import { playerValueRouter } from './player-value/player-value.route';
+import { playerRouter } from './player/player.route';
+import { teamRouter } from './team/team.route';
 
 import type { ApplicationServices } from '../app/services';
 

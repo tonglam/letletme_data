@@ -23,12 +23,15 @@ const parsePlayer = (playerStr: string): E.Either<CacheError, Player> =>
         }),
     ),
     E.chain((parsed) =>
-      parsed && typeof parsed === 'object' && 'id' in parsed && typeof parsed.id === 'number'
+      parsed &&
+      typeof parsed === 'object' &&
+      'element' in parsed &&
+      typeof parsed.element === 'number'
         ? E.right(parsed as Player)
         : E.left(
             createCacheError({
               code: CacheErrorCode.DESERIALIZATION_ERROR,
-              message: 'Parsed object is not a valid Player structure',
+              message: 'Parsed object is not a valid Player structure (missing/invalid element)',
             }),
           ),
     ),

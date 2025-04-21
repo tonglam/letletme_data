@@ -6,8 +6,9 @@ import { APIError } from '../../types/error.type';
 
 export interface EventHandlerResponse {
   readonly getAllEvents: () => TaskEither<APIError, Events>;
-  readonly getEventById: (req: Request) => TaskEither<APIError, Event>;
   readonly getCurrentEvent: () => TaskEither<APIError, Event>;
   readonly getLastEvent: () => TaskEither<APIError, Event>;
   readonly getNextEvent: () => TaskEither<APIError, Event>;
+  readonly syncEvents: () => TaskEither<APIError, void>;
+  readonly getEventById: (req: Request) => TaskEither<APIError, Event>;
 }

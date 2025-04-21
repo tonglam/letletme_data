@@ -2,36 +2,40 @@ import { Request } from 'express';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
+import { PlayerHandlerResponse } from 'src/api/player/types';
 
 import { PlayerService } from '../../services/player/types';
 import { Player, PlayerId, Players, validatePlayerId } from '../../types/domain/player.type';
 import { APIError, APIErrorCode, createAPIError } from '../../types/error.type';
 import { toAPIError } from '../../utils/error.util';
-import { PlayerHandlerResponse } from '../types';
 
-export const createPlayerHandlers = (playerService: PlayerService): PlayerHandlerResponse => ({
-  getAllPlayers: (): TE.TaskEither<APIError, Player[]> => {
+export const createPlayerHandlers = (playerService: PlayerService): PlayerHandlerResponse => {
+  const getAllPlayers = (): TE.TaskEither<APIError, Player[]> => {
     return pipe(
       playerService.getPlayers(),
       TE.mapLeft(toAPIError),
       TE.map((players: Players) => [...players]),
     );
-  },
+  };
 
-  getPlayerById: (req: Request): TE.TaskEither<APIError, Player> => {
-    const idParam = req.params.id;
-    const parsedId = parseInt(idParam, 10);
+  const syncPlayers = (): TE.TaskEither<APIError, void> => {
+    return pipe(playerService.syncPlayersFromApi(), TE.mapLeft(toAPIError));
+  };
 
-    if (isNaN(parsedId)) {
+  const getPlayerByElement = (req: Request): TE.TaskEither<APIError, Player> => {
+    const elementParam = req.params.element;
+    const parsedElement = parseInt(elementParam);
+
+    if (isNaN(parsedElement)) {
       return TE.left(
         createAPIError({
           code: APIErrorCode.VALIDATION_ERROR,
-          message: 'Invalid player ID format: must be a numeric string',
+          message: 'Invalid player element format: must be a numeric string',
         }),
       );
     }
 
-    const validatedId = validatePlayerId(parsedId);
+    const validatedId = validatePlayerId(parsedElement);
     if (E.isLeft(validatedId)) {
       return TE.left(
         createAPIError({
@@ -55,5 +59,11 @@ export const createPlayerHandlers = (playerService: PlayerService): PlayerHandle
           : TE.right(player),
       ),
     );
-  },
-});
+  };
+
+  return {
+    getAllPlayers,
+    syncPlayers,
+    getPlayerByElement: getPlayerByElement,
+  };
+};

@@ -8,15 +8,16 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 // Setup
 
 // Specific imports
-import { playerRouter } from '../../../src/api/routes/player.route'; // Import the router
+import { playerRouter } from '../../../src/api/player/player.route'; // Import the router
 import { CachePrefix } from '../../../src/configs/cache/cache.config';
 import { createFplBootstrapDataService } from '../../../src/data/fpl/bootstrap.data';
 import { FplBootstrapDataService } from '../../../src/data/types';
 import { createPlayerCache } from '../../../src/domains/player/cache';
-import { PlayerCache, PlayerRepository } from '../../../src/domains/player/types';
+import { PlayerCache } from '../../../src/domains/player/types';
 import { redisClient } from '../../../src/infrastructures/cache/client';
 import { HTTPClient } from '../../../src/infrastructures/http';
 import { createPlayerRepository } from '../../../src/repositories/player/repository';
+import { PlayerRepository } from '../../../src/repositories/player/type';
 import { createPlayerService } from '../../../src/services/player/service';
 import { PlayerService } from '../../../src/services/player/types';
 import { Player, PlayerId } from '../../../src/types/domain/player.type';
@@ -78,10 +79,22 @@ describe('Player Routes Integration Tests', () => {
       logger.error({ error: syncResult.left }, 'Sync failed in beforeEach');
       throw new Error('Player sync failed in beforeEach, cannot proceed with tests.');
     }
-    if (syncResult.right.length === 0) {
-      throw new Error('Player sync succeeded but returned 0 players in beforeEach.');
+    // Don't check syncResult.right.length as sync returns void
+    // if (syncResult.right.length === 0) { // REMOVED this check
+    //   throw new Error('Player sync succeeded but returned 0 players in beforeEach.');
+    // }
+
+    // Optional: Verify sync side-effect by fetching players if necessary
+    const verifyPlayers = await playerService.getPlayers()();
+    if (E.isLeft(verifyPlayers) || verifyPlayers.right.length === 0) {
+      logger.error(
+        { error: verifyPlayers },
+        'Verification fetch failed or returned 0 players in beforeEach',
+      );
+      throw new Error('Player sync side-effect verification failed in beforeEach.');
     }
-    logger.info('Sync completed successfully in beforeEach');
+
+    logger.info('Sync completed and verified successfully in beforeEach');
   });
 
   afterAll(async () => {

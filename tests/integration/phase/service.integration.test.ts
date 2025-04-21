@@ -12,10 +12,11 @@ import { CachePrefix } from '../../../src/configs/cache/cache.config';
 import { createFplBootstrapDataService } from '../../../src/data/fpl/bootstrap.data';
 import { FplBootstrapDataService } from '../../../src/data/types';
 import { createPhaseCache } from '../../../src/domains/phase/cache';
-import { PhaseCache, PhaseRepository } from '../../../src/domains/phase/types';
+import { PhaseCache } from '../../../src/domains/phase/types';
 import { redisClient } from '../../../src/infrastructures/cache/client';
 import { HTTPClient } from '../../../src/infrastructures/http';
 import { createPhaseRepository } from '../../../src/repositories/phase/repository';
+import { PhaseRepository } from '../../../src/repositories/phase/type';
 import { createPhaseService } from '../../../src/services/phase/service';
 import { PhaseService } from '../../../src/services/phase/types';
 import { phaseWorkflows } from '../../../src/services/phase/workflow';
@@ -79,9 +80,14 @@ describe('Phase Integration Tests', () => {
     it('should fetch phases from API, store in database, and cache them', async () => {
       const syncResult = await phaseService.syncPhasesFromApi()();
 
+      // Check sync succeeded (returned Right<void>)
       expect(E.isRight(syncResult)).toBe(true);
-      if (E.isRight(syncResult)) {
-        const phases = syncResult.right;
+
+      // Now check if phases were actually stored by fetching them
+      const getPhasesResult = await phaseService.getPhases()();
+      expect(E.isRight(getPhasesResult)).toBe(true);
+      if (E.isRight(getPhasesResult)) {
+        const phases = getPhasesResult.right;
         expect(phases.length).toBeGreaterThan(0);
         const firstPhase = phases[0];
         expect(firstPhase).toHaveProperty('id');
@@ -90,9 +96,11 @@ describe('Phase Integration Tests', () => {
         expect(firstPhase).toHaveProperty('stopEvent');
       }
 
+      // Check DB directly
       const dbPhases = await prisma.phase.findMany();
       expect(dbPhases.length).toBeGreaterThan(0);
 
+      // Check cache directly
       const cacheKey = `${cachePrefix}::${testSeason}`;
       // Use shared client for check
       const keyExists = await redisClient.exists(cacheKey);
@@ -101,18 +109,33 @@ describe('Phase Integration Tests', () => {
 
     it('should get phase by ID after syncing', async () => {
       const syncResult = await phaseService.syncPhasesFromApi()();
+      expect(E.isRight(syncResult)).toBe(true); // Ensure sync completed successfully (Right<void>)
 
-      if (E.isRight(syncResult)) {
-        const phases = syncResult.right;
-        if (phases.length > 0) {
-          const firstPhaseId = phases[0].id;
-          const phaseResult = await phaseService.getPhase(firstPhaseId)();
+      // Fetch all phases to get a valid ID
+      const getPhasesResult = await phaseService.getPhases()();
+      expect(E.isRight(getPhasesResult)).toBe(true);
 
-          expect(E.isRight(phaseResult)).toBe(true);
-          if (E.isRight(phaseResult) && phaseResult.right) {
-            expect(phaseResult.right.id).toEqual(firstPhaseId);
-          }
+      if (E.isRight(getPhasesResult)) {
+        const phases = getPhasesResult.right;
+        expect(phases.length).toBeGreaterThan(0); // Make sure we have phases to test with
+
+        const firstPhaseId = phases[0].id;
+        const phaseResult = await phaseService.getPhase(firstPhaseId)();
+
+        expect(E.isRight(phaseResult)).toBe(true);
+        if (E.isRight(phaseResult)) {
+          // Check Right<Phase> explicitly
+          expect(phaseResult.right).toBeDefined();
+          expect(phaseResult.right.id).toEqual(firstPhaseId);
+        } else {
+          // Fail test if phaseResult is Left
+          throw new Error(`Expected Right but got Left: ${JSON.stringify(phaseResult.left)}`);
         }
+      } else {
+        // Fail test if getPhasesResult is Left
+        throw new Error(
+          `Expected Right but got Left when getting phases: ${JSON.stringify(getPhasesResult.left)}`,
+        );
       }
     });
   });
@@ -122,15 +145,18 @@ describe('Phase Integration Tests', () => {
       const workflows = phaseWorkflows(phaseService);
       const result = await workflows.syncPhases()();
 
-      expect(E.isRight(result)).toBe(true);
+      expect(E.isRight(result)).toBe(true); // Check workflow completed successfully
       if (E.isRight(result)) {
         expect(result.right.context).toBeDefined();
         expect(result.right.duration).toBeGreaterThan(0);
-        expect(result.right.result).toBeDefined();
-        expect(result.right.result.length).toBeGreaterThan(0);
+        // WorkflowResult doesn't contain the void result, just context/duration
 
+        // Verify side effect: check database
         const dbPhases = await prisma.phase.findMany();
-        expect(dbPhases.length).toEqual(result.right.result.length);
+        expect(dbPhases.length).toBeGreaterThan(0); // Check that phases were actually synced
+      } else {
+        // Fail test if workflow result is Left
+        throw new Error(`Workflow failed: ${JSON.stringify(result.left)}`);
       }
     });
   });

@@ -443,9 +443,9 @@ export const mapCacheErrorToDomainError = (cacheError: CacheError): DomainError 
 
 export const mapDomainErrorToServiceError = (error: DomainError): ServiceError =>
   createServiceError({
-    code: ServiceErrorCode.OPERATION_ERROR,
+    code: ServiceErrorCode.INTEGRATION_ERROR,
     message: `Domain Operation Failed: ${error.message}`,
-    cause: error.cause,
+    cause: error,
   });
 
 export const getErrorMessage = (error: unknown): string =>

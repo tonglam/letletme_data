@@ -1,23 +1,27 @@
 import { Request } from 'express';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
+import { PhaseHandlerResponse } from 'src/api/phase/types';
 
 import { PhaseService } from '../../services/phase/types';
-import { PhaseId } from '../../types/domain/phase.type';
-import { APIErrorCode, createAPIError } from '../../types/error.type';
+import { Phase, PhaseId, Phases } from '../../types/domain/phase.type';
+import { APIError, APIErrorCode, createAPIError } from '../../types/error.type';
 import { toAPIError } from '../../utils/error.util';
-import { PhaseHandlerResponse } from '../types';
 
-export const createPhaseHandlers = (phaseService: PhaseService): PhaseHandlerResponse => ({
-  getAllPhases: () => {
+export const createPhaseHandlers = (phaseService: PhaseService): PhaseHandlerResponse => {
+  const getAllPhases = (): TE.TaskEither<APIError, Phases> => {
     return pipe(
       phaseService.getPhases(),
       TE.mapLeft(toAPIError),
       TE.map((phases) => phases),
     );
-  },
+  };
 
-  getPhaseById: (req: Request) => {
+  const syncPhases = (): TE.TaskEither<APIError, void> => {
+    return pipe(phaseService.syncPhasesFromApi(), TE.mapLeft(toAPIError));
+  };
+
+  const getPhaseById = (req: Request): TE.TaskEither<APIError, Phase> => {
     const phaseId = Number(req.params.id);
     if (isNaN(phaseId) || phaseId <= 0) {
       return TE.left(
@@ -42,5 +46,11 @@ export const createPhaseHandlers = (phaseService: PhaseService): PhaseHandlerRes
           : TE.right(phase),
       ),
     );
-  },
-});
+  };
+
+  return {
+    getAllPhases,
+    syncPhases,
+    getPhaseById,
+  };
+};

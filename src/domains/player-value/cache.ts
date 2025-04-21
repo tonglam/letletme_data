@@ -3,12 +3,12 @@ import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as O from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
-import { CachePrefix } from 'src/configs/cache/cache.config';
+import { CachePrefix, DefaultTTL } from 'src/configs/cache/cache.config';
 import { redisClient } from 'src/infrastructures/cache/client';
+import { PlayerValueRepository } from 'src/repositories/player-value/type';
 import { SourcePlayerValues } from 'src/types/domain/player-value.type';
 import { CacheError, CacheErrorCode, createCacheError, DomainError } from 'src/types/error.type';
-import { formatYYYYMMDD } from 'src/utils/date.util';
-import { mapCacheErrorToDomainError } from 'src/utils/error.util';
+import { mapCacheErrorToDomainError, mapRepositoryErrorToCacheError } from 'src/utils/error.util';
 
 const parsePlayerValues = (playerValuesStr: string): E.Either<CacheError, SourcePlayerValues> =>
   pipe(
@@ -34,18 +34,22 @@ const parsePlayerValues = (playerValuesStr: string): E.Either<CacheError, Source
   );
 
 export const createPlayerValueCache = (
+  repository: PlayerValueRepository,
   config: PlayerValueCacheConfig = {
     keyPrefix: CachePrefix.PLAYER_VALUE,
-    changeDate: formatYYYYMMDD(),
+    ttlSeconds: DefaultTTL.PLAYER_VALUE,
   },
 ): PlayerValueCache => {
-  const { keyPrefix } = config;
+  const { keyPrefix, ttlSeconds } = config;
   const baseKey = `${keyPrefix}`;
 
-  const getPlayerValuesByChangeDate = (): TE.TaskEither<DomainError, SourcePlayerValues> =>
-    pipe(
+  const getPlayerValuesByChangeDate = (
+    changeDate: string,
+  ): TE.TaskEither<DomainError, SourcePlayerValues> => {
+    const key = `${baseKey}:${changeDate}`;
+    return pipe(
       TE.tryCatch(
-        () => redisClient.smembers(baseKey),
+        () => redisClient.get(key),
         (error: unknown) =>
           createCacheError({
             code: CacheErrorCode.OPERATION_ERROR,
@@ -53,34 +57,41 @@ export const createPlayerValueCache = (
             cause: error as Error,
           }),
       ),
-      TE.chain((playerValuesStrArray) =>
-        pipe(
-          O.fromNullable(playerValuesStrArray),
-          O.fold(
-            () =>
-              TE.left(
-                createCacheError({
-                  code: CacheErrorCode.NOT_FOUND,
-                  message: 'Cache Miss: No player values found for the given change date',
-                }),
+      TE.mapLeft(mapCacheErrorToDomainError),
+      TE.map(O.fromNullable),
+      TE.chain(
+        O.fold(
+          () =>
+            pipe(
+              repository.findByChangeDate(changeDate),
+              TE.mapLeft(
+                mapRepositoryErrorToCacheError('Repository Error: Failed to findByChangeDate'),
               ),
-            (values) => pipe(`[${values.join(',')}]`, parsePlayerValues, TE.fromEither),
-          ),
+              TE.mapLeft(mapCacheErrorToDomainError),
+              TE.chainFirstW((playerValues) =>
+                setPlayerValuesByChangeDate(changeDate, playerValues),
+              ),
+            ),
+          (cachedJsonString) =>
+            pipe(
+              parsePlayerValues(cachedJsonString),
+              TE.fromEither,
+              TE.mapLeft(mapCacheErrorToDomainError),
+            ),
         ),
       ),
-      TE.mapLeft(mapCacheErrorToDomainError),
+      TE.map((playerValues) => (playerValues ? playerValues : [])),
     );
+  };
 
   const setPlayerValuesByChangeDate = (
+    changeDate: string,
     playerValues: SourcePlayerValues,
-  ): TE.TaskEither<DomainError, void> =>
-    pipe(
+  ): TE.TaskEither<DomainError, void> => {
+    const key = `${baseKey}:${changeDate}`;
+    return pipe(
       TE.tryCatch(
-        () =>
-          redisClient.sadd(
-            baseKey,
-            playerValues.map((value) => JSON.stringify(value)),
-          ),
+        () => redisClient.set(key, JSON.stringify(playerValues), 'EX', ttlSeconds),
         (error: unknown) =>
           createCacheError({
             code: CacheErrorCode.OPERATION_ERROR,
@@ -91,6 +102,7 @@ export const createPlayerValueCache = (
       TE.map(() => void 0),
       TE.mapLeft(mapCacheErrorToDomainError),
     );
+  };
 
   return {
     getPlayerValuesByChangeDate,

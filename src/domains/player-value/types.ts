@@ -1,20 +1,22 @@
 import * as TE from 'fp-ts/TaskEither';
-import { CachePrefix } from 'src/configs/cache/cache.config';
 import { PlayerValueCreateInputs } from 'src/repositories/player-value/type';
 import { SourcePlayerValues } from 'src/types/domain/player-value.type';
 import { DomainError } from 'src/types/error.type';
 
-export interface PlayerValueCacheConfig {
-  readonly keyPrefix: (typeof CachePrefix)[keyof typeof CachePrefix];
-  readonly changeDate: string;
-}
+export type PlayerValueCacheConfig = {
+  keyPrefix: string;
+  ttlSeconds: number;
+};
 
-export interface PlayerValueCache {
-  readonly getPlayerValuesByChangeDate: () => TE.TaskEither<DomainError, SourcePlayerValues>;
-  readonly setPlayerValuesByChangeDate: (
+export type PlayerValueCache = {
+  getPlayerValuesByChangeDate: (
+    changeDate: string,
+  ) => TE.TaskEither<DomainError, SourcePlayerValues>;
+  setPlayerValuesByChangeDate: (
+    changeDate: string,
     playerValues: SourcePlayerValues,
   ) => TE.TaskEither<DomainError, void>;
-}
+};
 
 export interface PlayerValueOperations {
   readonly savePlayerValues: (

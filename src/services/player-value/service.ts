@@ -99,9 +99,9 @@ export const playerValueServiceOperations = (
     ): TE.TaskEither<ServiceError, PlayerValueChanges> =>
       detectAndCalculateChanges(enrichedSourceValues),
 
-    findPlayerValuesByChangeDate: (): TE.TaskEither<ServiceError, PlayerValues> =>
+    findPlayerValuesByChangeDate: (changeDate: string): TE.TaskEither<ServiceError, PlayerValues> =>
       pipe(
-        playerValueCache.getPlayerValuesByChangeDate(),
+        playerValueCache.getPlayerValuesByChangeDate(changeDate),
         TE.mapLeft(mapDomainErrorToServiceError),
         TE.chainW(enrichSourceValues),
         TE.chainW(mapToPlayerValuesTask),
@@ -199,7 +199,8 @@ export const createPlayerValueService = (
   );
 
   return {
-    getPlayerValuesByChangeDate: () => ops.findPlayerValuesByChangeDate(),
+    getPlayerValuesByChangeDate: (changeDate: string) =>
+      ops.findPlayerValuesByChangeDate(changeDate),
     getPlayerValuesByElement: (element: number) => ops.findPlayerValuesByElement(element),
     getPlayerValuesByTeam: (team: number) => ops.findPlayerValuesByTeam(team),
     syncPlayerValuesFromApi: () => ops.syncPlayerValuesFromApi(),

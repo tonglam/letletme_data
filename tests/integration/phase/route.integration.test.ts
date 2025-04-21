@@ -8,7 +8,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 // Setup
 
 // Specific imports
-import { phaseRouter } from '../../../src/api/routes/phase.route'; // Import the router
+import { phaseRouter } from '../../../src/api/phase/phase.route'; // Import the router
 import { CachePrefix } from '../../../src/configs/cache/cache.config';
 import { createFplBootstrapDataService } from '../../../src/data/fpl/bootstrap.data';
 import { FplBootstrapDataService } from '../../../src/data/types';

@@ -9,7 +9,9 @@ export interface PlayerValueServiceOperations {
   readonly detectPlayerValueChanges: (
     enrichedSourceValues: ReadonlyArray<EnrichedSourcePlayerValue>,
   ) => TE.TaskEither<ServiceError, PlayerValueChanges>;
-  readonly findPlayerValuesByChangeDate: () => TE.TaskEither<ServiceError, PlayerValues>;
+  readonly findPlayerValuesByChangeDate: (
+    changeDate: string,
+  ) => TE.TaskEither<ServiceError, PlayerValues>;
   readonly findPlayerValuesByElement: (
     element: number,
   ) => TE.TaskEither<ServiceError, PlayerValues>;
@@ -18,7 +20,9 @@ export interface PlayerValueServiceOperations {
 }
 
 export interface PlayerValueService {
-  readonly getPlayerValuesByChangeDate: () => TE.TaskEither<ServiceError, PlayerValues>;
+  readonly getPlayerValuesByChangeDate: (
+    changeDate: string,
+  ) => TE.TaskEither<ServiceError, PlayerValues>;
   readonly getPlayerValuesByElement: (element: number) => TE.TaskEither<ServiceError, PlayerValues>;
   readonly getPlayerValuesByTeam: (team: number) => TE.TaskEither<ServiceError, PlayerValues>;
   readonly syncPlayerValuesFromApi: () => TE.TaskEither<ServiceError, void>;

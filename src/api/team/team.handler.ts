@@ -1,23 +1,27 @@
 import { Request } from 'express';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
+import { TeamHandlerResponse } from 'src/api/team/types';
 
 import { TeamService } from '../../services/team/types';
 import { Team, TeamId, Teams } from '../../types/domain/team.type';
 import { APIError, APIErrorCode, createAPIError } from '../../types/error.type';
 import { toAPIError } from '../../utils/error.util';
-import { TeamHandlerResponse } from '../types';
 
-export const createTeamHandlers = (teamService: TeamService): TeamHandlerResponse => ({
-  getAllTeams: (): TE.TaskEither<APIError, Team[]> => {
+export const createTeamHandlers = (teamService: TeamService): TeamHandlerResponse => {
+  const getAllTeams = (): TE.TaskEither<APIError, Team[]> => {
     return pipe(
       teamService.getTeams(),
       TE.mapLeft(toAPIError),
       TE.map((teams: Teams) => [...teams]),
     );
-  },
+  };
 
-  getTeamById: (req: Request): TE.TaskEither<APIError, Team> => {
+  const syncTeams = (): TE.TaskEither<APIError, void> => {
+    return pipe(teamService.syncTeamsFromApi(), TE.mapLeft(toAPIError));
+  };
+
+  const getTeamById = (req: Request): TE.TaskEither<APIError, Team> => {
     const teamId = Number(req.params.id);
     if (isNaN(teamId) || teamId <= 0) {
       return TE.left<APIError>(
@@ -42,5 +46,11 @@ export const createTeamHandlers = (teamService: TeamService): TeamHandlerRespons
           : TE.right(team),
       ),
     );
-  },
-});
+  };
+
+  return {
+    getAllTeams,
+    syncTeams,
+    getTeamById,
+  };
+};

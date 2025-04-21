@@ -8,7 +8,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 // Setup
 
 // Specific imports
-import { playerStatRouter } from '../../../src/api/routes/player-stat.route'; // Import the router
+import { playerStatRouter } from '../../../src/api/player-stat/player-stat.route'; // Import the router
 import { CachePrefix } from '../../../src/configs/cache/cache.config';
 import { createFplBootstrapDataService } from '../../../src/data/fpl/bootstrap.data';
 import { FplBootstrapDataService } from '../../../src/data/types';
