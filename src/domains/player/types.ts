@@ -1,6 +1,7 @@
 import * as TE from 'fp-ts/TaskEither';
 import { CachePrefix } from 'src/configs/cache/cache.config';
-import { Player, Players } from 'src/types/domain/player.type';
+import { PlayerCreateInputs } from 'src/repositories/player/type';
+import { Players } from 'src/types/domain/player.type';
 import { DomainError } from 'src/types/error.type';
 
 export interface PlayerCacheConfig {
@@ -15,6 +16,6 @@ export interface PlayerCache {
 }
 
 export interface PlayerOperations {
-  readonly savePlayers: (players: readonly Player[]) => TE.TaskEither<DomainError, Players>;
+  readonly savePlayers: (players: PlayerCreateInputs) => TE.TaskEither<DomainError, Players>;
   readonly deleteAllPlayers: () => TE.TaskEither<DomainError, void>;
 }

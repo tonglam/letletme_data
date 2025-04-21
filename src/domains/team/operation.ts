@@ -2,11 +2,12 @@ import { TeamOperations } from 'domains/team/types';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import { TeamCreateInputs, TeamRepository } from 'src/repositories/team/type';
-import { createDomainError, DomainErrorCode } from 'src/types/error.type';
+import { Teams } from 'src/types/domain/team.type';
+import { createDomainError, DomainError, DomainErrorCode } from 'src/types/error.type';
 import { getErrorMessage } from 'src/utils/error.util';
 
 export const createTeamOperations = (repository: TeamRepository): TeamOperations => ({
-  saveTeams: (teams: TeamCreateInputs) =>
+  saveTeams: (teams: TeamCreateInputs): TE.TaskEither<DomainError, Teams> =>
     pipe(
       repository.saveBatch(teams),
       TE.mapLeft((dbError) =>
@@ -18,7 +19,7 @@ export const createTeamOperations = (repository: TeamRepository): TeamOperations
       ),
     ),
 
-  deleteAllTeams: () =>
+  deleteAllTeams: (): TE.TaskEither<DomainError, void> =>
     pipe(
       repository.deleteAll(),
       TE.mapLeft((dbError) =>

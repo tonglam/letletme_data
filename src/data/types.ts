@@ -9,8 +9,8 @@ import { EventLiveExplains } from 'src/types/domain/event-live-explain.type';
 import { EventLives } from 'src/types/domain/event-live.type';
 import { Events } from 'src/types/domain/event.type';
 import { Phases } from 'src/types/domain/phase.type';
-import { PlayerStats } from 'src/types/domain/player-stat.type';
-import { PlayerValues } from 'src/types/domain/player-value.type';
+import { SourcePlayerStats } from 'src/types/domain/player-stat.type';
+import { SourcePlayerValues } from 'src/types/domain/player-value.type';
 import { Players } from 'src/types/domain/player.type';
 import { Teams } from 'src/types/domain/team.type';
 import { DataLayerError } from 'src/types/error.type';
@@ -20,8 +20,8 @@ export interface FplBootstrapDataService {
   readonly getPhases: () => TE.TaskEither<DataLayerError, Phases>;
   readonly getTeams: () => TE.TaskEither<DataLayerError, Teams>;
   readonly getPlayers: () => TE.TaskEither<DataLayerError, Players>;
-  readonly getPlayerStats: (event: number) => TE.TaskEither<DataLayerError, PlayerStats>;
-  readonly getPlayerValues: (event: number) => TE.TaskEither<DataLayerError, PlayerValues>;
+  readonly getPlayerStats: (event: number) => TE.TaskEither<DataLayerError, SourcePlayerStats>;
+  readonly getPlayerValues: (event: number) => TE.TaskEither<DataLayerError, SourcePlayerValues>;
 }
 
 export interface FplFixtureDataService {

@@ -46,14 +46,18 @@ export const createApplicationServices = (deps: ServiceDependencies): Applicatio
     deps.fplDataService,
     deps.playerStatRepository,
     deps.playerStatCache,
-    eventService,
+    deps.eventCache,
+    deps.playerCache,
+    deps.teamCache,
   );
 
   const playerValueService = createPlayerValueService(
     deps.fplDataService,
     deps.playerValueRepository,
     deps.playerValueCache,
-    eventService,
+    deps.eventCache,
+    deps.teamCache,
+    deps.playerCache,
   );
 
   return {

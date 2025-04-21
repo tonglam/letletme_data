@@ -1,7 +1,8 @@
 import { Prisma } from '@prisma/client';
 import * as E from 'fp-ts/Either';
 
-import { Branded, createBrandedType } from '../base.type';
+import { Branded, createBrandedType, ElementTypeId, ElementTypeName } from '../base.type';
+import { TeamId } from './team.type';
 
 export type PlayerStatId = Branded<number, 'PlayerStatId'>;
 
@@ -25,8 +26,11 @@ export const validatePlayerStatIdInput = (value: unknown): E.Either<string, Play
 export interface PlayerStat {
   readonly event: number;
   readonly element: number;
-  readonly elementType: number;
-  readonly team: number;
+  readonly elementType: ElementTypeId;
+  readonly elementTypeName: ElementTypeName;
+  readonly team: TeamId;
+  readonly teamName: string;
+  readonly teamShortName: string;
   readonly totalPoints: number | null;
   readonly form: number | null;
   readonly influence: number | null;
@@ -68,3 +72,9 @@ export interface PlayerStat {
 }
 
 export type PlayerStats = readonly PlayerStat[];
+
+export type SourcePlayerStat = Omit<
+  PlayerStat,
+  'elementType' | 'elementTypeName' | 'team' | 'teamName' | 'teamShortName'
+>;
+export type SourcePlayerStats = readonly SourcePlayerStat[];

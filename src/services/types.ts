@@ -3,9 +3,8 @@ export interface WorkflowContext {
   readonly startTime: Date;
 }
 
-export interface WorkflowResult<T> {
+export interface WorkflowResult {
   readonly context: WorkflowContext;
-  readonly result: T;
   readonly duration: number;
 }
 

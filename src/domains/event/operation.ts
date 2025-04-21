@@ -21,7 +21,7 @@ export const createEventOperations = (repository: EventRepository): EventOperati
       ),
     ),
 
-  deleteAllEvents: () =>
+  deleteAllEvents: (): TE.TaskEither<DomainError, void> =>
     pipe(
       repository.deleteAll(),
       TE.mapLeft((dbError) =>

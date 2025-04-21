@@ -1,105 +1,207 @@
+import { EventCache } from 'domains/event/types';
+import { PlayerCache } from 'domains/player/types';
 import { createPlayerValueOperations } from 'domains/player-value/operation';
-import {
-  PlayerValueCache,
-  PlayerValueOperations,
-  PlayerValueRepository,
-} from 'domains/player-value/types';
-import { pipe } from 'fp-ts/function';
+import { PlayerValueCache, PlayerValueOperations } from 'domains/player-value/types';
+import { TeamCache } from 'domains/team/types';
+import { pipe, flow } from 'fp-ts/function';
+import * as RA from 'fp-ts/ReadonlyArray';
 import * as TE from 'fp-ts/TaskEither';
-import { EventService } from 'services/event/types';
 import { PlayerValueService, PlayerValueServiceOperations } from 'services/player-value/types';
 import { FplBootstrapDataService } from 'src/data/types';
-import { mapMappedPlayerValueToPrismaCreate } from 'src/repositories/player-value/mapper';
-import { PlayerValueCreateInput } from 'src/repositories/player-value/type';
-import {
-  MappedPlayerValue,
-  PlayerValue,
-  PlayerValueId,
-  PlayerValues,
-} from 'src/types/domain/player-value.type';
-import {
-  createServiceError,
-  DataLayerError,
-  ServiceError,
-  ServiceErrorCode,
-} from 'src/types/error.type';
+import { PlayerValueRepository } from 'src/repositories/player-value/type';
+import { ValueChangeType } from 'src/types/base.type';
+import { PlayerValue, PlayerValues, PlayerValueChanges } from 'src/types/domain/player-value.type';
+import { createServiceError, ServiceError, ServiceErrorCode } from 'src/types/error.type';
+import { enrichPlayerValues, EnrichedSourcePlayerValue } from 'src/utils/data-enrichment.util';
 import { createServiceIntegrationError, mapDomainErrorToServiceError } from 'src/utils/error.util';
 
-export const playerValueServiceOperations = (
-  domainOps: PlayerValueOperations,
-  fplDataService: FplBootstrapDataService,
-  eventService: EventService,
-): PlayerValueServiceOperations => ({
-  findAllPlayerValues: () =>
-    pipe(domainOps.getAllPlayerValues(), TE.mapLeft(mapDomainErrorToServiceError)) as TE.TaskEither<
-      ServiceError,
-      PlayerValues
-    >,
+const determineChangeType = (newValue: number, lastValue: number): ValueChangeType => {
+  if (newValue > lastValue) {
+    return ValueChangeType.Rise;
+  }
+  if (newValue < lastValue) {
+    return ValueChangeType.Fall;
+  }
+  return ValueChangeType.Start;
+};
 
-  findPlayerValueById: (id: PlayerValueId) =>
-    pipe(
-      domainOps.getPlayerValueById(id),
-      TE.mapLeft(mapDomainErrorToServiceError),
-    ) as TE.TaskEither<ServiceError, PlayerValue | null>,
-
-  syncPlayerValuesFromApi: () =>
-    pipe(
-      eventService.getCurrentEvent(),
-      TE.mapLeft((error: ServiceError) =>
+const detectAndCalculateValueChanges =
+  (domainOps: PlayerValueOperations) =>
+  (
+    enrichedValues: ReadonlyArray<EnrichedSourcePlayerValue>,
+  ): TE.TaskEither<ServiceError, ReadonlyArray<PlayerValue>> => {
+    if (RA.isEmpty(enrichedValues)) {
+      return TE.right([]);
+    }
+    const elements = enrichedValues.map((value) => value.element);
+    return pipe(
+      domainOps.getPlayerValuesByElements(elements),
+      TE.mapLeft((error) =>
         createServiceError({
           code: ServiceErrorCode.OPERATION_ERROR,
-          message: 'Failed to fetch current event',
-          cause: error.cause,
+          message: `Failed to fetch existing player values for change detection: ${error.message}`,
+          cause: error,
         }),
       ),
-      TE.chainW((event) =>
-        event
-          ? TE.right(event.id)
-          : TE.left(
-              createServiceError({
-                code: ServiceErrorCode.OPERATION_ERROR,
-                message: 'No current event found to sync player values for.',
-              }),
-            ),
+      TE.map((currentValues) => {
+        const currentValueMap = new Map(currentValues.map((value) => [value.element, value]));
+        const processedValues = enrichedValues.map((enrichedValue): PlayerValue => {
+          const currentValue = currentValueMap.get(enrichedValue.element);
+          const lastValue = currentValue?.value ?? enrichedValue.value;
+          const changeType = currentValue
+            ? determineChangeType(enrichedValue.value, lastValue)
+            : ValueChangeType.Start;
+          return {
+            ...enrichedValue,
+            lastValue,
+            changeType,
+          };
+        });
+        return processedValues.filter(
+          (value) =>
+            !currentValueMap.has(value.element) ||
+            value.value !== currentValueMap.get(value.element)?.value,
+        ) as ReadonlyArray<PlayerValue>;
+      }),
+    );
+  };
+
+const mapToPlayerValues = (
+  enrichedValues: ReadonlyArray<EnrichedSourcePlayerValue>,
+): ReadonlyArray<PlayerValue> => {
+  return enrichedValues.map((enrichedValue) => ({
+    ...enrichedValue,
+    lastValue: enrichedValue.value,
+    changeType: ValueChangeType.Start,
+  }));
+};
+
+export const playerValueServiceOperations = (
+  fplDataService: FplBootstrapDataService,
+  domainOps: PlayerValueOperations,
+  playerValueCache: PlayerValueCache,
+  eventCache: EventCache,
+  teamCache: TeamCache,
+  playerCache: PlayerCache,
+): PlayerValueServiceOperations => {
+  const enrichSourceValues = flow(
+    enrichPlayerValues(playerCache, teamCache),
+    TE.mapLeft(mapDomainErrorToServiceError),
+  );
+
+  const detectAndCalculateChanges = detectAndCalculateValueChanges(domainOps);
+
+  const mapToPlayerValuesTask = flow(mapToPlayerValues, TE.right);
+
+  const ops: PlayerValueServiceOperations = {
+    detectPlayerValueChanges: (
+      enrichedSourceValues: ReadonlyArray<EnrichedSourcePlayerValue>,
+    ): TE.TaskEither<ServiceError, PlayerValueChanges> =>
+      detectAndCalculateChanges(enrichedSourceValues),
+
+    findPlayerValuesByChangeDate: (): TE.TaskEither<ServiceError, PlayerValues> =>
+      pipe(
+        playerValueCache.getPlayerValuesByChangeDate(),
+        TE.mapLeft(mapDomainErrorToServiceError),
+        TE.chainW(enrichSourceValues),
+        TE.chainW(mapToPlayerValuesTask),
       ),
-      TE.chainW((eventId) => fplDataService.getPlayerValues(eventId)),
-      TE.mapLeft((error: DataLayerError | ServiceError) =>
-        createServiceIntegrationError({
-          message: 'Failed to fetch/map player values via data layer',
-          cause: error.cause,
-          details: error.details,
+
+    findPlayerValuesByElement: (element: number): TE.TaskEither<ServiceError, PlayerValues> =>
+      pipe(
+        domainOps.getPlayerValuesByElement(element),
+        TE.mapLeft(mapDomainErrorToServiceError),
+        TE.chainW(enrichSourceValues),
+        TE.chainW(mapToPlayerValuesTask),
+      ),
+
+    findPlayerValuesByTeam: (team: number): TE.TaskEither<ServiceError, PlayerValues> =>
+      pipe(
+        playerCache.getAllPlayers(),
+        TE.mapLeft(mapDomainErrorToServiceError),
+        TE.map(RA.filter((player) => player.team === team)),
+        TE.map(RA.map((player) => player.element as number)),
+        TE.chainW((readonlyElements) => {
+          const mutableElements = [...readonlyElements];
+          if (mutableElements.length === 0) {
+            return TE.right([]);
+          }
+          return pipe(
+            domainOps.getPlayerValuesByElements(mutableElements),
+            TE.mapLeft(mapDomainErrorToServiceError),
+          );
         }),
+        TE.chainW(enrichSourceValues),
+        TE.chainW(mapToPlayerValuesTask),
       ),
-      TE.map((rawData: readonly MappedPlayerValue[]) =>
-        mapRawDataToPlayerValueCreateArray(rawData),
-      ),
-      TE.chain((playerValueCreateData) =>
-        pipe(
-          domainOps.savePlayerValues(playerValueCreateData),
-          TE.mapLeft(mapDomainErrorToServiceError),
+
+    syncPlayerValuesFromApi: (): TE.TaskEither<ServiceError, void> =>
+      pipe(
+        eventCache.getCurrentEvent(),
+        TE.mapLeft(mapDomainErrorToServiceError),
+        TE.chainW((event) =>
+          event
+            ? pipe(
+                fplDataService.getPlayerValues(event.id),
+                TE.mapLeft((error) =>
+                  createServiceIntegrationError({
+                    message: 'Failed to fetch player values via data layer',
+                    cause: error.cause,
+                  }),
+                ),
+                TE.chainW(enrichSourceValues),
+                TE.chainW(detectAndCalculateChanges),
+                TE.chainW((playerValueChanges) =>
+                  playerValueChanges.length === 0
+                    ? TE.right(undefined)
+                    : pipe(
+                        domainOps.deleteAllPlayerValues(),
+                        TE.mapLeft(mapDomainErrorToServiceError),
+                        TE.chain(() =>
+                          pipe(
+                            domainOps.savePlayerValues(playerValueChanges),
+                            TE.mapLeft(mapDomainErrorToServiceError),
+                          ),
+                        ),
+                        TE.map(() => undefined),
+                      ),
+                ),
+              )
+            : TE.left(
+                createServiceError({
+                  code: ServiceErrorCode.OPERATION_ERROR,
+                  message: 'No current event found to sync player values for.',
+                }),
+              ),
         ),
       ),
-    ),
-});
+  };
 
-const mapRawDataToPlayerValueCreateArray = (
-  rawData: readonly MappedPlayerValue[],
-): PlayerValueCreateInput[] => {
-  return rawData.map(mapMappedPlayerValueToPrismaCreate);
+  return ops;
 };
 
 export const createPlayerValueService = (
   fplDataService: FplBootstrapDataService,
   repository: PlayerValueRepository,
-  cache: PlayerValueCache,
-  eventService: EventService,
+  playerValueCache: PlayerValueCache,
+  eventCache: EventCache,
+  teamCache: TeamCache,
+  playerCache: PlayerCache,
 ): PlayerValueService => {
-  const domainOps = createPlayerValueOperations(repository, cache);
-  const ops = playerValueServiceOperations(domainOps, fplDataService, eventService);
+  const domainOps = createPlayerValueOperations(repository);
+  const ops = playerValueServiceOperations(
+    fplDataService,
+    domainOps,
+    playerValueCache,
+    eventCache,
+    teamCache,
+    playerCache,
+  );
 
   return {
-    getPlayerValues: () => ops.findAllPlayerValues(),
-    getPlayerValue: (id: PlayerValueId) => ops.findPlayerValueById(id),
+    getPlayerValuesByChangeDate: () => ops.findPlayerValuesByChangeDate(),
+    getPlayerValuesByElement: (element: number) => ops.findPlayerValuesByElement(element),
+    getPlayerValuesByTeam: (team: number) => ops.findPlayerValuesByTeam(team),
     syncPlayerValuesFromApi: () => ops.syncPlayerValuesFromApi(),
   };
 };

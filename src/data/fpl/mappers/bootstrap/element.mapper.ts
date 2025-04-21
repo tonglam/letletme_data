@@ -4,7 +4,7 @@ import { pipe } from 'fp-ts/function';
 import * as O from 'fp-ts/Option';
 import { ElementType } from 'src/types/base.type';
 import { PlayerStat } from 'src/types/domain/player-stat.type';
-import { MappedPlayerValue } from 'src/types/domain/player-value.type';
+import { SourcePlayerValue } from 'src/types/domain/player-value.type';
 import { Player, validatePlayerId } from 'src/types/domain/player.type';
 import { safeStringToDecimal, safeStringToNumber } from 'src/utils/common.util';
 
@@ -32,7 +32,7 @@ export const mapElementResponseToPlayer = (raw: ElementResponse): E.Either<strin
 export const mapElementResponseToPlayerValue = (
   event: number,
   raw: ElementResponse,
-): E.Either<string, MappedPlayerValue> => {
+): E.Either<string, SourcePlayerValue> => {
   const currentDateStr = format(new Date(), 'yyyyMMdd');
   const value = raw.now_cost / 10;
 
@@ -40,7 +40,7 @@ export const mapElementResponseToPlayerValue = (
     E.Do,
     E.bind('element', () => validatePlayerId(raw.id)),
     E.map(
-      ({ element }): MappedPlayerValue => ({
+      ({ element }): SourcePlayerValue => ({
         element: element,
         elementType: raw.element_type as ElementType,
         event: event,

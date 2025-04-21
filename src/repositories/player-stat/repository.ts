@@ -2,73 +2,48 @@ import { PrismaClient, PlayerStat as PrismaPlayerStatType } from '@prisma/client
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import {
-  mapDomainStatToPrismaCreateInput,
+  mapDomainStatToPrismaCreate,
   mapPrismaPlayerStatToDomain,
 } from 'src/repositories/player-stat/mapper';
-import { PlayerStatRepository } from 'src/repositories/player-stat/type';
-import { PlayerStats } from 'src/types/domain/player-stat.type';
+import { PlayerStatCreateInputs, PlayerStatRepository } from 'src/repositories/player-stat/type';
+import { SourcePlayerStats } from 'src/types/domain/player-stat.type';
 import { createDBError, DBError, DBErrorCode } from 'src/types/error.type';
 
 export const createPlayerStatRepository = (prisma: PrismaClient): PlayerStatRepository => ({
-  findByElement: (element: number): TE.TaskEither<DBError, PlayerStats> =>
+  findLatest: (): TE.TaskEither<DBError, SourcePlayerStats> =>
     pipe(
       TE.tryCatch(
-        () => prisma.playerStat.findMany({ where: { element } }),
-        (error) =>
-          createDBError({
-            code: DBErrorCode.QUERY_ERROR,
-            message: `Failed findByElement for PlayerStat with element ${element}: ${error}`,
-          }),
-      ),
-      TE.map((prismaPlayerStats) => prismaPlayerStats.map(mapPrismaPlayerStatToDomain)),
-    ),
+        async () => {
+          const maxEventResult = await prisma.playerStat.aggregate({
+            _max: { event: true },
+          });
+          const latestEvent = maxEventResult._max.event;
 
-  findByElements: (elements: number[]): TE.TaskEither<DBError, PlayerStats> =>
-    pipe(
-      TE.tryCatch(
-        () => prisma.playerStat.findMany({ where: { element: { in: elements } } }),
-        (error) =>
-          createDBError({
-            code: DBErrorCode.QUERY_ERROR,
-            message: `Failed findByElements for PlayerStat with elements ${elements}: ${error}`,
-          }),
-      ),
-      TE.map((prismaPlayerStats) => prismaPlayerStats.map(mapPrismaPlayerStatToDomain)),
-    ),
+          if (latestEvent === null) {
+            return [];
+          }
 
-  findByEvent: (event: number): TE.TaskEither<DBError, PlayerStats> =>
-    pipe(
-      TE.tryCatch(
-        () => prisma.playerStat.findMany({ where: { event } }),
+          return prisma.playerStat.findMany({
+            where: { event: latestEvent },
+            orderBy: { element: 'asc' },
+          });
+        },
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed findByEvent for PlayerStat with event ${event}: ${error}`,
-          }),
-      ),
-      TE.map((prismaPlayerStats) => prismaPlayerStats.map(mapPrismaPlayerStatToDomain)),
-    ),
-
-  findAll: () =>
-    pipe(
-      TE.tryCatch(
-        () => prisma.playerStat.findMany({ orderBy: { id: 'asc' } }),
-        (error) =>
-          createDBError({
-            code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to fetch all player stats: ${error}`,
+            message: `Failed to fetch latest player stats: ${error}`,
           }),
       ),
       TE.map((playerStats: PrismaPlayerStatType[]) => playerStats.map(mapPrismaPlayerStatToDomain)),
     ),
 
-  saveBatch: (playerStats: PlayerStats): TE.TaskEither<DBError, PlayerStats> =>
+  saveLatest: (playerStats: PlayerStatCreateInputs): TE.TaskEither<DBError, SourcePlayerStats> =>
     pipe(
       TE.tryCatch(
         async () => {
-          const prismaData = playerStats.map((stat) => mapDomainStatToPrismaCreateInput(stat));
+          const dataToCreate = playerStats.map(mapDomainStatToPrismaCreate);
           await prisma.playerStat.createMany({
-            data: prismaData,
+            data: dataToCreate,
             skipDuplicates: true,
           });
           return playerStats;
@@ -80,6 +55,32 @@ export const createPlayerStatRepository = (prisma: PrismaClient): PlayerStatRepo
             cause: error instanceof Error ? error : undefined,
           }),
       ),
+    ),
+
+  deleteLatest: (): TE.TaskEither<DBError, void> =>
+    pipe(
+      TE.tryCatch(
+        async () => {
+          const maxEventResult = await prisma.playerStat.aggregate({
+            _max: { event: true },
+          });
+          const latestEvent = maxEventResult._max.event;
+
+          if (latestEvent === null) {
+            return;
+          }
+          await prisma.playerStat.deleteMany({
+            where: { event: latestEvent },
+          });
+        },
+        (error) =>
+          createDBError({
+            code: DBErrorCode.OPERATION_ERROR,
+            message: 'Failed deleteLatest for PlayerStat',
+            cause: error instanceof Error ? error : undefined,
+          }),
+      ),
+      TE.map(() => void 0),
     ),
 
   deleteAll: (): TE.TaskEither<DBError, void> =>

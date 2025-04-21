@@ -1,10 +1,10 @@
 import { PlayerStat as PrismaPlayerStatType } from '@prisma/client';
 import { PrismaPlayerStatCreateInput } from 'src/repositories/player-stat/type';
-import { PlayerStat } from 'src/types/domain/player-stat.type';
+import { SourcePlayerStat } from 'src/types/domain/player-stat.type';
 
 export const mapPrismaPlayerStatToDomain = (
   prismaPlayerStat: PrismaPlayerStatType,
-): PlayerStat => ({
+): SourcePlayerStat => ({
   event: prismaPlayerStat.event,
   element: prismaPlayerStat.element,
   totalPoints: prismaPlayerStat.totalPoints ?? null,
@@ -47,8 +47,8 @@ export const mapPrismaPlayerStatToDomain = (
   mngGoalsScored: prismaPlayerStat.mngGoalsScored ?? null,
 });
 
-export const mapDomainStatToPrismaCreateInput = (
-  domainStat: Omit<PlayerStat, 'id'>,
+export const mapDomainStatToPrismaCreate = (
+  domainStat: SourcePlayerStat,
 ): PrismaPlayerStatCreateInput => ({
   event: domainStat.event,
   element: domainStat.element,

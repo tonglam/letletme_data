@@ -6,12 +6,10 @@ import { createWorkflowContext, WorkflowResult } from 'services/types';
 import { getWorkflowLogger } from '../../infrastructures/logger';
 import { createServiceError, ServiceError, ServiceErrorCode } from '../../types/error.type';
 
-import type { Teams } from '../../types/domain/team.type';
-
 const logger = getWorkflowLogger();
 
 export const teamWorkflows = (teamService: TeamService): TeamWorkflowsOperations => {
-  const syncTeams = (): TE.TaskEither<ServiceError, WorkflowResult<Teams>> => {
+  const syncTeams = (): TE.TaskEither<ServiceError, WorkflowResult> => {
     const context = createWorkflowContext('team-sync');
 
     logger.info({ workflow: context.workflowId }, 'Starting team sync workflow');
@@ -25,13 +23,12 @@ export const teamWorkflows = (teamService: TeamService): TeamWorkflowsOperations
           cause: error,
         }),
       ),
-      TE.map((teams) => {
+      TE.map(() => {
         const duration = new Date().getTime() - context.startTime.getTime();
 
         logger.info(
           {
             workflow: context.workflowId,
-            count: teams.length,
             durationMs: duration,
           },
           'Team sync workflow completed successfully',
@@ -39,7 +36,6 @@ export const teamWorkflows = (teamService: TeamService): TeamWorkflowsOperations
 
         return {
           context,
-          result: teams,
           duration,
         };
       }),

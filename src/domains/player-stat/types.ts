@@ -1,6 +1,7 @@
 import * as TE from 'fp-ts/TaskEither';
 import { CachePrefix } from 'src/configs/cache/cache.config';
-import { PlayerStats } from 'src/types/domain/player-stat.type';
+import { PlayerStatCreateInputs } from 'src/repositories/player-stat/type';
+import { SourcePlayerStats } from 'src/types/domain/player-stat.type';
 import { DomainError } from 'src/types/error.type';
 
 export interface PlayerStatCacheConfig {
@@ -9,12 +10,17 @@ export interface PlayerStatCacheConfig {
 }
 
 export interface PlayerStatCache {
-  readonly getAllPlayerStats: () => TE.TaskEither<DomainError, PlayerStats>;
-  readonly setAllPlayerStats: (playerStats: PlayerStats) => TE.TaskEither<DomainError, void>;
-  readonly deleteAllPlayerStats: () => TE.TaskEither<DomainError, void>;
+  readonly getLatestPlayerStats: () => TE.TaskEither<DomainError, SourcePlayerStats>;
+  readonly setLatestPlayerStats: (
+    playerStats: SourcePlayerStats,
+  ) => TE.TaskEither<DomainError, void>;
+  readonly deleteLatestPlayerStats: () => TE.TaskEither<DomainError, void>;
 }
 
 export interface PlayerStatOperations {
-  readonly savePlayerStats: (playerStats: PlayerStats) => TE.TaskEither<DomainError, PlayerStats>;
+  readonly saveLatestPlayerStats: (
+    playerStats: PlayerStatCreateInputs,
+  ) => TE.TaskEither<DomainError, SourcePlayerStats>;
+  readonly deleteLatestPlayerStats: () => TE.TaskEither<DomainError, void>;
   readonly deleteAllPlayerStats: () => TE.TaskEither<DomainError, void>;
 }

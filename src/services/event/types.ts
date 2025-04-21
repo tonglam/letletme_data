@@ -23,5 +23,5 @@ export interface EventService {
 }
 
 export interface EventWorkflowOperations {
-  readonly syncEvents: () => TE.TaskEither<ServiceError, WorkflowResult<Events>>;
+  readonly syncEvents: () => TE.TaskEither<ServiceError, WorkflowResult>;
 }

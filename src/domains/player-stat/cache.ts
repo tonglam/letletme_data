@@ -6,12 +6,12 @@ import * as TE from 'fp-ts/TaskEither';
 import { CachePrefix } from 'src/configs/cache/cache.config';
 import { redisClient } from 'src/infrastructures/cache/client';
 import { PlayerStatRepository } from 'src/repositories/player-stat/type';
-import { PlayerStat, PlayerStats } from 'src/types/domain/player-stat.type';
+import { SourcePlayerStat, SourcePlayerStats } from 'src/types/domain/player-stat.type';
 import { CacheError, CacheErrorCode, createCacheError, DomainError } from 'src/types/error.type';
 import { getCurrentSeason } from 'src/utils/common.util';
 import { mapCacheErrorToDomainError, mapRepositoryErrorToCacheError } from 'src/utils/error.util';
 
-const parsePlayerStat = (playerStatStr: string): E.Either<CacheError, PlayerStat> =>
+const parsePlayerStat = (playerStatStr: string): E.Either<CacheError, SourcePlayerStat> =>
   pipe(
     E.tryCatch(
       () => JSON.parse(playerStatStr),
@@ -24,7 +24,7 @@ const parsePlayerStat = (playerStatStr: string): E.Either<CacheError, PlayerStat
     ),
     E.chain((parsed) =>
       parsed && typeof parsed === 'object' && 'id' in parsed && typeof parsed.id === 'number'
-        ? E.right(parsed as PlayerStat)
+        ? E.right(parsed as SourcePlayerStat)
         : E.left(
             createCacheError({
               code: CacheErrorCode.DESERIALIZATION_ERROR,
@@ -36,18 +36,18 @@ const parsePlayerStat = (playerStatStr: string): E.Either<CacheError, PlayerStat
 
 const parsePlayerStats = (
   playerStatsMap: Record<string, string>,
-): E.Either<CacheError, PlayerStat[]> =>
+): E.Either<CacheError, SourcePlayerStats> =>
   pipe(
     Object.values(playerStatsMap),
     (playerStatStrs) =>
       playerStatStrs.map((str) =>
         pipe(
           parsePlayerStat(str),
-          E.getOrElse<CacheError, PlayerStat | null>(() => null),
+          E.getOrElse<CacheError, SourcePlayerStat | null>(() => null),
         ),
       ),
     (parsedPlayerStats) =>
-      parsedPlayerStats.filter((playerStat): playerStat is PlayerStat => playerStat !== null),
+      parsedPlayerStats.filter((playerStat): playerStat is SourcePlayerStat => playerStat !== null),
     (validPlayerStats) => E.right(validPlayerStats),
   );
 
@@ -61,7 +61,7 @@ export const createPlayerStatCache = (
   const { keyPrefix, season } = config;
   const baseKey = `${keyPrefix}::${season}`;
 
-  const getAllPlayerStats = (): TE.TaskEither<DomainError, PlayerStats> =>
+  const getLatestPlayerStats = (): TE.TaskEither<DomainError, SourcePlayerStats> =>
     pipe(
       TE.tryCatch(
         () => redisClient.hgetall(baseKey),
@@ -79,14 +79,14 @@ export const createPlayerStatCache = (
           O.fold(
             () =>
               pipe(
-                repository.findAll(),
+                repository.findLatest(),
                 TE.mapLeft(
                   mapRepositoryErrorToCacheError(
                     'Repository Error: Failed to get all player stats',
                   ),
                 ),
                 TE.mapLeft(mapCacheErrorToDomainError),
-                TE.chainFirst((playerStats) => setAllPlayerStats(playerStats)),
+                TE.chainFirst((playerStats) => setLatestPlayerStats(playerStats)),
               ),
             (cachedPlayerStats) =>
               pipe(
@@ -100,7 +100,7 @@ export const createPlayerStatCache = (
       TE.map((playerStats) => (playerStats.length > 0 ? playerStats : [])),
     );
 
-  const setAllPlayerStats = (playerStats: PlayerStats): TE.TaskEither<DomainError, void> =>
+  const setLatestPlayerStats = (playerStats: SourcePlayerStats): TE.TaskEither<DomainError, void> =>
     pipe(
       TE.tryCatch(
         async () => {
@@ -125,7 +125,7 @@ export const createPlayerStatCache = (
       TE.mapLeft(mapCacheErrorToDomainError),
     );
 
-  const deleteAllPlayerStats = (): TE.TaskEither<DomainError, void> =>
+  const deleteLatestPlayerStats = (): TE.TaskEither<DomainError, void> =>
     pipe(
       TE.tryCatch(
         () => redisClient.del(baseKey),
@@ -141,8 +141,8 @@ export const createPlayerStatCache = (
     );
 
   return {
-    getAllPlayerStats,
-    setAllPlayerStats,
-    deleteAllPlayerStats,
+    getLatestPlayerStats,
+    setLatestPlayerStats,
+    deleteLatestPlayerStats,
   };
 };

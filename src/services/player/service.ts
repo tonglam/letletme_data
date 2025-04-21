@@ -5,8 +5,7 @@ import * as RA from 'fp-ts/ReadonlyArray';
 import * as TE from 'fp-ts/TaskEither';
 import { FplBootstrapDataService } from 'src/data/types';
 import { PlayerCreateInputs, PlayerRepository } from 'src/repositories/player/type';
-import { Player, PlayerId, Players } from 'src/types/domain/player.type';
-import { TeamId } from 'src/types/domain/team.type';
+import { Player, Players } from 'src/types/domain/player.type';
 import {
   createDomainError,
   DataLayerError,
@@ -22,10 +21,7 @@ const playerServiceOperations = (
   domainOps: PlayerOperations,
   cache: PlayerCache,
 ): PlayerServiceOperations => ({
-  findAllPlayers: (): TE.TaskEither<ServiceError, Players> =>
-    pipe(cache.getAllPlayers(), TE.mapLeft(mapDomainErrorToServiceError)),
-
-  findPlayerById: (element: PlayerId): TE.TaskEither<ServiceError, Player> =>
+  findPlayerById: (element: number): TE.TaskEither<ServiceError, Player> =>
     pipe(
       cache.getAllPlayers(),
       TE.mapLeft(mapDomainErrorToServiceError),
@@ -39,19 +35,22 @@ const playerServiceOperations = (
       )((players) => RA.findFirst((p: Player) => p.element === element)(players)),
     ),
 
-  findPlayerByElementType: (elementType: number): TE.TaskEither<ServiceError, Players> =>
+  findPlayersByElementType: (elementType: number): TE.TaskEither<ServiceError, Players> =>
     pipe(
       cache.getAllPlayers(),
       TE.mapLeft(mapDomainErrorToServiceError),
       TE.map((players) => RA.filter((p: Player) => p.elementType === elementType)(players)),
     ),
 
-  findPlayerByTeam: (team: TeamId): TE.TaskEither<ServiceError, Players> =>
+  findPlayersByTeam: (team: number): TE.TaskEither<ServiceError, Players> =>
     pipe(
       cache.getAllPlayers(),
       TE.mapLeft(mapDomainErrorToServiceError),
       TE.map((players) => RA.filter((p: Player) => p.team === team)(players)),
     ),
+
+  findAllPlayers: (): TE.TaskEither<ServiceError, Players> =>
+    pipe(cache.getAllPlayers(), TE.mapLeft(mapDomainErrorToServiceError)),
 
   syncPlayersFromApi: (): TE.TaskEither<ServiceError, void> =>
     pipe(
@@ -85,12 +84,12 @@ export const createPlayerService = (
   const ops = playerServiceOperations(fplDataService, domainOps, cache);
 
   return {
+    getPlayer: (id: number): TE.TaskEither<ServiceError, Player> => ops.findPlayerById(id),
+    getPlayersByElementType: (elementType: number): TE.TaskEither<ServiceError, Players> =>
+      ops.findPlayersByElementType(elementType),
+    getPlayersByTeam: (team: number): TE.TaskEither<ServiceError, Players> =>
+      ops.findPlayersByTeam(team),
     getPlayers: (): TE.TaskEither<ServiceError, Players> => ops.findAllPlayers(),
-    getPlayer: (id: PlayerId): TE.TaskEither<ServiceError, Player> => ops.findPlayerById(id),
-    getPlayerByElementType: (elementType: number): TE.TaskEither<ServiceError, Players> =>
-      ops.findPlayerByElementType(elementType),
-    getPlayerByTeam: (team: TeamId): TE.TaskEither<ServiceError, Players> =>
-      ops.findPlayerByTeam(team),
     syncPlayersFromApi: (): TE.TaskEither<ServiceError, void> => ops.syncPlayersFromApi(),
   };
 };

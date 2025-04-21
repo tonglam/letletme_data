@@ -20,7 +20,7 @@ export const createPhaseOperations = (repository: PhaseRepository): PhaseOperati
       ),
     ),
 
-  deleteAllPhases: () =>
+  deleteAllPhases: (): TE.TaskEither<DomainError, void> =>
     pipe(
       repository.deleteAll(),
       TE.mapLeft((dbError) =>

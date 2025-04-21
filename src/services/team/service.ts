@@ -24,9 +24,6 @@ const teamServiceOperations = (
   domainOps: TeamOperations,
   cache: TeamCache,
 ): TeamServiceOperations => ({
-  findAllTeams: (): TE.TaskEither<ServiceError, Teams> =>
-    pipe(cache.getAllTeams(), TE.mapLeft(mapDomainErrorToServiceError)),
-
   findTeamById: (id: TeamId): TE.TaskEither<ServiceError, Team> =>
     pipe(
       cache.getAllTeams(),
@@ -40,6 +37,9 @@ const teamServiceOperations = (
         ),
       )((teams) => O.fromNullable(teams.find((team) => team.id === id))),
     ),
+
+  findAllTeams: (): TE.TaskEither<ServiceError, Teams> =>
+    pipe(cache.getAllTeams(), TE.mapLeft(mapDomainErrorToServiceError)),
 
   syncTeamsFromApi: (): TE.TaskEither<ServiceError, void> =>
     pipe(
@@ -73,8 +73,8 @@ export const createTeamService = (
   const ops = teamServiceOperations(fplDataService, domainOps, cache);
 
   return {
-    getTeams: (): TE.TaskEither<ServiceError, Teams> => ops.findAllTeams(),
     getTeam: (id: TeamId): TE.TaskEither<ServiceError, Team> => ops.findTeamById(id),
+    getTeams: (): TE.TaskEither<ServiceError, Teams> => ops.findAllTeams(),
     syncTeamsFromApi: (): TE.TaskEither<ServiceError, void> => ops.syncTeamsFromApi(),
   };
 };

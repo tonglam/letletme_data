@@ -4,8 +4,8 @@ import * as TE from 'fp-ts/TaskEither';
 import { Logger } from 'pino';
 import { Events } from 'src/types/domain/event.type';
 import { Phases } from 'src/types/domain/phase.type';
-import { PlayerStats } from 'src/types/domain/player-stat.type';
-import { PlayerValues } from 'src/types/domain/player-value.type';
+import { SourcePlayerStats } from 'src/types/domain/player-stat.type';
+import { SourcePlayerValues } from 'src/types/domain/player-value.type';
 import { Players } from 'src/types/domain/player.type';
 import { Teams } from 'src/types/domain/team.type';
 import { DataLayerError, DataLayerErrorCode } from 'src/types/error.type';
@@ -189,7 +189,7 @@ export const createFplBootstrapDataService = (
       ),
     );
 
-  const getPlayerStats = (event: number): TE.TaskEither<DataLayerError, PlayerStats> =>
+  const getPlayerStats = (event: number): TE.TaskEither<DataLayerError, SourcePlayerStats> =>
     pipe(
       getFplBootstrapDataInternal(),
       TE.chain((bootstrapData) =>
@@ -211,7 +211,7 @@ export const createFplBootstrapDataService = (
       ),
     );
 
-  const getPlayerValues = (event: number): TE.TaskEither<DataLayerError, PlayerValues> =>
+  const getPlayerValues = (event: number): TE.TaskEither<DataLayerError, SourcePlayerValues> =>
     pipe(
       getFplBootstrapDataInternal(),
       TE.chain((bootstrapData) =>

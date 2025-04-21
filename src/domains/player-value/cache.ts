@@ -1,17 +1,16 @@
 import { PlayerValueCache, PlayerValueCacheConfig } from 'domains/player-value/types';
 import * as E from 'fp-ts/Either';
-import { flow, pipe } from 'fp-ts/function';
+import { pipe } from 'fp-ts/function';
 import * as O from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
 import { CachePrefix } from 'src/configs/cache/cache.config';
 import { redisClient } from 'src/infrastructures/cache/client';
-import { PlayerValueRepository } from 'src/repositories/player-value/type';
-import { PlayerValues } from 'src/types/domain/player-value.type';
+import { SourcePlayerValues } from 'src/types/domain/player-value.type';
 import { CacheError, CacheErrorCode, createCacheError, DomainError } from 'src/types/error.type';
 import { formatYYYYMMDD } from 'src/utils/date.util';
-import { mapCacheErrorToDomainError, mapRepositoryErrorToCacheError } from 'src/utils/error.util';
+import { mapCacheErrorToDomainError } from 'src/utils/error.util';
 
-const parsePlayerValues = (playerValuesStr: string): E.Either<CacheError, PlayerValues> =>
+const parsePlayerValues = (playerValuesStr: string): E.Either<CacheError, SourcePlayerValues> =>
   pipe(
     E.tryCatch(
       () => JSON.parse(playerValuesStr),
@@ -24,7 +23,7 @@ const parsePlayerValues = (playerValuesStr: string): E.Either<CacheError, Player
     ),
     E.chain((parsed) =>
       Array.isArray(parsed)
-        ? E.right(parsed as PlayerValues)
+        ? E.right(parsed as SourcePlayerValues)
         : E.left(
             createCacheError({
               code: CacheErrorCode.DESERIALIZATION_ERROR,
@@ -35,7 +34,6 @@ const parsePlayerValues = (playerValuesStr: string): E.Either<CacheError, Player
   );
 
 export const createPlayerValueCache = (
-  repository: PlayerValueRepository,
   config: PlayerValueCacheConfig = {
     keyPrefix: CachePrefix.PLAYER_VALUE,
     changeDate: formatYYYYMMDD(),
@@ -44,9 +42,7 @@ export const createPlayerValueCache = (
   const { keyPrefix } = config;
   const baseKey = `${keyPrefix}`;
 
-  const getPlayerValuesByChangeDate = (
-    changeDate: string,
-  ): TE.TaskEither<DomainError, PlayerValues> =>
+  const getPlayerValuesByChangeDate = (): TE.TaskEither<DomainError, SourcePlayerValues> =>
     pipe(
       TE.tryCatch(
         () => redisClient.smembers(baseKey),
@@ -57,20 +53,18 @@ export const createPlayerValueCache = (
             cause: error as Error,
           }),
       ),
-      TE.chain(
-        flow(
-          O.fromNullable,
+      TE.chain((playerValuesStrArray) =>
+        pipe(
+          O.fromNullable(playerValuesStrArray),
           O.fold(
             () =>
-              pipe(
-                repository.findByChangeDate(changeDate),
-                TE.mapLeft(
-                  mapRepositoryErrorToCacheError(
-                    'Repository Error: Failed to get player values by change date on cache miss',
-                  ),
-                ),
+              TE.left(
+                createCacheError({
+                  code: CacheErrorCode.NOT_FOUND,
+                  message: 'Cache Miss: No player values found for the given change date',
+                }),
               ),
-            (playerValuesStr) => pipe(parsePlayerValues(playerValuesStr), TE.fromEither),
+            (values) => pipe(`[${values.join(',')}]`, parsePlayerValues, TE.fromEither),
           ),
         ),
       ),
@@ -78,15 +72,14 @@ export const createPlayerValueCache = (
     );
 
   const setPlayerValuesByChangeDate = (
-    changeDate: string,
-    playerValues: PlayerValues,
+    playerValues: SourcePlayerValues,
   ): TE.TaskEither<DomainError, void> =>
     pipe(
       TE.tryCatch(
         () =>
           redisClient.sadd(
             baseKey,
-            playerValues.map((value) => value.id),
+            playerValues.map((value) => JSON.stringify(value)),
           ),
         (error: unknown) =>
           createCacheError({

@@ -10,7 +10,7 @@ export interface PlayerStatServiceOperations {
     elementType: number,
   ) => TE.TaskEither<ServiceError, PlayerStats>;
   readonly findPlayerStatsByTeam: (team: number) => TE.TaskEither<ServiceError, PlayerStats>;
-  readonly findAllPlayerStats: () => TE.TaskEither<ServiceError, PlayerStats>;
+  readonly findLatestPlayerStats: () => TE.TaskEither<ServiceError, PlayerStats>;
   readonly syncPlayerStatsFromApi: () => TE.TaskEither<ServiceError, void>;
 }
 
@@ -20,10 +20,10 @@ export interface PlayerStatService {
     elementType: number,
   ) => TE.TaskEither<ServiceError, PlayerStats>;
   readonly getPlayerStatsByTeam: (team: number) => TE.TaskEither<ServiceError, PlayerStats>;
-  readonly getPlayerStats: () => TE.TaskEither<ServiceError, PlayerStats>;
+  readonly getLatestPlayerStats: () => TE.TaskEither<ServiceError, PlayerStats>;
   readonly syncPlayerStatsFromApi: () => TE.TaskEither<ServiceError, void>;
 }
 
 export interface PlayerStatWorkflowsOperations {
-  readonly syncPlayerStats: () => TE.TaskEither<ServiceError, WorkflowResult<PlayerStats>>;
+  readonly syncPlayerStats: () => TE.TaskEither<ServiceError, WorkflowResult>;
 }

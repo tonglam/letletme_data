@@ -147,7 +147,7 @@ describe('PlayerValue Integration Tests', () => {
           }
 
           // Attempting to fetch using the ID obtained above
-          const valueResult = await playerValueService.getPlayerValue(firstValueId)();
+          const valueResult = await playerValueService.getPlayerValues(firstValueId)();
 
           expect(E.isRight(valueResult)).toBe(true);
           if (E.isRight(valueResult) && valueResult.right) {

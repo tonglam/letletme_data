@@ -17,5 +17,5 @@ export interface PhaseService {
 }
 
 export interface PhaseWorkflowOperations {
-  readonly syncPhases: () => TE.TaskEither<ServiceError, WorkflowResult<Phases>>;
+  readonly syncPhases: () => TE.TaskEither<ServiceError, WorkflowResult>;
 }

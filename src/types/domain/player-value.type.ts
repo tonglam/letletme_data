@@ -1,6 +1,13 @@
 import * as E from 'fp-ts/Either';
 
-import { Branded, createBrandedType, ElementType, ValueChangeType } from '../base.type';
+import {
+  Branded,
+  createBrandedType,
+  ElementTypeId,
+  ElementTypeName,
+  ValueChangeType,
+} from '../base.type';
+import { TeamId } from './team.type';
 
 export type PlayerValueId = Branded<number, 'PlayerValueId'>;
 
@@ -25,13 +32,33 @@ export const validatePlayerValueIdInput = (value: unknown): E.Either<string, Pla
 
 export interface PlayerValue {
   readonly element: number;
-  readonly elementType: ElementType;
+  readonly elementType: ElementTypeId;
+  readonly elementTypeName: ElementTypeName;
   readonly event: number;
+  readonly team: TeamId;
+  readonly teamName: string;
+  readonly teamShortName: string;
   readonly value: number;
   readonly changeDate: string;
   readonly changeType: ValueChangeType;
   readonly lastValue: number;
 }
+export type PlayerValues = readonly PlayerValue[];
 
-export type MappedPlayerValue = Omit<PlayerValue, 'lastValue' | 'changeType'>;
-export type PlayerValues = readonly MappedPlayerValue[];
+export type SourcePlayerValue = Omit<
+  PlayerValue,
+  | 'lastValue'
+  | 'changeType'
+  | 'elementType'
+  | 'elementTypeName'
+  | 'team'
+  | 'teamName'
+  | 'teamShortName'
+>;
+export type SourcePlayerValues = readonly SourcePlayerValue[];
+
+export type PlayerValueChange = Omit<
+  PlayerValue,
+  'elementType' | 'elementTypeName' | 'team' | 'teamName' | 'teamShortName'
+>;
+export type PlayerValueChanges = readonly PlayerValueChange[];

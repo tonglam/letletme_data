@@ -38,7 +38,7 @@ export const createPlayerValueHandlers = (
     }
 
     return pipe(
-      playerValueService.getPlayerValue(validatedId.right),
+      playerValueService.getPlayerValues(validatedId.right),
       TE.mapLeft(toAPIError),
       TE.chain((playerValue) =>
         playerValue === null

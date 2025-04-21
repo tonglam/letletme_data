@@ -3,23 +3,20 @@ import * as TE from 'fp-ts/TaskEither';
 
 import { getWorkflowLogger } from '../../infrastructures/logger';
 import { createServiceError, ServiceError, ServiceErrorCode } from '../../types/error.type';
-import { createWorkflowContext } from '../types';
+import { createWorkflowContext, WorkflowResult } from '../types';
 
-import type { Events } from '../../types/domain/event.type';
-import type { WorkflowResult } from '../types';
 import type { EventService, EventWorkflowOperations } from './types';
 
 const logger = getWorkflowLogger();
 
 export const eventWorkflows = (eventService: EventService): EventWorkflowOperations => {
-  const syncEvents = (): TE.TaskEither<ServiceError, WorkflowResult<Events>> => {
+  const syncEvents = (): TE.TaskEither<ServiceError, WorkflowResult> => {
     const context = createWorkflowContext('event-sync');
 
     logger.info({ workflow: context.workflowId }, 'Starting event sync workflow');
 
     return pipe(
       eventService.syncEventsFromApi(),
-      TE.chainW(() => eventService.getEvents()),
       TE.mapLeft((error: ServiceError) =>
         createServiceError({
           code: ServiceErrorCode.INTEGRATION_ERROR,
@@ -27,13 +24,12 @@ export const eventWorkflows = (eventService: EventService): EventWorkflowOperati
           cause: error,
         }),
       ),
-      TE.map((events: Events) => {
+      TE.map(() => {
         const duration = new Date().getTime() - context.startTime.getTime();
 
         logger.info(
           {
             workflow: context.workflowId,
-            count: events.length,
             durationMs: duration,
           },
           'Event sync workflow completed successfully',
@@ -41,7 +37,6 @@ export const eventWorkflows = (eventService: EventService): EventWorkflowOperati
 
         return {
           context,
-          result: events,
           duration,
         };
       }),
