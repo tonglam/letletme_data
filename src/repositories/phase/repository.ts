@@ -11,8 +11,8 @@ import { Phase, Phases } from 'src/types/domain/phase.type';
 import { PhaseId } from '../../types/domain/phase.type';
 import { createDBError, DBError, DBErrorCode } from '../../types/error.type';
 
-export const createPhaseRepository = (prisma: PrismaClient): PhaseRepository => ({
-  findById: (id: PhaseId): TE.TaskEither<DBError, Phase> =>
+export const createPhaseRepository = (prisma: PrismaClient): PhaseRepository => {
+  const findById = (id: PhaseId): TE.TaskEither<DBError, Phase> =>
     pipe(
       TE.tryCatch(
         () => prisma.phase.findUnique({ where: { id: Number(id) } }),
@@ -32,9 +32,9 @@ export const createPhaseRepository = (prisma: PrismaClient): PhaseRepository => 
               }),
             ),
       ),
-    ),
+    );
 
-  findAll: (): TE.TaskEither<DBError, Phases> =>
+  const findAll = (): TE.TaskEither<DBError, Phases> =>
     pipe(
       TE.tryCatch(
         () => prisma.phase.findMany({ orderBy: { id: 'asc' } }),
@@ -45,9 +45,9 @@ export const createPhaseRepository = (prisma: PrismaClient): PhaseRepository => 
           }),
       ),
       TE.map((prismaPhases) => prismaPhases.map(mapPrismaPhaseToDomain)),
-    ),
+    );
 
-  saveBatch: (phases: PhaseCreateInputs): TE.TaskEither<DBError, Phases> =>
+  const saveBatch = (phases: PhaseCreateInputs): TE.TaskEither<DBError, Phases> =>
     pipe(
       TE.tryCatch(
         async () => {
@@ -56,7 +56,6 @@ export const createPhaseRepository = (prisma: PrismaClient): PhaseRepository => 
             data: dataToCreate,
             skipDuplicates: true,
           });
-          return phases;
         },
         (error) =>
           createDBError({
@@ -64,9 +63,10 @@ export const createPhaseRepository = (prisma: PrismaClient): PhaseRepository => 
             message: `Failed to create phases in batch: ${error}`,
           }),
       ),
-    ),
+      TE.chain(() => findAll()),
+    );
 
-  deleteAll: (): TE.TaskEither<DBError, void> =>
+  const deleteAll = (): TE.TaskEither<DBError, void> =>
     pipe(
       TE.tryCatch(
         () => prisma.phase.deleteMany({}),
@@ -77,5 +77,12 @@ export const createPhaseRepository = (prisma: PrismaClient): PhaseRepository => 
           }),
       ),
       TE.map(() => void 0),
-    ),
-});
+    );
+
+  return {
+    findById,
+    findAll,
+    saveBatch,
+    deleteAll,
+  };
+};

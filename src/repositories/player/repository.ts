@@ -10,8 +10,8 @@ import { Player, PlayerId, Players } from 'src/types/domain/player.type';
 
 import { createDBError, DBError, DBErrorCode } from '../../types/error.type';
 
-export const createPlayerRepository = (prisma: PrismaClient): PlayerRepository => ({
-  findById: (element: PlayerId): TE.TaskEither<DBError, Player> =>
+export const createPlayerRepository = (prisma: PrismaClient): PlayerRepository => {
+  const findById = (element: PlayerId): TE.TaskEither<DBError, Player> =>
     pipe(
       TE.tryCatch(
         () => prisma.player.findUnique({ where: { element: Number(element) } }),
@@ -31,9 +31,9 @@ export const createPlayerRepository = (prisma: PrismaClient): PlayerRepository =
               }),
             ),
       ),
-    ),
+    );
 
-  findAll: (): TE.TaskEither<DBError, Players> =>
+  const findAll = (): TE.TaskEither<DBError, Players> =>
     pipe(
       TE.tryCatch(
         () => prisma.player.findMany({ orderBy: { element: 'asc' } }),
@@ -44,9 +44,9 @@ export const createPlayerRepository = (prisma: PrismaClient): PlayerRepository =
           }),
       ),
       TE.map((prismaPlayers) => prismaPlayers.map(mapPrismaPlayerToDomain)),
-    ),
+    );
 
-  saveBatch: (players: PlayerCreateInputs): TE.TaskEither<DBError, Players> =>
+  const saveBatch = (players: PlayerCreateInputs): TE.TaskEither<DBError, Players> =>
     pipe(
       TE.tryCatch(
         async () => {
@@ -63,9 +63,10 @@ export const createPlayerRepository = (prisma: PrismaClient): PlayerRepository =
             message: `Failed to create players in batch: ${error}`,
           }),
       ),
-    ),
+      TE.chain(() => findAll()),
+    );
 
-  deleteAll: (): TE.TaskEither<DBError, void> =>
+  const deleteAll = (): TE.TaskEither<DBError, void> =>
     pipe(
       TE.tryCatch(
         () => prisma.player.deleteMany(),
@@ -77,5 +78,12 @@ export const createPlayerRepository = (prisma: PrismaClient): PlayerRepository =
           }),
       ),
       TE.map(() => void 0),
-    ),
-});
+    );
+
+  return {
+    findById,
+    findAll,
+    saveBatch,
+    deleteAll,
+  };
+};

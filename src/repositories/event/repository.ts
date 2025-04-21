@@ -10,8 +10,8 @@ import { Event, EventId, Events } from 'src/types/domain/event.type';
 
 import { createDBError, DBError, DBErrorCode } from '../../types/error.type';
 
-export const createEventRepository = (prisma: PrismaClient): EventRepository => ({
-  findById: (id: EventId): TE.TaskEither<DBError, Event> =>
+export const createEventRepository = (prisma: PrismaClient): EventRepository => {
+  const findById = (id: EventId): TE.TaskEither<DBError, Event> =>
     pipe(
       TE.tryCatch(
         () => prisma.event.findUnique({ where: { id: Number(id) } }),
@@ -31,9 +31,9 @@ export const createEventRepository = (prisma: PrismaClient): EventRepository => 
               }),
             ),
       ),
-    ),
+    );
 
-  findCurrent: (): TE.TaskEither<DBError, Event> =>
+  const findCurrent = (): TE.TaskEither<DBError, Event> =>
     pipe(
       TE.tryCatch(
         () => prisma.event.findFirst({ where: { isCurrent: true } }),
@@ -53,12 +53,12 @@ export const createEventRepository = (prisma: PrismaClient): EventRepository => 
               }),
             ),
       ),
-    ),
+    );
 
-  findAll: (): TE.TaskEither<DBError, Events> =>
+  const findAll = (): TE.TaskEither<DBError, Events> =>
     pipe(
       TE.tryCatch(
-        () => prisma.event.findMany({ orderBy: { deadlineTime: 'asc' } }),
+        () => prisma.event.findMany({ orderBy: { id: 'asc' } }),
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
@@ -66,9 +66,9 @@ export const createEventRepository = (prisma: PrismaClient): EventRepository => 
           }),
       ),
       TE.map((prismaEvents) => prismaEvents.map(mapPrismaEventToDomain)),
-    ),
+    );
 
-  saveBatch: (events: EventCreateInputs): TE.TaskEither<DBError, Events> =>
+  const saveBatch = (events: EventCreateInputs): TE.TaskEither<DBError, Events> =>
     pipe(
       TE.tryCatch(
         async () => {
@@ -77,7 +77,6 @@ export const createEventRepository = (prisma: PrismaClient): EventRepository => 
             data: dataToCreate,
             skipDuplicates: true,
           });
-          return events;
         },
         (error) =>
           createDBError({
@@ -85,9 +84,10 @@ export const createEventRepository = (prisma: PrismaClient): EventRepository => 
             message: `Failed to create events in batch: ${error}`,
           }),
       ),
-    ),
+      TE.chain(() => findAll()),
+    );
 
-  deleteAll: (): TE.TaskEither<DBError, void> =>
+  const deleteAll = (): TE.TaskEither<DBError, void> =>
     pipe(
       TE.tryCatch(
         () => prisma.event.deleteMany({}),
@@ -98,5 +98,13 @@ export const createEventRepository = (prisma: PrismaClient): EventRepository => 
           }),
       ),
       TE.map(() => void 0),
-    ),
-});
+    );
+
+  return {
+    findById,
+    findCurrent,
+    findAll,
+    saveBatch,
+    deleteAll,
+  };
+};

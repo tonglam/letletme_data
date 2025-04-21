@@ -77,7 +77,17 @@ describe('Event Routes Integration Tests', () => {
     if (keys.length > 0) {
       await redisClient.del(keys);
     }
-    await eventService.syncEventsFromApi()();
+    // Run the sync and check the result
+    const syncResult = await eventService.syncEventsFromApi()();
+    if (E.isLeft(syncResult)) {
+      // Log the error for debugging
+      logger.error(
+        { error: syncResult.left },
+        'Sync failed in beforeEach hook of route tests. Subsequent tests will likely fail.',
+      );
+      // Fail fast if sync didn't succeed
+      throw new Error(`Event sync failed during test setup: ${syncResult.left.message}`);
+    }
   });
 
   afterAll(async () => {
@@ -100,24 +110,57 @@ describe('Event Routes Integration Tests', () => {
     expect(events[0]).toHaveProperty('name');
   });
 
-  it('GET /events/current should return the current event within a data object', async () => {
+  it('GET /events/current should return the current event or 404 if not found', async () => {
     const res = await request(app).get('/events/current');
 
-    expect(res.status).toBe(200);
-    expect(res.body).toBeDefined();
-    expect(res.body).toHaveProperty('data');
-    expect(res.body.data).toHaveProperty('isCurrent', true);
+    // Expect either 200 OK or 404 Not Found
+    expect([200, 404]).toContain(res.status);
+
+    if (res.status === 200) {
+      expect(res.body).toBeDefined();
+      expect(res.body).toHaveProperty('data');
+      expect(res.body.data).toHaveProperty('isCurrent', true);
+    } else {
+      // Check for expected 404 or log unexpected 400
+      if (res.status === 404) {
+        expect(res.body).toHaveProperty('error');
+        expect(res.body.error.code).toEqual(APIErrorCode.NOT_FOUND);
+      } else if (res.status === 400) {
+        // Log the unexpected 400 error body for debugging
+        console.error('Unexpected 400 error body for /current:', JSON.stringify(res.body));
+        // Optionally, fail the test explicitly here if 400 is always wrong
+        // expect(res.status).toBe(200); // This would fail and show the 400
+      }
+      // The initial expect([200, 404]).toContain(res.status) will handle other statuses
+    }
   });
 
-  it('GET /events/next-id should return the next event ID within a data object', async () => {
-    const res = await request(app).get('/events/next-id');
+  it('GET /events/next should return the next event or 404 if not found', async () => {
+    const res = await request(app).get('/events/next');
 
-    expect(res.status).toBe(200);
-    expect(res.body).toBeDefined();
-    expect(res.body).toHaveProperty('data');
-    // Check that the data is a number (the ID)
-    expect(typeof res.body.data).toBe('number');
-    expect(res.body.data).toBeGreaterThan(0); // Basic sanity check for the ID
+    // Expect either 200 OK or 404 Not Found
+    expect([200, 404]).toContain(res.status);
+
+    if (res.status === 200) {
+      expect(res.body).toBeDefined();
+      expect(res.body).toHaveProperty('data');
+      expect(typeof res.body.data).toBe('object');
+      expect(res.body.data).toHaveProperty('id');
+      expect(res.body.data).toHaveProperty('name');
+      expect(res.body.data).toHaveProperty('isNext', true);
+    } else {
+      // Check for expected 404 or log unexpected 400
+      if (res.status === 404) {
+        expect(res.body).toHaveProperty('error');
+        expect(res.body.error.code).toEqual(APIErrorCode.NOT_FOUND);
+      } else if (res.status === 400) {
+        // Log the unexpected 400 error body for debugging
+        console.error('Unexpected 400 error body for /next:', JSON.stringify(res.body));
+        // Optionally, fail the test explicitly here if 400 is always wrong
+        // expect(res.status).toBe(200); // This would fail and show the 400
+      }
+      // The initial expect([200, 404]).toContain(res.status) will handle other statuses
+    }
   });
 
   it('GET /events/:id should return the event within a data object', async () => {

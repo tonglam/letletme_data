@@ -8,8 +8,10 @@ import { getErrorMessage } from 'src/utils/error.util';
 
 export const createPlayerValueOperations = (
   repository: PlayerValueRepository,
-): PlayerValueOperations => ({
-  getPlayerValuesByElement: (element: number): TE.TaskEither<DomainError, SourcePlayerValues> =>
+): PlayerValueOperations => {
+  const getPlayerValuesByElement = (
+    element: number,
+  ): TE.TaskEither<DomainError, SourcePlayerValues> =>
     pipe(
       repository.findByElement(element),
       TE.mapLeft((dbError) =>
@@ -19,9 +21,11 @@ export const createPlayerValueOperations = (
           cause: dbError,
         }),
       ),
-    ),
+    );
 
-  getPlayerValuesByElements: (elements: number[]): TE.TaskEither<DomainError, SourcePlayerValues> =>
+  const getPlayerValuesByElements = (
+    elements: number[],
+  ): TE.TaskEither<DomainError, SourcePlayerValues> =>
     pipe(
       repository.findByElements(elements),
       TE.mapLeft((dbError) =>
@@ -31,9 +35,9 @@ export const createPlayerValueOperations = (
           cause: dbError,
         }),
       ),
-    ),
+    );
 
-  savePlayerValues: (
+  const savePlayerValues = (
     playerValues: PlayerValueCreateInputs,
   ): TE.TaskEither<DomainError, SourcePlayerValues> =>
     pipe(
@@ -46,9 +50,9 @@ export const createPlayerValueOperations = (
           cause: dbError,
         }),
       ),
-    ),
+    );
 
-  deletePlayerValuesByChangeDate: (changeDate: string): TE.TaskEither<DomainError, void> =>
+  const deletePlayerValuesByChangeDate = (changeDate: string): TE.TaskEither<DomainError, void> =>
     pipe(
       repository.deleteByChangeDate(changeDate),
       TE.mapLeft((dbError) =>
@@ -58,9 +62,9 @@ export const createPlayerValueOperations = (
           cause: dbError,
         }),
       ),
-    ),
+    );
 
-  deleteAllPlayerValues: () =>
+  const deleteAllPlayerValues = (): TE.TaskEither<DomainError, void> =>
     pipe(
       repository.deleteAll(),
       TE.mapLeft((dbError) =>
@@ -70,5 +74,13 @@ export const createPlayerValueOperations = (
           cause: dbError,
         }),
       ),
-    ),
-});
+    );
+
+  return {
+    getPlayerValuesByElement,
+    getPlayerValuesByElements,
+    savePlayerValues,
+    deletePlayerValuesByChangeDate,
+    deleteAllPlayerValues,
+  };
+};

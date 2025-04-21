@@ -10,8 +10,8 @@ import { SourcePlayerValues } from 'src/types/domain/player-value.type';
 import { createDBError, DBError, DBErrorCode } from 'src/types/error.type';
 import { getErrorMessage } from 'src/utils/error.util';
 
-export const createPlayerValueRepository = (prisma: PrismaClient): PlayerValueRepository => ({
-  findByChangeDate: (changeDate: string): TE.TaskEither<DBError, SourcePlayerValues> =>
+export const createPlayerValueRepository = (prisma: PrismaClient): PlayerValueRepository => {
+  const findByChangeDate = (changeDate: string): TE.TaskEither<DBError, SourcePlayerValues> =>
     pipe(
       TE.tryCatch(
         () => prisma.playerValue.findMany({ where: { changeDate: { equals: changeDate } } }),
@@ -22,9 +22,9 @@ export const createPlayerValueRepository = (prisma: PrismaClient): PlayerValueRe
           }),
       ),
       TE.map((prismaPlayerValues) => prismaPlayerValues.map(mapPrismaPlayerValueToDomain)),
-    ),
+    );
 
-  findByElement: (element: number): TE.TaskEither<DBError, SourcePlayerValues> =>
+  const findByElement = (element: number): TE.TaskEither<DBError, SourcePlayerValues> =>
     pipe(
       TE.tryCatch(
         () => prisma.playerValue.findMany({ where: { element: { equals: element } } }),
@@ -35,9 +35,9 @@ export const createPlayerValueRepository = (prisma: PrismaClient): PlayerValueRe
           }),
       ),
       TE.map((prismaPlayerValues) => prismaPlayerValues.map(mapPrismaPlayerValueToDomain)),
-    ),
+    );
 
-  findByElements: (elements: number[]): TE.TaskEither<DBError, SourcePlayerValues> =>
+  const findByElements = (elements: number[]): TE.TaskEither<DBError, SourcePlayerValues> =>
     pipe(
       TE.tryCatch(
         () => prisma.playerValue.findMany({ where: { element: { in: elements } } }),
@@ -48,9 +48,11 @@ export const createPlayerValueRepository = (prisma: PrismaClient): PlayerValueRe
           }),
       ),
       TE.map((prismaPlayerValues) => prismaPlayerValues.map(mapPrismaPlayerValueToDomain)),
-    ),
+    );
 
-  saveBatch: (playerValues: PlayerValueCreateInputs): TE.TaskEither<DBError, SourcePlayerValues> =>
+  const saveBatch = (
+    playerValues: PlayerValueCreateInputs,
+  ): TE.TaskEither<DBError, SourcePlayerValues> =>
     pipe(
       TE.tryCatch(
         async () => {
@@ -59,7 +61,6 @@ export const createPlayerValueRepository = (prisma: PrismaClient): PlayerValueRe
             data: dataToCreate,
             skipDuplicates: true,
           });
-          return playerValues;
         },
         (error) =>
           createDBError({
@@ -67,9 +68,10 @@ export const createPlayerValueRepository = (prisma: PrismaClient): PlayerValueRe
             message: `Failed to save player values: ${getErrorMessage(error)}`,
           }),
       ),
-    ),
+      TE.chain(() => findByChangeDate(playerValues[0].changeDate)),
+    );
 
-  deleteByChangeDate: (changeDate: string): TE.TaskEither<DBError, void> =>
+  const deleteByChangeDate = (changeDate: string): TE.TaskEither<DBError, void> =>
     pipe(
       TE.tryCatch(
         () => prisma.playerValue.deleteMany({ where: { changeDate: { equals: changeDate } } }),
@@ -81,9 +83,9 @@ export const createPlayerValueRepository = (prisma: PrismaClient): PlayerValueRe
           }),
       ),
       TE.map(() => void 0),
-    ),
+    );
 
-  deleteAll: (): TE.TaskEither<DBError, void> =>
+  const deleteAll = (): TE.TaskEither<DBError, void> =>
     pipe(
       TE.tryCatch(
         () => prisma.playerValue.deleteMany(),
@@ -95,5 +97,14 @@ export const createPlayerValueRepository = (prisma: PrismaClient): PlayerValueRe
           }),
       ),
       TE.map(() => void 0),
-    ),
-});
+    );
+
+  return {
+    findByChangeDate,
+    findByElement,
+    findByElements,
+    saveBatch,
+    deleteByChangeDate,
+    deleteAll,
+  };
+};

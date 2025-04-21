@@ -6,8 +6,8 @@ import { Teams } from 'src/types/domain/team.type';
 import { createDomainError, DomainError, DomainErrorCode } from 'src/types/error.type';
 import { getErrorMessage } from 'src/utils/error.util';
 
-export const createTeamOperations = (repository: TeamRepository): TeamOperations => ({
-  saveTeams: (teams: TeamCreateInputs): TE.TaskEither<DomainError, Teams> =>
+export const createTeamOperations = (repository: TeamRepository): TeamOperations => {
+  const saveTeams = (teams: TeamCreateInputs): TE.TaskEither<DomainError, Teams> =>
     pipe(
       repository.saveBatch(teams),
       TE.mapLeft((dbError) =>
@@ -17,9 +17,9 @@ export const createTeamOperations = (repository: TeamRepository): TeamOperations
           cause: dbError,
         }),
       ),
-    ),
+    );
 
-  deleteAllTeams: (): TE.TaskEither<DomainError, void> =>
+  const deleteAllTeams = (): TE.TaskEither<DomainError, void> =>
     pipe(
       repository.deleteAll(),
       TE.mapLeft((dbError) =>
@@ -29,5 +29,10 @@ export const createTeamOperations = (repository: TeamRepository): TeamOperations
           cause: dbError,
         }),
       ),
-    ),
-});
+    );
+
+  return {
+    saveTeams,
+    deleteAllTeams,
+  };
+};

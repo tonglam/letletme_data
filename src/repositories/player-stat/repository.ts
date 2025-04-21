@@ -9,8 +9,8 @@ import { PlayerStatCreateInputs, PlayerStatRepository } from 'src/repositories/p
 import { SourcePlayerStats } from 'src/types/domain/player-stat.type';
 import { createDBError, DBError, DBErrorCode } from 'src/types/error.type';
 
-export const createPlayerStatRepository = (prisma: PrismaClient): PlayerStatRepository => ({
-  findLatest: (): TE.TaskEither<DBError, SourcePlayerStats> =>
+export const createPlayerStatRepository = (prisma: PrismaClient): PlayerStatRepository => {
+  const findLatest = (): TE.TaskEither<DBError, SourcePlayerStats> =>
     pipe(
       TE.tryCatch(
         async () => {
@@ -35,9 +35,11 @@ export const createPlayerStatRepository = (prisma: PrismaClient): PlayerStatRepo
           }),
       ),
       TE.map((playerStats: PrismaPlayerStatType[]) => playerStats.map(mapPrismaPlayerStatToDomain)),
-    ),
+    );
 
-  saveLatest: (playerStats: PlayerStatCreateInputs): TE.TaskEither<DBError, SourcePlayerStats> =>
+  const saveLatest = (
+    playerStats: PlayerStatCreateInputs,
+  ): TE.TaskEither<DBError, SourcePlayerStats> =>
     pipe(
       TE.tryCatch(
         async () => {
@@ -46,7 +48,6 @@ export const createPlayerStatRepository = (prisma: PrismaClient): PlayerStatRepo
             data: dataToCreate,
             skipDuplicates: true,
           });
-          return playerStats;
         },
         (error) =>
           createDBError({
@@ -55,9 +56,10 @@ export const createPlayerStatRepository = (prisma: PrismaClient): PlayerStatRepo
             cause: error instanceof Error ? error : undefined,
           }),
       ),
-    ),
+      TE.chain(() => findLatest()),
+    );
 
-  deleteLatest: (): TE.TaskEither<DBError, void> =>
+  const deleteLatest = (): TE.TaskEither<DBError, void> =>
     pipe(
       TE.tryCatch(
         async () => {
@@ -81,9 +83,9 @@ export const createPlayerStatRepository = (prisma: PrismaClient): PlayerStatRepo
           }),
       ),
       TE.map(() => void 0),
-    ),
+    );
 
-  deleteAll: (): TE.TaskEither<DBError, void> =>
+  const deleteAll = (): TE.TaskEither<DBError, void> =>
     pipe(
       TE.tryCatch(
         async () => {
@@ -97,5 +99,12 @@ export const createPlayerStatRepository = (prisma: PrismaClient): PlayerStatRepo
           }),
       ),
       TE.map(() => void 0),
-    ),
-});
+    );
+
+  return {
+    findLatest,
+    saveLatest,
+    deleteLatest,
+    deleteAll,
+  };
+};

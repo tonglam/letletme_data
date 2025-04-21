@@ -5,11 +5,6 @@ import { EventRepository } from 'src/repositories/event/type';
 import { EventId } from 'src/types/domain/event.type';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
-// Use the generic setup
-
-// Import the SHARED redis client used by the application
-
-// Specific imports for this test suite
 import { CachePrefix } from '../../../src/configs/cache/cache.config';
 import { createFplBootstrapDataService } from '../../../src/data/fpl/bootstrap.data';
 import { FplBootstrapDataService } from '../../../src/data/types';
@@ -71,9 +66,14 @@ describe('Event Integration Tests', () => {
   beforeEach(async () => {
     await prisma.event.deleteMany({});
     // Use the imported singleton redisClient to clear keys
-    const keys = await redisClient.keys(`${cachePrefix}::${testSeason}*`);
+    const pattern = `${cachePrefix}::${testSeason}*`;
+    const keys = await redisClient.keys(pattern);
+    const keysToDelete = ['current'];
     if (keys.length > 0) {
-      await redisClient.del(keys);
+      keysToDelete.push(...keys);
+    }
+    if (keysToDelete.length > 0) {
+      await redisClient.del(keysToDelete);
     }
   });
 
@@ -150,11 +150,15 @@ describe('Event Integration Tests', () => {
       if (E.isRight(result)) {
         expect(result.right.context).toBeDefined();
         expect(result.right.duration).toBeGreaterThan(0);
-        expect(result.right.result).toBeDefined();
-        expect(result.right.result.length).toBeGreaterThan(0);
+        // // Removed assertions for result.right.result as the workflow doesn't return it
+        // expect(result.right.result).toBeDefined();
+        // expect(result.right.result.length).toBeGreaterThan(0);
 
+        // Verify the side effect directly by checking the database
         const dbEvents = await prisma.event.findMany();
-        expect(dbEvents.length).toEqual(result.right.result.length);
+        expect(dbEvents.length).toBeGreaterThan(0); // Check that events were actually saved
+        // // Optionally, compare count if the workflow *did* return it, but it doesn't.
+        // expect(dbEvents.length).toEqual(result.right.result.length);
       }
     });
   });

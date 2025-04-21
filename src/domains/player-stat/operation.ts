@@ -8,8 +8,8 @@ import { getErrorMessage } from 'src/utils/error.util';
 
 export const createPlayerStatOperations = (
   repository: PlayerStatRepository,
-): PlayerStatOperations => ({
-  saveLatestPlayerStats: (
+): PlayerStatOperations => {
+  const saveLatestPlayerStats = (
     playerStats: PlayerStatCreateInputs,
   ): TE.TaskEither<DomainError, SourcePlayerStats> =>
     pipe(
@@ -21,9 +21,9 @@ export const createPlayerStatOperations = (
           cause: dbError,
         }),
       ),
-    ),
+    );
 
-  deleteLatestPlayerStats: (): TE.TaskEither<DomainError, void> =>
+  const deleteLatestPlayerStats = (): TE.TaskEither<DomainError, void> =>
     pipe(
       repository.deleteLatest(),
       TE.mapLeft((dbError) =>
@@ -33,9 +33,9 @@ export const createPlayerStatOperations = (
           cause: dbError,
         }),
       ),
-    ),
+    );
 
-  deleteAllPlayerStats: (): TE.TaskEither<DomainError, void> =>
+  const deleteAllPlayerStats = (): TE.TaskEither<DomainError, void> =>
     pipe(
       repository.deleteAll(),
       TE.mapLeft((dbError) =>
@@ -45,5 +45,11 @@ export const createPlayerStatOperations = (
           cause: dbError,
         }),
       ),
-    ),
-});
+    );
+
+  return {
+    saveLatestPlayerStats,
+    deleteLatestPlayerStats,
+    deleteAllPlayerStats,
+  };
+};

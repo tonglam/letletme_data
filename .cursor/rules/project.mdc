@@ -20,6 +20,7 @@ alwaysApply: true
 - **Validation:** Zod
 - **Job Queue:** BullMQ
 - **Logging:** Pino
+- **Test:** Vitest
 
 ---
 

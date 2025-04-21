@@ -32,10 +32,10 @@ export const createEventHandlers = (eventService: EventService): EventHandlerRes
   },
 
   getLastEvent: (): TE.TaskEither<APIError, Event> => {
-    return pipe(eventService.getLastEventId(), TE.mapLeft(toAPIError));
+    return pipe(eventService.getLastEvent(), TE.mapLeft(toAPIError));
   },
 
   getNextEvent: (): TE.TaskEither<APIError, Event> => {
-    return pipe(eventService.getNextEventId(), TE.mapLeft(toAPIError));
+    return pipe(eventService.getNextEvent(), TE.mapLeft(toAPIError));
   },
 });

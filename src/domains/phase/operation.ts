@@ -7,8 +7,8 @@ import { Phases } from '../../types/domain/phase.type';
 import { createDomainError, DomainError, DomainErrorCode } from '../../types/error.type';
 import { getErrorMessage } from '../../utils/error.util';
 
-export const createPhaseOperations = (repository: PhaseRepository): PhaseOperations => ({
-  savePhases: (phases: PhaseCreateInputs): TE.TaskEither<DomainError, Phases> =>
+export const createPhaseOperations = (repository: PhaseRepository): PhaseOperations => {
+  const savePhases = (phases: PhaseCreateInputs): TE.TaskEither<DomainError, Phases> =>
     pipe(
       repository.saveBatch(phases),
       TE.mapLeft((dbError) =>
@@ -18,9 +18,9 @@ export const createPhaseOperations = (repository: PhaseRepository): PhaseOperati
           cause: dbError,
         }),
       ),
-    ),
+    );
 
-  deleteAllPhases: (): TE.TaskEither<DomainError, void> =>
+  const deleteAllPhases = (): TE.TaskEither<DomainError, void> =>
     pipe(
       repository.deleteAll(),
       TE.mapLeft((dbError) =>
@@ -30,5 +30,10 @@ export const createPhaseOperations = (repository: PhaseRepository): PhaseOperati
           cause: dbError,
         }),
       ),
-    ),
-});
+    );
+
+  return {
+    savePhases,
+    deleteAllPhases,
+  };
+};

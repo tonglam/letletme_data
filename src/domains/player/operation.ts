@@ -7,8 +7,8 @@ import { getErrorMessage } from 'src/utils/error.util';
 
 import { PlayerOperations } from './types';
 
-export const createPlayerOperations = (repository: PlayerRepository): PlayerOperations => ({
-  savePlayers: (players: PlayerCreateInputs): TE.TaskEither<DomainError, Players> =>
+export const createPlayerOperations = (repository: PlayerRepository): PlayerOperations => {
+  const savePlayers = (players: PlayerCreateInputs): TE.TaskEither<DomainError, Players> =>
     pipe(
       repository.saveBatch(players),
       TE.mapLeft((dbError) =>
@@ -17,9 +17,9 @@ export const createPlayerOperations = (repository: PlayerRepository): PlayerOper
           message: `DB Error (saveBatch): ${getErrorMessage(dbError)}`,
         }),
       ),
-    ),
+    );
 
-  deleteAllPlayers: (): TE.TaskEither<DomainError, void> =>
+  const deleteAllPlayers = (): TE.TaskEither<DomainError, void> =>
     pipe(
       repository.deleteAll(),
       TE.mapLeft((dbError) =>
@@ -28,5 +28,10 @@ export const createPlayerOperations = (repository: PlayerRepository): PlayerOper
           message: `DB Error (deleteAll): ${getErrorMessage(dbError)}`,
         }),
       ),
-    ),
-});
+    );
+
+  return {
+    savePlayers,
+    deleteAllPlayers,
+  };
+};

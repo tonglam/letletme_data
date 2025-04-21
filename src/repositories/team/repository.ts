@@ -7,8 +7,8 @@ import { Team, TeamId, Teams } from 'src/types/domain/team.type';
 
 import { createDBError, DBError, DBErrorCode } from '../../types/error.type';
 
-export const createTeamRepository = (prismaClient: PrismaClient): TeamRepository => ({
-  findById: (id: TeamId): TE.TaskEither<DBError, Team> =>
+export const createTeamRepository = (prismaClient: PrismaClient): TeamRepository => {
+  const findById = (id: TeamId): TE.TaskEither<DBError, Team> =>
     pipe(
       TE.tryCatch(
         () => prismaClient.team.findUnique({ where: { id: Number(id) } }),
@@ -28,9 +28,9 @@ export const createTeamRepository = (prismaClient: PrismaClient): TeamRepository
               }),
             ),
       ),
-    ),
+    );
 
-  findAll: (): TE.TaskEither<DBError, Teams> =>
+  const findAll = (): TE.TaskEither<DBError, Teams> =>
     pipe(
       TE.tryCatch(
         () => prismaClient.team.findMany({ orderBy: { id: 'asc' } }),
@@ -41,9 +41,9 @@ export const createTeamRepository = (prismaClient: PrismaClient): TeamRepository
           }),
       ),
       TE.map((prismaTeams) => prismaTeams.map(mapPrismaTeamToDomain)),
-    ),
+    );
 
-  saveBatch: (teams: TeamCreateInputs): TE.TaskEither<DBError, Teams> =>
+  const saveBatch = (teams: TeamCreateInputs): TE.TaskEither<DBError, Teams> =>
     pipe(
       TE.tryCatch(
         async () => {
@@ -52,7 +52,6 @@ export const createTeamRepository = (prismaClient: PrismaClient): TeamRepository
             data: dataToCreate,
             skipDuplicates: true,
           });
-          return teams;
         },
         (error) =>
           createDBError({
@@ -60,9 +59,10 @@ export const createTeamRepository = (prismaClient: PrismaClient): TeamRepository
             message: `Failed to create teams in batch: ${error}`,
           }),
       ),
-    ),
+      TE.chain(() => findAll()),
+    );
 
-  deleteAll: (): TE.TaskEither<DBError, void> =>
+  const deleteAll = (): TE.TaskEither<DBError, void> =>
     pipe(
       TE.tryCatch(
         () => prismaClient.team.deleteMany({}),
@@ -73,5 +73,12 @@ export const createTeamRepository = (prismaClient: PrismaClient): TeamRepository
           }),
       ),
       TE.map(() => void 0),
-    ),
-});
+    );
+
+  return {
+    findById,
+    findAll,
+    saveBatch,
+    deleteAll,
+  };
+};

@@ -1,10 +1,9 @@
 import { createEventOperations } from 'domains/event/operation';
 import { pipe } from 'fp-ts/function';
 import * as O from 'fp-ts/Option';
-import * as RA from 'fp-ts/ReadonlyArray';
 import * as TE from 'fp-ts/TaskEither';
 import { EventService, EventServiceOperations } from 'services/event/types';
-import { EventCreateInputs, EventRepository } from 'src/repositories/event/type';
+import { EventRepository } from 'src/repositories/event/type';
 
 import { FplBootstrapDataService } from '../../data/types';
 import { EventCache, EventOperations } from '../../domains/event/types';
@@ -64,8 +63,8 @@ const eventServiceOperations = (
     findAllEvents: (): TE.TaskEither<ServiceError, Events> =>
       pipe(cache.getAllEvents(), TE.mapLeft(mapDomainErrorToServiceError)),
 
-    syncEventsFromApi: (): TE.TaskEither<ServiceError, void> =>
-      pipe(
+    syncEventsFromApi: (): TE.TaskEither<ServiceError, void> => {
+      return pipe(
         fplDataService.getEvents(),
         TE.mapLeft((error: DataLayerError) =>
           createServiceIntegrationError({
@@ -74,36 +73,38 @@ const eventServiceOperations = (
             details: error.details,
           }),
         ),
-        TE.chainFirstW(() =>
-          pipe(domainOps.deleteAllEvents(), TE.mapLeft(mapDomainErrorToServiceError)),
-        ),
-        TE.chainW((eventCreateData: EventCreateInputs) =>
-          pipe(domainOps.saveEvents(eventCreateData), TE.mapLeft(mapDomainErrorToServiceError)),
-        ),
-        TE.chainFirstW((savedEvents: Events) =>
-          pipe(
-            cache.setAllEvents(savedEvents),
+        TE.chain((eventCreateData) => {
+          return pipe(
+            domainOps.deleteAllEvents(),
             TE.mapLeft(mapDomainErrorToServiceError),
-            TE.chainW(() =>
-              pipe(
-                RA.findFirst((event: Event) => event.isCurrent)(savedEvents),
-                O.match(
-                  () =>
-                    TE.left(
-                      createDomainError({
-                        code: DomainErrorCode.NOT_FOUND,
-                        message: 'No current event found in synced data to cache.',
-                      }),
-                    ),
-                  (currentEvent) => cache.setCurrentEvent(currentEvent),
-                ),
+            TE.chain(() => {
+              return pipe(
+                domainOps.saveEvents(eventCreateData),
                 TE.mapLeft(mapDomainErrorToServiceError),
-              ),
-            ),
-          ),
-        ),
-        TE.map(() => void 0),
-      ),
+              );
+            }),
+            TE.chain((events) => {
+              return pipe(
+                cache.setAllEvents(events),
+                TE.mapLeft(mapDomainErrorToServiceError),
+                TE.chain(() => {
+                  const currentEvent = events.find((e) => e.isCurrent);
+                  if (currentEvent) {
+                    return pipe(
+                      cache.setCurrentEvent(currentEvent),
+                      TE.mapLeft(mapDomainErrorToServiceError),
+                    );
+                  } else {
+                    return TE.right(void 0);
+                  }
+                }),
+                TE.map(() => void 0),
+              );
+            }),
+          );
+        }),
+      );
+    },
   };
 };
 

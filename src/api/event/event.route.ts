@@ -9,10 +9,10 @@ export const eventRouter = (eventService: EventService): Router => {
   const handlers = createEventHandlers(eventService);
 
   router.get('/', createHandler(handlers.getAllEvents));
-  router.get('/:id', createHandler(handlers.getEventById));
   router.get('/current', createHandler(handlers.getCurrentEvent));
   router.get('/last', createHandler(handlers.getLastEvent));
   router.get('/next', createHandler(handlers.getNextEvent));
+  router.get('/:id', createHandler(handlers.getEventById));
 
   return router;
 };

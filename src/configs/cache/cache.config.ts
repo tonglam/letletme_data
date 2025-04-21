@@ -3,10 +3,12 @@ export const CacheTTL = {
   DERIVED_DATA: 24 * 60 * 60, // 24 hours
   TEMPORARY: 60 * 60, // 1 hour
   DAILY: 24 * 60 * 60, // 1 day
+  WEEKLY: 7 * 24 * 60 * 60, // 7 days
 } as const;
 
 export const DefaultTTL = {
   EVENT: CacheTTL.DERIVED_DATA,
+  EVENT_CURRENT: CacheTTL.WEEKLY, // TTL for the specific current event key
   PHASE: CacheTTL.DERIVED_DATA,
   TEAM: CacheTTL.DERIVED_DATA,
   STANDING: CacheTTL.TEMPORARY,

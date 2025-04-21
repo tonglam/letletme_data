@@ -7,7 +7,7 @@ import { EventRepository } from 'src/repositories/event/type';
 import { Event, Events } from 'src/types/domain/event.type';
 import { getCurrentSeason } from 'src/utils/common.util';
 
-import { CachePrefix } from '../../configs/cache/cache.config';
+import { CachePrefix, DefaultTTL } from '../../configs/cache/cache.config';
 import { redisClient } from '../../infrastructures/cache/client';
 import { CacheError, CacheErrorCode, createCacheError, DomainError } from '../../types/error.type';
 import { mapCacheErrorToDomainError, mapRepositoryErrorToCacheError } from '../../utils/error.util';
@@ -58,7 +58,7 @@ export const createEventCache = (
 ): EventCache => {
   const { keyPrefix, season } = config;
   const baseKey = `${keyPrefix}::${season}`;
-  const currentEventKey = 'current';
+  const currentEventKey = `${baseKey}::current`;
 
   const getCurrentEvent = (): TE.TaskEither<DomainError, Event> =>
     pipe(
@@ -104,7 +104,8 @@ export const createEventCache = (
   const setCurrentEvent = (event: Event): TE.TaskEither<DomainError, void> =>
     pipe(
       TE.tryCatch(
-        () => redisClient.set(currentEventKey, JSON.stringify(event)),
+        () =>
+          redisClient.set(currentEventKey, JSON.stringify(event), 'EX', DefaultTTL.EVENT_CURRENT),
         (error: unknown) =>
           createCacheError({
             code: CacheErrorCode.OPERATION_ERROR,
