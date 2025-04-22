@@ -206,4 +206,42 @@ describe('PlayerValue Routes Integration Tests', () => {
 
     expect(res.status).toBe(404);
   });
+
+  it('GET /player-values/team/:team should return values for players of that team', async () => {
+    const targetTeamId = 1; // Example: Arsenal
+    const res = await request(app).get(`/player-values/team/${targetTeamId}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty('data');
+    expect(Array.isArray(res.body.data)).toBe(true);
+    const values = res.body.data;
+    if (values.length > 0) {
+      // Need to verify team association indirectly or add team info to service response
+      // For now, just check the structure
+      expect(values[0]).toHaveProperty('element');
+      expect(values[0]).toHaveProperty('value');
+      expect(values[0]).toHaveProperty('changeDate');
+    } else {
+      console.warn(
+        `[Test Warning] No player values found for team ${targetTeamId} during test run.`,
+      );
+    }
+  });
+
+  it('GET /player-values/sync should trigger synchronization and return success', async () => {
+    // Clear cache and DB before testing sync specifically
+    await prisma.playerValue.deleteMany({});
+    const valueKeys = await redisClient.keys(`${cachePrefix}::${testSeason}*`);
+    if (valueKeys.length > 0) await redisClient.del(valueKeys);
+
+    const res = await request(app).get('/player-values/sync');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toBeDefined();
+    // The handler returns void on success, resulting in an empty body
+
+    // Verify data was actually synced
+    const valuesInDb = await prisma.playerValue.findMany();
+    expect(valuesInDb.length).toBeGreaterThan(0);
+  });
 });

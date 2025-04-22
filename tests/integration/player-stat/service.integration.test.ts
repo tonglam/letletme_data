@@ -194,6 +194,64 @@ describe('PlayerStat Integration Tests', { timeout: 30000 }, () => {
         throw new Error('getLatestPlayerStats failed');
       }
     });
+
+    it('should get player stats by element type after syncing', async () => {
+      await playerStatService.syncPlayerStatsFromApi()();
+      const latestStatsResult = await playerStatService.getLatestPlayerStats()();
+      expect(E.isRight(latestStatsResult)).toBe(true);
+
+      if (E.isRight(latestStatsResult) && latestStatsResult.right.length > 0) {
+        const firstStat = latestStatsResult.right[0];
+        const elementTypeToTest = firstStat.elementType;
+
+        const statsByTypeResult =
+          await playerStatService.getPlayerStatsByElementType(elementTypeToTest)();
+        expect(E.isRight(statsByTypeResult)).toBe(true);
+
+        if (E.isRight(statsByTypeResult)) {
+          const stats = statsByTypeResult.right;
+          expect(stats.length).toBeGreaterThan(0);
+          stats.forEach((s) => {
+            expect(s.elementType).toEqual(elementTypeToTest);
+            // Check enrichment
+            expect(s).toHaveProperty('elementTypeName');
+          });
+        } else {
+          throw new Error('getPlayerStatsByElementType returned Left');
+        }
+      } else {
+        throw new Error('Could not get latest stats or stats list is empty after sync.');
+      }
+    });
+
+    it('should get player stats by team after syncing', async () => {
+      await playerStatService.syncPlayerStatsFromApi()();
+      const latestStatsResult = await playerStatService.getLatestPlayerStats()();
+      expect(E.isRight(latestStatsResult)).toBe(true);
+
+      if (E.isRight(latestStatsResult) && latestStatsResult.right.length > 0) {
+        const firstStat = latestStatsResult.right[0];
+        const teamToTest = firstStat.team;
+
+        const statsByTeamResult = await playerStatService.getPlayerStatsByTeam(teamToTest)();
+        expect(E.isRight(statsByTeamResult)).toBe(true);
+
+        if (E.isRight(statsByTeamResult)) {
+          const stats = statsByTeamResult.right;
+          expect(stats.length).toBeGreaterThan(0);
+          stats.forEach((s) => {
+            expect(s.team).toEqual(teamToTest);
+            // Check enrichment
+            expect(s).toHaveProperty('teamName');
+            expect(s).toHaveProperty('teamShortName');
+          });
+        } else {
+          throw new Error('getPlayerStatsByTeam returned Left');
+        }
+      } else {
+        throw new Error('Could not get latest stats or stats list is empty after sync.');
+      }
+    });
   });
 
   describe('PlayerStat Workflow Integration', () => {

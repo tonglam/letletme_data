@@ -19,8 +19,8 @@ export const mapElementResponseToPlayer = (raw: ElementResponse): E.Either<strin
         code: raw.code,
         elementType: raw.element_type,
         team: raw.team,
-        price: raw.now_cost / 10,
-        startPrice: (raw.now_cost - raw.cost_change_start) / 10,
+        price: raw.now_cost,
+        startPrice: raw.now_cost - raw.cost_change_start,
         firstName: raw.first_name,
         secondName: raw.second_name,
         webName: raw.web_name,
@@ -33,7 +33,7 @@ export const mapElementResponseToPlayerValue = (
   raw: ElementResponse,
 ): E.Either<string, SourcePlayerValue> => {
   const currentDateStr = format(new Date(), 'yyyyMMdd');
-  const value = raw.now_cost / 10;
+  const value = raw.now_cost;
 
   return pipe(
     E.Do,

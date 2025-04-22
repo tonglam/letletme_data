@@ -13,10 +13,11 @@ import { CachePrefix } from '../../../src/configs/cache/cache.config';
 import { createFplBootstrapDataService } from '../../../src/data/fpl/bootstrap.data';
 import { FplBootstrapDataService } from '../../../src/data/types';
 import { createTeamCache } from '../../../src/domains/team/cache';
-import { TeamCache, TeamRepository } from '../../../src/domains/team/types';
+import { TeamCache } from '../../../src/domains/team/types';
 import { redisClient } from '../../../src/infrastructures/cache/client';
 import { HTTPClient } from '../../../src/infrastructures/http';
 import { createTeamRepository } from '../../../src/repositories/team/repository';
+import { TeamRepository } from '../../../src/repositories/team/type';
 import { createTeamService } from '../../../src/services/team/service';
 import { TeamService } from '../../../src/services/team/types';
 import { Team, TeamId } from '../../../src/types/domain/team.type';
@@ -118,5 +119,24 @@ describe('Team Routes Integration Tests', () => {
     const res = await request(app).get(`/teams/${nonExistentTeamId}`);
 
     expect(res.status).toBe(404);
+  });
+
+  it('GET /teams/sync should trigger synchronization and return success', async () => {
+    // Clear cache and DB before testing sync specifically
+    await prisma.team.deleteMany({});
+    const keys = await redisClient.keys(`${cachePrefix}::${testSeason}*`);
+    if (keys.length > 0) {
+      await redisClient.del(keys);
+    }
+
+    const res = await request(app).get('/teams/sync');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toBeDefined();
+    // The handler returns void on success, resulting in an empty body
+
+    // Verify data was actually synced
+    const teamsInDb = await prisma.team.findMany();
+    expect(teamsInDb.length).toBeGreaterThan(0);
   });
 });

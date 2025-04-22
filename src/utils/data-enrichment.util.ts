@@ -46,15 +46,9 @@ export const enrichWithElementType =
               O.map((p) => p.elementType as ElementTypeId),
               O.getOrElse(() => ElementTypeId.FORWARD),
             );
-            const value = pipe(
-              playerOpt,
-              O.map((p) => p.price / 10),
-              O.getOrElse(() => 0),
-            );
             return {
               ...item,
               elementTypeName: getElementTypeName(elementType),
-              value,
             };
           }),
         );

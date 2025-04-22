@@ -77,7 +77,7 @@ export type PlayerStats = readonly PlayerStat[];
 
 export type SourcePlayerStat = Omit<
   PlayerStat,
-  'elementTypeName' | 'team' | 'teamName' | 'teamShortName' | 'value'
+  'id' | 'elementTypeName' | 'team' | 'teamName' | 'teamShortName' | 'value'
 > & {
   readonly id?: PlayerStatId;
 };

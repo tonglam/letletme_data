@@ -168,4 +168,53 @@ describe('PlayerStat Routes Integration Tests', () => {
 
     expect(res.status).toBe(404);
   });
+
+  it('POST /player-stats/sync should trigger synchronization and return success', async () => {
+    // Clear cache and DB before testing sync specifically
+    await prisma.playerStat.deleteMany({});
+    const keys = await redisClient.keys(`${cachePrefix}::${testSeason}*`);
+    if (keys.length > 0) {
+      await redisClient.del(keys);
+    }
+
+    const res = await request(app).post('/player-stats/sync');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toBeDefined();
+    // The handler returns void on success, resulting in an empty body
+
+    // Verify data was actually synced
+    const statsInDb = await prisma.playerStat.findMany();
+    expect(statsInDb.length).toBeGreaterThan(0);
+  }, 30000);
+
+  it('GET /player-stats/element-type/:elementType should return stats for that type', async () => {
+    // Find a common element type (e.g., 2 for DEF)
+    const targetElementType = 2;
+    const res = await request(app).get(`/player-stats/element-type/${targetElementType}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty('data');
+    expect(Array.isArray(res.body.data)).toBe(true);
+    const stats = res.body.data as PlayerStat[];
+    expect(stats.length).toBeGreaterThan(0);
+    expect(stats.every((s) => s.elementType === targetElementType)).toBe(true);
+    expect(stats[0]).toHaveProperty('id');
+    expect(stats[0]).toHaveProperty('element');
+  });
+
+  it('GET /player-stats/team/:team should return stats for that team', async () => {
+    // Find a common team ID (e.g., 1 for Arsenal)
+    const targetTeamId = 1;
+    const res = await request(app).get(`/player-stats/team/${targetTeamId}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty('data');
+    expect(Array.isArray(res.body.data)).toBe(true);
+    const stats = res.body.data as PlayerStat[];
+    expect(stats.length).toBeGreaterThan(0);
+    expect(stats.every((s) => s.team === targetTeamId)).toBe(true);
+    expect(stats[0]).toHaveProperty('id');
+    expect(stats[0]).toHaveProperty('element');
+  });
 });

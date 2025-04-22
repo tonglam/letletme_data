@@ -135,6 +135,26 @@ describe('Event Routes Integration Tests', () => {
     }
   });
 
+  it('GET /events/last should return the last finished event or 404 if not found', async () => {
+    const res = await request(app).get('/events/last');
+
+    // Expect either 200 OK or 404 Not Found
+    expect([200, 404]).toContain(res.status);
+
+    if (res.status === 200) {
+      expect(res.body).toBeDefined();
+      expect(res.body).toHaveProperty('data');
+      expect(typeof res.body.data).toBe('object');
+      expect(res.body.data).toHaveProperty('id');
+      expect(res.body.data).toHaveProperty('name');
+    } else {
+      // Check for expected 404
+      expect(res.status).toBe(404);
+      expect(res.body).toHaveProperty('error');
+      expect(res.body.error.code).toEqual(APIErrorCode.NOT_FOUND);
+    }
+  });
+
   it('GET /events/next should return the next event or 404 if not found', async () => {
     const res = await request(app).get('/events/next');
 
@@ -188,5 +208,26 @@ describe('Event Routes Integration Tests', () => {
     expect(res.status).toBe(400);
     expect(res.body).toHaveProperty('error');
     expect(res.body.error.code).toEqual(APIErrorCode.VALIDATION_ERROR);
+  });
+
+  it('POST /events/sync should trigger synchronization and return success', async () => {
+    // Clear cache and DB before testing sync specifically
+    await prisma.event.deleteMany({});
+    const keys = await redisClient.keys(`${cachePrefix}::${testSeason}*`);
+    if (keys.length > 0) {
+      await redisClient.del(keys);
+    }
+
+    const res = await request(app).post('/events/sync');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toBeDefined();
+    // The handler returns void on success, resulting in an empty body
+    // expect(res.body).toHaveProperty('data');
+    // expect(res.body.data).toEqual({ success: true });
+
+    // Optional: Verify data was actually synced
+    const eventsInDb = await prisma.event.findMany();
+    expect(eventsInDb.length).toBeGreaterThan(0);
   });
 });

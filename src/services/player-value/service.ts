@@ -132,7 +132,18 @@ export const playerValueServiceOperations = (
   const processSourceToPlayerValues = (
     sourceValues: SourcePlayerValues,
   ): TE.TaskEither<ServiceError, PlayerValues> =>
-    pipe(TE.of(sourceValues), TE.chainW(enrichSourceData), TE.chainW(addChangeInfo));
+    pipe(
+      TE.of(sourceValues),
+      TE.chainW(enrichSourceData),
+      TE.chainW(addChangeInfo),
+      TE.map((playerValues) => {
+        const processed = RA.map((pv: PlayerValue) => ({
+          ...pv,
+          value: pv.value / 10,
+        }))(playerValues);
+        return processed;
+      }),
+    );
 
   const ops: PlayerValueServiceOperations = {
     detectPlayerValueChanges: (): TE.TaskEither<ServiceError, PlayerValues> =>

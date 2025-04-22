@@ -119,4 +119,23 @@ describe('Phase Routes Integration Tests', () => {
 
     expect(res.status).toBe(404);
   });
+
+  it('POST /phases/sync should trigger synchronization and return success', async () => {
+    // Clear cache and DB before testing sync specifically
+    await prisma.phase.deleteMany({});
+    const keys = await redisClient.keys(`${cachePrefix}::${testSeason}*`);
+    if (keys.length > 0) {
+      await redisClient.del(keys);
+    }
+
+    const res = await request(app).post('/phases/sync');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toBeDefined();
+    // The handler returns void on success, resulting in an empty body
+
+    // Verify data was actually synced
+    const phasesInDb = await prisma.phase.findMany();
+    expect(phasesInDb.length).toBeGreaterThan(0);
+  });
 });

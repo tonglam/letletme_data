@@ -181,8 +181,83 @@ describe('PlayerValue Integration Tests', { timeout: 30000 }, () => {
         expect(fetchedValue.changeType).toBeDefined();
 
         // Can compare against the value fetched directly from DB if needed
-        expect(fetchedValue.value).toEqual(targetPlayerValue.value);
+        // Adjust assertion to compare service float with DB int / 10
+        expect(fetchedValue.value).toEqual(targetPlayerValue.value / 10);
         // lastValue might differ depending on test setup and previous runs
+      }
+    });
+
+    it('should get player values by team after syncing', async () => {
+      const syncResult = await playerValueService.syncPlayerValuesFromApi()();
+      expect(E.isRight(syncResult)).toBe(true);
+
+      // Fetch a PlayerValue from DB to get an element ID
+      const dbValue = await prisma.playerValue.findFirst();
+      expect(dbValue).not.toBeNull();
+      if (!dbValue) throw new Error('No player value found in DB after sync');
+
+      // Fetch the corresponding Player using the element ID to get the teamId
+      const player = await prisma.player.findUnique({
+        where: { element: dbValue.element },
+      });
+      expect(player).not.toBeNull();
+      if (!player) throw new Error(`No player found for element ${dbValue.element}`);
+      const targetTeamId = player.team;
+
+      const valuesByTeamResult = await playerValueService.getPlayerValuesByTeam(targetTeamId)();
+      expect(E.isRight(valuesByTeamResult)).toBe(true);
+
+      if (E.isRight(valuesByTeamResult)) {
+        const values = valuesByTeamResult.right;
+        // It's possible a team has no players with value changes, so check array but not necessarily length > 0
+        expect(Array.isArray(values)).toBe(true);
+
+        if (values.length > 0) {
+          values.forEach((v) => {
+            expect(v.team).toEqual(targetTeamId);
+            // Check enrichment
+            expect(v).toHaveProperty('teamName');
+            expect(v).toHaveProperty('teamShortName');
+            // Check change info
+            expect(v).toHaveProperty('lastValue');
+            expect(v).toHaveProperty('changeType');
+          });
+        }
+      }
+    });
+
+    it('should get player values by change date after syncing', async () => {
+      const syncResult = await playerValueService.syncPlayerValuesFromApi()();
+      expect(E.isRight(syncResult)).toBe(true);
+
+      // Get today's date in YYYY-MM-DD format for the test
+      const today = new Date();
+      const changeDateToTest = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+
+      // Fetch using the change date
+      const valuesByDateResult =
+        await playerValueService.getPlayerValuesByChangeDate(changeDateToTest)();
+      expect(E.isRight(valuesByDateResult)).toBe(true);
+
+      if (E.isRight(valuesByDateResult)) {
+        const values = valuesByDateResult.right;
+        // It's possible no values changed today, so we check the result is an array
+        // but not necessarily non-empty
+        expect(Array.isArray(values)).toBe(true);
+
+        // If values exist, check their structure and date
+        if (values.length > 0) {
+          values.forEach((v) => {
+            expect(v.changeDate).toEqual(changeDateToTest);
+            // Check enrichment
+            expect(v).toHaveProperty('elementTypeName');
+            expect(v).toHaveProperty('teamName');
+            // Check change info
+            expect(v).toHaveProperty('lastValue');
+            expect(v).toHaveProperty('changeType');
+          });
+        }
+        // If no values changed, the test still passes as the function returned Right<[]>
       }
     });
   });

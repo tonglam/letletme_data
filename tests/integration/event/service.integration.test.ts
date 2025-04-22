@@ -139,6 +139,84 @@ describe('Event Integration Tests', () => {
         }
       }
     });
+
+    it('should fetch last event after syncing', async () => {
+      // Sync first
+      const syncResult = await eventService.syncEventsFromApi()();
+      expect(E.isRight(syncResult)).toBe(true);
+
+      // Need current event to know what "last" is
+      const currentEventResult = await eventService.getCurrentEvent()();
+      expect(E.isRight(currentEventResult)).toBe(true);
+      if (E.isRight(currentEventResult) && currentEventResult.right) {
+        const currentEvent = currentEventResult.right;
+        // Ensure there *is* a last event to fetch (e.g., if current is GW1)
+        if (currentEvent.id > 1) {
+          const lastEventResult = await eventService.getLastEvent()();
+          expect(E.isRight(lastEventResult)).toBe(true);
+          if (E.isRight(lastEventResult) && lastEventResult.right) {
+            expect(lastEventResult.right.id).toEqual(currentEvent.id - 1);
+          }
+        } else {
+          // If current event is 1, getLastEvent should fail or return nothing
+          // The current implementation relies on cache which should be populated,
+          // but finding event id 0 will fail. Adjust expectation based on desired behavior.
+          // For now, just check the attempt was made if applicable.
+          // Alternatively, skip this case or expect an error if the service guarantees one.
+          console.warn('Current event is 1, skipping getLastEvent check.');
+        }
+      }
+    });
+
+    it('should fetch next event after syncing', async () => {
+      // Sync first
+      const syncResult = await eventService.syncEventsFromApi()();
+      expect(E.isRight(syncResult)).toBe(true);
+
+      // Need current event to know what "next" is
+      const currentEventResult = await eventService.getCurrentEvent()();
+      expect(E.isRight(currentEventResult)).toBe(true);
+      if (E.isRight(currentEventResult) && currentEventResult.right) {
+        const currentEvent = currentEventResult.right;
+        // Fetch all events to check if there is a next one
+        const allEventsResult = await eventService.getEvents()();
+        expect(E.isRight(allEventsResult)).toBe(true);
+        if (E.isRight(allEventsResult) && allEventsResult.right) {
+          const maxEventId = Math.max(...allEventsResult.right.map((e) => e.id));
+          // Ensure there *is* a next event to fetch
+          if (currentEvent.id < maxEventId) {
+            const nextEventResult = await eventService.getNextEvent()();
+            expect(E.isRight(nextEventResult)).toBe(true);
+            if (E.isRight(nextEventResult) && nextEventResult.right) {
+              expect(nextEventResult.right.id).toEqual(currentEvent.id + 1);
+            }
+          } else {
+            console.warn(
+              `Current event ${currentEvent.id} is the last event, skipping getNextEvent check.`,
+            );
+          }
+        }
+      }
+    });
+
+    it('should fetch all events after syncing', async () => {
+      // Sync first
+      const syncResult = await eventService.syncEventsFromApi()();
+      expect(E.isRight(syncResult)).toBe(true); // Ensure sync succeeded
+
+      // Then attempt to get all events
+      const allEventsResult = await eventService.getEvents()();
+
+      expect(E.isRight(allEventsResult)).toBe(true);
+      if (E.isRight(allEventsResult) && allEventsResult.right) {
+        const allEvents = allEventsResult.right;
+        expect(Array.isArray(allEvents)).toBe(true);
+        expect(allEvents.length).toBeGreaterThan(0);
+        // Check if the fetched events have the correct structure
+        expect(allEvents[0]).toHaveProperty('id');
+        expect(allEvents[0]).toHaveProperty('name');
+      }
+    });
   });
 
   describe('Event Workflow Integration', () => {

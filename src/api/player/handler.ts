@@ -23,7 +23,7 @@ export const createPlayerHandlers = (playerService: PlayerService): PlayerHandle
   };
 
   const getPlayerByElement = (req: Request): TE.TaskEither<APIError, Player> => {
-    const elementParam = req.params.element;
+    const elementParam = req.params.id;
     const parsedElement = parseInt(elementParam);
 
     if (isNaN(parsedElement)) {

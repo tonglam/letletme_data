@@ -142,4 +142,23 @@ describe('Player Routes Integration Tests', () => {
     const res = await request(app).get(`/players/${String(nonExistentPlayerId)}`);
     expect(res.status).toBe(404);
   });
+
+  it('POST /players/sync should trigger synchronization and return success', async () => {
+    // Clear cache and DB before testing sync specifically
+    await prisma.player.deleteMany({});
+    const keys = await redisClient.keys(`${cachePrefix}::${testSeason}*`);
+    if (keys.length > 0) {
+      await redisClient.del(keys);
+    }
+
+    const res = await request(app).post('/players/sync');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toBeDefined();
+    // The handler returns void on success, resulting in an empty body
+
+    // Verify data was actually synced
+    const playersInDb = await prisma.player.findMany();
+    expect(playersInDb.length).toBeGreaterThan(0);
+  });
 });

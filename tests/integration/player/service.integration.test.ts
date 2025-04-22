@@ -144,6 +144,57 @@ describe('Player Integration Tests', () => {
         );
       }
     });
+
+    it('should get players by element type after syncing', async () => {
+      const syncResult = await playerService.syncPlayersFromApi()();
+      expect(E.isRight(syncResult)).toBe(true);
+
+      const getPlayersResult = await playerService.getPlayers()();
+      expect(E.isRight(getPlayersResult)).toBe(true);
+      if (E.isRight(getPlayersResult) && getPlayersResult.right.length > 0) {
+        const firstPlayer = getPlayersResult.right[0];
+        const elementTypeToTest = firstPlayer.elementType;
+
+        const playersByTypeResult =
+          await playerService.getPlayersByElementType(elementTypeToTest)();
+        expect(E.isRight(playersByTypeResult)).toBe(true);
+        if (E.isRight(playersByTypeResult)) {
+          const players = playersByTypeResult.right;
+          expect(players.length).toBeGreaterThan(0);
+          // Verify all returned players have the correct element type
+          players.forEach((p) => {
+            expect(p.elementType).toEqual(elementTypeToTest);
+          });
+        }
+      } else {
+        throw new Error('Could not get players or player list is empty after sync.');
+      }
+    });
+
+    it('should get players by team after syncing', async () => {
+      const syncResult = await playerService.syncPlayersFromApi()();
+      expect(E.isRight(syncResult)).toBe(true);
+
+      const getPlayersResult = await playerService.getPlayers()();
+      expect(E.isRight(getPlayersResult)).toBe(true);
+      if (E.isRight(getPlayersResult) && getPlayersResult.right.length > 0) {
+        const firstPlayer = getPlayersResult.right[0];
+        const teamToTest = firstPlayer.team;
+
+        const playersByTeamResult = await playerService.getPlayersByTeam(teamToTest)();
+        expect(E.isRight(playersByTeamResult)).toBe(true);
+        if (E.isRight(playersByTeamResult)) {
+          const players = playersByTeamResult.right;
+          expect(players.length).toBeGreaterThan(0);
+          // Verify all returned players belong to the correct team
+          players.forEach((p) => {
+            expect(p.team).toEqual(teamToTest);
+          });
+        }
+      } else {
+        throw new Error('Could not get players or player list is empty after sync.');
+      }
+    });
   });
 
   describe('Player Workflow Integration', () => {
