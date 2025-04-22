@@ -6,47 +6,25 @@ import * as RA from 'fp-ts/ReadonlyArray';
 import * as RNEA from 'fp-ts/ReadonlyNonEmptyArray';
 import * as TE from 'fp-ts/TaskEither';
 import { ElementTypeId, ElementTypeName, getElementTypeName } from 'src/types/base.type';
-import { SourcePlayerStat } from 'src/types/domain/player-stat.type';
-import { SourcePlayerValue } from 'src/types/domain/player-value.type';
+import { PlayerStat, PlayerStats, SourcePlayerStat } from 'src/types/domain/player-stat.type';
+import { PlayerValues, SourcePlayerValue } from 'src/types/domain/player-value.type';
 import { Player } from 'src/types/domain/player.type';
 import { Team, TeamId } from 'src/types/domain/team.type';
 import { createDomainError, DomainError, DomainErrorCode } from 'src/types/error.type';
 
 type HasElement = { element: number };
 
-// Type for intermediate enrichment step (adds element type info)
 type EnrichedWithElementType<T extends HasElement> = T & {
   elementType: ElementTypeId;
   elementTypeName: ElementTypeName;
 };
 
-// Type for final enrichment step (adds team info)
 type EnrichedWithTeam<T extends HasElement> = T & {
   team: TeamId;
   teamName: string;
   teamShortName: string;
 };
 
-// --- Define Intermediate Enriched Types ---
-// Represents SourcePlayerStat + enrichments
-export type EnrichedSourcePlayerStat = SourcePlayerStat & {
-  elementType: ElementTypeId;
-  elementTypeName: ElementTypeName;
-  team: TeamId;
-  teamName: string;
-  teamShortName: string;
-};
-// Represents SourcePlayerValue + enrichments
-export type EnrichedSourcePlayerValue = SourcePlayerValue & {
-  elementType: ElementTypeId;
-  elementTypeName: ElementTypeName;
-  team: TeamId;
-  teamName: string;
-  teamShortName: string;
-};
-// --- End Intermediate Enriched Types ---
-
-// Enrich with element type information using PlayerCache
 export const enrichWithElementType =
   <T extends HasElement>(playerCache: PlayerCache) =>
   (
@@ -80,7 +58,6 @@ export const enrichWithElementType =
     );
   };
 
-// Enrich with team information using PlayerCache and TeamCache
 export const enrichWithTeam =
   <T extends HasElement & { elementType: ElementTypeId; elementTypeName: ElementTypeName }>(
     playerCache: PlayerCache,
@@ -140,23 +117,19 @@ export const enrichWithTeam =
     );
   };
 
-// Update return type to intermediate type
 export const enrichPlayerStats =
   (playerCache: PlayerCache, teamCache: TeamCache) =>
-  (
-    sourceStats: ReadonlyArray<SourcePlayerStat>,
-  ): TE.TaskEither<DomainError, ReadonlyArray<EnrichedSourcePlayerStat>> =>
+  (sourceStats: ReadonlyArray<SourcePlayerStat>): TE.TaskEither<DomainError, PlayerStats> =>
     pipe(
       sourceStats,
       enrichWithElementType(playerCache),
       TE.chain(enrichWithTeam(playerCache, teamCache)),
-      TE.map((enrichedStats) => enrichedStats as ReadonlyArray<EnrichedSourcePlayerStat>),
+      TE.map((enrichedStats) => enrichedStats as PlayerStats),
     );
 
-// Update return type to intermediate type
 export const enrichPlayerStat =
   (playerCache: PlayerCache, teamCache: TeamCache) =>
-  (sourceStat: SourcePlayerStat): TE.TaskEither<DomainError, EnrichedSourcePlayerStat> =>
+  (sourceStat: SourcePlayerStat): TE.TaskEither<DomainError, PlayerStat> =>
     pipe(
       TE.of([sourceStat]),
       TE.chain(enrichPlayerStats(playerCache, teamCache)),
@@ -170,15 +143,12 @@ export const enrichPlayerStat =
       TE.map(RNEA.head),
     );
 
-// Update return type to intermediate type
 export const enrichPlayerValues =
   (playerCache: PlayerCache, teamCache: TeamCache) =>
-  (
-    sourceValues: ReadonlyArray<SourcePlayerValue>,
-  ): TE.TaskEither<DomainError, ReadonlyArray<EnrichedSourcePlayerValue>> =>
+  (sourceValues: ReadonlyArray<SourcePlayerValue>): TE.TaskEither<DomainError, PlayerValues> =>
     pipe(
       sourceValues,
       enrichWithElementType(playerCache),
       TE.chain(enrichWithTeam(playerCache, teamCache)),
-      TE.map((enrichedValues) => enrichedValues as ReadonlyArray<EnrichedSourcePlayerValue>),
+      TE.map((enrichedValues) => enrichedValues as PlayerValues),
     );

@@ -9,6 +9,34 @@ import { getErrorMessage } from 'src/utils/error.util';
 export const createPlayerValueOperations = (
   repository: PlayerValueRepository,
 ): PlayerValueOperations => {
+  const getLatestPlayerValuesByElements = (
+    elements: readonly number[],
+  ): TE.TaskEither<DomainError, ReadonlyArray<{ element: number; value: number }>> =>
+    pipe(
+      repository.getLatestPlayerValuesByElements(elements),
+      TE.mapLeft((dbError) =>
+        createDomainError({
+          code: DomainErrorCode.DATABASE_ERROR,
+          message: `DB Error (getLatestPlayerValuesByElements): ${getErrorMessage(dbError)}`,
+          cause: dbError,
+        }),
+      ),
+    );
+
+  const getPlayerValuesByChangeDate = (
+    changeDate: string,
+  ): TE.TaskEither<DomainError, SourcePlayerValues> =>
+    pipe(
+      repository.findByChangeDate(changeDate),
+      TE.mapLeft((dbError) =>
+        createDomainError({
+          code: DomainErrorCode.DATABASE_ERROR,
+          message: `DB Error (getPlayerValuesByChangeDate): ${getErrorMessage(dbError)}`,
+          cause: dbError,
+        }),
+      ),
+    );
+
   const getPlayerValuesByElement = (
     element: number,
   ): TE.TaskEither<DomainError, SourcePlayerValues> =>
@@ -37,16 +65,15 @@ export const createPlayerValueOperations = (
       ),
     );
 
-  const savePlayerValues = (
+  const savePlayerValueChanges = (
     playerValues: PlayerValueCreateInputs,
-  ): TE.TaskEither<DomainError, SourcePlayerValues> =>
+  ): TE.TaskEither<DomainError, void> =>
     pipe(
-      repository.saveBatch(playerValues),
-      TE.map(() => playerValues),
+      repository.savePlayerValueChanges(playerValues),
       TE.mapLeft((dbError) =>
         createDomainError({
           code: DomainErrorCode.DATABASE_ERROR,
-          message: `DB Error (savePlayerValues): ${getErrorMessage(dbError)}`,
+          message: `DB Error (savePlayerValueChanges): ${getErrorMessage(dbError)}`,
           cause: dbError,
         }),
       ),
@@ -64,23 +91,12 @@ export const createPlayerValueOperations = (
       ),
     );
 
-  const deleteAllPlayerValues = (): TE.TaskEither<DomainError, void> =>
-    pipe(
-      repository.deleteAll(),
-      TE.mapLeft((dbError) =>
-        createDomainError({
-          code: DomainErrorCode.DATABASE_ERROR,
-          message: `DB Error (deleteAllPlayerValues): ${getErrorMessage(dbError)}`,
-          cause: dbError,
-        }),
-      ),
-    );
-
   return {
+    getLatestPlayerValuesByElements,
+    getPlayerValuesByChangeDate,
     getPlayerValuesByElement,
     getPlayerValuesByElements,
-    savePlayerValues,
+    savePlayerValueChanges,
     deletePlayerValuesByChangeDate,
-    deleteAllPlayerValues,
   };
 };

@@ -10,12 +10,16 @@ export type PlayerValueCreateInput = Omit<PlayerValue, 'id' | 'createdAt'>;
 export type PlayerValueCreateInputs = readonly PlayerValueCreateInput[];
 
 export interface PlayerValueRepository {
+  readonly getLatestPlayerValuesByElements: (
+    elements: readonly number[],
+  ) => TE.TaskEither<DBError, ReadonlyArray<{ element: number; value: number }>>;
   readonly findByChangeDate: (changeDate: string) => TE.TaskEither<DBError, SourcePlayerValues>;
   readonly findByElement: (element: number) => TE.TaskEither<DBError, SourcePlayerValues>;
-  readonly findByElements: (elements: number[]) => TE.TaskEither<DBError, SourcePlayerValues>;
-  readonly saveBatch: (
-    playerValues: PlayerValueCreateInputs,
+  readonly findByElements: (
+    elements: readonly number[],
   ) => TE.TaskEither<DBError, SourcePlayerValues>;
+  readonly savePlayerValueChanges: (
+    playerValues: PlayerValueCreateInputs,
+  ) => TE.TaskEither<DBError, void>;
   readonly deleteByChangeDate: (changeDate: string) => TE.TaskEither<DBError, void>;
-  readonly deleteAll: () => TE.TaskEither<DBError, void>;
 }

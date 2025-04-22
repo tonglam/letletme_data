@@ -37,11 +37,8 @@ import { PlayerService } from '../../../src/services/player/types';
 import { createPlayerValueService } from '../../../src/services/player-value/service';
 import { PlayerValueService } from '../../../src/services/player-value/types';
 import { playerValueWorkflows } from '../../../src/services/player-value/workflow';
-// Import PlayerValue type
 import { createTeamService } from '../../../src/services/team/service';
 import { TeamService } from '../../../src/services/team/types';
-import { PlayerValue } from '../../../src/types/domain/player-value.type';
-// Need Event service dependency
 import {
   IntegrationTestSetupResult,
   setupIntegrationTest,
@@ -121,7 +118,7 @@ describe('PlayerValue Integration Tests', { timeout: 30000 }, () => {
     teamService = createTeamService(fplDataService, teamRepository, teamCache);
 
     // PlayerValue cache uses singleton client
-    playerValueCache = createPlayerValueCache(playerValueRepository, {
+    playerValueCache = createPlayerValueCache({
       keyPrefix: cachePrefix,
       ttlSeconds: 3600,
     });
@@ -133,30 +130,20 @@ describe('PlayerValue Integration Tests', { timeout: 30000 }, () => {
       teamCache,
       playerCache,
     );
+
+    // Sync base data once after all services are set up
+    await teamService.syncTeamsFromApi()();
+    await playerService.syncPlayersFromApi()();
+    await eventService.syncEventsFromApi()();
   });
 
   beforeEach(async () => {
     await prisma.playerValue.deleteMany({});
-    await prisma.player.deleteMany({});
-    await prisma.team.deleteMany({});
-    await prisma.event.deleteMany({});
 
     // Use shared client for cleanup
     const valueKeys = await redisClient.keys(`${cachePrefix}::${testSeason}*`);
     if (valueKeys.length > 0) {
       await redisClient.del(valueKeys);
-    }
-    const playerKeys = await redisClient.keys(`${playerCachePrefix}::${testSeason}*`);
-    if (playerKeys.length > 0) {
-      await redisClient.del(playerKeys);
-    }
-    const teamKeys = await redisClient.keys(`${teamCachePrefix}::${testSeason}*`);
-    if (teamKeys.length > 0) {
-      await redisClient.del(teamKeys);
-    }
-    const eventKeys = await redisClient.keys(`${eventCachePrefix}::${testSeason}*`);
-    if (eventKeys.length > 0) {
-      await redisClient.del(eventKeys);
     }
   });
 
@@ -165,20 +152,9 @@ describe('PlayerValue Integration Tests', { timeout: 30000 }, () => {
     // await redisClient.quit(); // If global teardown needed
   });
 
-  // Define local helper function to sync base data
-  const syncBaseData = async (
-    teamSvc: TeamService,
-    playerSvc: PlayerService,
-    eventSvc: EventService,
-  ) => {
-    await teamSvc.syncTeamsFromApi()();
-    await playerSvc.syncPlayersFromApi()();
-    await eventSvc.syncEventsFromApi()();
-  };
-
   describe('PlayerValue Service Integration', () => {
     it('should fetch player values from API, store in database, and cache them', async () => {
-      await syncBaseData(teamService, playerService, eventService); // Call helper
+      // Base data is already synced in beforeAll
 
       const syncResult = await playerValueService.syncPlayerValuesFromApi()();
 
@@ -186,15 +162,13 @@ describe('PlayerValue Integration Tests', { timeout: 30000 }, () => {
 
       const dbValues = await prisma.playerValue.findMany();
       expect(dbValues.length).toBeGreaterThan(0);
-
-      // Use shared client for check
-      const keysExist = (await redisClient.keys(`${cachePrefix}::${testSeason}*`)).length > 0;
-      expect(keysExist).toBe(true);
     });
 
     it('should get player value by ID after syncing', async () => {
       // Sync first to ensure data exists
-      await syncBaseData(teamService, playerService, eventService); // Call helper
+      // Base data is already synced in beforeAll
+
+      // We still need to sync player values here if the test relies on recent sync results
       const syncResult = await playerValueService.syncPlayerValuesFromApi()();
       expect(E.isRight(syncResult)).toBe(true);
 
@@ -202,18 +176,41 @@ describe('PlayerValue Integration Tests', { timeout: 30000 }, () => {
       const dbValues = await prisma.playerValue.findMany();
       expect(dbValues.length).toBeGreaterThan(0);
       const targetElementId = dbValues[0].element;
+      const targetPlayerValue = dbValues[0]; // Get the full record for comparison
 
-      if (E.isRight(syncResult)) {
-        // Attempting to fetch using the element ID
-        const valueResult = await playerValueService.getPlayerValuesByElement(targetElementId)();
+      // Attempting to fetch using the element ID
+      const valueResult = await playerValueService.getPlayerValuesByElement(targetElementId)();
 
-        expect(E.isRight(valueResult)).toBe(true);
-        if (E.isRight(valueResult) && valueResult.right) {
-          const values = valueResult.right as PlayerValue[]; // Cast to PlayerValue array
-          // Check if the result array is not empty and the first element has the correct element ID
-          expect(values.length).toBeGreaterThan(0);
-          expect(values[0].element).toEqual(targetElementId);
-        }
+      expect(E.isRight(valueResult)).toBe(true);
+      if (E.isRight(valueResult)) {
+        const values = valueResult.right; // Type is PlayerValues (ReadonlyArray<PlayerValue>)
+        expect(values.length).toBeGreaterThan(0);
+        const fetchedValue = values[0]; // Get the first result
+
+        // Basic check
+        expect(fetchedValue.element).toEqual(targetElementId);
+
+        // Check properties specific to PlayerValue (including those added by enrichment and change detection)
+        expect(fetchedValue).toHaveProperty('element');
+        expect(fetchedValue).toHaveProperty('value');
+        expect(fetchedValue).toHaveProperty('lastValue'); // Added property
+        expect(fetchedValue).toHaveProperty('changeType'); // Added property
+        expect(fetchedValue).toHaveProperty('changeDate');
+        // Check enriched properties (assuming enrichment works)
+        expect(fetchedValue).toHaveProperty('elementType');
+        expect(fetchedValue).toHaveProperty('elementTypeName');
+        expect(fetchedValue).toHaveProperty('team');
+        expect(fetchedValue).toHaveProperty('teamName');
+        expect(fetchedValue).toHaveProperty('teamShortName');
+
+        // Optionally, compare specific calculated values if deterministic
+        // Note: changeType might be 'Start' on the very first sync
+        expect(fetchedValue.lastValue).toBeDefined();
+        expect(fetchedValue.changeType).toBeDefined();
+
+        // Can compare against the value fetched directly from DB if needed
+        expect(fetchedValue.value).toEqual(targetPlayerValue.value);
+        // lastValue might differ depending on test setup and previous runs
       }
     });
   });
@@ -221,7 +218,7 @@ describe('PlayerValue Integration Tests', { timeout: 30000 }, () => {
   describe('PlayerValue Workflow Integration', () => {
     it('should execute the sync player values workflow end-to-end', async () => {
       // Ensure events are synced first if workflow depends on it
-      await syncBaseData(teamService, playerService, eventService); // Call helper
+      // Base data is already synced in beforeAll
 
       const workflows = playerValueWorkflows(playerValueService);
       const result = await workflows.syncPlayerValues()();

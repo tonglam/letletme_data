@@ -45,6 +45,12 @@ export interface PlayerValue {
 }
 export type PlayerValues = readonly PlayerValue[];
 
+export type RawPlayerValue = Omit<
+  PlayerValue,
+  'elementType' | 'elementTypeName' | 'team' | 'teamName' | 'teamShortName'
+>;
+export type RawPlayerValues = readonly RawPlayerValue[];
+
 export type SourcePlayerValue = Omit<
   PlayerValue,
   | 'lastValue'

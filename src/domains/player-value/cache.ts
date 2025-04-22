@@ -5,12 +5,11 @@ import * as O from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
 import { CachePrefix, DefaultTTL } from 'src/configs/cache/cache.config';
 import { redisClient } from 'src/infrastructures/cache/client';
-import { PlayerValueRepository } from 'src/repositories/player-value/type';
-import { SourcePlayerValues } from 'src/types/domain/player-value.type';
+import { PlayerValues } from 'src/types/domain/player-value.type';
 import { CacheError, CacheErrorCode, createCacheError, DomainError } from 'src/types/error.type';
-import { mapCacheErrorToDomainError, mapRepositoryErrorToCacheError } from 'src/utils/error.util';
+import { mapCacheErrorToDomainError } from 'src/utils/error.util';
 
-const parsePlayerValues = (playerValuesStr: string): E.Either<CacheError, SourcePlayerValues> =>
+const parsePlayerValues = (playerValuesStr: string): E.Either<CacheError, PlayerValues> =>
   pipe(
     E.tryCatch(
       () => JSON.parse(playerValuesStr),
@@ -23,7 +22,7 @@ const parsePlayerValues = (playerValuesStr: string): E.Either<CacheError, Source
     ),
     E.chain((parsed) =>
       Array.isArray(parsed)
-        ? E.right(parsed as SourcePlayerValues)
+        ? E.right(parsed as PlayerValues)
         : E.left(
             createCacheError({
               code: CacheErrorCode.DESERIALIZATION_ERROR,
@@ -34,7 +33,6 @@ const parsePlayerValues = (playerValuesStr: string): E.Either<CacheError, Source
   );
 
 export const createPlayerValueCache = (
-  repository: PlayerValueRepository,
   config: PlayerValueCacheConfig = {
     keyPrefix: CachePrefix.PLAYER_VALUE,
     ttlSeconds: DefaultTTL.PLAYER_VALUE,
@@ -45,7 +43,7 @@ export const createPlayerValueCache = (
 
   const getPlayerValuesByChangeDate = (
     changeDate: string,
-  ): TE.TaskEither<DomainError, SourcePlayerValues> => {
+  ): TE.TaskEither<DomainError, PlayerValues> => {
     const key = `${baseKey}:${changeDate}`;
     return pipe(
       TE.tryCatch(
@@ -59,19 +57,9 @@ export const createPlayerValueCache = (
       ),
       TE.mapLeft(mapCacheErrorToDomainError),
       TE.map(O.fromNullable),
-      TE.chain(
+      TE.chainW(
         O.fold(
-          () =>
-            pipe(
-              repository.findByChangeDate(changeDate),
-              TE.mapLeft(
-                mapRepositoryErrorToCacheError('Repository Error: Failed to findByChangeDate'),
-              ),
-              TE.mapLeft(mapCacheErrorToDomainError),
-              TE.chainFirstW((playerValues) =>
-                setPlayerValuesByChangeDate(changeDate, playerValues),
-              ),
-            ),
+          () => TE.right([] as PlayerValues),
           (cachedJsonString) =>
             pipe(
               parsePlayerValues(cachedJsonString),
@@ -80,13 +68,13 @@ export const createPlayerValueCache = (
             ),
         ),
       ),
-      TE.map((playerValues) => (playerValues ? playerValues : [])),
+      TE.map((playerValues) => playerValues ?? []),
     );
   };
 
   const setPlayerValuesByChangeDate = (
     changeDate: string,
-    playerValues: SourcePlayerValues,
+    playerValues: PlayerValues,
   ): TE.TaskEither<DomainError, void> => {
     const key = `${baseKey}:${changeDate}`;
     return pipe(

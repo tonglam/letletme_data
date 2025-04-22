@@ -1,6 +1,6 @@
 import * as TE from 'fp-ts/TaskEither';
 import { PlayerValueCreateInputs } from 'src/repositories/player-value/type';
-import { SourcePlayerValues } from 'src/types/domain/player-value.type';
+import { PlayerValues, SourcePlayerValues } from 'src/types/domain/player-value.type';
 import { DomainError } from 'src/types/error.type';
 
 export type PlayerValueCacheConfig = {
@@ -9,18 +9,19 @@ export type PlayerValueCacheConfig = {
 };
 
 export type PlayerValueCache = {
-  getPlayerValuesByChangeDate: (
-    changeDate: string,
-  ) => TE.TaskEither<DomainError, SourcePlayerValues>;
+  getPlayerValuesByChangeDate: (changeDate: string) => TE.TaskEither<DomainError, PlayerValues>;
   setPlayerValuesByChangeDate: (
     changeDate: string,
-    playerValues: SourcePlayerValues,
+    playerValues: PlayerValues,
   ) => TE.TaskEither<DomainError, void>;
 };
 
 export interface PlayerValueOperations {
-  readonly savePlayerValues: (
-    playerValues: PlayerValueCreateInputs,
+  readonly getLatestPlayerValuesByElements: (
+    elements: readonly number[],
+  ) => TE.TaskEither<DomainError, ReadonlyArray<{ element: number; value: number }>>;
+  readonly getPlayerValuesByChangeDate: (
+    changeDate: string,
   ) => TE.TaskEither<DomainError, SourcePlayerValues>;
   readonly getPlayerValuesByElement: (
     element: number,
@@ -28,6 +29,8 @@ export interface PlayerValueOperations {
   readonly getPlayerValuesByElements: (
     elements: number[],
   ) => TE.TaskEither<DomainError, SourcePlayerValues>;
+  readonly savePlayerValueChanges: (
+    playerValues: PlayerValueCreateInputs,
+  ) => TE.TaskEither<DomainError, void>;
   readonly deletePlayerValuesByChangeDate: (changeDate: string) => TE.TaskEither<DomainError, void>;
-  readonly deleteAllPlayerValues: () => TE.TaskEither<DomainError, void>;
 }

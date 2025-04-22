@@ -1,13 +1,12 @@
 import * as TE from 'fp-ts/TaskEither';
 import { WorkflowResult } from 'services/types';
 import { ServiceError } from 'src/types/error.type';
-import { EnrichedSourcePlayerValue } from 'src/utils/data-enrichment.util';
 
 import { PlayerValues, PlayerValueChanges } from '../../types/domain/player-value.type';
 
 export interface PlayerValueServiceOperations {
   readonly detectPlayerValueChanges: (
-    enrichedSourceValues: ReadonlyArray<EnrichedSourcePlayerValue>,
+    enrichedSourceValues: PlayerValues,
   ) => TE.TaskEither<ServiceError, PlayerValueChanges>;
   readonly findPlayerValuesByChangeDate: (
     changeDate: string,

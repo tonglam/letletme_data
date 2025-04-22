@@ -18,11 +18,7 @@ import {
   createDomainError,
   createServiceError,
 } from 'src/types/error.type';
-import {
-  enrichPlayerStat,
-  enrichPlayerStats,
-  EnrichedSourcePlayerStat,
-} from 'src/utils/data-enrichment.util';
+import { enrichPlayerStat, enrichPlayerStats } from 'src/utils/data-enrichment.util';
 import { createServiceIntegrationError, mapDomainErrorToServiceError } from 'src/utils/error.util';
 
 const playerStatServiceOperations = (
@@ -58,7 +54,7 @@ const playerStatServiceOperations = (
       TE.chainW(
         flow(enrichPlayerStats(playerCache, teamCache), TE.mapLeft(mapDomainErrorToServiceError)),
       ),
-      TE.map((enrichedPlayerStats: ReadonlyArray<EnrichedSourcePlayerStat>) =>
+      TE.map((enrichedPlayerStats: PlayerStats) =>
         enrichedPlayerStats.filter((playerStat) => playerStat.elementType === elementType),
       ),
       TE.map((filteredStats) => filteredStats as PlayerStats),
@@ -71,7 +67,7 @@ const playerStatServiceOperations = (
       TE.chainW(
         flow(enrichPlayerStats(playerCache, teamCache), TE.mapLeft(mapDomainErrorToServiceError)),
       ),
-      TE.map((enrichedPlayerStats: ReadonlyArray<EnrichedSourcePlayerStat>) =>
+      TE.map((enrichedPlayerStats: PlayerStats) =>
         enrichedPlayerStats.filter((playerStat) => playerStat.team === team),
       ),
       TE.map((filteredStats) => filteredStats as PlayerStats),
