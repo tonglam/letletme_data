@@ -10,10 +10,10 @@ import { APIError, APIErrorCode, createAPIError } from '../../types/error.type';
 import { toAPIError } from '../../utils/error.util';
 
 const validateChangeDate = (dateStr: unknown): E.Either<string, string> => {
-  if (typeof dateStr === 'string' && dateStr.trim().length === 6) {
-    return E.right(dateStr);
+  if (typeof dateStr === 'string' && /^[0-9]{8}$/.test(dateStr.trim())) {
+    return E.right(dateStr.trim());
   }
-  return E.left('Invalid change date format: must be a 6-digit string');
+  return E.left('Invalid change date format: must be an 8-digit string (YYYYMMDD)');
 };
 
 export const createPlayerValueHandlers = (

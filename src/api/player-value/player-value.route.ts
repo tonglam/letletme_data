@@ -9,9 +9,9 @@ export const playerValueRouter = (playerValueService: PlayerValueService): Route
   const handlers = createPlayerValueHandlers(playerValueService);
 
   router.get('/sync', createHandler(handlers.syncPlayerValues));
-  router.get('/:changeDate', createHandler(handlers.getPlayerValuesByChangeDate));
-  router.get('/:element', createHandler(handlers.getPlayerValuesByElement));
-  router.get('/:team', createHandler(handlers.getPlayerValuesByTeam));
+  router.get('/date/:changeDate', createHandler(handlers.getPlayerValuesByChangeDate));
+  router.get('/element/:element', createHandler(handlers.getPlayerValuesByElement));
+  router.get('/team/:team', createHandler(handlers.getPlayerValuesByTeam));
 
   return router;
 };
