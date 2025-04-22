@@ -39,7 +39,7 @@ describe('Team Integration Tests', () => {
   let teamService: TeamService;
 
   const cachePrefix = CachePrefix.TEAM;
-  const testSeason = '2425';
+  const season = '2425';
 
   beforeAll(async () => {
     setup = await setupIntegrationTest();
@@ -59,7 +59,7 @@ describe('Team Integration Tests', () => {
     // Team cache uses singleton client
     teamCache = createTeamCache(teamRepository, {
       keyPrefix: cachePrefix,
-      season: testSeason,
+      season: season,
     });
     fplDataService = createFplBootstrapDataService(httpClient, logger);
     teamService = createTeamService(fplDataService, teamRepository, teamCache);
@@ -68,7 +68,7 @@ describe('Team Integration Tests', () => {
   beforeEach(async () => {
     await prisma.team.deleteMany({});
     // Use shared client for cleanup
-    const keys = await redisClient.keys(`${cachePrefix}::${testSeason}*`);
+    const keys = await redisClient.keys(`${cachePrefix}::${season}*`);
     if (keys.length > 0) {
       await redisClient.del(keys);
     }
@@ -103,7 +103,7 @@ describe('Team Integration Tests', () => {
       expect(dbTeams.length).toBeGreaterThan(0);
 
       // Check cache directly
-      const cacheKey = `${cachePrefix}::${testSeason}`;
+      const cacheKey = `${cachePrefix}::${season}`;
       // Use shared client for check
       const keyExists = await redisClient.exists(cacheKey);
       expect(keyExists).toBe(1);

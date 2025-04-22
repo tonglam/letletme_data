@@ -15,5 +15,4 @@ export interface PlayerStatRepository {
     playerStats: PlayerStatCreateInputs,
   ) => TE.TaskEither<DBError, SourcePlayerStats>;
   readonly deleteLatest: () => TE.TaskEither<DBError, void>;
-  readonly deleteAll: () => TE.TaskEither<DBError, void>;
 }

@@ -3,29 +3,36 @@ import express from 'express';
 import * as E from 'fp-ts/Either';
 import { Logger } from 'pino';
 import request from 'supertest';
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 // Setup
 
 // Specific imports
-import { playerStatRouter } from '../../../src/api/player-stat/player-stat.route'; // Import the router
+import { playerStatRouter } from '../../../src/api/player-stat/route'; // Import the router
 import { CachePrefix } from '../../../src/configs/cache/cache.config';
 import { createFplBootstrapDataService } from '../../../src/data/fpl/bootstrap.data';
 import { FplBootstrapDataService } from '../../../src/data/types';
 import { createEventCache } from '../../../src/domains/event/cache';
-import { EventCache, EventRepository } from '../../../src/domains/event/types';
+import { EventCache } from '../../../src/domains/event/types';
+import { createPlayerCache } from '../../../src/domains/player/cache';
+import { PlayerCache } from '../../../src/domains/player/types';
 import { createPlayerStatCache } from '../../../src/domains/player-stat/cache';
-import { PlayerStatCache, PlayerStatRepository } from '../../../src/domains/player-stat/types';
+import { PlayerStatCache } from '../../../src/domains/player-stat/types';
+import { createTeamCache } from '../../../src/domains/team/cache';
+import { TeamCache } from '../../../src/domains/team/types';
 import { redisClient } from '../../../src/infrastructures/cache/client';
 import { HTTPClient } from '../../../src/infrastructures/http';
 import { createEventRepository } from '../../../src/repositories/event/repository';
+import { EventRepository } from '../../../src/repositories/event/type';
+import { createPlayerRepository } from '../../../src/repositories/player/repository';
+import { PlayerRepository } from '../../../src/repositories/player/type';
 import { createPlayerStatRepository } from '../../../src/repositories/player-stat/repository';
-import { createEventService } from '../../../src/services/event/service';
-import { EventService } from '../../../src/services/event/types';
+import { PlayerStatRepository } from '../../../src/repositories/player-stat/type';
+import { createTeamRepository } from '../../../src/repositories/team/repository';
+import { TeamRepository } from '../../../src/repositories/team/type';
 import { createPlayerStatService } from '../../../src/services/player-stat/service';
 import { PlayerStatService } from '../../../src/services/player-stat/types';
-import { PlayerStat, PlayerStatId } from '../../../src/types/domain/player-stat.type';
-// Event service dependency
+import { PlayerStat } from '../../../src/types/domain/player-stat.type';
 import {
   IntegrationTestSetupResult,
   setupIntegrationTest,
@@ -43,12 +50,17 @@ describe('PlayerStat Routes Integration Tests', () => {
   let playerStatCache: PlayerStatCache;
   let eventRepository: EventRepository;
   let eventCache: EventCache;
-  let eventService: EventService;
   let playerStatService: PlayerStatService;
   let fplDataService: FplBootstrapDataService;
+  let playerRepository: PlayerRepository;
+  let playerCache: PlayerCache;
+  let teamRepository: TeamRepository;
+  let teamCache: TeamCache;
 
   const cachePrefix = CachePrefix.PLAYER_STAT;
   const eventCachePrefix = CachePrefix.EVENT;
+  const playerCachePrefix = CachePrefix.PLAYER;
+  const teamCachePrefix = CachePrefix.TEAM;
   const testSeason = '2425';
 
   beforeAll(async () => {
@@ -73,10 +85,21 @@ describe('PlayerStat Routes Integration Tests', () => {
       keyPrefix: eventCachePrefix,
       season: testSeason,
     });
-    eventService = createEventService(fplDataService, eventRepository, eventCache);
+
+    playerRepository = createPlayerRepository(prisma);
+    playerCache = createPlayerCache(playerRepository, {
+      keyPrefix: playerCachePrefix,
+      season: testSeason,
+    });
+
+    teamRepository = createTeamRepository(prisma);
+    teamCache = createTeamCache(teamRepository, {
+      keyPrefix: teamCachePrefix,
+      season: testSeason,
+    });
 
     playerStatRepository = createPlayerStatRepository(prisma);
-    playerStatCache = createPlayerStatCache(playerStatRepository, {
+    playerStatCache = createPlayerStatCache({
       keyPrefix: cachePrefix,
       season: testSeason,
     });
@@ -84,38 +107,19 @@ describe('PlayerStat Routes Integration Tests', () => {
       fplDataService,
       playerStatRepository,
       playerStatCache,
-      eventService,
+      eventCache,
+      playerCache,
+      teamCache,
     );
 
-    // Create Express app and mount only the playerStat router
     app = express();
     app.use(express.json());
-    app.use('/player-stats', playerStatRouter(playerStatService)); // Mount router
+    app.use('/player-stats', playerStatRouter(playerStatService));
   });
-
-  beforeEach(async () => {
-    await prisma.playerStat.deleteMany({});
-    await prisma.event.deleteMany({}); // Clear events too
-
-    // Use shared client for cleanup
-    const statKeys = await redisClient.keys(`${cachePrefix}::${testSeason}*`);
-    if (statKeys.length > 0) {
-      await redisClient.del(statKeys);
-    }
-    const eventKeys = await redisClient.keys(`${eventCachePrefix}::${testSeason}*`);
-    if (eventKeys.length > 0) {
-      await redisClient.del(eventKeys);
-    }
-    // Ensure data exists for GET requests by syncing both services
-    await eventService.syncEventsFromApi()();
-    await playerStatService.syncPlayerStatsFromApi()();
-  }, 20000); // Timeout set to 20000ms
 
   afterAll(async () => {
     await teardownIntegrationTest(setup);
   });
-
-  // --- Test Cases ---
 
   it('GET /player-stats should return all player stats within a data object', async () => {
     const res = await request(app).get('/player-stats');
@@ -126,40 +130,41 @@ describe('PlayerStat Routes Integration Tests', () => {
     const stats = res.body.data as PlayerStat[];
     expect(stats.length).toBeGreaterThan(0);
     expect(stats[0]).toHaveProperty('id');
-    expect(stats[0]).toHaveProperty('elementId');
-    expect(stats[0]).toHaveProperty('eventId');
+    expect(stats[0]).toHaveProperty('element');
+    expect(stats[0]).toHaveProperty('event');
     expect(stats[0]).toHaveProperty('minutes');
+    expect(stats[0]).toHaveProperty('team');
+    expect(stats[0]).toHaveProperty('elementTypeName');
   });
 
-  it('GET /player-stats/:id should return the player stat within a data object', async () => {
-    // Sync first to ensure data exists in the DB
+  it('GET /player-stats/element/:element should return the player stat within a data object', async () => {
     const syncResult = await playerStatService.syncPlayerStatsFromApi()();
-    // Log the error if sync fails
     if (E.isLeft(syncResult)) {
       logger.error({ error: syncResult.left }, 'syncPlayerStatsFromApi failed in test');
     }
     expect(E.isRight(syncResult)).toBe(true);
 
-    // Fetch one record directly from the database to get a valid ID
     const dbStat = await prisma.playerStat.findFirst();
     if (!dbStat) {
       throw new Error('Could not find any player stats in the database after sync');
     }
-    const targetStatId = dbStat.id as PlayerStatId; // Cast the db ID to PlayerStatId
+    const targetElementId = dbStat.element;
 
-    const res = await request(app).get(`/player-stats/${targetStatId}`);
+    const res = await request(app).get(`/player-stats/element/${targetElementId}`);
 
     expect(res.status).toBe(200);
     expect(res.body).toBeDefined();
     expect(res.body).toHaveProperty('data');
-    expect(res.body.data.id).toBe(targetStatId);
-    expect(res.body.data).toHaveProperty('elementId');
-    expect(res.body.data).toHaveProperty('eventId');
+    expect(res.body.data.element).toBe(targetElementId);
+    expect(res.body.data).toHaveProperty('id');
+    expect(res.body.data).toHaveProperty('event');
+    expect(res.body.data).toHaveProperty('team');
+    expect(res.body.data).toHaveProperty('elementTypeName');
   }, 30000);
 
-  it('GET /player-stats/:id should return 404 if player stat ID does not exist', async () => {
-    const nonExistentStatId = 999999999 as PlayerStatId;
-    const res = await request(app).get(`/player-stats/${nonExistentStatId}`);
+  it('GET /player-stats/element/:element should return 404 if element ID does not exist', async () => {
+    const nonExistentElementId = 999999999;
+    const res = await request(app).get(`/player-stats/element/${nonExistentElementId}`);
 
     expect(res.status).toBe(404);
   });

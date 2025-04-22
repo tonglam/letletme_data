@@ -3,14 +3,14 @@ import {
   PlayerValueCreateInput,
   PrismaPlayerValueCreateInput,
 } from 'src/repositories/player-value/type';
-import { ElementType, ValueChangeType } from 'src/types/base.type';
+import { ValueChangeType } from 'src/types/base.type';
 import { SourcePlayerValue } from 'src/types/domain/player-value.type';
 
 export const mapPrismaPlayerValueToDomain = (
   prismaPlayerValue: PrismaPlayerValueType,
 ): SourcePlayerValue => ({
   element: prismaPlayerValue.element,
-  elementType: prismaPlayerValue.elementType as ElementType,
+  elementType: prismaPlayerValue.elementType,
   event: prismaPlayerValue.event,
   value: prismaPlayerValue.value,
   changeDate: prismaPlayerValue.changeDate,

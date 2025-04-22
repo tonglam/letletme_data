@@ -38,7 +38,7 @@ describe('Phase Integration Tests', () => {
 
   // Use standard prefix, rely on separate test DB for isolation
   const cachePrefix = CachePrefix.PHASE;
-  const testSeason = '2425';
+  const season = '2425';
 
   beforeAll(async () => {
     setup = await setupIntegrationTest();
@@ -57,7 +57,7 @@ describe('Phase Integration Tests', () => {
     // createPhaseCache uses the imported singleton redisClient internally
     phaseCache = createPhaseCache(phaseRepository, {
       keyPrefix: cachePrefix,
-      season: testSeason,
+      season: season,
     });
     fplDataService = createFplBootstrapDataService(httpClient, logger);
     phaseService = createPhaseService(fplDataService, phaseRepository, phaseCache);
@@ -66,7 +66,7 @@ describe('Phase Integration Tests', () => {
   beforeEach(async () => {
     await prisma.phase.deleteMany({});
     // Use shared client for cleanup
-    const keys = await redisClient.keys(`${cachePrefix}::${testSeason}*`);
+    const keys = await redisClient.keys(`${cachePrefix}::${season}*`);
     if (keys.length > 0) {
       await redisClient.del(keys);
     }
@@ -101,7 +101,7 @@ describe('Phase Integration Tests', () => {
       expect(dbPhases.length).toBeGreaterThan(0);
 
       // Check cache directly
-      const cacheKey = `${cachePrefix}::${testSeason}`;
+      const cacheKey = `${cachePrefix}::${season}`;
       // Use shared client for check
       const keyExists = await redisClient.exists(cacheKey);
       expect(keyExists).toBe(1);

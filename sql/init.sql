@@ -136,6 +136,7 @@ CREATE TABLE IF NOT EXISTS "player_stats" (
     "id" SERIAL PRIMARY KEY,
     "event" INTEGER NOT NULL,
     "element" INTEGER NOT NULL,
+    "element_type" INTEGER NOT NULL,
     "form" FLOAT,
     "influence" FLOAT,
     "creativity" FLOAT,

@@ -1,14 +1,8 @@
 import { PrismaClient } from '@prisma/client';
 import * as E from 'fp-ts/Either';
-// Removed Redis import
 import { Logger } from 'pino';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
-// Use the generic setup
-
-// Import the SHARED redis client used by the application
-
-// Specific imports for this test suite
 import { CachePrefix } from '../../../src/configs/cache/cache.config';
 import { createFplBootstrapDataService } from '../../../src/data/fpl/bootstrap.data';
 import { FplBootstrapDataService } from '../../../src/data/types';
@@ -30,15 +24,9 @@ import { createPlayerValueRepository } from '../../../src/repositories/player-va
 import { PlayerValueRepository } from '../../../src/repositories/player-value/type';
 import { createTeamRepository } from '../../../src/repositories/team/repository';
 import { TeamRepository } from '../../../src/repositories/team/type';
-import { createEventService } from '../../../src/services/event/service';
-import { EventService } from '../../../src/services/event/types';
-import { createPlayerService } from '../../../src/services/player/service';
-import { PlayerService } from '../../../src/services/player/types';
 import { createPlayerValueService } from '../../../src/services/player-value/service';
 import { PlayerValueService } from '../../../src/services/player-value/types';
 import { playerValueWorkflows } from '../../../src/services/player-value/workflow';
-import { createTeamService } from '../../../src/services/team/service';
-import { TeamService } from '../../../src/services/team/types';
 import {
   IntegrationTestSetupResult,
   setupIntegrationTest,
@@ -48,7 +36,6 @@ import {
 describe('PlayerValue Integration Tests', { timeout: 30000 }, () => {
   let setup: IntegrationTestSetupResult;
   let prisma: PrismaClient;
-  // Removed local redis
   let logger: Logger;
   let httpClient: HTTPClient;
   let playerValueRepository: PlayerValueRepository;
@@ -59,18 +46,15 @@ describe('PlayerValue Integration Tests', { timeout: 30000 }, () => {
   let teamCache: TeamCache;
   let fplDataService: FplBootstrapDataService;
   let playerValueService: PlayerValueService;
-  // Event service dependencies
+  // Event dependencies
   let eventRepository: EventRepository;
   let eventCache: EventCache;
-  let eventService: EventService;
-  let playerService: PlayerService;
-  let teamService: TeamService;
 
   const cachePrefix = CachePrefix.PLAYER_VALUE;
   const playerCachePrefix = CachePrefix.PLAYER;
   const teamCachePrefix = CachePrefix.TEAM;
   const eventCachePrefix = CachePrefix.EVENT;
-  const testSeason = '2425';
+  const season = '2425';
 
   beforeAll(async () => {
     setup = await setupIntegrationTest();
@@ -92,30 +76,23 @@ describe('PlayerValue Integration Tests', { timeout: 30000 }, () => {
     // Event cache uses singleton client
     eventCache = createEventCache(eventRepository, {
       keyPrefix: eventCachePrefix,
-      season: testSeason,
+      season: season,
     });
-    eventService = createEventService(fplDataService, eventRepository, eventCache);
 
     playerValueRepository = createPlayerValueRepository(prisma);
     // Initialize Player dependencies
     playerRepository = createPlayerRepository(prisma);
     playerCache = createPlayerCache(playerRepository, {
       keyPrefix: playerCachePrefix,
-      season: testSeason,
+      season: season,
     });
-
-    // Initialize PlayerService
-    playerService = createPlayerService(fplDataService, playerRepository, playerCache);
 
     // Initialize Team dependencies
     teamRepository = createTeamRepository(prisma);
     teamCache = createTeamCache(teamRepository, {
       keyPrefix: teamCachePrefix,
-      season: testSeason,
+      season: season,
     });
-
-    // Initialize TeamService
-    teamService = createTeamService(fplDataService, teamRepository, teamCache);
 
     // PlayerValue cache uses singleton client
     playerValueCache = createPlayerValueCache({
@@ -130,18 +107,13 @@ describe('PlayerValue Integration Tests', { timeout: 30000 }, () => {
       teamCache,
       playerCache,
     );
-
-    // Sync base data once after all services are set up
-    await teamService.syncTeamsFromApi()();
-    await playerService.syncPlayersFromApi()();
-    await eventService.syncEventsFromApi()();
   });
 
   beforeEach(async () => {
     await prisma.playerValue.deleteMany({});
 
     // Use shared client for cleanup
-    const valueKeys = await redisClient.keys(`${cachePrefix}::${testSeason}*`);
+    const valueKeys = await redisClient.keys(`${cachePrefix}::${season}*`);
     if (valueKeys.length > 0) {
       await redisClient.del(valueKeys);
     }

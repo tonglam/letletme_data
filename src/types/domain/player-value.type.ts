@@ -47,24 +47,18 @@ export type PlayerValues = readonly PlayerValue[];
 
 export type RawPlayerValue = Omit<
   PlayerValue,
-  'elementType' | 'elementTypeName' | 'team' | 'teamName' | 'teamShortName'
+  'elementTypeName' | 'team' | 'teamName' | 'teamShortName'
 >;
 export type RawPlayerValues = readonly RawPlayerValue[];
 
 export type SourcePlayerValue = Omit<
   PlayerValue,
-  | 'lastValue'
-  | 'changeType'
-  | 'elementType'
-  | 'elementTypeName'
-  | 'team'
-  | 'teamName'
-  | 'teamShortName'
+  'lastValue' | 'changeType' | 'elementTypeName' | 'team' | 'teamName' | 'teamShortName'
 >;
 export type SourcePlayerValues = readonly SourcePlayerValue[];
 
 export type PlayerValueChange = Omit<
   PlayerValue,
-  'elementType' | 'elementTypeName' | 'team' | 'teamName' | 'teamShortName'
+  'elementTypeName' | 'team' | 'teamName' | 'teamShortName'
 >;
 export type PlayerValueChanges = readonly PlayerValueChange[];

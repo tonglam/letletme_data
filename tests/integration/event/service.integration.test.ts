@@ -33,7 +33,7 @@ describe('Event Integration Tests', () => {
   let eventService: EventService;
 
   const cachePrefix = CachePrefix.EVENT;
-  const testSeason = '2425';
+  const season = '2425';
 
   beforeAll(async () => {
     // Get generic resources
@@ -57,7 +57,7 @@ describe('Event Integration Tests', () => {
     // createEventCache uses the imported singleton redisClient internally
     eventCache = createEventCache(eventRepository, {
       keyPrefix: cachePrefix,
-      season: testSeason,
+      season: season,
     });
     fplDataService = createFplBootstrapDataService(httpClient, logger);
     eventService = createEventService(fplDataService, eventRepository, eventCache);
@@ -66,7 +66,7 @@ describe('Event Integration Tests', () => {
   beforeEach(async () => {
     await prisma.event.deleteMany({});
     // Use the imported singleton redisClient to clear keys
-    const pattern = `${cachePrefix}::${testSeason}*`;
+    const pattern = `${cachePrefix}::${season}*`;
     const keys = await redisClient.keys(pattern);
     const keysToDelete = ['current'];
     if (keys.length > 0) {
@@ -100,7 +100,7 @@ describe('Event Integration Tests', () => {
       expect(firstEvent).toHaveProperty('deadlineTime');
 
       // Check cache state after sync
-      const cacheKey = `${cachePrefix}::${testSeason}`;
+      const cacheKey = `${cachePrefix}::${season}`;
       const keyExists = await redisClient.exists(cacheKey);
       expect(keyExists).toBe(1);
     });

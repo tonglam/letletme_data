@@ -128,6 +128,7 @@ model PlayerStat {
   id          Int  @id @default(autoincrement())
   event       Int  @map("event")
   element     Int  @map("element")
+  elementType Int  @map("element_type")
   totalPoints Int? @map("total_points")
 
   // Performance metrics

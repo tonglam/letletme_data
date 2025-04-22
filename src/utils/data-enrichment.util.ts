@@ -15,7 +15,6 @@ import { createDomainError, DomainError, DomainErrorCode } from 'src/types/error
 type HasElement = { element: number };
 
 type EnrichedWithElementType<T extends HasElement> = T & {
-  elementType: ElementTypeId;
   elementTypeName: ElementTypeName;
 };
 
@@ -47,10 +46,15 @@ export const enrichWithElementType =
               O.map((p) => p.elementType as ElementTypeId),
               O.getOrElse(() => ElementTypeId.FORWARD),
             );
+            const value = pipe(
+              playerOpt,
+              O.map((p) => p.price / 10),
+              O.getOrElse(() => 0),
+            );
             return {
               ...item,
-              elementType: elementType,
               elementTypeName: getElementTypeName(elementType),
+              value,
             };
           }),
         );

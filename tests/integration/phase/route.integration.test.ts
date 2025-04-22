@@ -2,18 +2,19 @@ import { PrismaClient } from '@prisma/client';
 import express, { Express } from 'express';
 import * as E from 'fp-ts/Either';
 import { Logger } from 'pino';
+import { PhaseRepository } from 'src/repositories/phase/type';
 import request from 'supertest';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 // Setup
 
 // Specific imports
-import { phaseRouter } from '../../../src/api/phase/phase.route'; // Import the router
+import { phaseRouter } from '../../../src/api/phase/route'; // Import the router
 import { CachePrefix } from '../../../src/configs/cache/cache.config';
 import { createFplBootstrapDataService } from '../../../src/data/fpl/bootstrap.data';
 import { FplBootstrapDataService } from '../../../src/data/types';
 import { createPhaseCache } from '../../../src/domains/phase/cache';
-import { PhaseCache, PhaseRepository } from '../../../src/domains/phase/types';
+import { PhaseCache } from '../../../src/domains/phase/types';
 import { redisClient } from '../../../src/infrastructures/cache/client';
 import { HTTPClient } from '../../../src/infrastructures/http';
 import { createPhaseRepository } from '../../../src/repositories/phase/repository';

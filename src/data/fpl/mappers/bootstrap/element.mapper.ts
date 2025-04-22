@@ -2,8 +2,7 @@ import { format } from 'date-fns';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as O from 'fp-ts/Option';
-import { ElementType } from 'src/types/base.type';
-import { PlayerStat } from 'src/types/domain/player-stat.type';
+import { SourcePlayerStat } from 'src/types/domain/player-stat.type';
 import { SourcePlayerValue } from 'src/types/domain/player-value.type';
 import { Player, validatePlayerId } from 'src/types/domain/player.type';
 import { safeStringToDecimal, safeStringToNumber } from 'src/utils/common.util';
@@ -18,7 +17,7 @@ export const mapElementResponseToPlayer = (raw: ElementResponse): E.Either<strin
       return {
         element: data.element,
         code: raw.code,
-        elementType: raw.element_type as ElementType,
+        elementType: raw.element_type,
         team: raw.team,
         price: raw.now_cost / 10,
         startPrice: (raw.now_cost - raw.cost_change_start) / 10,
@@ -42,7 +41,7 @@ export const mapElementResponseToPlayerValue = (
     E.map(
       ({ element }): SourcePlayerValue => ({
         element: element,
-        elementType: raw.element_type as ElementType,
+        elementType: raw.element_type,
         event: event,
         value: value,
         changeDate: currentDateStr,
@@ -54,14 +53,15 @@ export const mapElementResponseToPlayerValue = (
 export const mapElementResponseToPlayerStat = (
   event: number,
   raw: ElementResponse,
-): E.Either<string, PlayerStat> =>
+): E.Either<string, SourcePlayerStat> =>
   pipe(
     E.Do,
     E.bind('element', () => validatePlayerId(raw.id)),
     E.map(
-      ({ element }): PlayerStat => ({
+      ({ element }): SourcePlayerStat => ({
         event: event,
         element: element,
+        elementType: raw.element_type,
         totalPoints: raw.total_points,
         form: pipe(
           safeStringToNumber(raw.form),

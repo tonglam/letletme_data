@@ -1,7 +1,7 @@
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 
-import { Branded, createBrandedType, ElementType } from '../base.type';
+import { Branded, createBrandedType, ElementTypeId } from '../base.type';
 
 export type PlayerId = Branded<number, 'PlayerId'>;
 
@@ -24,7 +24,7 @@ export const validatePlayerId = (value: unknown): E.Either<string, PlayerId> =>
 export type Player = {
   readonly element: PlayerId;
   readonly code: number;
-  readonly elementType: ElementType;
+  readonly elementType: ElementTypeId;
   readonly team: number;
   readonly price: number;
   readonly startPrice: number;

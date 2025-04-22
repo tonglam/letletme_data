@@ -10,7 +10,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 // Import the SHARED redis client used by the application
 
 // Specific imports for this test suite
-import { eventRouter } from '../../../src/api/event/event.route';
+import { eventRouter } from '../../../src/api/event/route';
 import { CachePrefix } from '../../../src/configs/cache/cache.config';
 import { createFplBootstrapDataService } from '../../../src/data/fpl/bootstrap.data';
 import { FplBootstrapDataService } from '../../../src/data/types';

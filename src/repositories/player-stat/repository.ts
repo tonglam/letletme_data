@@ -85,26 +85,9 @@ export const createPlayerStatRepository = (prisma: PrismaClient): PlayerStatRepo
       TE.map(() => void 0),
     );
 
-  const deleteAll = (): TE.TaskEither<DBError, void> =>
-    pipe(
-      TE.tryCatch(
-        async () => {
-          await prisma.playerStat.deleteMany({});
-        },
-        (error) =>
-          createDBError({
-            code: DBErrorCode.OPERATION_ERROR,
-            message: 'Failed deleteAll for PlayerStat',
-            cause: error instanceof Error ? error : undefined,
-          }),
-      ),
-      TE.map(() => void 0),
-    );
-
   return {
     findLatest,
     saveLatest,
     deleteLatest,
-    deleteAll,
   };
 };

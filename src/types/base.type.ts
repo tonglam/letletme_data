@@ -29,21 +29,16 @@ export enum ElementStatus {
   Departed = 'd',
 }
 
-// --- Refactored ElementType ---
-
-// Keep numeric IDs for potential DB storage / external API mapping
 export enum ElementTypeId {
   GOALKEEPER = 1,
   DEFENDER = 2,
   MIDFIELDER = 3,
   FORWARD = 4,
-  MANAGER = 5, // Assuming 5 is Manager based on previous enum
+  MANAGER = 5,
 }
 
-// Define the short names as a type
 export type ElementTypeName = 'GKP' | 'DEF' | 'MID' | 'FWD' | 'MNG';
 
-// Main configuration object mapping ID to Name
 export const ElementTypeMap: Readonly<Record<ElementTypeId, ElementTypeName>> = {
   [ElementTypeId.GOALKEEPER]: 'GKP',
   [ElementTypeId.DEFENDER]: 'DEF',
@@ -52,23 +47,17 @@ export const ElementTypeMap: Readonly<Record<ElementTypeId, ElementTypeName>> = 
   [ElementTypeId.MANAGER]: 'MNG',
 };
 
-// Helper to get the numeric ID from the enum value (might not be needed often)
-// export const getElementTypeIdValue = (type: ElementTypeId): number => type;
+export const getElementTypeIdValue = (type: ElementTypeId): number => type;
 
-// Updated helper to get enum member by numeric ID
 export const getElementTypeById = (id: number): ElementTypeId | null => {
-  // Check if the id is a valid value in the ElementTypeId enum
   if (Object.values(ElementTypeId).includes(id)) {
     return id as ElementTypeId;
   }
   return null;
 };
 
-// Updated helper to get short name string by enum ID
 export const getElementTypeName = (typeId: ElementTypeId): ElementTypeName =>
   ElementTypeMap[typeId];
-
-// --- End Refactored ElementType ---
 
 export interface Brand<K extends string> {
   readonly __brand: K;
@@ -85,7 +74,6 @@ export const createBrandedType = <T, K extends string>(
   is: (value: unknown): value is Branded<T, K> => validator(value),
 });
 
-// Update this array to use the new enum IDs
 export const ELEMENT_TYPE_IDS: readonly ElementTypeId[] = [
   ElementTypeId.GOALKEEPER,
   ElementTypeId.DEFENDER,

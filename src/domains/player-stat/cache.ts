@@ -5,13 +5,19 @@ import * as O from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
 import { CachePrefix } from 'src/configs/cache/cache.config';
 import { redisClient } from 'src/infrastructures/cache/client';
-import { PlayerStatRepository } from 'src/repositories/player-stat/type';
-import { SourcePlayerStat, SourcePlayerStats } from 'src/types/domain/player-stat.type';
+import { PlayerStat, PlayerStats } from 'src/types/domain/player-stat.type';
 import { CacheError, CacheErrorCode, createCacheError, DomainError } from 'src/types/error.type';
 import { getCurrentSeason } from 'src/utils/common.util';
-import { mapCacheErrorToDomainError, mapRepositoryErrorToCacheError } from 'src/utils/error.util';
+import { mapCacheErrorToDomainError } from 'src/utils/error.util';
 
-const parsePlayerStat = (playerStatStr: string): E.Either<CacheError, SourcePlayerStat> =>
+const DECIMAL_FIELDS_AS_STRINGS: ReadonlyArray<keyof PlayerStat> = [
+  'expectedGoals',
+  'expectedAssists',
+  'expectedGoalInvolvements',
+  'expectedGoalsConceded',
+];
+
+const parsePlayerStat = (playerStatStr: string): E.Either<CacheError, PlayerStat> =>
   pipe(
     E.tryCatch(
       () => JSON.parse(playerStatStr),
@@ -22,37 +28,54 @@ const parsePlayerStat = (playerStatStr: string): E.Either<CacheError, SourcePlay
           cause: error as Error,
         }),
     ),
-    E.chain((parsed) =>
-      parsed && typeof parsed === 'object' && 'id' in parsed && typeof parsed.id === 'number'
-        ? E.right(parsed as SourcePlayerStat)
-        : E.left(
-            createCacheError({
-              code: CacheErrorCode.DESERIALIZATION_ERROR,
-              message: 'Parsed object is not a valid PlayerStat structure',
-            }),
-          ),
-    ),
+    E.chain((parsed: Record<string, unknown>) => {
+      if (
+        !parsed ||
+        typeof parsed !== 'object' ||
+        !('element' in parsed) ||
+        typeof parsed.element !== 'number'
+      ) {
+        return E.left(
+          createCacheError({
+            code: CacheErrorCode.DESERIALIZATION_ERROR,
+            message:
+              'Parsed object is not a valid PlayerStat structure (missing or invalid element field)',
+          }),
+        );
+      }
+
+      DECIMAL_FIELDS_AS_STRINGS.forEach((field) => {
+        const value = parsed[field];
+        if (typeof value === 'string') {
+          const num = parseFloat(value);
+          parsed[field] = isNaN(num) ? null : num;
+        } else if (value !== null && typeof value !== 'number') {
+          parsed[field] = null;
+        }
+      });
+
+      return E.right(parsed as unknown as PlayerStat);
+    }),
   );
 
 const parsePlayerStats = (
   playerStatsMap: Record<string, string>,
-): E.Either<CacheError, SourcePlayerStats> =>
+): E.Either<CacheError, PlayerStats> =>
   pipe(
     Object.values(playerStatsMap),
     (playerStatStrs) =>
       playerStatStrs.map((str) =>
         pipe(
           parsePlayerStat(str),
-          E.getOrElse<CacheError, SourcePlayerStat | null>(() => null),
+          E.getOrElse<CacheError, PlayerStat | null>(() => null),
         ),
       ),
     (parsedPlayerStats) =>
-      parsedPlayerStats.filter((playerStat): playerStat is SourcePlayerStat => playerStat !== null),
+      parsedPlayerStats.filter((playerStat): playerStat is PlayerStat => playerStat !== null),
     (validPlayerStats) => E.right(validPlayerStats),
   );
 
 export const createPlayerStatCache = (
-  repository: PlayerStatRepository,
   config: PlayerStatCacheConfig = {
     keyPrefix: CachePrefix.PLAYER_STAT,
     season: getCurrentSeason(),
@@ -61,7 +84,7 @@ export const createPlayerStatCache = (
   const { keyPrefix, season } = config;
   const baseKey = `${keyPrefix}::${season}`;
 
-  const getLatestPlayerStats = (): TE.TaskEither<DomainError, SourcePlayerStats> =>
+  const getLatestPlayerStats = (): TE.TaskEither<DomainError, PlayerStats> =>
     pipe(
       TE.tryCatch(
         () => redisClient.hgetall(baseKey),
@@ -73,34 +96,23 @@ export const createPlayerStatCache = (
           }),
       ),
       TE.mapLeft(mapCacheErrorToDomainError),
-      TE.chain(
+      TE.chainW(
         flow(
           O.fromNullable,
-          O.fold(
-            () =>
+          O.match(
+            () => TE.right([] as PlayerStats),
+            (cachedPlayerStatsMap) =>
               pipe(
-                repository.findLatest(),
-                TE.mapLeft(
-                  mapRepositoryErrorToCacheError(
-                    'Repository Error: Failed to get all player stats',
-                  ),
-                ),
-                TE.mapLeft(mapCacheErrorToDomainError),
-                TE.chainFirst((playerStats) => setLatestPlayerStats(playerStats)),
-              ),
-            (cachedPlayerStats) =>
-              pipe(
-                parsePlayerStats(cachedPlayerStats),
+                parsePlayerStats(cachedPlayerStatsMap),
                 TE.fromEither,
                 TE.mapLeft(mapCacheErrorToDomainError),
               ),
           ),
         ),
       ),
-      TE.map((playerStats) => (playerStats.length > 0 ? playerStats : [])),
     );
 
-  const setLatestPlayerStats = (playerStats: SourcePlayerStats): TE.TaskEither<DomainError, void> =>
+  const setLatestPlayerStats = (playerStats: PlayerStats): TE.TaskEither<DomainError, void> =>
     pipe(
       TE.tryCatch(
         async () => {

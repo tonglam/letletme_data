@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { createEventHandlers } from 'src/api/event/event.handler';
+import { createEventHandlers } from 'src/api/event/handler';
 
 import { EventService } from '../../services/event/types';
 import { createHandler } from '../middlewares/core';
@@ -12,7 +12,7 @@ export const eventRouter = (eventService: EventService): Router => {
   router.get('/current', createHandler(handlers.getCurrentEvent));
   router.get('/last', createHandler(handlers.getLastEvent));
   router.get('/next', createHandler(handlers.getNextEvent));
-  router.get('/sync', createHandler(handlers.syncEvents));
+  router.post('/sync', createHandler(handlers.syncEvents));
   router.get('/:id', createHandler(handlers.getEventById));
 
   return router;

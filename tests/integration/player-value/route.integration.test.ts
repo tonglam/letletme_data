@@ -5,7 +5,7 @@ import request from 'supertest';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 // Config
-import { playerValueRouter } from '../../../src/api/player-value/player-value.route';
+import { playerValueRouter } from '../../../src/api/player-value/route';
 import { CachePrefix } from '../../../src/configs/cache/cache.config';
 // Infrastructure
 import { createFplBootstrapDataService } from '../../../src/data/fpl/bootstrap.data';
