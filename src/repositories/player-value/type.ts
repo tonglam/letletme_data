@@ -18,8 +18,8 @@ export interface PlayerValueRepository {
   readonly findByElements: (
     elements: readonly number[],
   ) => TE.TaskEither<DBError, SourcePlayerValues>;
-  readonly savePlayerValueChanges: (
+  readonly savePlayerValueChangesByChangeDate: (
     playerValues: PlayerValueCreateInputs,
-  ) => TE.TaskEither<DBError, void>;
+  ) => TE.TaskEither<DBError, SourcePlayerValues>;
   readonly deleteByChangeDate: (changeDate: string) => TE.TaskEither<DBError, void>;
 }

@@ -3,8 +3,10 @@ import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as O from 'fp-ts/Option';
 import { SourcePlayerStat } from 'src/types/domain/player-stat.type';
+import { PlayerValueTrack } from 'src/types/domain/player-value-track.type';
 import { SourcePlayerValue } from 'src/types/domain/player-value.type';
 import { Player, validatePlayerId } from 'src/types/domain/player.type';
+import { TeamId } from 'src/types/domain/team.type';
 import { safeStringToDecimal, safeStringToNumber } from 'src/utils/common.util';
 
 import { ElementResponse } from '../../schemas/bootstrap/element.schema';
@@ -45,6 +47,41 @@ export const mapElementResponseToPlayerValue = (
         event: event,
         value: value,
         changeDate: currentDateStr,
+      }),
+    ),
+  );
+};
+
+export const mapElementResponseToPlayerValueTrack = (
+  event: number,
+  raw: ElementResponse,
+): E.Either<string, PlayerValueTrack> => {
+  const currentDate = new Date();
+  const currentDateStr = format(currentDate, 'yyyyMMdd');
+  const currentHour = currentDate.getHours();
+
+  return pipe(
+    E.Do,
+    E.bind('element', () => validatePlayerId(raw.id)),
+    E.map(
+      ({ element }): PlayerValueTrack => ({
+        hourIndex: currentHour,
+        date: currentDateStr,
+        event: event,
+        element: element,
+        elementType: raw.element_type,
+        team: raw.team as TeamId,
+        chanceOfPlayingThisRound: raw.chance_of_playing_this_round ?? null,
+        chanceOfPlayingNextRound: raw.chance_of_playing_next_round ?? null,
+        transfersIn: raw.transfers_in,
+        transfersOut: raw.transfers_out,
+        transfersInEvent: raw.transfers_in_event,
+        transfersOutEvent: raw.transfers_out_event,
+        selectedBy: pipe(
+          safeStringToNumber(raw.selected_by_percent),
+          O.getOrElseW(() => null),
+        ),
+        value: raw.now_cost,
       }),
     ),
   );

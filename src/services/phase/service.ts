@@ -23,8 +23,8 @@ const phaseServiceOperations = (
   fplDataService: FplBootstrapDataService,
   domainOps: PhaseOperations,
   cache: PhaseCache,
-): PhaseServiceOperations => ({
-  findPhaseById: (id: PhaseId): TE.TaskEither<ServiceError, Phase> =>
+): PhaseServiceOperations => {
+  const findPhaseById = (id: PhaseId): TE.TaskEither<ServiceError, Phase> =>
     pipe(
       cache.getAllPhases(),
       TE.mapLeft(mapDomainErrorToServiceError),
@@ -36,12 +36,12 @@ const phaseServiceOperations = (
           }),
         ),
       )((phases) => O.fromNullable(phases.find((phase) => phase.id === id))),
-    ),
+    );
 
-  findAllPhases: (): TE.TaskEither<ServiceError, Phases> =>
-    pipe(cache.getAllPhases(), TE.mapLeft(mapDomainErrorToServiceError)),
+  const findAllPhases = (): TE.TaskEither<ServiceError, Phases> =>
+    pipe(cache.getAllPhases(), TE.mapLeft(mapDomainErrorToServiceError));
 
-  syncPhasesFromApi: (): TE.TaskEither<ServiceError, void> =>
+  const syncPhasesFromApi = (): TE.TaskEither<ServiceError, void> =>
     pipe(
       fplDataService.getPhases(),
       TE.mapLeft((error: DataLayerError) =>
@@ -61,8 +61,14 @@ const phaseServiceOperations = (
         pipe(cache.setAllPhases(savedPhases), TE.mapLeft(mapDomainErrorToServiceError)),
       ),
       TE.map(() => void 0),
-    ),
-});
+    );
+
+  return {
+    findPhaseById,
+    findAllPhases,
+    syncPhasesFromApi,
+  };
+};
 
 export const createPhaseService = (
   fplDataService: FplBootstrapDataService,

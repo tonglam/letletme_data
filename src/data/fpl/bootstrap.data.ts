@@ -5,6 +5,7 @@ import { Logger } from 'pino';
 import { Events } from 'src/types/domain/event.type';
 import { Phases } from 'src/types/domain/phase.type';
 import { SourcePlayerStats } from 'src/types/domain/player-stat.type';
+import { PlayerValueTracks } from 'src/types/domain/player-value-track.type';
 import { SourcePlayerValues } from 'src/types/domain/player-value.type';
 import { Players } from 'src/types/domain/player.type';
 import { Teams } from 'src/types/domain/team.type';
@@ -18,6 +19,7 @@ import {
   mapElementResponseToPlayer,
   mapElementResponseToPlayerStat,
   mapElementResponseToPlayerValue,
+  mapElementResponseToPlayerValueTrack,
 } from './mappers/bootstrap/element.mapper';
 import { mapEventResponseToEvent } from './mappers/bootstrap/event.mapper';
 import { mapPhaseResponseToPhase } from './mappers/bootstrap/phase.mapper';
@@ -233,6 +235,28 @@ export const createFplBootstrapDataService = (
       ),
     );
 
+  const getPlayerValueTracks = (event: number): TE.TaskEither<DataLayerError, PlayerValueTracks> =>
+    pipe(
+      getFplBootstrapDataInternal(),
+      TE.chain((bootstrapData) =>
+        pipe(
+          bootstrapData.elements,
+          TE.traverseArray((elementResponse) =>
+            pipe(
+              mapElementResponseToPlayerValueTrack(event, elementResponse),
+              E.mapLeft((mappingError) =>
+                createDataLayerError({
+                  code: DataLayerErrorCode.MAPPING_ERROR,
+                  message: `Failed to map element/player value track: ${mappingError}`,
+                }),
+              ),
+              TE.fromEither,
+            ),
+          ),
+        ),
+      ),
+    );
+
   return {
     getEvents,
     getPhases,
@@ -240,5 +264,6 @@ export const createFplBootstrapDataService = (
     getPlayers,
     getPlayerStats,
     getPlayerValues,
+    getPlayerValueTracks,
   };
 };

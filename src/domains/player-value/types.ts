@@ -31,6 +31,6 @@ export interface PlayerValueOperations {
   ) => TE.TaskEither<DomainError, SourcePlayerValues>;
   readonly savePlayerValueChanges: (
     playerValues: PlayerValueCreateInputs,
-  ) => TE.TaskEither<DomainError, void>;
+  ) => TE.TaskEither<DomainError, SourcePlayerValues>;
   readonly deletePlayerValuesByChangeDate: (changeDate: string) => TE.TaskEither<DomainError, void>;
 }

@@ -38,73 +38,78 @@ const eventServiceOperations = (
       )((events) => O.fromNullable(events.find((event) => event.id === id))),
     );
 
+  const findCurrentEvent = (): TE.TaskEither<ServiceError, Event> =>
+    pipe(cache.getCurrentEvent(), TE.mapLeft(mapDomainErrorToServiceError));
+
+  const findNextEvent = (): TE.TaskEither<ServiceError, Event> =>
+    pipe(
+      cache.getCurrentEvent(),
+      TE.mapLeft(mapDomainErrorToServiceError),
+      TE.map((currentEvent) => (currentEvent.id + 1) as EventId),
+      TE.chain(findEventById),
+    );
+
+  const findLastEvent = (): TE.TaskEither<ServiceError, Event> =>
+    pipe(
+      cache.getCurrentEvent(),
+      TE.mapLeft(mapDomainErrorToServiceError),
+      TE.map((currentEvent) => (currentEvent.id - 1) as EventId),
+      TE.chain(findEventById),
+    );
+
+  const findAllEvents = (): TE.TaskEither<ServiceError, Events> =>
+    pipe(cache.getAllEvents(), TE.mapLeft(mapDomainErrorToServiceError));
+
+  const syncEventsFromApi = (): TE.TaskEither<ServiceError, void> => {
+    return pipe(
+      fplDataService.getEvents(),
+      TE.mapLeft((error: DataLayerError) =>
+        createServiceIntegrationError({
+          message: 'Failed to fetch/map events via data layer',
+          cause: error.cause,
+          details: error.details,
+        }),
+      ),
+      TE.chain((eventCreateData) => {
+        return pipe(
+          domainOps.deleteAllEvents(),
+          TE.mapLeft(mapDomainErrorToServiceError),
+          TE.chain(() => {
+            return pipe(
+              domainOps.saveEvents(eventCreateData),
+              TE.mapLeft(mapDomainErrorToServiceError),
+            );
+          }),
+          TE.chain((events) => {
+            return pipe(
+              cache.setAllEvents(events),
+              TE.mapLeft(mapDomainErrorToServiceError),
+              TE.chain(() => {
+                const currentEvent = events.find((e) => e.isCurrent);
+                if (currentEvent) {
+                  return pipe(
+                    cache.setCurrentEvent(currentEvent),
+                    TE.mapLeft(mapDomainErrorToServiceError),
+                  );
+                } else {
+                  return TE.right(void 0);
+                }
+              }),
+              TE.map(() => void 0),
+            );
+          }),
+        );
+      }),
+    );
+  };
+
   return {
     findEventById,
-
-    findCurrentEvent: (): TE.TaskEither<ServiceError, Event> =>
-      pipe(cache.getCurrentEvent(), TE.mapLeft(mapDomainErrorToServiceError)),
-
-    findLastEvent: (): TE.TaskEither<ServiceError, Event> =>
-      pipe(
-        cache.getCurrentEvent(),
-        TE.mapLeft(mapDomainErrorToServiceError),
-        TE.map((currentEvent) => (currentEvent.id - 1) as EventId),
-        TE.chain(findEventById),
-      ),
-
-    findNextEvent: (): TE.TaskEither<ServiceError, Event> =>
-      pipe(
-        cache.getCurrentEvent(),
-        TE.mapLeft(mapDomainErrorToServiceError),
-        TE.map((currentEvent) => (currentEvent.id + 1) as EventId),
-        TE.chain(findEventById),
-      ),
-
-    findAllEvents: (): TE.TaskEither<ServiceError, Events> =>
-      pipe(cache.getAllEvents(), TE.mapLeft(mapDomainErrorToServiceError)),
-
-    syncEventsFromApi: (): TE.TaskEither<ServiceError, void> => {
-      return pipe(
-        fplDataService.getEvents(),
-        TE.mapLeft((error: DataLayerError) =>
-          createServiceIntegrationError({
-            message: 'Failed to fetch/map events via data layer',
-            cause: error.cause,
-            details: error.details,
-          }),
-        ),
-        TE.chain((eventCreateData) => {
-          return pipe(
-            domainOps.deleteAllEvents(),
-            TE.mapLeft(mapDomainErrorToServiceError),
-            TE.chain(() => {
-              return pipe(
-                domainOps.saveEvents(eventCreateData),
-                TE.mapLeft(mapDomainErrorToServiceError),
-              );
-            }),
-            TE.chain((events) => {
-              return pipe(
-                cache.setAllEvents(events),
-                TE.mapLeft(mapDomainErrorToServiceError),
-                TE.chain(() => {
-                  const currentEvent = events.find((e) => e.isCurrent);
-                  if (currentEvent) {
-                    return pipe(
-                      cache.setCurrentEvent(currentEvent),
-                      TE.mapLeft(mapDomainErrorToServiceError),
-                    );
-                  } else {
-                    return TE.right(void 0);
-                  }
-                }),
-                TE.map(() => void 0),
-              );
-            }),
-          );
-        }),
-      );
-    },
+    findCurrentEvent,
+    findLastEvent,
+    findNextEvent,
+    findAllEvents,
+    syncEventsFromApi,
   };
 };
 

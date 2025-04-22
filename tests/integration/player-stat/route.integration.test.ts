@@ -129,7 +129,6 @@ describe('PlayerStat Routes Integration Tests', () => {
     expect(Array.isArray(res.body.data)).toBe(true);
     const stats = res.body.data as PlayerStat[];
     expect(stats.length).toBeGreaterThan(0);
-    expect(stats[0]).toHaveProperty('id');
     expect(stats[0]).toHaveProperty('element');
     expect(stats[0]).toHaveProperty('event');
     expect(stats[0]).toHaveProperty('minutes');
@@ -156,7 +155,6 @@ describe('PlayerStat Routes Integration Tests', () => {
     expect(res.body).toBeDefined();
     expect(res.body).toHaveProperty('data');
     expect(res.body.data.element).toBe(targetElementId);
-    expect(res.body.data).toHaveProperty('id');
     expect(res.body.data).toHaveProperty('event');
     expect(res.body.data).toHaveProperty('team');
     expect(res.body.data).toHaveProperty('elementTypeName');
@@ -199,7 +197,6 @@ describe('PlayerStat Routes Integration Tests', () => {
     const stats = res.body.data as PlayerStat[];
     expect(stats.length).toBeGreaterThan(0);
     expect(stats.every((s) => s.elementType === targetElementType)).toBe(true);
-    expect(stats[0]).toHaveProperty('id');
     expect(stats[0]).toHaveProperty('element');
   });
 
@@ -214,7 +211,6 @@ describe('PlayerStat Routes Integration Tests', () => {
     const stats = res.body.data as PlayerStat[];
     expect(stats.length).toBeGreaterThan(0);
     expect(stats.every((s) => s.team === targetTeamId)).toBe(true);
-    expect(stats[0]).toHaveProperty('id');
     expect(stats[0]).toHaveProperty('element');
   });
 });

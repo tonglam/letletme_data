@@ -1,11 +1,10 @@
 import { PlayerStat as PrismaPlayerStatType } from '@prisma/client';
 import { PrismaPlayerStatCreateInput } from 'src/repositories/player-stat/type';
-import { PlayerStatId, SourcePlayerStat } from 'src/types/domain/player-stat.type';
+import { SourcePlayerStat } from 'src/types/domain/player-stat.type';
 
 export const mapPrismaPlayerStatToDomain = (
   prismaPlayerStat: PrismaPlayerStatType,
 ): SourcePlayerStat => ({
-  id: prismaPlayerStat.id as PlayerStatId,
   event: prismaPlayerStat.event,
   element: prismaPlayerStat.element,
   elementType: prismaPlayerStat.elementType,

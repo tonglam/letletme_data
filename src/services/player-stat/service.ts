@@ -9,6 +9,7 @@ import * as TE from 'fp-ts/TaskEither';
 import { PlayerStatService, PlayerStatServiceOperations } from 'services/player-stat/types';
 import { FplBootstrapDataService } from 'src/data/types';
 import { PlayerStatRepository } from 'src/repositories/player-stat/type';
+import { Event } from 'src/types/domain/event.type';
 import { PlayerStat, PlayerStats, SourcePlayerStats } from 'src/types/domain/player-stat.type';
 import {
   DataLayerError,
@@ -28,8 +29,8 @@ const playerStatServiceOperations = (
   eventCache: EventCache,
   playerCache: PlayerCache,
   teamCache: TeamCache,
-): PlayerStatServiceOperations => ({
-  findPlayerStat: (element: number): TE.TaskEither<ServiceError, PlayerStat> =>
+): PlayerStatServiceOperations => {
+  const findPlayerStat = (element: number): TE.TaskEither<ServiceError, PlayerStat> =>
     pipe(
       playerStatCache.getLatestPlayerStats(),
       TE.mapLeft(mapDomainErrorToServiceError),
@@ -41,25 +42,27 @@ const playerStatServiceOperations = (
           }),
         ),
       )((playerStats) => O.fromNullable(playerStats.find((stat) => stat.element === element))),
-    ),
+    );
 
-  findPlayerStatsByElementType: (elementType: number): TE.TaskEither<ServiceError, PlayerStats> =>
+  const findPlayerStatsByElementType = (
+    elementType: number,
+  ): TE.TaskEither<ServiceError, PlayerStats> =>
     pipe(
       playerStatCache.getLatestPlayerStats(),
       TE.mapLeft(mapDomainErrorToServiceError),
       TE.map((playerStats) =>
         playerStats.filter((playerStat) => playerStat.elementType === elementType),
       ),
-    ),
+    );
 
-  findPlayerStatsByTeam: (team: number): TE.TaskEither<ServiceError, PlayerStats> =>
+  const findPlayerStatsByTeam = (team: number): TE.TaskEither<ServiceError, PlayerStats> =>
     pipe(
       playerStatCache.getLatestPlayerStats(),
       TE.mapLeft(mapDomainErrorToServiceError),
       TE.map((playerStats) => playerStats.filter((playerStat) => playerStat.team === team)),
-    ),
+    );
 
-  findLatestPlayerStats: (): TE.TaskEither<ServiceError, PlayerStats> =>
+  const findLatestPlayerStats = (): TE.TaskEither<ServiceError, PlayerStats> =>
     pipe(
       playerStatCache.getLatestPlayerStats(),
       TE.mapLeft(mapDomainErrorToServiceError),
@@ -89,13 +92,13 @@ const playerStatServiceOperations = (
           ),
         ),
       ),
-    ),
+    );
 
-  syncPlayerStatsFromApi: (): TE.TaskEither<ServiceError, void> =>
+  const syncPlayerStatsFromApi = (): TE.TaskEither<ServiceError, void> =>
     pipe(
       eventCache.getCurrentEvent(),
       TE.mapLeft(mapDomainErrorToServiceError),
-      TE.chainW((event) =>
+      TE.chainW((event: Event) =>
         event
           ? TE.right(event)
           : TE.left(
@@ -105,7 +108,7 @@ const playerStatServiceOperations = (
               }),
             ),
       ),
-      TE.chainW((event) =>
+      TE.chainW((event: Event) =>
         pipe(
           fplDataService.getPlayerStats(event.id),
           TE.mapLeft((error: DataLayerError) =>
@@ -122,13 +125,13 @@ const playerStatServiceOperations = (
               TE.mapLeft(mapDomainErrorToServiceError),
             ),
           ),
-          TE.chainW((savedStats) =>
+          TE.chainW((savedStats: SourcePlayerStats) =>
             pipe(
               enrichPlayerStats(playerCache, teamCache)(savedStats),
               TE.mapLeft(mapDomainErrorToServiceError),
             ),
           ),
-          TE.chainW((enrichedPlayerStats) =>
+          TE.chainW((enrichedPlayerStats: PlayerStats) =>
             pipe(
               enrichedPlayerStats.length > 0
                 ? playerStatCache.setLatestPlayerStats(enrichedPlayerStats)
@@ -138,9 +141,17 @@ const playerStatServiceOperations = (
           ),
         ),
       ),
-      TE.map(() => undefined),
-    ),
-});
+      TE.map(() => void 0),
+    );
+
+  return {
+    findPlayerStat,
+    findPlayerStatsByElementType,
+    findPlayerStatsByTeam,
+    findLatestPlayerStats,
+    syncPlayerStatsFromApi,
+  };
+};
 
 export const createPlayerStatService = (
   fplDataService: FplBootstrapDataService,

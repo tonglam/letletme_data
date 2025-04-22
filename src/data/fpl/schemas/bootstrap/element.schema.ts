@@ -63,6 +63,13 @@ export const ElementResponseSchema = z
     value_season: z.string().nullable(),
     transfers_in: z.number().default(0),
     transfers_out: z.number().default(0),
+    transfers_in_event: z.number().default(0),
+    transfers_out_event: z.number().default(0),
+
+    // Fields needed for player-value-track.type.ts
+    chance_of_playing_this_round: z.number().nullable(),
+    chance_of_playing_next_round: z.number().nullable(),
+    selected_by_percent: z.string().nullable(),
   })
   .passthrough();
 

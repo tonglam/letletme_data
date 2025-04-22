@@ -10,6 +10,7 @@ import { PlayerValueService, PlayerValueServiceOperations } from 'services/playe
 import { FplBootstrapDataService } from 'src/data/types';
 import { PlayerValueCreateInputs, PlayerValueRepository } from 'src/repositories/player-value/type';
 import { ValueChangeType } from 'src/types/base.type';
+import { Event } from 'src/types/domain/event.type';
 import {
   PlayerValue,
   PlayerValues,
@@ -17,7 +18,12 @@ import {
   RawPlayerValues,
   SourcePlayerValues,
 } from 'src/types/domain/player-value.type';
-import { createServiceError, ServiceError, ServiceErrorCode } from 'src/types/error.type';
+import {
+  createServiceError,
+  DataLayerError,
+  ServiceError,
+  ServiceErrorCode,
+} from 'src/types/error.type';
 import { enrichPlayerValues } from 'src/utils/data-enrichment.util';
 import { formatYYYYMMDD } from 'src/utils/date.util';
 import { createServiceIntegrationError, mapDomainErrorToServiceError } from 'src/utils/error.util';
@@ -206,11 +212,11 @@ export const playerValueServiceOperations = (
       pipe(
         eventCache.getCurrentEvent(),
         TE.mapLeft(mapDomainErrorToServiceError),
-        TE.chainW((event) =>
+        TE.chainW((event: Event) =>
           event
             ? pipe(
                 fplDataService.getPlayerValues(event.id),
-                TE.mapLeft((error) =>
+                TE.mapLeft((error: DataLayerError) =>
                   createServiceIntegrationError({
                     message: 'Failed to fetch player values via data layer',
                     cause: error.cause,

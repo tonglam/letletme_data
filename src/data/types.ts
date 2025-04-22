@@ -10,6 +10,7 @@ import { EventLives } from 'src/types/domain/event-live.type';
 import { Events } from 'src/types/domain/event.type';
 import { Phases } from 'src/types/domain/phase.type';
 import { SourcePlayerStats } from 'src/types/domain/player-stat.type';
+import { PlayerValueTracks } from 'src/types/domain/player-value-track.type';
 import { SourcePlayerValues } from 'src/types/domain/player-value.type';
 import { Players } from 'src/types/domain/player.type';
 import { Teams } from 'src/types/domain/team.type';
@@ -22,6 +23,9 @@ export interface FplBootstrapDataService {
   readonly getPlayers: () => TE.TaskEither<DataLayerError, Players>;
   readonly getPlayerStats: (event: number) => TE.TaskEither<DataLayerError, SourcePlayerStats>;
   readonly getPlayerValues: (event: number) => TE.TaskEither<DataLayerError, SourcePlayerValues>;
+  readonly getPlayerValueTracks: (
+    event: number,
+  ) => TE.TaskEither<DataLayerError, PlayerValueTracks>;
 }
 
 export interface FplFixtureDataService {

@@ -67,9 +67,9 @@ export const createPlayerValueOperations = (
 
   const savePlayerValueChanges = (
     playerValues: PlayerValueCreateInputs,
-  ): TE.TaskEither<DomainError, void> =>
+  ): TE.TaskEither<DomainError, SourcePlayerValues> =>
     pipe(
-      repository.savePlayerValueChanges(playerValues),
+      repository.savePlayerValueChangesByChangeDate(playerValues),
       TE.mapLeft((dbError) =>
         createDomainError({
           code: DomainErrorCode.DATABASE_ERROR,

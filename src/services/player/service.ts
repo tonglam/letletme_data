@@ -20,8 +20,8 @@ const playerServiceOperations = (
   fplDataService: FplBootstrapDataService,
   domainOps: PlayerOperations,
   cache: PlayerCache,
-): PlayerServiceOperations => ({
-  findPlayerById: (element: number): TE.TaskEither<ServiceError, Player> =>
+): PlayerServiceOperations => {
+  const findPlayerById = (element: number): TE.TaskEither<ServiceError, Player> =>
     pipe(
       cache.getAllPlayers(),
       TE.mapLeft(mapDomainErrorToServiceError),
@@ -33,26 +33,26 @@ const playerServiceOperations = (
           }),
         ),
       )((players) => RA.findFirst((p: Player) => p.element === element)(players)),
-    ),
+    );
 
-  findPlayersByElementType: (elementType: number): TE.TaskEither<ServiceError, Players> =>
+  const findPlayersByElementType = (elementType: number): TE.TaskEither<ServiceError, Players> =>
     pipe(
       cache.getAllPlayers(),
       TE.mapLeft(mapDomainErrorToServiceError),
       TE.map((players) => RA.filter((p: Player) => p.elementType === elementType)(players)),
-    ),
+    );
 
-  findPlayersByTeam: (team: number): TE.TaskEither<ServiceError, Players> =>
+  const findPlayersByTeam = (team: number): TE.TaskEither<ServiceError, Players> =>
     pipe(
       cache.getAllPlayers(),
       TE.mapLeft(mapDomainErrorToServiceError),
       TE.map((players) => RA.filter((p: Player) => p.team === team)(players)),
-    ),
+    );
 
-  findAllPlayers: (): TE.TaskEither<ServiceError, Players> =>
-    pipe(cache.getAllPlayers(), TE.mapLeft(mapDomainErrorToServiceError)),
+  const findAllPlayers = (): TE.TaskEither<ServiceError, Players> =>
+    pipe(cache.getAllPlayers(), TE.mapLeft(mapDomainErrorToServiceError));
 
-  syncPlayersFromApi: (): TE.TaskEither<ServiceError, void> =>
+  const syncPlayersFromApi = (): TE.TaskEither<ServiceError, void> =>
     pipe(
       fplDataService.getPlayers(),
       TE.mapLeft((error: DataLayerError) =>
@@ -72,8 +72,16 @@ const playerServiceOperations = (
         pipe(cache.setAllPlayers(savedPlayers), TE.mapLeft(mapDomainErrorToServiceError)),
       ),
       TE.map(() => void 0),
-    ),
-});
+    );
+
+  return {
+    findPlayerById,
+    findPlayersByElementType,
+    findPlayersByTeam,
+    findAllPlayers,
+    syncPlayersFromApi,
+  };
+};
 
 export const createPlayerService = (
   fplDataService: FplBootstrapDataService,

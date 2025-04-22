@@ -77,9 +77,9 @@ export const createPlayerValueRepository = (prisma: PrismaClient): PlayerValueRe
       TE.map((prismaPlayerValues) => prismaPlayerValues.map(mapPrismaPlayerValueToDomain)),
     );
 
-  const savePlayerValueChanges = (
+  const savePlayerValueChangesByChangeDate = (
     playerValues: PlayerValueCreateInputs,
-  ): TE.TaskEither<DBError, void> =>
+  ): TE.TaskEither<DBError, SourcePlayerValues> =>
     pipe(
       TE.tryCatch(
         async () => {
@@ -95,7 +95,7 @@ export const createPlayerValueRepository = (prisma: PrismaClient): PlayerValueRe
             message: `Failed to save player value changes: ${getErrorMessage(error)}`,
           }),
       ),
-      TE.map(() => undefined),
+      TE.chain(() => findByChangeDate(playerValues[0].changeDate)),
     );
 
   const deleteByChangeDate = (changeDate: string): TE.TaskEither<DBError, void> =>
@@ -117,7 +117,7 @@ export const createPlayerValueRepository = (prisma: PrismaClient): PlayerValueRe
     findByChangeDate,
     findByElement,
     findByElements,
-    savePlayerValueChanges,
+    savePlayerValueChangesByChangeDate,
     deleteByChangeDate,
   };
 };

@@ -23,8 +23,8 @@ const teamServiceOperations = (
   fplDataService: FplBootstrapDataService,
   domainOps: TeamOperations,
   cache: TeamCache,
-): TeamServiceOperations => ({
-  findTeamById: (id: TeamId): TE.TaskEither<ServiceError, Team> =>
+): TeamServiceOperations => {
+  const findTeamById = (id: TeamId): TE.TaskEither<ServiceError, Team> =>
     pipe(
       cache.getAllTeams(),
       TE.mapLeft(mapDomainErrorToServiceError),
@@ -36,12 +36,12 @@ const teamServiceOperations = (
           }),
         ),
       )((teams) => O.fromNullable(teams.find((team) => team.id === id))),
-    ),
+    );
 
-  findAllTeams: (): TE.TaskEither<ServiceError, Teams> =>
-    pipe(cache.getAllTeams(), TE.mapLeft(mapDomainErrorToServiceError)),
+  const findAllTeams = (): TE.TaskEither<ServiceError, Teams> =>
+    pipe(cache.getAllTeams(), TE.mapLeft(mapDomainErrorToServiceError));
 
-  syncTeamsFromApi: (): TE.TaskEither<ServiceError, void> =>
+  const syncTeamsFromApi = (): TE.TaskEither<ServiceError, void> =>
     pipe(
       fplDataService.getTeams(),
       TE.mapLeft((error: DataLayerError) =>
@@ -61,8 +61,14 @@ const teamServiceOperations = (
         pipe(cache.setAllTeams(savedTeams), TE.mapLeft(mapDomainErrorToServiceError)),
       ),
       TE.map(() => void 0),
-    ),
-});
+    );
+
+  return {
+    findTeamById,
+    findAllTeams,
+    syncTeamsFromApi,
+  };
+};
 
 export const createTeamService = (
   fplDataService: FplBootstrapDataService,
