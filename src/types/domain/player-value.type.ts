@@ -26,6 +26,9 @@ export type RawPlayerValue = Omit<
 >;
 export type RawPlayerValues = readonly RawPlayerValue[];
 
+export type SourcePlayerValue = Omit<RawPlayerValue, 'changeType' | 'lastValue'>;
+export type SourcePlayerValues = readonly SourcePlayerValue[];
+
 export type PlayerValueChange = Omit<
   PlayerValue,
   'elementTypeName' | 'teamId' | 'teamName' | 'teamShortName'

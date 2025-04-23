@@ -32,14 +32,14 @@ const parsePlayerStat = (playerStatStr: string): E.Either<CacheError, PlayerStat
       if (
         !parsed ||
         typeof parsed !== 'object' ||
-        !('element' in parsed) ||
-        typeof parsed.element !== 'number'
+        !('elementId' in parsed) ||
+        typeof parsed.elementId !== 'number'
       ) {
         return E.left(
           createCacheError({
             code: CacheErrorCode.DESERIALIZATION_ERROR,
             message:
-              'Parsed object is not a valid PlayerStat structure (missing or invalid element field)',
+              'Parsed object is not a valid PlayerStat structure (missing or invalid elementId field)',
           }),
         );
       }

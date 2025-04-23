@@ -9,6 +9,7 @@ import { PlayerCreateInputs, PlayerRepository } from 'src/repositories/player/ty
 import { PlayerId, RawPlayer, RawPlayers } from 'src/types/domain/player.type';
 
 import { createDBError, DBError, DBErrorCode } from '../../types/error.type';
+import { getErrorMessage } from '../../utils/error.util';
 
 export const createPlayerRepository = (prisma: PrismaClient): PlayerRepository => {
   const findById = (id: PlayerId): TE.TaskEither<DBError, RawPlayer> =>
@@ -18,7 +19,7 @@ export const createPlayerRepository = (prisma: PrismaClient): PlayerRepository =
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to fetch player by id ${id}: ${error}`,
+            message: `Failed to fetch player by id ${id}: ${getErrorMessage(error)}`,
           }),
       ),
       TE.chainW((prismaPlayerOrNull) =>
@@ -40,7 +41,7 @@ export const createPlayerRepository = (prisma: PrismaClient): PlayerRepository =
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to fetch all players: ${error}`,
+            message: `Failed to fetch all players: ${getErrorMessage(error)}`,
           }),
       ),
       TE.map((prismaPlayers) => prismaPlayers.map(mapPrismaPlayerToDomain)),
@@ -55,14 +56,17 @@ export const createPlayerRepository = (prisma: PrismaClient): PlayerRepository =
             data: dataToCreate,
             skipDuplicates: true,
           });
+          const savedPlayers = await prisma.player.findMany({ orderBy: { id: 'asc' } });
+          return savedPlayers.map(mapPrismaPlayerToDomain);
         },
-        (error) =>
-          createDBError({
+        (error) => {
+          return createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to create players in batch: ${error}`,
-          }),
+            message: `Failed to create players in batch: ${getErrorMessage(error)}`,
+            cause: error instanceof Error ? error : undefined,
+          });
+        },
       ),
-      TE.chain(() => findAll()),
     );
 
   const deleteAll = (): TE.TaskEither<DBError, void> =>
@@ -72,7 +76,7 @@ export const createPlayerRepository = (prisma: PrismaClient): PlayerRepository =
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to delete all players: ${error}`,
+            message: `Failed to delete all players: ${getErrorMessage(error)}`,
             cause: error instanceof Error ? error : undefined,
           }),
       ),

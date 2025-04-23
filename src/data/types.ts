@@ -12,8 +12,8 @@ import { EventId, Events } from 'src/types/domain/event.type';
 import { Phases } from 'src/types/domain/phase.type';
 import { RawPlayerStats as RawPlayerStats } from 'src/types/domain/player-stat.type';
 import { PlayerValueTracks } from 'src/types/domain/player-value-track.type';
-import { SourcePlayerValues as RawPlayerValues } from 'src/types/domain/player-value.type';
-import { RawPlayers as RawPlayers } from 'src/types/domain/player.type';
+import { SourcePlayerValues } from 'src/types/domain/player-value.type';
+import { RawPlayers } from 'src/types/domain/player.type';
 import { Teams } from 'src/types/domain/team.type';
 import { DataLayerError } from 'src/types/error.type';
 
@@ -23,7 +23,7 @@ export interface FplBootstrapDataService {
   readonly getTeams: () => TE.TaskEither<DataLayerError, Teams>;
   readonly getPlayers: () => TE.TaskEither<DataLayerError, RawPlayers>;
   readonly getPlayerStats: (eventId: EventId) => TE.TaskEither<DataLayerError, RawPlayerStats>;
-  readonly getPlayerValues: (eventId: EventId) => TE.TaskEither<DataLayerError, RawPlayerValues>;
+  readonly getPlayerValues: (eventId: EventId) => TE.TaskEither<DataLayerError, SourcePlayerValues>;
   readonly getPlayerValueTracks: (
     eventId: EventId,
   ) => TE.TaskEither<DataLayerError, PlayerValueTracks>;

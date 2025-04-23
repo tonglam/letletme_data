@@ -5,7 +5,6 @@ import { pipe } from 'fp-ts/function';
 import * as RA from 'fp-ts/ReadonlyArray';
 import * as TE from 'fp-ts/TaskEither';
 import { FplBootstrapDataService } from 'src/data/types';
-import { getLogger } from 'src/infrastructures/logger';
 import { PlayerRepository } from 'src/repositories/player/type';
 import { Player, PlayerId, Players, PlayerType, RawPlayers } from 'src/types/domain/player.type';
 import { TeamId } from 'src/types/domain/team.type';
@@ -19,8 +18,6 @@ import { enrichPlayers } from 'src/utils/data-enrichment.util';
 import { createServiceIntegrationError, mapDomainErrorToServiceError } from 'src/utils/error.util';
 
 import { PlayerService, PlayerServiceOperations } from './types';
-
-const logger = getLogger(__filename);
 
 const playerServiceOperations = (
   fplDataService: FplBootstrapDataService,
@@ -63,38 +60,26 @@ const playerServiceOperations = (
 
   const syncPlayersFromApi = (): TE.TaskEither<ServiceError, void> =>
     pipe(
-      TE.Do,
-      TE.tapIO(() => logger.info('Starting syncPlayersFromApi pipeline')),
-      TE.bindW('rawPlayers', () =>
-        pipe(
-          fplDataService.getPlayers(),
-          TE.mapLeft((error: DataLayerError) =>
-            createServiceIntegrationError({
-              message: 'Failed to fetch/map players via data layer',
-              cause: error.cause,
-              details: error.details,
-            }),
-          ),
-          TE.tapIO((players) => logger.info(`Fetched ${players.length} raw players`)),
-        ),
+      fplDataService.getPlayers(),
+      TE.mapLeft((error: DataLayerError) =>
+        createServiceIntegrationError({
+          message: 'Failed to fetch/map players via data layer',
+          cause: error.cause,
+          details: error.details,
+        }),
       ),
-      TE.tapIO(() => logger.info('Attempting to delete all players...')),
       TE.chainFirstW(() =>
         pipe(domainOps.deleteAllPlayers(), TE.mapLeft(mapDomainErrorToServiceError)),
       ),
-      TE.tapIO(() => logger.info('Successfully deleted players.')),
-      TE.tapIO(() => logger.info('Attempting to save players...')),
-      TE.chainW(({ rawPlayers }) =>
+      TE.chainW((rawPlayers: RawPlayers) =>
         pipe(
           rawPlayers.length > 0
             ? domainOps.savePlayers(rawPlayers)
             : TE.right(rawPlayers as RawPlayers),
           TE.mapLeft(mapDomainErrorToServiceError),
-          TE.tapIO((saved) => logger.info(`Successfully saved ${saved.length} players.`)),
         ),
       ),
-      TE.tapIO(() => logger.info('Attempting to fetch and cache teams...')),
-      TE.chainFirstW(() =>
+      TE.chainFirstW((savedPlayers) =>
         pipe(
           fplDataService.getTeams(),
           TE.mapLeft((error: DataLayerError) =>
@@ -107,31 +92,20 @@ const playerServiceOperations = (
           TE.chainW((teams) =>
             pipe(teamCache.setAllTeams(teams), TE.mapLeft(mapDomainErrorToServiceError)),
           ),
-          TE.tapIO(() => logger.info('Successfully fetched and cached teams.')),
+          TE.map(() => savedPlayers),
         ),
       ),
-      TE.bindW('savedPlayers', ({ rawPlayers }) => TE.right(rawPlayers)),
-      TE.tapIO(() => logger.info('Attempting to enrich players...')),
-      TE.chainW(({ savedPlayers }) =>
-        pipe(
-          enrichPlayers(teamCache)(savedPlayers),
-          TE.mapLeft(mapDomainErrorToServiceError),
-          TE.tapIO((enriched) => logger.info(`Successfully enriched ${enriched.length} players.`)),
-        ),
+      TE.chainW((savedPlayers: RawPlayers) =>
+        pipe(enrichPlayers(teamCache)(savedPlayers), TE.mapLeft(mapDomainErrorToServiceError)),
       ),
-      TE.tapIO(() => logger.info('Attempting to cache enriched players...')),
-      TE.chainW((enrichedPlayers) =>
+      TE.chainW((enrichedPlayers: Players) =>
         pipe(
           enrichedPlayers.length > 0
             ? playerCache.setAllPlayers(enrichedPlayers)
             : TE.rightIO(() => {}),
           TE.mapLeft(mapDomainErrorToServiceError),
-          TE.tapIO(() => logger.info('Successfully cached enriched players.')),
         ),
       ),
-      TE.map(() => void 0),
-      TE.tapIO(() => logger.info('Finished syncPlayersFromApi pipeline successfully')),
-      TE.orElseFirstIOK((err) => logger.error({ err }, 'syncPlayersFromApi pipeline failed')),
     );
 
   return {

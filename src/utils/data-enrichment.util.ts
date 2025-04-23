@@ -41,22 +41,25 @@ export const enrichWithElementType =
       playerCache.getAllPlayers(),
       TE.map((players) => {
         const playerMap = new Map(players.map((p) => [p.id as number, p]));
-        return pipe(
+        const enriched = pipe(
           items,
-          RA.map((item): EnrichedWithElementType<T> => {
+          RA.map((item): O.Option<EnrichedWithElementType<T>> => {
             const playerOpt = O.fromNullable(playerMap.get(item.element));
-            const elementType = pipe(
+            return pipe(
               playerOpt,
-              O.map((p) => p.type as ElementTypeId),
-              O.getOrElse(() => ElementTypeId.FORWARD),
+              O.map((player) => {
+                const elementType = player.type as ElementTypeId;
+                return {
+                  ...item,
+                  elementType: elementType,
+                  elementTypeName: getElementTypeName(elementType),
+                };
+              }),
             );
-            return {
-              ...item,
-              elementType: elementType,
-              elementTypeName: getElementTypeName(elementType),
-            };
           }),
+          RA.compact,
         );
+        return enriched;
       }),
     );
   };
@@ -109,12 +112,6 @@ export const enrichWithTeam =
           RA.compact,
         );
 
-        if (enrichedItems.length !== items.length) {
-          console.warn(
-            `enrichWithTeam: ${items.length - enrichedItems.length} items could not be enriched with team data.`,
-          );
-        }
-
         return TE.right(enrichedItems as ReadonlyArray<EnrichedWithTeam<T>>);
       }),
     );
@@ -122,12 +119,12 @@ export const enrichWithTeam =
 
 export const enrichPlayers =
   (teamCache: TeamCache) =>
-  (rawPlayers: RawPlayers): TE.TaskEither<DomainError, Players> =>
-    pipe(
+  (rawPlayers: RawPlayers): TE.TaskEither<DomainError, Players> => {
+    return pipe(
       teamCache.getAllTeams(),
       TE.map((teams) => {
         const teamMap = new Map(teams.map((t) => [t.id as number, t]));
-        return pipe(
+        const enriched = pipe(
           rawPlayers,
           RA.map(
             (rawPlayer): O.Option<Player> =>
@@ -136,6 +133,8 @@ export const enrichPlayers =
                 O.map(
                   (team): Player => ({
                     ...rawPlayer,
+                    price: rawPlayer.price / 10,
+                    startPrice: rawPlayer.startPrice / 10,
                     teamName: team.name,
                     teamShortName: team.shortName,
                   }),
@@ -144,16 +143,10 @@ export const enrichPlayers =
           ),
           RA.compact,
         );
+        return enriched;
       }),
-      TE.filterOrElse(
-        (enrichedPlayers) => enrichedPlayers.length === rawPlayers.length,
-        () =>
-          createDomainError({
-            code: DomainErrorCode.VALIDATION_ERROR,
-            message: 'Failed to enrich some players with team data.',
-          }),
-      ),
     );
+  };
 
 export const enrichPlayerStats =
   (playerCache: PlayerCache, teamCache: TeamCache) =>
@@ -208,11 +201,13 @@ export const enrichPlayerValues =
           (enriched) =>
             ({
               ...enriched.original,
+              value: enriched.original.value / 10,
               elementTypeName: enriched.elementTypeName,
               elementType: enriched.elementType,
               teamId: enriched.team,
               teamName: enriched.teamName,
               teamShortName: enriched.teamShortName,
+              lastValue: enriched.original.lastValue / 10,
             }) as PlayerValue,
         ),
       ),

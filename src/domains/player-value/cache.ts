@@ -77,6 +77,9 @@ export const createPlayerValueCache = (
   const setPlayerValuesByChangeDate = (
     playerValues: PlayerValues,
   ): TE.TaskEither<DomainError, void> => {
+    if (playerValues.length === 0) {
+      return TE.right(void 0);
+    }
     const changeDate = playerValues[0].changeDate;
     const key = `${baseKey}:${changeDate}`;
 

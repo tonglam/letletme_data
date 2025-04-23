@@ -111,12 +111,12 @@ describe('PlayerStat Integration Tests', { timeout: 30000 }, () => {
         const firstStat = playerStats[0];
 
         // Corrected assertions
-        expect(firstStat).toHaveProperty('element');
-        expect(firstStat).toHaveProperty('event');
+        expect(firstStat).toHaveProperty('elementId');
+        expect(firstStat).toHaveProperty('eventId');
         expect(firstStat).toHaveProperty('minutes');
         expect(firstStat).toHaveProperty('elementType');
         expect(firstStat).toHaveProperty('elementTypeName');
-        expect(firstStat).toHaveProperty('team');
+        expect(firstStat).toHaveProperty('teamId');
         expect(firstStat).toHaveProperty('teamName');
         expect(firstStat).toHaveProperty('teamShortName');
       }

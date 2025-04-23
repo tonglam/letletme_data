@@ -5,7 +5,7 @@ import * as O from 'fp-ts/Option';
 import { EventId } from 'src/types/domain/event.type';
 import { RawPlayerStat } from 'src/types/domain/player-stat.type';
 import { PlayerValueTrack } from 'src/types/domain/player-value-track.type';
-import { RawPlayerValue } from 'src/types/domain/player-value.type';
+import { SourcePlayerValue } from 'src/types/domain/player-value.type';
 import { PlayerId, PlayerType, RawPlayer, validatePlayerId } from 'src/types/domain/player.type';
 import { TeamId } from 'src/types/domain/team.type';
 import { safeStringToDecimal, safeStringToNumber } from 'src/utils/common.util';
@@ -34,19 +34,18 @@ export const mapElementResponseToPlayer = (raw: ElementResponse): E.Either<strin
 export const mapElementResponseToPlayerValue = (
   eventId: EventId,
   raw: ElementResponse,
-): E.Either<string, RawPlayerValue> => {
+): E.Either<string, SourcePlayerValue> => {
   const currentDateStr = format(new Date(), 'yyyyMMdd');
-  const value = raw.now_cost;
 
   return pipe(
     E.Do,
     E.bind('element', () => validatePlayerId(raw.id)),
     E.map(
-      ({ element }): RawPlayerValue => ({
+      ({ element }): SourcePlayerValue => ({
         elementId: element as PlayerId,
         elementType: raw.element_type as PlayerType,
         eventId: eventId as EventId,
-        value: value,
+        value: raw.now_cost,
         changeDate: currentDateStr,
       }),
     ),
@@ -100,7 +99,6 @@ export const mapElementResponseToPlayerStat = (
         eventId: eventId as EventId,
         elementId: element as PlayerId,
         elementType: raw.element_type as PlayerType,
-        teamId: raw.team as TeamId,
         totalPoints: raw.total_points,
         form: pipe(
           safeStringToNumber(raw.form),

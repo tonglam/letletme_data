@@ -10,12 +10,12 @@ import { PlayerValueService, PlayerValueServiceOperations } from 'services/playe
 import { FplBootstrapDataService } from 'src/data/types';
 import { PlayerValueCreateInputs, PlayerValueRepository } from 'src/repositories/player-value/type';
 import { ValueChangeType } from 'src/types/base.type';
-import { Event } from 'src/types/domain/event.type';
 import {
   PlayerValue,
   PlayerValues,
   RawPlayerValue,
   RawPlayerValues,
+  SourcePlayerValues,
 } from 'src/types/domain/player-value.type';
 import { PlayerId } from 'src/types/domain/player.type';
 import { TeamId } from 'src/types/domain/team.type';
@@ -40,7 +40,7 @@ const determineChangeType = (newValue: number, lastValue: number): ValueChangeTy
 
 const detectRawValueChanges =
   (domainOps: PlayerValueOperations) =>
-  (sourceValues: RawPlayerValues): TE.TaskEither<ServiceError, RawPlayerValues> => {
+  (sourceValues: SourcePlayerValues): TE.TaskEither<ServiceError, RawPlayerValues> => {
     if (RA.isEmpty(sourceValues)) {
       return TE.right([]);
     }
@@ -129,34 +129,18 @@ export const playerValueServiceOperations = (
 
   const addChangeInfo = addChangeInfoToEnriched(domainOps);
 
-  const enrichDetectedChanges = flow(
-    (changes: RawPlayerValues) => TE.of(changes as RawPlayerValues),
-    TE.chainW(enrichSourceData),
-    TE.map((enriched) => enriched as PlayerValues),
-  );
-
   const processSourceToPlayerValues = (
     sourceValues: RawPlayerValues,
   ): TE.TaskEither<ServiceError, PlayerValues> =>
-    pipe(
-      TE.of(sourceValues),
-      TE.chainW(enrichSourceData),
-      TE.chainW(addChangeInfo),
-      TE.map((playerValues) => {
-        const processed = RA.map((pv: PlayerValue) => ({
-          ...pv,
-          value: pv.value / 10,
-        }))(playerValues);
-        return processed;
-      }),
-    );
+    pipe(TE.of(sourceValues), TE.chainW(enrichSourceData), TE.chainW(addChangeInfo));
 
   const ops: PlayerValueServiceOperations = {
     detectPlayerValueChanges: (): TE.TaskEither<ServiceError, PlayerValues> =>
       TE.left(
         createServiceError({
           code: ServiceErrorCode.OPERATION_ERROR,
-          message: 'detectPlayerValueChanges operation needs redefinition or removal.',
+          message:
+            'detectPlayerValueChanges needs redefinition or removal. Use syncPlayerValuesFromApi logic.',
         }),
       ),
 
@@ -195,8 +179,8 @@ export const playerValueServiceOperations = (
         TE.mapLeft(mapDomainErrorToServiceError),
         TE.map(RA.filter((player) => player.teamId === teamId)),
         TE.map(RA.map((player) => player.id)),
-        TE.chainW((readonlyElements) => {
-          const mutableElements = [...readonlyElements];
+        TE.chainW((elementIds) => {
+          const mutableElements = [...elementIds];
           if (mutableElements.length === 0) {
             return TE.right([]);
           }
@@ -212,41 +196,42 @@ export const playerValueServiceOperations = (
       pipe(
         eventCache.getCurrentEvent(),
         TE.mapLeft(mapDomainErrorToServiceError),
-        TE.chainW((event: Event) =>
-          event
-            ? pipe(
-                fplDataService.getPlayerValues(event.id),
-                TE.mapLeft((error: DataLayerError) =>
-                  createServiceIntegrationError({
-                    message: 'Failed to fetch player values via data layer',
-                    cause: error.cause,
+        TE.chainW(
+          (event): TE.TaskEither<ServiceError, void> =>
+            event
+              ? pipe(
+                  fplDataService.getPlayerValues(event.id),
+                  TE.mapLeft((error: DataLayerError) =>
+                    createServiceIntegrationError({
+                      message: 'Failed to fetch player values via data layer',
+                      cause: error.cause,
+                    }),
+                  ),
+                  TE.chainW(detectChanges),
+                  TE.chainW((rawPlayerValueChanges: RawPlayerValues) =>
+                    rawPlayerValueChanges.length === 0
+                      ? TE.right(undefined as void)
+                      : pipe(
+                          domainOps.savePlayerValueChanges(
+                            rawPlayerValueChanges as PlayerValueCreateInputs,
+                          ),
+                          TE.mapLeft(mapDomainErrorToServiceError),
+                          TE.chainW(() => enrichSourceData(rawPlayerValueChanges)),
+                          TE.chainW((enrichedPlayerValues: PlayerValues) =>
+                            pipe(
+                              playerValueCache.setPlayerValuesByChangeDate(enrichedPlayerValues),
+                              TE.mapLeft(mapDomainErrorToServiceError),
+                            ),
+                          ),
+                        ),
+                  ),
+                )
+              : TE.left(
+                  createServiceError({
+                    code: ServiceErrorCode.OPERATION_ERROR,
+                    message: 'No current event found to sync player values for.',
                   }),
                 ),
-                TE.chainW(detectChanges),
-                TE.chainW(enrichDetectedChanges),
-                TE.chainW((playerValueChanges: PlayerValues) =>
-                  playerValueChanges.length === 0
-                    ? TE.right(undefined)
-                    : pipe(
-                        domainOps.savePlayerValueChanges(
-                          playerValueChanges as PlayerValueCreateInputs,
-                        ),
-                        TE.mapLeft(mapDomainErrorToServiceError),
-                        TE.chainW(() => {
-                          return pipe(
-                            playerValueCache.setPlayerValuesByChangeDate(playerValueChanges),
-                            TE.mapLeft(mapDomainErrorToServiceError),
-                          );
-                        }),
-                      ),
-                ),
-              )
-            : TE.left(
-                createServiceError({
-                  code: ServiceErrorCode.OPERATION_ERROR,
-                  message: 'No current event found to sync player values for.',
-                }),
-              ),
         ),
       ),
   };

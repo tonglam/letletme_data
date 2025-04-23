@@ -16,17 +16,13 @@ import { createTeamCache } from '../../../src/domains/team/cache';
 import { TeamCache } from '../../../src/domains/team/types';
 import { redisClient } from '../../../src/infrastructures/cache/client';
 import { HTTPClient } from '../../../src/infrastructures/http';
-import { createEventRepository } from '../../../src/repositories/event/repository';
-import { EventRepository } from '../../../src/repositories/event/type';
-import { createPlayerRepository } from '../../../src/repositories/player/repository';
-import { PlayerRepository } from '../../../src/repositories/player/type';
 import { createPlayerValueRepository } from '../../../src/repositories/player-value/repository';
 import { PlayerValueRepository } from '../../../src/repositories/player-value/type';
-import { createTeamRepository } from '../../../src/repositories/team/repository';
-import { TeamRepository } from '../../../src/repositories/team/type';
 import { createPlayerValueService } from '../../../src/services/player-value/service';
 import { PlayerValueService } from '../../../src/services/player-value/types';
 import { playerValueWorkflows } from '../../../src/services/player-value/workflow';
+import { PlayerId } from '../../../src/types/domain/player.type';
+import { TeamId } from '../../../src/types/domain/team.type';
 import {
   IntegrationTestSetupResult,
   setupIntegrationTest,
@@ -40,14 +36,11 @@ describe('PlayerValue Integration Tests', { timeout: 30000 }, () => {
   let httpClient: HTTPClient;
   let playerValueRepository: PlayerValueRepository;
   let playerValueCache: PlayerValueCache;
-  let playerRepository: PlayerRepository;
   let playerCache: PlayerCache;
-  let teamRepository: TeamRepository;
   let teamCache: TeamCache;
   let fplDataService: FplBootstrapDataService;
   let playerValueService: PlayerValueService;
   // Event dependencies
-  let eventRepository: EventRepository;
   let eventCache: EventCache;
 
   const cachePrefix = CachePrefix.PLAYER_VALUE;
@@ -72,33 +65,29 @@ describe('PlayerValue Integration Tests', { timeout: 30000 }, () => {
 
     fplDataService = createFplBootstrapDataService(httpClient, logger);
 
-    eventRepository = createEventRepository(prisma);
-    // Event cache uses singleton client
-    eventCache = createEventCache(eventRepository, {
+    // Initialize repositories (needed for services and caches)
+    playerValueRepository = createPlayerValueRepository(prisma);
+
+    // Initialize caches
+    eventCache = createEventCache({
       keyPrefix: eventCachePrefix,
       season: season,
     });
-
-    playerValueRepository = createPlayerValueRepository(prisma);
-    // Initialize Player dependencies
-    playerRepository = createPlayerRepository(prisma);
-    playerCache = createPlayerCache(playerRepository, {
+    playerCache = createPlayerCache({
       keyPrefix: playerCachePrefix,
       season: season,
     });
-
-    // Initialize Team dependencies
-    teamRepository = createTeamRepository(prisma);
-    teamCache = createTeamCache(teamRepository, {
+    teamCache = createTeamCache({
       keyPrefix: teamCachePrefix,
       season: season,
     });
-
-    // PlayerValue cache uses singleton client
     playerValueCache = createPlayerValueCache({
       keyPrefix: cachePrefix,
       ttlSeconds: 3600,
+      season: season,
     });
+
+    // Initialize PlayerValue service (depends on caches being potentially populated)
     playerValueService = createPlayerValueService(
       fplDataService,
       playerValueRepository,
@@ -147,11 +136,14 @@ describe('PlayerValue Integration Tests', { timeout: 30000 }, () => {
       // Fetch all from DB to get a valid element ID for testing
       const dbValues = await prisma.playerValue.findMany();
       expect(dbValues.length).toBeGreaterThan(0);
-      const targetElementId = dbValues[0].element;
+      // Get the first value's elementId for subsequent tests
+      const targetElementId = dbValues[0].elementId;
       const targetPlayerValue = dbValues[0]; // Get the full record for comparison
 
       // Attempting to fetch using the element ID
-      const valueResult = await playerValueService.getPlayerValuesByElement(targetElementId)();
+      const valueResult = await playerValueService.getPlayerValuesByElement(
+        targetElementId as PlayerId,
+      )();
 
       expect(E.isRight(valueResult)).toBe(true);
       if (E.isRight(valueResult)) {
@@ -160,10 +152,10 @@ describe('PlayerValue Integration Tests', { timeout: 30000 }, () => {
         const fetchedValue = values[0]; // Get the first result
 
         // Basic check
-        expect(fetchedValue.element_id).toEqual(targetElementId);
+        expect(fetchedValue.elementId).toEqual(targetElementId);
 
         // Check properties specific to PlayerValue (including those added by enrichment and change detection)
-        expect(fetchedValue).toHaveProperty('element');
+        expect(fetchedValue).toHaveProperty('elementId');
         expect(fetchedValue).toHaveProperty('value');
         expect(fetchedValue).toHaveProperty('lastValue'); // Added property
         expect(fetchedValue).toHaveProperty('changeType'); // Added property
@@ -171,7 +163,7 @@ describe('PlayerValue Integration Tests', { timeout: 30000 }, () => {
         // Check enriched properties (assuming enrichment works)
         expect(fetchedValue).toHaveProperty('elementType');
         expect(fetchedValue).toHaveProperty('elementTypeName');
-        expect(fetchedValue).toHaveProperty('team');
+        expect(fetchedValue).toHaveProperty('teamId');
         expect(fetchedValue).toHaveProperty('teamName');
         expect(fetchedValue).toHaveProperty('teamShortName');
 
@@ -198,13 +190,15 @@ describe('PlayerValue Integration Tests', { timeout: 30000 }, () => {
 
       // Fetch the corresponding Player using the element ID to get the teamId
       const player = await prisma.player.findUnique({
-        where: { element: dbValue.element },
+        where: { id: dbValue.elementId },
       });
       expect(player).not.toBeNull();
-      if (!player) throw new Error(`No player found for element ${dbValue.element}`);
-      const targetTeamId = player.team;
+      if (!player) throw new Error(`No player found for element ${dbValue.elementId}`);
+      const targetTeamId = player.teamId;
 
-      const valuesByTeamResult = await playerValueService.getPlayerValuesByTeam(targetTeamId)();
+      const valuesByTeamResult = await playerValueService.getPlayerValuesByTeam(
+        targetTeamId as TeamId,
+      )();
       expect(E.isRight(valuesByTeamResult)).toBe(true);
 
       if (E.isRight(valuesByTeamResult)) {
@@ -214,7 +208,7 @@ describe('PlayerValue Integration Tests', { timeout: 30000 }, () => {
 
         if (values.length > 0) {
           values.forEach((v) => {
-            expect(v.team).toEqual(targetTeamId);
+            expect(v.teamId).toEqual(targetTeamId);
             // Check enrichment
             expect(v).toHaveProperty('teamName');
             expect(v).toHaveProperty('teamShortName');

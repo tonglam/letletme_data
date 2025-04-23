@@ -6,7 +6,7 @@ import { EventId, Events } from 'src/types/domain/event.type';
 import { Phases } from 'src/types/domain/phase.type';
 import { RawPlayerStats } from 'src/types/domain/player-stat.type';
 import { PlayerValueTracks } from 'src/types/domain/player-value-track.type';
-import { RawPlayerValues } from 'src/types/domain/player-value.type';
+import { SourcePlayerValues } from 'src/types/domain/player-value.type';
 import { RawPlayers } from 'src/types/domain/player.type';
 import { Teams } from 'src/types/domain/team.type';
 import { DataLayerError, DataLayerErrorCode } from 'src/types/error.type';
@@ -213,7 +213,7 @@ export const createFplBootstrapDataService = (
       ),
     );
 
-  const getPlayerValues = (eventId: EventId): TE.TaskEither<DataLayerError, RawPlayerValues> =>
+  const getPlayerValues = (eventId: EventId): TE.TaskEither<DataLayerError, SourcePlayerValues> =>
     pipe(
       getFplBootstrapDataInternal(),
       TE.chain((bootstrapData) =>

@@ -114,7 +114,7 @@ describe('PlayerValue Routes Integration Tests', () => {
     expect(Array.isArray(res.body.data)).toBe(true);
     const values = res.body.data;
     if (values.length > 0) {
-      expect(values[0]).toHaveProperty('element');
+      expect(values[0]).toHaveProperty('elementId');
       expect(values[0]).toHaveProperty('value');
       expect(values[0]).toHaveProperty('lastValue');
       expect(values[0]).toHaveProperty('changeType');
@@ -139,7 +139,7 @@ describe('PlayerValue Routes Integration Tests', () => {
     expect(Array.isArray(res.body.data)).toBe(true);
     expect(res.body.data.length).toBeGreaterThan(0);
     const valueData = res.body.data[0];
-    expect(valueData.element).toBe(targetElementId);
+    expect(valueData.elementId).toBe(targetElementId);
     expect(valueData).toHaveProperty('value');
     expect(valueData).toHaveProperty('lastValue');
     expect(valueData).toHaveProperty('changeType');
@@ -156,7 +156,7 @@ describe('PlayerValue Routes Integration Tests', () => {
     if (values.length > 0) {
       // Need to verify team association indirectly or add team info to service response
       // For now, just check the structure
-      expect(values[0]).toHaveProperty('element');
+      expect(values[0]).toHaveProperty('elementId');
       expect(values[0]).toHaveProperty('value');
       expect(values[0]).toHaveProperty('changeDate');
     } else {

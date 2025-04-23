@@ -129,7 +129,7 @@ CREATE TABLE IF NOT EXISTS "player_value_tracks" (
 CREATE UNIQUE INDEX IF NOT EXISTS "unique_player_value_track" ON "player_value_tracks" ("element_id", "date", "hour_index");
 CREATE INDEX IF NOT EXISTS "idx_player_value_track_date_hour_index" ON "player_value_tracks" ("date", "hour_index");
 CREATE INDEX IF NOT EXISTS "idx_player_value_track_element_id" ON "player_value_tracks" ("element_id");
-CREATE INDEX IF NOT EXISTS "idx_player_value_track_event_id" ON "player_value_tracks" ("event");
+CREATE INDEX IF NOT EXISTS "idx_player_value_track_event_id" ON "player_value_tracks" ("event_id");
 ALTER TABLE "player_value_tracks" ENABLE ROW LEVEL SECURITY;
 
 CREATE TABLE IF NOT EXISTS "player_stats" (

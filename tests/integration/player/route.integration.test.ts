@@ -88,7 +88,7 @@ describe('Player Routes Integration Tests', () => {
     expect(Array.isArray(res.body.data)).toBe(true);
     const players = res.body.data as Player[];
     expect(players.length).toBeGreaterThan(0);
-    expect(players[0]).toHaveProperty('element');
+    expect(players[0]).toHaveProperty('id');
     expect(players[0]).toHaveProperty('webName');
   });
 
@@ -110,7 +110,7 @@ describe('Player Routes Integration Tests', () => {
     expect(res.status).toBe(200);
     expect(res.body).toBeDefined();
     expect(res.body).toHaveProperty('data');
-    expect(res.body.data.element).toBe(targetPlayerId);
+    expect(res.body.data.id).toBe(targetPlayerId);
     expect(res.body.data).toHaveProperty('webName');
   });
 
