@@ -6,6 +6,7 @@ import { TeamId } from './team.type';
 
 export interface PlayerValue {
   readonly elementId: PlayerId;
+  readonly webName: string;
   readonly elementType: ElementTypeId;
   readonly elementTypeName: ElementTypeName;
   readonly eventId: EventId;
@@ -22,7 +23,7 @@ export type PlayerValues = readonly PlayerValue[];
 
 export type RawPlayerValue = Omit<
   PlayerValue,
-  'elementTypeName' | 'teamId' | 'teamName' | 'teamShortName'
+  'webName' | 'elementTypeName' | 'teamId' | 'teamName' | 'teamShortName'
 >;
 export type RawPlayerValues = readonly RawPlayerValue[];
 
@@ -31,6 +32,6 @@ export type SourcePlayerValues = readonly SourcePlayerValue[];
 
 export type PlayerValueChange = Omit<
   PlayerValue,
-  'elementTypeName' | 'teamId' | 'teamName' | 'teamShortName'
+  'webName' | 'elementTypeName' | 'teamId' | 'teamName' | 'teamShortName'
 >;
 export type PlayerValueChanges = readonly PlayerValueChange[];

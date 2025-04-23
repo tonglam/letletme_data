@@ -18,6 +18,8 @@ type HasElement = { element: number };
 type EnrichedWithElementType<T extends HasElement> = T & {
   elementType: ElementTypeId;
   elementTypeName: ElementTypeName;
+  webName: string;
+  value: number;
 };
 
 type EnrichedWithTeam<
@@ -53,6 +55,8 @@ export const enrichWithElementType =
                   ...item,
                   elementType: elementType,
                   elementTypeName: getElementTypeName(elementType),
+                  webName: player.webName,
+                  value: player.price,
                 };
               }),
             );
@@ -161,11 +165,13 @@ export const enrichPlayerStats =
           (enriched) =>
             ({
               ...enriched.original,
+              webName: enriched.webName,
               elementTypeName: enriched.elementTypeName,
               elementType: enriched.elementType,
               teamId: enriched.team,
               teamName: enriched.teamName,
               teamShortName: enriched.teamShortName,
+              value: enriched.value,
             }) as PlayerStat,
         ),
       ),
@@ -202,6 +208,7 @@ export const enrichPlayerValues =
             ({
               ...enriched.original,
               value: enriched.original.value / 10,
+              webName: enriched.webName,
               elementTypeName: enriched.elementTypeName,
               elementType: enriched.elementType,
               teamId: enriched.team,

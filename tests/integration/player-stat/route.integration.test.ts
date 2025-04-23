@@ -3,9 +3,9 @@ import express from 'express';
 import * as E from 'fp-ts/Either';
 import { Logger } from 'pino';
 import request from 'supertest';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { playerStatRouter } from '../../../src/api/player-stat/route'; // Import the router
+import { playerStatRouter } from '../../../src/api/player-stat/route';
 import { CachePrefix } from '../../../src/configs/cache/cache.config';
 import { createFplBootstrapDataService } from '../../../src/data/fpl/bootstrap.data';
 import { FplBootstrapDataService } from '../../../src/data/types';
@@ -30,7 +30,6 @@ import {
   teardownIntegrationTest,
 } from '../../setup/integrationTestSetup';
 
-// Set timeouts using vi.setConfig inside beforeAll
 describe('PlayerStat Routes Integration Tests', () => {
   let setup: IntegrationTestSetupResult;
   let app: express.Express;
@@ -49,12 +48,9 @@ describe('PlayerStat Routes Integration Tests', () => {
   const eventCachePrefix = CachePrefix.EVENT;
   const playerCachePrefix = CachePrefix.PLAYER;
   const teamCachePrefix = CachePrefix.TEAM;
-  const testSeason = '2425';
+  const season = '2425';
 
   beforeAll(async () => {
-    // Set test timeout for this suite
-    vi.setConfig({ testTimeout: 30000 });
-
     setup = await setupIntegrationTest();
     prisma = setup.prisma;
     logger = setup.logger;
@@ -70,21 +66,21 @@ describe('PlayerStat Routes Integration Tests', () => {
 
     eventCache = createEventCache({
       keyPrefix: eventCachePrefix,
-      season: testSeason,
+      season: season,
     });
     playerCache = createPlayerCache({
       keyPrefix: playerCachePrefix,
-      season: testSeason,
+      season: season,
     });
     teamCache = createTeamCache({
       keyPrefix: teamCachePrefix,
-      season: testSeason,
+      season: season,
     });
 
     playerStatRepository = createPlayerStatRepository(prisma);
     playerStatCache = createPlayerStatCache({
       keyPrefix: cachePrefix,
-      season: testSeason,
+      season: season,
     });
     playerStatService = createPlayerStatService(
       fplDataService,
@@ -112,10 +108,10 @@ describe('PlayerStat Routes Integration Tests', () => {
     expect(Array.isArray(res.body.data)).toBe(true);
     const stats = res.body.data as PlayerStat[];
     expect(stats.length).toBeGreaterThan(0);
-    expect(stats[0]).toHaveProperty('element');
-    expect(stats[0]).toHaveProperty('event');
+    expect(stats[0]).toHaveProperty('elementId');
+    expect(stats[0]).toHaveProperty('eventId');
     expect(stats[0]).toHaveProperty('minutes');
-    expect(stats[0]).toHaveProperty('team');
+    expect(stats[0]).toHaveProperty('teamId');
     expect(stats[0]).toHaveProperty('elementTypeName');
   });
 
@@ -137,9 +133,9 @@ describe('PlayerStat Routes Integration Tests', () => {
     expect(res.status).toBe(200);
     expect(res.body).toBeDefined();
     expect(res.body).toHaveProperty('data');
-    expect(res.body.data.element).toBe(targetElementId);
-    expect(res.body.data).toHaveProperty('event');
-    expect(res.body.data).toHaveProperty('team');
+    expect(res.body.data.elementId).toBe(targetElementId);
+    expect(res.body.data).toHaveProperty('eventId');
+    expect(res.body.data).toHaveProperty('teamId');
     expect(res.body.data).toHaveProperty('elementTypeName');
   }, 30000);
 
@@ -153,7 +149,7 @@ describe('PlayerStat Routes Integration Tests', () => {
   it('POST /player-stats/sync should trigger synchronization and return success', async () => {
     // Clear cache and DB before testing sync specifically
     await prisma.playerStat.deleteMany({});
-    const keys = await redisClient.keys(`${cachePrefix}::${testSeason}*`);
+    const keys = await redisClient.keys(`${cachePrefix}::${season}*`);
     if (keys.length > 0) {
       await redisClient.del(keys);
     }
@@ -180,7 +176,7 @@ describe('PlayerStat Routes Integration Tests', () => {
     const stats = res.body.data as PlayerStat[];
     expect(stats.length).toBeGreaterThan(0);
     expect(stats.every((s) => s.elementType === targetElementType)).toBe(true);
-    expect(stats[0]).toHaveProperty('element');
+    expect(stats[0]).toHaveProperty('elementId');
   });
 
   it('GET /player-stats/team/:team should return stats for that team', async () => {

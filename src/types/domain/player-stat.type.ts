@@ -8,6 +8,7 @@ import { TeamId } from './team.type';
 export interface PlayerStat {
   readonly eventId: EventId;
   readonly elementId: PlayerId;
+  readonly webName: string;
   readonly elementType: ElementTypeId;
   readonly elementTypeName: ElementTypeName;
   readonly teamId: TeamId;
@@ -58,6 +59,6 @@ export type PlayerStats = readonly PlayerStat[];
 
 export type RawPlayerStat = Omit<
   PlayerStat,
-  'elementTypeName' | 'teamId' | 'teamName' | 'teamShortName' | 'value'
+  'webName' | 'elementTypeName' | 'teamId' | 'teamName' | 'teamShortName' | 'value'
 >;
 export type RawPlayerStats = readonly RawPlayerStat[];
