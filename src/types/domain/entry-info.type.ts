@@ -2,26 +2,26 @@ import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import { Branded, createBrandedType } from 'src/types/base.type';
 
-export type EntryInfoId = Branded<number, 'EntryInfoId'>;
+export type EntryId = Branded<number, 'EntryId'>;
 
-export const createEntryInfoId = createBrandedType<number, 'EntryInfoId'>(
-  'EntryInfoId',
+export const createEntryId = createBrandedType<number, 'EntryId'>(
+  'EntryId',
   (value: unknown): value is number => typeof value === 'number' && value > 0,
 );
 
-export const validateEntryInfoId = (value: unknown): E.Either<string, EntryInfoId> => {
+export const validateEntryId = (value: unknown): E.Either<string, EntryId> => {
   return pipe(
     value,
     E.fromPredicate(
       (v): v is number => typeof v === 'number' && v > 0,
-      () => 'Invalid entry info ID: must be a positive integer',
+      () => 'Invalid entry ID: must be a positive integer',
     ),
-    E.map((v) => v as EntryInfoId),
+    E.map((v) => v as EntryId),
   );
 };
 
 export type EntryInfo = {
-  readonly entry: EntryInfoId;
+  readonly entry: EntryId;
   readonly entryName: string;
   readonly playerName: string;
   readonly region: string | null;

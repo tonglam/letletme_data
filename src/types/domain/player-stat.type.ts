@@ -1,34 +1,16 @@
 import { Prisma } from '@prisma/client';
-import * as E from 'fp-ts/Either';
+import { EventId } from 'src/types/domain/event.type';
+import { PlayerId } from 'src/types/domain/player.type';
 
-import { Branded, createBrandedType, ElementTypeId, ElementTypeName } from '../base.type';
+import { ElementTypeId, ElementTypeName } from '../base.type';
 import { TeamId } from './team.type';
 
-export type PlayerStatId = Branded<number, 'PlayerStatId'>;
-
-export const PlayerStatId = createBrandedType<number, 'PlayerStatId'>(
-  'PlayerStatId',
-  (value: unknown): value is number =>
-    typeof value === 'number' && Number.isInteger(value) && value > 0,
-);
-
-export const validatePlayerStatIdInput = (value: unknown): E.Either<string, PlayerStatId> => {
-  if (typeof value !== 'string' || value.trim().length === 0) {
-    return E.left('Invalid player stat ID: input must be a non-empty string');
-  }
-  const numericId = parseInt(value, 10);
-  if (isNaN(numericId) || !Number.isInteger(numericId) || numericId <= 0) {
-    return E.left('Invalid player stat ID: input must be a string representing a positive integer');
-  }
-  return E.right(numericId as PlayerStatId);
-};
-
 export interface PlayerStat {
-  readonly event: number;
-  readonly element: number;
+  readonly eventId: EventId;
+  readonly elementId: PlayerId;
   readonly elementType: ElementTypeId;
   readonly elementTypeName: ElementTypeName;
-  readonly team: TeamId;
+  readonly teamId: TeamId;
   readonly teamName: string;
   readonly teamShortName: string;
   readonly value: number;
@@ -74,8 +56,8 @@ export interface PlayerStat {
 
 export type PlayerStats = readonly PlayerStat[];
 
-export type SourcePlayerStat = Omit<
+export type RawPlayerStat = Omit<
   PlayerStat,
-  'elementTypeName' | 'team' | 'teamName' | 'teamShortName' | 'value'
+  'elementTypeName' | 'teamId' | 'teamName' | 'teamShortName' | 'value'
 >;
-export type SourcePlayerStats = readonly SourcePlayerStat[];
+export type RawPlayerStats = readonly RawPlayerStat[];

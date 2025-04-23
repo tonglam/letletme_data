@@ -1,16 +1,13 @@
 import { Request } from 'express';
-// import * as E from 'fp-ts/Either'; // Remove unused import
 import { pipe } from 'fp-ts/function';
 import * as O from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
+import { PlayerId, PlayerType } from 'src/types/domain/player.type';
+import { TeamId } from 'src/types/domain/team.type';
 
 import { PlayerStatHandlerResponse } from './types';
 import { PlayerStatService } from '../../services/player-stat/types';
-import {
-  PlayerStat,
-  PlayerStats,
-  // validatePlayerStatIdInput, // Already removed this reference in previous edit
-} from '../../types/domain/player-stat.type';
+import { PlayerStat, PlayerStats } from '../../types/domain/player-stat.type';
 import { APIError, APIErrorCode, createAPIError } from '../../types/error.type';
 import { toAPIError } from '../../utils/error.util';
 
@@ -31,7 +28,7 @@ export const createPlayerStatHandlers = (
 
   const getPlayerStat = (req: Request): TE.TaskEither<APIError, PlayerStat> => {
     const elementParam = req.params.element;
-    const parsedElement = parseInt(elementParam);
+    const parsedElement = parseInt(elementParam) as PlayerId;
 
     if (isNaN(parsedElement)) {
       return TE.left(
@@ -56,7 +53,7 @@ export const createPlayerStatHandlers = (
 
   const getPlayerStatsByElementType = (req: Request): TE.TaskEither<APIError, PlayerStats> => {
     const elementTypeParam = req.params.elementType;
-    const parsedElementType = parseInt(elementTypeParam);
+    const parsedElementType = parseInt(elementTypeParam) as PlayerType;
 
     if (isNaN(parsedElementType)) {
       return TE.left(
@@ -75,7 +72,7 @@ export const createPlayerStatHandlers = (
 
   const getPlayerStatsByTeam = (req: Request): TE.TaskEither<APIError, PlayerStats> => {
     const teamParam = req.params.team;
-    const parsedTeam = parseInt(teamParam);
+    const parsedTeam = parseInt(teamParam) as TeamId;
 
     if (isNaN(parsedTeam)) {
       return TE.left(

@@ -10,6 +10,7 @@ import { EntryResponse, EntryResponseSchema } from 'src/data/fpl/schemas/entry/e
 import { FplEntryDataService } from 'src/data/types';
 import { HTTPClient } from 'src/infrastructures/http';
 import { LeagueType } from 'src/types/base.type';
+import { EntryId } from 'src/types/domain/entry-info.type';
 import { EntryInfos } from 'src/types/domain/entry-info.type';
 import { EntryLeagueInfos } from 'src/types/domain/entry-league-info.type';
 import { DataLayerError, DataLayerErrorCode } from 'src/types/error.type';
@@ -21,11 +22,13 @@ export const createFplEntryDataService = (
 ): FplEntryDataService => {
   let cachedEntryResponse: EntryResponse | null = null;
 
-  const fetchAndValidateEntries = (entry: number): TE.TaskEither<DataLayerError, EntryResponse> => {
-    logger.info({ operation: `fetchAndValidateEntry(${entry})` }, 'Fetching FPL entry data');
+  const fetchAndValidateEntries = (
+    entryId: EntryId,
+  ): TE.TaskEither<DataLayerError, EntryResponse> => {
+    logger.info({ operation: `fetchAndValidateEntry(${entryId})` }, 'Fetching FPL entry data');
 
     return pipe(
-      client.get<unknown>(apiConfig.endpoints.entry.info({ entry: entry })),
+      client.get<unknown>(apiConfig.endpoints.entry.info({ entryId })),
       TE.mapLeft((apiError) => {
         logger.error(
           {
@@ -82,16 +85,18 @@ export const createFplEntryDataService = (
     );
   };
 
-  const getFplEntryDataInternal = (entry: number): TE.TaskEither<DataLayerError, EntryResponse> => {
+  const getFplEntryDataInternal = (
+    entryId: EntryId,
+  ): TE.TaskEither<DataLayerError, EntryResponse> => {
     if (cachedEntryResponse) {
       return TE.right(cachedEntryResponse);
     }
-    return fetchAndValidateEntries(entry);
+    return fetchAndValidateEntries(entryId);
   };
 
-  const getEntryInfos = (entry: number): TE.TaskEither<DataLayerError, EntryInfos> =>
+  const getEntryInfos = (entryId: EntryId): TE.TaskEither<DataLayerError, EntryInfos> =>
     pipe(
-      getFplEntryDataInternal(entry),
+      getFplEntryDataInternal(entryId),
       TE.chain((entryData) =>
         pipe(
           mapEntryInfoResponseToEntryInfo(entryData),
@@ -107,9 +112,9 @@ export const createFplEntryDataService = (
       ),
     );
 
-  const getEntryLeagues = (entry: number): TE.TaskEither<DataLayerError, EntryLeagueInfos> =>
+  const getEntryLeagues = (entryId: EntryId): TE.TaskEither<DataLayerError, EntryLeagueInfos> =>
     pipe(
-      getFplEntryDataInternal(entry),
+      getFplEntryDataInternal(entryId),
       TE.chain((entryData) =>
         pipe(
           E.Do,
@@ -117,7 +122,7 @@ export const createFplEntryDataService = (
             pipe(
               entryData.leagues.classic,
               A.map((leagueInfo) =>
-                mapLeagueInfoResponseToEntryLeague(entry, LeagueType.Classic, leagueInfo),
+                mapLeagueInfoResponseToEntryLeague(entryId, LeagueType.Classic, leagueInfo),
               ),
               E.sequenceArray,
             ),
@@ -126,7 +131,7 @@ export const createFplEntryDataService = (
             pipe(
               entryData.leagues.h2h,
               A.map((leagueInfo) =>
-                mapLeagueInfoResponseToEntryLeague(entry, LeagueType.H2H, leagueInfo),
+                mapLeagueInfoResponseToEntryLeague(entryId, LeagueType.H2H, leagueInfo),
               ),
               E.sequenceArray,
             ),

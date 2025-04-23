@@ -3,27 +3,31 @@ import {
   PlayerValueCreateInput,
   PrismaPlayerValueCreateInput,
 } from 'src/repositories/player-value/type';
-import { ValueChangeType } from 'src/types/base.type';
-import { SourcePlayerValue } from 'src/types/domain/player-value.type';
+import { ElementTypeId, ValueChangeType } from 'src/types/base.type';
+import { EventId } from 'src/types/domain/event.type';
+import { RawPlayerValue } from 'src/types/domain/player-value.type';
+import { PlayerId } from 'src/types/domain/player.type';
 
 export const mapPrismaPlayerValueToDomain = (
   prismaPlayerValue: PrismaPlayerValueType,
-): SourcePlayerValue => ({
-  element: prismaPlayerValue.element,
-  elementType: prismaPlayerValue.elementType,
-  event: prismaPlayerValue.event,
+): RawPlayerValue => ({
+  elementId: prismaPlayerValue.elementId as PlayerId,
+  elementType: prismaPlayerValue.elementType as ElementTypeId,
+  eventId: prismaPlayerValue.eventId as EventId,
   value: prismaPlayerValue.value,
   changeDate: prismaPlayerValue.changeDate,
+  changeType: prismaPlayerValue.changeType as ValueChangeType,
+  lastValue: prismaPlayerValue.lastValue,
 });
 
 export const mapDomainPlayerValueToPrismaCreate = (
   domainPlayerValue: PlayerValueCreateInput,
 ): PrismaPlayerValueCreateInput => ({
-  element: domainPlayerValue.element,
-  elementType: domainPlayerValue.elementType as number,
-  event: domainPlayerValue.event,
+  elementId: domainPlayerValue.elementId,
+  elementType: domainPlayerValue.elementType,
+  eventId: domainPlayerValue.eventId,
   value: domainPlayerValue.value,
   changeDate: domainPlayerValue.changeDate,
-  changeType: domainPlayerValue.changeType as ValueChangeType,
+  changeType: domainPlayerValue.changeType,
   lastValue: domainPlayerValue.lastValue,
 });

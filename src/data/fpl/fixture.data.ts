@@ -7,6 +7,7 @@ import {
   EventFixturesResponseSchema,
 } from 'src/data/fpl/schemas/fixture/fixture.schema';
 import { EventFixtures } from 'src/types/domain/event-fixture.type';
+import { EventId } from 'src/types/domain/event.type';
 import { DataLayerError, DataLayerErrorCode } from 'src/types/error.type';
 import { createDataLayerError } from 'src/utils/error.util';
 
@@ -22,12 +23,12 @@ export const createFplFixtureDataService = (
   let cachedFixturesResponse: EventFixturesResponse | null = null;
 
   const fetchAndValidateFixtures = (
-    eventId: number,
+    eventId: EventId,
   ): TE.TaskEither<DataLayerError, EventFixturesResponse> => {
     logger.info({ operation: 'fetchAndValidateEventFixtures' }, 'Fetching FPL fixtures data');
 
     return pipe(
-      client.get<unknown>(apiConfig.endpoints.event.fixtures({ event: eventId })),
+      client.get<unknown>(apiConfig.endpoints.event.fixtures({ eventId: eventId })),
       TE.mapLeft((apiError) => {
         logger.error(
           {
@@ -86,17 +87,17 @@ export const createFplFixtureDataService = (
   };
 
   const getFplFixtureDataInternal = (
-    event: number,
+    eventId: EventId,
   ): TE.TaskEither<DataLayerError, EventFixturesResponse> => {
     if (cachedFixturesResponse) {
       return TE.right(cachedFixturesResponse);
     }
-    return fetchAndValidateFixtures(event);
+    return fetchAndValidateFixtures(eventId);
   };
 
-  const getFixtures = (event: number): TE.TaskEither<DataLayerError, EventFixtures> =>
+  const getFixtures = (eventId: EventId): TE.TaskEither<DataLayerError, EventFixtures> =>
     pipe(
-      getFplFixtureDataInternal(event),
+      getFplFixtureDataInternal(eventId),
       TE.chain((fixturesData) =>
         pipe(
           fixturesData,

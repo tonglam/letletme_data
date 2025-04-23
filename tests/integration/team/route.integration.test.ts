@@ -3,7 +3,7 @@ import express, { Express } from 'express';
 import * as E from 'fp-ts/Either';
 import { Logger } from 'pino';
 import request from 'supertest';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 // Setup
 
@@ -54,7 +54,7 @@ describe('Team Routes Integration Tests', () => {
     }
 
     teamRepository = createTeamRepository(prisma);
-    teamCache = createTeamCache(teamRepository, {
+    teamCache = createTeamCache({
       keyPrefix: cachePrefix,
       season: testSeason,
     });
@@ -65,16 +65,6 @@ describe('Team Routes Integration Tests', () => {
     app = express();
     app.use(express.json());
     app.use('/teams', teamRouter(teamService)); // Mount router
-  });
-
-  beforeEach(async () => {
-    await prisma.team.deleteMany({});
-    const keys = await redisClient.keys(`${cachePrefix}::${testSeason}*`);
-    if (keys.length > 0) {
-      await redisClient.del(keys);
-    }
-    // Ensure data exists for GET requests by syncing
-    await teamService.syncTeamsFromApi()();
   });
 
   afterAll(async () => {

@@ -3,6 +3,8 @@ import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import { PlayerValueHandlerResponse } from 'src/api/player-value/types';
+import { PlayerId } from 'src/types/domain/player.type';
+import { TeamId } from 'src/types/domain/team.type';
 
 import { PlayerValueService } from '../../services/player-value/types';
 import { PlayerValues } from '../../types/domain/player-value.type';
@@ -44,7 +46,7 @@ export const createPlayerValueHandlers = (
 
   const getPlayerValuesByElement = (req: Request): TE.TaskEither<APIError, PlayerValues> => {
     const elementParam = req.params.element;
-    const parsedElement = parseInt(elementParam);
+    const parsedElement = parseInt(elementParam) as PlayerId;
 
     if (isNaN(parsedElement)) {
       return TE.left(
@@ -60,7 +62,7 @@ export const createPlayerValueHandlers = (
 
   const getPlayerValuesByTeam = (req: Request): TE.TaskEither<APIError, PlayerValues> => {
     const teamParam = req.params.team;
-    const parsedTeam = parseInt(teamParam);
+    const parsedTeam = parseInt(teamParam) as TeamId;
 
     if (isNaN(parsedTeam)) {
       return TE.left(

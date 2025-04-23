@@ -1,12 +1,13 @@
-import { Player, PlayerId } from 'src/types/domain/player.type';
+import { PlayerId, PlayerType, RawPlayer } from 'src/types/domain/player.type';
+import { TeamId } from 'src/types/domain/team.type';
 
 import { PrismaPlayer, PrismaPlayerCreateInput } from './type';
 
-export const mapPrismaPlayerToDomain = (prismaPlayer: PrismaPlayer): Player => ({
-  element: prismaPlayer.element as PlayerId,
+export const mapPrismaPlayerToDomain = (prismaPlayer: PrismaPlayer): RawPlayer => ({
+  id: prismaPlayer.id as PlayerId,
   code: prismaPlayer.code,
-  elementType: prismaPlayer.elementType,
-  team: prismaPlayer.team,
+  type: prismaPlayer.type as PlayerType,
+  teamId: prismaPlayer.teamId as TeamId,
   price: prismaPlayer.price,
   startPrice: prismaPlayer.startPrice,
   firstName: prismaPlayer.firstName,
@@ -14,11 +15,13 @@ export const mapPrismaPlayerToDomain = (prismaPlayer: PrismaPlayer): Player => (
   webName: prismaPlayer.webName,
 });
 
-export const mapDomainPlayerToPrismaCreate = (domainPlayer: Player): PrismaPlayerCreateInput => ({
-  element: domainPlayer.element,
+export const mapDomainPlayerToPrismaCreate = (
+  domainPlayer: RawPlayer,
+): PrismaPlayerCreateInput => ({
+  id: domainPlayer.id,
   code: domainPlayer.code,
-  elementType: domainPlayer.elementType,
-  team: domainPlayer.team,
+  type: domainPlayer.type,
+  teamId: domainPlayer.teamId,
   price: domainPlayer.price,
   startPrice: domainPlayer.startPrice,
   firstName: domainPlayer.firstName,

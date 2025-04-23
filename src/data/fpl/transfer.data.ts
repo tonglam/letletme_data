@@ -11,6 +11,8 @@ import {
 import { FplTransferDataService } from 'src/data/types';
 import { HTTPClient } from 'src/infrastructures/http';
 import { EntryEventTransfers } from 'src/types/domain/entry-event-transfer.type';
+import { EntryId } from 'src/types/domain/entry-info.type';
+import { EventId } from 'src/types/domain/event.type';
 import { DataLayerError, DataLayerErrorCode } from 'src/types/error.type';
 import { createDataLayerError } from 'src/utils/error.util';
 import { z } from 'zod';
@@ -22,12 +24,18 @@ export const createFplTransferDataService = (
   let cachedTransferResponse: TransfersResponse | null = null;
 
   const fetchAndValidateTransfers = (
-    entry: number,
+    entryId: EntryId,
+    eventId: EventId,
   ): TE.TaskEither<DataLayerError, TransfersResponse> => {
-    logger.info({ operation: `fetchAndValidateTransfers(${entry})` }, 'Fetching FPL transfers');
+    logger.info(
+      { operation: `fetchAndValidateTransfers(${entryId}, ${eventId})` },
+      'Fetching FPL transfers',
+    );
 
     return pipe(
-      client.get<unknown>(apiConfig.endpoints.entry.transfers({ entry: entry })),
+      client.get<unknown>(
+        apiConfig.endpoints.entry.transfers({ entryId: entryId, eventId: eventId }),
+      ),
       TE.mapLeft((apiError) => {
         logger.error(
           {
@@ -85,17 +93,21 @@ export const createFplTransferDataService = (
   };
 
   const getTransfersInternal = (
-    entry: number,
+    entryId: EntryId,
+    eventId: EventId,
   ): TE.TaskEither<DataLayerError, TransfersResponse> => {
     if (cachedTransferResponse) {
       return TE.right(cachedTransferResponse);
     }
-    return fetchAndValidateTransfers(entry);
+    return fetchAndValidateTransfers(entryId, eventId);
   };
 
-  const getTransfers = (entry: number): TE.TaskEither<DataLayerError, EntryEventTransfers> =>
+  const getTransfers = (
+    entryId: EntryId,
+    eventId: EventId,
+  ): TE.TaskEither<DataLayerError, EntryEventTransfers> =>
     pipe(
-      getTransfersInternal(entry),
+      getTransfersInternal(entryId, eventId),
       TE.chain((transfersData) =>
         pipe(
           transfersData,

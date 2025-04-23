@@ -1,25 +1,27 @@
 import * as TE from 'fp-ts/TaskEither';
 import { PlayerStat, PlayerStats } from 'src/types/domain/player-stat.type';
+import { PlayerId, PlayerType } from 'src/types/domain/player.type';
+import { TeamId } from 'src/types/domain/team.type';
 import { ServiceError } from 'src/types/error.type';
 
 import type { WorkflowResult } from 'services/types';
 
 export interface PlayerStatServiceOperations {
-  readonly findPlayerStat: (element: number) => TE.TaskEither<ServiceError, PlayerStat>;
+  readonly findPlayerStat: (elementId: PlayerId) => TE.TaskEither<ServiceError, PlayerStat>;
   readonly findPlayerStatsByElementType: (
-    elementType: number,
+    elementType: PlayerType,
   ) => TE.TaskEither<ServiceError, PlayerStats>;
-  readonly findPlayerStatsByTeam: (team: number) => TE.TaskEither<ServiceError, PlayerStats>;
+  readonly findPlayerStatsByTeam: (teamId: TeamId) => TE.TaskEither<ServiceError, PlayerStats>;
   readonly findLatestPlayerStats: () => TE.TaskEither<ServiceError, PlayerStats>;
   readonly syncPlayerStatsFromApi: () => TE.TaskEither<ServiceError, void>;
 }
 
 export interface PlayerStatService {
-  readonly getPlayerStat: (element: number) => TE.TaskEither<ServiceError, PlayerStat>;
+  readonly getPlayerStat: (elementId: PlayerId) => TE.TaskEither<ServiceError, PlayerStat>;
   readonly getPlayerStatsByElementType: (
-    elementType: number,
+    elementType: PlayerType,
   ) => TE.TaskEither<ServiceError, PlayerStats>;
-  readonly getPlayerStatsByTeam: (team: number) => TE.TaskEither<ServiceError, PlayerStats>;
+  readonly getPlayerStatsByTeam: (teamId: TeamId) => TE.TaskEither<ServiceError, PlayerStats>;
   readonly getLatestPlayerStats: () => TE.TaskEither<ServiceError, PlayerStats>;
   readonly syncPlayerStatsFromApi: () => TE.TaskEither<ServiceError, void>;
 }

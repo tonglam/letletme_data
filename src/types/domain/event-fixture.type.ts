@@ -24,16 +24,26 @@ export type EventFixture = {
   readonly id: EventFixtureId;
   readonly code: number;
   readonly event: number;
-  readonly kickoffTime: Date | null;
+  readonly kickoffTime: Date;
   readonly started: boolean;
   readonly finished: boolean;
   readonly minutes: number;
   readonly teamH: number | null;
+  readonly teamHName: string;
+  readonly teamHShortName: string;
   readonly teamHDifficulty: number;
   readonly teamHScore: number;
   readonly teamA: number | null;
+  readonly teamAName: string;
+  readonly teamAShortName: string;
   readonly teamADifficulty: number;
   readonly teamAScore: number;
 };
 
 export type EventFixtures = readonly EventFixture[];
+
+export type SourceEventFixture = Omit<
+  EventFixture,
+  'teamHName' | 'teamAName' | 'teamHShortName' | 'teamAShortName'
+>;
+export type SourceEventFixtures = readonly SourceEventFixture[];

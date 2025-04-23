@@ -5,9 +5,6 @@ import { Logger } from 'pino';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
-// Setup
-
-// Specific imports
 import { playerStatRouter } from '../../../src/api/player-stat/route'; // Import the router
 import { CachePrefix } from '../../../src/configs/cache/cache.config';
 import { createFplBootstrapDataService } from '../../../src/data/fpl/bootstrap.data';
@@ -22,14 +19,8 @@ import { createTeamCache } from '../../../src/domains/team/cache';
 import { TeamCache } from '../../../src/domains/team/types';
 import { redisClient } from '../../../src/infrastructures/cache/client';
 import { HTTPClient } from '../../../src/infrastructures/http';
-import { createEventRepository } from '../../../src/repositories/event/repository';
-import { EventRepository } from '../../../src/repositories/event/type';
-import { createPlayerRepository } from '../../../src/repositories/player/repository';
-import { PlayerRepository } from '../../../src/repositories/player/type';
 import { createPlayerStatRepository } from '../../../src/repositories/player-stat/repository';
 import { PlayerStatRepository } from '../../../src/repositories/player-stat/type';
-import { createTeamRepository } from '../../../src/repositories/team/repository';
-import { TeamRepository } from '../../../src/repositories/team/type';
 import { createPlayerStatService } from '../../../src/services/player-stat/service';
 import { PlayerStatService } from '../../../src/services/player-stat/types';
 import { PlayerStat } from '../../../src/types/domain/player-stat.type';
@@ -48,13 +39,10 @@ describe('PlayerStat Routes Integration Tests', () => {
   let httpClient: HTTPClient;
   let playerStatRepository: PlayerStatRepository;
   let playerStatCache: PlayerStatCache;
-  let eventRepository: EventRepository;
   let eventCache: EventCache;
   let playerStatService: PlayerStatService;
   let fplDataService: FplBootstrapDataService;
-  let playerRepository: PlayerRepository;
   let playerCache: PlayerCache;
-  let teamRepository: TeamRepository;
   let teamCache: TeamCache;
 
   const cachePrefix = CachePrefix.PLAYER_STAT;
@@ -80,20 +68,15 @@ describe('PlayerStat Routes Integration Tests', () => {
 
     fplDataService = createFplBootstrapDataService(httpClient, logger);
 
-    eventRepository = createEventRepository(prisma);
-    eventCache = createEventCache(eventRepository, {
+    eventCache = createEventCache({
       keyPrefix: eventCachePrefix,
       season: testSeason,
     });
-
-    playerRepository = createPlayerRepository(prisma);
-    playerCache = createPlayerCache(playerRepository, {
+    playerCache = createPlayerCache({
       keyPrefix: playerCachePrefix,
       season: testSeason,
     });
-
-    teamRepository = createTeamRepository(prisma);
-    teamCache = createTeamCache(teamRepository, {
+    teamCache = createTeamCache({
       keyPrefix: teamCachePrefix,
       season: testSeason,
     });
@@ -147,7 +130,7 @@ describe('PlayerStat Routes Integration Tests', () => {
     if (!dbStat) {
       throw new Error('Could not find any player stats in the database after sync');
     }
-    const targetElementId = dbStat.element;
+    const targetElementId = dbStat.elementId;
 
     const res = await request(app).get(`/player-stats/element/${targetElementId}`);
 
@@ -210,7 +193,7 @@ describe('PlayerStat Routes Integration Tests', () => {
     expect(Array.isArray(res.body.data)).toBe(true);
     const stats = res.body.data as PlayerStat[];
     expect(stats.length).toBeGreaterThan(0);
-    expect(stats.every((s) => s.team === targetTeamId)).toBe(true);
-    expect(stats[0]).toHaveProperty('element');
+    expect(stats.every((s) => s.teamId === targetTeamId)).toBe(true);
+    expect(stats[0]).toHaveProperty('elementId');
   });
 });

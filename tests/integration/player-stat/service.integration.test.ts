@@ -1,7 +1,7 @@
 import { PrismaClient } from '@prisma/client';
 import * as E from 'fp-ts/Either';
 import { Logger } from 'pino';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { CachePrefix } from '../../../src/configs/cache/cache.config';
 import { createFplBootstrapDataService } from '../../../src/data/fpl/bootstrap.data';
@@ -16,21 +16,12 @@ import { createTeamCache } from '../../../src/domains/team/cache';
 import { TeamCache } from '../../../src/domains/team/types';
 import { redisClient } from '../../../src/infrastructures/cache/client';
 import { HTTPClient } from '../../../src/infrastructures/http';
-import { createEventRepository } from '../../../src/repositories/event/repository';
-import { EventRepository } from '../../../src/repositories/event/type';
-import { createPlayerRepository } from '../../../src/repositories/player/repository';
-import { PlayerRepository } from '../../../src/repositories/player/type';
 import { createPlayerStatRepository } from '../../../src/repositories/player-stat/repository';
 import { PlayerStatRepository } from '../../../src/repositories/player-stat/type';
-import { createTeamRepository } from '../../../src/repositories/team/repository';
-import { TeamRepository } from '../../../src/repositories/team/type';
-import { createPlayerService } from '../../../src/services/player/service';
-import { PlayerService } from '../../../src/services/player/types';
 import { createPlayerStatService } from '../../../src/services/player-stat/service';
 import { PlayerStatService } from '../../../src/services/player-stat/types';
 import { playerStatWorkflows } from '../../../src/services/player-stat/workflow';
-import { createTeamService } from '../../../src/services/team/service';
-import { TeamService } from '../../../src/services/team/types';
+import { PlayerType } from '../../../src/types/domain/player.type';
 import {
   IntegrationTestSetupResult,
   setupIntegrationTest,
@@ -47,21 +38,15 @@ describe('PlayerStat Integration Tests', { timeout: 30000 }, () => {
   let playerStatRepository: PlayerStatRepository;
   let playerStatCache: PlayerStatCache;
   let playerStatService: PlayerStatService;
-  let eventRepository: EventRepository;
   let eventCache: EventCache;
-  let playerRepository: PlayerRepository;
   let playerCache: PlayerCache;
-  let playerService: PlayerService;
-  let teamRepository: TeamRepository;
   let teamCache: TeamCache;
-  let teamService: TeamService;
 
   const cachePrefix = CachePrefix.PLAYER_STAT;
   const eventCachePrefix = CachePrefix.EVENT;
   const playerCachePrefix = CachePrefix.PLAYER;
   const teamCachePrefix = CachePrefix.TEAM;
   const season = '2425';
-  // No base key needed
 
   beforeAll(async () => {
     setup = await setupIntegrationTest();
@@ -78,26 +63,10 @@ describe('PlayerStat Integration Tests', { timeout: 30000 }, () => {
     fplDataService = createFplBootstrapDataService(httpClient, logger);
 
     // Sync Player and Team Data FIRST
-    playerRepository = createPlayerRepository(prisma);
-    playerCache = createPlayerCache(playerRepository, { keyPrefix: playerCachePrefix, season });
-    teamRepository = createTeamRepository(prisma);
-    teamCache = createTeamCache(teamRepository, { keyPrefix: teamCachePrefix, season });
-
-    // Instantiate services needed for sync
-    playerService = createPlayerService(fplDataService, playerRepository, playerCache);
-    teamService = createTeamService(fplDataService, teamRepository, teamCache);
-
-    // Sync Teams
-    const teamSyncResult = await teamService.syncTeamsFromApi()();
-    if (E.isLeft(teamSyncResult)) throw new Error('Failed to sync teams');
-
-    // Sync Players
-    const playerSyncResult = await playerService.syncPlayersFromApi()();
-    if (E.isLeft(playerSyncResult)) throw new Error('Failed to sync players');
-
+    playerCache = createPlayerCache({ keyPrefix: playerCachePrefix, season });
+    teamCache = createTeamCache({ keyPrefix: teamCachePrefix, season });
     // Setup Event components
-    eventRepository = createEventRepository(prisma);
-    eventCache = createEventCache(eventRepository, { keyPrefix: eventCachePrefix, season });
+    eventCache = createEventCache({ keyPrefix: eventCachePrefix, season });
     await eventCache.getAllEvents()(); // Populate event cache
 
     // Ensure Player/Team caches are populated *after* DB sync for PlayerStat service
@@ -118,16 +87,6 @@ describe('PlayerStat Integration Tests', { timeout: 30000 }, () => {
       playerCache,
       teamCache,
     );
-  });
-
-  beforeEach(async () => {
-    // Clear only PlayerStat data
-    await prisma.playerStat.deleteMany({});
-    const statKeys = await redisClient.keys(`${cachePrefix}::${season}*`);
-    if (statKeys.length > 0) {
-      await redisClient.del(statKeys);
-    }
-    // No need to clear base key
   });
 
   afterAll(async () => {
@@ -178,12 +137,12 @@ describe('PlayerStat Integration Tests', { timeout: 30000 }, () => {
       if (E.isRight(latestStatsResult)) {
         const stats = latestStatsResult.right;
         expect(stats.length).toBeGreaterThan(0);
-        const firstStatElement = stats[0].element;
+        const firstStatElement = stats[0].elementId;
         const statResult = await playerStatService.getPlayerStat(firstStatElement)();
 
         expect(E.isRight(statResult)).toBe(true);
         if (E.isRight(statResult) && statResult.right) {
-          expect(statResult.right.element).toEqual(firstStatElement);
+          expect(statResult.right.elementId).toEqual(firstStatElement);
           // Corrected assertions
           expect(statResult.right).toHaveProperty('elementType');
           expect(statResult.right).toHaveProperty('teamName');
@@ -204,8 +163,9 @@ describe('PlayerStat Integration Tests', { timeout: 30000 }, () => {
         const firstStat = latestStatsResult.right[0];
         const elementTypeToTest = firstStat.elementType;
 
-        const statsByTypeResult =
-          await playerStatService.getPlayerStatsByElementType(elementTypeToTest)();
+        const statsByTypeResult = await playerStatService.getPlayerStatsByElementType(
+          elementTypeToTest as PlayerType,
+        )();
         expect(E.isRight(statsByTypeResult)).toBe(true);
 
         if (E.isRight(statsByTypeResult)) {
@@ -231,7 +191,7 @@ describe('PlayerStat Integration Tests', { timeout: 30000 }, () => {
 
       if (E.isRight(latestStatsResult) && latestStatsResult.right.length > 0) {
         const firstStat = latestStatsResult.right[0];
-        const teamToTest = firstStat.team;
+        const teamToTest = firstStat.teamId;
 
         const statsByTeamResult = await playerStatService.getPlayerStatsByTeam(teamToTest)();
         expect(E.isRight(statsByTeamResult)).toBe(true);
@@ -240,7 +200,7 @@ describe('PlayerStat Integration Tests', { timeout: 30000 }, () => {
           const stats = statsByTeamResult.right;
           expect(stats.length).toBeGreaterThan(0);
           stats.forEach((s) => {
-            expect(s.team).toEqual(teamToTest);
+            expect(s.teamId).toEqual(teamToTest);
             // Check enrichment
             expect(s).toHaveProperty('teamName');
             expect(s).toHaveProperty('teamShortName');

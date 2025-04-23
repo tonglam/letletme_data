@@ -6,19 +6,23 @@ import * as RA from 'fp-ts/ReadonlyArray';
 import * as RNEA from 'fp-ts/ReadonlyNonEmptyArray';
 import * as TE from 'fp-ts/TaskEither';
 import { ElementTypeId, ElementTypeName, getElementTypeName } from 'src/types/base.type';
-import { PlayerStat, PlayerStats, SourcePlayerStat } from 'src/types/domain/player-stat.type';
-import { PlayerValues, SourcePlayerValue } from 'src/types/domain/player-value.type';
+import { PlayerStat, PlayerStats, RawPlayerStat } from 'src/types/domain/player-stat.type';
+import { PlayerValue, PlayerValues, RawPlayerValue } from 'src/types/domain/player-value.type';
 import { Player } from 'src/types/domain/player.type';
+import { RawPlayers, Players } from 'src/types/domain/player.type';
 import { Team, TeamId } from 'src/types/domain/team.type';
 import { createDomainError, DomainError, DomainErrorCode } from 'src/types/error.type';
 
 type HasElement = { element: number };
 
 type EnrichedWithElementType<T extends HasElement> = T & {
+  elementType: ElementTypeId;
   elementTypeName: ElementTypeName;
 };
 
-type EnrichedWithTeam<T extends HasElement> = T & {
+type EnrichedWithTeam<
+  T extends HasElement & { elementType: ElementTypeId; elementTypeName: ElementTypeName },
+> = T & {
   team: TeamId;
   teamName: string;
   teamShortName: string;
@@ -36,18 +40,19 @@ export const enrichWithElementType =
     return pipe(
       playerCache.getAllPlayers(),
       TE.map((players) => {
-        const playerMap = new Map(players.map((p) => [p.element as number, p]));
+        const playerMap = new Map(players.map((p) => [p.id as number, p]));
         return pipe(
           items,
           RA.map((item): EnrichedWithElementType<T> => {
             const playerOpt = O.fromNullable(playerMap.get(item.element));
             const elementType = pipe(
               playerOpt,
-              O.map((p) => p.elementType as ElementTypeId),
+              O.map((p) => p.type as ElementTypeId),
               O.getOrElse(() => ElementTypeId.FORWARD),
             );
             return {
               ...item,
+              elementType: elementType,
               elementTypeName: getElementTypeName(elementType),
             };
           }),
@@ -71,7 +76,7 @@ export const enrichWithTeam =
       TE.bindTo('players'),
       TE.bind('teams', () => teamCache.getAllTeams()),
       TE.chain(({ players, teams }) => {
-        const playerMap = new Map(players.map((p) => [p.element as number, p]));
+        const playerMap = new Map(players.map((p) => [p.id as number, p]));
         const teamMap = new Map(teams.map((t: Team) => [t.id as number, t]));
 
         const relevantPlayerMap = new Map<number, Player>();
@@ -86,7 +91,7 @@ export const enrichWithTeam =
             const playerOpt = O.fromNullable(relevantPlayerMap.get(item.element));
             const teamOpt: O.Option<Team> = pipe(
               playerOpt,
-              O.chain((p: Player) => O.fromNullable(teamMap.get(p.team as number))),
+              O.chain((p: Player) => O.fromNullable(teamMap.get(p.teamId as number))),
             );
 
             return pipe(
@@ -115,19 +120,68 @@ export const enrichWithTeam =
     );
   };
 
+export const enrichPlayers =
+  (teamCache: TeamCache) =>
+  (rawPlayers: RawPlayers): TE.TaskEither<DomainError, Players> =>
+    pipe(
+      teamCache.getAllTeams(),
+      TE.map((teams) => {
+        const teamMap = new Map(teams.map((t) => [t.id as number, t]));
+        return pipe(
+          rawPlayers,
+          RA.map(
+            (rawPlayer): O.Option<Player> =>
+              pipe(
+                O.fromNullable(teamMap.get(rawPlayer.teamId as number)),
+                O.map(
+                  (team): Player => ({
+                    ...rawPlayer,
+                    teamName: team.name,
+                    teamShortName: team.shortName,
+                  }),
+                ),
+              ),
+          ),
+          RA.compact,
+        );
+      }),
+      TE.filterOrElse(
+        (enrichedPlayers) => enrichedPlayers.length === rawPlayers.length,
+        () =>
+          createDomainError({
+            code: DomainErrorCode.VALIDATION_ERROR,
+            message: 'Failed to enrich some players with team data.',
+          }),
+      ),
+    );
+
 export const enrichPlayerStats =
   (playerCache: PlayerCache, teamCache: TeamCache) =>
-  (sourceStats: ReadonlyArray<SourcePlayerStat>): TE.TaskEither<DomainError, PlayerStats> =>
+  (sourceStats: ReadonlyArray<RawPlayerStat>): TE.TaskEither<DomainError, PlayerStats> =>
     pipe(
       sourceStats,
+      RA.map((stat) => ({ element: stat.elementId, original: stat })),
       enrichWithElementType(playerCache),
       TE.chain(enrichWithTeam(playerCache, teamCache)),
-      TE.map((enrichedStats) => enrichedStats as PlayerStats),
+      TE.map(
+        RA.map(
+          (enriched) =>
+            ({
+              ...enriched.original,
+              elementTypeName: enriched.elementTypeName,
+              elementType: enriched.elementType,
+              teamId: enriched.team,
+              teamName: enriched.teamName,
+              teamShortName: enriched.teamShortName,
+            }) as PlayerStat,
+        ),
+      ),
+      TE.map((stats) => stats as PlayerStats),
     );
 
 export const enrichPlayerStat =
   (playerCache: PlayerCache, teamCache: TeamCache) =>
-  (sourceStat: SourcePlayerStat): TE.TaskEither<DomainError, PlayerStat> =>
+  (sourceStat: RawPlayerStat): TE.TaskEither<DomainError, PlayerStat> =>
     pipe(
       TE.of([sourceStat]),
       TE.chain(enrichPlayerStats(playerCache, teamCache)),
@@ -143,10 +197,24 @@ export const enrichPlayerStat =
 
 export const enrichPlayerValues =
   (playerCache: PlayerCache, teamCache: TeamCache) =>
-  (sourceValues: ReadonlyArray<SourcePlayerValue>): TE.TaskEither<DomainError, PlayerValues> =>
+  (sourceValues: ReadonlyArray<RawPlayerValue>): TE.TaskEither<DomainError, PlayerValues> =>
     pipe(
       sourceValues,
+      RA.map((value) => ({ element: value.elementId, original: value })),
       enrichWithElementType(playerCache),
       TE.chain(enrichWithTeam(playerCache, teamCache)),
-      TE.map((enrichedValues) => enrichedValues as PlayerValues),
+      TE.map(
+        RA.map(
+          (enriched) =>
+            ({
+              ...enriched.original,
+              elementTypeName: enriched.elementTypeName,
+              elementType: enriched.elementType,
+              teamId: enriched.team,
+              teamName: enriched.teamName,
+              teamShortName: enriched.teamShortName,
+            }) as PlayerValue,
+        ),
+      ),
+      TE.map((values) => values as PlayerValues),
     );

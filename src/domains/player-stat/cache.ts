@@ -101,9 +101,9 @@ export const createPlayerStatCache = (
           O.fromNullable,
           O.match(
             () => TE.right([] as PlayerStats),
-            (cachedPlayerStatsMap) =>
+            (cachedPlayerStats) =>
               pipe(
-                parsePlayerStats(cachedPlayerStatsMap),
+                parsePlayerStats(cachedPlayerStats),
                 TE.fromEither,
                 TE.mapLeft(mapCacheErrorToDomainError),
               ),
@@ -121,7 +121,7 @@ export const createPlayerStatCache = (
           if (playerStats.length > 0) {
             const items: Record<string, string> = {};
             playerStats.forEach((playerStat) => {
-              items[playerStat.element.toString()] = JSON.stringify(playerStat);
+              items[playerStat.elementId.toString()] = JSON.stringify(playerStat);
             });
             multi.hset(baseKey, items);
           }
@@ -137,24 +137,8 @@ export const createPlayerStatCache = (
       TE.mapLeft(mapCacheErrorToDomainError),
     );
 
-  const deleteLatestPlayerStats = (): TE.TaskEither<DomainError, void> =>
-    pipe(
-      TE.tryCatch(
-        () => redisClient.del(baseKey),
-        (error: unknown) =>
-          createCacheError({
-            code: CacheErrorCode.OPERATION_ERROR,
-            message: 'Cache Write Error: Failed to delete all player stats',
-            cause: error as Error,
-          }),
-      ),
-      TE.map(() => undefined),
-      TE.mapLeft(mapCacheErrorToDomainError),
-    );
-
   return {
     getLatestPlayerStats,
     setLatestPlayerStats,
-    deleteLatestPlayerStats,
   };
 };

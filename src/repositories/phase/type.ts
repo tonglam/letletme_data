@@ -12,6 +12,6 @@ export type PhaseCreateInputs = readonly PhaseCreateInput[];
 export interface PhaseRepository {
   readonly findById: (id: PhaseId) => TE.TaskEither<DBError, Phase>;
   readonly findAll: () => TE.TaskEither<DBError, Phases>;
-  readonly saveBatch: (phases: PhaseCreateInputs) => TE.TaskEither<DBError, Phases>;
+  readonly saveBatch: (phaseInputs: PhaseCreateInputs) => TE.TaskEither<DBError, Phases>;
   readonly deleteAll: () => TE.TaskEither<DBError, void>;
 }

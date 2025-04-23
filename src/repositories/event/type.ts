@@ -13,6 +13,6 @@ export interface EventRepository {
   readonly findById: (id: EventId) => TE.TaskEither<DBError, Event>;
   readonly findCurrent: () => TE.TaskEither<DBError, Event>;
   readonly findAll: () => TE.TaskEither<DBError, Events>;
-  readonly saveBatch: (events: EventCreateInputs) => TE.TaskEither<DBError, Events>;
+  readonly saveBatch: (eventInputs: EventCreateInputs) => TE.TaskEither<DBError, Events>;
   readonly deleteAll: () => TE.TaskEither<DBError, void>;
 }

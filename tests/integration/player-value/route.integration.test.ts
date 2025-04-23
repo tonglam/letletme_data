@@ -1,13 +1,12 @@
 import { PrismaClient } from '@prisma/client';
 import express, { Express } from 'express';
 import { Logger } from 'pino';
+import { formatYYYYMMDD } from 'src/utils/date.util';
 import request from 'supertest';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-// Config
 import { playerValueRouter } from '../../../src/api/player-value/route';
 import { CachePrefix } from '../../../src/configs/cache/cache.config';
-// Infrastructure
 import { createFplBootstrapDataService } from '../../../src/data/fpl/bootstrap.data';
 import { FplBootstrapDataService } from '../../../src/data/types';
 import { createEventCache } from '../../../src/domains/event/cache';
@@ -20,34 +19,10 @@ import { createTeamCache } from '../../../src/domains/team/cache';
 import { TeamCache } from '../../../src/domains/team/types';
 import { redisClient } from '../../../src/infrastructures/cache/client';
 import { HTTPClient } from '../../../src/infrastructures/http';
-// Repository Types
-import { createEventRepository } from '../../../src/repositories/event/repository';
-import { EventRepository } from '../../../src/repositories/event/type';
-import { createPlayerRepository } from '../../../src/repositories/player/repository';
-import { PlayerRepository } from '../../../src/repositories/player/type';
 import { createPlayerValueRepository } from '../../../src/repositories/player-value/repository';
 import { PlayerValueRepository } from '../../../src/repositories/player-value/type';
-import { createTeamRepository } from '../../../src/repositories/team/repository';
-import { TeamRepository } from '../../../src/repositories/team/type';
-// Domain Types (Cache etc.)
-// Service Types
-import { createEventService } from '../../../src/services/event/service';
-import { EventService } from '../../../src/services/event/types';
-import { createPlayerService } from '../../../src/services/player/service';
 import { createPlayerValueService } from '../../../src/services/player-value/service';
 import { PlayerValueService } from '../../../src/services/player-value/types';
-import { createTeamService } from '../../../src/services/team/service';
-// Data Layer Types
-// Domain Specific Types
-import { PlayerValueId } from '../../../src/types/domain/player-value.type';
-// Repository Factories
-// Domain Factories (Cache)
-// Data Layer Factories
-// Service Factories
-// Workflow Imports
-// API Router
-// Utilities
-import { formatYYYYMMDD } from '../../../src/utils/date.util';
 // Test Setup
 import {
   IntegrationTestSetupResult,
@@ -65,19 +40,15 @@ describe('PlayerValue Routes Integration Tests', () => {
   let playerValueCache: PlayerValueCache;
   let fplDataService: FplBootstrapDataService;
   let playerValueService: PlayerValueService;
-  let eventRepository: EventRepository;
   let eventCache: EventCache;
-  let eventService: EventService;
-  let teamRepository: TeamRepository;
   let teamCache: TeamCache;
-  let playerRepository: PlayerRepository;
   let playerCache: PlayerCache;
 
   const cachePrefix = CachePrefix.PLAYER_VALUE;
   const eventCachePrefix = CachePrefix.EVENT;
   const teamCachePrefix = CachePrefix.TEAM;
   const playerCachePrefix = CachePrefix.PLAYER;
-  const testSeason = '2425';
+  const season = '2425';
 
   beforeAll(async () => {
     setup = await setupIntegrationTest();
@@ -93,28 +64,25 @@ describe('PlayerValue Routes Integration Tests', () => {
 
     fplDataService = createFplBootstrapDataService(httpClient, logger);
 
-    eventRepository = createEventRepository(prisma);
-    eventCache = createEventCache(eventRepository, {
+    eventCache = createEventCache({
       keyPrefix: eventCachePrefix,
-      season: testSeason,
+      season: season,
     });
-    eventService = createEventService(fplDataService, eventRepository, eventCache);
 
-    teamRepository = createTeamRepository(prisma);
-    teamCache = createTeamCache(teamRepository, {
+    teamCache = createTeamCache({
       keyPrefix: teamCachePrefix,
-      season: testSeason,
+      season: season,
     });
 
-    playerRepository = createPlayerRepository(prisma);
-    playerCache = createPlayerCache(playerRepository, {
+    playerCache = createPlayerCache({
       keyPrefix: playerCachePrefix,
-      season: testSeason,
+      season: season,
     });
 
     playerValueRepository = createPlayerValueRepository(prisma);
     playerValueCache = createPlayerValueCache({
       keyPrefix: cachePrefix,
+      season: season,
       ttlSeconds: 3600,
     });
     playerValueService = createPlayerValueService(
@@ -129,29 +97,6 @@ describe('PlayerValue Routes Integration Tests', () => {
     app = express();
     app.use(express.json());
     app.use('/player-values', playerValueRouter(playerValueService));
-  });
-
-  beforeEach(async () => {
-    await prisma.playerValue.deleteMany({});
-    await prisma.event.deleteMany({});
-    await prisma.team.deleteMany({});
-    await prisma.player.deleteMany({});
-
-    const valueKeys = await redisClient.keys(`${cachePrefix}::${testSeason}*`);
-    if (valueKeys.length > 0) await redisClient.del(valueKeys);
-    const eventKeys = await redisClient.keys(`${eventCachePrefix}::${testSeason}*`);
-    if (eventKeys.length > 0) await redisClient.del(eventKeys);
-    const teamKeys = await redisClient.keys(`${teamCachePrefix}::${testSeason}*`);
-    if (teamKeys.length > 0) await redisClient.del(teamKeys);
-    const playerKeys = await redisClient.keys(`${playerCachePrefix}::${testSeason}*`);
-    if (playerKeys.length > 0) await redisClient.del(playerKeys);
-
-    const teamService = createTeamService(fplDataService, teamRepository, teamCache);
-    const playerService = createPlayerService(fplDataService, playerRepository, playerCache);
-    await teamService.syncTeamsFromApi()();
-    await playerService.syncPlayersFromApi()();
-    await eventService.syncEventsFromApi()();
-    await playerValueService.syncPlayerValuesFromApi()();
   });
 
   afterAll(async () => {
@@ -184,7 +129,7 @@ describe('PlayerValue Routes Integration Tests', () => {
     if (!dbValue) {
       throw new Error('Could not retrieve a player value from DB for testing');
     }
-    const targetElementId = dbValue.element;
+    const targetElementId = dbValue.elementId;
 
     const res = await request(app).get(`/player-values/element/${targetElementId}`);
 
@@ -198,13 +143,6 @@ describe('PlayerValue Routes Integration Tests', () => {
     expect(valueData).toHaveProperty('value');
     expect(valueData).toHaveProperty('lastValue');
     expect(valueData).toHaveProperty('changeType');
-  });
-
-  it('GET /player-values/:id should return 404 if player value ID does not exist', async () => {
-    const nonExistentValueId = 999999999 as PlayerValueId;
-    const res = await request(app).get(`/player-values/${nonExistentValueId}`);
-
-    expect(res.status).toBe(404);
   });
 
   it('GET /player-values/team/:team should return values for players of that team', async () => {
@@ -231,7 +169,7 @@ describe('PlayerValue Routes Integration Tests', () => {
   it('GET /player-values/sync should trigger synchronization and return success', async () => {
     // Clear cache and DB before testing sync specifically
     await prisma.playerValue.deleteMany({});
-    const valueKeys = await redisClient.keys(`${cachePrefix}::${testSeason}*`);
+    const valueKeys = await redisClient.keys(`${cachePrefix}::${season}*`);
     if (valueKeys.length > 0) await redisClient.del(valueKeys);
 
     const res = await request(app).get('/player-values/sync');

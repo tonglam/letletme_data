@@ -15,10 +15,9 @@ export interface EventCache {
   readonly setCurrentEvent: (event: Event) => TE.TaskEither<DomainError, void>;
   readonly getAllEvents: () => TE.TaskEither<DomainError, Events>;
   readonly setAllEvents: (events: Events) => TE.TaskEither<DomainError, void>;
-  readonly deleteAllEvents: () => TE.TaskEither<DomainError, void>;
 }
 
 export interface EventOperations {
-  readonly saveEvents: (events: EventCreateInputs) => TE.TaskEither<DomainError, Events>;
+  readonly saveEvents: (eventInputs: EventCreateInputs) => TE.TaskEither<DomainError, Events>;
   readonly deleteAllEvents: () => TE.TaskEither<DomainError, void>;
 }

@@ -2,12 +2,12 @@ import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import { Logger } from 'pino';
-import { Events } from 'src/types/domain/event.type';
+import { EventId, Events } from 'src/types/domain/event.type';
 import { Phases } from 'src/types/domain/phase.type';
-import { SourcePlayerStats } from 'src/types/domain/player-stat.type';
+import { RawPlayerStats } from 'src/types/domain/player-stat.type';
 import { PlayerValueTracks } from 'src/types/domain/player-value-track.type';
-import { SourcePlayerValues } from 'src/types/domain/player-value.type';
-import { Players } from 'src/types/domain/player.type';
+import { RawPlayerValues } from 'src/types/domain/player-value.type';
+import { RawPlayers } from 'src/types/domain/player.type';
 import { Teams } from 'src/types/domain/team.type';
 import { DataLayerError, DataLayerErrorCode } from 'src/types/error.type';
 import { createDataLayerError } from 'src/utils/error.util';
@@ -169,7 +169,7 @@ export const createFplBootstrapDataService = (
       ),
     );
 
-  const getPlayers = (): TE.TaskEither<DataLayerError, Players> =>
+  const getPlayers = (): TE.TaskEither<DataLayerError, RawPlayers> =>
     pipe(
       getFplBootstrapDataInternal(),
       TE.chain((bootstrapData) =>
@@ -191,7 +191,7 @@ export const createFplBootstrapDataService = (
       ),
     );
 
-  const getPlayerStats = (event: number): TE.TaskEither<DataLayerError, SourcePlayerStats> =>
+  const getPlayerStats = (eventId: EventId): TE.TaskEither<DataLayerError, RawPlayerStats> =>
     pipe(
       getFplBootstrapDataInternal(),
       TE.chain((bootstrapData) =>
@@ -199,7 +199,7 @@ export const createFplBootstrapDataService = (
           bootstrapData.elements,
           TE.traverseArray((elementResponse) =>
             pipe(
-              mapElementResponseToPlayerStat(event, elementResponse),
+              mapElementResponseToPlayerStat(eventId, elementResponse),
               E.mapLeft((mappingError) =>
                 createDataLayerError({
                   code: DataLayerErrorCode.MAPPING_ERROR,
@@ -213,7 +213,7 @@ export const createFplBootstrapDataService = (
       ),
     );
 
-  const getPlayerValues = (event: number): TE.TaskEither<DataLayerError, SourcePlayerValues> =>
+  const getPlayerValues = (eventId: EventId): TE.TaskEither<DataLayerError, RawPlayerValues> =>
     pipe(
       getFplBootstrapDataInternal(),
       TE.chain((bootstrapData) =>
@@ -221,7 +221,7 @@ export const createFplBootstrapDataService = (
           bootstrapData.elements,
           TE.traverseArray((elementResponse) =>
             pipe(
-              mapElementResponseToPlayerValue(event, elementResponse),
+              mapElementResponseToPlayerValue(eventId, elementResponse),
               E.mapLeft((mappingError) =>
                 createDataLayerError({
                   code: DataLayerErrorCode.MAPPING_ERROR,
@@ -235,7 +235,9 @@ export const createFplBootstrapDataService = (
       ),
     );
 
-  const getPlayerValueTracks = (event: number): TE.TaskEither<DataLayerError, PlayerValueTracks> =>
+  const getPlayerValueTracks = (
+    eventId: EventId,
+  ): TE.TaskEither<DataLayerError, PlayerValueTracks> =>
     pipe(
       getFplBootstrapDataInternal(),
       TE.chain((bootstrapData) =>
@@ -243,7 +245,7 @@ export const createFplBootstrapDataService = (
           bootstrapData.elements,
           TE.traverseArray((elementResponse) =>
             pipe(
-              mapElementResponseToPlayerValueTrack(event, elementResponse),
+              mapElementResponseToPlayerValueTrack(eventId, elementResponse),
               E.mapLeft((mappingError) =>
                 createDataLayerError({
                   code: DataLayerErrorCode.MAPPING_ERROR,

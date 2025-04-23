@@ -3,7 +3,7 @@ import express, { Express } from 'express';
 import * as E from 'fp-ts/Either';
 import { Logger } from 'pino';
 import request from 'supertest';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 // Use the generic setup
 
@@ -58,7 +58,7 @@ describe('Event Routes Integration Tests', () => {
     }
 
     eventRepository = createEventRepository(prisma);
-    eventCache = createEventCache(eventRepository, {
+    eventCache = createEventCache({
       keyPrefix: cachePrefix,
       season: testSeason,
     });
@@ -70,29 +70,8 @@ describe('Event Routes Integration Tests', () => {
     app.use('/events', eventRouter(eventService));
   });
 
-  beforeEach(async () => {
-    await prisma.event.deleteMany({});
-    // Use shared client for cleanup
-    const keys = await redisClient.keys(`${cachePrefix}::${testSeason}*`);
-    if (keys.length > 0) {
-      await redisClient.del(keys);
-    }
-    // Run the sync and check the result
-    const syncResult = await eventService.syncEventsFromApi()();
-    if (E.isLeft(syncResult)) {
-      // Log the error for debugging
-      logger.error(
-        { error: syncResult.left },
-        'Sync failed in beforeEach hook of route tests. Subsequent tests will likely fail.',
-      );
-      // Fail fast if sync didn't succeed
-      throw new Error(`Event sync failed during test setup: ${syncResult.left.message}`);
-    }
-  });
-
   afterAll(async () => {
     await teardownIntegrationTest(setup);
-    // await redisClient.quit(); // If global teardown needed
   });
 
   // --- Test Cases ---

@@ -8,6 +8,8 @@ import { PickResponse, PickResponseSchema } from 'src/data/fpl/schemas/pick/pick
 import { FplPickDataService } from 'src/data/types';
 import { HTTPClient } from 'src/infrastructures/http';
 import { EntryEventPicks } from 'src/types/domain/entry-event-pick.type';
+import { EntryId } from 'src/types/domain/entry-info.type';
+import { EventId } from 'src/types/domain/event.type';
 import { DataLayerError, DataLayerErrorCode } from 'src/types/error.type';
 import { createDataLayerError } from 'src/utils/error.util';
 export const createFplPickDataService = (
@@ -17,13 +19,16 @@ export const createFplPickDataService = (
   let cachedPickResponse: PickResponse | null = null;
 
   const fetchAndValidatePicks = (
-    entry: number,
-    event: number,
+    entryId: EntryId,
+    eventId: EventId,
   ): TE.TaskEither<DataLayerError, PickResponse> => {
-    logger.info({ operation: `fetchAndValidatePicks(${entry}, ${event})` }, 'Fetching FPL picks');
+    logger.info(
+      { operation: `fetchAndValidatePicks(${entryId}, ${eventId})` },
+      'Fetching FPL picks',
+    );
 
     return pipe(
-      client.get<unknown>(apiConfig.endpoints.entry.picks({ entry: entry, event: event })),
+      client.get<unknown>(apiConfig.endpoints.entry.picks({ entryId: entryId, eventId: eventId })),
       TE.mapLeft((apiError) => {
         logger.error(
           {
@@ -81,21 +86,24 @@ export const createFplPickDataService = (
   };
 
   const getFplPickDataInternal = (
-    entry: number,
-    event: number,
+    entryId: EntryId,
+    eventId: EventId,
   ): TE.TaskEither<DataLayerError, PickResponse> => {
     if (cachedPickResponse) {
       return TE.right(cachedPickResponse);
     }
-    return fetchAndValidatePicks(entry, event);
+    return fetchAndValidatePicks(entryId, eventId);
   };
 
-  const getPicks = (entry: number, event: number): TE.TaskEither<DataLayerError, EntryEventPicks> =>
+  const getPicks = (
+    entryId: EntryId,
+    eventId: EventId,
+  ): TE.TaskEither<DataLayerError, EntryEventPicks> =>
     pipe(
-      getFplPickDataInternal(entry, event),
+      getFplPickDataInternal(entryId, eventId),
       TE.chain((pickResponse) =>
         pipe(
-          mapPickResponseToEntryEventPick(entry, event, pickResponse),
+          mapPickResponseToEntryEventPick(entryId, eventId, pickResponse),
           E.mapLeft((mappingError) =>
             createDataLayerError({
               code: DataLayerErrorCode.MAPPING_ERROR,

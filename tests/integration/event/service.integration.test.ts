@@ -3,7 +3,7 @@ import * as E from 'fp-ts/Either';
 import { Logger } from 'pino';
 import { EventRepository } from 'src/repositories/event/type';
 import { EventId } from 'src/types/domain/event.type';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { CachePrefix } from '../../../src/configs/cache/cache.config';
 import { createFplBootstrapDataService } from '../../../src/data/fpl/bootstrap.data';
@@ -55,26 +55,12 @@ describe('Event Integration Tests', () => {
     // Instantiate specific dependencies
     eventRepository = createEventRepository(prisma);
     // createEventCache uses the imported singleton redisClient internally
-    eventCache = createEventCache(eventRepository, {
+    eventCache = createEventCache({
       keyPrefix: cachePrefix,
       season: season,
     });
     fplDataService = createFplBootstrapDataService(httpClient, logger);
     eventService = createEventService(fplDataService, eventRepository, eventCache);
-  });
-
-  beforeEach(async () => {
-    await prisma.event.deleteMany({});
-    // Use the imported singleton redisClient to clear keys
-    const pattern = `${cachePrefix}::${season}*`;
-    const keys = await redisClient.keys(pattern);
-    const keysToDelete = ['current'];
-    if (keys.length > 0) {
-      keysToDelete.push(...keys);
-    }
-    if (keysToDelete.length > 0) {
-      await redisClient.del(keysToDelete);
-    }
   });
 
   afterAll(async () => {

@@ -2,7 +2,7 @@ import { PrismaClient } from '@prisma/client';
 import * as E from 'fp-ts/Either';
 // Removed Redis import
 import { Logger } from 'pino';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 // Use the generic setup
 
@@ -57,21 +57,12 @@ describe('Team Integration Tests', () => {
 
     teamRepository = createTeamRepository(prisma);
     // Team cache uses singleton client
-    teamCache = createTeamCache(teamRepository, {
+    teamCache = createTeamCache({
       keyPrefix: cachePrefix,
       season: season,
     });
     fplDataService = createFplBootstrapDataService(httpClient, logger);
     teamService = createTeamService(fplDataService, teamRepository, teamCache);
-  });
-
-  beforeEach(async () => {
-    await prisma.team.deleteMany({});
-    // Use shared client for cleanup
-    const keys = await redisClient.keys(`${cachePrefix}::${season}*`);
-    if (keys.length > 0) {
-      await redisClient.del(keys);
-    }
   });
 
   afterAll(async () => {

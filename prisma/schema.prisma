@@ -68,33 +68,33 @@ model Team {
 }
 
 model Player {
-  element     Int      @id
-  code        Int      @unique @map("code")
-  elementType Int      @map("element_type")
-  team        Int      @map("team")
-  price       Int      @default(0) @map("price")
-  startPrice  Int      @default(0) @map("start_price")
-  firstName   String?  @map("first_name")
-  secondName  String?  @map("second_name")
-  webName     String   @map("web_name")
-  createdAt   DateTime @default(now()) @map("created_at")
+  id         Int      @id @map("id")
+  code       Int      @unique @map("code")
+  type       Int      @map("type")
+  teamId     Int      @map("team_id")
+  price      Int      @default(0) @map("price")
+  startPrice Int      @default(0) @map("start_price")
+  firstName  String?  @map("first_name")
+  secondName String?  @map("second_name")
+  webName    String   @map("web_name")
+  createdAt  DateTime @default(now()) @map("created_at")
 
   @@map("players")
 }
 
 model PlayerValue {
   id          Int             @id @default(autoincrement())
-  element     Int             @map("element")
+  elementId   Int             @map("element_id")
   elementType Int             @map("element_type")
-  event       Int             @map("event")
+  eventId     Int             @map("event_id")
   value       Int             @map("value")
   changeDate  String          @map("change_date") @db.Char(8)
   changeType  ValueChangeType @map("change_type")
   lastValue   Int             @default(0) @map("last_value")
   createdAt   DateTime        @default(now()) @map("created_at")
 
-  @@unique([element, changeDate], name: "unique_player_value")
-  @@index([element], name: "idx_player_values_element_id")
+  @@unique([elementId, changeDate], name: "unique_player_value")
+  @@index([elementId], name: "idx_player_values_element_id")
   @@index([changeDate], name: "idx_player_values_change_date")
   @@map("player_values")
 }
@@ -103,10 +103,10 @@ model PlayerValueTrack {
   id                       Int      @id @default(autoincrement())
   hourIndex                Int      @map("hour_index")
   date                     String   @map("date") @db.Char(8)
-  event                    Int      @map("event")
-  element                  Int      @map("element")
+  eventId                  Int      @map("event_id")
+  elementId                Int      @map("element_id")
   elementType              Int      @map("element_type")
-  team                     Int      @map("team")
+  teamId                   Int      @map("team_id")
   chanceOfPlayingThisRound Int?     @map("chance_of_playing_this_round")
   chanceOfPlayingNextRound Int?     @map("chance_of_playing_next_round")
   transfersIn              Int      @map("transfers_in")
@@ -117,17 +117,17 @@ model PlayerValueTrack {
   value                    Int      @default(0) @map("value")
   createdAt                DateTime @default(now()) @map("created_at")
 
-  @@unique([element, date, hourIndex], name: "unique_player_value_track")
+  @@unique([elementId, date, hourIndex], name: "unique_player_value_track")
   @@index([date, hourIndex], name: "idx_player_value_track_date_hour_index")
-  @@index([element], name: "idx_player_value_track_element_id")
-  @@index([event], name: "idx_player_value_track_event_id")
+  @@index([elementId], name: "idx_player_value_track_element_id")
+  @@index([eventId], name: "idx_player_value_track_event_id")
   @@map("player_value_tracks")
 }
 
 model PlayerStat {
   id          Int  @id @default(autoincrement())
-  event       Int  @map("event")
-  element     Int  @map("element")
+  eventId     Int  @map("event_id")
+  elementId   Int  @map("element_id")
   elementType Int  @map("element_type")
   totalPoints Int? @map("total_points")
 
@@ -181,9 +181,9 @@ model PlayerStat {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @default(now()) @map("updated_at")
 
-  @@unique([event, element], name: "unique_event_element")
-  @@index([element], name: "idx_player_stats_element_id")
-  @@index([event], name: "idx_player_stats_event_id")
+  @@unique([eventId, elementId], name: "unique_event_element")
+  @@index([elementId], name: "idx_player_stats_element_id")
+  @@index([eventId], name: "idx_player_stats_event_id")
   @@map("player_stats")
 }
 

@@ -1,36 +1,35 @@
 import * as TE from 'fp-ts/TaskEither';
 import { PlayerValueCreateInputs } from 'src/repositories/player-value/type';
-import { PlayerValues, SourcePlayerValues } from 'src/types/domain/player-value.type';
+import { PlayerValues, RawPlayerValues } from 'src/types/domain/player-value.type';
+import { PlayerId } from 'src/types/domain/player.type';
 import { DomainError } from 'src/types/error.type';
 
 export type PlayerValueCacheConfig = {
   keyPrefix: string;
+  readonly season: string;
   ttlSeconds: number;
 };
 
 export type PlayerValueCache = {
   getPlayerValuesByChangeDate: (changeDate: string) => TE.TaskEither<DomainError, PlayerValues>;
-  setPlayerValuesByChangeDate: (
-    changeDate: string,
-    playerValues: PlayerValues,
-  ) => TE.TaskEither<DomainError, void>;
+  setPlayerValuesByChangeDate: (playerValues: PlayerValues) => TE.TaskEither<DomainError, void>;
 };
 
 export interface PlayerValueOperations {
   readonly getLatestPlayerValuesByElements: (
-    elements: readonly number[],
-  ) => TE.TaskEither<DomainError, ReadonlyArray<{ element: number; value: number }>>;
+    elementIds: ReadonlyArray<PlayerId>,
+  ) => TE.TaskEither<DomainError, ReadonlyArray<{ elementId: PlayerId; value: number }>>;
   readonly getPlayerValuesByChangeDate: (
     changeDate: string,
-  ) => TE.TaskEither<DomainError, SourcePlayerValues>;
+  ) => TE.TaskEither<DomainError, RawPlayerValues>;
   readonly getPlayerValuesByElement: (
-    element: number,
-  ) => TE.TaskEither<DomainError, SourcePlayerValues>;
+    elementId: PlayerId,
+  ) => TE.TaskEither<DomainError, RawPlayerValues>;
   readonly getPlayerValuesByElements: (
-    elements: number[],
-  ) => TE.TaskEither<DomainError, SourcePlayerValues>;
+    elementIds: ReadonlyArray<PlayerId>,
+  ) => TE.TaskEither<DomainError, RawPlayerValues>;
   readonly savePlayerValueChanges: (
-    playerValues: PlayerValueCreateInputs,
-  ) => TE.TaskEither<DomainError, SourcePlayerValues>;
+    playerValueInputs: PlayerValueCreateInputs,
+  ) => TE.TaskEither<DomainError, RawPlayerValues>;
   readonly deletePlayerValuesByChangeDate: (changeDate: string) => TE.TaskEither<DomainError, void>;
 }

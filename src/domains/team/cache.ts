@@ -5,11 +5,10 @@ import * as O from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
 import { CachePrefix } from 'src/configs/cache/cache.config';
 import { redisClient } from 'src/infrastructures/cache/client';
-import { TeamRepository } from 'src/repositories/team/type';
 import { Team, Teams } from 'src/types/domain/team.type';
 import { CacheError, CacheErrorCode, createCacheError, DomainError } from 'src/types/error.type';
 import { getCurrentSeason } from 'src/utils/common.util';
-import { mapCacheErrorToDomainError, mapRepositoryErrorToCacheError } from 'src/utils/error.util';
+import { mapCacheErrorToDomainError } from 'src/utils/error.util';
 
 const parseTeam = (teamStr: string): E.Either<CacheError, Team> =>
   pipe(
@@ -34,9 +33,9 @@ const parseTeam = (teamStr: string): E.Either<CacheError, Team> =>
     ),
   );
 
-const parseTeams = (teams: Record<string, string>): E.Either<CacheError, Teams> =>
+const parseTeams = (teamMaps: Record<string, string>): E.Either<CacheError, Teams> =>
   pipe(
-    Object.values(teams),
+    Object.values(teamMaps),
     (teamStrs) =>
       teamStrs.map((str) =>
         pipe(
@@ -49,7 +48,6 @@ const parseTeams = (teams: Record<string, string>): E.Either<CacheError, Teams> 
   );
 
 export const createTeamCache = (
-  repository: TeamRepository,
   config: TeamCacheConfig = {
     keyPrefix: CachePrefix.TEAM,
     season: getCurrentSeason(),
@@ -75,16 +73,8 @@ export const createTeamCache = (
           O.fromNullable,
           O.filter((teamsMap) => Object.keys(teamsMap).length > 0),
           O.fold(
-            () =>
-              pipe(
-                repository.findAll(),
-                TE.mapLeft(
-                  mapRepositoryErrorToCacheError('Repository Error: Failed to get all teams'),
-                ),
-                TE.mapLeft(mapCacheErrorToDomainError),
-                TE.chainFirst((teams) => setAllTeams(teams)),
-              ),
-            (cachedTeams) =>
+            () => TE.right([] as Teams),
+            (cachedTeams): TE.TaskEither<DomainError, Teams> =>
               pipe(parseTeams(cachedTeams), TE.fromEither, TE.mapLeft(mapCacheErrorToDomainError)),
           ),
         ),
@@ -116,24 +106,8 @@ export const createTeamCache = (
       TE.mapLeft(mapCacheErrorToDomainError),
     );
 
-  const deleteAllTeams = (): TE.TaskEither<DomainError, void> =>
-    pipe(
-      TE.tryCatch(
-        () => redisClient.del(baseKey),
-        (error: unknown) =>
-          createCacheError({
-            code: CacheErrorCode.OPERATION_ERROR,
-            message: 'Cache Write Error: Failed to delete all teams',
-            cause: error as Error,
-          }),
-      ),
-      TE.map(() => undefined),
-      TE.mapLeft(mapCacheErrorToDomainError),
-    );
-
   return {
     getAllTeams,
     setAllTeams,
-    deleteAllTeams,
   };
 };

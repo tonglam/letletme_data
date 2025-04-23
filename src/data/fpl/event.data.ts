@@ -9,6 +9,7 @@ import { FplEventDataService } from 'src/data/types';
 import { HTTPClient } from 'src/infrastructures/http/types';
 import { EventLiveExplains } from 'src/types/domain/event-live-explain.type';
 import { EventLives } from 'src/types/domain/event-live.type';
+import { EventId } from 'src/types/domain/event.type';
 import { DataLayerError, DataLayerErrorCode } from 'src/types/error.type';
 import { createDataLayerError } from 'src/utils/error.util';
 
@@ -20,11 +21,13 @@ export const createFplEventDataService = (
 ): FplEventDataService => {
   let cachedEventResponse: EventResponse | null = null;
 
-  const fetchAndValidateEvents = (event: number): TE.TaskEither<DataLayerError, EventResponse> => {
-    logger.info({ operation: `fetchAndValidateEvent(${event})` }, 'Fetching FPL event data');
+  const fetchAndValidateEvents = (
+    eventId: EventId,
+  ): TE.TaskEither<DataLayerError, EventResponse> => {
+    logger.info({ operation: `fetchAndValidateEvent(${eventId})` }, 'Fetching FPL event data');
 
     return pipe(
-      client.get<unknown>(apiConfig.endpoints.event.live({ event: event })),
+      client.get<unknown>(apiConfig.endpoints.event.live({ eventId: eventId })),
       TE.mapLeft((apiError) => {
         logger.error(
           {
@@ -81,22 +84,24 @@ export const createFplEventDataService = (
     );
   };
 
-  const getFplEventDataInternal = (event: number): TE.TaskEither<DataLayerError, EventResponse> => {
+  const getFplEventDataInternal = (
+    eventId: EventId,
+  ): TE.TaskEither<DataLayerError, EventResponse> => {
     if (cachedEventResponse) {
       return TE.right(cachedEventResponse);
     }
-    return fetchAndValidateEvents(event);
+    return fetchAndValidateEvents(eventId);
   };
 
-  const getLives = (event: number): TE.TaskEither<DataLayerError, EventLives> =>
+  const getLives = (eventId: EventId): TE.TaskEither<DataLayerError, EventLives> =>
     pipe(
-      getFplEventDataInternal(event),
+      getFplEventDataInternal(eventId),
       TE.chain((eventData) =>
         pipe(
           eventData.elements.map((element) => element.stats),
           TE.traverseArray((element) =>
             pipe(
-              mapEventLiveResponseToDomain(event, element.stats),
+              mapEventLiveResponseToDomain(eventId, element.stats),
               E.mapLeft((mappingError) =>
                 createDataLayerError({
                   code: DataLayerErrorCode.MAPPING_ERROR,
@@ -110,15 +115,15 @@ export const createFplEventDataService = (
       ),
     );
 
-  const getExplains = (event: number): TE.TaskEither<DataLayerError, EventLiveExplains> =>
+  const getExplains = (eventId: EventId): TE.TaskEither<DataLayerError, EventLiveExplains> =>
     pipe(
-      getFplEventDataInternal(event),
+      getFplEventDataInternal(eventId),
       TE.chain((eventData) =>
         pipe(
           eventData.elements.flatMap((element) => element.explain),
           TE.traverseArray((explainResponse) =>
             pipe(
-              mapEventLiveExplainResponseToDomain(event, explainResponse),
+              mapEventLiveExplainResponseToDomain(eventId, explainResponse),
               E.mapLeft((mappingError) =>
                 createDataLayerError({
                   code: DataLayerErrorCode.MAPPING_ERROR,

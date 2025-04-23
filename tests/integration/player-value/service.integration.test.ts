@@ -160,7 +160,7 @@ describe('PlayerValue Integration Tests', { timeout: 30000 }, () => {
         const fetchedValue = values[0]; // Get the first result
 
         // Basic check
-        expect(fetchedValue.element).toEqual(targetElementId);
+        expect(fetchedValue.element_id).toEqual(targetElementId);
 
         // Check properties specific to PlayerValue (including those added by enrichment and change detection)
         expect(fetchedValue).toHaveProperty('element');

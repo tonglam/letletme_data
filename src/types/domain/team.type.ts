@@ -8,15 +8,15 @@ export type TeamId = Branded<number, 'TeamId'>;
 export const createTeamId = createBrandedType<number, 'TeamId'>(
   'TeamId',
   (value: unknown): value is number =>
-    typeof value === 'number' && value > 0 && Number.isInteger(value),
+    typeof value === 'number' && value > 0 && value < 21 && Number.isInteger(value),
 );
 
 export const validateTeamId = (value: unknown): E.Either<string, TeamId> =>
   pipe(
     value,
     E.fromPredicate(
-      (v): v is number => typeof v === 'number' && v > 0 && Number.isInteger(v),
-      () => 'Invalid team ID: must be a positive integer',
+      (v): v is number => typeof v === 'number' && v > 0 && v < 21 && Number.isInteger(v),
+      () => 'Invalid team ID: must be a positive integer between 1 and 20',
     ),
     E.map((v) => v as TeamId),
   );

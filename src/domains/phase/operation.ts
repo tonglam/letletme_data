@@ -8,9 +8,9 @@ import { createDomainError, DomainError, DomainErrorCode } from '../../types/err
 import { getErrorMessage } from '../../utils/error.util';
 
 export const createPhaseOperations = (repository: PhaseRepository): PhaseOperations => {
-  const savePhases = (phases: PhaseCreateInputs): TE.TaskEither<DomainError, Phases> =>
+  const savePhases = (phaseInputs: PhaseCreateInputs): TE.TaskEither<DomainError, Phases> =>
     pipe(
-      repository.saveBatch(phases),
+      repository.saveBatch(phaseInputs),
       TE.mapLeft((dbError) =>
         createDomainError({
           code: DomainErrorCode.DATABASE_ERROR,

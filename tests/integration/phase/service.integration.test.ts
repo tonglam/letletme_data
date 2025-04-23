@@ -1,7 +1,7 @@
 import { PrismaClient } from '@prisma/client';
 import * as E from 'fp-ts/Either';
 import { Logger } from 'pino';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 // Use the generic setup
 
@@ -55,21 +55,12 @@ describe('Phase Integration Tests', () => {
 
     phaseRepository = createPhaseRepository(prisma);
     // createPhaseCache uses the imported singleton redisClient internally
-    phaseCache = createPhaseCache(phaseRepository, {
+    phaseCache = createPhaseCache({
       keyPrefix: cachePrefix,
       season: season,
     });
     fplDataService = createFplBootstrapDataService(httpClient, logger);
     phaseService = createPhaseService(fplDataService, phaseRepository, phaseCache);
-  });
-
-  beforeEach(async () => {
-    await prisma.phase.deleteMany({});
-    // Use shared client for cleanup
-    const keys = await redisClient.keys(`${cachePrefix}::${season}*`);
-    if (keys.length > 0) {
-      await redisClient.del(keys);
-    }
   });
 
   afterAll(async () => {

@@ -13,6 +13,6 @@ export type TeamCreateInputs = readonly TeamCreateInput[];
 export interface TeamRepository {
   readonly findById: (id: TeamId) => TE.TaskEither<DBError, Team>;
   readonly findAll: () => TE.TaskEither<DBError, Teams>;
-  readonly saveBatch: (data: TeamCreateInputs) => TE.TaskEither<DBError, Teams>;
+  readonly saveBatch: (teamInputs: TeamCreateInputs) => TE.TaskEither<DBError, Teams>;
   readonly deleteAll: () => TE.TaskEither<DBError, void>;
 }

@@ -8,7 +8,7 @@ export interface PlayerValueTrackOperations {
     date: string,
   ) => TE.TaskEither<DomainError, PlayerValueTracks>;
   readonly savePlayerValueTracksByDate: (
-    playerValueTracks: PlayerValueTrackCreateInputs,
+    playerValueTrackInputs: PlayerValueTrackCreateInputs,
   ) => TE.TaskEither<DomainError, PlayerValueTracks>;
   readonly deletePlayerValueTracksByDate: (date: string) => TE.TaskEither<DomainError, void>;
 }

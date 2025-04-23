@@ -33,17 +33,6 @@ export const playerValueTrackServiceOperations = (
   ): TE.TaskEither<ServiceError, PlayerValueTracks> =>
     pipe(domainOps.getPlayerValueTracksByDate(date), TE.mapLeft(mapDomainErrorToServiceError));
 
-  const savePlayerValueTracksByDate = (
-    playerValueTracks: PlayerValueTrackCreateInputs,
-  ): TE.TaskEither<ServiceError, PlayerValueTracks> =>
-    pipe(
-      domainOps.savePlayerValueTracksByDate(playerValueTracks),
-      TE.mapLeft(mapDomainErrorToServiceError),
-    );
-
-  const deletePlayerValueTracksByDate = (date: string): TE.TaskEither<ServiceError, void> =>
-    pipe(domainOps.deletePlayerValueTracksByDate(date), TE.mapLeft(mapDomainErrorToServiceError));
-
   const syncPlayerValueTracksFromApi = (): TE.TaskEither<ServiceError, void> => {
     const date = formatYYYYMMDD();
 
@@ -91,9 +80,7 @@ export const playerValueTrackServiceOperations = (
   };
 
   return {
-    getPlayerValueTracksByDate,
-    savePlayerValueTracksByDate,
-    deletePlayerValueTracksByDate,
+    findPlayerValueTracksByDate: getPlayerValueTracksByDate,
     syncPlayerValueTracksFromApi,
   };
 };
@@ -107,9 +94,7 @@ export const createPlayerValueTrackService = (
   const ops = playerValueTrackServiceOperations(fplDataService, eventService, domainOps);
 
   return {
-    getPlayerValueTracksByDate: ops.getPlayerValueTracksByDate,
-    savePlayerValueTracksByDate: ops.savePlayerValueTracksByDate,
-    deletePlayerValueTracksByDate: ops.deletePlayerValueTracksByDate,
+    getPlayerValueTracksByDate: ops.findPlayerValueTracksByDate,
     syncPlayerValueTracksFromApi: ops.syncPlayerValueTracksFromApi,
   };
 };

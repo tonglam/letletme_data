@@ -7,9 +7,9 @@ import { createDomainError, DomainError, DomainErrorCode } from 'src/types/error
 import { getErrorMessage } from 'src/utils/error.util';
 
 export const createTeamOperations = (repository: TeamRepository): TeamOperations => {
-  const saveTeams = (teams: TeamCreateInputs): TE.TaskEither<DomainError, Teams> =>
+  const saveTeams = (teamInputs: TeamCreateInputs): TE.TaskEither<DomainError, Teams> =>
     pipe(
-      repository.saveBatch(teams),
+      repository.saveBatch(teamInputs),
       TE.mapLeft((dbError) =>
         createDomainError({
           code: DomainErrorCode.DATABASE_ERROR,

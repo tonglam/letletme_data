@@ -2,7 +2,8 @@ import { PlayerValueOperations } from 'domains/player-value/types';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import { PlayerValueCreateInputs, PlayerValueRepository } from 'src/repositories/player-value/type';
-import { SourcePlayerValues } from 'src/types/domain/player-value.type';
+import { RawPlayerValues } from 'src/types/domain/player-value.type';
+import { PlayerId } from 'src/types/domain/player.type';
 import { createDomainError, DomainError, DomainErrorCode } from 'src/types/error.type';
 import { getErrorMessage } from 'src/utils/error.util';
 
@@ -10,71 +11,66 @@ export const createPlayerValueOperations = (
   repository: PlayerValueRepository,
 ): PlayerValueOperations => {
   const getLatestPlayerValuesByElements = (
-    elements: readonly number[],
-  ): TE.TaskEither<DomainError, ReadonlyArray<{ element: number; value: number }>> =>
+    elementIds: ReadonlyArray<PlayerId>,
+  ): TE.TaskEither<DomainError, ReadonlyArray<{ elementId: PlayerId; value: number }>> =>
     pipe(
-      repository.getLatestPlayerValuesByElements(elements),
+      repository.getLatestPlayerValuesByElements(elementIds),
       TE.mapLeft((dbError) =>
         createDomainError({
           code: DomainErrorCode.DATABASE_ERROR,
           message: `DB Error (getLatestPlayerValuesByElements): ${getErrorMessage(dbError)}`,
-          cause: dbError,
         }),
       ),
     );
 
   const getPlayerValuesByChangeDate = (
     changeDate: string,
-  ): TE.TaskEither<DomainError, SourcePlayerValues> =>
+  ): TE.TaskEither<DomainError, RawPlayerValues> =>
     pipe(
       repository.findByChangeDate(changeDate),
       TE.mapLeft((dbError) =>
         createDomainError({
           code: DomainErrorCode.DATABASE_ERROR,
           message: `DB Error (getPlayerValuesByChangeDate): ${getErrorMessage(dbError)}`,
-          cause: dbError,
         }),
       ),
     );
 
   const getPlayerValuesByElement = (
-    element: number,
-  ): TE.TaskEither<DomainError, SourcePlayerValues> =>
+    elementId: PlayerId,
+  ): TE.TaskEither<DomainError, RawPlayerValues> =>
     pipe(
-      repository.findByElement(element),
+      repository.findByElement(elementId),
       TE.mapLeft((dbError) =>
         createDomainError({
           code: DomainErrorCode.DATABASE_ERROR,
           message: `DB Error (getPlayerValuesByElement): ${getErrorMessage(dbError)}`,
-          cause: dbError,
         }),
       ),
     );
 
   const getPlayerValuesByElements = (
-    elements: number[],
-  ): TE.TaskEither<DomainError, SourcePlayerValues> =>
+    elementIds: ReadonlyArray<PlayerId>,
+  ): TE.TaskEither<DomainError, RawPlayerValues> =>
     pipe(
-      repository.findByElements(elements),
+      repository.findByElements(elementIds),
       TE.mapLeft((dbError) =>
         createDomainError({
           code: DomainErrorCode.DATABASE_ERROR,
           message: `DB Error (getPlayerValuesByElements): ${getErrorMessage(dbError)}`,
-          cause: dbError,
         }),
       ),
     );
 
   const savePlayerValueChanges = (
-    playerValues: PlayerValueCreateInputs,
-  ): TE.TaskEither<DomainError, SourcePlayerValues> =>
+    playerValueInputs: PlayerValueCreateInputs,
+  ): TE.TaskEither<DomainError, RawPlayerValues> =>
     pipe(
-      repository.savePlayerValueChangesByChangeDate(playerValues),
+      repository.savePlayerValueChangesByChangeDate(playerValueInputs),
       TE.mapLeft((dbError) =>
         createDomainError({
           code: DomainErrorCode.DATABASE_ERROR,
           message: `DB Error (savePlayerValueChanges): ${getErrorMessage(dbError)}`,
-          cause: dbError,
         }),
       ),
     );
@@ -86,7 +82,6 @@ export const createPlayerValueOperations = (
         createDomainError({
           code: DomainErrorCode.DATABASE_ERROR,
           message: `DB Error (deletePlayerValuesByChangeDate): ${getErrorMessage(dbError)}`,
-          cause: dbError,
         }),
       ),
     );

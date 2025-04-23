@@ -8,15 +8,15 @@ export type EventId = Branded<number, 'EventId'>;
 export const createEventId = createBrandedType<number, 'EventId'>(
   'EventId',
   (value: unknown): value is number =>
-    typeof value === 'number' && value > 0 && Number.isInteger(value),
+    typeof value === 'number' && value > 0 && value < 39 && Number.isInteger(value),
 );
 
 export const validateEventId = (value: unknown): E.Either<string, EventId> =>
   pipe(
     value,
     E.fromPredicate(
-      (v): v is number => typeof v === 'number' && v > 0 && Number.isInteger(v),
-      () => 'Invalid event ID: must be a positive integer',
+      (v): v is number => typeof v === 'number' && v > 0 && v < 39 && Number.isInteger(v),
+      () => 'Invalid event ID: must be a positive integer between 1 and 38',
     ),
     E.map((v) => v as EventId),
   );

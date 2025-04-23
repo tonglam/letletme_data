@@ -1,26 +1,22 @@
 import { PrismaClient } from '@prisma/client';
+import { createTeamCache } from 'domains/team/cache';
+import { TeamCache } from 'domains/team/types';
 import * as E from 'fp-ts/Either';
-// Removed Redis import
 import { Logger } from 'pino';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-// Use the generic setup
-
-// Import the SHARED redis client used by the application
-
-// Specific imports for this test suite
 import { CachePrefix } from '../../../src/configs/cache/cache.config';
 import { createFplBootstrapDataService } from '../../../src/data/fpl/bootstrap.data';
 import { FplBootstrapDataService } from '../../../src/data/types';
-import { createPlayerCache } from '../../../src/domains/player/cache'; // Player specific
-import { PlayerCache } from '../../../src/domains/player/types'; // Player specific
+import { createPlayerCache } from '../../../src/domains/player/cache';
+import { PlayerCache } from '../../../src/domains/player/types';
 import { redisClient } from '../../../src/infrastructures/cache/client';
 import { HTTPClient } from '../../../src/infrastructures/http';
-import { createPlayerRepository } from '../../../src/repositories/player/repository'; // Player specific
-import { PlayerRepository } from '../../../src/repositories/player/type'; // Import PlayerRepository
-import { createPlayerService } from '../../../src/services/player/service'; // Player specific
-import { PlayerService } from '../../../src/services/player/types'; // Player specific
-import { playerWorkflows } from '../../../src/services/player/workflow'; // Player specific
+import { createPlayerRepository } from '../../../src/repositories/player/repository';
+import { PlayerRepository } from '../../../src/repositories/player/type';
+import { createPlayerService } from '../../../src/services/player/service';
+import { PlayerService } from '../../../src/services/player/types';
+import { playerWorkflows } from '../../../src/services/player/workflow';
 import {
   IntegrationTestSetupResult,
   setupIntegrationTest,
@@ -30,13 +26,13 @@ import {
 describe('Player Integration Tests', () => {
   let setup: IntegrationTestSetupResult;
   let prisma: PrismaClient;
-  // Removed local redis
   let logger: Logger;
   let httpClient: HTTPClient;
   let playerRepository: PlayerRepository;
   let playerCache: PlayerCache;
   let fplDataService: FplBootstrapDataService;
   let playerService: PlayerService;
+  let teamCache: TeamCache;
 
   const cachePrefix = CachePrefix.PLAYER;
   const season = '2425';
@@ -44,7 +40,6 @@ describe('Player Integration Tests', () => {
   beforeAll(async () => {
     setup = await setupIntegrationTest();
     prisma = setup.prisma;
-    // No local redis assignment
     logger = setup.logger;
     httpClient = setup.httpClient;
 
@@ -57,21 +52,16 @@ describe('Player Integration Tests', () => {
 
     playerRepository = createPlayerRepository(prisma);
     // Player cache uses singleton client
-    playerCache = createPlayerCache(playerRepository, {
+    playerCache = createPlayerCache({
+      keyPrefix: cachePrefix,
+      season: season,
+    });
+    teamCache = createTeamCache({
       keyPrefix: cachePrefix,
       season: season,
     });
     fplDataService = createFplBootstrapDataService(httpClient, logger);
-    playerService = createPlayerService(fplDataService, playerRepository, playerCache);
-  });
-
-  beforeEach(async () => {
-    await prisma.player.deleteMany({});
-    // Use shared client for cleanup
-    const keys = await redisClient.keys(`${cachePrefix}::${season}*`);
-    if (keys.length > 0) {
-      await redisClient.del(keys);
-    }
+    playerService = createPlayerService(fplDataService, playerRepository, playerCache, teamCache);
   });
 
   afterAll(async () => {
@@ -122,7 +112,7 @@ describe('Player Integration Tests', () => {
         const players = getPlayersResult.right;
         expect(players.length).toBeGreaterThan(0); // Make sure we have players to test with
 
-        const firstPlayerId = players[0]?.element;
+        const firstPlayerId = players[0]?.id;
         if (firstPlayerId === undefined) {
           throw new Error('First player or its ID is undefined after sync');
         }
@@ -132,7 +122,7 @@ describe('Player Integration Tests', () => {
         if (E.isRight(playerResult)) {
           // Check Right<Player> explicitly
           expect(playerResult.right).toBeDefined();
-          expect(playerResult.right.element).toEqual(firstPlayerId);
+          expect(playerResult.right.id).toEqual(firstPlayerId);
         } else {
           // Fail test if playerResult is Left
           throw new Error(`Expected Right but got Left: ${JSON.stringify(playerResult.left)}`);
@@ -153,7 +143,7 @@ describe('Player Integration Tests', () => {
       expect(E.isRight(getPlayersResult)).toBe(true);
       if (E.isRight(getPlayersResult) && getPlayersResult.right.length > 0) {
         const firstPlayer = getPlayersResult.right[0];
-        const elementTypeToTest = firstPlayer.elementType;
+        const elementTypeToTest = firstPlayer.type;
 
         const playersByTypeResult =
           await playerService.getPlayersByElementType(elementTypeToTest)();
@@ -163,7 +153,7 @@ describe('Player Integration Tests', () => {
           expect(players.length).toBeGreaterThan(0);
           // Verify all returned players have the correct element type
           players.forEach((p) => {
-            expect(p.elementType).toEqual(elementTypeToTest);
+            expect(p.type).toEqual(elementTypeToTest);
           });
         }
       } else {
@@ -179,7 +169,7 @@ describe('Player Integration Tests', () => {
       expect(E.isRight(getPlayersResult)).toBe(true);
       if (E.isRight(getPlayersResult) && getPlayersResult.right.length > 0) {
         const firstPlayer = getPlayersResult.right[0];
-        const teamToTest = firstPlayer.team;
+        const teamToTest = firstPlayer.teamId;
 
         const playersByTeamResult = await playerService.getPlayersByTeam(teamToTest)();
         expect(E.isRight(playersByTeamResult)).toBe(true);
@@ -188,7 +178,7 @@ describe('Player Integration Tests', () => {
           expect(players.length).toBeGreaterThan(0);
           // Verify all returned players belong to the correct team
           players.forEach((p) => {
-            expect(p.team).toEqual(teamToTest);
+            expect(p.teamId).toEqual(teamToTest);
           });
         }
       } else {

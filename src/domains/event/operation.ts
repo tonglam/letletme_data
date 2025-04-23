@@ -8,9 +8,9 @@ import { DomainError, DomainErrorCode, createDomainError } from '../../types/err
 import { getErrorMessage } from '../../utils/error.util';
 
 export const createEventOperations = (repository: EventRepository): EventOperations => {
-  const saveEvents = (events: EventCreateInputs): TE.TaskEither<DomainError, Events> =>
+  const saveEvents = (eventInputs: EventCreateInputs): TE.TaskEither<DomainError, Events> =>
     pipe(
-      repository.saveBatch(events),
+      repository.saveBatch(eventInputs),
       TE.mapLeft((dbError) =>
         createDomainError({
           code: DomainErrorCode.DATABASE_ERROR,

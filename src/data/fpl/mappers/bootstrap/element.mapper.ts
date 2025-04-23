@@ -2,25 +2,26 @@ import { format } from 'date-fns';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as O from 'fp-ts/Option';
-import { SourcePlayerStat } from 'src/types/domain/player-stat.type';
+import { EventId } from 'src/types/domain/event.type';
+import { RawPlayerStat } from 'src/types/domain/player-stat.type';
 import { PlayerValueTrack } from 'src/types/domain/player-value-track.type';
-import { SourcePlayerValue } from 'src/types/domain/player-value.type';
-import { Player, validatePlayerId } from 'src/types/domain/player.type';
+import { RawPlayerValue } from 'src/types/domain/player-value.type';
+import { PlayerId, PlayerType, RawPlayer, validatePlayerId } from 'src/types/domain/player.type';
 import { TeamId } from 'src/types/domain/team.type';
 import { safeStringToDecimal, safeStringToNumber } from 'src/utils/common.util';
 
 import { ElementResponse } from '../../schemas/bootstrap/element.schema';
 
-export const mapElementResponseToPlayer = (raw: ElementResponse): E.Either<string, Player> =>
+export const mapElementResponseToPlayer = (raw: ElementResponse): E.Either<string, RawPlayer> =>
   pipe(
     E.Do,
-    E.bind('element', () => validatePlayerId(raw.id)),
-    E.map((data): Player => {
+    E.bind('id', () => validatePlayerId(raw.id)),
+    E.map((data): RawPlayer => {
       return {
-        element: data.element,
+        id: data.id as PlayerId,
         code: raw.code,
-        elementType: raw.element_type,
-        team: raw.team,
+        type: raw.element_type as PlayerType,
+        teamId: raw.team as TeamId,
         price: raw.now_cost,
         startPrice: raw.now_cost - raw.cost_change_start,
         firstName: raw.first_name,
@@ -31,9 +32,9 @@ export const mapElementResponseToPlayer = (raw: ElementResponse): E.Either<strin
   );
 
 export const mapElementResponseToPlayerValue = (
-  event: number,
+  eventId: EventId,
   raw: ElementResponse,
-): E.Either<string, SourcePlayerValue> => {
+): E.Either<string, RawPlayerValue> => {
   const currentDateStr = format(new Date(), 'yyyyMMdd');
   const value = raw.now_cost;
 
@@ -41,10 +42,10 @@ export const mapElementResponseToPlayerValue = (
     E.Do,
     E.bind('element', () => validatePlayerId(raw.id)),
     E.map(
-      ({ element }): SourcePlayerValue => ({
-        element: element,
-        elementType: raw.element_type,
-        event: event,
+      ({ element }): RawPlayerValue => ({
+        elementId: element as PlayerId,
+        elementType: raw.element_type as PlayerType,
+        eventId: eventId as EventId,
         value: value,
         changeDate: currentDateStr,
       }),
@@ -53,7 +54,7 @@ export const mapElementResponseToPlayerValue = (
 };
 
 export const mapElementResponseToPlayerValueTrack = (
-  event: number,
+  eventId: EventId,
   raw: ElementResponse,
 ): E.Either<string, PlayerValueTrack> => {
   const currentDate = new Date();
@@ -67,10 +68,10 @@ export const mapElementResponseToPlayerValueTrack = (
       ({ element }): PlayerValueTrack => ({
         hourIndex: currentHour,
         date: currentDateStr,
-        event: event,
-        element: element,
-        elementType: raw.element_type,
-        team: raw.team as TeamId,
+        eventId: eventId as EventId,
+        elementId: element as PlayerId,
+        elementType: raw.element_type as PlayerType,
+        teamId: raw.team as TeamId,
         chanceOfPlayingThisRound: raw.chance_of_playing_this_round ?? null,
         chanceOfPlayingNextRound: raw.chance_of_playing_next_round ?? null,
         transfersIn: raw.transfers_in,
@@ -88,17 +89,18 @@ export const mapElementResponseToPlayerValueTrack = (
 };
 
 export const mapElementResponseToPlayerStat = (
-  event: number,
+  eventId: EventId,
   raw: ElementResponse,
-): E.Either<string, SourcePlayerStat> =>
+): E.Either<string, RawPlayerStat> =>
   pipe(
     E.Do,
     E.bind('element', () => validatePlayerId(raw.id)),
     E.map(
-      ({ element }): SourcePlayerStat => ({
-        event: event,
-        element: element,
-        elementType: raw.element_type,
+      ({ element }): RawPlayerStat => ({
+        eventId: eventId as EventId,
+        elementId: element as PlayerId,
+        elementType: raw.element_type as PlayerType,
+        teamId: raw.team as TeamId,
         totalPoints: raw.total_points,
         form: pipe(
           safeStringToNumber(raw.form),

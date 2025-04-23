@@ -2,10 +2,11 @@ import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import { LeagueInfoResponse } from 'src/data/fpl/schemas/entry/league-info.schema';
 import { LeagueType } from 'src/types/base.type';
+import { EntryId } from 'src/types/domain/entry-info.type';
 import { MappedEntryLeagueInfo } from 'src/types/domain/entry-league-info.type';
 
 export const mapLeagueInfoResponseToEntryLeague = (
-  entry: number,
+  entryId: EntryId,
   leagueType: LeagueType,
   raw: LeagueInfoResponse,
 ): E.Either<string, MappedEntryLeagueInfo> => {
@@ -13,7 +14,7 @@ export const mapLeagueInfoResponseToEntryLeague = (
     E.Do,
     E.map(() => {
       return {
-        entry: entry,
+        entry: entryId,
         leagueId: raw.id,
         leagueName: raw.name,
         leagueType: leagueType,

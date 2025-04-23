@@ -16,8 +16,9 @@ import {
   PlayerValues,
   RawPlayerValue,
   RawPlayerValues,
-  SourcePlayerValues,
 } from 'src/types/domain/player-value.type';
+import { PlayerId } from 'src/types/domain/player.type';
+import { TeamId } from 'src/types/domain/team.type';
 import {
   createServiceError,
   DataLayerError,
@@ -25,7 +26,6 @@ import {
   ServiceErrorCode,
 } from 'src/types/error.type';
 import { enrichPlayerValues } from 'src/utils/data-enrichment.util';
-import { formatYYYYMMDD } from 'src/utils/date.util';
 import { createServiceIntegrationError, mapDomainErrorToServiceError } from 'src/utils/error.util';
 
 const determineChangeType = (newValue: number, lastValue: number): ValueChangeType => {
@@ -40,13 +40,13 @@ const determineChangeType = (newValue: number, lastValue: number): ValueChangeTy
 
 const detectRawValueChanges =
   (domainOps: PlayerValueOperations) =>
-  (sourceValues: SourcePlayerValues): TE.TaskEither<ServiceError, RawPlayerValues> => {
+  (sourceValues: RawPlayerValues): TE.TaskEither<ServiceError, RawPlayerValues> => {
     if (RA.isEmpty(sourceValues)) {
       return TE.right([]);
     }
-    const elements = sourceValues.map((value) => value.element);
+    const elementIds = sourceValues.map((value) => value.elementId);
     return pipe(
-      domainOps.getLatestPlayerValuesByElements(elements),
+      domainOps.getLatestPlayerValuesByElements(elementIds),
       TE.mapLeft((error) =>
         createServiceError({
           code: ServiceErrorCode.OPERATION_ERROR,
@@ -55,11 +55,11 @@ const detectRawValueChanges =
         }),
       ),
       TE.map((latestDbValues) => {
-        const latestValueMap = new Map(latestDbValues.map((v) => [v.element, v.value]));
+        const latestValueMap = new Map(latestDbValues.map((v) => [v.elementId, v.value]));
         const changes: Array<RawPlayerValue> = [];
 
         for (const sourceValue of sourceValues) {
-          const latestDbValue = latestValueMap.get(sourceValue.element);
+          const latestDbValue = latestValueMap.get(sourceValue.elementId);
 
           if (latestDbValue === undefined || sourceValue.value !== latestDbValue) {
             const lastValue = latestDbValue ?? sourceValue.value;
@@ -84,9 +84,9 @@ const addChangeInfoToEnriched =
     if (RA.isEmpty(enrichedSourceValues)) {
       return TE.right([]);
     }
-    const elements = enrichedSourceValues.map((v) => v.element);
+    const elementIds = enrichedSourceValues.map((v) => v.elementId);
     return pipe(
-      domainOps.getLatestPlayerValuesByElements(elements),
+      domainOps.getLatestPlayerValuesByElements(elementIds),
       TE.mapLeft((error) =>
         createServiceError({
           code: ServiceErrorCode.OPERATION_ERROR,
@@ -95,9 +95,9 @@ const addChangeInfoToEnriched =
         }),
       ),
       TE.map((latestDbValues) => {
-        const latestValueMap = new Map(latestDbValues.map((v) => [v.element, v.value]));
+        const latestValueMap = new Map(latestDbValues.map((v) => [v.elementId, v.value]));
         return enrichedSourceValues.map((enrichedValue): PlayerValue => {
-          const latestDbValue = latestValueMap.get(enrichedValue.element);
+          const latestDbValue = latestValueMap.get(enrichedValue.elementId);
           const lastValue = latestDbValue ?? enrichedValue.value;
           const changeType = latestDbValue
             ? determineChangeType(enrichedValue.value, latestDbValue)
@@ -130,13 +130,13 @@ export const playerValueServiceOperations = (
   const addChangeInfo = addChangeInfoToEnriched(domainOps);
 
   const enrichDetectedChanges = flow(
-    (changes: RawPlayerValues) => TE.of(changes as SourcePlayerValues),
+    (changes: RawPlayerValues) => TE.of(changes as RawPlayerValues),
     TE.chainW(enrichSourceData),
     TE.map((enriched) => enriched as PlayerValues),
   );
 
   const processSourceToPlayerValues = (
-    sourceValues: SourcePlayerValues,
+    sourceValues: RawPlayerValues,
   ): TE.TaskEither<ServiceError, PlayerValues> =>
     pipe(
       TE.of(sourceValues),
@@ -174,7 +174,7 @@ export const playerValueServiceOperations = (
             TE.chainW(processSourceToPlayerValues),
             TE.chainFirstW((processedValues) =>
               pipe(
-                playerValueCache.setPlayerValuesByChangeDate(changeDate, processedValues),
+                playerValueCache.setPlayerValuesByChangeDate(processedValues),
                 TE.mapLeft(mapDomainErrorToServiceError),
               ),
             ),
@@ -182,19 +182,19 @@ export const playerValueServiceOperations = (
         }),
       ),
 
-    findPlayerValuesByElement: (element: number): TE.TaskEither<ServiceError, PlayerValues> =>
+    findPlayerValuesByElement: (elementId: PlayerId): TE.TaskEither<ServiceError, PlayerValues> =>
       pipe(
-        domainOps.getPlayerValuesByElement(element),
+        domainOps.getPlayerValuesByElement(elementId),
         TE.mapLeft(mapDomainErrorToServiceError),
         TE.chainW(processSourceToPlayerValues),
       ),
 
-    findPlayerValuesByTeam: (team: number): TE.TaskEither<ServiceError, PlayerValues> =>
+    findPlayerValuesByTeam: (teamId: TeamId): TE.TaskEither<ServiceError, PlayerValues> =>
       pipe(
         playerCache.getAllPlayers(),
         TE.mapLeft(mapDomainErrorToServiceError),
-        TE.map(RA.filter((player) => player.team === team)),
-        TE.map(RA.map((player) => player.element as number)),
+        TE.map(RA.filter((player) => player.teamId === teamId)),
+        TE.map(RA.map((player) => player.id)),
         TE.chainW((readonlyElements) => {
           const mutableElements = [...readonlyElements];
           if (mutableElements.length === 0) {
@@ -233,12 +233,8 @@ export const playerValueServiceOperations = (
                         ),
                         TE.mapLeft(mapDomainErrorToServiceError),
                         TE.chainW(() => {
-                          const changeDate = formatYYYYMMDD();
                           return pipe(
-                            playerValueCache.setPlayerValuesByChangeDate(
-                              changeDate,
-                              playerValueChanges,
-                            ),
+                            playerValueCache.setPlayerValuesByChangeDate(playerValueChanges),
                             TE.mapLeft(mapDomainErrorToServiceError),
                           );
                         }),

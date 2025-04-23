@@ -10,7 +10,9 @@ import { PlayerStatService, PlayerStatServiceOperations } from 'services/player-
 import { FplBootstrapDataService } from 'src/data/types';
 import { PlayerStatRepository } from 'src/repositories/player-stat/type';
 import { Event } from 'src/types/domain/event.type';
-import { PlayerStat, PlayerStats, SourcePlayerStats } from 'src/types/domain/player-stat.type';
+import { PlayerStat, PlayerStats, RawPlayerStats } from 'src/types/domain/player-stat.type';
+import { PlayerId, PlayerType } from 'src/types/domain/player.type';
+import { TeamId } from 'src/types/domain/team.type';
 import {
   DataLayerError,
   DomainErrorCode,
@@ -30,7 +32,7 @@ const playerStatServiceOperations = (
   playerCache: PlayerCache,
   teamCache: TeamCache,
 ): PlayerStatServiceOperations => {
-  const findPlayerStat = (element: number): TE.TaskEither<ServiceError, PlayerStat> =>
+  const findPlayerStat = (elementId: PlayerId): TE.TaskEither<ServiceError, PlayerStat> =>
     pipe(
       playerStatCache.getLatestPlayerStats(),
       TE.mapLeft(mapDomainErrorToServiceError),
@@ -38,14 +40,14 @@ const playerStatServiceOperations = (
         mapDomainErrorToServiceError(
           createDomainError({
             code: DomainErrorCode.NOT_FOUND,
-            message: `Player stat with element ${element} not found in cache.`,
+            message: `Player stat with element ${elementId} not found in cache.`,
           }),
         ),
-      )((playerStats) => O.fromNullable(playerStats.find((stat) => stat.element === element))),
+      )((playerStats) => O.fromNullable(playerStats.find((stat) => stat.elementId === elementId))),
     );
 
   const findPlayerStatsByElementType = (
-    elementType: number,
+    elementType: PlayerType,
   ): TE.TaskEither<ServiceError, PlayerStats> =>
     pipe(
       playerStatCache.getLatestPlayerStats(),
@@ -55,18 +57,18 @@ const playerStatServiceOperations = (
       ),
     );
 
-  const findPlayerStatsByTeam = (team: number): TE.TaskEither<ServiceError, PlayerStats> =>
+  const findPlayerStatsByTeam = (teamId: TeamId): TE.TaskEither<ServiceError, PlayerStats> =>
     pipe(
       playerStatCache.getLatestPlayerStats(),
       TE.mapLeft(mapDomainErrorToServiceError),
-      TE.map((playerStats) => playerStats.filter((playerStat) => playerStat.team === team)),
+      TE.map((playerStats) => playerStats.filter((playerStat) => playerStat.teamId === teamId)),
     );
 
   const findLatestPlayerStats = (): TE.TaskEither<ServiceError, PlayerStats> =>
     pipe(
       playerStatCache.getLatestPlayerStats(),
       TE.mapLeft(mapDomainErrorToServiceError),
-      TE.orElseW((_cacheError) =>
+      TE.orElseW(() =>
         pipe(
           domainOps.getLatestPlayerStats(),
           TE.mapLeft(mapDomainErrorToServiceError),
@@ -117,15 +119,15 @@ const playerStatServiceOperations = (
           TE.chainFirstW(() =>
             pipe(domainOps.deleteLatestPlayerStats(), TE.mapLeft(mapDomainErrorToServiceError)),
           ),
-          TE.chainW((sourcePlayerStats) =>
+          TE.chainW((rawPlayerStats: RawPlayerStats) =>
             pipe(
-              sourcePlayerStats.length > 0
-                ? domainOps.saveLatestPlayerStats(sourcePlayerStats)
-                : TE.right(sourcePlayerStats as SourcePlayerStats),
+              rawPlayerStats.length > 0
+                ? domainOps.saveLatestPlayerStats(rawPlayerStats)
+                : TE.right(rawPlayerStats as RawPlayerStats),
               TE.mapLeft(mapDomainErrorToServiceError),
             ),
           ),
-          TE.chainW((savedStats: SourcePlayerStats) =>
+          TE.chainW((savedStats: RawPlayerStats) =>
             pipe(
               enrichPlayerStats(playerCache, teamCache)(savedStats),
               TE.mapLeft(mapDomainErrorToServiceError),

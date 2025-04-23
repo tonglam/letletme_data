@@ -4,7 +4,7 @@ import * as E from 'fp-ts/Either';
 import { Logger } from 'pino';
 import { PhaseRepository } from 'src/repositories/phase/type';
 import request from 'supertest';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 // Setup
 
@@ -54,7 +54,7 @@ describe('Phase Routes Integration Tests', () => {
     }
 
     phaseRepository = createPhaseRepository(prisma);
-    phaseCache = createPhaseCache(phaseRepository, {
+    phaseCache = createPhaseCache({
       keyPrefix: cachePrefix,
       season: testSeason,
     });
@@ -65,16 +65,6 @@ describe('Phase Routes Integration Tests', () => {
     app = express();
     app.use(express.json());
     app.use('/phases', phaseRouter(phaseService)); // Mount router
-  });
-
-  beforeEach(async () => {
-    await prisma.phase.deleteMany({});
-    const keys = await redisClient.keys(`${cachePrefix}::${testSeason}*`);
-    if (keys.length > 0) {
-      await redisClient.del(keys);
-    }
-    // Ensure data exists for GET requests by syncing
-    await phaseService.syncPhasesFromApi()();
   });
 
   afterAll(async () => {

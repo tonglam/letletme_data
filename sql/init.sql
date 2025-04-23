@@ -79,10 +79,10 @@ CREATE TABLE IF NOT EXISTS "teams" (
 ALTER TABLE "teams" ENABLE ROW LEVEL SECURITY;
 
 CREATE TABLE IF NOT EXISTS "players" (
-    "element" INTEGER PRIMARY KEY,
+    "id" INTEGER PRIMARY KEY,
     "code" INTEGER UNIQUE NOT NULL,
-    "element_type" INTEGER NOT NULL,
-    "team" INTEGER NOT NULL,
+    "type" INTEGER NOT NULL,
+    "team_id" INTEGER NOT NULL,
     "price" INTEGER NOT NULL DEFAULT 0,
     "start_price" INTEGER NOT NULL DEFAULT 0,
     "first_name" TEXT,
@@ -94,17 +94,17 @@ ALTER TABLE "players" ENABLE ROW LEVEL SECURITY;
 
 CREATE TABLE IF NOT EXISTS "player_values" (
     "id" SERIAL PRIMARY KEY,
-    "element" INTEGER NOT NULL,
+    "element_id" INTEGER NOT NULL,
     "element_type" INTEGER NOT NULL,
-    "event" INTEGER NOT NULL,
+    "event_id" INTEGER NOT NULL,
     "value" INTEGER NOT NULL,
     "change_date" CHAR(8) NOT NULL,
     "change_type" "ValueChangeType" NOT NULL,
     "last_value" INTEGER NOT NULL DEFAULT 0,
     "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-CREATE UNIQUE INDEX IF NOT EXISTS "unique_player_value" ON "player_values" ("element", "change_date");
-CREATE INDEX IF NOT EXISTS "idx_player_values_element_id" ON "player_values" ("element");
+CREATE UNIQUE INDEX IF NOT EXISTS "unique_player_value" ON "player_values" ("element_id", "change_date");
+CREATE INDEX IF NOT EXISTS "idx_player_values_element_id" ON "player_values" ("element_id");
 CREATE INDEX IF NOT EXISTS "idx_player_values_change_date" ON "player_values" ("change_date");
 ALTER TABLE "player_values" ENABLE ROW LEVEL SECURITY;
 
@@ -112,10 +112,10 @@ CREATE TABLE IF NOT EXISTS "player_value_tracks" (
     "id" SERIAL PRIMARY KEY,
     "hour_index" INTEGER NOT NULL,
     "date" CHAR(8) NOT NULL,
-    "event" INTEGER NOT NULL,
-    "element" INTEGER NOT NULL,
+    "event_id" INTEGER NOT NULL,
+    "element_id" INTEGER NOT NULL,
     "element_type" INTEGER NOT NULL,
-    "team" INTEGER NOT NULL,
+    "team_id" INTEGER NOT NULL,
     "chance_of_playing_this_round" INTEGER,
     "chance_of_playing_next_round" INTEGER,
     "transfers_in" INTEGER NOT NULL,
@@ -126,16 +126,16 @@ CREATE TABLE IF NOT EXISTS "player_value_tracks" (
     "value" INTEGER NOT NULL DEFAULT 0,
     "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-CREATE UNIQUE INDEX IF NOT EXISTS "unique_player_value_track" ON "player_value_tracks" ("element", "date", "hour_index");
+CREATE UNIQUE INDEX IF NOT EXISTS "unique_player_value_track" ON "player_value_tracks" ("element_id", "date", "hour_index");
 CREATE INDEX IF NOT EXISTS "idx_player_value_track_date_hour_index" ON "player_value_tracks" ("date", "hour_index");
-CREATE INDEX IF NOT EXISTS "idx_player_value_track_element_id" ON "player_value_tracks" ("element");
+CREATE INDEX IF NOT EXISTS "idx_player_value_track_element_id" ON "player_value_tracks" ("element_id");
 CREATE INDEX IF NOT EXISTS "idx_player_value_track_event_id" ON "player_value_tracks" ("event");
 ALTER TABLE "player_value_tracks" ENABLE ROW LEVEL SECURITY;
 
 CREATE TABLE IF NOT EXISTS "player_stats" (
     "id" SERIAL PRIMARY KEY,
-    "event" INTEGER NOT NULL,
-    "element" INTEGER NOT NULL,
+    "event_id" INTEGER NOT NULL,
+    "element_id" INTEGER NOT NULL,
     "element_type" INTEGER NOT NULL,
     "form" FLOAT,
     "influence" FLOAT,
@@ -178,9 +178,9 @@ CREATE TABLE IF NOT EXISTS "player_stats" (
     "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updated_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-CREATE UNIQUE INDEX IF NOT EXISTS "unique_event_element" ON "player_stats" ("event", "element");
-CREATE INDEX IF NOT EXISTS "idx_player_stats_element_id" ON "player_stats" ("element");
-CREATE INDEX IF NOT EXISTS "idx_player_stats_event_id" ON "player_stats" ("event");
+CREATE UNIQUE INDEX IF NOT EXISTS "unique_event_element" ON "player_stats" ("event_id", "element_id");
+CREATE INDEX IF NOT EXISTS "idx_player_stats_element_id" ON "player_stats" ("element_id");
+CREATE INDEX IF NOT EXISTS "idx_player_stats_event_id" ON "player_stats" ("event_id");
 ALTER TABLE "player_stats" ENABLE ROW LEVEL SECURITY;
 
 CREATE TABLE IF NOT EXISTS "event_fixtures" (

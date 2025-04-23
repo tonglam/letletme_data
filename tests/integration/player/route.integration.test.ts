@@ -1,9 +1,11 @@
 import { PrismaClient } from '@prisma/client';
+import { createTeamCache } from 'domains/team/cache';
+import { TeamCache } from 'domains/team/types';
 import express, { Express } from 'express';
 import * as E from 'fp-ts/Either';
 import { Logger } from 'pino';
 import request from 'supertest';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 // Setup
 
@@ -35,11 +37,12 @@ describe('Player Routes Integration Tests', () => {
   let httpClient: HTTPClient;
   let playerRepository: PlayerRepository;
   let playerCache: PlayerCache;
+  let teamCache: TeamCache;
   let fplDataService: FplBootstrapDataService;
   let playerService: PlayerService;
 
   const cachePrefix = CachePrefix.PLAYER;
-  const testSeason = '2425';
+  const season = '2425';
 
   beforeAll(async () => {
     setup = await setupIntegrationTest();
@@ -54,47 +57,21 @@ describe('Player Routes Integration Tests', () => {
     }
 
     playerRepository = createPlayerRepository(prisma);
-    playerCache = createPlayerCache(playerRepository, {
+    playerCache = createPlayerCache({
       keyPrefix: cachePrefix,
-      season: testSeason,
+      season: season,
     });
     fplDataService = createFplBootstrapDataService(httpClient, logger);
-    playerService = createPlayerService(fplDataService, playerRepository, playerCache);
+    teamCache = createTeamCache({
+      keyPrefix: cachePrefix,
+      season: season,
+    });
+    playerService = createPlayerService(fplDataService, playerRepository, playerCache, teamCache);
 
     // Create Express app and mount only the player router
     app = express();
     app.use(express.json());
     app.use('/players', playerRouter(playerService)); // Mount router
-  });
-
-  beforeEach(async () => {
-    await prisma.player.deleteMany({});
-    const keys = await redisClient.keys(`${cachePrefix}::${testSeason}*`);
-    if (keys.length > 0) {
-      await redisClient.del(keys);
-    }
-    // Sync and verify before tests
-    const syncResult = await playerService.syncPlayersFromApi()();
-    if (E.isLeft(syncResult)) {
-      logger.error({ error: syncResult.left }, 'Sync failed in beforeEach');
-      throw new Error('Player sync failed in beforeEach, cannot proceed with tests.');
-    }
-    // Don't check syncResult.right.length as sync returns void
-    // if (syncResult.right.length === 0) { // REMOVED this check
-    //   throw new Error('Player sync succeeded but returned 0 players in beforeEach.');
-    // }
-
-    // Optional: Verify sync side-effect by fetching players if necessary
-    const verifyPlayers = await playerService.getPlayers()();
-    if (E.isLeft(verifyPlayers) || verifyPlayers.right.length === 0) {
-      logger.error(
-        { error: verifyPlayers },
-        'Verification fetch failed or returned 0 players in beforeEach',
-      );
-      throw new Error('Player sync side-effect verification failed in beforeEach.');
-    }
-
-    logger.info('Sync completed and verified successfully in beforeEach');
   });
 
   afterAll(async () => {
@@ -123,7 +100,7 @@ describe('Player Routes Integration Tests', () => {
       allPlayersResult.right &&
       allPlayersResult.right.length > 0
     ) {
-      targetPlayerId = allPlayersResult.right[0].element;
+      targetPlayerId = allPlayersResult.right[0].id;
     } else {
       throw new Error('Could not retrieve players to get an ID for testing');
     }
@@ -146,7 +123,7 @@ describe('Player Routes Integration Tests', () => {
   it('POST /players/sync should trigger synchronization and return success', async () => {
     // Clear cache and DB before testing sync specifically
     await prisma.player.deleteMany({});
-    const keys = await redisClient.keys(`${cachePrefix}::${testSeason}*`);
+    const keys = await redisClient.keys(`${cachePrefix}::${season}*`);
     if (keys.length > 0) {
       await redisClient.del(keys);
     }

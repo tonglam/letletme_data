@@ -7,6 +7,7 @@ import { CachePrefix, DefaultTTL } from 'src/configs/cache/cache.config';
 import { redisClient } from 'src/infrastructures/cache/client';
 import { PlayerValues } from 'src/types/domain/player-value.type';
 import { CacheError, CacheErrorCode, createCacheError, DomainError } from 'src/types/error.type';
+import { getCurrentSeason } from 'src/utils/common.util';
 import { mapCacheErrorToDomainError } from 'src/utils/error.util';
 
 const parsePlayerValues = (playerValuesStr: string): E.Either<CacheError, PlayerValues> =>
@@ -35,11 +36,12 @@ const parsePlayerValues = (playerValuesStr: string): E.Either<CacheError, Player
 export const createPlayerValueCache = (
   config: PlayerValueCacheConfig = {
     keyPrefix: CachePrefix.PLAYER_VALUE,
+    season: getCurrentSeason(),
     ttlSeconds: DefaultTTL.PLAYER_VALUE,
   },
 ): PlayerValueCache => {
-  const { keyPrefix, ttlSeconds } = config;
-  const baseKey = `${keyPrefix}`;
+  const { keyPrefix, season, ttlSeconds } = config;
+  const baseKey = `${keyPrefix}::${season}`;
 
   const getPlayerValuesByChangeDate = (
     changeDate: string,
@@ -73,10 +75,11 @@ export const createPlayerValueCache = (
   };
 
   const setPlayerValuesByChangeDate = (
-    changeDate: string,
     playerValues: PlayerValues,
   ): TE.TaskEither<DomainError, void> => {
+    const changeDate = playerValues[0].changeDate;
     const key = `${baseKey}:${changeDate}`;
+
     return pipe(
       TE.tryCatch(
         () => redisClient.set(key, JSON.stringify(playerValues), 'EX', ttlSeconds),

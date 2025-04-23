@@ -38,12 +38,12 @@ export const createPlayerValueTrackRepository = (
     );
 
   const savePlayerValueTracksByDate = (
-    playerValueTracks: PlayerValueTrackCreateInputs,
+    playerValueTrackInputs: PlayerValueTrackCreateInputs,
   ): TE.TaskEither<DBError, PlayerValueTracks> =>
     pipe(
       TE.tryCatch(
         async () => {
-          const dataToCreate = playerValueTracks.map(mapDomainPlayerValueTrackToPrismaCreate);
+          const dataToCreate = playerValueTrackInputs.map(mapDomainPlayerValueTrackToPrismaCreate);
           await prisma.playerValueTrack.createMany({
             data: dataToCreate,
             skipDuplicates: true,
@@ -55,7 +55,7 @@ export const createPlayerValueTrackRepository = (
             message: `Failed to save player value tracks: ${getErrorMessage(error)}`,
           }),
       ),
-      TE.chain(() => findByDate(playerValueTracks[0].date)),
+      TE.chain(() => findByDate(playerValueTrackInputs[0].date)),
     );
 
   const deleteByDate = (date: string): TE.TaskEither<DBError, void> =>

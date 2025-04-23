@@ -6,19 +6,19 @@ import {
   mapPrismaPlayerToDomain,
 } from 'src/repositories/player/mapper';
 import { PlayerCreateInputs, PlayerRepository } from 'src/repositories/player/type';
-import { Player, PlayerId, Players } from 'src/types/domain/player.type';
+import { PlayerId, RawPlayer, RawPlayers } from 'src/types/domain/player.type';
 
 import { createDBError, DBError, DBErrorCode } from '../../types/error.type';
 
 export const createPlayerRepository = (prisma: PrismaClient): PlayerRepository => {
-  const findById = (element: PlayerId): TE.TaskEither<DBError, Player> =>
+  const findById = (id: PlayerId): TE.TaskEither<DBError, RawPlayer> =>
     pipe(
       TE.tryCatch(
-        () => prisma.player.findUnique({ where: { element: Number(element) } }),
+        () => prisma.player.findUnique({ where: { id: Number(id) } }),
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to fetch player by id ${element}: ${error}`,
+            message: `Failed to fetch player by id ${id}: ${error}`,
           }),
       ),
       TE.chainW((prismaPlayerOrNull) =>
@@ -27,16 +27,16 @@ export const createPlayerRepository = (prisma: PrismaClient): PlayerRepository =
           : TE.left(
               createDBError({
                 code: DBErrorCode.NOT_FOUND,
-                message: `Player with ID ${element} not found in database`,
+                message: `Player with ID ${id} not found in database`,
               }),
             ),
       ),
     );
 
-  const findAll = (): TE.TaskEither<DBError, Players> =>
+  const findAll = (): TE.TaskEither<DBError, RawPlayers> =>
     pipe(
       TE.tryCatch(
-        () => prisma.player.findMany({ orderBy: { element: 'asc' } }),
+        () => prisma.player.findMany({ orderBy: { id: 'asc' } }),
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
@@ -46,11 +46,11 @@ export const createPlayerRepository = (prisma: PrismaClient): PlayerRepository =
       TE.map((prismaPlayers) => prismaPlayers.map(mapPrismaPlayerToDomain)),
     );
 
-  const saveBatch = (players: PlayerCreateInputs): TE.TaskEither<DBError, Players> =>
+  const saveBatch = (playerInputs: PlayerCreateInputs): TE.TaskEither<DBError, RawPlayers> =>
     pipe(
       TE.tryCatch(
         async () => {
-          const dataToCreate = players.map(mapDomainPlayerToPrismaCreate);
+          const dataToCreate = playerInputs.map(mapDomainPlayerToPrismaCreate);
           await prisma.player.createMany({
             data: dataToCreate,
             skipDuplicates: true,

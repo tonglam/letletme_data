@@ -3,14 +3,13 @@ import * as E from 'fp-ts/Either';
 import { flow, pipe } from 'fp-ts/function';
 import * as O from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
-import { EventRepository } from 'src/repositories/event/type';
 import { Event, Events } from 'src/types/domain/event.type';
 import { getCurrentSeason } from 'src/utils/common.util';
 
 import { CachePrefix, DefaultTTL } from '../../configs/cache/cache.config';
 import { redisClient } from '../../infrastructures/cache/client';
 import { CacheError, CacheErrorCode, createCacheError, DomainError } from '../../types/error.type';
-import { mapCacheErrorToDomainError, mapRepositoryErrorToCacheError } from '../../utils/error.util';
+import { mapCacheErrorToDomainError } from '../../utils/error.util';
 
 const parseEvent = (eventStr: string): E.Either<CacheError, Event> =>
   pipe(
@@ -35,9 +34,9 @@ const parseEvent = (eventStr: string): E.Either<CacheError, Event> =>
     ),
   );
 
-const parseEvents = (events: Record<string, string>): E.Either<CacheError, Events> =>
+const parseEvents = (eventMaps: Record<string, string>): E.Either<CacheError, Events> =>
   pipe(
-    Object.values(events),
+    Object.values(eventMaps),
     (eventStrs) =>
       eventStrs.map((str) =>
         pipe(
@@ -50,7 +49,6 @@ const parseEvents = (events: Record<string, string>): E.Either<CacheError, Event
   );
 
 export const createEventCache = (
-  repository: EventRepository,
   config: EventCacheConfig = {
     keyPrefix: CachePrefix.EVENT,
     season: getCurrentSeason(),
@@ -78,17 +76,13 @@ export const createEventCache = (
           O.match(
             (): TE.TaskEither<DomainError, Event> =>
               pipe(
-                repository.findCurrent(),
-                TE.mapLeft(
-                  mapRepositoryErrorToCacheError('Repository Error: Failed to find current event'),
+                TE.left(
+                  createCacheError({
+                    code: CacheErrorCode.NOT_FOUND,
+                    message: 'Current event not found in cache',
+                  }),
                 ),
                 TE.mapLeft(mapCacheErrorToDomainError),
-                TE.chainW((eventFromRepo: Event) =>
-                  pipe(
-                    setCurrentEvent(eventFromRepo),
-                    TE.map(() => eventFromRepo),
-                  ),
-                ),
               ),
             (cachedEventStr: string): TE.TaskEither<DomainError, Event> =>
               pipe(
@@ -129,21 +123,13 @@ export const createEventCache = (
           }),
       ),
       TE.mapLeft(mapCacheErrorToDomainError),
-      TE.chain(
+      TE.chainW(
         flow(
           O.fromNullable,
           O.filter((eventsMap) => Object.keys(eventsMap).length > 0),
           O.fold(
-            () =>
-              pipe(
-                repository.findAll(),
-                TE.mapLeft(
-                  mapRepositoryErrorToCacheError('Repository Error: Failed to get all events'),
-                ),
-                TE.mapLeft(mapCacheErrorToDomainError),
-                TE.chainFirst((events) => setAllEvents(events)),
-              ),
-            (cachedEvents) =>
+            () => TE.right([] as Events),
+            (cachedEvents): TE.TaskEither<DomainError, Events> =>
               pipe(
                 parseEvents(cachedEvents),
                 TE.fromEither,
@@ -179,26 +165,10 @@ export const createEventCache = (
       TE.mapLeft(mapCacheErrorToDomainError),
     );
 
-  const deleteAllEvents = (): TE.TaskEither<DomainError, void> =>
-    pipe(
-      TE.tryCatch(
-        () => redisClient.del(baseKey),
-        (error: unknown) =>
-          createCacheError({
-            code: CacheErrorCode.OPERATION_ERROR,
-            message: 'Cache Write Error: Failed to delete all events',
-            cause: error as Error,
-          }),
-      ),
-      TE.map(() => undefined),
-      TE.mapLeft(mapCacheErrorToDomainError),
-    );
-
   return {
     getAllEvents,
     getCurrentEvent,
     setAllEvents,
     setCurrentEvent,
-    deleteAllEvents,
   };
 };

@@ -10,6 +10,7 @@ import {
 } from 'src/data/fpl/schemas/history/history.schema';
 import { HTTPClient } from 'src/infrastructures/http';
 import { EntryHistoryInfos } from 'src/types/domain/entry-history-info.type';
+import { EntryId } from 'src/types/domain/entry-info.type';
 import { DataLayerError, DataLayerErrorCode } from 'src/types/error.type';
 import { createDataLayerError } from 'src/utils/error.util';
 
@@ -22,12 +23,12 @@ export const createFplHistoryDataService = (
   let cachedHistoryResponse: EntryHistoryResponse | null = null;
 
   const fetchAndValidateHistories = (
-    entry: number,
+    entryId: EntryId,
   ): TE.TaskEither<DataLayerError, EntryHistoryResponse> => {
-    logger.info({ operation: `fetchAndValidateHistory(${entry})` }, 'Fetching FPL entry history');
+    logger.info({ operation: `fetchAndValidateHistory(${entryId})` }, 'Fetching FPL entry history');
 
     return pipe(
-      client.get<unknown>(apiConfig.endpoints.entry.history({ entry: entry })),
+      client.get<unknown>(apiConfig.endpoints.entry.history({ entryId: entryId })),
       TE.mapLeft((apiError) => {
         logger.error(
           {
@@ -86,23 +87,23 @@ export const createFplHistoryDataService = (
   };
 
   const getFplHistoryDataInternal = (
-    entry: number,
+    entryId: EntryId,
   ): TE.TaskEither<DataLayerError, EntryHistoryResponse> => {
     if (cachedHistoryResponse) {
       return TE.right(cachedHistoryResponse);
     }
-    return fetchAndValidateHistories(entry);
+    return fetchAndValidateHistories(entryId);
   };
 
-  const getHistoryInfos = (entry: number): TE.TaskEither<DataLayerError, EntryHistoryInfos> =>
+  const getHistoryInfos = (entryId: EntryId): TE.TaskEither<DataLayerError, EntryHistoryInfos> =>
     pipe(
-      getFplHistoryDataInternal(entry),
+      getFplHistoryDataInternal(entryId),
       TE.chain((historyData) =>
         pipe(
           historyData.past,
           TE.traverseArray((historyInfoResponse) =>
             pipe(
-              mapEntryHistoryResponseToDomain(entry, historyInfoResponse),
+              mapEntryHistoryResponseToDomain(entryId, historyInfoResponse),
               E.mapLeft((mappingError) =>
                 createDataLayerError({
                   code: DataLayerErrorCode.MAPPING_ERROR,

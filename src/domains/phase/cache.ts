@@ -3,14 +3,13 @@ import * as E from 'fp-ts/Either';
 import { flow, pipe } from 'fp-ts/function';
 import * as O from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
-import { PhaseRepository } from 'src/repositories/phase/type';
 import { Phase, Phases } from 'src/types/domain/phase.type';
 import { getCurrentSeason } from 'src/utils/common.util';
 
 import { CachePrefix } from '../../configs/cache/cache.config';
 import { redisClient } from '../../infrastructures/cache/client';
 import { CacheError, CacheErrorCode, createCacheError, DomainError } from '../../types/error.type';
-import { mapCacheErrorToDomainError, mapRepositoryErrorToCacheError } from '../../utils/error.util';
+import { mapCacheErrorToDomainError } from '../../utils/error.util';
 
 const parsePhase = (phaseStr: string): E.Either<CacheError, Phase> =>
   pipe(
@@ -35,9 +34,9 @@ const parsePhase = (phaseStr: string): E.Either<CacheError, Phase> =>
     ),
   );
 
-const parsePhases = (phasesMap: Record<string, string>): E.Either<CacheError, Phases> =>
+const parsePhases = (phaseMaps: Record<string, string>): E.Either<CacheError, Phases> =>
   pipe(
-    Object.values(phasesMap),
+    Object.values(phaseMaps),
     (phaseStrs) =>
       phaseStrs.map((str) =>
         pipe(
@@ -50,7 +49,6 @@ const parsePhases = (phasesMap: Record<string, string>): E.Either<CacheError, Ph
   );
 
 export const createPhaseCache = (
-  repository: PhaseRepository,
   config: PhaseCacheConfig = {
     keyPrefix: CachePrefix.PHASE,
     season: getCurrentSeason(),
@@ -76,16 +74,8 @@ export const createPhaseCache = (
           O.fromNullable,
           O.filter((phasesMap) => Object.keys(phasesMap).length > 0),
           O.fold(
-            () =>
-              pipe(
-                repository.findAll(),
-                TE.mapLeft(
-                  mapRepositoryErrorToCacheError('Repository Error: Failed to get all phases'),
-                ),
-                TE.mapLeft(mapCacheErrorToDomainError),
-                TE.chainFirst((phases) => setAllPhases(phases)),
-              ),
-            (cachedPhases) =>
+            () => TE.right([] as Phases),
+            (cachedPhases): TE.TaskEither<DomainError, Phases> =>
               pipe(
                 parsePhases(cachedPhases),
                 TE.fromEither,
@@ -121,24 +111,8 @@ export const createPhaseCache = (
       TE.mapLeft(mapCacheErrorToDomainError),
     );
 
-  const deleteAllPhases = (): TE.TaskEither<DomainError, void> =>
-    pipe(
-      TE.tryCatch(
-        () => redisClient.del(baseKey),
-        (error: unknown) =>
-          createCacheError({
-            code: CacheErrorCode.OPERATION_ERROR,
-            message: 'Cache Write Error: Failed to delete all phases',
-            cause: error as Error,
-          }),
-      ),
-      TE.map(() => undefined),
-      TE.mapLeft(mapCacheErrorToDomainError),
-    );
-
   return {
     getAllPhases,
     setAllPhases,
-    deleteAllPhases,
   };
 };

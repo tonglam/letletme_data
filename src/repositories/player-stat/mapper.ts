@@ -1,13 +1,16 @@
 import { PlayerStat as PrismaPlayerStatType } from '@prisma/client';
 import { PrismaPlayerStatCreateInput } from 'src/repositories/player-stat/type';
-import { SourcePlayerStat } from 'src/types/domain/player-stat.type';
+import { ElementTypeId } from 'src/types/base.type';
+import { EventId } from 'src/types/domain/event.type';
+import { RawPlayerStat } from 'src/types/domain/player-stat.type';
+import { PlayerId } from 'src/types/domain/player.type';
 
 export const mapPrismaPlayerStatToDomain = (
   prismaPlayerStat: PrismaPlayerStatType,
-): SourcePlayerStat => ({
-  event: prismaPlayerStat.event,
-  element: prismaPlayerStat.element,
-  elementType: prismaPlayerStat.elementType,
+): RawPlayerStat => ({
+  eventId: prismaPlayerStat.eventId as EventId,
+  elementId: prismaPlayerStat.elementId as PlayerId,
+  elementType: prismaPlayerStat.elementType as ElementTypeId,
   totalPoints: prismaPlayerStat.totalPoints ?? null,
   form: prismaPlayerStat.form ?? null,
   influence: prismaPlayerStat.influence ?? null,
@@ -49,10 +52,10 @@ export const mapPrismaPlayerStatToDomain = (
 });
 
 export const mapDomainStatToPrismaCreate = (
-  domainStat: SourcePlayerStat,
+  domainStat: RawPlayerStat,
 ): PrismaPlayerStatCreateInput => ({
-  event: domainStat.event,
-  element: domainStat.element,
+  eventId: domainStat.eventId,
+  elementId: domainStat.elementId,
   elementType: domainStat.elementType,
   totalPoints: domainStat.totalPoints,
   form: domainStat.form,

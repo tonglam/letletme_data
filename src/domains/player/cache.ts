@@ -5,11 +5,10 @@ import * as O from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
 import { CachePrefix } from 'src/configs/cache/cache.config';
 import { redisClient } from 'src/infrastructures/cache/client';
-import { PlayerRepository } from 'src/repositories/player/type';
 import { Player, Players } from 'src/types/domain/player.type';
 import { CacheError, CacheErrorCode, createCacheError, DomainError } from 'src/types/error.type';
 import { getCurrentSeason } from 'src/utils/common.util';
-import { mapCacheErrorToDomainError, mapRepositoryErrorToCacheError } from 'src/utils/error.util';
+import { mapCacheErrorToDomainError } from 'src/utils/error.util';
 
 const parsePlayer = (playerStr: string): E.Either<CacheError, Player> =>
   pipe(
@@ -37,9 +36,9 @@ const parsePlayer = (playerStr: string): E.Either<CacheError, Player> =>
     ),
   );
 
-const parsePlayers = (playersMap: Record<string, string>): E.Either<CacheError, Players> =>
+const parsePlayers = (playerMaps: Record<string, string>): E.Either<CacheError, Players> =>
   pipe(
-    Object.values(playersMap),
+    Object.values(playerMaps),
     (playerStrs) =>
       playerStrs.map((str) =>
         pipe(
@@ -52,7 +51,6 @@ const parsePlayers = (playersMap: Record<string, string>): E.Either<CacheError, 
   );
 
 export const createPlayerCache = (
-  repository: PlayerRepository,
   config: PlayerCacheConfig = {
     keyPrefix: CachePrefix.PLAYER,
     season: getCurrentSeason(),
@@ -78,17 +76,8 @@ export const createPlayerCache = (
           O.fromNullable,
           O.filter((playersMap) => Object.keys(playersMap).length > 0),
           O.fold(
-            () =>
-              pipe(
-                repository.findAll(),
-                TE.mapLeft(
-                  mapRepositoryErrorToCacheError('Repository Error: Failed to get all players'),
-                ),
-                (task: TE.TaskEither<CacheError, Players>) => task,
-                TE.mapLeft(mapCacheErrorToDomainError),
-                TE.chainFirst((players) => setAllPlayers(players)),
-              ),
-            (cachedPlayers) =>
+            () => TE.right([] as Players),
+            (cachedPlayers): TE.TaskEither<DomainError, Players> =>
               pipe(
                 parsePlayers(cachedPlayers),
                 TE.fromEither,
@@ -108,7 +97,7 @@ export const createPlayerCache = (
           if (players.length > 0) {
             const items: Record<string, string> = {};
             players.forEach((player) => {
-              items[player.element.toString()] = JSON.stringify(player);
+              items[player.id.toString()] = JSON.stringify(player);
             });
             multi.hset(baseKey, items);
           }
@@ -124,24 +113,8 @@ export const createPlayerCache = (
       TE.mapLeft(mapCacheErrorToDomainError),
     );
 
-  const deleteAllPlayers = (): TE.TaskEither<DomainError, void> =>
-    pipe(
-      TE.tryCatch(
-        () => redisClient.del(baseKey),
-        (error: unknown) =>
-          createCacheError({
-            code: CacheErrorCode.OPERATION_ERROR,
-            message: 'Cache Write Error: Failed to delete all players',
-            cause: error as Error,
-          }),
-      ),
-      TE.map(() => undefined),
-      TE.mapLeft(mapCacheErrorToDomainError),
-    );
-
   return {
     getAllPlayers,
     setAllPlayers,
-    deleteAllPlayers,
   };
 };
