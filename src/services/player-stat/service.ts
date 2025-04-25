@@ -143,7 +143,7 @@ const playerStatServiceOperations = (
           ),
         ),
       ),
-      TE.map(() => void 0),
+      TE.map(() => undefined),
     );
 
   return {

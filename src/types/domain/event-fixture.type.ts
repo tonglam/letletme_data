@@ -23,27 +23,27 @@ export const validateEventFixtureId = (value: unknown): E.Either<string, EventFi
 export type EventFixture = {
   readonly id: EventFixtureId;
   readonly code: number;
-  readonly event: number;
-  readonly kickoffTime: Date;
+  readonly eventId: number;
+  readonly kickoffTime: Date | null;
   readonly started: boolean;
   readonly finished: boolean;
   readonly minutes: number;
   readonly teamH: number | null;
-  readonly teamHName: string;
-  readonly teamHShortName: string;
-  readonly teamHDifficulty: number;
-  readonly teamHScore: number;
+  readonly teamHName: string | null;
+  readonly teamHShortName: string | null;
+  readonly teamHDifficulty: number | null;
+  readonly teamHScore: number | null;
   readonly teamA: number | null;
-  readonly teamAName: string;
-  readonly teamAShortName: string;
-  readonly teamADifficulty: number;
-  readonly teamAScore: number;
+  readonly teamAName: string | null;
+  readonly teamAShortName: string | null;
+  readonly teamADifficulty: number | null;
+  readonly teamAScore: number | null;
 };
 
 export type EventFixtures = readonly EventFixture[];
 
-export type SourceEventFixture = Omit<
+export type RawEventFixture = Omit<
   EventFixture,
   'teamHName' | 'teamAName' | 'teamHShortName' | 'teamAShortName'
 >;
-export type SourceEventFixtures = readonly SourceEventFixture[];
+export type RawEventFixtures = readonly RawEventFixture[];

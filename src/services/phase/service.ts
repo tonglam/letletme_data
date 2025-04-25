@@ -60,7 +60,7 @@ const phaseServiceOperations = (
       TE.chainFirstW((savedPhases: Phases) =>
         pipe(cache.setAllPhases(savedPhases), TE.mapLeft(mapDomainErrorToServiceError)),
       ),
-      TE.map(() => void 0),
+      TE.map(() => undefined),
     );
 
   return {

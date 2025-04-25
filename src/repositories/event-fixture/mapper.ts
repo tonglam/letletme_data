@@ -1,14 +1,14 @@
-import { SourceEventFixture } from 'src/types/domain/event-fixture.type';
+import { RawEventFixture } from 'src/types/domain/event-fixture.type';
 import { EventFixtureId } from 'src/types/domain/event-fixture.type';
 
 import { EventFixtureCreateInput, PrismaEventFixture, PrismaEventFixtureCreateInput } from './type';
 
 export const mapPrismaEventFixtureToDomain = (
   prismaEventFixture: PrismaEventFixture,
-): SourceEventFixture => ({
+): RawEventFixture => ({
   id: prismaEventFixture.id as EventFixtureId,
   code: prismaEventFixture.code,
-  event: prismaEventFixture.event,
+  eventId: prismaEventFixture.eventId,
   kickoffTime: prismaEventFixture.kickoffTime ?? new Date(),
   started: prismaEventFixture.started,
   finished: prismaEventFixture.finished,
@@ -26,7 +26,7 @@ export const mapDomainEventFixtureToPrismaCreate = (
 ): PrismaEventFixtureCreateInput => ({
   id: Number(domainEventFixture.id),
   code: domainEventFixture.code,
-  event: domainEventFixture.event,
+  eventId: domainEventFixture.eventId,
   kickoffTime: domainEventFixture.kickoffTime,
   started: domainEventFixture.started,
   finished: domainEventFixture.finished,

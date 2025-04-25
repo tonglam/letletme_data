@@ -1,28 +1,6 @@
-import * as E from 'fp-ts/Either';
-import { pipe } from 'fp-ts/function';
-import { Branded, createBrandedType } from 'src/types/base.type';
-
-export type EventLiveExplainId = Branded<number, 'EventLiveExplainId'>;
-
-export const createEventLiveExplainId = createBrandedType<number, 'EventLiveExplainId'>(
-  'EventLiveExplainId',
-  (value: unknown): value is number => typeof value === 'number' && value > 0,
-);
-
-export const validateEventLiveExplainId = (value: unknown): E.Either<string, EventLiveExplainId> =>
-  pipe(
-    value,
-    E.fromPredicate(
-      (v) => typeof v === 'number' && v > 0,
-      () => 'Invalid event live explain ID: must be a positive integer',
-    ),
-    E.map((v) => v as EventLiveExplainId),
-  );
-
 export interface EventLiveExplain {
-  readonly id: EventLiveExplainId;
-  readonly event: number;
-  readonly element: number;
+  readonly eventId: number;
+  readonly elementId: number;
   readonly bps: number | null;
   readonly bonus: number | null;
   readonly minutes: number | null;
@@ -63,5 +41,4 @@ export interface EventLiveExplain {
   readonly mngGoalsScoredPoints: number | null;
 }
 
-export type MappedEventLiveExplain = Omit<EventLiveExplain, 'id'>;
-export type EventLiveExplains = readonly MappedEventLiveExplain[];
+export type EventLiveExplains = readonly EventLiveExplain[];

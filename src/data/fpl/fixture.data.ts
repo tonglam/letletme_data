@@ -6,7 +6,7 @@ import {
   EventFixturesResponse,
   EventFixturesResponseSchema,
 } from 'src/data/fpl/schemas/fixture/fixture.schema';
-import { EventFixtures } from 'src/types/domain/event-fixture.type';
+import { RawEventFixtures } from 'src/types/domain/event-fixture.type';
 import { EventId } from 'src/types/domain/event.type';
 import { DataLayerError, DataLayerErrorCode } from 'src/types/error.type';
 import { createDataLayerError } from 'src/utils/error.util';
@@ -95,7 +95,7 @@ export const createFplFixtureDataService = (
     return fetchAndValidateFixtures(eventId);
   };
 
-  const getFixtures = (eventId: EventId): TE.TaskEither<DataLayerError, EventFixtures> =>
+  const getFixtures = (eventId: EventId): TE.TaskEither<DataLayerError, RawEventFixtures> =>
     pipe(
       getFplFixtureDataInternal(eventId),
       TE.chain((fixturesData) =>

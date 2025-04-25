@@ -75,7 +75,7 @@ export const playerValueTrackServiceOperations = (
           ),
         ),
       ),
-      TE.map(() => void 0),
+      TE.map(() => undefined),
     );
   };
 

@@ -18,11 +18,11 @@ export const DefaultTTL = {
 } as const;
 
 export const CachePrefix = {
-  PHASE: 'phase',
   EVENT: 'event',
+  PHASE: 'phase',
   TEAM: 'team',
-  STANDING: 'standing',
   PLAYER: 'player',
   PLAYER_VALUE: 'player-value',
   PLAYER_STAT: 'player-stat',
+  FIXTURE: 'fixture',
 } as const;

@@ -3,6 +3,7 @@
 
 generator client {
   provider = "prisma-client-js"
+  output   = "../node_modules/.prisma/client"
 }
 
 datasource db {
@@ -190,21 +191,21 @@ model PlayerStat {
 model EventFixture {
   id              Int       @id
   code            Int       @unique @map("code")
-  event           Int       @map("event")
+  eventId         Int       @map("event_id")
   kickoffTime     DateTime? @map("kickoff_time") @db.Timestamptz
   started         Boolean   @default(false) @map("started")
   finished        Boolean   @default(false) @map("finished")
   minutes         Int       @default(0) @map("minutes")
   teamH           Int?      @map("team_h")
-  teamHDifficulty Int       @default(0) @map("team_h_difficulty")
-  teamHScore      Int       @default(0) @map("team_h_score")
+  teamHDifficulty Int?      @map("team_h_difficulty")
+  teamHScore      Int?      @map("team_h_score")
   teamA           Int?      @map("team_a")
-  teamADifficulty Int       @default(0) @map("team_a_difficulty")
-  teamAScore      Int       @default(0) @map("team_a_score")
+  teamADifficulty Int?      @map("team_a_difficulty")
+  teamAScore      Int?      @map("team_a_score")
   createdAt       DateTime  @default(now()) @map("created_at")
   updatedAt       DateTime  @updatedAt @map("updated_at")
 
-  @@index([event], name: "idx_event_fixtures_event_id")
+  @@index([eventId], name: "idx_event_fixtures_event_id")
   @@index([teamH], name: "idx_event_fixtures_team_h_id")
   @@index([teamA], name: "idx_event_fixtures_team_a_id")
   @@map("event_fixtures")
@@ -212,8 +213,8 @@ model EventFixture {
 
 model EventLive {
   id                       Int      @id @default(autoincrement())
-  event                    Int      @map("event")
-  element                  Int      @map("element")
+  eventId                  Int      @map("event_id")
+  elementId                Int      @map("element_id")
   minutes                  Int?     @map("minutes")
   goalsScored              Int?     @map("goals_scored")
   assists                  Int?     @map("assists")
@@ -244,16 +245,16 @@ model EventLive {
   createdAt                DateTime @default(now()) @map("created_at")
   updatedAt                DateTime @updatedAt @map("updated_at")
 
-  @@unique([event, element], name: "unique_event_element_live")
-  @@index([element], name: "idx_event_live_element_id")
-  @@index([event], name: "idx_event_live_event_id")
+  @@unique([eventId, elementId], name: "unique_event_element_live")
+  @@index([elementId], name: "idx_event_live_element_id")
+  @@index([eventId], name: "idx_event_live_event_id")
   @@map("event_lives")
 }
 
 model EventLiveExplain {
   id                    Int      @id @default(autoincrement())
-  event                 Int      @map("event")
-  element               Int      @map("element")
+  eventId               Int      @map("event_id")
+  elementId             Int      @map("element_id")
   bps                   Int?     @map("bps")
   bonus                 Int?     @map("bonus")
   minutes               Int?     @map("minutes")
@@ -295,9 +296,9 @@ model EventLiveExplain {
   createdAt             DateTime @default(now()) @map("created_at")
   updatedAt             DateTime @updatedAt @map("updated_at")
 
-  @@unique([element, event], name: "unique_event_element_live_explain")
-  @@index([element], name: "idx_event_live_explain_element_id")
-  @@index([event], name: "idx_event_live_explain_event_id")
+  @@unique([elementId, eventId], name: "unique_event_element_live_explain")
+  @@index([elementId], name: "idx_event_live_explain_element_id")
+  @@index([eventId], name: "idx_event_live_explain_event_id")
   @@map("event_live_explains")
 }
 

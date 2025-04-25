@@ -60,7 +60,7 @@ const teamServiceOperations = (
       TE.chainFirstW((savedTeams: Teams) =>
         pipe(cache.setAllTeams(savedTeams), TE.mapLeft(mapDomainErrorToServiceError)),
       ),
-      TE.map(() => void 0),
+      TE.map(() => undefined),
     );
 
   return {

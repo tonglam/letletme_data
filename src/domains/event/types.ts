@@ -1,4 +1,5 @@
 import * as TE from 'fp-ts/TaskEither';
+import { CachePrefix } from 'src/configs/cache/cache.config';
 import { Event, Events } from 'src/types/domain/event.type';
 
 import { DomainError } from '../../types/error.type';
@@ -6,7 +7,7 @@ import { DomainError } from '../../types/error.type';
 import type { EventCreateInputs } from '../../repositories/event/type';
 
 export interface EventCacheConfig {
-  readonly keyPrefix: string;
+  readonly keyPrefix: (typeof CachePrefix)[keyof typeof CachePrefix];
   readonly season: string;
 }
 

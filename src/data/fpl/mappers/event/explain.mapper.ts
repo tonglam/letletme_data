@@ -1,18 +1,17 @@
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import { EventLiveExplainResponse } from 'src/data/fpl/schemas/event/explain.schema';
-import {
-  MappedEventLiveExplain,
-  validateEventLiveExplainId,
-} from 'src/types/domain/event-live-explain.type';
+import { EventLiveExplain } from 'src/types/domain/event-live-explain.type';
+import { EventId } from 'src/types/domain/event.type';
+import { validatePlayerId } from 'src/types/domain/player.type';
 
 export const mapEventLiveExplainResponseToDomain = (
-  event: number,
+  eventId: EventId,
   raw: EventLiveExplainResponse,
-): E.Either<string, MappedEventLiveExplain> => {
+): E.Either<string, EventLiveExplain> => {
   const defaultStats = {
-    event: 0,
-    element: 0,
+    eventId: eventId,
+    elementId: 0,
     elementType: 0,
     team: 0,
     totalPoints: 0,
@@ -124,12 +123,12 @@ export const mapEventLiveExplainResponseToDomain = (
 
   return pipe(
     E.Do,
-    E.bind('element', () => validateEventLiveExplainId(raw.element)),
+    E.bind('elementId', () => validatePlayerId(raw.element)),
     E.map(
-      ({ element }): MappedEventLiveExplain => ({
+      ({ elementId }): EventLiveExplain => ({
         ...processedStats,
-        element,
-        event,
+        elementId,
+        eventId,
       }),
     ),
   );

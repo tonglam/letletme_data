@@ -73,30 +73,12 @@ const playerServiceOperations = (
       ),
       TE.chainW((rawPlayers: RawPlayers) =>
         pipe(
-          rawPlayers.length > 0
-            ? domainOps.savePlayers(rawPlayers)
-            : TE.right(rawPlayers as RawPlayers),
+          rawPlayers.length > 0 ? domainOps.savePlayers(rawPlayers) : TE.right([] as RawPlayers),
           TE.mapLeft(mapDomainErrorToServiceError),
         ),
       ),
-      TE.chainFirstW((savedPlayers) =>
-        pipe(
-          fplDataService.getTeams(),
-          TE.mapLeft((error: DataLayerError) =>
-            createServiceIntegrationError({
-              message: 'Failed to fetch/map teams via data layer for enrichment',
-              cause: error.cause,
-              details: error.details,
-            }),
-          ),
-          TE.chainW((teams) =>
-            pipe(teamCache.setAllTeams(teams), TE.mapLeft(mapDomainErrorToServiceError)),
-          ),
-          TE.map(() => savedPlayers),
-        ),
-      ),
-      TE.chainW((savedPlayers: RawPlayers) =>
-        pipe(enrichPlayers(teamCache)(savedPlayers), TE.mapLeft(mapDomainErrorToServiceError)),
+      TE.chainW((savedRawPlayers: RawPlayers) =>
+        pipe(enrichPlayers(teamCache)(savedRawPlayers), TE.mapLeft(mapDomainErrorToServiceError)),
       ),
       TE.chainW((enrichedPlayers: Players) =>
         pipe(
@@ -106,6 +88,7 @@ const playerServiceOperations = (
           TE.mapLeft(mapDomainErrorToServiceError),
         ),
       ),
+      TE.map(() => undefined),
     );
 
   return {

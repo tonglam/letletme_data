@@ -1,20 +1,20 @@
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
-import { EventFixture, validateEventFixtureId } from 'src/types/domain/event-fixture.type';
+import { RawEventFixture, validateEventFixtureId } from 'src/types/domain/event-fixture.type';
 
 import { EventFixtureResponse } from '../../schemas/fixture/fixture.schema';
 
 export const mapEventFixtureResponseToDomain = (
   raw: EventFixtureResponse,
-): E.Either<string, EventFixture> => {
+): E.Either<string, RawEventFixture> => {
   return pipe(
     E.Do,
     E.bind('id', () => validateEventFixtureId(raw.id)),
     E.map(
-      ({ id }): EventFixture => ({
+      ({ id }): RawEventFixture => ({
         id: id,
         code: raw.code,
-        event: raw.event,
+        eventId: raw.event,
         kickoffTime: raw.kickoff_time ? new Date(raw.kickoff_time) : null,
         started: raw.started,
         finished: raw.finished,

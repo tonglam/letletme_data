@@ -76,7 +76,7 @@ export const createPhaseRepository = (prisma: PrismaClient): PhaseRepository => 
             message: `Failed to delete all phases: ${error}`,
           }),
       ),
-      TE.map(() => void 0),
+      TE.map(() => undefined),
     );
 
   return {

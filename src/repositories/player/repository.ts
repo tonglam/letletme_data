@@ -80,7 +80,7 @@ export const createPlayerRepository = (prisma: PrismaClient): PlayerRepository =
             cause: error instanceof Error ? error : undefined,
           }),
       ),
-      TE.map(() => void 0),
+      TE.map(() => undefined),
     );
 
   return {

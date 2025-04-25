@@ -5,9 +5,9 @@ import { EntryHistoryInfos } from 'src/types/domain/entry-history-info.type';
 import { EntryInfos } from 'src/types/domain/entry-info.type';
 import { EntryId } from 'src/types/domain/entry-info.type';
 import { EntryLeagueInfos } from 'src/types/domain/entry-league-info.type';
-import { EventFixtures } from 'src/types/domain/event-fixture.type';
+import { RawEventFixtures } from 'src/types/domain/event-fixture.type';
 import { EventLiveExplains } from 'src/types/domain/event-live-explain.type';
-import { EventLives } from 'src/types/domain/event-live.type';
+import { RawEventLives } from 'src/types/domain/event-live.type';
 import { EventId, Events } from 'src/types/domain/event.type';
 import { Phases } from 'src/types/domain/phase.type';
 import { RawPlayerStats as RawPlayerStats } from 'src/types/domain/player-stat.type';
@@ -30,11 +30,11 @@ export interface FplBootstrapDataService {
 }
 
 export interface FplFixtureDataService {
-  readonly getFixtures: (eventId: EventId) => TE.TaskEither<DataLayerError, EventFixtures>;
+  readonly getFixtures: (eventId: EventId) => TE.TaskEither<DataLayerError, RawEventFixtures>;
 }
 
 export interface FplEventDataService {
-  readonly getLives: (eventId: EventId) => TE.TaskEither<DataLayerError, EventLives>;
+  readonly getLives: (eventId: EventId) => TE.TaskEither<DataLayerError, RawEventLives>;
   readonly getExplains: (eventId: EventId) => TE.TaskEither<DataLayerError, EventLiveExplains>;
 }
 

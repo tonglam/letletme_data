@@ -82,7 +82,7 @@ export const createPlayerStatRepository = (prisma: PrismaClient): PlayerStatRepo
             cause: error instanceof Error ? error : undefined,
           }),
       ),
-      TE.map(() => void 0),
+      TE.map(() => undefined),
     );
 
   return {

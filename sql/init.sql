@@ -186,7 +186,7 @@ ALTER TABLE "player_stats" ENABLE ROW LEVEL SECURITY;
 CREATE TABLE IF NOT EXISTS "event_fixtures" (
     "id" SERIAL PRIMARY KEY,
     "code" INTEGER UNIQUE NOT NULL,
-    "event" INTEGER NOT NULL,
+    "event_id" INTEGER NOT NULL,
     "kickoff_time" TIMESTAMPTZ,
     "started" BOOLEAN NOT NULL DEFAULT false,
     "finished" BOOLEAN NOT NULL DEFAULT false,
@@ -200,15 +200,15 @@ CREATE TABLE IF NOT EXISTS "event_fixtures" (
     "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updated_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-CREATE INDEX IF NOT EXISTS "idx_event_fixtures_event_id" ON "event_fixtures" ("event");
+CREATE INDEX IF NOT EXISTS "idx_event_fixtures_event_id" ON "event_fixtures" ("event_id");
 CREATE INDEX IF NOT EXISTS "idx_event_fixtures_team_h_id" ON "event_fixtures" ("team_h");
 CREATE INDEX IF NOT EXISTS "idx_event_fixtures_team_a_id" ON "event_fixtures" ("team_a");
 ALTER TABLE "event_fixtures" ENABLE ROW LEVEL SECURITY;
 
 CREATE TABLE IF NOT EXISTS "event_lives" (
     "id" SERIAL PRIMARY KEY,
-    "event" INTEGER NOT NULL,
-    "element" INTEGER NOT NULL,
+    "event_id" INTEGER NOT NULL,
+    "element_id" INTEGER NOT NULL,
     "minutes" INTEGER,
     "goals_scored" INTEGER,
     "assists" INTEGER,
@@ -239,15 +239,15 @@ CREATE TABLE IF NOT EXISTS "event_lives" (
     "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updated_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-CREATE UNIQUE INDEX IF NOT EXISTS "unique_event_element_live" ON "event_lives" ("event", "element");
-CREATE INDEX IF NOT EXISTS "idx_event_live_element_id" ON "event_lives" ("element");
-CREATE INDEX IF NOT EXISTS "idx_event_live_event_id" ON "event_lives" ("event");
+CREATE UNIQUE INDEX IF NOT EXISTS "unique_event_element_live" ON "event_lives" ("event_id", "element_id");
+CREATE INDEX IF NOT EXISTS "idx_event_live_element_id" ON "event_lives" ("element_id");
+CREATE INDEX IF NOT EXISTS "idx_event_live_event_id" ON "event_lives" ("event_id");
 ALTER TABLE "event_lives" ENABLE ROW LEVEL SECURITY;
 
 CREATE TABLE IF NOT EXISTS "event_live_explains" (
     "id" SERIAL PRIMARY KEY,
-    "event" INTEGER NOT NULL,
-    "element" INTEGER NOT NULL,
+    "event_id" INTEGER NOT NULL,
+    "element_id" INTEGER NOT NULL,
     "bps" INTEGER,
     "bonus" INTEGER,
     "minutes" INTEGER,
@@ -289,9 +289,9 @@ CREATE TABLE IF NOT EXISTS "event_live_explains" (
     "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updated_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-CREATE UNIQUE INDEX IF NOT EXISTS "unique_event_element_live_explain" ON "event_live_explains" ("element", "event");
-CREATE INDEX IF NOT EXISTS "idx_event_live_explain_element_id" ON "event_live_explains" ("element");
-CREATE INDEX IF NOT EXISTS "idx_event_live_explain_event_id" ON "event_live_explains" ("event");
+CREATE UNIQUE INDEX IF NOT EXISTS "unique_event_element_live_explain" ON "event_live_explains" ("element_id", "event_id");
+CREATE INDEX IF NOT EXISTS "idx_event_live_explain_element_id" ON "event_live_explains" ("element_id");
+CREATE INDEX IF NOT EXISTS "idx_event_live_explain_event_id" ON "event_live_explains" ("event_id");
 ALTER TABLE "event_live_explains" ENABLE ROW LEVEL SECURITY;
 
 CREATE TABLE IF NOT EXISTS "entry_infos" (

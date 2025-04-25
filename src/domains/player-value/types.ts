@@ -1,11 +1,12 @@
 import * as TE from 'fp-ts/TaskEither';
+import { CachePrefix } from 'src/configs/cache/cache.config';
 import { PlayerValueCreateInputs } from 'src/repositories/player-value/type';
 import { PlayerValues, RawPlayerValues } from 'src/types/domain/player-value.type';
 import { PlayerId } from 'src/types/domain/player.type';
 import { DomainError } from 'src/types/error.type';
 
 export type PlayerValueCacheConfig = {
-  keyPrefix: string;
+  keyPrefix: (typeof CachePrefix)[keyof typeof CachePrefix];
   readonly season: string;
   ttlSeconds: number;
 };

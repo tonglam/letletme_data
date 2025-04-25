@@ -92,10 +92,10 @@ const eventServiceOperations = (
                     TE.mapLeft(mapDomainErrorToServiceError),
                   );
                 } else {
-                  return TE.right(void 0);
+                  return TE.right(undefined);
                 }
               }),
-              TE.map(() => void 0),
+              TE.map(() => undefined),
             );
           }),
         );

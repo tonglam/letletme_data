@@ -6,6 +6,12 @@ import * as RA from 'fp-ts/ReadonlyArray';
 import * as RNEA from 'fp-ts/ReadonlyNonEmptyArray';
 import * as TE from 'fp-ts/TaskEither';
 import { ElementTypeId, ElementTypeName, getElementTypeName } from 'src/types/base.type';
+import {
+  EventFixture,
+  EventFixtures,
+  RawEventFixture,
+  RawEventFixtures,
+} from 'src/types/domain/event-fixture.type';
 import { PlayerStat, PlayerStats, RawPlayerStat } from 'src/types/domain/player-stat.type';
 import { PlayerValue, PlayerValues, RawPlayerValue } from 'src/types/domain/player-value.type';
 import { Player } from 'src/types/domain/player.type';
@@ -220,3 +226,59 @@ export const enrichPlayerValues =
       ),
       TE.map((values) => values as PlayerValues),
     );
+
+export const enrichEventFixtures =
+  (teamCache: TeamCache) =>
+  (rawFixtures: RawEventFixtures): TE.TaskEither<DomainError, EventFixtures> => {
+    if (RA.isEmpty(rawFixtures)) {
+      return TE.right([]);
+    }
+
+    return pipe(
+      teamCache.getAllTeams(),
+      TE.map((teams: ReadonlyArray<Team>) => {
+        const teamMap = new Map(teams.map((t: Team) => [t.id as number, t]));
+
+        const enrichedFixtures = pipe(
+          rawFixtures,
+          RA.map((rawFixture: RawEventFixture): O.Option<EventFixture> => {
+            const homeTeamOpt = O.fromNullable(teamMap.get(rawFixture.teamH as number));
+            const awayTeamOpt = O.fromNullable(teamMap.get(rawFixture.teamA as number));
+
+            return pipe(
+              O.Do,
+              O.apS('homeTeam', homeTeamOpt),
+              O.apS('awayTeam', awayTeamOpt),
+              O.map(
+                ({ homeTeam, awayTeam }) =>
+                  ({
+                    ...rawFixture,
+                    teamHName: homeTeam.name,
+                    teamHShortName: homeTeam.shortName,
+                    teamAName: awayTeam.name,
+                    teamAShortName: awayTeam.shortName,
+                  }) as EventFixture,
+              ),
+            );
+          }),
+          RA.compact,
+        );
+
+        if (enrichedFixtures.length < rawFixtures.length) {
+          console.warn(
+            '[enrichEventFixtures] Enrichment resulted in fewer fixtures than input. Check TeamCache integrity.',
+          );
+        }
+
+        return enrichedFixtures as EventFixtures;
+      }),
+      TE.mapLeft(
+        (domainError): DomainError =>
+          createDomainError({
+            code: DomainErrorCode.CACHE_ERROR,
+            message: 'Failed to retrieve teams from cache for fixture enrichment',
+            cause: domainError,
+          }),
+      ),
+    );
+  };

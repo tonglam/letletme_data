@@ -8,7 +8,7 @@ import { EventResponse, EventResponseSchema } from 'src/data/fpl/schemas/event/e
 import { FplEventDataService } from 'src/data/types';
 import { HTTPClient } from 'src/infrastructures/http/types';
 import { EventLiveExplains } from 'src/types/domain/event-live-explain.type';
-import { EventLives } from 'src/types/domain/event-live.type';
+import { RawEventLives } from 'src/types/domain/event-live.type';
 import { EventId } from 'src/types/domain/event.type';
 import { DataLayerError, DataLayerErrorCode } from 'src/types/error.type';
 import { createDataLayerError } from 'src/utils/error.util';
@@ -93,7 +93,7 @@ export const createFplEventDataService = (
     return fetchAndValidateEvents(eventId);
   };
 
-  const getLives = (eventId: EventId): TE.TaskEither<DataLayerError, EventLives> =>
+  const getLives = (eventId: EventId): TE.TaskEither<DataLayerError, RawEventLives> =>
     pipe(
       getFplEventDataInternal(eventId),
       TE.chain((eventData) =>

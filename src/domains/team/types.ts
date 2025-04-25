@@ -1,11 +1,12 @@
 import * as TE from 'fp-ts/TaskEither';
+import { CachePrefix } from 'src/configs/cache/cache.config';
 import { Teams } from 'src/types/domain/team.type';
 import { DomainError } from 'src/types/error.type';
 
 import { TeamCreateInputs } from '../../repositories/team/type';
 
 export interface TeamCacheConfig {
-  readonly keyPrefix: string;
+  readonly keyPrefix: (typeof CachePrefix)[keyof typeof CachePrefix];
   readonly season: string;
 }
 

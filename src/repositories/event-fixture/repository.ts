@@ -1,59 +1,69 @@
 import { PrismaClient } from '@prisma/client';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import {
-  mapDomainEventFixtureToPrismaCreate,
-  mapPrismaEventFixtureToDomain,
-} from 'src/repositories/event-fixture/mapper';
-import {
-  EventFixtureId,
-  SourceEventFixture,
-  SourceEventFixtures,
-} from 'src/types/domain/event-fixture.type';
+import { RawEventFixtures } from 'src/types/domain/event-fixture.type';
+import { EventId } from 'src/types/domain/event.type';
+import { TeamId } from 'src/types/domain/team.type';
 import { createDBError, DBError, DBErrorCode } from 'src/types/error.type';
 
+import { mapDomainEventFixtureToPrismaCreate, mapPrismaEventFixtureToDomain } from './mapper';
 import { EventFixtureCreateInputs, EventFixtureRepository } from './type';
 
 export const createEventFixtureRepository = (prisma: PrismaClient): EventFixtureRepository => {
-  const findById = (id: EventFixtureId): TE.TaskEither<DBError, SourceEventFixture> =>
+  const findByTeamId = (teamId: TeamId): TE.TaskEither<DBError, RawEventFixtures> =>
     pipe(
       TE.tryCatch(
-        () => prisma.eventFixture.findUnique({ where: { id: Number(id) } }),
+        () =>
+          prisma.eventFixture.findMany({ where: { OR: [{ teamH: teamId }, { teamA: teamId }] } }),
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to fetch event fixture by id ${id}: ${error}`,
+            message: `Failed to find event fixture by team id ${teamId}: ${error}`,
           }),
       ),
-      TE.chainW((prismaEventFixtureOrNull) =>
-        prismaEventFixtureOrNull
-          ? TE.right(mapPrismaEventFixtureToDomain(prismaEventFixtureOrNull))
+      TE.chainW((prismaEventFixturesOrNull) =>
+        prismaEventFixturesOrNull
+          ? TE.right(prismaEventFixturesOrNull.map(mapPrismaEventFixtureToDomain))
           : TE.left(
               createDBError({
                 code: DBErrorCode.NOT_FOUND,
-                message: `Event fixture with id ${id} not found`,
+                message: `Event fixture with team id ${teamId} not found in database`,
               }),
             ),
       ),
     );
 
-  const findAll = (): TE.TaskEither<DBError, SourceEventFixtures> =>
+  const findByEventId = (eventId: EventId): TE.TaskEither<DBError, RawEventFixtures> =>
     pipe(
       TE.tryCatch(
-        () => prisma.eventFixture.findMany({ orderBy: { id: 'asc' } }),
+        () => prisma.eventFixture.findMany({ where: { eventId } }),
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to fetch all event fixtures: ${error}`,
+            message: `Failed to find event fixture by event id ${eventId}: ${error}`,
           }),
       ),
-      TE.map((prismaEventFixtures) => prismaEventFixtures.map(mapPrismaEventFixtureToDomain)),
+      TE.chainW((prismaEventFixturesOrNull) =>
+        prismaEventFixturesOrNull
+          ? TE.right(prismaEventFixturesOrNull.map(mapPrismaEventFixtureToDomain))
+          : TE.left(
+              createDBError({
+                code: DBErrorCode.NOT_FOUND,
+                message: `Event fixture with event id ${eventId} not found in database`,
+              }),
+            ),
+      ),
     );
 
-  const saveBatch = (
+  const saveBatchByEventId = (
     eventFixtures: EventFixtureCreateInputs,
-  ): TE.TaskEither<DBError, SourceEventFixtures> =>
-    pipe(
+  ): TE.TaskEither<DBError, RawEventFixtures> => {
+    if (eventFixtures.length === 0) {
+      return TE.right([]);
+    }
+    const eventId = eventFixtures[0].eventId as EventId;
+
+    return pipe(
       TE.tryCatch(
         async () => {
           const dataToCreate = eventFixtures.map(mapDomainEventFixtureToPrismaCreate);
@@ -65,29 +75,44 @@ export const createEventFixtureRepository = (prisma: PrismaClient): EventFixture
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to create event fixtures in batch: ${error}`,
+            message: `Failed to save event fixture batch for event id ${eventId}: ${error}`,
           }),
       ),
-      TE.chain(() => findAll()),
+      TE.chainW(() => findByEventId(eventId)),
+    );
+  };
+
+  const deleteByEventId = (eventId: EventId): TE.TaskEither<DBError, void> =>
+    pipe(
+      TE.tryCatch(
+        () => prisma.eventFixture.deleteMany({ where: { eventId } }),
+        (error) =>
+          createDBError({
+            code: DBErrorCode.QUERY_ERROR,
+            message: `Failed to delete event fixture by event id ${eventId}: ${error}`,
+          }),
+      ),
+      TE.map(() => undefined),
     );
 
   const deleteAll = (): TE.TaskEither<DBError, void> =>
     pipe(
       TE.tryCatch(
-        () => prisma.eventFixture.deleteMany({}),
+        () => prisma.eventFixture.deleteMany(),
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
             message: `Failed to delete all event fixtures: ${error}`,
           }),
       ),
-      TE.map(() => void 0),
+      TE.map(() => undefined),
     );
 
   return {
-    findById,
-    findAll,
-    saveBatch,
+    findByTeamId,
+    findByEventId,
+    saveBatchByEventId,
+    deleteByEventId,
     deleteAll,
   };
 };

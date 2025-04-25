@@ -72,7 +72,7 @@ export const createTeamRepository = (prismaClient: PrismaClient): TeamRepository
             message: `Failed to delete all teams: ${error}`,
           }),
       ),
-      TE.map(() => void 0),
+      TE.map(() => undefined),
     );
 
   return {

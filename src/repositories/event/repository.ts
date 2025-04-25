@@ -97,7 +97,7 @@ export const createEventRepository = (prisma: PrismaClient): EventRepository => 
             message: `Failed to delete all events: ${error}`,
           }),
       ),
-      TE.map(() => void 0),
+      TE.map(() => undefined),
     );
 
   return {
