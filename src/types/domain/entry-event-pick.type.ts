@@ -1,34 +1,39 @@
-import * as E from 'fp-ts/Either';
-import { pipe } from 'fp-ts/function';
-import { Branded, Chip, createBrandedType } from 'src/types/base.type';
+import { Chip, ElementTypeId, ElementTypeName } from 'src/types/base.type';
+import { EntryId } from 'src/types/domain/entry-info.type';
+import { EventId } from 'src/types/domain/event.type';
+import { PlayerId } from 'src/types/domain/player.type';
+import { TeamId } from 'src/types/domain/team.type';
 
-export type EntryEventPickId = Branded<number, 'EntryEventPickId'>;
-
-export const createEntryEventPickId = createBrandedType<number, 'EntryEventPickId'>(
-  'EntryEventPickId',
-  (value: unknown): value is number => typeof value === 'number' && value > 0,
-);
-
-export const validateEntryEventPickId = (value: unknown): E.Either<string, EntryEventPickId> => {
-  return pipe(
-    value,
-    E.fromPredicate(
-      (v): v is number => typeof v === 'number' && v > 0,
-      () => 'Invalid entry event info ID: must be a positive integer',
-    ),
-    E.map((v) => v as EntryEventPickId),
-  );
+export type PickItem = {
+  readonly elementId: PlayerId;
+  readonly webName: string;
+  readonly position: number;
+  readonly multiplier: number;
+  readonly isCaptain: boolean;
+  readonly isViceCaptain: boolean;
+  readonly elementType: ElementTypeId;
+  readonly elementTypeName: ElementTypeName;
+  readonly teamId: TeamId;
+  readonly teamName: string;
+  readonly teamShortName: string;
+  readonly value: number;
 };
 
 export type EntryEventPick = {
-  readonly id: EntryEventPickId;
-  readonly entry: number;
-  readonly event: number;
-  readonly chip: Chip | null;
-  readonly picks: readonly number[];
+  readonly entryId: EntryId;
+  readonly entryName: string;
+  readonly eventId: EventId;
+  readonly chip: Chip;
+  readonly picks: readonly PickItem[];
   readonly transfers: number;
   readonly transfersCost: number;
 };
 
-export type MappedEntryEventPick = Omit<EntryEventPick, 'id' | 'transfers' | 'transfersCost'>;
-export type EntryEventPicks = readonly MappedEntryEventPick[];
+export type EntryEventPicks = readonly EntryEventPick[];
+
+export type RawPickItem = Omit<
+  PickItem,
+  'webName' | 'elementTypeName' | 'teamId' | 'teamName' | 'teamShortName' | 'value'
+>;
+export type RawEntryEventPick = Omit<EntryEventPick, 'entryName'>;
+export type RawEntryEventPicks = readonly RawEntryEventPick[];

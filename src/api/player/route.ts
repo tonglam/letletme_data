@@ -9,7 +9,6 @@ export const playerRouter = (playerService: PlayerService): Router => {
   const handlers = createPlayerHandlers(playerService);
 
   router.get('/', createHandler(handlers.getAllPlayers));
-  router.post('/sync', createHandler(handlers.syncPlayers));
   router.get('/:id', createHandler(handlers.getPlayerByElement));
 
   return router;

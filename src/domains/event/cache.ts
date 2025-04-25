@@ -52,6 +52,7 @@ export const createEventCache = (
   config: EventCacheConfig = {
     keyPrefix: CachePrefix.EVENT,
     season: getCurrentSeason(),
+    ttlSeconds: DefaultTTL.EVENT,
   },
 ): EventCache => {
   const { keyPrefix, season } = config;

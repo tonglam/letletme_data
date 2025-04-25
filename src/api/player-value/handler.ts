@@ -21,10 +21,6 @@ const validateChangeDate = (dateStr: unknown): E.Either<string, string> => {
 export const createPlayerValueHandlers = (
   playerValueService: PlayerValueService,
 ): PlayerValueHandlerResponse => {
-  const syncPlayerValues = (): TE.TaskEither<APIError, void> => {
-    return pipe(playerValueService.syncPlayerValuesFromApi(), TE.mapLeft(toAPIError));
-  };
-
   const getPlayerValuesByChangeDate = (req: Request): TE.TaskEither<APIError, PlayerValues> => {
     const changeDateParam = req.params.changeDate;
     const validatedDate = validateChangeDate(changeDateParam);
@@ -80,6 +76,5 @@ export const createPlayerValueHandlers = (
     getPlayerValuesByChangeDate,
     getPlayerValuesByElement,
     getPlayerValuesByTeam,
-    syncPlayerValues,
   };
 };

@@ -5,6 +5,5 @@ import { APIError } from 'src/types/error.type';
 
 export interface TeamHandlerResponse {
   readonly getAllTeams: () => TaskEither<APIError, Teams>;
-  readonly syncTeams: () => TaskEither<APIError, void>;
   readonly getTeamById: (req: Request) => TaskEither<APIError, Team>;
 }

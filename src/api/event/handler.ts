@@ -25,10 +25,6 @@ export const createEventHandlers = (eventService: EventService): EventHandlerRes
     return pipe(eventService.getNextEvent(), TE.mapLeft(toAPIError));
   };
 
-  const syncEvents = (): TE.TaskEither<APIError, void> => {
-    return pipe(eventService.syncEventsFromApi(), TE.mapLeft(toAPIError));
-  };
-
   const getEventById = (req: Request): TE.TaskEither<APIError, Event> => {
     const eventId = Number(req.params.id);
     if (isNaN(eventId) || eventId <= 0 || eventId > 38) {
@@ -48,7 +44,6 @@ export const createEventHandlers = (eventService: EventService): EventHandlerRes
     getCurrentEvent,
     getLastEvent,
     getNextEvent,
-    syncEvents,
     getEventById,
   };
 };

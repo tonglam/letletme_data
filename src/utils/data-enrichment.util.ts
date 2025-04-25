@@ -243,8 +243,8 @@ export const enrichEventFixtures =
         const enrichedFixtures = pipe(
           rawFixtures,
           RA.map((rawFixture: RawEventFixture): O.Option<EventFixture> => {
-            const homeTeamOpt = O.fromNullable(teamMap.get(rawFixture.teamH as number));
-            const awayTeamOpt = O.fromNullable(teamMap.get(rawFixture.teamA as number));
+            const homeTeamOpt = O.fromNullable(teamMap.get(rawFixture.teamHId as TeamId));
+            const awayTeamOpt = O.fromNullable(teamMap.get(rawFixture.teamAId as TeamId));
 
             return pipe(
               O.Do,

@@ -1,5 +1,5 @@
 import * as TE from 'fp-ts/TaskEither';
-import { CachePrefix } from 'src/configs/cache/cache.config';
+import { CachePrefix, DefaultTTL } from 'src/configs/cache/cache.config';
 import { PlayerCreateInputs } from 'src/repositories/player/types';
 import { Players, RawPlayers } from 'src/types/domain/player.type';
 import { DomainError } from 'src/types/error.type';
@@ -7,6 +7,7 @@ import { DomainError } from 'src/types/error.type';
 export interface PlayerCacheConfig {
   readonly keyPrefix: (typeof CachePrefix)[keyof typeof CachePrefix];
   readonly season: string;
+  ttlSeconds: (typeof DefaultTTL)[keyof typeof DefaultTTL];
 }
 
 export interface PlayerCache {

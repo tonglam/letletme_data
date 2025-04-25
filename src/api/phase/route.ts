@@ -9,7 +9,6 @@ export const phaseRouter = (phaseService: PhaseService): Router => {
   const handlers = createPhaseHandlers(phaseService);
 
   router.get('/', createHandler(handlers.getAllPhases));
-  router.post('/sync', createHandler(handlers.syncPhases));
   router.get('/:id', createHandler(handlers.getPhaseById));
 
   return router;

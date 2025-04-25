@@ -1,5 +1,5 @@
 import * as TE from 'fp-ts/TaskEither';
-import { CachePrefix } from 'src/configs/cache/cache.config';
+import { CachePrefix, DefaultTTL } from 'src/configs/cache/cache.config';
 import { EventLiveCreateInputs } from 'src/repositories/event-live/types';
 import { EventLives, RawEventLives } from 'src/types/domain/event-live.type';
 import { EventId } from 'src/types/domain/event.type';
@@ -9,6 +9,7 @@ import { DomainError } from '../../types/error.type';
 export interface EventLiveCacheConfig {
   readonly keyPrefix: (typeof CachePrefix)[keyof typeof CachePrefix];
   readonly season: string;
+  ttlSeconds: (typeof DefaultTTL)[keyof typeof DefaultTTL];
 }
 
 export interface EventLiveCache {

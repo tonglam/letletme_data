@@ -8,7 +8,7 @@ import { EventFixture, EventFixtures } from 'src/types/domain/event-fixture.type
 import { EventId } from 'src/types/domain/event.type';
 import { getCurrentSeason } from 'src/utils/common.util';
 
-import { CachePrefix } from '../../configs/cache/cache.config';
+import { CachePrefix, DefaultTTL } from '../../configs/cache/cache.config';
 import { redisClient } from '../../infrastructures/cache/client';
 import { CacheError, CacheErrorCode, createCacheError, DomainError } from '../../types/error.type';
 import { mapCacheErrorToDomainError } from '../../utils/error.util';
@@ -59,6 +59,7 @@ export const createEventFixtureCache = (
   config: EventFixtureCacheConfig = {
     keyPrefix: CachePrefix.FIXTURE,
     season: getCurrentSeason(),
+    ttlSeconds: DefaultTTL.FIXTURE,
   },
 ): EventFixtureCache => {
   const { keyPrefix, season } = config;

@@ -18,10 +18,6 @@ export const createPlayerHandlers = (playerService: PlayerService): PlayerHandle
     );
   };
 
-  const syncPlayers = (): TE.TaskEither<APIError, void> => {
-    return pipe(playerService.syncPlayersFromApi(), TE.mapLeft(toAPIError));
-  };
-
   const getPlayerByElement = (req: Request): TE.TaskEither<APIError, Player> => {
     const elementParam = req.params.id;
     const parsedElement = parseInt(elementParam);
@@ -63,7 +59,6 @@ export const createPlayerHandlers = (playerService: PlayerService): PlayerHandle
 
   return {
     getAllPlayers,
-    syncPlayers,
-    getPlayerByElement: getPlayerByElement,
+    getPlayerByElement,
   };
 };

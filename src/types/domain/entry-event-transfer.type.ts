@@ -1,42 +1,50 @@
-import * as E from 'fp-ts/Either';
-import { pipe } from 'fp-ts/function';
-import { Branded, createBrandedType } from 'src/types/base.type';
-
-export type EntryEventTransferId = Branded<number, 'EntryEventTransferId'>;
-
-export const createEntryEventTransferId = createBrandedType<number, 'EntryEventTransferId'>(
-  'EntryEventTransferId',
-  (value: unknown): value is number => typeof value === 'number' && value > 0,
-);
-
-export const validateEntryEventTransferId = (
-  value: unknown,
-): E.Either<string, EntryEventTransferId> => {
-  return pipe(
-    value,
-    E.fromPredicate(
-      (v): v is number => typeof v === 'number' && v > 0,
-      () => 'Invalid entry event transfer ID: must be a positive integer',
-    ),
-    E.map((v) => v as EntryEventTransferId),
-  );
-};
+import { ElementTypeId, ElementTypeName } from 'src/types/base.type';
+import { EntryId } from 'src/types/domain/entry-info.type';
+import { EventId } from 'src/types/domain/event.type';
+import { PlayerId } from 'src/types/domain/player.type';
+import { TeamId } from 'src/types/domain/team.type';
 
 export type EntryEventTransfer = {
-  readonly id: EntryEventTransferId;
-  readonly entry: number;
-  readonly event: number;
-  readonly elementIn: number;
+  readonly entryId: EntryId;
+  readonly entryName: string;
+  readonly eventId: EventId;
+  readonly elementInId: PlayerId;
+  readonly elementInWebName: string;
+  readonly elementInType: ElementTypeId;
+  readonly elementInTypeName: ElementTypeName;
+  readonly elementInTeamId: TeamId;
+  readonly elementInTeamName: string;
+  readonly elementInTeamShortName: string;
   readonly elementInCost: number;
   readonly elementInPoints: number;
-  readonly elementOut: number;
+  readonly elementOutId: PlayerId;
+  readonly elementOutWebName: string;
+  readonly elementOutType: ElementTypeId;
+  readonly elementOutTypeName: ElementTypeName;
+  readonly elementOutTeamId: TeamId;
+  readonly elementOutTeamName: string;
+  readonly elementOutTeamShortName: string;
   readonly elementOutCost: number;
   readonly elementOutPoints: number;
   readonly transferTime: Date;
 };
 
-export type MappedEntryEventTransfer = Omit<
+export type EntryEventTransfers = readonly EntryEventTransfer[];
+
+export type RawEntryEventTransfer = Omit<
   EntryEventTransfer,
-  'id' | 'elementInPoints' | 'elementOutPoints'
+  | 'entryName'
+  | 'elementInWebName'
+  | 'elementInType'
+  | 'elementInTypeName'
+  | 'elementInTeamId'
+  | 'elementInTeamName'
+  | 'elementInTeamShortName'
+  | 'elementOutWebName'
+  | 'elementOutType'
+  | 'elementOutTypeName'
+  | 'elementOutTeamId'
+  | 'elementOutTeamName'
+  | 'elementOutTeamShortName'
 >;
-export type EntryEventTransfers = readonly MappedEntryEventTransfer[];
+export type RawEntryEventTransfers = readonly RawEntryEventTransfer[];

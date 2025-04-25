@@ -105,26 +105,11 @@ export const createPlayerValueRepository = (prisma: PrismaClient): PlayerValueRe
       TE.chain(() => findByChangeDate(playerValueInputs[0].changeDate)),
     );
 
-  const deleteByChangeDate = (changeDate: string): TE.TaskEither<DBError, void> =>
-    pipe(
-      TE.tryCatch(
-        () => prisma.playerValue.deleteMany({ where: { changeDate: changeDate } }),
-        (error) =>
-          createDBError({
-            code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to delete player values by change date ${changeDate}: ${getErrorMessage(error)}`,
-            cause: error instanceof Error ? error : undefined,
-          }),
-      ),
-      TE.map(() => undefined),
-    );
-
   return {
     getLatestPlayerValuesByElements,
     findByChangeDate,
     findByElement,
     findByElements,
     savePlayerValueChangesByChangeDate,
-    deleteByChangeDate,
   };
 };

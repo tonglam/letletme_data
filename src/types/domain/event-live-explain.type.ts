@@ -1,6 +1,9 @@
+import { EventId } from 'src/types/domain/event.type';
+import { PlayerId } from 'src/types/domain/player.type';
+
 export interface EventLiveExplain {
-  readonly eventId: number;
-  readonly elementId: number;
+  readonly eventId: EventId;
+  readonly elementId: PlayerId;
   readonly bps: number | null;
   readonly bonus: number | null;
   readonly minutes: number | null;

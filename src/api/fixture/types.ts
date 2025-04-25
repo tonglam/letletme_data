@@ -7,7 +7,6 @@ import { APIError } from '../../types/error.type';
 
 export interface FixtureHandlerResponse {
   readonly getFixtures: () => TaskEither<APIError, EventFixtures>;
-  readonly syncFixtures: (req: Request) => TaskEither<APIError, void>;
   readonly getFixturesByTeamId: (req: Request) => TaskEither<APIError, TeamFixtures>;
   readonly getFixturesByEventId: (req: Request) => TaskEither<APIError, EventFixtures>;
 }

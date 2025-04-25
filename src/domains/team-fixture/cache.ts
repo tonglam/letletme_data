@@ -8,7 +8,7 @@ import { TeamFixture, TeamFixtures } from 'src/types/domain/team-fixture.type';
 import { TeamId } from 'src/types/domain/team.type';
 import { getCurrentSeason } from 'src/utils/common.util';
 
-import { CachePrefix } from '../../configs/cache/cache.config';
+import { CachePrefix, DefaultTTL } from '../../configs/cache/cache.config';
 import { redisClient } from '../../infrastructures/cache/client';
 import { CacheError, CacheErrorCode, createCacheError, DomainError } from '../../types/error.type';
 import { mapCacheErrorToDomainError } from '../../utils/error.util';
@@ -57,6 +57,7 @@ export const createTeamFixtureCache = (
   config: TeamFixtureCacheConfig = {
     keyPrefix: CachePrefix.FIXTURE,
     season: getCurrentSeason(),
+    ttlSeconds: DefaultTTL.FIXTURE,
   },
 ): TeamFixtureCache => {
   const { keyPrefix, season } = config;

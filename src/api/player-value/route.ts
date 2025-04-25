@@ -8,7 +8,6 @@ export const playerValueRouter = (playerValueService: PlayerValueService): Route
   const router = Router();
   const handlers = createPlayerValueHandlers(playerValueService);
 
-  router.get('/sync', createHandler(handlers.syncPlayerValues));
   router.get('/date/:changeDate', createHandler(handlers.getPlayerValuesByChangeDate));
   router.get('/element/:element', createHandler(handlers.getPlayerValuesByElement));
   router.get('/team/:team', createHandler(handlers.getPlayerValuesByTeam));

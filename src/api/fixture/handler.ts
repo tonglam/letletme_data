@@ -16,20 +16,6 @@ export const createFixtureHandlers = (fixtureService: FixtureService): FixtureHa
     return pipe(fixtureService.getFixtures(), TE.mapLeft(toAPIError));
   };
 
-  const syncFixtures = (req: Request): TE.TaskEither<APIError, void> => {
-    const eventId = Number(req.params.eventId);
-    if (isNaN(eventId) || eventId <= 0) {
-      return TE.left(
-        createAPIError({ code: APIErrorCode.VALIDATION_ERROR, message: 'Invalid event ID' }),
-      );
-    }
-
-    return pipe(
-      fixtureService.syncEventFixturesFromApi(eventId as EventId),
-      TE.mapLeft(toAPIError),
-    );
-  };
-
   const getFixturesByTeamId = (req: Request): TE.TaskEither<APIError, TeamFixtures> => {
     const teamId = Number(req.params.id);
     if (isNaN(teamId) || teamId <= 0) {
@@ -52,7 +38,6 @@ export const createFixtureHandlers = (fixtureService: FixtureService): FixtureHa
 
   return {
     getFixtures,
-    syncFixtures,
     getFixturesByTeamId,
     getFixturesByEventId,
   };

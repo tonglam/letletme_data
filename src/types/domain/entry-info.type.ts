@@ -34,20 +34,8 @@ export type EntryInfo = {
   readonly lastEntryName: string | null;
   readonly lastOverallPoints: number | null;
   readonly lastOverallRank: number | null;
-  readonly lastEventPoints: number | null;
   readonly lastTeamValue: number | null;
   readonly usedEntryNames: string[];
 };
 
 export type EntryInfos = readonly EntryInfo[];
-
-export type RawEntryInfo = Omit<
-  EntryInfo,
-  | 'lastEntryName'
-  | 'lastOverallPoints'
-  | 'lastOverallRank'
-  | 'lastEventPoints'
-  | 'lastTeamValue'
-  | 'usedEntryNames'
->;
-export type RawEntryInfos = readonly RawEntryInfo[];

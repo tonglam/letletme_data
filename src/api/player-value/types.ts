@@ -7,5 +7,4 @@ export interface PlayerValueHandlerResponse {
   readonly getPlayerValuesByChangeDate: (req: Request) => TaskEither<APIError, PlayerValues>;
   readonly getPlayerValuesByElement: (req: Request) => TaskEither<APIError, PlayerValues>;
   readonly getPlayerValuesByTeam: (req: Request) => TaskEither<APIError, PlayerValues>;
-  readonly syncPlayerValues: () => TaskEither<APIError, void>;
 }

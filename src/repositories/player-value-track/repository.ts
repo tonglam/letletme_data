@@ -58,25 +58,8 @@ export const createPlayerValueTrackRepository = (
       TE.chain(() => findByDate(playerValueTrackInputs[0].date)),
     );
 
-  const deleteByDate = (date: string): TE.TaskEither<DBError, void> =>
-    pipe(
-      TE.tryCatch(
-        async () => {
-          await prisma.playerValueTrack.deleteMany({
-            where: { date },
-          });
-        },
-        (error) =>
-          createDBError({
-            code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to delete player value tracks by date: ${getErrorMessage(error)}`,
-          }),
-      ),
-    );
-
   return {
     findByDate,
     savePlayerValueTracksByDate,
-    deleteByDate,
   };
 };

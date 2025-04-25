@@ -12,7 +12,6 @@ export const eventRouter = (eventService: EventService): Router => {
   router.get('/current', createHandler(handlers.getCurrentEvent));
   router.get('/last', createHandler(handlers.getLastEvent));
   router.get('/next', createHandler(handlers.getNextEvent));
-  router.post('/sync', createHandler(handlers.syncEvents));
   router.get('/:id', createHandler(handlers.getEventById));
 
   return router;

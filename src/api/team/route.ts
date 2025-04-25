@@ -9,7 +9,6 @@ export const teamRouter = (teamService: TeamService): Router => {
   const handlers = createTeamHandlers(teamService);
 
   router.get('/', createHandler(handlers.getAllTeams));
-  router.get('/sync', createHandler(handlers.syncTeams));
   router.get('/:id', createHandler(handlers.getTeamById));
 
   return router;

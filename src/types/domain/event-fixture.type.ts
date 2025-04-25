@@ -1,5 +1,7 @@
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
+import { EventId } from 'src/types/domain/event.type';
+import { TeamId } from 'src/types/domain/team.type';
 
 import { Branded, createBrandedType } from '../base.type';
 
@@ -23,17 +25,17 @@ export const validateEventFixtureId = (value: unknown): E.Either<string, EventFi
 export type EventFixture = {
   readonly id: EventFixtureId;
   readonly code: number;
-  readonly eventId: number;
+  readonly eventId: EventId;
   readonly kickoffTime: Date | null;
   readonly started: boolean;
   readonly finished: boolean;
   readonly minutes: number;
-  readonly teamH: number | null;
+  readonly teamHId: TeamId | null;
   readonly teamHName: string | null;
   readonly teamHShortName: string | null;
   readonly teamHDifficulty: number | null;
   readonly teamHScore: number | null;
-  readonly teamA: number | null;
+  readonly teamAId: TeamId | null;
   readonly teamAName: string | null;
   readonly teamAShortName: string | null;
   readonly teamADifficulty: number | null;

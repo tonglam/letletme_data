@@ -74,8 +74,8 @@ const fixtureServiceOperations = (
           enrichedFixtures,
           RA.traverse(E.Applicative)((ef: EventFixture): E.Either<DomainError, TeamFixtures> => {
             if (
-              ef.teamH === null ||
-              ef.teamA === null ||
+              ef.teamHId === null ||
+              ef.teamAId === null ||
               ef.kickoffTime === null ||
               ef.teamHName === null ||
               ef.teamHShortName === null ||
@@ -89,8 +89,8 @@ const fixtureServiceOperations = (
                 }),
               );
             }
-            const homeTeamId = ef.teamH as TeamId;
-            const awayTeamId = ef.teamA as TeamId;
+            const homeTeamId = ef.teamHId as TeamId;
+            const awayTeamId = ef.teamAId as TeamId;
             return E.right([
               {
                 eventId: ef.eventId as EventId,

@@ -22,5 +22,4 @@ export interface PlayerValueRepository {
   readonly savePlayerValueChangesByChangeDate: (
     playerValueInputs: PlayerValueCreateInputs,
   ) => TE.TaskEither<DBError, RawPlayerValues>;
-  readonly deleteByChangeDate: (changeDate: string) => TE.TaskEither<DBError, void>;
 }

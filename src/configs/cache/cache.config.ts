@@ -8,13 +8,14 @@ export const CacheTTL = {
 
 export const DefaultTTL = {
   EVENT: CacheTTL.DERIVED_DATA,
-  EVENT_CURRENT: CacheTTL.WEEKLY, // TTL for the specific current event key
+  EVENT_CURRENT: CacheTTL.WEEKLY,
   PHASE: CacheTTL.DERIVED_DATA,
   TEAM: CacheTTL.DERIVED_DATA,
-  STANDING: CacheTTL.TEMPORARY,
   PLAYER: CacheTTL.DERIVED_DATA,
   PLAYER_VALUE: CacheTTL.DAILY,
-  PLAYER_STAT: CacheTTL.TEMPORARY,
+  PLAYER_STAT: CacheTTL.DERIVED_DATA,
+  FIXTURE: CacheTTL.DERIVED_DATA,
+  LIVE: CacheTTL.WEEKLY,
 } as const;
 
 export const CachePrefix = {
@@ -26,5 +27,4 @@ export const CachePrefix = {
   PLAYER_STAT: 'player-stat',
   FIXTURE: 'fixture',
   LIVE: 'live',
-  LIVE_EXPLAIN: 'live-explain',
 } as const;

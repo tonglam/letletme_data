@@ -17,10 +17,6 @@ export const createTeamHandlers = (teamService: TeamService): TeamHandlerRespons
     );
   };
 
-  const syncTeams = (): TE.TaskEither<APIError, void> => {
-    return pipe(teamService.syncTeamsFromApi(), TE.mapLeft(toAPIError));
-  };
-
   const getTeamById = (req: Request): TE.TaskEither<APIError, Team> => {
     const teamId = Number(req.params.id);
     if (isNaN(teamId) || teamId <= 0) {
@@ -50,7 +46,6 @@ export const createTeamHandlers = (teamService: TeamService): TeamHandlerRespons
 
   return {
     getAllTeams,
-    syncTeams,
     getTeamById,
   };
 };

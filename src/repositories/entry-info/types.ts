@@ -11,9 +11,10 @@ export type EntryInfoCreateInput = Omit<EntryInfo, 'id'> & { id: EntryId };
 
 export interface EntryInfoRepository {
   readonly findById: (id: EntryId) => TE.TaskEither<DBError, EntryInfo>;
-  readonly findByEntryIds: (entryIds: ReadonlyArray<EntryId>) => TE.TaskEither<DBError, EntryInfos>;
+  readonly findByIds: (entryIds: ReadonlyArray<EntryId>) => TE.TaskEither<DBError, EntryInfos>;
+  readonly findAllEntryIds: () => TE.TaskEither<DBError, ReadonlyArray<EntryId>>;
   readonly upsertEntryInfo: (
     entryInfoInput: EntryInfoCreateInput,
   ) => TE.TaskEither<DBError, EntryInfo>;
-  readonly deleteEntryInfo: (id: EntryId) => TE.TaskEither<DBError, void>;
+  readonly deleteById: (id: EntryId) => TE.TaskEither<DBError, void>;
 }

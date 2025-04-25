@@ -17,10 +17,6 @@ export const createPhaseHandlers = (phaseService: PhaseService): PhaseHandlerRes
     );
   };
 
-  const syncPhases = (): TE.TaskEither<APIError, void> => {
-    return pipe(phaseService.syncPhasesFromApi(), TE.mapLeft(toAPIError));
-  };
-
   const getPhaseById = (req: Request): TE.TaskEither<APIError, Phase> => {
     const phaseId = Number(req.params.id);
     if (isNaN(phaseId) || phaseId <= 0) {
@@ -50,7 +46,6 @@ export const createPhaseHandlers = (phaseService: PhaseService): PhaseHandlerRes
 
   return {
     getAllPhases,
-    syncPhases,
     getPhaseById,
   };
 };

@@ -1,11 +1,13 @@
 import { Prisma } from '@prisma/client';
 import { ElementTypeId, ElementTypeName } from 'src/types/base.type';
+import { EventId } from 'src/types/domain/event.type';
+import { PlayerId } from 'src/types/domain/player.type';
 
 import { TeamId } from '../../../src/types/domain/team.type';
 
 export interface EventLive {
-  readonly eventId: number;
-  readonly elementId: number;
+  readonly eventId: EventId;
+  readonly elementId: PlayerId;
   readonly webName: string;
   readonly elementType: ElementTypeId;
   readonly elementTypeName: ElementTypeName;

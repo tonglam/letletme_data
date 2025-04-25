@@ -22,10 +22,6 @@ export const createPlayerStatHandlers = (
     );
   };
 
-  const syncPlayerStats = (): TE.TaskEither<APIError, void> => {
-    return pipe(playerStatService.syncPlayerStatsFromApi(), TE.mapLeft(toAPIError));
-  };
-
   const getPlayerStat = (req: Request): TE.TaskEither<APIError, PlayerStat> => {
     const elementParam = req.params.element;
     const parsedElement = parseInt(elementParam) as PlayerId;
@@ -88,7 +84,6 @@ export const createPlayerStatHandlers = (
 
   return {
     getPlayerStats,
-    syncPlayerStats,
     getPlayerStatsByElementType,
     getPlayerStatsByTeam,
     getPlayerStat,

@@ -15,4 +15,5 @@ export interface EntryHistoryInfoRepository {
   readonly saveBatchByEntryId: (
     entryHistoryInfoInputs: EntryHistoryInfoCreateInputs,
   ) => TE.TaskEither<DBError, EntryHistoryInfos>;
+  readonly deleteByEntryId: (entryId: EntryId) => TE.TaskEither<DBError, void>;
 }

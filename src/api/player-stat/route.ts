@@ -9,7 +9,6 @@ export const playerStatRouter = (playerStatService: PlayerStatService): Router =
   const handlers = createPlayerStatHandlers(playerStatService);
 
   router.get('/', createHandler(handlers.getPlayerStats));
-  router.post('/sync', createHandler(handlers.syncPlayerStats));
   router.get('/element/:element', createHandler(handlers.getPlayerStat));
   router.get('/element-type/:elementType', createHandler(handlers.getPlayerStatsByElementType));
   router.get('/team/:team', createHandler(handlers.getPlayerStatsByTeam));

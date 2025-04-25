@@ -3,7 +3,7 @@ import * as E from 'fp-ts/Either';
 import { flow, pipe } from 'fp-ts/function';
 import * as O from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
-import { CachePrefix } from 'src/configs/cache/cache.config';
+import { CachePrefix, DefaultTTL } from 'src/configs/cache/cache.config';
 import { redisClient } from 'src/infrastructures/cache/client';
 import { Player, Players } from 'src/types/domain/player.type';
 import { CacheError, CacheErrorCode, createCacheError, DomainError } from 'src/types/error.type';
@@ -56,6 +56,7 @@ export const createPlayerCache = (
   config: PlayerCacheConfig = {
     keyPrefix: CachePrefix.PLAYER,
     season: getCurrentSeason(),
+    ttlSeconds: DefaultTTL.PLAYER,
   },
 ): PlayerCache => {
   const { keyPrefix, season } = config;

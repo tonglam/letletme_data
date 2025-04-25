@@ -6,7 +6,7 @@ import * as TE from 'fp-ts/TaskEither';
 import { Phase, Phases } from 'src/types/domain/phase.type';
 import { getCurrentSeason } from 'src/utils/common.util';
 
-import { CachePrefix } from '../../configs/cache/cache.config';
+import { CachePrefix, DefaultTTL } from '../../configs/cache/cache.config';
 import { redisClient } from '../../infrastructures/cache/client';
 import { CacheError, CacheErrorCode, createCacheError, DomainError } from '../../types/error.type';
 import { mapCacheErrorToDomainError } from '../../utils/error.util';
@@ -52,6 +52,7 @@ export const createPhaseCache = (
   config: PhaseCacheConfig = {
     keyPrefix: CachePrefix.PHASE,
     season: getCurrentSeason(),
+    ttlSeconds: DefaultTTL.PHASE,
   },
 ): PhaseCache => {
   const { keyPrefix, season } = config;

@@ -8,7 +8,7 @@ import { EventLive, EventLives } from 'src/types/domain/event-live.type';
 import { EventId } from 'src/types/domain/event.type';
 import { getCurrentSeason } from 'src/utils/common.util';
 
-import { CachePrefix } from '../../configs/cache/cache.config';
+import { CachePrefix, DefaultTTL } from '../../configs/cache/cache.config';
 import { redisClient } from '../../infrastructures/cache/client';
 import { CacheError, CacheErrorCode, createCacheError, DomainError } from '../../types/error.type';
 import { mapCacheErrorToDomainError } from '../../utils/error.util';
@@ -55,6 +55,7 @@ export const createEventLiveCache = (
   config: EventLiveCacheConfig = {
     keyPrefix: CachePrefix.LIVE,
     season: getCurrentSeason(),
+    ttlSeconds: DefaultTTL.LIVE,
   },
 ): EventLiveCache => {
   const { keyPrefix, season } = config;

@@ -9,7 +9,6 @@ export const fixtureRouter = (fixtureService: FixtureService): Router => {
   const handlers = createFixtureHandlers(fixtureService);
 
   router.get('/', createHandler(handlers.getFixtures));
-  router.get('/sync/:eventId', createHandler(handlers.syncFixtures));
   router.get('/team/:id', createHandler(handlers.getFixturesByTeamId));
   router.get('/event/:id', createHandler(handlers.getFixturesByEventId));
 
