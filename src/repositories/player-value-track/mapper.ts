@@ -2,7 +2,7 @@ import { PlayerValueTrack as PrismaPlayerValueTrackType } from '@prisma/client';
 import {
   PrismaPlayerValueTrackCreateInput,
   PlayerValueTrackCreateInput,
-} from 'src/repositories/player-value-track/type';
+} from 'src/repositories/player-value-track/types';
 import { ElementTypeId } from 'src/types/base.type';
 import { EventId } from 'src/types/domain/event.type';
 import { PlayerValueTrack } from 'src/types/domain/player-value-track.type';

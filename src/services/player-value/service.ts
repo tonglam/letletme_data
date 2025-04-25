@@ -8,7 +8,10 @@ import * as RA from 'fp-ts/ReadonlyArray';
 import * as TE from 'fp-ts/TaskEither';
 import { PlayerValueService, PlayerValueServiceOperations } from 'services/player-value/types';
 import { FplBootstrapDataService } from 'src/data/types';
-import { PlayerValueCreateInputs, PlayerValueRepository } from 'src/repositories/player-value/type';
+import {
+  PlayerValueCreateInputs,
+  PlayerValueRepository,
+} from 'src/repositories/player-value/types';
 import { ValueChangeType } from 'src/types/base.type';
 import {
   PlayerValue,

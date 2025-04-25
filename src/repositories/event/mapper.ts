@@ -1,7 +1,7 @@
 import { Prisma } from '@prisma/client';
 import { ChipPlay, Event, EventId, TopElementInfo } from 'src/types/domain/event.type';
 
-import { EventCreateInput, PrismaEvent, PrismaEventCreateInput } from './type';
+import { EventCreateInput, PrismaEvent, PrismaEventCreateInput } from './types';
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);

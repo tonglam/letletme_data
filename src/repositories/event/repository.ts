@@ -5,7 +5,7 @@ import {
   mapDomainEventToPrismaCreate,
   mapPrismaEventToDomain,
 } from 'src/repositories/event/mapper';
-import { EventCreateInputs, EventRepository } from 'src/repositories/event/type';
+import { EventCreateInputs, EventRepository } from 'src/repositories/event/types';
 import { Event, EventId, Events } from 'src/types/domain/event.type';
 
 import { createDBError, DBError, DBErrorCode } from '../../types/error.type';

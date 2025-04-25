@@ -1,5 +1,5 @@
 import { PlayerStat as PrismaPlayerStatType } from '@prisma/client';
-import { PrismaPlayerStatCreateInput } from 'src/repositories/player-stat/type';
+import { PrismaPlayerStatCreateInput } from 'src/repositories/player-stat/types';
 import { ElementTypeId } from 'src/types/base.type';
 import { EventId } from 'src/types/domain/event.type';
 import { RawPlayerStat } from 'src/types/domain/player-stat.type';

@@ -1,4 +1,4 @@
-import { PrismaTeam, PrismaTeamCreateInput, TeamCreateInput } from 'src/repositories/team/type';
+import { PrismaTeam, PrismaTeamCreateInput, TeamCreateInput } from 'src/repositories/team/types';
 
 import { Team, TeamId } from '../../types/domain/team.type';
 

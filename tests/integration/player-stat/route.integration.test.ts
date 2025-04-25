@@ -20,7 +20,7 @@ import { TeamCache } from '../../../src/domains/team/types';
 import { redisClient } from '../../../src/infrastructures/cache/client';
 import { HTTPClient } from '../../../src/infrastructures/http';
 import { createPlayerStatRepository } from '../../../src/repositories/player-stat/repository';
-import { PlayerStatRepository } from '../../../src/repositories/player-stat/type';
+import { PlayerStatRepository } from '../../../src/repositories/player-stat/types';
 import { createPlayerStatService } from '../../../src/services/player-stat/service';
 import { PlayerStatService } from '../../../src/services/player-stat/types';
 import { PlayerStat } from '../../../src/types/domain/player-stat.type';

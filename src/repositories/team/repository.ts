@@ -2,7 +2,7 @@ import { PrismaClient } from '@prisma/client';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import { mapDomainTeamToPrismaCreate, mapPrismaTeamToDomain } from 'src/repositories/team/mapper';
-import { TeamCreateInputs, TeamRepository } from 'src/repositories/team/type';
+import { TeamCreateInputs, TeamRepository } from 'src/repositories/team/types';
 import { Team, TeamId, Teams } from 'src/types/domain/team.type';
 
 import { createDBError, DBError, DBErrorCode } from '../../types/error.type';

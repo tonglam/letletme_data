@@ -1,7 +1,7 @@
 import { PrismaClient } from '@prisma/client';
 import * as E from 'fp-ts/Either';
 import { Logger } from 'pino';
-import { EventRepository } from 'src/repositories/event/type';
+import { EventRepository } from 'src/repositories/event/types';
 import { EventId } from 'src/types/domain/event.type';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 

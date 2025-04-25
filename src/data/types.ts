@@ -39,12 +39,12 @@ export interface FplLiveDataService {
 }
 
 export interface FplEntryDataService {
-  readonly getEntryInfos: (entryId: EntryId) => TE.TaskEither<DataLayerError, EntryInfos>;
-  readonly getEntryLeagues: (entryId: EntryId) => TE.TaskEither<DataLayerError, EntryLeagueInfos>;
+  readonly getInfos: (entryId: EntryId) => TE.TaskEither<DataLayerError, EntryInfos>;
+  readonly getLeagues: (entryId: EntryId) => TE.TaskEither<DataLayerError, EntryLeagueInfos>;
 }
 
 export interface FplHistoryDataService {
-  readonly getHistoryInfos: (entryId: EntryId) => TE.TaskEither<DataLayerError, EntryHistoryInfos>;
+  readonly getHistories: (entryId: EntryId) => TE.TaskEither<DataLayerError, EntryHistoryInfos>;
 }
 
 export interface FplPickDataService {

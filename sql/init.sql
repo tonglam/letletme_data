@@ -295,7 +295,7 @@ CREATE INDEX IF NOT EXISTS "idx_event_live_explain_event_id" ON "event_live_expl
 ALTER TABLE "event_live_explains" ENABLE ROW LEVEL SECURITY;
 
 CREATE TABLE IF NOT EXISTS "entry_infos" (
-    "entry" INTEGER PRIMARY KEY,
+    "id" INTEGER PRIMARY KEY,
     "entry_name" TEXT NOT NULL,
     "player_name" TEXT NOT NULL,
     "region" TEXT,
@@ -318,7 +318,7 @@ ALTER TABLE "entry_infos" ENABLE ROW LEVEL SECURITY;
 
 CREATE TABLE IF NOT EXISTS "entry_league_infos" (
     "id" SERIAL PRIMARY KEY,
-    "entry" INTEGER NOT NULL,
+    "entry_id" INTEGER NOT NULL,
     "league_id" INTEGER NOT NULL,
     "league_name" TEXT NOT NULL,
     "league_type" "LeagueType" NOT NULL,
@@ -328,27 +328,27 @@ CREATE TABLE IF NOT EXISTS "entry_league_infos" (
     "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updated_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-CREATE UNIQUE INDEX IF NOT EXISTS "unique_entry_league_info" ON "entry_league_infos" ("entry", "league_id");
-CREATE INDEX IF NOT EXISTS "idx_entry_league_info_entry_id" ON "entry_league_infos" ("entry");
+CREATE UNIQUE INDEX IF NOT EXISTS "unique_entry_league_info" ON "entry_league_infos" ("entry_id", "league_id");
+CREATE INDEX IF NOT EXISTS "idx_entry_league_info_entry_id" ON "entry_league_infos" ("entry_id");
 ALTER TABLE "entry_league_infos" ENABLE ROW LEVEL SECURITY;
 
 CREATE TABLE IF NOT EXISTS "entry_history_infos" (
     "id" SERIAL PRIMARY KEY,
-    "entry" INTEGER NOT NULL,
+    "entry_id" INTEGER NOT NULL,
     "season" INTEGER NOT NULL,
     "total_points" INTEGER NOT NULL DEFAULT 0,
     "overall_rank" INTEGER NOT NULL DEFAULT 0,
     "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updated_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-CREATE UNIQUE INDEX IF NOT EXISTS "unique_entry_season_history" ON "entry_history_infos" ("entry", "season");
-CREATE INDEX IF NOT EXISTS "idx_entry_history_info_entry_id" ON "entry_history_infos" ("entry");
+CREATE UNIQUE INDEX IF NOT EXISTS "unique_entry_season_history" ON "entry_history_infos" ("entry_id", "season");
+CREATE INDEX IF NOT EXISTS "idx_entry_history_info_entry_id" ON "entry_history_infos" ("entry_id");
 ALTER TABLE "entry_history_infos" ENABLE ROW LEVEL SECURITY;
 
 CREATE TABLE IF NOT EXISTS "entry_event_picks" (
     "id" SERIAL PRIMARY KEY,
-    "entry" INTEGER NOT NULL,
-    "event" INTEGER NOT NULL,
+    "entry_id" INTEGER NOT NULL,
+    "event_id" INTEGER NOT NULL,
     "chip" "Chip" NOT NULL,
     "picks" JSONB NOT NULL,
     "transfers" INTEGER NOT NULL DEFAULT 0,
@@ -356,14 +356,14 @@ CREATE TABLE IF NOT EXISTS "entry_event_picks" (
     "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE UNIQUE INDEX IF NOT EXISTS "unique_entry_event_pick" ON "entry_event_picks" ("entry", "event");
-CREATE INDEX IF NOT EXISTS "idx_entry_event_picks_entry_id" ON "entry_event_picks" ("entry");
-CREATE INDEX IF NOT EXISTS "idx_entry_event_picks_event_id" ON "entry_event_picks" ("event");
+CREATE INDEX IF NOT EXISTS "idx_entry_event_picks_entry_id" ON "entry_event_picks" ("entry_id");
+CREATE INDEX IF NOT EXISTS "idx_entry_event_picks_event_id" ON "entry_event_picks" ("event_id");
 ALTER TABLE "entry_event_picks" ENABLE ROW LEVEL SECURITY;
 
 CREATE TABLE IF NOT EXISTS "entry_event_transfers" (
     "id" SERIAL PRIMARY KEY,
-    "entry" INTEGER NOT NULL,
-    "event" INTEGER NOT NULL,
+    "entry_id" INTEGER NOT NULL,
+    "event_id" INTEGER NOT NULL,
     "element_in" INTEGER NOT NULL,
     "element_in_cost" INTEGER NOT NULL,
     "element_in_points" INTEGER NOT NULL DEFAULT 0,
@@ -373,14 +373,14 @@ CREATE TABLE IF NOT EXISTS "entry_event_transfers" (
     "transfer_time" TIMESTAMPTZ NOT NULL,
     "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-CREATE UNIQUE INDEX IF NOT EXISTS "unique_entry_event_transfer" ON "entry_event_transfers" ("entry", "event");
-CREATE INDEX IF NOT EXISTS "idx_entry_event_transfers_entry_id" ON "entry_event_transfers" ("entry");
+CREATE UNIQUE INDEX IF NOT EXISTS "unique_entry_event_transfer" ON "entry_event_transfers" ("entry_id", "event_id");
+CREATE INDEX IF NOT EXISTS "idx_entry_event_transfers_entry_id" ON "entry_event_transfers" ("entry_id");
 ALTER TABLE "entry_event_transfers" ENABLE ROW LEVEL SECURITY;
 
 CREATE TABLE IF NOT EXISTS "entry_event_results" (
     "id" SERIAL PRIMARY KEY,
-    "entry" INTEGER NOT NULL,
-    "event" INTEGER NOT NULL,
+    "entry_id" INTEGER NOT NULL,
+    "event_id" INTEGER NOT NULL,
     "event_points" INTEGER NOT NULL DEFAULT 0,
     "event_transfers" INTEGER NOT NULL DEFAULT 0,
     "event_transfers_cost" INTEGER NOT NULL DEFAULT 0,
@@ -401,7 +401,7 @@ CREATE TABLE IF NOT EXISTS "entry_event_results" (
     "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updated_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-CREATE UNIQUE INDEX IF NOT EXISTS "unique_entry_event_result" ON "entry_event_results" ("entry", "event");
-CREATE INDEX IF NOT EXISTS "idx_entry_event_results_entry_id" ON "entry_event_results" ("entry");
-CREATE INDEX IF NOT EXISTS "idx_entry_event_results_event_id" ON "entry_event_results" ("event");
+CREATE UNIQUE INDEX IF NOT EXISTS "unique_entry_event_result" ON "entry_event_results" ("entry_id", "event_id");
+CREATE INDEX IF NOT EXISTS "idx_entry_event_results_entry_id" ON "entry_event_results" ("entry_id");
+CREATE INDEX IF NOT EXISTS "idx_entry_event_results_event_id" ON "entry_event_results" ("event_id");
 ALTER TABLE "entry_event_results" ENABLE ROW LEVEL SECURITY;

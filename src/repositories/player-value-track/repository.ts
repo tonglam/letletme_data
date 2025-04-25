@@ -8,7 +8,7 @@ import {
 import {
   PlayerValueTrackCreateInputs,
   PlayerValueTrackRepository,
-} from 'src/repositories/player-value-track/type';
+} from 'src/repositories/player-value-track/types';
 import { PlayerValueTracks } from 'src/types/domain/player-value-track.type';
 import { createDBError, DBError, DBErrorCode } from 'src/types/error.type';
 import { getErrorMessage } from 'src/utils/error.util';

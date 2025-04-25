@@ -1,7 +1,7 @@
 import { PlayerId, PlayerType, RawPlayer } from 'src/types/domain/player.type';
 import { TeamId } from 'src/types/domain/team.type';
 
-import { PrismaPlayer, PrismaPlayerCreateInput } from './type';
+import { PrismaPlayer, PrismaPlayerCreateInput } from './types';
 
 export const mapPrismaPlayerToDomain = (prismaPlayer: PrismaPlayer): RawPlayer => ({
   id: prismaPlayer.id as PlayerId,

@@ -1,6 +1,6 @@
 import * as TE from 'fp-ts/TaskEither';
 import { CachePrefix } from 'src/configs/cache/cache.config';
-import { PlayerValueCreateInputs } from 'src/repositories/player-value/type';
+import { PlayerValueCreateInputs } from 'src/repositories/player-value/types';
 import { PlayerValues, RawPlayerValues } from 'src/types/domain/player-value.type';
 import { PlayerId } from 'src/types/domain/player.type';
 import { DomainError } from 'src/types/error.type';

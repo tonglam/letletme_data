@@ -3,7 +3,7 @@ import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import { Events } from 'src/types/domain/event.type';
 
-import { EventCreateInputs, EventRepository } from '../../repositories/event/type';
+import { EventCreateInputs, EventRepository } from '../../repositories/event/types';
 import { DomainError, DomainErrorCode, createDomainError } from '../../types/error.type';
 import { getErrorMessage } from '../../utils/error.util';
 

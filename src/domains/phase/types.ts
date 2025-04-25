@@ -2,7 +2,7 @@ import * as TE from 'fp-ts/TaskEither';
 import { CachePrefix } from 'src/configs/cache/cache.config';
 import { Phases } from 'src/types/domain/phase.type';
 
-import { PhaseCreateInputs } from '../../repositories/phase/type';
+import { PhaseCreateInputs } from '../../repositories/phase/types';
 import { DomainError } from '../../types/error.type';
 
 export interface PhaseCacheConfig {

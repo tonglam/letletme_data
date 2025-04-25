@@ -9,7 +9,7 @@ import * as R from 'fp-ts/Record';
 import * as TE from 'fp-ts/TaskEither';
 import { FixtureService, FixtureServiceOperations } from 'services/fixture/types';
 import { FplFixtureDataService } from 'src/data/types';
-import { EventFixtureRepository } from 'src/repositories/event-fixture/type';
+import { EventFixtureRepository } from 'src/repositories/event-fixture/types';
 import { EventFixture, EventFixtures, RawEventFixtures } from 'src/types/domain/event-fixture.type';
 import { EventId } from 'src/types/domain/event.type';
 import { TeamFixture, TeamFixtures } from 'src/types/domain/team-fixture.type';

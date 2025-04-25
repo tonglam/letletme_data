@@ -2,7 +2,7 @@ import { PlayerValue as PrismaPlayerValueType } from '@prisma/client';
 import {
   PlayerValueCreateInput,
   PrismaPlayerValueCreateInput,
-} from 'src/repositories/player-value/type';
+} from 'src/repositories/player-value/types';
 import { ElementTypeId, ValueChangeType } from 'src/types/base.type';
 import { EventId } from 'src/types/domain/event.type';
 import { RawPlayerValue } from 'src/types/domain/player-value.type';

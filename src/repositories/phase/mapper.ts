@@ -1,4 +1,4 @@
-import { PhaseCreateInput, PrismaPhase, PrismaPhaseCreateInput } from './type';
+import { PhaseCreateInput, PrismaPhase, PrismaPhaseCreateInput } from './types';
 import { Phase, PhaseId } from '../../types/domain/phase.type';
 
 export const mapPrismaPhaseToDomain = (prismaPhase: PrismaPhase): Phase => ({

@@ -95,7 +95,7 @@ export const createFplHistoryDataService = (
     return fetchAndValidateHistories(entryId);
   };
 
-  const getHistoryInfos = (entryId: EntryId): TE.TaskEither<DataLayerError, EntryHistoryInfos> =>
+  const getHistories = (entryId: EntryId): TE.TaskEither<DataLayerError, EntryHistoryInfos> =>
     pipe(
       getFplHistoryDataInternal(entryId),
       TE.chain((historyData) =>
@@ -118,6 +118,6 @@ export const createFplHistoryDataService = (
     );
 
   return {
-    getHistoryInfos: getHistoryInfos,
+    getHistories,
   };
 };

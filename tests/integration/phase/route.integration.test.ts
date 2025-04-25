@@ -2,7 +2,7 @@ import { PrismaClient } from '@prisma/client';
 import express, { Express } from 'express';
 import * as E from 'fp-ts/Either';
 import { Logger } from 'pino';
-import { PhaseRepository } from 'src/repositories/phase/type';
+import { PhaseRepository } from 'src/repositories/phase/types';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 

@@ -16,7 +16,7 @@ import { PhaseCache } from '../../../src/domains/phase/types';
 import { redisClient } from '../../../src/infrastructures/cache/client';
 import { HTTPClient } from '../../../src/infrastructures/http';
 import { createPhaseRepository } from '../../../src/repositories/phase/repository';
-import { PhaseRepository } from '../../../src/repositories/phase/type';
+import { PhaseRepository } from '../../../src/repositories/phase/types';
 import { createPhaseService } from '../../../src/services/phase/service';
 import { PhaseService } from '../../../src/services/phase/types';
 import { phaseWorkflows } from '../../../src/services/phase/workflow';

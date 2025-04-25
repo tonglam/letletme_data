@@ -5,7 +5,7 @@ import { pipe } from 'fp-ts/function';
 import * as RA from 'fp-ts/ReadonlyArray';
 import * as TE from 'fp-ts/TaskEither';
 import { FplBootstrapDataService } from 'src/data/types';
-import { PlayerRepository } from 'src/repositories/player/type';
+import { PlayerRepository } from 'src/repositories/player/types';
 import { Player, PlayerId, Players, PlayerType, RawPlayers } from 'src/types/domain/player.type';
 import { TeamId } from 'src/types/domain/team.type';
 import {

@@ -303,7 +303,7 @@ model EventLiveExplain {
 }
 
 model EntryInfo {
-  entry             Int      @id
+  id                Int      @id @map("id")
   entryName         String   @map("entry_name")
   playerName        String   @map("player_name")
   region            String?  @map("region")
@@ -327,7 +327,7 @@ model EntryInfo {
 
 model EntryLeagueInfo {
   id            Int        @id @default(autoincrement())
-  entry         Int        @map("entry")
+  entryId       Int        @map("entry_id")
   leagueId      Int        @map("league_id")
   leagueName    String     @map("league_name")
   leagueType    LeagueType @map("league_type")
@@ -337,44 +337,44 @@ model EntryLeagueInfo {
   createdAt     DateTime   @default(now()) @map("created_at")
   updatedAt     DateTime   @updatedAt @map("updated_at")
 
-  @@unique([entry, leagueId], name: "unique_entry_league_info")
-  @@index([entry], name: "idx_entry_league_info_entry_id")
+  @@unique([entryId, leagueId], name: "unique_entry_league_info")
+  @@index([entryId], name: "idx_entry_league_info_entry_id")
   @@map("entry_league_infos")
 }
 
 model EntryHistoryInfo {
   id          Int      @id @default(autoincrement())
-  entry       Int      @map("entry")
+  entryId     Int      @map("entry_id")
   season      String   @map("season") @db.Char(4)
   totalPoints Int      @default(0) @map("total_points")
   overallRank Int      @default(0) @map("overall_rank")
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 
-  @@unique([entry, season], name: "unique_entry_season_history")
-  @@index([entry], name: "idx_entry_history_info_entry_id")
+  @@unique([entryId, season], name: "unique_entry_season_history")
+  @@index([entryId], name: "idx_entry_history_info_entry_id")
   @@map("entry_history_infos")
 }
 
 model EntryEventPick {
   id            Int      @id @default(autoincrement())
-  entry         Int      @map("entry")
-  event         Int      @map("event")
+  entryId       Int      @map("entry_id")
+  eventId       Int      @map("event_id")
   chip          Chip?    @map("chip")
   picks         Json?    @map("picks")
   transfers     Int?     @map("transfers")
   transfersCost Int?     @map("transfers_cost")
   createdAt     DateTime @default(now()) @map("created_at")
 
-  @@unique([entry, event], name: "unique_entry_event_pick")
-  @@index([entry], name: "idx_entry_event_picks_entry_id")
+  @@unique([entryId, eventId], name: "unique_entry_event_pick")
+  @@index([entryId], name: "idx_entry_event_picks_entry_id")
   @@map("entry_event_picks")
 }
 
 model EntryEventTransfer {
   id               Int      @id @default(autoincrement())
-  entry            Int      @map("entry")
-  event            Int      @map("event")
+  entryId          Int      @map("entry_id")
+  eventId          Int      @map("event_id")
   elementIn        Int?     @map("element_in")
   elementInCost    Int?     @map("element_in_cost")
   elementInPoints  Int?     @map("element_in_points")
@@ -384,15 +384,15 @@ model EntryEventTransfer {
   transferTime     DateTime @map("transfer_time")
   createdAt        DateTime @default(now()) @map("created_at")
 
-  @@unique([entry, event], name: "unique_entry_event_transfer")
-  @@index([entry], name: "idx_entry_event_transfers_entry_id")
+  @@unique([entryId, eventId], name: "unique_entry_event_transfer")
+  @@index([entryId], name: "idx_entry_event_transfers_entry_id")
   @@map("entry_event_transfers")
 }
 
 model EntryEventResult {
   id                       Int      @id @default(autoincrement())
-  entry                    Int      @map("entry")
-  event                    Int      @map("event")
+  entryId                  Int      @map("entry_id")
+  eventId                  Int      @map("event_id")
   eventPoints              Int      @default(0) @map("event_points")
   eventTransfers           Int      @default(0) @map("event_transfers")
   eventTransfersCost       Int      @default(0) @map("event_transfers_cost")
@@ -413,8 +413,8 @@ model EntryEventResult {
   createdAt                DateTime @default(now()) @map("created_at")
   updatedAt                DateTime @updatedAt @map("updated_at")
 
-  @@index([entry], name: "idx_entry_event_results_entry_id")
-  @@index([event], name: "idx_entry_event_results_event_id")
+  @@index([entryId], name: "idx_entry_event_results_entry_id")
+  @@index([eventId], name: "idx_entry_event_results_event_id")
   @@map("entry_event_results")
 }
 

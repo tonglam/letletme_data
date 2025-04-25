@@ -3,7 +3,7 @@ import * as O from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
 import { TeamService, TeamServiceOperations } from 'services/team/types';
 import { FplBootstrapDataService } from 'src/data/types';
-import { TeamCreateInputs, TeamRepository } from 'src/repositories/team/type';
+import { TeamCreateInputs, TeamRepository } from 'src/repositories/team/types';
 
 import { createTeamOperations } from '../../domains/team/operation';
 import { TeamCache, TeamOperations } from '../../domains/team/types';

@@ -8,7 +8,7 @@ import {
 import {
   EventLiveExplainCreateInputs,
   EventLiveExplainRepository,
-} from 'src/repositories/event-live-explain/type';
+} from 'src/repositories/event-live-explain/types';
 import { EventLiveExplains, EventLiveExplain } from 'src/types/domain/event-live-explain.type';
 import { EventId } from 'src/types/domain/event.type';
 import { PlayerId } from 'src/types/domain/player.type';
@@ -25,7 +25,12 @@ export const createEventLiveExplainRepository = (
       TE.tryCatch(
         () =>
           prisma.eventLiveExplain.findUnique({
-            where: { unique_event_element_live_explain: { eventId, elementId } },
+            where: {
+              unique_event_element_live_explain: {
+                eventId: Number(eventId),
+                elementId: Number(elementId),
+              },
+            },
           }),
         (error) =>
           createDBError({
@@ -48,7 +53,7 @@ export const createEventLiveExplainRepository = (
   const findByEventId = (eventId: EventId): TE.TaskEither<DBError, EventLiveExplains> =>
     pipe(
       TE.tryCatch(
-        () => prisma.eventLiveExplain.findMany({ where: { eventId } }),
+        () => prisma.eventLiveExplain.findMany({ where: { eventId: Number(eventId) } }),
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
@@ -91,7 +96,7 @@ export const createEventLiveExplainRepository = (
     pipe(
       TE.tryCatch(
         async () => {
-          await prisma.eventLiveExplain.deleteMany({ where: { eventId } });
+          await prisma.eventLiveExplain.deleteMany({ where: { eventId: Number(eventId) } });
         },
         (error) =>
           createDBError({

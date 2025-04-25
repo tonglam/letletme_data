@@ -5,7 +5,7 @@ import {
   mapDomainStatToPrismaCreate,
   mapPrismaPlayerStatToDomain,
 } from 'src/repositories/player-stat/mapper';
-import { PlayerStatCreateInputs, PlayerStatRepository } from 'src/repositories/player-stat/type';
+import { PlayerStatCreateInputs, PlayerStatRepository } from 'src/repositories/player-stat/types';
 import { RawPlayerStats } from 'src/types/domain/player-stat.type';
 import { createDBError, DBError, DBErrorCode } from 'src/types/error.type';
 

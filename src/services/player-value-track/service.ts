@@ -10,7 +10,7 @@ import { FplBootstrapDataService } from 'src/data/types';
 import {
   PlayerValueTrackCreateInputs,
   PlayerValueTrackRepository,
-} from 'src/repositories/player-value-track/type';
+} from 'src/repositories/player-value-track/types';
 import { EventService } from 'src/services/event/types';
 import { Event } from 'src/types/domain/event.type';
 import { PlayerValueTracks } from 'src/types/domain/player-value-track.type';

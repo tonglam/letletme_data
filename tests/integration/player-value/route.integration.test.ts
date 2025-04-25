@@ -20,7 +20,7 @@ import { TeamCache } from '../../../src/domains/team/types';
 import { redisClient } from '../../../src/infrastructures/cache/client';
 import { HTTPClient } from '../../../src/infrastructures/http';
 import { createPlayerValueRepository } from '../../../src/repositories/player-value/repository';
-import { PlayerValueRepository } from '../../../src/repositories/player-value/type';
+import { PlayerValueRepository } from '../../../src/repositories/player-value/types';
 import { createPlayerValueService } from '../../../src/services/player-value/service';
 import { PlayerValueService } from '../../../src/services/player-value/types';
 // Test Setup

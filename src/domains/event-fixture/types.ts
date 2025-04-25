@@ -1,6 +1,6 @@
 import * as TE from 'fp-ts/TaskEither';
 import { CachePrefix } from 'src/configs/cache/cache.config';
-import { EventFixtureCreateInputs } from 'src/repositories/event-fixture/type';
+import { EventFixtureCreateInputs } from 'src/repositories/event-fixture/types';
 import { EventFixtures, RawEventFixtures } from 'src/types/domain/event-fixture.type';
 import { EventId } from 'src/types/domain/event.type';
 

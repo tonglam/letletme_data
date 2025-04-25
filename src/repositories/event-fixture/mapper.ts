@@ -1,7 +1,11 @@
 import { RawEventFixture } from 'src/types/domain/event-fixture.type';
 import { EventFixtureId } from 'src/types/domain/event-fixture.type';
 
-import { EventFixtureCreateInput, PrismaEventFixture, PrismaEventFixtureCreateInput } from './type';
+import {
+  EventFixtureCreateInput,
+  PrismaEventFixture,
+  PrismaEventFixtureCreateInput,
+} from './types';
 
 export const mapPrismaEventFixtureToDomain = (
   prismaEventFixture: PrismaEventFixture,

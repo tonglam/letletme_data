@@ -3,7 +3,7 @@ import { pipe } from 'fp-ts/function';
 import * as O from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
 import { EventService, EventServiceOperations } from 'services/event/types';
-import { EventRepository } from 'src/repositories/event/type';
+import { EventRepository } from 'src/repositories/event/types';
 
 import { FplBootstrapDataService } from '../../data/types';
 import { EventCache, EventOperations } from '../../domains/event/types';

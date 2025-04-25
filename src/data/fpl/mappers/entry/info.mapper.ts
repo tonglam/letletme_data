@@ -1,18 +1,18 @@
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
-import { MappedEntryInfo, validateEntryId } from 'src/types/domain/entry-info.type';
+import { RawEntryInfo, validateEntryId } from 'src/types/domain/entry-info.type';
 
 import { EntryInfoResponse } from '../../schemas/entry/info.schema';
 
 export const mapEntryInfoResponseToEntryInfo = (
   raw: EntryInfoResponse,
-): E.Either<string, MappedEntryInfo> =>
+): E.Either<string, RawEntryInfo> =>
   pipe(
     E.Do,
     E.bind('id', () => validateEntryId(raw.id)),
-    E.map((data): MappedEntryInfo => {
+    E.map((data): RawEntryInfo => {
       return {
-        entry: data.id,
+        id: data.id,
         entryName: raw.name,
         playerName: raw.player_first_name + ' ' + raw.player_last_name,
         region: raw.player_region_name,

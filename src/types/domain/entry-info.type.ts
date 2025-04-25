@@ -21,7 +21,7 @@ export const validateEntryId = (value: unknown): E.Either<string, EntryId> => {
 };
 
 export type EntryInfo = {
-  readonly entry: EntryId;
+  readonly id: EntryId;
   readonly entryName: string;
   readonly playerName: string;
   readonly region: string | null;
@@ -39,7 +39,9 @@ export type EntryInfo = {
   readonly usedEntryNames: string[];
 };
 
-export type MappedEntryInfo = Omit<
+export type EntryInfos = readonly EntryInfo[];
+
+export type RawEntryInfo = Omit<
   EntryInfo,
   | 'lastEntryName'
   | 'lastOverallPoints'
@@ -48,4 +50,4 @@ export type MappedEntryInfo = Omit<
   | 'lastTeamValue'
   | 'usedEntryNames'
 >;
-export type EntryInfos = readonly MappedEntryInfo[];
+export type RawEntryInfos = readonly RawEntryInfo[];

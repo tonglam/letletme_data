@@ -4,7 +4,7 @@ import { Event, Events } from 'src/types/domain/event.type';
 
 import { DomainError } from '../../types/error.type';
 
-import type { EventCreateInputs } from '../../repositories/event/type';
+import type { EventCreateInputs } from '../../repositories/event/types';
 
 export interface EventCacheConfig {
   readonly keyPrefix: (typeof CachePrefix)[keyof typeof CachePrefix];

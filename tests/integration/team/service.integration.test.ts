@@ -17,7 +17,7 @@ import { TeamCache } from '../../../src/domains/team/types'; // Team specific
 import { redisClient } from '../../../src/infrastructures/cache/client';
 import { HTTPClient } from '../../../src/infrastructures/http';
 import { createTeamRepository } from '../../../src/repositories/team/repository'; // Team specific
-import { TeamRepository } from '../../../src/repositories/team/type'; // Import TeamRepository
+import { TeamRepository } from '../../../src/repositories/team/types'; // Import TeamRepository
 import { createTeamService } from '../../../src/services/team/service'; // Team specific
 import { TeamService } from '../../../src/services/team/types'; // Team specific
 import { teamWorkflows } from '../../../src/services/team/workflow'; // Team specific

@@ -5,7 +5,10 @@ import {
   mapDomainPlayerValueToPrismaCreate,
   mapPrismaPlayerValueToDomain,
 } from 'src/repositories/player-value/mapper';
-import { PlayerValueCreateInputs, PlayerValueRepository } from 'src/repositories/player-value/type';
+import {
+  PlayerValueCreateInputs,
+  PlayerValueRepository,
+} from 'src/repositories/player-value/types';
 import { RawPlayerValues } from 'src/types/domain/player-value.type';
 import { PlayerId } from 'src/types/domain/player.type';
 import { createDBError, DBError, DBErrorCode } from 'src/types/error.type';
@@ -22,7 +25,7 @@ export const createPlayerValueRepository = (prisma: PrismaClient): PlayerValueRe
             return [];
           }
           const latestValues = await prisma.playerValue.findMany({
-            where: { elementId: { in: [...elementIds] } },
+            where: { elementId: { in: elementIds.map((id) => Number(id)) } },
             orderBy: { changeDate: 'desc' },
             distinct: ['elementId'],
             select: { elementId: true, value: true },
@@ -53,7 +56,7 @@ export const createPlayerValueRepository = (prisma: PrismaClient): PlayerValueRe
   const findByElement = (elementId: PlayerId): TE.TaskEither<DBError, RawPlayerValues> =>
     pipe(
       TE.tryCatch(
-        () => prisma.playerValue.findMany({ where: { elementId: { equals: elementId } } }),
+        () => prisma.playerValue.findMany({ where: { elementId: Number(elementId) } }),
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
@@ -68,7 +71,10 @@ export const createPlayerValueRepository = (prisma: PrismaClient): PlayerValueRe
   ): TE.TaskEither<DBError, RawPlayerValues> =>
     pipe(
       TE.tryCatch(
-        () => prisma.playerValue.findMany({ where: { elementId: { in: [...elementIds] } } }),
+        () =>
+          prisma.playerValue.findMany({
+            where: { elementId: { in: elementIds.map((id) => Number(id)) } },
+          }),
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
@@ -102,7 +108,7 @@ export const createPlayerValueRepository = (prisma: PrismaClient): PlayerValueRe
   const deleteByChangeDate = (changeDate: string): TE.TaskEither<DBError, void> =>
     pipe(
       TE.tryCatch(
-        () => prisma.playerValue.deleteMany({ where: { changeDate: { equals: changeDate } } }),
+        () => prisma.playerValue.deleteMany({ where: { changeDate: changeDate } }),
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,

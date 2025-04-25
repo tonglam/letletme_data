@@ -1,6 +1,6 @@
 import { RawEventLive } from 'src/types/domain/event-live.type';
 
-import { EventLiveCreateInput, PrismaEventLive, PrismaEventLiveCreateInput } from './type';
+import { EventLiveCreateInput, PrismaEventLive, PrismaEventLiveCreateInput } from './types';
 
 export const mapPrismaEventLiveToDomain = (prismaEventLive: PrismaEventLive): RawEventLive => ({
   eventId: prismaEventLive.eventId,

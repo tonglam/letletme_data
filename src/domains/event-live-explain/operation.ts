@@ -4,7 +4,7 @@ import * as TE from 'fp-ts/TaskEither';
 import {
   EventLiveExplainCreateInputs,
   EventLiveExplainRepository,
-} from 'src/repositories/event-live-explain/type';
+} from 'src/repositories/event-live-explain/types';
 import { EventLiveExplains } from 'src/types/domain/event-live-explain.type';
 import { EventId } from 'src/types/domain/event.type';
 

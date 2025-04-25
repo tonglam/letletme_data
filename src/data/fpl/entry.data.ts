@@ -94,7 +94,7 @@ export const createFplEntryDataService = (
     return fetchAndValidateEntries(entryId);
   };
 
-  const getEntryInfos = (entryId: EntryId): TE.TaskEither<DataLayerError, EntryInfos> =>
+  const getInfos = (entryId: EntryId): TE.TaskEither<DataLayerError, EntryInfos> =>
     pipe(
       getFplEntryDataInternal(entryId),
       TE.chain((entryData) =>
@@ -112,7 +112,7 @@ export const createFplEntryDataService = (
       ),
     );
 
-  const getEntryLeagues = (entryId: EntryId): TE.TaskEither<DataLayerError, EntryLeagueInfos> =>
+  const getLeagues = (entryId: EntryId): TE.TaskEither<DataLayerError, EntryLeagueInfos> =>
     pipe(
       getFplEntryDataInternal(entryId),
       TE.chain((entryData) =>
@@ -149,7 +149,7 @@ export const createFplEntryDataService = (
     );
 
   return {
-    getEntryInfos,
-    getEntryLeagues,
+    getInfos,
+    getLeagues,
   };
 };

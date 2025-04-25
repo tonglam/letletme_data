@@ -5,7 +5,7 @@ import {
   mapDomainEventLiveToPrismaCreate,
   mapPrismaEventLiveToDomain,
 } from 'src/repositories/event-live/mapper';
-import { EventLiveCreateInputs, EventLiveRepository } from 'src/repositories/event-live/type';
+import { EventLiveCreateInputs, EventLiveRepository } from 'src/repositories/event-live/types';
 import { RawEventLives } from 'src/types/domain/event-live.type';
 import { EventId } from 'src/types/domain/event.type';
 import { createDBError, DBError, DBErrorCode } from 'src/types/error.type';
@@ -64,7 +64,7 @@ export const createEventLiveRepository = (prisma: PrismaClient): EventLiveReposi
     pipe(
       TE.tryCatch(
         async () => {
-          await prisma.eventLive.deleteMany({ where: { eventId } });
+          await prisma.eventLive.deleteMany({ where: { eventId: Number(eventId) } });
         },
         (error) =>
           createDBError({

@@ -1,7 +1,10 @@
 import { PlayerValueOperations } from 'domains/player-value/types';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { PlayerValueCreateInputs, PlayerValueRepository } from 'src/repositories/player-value/type';
+import {
+  PlayerValueCreateInputs,
+  PlayerValueRepository,
+} from 'src/repositories/player-value/types';
 import { RawPlayerValues } from 'src/types/domain/player-value.type';
 import { PlayerId } from 'src/types/domain/player.type';
 import { createDomainError, DomainError, DomainErrorCode } from 'src/types/error.type';

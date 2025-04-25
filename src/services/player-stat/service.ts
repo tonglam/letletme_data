@@ -8,7 +8,7 @@ import * as O from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
 import { PlayerStatService, PlayerStatServiceOperations } from 'services/player-stat/types';
 import { FplBootstrapDataService } from 'src/data/types';
-import { PlayerStatRepository } from 'src/repositories/player-stat/type';
+import { PlayerStatRepository } from 'src/repositories/player-stat/types';
 import { Event } from 'src/types/domain/event.type';
 import { PlayerStat, PlayerStats, RawPlayerStats } from 'src/types/domain/player-stat.type';
 import { PlayerId, PlayerType } from 'src/types/domain/player.type';

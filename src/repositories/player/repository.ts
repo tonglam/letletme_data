@@ -5,7 +5,7 @@ import {
   mapDomainPlayerToPrismaCreate,
   mapPrismaPlayerToDomain,
 } from 'src/repositories/player/mapper';
-import { PlayerCreateInputs, PlayerRepository } from 'src/repositories/player/type';
+import { PlayerCreateInputs, PlayerRepository } from 'src/repositories/player/types';
 import { PlayerId, RawPlayer, RawPlayers } from 'src/types/domain/player.type';
 
 import { createDBError, DBError, DBErrorCode } from '../../types/error.type';

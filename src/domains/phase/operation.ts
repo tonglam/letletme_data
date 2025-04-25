@@ -2,7 +2,7 @@ import { PhaseOperations } from 'domains/phase/types';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 
-import { PhaseCreateInputs, PhaseRepository } from '../../repositories/phase/type';
+import { PhaseCreateInputs, PhaseRepository } from '../../repositories/phase/types';
 import { Phases } from '../../types/domain/phase.type';
 import { createDomainError, DomainError, DomainErrorCode } from '../../types/error.type';
 import { getErrorMessage } from '../../utils/error.util';

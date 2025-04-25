@@ -1,7 +1,7 @@
 import { EventLiveOperations } from 'domains/event-live/types';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { EventLiveCreateInputs, EventLiveRepository } from 'src/repositories/event-live/type';
+import { EventLiveCreateInputs, EventLiveRepository } from 'src/repositories/event-live/types';
 import { RawEventLives } from 'src/types/domain/event-live.type';
 import { EventId } from 'src/types/domain/event.type';
 

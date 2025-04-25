@@ -1,6 +1,6 @@
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { PlayerCreateInputs, PlayerRepository } from 'src/repositories/player/type';
+import { PlayerCreateInputs, PlayerRepository } from 'src/repositories/player/types';
 import { RawPlayers } from 'src/types/domain/player.type';
 import { createDomainError, DomainError, DomainErrorCode } from 'src/types/error.type';
 import { getErrorMessage } from 'src/utils/error.util';

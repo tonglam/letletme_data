@@ -13,7 +13,7 @@ import { PlayerCache } from '../../../src/domains/player/types';
 import { redisClient } from '../../../src/infrastructures/cache/client';
 import { HTTPClient } from '../../../src/infrastructures/http';
 import { createPlayerRepository } from '../../../src/repositories/player/repository';
-import { PlayerRepository } from '../../../src/repositories/player/type';
+import { PlayerRepository } from '../../../src/repositories/player/types';
 import { createPlayerService } from '../../../src/services/player/service';
 import { PlayerService } from '../../../src/services/player/types';
 import { playerWorkflows } from '../../../src/services/player/workflow';

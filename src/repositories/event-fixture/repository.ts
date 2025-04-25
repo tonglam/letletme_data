@@ -7,14 +7,16 @@ import { TeamId } from 'src/types/domain/team.type';
 import { createDBError, DBError, DBErrorCode } from 'src/types/error.type';
 
 import { mapDomainEventFixtureToPrismaCreate, mapPrismaEventFixtureToDomain } from './mapper';
-import { EventFixtureCreateInputs, EventFixtureRepository } from './type';
+import { EventFixtureCreateInputs, EventFixtureRepository } from './types';
 
 export const createEventFixtureRepository = (prisma: PrismaClient): EventFixtureRepository => {
   const findByTeamId = (teamId: TeamId): TE.TaskEither<DBError, RawEventFixtures> =>
     pipe(
       TE.tryCatch(
         () =>
-          prisma.eventFixture.findMany({ where: { OR: [{ teamH: teamId }, { teamA: teamId }] } }),
+          prisma.eventFixture.findMany({
+            where: { OR: [{ teamH: Number(teamId) }, { teamA: Number(teamId) }] },
+          }),
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
@@ -36,7 +38,7 @@ export const createEventFixtureRepository = (prisma: PrismaClient): EventFixture
   const findByEventId = (eventId: EventId): TE.TaskEither<DBError, RawEventFixtures> =>
     pipe(
       TE.tryCatch(
-        () => prisma.eventFixture.findMany({ where: { eventId } }),
+        () => prisma.eventFixture.findMany({ where: { eventId: Number(eventId) } }),
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
@@ -85,7 +87,7 @@ export const createEventFixtureRepository = (prisma: PrismaClient): EventFixture
   const deleteByEventId = (eventId: EventId): TE.TaskEither<DBError, void> =>
     pipe(
       TE.tryCatch(
-        () => prisma.eventFixture.deleteMany({ where: { eventId } }),
+        () => prisma.eventFixture.deleteMany({ where: { eventId: Number(eventId) } }),
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,

@@ -1,5 +1,5 @@
 import * as TE from 'fp-ts/TaskEither';
-import { PlayerValueTrackCreateInputs } from 'src/repositories/player-value-track/type';
+import { PlayerValueTrackCreateInputs } from 'src/repositories/player-value-track/types';
 import { PlayerValueTracks } from 'src/types/domain/player-value-track.type';
 import { DomainError } from 'src/types/error.type';
 

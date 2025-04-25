@@ -1,6 +1,6 @@
 import * as TE from 'fp-ts/TaskEither';
 import { CachePrefix } from 'src/configs/cache/cache.config';
-import { EventLiveCreateInputs } from 'src/repositories/event-live/type';
+import { EventLiveCreateInputs } from 'src/repositories/event-live/types';
 import { EventLives, RawEventLives } from 'src/types/domain/event-live.type';
 import { EventId } from 'src/types/domain/event.type';
 

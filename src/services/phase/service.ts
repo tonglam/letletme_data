@@ -6,7 +6,7 @@ import { PhaseService, PhaseServiceOperations } from 'services/phase/types';
 import { FplBootstrapDataService } from '../../data/types';
 import { createPhaseOperations } from '../../domains/phase/operation';
 import { PhaseCache, PhaseOperations } from '../../domains/phase/types';
-import { PhaseCreateInputs, PhaseRepository } from '../../repositories/phase/type';
+import { PhaseCreateInputs, PhaseRepository } from '../../repositories/phase/types';
 import { Phase, PhaseId, Phases } from '../../types/domain/phase.type';
 import {
   createDomainError,

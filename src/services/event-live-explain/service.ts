@@ -7,7 +7,7 @@ import { pipe } from 'fp-ts/function';
 import * as RA from 'fp-ts/ReadonlyArray';
 import * as TE from 'fp-ts/TaskEither';
 import { FplLiveDataService } from 'src/data/types';
-import { EventLiveExplainRepository } from 'src/repositories/event-live-explain/type';
+import { EventLiveExplainRepository } from 'src/repositories/event-live-explain/types';
 import { EventLiveExplain, EventLiveExplains } from 'src/types/domain/event-live-explain.type';
 import { EventId } from 'src/types/domain/event.type';
 import { PlayerId } from 'src/types/domain/player.type';

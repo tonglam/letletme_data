@@ -5,7 +5,7 @@ import {
   mapDomainPhaseToPrismaCreate,
   mapPrismaPhaseToDomain,
 } from 'src/repositories/phase/mapper';
-import { PhaseCreateInputs, PhaseRepository } from 'src/repositories/phase/type';
+import { PhaseCreateInputs, PhaseRepository } from 'src/repositories/phase/types';
 import { Phase, Phases } from 'src/types/domain/phase.type';
 
 import { PhaseId } from '../../types/domain/phase.type';

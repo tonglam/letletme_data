@@ -19,7 +19,7 @@ import { EventCache } from '../../../src/domains/event/types';
 import { redisClient } from '../../../src/infrastructures/cache/client';
 import { HTTPClient } from '../../../src/infrastructures/http';
 import { createEventRepository } from '../../../src/repositories/event/repository';
-import { EventRepository } from '../../../src/repositories/event/type';
+import { EventRepository } from '../../../src/repositories/event/types';
 import { createEventService } from '../../../src/services/event/service';
 import { EventService } from '../../../src/services/event/types';
 import { Event, EventId } from '../../../src/types/domain/event.type';

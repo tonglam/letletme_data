@@ -4,7 +4,7 @@ import * as TE from 'fp-ts/TaskEither';
 import {
   PlayerValueTrackCreateInputs,
   PlayerValueTrackRepository,
-} from 'src/repositories/player-value-track/type';
+} from 'src/repositories/player-value-track/types';
 import { PlayerValueTracks } from 'src/types/domain/player-value-track.type';
 import { createDomainError } from 'src/types/error.type';
 import { DomainErrorCode } from 'src/types/error.type';

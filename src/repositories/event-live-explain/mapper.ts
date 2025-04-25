@@ -4,7 +4,7 @@ import {
   EventLiveExplainCreateInput,
   PrismaEventLiveExplain,
   PrismaEventLiveExplainCreateInput,
-} from './type';
+} from './types';
 
 export const mapPrismaEventLiveExplainToDomain = (
   prismaEventLiveExplain: PrismaEventLiveExplain,
