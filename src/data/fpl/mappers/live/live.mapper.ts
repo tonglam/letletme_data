@@ -5,11 +5,11 @@ import { RawEventLive } from 'src/types/domain/event-live.type';
 import { validatePlayerId } from 'src/types/domain/player.type';
 import { safeStringToDecimal } from 'src/utils/common.util';
 
-import { EventLiveResponse } from '../../schemas/event/live.schema';
+import { LiveResponse } from '../../schemas/live/live.schema';
 
 export const mapEventLiveResponseToDomain = (
   event: number,
-  raw: EventLiveResponse,
+  raw: LiveResponse,
 ): E.Either<string, RawEventLive> => {
   return pipe(
     E.Do,

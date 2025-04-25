@@ -68,11 +68,11 @@ export const createEventRepository = (prisma: PrismaClient): EventRepository => 
       TE.map((prismaEvents) => prismaEvents.map(mapPrismaEventToDomain)),
     );
 
-  const saveBatch = (events: EventCreateInputs): TE.TaskEither<DBError, Events> =>
+  const saveBatch = (eventInputs: EventCreateInputs): TE.TaskEither<DBError, Events> =>
     pipe(
       TE.tryCatch(
         async () => {
-          const dataToCreate = events.map(mapDomainEventToPrismaCreate);
+          const dataToCreate = eventInputs.map(mapDomainEventToPrismaCreate);
           await prisma.event.createMany({
             data: dataToCreate,
             skipDuplicates: true,

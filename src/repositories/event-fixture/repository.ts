@@ -56,17 +56,17 @@ export const createEventFixtureRepository = (prisma: PrismaClient): EventFixture
     );
 
   const saveBatchByEventId = (
-    eventFixtures: EventFixtureCreateInputs,
+    eventFixtureInputs: EventFixtureCreateInputs,
   ): TE.TaskEither<DBError, RawEventFixtures> => {
-    if (eventFixtures.length === 0) {
+    if (eventFixtureInputs.length === 0) {
       return TE.right([]);
     }
-    const eventId = eventFixtures[0].eventId as EventId;
+    const eventId = eventFixtureInputs[0].eventId as EventId;
 
     return pipe(
       TE.tryCatch(
         async () => {
-          const dataToCreate = eventFixtures.map(mapDomainEventFixtureToPrismaCreate);
+          const dataToCreate = eventFixtureInputs.map(mapDomainEventFixtureToPrismaCreate);
           await prisma.eventFixture.createMany({
             data: dataToCreate,
             skipDuplicates: true,
@@ -95,24 +95,10 @@ export const createEventFixtureRepository = (prisma: PrismaClient): EventFixture
       TE.map(() => undefined),
     );
 
-  const deleteAll = (): TE.TaskEither<DBError, void> =>
-    pipe(
-      TE.tryCatch(
-        () => prisma.eventFixture.deleteMany(),
-        (error) =>
-          createDBError({
-            code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to delete all event fixtures: ${error}`,
-          }),
-      ),
-      TE.map(() => undefined),
-    );
-
   return {
     findByTeamId,
     findByEventId,
     saveBatchByEventId,
     deleteByEventId,
-    deleteAll,
   };
 };

@@ -19,8 +19,7 @@ export interface EventFixtureRepository {
   readonly findByTeamId: (teamId: TeamId) => TE.TaskEither<DBError, RawEventFixtures>;
   readonly findByEventId: (eventId: EventId) => TE.TaskEither<DBError, RawEventFixtures>;
   readonly saveBatchByEventId: (
-    eventFixtures: EventFixtureCreateInputs,
+    eventFixtureInputs: EventFixtureCreateInputs,
   ) => TE.TaskEither<DBError, RawEventFixtures>;
   readonly deleteByEventId: (eventId: EventId) => TE.TaskEither<DBError, void>;
-  readonly deleteAll: () => TE.TaskEither<DBError, void>;
 }

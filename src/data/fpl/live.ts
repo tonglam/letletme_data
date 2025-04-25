@@ -3,9 +3,12 @@ import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import { Logger } from 'pino';
 import { apiConfig } from 'src/configs/api/api.config';
-import { mapEventLiveExplainResponseToDomain } from 'src/data/fpl/mappers/event/explain.mapper';
-import { EventResponse, EventResponseSchema } from 'src/data/fpl/schemas/event/event.schema';
-import { FplEventDataService } from 'src/data/types';
+import { mapEventLiveExplainResponseToDomain } from 'src/data/fpl/mappers/live/explain.mapper';
+import {
+  EventLiveResponseSchema,
+  EventLiveResponse,
+} from 'src/data/fpl/schemas/live/event-live.schema';
+import { FplLiveDataService } from 'src/data/types';
 import { HTTPClient } from 'src/infrastructures/http/types';
 import { EventLiveExplains } from 'src/types/domain/event-live-explain.type';
 import { RawEventLives } from 'src/types/domain/event-live.type';
@@ -13,17 +16,17 @@ import { EventId } from 'src/types/domain/event.type';
 import { DataLayerError, DataLayerErrorCode } from 'src/types/error.type';
 import { createDataLayerError } from 'src/utils/error.util';
 
-import { mapEventLiveResponseToDomain } from './mappers/event/live.mapper';
+import { mapEventLiveResponseToDomain } from './mappers/live/live.mapper';
 
-export const createFplEventDataService = (
+export const createFplLiveDataService = (
   client: HTTPClient,
   logger: Logger,
-): FplEventDataService => {
-  let cachedEventResponse: EventResponse | null = null;
+): FplLiveDataService => {
+  let cachedEventResponse: EventLiveResponse | null = null;
 
   const fetchAndValidateEvents = (
     eventId: EventId,
-  ): TE.TaskEither<DataLayerError, EventResponse> => {
+  ): TE.TaskEither<DataLayerError, EventLiveResponse> => {
     logger.info({ operation: `fetchAndValidateEvent(${eventId})` }, 'Fetching FPL event data');
 
     return pipe(
@@ -45,7 +48,7 @@ export const createFplEventDataService = (
         });
       }),
       TE.chain((response) => {
-        const parsed = EventResponseSchema.safeParse(response);
+        const parsed = EventLiveResponseSchema.safeParse(response);
         if (!parsed.success) {
           logger.error(
             {
@@ -86,7 +89,7 @@ export const createFplEventDataService = (
 
   const getFplEventDataInternal = (
     eventId: EventId,
-  ): TE.TaskEither<DataLayerError, EventResponse> => {
+  ): TE.TaskEither<DataLayerError, EventLiveResponse> => {
     if (cachedEventResponse) {
       return TE.right(cachedEventResponse);
     }

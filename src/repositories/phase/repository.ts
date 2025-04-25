@@ -47,11 +47,11 @@ export const createPhaseRepository = (prisma: PrismaClient): PhaseRepository => 
       TE.map((prismaPhases) => prismaPhases.map(mapPrismaPhaseToDomain)),
     );
 
-  const saveBatch = (phases: PhaseCreateInputs): TE.TaskEither<DBError, Phases> =>
+  const saveBatch = (phaseInputs: PhaseCreateInputs): TE.TaskEither<DBError, Phases> =>
     pipe(
       TE.tryCatch(
         async () => {
-          const dataToCreate = phases.map(mapDomainPhaseToPrismaCreate);
+          const dataToCreate = phaseInputs.map(mapDomainPhaseToPrismaCreate);
           await prisma.phase.createMany({
             data: dataToCreate,
             skipDuplicates: true,

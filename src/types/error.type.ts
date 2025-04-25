@@ -124,13 +124,6 @@ export const createAPIError = (params: {
   ...params,
 });
 
-export const formatErrorResponse = (error: APIError) => ({
-  error: {
-    code: error.code,
-    message: error.message,
-  },
-});
-
 export const getErrorStatus = (error: APIError): number => {
   switch (error.code) {
     case APIErrorCode.VALIDATION_ERROR:

@@ -48,7 +48,7 @@ const playerServiceOperations = (
       TE.map((players) => RA.filter((p: Player) => p.type === elementType)(players)),
     );
 
-  const findPlayersByTeam = (teamId: TeamId): TE.TaskEither<ServiceError, Players> =>
+  const findPlayersByTeamId = (teamId: TeamId): TE.TaskEither<ServiceError, Players> =>
     pipe(
       playerCache.getAllPlayers(),
       TE.mapLeft(mapDomainErrorToServiceError),
@@ -94,7 +94,7 @@ const playerServiceOperations = (
   return {
     findPlayerById,
     findPlayersByElementType,
-    findPlayersByTeam,
+    findPlayersByTeam: findPlayersByTeamId,
     findAllPlayers,
     syncPlayersFromApi,
   };
@@ -113,7 +113,7 @@ export const createPlayerService = (
     getPlayer: (id: PlayerId): TE.TaskEither<ServiceError, Player> => ops.findPlayerById(id),
     getPlayersByElementType: (elementType: PlayerType): TE.TaskEither<ServiceError, Players> =>
       ops.findPlayersByElementType(elementType),
-    getPlayersByTeam: (teamId: TeamId): TE.TaskEither<ServiceError, Players> =>
+    getPlayersByTeamId: (teamId: TeamId): TE.TaskEither<ServiceError, Players> =>
       ops.findPlayersByTeam(teamId),
     getPlayers: (): TE.TaskEither<ServiceError, Players> => ops.findAllPlayers(),
     syncPlayersFromApi: (): TE.TaskEither<ServiceError, void> => ops.syncPlayersFromApi(),

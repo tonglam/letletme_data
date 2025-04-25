@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const EventLiveResponseSchema = z
+export const LiveResponseSchema = z
   .object({
     element: z.number(),
     minutes: z.number(),
@@ -33,4 +33,4 @@ export const EventLiveResponseSchema = z
   })
   .passthrough();
 
-export type EventLiveResponse = z.infer<typeof EventLiveResponseSchema>;
+export type LiveResponse = z.infer<typeof LiveResponseSchema>;

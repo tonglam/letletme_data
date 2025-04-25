@@ -12,6 +12,7 @@ import {
   RawEventFixture,
   RawEventFixtures,
 } from 'src/types/domain/event-fixture.type';
+import { EventLive, EventLives, RawEventLives } from 'src/types/domain/event-live.type';
 import { PlayerStat, PlayerStats, RawPlayerStat } from 'src/types/domain/player-stat.type';
 import { PlayerValue, PlayerValues, RawPlayerValue } from 'src/types/domain/player-value.type';
 import { Player } from 'src/types/domain/player.type';
@@ -278,6 +279,61 @@ export const enrichEventFixtures =
             code: DomainErrorCode.CACHE_ERROR,
             message: 'Failed to retrieve teams from cache for fixture enrichment',
             cause: domainError,
+          }),
+      ),
+    );
+  };
+
+export const enrichEventLives =
+  (playerCache: PlayerCache, teamCache: TeamCache) =>
+  (rawEventLives: RawEventLives): TE.TaskEither<DomainError, EventLives> => {
+    if (RA.isEmpty(rawEventLives)) {
+      return TE.right([]);
+    }
+
+    return pipe(
+      playerCache.getAllPlayers(),
+      TE.bindTo('players'),
+      TE.bind('teams', () => teamCache.getAllTeams()),
+      TE.map(({ players, teams }) => {
+        const playerMap = new Map(players.map((p) => [p.id as number, p]));
+        const teamMap = new Map(teams.map((t) => [t.id as number, t]));
+
+        return pipe(
+          rawEventLives,
+          RA.map((rawLive): O.Option<EventLive> => {
+            const playerOpt = O.fromNullable(playerMap.get(rawLive.elementId as number));
+            return pipe(
+              playerOpt,
+              O.chain((player) => {
+                const teamOpt = O.fromNullable(teamMap.get(player.teamId as number));
+                return pipe(
+                  teamOpt,
+                  O.map(
+                    (team): EventLive => ({
+                      ...rawLive,
+                      teamId: team.id,
+                      teamName: team.name,
+                      teamShortName: team.shortName,
+                      elementType: player.type as ElementTypeId,
+                      elementTypeName: getElementTypeName(player.type as ElementTypeId),
+                      webName: player.webName,
+                      value: player.price,
+                    }),
+                  ),
+                );
+              }),
+            );
+          }),
+          RA.compact, // Filter out any None values if player or team wasn't found
+        );
+      }),
+      TE.mapLeft(
+        (error): DomainError =>
+          createDomainError({
+            code: DomainErrorCode.CACHE_ERROR,
+            message: 'Failed to retrieve players or teams from cache for event live enrichment',
+            cause: error,
           }),
       ),
     );

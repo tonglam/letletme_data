@@ -19,7 +19,7 @@ export interface PlayerService {
   readonly getPlayersByElementType: (
     elementType: PlayerType,
   ) => TE.TaskEither<ServiceError, Players>;
-  readonly getPlayersByTeam: (teamId: TeamId) => TE.TaskEither<ServiceError, Players>;
+  readonly getPlayersByTeamId: (teamId: TeamId) => TE.TaskEither<ServiceError, Players>;
   readonly getPlayers: () => TE.TaskEither<ServiceError, Players>;
   readonly syncPlayersFromApi: () => TE.TaskEither<ServiceError, void>;
 }

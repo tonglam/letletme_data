@@ -1,6 +1,6 @@
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
-import { EventLiveExplainResponse } from 'src/data/fpl/schemas/event/explain.schema';
+import { EventLiveExplainResponse } from 'src/data/fpl/schemas/live/explain.schema';
 import { EventLiveExplain } from 'src/types/domain/event-live-explain.type';
 import { EventId } from 'src/types/domain/event.type';
 import { validatePlayerId } from 'src/types/domain/player.type';

@@ -25,4 +25,6 @@ export const CachePrefix = {
   PLAYER_VALUE: 'player-value',
   PLAYER_STAT: 'player-stat',
   FIXTURE: 'fixture',
+  LIVE: 'live',
+  LIVE_EXPLAIN: 'live-explain',
 } as const;

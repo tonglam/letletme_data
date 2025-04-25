@@ -6,7 +6,7 @@ import { DBError } from 'src/types/error.type';
 export type PrismaPlayerStatCreateInput = Prisma.PlayerStatCreateInput;
 export type PrismaPlayerStat = PrismaPlayerStatType;
 
-export type PlayerStatCreateInput = Omit<RawPlayerStat, 'id' | 'createdAt' | 'updatedAt'>;
+export type PlayerStatCreateInput = RawPlayerStat;
 export type PlayerStatCreateInputs = readonly PlayerStatCreateInput[];
 
 export interface PlayerStatRepository {

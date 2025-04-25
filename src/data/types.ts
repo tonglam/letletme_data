@@ -33,7 +33,7 @@ export interface FplFixtureDataService {
   readonly getFixtures: (eventId: EventId) => TE.TaskEither<DataLayerError, RawEventFixtures>;
 }
 
-export interface FplEventDataService {
+export interface FplLiveDataService {
   readonly getLives: (eventId: EventId) => TE.TaskEither<DataLayerError, RawEventLives>;
   readonly getExplains: (eventId: EventId) => TE.TaskEither<DataLayerError, EventLiveExplains>;
 }

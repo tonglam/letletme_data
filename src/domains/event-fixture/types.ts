@@ -19,7 +19,7 @@ export interface EventFixtureCache {
 
 export interface EventFixtureOperations {
   readonly saveEventFixtures: (
-    eventFixtures: EventFixtureCreateInputs,
+    eventFixtureInputs: EventFixtureCreateInputs,
   ) => TE.TaskEither<DomainError, RawEventFixtures>;
   readonly deleteEventFixtures: (eventId: EventId) => TE.TaskEither<DomainError, void>;
 }

@@ -43,11 +43,11 @@ export const createTeamRepository = (prismaClient: PrismaClient): TeamRepository
       TE.map((prismaTeams) => prismaTeams.map(mapPrismaTeamToDomain)),
     );
 
-  const saveBatch = (teams: TeamCreateInputs): TE.TaskEither<DBError, Teams> =>
+  const saveBatch = (teamInputs: TeamCreateInputs): TE.TaskEither<DBError, Teams> =>
     pipe(
       TE.tryCatch(
         async () => {
-          const dataToCreate = teams.map(mapDomainTeamToPrismaCreate);
+          const dataToCreate = teamInputs.map(mapDomainTeamToPrismaCreate);
           await prismaClient.team.createMany({
             data: dataToCreate,
             skipDuplicates: true,

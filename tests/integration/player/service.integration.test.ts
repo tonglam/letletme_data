@@ -166,7 +166,7 @@ describe('Player Integration Tests', () => {
         const firstPlayer = getPlayersResult.right[0];
         const teamToTest = firstPlayer.teamId;
 
-        const playersByTeamResult = await playerService.getPlayersByTeam(teamToTest)();
+        const playersByTeamResult = await playerService.getPlayersByTeamId(teamToTest)();
         expect(E.isRight(playersByTeamResult)).toBe(true);
         if (E.isRight(playersByTeamResult)) {
           const players = playersByTeamResult.right;
