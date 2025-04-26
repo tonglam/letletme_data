@@ -8,3 +8,5 @@ export const ClassicLeagueResponseSchema = z.object({
   standings: ClassicStandingsResponseSchema,
   last_updated_data: z.string(),
 });
+
+export type ClassicLeagueResponse = z.infer<typeof ClassicLeagueResponseSchema>;

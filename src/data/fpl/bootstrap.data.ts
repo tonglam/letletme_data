@@ -36,7 +36,7 @@ export const createFplBootstrapDataService = (
     logger.info({ operation: 'fetchAndValidateBootstrap' }, 'Fetching FPL bootstrap data');
 
     return pipe(
-      client.get<unknown>(apiConfig.endpoints.bootstrap.static),
+      client.get<BootStrapResponse>(apiConfig.endpoints.bootstrap.static),
       TE.mapLeft((apiError) => {
         logger.error(
           {

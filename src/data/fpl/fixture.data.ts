@@ -28,7 +28,7 @@ export const createFplFixtureDataService = (
     logger.info({ operation: 'fetchAndValidateEventFixtures' }, 'Fetching FPL fixtures data');
 
     return pipe(
-      client.get<unknown>(apiConfig.endpoints.event.fixtures({ eventId: eventId })),
+      client.get<EventFixturesResponse>(apiConfig.endpoints.event.fixtures({ eventId: eventId })),
       TE.mapLeft((apiError) => {
         logger.error(
           {

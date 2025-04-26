@@ -1,30 +1,18 @@
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'chip') THEN
-        CREATE TYPE "Chip" AS ENUM ('None', 'Wildcard', 'FreeHit', 'TripleCaptain', 'BenchBoost', 'Manager');
-    END IF;
-END$$;
+CREATE TYPE IF NOT EXISTS "Chip" AS ENUM ('None', 'Wildcard', 'FreeHit', 'TripleCaptain', 'BenchBoost', 'Manager');
 
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'valuechangetype') THEN
-        CREATE TYPE "ValueChangeType" AS ENUM ('Start', 'Rise', 'Fall');
-    END IF;
-END$$;
+CREATE TYPE IF NOT EXISTS "ValueChangeType" AS ENUM ('Start', 'Rise', 'Fall');
 
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'leaguetype') THEN
-        CREATE TYPE "LeagueType" AS ENUM ('Classic', 'H2H');
-    END IF;
-END$$;
+CREATE TYPE IF NOT EXISTS "LeagueType" AS ENUM ('Classic', 'H2H');
 
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'cupresult') THEN
-        CREATE TYPE "CupResult" AS ENUM ('Win', 'Loss');
-    END IF;
-END$$;
+CREATE TYPE IF NOT EXISTS "CupResult" AS ENUM ('Win', 'Loss');
+
+CREATE TYPE IF NOT EXISTS "TournamentMode" AS ENUM ('Normal');
+
+CREATE TYPE IF NOT EXISTS "GroupMode" AS ENUM ('NoGroup', 'PointsRaces', 'BattleRaces');
+
+CREATE TYPE IF NOT EXISTS "KnockoutMode" AS ENUM ('NoKnockout', 'SingleElimination', 'DoubleElimination', 'HeadToHead');
+
+CREATE TYPE IF NOT EXISTS "TournamentState" AS ENUM ('Active', 'Inactive', 'Finished');
 
 CREATE TABLE IF NOT EXISTS "events" (
     "id" INTEGER PRIMARY KEY,
@@ -137,6 +125,7 @@ CREATE TABLE IF NOT EXISTS "player_stats" (
     "event_id" INTEGER NOT NULL,
     "element_id" INTEGER NOT NULL,
     "element_type" INTEGER NOT NULL,
+    "total_points" INTEGER,
     "form" FLOAT,
     "influence" FLOAT,
     "creativity" FLOAT,
@@ -153,7 +142,6 @@ CREATE TABLE IF NOT EXISTS "player_stats" (
     "goals_conceded" INTEGER,
     "own_goals" INTEGER,
     "penalties_saved" INTEGER,
-    "total_points" INTEGER,
     "yellow_cards" INTEGER DEFAULT 0,
     "red_cards" INTEGER DEFAULT 0,
     "saves" INTEGER DEFAULT 0,
@@ -184,7 +172,7 @@ CREATE INDEX IF NOT EXISTS "idx_player_stats_event_id" ON "player_stats" ("event
 ALTER TABLE "player_stats" ENABLE ROW LEVEL SECURITY;
 
 CREATE TABLE IF NOT EXISTS "event_fixtures" (
-    "id" SERIAL PRIMARY KEY,
+    "id" INTEGER PRIMARY KEY,
     "code" INTEGER UNIQUE NOT NULL,
     "event_id" INTEGER NOT NULL,
     "kickoff_time" TIMESTAMPTZ,
@@ -192,11 +180,11 @@ CREATE TABLE IF NOT EXISTS "event_fixtures" (
     "finished" BOOLEAN NOT NULL DEFAULT false,
     "minutes" INTEGER NOT NULL DEFAULT 0,
     "team_h" INTEGER,
-    "team_h_difficulty" INTEGER NOT NULL DEFAULT 0,
-    "team_h_score" INTEGER NOT NULL DEFAULT 0,
+    "team_h_difficulty" INTEGER,
+    "team_h_score" INTEGER,
     "team_a" INTEGER,
-    "team_a_difficulty" INTEGER NOT NULL DEFAULT 0,
-    "team_a_score" INTEGER NOT NULL DEFAULT 0,
+    "team_a_difficulty" INTEGER,
+    "team_a_score" INTEGER,
     "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updated_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -248,7 +236,6 @@ CREATE TABLE IF NOT EXISTS "event_live_explains" (
     "id" SERIAL PRIMARY KEY,
     "event_id" INTEGER NOT NULL,
     "element_id" INTEGER NOT NULL,
-    "bps" INTEGER,
     "bonus" INTEGER,
     "minutes" INTEGER,
     "minutes_points" INTEGER,
@@ -299,9 +286,9 @@ CREATE TABLE IF NOT EXISTS "entry_infos" (
     "entry_name" TEXT NOT NULL,
     "player_name" TEXT NOT NULL,
     "region" TEXT,
-    "started_event" INTEGER NOT NULL DEFAULT 1,
-    "overall_points" INTEGER NOT NULL DEFAULT 0,
-    "overall_rank" INTEGER NOT NULL DEFAULT 0,
+    "started_event" INTEGER,
+    "overall_points" INTEGER,
+    "overall_rank" INTEGER,
     "bank" INTEGER,
     "team_value" INTEGER,
     "total_transfers" INTEGER,
@@ -334,7 +321,7 @@ ALTER TABLE "entry_league_infos" ENABLE ROW LEVEL SECURITY;
 CREATE TABLE IF NOT EXISTS "entry_history_infos" (
     "id" SERIAL PRIMARY KEY,
     "entry_id" INTEGER NOT NULL,
-    "season" INTEGER NOT NULL,
+    "season" CHAR(4) NOT NULL,
     "total_points" INTEGER NOT NULL DEFAULT 0,
     "overall_rank" INTEGER NOT NULL DEFAULT 0,
     "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -349,12 +336,12 @@ CREATE TABLE IF NOT EXISTS "entry_event_picks" (
     "entry_id" INTEGER NOT NULL,
     "event_id" INTEGER NOT NULL,
     "chip" "Chip" NOT NULL,
-    "picks" JSONB NOT NULL,
-    "transfers" INTEGER NOT NULL DEFAULT 0,
-    "transfers_cost" INTEGER NOT NULL DEFAULT 0,
+    "picks" JSONB,
+    "transfers" INTEGER,
+    "transfers_cost" INTEGER,
     "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-CREATE UNIQUE INDEX IF NOT EXISTS "unique_entry_event_pick" ON "entry_event_picks" ("entry", "event");
+CREATE UNIQUE INDEX IF NOT EXISTS "unique_entry_event_pick" ON "entry_event_picks" ("entry_id", "event_id");
 CREATE INDEX IF NOT EXISTS "idx_entry_event_picks_entry_id" ON "entry_event_picks" ("entry_id");
 CREATE INDEX IF NOT EXISTS "idx_entry_event_picks_event_id" ON "entry_event_picks" ("event_id");
 ALTER TABLE "entry_event_picks" ENABLE ROW LEVEL SECURITY;
@@ -363,12 +350,12 @@ CREATE TABLE IF NOT EXISTS "entry_event_transfers" (
     "id" SERIAL PRIMARY KEY,
     "entry_id" INTEGER NOT NULL,
     "event_id" INTEGER NOT NULL,
-    "element_in" INTEGER NOT NULL,
-    "element_in_cost" INTEGER NOT NULL,
-    "element_in_points" INTEGER NOT NULL DEFAULT 0,
-    "element_out" INTEGER NOT NULL,
-    "element_out_cost" INTEGER NOT NULL,
-    "element_out_points" INTEGER NOT NULL DEFAULT 0,
+    "element_in_id" INTEGER,
+    "element_in_cost" INTEGER,
+    "element_in_points" INTEGER,
+    "element_out_id" INTEGER,
+    "element_out_cost" INTEGER,
+    "element_out_points" INTEGER,
     "transfer_time" TIMESTAMPTZ NOT NULL,
     "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -403,3 +390,172 @@ CREATE UNIQUE INDEX IF NOT EXISTS "unique_entry_event_result" ON "entry_event_re
 CREATE INDEX IF NOT EXISTS "idx_entry_event_results_entry_id" ON "entry_event_results" ("entry_id");
 CREATE INDEX IF NOT EXISTS "idx_entry_event_results_event_id" ON "entry_event_results" ("event_id");
 ALTER TABLE "entry_event_results" ENABLE ROW LEVEL SECURITY;
+
+CREATE TABLE IF NOT EXISTS "tournament_infos" (
+    "id" SERIAL PRIMARY KEY,
+    "name" TEXT NOT NULL,
+    "creator" TEXT NOT NULL,
+    "admin_entry_id" INTEGER NOT NULL,
+    "league_id" INTEGER NOT NULL,
+    "league_type" "LeagueType" NOT NULL,
+    "total_team_num" INTEGER NOT NULL,
+    "tournament_mode" "TournamentMode" NOT NULL,
+    "group_mode" "GroupMode",
+    "group_team_num" INTEGER,
+    "group_num" INTEGER,
+    "group_started_event_id" INTEGER,
+    "group_ended_event_id" INTEGER,
+    "group_auto_averages" BOOLEAN NOT NULL,
+    "group_rounds" INTEGER,
+    "group_play_against_num" INTEGER,
+    "group_qualify_num" INTEGER,
+    "knockout_mode" "KnockoutMode",
+    "knockout_team_num" INTEGER,
+    "knockout_rounds" INTEGER,
+    "knockout_event_num" INTEGER,
+    "knockout_started_event_id" INTEGER,
+    "knockout_ended_event_id" INTEGER,
+    "knockout_play_against_num" INTEGER,
+    "state" "TournamentState" NOT NULL,
+    "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updated_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS "unique_tournament_name" ON "tournament_infos" ("name");
+CREATE INDEX IF NOT EXISTS "idx_tournament_info_league_id" ON "tournament_infos" ("league_id");
+ALTER TABLE "tournament_infos" ENABLE ROW LEVEL SECURITY;
+
+CREATE TABLE IF NOT EXISTS "tournament_entries" (
+    "id" SERIAL PRIMARY KEY,
+    "tournament_id" INTEGER NOT NULL,
+    "league_id" INTEGER NOT NULL,
+    "entry_id" INTEGER NOT NULL,
+    "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updated_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS "unique_tournament_entry" ON "tournament_entries" ("tournament_id", "league_id", "entry_id");
+CREATE INDEX IF NOT EXISTS "idx_tournament_entry_tournament_id" ON "tournament_entries" ("tournament_id");
+ALTER TABLE "tournament_entries" ENABLE ROW LEVEL SECURITY;
+
+CREATE TABLE IF NOT EXISTS "tournament_groups" (
+    "id" SERIAL PRIMARY KEY,
+    "tournament_id" INTEGER NOT NULL,
+    "group_id" INTEGER NOT NULL,
+    "group_name" TEXT NOT NULL,
+    "group_index" INTEGER NOT NULL,
+    "entry_id" INTEGER NOT NULL,
+    "started_event_id" INTEGER,
+    "ended_event_id" INTEGER,
+    "group_points" INTEGER,
+    "group_rank" INTEGER,
+    "played" INTEGER,
+    "won" INTEGER,
+    "drawn" INTEGER,
+    "lost" INTEGER,
+    "total_points" INTEGER,
+    "total_transfers_cost" INTEGER,
+    "total_net_points" INTEGER,
+    "qualified" INTEGER,
+    "overall_rank" INTEGER,
+    "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updated_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS "unique_tournament_group" ON "tournament_groups" ("tournament_id", "group_id", "entry_id");
+CREATE INDEX IF NOT EXISTS "idx_tournament_group_tournament_id" ON "tournament_groups" ("tournament_id");
+CREATE INDEX IF NOT EXISTS "idx_tournament_group_group_id" ON "tournament_groups" ("group_id");
+CREATE INDEX IF NOT EXISTS "idx_tournament_group_entry_id" ON "tournament_groups" ("entry_id");
+ALTER TABLE "tournament_groups" ENABLE ROW LEVEL SECURITY;
+
+CREATE TABLE IF NOT EXISTS "tournament_points_group_results" (
+    "id" SERIAL PRIMARY KEY,
+    "tournament_id" INTEGER NOT NULL,
+    "group_id" INTEGER NOT NULL,
+    "event_id" INTEGER NOT NULL,
+    "entry_id" INTEGER NOT NULL,
+    "event_group_rank" INTEGER,
+    "event_points" INTEGER,
+    "event_cost" INTEGER,
+    "event_net_points" INTEGER,
+    "event_rank" INTEGER,
+    "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updated_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS "unique_tournament_points_group_result" ON "tournament_points_group_results" ("tournament_id", "group_id", "event_id", "entry_id");
+CREATE INDEX IF NOT EXISTS "idx_tournament_points_group_result_tournament_id" ON "tournament_points_group_results" ("tournament_id");
+CREATE INDEX IF NOT EXISTS "idx_tournament_points_group_result_group_id" ON "tournament_points_group_results" ("group_id");
+CREATE INDEX IF NOT EXISTS "idx_tournament_points_group_result_event_id" ON "tournament_points_group_results" ("event_id");
+ALTER TABLE "tournament_points_group_results" ENABLE ROW LEVEL SECURITY;
+
+CREATE TABLE IF NOT EXISTS "tournament_battle_group_results" (
+    "id" SERIAL PRIMARY KEY,
+    "tournament_id" INTEGER NOT NULL,
+    "group_id" INTEGER NOT NULL,
+    "event_id" INTEGER NOT NULL,
+    "home_index" INTEGER NOT NULL,
+    "home_entry_id" INTEGER NOT NULL,
+    "home_net_points" INTEGER,
+    "home_rank" INTEGER,
+    "home_match_points" INTEGER,
+    "away_index" INTEGER NOT NULL,
+    "away_entry_id" INTEGER NOT NULL,
+    "away_net_points" INTEGER,
+    "away_rank" INTEGER,
+    "away_match_points" INTEGER,
+    "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updated_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS "unique_tournament_battle_group_result" ON "tournament_battle_group_results" ("tournament_id", "group_id", "event_id", "home_index", "away_index");
+CREATE INDEX IF NOT EXISTS "idx_tournament_battle_group_result_tournament_id" ON "tournament_battle_group_results" ("tournament_id");
+CREATE INDEX IF NOT EXISTS "idx_tournament_battle_group_result_group_id" ON "tournament_battle_group_results" ("group_id");
+CREATE INDEX IF NOT EXISTS "idx_tournament_battle_group_result_event_id" ON "tournament_battle_group_results" ("event_id");
+ALTER TABLE "tournament_battle_group_results" ENABLE ROW LEVEL SECURITY;
+
+CREATE TABLE IF NOT EXISTS "tournament_knockouts" (
+    "id" SERIAL PRIMARY KEY,
+    "tournament_id" INTEGER NOT NULL,
+    "round" INTEGER NOT NULL,
+    "started_event_id" INTEGER,
+    "ended_event_id" INTEGER,
+    "match_id" INTEGER NOT NULL,
+    "next_match_id" INTEGER,
+    "home_entry_id" INTEGER,
+    "home_net_points" INTEGER,
+    "home_goals_scored" INTEGER,
+    "home_goals_conceded" INTEGER,
+    "home_wins" INTEGER,
+    "away_entry_id" INTEGER,
+    "away_net_points" INTEGER,
+    "away_goals_scored" INTEGER,
+    "away_goals_conceded" INTEGER,
+    "away_wins" INTEGER,
+    "round_winner" INTEGER,
+    "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updated_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS "unique_tournament_knockout" ON "tournament_knockouts" ("tournament_id", "match_id");
+CREATE INDEX IF NOT EXISTS "idx_tournament_knockout_tournament_id" ON "tournament_knockouts" ("tournament_id");
+ALTER TABLE "tournament_knockouts" ENABLE ROW LEVEL SECURITY;
+
+CREATE TABLE IF NOT EXISTS "tournament_knockout_results" (
+    "id" SERIAL PRIMARY KEY,
+    "tournament_id" INTEGER NOT NULL,
+    "event_id" INTEGER NOT NULL,
+    "match_id" INTEGER NOT NULL,
+    "play_against_id" INTEGER NOT NULL,
+    "home_entry_id" INTEGER,
+    "home_net_points" INTEGER,
+    "home_goals_scored" INTEGER,
+    "home_goals_conceded" INTEGER,
+    "away_entry_id" INTEGER,
+    "away_net_points" INTEGER,
+    "away_goals_scored" INTEGER,
+    "away_goals_conceded" INTEGER,
+    "match_winner" INTEGER,
+    "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updated_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS "unique_tournament_knockout_result" ON "tournament_knockout_results" ("tournament_id", "event_id", "match_id", "play_against_id");
+CREATE INDEX IF NOT EXISTS "idx_tournament_knockout_result_tournament_id" ON "tournament_knockout_results" ("tournament_id");
+CREATE INDEX IF NOT EXISTS "idx_tournament_knockout_result_event_id" ON "tournament_knockout_results" ("event_id");
+CREATE INDEX IF NOT EXISTS "idx_tournament_knockout_result_match_id" ON "tournament_knockout_results" ("match_id");
+CREATE INDEX IF NOT EXISTS "idx_tournament_knockout_result_play_against_id" ON "tournament_knockout_results" ("play_against_id");
+ALTER TABLE "tournament_knockout_results" ENABLE ROW LEVEL SECURITY;

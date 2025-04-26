@@ -2,7 +2,8 @@ import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as O from 'fp-ts/Option';
 import { RawEventLive } from 'src/types/domain/event-live.type';
-import { validatePlayerId } from 'src/types/domain/player.type';
+import { EventId } from 'src/types/domain/event.type';
+import { PlayerId, validatePlayerId } from 'src/types/domain/player.type';
 import { safeStringToDecimal } from 'src/utils/common.util';
 
 import { LiveResponse } from '../../schemas/live/live.schema';
@@ -15,8 +16,8 @@ export const mapEventLiveResponseToDomain = (
     E.Do,
     E.bind('elementId', () => validatePlayerId(raw.element)),
     E.map(({ elementId }) => ({
-      eventId: event,
-      elementId: elementId,
+      eventId: event as EventId,
+      elementId: elementId as PlayerId,
       minutes: raw.minutes,
       goalsScored: raw.goals_scored,
       assists: raw.assists,

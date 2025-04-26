@@ -3,7 +3,7 @@ import { ElementTypeId, ElementTypeName } from 'src/types/base.type';
 import { EventId } from 'src/types/domain/event.type';
 import { PlayerId } from 'src/types/domain/player.type';
 
-import { TeamId } from '../../../src/types/domain/team.type';
+import { TeamId } from './team.type';
 
 export interface EventLive {
   readonly eventId: EventId;

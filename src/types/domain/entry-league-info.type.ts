@@ -1,6 +1,6 @@
 import { LeagueType } from 'src/types/base.type';
 import { EntryId } from 'src/types/domain/entry-info.type';
-import { LeagueId } from 'src/types/domain/league-info.type';
+import { LeagueId } from 'src/types/domain/league.type';
 
 export type EntryLeagueInfo = {
   readonly entryId: EntryId;

@@ -3,7 +3,7 @@ import { pipe } from 'fp-ts/function';
 import { EventLiveExplainResponse } from 'src/data/fpl/schemas/live/explain.schema';
 import { EventLiveExplain } from 'src/types/domain/event-live-explain.type';
 import { EventId } from 'src/types/domain/event.type';
-import { validatePlayerId } from 'src/types/domain/player.type';
+import { PlayerId, validatePlayerId } from 'src/types/domain/player.type';
 
 export const mapEventLiveExplainResponseToDomain = (
   eventId: EventId,
@@ -11,11 +11,7 @@ export const mapEventLiveExplainResponseToDomain = (
 ): E.Either<string, EventLiveExplain> => {
   const defaultStats = {
     eventId: eventId,
-    elementId: 0,
-    elementType: 0,
-    team: 0,
-    totalPoints: 0,
-    bps: 0,
+    elementId: raw.element as PlayerId,
     bonus: 0,
     minutes: 0,
     minutesPoints: 0,
@@ -109,12 +105,7 @@ export const mapEventLiveExplainResponseToDomain = (
         case 'bonus':
           acc.bonus = value;
           break;
-        case 'bps':
-          acc.bps = value;
-          break;
       }
-
-      acc.totalPoints += points;
 
       return acc;
     },

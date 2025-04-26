@@ -33,7 +33,16 @@ export type EntryEventPicks = readonly EntryEventPick[];
 
 export type RawPickItem = Omit<
   PickItem,
-  'webName' | 'elementTypeName' | 'teamId' | 'teamName' | 'teamShortName' | 'value'
+  'webName' | 'elementType' | 'elementTypeName' | 'teamId' | 'teamName' | 'teamShortName' | 'value'
 >;
-export type RawEntryEventPick = Omit<EntryEventPick, 'entryName'>;
+export type RawPickItems = readonly RawPickItem[];
+
+export type RawEntryEventPick = {
+  readonly entryId: EntryId;
+  readonly eventId: EventId;
+  readonly chip: Chip;
+  readonly picks: readonly RawPickItem[];
+  readonly transfers: number;
+  readonly transfersCost: number;
+};
 export type RawEntryEventPicks = readonly RawEntryEventPick[];

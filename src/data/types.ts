@@ -1,6 +1,6 @@
 import * as TE from 'fp-ts/TaskEither';
-import { EntryEventPicks } from 'src/types/domain/entry-event-pick.type';
-import { EntryEventTransfers } from 'src/types/domain/entry-event-transfer.type';
+import { RawEntryEventPicks } from 'src/types/domain/entry-event-pick.type';
+import { RawEntryEventTransfers } from 'src/types/domain/entry-event-transfer.type';
 import { EntryHistoryInfos } from 'src/types/domain/entry-history-info.type';
 import { EntryInfos } from 'src/types/domain/entry-info.type';
 import { EntryId } from 'src/types/domain/entry-info.type';
@@ -9,6 +9,7 @@ import { RawEventFixtures } from 'src/types/domain/event-fixture.type';
 import { EventLiveExplains } from 'src/types/domain/event-live-explain.type';
 import { RawEventLives } from 'src/types/domain/event-live.type';
 import { EventId, Events } from 'src/types/domain/event.type';
+import { ClassicLeague, H2hLeague, LeagueId } from 'src/types/domain/league.type';
 import { Phases } from 'src/types/domain/phase.type';
 import { RawPlayerStats as RawPlayerStats } from 'src/types/domain/player-stat.type';
 import { PlayerValueTracks } from 'src/types/domain/player-value-track.type';
@@ -51,12 +52,20 @@ export interface FplPickDataService {
   readonly getPicks: (
     entryId: EntryId,
     eventId: EventId,
-  ) => TE.TaskEither<DataLayerError, EntryEventPicks>;
+  ) => TE.TaskEither<DataLayerError, RawEntryEventPicks>;
 }
 
 export interface FplTransferDataService {
   readonly getTransfers: (
     entryId: EntryId,
     eventId: EventId,
-  ) => TE.TaskEither<DataLayerError, EntryEventTransfers>;
+  ) => TE.TaskEither<DataLayerError, RawEntryEventTransfers>;
+}
+
+export interface FplClassicLeagueDataService {
+  readonly getClassicLeague: (leagueId: LeagueId) => TE.TaskEither<DataLayerError, ClassicLeague>;
+}
+
+export interface FplH2hLeagueDataService {
+  readonly getH2hLeague: (leagueId: LeagueId) => TE.TaskEither<DataLayerError, H2hLeague>;
 }

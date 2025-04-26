@@ -40,11 +40,13 @@ export type RawEntryEventTransfer = Omit<
   | 'elementInTeamId'
   | 'elementInTeamName'
   | 'elementInTeamShortName'
+  | 'elementInPoints'
   | 'elementOutWebName'
   | 'elementOutType'
   | 'elementOutTypeName'
   | 'elementOutTeamId'
   | 'elementOutTeamName'
   | 'elementOutTeamShortName'
+  | 'elementOutPoints'
 >;
 export type RawEntryEventTransfers = readonly RawEntryEventTransfer[];

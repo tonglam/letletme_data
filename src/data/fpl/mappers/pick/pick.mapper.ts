@@ -1,14 +1,19 @@
+import * as A from 'fp-ts/Array';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import { PickResponse } from 'src/data/fpl/schemas/pick/pick.schema';
 import { Chip } from 'src/types/base.type';
 import {
-  MappedEntryEventPick,
-  validateEntryEventPickId,
+  RawEntryEventPick,
+  RawPickItem,
+  RawPickItems,
 } from 'src/types/domain/entry-event-pick.type';
+import { EntryId } from 'src/types/domain/entry-info.type';
+import { EventId } from 'src/types/domain/event.type';
+import { validatePlayerId } from 'src/types/domain/player.type';
 
-const mapChipStringToEnum = (chipString: string | null): Chip | null => {
-  if (!chipString) return null;
+const mapChipStringToEnum = (chipString: string | null): Chip => {
+  if (!chipString) return Chip.None;
   switch (chipString.toLowerCase()) {
     case 'wildcard':
       return Chip.Wildcard;
@@ -26,20 +31,37 @@ const mapChipStringToEnum = (chipString: string | null): Chip | null => {
 };
 
 export const mapPickResponseToEntryEventPick = (
-  entry: number,
-  event: number,
+  entryId: EntryId,
+  eventId: EventId,
   raw: PickResponse,
-): E.Either<string, MappedEntryEventPick> => {
+): E.Either<string, RawEntryEventPick> => {
+  const picksData = raw.picks ?? [];
+  const elementIds = picksData.map((pick) => pick.element);
+
   return pipe(
-    E.Do,
-    E.bind('entry', () => validateEntryEventPickId(entry)),
-    E.bind('event', () => validateEntryEventPickId(event)),
-    E.map((data) => {
+    elementIds,
+    E.traverseArray(validatePlayerId),
+    E.map((validatedPlayerIds) => {
+      const picks: RawPickItems = pipe(
+        picksData,
+        A.mapWithIndex(
+          (index, pick): RawPickItem => ({
+            elementId: validatedPlayerIds[index],
+            position: pick.position,
+            multiplier: pick.multiplier,
+            isCaptain: pick.is_captain,
+            isViceCaptain: pick.is_vice_captain,
+          }),
+        ),
+      );
+
       return {
-        entry: data.entry,
-        event: data.event,
+        entryId,
+        eventId,
         chip: mapChipStringToEnum(raw.active_chip),
-        picks: (raw.picks ?? []).map((pick) => pick.element),
+        picks,
+        transfers: 0,
+        transfersCost: 0,
       };
     }),
   );

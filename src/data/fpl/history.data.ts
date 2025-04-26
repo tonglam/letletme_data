@@ -28,7 +28,7 @@ export const createFplHistoryDataService = (
     logger.info({ operation: `fetchAndValidateHistory(${entryId})` }, 'Fetching FPL entry history');
 
     return pipe(
-      client.get<unknown>(apiConfig.endpoints.entry.history({ entryId: entryId })),
+      client.get<EntryHistoryResponse>(apiConfig.endpoints.entry.history({ entryId: entryId })),
       TE.mapLeft((apiError) => {
         logger.error(
           {

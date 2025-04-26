@@ -12,3 +12,6 @@ export const ClassicResultResponseSchema = z.object({
   entry_name: z.string(),
   has_played: z.boolean(),
 });
+
+export type ClassicResultResponse = z.infer<typeof ClassicResultResponseSchema>;
+export type ClassicResultResponses = readonly ClassicResultResponse[];

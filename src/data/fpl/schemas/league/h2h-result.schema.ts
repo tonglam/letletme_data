@@ -16,3 +16,6 @@ export const H2hResultResponseSchema = z.object({
   matches_lost: z.number(),
   points_for: z.number(),
 });
+
+export type H2hResultResponse = z.infer<typeof H2hResultResponseSchema>;
+export type H2hResultResponses = readonly H2hResultResponse[];

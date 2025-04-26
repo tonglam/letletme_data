@@ -11,7 +11,7 @@ export const LeagueInfoResponseSchema = z.object({
   admin_entry: z.number().nullable(),
   start_event: z.number(),
   code_privacy: z.string(),
-  has_cup: z.boolean().nullable(),
+  has_cup: z.string(),
   cup_league: z.number().nullable(),
   rank: z.number().nullable(),
   ko_rounds: z.number().nullable(),

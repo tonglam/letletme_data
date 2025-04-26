@@ -1,4 +1,6 @@
 import { EventLiveExplain } from 'src/types/domain/event-live-explain.type';
+import { EventId } from 'src/types/domain/event.type';
+import { PlayerId } from 'src/types/domain/player.type';
 
 import {
   EventLiveExplainCreateInput,
@@ -9,9 +11,8 @@ import {
 export const mapPrismaEventLiveExplainToDomain = (
   prismaEventLiveExplain: PrismaEventLiveExplain,
 ): EventLiveExplain => ({
-  eventId: prismaEventLiveExplain.eventId,
-  elementId: prismaEventLiveExplain.elementId,
-  bps: prismaEventLiveExplain.bps,
+  eventId: prismaEventLiveExplain.eventId as EventId,
+  elementId: prismaEventLiveExplain.elementId as PlayerId,
   bonus: prismaEventLiveExplain.bonus,
   minutes: prismaEventLiveExplain.minutes,
   minutesPoints: prismaEventLiveExplain.minutesPoints,
@@ -56,7 +57,6 @@ export const mapDomainEventLiveExplainToPrismaCreate = (
 ): PrismaEventLiveExplainCreateInput => ({
   eventId: domainEventLiveExplain.eventId,
   elementId: domainEventLiveExplain.elementId,
-  bps: domainEventLiveExplain.bps,
   bonus: domainEventLiveExplain.bonus,
   minutes: domainEventLiveExplain.minutes,
   minutesPoints: domainEventLiveExplain.minutesPoints,

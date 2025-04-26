@@ -30,7 +30,7 @@ export const createFplLiveDataService = (
     logger.info({ operation: `fetchAndValidateEvent(${eventId})` }, 'Fetching FPL event data');
 
     return pipe(
-      client.get<unknown>(apiConfig.endpoints.event.live({ eventId: eventId })),
+      client.get<EventLiveResponse>(apiConfig.endpoints.event.live({ eventId: eventId })),
       TE.mapLeft((apiError) => {
         logger.error(
           {

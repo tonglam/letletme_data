@@ -255,7 +255,6 @@ model EventLiveExplain {
   id                    Int      @id @default(autoincrement())
   eventId               Int      @map("event_id")
   elementId             Int      @map("element_id")
-  bps                   Int?     @map("bps")
   bonus                 Int?     @map("bonus")
   minutes               Int?     @map("minutes")
   minutesPoints         Int?     @map("minutes_points")
@@ -416,6 +415,182 @@ model EntryEventResult {
   @@map("entry_event_results")
 }
 
+model TournamentInfo {
+  id                     Int             @id @default(autoincrement())
+  name                   String          @map("name")
+  creator                String          @map("creator")
+  adminEntryId           Int             @map("admin_entry_id")
+  leagueId               Int             @map("league_id")
+  leagueType             LeagueType      @map("league_type")
+  totalTeamNum           Int             @map("total_team_num")
+  tournamentMode         TournamentMode  @map("tournament_mode")
+  groupMode              GroupMode       @map("group_mode")
+  groupTeamNum           Int?            @map("group_team_num")
+  groupNum               Int?            @map("group_num")
+  groupStartedEventId    Int?            @map("group_started_event_id")
+  groupEndedEventId      Int?            @map("group_ended_event_id")
+  groupAutoAverages      Boolean?        @map("group_auto_averages")
+  groupRounds            Int?            @map("group_rounds")
+  groupPlayAgainstNum    Int?            @map("group_play_against_num")
+  groupQualifyNum        Int?            @map("group_qualify_num")
+  knockoutMode           KnockoutMode    @map("knockout_mode")
+  knockoutTeamNum        Int?            @map("knockout_team_num")
+  knockoutRounds         Int?            @map("knockout_rounds")
+  knockoutEventNum       Int?            @map("knockout_event_num")
+  knockoutStartedEventId Int?            @map("knockout_started_event_id")
+  knockoutEndedEventId   Int?            @map("knockout_ended_event_id")
+  knockoutPlayAgainstNum Int?            @map("knockout_play_against_num")
+  state                  TournamentState @map("state")
+  createdAt              DateTime        @default(now()) @map("created_at")
+  updatedAt              DateTime        @updatedAt @map("updated_at")
+
+  @@unique([name], name: "unique_tournament_name")
+  @@index([leagueId], name: "idx_tournament_info_league_id")
+  @@map("tournament_infos")
+}
+
+model TournamentEntry {
+  id           Int      @id @default(autoincrement())
+  tournamentId Int      @map("tournament_id")
+  leagueId     Int      @map("league_id")
+  entryId      Int      @map("entry_id")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  @@unique([tournamentId, leagueId, entryId], name: "unique_tournament_entry")
+  @@index([tournamentId], name: "idx_tournament_entry_tournament_id")
+  @@map("tournament_entries")
+}
+
+model TournamentGroup {
+  id                 Int      @id @default(autoincrement())
+  tournamentId       Int      @map("tournament_id")
+  groupId            Int      @map("group_id")
+  groupName          String   @map("group_name")
+  groupIndex         Int      @map("group_index")
+  entryId            Int      @map("entry_id")
+  startedEventId     Int?     @map("started_event_id")
+  endedEventId       Int?     @map("ended_event_id")
+  groupPoints        Int?     @map("group_points")
+  groupRank          Int?     @map("group_rank")
+  played             Int?     @map("played")
+  won                Int?     @map("won")
+  drawn              Int?     @map("drawn")
+  lost               Int?     @map("lost")
+  totalPoints        Int?     @map("total_points")
+  totalTransfersCost Int?     @map("total_transfers_cost")
+  totalNetPoints     Int?     @map("total_net_points")
+  qualified          Int?     @map("qualified")
+  overallRank        Int?     @map("overall_rank")
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  @@unique([tournamentId, groupId, entryId], name: "unique_tournament_group")
+  @@index([tournamentId], name: "idx_tournament_group_tournament_id")
+  @@index([groupId], name: "idx_tournament_group_group_id")
+  @@map("tournament_groups")
+}
+
+model TournamentPointsGroupResult {
+  id             Int      @id @default(autoincrement())
+  tournamentId   Int      @map("tournament_id")
+  groupId        Int      @map("group_id")
+  eventId        Int      @map("event_id")
+  entryId        Int      @map("entry_id")
+  eventGroupRank Int?     @map("event_group_rank")
+  eventPoints    Int?     @map("event_points")
+  eventCost      Int?     @map("event_cost")
+  eventNetPoints Int?     @map("event_net_points")
+  eventRank      Int?     @map("event_rank")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  @@unique([tournamentId, groupId, eventId, entryId], name: "unique_tournament_points_group_result")
+  @@index([tournamentId], name: "idx_tournament_points_group_result_tournament_id")
+  @@index([groupId], name: "idx_tournament_points_group_result_group_id")
+  @@index([eventId], name: "idx_tournament_points_group_result_event_id")
+  @@index([entryId], name: "idx_tournament_points_group_result_entry_id")
+  @@map("tournament_points_group_results")
+}
+
+model TournamentBattleGroupResult {
+  id              Int      @id @default(autoincrement())
+  tournamentId    Int      @map("tournament_id")
+  groupId         Int      @map("group_id")
+  eventId         Int      @map("event_id")
+  homeIndex       Int      @map("home_index")
+  homeEntryId     Int      @map("home_entry_id")
+  homeNetPoints   Int?     @map("home_net_points")
+  homeRank        Int?     @map("home_rank")
+  homeMatchPoints Int?     @map("home_match_points")
+  awayIndex       Int      @map("away_index")
+  awayEntryId     Int      @map("away_entry_id")
+  awayNetPoints   Int?     @map("away_net_points")
+  awayRank        Int?     @map("away_rank")
+  awayMatchPoints Int?     @map("away_match_points")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@unique([tournamentId, groupId, eventId, homeIndex, awayIndex], name: "unique_tournament_battle_group_result")
+  @@index([tournamentId], name: "idx_tournament_battle_group_result_tournament_id")
+  @@index([groupId], name: "idx_tournament_battle_group_result_group_id")
+  @@index([eventId], name: "idx_tournament_battle_group_result_event_id")
+  @@map("tournament_battle_group_results")
+}
+
+model TournamentKnockout {
+  id                Int      @id @default(autoincrement())
+  tournamentId      Int      @map("tournament_id")
+  round             Int      @map("round")
+  startedEventId    Int?     @map("started_event_id")
+  endedEventId      Int?     @map("ended_event_id")
+  matchId           Int      @map("match_id")
+  nextMatchId       Int?     @map("next_match_id")
+  homeEntryId       Int?     @map("home_entry_id")
+  homeNetPoints     Int?     @map("home_net_points")
+  homeGoalsScored   Int?     @map("home_goals_scored")
+  homeGoalsConceded Int?     @map("home_goals_conceded")
+  homeWins          Int?     @map("home_wins")
+  awayEntryId       Int?     @map("away_entry_id")
+  awayNetPoints     Int?     @map("away_net_points")
+  awayGoalsScored   Int?     @map("away_goals_scored")
+  awayGoalsConceded Int?     @map("away_goals_conceded")
+  awayWins          Int?     @map("away_wins")
+  roundWinner       Int?     @map("round_winner")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  @@unique([tournamentId, matchId], name: "unique_tournament_knockout")
+  @@index([tournamentId], name: "idx_tournament_knockout_tournament_id")
+  @@map("tournament_knockouts")
+}
+
+model TournamentKnockoutResult {
+  id                Int      @id @default(autoincrement())
+  tournamentId      Int      @map("tournament_id")
+  eventId           Int      @map("event_id")
+  matchId           Int      @map("match_id")
+  playAgainstId     Int      @map("play_against_id")
+  homeEntryId       Int?     @map("home_entry_id")
+  homeNetPoints     Int?     @map("home_net_points")
+  homeGoalsScored   Int?     @map("home_goals_scored")
+  homeGoalsConceded Int?     @map("home_goals_conceded")
+  awayEntryId       Int?     @map("away_entry_id")
+  awayNetPoints     Int?     @map("away_net_points")
+  awayGoalsScored   Int?     @map("away_goals_scored")
+  awayGoalsConceded Int?     @map("away_goals_conceded")
+  matchWinner       Int?     @map("match_winner")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  @@unique([tournamentId, eventId, matchId, playAgainstId], name: "unique_tournament_knockout_result")
+  @@index([tournamentId], name: "idx_tournament_knockout_result_tournament_id")
+  @@index([eventId], name: "idx_tournament_knockout_result_event_id")
+  @@index([matchId], name: "idx_tournament_knockout_result_match_id")
+  @@index([playAgainstId], name: "idx_tournament_knockout_result_play_against_id")
+  @@map("tournament_knockout_results")
+}
+
 // ---Enums---
 
 enum Chip {
@@ -441,6 +616,29 @@ enum LeagueType {
 enum CupResult {
   Win
   Loss
+}
+
+enum TournamentMode {
+  Normal
+}
+
+enum GroupMode {
+  NoGroup
+  PointsRaces
+  BattleRaces
+}
+
+enum KnockoutMode {
+  NoKnockout
+  SingleElimination
+  DoubleElimination
+  HeadToHead
+}
+
+enum TournamentState {
+  Active
+  Inactive
+  Finished
 }
 
 // ---Views---

@@ -17,7 +17,7 @@ export enum ValueChangeType {
 
 export enum LeagueType {
   Classic = 'Classic',
-  H2H = 'H2H',
+  H2h = 'H2h',
 }
 
 export enum ElementStatus {
@@ -81,3 +81,26 @@ export const ELEMENT_TYPE_IDS: readonly ElementTypeId[] = [
   ElementTypeId.FORWARD,
   ElementTypeId.MANAGER,
 ];
+
+export enum TournamentMode {
+  Normal = 'Normal',
+}
+
+export enum GroupMode {
+  NoGroup = 'NoGroup',
+  PointsRaces = 'PointsRaces',
+  BattleRaces = 'BattleRaces',
+}
+
+export enum KnockoutMode {
+  NoKnockout = 'NoKnockout',
+  SingleElimination = 'SingleElimination',
+  DoubleElimination = 'DoubleElimination',
+  HeadToHead = 'HeadToHead',
+}
+
+export enum TournamentState {
+  Active = 'Active',
+  Inactive = 'Inactive',
+  Finished = 'Finished',
+}

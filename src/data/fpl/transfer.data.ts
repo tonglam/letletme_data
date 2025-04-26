@@ -10,7 +10,7 @@ import {
 } from 'src/data/fpl/schemas/transfer/transfer.schema';
 import { FplTransferDataService } from 'src/data/types';
 import { HTTPClient } from 'src/infrastructures/http';
-import { EntryEventTransfers } from 'src/types/domain/entry-event-transfer.type';
+import { RawEntryEventTransfers } from 'src/types/domain/entry-event-transfer.type';
 import { EntryId } from 'src/types/domain/entry-info.type';
 import { EventId } from 'src/types/domain/event.type';
 import { DataLayerError, DataLayerErrorCode } from 'src/types/error.type';
@@ -33,7 +33,7 @@ export const createFplTransferDataService = (
     );
 
     return pipe(
-      client.get<unknown>(
+      client.get<TransfersResponse>(
         apiConfig.endpoints.entry.transfers({ entryId: entryId, eventId: eventId }),
       ),
       TE.mapLeft((apiError) => {
@@ -105,7 +105,7 @@ export const createFplTransferDataService = (
   const getTransfers = (
     entryId: EntryId,
     eventId: EventId,
-  ): TE.TaskEither<DataLayerError, EntryEventTransfers> =>
+  ): TE.TaskEither<DataLayerError, RawEntryEventTransfers> =>
     pipe(
       getTransfersInternal(entryId, eventId),
       TE.chain((transfersData) =>

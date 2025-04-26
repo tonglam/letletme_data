@@ -28,7 +28,7 @@ export const createFplEntryDataService = (
     logger.info({ operation: `fetchAndValidateEntry(${entryId})` }, 'Fetching FPL entry data');
 
     return pipe(
-      client.get<unknown>(apiConfig.endpoints.entry.info({ entryId })),
+      client.get<EntryResponse>(apiConfig.endpoints.entry.info({ entryId })),
       TE.mapLeft((apiError) => {
         logger.error(
           {
@@ -131,7 +131,7 @@ export const createFplEntryDataService = (
             pipe(
               entryData.leagues.h2h,
               A.map((leagueInfo) =>
-                mapLeagueInfoResponseToEntryLeague(entryId, LeagueType.H2H, leagueInfo),
+                mapLeagueInfoResponseToEntryLeague(entryId, LeagueType.H2h, leagueInfo),
               ),
               E.sequenceArray,
             ),

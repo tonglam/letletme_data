@@ -7,7 +7,7 @@ import { mapPickResponseToEntryEventPick } from 'src/data/fpl/mappers/pick/pick.
 import { PickResponse, PickResponseSchema } from 'src/data/fpl/schemas/pick/pick.schema';
 import { FplPickDataService } from 'src/data/types';
 import { HTTPClient } from 'src/infrastructures/http';
-import { EntryEventPicks } from 'src/types/domain/entry-event-pick.type';
+import { RawEntryEventPicks } from 'src/types/domain/entry-event-pick.type';
 import { EntryId } from 'src/types/domain/entry-info.type';
 import { EventId } from 'src/types/domain/event.type';
 import { DataLayerError, DataLayerErrorCode } from 'src/types/error.type';
@@ -28,7 +28,9 @@ export const createFplPickDataService = (
     );
 
     return pipe(
-      client.get<unknown>(apiConfig.endpoints.entry.picks({ entryId: entryId, eventId: eventId })),
+      client.get<PickResponse>(
+        apiConfig.endpoints.entry.picks({ entryId: entryId, eventId: eventId }),
+      ),
       TE.mapLeft((apiError) => {
         logger.error(
           {
@@ -98,7 +100,7 @@ export const createFplPickDataService = (
   const getPicks = (
     entryId: EntryId,
     eventId: EventId,
-  ): TE.TaskEither<DataLayerError, EntryEventPicks> =>
+  ): TE.TaskEither<DataLayerError, RawEntryEventPicks> =>
     pipe(
       getFplPickDataInternal(entryId, eventId),
       TE.chain((pickResponse) =>
