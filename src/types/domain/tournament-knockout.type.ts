@@ -1,5 +1,5 @@
-import { EntryId } from 'src/types/domain/entry-info.type';
 import { EventId } from 'src/types/domain/event.type';
+import { PlayerId } from 'src/types/domain/player.type';
 import { TournamentId } from 'src/types/domain/tournament-info.type';
 
 export type TournamentKnockout = {
@@ -9,12 +9,12 @@ export type TournamentKnockout = {
   readonly endedEventId: EventId | null;
   readonly matchId: number;
   readonly nextMatchId: number | null;
-  readonly homeEntryId: EntryId | null;
+  readonly homeEntryId: PlayerId | null;
   readonly homeNetPoints: number | null;
   readonly homeGoalsScored: number | null;
   readonly homeGoalsConceded: number | null;
   readonly homeWins: number | null;
-  readonly awayEntryId: EntryId | null;
+  readonly awayEntryId: PlayerId | null;
   readonly awayNetPoints: number | null;
   readonly awayGoalsScored: number | null;
   readonly awayGoalsConceded: number | null;

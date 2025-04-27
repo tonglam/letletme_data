@@ -1,10 +1,11 @@
 import { EntryId } from 'src/types/domain/entry-info.type';
 import { EventId } from 'src/types/domain/event.type';
+import { TournamentGroupId } from 'src/types/domain/tournament-group.type';
 import { TournamentId } from 'src/types/domain/tournament-info.type';
 
 export type TournamentBattleGroupResult = {
   readonly tournamentId: TournamentId;
-  readonly groupId: number;
+  readonly groupId: TournamentGroupId;
   readonly eventId: EventId;
   readonly homeIndex: number;
   readonly homeEntryId: EntryId;

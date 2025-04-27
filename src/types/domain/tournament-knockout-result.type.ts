@@ -11,13 +11,11 @@ export type TournamentKnockoutResult = {
   readonly homeNetPoints: number | null;
   readonly homeGoalsScored: number | null;
   readonly homeGoalsConceded: number | null;
-  readonly homeWins: number | null;
   readonly awayEntryId: EntryId | null;
   readonly awayNetPoints: number | null;
   readonly awayGoalsScored: number | null;
   readonly awayGoalsConceded: number | null;
-  readonly awayWins: number | null;
-  readonly roundWinner: number | null;
+  readonly matchWinner: number | null;
 };
 
 export type TournamentKnockoutResults = readonly TournamentKnockoutResult[];
