@@ -14,5 +14,4 @@ export interface EntryEventTransferOperations {
   readonly saveBatchByEntryIdAndEventId: (
     entryEventTransferInputs: EntryEventTransferCreateInputs,
   ) => TE.TaskEither<DomainError, RawEntryEventTransfers>;
-  readonly deleteByEntryId: (entryId: EntryId) => TE.TaskEither<DomainError, void>;
 }

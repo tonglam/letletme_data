@@ -2,7 +2,7 @@ import { EntryInfoOperations } from 'domains/entry-info/types';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 
-import { EntryInfoCreateInput, EntryInfoRepository } from '../../repositories/entry-info/types';
+import { EntryInfoRepository } from '../../repositories/entry-info/types';
 import { EntryId, EntryInfo, EntryInfos } from '../../types/domain/entry-info.type';
 import { createDomainError, DomainError, DomainErrorCode } from '../../types/error.type';
 import { getErrorMessage } from '../../utils/error.util';
@@ -32,11 +32,9 @@ export const createEntryInfoOperations = (repository: EntryInfoRepository): Entr
       ),
     );
 
-  const upsertEntryInfo = (
-    entryInfoInput: EntryInfoCreateInput,
-  ): TE.TaskEither<DomainError, EntryInfo> =>
+  const upsertEntryInfo = (entryInfo: EntryInfo): TE.TaskEither<DomainError, EntryInfo> =>
     pipe(
-      repository.upsertEntryInfo(entryInfoInput),
+      repository.upsertEntryInfo(entryInfo),
       TE.mapLeft((dbError) =>
         createDomainError({
           code: DomainErrorCode.DATABASE_ERROR,
@@ -46,22 +44,9 @@ export const createEntryInfoOperations = (repository: EntryInfoRepository): Entr
       ),
     );
 
-  const deleteById = (id: EntryId): TE.TaskEither<DomainError, void> =>
-    pipe(
-      repository.deleteById(id),
-      TE.mapLeft((dbError) =>
-        createDomainError({
-          code: DomainErrorCode.DATABASE_ERROR,
-          message: `DB Error (deleteById): ${getErrorMessage(dbError)}`,
-          cause: dbError,
-        }),
-      ),
-    );
-
   return {
     findById,
     findByIds,
     upsertEntryInfo,
-    deleteById,
   };
 };

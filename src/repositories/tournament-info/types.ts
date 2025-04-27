@@ -10,6 +10,9 @@ import {
 
 export type PrismaTournamentInfo = PrismaTournamentInfoType;
 
+export type TournamentInfoCreateInput = TournamentInfo;
+export type TournamentInfoCreateInputs = readonly TournamentInfoCreateInput[];
+
 export interface TournamentInfoRepository {
   readonly findById: (id: TournamentId) => TE.TaskEither<DBError, TournamentInfo>;
   readonly findAll: () => TE.TaskEither<DBError, TournamentInfos>;

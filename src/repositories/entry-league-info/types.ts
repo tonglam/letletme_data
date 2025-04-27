@@ -14,5 +14,4 @@ export interface EntryLeagueInfoRepository {
   readonly upsertEntryLeagueInfo: (
     entryLeagueInfoInput: EntryLeagueInfoCreateInput,
   ) => TE.TaskEither<DBError, EntryLeagueInfo>;
-  readonly deleteByEntryId: (entryId: EntryId) => TE.TaskEither<DBError, void>;
 }

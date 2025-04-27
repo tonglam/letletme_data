@@ -6,13 +6,11 @@ import { ServiceError } from 'src/types/error.type';
 
 export interface EntryLeagueInfoServiceOperations {
   readonly findByEntryId: (id: EntryId) => TE.TaskEither<ServiceError, EntryLeagueInfos>;
-  readonly deleteByEntryId: (id: EntryId) => TE.TaskEither<ServiceError, void>;
   readonly syncEntryLeagueInfosFromApi: () => TE.TaskEither<ServiceError, void>;
 }
 
 export interface EntryLeagueInfoService {
   readonly getEntryLeagueInfo: (id: EntryId) => TE.TaskEither<ServiceError, EntryLeagueInfos>;
-  readonly deleteEntryLeagueInfo: (id: EntryId) => TE.TaskEither<ServiceError, void>;
   readonly syncEntryLeagueInfosFromApi: () => TE.TaskEither<ServiceError, void>;
 }
 

@@ -35,18 +35,6 @@ const entryHistoryInfoServiceOperations = (
       ),
     );
 
-  const deleteByEntryId = (id: EntryId): TE.TaskEither<ServiceError, void> =>
-    pipe(
-      domainOps.deleteByEntryId(id),
-      TE.mapLeft((error: DomainError) =>
-        createServiceError({
-          code: ServiceErrorCode.OPERATION_ERROR,
-          message: 'Failed to delete entry history info by id',
-          cause: error.cause,
-        }),
-      ),
-    );
-
   const processSingleEntry = (entryId: EntryId): TE.TaskEither<never, void> =>
     pipe(
       fplDataService.getHistories(entryId),
@@ -117,7 +105,6 @@ const entryHistoryInfoServiceOperations = (
 
   return {
     findByEntryId,
-    deleteByEntryId,
     syncEntryHistoryInfosFromApi,
   };
 };
@@ -139,8 +126,6 @@ export const createEntryHistoryInfoService = (
   return {
     getEntryHistoryInfo: (id: EntryId): TE.TaskEither<ServiceError, EntryHistoryInfos> =>
       ops.findByEntryId(id),
-    deleteEntryHistoryInfoByEntryId: (id: EntryId): TE.TaskEither<ServiceError, void> =>
-      ops.deleteByEntryId(id),
     syncEntryHistoryInfosFromApi: (): TE.TaskEither<ServiceError, void> =>
       ops.syncEntryHistoryInfosFromApi(),
   };

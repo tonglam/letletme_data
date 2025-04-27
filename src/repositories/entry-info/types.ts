@@ -16,5 +16,4 @@ export interface EntryInfoRepository {
   readonly upsertEntryInfo: (
     entryInfoInput: EntryInfoCreateInput,
   ) => TE.TaskEither<DBError, EntryInfo>;
-  readonly deleteById: (id: EntryId) => TE.TaskEither<DBError, void>;
 }

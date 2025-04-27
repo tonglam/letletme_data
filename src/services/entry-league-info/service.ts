@@ -42,18 +42,6 @@ const entryLeagueInfoServiceOperations = (
       ),
     );
 
-  const deleteByEntryId = (id: EntryId): TE.TaskEither<ServiceError, void> =>
-    pipe(
-      domainOps.deleteByEntryId(id),
-      TE.mapLeft((error: DomainError) =>
-        createServiceError({
-          code: ServiceErrorCode.OPERATION_ERROR,
-          message: 'Failed to delete entry league info by id',
-          cause: error.cause,
-        }),
-      ),
-    );
-
   const processSingleEntry = (entryId: EntryId): TE.TaskEither<never, void> =>
     pipe(
       fplDataService.getLeagues(entryId),
@@ -130,7 +118,6 @@ const entryLeagueInfoServiceOperations = (
 
   return {
     findByEntryId,
-    deleteByEntryId,
     syncEntryLeagueInfosFromApi,
   };
 };
@@ -152,8 +139,6 @@ export const createEntryLeagueInfoService = (
   return {
     getEntryLeagueInfo: (id: EntryId): TE.TaskEither<ServiceError, EntryLeagueInfos> =>
       ops.findByEntryId(id),
-    deleteEntryLeagueInfo: (id: EntryId): TE.TaskEither<ServiceError, void> =>
-      ops.deleteByEntryId(id),
     syncEntryLeagueInfosFromApi: (): TE.TaskEither<ServiceError, void> =>
       ops.syncEntryLeagueInfosFromApi(),
   };

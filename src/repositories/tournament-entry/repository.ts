@@ -9,6 +9,7 @@ import {
   TournamentEntryCreateInputs,
   TournamentEntryRepository,
 } from 'src/repositories/tournament-entry/types';
+import { EntryId } from 'src/types/domain/entry-info.type';
 import { TournamentEntries } from 'src/types/domain/tournament-entry.type';
 import { TournamentId } from 'src/types/domain/tournament-info.type';
 
@@ -44,6 +45,25 @@ export const createTournamentEntryRepository = (
       ),
     );
 
+  const findAllTournamentEntryIds = (): TE.TaskEither<DBError, ReadonlyArray<EntryId>> =>
+    pipe(
+      TE.tryCatch(
+        () =>
+          prismaClient.tournamentEntry.findMany({
+            select: { entryId: true },
+            distinct: ['entryId'],
+          }),
+        (error) =>
+          createDBError({
+            code: DBErrorCode.QUERY_ERROR,
+            message: `Failed to fetch all tournament entry ids: ${error}`,
+          }),
+      ),
+      TE.map((prismaTournamentEntries) =>
+        prismaTournamentEntries.map((tournamentEntry) => tournamentEntry.entryId as EntryId),
+      ),
+    );
+
   const saveBatchByTournamentId = (
     tournamentEntryInputs: TournamentEntryCreateInputs,
   ): TE.TaskEither<DBError, TournamentEntries> =>
@@ -67,6 +87,7 @@ export const createTournamentEntryRepository = (
 
   return {
     findByTournamentId,
+    findAllTournamentEntryIds,
     saveBatchByTournamentId,
   };
 };

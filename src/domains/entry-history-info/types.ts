@@ -10,5 +10,4 @@ export interface EntryHistoryInfoOperations {
   readonly saveBatchByEntryId: (
     entryHistoryInfoInputs: EntryHistoryInfoCreateInputs,
   ) => TE.TaskEither<DomainError, EntryHistoryInfos>;
-  readonly deleteByEntryId: (entryId: EntryId) => TE.TaskEither<DomainError, void>;
 }

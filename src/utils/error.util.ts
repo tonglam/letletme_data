@@ -437,14 +437,22 @@ export const mapRepositoryErrorToCacheError =
 export const mapCacheErrorToDomainError = (cacheError: CacheError): DomainError =>
   createDomainError({
     code: DomainErrorCode.CACHE_ERROR,
-    message: `Cache error: ${cacheError.message}`,
+    message: cacheError.message,
     cause: cacheError.cause,
   });
 
 export const mapDBErrorToServiceError = (error: DBError): ServiceError =>
   createServiceError({
+    code: ServiceErrorCode.OPERATION_ERROR,
+    message: `Database Error: ${error.message}`,
+    cause: error.cause,
+    details: error.details,
+  });
+
+export const mapDataLayerErrorToServiceError = (error: DataLayerError): ServiceError =>
+  createServiceError({
     code: ServiceErrorCode.INTEGRATION_ERROR,
-    message: `Database error: ${error.message}`,
+    message: `Data layer error: ${error.message}`,
     cause: error.cause,
     details: error.details,
   });

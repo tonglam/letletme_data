@@ -40,21 +40,8 @@ export const createEntryHistoryInfoOperations = (
       ),
     );
 
-  const deleteByEntryId = (entryId: EntryId): TE.TaskEither<DomainError, void> =>
-    pipe(
-      repository.deleteByEntryId(entryId),
-      TE.mapLeft((dbError) =>
-        createDomainError({
-          code: DomainErrorCode.DATABASE_ERROR,
-          message: `DB Error (deleteByEntryId): ${getErrorMessage(dbError)}`,
-          cause: dbError,
-        }),
-      ),
-    );
-
   return {
     findByEntryId,
     saveBatchByEntryId,
-    deleteByEntryId,
   };
 };

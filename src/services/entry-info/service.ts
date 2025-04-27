@@ -49,18 +49,6 @@ const entryInfoServiceOperations = (
       ),
     );
 
-  const deleteById = (id: EntryId): TE.TaskEither<ServiceError, void> =>
-    pipe(
-      domainOps.deleteById(id),
-      TE.mapLeft((error: DomainError) =>
-        createServiceError({
-          code: ServiceErrorCode.OPERATION_ERROR,
-          message: 'Failed to delete entry info by id',
-          cause: error.cause,
-        }),
-      ),
-    );
-
   const processSingleEntry = (entryId: EntryId): TE.TaskEither<never, void> =>
     pipe(
       fplDataService.getInfos(entryId),
@@ -135,7 +123,6 @@ const entryInfoServiceOperations = (
   return {
     findById,
     findByIds,
-    deleteById,
     syncEntryInfosFromApi,
   };
 };
@@ -152,7 +139,6 @@ export const createEntryInfoService = (
     getEntryInfo: (id: EntryId): TE.TaskEither<ServiceError, EntryInfo> => ops.findById(id),
     getEntryInfoByIds: (ids: ReadonlyArray<EntryId>): TE.TaskEither<ServiceError, EntryInfos> =>
       ops.findByIds(ids),
-    deleteEntryInfoById: (id: EntryId): TE.TaskEither<ServiceError, void> => ops.deleteById(id),
     syncEntryInfosFromApi: (): TE.TaskEither<ServiceError, void> => ops.syncEntryInfosFromApi(),
   };
 };

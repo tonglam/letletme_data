@@ -65,22 +65,8 @@ export const createEntryEventPickRepository = (prisma: PrismaClient): EntryEvent
       ),
     );
 
-  const deleteByEntryId = (entryId: EntryId): TE.TaskEither<DBError, void> =>
-    pipe(
-      TE.tryCatch(
-        () => prisma.entryEventPick.deleteMany({ where: { entryId: Number(entryId) } }),
-        (error) =>
-          createDBError({
-            code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to delete entry event pick by entry id ${entryId}: ${error}`,
-          }),
-      ),
-      TE.map(() => undefined),
-    );
-
   return {
     findByEntryIdAndEventId,
     saveBatchByEntryIdAndEventId,
-    deleteByEntryId,
   };
 };

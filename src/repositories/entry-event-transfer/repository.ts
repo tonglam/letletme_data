@@ -71,22 +71,8 @@ export const createEntryEventTransferRepository = (
       ),
     );
 
-  const deleteByEntryId = (entryId: EntryId): TE.TaskEither<DBError, void> =>
-    pipe(
-      TE.tryCatch(
-        () => prisma.entryEventTransfer.deleteMany({ where: { entryId: Number(entryId) } }),
-        (error) =>
-          createDBError({
-            code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to delete entry event transfer by entry id ${entryId}: ${error}`,
-          }),
-      ),
-      TE.map(() => undefined),
-    );
-
   return {
     findByEntryIdAndEventId,
     saveBatchByEntryIdAndEventId,
-    deleteByEntryId,
   };
 };

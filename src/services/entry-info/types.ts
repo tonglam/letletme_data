@@ -6,7 +6,6 @@ import { ServiceError } from 'src/types/error.type';
 export interface EntryInfoServiceOperations {
   readonly findById: (id: EntryId) => TE.TaskEither<ServiceError, EntryInfo>;
   readonly findByIds: (ids: ReadonlyArray<EntryId>) => TE.TaskEither<ServiceError, EntryInfos>;
-  readonly deleteById: (id: EntryId) => TE.TaskEither<ServiceError, void>;
   readonly syncEntryInfosFromApi: () => TE.TaskEither<ServiceError, void>;
 }
 
@@ -15,7 +14,6 @@ export interface EntryInfoService {
   readonly getEntryInfoByIds: (
     ids: ReadonlyArray<EntryId>,
   ) => TE.TaskEither<ServiceError, EntryInfos>;
-  readonly deleteEntryInfoById: (id: EntryId) => TE.TaskEither<ServiceError, void>;
   readonly syncEntryInfosFromApi: () => TE.TaskEither<ServiceError, void>;
 }
 

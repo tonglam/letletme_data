@@ -19,5 +19,4 @@ export interface EntryEventPickRepository {
   readonly saveBatchByEntryIdAndEventId: (
     entryEventPickInputs: EntryEventPickCreateInputs,
   ) => TE.TaskEither<DBError, RawEntryEventPick>;
-  readonly deleteByEntryId: (entryId: EntryId) => TE.TaskEither<DBError, void>;
 }

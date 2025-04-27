@@ -10,8 +10,7 @@ export interface EntryEventPickServiceOperations {
     entryId: EntryId,
     eventId: EventId,
   ) => TE.TaskEither<ServiceError, EntryEventPick>;
-  readonly deleteByEntryId: (entryId: EntryId) => TE.TaskEither<ServiceError, void>;
-  readonly syncEntryEventPicksFromApi: () => TE.TaskEither<ServiceError, void>;
+  readonly syncPicksFromApi: (eventId: EventId) => TE.TaskEither<ServiceError, void>;
 }
 
 export interface EntryEventPickService {
@@ -19,10 +18,9 @@ export interface EntryEventPickService {
     entryId: EntryId,
     eventId: EventId,
   ) => TE.TaskEither<ServiceError, EntryEventPick>;
-  readonly deleteEntryEventPickByEntryId: (entryId: EntryId) => TE.TaskEither<ServiceError, void>;
-  readonly syncEntryEventPicksFromApi: () => TE.TaskEither<ServiceError, void>;
+  readonly syncPicksFromApi: (eventId: EventId) => TE.TaskEither<ServiceError, void>;
 }
 
 export interface EntryEventPickWorkflowOperations {
-  readonly syncEntryEventPicks: () => TE.TaskEither<ServiceError, WorkflowResult>;
+  readonly syncEntryEventPicks: (eventId: EventId) => TE.TaskEither<ServiceError, WorkflowResult>;
 }

@@ -128,24 +128,10 @@ export const createEntryInfoRepository = (prisma: PrismaClient): EntryInfoReposi
       TE.map(mapPrismaEntryInfoToDomain),
     );
 
-  const deleteById = (id: EntryId): TE.TaskEither<DBError, void> =>
-    pipe(
-      TE.tryCatch(
-        () => prisma.entryInfo.delete({ where: { id: Number(id) } }),
-        (error) =>
-          createDBError({
-            code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to delete entry info by id ${id}: ${error}`,
-          }),
-      ),
-      TE.map(() => undefined),
-    );
-
   return {
     findById,
     findByIds,
     findAllEntryIds,
     upsertEntryInfo,
-    deleteById,
   };
 };

@@ -10,5 +10,4 @@ export interface EntryLeagueInfoOperations {
   readonly upsertEntryLeagueInfo: (
     entryLeagueInfoInput: EntryLeagueInfoCreateInput,
   ) => TE.TaskEither<DomainError, EntryLeagueInfo>;
-  readonly deleteByEntryId: (id: EntryId) => TE.TaskEither<DomainError, void>;
 }

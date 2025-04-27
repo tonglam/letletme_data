@@ -56,22 +56,8 @@ export const createEntryHistoryInfoRepository = (
       TE.chain(() => findByEntryId(entryHistoryInfoInputs[0].entryId)),
     );
 
-  const deleteByEntryId = (entryId: EntryId): TE.TaskEither<DBError, void> =>
-    pipe(
-      TE.tryCatch(
-        () => prisma.entryHistoryInfo.deleteMany({ where: { entryId: Number(entryId) } }),
-        (error) =>
-          createDBError({
-            code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to delete entry history info by id ${entryId}: ${error}`,
-          }),
-      ),
-      TE.map(() => undefined),
-    );
-
   return {
     findByEntryId,
     saveBatchByEntryId,
-    deleteByEntryId,
   };
 };

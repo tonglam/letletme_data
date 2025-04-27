@@ -1,8 +1,14 @@
 import { PrismaClient } from '@prisma/client';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { mapPrismaEntryLeagueInfoToDomain } from 'src/repositories/entry-league-info/mapper';
-import { EntryLeagueInfoRepository } from 'src/repositories/entry-league-info/types';
+import {
+  mapDomainEntryLeagueInfoToPrismaCreate,
+  mapPrismaEntryLeagueInfoToDomain,
+} from 'src/repositories/entry-league-info/mapper';
+import {
+  EntryLeagueInfoCreateInput,
+  EntryLeagueInfoRepository,
+} from 'src/repositories/entry-league-info/types';
 import { EntryId } from 'src/types/domain/entry-info.type';
 import { EntryLeagueInfo, EntryLeagueInfos } from 'src/types/domain/entry-league-info.type';
 import { createDBError, DBError, DBErrorCode } from 'src/types/error.type';
@@ -24,7 +30,7 @@ export const createEntryLeagueInfoRepository = (
     );
 
   const upsertEntryLeagueInfo = (
-    entryLeagueInfo: EntryLeagueInfo,
+    entryLeagueInfoInput: EntryLeagueInfoCreateInput,
   ): TE.TaskEither<DBError, EntryLeagueInfo> =>
     pipe(
       TE.tryCatch(
@@ -32,12 +38,12 @@ export const createEntryLeagueInfoRepository = (
           prisma.entryLeagueInfo.upsert({
             where: {
               unique_entry_league_info: {
-                entryId: Number(entryLeagueInfo.entryId),
-                leagueId: Number(entryLeagueInfo.leagueId),
+                entryId: Number(entryLeagueInfoInput.entryId),
+                leagueId: Number(entryLeagueInfoInput.leagueId),
               },
             },
-            update: entryLeagueInfo,
-            create: entryLeagueInfo,
+            update: mapDomainEntryLeagueInfoToPrismaCreate(entryLeagueInfoInput),
+            create: mapDomainEntryLeagueInfoToPrismaCreate(entryLeagueInfoInput),
           }),
         (error) =>
           createDBError({
@@ -48,22 +54,8 @@ export const createEntryLeagueInfoRepository = (
       TE.map(mapPrismaEntryLeagueInfoToDomain),
     );
 
-  const deleteByEntryId = (entryId: EntryId): TE.TaskEither<DBError, void> =>
-    pipe(
-      TE.tryCatch(
-        () => prisma.entryLeagueInfo.deleteMany({ where: { entryId: Number(entryId) } }),
-        (error) =>
-          createDBError({
-            code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to delete entry league info by id ${entryId}: ${error}`,
-          }),
-      ),
-      TE.map(() => undefined),
-    );
-
   return {
     findByEntryId,
     upsertEntryLeagueInfo,
-    deleteByEntryId,
   };
 };

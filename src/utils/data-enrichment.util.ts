@@ -5,7 +5,22 @@ import * as O from 'fp-ts/Option';
 import * as RA from 'fp-ts/ReadonlyArray';
 import * as RNEA from 'fp-ts/ReadonlyNonEmptyArray';
 import * as TE from 'fp-ts/TaskEither';
+import { EntryInfoRepository } from 'src/repositories/entry-info/types';
 import { ElementTypeId, ElementTypeName, getElementTypeName } from 'src/types/base.type';
+import {
+  EntryEventPick,
+  EntryEventPicks,
+  PickItem,
+  RawEntryEventPick,
+  RawEntryEventPicks,
+  RawPickItem,
+} from 'src/types/domain/entry-event-pick.type';
+import {
+  EntryEventTransfer,
+  EntryEventTransfers,
+  RawEntryEventTransfer,
+  RawEntryEventTransfers,
+} from 'src/types/domain/entry-event-transfer.type';
 import {
   EventFixture,
   EventFixtures,
@@ -325,7 +340,7 @@ export const enrichEventLives =
               }),
             );
           }),
-          RA.compact, // Filter out any None values if player or team wasn't found
+          RA.compact,
         );
       }),
       TE.mapLeft(
@@ -338,3 +353,188 @@ export const enrichEventLives =
       ),
     );
   };
+
+export const enrichEntryEventPick =
+  (playerCache: PlayerCache, teamCache: TeamCache, entryInfoRepository: EntryInfoRepository) =>
+  (rawPick: RawEntryEventPick): TE.TaskEither<DomainError, EntryEventPick> =>
+    pipe(
+      entryInfoRepository.findById(rawPick.entryId),
+      TE.mapLeft(
+        (dbError): DomainError =>
+          createDomainError({
+            code: DomainErrorCode.DATABASE_ERROR,
+            message: `Failed to fetch entry info for enrichment: ${rawPick.entryId}`,
+            cause: dbError,
+          }),
+      ),
+      TE.chainW((entryInfo) =>
+        pipe(
+          playerCache.getAllPlayers(),
+          TE.bindTo('players'),
+          TE.bind('teams', () => teamCache.getAllTeams()),
+          TE.map(({ players, teams }) => {
+            const playerMap = new Map(players.map((p) => [p.id as number, p]));
+            const teamMap = new Map(teams.map((t) => [t.id as number, t]));
+
+            const enrichedPicks = pipe(
+              rawPick.picks,
+              RA.map((rawPickItem: RawPickItem): O.Option<PickItem> => {
+                const playerOpt = O.fromNullable(playerMap.get(rawPickItem.elementId as number));
+                return pipe(
+                  playerOpt,
+                  O.chain((player) => {
+                    const teamOpt = O.fromNullable(teamMap.get(player.teamId as number));
+                    const elementType = player.type as ElementTypeId;
+                    return pipe(
+                      teamOpt,
+                      O.map(
+                        (team): PickItem => ({
+                          ...rawPickItem,
+                          elementType: elementType,
+                          elementTypeName: getElementTypeName(elementType),
+                          teamId: team.id,
+                          teamName: team.name,
+                          teamShortName: team.shortName,
+                          webName: player.webName,
+                          value: player.price,
+                        }),
+                      ),
+                    );
+                  }),
+                );
+              }),
+              RA.compact,
+            );
+
+            return {
+              ...rawPick,
+              entryName: entryInfo.entryName,
+              picks: enrichedPicks,
+            } as EntryEventPick;
+          }),
+          TE.mapLeft(
+            (cacheError): DomainError =>
+              createDomainError({
+                code: DomainErrorCode.CACHE_ERROR,
+                message: 'Failed to retrieve players or teams from cache for pick enrichment',
+                cause: cacheError,
+              }),
+          ),
+        ),
+      ),
+    );
+
+export const enrichEntryEventPicks =
+  (playerCache: PlayerCache, teamCache: TeamCache, entryInfoRepository: EntryInfoRepository) =>
+  (rawPicks: RawEntryEventPicks): TE.TaskEither<DomainError, EntryEventPicks> =>
+    pipe(
+      rawPicks,
+      RA.traverse(TE.ApplicativePar)(
+        enrichEntryEventPick(playerCache, teamCache, entryInfoRepository),
+      ),
+    );
+
+export const enrichEntryEventTransfer =
+  (playerCache: PlayerCache, teamCache: TeamCache, entryInfoRepository: EntryInfoRepository) =>
+  (rawTransfer: RawEntryEventTransfer): TE.TaskEither<DomainError, EntryEventTransfer> =>
+    pipe(
+      TE.Do,
+      TE.bind('entryInfo', () =>
+        pipe(
+          entryInfoRepository.findById(rawTransfer.entryId),
+          TE.mapLeft(
+            (dbError): DomainError =>
+              createDomainError({
+                code: DomainErrorCode.DATABASE_ERROR,
+                message: `Failed to fetch entry info for transfer enrichment: ${rawTransfer.entryId}`,
+                cause: dbError,
+              }),
+          ),
+        ),
+      ),
+      TE.bind('players', () => playerCache.getAllPlayers()),
+      TE.bind('teams', () => teamCache.getAllTeams()),
+      TE.chainW(({ entryInfo, players, teams }) => {
+        const playerMap = new Map(players.map((p) => [p.id as number, p]));
+        const teamMap = new Map(teams.map((t) => [t.id as number, t]));
+
+        const getPlayerData = (elementId: number) => {
+          const playerOpt = O.fromNullable(playerMap.get(elementId));
+          return pipe(
+            playerOpt,
+            O.chain((player) => {
+              const teamOpt = O.fromNullable(teamMap.get(player.teamId as number));
+              const elementType = player.type as ElementTypeId;
+              return pipe(
+                teamOpt,
+                O.map((team) => ({
+                  webName: player.webName,
+                  elementType: elementType,
+                  elementTypeName: getElementTypeName(elementType),
+                  teamId: team.id,
+                  teamName: team.name,
+                  teamShortName: team.shortName,
+                  value: player.price, // Assuming cost is related to price, might need adjustment
+                  points: 0, // Need a way to get points, defaulting to 0
+                })),
+              );
+            }),
+          );
+        };
+
+        const elementInDataOpt = getPlayerData(rawTransfer.elementInId as number);
+        const elementOutDataOpt = getPlayerData(rawTransfer.elementOutId as number);
+
+        return pipe(
+          O.Do,
+          O.apS('elementInData', elementInDataOpt),
+          O.apS('elementOutData', elementOutDataOpt),
+          TE.fromOption(() =>
+            createDomainError({
+              code: DomainErrorCode.NOT_FOUND,
+              message: 'Could not find player or team data for transfer elements',
+            }),
+          ),
+          TE.map(
+            ({ elementInData, elementOutData }): EntryEventTransfer => ({
+              ...rawTransfer,
+              entryName: entryInfo.entryName,
+              elementInWebName: elementInData.webName,
+              elementInType: elementInData.elementType,
+              elementInTypeName: elementInData.elementTypeName,
+              elementInTeamId: elementInData.teamId,
+              elementInTeamName: elementInData.teamName,
+              elementInTeamShortName: elementInData.teamShortName,
+              elementInPoints: elementInData.points, // Using default 0 for now
+              elementOutWebName: elementOutData.webName,
+              elementOutType: elementOutData.elementType,
+              elementOutTypeName: elementOutData.elementTypeName,
+              elementOutTeamId: elementOutData.teamId,
+              elementOutTeamName: elementOutData.teamName,
+              elementOutTeamShortName: elementOutData.teamShortName,
+              elementOutPoints: elementOutData.points, // Using default 0 for now
+            }),
+          ),
+        );
+      }),
+      TE.mapLeft((error) =>
+        error.code === DomainErrorCode.DATABASE_ERROR || error.code === DomainErrorCode.NOT_FOUND
+          ? error // Propagate DB or Not Found errors
+          : createDomainError({
+              // Wrap other errors (like cache errors) as CACHE_ERROR
+              code: DomainErrorCode.CACHE_ERROR,
+              message: 'Failed to retrieve players or teams from cache for transfer enrichment',
+              cause: error,
+            }),
+      ),
+    );
+
+export const enrichEntryEventTransfers =
+  (playerCache: PlayerCache, teamCache: TeamCache, entryInfoRepository: EntryInfoRepository) =>
+  (rawTransfers: RawEntryEventTransfers): TE.TaskEither<DomainError, EntryEventTransfers> =>
+    pipe(
+      rawTransfers,
+      RA.traverse(TE.ApplicativePar)(
+        enrichEntryEventTransfer(playerCache, teamCache, entryInfoRepository),
+      ),
+    );

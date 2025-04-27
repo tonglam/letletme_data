@@ -1,5 +1,6 @@
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
+import { EventId } from 'src/types/domain/event.type';
 
 import { getWorkflowLogger } from '../../infrastructures/logger';
 import { createServiceError, ServiceError, ServiceErrorCode } from '../../types/error.type';
@@ -13,13 +14,13 @@ const logger = getWorkflowLogger();
 export const entryEventPickWorkflows = (
   entryEventPickService: EntryEventPickService,
 ): EntryEventPickWorkflowOperations => {
-  const syncEntryEventPicks = (): TE.TaskEither<ServiceError, WorkflowResult> => {
+  const syncEntryEventPicks = (eventId: EventId): TE.TaskEither<ServiceError, WorkflowResult> => {
     const context = createWorkflowContext('entry-event-pick-sync');
 
     logger.info({ workflow: context.workflowId }, 'Starting entry event pick sync workflow');
 
     return pipe(
-      entryEventPickService.syncEntryEventPicksFromApi(),
+      entryEventPickService.syncPicksFromApi(eventId),
       TE.mapLeft((error: ServiceError) =>
         createServiceError({
           code: ServiceErrorCode.INTEGRATION_ERROR,
