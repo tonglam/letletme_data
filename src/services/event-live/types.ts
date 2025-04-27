@@ -16,6 +16,7 @@ export interface EventLiveServiceOperations {
     teamId: TeamId,
     eventId: EventId,
   ) => TE.TaskEither<ServiceError, EventLives>;
+  readonly syncEventLiveCacheFromApi: (eventId: EventId) => TE.TaskEither<ServiceError, void>;
   readonly syncEventLivesFromApi: (eventId: EventId) => TE.TaskEither<ServiceError, void>;
 }
 
@@ -29,6 +30,7 @@ export interface EventLiveService {
     teamId: TeamId,
     eventId: EventId,
   ) => TE.TaskEither<ServiceError, EventLives>;
+  readonly syncEventLiveCacheFromApi: (eventId: EventId) => TE.TaskEither<ServiceError, void>;
   readonly syncEventLivesFromApi: (eventId: EventId) => TE.TaskEither<ServiceError, void>;
 }
 
