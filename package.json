@@ -7,10 +7,10 @@
   "scripts": {
     "start": "ts-node src/index.ts",
     "dev": "nodemon src/index.js",
-    "build": "npx prisma generate && tsc",
+    "build": "pnpm prisma generate && tsc",
     "test": "vitest run",
     "coverage": "vitest run --coverage",
-    "prisma": "npx prisma generate",
+    "prisma": "pnpm prisma generate",
     "lint": "eslint . --ext .ts,.tsx --cache --config eslint.config.mjs",
     "lint:fix": "eslint . --ext .ts,.tsx --cache --fix --config eslint.config.mjs",
     "lint:strict": "eslint . --ext .ts,.tsx --max-warnings=0 --config eslint.config.mjs",
@@ -18,7 +18,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "format:fix": "prettier --write .",
-    "check-all": "npm run lint && npm run format:check && npm run test"
+    "check-all": "pnpm run lint && pnpm run format:check && pnpm run test"
   },
   "repository": {
     "type": "git",

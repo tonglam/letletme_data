@@ -173,7 +173,7 @@ While the learning curve with TypeScript generics and FP patterns can be steep, 
    ```bash
    git clone [repository-url]
    cd letletme_data
-   npm install
+   pnpm install
    ```
 
 3. Configuration:
@@ -186,7 +186,7 @@ While the learning curve with TypeScript generics and FP patterns can be steep, 
 4. Run:
    ```bash
    docker-compose up -d
-   npm run dev
+   pnpm run dev
    ```
 
 # Domain-Driven Design
