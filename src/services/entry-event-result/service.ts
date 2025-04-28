@@ -1,23 +1,27 @@
+import { FplHistoryDataService } from 'data/types';
 import { createEntryEventResultOperations } from 'domains/entry-event-result/operation';
 import { EntryEventResultOperations } from 'domains/entry-event-result/types';
 import * as A from 'fp-ts/Array';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import { Logger } from 'pino';
+import { EntryEventResultRepository } from 'repositories/entry-event-result/types';
+import { EntryInfoRepository } from 'repositories/entry-info/types';
 import {
   EntryEventResultService,
   EntryEventResultServiceOperations,
 } from 'services/entry-event-result/types';
-import { EntryEventResultRepository } from 'src/repositories/entry-event-result/types';
-import { EntryInfoRepository } from 'src/repositories/entry-info/types';
-import { EntryEventResult, EntryEventResults } from 'src/types/domain/entry-event-result.type';
-import { DBError, DomainError, ServiceError, ServiceErrorCode } from 'src/types/error.type';
-import { createServiceError } from 'src/types/error.type';
-import { enrichEntryEventResults } from 'src/utils/data-enrichment.util';
-
-import { FplHistoryDataService } from '../../data/types';
-import { EntryId } from '../../types/domain/entry-info.type';
-import { EventId } from '../../types/domain/event.type';
+import { EntryEventResult, EntryEventResults } from 'types/domain/entry-event-result.type';
+import { EntryId } from 'types/domain/entry-info.type';
+import { EventId } from 'types/domain/event.type';
+import {
+  createServiceError,
+  DBError,
+  DomainError,
+  ServiceError,
+  ServiceErrorCode,
+} from 'types/error.type';
+import { enrichEntryEventResults } from 'utils/data-enrichment.util';
 
 const entryEventResultServiceOperations = (
   fplDataService: FplHistoryDataService,

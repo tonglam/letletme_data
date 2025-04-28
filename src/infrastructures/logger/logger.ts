@@ -1,6 +1,5 @@
+import { LOG_CONFIG, createLogger } from 'configs/logger/logger.config';
 import { Logger } from 'pino';
-
-import { LOG_CONFIG, createLogger } from '../../configs/logger/logger.config';
 
 const loggerInstances = new Map<string, Logger>();
 

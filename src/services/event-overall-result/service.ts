@@ -1,11 +1,12 @@
 import { createEventLiveExplainOperations } from 'domains/event-live-explain/operation';
-import {
-  EventLiveExplainCache,
-  EventLiveExplainOperations,
-} from 'domains/event-live-explain/types';
+import { EventLiveExplainOperations } from 'domains/event-live-explain/types';
 import { pipe } from 'fp-ts/function';
 import * as RA from 'fp-ts/ReadonlyArray';
 import * as TE from 'fp-ts/TaskEither';
+import {
+  EventLiveExplainService,
+  EventLiveExplainServiceOperations,
+} from 'services/event-live-explain/types';
 import { FplLiveDataService } from 'src/data/types';
 import { EventLiveExplainRepository } from 'src/repositories/event-live-explain/types';
 import { EventLiveExplain, EventLiveExplains } from 'src/types/domain/event-live-explain.type';
@@ -18,8 +19,6 @@ import {
   ServiceError,
 } from 'src/types/error.type';
 import { createServiceIntegrationError, mapDomainErrorToServiceError } from 'src/utils/error.util';
-
-import { EventLiveExplainService, EventLiveExplainServiceOperations } from './types';
 
 const eventLiveExplainServiceOperations = (
   fplDataService: FplLiveDataService,

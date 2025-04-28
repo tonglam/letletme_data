@@ -1,34 +1,34 @@
 import {
-  PrismaTournamentKnockoutResult,
-  PrismaTournamentKnockoutResultCreateInput,
+  DbTournamentKnockoutResult,
+  DbTournamentKnockoutResultCreateInput,
   TournamentKnockoutResultCreateInput,
-} from 'src/repositories/tournament-knockout-result/types';
-import { EntryId } from 'src/types/domain/entry-info.type';
-import { EventId } from 'src/types/domain/event.type';
-import { TournamentId } from 'src/types/domain/tournament-info.type';
-import { TournamentKnockoutResult } from 'src/types/domain/tournament-knockout-result.type';
+} from 'repositories/tournament-knockout-result/types';
+import { EntryId } from 'types/domain/entry-info.type';
+import { EventId } from 'types/domain/event.type';
+import { TournamentId } from 'types/domain/tournament-info.type';
+import { TournamentKnockoutResult } from 'types/domain/tournament-knockout-result.type';
 
-export const mapPrismaTournamentKnockoutResultToDomain = (
-  prismaTournamentKnockoutResult: PrismaTournamentKnockoutResult,
+export const mapDbTournamentKnockoutResultToDomain = (
+  dbTournamentKnockoutResult: DbTournamentKnockoutResult,
 ): TournamentKnockoutResult => ({
-  tournamentId: prismaTournamentKnockoutResult.tournamentId as TournamentId,
-  eventId: prismaTournamentKnockoutResult.eventId as EventId,
-  matchId: prismaTournamentKnockoutResult.matchId,
-  playAgainstId: prismaTournamentKnockoutResult.playAgainstId,
-  homeEntryId: prismaTournamentKnockoutResult.homeEntryId as EntryId,
-  homeNetPoints: prismaTournamentKnockoutResult.homeNetPoints,
-  homeGoalsScored: prismaTournamentKnockoutResult.homeGoalsScored,
-  homeGoalsConceded: prismaTournamentKnockoutResult.homeGoalsConceded,
-  awayEntryId: prismaTournamentKnockoutResult.awayEntryId as EntryId,
-  awayNetPoints: prismaTournamentKnockoutResult.awayNetPoints,
-  awayGoalsScored: prismaTournamentKnockoutResult.awayGoalsScored,
-  awayGoalsConceded: prismaTournamentKnockoutResult.awayGoalsConceded,
-  matchWinner: prismaTournamentKnockoutResult.matchWinner,
+  tournamentId: dbTournamentKnockoutResult.tournamentId as TournamentId,
+  eventId: dbTournamentKnockoutResult.eventId as EventId,
+  matchId: dbTournamentKnockoutResult.matchId,
+  playAgainstId: dbTournamentKnockoutResult.playAgainstId,
+  homeEntryId: dbTournamentKnockoutResult.homeEntryId as EntryId,
+  homeNetPoints: dbTournamentKnockoutResult.homeNetPoints,
+  homeGoalsScored: dbTournamentKnockoutResult.homeGoalsScored,
+  homeGoalsConceded: dbTournamentKnockoutResult.homeGoalsConceded,
+  awayEntryId: dbTournamentKnockoutResult.awayEntryId as EntryId,
+  awayNetPoints: dbTournamentKnockoutResult.awayNetPoints,
+  awayGoalsScored: dbTournamentKnockoutResult.awayGoalsScored,
+  awayGoalsConceded: dbTournamentKnockoutResult.awayGoalsConceded,
+  matchWinner: dbTournamentKnockoutResult.matchWinner,
 });
 
-export const mapDomainTournamentKnockoutResultToPrismaCreate = (
+export const mapDomainTournamentKnockoutResultToDbCreate = (
   domainTournamentKnockoutResult: TournamentKnockoutResultCreateInput,
-): PrismaTournamentKnockoutResultCreateInput => ({
+): DbTournamentKnockoutResultCreateInput => ({
   tournamentId: domainTournamentKnockoutResult.tournamentId,
   eventId: domainTournamentKnockoutResult.eventId,
   matchId: domainTournamentKnockoutResult.matchId,

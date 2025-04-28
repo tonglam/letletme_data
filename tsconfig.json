@@ -11,10 +11,18 @@
     "rootDir": ".",
     "baseUrl": ".",
     "paths": {
-      "infrastructure/*": ["src/infrastructure/*"],
-      "services/*": ["src/services/*"],
+      "api/*": ["src/api/*"],
+      "configs/*": ["src/configs/*"],
+      "data/*": ["src/data/*"],
+      "db/*": ["src/db/*"],
       "domains/*": ["src/domains/*"],
-      "src/*": ["src/*"]
+      "infrastructures/*": ["src/infrastructures/*"],
+      "repositories/*": ["src/repositories/*"],
+      "services/*": ["src/services/*"],
+      "schema/*": ["src/db/schema/*"],
+      "types/*": ["src/types/*"],
+      "utils/*": ["src/utils/*"],
+      "workers/*": ["src/workers/*"]
     },
     "strictNullChecks": true,
     "noImplicitThis": true,
@@ -33,7 +41,8 @@
     "tests/**/*.json",
     "vitest.config.ts",
     "vitest.setup.ts",
-    "scripts/**/*.ts"
+    "scripts/**/*.ts",
+    "drizzle.config.ts"
   ],
   "exclude": ["node_modules"]
 }

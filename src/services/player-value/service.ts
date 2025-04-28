@@ -1,3 +1,4 @@
+import { FplBootstrapDataService } from 'data/types';
 import { EventCache } from 'domains/event/types';
 import { PlayerCache } from 'domains/player/types';
 import { createPlayerValueOperations } from 'domains/player-value/operation';
@@ -6,30 +7,26 @@ import { TeamCache } from 'domains/team/types';
 import { pipe, flow } from 'fp-ts/function';
 import * as RA from 'fp-ts/ReadonlyArray';
 import * as TE from 'fp-ts/TaskEither';
+import { PlayerValueRepository, PlayerValueCreateInputs } from 'repositories/player-value/types';
 import { PlayerValueService, PlayerValueServiceOperations } from 'services/player-value/types';
-import { FplBootstrapDataService } from 'src/data/types';
-import {
-  PlayerValueCreateInputs,
-  PlayerValueRepository,
-} from 'src/repositories/player-value/types';
-import { ValueChangeType } from 'src/types/base.type';
+import { ValueChangeType } from 'types/base.type';
 import {
   PlayerValue,
   PlayerValues,
   RawPlayerValue,
   RawPlayerValues,
   SourcePlayerValues,
-} from 'src/types/domain/player-value.type';
-import { PlayerId } from 'src/types/domain/player.type';
-import { TeamId } from 'src/types/domain/team.type';
+} from 'types/domain/player-value.type';
+import { PlayerId } from 'types/domain/player.type';
+import { TeamId } from 'types/domain/team.type';
 import {
   createServiceError,
   DataLayerError,
   ServiceError,
   ServiceErrorCode,
-} from 'src/types/error.type';
-import { enrichPlayerValues } from 'src/utils/data-enrichment.util';
-import { createServiceIntegrationError, mapDomainErrorToServiceError } from 'src/utils/error.util';
+} from 'types/error.type';
+import { enrichPlayerValues } from 'utils/data-enrichment.util';
+import { createServiceIntegrationError, mapDomainErrorToServiceError } from 'utils/error.util';
 
 const determineChangeType = (newValue: number, lastValue: number): ValueChangeType => {
   if (newValue > lastValue) {

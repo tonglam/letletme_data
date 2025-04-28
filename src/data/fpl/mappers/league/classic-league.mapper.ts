@@ -1,9 +1,9 @@
+import { ClassicLeagueResponse } from 'data/fpl/schemas/league/classic-league.schema';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
-import { ClassicLeagueResponse } from 'src/data/fpl/schemas/league/classic-league.schema';
-import { LeagueType } from 'src/types/base.type';
-import { EntryId } from 'src/types/domain/entry-info.type';
-import { ClassicLeague, LeagueId } from 'src/types/domain/league.type';
+import { LeagueType } from 'types/base.type';
+import { EntryId } from 'types/domain/entry-info.type';
+import { ClassicLeague, LeagueId } from 'types/domain/league.type';
 
 export const mapClassicLeagueResponseToDomain = (
   leagueId: LeagueId,

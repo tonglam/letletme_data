@@ -1,46 +1,40 @@
-import { PrismaClient } from '@prisma/client';
+import { db } from 'db/index';
+import { eq } from 'drizzle-orm';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import {
-  mapDomainTournamentKnockoutToPrismaCreate,
-  mapPrismaTournamentKnockoutToDomain,
-} from 'src/repositories/tournament-knockout/mapper';
+  mapDomainTournamentKnockoutToDbCreate,
+  mapDbTournamentKnockoutToDomain,
+} from 'repositories/tournament-knockout/mapper';
 import {
   TournamentKnockoutCreateInputs,
   TournamentKnockoutRepository,
-} from 'src/repositories/tournament-knockout/types';
-import { TournamentId } from 'src/types/domain/tournament-info.type';
-import { TournamentKnockouts } from 'src/types/domain/tournament-knockout.type';
+} from 'repositories/tournament-knockout/types';
+import * as schema from 'schema/tournament-knockout';
+import { TournamentId } from 'types/domain/tournament-info.type';
+import { TournamentKnockouts } from 'types/domain/tournament-knockout.type';
+import { createDBError, DBError, DBErrorCode } from 'types/error.type';
+import { getErrorMessage } from 'utils/error.util';
 
-import { createDBError, DBError, DBErrorCode } from '../../types/error.type';
-
-export const createTournamentKnockoutRepository = (
-  prismaClient: PrismaClient,
-): TournamentKnockoutRepository => {
+export const createTournamentKnockoutRepository = (): TournamentKnockoutRepository => {
   const findByTournamentId = (
     tournamentId: TournamentId,
   ): TE.TaskEither<DBError, TournamentKnockouts> =>
     pipe(
       TE.tryCatch(
-        () =>
-          prismaClient.tournamentKnockout.findMany({
-            where: { tournamentId: Number(tournamentId) },
-          }),
+        async () => {
+          const result = await db
+            .select()
+            .from(schema.tournamentKnockouts)
+            .where(eq(schema.tournamentKnockouts.tournamentId, Number(tournamentId)));
+          return result.map(mapDbTournamentKnockoutToDomain);
+        },
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to fetch tournament knockout by tournament id ${tournamentId}: ${error}`,
+            message: `Failed to fetch tournament knockout by tournament id ${tournamentId}: ${getErrorMessage(error)}`,
+            cause: error instanceof Error ? error : undefined,
           }),
-      ),
-      TE.chainW((prismaTournamentKnockoutOrNull) =>
-        prismaTournamentKnockoutOrNull
-          ? TE.right(prismaTournamentKnockoutOrNull.map(mapPrismaTournamentKnockoutToDomain))
-          : TE.left(
-              createDBError({
-                code: DBErrorCode.NOT_FOUND,
-                message: `Tournament knockout with tournament id ${tournamentId} not found in database`,
-              }),
-            ),
       ),
     );
 
@@ -50,18 +44,19 @@ export const createTournamentKnockoutRepository = (
     pipe(
       TE.tryCatch(
         async () => {
-          const dataToCreate = tournamentKnockoutInputs.map(
-            mapDomainTournamentKnockoutToPrismaCreate,
-          );
-          await prismaClient.tournamentKnockout.createMany({
-            data: dataToCreate,
-            skipDuplicates: true,
-          });
+          const dataToCreate = tournamentKnockoutInputs.map(mapDomainTournamentKnockoutToDbCreate);
+          await db
+            .insert(schema.tournamentKnockouts)
+            .values(dataToCreate)
+            .onConflictDoNothing({
+              target: [schema.tournamentKnockouts.tournamentId],
+            });
         },
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to create tournament knockouts in batch: ${error}`,
+            message: `Failed to create tournament knockouts in batch: ${getErrorMessage(error)}`,
+            cause: error instanceof Error ? error : undefined,
           }),
       ),
       TE.chain(() => findByTournamentId(tournamentKnockoutInputs[0].tournamentId)),

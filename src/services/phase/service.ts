@@ -1,23 +1,14 @@
+import { FplBootstrapDataService } from 'data/types';
+import { createPhaseOperations } from 'domains/phase/operation';
+import { PhaseCache, PhaseOperations } from 'domains/phase/types';
 import { pipe } from 'fp-ts/function';
 import * as O from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
+import { PhaseCreateInputs, PhaseRepository } from 'repositories/phase/types';
 import { PhaseService, PhaseServiceOperations } from 'services/phase/types';
-
-import { FplBootstrapDataService } from '../../data/types';
-import { createPhaseOperations } from '../../domains/phase/operation';
-import { PhaseCache, PhaseOperations } from '../../domains/phase/types';
-import { PhaseCreateInputs, PhaseRepository } from '../../repositories/phase/types';
-import { Phase, PhaseId, Phases } from '../../types/domain/phase.type';
-import {
-  createDomainError,
-  DataLayerError,
-  DomainErrorCode,
-  ServiceError,
-} from '../../types/error.type';
-import {
-  createServiceIntegrationError,
-  mapDomainErrorToServiceError,
-} from '../../utils/error.util';
+import { Phase, PhaseId, Phases } from 'types/domain/phase.type';
+import { createDomainError, DataLayerError, DomainErrorCode, ServiceError } from 'types/error.type';
+import { createServiceIntegrationError, mapDomainErrorToServiceError } from 'utils/error.util';
 
 const phaseServiceOperations = (
   fplDataService: FplBootstrapDataService,

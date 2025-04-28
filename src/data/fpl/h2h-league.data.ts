@@ -1,19 +1,19 @@
-import * as E from 'fp-ts/Either';
-import { pipe } from 'fp-ts/function';
-import * as TE from 'fp-ts/TaskEither';
-import { Logger } from 'pino';
-import { apiConfig } from 'src/configs/api/api.config';
-import { mapH2hLeagueResponseToDomain } from 'src/data/fpl/mappers/league/h2h-league.mapper';
+import { apiConfig } from 'configs/api/api.config';
+import { mapH2hLeagueResponseToDomain } from 'data/fpl/mappers/league/h2h-league.mapper';
 import {
   H2hLeagueResponse,
   H2hLeagueResponseSchema,
-} from 'src/data/fpl/schemas/league/h2h-league.schema';
-import { H2hResultResponses } from 'src/data/fpl/schemas/league/h2h-result.schema';
-import { FplH2hLeagueDataService } from 'src/data/types';
-import { HTTPClient } from 'src/infrastructures/http/types';
-import { H2hLeague, LeagueId } from 'src/types/domain/league.type';
-import { DataLayerError, DataLayerErrorCode } from 'src/types/error.type';
-import { createDataLayerError } from 'src/utils/error.util';
+} from 'data/fpl/schemas/league/h2h-league.schema';
+import { H2hResultResponses } from 'data/fpl/schemas/league/h2h-result.schema';
+import { FplH2hLeagueDataService } from 'data/types';
+import * as E from 'fp-ts/Either';
+import { pipe } from 'fp-ts/function';
+import * as TE from 'fp-ts/TaskEither';
+import { HTTPClient } from 'infrastructures/http';
+import { Logger } from 'pino';
+import { H2hLeague, LeagueId } from 'types/domain/league.type';
+import { DataLayerError, DataLayerErrorCode } from 'types/error.type';
+import { createDataLayerError } from 'utils/error.util';
 
 export const createFplH2hLeagueDataService = (
   client: HTTPClient,

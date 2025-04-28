@@ -1,25 +1,24 @@
-import { EntryHistoryInfo } from 'src/types/domain/entry-history-info.type';
-import { EntryId } from 'src/types/domain/entry-info.type';
-import { Season } from 'src/utils/common.util';
-
 import {
   EntryHistoryInfoCreateInput,
-  PrismaEntryHistoryInfo,
-  PrismaEntryHistoryInfoCreateInput,
-} from './types';
+  DbEntryHistoryInfo,
+  DbEntryHistoryInfoCreateInput,
+} from 'repositories/entry-history-info/types';
+import { EntryHistoryInfo } from 'types/domain/entry-history-info.type';
+import { EntryId } from 'types/domain/entry-info.type';
+import { Season } from 'utils/common.util';
 
-export const mapPrismaEntryHistoryInfoToDomain = (
-  prismaEntryHistoryInfo: PrismaEntryHistoryInfo,
+export const mapDbEntryHistoryInfoToDomain = (
+  dbEntryHistoryInfo: DbEntryHistoryInfo,
 ): EntryHistoryInfo => ({
-  entryId: prismaEntryHistoryInfo.entryId as EntryId,
-  season: prismaEntryHistoryInfo.season as Season,
-  totalPoints: prismaEntryHistoryInfo.totalPoints as number,
-  overallRank: prismaEntryHistoryInfo.overallRank as number,
+  entryId: dbEntryHistoryInfo.entryId as EntryId,
+  season: dbEntryHistoryInfo.season as Season,
+  totalPoints: dbEntryHistoryInfo.totalPoints as number,
+  overallRank: dbEntryHistoryInfo.overallRank as number,
 });
 
-export const mapDomainEntryHistoryInfoToPrismaCreate = (
+export const mapDomainEntryHistoryInfoToDbCreate = (
   domainEntryHistoryInfo: EntryHistoryInfoCreateInput,
-): PrismaEntryHistoryInfoCreateInput => ({
+): DbEntryHistoryInfoCreateInput => ({
   entryId: domainEntryHistoryInfo.entryId,
   season: domainEntryHistoryInfo.season,
   totalPoints: domainEntryHistoryInfo.totalPoints,

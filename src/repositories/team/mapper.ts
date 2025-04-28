@@ -1,23 +1,20 @@
-import { PrismaTeam, PrismaTeamCreateInput, TeamCreateInput } from 'src/repositories/team/types';
+import { TeamCreateInput, DbTeam, DbTeamCreateInput } from 'repositories/team/types';
+import { Team, TeamId } from 'types/domain/team.type';
 
-import { Team, TeamId } from '../../types/domain/team.type';
-
-export const mapPrismaTeamToDomain = (prismaTeam: PrismaTeam): Team => ({
-  id: prismaTeam.id as TeamId,
-  code: prismaTeam.code,
-  name: prismaTeam.name,
-  shortName: prismaTeam.shortName,
-  strength: prismaTeam.strength,
-  position: prismaTeam.position,
-  points: prismaTeam.points,
-  win: prismaTeam.win,
-  draw: prismaTeam.draw,
-  loss: prismaTeam.loss,
+export const mapDbTeamToDomain = (dbTeam: DbTeam): Team => ({
+  id: dbTeam.id as TeamId,
+  code: dbTeam.code,
+  name: dbTeam.name,
+  shortName: dbTeam.shortName,
+  strength: dbTeam.strength,
+  position: dbTeam.position,
+  points: dbTeam.points,
+  win: dbTeam.win,
+  draw: dbTeam.draw,
+  loss: dbTeam.loss,
 });
 
-export const mapDomainTeamToPrismaCreate = (
-  domainTeam: TeamCreateInput,
-): PrismaTeamCreateInput => ({
+export const mapDomainTeamToDbCreate = (domainTeam: TeamCreateInput): DbTeamCreateInput => ({
   id: Number(domainTeam.id),
   code: domainTeam.code,
   name: domainTeam.name,

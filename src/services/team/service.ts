@@ -1,23 +1,14 @@
+import { FplBootstrapDataService } from 'data/types';
+import { createTeamOperations } from 'domains/team/operation';
+import { TeamCache, TeamOperations } from 'domains/team/types';
 import { pipe } from 'fp-ts/function';
 import * as O from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
+import { TeamCreateInputs, TeamRepository } from 'repositories/team/types';
 import { TeamService, TeamServiceOperations } from 'services/team/types';
-import { FplBootstrapDataService } from 'src/data/types';
-import { TeamCreateInputs, TeamRepository } from 'src/repositories/team/types';
-
-import { createTeamOperations } from '../../domains/team/operation';
-import { TeamCache, TeamOperations } from '../../domains/team/types';
-import { Team, TeamId, Teams } from '../../types/domain/team.type';
-import {
-  createDomainError,
-  DataLayerError,
-  DomainErrorCode,
-  ServiceError,
-} from '../../types/error.type';
-import {
-  createServiceIntegrationError,
-  mapDomainErrorToServiceError,
-} from '../../utils/error.util';
+import { Team, TeamId, Teams } from 'types/domain/team.type';
+import { createDomainError, DataLayerError, DomainErrorCode, ServiceError } from 'types/error.type';
+import { createServiceIntegrationError, mapDomainErrorToServiceError } from 'utils/error.util';
 
 const teamServiceOperations = (
   fplDataService: FplBootstrapDataService,

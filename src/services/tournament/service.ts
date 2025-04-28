@@ -1,7 +1,7 @@
 import * as TE from 'fp-ts/TaskEither';
 import { TournamentService, TournamentServiceOperations } from 'services/tournament/types';
-import { TournamentId } from 'src/types/domain/tournament-info.type';
-import { ServiceError } from 'src/types/error.type';
+import { TournamentId } from 'types/domain/tournament-info.type';
+import { ServiceError } from 'types/error.type';
 
 const tournamentServiceOperations = (): TournamentServiceOperations => {
   const drawTournamentGroups = (id: TournamentId): TE.TaskEither<ServiceError, void> => {

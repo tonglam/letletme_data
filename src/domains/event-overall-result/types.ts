@@ -1,13 +1,9 @@
+import { DefaultTTL } from 'configs/cache/cache.config';
+import { CachePrefix } from 'configs/cache/cache.config';
 import * as TE from 'fp-ts/TaskEither';
-import { DefaultTTL } from 'src/configs/cache/cache.config';
-import { CachePrefix } from 'src/configs/cache/cache.config';
-import {
-  EventOverallResult,
-  EventOverallResults,
-} from 'src/types/domain/event-overall-result.type';
-import { EventId } from 'src/types/domain/event.type';
-
-import { DomainError } from '../../types/error.type';
+import { EventOverallResult, EventOverallResults } from 'types/domain/event-overall-result.type';
+import { EventId } from 'types/domain/event.type';
+import { DomainError } from 'types/error.type';
 
 export interface EventOverallResultCacheConfig {
   readonly keyPrefix: (typeof CachePrefix)[keyof typeof CachePrefix];

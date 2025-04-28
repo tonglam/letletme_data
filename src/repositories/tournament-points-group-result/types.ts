@@ -1,19 +1,19 @@
-import {
-  Prisma,
-  TournamentPointsGroupResult as PrismaTournamentPointsGroupResultType,
-} from '@prisma/client';
+import { InferInsertModel, InferSelectModel } from 'drizzle-orm';
 import * as TE from 'fp-ts/TaskEither';
-import { DBError } from 'src/types/error.type';
-
-import { TournamentId } from '../../types/domain/tournament-info.type';
+import * as schema from 'schema/tournament-points-group-result';
+import { TournamentId } from 'types/domain/tournament-info.type';
 import {
   TournamentPointsGroupResult,
   TournamentPointsGroupResults,
-} from '../../types/domain/tournament-points-group-result.type';
+} from 'types/domain/tournament-points-group-result.type';
+import { DBError } from 'types/error.type';
 
-export type PrismaTournamentPointsGroupResultCreateInput =
-  Prisma.TournamentPointsGroupResultCreateInput;
-export type PrismaTournamentPointsGroupResult = PrismaTournamentPointsGroupResultType;
+export type DbTournamentPointsGroupResult = InferSelectModel<
+  typeof schema.tournamentPointsGroupResults
+>;
+export type DbTournamentPointsGroupResultCreateInput = InferInsertModel<
+  typeof schema.tournamentPointsGroupResults
+>;
 
 export type TournamentPointsGroupResultCreateInput = TournamentPointsGroupResult;
 export type TournamentPointsGroupResultCreateInputs =

@@ -1,8 +1,7 @@
-import { EventId } from 'src/types/domain/event.type';
-import { PlayerId } from 'src/types/domain/player.type';
-
-import { ElementTypeId } from '../base.type';
-import { TeamId } from './team.type';
+import { ElementTypeId } from 'types/base.type';
+import { EventId } from 'types/domain/event.type';
+import { PlayerId } from 'types/domain/player.type';
+import { TeamId } from 'types/domain/team.type';
 
 export interface PlayerValueTrack {
   readonly hourIndex: number;

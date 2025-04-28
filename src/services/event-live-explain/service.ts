@@ -1,28 +1,25 @@
+import { FplLiveDataService } from 'data/types';
 import { createEventLiveExplainOperations } from 'domains/event-live-explain/operation';
 import { EventLiveExplainOperations } from 'domains/event-live-explain/types';
 import { pipe } from 'fp-ts/function';
 import * as O from 'fp-ts/Option';
 import { Option } from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
-import { FplLiveDataService } from 'src/data/types';
-import { EventLiveExplainRepository } from 'src/repositories/event-live-explain/types';
-import { EventService } from 'src/services/event/types';
-import { EventLiveExplain, EventLiveExplains } from 'src/types/domain/event-live-explain.type';
-import { EventId } from 'src/types/domain/event.type';
-import { PlayerId } from 'src/types/domain/player.type';
+import { EventLiveExplainRepository } from 'repositories/event-live-explain/types';
+import { EventService } from 'services/event/types';
 import {
-  createDomainError,
-  DataLayerError,
-  DomainErrorCode,
-  ServiceError,
-} from 'src/types/error.type';
+  EventLiveExplainService,
+  EventLiveExplainServiceOperations,
+} from 'services/event-live-explain/types';
+import { EventLiveExplain, EventLiveExplains } from 'types/domain/event-live-explain.type';
+import { EventId } from 'types/domain/event.type';
+import { PlayerId } from 'types/domain/player.type';
+import { createDomainError, DataLayerError, DomainErrorCode, ServiceError } from 'types/error.type';
 import {
   createServiceIntegrationError,
   mapDBErrorToServiceError,
   mapDomainErrorToServiceError,
-} from 'src/utils/error.util';
-
-import { EventLiveExplainService, EventLiveExplainServiceOperations } from './types';
+} from 'utils/error.util';
 
 const eventLiveExplainServiceOperations = (
   fplDataService: FplLiveDataService,

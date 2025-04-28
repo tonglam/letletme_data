@@ -1,10 +1,10 @@
+import { TransferResponse } from 'data/fpl/schemas/transfer/transfer.schema';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
-import { TransferResponse } from 'src/data/fpl/schemas/transfer/transfer.schema';
-import { RawEntryEventTransfer } from 'src/types/domain/entry-event-transfer.type';
-import { EntryId } from 'src/types/domain/entry-info.type';
-import { EventId } from 'src/types/domain/event.type';
-import { PlayerId } from 'src/types/domain/player.type';
+import { RawEntryEventTransfer } from 'types/domain/entry-event-transfer.type';
+import { EntryId } from 'types/domain/entry-info.type';
+import { EventId } from 'types/domain/event.type';
+import { PlayerId } from 'types/domain/player.type';
 
 export const mapTransferResponseToEntryEventTransfer = (
   raw: TransferResponse,

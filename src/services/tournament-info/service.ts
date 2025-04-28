@@ -3,17 +3,16 @@ import { pipe } from 'fp-ts/function';
 import * as O from 'fp-ts/Option';
 import { Option } from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
+import { TournamentInfoRepository } from 'repositories/tournament-info/types';
 import {
   TournamentInfoService,
   TournamentInfoServiceOperations,
 } from 'services/tournament-info/types';
-import { TournamentInfoRepository } from 'src/repositories/tournament-info/types';
-import { TournamentMode, GroupMode, TournamentState, KnockoutMode } from 'src/types/base.type';
-import { TournamentInfo, TournamentInfos } from 'src/types/domain/tournament-info.type';
-import { TournamentId } from 'src/types/domain/tournament-info.type';
-
-import { createDomainError, DomainErrorCode, ServiceError } from '../../types/error.type';
-import { mapDBErrorToServiceError, mapDomainErrorToServiceError } from '../../utils/error.util';
+import { TournamentMode, GroupMode, TournamentState, KnockoutMode } from 'types/base.type';
+import { TournamentInfo, TournamentInfos } from 'types/domain/tournament-info.type';
+import { TournamentId } from 'types/domain/tournament-info.type';
+import { createDomainError, DomainErrorCode, ServiceError } from 'types/error.type';
+import { mapDBErrorToServiceError, mapDomainErrorToServiceError } from 'utils/error.util';
 
 const tournamentInfoServiceOperations = (
   repository: TournamentInfoRepository,

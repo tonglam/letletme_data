@@ -1,11 +1,12 @@
-import { Prisma, EventLive as PrismaEventLiveType } from '@prisma/client';
+import { InferInsertModel, InferSelectModel } from 'drizzle-orm';
 import * as TE from 'fp-ts/TaskEither';
-import { RawEventLive, RawEventLives } from 'src/types/domain/event-live.type';
-import { EventId } from 'src/types/domain/event.type';
-import { DBError } from 'src/types/error.type';
+import * as schema from 'schema/event-live';
+import { RawEventLive, RawEventLives } from 'types/domain/event-live.type';
+import { EventId } from 'types/domain/event.type';
+import { DBError } from 'types/error.type';
 
-export type PrismaEventLiveCreateInput = Prisma.EventLiveCreateInput;
-export type PrismaEventLive = PrismaEventLiveType;
+export type DbEventLive = InferSelectModel<typeof schema.eventLive>;
+export type DbEventLiveCreateInput = InferInsertModel<typeof schema.eventLive>;
 
 export type EventLiveCreateInput = RawEventLive;
 export type EventLiveCreateInputs = readonly EventLiveCreateInput[];

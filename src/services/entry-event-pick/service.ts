@@ -1,3 +1,4 @@
+import { FplPickDataService } from 'data/types';
 import { createEntryEventPickOperations } from 'domains/entry-event-pick/operation';
 import { EntryEventPickOperations } from 'domains/entry-event-pick/types';
 import { PlayerCache } from 'domains/player/types';
@@ -6,28 +7,25 @@ import * as A from 'fp-ts/Array';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import { Logger } from 'pino';
+import { EntryEventPickRepository } from 'repositories/entry-event-pick/types';
+import { EntryInfoRepository } from 'repositories/entry-info/types';
+import { TournamentEntryRepository } from 'repositories/tournament-entry/types';
 import {
   EntryEventPickService,
   EntryEventPickServiceOperations,
 } from 'services/entry-event-pick/types';
-import { EntryEventPickRepository } from 'src/repositories/entry-event-pick/types';
-import { EntryInfoRepository } from 'src/repositories/entry-info/types';
-import { TournamentEntryRepository } from 'src/repositories/tournament-entry/types';
-import { RawEntryEventPicks } from 'src/types/domain/entry-event-pick.type';
-import { EntryEventPick } from 'src/types/domain/entry-event-pick.type';
-import { EventId } from 'src/types/domain/event.type';
+import { RawEntryEventPicks, EntryEventPick } from 'types/domain/entry-event-pick.type';
+import { EntryId } from 'types/domain/entry-info.type';
+import { EventId } from 'types/domain/event.type';
 import {
+  createServiceError,
   DBError,
   DomainError,
   DomainErrorCode,
   ServiceError,
   ServiceErrorCode,
-} from 'src/types/error.type';
-import { createServiceError } from 'src/types/error.type';
-import { enrichEntryEventPick } from 'src/utils/data-enrichment.util';
-
-import { FplPickDataService } from '../../data/types';
-import { EntryId } from '../../types/domain/entry-info.type';
+} from 'types/error.type';
+import { enrichEntryEventPick } from 'utils/data-enrichment.util';
 
 const entryEventPickServiceOperations = (
   fplDataService: FplPickDataService,

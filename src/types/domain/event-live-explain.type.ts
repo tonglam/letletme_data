@@ -1,5 +1,5 @@
-import { EventId } from 'src/types/domain/event.type';
-import { PlayerId } from 'src/types/domain/player.type';
+import { EventId } from 'types/domain/event.type';
+import { PlayerId } from 'types/domain/player.type';
 
 export interface EventLiveExplain {
   readonly eventId: EventId;

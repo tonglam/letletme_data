@@ -1,10 +1,10 @@
 import { TeamOperations } from 'domains/team/types';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { TeamCreateInputs, TeamRepository } from 'src/repositories/team/types';
-import { Teams } from 'src/types/domain/team.type';
-import { createDomainError, DomainError, DomainErrorCode } from 'src/types/error.type';
-import { getErrorMessage } from 'src/utils/error.util';
+import { TeamCreateInputs, TeamRepository } from 'repositories/team/types';
+import { Teams } from 'types/domain/team.type';
+import { createDomainError, DomainError, DomainErrorCode } from 'types/error.type';
+import { getErrorMessage } from 'utils/error.util';
 
 export const createTeamOperations = (repository: TeamRepository): TeamOperations => {
   const saveTeams = (teamInputs: TeamCreateInputs): TE.TaskEither<DomainError, Teams> =>

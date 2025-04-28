@@ -1,4 +1,4 @@
-import { EntryId } from 'src/types/domain/entry-info.type';
+import { EntryId } from 'types/domain/entry-info.type';
 
 export type EntryHistoryInfo = {
   readonly entryId: EntryId;

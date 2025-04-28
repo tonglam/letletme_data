@@ -1,50 +1,49 @@
-import { PrismaClient } from '@prisma/client';
+import { db } from 'db/index';
+import { eq } from 'drizzle-orm';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { mapPrismaTournamentInfoToDomain } from 'src/repositories/tournament-info/mapper';
-import { TournamentInfoRepository } from 'src/repositories/tournament-info/types';
-import { TournamentInfo, TournamentInfos } from 'src/types/domain/tournament-info.type';
-import { TournamentId } from 'src/types/domain/tournament-info.type';
-import { DBError, DBErrorCode } from 'src/types/error.type';
-import { createDBError } from 'src/types/error.type';
+import { mapDbTournamentInfoToDomain } from 'repositories/tournament-info/mapper';
+import { TournamentInfoRepository } from 'repositories/tournament-info/types';
+import * as schema from 'schema/tournament-info';
+import { TournamentInfo, TournamentInfos } from 'types/domain/tournament-info.type';
+import { TournamentId } from 'types/domain/tournament-info.type';
+import { DBError, DBErrorCode } from 'types/error.type';
+import { createDBError } from 'types/error.type';
+import { getErrorMessage } from 'utils/error.util';
 
-export const createTournamentInfoRepository = (
-  prismaClient: PrismaClient,
-): TournamentInfoRepository => {
+export const createTournamentInfoRepository = (): TournamentInfoRepository => {
   const findById = (id: TournamentId): TE.TaskEither<DBError, TournamentInfo> =>
     pipe(
       TE.tryCatch(
-        () => prismaClient.tournamentInfo.findUnique({ where: { id: Number(id) } }),
+        async () => {
+          const result = await db
+            .select()
+            .from(schema.tournamentInfos)
+            .where(eq(schema.tournamentInfos.id, Number(id)));
+          return mapDbTournamentInfoToDomain(result[0]);
+        },
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to fetch tournament info by id ${id}: ${error}`,
+            message: `Failed to fetch tournament info by id ${id}: ${getErrorMessage(error)}`,
+            cause: error instanceof Error ? error : undefined,
           }),
-      ),
-      TE.chainW((prismaTournamentInfoOrNull) =>
-        prismaTournamentInfoOrNull
-          ? TE.right(mapPrismaTournamentInfoToDomain(prismaTournamentInfoOrNull))
-          : TE.left(
-              createDBError({
-                code: DBErrorCode.NOT_FOUND,
-                message: `Tournament info with id ${id} not found in database`,
-              }),
-            ),
       ),
     );
 
   const findAll = (): TE.TaskEither<DBError, TournamentInfos> =>
     pipe(
       TE.tryCatch(
-        () => prismaClient.tournamentInfo.findMany(),
+        async () => {
+          const result = await db.select().from(schema.tournamentInfos);
+          return result.map(mapDbTournamentInfoToDomain);
+        },
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to fetch all tournament ids: ${error}`,
+            message: `Failed to fetch all tournament ids: ${getErrorMessage(error)}`,
+            cause: error instanceof Error ? error : undefined,
           }),
-      ),
-      TE.chainW((prismaTournamentInfos) =>
-        TE.right(prismaTournamentInfos.map(mapPrismaTournamentInfoToDomain)),
       ),
     );
 

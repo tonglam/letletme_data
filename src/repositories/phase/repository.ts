@@ -1,66 +1,68 @@
-import { PrismaClient } from '@prisma/client';
+import { db } from 'db/index';
+import { eq, asc } from 'drizzle-orm';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import {
-  mapDomainPhaseToPrismaCreate,
-  mapPrismaPhaseToDomain,
-} from 'src/repositories/phase/mapper';
-import { PhaseCreateInputs, PhaseRepository } from 'src/repositories/phase/types';
-import { Phase, Phases } from 'src/types/domain/phase.type';
+import { mapDomainPhaseToDbCreate, mapDbPhaseToDomain } from 'repositories/phase/mapper';
+import { PhaseCreateInputs, PhaseRepository } from 'repositories/phase/types';
+import * as schema from 'schema/phase';
+import { Phase, PhaseId, Phases } from 'types/domain/phase.type';
+import { createDBError, DBError, DBErrorCode } from 'types/error.type';
+import { getErrorMessage } from 'utils/error.util';
 
-import { PhaseId } from '../../types/domain/phase.type';
-import { createDBError, DBError, DBErrorCode } from '../../types/error.type';
-
-export const createPhaseRepository = (prisma: PrismaClient): PhaseRepository => {
+export const createPhaseRepository = (): PhaseRepository => {
   const findById = (id: PhaseId): TE.TaskEither<DBError, Phase> =>
     pipe(
       TE.tryCatch(
-        () => prisma.phase.findUnique({ where: { id: Number(id) } }),
+        async () => {
+          const result = await db
+            .select()
+            .from(schema.phases)
+            .where(eq(schema.phases.id, Number(id)))
+            .limit(1);
+          return mapDbPhaseToDomain(result[0]);
+        },
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to fetch phase by id ${id}: ${error}`,
+            message: `Failed to fetch phase by id ${id}: ${getErrorMessage(error)}`,
+            cause: error instanceof Error ? error : undefined,
           }),
-      ),
-      TE.chainW((prismaPhaseOrNull) =>
-        prismaPhaseOrNull
-          ? TE.right(mapPrismaPhaseToDomain(prismaPhaseOrNull))
-          : TE.left(
-              createDBError({
-                code: DBErrorCode.NOT_FOUND,
-                message: `Phase with ID ${id} not found in database`,
-              }),
-            ),
       ),
     );
 
   const findAll = (): TE.TaskEither<DBError, Phases> =>
     pipe(
       TE.tryCatch(
-        () => prisma.phase.findMany({ orderBy: { id: 'asc' } }),
+        async () => {
+          const result = await db.select().from(schema.phases).orderBy(asc(schema.phases.id));
+          return result.map(mapDbPhaseToDomain);
+        },
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to fetch all phases: ${error}`,
+            message: `Failed to fetch all phases: ${getErrorMessage(error)}`,
+            cause: error instanceof Error ? error : undefined,
           }),
       ),
-      TE.map((prismaPhases) => prismaPhases.map(mapPrismaPhaseToDomain)),
     );
 
   const saveBatch = (phaseInputs: PhaseCreateInputs): TE.TaskEither<DBError, Phases> =>
     pipe(
       TE.tryCatch(
         async () => {
-          const dataToCreate = phaseInputs.map(mapDomainPhaseToPrismaCreate);
-          await prisma.phase.createMany({
-            data: dataToCreate,
-            skipDuplicates: true,
-          });
+          const dataToCreate = phaseInputs.map(mapDomainPhaseToDbCreate);
+          await db
+            .insert(schema.phases)
+            .values(dataToCreate)
+            .onConflictDoNothing({
+              target: [schema.phases.id],
+            });
         },
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to create phases in batch: ${error}`,
+            message: `Failed to create phases in batch: ${getErrorMessage(error)}`,
+            cause: error instanceof Error ? error : undefined,
           }),
       ),
       TE.chain(() => findAll()),
@@ -69,14 +71,16 @@ export const createPhaseRepository = (prisma: PrismaClient): PhaseRepository => 
   const deleteAll = (): TE.TaskEither<DBError, void> =>
     pipe(
       TE.tryCatch(
-        () => prisma.phase.deleteMany({}),
+        async () => {
+          await db.delete(schema.phases);
+        },
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to delete all phases: ${error}`,
+            message: `Failed to delete all phases: ${getErrorMessage(error)}`,
+            cause: error instanceof Error ? error : undefined,
           }),
       ),
-      TE.map(() => undefined),
     );
 
   return {

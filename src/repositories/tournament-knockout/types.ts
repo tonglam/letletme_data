@@ -1,5 +1,6 @@
-import { Prisma, TournamentKnockout as PrismaTournamentKnockoutType } from '@prisma/client';
+import { InferInsertModel, InferSelectModel } from 'drizzle-orm';
 import * as TE from 'fp-ts/TaskEither';
+import * as schema from 'schema/tournament-knockout';
 import { DBError } from 'src/types/error.type';
 
 import { TournamentId } from '../../types/domain/tournament-info.type';
@@ -8,8 +9,8 @@ import {
   TournamentKnockouts,
 } from '../../types/domain/tournament-knockout.type';
 
-export type PrismaTournamentKnockoutCreateInput = Prisma.TournamentKnockoutCreateInput;
-export type PrismaTournamentKnockout = PrismaTournamentKnockoutType;
+export type DbTournamentKnockout = InferSelectModel<typeof schema.tournamentKnockouts>;
+export type DbTournamentKnockoutCreateInput = InferInsertModel<typeof schema.tournamentKnockouts>;
 
 export type TournamentKnockoutCreateInput = TournamentKnockout;
 export type TournamentKnockoutCreateInputs = readonly TournamentKnockoutCreateInput[];

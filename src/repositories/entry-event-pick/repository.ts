@@ -1,47 +1,47 @@
-import { PrismaClient } from '@prisma/client';
+import { db } from 'db/index';
+import { eq, and } from 'drizzle-orm';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import {
-  mapDomainEntryEventPickToPrismaCreate,
-  mapPrismaEntryEventPickToDomain,
-} from 'src/repositories/entry-event-pick/mapper';
+  mapDomainEntryEventPickToDbCreate,
+  mapDbEntryEventPickToDomain,
+} from 'repositories/entry-event-pick/mapper';
 import {
   EntryEventPickCreateInputs,
   EntryEventPickRepository,
-} from 'src/repositories/entry-event-pick/types';
-import { RawEntryEventPick } from 'src/types/domain/entry-event-pick.type';
-import { EntryId } from 'src/types/domain/entry-info.type';
-import { EventId } from 'src/types/domain/event.type';
-import { createDBError, DBError, DBErrorCode } from 'src/types/error.type';
+} from 'repositories/entry-event-pick/types';
+import * as schema from 'schema/entry-event-pick';
+import { RawEntryEventPick } from 'types/domain/entry-event-pick.type';
+import { EntryId } from 'types/domain/entry-info.type';
+import { EventId } from 'types/domain/event.type';
+import { createDBError, DBError, DBErrorCode } from 'types/error.type';
+import { getErrorMessage } from 'utils/error.util';
 
-export const createEntryEventPickRepository = (prisma: PrismaClient): EntryEventPickRepository => {
+export const createEntryEventPickRepository = (): EntryEventPickRepository => {
   const findByEntryIdAndEventId = (
     entryId: EntryId,
     eventId: EventId,
   ): TE.TaskEither<DBError, RawEntryEventPick> =>
     pipe(
       TE.tryCatch(
-        () =>
-          prisma.entryEventPick.findUnique({
-            where: {
-              unique_entry_event_pick: { entryId: Number(entryId), eventId: Number(eventId) },
-            },
-          }),
+        async () => {
+          const result = await db
+            .select()
+            .from(schema.entryEventPicks)
+            .where(
+              and(
+                eq(schema.entryEventPicks.entryId, Number(entryId)),
+                eq(schema.entryEventPicks.eventId, Number(eventId)),
+              ),
+            );
+          return mapDbEntryEventPickToDomain(result[0]);
+        },
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to fetch entry event pick by id ${entryId} and event id ${eventId}: ${error}`,
+            message: `Failed to fetch entry event pick by id ${entryId} and event id ${eventId}: ${getErrorMessage(error)}`,
+            cause: error instanceof Error ? error : undefined,
           }),
-      ),
-      TE.chainW((prismaEntryEventPickOrNull) =>
-        prismaEntryEventPickOrNull
-          ? TE.right(mapPrismaEntryEventPickToDomain(prismaEntryEventPickOrNull))
-          : TE.left(
-              createDBError({
-                code: DBErrorCode.NOT_FOUND,
-                message: `Entry event pick with ID ${entryId} and event id ${eventId} not found in database`,
-              }),
-            ),
       ),
     );
 
@@ -50,15 +50,19 @@ export const createEntryEventPickRepository = (prisma: PrismaClient): EntryEvent
   ): TE.TaskEither<DBError, RawEntryEventPick> =>
     pipe(
       TE.tryCatch(
-        () =>
-          prisma.entryEventPick.createMany({
-            data: entryEventPickInputs.map(mapDomainEntryEventPickToPrismaCreate),
-            skipDuplicates: true,
-          }),
+        async () => {
+          await db
+            .insert(schema.entryEventPicks)
+            .values(entryEventPickInputs.map(mapDomainEntryEventPickToDbCreate))
+            .onConflictDoNothing({
+              target: [schema.entryEventPicks.entryId, schema.entryEventPicks.eventId],
+            });
+        },
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to save entry event pick: ${error}`,
+            message: `Failed to save entry event pick: ${getErrorMessage(error)}`,
+            cause: error instanceof Error ? error : undefined,
           }),
       ),
       TE.chain(() =>

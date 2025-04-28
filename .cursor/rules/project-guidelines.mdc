@@ -1,0 +1,36 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# Project Guidelines: TypeScript Backend App
+
+## Core Principles & Tech Stack
+- **FP Only:** Use functional programming patterns. Avoid classes and `this`.
+- **DDD:** Follow Domain-Driven Design with a strict layered structure.
+- **Type Safety:** Use TypeScript, `zod`, and `prisma` types rigorously. Avoid `any` and `unknown`.
+- **Consistency:** Prioritize convention over cleverness.
+- **Tech:** Node.js (Express), TypeScript, Prisma, Zod, BullMQ, Pino, Vitest.
+
+## Project Structure & Layers
+- `src/api`: Express routes, handlers, input validation (Zod), logging (Pino).
+- `src/configs`: Configuration files and environment bindings.
+- `src/domains`: Pure business logic, domain models, types. No external dependencies.
+- `src/infrastructures`: Initialization for DB (Prisma), queues (BullMQ), Redis, logger (Pino). Side effects live here.
+- `src/repositories`: Data access logic using Prisma, abstracting DB interactions.
+- `src/services`: Application logic, orchestrates domain and infrastructure layers. Stateless and composable functions.
+- `src/types`: Shared TypeScript types, potentially derived from Zod schemas.
+- `src/utils`: Common utility functions.
+- `src/workers`: BullMQ worker definitions.
+- `tests/`: All tests (unit & integration), mirroring `src` structure.
+- `documentation/`: Architecture, design, and usage guides.
+
+## Key Rules & Best Practices
+- **File Creation:** Check for existing files/types/schemas before creating new ones. Reuse shared logic.
+- **Layered Dependencies:** Domain is isolated. Infrastructure should not be imported into the domain. API calls services, services use domain/repositories/infrastructure.
+- **Validation:** Use Zod for all input validation at the API layer. Infer types with `z.infer`.
+- **Testing:** Write unit tests (mocked dependencies) and integration tests (real resources in `tests/integration`).
+- **Logging:** Use Pino in the API or infrastructure layer. Avoid logging sensitive data.
+- **Pure Functions:** Prefer pure functions; isolate side effects in the infrastructure layer.
+- **Configuration:** Load config safely from `/config`.
+- **Principles:** Follow DRY, Single Responsibility, Separation of Concerns, Clear Dependencies.

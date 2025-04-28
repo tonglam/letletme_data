@@ -1,52 +1,47 @@
-import { PrismaClient } from '@prisma/client';
+import { db } from 'db/index';
+import { and, eq, inArray } from 'drizzle-orm';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import {
-  mapDomainEntryEventResultToPrismaCreate,
-  mapPrismaEntryEventResultToDomain,
-} from 'src/repositories/entry-event-result/mapper';
+  mapDomainEntryEventResultToDbCreate,
+  mapDbEntryEventResultToDomain,
+} from 'repositories/entry-event-result/mapper';
 import {
   EntryEventResultCreateInputs,
   EntryEventResultRepository,
-} from 'src/repositories/entry-event-result/types';
-import {
-  RawEntryEventResult,
-  RawEntryEventResults,
-} from 'src/types/domain/entry-event-result.type';
-import { EntryId } from 'src/types/domain/entry-info.type';
-import { EventId } from 'src/types/domain/event.type';
-import { createDBError, DBError, DBErrorCode } from 'src/types/error.type';
+} from 'repositories/entry-event-result/types';
+import * as schema from 'schema/entry-event-result';
+import { RawEntryEventResult, RawEntryEventResults } from 'types/domain/entry-event-result.type';
+import { EntryId } from 'types/domain/entry-info.type';
+import { EventId } from 'types/domain/event.type';
+import { createDBError, DBError, DBErrorCode } from 'types/error.type';
+import { getErrorMessage } from 'utils/error.util';
 
-export const createEntryEventResultRepository = (
-  prisma: PrismaClient,
-): EntryEventResultRepository => {
+export const createEntryEventResultRepository = (): EntryEventResultRepository => {
   const findByEntryIdAndEventId = (
     entryId: EntryId,
     eventId: EventId,
   ): TE.TaskEither<DBError, RawEntryEventResult> =>
     pipe(
       TE.tryCatch(
-        () =>
-          prisma.entryEventResult.findUnique({
-            where: {
-              unique_entry_event_result: { entryId: Number(entryId), eventId: Number(eventId) },
-            },
-          }),
+        async () => {
+          const result = await db
+            .select()
+            .from(schema.entryEventResults)
+            .where(
+              and(
+                eq(schema.entryEventResults.entryId, Number(entryId)),
+                eq(schema.entryEventResults.eventId, Number(eventId)),
+              ),
+            );
+          return mapDbEntryEventResultToDomain(result[0]);
+        },
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to fetch entry event result by id ${entryId} and event id ${eventId}: ${error}`,
+            message: `Failed to fetch entry event result by id ${entryId} and event id ${eventId}: ${getErrorMessage(error)}`,
+            cause: error instanceof Error ? error : undefined,
           }),
-      ),
-      TE.chainW((prismaEntryEventResultOrNull) =>
-        prismaEntryEventResultOrNull
-          ? TE.right(mapPrismaEntryEventResultToDomain(prismaEntryEventResultOrNull))
-          : TE.left(
-              createDBError({
-                code: DBErrorCode.NOT_FOUND,
-                message: `Entry event result with ID ${entryId} and event id ${eventId} not found in database`,
-              }),
-            ),
       ),
     );
 
@@ -56,36 +51,43 @@ export const createEntryEventResultRepository = (
   ): TE.TaskEither<DBError, RawEntryEventResults> =>
     pipe(
       TE.tryCatch(
-        () =>
-          prisma.entryEventResult.findMany({
-            where: { entryId: { in: entryIds.map(Number) }, eventId: Number(eventId) },
-          }),
+        async () => {
+          const result = await db
+            .select()
+            .from(schema.entryEventResults)
+            .where(
+              and(
+                inArray(schema.entryEventResults.entryId, entryIds.map(Number)),
+                eq(schema.entryEventResults.eventId, Number(eventId)),
+              ),
+            );
+          return result.map(mapDbEntryEventResultToDomain);
+        },
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to fetch entry event results by entry ids ${entryIds} and event id ${eventId}: ${error}`,
+            message: `Failed to fetch entry event results by entry ids ${entryIds} and event id ${eventId}: ${getErrorMessage(error)}`,
+            cause: error instanceof Error ? error : undefined,
           }),
-      ),
-      TE.map((prismaEntryEventResults) =>
-        prismaEntryEventResults.map(mapPrismaEntryEventResultToDomain),
       ),
     );
 
   const findByEntryId = (entryId: EntryId): TE.TaskEither<DBError, RawEntryEventResults> =>
     pipe(
       TE.tryCatch(
-        () =>
-          prisma.entryEventResult.findMany({
-            where: { entryId: Number(entryId) },
-          }),
+        async () => {
+          const result = await db
+            .select()
+            .from(schema.entryEventResults)
+            .where(eq(schema.entryEventResults.entryId, Number(entryId)));
+          return result.map(mapDbEntryEventResultToDomain);
+        },
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to fetch entry event results by entry id ${entryId}: ${error}`,
+            message: `Failed to fetch entry event results by entry id ${entryId}: ${getErrorMessage(error)}`,
+            cause: error instanceof Error ? error : undefined,
           }),
-      ),
-      TE.map((prismaEntryEventResults) =>
-        prismaEntryEventResults.map(mapPrismaEntryEventResultToDomain),
       ),
     );
 
@@ -94,15 +96,19 @@ export const createEntryEventResultRepository = (
   ): TE.TaskEither<DBError, RawEntryEventResult> =>
     pipe(
       TE.tryCatch(
-        () =>
-          prisma.entryEventResult.createMany({
-            data: entryEventResultInputs.map(mapDomainEntryEventResultToPrismaCreate),
-            skipDuplicates: true,
-          }),
+        async () => {
+          await db
+            .insert(schema.entryEventResults)
+            .values(entryEventResultInputs.map(mapDomainEntryEventResultToDbCreate))
+            .onConflictDoNothing({
+              target: [schema.entryEventResults.entryId, schema.entryEventResults.eventId],
+            });
+        },
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to save entry event result: ${error}`,
+            message: `Failed to save entry event result: ${getErrorMessage(error)}`,
+            cause: error instanceof Error ? error : undefined,
           }),
       ),
       TE.chain(() =>

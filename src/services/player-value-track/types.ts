@@ -1,7 +1,7 @@
 import * as TE from 'fp-ts/TaskEither';
 import { WorkflowResult } from 'services/types';
-import { PlayerValueTracks } from 'src/types/domain/player-value-track.type';
-import { ServiceError } from 'src/types/error.type';
+import { PlayerValueTracks } from 'types/domain/player-value-track.type';
+import { ServiceError } from 'types/error.type';
 
 export interface PlayerValueTrackServiceOperations {
   readonly findPlayerValueTracksByDate: (

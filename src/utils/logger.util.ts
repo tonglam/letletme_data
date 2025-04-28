@@ -1,7 +1,6 @@
 import { Request } from 'express';
+import { getApiLogger, getFplApiLogger, getQueueLogger } from 'infrastructures/logger';
 import { v4 as uuidv4 } from 'uuid';
-
-import { getApiLogger, getFplApiLogger, getQueueLogger } from '../infrastructures/logger';
 
 export interface LogContext {
   [key: string]: unknown;

@@ -1,8 +1,8 @@
 import * as TE from 'fp-ts/TaskEither';
-import { TournamentId } from 'src/types/domain/tournament-info.type';
-import { TournamentKnockouts } from 'src/types/domain/tournament-knockout.type';
+import { TournamentId } from 'types/domain/tournament-info.type';
+import { TournamentKnockouts } from 'types/domain/tournament-knockout.type';
 
-import type { ServiceError } from '../../types/error.type';
+import type { ServiceError } from 'types/error.type';
 
 export interface TournamentKnockoutServiceOperations {
   readonly findKnockoutsByTournamentId: (

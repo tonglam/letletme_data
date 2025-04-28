@@ -1,6 +1,6 @@
-import { EventId } from 'src/types/domain/event.type';
-import { PlayerId } from 'src/types/domain/player.type';
-import { TournamentId } from 'src/types/domain/tournament-info.type';
+import { EventId } from 'types/domain/event.type';
+import { PlayerId } from 'types/domain/player.type';
+import { TournamentId } from 'types/domain/tournament-info.type';
 
 export type TournamentKnockout = {
   readonly tournamentId: TournamentId;

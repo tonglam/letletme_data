@@ -1,8 +1,4 @@
-import { Prisma } from '@prisma/client';
 import * as E from 'fp-ts/Either';
-import { pipe } from 'fp-ts/function';
-import * as O from 'fp-ts/Option';
-
 import {
   APIError,
   APIErrorCode,
@@ -24,7 +20,7 @@ import {
   QueueErrorCode,
   ServiceError,
   ServiceErrorCode,
-} from '../types/error.type';
+} from 'types/error.type';
 
 const isQueueError = (error: unknown): error is QueueError =>
   typeof error === 'object' &&
@@ -98,87 +94,6 @@ export const createDatabaseConnectionError = (error: unknown): DBError => {
     cause: error instanceof Error ? error : undefined,
   });
 };
-
-export const handlePrismaError = (error: unknown): DBError =>
-  pipe(
-    error,
-    O.fromPredicate(
-      (e): e is Prisma.PrismaClientValidationError =>
-        e instanceof Prisma.PrismaClientValidationError,
-    ),
-    O.map(createDatabaseValidationError),
-    O.alt(() =>
-      pipe(
-        error,
-        O.fromPredicate(
-          (e): e is Prisma.PrismaClientKnownRequestError =>
-            e instanceof Prisma.PrismaClientKnownRequestError,
-        ),
-        O.map((err) => {
-          switch (err.code) {
-            case 'P2002':
-              return createDatabaseValidationError({
-                message: `Unique constraint violation on ${(err.meta?.target as string[])?.join(', ')}`,
-                details: err,
-              });
-            case 'P2003':
-              return createDatabaseValidationError({
-                message: `Foreign key constraint failed on ${err.meta?.field_name}`,
-                details: err,
-              });
-            case 'P2025':
-              return createDatabaseOperationError({
-                message: err.message,
-                details: err,
-              });
-            case 'P2011':
-              return createDatabaseValidationError({
-                message: `Null constraint violation on ${err.meta?.target}`,
-                details: err,
-              });
-            case 'P2006':
-              return createDatabaseTransformationError({
-                message: `Invalid data type for ${err.meta?.target}`,
-                details: err,
-              });
-            default:
-              return createDatabaseOperationError(err);
-          }
-        }),
-      ),
-    ),
-    O.alt(() =>
-      pipe(
-        error,
-        O.fromPredicate(
-          (e): e is Prisma.PrismaClientInitializationError =>
-            e instanceof Prisma.PrismaClientInitializationError,
-        ),
-        O.map(createDatabaseConnectionError),
-      ),
-    ),
-    O.alt(() =>
-      pipe(
-        error,
-        O.fromPredicate(
-          (e): e is Prisma.PrismaClientRustPanicError =>
-            e instanceof Prisma.PrismaClientRustPanicError,
-        ),
-        O.map(createDatabaseConnectionError),
-      ),
-    ),
-    O.alt(() =>
-      pipe(
-        error,
-        O.fromPredicate(
-          (e): e is Prisma.PrismaClientUnknownRequestError =>
-            e instanceof Prisma.PrismaClientUnknownRequestError,
-        ),
-        O.map(createDatabaseOperationError),
-      ),
-    ),
-    O.getOrElse(() => createDatabaseOperationError(error)),
-  );
 
 // ============ Cache Error Handlers ============
 

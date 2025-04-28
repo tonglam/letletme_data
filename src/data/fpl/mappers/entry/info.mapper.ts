@@ -1,8 +1,7 @@
+import { EntryInfoResponse } from 'data/fpl/schemas/entry/info.schema';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
-import { EntryInfo, validateEntryId } from 'src/types/domain/entry-info.type';
-
-import { EntryInfoResponse } from '../../schemas/entry/info.schema';
+import { EntryInfo, validateEntryId } from 'types/domain/entry-info.type';
 
 export const mapEntryInfoResponseToEntryInfo = (
   raw: EntryInfoResponse,

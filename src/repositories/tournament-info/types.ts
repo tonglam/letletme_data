@@ -1,14 +1,11 @@
-import { TournamentInfo as PrismaTournamentInfoType } from '@prisma/client';
+import { InferSelectModel, InferInsertModel } from 'drizzle-orm';
 import * as TE from 'fp-ts/TaskEither';
-import { DBError } from 'src/types/error.type';
+import * as schema from 'schema/tournament-info';
+import { TournamentInfo, TournamentInfos, TournamentId } from 'types/domain/tournament-info.type';
+import { DBError } from 'types/error.type';
 
-import {
-  TournamentInfo,
-  TournamentInfos,
-  TournamentId,
-} from '../../types/domain/tournament-info.type';
-
-export type PrismaTournamentInfo = PrismaTournamentInfoType;
+export type DbTournamentInfo = InferSelectModel<typeof schema.tournamentInfos>;
+export type DbTournamentInfoCreateInput = InferInsertModel<typeof schema.tournamentInfos>;
 
 export type TournamentInfoCreateInput = TournamentInfo;
 export type TournamentInfoCreateInputs = readonly TournamentInfoCreateInput[];

@@ -1,29 +1,31 @@
-import { EntryId, EntryInfo } from 'src/types/domain/entry-info.type';
+import {
+  EntryInfoCreateInput,
+  DbEntryInfo,
+  DbEntryInfoCreateInput,
+} from 'repositories/entry-info/types';
+import { EntryId, EntryInfo } from 'types/domain/entry-info.type';
 
-import { EntryInfoCreateInput, PrismaEntryInfo, PrismaEntryInfoCreateInput } from './types';
-
-export const mapPrismaEntryInfoToDomain = (prismaEntryInfo: PrismaEntryInfo): EntryInfo => ({
-  id: prismaEntryInfo.id as EntryId,
-  entryName: prismaEntryInfo.entryName,
-  playerName: prismaEntryInfo.playerName,
-  region: prismaEntryInfo.region,
-  startedEvent: prismaEntryInfo.startedEvent ?? 0,
-  overallPoints: prismaEntryInfo.overallPoints ?? 0,
-  overallRank: prismaEntryInfo.overallRank ?? 0,
-  bank: prismaEntryInfo.bank ?? 0,
-  teamValue: prismaEntryInfo.teamValue ?? 0,
-  totalTransfers: prismaEntryInfo.totalTransfers ?? 0,
-  lastEntryName: prismaEntryInfo.lastEntryName,
-  lastOverallPoints: prismaEntryInfo.lastOverallPoints,
-  lastOverallRank: prismaEntryInfo.lastOverallRank,
-  lastEventPoints: prismaEntryInfo.lastEventPoints,
-  lastTeamValue: prismaEntryInfo.lastTeamValue,
-  usedEntryNames: prismaEntryInfo.usedEntryNames,
+export const mapDbEntryInfoToDomain = (dbEntryInfo: DbEntryInfo): EntryInfo => ({
+  id: dbEntryInfo.id as EntryId,
+  entryName: dbEntryInfo.entryName,
+  playerName: dbEntryInfo.playerName,
+  region: dbEntryInfo.region,
+  startedEvent: dbEntryInfo.startedEvent ?? 0,
+  overallPoints: dbEntryInfo.overallPoints ?? 0,
+  overallRank: dbEntryInfo.overallRank ?? 0,
+  bank: dbEntryInfo.bank ?? 0,
+  teamValue: dbEntryInfo.teamValue ?? 0,
+  totalTransfers: dbEntryInfo.totalTransfers ?? 0,
+  lastEntryName: dbEntryInfo.lastEntryName,
+  lastOverallPoints: dbEntryInfo.lastOverallPoints ?? 0,
+  lastOverallRank: dbEntryInfo.lastOverallRank ?? 0,
+  lastTeamValue: dbEntryInfo.lastTeamValue ?? 0,
+  usedEntryNames: dbEntryInfo.usedEntryNames ?? [],
 });
 
-export const mapDomainEntryInfoToPrismaCreate = (
+export const mapDomainEntryInfoToDbCreate = (
   domainEntryInfo: EntryInfoCreateInput,
-): PrismaEntryInfoCreateInput => ({
+): DbEntryInfoCreateInput => ({
   id: domainEntryInfo.id,
   entryName: domainEntryInfo.entryName,
   playerName: domainEntryInfo.playerName,
@@ -37,7 +39,6 @@ export const mapDomainEntryInfoToPrismaCreate = (
   lastEntryName: domainEntryInfo.lastEntryName,
   lastOverallPoints: domainEntryInfo.lastOverallPoints,
   lastOverallRank: domainEntryInfo.lastOverallRank,
-  lastEventPoints: domainEntryInfo.lastEventPoints,
   lastTeamValue: domainEntryInfo.lastTeamValue,
   usedEntryNames: domainEntryInfo.usedEntryNames,
 });

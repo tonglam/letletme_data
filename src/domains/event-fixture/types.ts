@@ -1,10 +1,9 @@
+import { CachePrefix, DefaultTTL } from 'configs/cache/cache.config';
 import * as TE from 'fp-ts/TaskEither';
-import { CachePrefix, DefaultTTL } from 'src/configs/cache/cache.config';
-import { EventFixtureCreateInputs } from 'src/repositories/event-fixture/types';
-import { EventFixtures, RawEventFixtures } from 'src/types/domain/event-fixture.type';
-import { EventId } from 'src/types/domain/event.type';
-
-import { DomainError } from '../../types/error.type';
+import { EventFixtureCreateInputs } from 'repositories/event-fixture/types';
+import { EventFixtures, RawEventFixtures } from 'types/domain/event-fixture.type';
+import { EventId } from 'types/domain/event.type';
+import { DomainError } from 'types/error.type';
 
 export interface EventFixtureCacheConfig {
   readonly keyPrefix: (typeof CachePrefix)[keyof typeof CachePrefix];

@@ -1,3 +1,4 @@
+import { FplTransferDataService } from 'data/types';
 import { createEntryEventTransferOperations } from 'domains/entry-event-transfer/operation';
 import { EntryEventTransferOperations } from 'domains/entry-event-transfer/types';
 import { PlayerCache } from 'domains/player/types';
@@ -6,30 +7,28 @@ import * as A from 'fp-ts/Array';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import { Logger } from 'pino';
+import { EntryEventTransferRepository } from 'repositories/entry-event-transfer/types';
+import { EntryInfoRepository } from 'repositories/entry-info/types';
+import { TournamentEntryRepository } from 'repositories/tournament-entry/types';
 import {
   EntryEventTransferService,
   EntryEventTransferServiceOperations,
 } from 'services/entry-event-transfer/types';
-import { EntryEventTransferRepository } from 'src/repositories/entry-event-transfer/types';
-import { EntryInfoRepository } from 'src/repositories/entry-info/types';
-import { TournamentEntryRepository } from 'src/repositories/tournament-entry/types';
 import {
   EntryEventTransfers,
   RawEntryEventTransfers,
-} from 'src/types/domain/entry-event-transfer.type';
-import { EventId } from 'src/types/domain/event.type';
+} from 'types/domain/entry-event-transfer.type';
+import { EntryId } from 'types/domain/entry-info.type';
+import { EventId } from 'types/domain/event.type';
+import { createServiceError } from 'types/error.type';
 import {
   DBError,
   DomainError,
   DomainErrorCode,
   ServiceError,
   ServiceErrorCode,
-} from 'src/types/error.type';
-import { createServiceError } from 'src/types/error.type';
-import { enrichEntryEventTransfers } from 'src/utils/data-enrichment.util';
-
-import { FplTransferDataService } from '../../data/types';
-import { EntryId } from '../../types/domain/entry-info.type';
+} from 'types/error.type';
+import { enrichEntryEventTransfers } from 'utils/data-enrichment.util';
 
 const entryEventTransferServiceOperations = (
   fplDataService: FplTransferDataService,

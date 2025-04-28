@@ -1,19 +1,18 @@
+import { CachePrefix, DefaultTTL } from 'configs/cache/cache.config';
+import {
+  EventOverallResultCache,
+  EventOverallResultCacheConfig,
+} from 'domains/event-overall-result/types';
 import * as E from 'fp-ts/Either';
 import { flow, pipe } from 'fp-ts/function';
 import * as O from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
-import {
-  EventOverallResult,
-  EventOverallResults,
-} from 'src/types/domain/event-overall-result.type';
-import { EventId } from 'src/types/domain/event.type';
-import { getCurrentSeason } from 'src/utils/common.util';
-
-import { EventOverallResultCache, EventOverallResultCacheConfig } from './types';
-import { CachePrefix, DefaultTTL } from '../../configs/cache/cache.config';
-import { redisClient } from '../../infrastructures/cache/client';
-import { CacheError, CacheErrorCode, createCacheError, DomainError } from '../../types/error.type';
-import { mapCacheErrorToDomainError } from '../../utils/error.util';
+import { redisClient } from 'infrastructures/cache/client';
+import { EventOverallResult, EventOverallResults } from 'types/domain/event-overall-result.type';
+import { EventId } from 'types/domain/event.type';
+import { CacheError, CacheErrorCode, createCacheError, DomainError } from 'types/error.type';
+import { getCurrentSeason } from 'utils/common.util';
+import { mapCacheErrorToDomainError } from 'utils/error.util';
 
 const parseEventOverallResult = (
   eventOverallResultStr: string,

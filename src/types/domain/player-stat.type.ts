@@ -1,9 +1,7 @@
-import { Prisma } from '@prisma/client';
-import { EventId } from 'src/types/domain/event.type';
-import { PlayerId } from 'src/types/domain/player.type';
-
-import { ElementTypeId, ElementTypeName } from '../base.type';
-import { TeamId } from './team.type';
+import { ElementTypeId, ElementTypeName } from 'types/base.type';
+import { EventId } from 'types/domain/event.type';
+import { PlayerId } from 'types/domain/player.type';
+import { TeamId } from 'types/domain/team.type';
 
 export interface PlayerStat {
   readonly eventId: EventId;
@@ -16,15 +14,15 @@ export interface PlayerStat {
   readonly teamShortName: string;
   readonly value: number;
   readonly totalPoints: number | null;
-  readonly form: number | null;
-  readonly influence: number | null;
-  readonly creativity: number | null;
-  readonly threat: number | null;
-  readonly ictIndex: number | null;
-  readonly expectedGoals: Prisma.Decimal | null;
-  readonly expectedAssists: Prisma.Decimal | null;
-  readonly expectedGoalInvolvements: Prisma.Decimal | null;
-  readonly expectedGoalsConceded: Prisma.Decimal | null;
+  readonly form: string | null;
+  readonly influence: string | null;
+  readonly creativity: string | null;
+  readonly threat: string | null;
+  readonly ictIndex: string | null;
+  readonly expectedGoals: string | null;
+  readonly expectedAssists: string | null;
+  readonly expectedGoalInvolvements: string | null;
+  readonly expectedGoalsConceded: string | null;
   readonly minutes: number | null;
   readonly goalsScored: number | null;
   readonly assists: number | null;

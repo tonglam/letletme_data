@@ -1,19 +1,15 @@
+import { EntryEventResultOperations } from 'domains/entry-event-result/types';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import {
   EntryEventResultCreateInputs,
   EntryEventResultRepository,
-} from 'src/repositories/entry-event-result/types';
-import {
-  RawEntryEventResult,
-  RawEntryEventResults,
-} from 'src/types/domain/entry-event-result.type';
-import { EntryId } from 'src/types/domain/entry-info.type';
-import { EventId } from 'src/types/domain/event.type';
-
-import { EntryEventResultOperations } from './types';
-import { createDomainError, DomainError, DomainErrorCode } from '../../types/error.type';
-import { getErrorMessage } from '../../utils/error.util';
+} from 'repositories/entry-event-result/types';
+import { RawEntryEventResult, RawEntryEventResults } from 'types/domain/entry-event-result.type';
+import { EntryId } from 'types/domain/entry-info.type';
+import { EventId } from 'types/domain/event.type';
+import { createDomainError, DomainError, DomainErrorCode } from 'types/error.type';
+import { getErrorMessage } from 'utils/error.util';
 
 export const createEntryEventResultOperations = (
   repository: EntryEventResultRepository,

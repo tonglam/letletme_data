@@ -1,3 +1,4 @@
+import { FplLiveDataService } from 'data/types';
 import { createEventLiveOperations } from 'domains/event-live/operation';
 import { EventLiveCache, EventLiveOperations } from 'domains/event-live/types';
 import { PlayerCache } from 'domains/player/types';
@@ -6,23 +7,16 @@ import { pipe } from 'fp-ts/function';
 import * as IO from 'fp-ts/IO';
 import * as RA from 'fp-ts/ReadonlyArray';
 import * as TE from 'fp-ts/TaskEither';
-import { FplLiveDataService } from 'src/data/types';
-import { EventLiveRepository } from 'src/repositories/event-live/types';
-import { EventService } from 'src/services/event/types';
-import { EventLive, EventLives, RawEventLives } from 'src/types/domain/event-live.type';
-import { EventId } from 'src/types/domain/event.type';
-import { PlayerId } from 'src/types/domain/player.type';
-import { TeamId } from 'src/types/domain/team.type';
-import {
-  createDomainError,
-  DataLayerError,
-  DomainErrorCode,
-  ServiceError,
-} from 'src/types/error.type';
-import { enrichEventLives } from 'src/utils/data-enrichment.util';
-import { createServiceIntegrationError, mapDomainErrorToServiceError } from 'src/utils/error.util';
-
-import { EventLiveService, EventLiveServiceOperations } from './types';
+import { EventLiveRepository } from 'repositories/event-live/types';
+import { EventService } from 'services/event/types';
+import { EventLiveService, EventLiveServiceOperations } from 'services/event-live/types';
+import { EventLive, EventLives, RawEventLives } from 'types/domain/event-live.type';
+import { EventId } from 'types/domain/event.type';
+import { PlayerId } from 'types/domain/player.type';
+import { TeamId } from 'types/domain/team.type';
+import { createDomainError, DataLayerError, DomainErrorCode, ServiceError } from 'types/error.type';
+import { enrichEventLives } from 'utils/data-enrichment.util';
+import { createServiceIntegrationError, mapDomainErrorToServiceError } from 'utils/error.util';
 
 const eventLiveServiceOperations = (
   fplDataService: FplLiveDataService,

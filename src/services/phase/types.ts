@@ -1,8 +1,7 @@
 import * as TE from 'fp-ts/TaskEither';
 import { WorkflowResult } from 'services/types';
-import { ServiceError } from 'src/types/error.type';
-
-import type { Phase, PhaseId, Phases } from '../../types/domain/phase.type';
+import { Phase, PhaseId, Phases } from 'types/domain/phase.type';
+import { ServiceError } from 'types/error.type';
 
 export interface PhaseServiceOperations {
   readonly findPhaseById: (id: PhaseId) => TE.TaskEither<ServiceError, Phase>;

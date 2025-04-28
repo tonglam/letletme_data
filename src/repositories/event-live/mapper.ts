@@ -1,42 +1,47 @@
-import { RawEventLive } from 'src/types/domain/event-live.type';
+import {
+  EventLiveCreateInput,
+  DbEventLive,
+  DbEventLiveCreateInput,
+} from 'repositories/event-live/types';
+import { RawEventLive } from 'types/domain/event-live.type';
+import { EventId } from 'types/domain/event.type';
+import { PlayerId } from 'types/domain/player.type';
 
-import { EventLiveCreateInput, PrismaEventLive, PrismaEventLiveCreateInput } from './types';
-
-export const mapPrismaEventLiveToDomain = (prismaEventLive: PrismaEventLive): RawEventLive => ({
-  eventId: prismaEventLive.eventId,
-  elementId: prismaEventLive.elementId,
-  minutes: prismaEventLive.minutes,
-  goalsScored: prismaEventLive.goalsScored,
-  assists: prismaEventLive.assists,
-  cleanSheets: prismaEventLive.cleanSheets,
-  goalsConceded: prismaEventLive.goalsConceded,
-  ownGoals: prismaEventLive.ownGoals,
-  penaltiesSaved: prismaEventLive.penaltiesSaved,
-  penaltiesMissed: prismaEventLive.penaltiesMissed,
-  yellowCards: prismaEventLive.yellowCards,
-  redCards: prismaEventLive.redCards,
-  saves: prismaEventLive.saves,
-  bonus: prismaEventLive.bonus,
-  bps: prismaEventLive.bps,
-  starts: prismaEventLive.starts,
-  expectedGoals: prismaEventLive.expectedGoals,
-  expectedAssists: prismaEventLive.expectedAssists,
-  expectedGoalInvolvements: prismaEventLive.expectedGoalInvolvements,
-  expectedGoalsConceded: prismaEventLive.expectedGoalsConceded,
-  mngWin: prismaEventLive.mngWin,
-  mngDraw: prismaEventLive.mngDraw,
-  mngLoss: prismaEventLive.mngLoss,
-  mngUnderdogWin: prismaEventLive.mngUnderdogWin,
-  mngUnderdogDraw: prismaEventLive.mngUnderdogDraw,
-  mngCleanSheets: prismaEventLive.mngCleanSheets,
-  mngGoalsScored: prismaEventLive.mngGoalsScored,
-  inDreamTeam: prismaEventLive.inDreamTeam,
-  totalPoints: prismaEventLive.totalPoints,
+export const mapDbEventLiveToDomain = (dbEventLive: DbEventLive): RawEventLive => ({
+  eventId: dbEventLive.eventId as EventId,
+  elementId: dbEventLive.elementId as PlayerId,
+  minutes: dbEventLive.minutes,
+  goalsScored: dbEventLive.goalsScored,
+  assists: dbEventLive.assists,
+  cleanSheets: dbEventLive.cleanSheets,
+  goalsConceded: dbEventLive.goalsConceded,
+  ownGoals: dbEventLive.ownGoals,
+  penaltiesSaved: dbEventLive.penaltiesSaved,
+  penaltiesMissed: dbEventLive.penaltiesMissed,
+  yellowCards: dbEventLive.yellowCards,
+  redCards: dbEventLive.redCards,
+  saves: dbEventLive.saves,
+  bonus: dbEventLive.bonus,
+  bps: dbEventLive.bps,
+  starts: dbEventLive.starts,
+  expectedGoals: dbEventLive.expectedGoals,
+  expectedAssists: dbEventLive.expectedAssists,
+  expectedGoalInvolvements: dbEventLive.expectedGoalInvolvements,
+  expectedGoalsConceded: dbEventLive.expectedGoalsConceded,
+  mngWin: dbEventLive.mngWin,
+  mngDraw: dbEventLive.mngDraw,
+  mngLoss: dbEventLive.mngLoss,
+  mngUnderdogWin: dbEventLive.mngUnderdogWin,
+  mngUnderdogDraw: dbEventLive.mngUnderdogDraw,
+  mngCleanSheets: dbEventLive.mngCleanSheets,
+  mngGoalsScored: dbEventLive.mngGoalsScored,
+  inDreamTeam: dbEventLive.inDreamTeam,
+  totalPoints: dbEventLive.totalPoints,
 });
 
-export const mapDomainEventLiveToPrismaCreate = (
+export const mapDomainEventLiveToDbCreate = (
   domainEventLive: EventLiveCreateInput,
-): PrismaEventLiveCreateInput => ({
+): DbEventLiveCreateInput => ({
   eventId: domainEventLive.eventId,
   elementId: domainEventLive.elementId,
   minutes: domainEventLive.minutes,

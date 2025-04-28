@@ -1,8 +1,8 @@
-import { Chip } from 'src/types/base.type';
-import { PickItem } from 'src/types/domain/entry-event-pick.type';
-import { EntryId } from 'src/types/domain/entry-info.type';
-import { EventId } from 'src/types/domain/event.type';
-import { PlayerId } from 'src/types/domain/player.type';
+import { Chip } from 'types/base.type';
+import { PickItem } from 'types/domain/entry-event-pick.type';
+import { EntryId } from 'types/domain/entry-info.type';
+import { EventId } from 'types/domain/event.type';
+import { PlayerId } from 'types/domain/player.type';
 
 export type EntryEventResult = {
   readonly entryId: EntryId;

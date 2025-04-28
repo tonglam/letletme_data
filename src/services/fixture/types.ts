@@ -1,10 +1,10 @@
 import * as TE from 'fp-ts/TaskEither';
 import { WorkflowResult } from 'services/types';
-import { EventFixtures } from 'src/types/domain/event-fixture.type';
-import { EventId } from 'src/types/domain/event.type';
-import { TeamFixtures } from 'src/types/domain/team-fixture.type';
-import { TeamId } from 'src/types/domain/team.type';
-import { ServiceError } from 'src/types/error.type';
+import { EventFixtures } from 'types/domain/event-fixture.type';
+import { EventId } from 'types/domain/event.type';
+import { TeamFixtures } from 'types/domain/team-fixture.type';
+import { TeamId } from 'types/domain/team.type';
+import { ServiceError } from 'types/error.type';
 
 export interface FixtureServiceOperations {
   readonly mapTeamEventFixtures: (

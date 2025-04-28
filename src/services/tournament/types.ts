@@ -1,7 +1,6 @@
 import * as TE from 'fp-ts/TaskEither';
-import { TournamentId } from 'src/types/domain/tournament-info.type';
-
-import type { ServiceError } from '../../types/error.type';
+import { TournamentId } from 'types/domain/tournament-info.type';
+import { ServiceError } from 'types/error.type';
 
 export interface TournamentServiceOperations {
   readonly drawTournamentGroups: (id: TournamentId) => TE.TaskEither<ServiceError, void>;

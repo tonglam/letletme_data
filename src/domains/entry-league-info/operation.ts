@@ -4,12 +4,11 @@ import * as TE from 'fp-ts/TaskEither';
 import {
   EntryLeagueInfoRepository,
   EntryLeagueInfoCreateInput,
-} from 'src/repositories/entry-league-info/types';
-import { EntryLeagueInfo, EntryLeagueInfos } from 'src/types/domain/entry-league-info.type';
-
-import { EntryId } from '../../types/domain/entry-info.type';
-import { createDomainError, DomainError, DomainErrorCode } from '../../types/error.type';
-import { getErrorMessage } from '../../utils/error.util';
+} from 'repositories/entry-league-info/types';
+import { EntryId } from 'types/domain/entry-info.type';
+import { EntryLeagueInfo, EntryLeagueInfos } from 'types/domain/entry-league-info.type';
+import { createDomainError, DomainError, DomainErrorCode } from 'types/error.type';
+import { getErrorMessage } from 'utils/error.util';
 
 export const createEntryLeagueInfoOperations = (
   repository: EntryLeagueInfoRepository,

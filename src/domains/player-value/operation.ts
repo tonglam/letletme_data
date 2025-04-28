@@ -1,14 +1,11 @@
 import { PlayerValueOperations } from 'domains/player-value/types';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import {
-  PlayerValueCreateInputs,
-  PlayerValueRepository,
-} from 'src/repositories/player-value/types';
-import { RawPlayerValues } from 'src/types/domain/player-value.type';
-import { PlayerId } from 'src/types/domain/player.type';
-import { createDomainError, DomainError, DomainErrorCode } from 'src/types/error.type';
-import { getErrorMessage } from 'src/utils/error.util';
+import { PlayerValueCreateInputs, PlayerValueRepository } from 'repositories/player-value/types';
+import { RawPlayerValues } from 'types/domain/player-value.type';
+import { PlayerId } from 'types/domain/player.type';
+import { createDomainError, DomainError, DomainErrorCode } from 'types/error.type';
+import { getErrorMessage } from 'utils/error.util';
 
 export const createPlayerValueOperations = (
   repository: PlayerValueRepository,

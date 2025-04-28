@@ -1,10 +1,10 @@
 import * as TE from 'fp-ts/TaskEither';
 import { WorkflowResult } from 'services/types';
-import { EventLive, EventLives } from 'src/types/domain/event-live.type';
-import { EventId } from 'src/types/domain/event.type';
-import { PlayerId } from 'src/types/domain/player.type';
-import { TeamId } from 'src/types/domain/team.type';
-import { ServiceError } from 'src/types/error.type';
+import { EventLive, EventLives } from 'types/domain/event-live.type';
+import { EventId } from 'types/domain/event.type';
+import { PlayerId } from 'types/domain/player.type';
+import { TeamId } from 'types/domain/team.type';
+import { ServiceError } from 'types/error.type';
 
 export interface EventLiveServiceOperations {
   readonly findEventLives: (eventId: EventId) => TE.TaskEither<ServiceError, EventLives>;

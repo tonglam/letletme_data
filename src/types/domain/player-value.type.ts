@@ -1,8 +1,7 @@
-import { EventId } from 'src/types/domain/event.type';
-import { PlayerId } from 'src/types/domain/player.type';
-
-import { ElementTypeId, ElementTypeName, ValueChangeType } from '../base.type';
-import { TeamId } from './team.type';
+import { ElementTypeId, ValueChangeType, ElementTypeName } from 'types/base.type';
+import { EventId } from 'types/domain/event.type';
+import { PlayerId } from 'types/domain/player.type';
+import { TeamId } from 'types/domain/team.type';
 
 export interface PlayerValue {
   readonly elementId: PlayerId;

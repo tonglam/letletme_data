@@ -2,7 +2,6 @@ import { z } from 'zod';
 
 export const TeamResponseSchema = z
   .object({
-    // Required fields (must exist in API response)
     id: z.number(),
     code: z.number(),
     name: z.string(),

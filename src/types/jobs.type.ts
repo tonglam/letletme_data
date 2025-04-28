@@ -1,4 +1,4 @@
-import { QueueName } from './queues.type';
+import { QueueName } from 'types/queues.type';
 
 export interface BaseJobPayload {
   source?: string;

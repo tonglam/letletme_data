@@ -1,11 +1,10 @@
 import { EventOperations } from 'domains/event/types';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { Events } from 'src/types/domain/event.type';
-
-import { EventCreateInputs, EventRepository } from '../../repositories/event/types';
-import { DomainError, DomainErrorCode, createDomainError } from '../../types/error.type';
-import { getErrorMessage } from '../../utils/error.util';
+import { EventCreateInputs, EventRepository } from 'repositories/event/types';
+import { Events } from 'types/domain/event.type';
+import { DomainError, DomainErrorCode, createDomainError } from 'types/error.type';
+import { getErrorMessage } from 'utils/error.util';
 
 export const createEventOperations = (repository: EventRepository): EventOperations => {
   const saveEvents = (eventInputs: EventCreateInputs): TE.TaskEither<DomainError, Events> =>

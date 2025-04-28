@@ -1,35 +1,29 @@
-import { $Enums as PrismaEnums } from '@prisma/client';
-import { Chip } from 'src/types/base.type';
-import { PickItem, RawEntryEventPick } from 'src/types/domain/entry-event-pick.type';
-import { EntryId } from 'src/types/domain/entry-info.type';
-import { EventId } from 'src/types/domain/event.type';
+import { Chip } from 'types/base.type';
+import { PickItem, RawEntryEventPick } from 'types/domain/entry-event-pick.type';
+import { EntryId } from 'types/domain/entry-info.type';
+import { EventId } from 'types/domain/event.type';
 
-import {
-  EntryEventPickCreateInput,
-  PrismaEntryEventPick,
-  PrismaEntryEventPickCreateInput,
-} from './types';
+import { EntryEventPickCreateInput, DbEntryEventPick, DbEntryEventPickCreateInput } from './types';
 
-export const mapPrismaEntryEventPickToDomain = (
-  prismaEntryEventPick: PrismaEntryEventPick,
+export const mapDbEntryEventPickToDomain = (
+  dbEntryEventPick: DbEntryEventPick,
 ): RawEntryEventPick => ({
-  entryId: prismaEntryEventPick.entryId as EntryId,
-  eventId: prismaEntryEventPick.eventId as EventId,
-  chip: prismaEntryEventPick.chip as Chip,
-  picks: prismaEntryEventPick.picks as PickItem[],
-  transfers: prismaEntryEventPick.transfers as number,
-  transfersCost: prismaEntryEventPick.transfersCost as number,
+  entryId: dbEntryEventPick.entryId as EntryId,
+  eventId: dbEntryEventPick.eventId as EventId,
+  chip: dbEntryEventPick.chip as Chip,
+  picks: dbEntryEventPick.picks as PickItem[],
+  transfers: dbEntryEventPick.transfers as number,
+  transfersCost: dbEntryEventPick.transfersCost as number,
 });
 
-export const mapDomainEntryEventPickToPrismaCreate = (
+export const mapDomainEntryEventPickToDbCreate = (
   domainEntryEventPick: EntryEventPickCreateInput,
-): PrismaEntryEventPickCreateInput => ({
+): DbEntryEventPickCreateInput => ({
   entryId: domainEntryEventPick.entryId,
   eventId: domainEntryEventPick.eventId,
-  chip:
-    domainEntryEventPick.chip === null || domainEntryEventPick.chip === Chip.None
-      ? PrismaEnums.Chip.None
-      : (domainEntryEventPick.chip as unknown as PrismaEnums.Chip),
+  chip: (domainEntryEventPick.chip === null || domainEntryEventPick.chip === Chip.None
+    ? Chip.None
+    : domainEntryEventPick.chip) as DbEntryEventPickCreateInput['chip'],
   picks: domainEntryEventPick.picks,
   transfers: domainEntryEventPick.transfers,
   transfersCost: domainEntryEventPick.transfersCost,

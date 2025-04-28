@@ -1,19 +1,19 @@
-import * as E from 'fp-ts/Either';
-import { pipe } from 'fp-ts/function';
-import * as TE from 'fp-ts/TaskEither';
-import { Logger } from 'pino';
-import { apiConfig } from 'src/configs/api/api.config';
-import { mapClassicLeagueResponseToDomain } from 'src/data/fpl/mappers/league/classic-league.mapper';
+import { apiConfig } from 'configs/api/api.config';
+import { mapClassicLeagueResponseToDomain } from 'data/fpl/mappers/league/classic-league.mapper';
 import {
   ClassicLeagueResponse,
   ClassicLeagueResponseSchema,
-} from 'src/data/fpl/schemas/league/classic-league.schema';
-import { ClassicResultResponses } from 'src/data/fpl/schemas/league/classic-result.schema';
-import { FplClassicLeagueDataService } from 'src/data/types';
-import { HTTPClient } from 'src/infrastructures/http/types';
-import { ClassicLeague, LeagueId } from 'src/types/domain/league.type';
-import { DataLayerError, DataLayerErrorCode } from 'src/types/error.type';
-import { createDataLayerError } from 'src/utils/error.util';
+} from 'data/fpl/schemas/league/classic-league.schema';
+import { ClassicResultResponses } from 'data/fpl/schemas/league/classic-result.schema';
+import { FplClassicLeagueDataService } from 'data/types';
+import * as E from 'fp-ts/Either';
+import { pipe } from 'fp-ts/function';
+import * as TE from 'fp-ts/TaskEither';
+import { HTTPClient } from 'infrastructures/http/types';
+import { Logger } from 'pino';
+import { ClassicLeague, LeagueId } from 'types/domain/league.type';
+import { DataLayerError, DataLayerErrorCode } from 'types/error.type';
+import { createDataLayerError } from 'utils/error.util';
 
 export const createFplClassicLeagueDataService = (
   client: HTTPClient,

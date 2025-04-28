@@ -1,9 +1,7 @@
-import { Prisma } from '@prisma/client';
-import { ElementTypeId, ElementTypeName } from 'src/types/base.type';
-import { EventId } from 'src/types/domain/event.type';
-import { PlayerId } from 'src/types/domain/player.type';
-
-import { TeamId } from './team.type';
+import { ElementTypeId, ElementTypeName } from 'types/base.type';
+import { EventId } from 'types/domain/event.type';
+import { PlayerId } from 'types/domain/player.type';
+import { TeamId } from 'types/domain/team.type';
 
 export interface EventLive {
   readonly eventId: EventId;
@@ -29,10 +27,10 @@ export interface EventLive {
   readonly bonus: number | null;
   readonly bps: number | null;
   readonly starts: boolean | null;
-  readonly expectedGoals: Prisma.Decimal | null;
-  readonly expectedAssists: Prisma.Decimal | null;
-  readonly expectedGoalInvolvements: Prisma.Decimal | null;
-  readonly expectedGoalsConceded: Prisma.Decimal | null;
+  readonly expectedGoals: string | null;
+  readonly expectedAssists: string | null;
+  readonly expectedGoalInvolvements: string | null;
+  readonly expectedGoalsConceded: string | null;
   readonly mngWin: number | null;
   readonly mngDraw: number | null;
   readonly mngLoss: number | null;

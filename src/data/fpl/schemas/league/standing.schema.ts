@@ -1,6 +1,7 @@
-import { ClassicResultResponseSchema } from 'src/data/fpl/schemas/league/classic-result.schema';
-import { H2hResultResponseSchema } from 'src/data/fpl/schemas/league/h2h-result.schema';
 import { z } from 'zod';
+
+import { ClassicResultResponseSchema } from './classic-result.schema';
+import { H2hResultResponseSchema } from './h2h-result.schema';
 
 export const ClassicStandingsResponseSchema = z.object({
   has_next: z.boolean(),

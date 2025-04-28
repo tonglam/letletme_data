@@ -1,8 +1,8 @@
 import * as TE from 'fp-ts/TaskEither';
-import { PlayerStat, PlayerStats } from 'src/types/domain/player-stat.type';
-import { PlayerId, PlayerType } from 'src/types/domain/player.type';
-import { TeamId } from 'src/types/domain/team.type';
-import { ServiceError } from 'src/types/error.type';
+import { PlayerStat, PlayerStats } from 'types/domain/player-stat.type';
+import { PlayerId, PlayerType } from 'types/domain/player.type';
+import { TeamId } from 'types/domain/team.type';
+import { ServiceError } from 'types/error.type';
 
 import type { WorkflowResult } from 'services/types';
 

@@ -1,14 +1,11 @@
-import {
-  PlayerValueTrack,
-  Prisma,
-  PlayerValueTrack as PrismaPlayerValueTrackType,
-} from '@prisma/client';
+import { InferSelectModel, InferInsertModel } from 'drizzle-orm';
 import * as TE from 'fp-ts/TaskEither';
-import { PlayerValueTracks } from 'src/types/domain/player-value-track.type';
-import { DBError } from 'src/types/error.type';
+import * as schema from 'schema/player-value-track';
+import { PlayerValueTrack, PlayerValueTracks } from 'types/domain/player-value-track.type';
+import { DBError } from 'types/error.type';
 
-export type PrismaPlayerValueTrackCreateInput = Prisma.PlayerValueTrackCreateInput;
-export type PrismaPlayerValueTrack = PrismaPlayerValueTrackType;
+export type DbPlayerValueTrack = InferSelectModel<typeof schema.playerValueTracks>;
+export type DbPlayerValueTrackCreateInput = InferInsertModel<typeof schema.playerValueTracks>;
 
 export type PlayerValueTrackCreateInput = Omit<PlayerValueTrack, 'id' | 'createdAt'>;
 export type PlayerValueTrackCreateInputs = readonly PlayerValueTrackCreateInput[];

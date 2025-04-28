@@ -1,8 +1,8 @@
-import { ElementTypeId, ElementTypeName } from 'src/types/base.type';
-import { EntryId } from 'src/types/domain/entry-info.type';
-import { EventId } from 'src/types/domain/event.type';
-import { PlayerId } from 'src/types/domain/player.type';
-import { TeamId } from 'src/types/domain/team.type';
+import { ElementTypeId, ElementTypeName } from 'types/base.type';
+import { EntryId } from 'types/domain/entry-info.type';
+import { EventId } from 'types/domain/event.type';
+import { PlayerId } from 'types/domain/player.type';
+import { TeamId } from 'types/domain/team.type';
 
 export type EntryEventTransfer = {
   readonly entryId: EntryId;

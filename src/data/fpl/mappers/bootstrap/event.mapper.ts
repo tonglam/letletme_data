@@ -1,14 +1,7 @@
+import { EventResponse } from 'data/fpl/schemas/bootstrap/event.schema';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
-import {
-  ChipPlay,
-  Event,
-  EventId,
-  TopElementInfo,
-  validateEventId,
-} from 'src/types/domain/event.type';
-
-import { EventResponse } from '../../schemas/bootstrap/event.schema';
+import { ChipPlay, Event, EventId, TopElementInfo, validateEventId } from 'types/domain/event.type';
 
 const transformChipPlays = (
   apiChipPlays: readonly { chip_name: string; num_played: number }[] | undefined | null,

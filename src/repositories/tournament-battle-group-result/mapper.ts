@@ -1,35 +1,35 @@
 import {
-  PrismaTournamentBattleGroupResult,
-  PrismaTournamentBattleGroupResultCreateInput,
+  DbTournamentBattleGroupResult,
+  DbTournamentBattleGroupResultCreateInput,
   TournamentBattleGroupResultCreateInput,
-} from 'src/repositories/tournament-battle-group-result/types';
-import { EntryId } from 'src/types/domain/entry-info.type';
-import { EventId } from 'src/types/domain/event.type';
-import { TournamentBattleGroupResult } from 'src/types/domain/tournament-battle-group-result.type';
-import { TournamentGroupId } from 'src/types/domain/tournament-group.type';
-import { TournamentId } from 'src/types/domain/tournament-info.type';
+} from 'repositories/tournament-battle-group-result/types';
+import { EntryId } from 'types/domain/entry-info.type';
+import { EventId } from 'types/domain/event.type';
+import { TournamentBattleGroupResult } from 'types/domain/tournament-battle-group-result.type';
+import { TournamentGroupId } from 'types/domain/tournament-group.type';
+import { TournamentId } from 'types/domain/tournament-info.type';
 
-export const mapPrismaTournamentBattleGroupResultToDomain = (
-  prismaTournamentBattleGroupResult: PrismaTournamentBattleGroupResult,
+export const mapDbTournamentBattleGroupResultToDomain = (
+  dbTournamentBattleGroupResult: DbTournamentBattleGroupResult,
 ): TournamentBattleGroupResult => ({
-  tournamentId: prismaTournamentBattleGroupResult.tournamentId as TournamentId,
-  groupId: prismaTournamentBattleGroupResult.groupId as TournamentGroupId,
-  eventId: prismaTournamentBattleGroupResult.eventId as EventId,
-  homeIndex: prismaTournamentBattleGroupResult.homeIndex,
-  homeEntryId: prismaTournamentBattleGroupResult.homeEntryId as EntryId,
-  homeNetPoints: prismaTournamentBattleGroupResult.homeNetPoints,
-  homeRank: prismaTournamentBattleGroupResult.homeRank,
-  homeMatchPoints: prismaTournamentBattleGroupResult.homeMatchPoints,
-  awayIndex: prismaTournamentBattleGroupResult.awayIndex,
-  awayEntryId: prismaTournamentBattleGroupResult.awayEntryId as EntryId,
-  awayNetPoints: prismaTournamentBattleGroupResult.awayNetPoints,
-  awayRank: prismaTournamentBattleGroupResult.awayRank,
-  awayMatchPoints: prismaTournamentBattleGroupResult.awayMatchPoints,
+  tournamentId: dbTournamentBattleGroupResult.tournamentId as TournamentId,
+  groupId: dbTournamentBattleGroupResult.groupId as TournamentGroupId,
+  eventId: dbTournamentBattleGroupResult.eventId as EventId,
+  homeIndex: dbTournamentBattleGroupResult.homeIndex,
+  homeEntryId: dbTournamentBattleGroupResult.homeEntryId as EntryId,
+  homeNetPoints: dbTournamentBattleGroupResult.homeNetPoints,
+  homeRank: dbTournamentBattleGroupResult.homeRank,
+  homeMatchPoints: dbTournamentBattleGroupResult.homeMatchPoints,
+  awayIndex: dbTournamentBattleGroupResult.awayIndex,
+  awayEntryId: dbTournamentBattleGroupResult.awayEntryId as EntryId,
+  awayNetPoints: dbTournamentBattleGroupResult.awayNetPoints,
+  awayRank: dbTournamentBattleGroupResult.awayRank,
+  awayMatchPoints: dbTournamentBattleGroupResult.awayMatchPoints,
 });
 
-export const mapDomainTournamentBattleGroupResultToPrismaCreate = (
+export const mapDomainTournamentBattleGroupResultToDbCreate = (
   domainTournamentBattleGroupResult: TournamentBattleGroupResultCreateInput,
-): PrismaTournamentBattleGroupResultCreateInput => ({
+): DbTournamentBattleGroupResultCreateInput => ({
   tournamentId: domainTournamentBattleGroupResult.tournamentId,
   groupId: domainTournamentBattleGroupResult.groupId,
   eventId: domainTournamentBattleGroupResult.eventId,

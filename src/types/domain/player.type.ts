@@ -1,8 +1,7 @@
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
-import { TeamId } from 'src/types/domain/team.type';
-
-import { Branded, createBrandedType } from '../base.type';
+import { Branded, createBrandedType } from 'types/base.type';
+import { TeamId } from 'types/domain/team.type';
 
 export type PlayerId = Branded<number, 'PlayerId'>;
 

@@ -3,12 +3,12 @@ import { pipe } from 'fp-ts/function';
 import * as RA from 'fp-ts/ReadonlyArray';
 import * as T from 'fp-ts/Task';
 import * as TE from 'fp-ts/TaskEither';
+import { getWorkflowLogger } from 'infrastructures/logger';
 import { FixtureWorkflowsOperations } from 'services/fixture/types';
 import { FixtureService } from 'services/fixture/types';
 import { createWorkflowContext, WorkflowResult } from 'services/types';
-import { getWorkflowLogger } from 'src/infrastructures/logger';
-import { EventId } from 'src/types/domain/event.type';
-import { createServiceError, ServiceError, ServiceErrorCode } from 'src/types/error.type';
+import { EventId } from 'types/domain/event.type';
+import { createServiceError, ServiceError, ServiceErrorCode } from 'types/error.type';
 
 const logger = getWorkflowLogger();
 

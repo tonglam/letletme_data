@@ -1,87 +1,88 @@
-import { PrismaClient } from '@prisma/client';
+import { db } from 'db/index';
+import { eq } from 'drizzle-orm';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import {
-  mapDomainEventToPrismaCreate,
-  mapPrismaEventToDomain,
-} from 'src/repositories/event/mapper';
-import { EventCreateInputs, EventRepository } from 'src/repositories/event/types';
-import { Event, EventId, Events } from 'src/types/domain/event.type';
+import { mapDomainEventToDbCreate, mapDbEventToDomain } from 'repositories/event/mapper';
+import { EventCreateInputs, EventRepository } from 'repositories/event/types';
+import * as schema from 'schema/event';
+import { Event, EventId, Events } from 'types/domain/event.type';
+import { createDBError, DBError, DBErrorCode } from 'types/error.type';
+import { getErrorMessage } from 'utils/error.util';
 
-import { createDBError, DBError, DBErrorCode } from '../../types/error.type';
-
-export const createEventRepository = (prisma: PrismaClient): EventRepository => {
+export const createEventRepository = (): EventRepository => {
   const findById = (id: EventId): TE.TaskEither<DBError, Event> =>
     pipe(
       TE.tryCatch(
-        () => prisma.event.findUnique({ where: { id: Number(id) } }),
+        async () => {
+          const result = await db
+            .select()
+            .from(schema.events)
+            .where(eq(schema.events.id, Number(id)))
+            .limit(1);
+          return mapDbEventToDomain(result[0]);
+        },
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to fetch event by id ${id}: ${error}`,
+            message: `Failed to fetch event by id ${id}: ${getErrorMessage(error)}`,
+            cause: error instanceof Error ? error : undefined,
           }),
-      ),
-      TE.chainW((prismaEventOrNull) =>
-        prismaEventOrNull
-          ? TE.right(mapPrismaEventToDomain(prismaEventOrNull))
-          : TE.left(
-              createDBError({
-                code: DBErrorCode.NOT_FOUND,
-                message: `Event with ID ${id} not found in database`,
-              }),
-            ),
       ),
     );
 
   const findCurrent = (): TE.TaskEither<DBError, Event> =>
     pipe(
       TE.tryCatch(
-        () => prisma.event.findFirst({ where: { isCurrent: true } }),
+        async () => {
+          const result = await db
+            .select()
+            .from(schema.events)
+            .where(eq(schema.events.isCurrent, true))
+            .limit(1);
+          return mapDbEventToDomain(result[0]);
+        },
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to fetch current event (isCurrent: true): ${error}`,
+            message: `Failed to fetch current event (isCurrent: true): ${getErrorMessage(error)}`,
+            cause: error instanceof Error ? error : undefined,
           }),
-      ),
-      TE.chainW((prismaEventOrNull) =>
-        prismaEventOrNull
-          ? TE.right(mapPrismaEventToDomain(prismaEventOrNull))
-          : TE.left(
-              createDBError({
-                code: DBErrorCode.NOT_FOUND,
-                message: 'No event found with isCurrent: true.',
-              }),
-            ),
       ),
     );
 
   const findAll = (): TE.TaskEither<DBError, Events> =>
     pipe(
       TE.tryCatch(
-        () => prisma.event.findMany({ orderBy: { id: 'asc' } }),
+        async () => {
+          const dbEvents = await db.select().from(schema.events).orderBy(schema.events.id);
+          return dbEvents.map(mapDbEventToDomain);
+        },
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to fetch all events: ${error}`,
+            message: `Failed to fetch all events: ${getErrorMessage(error)}`,
+            cause: error instanceof Error ? error : undefined,
           }),
       ),
-      TE.map((prismaEvents) => prismaEvents.map(mapPrismaEventToDomain)),
     );
 
   const saveBatch = (eventInputs: EventCreateInputs): TE.TaskEither<DBError, Events> =>
     pipe(
       TE.tryCatch(
         async () => {
-          const dataToCreate = eventInputs.map(mapDomainEventToPrismaCreate);
-          await prisma.event.createMany({
-            data: dataToCreate,
-            skipDuplicates: true,
-          });
+          const dataToInsert = eventInputs.map(mapDomainEventToDbCreate);
+
+          if (dataToInsert.length === 0) {
+            return;
+          }
+
+          await db.insert(schema.events).values(dataToInsert).onConflictDoNothing();
         },
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to create events in batch: ${error}`,
+            message: `Failed to create events in batch: ${getErrorMessage(error)}`,
+            cause: error instanceof Error ? error : undefined,
           }),
       ),
       TE.chain(() => findAll()),
@@ -90,14 +91,16 @@ export const createEventRepository = (prisma: PrismaClient): EventRepository => 
   const deleteAll = (): TE.TaskEither<DBError, void> =>
     pipe(
       TE.tryCatch(
-        () => prisma.event.deleteMany({}),
+        async () => {
+          await db.delete(schema.events);
+        },
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to delete all events: ${error}`,
+            message: `Failed to delete all events: ${getErrorMessage(error)}`,
+            cause: error instanceof Error ? error : undefined,
           }),
       ),
-      TE.map(() => undefined),
     );
 
   return {

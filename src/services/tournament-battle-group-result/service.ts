@@ -2,16 +2,15 @@ import { pipe } from 'fp-ts/function';
 import * as O from 'fp-ts/Option';
 import { Option } from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
+import { TournamentBattleGroupResultRepository } from 'repositories/tournament-battle-group-result/types';
 import {
   TournamentBattleGroupResultService,
   TournamentBattleGroupResultServiceOperations,
 } from 'services/tournament-battle-group-result/types';
-import { TournamentBattleGroupResultRepository } from 'src/repositories/tournament-battle-group-result/types';
-import { TournamentBattleGroupResults } from 'src/types/domain/tournament-battle-group-result.type';
-import { TournamentId } from 'src/types/domain/tournament-info.type';
-
-import { createDomainError, DomainErrorCode, ServiceError } from '../../types/error.type';
-import { mapDomainErrorToServiceError, mapDBErrorToServiceError } from '../../utils/error.util';
+import { TournamentBattleGroupResults } from 'types/domain/tournament-battle-group-result.type';
+import { TournamentId } from 'types/domain/tournament-info.type';
+import { createDomainError, DomainErrorCode, ServiceError } from 'types/error.type';
+import { mapDomainErrorToServiceError, mapDBErrorToServiceError } from 'utils/error.util';
 
 const tournamentBattleGroupResultServiceOperations = (
   repository: TournamentBattleGroupResultRepository,

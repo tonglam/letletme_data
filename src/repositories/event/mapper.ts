@@ -1,13 +1,11 @@
-import { Prisma } from '@prisma/client';
-import { ChipPlay, Event, EventId, TopElementInfo } from 'src/types/domain/event.type';
-
-import { EventCreateInput, PrismaEvent, PrismaEventCreateInput } from './types';
+import { DbEvent, DbEventInsert, EventCreateInput } from 'repositories/event/types';
+import { ChipPlay, Event, EventId, TopElementInfo } from 'types/domain/event.type';
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function parseChipPlays(data: Prisma.JsonValue): readonly ChipPlay[] {
+function parseChipPlays(data: unknown): readonly ChipPlay[] {
   if (!Array.isArray(data)) {
     return [];
   }
@@ -25,54 +23,47 @@ function parseChipPlays(data: Prisma.JsonValue): readonly ChipPlay[] {
   return validPlays;
 }
 
-function parseTopElementInfo(data: Prisma.JsonValue): TopElementInfo | null {
+function parseTopElementInfo(data: unknown): TopElementInfo | null {
   if (isObject(data) && typeof data.id === 'number' && typeof data.points === 'number') {
     return { id: data.id, points: data.points };
   }
   return null;
 }
 
-export const mapPrismaEventToDomain = (prismaEvent: PrismaEvent): Event => ({
-  id: prismaEvent.id as EventId,
-  name: prismaEvent.name,
-  deadlineTime: prismaEvent.deadlineTime.toISOString(),
-  averageEntryScore: prismaEvent.averageEntryScore,
-  finished: prismaEvent.finished,
-  dataChecked: prismaEvent.dataChecked,
-  highestScore: prismaEvent.highestScore,
-  highestScoringEntry: prismaEvent.highestScoringEntry,
-  isPrevious: prismaEvent.isPrevious,
-  isCurrent: prismaEvent.isCurrent,
-  isNext: prismaEvent.isNext,
-  cupLeaguesCreated: prismaEvent.cupLeaguesCreated,
-  h2hKoMatchesCreated: prismaEvent.h2hKoMatchesCreated,
-  rankedCount: prismaEvent.rankedCount,
-  chipPlays: parseChipPlays(prismaEvent.chipPlays),
-  mostSelected: prismaEvent.mostSelected,
-  mostTransferredIn: prismaEvent.mostTransferredIn,
-  mostCaptained: prismaEvent.mostCaptained,
-  mostViceCaptained: prismaEvent.mostViceCaptained,
-  topElement: prismaEvent.topElement,
-  topElementInfo: parseTopElementInfo(prismaEvent.topElementInfo),
-  transfersMade: prismaEvent.transfersMade,
+export const mapDbEventToDomain = (dbEvent: DbEvent): Event => ({
+  id: dbEvent.id as EventId,
+  name: dbEvent.name,
+  deadlineTime: dbEvent.deadlineTime.toISOString(),
+  averageEntryScore: dbEvent.averageEntryScore,
+  finished: dbEvent.finished,
+  dataChecked: dbEvent.dataChecked,
+  highestScore: dbEvent.highestScore,
+  highestScoringEntry: dbEvent.highestScoringEntry,
+  isPrevious: dbEvent.isPrevious,
+  isCurrent: dbEvent.isCurrent,
+  isNext: dbEvent.isNext,
+  cupLeaguesCreated: dbEvent.cupLeaguesCreated,
+  h2hKoMatchesCreated: dbEvent.h2hKoMatchesCreated,
+  rankedCount: dbEvent.rankedCount,
+  chipPlays: parseChipPlays(dbEvent.chipPlays),
+  mostSelected: dbEvent.mostSelected,
+  mostTransferredIn: dbEvent.mostTransferredIn,
+  mostCaptained: dbEvent.mostCaptained,
+  mostViceCaptained: dbEvent.mostViceCaptained,
+  topElement: dbEvent.topElement,
+  topElementInfo: parseTopElementInfo(dbEvent.topElementInfo),
+  transfersMade: dbEvent.transfersMade,
 });
 
-export const mapDomainEventToPrismaCreate = (
-  domainEvent: EventCreateInput,
-): PrismaEventCreateInput => {
+export const mapDomainEventToDbCreate = (domainEvent: EventCreateInput): DbEventInsert => {
   const chipPlaysInput =
-    domainEvent.chipPlays && domainEvent.chipPlays.length > 0
-      ? (domainEvent.chipPlays as unknown as Prisma.InputJsonValue)
-      : Prisma.JsonNull;
-
-  const topElementInfoInput = domainEvent.topElementInfo
-    ? (domainEvent.topElementInfo as unknown as Prisma.InputJsonValue)
-    : Prisma.JsonNull;
+    domainEvent.chipPlays && domainEvent.chipPlays.length > 0 ? domainEvent.chipPlays : null;
+  const topElementInfoInput = domainEvent.topElementInfo ? domainEvent.topElementInfo : null;
 
   return {
     id: Number(domainEvent.id),
     name: domainEvent.name,
-    deadlineTime: domainEvent.deadlineTime,
+    deadlineTime: new Date(domainEvent.deadlineTime),
     averageEntryScore: domainEvent.averageEntryScore,
     finished: domainEvent.finished,
     dataChecked: domainEvent.dataChecked,
@@ -85,11 +76,11 @@ export const mapDomainEventToPrismaCreate = (
     h2hKoMatchesCreated: domainEvent.h2hKoMatchesCreated,
     rankedCount: domainEvent.rankedCount,
     chipPlays: chipPlaysInput,
-    mostSelected: domainEvent.mostSelected ?? null,
-    mostTransferredIn: domainEvent.mostTransferredIn ?? null,
-    mostCaptained: domainEvent.mostCaptained ?? null,
-    mostViceCaptained: domainEvent.mostViceCaptained ?? null,
-    topElement: domainEvent.topElement ?? null,
+    mostSelected: domainEvent.mostSelected ?? undefined,
+    mostTransferredIn: domainEvent.mostTransferredIn ?? undefined,
+    mostCaptained: domainEvent.mostCaptained ?? undefined,
+    mostViceCaptained: domainEvent.mostViceCaptained ?? undefined,
+    topElement: domainEvent.topElement ?? undefined,
     topElementInfo: topElementInfoInput,
     transfersMade: domainEvent.transfersMade,
   };

@@ -1,12 +1,11 @@
 import { EventLiveOperations } from 'domains/event-live/types';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { EventLiveCreateInputs, EventLiveRepository } from 'src/repositories/event-live/types';
-import { RawEventLives } from 'src/types/domain/event-live.type';
-import { EventId } from 'src/types/domain/event.type';
-
-import { createDomainError, DomainError, DomainErrorCode } from '../../types/error.type';
-import { getErrorMessage } from '../../utils/error.util';
+import { EventLiveCreateInputs, EventLiveRepository } from 'repositories/event-live/types';
+import { RawEventLives } from 'types/domain/event-live.type';
+import { EventId } from 'types/domain/event.type';
+import { createDomainError, DomainError, DomainErrorCode } from 'types/error.type';
+import { getErrorMessage } from 'utils/error.util';
 
 export const createEventLiveOperations = (repository: EventLiveRepository): EventLiveOperations => {
   const saveEventLives = (

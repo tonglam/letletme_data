@@ -1,9 +1,9 @@
 import * as TE from 'fp-ts/TaskEither';
 import { WorkflowResult } from 'services/types';
-import { EntryEventPick } from 'src/types/domain/entry-event-pick.type';
-import { EntryId } from 'src/types/domain/entry-info.type';
-import { EventId } from 'src/types/domain/event.type';
-import { ServiceError } from 'src/types/error.type';
+import { EntryEventPick } from 'types/domain/entry-event-pick.type';
+import { EntryId } from 'types/domain/entry-info.type';
+import { EventId } from 'types/domain/event.type';
+import { ServiceError } from 'types/error.type';
 
 export interface EntryEventPickServiceOperations {
   readonly findByEntryIdAndEventId: (

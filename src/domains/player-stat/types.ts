@@ -1,8 +1,8 @@
+import { CachePrefix, DefaultTTL } from 'configs/cache/cache.config';
 import * as TE from 'fp-ts/TaskEither';
-import { CachePrefix, DefaultTTL } from 'src/configs/cache/cache.config';
-import { PlayerStatCreateInputs } from 'src/repositories/player-stat/types';
-import { PlayerStats, RawPlayerStats } from 'src/types/domain/player-stat.type';
-import { DomainError } from 'src/types/error.type';
+import { PlayerStatCreateInputs } from 'repositories/player-stat/types';
+import { PlayerStats, RawPlayerStats } from 'types/domain/player-stat.type';
+import { DomainError } from 'types/error.type';
 
 export interface PlayerStatCacheConfig {
   readonly keyPrefix: (typeof CachePrefix)[keyof typeof CachePrefix];

@@ -1,6 +1,6 @@
-import { EntryId } from 'src/types/domain/entry-info.type';
-import { LeagueId } from 'src/types/domain/league.type';
-import { TournamentId } from 'src/types/domain/tournament-info.type';
+import { EntryId } from 'types/domain/entry-info.type';
+import { LeagueId } from 'types/domain/league.type';
+import { TournamentId } from 'types/domain/tournament-info.type';
 
 export type TournamentEntry = {
   readonly tournamentId: TournamentId;

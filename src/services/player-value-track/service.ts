@@ -1,26 +1,26 @@
+import { FplBootstrapDataService } from 'data/types';
 import { createPlayerValueTrackOperations } from 'domains/player-value-track/operation';
 import { PlayerValueTrackOperations } from 'domains/player-value-track/types';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import {
+  PlayerValueTrackCreateInputs,
+  PlayerValueTrackRepository,
+} from 'repositories/player-value-track/types';
+import { EventService } from 'services/event/types';
+import {
   PlayerValueTrackService,
   PlayerValueTrackServiceOperations,
 } from 'services/player-value-track/types';
-import { FplBootstrapDataService } from 'src/data/types';
-import {
-  PlayerValueTrackCreateInputs,
-  PlayerValueTrackRepository,
-} from 'src/repositories/player-value-track/types';
-import { EventService } from 'src/services/event/types';
-import { Event } from 'src/types/domain/event.type';
-import { PlayerValueTracks } from 'src/types/domain/player-value-track.type';
+import { Event } from 'types/domain/event.type';
+import { PlayerValueTracks } from 'types/domain/player-value-track.type';
 import {
   DataLayerError,
   ServiceError,
   ServiceErrorCode,
   createServiceError,
-} from 'src/types/error.type';
-import { createServiceIntegrationError, mapDomainErrorToServiceError } from 'src/utils/error.util';
+} from 'types/error.type';
+import { createServiceIntegrationError, mapDomainErrorToServiceError } from 'utils/error.util';
 
 export const playerValueTrackServiceOperations = (
   fplDataService: FplBootstrapDataService,

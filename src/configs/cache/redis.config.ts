@@ -1,4 +1,4 @@
-import { type RedisConnectionConfig } from '../../infrastructures/cache/types';
+import { type RedisConnectionConfig } from 'infrastructures/cache/types';
 
 export const REDIS_CONFIG: RedisConnectionConfig = {
   host: process.env.REDIS_HOST ?? 'localhost',

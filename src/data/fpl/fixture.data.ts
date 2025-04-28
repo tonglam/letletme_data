@@ -1,20 +1,19 @@
-import * as E from 'fp-ts/Either';
-import { pipe } from 'fp-ts/function';
-import * as TE from 'fp-ts/TaskEither';
-import { Logger } from 'pino';
+import { apiConfig } from 'configs/api/api.config';
+import { mapEventFixtureResponseToDomain } from 'data/fpl/mappers/fixture/fixture.mapper';
 import {
   EventFixturesResponse,
   EventFixturesResponseSchema,
-} from 'src/data/fpl/schemas/fixture/fixture.schema';
-import { RawEventFixtures } from 'src/types/domain/event-fixture.type';
-import { EventId } from 'src/types/domain/event.type';
-import { DataLayerError, DataLayerErrorCode } from 'src/types/error.type';
-import { createDataLayerError } from 'src/utils/error.util';
-
-import { apiConfig } from '../../configs/api/api.config';
-import { HTTPClient } from '../../infrastructures/http';
-import { FplFixtureDataService } from '../types';
-import { mapEventFixtureResponseToDomain } from './mappers/fixture/fixture.mapper';
+} from 'data/fpl/schemas/fixture/fixture.schema';
+import { FplFixtureDataService } from 'data/types';
+import * as E from 'fp-ts/Either';
+import { pipe } from 'fp-ts/function';
+import * as TE from 'fp-ts/TaskEither';
+import { HTTPClient } from 'infrastructures/http';
+import { Logger } from 'pino';
+import { RawEventFixtures } from 'types/domain/event-fixture.type';
+import { EventId } from 'types/domain/event.type';
+import { DataLayerError, DataLayerErrorCode } from 'types/error.type';
+import { createDataLayerError } from 'utils/error.util';
 
 export const createFplFixtureDataService = (
   client: HTTPClient,

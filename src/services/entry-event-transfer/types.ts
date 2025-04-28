@@ -1,9 +1,9 @@
 import * as TE from 'fp-ts/TaskEither';
 import { WorkflowResult } from 'services/types';
-import { EntryEventTransfers } from 'src/types/domain/entry-event-transfer.type';
-import { EntryId } from 'src/types/domain/entry-info.type';
-import { EventId } from 'src/types/domain/event.type';
-import { ServiceError } from 'src/types/error.type';
+import { EntryEventTransfers } from 'types/domain/entry-event-transfer.type';
+import { EntryId } from 'types/domain/entry-info.type';
+import { EventId } from 'types/domain/event.type';
+import { ServiceError } from 'types/error.type';
 
 export interface EntryEventTransferServiceOperations {
   readonly findByEntryIdAndEventId: (

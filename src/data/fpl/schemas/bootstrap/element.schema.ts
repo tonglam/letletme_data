@@ -3,7 +3,6 @@ import { z } from 'zod';
 
 export const ElementResponseSchema = z
   .object({
-    // Core fields needed for players.type.ts
     id: z.number(),
     code: z.number(),
     element_type: z.number(),
@@ -15,8 +14,6 @@ export const ElementResponseSchema = z
     cost_change_start: z.number(),
     team_code: z.number(),
     status: z.nativeEnum(ElementStatus),
-
-    // Fields needed for player-stats.type.ts
     minutes: z.number().default(0),
     goals_scored: z.number().default(0),
     assists: z.number().default(0),
@@ -57,16 +54,12 @@ export const ElementResponseSchema = z
     mng_underdog_draw: z.number().default(0),
     mng_clean_sheets: z.number().default(0),
     mng_goals_scored: z.number().default(0),
-
-    // Fields needed for player-value.type.ts
     value_form: z.string().nullable(),
     value_season: z.string().nullable(),
     transfers_in: z.number().default(0),
     transfers_out: z.number().default(0),
     transfers_in_event: z.number().default(0),
     transfers_out_event: z.number().default(0),
-
-    // Fields needed for player-value-track.type.ts
     chance_of_playing_this_round: z.number().nullable(),
     chance_of_playing_next_round: z.number().nullable(),
     selected_by_percent: z.string().nullable(),

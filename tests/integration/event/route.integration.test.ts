@@ -5,25 +5,40 @@ import { Logger } from 'pino';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-// Use the generic setup
-
-// Import the SHARED redis client used by the application
-
-// Specific imports for this test suite
+// Configs
 import { eventRouter } from '../../../src/api/event/route';
-import { CachePrefix } from '../../../src/configs/cache/cache.config';
+import { CachePrefix, DefaultTTL } from '../../../src/configs/cache/cache.config';
+// API
+// Data Services
 import { createFplBootstrapDataService } from '../../../src/data/fpl/bootstrap.data';
-import { FplBootstrapDataService } from '../../../src/data/types';
+import { createFplFixtureDataService } from '../../../src/data/fpl/fixture.data';
+import { FplBootstrapDataService, FplFixtureDataService } from '../../../src/data/types';
+// Domains (Caches)
 import { createEventCache } from '../../../src/domains/event/cache';
 import { EventCache } from '../../../src/domains/event/types';
+import { createEventFixtureCache } from '../../../src/domains/event-fixture/cache';
+import { EventFixtureCache } from '../../../src/domains/event-fixture/types';
+import { createTeamCache } from '../../../src/domains/team/cache';
+import { TeamCache } from '../../../src/domains/team/types';
+import { createTeamFixtureCache } from '../../../src/domains/team-fixture/cache';
+import { TeamFixtureCache } from '../../../src/domains/team-fixture/types';
+// Infrastructures
 import { redisClient } from '../../../src/infrastructures/cache/client';
 import { HTTPClient } from '../../../src/infrastructures/http';
+// Repositories
 import { createEventRepository } from '../../../src/repositories/event/repository';
 import { EventRepository } from '../../../src/repositories/event/types';
+import { createEventFixtureRepository } from '../../../src/repositories/event-fixture/repository';
+import { EventFixtureRepository } from '../../../src/repositories/event-fixture/types';
+// Services
 import { createEventService } from '../../../src/services/event/service';
 import { EventService } from '../../../src/services/event/types';
+import { createFixtureService } from '../../../src/services/fixture/service';
+import { FixtureService } from '../../../src/services/fixture/types';
+// Domain Types
 import { Event, EventId } from '../../../src/types/domain/event.type';
 import { APIErrorCode } from '../../../src/types/error.type';
+// Test Setup
 import {
   IntegrationTestSetupResult,
   setupIntegrationTest,
@@ -36,12 +51,22 @@ describe('Event Routes Integration Tests', () => {
   let prisma: PrismaClient;
   let logger: Logger;
   let httpClient: HTTPClient;
+  // Event related dependencies
   let eventRepository: EventRepository;
   let eventCache: EventCache;
-  let fplDataService: FplBootstrapDataService;
+  let fplBootstrapDataService: FplBootstrapDataService;
   let eventService: EventService;
+  // Fixture related dependencies needed for FixtureService
+  let fplFixtureDataService: FplFixtureDataService;
+  let eventFixtureRepository: EventFixtureRepository;
+  let eventFixtureCache: EventFixtureCache;
+  let teamFixtureCache: TeamFixtureCache;
+  let teamCache: TeamCache;
+  let fixtureService: FixtureService;
 
-  const cachePrefix = CachePrefix.EVENT;
+  const eventCachePrefix = CachePrefix.EVENT;
+  const fixtureCachePrefix = CachePrefix.FIXTURE;
+  const teamCachePrefix = CachePrefix.TEAM;
   const testSeason = '2425';
 
   beforeAll(async () => {
@@ -50,20 +75,57 @@ describe('Event Routes Integration Tests', () => {
     logger = setup.logger;
     httpClient = setup.httpClient;
 
-    // Ping shared client (optional)
+    // Ping redis
     try {
       await redisClient.ping();
     } catch (error) {
-      logger.error({ err: error }, 'Shared redisClient ping failed in beforeAll.');
+      logger.error({ err: error }, 'Redis ping failed in beforeAll.');
     }
 
-    eventRepository = createEventRepository(prisma);
+    // Instantiate Event dependencies
+    eventRepository = createEventRepository(); // Corrected: no args
     eventCache = createEventCache({
-      keyPrefix: cachePrefix,
+      keyPrefix: eventCachePrefix,
       season: testSeason,
+      ttlSeconds: DefaultTTL.EVENT, // Corrected: added ttlSeconds
     });
-    fplDataService = createFplBootstrapDataService(httpClient, logger);
-    eventService = createEventService(fplDataService, eventRepository, eventCache);
+    fplBootstrapDataService = createFplBootstrapDataService(httpClient, logger);
+
+    // Instantiate Fixture dependencies
+    fplFixtureDataService = createFplFixtureDataService(httpClient, logger);
+    eventFixtureRepository = createEventFixtureRepository(prisma);
+    eventFixtureCache = createEventFixtureCache({
+      keyPrefix: fixtureCachePrefix,
+      season: testSeason,
+      ttlSeconds: DefaultTTL.FIXTURE,
+    });
+    teamFixtureCache = createTeamFixtureCache({
+      keyPrefix: fixtureCachePrefix,
+      season: testSeason,
+      ttlSeconds: DefaultTTL.FIXTURE,
+    });
+    teamCache = createTeamCache({
+      keyPrefix: teamCachePrefix,
+      season: testSeason,
+      ttlSeconds: DefaultTTL.TEAM,
+    });
+
+    // Instantiate FixtureService with actual dependencies
+    fixtureService = createFixtureService(
+      fplFixtureDataService,
+      eventFixtureRepository,
+      eventFixtureCache,
+      teamFixtureCache,
+      teamCache,
+    );
+
+    // Instantiate EventService with the actual fixtureService
+    eventService = createEventService(
+      fplBootstrapDataService,
+      fixtureService,
+      eventRepository,
+      eventCache,
+    ); // Corrected: added fixtureService
 
     app = express();
     app.use(express.json());
@@ -192,7 +254,7 @@ describe('Event Routes Integration Tests', () => {
   it('POST /events/sync should trigger synchronization and return success', async () => {
     // Clear cache and DB before testing sync specifically
     await prisma.event.deleteMany({});
-    const keys = await redisClient.keys(`${cachePrefix}::${testSeason}*`);
+    const keys = await redisClient.keys(`${eventCachePrefix}::${testSeason}*`);
     if (keys.length > 0) {
       await redisClient.del(keys);
     }

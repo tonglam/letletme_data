@@ -1,16 +1,13 @@
-import { Prisma, EventFixture as PrismaEventFixtureType } from '@prisma/client';
+import { InferInsertModel, InferSelectModel } from 'drizzle-orm';
 import * as TE from 'fp-ts/TaskEither';
-import {
-  EventFixtureId,
-  RawEventFixture,
-  RawEventFixtures,
-} from 'src/types/domain/event-fixture.type';
-import { EventId } from 'src/types/domain/event.type';
-import { TeamId } from 'src/types/domain/team.type';
-import { DBError } from 'src/types/error.type';
+import * as schema from 'schema/event-fixture';
+import { EventFixtureId, RawEventFixture, RawEventFixtures } from 'types/domain/event-fixture.type';
+import { EventId } from 'types/domain/event.type';
+import { TeamId } from 'types/domain/team.type';
+import { DBError } from 'types/error.type';
 
-export type PrismaEventFixtureCreateInput = Prisma.EventFixtureCreateInput;
-export type PrismaEventFixture = PrismaEventFixtureType;
+export type DbEventFixture = InferSelectModel<typeof schema.eventFixtures>;
+export type DbEventFixtureCreateInput = InferInsertModel<typeof schema.eventFixtures>;
 
 export type EventFixtureCreateInput = Omit<RawEventFixture, 'id'> & { id: EventFixtureId };
 export type EventFixtureCreateInputs = readonly EventFixtureCreateInput[];

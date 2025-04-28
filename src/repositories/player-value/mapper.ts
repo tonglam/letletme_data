@@ -1,33 +1,31 @@
-import { PlayerValue as PrismaPlayerValueType } from '@prisma/client';
 import {
+  DbPlayerValue,
+  DbPlayerValueCreateInput,
   PlayerValueCreateInput,
-  PrismaPlayerValueCreateInput,
-} from 'src/repositories/player-value/types';
-import { ElementTypeId, ValueChangeType } from 'src/types/base.type';
-import { EventId } from 'src/types/domain/event.type';
-import { RawPlayerValue } from 'src/types/domain/player-value.type';
-import { PlayerId } from 'src/types/domain/player.type';
+} from 'repositories/player-value/types';
+import { ElementTypeId, ValueChangeType } from 'types/base.type';
+import { EventId } from 'types/domain/event.type';
+import { RawPlayerValue } from 'types/domain/player-value.type';
+import { PlayerId } from 'types/domain/player.type';
 
-export const mapPrismaPlayerValueToDomain = (
-  prismaPlayerValue: PrismaPlayerValueType,
-): RawPlayerValue => ({
-  elementId: prismaPlayerValue.elementId as PlayerId,
-  elementType: prismaPlayerValue.elementType as ElementTypeId,
-  eventId: prismaPlayerValue.eventId as EventId,
-  value: prismaPlayerValue.value,
-  changeDate: prismaPlayerValue.changeDate,
-  changeType: prismaPlayerValue.changeType as ValueChangeType,
-  lastValue: prismaPlayerValue.lastValue,
+export const mapDbPlayerValueToDomain = (dbPlayerValue: DbPlayerValue): RawPlayerValue => ({
+  elementId: dbPlayerValue.elementId as PlayerId,
+  elementType: dbPlayerValue.elementType as ElementTypeId,
+  eventId: dbPlayerValue.eventId as EventId,
+  value: dbPlayerValue.value,
+  changeDate: dbPlayerValue.changeDate,
+  changeType: dbPlayerValue.changeType as ValueChangeType,
+  lastValue: dbPlayerValue.lastValue,
 });
 
 export const mapDomainPlayerValueToPrismaCreate = (
   domainPlayerValue: PlayerValueCreateInput,
-): PrismaPlayerValueCreateInput => ({
+): DbPlayerValueCreateInput => ({
   elementId: domainPlayerValue.elementId,
   elementType: domainPlayerValue.elementType,
   eventId: domainPlayerValue.eventId,
   value: domainPlayerValue.value,
   changeDate: domainPlayerValue.changeDate,
-  changeType: domainPlayerValue.changeType,
+  changeType: domainPlayerValue.changeType as unknown as DbPlayerValueCreateInput['changeType'],
   lastValue: domainPlayerValue.lastValue,
 });

@@ -1,11 +1,10 @@
 import { EntryInfoOperations } from 'domains/entry-info/types';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-
-import { EntryInfoRepository } from '../../repositories/entry-info/types';
-import { EntryId, EntryInfo, EntryInfos } from '../../types/domain/entry-info.type';
-import { createDomainError, DomainError, DomainErrorCode } from '../../types/error.type';
-import { getErrorMessage } from '../../utils/error.util';
+import { EntryInfoRepository } from 'repositories/entry-info/types';
+import { EntryId, EntryInfo, EntryInfos } from 'types/domain/entry-info.type';
+import { createDomainError, DomainError, DomainErrorCode } from 'types/error.type';
+import { getErrorMessage } from 'utils/error.util';
 
 export const createEntryInfoOperations = (repository: EntryInfoRepository): EntryInfoOperations => {
   const findById = (id: EntryId): TE.TaskEither<DomainError, EntryInfo> =>

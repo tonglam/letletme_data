@@ -1,40 +1,40 @@
 import {
-  PrismaTournamentGroup,
-  PrismaTournamentGroupCreateInput,
   TournamentGroupCreateInput,
-} from 'src/repositories/tournament-group/types';
-import { EntryId } from 'src/types/domain/entry-info.type';
-import { EventId } from 'src/types/domain/event.type';
-import { TournamentGroupId } from 'src/types/domain/tournament-group.type';
-import { TournamentGroup } from 'src/types/domain/tournament-group.type';
-import { TournamentId } from 'src/types/domain/tournament-info.type';
+  DbTournamentGroup,
+  DbTournamentGroupCreateInput,
+} from 'repositories/tournament-group/types';
+import { EntryId } from 'types/domain/entry-info.type';
+import { EventId } from 'types/domain/event.type';
+import { TournamentGroupId } from 'types/domain/tournament-group.type';
+import { TournamentGroup } from 'types/domain/tournament-group.type';
+import { TournamentId } from 'types/domain/tournament-info.type';
 
-export const mapPrismaTournamentGroupToDomain = (
-  prismaTournamentGroup: PrismaTournamentGroup,
+export const mapDbTournamentGroupToDomain = (
+  dbTournamentGroup: DbTournamentGroup,
 ): TournamentGroup => ({
-  tournamentId: prismaTournamentGroup.tournamentId as TournamentId,
-  groupId: prismaTournamentGroup.groupId as TournamentGroupId,
-  groupName: prismaTournamentGroup.groupName,
-  groupIndex: prismaTournamentGroup.groupIndex,
-  entryId: prismaTournamentGroup.entryId as EntryId,
-  startedEventId: prismaTournamentGroup.startedEventId as EventId | null,
-  endedEventId: prismaTournamentGroup.endedEventId as EventId | null,
-  groupPoints: prismaTournamentGroup.groupPoints ?? 0,
-  groupRank: prismaTournamentGroup.groupRank ?? 0,
-  played: prismaTournamentGroup.played ?? 0,
-  won: prismaTournamentGroup.won ?? 0,
-  drawn: prismaTournamentGroup.drawn ?? 0,
-  lost: prismaTournamentGroup.lost ?? 0,
-  totalPoints: prismaTournamentGroup.totalPoints ?? 0,
-  totalTransfersCost: prismaTournamentGroup.totalTransfersCost ?? 0,
-  totalNetPoints: prismaTournamentGroup.totalNetPoints ?? 0,
-  qualified: prismaTournamentGroup.qualified ?? 0,
-  overallRank: prismaTournamentGroup.overallRank ?? 0,
+  tournamentId: dbTournamentGroup.tournamentId as TournamentId,
+  groupId: dbTournamentGroup.groupId as TournamentGroupId,
+  groupName: dbTournamentGroup.groupName,
+  groupIndex: dbTournamentGroup.groupIndex,
+  entryId: dbTournamentGroup.entryId as EntryId,
+  startedEventId: dbTournamentGroup.startedEventId as EventId | null,
+  endedEventId: dbTournamentGroup.endedEventId as EventId | null,
+  groupPoints: dbTournamentGroup.groupPoints ?? 0,
+  groupRank: dbTournamentGroup.groupRank ?? 0,
+  played: dbTournamentGroup.played ?? 0,
+  won: dbTournamentGroup.won ?? 0,
+  drawn: dbTournamentGroup.drawn ?? 0,
+  lost: dbTournamentGroup.lost ?? 0,
+  totalPoints: dbTournamentGroup.totalPoints ?? 0,
+  totalTransfersCost: dbTournamentGroup.totalTransfersCost ?? 0,
+  totalNetPoints: dbTournamentGroup.totalNetPoints ?? 0,
+  qualified: dbTournamentGroup.qualified ?? 0,
+  overallRank: dbTournamentGroup.overallRank ?? 0,
 });
 
-export const mapDomainTournamentGroupToPrismaCreate = (
+export const mapDomainTournamentGroupToDbCreate = (
   domainTournamentGroup: TournamentGroupCreateInput,
-): PrismaTournamentGroupCreateInput => ({
+): DbTournamentGroupCreateInput => ({
   tournamentId: domainTournamentGroup.tournamentId,
   groupId: domainTournamentGroup.groupId,
   groupName: domainTournamentGroup.groupName,

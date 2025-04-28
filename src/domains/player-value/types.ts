@@ -1,9 +1,9 @@
+import { CachePrefix, DefaultTTL } from 'configs/cache/cache.config';
 import * as TE from 'fp-ts/TaskEither';
-import { CachePrefix, DefaultTTL } from 'src/configs/cache/cache.config';
-import { PlayerValueCreateInputs } from 'src/repositories/player-value/types';
-import { PlayerValues, RawPlayerValues } from 'src/types/domain/player-value.type';
-import { PlayerId } from 'src/types/domain/player.type';
-import { DomainError } from 'src/types/error.type';
+import { PlayerValueCreateInputs } from 'repositories/player-value/types';
+import { PlayerValues, RawPlayerValues } from 'types/domain/player-value.type';
+import { PlayerId } from 'types/domain/player.type';
+import { DomainError } from 'types/error.type';
 
 export type PlayerValueCacheConfig = {
   keyPrefix: (typeof CachePrefix)[keyof typeof CachePrefix];

@@ -8,10 +8,10 @@ import {
   LeagueType,
   TournamentMode,
   TournamentState,
-} from 'src/types/base.type';
-import { EntryId } from 'src/types/domain/entry-info.type';
-import { EventId } from 'src/types/domain/event.type';
-import { LeagueId } from 'src/types/domain/league.type';
+} from 'types/base.type';
+import { EntryId } from 'types/domain/entry-info.type';
+import { EventId } from 'types/domain/event.type';
+import { LeagueId } from 'types/domain/league.type';
 
 export type TournamentId = Branded<number, 'TournamentId'>;
 

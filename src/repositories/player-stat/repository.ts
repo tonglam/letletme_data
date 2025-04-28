@@ -1,40 +1,44 @@
-import { PrismaClient, PlayerStat as PrismaPlayerStatType } from '@prisma/client';
+import { db } from 'db/index';
+import { asc, eq, sql } from 'drizzle-orm';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import {
-  mapDomainStatToPrismaCreate,
-  mapPrismaPlayerStatToDomain,
-} from 'src/repositories/player-stat/mapper';
-import { PlayerStatCreateInputs, PlayerStatRepository } from 'src/repositories/player-stat/types';
-import { RawPlayerStats } from 'src/types/domain/player-stat.type';
-import { createDBError, DBError, DBErrorCode } from 'src/types/error.type';
+import { mapDomainStatToDbCreate, mapDbPlayerStatToDomain } from 'repositories/player-stat/mapper';
+import { PlayerStatCreateInputs, PlayerStatRepository } from 'repositories/player-stat/types';
+import * as schema from 'schema/player-stat';
+import { RawPlayerStats } from 'types/domain/player-stat.type';
+import { createDBError, DBError, DBErrorCode } from 'types/error.type';
+import { getErrorMessage } from 'utils/error.util';
 
-export const createPlayerStatRepository = (prisma: PrismaClient): PlayerStatRepository => {
+export const createPlayerStatRepository = (): PlayerStatRepository => {
   const findLatest = (): TE.TaskEither<DBError, RawPlayerStats> =>
     pipe(
       TE.tryCatch(
         async () => {
-          const maxEventResult = await prisma.playerStat.aggregate({
-            _max: { eventId: true },
-          });
-          const latestEvent = maxEventResult._max.eventId;
+          const maxEventResult = await db
+            .select({
+              _max: sql<number>`max(${schema.playerStats.eventId})`.as('_max'),
+            })
+            .from(schema.playerStats);
+          const latestEvent = maxEventResult[0]._max;
 
           if (latestEvent === null) {
             return [];
           }
 
-          return prisma.playerStat.findMany({
-            where: { eventId: latestEvent },
-            orderBy: { elementId: 'asc' },
-          });
+          const result = await db
+            .select()
+            .from(schema.playerStats)
+            .where(eq(schema.playerStats.eventId, latestEvent))
+            .orderBy(asc(schema.playerStats.elementId));
+          return result.map(mapDbPlayerStatToDomain);
         },
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to fetch latest player stats: ${error}`,
+            message: `Failed to fetch latest player stats: ${getErrorMessage(error)}`,
+            cause: error instanceof Error ? error : undefined,
           }),
       ),
-      TE.map((playerStats: PrismaPlayerStatType[]) => playerStats.map(mapPrismaPlayerStatToDomain)),
     );
 
   const saveLatest = (
@@ -43,16 +47,18 @@ export const createPlayerStatRepository = (prisma: PrismaClient): PlayerStatRepo
     pipe(
       TE.tryCatch(
         async () => {
-          const dataToCreate = playerStatInputs.map(mapDomainStatToPrismaCreate);
-          await prisma.playerStat.createMany({
-            data: dataToCreate,
-            skipDuplicates: true,
-          });
+          const dataToCreate = playerStatInputs.map(mapDomainStatToDbCreate);
+          await db
+            .insert(schema.playerStats)
+            .values(dataToCreate)
+            .onConflictDoNothing({
+              target: [schema.playerStats.eventId, schema.playerStats.elementId],
+            });
         },
         (error) =>
           createDBError({
             code: DBErrorCode.OPERATION_ERROR,
-            message: 'Failed saveBatch for PlayerStat',
+            message: `Failed saveBatch for PlayerStat: ${getErrorMessage(error)}`,
             cause: error instanceof Error ? error : undefined,
           }),
       ),
@@ -63,26 +69,25 @@ export const createPlayerStatRepository = (prisma: PrismaClient): PlayerStatRepo
     pipe(
       TE.tryCatch(
         async () => {
-          const maxEventResult = await prisma.playerStat.aggregate({
-            _max: { eventId: true },
-          });
-          const latestEvent = maxEventResult._max.eventId;
+          const maxEventResult = await db
+            .select({
+              _max: sql<number>`max(${schema.playerStats.eventId})`.as('_max'),
+            })
+            .from(schema.playerStats);
+          const latestEvent = maxEventResult[0]._max;
 
           if (latestEvent === null) {
             return;
           }
-          await prisma.playerStat.deleteMany({
-            where: { eventId: latestEvent },
-          });
+          await db.delete(schema.playerStats).where(eq(schema.playerStats.eventId, latestEvent));
         },
         (error) =>
           createDBError({
             code: DBErrorCode.OPERATION_ERROR,
-            message: 'Failed deleteLatest for PlayerStat',
+            message: `Failed deleteLatest for PlayerStat: ${getErrorMessage(error)}`,
             cause: error instanceof Error ? error : undefined,
           }),
       ),
-      TE.map(() => undefined),
     );
 
   return {

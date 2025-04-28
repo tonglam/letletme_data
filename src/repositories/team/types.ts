@@ -1,11 +1,11 @@
-import { Prisma, Team as PrismaTeamType } from '@prisma/client';
+import { InferSelectModel, InferInsertModel } from 'drizzle-orm';
 import * as TE from 'fp-ts/TaskEither';
-import { DBError } from 'src/types/error.type';
+import * as schema from 'schema/team';
+import { Team, TeamId, Teams } from 'types/domain/team.type';
+import { DBError } from 'types/error.type';
 
-import { Team, TeamId, Teams } from '../../types/domain/team.type';
-
-export type PrismaTeamCreateInput = Prisma.TeamCreateInput;
-export type PrismaTeam = PrismaTeamType;
+export type DbTeam = InferSelectModel<typeof schema.teams>;
+export type DbTeamCreateInput = InferInsertModel<typeof schema.teams>;
 
 export type TeamCreateInput = Omit<Team, 'id'> & { id: TeamId };
 export type TeamCreateInputs = readonly TeamCreateInput[];

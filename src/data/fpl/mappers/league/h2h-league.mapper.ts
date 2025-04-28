@@ -1,9 +1,9 @@
+import { H2hLeagueResponse } from 'data/fpl/schemas/league/h2h-league.schema';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
-import { H2hLeagueResponse } from 'src/data/fpl/schemas/league/h2h-league.schema';
-import { LeagueType } from 'src/types/base.type';
-import { EntryId } from 'src/types/domain/entry-info.type';
-import { H2hLeague, LeagueId } from 'src/types/domain/league.type';
+import { LeagueType } from 'types/base.type';
+import { EntryId } from 'types/domain/entry-info.type';
+import { H2hLeague, LeagueId } from 'types/domain/league.type';
 
 export const mapH2hLeagueResponseToDomain = (
   leagueId: LeagueId,

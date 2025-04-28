@@ -1,23 +1,17 @@
+import { FplBootstrapDataService } from 'data/types';
 import { createPlayerOperations } from 'domains/player/operation';
 import { PlayerCache, PlayerOperations } from 'domains/player/types';
 import { TeamCache } from 'domains/team/types';
 import { pipe } from 'fp-ts/function';
 import * as RA from 'fp-ts/ReadonlyArray';
 import * as TE from 'fp-ts/TaskEither';
-import { FplBootstrapDataService } from 'src/data/types';
-import { PlayerRepository } from 'src/repositories/player/types';
-import { Player, PlayerId, Players, PlayerType, RawPlayers } from 'src/types/domain/player.type';
-import { TeamId } from 'src/types/domain/team.type';
-import {
-  createDomainError,
-  DataLayerError,
-  DomainErrorCode,
-  ServiceError,
-} from 'src/types/error.type';
-import { enrichPlayers } from 'src/utils/data-enrichment.util';
-import { createServiceIntegrationError, mapDomainErrorToServiceError } from 'src/utils/error.util';
-
-import { PlayerService, PlayerServiceOperations } from './types';
+import { PlayerRepository } from 'repositories/player/types';
+import { PlayerService, PlayerServiceOperations } from 'services/player/types';
+import { Player, PlayerId, Players, PlayerType, RawPlayers } from 'types/domain/player.type';
+import { TeamId } from 'types/domain/team.type';
+import { createDomainError, DataLayerError, DomainErrorCode, ServiceError } from 'types/error.type';
+import { enrichPlayers } from 'utils/data-enrichment.util';
+import { createServiceIntegrationError, mapDomainErrorToServiceError } from 'utils/error.util';
 
 const playerServiceOperations = (
   fplDataService: FplBootstrapDataService,

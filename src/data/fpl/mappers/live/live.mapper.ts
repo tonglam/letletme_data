@@ -1,12 +1,11 @@
+import { LiveResponse } from 'data/fpl/schemas/live/live.schema';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as O from 'fp-ts/Option';
-import { RawEventLive } from 'src/types/domain/event-live.type';
-import { EventId } from 'src/types/domain/event.type';
-import { PlayerId, validatePlayerId } from 'src/types/domain/player.type';
-import { safeStringToDecimal } from 'src/utils/common.util';
-
-import { LiveResponse } from '../../schemas/live/live.schema';
+import { RawEventLive } from 'types/domain/event-live.type';
+import { EventId } from 'types/domain/event.type';
+import { PlayerId, validatePlayerId } from 'types/domain/player.type';
+import { safeStringToDecimal } from 'utils/common.util';
 
 export const mapEventLiveResponseToDomain = (
   event: number,

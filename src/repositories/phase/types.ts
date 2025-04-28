@@ -1,11 +1,11 @@
-import { Prisma, Phase as PrismaPhaseType } from '@prisma/client';
+import { InferInsertModel, InferSelectModel } from 'drizzle-orm';
 import * as TE from 'fp-ts/TaskEither';
-import { DBError } from 'src/types/error.type';
+import * as schema from 'schema/phase';
+import { Phase, PhaseId, Phases } from 'types/domain/phase.type';
+import { DBError } from 'types/error.type';
 
-import { Phase, PhaseId, Phases } from '../../types/domain/phase.type';
-
-export type PrismaPhaseCreateInput = Prisma.PhaseCreateInput;
-export type PrismaPhase = PrismaPhaseType;
+export type DbPhase = InferSelectModel<typeof schema.phases>;
+export type DbPhaseCreateInput = InferInsertModel<typeof schema.phases>;
 
 export type PhaseCreateInput = Omit<Phase, 'id'> & { id: PhaseId };
 export type PhaseCreateInputs = readonly PhaseCreateInput[];

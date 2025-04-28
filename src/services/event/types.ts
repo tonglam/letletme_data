@@ -1,8 +1,7 @@
 import * as TE from 'fp-ts/TaskEither';
 import { WorkflowResult } from 'services/types';
-
-import type { Event, EventId, Events } from '../../types/domain/event.type';
-import type { ServiceError } from '../../types/error.type';
+import { Event, EventId, Events } from 'types/domain/event.type';
+import { ServiceError } from 'types/error.type';
 
 export interface EventServiceOperations {
   readonly findEventById: (id: EventId) => TE.TaskEither<ServiceError, Event>;

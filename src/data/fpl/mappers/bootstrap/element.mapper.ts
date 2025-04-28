@@ -1,16 +1,15 @@
+import { ElementResponse } from 'data/fpl/schemas/bootstrap/element.schema';
 import { format } from 'date-fns';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as O from 'fp-ts/Option';
-import { EventId } from 'src/types/domain/event.type';
-import { RawPlayerStat } from 'src/types/domain/player-stat.type';
-import { PlayerValueTrack } from 'src/types/domain/player-value-track.type';
-import { SourcePlayerValue } from 'src/types/domain/player-value.type';
-import { PlayerId, PlayerType, RawPlayer, validatePlayerId } from 'src/types/domain/player.type';
-import { TeamId } from 'src/types/domain/team.type';
-import { safeStringToDecimal, safeStringToNumber } from 'src/utils/common.util';
-
-import { ElementResponse } from '../../schemas/bootstrap/element.schema';
+import { EventId } from 'types/domain/event.type';
+import { RawPlayerStat } from 'types/domain/player-stat.type';
+import { PlayerValueTrack } from 'types/domain/player-value-track.type';
+import { SourcePlayerValue } from 'types/domain/player-value.type';
+import { PlayerId, PlayerType, RawPlayer, validatePlayerId } from 'types/domain/player.type';
+import { TeamId } from 'types/domain/team.type';
+import { safeStringToDecimal, safeStringToNumber } from 'utils/common.util';
 
 export const mapElementResponseToPlayer = (raw: ElementResponse): E.Either<string, RawPlayer> =>
   pipe(

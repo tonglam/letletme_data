@@ -1,5 +1,6 @@
-import { LeagueInfoResponseSchema } from 'src/data/fpl/schemas/entry/league-info.schema';
 import { z } from 'zod';
+
+import { LeagueInfoResponseSchema } from './league-info.schema';
 
 export const EntryLeagueResponseSchema = z
   .object({

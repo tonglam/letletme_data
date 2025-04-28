@@ -1,20 +1,19 @@
-import * as E from 'fp-ts/Either';
-import { pipe } from 'fp-ts/function';
-import * as TE from 'fp-ts/TaskEither';
-import { Logger } from 'pino';
-import { apiConfig } from 'src/configs/api/api.config';
-import { mapEntryHistoryResponseToDomain } from 'src/data/fpl/mappers/history/history.mapper';
+import { apiConfig } from 'configs/api/api.config';
+import { mapEntryHistoryResponseToDomain } from 'data/fpl/mappers/history/history.mapper';
 import {
   EntryHistoryResponse,
   EntryHistoryResponseSchema,
-} from 'src/data/fpl/schemas/history/history.schema';
-import { HTTPClient } from 'src/infrastructures/http';
-import { EntryHistoryInfos } from 'src/types/domain/entry-history-info.type';
-import { EntryId } from 'src/types/domain/entry-info.type';
-import { DataLayerError, DataLayerErrorCode } from 'src/types/error.type';
-import { createDataLayerError } from 'src/utils/error.util';
-
-import { FplHistoryDataService } from '../types';
+} from 'data/fpl/schemas/history/history.schema';
+import { FplHistoryDataService } from 'data/types';
+import * as E from 'fp-ts/Either';
+import { pipe } from 'fp-ts/function';
+import * as TE from 'fp-ts/TaskEither';
+import { HTTPClient } from 'infrastructures/http';
+import { Logger } from 'pino';
+import { EntryHistoryInfos } from 'types/domain/entry-history-info.type';
+import { EntryId } from 'types/domain/entry-info.type';
+import { DataLayerError, DataLayerErrorCode } from 'types/error.type';
+import { createDataLayerError } from 'utils/error.util';
 
 export const createFplHistoryDataService = (
   client: HTTPClient,

@@ -1,40 +1,38 @@
-import { PrismaClient } from '@prisma/client';
+import { db } from 'db/index';
+import { eq } from 'drizzle-orm';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import {
-  mapDomainEntryHistoryInfoToPrismaCreate,
-  mapPrismaEntryHistoryInfoToDomain,
-} from 'src/repositories/entry-history-info/mapper';
+  mapDomainEntryHistoryInfoToDbCreate,
+  mapDbEntryHistoryInfoToDomain,
+} from 'repositories/entry-history-info/mapper';
 import {
   EntryHistoryInfoCreateInputs,
   EntryHistoryInfoRepository,
-} from 'src/repositories/entry-history-info/types';
-import { EntryHistoryInfos } from 'src/types/domain/entry-history-info.type';
-import { EntryId } from 'src/types/domain/entry-info.type';
-import { createDBError, DBError, DBErrorCode } from 'src/types/error.type';
+} from 'repositories/entry-history-info/types';
+import * as schema from 'schema/entry-history-info';
+import { EntryHistoryInfos } from 'types/domain/entry-history-info.type';
+import { EntryId } from 'types/domain/entry-info.type';
+import { createDBError, DBError, DBErrorCode } from 'types/error.type';
+import { getErrorMessage } from 'utils/error.util';
 
-export const createEntryHistoryInfoRepository = (
-  prisma: PrismaClient,
-): EntryHistoryInfoRepository => {
+export const createEntryHistoryInfoRepository = (): EntryHistoryInfoRepository => {
   const findByEntryId = (entryId: EntryId): TE.TaskEither<DBError, EntryHistoryInfos> =>
     pipe(
       TE.tryCatch(
-        () => prisma.entryHistoryInfo.findMany({ where: { entryId: Number(entryId) } }),
+        async () => {
+          const result = await db
+            .select()
+            .from(schema.entryHistoryInfos)
+            .where(eq(schema.entryHistoryInfos.entryId, Number(entryId)));
+          return result.map(mapDbEntryHistoryInfoToDomain);
+        },
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to fetch entry league info by id ${entryId}: ${error}`,
+            message: `Failed to fetch entry history info by id ${entryId}: ${getErrorMessage(error)}`,
+            cause: error instanceof Error ? error : undefined,
           }),
-      ),
-      TE.chainW((prismaEntryLeagueInfoOrNull) =>
-        prismaEntryLeagueInfoOrNull
-          ? TE.right(prismaEntryLeagueInfoOrNull.map(mapPrismaEntryHistoryInfoToDomain))
-          : TE.left(
-              createDBError({
-                code: DBErrorCode.NOT_FOUND,
-                message: `Entry league info with ID ${entryId} not found in database`,
-              }),
-            ),
       ),
     );
 
@@ -43,15 +41,17 @@ export const createEntryHistoryInfoRepository = (
   ): TE.TaskEither<DBError, EntryHistoryInfos> =>
     pipe(
       TE.tryCatch(
-        () =>
-          prisma.entryHistoryInfo.createMany({
-            data: entryHistoryInfoInputs.map(mapDomainEntryHistoryInfoToPrismaCreate),
-            skipDuplicates: true,
-          }),
+        async () => {
+          await db
+            .insert(schema.entryHistoryInfos)
+            .values(entryHistoryInfoInputs.map(mapDomainEntryHistoryInfoToDbCreate))
+            .onConflictDoNothing();
+        },
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to save entry history info: ${error}`,
+            message: `Failed to save entry history info: ${getErrorMessage(error)}`,
+            cause: error instanceof Error ? error : undefined,
           }),
       ),
       TE.chain(() => findByEntryId(entryHistoryInfoInputs[0].entryId)),

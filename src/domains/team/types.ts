@@ -1,7 +1,7 @@
+import { CachePrefix, DefaultTTL } from 'configs/cache/cache.config';
 import * as TE from 'fp-ts/TaskEither';
-import { CachePrefix, DefaultTTL } from 'src/configs/cache/cache.config';
-import { Teams } from 'src/types/domain/team.type';
-import { DomainError } from 'src/types/error.type';
+import { Teams } from 'types/domain/team.type';
+import { DomainError } from 'types/error.type';
 
 import { TeamCreateInputs } from '../../repositories/team/types';
 

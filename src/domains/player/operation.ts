@@ -1,11 +1,10 @@
+import { PlayerOperations } from 'domains/player/types';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { PlayerCreateInputs, PlayerRepository } from 'src/repositories/player/types';
-import { RawPlayers } from 'src/types/domain/player.type';
-import { createDomainError, DomainError, DomainErrorCode } from 'src/types/error.type';
-import { getErrorMessage } from 'src/utils/error.util';
-
-import { PlayerOperations } from './types';
+import { PlayerCreateInputs, PlayerRepository } from 'repositories/player/types';
+import { RawPlayers } from 'types/domain/player.type';
+import { createDomainError, DomainError, DomainErrorCode } from 'types/error.type';
+import { getErrorMessage } from 'utils/error.util';
 
 export const createPlayerOperations = (repository: PlayerRepository): PlayerOperations => {
   const savePlayers = (playerInputs: PlayerCreateInputs): TE.TaskEither<DomainError, RawPlayers> =>

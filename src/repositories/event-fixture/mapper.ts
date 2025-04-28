@@ -1,33 +1,31 @@
-import { RawEventFixture } from 'src/types/domain/event-fixture.type';
-import { EventFixtureId } from 'src/types/domain/event-fixture.type';
-
 import {
   EventFixtureCreateInput,
-  PrismaEventFixture,
-  PrismaEventFixtureCreateInput,
-} from './types';
+  DbEventFixture,
+  DbEventFixtureCreateInput,
+} from 'repositories/event-fixture/types';
+import { EventFixtureId, RawEventFixture } from 'types/domain/event-fixture.type';
+import { EventId } from 'types/domain/event.type';
+import { TeamId } from 'types/domain/team.type';
 
-export const mapPrismaEventFixtureToDomain = (
-  prismaEventFixture: PrismaEventFixture,
-): RawEventFixture => ({
-  id: prismaEventFixture.id as EventFixtureId,
-  code: prismaEventFixture.code,
-  eventId: prismaEventFixture.eventId,
-  kickoffTime: prismaEventFixture.kickoffTime ?? new Date(),
-  started: prismaEventFixture.started,
-  finished: prismaEventFixture.finished,
-  minutes: prismaEventFixture.minutes,
-  teamH: prismaEventFixture.teamH ?? null,
-  teamHDifficulty: prismaEventFixture.teamHDifficulty,
-  teamHScore: prismaEventFixture.teamHScore,
-  teamA: prismaEventFixture.teamA ?? null,
-  teamADifficulty: prismaEventFixture.teamADifficulty,
-  teamAScore: prismaEventFixture.teamAScore,
+export const mapDbEventFixtureToDomain = (dbEventFixture: DbEventFixture): RawEventFixture => ({
+  id: dbEventFixture.id as EventFixtureId,
+  code: dbEventFixture.code,
+  eventId: dbEventFixture.eventId as EventId,
+  kickoffTime: dbEventFixture.kickoffTime ?? new Date(),
+  started: dbEventFixture.started,
+  finished: dbEventFixture.finished,
+  minutes: dbEventFixture.minutes,
+  teamHId: dbEventFixture.teamHId as TeamId,
+  teamHDifficulty: dbEventFixture.teamHDifficulty,
+  teamHScore: dbEventFixture.teamHScore,
+  teamAId: dbEventFixture.teamAId as TeamId,
+  teamADifficulty: dbEventFixture.teamADifficulty,
+  teamAScore: dbEventFixture.teamAScore,
 });
 
-export const mapDomainEventFixtureToPrismaCreate = (
+export const mapDomainEventFixtureToDbCreate = (
   domainEventFixture: EventFixtureCreateInput,
-): PrismaEventFixtureCreateInput => ({
+): DbEventFixtureCreateInput => ({
   id: Number(domainEventFixture.id),
   code: domainEventFixture.code,
   eventId: domainEventFixture.eventId,
@@ -35,8 +33,10 @@ export const mapDomainEventFixtureToPrismaCreate = (
   started: domainEventFixture.started,
   finished: domainEventFixture.finished,
   minutes: domainEventFixture.minutes,
-  teamH: domainEventFixture.teamH,
+  teamHId: domainEventFixture.teamHId as TeamId,
   teamHDifficulty: domainEventFixture.teamHDifficulty,
   teamHScore: domainEventFixture.teamHScore,
-  teamA: domainEventFixture.teamA,
+  teamAId: domainEventFixture.teamAId as TeamId,
+  teamADifficulty: domainEventFixture.teamADifficulty,
+  teamAScore: domainEventFixture.teamAScore,
 });

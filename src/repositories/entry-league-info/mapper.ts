@@ -1,33 +1,33 @@
-import { LeagueType } from 'src/types/base.type';
-import { EntryId } from 'src/types/domain/entry-info.type';
-import { EntryLeagueInfo } from 'src/types/domain/entry-league-info.type';
-import { LeagueId } from 'src/types/domain/league.type';
-
 import {
   EntryLeagueInfoCreateInput,
-  PrismaEntryLeagueInfo,
-  PrismaEntryLeagueInfoCreateInput,
-} from './types';
+  DbEntryLeagueInfo,
+  DbEntryLeagueInfoCreateInput,
+} from 'repositories/entry-league-info/types';
+import { LeagueType } from 'types/base.type';
+import { EntryId } from 'types/domain/entry-info.type';
+import { EntryLeagueInfo } from 'types/domain/entry-league-info.type';
+import { LeagueId } from 'types/domain/league.type';
 
-export const mapPrismaEntryLeagueInfoToDomain = (
-  prismaEntryLeagueInfo: PrismaEntryLeagueInfo,
+export const mapDbEntryLeagueInfoToDomain = (
+  dbEntryLeagueInfo: DbEntryLeagueInfo,
 ): EntryLeagueInfo => ({
-  entryId: prismaEntryLeagueInfo.entryId as EntryId,
-  leagueId: prismaEntryLeagueInfo.leagueId as LeagueId,
-  leagueName: prismaEntryLeagueInfo.leagueName,
-  leagueType: prismaEntryLeagueInfo.leagueType as LeagueType,
-  startedEvent: prismaEntryLeagueInfo.startedEvent,
-  entryRank: prismaEntryLeagueInfo.entryRank,
-  entryLastRank: prismaEntryLeagueInfo.entryLastRank,
+  entryId: dbEntryLeagueInfo.entryId as EntryId,
+  leagueId: dbEntryLeagueInfo.leagueId as LeagueId,
+  leagueName: dbEntryLeagueInfo.leagueName,
+  leagueType: dbEntryLeagueInfo.leagueType as LeagueType,
+  startedEvent: dbEntryLeagueInfo.startedEvent,
+  entryRank: dbEntryLeagueInfo.entryRank,
+  entryLastRank: dbEntryLeagueInfo.entryLastRank,
 });
 
-export const mapDomainEntryLeagueInfoToPrismaCreate = (
+export const mapDomainEntryLeagueInfoToDbCreate = (
   domainEntryLeagueInfo: EntryLeagueInfoCreateInput,
-): PrismaEntryLeagueInfoCreateInput => ({
+): DbEntryLeagueInfoCreateInput => ({
   entryId: domainEntryLeagueInfo.entryId,
   leagueId: domainEntryLeagueInfo.leagueId,
   leagueName: domainEntryLeagueInfo.leagueName,
-  leagueType: domainEntryLeagueInfo.leagueType,
+  leagueType:
+    domainEntryLeagueInfo.leagueType as unknown as DbEntryLeagueInfoCreateInput['leagueType'],
   startedEvent: domainEntryLeagueInfo.startedEvent,
   entryRank: domainEntryLeagueInfo.entryRank,
   entryLastRank: domainEntryLeagueInfo.entryLastRank,

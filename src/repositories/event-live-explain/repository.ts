@@ -1,67 +1,67 @@
-import { PrismaClient } from '@prisma/client';
+import { db } from 'db/index';
+import { and, eq } from 'drizzle-orm';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import {
-  mapDomainEventLiveExplainToPrismaCreate,
-  mapPrismaEventLiveExplainToDomain,
-} from 'src/repositories/event-live-explain/mapper';
+  mapDomainEventLiveExplainToDbCreate,
+  mapDbEventLiveExplainToDomain,
+} from 'repositories/event-live-explain/mapper';
 import {
   EventLiveExplainCreateInputs,
   EventLiveExplainRepository,
-} from 'src/repositories/event-live-explain/types';
-import { EventLiveExplains, EventLiveExplain } from 'src/types/domain/event-live-explain.type';
-import { EventId } from 'src/types/domain/event.type';
-import { PlayerId } from 'src/types/domain/player.type';
-import { createDBError, DBError, DBErrorCode } from 'src/types/error.type';
+} from 'repositories/event-live-explain/types';
+import * as schema from 'schema/event-live-explain';
+import { EventLiveExplains, EventLiveExplain } from 'types/domain/event-live-explain.type';
+import { EventId } from 'types/domain/event.type';
+import { PlayerId } from 'types/domain/player.type';
+import { createDBError, DBError, DBErrorCode } from 'types/error.type';
+import { getErrorMessage } from 'utils/error.util';
 
-export const createEventLiveExplainRepository = (
-  prisma: PrismaClient,
-): EventLiveExplainRepository => {
+export const createEventLiveExplainRepository = (): EventLiveExplainRepository => {
   const findByElementIdAndEventId = (
     elementId: PlayerId,
     eventId: EventId,
   ): TE.TaskEither<DBError, EventLiveExplain> =>
     pipe(
       TE.tryCatch(
-        () =>
-          prisma.eventLiveExplain.findUnique({
-            where: {
-              unique_event_element_live_explain: {
-                eventId: Number(eventId),
-                elementId: Number(elementId),
-              },
-            },
-          }),
+        async () => {
+          const result = await db
+            .select()
+            .from(schema.eventLiveExplains)
+            .where(
+              and(
+                eq(schema.eventLiveExplains.eventId, Number(eventId)),
+                eq(schema.eventLiveExplains.elementId, Number(elementId)),
+              ),
+            )
+            .limit(1);
+          return mapDbEventLiveExplainToDomain(result[0]);
+        },
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to fetch event live explain by element id ${elementId} and event id ${eventId}: ${error}`,
+            message: `Failed to fetch event live explain by element id ${elementId} and event id ${eventId}: ${getErrorMessage(error)}`,
+            cause: error instanceof Error ? error : undefined,
           }),
-      ),
-      TE.chain((prismaEventLiveExplain) =>
-        prismaEventLiveExplain
-          ? TE.right(mapPrismaEventLiveExplainToDomain(prismaEventLiveExplain))
-          : TE.left(
-              createDBError({
-                code: DBErrorCode.NOT_FOUND,
-                message: `Event live explain with element id ${elementId} and event id ${eventId} not found in database`,
-              }),
-            ),
       ),
     );
 
   const findByEventId = (eventId: EventId): TE.TaskEither<DBError, EventLiveExplains> =>
     pipe(
       TE.tryCatch(
-        () => prisma.eventLiveExplain.findMany({ where: { eventId: Number(eventId) } }),
+        async () => {
+          const result = await db
+            .select()
+            .from(schema.eventLiveExplains)
+            .where(eq(schema.eventLiveExplains.eventId, Number(eventId)));
+          return result.map(mapDbEventLiveExplainToDomain);
+        },
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to fetch event live explains by event id ${eventId}: ${error}`,
+            message: `Failed to fetch event live explains by event id ${eventId}: ${getErrorMessage(error)}`,
+            cause: error instanceof Error ? error : undefined,
           }),
-      ),
-      TE.map((prismaEventLiveExplains) =>
-        prismaEventLiveExplains.map(mapPrismaEventLiveExplainToDomain),
       ),
     );
 
@@ -76,16 +76,19 @@ export const createEventLiveExplainRepository = (
     return pipe(
       TE.tryCatch(
         async () => {
-          const dataToCreate = eventLiveExplainInputs.map(mapDomainEventLiveExplainToPrismaCreate);
-          await prisma.eventLiveExplain.createMany({
-            data: dataToCreate,
-            skipDuplicates: true,
-          });
+          const dataToCreate = eventLiveExplainInputs.map(mapDomainEventLiveExplainToDbCreate);
+          await db
+            .insert(schema.eventLiveExplains)
+            .values(dataToCreate)
+            .onConflictDoNothing({
+              target: [schema.eventLiveExplains.eventId, schema.eventLiveExplains.elementId],
+            });
         },
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to create event live in batch: ${error}`,
+            message: `Failed to create event live explain in batch: ${error}`,
+            cause: error instanceof Error ? error : undefined,
           }),
       ),
       TE.chainW(() => findByEventId(eventId)),
@@ -96,15 +99,17 @@ export const createEventLiveExplainRepository = (
     pipe(
       TE.tryCatch(
         async () => {
-          await prisma.eventLiveExplain.deleteMany({ where: { eventId: Number(eventId) } });
+          await db
+            .delete(schema.eventLiveExplains)
+            .where(eq(schema.eventLiveExplains.eventId, Number(eventId)));
         },
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to delete event live explain by event id ${eventId}: ${error}`,
+            message: `Failed to delete event live explain by event id ${eventId}: ${getErrorMessage(error)}`,
+            cause: error instanceof Error ? error : undefined,
           }),
       ),
-      TE.map(() => undefined),
     );
 
   return {

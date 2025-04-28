@@ -1,10 +1,9 @@
+import { EventFixtureResponse } from 'data/fpl/schemas/fixture/fixture.schema';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
-import { RawEventFixture, validateEventFixtureId } from 'src/types/domain/event-fixture.type';
-import { EventId } from 'src/types/domain/event.type';
-import { TeamId } from 'src/types/domain/team.type';
-
-import { EventFixtureResponse } from '../../schemas/fixture/fixture.schema';
+import { RawEventFixture, validateEventFixtureId } from 'types/domain/event-fixture.type';
+import { EventId } from 'types/domain/event.type';
+import { TeamId } from 'types/domain/team.type';
 
 export const mapEventFixtureResponseToDomain = (
   raw: EventFixtureResponse,

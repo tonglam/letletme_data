@@ -1,10 +1,9 @@
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
-import { createBrandedType } from 'src/types/base.type';
-import { Branded } from 'src/types/base.type';
-import { EntryId } from 'src/types/domain/entry-info.type';
-import { EventId } from 'src/types/domain/event.type';
-import { TournamentId } from 'src/types/domain/tournament-info.type';
+import { Branded, createBrandedType } from 'types/base.type';
+import { EntryId } from 'types/domain/entry-info.type';
+import { EventId } from 'types/domain/event.type';
+import { TournamentId } from 'types/domain/tournament-info.type';
 
 export type TournamentGroupId = Branded<number, 'TournamentGroupId'>;
 

@@ -1,15 +1,16 @@
-import { Prisma, EntryEventTransfer as PrismaEntryEventTransferType } from '@prisma/client';
+import { InferInsertModel, InferSelectModel } from 'drizzle-orm';
 import * as TE from 'fp-ts/TaskEither';
+import * as schema from 'schema/entry-event-transfer';
 import {
   RawEntryEventTransfer,
   RawEntryEventTransfers,
-} from 'src/types/domain/entry-event-transfer.type';
-import { EntryId } from 'src/types/domain/entry-info.type';
-import { EventId } from 'src/types/domain/event.type';
-import { DBError } from 'src/types/error.type';
+} from 'types/domain/entry-event-transfer.type';
+import { EntryId } from 'types/domain/entry-info.type';
+import { EventId } from 'types/domain/event.type';
+import { DBError } from 'types/error.type';
 
-export type PrismaEntryEventTransferCreateInput = Prisma.EntryEventTransferCreateInput;
-export type PrismaEntryEventTransfer = PrismaEntryEventTransferType;
+export type DbEntryEventTransfer = InferSelectModel<typeof schema.entryEventTransfers>;
+export type DbEntryEventTransferCreateInput = InferInsertModel<typeof schema.entryEventTransfers>;
 
 export type EntryEventTransferCreateInput = RawEntryEventTransfer;
 export type EntryEventTransferCreateInputs = readonly EntryEventTransferCreateInput[];

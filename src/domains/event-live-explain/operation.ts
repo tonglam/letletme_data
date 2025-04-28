@@ -4,12 +4,11 @@ import * as TE from 'fp-ts/TaskEither';
 import {
   EventLiveExplainCreateInputs,
   EventLiveExplainRepository,
-} from 'src/repositories/event-live-explain/types';
-import { EventLiveExplains } from 'src/types/domain/event-live-explain.type';
-import { EventId } from 'src/types/domain/event.type';
-
-import { createDomainError, DomainError, DomainErrorCode } from '../../types/error.type';
-import { getErrorMessage } from '../../utils/error.util';
+} from 'repositories/event-live-explain/types';
+import { EventLiveExplains } from 'types/domain/event-live-explain.type';
+import { EventId } from 'types/domain/event.type';
+import { createDomainError, DomainError, DomainErrorCode } from 'types/error.type';
+import { getErrorMessage } from 'utils/error.util';
 
 export const createEventLiveExplainOperations = (
   repository: EventLiveExplainRepository,

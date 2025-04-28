@@ -1,17 +1,23 @@
-import { Prisma, EntryLeagueInfo as PrismaEntryLeagueInfoType } from '@prisma/client';
-import * as TE from 'fp-ts/TaskEither';
-import { EntryId } from 'src/types/domain/entry-info.type';
-import { EntryLeagueInfo, EntryLeagueInfos } from 'src/types/domain/entry-league-info.type';
-import { DBError } from 'src/types/error.type';
+import { createInsertSchema } from 'drizzle-zod';
+import { TaskEither } from 'fp-ts/TaskEither';
+import * as schema from 'schema/entry-league-info';
+import { EntryId } from 'types/domain/entry-info.type';
+import { EntryLeagueInfo, EntryLeagueInfos } from 'types/domain/entry-league-info.type';
+import { LeagueId } from 'types/domain/league.type';
+import { DBError } from 'types/error.type';
+import { z } from 'zod';
 
-export type PrismaEntryLeagueInfoCreateInput = Prisma.EntryLeagueInfoCreateInput;
-export type PrismaEntryLeagueInfo = PrismaEntryLeagueInfoType;
-
-export type EntryLeagueInfoCreateInput = EntryLeagueInfo;
+export type DbEntryLeagueInfo = typeof schema.entryLeagueInfos.$inferSelect;
+export const DbEntryLeagueInfoCreateSchema = createInsertSchema(schema.entryLeagueInfos);
+export type DbEntryLeagueInfoCreateInput = z.infer<typeof DbEntryLeagueInfoCreateSchema>;
 
 export interface EntryLeagueInfoRepository {
-  readonly findByEntryId: (entryId: EntryId) => TE.TaskEither<DBError, EntryLeagueInfos>;
-  readonly upsertEntryLeagueInfo: (
-    entryLeagueInfoInput: EntryLeagueInfoCreateInput,
-  ) => TE.TaskEither<DBError, EntryLeagueInfo>;
+  findByEntryId(entryId: EntryId): TaskEither<DBError, EntryLeagueInfos>;
+  findByEntryIdAndLeagueId(
+    entryId: EntryId,
+    leagueId: LeagueId,
+  ): TaskEither<DBError, EntryLeagueInfo>;
+  upsertEntryLeagueInfo(
+    entryLeagueInfoInput: DbEntryLeagueInfoCreateInput,
+  ): TaskEither<DBError, EntryLeagueInfo>;
 }

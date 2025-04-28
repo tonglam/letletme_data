@@ -1,28 +1,24 @@
+import { FplBootstrapDataService } from 'data/types';
 import { createEventOperations } from 'domains/event/operation';
+import { EventCache, EventOperations } from 'domains/event/types';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as O from 'fp-ts/Option';
 import * as RA from 'fp-ts/ReadonlyArray';
 import * as TE from 'fp-ts/TaskEither';
+import { EventRepository } from 'repositories/event/types';
 import { EventService, EventServiceOperations } from 'services/event/types';
 import { FixtureService } from 'services/fixture/types';
-import { EventRepository } from 'src/repositories/event/types';
-
-import { FplBootstrapDataService } from '../../data/types';
-import { EventCache, EventOperations } from '../../domains/event/types';
-import { EventFixture } from '../../types/domain/event-fixture.type';
-import { Event, EventId, Events } from '../../types/domain/event.type';
+import { EventFixture } from 'types/domain/event-fixture.type';
+import { Event, EventId, Events } from 'types/domain/event.type';
 import {
   DataLayerError,
   ServiceError,
   ServiceErrorCode,
   createServiceError,
-} from '../../types/error.type';
-import { eqDate, normalizeDate, ordDate } from '../../utils/date.util';
-import {
-  createServiceIntegrationError,
-  mapDomainErrorToServiceError,
-} from '../../utils/error.util';
+} from 'types/error.type';
+import { eqDate, normalizeDate, ordDate } from 'utils/date.util';
+import { createServiceIntegrationError, mapDomainErrorToServiceError } from 'utils/error.util';
 
 const eventServiceOperations = (
   fplDataService: FplBootstrapDataService,
@@ -98,7 +94,7 @@ const eventServiceOperations = (
           TE.mapLeft(mapDomainErrorToServiceError),
           TE.chain(() => {
             return pipe(
-              domainOps.saveEvents(eventCreateData),
+              domainOps.saveEvents([...eventCreateData]),
               TE.mapLeft(mapDomainErrorToServiceError),
             );
           }),

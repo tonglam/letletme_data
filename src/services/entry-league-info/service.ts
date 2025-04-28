@@ -1,3 +1,4 @@
+import { FplEntryDataService } from 'data/types';
 import { createEntryLeagueInfoOperations } from 'domains/entry-league-info/operation';
 import { EntryLeagueInfoOperations } from 'domains/entry-league-info/types';
 import * as A from 'fp-ts/Array';
@@ -6,23 +7,21 @@ import * as O from 'fp-ts/Option';
 import * as RNEA from 'fp-ts/ReadonlyNonEmptyArray';
 import * as TE from 'fp-ts/TaskEither';
 import { Logger } from 'pino';
+import { EntryInfoRepository } from 'repositories/entry-info/types';
+import { EntryLeagueInfoRepository } from 'repositories/entry-league-info/types';
 import {
   EntryLeagueInfoService,
   EntryLeagueInfoServiceOperations,
 } from 'services/entry-league-info/types';
-import { EntryInfoRepository } from 'src/repositories/entry-info/types';
-import { EntryLeagueInfoRepository } from 'src/repositories/entry-league-info/types';
-import { EntryLeagueInfos } from 'src/types/domain/entry-league-info.type';
-
-import { FplEntryDataService } from '../../data/types';
-import { EntryId } from '../../types/domain/entry-info.type';
+import { EntryId } from 'types/domain/entry-info.type';
+import { EntryLeagueInfos } from 'types/domain/entry-league-info.type';
 import {
   createServiceError,
   DBError,
   DomainError,
   ServiceError,
   ServiceErrorCode,
-} from '../../types/error.type';
+} from 'types/error.type';
 
 const entryLeagueInfoServiceOperations = (
   fplDataService: FplEntryDataService,

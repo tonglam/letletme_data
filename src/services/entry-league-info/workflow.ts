@@ -1,12 +1,12 @@
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-
-import { getWorkflowLogger } from '../../infrastructures/logger';
-import { createServiceError, ServiceError, ServiceErrorCode } from '../../types/error.type';
-import { createWorkflowContext } from '../types';
-
-import type { WorkflowResult } from '../types';
-import type { EntryLeagueInfoService, EntryLeagueInfoWorkflowOperations } from './types';
+import { getWorkflowLogger } from 'infrastructures/logger';
+import {
+  EntryLeagueInfoService,
+  EntryLeagueInfoWorkflowOperations,
+} from 'services/entry-league-info/types';
+import { createWorkflowContext, WorkflowResult } from 'services/types';
+import { createServiceError, ServiceError, ServiceErrorCode } from 'types/error.type';
 
 const logger = getWorkflowLogger();
 

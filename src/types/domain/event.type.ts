@@ -1,7 +1,6 @@
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
-
-import { Branded, createBrandedType } from '../base.type';
+import { Branded, createBrandedType } from 'types/base.type';
 
 export type EventId = Branded<number, 'EventId'>;
 

@@ -1,10 +1,9 @@
+import { CachePrefix, DefaultTTL } from 'configs/cache/cache.config';
 import * as TE from 'fp-ts/TaskEither';
-import { CachePrefix, DefaultTTL } from 'src/configs/cache/cache.config';
-import { Event, Events } from 'src/types/domain/event.type';
+import { Event, Events } from 'types/domain/event.type';
+import { DomainError } from 'types/error.type';
 
-import { DomainError } from '../../types/error.type';
-
-import type { EventCreateInputs } from '../../repositories/event/types';
+import type { EventCreateInputs } from 'repositories/event/types';
 export interface EventCacheConfig {
   readonly keyPrefix: (typeof CachePrefix)[keyof typeof CachePrefix];
   readonly season: string;

@@ -1,38 +1,33 @@
-import { RawEntryEventTransfer } from 'src/types/domain/entry-event-transfer.type';
-import { EntryId } from 'src/types/domain/entry-info.type';
-import { EventId } from 'src/types/domain/event.type';
-import { PlayerId } from 'src/types/domain/player.type';
-
 import {
   EntryEventTransferCreateInput,
-  PrismaEntryEventTransfer,
-  PrismaEntryEventTransferCreateInput,
-} from './types';
+  DbEntryEventTransfer,
+  DbEntryEventTransferCreateInput,
+} from 'repositories/entry-event-transfer/types';
+import { RawEntryEventTransfer } from 'types/domain/entry-event-transfer.type';
+import { EntryId } from 'types/domain/entry-info.type';
+import { EventId } from 'types/domain/event.type';
+import { PlayerId } from 'types/domain/player.type';
 
-export const mapPrismaEntryEventTransferToDomain = (
-  prismaEntryEventTransfer: PrismaEntryEventTransfer,
+export const mapDbEntryEventTransferToDomain = (
+  dbEntryEventTransfer: DbEntryEventTransfer,
 ): RawEntryEventTransfer => ({
-  entryId: prismaEntryEventTransfer.entryId as EntryId,
-  eventId: prismaEntryEventTransfer.eventId as EventId,
-  elementInId: prismaEntryEventTransfer.elementInId as PlayerId,
-  elementInCost: prismaEntryEventTransfer.elementInCost as number,
-  elementInPoints: prismaEntryEventTransfer.elementInPoints as number,
-  elementOutId: prismaEntryEventTransfer.elementOutId as PlayerId,
-  elementOutCost: prismaEntryEventTransfer.elementOutCost as number,
-  elementOutPoints: prismaEntryEventTransfer.elementOutPoints as number,
-  transferTime: prismaEntryEventTransfer.transferTime as Date,
+  entryId: dbEntryEventTransfer.entryId as EntryId,
+  eventId: dbEntryEventTransfer.eventId as EventId,
+  elementInId: dbEntryEventTransfer.elementInId as PlayerId,
+  elementInCost: dbEntryEventTransfer.elementInCost as number,
+  elementOutId: dbEntryEventTransfer.elementOutId as PlayerId,
+  elementOutCost: dbEntryEventTransfer.elementOutCost as number,
+  transferTime: dbEntryEventTransfer.transferTime as Date,
 });
 
-export const mapDomainEntryEventTransferToPrismaCreate = (
+export const mapDomainEntryEventTransferToDbCreate = (
   domainEntryEventTransfer: EntryEventTransferCreateInput,
-): PrismaEntryEventTransferCreateInput => ({
+): DbEntryEventTransferCreateInput => ({
   entryId: domainEntryEventTransfer.entryId,
   eventId: domainEntryEventTransfer.eventId,
   elementInId: domainEntryEventTransfer.elementInId,
   elementInCost: domainEntryEventTransfer.elementInCost,
-  elementInPoints: domainEntryEventTransfer.elementInPoints,
   elementOutId: domainEntryEventTransfer.elementOutId,
   elementOutCost: domainEntryEventTransfer.elementOutCost,
-  elementOutPoints: domainEntryEventTransfer.elementOutPoints,
   transferTime: domainEntryEventTransfer.transferTime,
 });

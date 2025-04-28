@@ -1,26 +1,25 @@
-import { LeagueType } from '@prisma/client';
+import { FplClassicLeagueDataService, FplH2hLeagueDataService } from 'data/types';
 import { pipe } from 'fp-ts/function';
 import * as O from 'fp-ts/Option';
 import { Option } from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
 import { TaskEither } from 'fp-ts/TaskEither';
+import { TournamentEntryRepository } from 'repositories/tournament-entry/types';
 import {
   TournamentEntryService,
   TournamentEntryServiceOperations,
 } from 'services/tournament-entry/types';
-import { FplClassicLeagueDataService, FplH2hLeagueDataService } from 'src/data/types';
-import { TournamentEntryRepository } from 'src/repositories/tournament-entry/types';
-import { EntryId } from 'src/types/domain/entry-info.type';
-import { ClassicLeague, H2hLeague, LeagueId } from 'src/types/domain/league.type';
-import { TournamentEntries, TournamentEntry } from 'src/types/domain/tournament-entry.type';
-import { TournamentId } from 'src/types/domain/tournament-info.type';
-
-import { createDomainError, DomainErrorCode, ServiceError } from '../../types/error.type';
+import { LeagueType } from 'types/base.type';
+import { EntryId } from 'types/domain/entry-info.type';
+import { ClassicLeague, H2hLeague, LeagueId } from 'types/domain/league.type';
+import { TournamentEntries, TournamentEntry } from 'types/domain/tournament-entry.type';
+import { TournamentId } from 'types/domain/tournament-info.type';
+import { createDomainError, DomainErrorCode, ServiceError } from 'types/error.type';
 import {
   mapDomainErrorToServiceError,
   mapDataLayerErrorToServiceError,
   mapDBErrorToServiceError,
-} from '../../utils/error.util';
+} from 'utils/error.util';
 
 const tournamentEntryServiceOperations = (
   fplClassicLeagueDataService: FplClassicLeagueDataService,

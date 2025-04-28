@@ -1,18 +1,18 @@
-CREATE TYPE IF NOT EXISTS "Chip" AS ENUM ('None', 'Wildcard', 'FreeHit', 'TripleCaptain', 'BenchBoost', 'Manager');
+CREATE TYPE  "Chip" AS ENUM ('None', 'Wildcard', 'FreeHit', 'TripleCaptain', 'BenchBoost', 'Manager');
 
-CREATE TYPE IF NOT EXISTS "ValueChangeType" AS ENUM ('Start', 'Rise', 'Fall');
+CREATE TYPE  "ValueChangeType" AS ENUM ('Start', 'Rise', 'Fall');
 
-CREATE TYPE IF NOT EXISTS "LeagueType" AS ENUM ('Classic', 'H2H');
+CREATE TYPE  "LeagueType" AS ENUM ('Classic', 'H2H');
 
-CREATE TYPE IF NOT EXISTS "CupResult" AS ENUM ('Win', 'Loss');
+CREATE TYPE  "CupResult" AS ENUM ('Win', 'Loss');
 
-CREATE TYPE IF NOT EXISTS "TournamentMode" AS ENUM ('Normal');
+CREATE TYPE  "TournamentMode" AS ENUM ('Normal');
 
-CREATE TYPE IF NOT EXISTS "GroupMode" AS ENUM ('NoGroup', 'PointsRaces', 'BattleRaces');
+CREATE TYPE  "GroupMode" AS ENUM ('NoGroup', 'PointsRaces', 'BattleRaces');
 
-CREATE TYPE IF NOT EXISTS "KnockoutMode" AS ENUM ('NoKnockout', 'SingleElimination', 'DoubleElimination', 'HeadToHead');
+CREATE TYPE  "KnockoutMode" AS ENUM ('NoKnockout', 'SingleElimination', 'DoubleElimination', 'HeadToHead');
 
-CREATE TYPE IF NOT EXISTS "TournamentState" AS ENUM ('Active', 'Inactive', 'Finished');
+CREATE TYPE  "TournamentState" AS ENUM ('Active', 'Inactive', 'Finished');
 
 CREATE TABLE IF NOT EXISTS "events" (
     "id" INTEGER PRIMARY KEY,
@@ -179,14 +179,13 @@ CREATE TABLE IF NOT EXISTS "event_fixtures" (
     "started" BOOLEAN NOT NULL DEFAULT false,
     "finished" BOOLEAN NOT NULL DEFAULT false,
     "minutes" INTEGER NOT NULL DEFAULT 0,
-    "team_h" INTEGER,
+    "team_h_id" INTEGER,
     "team_h_difficulty" INTEGER,
     "team_h_score" INTEGER,
-    "team_a" INTEGER,
+    "team_a_id" INTEGER,
     "team_a_difficulty" INTEGER,
     "team_a_score" INTEGER,
     "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updated_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS "idx_event_fixtures_event_id" ON "event_fixtures" ("event_id");
 CREATE INDEX IF NOT EXISTS "idx_event_fixtures_team_h_id" ON "event_fixtures" ("team_h");
@@ -225,7 +224,6 @@ CREATE TABLE IF NOT EXISTS "event_lives" (
     "in_dream_team" BOOLEAN,
     "total_points" INTEGER NOT NULL DEFAULT 0,
     "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updated_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE UNIQUE INDEX IF NOT EXISTS "unique_event_element_live" ON "event_lives" ("event_id", "element_id");
 CREATE INDEX IF NOT EXISTS "idx_event_live_element_id" ON "event_lives" ("element_id");
@@ -274,7 +272,6 @@ CREATE TABLE IF NOT EXISTS "event_live_explains" (
     "mng_goals_scored" INTEGER,
     "mng_goals_scored_points" INTEGER,
     "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updated_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE UNIQUE INDEX IF NOT EXISTS "unique_event_element_live_explain" ON "event_live_explains" ("element_id", "event_id");
 CREATE INDEX IF NOT EXISTS "idx_event_live_explain_element_id" ON "event_live_explains" ("element_id");
@@ -325,7 +322,6 @@ CREATE TABLE IF NOT EXISTS "entry_history_infos" (
     "total_points" INTEGER NOT NULL DEFAULT 0,
     "overall_rank" INTEGER NOT NULL DEFAULT 0,
     "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updated_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE UNIQUE INDEX IF NOT EXISTS "unique_entry_season_history" ON "entry_history_infos" ("entry_id", "season");
 CREATE INDEX IF NOT EXISTS "idx_entry_history_info_entry_id" ON "entry_history_infos" ("entry_id");
@@ -430,7 +426,6 @@ CREATE TABLE IF NOT EXISTS "tournament_entries" (
     "league_id" INTEGER NOT NULL,
     "entry_id" INTEGER NOT NULL,
     "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updated_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE UNIQUE INDEX IF NOT EXISTS "unique_tournament_entry" ON "tournament_entries" ("tournament_id", "league_id", "entry_id");
 CREATE INDEX IF NOT EXISTS "idx_tournament_entry_tournament_id" ON "tournament_entries" ("tournament_id");
@@ -483,6 +478,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS "unique_tournament_points_group_result" ON "to
 CREATE INDEX IF NOT EXISTS "idx_tournament_points_group_result_tournament_id" ON "tournament_points_group_results" ("tournament_id");
 CREATE INDEX IF NOT EXISTS "idx_tournament_points_group_result_group_id" ON "tournament_points_group_results" ("group_id");
 CREATE INDEX IF NOT EXISTS "idx_tournament_points_group_result_event_id" ON "tournament_points_group_results" ("event_id");
+CREATE INDEX IF NOT EXISTS "idx_tournament_points_group_result_entry_id" ON "tournament_points_group_results" ("entry_id");
 ALTER TABLE "tournament_points_group_results" ENABLE ROW LEVEL SECURITY;
 
 CREATE TABLE IF NOT EXISTS "tournament_battle_group_results" (

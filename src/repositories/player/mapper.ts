@@ -1,23 +1,20 @@
-import { PlayerId, PlayerType, RawPlayer } from 'src/types/domain/player.type';
-import { TeamId } from 'src/types/domain/team.type';
+import { DbPlayer, DbPlayerCreateInput } from 'repositories/player/types';
+import { PlayerId, PlayerType, RawPlayer } from 'types/domain/player.type';
+import { TeamId } from 'types/domain/team.type';
 
-import { PrismaPlayer, PrismaPlayerCreateInput } from './types';
-
-export const mapPrismaPlayerToDomain = (prismaPlayer: PrismaPlayer): RawPlayer => ({
-  id: prismaPlayer.id as PlayerId,
-  code: prismaPlayer.code,
-  type: prismaPlayer.type as PlayerType,
-  teamId: prismaPlayer.teamId as TeamId,
-  price: prismaPlayer.price,
-  startPrice: prismaPlayer.startPrice,
-  firstName: prismaPlayer.firstName,
-  secondName: prismaPlayer.secondName,
-  webName: prismaPlayer.webName,
+export const mapDbPlayerToDomain = (dbPlayer: DbPlayer): RawPlayer => ({
+  id: dbPlayer.id as PlayerId,
+  code: dbPlayer.code,
+  type: dbPlayer.type as PlayerType,
+  teamId: dbPlayer.teamId as TeamId,
+  price: dbPlayer.price,
+  startPrice: dbPlayer.startPrice,
+  firstName: dbPlayer.firstName,
+  secondName: dbPlayer.secondName,
+  webName: dbPlayer.webName,
 });
 
-export const mapDomainPlayerToPrismaCreate = (
-  domainPlayer: RawPlayer,
-): PrismaPlayerCreateInput => ({
+export const mapDomainPlayerToDbCreate = (domainPlayer: RawPlayer): DbPlayerCreateInput => ({
   id: domainPlayer.id,
   code: domainPlayer.code,
   type: domainPlayer.type,

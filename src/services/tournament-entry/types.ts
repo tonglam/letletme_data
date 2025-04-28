@@ -1,11 +1,11 @@
-import { LeagueType } from '@prisma/client';
 import * as TE from 'fp-ts/TaskEither';
-import { EntryId } from 'src/types/domain/entry-info.type';
-import { LeagueId } from 'src/types/domain/league.type';
-import { TournamentEntries } from 'src/types/domain/tournament-entry.type';
-import { TournamentId } from 'src/types/domain/tournament-info.type';
+import { LeagueType } from 'types/base.type';
+import { EntryId } from 'types/domain/entry-info.type';
+import { LeagueId } from 'types/domain/league.type';
+import { TournamentEntries } from 'types/domain/tournament-entry.type';
+import { TournamentId } from 'types/domain/tournament-info.type';
 
-import type { ServiceError } from '../../types/error.type';
+import type { ServiceError } from 'types/error.type';
 
 export interface TournamentEntryServiceOperations {
   readonly findByTournamentId: (id: TournamentId) => TE.TaskEither<ServiceError, TournamentEntries>;

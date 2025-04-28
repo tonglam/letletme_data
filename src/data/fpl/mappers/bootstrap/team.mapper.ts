@@ -1,8 +1,7 @@
+import { TeamResponse } from 'data/fpl/schemas/bootstrap/team.schema';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
-import { Team, TeamId, validateTeamId } from 'src/types/domain/team.type';
-
-import { TeamResponse } from '../../schemas/bootstrap/team.schema';
+import { Team, TeamId, validateTeamId } from 'types/domain/team.type';
 
 export const mapTeamResponseToTeam = (raw: TeamResponse): E.Either<string, Team> =>
   pipe(

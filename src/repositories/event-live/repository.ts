@@ -1,35 +1,34 @@
-import { PrismaClient } from '@prisma/client';
+import { db } from 'db/index';
+import { eq } from 'drizzle-orm';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import {
-  mapDomainEventLiveToPrismaCreate,
-  mapPrismaEventLiveToDomain,
-} from 'src/repositories/event-live/mapper';
-import { EventLiveCreateInputs, EventLiveRepository } from 'src/repositories/event-live/types';
-import { RawEventLives } from 'src/types/domain/event-live.type';
-import { EventId } from 'src/types/domain/event.type';
-import { createDBError, DBError, DBErrorCode } from 'src/types/error.type';
-
-export const createEventLiveRepository = (prisma: PrismaClient): EventLiveRepository => {
+  mapDomainEventLiveToDbCreate,
+  mapDbEventLiveToDomain,
+} from 'repositories/event-live/mapper';
+import { EventLiveCreateInputs, EventLiveRepository } from 'repositories/event-live/types';
+import * as schema from 'schema/event-live';
+import { RawEventLives } from 'types/domain/event-live.type';
+import { EventId } from 'types/domain/event.type';
+import { createDBError, DBError, DBErrorCode } from 'types/error.type';
+import { getErrorMessage } from 'utils/error.util';
+export const createEventLiveRepository = (): EventLiveRepository => {
   const findByEventId = (eventId: EventId): TE.TaskEither<DBError, RawEventLives> =>
     pipe(
       TE.tryCatch(
-        () => prisma.eventLive.findMany({ where: { eventId: Number(eventId) } }),
+        async () => {
+          const result = await db
+            .select()
+            .from(schema.eventLive)
+            .where(eq(schema.eventLive.eventId, Number(eventId)));
+          return result.map(mapDbEventLiveToDomain);
+        },
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to fetch event live by event id ${eventId}: ${error}`,
+            message: `Failed to fetch event live by event id ${eventId}: ${getErrorMessage(error)}`,
+            cause: error instanceof Error ? error : undefined,
           }),
-      ),
-      TE.chain((prismaEventLives) =>
-        prismaEventLives
-          ? TE.right(prismaEventLives.map(mapPrismaEventLiveToDomain))
-          : TE.left(
-              createDBError({
-                code: DBErrorCode.NOT_FOUND,
-                message: `Event live with event id ${eventId} not found in database`,
-              }),
-            ),
       ),
     );
 
@@ -44,16 +43,19 @@ export const createEventLiveRepository = (prisma: PrismaClient): EventLiveReposi
     return pipe(
       TE.tryCatch(
         async () => {
-          const dataToCreate = eventLiveInputs.map(mapDomainEventLiveToPrismaCreate);
-          await prisma.eventLive.createMany({
-            data: dataToCreate,
-            skipDuplicates: true,
-          });
+          const dataToCreate = eventLiveInputs.map(mapDomainEventLiveToDbCreate);
+          await db
+            .insert(schema.eventLive)
+            .values(dataToCreate)
+            .onConflictDoNothing({
+              target: [schema.eventLive.eventId],
+            });
         },
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to create event live in batch: ${error}`,
+            message: `Failed to create event live in batch: ${getErrorMessage(error)}`,
+            cause: error instanceof Error ? error : undefined,
           }),
       ),
       TE.chainW(() => findByEventId(eventId)),
@@ -64,15 +66,15 @@ export const createEventLiveRepository = (prisma: PrismaClient): EventLiveReposi
     pipe(
       TE.tryCatch(
         async () => {
-          await prisma.eventLive.deleteMany({ where: { eventId: Number(eventId) } });
+          await db.delete(schema.eventLive).where(eq(schema.eventLive.eventId, Number(eventId)));
         },
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to delete event live by event id ${eventId}: ${error}`,
+            message: `Failed to delete event live by event id ${eventId}: ${getErrorMessage(error)}`,
+            cause: error instanceof Error ? error : undefined,
           }),
       ),
-      TE.map(() => undefined),
     );
 
   return {

@@ -1,43 +1,41 @@
-import { $Enums as PrismaEnums } from '@prisma/client';
-import { Chip } from 'src/types/base.type';
-import { PickItem } from 'src/types/domain/entry-event-pick.type';
-import { RawEntryEventResult } from 'src/types/domain/entry-event-result.type';
-import { EntryId } from 'src/types/domain/entry-info.type';
-import { EventId } from 'src/types/domain/event.type';
-import { PlayerId } from 'src/types/domain/player.type';
-
 import {
   EntryEventResultCreateInput,
-  PrismaEntryEventResult,
-  PrismaEntryEventResultCreateInput,
-} from './types';
+  DbEntryEventResult,
+  DbEntryEventResultCreateInput,
+} from 'repositories/entry-event-result/types';
+import { Chip } from 'types/base.type';
+import { PickItem } from 'types/domain/entry-event-pick.type';
+import { RawEntryEventResult } from 'types/domain/entry-event-result.type';
+import { EntryId } from 'types/domain/entry-info.type';
+import { EventId } from 'types/domain/event.type';
+import { PlayerId } from 'types/domain/player.type';
 
-export const mapPrismaEntryEventResultToDomain = (
-  prismaEntryEventResult: PrismaEntryEventResult,
+export const mapDbEntryEventResultToDomain = (
+  dbEntryEventResult: DbEntryEventResult,
 ): RawEntryEventResult => ({
-  entryId: prismaEntryEventResult.entryId as EntryId,
-  eventId: prismaEntryEventResult.eventId as EventId,
-  eventPoints: prismaEntryEventResult.eventPoints as number,
-  eventTransfers: prismaEntryEventResult.eventTransfers as number,
-  eventTransfersCost: prismaEntryEventResult.eventTransfersCost as number,
-  eventNetPoints: prismaEntryEventResult.eventNetPoints as number,
-  eventBenchPoints: prismaEntryEventResult.eventBenchPoints as number,
-  eventAutoSubPoints: prismaEntryEventResult.eventAutoSubPoints as number,
-  eventRank: prismaEntryEventResult.eventRank as number,
-  eventChip: prismaEntryEventResult.eventChip as Chip,
-  eventPlayedCaptain: prismaEntryEventResult.eventPlayedCaptain as PlayerId,
-  eventCaptainPoints: prismaEntryEventResult.eventCaptainPoints as number,
-  eventPicks: prismaEntryEventResult.eventPicks as PickItem[],
-  eventAutoSub: prismaEntryEventResult.eventAutoSub as PickItem[],
-  overallPoints: prismaEntryEventResult.overallPoints as number,
-  overallRank: prismaEntryEventResult.overallRank as number,
-  teamValue: prismaEntryEventResult.teamValue as number,
-  bank: prismaEntryEventResult.bank as number,
+  entryId: dbEntryEventResult.entryId as EntryId,
+  eventId: dbEntryEventResult.eventId as EventId,
+  eventPoints: dbEntryEventResult.eventPoints as number,
+  eventTransfers: dbEntryEventResult.eventTransfers as number,
+  eventTransfersCost: dbEntryEventResult.eventTransfersCost as number,
+  eventNetPoints: dbEntryEventResult.eventNetPoints as number,
+  eventBenchPoints: dbEntryEventResult.eventBenchPoints as number,
+  eventAutoSubPoints: dbEntryEventResult.eventAutoSubPoints as number,
+  eventRank: dbEntryEventResult.eventRank as number,
+  eventChip: dbEntryEventResult.eventChip as Chip,
+  eventPlayedCaptain: dbEntryEventResult.eventPlayedCaptain as PlayerId,
+  eventCaptainPoints: dbEntryEventResult.eventCaptainPoints as number,
+  eventPicks: dbEntryEventResult.eventPicks as PickItem[],
+  eventAutoSub: dbEntryEventResult.eventAutoSub as PickItem[],
+  overallPoints: dbEntryEventResult.overallPoints as number,
+  overallRank: dbEntryEventResult.overallRank as number,
+  teamValue: dbEntryEventResult.teamValue as number,
+  bank: dbEntryEventResult.bank as number,
 });
 
-export const mapDomainEntryEventResultToPrismaCreate = (
+export const mapDomainEntryEventResultToDbCreate = (
   domainEntryEventResult: EntryEventResultCreateInput,
-): PrismaEntryEventResultCreateInput => ({
+): DbEntryEventResultCreateInput => ({
   entryId: domainEntryEventResult.entryId,
   eventId: domainEntryEventResult.eventId,
   eventPoints: domainEntryEventResult.eventPoints,
@@ -47,10 +45,10 @@ export const mapDomainEntryEventResultToPrismaCreate = (
   eventBenchPoints: domainEntryEventResult.eventBenchPoints,
   eventAutoSubPoints: domainEntryEventResult.eventAutoSubPoints,
   eventRank: domainEntryEventResult.eventRank,
-  eventChip:
-    domainEntryEventResult.eventChip === null || domainEntryEventResult.eventChip === Chip.None
-      ? PrismaEnums.Chip.None
-      : (domainEntryEventResult.eventChip as unknown as PrismaEnums.Chip),
+  eventChip: (domainEntryEventResult.eventChip === null ||
+  domainEntryEventResult.eventChip === Chip.None
+    ? Chip.None
+    : domainEntryEventResult.eventChip) as DbEntryEventResultCreateInput['eventChip'],
   eventPlayedCaptain: domainEntryEventResult.eventPlayedCaptain,
   eventCaptainPoints: domainEntryEventResult.eventCaptainPoints,
   eventPicks: domainEntryEventResult.eventPicks,

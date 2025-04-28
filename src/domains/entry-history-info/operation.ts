@@ -1,15 +1,14 @@
+import { EntryHistoryInfoOperations } from 'domains/entry-history-info/types';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import {
   EntryHistoryInfoCreateInputs,
   EntryHistoryInfoRepository,
-} from 'src/repositories/entry-history-info/types';
-import { EntryHistoryInfos } from 'src/types/domain/entry-history-info.type';
-import { EntryId } from 'src/types/domain/entry-info.type';
-
-import { EntryHistoryInfoOperations } from './types';
-import { createDomainError, DomainError, DomainErrorCode } from '../../types/error.type';
-import { getErrorMessage } from '../../utils/error.util';
+} from 'repositories/entry-history-info/types';
+import { EntryHistoryInfos } from 'types/domain/entry-history-info.type';
+import { EntryId } from 'types/domain/entry-info.type';
+import { createDomainError, DomainError, DomainErrorCode } from 'types/error.type';
+import { getErrorMessage } from 'utils/error.util';
 
 export const createEntryHistoryInfoOperations = (
   repository: EntryHistoryInfoRepository,

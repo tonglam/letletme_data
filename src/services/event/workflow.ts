@@ -1,11 +1,9 @@
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-
-import { getWorkflowLogger } from '../../infrastructures/logger';
-import { createServiceError, ServiceError, ServiceErrorCode } from '../../types/error.type';
-import { createWorkflowContext, WorkflowResult } from '../types';
-
-import type { EventService, EventWorkflowOperations } from './types';
+import { getWorkflowLogger } from 'infrastructures/logger';
+import { EventService, EventWorkflowOperations } from 'services/event/types';
+import { createWorkflowContext, WorkflowResult } from 'services/types';
+import { createServiceError, ServiceError, ServiceErrorCode } from 'types/error.type';
 
 const logger = getWorkflowLogger();
 

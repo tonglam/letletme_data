@@ -1,3 +1,4 @@
+import { FplFixtureDataService } from 'data/types';
 import { createEventFixtureOperations } from 'domains/event-fixture/operation';
 import { EventFixtureCache, EventFixtureOperations } from 'domains/event-fixture/types';
 import { TeamCache } from 'domains/team/types';
@@ -7,22 +8,21 @@ import { pipe } from 'fp-ts/function';
 import * as RA from 'fp-ts/ReadonlyArray';
 import * as R from 'fp-ts/Record';
 import * as TE from 'fp-ts/TaskEither';
+import { EventFixtureRepository } from 'repositories/event-fixture/types';
 import { FixtureService, FixtureServiceOperations } from 'services/fixture/types';
-import { FplFixtureDataService } from 'src/data/types';
-import { EventFixtureRepository } from 'src/repositories/event-fixture/types';
-import { EventFixture, EventFixtures, RawEventFixtures } from 'src/types/domain/event-fixture.type';
-import { EventId } from 'src/types/domain/event.type';
-import { TeamFixture, TeamFixtures } from 'src/types/domain/team-fixture.type';
-import { TeamId } from 'src/types/domain/team.type';
+import { EventFixture, EventFixtures, RawEventFixtures } from 'types/domain/event-fixture.type';
+import { EventId } from 'types/domain/event.type';
+import { TeamFixture, TeamFixtures } from 'types/domain/team-fixture.type';
+import { TeamId } from 'types/domain/team.type';
 import {
   createDomainError,
   DataLayerError,
   DomainError,
   DomainErrorCode,
   ServiceError,
-} from 'src/types/error.type';
-import { enrichEventFixtures } from 'src/utils/data-enrichment.util';
-import { createServiceIntegrationError, mapDomainErrorToServiceError } from 'src/utils/error.util';
+} from 'types/error.type';
+import { enrichEventFixtures } from 'utils/data-enrichment.util';
+import { createServiceIntegrationError, mapDomainErrorToServiceError } from 'utils/error.util';
 
 const groupTeamFixturesByTeam = (fixtures: TeamFixtures): Readonly<Record<string, TeamFixtures>> =>
   pipe(

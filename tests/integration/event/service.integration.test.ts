@@ -5,17 +5,28 @@ import { EventRepository } from 'src/repositories/event/types';
 import { EventId } from 'src/types/domain/event.type';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { CachePrefix } from '../../../src/configs/cache/cache.config';
+import { CachePrefix, DefaultTTL } from '../../../src/configs/cache/cache.config';
 import { createFplBootstrapDataService } from '../../../src/data/fpl/bootstrap.data';
-import { FplBootstrapDataService } from '../../../src/data/types';
+import { createFplFixtureDataService } from '../../../src/data/fpl/fixture.data';
+import { FplBootstrapDataService, FplFixtureDataService } from '../../../src/data/types';
 import { createEventCache } from '../../../src/domains/event/cache';
 import { EventCache } from '../../../src/domains/event/types';
+import { createEventFixtureCache } from '../../../src/domains/event-fixture/cache';
+import { EventFixtureCache } from '../../../src/domains/event-fixture/types';
+import { createTeamCache } from '../../../src/domains/team/cache';
+import { TeamCache } from '../../../src/domains/team/types';
+import { createTeamFixtureCache } from '../../../src/domains/team-fixture/cache';
+import { TeamFixtureCache } from '../../../src/domains/team-fixture/types';
 import { redisClient } from '../../../src/infrastructures/cache/client';
 import { HTTPClient } from '../../../src/infrastructures/http';
 import { createEventRepository } from '../../../src/repositories/event/repository';
+import { createEventFixtureRepository } from '../../../src/repositories/event-fixture/repository';
+import { EventFixtureRepository } from '../../../src/repositories/event-fixture/types';
 import { createEventService } from '../../../src/services/event/service';
 import { EventService } from '../../../src/services/event/types';
 import { eventWorkflows } from '../../../src/services/event/workflow';
+import { createFixtureService } from '../../../src/services/fixture/service';
+import { FixtureService } from '../../../src/services/fixture/types';
 import {
   IntegrationTestSetupResult,
   setupIntegrationTest,
@@ -29,10 +40,18 @@ describe('Event Integration Tests', () => {
   let httpClient: HTTPClient;
   let eventRepository: EventRepository;
   let eventCache: EventCache;
-  let fplDataService: FplBootstrapDataService;
+  let fplBootstrapDataService: FplBootstrapDataService;
   let eventService: EventService;
+  let fplFixtureDataService: FplFixtureDataService;
+  let eventFixtureRepository: EventFixtureRepository;
+  let eventFixtureCache: EventFixtureCache;
+  let teamFixtureCache: TeamFixtureCache;
+  let teamCache: TeamCache;
+  let fixtureService: FixtureService;
 
-  const cachePrefix = CachePrefix.EVENT;
+  const eventCachePrefix = CachePrefix.EVENT;
+  const fixtureCachePrefix = CachePrefix.FIXTURE;
+  const teamCachePrefix = CachePrefix.TEAM;
   const season = '2425';
 
   beforeAll(async () => {
@@ -53,14 +72,49 @@ describe('Event Integration Tests', () => {
     }
 
     // Instantiate specific dependencies
-    eventRepository = createEventRepository(prisma);
-    // createEventCache uses the imported singleton redisClient internally
+    eventRepository = createEventRepository();
     eventCache = createEventCache({
-      keyPrefix: cachePrefix,
+      keyPrefix: eventCachePrefix,
       season: season,
+      ttlSeconds: DefaultTTL.EVENT,
     });
-    fplDataService = createFplBootstrapDataService(httpClient, logger);
-    eventService = createEventService(fplDataService, eventRepository, eventCache);
+    fplBootstrapDataService = createFplBootstrapDataService(httpClient, logger);
+
+    // Instantiate Fixture dependencies
+    fplFixtureDataService = createFplFixtureDataService(httpClient, logger);
+    eventFixtureRepository = createEventFixtureRepository(prisma);
+    eventFixtureCache = createEventFixtureCache({
+      keyPrefix: fixtureCachePrefix,
+      season: season,
+      ttlSeconds: DefaultTTL.FIXTURE,
+    });
+    teamFixtureCache = createTeamFixtureCache({
+      keyPrefix: fixtureCachePrefix,
+      season: season,
+      ttlSeconds: DefaultTTL.FIXTURE,
+    });
+    teamCache = createTeamCache({
+      keyPrefix: teamCachePrefix,
+      season: season,
+      ttlSeconds: DefaultTTL.TEAM,
+    });
+
+    // Instantiate FixtureService with actual dependencies
+    fixtureService = createFixtureService(
+      fplFixtureDataService,
+      eventFixtureRepository,
+      eventFixtureCache,
+      teamFixtureCache,
+      teamCache,
+    );
+
+    // Instantiate EventService with the actual fixtureService
+    eventService = createEventService(
+      fplBootstrapDataService,
+      fixtureService,
+      eventRepository,
+      eventCache,
+    );
   });
 
   afterAll(async () => {
@@ -86,7 +140,7 @@ describe('Event Integration Tests', () => {
       expect(firstEvent).toHaveProperty('deadlineTime');
 
       // Check cache state after sync
-      const cacheKey = `${cachePrefix}::${season}`;
+      const cacheKey = `${eventCachePrefix}::${season}`;
       const keyExists = await redisClient.exists(cacheKey);
       expect(keyExists).toBe(1);
     });

@@ -1,59 +1,60 @@
-import { PrismaClient } from '@prisma/client';
+import { db } from 'db/index';
+import { eq, or } from 'drizzle-orm';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { RawEventFixtures } from 'src/types/domain/event-fixture.type';
-import { EventId } from 'src/types/domain/event.type';
-import { TeamId } from 'src/types/domain/team.type';
-import { createDBError, DBError, DBErrorCode } from 'src/types/error.type';
+import {
+  mapDbEventFixtureToDomain,
+  mapDomainEventFixtureToDbCreate,
+} from 'repositories/event-fixture/mapper';
+import { EventFixtureCreateInputs, EventFixtureRepository } from 'repositories/event-fixture/types';
+import * as schema from 'schema/event-fixture';
+import { RawEventFixtures } from 'types/domain/event-fixture.type';
+import { EventId } from 'types/domain/event.type';
+import { TeamId } from 'types/domain/team.type';
+import { createDBError, DBError, DBErrorCode } from 'types/error.type';
+import { getErrorMessage } from 'utils/error.util';
 
-import { mapDomainEventFixtureToPrismaCreate, mapPrismaEventFixtureToDomain } from './mapper';
-import { EventFixtureCreateInputs, EventFixtureRepository } from './types';
-
-export const createEventFixtureRepository = (prisma: PrismaClient): EventFixtureRepository => {
+export const createEventFixtureRepository = (): EventFixtureRepository => {
   const findByTeamId = (teamId: TeamId): TE.TaskEither<DBError, RawEventFixtures> =>
     pipe(
       TE.tryCatch(
-        () =>
-          prisma.eventFixture.findMany({
-            where: { OR: [{ teamH: Number(teamId) }, { teamA: Number(teamId) }] },
-          }),
+        async () => {
+          const result = await db
+            .select()
+            .from(schema.eventFixtures)
+            .where(
+              or(
+                eq(schema.eventFixtures.teamHId, Number(teamId)),
+                eq(schema.eventFixtures.teamAId, Number(teamId)),
+              ),
+            );
+          return result.map(mapDbEventFixtureToDomain);
+        },
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to find event fixture by team id ${teamId}: ${error}`,
+            message: `Failed to find event fixture by team id ${teamId}: ${getErrorMessage(error)}`,
+            cause: error instanceof Error ? error : undefined,
           }),
-      ),
-      TE.chainW((prismaEventFixturesOrNull) =>
-        prismaEventFixturesOrNull
-          ? TE.right(prismaEventFixturesOrNull.map(mapPrismaEventFixtureToDomain))
-          : TE.left(
-              createDBError({
-                code: DBErrorCode.NOT_FOUND,
-                message: `Event fixture with team id ${teamId} not found in database`,
-              }),
-            ),
       ),
     );
 
   const findByEventId = (eventId: EventId): TE.TaskEither<DBError, RawEventFixtures> =>
     pipe(
       TE.tryCatch(
-        () => prisma.eventFixture.findMany({ where: { eventId: Number(eventId) } }),
+        async () => {
+          const result = await db
+            .select()
+            .from(schema.eventFixtures)
+            .where(eq(schema.eventFixtures.eventId, Number(eventId)));
+          return result.map(mapDbEventFixtureToDomain);
+        },
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to find event fixture by event id ${eventId}: ${error}`,
+            message: `Failed to find event fixture by event id ${eventId}: ${getErrorMessage(error)}`,
+            cause: error instanceof Error ? error : undefined,
           }),
-      ),
-      TE.chainW((prismaEventFixturesOrNull) =>
-        prismaEventFixturesOrNull
-          ? TE.right(prismaEventFixturesOrNull.map(mapPrismaEventFixtureToDomain))
-          : TE.left(
-              createDBError({
-                code: DBErrorCode.NOT_FOUND,
-                message: `Event fixture with event id ${eventId} not found in database`,
-              }),
-            ),
       ),
     );
 
@@ -68,16 +69,23 @@ export const createEventFixtureRepository = (prisma: PrismaClient): EventFixture
     return pipe(
       TE.tryCatch(
         async () => {
-          const dataToCreate = eventFixtureInputs.map(mapDomainEventFixtureToPrismaCreate);
-          await prisma.eventFixture.createMany({
-            data: dataToCreate,
-            skipDuplicates: true,
-          });
+          const dataToCreate = eventFixtureInputs.map(mapDomainEventFixtureToDbCreate);
+          await db
+            .insert(schema.eventFixtures)
+            .values(dataToCreate)
+            .onConflictDoNothing({
+              target: [
+                schema.eventFixtures.eventId,
+                schema.eventFixtures.teamHId,
+                schema.eventFixtures.teamAId,
+              ],
+            });
         },
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to save event fixture batch for event id ${eventId}: ${error}`,
+            message: `Failed to save event fixture batch for event id ${eventId}: ${getErrorMessage(error)}`,
+            cause: error instanceof Error ? error : undefined,
           }),
       ),
       TE.chainW(() => findByEventId(eventId)),
@@ -87,14 +95,18 @@ export const createEventFixtureRepository = (prisma: PrismaClient): EventFixture
   const deleteByEventId = (eventId: EventId): TE.TaskEither<DBError, void> =>
     pipe(
       TE.tryCatch(
-        () => prisma.eventFixture.deleteMany({ where: { eventId: Number(eventId) } }),
+        async () => {
+          await db
+            .delete(schema.eventFixtures)
+            .where(eq(schema.eventFixtures.eventId, Number(eventId)));
+        },
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to delete event fixture by event id ${eventId}: ${error}`,
+            message: `Failed to delete event fixture by event id ${eventId}: ${getErrorMessage(error)}`,
+            cause: error instanceof Error ? error : undefined,
           }),
       ),
-      TE.map(() => undefined),
     );
 
   return {

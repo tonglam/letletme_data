@@ -1,78 +1,75 @@
-import { PrismaClient } from '@prisma/client';
+import { db } from 'db/index';
+import { eq } from 'drizzle-orm';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import {
+  mapDomainTournamentBattleGroupResultToDbCreate,
+  mapDbTournamentBattleGroupResultToDomain,
+} from 'repositories/tournament-battle-group-result/mapper';
+import {
   TournamentBattleGroupResultCreateInputs,
   TournamentBattleGroupResultRepository,
-} from 'src/repositories/tournament-battle-group-result/types';
-import { TournamentBattleGroupResults } from 'src/types/domain/tournament-battle-group-result.type';
-import { TournamentId } from 'src/types/domain/tournament-info.type';
+} from 'repositories/tournament-battle-group-result/types';
+import * as schema from 'schema/tournament-battle-group-result';
+import { TournamentBattleGroupResults } from 'types/domain/tournament-battle-group-result.type';
+import { TournamentId } from 'types/domain/tournament-info.type';
+import { createDBError, DBError, DBErrorCode } from 'types/error.type';
+import { getErrorMessage } from 'utils/error.util';
 
-import {
-  mapDomainTournamentBattleGroupResultToPrismaCreate,
-  mapPrismaTournamentBattleGroupResultToDomain,
-} from './mapper';
-import { createDBError, DBError, DBErrorCode } from '../../types/error.type';
+export const createTournamentBattleGroupResultRepository =
+  (): TournamentBattleGroupResultRepository => {
+    const findByTournamentId = (
+      tournamentId: TournamentId,
+    ): TE.TaskEither<DBError, TournamentBattleGroupResults> =>
+      pipe(
+        TE.tryCatch(
+          async () => {
+            const result = await db
+              .select()
+              .from(schema.tournamentBattleGroupResults)
+              .where(eq(schema.tournamentBattleGroupResults.tournamentId, Number(tournamentId)));
+            return result.map(mapDbTournamentBattleGroupResultToDomain);
+          },
+          (error) =>
+            createDBError({
+              code: DBErrorCode.QUERY_ERROR,
+              message: `Failed to fetch tournament battle group result by tournament id ${tournamentId}: ${getErrorMessage(error)}`,
+              cause: error instanceof Error ? error : undefined,
+            }),
+        ),
+      );
 
-export const createTournamentBattleGroupResultRepository = (
-  prismaClient: PrismaClient,
-): TournamentBattleGroupResultRepository => {
-  const findByTournamentId = (
-    tournamentId: TournamentId,
-  ): TE.TaskEither<DBError, TournamentBattleGroupResults> =>
-    pipe(
-      TE.tryCatch(
-        () =>
-          prismaClient.tournamentBattleGroupResult.findMany({
-            where: { tournamentId: Number(tournamentId) },
-          }),
-        (error) =>
-          createDBError({
-            code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to fetch tournament battle group result by tournament id ${tournamentId}: ${error}`,
-          }),
-      ),
-      TE.chainW((prismaTournamentBattleGroupResultOrNull) =>
-        prismaTournamentBattleGroupResultOrNull
-          ? TE.right(
-              prismaTournamentBattleGroupResultOrNull.map(
-                mapPrismaTournamentBattleGroupResultToDomain,
-              ),
-            )
-          : TE.left(
-              createDBError({
-                code: DBErrorCode.NOT_FOUND,
-                message: `Tournament battle group result with tournament id ${tournamentId} not found in database`,
-              }),
-            ),
-      ),
-    );
+    const saveBatchByTournamentId = (
+      tournamentBattleGroupResultInputs: TournamentBattleGroupResultCreateInputs,
+    ): TE.TaskEither<DBError, TournamentBattleGroupResults> =>
+      pipe(
+        TE.tryCatch(
+          async () => {
+            const dataToCreate = tournamentBattleGroupResultInputs.map(
+              mapDomainTournamentBattleGroupResultToDbCreate,
+            );
+            await db
+              .insert(schema.tournamentBattleGroupResults)
+              .values(dataToCreate)
+              .onConflictDoNothing({
+                target: [
+                  schema.tournamentBattleGroupResults.tournamentId,
+                  schema.tournamentBattleGroupResults.groupId,
+                ],
+              });
+          },
+          (error) =>
+            createDBError({
+              code: DBErrorCode.QUERY_ERROR,
+              message: `Failed to create tournament battle group results in batch: ${getErrorMessage(error)}`,
+              cause: error instanceof Error ? error : undefined,
+            }),
+        ),
+        TE.chain(() => findByTournamentId(tournamentBattleGroupResultInputs[0].tournamentId)),
+      );
 
-  const saveBatchByTournamentId = (
-    tournamentBattleGroupResultInputs: TournamentBattleGroupResultCreateInputs,
-  ): TE.TaskEither<DBError, TournamentBattleGroupResults> =>
-    pipe(
-      TE.tryCatch(
-        async () => {
-          const dataToCreate = tournamentBattleGroupResultInputs.map(
-            mapDomainTournamentBattleGroupResultToPrismaCreate,
-          );
-          await prismaClient.tournamentBattleGroupResult.createMany({
-            data: dataToCreate,
-            skipDuplicates: true,
-          });
-        },
-        (error) =>
-          createDBError({
-            code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to create tournament battle group results in batch: ${error}`,
-          }),
-      ),
-      TE.chain(() => findByTournamentId(tournamentBattleGroupResultInputs[0].tournamentId)),
-    );
-
-  return {
-    findByTournamentId,
-    saveBatchByTournamentId,
+    return {
+      findByTournamentId,
+      saveBatchByTournamentId,
+    };
   };
-};

@@ -1,23 +1,22 @@
+import { FplEntryDataService } from 'data/types';
+import { createEntryInfoOperations } from 'domains/entry-info/operation';
+import { EntryInfoOperations } from 'domains/entry-info/types';
 import * as A from 'fp-ts/Array';
 import { pipe } from 'fp-ts/function';
 import * as O from 'fp-ts/Option';
 import * as RNEA from 'fp-ts/ReadonlyNonEmptyArray';
 import * as TE from 'fp-ts/TaskEither';
 import { Logger } from 'pino';
+import { EntryInfoRepository } from 'repositories/entry-info/types';
 import { EntryInfoService, EntryInfoServiceOperations } from 'services/entry-info/types';
-
-import { FplEntryDataService } from '../../data/types';
-import { createEntryInfoOperations } from '../../domains/entry-info/operation';
-import { EntryInfoOperations } from '../../domains/entry-info/types';
-import { EntryInfoRepository } from '../../repositories/entry-info/types';
-import { EntryInfo, EntryId, EntryInfos } from '../../types/domain/entry-info.type';
+import { EntryInfo, EntryId, EntryInfos } from 'types/domain/entry-info.type';
 import {
   createServiceError,
   DBError,
   DomainError,
   ServiceError,
   ServiceErrorCode,
-} from '../../types/error.type';
+} from 'types/error.type';
 
 const entryInfoServiceOperations = (
   fplDataService: FplEntryDataService,

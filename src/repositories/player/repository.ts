@@ -1,63 +1,61 @@
-import { PrismaClient } from '@prisma/client';
+import { db } from 'db/index';
+import { eq, asc } from 'drizzle-orm';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import {
-  mapDomainPlayerToPrismaCreate,
-  mapPrismaPlayerToDomain,
-} from 'src/repositories/player/mapper';
-import { PlayerCreateInputs, PlayerRepository } from 'src/repositories/player/types';
-import { PlayerId, RawPlayer, RawPlayers } from 'src/types/domain/player.type';
+import { mapDbPlayerToDomain, mapDomainPlayerToDbCreate } from 'repositories/player/mapper';
+import { PlayerCreateInputs, PlayerRepository } from 'repositories/player/types';
+import * as schema from 'schema/player';
+import { PlayerId, RawPlayer, RawPlayers } from 'types/domain/player.type';
+import { createDBError, DBError, DBErrorCode } from 'types/error.type';
+import { getErrorMessage } from 'utils/error.util';
 
-import { createDBError, DBError, DBErrorCode } from '../../types/error.type';
-import { getErrorMessage } from '../../utils/error.util';
-
-export const createPlayerRepository = (prisma: PrismaClient): PlayerRepository => {
+export const createPlayerRepository = (): PlayerRepository => {
   const findById = (id: PlayerId): TE.TaskEither<DBError, RawPlayer> =>
     pipe(
       TE.tryCatch(
-        () => prisma.player.findUnique({ where: { id: Number(id) } }),
+        async () => {
+          const result = await db
+            .select()
+            .from(schema.players)
+            .where(eq(schema.players.id, Number(id)));
+          return mapDbPlayerToDomain(result[0]);
+        },
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
             message: `Failed to fetch player by id ${id}: ${getErrorMessage(error)}`,
+            cause: error instanceof Error ? error : undefined,
           }),
-      ),
-      TE.chainW((prismaPlayerOrNull) =>
-        prismaPlayerOrNull
-          ? TE.right(mapPrismaPlayerToDomain(prismaPlayerOrNull))
-          : TE.left(
-              createDBError({
-                code: DBErrorCode.NOT_FOUND,
-                message: `Player with ID ${id} not found in database`,
-              }),
-            ),
       ),
     );
 
   const findAll = (): TE.TaskEither<DBError, RawPlayers> =>
     pipe(
       TE.tryCatch(
-        () => prisma.player.findMany({ orderBy: { id: 'asc' } }),
+        async () => {
+          const result = await db.select().from(schema.players).orderBy(asc(schema.players.id));
+          return result.map(mapDbPlayerToDomain);
+        },
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
             message: `Failed to fetch all players: ${getErrorMessage(error)}`,
+            cause: error instanceof Error ? error : undefined,
           }),
       ),
-      TE.map((prismaPlayers) => prismaPlayers.map(mapPrismaPlayerToDomain)),
     );
 
   const saveBatch = (playerInputs: PlayerCreateInputs): TE.TaskEither<DBError, RawPlayers> =>
     pipe(
       TE.tryCatch(
         async () => {
-          const dataToCreate = playerInputs.map(mapDomainPlayerToPrismaCreate);
-          await prisma.player.createMany({
-            data: dataToCreate,
-            skipDuplicates: true,
-          });
-          const savedPlayers = await prisma.player.findMany({ orderBy: { id: 'asc' } });
-          return savedPlayers.map(mapPrismaPlayerToDomain);
+          const dataToCreate = playerInputs.map(mapDomainPlayerToDbCreate);
+          await db
+            .insert(schema.players)
+            .values(dataToCreate)
+            .onConflictDoNothing({
+              target: [schema.players.id],
+            });
         },
         (error) => {
           return createDBError({
@@ -67,12 +65,15 @@ export const createPlayerRepository = (prisma: PrismaClient): PlayerRepository =
           });
         },
       ),
+      TE.chain(() => findAll()),
     );
 
   const deleteAll = (): TE.TaskEither<DBError, void> =>
     pipe(
       TE.tryCatch(
-        () => prisma.player.deleteMany(),
+        async () => {
+          await db.delete(schema.players);
+        },
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
@@ -80,7 +81,6 @@ export const createPlayerRepository = (prisma: PrismaClient): PlayerRepository =
             cause: error instanceof Error ? error : undefined,
           }),
       ),
-      TE.map(() => undefined),
     );
 
   return {

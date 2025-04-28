@@ -6,8 +6,8 @@ import * as O from 'fp-ts/Option';
 import * as RA from 'fp-ts/ReadonlyArray';
 import * as RNEA from 'fp-ts/ReadonlyNonEmptyArray';
 import * as TE from 'fp-ts/TaskEither';
-import { EntryInfoRepository } from 'src/repositories/entry-info/types';
-import { ElementTypeId, ElementTypeName, getElementTypeName } from 'src/types/base.type';
+import { EntryInfoRepository } from 'repositories/entry-info/types';
+import { ElementTypeId, ElementTypeName, getElementTypeName } from 'types/base.type';
 import {
   EntryEventPick,
   EntryEventPicks,
@@ -15,34 +15,34 @@ import {
   RawEntryEventPick,
   RawEntryEventPicks,
   RawPickItem,
-} from 'src/types/domain/entry-event-pick.type';
+} from 'types/domain/entry-event-pick.type';
 import {
   EntryEventResult,
   EntryEventResults,
   RawEntryEventResult,
   RawEntryEventResults,
-} from 'src/types/domain/entry-event-result.type';
+} from 'types/domain/entry-event-result.type';
 import {
   EntryEventTransfer,
   EntryEventTransfers,
   RawEntryEventTransfer,
   RawEntryEventTransfers,
-} from 'src/types/domain/entry-event-transfer.type';
-import { EntryInfo } from 'src/types/domain/entry-info.type';
-import { EntryId } from 'src/types/domain/entry-info.type';
+} from 'types/domain/entry-event-transfer.type';
+import { EntryId } from 'types/domain/entry-info.type';
+import { EntryInfo } from 'types/domain/entry-info.type';
 import {
   EventFixture,
   EventFixtures,
   RawEventFixture,
   RawEventFixtures,
-} from 'src/types/domain/event-fixture.type';
-import { EventLive, EventLives, RawEventLives } from 'src/types/domain/event-live.type';
-import { PlayerStat, PlayerStats, RawPlayerStat } from 'src/types/domain/player-stat.type';
-import { PlayerValue, PlayerValues, RawPlayerValue } from 'src/types/domain/player-value.type';
-import { Player } from 'src/types/domain/player.type';
-import { RawPlayers, Players } from 'src/types/domain/player.type';
-import { Team, TeamId } from 'src/types/domain/team.type';
-import { createDomainError, DomainError, DomainErrorCode } from 'src/types/error.type';
+} from 'types/domain/event-fixture.type';
+import { EventLive, EventLives, RawEventLives } from 'types/domain/event-live.type';
+import { PlayerStat, PlayerStats, RawPlayerStat } from 'types/domain/player-stat.type';
+import { PlayerValue, PlayerValues, RawPlayerValue } from 'types/domain/player-value.type';
+import { RawPlayers, Players } from 'types/domain/player.type';
+import { Player } from 'types/domain/player.type';
+import { Team, TeamId } from 'types/domain/team.type';
+import { createDomainError, DomainError, DomainErrorCode } from 'types/error.type';
 
 type HasElement = { element: number };
 

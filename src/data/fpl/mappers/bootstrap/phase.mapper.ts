@@ -1,8 +1,7 @@
+import { PhaseResponse } from 'data/fpl/schemas/bootstrap/phase.schema';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
-import { Phase, PhaseId, validatePhaseId } from 'src/types/domain/phase.type';
-
-import { PhaseResponse } from '../../schemas/bootstrap/phase.schema';
+import { Phase, PhaseId, validatePhaseId } from 'types/domain/phase.type';
 
 export const mapPhaseResponseToPhase = (raw: PhaseResponse): E.Either<string, Phase> =>
   pipe(

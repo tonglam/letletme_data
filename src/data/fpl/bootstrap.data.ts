@@ -1,30 +1,32 @@
-import * as E from 'fp-ts/Either';
-import { pipe } from 'fp-ts/function';
-import * as TE from 'fp-ts/TaskEither';
-import { Logger } from 'pino';
-import { EventId, Events } from 'src/types/domain/event.type';
-import { Phases } from 'src/types/domain/phase.type';
-import { RawPlayerStats } from 'src/types/domain/player-stat.type';
-import { PlayerValueTracks } from 'src/types/domain/player-value-track.type';
-import { SourcePlayerValues } from 'src/types/domain/player-value.type';
-import { RawPlayers } from 'src/types/domain/player.type';
-import { Teams } from 'src/types/domain/team.type';
-import { DataLayerError, DataLayerErrorCode } from 'src/types/error.type';
-import { createDataLayerError } from 'src/utils/error.util';
-
-import { apiConfig } from '../../configs/api/api.config';
-import { HTTPClient } from '../../infrastructures/http';
-import { FplBootstrapDataService } from '../types';
+import { apiConfig } from 'configs/api/api.config';
 import {
   mapElementResponseToPlayer,
   mapElementResponseToPlayerStat,
   mapElementResponseToPlayerValue,
   mapElementResponseToPlayerValueTrack,
-} from './mappers/bootstrap/element.mapper';
-import { mapEventResponseToEvent } from './mappers/bootstrap/event.mapper';
-import { mapPhaseResponseToPhase } from './mappers/bootstrap/phase.mapper';
-import { mapTeamResponseToTeam } from './mappers/bootstrap/team.mapper';
-import { BootStrapResponse, BootStrapResponseSchema } from './schemas/bootstrap/bootstrap.schema';
+} from 'data/fpl/mappers/bootstrap/element.mapper';
+import { mapEventResponseToEvent } from 'data/fpl/mappers/bootstrap/event.mapper';
+import { mapPhaseResponseToPhase } from 'data/fpl/mappers/bootstrap/phase.mapper';
+import { mapTeamResponseToTeam } from 'data/fpl/mappers/bootstrap/team.mapper';
+import {
+  BootStrapResponse,
+  BootStrapResponseSchema,
+} from 'data/fpl/schemas/bootstrap/bootstrap.schema';
+import { FplBootstrapDataService } from 'data/types';
+import * as E from 'fp-ts/Either';
+import { pipe } from 'fp-ts/function';
+import * as TE from 'fp-ts/TaskEither';
+import { HTTPClient } from 'infrastructures/http';
+import { Logger } from 'pino';
+import { EventId, Events } from 'types/domain/event.type';
+import { Phases } from 'types/domain/phase.type';
+import { RawPlayerStats } from 'types/domain/player-stat.type';
+import { PlayerValueTracks } from 'types/domain/player-value-track.type';
+import { SourcePlayerValues } from 'types/domain/player-value.type';
+import { RawPlayers } from 'types/domain/player.type';
+import { Teams } from 'types/domain/team.type';
+import { DataLayerError, DataLayerErrorCode } from 'types/error.type';
+import { createDataLayerError } from 'utils/error.util';
 
 export const createFplBootstrapDataService = (
   client: HTTPClient,

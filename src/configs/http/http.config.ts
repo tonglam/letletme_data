@@ -1,4 +1,4 @@
-import { RetryConfig } from '../../infrastructures/http/types';
+import { RetryConfig } from 'infrastructures/http/types';
 
 export const HTTP_STATUS = {
   OK: 200,

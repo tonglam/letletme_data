@@ -1,8 +1,8 @@
 import * as TE from 'fp-ts/TaskEither';
 import { WorkflowResult } from 'services/types';
-import { EntryId } from 'src/types/domain/entry-info.type';
-import { EntryLeagueInfos } from 'src/types/domain/entry-league-info.type';
-import { ServiceError } from 'src/types/error.type';
+import { EntryId } from 'types/domain/entry-info.type';
+import { EntryLeagueInfos } from 'types/domain/entry-league-info.type';
+import { ServiceError } from 'types/error.type';
 
 export interface EntryLeagueInfoServiceOperations {
   readonly findByEntryId: (id: EntryId) => TE.TaskEither<ServiceError, EntryLeagueInfos>;

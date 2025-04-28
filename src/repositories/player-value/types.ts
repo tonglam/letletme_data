@@ -1,11 +1,13 @@
-import { Prisma, PlayerValue as PrismaPlayerValueType } from '@prisma/client';
+import { InferInsertModel } from 'drizzle-orm';
+import { InferSelectModel } from 'drizzle-orm';
 import * as TE from 'fp-ts/TaskEither';
-import { RawPlayerValue, RawPlayerValues } from 'src/types/domain/player-value.type';
-import { PlayerId } from 'src/types/domain/player.type';
-import { DBError } from 'src/types/error.type';
+import * as schema from 'schema/player-value';
+import { RawPlayerValue, RawPlayerValues } from 'types/domain/player-value.type';
+import { PlayerId } from 'types/domain/player.type';
+import { DBError } from 'types/error.type';
 
-export type PrismaPlayerValueCreateInput = Prisma.PlayerValueCreateInput;
-export type PrismaPlayerValue = PrismaPlayerValueType;
+export type DbPlayerValue = InferSelectModel<typeof schema.playerValues>;
+export type DbPlayerValueCreateInput = InferInsertModel<typeof schema.playerValues>;
 
 export type PlayerValueCreateInput = Omit<RawPlayerValue, 'id' | 'createdAt'>;
 export type PlayerValueCreateInputs = readonly PlayerValueCreateInput[];

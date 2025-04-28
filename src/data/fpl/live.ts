@@ -1,22 +1,21 @@
-import * as E from 'fp-ts/Either';
-import { pipe } from 'fp-ts/function';
-import * as TE from 'fp-ts/TaskEither';
-import { Logger } from 'pino';
-import { apiConfig } from 'src/configs/api/api.config';
-import { mapEventLiveExplainResponseToDomain } from 'src/data/fpl/mappers/live/explain.mapper';
+import { apiConfig } from 'configs/api/api.config';
+import { mapEventLiveExplainResponseToDomain } from 'data/fpl/mappers/live/explain.mapper';
+import { mapEventLiveResponseToDomain } from 'data/fpl/mappers/live/live.mapper';
 import {
   EventLiveResponseSchema,
   EventLiveResponse,
-} from 'src/data/fpl/schemas/live/event-live.schema';
-import { FplLiveDataService } from 'src/data/types';
-import { HTTPClient } from 'src/infrastructures/http/types';
-import { EventLiveExplains } from 'src/types/domain/event-live-explain.type';
-import { RawEventLives } from 'src/types/domain/event-live.type';
-import { EventId } from 'src/types/domain/event.type';
-import { DataLayerError, DataLayerErrorCode } from 'src/types/error.type';
-import { createDataLayerError } from 'src/utils/error.util';
-
-import { mapEventLiveResponseToDomain } from './mappers/live/live.mapper';
+} from 'data/fpl/schemas/live/event-live.schema';
+import { FplLiveDataService } from 'data/types';
+import * as E from 'fp-ts/Either';
+import { pipe } from 'fp-ts/function';
+import * as TE from 'fp-ts/TaskEither';
+import { HTTPClient } from 'infrastructures/http';
+import { Logger } from 'pino';
+import { EventLiveExplains } from 'types/domain/event-live-explain.type';
+import { RawEventLives } from 'types/domain/event-live.type';
+import { EventId } from 'types/domain/event.type';
+import { DataLayerError, DataLayerErrorCode } from 'types/error.type';
+import { createDataLayerError } from 'utils/error.util';
 
 export const createFplLiveDataService = (
   client: HTTPClient,

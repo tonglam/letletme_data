@@ -1,10 +1,11 @@
-import { Prisma, Player as PrismaPlayerType } from '@prisma/client';
+import { InferInsertModel, InferSelectModel } from 'drizzle-orm';
 import * as TE from 'fp-ts/TaskEither';
-import { PlayerId, RawPlayer, RawPlayers } from 'src/types/domain/player.type';
-import { DBError } from 'src/types/error.type';
+import * as schema from 'schema/player';
+import { PlayerId, RawPlayer, RawPlayers } from 'types/domain/player.type';
+import { DBError } from 'types/error.type';
 
-export type PrismaPlayerCreateInput = Prisma.PlayerCreateInput;
-export type PrismaPlayer = PrismaPlayerType;
+export type DbPlayer = InferSelectModel<typeof schema.players>;
+export type DbPlayerCreateInput = InferInsertModel<typeof schema.players>;
 
 export type PlayerCreateInput = Omit<RawPlayer, 'id'> & { id: PlayerId };
 export type PlayerCreateInputs = readonly PlayerCreateInput[];

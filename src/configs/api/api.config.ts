@@ -1,7 +1,7 @@
-import { EntryId } from 'src/types/domain/entry-info.type';
-import { EventId } from 'src/types/domain/event.type';
-import { LeagueId } from 'src/types/domain/league.type';
-import { PlayerId } from 'src/types/domain/player.type';
+import { EntryId } from 'types/domain/entry-info.type';
+import { EventId } from 'types/domain/event.type';
+import { LeagueId } from 'types/domain/league.type';
+import { PlayerId } from 'types/domain/player.type';
 
 export const apiConfig = {
   baseUrl: 'https://fantasy.premierleague.com/api',

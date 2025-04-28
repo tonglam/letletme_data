@@ -1,16 +1,12 @@
+import { PickResponse } from 'data/fpl/schemas/pick/pick.schema';
 import * as A from 'fp-ts/Array';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
-import { PickResponse } from 'src/data/fpl/schemas/pick/pick.schema';
-import { Chip } from 'src/types/base.type';
-import {
-  RawEntryEventPick,
-  RawPickItem,
-  RawPickItems,
-} from 'src/types/domain/entry-event-pick.type';
-import { EntryId } from 'src/types/domain/entry-info.type';
-import { EventId } from 'src/types/domain/event.type';
-import { validatePlayerId } from 'src/types/domain/player.type';
+import { Chip } from 'types/base.type';
+import { RawEntryEventPick, RawPickItem, RawPickItems } from 'types/domain/entry-event-pick.type';
+import { EntryId } from 'types/domain/entry-info.type';
+import { EventId } from 'types/domain/event.type';
+import { validatePlayerId } from 'types/domain/player.type';
 
 const mapChipStringToEnum = (chipString: string | null): Chip => {
   if (!chipString) return Chip.None;

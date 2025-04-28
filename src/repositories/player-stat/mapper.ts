@@ -1,59 +1,54 @@
-import { PlayerStat as PrismaPlayerStatType } from '@prisma/client';
-import { PrismaPlayerStatCreateInput } from 'src/repositories/player-stat/types';
-import { ElementTypeId } from 'src/types/base.type';
-import { EventId } from 'src/types/domain/event.type';
-import { RawPlayerStat } from 'src/types/domain/player-stat.type';
-import { PlayerId } from 'src/types/domain/player.type';
+import { DbPlayerStat, DbPlayerStatCreateInput } from 'repositories/player-stat/types';
+import { ElementTypeId } from 'types/base.type';
+import { EventId } from 'types/domain/event.type';
+import { RawPlayerStat } from 'types/domain/player-stat.type';
+import { PlayerId } from 'types/domain/player.type';
 
-export const mapPrismaPlayerStatToDomain = (
-  prismaPlayerStat: PrismaPlayerStatType,
-): RawPlayerStat => ({
-  eventId: prismaPlayerStat.eventId as EventId,
-  elementId: prismaPlayerStat.elementId as PlayerId,
-  elementType: prismaPlayerStat.elementType as ElementTypeId,
-  totalPoints: prismaPlayerStat.totalPoints ?? null,
-  form: prismaPlayerStat.form ?? null,
-  influence: prismaPlayerStat.influence ?? null,
-  creativity: prismaPlayerStat.creativity ?? null,
-  threat: prismaPlayerStat.threat ?? null,
-  ictIndex: prismaPlayerStat.ictIndex ?? null,
-  expectedGoals: prismaPlayerStat.expectedGoals ?? null,
-  expectedAssists: prismaPlayerStat.expectedAssists ?? null,
-  expectedGoalInvolvements: prismaPlayerStat.expectedGoalInvolvements ?? null,
-  expectedGoalsConceded: prismaPlayerStat.expectedGoalsConceded ?? null,
-  minutes: prismaPlayerStat.minutes ?? null,
-  goalsScored: prismaPlayerStat.goalsScored ?? null,
-  assists: prismaPlayerStat.assists ?? null,
-  cleanSheets: prismaPlayerStat.cleanSheets ?? null,
-  goalsConceded: prismaPlayerStat.goalsConceded ?? null,
-  ownGoals: prismaPlayerStat.ownGoals ?? null,
-  penaltiesSaved: prismaPlayerStat.penaltiesSaved ?? null,
-  yellowCards: prismaPlayerStat.yellowCards ?? null,
-  redCards: prismaPlayerStat.redCards ?? null,
-  saves: prismaPlayerStat.saves ?? null,
-  bonus: prismaPlayerStat.bonus ?? null,
-  bps: prismaPlayerStat.bps ?? null,
-  starts: prismaPlayerStat.starts ?? null,
-  influenceRank: prismaPlayerStat.influenceRank ?? null,
-  influenceRankType: prismaPlayerStat.influenceRankType ?? null,
-  creativityRank: prismaPlayerStat.creativityRank ?? null,
-  creativityRankType: prismaPlayerStat.creativityRankType ?? null,
-  threatRank: prismaPlayerStat.threatRank ?? null,
-  threatRankType: prismaPlayerStat.threatRankType ?? null,
-  ictIndexRank: prismaPlayerStat.ictIndexRank ?? null,
-  ictIndexRankType: prismaPlayerStat.ictIndexRankType ?? null,
-  mngWin: prismaPlayerStat.mngWin ?? null,
-  mngDraw: prismaPlayerStat.mngDraw ?? null,
-  mngLoss: prismaPlayerStat.mngLoss ?? null,
-  mngUnderdogWin: prismaPlayerStat.mngUnderdogWin ?? null,
-  mngUnderdogDraw: prismaPlayerStat.mngUnderdogDraw ?? null,
-  mngCleanSheets: prismaPlayerStat.mngCleanSheets ?? null,
-  mngGoalsScored: prismaPlayerStat.mngGoalsScored ?? null,
+export const mapDbPlayerStatToDomain = (dbPlayerStat: DbPlayerStat): RawPlayerStat => ({
+  eventId: dbPlayerStat.eventId as EventId,
+  elementId: dbPlayerStat.elementId as PlayerId,
+  elementType: dbPlayerStat.elementType as ElementTypeId,
+  totalPoints: dbPlayerStat.totalPoints ?? null,
+  form: dbPlayerStat.form ?? null,
+  influence: dbPlayerStat.influence ?? null,
+  creativity: dbPlayerStat.creativity ?? null,
+  threat: dbPlayerStat.threat ?? null,
+  ictIndex: dbPlayerStat.ictIndex ?? null,
+  expectedGoals: dbPlayerStat.expectedGoals ?? null,
+  expectedAssists: dbPlayerStat.expectedAssists ?? null,
+  expectedGoalInvolvements: dbPlayerStat.expectedGoalInvolvements ?? null,
+  expectedGoalsConceded: dbPlayerStat.expectedGoalsConceded ?? null,
+  minutes: dbPlayerStat.minutes ?? null,
+  goalsScored: dbPlayerStat.goalsScored ?? null,
+  assists: dbPlayerStat.assists ?? null,
+  cleanSheets: dbPlayerStat.cleanSheets ?? null,
+  goalsConceded: dbPlayerStat.goalsConceded ?? null,
+  ownGoals: dbPlayerStat.ownGoals ?? null,
+  penaltiesSaved: dbPlayerStat.penaltiesSaved ?? null,
+  yellowCards: dbPlayerStat.yellowCards ?? null,
+  redCards: dbPlayerStat.redCards ?? null,
+  saves: dbPlayerStat.saves ?? null,
+  bonus: dbPlayerStat.bonus ?? null,
+  bps: dbPlayerStat.bps ?? null,
+  starts: dbPlayerStat.starts ?? null,
+  influenceRank: dbPlayerStat.influenceRank ?? null,
+  influenceRankType: dbPlayerStat.influenceRankType ?? null,
+  creativityRank: dbPlayerStat.creativityRank ?? null,
+  creativityRankType: dbPlayerStat.creativityRankType ?? null,
+  threatRank: dbPlayerStat.threatRank ?? null,
+  threatRankType: dbPlayerStat.threatRankType ?? null,
+  ictIndexRank: dbPlayerStat.ictIndexRank ?? null,
+  ictIndexRankType: dbPlayerStat.ictIndexRankType ?? null,
+  mngWin: dbPlayerStat.mngWin ?? null,
+  mngDraw: dbPlayerStat.mngDraw ?? null,
+  mngLoss: dbPlayerStat.mngLoss ?? null,
+  mngUnderdogWin: dbPlayerStat.mngUnderdogWin ?? null,
+  mngUnderdogDraw: dbPlayerStat.mngUnderdogDraw ?? null,
+  mngCleanSheets: dbPlayerStat.mngCleanSheets ?? null,
+  mngGoalsScored: dbPlayerStat.mngGoalsScored ?? null,
 });
 
-export const mapDomainStatToPrismaCreate = (
-  domainStat: RawPlayerStat,
-): PrismaPlayerStatCreateInput => ({
+export const mapDomainStatToDbCreate = (domainStat: RawPlayerStat): DbPlayerStatCreateInput => ({
   eventId: domainStat.eventId,
   elementId: domainStat.elementId,
   elementType: domainStat.elementType,

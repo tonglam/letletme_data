@@ -16,7 +16,6 @@ export type ChipPlay = z.infer<typeof ChipPlaySchema>;
 
 export const EventResponseSchema = z
   .object({
-    // Required fields
     id: z.number(),
     name: z.string(),
     deadline_time: z.string(),
@@ -24,8 +23,6 @@ export const EventResponseSchema = z
     is_previous: z.boolean(),
     is_current: z.boolean(),
     is_next: z.boolean(),
-
-    // Fields with default values
     average_entry_score: z.number().default(0),
     data_checked: z.boolean().default(false),
     highest_score: z.number().nullable().default(0),
@@ -34,8 +31,6 @@ export const EventResponseSchema = z
     h2h_ko_matches_created: z.boolean().default(false),
     ranked_count: z.number().default(0),
     transfers_made: z.number().default(0),
-
-    // Optional fields
     chip_plays: z.array(ChipPlaySchema).default([]),
     most_selected: z.number().nullable().optional(),
     most_transferred_in: z.number().nullable().optional(),

@@ -1,5 +1,5 @@
-import { EventId } from 'src/types/domain/event.type';
-import { TeamId } from 'src/types/domain/team.type';
+import { EventId } from 'types/domain/event.type';
+import { TeamId } from 'types/domain/team.type';
 
 export type TeamFixture = {
   readonly eventId: EventId;

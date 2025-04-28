@@ -1,13 +1,13 @@
 import { Server } from 'http';
 
 import * as E from 'fp-ts/Either';
+import { addJob } from 'infrastructures/queue/jobManager';
+import { initializeManagedQueues, ManagedQueueConfig } from 'infrastructures/queue/queueManager';
+import { createRedisConnection, disconnectRedis } from 'infrastructures/redis/connection';
+import { EmailJobPayload } from 'types/jobs.type';
+import { QueueName } from 'types/queues.type';
 
 import { initializeApp } from './app/initializer';
-import { addJob } from './infrastructures/queue/jobManager';
-import { initializeManagedQueues, ManagedQueueConfig } from './infrastructures/queue/queueManager';
-import { createRedisConnection, disconnectRedis } from './infrastructures/redis/connection';
-import { EmailJobPayload } from './types/jobs.type';
-import { QueueName } from './types/queues.type';
 
 const logger = console;
 

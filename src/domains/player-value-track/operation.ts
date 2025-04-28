@@ -4,12 +4,10 @@ import * as TE from 'fp-ts/TaskEither';
 import {
   PlayerValueTrackCreateInputs,
   PlayerValueTrackRepository,
-} from 'src/repositories/player-value-track/types';
-import { PlayerValueTracks } from 'src/types/domain/player-value-track.type';
-import { createDomainError } from 'src/types/error.type';
-import { DomainErrorCode } from 'src/types/error.type';
-import { DomainError } from 'src/types/error.type';
-import { getErrorMessage } from 'src/utils/error.util';
+} from 'repositories/player-value-track/types';
+import { PlayerValueTracks } from 'types/domain/player-value-track.type';
+import { DomainError, DomainErrorCode, createDomainError } from 'types/error.type';
+import { getErrorMessage } from 'utils/error.util';
 
 export const createPlayerValueTrackOperations = (
   repository: PlayerValueTrackRepository,

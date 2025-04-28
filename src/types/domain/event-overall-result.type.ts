@@ -1,4 +1,4 @@
-import { ChipPlay, TopElementInfo } from 'src/types/domain/event.type';
+import { ChipPlay, TopElementInfo } from 'types/domain/event.type';
 
 export type EventOverallResult = {
   eventId: string;

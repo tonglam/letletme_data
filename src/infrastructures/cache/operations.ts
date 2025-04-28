@@ -1,9 +1,8 @@
+import { CACHE_CONFIG } from 'configs/cache/redis.config';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-
-import { redisClient } from './client';
-import { CACHE_CONFIG } from '../../configs/cache/redis.config';
-import { CacheError, CacheErrorCode, DomainError, DomainErrorCode } from '../../types/error.type';
+import { redisClient } from 'infrastructures/cache/client';
+import { CacheError, CacheErrorCode, DomainError, DomainErrorCode } from 'types/error.type';
 
 export const createStandardCacheError = (error: unknown, message?: string): CacheError => ({
   name: 'CacheError',

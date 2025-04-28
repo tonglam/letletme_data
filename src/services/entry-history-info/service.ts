@@ -1,21 +1,20 @@
+import { FplHistoryDataService } from 'data/types';
 import { createEntryHistoryInfoOperations } from 'domains/entry-history-info/operation';
 import { EntryHistoryInfoOperations } from 'domains/entry-history-info/types';
 import * as A from 'fp-ts/Array';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import { Logger } from 'pino';
+import { EntryHistoryInfoRepository } from 'repositories/entry-history-info/types';
+import { EntryInfoRepository } from 'repositories/entry-info/types';
 import {
   EntryHistoryInfoService,
   EntryHistoryInfoServiceOperations,
 } from 'services/entry-history-info/types';
-import { EntryHistoryInfoRepository } from 'src/repositories/entry-history-info/types';
-import { EntryInfoRepository } from 'src/repositories/entry-info/types';
-import { EntryHistoryInfos } from 'src/types/domain/entry-history-info.type';
-import { DBError, DomainError, ServiceError, ServiceErrorCode } from 'src/types/error.type';
-import { createServiceError } from 'src/types/error.type';
-
-import { FplHistoryDataService } from '../../data/types';
-import { EntryId } from '../../types/domain/entry-info.type';
+import { EntryHistoryInfos } from 'types/domain/entry-history-info.type';
+import { EntryId } from 'types/domain/entry-info.type';
+import { DBError, DomainError, ServiceError, ServiceErrorCode } from 'types/error.type';
+import { createServiceError } from 'types/error.type';
 
 const entryHistoryInfoServiceOperations = (
   fplDataService: FplHistoryDataService,

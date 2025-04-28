@@ -1,11 +1,12 @@
-import { Prisma, EntryHistoryInfo as PrismaEntryHistoryInfoType } from '@prisma/client';
+import { InferInsertModel, InferSelectModel } from 'drizzle-orm';
 import * as TE from 'fp-ts/TaskEither';
-import { EntryHistoryInfo, EntryHistoryInfos } from 'src/types/domain/entry-history-info.type';
-import { EntryId } from 'src/types/domain/entry-info.type';
-import { DBError } from 'src/types/error.type';
+import * as schema from 'schema/entry-history-info';
+import { EntryHistoryInfo, EntryHistoryInfos } from 'types/domain/entry-history-info.type';
+import { EntryId } from 'types/domain/entry-info.type';
+import { DBError } from 'types/error.type';
 
-export type PrismaEntryHistoryInfoCreateInput = Prisma.EntryHistoryInfoCreateInput;
-export type PrismaEntryHistoryInfo = PrismaEntryHistoryInfoType;
+export type DbEntryHistoryInfo = InferSelectModel<typeof schema.entryHistoryInfos>;
+export type DbEntryHistoryInfoCreateInput = InferInsertModel<typeof schema.entryHistoryInfos>;
 
 export type EntryHistoryInfoCreateInput = EntryHistoryInfo;
 export type EntryHistoryInfoCreateInputs = readonly EntryHistoryInfoCreateInput[];

@@ -1,13 +1,14 @@
-import { Prisma, Event as PrismaEventType } from '@prisma/client';
+import { InferInsertModel, InferSelectModel } from 'drizzle-orm';
 import * as TE from 'fp-ts/TaskEither';
-import { Event, EventId, Events } from 'src/types/domain/event.type';
-import { DBError } from 'src/types/error.type';
+import * as schema from 'schema/event';
+import { Event, EventId, Events } from 'types/domain/event.type';
+import { DBError } from 'types/error.type';
 
-export type PrismaEventCreateInput = Prisma.EventCreateInput;
-export type PrismaEvent = PrismaEventType;
+export type DbEvent = InferSelectModel<typeof schema.events>;
+export type DbEventInsert = InferInsertModel<typeof schema.events>;
 
-export type EventCreateInput = Omit<Event, 'id'> & { id: EventId };
-export type EventCreateInputs = readonly EventCreateInput[];
+export type EventCreateInput = Omit<Event, 'createdAt'>;
+export type EventCreateInputs = EventCreateInput[];
 
 export interface EventRepository {
   readonly findById: (id: EventId) => TE.TaskEither<DBError, Event>;

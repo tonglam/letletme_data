@@ -1,39 +1,38 @@
-import { PrismaClient } from '@prisma/client';
+import { db } from 'db/index';
+import { desc, eq } from 'drizzle-orm';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import {
-  mapDomainPlayerValueTrackToPrismaCreate,
-  mapPrismaPlayerValueTrackToDomain,
-} from 'src/repositories/player-value-track/mapper';
+  mapDomainPlayerValueTrackToDbCreate,
+  mapDbPlayerValueTrackToDomain,
+} from 'repositories/player-value-track/mapper';
 import {
   PlayerValueTrackCreateInputs,
   PlayerValueTrackRepository,
-} from 'src/repositories/player-value-track/types';
-import { PlayerValueTracks } from 'src/types/domain/player-value-track.type';
-import { createDBError, DBError, DBErrorCode } from 'src/types/error.type';
-import { getErrorMessage } from 'src/utils/error.util';
+} from 'repositories/player-value-track/types';
+import * as schema from 'schema/player-value-track';
+import { PlayerValueTracks } from 'types/domain/player-value-track.type';
+import { createDBError, DBError, DBErrorCode } from 'types/error.type';
+import { getErrorMessage } from 'utils/error.util';
 
-export const createPlayerValueTrackRepository = (
-  prisma: PrismaClient,
-): PlayerValueTrackRepository => {
+export const createPlayerValueTrackRepository = (): PlayerValueTrackRepository => {
   const findByDate = (date: string): TE.TaskEither<DBError, PlayerValueTracks> =>
     pipe(
       TE.tryCatch(
         async () => {
-          const playerValueTracks = await prisma.playerValueTrack.findMany({
-            where: { date },
-            orderBy: { date: 'desc' },
-          });
-          return playerValueTracks;
+          const playerValueTracks = await db
+            .select()
+            .from(schema.playerValueTracks)
+            .where(eq(schema.playerValueTracks.date, date))
+            .orderBy(desc(schema.playerValueTracks.date));
+          return playerValueTracks.map(mapDbPlayerValueTrackToDomain);
         },
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
             message: `Failed to find player value tracks by date: ${getErrorMessage(error)}`,
+            cause: error instanceof Error ? error : undefined,
           }),
-      ),
-      TE.map((prismaPlayerValueTracks) =>
-        prismaPlayerValueTracks.map(mapPrismaPlayerValueTrackToDomain),
       ),
     );
 
@@ -43,16 +42,19 @@ export const createPlayerValueTrackRepository = (
     pipe(
       TE.tryCatch(
         async () => {
-          const dataToCreate = playerValueTrackInputs.map(mapDomainPlayerValueTrackToPrismaCreate);
-          await prisma.playerValueTrack.createMany({
-            data: dataToCreate,
-            skipDuplicates: true,
-          });
+          const dataToCreate = playerValueTrackInputs.map(mapDomainPlayerValueTrackToDbCreate);
+          await db
+            .insert(schema.playerValueTracks)
+            .values(dataToCreate)
+            .onConflictDoNothing({
+              target: [schema.playerValueTracks.date],
+            });
         },
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
             message: `Failed to save player value tracks: ${getErrorMessage(error)}`,
+            cause: error instanceof Error ? error : undefined,
           }),
       ),
       TE.chain(() => findByDate(playerValueTrackInputs[0].date)),

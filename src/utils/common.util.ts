@@ -1,4 +1,3 @@
-import { Prisma } from '@prisma/client';
 import { pipe } from 'fp-ts/function';
 import * as O from 'fp-ts/Option';
 
@@ -9,10 +8,10 @@ export const safeStringToNumber = (s: string | null | undefined): O.Option<numbe
     O.filter((n) => !isNaN(n)),
   );
 
-export const safeStringToDecimal = (s: string | null | undefined): O.Option<Prisma.Decimal> =>
+export const safeStringToDecimal = (s: string | null | undefined): O.Option<string> =>
   pipe(
     safeStringToNumber(s),
-    O.map((n) => new Prisma.Decimal(n)),
+    O.map((n) => n.toFixed(2)),
   );
 
 export enum Season {

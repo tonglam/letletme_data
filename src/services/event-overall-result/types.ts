@@ -1,11 +1,8 @@
 import * as TE from 'fp-ts/TaskEither';
 import { WorkflowResult } from 'services/types';
-import {
-  EventOverallResult,
-  EventOverallResults,
-} from 'src/types/domain/event-overall-result.type';
-import { EventId } from 'src/types/domain/event.type';
-import { ServiceError } from 'src/types/error.type';
+import { EventOverallResult, EventOverallResults } from 'types/domain/event-overall-result.type';
+import { EventId } from 'types/domain/event.type';
+import { ServiceError } from 'types/error.type';
 
 export interface EventOverallResultServiceOperations {
   readonly findEventOverallResultById: (

@@ -2,16 +2,15 @@ import { pipe } from 'fp-ts/function';
 import * as O from 'fp-ts/Option';
 import { Option } from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
+import { TournamentKnockoutRepository } from 'repositories/tournament-knockout/types';
 import {
   TournamentKnockoutService,
   TournamentKnockoutServiceOperations,
 } from 'services/tournament-knockout/types';
-import { TournamentKnockoutRepository } from 'src/repositories/tournament-knockout/types';
-import { TournamentId } from 'src/types/domain/tournament-info.type';
-import { TournamentKnockouts } from 'src/types/domain/tournament-knockout.type';
-
-import { createDomainError, DomainErrorCode, ServiceError } from '../../types/error.type';
-import { mapDomainErrorToServiceError, mapDBErrorToServiceError } from '../../utils/error.util';
+import { TournamentId } from 'types/domain/tournament-info.type';
+import { TournamentKnockouts } from 'types/domain/tournament-knockout.type';
+import { createDomainError, DomainErrorCode, ServiceError } from 'types/error.type';
+import { mapDomainErrorToServiceError, mapDBErrorToServiceError } from 'utils/error.util';
 
 const tournamentKnockoutServiceOperations = (
   repository: TournamentKnockoutRepository,
