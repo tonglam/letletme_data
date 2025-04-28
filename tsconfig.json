@@ -1,13 +1,13 @@
 {
   "compilerOptions": {
     "target": "ESNext",
-    "module": "Commonjs",
+    "module": "ESNext",
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "noImplicitAny": true,
-    "outDir": "./dist",
+    "outDir": "./build",
     "rootDir": ".",
     "baseUrl": ".",
     "paths": {
@@ -30,10 +30,10 @@
     "noUnusedLocals": true,
     "noImplicitReturns": true,
     "noFallthroughCasesInSwitch": true,
-    "moduleResolution": "node",
-    "composite": true,
+    "moduleResolution": "bundler",
+    "composite": false,
     "resolveJsonModule": true,
-    "types": ["vitest/globals"]
+    "types": ["bun-types", "vitest/globals"]
   },
   "include": [
     "src/**/*.ts",
@@ -44,5 +44,5 @@
     "scripts/**/*.ts",
     "drizzle.config.ts"
   ],
-  "exclude": ["node_modules"]
+  "exclude": ["node_modules", "build"]
 }
