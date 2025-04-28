@@ -7,26 +7,26 @@ import { createServiceError, ServiceError, ServiceErrorCode } from '../../types/
 import { createWorkflowContext } from '../types';
 
 import type { WorkflowResult } from '../types';
-import type { EntryEventTransferService, EntryEventTransferWorkflowOperations } from './types';
+import type { EventOverallResultService, EventOverallResultWorkflowOperations } from './types';
 
 const logger = getWorkflowLogger();
 
-export const entryEventTransferWorkflows = (
-  entryEventTransferService: EntryEventTransferService,
-): EntryEventTransferWorkflowOperations => {
-  const syncEntryEventTransfers = (
+export const eventOverallResultWorkflows = (
+  eventOverallResultService: EventOverallResultService,
+): EventOverallResultWorkflowOperations => {
+  const syncEventOverallResults = (
     eventId: EventId,
   ): TE.TaskEither<ServiceError, WorkflowResult> => {
-    const context = createWorkflowContext('entry-event-transfer-sync');
+    const context = createWorkflowContext('event-overall-result-sync');
 
-    logger.info({ workflow: context.workflowId }, 'Starting entry event transfer sync workflow');
+    logger.info({ workflow: context.workflowId }, 'Starting event overall result sync workflow');
 
     return pipe(
-      entryEventTransferService.syncTransfersFromApi(eventId),
+      eventOverallResultService.syncEventOverallResultsFromApi(eventId),
       TE.mapLeft((error: ServiceError) =>
         createServiceError({
           code: ServiceErrorCode.INTEGRATION_ERROR,
-          message: `Entry event transfer sync workflow failed: ${error.message}`,
+          message: `Event overall result sync workflow failed: ${error.message}`,
           cause: error instanceof Error ? error : undefined,
         }),
       ),
@@ -38,7 +38,7 @@ export const entryEventTransferWorkflows = (
             workflow: context.workflowId,
             durationMs: duration,
           },
-          'Entry event transfer sync workflow completed successfully',
+          'Event overall result sync workflow completed successfully',
         );
 
         return {
@@ -50,6 +50,6 @@ export const entryEventTransferWorkflows = (
   };
 
   return {
-    syncEntryEventTransfers,
+    syncEventOverallResults,
   };
 };

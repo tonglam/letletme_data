@@ -78,23 +78,11 @@ export const createPlayerValueOperations = (
       ),
     );
 
-  const deletePlayerValuesByChangeDate = (changeDate: string): TE.TaskEither<DomainError, void> =>
-    pipe(
-      repository.deleteByChangeDate(changeDate),
-      TE.mapLeft((dbError) =>
-        createDomainError({
-          code: DomainErrorCode.DATABASE_ERROR,
-          message: `DB Error (deletePlayerValuesByChangeDate): ${getErrorMessage(dbError)}`,
-        }),
-      ),
-    );
-
   return {
     getLatestPlayerValuesByElements,
     getPlayerValuesByChangeDate,
     getPlayerValuesByElement,
     getPlayerValuesByElements,
     savePlayerValueChanges,
-    deletePlayerValuesByChangeDate,
   };
 };

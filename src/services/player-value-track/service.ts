@@ -20,7 +20,6 @@ import {
   ServiceErrorCode,
   createServiceError,
 } from 'src/types/error.type';
-import { formatYYYYMMDD } from 'src/utils/date.util';
 import { createServiceIntegrationError, mapDomainErrorToServiceError } from 'src/utils/error.util';
 
 export const playerValueTrackServiceOperations = (
@@ -34,8 +33,6 @@ export const playerValueTrackServiceOperations = (
     pipe(domainOps.getPlayerValueTracksByDate(date), TE.mapLeft(mapDomainErrorToServiceError));
 
   const syncPlayerValueTracksFromApi = (): TE.TaskEither<ServiceError, void> => {
-    const date = formatYYYYMMDD();
-
     return pipe(
       eventService.getCurrentEvent(),
       TE.chainW((event: Event) =>
@@ -56,12 +53,6 @@ export const playerValueTrackServiceOperations = (
               message: 'Failed to fetch player value tracks via data layer',
               cause: error.cause,
             }),
-          ),
-          TE.chainFirstW(() =>
-            pipe(
-              domainOps.deletePlayerValueTracksByDate(date),
-              TE.mapLeft(mapDomainErrorToServiceError),
-            ),
           ),
           TE.chainW((playerValueTracks: PlayerValueTracks) =>
             pipe(

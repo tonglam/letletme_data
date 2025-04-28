@@ -41,21 +41,8 @@ export const createPlayerValueTrackOperations = (
       ),
     );
 
-  const deletePlayerValueTracksByDate = (date: string): TE.TaskEither<DomainError, void> =>
-    pipe(
-      repository.deleteByDate(date),
-      TE.mapLeft((dbError) =>
-        createDomainError({
-          code: DomainErrorCode.DATABASE_ERROR,
-          message: `DB Error (deletePlayerValueTracksByDate): ${getErrorMessage(dbError)}`,
-          cause: dbError,
-        }),
-      ),
-    );
-
   return {
     getPlayerValueTracksByDate,
     savePlayerValueTracksByDate,
-    deletePlayerValueTracksByDate,
   };
 };

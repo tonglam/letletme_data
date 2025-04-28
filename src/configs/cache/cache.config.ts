@@ -16,8 +16,7 @@ export const DefaultTTL = {
   PLAYER_STAT: CacheTTL.DERIVED_DATA,
   FIXTURE: CacheTTL.DERIVED_DATA,
   LIVE: CacheTTL.WEEKLY,
-  TOURNAMENT_INFO: CacheTTL.DERIVED_DATA,
-  TOURNAMENT_ENTRY: CacheTTL.DERIVED_DATA,
+  OVERALL_RESULT: CacheTTL.DERIVED_DATA,
 } as const;
 
 export const CachePrefix = {
@@ -29,6 +28,5 @@ export const CachePrefix = {
   PLAYER_STAT: 'player-stat',
   FIXTURE: 'fixture',
   LIVE: 'live',
-  TOURNAMENT_INFO: 'tournament-info',
-  TOURNAMENT_ENTRY: 'tournament-entry',
+  OVERALL_RESULT: 'overall-result',
 } as const;
