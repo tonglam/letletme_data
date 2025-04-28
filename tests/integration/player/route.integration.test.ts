@@ -11,7 +11,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 // Specific imports
 import { playerRouter } from '../../../src/api/player/route'; // Import the router
-import { CachePrefix } from '../../../src/configs/cache/cache.config';
+import { CachePrefix } from '../../../src/config/cache/cache.config';
 import { createFplBootstrapDataService } from '../../../src/data/fpl/bootstrap.data';
 import { FplBootstrapDataService } from '../../../src/data/types';
 import { createPlayerCache } from '../../../src/domains/player/cache';

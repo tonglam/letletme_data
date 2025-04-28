@@ -1,4 +1,3 @@
-import { apiConfig } from 'configs/api/api.config';
 import { mapEntryHistoryResponseToDomain } from 'data/fpl/mappers/history/history.mapper';
 import {
   EntryHistoryResponse,
@@ -8,81 +7,117 @@ import { FplHistoryDataService } from 'data/types';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { HTTPClient } from 'infrastructures/http';
-import { Logger } from 'pino';
+import { apiConfig } from 'src/config/api/api.config';
 import { EntryHistoryInfos } from 'types/domain/entry-history-info.type';
 import { EntryId } from 'types/domain/entry-info.type';
 import { DataLayerError, DataLayerErrorCode } from 'types/error.type';
 import { createDataLayerError } from 'utils/error.util';
+import { FplApiContext, logFplApiCall, logFplApiError } from 'utils/logger.util';
 
-export const createFplHistoryDataService = (
-  client: HTTPClient,
-  logger: Logger,
-): FplHistoryDataService => {
+export const createFplHistoryDataService = (): FplHistoryDataService => {
   let cachedHistoryResponse: EntryHistoryResponse | null = null;
 
   const fetchAndValidateHistories = (
     entryId: EntryId,
   ): TE.TaskEither<DataLayerError, EntryHistoryResponse> => {
-    logger.info({ operation: `fetchAndValidateHistory(${entryId})` }, 'Fetching FPL entry history');
+    const url = apiConfig.endpoints.entry.history({ entryId });
+    const context: FplApiContext = {
+      service: 'FplHistoryDataService',
+      endpoint: url,
+      entryId,
+    };
+    logFplApiCall('Attempting to fetch FPL entry history', context);
 
-    return pipe(
-      client.get<EntryHistoryResponse>(apiConfig.endpoints.entry.history({ entryId: entryId })),
-      TE.mapLeft((apiError) => {
-        logger.error(
-          {
-            operation: 'fetchAndValidateHistory',
-            error: apiError,
-            success: false,
-          },
-          'FPL API call failed',
-        );
-        return createDataLayerError({
-          code: DataLayerErrorCode.FETCH_ERROR,
-          message: 'Failed to fetch data from FPL API',
-          cause: apiError instanceof Error ? apiError : undefined,
-          details: { apiError },
-        });
-      }),
-      TE.chain((response) => {
-        const parsed = EntryHistoryResponseSchema.safeParse(response);
-        if (!parsed.success) {
-          logger.error(
-            {
-              operation: 'fetchAndValidateHistory',
-              error: {
-                message: 'Invalid response data',
-                validationError: parsed.error.errors,
-              },
-              response: response,
-              success: false,
-            },
-            'FPL API response validation failed',
-          );
-          return TE.left(
-            createDataLayerError({
-              code: DataLayerErrorCode.VALIDATION_ERROR,
-              message: 'Invalid response data',
-              cause: parsed.error,
-              details: {
-                errorMessage: parsed.error.message,
-                validationError: parsed.error.format(),
-              },
-            }),
-          );
+    return TE.tryCatchK(
+      async () => {
+        const response = await fetch(url);
+
+        if (!response.ok) {
+          throw {
+            type: 'HttpError',
+            status: response.status,
+            statusText: response.statusText,
+            url,
+          };
         }
-        logger.info(
-          {
-            operation: 'fetchAndValidateHistory',
-            success: true,
-            historyInfosCount: parsed.data.past.length,
-          },
-          'FPL API call successful and validated',
-        );
+
+        const data: unknown = await response.json();
+
+        const parsed = EntryHistoryResponseSchema.safeParse(data);
+        if (!parsed.success) {
+          throw {
+            type: 'ValidationError',
+            message: 'Invalid response data',
+            validationError: parsed.error.format(),
+            response: data,
+          };
+        }
+
+        logFplApiCall('FPL API call successful and validated', {
+          ...context,
+          entryId,
+          success: true,
+          historyInfosCount: parsed.data.past.length,
+        });
         cachedHistoryResponse = parsed.data;
-        return TE.right(parsed.data);
-      }),
-    );
+        return parsed.data;
+      },
+      (error: unknown): DataLayerError => {
+        if (typeof error === 'object' && error !== null && 'type' in error) {
+          const errorObj = error as { type: string };
+
+          if (
+            errorObj.type === 'HttpError' &&
+            'status' in error &&
+            typeof error.status === 'number' &&
+            'statusText' in error &&
+            typeof error.statusText === 'string' &&
+            'url' in error &&
+            typeof error.url === 'string'
+          ) {
+            const httpError = createDataLayerError({
+              code: DataLayerErrorCode.FETCH_ERROR,
+              message: `FPL API HTTP Error: ${error.status} ${error.statusText}`,
+              details: {
+                entryId,
+                status: error.status,
+                statusText: error.statusText,
+                url: error.url,
+              },
+            });
+            logFplApiError(httpError, { ...context, err: httpError });
+            return httpError;
+          }
+          if (
+            errorObj.type === 'ValidationError' &&
+            'validationError' in error &&
+            'response' in error &&
+            typeof (error as { message?: string }).message === 'string'
+          ) {
+            const validationError = createDataLayerError({
+              code: DataLayerErrorCode.VALIDATION_ERROR,
+              message: 'Invalid response data for entry history',
+              details: {
+                entryId,
+                validationError: error.validationError,
+                response: error.response,
+              },
+            });
+            logFplApiError(validationError, { ...context, err: validationError });
+            return validationError;
+          }
+        }
+
+        const unexpectedError = createDataLayerError({
+          code: DataLayerErrorCode.FETCH_ERROR,
+          message: 'An unexpected error occurred during FPL history fetch or processing',
+          cause: error instanceof Error ? error : undefined,
+          details: { entryId, error },
+        });
+        logFplApiError(unexpectedError, { ...context, err: unexpectedError });
+        return unexpectedError;
+      },
+    )();
   };
 
   const getFplHistoryDataInternal = (

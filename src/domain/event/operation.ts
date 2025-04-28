@@ -1,0 +1,39 @@
+import { EventOperations } from 'domain/event/types';
+
+import { pipe } from 'fp-ts/function';
+import * as TE from 'fp-ts/TaskEither';
+import { EventCreateInputs, EventRepository } from 'repository/event/types';
+import { Events } from 'types/domain/event.type';
+import { DomainError, DomainErrorCode, createDomainError } from 'types/error.type';
+import { getErrorMessage } from 'utils/error.util';
+
+export const createEventOperations = (repository: EventRepository): EventOperations => {
+  const saveEvents = (eventInputs: EventCreateInputs): TE.TaskEither<DomainError, Events> =>
+    pipe(
+      repository.saveBatch(eventInputs),
+      TE.mapLeft((dbError) =>
+        createDomainError({
+          code: DomainErrorCode.DATABASE_ERROR,
+          message: `DB Error (saveEvents): ${getErrorMessage(dbError)}`,
+          cause: dbError,
+        }),
+      ),
+    );
+
+  const deleteAllEvents = (): TE.TaskEither<DomainError, void> =>
+    pipe(
+      repository.deleteAll(),
+      TE.mapLeft((dbError) =>
+        createDomainError({
+          code: DomainErrorCode.DATABASE_ERROR,
+          message: `DB Error (deleteAll): ${getErrorMessage(dbError)}`,
+          cause: dbError,
+        }),
+      ),
+    );
+
+  return {
+    saveEvents,
+    deleteAllEvents,
+  };
+};

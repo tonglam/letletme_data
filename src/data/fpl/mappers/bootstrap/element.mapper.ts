@@ -9,7 +9,7 @@ import { PlayerValueTrack } from 'types/domain/player-value-track.type';
 import { SourcePlayerValue } from 'types/domain/player-value.type';
 import { PlayerId, PlayerType, RawPlayer, validatePlayerId } from 'types/domain/player.type';
 import { TeamId } from 'types/domain/team.type';
-import { safeStringToDecimal, safeStringToNumber } from 'utils/common.util';
+import { safeStringToNumber } from 'utils/common.util';
 
 export const mapElementResponseToPlayer = (raw: ElementResponse): E.Either<string, RawPlayer> =>
   pipe(
@@ -99,42 +99,15 @@ export const mapElementResponseToPlayerStat = (
         elementId: element as PlayerId,
         elementType: raw.element_type as PlayerType,
         totalPoints: raw.total_points,
-        form: pipe(
-          safeStringToNumber(raw.form),
-          O.getOrElseW(() => null),
-        ),
-        influence: pipe(
-          safeStringToNumber(raw.influence),
-          O.getOrElseW(() => null),
-        ),
-        creativity: pipe(
-          safeStringToNumber(raw.creativity),
-          O.getOrElseW(() => null),
-        ),
-        threat: pipe(
-          safeStringToNumber(raw.threat),
-          O.getOrElseW(() => null),
-        ),
-        ictIndex: pipe(
-          safeStringToNumber(raw.ict_index),
-          O.getOrElseW(() => null),
-        ),
-        expectedGoals: pipe(
-          safeStringToDecimal(raw.expected_goals),
-          O.getOrElseW(() => null),
-        ),
-        expectedAssists: pipe(
-          safeStringToDecimal(raw.expected_assists),
-          O.getOrElseW(() => null),
-        ),
-        expectedGoalInvolvements: pipe(
-          safeStringToDecimal(raw.expected_goal_involvements),
-          O.getOrElseW(() => null),
-        ),
-        expectedGoalsConceded: pipe(
-          safeStringToDecimal(raw.expected_goals_conceded),
-          O.getOrElseW(() => null),
-        ),
+        form: raw.form ?? null,
+        influence: raw.influence ?? null,
+        creativity: raw.creativity ?? null,
+        threat: raw.threat ?? null,
+        ictIndex: raw.ict_index ?? null,
+        expectedGoals: raw.expected_goals ?? null,
+        expectedAssists: raw.expected_assists ?? null,
+        expectedGoalInvolvements: raw.expected_goal_involvements ?? null,
+        expectedGoalsConceded: raw.expected_goals_conceded ?? null,
         minutes: raw.minutes,
         goalsScored: raw.goals_scored,
         assists: raw.assists,

@@ -1,12 +1,13 @@
-import { PlayerCache } from 'domains/player/types';
-import { TeamCache } from 'domains/team/types';
+import { PlayerCache } from 'domain/player/types';
+import { TeamCache } from 'domain/team/types';
+
 import * as Eq from 'fp-ts/Eq';
 import { pipe } from 'fp-ts/function';
 import * as O from 'fp-ts/Option';
 import * as RA from 'fp-ts/ReadonlyArray';
 import * as RNEA from 'fp-ts/ReadonlyNonEmptyArray';
 import * as TE from 'fp-ts/TaskEither';
-import { EntryInfoRepository } from 'repositories/entry-info/types';
+import { EntryInfoRepository } from 'repository/entry-info/types';
 import { ElementTypeId, ElementTypeName, getElementTypeName } from 'types/base.type';
 import {
   EntryEventPick,

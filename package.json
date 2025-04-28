@@ -10,15 +10,13 @@
     "build": "bun prisma generate && bun build src/index.ts --outdir ./build",
     "test": "bun test",
     "coverage": "bun test --coverage",
-    "prisma": "bun prisma generate",
     "lint": "bunx eslint . --ext .ts,.tsx --cache --config eslint.config.mjs",
     "lint:fix": "bunx eslint . --ext .ts,.tsx --cache --fix --config eslint.config.mjs",
-    "lint:strict": "bunx eslint . --ext .ts,.tsx --max-warnings=0 --config eslint.config.mjs",
-    "lint:auto-fix": "bunx eslint . --ext .ts,.tsx --fix --config eslint.config.mjs --rule '{\"import/order\": [\"error\", {\"groups\": [\"builtin\", \"external\", \"internal\", [\"parent\", \"sibling\"], \"index\"], \"newlines-between\": \"always\"}]}'",
-    "format": "bunx prettier --write .",
-    "format:check": "bunx prettier --check .",
     "format:fix": "bunx prettier --write .",
-    "check-all": "bun run lint && bun run format:check && bun run test"
+    "db:generate": "bunx drizzle-kit generate",
+    "db:migrate": "bunx drizzle-kit migrate",
+    "db:check": "bunx drizzle-kit check",
+    "db:studio": "bunx drizzle-kit studio"
   },
   "repository": {
     "type": "git",
@@ -57,6 +55,7 @@
     "bullmq": "^5.49.1",
     "date-fns": "^4.1.0",
     "drizzle-orm": "^0.43.1",
+    "drizzle-typebox": "^0.3.2",
     "drizzle-zod": "^0.7.1",
     "elysia": "^1.0.9",
     "fp-ts": "^2.16.9",

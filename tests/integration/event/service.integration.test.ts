@@ -5,7 +5,7 @@ import { EventRepository } from 'src/repositories/event/types';
 import { EventId } from 'src/types/domain/event.type';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { CachePrefix, DefaultTTL } from '../../../src/configs/cache/cache.config';
+import { CachePrefix, DefaultTTL } from '../../../src/config/cache/cache.config';
 import { createFplBootstrapDataService } from '../../../src/data/fpl/bootstrap.data';
 import { createFplFixtureDataService } from '../../../src/data/fpl/fixture.data';
 import { FplBootstrapDataService, FplFixtureDataService } from '../../../src/data/types';

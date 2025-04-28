@@ -1,4 +1,3 @@
-import { apiConfig } from 'configs/api/api.config';
 import { mapTransferResponseToEntryEventTransfer } from 'data/fpl/mappers/transfer/transfer.mapper';
 import {
   TransferResponseSchema,
@@ -8,88 +7,122 @@ import { FplTransferDataService } from 'data/types';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { HTTPClient } from 'infrastructures/http';
-import { Logger } from 'pino';
+import { apiConfig } from 'src/config/api/api.config';
 import { RawEntryEventTransfers } from 'types/domain/entry-event-transfer.type';
 import { EntryId } from 'types/domain/entry-info.type';
 import { EventId } from 'types/domain/event.type';
 import { DataLayerError, DataLayerErrorCode } from 'types/error.type';
 import { createDataLayerError } from 'utils/error.util';
+import { FplApiContext, logFplApiCall, logFplApiError } from 'utils/logger.util';
 import { z } from 'zod';
 
-export const createFplTransferDataService = (
-  client: HTTPClient,
-  logger: Logger,
-): FplTransferDataService => {
+export const createFplTransferDataService = (): FplTransferDataService => {
   let cachedTransferResponse: TransfersResponse | null = null;
 
   const fetchAndValidateTransfers = (
     entryId: EntryId,
     eventId: EventId,
   ): TE.TaskEither<DataLayerError, TransfersResponse> => {
-    logger.info(
-      { operation: `fetchAndValidateTransfers(${entryId}, ${eventId})` },
-      'Fetching FPL transfers',
-    );
+    const url = apiConfig.endpoints.entry.transfers({ entryId, eventId });
+    const context: FplApiContext = {
+      service: 'FplTransferDataService',
+      endpoint: url,
+      entryId,
+      eventId,
+    };
+    logFplApiCall('Attempting to fetch FPL transfers', context);
 
-    return pipe(
-      client.get<TransfersResponse>(
-        apiConfig.endpoints.entry.transfers({ entryId: entryId, eventId: eventId }),
-      ),
-      TE.mapLeft((apiError) => {
-        logger.error(
-          {
-            operation: 'fetchAndValidateTransfers',
-            error: apiError,
-            success: false,
-          },
-          'FPL API call failed',
-        );
-        return createDataLayerError({
-          code: DataLayerErrorCode.FETCH_ERROR,
-          message: 'Failed to fetch FPL transfers',
-          cause: apiError instanceof Error ? apiError : undefined,
-          details: { apiError },
-        });
-      }),
-      TE.chain((response) => {
-        const parsed = z.array(TransferResponseSchema).safeParse(response);
-        if (!parsed.success) {
-          logger.error(
-            {
-              operation: 'fetchAndValidateTransfers',
-              error: {
-                message: 'Invalid response data',
-                validationError: parsed.error.errors,
-              },
-              response: response,
-              success: false,
-            },
-            'FPL API response validation failed',
-          );
-          return TE.left(
-            createDataLayerError({
-              code: DataLayerErrorCode.VALIDATION_ERROR,
-              message: 'Failed to validate FPL transfers',
-              cause: parsed.error,
-              details: {
-                errorMessage: parsed.error.message,
-                validationError: parsed.error.format(),
-              },
-            }),
-          );
+    return TE.tryCatchK(
+      async () => {
+        const response = await fetch(url);
+
+        if (!response.ok) {
+          throw {
+            type: 'HttpError',
+            status: response.status,
+            statusText: response.statusText,
+            url,
+          };
         }
-        logger.info(
-          {
-            operation: 'fetchAndValidateTransfers',
-            success: true,
-          },
-          'FPL transfers fetched and validated',
-        );
+
+        const data: unknown = await response.json();
+
+        const parsed = z.array(TransferResponseSchema).safeParse(data);
+        if (!parsed.success) {
+          throw {
+            type: 'ValidationError',
+            message: 'Invalid response data',
+            validationError: parsed.error.format(),
+            response: data,
+          };
+        }
+
+        logFplApiCall('FPL transfers fetched and validated', {
+          ...context,
+          entryId,
+          eventId,
+        });
         cachedTransferResponse = parsed.data;
-        return TE.right(parsed.data);
-      }),
-    );
+        return parsed.data;
+      },
+      (error: unknown): DataLayerError => {
+        if (typeof error === 'object' && error !== null && 'type' in error) {
+          const errorObj = error as { type: string };
+
+          if (
+            errorObj.type === 'HttpError' &&
+            'status' in error &&
+            typeof error.status === 'number' &&
+            'statusText' in error &&
+            typeof error.statusText === 'string' &&
+            'url' in error &&
+            typeof error.url === 'string'
+          ) {
+            const httpError = createDataLayerError({
+              code: DataLayerErrorCode.FETCH_ERROR,
+              message: `FPL API HTTP Error: ${error.status} ${error.statusText}`,
+              details: {
+                entryId,
+                eventId,
+                status: error.status,
+                statusText: error.statusText,
+                url: error.url,
+              },
+            });
+            logFplApiError(httpError, { ...context, err: httpError });
+            return httpError;
+          }
+          if (
+            errorObj.type === 'ValidationError' &&
+            'validationError' in error &&
+            'response' in error &&
+            typeof (error as { message?: string }).message === 'string'
+          ) {
+            const validationError = createDataLayerError({
+              code: DataLayerErrorCode.VALIDATION_ERROR,
+              message: 'Invalid response data for transfers',
+              details: {
+                entryId,
+                eventId,
+                validationError: error.validationError,
+                response: error.response,
+              },
+            });
+            logFplApiError(validationError, { ...context, err: validationError });
+            return validationError;
+          }
+        }
+
+        const unexpectedError = createDataLayerError({
+          code: DataLayerErrorCode.FETCH_ERROR,
+          message: 'An unexpected error occurred during FPL transfers fetch or processing',
+          cause: error instanceof Error ? error : undefined,
+          details: { entryId, eventId, error },
+        });
+        logFplApiError(unexpectedError, { ...context, err: unexpectedError });
+        return unexpectedError;
+      },
+    )();
   };
 
   const getTransfersInternal = (

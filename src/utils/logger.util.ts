@@ -1,5 +1,5 @@
-import { Request } from 'express';
-import { getApiLogger, getFplApiLogger, getQueueLogger } from 'infrastructures/logger';
+import { Context } from 'elysia';
+import { getApiLogger, getFplApiLogger, getQueueLogger } from 'infrastructure/logger';
 import { v4 as uuidv4 } from 'uuid';
 
 export interface LogContext {
@@ -31,32 +31,32 @@ export const sanitizeHeaders = (headers: Record<string, unknown>): Record<string
   return sanitized;
 };
 
-export const getRequestDetails = (req: Request): Record<string, unknown> => ({
-  ...(req.method !== 'GET' && { body: req.body }),
-  userAgent: req.get('user-agent'),
-  ip: req.ip,
-  headers: sanitizeHeaders(req.headers as Record<string, unknown>),
+export const getRequestDetails = (ctx: Context): Record<string, unknown> => ({
+  ...(ctx.request.method !== 'GET' && { body: ctx.body }),
+  userAgent: ctx.request.headers.get('user-agent'),
+  ip: ctx.request.headers.get('x-forwarded-for') ?? null,
+  headers: sanitizeHeaders(Object.fromEntries(ctx.request.headers.entries())),
 });
 
-export const logApiRequest = (req: Request, message: string, context?: LogContext): void => {
+export const logApiRequest = (ctx: Context, message: string, context?: LogContext): void => {
   getApiLogger().info(
     {
-      requestId: req.id,
-      method: req.method,
-      url: req.originalUrl,
-      ...getRequestDetails(req),
+      requestId: generateRequestId(),
+      method: ctx.request.method,
+      url: ctx.path,
+      ...getRequestDetails(ctx),
       ...context,
     },
     message,
   );
 };
 
-export const logApiError = (req: Request, error: Error, context?: LogContext): void => {
+export const logApiError = (ctx: Context, error: Error, context?: LogContext): void => {
   getApiLogger().error({
     err: error,
-    requestId: req.id,
-    url: req.originalUrl,
-    method: req.method,
+    requestId: generateRequestId(),
+    url: ctx.path,
+    method: ctx.request.method,
     stack: process.env.NODE_ENV !== 'production' ? error.stack : undefined,
     ...context,
   });

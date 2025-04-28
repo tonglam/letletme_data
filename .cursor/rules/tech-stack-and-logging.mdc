@@ -1,0 +1,28 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# Tech Stack & Logging
+
+This project uses **Elysia** on **Bun** as the backend framework, adhering to Domain-Driven Design (DDD) and Functional Programming (FP) principles.
+
+**Key Technologies:**
+- Runtime: Bun
+- Framework: Elysia
+- Language: TypeScript
+- ORM: Prisma
+- Validation: Zod
+- Job Queue: BullMQ
+- Logging: Pino
+- Testing: Vitest
+
+**Logging:**
+Centralized logging utilities are defined in [src/utils/logger.util.ts](mdc:src/utils/logger.util.ts). Remember to use the Elysia `Context` object for API logging, not Express `Request`.
+
+**Architecture:**
+Follow the layered structure outlined in the project documentation:
+- `/domain`
+- `/service`
+- `/infrastructure`
+- `/api`

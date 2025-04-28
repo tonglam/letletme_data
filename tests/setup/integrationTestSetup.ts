@@ -3,7 +3,7 @@ import axios from 'axios';
 import pino, { Logger } from 'pino';
 
 // Configs
-import { apiConfig } from '../../src/configs/api/api.config';
+import { apiConfig } from '../../src/config/api/api.config';
 // Infrastructures
 // import { redisClient } from '../../src/infrastructures/cache/client'; // redisClient managed globally
 import { createHTTPClient, HTTPClient } from '../../src/infrastructures/http';

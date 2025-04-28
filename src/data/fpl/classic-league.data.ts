@@ -1,4 +1,3 @@
-import { apiConfig } from 'configs/api/api.config';
 import { mapClassicLeagueResponseToDomain } from 'data/fpl/mappers/league/classic-league.mapper';
 import {
   ClassicLeagueResponse,
@@ -9,75 +8,112 @@ import { FplClassicLeagueDataService } from 'data/types';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { HTTPClient } from 'infrastructures/http/types';
-import { Logger } from 'pino';
+import { apiConfig } from 'src/config/api/api.config';
 import { ClassicLeague, LeagueId } from 'types/domain/league.type';
 import { DataLayerError, DataLayerErrorCode } from 'types/error.type';
 import { createDataLayerError } from 'utils/error.util';
+import { FplApiContext, logFplApiCall, logFplApiError } from 'utils/logger.util';
 
-export const createFplClassicLeagueDataService = (
-  client: HTTPClient,
-  logger: Logger,
-): FplClassicLeagueDataService => {
+export const createFplClassicLeagueDataService = (): FplClassicLeagueDataService => {
   const fetchClassicLeaguePage = (
     leagueId: LeagueId,
     page: number,
   ): TE.TaskEither<DataLayerError, ClassicLeagueResponse> => {
-    logger.info(
-      { operation: `fetchClassicLeaguePage(${leagueId}, ${page})` },
-      `Fetching FPL classic league data page ${page}`,
-    );
-    return pipe(
-      client.get<ClassicLeagueResponse>(
-        apiConfig.endpoints.leagues.classic({ leagueId: leagueId, page: page }),
-      ),
-      TE.mapLeft((apiError) => {
-        logger.error(
-          { operation: 'fetchClassicLeaguePage', leagueId, page, error: apiError, success: false },
-          'FPL API call failed',
-        );
-        return createDataLayerError({
-          code: DataLayerErrorCode.FETCH_ERROR,
-          message: `Failed to fetch page ${page} for league ${leagueId} from FPL API`,
-          cause: apiError instanceof Error ? apiError : undefined,
-          details: { apiError, leagueId, page },
-        });
-      }),
-      TE.chain((response) => {
-        const parsed = ClassicLeagueResponseSchema.safeParse(response);
+    const url = apiConfig.endpoints.leagues.classic({ leagueId, page });
+    const context: FplApiContext = {
+      service: 'FplClassicLeagueDataService',
+      endpoint: url,
+      leagueId,
+      page,
+    };
+    logFplApiCall(`Attempting to fetch FPL classic league page ${page}`, context);
+
+    return TE.tryCatchK(
+      async () => {
+        const response = await fetch(url);
+
+        if (!response.ok) {
+          throw {
+            type: 'HttpError',
+            status: response.status,
+            statusText: response.statusText,
+            url,
+          };
+        }
+
+        const data: unknown = await response.json();
+
+        const parsed = ClassicLeagueResponseSchema.safeParse(data);
         if (!parsed.success) {
-          logger.error(
-            {
-              operation: 'fetchClassicLeaguePage',
-              leagueId,
-              page,
-              error: { message: 'Invalid response data', validationError: parsed.error.errors },
-              response: response,
-              success: false,
-            },
-            `FPL API response validation failed for page ${page}`,
-          );
-          return TE.left(
-            createDataLayerError({
-              code: DataLayerErrorCode.VALIDATION_ERROR,
-              message: `Invalid classic league data received from FPL API on page ${page} for league ${leagueId}`,
-              cause: undefined,
+          throw {
+            type: 'ValidationError',
+            message: 'Invalid response data',
+            validationError: parsed.error.format(),
+            response: data,
+          };
+        }
+
+        logFplApiCall(`FPL API call successful and validated for page ${page}`, { ...context });
+        return parsed.data;
+      },
+      (error: unknown): DataLayerError => {
+        if (typeof error === 'object' && error !== null && 'type' in error) {
+          const errorObj = error as { type: string };
+
+          if (
+            errorObj.type === 'HttpError' &&
+            'status' in error &&
+            typeof error.status === 'number' &&
+            'statusText' in error &&
+            typeof error.statusText === 'string' &&
+            'url' in error &&
+            typeof error.url === 'string'
+          ) {
+            const httpError = createDataLayerError({
+              code: DataLayerErrorCode.FETCH_ERROR,
+              message: `FPL API HTTP Error: ${error.status} ${error.statusText}`,
               details: {
                 leagueId,
                 page,
-                errorMessage: parsed.error.message,
-                validationError: parsed.error.format(),
+                status: error.status,
+                statusText: error.statusText,
+                url: error.url,
               },
-            }),
-          );
+            });
+            logFplApiError(httpError, { ...context, err: httpError });
+            return httpError;
+          }
+          if (
+            errorObj.type === 'ValidationError' &&
+            'validationError' in error &&
+            'response' in error &&
+            typeof (error as { message?: string }).message === 'string'
+          ) {
+            const validationError = createDataLayerError({
+              code: DataLayerErrorCode.VALIDATION_ERROR,
+              message: `Invalid response data for classic league page ${page}`,
+              details: {
+                leagueId,
+                page,
+                validationError: error.validationError,
+                response: error.response,
+              },
+            });
+            logFplApiError(validationError, { ...context, err: validationError });
+            return validationError;
+          }
         }
-        logger.info(
-          { operation: 'fetchClassicLeaguePage', leagueId, page, success: true },
-          `FPL API call successful and validated for page ${page}`,
-        );
-        return TE.right(parsed.data);
-      }),
-    );
+
+        const unexpectedError = createDataLayerError({
+          code: DataLayerErrorCode.FETCH_ERROR,
+          message: 'An unexpected error occurred during FPL classic league fetch or processing',
+          cause: error instanceof Error ? error : undefined,
+          details: { leagueId, page, error },
+        });
+        logFplApiError(unexpectedError, { ...context, err: unexpectedError });
+        return unexpectedError;
+      },
+    )();
   };
 
   const fetchAllClassicLeaguePages = (
@@ -105,38 +141,28 @@ export const createFplClassicLeagueDataService = (
                 results: combinedResults,
               },
             };
-            logger.info(
-              {
-                operation: 'fetchAllClassicLeaguePages',
-                leagueId,
-                totalPages: currentPage,
-                totalResults: combinedResults.length,
-                success: true,
-              },
+
+            const successContext: FplApiContext = {
+              service: 'FplClassicLeagueDataService',
+              endpoint: apiConfig.endpoints.leagues.classic({ leagueId, page: 1 }),
+              leagueId,
+              totalPages: currentPage,
+              totalResults: combinedResults.length,
+            };
+
+            logFplApiCall(
               `Successfully fetched all pages for classic league ${leagueId}`,
+              successContext,
             );
+
             return TE.right(finalResponse);
           }
         }),
         TE.mapLeft((error) => {
-          logger.error(
-            {
-              operation: 'fetchAllClassicLeaguePages',
-              leagueId,
-              currentPage,
-              error,
-              success: false,
-            },
-            `Error encountered while fetching page ${currentPage} for league ${leagueId}`,
-          );
           return error;
         }),
       );
 
-    logger.info(
-      { operation: `fetchAllClassicLeaguePages(${leagueId})` },
-      `Fetching all pages for FPL classic league data ${leagueId}`,
-    );
     return loop(1, []);
   };
 
@@ -146,16 +172,13 @@ export const createFplClassicLeagueDataService = (
       TE.chain((classicLeagueData) =>
         pipe(
           mapClassicLeagueResponseToDomain(leagueId, classicLeagueData),
-          E.mapLeft((mappingError) => {
-            logger.error(
-              { operation: 'getClassicLeague', leagueId, error: mappingError, success: false },
-              'Failed to map classic league data to domain model',
-            );
-            return createDataLayerError({
+          E.mapLeft((mappingError: string) => {
+            const error = createDataLayerError({
               code: DataLayerErrorCode.MAPPING_ERROR,
               message: `Failed to map classic league ${leagueId}: ${mappingError}`,
               details: { leagueId, mappingError },
             });
+            return error;
           }),
           TE.fromEither,
         ),

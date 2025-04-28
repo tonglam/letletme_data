@@ -12,17 +12,17 @@
     "baseUrl": ".",
     "paths": {
       "api/*": ["src/api/*"],
-      "configs/*": ["src/configs/*"],
+      "config/*": ["src/config/*"],
       "data/*": ["src/data/*"],
       "db/*": ["src/db/*"],
-      "domains/*": ["src/domains/*"],
-      "infrastructures/*": ["src/infrastructures/*"],
-      "repositories/*": ["src/repositories/*"],
-      "services/*": ["src/services/*"],
+      "domain/*": ["src/domain/*"],
+      "infrastructure/*": ["src/infrastructure/*"],
+      "repository/*": ["src/repository/*"],
+      "service/*": ["src/service/*"],
       "schema/*": ["src/db/schema/*"],
       "types/*": ["src/types/*"],
       "utils/*": ["src/utils/*"],
-      "workers/*": ["src/workers/*"]
+      "worker/*": ["src/worker/*"]
     },
     "strictNullChecks": true,
     "noImplicitThis": true,

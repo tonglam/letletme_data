@@ -1,4 +1,3 @@
-import { apiConfig } from 'configs/api/api.config';
 import { mapEventFixtureResponseToDomain } from 'data/fpl/mappers/fixture/fixture.mapper';
 import {
   EventFixturesResponse,
@@ -8,81 +7,117 @@ import { FplFixtureDataService } from 'data/types';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { HTTPClient } from 'infrastructures/http';
-import { Logger } from 'pino';
+import { apiConfig } from 'src/config/api/api.config';
 import { RawEventFixtures } from 'types/domain/event-fixture.type';
 import { EventId } from 'types/domain/event.type';
 import { DataLayerError, DataLayerErrorCode } from 'types/error.type';
 import { createDataLayerError } from 'utils/error.util';
+import { FplApiContext, logFplApiCall, logFplApiError } from 'utils/logger.util';
 
-export const createFplFixtureDataService = (
-  client: HTTPClient,
-  logger: Logger,
-): FplFixtureDataService => {
+export const createFplFixtureDataService = (): FplFixtureDataService => {
   let cachedFixturesResponse: EventFixturesResponse | null = null;
 
   const fetchAndValidateFixtures = (
     eventId: EventId,
   ): TE.TaskEither<DataLayerError, EventFixturesResponse> => {
-    logger.info({ operation: 'fetchAndValidateEventFixtures' }, 'Fetching FPL fixtures data');
+    const url = apiConfig.endpoints.event.fixtures({ eventId });
+    const context: FplApiContext = {
+      service: 'FplFixtureDataService',
+      endpoint: url,
+      eventId,
+    };
+    logFplApiCall('Attempting to fetch FPL fixtures data', context);
 
-    return pipe(
-      client.get<EventFixturesResponse>(apiConfig.endpoints.event.fixtures({ eventId: eventId })),
-      TE.mapLeft((apiError) => {
-        logger.error(
-          {
-            operation: 'fetchAndValidateEventFixture',
-            error: apiError,
-            success: false,
-          },
-          'FPL API call failed',
-        );
-        return createDataLayerError({
-          code: DataLayerErrorCode.FETCH_ERROR,
-          message: 'Failed to fetch data from FPL API',
-          cause: apiError instanceof Error ? apiError : undefined,
-          details: { apiError },
-        });
-      }),
-      TE.chain((response) => {
-        const parsed = EventFixturesResponseSchema.safeParse(response);
-        if (!parsed.success) {
-          logger.error(
-            {
-              operation: 'fetchAndValidateEventFixture',
-              error: {
-                message: 'Invalid response data',
-                validationError: parsed.error.errors,
-              },
-              response: response,
-              success: false,
-            },
-            'FPL API response validation failed',
-          );
-          return TE.left(
-            createDataLayerError({
-              code: DataLayerErrorCode.VALIDATION_ERROR,
-              message: 'Invalid response data',
-              cause: undefined,
-              details: {
-                errorMessage: parsed.error.message,
-                validationError: parsed.error.format(),
-              },
-            }),
-          );
+    return TE.tryCatchK(
+      async () => {
+        const response = await fetch(url);
+
+        if (!response.ok) {
+          throw {
+            type: 'HttpError',
+            status: response.status,
+            statusText: response.statusText,
+            url,
+          };
         }
-        logger.info(
-          {
-            operation: 'fetchAndValidateEventFixture',
-            success: true,
-            fixtureCount: parsed.data.length,
-          },
-          'FPL API call successful and validated',
-        );
+
+        const data: unknown = await response.json();
+
+        const parsed = EventFixturesResponseSchema.safeParse(data);
+        if (!parsed.success) {
+          throw {
+            type: 'ValidationError',
+            message: 'Invalid response data',
+            validationError: parsed.error.format(),
+            response: data,
+          };
+        }
+
+        logFplApiCall('FPL API call successful and validated', {
+          ...context,
+          eventId,
+          success: true,
+          fixtureCount: parsed.data.length,
+        });
         cachedFixturesResponse = parsed.data;
-        return TE.right(parsed.data);
-      }),
-    );
+        return parsed.data;
+      },
+      (error: unknown): DataLayerError => {
+        if (typeof error === 'object' && error !== null && 'type' in error) {
+          const errorObj = error as { type: string };
+
+          if (
+            errorObj.type === 'HttpError' &&
+            'status' in error &&
+            typeof error.status === 'number' &&
+            'statusText' in error &&
+            typeof error.statusText === 'string' &&
+            'url' in error &&
+            typeof error.url === 'string'
+          ) {
+            const httpError = createDataLayerError({
+              code: DataLayerErrorCode.FETCH_ERROR,
+              message: `FPL API HTTP Error: ${error.status} ${error.statusText}`,
+              details: {
+                eventId,
+                status: error.status,
+                statusText: error.statusText,
+                url: error.url,
+              },
+            });
+            logFplApiError(httpError, { ...context, err: httpError });
+            return httpError;
+          }
+          if (
+            errorObj.type === 'ValidationError' &&
+            'validationError' in error &&
+            'response' in error &&
+            typeof (error as { message?: string }).message === 'string'
+          ) {
+            const validationError = createDataLayerError({
+              code: DataLayerErrorCode.VALIDATION_ERROR,
+              message: 'Invalid response data for event fixtures',
+              details: {
+                eventId,
+                validationError: error.validationError,
+                response: error.response,
+              },
+            });
+            logFplApiError(validationError, { ...context, err: validationError });
+            return validationError;
+          }
+        }
+
+        const unexpectedError = createDataLayerError({
+          code: DataLayerErrorCode.FETCH_ERROR,
+          message: 'An unexpected error occurred during FPL fixtures fetch or processing',
+          cause: error instanceof Error ? error : undefined,
+          details: { eventId, error },
+        });
+        logFplApiError(unexpectedError, { ...context, err: unexpectedError });
+        return unexpectedError;
+      },
+    )();
   };
 
   const getFplFixtureDataInternal = (

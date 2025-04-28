@@ -7,7 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 // Configs
 import { eventRouter } from '../../../src/api/event/route';
-import { CachePrefix, DefaultTTL } from '../../../src/configs/cache/cache.config';
+import { CachePrefix, DefaultTTL } from '../../../src/config/cache/cache.config';
 // API
 // Data Services
 import { createFplBootstrapDataService } from '../../../src/data/fpl/bootstrap.data';

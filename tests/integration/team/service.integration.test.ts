@@ -9,7 +9,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 // Import the SHARED redis client used by the application
 
 // Specific imports for this test suite
-import { CachePrefix } from '../../../src/configs/cache/cache.config';
+import { CachePrefix } from '../../../src/config/cache/cache.config';
 import { createFplBootstrapDataService } from '../../../src/data/fpl/bootstrap.data';
 import { FplBootstrapDataService } from '../../../src/data/types';
 import { createTeamCache } from '../../../src/domains/team/cache'; // Team specific

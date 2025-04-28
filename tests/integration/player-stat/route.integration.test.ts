@@ -6,7 +6,7 @@ import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { playerStatRouter } from '../../../src/api/player-stat/route';
-import { CachePrefix } from '../../../src/configs/cache/cache.config';
+import { CachePrefix } from '../../../src/config/cache/cache.config';
 import { createFplBootstrapDataService } from '../../../src/data/fpl/bootstrap.data';
 import { FplBootstrapDataService } from '../../../src/data/types';
 import { createEventCache } from '../../../src/domains/event/cache';

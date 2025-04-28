@@ -1,4 +1,3 @@
-import { apiConfig } from 'configs/api/api.config';
 import {
   mapElementResponseToPlayer,
   mapElementResponseToPlayerStat,
@@ -16,8 +15,7 @@ import { FplBootstrapDataService } from 'data/types';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { HTTPClient } from 'infrastructures/http';
-import { Logger } from 'pino';
+import { apiConfig } from 'src/config/api/api.config';
 import { EventId, Events } from 'types/domain/event.type';
 import { Phases } from 'types/domain/phase.type';
 import { RawPlayerStats } from 'types/domain/player-stat.type';
@@ -27,75 +25,107 @@ import { RawPlayers } from 'types/domain/player.type';
 import { Teams } from 'types/domain/team.type';
 import { DataLayerError, DataLayerErrorCode } from 'types/error.type';
 import { createDataLayerError } from 'utils/error.util';
+import { FplApiContext, logFplApiCall, logFplApiError } from 'utils/logger.util';
 
-export const createFplBootstrapDataService = (
-  client: HTTPClient,
-  logger: Logger,
-): FplBootstrapDataService => {
+export const createFplBootstrapDataService = (): FplBootstrapDataService => {
   let cachedBootstrapResponse: BootStrapResponse | null = null;
 
   const fetchAndValidateBootstrap = (): TE.TaskEither<DataLayerError, BootStrapResponse> => {
-    logger.info({ operation: 'fetchAndValidateBootstrap' }, 'Fetching FPL bootstrap data');
+    const context: FplApiContext = {
+      service: 'FplBootstrapDataService',
+      endpoint: apiConfig.endpoints.bootstrap.static,
+    };
 
-    return pipe(
-      client.get<BootStrapResponse>(apiConfig.endpoints.bootstrap.static),
-      TE.mapLeft((apiError) => {
-        logger.error(
-          {
-            operation: 'fetchAndValidateBootstrap',
-            error: apiError,
-            success: false,
-          },
-          'FPL API call failed',
-        );
-        return createDataLayerError({
-          code: DataLayerErrorCode.FETCH_ERROR,
-          message: 'Failed to fetch data from FPL API',
-          cause: apiError instanceof Error ? apiError : undefined,
-          details: { apiError },
-        });
-      }),
-      TE.chain((response) => {
-        const parsed = BootStrapResponseSchema.safeParse(response);
-        if (!parsed.success) {
-          logger.error(
-            {
-              operation: 'fetchAndValidateBootstrap',
-              error: {
-                message: 'Invalid response data',
-                validationError: parsed.error.errors,
-              },
-              response: response,
-              success: false,
-            },
-            'FPL API response validation failed',
-          );
-          return TE.left(
-            createDataLayerError({
-              code: DataLayerErrorCode.VALIDATION_ERROR,
-              message: 'Invalid bootstrap data received from FPL API',
-              cause: undefined,
-              details: {
-                errorMessage: parsed.error.message,
-                validationError: parsed.error.format(),
-              },
-            }),
-          );
+    logFplApiCall('Attempting to fetch FPL bootstrap data', context);
+
+    return TE.tryCatchK(
+      async () => {
+        const response = await fetch(apiConfig.endpoints.bootstrap.static);
+
+        if (!response.ok) {
+          throw {
+            type: 'HttpError',
+            status: response.status,
+            statusText: response.statusText,
+            url: apiConfig.endpoints.bootstrap.static,
+          } satisfies Partial<DataLayerError> & {
+            type: 'HttpError';
+            status: number;
+            statusText: string;
+            url: string;
+          };
         }
-        logger.info(
-          {
-            operation: 'fetchAndValidateBootstrap',
-            success: true,
-            eventCount: parsed.data.events.length,
-            teamCount: parsed.data.teams.length,
-            elementCount: parsed.data.elements.length,
-          },
-          'FPL API call successful and validated',
-        );
+
+        const data: unknown = await response.json();
+
+        const parsed = BootStrapResponseSchema.safeParse(data);
+        if (!parsed.success) {
+          throw {
+            type: 'ValidationError',
+            validationError: parsed.error.format(),
+            response: data,
+          } satisfies Partial<DataLayerError> & {
+            type: 'ValidationError';
+            validationError: unknown;
+            response: unknown;
+          };
+        }
+
+        logFplApiCall('FPL API call successful and validated', {
+          ...context,
+          eventCount: parsed.data.events.length,
+          teamCount: parsed.data.teams.length,
+          elementCount: parsed.data.elements.length,
+        });
         cachedBootstrapResponse = parsed.data;
-        return TE.right(parsed.data);
-      }),
-    );
+        return parsed.data;
+      },
+      (error: unknown): DataLayerError => {
+        if (typeof error === 'object' && error !== null && 'type' in error) {
+          const errorObj = error as { type: string };
+
+          if (
+            errorObj.type === 'HttpError' &&
+            'status' in error &&
+            'statusText' in error &&
+            'url' in error &&
+            typeof error.status === 'number' &&
+            typeof error.statusText === 'string'
+          ) {
+            const httpError = createDataLayerError({
+              code: DataLayerErrorCode.FETCH_ERROR,
+              message: `FPL API HTTP Error: ${error.status} ${error.statusText}`,
+              details: { status: error.status, statusText: error.statusText, url: error.url },
+            });
+            logFplApiError(httpError, context);
+            return httpError;
+          }
+          if (
+            errorObj.type === 'ValidationError' &&
+            'validationError' in error &&
+            'response' in error &&
+            typeof (error as { message?: string }).message === 'string'
+          ) {
+            const validationError = createDataLayerError({
+              code: DataLayerErrorCode.VALIDATION_ERROR,
+              message: 'Invalid response data',
+              details: { validationError: error.validationError, response: error.response },
+            });
+            logFplApiError(validationError, context);
+            return validationError;
+          }
+        }
+
+        const unexpectedError = createDataLayerError({
+          code: DataLayerErrorCode.FETCH_ERROR,
+          message: 'An unexpected error occurred during FPL API fetch or processing',
+          cause: error instanceof Error ? error : undefined,
+          details: { error },
+        });
+        logFplApiError(unexpectedError, context);
+        return unexpectedError;
+      },
+    )();
   };
 
   const getFplBootstrapDataInternal = (): TE.TaskEither<DataLayerError, BootStrapResponse> => {
