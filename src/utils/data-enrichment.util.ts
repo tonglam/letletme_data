@@ -1,5 +1,6 @@
 import { PlayerCache } from 'domains/player/types';
 import { TeamCache } from 'domains/team/types';
+import * as Eq from 'fp-ts/Eq';
 import { pipe } from 'fp-ts/function';
 import * as O from 'fp-ts/Option';
 import * as RA from 'fp-ts/ReadonlyArray';
@@ -16,11 +17,19 @@ import {
   RawPickItem,
 } from 'src/types/domain/entry-event-pick.type';
 import {
+  EntryEventResult,
+  EntryEventResults,
+  RawEntryEventResult,
+  RawEntryEventResults,
+} from 'src/types/domain/entry-event-result.type';
+import {
   EntryEventTransfer,
   EntryEventTransfers,
   RawEntryEventTransfer,
   RawEntryEventTransfers,
 } from 'src/types/domain/entry-event-transfer.type';
+import { EntryInfo } from 'src/types/domain/entry-info.type';
+import { EntryId } from 'src/types/domain/entry-info.type';
 import {
   EventFixture,
   EventFixtures,
@@ -538,3 +547,99 @@ export const enrichEntryEventTransfers =
         enrichEntryEventTransfer(playerCache, teamCache, entryInfoRepository),
       ),
     );
+
+// --- Helper Function ---
+// Pure function to combine RawResult and EntryInfo
+const combineRawResultAndEntryInfo = (
+  rawResult: RawEntryEventResult,
+  entryInfo: EntryInfo,
+): EntryEventResult => ({
+  ...rawResult,
+  entryName: entryInfo.entryName,
+  playerName: entryInfo.playerName,
+});
+// --- End Helper ---
+
+export const enrichEntryEventResults =
+  (entryInfoRepository: EntryInfoRepository) =>
+  (
+    rawInput: RawEntryEventResult | RawEntryEventResults,
+  ): TE.TaskEither<DomainError, EntryEventResult | EntryEventResults> => {
+    // --- Handle single object input ---
+    if (!Array.isArray(rawInput)) {
+      const rawResult = rawInput as RawEntryEventResult;
+      return pipe(
+        entryInfoRepository.findById(rawResult.entryId),
+        TE.mapLeft(
+          // Map DB Error
+          (dbError): DomainError =>
+            createDomainError({
+              code: DomainErrorCode.DATABASE_ERROR,
+              message: `Failed to fetch entry info for event result enrichment: ${rawResult.entryId}`,
+              cause: dbError,
+            }),
+        ),
+        // Chain and handle Option for potentially missing EntryInfo
+        TE.chainOptionK(() =>
+          // Use chainOptionK for cleaner None -> DomainError mapping
+          createDomainError({
+            code: DomainErrorCode.NOT_FOUND,
+            message: `EntryInfo not found for entry ID: ${rawResult.entryId}`,
+          }),
+        )((entryInfo) => O.fromNullable(entryInfo)), // Convert nullable EntryInfo to Option
+        TE.map((entryInfo) => combineRawResultAndEntryInfo(rawResult, entryInfo)), // Use helper
+      );
+    }
+
+    // --- Handle array input ---
+    const rawResults = rawInput as RawEntryEventResults; // Cast for clarity within this block
+    if (RA.isEmpty(rawResults)) {
+      return TE.right([]);
+    }
+
+    const entryIds = pipe(
+      rawResults,
+      RA.map((r) => r.entryId),
+      RA.uniq(Eq.eqNumber as Eq.Eq<EntryId>),
+    );
+
+    return pipe(
+      entryInfoRepository.findByIds(entryIds),
+      TE.mapLeft(
+        // Map DB Error
+        (dbError): DomainError =>
+          createDomainError({
+            code: DomainErrorCode.DATABASE_ERROR,
+            message: 'Failed to fetch entry info for event result enrichment',
+            cause: dbError,
+          }),
+      ),
+      TE.map((entryInfos) => {
+        // Process the array of EntryInfos
+        const entryInfoMap = new Map(entryInfos.map((info: EntryInfo) => [info.id, info]));
+        const enrichedResults = pipe(
+          rawResults,
+          // Map over raw results, look up info, combine using helper, handle None
+          RA.map(
+            (
+              rawResultItem: RawEntryEventResult,
+            ): O.Option<EntryEventResult> => // Map to Option
+              pipe(
+                O.fromNullable(entryInfoMap.get(rawResultItem.entryId)), // Find matching EntryInfo
+                O.map((entryInfo) => combineRawResultAndEntryInfo(rawResultItem, entryInfo)), // Use helper
+              ),
+          ),
+          RA.compact, // Filter out None values
+        );
+
+        // Log if results were dropped (optional, could be removed if not needed)
+        if (enrichedResults.length < rawResults.length) {
+          console.warn(
+            '[enrichEntryEventResults] Enrichment dropped some results due to missing EntryInfo. Check EntryInfoRepository integrity.',
+          );
+        }
+
+        return enrichedResults as EntryEventResults; // Return the enriched array
+      }),
+    );
+  };

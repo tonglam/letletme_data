@@ -53,6 +53,7 @@ export const createEntryEventPickRepository = (prisma: PrismaClient): EntryEvent
         () =>
           prisma.entryEventPick.createMany({
             data: entryEventPickInputs.map(mapDomainEntryEventPickToPrismaCreate),
+            skipDuplicates: true,
           }),
         (error) =>
           createDBError({

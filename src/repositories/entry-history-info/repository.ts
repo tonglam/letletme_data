@@ -46,6 +46,7 @@ export const createEntryHistoryInfoRepository = (
         () =>
           prisma.entryHistoryInfo.createMany({
             data: entryHistoryInfoInputs.map(mapDomainEntryHistoryInfoToPrismaCreate),
+            skipDuplicates: true,
           }),
         (error) =>
           createDBError({

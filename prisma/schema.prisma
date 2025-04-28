@@ -411,6 +411,7 @@ model EntryEventResult {
   createdAt          DateTime @default(now()) @map("created_at")
   updatedAt          DateTime @updatedAt @map("updated_at")
 
+  @@unique([entryId, eventId], name: "unique_entry_event_result")
   @@index([entryId], name: "idx_entry_event_results_entry_id")
   @@index([eventId], name: "idx_entry_event_results_event_id")
   @@map("entry_event_results")

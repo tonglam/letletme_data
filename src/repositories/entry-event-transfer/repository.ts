@@ -56,6 +56,7 @@ export const createEntryEventTransferRepository = (
         () =>
           prisma.entryEventTransfer.createMany({
             data: entryEventTransferInputs.map(mapDomainEntryEventTransferToPrismaCreate),
+            skipDuplicates: true,
           }),
         (error) =>
           createDBError({
