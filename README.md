@@ -81,8 +81,7 @@ flowchart LR
     D --> E[Storage Layer]
 
     subgraph Validation
-        B --> |io-ts| B1[Type Validation]
-        B --> |zod| B2[Schema Validation]
+        B --> |zod| B1[Schema Validation]
     end
 
     subgraph Transform
@@ -102,28 +101,26 @@ Core:
 
 - TypeScript (with strict type checking)
 - Node.js (v18+)
-- Express.js (REST API framework)
+- Bun (runtime & package manager)
+- ElysiaJS (REST API framework)
 
 Storage:
 
 - PostgreSQL (primary database)
-- Redis (caching layer)
-- Prisma (type-safe ORM)
+- Redis (caching layer, via ioredis)
+- Drizzle ORM (type-safe ORM)
 
 Testing & Quality:
 
-- Jest (testing framework)
+- Vitest (testing framework)
 - ESLint & Prettier (code quality tools)
-- Husky (git hooks)
 
 Utilities:
 
 - Pino (structured logging)
 - Zod (runtime type validation)
-- Node-cron (scheduled tasks)
-- Axios (HTTP client)
+- BullMQ (job queue management)
 - fp-ts (functional programming utilities)
-- io-ts (runtime type validation)
 
 DevOps:
 
@@ -146,7 +143,7 @@ This project is designed using functional programming principles, making it part
    - Advanced TypeScript generics
    - No 'any' types allowed
    - Strong type inference
-   - Runtime type validation with io-ts
+   - Runtime type validation with Zod
 
 3. Benefits:
    - Highly testable code
@@ -163,6 +160,7 @@ While the learning curve with TypeScript generics and FP patterns can be steep, 
 
    ```bash
    Node.js v18+
+   Bun v1+
    Docker & Docker Compose
    PostgreSQL
    Redis
@@ -173,7 +171,7 @@ While the learning curve with TypeScript generics and FP patterns can be steep, 
    ```bash
    git clone [repository-url]
    cd letletme_data
-   pnpm install
+   bun install
    ```
 
 3. Configuration:
@@ -186,7 +184,7 @@ While the learning curve with TypeScript generics and FP patterns can be steep, 
 4. Run:
    ```bash
    docker-compose up -d
-   pnpm run dev
+   bun run dev
    ```
 
 # Domain-Driven Design
@@ -223,12 +221,12 @@ Each domain follows a standard structure with entities, repositories, services, 
 
 # Job Management
 
-The system uses BullMQ for robust job queue management, handling various data fetching and processing tasks.
+The system uses BullMQ for robust job queue management, handling various data fetching and processing tasks. Jobs are typically triggered by API requests or scheduled within the application logic interacting with BullMQ.
 
 ```mermaid
 graph LR
     subgraph Queue Management
-        Cron[Node-Cron] --> Bull[BullMQ]
+        App[Application Logic] --> Bull[BullMQ]
         Bull --> Jobs[Job Processors]
     end
 

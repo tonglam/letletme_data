@@ -53,8 +53,6 @@
     "@elysiajs/cors": "^1.0.1",
     "@elysiajs/swagger": "^1.0.3",
     "@sinclair/typebox": "^0.34.33",
-    "@supabase/supabase-js": "^2.49.4",
-    "@types/pino-http": "^5.8.4",
     "@types/uuid": "^10.0.0",
     "bullmq": "^5.49.1",
     "date-fns": "^4.1.0",
@@ -62,16 +60,9 @@
     "drizzle-zod": "^0.7.1",
     "elysia": "^1.0.9",
     "fp-ts": "^2.16.9",
-    "io-ts": "^2.2.22",
-    "io-ts-types": "^0.5.19",
     "ioredis": "^5.6.1",
-    "node-cron": "^3.0.3",
     "pino": "^9.6.0",
-    "pino-http": "^10.3.0",
-    "pino-roll": "^3.1.0",
     "postgres": "^3.4.5",
-    "redis": "^4.6.11",
-    "rotating-file-stream": "^3.2.5",
     "zod": "^3.24.3"
   }
 }
