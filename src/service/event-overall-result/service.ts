@@ -1,71 +1,62 @@
-import { createEventLiveExplainOperations } from 'domain/event-live-explain/operation';
-import { EventLiveExplainOperations } from 'domain/event-live-explain/types';
+import { EventOverallResultCache } from 'domain/event-overall-result/types';
+import { PlayerCache } from 'domain/player/types';
 
-import { FplLiveDataService } from 'data/types';
+import { FplBootstrapDataService } from 'data/types';
 import { pipe } from 'fp-ts/function';
 import * as RA from 'fp-ts/ReadonlyArray';
 import * as TE from 'fp-ts/TaskEither';
-import { EventLiveExplainRepository } from 'repository/event-live-explain/types';
 import {
-  EventLiveExplainService,
-  EventLiveExplainServiceOperations,
-} from 'service/event-live-explain/types';
-import { EventLiveExplain, EventLiveExplains } from 'types/domain/event-live-explain.type';
+  EventOverallResultService,
+  EventOverallResultServiceOperations,
+} from 'service/event-overall-result/types';
+import { EventOverallResult, RawEventOverallResult } from 'types/domain/event-overall-result.type';
 import { EventId } from 'types/domain/event.type';
-import { PlayerId } from 'types/domain/player.type';
 import { createDomainError, DataLayerError, DomainErrorCode, ServiceError } from 'types/error.type';
+import { enrichEventOverallResult } from 'utils/data-enrichment.util';
 import { createServiceIntegrationError, mapDomainErrorToServiceError } from 'utils/error.util';
 
-const eventLiveExplainServiceOperations = (
-  fplDataService: FplLiveDataService,
-  domainOps: EventLiveExplainOperations,
-  cache: EventLiveExplainCache,
-): EventLiveExplainServiceOperations => {
-  const findEventLiveExplainByElementId = (
-    elementId: PlayerId,
+const eventOverallResultServiceOperations = (
+  fplDataService: FplBootstrapDataService,
+  playerCache: PlayerCache,
+  cache: EventOverallResultCache,
+): EventOverallResultServiceOperations => {
+  const findEventOverallResultById = (
     eventId: EventId,
-  ): TE.TaskEither<ServiceError, EventLiveExplain> =>
+  ): TE.TaskEither<ServiceError, EventOverallResult> =>
     pipe(
-      cache.getEventLiveExplains(eventId),
+      cache.getEventOverallResult(eventId),
       TE.mapLeft(mapDomainErrorToServiceError),
       TE.chainOptionK(() =>
         mapDomainErrorToServiceError(
           createDomainError({
             code: DomainErrorCode.NOT_FOUND,
-            message: `Event live explain with element ID ${elementId} and event ID ${eventId} not found in cache.`,
+            message: `Event overall result with ID ${eventId} not found in cache.`,
           }),
         ),
-      )((eventLiveExplains) =>
-        RA.findFirst((p: EventLiveExplain) => p.elementId === elementId)(eventLiveExplains),
+      )((eventOverallResult) =>
+        RA.findFirst((p: EventOverallResult) => p.eventId === eventId)([eventOverallResult]),
       ),
     );
 
-  const syncEventLiveExplainsFromApi = (eventId: EventId): TE.TaskEither<ServiceError, void> =>
+  const syncEventOverallResultsFromApi = (eventId: EventId): TE.TaskEither<ServiceError, void> =>
     pipe(
-      fplDataService.getExplains(eventId),
+      fplDataService.getEventOverallResults(eventId),
       TE.mapLeft((error: DataLayerError) =>
         createServiceIntegrationError({
-          message: 'Failed to fetch/map event live explains via data layer',
+          message: 'Failed to fetch event overall results via data layer',
           cause: error.cause,
           details: error.details,
         }),
       ),
-      TE.chainFirstW(() =>
-        pipe(domainOps.deleteEventLiveExplains(eventId), TE.mapLeft(mapDomainErrorToServiceError)),
-      ),
-      TE.chainW((eventLiveExplains: EventLiveExplains) =>
+      TE.chainW((rawResult: RawEventOverallResult) =>
         pipe(
-          eventLiveExplains.length > 0
-            ? domainOps.saveEventLiveExplains(eventLiveExplains)
-            : TE.right([] as EventLiveExplains),
+          enrichEventOverallResult(playerCache)(rawResult),
           TE.mapLeft(mapDomainErrorToServiceError),
         ),
       ),
-      TE.chainFirstW((enrichedEventLiveExplains: EventLiveExplains) =>
+      TE.chainW((enrichedResult: EventOverallResult) =>
         pipe(
-          enrichedEventLiveExplains.length > 0
-            ? cache.setEventLiveExplains(enrichedEventLiveExplains)
-            : TE.rightIO(() => {}),
+          cache.setAllEventOverallResults([enrichedResult]),
           TE.mapLeft(mapDomainErrorToServiceError),
         ),
       ),
@@ -73,26 +64,22 @@ const eventLiveExplainServiceOperations = (
     );
 
   return {
-    findEventLiveExplainByElementId,
-    syncEventLiveExplainsFromApi,
+    findEventOverallResultById,
+    syncEventOverallResultsFromApi,
   };
 };
 
-export const createEventLiveExplainService = (
-  fplDataService: FplLiveDataService,
-  repository: EventLiveExplainRepository,
-  cache: EventLiveExplainCache,
-): EventLiveExplainService => {
-  const domainOps = createEventLiveExplainOperations(repository);
-  const ops = eventLiveExplainServiceOperations(fplDataService, domainOps, cache);
+export const createEventOverallResultService = (
+  fplDataService: FplBootstrapDataService,
+  playerCache: PlayerCache,
+  cache: EventOverallResultCache,
+): EventOverallResultService => {
+  const ops = eventOverallResultServiceOperations(fplDataService, playerCache, cache);
 
   return {
-    getEventLiveExplainByElementId: (
-      elementId: PlayerId,
-      eventId: EventId,
-    ): TE.TaskEither<ServiceError, EventLiveExplain> =>
-      ops.findEventLiveExplainByElementId(elementId, eventId),
-    syncEventLiveExplainsFromApi: (eventId: EventId): TE.TaskEither<ServiceError, void> =>
-      ops.syncEventLiveExplainsFromApi(eventId),
+    getEventOverallResult: (id: EventId): TE.TaskEither<ServiceError, EventOverallResult> =>
+      ops.findEventOverallResultById(id),
+    syncEventOverallResultsFromApi: (eventId: EventId): TE.TaskEither<ServiceError, void> =>
+      ops.syncEventOverallResultsFromApi(eventId),
   };
 };

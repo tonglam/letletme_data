@@ -8,9 +8,10 @@ import { FplBootstrapDataService } from 'data/types';
 import { pipe, flow } from 'fp-ts/function';
 import * as RA from 'fp-ts/ReadonlyArray';
 import * as TE from 'fp-ts/TaskEither';
+import { getWorkflowLogger } from 'infrastructure/logger';
 import { PlayerValueRepository, PlayerValueCreateInputs } from 'repository/player-value/types';
 import { PlayerValueService, PlayerValueServiceOperations } from 'service/player-value/types';
-import { ValueChangeType } from 'types/base.type';
+import { ValueChangeType, ValueChangeTypes } from 'types/base.type';
 import {
   PlayerValue,
   PlayerValues,
@@ -29,14 +30,16 @@ import {
 import { enrichPlayerValues } from 'utils/data-enrichment.util';
 import { createServiceIntegrationError, mapDomainErrorToServiceError } from 'utils/error.util';
 
+const workflowLogger = getWorkflowLogger();
+
 const determineChangeType = (newValue: number, lastValue: number): ValueChangeType => {
   if (newValue > lastValue) {
-    return ValueChangeType.Rise;
+    return ValueChangeTypes[0];
   }
   if (newValue < lastValue) {
-    return ValueChangeType.Fall;
+    return ValueChangeTypes[1];
   }
-  return ValueChangeType.Start;
+  return ValueChangeTypes[2];
 };
 
 const detectRawValueChanges =
@@ -66,7 +69,7 @@ const detectRawValueChanges =
             const lastValue = latestDbValue ?? sourceValue.value;
             const changeType = latestDbValue
               ? determineChangeType(sourceValue.value, latestDbValue)
-              : ValueChangeType.Start;
+              : ValueChangeTypes[2];
             changes.push({
               ...sourceValue,
               lastValue,
@@ -102,7 +105,7 @@ const addChangeInfoToEnriched =
           const lastValue = latestDbValue ?? enrichedValue.value;
           const changeType = latestDbValue
             ? determineChangeType(enrichedValue.value, latestDbValue)
-            : ValueChangeType.Start;
+            : ValueChangeTypes[2];
           return {
             ...enrichedValue,
             lastValue,
@@ -197,43 +200,103 @@ export const playerValueServiceOperations = (
       pipe(
         eventCache.getCurrentEvent(),
         TE.mapLeft(mapDomainErrorToServiceError),
-        TE.chainW(
-          (event): TE.TaskEither<ServiceError, void> =>
-            event
-              ? pipe(
-                  fplDataService.getPlayerValues(event.id),
-                  TE.mapLeft((error: DataLayerError) =>
-                    createServiceIntegrationError({
-                      message: 'Failed to fetch player values via data layer',
-                      cause: error.cause,
-                    }),
-                  ),
-                  TE.chainW(detectChanges),
-                  TE.chainW((rawPlayerValueChanges: RawPlayerValues) =>
-                    rawPlayerValueChanges.length === 0
-                      ? TE.right(undefined as void)
-                      : pipe(
-                          domainOps.savePlayerValueChanges(
-                            rawPlayerValueChanges as PlayerValueCreateInputs,
-                          ),
-                          TE.mapLeft(mapDomainErrorToServiceError),
-                          TE.chainW(() => enrichSourceData(rawPlayerValueChanges)),
-                          TE.chainW((enrichedPlayerValues: PlayerValues) =>
-                            pipe(
-                              playerValueCache.setPlayerValuesByChangeDate(enrichedPlayerValues),
-                              TE.mapLeft(mapDomainErrorToServiceError),
-                            ),
-                          ),
-                        ),
-                  ),
-                )
-              : TE.left(
-                  createServiceError({
-                    code: ServiceErrorCode.OPERATION_ERROR,
-                    message: 'No current event found to sync player values for.',
-                  }),
-                ),
+        TE.tapError((err) =>
+          TE.fromIO(() => workflowLogger.error({ err }, 'Error getting current event')),
         ),
+        TE.chainW((currentEvent) => {
+          workflowLogger.info({ eventId: currentEvent.id }, 'Current event fetched successfully');
+          return pipe(
+            fplDataService.getPlayerValues(currentEvent.id),
+            TE.mapLeft((error: DataLayerError) =>
+              createServiceIntegrationError({
+                message: 'Failed to fetch source player values',
+                cause: error.cause,
+                details: error.details,
+              }),
+            ),
+          );
+        }),
+        TE.tapError((err) =>
+          TE.fromIO(() => workflowLogger.error({ err }, 'Error fetching source player values')),
+        ),
+        TE.chainW((sourceValues) => {
+          workflowLogger.info(
+            { count: sourceValues.length },
+            'Source values fetched, detecting changes...',
+          );
+          return pipe(detectChanges(sourceValues));
+        }),
+        TE.tapError((err) =>
+          TE.fromIO(() => workflowLogger.error({ err }, 'Error detecting value changes')),
+        ),
+        TE.chainFirstW((changes) =>
+          TE.fromIO(() =>
+            workflowLogger.info({ count: changes.length }, 'Changes detected, saving...'),
+          ),
+        ),
+        TE.chainW((changes: RawPlayerValues) => {
+          if (RA.isEmpty(changes)) {
+            workflowLogger.info('No value changes to save.');
+            return TE.right([]);
+          }
+
+          const keySet = new Set<string>();
+          const duplicates = changes.filter((c) => {
+            const key = `${c.elementId}-${c.changeDate}`;
+            if (keySet.has(key)) return true;
+            keySet.add(key);
+            return false;
+          });
+          if (duplicates.length > 0) {
+            workflowLogger.error(
+              { duplicates },
+              'Duplicate (elementId, changeDate) pairs detected in changes before saving!',
+            );
+          }
+
+          return pipe(
+            domainOps.savePlayerValueChanges(changes as PlayerValueCreateInputs),
+            TE.mapLeft(mapDomainErrorToServiceError),
+          );
+        }),
+        TE.tapError((err) =>
+          TE.fromIO(() => workflowLogger.error({ err }, 'Error saving value changes')),
+        ),
+        TE.chainW((savedChanges) => {
+          workflowLogger.info({ count: savedChanges.length }, 'Changes saved, enriching...');
+          return pipe(enrichSourceData(savedChanges));
+        }),
+        TE.tapError((err) =>
+          TE.fromIO(() => workflowLogger.error({ err }, 'Error enriching saved changes')),
+        ),
+        TE.chainW((enrichedValues) => {
+          workflowLogger.info(
+            { count: enrichedValues.length },
+            'Changes enriched, adding change info...',
+          );
+          return pipe(addChangeInfo(enrichedValues));
+        }),
+        TE.tapError((err) =>
+          TE.fromIO(() => workflowLogger.error({ err }, 'Error adding change info')),
+        ),
+        TE.chainW((processedValues) => {
+          workflowLogger.info(
+            { count: processedValues.length },
+            'Processing complete, updating cache...',
+          );
+          if (RA.isEmpty(processedValues)) {
+            workflowLogger.info('No processed values to cache.');
+            return TE.right(undefined);
+          }
+          return pipe(
+            playerValueCache.setPlayerValuesByChangeDate(processedValues),
+            TE.mapLeft(mapDomainErrorToServiceError),
+          );
+        }),
+        TE.tapError((err) =>
+          TE.fromIO(() => workflowLogger.error({ err }, 'Error updating cache')),
+        ),
+        TE.map(() => undefined),
       ),
   };
 

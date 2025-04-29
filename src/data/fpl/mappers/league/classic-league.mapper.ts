@@ -1,7 +1,7 @@
 import { ClassicLeagueResponse } from 'data/fpl/schemas/league/classic-league.schema';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
-import { LeagueType } from 'types/base.type';
+import { LeagueTypes } from 'types/base.type';
 import { EntryId } from 'types/domain/entry-info.type';
 import { ClassicLeague, LeagueId } from 'types/domain/league.type';
 
@@ -14,7 +14,7 @@ export const mapClassicLeagueResponseToDomain = (
     E.map(() => ({
       id: leagueId as LeagueId,
       name: raw.league.name,
-      leagueType: LeagueType.Classic,
+      leagueType: LeagueTypes[0],
       created: new Date(raw.league.created),
       closed: raw.league.closed,
       adminEntryId: raw.league.admin_entry,

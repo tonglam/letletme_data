@@ -9,7 +9,7 @@ import {
   TournamentEntryService,
   TournamentEntryServiceOperations,
 } from 'service/tournament-entry/types';
-import { LeagueType } from 'types/base.type';
+import { LeagueType, LeagueTypes } from 'types/base.type';
 import { EntryId } from 'types/domain/entry-info.type';
 import { ClassicLeague, H2hLeague, LeagueId } from 'types/domain/league.type';
 import { TournamentEntries, TournamentEntry } from 'types/domain/tournament-entry.type';
@@ -54,7 +54,7 @@ const tournamentEntryServiceOperations = (
     leagueType: LeagueType,
   ): TE.TaskEither<ServiceError, void> => {
     const fetchLeagueTask: TaskEither<ServiceError, ClassicLeague | H2hLeague> =
-      leagueType === LeagueType.Classic
+      leagueType === LeagueTypes[0]
         ? pipe(
             fplClassicLeagueDataService.getClassicLeague(leagueId),
             TE.mapLeft(mapDataLayerErrorToServiceError),

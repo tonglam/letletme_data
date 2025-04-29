@@ -46,8 +46,8 @@ export const mapDomainEntryEventResultToDbCreate = (
   eventAutoSubPoints: domainEntryEventResult.eventAutoSubPoints,
   eventRank: domainEntryEventResult.eventRank,
   eventChip: (domainEntryEventResult.eventChip === null ||
-  domainEntryEventResult.eventChip === Chip.None
-    ? Chip.None
+  domainEntryEventResult.eventChip === 'n/a'
+    ? 'n/a'
     : domainEntryEventResult.eventChip) as DbEntryEventResultCreateInput['eventChip'],
   eventPlayedCaptain: domainEntryEventResult.eventPlayedCaptain,
   eventCaptainPoints: domainEntryEventResult.eventCaptainPoints,

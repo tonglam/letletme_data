@@ -3,6 +3,7 @@ import { format } from 'date-fns';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as O from 'fp-ts/Option';
+import { ElementTypeId } from 'types/base.type';
 import { EventId } from 'types/domain/event.type';
 import { RawPlayerStat } from 'types/domain/player-stat.type';
 import { PlayerValueTrack } from 'types/domain/player-value-track.type';
@@ -68,7 +69,7 @@ export const mapElementResponseToPlayerValueTrack = (
         date: currentDateStr,
         eventId: eventId as EventId,
         elementId: element as PlayerId,
-        elementType: raw.element_type as PlayerType,
+        elementType: raw.element_type as ElementTypeId,
         teamId: raw.team as TeamId,
         chanceOfPlayingThisRound: raw.chance_of_playing_this_round ?? null,
         chanceOfPlayingNextRound: raw.chance_of_playing_next_round ?? null,

@@ -1,20 +1,18 @@
 import * as TE from 'fp-ts/TaskEither';
-import { WorkflowResult } from 'services/types';
-import { EventOverallResult, EventOverallResults } from 'types/domain/event-overall-result.type';
+import { WorkflowResult } from 'service/types';
+import { EventOverallResult } from 'types/domain/event-overall-result.type';
 import { EventId } from 'types/domain/event.type';
 import { ServiceError } from 'types/error.type';
 
 export interface EventOverallResultServiceOperations {
   readonly findEventOverallResultById: (
-    id: EventId,
+    eventId: EventId,
   ) => TE.TaskEither<ServiceError, EventOverallResult>;
-  readonly findAllEventOverallResults: () => TE.TaskEither<ServiceError, EventOverallResults>;
   readonly syncEventOverallResultsFromApi: (eventId: EventId) => TE.TaskEither<ServiceError, void>;
 }
 
 export interface EventOverallResultService {
   readonly getEventOverallResult: (id: EventId) => TE.TaskEither<ServiceError, EventOverallResult>;
-  readonly getAllEventOverallResults: () => TE.TaskEither<ServiceError, EventOverallResults>;
   readonly syncEventOverallResultsFromApi: (eventId: EventId) => TE.TaskEither<ServiceError, void>;
 }
 

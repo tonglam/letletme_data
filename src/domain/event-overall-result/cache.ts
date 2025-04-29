@@ -5,8 +5,7 @@ import {
 
 import { CachePrefix, DefaultTTL } from 'config/cache/cache.config';
 import * as E from 'fp-ts/Either';
-import { flow, pipe } from 'fp-ts/function';
-import * as O from 'fp-ts/Option';
+import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import { redisClient } from 'infrastructure/cache/client';
 import { EventOverallResult, EventOverallResults } from 'types/domain/event-overall-result.type';
@@ -41,26 +40,6 @@ const parseEventOverallResult = (
             }),
           ),
     ),
-  );
-
-const parseEventOverallResults = (
-  eventOverallResultMaps: Record<string, string>,
-): E.Either<CacheError, EventOverallResults> =>
-  pipe(
-    Object.values(eventOverallResultMaps),
-    (eventOverallResultStrs) =>
-      eventOverallResultStrs.map((str) =>
-        pipe(
-          parseEventOverallResult(str),
-          E.getOrElse<CacheError, EventOverallResult | null>(() => null),
-        ),
-      ),
-    (parsedEventOverallResults) =>
-      parsedEventOverallResults.filter(
-        (eventOverallResult): eventOverallResult is EventOverallResult =>
-          eventOverallResult !== null,
-      ),
-    (validEventOverallResults) => E.right(validEventOverallResults),
   );
 
 export const createEventOverallResultCache = (
@@ -99,35 +78,6 @@ export const createEventOverallResultCache = (
       TE.mapLeft(mapCacheErrorToDomainError),
     );
 
-  const getAllEventOverallResults = (): TE.TaskEither<DomainError, EventOverallResults> =>
-    pipe(
-      TE.tryCatch(
-        () => redisClient.hgetall(baseKey),
-        (error: unknown) =>
-          createCacheError({
-            code: CacheErrorCode.OPERATION_ERROR,
-            message: 'Cache Read Error: Failed to get all event overall results',
-            cause: error as Error,
-          }),
-      ),
-      TE.mapLeft(mapCacheErrorToDomainError),
-      TE.chain(
-        flow(
-          O.fromNullable,
-          O.filter((eventOverallResultMaps) => Object.keys(eventOverallResultMaps).length > 0),
-          O.fold(
-            () => TE.right([] as EventOverallResults),
-            (cachedEventOverallResults): TE.TaskEither<DomainError, EventOverallResults> =>
-              pipe(
-                parseEventOverallResults(cachedEventOverallResults),
-                TE.fromEither,
-                TE.mapLeft(mapCacheErrorToDomainError),
-              ),
-          ),
-        ),
-      ),
-    );
-
   const setAllEventOverallResults = (
     eventOverallResults: EventOverallResults,
   ): TE.TaskEither<DomainError, void> =>
@@ -157,7 +107,6 @@ export const createEventOverallResultCache = (
 
   return {
     getEventOverallResult,
-    getAllEventOverallResults,
     setAllEventOverallResults,
   };
 };

@@ -7,7 +7,7 @@ import { type TeamCache } from 'domain/team/types';
 import { createTeamFixtureCache } from 'domain/team-fixture/cache';
 import { type TeamFixtureCache } from 'domain/team-fixture/types';
 
-import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
+import { beforeAll, describe, expect, it } from 'bun:test';
 import { CachePrefix, DefaultTTL } from 'config/cache/cache.config';
 import { createFplBootstrapDataService } from 'data/fpl/bootstrap.data';
 import { createFplFixtureDataService } from 'data/fpl/fixture.data';
@@ -29,7 +29,7 @@ import { type EventId } from 'types/domain/event.type';
 import {
   type IntegrationTestSetupResult,
   setupIntegrationTest,
-} from '../../setup/integrationTestSetup';
+} from '../setup/integrationTestSetup';
 
 describe('Event Integration Tests', () => {
   let setup: IntegrationTestSetupResult;
@@ -105,10 +105,6 @@ describe('Event Integration Tests', () => {
       eventRepository,
       eventCache,
     );
-  });
-
-  afterAll(async () => {
-    // No explicit teardown needed
   });
 
   describe('Event Service Integration', () => {

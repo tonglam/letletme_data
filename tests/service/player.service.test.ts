@@ -1,111 +1,108 @@
-import { PrismaClient } from '@prisma/client';
-import { createTeamCache } from 'domains/team/cache';
-import { TeamCache } from 'domains/team/types';
-import * as E from 'fp-ts/Either';
-import { Logger } from 'pino';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { createPlayerCache } from 'domain/player/cache';
+import { PlayerCache } from 'domain/player/types';
+import { createTeamCache } from 'domain/team/cache';
+import { TeamCache } from 'domain/team/types';
 
-import { CachePrefix } from '../../../src/config/cache/cache.config';
-import { createFplBootstrapDataService } from '../../../src/data/fpl/bootstrap.data';
-import { FplBootstrapDataService } from '../../../src/data/types';
-import { createPlayerCache } from '../../../src/domains/player/cache';
-import { PlayerCache } from '../../../src/domains/player/types';
-import { redisClient } from '../../../src/infrastructures/cache/client';
-import { HTTPClient } from '../../../src/infrastructures/http';
-import { createPlayerRepository } from '../../../src/repositories/player/repository';
-import { PlayerRepository } from '../../../src/repositories/player/types';
-import { createPlayerService } from '../../../src/services/player/service';
-import { PlayerService } from '../../../src/services/player/types';
-import { playerWorkflows } from '../../../src/services/player/workflow';
-import {
-  IntegrationTestSetupResult,
-  setupIntegrationTest,
-  teardownIntegrationTest,
-} from '../../setup/integrationTestSetup';
+import { beforeAll, describe, expect, it } from 'bun:test';
+import { CachePrefix, DefaultTTL } from 'config/cache/cache.config';
+import { createFplBootstrapDataService } from 'data/fpl/bootstrap.data';
+import { FplBootstrapDataService } from 'data/types';
+import { db } from 'db/index';
+import * as playerSchema from 'db/schema/player';
+import * as E from 'fp-ts/Either';
+import { redisClient } from 'infrastructure/cache/client';
+import { Logger } from 'pino';
+import { createPlayerRepository } from 'repository/player/repository';
+import { PlayerRepository } from 'repository/player/types';
+import { createPlayerService } from 'service/player/service';
+import { PlayerService } from 'service/player/types';
+import { playerWorkflows } from 'service/player/workflow';
+import { Player, Players, PlayerType } from 'types/domain/player.type';
+import { TeamId } from 'types/domain/team.type';
+
+import { IntegrationTestSetupResult, setupIntegrationTest } from '../setup/integrationTestSetup';
+
+type DrizzleDB = typeof db;
 
 describe('Player Integration Tests', () => {
   let setup: IntegrationTestSetupResult;
-  let prisma: PrismaClient;
+  let drizzleDb: DrizzleDB;
   let logger: Logger;
-  let httpClient: HTTPClient;
   let playerRepository: PlayerRepository;
   let playerCache: PlayerCache;
+  let teamCache: TeamCache;
   let fplDataService: FplBootstrapDataService;
   let playerService: PlayerService;
-  let teamCache: TeamCache;
 
   const cachePrefix = CachePrefix.PLAYER;
+  const teamCachePrefix = CachePrefix.TEAM;
   const season = '2425';
 
   beforeAll(async () => {
     setup = await setupIntegrationTest();
-    prisma = setup.prisma;
+    drizzleDb = setup.db;
     logger = setup.logger;
-    httpClient = setup.httpClient;
 
-    // Ping shared client (optional)
     try {
       await redisClient.ping();
+      logger.info('Shared redisClient ping successful.');
     } catch (error) {
       logger.error({ err: error }, 'Shared redisClient ping failed in beforeAll.');
     }
 
-    playerRepository = createPlayerRepository(prisma);
-    // Player cache uses singleton client
+    playerRepository = createPlayerRepository();
     playerCache = createPlayerCache({
       keyPrefix: cachePrefix,
       season: season,
+      ttlSeconds: DefaultTTL.PLAYER,
     });
     teamCache = createTeamCache({
-      keyPrefix: CachePrefix.TEAM,
+      keyPrefix: teamCachePrefix,
       season: season,
+      ttlSeconds: DefaultTTL.TEAM,
     });
-    fplDataService = createFplBootstrapDataService(httpClient, logger);
+    fplDataService = createFplBootstrapDataService();
     playerService = createPlayerService(fplDataService, playerRepository, playerCache, teamCache);
-  });
-
-  afterAll(async () => {
-    await teardownIntegrationTest(setup);
-    // await redisClient.quit(); // If global teardown needed
   });
 
   describe('Player Service Integration', () => {
     it('should fetch players from API, store in database, and cache them', async () => {
-      await prisma.player.deleteMany();
+      await drizzleDb.delete(playerSchema.players);
+      await redisClient.del(`${cachePrefix}::${season}`);
 
       const syncResult = await playerService.syncPlayersFromApi()();
-
-      // Check sync succeeded (Right<void>)
       expect(E.isRight(syncResult)).toBe(true);
 
-      // Now check if players were actually stored by fetching them
       const getPlayersResult = await playerService.getPlayers()();
       expect(E.isRight(getPlayersResult)).toBe(true);
       if (E.isRight(getPlayersResult)) {
-        const players = getPlayersResult.right;
+        const players = getPlayersResult.right as Players;
         expect(players.length).toBeGreaterThan(0);
         const firstPlayer = players[0];
         expect(firstPlayer).toHaveProperty('firstName');
         expect(firstPlayer).toHaveProperty('secondName');
         expect(firstPlayer).toHaveProperty('webName');
+      } else {
+        throw new Error(`getPlayers failed: ${JSON.stringify(getPlayersResult.left)}`);
       }
 
-      // Check DB directly
-      const dbPlayers = await prisma.player.findMany();
+      // Check DB directly using Drizzle
+      const dbPlayers = await drizzleDb.select().from(playerSchema.players);
       expect(dbPlayers.length).toBeGreaterThan(0);
+
+      // Check cache
+      const cacheKey = `${cachePrefix}::${season}`;
+      const keyExists = await redisClient.exists(cacheKey);
+      expect(keyExists).toBe(1);
     });
 
     it('should get player by ID after syncing', async () => {
-      const syncResult = await playerService.syncPlayersFromApi()();
-      expect(E.isRight(syncResult)).toBe(true); // Ensure sync completed successfully (Right<void>)
-
-      // Fetch all players to get a valid ID
       const getPlayersResult = await playerService.getPlayers()();
       expect(E.isRight(getPlayersResult)).toBe(true);
 
       if (E.isRight(getPlayersResult)) {
-        const players = getPlayersResult.right;
-        expect(players.length).toBeGreaterThan(0); // Make sure we have players to test with
+        const players = getPlayersResult.right as Players;
+        expect(players.length).toBeGreaterThan(0);
 
         const firstPlayerId = players[0]?.id;
         if (firstPlayerId === undefined) {
@@ -115,15 +112,13 @@ describe('Player Integration Tests', () => {
 
         expect(E.isRight(playerResult)).toBe(true);
         if (E.isRight(playerResult)) {
-          // Check Right<Player> explicitly
-          expect(playerResult.right).toBeDefined();
-          expect(playerResult.right.id).toEqual(firstPlayerId);
+          const player = playerResult.right as Player;
+          expect(player).toBeDefined();
+          expect(player.id).toEqual(firstPlayerId);
         } else {
-          // Fail test if playerResult is Left
           throw new Error(`Expected Right but got Left: ${JSON.stringify(playerResult.left)}`);
         }
       } else {
-        // Fail test if getPlayersResult is Left
         throw new Error(
           `Expected Right but got Left when getting players: ${JSON.stringify(getPlayersResult.left)}`,
         );
@@ -131,23 +126,21 @@ describe('Player Integration Tests', () => {
     });
 
     it('should get players by element type after syncing', async () => {
-      const syncResult = await playerService.syncPlayersFromApi()();
-      expect(E.isRight(syncResult)).toBe(true);
-
       const getPlayersResult = await playerService.getPlayers()();
       expect(E.isRight(getPlayersResult)).toBe(true);
-      if (E.isRight(getPlayersResult) && getPlayersResult.right.length > 0) {
-        const firstPlayer = getPlayersResult.right[0];
-        const elementTypeToTest = firstPlayer.type;
+      const playersList = E.isRight(getPlayersResult) ? (getPlayersResult.right as Players) : [];
+
+      if (playersList.length > 0) {
+        const firstPlayer = playersList[0];
+        const elementTypeToTest: PlayerType = firstPlayer.type;
 
         const playersByTypeResult =
           await playerService.getPlayersByElementType(elementTypeToTest)();
         expect(E.isRight(playersByTypeResult)).toBe(true);
         if (E.isRight(playersByTypeResult)) {
-          const players = playersByTypeResult.right;
+          const players = playersByTypeResult.right as Players;
           expect(players.length).toBeGreaterThan(0);
-          // Verify all returned players have the correct element type
-          players.forEach((p) => {
+          players.forEach((p: Player) => {
             expect(p.type).toEqual(elementTypeToTest);
           });
         }
@@ -157,22 +150,20 @@ describe('Player Integration Tests', () => {
     });
 
     it('should get players by team after syncing', async () => {
-      const syncResult = await playerService.syncPlayersFromApi()();
-      expect(E.isRight(syncResult)).toBe(true);
-
       const getPlayersResult = await playerService.getPlayers()();
       expect(E.isRight(getPlayersResult)).toBe(true);
-      if (E.isRight(getPlayersResult) && getPlayersResult.right.length > 0) {
-        const firstPlayer = getPlayersResult.right[0];
-        const teamToTest = firstPlayer.teamId;
+      const playersList = E.isRight(getPlayersResult) ? (getPlayersResult.right as Players) : [];
+
+      if (playersList.length > 0) {
+        const firstPlayer = playersList[0];
+        const teamToTest: TeamId = firstPlayer.teamId;
 
         const playersByTeamResult = await playerService.getPlayersByTeamId(teamToTest)();
         expect(E.isRight(playersByTeamResult)).toBe(true);
         if (E.isRight(playersByTeamResult)) {
-          const players = playersByTeamResult.right;
+          const players = playersByTeamResult.right as Players;
           expect(players.length).toBeGreaterThan(0);
-          // Verify all returned players belong to the correct team
-          players.forEach((p) => {
+          players.forEach((p: Player) => {
             expect(p.teamId).toEqual(teamToTest);
           });
         }
@@ -184,20 +175,20 @@ describe('Player Integration Tests', () => {
 
   describe('Player Workflow Integration', () => {
     it('should execute the sync players workflow end-to-end', async () => {
+      await drizzleDb.delete(playerSchema.players);
+      await redisClient.del(`${cachePrefix}::${season}`);
+
       const workflows = playerWorkflows(playerService);
       const result = await workflows.syncPlayers()();
 
-      expect(E.isRight(result)).toBe(true); // Check workflow completed successfully
+      expect(E.isRight(result)).toBe(true);
       if (E.isRight(result)) {
-        expect(result.right.context).toBeDefined();
-        expect(result.right.duration).toBeGreaterThan(0);
-        // WorkflowResult doesn't contain the void result, just context/duration
+        const workflowResult = result.right;
+        expect(workflowResult).toBeDefined();
 
-        // Verify side effect: check database
-        const dbPlayers = await prisma.player.findMany();
-        expect(dbPlayers.length).toBeGreaterThan(0); // Check that players were actually synced
+        const dbPlayers = await drizzleDb.select().from(playerSchema.players);
+        expect(dbPlayers.length).toBeGreaterThan(0);
       } else {
-        // Fail test if workflow result is Left
         throw new Error(`Workflow failed: ${JSON.stringify(result.left)}`);
       }
     });

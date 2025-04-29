@@ -1,7 +1,7 @@
 import { H2hLeagueResponse } from 'data/fpl/schemas/league/h2h-league.schema';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
-import { LeagueType } from 'types/base.type';
+import { LeagueTypes } from 'types/base.type';
 import { EntryId } from 'types/domain/entry-info.type';
 import { H2hLeague, LeagueId } from 'types/domain/league.type';
 
@@ -14,7 +14,7 @@ export const mapH2hLeagueResponseToDomain = (
     E.map(() => ({
       id: leagueId as LeagueId,
       name: raw.league.name,
-      leagueType: LeagueType.H2h,
+      leagueType: LeagueTypes[1],
       created: new Date(raw.league.created),
       closed: raw.league.closed,
       adminEntryId: raw.league.admin_entry,

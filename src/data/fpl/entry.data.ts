@@ -7,7 +7,7 @@ import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import { apiConfig } from 'src/config/api/api.config';
-import { LeagueType } from 'types/base.type';
+import { LeagueTypes } from 'types/base.type';
 import { EntryId } from 'types/domain/entry-info.type';
 import { EntryInfos } from 'types/domain/entry-info.type';
 import { EntryLeagueInfos } from 'types/domain/entry-league-info.type';
@@ -157,7 +157,7 @@ export const createFplEntryDataService = (): FplEntryDataService => {
             pipe(
               entryData.leagues.classic,
               A.map((leagueInfo) =>
-                mapLeagueInfoResponseToEntryLeague(entryId, LeagueType.Classic, leagueInfo),
+                mapLeagueInfoResponseToEntryLeague(entryId, LeagueTypes[0], leagueInfo),
               ),
               E.sequenceArray,
             ),
@@ -166,7 +166,7 @@ export const createFplEntryDataService = (): FplEntryDataService => {
             pipe(
               entryData.leagues.h2h,
               A.map((leagueInfo) =>
-                mapLeagueInfoResponseToEntryLeague(entryId, LeagueType.H2h, leagueInfo),
+                mapLeagueInfoResponseToEntryLeague(entryId, LeagueTypes[1], leagueInfo),
               ),
               E.sequenceArray,
             ),

@@ -1,10 +1,11 @@
-import { EntryHistoryInfoOperations } from 'domains/entry-history-info/types';
+import { EntryHistoryInfoOperations } from 'domain/entry-history-info/types';
+
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import {
   EntryHistoryInfoCreateInputs,
   EntryHistoryInfoRepository,
-} from 'repositories/entry-history-info/types';
+} from 'repository/entry-history-info/types';
 import { EntryHistoryInfos } from 'types/domain/entry-history-info.type';
 import { EntryId } from 'types/domain/entry-info.type';
 import { createDomainError, DomainError, DomainErrorCode } from 'types/error.type';

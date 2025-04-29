@@ -14,7 +14,6 @@ export interface EventOverallResultCache {
   readonly getEventOverallResult: (
     eventId: EventId,
   ) => TE.TaskEither<DomainError, EventOverallResult>;
-  readonly getAllEventOverallResults: () => TE.TaskEither<DomainError, EventOverallResults>;
   readonly setAllEventOverallResults: (
     eventOverallResults: EventOverallResults,
   ) => TE.TaskEither<DomainError, void>;

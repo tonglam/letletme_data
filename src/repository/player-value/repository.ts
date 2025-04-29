@@ -118,19 +118,30 @@ export const createPlayerValueRepository = (): PlayerValueRepository => {
       TE.tryCatch(
         async () => {
           const dataToCreate = playerValueInputs.map(mapDomainPlayerValueToPrismaCreate);
+          // Log the data just before insertion for debugging
+          // console.log('Attempting to insert player values:', JSON.stringify(dataToCreate, null, 2));
           await db
             .insert(schema.playerValues)
             .values(dataToCreate)
             .onConflictDoNothing({
               target: [schema.playerValues.elementId, schema.playerValues.changeDate],
             });
+          // console.log('Insertion attempt finished.');
         },
-        (error) =>
-          createDBError({
+        (error) => {
+          const errorMessage = getErrorMessage(error);
+          // Log the full error object for more details
+          console.error('DB Error (savePlayerValueChanges) - Raw Error:', error);
+          console.error(
+            'DB Error (savePlayerValueChanges) - Data Payload:',
+            playerValueInputs.map(mapDomainPlayerValueToPrismaCreate),
+          );
+          return createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to save player value changes: ${getErrorMessage(error)}`,
+            message: `Failed to save player value changes: ${errorMessage}`,
             cause: error instanceof Error ? error : undefined,
-          }),
+          });
+        },
       ),
       TE.chain(() => findByChangeDate(playerValueInputs[0].changeDate)),
     );

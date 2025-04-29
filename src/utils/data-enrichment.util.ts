@@ -8,7 +8,7 @@ import * as RA from 'fp-ts/ReadonlyArray';
 import * as RNEA from 'fp-ts/ReadonlyNonEmptyArray';
 import * as TE from 'fp-ts/TaskEither';
 import { EntryInfoRepository } from 'repository/entry-info/types';
-import { ElementTypeId, ElementTypeName, getElementTypeName } from 'types/base.type';
+import { ElementTypeId, ElementTypeName, ElementTypeNames } from 'types/base.type';
 import {
   EntryEventPick,
   EntryEventPicks,
@@ -38,6 +38,7 @@ import {
   RawEventFixtures,
 } from 'types/domain/event-fixture.type';
 import { EventLive, EventLives, RawEventLives } from 'types/domain/event-live.type';
+import { EventOverallResult, RawEventOverallResult } from 'types/domain/event-overall-result.type';
 import { PlayerStat, PlayerStats, RawPlayerStat } from 'types/domain/player-stat.type';
 import { PlayerValue, PlayerValues, RawPlayerValue } from 'types/domain/player-value.type';
 import { RawPlayers, Players } from 'types/domain/player.type';
@@ -86,7 +87,7 @@ export const enrichWithElementType =
                 return {
                   ...item,
                   elementType: elementType,
-                  elementTypeName: getElementTypeName(elementType),
+                  elementTypeName: ElementTypeNames[elementType],
                   webName: player.webName,
                   value: player.price,
                 };
@@ -341,7 +342,7 @@ export const enrichEventLives =
                       teamName: team.name,
                       teamShortName: team.shortName,
                       elementType: player.type as ElementTypeId,
-                      elementTypeName: getElementTypeName(player.type as ElementTypeId),
+                      elementTypeName: ElementTypeNames[player.type as ElementTypeId],
                       webName: player.webName,
                       value: player.price,
                     }),
@@ -401,7 +402,7 @@ export const enrichEntryEventPick =
                         (team): PickItem => ({
                           ...rawPickItem,
                           elementType: elementType,
-                          elementTypeName: getElementTypeName(elementType),
+                          elementTypeName: ElementTypeNames[elementType],
                           teamId: team.id,
                           teamName: team.name,
                           teamShortName: team.shortName,
@@ -480,12 +481,12 @@ export const enrichEntryEventTransfer =
                 O.map((team) => ({
                   webName: player.webName,
                   elementType: elementType,
-                  elementTypeName: getElementTypeName(elementType),
+                  elementTypeName: ElementTypeNames[elementType],
                   teamId: team.id,
                   teamName: team.name,
                   teamShortName: team.shortName,
-                  value: player.price, // Assuming cost is related to price, might need adjustment
-                  points: 0, // Need a way to get points, defaulting to 0
+                  value: player.price,
+                  points: 0,
                 })),
               );
             }),
@@ -515,23 +516,22 @@ export const enrichEntryEventTransfer =
               elementInTeamId: elementInData.teamId,
               elementInTeamName: elementInData.teamName,
               elementInTeamShortName: elementInData.teamShortName,
-              elementInPoints: elementInData.points, // Using default 0 for now
+              elementInPoints: elementInData.points,
               elementOutWebName: elementOutData.webName,
               elementOutType: elementOutData.elementType,
               elementOutTypeName: elementOutData.elementTypeName,
               elementOutTeamId: elementOutData.teamId,
               elementOutTeamName: elementOutData.teamName,
               elementOutTeamShortName: elementOutData.teamShortName,
-              elementOutPoints: elementOutData.points, // Using default 0 for now
+              elementOutPoints: elementOutData.points,
             }),
           ),
         );
       }),
       TE.mapLeft((error) =>
         error.code === DomainErrorCode.DATABASE_ERROR || error.code === DomainErrorCode.NOT_FOUND
-          ? error // Propagate DB or Not Found errors
+          ? error
           : createDomainError({
-              // Wrap other errors (like cache errors) as CACHE_ERROR
               code: DomainErrorCode.CACHE_ERROR,
               message: 'Failed to retrieve players or teams from cache for transfer enrichment',
               cause: error,
@@ -549,8 +549,6 @@ export const enrichEntryEventTransfers =
       ),
     );
 
-// --- Helper Function ---
-// Pure function to combine RawResult and EntryInfo
 const combineRawResultAndEntryInfo = (
   rawResult: RawEntryEventResult,
   entryInfo: EntryInfo,
@@ -559,20 +557,17 @@ const combineRawResultAndEntryInfo = (
   entryName: entryInfo.entryName,
   playerName: entryInfo.playerName,
 });
-// --- End Helper ---
 
 export const enrichEntryEventResults =
   (entryInfoRepository: EntryInfoRepository) =>
   (
     rawInput: RawEntryEventResult | RawEntryEventResults,
   ): TE.TaskEither<DomainError, EntryEventResult | EntryEventResults> => {
-    // --- Handle single object input ---
     if (!Array.isArray(rawInput)) {
       const rawResult = rawInput as RawEntryEventResult;
       return pipe(
         entryInfoRepository.findById(rawResult.entryId),
         TE.mapLeft(
-          // Map DB Error
           (dbError): DomainError =>
             createDomainError({
               code: DomainErrorCode.DATABASE_ERROR,
@@ -580,20 +575,17 @@ export const enrichEntryEventResults =
               cause: dbError,
             }),
         ),
-        // Chain and handle Option for potentially missing EntryInfo
         TE.chainOptionK(() =>
-          // Use chainOptionK for cleaner None -> DomainError mapping
           createDomainError({
             code: DomainErrorCode.NOT_FOUND,
             message: `EntryInfo not found for entry ID: ${rawResult.entryId}`,
           }),
-        )((entryInfo) => O.fromNullable(entryInfo)), // Convert nullable EntryInfo to Option
-        TE.map((entryInfo) => combineRawResultAndEntryInfo(rawResult, entryInfo)), // Use helper
+        )((entryInfo) => O.fromNullable(entryInfo)),
+        TE.map((entryInfo) => combineRawResultAndEntryInfo(rawResult, entryInfo)),
       );
     }
 
-    // --- Handle array input ---
-    const rawResults = rawInput as RawEntryEventResults; // Cast for clarity within this block
+    const rawResults = rawInput as RawEntryEventResults;
     if (RA.isEmpty(rawResults)) {
       return TE.right([]);
     }
@@ -607,7 +599,6 @@ export const enrichEntryEventResults =
     return pipe(
       entryInfoRepository.findByIds(entryIds),
       TE.mapLeft(
-        // Map DB Error
         (dbError): DomainError =>
           createDomainError({
             code: DomainErrorCode.DATABASE_ERROR,
@@ -616,31 +607,53 @@ export const enrichEntryEventResults =
           }),
       ),
       TE.map((entryInfos) => {
-        // Process the array of EntryInfos
         const entryInfoMap = new Map(entryInfos.map((info: EntryInfo) => [info.id, info]));
         const enrichedResults = pipe(
           rawResults,
-          // Map over raw results, look up info, combine using helper, handle None
           RA.map(
-            (
-              rawResultItem: RawEntryEventResult,
-            ): O.Option<EntryEventResult> => // Map to Option
+            (rawResultItem: RawEntryEventResult): O.Option<EntryEventResult> =>
               pipe(
-                O.fromNullable(entryInfoMap.get(rawResultItem.entryId)), // Find matching EntryInfo
-                O.map((entryInfo) => combineRawResultAndEntryInfo(rawResultItem, entryInfo)), // Use helper
+                O.fromNullable(entryInfoMap.get(rawResultItem.entryId)),
+                O.map((entryInfo) => combineRawResultAndEntryInfo(rawResultItem, entryInfo)),
               ),
           ),
-          RA.compact, // Filter out None values
+          RA.compact,
         );
 
-        // Log if results were dropped (optional, could be removed if not needed)
         if (enrichedResults.length < rawResults.length) {
           console.warn(
             '[enrichEntryEventResults] Enrichment dropped some results due to missing EntryInfo. Check EntryInfoRepository integrity.',
           );
         }
 
-        return enrichedResults as EntryEventResults; // Return the enriched array
+        return enrichedResults as EntryEventResults;
+      }),
+    );
+  };
+
+export const enrichEventOverallResult =
+  (playerCache: PlayerCache) =>
+  (rawResult: RawEventOverallResult): TE.TaskEither<DomainError, EventOverallResult> => {
+    return pipe(
+      playerCache.getAllPlayers(),
+      TE.mapLeft((cacheError: DomainError) =>
+        createDomainError({
+          code: DomainErrorCode.CACHE_ERROR,
+          message: 'Failed to retrieve players from cache for event overall result enrichment',
+          cause: cacheError,
+        }),
+      ),
+      TE.map((players: ReadonlyArray<Player>) => {
+        const playerMap = new Map(players.map((p: Player) => [p.id as number, p]));
+        const getWebName = (id: number): string => playerMap.get(id)?.webName ?? 'N/A';
+
+        return {
+          ...rawResult,
+          mostSelectedWebName: getWebName(rawResult.mostSelected),
+          mostTransferredInWebName: getWebName(rawResult.mostTransferredIn),
+          mostCaptainedWebName: getWebName(rawResult.mostCaptained),
+          mostViceCaptainedWebName: getWebName(rawResult.mostViceCaptained),
+        } as EventOverallResult;
       }),
     );
   };

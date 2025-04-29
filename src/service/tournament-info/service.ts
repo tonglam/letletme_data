@@ -9,7 +9,8 @@ import {
   TournamentInfoService,
   TournamentInfoServiceOperations,
 } from 'service/tournament-info/types';
-import { TournamentMode, GroupMode, TournamentState, KnockoutMode } from 'types/base.type';
+import { KnockoutModes, TournamentModes, TournamentStates } from 'types/base.type';
+import { GroupModes } from 'types/base.type';
 import { TournamentInfo, TournamentInfos } from 'types/domain/tournament-info.type';
 import { TournamentId } from 'types/domain/tournament-info.type';
 import { createDomainError, DomainErrorCode, ServiceError } from 'types/error.type';
@@ -45,9 +46,9 @@ const tournamentInfoServiceOperations = (
           TE.map((tournamentInfos) =>
             tournamentInfos.filter(
               (tournamentInfo) =>
-                tournamentInfo.tournamentMode === TournamentMode.Normal &&
-                tournamentInfo.groupMode === GroupMode.PointsRaces &&
-                tournamentInfo.state === TournamentState.Active &&
+                tournamentInfo.tournamentMode === TournamentModes[0] &&
+                tournamentInfo.groupMode === GroupModes[1] &&
+                tournamentInfo.state === TournamentStates[0] &&
                 tournamentInfo.groupStartedEventId !== null &&
                 tournamentInfo.groupStartedEventId <= currentEvent.id &&
                 tournamentInfo.groupEndedEventId !== null &&
@@ -69,9 +70,9 @@ const tournamentInfoServiceOperations = (
           TE.map((tournamentInfos) =>
             tournamentInfos.filter(
               (tournamentInfo) =>
-                tournamentInfo.tournamentMode === TournamentMode.Normal &&
-                tournamentInfo.groupMode === GroupMode.BattleRaces &&
-                tournamentInfo.state === TournamentState.Active &&
+                tournamentInfo.tournamentMode === TournamentModes[0] &&
+                tournamentInfo.groupMode === GroupModes[2] &&
+                tournamentInfo.state === TournamentStates[0] &&
                 tournamentInfo.groupStartedEventId !== null &&
                 tournamentInfo.groupStartedEventId <= currentEvent.id &&
                 tournamentInfo.groupEndedEventId !== null &&
@@ -93,9 +94,9 @@ const tournamentInfoServiceOperations = (
           TE.map((tournamentInfos) =>
             tournamentInfos.filter(
               (tournamentInfo) =>
-                tournamentInfo.tournamentMode === TournamentMode.Normal &&
-                tournamentInfo.knockoutMode !== KnockoutMode.NoKnockout &&
-                tournamentInfo.state === TournamentState.Active &&
+                tournamentInfo.tournamentMode === TournamentModes[0] &&
+                tournamentInfo.knockoutMode !== KnockoutModes[0] &&
+                tournamentInfo.state === TournamentStates[0] &&
                 tournamentInfo.knockoutStartedEventId !== null &&
                 tournamentInfo.knockoutStartedEventId <= currentEvent.id &&
                 tournamentInfo.knockoutEndedEventId !== null &&

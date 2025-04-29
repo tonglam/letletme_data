@@ -2,7 +2,7 @@ import * as A from 'fp-ts/Array';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { redisClient } from 'infrastructures/cache/client';
+import { redisClient } from 'infrastructure/cache/client';
 import Redis from 'ioredis';
 import { CacheError } from 'types/error.type';
 import { createCacheOperationError } from 'utils/error.util';

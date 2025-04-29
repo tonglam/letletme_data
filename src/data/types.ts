@@ -8,6 +8,7 @@ import { EntryLeagueInfos } from 'types/domain/entry-league-info.type';
 import { RawEventFixtures } from 'types/domain/event-fixture.type';
 import { EventLiveExplains } from 'types/domain/event-live-explain.type';
 import { RawEventLives } from 'types/domain/event-live.type';
+import { RawEventOverallResult } from 'types/domain/event-overall-result.type';
 import { EventId, Events } from 'types/domain/event.type';
 import { ClassicLeague, H2hLeague, LeagueId } from 'types/domain/league.type';
 import { Phases } from 'types/domain/phase.type';
@@ -28,6 +29,9 @@ export interface FplBootstrapDataService {
   readonly getPlayerValueTracks: (
     eventId: EventId,
   ) => TE.TaskEither<DataLayerError, PlayerValueTracks>;
+  readonly getEventOverallResults: (
+    eventId: EventId,
+  ) => TE.TaskEither<DataLayerError, RawEventOverallResult>;
 }
 
 export interface FplFixtureDataService {

@@ -1,11 +1,11 @@
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { getWorkflowLogger } from 'infrastructures/logger';
+import { getWorkflowLogger } from 'infrastructure/logger';
 import {
   EventOverallResultService,
   EventOverallResultWorkflowOperations,
-} from 'services/event-overall-result/types';
-import { createWorkflowContext, WorkflowResult } from 'services/types';
+} from 'service/event-overall-result/types';
+import { createWorkflowContext, WorkflowResult } from 'service/types';
 import { EventId } from 'types/domain/event.type';
 import { createServiceError, ServiceError, ServiceErrorCode } from 'types/error.type';
 

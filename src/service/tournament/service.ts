@@ -4,15 +4,15 @@ import { TournamentId } from 'types/domain/tournament-info.type';
 import { ServiceError } from 'types/error.type';
 
 const tournamentServiceOperations = (): TournamentServiceOperations => {
-  const drawTournamentGroups = (id: TournamentId): TE.TaskEither<ServiceError, void> => {
+  const drawTournamentGroups = (_id: TournamentId): TE.TaskEither<ServiceError, void> => {
     return TE.right(undefined);
   };
 
-  const drawTournamentKnockouts = (id: TournamentId): TE.TaskEither<ServiceError, void> => {
+  const drawTournamentKnockouts = (_id: TournamentId): TE.TaskEither<ServiceError, void> => {
     return TE.right(undefined);
   };
 
-  const initializeTournament = (id: TournamentId): TE.TaskEither<ServiceError, void> => {
+  const initializeTournament = (_id: TournamentId): TE.TaskEither<ServiceError, void> => {
     return TE.right(undefined);
   };
 

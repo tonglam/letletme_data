@@ -1,63 +1,52 @@
 import * as E from 'fp-ts/Either';
+import { z } from 'zod';
 
-export enum Chip {
-  None = 'n/a',
-  Wildcard = 'wildcard',
-  FreeHit = 'freehit',
-  TripleCaptain = '3xc',
-  BenchBoost = 'bb',
-  Manager = 'mng',
+export const Chips = ['n/a', 'wildcard', 'freehit', '3xc', 'bboost', 'manager'] as const;
+export type Chip = (typeof Chips)[number];
+
+export const ValueChangeTypes = ['start', 'rise', 'fall'] as const;
+export type ValueChangeType = (typeof ValueChangeTypes)[number];
+
+export const LeagueTypes = ['classic', 'h2h'] as const;
+export type LeagueType = (typeof LeagueTypes)[number];
+
+export const ElementStatus = ['a', 'u', 'i', 's', 'n', 'd'] as const;
+export type ElementStatus = (typeof ElementStatus)[number];
+
+export const TournamentModes = ['normal'] as const;
+export type TournamentMode = (typeof TournamentModes)[number];
+
+export const GroupModes = ['no_group', 'points_races', 'battle_races'] as const;
+export type GroupMode = (typeof GroupModes)[number];
+
+export const KnockoutModes = [
+  'no_knockout',
+  'single_elimination',
+  'double_elimination',
+  'head_to_head',
+] as const;
+export type KnockoutMode = (typeof KnockoutModes)[number];
+
+export const TournamentStates = ['active', 'inactive', 'finished'] as const;
+export type TournamentState = (typeof TournamentStates)[number];
+
+export enum ElementType {
+  GKP = 1,
+  DEF = 2,
+  MID = 3,
+  FWD = 4,
+  MNG = 5,
 }
 
-export enum ValueChangeType {
-  Start = 'Start',
-  Rise = 'Rise',
-  Fall = 'Fall',
-}
+export const ElementTypeIds = Object.values(ElementType).filter(
+  (v): v is number => typeof v === 'number',
+) as ReadonlyArray<ElementType>;
+export type ElementTypeId = (typeof ElementTypeIds)[number];
 
-export enum LeagueType {
-  Classic = 'Classic',
-  H2h = 'H2h',
-}
-
-export enum ElementStatus {
-  Available = 'a',
-  Unavailable = 'u',
-  Injured = 'i',
-  Suspended = 's',
-  NotAvailable = 'n',
-  Departed = 'd',
-}
-
-export enum ElementTypeId {
-  GOALKEEPER = 1,
-  DEFENDER = 2,
-  MIDFIELDER = 3,
-  FORWARD = 4,
-  MANAGER = 5,
-}
-
-export type ElementTypeName = 'GKP' | 'DEF' | 'MID' | 'FWD' | 'MNG';
-
-export const ElementTypeMap: Readonly<Record<ElementTypeId, ElementTypeName>> = {
-  [ElementTypeId.GOALKEEPER]: 'GKP',
-  [ElementTypeId.DEFENDER]: 'DEF',
-  [ElementTypeId.MIDFIELDER]: 'MID',
-  [ElementTypeId.FORWARD]: 'FWD',
-  [ElementTypeId.MANAGER]: 'MNG',
-};
-
-export const getElementTypeIdValue = (type: ElementTypeId): number => type;
-
-export const getElementTypeById = (id: number): ElementTypeId | null => {
-  if (Object.values(ElementTypeId).includes(id)) {
-    return id as ElementTypeId;
-  }
-  return null;
-};
-
-export const getElementTypeName = (typeId: ElementTypeId): ElementTypeName =>
-  ElementTypeMap[typeId];
+export const ElementTypeNames = Object.fromEntries(
+  Object.entries(ElementType).map(([key, value]) => [value, key]),
+) as Record<ElementType, string>;
+export type ElementTypeName = (typeof ElementTypeNames)[keyof typeof ElementTypeNames];
 
 export interface Brand<K extends string> {
   readonly __brand: K;
@@ -74,33 +63,6 @@ export const createBrandedType = <T, K extends string>(
   is: (value: unknown): value is Branded<T, K> => validator(value),
 });
 
-export const ELEMENT_TYPE_IDS: readonly ElementTypeId[] = [
-  ElementTypeId.GOALKEEPER,
-  ElementTypeId.DEFENDER,
-  ElementTypeId.MIDFIELDER,
-  ElementTypeId.FORWARD,
-  ElementTypeId.MANAGER,
-];
-
-export enum TournamentMode {
-  Normal = 'Normal',
-}
-
-export enum GroupMode {
-  NoGroup = 'NoGroup',
-  PointsRaces = 'PointsRaces',
-  BattleRaces = 'BattleRaces',
-}
-
-export enum KnockoutMode {
-  NoKnockout = 'NoKnockout',
-  SingleElimination = 'SingleElimination',
-  DoubleElimination = 'DoubleElimination',
-  HeadToHead = 'HeadToHead',
-}
-
-export enum TournamentState {
-  Active = 'Active',
-  Inactive = 'Inactive',
-  Finished = 'Finished',
-}
+export const GameSettingsSchema = z.object({
+  league_join_private_max: z.number(),
+});

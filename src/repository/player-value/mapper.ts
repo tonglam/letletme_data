@@ -20,12 +20,14 @@ export const mapDbPlayerValueToDomain = (dbPlayerValue: DbPlayerValue): RawPlaye
 
 export const mapDomainPlayerValueToPrismaCreate = (
   domainPlayerValue: PlayerValueCreateInput,
-): DbPlayerValueCreateInput => ({
-  elementId: domainPlayerValue.elementId,
-  elementType: domainPlayerValue.elementType,
-  eventId: domainPlayerValue.eventId,
-  value: domainPlayerValue.value,
-  changeDate: domainPlayerValue.changeDate,
-  changeType: domainPlayerValue.changeType as unknown as DbPlayerValueCreateInput['changeType'],
-  lastValue: domainPlayerValue.lastValue,
-});
+): DbPlayerValueCreateInput => {
+  return {
+    elementId: domainPlayerValue.elementId,
+    elementType: domainPlayerValue.elementType,
+    eventId: domainPlayerValue.eventId,
+    value: domainPlayerValue.value,
+    changeDate: domainPlayerValue.changeDate.replace(/-/g, ''),
+    changeType: domainPlayerValue.changeType as unknown as DbPlayerValueCreateInput['changeType'],
+    lastValue: domainPlayerValue.lastValue,
+  };
+};

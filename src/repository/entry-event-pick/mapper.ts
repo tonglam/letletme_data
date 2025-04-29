@@ -21,8 +21,8 @@ export const mapDomainEntryEventPickToDbCreate = (
 ): DbEntryEventPickCreateInput => ({
   entryId: domainEntryEventPick.entryId,
   eventId: domainEntryEventPick.eventId,
-  chip: (domainEntryEventPick.chip === null || domainEntryEventPick.chip === Chip.None
-    ? Chip.None
+  chip: (domainEntryEventPick.chip === null || domainEntryEventPick.chip === 'n/a'
+    ? 'n/a'
     : domainEntryEventPick.chip) as DbEntryEventPickCreateInput['chip'],
   picks: domainEntryEventPick.picks,
   transfers: domainEntryEventPick.transfers,

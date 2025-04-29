@@ -5,6 +5,7 @@ import {
   mapElementResponseToPlayerValueTrack,
 } from 'data/fpl/mappers/bootstrap/element.mapper';
 import { mapEventResponseToEvent } from 'data/fpl/mappers/bootstrap/event.mapper';
+import { mapEventResponseToEventOverallResult } from 'data/fpl/mappers/bootstrap/overall-result.mapper';
 import { mapPhaseResponseToPhase } from 'data/fpl/mappers/bootstrap/phase.mapper';
 import { mapTeamResponseToTeam } from 'data/fpl/mappers/bootstrap/team.mapper';
 import {
@@ -16,6 +17,7 @@ import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import { apiConfig } from 'src/config/api/api.config';
+import { RawEventOverallResult } from 'types/domain/event-overall-result.type';
 import { EventId, Events } from 'types/domain/event.type';
 import { Phases } from 'types/domain/phase.type';
 import { RawPlayerStats } from 'types/domain/player-stat.type';
@@ -296,6 +298,34 @@ export const createFplBootstrapDataService = (): FplBootstrapDataService => {
       ),
     );
 
+  const getEventOverallResults = (
+    eventId: EventId,
+  ): TE.TaskEither<DataLayerError, RawEventOverallResult> =>
+    pipe(
+      getFplBootstrapDataInternal(),
+      TE.chain((bootstrapData) => {
+        const eventResponse = bootstrapData.events.find((e) => e.id === eventId);
+        if (!eventResponse) {
+          return TE.left(
+            createDataLayerError({
+              code: DataLayerErrorCode.INTERNAL_ERROR,
+              message: `Event with ID ${eventId} not found in bootstrap data.`,
+            }),
+          );
+        }
+        return pipe(
+          mapEventResponseToEventOverallResult(eventResponse),
+          E.mapLeft((mappingError) =>
+            createDataLayerError({
+              code: DataLayerErrorCode.MAPPING_ERROR,
+              message: `Failed to map event overall result for event ${eventId}: ${mappingError}`,
+            }),
+          ),
+          TE.fromEither,
+        );
+      }),
+    );
+
   return {
     getEvents,
     getPhases,
@@ -304,5 +334,6 @@ export const createFplBootstrapDataService = (): FplBootstrapDataService => {
     getPlayerStats,
     getPlayerValues,
     getPlayerValueTracks,
+    getEventOverallResults,
   };
 };
