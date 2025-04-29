@@ -1,6 +1,5 @@
-import { Hono } from 'hono';
-const app = new Hono();
+import { Elysia } from 'elysia';
 
-app.get('/', (c) => c.text('Hono!'));
+const app = new Elysia().get('/', () => 'Hello Elysia').listen(3000);
 
-export default app;
+console.log(`🦊 Elysia is running at ${app.server?.hostname}:${app.server?.port}`);
