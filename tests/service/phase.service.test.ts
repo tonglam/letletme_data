@@ -4,7 +4,7 @@ import { type PhaseCache } from 'domain/phase/types';
 import { beforeAll, describe, expect, it } from 'bun:test';
 import { CachePrefix, DefaultTTL } from 'config/cache/cache.config';
 import { createFplBootstrapDataService } from 'data/fpl/bootstrap.data';
-import { type FplBootstrapDataService } from 'data/types';
+import { FplBootstrapDataService } from 'data/types';
 import * as E from 'fp-ts/Either';
 import { redisClient } from 'infrastructure/cache/client';
 import { type Logger } from 'pino';

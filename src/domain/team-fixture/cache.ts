@@ -94,12 +94,8 @@ export const createTeamFixtureCache = (
 
   const setFixturesByTeamId = (teamFixtures: TeamFixtures): TE.TaskEither<DomainError, void> => {
     if (!teamFixtures || teamFixtures.length === 0) {
-      // If input is empty, nothing to set, maybe clear the key?
-      // For now, just return success.
-      // Consider adding logic to delete the key if the intent is to clear.
       return TE.right(undefined);
     }
-    // Safely get teamId only if array is not empty
     const teamId = teamFixtures[0].teamId;
 
     return pipe(
@@ -109,12 +105,10 @@ export const createTeamFixtureCache = (
           const redisKey = `${baseKey}::${teamId}`;
           multi.del(redisKey);
 
-          // Check length again just in case (although handled above)
           if (teamFixtures.length > 0) {
             const items: Record<string, string> = {};
             teamFixtures.forEach((teamFixture) => {
-              // Use the unique fixture ID as the hash field key
-              items[teamFixture.id.toString()] = JSON.stringify(teamFixture);
+              items[teamFixture.eventId.toString()] = JSON.stringify(teamFixture);
             });
             multi.hset(redisKey, items);
           }

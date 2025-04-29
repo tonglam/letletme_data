@@ -11,7 +11,6 @@ export const StatSchema = z
 
 export const EventLiveExplainResponseSchema = z
   .object({
-    element: z.number(),
     fixture: z.number(),
     stats: z.array(StatSchema),
   })

@@ -59,36 +59,35 @@ const eventLiveServiceOperations = (
 
   const syncEventLiveCacheFromApi = (eventId: EventId): TE.TaskEither<ServiceError, void> =>
     pipe(
-      eventService.isMatchDay(eventId),
-      TE.chainW((isMatchDay) =>
-        isMatchDay
+      fplDataService.getLives(eventId),
+      TE.mapLeft((error: DataLayerError) =>
+        createServiceIntegrationError({
+          message: 'Failed to fetch event lives for cache update via data layer',
+          cause: error.cause,
+          details: error.details,
+        }),
+      ),
+      TE.chainFirstW((rawEventLives) =>
+        rawEventLives.length > 0
           ? pipe(
-              fplDataService.getLives(eventId),
-              TE.mapLeft((error: DataLayerError) =>
-                createServiceIntegrationError({
-                  message: 'Failed to fetch event lives for cache update via data layer',
-                  cause: error.cause,
-                  details: error.details,
-                }),
-              ),
-              TE.chainW((fetchedRawEventLives: RawEventLives) =>
-                pipe(
-                  enrichEventLives(playerCache, teamCache)(fetchedRawEventLives),
-                  TE.mapLeft(mapDomainErrorToServiceError),
-                ),
-              ),
-              TE.chainFirstW((enrichedEventLives: EventLives) =>
-                pipe(
-                  enrichedEventLives.length > 0
-                    ? cache.setEventLives(enrichedEventLives)
-                    : TE.rightIO(IO.of(undefined)),
-                  TE.mapLeft(mapDomainErrorToServiceError),
-                ),
-              ),
-              TE.map(() => undefined),
+              domainOps.saveEventLives(rawEventLives),
+              TE.mapLeft(mapDomainErrorToServiceError),
+              TE.as(undefined),
             )
           : TE.right(undefined),
       ),
+      TE.chainW((rawEventLives) =>
+        pipe(
+          enrichEventLives(playerCache, teamCache)(rawEventLives),
+          TE.mapLeft(mapDomainErrorToServiceError),
+        ),
+      ),
+      TE.chainFirstW((enrichedEventLives) =>
+        enrichedEventLives.length > 0
+          ? pipe(cache.setEventLives(enrichedEventLives), TE.mapLeft(mapDomainErrorToServiceError))
+          : TE.rightIO(IO.of(undefined)),
+      ),
+      TE.map(() => undefined),
     );
 
   const syncEventLivesFromApi = (eventId: EventId): TE.TaskEither<ServiceError, void> =>

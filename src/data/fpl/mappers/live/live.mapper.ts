@@ -9,14 +9,14 @@ import { safeStringToDecimal } from 'utils/common.util';
 
 export const mapEventLiveResponseToDomain = (
   event: number,
+  elementIdInput: number | undefined | null,
   raw: LiveResponse,
 ): E.Either<string, RawEventLive> => {
   return pipe(
-    E.Do,
-    E.bind('elementId', () => validatePlayerId(raw.element)),
-    E.map(({ elementId }) => ({
+    validatePlayerId(elementIdInput),
+    E.map((validElementId) => ({
       eventId: event as EventId,
-      elementId: elementId as PlayerId,
+      elementId: validElementId as PlayerId,
       minutes: raw.minutes,
       goalsScored: raw.goals_scored,
       assists: raw.assists,
@@ -54,7 +54,7 @@ export const mapEventLiveResponseToDomain = (
       mngUnderdogDraw: raw.mng_underdog_draw,
       mngCleanSheets: raw.mng_clean_sheets,
       mngGoalsScored: raw.mng_goals_scored,
-      inDreamTeam: raw.in_dream_team,
+      inDreamTeam: raw.in_dreamteam,
       totalPoints: raw.total_points,
     })),
   );

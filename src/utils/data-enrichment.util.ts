@@ -325,34 +325,37 @@ export const enrichEventLives =
         const playerMap = new Map(players.map((p) => [p.id as number, p]));
         const teamMap = new Map(teams.map((t) => [t.id as number, t]));
 
-        return pipe(
+        const enrichedItems = pipe(
           rawEventLives,
-          RA.map((rawLive): O.Option<EventLive> => {
-            const playerOpt = O.fromNullable(playerMap.get(rawLive.elementId as number));
-            return pipe(
+          RA.map((rawEventLive) => {
+            const elementId = rawEventLive.elementId as number;
+            const playerOpt = O.fromNullable(playerMap.get(elementId));
+            const teamOpt: O.Option<Team> = pipe(
               playerOpt,
-              O.chain((player) => {
-                const teamOpt = O.fromNullable(teamMap.get(player.teamId as number));
-                return pipe(
-                  teamOpt,
-                  O.map(
-                    (team): EventLive => ({
-                      ...rawLive,
-                      teamId: team.id,
-                      teamName: team.name,
-                      teamShortName: team.shortName,
-                      elementType: player.type as ElementTypeId,
-                      elementTypeName: ElementTypeNames[player.type as ElementTypeId],
-                      webName: player.webName,
-                      value: player.price,
-                    }),
-                  ),
-                );
-              }),
+              O.chain((p: Player) => O.fromNullable(teamMap.get(p.teamId as number))),
+            );
+            return pipe(
+              O.Do,
+              O.bind('player', () => playerOpt),
+              O.bind('team', () => teamOpt),
+              O.map(
+                ({ player, team }): EventLive => ({
+                  ...rawEventLive,
+                  webName: player.webName,
+                  elementType: player.type as ElementTypeId,
+                  elementTypeName: ElementTypeNames[player.type as ElementTypeId],
+                  value: player.price,
+                  teamId: team.id,
+                  teamName: team.name,
+                  teamShortName: team.shortName,
+                }),
+              ),
             );
           }),
           RA.compact,
         );
+
+        return enrichedItems;
       }),
       TE.mapLeft(
         (error): DomainError =>

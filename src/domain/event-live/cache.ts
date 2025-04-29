@@ -25,7 +25,10 @@ const parseEventLive = (eventLiveStr: string): E.Either<CacheError, EventLive> =
         }),
     ),
     E.chain((parsed) =>
-      parsed && typeof parsed === 'object' && 'id' in parsed && typeof parsed.id === 'number'
+      parsed &&
+      typeof parsed === 'object' &&
+      'elementId' in parsed &&
+      typeof parsed.elementId === 'number'
         ? E.right(parsed as EventLive)
         : E.left(
             createCacheError({
@@ -76,12 +79,15 @@ export const createEventLiveCache = (
       TE.chain(
         flow(
           O.fromNullable,
+          O.map((eventLivesMap) => {
+            return eventLivesMap;
+          }),
           O.filter((eventLivesMap) => Object.keys(eventLivesMap).length > 0),
           O.fold(
             () => TE.right([] as EventLives),
-            (cachedEventLives): TE.TaskEither<DomainError, EventLives> =>
+            (cachedEventLivesMap): TE.TaskEither<DomainError, EventLives> =>
               pipe(
-                parseEventLives(cachedEventLives),
+                parseEventLives(cachedEventLivesMap),
                 TE.fromEither,
                 TE.mapLeft(mapCacheErrorToDomainError),
               ),
@@ -91,21 +97,25 @@ export const createEventLiveCache = (
     );
 
   const setEventLives = (eventLives: EventLives): TE.TaskEither<DomainError, void> => {
+    if (eventLives.length === 0) {
+      return TE.right(undefined);
+    }
     const eventId = eventLives[0].eventId;
+    const redisKey = `${baseKey}::${eventId}`;
 
     return pipe(
       TE.tryCatch(
         async () => {
-          const multi = redisClient.multi();
-          multi.del(`${baseKey}::${eventId}`);
-          if (eventLives.length > 0) {
-            const items: Record<string, string> = {};
-            eventLives.forEach((eventLive) => {
-              items[eventLive.eventId.toString()] = JSON.stringify(eventLive);
-            });
-            multi.hset(`${baseKey}::${eventId}`, items);
+          const items: Record<string, string> = {};
+          eventLives.forEach((eventLive) => {
+            items[eventLive.elementId.toString()] = JSON.stringify(eventLive);
+          });
+
+          await redisClient.del(redisKey);
+          await redisClient.hset(redisKey, items);
+          if (config.ttlSeconds > 0) {
+            await redisClient.expire(redisKey, config.ttlSeconds);
           }
-          await multi.exec();
         },
         (error: unknown) =>
           createCacheError({
@@ -115,6 +125,7 @@ export const createEventLiveCache = (
           }),
       ),
       TE.mapLeft(mapCacheErrorToDomainError),
+      TE.map(() => undefined),
     );
   };
 

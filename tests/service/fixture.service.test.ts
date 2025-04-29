@@ -21,7 +21,6 @@ import { type EventId } from 'types/domain/event.type';
 import { type TeamFixture } from 'types/domain/team-fixture.type';
 import { type TeamId } from 'types/domain/team.type';
 
-// Test Setup
 import {
   type IntegrationTestSetupResult,
   setupIntegrationTest,

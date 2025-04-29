@@ -2,7 +2,6 @@ import { z } from 'zod';
 
 export const LiveResponseSchema = z
   .object({
-    element: z.number(),
     minutes: z.number(),
     goals_scored: z.number(),
     assists: z.number(),
@@ -29,7 +28,7 @@ export const LiveResponseSchema = z
     mng_clean_sheets: z.number().nullable(),
     mng_goals_scored: z.number().nullable(),
     total_points: z.number(),
-    in_dream_team: z.boolean().nullable(),
+    in_dreamteam: z.boolean().nullable(),
   })
   .passthrough();
 

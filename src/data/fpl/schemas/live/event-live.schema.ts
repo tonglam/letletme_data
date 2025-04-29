@@ -6,7 +6,7 @@ import { LiveResponseSchema } from './live.schema';
 export const ElementSchema = z
   .object({
     id: z.number(),
-    stats: z.record(LiveResponseSchema),
+    stats: LiveResponseSchema,
     explain: z.array(EventLiveExplainResponseSchema),
   })
   .passthrough();

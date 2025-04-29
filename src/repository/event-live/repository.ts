@@ -44,14 +44,43 @@ export const createEventLiveRepository = (): EventLiveRepository => {
           await db
             .insert(schema.eventLive)
             .values(dataToCreate)
-            .onConflictDoNothing({
-              target: [schema.eventLive.eventId],
+            .onConflictDoUpdate({
+              target: [schema.eventLive.eventId, schema.eventLive.elementId],
+              set: {
+                minutes: schema.eventLive.minutes,
+                goalsScored: schema.eventLive.goalsScored,
+                assists: schema.eventLive.assists,
+                cleanSheets: schema.eventLive.cleanSheets,
+                goalsConceded: schema.eventLive.goalsConceded,
+                ownGoals: schema.eventLive.ownGoals,
+                penaltiesSaved: schema.eventLive.penaltiesSaved,
+                penaltiesMissed: schema.eventLive.penaltiesMissed,
+                yellowCards: schema.eventLive.yellowCards,
+                redCards: schema.eventLive.redCards,
+                saves: schema.eventLive.saves,
+                bonus: schema.eventLive.bonus,
+                bps: schema.eventLive.bps,
+                starts: schema.eventLive.starts,
+                expectedGoals: schema.eventLive.expectedGoals,
+                expectedAssists: schema.eventLive.expectedAssists,
+                expectedGoalInvolvements: schema.eventLive.expectedGoalInvolvements,
+                expectedGoalsConceded: schema.eventLive.expectedGoalsConceded,
+                mngWin: schema.eventLive.mngWin,
+                mngDraw: schema.eventLive.mngDraw,
+                mngLoss: schema.eventLive.mngLoss,
+                mngUnderdogWin: schema.eventLive.mngUnderdogWin,
+                mngUnderdogDraw: schema.eventLive.mngUnderdogDraw,
+                mngCleanSheets: schema.eventLive.mngCleanSheets,
+                mngGoalsScored: schema.eventLive.mngGoalsScored,
+                inDreamTeam: schema.eventLive.inDreamTeam,
+                totalPoints: schema.eventLive.totalPoints,
+              },
             });
         },
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to create event live in batch: ${getErrorMessage(error)}`,
+            message: `Failed to upsert event live batch: ${getErrorMessage(error)}`,
             cause: error instanceof Error ? error : undefined,
           }),
       ),
