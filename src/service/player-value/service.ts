@@ -211,7 +211,6 @@ export const playerValueServiceOperations = (
         TE.chainFirstW((_sourceValues) =>
           TE.fromIO(() => getWorkflowLogger().info('sync: Step 2 DONE')),
         ),
-
         TE.chainW((sourceValues) => detectChanges(sourceValues)),
         TE.tapError((err: ServiceError) =>
           TE.fromIO(() => getWorkflowLogger().error({ err }, 'sync: Step 3 FAILED')),
@@ -219,8 +218,6 @@ export const playerValueServiceOperations = (
         TE.chainFirstW((_changes) =>
           TE.fromIO(() => getWorkflowLogger().info('sync: Step 3 DONE')),
         ),
-
-        // Step 4: Save Changes - Input should be RawPlayerValues from Step 3
         TE.chainW((changes: RawPlayerValues) => {
           const logSaveStart: IO.IO<void> = () =>
             getWorkflowLogger().info(
@@ -233,39 +230,28 @@ export const playerValueServiceOperations = (
               TE.chainW(() =>
                 TE.fromIO(() => getWorkflowLogger().info('sync: Step 4 - No changes to save.')),
               ),
-              TE.map(() => changes), // Pass empty changes array along
+              TE.map(() => changes),
             );
           }
-
           const logSaveCall: IO.IO<void> = () =>
             getWorkflowLogger().info('sync: Step 4 - Calling savePlayerValueChanges...');
           return pipe(
             TE.fromIO(logSaveStart),
             TE.chainW(() => TE.fromIO(logSaveCall)),
-            // Pass changes directly, as RawPlayerValues is compatible with PlayerValueCreateInputs
             TE.chainW(() => domainOps.savePlayerValueChanges(changes)),
-            TE.mapLeft(mapDomainErrorToServiceError), // Map DomainError to ServiceError
-            // Assume savePlayerValueChanges returns the saved RawPlayerValues
-            TE.map((savedResult) => savedResult as RawPlayerValues), // Ensure type consistency for next step
+            TE.mapLeft(mapDomainErrorToServiceError),
+            TE.map((savedResult) => savedResult as RawPlayerValues),
           );
         }),
-        TE.tapError(
-          (
-            err: ServiceError, // Type is ServiceError
-          ) => TE.fromIO(() => getWorkflowLogger().error({ err }, 'sync: Step 4 FAILED')),
+        TE.tapError((err: ServiceError) =>
+          TE.fromIO(() => getWorkflowLogger().error({ err }, 'sync: Step 4 FAILED')),
         ),
-        TE.chainFirstW(
-          (
-            savedChanges: RawPlayerValues, // savedChanges is RawPlayerValues
-          ) =>
-            TE.fromIO(() =>
-              getWorkflowLogger().info({ count: savedChanges.length }, 'sync: Step 4 DONE'),
-            ),
+        TE.chainFirstW((savedChanges: RawPlayerValues) =>
+          TE.fromIO(() =>
+            getWorkflowLogger().info({ count: savedChanges.length }, 'sync: Step 4 DONE'),
+          ),
         ),
-
-        // Step 5: Enrich Data - Input is RawPlayerValues from Step 4
         TE.chainW((savedChanges: RawPlayerValues) => {
-          // savedChanges is RawPlayerValues
           const logEnrichStart: IO.IO<void> = () =>
             getWorkflowLogger().info(
               { count: savedChanges.length },
@@ -273,27 +259,18 @@ export const playerValueServiceOperations = (
             );
           return pipe(
             TE.fromIO(logEnrichStart),
-            // enrichSourceData expects RawPlayerValues and returns PlayerValues
-            TE.chainW(() => enrichSourceData(savedChanges)), // Returns TaskEither<ServiceError, PlayerValues>
+            TE.chainW(() => enrichSourceData(savedChanges)),
           );
         }),
-        TE.tapError(
-          (
-            err: ServiceError, // Type is ServiceError
-          ) => TE.fromIO(() => getWorkflowLogger().error({ err }, 'sync: Step 5 FAILED')),
+        TE.tapError((err: ServiceError) =>
+          TE.fromIO(() => getWorkflowLogger().error({ err }, 'sync: Step 5 FAILED')),
         ),
-        TE.chainFirstW(
-          (
-            enrichedValues: PlayerValues, // enrichedValues is PlayerValues
-          ) =>
-            TE.fromIO(() =>
-              getWorkflowLogger().info({ count: enrichedValues.length }, 'sync: Step 5 DONE'),
-            ),
+        TE.chainFirstW((enrichedValues: PlayerValues) =>
+          TE.fromIO(() =>
+            getWorkflowLogger().info({ count: enrichedValues.length }, 'sync: Step 5 DONE'),
+          ),
         ),
-
-        // Step 7: Update Cache - Input is PlayerValues from Step 5
         TE.chainW((processedValues: PlayerValues) => {
-          // processedValues is PlayerValues
           const logCacheStart: IO.IO<void> = () =>
             getWorkflowLogger().info(
               { count: processedValues.length },
@@ -307,7 +284,7 @@ export const playerValueServiceOperations = (
                   getWorkflowLogger().info('sync: Step 7 - No processed values to cache.'),
                 ),
               ),
-              TE.map(() => undefined), // Return undefined for void
+              TE.map(() => undefined),
             );
           }
           const logCacheCall: IO.IO<void> = () =>
@@ -315,22 +292,17 @@ export const playerValueServiceOperations = (
           return pipe(
             TE.fromIO(logCacheStart),
             TE.chainW(() => TE.fromIO(logCacheCall)),
-            TE.chainW(() => playerValueCache.setPlayerValuesByChangeDate(processedValues)), // Returns TaskEither<DomainError, void>
-            TE.mapLeft(mapDomainErrorToServiceError), // Map DomainError to ServiceError
+            TE.chainW(() => playerValueCache.setPlayerValuesByChangeDate(processedValues)),
+            TE.mapLeft(mapDomainErrorToServiceError),
           );
         }),
-        TE.tapError(
-          (
-            err: ServiceError, // Type is ServiceError
-          ) => TE.fromIO(() => getWorkflowLogger().error({ err }, 'sync: Step 7 FAILED')),
+        TE.tapError((err: ServiceError) =>
+          TE.fromIO(() => getWorkflowLogger().error({ err }, 'sync: Step 7 FAILED')),
         ),
         TE.chainFirstW(() => TE.fromIO(() => getWorkflowLogger().info('sync: Step 7 DONE'))),
-
-        // Final Step - Map the result of the last active step (Step 7: Cache result) to void
         TE.map((_cacheResult) => {
-          // _cacheResult is likely void | undefined
-          getWorkflowLogger().info('sync: COMPLETED SUCCESSFULLY'); // Changed log message
-          return undefined; // Return void
+          getWorkflowLogger().info('sync: COMPLETED SUCCESSFULLY');
+          return undefined;
         }),
       ),
   };

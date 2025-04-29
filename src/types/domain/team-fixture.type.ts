@@ -2,6 +2,7 @@ import { EventId } from 'types/domain/event.type';
 import { TeamId } from 'types/domain/team.type';
 
 export type TeamFixture = {
+  readonly id: number;
   readonly eventId: EventId;
   readonly teamId: TeamId;
   readonly teamName: string;

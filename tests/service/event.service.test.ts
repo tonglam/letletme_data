@@ -47,7 +47,7 @@ describe('Event Integration Tests', () => {
   let fixtureService: FixtureService;
 
   const eventCachePrefix = CachePrefix.EVENT;
-  const fixtureCachePrefix = CachePrefix.FIXTURE;
+  const fixtureCachePrefix = CachePrefix.TEAM_FIXTURE;
   const teamCachePrefix = CachePrefix.TEAM;
   const season = '2425';
 

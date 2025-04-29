@@ -1,4 +1,4 @@
-import { pgTable, integer, timestamp, boolean, index } from 'drizzle-orm/pg-core';
+import { pgTable, integer, timestamp, boolean, index, uniqueIndex } from 'drizzle-orm/pg-core';
 import { createdAtField } from 'schema/_helpers';
 import { events } from 'schema/event';
 import { teams } from 'schema/team';
@@ -28,6 +28,7 @@ export const eventFixtures = pgTable(
     ...createdAtField,
   },
   (table) => [
+    uniqueIndex('uq_event_fixtures').on(table.eventId, table.teamHId, table.teamAId),
     index('idx_event_fixtures_event_id').on(table.eventId),
     index('idx_event_fixtures_team_h_id').on(table.teamHId),
     index('idx_event_fixtures_team_a_id').on(table.teamAId),

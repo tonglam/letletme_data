@@ -57,9 +57,9 @@ const parseEventFixtures = (
 
 export const createEventFixtureCache = (
   config: EventFixtureCacheConfig = {
-    keyPrefix: CachePrefix.FIXTURE,
+    keyPrefix: CachePrefix.EVENT_FIXTURE,
     season: getCurrentSeason(),
-    ttlSeconds: DefaultTTL.FIXTURE,
+    ttlSeconds: DefaultTTL.EVENT_FIXTURE,
   },
 ): EventFixtureCache => {
   const { keyPrefix, season } = config;
@@ -94,34 +94,45 @@ export const createEventFixtureCache = (
       ),
     );
 
-  const getAllEventFixtures = (): TE.TaskEither<DomainError, EventFixtures> =>
-    pipe(
-      TE.tryCatch(
-        () => redisClient.hgetall(`${baseKey}`),
-        (error: unknown) =>
-          createCacheError({
-            code: CacheErrorCode.OPERATION_ERROR,
-            message: 'Cache Read Error: Failed to get all event fixtures',
-            cause: error as Error,
-          }),
-      ),
-      TE.mapLeft(mapCacheErrorToDomainError),
-      TE.chain(
-        flow(
-          O.fromNullable,
-          O.filter((eventFixturesMap) => Object.keys(eventFixturesMap).length > 0),
-          O.fold(
-            () => TE.right([] as EventFixtures),
-            (cachedEventFixtures): TE.TaskEither<DomainError, EventFixtures> =>
-              pipe(
-                parseEventFixtures(cachedEventFixtures),
-                TE.fromEither,
-                TE.mapLeft(mapCacheErrorToDomainError),
-              ),
-          ),
-        ),
-      ),
+  const getAllEventFixtures = (): TE.TaskEither<DomainError, EventFixtures> => {
+    const pattern = `${baseKey}::*`;
+    let cursor = '0';
+    let allFixtures: EventFixtures = [];
+
+    const scanAndFetch: TE.TaskEither<CacheError, void> = TE.tryCatch(
+      async () => {
+        do {
+          const scanResult = await redisClient.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
+          cursor = scanResult[0];
+          const keys = scanResult[1];
+
+          if (keys.length > 0) {
+            for (const key of keys) {
+              const fixturesMap = await redisClient.hgetall(key);
+              if (fixturesMap && Object.keys(fixturesMap).length > 0) {
+                const parsedResult = parseEventFixtures(fixturesMap);
+                if (E.isRight(parsedResult)) {
+                  allFixtures = allFixtures.concat(parsedResult.right);
+                }
+              }
+            }
+          }
+        } while (cursor !== '0');
+      },
+      (error: unknown) =>
+        createCacheError({
+          code: CacheErrorCode.OPERATION_ERROR,
+          message: `Cache Read Error: Failed during SCAN/HGETALL for pattern ${pattern}`,
+          cause: error as Error,
+        }),
     );
+
+    return pipe(
+      scanAndFetch,
+      TE.map(() => allFixtures),
+      TE.mapLeft(mapCacheErrorToDomainError),
+    );
+  };
 
   const setEventFixtures = (eventFixtures: EventFixtures): TE.TaskEither<DomainError, void> => {
     const eventId = eventFixtures[0].eventId;

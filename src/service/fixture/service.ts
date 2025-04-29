@@ -70,6 +70,7 @@ const fixtureServiceOperations = (
     return pipe(
       TE.of(eventFixtures),
       TE.chainW(enrichEventFixtures(teamCacheActual)),
+      TE.mapLeft(mapDomainErrorToServiceError),
       TE.chainEitherKW((enrichedFixtures: EventFixtures) =>
         pipe(
           enrichedFixtures,
@@ -83,29 +84,29 @@ const fixtureServiceOperations = (
               ef.teamAName === null ||
               ef.teamAShortName === null
             ) {
-              return E.left(
-                createDomainError({
-                  code: DomainErrorCode.VALIDATION_ERROR,
-                  message: `Invalid EventFixture data: Missing required fields for fixture ID ${ef.id}`,
-                }),
-              );
+              const domainError = createDomainError({
+                code: DomainErrorCode.VALIDATION_ERROR,
+                message: `Invalid EventFixture data: Missing required fields for fixture ID ${ef.id}`,
+              });
+              return E.left(domainError);
             }
             const homeTeamId = ef.teamHId as TeamId;
             const awayTeamId = ef.teamAId as TeamId;
             return E.right([
               {
+                id: ef.id,
                 eventId: ef.eventId as EventId,
                 teamId: homeTeamId,
-                teamName: ef.teamHName,
-                teamShortName: ef.teamHShortName,
+                teamName: ef.teamHName!,
+                teamShortName: ef.teamHShortName!,
                 teamScore: ef.teamHScore ?? 0,
                 teamDifficulty: ef.teamHDifficulty ?? 0,
                 opponentTeamId: awayTeamId,
-                opponentTeamName: ef.teamAName,
-                opponentTeamShortName: ef.teamAShortName,
+                opponentTeamName: ef.teamAName!,
+                opponentTeamShortName: ef.teamAShortName!,
                 opponentTeamScore: ef.teamAScore ?? 0,
                 opponentTeamDifficulty: ef.teamADifficulty ?? 0,
-                kickoffTime: ef.kickoffTime,
+                kickoffTime: ef.kickoffTime!,
                 started: ef.started,
                 finished: ef.finished,
                 minutes: ef.minutes,
@@ -116,18 +117,19 @@ const fixtureServiceOperations = (
                 bgw: false,
               },
               {
+                id: ef.id,
                 eventId: ef.eventId as EventId,
                 teamId: awayTeamId,
-                teamName: ef.teamAName,
-                teamShortName: ef.teamAShortName,
+                teamName: ef.teamAName!,
+                teamShortName: ef.teamAShortName!,
                 teamScore: ef.teamAScore ?? 0,
                 teamDifficulty: ef.teamADifficulty ?? 0,
                 opponentTeamId: homeTeamId,
-                opponentTeamName: ef.teamHName,
-                opponentTeamShortName: ef.teamHShortName,
+                opponentTeamName: ef.teamHName!,
+                opponentTeamShortName: ef.teamHShortName!,
                 opponentTeamScore: ef.teamHScore ?? 0,
                 opponentTeamDifficulty: ef.teamHDifficulty ?? 0,
-                kickoffTime: ef.kickoffTime,
+                kickoffTime: ef.kickoffTime!,
                 started: ef.started,
                 finished: ef.finished,
                 minutes: ef.minutes,
@@ -142,18 +144,21 @@ const fixtureServiceOperations = (
           E.map(RA.flatten),
         ),
       ),
-      TE.mapLeft(mapDomainErrorToServiceError),
+      TE.mapLeft((error) => {
+        if (error.name === 'DomainError') {
+          return mapDomainErrorToServiceError(error as DomainError);
+        }
+        return error as ServiceError;
+      }),
       TE.chainFirstW((teamFixtures: TeamFixtures) =>
         pipe(
           teamFixtures,
           groupTeamFixturesByTeam,
           R.toEntries,
           RA.traverse(TE.ApplicativePar)(([, fixturesForTeam]) =>
-            pipe(
-              teamFixtureCache.setFixturesByTeamId(fixturesForTeam),
-              TE.mapLeft(mapDomainErrorToServiceError),
-            ),
+            teamFixtureCache.setFixturesByTeamId(fixturesForTeam),
           ),
+          TE.mapLeft(mapDomainErrorToServiceError),
           TE.map(() => undefined),
         ),
       ),
@@ -172,13 +177,13 @@ const fixtureServiceOperations = (
   const syncEventFixturesFromApi = (eventId: EventId): TE.TaskEither<ServiceError, void> =>
     pipe(
       fplDataService.getFixtures(eventId),
-      TE.mapLeft((error: DataLayerError) =>
-        createServiceIntegrationError({
+      TE.mapLeft((error: DataLayerError) => {
+        return createServiceIntegrationError({
           message: 'Failed to fetch fixtures',
           cause: error.cause,
           details: error.details,
-        }),
-      ),
+        });
+      }),
       TE.chainFirstW(() =>
         pipe(
           eventFixtureDomainOps.deleteEventFixtures(eventId),
@@ -207,18 +212,12 @@ const fixtureServiceOperations = (
           TE.mapLeft(mapDomainErrorToServiceError),
         ),
       ),
-      TE.chainW((enrichedEventFixtures: EventFixtures) =>
-        mapTeamEventFixtures(enrichedEventFixtures),
-      ),
-      TE.chainFirstW((enrichedTeamFixtures: TeamFixtures) =>
-        pipe(
-          enrichedTeamFixtures.length > 0
-            ? teamFixtureCache.setFixturesByTeamId(enrichedTeamFixtures)
-            : TE.rightIO(() => {}),
-          TE.mapLeft(mapDomainErrorToServiceError),
-        ),
-      ),
-      TE.map(() => undefined),
+      TE.chainW((enrichedEventFixtures: EventFixtures) => {
+        return mapTeamEventFixtures(enrichedEventFixtures);
+      }),
+      TE.map(() => {
+        return undefined;
+      }),
     );
 
   return {
