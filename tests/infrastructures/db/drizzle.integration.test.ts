@@ -1,19 +1,10 @@
-// Load environment variables first
 import 'dotenv/config';
 
+import { describe, expect, it } from 'bun:test';
 import { sql } from 'drizzle-orm';
-// Remove unused PostgresJsDatabase import
-// import { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
-import { describe, expect, it } from 'vitest';
 
 import { db } from '../../../src/db';
-// Remove unused schema import if not used by query builder tests later
-// import * as schema from '../../../src/db/schema';
 
-// Remove unused DrizzleDB type alias
-// type DrizzleDB = PostgresJsDatabase<typeof schema>;
-
-// Update interfaces to satisfy Record<string, unknown>
 interface TestResult {
   test: number;
   [key: string]: any; // Index signature
@@ -29,35 +20,12 @@ interface ValueResult2 {
   [key: string]: any; // Index signature
 }
 
-// Remove unused TransactionResult interface
-// interface TransactionResult {
-//   query1: ValueResult1[];
-//   query2: ValueResult2[];
-// }
-
-// Interface for table name query result
 interface TableNameResult {
   table_name: string;
   [key: string]: any; // Index signature
 }
 
-// This test uses the actual database connection from .env
 describe('Drizzle DB Connection - Integration Test', () => {
-  // No explicit connect/disconnect needed for drizzle-orm/postgres-js by default
-  // It manages connections implicitly. We can add explicit client connection/disconnection
-  // if the underlying 'postgres' client ('client' in db/config.ts) needs it, but
-  // typically it's not required for basic tests.
-
-  // Example: If explicit connection management is needed
-  // beforeAll(async () => {
-  //   // Access the underlying client if needed, depends on config.ts export
-  //   // await client.connect(); // Assuming 'client' is exported from config
-  // });
-  //
-  // afterAll(async () => {
-  //   // await client.end(); // Assuming 'client' is exported from config
-  // });
-
   it('should have a Drizzle instance defined', () => {
     expect(db).toBeDefined();
   });
@@ -105,12 +73,29 @@ describe('Drizzle DB Connection - Integration Test', () => {
 
     // Check for specific essential tables based on the actual schema
     // These names should match your Drizzle schema definitions (src/db/schema.ts)
-    expect(tableNames).toContain('players');
-    expect(tableNames).toContain('teams');
     expect(tableNames).toContain('events');
+    expect(tableNames).toContain('phases');
+    expect(tableNames).toContain('teams');
+    expect(tableNames).toContain('players');
     expect(tableNames).toContain('player_values');
     expect(tableNames).toContain('player_stats');
-    expect(tableNames).toContain('phases');
+    expect(tableNames).toContain('player_value_tracks');
+    expect(tableNames).toContain('event_fixtures');
+    expect(tableNames).toContain('event_live');
+    expect(tableNames).toContain('event_live_explains');
+    expect(tableNames).toContain('entry_infos');
+    expect(tableNames).toContain('entry_history_infos');
+    expect(tableNames).toContain('entry_league_infos');
+    expect(tableNames).toContain('entry_event_picks');
+    expect(tableNames).toContain('entry_event_results');
+    expect(tableNames).toContain('entry_event_transfers');
+    expect(tableNames).toContain('tournament_infos');
+    expect(tableNames).toContain('tournament_entries');
+    expect(tableNames).toContain('tournament_groups');
+    expect(tableNames).toContain('tournament_knockouts');
+    expect(tableNames).toContain('tournament_battle_group_results');
+    expect(tableNames).toContain('tournament_knockout_results');
+    expect(tableNames).toContain('tournament_points_group_results');
     // Add more table checks as needed based on your schema.ts
   });
 });

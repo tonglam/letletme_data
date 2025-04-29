@@ -19,10 +19,10 @@ export const createFplClassicLeagueDataService = (): FplClassicLeagueDataService
     leagueId: LeagueId,
     page: number,
   ): TE.TaskEither<DataLayerError, ClassicLeagueResponse> => {
-    const url = apiConfig.endpoints.leagues.classic({ leagueId, page });
+    const urlPath = apiConfig.endpoints.leagues.classic({ leagueId, page });
     const context: FplApiContext = {
       service: 'FplClassicLeagueDataService',
-      endpoint: url,
+      endpoint: urlPath,
       leagueId,
       page,
     };
@@ -30,14 +30,15 @@ export const createFplClassicLeagueDataService = (): FplClassicLeagueDataService
 
     return TE.tryCatchK(
       async () => {
-        const response = await fetch(url);
+        const fullUrl = `${apiConfig.baseUrl}${urlPath}`;
+        const response = await fetch(fullUrl);
 
         if (!response.ok) {
           throw {
             type: 'HttpError',
             status: response.status,
             statusText: response.statusText,
-            url,
+            url: fullUrl,
           };
         }
 

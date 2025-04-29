@@ -40,14 +40,15 @@ export const createFplBootstrapDataService = (): FplBootstrapDataService => {
 
     return TE.tryCatchK(
       async () => {
-        const response = await fetch(apiConfig.endpoints.bootstrap.static);
+        const url = `${apiConfig.baseUrl}${apiConfig.endpoints.bootstrap.static}`;
+        const response = await fetch(url);
 
         if (!response.ok) {
           throw {
             type: 'HttpError',
             status: response.status,
             statusText: response.statusText,
-            url: apiConfig.endpoints.bootstrap.static,
+            url: url,
           } satisfies Partial<DataLayerError> & {
             type: 'HttpError';
             status: number;
@@ -116,11 +117,15 @@ export const createFplBootstrapDataService = (): FplBootstrapDataService => {
           }
         }
 
+        // Fallback for other errors:
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        const errorDetails = { originalError: String(error) }; // Stringify original error for details
+
         const unexpectedError = createDataLayerError({
           code: DataLayerErrorCode.FETCH_ERROR,
-          message: 'An unexpected error occurred during FPL API fetch or processing',
+          message: `An unexpected error occurred during FPL API fetch or processing: ${errorMessage}`,
           cause: error instanceof Error ? error : undefined,
-          details: { error },
+          details: errorDetails,
         });
         logFplApiError(unexpectedError, context);
         return unexpectedError;

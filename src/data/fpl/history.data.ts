@@ -20,24 +20,25 @@ export const createFplHistoryDataService = (): FplHistoryDataService => {
   const fetchAndValidateHistories = (
     entryId: EntryId,
   ): TE.TaskEither<DataLayerError, EntryHistoryResponse> => {
-    const url = apiConfig.endpoints.entry.history({ entryId });
+    const urlPath = apiConfig.endpoints.entry.history({ entryId });
     const context: FplApiContext = {
       service: 'FplHistoryDataService',
-      endpoint: url,
+      endpoint: urlPath,
       entryId,
     };
     logFplApiCall('Attempting to fetch FPL entry history', context);
 
     return TE.tryCatchK(
       async () => {
-        const response = await fetch(url);
+        const fullUrl = `${apiConfig.baseUrl}${urlPath}`;
+        const response = await fetch(fullUrl);
 
         if (!response.ok) {
           throw {
             type: 'HttpError',
             status: response.status,
             statusText: response.statusText,
-            url,
+            url: fullUrl,
           };
         }
 

@@ -19,10 +19,10 @@ export const createFplPickDataService = (): FplPickDataService => {
     entryId: EntryId,
     eventId: EventId,
   ): TE.TaskEither<DataLayerError, PickResponse> => {
-    const url = apiConfig.endpoints.entry.picks({ entryId, eventId });
+    const urlPath = apiConfig.endpoints.entry.picks({ entryId, eventId });
     const context: FplApiContext = {
       service: 'FplPickDataService',
-      endpoint: url,
+      endpoint: urlPath,
       entryId,
       eventId,
     };
@@ -30,14 +30,15 @@ export const createFplPickDataService = (): FplPickDataService => {
 
     return TE.tryCatchK(
       async () => {
-        const response = await fetch(url);
+        const fullUrl = `${apiConfig.baseUrl}${urlPath}`;
+        const response = await fetch(fullUrl);
 
         if (!response.ok) {
           throw {
             type: 'HttpError',
             status: response.status,
             statusText: response.statusText,
-            url,
+            url: fullUrl,
           };
         }
 

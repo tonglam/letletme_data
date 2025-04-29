@@ -1,14 +1,14 @@
 // Load environment variables first
 import 'dotenv/config';
 
+import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 import { Redis } from 'ioredis';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 // Create direct Redis client for testing using environment variables
 const testRedisClient = new Redis({
-  host: process.env.REDIS_HOST || '127.0.0.1', // Fallback for safety, though dotenv should load
+  host: process.env.REDIS_HOST,
   port: parseInt(process.env.REDIS_PORT || '6379', 10),
-  password: process.env.REDIS_PASSWORD, // Must be loaded from .env
+  password: process.env.REDIS_PASSWORD,
   db: parseInt(process.env.REDIS_DB || '0', 10),
 });
 

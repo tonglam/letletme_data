@@ -33,14 +33,12 @@
     "moduleResolution": "bundler",
     "composite": false,
     "resolveJsonModule": true,
-    "types": ["bun-types", "vitest/globals"]
+    "types": ["bun-types"]
   },
   "include": [
     "src/**/*.ts",
     "tests/**/*.ts",
     "tests/**/*.json",
-    "vitest.config.ts",
-    "vitest.setup.ts",
     "scripts/**/*.ts",
     "drizzle.config.ts"
   ],

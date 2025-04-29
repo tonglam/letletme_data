@@ -21,24 +21,25 @@ export const createFplEntryDataService = (): FplEntryDataService => {
   const fetchAndValidateEntries = (
     entryId: EntryId,
   ): TE.TaskEither<DataLayerError, EntryResponse> => {
-    const url = apiConfig.endpoints.entry.info({ entryId });
+    const urlPath = apiConfig.endpoints.entry.info({ entryId });
     const context: FplApiContext = {
       service: 'FplEntryDataService',
-      endpoint: url,
+      endpoint: urlPath,
       entryId,
     };
     logFplApiCall('Attempting to fetch FPL entry data', context);
 
     return TE.tryCatchK(
       async () => {
-        const response = await fetch(url);
+        const fullUrl = `${apiConfig.baseUrl}${urlPath}`;
+        const response = await fetch(fullUrl);
 
         if (!response.ok) {
           throw {
             type: 'HttpError',
             status: response.status,
             statusText: response.statusText,
-            url,
+            url: fullUrl,
           };
         }
 

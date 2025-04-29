@@ -22,24 +22,25 @@ export const createFplLiveDataService = (): FplLiveDataService => {
   const fetchAndValidateEvents = (
     eventId: EventId,
   ): TE.TaskEither<DataLayerError, EventLiveResponse> => {
-    const url = apiConfig.endpoints.event.live({ eventId });
+    const urlPath = apiConfig.endpoints.event.live({ eventId });
     const context: FplApiContext = {
       service: 'FplLiveDataService',
-      endpoint: url,
+      endpoint: urlPath,
       eventId,
     };
     logFplApiCall('Attempting to fetch FPL event live data', context);
 
     return TE.tryCatchK(
       async () => {
-        const response = await fetch(url);
+        const fullUrl = `${apiConfig.baseUrl}${urlPath}`;
+        const response = await fetch(fullUrl);
 
         if (!response.ok) {
           throw {
             type: 'HttpError',
             status: response.status,
             statusText: response.statusText,
-            url,
+            url: fullUrl,
           };
         }
 

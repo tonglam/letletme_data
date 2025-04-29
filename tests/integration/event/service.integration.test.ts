@@ -1,43 +1,40 @@
-import { PrismaClient } from '@prisma/client';
-import * as E from 'fp-ts/Either';
-import { Logger } from 'pino';
-import { EventRepository } from 'src/repositories/event/types';
-import { EventId } from 'src/types/domain/event.type';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { createEventCache } from 'domain/event/cache';
+import { type EventCache } from 'domain/event/types';
+import { createEventFixtureCache } from 'domain/event-fixture/cache';
+import { type EventFixtureCache } from 'domain/event-fixture/types';
+import { createTeamCache } from 'domain/team/cache';
+import { type TeamCache } from 'domain/team/types';
+import { createTeamFixtureCache } from 'domain/team-fixture/cache';
+import { type TeamFixtureCache } from 'domain/team-fixture/types';
 
-import { CachePrefix, DefaultTTL } from '../../../src/config/cache/cache.config';
-import { createFplBootstrapDataService } from '../../../src/data/fpl/bootstrap.data';
-import { createFplFixtureDataService } from '../../../src/data/fpl/fixture.data';
-import { FplBootstrapDataService, FplFixtureDataService } from '../../../src/data/types';
-import { createEventCache } from '../../../src/domains/event/cache';
-import { EventCache } from '../../../src/domains/event/types';
-import { createEventFixtureCache } from '../../../src/domains/event-fixture/cache';
-import { EventFixtureCache } from '../../../src/domains/event-fixture/types';
-import { createTeamCache } from '../../../src/domains/team/cache';
-import { TeamCache } from '../../../src/domains/team/types';
-import { createTeamFixtureCache } from '../../../src/domains/team-fixture/cache';
-import { TeamFixtureCache } from '../../../src/domains/team-fixture/types';
-import { redisClient } from '../../../src/infrastructures/cache/client';
-import { HTTPClient } from '../../../src/infrastructures/http';
-import { createEventRepository } from '../../../src/repositories/event/repository';
-import { createEventFixtureRepository } from '../../../src/repositories/event-fixture/repository';
-import { EventFixtureRepository } from '../../../src/repositories/event-fixture/types';
-import { createEventService } from '../../../src/services/event/service';
-import { EventService } from '../../../src/services/event/types';
-import { eventWorkflows } from '../../../src/services/event/workflow';
-import { createFixtureService } from '../../../src/services/fixture/service';
-import { FixtureService } from '../../../src/services/fixture/types';
+import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
+import { CachePrefix, DefaultTTL } from 'config/cache/cache.config';
+import { createFplBootstrapDataService } from 'data/fpl/bootstrap.data';
+import { createFplFixtureDataService } from 'data/fpl/fixture.data';
+import { type FplBootstrapDataService, type FplFixtureDataService } from 'data/types';
+import * as E from 'fp-ts/Either';
+import { redisClient } from 'infrastructure/cache/client';
+import { type Logger } from 'pino';
+import { createEventRepository } from 'repository/event/repository';
+import { type EventRepository } from 'repository/event/types';
+import { createEventFixtureRepository } from 'repository/event-fixture/repository';
+import { type EventFixtureRepository } from 'repository/event-fixture/types';
+import { createEventService } from 'service/event/service';
+import { type EventService } from 'service/event/types';
+import { eventWorkflows } from 'service/event/workflow';
+import { createFixtureService } from 'service/fixture/service';
+import { type FixtureService } from 'service/fixture/types';
+import { type EventId } from 'types/domain/event.type';
+
 import {
-  IntegrationTestSetupResult,
+  type IntegrationTestSetupResult,
   setupIntegrationTest,
-  teardownIntegrationTest,
 } from '../../setup/integrationTestSetup';
 
 describe('Event Integration Tests', () => {
   let setup: IntegrationTestSetupResult;
-  let prisma: PrismaClient;
+  let db: IntegrationTestSetupResult['db'];
   let logger: Logger;
-  let httpClient: HTTPClient;
   let eventRepository: EventRepository;
   let eventCache: EventCache;
   let fplBootstrapDataService: FplBootstrapDataService;
@@ -55,13 +52,10 @@ describe('Event Integration Tests', () => {
   const season = '2425';
 
   beforeAll(async () => {
-    // Get generic resources
     setup = await setupIntegrationTest();
-    prisma = setup.prisma;
+    db = setup.db;
     logger = setup.logger;
-    httpClient = setup.httpClient;
 
-    // Ping the shared client to ensure connection (optional but recommended)
     try {
       await redisClient.ping();
     } catch (error) {
@@ -71,18 +65,16 @@ describe('Event Integration Tests', () => {
       );
     }
 
-    // Instantiate specific dependencies
     eventRepository = createEventRepository();
     eventCache = createEventCache({
       keyPrefix: eventCachePrefix,
       season: season,
       ttlSeconds: DefaultTTL.EVENT,
     });
-    fplBootstrapDataService = createFplBootstrapDataService(httpClient, logger);
+    fplBootstrapDataService = createFplBootstrapDataService();
 
-    // Instantiate Fixture dependencies
-    fplFixtureDataService = createFplFixtureDataService(httpClient, logger);
-    eventFixtureRepository = createEventFixtureRepository(prisma);
+    fplFixtureDataService = createFplFixtureDataService();
+    eventFixtureRepository = createEventFixtureRepository();
     eventFixtureCache = createEventFixtureCache({
       keyPrefix: fixtureCachePrefix,
       season: season,
@@ -99,7 +91,6 @@ describe('Event Integration Tests', () => {
       ttlSeconds: DefaultTTL.TEAM,
     });
 
-    // Instantiate FixtureService with actual dependencies
     fixtureService = createFixtureService(
       fplFixtureDataService,
       eventFixtureRepository,
@@ -108,7 +99,6 @@ describe('Event Integration Tests', () => {
       teamCache,
     );
 
-    // Instantiate EventService with the actual fixtureService
     eventService = createEventService(
       fplBootstrapDataService,
       fixtureService,
@@ -118,55 +108,49 @@ describe('Event Integration Tests', () => {
   });
 
   afterAll(async () => {
-    // Run generic teardown (which no longer includes redis.quit())
-    await teardownIntegrationTest(setup);
-    // Disconnect shared redis client if required by global teardown
-    // await redisClient.quit();
+    // No explicit teardown needed
   });
 
   describe('Event Service Integration', () => {
     it('should fetch events from API, store in database, and cache them', async () => {
       const syncResult = await eventService.syncEventsFromApi()();
 
-      // Check if the sync operation itself succeeded
       expect(E.isRight(syncResult)).toBe(true);
 
-      // Check database state after sync
-      const dbEvents = await prisma.event.findMany();
-      expect(dbEvents.length).toBeGreaterThan(0);
-      const firstEvent = dbEvents[0];
-      expect(firstEvent).toHaveProperty('id');
-      expect(firstEvent).toHaveProperty('name');
-      expect(firstEvent).toHaveProperty('deadlineTime');
+      if (E.isRight(syncResult)) {
+        const dbEvents = await db.query.events.findMany();
+        expect(dbEvents.length).toBeGreaterThan(0);
+        const firstEvent = dbEvents[0];
+        expect(firstEvent).toHaveProperty('id');
+        expect(firstEvent).toHaveProperty('name');
+        expect(firstEvent).toHaveProperty('deadlineTime');
 
-      // Check cache state after sync
-      const cacheKey = `${eventCachePrefix}::${season}`;
-      const keyExists = await redisClient.exists(cacheKey);
-      expect(keyExists).toBe(1);
+        const cacheKey = `${eventCachePrefix}::${season}`;
+        const keyExists = await redisClient.exists(cacheKey);
+        expect(keyExists).toBe(1);
+      }
     });
 
     it('should fetch current event after syncing', async () => {
-      // Sync first
       const syncResult = await eventService.syncEventsFromApi()();
-      expect(E.isRight(syncResult)).toBe(true); // Ensure sync succeeded
+      expect(E.isRight(syncResult)).toBe(true);
 
-      // Then attempt to get the current event
       const currentEventResult = await eventService.getCurrentEvent()();
 
       expect(E.isRight(currentEventResult)).toBe(true);
       if (E.isRight(currentEventResult) && currentEventResult.right) {
         const currentEvent = currentEventResult.right;
+        expect(currentEvent).toBeDefined();
+        expect(currentEvent).not.toBeNull();
         expect(currentEvent).toHaveProperty('isCurrent', true);
       }
     });
 
     it('should get event by ID after syncing', async () => {
-      // Sync first
       const syncResult = await eventService.syncEventsFromApi()();
-      expect(E.isRight(syncResult)).toBe(true); // Ensure sync succeeded
+      expect(E.isRight(syncResult)).toBe(true);
 
-      // Get an event from the DB to test with
-      const eventFromDb = await prisma.event.findFirst();
+      const eventFromDb = await db.query.events.findFirst();
       expect(eventFromDb).not.toBeNull();
 
       if (eventFromDb) {
@@ -175,64 +159,54 @@ describe('Event Integration Tests', () => {
 
         expect(E.isRight(eventResult)).toBe(true);
         if (E.isRight(eventResult) && eventResult.right) {
-          expect(eventResult.right.id).toEqual(eventIdToGet);
+          expect(eventResult.right).toBeDefined();
+          expect(eventResult.right).not.toBeNull();
+          expect(eventResult.right).toHaveProperty('id', eventIdToGet);
         }
       }
     });
 
     it('should fetch last event after syncing', async () => {
-      // Sync first
       const syncResult = await eventService.syncEventsFromApi()();
       expect(E.isRight(syncResult)).toBe(true);
 
-      // Need current event to know what "last" is
       const currentEventResult = await eventService.getCurrentEvent()();
       expect(E.isRight(currentEventResult)).toBe(true);
       if (E.isRight(currentEventResult) && currentEventResult.right) {
         const currentEvent = currentEventResult.right;
-        // Ensure there *is* a last event to fetch (e.g., if current is GW1)
-        if (currentEvent.id > 1) {
+        if ((currentEvent.id as number) > 1) {
           const lastEventResult = await eventService.getLastEvent()();
           expect(E.isRight(lastEventResult)).toBe(true);
           if (E.isRight(lastEventResult) && lastEventResult.right) {
-            expect(lastEventResult.right.id).toEqual(currentEvent.id - 1);
+            expect(lastEventResult.right.id as number).toEqual((currentEvent.id as number) - 1);
           }
         } else {
-          // If current event is 1, getLastEvent should fail or return nothing
-          // The current implementation relies on cache which should be populated,
-          // but finding event id 0 will fail. Adjust expectation based on desired behavior.
-          // For now, just check the attempt was made if applicable.
-          // Alternatively, skip this case or expect an error if the service guarantees one.
           console.warn('Current event is 1, skipping getLastEvent check.');
         }
       }
     });
 
     it('should fetch next event after syncing', async () => {
-      // Sync first
       const syncResult = await eventService.syncEventsFromApi()();
       expect(E.isRight(syncResult)).toBe(true);
 
-      // Need current event to know what "next" is
       const currentEventResult = await eventService.getCurrentEvent()();
       expect(E.isRight(currentEventResult)).toBe(true);
       if (E.isRight(currentEventResult) && currentEventResult.right) {
         const currentEvent = currentEventResult.right;
-        // Fetch all events to check if there is a next one
         const allEventsResult = await eventService.getEvents()();
         expect(E.isRight(allEventsResult)).toBe(true);
         if (E.isRight(allEventsResult) && allEventsResult.right) {
-          const maxEventId = Math.max(...allEventsResult.right.map((e) => e.id));
-          // Ensure there *is* a next event to fetch
-          if (currentEvent.id < maxEventId) {
+          const maxEventId = Math.max(...allEventsResult.right.map((e) => e.id as number));
+          if ((currentEvent.id as number) < maxEventId) {
             const nextEventResult = await eventService.getNextEvent()();
             expect(E.isRight(nextEventResult)).toBe(true);
             if (E.isRight(nextEventResult) && nextEventResult.right) {
-              expect(nextEventResult.right.id).toEqual(currentEvent.id + 1);
+              expect(nextEventResult.right.id as number).toEqual((currentEvent.id as number) + 1);
             }
           } else {
             console.warn(
-              `Current event ${currentEvent.id} is the last event, skipping getNextEvent check.`,
+              `Current event ${currentEvent.id as number} is the last event, skipping getNextEvent check.`,
             );
           }
         }
@@ -240,11 +214,9 @@ describe('Event Integration Tests', () => {
     });
 
     it('should fetch all events after syncing', async () => {
-      // Sync first
       const syncResult = await eventService.syncEventsFromApi()();
-      expect(E.isRight(syncResult)).toBe(true); // Ensure sync succeeded
+      expect(E.isRight(syncResult)).toBe(true);
 
-      // Then attempt to get all events
       const allEventsResult = await eventService.getEvents()();
 
       expect(E.isRight(allEventsResult)).toBe(true);
@@ -252,7 +224,6 @@ describe('Event Integration Tests', () => {
         const allEvents = allEventsResult.right;
         expect(Array.isArray(allEvents)).toBe(true);
         expect(allEvents.length).toBeGreaterThan(0);
-        // Check if the fetched events have the correct structure
         expect(allEvents[0]).toHaveProperty('id');
         expect(allEvents[0]).toHaveProperty('name');
       }
@@ -266,17 +237,14 @@ describe('Event Integration Tests', () => {
 
       expect(E.isRight(result)).toBe(true);
       if (E.isRight(result)) {
-        expect(result.right.context).toBeDefined();
+        expect(result.right).toBeDefined();
+        expect(result.right).not.toBeNull();
+        expect(result.right).toHaveProperty('context');
+        expect(result.right).toHaveProperty('duration');
         expect(result.right.duration).toBeGreaterThan(0);
-        // // Removed assertions for result.right.result as the workflow doesn't return it
-        // expect(result.right.result).toBeDefined();
-        // expect(result.right.result.length).toBeGreaterThan(0);
 
-        // Verify the side effect directly by checking the database
-        const dbEvents = await prisma.event.findMany();
-        expect(dbEvents.length).toBeGreaterThan(0); // Check that events were actually saved
-        // // Optionally, compare count if the workflow *did* return it, but it doesn't.
-        // expect(dbEvents.length).toEqual(result.right.result.length);
+        const dbEvents = await db.query.events.findMany();
+        expect(dbEvents.length).toBeGreaterThan(0);
       }
     });
   });

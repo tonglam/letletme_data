@@ -20,24 +20,25 @@ export const createFplFixtureDataService = (): FplFixtureDataService => {
   const fetchAndValidateFixtures = (
     eventId: EventId,
   ): TE.TaskEither<DataLayerError, EventFixturesResponse> => {
-    const url = apiConfig.endpoints.event.fixtures({ eventId });
+    const urlPath = apiConfig.endpoints.event.fixtures({ eventId });
     const context: FplApiContext = {
       service: 'FplFixtureDataService',
-      endpoint: url,
+      endpoint: urlPath,
       eventId,
     };
     logFplApiCall('Attempting to fetch FPL fixtures data', context);
 
     return TE.tryCatchK(
       async () => {
-        const response = await fetch(url);
+        const fullUrl = `${apiConfig.baseUrl}${urlPath}`;
+        const response = await fetch(fullUrl);
 
         if (!response.ok) {
           throw {
             type: 'HttpError',
             status: response.status,
             statusText: response.statusText,
-            url,
+            url: fullUrl,
           };
         }
 

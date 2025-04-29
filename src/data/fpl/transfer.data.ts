@@ -23,10 +23,10 @@ export const createFplTransferDataService = (): FplTransferDataService => {
     entryId: EntryId,
     eventId: EventId,
   ): TE.TaskEither<DataLayerError, TransfersResponse> => {
-    const url = apiConfig.endpoints.entry.transfers({ entryId, eventId });
+    const urlPath = apiConfig.endpoints.entry.transfers({ entryId, eventId });
     const context: FplApiContext = {
       service: 'FplTransferDataService',
-      endpoint: url,
+      endpoint: urlPath,
       entryId,
       eventId,
     };
@@ -34,14 +34,15 @@ export const createFplTransferDataService = (): FplTransferDataService => {
 
     return TE.tryCatchK(
       async () => {
-        const response = await fetch(url);
+        const fullUrl = `${apiConfig.baseUrl}${urlPath}`;
+        const response = await fetch(fullUrl);
 
         if (!response.ok) {
           throw {
             type: 'HttpError',
             status: response.status,
             statusText: response.statusText,
-            url,
+            url: fullUrl,
           };
         }
 
