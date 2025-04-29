@@ -26,6 +26,7 @@ export const createEventLiveExplainOperations = (
           cause: dbError,
         }),
       ),
+      TE.map(() => eventLiveExplains),
     );
 
   const deleteEventLiveExplains = (eventId: EventId): TE.TaskEither<DomainError, void> =>

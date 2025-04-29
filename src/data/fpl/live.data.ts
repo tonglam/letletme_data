@@ -53,6 +53,7 @@ export const createFplLiveDataService = (): FplLiveDataService => {
           throw validationErrorDetails;
         }
 
+        // Restore cache assignment
         cachedEventResponse = parsed.data;
         return parsed.data;
       },
@@ -99,7 +100,7 @@ export const createFplLiveDataService = (): FplLiveDataService => {
   const getFplEventDataInternal = (
     eventId: EventId,
   ): TE.TaskEither<DataLayerError, EventLiveResponse> => {
-    if (cachedEventResponse) {
+    if (cachedEventResponse && cachedEventResponse.elements[0]?.explain[0]?.fixture === eventId) {
       return TE.right(cachedEventResponse);
     }
     return fetchAndValidateEvents(eventId);
