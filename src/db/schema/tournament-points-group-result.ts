@@ -2,7 +2,6 @@ import { pgTable, integer, uniqueIndex, index } from 'drizzle-orm/pg-core';
 import { autoIncrementId, timestamps } from 'schema/_helpers';
 import { entryInfos } from 'schema/entry-info';
 import { events } from 'schema/event';
-import { tournamentGroups } from 'schema/tournament-group';
 import { tournamentInfos } from 'schema/tournament-info';
 
 export const tournamentPointsGroupResults = pgTable(
@@ -12,9 +11,7 @@ export const tournamentPointsGroupResults = pgTable(
     tournamentId: integer('tournament_id')
       .notNull()
       .references(() => tournamentInfos.id),
-    groupId: integer('group_id')
-      .notNull()
-      .references(() => tournamentGroups.groupId),
+    groupId: integer('group_id').notNull(),
     eventId: integer('event_id')
       .notNull()
       .references(() => events.id),

@@ -6,14 +6,13 @@ import { TeamCache } from 'domain/team/types';
 
 import { FplBootstrapDataService } from 'data/types';
 import { pipe, flow } from 'fp-ts/function';
+import * as IO from 'fp-ts/IO';
 import * as RA from 'fp-ts/ReadonlyArray';
 import * as TE from 'fp-ts/TaskEither';
-import { getWorkflowLogger } from 'infrastructure/logger';
-import { PlayerValueRepository, PlayerValueCreateInputs } from 'repository/player-value/types';
+import { PlayerValueRepository } from 'repository/player-value/types';
 import { PlayerValueService, PlayerValueServiceOperations } from 'service/player-value/types';
-import { ValueChangeType, ValueChangeTypes } from 'types/base.type';
+import { ValueChangeTypes } from 'types/base.type';
 import {
-  PlayerValue,
   PlayerValues,
   RawPlayerValue,
   RawPlayerValues,
@@ -30,17 +29,8 @@ import {
 import { enrichPlayerValues } from 'utils/data-enrichment.util';
 import { createServiceIntegrationError, mapDomainErrorToServiceError } from 'utils/error.util';
 
-const workflowLogger = getWorkflowLogger();
-
-const determineChangeType = (newValue: number, lastValue: number): ValueChangeType => {
-  if (newValue > lastValue) {
-    return ValueChangeTypes[0];
-  }
-  if (newValue < lastValue) {
-    return ValueChangeTypes[1];
-  }
-  return ValueChangeTypes[2];
-};
+import { getWorkflowLogger } from '../../infrastructure/logger';
+import { DomainError } from '../../types/error.type';
 
 const detectRawValueChanges =
   (domainOps: PlayerValueOperations) =>
@@ -49,8 +39,21 @@ const detectRawValueChanges =
       return TE.right([]);
     }
     const elementIds = sourceValues.map((value) => value.elementId);
+
+    const logFetchStart: IO.IO<void> = () =>
+      getWorkflowLogger().info(
+        { count: elementIds.length },
+        'detectRawValueChanges: Fetching latest values from DB',
+      );
+
     return pipe(
-      domainOps.getLatestPlayerValuesByElements(elementIds),
+      TE.fromIO(logFetchStart),
+      TE.chainW(() => domainOps.getLatestPlayerValuesByElements(elementIds)),
+      TE.tapError((error: DomainError) =>
+        TE.fromIO(() =>
+          getWorkflowLogger().error({ err: error }, 'detectRawValueChanges: Failed DB fetch'),
+        ),
+      ),
       TE.mapLeft((error) =>
         createServiceError({
           code: ServiceErrorCode.OPERATION_ERROR,
@@ -58,61 +61,47 @@ const detectRawValueChanges =
           cause: error,
         }),
       ),
-      TE.map((latestDbValues) => {
-        const latestValueMap = new Map(latestDbValues.map((v) => [v.elementId, v.value]));
-        const changes: Array<RawPlayerValue> = [];
+      TE.chainW((latestDbValues) =>
+        pipe(
+          TE.fromIO(() =>
+            getWorkflowLogger().info(
+              { count: latestDbValues.length },
+              'detectRawValueChanges: Successfully fetched latest values',
+            ),
+          ),
+          TE.map(() => {
+            const dbValuesTyped = latestDbValues as ReadonlyArray<{
+              elementId: PlayerId;
+              value: number;
+            }>;
+            const latestValueMap = new Map(dbValuesTyped.map((v) => [v.elementId, v.value]));
+            const changes: Array<RawPlayerValue> = [];
 
-        for (const sourceValue of sourceValues) {
-          const latestDbValue = latestValueMap.get(sourceValue.elementId);
+            for (const sourceValue of sourceValues) {
+              const latestDbValueNum = latestValueMap.get(sourceValue.elementId);
 
-          if (latestDbValue === undefined || sourceValue.value !== latestDbValue) {
-            const lastValue = latestDbValue ?? sourceValue.value;
-            const changeType = latestDbValue
-              ? determineChangeType(sourceValue.value, latestDbValue)
-              : ValueChangeTypes[2];
-            changes.push({
-              ...sourceValue,
-              lastValue,
-              changeType,
-            });
-          }
-        }
-        return changes;
-      }),
-    );
-  };
-
-const addChangeInfoToEnriched =
-  (domainOps: PlayerValueOperations) =>
-  (enrichedSourceValues: PlayerValues): TE.TaskEither<ServiceError, PlayerValues> => {
-    if (RA.isEmpty(enrichedSourceValues)) {
-      return TE.right([]);
-    }
-    const elementIds = enrichedSourceValues.map((v) => v.elementId);
-    return pipe(
-      domainOps.getLatestPlayerValuesByElements(elementIds),
-      TE.mapLeft((error) =>
-        createServiceError({
-          code: ServiceErrorCode.OPERATION_ERROR,
-          message: `Failed to fetch latest player values for adding change info: ${error.message}`,
-          cause: error,
-        }),
+              if (latestDbValueNum === undefined) {
+                changes.push({
+                  ...sourceValue,
+                  lastValue: 0,
+                  changeType: ValueChangeTypes[0], // 'start'
+                });
+              } else if (sourceValue.value !== latestDbValueNum) {
+                const changeType =
+                  sourceValue.value > latestDbValueNum
+                    ? ValueChangeTypes[1] // 'rise'
+                    : ValueChangeTypes[2]; // 'fall'
+                changes.push({
+                  ...sourceValue,
+                  lastValue: latestDbValueNum,
+                  changeType: changeType,
+                });
+              }
+            }
+            return changes;
+          }),
+        ),
       ),
-      TE.map((latestDbValues) => {
-        const latestValueMap = new Map(latestDbValues.map((v) => [v.elementId, v.value]));
-        return enrichedSourceValues.map((enrichedValue): PlayerValue => {
-          const latestDbValue = latestValueMap.get(enrichedValue.elementId);
-          const lastValue = latestDbValue ?? enrichedValue.value;
-          const changeType = latestDbValue
-            ? determineChangeType(enrichedValue.value, latestDbValue)
-            : ValueChangeTypes[2];
-          return {
-            ...enrichedValue,
-            lastValue,
-            changeType,
-          };
-        });
-      }),
     );
   };
 
@@ -131,12 +120,10 @@ export const playerValueServiceOperations = (
 
   const detectChanges = detectRawValueChanges(domainOps);
 
-  const addChangeInfo = addChangeInfoToEnriched(domainOps);
-
   const processSourceToPlayerValues = (
     sourceValues: RawPlayerValues,
   ): TE.TaskEither<ServiceError, PlayerValues> =>
-    pipe(TE.of(sourceValues), TE.chainW(enrichSourceData), TE.chainW(addChangeInfo));
+    pipe(TE.of(sourceValues), TE.chainW(enrichSourceData));
 
   const ops: PlayerValueServiceOperations = {
     detectPlayerValueChanges: (): TE.TaskEither<ServiceError, PlayerValues> =>
@@ -200,12 +187,14 @@ export const playerValueServiceOperations = (
       pipe(
         eventCache.getCurrentEvent(),
         TE.mapLeft(mapDomainErrorToServiceError),
-        TE.tapError((err) =>
-          TE.fromIO(() => workflowLogger.error({ err }, 'Error getting current event')),
+        TE.tapError((err: ServiceError) =>
+          TE.fromIO(() => getWorkflowLogger().error({ err }, 'sync: Step 1 FAILED')),
         ),
-        TE.chainW((currentEvent) => {
-          workflowLogger.info({ eventId: currentEvent.id }, 'Current event fetched successfully');
-          return pipe(
+        TE.chainFirstW((_currentEvent) =>
+          TE.fromIO(() => getWorkflowLogger().info('sync: Step 1 DONE')),
+        ),
+        TE.chainW((currentEvent) =>
+          pipe(
             fplDataService.getPlayerValues(currentEvent.id),
             TE.mapLeft((error: DataLayerError) =>
               createServiceIntegrationError({
@@ -214,93 +203,135 @@ export const playerValueServiceOperations = (
                 details: error.details,
               }),
             ),
-          );
-        }),
-        TE.tapError((err) =>
-          TE.fromIO(() => workflowLogger.error({ err }, 'Error fetching source player values')),
-        ),
-        TE.chainW((sourceValues) => {
-          workflowLogger.info(
-            { count: sourceValues.length },
-            'Source values fetched, detecting changes...',
-          );
-          return pipe(detectChanges(sourceValues));
-        }),
-        TE.tapError((err) =>
-          TE.fromIO(() => workflowLogger.error({ err }, 'Error detecting value changes')),
-        ),
-        TE.chainFirstW((changes) =>
-          TE.fromIO(() =>
-            workflowLogger.info({ count: changes.length }, 'Changes detected, saving...'),
           ),
         ),
-        TE.chainW((changes: RawPlayerValues) => {
-          if (RA.isEmpty(changes)) {
-            workflowLogger.info('No value changes to save.');
-            return TE.right([]);
-          }
+        TE.tapError((err: ServiceError) =>
+          TE.fromIO(() => getWorkflowLogger().error({ err }, 'sync: Step 2 FAILED')),
+        ),
+        TE.chainFirstW((_sourceValues) =>
+          TE.fromIO(() => getWorkflowLogger().info('sync: Step 2 DONE')),
+        ),
 
-          // Duplicate check on original changes
-          const keySet = new Set<string>();
-          // Use original 'changes' array for duplicate check now
-          const duplicates = changes.filter((c) => {
-            const key = `${c.elementId}-${c.changeDate}`;
-            if (keySet.has(key)) return true;
-            keySet.add(key);
-            return false;
-          });
-          if (duplicates.length > 0) {
-            workflowLogger.error(
-              { duplicates },
-              // Adjusted log message back to original
-              'Duplicate (elementId, changeDate) pairs detected in changes before saving!',
+        TE.chainW((sourceValues) => detectChanges(sourceValues)),
+        TE.tapError((err: ServiceError) =>
+          TE.fromIO(() => getWorkflowLogger().error({ err }, 'sync: Step 3 FAILED')),
+        ),
+        TE.chainFirstW((_changes) =>
+          TE.fromIO(() => getWorkflowLogger().info('sync: Step 3 DONE')),
+        ),
+
+        // Step 4: Save Changes - Input should be RawPlayerValues from Step 3
+        TE.chainW((changes: RawPlayerValues) => {
+          const logSaveStart: IO.IO<void> = () =>
+            getWorkflowLogger().info(
+              { count: changes.length },
+              'sync: Step 4 START - Saving changes',
+            );
+          if (RA.isEmpty(changes)) {
+            return pipe(
+              TE.fromIO(logSaveStart),
+              TE.chainW(() =>
+                TE.fromIO(() => getWorkflowLogger().info('sync: Step 4 - No changes to save.')),
+              ),
+              TE.map(() => changes), // Pass empty changes array along
             );
           }
 
+          const logSaveCall: IO.IO<void> = () =>
+            getWorkflowLogger().info('sync: Step 4 - Calling savePlayerValueChanges...');
           return pipe(
-            // Use original 'changes' array for saving now
-            domainOps.savePlayerValueChanges(changes as PlayerValueCreateInputs),
-            TE.mapLeft(mapDomainErrorToServiceError),
+            TE.fromIO(logSaveStart),
+            TE.chainW(() => TE.fromIO(logSaveCall)),
+            // Pass changes directly, as RawPlayerValues is compatible with PlayerValueCreateInputs
+            TE.chainW(() => domainOps.savePlayerValueChanges(changes)),
+            TE.mapLeft(mapDomainErrorToServiceError), // Map DomainError to ServiceError
+            // Assume savePlayerValueChanges returns the saved RawPlayerValues
+            TE.map((savedResult) => savedResult as RawPlayerValues), // Ensure type consistency for next step
           );
         }),
-        TE.tapError((err) =>
-          TE.fromIO(() => workflowLogger.error({ err }, 'Error saving value changes')),
+        TE.tapError(
+          (
+            err: ServiceError, // Type is ServiceError
+          ) => TE.fromIO(() => getWorkflowLogger().error({ err }, 'sync: Step 4 FAILED')),
         ),
-        TE.chainW((savedChanges) => {
-          workflowLogger.info({ count: savedChanges.length }, 'Changes saved, enriching...');
-          return pipe(enrichSourceData(savedChanges));
-        }),
-        TE.tapError((err) =>
-          TE.fromIO(() => workflowLogger.error({ err }, 'Error enriching saved changes')),
+        TE.chainFirstW(
+          (
+            savedChanges: RawPlayerValues, // savedChanges is RawPlayerValues
+          ) =>
+            TE.fromIO(() =>
+              getWorkflowLogger().info({ count: savedChanges.length }, 'sync: Step 4 DONE'),
+            ),
         ),
-        TE.chainW((enrichedValues) => {
-          workflowLogger.info(
-            { count: enrichedValues.length },
-            'Changes enriched, adding change info...',
+
+        // Step 5: Enrich Data - Input is RawPlayerValues from Step 4
+        TE.chainW((savedChanges: RawPlayerValues) => {
+          // savedChanges is RawPlayerValues
+          const logEnrichStart: IO.IO<void> = () =>
+            getWorkflowLogger().info(
+              { count: savedChanges.length },
+              'sync: Step 5 START - Enriching saved changes',
+            );
+          return pipe(
+            TE.fromIO(logEnrichStart),
+            // enrichSourceData expects RawPlayerValues and returns PlayerValues
+            TE.chainW(() => enrichSourceData(savedChanges)), // Returns TaskEither<ServiceError, PlayerValues>
           );
-          return pipe(addChangeInfo(enrichedValues));
         }),
-        TE.tapError((err) =>
-          TE.fromIO(() => workflowLogger.error({ err }, 'Error adding change info')),
+        TE.tapError(
+          (
+            err: ServiceError, // Type is ServiceError
+          ) => TE.fromIO(() => getWorkflowLogger().error({ err }, 'sync: Step 5 FAILED')),
         ),
-        TE.chainW((processedValues) => {
-          workflowLogger.info(
-            { count: processedValues.length },
-            'Processing complete, updating cache...',
-          );
+        TE.chainFirstW(
+          (
+            enrichedValues: PlayerValues, // enrichedValues is PlayerValues
+          ) =>
+            TE.fromIO(() =>
+              getWorkflowLogger().info({ count: enrichedValues.length }, 'sync: Step 5 DONE'),
+            ),
+        ),
+
+        // Step 7: Update Cache - Input is PlayerValues from Step 5
+        TE.chainW((processedValues: PlayerValues) => {
+          // processedValues is PlayerValues
+          const logCacheStart: IO.IO<void> = () =>
+            getWorkflowLogger().info(
+              { count: processedValues.length },
+              'sync: Step 7 START - Updating cache',
+            );
           if (RA.isEmpty(processedValues)) {
-            workflowLogger.info('No processed values to cache.');
-            return TE.right(undefined);
+            return pipe(
+              TE.fromIO(logCacheStart),
+              TE.chainW(() =>
+                TE.fromIO(() =>
+                  getWorkflowLogger().info('sync: Step 7 - No processed values to cache.'),
+                ),
+              ),
+              TE.map(() => undefined), // Return undefined for void
+            );
           }
+          const logCacheCall: IO.IO<void> = () =>
+            getWorkflowLogger().info('sync: Step 7 - Calling setPlayerValuesByChangeDate...');
           return pipe(
-            playerValueCache.setPlayerValuesByChangeDate(processedValues),
-            TE.mapLeft(mapDomainErrorToServiceError),
+            TE.fromIO(logCacheStart),
+            TE.chainW(() => TE.fromIO(logCacheCall)),
+            TE.chainW(() => playerValueCache.setPlayerValuesByChangeDate(processedValues)), // Returns TaskEither<DomainError, void>
+            TE.mapLeft(mapDomainErrorToServiceError), // Map DomainError to ServiceError
           );
         }),
-        TE.tapError((err) =>
-          TE.fromIO(() => workflowLogger.error({ err }, 'Error updating cache')),
+        TE.tapError(
+          (
+            err: ServiceError, // Type is ServiceError
+          ) => TE.fromIO(() => getWorkflowLogger().error({ err }, 'sync: Step 7 FAILED')),
         ),
-        TE.map(() => undefined),
+        TE.chainFirstW(() => TE.fromIO(() => getWorkflowLogger().info('sync: Step 7 DONE'))),
+
+        // Final Step - Map the result of the last active step (Step 7: Cache result) to void
+        TE.map((_cacheResult) => {
+          // _cacheResult is likely void | undefined
+          getWorkflowLogger().info('sync: COMPLETED SUCCESSFULLY'); // Changed log message
+          return undefined; // Return void
+        }),
       ),
   };
 

@@ -1,5 +1,5 @@
 {
-  "id": "fa40e73c-9820-49d9-be47-ddb2d6882e80",
+  "id": "9d18cfb5-7ba9-49bd-89bf-e9c78043cf77",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -608,8 +608,8 @@
         }
       },
       "indexes": {
-        "unique_entry_season_history": {
-          "name": "unique_entry_season_history",
+        "unique_entry_history_info": {
+          "name": "unique_entry_history_info",
           "columns": [
             {
               "expression": "entry_id",
@@ -1685,8 +1685,8 @@
         }
       },
       "indexes": {
-        "unique_event_element_live": {
-          "name": "unique_event_element_live",
+        "unique_event_live": {
+          "name": "unique_event_live",
           "columns": [
             {
               "expression": "event_id",
@@ -2383,8 +2383,8 @@
         }
       },
       "indexes": {
-        "unique_player_stats_event_element": {
-          "name": "unique_player_stats_event_element",
+        "unique_player_stats": {
+          "name": "unique_player_stats",
           "columns": [
             {
               "expression": "event_id",
@@ -2543,8 +2543,8 @@
         }
       },
       "indexes": {
-        "unique_player_values_element_date": {
-          "name": "unique_player_values_element_date",
+        "unique_player_values": {
+          "name": "unique_player_values",
           "columns": [
             {
               "expression": "element_id",
@@ -3132,19 +3132,6 @@
           ],
           "columnsTo": [
             "id"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        },
-        "tournament_battle_group_results_group_id_tournament_groups_group_id_fk": {
-          "name": "tournament_battle_group_results_group_id_tournament_groups_group_id_fk",
-          "tableFrom": "tournament_battle_group_results",
-          "tableTo": "tournament_groups",
-          "columnsFrom": [
-            "group_id"
-          ],
-          "columnsTo": [
-            "group_id"
           ],
           "onDelete": "no action",
           "onUpdate": "no action"
@@ -4588,19 +4575,6 @@
           ],
           "columnsTo": [
             "id"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        },
-        "tournament_points_group_results_group_id_tournament_groups_group_id_fk": {
-          "name": "tournament_points_group_results_group_id_tournament_groups_group_id_fk",
-          "tableFrom": "tournament_points_group_results",
-          "tableTo": "tournament_groups",
-          "columnsFrom": [
-            "group_id"
-          ],
-          "columnsTo": [
-            "group_id"
           ],
           "onDelete": "no action",
           "onUpdate": "no action"

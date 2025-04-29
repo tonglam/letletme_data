@@ -1,39 +1,35 @@
-import { PrismaClient } from '@prisma/client';
+import { createEventCache } from 'domain/event/cache';
+import { EventCache } from 'domain/event/types';
+import { createPlayerCache } from 'domain/player/cache';
+import { PlayerCache } from 'domain/player/types';
+import { createPlayerStatCache } from 'domain/player-stat/cache';
+import { PlayerStatCache } from 'domain/player-stat/types';
+import { createTeamCache } from 'domain/team/cache';
+import { TeamCache } from 'domain/team/types';
+
+import { beforeAll, describe, expect, it } from 'bun:test';
+import { CachePrefix, DefaultTTL } from 'config/cache/cache.config';
+import { createFplBootstrapDataService } from 'data/fpl/bootstrap.data';
+import { FplBootstrapDataService } from 'data/types';
+import { db } from 'db/index';
+import * as playerStatSchema from 'db/schema/player-stat';
 import * as E from 'fp-ts/Either';
+import { redisClient } from 'infrastructure/cache/client';
 import { Logger } from 'pino';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { createPlayerStatRepository } from 'repository/player-stat/repository';
+import { PlayerStatRepository } from 'repository/player-stat/types';
+import { createPlayerStatService } from 'service/player-stat/service';
+import { PlayerStatService } from 'service/player-stat/types';
+import { playerStatWorkflows } from 'service/player-stat/workflow';
+import { IntegrationTestSetupResult, setupIntegrationTest } from 'tests/setup/integrationTestSetup';
+import { PlayerType } from 'types/domain/player.type';
 
-import { CachePrefix } from '../../../src/config/cache/cache.config';
-import { createFplBootstrapDataService } from '../../../src/data/fpl/bootstrap.data';
-import { FplBootstrapDataService } from '../../../src/data/types';
-import { createEventCache } from '../../../src/domains/event/cache';
-import { EventCache } from '../../../src/domains/event/types';
-import { createPlayerCache } from '../../../src/domains/player/cache';
-import { PlayerCache } from '../../../src/domains/player/types';
-import { createPlayerStatCache } from '../../../src/domains/player-stat/cache';
-import { PlayerStatCache } from '../../../src/domains/player-stat/types';
-import { createTeamCache } from '../../../src/domains/team/cache';
-import { TeamCache } from '../../../src/domains/team/types';
-import { redisClient } from '../../../src/infrastructures/cache/client';
-import { HTTPClient } from '../../../src/infrastructures/http';
-import { createPlayerStatRepository } from '../../../src/repositories/player-stat/repository';
-import { PlayerStatRepository } from '../../../src/repositories/player-stat/types';
-import { createPlayerStatService } from '../../../src/services/player-stat/service';
-import { PlayerStatService } from '../../../src/services/player-stat/types';
-import { playerStatWorkflows } from '../../../src/services/player-stat/workflow';
-import { PlayerType } from '../../../src/types/domain/player.type';
-import {
-  IntegrationTestSetupResult,
-  setupIntegrationTest,
-  teardownIntegrationTest,
-} from '../../setup/integrationTestSetup';
+type DrizzleDB = typeof db;
 
-// Increase timeout for this describe block
-describe('PlayerStat Integration Tests', { timeout: 30000 }, () => {
+describe('PlayerStat Integration Tests', () => {
   let setup: IntegrationTestSetupResult;
-  let prisma: PrismaClient;
+  let drizzleDb: DrizzleDB;
   let logger: Logger;
-  let httpClient: HTTPClient;
   let fplDataService: FplBootstrapDataService;
   let playerStatRepository: PlayerStatRepository;
   let playerStatCache: PlayerStatCache;
@@ -50,34 +46,43 @@ describe('PlayerStat Integration Tests', { timeout: 30000 }, () => {
 
   beforeAll(async () => {
     setup = await setupIntegrationTest();
-    prisma = setup.prisma;
+    drizzleDb = setup.db;
     logger = setup.logger;
-    httpClient = setup.httpClient;
 
     try {
       await redisClient.ping();
-    } catch {
-      /* Ignore error */
+      logger.info('Shared redisClient ping successful.');
+    } catch (error) {
+      logger.error({ err: error }, 'Shared redisClient ping failed in beforeAll.');
     }
 
-    fplDataService = createFplBootstrapDataService(httpClient, logger);
+    fplDataService = createFplBootstrapDataService();
 
-    // Sync Player and Team Data FIRST
-    playerCache = createPlayerCache({ keyPrefix: playerCachePrefix, season });
-    teamCache = createTeamCache({ keyPrefix: teamCachePrefix, season });
-    // Setup Event components
-    eventCache = createEventCache({ keyPrefix: eventCachePrefix, season });
-    await eventCache.getAllEvents()(); // Populate event cache
+    playerCache = createPlayerCache({
+      keyPrefix: playerCachePrefix,
+      season,
+      ttlSeconds: DefaultTTL.PLAYER,
+    });
+    teamCache = createTeamCache({
+      keyPrefix: teamCachePrefix,
+      season,
+      ttlSeconds: DefaultTTL.TEAM,
+    });
+    eventCache = createEventCache({
+      keyPrefix: eventCachePrefix,
+      season,
+      ttlSeconds: DefaultTTL.EVENT,
+    });
 
-    // Ensure Player/Team caches are populated *after* DB sync for PlayerStat service
+    await eventCache.getAllEvents()();
     await playerCache.getAllPlayers()();
     await teamCache.getAllTeams()();
 
-    // Setup PlayerStat components
-    playerStatRepository = createPlayerStatRepository(prisma);
+    playerStatRepository = createPlayerStatRepository();
     playerStatCache = createPlayerStatCache({
       keyPrefix: cachePrefix,
       season,
+      ttlSeconds: DefaultTTL.PLAYER_STAT,
     });
     playerStatService = createPlayerStatService(
       fplDataService,
@@ -89,20 +94,21 @@ describe('PlayerStat Integration Tests', { timeout: 30000 }, () => {
     );
   });
 
-  afterAll(async () => {
-    await teardownIntegrationTest(setup);
-  });
-
   describe('PlayerStat Service Integration', () => {
     it('should fetch player stats from API, store in database, and cache them', async () => {
       const syncResult = await playerStatService.syncPlayerStatsFromApi()();
+      if (E.isLeft(syncResult)) {
+        logger.error({ error: syncResult.left }, 'Sync operation failed unexpectedly.');
+      }
       expect(E.isRight(syncResult)).toBe(true);
 
-      // --- Direct Cache Check Removed ---
-
       const latestStatsResult = await playerStatService.getLatestPlayerStats()();
-      // --- Retry Logic Removed ---
-
+      if (E.isLeft(latestStatsResult)) {
+        logger.error(
+          { error: latestStatsResult.left },
+          'getLatestPlayerStats failed unexpectedly.',
+        );
+      }
       expect(E.isRight(latestStatsResult)).toBe(true);
 
       if (E.isRight(latestStatsResult)) {
@@ -110,7 +116,6 @@ describe('PlayerStat Integration Tests', { timeout: 30000 }, () => {
         expect(playerStats.length).toBeGreaterThan(0);
         const firstStat = playerStats[0];
 
-        // Corrected assertions
         expect(firstStat).toHaveProperty('elementId');
         expect(firstStat).toHaveProperty('eventId');
         expect(firstStat).toHaveProperty('minutes');
@@ -121,17 +126,24 @@ describe('PlayerStat Integration Tests', { timeout: 30000 }, () => {
         expect(firstStat).toHaveProperty('teamShortName');
       }
 
-      const dbStats = await prisma.playerStat.findMany();
+      const dbStats = await drizzleDb.select().from(playerStatSchema.playerStats);
       expect(dbStats.length).toBeGreaterThan(0);
     });
 
     it('should get player stat by ID after syncing', async () => {
       const syncResult = await playerStatService.syncPlayerStatsFromApi()();
+      if (E.isLeft(syncResult)) {
+        logger.error({ error: syncResult.left }, 'Sync operation failed unexpectedly.');
+      }
       expect(E.isRight(syncResult)).toBe(true);
 
       const latestStatsResult = await playerStatService.getLatestPlayerStats()();
-      // --- Retry Logic Removed ---
-
+      if (E.isLeft(latestStatsResult)) {
+        logger.error(
+          { error: latestStatsResult.left },
+          'getLatestPlayerStats failed unexpectedly.',
+        );
+      }
       expect(E.isRight(latestStatsResult)).toBe(true);
 
       if (E.isRight(latestStatsResult)) {
@@ -140,23 +152,39 @@ describe('PlayerStat Integration Tests', { timeout: 30000 }, () => {
         const firstStatElement = stats[0].elementId;
         const statResult = await playerStatService.getPlayerStat(firstStatElement)();
 
+        if (E.isLeft(statResult)) {
+          logger.error({ error: statResult.left }, 'getPlayerStat failed unexpectedly.');
+        }
         expect(E.isRight(statResult)).toBe(true);
+
         if (E.isRight(statResult) && statResult.right) {
           expect(statResult.right.elementId).toEqual(firstStatElement);
-          // Corrected assertions
           expect(statResult.right).toHaveProperty('elementType');
           expect(statResult.right).toHaveProperty('teamName');
         } else {
-          throw new Error('getPlayerStat returned Left or null');
+          throw new Error(
+            `getPlayerStat returned Right(null) or test failed for element ${firstStatElement}`,
+          );
         }
       } else {
-        throw new Error('getLatestPlayerStats failed');
+        throw new Error('getLatestPlayerStats failed or returned empty array');
       }
     });
 
     it('should get player stats by element type after syncing', async () => {
-      await playerStatService.syncPlayerStatsFromApi()();
+      const syncResult = await playerStatService.syncPlayerStatsFromApi()();
+      if (E.isLeft(syncResult)) {
+        logger.error({ error: syncResult.left }, 'Sync operation failed unexpectedly.');
+      }
+      expect(E.isRight(syncResult)).toBe(true);
+
       const latestStatsResult = await playerStatService.getLatestPlayerStats()();
+      if (E.isLeft(latestStatsResult)) {
+        logger.error(
+          { error: latestStatsResult.left },
+          'getLatestPlayerStats failed unexpectedly.',
+        );
+      }
       expect(E.isRight(latestStatsResult)).toBe(true);
 
       if (E.isRight(latestStatsResult) && latestStatsResult.right.length > 0) {
@@ -166,6 +194,12 @@ describe('PlayerStat Integration Tests', { timeout: 30000 }, () => {
         const statsByTypeResult = await playerStatService.getPlayerStatsByElementType(
           elementTypeToTest as PlayerType,
         )();
+        if (E.isLeft(statsByTypeResult)) {
+          logger.error(
+            { error: statsByTypeResult.left },
+            'getPlayerStatsByElementType failed unexpectedly.',
+          );
+        }
         expect(E.isRight(statsByTypeResult)).toBe(true);
 
         if (E.isRight(statsByTypeResult)) {
@@ -173,11 +207,10 @@ describe('PlayerStat Integration Tests', { timeout: 30000 }, () => {
           expect(stats.length).toBeGreaterThan(0);
           stats.forEach((s) => {
             expect(s.elementType).toEqual(elementTypeToTest);
-            // Check enrichment
             expect(s).toHaveProperty('elementTypeName');
           });
         } else {
-          throw new Error('getPlayerStatsByElementType returned Left');
+          throw new Error('getPlayerStatsByElementType returned Left despite passing expect');
         }
       } else {
         throw new Error('Could not get latest stats or stats list is empty after sync.');
@@ -185,8 +218,19 @@ describe('PlayerStat Integration Tests', { timeout: 30000 }, () => {
     });
 
     it('should get player stats by team after syncing', async () => {
-      await playerStatService.syncPlayerStatsFromApi()();
+      const syncResult = await playerStatService.syncPlayerStatsFromApi()();
+      if (E.isLeft(syncResult)) {
+        logger.error({ error: syncResult.left }, 'Sync operation failed unexpectedly.');
+      }
+      expect(E.isRight(syncResult)).toBe(true);
+
       const latestStatsResult = await playerStatService.getLatestPlayerStats()();
+      if (E.isLeft(latestStatsResult)) {
+        logger.error(
+          { error: latestStatsResult.left },
+          'getLatestPlayerStats failed unexpectedly.',
+        );
+      }
       expect(E.isRight(latestStatsResult)).toBe(true);
 
       if (E.isRight(latestStatsResult) && latestStatsResult.right.length > 0) {
@@ -194,6 +238,12 @@ describe('PlayerStat Integration Tests', { timeout: 30000 }, () => {
         const teamToTest = firstStat.teamId;
 
         const statsByTeamResult = await playerStatService.getPlayerStatsByTeam(teamToTest)();
+        if (E.isLeft(statsByTeamResult)) {
+          logger.error(
+            { error: statsByTeamResult.left },
+            'getPlayerStatsByTeam failed unexpectedly.',
+          );
+        }
         expect(E.isRight(statsByTeamResult)).toBe(true);
 
         if (E.isRight(statsByTeamResult)) {
@@ -201,12 +251,11 @@ describe('PlayerStat Integration Tests', { timeout: 30000 }, () => {
           expect(stats.length).toBeGreaterThan(0);
           stats.forEach((s) => {
             expect(s.teamId).toEqual(teamToTest);
-            // Check enrichment
             expect(s).toHaveProperty('teamName');
             expect(s).toHaveProperty('teamShortName');
           });
         } else {
-          throw new Error('getPlayerStatsByTeam returned Left');
+          throw new Error('getPlayerStatsByTeam returned Left despite passing expect');
         }
       } else {
         throw new Error('Could not get latest stats or stats list is empty after sync.');
@@ -219,13 +268,16 @@ describe('PlayerStat Integration Tests', { timeout: 30000 }, () => {
       const workflows = playerStatWorkflows(playerStatService);
       const result = await workflows.syncPlayerStats()();
 
+      if (E.isLeft(result)) {
+        logger.error({ error: result.left }, 'Sync workflow failed unexpectedly.');
+      }
       expect(E.isRight(result)).toBe(true);
+
       if (E.isRight(result)) {
         expect(result.right.context).toBeDefined();
         expect(result.right.duration).toBeGreaterThan(0);
 
-        // Verify DB side effect
-        const dbStats = await prisma.playerStat.findMany();
+        const dbStats = await drizzleDb.select().from(playerStatSchema.playerStats);
         expect(dbStats.length).toBeGreaterThan(0);
       }
     });

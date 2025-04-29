@@ -17,16 +17,19 @@ export const DefaultTTL = {
   FIXTURE: CacheTTL.DERIVED_DATA,
   LIVE: CacheTTL.WEEKLY,
   OVERALL_RESULT: CacheTTL.DERIVED_DATA,
+  EVENT_FIXTURE: CacheTTL.DERIVED_DATA,
+  TEAM_FIXTURE: CacheTTL.DERIVED_DATA,
 } as const;
 
-export const CachePrefix = {
-  EVENT: 'event',
-  PHASE: 'phase',
-  TEAM: 'team',
-  PLAYER: 'player',
-  PLAYER_VALUE: 'player-value',
-  PLAYER_STAT: 'player-stat',
-  FIXTURE: 'fixture',
-  LIVE: 'live',
-  OVERALL_RESULT: 'overall-result',
-} as const;
+export enum CachePrefix {
+  EVENT = 'event',
+  PHASE = 'phase',
+  TEAM = 'team',
+  PLAYER = 'player',
+  PLAYER_VALUE = 'player-value',
+  PLAYER_STAT = 'player-stat',
+  EVENT_FIXTURE = 'event-fixture',
+  TEAM_FIXTURE = 'team-fixture',
+  LIVE = 'live',
+  OVERALL_RESULT = 'overall-result',
+}

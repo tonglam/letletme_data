@@ -118,38 +118,38 @@ export const createPlayerValueRepository = (): PlayerValueRepository => {
       TE.tryCatch(
         async () => {
           if (playerValueInputs.length === 0) {
-            return; // Nothing to insert
+            return []; // Return empty array if nothing to insert, matches expected return type later
           }
           const dataToCreate = playerValueInputs.map(mapDomainPlayerValueToPrismaCreate);
 
-          // --- Start Modification: Iterative Insert ---
-          for (const record of dataToCreate) {
-            await db
-              .insert(schema.playerValues)
-              .values(record) // Insert one record at a time
-              .onConflictDoNothing({
-                target: [schema.playerValues.elementId, schema.playerValues.changeDate],
-              });
-          }
-          // --- End Modification ---
+          // Perform a single bulk insert
+          await db
+            .insert(schema.playerValues)
+            .values(dataToCreate) // Pass the entire array
+            .onConflictDoNothing({
+              target: [schema.playerValues.elementId, schema.playerValues.changeDate],
+            });
+
+          // Explicitly return something to indicate success, maybe the input count or void
+          // Or, fetch and return the inserted/updated records if needed (findByChangeDate does this later)
+          return dataToCreate; // Let's return the data we attempted to create for now
         },
         (error) => {
           const errorMessage = getErrorMessage(error);
           console.error('DB Error (savePlayerValueChanges) - Raw Error:', error);
-          // Log the input payload that caused the error (if relevant, might log all if error is general)
           console.error(
             'DB Error (savePlayerValueChanges) - Input Payload:',
-            playerValueInputs.map(mapDomainPlayerValueToPrismaCreate), // Map again for consistency in logging
+            playerValueInputs.map(mapDomainPlayerValueToPrismaCreate),
           );
           return createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to save player value changes iteratively: ${errorMessage}`,
+            message: `Failed to save player value changes (bulk): ${errorMessage}`,
             cause: error instanceof Error ? error : undefined,
           });
         },
       ),
-      // Ensure findByChangeDate still uses a valid change date if inputs exist
-      TE.chain(() =>
+      // This TE.chain fetches the results after the insert/update. It seems correct.
+      TE.chain((_createdData) =>
         playerValueInputs.length > 0
           ? findByChangeDate(playerValueInputs[0].changeDate)
           : TE.right([] as RawPlayerValues),

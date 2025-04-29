@@ -43,6 +43,6 @@ export const mapDomainPlayerValueTrackToDbCreate = (
   transfersOut: domainPlayerValueTrack.transfersOut,
   transfersInEvent: domainPlayerValueTrack.transfersInEvent,
   transfersOutEvent: domainPlayerValueTrack.transfersOutEvent,
-  selectedBy: domainPlayerValueTrack.selectedBy ?? 0,
+  selectedBy: Math.round(domainPlayerValueTrack.selectedBy ?? 0),
   value: domainPlayerValueTrack.value,
 });

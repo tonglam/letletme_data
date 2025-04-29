@@ -47,17 +47,28 @@ export const createPlayerValueTrackRepository = (): PlayerValueTrackRepository =
             .insert(schema.playerValueTracks)
             .values(dataToCreate)
             .onConflictDoNothing({
-              target: [schema.playerValueTracks.date],
+              target: [
+                schema.playerValueTracks.elementId,
+                schema.playerValueTracks.date,
+                schema.playerValueTracks.hourIndex,
+              ],
             });
         },
-        (error) =>
-          createDBError({
+        (error) => {
+          console.error('Raw DB Error (savePlayerValueTracksByDate):', error);
+          return createDBError({
             code: DBErrorCode.QUERY_ERROR,
             message: `Failed to save player value tracks: ${getErrorMessage(error)}`,
             cause: error instanceof Error ? error : undefined,
-          }),
+          });
+        },
       ),
-      TE.chain(() => findByDate(playerValueTrackInputs[0].date)),
+      TE.chain(() => {
+        if (playerValueTrackInputs.length === 0) {
+          return TE.right([]);
+        }
+        return findByDate(playerValueTrackInputs[0].date);
+      }),
     );
 
   return {

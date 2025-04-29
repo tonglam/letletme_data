@@ -134,15 +134,14 @@ describe('Team Integration Tests', () => {
       const workflows = teamWorkflows(teamService);
       const result = await workflows.syncTeams()();
 
-      pipe(result, (error) => {
-        logger.error({ error }, 'syncTeams workflow failed in test');
-        throw new Error(`syncTeams workflow returned Left: ${JSON.stringify(error)}`);
-      });
       expect(E.isRight(result)).toBe(true);
 
       if (E.isRight(result)) {
         const workflowResult = result.right;
         expect(workflowResult).toBeDefined();
+        expect(workflowResult).toHaveProperty('context');
+        expect(workflowResult).toHaveProperty('duration');
+        expect(workflowResult.duration).toBeGreaterThan(0);
 
         const dbTeams = await drizzleDb.select().from(teamSchema.teams);
         expect(dbTeams.length).toBeGreaterThan(0);

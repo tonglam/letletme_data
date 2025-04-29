@@ -498,7 +498,6 @@ ALTER TABLE "player_stats" ADD CONSTRAINT "player_stats_element_id_players_id_fk
 ALTER TABLE "player_values" ADD CONSTRAINT "player_values_element_id_players_id_fk" FOREIGN KEY ("element_id") REFERENCES "public"."players"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "player_values" ADD CONSTRAINT "player_values_event_id_events_id_fk" FOREIGN KEY ("event_id") REFERENCES "public"."events"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "tournament_battle_group_results" ADD CONSTRAINT "tournament_battle_group_results_tournament_id_tournament_infos_id_fk" FOREIGN KEY ("tournament_id") REFERENCES "public"."tournament_infos"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "tournament_battle_group_results" ADD CONSTRAINT "tournament_battle_group_results_group_id_tournament_groups_group_id_fk" FOREIGN KEY ("group_id") REFERENCES "public"."tournament_groups"("group_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "tournament_battle_group_results" ADD CONSTRAINT "tournament_battle_group_results_event_id_events_id_fk" FOREIGN KEY ("event_id") REFERENCES "public"."events"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "tournament_battle_group_results" ADD CONSTRAINT "tournament_battle_group_results_home_entry_id_entry_infos_id_fk" FOREIGN KEY ("home_entry_id") REFERENCES "public"."entry_infos"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "tournament_battle_group_results" ADD CONSTRAINT "tournament_battle_group_results_away_entry_id_entry_infos_id_fk" FOREIGN KEY ("away_entry_id") REFERENCES "public"."entry_infos"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
@@ -524,7 +523,6 @@ ALTER TABLE "tournament_knockout_results" ADD CONSTRAINT "tournament_knockout_re
 ALTER TABLE "tournament_knockout_results" ADD CONSTRAINT "tournament_knockout_results_away_entry_id_entry_infos_id_fk" FOREIGN KEY ("away_entry_id") REFERENCES "public"."entry_infos"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "tournament_knockout_results" ADD CONSTRAINT "tournament_knockout_results_match_winner_entry_infos_id_fk" FOREIGN KEY ("match_winner") REFERENCES "public"."entry_infos"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "tournament_points_group_results" ADD CONSTRAINT "tournament_points_group_results_tournament_id_tournament_infos_id_fk" FOREIGN KEY ("tournament_id") REFERENCES "public"."tournament_infos"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "tournament_points_group_results" ADD CONSTRAINT "tournament_points_group_results_group_id_tournament_groups_group_id_fk" FOREIGN KEY ("group_id") REFERENCES "public"."tournament_groups"("group_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "tournament_points_group_results" ADD CONSTRAINT "tournament_points_group_results_event_id_events_id_fk" FOREIGN KEY ("event_id") REFERENCES "public"."events"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "tournament_points_group_results" ADD CONSTRAINT "tournament_points_group_results_entry_id_entry_infos_id_fk" FOREIGN KEY ("entry_id") REFERENCES "public"."entry_infos"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 CREATE UNIQUE INDEX "unique_entry_event_pick" ON "entry_event_picks" USING btree ("entry_id","event_id");--> statement-breakpoint
@@ -533,7 +531,7 @@ CREATE UNIQUE INDEX "unique_entry_event_result" ON "entry_event_results" USING b
 CREATE INDEX "idx_entry_event_results_entry_id" ON "entry_event_results" USING btree ("entry_id");--> statement-breakpoint
 CREATE INDEX "idx_entry_event_results_event_id" ON "entry_event_results" USING btree ("event_id");--> statement-breakpoint
 CREATE INDEX "idx_entry_event_transfers_entry_id" ON "entry_event_transfers" USING btree ("entry_id");--> statement-breakpoint
-CREATE UNIQUE INDEX "unique_entry_season_history" ON "entry_history_infos" USING btree ("entry_id","season");--> statement-breakpoint
+CREATE UNIQUE INDEX "unique_entry_history_info" ON "entry_history_infos" USING btree ("entry_id","season");--> statement-breakpoint
 CREATE INDEX "idx_entry_history_info_entry_id" ON "entry_history_infos" USING btree ("entry_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "unique_entry_league_info" ON "entry_league_infos" USING btree ("entry_id","league_id");--> statement-breakpoint
 CREATE INDEX "idx_entry_league_info_entry_id" ON "entry_league_infos" USING btree ("entry_id");--> statement-breakpoint
@@ -543,12 +541,12 @@ CREATE INDEX "idx_event_fixtures_team_a_id" ON "event_fixtures" USING btree ("te
 CREATE UNIQUE INDEX "unique_event_element_live_explain" ON "event_live_explains" USING btree ("element_id","event_id");--> statement-breakpoint
 CREATE INDEX "idx_event_live_explain_element_id" ON "event_live_explains" USING btree ("element_id");--> statement-breakpoint
 CREATE INDEX "idx_event_live_explain_event_id" ON "event_live_explains" USING btree ("event_id");--> statement-breakpoint
-CREATE UNIQUE INDEX "unique_event_element_live" ON "event_live" USING btree ("event_id","element_id");--> statement-breakpoint
+CREATE UNIQUE INDEX "unique_event_live" ON "event_live" USING btree ("event_id","element_id");--> statement-breakpoint
 CREATE INDEX "idx_event_live_element_id" ON "event_live" USING btree ("element_id");--> statement-breakpoint
-CREATE UNIQUE INDEX "unique_player_stats_event_element" ON "player_stats" USING btree ("event_id","element_id");--> statement-breakpoint
+CREATE UNIQUE INDEX "unique_player_stats" ON "player_stats" USING btree ("event_id","element_id");--> statement-breakpoint
 CREATE INDEX "idx_player_stats_element_id" ON "player_stats" USING btree ("element_id");--> statement-breakpoint
 CREATE INDEX "idx_player_stats_event_id" ON "player_stats" USING btree ("event_id");--> statement-breakpoint
-CREATE UNIQUE INDEX "unique_player_values_element_date" ON "player_values" USING btree ("element_id","change_date");--> statement-breakpoint
+CREATE UNIQUE INDEX "unique_player_values" ON "player_values" USING btree ("element_id","change_date");--> statement-breakpoint
 CREATE INDEX "idx_player_values_element_id" ON "player_values" USING btree ("element_id");--> statement-breakpoint
 CREATE INDEX "idx_player_values_change_date" ON "player_values" USING btree ("change_date");--> statement-breakpoint
 CREATE UNIQUE INDEX "unique_player_value_track" ON "player_value_tracks" USING btree ("element_id","date","hour_index");--> statement-breakpoint

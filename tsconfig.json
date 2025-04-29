@@ -22,7 +22,8 @@
       "schema/*": ["src/db/schema/*"],
       "types/*": ["src/types/*"],
       "utils/*": ["src/utils/*"],
-      "worker/*": ["src/worker/*"]
+      "worker/*": ["src/worker/*"],
+      "tests/*": ["tests/*"]
     },
     "strictNullChecks": true,
     "noImplicitThis": true,
