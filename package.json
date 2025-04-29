@@ -7,7 +7,7 @@
   "scripts": {
     "start": "bun run src/index.ts",
     "dev": "bun --watch run src/index.ts",
-    "build": "bun prisma generate && bun build src/index.ts --outdir ./build",
+    "build": "bun build src/index.ts --outdir ./build",
     "test": "bun test",
     "coverage": "bun test --coverage",
     "lint": "bunx eslint . --ext .ts,.tsx --cache --config eslint.config.mjs",
@@ -26,7 +26,7 @@
     "FPL",
     "Letletme",
     "Bun",
-    "ElysiaJS",
+    "Hono",
     "TypeScript"
   ],
   "author": "Tong Lam",
@@ -45,8 +45,7 @@
     "pino-pretty": "^13.0.0",
     "prettier": "^3.5.3",
     "typescript": "^5.8.3",
-    "typescript-eslint": "^8.30.1",
-    "vite-tsconfig-paths": "^5.1.4"
+    "typescript-eslint": "^8.30.1"
   },
   "dependencies": {
     "@types/uuid": "^10.0.0",
