@@ -43,9 +43,6 @@ const teamServiceOperations = (
           details: error.details,
         }),
       ),
-      TE.chainFirstW(() =>
-        pipe(domainOps.deleteAllTeams(), TE.mapLeft(mapDomainErrorToServiceError)),
-      ),
       TE.chainW((teamsCreateData: TeamCreateInputs) =>
         pipe(domainOps.saveTeams(teamsCreateData), TE.mapLeft(mapDomainErrorToServiceError)),
       ),

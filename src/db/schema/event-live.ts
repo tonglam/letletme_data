@@ -49,7 +49,7 @@ export const eventLive = pgTable(
     ...createdAtField,
   },
   (table) => [
-    uniqueIndex('unique_event_element_live').on(table.eventId, table.elementId),
+    uniqueIndex('unique_event_live').on(table.eventId, table.elementId),
     index('idx_event_live_element_id').on(table.elementId),
   ],
 );

@@ -1,4 +1,5 @@
 import * as TE from 'fp-ts/TaskEither';
+import { TeamCreateInputs } from 'repository/team/types';
 import { RawEntryEventPicks } from 'types/domain/entry-event-pick.type';
 import { RawEntryEventTransfers } from 'types/domain/entry-event-transfer.type';
 import { EntryHistoryInfos } from 'types/domain/entry-history-info.type';
@@ -16,13 +17,12 @@ import { RawPlayerStats } from 'types/domain/player-stat.type';
 import { PlayerValueTracks } from 'types/domain/player-value-track.type';
 import { SourcePlayerValues } from 'types/domain/player-value.type';
 import { RawPlayers } from 'types/domain/player.type';
-import { Teams } from 'types/domain/team.type';
 import { DataLayerError } from 'types/error.type';
 
 export interface FplBootstrapDataService {
   readonly getEvents: () => TE.TaskEither<DataLayerError, Events>;
   readonly getPhases: () => TE.TaskEither<DataLayerError, Phases>;
-  readonly getTeams: () => TE.TaskEither<DataLayerError, Teams>;
+  readonly getTeams: () => TE.TaskEither<DataLayerError, TeamCreateInputs>;
   readonly getPlayers: () => TE.TaskEither<DataLayerError, RawPlayers>;
   readonly getPlayerStats: (eventId: EventId) => TE.TaskEither<DataLayerError, RawPlayerStats>;
   readonly getPlayerValues: (eventId: EventId) => TE.TaskEither<DataLayerError, SourcePlayerValues>;

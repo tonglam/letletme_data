@@ -16,6 +16,7 @@ import { FplBootstrapDataService } from 'data/types';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
+import { TeamCreateInputs } from 'repository/team/types';
 import { apiConfig } from 'src/config/api/api.config';
 import { RawEventOverallResult } from 'types/domain/event-overall-result.type';
 import { EventId, Events } from 'types/domain/event.type';
@@ -24,7 +25,6 @@ import { RawPlayerStats } from 'types/domain/player-stat.type';
 import { PlayerValueTracks } from 'types/domain/player-value-track.type';
 import { SourcePlayerValues } from 'types/domain/player-value.type';
 import { RawPlayers } from 'types/domain/player.type';
-import { Teams } from 'types/domain/team.type';
 import { DataLayerError, DataLayerErrorCode } from 'types/error.type';
 import { createDataLayerError } from 'utils/error.util';
 import { FplApiContext, logFplApiCall, logFplApiError } from 'utils/logger.util';
@@ -186,7 +186,7 @@ export const createFplBootstrapDataService = (): FplBootstrapDataService => {
       ),
     );
 
-  const getTeams = (): TE.TaskEither<DataLayerError, Teams> =>
+  const getTeams = (): TE.TaskEither<DataLayerError, TeamCreateInputs> =>
     pipe(
       getFplBootstrapDataInternal(),
       TE.chain((bootstrapData) =>
@@ -204,6 +204,7 @@ export const createFplBootstrapDataService = (): FplBootstrapDataService => {
               TE.fromEither,
             ),
           ),
+          TE.map((teams) => teams as TeamCreateInputs),
         ),
       ),
     );

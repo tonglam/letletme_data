@@ -1,18 +1,23 @@
-CREATE TYPE  "Chip" AS ENUM ('None', 'Wildcard', 'FreeHit', 'TripleCaptain', 'BenchBoost', 'Manager');
+CREATE TYPE "chip" AS ENUM ('n/a', 'wildcard', 'freehit', 'bboost', '3xc', 'manager');
 
-CREATE TYPE  "ValueChangeType" AS ENUM ('Start', 'Rise', 'Fall');
+CREATE TYPE "value_change_type" AS ENUM ('start', 'rise', 'fall');
 
-CREATE TYPE  "LeagueType" AS ENUM ('Classic', 'H2H');
+CREATE TYPE "league_type" AS ENUM ('classic', 'h2h');
 
-CREATE TYPE  "CupResult" AS ENUM ('Win', 'Loss');
+CREATE TYPE "cup_result" AS ENUM ('win', 'loss');
 
-CREATE TYPE  "TournamentMode" AS ENUM ('Normal');
+CREATE TYPE "tournament_mode" AS ENUM ('normal');
 
-CREATE TYPE  "GroupMode" AS ENUM ('NoGroup', 'PointsRaces', 'BattleRaces');
+CREATE TYPE "group_mode" AS ENUM ('no_group', 'points_races', 'battle_races');
 
-CREATE TYPE  "KnockoutMode" AS ENUM ('NoKnockout', 'SingleElimination', 'DoubleElimination', 'HeadToHead');
+CREATE TYPE "knockout_mode" AS ENUM (
+  'no_knockout',
+  'single_elimination',
+  'double_elimination',
+  'head_to_head'
+);
 
-CREATE TYPE  "TournamentState" AS ENUM ('Active', 'Inactive', 'Finished');
+CREATE TYPE "tournament_state" AS ENUM ('active', 'inactive', 'finished');
 
 CREATE TABLE IF NOT EXISTS "events" (
     "id" INTEGER PRIMARY KEY,
@@ -87,7 +92,7 @@ CREATE TABLE IF NOT EXISTS "player_values" (
     "event_id" INTEGER NOT NULL,
     "value" INTEGER NOT NULL,
     "change_date" CHAR(8) NOT NULL,
-    "change_type" "ValueChangeType" NOT NULL,
+    "change_type" "value_change_type" NOT NULL,
     "last_value" INTEGER NOT NULL DEFAULT 0,
     "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -304,7 +309,7 @@ CREATE TABLE IF NOT EXISTS "entry_league_infos" (
     "entry_id" INTEGER NOT NULL,
     "league_id" INTEGER NOT NULL,
     "league_name" TEXT NOT NULL,
-    "league_type" "LeagueType" NOT NULL,
+    "league_type" "league_type" NOT NULL,
     "started_event" INTEGER,
     "entry_rank" INTEGER,
     "entry_last_rank" INTEGER,
@@ -331,7 +336,7 @@ CREATE TABLE IF NOT EXISTS "entry_event_picks" (
     "id" SERIAL PRIMARY KEY,
     "entry_id" INTEGER NOT NULL,
     "event_id" INTEGER NOT NULL,
-    "chip" "Chip" NOT NULL,
+    "chip" "chip" NOT NULL,
     "picks" JSONB,
     "transfers" INTEGER,
     "transfers_cost" INTEGER,
@@ -370,7 +375,7 @@ CREATE TABLE IF NOT EXISTS "entry_event_results" (
     "event_bench_points" INTEGER,
     "event_auto_sub_points" INTEGER,
     "event_rank" INTEGER,
-    "event_chip" "Chip",
+    "event_chip" "chip",
     "event_played_captain" INTEGER,
     "event_captain_points" INTEGER,
     "event_picks" JSONB,
@@ -393,10 +398,10 @@ CREATE TABLE IF NOT EXISTS "tournament_infos" (
     "creator" TEXT NOT NULL,
     "admin_entry_id" INTEGER NOT NULL,
     "league_id" INTEGER NOT NULL,
-    "league_type" "LeagueType" NOT NULL,
+    "league_type" "league_type" NOT NULL,
     "total_team_num" INTEGER NOT NULL,
-    "tournament_mode" "TournamentMode" NOT NULL,
-    "group_mode" "GroupMode",
+    "tournament_mode" "tournament_mode" NOT NULL,
+    "group_mode" "group_mode",
     "group_team_num" INTEGER,
     "group_num" INTEGER,
     "group_started_event_id" INTEGER,
@@ -405,14 +410,14 @@ CREATE TABLE IF NOT EXISTS "tournament_infos" (
     "group_rounds" INTEGER,
     "group_play_against_num" INTEGER,
     "group_qualify_num" INTEGER,
-    "knockout_mode" "KnockoutMode",
+    "knockout_mode" "knockout_mode",
     "knockout_team_num" INTEGER,
     "knockout_rounds" INTEGER,
     "knockout_event_num" INTEGER,
     "knockout_started_event_id" INTEGER,
     "knockout_ended_event_id" INTEGER,
     "knockout_play_against_num" INTEGER,
-    "state" "TournamentState" NOT NULL,
+    "state" "tournament_state" NOT NULL,
     "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updated_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );

@@ -240,7 +240,9 @@ export const playerValueServiceOperations = (
             return TE.right([]);
           }
 
+          // Duplicate check on original changes
           const keySet = new Set<string>();
+          // Use original 'changes' array for duplicate check now
           const duplicates = changes.filter((c) => {
             const key = `${c.elementId}-${c.changeDate}`;
             if (keySet.has(key)) return true;
@@ -250,11 +252,13 @@ export const playerValueServiceOperations = (
           if (duplicates.length > 0) {
             workflowLogger.error(
               { duplicates },
+              // Adjusted log message back to original
               'Duplicate (elementId, changeDate) pairs detected in changes before saving!',
             );
           }
 
           return pipe(
+            // Use original 'changes' array for saving now
             domainOps.savePlayerValueChanges(changes as PlayerValueCreateInputs),
             TE.mapLeft(mapDomainErrorToServiceError),
           );

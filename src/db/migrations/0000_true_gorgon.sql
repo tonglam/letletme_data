@@ -1,13 +1,13 @@
-CREATE TYPE "public"."chip" AS ENUM('bboost', '3xc', 'freehit', 'wildcard');--> statement-breakpoint
-CREATE TYPE "public"."cup_result" AS ENUM('W', 'L', 'D');--> statement-breakpoint
-CREATE TYPE "public"."group_mode" AS ENUM('GROUP_KNOCKOUT');--> statement-breakpoint
-CREATE TYPE "public"."knockout_mode" AS ENUM('ONE_LEGGED', 'TWO_LEGGED');--> statement-breakpoint
-CREATE TYPE "public"."league_type" AS ENUM('classic', 'h2h', 'global');--> statement-breakpoint
-CREATE TYPE "public"."tournament_mode" AS ENUM('BATTLE_GROUP', 'POINTS_GROUP');--> statement-breakpoint
-CREATE TYPE "public"."tournament_state" AS ENUM('PENDING', 'ACTIVE', 'FINISHED', 'CANCELLED');--> statement-breakpoint
-CREATE TYPE "public"."value_change_type" AS ENUM('cost_change', 'transfer_in', 'transfer_out');--> statement-breakpoint
+CREATE TYPE "public"."chip" AS ENUM('n/a', 'wildcard', 'freehit', 'bboost', '3xc', 'manager');--> statement-breakpoint
+CREATE TYPE "public"."cup_result" AS ENUM('win', 'loss');--> statement-breakpoint
+CREATE TYPE "public"."group_mode" AS ENUM('no_group', 'points_races', 'battle_races');--> statement-breakpoint
+CREATE TYPE "public"."knockout_mode" AS ENUM('no_knockout', 'single_elimination', 'double_elimination', 'head_to_head');--> statement-breakpoint
+CREATE TYPE "public"."league_type" AS ENUM('classic', 'h2h');--> statement-breakpoint
+CREATE TYPE "public"."tournament_mode" AS ENUM('normal');--> statement-breakpoint
+CREATE TYPE "public"."tournament_state" AS ENUM('active', 'inactive', 'finished');--> statement-breakpoint
+CREATE TYPE "public"."value_change_type" AS ENUM('start', 'rise', 'fall');--> statement-breakpoint
 CREATE TABLE "entry_event_picks" (
-	"id" serial PRIMARY KEY NOT NULL,
+	"id" integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY (sequence name "entry_event_picks_id_seq" INCREMENT BY 1 MINVALUE 1 MAXVALUE 2147483647 START WITH 1 CACHE 1),
 	"entry_id" integer NOT NULL,
 	"event_id" integer NOT NULL,
 	"chip" "chip" NOT NULL,
@@ -18,7 +18,7 @@ CREATE TABLE "entry_event_picks" (
 );
 --> statement-breakpoint
 CREATE TABLE "entry_event_results" (
-	"id" serial PRIMARY KEY NOT NULL,
+	"id" integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY (sequence name "entry_event_results_id_seq" INCREMENT BY 1 MINVALUE 1 MAXVALUE 2147483647 START WITH 1 CACHE 1),
 	"entry_id" integer NOT NULL,
 	"event_id" integer NOT NULL,
 	"event_points" integer DEFAULT 0 NOT NULL,
@@ -38,11 +38,11 @@ CREATE TABLE "entry_event_results" (
 	"team_value" integer,
 	"bank" integer,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
+	"updated_at" timestamp with time zone
 );
 --> statement-breakpoint
 CREATE TABLE "entry_event_transfers" (
-	"id" serial PRIMARY KEY NOT NULL,
+	"id" integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY (sequence name "entry_event_transfers_id_seq" INCREMENT BY 1 MINVALUE 1 MAXVALUE 2147483647 START WITH 1 CACHE 1),
 	"entry_id" integer NOT NULL,
 	"event_id" integer NOT NULL,
 	"element_in_id" integer,
@@ -56,13 +56,12 @@ CREATE TABLE "entry_event_transfers" (
 );
 --> statement-breakpoint
 CREATE TABLE "entry_history_infos" (
-	"id" serial PRIMARY KEY NOT NULL,
+	"id" integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY (sequence name "entry_history_infos_id_seq" INCREMENT BY 1 MINVALUE 1 MAXVALUE 2147483647 START WITH 1 CACHE 1),
 	"entry_id" integer NOT NULL,
 	"season" char(4) NOT NULL,
 	"total_points" integer DEFAULT 0 NOT NULL,
 	"overall_rank" integer DEFAULT 0 NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
 CREATE TABLE "entry_infos" (
@@ -81,12 +80,11 @@ CREATE TABLE "entry_infos" (
 	"last_overall_rank" integer,
 	"last_team_value" integer,
 	"used_entry_names" text[] DEFAULT '{}',
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
 CREATE TABLE "entry_league_infos" (
-	"id" serial PRIMARY KEY NOT NULL,
+	"id" integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY (sequence name "entry_league_infos_id_seq" INCREMENT BY 1 MINVALUE 1 MAXVALUE 2147483647 START WITH 1 CACHE 1),
 	"entry_id" integer NOT NULL,
 	"league_id" integer NOT NULL,
 	"league_name" text NOT NULL,
@@ -94,8 +92,7 @@ CREATE TABLE "entry_league_infos" (
 	"started_event" integer,
 	"entry_rank" integer,
 	"entry_last_rank" integer,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
 CREATE TABLE "event_fixtures" (
@@ -106,54 +103,18 @@ CREATE TABLE "event_fixtures" (
 	"started" boolean DEFAULT false NOT NULL,
 	"finished" boolean DEFAULT false NOT NULL,
 	"minutes" integer DEFAULT 0 NOT NULL,
-	"team_h" integer,
+	"team_h_id" integer NOT NULL,
 	"team_h_difficulty" integer,
 	"team_h_score" integer,
-	"team_a" integer,
+	"team_a_id" integer NOT NULL,
 	"team_a_difficulty" integer,
 	"team_a_score" integer,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "event_fixtures_code_unique" UNIQUE("code")
 );
 --> statement-breakpoint
-CREATE TABLE "event_live" (
-	"id" serial PRIMARY KEY NOT NULL,
-	"event_id" integer NOT NULL,
-	"element_id" integer NOT NULL,
-	"minutes" integer,
-	"goals_scored" integer,
-	"assists" integer,
-	"clean_sheets" integer,
-	"goals_conceded" integer,
-	"own_goals" integer,
-	"penalties_saved" integer,
-	"penalties_missed" integer,
-	"yellow_cards" integer,
-	"red_cards" integer,
-	"saves" integer,
-	"bonus" integer,
-	"bps" integer,
-	"starts" boolean,
-	"expected_goals" numeric(10, 2),
-	"expected_assists" numeric(10, 2),
-	"expected_goal_involvements" numeric(10, 2),
-	"expected_goals_conceded" numeric(10, 2),
-	"mng_win" integer,
-	"mng_draw" integer,
-	"mng_loss" integer,
-	"mng_underdog_win" integer,
-	"mng_underdog_draw" integer,
-	"mng_clean_sheets" integer,
-	"mng_goals_scored" integer,
-	"in_dream_team" boolean,
-	"total_points" integer DEFAULT 0 NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
-);
---> statement-breakpoint
 CREATE TABLE "event_live_explains" (
-	"id" serial PRIMARY KEY NOT NULL,
+	"id" integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY (sequence name "event_live_explains_id_seq" INCREMENT BY 1 MINVALUE 1 MAXVALUE 2147483647 START WITH 1 CACHE 1),
 	"event_id" integer NOT NULL,
 	"element_id" integer NOT NULL,
 	"bonus" integer,
@@ -193,8 +154,41 @@ CREATE TABLE "event_live_explains" (
 	"mng_clean_sheets_points" integer,
 	"mng_goals_scored" integer,
 	"mng_goals_scored_points" integer,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL
+);
+--> statement-breakpoint
+CREATE TABLE "event_live" (
+	"id" integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY (sequence name "event_live_id_seq" INCREMENT BY 1 MINVALUE 1 MAXVALUE 2147483647 START WITH 1 CACHE 1),
+	"event_id" integer NOT NULL,
+	"element_id" integer NOT NULL,
+	"minutes" integer,
+	"goals_scored" integer,
+	"assists" integer,
+	"clean_sheets" integer,
+	"goals_conceded" integer,
+	"own_goals" integer,
+	"penalties_saved" integer,
+	"penalties_missed" integer,
+	"yellow_cards" integer,
+	"red_cards" integer,
+	"saves" integer,
+	"bonus" integer,
+	"bps" integer,
+	"starts" boolean,
+	"expected_goals" numeric(10, 2),
+	"expected_assists" numeric(10, 2),
+	"expected_goal_involvements" numeric(10, 2),
+	"expected_goals_conceded" numeric(10, 2),
+	"mng_win" integer,
+	"mng_draw" integer,
+	"mng_loss" integer,
+	"mng_underdog_win" integer,
+	"mng_underdog_draw" integer,
+	"mng_clean_sheets" integer,
+	"mng_goals_scored" integer,
+	"in_dream_team" boolean,
+	"total_points" integer DEFAULT 0 NOT NULL,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
 CREATE TABLE "events" (
@@ -232,21 +226,35 @@ CREATE TABLE "phases" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
+CREATE TABLE "players" (
+	"id" integer PRIMARY KEY NOT NULL,
+	"code" integer NOT NULL,
+	"element_type" integer NOT NULL,
+	"team_id" integer NOT NULL,
+	"price" integer DEFAULT 0 NOT NULL,
+	"start_price" integer DEFAULT 0 NOT NULL,
+	"first_name" text,
+	"second_name" text,
+	"web_name" text NOT NULL,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "players_code_unique" UNIQUE("code")
+);
+--> statement-breakpoint
 CREATE TABLE "player_stats" (
-	"id" serial PRIMARY KEY NOT NULL,
+	"id" integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY (sequence name "player_stats_id_seq" INCREMENT BY 1 MINVALUE 1 MAXVALUE 2147483647 START WITH 1 CACHE 1),
 	"event_id" integer NOT NULL,
 	"element_id" integer NOT NULL,
 	"element_type" integer NOT NULL,
 	"total_points" integer,
-	"form" numeric(10, 2),
-	"influence" numeric(10, 2),
-	"creativity" numeric(10, 2),
-	"threat" numeric(10, 2),
-	"ict_index" numeric(10, 2),
-	"expected_goals" numeric(10, 2),
-	"expected_assists" numeric(10, 2),
-	"expected_goal_involvements" numeric(10, 2),
-	"expected_goals_conceded" numeric(10, 2),
+	"form" text,
+	"influence" text,
+	"creativity" text,
+	"threat" text,
+	"ict_index" text,
+	"expected_goals" text,
+	"expected_assists" text,
+	"expected_goal_involvements" text,
+	"expected_goals_conceded" text,
 	"minutes" integer,
 	"goals_scored" integer,
 	"assists" integer,
@@ -276,11 +284,23 @@ CREATE TABLE "player_stats" (
 	"mng_clean_sheets" integer,
 	"mng_goals_scored" integer,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
+	"updated_at" timestamp with time zone
+);
+--> statement-breakpoint
+CREATE TABLE "player_values" (
+	"id" integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY (sequence name "player_values_id_seq" INCREMENT BY 1 MINVALUE 1 MAXVALUE 2147483647 START WITH 1 CACHE 1),
+	"element_id" integer NOT NULL,
+	"element_type" integer NOT NULL,
+	"event_id" integer NOT NULL,
+	"value" integer NOT NULL,
+	"change_date" char(8) NOT NULL,
+	"change_type" "value_change_type" NOT NULL,
+	"last_value" integer DEFAULT 0 NOT NULL,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
 CREATE TABLE "player_value_tracks" (
-	"id" serial PRIMARY KEY NOT NULL,
+	"id" integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY (sequence name "player_value_tracks_id_seq" INCREMENT BY 1 MINVALUE 1 MAXVALUE 2147483647 START WITH 1 CACHE 1),
 	"hour_index" integer NOT NULL,
 	"date" char(8) NOT NULL,
 	"event_id" integer NOT NULL,
@@ -296,32 +316,6 @@ CREATE TABLE "player_value_tracks" (
 	"selected_by" integer NOT NULL,
 	"value" integer DEFAULT 0 NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
-);
---> statement-breakpoint
-CREATE TABLE "player_values" (
-	"id" serial PRIMARY KEY NOT NULL,
-	"element_id" integer NOT NULL,
-	"element_type" integer NOT NULL,
-	"event_id" integer NOT NULL,
-	"value" integer NOT NULL,
-	"change_date" char(8) NOT NULL,
-	"change_type" "value_change_type" NOT NULL,
-	"last_value" integer DEFAULT 0 NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL
-);
---> statement-breakpoint
-CREATE TABLE "players" (
-	"id" integer PRIMARY KEY NOT NULL,
-	"code" integer NOT NULL,
-	"element_type" integer NOT NULL,
-	"team_id" integer NOT NULL,
-	"price" integer DEFAULT 0 NOT NULL,
-	"start_price" integer DEFAULT 0 NOT NULL,
-	"first_name" text,
-	"second_name" text,
-	"web_name" text NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "players_code_unique" UNIQUE("code")
 );
 --> statement-breakpoint
 CREATE TABLE "teams" (
@@ -340,7 +334,7 @@ CREATE TABLE "teams" (
 );
 --> statement-breakpoint
 CREATE TABLE "tournament_battle_group_results" (
-	"id" serial PRIMARY KEY NOT NULL,
+	"id" integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY (sequence name "tournament_battle_group_results_id_seq" INCREMENT BY 1 MINVALUE 1 MAXVALUE 2147483647 START WITH 1 CACHE 1),
 	"tournament_id" integer NOT NULL,
 	"group_id" integer NOT NULL,
 	"event_id" integer NOT NULL,
@@ -355,20 +349,19 @@ CREATE TABLE "tournament_battle_group_results" (
 	"away_rank" integer,
 	"away_match_points" integer,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
+	"updated_at" timestamp with time zone
 );
 --> statement-breakpoint
 CREATE TABLE "tournament_entries" (
-	"id" serial PRIMARY KEY NOT NULL,
+	"id" integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY (sequence name "tournament_entries_id_seq" INCREMENT BY 1 MINVALUE 1 MAXVALUE 2147483647 START WITH 1 CACHE 1),
 	"tournament_id" integer NOT NULL,
 	"league_id" integer NOT NULL,
 	"entry_id" integer NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
 CREATE TABLE "tournament_groups" (
-	"id" serial PRIMARY KEY NOT NULL,
+	"id" integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY (sequence name "tournament_groups_id_seq" INCREMENT BY 1 MINVALUE 1 MAXVALUE 2147483647 START WITH 1 CACHE 1),
 	"tournament_id" integer NOT NULL,
 	"group_id" integer NOT NULL,
 	"group_name" text NOT NULL,
@@ -387,12 +380,11 @@ CREATE TABLE "tournament_groups" (
 	"total_net_points" integer,
 	"qualified" integer,
 	"overall_rank" integer,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
 CREATE TABLE "tournament_infos" (
-	"id" serial PRIMARY KEY NOT NULL,
+	"id" integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY (sequence name "tournament_infos_id_seq" INCREMENT BY 1 MINVALUE 1 MAXVALUE 2147483647 START WITH 1 CACHE 1),
 	"name" text NOT NULL,
 	"creator" text NOT NULL,
 	"admin_entry_id" integer NOT NULL,
@@ -418,30 +410,11 @@ CREATE TABLE "tournament_infos" (
 	"knockout_play_against_num" integer,
 	"state" "tournament_state" NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
-);
---> statement-breakpoint
-CREATE TABLE "tournament_knockout_results" (
-	"id" serial PRIMARY KEY NOT NULL,
-	"tournament_id" integer NOT NULL,
-	"event_id" integer NOT NULL,
-	"match_id" integer NOT NULL,
-	"play_against_id" integer NOT NULL,
-	"home_entry_id" integer,
-	"home_net_points" integer,
-	"home_goals_scored" integer,
-	"home_goals_conceded" integer,
-	"away_entry_id" integer,
-	"away_net_points" integer,
-	"away_goals_scored" integer,
-	"away_goals_conceded" integer,
-	"match_winner" integer,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
+	"updated_at" timestamp with time zone
 );
 --> statement-breakpoint
 CREATE TABLE "tournament_knockouts" (
-	"id" serial PRIMARY KEY NOT NULL,
+	"id" integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY (sequence name "tournament_knockouts_id_seq" INCREMENT BY 1 MINVALUE 1 MAXVALUE 2147483647 START WITH 1 CACHE 1),
 	"tournament_id" integer NOT NULL,
 	"round" integer NOT NULL,
 	"started_event_id" integer,
@@ -460,11 +433,30 @@ CREATE TABLE "tournament_knockouts" (
 	"away_wins" integer,
 	"round_winner" integer,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
+	"updated_at" timestamp with time zone
+);
+--> statement-breakpoint
+CREATE TABLE "tournament_knockout_results" (
+	"id" integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY (sequence name "tournament_knockout_results_id_seq" INCREMENT BY 1 MINVALUE 1 MAXVALUE 2147483647 START WITH 1 CACHE 1),
+	"tournament_id" integer NOT NULL,
+	"event_id" integer NOT NULL,
+	"match_id" integer NOT NULL,
+	"play_against_id" integer NOT NULL,
+	"home_entry_id" integer,
+	"home_net_points" integer,
+	"home_goals_scored" integer,
+	"home_goals_conceded" integer,
+	"away_entry_id" integer,
+	"away_net_points" integer,
+	"away_goals_scored" integer,
+	"away_goals_conceded" integer,
+	"match_winner" integer,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"updated_at" timestamp with time zone
 );
 --> statement-breakpoint
 CREATE TABLE "tournament_points_group_results" (
-	"id" serial PRIMARY KEY NOT NULL,
+	"id" integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY (sequence name "tournament_points_group_results_id_seq" INCREMENT BY 1 MINVALUE 1 MAXVALUE 2147483647 START WITH 1 CACHE 1),
 	"tournament_id" integer NOT NULL,
 	"group_id" integer NOT NULL,
 	"event_id" integer NOT NULL,
@@ -475,7 +467,7 @@ CREATE TABLE "tournament_points_group_results" (
 	"event_net_points" integer,
 	"event_rank" integer,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
+	"updated_at" timestamp with time zone
 );
 --> statement-breakpoint
 ALTER TABLE "entry_event_picks" ADD CONSTRAINT "entry_event_picks_entry_id_entry_infos_id_fk" FOREIGN KEY ("entry_id") REFERENCES "public"."entry_infos"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
@@ -491,10 +483,22 @@ ALTER TABLE "entry_history_infos" ADD CONSTRAINT "entry_history_infos_entry_id_e
 ALTER TABLE "entry_infos" ADD CONSTRAINT "entry_infos_started_event_events_id_fk" FOREIGN KEY ("started_event") REFERENCES "public"."events"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "entry_league_infos" ADD CONSTRAINT "entry_league_infos_entry_id_entry_infos_id_fk" FOREIGN KEY ("entry_id") REFERENCES "public"."entry_infos"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "entry_league_infos" ADD CONSTRAINT "entry_league_infos_started_event_events_id_fk" FOREIGN KEY ("started_event") REFERENCES "public"."events"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "event_fixtures" ADD CONSTRAINT "event_fixtures_event_id_events_id_fk" FOREIGN KEY ("event_id") REFERENCES "public"."events"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "event_fixtures" ADD CONSTRAINT "event_fixtures_team_h_id_teams_id_fk" FOREIGN KEY ("team_h_id") REFERENCES "public"."teams"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "event_fixtures" ADD CONSTRAINT "event_fixtures_team_a_id_teams_id_fk" FOREIGN KEY ("team_a_id") REFERENCES "public"."teams"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "event_live_explains" ADD CONSTRAINT "event_live_explains_event_id_events_id_fk" FOREIGN KEY ("event_id") REFERENCES "public"."events"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "event_live_explains" ADD CONSTRAINT "event_live_explains_element_id_players_id_fk" FOREIGN KEY ("element_id") REFERENCES "public"."players"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "event_live" ADD CONSTRAINT "event_live_event_id_events_id_fk" FOREIGN KEY ("event_id") REFERENCES "public"."events"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "event_live" ADD CONSTRAINT "event_live_element_id_players_id_fk" FOREIGN KEY ("element_id") REFERENCES "public"."players"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "phases" ADD CONSTRAINT "phases_start_event_events_id_fk" FOREIGN KEY ("start_event") REFERENCES "public"."events"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "phases" ADD CONSTRAINT "phases_stop_event_events_id_fk" FOREIGN KEY ("stop_event") REFERENCES "public"."events"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "players" ADD CONSTRAINT "players_team_id_teams_id_fk" FOREIGN KEY ("team_id") REFERENCES "public"."teams"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "player_stats" ADD CONSTRAINT "player_stats_event_id_events_id_fk" FOREIGN KEY ("event_id") REFERENCES "public"."events"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "player_stats" ADD CONSTRAINT "player_stats_element_id_players_id_fk" FOREIGN KEY ("element_id") REFERENCES "public"."players"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "player_values" ADD CONSTRAINT "player_values_element_id_players_id_fk" FOREIGN KEY ("element_id") REFERENCES "public"."players"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "player_values" ADD CONSTRAINT "player_values_event_id_events_id_fk" FOREIGN KEY ("event_id") REFERENCES "public"."events"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "tournament_battle_group_results" ADD CONSTRAINT "tournament_battle_group_results_tournament_id_tournament_infos_id_fk" FOREIGN KEY ("tournament_id") REFERENCES "public"."tournament_infos"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "tournament_battle_group_results" ADD CONSTRAINT "tournament_battle_group_results_group_id_tournament_groups_group_id_fk" FOREIGN KEY ("group_id") REFERENCES "public"."tournament_groups"("group_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "tournament_battle_group_results" ADD CONSTRAINT "tournament_battle_group_results_event_id_events_id_fk" FOREIGN KEY ("event_id") REFERENCES "public"."events"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "tournament_battle_group_results" ADD CONSTRAINT "tournament_battle_group_results_home_entry_id_entry_infos_id_fk" FOREIGN KEY ("home_entry_id") REFERENCES "public"."entry_infos"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "tournament_battle_group_results" ADD CONSTRAINT "tournament_battle_group_results_away_entry_id_entry_infos_id_fk" FOREIGN KEY ("away_entry_id") REFERENCES "public"."entry_infos"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
@@ -504,23 +508,23 @@ ALTER TABLE "tournament_groups" ADD CONSTRAINT "tournament_groups_tournament_id_
 ALTER TABLE "tournament_groups" ADD CONSTRAINT "tournament_groups_entry_id_entry_infos_id_fk" FOREIGN KEY ("entry_id") REFERENCES "public"."entry_infos"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "tournament_groups" ADD CONSTRAINT "tournament_groups_started_event_id_events_id_fk" FOREIGN KEY ("started_event_id") REFERENCES "public"."events"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "tournament_groups" ADD CONSTRAINT "tournament_groups_ended_event_id_events_id_fk" FOREIGN KEY ("ended_event_id") REFERENCES "public"."events"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "tournament_infos" ADD CONSTRAINT "tournament_infos_admin_entry_id_entry_infos_id_fk" FOREIGN KEY ("admin_entry_id") REFERENCES "public"."entry_infos"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "tournament_infos" ADD CONSTRAINT "tournament_infos_group_started_event_id_events_id_fk" FOREIGN KEY ("group_started_event_id") REFERENCES "public"."events"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "tournament_infos" ADD CONSTRAINT "tournament_infos_group_ended_event_id_events_id_fk" FOREIGN KEY ("group_ended_event_id") REFERENCES "public"."events"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "tournament_infos" ADD CONSTRAINT "tournament_infos_knockout_started_event_id_events_id_fk" FOREIGN KEY ("knockout_started_event_id") REFERENCES "public"."events"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "tournament_infos" ADD CONSTRAINT "tournament_infos_knockout_ended_event_id_events_id_fk" FOREIGN KEY ("knockout_ended_event_id") REFERENCES "public"."events"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "tournament_knockout_results" ADD CONSTRAINT "tournament_knockout_results_tournament_id_tournament_infos_id_fk" FOREIGN KEY ("tournament_id") REFERENCES "public"."tournament_infos"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "tournament_knockout_results" ADD CONSTRAINT "tournament_knockout_results_event_id_events_id_fk" FOREIGN KEY ("event_id") REFERENCES "public"."events"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "tournament_knockout_results" ADD CONSTRAINT "tournament_knockout_results_home_entry_id_entry_infos_id_fk" FOREIGN KEY ("home_entry_id") REFERENCES "public"."entry_infos"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "tournament_knockout_results" ADD CONSTRAINT "tournament_knockout_results_away_entry_id_entry_infos_id_fk" FOREIGN KEY ("away_entry_id") REFERENCES "public"."entry_infos"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "tournament_knockout_results" ADD CONSTRAINT "tournament_knockout_results_match_winner_entry_infos_id_fk" FOREIGN KEY ("match_winner") REFERENCES "public"."entry_infos"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "tournament_knockouts" ADD CONSTRAINT "tournament_knockouts_tournament_id_tournament_infos_id_fk" FOREIGN KEY ("tournament_id") REFERENCES "public"."tournament_infos"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "tournament_knockouts" ADD CONSTRAINT "tournament_knockouts_started_event_id_events_id_fk" FOREIGN KEY ("started_event_id") REFERENCES "public"."events"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "tournament_knockouts" ADD CONSTRAINT "tournament_knockouts_ended_event_id_events_id_fk" FOREIGN KEY ("ended_event_id") REFERENCES "public"."events"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "tournament_knockouts" ADD CONSTRAINT "tournament_knockouts_home_entry_id_entry_infos_id_fk" FOREIGN KEY ("home_entry_id") REFERENCES "public"."entry_infos"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "tournament_knockouts" ADD CONSTRAINT "tournament_knockouts_away_entry_id_entry_infos_id_fk" FOREIGN KEY ("away_entry_id") REFERENCES "public"."entry_infos"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "tournament_knockouts" ADD CONSTRAINT "tournament_knockouts_round_winner_entry_infos_id_fk" FOREIGN KEY ("round_winner") REFERENCES "public"."entry_infos"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "tournament_knockout_results" ADD CONSTRAINT "tournament_knockout_results_tournament_id_tournament_infos_id_fk" FOREIGN KEY ("tournament_id") REFERENCES "public"."tournament_infos"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "tournament_knockout_results" ADD CONSTRAINT "tournament_knockout_results_event_id_events_id_fk" FOREIGN KEY ("event_id") REFERENCES "public"."events"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "tournament_knockout_results" ADD CONSTRAINT "tournament_knockout_results_home_entry_id_entry_infos_id_fk" FOREIGN KEY ("home_entry_id") REFERENCES "public"."entry_infos"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "tournament_knockout_results" ADD CONSTRAINT "tournament_knockout_results_away_entry_id_entry_infos_id_fk" FOREIGN KEY ("away_entry_id") REFERENCES "public"."entry_infos"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "tournament_knockout_results" ADD CONSTRAINT "tournament_knockout_results_match_winner_entry_infos_id_fk" FOREIGN KEY ("match_winner") REFERENCES "public"."entry_infos"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "tournament_points_group_results" ADD CONSTRAINT "tournament_points_group_results_tournament_id_tournament_infos_id_fk" FOREIGN KEY ("tournament_id") REFERENCES "public"."tournament_infos"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "tournament_points_group_results" ADD CONSTRAINT "tournament_points_group_results_group_id_tournament_groups_group_id_fk" FOREIGN KEY ("group_id") REFERENCES "public"."tournament_groups"("group_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "tournament_points_group_results" ADD CONSTRAINT "tournament_points_group_results_event_id_events_id_fk" FOREIGN KEY ("event_id") REFERENCES "public"."events"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "tournament_points_group_results" ADD CONSTRAINT "tournament_points_group_results_entry_id_entry_infos_id_fk" FOREIGN KEY ("entry_id") REFERENCES "public"."entry_infos"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 CREATE UNIQUE INDEX "unique_entry_event_pick" ON "entry_event_picks" USING btree ("entry_id","event_id");--> statement-breakpoint
@@ -534,23 +538,23 @@ CREATE INDEX "idx_entry_history_info_entry_id" ON "entry_history_infos" USING bt
 CREATE UNIQUE INDEX "unique_entry_league_info" ON "entry_league_infos" USING btree ("entry_id","league_id");--> statement-breakpoint
 CREATE INDEX "idx_entry_league_info_entry_id" ON "entry_league_infos" USING btree ("entry_id");--> statement-breakpoint
 CREATE INDEX "idx_event_fixtures_event_id" ON "event_fixtures" USING btree ("event_id");--> statement-breakpoint
-CREATE INDEX "idx_event_fixtures_team_h_id" ON "event_fixtures" USING btree ("team_h");--> statement-breakpoint
-CREATE INDEX "idx_event_fixtures_team_a_id" ON "event_fixtures" USING btree ("team_a");--> statement-breakpoint
-CREATE UNIQUE INDEX "unique_event_element_live" ON "event_live" USING btree ("event_id","element_id");--> statement-breakpoint
-CREATE INDEX "idx_event_live_element_id" ON "event_live" USING btree ("element_id");--> statement-breakpoint
+CREATE INDEX "idx_event_fixtures_team_h_id" ON "event_fixtures" USING btree ("team_h_id");--> statement-breakpoint
+CREATE INDEX "idx_event_fixtures_team_a_id" ON "event_fixtures" USING btree ("team_a_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "unique_event_element_live_explain" ON "event_live_explains" USING btree ("element_id","event_id");--> statement-breakpoint
 CREATE INDEX "idx_event_live_explain_element_id" ON "event_live_explains" USING btree ("element_id");--> statement-breakpoint
 CREATE INDEX "idx_event_live_explain_event_id" ON "event_live_explains" USING btree ("event_id");--> statement-breakpoint
-CREATE UNIQUE INDEX "unique_event_element" ON "player_stats" USING btree ("event_id","element_id");--> statement-breakpoint
+CREATE UNIQUE INDEX "unique_event_element_live" ON "event_live" USING btree ("event_id","element_id");--> statement-breakpoint
+CREATE INDEX "idx_event_live_element_id" ON "event_live" USING btree ("element_id");--> statement-breakpoint
+CREATE UNIQUE INDEX "unique_player_stats_event_element" ON "player_stats" USING btree ("event_id","element_id");--> statement-breakpoint
 CREATE INDEX "idx_player_stats_element_id" ON "player_stats" USING btree ("element_id");--> statement-breakpoint
 CREATE INDEX "idx_player_stats_event_id" ON "player_stats" USING btree ("event_id");--> statement-breakpoint
+CREATE UNIQUE INDEX "unique_player_values_element_date" ON "player_values" USING btree ("element_id","change_date");--> statement-breakpoint
+CREATE INDEX "idx_player_values_element_id" ON "player_values" USING btree ("element_id");--> statement-breakpoint
+CREATE INDEX "idx_player_values_change_date" ON "player_values" USING btree ("change_date");--> statement-breakpoint
 CREATE UNIQUE INDEX "unique_player_value_track" ON "player_value_tracks" USING btree ("element_id","date","hour_index");--> statement-breakpoint
 CREATE INDEX "idx_player_value_track_date_hour_index" ON "player_value_tracks" USING btree ("date","hour_index");--> statement-breakpoint
 CREATE INDEX "idx_player_value_track_element_id" ON "player_value_tracks" USING btree ("element_id");--> statement-breakpoint
 CREATE INDEX "idx_player_value_track_event_id" ON "player_value_tracks" USING btree ("event_id");--> statement-breakpoint
-CREATE UNIQUE INDEX "unique_player_value" ON "player_values" USING btree ("element_id","change_date");--> statement-breakpoint
-CREATE INDEX "idx_player_values_element_id" ON "player_values" USING btree ("element_id");--> statement-breakpoint
-CREATE INDEX "idx_player_values_change_date" ON "player_values" USING btree ("change_date");--> statement-breakpoint
 CREATE UNIQUE INDEX "unique_tournament_battle_group_result" ON "tournament_battle_group_results" USING btree ("tournament_id","group_id","event_id","home_index","away_index");--> statement-breakpoint
 CREATE INDEX "idx_tournament_battle_group_result_tournament_id" ON "tournament_battle_group_results" USING btree ("tournament_id");--> statement-breakpoint
 CREATE INDEX "idx_tournament_battle_group_result_group_id" ON "tournament_battle_group_results" USING btree ("group_id");--> statement-breakpoint
@@ -562,13 +566,13 @@ CREATE INDEX "idx_tournament_group_tournament_id" ON "tournament_groups" USING b
 CREATE INDEX "idx_tournament_group_group_id" ON "tournament_groups" USING btree ("group_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "unique_tournament_name" ON "tournament_infos" USING btree ("name");--> statement-breakpoint
 CREATE INDEX "idx_tournament_info_league_id" ON "tournament_infos" USING btree ("league_id");--> statement-breakpoint
+CREATE UNIQUE INDEX "unique_tournament_knockout" ON "tournament_knockouts" USING btree ("tournament_id","match_id");--> statement-breakpoint
+CREATE INDEX "idx_tournament_knockout_tournament_id" ON "tournament_knockouts" USING btree ("tournament_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "unique_tournament_knockout_result" ON "tournament_knockout_results" USING btree ("tournament_id","event_id","match_id","play_against_id");--> statement-breakpoint
 CREATE INDEX "idx_tournament_knockout_result_tournament_id" ON "tournament_knockout_results" USING btree ("tournament_id");--> statement-breakpoint
 CREATE INDEX "idx_tournament_knockout_result_event_id" ON "tournament_knockout_results" USING btree ("event_id");--> statement-breakpoint
 CREATE INDEX "idx_tournament_knockout_result_match_id" ON "tournament_knockout_results" USING btree ("match_id");--> statement-breakpoint
 CREATE INDEX "idx_tournament_knockout_result_play_against_id" ON "tournament_knockout_results" USING btree ("play_against_id");--> statement-breakpoint
-CREATE UNIQUE INDEX "unique_tournament_knockout" ON "tournament_knockouts" USING btree ("tournament_id","match_id");--> statement-breakpoint
-CREATE INDEX "idx_tournament_knockout_tournament_id" ON "tournament_knockouts" USING btree ("tournament_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "unique_tournament_points_group_result" ON "tournament_points_group_results" USING btree ("tournament_id","group_id","event_id","entry_id");--> statement-breakpoint
 CREATE INDEX "idx_tournament_points_group_result_tournament_id" ON "tournament_points_group_results" USING btree ("tournament_id");--> statement-breakpoint
 CREATE INDEX "idx_tournament_points_group_result_group_id" ON "tournament_points_group_results" USING btree ("group_id");--> statement-breakpoint

@@ -107,7 +107,6 @@ describe('PlayerValue Integration Tests', () => {
   describe('PlayerValue Service Integration', () => {
     it('should fetch player values from API, store in database, and cache them', async () => {
       const syncResult = await playerValueService.syncPlayerValuesFromApi()();
-
       expect(E.isRight(syncResult)).toBe(true);
 
       const dbValues = await drizzleDb.select().from(playerValueSchema.playerValues);
@@ -119,11 +118,11 @@ describe('PlayerValue Integration Tests', () => {
 
     it('should get player values by element ID after syncing', async () => {
       const syncResult = await playerValueService.syncPlayerValuesFromApi()();
-
       expect(E.isRight(syncResult)).toBe(true);
 
       const dbValues = await drizzleDb.select().from(playerValueSchema.playerValues);
       expect(dbValues.length).toBeGreaterThan(0);
+
       const targetDbValue = dbValues[0];
       const targetElementId = targetDbValue.elementId as PlayerId;
 
@@ -154,23 +153,23 @@ describe('PlayerValue Integration Tests', () => {
 
     it('should get player values by team after syncing', async () => {
       const syncResult = await playerValueService.syncPlayerValuesFromApi()();
-
       expect(E.isRight(syncResult)).toBe(true);
 
-      const dbValue = await drizzleDb.select().from(playerValueSchema.playerValues).limit(1);
-      expect(dbValue.length).toBeGreaterThan(0);
-      if (dbValue.length === 0) throw new Error('No player value found in DB after sync');
+      const dbValueResult = await drizzleDb.select().from(playerValueSchema.playerValues).limit(1);
+      expect(dbValueResult.length).toBeGreaterThan(0);
+
+      if (dbValueResult.length === 0) throw new Error('No player value found in DB after sync');
+      const dbValue = dbValueResult[0];
 
       const player = await drizzleDb
         .select()
         .from(playerSchema.players)
-        .where(eq(playerSchema.players.id, dbValue[0].elementId))
+        .where(eq(playerSchema.players.id, dbValue.elementId))
         .limit(1);
-      expect(player.length).toBeGreaterThan(0);
-      if (player.length === 0)
-        throw new Error(`No player found for element ${dbValue[0].elementId}`);
-      const targetTeamId = player[0].teamId as TeamId;
 
+      if (player.length === 0) throw new Error(`No player found for element ${dbValue.elementId}`);
+
+      const targetTeamId = player[0].teamId as TeamId;
       const valuesByTeamResult = await playerValueService.getPlayerValuesByTeam(targetTeamId)();
       expect(E.isRight(valuesByTeamResult)).toBe(true);
 
@@ -192,7 +191,6 @@ describe('PlayerValue Integration Tests', () => {
 
     it('should get player values by change date after syncing', async () => {
       const syncResult = await playerValueService.syncPlayerValuesFromApi()();
-
       expect(E.isRight(syncResult)).toBe(true);
 
       const dbDates = await drizzleDb
@@ -202,11 +200,11 @@ describe('PlayerValue Integration Tests', () => {
         .limit(1);
 
       if (dbDates.length === 0) {
-        logger.warn('No player value changes found in DB to test getPlayerValuesByChangeDate');
+        logger.warn('No player value changes found in DB after sync, test might be inconclusive.');
         return;
       }
-      const changeDateToTest = dbDates[0].changeDate;
 
+      const changeDateToTest = dbDates[0].changeDate;
       const valuesByDateResult =
         await playerValueService.getPlayerValuesByChangeDate(changeDateToTest)();
       expect(E.isRight(valuesByDateResult)).toBe(true);
@@ -224,10 +222,11 @@ describe('PlayerValue Integration Tests', () => {
             expect(v).toHaveProperty('changeType');
           });
         } else {
-          logger.warn(
+          logger.error(
             { changeDate: changeDateToTest },
-            'Service returned no values for a date found in DB',
+            'Service returned no values for a change date found in the DB!',
           );
+          expect(values.length).toBeGreaterThan(0);
         }
       }
     });
@@ -243,6 +242,7 @@ describe('PlayerValue Integration Tests', () => {
       const result = await workflows.syncPlayerValues()();
 
       expect(E.isRight(result)).toBe(true);
+
       if (E.isRight(result)) {
         const workflowResult = result.right;
         expect(workflowResult.context).toBeDefined();

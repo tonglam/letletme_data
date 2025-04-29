@@ -7,6 +7,7 @@ import { FplBootstrapDataService } from 'data/types';
 import { db } from 'db/index';
 import * as teamSchema from 'db/schema/team';
 import * as E from 'fp-ts/Either';
+import { pipe } from 'fp-ts/function';
 import { redisClient } from 'infrastructure/cache/client';
 import { Logger } from 'pino';
 import { createTeamRepository } from 'repository/team/repository';
@@ -63,6 +64,18 @@ describe('Team Integration Tests', () => {
     it('should fetch teams from API, store in database, and cache them', async () => {
       const syncResult = await teamService.syncTeamsFromApi()();
 
+      pipe(
+        syncResult,
+        E.fold(
+          (error) => {
+            logger.error({ error }, 'syncTeamsFromApi failed in test');
+            throw new Error(`syncTeamsFromApi returned Left: ${JSON.stringify(error)}`);
+          },
+          () => {
+            // Success case, do nothing here as the main logic continues below
+          },
+        ),
+      );
       expect(E.isRight(syncResult)).toBe(true);
 
       const getTeamsResult = await teamService.getTeams()();
@@ -121,7 +134,12 @@ describe('Team Integration Tests', () => {
       const workflows = teamWorkflows(teamService);
       const result = await workflows.syncTeams()();
 
+      pipe(result, (error) => {
+        logger.error({ error }, 'syncTeams workflow failed in test');
+        throw new Error(`syncTeams workflow returned Left: ${JSON.stringify(error)}`);
+      });
       expect(E.isRight(result)).toBe(true);
+
       if (E.isRight(result)) {
         const workflowResult = result.right;
         expect(workflowResult).toBeDefined();

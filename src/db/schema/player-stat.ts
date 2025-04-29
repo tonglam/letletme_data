@@ -55,7 +55,7 @@ export const playerStats = pgTable(
     ...timestamps,
   },
   (table) => [
-    uniqueIndex('unique_event_element').on(table.eventId, table.elementId),
+    uniqueIndex('unique_player_stats').on(table.eventId, table.elementId),
     index('idx_player_stats_element_id').on(table.elementId),
     index('idx_player_stats_event_id').on(table.eventId),
   ],

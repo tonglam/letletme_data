@@ -15,7 +15,7 @@ export const entryHistoryInfos = pgTable(
     ...createdAtField,
   },
   (table) => [
-    uniqueIndex('unique_entry_season_history').on(table.entryId, table.season),
+    uniqueIndex('unique_entry_history_info').on(table.entryId, table.season),
     index('idx_entry_history_info_entry_id').on(table.entryId),
   ],
 );

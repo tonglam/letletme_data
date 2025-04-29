@@ -22,7 +22,7 @@ export const playerValues = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [
-    uniqueIndex('unique_event_element').on(table.elementId, table.changeDate),
+    uniqueIndex('unique_player_values').on(table.elementId, table.changeDate),
     index('idx_player_values_element_id').on(table.elementId),
     index('idx_player_values_change_date').on(table.changeDate),
   ],

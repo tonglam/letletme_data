@@ -117,33 +117,43 @@ export const createPlayerValueRepository = (): PlayerValueRepository => {
     pipe(
       TE.tryCatch(
         async () => {
+          if (playerValueInputs.length === 0) {
+            return; // Nothing to insert
+          }
           const dataToCreate = playerValueInputs.map(mapDomainPlayerValueToPrismaCreate);
-          // Log the data just before insertion for debugging
-          // console.log('Attempting to insert player values:', JSON.stringify(dataToCreate, null, 2));
-          await db
-            .insert(schema.playerValues)
-            .values(dataToCreate)
-            .onConflictDoNothing({
-              target: [schema.playerValues.elementId, schema.playerValues.changeDate],
-            });
-          // console.log('Insertion attempt finished.');
+
+          // --- Start Modification: Iterative Insert ---
+          for (const record of dataToCreate) {
+            await db
+              .insert(schema.playerValues)
+              .values(record) // Insert one record at a time
+              .onConflictDoNothing({
+                target: [schema.playerValues.elementId, schema.playerValues.changeDate],
+              });
+          }
+          // --- End Modification ---
         },
         (error) => {
           const errorMessage = getErrorMessage(error);
-          // Log the full error object for more details
           console.error('DB Error (savePlayerValueChanges) - Raw Error:', error);
+          // Log the input payload that caused the error (if relevant, might log all if error is general)
           console.error(
-            'DB Error (savePlayerValueChanges) - Data Payload:',
-            playerValueInputs.map(mapDomainPlayerValueToPrismaCreate),
+            'DB Error (savePlayerValueChanges) - Input Payload:',
+            playerValueInputs.map(mapDomainPlayerValueToPrismaCreate), // Map again for consistency in logging
           );
           return createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to save player value changes: ${errorMessage}`,
+            message: `Failed to save player value changes iteratively: ${errorMessage}`,
             cause: error instanceof Error ? error : undefined,
           });
         },
       ),
-      TE.chain(() => findByChangeDate(playerValueInputs[0].changeDate)),
+      // Ensure findByChangeDate still uses a valid change date if inputs exist
+      TE.chain(() =>
+        playerValueInputs.length > 0
+          ? findByChangeDate(playerValueInputs[0].changeDate)
+          : TE.right([] as RawPlayerValues),
+      ),
     );
 
   return {
