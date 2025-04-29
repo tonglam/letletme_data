@@ -112,14 +112,13 @@ Storage:
 
 Testing & Quality:
 
-- Vitest (testing framework)
+- Bun Test Runner (Jest-compatible)
 - ESLint & Prettier (code quality tools)
 
 Utilities:
 
 - Pino (structured logging)
 - Zod (runtime type validation)
-- BullMQ (job queue management)
 - fp-ts (functional programming utilities)
 
 DevOps:
@@ -218,22 +217,3 @@ graph TB
 ```
 
 Each domain follows a standard structure with entities, repositories, services, and types, ensuring clear separation of concerns and maintainable code. For detailed design documentation, please refer to the design docs.
-
-# Job Management
-
-The system uses BullMQ for robust job queue management, handling various data fetching and processing tasks. Jobs are typically triggered by API requests or scheduled within the application logic interacting with BullMQ.
-
-```mermaid
-graph LR
-    subgraph Queue Management
-        App[Application Logic] --> Bull[BullMQ]
-        Bull --> Jobs[Job Processors]
-    end
-
-    subgraph Job Types
-        Jobs --> Bootstrap[Bootstrap]
-        Jobs --> Static[Static Data]
-        Jobs --> Live[Live Data]
-        Jobs --> Event[Event Processing]
-    end
-```
