@@ -16,7 +16,6 @@ import { playerStatsJob } from 'job/player-stats.job';
 import { playerValuesJob } from 'job/player-values.job';
 import { playersJob } from 'job/players.job';
 import { teamsJob } from 'job/teams.job';
-import { testJob } from 'job/test.job';
 import { getErrorStatus } from 'types/error.type';
 import { toAPIError } from 'utils/error.util';
 
@@ -38,7 +37,6 @@ const app = new Elysia()
   .use(playerValuesApi(dependencies))
   .use(playerStatsApi(dependencies))
   // --- jobs ---
-  .use(testJob())
   .use(eventsJob(dependencies))
   .use(phasesJob(dependencies))
   .use(teamsJob(dependencies))
@@ -47,6 +45,7 @@ const app = new Elysia()
   .use(playerStatsJob(dependencies))
   .use(fixturesJob(dependencies))
   .use(eventLivesJob(dependencies))
+
   // --- routes ---
   .get('/', () => 'Welcome to Letletme Data API')
   .get('/health', () => 'Relax, I am healthy!')

@@ -77,7 +77,7 @@ export const eventLivesJob = (dependencies: DecoratedDependencies) =>
     .use(
       cron({
         name: 'event-lives-daily',
-        pattern: Patterns.everyHours(2),
+        pattern: Patterns.everyHours(6),
         async run() {
           logger.info('Running event-lives-daily job');
           await pipe(
@@ -103,7 +103,7 @@ export const eventLivesJob = (dependencies: DecoratedDependencies) =>
     .use(
       cron({
         name: 'event-live-explains-daily',
-        pattern: Patterns.everyHours(2),
+        pattern: Patterns.everyHours(6),
         async run() {
           logger.info('Running event-live-explains-daily job');
           await pipe(

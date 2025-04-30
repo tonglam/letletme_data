@@ -1,1 +1,7 @@
-export { getApiLogger, getFplApiLogger, getQueueLogger, getWorkflowLogger } from './logger';
+export {
+  getApiLogger,
+  getFplApiLogger,
+  getAppLogger,
+  getJobLogger,
+  getWorkflowLogger,
+} from './logger';

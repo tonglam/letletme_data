@@ -1,4 +1,4 @@
-import { cron, Patterns } from '@elysiajs/cron';
+import { cron } from '@elysiajs/cron';
 import { Elysia } from 'elysia';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
@@ -12,7 +12,7 @@ export const phasesJob = (dependencies: DecoratedDependencies) =>
   new Elysia().use(
     cron({
       name: 'phases',
-      pattern: Patterns.everyDayAt('06:32'),
+      pattern: '32 06 * * *',
       async run() {
         logger.info('Running phases job');
         await pipe(

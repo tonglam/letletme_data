@@ -1,4 +1,4 @@
-import { cron, Patterns } from '@elysiajs/cron';
+import { cron } from '@elysiajs/cron';
 import { Elysia } from 'elysia';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
@@ -12,7 +12,7 @@ export const eventsJob = (dependencies: DecoratedDependencies) =>
   new Elysia().use(
     cron({
       name: 'events',
-      pattern: Patterns.everyDayAt('06:30'),
+      pattern: '30 6 * * *',
       async run() {
         logger.info('Running events job');
         await pipe(
