@@ -10,7 +10,7 @@ import { createServiceError, ServiceError, ServiceErrorCode } from 'types/error.
 
 const logger = getWorkflowLogger();
 
-export const playerValueTrackWorkflows = (
+export const createPlayerValueTrackWorkflows = (
   playerValueTrackService: PlayerValueTrackService,
 ): PlayerValueTrackWorkflowsOperations => {
   const syncPlayerValueTracks = (): TE.TaskEither<ServiceError, WorkflowResult> => {

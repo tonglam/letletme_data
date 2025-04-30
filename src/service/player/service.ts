@@ -8,7 +8,8 @@ import * as RA from 'fp-ts/ReadonlyArray';
 import * as TE from 'fp-ts/TaskEither';
 import { PlayerRepository } from 'repository/player/types';
 import { PlayerService, PlayerServiceOperations } from 'service/player/types';
-import { Player, PlayerId, Players, PlayerType, RawPlayers } from 'types/domain/player.type';
+import { ElementTypeId } from 'types/base.type';
+import { Player, PlayerId, Players, RawPlayers } from 'types/domain/player.type';
 import { TeamId } from 'types/domain/team.type';
 import { createDomainError, DataLayerError, DomainErrorCode, ServiceError } from 'types/error.type';
 import { enrichPlayers } from 'utils/data-enrichment.util';
@@ -17,12 +18,12 @@ import { createServiceIntegrationError, mapDomainErrorToServiceError } from 'uti
 const playerServiceOperations = (
   fplDataService: FplBootstrapDataService,
   domainOps: PlayerOperations,
-  playerCache: PlayerCache,
+  cache: PlayerCache,
   teamCache: TeamCache,
 ): PlayerServiceOperations => {
   const findPlayerById = (id: PlayerId): TE.TaskEither<ServiceError, Player> =>
     pipe(
-      playerCache.getAllPlayers(),
+      cache.getAllPlayers(),
       TE.mapLeft(mapDomainErrorToServiceError),
       TE.chainOptionK(() =>
         mapDomainErrorToServiceError(
@@ -35,23 +36,23 @@ const playerServiceOperations = (
     );
 
   const findPlayersByElementType = (
-    elementType: PlayerType,
+    elementType: ElementTypeId,
   ): TE.TaskEither<ServiceError, Players> =>
     pipe(
-      playerCache.getAllPlayers(),
+      cache.getAllPlayers(),
       TE.mapLeft(mapDomainErrorToServiceError),
       TE.map((players) => RA.filter((p: Player) => p.type === elementType)(players)),
     );
 
   const findPlayersByTeamId = (teamId: TeamId): TE.TaskEither<ServiceError, Players> =>
     pipe(
-      playerCache.getAllPlayers(),
+      cache.getAllPlayers(),
       TE.mapLeft(mapDomainErrorToServiceError),
       TE.map((players) => RA.filter((p: Player) => p.teamId === teamId)(players)),
     );
 
   const findAllPlayers = (): TE.TaskEither<ServiceError, Players> =>
-    pipe(playerCache.getAllPlayers(), TE.mapLeft(mapDomainErrorToServiceError));
+    pipe(cache.getAllPlayers(), TE.mapLeft(mapDomainErrorToServiceError));
 
   const syncPlayersFromApi = (): TE.TaskEither<ServiceError, void> =>
     pipe(
@@ -77,9 +78,7 @@ const playerServiceOperations = (
       ),
       TE.chainW((enrichedPlayers: Players) =>
         pipe(
-          enrichedPlayers.length > 0
-            ? playerCache.setAllPlayers(enrichedPlayers)
-            : TE.rightIO(() => {}),
+          enrichedPlayers.length > 0 ? cache.setAllPlayers(enrichedPlayers) : TE.rightIO(() => {}),
           TE.mapLeft(mapDomainErrorToServiceError),
         ),
       ),
@@ -98,15 +97,15 @@ const playerServiceOperations = (
 export const createPlayerService = (
   fplDataService: FplBootstrapDataService,
   repository: PlayerRepository,
-  playerCache: PlayerCache,
+  cache: PlayerCache,
   teamCache: TeamCache,
 ): PlayerService => {
   const domainOps = createPlayerOperations(repository);
-  const ops = playerServiceOperations(fplDataService, domainOps, playerCache, teamCache);
+  const ops = playerServiceOperations(fplDataService, domainOps, cache, teamCache);
 
   return {
     getPlayer: (id: PlayerId): TE.TaskEither<ServiceError, Player> => ops.findPlayerById(id),
-    getPlayersByElementType: (elementType: PlayerType): TE.TaskEither<ServiceError, Players> =>
+    getPlayersByElementType: (elementType: ElementTypeId): TE.TaskEither<ServiceError, Players> =>
       ops.findPlayersByElementType(elementType),
     getPlayersByTeamId: (teamId: TeamId): TE.TaskEither<ServiceError, Players> =>
       ops.findPlayersByTeam(teamId),

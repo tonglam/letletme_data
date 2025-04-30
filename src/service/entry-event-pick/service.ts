@@ -7,7 +7,6 @@ import { FplPickDataService } from 'data/types';
 import * as A from 'fp-ts/Array';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { Logger } from 'pino';
 import { EntryEventPickRepository } from 'repository/entry-event-pick/types';
 import { EntryInfoRepository } from 'repository/entry-info/types';
 import { TournamentEntryRepository } from 'repository/tournament-entry/types';
@@ -33,9 +32,8 @@ const entryEventPickServiceOperations = (
   domainOps: EntryEventPickOperations,
   entryInfoRepository: EntryInfoRepository,
   tournamentEntryRepository: TournamentEntryRepository,
-  playerCache: PlayerCache,
   teamCache: TeamCache,
-  logger: Logger,
+  playerCache: PlayerCache,
 ): EntryEventPickServiceOperations => {
   const enrichPick = enrichEntryEventPick(playerCache, teamCache, entryInfoRepository);
 
@@ -105,33 +103,7 @@ const entryEventPickServiceOperations = (
             ),
           ),
         ),
-        TE.foldW(
-          (errorInfo: { type: string; error?: unknown; entryId: EntryId; eventId: EventId }) =>
-            pipe(
-              TE.tryCatch(
-                async () =>
-                  logger.error(
-                    { entryId: errorInfo.entryId, eventId: errorInfo.eventId, error: errorInfo },
-                    `Failed to process entry event pick ${errorInfo.entryId} for event ${errorInfo.eventId} during sync: ${errorInfo.type}`,
-                  ),
-                (err) => {
-                  console.error(
-                    'CRITICAL: Logging failed during entry event pick sync error handling',
-                    {
-                      entryId: errorInfo.entryId,
-                      eventId: errorInfo.eventId,
-                      originalError: errorInfo,
-                      loggingError: err,
-                    },
-                  );
-                  return new Error('Logging failed');
-                },
-              ),
-              TE.map(() => undefined),
-              TE.orElseW(() => TE.right(undefined)),
-            ),
-          () => TE.right(undefined),
-        ),
+        TE.orElseW(() => TE.right(undefined)),
       );
 
   const syncPicksFromApi = (eventId: EventId): TE.TaskEither<ServiceError, void> =>
@@ -164,9 +136,8 @@ export const createEntryEventPickService = (
   repository: EntryEventPickRepository,
   entryInfoRepository: EntryInfoRepository,
   tournamentEntryRepository: TournamentEntryRepository,
-  playerCache: PlayerCache,
   teamCache: TeamCache,
-  logger: Logger,
+  playerCache: PlayerCache,
 ): EntryEventPickService => {
   const domainOps = createEntryEventPickOperations(repository);
   const ops = entryEventPickServiceOperations(
@@ -174,9 +145,8 @@ export const createEntryEventPickService = (
     domainOps,
     entryInfoRepository,
     tournamentEntryRepository,
-    playerCache,
     teamCache,
-    logger,
+    playerCache,
   );
 
   return {

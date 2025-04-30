@@ -180,10 +180,15 @@ export const createQueueError = (
 });
 
 export enum ServiceErrorCode {
-  INTEGRATION_ERROR = 'INTEGRATION_ERROR',
+  UNKNOWN = 'UNKNOWN',
+  NOT_FOUND = 'NOT_FOUND',
   VALIDATION_ERROR = 'VALIDATION_ERROR',
-  OPERATION_ERROR = 'OPERATION_ERROR',
-  TRANSFORMATION_ERROR = 'TRANSFORMATION_ERROR',
+  INTEGRATION_ERROR = 'INTEGRATION_ERROR',
+  CACHE_ERROR = 'CACHE_ERROR',
+  DB_ERROR = 'DB_ERROR',
+  QUEUE_ERROR = 'QUEUE_ERROR',
+  CONFIG_ERROR = 'CONFIG_ERROR',
+  CONDITION_NOT_MET = 'CONDITION_NOT_MET',
 }
 
 export interface ServiceError extends BaseError {
@@ -197,10 +202,24 @@ export const createServiceError = (params: {
   details?: ErrorDetails;
 }): ServiceError => ({
   name: 'ServiceError',
-  stack: new Error().stack,
+  code: params.code,
+  message: params.message,
   timestamp: new Date(),
-  ...params,
+  stack: params.cause?.stack,
+  cause: params.cause,
+  details: params.details,
 });
+
+export const isServiceError = (e: unknown): e is ServiceError => {
+  return (
+    typeof e === 'object' &&
+    e !== null &&
+    'name' in e &&
+    e.name === 'ServiceError' &&
+    'code' in e &&
+    Object.values(ServiceErrorCode).includes(e.code as ServiceErrorCode)
+  );
+};
 
 export enum DataLayerErrorCode {
   FETCH_ERROR = 'FETCH_ERROR',

@@ -77,8 +77,8 @@ describe('Event Live Explain Service Integration Tests', () => {
   it('should return NotFound error for non-existent player ID', async () => {
     const nonExistentPlayerId = 9999 as PlayerId;
     const explainResult = await eventLiveExplainService.getEventLiveExplainByElementId(
-      nonExistentPlayerId,
       testEventId,
+      nonExistentPlayerId,
     )();
 
     expect(E.isLeft(explainResult)).toBe(true);

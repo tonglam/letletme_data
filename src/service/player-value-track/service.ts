@@ -25,8 +25,8 @@ import { createServiceIntegrationError, mapDomainErrorToServiceError } from 'uti
 
 export const playerValueTrackServiceOperations = (
   fplDataService: FplBootstrapDataService,
-  eventService: EventService,
   domainOps: PlayerValueTrackOperations,
+  eventService: EventService,
 ): PlayerValueTrackServiceOperations => {
   const getPlayerValueTracksByDate = (
     date: string,
@@ -79,11 +79,11 @@ export const playerValueTrackServiceOperations = (
 
 export const createPlayerValueTrackService = (
   fplDataService: FplBootstrapDataService,
-  eventService: EventService,
   repository: PlayerValueTrackRepository,
+  eventService: EventService,
 ): PlayerValueTrackService => {
   const domainOps = createPlayerValueTrackOperations(repository);
-  const ops = playerValueTrackServiceOperations(fplDataService, eventService, domainOps);
+  const ops = playerValueTrackServiceOperations(fplDataService, domainOps, eventService);
 
   return {
     getPlayerValueTracksByDate: ops.findPlayerValueTracksByDate,

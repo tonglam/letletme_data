@@ -59,17 +59,17 @@ const getResultString = (
 
 const fixtureServiceOperations = (
   fplDataService: FplFixtureDataService,
-  eventFixtureDomainOps: EventFixtureOperations,
-  eventFixtureCache: EventFixtureCache,
+  domainOps: EventFixtureOperations,
+  eventFixturecache: EventFixtureCache,
   teamFixtureCache: TeamFixtureCache,
-  teamCacheActual: TeamCache,
+  teamCache: TeamCache,
 ): FixtureServiceOperations => {
   const mapTeamEventFixtures = (
     eventFixtures: EventFixtures,
   ): TE.TaskEither<ServiceError, TeamFixtures> => {
     return pipe(
       TE.of(eventFixtures),
-      TE.chainW(enrichEventFixtures(teamCacheActual)),
+      TE.chainW(enrichEventFixtures(teamCache)),
       TE.mapLeft(mapDomainErrorToServiceError),
       TE.chainEitherKW((enrichedFixtures: EventFixtures) =>
         pipe(
@@ -169,10 +169,10 @@ const fixtureServiceOperations = (
     pipe(teamFixtureCache.getFixturesByTeamId(teamId), TE.mapLeft(mapDomainErrorToServiceError));
 
   const findFixturesByEventId = (eventId: EventId): TE.TaskEither<ServiceError, EventFixtures> =>
-    pipe(eventFixtureCache.getEventFixtures(eventId), TE.mapLeft(mapDomainErrorToServiceError));
+    pipe(eventFixturecache.getEventFixtures(eventId), TE.mapLeft(mapDomainErrorToServiceError));
 
   const findFixtures = (): TE.TaskEither<ServiceError, EventFixtures> =>
-    pipe(eventFixtureCache.getAllEventFixtures(), TE.mapLeft(mapDomainErrorToServiceError));
+    pipe(eventFixturecache.getAllEventFixtures(), TE.mapLeft(mapDomainErrorToServiceError));
 
   const syncEventFixturesFromApi = (eventId: EventId): TE.TaskEither<ServiceError, void> =>
     pipe(
@@ -185,29 +185,26 @@ const fixtureServiceOperations = (
         });
       }),
       TE.chainFirstW(() =>
-        pipe(
-          eventFixtureDomainOps.deleteEventFixtures(eventId),
-          TE.mapLeft(mapDomainErrorToServiceError),
-        ),
+        pipe(domainOps.deleteEventFixtures(eventId), TE.mapLeft(mapDomainErrorToServiceError)),
       ),
       TE.chainW((rawFixtures: RawEventFixtures) =>
         pipe(
           rawFixtures.length > 0
-            ? eventFixtureDomainOps.saveEventFixtures(rawFixtures)
+            ? domainOps.saveEventFixtures(rawFixtures)
             : TE.right([] as RawEventFixtures),
           TE.mapLeft(mapDomainErrorToServiceError),
         ),
       ),
       TE.chainW((savedRawFixtures: RawEventFixtures) =>
         pipe(
-          enrichEventFixtures(teamCacheActual)(savedRawFixtures),
+          enrichEventFixtures(teamCache)(savedRawFixtures),
           TE.mapLeft(mapDomainErrorToServiceError),
         ),
       ),
       TE.chainFirstW((enrichedEventFixtures: EventFixtures) =>
         pipe(
           enrichedEventFixtures.length > 0
-            ? eventFixtureCache.setEventFixtures(enrichedEventFixtures)
+            ? eventFixturecache.setEventFixtures(enrichedEventFixtures)
             : TE.rightIO(() => {}),
           TE.mapLeft(mapDomainErrorToServiceError),
         ),
@@ -231,16 +228,16 @@ const fixtureServiceOperations = (
 
 export const createFixtureService = (
   fplDataService: FplFixtureDataService,
-  eventFixtureRepository: EventFixtureRepository,
-  eventFixtureCache: EventFixtureCache,
+  repository: EventFixtureRepository,
+  eventFixturecache: EventFixtureCache,
   teamFixtureCache: TeamFixtureCache,
   teamCache: TeamCache,
 ): FixtureService => {
-  const domainOps = createEventFixtureOperations(eventFixtureRepository);
+  const domainOps = createEventFixtureOperations(repository);
   const ops: FixtureServiceOperations = fixtureServiceOperations(
     fplDataService,
     domainOps,
-    eventFixtureCache,
+    eventFixturecache,
     teamFixtureCache,
     teamCache,
   );

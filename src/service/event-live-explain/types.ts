@@ -7,16 +7,16 @@ import { ServiceError } from 'types/error.type';
 
 export interface EventLiveExplainServiceOperations {
   readonly findEventLiveExplainByElementId: (
-    elementId: PlayerId,
     eventId: EventId,
+    elementId: PlayerId,
   ) => TE.TaskEither<ServiceError, EventLiveExplain>;
   readonly syncEventLiveExplainsFromApi: (eventId: EventId) => TE.TaskEither<ServiceError, void>;
 }
 
 export interface EventLiveExplainService {
   readonly getEventLiveExplainByElementId: (
-    elementId: PlayerId,
     eventId: EventId,
+    elementId: PlayerId,
   ) => TE.TaskEither<ServiceError, EventLiveExplain>;
   readonly syncEventLiveExplainsFromApi: (eventId: EventId) => TE.TaskEither<ServiceError, void>;
 }

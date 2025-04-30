@@ -7,7 +7,6 @@ import { FplTransferDataService } from 'data/types';
 import * as A from 'fp-ts/Array';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { Logger } from 'pino';
 import { EntryEventTransferRepository } from 'repository/entry-event-transfer/types';
 import { EntryInfoRepository } from 'repository/entry-info/types';
 import { TournamentEntryRepository } from 'repository/tournament-entry/types';
@@ -36,9 +35,8 @@ const entryEventTransferServiceOperations = (
   domainOps: EntryEventTransferOperations,
   entryInfoRepository: EntryInfoRepository,
   tournamentEntryRepository: TournamentEntryRepository,
-  playerCache: PlayerCache,
   teamCache: TeamCache,
-  logger: Logger,
+  playerCache: PlayerCache,
 ): EntryEventTransferServiceOperations => {
   const enrichTransfers = enrichEntryEventTransfers(playerCache, teamCache, entryInfoRepository);
 
@@ -110,33 +108,7 @@ const entryEventTransferServiceOperations = (
               )
             : TE.right(undefined),
         ),
-        TE.foldW(
-          (errorInfo: { type: string; error?: unknown; entryId: EntryId; eventId: EventId }) =>
-            pipe(
-              TE.tryCatch(
-                async () =>
-                  logger.error(
-                    { entryId: errorInfo.entryId, eventId: errorInfo.eventId, error: errorInfo },
-                    `Failed to process entry event transfer ${errorInfo.entryId} for event ${errorInfo.eventId} during sync: ${errorInfo.type}`,
-                  ),
-                (err) => {
-                  console.error(
-                    'CRITICAL: Logging failed during entry event transfer sync error handling',
-                    {
-                      entryId: errorInfo.entryId,
-                      eventId: errorInfo.eventId,
-                      originalError: errorInfo,
-                      loggingError: err,
-                    },
-                  );
-                  return new Error('Logging failed');
-                },
-              ),
-              TE.map(() => undefined),
-              TE.orElseW(() => TE.right(undefined)),
-            ),
-          () => TE.right(undefined),
-        ),
+        TE.orElseW(() => TE.right(undefined)),
       );
 
   const syncTransfersFromApi = (eventId: EventId): TE.TaskEither<ServiceError, void> =>
@@ -169,9 +141,8 @@ export const createEntryEventTransferService = (
   repository: EntryEventTransferRepository,
   entryInfoRepository: EntryInfoRepository,
   tournamentEntryRepository: TournamentEntryRepository,
-  playerCache: PlayerCache,
   teamCache: TeamCache,
-  logger: Logger,
+  playerCache: PlayerCache,
 ): EntryEventTransferService => {
   const domainOps = createEntryEventTransferOperations(repository);
   const ops = entryEventTransferServiceOperations(
@@ -179,9 +150,8 @@ export const createEntryEventTransferService = (
     domainOps,
     entryInfoRepository,
     tournamentEntryRepository,
-    playerCache,
     teamCache,
-    logger,
+    playerCache,
   );
 
   return {

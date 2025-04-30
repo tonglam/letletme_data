@@ -17,8 +17,8 @@ import { createServiceIntegrationError, mapDomainErrorToServiceError } from 'uti
 
 const eventOverallResultServiceOperations = (
   fplDataService: FplBootstrapDataService,
-  playerCache: PlayerCache,
   cache: EventOverallResultCache,
+  playerCache: PlayerCache,
 ): EventOverallResultServiceOperations => {
   const findEventOverallResultById = (
     eventId: EventId,
@@ -71,10 +71,10 @@ const eventOverallResultServiceOperations = (
 
 export const createEventOverallResultService = (
   fplDataService: FplBootstrapDataService,
-  playerCache: PlayerCache,
   cache: EventOverallResultCache,
+  playerCache: PlayerCache,
 ): EventOverallResultService => {
-  const ops = eventOverallResultServiceOperations(fplDataService, playerCache, cache);
+  const ops = eventOverallResultServiceOperations(fplDataService, cache, playerCache);
 
   return {
     getEventOverallResult: (id: EventId): TE.TaskEither<ServiceError, EventOverallResult> =>

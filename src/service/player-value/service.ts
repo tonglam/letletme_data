@@ -108,7 +108,7 @@ const detectRawValueChanges =
 export const playerValueServiceOperations = (
   fplDataService: FplBootstrapDataService,
   domainOps: PlayerValueOperations,
-  playerValueCache: PlayerValueCache,
+  cache: PlayerValueCache,
   eventCache: EventCache,
   teamCache: TeamCache,
   playerCache: PlayerCache,
@@ -137,7 +137,7 @@ export const playerValueServiceOperations = (
 
     findPlayerValuesByChangeDate: (changeDate: string): TE.TaskEither<ServiceError, PlayerValues> =>
       pipe(
-        playerValueCache.getPlayerValuesByChangeDate(changeDate),
+        cache.getPlayerValuesByChangeDate(changeDate),
         TE.mapLeft(mapDomainErrorToServiceError),
         TE.chainW((cachedValues) => {
           if (!RA.isEmpty(cachedValues)) {
@@ -149,7 +149,7 @@ export const playerValueServiceOperations = (
             TE.chainW(processSourceToPlayerValues),
             TE.chainFirstW((processedValues) =>
               pipe(
-                playerValueCache.setPlayerValuesByChangeDate(processedValues),
+                cache.setPlayerValuesByChangeDate(processedValues),
                 TE.mapLeft(mapDomainErrorToServiceError),
               ),
             ),
@@ -292,7 +292,7 @@ export const playerValueServiceOperations = (
           return pipe(
             TE.fromIO(logCacheStart),
             TE.chainW(() => TE.fromIO(logCacheCall)),
-            TE.chainW(() => playerValueCache.setPlayerValuesByChangeDate(processedValues)),
+            TE.chainW(() => cache.setPlayerValuesByChangeDate(processedValues)),
             TE.mapLeft(mapDomainErrorToServiceError),
           );
         }),
@@ -313,7 +313,7 @@ export const playerValueServiceOperations = (
 export const createPlayerValueService = (
   fplDataService: FplBootstrapDataService,
   repository: PlayerValueRepository,
-  playerValueCache: PlayerValueCache,
+  cache: PlayerValueCache,
   eventCache: EventCache,
   teamCache: TeamCache,
   playerCache: PlayerCache,
@@ -322,7 +322,7 @@ export const createPlayerValueService = (
   const ops = playerValueServiceOperations(
     fplDataService,
     domainOps,
-    playerValueCache,
+    cache,
     eventCache,
     teamCache,
     playerCache,

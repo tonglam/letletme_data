@@ -127,16 +127,16 @@ describe('Event Live Integration Tests', () => {
     );
     eventService = createEventService(
       fplBootstrapDataService,
-      fixtureService,
       eventRepository,
       eventCache,
+      fixtureService,
     );
     eventLiveService = createEventLiveService(
       fplDataService,
       eventLiveRepository,
       eventLiveCache,
-      playerCache,
       teamCache,
+      playerCache,
       eventService,
     );
   });

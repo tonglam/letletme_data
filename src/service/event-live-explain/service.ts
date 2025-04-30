@@ -25,8 +25,8 @@ const eventLiveExplainServiceOperations = (
   repository: EventLiveExplainRepository,
 ): EventLiveExplainServiceOperations => {
   const findEventLiveExplainByElementId = (
-    elementId: PlayerId,
     eventId: EventId,
+    elementId: PlayerId,
   ): TE.TaskEither<ServiceError, EventLiveExplain> =>
     pipe(
       repository.findByElementIdAndEventId(elementId, eventId),
@@ -81,10 +81,10 @@ export const createEventLiveExplainService = (
 
   return {
     getEventLiveExplainByElementId: (
-      elementId: PlayerId,
       eventId: EventId,
+      elementId: PlayerId,
     ): TE.TaskEither<ServiceError, EventLiveExplain> =>
-      ops.findEventLiveExplainByElementId(elementId, eventId),
+      ops.findEventLiveExplainByElementId(eventId, elementId),
     syncEventLiveExplainsFromApi: (eventId: EventId): TE.TaskEither<ServiceError, void> =>
       ops.syncEventLiveExplainsFromApi(eventId),
   };

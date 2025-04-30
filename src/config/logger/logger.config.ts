@@ -41,7 +41,8 @@ export const LOG_CONFIG = {
   loggers: {
     api: { name: 'api' },
     fpl: { name: 'fpl' },
-    queue: { name: 'queue' },
+    app: { name: 'app' },
+    job: { name: 'job' },
     workflow: { name: 'workflow' },
   },
 } as const;

@@ -7,7 +7,6 @@ import { pipe } from 'fp-ts/function';
 import * as O from 'fp-ts/Option';
 import * as RNEA from 'fp-ts/ReadonlyNonEmptyArray';
 import * as TE from 'fp-ts/TaskEither';
-import { Logger } from 'pino';
 import { EntryInfoRepository } from 'repository/entry-info/types';
 import { EntryInfoService, EntryInfoServiceOperations } from 'service/entry-info/types';
 import { EntryInfo, EntryId, EntryInfos } from 'types/domain/entry-info.type';
@@ -23,7 +22,6 @@ const entryInfoServiceOperations = (
   fplDataService: FplEntryDataService,
   domainOps: EntryInfoOperations,
   repository: EntryInfoRepository,
-  logger: Logger,
 ): EntryInfoServiceOperations => {
   const findById = (id: EntryId): TE.TaskEither<ServiceError, EntryInfo> =>
     pipe(
@@ -49,77 +47,18 @@ const entryInfoServiceOperations = (
       ),
     );
 
-  const processSingleEntry = (entryId: EntryId): TE.TaskEither<never, void> =>
+  const syncEntryInfosFromApi = (entryId: EntryId): TE.TaskEither<ServiceError, void> =>
     pipe(
-      fplDataService.getInfos(entryId),
-      TE.mapLeft((error) => ({ type: 'fetch' as const, error, entryId })),
-      TE.chainW((fetchedInfos) =>
-        pipe(
-          RNEA.fromReadonlyArray(fetchedInfos),
-          O.map(RNEA.head),
-          TE.fromOption(() => ({
-            type: 'extract' as const,
-            message: `No data for entry ${entryId}`,
-            entryId,
-          })),
-        ),
-      ),
-      TE.chainW((fetchedEntryInfo) =>
-        pipe(
-          domainOps.upsertEntryInfo(fetchedEntryInfo),
-          TE.mapLeft((error) => ({ type: 'upsert' as const, error, entryId })),
-        ),
-      ),
-      TE.map(() => undefined),
-      TE.foldW(
-        (errorInfo: {
-          type: 'fetch' | 'extract' | 'upsert';
-          error?: unknown;
-          message?: string;
-          entryId: EntryId;
-        }) =>
-          pipe(
-            TE.tryCatch(
-              async () =>
-                logger.error(
-                  { entryId: errorInfo.entryId, error: errorInfo },
-                  `Failed to process entry ${errorInfo.entryId} during sync: ${errorInfo.type}`,
-                ),
-              (err) => {
-                console.error('CRITICAL: Logging failed during entry sync error handling', {
-                  entryId: errorInfo.entryId,
-                  originalError: errorInfo,
-                  loggingError: err,
-                });
-                return new Error('Logging failed');
-              },
-            ),
-            TE.chainW(() => TE.right(undefined)),
-            TE.orElseW(() => TE.right(undefined)),
-          ),
-        () => TE.right(undefined),
-      ),
-    );
-
-  const syncEntryInfosFromApi = (): TE.TaskEither<ServiceError, void> =>
-    pipe(
-      repository.findAllEntryIds(),
-      TE.mapLeft((error: DBError) =>
+      domainOps.syncEntryInfosFromApi(entryId),
+      TE.mapLeft((error: DomainError) =>
         createServiceError({
           code: ServiceErrorCode.OPERATION_ERROR,
-          message: 'Failed to find all entry ids',
+          message: 'Failed to sync entry info from api',
           cause: error.cause,
         }),
       ),
-      TE.chainW((readonlyEntryIds) =>
-        pipe(
-          [...readonlyEntryIds],
-          A.traverse(TE.ApplicativePar)(processSingleEntry),
-          TE.map(() => undefined),
-        ),
-      ),
+      TE.map(() => undefined),
     );
-
   return {
     findById,
     findByIds,
@@ -130,10 +69,9 @@ const entryInfoServiceOperations = (
 export const createEntryInfoService = (
   fplDataService: FplEntryDataService,
   repository: EntryInfoRepository,
-  logger: Logger,
 ): EntryInfoService => {
   const domainOps = createEntryInfoOperations(repository);
-  const ops = entryInfoServiceOperations(fplDataService, domainOps, repository, logger);
+  const ops = entryInfoServiceOperations(fplDataService, domainOps, repository);
 
   return {
     getEntryInfo: (id: EntryId): TE.TaskEither<ServiceError, EntryInfo> => ops.findById(id),

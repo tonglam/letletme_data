@@ -7,7 +7,7 @@ import { createServiceError, ServiceError, ServiceErrorCode } from 'types/error.
 
 const logger = getWorkflowLogger();
 
-export const eventWorkflows = (eventService: EventService): EventWorkflowOperations => {
+export const createEventWorkflows = (eventService: EventService): EventWorkflowOperations => {
   const syncEvents = (): TE.TaskEither<ServiceError, WorkflowResult> => {
     const context = createWorkflowContext('event-sync');
 

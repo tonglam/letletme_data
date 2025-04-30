@@ -10,7 +10,7 @@ import * as TE from 'fp-ts/TaskEither';
 import { EventRepository } from 'repository/event/types';
 import { EventService, EventServiceOperations } from 'service/event/types';
 import { FixtureService } from 'service/fixture/types';
-import { EventFixture } from 'types/domain/event-fixture.type';
+import { EventFixtures } from 'types/domain/event-fixture.type';
 import { Event, EventId, Events } from 'types/domain/event.type';
 import {
   DataLayerError,
@@ -23,9 +23,9 @@ import { createServiceIntegrationError, mapDomainErrorToServiceError } from 'uti
 
 const eventServiceOperations = (
   fplDataService: FplBootstrapDataService,
-  fixtureService: FixtureService,
   domainOps: EventOperations,
   cache: EventCache,
+  fixtureService: FixtureService,
 ): EventServiceOperations => {
   const findEventById = (id: EventId): TE.TaskEither<ServiceError, Event> =>
     pipe(
@@ -33,7 +33,7 @@ const eventServiceOperations = (
       TE.mapLeft(mapDomainErrorToServiceError),
       TE.chainOptionK(() =>
         createServiceError({
-          code: ServiceErrorCode.OPERATION_ERROR,
+          code: ServiceErrorCode.NOT_FOUND,
           message: `Event with ID ${id} not found in cache after fetching all.`,
         }),
       )((events) => O.fromNullable(events.find((event) => event.id === id))),
@@ -50,7 +50,7 @@ const eventServiceOperations = (
         if (currentEventIndex === -1 || currentEventIndex === events.length - 1) {
           return TE.left(
             createServiceError({
-              code: ServiceErrorCode.OPERATION_ERROR,
+              code: ServiceErrorCode.NOT_FOUND,
               message: 'Cannot determine next event.',
             }),
           );
@@ -67,7 +67,7 @@ const eventServiceOperations = (
         if (currentEventIndex <= 0) {
           return TE.left(
             createServiceError({
-              code: ServiceErrorCode.OPERATION_ERROR,
+              code: ServiceErrorCode.NOT_FOUND,
               message: 'Cannot determine last event.',
             }),
           );
@@ -186,7 +186,7 @@ const eventServiceOperations = (
               if (isNaN(deadlineDate.getTime())) {
                 return E.left(
                   createServiceError({
-                    code: ServiceErrorCode.OPERATION_ERROR,
+                    code: ServiceErrorCode.VALIDATION_ERROR,
                     message: `Invalid deadline time format for event ${eventId}: ${event.deadlineTime}`,
                   }),
                 );
@@ -197,7 +197,7 @@ const eventServiceOperations = (
             } catch (error) {
               return E.left(
                 createServiceError({
-                  code: ServiceErrorCode.OPERATION_ERROR,
+                  code: ServiceErrorCode.UNKNOWN,
                   message: `Error processing deadline time for event ${eventId}: ${event.deadlineTime}`,
                   cause: error instanceof Error ? error : undefined,
                 }),
@@ -225,7 +225,7 @@ const eventServiceOperations = (
   const findAllMatchDays = (eventId: EventId): TE.TaskEither<ServiceError, ReadonlyArray<Date>> => {
     return pipe(
       fixtureService.getFixturesByEventId(eventId),
-      TE.map((fixtures: ReadonlyArray<EventFixture>) =>
+      TE.map((fixtures: EventFixtures) =>
         pipe(
           fixtures,
           RA.filterMap((fixture) => O.fromNullable(fixture.kickoffTime)),
@@ -242,7 +242,7 @@ const eventServiceOperations = (
   ): TE.TaskEither<ServiceError, ReadonlyArray<Date>> => {
     return pipe(
       fixtureService.getFixturesByEventId(eventId),
-      TE.map((fixtures: ReadonlyArray<EventFixture>) =>
+      TE.map((fixtures: EventFixtures) =>
         pipe(
           fixtures,
           RA.filterMap((fixture) => O.fromNullable(fixture.kickoffTime)),
@@ -273,12 +273,12 @@ const eventServiceOperations = (
 
 export const createEventService = (
   fplDataService: FplBootstrapDataService,
-  fixtureService: FixtureService,
   repository: EventRepository,
   cache: EventCache,
+  fixtureService: FixtureService,
 ): EventService => {
   const domainOps = createEventOperations(repository);
-  const ops = eventServiceOperations(fplDataService, fixtureService, domainOps, cache);
+  const ops = eventServiceOperations(fplDataService, domainOps, cache, fixtureService);
 
   return {
     getEvent: (id: EventId): TE.TaskEither<ServiceError, Event> => ops.findEventById(id),

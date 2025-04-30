@@ -12,41 +12,9 @@ import { createServiceError, ServiceError, ServiceErrorCode } from 'types/error.
 
 const logger = getWorkflowLogger();
 
-export const fixtureWorkflows = (fixtureService: FixtureService): FixtureWorkflowsOperations => {
-  const syncEventFixtures = (eventId: EventId): TE.TaskEither<ServiceError, WorkflowResult> => {
-    const context = createWorkflowContext(`event-fixture-sync-${eventId}`);
-
-    logger.info({ workflow: context.workflowId, eventId }, 'Starting event fixture sync workflow');
-
-    return pipe(
-      fixtureService.syncEventFixturesFromApi(eventId),
-      TE.mapLeft((error: ServiceError) =>
-        createServiceError({
-          code: ServiceErrorCode.INTEGRATION_ERROR,
-          message: `Event fixture sync workflow for event ${eventId} failed: ${error.message}`,
-          cause: error,
-        }),
-      ),
-      TE.map(() => {
-        const duration = new Date().getTime() - context.startTime.getTime();
-
-        logger.info(
-          {
-            workflow: context.workflowId,
-            eventId,
-            duration,
-          },
-          'Event fixture sync workflow completed',
-        );
-
-        return {
-          context,
-          duration,
-        };
-      }),
-    );
-  };
-
+export const createFixtureWorkflows = (
+  fixtureService: FixtureService,
+): FixtureWorkflowsOperations => {
   const syncFixtures = (): TE.TaskEither<ServiceError, WorkflowResult> => {
     const context = createWorkflowContext('all-events-fixture-sync');
     const startTime = new Date().getTime();
@@ -132,7 +100,6 @@ export const fixtureWorkflows = (fixtureService: FixtureService): FixtureWorkflo
   };
 
   return {
-    syncEventFixtures,
     syncFixtures,
   };
 };

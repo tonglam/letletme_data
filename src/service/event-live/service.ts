@@ -23,16 +23,16 @@ const eventLiveServiceOperations = (
   fplDataService: FplLiveDataService,
   domainOps: EventLiveOperations,
   cache: EventLiveCache,
-  playerCache: PlayerCache,
   teamCache: TeamCache,
+  playerCache: PlayerCache,
   eventService: EventService,
 ): EventLiveServiceOperations => {
   const findEventLives = (eventId: EventId): TE.TaskEither<ServiceError, EventLives> =>
     pipe(cache.getEventLives(eventId), TE.mapLeft(mapDomainErrorToServiceError));
 
   const findEventLiveByElementId = (
-    elementId: PlayerId,
     eventId: EventId,
+    elementId: PlayerId,
   ): TE.TaskEither<ServiceError, EventLive> =>
     pipe(
       cache.getEventLives(eventId),
@@ -48,8 +48,8 @@ const eventLiveServiceOperations = (
     );
 
   const findEventLivesByTeamId = (
-    teamId: TeamId,
     eventId: EventId,
+    teamId: TeamId,
   ): TE.TaskEither<ServiceError, EventLives> =>
     pipe(
       cache.getEventLives(eventId),
@@ -148,8 +148,8 @@ export const createEventLiveService = (
   fplDataService: FplLiveDataService,
   repository: EventLiveRepository,
   cache: EventLiveCache,
-  playerCache: PlayerCache,
   teamCache: TeamCache,
+  playerCache: PlayerCache,
   eventService: EventService,
 ): EventLiveService => {
   const domainOps = createEventLiveOperations(repository);
@@ -157,8 +157,8 @@ export const createEventLiveService = (
     fplDataService,
     domainOps,
     cache,
-    playerCache,
     teamCache,
+    playerCache,
     eventService,
   );
 
@@ -166,13 +166,13 @@ export const createEventLiveService = (
     getEventLives: (eventId: EventId): TE.TaskEither<ServiceError, EventLives> =>
       ops.findEventLives(eventId),
     getEventLiveByElementId: (
+      eventId: EventId,
       elementId: PlayerId,
-      eventId: EventId,
-    ): TE.TaskEither<ServiceError, EventLive> => ops.findEventLiveByElementId(elementId, eventId),
+    ): TE.TaskEither<ServiceError, EventLive> => ops.findEventLiveByElementId(eventId, elementId),
     getEventLivesByTeamId: (
-      teamId: TeamId,
       eventId: EventId,
-    ): TE.TaskEither<ServiceError, EventLives> => ops.findEventLivesByTeamId(teamId, eventId),
+      teamId: TeamId,
+    ): TE.TaskEither<ServiceError, EventLives> => ops.findEventLivesByTeamId(eventId, teamId),
     syncEventLiveCacheFromApi: (eventId: EventId): TE.TaskEither<ServiceError, void> =>
       ops.syncEventLiveCacheFromApi(eventId),
     syncEventLivesFromApi: (eventId: EventId): TE.TaskEither<ServiceError, void> =>

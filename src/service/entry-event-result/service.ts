@@ -5,7 +5,6 @@ import { FplHistoryDataService } from 'data/types';
 import * as A from 'fp-ts/Array';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { Logger } from 'pino';
 import { EntryEventResultRepository } from 'repository/entry-event-result/types';
 import { EntryInfoRepository } from 'repository/entry-info/types';
 import {
@@ -28,7 +27,6 @@ const entryEventResultServiceOperations = (
   fplDataService: FplHistoryDataService,
   domainOps: EntryEventResultOperations,
   entryInfoRepository: EntryInfoRepository,
-  logger: Logger,
 ): EntryEventResultServiceOperations => {
   const enrichResults = enrichEntryEventResults(entryInfoRepository);
 
@@ -98,34 +96,7 @@ const entryEventResultServiceOperations = (
           ),
         ),
       ),
-      TE.foldW(
-        (errorInfo: {
-          type: 'fetch' | 'extract' | 'upsert' | 'check_exists';
-          error?: unknown;
-          message?: string;
-          entryId: EntryId;
-        }) =>
-          pipe(
-            TE.tryCatch(
-              async () =>
-                logger.error(
-                  { entryId: errorInfo.entryId, error: errorInfo },
-                  `Failed to process entry history ${errorInfo.entryId} during sync: ${errorInfo.type}`,
-                ),
-              (err) => {
-                console.error('CRITICAL: Logging failed during entry history sync error handling', {
-                  entryId: errorInfo.entryId,
-                  originalError: errorInfo,
-                  loggingError: err,
-                });
-                return new Error('Logging failed');
-              },
-            ),
-            TE.chainW(() => TE.right(undefined)),
-            TE.orElseW(() => TE.right(undefined)),
-          ),
-        () => TE.right(undefined),
-      ),
+      TE.orElseW(() => TE.right(undefined)),
     );
 
   const syncResultsFromApi = (_eventId: EventId): TE.TaskEither<ServiceError, void> =>
@@ -159,15 +130,9 @@ export const createEntryEventResultService = (
   fplDataService: FplHistoryDataService,
   repository: EntryEventResultRepository,
   entryInfoRepository: EntryInfoRepository,
-  logger: Logger,
 ): EntryEventResultService => {
   const domainOps = createEntryEventResultOperations(repository);
-  const ops = entryEventResultServiceOperations(
-    fplDataService,
-    domainOps,
-    entryInfoRepository,
-    logger,
-  );
+  const ops = entryEventResultServiceOperations(fplDataService, domainOps, entryInfoRepository);
 
   return {
     getEntryEventResult: (entryId: EntryId, eventId: EventId) =>

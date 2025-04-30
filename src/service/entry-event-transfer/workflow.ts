@@ -11,7 +11,7 @@ import { createServiceError, ServiceError, ServiceErrorCode } from 'types/error.
 
 const logger = getWorkflowLogger();
 
-export const entryEventTransferWorkflows = (
+export const createEntryEventTransferWorkflows = (
   entryEventTransferService: EntryEventTransferService,
 ): EntryEventTransferWorkflowOperations => {
   const syncEntryEventTransfers = (

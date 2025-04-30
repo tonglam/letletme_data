@@ -19,5 +19,6 @@ const getOrCreateLogger = (name: keyof typeof LOG_CONFIG.loggers): Logger => {
 
 export const getApiLogger = (): Logger => getOrCreateLogger('api');
 export const getFplApiLogger = (): Logger => getOrCreateLogger('fpl');
-export const getQueueLogger = (): Logger => getOrCreateLogger('queue');
+export const getAppLogger = (): Logger => getOrCreateLogger('app');
+export const getJobLogger = (): Logger => getOrCreateLogger('job');
 export const getWorkflowLogger = (): Logger => getOrCreateLogger('workflow');

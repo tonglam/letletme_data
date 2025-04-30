@@ -7,7 +7,7 @@ import { createServiceError, ServiceError, ServiceErrorCode } from 'types/error.
 
 const logger = getWorkflowLogger();
 
-export const teamWorkflows = (teamService: TeamService): TeamWorkflowsOperations => {
+export const createTeamWorkflows = (teamService: TeamService): TeamWorkflowsOperations => {
   const syncTeams = (): TE.TaskEither<ServiceError, WorkflowResult> => {
     const context = createWorkflowContext('team-sync');
 

@@ -7,7 +7,7 @@ import { createServiceError, ServiceError, ServiceErrorCode } from 'types/error.
 
 const logger = getWorkflowLogger();
 
-export const playerStatWorkflows = (
+export const createPlayerStatWorkflows = (
   playerStatService: PlayerStatService,
 ): PlayerStatWorkflowsOperations => {
   const syncPlayerStats = (): TE.TaskEither<ServiceError, WorkflowResult> => {
@@ -17,7 +17,7 @@ export const playerStatWorkflows = (
 
     return pipe(
       playerStatService.syncPlayerStatsFromApi(),
-      TE.chainW(() => playerStatService.getLatestPlayerStats()),
+      TE.chainW(() => playerStatService.getPlayerStats()),
       TE.mapLeft((error: ServiceError) =>
         createServiceError({
           code: ServiceErrorCode.OPERATION_ERROR,

@@ -101,11 +101,12 @@ describe('PlayerValueTrack Service Integration Tests', () => {
       teamFixtureCache,
       teamCache,
     );
-    eventService = createEventService(fplDataService, fixtureService, eventRepository, eventCache);
+    eventService = createEventService(fplDataService, eventRepository, eventCache, fixtureService);
+
     playerValueTrackService = createPlayerValueTrackService(
       fplDataService,
-      eventService,
       playerValueTrackRepository,
+      eventService,
     );
   });
 

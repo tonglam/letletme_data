@@ -1,5 +1,5 @@
 import { Context } from 'elysia';
-import { getApiLogger, getFplApiLogger, getQueueLogger } from 'infrastructure/logger';
+import { getApiLogger, getFplApiLogger } from 'infrastructure/logger';
 import { v4 as uuidv4 } from 'uuid';
 
 export interface LogContext {
@@ -82,8 +82,8 @@ export const logFplApiError = (error: Error, context: FplApiContext): void => {
   });
 };
 
-export const logQueueJob = (message: string, context: QueueContext): void => {
-  getQueueLogger().info(
+export const logApp = (message: string, context?: LogContext): void => {
+  getApiLogger().info(
     {
       timestamp: new Date().toISOString(),
       ...context,
@@ -92,9 +92,48 @@ export const logQueueJob = (message: string, context: QueueContext): void => {
   );
 };
 
-export const logQueueError = (error: Error, context: QueueContext): void => {
-  getQueueLogger().error({
+export const logAppError = (error: Error, context?: LogContext): void => {
+  getApiLogger().error({
     err: error,
+    timestamp: new Date().toISOString(),
+    stack: process.env.NODE_ENV !== 'production' ? error.stack : undefined,
+    ...context,
+  });
+};
+
+export const logJob = (message: string, context: QueueContext): void => {
+  getApiLogger().info(
+    {
+      timestamp: new Date().toISOString(),
+      ...context,
+    },
+    message,
+  );
+};
+
+export const logJobError = (error: Error, context: QueueContext): void => {
+  getApiLogger().error({
+    err: error,
+    timestamp: new Date().toISOString(),
+    stack: process.env.NODE_ENV !== 'production' ? error.stack : undefined,
+    ...context,
+  });
+};
+
+export const logWorkflow = (message: string, context?: LogContext): void => {
+  getApiLogger().info(
+    {
+      timestamp: new Date().toISOString(),
+      ...context,
+    },
+    message,
+  );
+};
+
+export const logWorkflowError = (error: Error, context?: LogContext): void => {
+  getApiLogger().error({
+    err: error,
+    timestamp: new Date().toISOString(),
     stack: process.env.NODE_ENV !== 'production' ? error.stack : undefined,
     ...context,
   });

@@ -21,7 +21,7 @@ import { createEventFixtureRepository } from 'repository/event-fixture/repositor
 import { type EventFixtureRepository } from 'repository/event-fixture/types';
 import { createEventService } from 'service/event/service';
 import { type EventService } from 'service/event/types';
-import { eventWorkflows } from 'service/event/workflow';
+import { createEventWorkflows } from 'service/event/workflow';
 import { createFixtureService } from 'service/fixture/service';
 import { type FixtureService } from 'service/fixture/types';
 import { type EventId } from 'types/domain/event.type';
@@ -101,9 +101,9 @@ describe('Event Integration Tests', () => {
 
     eventService = createEventService(
       fplBootstrapDataService,
-      fixtureService,
       eventRepository,
       eventCache,
+      fixtureService,
     );
   });
 
@@ -228,7 +228,7 @@ describe('Event Integration Tests', () => {
 
   describe('Event Workflow Integration', () => {
     it('should execute the sync events workflow end-to-end', async () => {
-      const workflows = eventWorkflows(eventService);
+      const workflows = createEventWorkflows(eventService);
       const result = await workflows.syncEvents()();
 
       expect(E.isRight(result)).toBe(true);

@@ -24,6 +24,5 @@ export interface FixtureService {
 }
 
 export interface FixtureWorkflowsOperations {
-  readonly syncEventFixtures: (eventId: EventId) => TE.TaskEither<ServiceError, WorkflowResult>;
   readonly syncFixtures: () => TE.TaskEither<ServiceError, WorkflowResult>;
 }

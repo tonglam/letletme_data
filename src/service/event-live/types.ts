@@ -9,12 +9,12 @@ import { ServiceError } from 'types/error.type';
 export interface EventLiveServiceOperations {
   readonly findEventLives: (eventId: EventId) => TE.TaskEither<ServiceError, EventLives>;
   readonly findEventLiveByElementId: (
-    elementId: PlayerId,
     eventId: EventId,
+    elementId: PlayerId,
   ) => TE.TaskEither<ServiceError, EventLive>;
   readonly findEventLivesByTeamId: (
-    teamId: TeamId,
     eventId: EventId,
+    teamId: TeamId,
   ) => TE.TaskEither<ServiceError, EventLives>;
   readonly syncEventLiveCacheFromApi: (eventId: EventId) => TE.TaskEither<ServiceError, void>;
   readonly syncEventLivesFromApi: (eventId: EventId) => TE.TaskEither<ServiceError, void>;
@@ -23,17 +23,18 @@ export interface EventLiveServiceOperations {
 export interface EventLiveService {
   readonly getEventLives: (eventId: EventId) => TE.TaskEither<ServiceError, EventLives>;
   readonly getEventLiveByElementId: (
-    elementId: PlayerId,
     eventId: EventId,
+    elementId: PlayerId,
   ) => TE.TaskEither<ServiceError, EventLive>;
   readonly getEventLivesByTeamId: (
-    teamId: TeamId,
     eventId: EventId,
+    teamId: TeamId,
   ) => TE.TaskEither<ServiceError, EventLives>;
   readonly syncEventLiveCacheFromApi: (eventId: EventId) => TE.TaskEither<ServiceError, void>;
   readonly syncEventLivesFromApi: (eventId: EventId) => TE.TaskEither<ServiceError, void>;
 }
 
 export interface EventLiveWorkflowsOperations {
+  readonly syncEventLiveCache: (eventId: EventId) => TE.TaskEither<ServiceError, WorkflowResult>;
   readonly syncEventLives: (eventId: EventId) => TE.TaskEither<ServiceError, WorkflowResult>;
 }

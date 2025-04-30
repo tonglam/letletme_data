@@ -1,5 +1,8 @@
+import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as O from 'fp-ts/Option';
+import * as RA from 'fp-ts/ReadonlyArray';
+import { EntryId, validateEntryId } from 'types/domain/entry-info.type';
 
 export const safeStringToNumber = (s: string | null | undefined): O.Option<number> =>
   pipe(
@@ -39,3 +42,18 @@ export const getCurrentSeason = (): string => {
 };
 
 export const getAllSeasons = (): Season[] => Object.values(Season);
+
+export const parseAndValidateEntryIds = (idsString: string | undefined): ReadonlyArray<EntryId> => {
+  if (!idsString) {
+    return [];
+  }
+  return pipe(
+    idsString
+      .split(',')
+      .map(Number)
+      .filter((id) => !isNaN(id)),
+    RA.map(validateEntryId),
+    RA.filter(E.isRight),
+    RA.map((e) => e.right),
+  );
+};

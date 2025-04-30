@@ -17,7 +17,8 @@ import { PlayerRepository } from 'repository/player/types';
 import { createPlayerService } from 'service/player/service';
 import { PlayerService } from 'service/player/types';
 import { playerWorkflows } from 'service/player/workflow';
-import { Player, Players, PlayerType } from 'types/domain/player.type';
+import { ElementTypeId } from 'types/base.type';
+import { Player, Players } from 'types/domain/player.type';
 import { TeamId } from 'types/domain/team.type';
 
 import { IntegrationTestSetupResult, setupIntegrationTest } from '../setup/integrationTestSetup';
@@ -132,7 +133,7 @@ describe('Player Integration Tests', () => {
 
       if (playersList.length > 0) {
         const firstPlayer = playersList[0];
-        const elementTypeToTest: PlayerType = firstPlayer.type;
+        const elementTypeToTest: ElementTypeId = firstPlayer.type;
 
         const playersByTypeResult =
           await playerService.getPlayersByElementType(elementTypeToTest)();

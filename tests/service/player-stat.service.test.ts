@@ -22,7 +22,7 @@ import { createPlayerStatService } from 'service/player-stat/service';
 import { PlayerStatService } from 'service/player-stat/types';
 import { playerStatWorkflows } from 'service/player-stat/workflow';
 import { IntegrationTestSetupResult, setupIntegrationTest } from 'tests/setup/integrationTestSetup';
-import { PlayerType } from 'types/domain/player.type';
+import { ElementTypeId } from 'types/base.type';
 
 type DrizzleDB = typeof db;
 
@@ -89,8 +89,8 @@ describe('PlayerStat Integration Tests', () => {
       playerStatRepository,
       playerStatCache,
       eventCache,
-      playerCache,
       teamCache,
+      playerCache,
     );
   });
 
@@ -102,7 +102,7 @@ describe('PlayerStat Integration Tests', () => {
       }
       expect(E.isRight(syncResult)).toBe(true);
 
-      const latestStatsResult = await playerStatService.getLatestPlayerStats()();
+      const latestStatsResult = await playerStatService.getPlayerStats()();
       if (E.isLeft(latestStatsResult)) {
         logger.error(
           { error: latestStatsResult.left },
@@ -137,7 +137,7 @@ describe('PlayerStat Integration Tests', () => {
       }
       expect(E.isRight(syncResult)).toBe(true);
 
-      const latestStatsResult = await playerStatService.getLatestPlayerStats()();
+      const latestStatsResult = await playerStatService.getPlayerStats()();
       if (E.isLeft(latestStatsResult)) {
         logger.error(
           { error: latestStatsResult.left },
@@ -178,7 +178,7 @@ describe('PlayerStat Integration Tests', () => {
       }
       expect(E.isRight(syncResult)).toBe(true);
 
-      const latestStatsResult = await playerStatService.getLatestPlayerStats()();
+      const latestStatsResult = await playerStatService.getPlayerStats()();
       if (E.isLeft(latestStatsResult)) {
         logger.error(
           { error: latestStatsResult.left },
@@ -192,7 +192,7 @@ describe('PlayerStat Integration Tests', () => {
         const elementTypeToTest = firstStat.elementType;
 
         const statsByTypeResult = await playerStatService.getPlayerStatsByElementType(
-          elementTypeToTest as PlayerType,
+          elementTypeToTest as ElementTypeId,
         )();
         if (E.isLeft(statsByTypeResult)) {
           logger.error(
@@ -224,7 +224,7 @@ describe('PlayerStat Integration Tests', () => {
       }
       expect(E.isRight(syncResult)).toBe(true);
 
-      const latestStatsResult = await playerStatService.getLatestPlayerStats()();
+      const latestStatsResult = await playerStatService.getPlayerStats()();
       if (E.isLeft(latestStatsResult)) {
         logger.error(
           { error: latestStatsResult.left },

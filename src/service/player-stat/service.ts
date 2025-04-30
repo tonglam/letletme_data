@@ -10,9 +10,10 @@ import * as O from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
 import { PlayerStatRepository } from 'repository/player-stat/types';
 import { PlayerStatService, PlayerStatServiceOperations } from 'service/player-stat/types';
+import { ElementTypeId } from 'types/base.type';
 import { Event } from 'types/domain/event.type';
 import { PlayerStat, PlayerStats, RawPlayerStats } from 'types/domain/player-stat.type';
-import { PlayerId, PlayerType } from 'types/domain/player.type';
+import { PlayerId } from 'types/domain/player.type';
 import { TeamId } from 'types/domain/team.type';
 import {
   DataLayerError,
@@ -28,14 +29,14 @@ import { createServiceIntegrationError, mapDomainErrorToServiceError } from 'uti
 const playerStatServiceOperations = (
   fplDataService: FplBootstrapDataService,
   domainOps: PlayerStatOperations,
-  playerStatCache: PlayerStatCache,
+  cache: PlayerStatCache,
   eventCache: EventCache,
-  playerCache: PlayerCache,
   teamCache: TeamCache,
+  playerCache: PlayerCache,
 ): PlayerStatServiceOperations => {
   const findPlayerStat = (elementId: PlayerId): TE.TaskEither<ServiceError, PlayerStat> =>
     pipe(
-      playerStatCache.getLatestPlayerStats(),
+      cache.getLatestPlayerStats(),
       TE.mapLeft(mapDomainErrorToServiceError),
       TE.chainOptionK(() =>
         mapDomainErrorToServiceError(
@@ -48,10 +49,10 @@ const playerStatServiceOperations = (
     );
 
   const findPlayerStatsByElementType = (
-    elementType: PlayerType,
+    elementType: ElementTypeId,
   ): TE.TaskEither<ServiceError, PlayerStats> =>
     pipe(
-      playerStatCache.getLatestPlayerStats(),
+      cache.getLatestPlayerStats(),
       TE.mapLeft(mapDomainErrorToServiceError),
       TE.map((playerStats) =>
         playerStats.filter((playerStat) => playerStat.elementType === elementType),
@@ -60,14 +61,14 @@ const playerStatServiceOperations = (
 
   const findPlayerStatsByTeam = (teamId: TeamId): TE.TaskEither<ServiceError, PlayerStats> =>
     pipe(
-      playerStatCache.getLatestPlayerStats(),
+      cache.getLatestPlayerStats(),
       TE.mapLeft(mapDomainErrorToServiceError),
       TE.map((playerStats) => playerStats.filter((playerStat) => playerStat.teamId === teamId)),
     );
 
-  const findLatestPlayerStats = (): TE.TaskEither<ServiceError, PlayerStats> =>
+  const findPlayerStats = (): TE.TaskEither<ServiceError, PlayerStats> =>
     pipe(
-      playerStatCache.getLatestPlayerStats(),
+      cache.getLatestPlayerStats(),
       TE.mapLeft(mapDomainErrorToServiceError),
       TE.orElseW(() =>
         pipe(
@@ -82,11 +83,11 @@ const playerStatServiceOperations = (
           TE.chainFirstW((enrichedDbStats) =>
             pipe(
               enrichedDbStats.length > 0
-                ? playerStatCache.setLatestPlayerStats(enrichedDbStats)
+                ? cache.setLatestPlayerStats(enrichedDbStats)
                 : TE.rightIO(() => {}),
               TE.mapLeft(mapDomainErrorToServiceError),
               TE.orElseW((cacheSetError) => {
-                console.warn('[findLatestPlayerStats] Cache fallback: Failed to update cache', {
+                console.warn('[findPlayerStats] Cache fallback: Failed to update cache', {
                   error: cacheSetError,
                 });
                 return TE.rightIO(() => {});
@@ -137,7 +138,7 @@ const playerStatServiceOperations = (
           TE.chainW((enrichedPlayerStats: PlayerStats) =>
             pipe(
               enrichedPlayerStats.length > 0
-                ? playerStatCache.setLatestPlayerStats(enrichedPlayerStats)
+                ? cache.setLatestPlayerStats(enrichedPlayerStats)
                 : TE.rightIO(() => {}),
               TE.mapLeft(mapDomainErrorToServiceError),
             ),
@@ -151,7 +152,7 @@ const playerStatServiceOperations = (
     findPlayerStat,
     findPlayerStatsByElementType,
     findPlayerStatsByTeam,
-    findLatestPlayerStats,
+    findPlayerStats,
     syncPlayerStatsFromApi,
   };
 };
@@ -159,26 +160,26 @@ const playerStatServiceOperations = (
 export const createPlayerStatService = (
   fplDataService: FplBootstrapDataService,
   repository: PlayerStatRepository,
-  playerStatCache: PlayerStatCache,
+  cache: PlayerStatCache,
   eventCache: EventCache,
-  playerCache: PlayerCache,
   teamCache: TeamCache,
+  playerCache: PlayerCache,
 ): PlayerStatService => {
   const domainOps = createPlayerStatOperations(repository);
   const ops = playerStatServiceOperations(
     fplDataService,
     domainOps,
-    playerStatCache,
+    cache,
     eventCache,
-    playerCache,
     teamCache,
+    playerCache,
   );
 
   return {
     getPlayerStat: ops.findPlayerStat,
     getPlayerStatsByElementType: ops.findPlayerStatsByElementType,
     getPlayerStatsByTeam: ops.findPlayerStatsByTeam,
-    getLatestPlayerStats: ops.findLatestPlayerStats,
+    getPlayerStats: ops.findPlayerStats,
     syncPlayerStatsFromApi: ops.syncPlayerStatsFromApi,
   };
 };

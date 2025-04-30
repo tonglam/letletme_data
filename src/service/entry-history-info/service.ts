@@ -5,7 +5,6 @@ import { FplHistoryDataService } from 'data/types';
 import * as A from 'fp-ts/Array';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { Logger } from 'pino';
 import { EntryHistoryInfoRepository } from 'repository/entry-history-info/types';
 import { EntryInfoRepository } from 'repository/entry-info/types';
 import {
@@ -21,7 +20,6 @@ const entryHistoryInfoServiceOperations = (
   fplDataService: FplHistoryDataService,
   domainOps: EntryHistoryInfoOperations,
   entryInfoRepository: EntryInfoRepository,
-  logger: Logger,
 ): EntryHistoryInfoServiceOperations => {
   const findByEntryId = (id: EntryId): TE.TaskEither<ServiceError, EntryHistoryInfos> =>
     pipe(
@@ -54,34 +52,7 @@ const entryHistoryInfoServiceOperations = (
           ),
         ),
       ),
-      TE.foldW(
-        (errorInfo: {
-          type: 'fetch' | 'extract' | 'upsert' | 'check_exists';
-          error?: unknown;
-          message?: string;
-          entryId: EntryId;
-        }) =>
-          pipe(
-            TE.tryCatch(
-              async () =>
-                logger.error(
-                  { entryId: errorInfo.entryId, error: errorInfo },
-                  `Failed to process entry history ${errorInfo.entryId} during sync: ${errorInfo.type}`,
-                ),
-              (err) => {
-                console.error('CRITICAL: Logging failed during entry history sync error handling', {
-                  entryId: errorInfo.entryId,
-                  originalError: errorInfo,
-                  loggingError: err,
-                });
-                return new Error('Logging failed');
-              },
-            ),
-            TE.chainW(() => TE.right(undefined)),
-            TE.orElseW(() => TE.right(undefined)),
-          ),
-        () => TE.right(undefined),
-      ),
+      TE.orElseW(() => TE.right(undefined)),
     );
 
   const syncEntryHistoryInfosFromApi = (): TE.TaskEither<ServiceError, void> =>
@@ -113,15 +84,9 @@ export const createEntryHistoryInfoService = (
   fplDataService: FplHistoryDataService,
   repository: EntryHistoryInfoRepository,
   entryInfoRepository: EntryInfoRepository,
-  logger: Logger,
 ): EntryHistoryInfoService => {
   const domainOps = createEntryHistoryInfoOperations(repository);
-  const ops = entryHistoryInfoServiceOperations(
-    fplDataService,
-    domainOps,
-    entryInfoRepository,
-    logger,
-  );
+  const ops = entryHistoryInfoServiceOperations(fplDataService, domainOps, entryInfoRepository);
 
   return {
     getEntryHistoryInfo: (id: EntryId): TE.TaskEither<ServiceError, EntryHistoryInfos> =>

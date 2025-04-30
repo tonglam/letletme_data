@@ -7,7 +7,6 @@ import { pipe } from 'fp-ts/function';
 import * as O from 'fp-ts/Option';
 import * as RNEA from 'fp-ts/ReadonlyNonEmptyArray';
 import * as TE from 'fp-ts/TaskEither';
-import { Logger } from 'pino';
 import { EntryInfoRepository } from 'repository/entry-info/types';
 import { EntryLeagueInfoRepository } from 'repository/entry-league-info/types';
 import {
@@ -28,7 +27,6 @@ const entryLeagueInfoServiceOperations = (
   fplDataService: FplEntryDataService,
   domainOps: EntryLeagueInfoOperations,
   entryInfoRepository: EntryInfoRepository,
-  logger: Logger,
 ): EntryLeagueInfoServiceOperations => {
   const findByEntryId = (id: EntryId): TE.TaskEither<ServiceError, EntryLeagueInfos> =>
     pipe(
@@ -64,37 +62,7 @@ const entryLeagueInfoServiceOperations = (
         ),
       ),
       TE.map(() => undefined),
-      TE.foldW(
-        (errorInfo: {
-          type: 'fetch' | 'extract' | 'upsert';
-          error?: unknown;
-          message?: string;
-          entryId: EntryId;
-        }) =>
-          pipe(
-            TE.tryCatch(
-              async () =>
-                logger.error(
-                  { entryId: errorInfo.entryId, error: errorInfo },
-                  `Failed to process entry ${errorInfo.entryId} during sync: ${errorInfo.type}`,
-                ),
-              (err) => {
-                console.error(
-                  'CRITICAL: Logging failed during entry league info sync error handling',
-                  {
-                    entryId: errorInfo.entryId,
-                    originalError: errorInfo,
-                    loggingError: err,
-                  },
-                );
-                return new Error('Logging failed');
-              },
-            ),
-            TE.chainW(() => TE.right(undefined)),
-            TE.orElseW(() => TE.right(undefined)),
-          ),
-        () => TE.right(undefined),
-      ),
+      TE.orElseW(() => TE.right(undefined)),
     );
 
   const syncEntryLeagueInfosFromApi = (): TE.TaskEither<ServiceError, void> =>
@@ -126,15 +94,9 @@ export const createEntryLeagueInfoService = (
   fplDataService: FplEntryDataService,
   repository: EntryLeagueInfoRepository,
   entryInfoRepository: EntryInfoRepository,
-  logger: Logger,
 ): EntryLeagueInfoService => {
   const domainOps = createEntryLeagueInfoOperations(repository);
-  const ops = entryLeagueInfoServiceOperations(
-    fplDataService,
-    domainOps,
-    entryInfoRepository,
-    logger,
-  );
+  const ops = entryLeagueInfoServiceOperations(fplDataService, domainOps, entryInfoRepository);
 
   return {
     getEntryLeagueInfo: (id: EntryId): TE.TaskEither<ServiceError, EntryLeagueInfos> =>

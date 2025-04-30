@@ -11,6 +11,7 @@
     "rootDir": ".",
     "baseUrl": ".",
     "paths": {
+      "@/*": ["src/*"],
       "api/*": ["src/api/*"],
       "config/*": ["src/config/*"],
       "data/*": ["src/data/*"],
@@ -22,7 +23,7 @@
       "schema/*": ["src/db/schema/*"],
       "types/*": ["src/types/*"],
       "utils/*": ["src/utils/*"],
-      "worker/*": ["src/worker/*"],
+      "job/*": ["src/job/*"],
       "tests/*": ["tests/*"]
     },
     "strictNullChecks": true,
