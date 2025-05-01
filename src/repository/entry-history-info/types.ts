@@ -13,6 +13,7 @@ export type EntryHistoryInfoCreateInputs = readonly EntryHistoryInfoCreateInput[
 
 export interface EntryHistoryInfoRepository {
   readonly findByEntryId: (entryId: EntryId) => TE.TaskEither<DBError, EntryHistoryInfos>;
+  readonly findAllEntryIds: () => TE.TaskEither<DBError, ReadonlyArray<EntryId>>;
   readonly saveBatchByEntryId: (
     entryHistoryInfoInputs: EntryHistoryInfoCreateInputs,
   ) => TE.TaskEither<DBError, EntryHistoryInfos>;

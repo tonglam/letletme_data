@@ -6,16 +6,24 @@ import { ServiceError } from 'types/error.type';
 
 export interface EntryHistoryInfoServiceOperations {
   readonly findByEntryId: (entryId: EntryId) => TE.TaskEither<ServiceError, EntryHistoryInfos>;
-  readonly syncEntryHistoryInfosFromApi: () => TE.TaskEither<ServiceError, void>;
+  readonly findAllEntryIds: () => TE.TaskEither<ServiceError, ReadonlyArray<EntryId>>;
+  readonly syncEntryHistoryInfosFromApi: (entryId: EntryId) => TE.TaskEither<ServiceError, void>;
+  readonly syncHistoryInfosFromApi: (
+    entryIds: ReadonlyArray<EntryId>,
+  ) => TE.TaskEither<ServiceError, void>;
 }
 
 export interface EntryHistoryInfoService {
   readonly getEntryHistoryInfo: (
     entryId: EntryId,
   ) => TE.TaskEither<ServiceError, EntryHistoryInfos>;
-  readonly syncEntryHistoryInfosFromApi: () => TE.TaskEither<ServiceError, void>;
+  readonly getAllEntryIds: () => TE.TaskEither<ServiceError, ReadonlyArray<EntryId>>;
+  readonly syncEntryHistoryInfosFromApi: (entryId: EntryId) => TE.TaskEither<ServiceError, void>;
+  readonly syncHistoryInfosFromApi: (
+    entryIds: ReadonlyArray<EntryId>,
+  ) => TE.TaskEither<ServiceError, void>;
 }
 
 export interface EntryHistoryInfoWorkflowOperations {
-  readonly syncEntryHistoryInfos: () => TE.TaskEither<ServiceError, WorkflowResult>;
+  readonly syncHistoryInfos: () => TE.TaskEither<ServiceError, WorkflowResult>;
 }

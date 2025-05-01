@@ -36,6 +36,24 @@ export const createEntryHistoryInfoRepository = (): EntryHistoryInfoRepository =
       ),
     );
 
+  const findAllEntryIds = (): TE.TaskEither<DBError, ReadonlyArray<EntryId>> =>
+    pipe(
+      TE.tryCatch(
+        async () => {
+          const result = await db
+            .selectDistinct({ entryId: schema.entryHistoryInfos.entryId })
+            .from(schema.entryHistoryInfos);
+          return result.map((entry) => entry.entryId as EntryId);
+        },
+        (error) =>
+          createDBError({
+            code: DBErrorCode.QUERY_ERROR,
+            message: `Failed to fetch all entry ids: ${getErrorMessage(error)}`,
+            cause: error instanceof Error ? error : undefined,
+          }),
+      ),
+    );
+
   const saveBatchByEntryId = (
     entryHistoryInfoInputs: EntryHistoryInfoCreateInputs,
   ): TE.TaskEither<DBError, EntryHistoryInfos> =>
@@ -59,6 +77,7 @@ export const createEntryHistoryInfoRepository = (): EntryHistoryInfoRepository =
 
   return {
     findByEntryId,
+    findAllEntryIds,
     saveBatchByEntryId,
   };
 };

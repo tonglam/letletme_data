@@ -2,24 +2,22 @@ import { createEntryHistoryInfoOperations } from 'domain/entry-history-info/oper
 import { EntryHistoryInfoOperations } from 'domain/entry-history-info/types';
 
 import { FplHistoryDataService } from 'data/types';
-import * as A from 'fp-ts/Array';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import { EntryHistoryInfoRepository } from 'repository/entry-history-info/types';
-import { EntryInfoRepository } from 'repository/entry-info/types';
 import {
   EntryHistoryInfoService,
   EntryHistoryInfoServiceOperations,
 } from 'service/entry-history-info/types';
 import { EntryHistoryInfos } from 'types/domain/entry-history-info.type';
 import { EntryId } from 'types/domain/entry-info.type';
-import { DBError, DomainError, ServiceError, ServiceErrorCode } from 'types/error.type';
+import { DataLayerError, DomainError, ServiceError, ServiceErrorCode } from 'types/error.type';
 import { createServiceError } from 'types/error.type';
+import { createServiceIntegrationError } from 'utils/error.util';
 
 const entryHistoryInfoServiceOperations = (
   fplDataService: FplHistoryDataService,
   domainOps: EntryHistoryInfoOperations,
-  entryInfoRepository: EntryInfoRepository,
 ): EntryHistoryInfoServiceOperations => {
   const findByEntryId = (id: EntryId): TE.TaskEither<ServiceError, EntryHistoryInfos> =>
     pipe(
@@ -33,65 +31,75 @@ const entryHistoryInfoServiceOperations = (
       ),
     );
 
-  const processSingleEntry = (entryId: EntryId): TE.TaskEither<never, void> =>
+  const findAllEntryIds = (): TE.TaskEither<ServiceError, ReadonlyArray<EntryId>> =>
     pipe(
-      fplDataService.getHistories(entryId),
-      TE.mapLeft((error) => ({ type: 'fetch' as const, error, entryId })),
-      TE.chainW((fetchedHistoriesArray) =>
-        pipe(
-          domainOps.findByEntryId(entryId),
-          TE.mapLeft((error) => ({ type: 'check_exists' as const, error, entryId })),
-          TE.chainW((existingHistories) =>
-            existingHistories.length === 0
-              ? pipe(
-                  domainOps.saveBatchByEntryId(fetchedHistoriesArray),
-                  TE.map(() => undefined),
-                  TE.mapLeft((error) => ({ type: 'upsert' as const, error, entryId })),
-                )
-              : TE.right(undefined),
-          ),
-        ),
-      ),
-      TE.orElseW(() => TE.right(undefined)),
-    );
-
-  const syncEntryHistoryInfosFromApi = (): TE.TaskEither<ServiceError, void> =>
-    pipe(
-      entryInfoRepository.findAllIds(),
-      TE.mapLeft((error: DBError) =>
+      domainOps.findAllEntryIds(),
+      TE.mapLeft((error: DomainError) =>
         createServiceError({
           code: ServiceErrorCode.INTEGRATION_ERROR,
           message: 'Failed to find all entry ids',
           cause: error.cause,
         }),
       ),
-      TE.chainW((readonlyEntryIds) =>
+    );
+
+  const syncEntryHistoryInfosFromApi = (entryId: EntryId): TE.TaskEither<ServiceError, void> =>
+    pipe(
+      fplDataService.getHistories(entryId),
+      TE.mapLeft((error: DataLayerError) =>
+        createServiceIntegrationError({
+          message: `Failed to fetch entry history info from api for entry id ${entryId}`,
+          cause: error.cause,
+          details: error.details,
+        }),
+      ),
+      TE.chain((histories) =>
         pipe(
-          [...readonlyEntryIds],
-          A.traverse(TE.ApplicativePar)(processSingleEntry),
-          TE.map(() => undefined),
+          domainOps.saveBatchByEntryId(histories),
+          TE.mapLeft((error: DomainError) =>
+            createServiceError({
+              code: ServiceErrorCode.DB_ERROR,
+              message: `Failed to save entry history info for entry id ${entryId}`,
+              cause: error.cause,
+            }),
+          ),
         ),
       ),
+      TE.map(() => undefined),
+    );
+
+  const syncHistoryInfosFromApi = (
+    ids: ReadonlyArray<EntryId>,
+  ): TE.TaskEither<ServiceError, void> =>
+    pipe(
+      TE.sequenceArray(ids.map(syncEntryHistoryInfosFromApi)),
+      TE.map(() => undefined),
     );
 
   return {
     findByEntryId,
+    findAllEntryIds,
     syncEntryHistoryInfosFromApi,
+    syncHistoryInfosFromApi,
   };
 };
 
 export const createEntryHistoryInfoService = (
   fplDataService: FplHistoryDataService,
   repository: EntryHistoryInfoRepository,
-  entryInfoRepository: EntryInfoRepository,
 ): EntryHistoryInfoService => {
   const domainOps = createEntryHistoryInfoOperations(repository);
-  const ops = entryHistoryInfoServiceOperations(fplDataService, domainOps, entryInfoRepository);
+  const ops = entryHistoryInfoServiceOperations(fplDataService, domainOps);
 
   return {
     getEntryHistoryInfo: (id: EntryId): TE.TaskEither<ServiceError, EntryHistoryInfos> =>
       ops.findByEntryId(id),
-    syncEntryHistoryInfosFromApi: (): TE.TaskEither<ServiceError, void> =>
-      ops.syncEntryHistoryInfosFromApi(),
+    getAllEntryIds: (): TE.TaskEither<ServiceError, ReadonlyArray<EntryId>> =>
+      ops.findAllEntryIds(),
+    syncEntryHistoryInfosFromApi: (entryId: EntryId): TE.TaskEither<ServiceError, void> =>
+      ops.syncEntryHistoryInfosFromApi(entryId),
+    syncHistoryInfosFromApi: (
+      entryIds: ReadonlyArray<EntryId>,
+    ): TE.TaskEither<ServiceError, void> => ops.syncHistoryInfosFromApi(entryIds),
   };
 };

@@ -44,7 +44,40 @@ export const entriesApi = (dependencies: DecoratedDependencies) =>
     )
     .post(
       '/leagues/sync',
-      () => unwrapOrThrow(dependencies.entryLeagueInfoService.syncEntryLeagueInfosFromApi()),
+      ({ params }) =>
+        unwrapOrThrow(
+          dependencies.entryLeagueInfoService.syncEntryLeagueInfosFromApi(
+            Number(params.entryId) as EntryId,
+          ),
+        ),
+      {
+        params: t.Object({
+          entryId: t.Numeric(),
+        }),
+      },
+    )
+    .get(
+      '/history',
+      ({ params }) =>
+        unwrapOrThrow(
+          dependencies.entryHistoryInfoService.getEntryHistoryInfo(
+            Number(params.entryId) as EntryId,
+          ),
+        ),
+      {
+        params: t.Object({
+          entryId: t.Numeric(),
+        }),
+      },
+    )
+    .post(
+      '/history/sync',
+      ({ params }) =>
+        unwrapOrThrow(
+          dependencies.entryHistoryInfoService.syncEntryHistoryInfosFromApi(
+            Number(params.entryId) as EntryId,
+          ),
+        ),
       {
         params: t.Object({
           entryId: t.Numeric(),

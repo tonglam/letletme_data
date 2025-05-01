@@ -48,9 +48,11 @@ import { createEntryEventResultWorkflows } from 'service/entry-event-result/work
 import { createEntryEventTransferService } from 'service/entry-event-transfer/service';
 import { createEntryEventTransferWorkflows } from 'service/entry-event-transfer/workflow';
 import { createEntryHistoryInfoService } from 'service/entry-history-info/service';
+import { createEntryHistoryInfoWorkflows } from 'service/entry-history-info/workflow';
 import { createEntryInfoService } from 'service/entry-info/service';
 import { createEntryInfoWorkflows } from 'service/entry-info/workflow';
 import { createEntryLeagueInfoService } from 'service/entry-league-info/service';
+import { createEntryLeagueInfoWorkflows } from 'service/entry-league-info/workflow';
 import { createEventService } from 'service/event/service';
 import { createEventWorkflows } from 'service/event/workflow';
 import { createEventLiveService } from 'service/event-live/service';
@@ -236,13 +238,11 @@ export const entryInfoService = createEntryInfoService(fplEntryDataService, entr
 export const entryLeagueInfoService = createEntryLeagueInfoService(
   fplEntryDataService,
   entryLeagueInfoRepository,
-  entryInfoRepository,
 );
 
 export const entryHistoryInfoService = createEntryHistoryInfoService(
   fplHistoryDataService,
   entryHistoryInfoRepository,
-  entryInfoRepository,
 );
 
 export const tournamentService = createTournamentService();
@@ -307,6 +307,13 @@ export const eventOverallResultWorkflows = createEventOverallResultWorkflows(
 
 export const entryInfoWorkflows = createEntryInfoWorkflows(entryInfoService);
 
+export const entryLeagueInfoWorkflows = createEntryLeagueInfoWorkflows(
+  entryLeagueInfoService,
+  entryInfoService,
+);
+
+export const entryHistoryInfoWorkflows = createEntryHistoryInfoWorkflows(entryHistoryInfoService);
+
 export const entryEventPickWorkflows = createEntryEventPickWorkflows(entryEventPickService);
 
 export const entryEventTransferWorkflows =
@@ -347,6 +354,8 @@ export const dependencies = {
   entryEventPickWorkflows,
   entryEventTransferWorkflows,
   entryEventResultWorkflows,
+  entryLeagueInfoWorkflows,
+  entryHistoryInfoWorkflows,
 };
 
 export type DecoratedDependencies = typeof dependencies;

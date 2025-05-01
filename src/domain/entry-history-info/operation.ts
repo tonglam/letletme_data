@@ -26,6 +26,18 @@ export const createEntryHistoryInfoOperations = (
       ),
     );
 
+  const findAllEntryIds = (): TE.TaskEither<DomainError, ReadonlyArray<EntryId>> =>
+    pipe(
+      repository.findAllEntryIds(),
+      TE.mapLeft((dbError) =>
+        createDomainError({
+          code: DomainErrorCode.DATABASE_ERROR,
+          message: `DB Error (findAllEntryIds): ${getErrorMessage(dbError)}`,
+          cause: dbError,
+        }),
+      ),
+    );
+
   const saveBatchByEntryId = (
     entryHistoryInfoInputs: EntryHistoryInfoCreateInputs,
   ): TE.TaskEither<DomainError, EntryHistoryInfos> =>
@@ -42,6 +54,7 @@ export const createEntryHistoryInfoOperations = (
 
   return {
     findByEntryId,
+    findAllEntryIds,
     saveBatchByEntryId,
   };
 };

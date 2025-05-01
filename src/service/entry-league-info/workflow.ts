@@ -1,6 +1,7 @@
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import { getWorkflowLogger } from 'infrastructure/logger';
+import { EntryInfoService } from 'service/entry-info/types';
 import {
   EntryLeagueInfoService,
   EntryLeagueInfoWorkflowOperations,
@@ -12,6 +13,7 @@ const logger = getWorkflowLogger();
 
 export const createEntryLeagueInfoWorkflows = (
   entryLeagueInfoService: EntryLeagueInfoService,
+  entryInfoService: EntryInfoService,
 ): EntryLeagueInfoWorkflowOperations => {
   const syncEntryLeagueInfos = (): TE.TaskEither<ServiceError, WorkflowResult> => {
     const context = createWorkflowContext('entry-league-info-sync');
@@ -19,7 +21,8 @@ export const createEntryLeagueInfoWorkflows = (
     logger.info({ workflow: context.workflowId }, 'Starting entry league info sync workflow');
 
     return pipe(
-      entryLeagueInfoService.syncEntryLeagueInfosFromApi(),
+      entryInfoService.getAllEntryIds(),
+      TE.chainW((ids) => entryLeagueInfoService.syncLeaguesInfosFromApi(ids)),
       TE.mapLeft((error: ServiceError) =>
         createServiceError({
           code: ServiceErrorCode.INTEGRATION_ERROR,

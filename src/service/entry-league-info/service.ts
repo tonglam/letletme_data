@@ -4,7 +4,6 @@ import { EntryLeagueInfoOperations } from 'domain/entry-league-info/types';
 import { FplEntryDataService } from 'data/types';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { EntryInfoRepository } from 'repository/entry-info/types';
 import { EntryLeagueInfoRepository } from 'repository/entry-league-info/types';
 import {
   EntryLeagueInfoService,
@@ -42,14 +41,29 @@ const entryLeagueInfoServiceOperations = (
       fplDataService.getLeagues(entryId),
       TE.mapLeft((error: DataLayerError) =>
         createServiceIntegrationError({
-          message: `Failed to sync entry league info from api for entry id ${entryId}`,
+          message: `Failed to fetch entry league info from api for entry id ${entryId}`,
           cause: error.cause,
           details: error.details,
         }),
       ),
+      TE.chain((leagues) =>
+        pipe(
+          domainOps.upsertEntryLeagueInfoBatch(leagues),
+          TE.mapLeft((error: DomainError) =>
+            createServiceError({
+              code: ServiceErrorCode.DB_ERROR,
+              message: `Failed to save entry league info for entry id ${entryId}`,
+              cause: error.cause,
+            }),
+          ),
+        ),
+      ),
+      TE.map(() => undefined),
     );
 
-  const syncLeaguesInfosFromApi = (): TE.TaskEither<ServiceError, void> =>
+  const syncLeaguesInfosFromApi = (
+    ids: ReadonlyArray<EntryId>,
+  ): TE.TaskEither<ServiceError, void> =>
     pipe(
       TE.sequenceArray(ids.map(syncEntryLeagueInfosFromApi)),
       TE.map(() => undefined),
@@ -65,16 +79,16 @@ const entryLeagueInfoServiceOperations = (
 export const createEntryLeagueInfoService = (
   fplDataService: FplEntryDataService,
   repository: EntryLeagueInfoRepository,
-  entryInfoRepository: EntryInfoRepository,
 ): EntryLeagueInfoService => {
   const domainOps = createEntryLeagueInfoOperations(repository);
-  const ops = entryLeagueInfoServiceOperations(fplDataService, domainOps, entryInfoRepository);
+  const ops = entryLeagueInfoServiceOperations(fplDataService, domainOps);
 
   return {
     getEntryLeagueInfo: (id: EntryId): TE.TaskEither<ServiceError, EntryLeagueInfos> =>
       ops.findByEntryId(id),
     syncEntryLeagueInfosFromApi: (entryId: EntryId): TE.TaskEither<ServiceError, void> =>
       ops.syncEntryLeagueInfosFromApi(entryId),
-    syncLeaguesInfosFromApi: (): TE.TaskEither<ServiceError, void> => ops.syncLeaguesInfosFromApi(),
+    syncLeaguesInfosFromApi: (ids: ReadonlyArray<EntryId>): TE.TaskEither<ServiceError, void> =>
+      ops.syncLeaguesInfosFromApi(ids),
   };
 };
