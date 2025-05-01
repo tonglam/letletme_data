@@ -47,5 +47,26 @@ export const createTournamentInfoRepository = (): TournamentInfoRepository => {
       ),
     );
 
-  return { findById, findAll };
+  const updateById = (tournamentInfo: TournamentInfo): TE.TaskEither<DBError, void> => {
+    const { id, ...rest } = tournamentInfo;
+    return pipe(
+      TE.tryCatch(
+        async () => {
+          await db
+            .update(schema.tournamentInfos)
+            .set(rest)
+            .where(eq(schema.tournamentInfos.id, Number(id)));
+        },
+        (error) =>
+          createDBError({
+            code: DBErrorCode.QUERY_ERROR,
+            message: `Failed to update tournament info by id ${id}: ${getErrorMessage(error)}`,
+            cause: error instanceof Error ? error : undefined,
+          }),
+      ),
+      TE.map(() => undefined),
+    );
+  };
+
+  return { findById, findAll, updateById };
 };

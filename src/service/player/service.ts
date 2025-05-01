@@ -1,5 +1,4 @@
-import { createPlayerOperations } from 'domain/player/operation';
-import { PlayerCache, PlayerOperations } from 'domain/player/types';
+import { PlayerCache } from 'domain/player/types';
 import { TeamCache } from 'domain/team/types';
 
 import { FplBootstrapDataService } from 'data/types';
@@ -11,24 +10,28 @@ import { PlayerService, PlayerServiceOperations } from 'service/player/types';
 import { ElementTypeId } from 'types/base.type';
 import { Player, PlayerId, Players, RawPlayers } from 'types/domain/player.type';
 import { TeamId } from 'types/domain/team.type';
-import { createDomainError, DataLayerError, DomainErrorCode, ServiceError } from 'types/error.type';
+import { CacheErrorCode, createCacheError, ServiceError } from 'types/error.type';
 import { enrichPlayers } from 'utils/data-enrichment.util';
-import { createServiceIntegrationError, mapDomainErrorToServiceError } from 'utils/error.util';
+import {
+  mapCacheErrorToServiceError,
+  mapDataLayerErrorToServiceError,
+  mapDBErrorToServiceError,
+} from 'utils/error.util';
 
 const playerServiceOperations = (
   fplDataService: FplBootstrapDataService,
-  domainOps: PlayerOperations,
+  repository: PlayerRepository,
   cache: PlayerCache,
   teamCache: TeamCache,
 ): PlayerServiceOperations => {
   const findPlayerById = (id: PlayerId): TE.TaskEither<ServiceError, Player> =>
     pipe(
       cache.getAllPlayers(),
-      TE.mapLeft(mapDomainErrorToServiceError),
+      TE.mapLeft(mapCacheErrorToServiceError),
       TE.chainOptionK(() =>
-        mapDomainErrorToServiceError(
-          createDomainError({
-            code: DomainErrorCode.NOT_FOUND,
+        mapCacheErrorToServiceError(
+          createCacheError({
+            code: CacheErrorCode.NOT_FOUND,
             message: `Player with ID ${id} not found in cache.`,
           }),
         ),
@@ -40,46 +43,38 @@ const playerServiceOperations = (
   ): TE.TaskEither<ServiceError, Players> =>
     pipe(
       cache.getAllPlayers(),
-      TE.mapLeft(mapDomainErrorToServiceError),
+      TE.mapLeft(mapCacheErrorToServiceError),
       TE.map((players) => RA.filter((p: Player) => p.type === elementType)(players)),
     );
 
   const findPlayersByTeamId = (teamId: TeamId): TE.TaskEither<ServiceError, Players> =>
     pipe(
       cache.getAllPlayers(),
-      TE.mapLeft(mapDomainErrorToServiceError),
+      TE.mapLeft(mapCacheErrorToServiceError),
       TE.map((players) => RA.filter((p: Player) => p.teamId === teamId)(players)),
     );
 
   const findAllPlayers = (): TE.TaskEither<ServiceError, Players> =>
-    pipe(cache.getAllPlayers(), TE.mapLeft(mapDomainErrorToServiceError));
+    pipe(cache.getAllPlayers(), TE.mapLeft(mapCacheErrorToServiceError));
 
   const syncPlayersFromApi = (): TE.TaskEither<ServiceError, void> =>
     pipe(
       fplDataService.getPlayers(),
-      TE.mapLeft((error: DataLayerError) =>
-        createServiceIntegrationError({
-          message: 'Failed to fetch/map players via data layer',
-          cause: error.cause,
-          details: error.details,
-        }),
-      ),
-      TE.chainFirstW(() =>
-        pipe(domainOps.deleteAllPlayers(), TE.mapLeft(mapDomainErrorToServiceError)),
-      ),
+      TE.mapLeft(mapDataLayerErrorToServiceError),
+      TE.chainFirstW(() => pipe(repository.deleteAll(), TE.mapLeft(mapDBErrorToServiceError))),
       TE.chainW((rawPlayers: RawPlayers) =>
         pipe(
-          rawPlayers.length > 0 ? domainOps.savePlayers(rawPlayers) : TE.right([] as RawPlayers),
-          TE.mapLeft(mapDomainErrorToServiceError),
+          rawPlayers.length > 0 ? repository.saveBatch(rawPlayers) : TE.right([] as RawPlayers),
+          TE.mapLeft(mapDBErrorToServiceError),
         ),
       ),
       TE.chainW((savedRawPlayers: RawPlayers) =>
-        pipe(enrichPlayers(teamCache)(savedRawPlayers), TE.mapLeft(mapDomainErrorToServiceError)),
+        pipe(enrichPlayers(teamCache)(savedRawPlayers), TE.mapLeft(mapCacheErrorToServiceError)),
       ),
       TE.chainW((enrichedPlayers: Players) =>
         pipe(
           enrichedPlayers.length > 0 ? cache.setAllPlayers(enrichedPlayers) : TE.rightIO(() => {}),
-          TE.mapLeft(mapDomainErrorToServiceError),
+          TE.mapLeft(mapCacheErrorToServiceError),
         ),
       ),
       TE.map(() => undefined),
@@ -100,8 +95,7 @@ export const createPlayerService = (
   cache: PlayerCache,
   teamCache: TeamCache,
 ): PlayerService => {
-  const domainOps = createPlayerOperations(repository);
-  const ops = playerServiceOperations(fplDataService, domainOps, cache, teamCache);
+  const ops = playerServiceOperations(fplDataService, repository, cache, teamCache);
 
   return {
     getPlayer: (id: PlayerId): TE.TaskEither<ServiceError, Player> => ops.findPlayerById(id),

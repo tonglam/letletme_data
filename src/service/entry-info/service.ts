@@ -15,7 +15,7 @@ import {
   ServiceErrorCode,
 } from 'types/error.type';
 import { ServiceError } from 'types/error.type';
-import { createServiceIntegrationError, mapDomainErrorToServiceError } from 'utils/error.util';
+import { createServiceIntegrationError, mapCacheErrorToServiceError } from 'utils/error.util';
 
 const entryInfoServiceOperations = (
   fplDataService: FplEntryDataService,
@@ -46,7 +46,7 @@ const entryInfoServiceOperations = (
     );
 
   const findAllIds = (): TE.TaskEither<ServiceError, ReadonlyArray<EntryId>> =>
-    pipe(domainOps.findAllIds(), TE.mapLeft(mapDomainErrorToServiceError));
+    pipe(domainOps.findAllIds(), TE.mapLeft(mapCacheErrorToServiceError));
 
   const syncEntryInfoFromApi = (id: EntryId): TE.TaskEither<ServiceError, void> =>
     pipe(

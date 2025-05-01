@@ -13,7 +13,7 @@ import { EventOverallResult, RawEventOverallResult } from 'types/domain/event-ov
 import { EventId } from 'types/domain/event.type';
 import { createDomainError, DataLayerError, DomainErrorCode, ServiceError } from 'types/error.type';
 import { enrichEventOverallResult } from 'utils/data-enrichment.util';
-import { createServiceIntegrationError, mapDomainErrorToServiceError } from 'utils/error.util';
+import { createServiceIntegrationError, mapCacheErrorToServiceError } from 'utils/error.util';
 
 const eventOverallResultServiceOperations = (
   fplDataService: FplBootstrapDataService,
@@ -25,9 +25,9 @@ const eventOverallResultServiceOperations = (
   ): TE.TaskEither<ServiceError, EventOverallResult> =>
     pipe(
       cache.getEventOverallResult(eventId),
-      TE.mapLeft(mapDomainErrorToServiceError),
+      TE.mapLeft(mapCacheErrorToServiceError),
       TE.chainOptionK(() =>
-        mapDomainErrorToServiceError(
+        mapCacheErrorToServiceError(
           createDomainError({
             code: DomainErrorCode.NOT_FOUND,
             message: `Event overall result with ID ${eventId} not found in cache.`,
@@ -51,13 +51,13 @@ const eventOverallResultServiceOperations = (
       TE.chainW((rawResult: RawEventOverallResult) =>
         pipe(
           enrichEventOverallResult(playerCache)(rawResult),
-          TE.mapLeft(mapDomainErrorToServiceError),
+          TE.mapLeft(mapCacheErrorToServiceError),
         ),
       ),
       TE.chainW((enrichedResult: EventOverallResult) =>
         pipe(
           cache.setAllEventOverallResults([enrichedResult]),
-          TE.mapLeft(mapDomainErrorToServiceError),
+          TE.mapLeft(mapCacheErrorToServiceError),
         ),
       ),
       TE.map(() => undefined),

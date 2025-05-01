@@ -1,5 +1,4 @@
-import { createTeamOperations } from 'domain/team/operation';
-import { TeamCache, TeamOperations } from 'domain/team/types';
+import { TeamCache } from 'domain/team/types';
 
 import { FplBootstrapDataService } from 'data/types';
 import { pipe } from 'fp-ts/function';
@@ -8,22 +7,26 @@ import * as TE from 'fp-ts/TaskEither';
 import { TeamCreateInputs, TeamRepository } from 'repository/team/types';
 import { TeamService, TeamServiceOperations } from 'service/team/types';
 import { Team, TeamId, Teams } from 'types/domain/team.type';
-import { createDomainError, DataLayerError, DomainErrorCode, ServiceError } from 'types/error.type';
-import { createServiceIntegrationError, mapDomainErrorToServiceError } from 'utils/error.util';
+import { CacheErrorCode, createCacheError, ServiceError } from 'types/error.type';
+import {
+  mapCacheErrorToServiceError,
+  mapDBErrorToServiceError,
+  mapDataLayerErrorToServiceError,
+} from 'utils/error.util';
 
 const teamServiceOperations = (
   fplDataService: FplBootstrapDataService,
-  domainOps: TeamOperations,
+  repository: TeamRepository,
   cache: TeamCache,
 ): TeamServiceOperations => {
   const findTeamById = (id: TeamId): TE.TaskEither<ServiceError, Team> =>
     pipe(
       cache.getAllTeams(),
-      TE.mapLeft(mapDomainErrorToServiceError),
+      TE.mapLeft(mapCacheErrorToServiceError),
       TE.chainOptionK(() =>
-        mapDomainErrorToServiceError(
-          createDomainError({
-            code: DomainErrorCode.NOT_FOUND,
+        mapCacheErrorToServiceError(
+          createCacheError({
+            code: CacheErrorCode.NOT_FOUND,
             message: `Team with ID ${id} not found in cache after fetching all.`,
           }),
         ),
@@ -31,23 +34,22 @@ const teamServiceOperations = (
     );
 
   const findAllTeams = (): TE.TaskEither<ServiceError, Teams> =>
-    pipe(cache.getAllTeams(), TE.mapLeft(mapDomainErrorToServiceError));
+    pipe(cache.getAllTeams(), TE.mapLeft(mapCacheErrorToServiceError));
 
   const syncTeamsFromApi = (): TE.TaskEither<ServiceError, void> =>
     pipe(
       fplDataService.getTeams(),
-      TE.mapLeft((error: DataLayerError) =>
-        createServiceIntegrationError({
-          message: 'Failed to fetch teams from API',
-          cause: error,
-          details: error.details,
-        }),
-      ),
+      TE.mapLeft(mapDataLayerErrorToServiceError),
       TE.chainW((teamsCreateData: TeamCreateInputs) =>
-        pipe(domainOps.saveTeams(teamsCreateData), TE.mapLeft(mapDomainErrorToServiceError)),
+        pipe(
+          teamsCreateData.length > 0
+            ? repository.saveBatch(teamsCreateData)
+            : TE.right([] as Teams),
+          TE.mapLeft(mapDBErrorToServiceError),
+        ),
       ),
       TE.chainFirstW((savedTeams: Teams) =>
-        pipe(cache.setAllTeams(savedTeams), TE.mapLeft(mapDomainErrorToServiceError)),
+        pipe(cache.setAllTeams(savedTeams), TE.mapLeft(mapCacheErrorToServiceError)),
       ),
       TE.map(() => undefined),
     );
@@ -64,8 +66,7 @@ export const createTeamService = (
   repository: TeamRepository,
   cache: TeamCache,
 ): TeamService => {
-  const domainOps = createTeamOperations(repository);
-  const ops = teamServiceOperations(fplDataService, domainOps, cache);
+  const ops = teamServiceOperations(fplDataService, repository, cache);
 
   return {
     getTeam: (id: TeamId): TE.TaskEither<ServiceError, Team> => ops.findTeamById(id),

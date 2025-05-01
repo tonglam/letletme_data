@@ -44,7 +44,7 @@ import { PlayerValue, PlayerValues, RawPlayerValue } from 'types/domain/player-v
 import { RawPlayers, Players } from 'types/domain/player.type';
 import { Player } from 'types/domain/player.type';
 import { Team, TeamId } from 'types/domain/team.type';
-import { createDomainError, DomainError, DomainErrorCode } from 'types/error.type';
+import { CacheError, CacheErrorCode, createCacheError } from 'types/error.type';
 
 type HasElement = { element: number };
 
@@ -67,7 +67,7 @@ export const enrichWithElementType =
   <T extends HasElement>(playerCache: PlayerCache) =>
   (
     items: ReadonlyArray<T>,
-  ): TE.TaskEither<DomainError, ReadonlyArray<EnrichedWithElementType<T>>> => {
+  ): TE.TaskEither<CacheError, ReadonlyArray<EnrichedWithElementType<T>>> => {
     if (RA.isEmpty(items)) {
       return TE.right([]);
     }
@@ -106,7 +106,7 @@ export const enrichWithTeam =
     playerCache: PlayerCache,
     teamCache: TeamCache,
   ) =>
-  (items: ReadonlyArray<T>): TE.TaskEither<DomainError, ReadonlyArray<EnrichedWithTeam<T>>> => {
+  (items: ReadonlyArray<T>): TE.TaskEither<CacheError, ReadonlyArray<EnrichedWithTeam<T>>> => {
     if (RA.isEmpty(items)) {
       return TE.right([]);
     }
@@ -156,7 +156,7 @@ export const enrichWithTeam =
 
 export const enrichPlayers =
   (teamCache: TeamCache) =>
-  (rawPlayers: RawPlayers): TE.TaskEither<DomainError, Players> => {
+  (rawPlayers: RawPlayers): TE.TaskEither<CacheError, Players> => {
     return pipe(
       teamCache.getAllTeams(),
       TE.map((teams) => {
@@ -187,7 +187,7 @@ export const enrichPlayers =
 
 export const enrichPlayerStats =
   (playerCache: PlayerCache, teamCache: TeamCache) =>
-  (sourceStats: ReadonlyArray<RawPlayerStat>): TE.TaskEither<DomainError, PlayerStats> =>
+  (sourceStats: ReadonlyArray<RawPlayerStat>): TE.TaskEither<CacheError, PlayerStats> =>
     pipe(
       sourceStats,
       RA.map((stat) => ({ element: stat.elementId, original: stat })),
@@ -213,13 +213,13 @@ export const enrichPlayerStats =
 
 export const enrichPlayerStat =
   (playerCache: PlayerCache, teamCache: TeamCache) =>
-  (sourceStat: RawPlayerStat): TE.TaskEither<DomainError, PlayerStat> =>
+  (sourceStat: RawPlayerStat): TE.TaskEither<CacheError, PlayerStat> =>
     pipe(
       TE.of([sourceStat]),
       TE.chain(enrichPlayerStats(playerCache, teamCache)),
       TE.chainOptionK(() =>
-        createDomainError({
-          code: DomainErrorCode.NOT_FOUND,
+        createCacheError({
+          code: CacheErrorCode.NOT_FOUND,
           message:
             'Enrichment resulted in an empty array for a single item, likely missing Player or Team data.',
         }),
@@ -229,7 +229,7 @@ export const enrichPlayerStat =
 
 export const enrichPlayerValues =
   (playerCache: PlayerCache, teamCache: TeamCache) =>
-  (sourceValues: ReadonlyArray<RawPlayerValue>): TE.TaskEither<DomainError, PlayerValues> =>
+  (sourceValues: ReadonlyArray<RawPlayerValue>): TE.TaskEither<CacheError, PlayerValues> =>
     pipe(
       sourceValues,
       RA.map((value) => ({ element: value.elementId, original: value })),
@@ -256,7 +256,7 @@ export const enrichPlayerValues =
 
 export const enrichEventFixtures =
   (teamCache: TeamCache) =>
-  (rawFixtures: RawEventFixtures): TE.TaskEither<DomainError, EventFixtures> => {
+  (rawFixtures: RawEventFixtures): TE.TaskEither<CacheError, EventFixtures> => {
     if (RA.isEmpty(rawFixtures)) {
       return TE.right([]);
     }
@@ -291,20 +291,14 @@ export const enrichEventFixtures =
           RA.compact,
         );
 
-        if (enrichedFixtures.length < rawFixtures.length) {
-          console.warn(
-            '[enrichEventFixtures] Enrichment resulted in fewer fixtures than input. Check TeamCache integrity.',
-          );
-        }
-
         return enrichedFixtures as EventFixtures;
       }),
       TE.mapLeft(
-        (domainError): DomainError =>
-          createDomainError({
-            code: DomainErrorCode.CACHE_ERROR,
+        (cacheError): CacheError =>
+          createCacheError({
+            code: CacheErrorCode.OPERATION_ERROR,
             message: 'Failed to retrieve teams from cache for fixture enrichment',
-            cause: domainError,
+            cause: cacheError,
           }),
       ),
     );
@@ -312,7 +306,7 @@ export const enrichEventFixtures =
 
 export const enrichEventLives =
   (playerCache: PlayerCache, teamCache: TeamCache) =>
-  (rawEventLives: RawEventLives): TE.TaskEither<DomainError, EventLives> => {
+  (rawEventLives: RawEventLives): TE.TaskEither<CacheError, EventLives> => {
     if (RA.isEmpty(rawEventLives)) {
       return TE.right([]);
     }
@@ -358,9 +352,9 @@ export const enrichEventLives =
         return enrichedItems;
       }),
       TE.mapLeft(
-        (error): DomainError =>
-          createDomainError({
-            code: DomainErrorCode.CACHE_ERROR,
+        (error): CacheError =>
+          createCacheError({
+            code: CacheErrorCode.OPERATION_ERROR,
             message: 'Failed to retrieve players or teams from cache for event live enrichment',
             cause: error,
           }),
@@ -370,13 +364,13 @@ export const enrichEventLives =
 
 export const enrichEntryEventPick =
   (playerCache: PlayerCache, teamCache: TeamCache, entryInfoRepository: EntryInfoRepository) =>
-  (rawPick: RawEntryEventPick): TE.TaskEither<DomainError, EntryEventPick> =>
+  (rawPick: RawEntryEventPick): TE.TaskEither<CacheError, EntryEventPick> =>
     pipe(
       entryInfoRepository.findById(rawPick.entryId),
       TE.mapLeft(
-        (dbError): DomainError =>
-          createDomainError({
-            code: DomainErrorCode.DATABASE_ERROR,
+        (dbError): CacheError =>
+          createCacheError({
+            code: CacheErrorCode.OPERATION_ERROR,
             message: `Failed to fetch entry info for enrichment: ${rawPick.entryId}`,
             cause: dbError,
           }),
@@ -427,9 +421,9 @@ export const enrichEntryEventPick =
             } as EntryEventPick;
           }),
           TE.mapLeft(
-            (cacheError): DomainError =>
-              createDomainError({
-                code: DomainErrorCode.CACHE_ERROR,
+            (cacheError): CacheError =>
+              createCacheError({
+                code: CacheErrorCode.OPERATION_ERROR,
                 message: 'Failed to retrieve players or teams from cache for pick enrichment',
                 cause: cacheError,
               }),
@@ -440,7 +434,7 @@ export const enrichEntryEventPick =
 
 export const enrichEntryEventPicks =
   (playerCache: PlayerCache, teamCache: TeamCache, entryInfoRepository: EntryInfoRepository) =>
-  (rawPicks: RawEntryEventPicks): TE.TaskEither<DomainError, EntryEventPicks> =>
+  (rawPicks: RawEntryEventPicks): TE.TaskEither<CacheError, EntryEventPicks> =>
     pipe(
       rawPicks,
       RA.traverse(TE.ApplicativePar)(
@@ -450,16 +444,16 @@ export const enrichEntryEventPicks =
 
 export const enrichEntryEventTransfer =
   (playerCache: PlayerCache, teamCache: TeamCache, entryInfoRepository: EntryInfoRepository) =>
-  (rawTransfer: RawEntryEventTransfer): TE.TaskEither<DomainError, EntryEventTransfer> =>
+  (rawTransfer: RawEntryEventTransfer): TE.TaskEither<CacheError, EntryEventTransfer> =>
     pipe(
       TE.Do,
       TE.bind('entryInfo', () =>
         pipe(
           entryInfoRepository.findById(rawTransfer.entryId),
           TE.mapLeft(
-            (dbError): DomainError =>
-              createDomainError({
-                code: DomainErrorCode.DATABASE_ERROR,
+            (dbError): CacheError =>
+              createCacheError({
+                code: CacheErrorCode.OPERATION_ERROR,
                 message: `Failed to fetch entry info for transfer enrichment: ${rawTransfer.entryId}`,
                 cause: dbError,
               }),
@@ -504,8 +498,8 @@ export const enrichEntryEventTransfer =
           O.apS('elementInData', elementInDataOpt),
           O.apS('elementOutData', elementOutDataOpt),
           TE.fromOption(() =>
-            createDomainError({
-              code: DomainErrorCode.NOT_FOUND,
+            createCacheError({
+              code: CacheErrorCode.NOT_FOUND,
               message: 'Could not find player or team data for transfer elements',
             }),
           ),
@@ -532,10 +526,10 @@ export const enrichEntryEventTransfer =
         );
       }),
       TE.mapLeft((error) =>
-        error.code === DomainErrorCode.DATABASE_ERROR || error.code === DomainErrorCode.NOT_FOUND
+        error.code === CacheErrorCode.OPERATION_ERROR || error.code === CacheErrorCode.NOT_FOUND
           ? error
-          : createDomainError({
-              code: DomainErrorCode.CACHE_ERROR,
+          : createCacheError({
+              code: CacheErrorCode.OPERATION_ERROR,
               message: 'Failed to retrieve players or teams from cache for transfer enrichment',
               cause: error,
             }),
@@ -544,7 +538,7 @@ export const enrichEntryEventTransfer =
 
 export const enrichEntryEventTransfers =
   (playerCache: PlayerCache, teamCache: TeamCache, entryInfoRepository: EntryInfoRepository) =>
-  (rawTransfers: RawEntryEventTransfers): TE.TaskEither<DomainError, EntryEventTransfers> =>
+  (rawTransfers: RawEntryEventTransfers): TE.TaskEither<CacheError, EntryEventTransfers> =>
     pipe(
       rawTransfers,
       RA.traverse(TE.ApplicativePar)(
@@ -565,22 +559,22 @@ export const enrichEntryEventResults =
   (entryInfoRepository: EntryInfoRepository) =>
   (
     rawInput: RawEntryEventResult | RawEntryEventResults,
-  ): TE.TaskEither<DomainError, EntryEventResult | EntryEventResults> => {
+  ): TE.TaskEither<CacheError, EntryEventResult | EntryEventResults> => {
     if (!Array.isArray(rawInput)) {
       const rawResult = rawInput as RawEntryEventResult;
       return pipe(
         entryInfoRepository.findById(rawResult.entryId),
         TE.mapLeft(
-          (dbError): DomainError =>
-            createDomainError({
-              code: DomainErrorCode.DATABASE_ERROR,
+          (dbError): CacheError =>
+            createCacheError({
+              code: CacheErrorCode.OPERATION_ERROR,
               message: `Failed to fetch entry info for event result enrichment: ${rawResult.entryId}`,
               cause: dbError,
             }),
         ),
         TE.chainOptionK(() =>
-          createDomainError({
-            code: DomainErrorCode.NOT_FOUND,
+          createCacheError({
+            code: CacheErrorCode.NOT_FOUND,
             message: `EntryInfo not found for entry ID: ${rawResult.entryId}`,
           }),
         )((entryInfo) => O.fromNullable(entryInfo)),
@@ -602,9 +596,9 @@ export const enrichEntryEventResults =
     return pipe(
       entryInfoRepository.findByIds(entryIds),
       TE.mapLeft(
-        (dbError): DomainError =>
-          createDomainError({
-            code: DomainErrorCode.DATABASE_ERROR,
+        (dbError): CacheError =>
+          createCacheError({
+            code: CacheErrorCode.OPERATION_ERROR,
             message: 'Failed to fetch entry info for event result enrichment',
             cause: dbError,
           }),
@@ -636,12 +630,12 @@ export const enrichEntryEventResults =
 
 export const enrichEventOverallResult =
   (playerCache: PlayerCache) =>
-  (rawResult: RawEventOverallResult): TE.TaskEither<DomainError, EventOverallResult> => {
+  (rawResult: RawEventOverallResult): TE.TaskEither<CacheError, EventOverallResult> => {
     return pipe(
       playerCache.getAllPlayers(),
-      TE.mapLeft((cacheError: DomainError) =>
-        createDomainError({
-          code: DomainErrorCode.CACHE_ERROR,
+      TE.mapLeft((cacheError: CacheError) =>
+        createCacheError({
+          code: CacheErrorCode.OPERATION_ERROR,
           message: 'Failed to retrieve players from cache for event overall result enrichment',
           cause: cacheError,
         }),

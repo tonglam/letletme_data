@@ -21,14 +21,4 @@ export const eventsApi = (dependencies: DecoratedDependencies) =>
     .get('/current', () => unwrapOrThrow(dependencies.eventService.getCurrentEvent()))
     .get('/last', () => unwrapOrThrow(dependencies.eventService.getLastEvent()))
     .get('/next', () => unwrapOrThrow(dependencies.eventService.getNextEvent()))
-    .get(
-      '/:id/match-days',
-      ({ params }) =>
-        unwrapOrThrow(dependencies.eventService.getMatchDays(Number(params.id) as EventId)),
-      {
-        params: t.Object({
-          id: t.Numeric(),
-        }),
-      },
-    )
     .post('/sync', () => unwrapOrThrow(dependencies.eventService.syncEventsFromApi()));

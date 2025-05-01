@@ -138,7 +138,6 @@ export const eventService = createEventService(
   fplBootstrapDataService,
   eventRepository,
   eventCache,
-  eventFixtureCache,
 );
 
 export const fixtureService = createFixtureService(
@@ -177,7 +176,7 @@ export const playerValueService = createPlayerValueService(
 export const playerValueTrackService = createPlayerValueTrackService(
   fplBootstrapDataService,
   playerValueTrackRepository,
-  eventService,
+  eventCache,
 );
 
 export const playerStatService = createPlayerStatService(
@@ -312,7 +311,10 @@ export const entryLeagueInfoWorkflows = createEntryLeagueInfoWorkflows(
   entryInfoService,
 );
 
-export const entryHistoryInfoWorkflows = createEntryHistoryInfoWorkflows(entryHistoryInfoService);
+export const entryHistoryInfoWorkflows = createEntryHistoryInfoWorkflows(
+  entryHistoryInfoService,
+  entryInfoService,
+);
 
 export const entryEventPickWorkflows = createEntryEventPickWorkflows(entryEventPickService);
 

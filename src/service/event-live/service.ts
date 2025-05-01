@@ -1,3 +1,4 @@
+import { EventCache } from 'domain/event/types';
 import { createEventLiveOperations } from 'domain/event-live/operation';
 import { EventLiveCache, EventLiveOperations } from 'domain/event-live/types';
 import { PlayerCache } from 'domain/player/types';
@@ -9,7 +10,6 @@ import * as IO from 'fp-ts/IO';
 import * as RA from 'fp-ts/ReadonlyArray';
 import * as TE from 'fp-ts/TaskEither';
 import { EventLiveRepository } from 'repository/event-live/types';
-import { EventService } from 'service/event/types';
 import { EventLiveService, EventLiveServiceOperations } from 'service/event-live/types';
 import { EventLive, EventLives, RawEventLives } from 'types/domain/event-live.type';
 import { EventId } from 'types/domain/event.type';
@@ -17,18 +17,18 @@ import { PlayerId } from 'types/domain/player.type';
 import { TeamId } from 'types/domain/team.type';
 import { createDomainError, DataLayerError, DomainErrorCode, ServiceError } from 'types/error.type';
 import { enrichEventLives } from 'utils/data-enrichment.util';
-import { createServiceIntegrationError, mapDomainErrorToServiceError } from 'utils/error.util';
+import { createServiceIntegrationError, mapCacheErrorToServiceError } from 'utils/error.util';
 
 const eventLiveServiceOperations = (
   fplDataService: FplLiveDataService,
   domainOps: EventLiveOperations,
   cache: EventLiveCache,
+  eventCache: EventCache,
   teamCache: TeamCache,
   playerCache: PlayerCache,
-  eventService: EventService,
 ): EventLiveServiceOperations => {
   const findEventLives = (eventId: EventId): TE.TaskEither<ServiceError, EventLives> =>
-    pipe(cache.getEventLives(eventId), TE.mapLeft(mapDomainErrorToServiceError));
+    pipe(cache.getEventLives(eventId), TE.mapLeft(mapCacheErrorToServiceError));
 
   const findEventLiveByElementId = (
     eventId: EventId,
@@ -36,9 +36,9 @@ const eventLiveServiceOperations = (
   ): TE.TaskEither<ServiceError, EventLive> =>
     pipe(
       cache.getEventLives(eventId),
-      TE.mapLeft(mapDomainErrorToServiceError),
+      TE.mapLeft(mapCacheErrorToServiceError),
       TE.chainOptionK(() =>
-        mapDomainErrorToServiceError(
+        mapCacheErrorToServiceError(
           createDomainError({
             code: DomainErrorCode.NOT_FOUND,
             message: `Event live with element ID ${elementId} and event ID ${eventId} not found in cache.`,
@@ -53,7 +53,7 @@ const eventLiveServiceOperations = (
   ): TE.TaskEither<ServiceError, EventLives> =>
     pipe(
       cache.getEventLives(eventId),
-      TE.mapLeft(mapDomainErrorToServiceError),
+      TE.mapLeft(mapCacheErrorToServiceError),
       TE.map((eventLives) => RA.filter((p: EventLive) => p.teamId === teamId)(eventLives)),
     );
 
@@ -71,7 +71,7 @@ const eventLiveServiceOperations = (
         rawEventLives.length > 0
           ? pipe(
               domainOps.saveEventLives(rawEventLives),
-              TE.mapLeft(mapDomainErrorToServiceError),
+              TE.mapLeft(mapCacheErrorToServiceError),
               TE.as(undefined),
             )
           : TE.right(undefined),
@@ -79,12 +79,12 @@ const eventLiveServiceOperations = (
       TE.chainW((rawEventLives) =>
         pipe(
           enrichEventLives(playerCache, teamCache)(rawEventLives),
-          TE.mapLeft(mapDomainErrorToServiceError),
+          TE.mapLeft(mapCacheErrorToServiceError),
         ),
       ),
       TE.chainFirstW((enrichedEventLives) =>
         enrichedEventLives.length > 0
-          ? pipe(cache.setEventLives(enrichedEventLives), TE.mapLeft(mapDomainErrorToServiceError))
+          ? pipe(cache.setEventLives(enrichedEventLives), TE.mapLeft(mapCacheErrorToServiceError))
           : TE.rightIO(IO.of(undefined)),
       ),
       TE.map(() => undefined),
@@ -105,20 +105,20 @@ const eventLiveServiceOperations = (
                 }),
               ),
               TE.chainFirstW(() =>
-                pipe(domainOps.deleteEventLives(eventId), TE.mapLeft(mapDomainErrorToServiceError)),
+                pipe(domainOps.deleteEventLives(eventId), TE.mapLeft(mapCacheErrorToServiceError)),
               ),
               TE.chainW((rawEventLives: RawEventLives) =>
                 pipe(
                   rawEventLives.length > 0
                     ? domainOps.saveEventLives(rawEventLives)
                     : TE.right([] as RawEventLives),
-                  TE.mapLeft(mapDomainErrorToServiceError),
+                  TE.mapLeft(mapCacheErrorToServiceError),
                 ),
               ),
               TE.chainW((savedEventLives: RawEventLives) =>
                 pipe(
                   enrichEventLives(playerCache, teamCache)(savedEventLives),
-                  TE.mapLeft(mapDomainErrorToServiceError),
+                  TE.mapLeft(mapCacheErrorToServiceError),
                 ),
               ),
               TE.chainFirstW((enrichedEventLives: EventLives) =>
@@ -126,7 +126,7 @@ const eventLiveServiceOperations = (
                   enrichedEventLives.length > 0
                     ? cache.setEventLives(enrichedEventLives)
                     : TE.rightIO(IO.of(undefined)),
-                  TE.mapLeft(mapDomainErrorToServiceError),
+                  TE.mapLeft(mapCacheErrorToServiceError),
                 ),
               ),
               TE.map(() => undefined),
@@ -148,15 +148,16 @@ export const createEventLiveService = (
   fplDataService: FplLiveDataService,
   repository: EventLiveRepository,
   cache: EventLiveCache,
+  eventCache: EventCache,
   teamCache: TeamCache,
   playerCache: PlayerCache,
-  eventService: EventService,
 ): EventLiveService => {
   const domainOps = createEventLiveOperations(repository);
   const ops = eventLiveServiceOperations(
     fplDataService,
     domainOps,
     cache,
+    eventCache,
     teamCache,
     playerCache,
     eventService,

@@ -13,6 +13,14 @@ export interface FixtureServiceOperations {
   readonly findFixturesByTeamId: (teamId: TeamId) => TE.TaskEither<ServiceError, TeamFixtures>;
   readonly findFixturesByEventId: (eventId: EventId) => TE.TaskEither<ServiceError, EventFixtures>;
   readonly findFixtures: () => TE.TaskEither<ServiceError, EventFixtures>;
+  readonly isMatchDay: (eventId: EventId) => TE.TaskEither<ServiceError, boolean>;
+  readonly isAfterMatchDay: (eventId: EventId) => TE.TaskEither<ServiceError, boolean>;
+  readonly isMatchTime: (eventId: EventId) => TE.TaskEither<ServiceError, boolean>;
+  readonly isSelectTime: (eventId: EventId) => TE.TaskEither<ServiceError, boolean>;
+  readonly findAllMatchDays: (eventId: EventId) => TE.TaskEither<ServiceError, ReadonlyArray<Date>>;
+  readonly findAllAfterMatchDays: (
+    eventId: EventId,
+  ) => TE.TaskEither<ServiceError, ReadonlyArray<Date>>;
   readonly syncEventFixturesFromApi: (eventId: EventId) => TE.TaskEither<ServiceError, void>;
   readonly syncFixturesFromApi: () => TE.TaskEither<ServiceError, void>;
 }
@@ -21,6 +29,14 @@ export interface FixtureService {
   readonly getFixturesByTeamId: (teamId: TeamId) => TE.TaskEither<ServiceError, TeamFixtures>;
   readonly getFixturesByEventId: (eventId: EventId) => TE.TaskEither<ServiceError, EventFixtures>;
   readonly getFixtures: () => TE.TaskEither<ServiceError, EventFixtures>;
+  readonly isMatchDay: (eventId: EventId) => TE.TaskEither<ServiceError, boolean>;
+  readonly isAfterMatchDay: (eventId: EventId) => TE.TaskEither<ServiceError, boolean>;
+  readonly isMatchTime: (eventId: EventId) => TE.TaskEither<ServiceError, boolean>;
+  readonly isSelectTime: (eventId: EventId) => TE.TaskEither<ServiceError, boolean>;
+  readonly getMatchDays: (eventId: EventId) => TE.TaskEither<ServiceError, ReadonlyArray<Date>>;
+  readonly getAfterMatchDays: (
+    eventId: EventId,
+  ) => TE.TaskEither<ServiceError, ReadonlyArray<Date>>;
   readonly syncEventFixturesFromApi: (eventId: EventId) => TE.TaskEither<ServiceError, void>;
   readonly syncFixturesFromApi: () => TE.TaskEither<ServiceError, void>;
 }

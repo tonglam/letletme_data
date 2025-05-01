@@ -19,6 +19,16 @@ export const fixturesApi = (dependencies: DecoratedDependencies) =>
       },
     )
     .get(
+      '/:eventId/match-days',
+      ({ params }) =>
+        unwrapOrThrow(dependencies.fixtureService.getMatchDays(Number(params.eventId) as EventId)),
+      {
+        params: t.Object({
+          eventId: t.Numeric(),
+        }),
+      },
+    )
+    .get(
       '/team/:teamId',
       ({ params }) =>
         unwrapOrThrow(

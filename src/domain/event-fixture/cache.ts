@@ -9,9 +9,8 @@ import * as TE from 'fp-ts/TaskEither';
 import { redisClient } from 'infrastructure/cache/client';
 import { EventFixture, EventFixtures } from 'types/domain/event-fixture.type';
 import { EventId } from 'types/domain/event.type';
-import { CacheError, CacheErrorCode, createCacheError, DomainError } from 'types/error.type';
+import { CacheError, CacheErrorCode, createCacheError } from 'types/error.type';
 import { getCurrentSeason } from 'utils/common.util';
-import { mapCacheErrorToDomainError } from 'utils/error.util';
 
 const parseEventFixture = (eventFixtureStr: string): E.Either<CacheError, EventFixture> =>
   pipe(
@@ -65,7 +64,7 @@ export const createEventFixtureCache = (
   const { keyPrefix, season } = config;
   const baseKey = `${keyPrefix}::${season}`;
 
-  const getEventFixtures = (eventId: EventId): TE.TaskEither<DomainError, EventFixtures> =>
+  const getEventFixtures = (eventId: EventId): TE.TaskEither<CacheError, EventFixtures> =>
     pipe(
       TE.tryCatch(
         () => redisClient.hgetall(`${baseKey}::${eventId}`),
@@ -76,25 +75,20 @@ export const createEventFixtureCache = (
             cause: error as Error,
           }),
       ),
-      TE.mapLeft(mapCacheErrorToDomainError),
       TE.chain(
         flow(
           O.fromNullable,
           O.filter((eventFixturesMap) => Object.keys(eventFixturesMap).length > 0),
           O.fold(
             () => TE.right([] as EventFixtures),
-            (cachedEventFixtures): TE.TaskEither<DomainError, EventFixtures> =>
-              pipe(
-                parseEventFixtures(cachedEventFixtures),
-                TE.fromEither,
-                TE.mapLeft(mapCacheErrorToDomainError),
-              ),
+            (cachedEventFixtures): TE.TaskEither<CacheError, EventFixtures> =>
+              pipe(parseEventFixtures(cachedEventFixtures), TE.fromEither),
           ),
         ),
       ),
     );
 
-  const getAllEventFixtures = (): TE.TaskEither<DomainError, EventFixtures> => {
+  const getAllEventFixtures = (): TE.TaskEither<CacheError, EventFixtures> => {
     const pattern = `${baseKey}::*`;
     let cursor = '0';
     let allFixtures: EventFixtures = [];
@@ -130,11 +124,10 @@ export const createEventFixtureCache = (
     return pipe(
       scanAndFetch,
       TE.map(() => allFixtures),
-      TE.mapLeft(mapCacheErrorToDomainError),
     );
   };
 
-  const setEventFixtures = (eventFixtures: EventFixtures): TE.TaskEither<DomainError, void> => {
+  const setEventFixtures = (eventFixtures: EventFixtures): TE.TaskEither<CacheError, void> => {
     const eventId = eventFixtures[0].eventId;
 
     return pipe(
@@ -158,7 +151,6 @@ export const createEventFixtureCache = (
             cause: error as Error,
           }),
       ),
-      TE.mapLeft(mapCacheErrorToDomainError),
     );
   };
 

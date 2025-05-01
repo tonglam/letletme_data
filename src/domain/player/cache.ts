@@ -7,9 +7,8 @@ import * as O from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
 import { redisClient } from 'infrastructure/cache/client';
 import { Player, Players } from 'types/domain/player.type';
-import { CacheError, CacheErrorCode, createCacheError, DomainError } from 'types/error.type';
+import { CacheError, CacheErrorCode, createCacheError } from 'types/error.type';
 import { getCurrentSeason } from 'utils/common.util';
-import { mapCacheErrorToDomainError } from 'utils/error.util';
 
 const parsePlayer = (playerStr: string): E.Either<CacheError, Player> =>
   pipe(
@@ -63,7 +62,7 @@ export const createPlayerCache = (
   const { keyPrefix, season } = config;
   const baseKey = `${keyPrefix}::${season}`;
 
-  const getAllPlayers = (): TE.TaskEither<DomainError, Players> =>
+  const getAllPlayers = (): TE.TaskEither<CacheError, Players> =>
     pipe(
       TE.tryCatch(
         () => redisClient.hgetall(baseKey),
@@ -74,25 +73,20 @@ export const createPlayerCache = (
             cause: error as Error,
           }),
       ),
-      TE.mapLeft(mapCacheErrorToDomainError),
       TE.chain(
         flow(
           O.fromNullable,
           O.filter((playersMap) => Object.keys(playersMap).length > 0),
           O.fold(
             () => TE.right([] as Players),
-            (cachedPlayers): TE.TaskEither<DomainError, Players> =>
-              pipe(
-                parsePlayers(cachedPlayers),
-                TE.fromEither,
-                TE.mapLeft(mapCacheErrorToDomainError),
-              ),
+            (cachedPlayers): TE.TaskEither<CacheError, Players> =>
+              pipe(parsePlayers(cachedPlayers), TE.fromEither),
           ),
         ),
       ),
     );
 
-  const setAllPlayers = (players: Players): TE.TaskEither<DomainError, void> =>
+  const setAllPlayers = (players: Players): TE.TaskEither<CacheError, void> =>
     pipe(
       TE.tryCatch(
         async () => {
@@ -114,7 +108,6 @@ export const createPlayerCache = (
             cause: error as Error,
           }),
       ),
-      TE.mapLeft(mapCacheErrorToDomainError),
     );
 
   return {

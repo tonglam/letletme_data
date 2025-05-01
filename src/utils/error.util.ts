@@ -377,10 +377,10 @@ export const mapDataLayerErrorToServiceError = (error: DataLayerError): ServiceE
     details: error.details,
   });
 
-export const mapDomainErrorToServiceError = (error: DomainError): ServiceError =>
+export const mapCacheErrorToServiceError = (error: CacheError): ServiceError =>
   createServiceError({
     code: ServiceErrorCode.INTEGRATION_ERROR,
-    message: `Domain Operation Failed: ${error.message}`,
+    message: `Cache Operation Failed: ${error.message}`,
     cause: error,
   });
 

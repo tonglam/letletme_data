@@ -1,7 +1,5 @@
 import { createEventCache } from 'domain/event/cache';
 import { EventCache } from 'domain/event/types';
-import { createEventFixtureCache } from 'domain/event-fixture/cache';
-import { EventFixtureCache } from 'domain/event-fixture/types';
 
 import { beforeAll, describe, expect, it } from 'bun:test';
 import { CachePrefix, DefaultTTL } from 'config/cache/cache.config';
@@ -12,13 +10,9 @@ import { desc } from 'drizzle-orm';
 import * as E from 'fp-ts/Either';
 import { redisClient } from 'infrastructure/cache/client';
 import { Logger } from 'pino';
-import { createEventRepository } from 'repository/event/repository';
-import { EventRepository } from 'repository/event/types';
 import { createPlayerValueTrackRepository } from 'repository/player-value-track/repository';
 import { PlayerValueTrackRepository } from 'repository/player-value-track/types';
 import * as playerValueTrackSchema from 'schema/player-value-track.schema';
-import { createEventService } from 'service/event/service';
-import { EventService } from 'service/event/types';
 import { createPlayerValueTrackService } from 'service/player-value-track/service';
 import { PlayerValueTrackService } from 'service/player-value-track/types';
 import { IntegrationTestSetupResult, setupIntegrationTest } from 'tests/setup/integrationTestSetup';
@@ -30,13 +24,9 @@ describe('PlayerValueTrack Service Integration Tests', () => {
   let playerValueTrackRepository: PlayerValueTrackRepository;
   let fplDataService: FplBootstrapDataService;
   let playerValueTrackService: PlayerValueTrackService;
-  let eventService: EventService;
-  let eventRepository: EventRepository;
   let eventCache: EventCache;
-  let eventFixtureCache: EventFixtureCache;
 
   const eventCachePrefix = CachePrefix.EVENT;
-  const eventFixtureCachePrefix = CachePrefix.EVENT_FIXTURE;
   const season = '2425';
 
   beforeAll(async () => {
@@ -53,36 +43,23 @@ describe('PlayerValueTrack Service Integration Tests', () => {
     fplDataService = createFplBootstrapDataService();
 
     playerValueTrackRepository = createPlayerValueTrackRepository();
-    eventRepository = createEventRepository();
 
     eventCache = createEventCache({
       keyPrefix: eventCachePrefix,
       season: season,
       ttlSeconds: DefaultTTL.EVENT,
     });
-    eventFixtureCache = createEventFixtureCache({
-      keyPrefix: eventFixtureCachePrefix,
-      season: season,
-      ttlSeconds: DefaultTTL.EVENT_FIXTURE,
-    });
-
-    eventService = createEventService(
-      fplDataService,
-      eventRepository,
-      eventCache,
-      eventFixtureCache,
-    );
 
     playerValueTrackService = createPlayerValueTrackService(
       fplDataService,
       playerValueTrackRepository,
-      eventService,
+      eventCache,
     );
   });
 
   describe('PlayerValueTrack Service Operations', () => {
     it('should sync player value tracks from the FPL API and store them', async () => {
-      const currentEventResult = await eventService.getCurrentEvent()();
+      const currentEventResult = await eventCache.getCurrentEvent()();
       if (E.isLeft(currentEventResult)) {
         throw new Error(
           `Failed to get current event before syncing: ${currentEventResult.left.message}`,

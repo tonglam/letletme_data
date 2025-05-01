@@ -117,6 +117,11 @@ export const createFplH2hLeagueDataService = (): FplH2hLeagueDataService => {
     )();
   };
 
+  const fetchH2hLeagueOnePage = (
+    leagueId: LeagueId,
+    page: number,
+  ): TE.TaskEither<DataLayerError, H2hLeagueResponse> => pipe(fetchH2hLeaguePage(leagueId, page));
+
   const fetchAllH2hLeaguePages = (
     leagueId: LeagueId,
   ): TE.TaskEither<DataLayerError, H2hLeagueResponse> => {
@@ -167,6 +172,25 @@ export const createFplH2hLeagueDataService = (): FplH2hLeagueDataService => {
     return loop(1, []);
   };
 
+  const getH2hLeagueInfo = (leagueId: LeagueId): TE.TaskEither<DataLayerError, H2hLeague> =>
+    pipe(
+      fetchH2hLeagueOnePage(leagueId, 1),
+      TE.chain((h2hLeagueData) =>
+        pipe(
+          mapH2hLeagueResponseToDomain(leagueId, h2hLeagueData),
+          E.mapLeft((mappingError: string) => {
+            const error = createDataLayerError({
+              code: DataLayerErrorCode.MAPPING_ERROR,
+              message: `Failed to map H2H league ${leagueId}: ${mappingError}`,
+              details: { leagueId, mappingError },
+            });
+            return error;
+          }),
+          TE.fromEither,
+        ),
+      ),
+    );
+
   const getH2hLeague = (leagueId: LeagueId): TE.TaskEither<DataLayerError, H2hLeague> =>
     pipe(
       fetchAllH2hLeaguePages(leagueId),
@@ -187,6 +211,7 @@ export const createFplH2hLeagueDataService = (): FplH2hLeagueDataService => {
     );
 
   return {
+    getH2hLeagueInfo,
     getH2hLeague,
   };
 };

@@ -1,7 +1,6 @@
 import { EventCache } from 'domain/event/types';
 import { PlayerCache } from 'domain/player/types';
-import { createPlayerValueOperations } from 'domain/player-value/operation';
-import { PlayerValueCache, PlayerValueOperations } from 'domain/player-value/types';
+import { PlayerValueCache } from 'domain/player-value/types';
 import { TeamCache } from 'domain/team/types';
 
 import { FplBootstrapDataService } from 'data/types';
@@ -19,94 +18,25 @@ import {
   RawPlayerValues,
   SourcePlayerValues,
 } from 'types/domain/player-value.type';
-import { PlayerId } from 'types/domain/player.type';
+import { PlayerId, Player } from 'types/domain/player.type';
 import { TeamId } from 'types/domain/team.type';
+import { DBError } from 'types/error.type';
 import {
   createServiceError,
   DataLayerError,
   ServiceError,
   ServiceErrorCode,
 } from 'types/error.type';
-import { DomainError } from 'types/error.type';
 import { enrichPlayerValues } from 'utils/data-enrichment.util';
-import { createServiceIntegrationError, mapDomainErrorToServiceError } from 'utils/error.util';
-
-const detectRawValueChanges =
-  (domainOps: PlayerValueOperations) =>
-  (sourceValues: SourcePlayerValues): TE.TaskEither<ServiceError, RawPlayerValues> => {
-    if (RA.isEmpty(sourceValues)) {
-      return TE.right([]);
-    }
-    const elementIds = sourceValues.map((value) => value.elementId);
-
-    const logFetchStart: IO.IO<void> = () =>
-      getWorkflowLogger().info(
-        { count: elementIds.length },
-        'detectRawValueChanges: Fetching latest values from DB',
-      );
-
-    return pipe(
-      TE.fromIO(logFetchStart),
-      TE.chainW(() => domainOps.getLatestPlayerValuesByElements(elementIds)),
-      TE.tapError((error: DomainError) =>
-        TE.fromIO(() =>
-          getWorkflowLogger().error({ err: error }, 'detectRawValueChanges: Failed DB fetch'),
-        ),
-      ),
-      TE.mapLeft((error) =>
-        createServiceError({
-          code: ServiceErrorCode.INTEGRATION_ERROR,
-          message: `Failed to fetch latest player values for change detection: ${error.message}`,
-          cause: error,
-        }),
-      ),
-      TE.chainW((latestDbValues) =>
-        pipe(
-          TE.fromIO(() =>
-            getWorkflowLogger().info(
-              { count: latestDbValues.length },
-              'detectRawValueChanges: Successfully fetched latest values',
-            ),
-          ),
-          TE.map(() => {
-            const dbValuesTyped = latestDbValues as ReadonlyArray<{
-              elementId: PlayerId;
-              value: number;
-            }>;
-            const latestValueMap = new Map(dbValuesTyped.map((v) => [v.elementId, v.value]));
-            const changes: Array<RawPlayerValue> = [];
-
-            for (const sourceValue of sourceValues) {
-              const latestDbValueNum = latestValueMap.get(sourceValue.elementId);
-
-              if (latestDbValueNum === undefined) {
-                changes.push({
-                  ...sourceValue,
-                  lastValue: 0,
-                  changeType: ValueChangeTypes[0], // 'start'
-                });
-              } else if (sourceValue.value !== latestDbValueNum) {
-                const changeType =
-                  sourceValue.value > latestDbValueNum
-                    ? ValueChangeTypes[1] // 'rise'
-                    : ValueChangeTypes[2]; // 'fall'
-                changes.push({
-                  ...sourceValue,
-                  lastValue: latestDbValueNum,
-                  changeType: changeType,
-                });
-              }
-            }
-            return changes;
-          }),
-        ),
-      ),
-    );
-  };
+import {
+  createServiceIntegrationError,
+  mapCacheErrorToServiceError,
+  mapDBErrorToServiceError,
+} from 'utils/error.util';
 
 export const playerValueServiceOperations = (
   fplDataService: FplBootstrapDataService,
-  domainOps: PlayerValueOperations,
+  repository: PlayerValueRepository,
   cache: PlayerValueCache,
   eventCache: EventCache,
   teamCache: TeamCache,
@@ -114,10 +44,81 @@ export const playerValueServiceOperations = (
 ): PlayerValueServiceOperations => {
   const enrichSourceData = flow(
     enrichPlayerValues(playerCache, teamCache),
-    TE.mapLeft(mapDomainErrorToServiceError),
+    TE.mapLeft(mapCacheErrorToServiceError),
   );
 
-  const detectChanges = detectRawValueChanges(domainOps);
+  const detectRawValueChanges =
+    () =>
+    (sourceValues: SourcePlayerValues): TE.TaskEither<ServiceError, RawPlayerValues> => {
+      if (RA.isEmpty(sourceValues)) {
+        return TE.right([]);
+      }
+      const elementIds = sourceValues.map((value) => value.elementId);
+
+      const logFetchStart: IO.IO<void> = () =>
+        getWorkflowLogger().info(
+          { count: elementIds.length },
+          'detectRawValueChanges: Fetching latest values from DB',
+        );
+
+      return pipe(
+        TE.fromIO(logFetchStart),
+        TE.chainW(() => repository.getLatestPlayerValuesByElements(elementIds)),
+        TE.tapError((error: DBError) =>
+          TE.fromIO(() =>
+            getWorkflowLogger().error({ err: error }, 'detectRawValueChanges: Failed DB fetch'),
+          ),
+        ),
+        TE.mapLeft((error) =>
+          createServiceError({
+            code: ServiceErrorCode.INTEGRATION_ERROR,
+            message: `Failed to fetch latest player values for change detection: ${error.message}`,
+            cause: error,
+          }),
+        ),
+        TE.chainW((latestDbValues) =>
+          pipe(
+            TE.fromIO(() =>
+              getWorkflowLogger().info(
+                { count: latestDbValues.length },
+                'detectRawValueChanges: Successfully fetched latest values',
+              ),
+            ),
+            TE.map(() => {
+              const dbValuesTyped = latestDbValues as ReadonlyArray<{
+                elementId: PlayerId;
+                value: number;
+              }>;
+              const latestValueMap = new Map(dbValuesTyped.map((v) => [v.elementId, v.value]));
+              const changes: Array<RawPlayerValue> = [];
+
+              for (const sourceValue of sourceValues) {
+                const latestDbValueNum = latestValueMap.get(sourceValue.elementId);
+
+                if (latestDbValueNum === undefined) {
+                  changes.push({
+                    ...sourceValue,
+                    lastValue: 0,
+                    changeType: ValueChangeTypes[0], // 'start'
+                  });
+                } else if (sourceValue.value !== latestDbValueNum) {
+                  const changeType =
+                    sourceValue.value > latestDbValueNum
+                      ? ValueChangeTypes[1] // 'rise'
+                      : ValueChangeTypes[2]; // 'fall'
+                  changes.push({
+                    ...sourceValue,
+                    lastValue: latestDbValueNum,
+                    changeType: changeType,
+                  });
+                }
+              }
+              return changes;
+            }),
+          ),
+        ),
+      );
+    };
 
   const processSourceToPlayerValues = (
     sourceValues: RawPlayerValues,
@@ -137,19 +138,19 @@ export const playerValueServiceOperations = (
     findPlayerValuesByChangeDate: (changeDate: string): TE.TaskEither<ServiceError, PlayerValues> =>
       pipe(
         cache.getPlayerValuesByChangeDate(changeDate),
-        TE.mapLeft(mapDomainErrorToServiceError),
+        TE.mapLeft(mapCacheErrorToServiceError),
         TE.chainW((cachedValues) => {
           if (!RA.isEmpty(cachedValues)) {
             return TE.right(cachedValues);
           }
           return pipe(
-            domainOps.getPlayerValuesByChangeDate(changeDate),
-            TE.mapLeft(mapDomainErrorToServiceError),
+            repository.findByChangeDate(changeDate),
+            TE.mapLeft(mapDBErrorToServiceError),
             TE.chainW(processSourceToPlayerValues),
             TE.chainFirstW((processedValues) =>
               pipe(
                 cache.setPlayerValuesByChangeDate(processedValues),
-                TE.mapLeft(mapDomainErrorToServiceError),
+                TE.mapLeft(mapCacheErrorToServiceError),
               ),
             ),
           );
@@ -158,16 +159,16 @@ export const playerValueServiceOperations = (
 
     findPlayerValuesByElement: (elementId: PlayerId): TE.TaskEither<ServiceError, PlayerValues> =>
       pipe(
-        domainOps.getPlayerValuesByElement(elementId),
-        TE.mapLeft(mapDomainErrorToServiceError),
+        repository.findByElement(elementId),
+        TE.mapLeft(mapDBErrorToServiceError),
         TE.chainW(processSourceToPlayerValues),
       ),
 
     findPlayerValuesByTeam: (teamId: TeamId): TE.TaskEither<ServiceError, PlayerValues> =>
       pipe(
         playerCache.getAllPlayers(),
-        TE.mapLeft(mapDomainErrorToServiceError),
-        TE.map(RA.filter((player) => player.teamId === teamId)),
+        TE.mapLeft(mapCacheErrorToServiceError),
+        TE.map(RA.filter((player: Player) => player.teamId === teamId)),
         TE.map(RA.map((player) => player.id)),
         TE.chainW((elementIds) => {
           const mutableElements = [...elementIds];
@@ -175,8 +176,8 @@ export const playerValueServiceOperations = (
             return TE.right([]);
           }
           return pipe(
-            domainOps.getPlayerValuesByElements(mutableElements),
-            TE.mapLeft(mapDomainErrorToServiceError),
+            repository.findByElements(mutableElements),
+            TE.mapLeft(mapDBErrorToServiceError),
           );
         }),
         TE.chainW(processSourceToPlayerValues),
@@ -185,7 +186,7 @@ export const playerValueServiceOperations = (
     syncPlayerValuesFromApi: (): TE.TaskEither<ServiceError, void> =>
       pipe(
         eventCache.getCurrentEvent(),
-        TE.mapLeft(mapDomainErrorToServiceError),
+        TE.mapLeft(mapCacheErrorToServiceError),
         TE.tapError((err: ServiceError) =>
           TE.fromIO(() => getWorkflowLogger().error({ err }, 'sync: Step 1 FAILED')),
         ),
@@ -210,7 +211,7 @@ export const playerValueServiceOperations = (
         TE.chainFirstW((_sourceValues) =>
           TE.fromIO(() => getWorkflowLogger().info('sync: Step 2 DONE')),
         ),
-        TE.chainW((sourceValues) => detectChanges(sourceValues)),
+        TE.chainW((sourceValues) => detectRawValueChanges()(sourceValues)),
         TE.tapError((err: ServiceError) =>
           TE.fromIO(() => getWorkflowLogger().error({ err }, 'sync: Step 3 FAILED')),
         ),
@@ -237,8 +238,8 @@ export const playerValueServiceOperations = (
           return pipe(
             TE.fromIO(logSaveStart),
             TE.chainW(() => TE.fromIO(logSaveCall)),
-            TE.chainW(() => domainOps.savePlayerValueChanges(changes)),
-            TE.mapLeft(mapDomainErrorToServiceError),
+            TE.chainW(() => repository.savePlayerValueChangesByChangeDate(changes)),
+            TE.mapLeft(mapDBErrorToServiceError),
             TE.map((savedResult) => savedResult as RawPlayerValues),
           );
         }),
@@ -292,7 +293,7 @@ export const playerValueServiceOperations = (
             TE.fromIO(logCacheStart),
             TE.chainW(() => TE.fromIO(logCacheCall)),
             TE.chainW(() => cache.setPlayerValuesByChangeDate(processedValues)),
-            TE.mapLeft(mapDomainErrorToServiceError),
+            TE.mapLeft(mapCacheErrorToServiceError),
           );
         }),
         TE.tapError((err: ServiceError) =>
@@ -317,10 +318,9 @@ export const createPlayerValueService = (
   teamCache: TeamCache,
   playerCache: PlayerCache,
 ): PlayerValueService => {
-  const domainOps = createPlayerValueOperations(repository);
   const ops = playerValueServiceOperations(
     fplDataService,
-    domainOps,
+    repository,
     cache,
     eventCache,
     teamCache,

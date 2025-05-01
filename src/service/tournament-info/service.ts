@@ -14,7 +14,7 @@ import { GroupModes } from 'types/base.type';
 import { TournamentInfo, TournamentInfos } from 'types/domain/tournament-info.type';
 import { TournamentId } from 'types/domain/tournament-info.type';
 import { createDomainError, DomainErrorCode, ServiceError } from 'types/error.type';
-import { mapDBErrorToServiceError, mapDomainErrorToServiceError } from 'utils/error.util';
+import { mapDBErrorToServiceError, mapCacheErrorToServiceError } from 'utils/error.util';
 
 const tournamentInfoServiceOperations = (
   repository: TournamentInfoRepository,
@@ -26,7 +26,7 @@ const tournamentInfoServiceOperations = (
       TE.mapLeft(mapDBErrorToServiceError),
       TE.chainOptionK<ServiceError>(
         (): ServiceError =>
-          mapDomainErrorToServiceError(
+          mapCacheErrorToServiceError(
             createDomainError({
               code: DomainErrorCode.NOT_FOUND,
               message: `TournamentInfo with ID ${id} not found.`,
@@ -38,7 +38,7 @@ const tournamentInfoServiceOperations = (
   const findPointsRaceGroups = (): TE.TaskEither<ServiceError, TournamentInfos> =>
     pipe(
       eventCache.getCurrentEvent(),
-      TE.mapLeft(mapDomainErrorToServiceError),
+      TE.mapLeft(mapCacheErrorToServiceError),
       TE.chain((currentEvent) =>
         pipe(
           repository.findAll(),
@@ -62,7 +62,7 @@ const tournamentInfoServiceOperations = (
   const findBattleGroups = (): TE.TaskEither<ServiceError, TournamentInfos> =>
     pipe(
       eventCache.getCurrentEvent(),
-      TE.mapLeft(mapDomainErrorToServiceError),
+      TE.mapLeft(mapCacheErrorToServiceError),
       TE.chain((currentEvent) =>
         pipe(
           repository.findAll(),
@@ -86,7 +86,7 @@ const tournamentInfoServiceOperations = (
   const findKnockouts = (): TE.TaskEither<ServiceError, TournamentInfos> =>
     pipe(
       eventCache.getCurrentEvent(),
-      TE.mapLeft(mapDomainErrorToServiceError),
+      TE.mapLeft(mapCacheErrorToServiceError),
       TE.chain((currentEvent) =>
         pipe(
           repository.findAll(),
@@ -110,12 +110,17 @@ const tournamentInfoServiceOperations = (
   const findAllTournamentInfos = (): TE.TaskEither<ServiceError, TournamentInfos> =>
     pipe(repository.findAll(), TE.mapLeft(mapDBErrorToServiceError));
 
+  const syncTournamentNamesFromApi = (
+    ids: ReadonlyArray<TournamentId>,
+  ): TE.TaskEither<ServiceError, void> =>;
+
   return {
     findTournamentInfoById,
     findPointsRaceGroups,
     findBattleGroups,
     findKnockouts,
     findAllTournamentInfos,
+    syncTournamentNamesFromApi,
   };
 };
 
@@ -134,5 +139,8 @@ export const createTournamentInfoService = (
     getKnockouts: (): TE.TaskEither<ServiceError, TournamentInfos> => ops.findKnockouts(),
     getTournamentInfos: (): TE.TaskEither<ServiceError, TournamentInfos> =>
       ops.findAllTournamentInfos(),
+    syncTournamentNamesFromApi: (
+      ids: ReadonlyArray<TournamentId>,
+    ): TE.TaskEither<ServiceError, void> => ops.syncTournamentNamesFromApi(ids),
   };
 };

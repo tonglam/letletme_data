@@ -67,9 +67,13 @@ export interface FplTransferDataService {
 }
 
 export interface FplClassicLeagueDataService {
+  readonly getClassicLeagueInfo: (
+    leagueId: LeagueId,
+  ) => TE.TaskEither<DataLayerError, ClassicLeague>;
   readonly getClassicLeague: (leagueId: LeagueId) => TE.TaskEither<DataLayerError, ClassicLeague>;
 }
 
 export interface FplH2hLeagueDataService {
+  readonly getH2hLeagueInfo: (leagueId: LeagueId) => TE.TaskEither<DataLayerError, H2hLeague>;
   readonly getH2hLeague: (leagueId: LeagueId) => TE.TaskEither<DataLayerError, H2hLeague>;
 }

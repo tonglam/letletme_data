@@ -7,9 +7,8 @@ import * as O from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
 import { redisClient } from 'infrastructure/cache/client';
 import { Team, Teams } from 'types/domain/team.type';
-import { CacheError, CacheErrorCode, createCacheError, DomainError } from 'types/error.type';
+import { CacheError, CacheErrorCode, createCacheError } from 'types/error.type';
 import { getCurrentSeason } from 'utils/common.util';
-import { mapCacheErrorToDomainError } from 'utils/error.util';
 
 const parseTeam = (teamStr: string): E.Either<CacheError, Team> =>
   pipe(
@@ -58,7 +57,7 @@ export const createTeamCache = (
   const { keyPrefix, season } = config;
   const baseKey = `${keyPrefix}::${season}`;
 
-  const getAllTeams = (): TE.TaskEither<DomainError, Teams> =>
+  const getAllTeams = (): TE.TaskEither<CacheError, Teams> =>
     pipe(
       TE.tryCatch(
         () => redisClient.hgetall(baseKey),
@@ -69,21 +68,20 @@ export const createTeamCache = (
             cause: error as Error,
           }),
       ),
-      TE.mapLeft(mapCacheErrorToDomainError),
       TE.chain(
         flow(
           O.fromNullable,
           O.filter((teamsMap) => Object.keys(teamsMap).length > 0),
           O.fold(
             () => TE.right([] as Teams),
-            (cachedTeams): TE.TaskEither<DomainError, Teams> =>
-              pipe(parseTeams(cachedTeams), TE.fromEither, TE.mapLeft(mapCacheErrorToDomainError)),
+            (cachedTeams): TE.TaskEither<CacheError, Teams> =>
+              pipe(parseTeams(cachedTeams), TE.fromEither),
           ),
         ),
       ),
     );
 
-  const setAllTeams = (teams: Teams): TE.TaskEither<DomainError, void> =>
+  const setAllTeams = (teams: Teams): TE.TaskEither<CacheError, void> =>
     pipe(
       TE.tryCatch(
         async () => {
@@ -105,7 +103,6 @@ export const createTeamCache = (
             cause: error as Error,
           }),
       ),
-      TE.mapLeft(mapCacheErrorToDomainError),
     );
 
   return {

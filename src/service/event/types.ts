@@ -9,16 +9,8 @@ export interface EventServiceOperations {
   readonly findLastEvent: () => TE.TaskEither<ServiceError, Event>;
   readonly findNextEvent: () => TE.TaskEither<ServiceError, Event>;
   readonly findAllEvents: () => TE.TaskEither<ServiceError, Events>;
-  readonly syncEventsFromApi: () => TE.TaskEither<ServiceError, void>;
-  readonly isMatchDay: (eventId: EventId) => TE.TaskEither<ServiceError, boolean>;
-  readonly isAfterMatchDay: (eventId: EventId) => TE.TaskEither<ServiceError, boolean>;
-  readonly isMatchTime: (eventId: EventId) => TE.TaskEither<ServiceError, boolean>;
-  readonly isSelectTime: (eventId: EventId) => TE.TaskEither<ServiceError, boolean>;
   readonly findAllDeadlineDates: () => TE.TaskEither<ServiceError, ReadonlyArray<Date>>;
-  readonly findAllMatchDays: (eventId: EventId) => TE.TaskEither<ServiceError, ReadonlyArray<Date>>;
-  readonly findAllAfterMatchDays: (
-    eventId: EventId,
-  ) => TE.TaskEither<ServiceError, ReadonlyArray<Date>>;
+  readonly syncEventsFromApi: () => TE.TaskEither<ServiceError, void>;
 }
 
 export interface EventService {
@@ -27,16 +19,8 @@ export interface EventService {
   readonly getLastEvent: () => TE.TaskEither<ServiceError, Event>;
   readonly getNextEvent: () => TE.TaskEither<ServiceError, Event>;
   readonly getEvents: () => TE.TaskEither<ServiceError, Events>;
-  readonly syncEventsFromApi: () => TE.TaskEither<ServiceError, void>;
-  readonly isMatchDay: (eventId: EventId) => TE.TaskEither<ServiceError, boolean>;
-  readonly isAfterMatchDay: (eventId: EventId) => TE.TaskEither<ServiceError, boolean>;
-  readonly isMatchTime: (eventId: EventId) => TE.TaskEither<ServiceError, boolean>;
-  readonly isSelectTime: (eventId: EventId) => TE.TaskEither<ServiceError, boolean>;
   readonly getDeadlineDates: () => TE.TaskEither<ServiceError, ReadonlyArray<Date>>;
-  readonly getMatchDays: (eventId: EventId) => TE.TaskEither<ServiceError, ReadonlyArray<Date>>;
-  readonly getAfterMatchDays: (
-    eventId: EventId,
-  ) => TE.TaskEither<ServiceError, ReadonlyArray<Date>>;
+  readonly syncEventsFromApi: () => TE.TaskEither<ServiceError, void>;
 }
 
 export interface EventWorkflowOperations {

@@ -1,5 +1,4 @@
-import { createPhaseOperations } from 'domain/phase/operation';
-import { PhaseCache, PhaseOperations } from 'domain/phase/types';
+import { PhaseCache } from 'domain/phase/types';
 
 import { FplBootstrapDataService } from 'data/types';
 import { pipe } from 'fp-ts/function';
@@ -8,22 +7,26 @@ import * as TE from 'fp-ts/TaskEither';
 import { PhaseCreateInputs, PhaseRepository } from 'repository/phase/types';
 import { PhaseService, PhaseServiceOperations } from 'service/phase/types';
 import { Phase, PhaseId, Phases } from 'types/domain/phase.type';
-import { createDomainError, DataLayerError, DomainErrorCode, ServiceError } from 'types/error.type';
-import { createServiceIntegrationError, mapDomainErrorToServiceError } from 'utils/error.util';
+import { CacheErrorCode, createCacheError, ServiceError } from 'types/error.type';
+import {
+  mapCacheErrorToServiceError,
+  mapDBErrorToServiceError,
+  mapDataLayerErrorToServiceError,
+} from 'utils/error.util';
 
 const phaseServiceOperations = (
   fplDataService: FplBootstrapDataService,
-  domainOps: PhaseOperations,
+  repository: PhaseRepository,
   cache: PhaseCache,
 ): PhaseServiceOperations => {
   const findPhaseById = (id: PhaseId): TE.TaskEither<ServiceError, Phase> =>
     pipe(
       cache.getAllPhases(),
-      TE.mapLeft(mapDomainErrorToServiceError),
+      TE.mapLeft(mapCacheErrorToServiceError),
       TE.chainOptionK(() =>
-        mapDomainErrorToServiceError(
-          createDomainError({
-            code: DomainErrorCode.NOT_FOUND,
+        mapCacheErrorToServiceError(
+          createCacheError({
+            code: CacheErrorCode.NOT_FOUND,
             message: `Phase with ID ${id} not found in cache after fetching all.`,
           }),
         ),
@@ -31,26 +34,23 @@ const phaseServiceOperations = (
     );
 
   const findAllPhases = (): TE.TaskEither<ServiceError, Phases> =>
-    pipe(cache.getAllPhases(), TE.mapLeft(mapDomainErrorToServiceError));
+    pipe(cache.getAllPhases(), TE.mapLeft(mapCacheErrorToServiceError));
 
   const syncPhasesFromApi = (): TE.TaskEither<ServiceError, void> =>
     pipe(
       fplDataService.getPhases(),
-      TE.mapLeft((error: DataLayerError) =>
-        createServiceIntegrationError({
-          message: 'Failed to fetch/map phases via data layer',
-          cause: error.cause,
-          details: error.details,
-        }),
-      ),
-      TE.chainFirstW(() =>
-        pipe(domainOps.deleteAllPhases(), TE.mapLeft(mapDomainErrorToServiceError)),
-      ),
+      TE.mapLeft(mapDataLayerErrorToServiceError),
+      TE.chainFirstW(() => pipe(repository.deleteAll(), TE.mapLeft(mapDBErrorToServiceError))),
       TE.chainW((phasesCreateData: PhaseCreateInputs) =>
-        pipe(domainOps.savePhases(phasesCreateData), TE.mapLeft(mapDomainErrorToServiceError)),
+        pipe(
+          phasesCreateData.length > 0
+            ? repository.saveBatch(phasesCreateData)
+            : TE.right([] as Phases),
+          TE.mapLeft(mapDBErrorToServiceError),
+        ),
       ),
       TE.chainFirstW((savedPhases: Phases) =>
-        pipe(cache.setAllPhases(savedPhases), TE.mapLeft(mapDomainErrorToServiceError)),
+        pipe(cache.setAllPhases(savedPhases), TE.mapLeft(mapCacheErrorToServiceError)),
       ),
       TE.map(() => undefined),
     );
@@ -67,8 +67,7 @@ export const createPhaseService = (
   repository: PhaseRepository,
   cache: PhaseCache,
 ): PhaseService => {
-  const domainOps = createPhaseOperations(repository);
-  const ops = phaseServiceOperations(fplDataService, domainOps, cache);
+  const ops = phaseServiceOperations(fplDataService, repository, cache);
 
   return {
     getPhases: (): TE.TaskEither<ServiceError, Phases> => ops.findAllPhases(),

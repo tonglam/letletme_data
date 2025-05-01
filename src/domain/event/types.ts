@@ -1,8 +1,9 @@
 import { CachePrefix, DefaultTTL } from 'config/cache/cache.config';
 import * as TE from 'fp-ts/TaskEither';
-import { EventCreateInputs } from 'repository/event/types';
-import { Event, Events } from 'types/domain/event.type';
-import { DomainError } from 'types/error.type';
+import { Event, EventId, Events } from 'types/domain/event.type';
+import { CacheError } from 'types/error.type';
+
+export { Event, Events };
 
 export interface EventCacheConfig {
   readonly keyPrefix: (typeof CachePrefix)[keyof typeof CachePrefix];
@@ -11,13 +12,11 @@ export interface EventCacheConfig {
 }
 
 export interface EventCache {
-  readonly getCurrentEvent: () => TE.TaskEither<DomainError, Event>;
-  readonly setCurrentEvent: (event: Event) => TE.TaskEither<DomainError, void>;
-  readonly getAllEvents: () => TE.TaskEither<DomainError, Events>;
-  readonly setAllEvents: (events: Events) => TE.TaskEither<DomainError, void>;
-}
-
-export interface EventOperations {
-  readonly saveEvents: (eventInputs: EventCreateInputs) => TE.TaskEither<DomainError, Events>;
-  readonly deleteAllEvents: () => TE.TaskEither<DomainError, void>;
+  readonly getCurrentEvent: () => TE.TaskEither<CacheError, Event>;
+  readonly getLastEvent: () => TE.TaskEither<CacheError, Event>;
+  readonly getNextEvent: () => TE.TaskEither<CacheError, Event>;
+  readonly setCurrentEvent: (event: Event) => TE.TaskEither<CacheError, void>;
+  readonly getEvent: (id: EventId) => TE.TaskEither<CacheError, Event>;
+  readonly getAllEvents: () => TE.TaskEither<CacheError, Events>;
+  readonly setAllEvents: (events: Events) => TE.TaskEither<CacheError, void>;
 }

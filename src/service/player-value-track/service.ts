@@ -1,5 +1,4 @@
-import { createPlayerValueTrackOperations } from 'domain/player-value-track/operation';
-import { PlayerValueTrackOperations } from 'domain/player-value-track/types';
+import { EventCache } from 'domain/event/types';
 
 import { FplBootstrapDataService } from 'data/types';
 import { pipe } from 'fp-ts/function';
@@ -8,7 +7,6 @@ import {
   PlayerValueTrackCreateInputs,
   PlayerValueTrackRepository,
 } from 'repository/player-value-track/types';
-import { EventService } from 'service/event/types';
 import {
   PlayerValueTrackService,
   PlayerValueTrackServiceOperations,
@@ -21,21 +19,26 @@ import {
   ServiceErrorCode,
   createServiceError,
 } from 'types/error.type';
-import { createServiceIntegrationError, mapDomainErrorToServiceError } from 'utils/error.util';
+import {
+  createServiceIntegrationError,
+  mapDBErrorToServiceError,
+  mapCacheErrorToServiceError,
+} from 'utils/error.util';
 
 export const playerValueTrackServiceOperations = (
   fplDataService: FplBootstrapDataService,
-  domainOps: PlayerValueTrackOperations,
-  eventService: EventService,
+  repository: PlayerValueTrackRepository,
+  eventCache: EventCache,
 ): PlayerValueTrackServiceOperations => {
-  const getPlayerValueTracksByDate = (
+  const findPlayerValueTracksByDate = (
     date: string,
   ): TE.TaskEither<ServiceError, PlayerValueTracks> =>
-    pipe(domainOps.getPlayerValueTracksByDate(date), TE.mapLeft(mapDomainErrorToServiceError));
+    pipe(repository.findByDate(date), TE.mapLeft(mapDBErrorToServiceError));
 
   const syncPlayerValueTracksFromApi = (): TE.TaskEither<ServiceError, void> => {
     return pipe(
-      eventService.getCurrentEvent(),
+      eventCache.getCurrentEvent(),
+      TE.mapLeft(mapCacheErrorToServiceError),
       TE.chainW((event: Event) =>
         event
           ? TE.right(event)
@@ -58,11 +61,11 @@ export const playerValueTrackServiceOperations = (
           TE.chainW((playerValueTracks: PlayerValueTracks) =>
             pipe(
               playerValueTracks.length > 0
-                ? domainOps.savePlayerValueTracksByDate(
+                ? repository.savePlayerValueTracksByDate(
                     playerValueTracks as PlayerValueTrackCreateInputs,
                   )
                 : TE.right([] as PlayerValueTracks),
-              TE.mapLeft(mapDomainErrorToServiceError),
+              TE.mapLeft(mapDBErrorToServiceError),
             ),
           ),
         ),
@@ -72,7 +75,7 @@ export const playerValueTrackServiceOperations = (
   };
 
   return {
-    findPlayerValueTracksByDate: getPlayerValueTracksByDate,
+    findPlayerValueTracksByDate,
     syncPlayerValueTracksFromApi,
   };
 };
@@ -80,10 +83,9 @@ export const playerValueTrackServiceOperations = (
 export const createPlayerValueTrackService = (
   fplDataService: FplBootstrapDataService,
   repository: PlayerValueTrackRepository,
-  eventService: EventService,
+  eventCache: EventCache,
 ): PlayerValueTrackService => {
-  const domainOps = createPlayerValueTrackOperations(repository);
-  const ops = playerValueTrackServiceOperations(fplDataService, domainOps, eventService);
+  const ops = playerValueTrackServiceOperations(fplDataService, repository, eventCache);
 
   return {
     getPlayerValueTracksByDate: ops.findPlayerValueTracksByDate,

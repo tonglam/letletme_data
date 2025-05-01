@@ -10,7 +10,7 @@ import {
 import { TournamentGroups } from 'types/domain/tournament-group.type';
 import { TournamentId } from 'types/domain/tournament-info.type';
 import { createDomainError, DomainErrorCode, ServiceError } from 'types/error.type';
-import { mapDomainErrorToServiceError, mapDBErrorToServiceError } from 'utils/error.util';
+import { mapCacheErrorToServiceError, mapDBErrorToServiceError } from 'utils/error.util';
 
 const tournamentGroupServiceOperations = (
   repository: TournamentGroupRepository,
@@ -23,7 +23,7 @@ const tournamentGroupServiceOperations = (
       TE.mapLeft(mapDBErrorToServiceError),
       TE.chainOptionK<ServiceError>(
         (): ServiceError =>
-          mapDomainErrorToServiceError(
+          mapCacheErrorToServiceError(
             createDomainError({
               code: DomainErrorCode.NOT_FOUND,
               message: `TournamentEntry with ID ${id} not found.`,

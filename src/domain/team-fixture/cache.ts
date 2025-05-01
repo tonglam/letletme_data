@@ -9,9 +9,8 @@ import * as TE from 'fp-ts/TaskEither';
 import { redisClient } from 'infrastructure/cache/client';
 import { TeamFixture, TeamFixtures } from 'types/domain/team-fixture.type';
 import { TeamId } from 'types/domain/team.type';
-import { CacheError, CacheErrorCode, createCacheError, DomainError } from 'types/error.type';
+import { CacheError, CacheErrorCode, createCacheError } from 'types/error.type';
 import { getCurrentSeason } from 'utils/common.util';
-import { mapCacheErrorToDomainError } from 'utils/error.util';
 
 const parseTeamFixture = (teamFixtureStr: string): E.Either<CacheError, TeamFixture> =>
   pipe(
@@ -63,7 +62,7 @@ export const createTeamFixtureCache = (
   const { keyPrefix, season } = config;
   const baseKey = `${keyPrefix}::${season}`;
 
-  const getFixturesByTeamId = (teamId: TeamId): TE.TaskEither<DomainError, TeamFixtures> =>
+  const getFixturesByTeamId = (teamId: TeamId): TE.TaskEither<CacheError, TeamFixtures> =>
     pipe(
       TE.tryCatch(
         () => redisClient.hgetall(`${baseKey}::${teamId}`),
@@ -74,25 +73,20 @@ export const createTeamFixtureCache = (
             cause: error as Error,
           }),
       ),
-      TE.mapLeft(mapCacheErrorToDomainError),
       TE.chain(
         flow(
           O.fromNullable,
           O.filter((eventFixturesMap) => Object.keys(eventFixturesMap).length > 0),
           O.fold(
             () => TE.right([] as TeamFixtures),
-            (cachedTeamFixtures): TE.TaskEither<DomainError, TeamFixtures> =>
-              pipe(
-                parseTeamFixtures(cachedTeamFixtures),
-                TE.fromEither,
-                TE.mapLeft(mapCacheErrorToDomainError),
-              ),
+            (cachedTeamFixtures): TE.TaskEither<CacheError, TeamFixtures> =>
+              pipe(parseTeamFixtures(cachedTeamFixtures), TE.fromEither),
           ),
         ),
       ),
     );
 
-  const setFixturesByTeamId = (teamFixtures: TeamFixtures): TE.TaskEither<DomainError, void> => {
+  const setFixturesByTeamId = (teamFixtures: TeamFixtures): TE.TaskEither<CacheError, void> => {
     if (!teamFixtures || teamFixtures.length === 0) {
       return TE.right(undefined);
     }
@@ -121,7 +115,6 @@ export const createTeamFixtureCache = (
             cause: error as Error,
           }),
       ),
-      TE.mapLeft(mapCacheErrorToDomainError),
     );
   };
 

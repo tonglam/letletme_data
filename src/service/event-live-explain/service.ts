@@ -16,7 +16,7 @@ import { createDomainError, DataLayerError, DomainErrorCode, ServiceError } from
 import {
   createServiceIntegrationError,
   mapDBErrorToServiceError,
-  mapDomainErrorToServiceError,
+  mapCacheErrorToServiceError,
 } from 'utils/error.util';
 
 const eventLiveExplainServiceOperations = (
@@ -33,7 +33,7 @@ const eventLiveExplainServiceOperations = (
       TE.mapLeft(mapDBErrorToServiceError),
       TE.chainOptionK<ServiceError>(
         (): ServiceError =>
-          mapDomainErrorToServiceError(
+          mapCacheErrorToServiceError(
             createDomainError({
               code: DomainErrorCode.NOT_FOUND,
               message: `Event live explain with element ID ${elementId} and event ID ${eventId} not found.`,
@@ -53,14 +53,14 @@ const eventLiveExplainServiceOperations = (
         }),
       ),
       TE.chainFirstW(() =>
-        pipe(domainOps.deleteEventLiveExplains(eventId), TE.mapLeft(mapDomainErrorToServiceError)),
+        pipe(domainOps.deleteEventLiveExplains(eventId), TE.mapLeft(mapCacheErrorToServiceError)),
       ),
       TE.chainW((eventLiveExplains: EventLiveExplains) =>
         pipe(
           eventLiveExplains.length > 0
             ? domainOps.saveEventLiveExplains(eventLiveExplains)
             : TE.right([] as EventLiveExplains),
-          TE.mapLeft(mapDomainErrorToServiceError),
+          TE.mapLeft(mapCacheErrorToServiceError),
         ),
       ),
       TE.map(() => undefined),

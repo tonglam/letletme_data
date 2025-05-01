@@ -24,7 +24,7 @@ import {
   createServiceError,
 } from 'types/error.type';
 import { enrichPlayerStats } from 'utils/data-enrichment.util';
-import { createServiceIntegrationError, mapDomainErrorToServiceError } from 'utils/error.util';
+import { createServiceIntegrationError, mapCacheErrorToServiceError } from 'utils/error.util';
 
 const playerStatServiceOperations = (
   fplDataService: FplBootstrapDataService,
@@ -37,9 +37,9 @@ const playerStatServiceOperations = (
   const findPlayerStat = (elementId: PlayerId): TE.TaskEither<ServiceError, PlayerStat> =>
     pipe(
       cache.getLatestPlayerStats(),
-      TE.mapLeft(mapDomainErrorToServiceError),
+      TE.mapLeft(mapCacheErrorToServiceError),
       TE.chainOptionK(() =>
-        mapDomainErrorToServiceError(
+        mapCacheErrorToServiceError(
           createDomainError({
             code: DomainErrorCode.NOT_FOUND,
             message: `Player stat with element ${elementId} not found in cache.`,
@@ -53,7 +53,7 @@ const playerStatServiceOperations = (
   ): TE.TaskEither<ServiceError, PlayerStats> =>
     pipe(
       cache.getLatestPlayerStats(),
-      TE.mapLeft(mapDomainErrorToServiceError),
+      TE.mapLeft(mapCacheErrorToServiceError),
       TE.map((playerStats) =>
         playerStats.filter((playerStat) => playerStat.elementType === elementType),
       ),
@@ -62,22 +62,22 @@ const playerStatServiceOperations = (
   const findPlayerStatsByTeam = (teamId: TeamId): TE.TaskEither<ServiceError, PlayerStats> =>
     pipe(
       cache.getLatestPlayerStats(),
-      TE.mapLeft(mapDomainErrorToServiceError),
+      TE.mapLeft(mapCacheErrorToServiceError),
       TE.map((playerStats) => playerStats.filter((playerStat) => playerStat.teamId === teamId)),
     );
 
   const findPlayerStats = (): TE.TaskEither<ServiceError, PlayerStats> =>
     pipe(
       cache.getLatestPlayerStats(),
-      TE.mapLeft(mapDomainErrorToServiceError),
+      TE.mapLeft(mapCacheErrorToServiceError),
       TE.orElseW(() =>
         pipe(
           domainOps.getLatestPlayerStats(),
-          TE.mapLeft(mapDomainErrorToServiceError),
+          TE.mapLeft(mapCacheErrorToServiceError),
           TE.chainW(
             flow(
               enrichPlayerStats(playerCache, teamCache),
-              TE.mapLeft(mapDomainErrorToServiceError),
+              TE.mapLeft(mapCacheErrorToServiceError),
             ),
           ),
           TE.chainFirstW((enrichedDbStats) =>
@@ -85,7 +85,7 @@ const playerStatServiceOperations = (
               enrichedDbStats.length > 0
                 ? cache.setLatestPlayerStats(enrichedDbStats)
                 : TE.rightIO(() => {}),
-              TE.mapLeft(mapDomainErrorToServiceError),
+              TE.mapLeft(mapCacheErrorToServiceError),
               TE.orElseW((cacheSetError) => {
                 console.warn('[findPlayerStats] Cache fallback: Failed to update cache', {
                   error: cacheSetError,
@@ -101,7 +101,7 @@ const playerStatServiceOperations = (
   const syncPlayerStatsFromApi = (): TE.TaskEither<ServiceError, void> =>
     pipe(
       eventCache.getCurrentEvent(),
-      TE.mapLeft(mapDomainErrorToServiceError),
+      TE.mapLeft(mapCacheErrorToServiceError),
       TE.chainW((event: Event) =>
         event
           ? TE.right(event)
@@ -119,20 +119,20 @@ const playerStatServiceOperations = (
             createServiceIntegrationError({ message: 'Failed to fetch FPL stats', cause: error }),
           ),
           TE.chainFirstW(() =>
-            pipe(domainOps.deleteLatestPlayerStats(), TE.mapLeft(mapDomainErrorToServiceError)),
+            pipe(domainOps.deleteLatestPlayerStats(), TE.mapLeft(mapCacheErrorToServiceError)),
           ),
           TE.chainW((rawPlayerStats: RawPlayerStats) =>
             pipe(
               rawPlayerStats.length > 0
                 ? domainOps.saveLatestPlayerStats(rawPlayerStats)
                 : TE.right(rawPlayerStats as RawPlayerStats),
-              TE.mapLeft(mapDomainErrorToServiceError),
+              TE.mapLeft(mapCacheErrorToServiceError),
             ),
           ),
           TE.chainW((savedStats: RawPlayerStats) =>
             pipe(
               enrichPlayerStats(playerCache, teamCache)(savedStats),
-              TE.mapLeft(mapDomainErrorToServiceError),
+              TE.mapLeft(mapCacheErrorToServiceError),
             ),
           ),
           TE.chainW((enrichedPlayerStats: PlayerStats) =>
@@ -140,7 +140,7 @@ const playerStatServiceOperations = (
               enrichedPlayerStats.length > 0
                 ? cache.setLatestPlayerStats(enrichedPlayerStats)
                 : TE.rightIO(() => {}),
-              TE.mapLeft(mapDomainErrorToServiceError),
+              TE.mapLeft(mapCacheErrorToServiceError),
             ),
           ),
         ),

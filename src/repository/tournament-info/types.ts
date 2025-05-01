@@ -13,4 +13,5 @@ export type TournamentInfoCreateInputs = readonly TournamentInfoCreateInput[];
 export interface TournamentInfoRepository {
   readonly findById: (id: TournamentId) => TE.TaskEither<DBError, TournamentInfo>;
   readonly findAll: () => TE.TaskEither<DBError, TournamentInfos>;
+  readonly updateById: (tournamentInfo: TournamentInfo) => TE.TaskEither<DBError, void>;
 }

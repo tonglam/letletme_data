@@ -7,9 +7,8 @@ import * as O from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
 import { redisClient } from 'infrastructure/cache/client';
 import { PlayerValues } from 'types/domain/player-value.type';
-import { CacheError, CacheErrorCode, createCacheError, DomainError } from 'types/error.type';
+import { CacheError, CacheErrorCode, createCacheError } from 'types/error.type';
 import { getCurrentSeason } from 'utils/common.util';
-import { mapCacheErrorToDomainError } from 'utils/error.util';
 
 const parsePlayerValues = (playerValuesStr: string): E.Either<CacheError, PlayerValues> =>
   pipe(
@@ -46,7 +45,7 @@ export const createPlayerValueCache = (
 
   const getPlayerValuesByChangeDate = (
     changeDate: string,
-  ): TE.TaskEither<DomainError, PlayerValues> => {
+  ): TE.TaskEither<CacheError, PlayerValues> => {
     const key = `${baseKey}:${changeDate}`;
     return pipe(
       TE.tryCatch(
@@ -58,17 +57,11 @@ export const createPlayerValueCache = (
             cause: error as Error,
           }),
       ),
-      TE.mapLeft(mapCacheErrorToDomainError),
       TE.map(O.fromNullable),
       TE.chainW(
         O.fold(
           () => TE.right([] as PlayerValues),
-          (cachedJsonString) =>
-            pipe(
-              parsePlayerValues(cachedJsonString),
-              TE.fromEither,
-              TE.mapLeft(mapCacheErrorToDomainError),
-            ),
+          (cachedJsonString) => pipe(parsePlayerValues(cachedJsonString), TE.fromEither),
         ),
       ),
       TE.map((playerValues) => playerValues ?? []),
@@ -77,7 +70,7 @@ export const createPlayerValueCache = (
 
   const setPlayerValuesByChangeDate = (
     playerValues: PlayerValues,
-  ): TE.TaskEither<DomainError, void> => {
+  ): TE.TaskEither<CacheError, void> => {
     if (playerValues.length === 0) {
       return TE.right(void 0);
     }
@@ -95,7 +88,6 @@ export const createPlayerValueCache = (
           }),
       ),
       TE.map(() => void 0),
-      TE.mapLeft(mapCacheErrorToDomainError),
     );
   };
 

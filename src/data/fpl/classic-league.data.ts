@@ -117,6 +117,12 @@ export const createFplClassicLeagueDataService = (): FplClassicLeagueDataService
     )();
   };
 
+  const fetchClassicLeagueOnePage = (
+    leagueId: LeagueId,
+    page: number,
+  ): TE.TaskEither<DataLayerError, ClassicLeagueResponse> =>
+    pipe(fetchClassicLeaguePage(leagueId, page));
+
   const fetchAllClassicLeaguePages = (
     leagueId: LeagueId,
   ): TE.TaskEither<DataLayerError, ClassicLeagueResponse> => {
@@ -167,6 +173,25 @@ export const createFplClassicLeagueDataService = (): FplClassicLeagueDataService
     return loop(1, []);
   };
 
+  const getClassicLeagueInfo = (leagueId: LeagueId): TE.TaskEither<DataLayerError, ClassicLeague> =>
+    pipe(
+      fetchClassicLeagueOnePage(leagueId, 1),
+      TE.chain((classicLeagueData) =>
+        pipe(
+          mapClassicLeagueResponseToDomain(leagueId, classicLeagueData),
+          E.mapLeft((mappingError: string) => {
+            const error = createDataLayerError({
+              code: DataLayerErrorCode.MAPPING_ERROR,
+              message: `Failed to map classic league info for ${leagueId}: ${mappingError}`,
+              details: { leagueId, mappingError },
+            });
+            return error;
+          }),
+          TE.fromEither,
+        ),
+      ),
+    );
+
   const getClassicLeague = (leagueId: LeagueId): TE.TaskEither<DataLayerError, ClassicLeague> =>
     pipe(
       fetchAllClassicLeaguePages(leagueId),
@@ -187,6 +212,7 @@ export const createFplClassicLeagueDataService = (): FplClassicLeagueDataService
     );
 
   return {
+    getClassicLeagueInfo,
     getClassicLeague,
   };
 };

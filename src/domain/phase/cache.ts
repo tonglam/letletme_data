@@ -7,9 +7,8 @@ import * as O from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
 import { redisClient } from 'infrastructure/cache/client';
 import { Phase, Phases } from 'types/domain/phase.type';
-import { CacheError, CacheErrorCode, createCacheError, DomainError } from 'types/error.type';
+import { CacheError, CacheErrorCode, createCacheError } from 'types/error.type';
 import { getCurrentSeason } from 'utils/common.util';
-import { mapCacheErrorToDomainError } from 'utils/error.util';
 
 const parsePhase = (phaseStr: string): E.Either<CacheError, Phase> =>
   pipe(
@@ -58,7 +57,7 @@ export const createPhaseCache = (
   const { keyPrefix, season } = config;
   const baseKey = `${keyPrefix}::${season}`;
 
-  const getAllPhases = (): TE.TaskEither<DomainError, Phases> =>
+  const getAllPhases = (): TE.TaskEither<CacheError, Phases> =>
     pipe(
       TE.tryCatch(
         () => redisClient.hgetall(baseKey),
@@ -69,25 +68,20 @@ export const createPhaseCache = (
             cause: error as Error,
           }),
       ),
-      TE.mapLeft(mapCacheErrorToDomainError),
       TE.chain(
         flow(
           O.fromNullable,
           O.filter((phasesMap) => Object.keys(phasesMap).length > 0),
           O.fold(
             () => TE.right([] as Phases),
-            (cachedPhases): TE.TaskEither<DomainError, Phases> =>
-              pipe(
-                parsePhases(cachedPhases),
-                TE.fromEither,
-                TE.mapLeft(mapCacheErrorToDomainError),
-              ),
+            (cachedPhases): TE.TaskEither<CacheError, Phases> =>
+              pipe(parsePhases(cachedPhases), TE.fromEither),
           ),
         ),
       ),
     );
 
-  const setAllPhases = (phases: Phases): TE.TaskEither<DomainError, void> =>
+  const setAllPhases = (phases: Phases): TE.TaskEither<CacheError, void> =>
     pipe(
       TE.tryCatch(
         async () => {
@@ -109,7 +103,6 @@ export const createPhaseCache = (
             cause: error as Error,
           }),
       ),
-      TE.mapLeft(mapCacheErrorToDomainError),
     );
 
   return {
