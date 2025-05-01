@@ -1,3 +1,4 @@
+import { EventCache } from 'domain/event/types';
 import { createEventFixtureOperations } from 'domain/event-fixture/operation';
 import { EventFixtureCache, EventFixtureOperations } from 'domain/event-fixture/types';
 import { TeamCache } from 'domain/team/types';
@@ -62,6 +63,7 @@ const fixtureServiceOperations = (
   domainOps: EventFixtureOperations,
   eventFixturecache: EventFixtureCache,
   teamFixtureCache: TeamFixtureCache,
+  eventCache: EventCache,
   teamCache: TeamCache,
 ): FixtureServiceOperations => {
   const mapTeamEventFixtures = (
@@ -217,12 +219,22 @@ const fixtureServiceOperations = (
       }),
     );
 
+  const syncFixturesFromApi = (): TE.TaskEither<ServiceError, void> =>
+    pipe(
+      eventCache.getAllEvents(),
+      TE.mapLeft(mapDomainErrorToServiceError),
+      TE.map(RA.map((event) => event.id)),
+      TE.chainW((eventIds) => pipe(eventIds.map(syncEventFixturesFromApi), TE.sequenceArray)),
+      TE.map(() => undefined),
+    );
+
   return {
     mapTeamEventFixtures,
     findFixturesByTeamId,
     findFixturesByEventId,
     findFixtures,
     syncEventFixturesFromApi,
+    syncFixturesFromApi,
   };
 };
 
@@ -231,6 +243,7 @@ export const createFixtureService = (
   repository: EventFixtureRepository,
   eventFixturecache: EventFixtureCache,
   teamFixtureCache: TeamFixtureCache,
+  eventCache: EventCache,
   teamCache: TeamCache,
 ): FixtureService => {
   const domainOps = createEventFixtureOperations(repository);
@@ -239,6 +252,7 @@ export const createFixtureService = (
     domainOps,
     eventFixturecache,
     teamFixtureCache,
+    eventCache,
     teamCache,
   );
 
@@ -247,5 +261,6 @@ export const createFixtureService = (
     getFixturesByEventId: ops.findFixturesByEventId,
     getFixtures: ops.findFixtures,
     syncEventFixturesFromApi: ops.syncEventFixturesFromApi,
+    syncFixturesFromApi: ops.syncFixturesFromApi,
   };
 };

@@ -12,7 +12,7 @@ import {
   EventLiveExplainCreateInputs,
   EventLiveExplainRepository,
 } from 'repository/event-live-explain/types';
-import * as schema from 'schema/event-live-explain';
+import * as schema from 'schema/event-live-explain.schema';
 import { EventLiveExplains, EventLiveExplain } from 'types/domain/event-live-explain.type';
 import { EventId } from 'types/domain/event.type';
 import { PlayerId } from 'types/domain/player.type';

@@ -26,7 +26,7 @@ const entryHistoryInfoServiceOperations = (
       domainOps.findByEntryId(id),
       TE.mapLeft((error: DomainError) =>
         createServiceError({
-          code: ServiceErrorCode.OPERATION_ERROR,
+          code: ServiceErrorCode.INTEGRATION_ERROR,
           message: 'Failed to find entry history info by id',
           cause: error.cause,
         }),
@@ -57,10 +57,10 @@ const entryHistoryInfoServiceOperations = (
 
   const syncEntryHistoryInfosFromApi = (): TE.TaskEither<ServiceError, void> =>
     pipe(
-      entryInfoRepository.findAllEntryIds(),
+      entryInfoRepository.findAllIds(),
       TE.mapLeft((error: DBError) =>
         createServiceError({
-          code: ServiceErrorCode.OPERATION_ERROR,
+          code: ServiceErrorCode.INTEGRATION_ERROR,
           message: 'Failed to find all entry ids',
           cause: error.cause,
         }),

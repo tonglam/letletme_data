@@ -1,10 +1,10 @@
+import { apiConfig } from 'config/api/api.config';
 import { mapPickResponseToEntryEventPick } from 'data/fpl/mappers/pick/pick.mapper';
 import { PickResponse, PickResponseSchema } from 'data/fpl/schemas/pick/pick.schema';
 import { FplPickDataService } from 'data/types';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { apiConfig } from 'src/config/api/api.config';
 import { RawEntryEventPicks } from 'types/domain/entry-event-pick.type';
 import { EntryId } from 'types/domain/entry-info.type';
 import { EventId } from 'types/domain/event.type';

@@ -10,7 +10,7 @@ import {
   TournamentKnockoutResultCreateInputs,
   TournamentKnockoutResultRepository,
 } from 'repository/tournament-knockout-result/types';
-import * as schema from 'schema/tournament-knockout-result';
+import * as schema from 'schema/tournament-knockout-result.schema';
 import { TournamentId } from 'types/domain/tournament-info.type';
 import { TournamentKnockoutResults } from 'types/domain/tournament-knockout-result.type';
 import { createDBError, DBError, DBErrorCode } from 'types/error.type';

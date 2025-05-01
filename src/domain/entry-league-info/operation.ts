@@ -4,10 +4,10 @@ import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import {
   EntryLeagueInfoRepository,
-  EntryLeagueInfoCreateInput,
+  EntryLeagueInfoCreateInputs,
 } from 'repository/entry-league-info/types';
 import { EntryId } from 'types/domain/entry-info.type';
-import { EntryLeagueInfo, EntryLeagueInfos } from 'types/domain/entry-league-info.type';
+import { EntryLeagueInfos } from 'types/domain/entry-league-info.type';
 import { createDomainError, DomainError, DomainErrorCode } from 'types/error.type';
 import { getErrorMessage } from 'utils/error.util';
 
@@ -26,11 +26,11 @@ export const createEntryLeagueInfoOperations = (
       ),
     );
 
-  const upsertEntryLeagueInfo = (
-    entryLeagueInfoInput: EntryLeagueInfoCreateInput,
-  ): TE.TaskEither<DomainError, EntryLeagueInfo> =>
+  const upsertEntryLeagueInfoBatch = (
+    entryLeagueInfoInputs: EntryLeagueInfoCreateInputs,
+  ): TE.TaskEither<DomainError, EntryLeagueInfos> =>
     pipe(
-      repository.upsertEntryLeagueInfo(entryLeagueInfoInput),
+      repository.upsertLeagueInfoBatch(entryLeagueInfoInputs),
       TE.mapLeft((dbError) =>
         createDomainError({
           code: DomainErrorCode.DATABASE_ERROR,
@@ -42,6 +42,6 @@ export const createEntryLeagueInfoOperations = (
 
   return {
     findByEntryId,
-    upsertEntryLeagueInfo,
+    upsertEntryLeagueInfoBatch,
   };
 };

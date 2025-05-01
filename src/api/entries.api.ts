@@ -2,7 +2,7 @@ import { Elysia, t } from 'elysia';
 import { EntryId } from 'types/domain/entry-info.type';
 import { unwrapOrThrow } from 'utils/response.util';
 
-import { DecoratedDependencies } from '@/dependencies';
+import { DecoratedDependencies } from '../dependencies';
 
 export const entriesApi = (dependencies: DecoratedDependencies) =>
   new Elysia({ prefix: '/entries/:entryId' })
@@ -11,6 +11,18 @@ export const entriesApi = (dependencies: DecoratedDependencies) =>
       ({ params }) =>
         unwrapOrThrow(
           dependencies.entryInfoService.getEntryInfo(Number(params.entryId) as EntryId),
+        ),
+      {
+        params: t.Object({
+          entryId: t.Numeric(),
+        }),
+      },
+    )
+    .post(
+      '/sync',
+      ({ params }) =>
+        unwrapOrThrow(
+          dependencies.entryInfoService.syncEntryInfoFromApi(Number(params.entryId) as EntryId),
         ),
       {
         params: t.Object({
@@ -30,7 +42,6 @@ export const entriesApi = (dependencies: DecoratedDependencies) =>
         }),
       },
     )
-    .post('/sync', () => unwrapOrThrow(dependencies.entryInfoService.syncEntryInfosFromApi()))
     .post(
       '/leagues/sync',
       () => unwrapOrThrow(dependencies.entryLeagueInfoService.syncEntryLeagueInfosFromApi()),

@@ -2,7 +2,7 @@ import { Elysia, t } from 'elysia';
 import { EventId } from 'types/domain/event.type';
 import { unwrapOrThrow } from 'utils/response.util';
 
-import { DecoratedDependencies } from '@/dependencies';
+import { DecoratedDependencies } from '../dependencies';
 
 export const eventsApi = (dependencies: DecoratedDependencies) =>
   new Elysia({ prefix: '/events' })

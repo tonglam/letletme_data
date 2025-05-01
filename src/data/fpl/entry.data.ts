@@ -1,3 +1,4 @@
+import { apiConfig } from 'config/api/api.config';
 import { mapEntryInfoResponseToEntryInfo } from 'data/fpl/mappers/entry/info.mapper';
 import { mapLeagueInfoResponseToEntryLeague } from 'data/fpl/mappers/entry/league.mapper';
 import { EntryResponse, EntryResponseSchema } from 'data/fpl/schemas/entry/entry.schema';
@@ -6,10 +7,8 @@ import * as A from 'fp-ts/Array';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { apiConfig } from 'src/config/api/api.config';
 import { LeagueTypes } from 'types/base.type';
-import { EntryId } from 'types/domain/entry-info.type';
-import { EntryInfos } from 'types/domain/entry-info.type';
+import { EntryId, EntryInfo } from 'types/domain/entry-info.type';
 import { EntryLeagueInfos } from 'types/domain/entry-league-info.type';
 import { DataLayerError, DataLayerErrorCode } from 'types/error.type';
 import { createDataLayerError } from 'utils/error.util';
@@ -129,7 +128,7 @@ export const createFplEntryDataService = (): FplEntryDataService => {
     return fetchAndValidateEntries(entryId);
   };
 
-  const getInfos = (entryId: EntryId): TE.TaskEither<DataLayerError, EntryInfos> =>
+  const getInfo = (entryId: EntryId): TE.TaskEither<DataLayerError, EntryInfo> =>
     pipe(
       getFplEntryDataInternal(entryId),
       TE.chain((entryData) =>
@@ -142,7 +141,6 @@ export const createFplEntryDataService = (): FplEntryDataService => {
             }),
           ),
           TE.fromEither,
-          TE.map((mappedInfo) => [mappedInfo]),
         ),
       ),
     );
@@ -184,7 +182,7 @@ export const createFplEntryDataService = (): FplEntryDataService => {
     );
 
   return {
-    getInfos,
+    getInfo,
     getLeagues,
   };
 };

@@ -10,7 +10,7 @@ import {
   EntryEventTransferCreateInputs,
   EntryEventTransferRepository,
 } from 'repository/entry-event-transfer/types';
-import * as schema from 'schema/entry-event-transfer';
+import * as schema from 'schema/entry-event-transfer.schema';
 import { RawEntryEventTransfers } from 'types/domain/entry-event-transfer.type';
 import { EntryId } from 'types/domain/entry-info.type';
 import { EventId } from 'types/domain/event.type';

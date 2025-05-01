@@ -1,8 +1,9 @@
 import { Elysia, t } from 'elysia';
-import { DecoratedDependencies } from 'src/dependencies';
 import { EventId } from 'types/domain/event.type';
 import { TeamId } from 'types/domain/team.type';
 import { unwrapOrThrow } from 'utils/response.util';
+
+import { DecoratedDependencies } from '../dependencies';
 
 export const fixturesApi = (dependencies: DecoratedDependencies) =>
   new Elysia({ prefix: '/fixtures' })

@@ -1,3 +1,4 @@
+import { apiConfig } from 'config/api/api.config';
 import { mapEventLiveExplainResponseToDomain } from 'data/fpl/mappers/live/explain.mapper';
 import { mapEventLiveResponseToDomain } from 'data/fpl/mappers/live/live.mapper';
 import {
@@ -10,7 +11,6 @@ import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as RA from 'fp-ts/ReadonlyArray';
 import * as TE from 'fp-ts/TaskEither';
-import { apiConfig } from 'src/config/api/api.config';
 import { EventLiveExplains } from 'types/domain/event-live-explain.type';
 import { RawEventLives } from 'types/domain/event-live.type';
 import { EventId } from 'types/domain/event.type';

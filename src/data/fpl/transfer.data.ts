@@ -1,3 +1,4 @@
+import { apiConfig } from 'config/api/api.config';
 import { mapTransferResponseToEntryEventTransfer } from 'data/fpl/mappers/transfer/transfer.mapper';
 import {
   TransferResponseSchema,
@@ -7,7 +8,6 @@ import { FplTransferDataService } from 'data/types';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { apiConfig } from 'src/config/api/api.config';
 import { RawEntryEventTransfers } from 'types/domain/entry-event-transfer.type';
 import { EntryId } from 'types/domain/entry-info.type';
 import { EventId } from 'types/domain/event.type';

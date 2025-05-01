@@ -16,7 +16,8 @@ export const createEntryInfoWorkflows = (
     logger.info({ workflow: context.workflowId }, 'Starting entry info sync workflow');
 
     return pipe(
-      entryInfoService.syncEntryInfosFromApi(),
+      entryInfoService.getAllEntryIds(),
+      TE.chainW((ids) => entryInfoService.syncEntryInfosFromApi(ids)),
       TE.mapLeft((error: ServiceError) =>
         createServiceError({
           code: ServiceErrorCode.INTEGRATION_ERROR,

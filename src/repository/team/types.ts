@@ -1,6 +1,6 @@
 import { InferSelectModel, InferInsertModel } from 'drizzle-orm';
 import * as TE from 'fp-ts/TaskEither';
-import * as schema from 'schema/team';
+import * as schema from 'schema/team.schema';
 import { Team, TeamId, Teams } from 'types/domain/team.type';
 import { DBError } from 'types/error.type';
 

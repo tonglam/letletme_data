@@ -1,3 +1,4 @@
+import { apiConfig } from 'config/api/api.config';
 import { mapEntryHistoryResponseToDomain } from 'data/fpl/mappers/history/history.mapper';
 import {
   EntryHistoryResponse,
@@ -7,7 +8,6 @@ import { FplHistoryDataService } from 'data/types';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { apiConfig } from 'src/config/api/api.config';
 import { EntryHistoryInfos } from 'types/domain/entry-history-info.type';
 import { EntryId } from 'types/domain/entry-info.type';
 import { DataLayerError, DataLayerErrorCode } from 'types/error.type';

@@ -4,7 +4,7 @@ import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import { mapDomainEventLiveToDbCreate, mapDbEventLiveToDomain } from 'repository/event-live/mapper';
 import { EventLiveCreateInputs, EventLiveRepository } from 'repository/event-live/types';
-import * as schema from 'schema/event-live';
+import * as schema from 'schema/event-live.schema';
 import { RawEventLives } from 'types/domain/event-live.type';
 import { EventId } from 'types/domain/event.type';
 import { createDBError, DBError, DBErrorCode } from 'types/error.type';

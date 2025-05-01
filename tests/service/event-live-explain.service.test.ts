@@ -1,22 +1,19 @@
 import { beforeAll, describe, expect, it } from 'bun:test';
 import { createFplLiveDataService } from 'data/fpl/live.data';
-import { type FplLiveDataService } from 'data/types';
+import { FplLiveDataService } from 'data/types';
 import * as E from 'fp-ts/Either';
 import * as O from 'fp-ts/Option';
 import { redisClient } from 'infrastructure/cache/client';
-import { type Logger } from 'pino';
+import { Logger } from 'pino';
 import { createEventLiveExplainRepository } from 'repository/event-live-explain/repository';
-import { type EventLiveExplainRepository } from 'repository/event-live-explain/types';
+import { EventLiveExplainRepository } from 'repository/event-live-explain/types';
 import { createEventLiveExplainService } from 'service/event-live-explain/service';
-import { type EventLiveExplainService } from 'service/event-live-explain/types';
-import { type EventId } from 'types/domain/event.type';
-import { type PlayerId } from 'types/domain/player.type';
+import { EventLiveExplainService } from 'service/event-live-explain/types';
+import { EventId } from 'types/domain/event.type';
+import { PlayerId } from 'types/domain/player.type';
 import { DomainErrorCode } from 'types/error.type';
 
-import {
-  type IntegrationTestSetupResult,
-  setupIntegrationTest,
-} from '../setup/integrationTestSetup';
+import { IntegrationTestSetupResult, setupIntegrationTest } from '../setup/integrationTestSetup';
 
 describe('Event Live Explain Service Integration Tests', () => {
   let setup: IntegrationTestSetupResult;

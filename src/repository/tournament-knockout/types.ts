@@ -1,13 +1,9 @@
 import { InferInsertModel, InferSelectModel } from 'drizzle-orm';
 import * as TE from 'fp-ts/TaskEither';
-import * as schema from 'schema/tournament-knockout';
-import { DBError } from 'src/types/error.type';
-
-import { TournamentId } from '../../types/domain/tournament-info.type';
-import {
-  TournamentKnockout,
-  TournamentKnockouts,
-} from '../../types/domain/tournament-knockout.type';
+import * as schema from 'schema/tournament-knockout.schema';
+import { TournamentId } from 'types/domain/tournament-info.type';
+import { TournamentKnockout, TournamentKnockouts } from 'types/domain/tournament-knockout.type';
+import { DBError } from 'types/error.type';
 
 export type DbTournamentKnockout = InferSelectModel<typeof schema.tournamentKnockouts>;
 export type DbTournamentKnockoutCreateInput = InferInsertModel<typeof schema.tournamentKnockouts>;

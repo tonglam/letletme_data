@@ -1,13 +1,13 @@
 import { pgTable, integer, text, boolean, uniqueIndex, index } from 'drizzle-orm/pg-core';
-import { autoIncrementId, timestamps } from 'schema/_helpers';
+import { autoIncrementId, timestamps } from 'schema/_helpers.schema';
 import {
   leagueTypeEnum,
   tournamentModeEnum,
   groupModeEnum,
   knockoutModeEnum,
   tournamentStateEnum,
-} from 'schema/enums';
-import { events } from 'schema/event';
+} from 'schema/enums.schema';
+import { events } from 'schema/event.schema';
 
 export const tournamentInfos = pgTable(
   'tournament_infos',

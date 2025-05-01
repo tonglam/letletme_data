@@ -2,34 +2,32 @@ import { createEntryInfoOperations } from 'domain/entry-info/operation';
 import { EntryInfoOperations } from 'domain/entry-info/types';
 
 import { FplEntryDataService } from 'data/types';
-import * as A from 'fp-ts/Array';
 import { pipe } from 'fp-ts/function';
-import * as O from 'fp-ts/Option';
-import * as RNEA from 'fp-ts/ReadonlyNonEmptyArray';
 import * as TE from 'fp-ts/TaskEither';
 import { EntryInfoRepository } from 'repository/entry-info/types';
 import { EntryInfoService, EntryInfoServiceOperations } from 'service/entry-info/types';
-import { EntryInfo, EntryId, EntryInfos } from 'types/domain/entry-info.type';
+import { EntryId, EntryInfo } from 'types/domain/entry-info.type';
+import { EntryInfos } from 'types/domain/entry-info.type';
 import {
-  createServiceError,
-  DBError,
+  DataLayerError,
   DomainError,
-  ServiceError,
+  createServiceError,
   ServiceErrorCode,
 } from 'types/error.type';
+import { ServiceError } from 'types/error.type';
+import { createServiceIntegrationError, mapDomainErrorToServiceError } from 'utils/error.util';
 
 const entryInfoServiceOperations = (
   fplDataService: FplEntryDataService,
   domainOps: EntryInfoOperations,
-  repository: EntryInfoRepository,
 ): EntryInfoServiceOperations => {
   const findById = (id: EntryId): TE.TaskEither<ServiceError, EntryInfo> =>
     pipe(
       domainOps.findById(id),
       TE.mapLeft((error: DomainError) =>
         createServiceError({
-          code: ServiceErrorCode.OPERATION_ERROR,
-          message: 'Failed to find entry info by id',
+          code: ServiceErrorCode.NOT_FOUND,
+          message: `Entry info with id ${id} not found`,
           cause: error.cause,
         }),
       ),
@@ -40,28 +38,52 @@ const entryInfoServiceOperations = (
       domainOps.findByIds(ids),
       TE.mapLeft((error: DomainError) =>
         createServiceError({
-          code: ServiceErrorCode.OPERATION_ERROR,
-          message: 'Failed to find entry info by ids',
+          code: ServiceErrorCode.NOT_FOUND,
+          message: `Entry info with ids ${ids.join(', ')} not found`,
           cause: error.cause,
         }),
       ),
     );
 
-  const syncEntryInfosFromApi = (entryId: EntryId): TE.TaskEither<ServiceError, void> =>
+  const findAllIds = (): TE.TaskEither<ServiceError, ReadonlyArray<EntryId>> =>
+    pipe(domainOps.findAllIds(), TE.mapLeft(mapDomainErrorToServiceError));
+
+  const syncEntryInfoFromApi = (id: EntryId): TE.TaskEither<ServiceError, void> =>
     pipe(
-      domainOps.syncEntryInfosFromApi(entryId),
-      TE.mapLeft((error: DomainError) =>
-        createServiceError({
-          code: ServiceErrorCode.OPERATION_ERROR,
-          message: 'Failed to sync entry info from api',
+      fplDataService.getInfo(id),
+      TE.mapLeft((error: DataLayerError) =>
+        createServiceIntegrationError({
+          message: `Failed to sync entry info from api for entry id ${id}`,
           cause: error.cause,
+          details: error.details,
         }),
+      ),
+      TE.chainW((entryInfo) =>
+        pipe(
+          domainOps.upsertEntryInfo(entryInfo),
+          TE.mapLeft((error: DomainError) =>
+            createServiceError({
+              code: ServiceErrorCode.INTEGRATION_ERROR,
+              message: `Failed to upsert entry info for entry id ${id}`,
+              cause: error.cause,
+            }),
+          ),
+        ),
       ),
       TE.map(() => undefined),
     );
+
+  const syncEntryInfosFromApi = (ids: ReadonlyArray<EntryId>): TE.TaskEither<ServiceError, void> =>
+    pipe(
+      TE.sequenceArray(ids.map(syncEntryInfoFromApi)),
+      TE.map(() => undefined),
+    );
+
   return {
     findById,
     findByIds,
+    findAllIds,
+    syncEntryInfoFromApi,
     syncEntryInfosFromApi,
   };
 };
@@ -71,12 +93,16 @@ export const createEntryInfoService = (
   repository: EntryInfoRepository,
 ): EntryInfoService => {
   const domainOps = createEntryInfoOperations(repository);
-  const ops = entryInfoServiceOperations(fplDataService, domainOps, repository);
+  const ops = entryInfoServiceOperations(fplDataService, domainOps);
 
   return {
     getEntryInfo: (id: EntryId): TE.TaskEither<ServiceError, EntryInfo> => ops.findById(id),
     getEntryInfoByIds: (ids: ReadonlyArray<EntryId>): TE.TaskEither<ServiceError, EntryInfos> =>
       ops.findByIds(ids),
-    syncEntryInfosFromApi: (): TE.TaskEither<ServiceError, void> => ops.syncEntryInfosFromApi(),
+    getAllEntryIds: (): TE.TaskEither<ServiceError, ReadonlyArray<EntryId>> => ops.findAllIds(),
+    syncEntryInfoFromApi: (id: EntryId): TE.TaskEither<ServiceError, void> =>
+      ops.syncEntryInfoFromApi(id),
+    syncEntryInfosFromApi: (ids: ReadonlyArray<EntryId>): TE.TaskEither<ServiceError, void> =>
+      ops.syncEntryInfosFromApi(ids),
   };
 };

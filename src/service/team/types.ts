@@ -1,8 +1,7 @@
 import * as TE from 'fp-ts/TaskEither';
 import { WorkflowResult } from 'service/types';
-
-import type { Team, TeamId, Teams } from 'types/domain/team.type';
-import type { ServiceError } from 'types/error.type';
+import { Team, TeamId, Teams } from 'types/domain/team.type';
+import { ServiceError } from 'types/error.type';
 
 export interface TeamServiceOperations {
   readonly findTeamById: (id: TeamId) => TE.TaskEither<ServiceError, Team>;

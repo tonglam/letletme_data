@@ -4,8 +4,7 @@ import { EntryId } from 'types/domain/entry-info.type';
 import { LeagueId } from 'types/domain/league.type';
 import { TournamentEntries } from 'types/domain/tournament-entry.type';
 import { TournamentId } from 'types/domain/tournament-info.type';
-
-import type { ServiceError } from 'types/error.type';
+import { ServiceError } from 'types/error.type';
 
 export interface TournamentEntryServiceOperations {
   readonly findByTournamentId: (id: TournamentId) => TE.TaskEither<ServiceError, TournamentEntries>;

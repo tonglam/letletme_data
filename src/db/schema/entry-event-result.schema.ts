@@ -1,9 +1,9 @@
 import { pgTable, integer, jsonb, uniqueIndex, index } from 'drizzle-orm/pg-core';
-import { autoIncrementId, timestamps } from 'schema/_helpers';
-import { entryInfos } from 'schema/entry-info';
-import { chipEnum } from 'schema/enums';
-import { events } from 'schema/event';
-import { players } from 'schema/player';
+import { autoIncrementId, timestamps } from 'schema/_helpers.schema';
+import { entryInfos } from 'schema/entry-info.schema';
+import { chipEnum } from 'schema/enums.schema';
+import { events } from 'schema/event.schema';
+import { players } from 'schema/player.schema';
 
 export const entryEventResults = pgTable(
   'entry_event_results',

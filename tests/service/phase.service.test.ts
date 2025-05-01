@@ -1,5 +1,5 @@
 import { createPhaseCache } from 'domain/phase/cache';
-import { type PhaseCache } from 'domain/phase/types';
+import { PhaseCache } from 'domain/phase/types';
 
 import { beforeAll, describe, expect, it } from 'bun:test';
 import { CachePrefix, DefaultTTL } from 'config/cache/cache.config';
@@ -7,18 +7,14 @@ import { createFplBootstrapDataService } from 'data/fpl/bootstrap.data';
 import { FplBootstrapDataService } from 'data/types';
 import * as E from 'fp-ts/Either';
 import { redisClient } from 'infrastructure/cache/client';
-import { type Logger } from 'pino';
+import { Logger } from 'pino';
 import { createPhaseRepository } from 'repository/phase/repository';
-import { type PhaseRepository } from 'repository/phase/types';
+import { PhaseRepository } from 'repository/phase/types';
 import { createPhaseService } from 'service/phase/service';
-import { type PhaseService } from 'service/phase/types';
-import { phaseWorkflows } from 'service/phase/workflow';
+import { PhaseService } from 'service/phase/types';
+import { createPhaseWorkflows } from 'service/phase/workflow';
 
-// Test Setup
-import {
-  type IntegrationTestSetupResult,
-  setupIntegrationTest,
-} from '../setup/integrationTestSetup';
+import { IntegrationTestSetupResult, setupIntegrationTest } from '../setup/integrationTestSetup';
 
 describe('Phase Integration Tests', () => {
   let setup: IntegrationTestSetupResult;
@@ -116,7 +112,7 @@ describe('Phase Integration Tests', () => {
 
   describe('Phase Workflow Integration', () => {
     it('should execute the sync phases workflow end-to-end', async () => {
-      const workflows = phaseWorkflows(phaseService);
+      const workflows = createPhaseWorkflows(phaseService);
       const result = await workflows.syncPhases()();
 
       expect(E.isRight(result)).toBe(true);

@@ -4,7 +4,7 @@ import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import { mapDomainPhaseToDbCreate, mapDbPhaseToDomain } from 'repository/phase/mapper';
 import { PhaseCreateInputs, PhaseRepository } from 'repository/phase/types';
-import * as schema from 'schema/phase';
+import * as schema from 'schema/phase.schema';
 import { Phase, PhaseId, Phases } from 'types/domain/phase.type';
 import { createDBError, DBError, DBErrorCode } from 'types/error.type';
 import { getErrorMessage } from 'utils/error.util';

@@ -6,7 +6,11 @@ import { ServiceError } from 'types/error.type';
 export interface EntryInfoServiceOperations {
   readonly findById: (id: EntryId) => TE.TaskEither<ServiceError, EntryInfo>;
   readonly findByIds: (ids: ReadonlyArray<EntryId>) => TE.TaskEither<ServiceError, EntryInfos>;
-  readonly syncEntryInfosFromApi: (entryId: EntryId) => TE.TaskEither<ServiceError, void>;
+  readonly findAllIds: () => TE.TaskEither<ServiceError, ReadonlyArray<EntryId>>;
+  readonly syncEntryInfoFromApi: (id: EntryId) => TE.TaskEither<ServiceError, void>;
+  readonly syncEntryInfosFromApi: (
+    ids: ReadonlyArray<EntryId>,
+  ) => TE.TaskEither<ServiceError, void>;
 }
 
 export interface EntryInfoService {
@@ -14,7 +18,11 @@ export interface EntryInfoService {
   readonly getEntryInfoByIds: (
     ids: ReadonlyArray<EntryId>,
   ) => TE.TaskEither<ServiceError, EntryInfos>;
-  readonly syncEntryInfosFromApi: (entryId: EntryId) => TE.TaskEither<ServiceError, void>;
+  readonly getAllEntryIds: () => TE.TaskEither<ServiceError, ReadonlyArray<EntryId>>;
+  readonly syncEntryInfoFromApi: (id: EntryId) => TE.TaskEither<ServiceError, void>;
+  readonly syncEntryInfosFromApi: (
+    ids: ReadonlyArray<EntryId>,
+  ) => TE.TaskEither<ServiceError, void>;
 }
 
 export interface EntryInfoWorkflowOperations {

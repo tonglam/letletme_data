@@ -14,6 +14,7 @@ export interface FixtureServiceOperations {
   readonly findFixturesByEventId: (eventId: EventId) => TE.TaskEither<ServiceError, EventFixtures>;
   readonly findFixtures: () => TE.TaskEither<ServiceError, EventFixtures>;
   readonly syncEventFixturesFromApi: (eventId: EventId) => TE.TaskEither<ServiceError, void>;
+  readonly syncFixturesFromApi: () => TE.TaskEither<ServiceError, void>;
 }
 
 export interface FixtureService {
@@ -21,6 +22,7 @@ export interface FixtureService {
   readonly getFixturesByEventId: (eventId: EventId) => TE.TaskEither<ServiceError, EventFixtures>;
   readonly getFixtures: () => TE.TaskEither<ServiceError, EventFixtures>;
   readonly syncEventFixturesFromApi: (eventId: EventId) => TE.TaskEither<ServiceError, void>;
+  readonly syncFixturesFromApi: () => TE.TaskEither<ServiceError, void>;
 }
 
 export interface FixtureWorkflowsOperations {

@@ -1,5 +1,6 @@
 import { createEventOperations } from 'domain/event/operation';
 import { EventCache, EventOperations } from 'domain/event/types';
+import { EventFixtureCache } from 'domain/event-fixture/types';
 
 import { FplBootstrapDataService } from 'data/types';
 import * as E from 'fp-ts/Either';
@@ -9,7 +10,6 @@ import * as RA from 'fp-ts/ReadonlyArray';
 import * as TE from 'fp-ts/TaskEither';
 import { EventRepository } from 'repository/event/types';
 import { EventService, EventServiceOperations } from 'service/event/types';
-import { FixtureService } from 'service/fixture/types';
 import { EventFixtures } from 'types/domain/event-fixture.type';
 import { Event, EventId, Events } from 'types/domain/event.type';
 import {
@@ -25,7 +25,7 @@ const eventServiceOperations = (
   fplDataService: FplBootstrapDataService,
   domainOps: EventOperations,
   cache: EventCache,
-  fixtureService: FixtureService,
+  eventFixtureCache: EventFixtureCache,
 ): EventServiceOperations => {
   const findEventById = (id: EventId): TE.TaskEither<ServiceError, Event> =>
     pipe(
@@ -159,7 +159,8 @@ const eventServiceOperations = (
   const isMatchTime = (eventId: EventId): TE.TaskEither<ServiceError, boolean> => {
     const now = new Date();
     return pipe(
-      fixtureService.getFixturesByEventId(eventId),
+      eventFixtureCache.getEventFixtures(eventId),
+      TE.mapLeft(mapDomainErrorToServiceError),
       TE.map((fixtures) =>
         fixtures.some(
           (f) => f.kickoffTime !== null && f.kickoffTime <= now && !f.finished && f.started,
@@ -224,7 +225,8 @@ const eventServiceOperations = (
 
   const findAllMatchDays = (eventId: EventId): TE.TaskEither<ServiceError, ReadonlyArray<Date>> => {
     return pipe(
-      fixtureService.getFixturesByEventId(eventId),
+      eventFixtureCache.getEventFixtures(eventId),
+      TE.mapLeft(mapDomainErrorToServiceError),
       TE.map((fixtures: EventFixtures) =>
         pipe(
           fixtures,
@@ -241,7 +243,8 @@ const eventServiceOperations = (
     eventId: EventId,
   ): TE.TaskEither<ServiceError, ReadonlyArray<Date>> => {
     return pipe(
-      fixtureService.getFixturesByEventId(eventId),
+      eventFixtureCache.getEventFixtures(eventId),
+      TE.mapLeft(mapDomainErrorToServiceError),
       TE.map((fixtures: EventFixtures) =>
         pipe(
           fixtures,
@@ -275,10 +278,10 @@ export const createEventService = (
   fplDataService: FplBootstrapDataService,
   repository: EventRepository,
   cache: EventCache,
-  fixtureService: FixtureService,
+  eventFixtureCache: EventFixtureCache,
 ): EventService => {
   const domainOps = createEventOperations(repository);
-  const ops = eventServiceOperations(fplDataService, domainOps, cache, fixtureService);
+  const ops = eventServiceOperations(fplDataService, domainOps, cache, eventFixtureCache);
 
   return {
     getEvent: (id: EventId): TE.TaskEither<ServiceError, Event> => ops.findEventById(id),

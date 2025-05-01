@@ -10,7 +10,7 @@ import {
   EntryHistoryInfoCreateInputs,
   EntryHistoryInfoRepository,
 } from 'repository/entry-history-info/types';
-import * as schema from 'schema/entry-history-info';
+import * as schema from 'schema/entry-history-info.schema';
 import { EntryHistoryInfos } from 'types/domain/entry-history-info.type';
 import { EntryId } from 'types/domain/entry-info.type';
 import { createDBError, DBError, DBErrorCode } from 'types/error.type';

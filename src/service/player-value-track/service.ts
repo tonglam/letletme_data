@@ -41,7 +41,7 @@ export const playerValueTrackServiceOperations = (
           ? TE.right(event)
           : TE.left(
               createServiceError({
-                code: ServiceErrorCode.OPERATION_ERROR,
+                code: ServiceErrorCode.INTEGRATION_ERROR,
                 message: 'No current event found to sync player value tracks.',
               }),
             ),

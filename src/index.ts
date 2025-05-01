@@ -19,7 +19,7 @@ import { teamsJob } from 'job/teams.job';
 import { getErrorStatus } from 'types/error.type';
 import { toAPIError } from 'utils/error.util';
 
-import { dependencies } from '@/dependencies';
+import { dependencies } from './dependencies';
 
 const logger = getAppLogger();
 

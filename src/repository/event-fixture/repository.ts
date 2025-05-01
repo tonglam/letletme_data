@@ -7,7 +7,7 @@ import {
   mapDomainEventFixtureToDbCreate,
 } from 'repository/event-fixture/mapper';
 import { EventFixtureCreateInputs, EventFixtureRepository } from 'repository/event-fixture/types';
-import * as schema from 'schema/event-fixture';
+import * as schema from 'schema/event-fixture.schema';
 import { RawEventFixtures } from 'types/domain/event-fixture.type';
 import { EventId } from 'types/domain/event.type';
 import { TeamId } from 'types/domain/team.type';

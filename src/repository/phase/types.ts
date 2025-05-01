@@ -1,6 +1,6 @@
 import { InferInsertModel, InferSelectModel } from 'drizzle-orm';
 import * as TE from 'fp-ts/TaskEither';
-import * as schema from 'schema/phase';
+import * as schema from 'schema/phase.schema';
 import { Phase, PhaseId, Phases } from 'types/domain/phase.type';
 import { DBError } from 'types/error.type';
 

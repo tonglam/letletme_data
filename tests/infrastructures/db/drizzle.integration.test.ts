@@ -1,9 +1,8 @@
 import 'dotenv/config';
 
 import { describe, expect, it } from 'bun:test';
+import { db } from 'db/index';
 import { sql } from 'drizzle-orm';
-
-import { db } from '../../../src/db';
 
 interface TestResult {
   test: number;

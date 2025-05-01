@@ -1,11 +1,10 @@
 import * as TE from 'fp-ts/TaskEither';
+import { WorkflowResult } from 'service/types';
 import { ElementTypeId } from 'types/base.type';
 import { PlayerStat, PlayerStats } from 'types/domain/player-stat.type';
 import { PlayerId } from 'types/domain/player.type';
 import { TeamId } from 'types/domain/team.type';
 import { ServiceError } from 'types/error.type';
-
-import type { WorkflowResult } from 'service/types';
 
 export interface PlayerStatServiceOperations {
   readonly findPlayerStat: (elementId: PlayerId) => TE.TaskEither<ServiceError, PlayerStat>;

@@ -12,17 +12,17 @@ import { CachePrefix, DefaultTTL } from 'config/cache/cache.config';
 import { createFplBootstrapDataService } from 'data/fpl/bootstrap.data';
 import { FplBootstrapDataService } from 'data/types';
 import { db } from 'db/index';
-import * as playerSchema from 'db/schema/player';
-import * as playerValueSchema from 'db/schema/player-value';
 import { eq } from 'drizzle-orm';
 import * as E from 'fp-ts/Either';
 import { redisClient } from 'infrastructure/cache/client';
 import { Logger } from 'pino';
 import { createPlayerValueRepository } from 'repository/player-value/repository';
 import { PlayerValueRepository } from 'repository/player-value/types';
+import * as playerValueSchema from 'schema/player-value.schema';
+import * as playerSchema from 'schema/player.schema';
 import { createPlayerValueService } from 'service/player-value/service';
 import { PlayerValueService } from 'service/player-value/types';
-import { playerValueWorkflows } from 'service/player-value/workflow';
+import { createPlayerValueWorkflows } from 'service/player-value/workflow';
 import { PlayerValue, PlayerValues } from 'types/domain/player-value.type';
 import { PlayerId } from 'types/domain/player.type';
 import { TeamId } from 'types/domain/team.type';
@@ -233,7 +233,7 @@ describe('PlayerValue Integration Tests', () => {
       const valueKeys = await redisClient.keys(`${cachePrefix}::${season}*`);
       if (valueKeys.length > 0) await redisClient.del(valueKeys);
 
-      const workflows = playerValueWorkflows(playerValueService);
+      const workflows = createPlayerValueWorkflows(playerValueService);
       const result = await workflows.syncPlayerValues()();
 
       expect(E.isRight(result)).toBe(true);

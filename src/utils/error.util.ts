@@ -142,7 +142,7 @@ export const createCacheDeserializationError = (error: unknown): CacheError => {
 export const createServiceOperationError = (error: unknown): ServiceError => {
   const message = error instanceof Error ? error.message : 'Service operation failed';
   return createServiceError({
-    code: ServiceErrorCode.OPERATION_ERROR,
+    code: ServiceErrorCode.INTEGRATION_ERROR,
     message,
     details: { error: error instanceof Error ? error.message : String(error) },
     cause: error instanceof Error ? error : undefined,
@@ -172,7 +172,7 @@ export const createServiceIntegrationError = (error: unknown): ServiceError => {
 export const createServiceTransformationError = (error: unknown): ServiceError => {
   const message = error instanceof Error ? error.message : 'Service transformation failed';
   return createServiceError({
-    code: ServiceErrorCode.TRANSFORMATION_ERROR,
+    code: ServiceErrorCode.INTEGRATION_ERROR,
     message,
     details: { error: error instanceof Error ? error.message : String(error) },
     cause: error instanceof Error ? error : undefined,
@@ -259,8 +259,13 @@ const isServiceError = (error: unknown): error is ServiceError =>
 const serviceErrorToApiErrorCode: Record<ServiceErrorCode, APIErrorCode> = {
   [ServiceErrorCode.INTEGRATION_ERROR]: APIErrorCode.SERVICE_ERROR,
   [ServiceErrorCode.VALIDATION_ERROR]: APIErrorCode.VALIDATION_ERROR,
-  [ServiceErrorCode.OPERATION_ERROR]: APIErrorCode.SERVICE_ERROR,
-  [ServiceErrorCode.TRANSFORMATION_ERROR]: APIErrorCode.SERVICE_ERROR,
+  [ServiceErrorCode.UNKNOWN]: APIErrorCode.INTERNAL_SERVER_ERROR,
+  [ServiceErrorCode.NOT_FOUND]: APIErrorCode.NOT_FOUND,
+  [ServiceErrorCode.CACHE_ERROR]: APIErrorCode.SERVICE_ERROR,
+  [ServiceErrorCode.DB_ERROR]: APIErrorCode.SERVICE_ERROR,
+  [ServiceErrorCode.QUEUE_ERROR]: APIErrorCode.SERVICE_ERROR,
+  [ServiceErrorCode.CONFIG_ERROR]: APIErrorCode.INTERNAL_SERVER_ERROR,
+  [ServiceErrorCode.CONDITION_NOT_MET]: APIErrorCode.INTERNAL_SERVER_ERROR,
 };
 
 const isDomainError = (error: unknown): error is DomainError =>
@@ -358,7 +363,7 @@ export const mapCacheErrorToDomainError = (cacheError: CacheError): DomainError 
 
 export const mapDBErrorToServiceError = (error: DBError): ServiceError =>
   createServiceError({
-    code: ServiceErrorCode.OPERATION_ERROR,
+    code: ServiceErrorCode.DB_ERROR,
     message: `Database Error: ${error.message}`,
     cause: error.cause,
     details: error.details,

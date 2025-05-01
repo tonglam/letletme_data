@@ -1,4 +1,3 @@
-// Load environment variables first
 import 'dotenv/config';
 
 import { afterAll, describe, expect, it } from 'bun:test';
@@ -7,10 +6,8 @@ import * as O from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
 import { RedisCache } from 'infrastructure/cache/redis-cache';
 import Redis from 'ioredis';
+import { CacheError, CacheErrorCode, createCacheError } from 'types/error.type';
 
-import { CacheError, CacheErrorCode, createCacheError } from '../../../src/types/error.type';
-
-// Create our own Redis client for testing using environment variables
 const testRedisClient = new Redis({
   host: process.env.REDIS_HOST,
   port: parseInt(process.env.REDIS_PORT || '6379', 10),

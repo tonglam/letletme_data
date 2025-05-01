@@ -1,6 +1,6 @@
 import { InferInsertModel, InferSelectModel } from 'drizzle-orm';
 import * as TE from 'fp-ts/TaskEither';
-import * as schema from 'schema/entry-event-transfer';
+import * as schema from 'schema/entry-event-transfer.schema';
 import {
   RawEntryEventTransfer,
   RawEntryEventTransfers,

@@ -1,6 +1,6 @@
 import { pgTable, integer, text } from 'drizzle-orm/pg-core';
-import { createdAtField } from 'schema/_helpers';
-import { events } from 'schema/event';
+import { createdAtField } from 'schema/_helpers.schema';
+import { events } from 'schema/event.schema';
 
 export const phases = pgTable('phases', {
   id: integer('id').primaryKey(),

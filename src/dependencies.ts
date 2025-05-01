@@ -42,23 +42,37 @@ import { createTournamentKnockoutRepository } from 'repository/tournament-knocko
 import { createTournamentKnockoutResultRepository } from 'repository/tournament-knockout-result/repository';
 import { createTournamentPointsGroupResultRepository } from 'repository/tournament-points-group-result/repository';
 import { createEntryEventPickService } from 'service/entry-event-pick/service';
+import { createEntryEventPickWorkflows } from 'service/entry-event-pick/workflow';
 import { createEntryEventResultService } from 'service/entry-event-result/service';
+import { createEntryEventResultWorkflows } from 'service/entry-event-result/workflow';
 import { createEntryEventTransferService } from 'service/entry-event-transfer/service';
+import { createEntryEventTransferWorkflows } from 'service/entry-event-transfer/workflow';
 import { createEntryHistoryInfoService } from 'service/entry-history-info/service';
 import { createEntryInfoService } from 'service/entry-info/service';
+import { createEntryInfoWorkflows } from 'service/entry-info/workflow';
 import { createEntryLeagueInfoService } from 'service/entry-league-info/service';
 import { createEventService } from 'service/event/service';
 import { createEventWorkflows } from 'service/event/workflow';
 import { createEventLiveService } from 'service/event-live/service';
+import { createEventLiveWorkflows } from 'service/event-live/workflow';
 import { createEventLiveExplainService } from 'service/event-live-explain/service';
+import { createEventLiveExplainWorkflows } from 'service/event-live-explain/workflow';
 import { createEventOverallResultService } from 'service/event-overall-result/service';
+import { createEventOverallResultWorkflows } from 'service/event-overall-result/workflow';
 import { createFixtureService } from 'service/fixture/service';
+import { createFixtureWorkflows } from 'service/fixture/workflow';
 import { createPhaseService } from 'service/phase/service';
+import { createPhaseWorkflows } from 'service/phase/workflow';
 import { createPlayerService } from 'service/player/service';
+import { createPlayerWorkflows } from 'service/player/workflow';
 import { createPlayerStatService } from 'service/player-stat/service';
+import { createPlayerStatWorkflows } from 'service/player-stat/workflow';
 import { createPlayerValueService } from 'service/player-value/service';
+import { createPlayerValueWorkflows } from 'service/player-value/workflow';
 import { createPlayerValueTrackService } from 'service/player-value-track/service';
+import { createPlayerValueTrackWorkflows } from 'service/player-value-track/workflow';
 import { createTeamService } from 'service/team/service';
+import { createTeamWorkflows } from 'service/team/workflow';
 import { createTournamentService } from 'service/tournament/service';
 import { createTournamentBattleGroupResultService } from 'service/tournament-battle-group-result/service';
 import { createTournamentEntryService } from 'service/tournament-entry/service';
@@ -67,20 +81,6 @@ import { createTournamentInfoService } from 'service/tournament-info/service';
 import { createTournamentKnockoutService } from 'service/tournament-knockout/service';
 import { createTournamentKnockoutResultService } from 'service/tournament-knockout-result/service';
 import { createTournamentPointsGroupResultService } from 'service/tournament-points-group-result/service';
-
-import { createEntryEventPickWorkflows } from '@/service/entry-event-pick/workflow';
-import { createEntryEventResultWorkflows } from '@/service/entry-event-result/workflow';
-import { createEntryEventTransferWorkflows } from '@/service/entry-event-transfer/workflow';
-import { createEventLiveWorkflows } from '@/service/event-live/workflow';
-import { createEventLiveExplainWorkflows } from '@/service/event-live-explain/workflow';
-import { createEventOverallResultWorkflows } from '@/service/event-overall-result/workflow';
-import { createFixtureWorkflows } from '@/service/fixture/workflow';
-import { createPhaseWorkflows } from '@/service/phase/workflow';
-import { createPlayerWorkflows } from '@/service/player/workflow';
-import { createPlayerStatWorkflows } from '@/service/player-stat/workflow';
-import { createPlayerValueWorkflows } from '@/service/player-value/workflow';
-import { createPlayerValueTrackWorkflows } from '@/service/player-value-track/workflow';
-import { createTeamWorkflows } from '@/service/team/workflow';
 
 // --- Instantiate Data Services ---
 export const fplBootstrapDataService = createFplBootstrapDataService();
@@ -131,19 +131,21 @@ export const eventLiveCache = createEventLiveCache();
 export const eventOverallResultCache = createEventOverallResultCache();
 
 // --- Instantiate Services ---
-export const fixtureService = createFixtureService(
-  fplFixtureDataService,
-  eventFixtureRepository,
-  eventFixtureCache,
-  teamFixtureCache,
-  teamCache,
-);
 
 export const eventService = createEventService(
   fplBootstrapDataService,
   eventRepository,
   eventCache,
-  fixtureService,
+  eventFixtureCache,
+);
+
+export const fixtureService = createFixtureService(
+  fplFixtureDataService,
+  eventFixtureRepository,
+  eventFixtureCache,
+  teamFixtureCache,
+  eventCache,
+  teamCache,
 );
 
 export const phaseService = createPhaseService(
@@ -276,25 +278,40 @@ export const tournamentKnockoutResultService = createTournamentKnockoutResultSer
 
 // --- Instantiate Workflow Operations ---
 export const eventWorkflows = createEventWorkflows(eventService);
+
 export const phaseWorkflows = createPhaseWorkflows(phaseService);
+
 export const teamWorkflows = createTeamWorkflows(teamService);
+
 export const playerWorkflows = createPlayerWorkflows(playerService);
+
 export const playerValueWorkflows = createPlayerValueWorkflows(playerValueService);
+
 export const playerValueTrackWorkflows = createPlayerValueTrackWorkflows(playerValueTrackService);
+
 export const playerStatWorkflows = createPlayerStatWorkflows(playerStatService);
+
 export const fixtureWorkflows = createFixtureWorkflows(fixtureService);
+
 export const eventLiveWorkflows = createEventLiveWorkflows(eventService, eventLiveService);
+
 export const eventLiveExplainWorkflows = createEventLiveExplainWorkflows(
   eventService,
   eventLiveExplainService,
 );
+
 export const eventOverallResultWorkflows = createEventOverallResultWorkflows(
   eventService,
   eventOverallResultService,
 );
+
+export const entryInfoWorkflows = createEntryInfoWorkflows(entryInfoService);
+
 export const entryEventPickWorkflows = createEntryEventPickWorkflows(entryEventPickService);
+
 export const entryEventTransferWorkflows =
   createEntryEventTransferWorkflows(entryEventTransferService);
+
 export const entryEventResultWorkflows = createEntryEventResultWorkflows(entryEventResultService);
 
 export const dependencies = {
@@ -326,6 +343,7 @@ export const dependencies = {
   eventLiveWorkflows,
   eventLiveExplainWorkflows,
   eventOverallResultWorkflows,
+  entryInfoWorkflows,
   entryEventPickWorkflows,
   entryEventTransferWorkflows,
   entryEventResultWorkflows,

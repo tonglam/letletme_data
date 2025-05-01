@@ -10,7 +10,7 @@ import {
   TournamentGroupCreateInputs,
   TournamentGroupRepository,
 } from 'repository/tournament-group/types';
-import * as schema from 'schema/tournament-group';
+import * as schema from 'schema/tournament-group.schema';
 import { TournamentGroups } from 'types/domain/tournament-group.type';
 import { TournamentId } from 'types/domain/tournament-info.type';
 import { createDBError, DBError, DBErrorCode } from 'types/error.type';

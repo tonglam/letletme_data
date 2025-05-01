@@ -1,8 +1,8 @@
 import { pgTable, integer, uniqueIndex, index } from 'drizzle-orm/pg-core';
-import { autoIncrementId, timestamps } from 'schema/_helpers';
-import { entryInfos } from 'schema/entry-info';
-import { events } from 'schema/event';
-import { tournamentInfos } from 'schema/tournament-info';
+import { autoIncrementId, timestamps } from 'schema/_helpers.schema';
+import { entryInfos } from 'schema/entry-info.schema';
+import { events } from 'schema/event.schema';
+import { tournamentInfos } from 'schema/tournament-info.schema';
 
 export const tournamentKnockoutResults = pgTable(
   'tournament_knockout_results',

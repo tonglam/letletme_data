@@ -4,7 +4,7 @@ import { PlayerId } from 'types/domain/player.type';
 import { TeamId } from 'types/domain/team.type';
 import { unwrapOrThrow } from 'utils/response.util';
 
-import { DecoratedDependencies } from '@/dependencies';
+import { DecoratedDependencies } from '../dependencies';
 
 export const playerStatsApi = (dependencies: DecoratedDependencies) =>
   new Elysia({ prefix: '/player-stats' })

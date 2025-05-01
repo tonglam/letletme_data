@@ -107,7 +107,7 @@ const playerStatServiceOperations = (
           ? TE.right(event)
           : TE.left(
               createServiceError({
-                code: ServiceErrorCode.OPERATION_ERROR,
+                code: ServiceErrorCode.INTEGRATION_ERROR,
                 message: 'No current event found',
               }),
             ),

@@ -1,6 +1,6 @@
 import { pgTable, integer, char, uniqueIndex, index } from 'drizzle-orm/pg-core';
-import { autoIncrementId, createdAtField } from 'schema/_helpers';
-import { entryInfos } from 'schema/entry-info';
+import { autoIncrementId, createdAtField } from 'schema/_helpers.schema';
+import { entryInfos } from 'schema/entry-info.schema';
 
 export const entryHistoryInfos = pgTable(
   'entry_history_infos',

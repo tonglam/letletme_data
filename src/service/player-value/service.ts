@@ -9,6 +9,7 @@ import { pipe, flow } from 'fp-ts/function';
 import * as IO from 'fp-ts/IO';
 import * as RA from 'fp-ts/ReadonlyArray';
 import * as TE from 'fp-ts/TaskEither';
+import { getWorkflowLogger } from 'infrastructure/logger';
 import { PlayerValueRepository } from 'repository/player-value/types';
 import { PlayerValueService, PlayerValueServiceOperations } from 'service/player-value/types';
 import { ValueChangeTypes } from 'types/base.type';
@@ -26,11 +27,9 @@ import {
   ServiceError,
   ServiceErrorCode,
 } from 'types/error.type';
+import { DomainError } from 'types/error.type';
 import { enrichPlayerValues } from 'utils/data-enrichment.util';
 import { createServiceIntegrationError, mapDomainErrorToServiceError } from 'utils/error.util';
-
-import { getWorkflowLogger } from '../../infrastructure/logger';
-import { DomainError } from '../../types/error.type';
 
 const detectRawValueChanges =
   (domainOps: PlayerValueOperations) =>
@@ -56,7 +55,7 @@ const detectRawValueChanges =
       ),
       TE.mapLeft((error) =>
         createServiceError({
-          code: ServiceErrorCode.OPERATION_ERROR,
+          code: ServiceErrorCode.INTEGRATION_ERROR,
           message: `Failed to fetch latest player values for change detection: ${error.message}`,
           cause: error,
         }),
@@ -129,7 +128,7 @@ export const playerValueServiceOperations = (
     detectPlayerValueChanges: (): TE.TaskEither<ServiceError, PlayerValues> =>
       TE.left(
         createServiceError({
-          code: ServiceErrorCode.OPERATION_ERROR,
+          code: ServiceErrorCode.INTEGRATION_ERROR,
           message:
             'detectPlayerValueChanges needs redefinition or removal. Use syncPlayerValuesFromApi logic.',
         }),

@@ -1,8 +1,8 @@
 import { integer, char, timestamp, uniqueIndex, index, pgTable } from 'drizzle-orm/pg-core';
-import { autoIncrementId } from 'schema/_helpers';
-import { valueChangeTypeEnum } from 'schema/enums';
-import { events } from 'schema/event';
-import { players } from 'schema/player';
+import { autoIncrementId } from 'schema/_helpers.schema';
+import { valueChangeTypeEnum } from 'schema/enums.schema';
+import { events } from 'schema/event.schema';
+import { players } from 'schema/player.schema';
 
 export const playerValues = pgTable(
   'player_values',

@@ -1,3 +1,4 @@
+import { apiConfig } from 'config/api/api.config';
 import { mapClassicLeagueResponseToDomain } from 'data/fpl/mappers/league/classic-league.mapper';
 import {
   ClassicLeagueResponse,
@@ -8,7 +9,6 @@ import { FplClassicLeagueDataService } from 'data/types';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { apiConfig } from 'src/config/api/api.config';
 import { ClassicLeague, LeagueId } from 'types/domain/league.type';
 import { DataLayerError, DataLayerErrorCode } from 'types/error.type';
 import { createDataLayerError } from 'utils/error.util';

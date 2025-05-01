@@ -1,3 +1,4 @@
+import { apiConfig } from 'config/api/api.config';
 import { mapH2hLeagueResponseToDomain } from 'data/fpl/mappers/league/h2h-league.mapper';
 import {
   H2hLeagueResponse,
@@ -8,7 +9,6 @@ import { FplH2hLeagueDataService } from 'data/types';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { apiConfig } from 'src/config/api/api.config';
 import { H2hLeague, LeagueId } from 'types/domain/league.type';
 import { DataLayerError, DataLayerErrorCode } from 'types/error.type';
 import { createDataLayerError } from 'utils/error.util';

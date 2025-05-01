@@ -1,6 +1,6 @@
 import { InferInsertModel, InferSelectModel } from 'drizzle-orm';
 import * as TE from 'fp-ts/TaskEither';
-import * as schema from 'schema/tournament-entry';
+import * as schema from 'schema/tournament-entry.schema';
 import { EntryId } from 'types/domain/entry-info.type';
 import { TournamentEntry, TournamentEntries } from 'types/domain/tournament-entry.type';
 import { TournamentId } from 'types/domain/tournament-info.type';

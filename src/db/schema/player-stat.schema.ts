@@ -1,7 +1,7 @@
 import { pgTable, integer, uniqueIndex, index, text } from 'drizzle-orm/pg-core';
-import { autoIncrementId, timestamps } from 'schema/_helpers';
-import { events } from 'schema/event';
-import { players } from 'schema/player';
+import { autoIncrementId, timestamps } from 'schema/_helpers.schema';
+import { events } from 'schema/event.schema';
+import { players } from 'schema/player.schema';
 
 export const playerStats = pgTable(
   'player_stats',

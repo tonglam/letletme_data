@@ -1,11 +1,12 @@
 import { DbPlayer, DbPlayerCreateInput } from 'repository/player/types';
-import { PlayerId, PlayerType, RawPlayer } from 'types/domain/player.type';
+import { ElementTypeId } from 'types/base.type';
+import { PlayerId, RawPlayer } from 'types/domain/player.type';
 import { TeamId } from 'types/domain/team.type';
 
 export const mapDbPlayerToDomain = (dbPlayer: DbPlayer): RawPlayer => ({
   id: dbPlayer.id as PlayerId,
   code: dbPlayer.code,
-  type: dbPlayer.type as PlayerType,
+  type: dbPlayer.type as ElementTypeId,
   teamId: dbPlayer.teamId as TeamId,
   price: dbPlayer.price,
   startPrice: dbPlayer.startPrice,

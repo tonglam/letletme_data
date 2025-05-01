@@ -2,7 +2,7 @@ import { Elysia, t } from 'elysia';
 import { PhaseId } from 'types/domain/phase.type';
 import { unwrapOrThrow } from 'utils/response.util';
 
-import { DecoratedDependencies } from '@/dependencies';
+import { DecoratedDependencies } from '../dependencies';
 
 export const phasesApi = (dependencies: DecoratedDependencies) =>
   new Elysia({ prefix: '/phases' })

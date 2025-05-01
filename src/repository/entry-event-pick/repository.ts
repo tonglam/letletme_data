@@ -10,7 +10,7 @@ import {
   EntryEventPickCreateInputs,
   EntryEventPickRepository,
 } from 'repository/entry-event-pick/types';
-import * as schema from 'schema/entry-event-pick';
+import * as schema from 'schema/entry-event-pick.schema';
 import { RawEntryEventPick } from 'types/domain/entry-event-pick.type';
 import { EntryId } from 'types/domain/entry-info.type';
 import { EventId } from 'types/domain/event.type';

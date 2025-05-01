@@ -1,3 +1,4 @@
+import { apiConfig } from 'config/api/api.config';
 import {
   mapElementResponseToPlayer,
   mapElementResponseToPlayerStat,
@@ -17,7 +18,6 @@ import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import { TeamCreateInputs } from 'repository/team/types';
-import { apiConfig } from 'src/config/api/api.config';
 import { RawEventOverallResult } from 'types/domain/event-overall-result.type';
 import { EventId, Events } from 'types/domain/event.type';
 import { Phases } from 'types/domain/phase.type';

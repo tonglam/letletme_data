@@ -1,7 +1,7 @@
 import { pgTable, integer, timestamp, boolean, index, uniqueIndex } from 'drizzle-orm/pg-core';
-import { createdAtField } from 'schema/_helpers';
-import { events } from 'schema/event';
-import { teams } from 'schema/team';
+import { createdAtField } from 'schema/_helpers.schema';
+import { events } from 'schema/event.schema';
+import { teams } from 'schema/team.schema';
 
 export const eventFixtures = pgTable(
   'event_fixtures',

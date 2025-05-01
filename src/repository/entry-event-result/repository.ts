@@ -10,7 +10,7 @@ import {
   EntryEventResultCreateInputs,
   EntryEventResultRepository,
 } from 'repository/entry-event-result/types';
-import * as schema from 'schema/entry-event-result';
+import * as schema from 'schema/entry-event-result.schema';
 import { RawEntryEventResult, RawEntryEventResults } from 'types/domain/entry-event-result.type';
 import { EntryId } from 'types/domain/entry-info.type';
 import { EventId } from 'types/domain/event.type';

@@ -10,7 +10,7 @@ import {
   PlayerValueTrackCreateInputs,
   PlayerValueTrackRepository,
 } from 'repository/player-value-track/types';
-import * as schema from 'schema/player-value-track';
+import * as schema from 'schema/player-value-track.schema';
 import { PlayerValueTracks } from 'types/domain/player-value-track.type';
 import { createDBError, DBError, DBErrorCode } from 'types/error.type';
 import { getErrorMessage } from 'utils/error.util';

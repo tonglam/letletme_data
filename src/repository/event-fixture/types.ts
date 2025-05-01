@@ -1,6 +1,6 @@
 import { InferInsertModel, InferSelectModel } from 'drizzle-orm';
 import * as TE from 'fp-ts/TaskEither';
-import * as schema from 'schema/event-fixture';
+import * as schema from 'schema/event-fixture.schema';
 import { EventFixtureId, RawEventFixture, RawEventFixtures } from 'types/domain/event-fixture.type';
 import { EventId } from 'types/domain/event.type';
 import { TeamId } from 'types/domain/team.type';

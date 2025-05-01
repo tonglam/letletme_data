@@ -1,4 +1,4 @@
-import { ElementStatus } from 'src/types/base.type';
+import { ElementStatus } from 'types/base.type';
 import { z } from 'zod';
 
 export const ElementResponseSchema = z
@@ -13,7 +13,7 @@ export const ElementResponseSchema = z
     now_cost: z.number(),
     cost_change_start: z.number(),
     team_code: z.number(),
-    status: z.nativeEnum(ElementStatus),
+    status: z.enum(ElementStatus),
     minutes: z.number().default(0),
     goals_scored: z.number().default(0),
     assists: z.number().default(0),

@@ -1,8 +1,8 @@
 import { pgTable, integer, text, uniqueIndex, index } from 'drizzle-orm/pg-core';
-import { autoIncrementId, createdAtField } from 'schema/_helpers';
-import { entryInfos } from 'schema/entry-info';
-import { events } from 'schema/event';
-import { tournamentInfos } from 'schema/tournament-info';
+import { autoIncrementId, createdAtField } from 'schema/_helpers.schema';
+import { entryInfos } from 'schema/entry-info.schema';
+import { events } from 'schema/event.schema';
+import { tournamentInfos } from 'schema/tournament-info.schema';
 
 export const tournamentGroups = pgTable(
   'tournament_groups',

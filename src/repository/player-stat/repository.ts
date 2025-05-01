@@ -4,7 +4,7 @@ import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import { mapDomainStatToDbCreate, mapDbPlayerStatToDomain } from 'repository/player-stat/mapper';
 import { PlayerStatCreateInputs, PlayerStatRepository } from 'repository/player-stat/types';
-import * as schema from 'schema/player-stat';
+import * as schema from 'schema/player-stat.schema';
 import { RawPlayerStats } from 'types/domain/player-stat.type';
 import { createDBError, DBError, DBErrorCode } from 'types/error.type';
 import { getErrorMessage } from 'utils/error.util';

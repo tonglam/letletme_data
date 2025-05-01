@@ -8,7 +8,7 @@ import { EventId } from 'types/domain/event.type';
 import { RawPlayerStat } from 'types/domain/player-stat.type';
 import { PlayerValueTrack } from 'types/domain/player-value-track.type';
 import { SourcePlayerValue } from 'types/domain/player-value.type';
-import { PlayerId, PlayerType, RawPlayer, validatePlayerId } from 'types/domain/player.type';
+import { PlayerId, RawPlayer, validatePlayerId } from 'types/domain/player.type';
 import { TeamId } from 'types/domain/team.type';
 import { safeStringToNumber } from 'utils/common.util';
 
@@ -20,7 +20,7 @@ export const mapElementResponseToPlayer = (raw: ElementResponse): E.Either<strin
       return {
         id: data.id as PlayerId,
         code: raw.code,
-        type: raw.element_type as PlayerType,
+        type: raw.element_type as ElementTypeId,
         teamId: raw.team as TeamId,
         price: raw.now_cost,
         startPrice: raw.now_cost - raw.cost_change_start,
@@ -43,7 +43,7 @@ export const mapElementResponseToPlayerValue = (
     E.map(
       ({ element }): SourcePlayerValue => ({
         elementId: element as PlayerId,
-        elementType: raw.element_type as PlayerType,
+        elementType: raw.element_type as ElementTypeId,
         eventId: eventId as EventId,
         value: raw.now_cost,
         changeDate: currentDateStr,
@@ -98,7 +98,7 @@ export const mapElementResponseToPlayerStat = (
       ({ element }): RawPlayerStat => ({
         eventId: eventId as EventId,
         elementId: element as PlayerId,
-        elementType: raw.element_type as PlayerType,
+        elementType: raw.element_type as ElementTypeId,
         totalPoints: raw.total_points,
         form: raw.form ?? null,
         influence: raw.influence ?? null,

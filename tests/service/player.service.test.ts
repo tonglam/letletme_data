@@ -8,15 +8,15 @@ import { CachePrefix, DefaultTTL } from 'config/cache/cache.config';
 import { createFplBootstrapDataService } from 'data/fpl/bootstrap.data';
 import { FplBootstrapDataService } from 'data/types';
 import { db } from 'db/index';
-import * as playerSchema from 'db/schema/player';
 import * as E from 'fp-ts/Either';
 import { redisClient } from 'infrastructure/cache/client';
 import { Logger } from 'pino';
 import { createPlayerRepository } from 'repository/player/repository';
 import { PlayerRepository } from 'repository/player/types';
+import * as playerSchema from 'schema/player.schema';
 import { createPlayerService } from 'service/player/service';
 import { PlayerService } from 'service/player/types';
-import { playerWorkflows } from 'service/player/workflow';
+import { createPlayerWorkflows } from 'service/player/workflow';
 import { ElementTypeId } from 'types/base.type';
 import { Player, Players } from 'types/domain/player.type';
 import { TeamId } from 'types/domain/team.type';
@@ -179,7 +179,7 @@ describe('Player Integration Tests', () => {
       await drizzleDb.delete(playerSchema.players);
       await redisClient.del(`${cachePrefix}::${season}`);
 
-      const workflows = playerWorkflows(playerService);
+      const workflows = createPlayerWorkflows(playerService);
       const result = await workflows.syncPlayers()();
 
       expect(E.isRight(result)).toBe(true);

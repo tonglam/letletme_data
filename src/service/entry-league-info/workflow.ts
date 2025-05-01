@@ -47,6 +47,6 @@ export const createEntryLeagueInfoWorkflows = (
   };
 
   return {
-    syncEntryLeagueInfos,
+    syncLeagueInfos: syncEntryLeagueInfos,
   };
 };

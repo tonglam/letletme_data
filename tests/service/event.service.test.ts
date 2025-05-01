@@ -1,35 +1,23 @@
 import { createEventCache } from 'domain/event/cache';
-import { type EventCache } from 'domain/event/types';
+import { EventCache } from 'domain/event/types';
 import { createEventFixtureCache } from 'domain/event-fixture/cache';
-import { type EventFixtureCache } from 'domain/event-fixture/types';
-import { createTeamCache } from 'domain/team/cache';
-import { type TeamCache } from 'domain/team/types';
-import { createTeamFixtureCache } from 'domain/team-fixture/cache';
-import { type TeamFixtureCache } from 'domain/team-fixture/types';
+import { EventFixtureCache } from 'domain/event-fixture/types';
 
 import { beforeAll, describe, expect, it } from 'bun:test';
 import { CachePrefix, DefaultTTL } from 'config/cache/cache.config';
 import { createFplBootstrapDataService } from 'data/fpl/bootstrap.data';
-import { createFplFixtureDataService } from 'data/fpl/fixture.data';
-import { type FplBootstrapDataService, type FplFixtureDataService } from 'data/types';
+import { FplBootstrapDataService } from 'data/types';
 import * as E from 'fp-ts/Either';
 import { redisClient } from 'infrastructure/cache/client';
-import { type Logger } from 'pino';
+import { Logger } from 'pino';
 import { createEventRepository } from 'repository/event/repository';
-import { type EventRepository } from 'repository/event/types';
-import { createEventFixtureRepository } from 'repository/event-fixture/repository';
-import { type EventFixtureRepository } from 'repository/event-fixture/types';
+import { EventRepository } from 'repository/event/types';
 import { createEventService } from 'service/event/service';
-import { type EventService } from 'service/event/types';
+import { EventService } from 'service/event/types';
 import { createEventWorkflows } from 'service/event/workflow';
-import { createFixtureService } from 'service/fixture/service';
-import { type FixtureService } from 'service/fixture/types';
-import { type EventId } from 'types/domain/event.type';
+import { EventId } from 'types/domain/event.type';
 
-import {
-  type IntegrationTestSetupResult,
-  setupIntegrationTest,
-} from '../setup/integrationTestSetup';
+import { IntegrationTestSetupResult, setupIntegrationTest } from '../setup/integrationTestSetup';
 
 describe('Event Integration Tests', () => {
   let setup: IntegrationTestSetupResult;
@@ -39,16 +27,10 @@ describe('Event Integration Tests', () => {
   let eventCache: EventCache;
   let fplBootstrapDataService: FplBootstrapDataService;
   let eventService: EventService;
-  let fplFixtureDataService: FplFixtureDataService;
-  let eventFixtureRepository: EventFixtureRepository;
   let eventFixtureCache: EventFixtureCache;
-  let teamFixtureCache: TeamFixtureCache;
-  let teamCache: TeamCache;
-  let fixtureService: FixtureService;
 
   const eventCachePrefix = CachePrefix.EVENT;
   const fixtureCachePrefix = CachePrefix.TEAM_FIXTURE;
-  const teamCachePrefix = CachePrefix.TEAM;
   const season = '2425';
 
   beforeAll(async () => {
@@ -73,37 +55,17 @@ describe('Event Integration Tests', () => {
     });
     fplBootstrapDataService = createFplBootstrapDataService();
 
-    fplFixtureDataService = createFplFixtureDataService();
-    eventFixtureRepository = createEventFixtureRepository();
     eventFixtureCache = createEventFixtureCache({
       keyPrefix: fixtureCachePrefix,
       season: season,
       ttlSeconds: DefaultTTL.FIXTURE,
     });
-    teamFixtureCache = createTeamFixtureCache({
-      keyPrefix: fixtureCachePrefix,
-      season: season,
-      ttlSeconds: DefaultTTL.FIXTURE,
-    });
-    teamCache = createTeamCache({
-      keyPrefix: teamCachePrefix,
-      season: season,
-      ttlSeconds: DefaultTTL.TEAM,
-    });
-
-    fixtureService = createFixtureService(
-      fplFixtureDataService,
-      eventFixtureRepository,
-      eventFixtureCache,
-      teamFixtureCache,
-      teamCache,
-    );
 
     eventService = createEventService(
       fplBootstrapDataService,
       eventRepository,
       eventCache,
-      fixtureService,
+      eventFixtureCache,
     );
   });
 

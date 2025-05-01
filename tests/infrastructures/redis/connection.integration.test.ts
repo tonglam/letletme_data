@@ -1,10 +1,8 @@
-// Load environment variables first
 import 'dotenv/config';
 
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 import { Redis } from 'ioredis';
 
-// Create direct Redis client for testing using environment variables
 const testRedisClient = new Redis({
   host: process.env.REDIS_HOST,
   port: parseInt(process.env.REDIS_PORT || '6379', 10),

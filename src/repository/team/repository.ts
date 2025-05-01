@@ -4,7 +4,7 @@ import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import { mapDomainTeamToDbCreate, mapDbTeamToDomain } from 'repository/team/mapper';
 import { TeamCreateInputs, TeamRepository } from 'repository/team/types';
-import * as schema from 'schema/team';
+import * as schema from 'schema/team.schema';
 import { Team, TeamId, Teams } from 'types/domain/team.type';
 import { createDBError, DBError, DBErrorCode } from 'types/error.type';
 import { getErrorMessage } from 'utils/error.util';

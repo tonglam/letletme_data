@@ -1,8 +1,8 @@
-import { autoIncrementId, createdAtField } from 'db/schema/_helpers';
 import { pgTable, integer, timestamp, index } from 'drizzle-orm/pg-core';
-import { entryInfos } from 'schema/entry-info';
-import { events } from 'schema/event';
-import { players } from 'schema/player';
+import { autoIncrementId, createdAtField } from 'schema/_helpers.schema';
+import { entryInfos } from 'schema/entry-info.schema';
+import { events } from 'schema/event.schema';
+import { players } from 'schema/player.schema';
 
 export const entryEventTransfers = pgTable(
   'entry_event_transfers',

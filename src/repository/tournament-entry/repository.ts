@@ -10,7 +10,7 @@ import {
   TournamentEntryCreateInputs,
   TournamentEntryRepository,
 } from 'repository/tournament-entry/types';
-import * as schema from 'schema/tournament-entry';
+import * as schema from 'schema/tournament-entry.schema';
 import { EntryId } from 'types/domain/entry-info.type';
 import { TournamentEntries } from 'types/domain/tournament-entry.type';
 import { TournamentId } from 'types/domain/tournament-info.type';

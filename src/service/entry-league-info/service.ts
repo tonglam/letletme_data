@@ -2,10 +2,7 @@ import { createEntryLeagueInfoOperations } from 'domain/entry-league-info/operat
 import { EntryLeagueInfoOperations } from 'domain/entry-league-info/types';
 
 import { FplEntryDataService } from 'data/types';
-import * as A from 'fp-ts/Array';
 import { pipe } from 'fp-ts/function';
-import * as O from 'fp-ts/Option';
-import * as RNEA from 'fp-ts/ReadonlyNonEmptyArray';
 import * as TE from 'fp-ts/TaskEither';
 import { EntryInfoRepository } from 'repository/entry-info/types';
 import { EntryLeagueInfoRepository } from 'repository/entry-league-info/types';
@@ -17,76 +14,51 @@ import { EntryId } from 'types/domain/entry-info.type';
 import { EntryLeagueInfos } from 'types/domain/entry-league-info.type';
 import {
   createServiceError,
-  DBError,
+  DataLayerError,
   DomainError,
   ServiceError,
   ServiceErrorCode,
 } from 'types/error.type';
+import { createServiceIntegrationError } from 'utils/error.util';
 
 const entryLeagueInfoServiceOperations = (
   fplDataService: FplEntryDataService,
   domainOps: EntryLeagueInfoOperations,
-  entryInfoRepository: EntryInfoRepository,
 ): EntryLeagueInfoServiceOperations => {
-  const findByEntryId = (id: EntryId): TE.TaskEither<ServiceError, EntryLeagueInfos> =>
+  const findByEntryId = (entryId: EntryId): TE.TaskEither<ServiceError, EntryLeagueInfos> =>
     pipe(
-      domainOps.findByEntryId(id),
+      domainOps.findByEntryId(entryId),
       TE.mapLeft((error: DomainError) =>
         createServiceError({
-          code: ServiceErrorCode.OPERATION_ERROR,
-          message: 'Failed to find entry league info by id',
+          code: ServiceErrorCode.NOT_FOUND,
+          message: `Failed to find entry league info by id ${entryId}`,
           cause: error.cause,
         }),
       ),
     );
 
-  const processSingleEntry = (entryId: EntryId): TE.TaskEither<never, void> =>
+  const syncEntryLeagueInfosFromApi = (entryId: EntryId): TE.TaskEither<ServiceError, void> =>
     pipe(
       fplDataService.getLeagues(entryId),
-      TE.mapLeft((error) => ({ type: 'fetch' as const, error, entryId })),
-      TE.chainW((fetchedLeagues) =>
-        pipe(
-          RNEA.fromReadonlyArray(fetchedLeagues),
-          O.map(RNEA.head),
-          TE.fromOption(() => ({
-            type: 'extract' as const,
-            message: `No data for entry ${entryId}`,
-            entryId,
-          })),
-        ),
-      ),
-      TE.chainW((fetchedLeagueInfo) =>
-        pipe(
-          domainOps.upsertEntryLeagueInfo(fetchedLeagueInfo),
-          TE.mapLeft((error) => ({ type: 'upsert' as const, error, entryId })),
-        ),
-      ),
-      TE.map(() => undefined),
-      TE.orElseW(() => TE.right(undefined)),
-    );
-
-  const syncEntryLeagueInfosFromApi = (): TE.TaskEither<ServiceError, void> =>
-    pipe(
-      entryInfoRepository.findAllEntryIds(),
-      TE.mapLeft((error: DBError) =>
-        createServiceError({
-          code: ServiceErrorCode.OPERATION_ERROR,
-          message: 'Failed to find all entry ids',
+      TE.mapLeft((error: DataLayerError) =>
+        createServiceIntegrationError({
+          message: `Failed to sync entry league info from api for entry id ${entryId}`,
           cause: error.cause,
+          details: error.details,
         }),
       ),
-      TE.chainW((readonlyEntryIds) =>
-        pipe(
-          [...readonlyEntryIds],
-          A.traverse(TE.ApplicativePar)(processSingleEntry),
-          TE.map(() => undefined),
-        ),
-      ),
+    );
+
+  const syncLeaguesInfosFromApi = (): TE.TaskEither<ServiceError, void> =>
+    pipe(
+      TE.sequenceArray(ids.map(syncEntryLeagueInfosFromApi)),
+      TE.map(() => undefined),
     );
 
   return {
     findByEntryId,
     syncEntryLeagueInfosFromApi,
+    syncLeaguesInfosFromApi,
   };
 };
 
@@ -101,7 +73,8 @@ export const createEntryLeagueInfoService = (
   return {
     getEntryLeagueInfo: (id: EntryId): TE.TaskEither<ServiceError, EntryLeagueInfos> =>
       ops.findByEntryId(id),
-    syncEntryLeagueInfosFromApi: (): TE.TaskEither<ServiceError, void> =>
-      ops.syncEntryLeagueInfosFromApi(),
+    syncEntryLeagueInfosFromApi: (entryId: EntryId): TE.TaskEither<ServiceError, void> =>
+      ops.syncEntryLeagueInfosFromApi(entryId),
+    syncLeaguesInfosFromApi: (): TE.TaskEither<ServiceError, void> => ops.syncLeaguesInfosFromApi(),
   };
 };

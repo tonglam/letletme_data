@@ -46,7 +46,7 @@ const entryEventPickServiceOperations = (
       TE.chainW(enrichPick),
       TE.mapLeft((error: DomainError | DBError) =>
         createServiceError({
-          code: ServiceErrorCode.OPERATION_ERROR,
+          code: ServiceErrorCode.INTEGRATION_ERROR,
           message: 'Failed to find and enrich entry event pick by id and event id',
           cause: error.cause,
         }),
@@ -111,7 +111,7 @@ const entryEventPickServiceOperations = (
       tournamentEntryRepository.findAllTournamentEntryIds(),
       TE.mapLeft((error: DBError) =>
         createServiceError({
-          code: ServiceErrorCode.OPERATION_ERROR,
+          code: ServiceErrorCode.INTEGRATION_ERROR,
           message: 'Failed to find all tournament entry ids',
           cause: error.cause,
         }),

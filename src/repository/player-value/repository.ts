@@ -7,7 +7,7 @@ import {
   mapDomainPlayerValueToPrismaCreate,
 } from 'repository/player-value/mapper';
 import { PlayerValueCreateInputs, PlayerValueRepository } from 'repository/player-value/types';
-import * as schema from 'schema/player-value';
+import * as schema from 'schema/player-value.schema';
 import { RawPlayerValues } from 'types/domain/player-value.type';
 import { PlayerId } from 'types/domain/player.type';
 import { createDBError, DBError, DBErrorCode } from 'types/error.type';
@@ -117,22 +117,16 @@ export const createPlayerValueRepository = (): PlayerValueRepository => {
     pipe(
       TE.tryCatch(
         async () => {
-          if (playerValueInputs.length === 0) {
-            return []; // Return empty array if nothing to insert, matches expected return type later
-          }
           const dataToCreate = playerValueInputs.map(mapDomainPlayerValueToPrismaCreate);
 
-          // Perform a single bulk insert
           await db
             .insert(schema.playerValues)
-            .values(dataToCreate) // Pass the entire array
+            .values(dataToCreate)
             .onConflictDoNothing({
               target: [schema.playerValues.elementId, schema.playerValues.changeDate],
             });
 
-          // Explicitly return something to indicate success, maybe the input count or void
-          // Or, fetch and return the inserted/updated records if needed (findByChangeDate does this later)
-          return dataToCreate; // Let's return the data we attempted to create for now
+          return dataToCreate;
         },
         (error) => {
           const errorMessage = getErrorMessage(error);
@@ -148,8 +142,7 @@ export const createPlayerValueRepository = (): PlayerValueRepository => {
           });
         },
       ),
-      // This TE.chain fetches the results after the insert/update. It seems correct.
-      TE.chain((_createdData) =>
+      TE.chain(() =>
         playerValueInputs.length > 0
           ? findByChangeDate(playerValueInputs[0].changeDate)
           : TE.right([] as RawPlayerValues),

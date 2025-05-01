@@ -1,6 +1,6 @@
 import { InferInsertModel, InferSelectModel } from 'drizzle-orm';
 import * as TE from 'fp-ts/TaskEither';
-import * as schema from 'schema/event-live';
+import * as schema from 'schema/event-live.schema';
 import { RawEventLive, RawEventLives } from 'types/domain/event-live.type';
 import { EventId } from 'types/domain/event.type';
 import { DBError } from 'types/error.type';

@@ -40,7 +40,7 @@ const entryEventResultServiceOperations = (
       TE.map((result) => result as EntryEventResult),
       TE.mapLeft((error: DomainError) =>
         createServiceError({
-          code: ServiceErrorCode.OPERATION_ERROR,
+          code: ServiceErrorCode.INTEGRATION_ERROR,
           message: 'Failed to find and enrich entry event result by id and event id',
           cause: error,
         }),
@@ -57,7 +57,7 @@ const entryEventResultServiceOperations = (
       TE.map((results) => results as EntryEventResults),
       TE.mapLeft((error: DomainError) =>
         createServiceError({
-          code: ServiceErrorCode.OPERATION_ERROR,
+          code: ServiceErrorCode.INTEGRATION_ERROR,
           message: 'Failed to find and enrich entry event results by ids and event id',
           cause: error,
         }),
@@ -71,7 +71,7 @@ const entryEventResultServiceOperations = (
       TE.map((results) => results as EntryEventResults),
       TE.mapLeft((error: DomainError) =>
         createServiceError({
-          code: ServiceErrorCode.OPERATION_ERROR,
+          code: ServiceErrorCode.INTEGRATION_ERROR,
           message: 'Failed to find and enrich entry event results by id',
           cause: error,
         }),
@@ -101,10 +101,10 @@ const entryEventResultServiceOperations = (
 
   const syncResultsFromApi = (_eventId: EventId): TE.TaskEither<ServiceError, void> =>
     pipe(
-      entryInfoRepository.findAllEntryIds(),
+      entryInfoRepository.findAllIds(),
       TE.mapLeft((error: DBError) =>
         createServiceError({
-          code: ServiceErrorCode.OPERATION_ERROR,
+          code: ServiceErrorCode.INTEGRATION_ERROR,
           message: 'Failed to find all entry ids',
           cause: error.cause,
         }),

@@ -1,3 +1,4 @@
+import { apiConfig } from 'config/api/api.config';
 import { mapEventFixtureResponseToDomain } from 'data/fpl/mappers/fixture/fixture.mapper';
 import {
   EventFixturesResponse,
@@ -7,7 +8,6 @@ import { FplFixtureDataService } from 'data/types';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { apiConfig } from 'src/config/api/api.config';
 import { RawEventFixtures } from 'types/domain/event-fixture.type';
 import { EventId } from 'types/domain/event.type';
 import { DataLayerError, DataLayerErrorCode } from 'types/error.type';

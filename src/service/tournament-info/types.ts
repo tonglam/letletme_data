@@ -1,7 +1,6 @@
 import * as TE from 'fp-ts/TaskEither';
 import { TournamentInfo, TournamentInfos, TournamentId } from 'types/domain/tournament-info.type';
-
-import type { ServiceError } from 'types/error.type';
+import { ServiceError } from 'types/error.type';
 
 export interface TournamentInfoServiceOperations {
   readonly findTournamentInfoById: (

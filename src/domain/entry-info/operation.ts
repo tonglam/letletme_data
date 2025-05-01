@@ -20,13 +20,25 @@ export const createEntryInfoOperations = (repository: EntryInfoRepository): Entr
       ),
     );
 
-  const findByIds = (entryIds: ReadonlyArray<EntryId>): TE.TaskEither<DomainError, EntryInfos> =>
+  const findByIds = (ids: ReadonlyArray<EntryId>): TE.TaskEither<DomainError, EntryInfos> =>
     pipe(
-      repository.findByIds(entryIds),
+      repository.findByIds(ids),
       TE.mapLeft((dbError) =>
         createDomainError({
           code: DomainErrorCode.DATABASE_ERROR,
           message: `DB Error (findByEntryIds): ${getErrorMessage(dbError)}`,
+          cause: dbError,
+        }),
+      ),
+    );
+
+  const findAllIds = (): TE.TaskEither<DomainError, ReadonlyArray<EntryId>> =>
+    pipe(
+      repository.findAllIds(),
+      TE.mapLeft((dbError) =>
+        createDomainError({
+          code: DomainErrorCode.DATABASE_ERROR,
+          message: `DB Error (findAllIds): ${getErrorMessage(dbError)}`,
           cause: dbError,
         }),
       ),
@@ -47,6 +59,7 @@ export const createEntryInfoOperations = (repository: EntryInfoRepository): Entr
   return {
     findById,
     findByIds,
+    findAllIds,
     upsertEntryInfo,
   };
 };

@@ -14,6 +14,8 @@ export const mapPickResponseToEntryEventPick = (
 ): E.Either<string, RawEntryEventPick> => {
   const picksData = raw.picks ?? [];
   const elementIds = picksData.map((pick) => pick.element);
+  const chip: RawEntryEventPick['chip'] =
+    raw.active_chip === null ? 'n/a' : (raw.active_chip as RawEntryEventPick['chip']);
 
   return pipe(
     elementIds,
@@ -35,7 +37,7 @@ export const mapPickResponseToEntryEventPick = (
       return {
         entryId,
         eventId,
-        chip: raw.active_chip,
+        chip: chip,
         picks,
         transfers: 0,
         transfersCost: 0,

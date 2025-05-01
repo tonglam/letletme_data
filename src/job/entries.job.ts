@@ -8,21 +8,21 @@ import { DecoratedDependencies } from '../dependencies';
 
 const logger = getWorkflowLogger();
 
-export const teamsJob = (dependencies: DecoratedDependencies) =>
+export const entriesJob = (dependencies: DecoratedDependencies) =>
   new Elysia().use(
     cron({
-      name: 'teams',
-      pattern: '34 06 * * *',
+      name: 'entries',
+      pattern: '0 10 * * *',
       async run() {
-        logger.info('Running teams job');
+        logger.info('Running entries job');
         await pipe(
-          dependencies.teamWorkflows.syncTeams(),
+          dependencies.entryInfoWorkflows.syncEntryInfos(),
           TE.match(
             (error) => {
-              logger.error({ err: error }, 'Teams job failed');
+              logger.error({ err: error }, 'Entries job failed');
             },
             () => {
-              logger.info('Teams job completed successfully');
+              logger.info('Entries job completed successfully');
             },
           ),
         )();

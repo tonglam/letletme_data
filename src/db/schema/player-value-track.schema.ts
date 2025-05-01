@@ -1,5 +1,5 @@
 import { pgTable, integer, char, timestamp, uniqueIndex, index } from 'drizzle-orm/pg-core';
-import { autoIncrementId } from 'schema/_helpers';
+import { autoIncrementId } from 'schema/_helpers.schema';
 
 export const playerValueTracks = pgTable(
   'player_value_tracks',

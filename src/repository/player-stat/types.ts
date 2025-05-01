@@ -1,6 +1,6 @@
 import { InferInsertModel, InferSelectModel } from 'drizzle-orm';
 import * as TE from 'fp-ts/TaskEither';
-import * as schema from 'schema/player-stat';
+import * as schema from 'schema/player-stat.schema';
 import { RawPlayerStat, RawPlayerStats } from 'types/domain/player-stat.type';
 import { DBError } from 'types/error.type';
 

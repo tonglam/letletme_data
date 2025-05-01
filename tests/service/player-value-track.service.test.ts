@@ -2,32 +2,23 @@ import { createEventCache } from 'domain/event/cache';
 import { EventCache } from 'domain/event/types';
 import { createEventFixtureCache } from 'domain/event-fixture/cache';
 import { EventFixtureCache } from 'domain/event-fixture/types';
-import { createTeamCache } from 'domain/team/cache';
-import { TeamCache } from 'domain/team/types';
-import { createTeamFixtureCache } from 'domain/team-fixture/cache';
-import { TeamFixtureCache } from 'domain/team-fixture/types';
 
 import { beforeAll, describe, expect, it } from 'bun:test';
 import { CachePrefix, DefaultTTL } from 'config/cache/cache.config';
 import { createFplBootstrapDataService } from 'data/fpl/bootstrap.data';
-import { createFplFixtureDataService } from 'data/fpl/fixture.data';
-import { FplBootstrapDataService, FplFixtureDataService } from 'data/types';
+import { FplBootstrapDataService } from 'data/types';
 import { db } from 'db/index';
-import * as playerValueTrackSchema from 'db/schema/player-value-track';
 import { desc } from 'drizzle-orm';
 import * as E from 'fp-ts/Either';
 import { redisClient } from 'infrastructure/cache/client';
 import { Logger } from 'pino';
 import { createEventRepository } from 'repository/event/repository';
 import { EventRepository } from 'repository/event/types';
-import { createEventFixtureRepository } from 'repository/event-fixture/repository';
-import { EventFixtureRepository } from 'repository/event-fixture/types';
 import { createPlayerValueTrackRepository } from 'repository/player-value-track/repository';
 import { PlayerValueTrackRepository } from 'repository/player-value-track/types';
+import * as playerValueTrackSchema from 'schema/player-value-track.schema';
 import { createEventService } from 'service/event/service';
 import { EventService } from 'service/event/types';
-import { createFixtureService } from 'service/fixture/service';
-import { FixtureService } from 'service/fixture/types';
 import { createPlayerValueTrackService } from 'service/player-value-track/service';
 import { PlayerValueTrackService } from 'service/player-value-track/types';
 import { IntegrationTestSetupResult, setupIntegrationTest } from 'tests/setup/integrationTestSetup';
@@ -38,21 +29,14 @@ describe('PlayerValueTrack Service Integration Tests', () => {
   let logger: Logger;
   let playerValueTrackRepository: PlayerValueTrackRepository;
   let fplDataService: FplBootstrapDataService;
-  let fplFixtureDataService: FplFixtureDataService;
   let playerValueTrackService: PlayerValueTrackService;
   let eventService: EventService;
   let eventRepository: EventRepository;
   let eventCache: EventCache;
-  let fixtureService: FixtureService;
-  let eventFixtureRepository: EventFixtureRepository;
   let eventFixtureCache: EventFixtureCache;
-  let teamFixtureCache: TeamFixtureCache;
-  let teamCache: TeamCache;
 
   const eventCachePrefix = CachePrefix.EVENT;
   const eventFixtureCachePrefix = CachePrefix.EVENT_FIXTURE;
-  const teamFixtureCachePrefix = CachePrefix.TEAM_FIXTURE;
-  const teamCachePrefix = CachePrefix.TEAM;
   const season = '2425';
 
   beforeAll(async () => {
@@ -67,11 +51,9 @@ describe('PlayerValueTrack Service Integration Tests', () => {
     }
 
     fplDataService = createFplBootstrapDataService();
-    fplFixtureDataService = createFplFixtureDataService();
 
     playerValueTrackRepository = createPlayerValueTrackRepository();
     eventRepository = createEventRepository();
-    eventFixtureRepository = createEventFixtureRepository();
 
     eventCache = createEventCache({
       keyPrefix: eventCachePrefix,
@@ -83,25 +65,13 @@ describe('PlayerValueTrack Service Integration Tests', () => {
       season: season,
       ttlSeconds: DefaultTTL.EVENT_FIXTURE,
     });
-    teamFixtureCache = createTeamFixtureCache({
-      keyPrefix: teamFixtureCachePrefix,
-      season: season,
-      ttlSeconds: DefaultTTL.TEAM_FIXTURE,
-    });
-    teamCache = createTeamCache({
-      keyPrefix: teamCachePrefix,
-      season: season,
-      ttlSeconds: DefaultTTL.TEAM,
-    });
 
-    fixtureService = createFixtureService(
-      fplFixtureDataService,
-      eventFixtureRepository,
+    eventService = createEventService(
+      fplDataService,
+      eventRepository,
+      eventCache,
       eventFixtureCache,
-      teamFixtureCache,
-      teamCache,
     );
-    eventService = createEventService(fplDataService, eventRepository, eventCache, fixtureService);
 
     playerValueTrackService = createPlayerValueTrackService(
       fplDataService,

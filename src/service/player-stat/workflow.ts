@@ -20,7 +20,7 @@ export const createPlayerStatWorkflows = (
       TE.chainW(() => playerStatService.getPlayerStats()),
       TE.mapLeft((error: ServiceError) =>
         createServiceError({
-          code: ServiceErrorCode.OPERATION_ERROR,
+          code: ServiceErrorCode.INTEGRATION_ERROR,
           message: 'Failed to sync player stats',
           cause: error,
         }),

@@ -4,7 +4,7 @@ import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 import { mapDbTournamentInfoToDomain } from 'repository/tournament-info/mapper';
 import { TournamentInfoRepository } from 'repository/tournament-info/types';
-import * as schema from 'schema/tournament-info';
+import * as schema from 'schema/tournament-info.schema';
 import { TournamentInfo, TournamentInfos } from 'types/domain/tournament-info.type';
 import { TournamentId } from 'types/domain/tournament-info.type';
 import { DBError, DBErrorCode } from 'types/error.type';

@@ -10,7 +10,7 @@ import {
   DbEntryInfoUpdateInput,
   EntryInfoRepository,
 } from 'repository/entry-info/types';
-import * as schema from 'schema/entry-info';
+import * as schema from 'schema/entry-info.schema';
 import { EntryId, EntryInfo, EntryInfos } from 'types/domain/entry-info.type';
 import { createDBError, DBError, DBErrorCode } from 'types/error.type';
 import { getErrorMessage } from 'utils/error.util';
@@ -36,7 +36,7 @@ export const createEntryInfoRepository = (): EntryInfoRepository => {
       ),
     );
 
-  const findByIds = (entryIds: ReadonlyArray<EntryId>): TE.TaskEither<DBError, EntryInfos> =>
+  const findByIds = (ids: ReadonlyArray<EntryId>): TE.TaskEither<DBError, EntryInfos> =>
     pipe(
       TE.tryCatch(
         async () => {
@@ -46,7 +46,7 @@ export const createEntryInfoRepository = (): EntryInfoRepository => {
             .where(
               inArray(
                 schema.entryInfos.id,
-                entryIds.map((id) => Number(id)),
+                ids.map((id) => Number(id)),
               ),
             );
           return result.map(mapDbEntryInfoToDomain);
@@ -54,13 +54,13 @@ export const createEntryInfoRepository = (): EntryInfoRepository => {
         (error) =>
           createDBError({
             code: DBErrorCode.QUERY_ERROR,
-            message: `Failed to fetch entry info by ids ${entryIds.join(', ')}: ${getErrorMessage(error)}`,
+            message: `Failed to fetch entry info by ids ${ids.join(', ')}: ${getErrorMessage(error)}`,
             cause: error instanceof Error ? error : undefined,
           }),
       ),
     );
 
-  const findAllEntryIds = (): TE.TaskEither<DBError, ReadonlyArray<EntryId>> =>
+  const findAllIds = (): TE.TaskEither<DBError, ReadonlyArray<EntryId>> =>
     pipe(
       TE.tryCatch(
         async () => {
@@ -166,7 +166,7 @@ export const createEntryInfoRepository = (): EntryInfoRepository => {
   return {
     findById,
     findByIds,
-    findAllEntryIds,
+    findAllIds,
     upsertEntryInfo,
   };
 };

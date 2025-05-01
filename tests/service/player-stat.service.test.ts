@@ -12,15 +12,15 @@ import { CachePrefix, DefaultTTL } from 'config/cache/cache.config';
 import { createFplBootstrapDataService } from 'data/fpl/bootstrap.data';
 import { FplBootstrapDataService } from 'data/types';
 import { db } from 'db/index';
-import * as playerStatSchema from 'db/schema/player-stat';
 import * as E from 'fp-ts/Either';
 import { redisClient } from 'infrastructure/cache/client';
 import { Logger } from 'pino';
 import { createPlayerStatRepository } from 'repository/player-stat/repository';
 import { PlayerStatRepository } from 'repository/player-stat/types';
+import * as playerStatSchema from 'schema/player-stat.schema';
 import { createPlayerStatService } from 'service/player-stat/service';
 import { PlayerStatService } from 'service/player-stat/types';
-import { playerStatWorkflows } from 'service/player-stat/workflow';
+import { createPlayerStatWorkflows } from 'service/player-stat/workflow';
 import { IntegrationTestSetupResult, setupIntegrationTest } from 'tests/setup/integrationTestSetup';
 import { ElementTypeId } from 'types/base.type';
 
@@ -265,7 +265,7 @@ describe('PlayerStat Integration Tests', () => {
 
   describe('PlayerStat Workflow Integration', () => {
     it('should execute the sync player stats workflow end-to-end', async () => {
-      const workflows = playerStatWorkflows(playerStatService);
+      const workflows = createPlayerStatWorkflows(playerStatService);
       const result = await workflows.syncPlayerStats()();
 
       if (E.isLeft(result)) {

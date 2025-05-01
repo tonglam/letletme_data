@@ -1,6 +1,6 @@
 import { InferInsertModel, InferSelectModel } from 'drizzle-orm';
 import * as TE from 'fp-ts/TaskEither';
-import * as schema from 'schema/tournament-battle-group-result';
+import * as schema from 'schema/tournament-battle-group-result.schema';
 import {
   TournamentBattleGroupResult,
   TournamentBattleGroupResults,

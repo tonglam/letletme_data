@@ -1,6 +1,6 @@
 import { pgTable, integer, text } from 'drizzle-orm/pg-core';
-import { createdAtField } from 'schema/_helpers';
-import { teams } from 'schema/team';
+import { createdAtField } from 'schema/_helpers.schema';
+import { teams } from 'schema/team.schema';
 
 export const players = pgTable('players', {
   id: integer('id').primaryKey(),

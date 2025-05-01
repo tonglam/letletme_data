@@ -49,7 +49,7 @@ const entryEventTransferServiceOperations = (
       TE.chainW(enrichTransfers),
       TE.mapLeft((error: DomainError | DBError) =>
         createServiceError({
-          code: ServiceErrorCode.OPERATION_ERROR,
+          code: ServiceErrorCode.INTEGRATION_ERROR,
           message: 'Failed to find and enrich entry event transfers by id and event id',
           cause: error.cause,
         }),
@@ -116,7 +116,7 @@ const entryEventTransferServiceOperations = (
       tournamentEntryRepository.findAllTournamentEntryIds(),
       TE.mapLeft((error: DBError) =>
         createServiceError({
-          code: ServiceErrorCode.OPERATION_ERROR,
+          code: ServiceErrorCode.INTEGRATION_ERROR,
           message: 'Failed to find all tournament entry ids',
           cause: error.cause,
         }),

@@ -1,22 +1,22 @@
 import { createTeamCache } from 'domain/team/cache';
 import { TeamCache } from 'domain/team/types';
 
+import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 import { CachePrefix, DefaultTTL } from 'config/cache/cache.config';
 import { createFplBootstrapDataService } from 'data/fpl/bootstrap.data';
 import { FplBootstrapDataService } from 'data/types';
 import { db } from 'db/index';
-import * as teamSchema from 'db/schema/team';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import { redisClient } from 'infrastructure/cache/client';
 import { Logger } from 'pino';
 import { createTeamRepository } from 'repository/team/repository';
 import { TeamRepository } from 'repository/team/types';
+import * as teamSchema from 'schema/team.schema';
 import { createTeamService } from 'service/team/service';
 import { TeamService } from 'service/team/types';
-import { teamWorkflows } from 'service/team/workflow';
+import { createTeamWorkflows } from 'service/team/workflow';
 import { Team, Teams } from 'types/domain/team.type';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { IntegrationTestSetupResult, setupIntegrationTest } from '../setup/integrationTestSetup';
 
@@ -131,7 +131,7 @@ describe('Team Integration Tests', () => {
 
   describe('Team Workflow Integration', () => {
     it('should execute the sync teams workflow end-to-end', async () => {
-      const workflows = teamWorkflows(teamService);
+      const workflows = createTeamWorkflows(teamService);
       const result = await workflows.syncTeams()();
 
       expect(E.isRight(result)).toBe(true);

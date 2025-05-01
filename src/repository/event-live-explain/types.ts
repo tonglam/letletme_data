@@ -1,7 +1,7 @@
 import { InferInsertModel, InferSelectModel } from 'drizzle-orm';
 import { Option } from 'fp-ts/Option';
 import * as TE from 'fp-ts/TaskEither';
-import * as schema from 'schema/event-live-explain';
+import * as schema from 'schema/event-live-explain.schema';
 import { EventLiveExplain, EventLiveExplains } from 'types/domain/event-live-explain.type';
 import { EventId } from 'types/domain/event.type';
 import { PlayerId } from 'types/domain/player.type';

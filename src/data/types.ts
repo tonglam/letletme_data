@@ -3,7 +3,7 @@ import { TeamCreateInputs } from 'repository/team/types';
 import { RawEntryEventPicks } from 'types/domain/entry-event-pick.type';
 import { RawEntryEventTransfers } from 'types/domain/entry-event-transfer.type';
 import { EntryHistoryInfos } from 'types/domain/entry-history-info.type';
-import { EntryInfos } from 'types/domain/entry-info.type';
+import { EntryInfo } from 'types/domain/entry-info.type';
 import { EntryId } from 'types/domain/entry-info.type';
 import { EntryLeagueInfos } from 'types/domain/entry-league-info.type';
 import { RawEventFixtures } from 'types/domain/event-fixture.type';
@@ -44,7 +44,7 @@ export interface FplLiveDataService {
 }
 
 export interface FplEntryDataService {
-  readonly getInfos: (entryId: EntryId) => TE.TaskEither<DataLayerError, EntryInfos>;
+  readonly getInfo: (entryId: EntryId) => TE.TaskEither<DataLayerError, EntryInfo>;
   readonly getLeagues: (entryId: EntryId) => TE.TaskEither<DataLayerError, EntryLeagueInfos>;
 }
 
