@@ -11,19 +11,12 @@
     "rootDir": ".",
     "baseUrl": ".",
     "paths": {
-      "api/*": ["src/api/*"],
-      "config/*": ["src/config/*"],
-      "data/*": ["src/data/*"],
-      "db/*": ["src/db/*"],
-      "domain/*": ["src/domain/*"],
-      "infrastructure/*": ["src/infrastructure/*"],
-      "repository/*": ["src/repository/*"],
-      "service/*": ["src/service/*"],
-      "schema/*": ["src/db/schema/*"],
-      "types/*": ["src/types/*"],
-      "utils/*": ["src/utils/*"],
-      "job/*": ["src/job/*"],
-      "tests/*": ["tests/*"]
+      "@app/*": ["src/*"],
+      "@app/schemas/*": ["src/infrastructure/persistence/drizzle/schemas/*"],
+      "@app/repositories/*": ["src/infrastructure/persistence/drizzle/repositories/*"],
+      "@app/cache/*": ["src/infrastructure/cache/*"],
+      "@app/tests/*": ["tests/*"],
+      "@app/dependencies": ["src/dependencies.ts"]
     },
     "strictNullChecks": true,
     "noImplicitThis": true,
@@ -40,8 +33,8 @@
     "src/**/*.ts",
     "tests/**/*.ts",
     "tests/**/*.json",
-    "scripts/**/*.ts",
-    "drizzle.config.ts"
+    "drizzle.config.ts",
+    "node_modules/enums.schema.ts"
   ],
   "exclude": ["node_modules", "build"]
 }

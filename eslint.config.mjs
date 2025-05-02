@@ -88,8 +88,8 @@ export default [
       },
     },
     rules: {
-      '@typescript-eslint/no-empty-function': 'off',
-      '@typescript-eslint/no-explicit-any': 'off',
+      '@typescript-eslint/no-empty-function': 'on',
+      '@typescript-eslint/no-explicit-any': 'on',
       '@typescript-eslint/explicit-function-return-type': 'off',
     },
   },

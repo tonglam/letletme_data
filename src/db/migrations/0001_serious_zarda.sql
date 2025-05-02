@@ -1,1 +1,0 @@
-CREATE UNIQUE INDEX "uq_event_fixtures_event_team_h_team_a" ON "event_fixtures" USING btree ("event_id","team_h_id","team_a_id");
