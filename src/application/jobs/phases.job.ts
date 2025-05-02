@@ -1,10 +1,9 @@
+import { DecoratedDependencies } from '@app/dependencies';
+import { getWorkflowLogger } from '@app/infrastructure/logging/logger';
 import { cron } from '@elysiajs/cron';
 import { Elysia } from 'elysia';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
-import { getWorkflowLogger } from 'infrastructure/logger';
-
-import { DecoratedDependencies } from '../../dependencies';
 
 const logger = getWorkflowLogger();
 
