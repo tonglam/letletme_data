@@ -1,7 +1,3 @@
-import { EntryInfoRepository } from '@app/infrastructure/persistence/drizzle/repository/entry-info/types';
-import { PlayerCache } from '@app/old-domain/player/types';
-import { TeamCache } from '@app/old-domain/team/types';
-import { ElementTypeId, ElementTypeName, ElementTypeNames } from '@app/shared/types/base.types';
 import {
   EntryEventPick,
   EntryEventPicks,
@@ -9,39 +5,39 @@ import {
   RawEntryEventPick,
   RawEntryEventPicks,
   RawPickItem,
-} from '@app/shared/types/domain/entry-event-pick.type';
+} from '@app/domain/models/entry-event-pick.model';
 import {
   EntryEventResult,
   EntryEventResults,
   RawEntryEventResult,
   RawEntryEventResults,
-} from '@app/shared/types/domain/entry-event-result.type';
+} from '@app/domain/models/entry-event-result.model';
 import {
   EntryEventTransfer,
   EntryEventTransfers,
   RawEntryEventTransfer,
   RawEntryEventTransfers,
-} from '@app/shared/types/domain/entry-event-transfer.type';
-import { EntryId, EntryInfo } from '@app/shared/types/domain/entry-info.type';
+} from '@app/domain/models/entry-event-transfer.model';
+import { EntryId, EntryInfo } from '@app/domain/models/entry-info.model';
 import {
   EventFixture,
   EventFixtures,
   RawEventFixture,
   RawEventFixtures,
-} from '@app/shared/types/domain/event-fixture.type';
-import { EventLive, EventLives, RawEventLives } from '@app/shared/types/domain/event-live.type';
+} from '@app/domain/models/event-fixture.model';
+import { EventLive, EventLives, RawEventLives } from '@app/domain/models/event-live.model';
 import {
   EventOverallResult,
   RawEventOverallResult,
-} from '@app/shared/types/domain/event-overall-result.type';
-import { PlayerStat, PlayerStats, RawPlayerStat } from '@app/shared/types/domain/player-stat.type';
-import {
-  PlayerValue,
-  PlayerValues,
-  RawPlayerValue,
-} from '@app/shared/types/domain/player-value.type';
-import { Player, Players, RawPlayers } from '@app/shared/types/domain/player.type';
-import { Team, TeamId } from '@app/shared/types/domain/team.type';
+} from '@app/domain/models/event-overall-result.model';
+import { PlayerStat, PlayerStats, RawPlayerStat } from '@app/domain/models/player-stat.model';
+import { PlayerValue, PlayerValues, RawPlayerValue } from '@app/domain/models/player-value.model';
+import { Player, Players, RawPlayers } from '@app/domain/models/player.model';
+import { TeamId, TeamModel } from '@app/domain/models/team.model';
+import { EntryInfoRepository } from '@app/infrastructure/persistence/drizzle/repository/entry-info/types';
+import { PlayerCache } from '@app/old-domain/player/types';
+import { TeamCache } from '@app/old-domain/team/types';
+import { ElementTypeId, ElementTypeName, ElementTypeNames } from '@app/shared/types/base.types';
 import { CacheError, CacheErrorCode, createCacheError } from '@app/shared/types/error.types';
 import * as Eq from 'fp-ts/Eq';
 import { pipe } from 'fp-ts/function';
@@ -121,7 +117,7 @@ export const enrichWithTeam =
       TE.bind('teams', () => teamCache.getAllTeams()),
       TE.chain(({ players, teams }) => {
         const playerMap = new Map(players.map((p) => [p.id as number, p]));
-        const teamMap = new Map(teams.map((t: Team) => [t.id as number, t]));
+        const teamMap = new Map(teams.map((t: TeamModel) => [t.id as number, t]));
 
         const relevantPlayerMap = new Map<number, Player>();
         items.forEach((item) => {
@@ -133,7 +129,7 @@ export const enrichWithTeam =
           items,
           RA.map((item) => {
             const playerOpt = O.fromNullable(relevantPlayerMap.get(item.element));
-            const teamOpt: O.Option<Team> = pipe(
+            const teamOpt: O.Option<TeamModel> = pipe(
               playerOpt,
               O.chain((p: Player) => O.fromNullable(teamMap.get(p.teamId as number))),
             );
@@ -267,8 +263,8 @@ export const enrichEventFixtures =
 
     return pipe(
       teamCache.getAllTeams(),
-      TE.map((teams: ReadonlyArray<Team>) => {
-        const teamMap = new Map(teams.map((t: Team) => [t.id as number, t]));
+      TE.map((teams: ReadonlyArray<TeamModel>) => {
+        const teamMap = new Map(teams.map((t: TeamModel) => [t.id as number, t]));
 
         const enrichedFixtures = pipe(
           rawFixtures,
@@ -328,7 +324,7 @@ export const enrichEventLives =
           RA.map((rawEventLive) => {
             const elementId = rawEventLive.elementId as number;
             const playerOpt = O.fromNullable(playerMap.get(elementId));
-            const teamOpt: O.Option<Team> = pipe(
+            const teamOpt: O.Option<TeamModel> = pipe(
               playerOpt,
               O.chain((p: Player) => O.fromNullable(teamMap.get(p.teamId as number))),
             );

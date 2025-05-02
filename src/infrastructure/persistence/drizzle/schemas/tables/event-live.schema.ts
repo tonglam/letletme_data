@@ -54,8 +54,8 @@ export const eventLive = pgTable(
   ],
 );
 
-export type EventLive = Readonly<typeof eventLive.$inferSelect>;
-export type EventLives = readonly EventLive[];
+export type DbEventLive = Readonly<typeof eventLive.$inferSelect>;
+export type DbEventLives = readonly DbEventLive[];
 
-export type EventLiveCreateInput = Readonly<typeof eventLive.$inferInsert>;
-export type EventLiveCreateInputs = readonly EventLiveCreateInput[];
+export type DbEventLiveInsert = Readonly<typeof eventLive.$inferInsert>;
+export type DbEventLiveInserts = readonly DbEventLiveInsert[];

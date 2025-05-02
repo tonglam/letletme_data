@@ -1,6 +1,6 @@
+import { Event } from '@app/domain/models/event.type';
 import { EventID, validateEventId } from '@app/domain/types/id.types';
 import { EventResponse } from '@app/infrastructure/external/fpl/schemas/bootstrap/event.schema';
-import { Event } from '@app/shared/types/domain/event.type';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 

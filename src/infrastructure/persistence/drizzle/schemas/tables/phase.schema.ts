@@ -15,8 +15,8 @@ export const phases = pgTable('phases', {
   ...createdAtField,
 });
 
-export type Phase = Readonly<typeof phases.$inferSelect>;
-export type Phases = readonly Phase[];
+export type DbPhase = Readonly<typeof phases.$inferSelect>;
+export type DbPhases = readonly DbPhase[];
 
-export type PhaseCreateInput = Readonly<typeof phases.$inferInsert>;
-export type PhaseCreateInputs = readonly PhaseCreateInput[];
+export type DbPhaseInsert = Readonly<typeof phases.$inferInsert>;
+export type DbPhaseInserts = readonly DbPhaseInsert[];

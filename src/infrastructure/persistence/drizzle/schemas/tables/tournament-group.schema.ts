@@ -39,8 +39,8 @@ export const tournamentGroups = pgTable(
   ],
 );
 
-export type TournamentGroup = Readonly<typeof tournamentGroups.$inferSelect>;
-export type TournamentGroups = readonly TournamentGroup[];
+export type DbTournamentGroup = Readonly<typeof tournamentGroups.$inferSelect>;
+export type DbTournamentGroups = readonly DbTournamentGroup[];
 
-export type TournamentGroupCreateInput = Readonly<typeof tournamentGroups.$inferInsert>;
-export type TournamentGroupCreateInputs = readonly TournamentGroupCreateInput[];
+export type DbTournamentGroupInsert = Readonly<typeof tournamentGroups.$inferInsert>;
+export type DbTournamentGroupInserts = readonly DbTournamentGroupInsert[];

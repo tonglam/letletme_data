@@ -1,8 +1,7 @@
-import { EntryId, validateEntryId } from '@app/shared/types/domain/entry-info.type';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as O from 'fp-ts/Option';
-import * as RA from 'fp-ts/ReadonlyArray';
+import { z } from 'zod';
 
 export const safeStringToNumber = (s: string | null | undefined): O.Option<number> =>
   pipe(
@@ -16,6 +15,21 @@ export const safeStringToDecimal = (s: string | null | undefined): O.Option<stri
     safeStringToNumber(s),
     O.map((n) => n.toFixed(2)),
   );
+
+export const safeParseJson =
+  <T>(schema: z.ZodType<T>) =>
+  (data: unknown): E.Either<Error, T> => {
+    try {
+      return E.right(schema.parse(data));
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return E.left(
+          new Error(`JSON validation failed: ${error.errors.map((e) => e.message).join(', ')}`),
+        );
+      }
+      return E.left(new Error('Unknown JSON parsing error'));
+    }
+  };
 
 export enum Season {
   Season_1617 = '1617',
@@ -42,18 +56,3 @@ export const getCurrentSeason = (): string => {
 };
 
 export const getAllSeasons = (): Season[] => Object.values(Season);
-
-export const parseAndValidateEntryIds = (idsString: string | undefined): ReadonlyArray<EntryId> => {
-  if (!idsString) {
-    return [];
-  }
-  return pipe(
-    idsString
-      .split(',')
-      .map(Number)
-      .filter((id) => !isNaN(id)),
-    RA.map(validateEntryId),
-    RA.filter(E.isRight),
-    RA.map((e) => e.right),
-  );
-};

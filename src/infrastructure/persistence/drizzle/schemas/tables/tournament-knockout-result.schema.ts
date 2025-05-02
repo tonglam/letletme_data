@@ -41,10 +41,10 @@ export const tournamentKnockoutResults = pgTable(
   ],
 );
 
-export type TournamentKnockoutResult = Readonly<typeof tournamentKnockoutResults.$inferSelect>;
-export type TournamentKnockoutResults = readonly TournamentKnockoutResult[];
+export type DbTournamentKnockoutResult = Readonly<typeof tournamentKnockoutResults.$inferSelect>;
+export type DbTournamentKnockoutResults = readonly DbTournamentKnockoutResult[];
 
-export type TournamentKnockoutResultCreateInput = Readonly<
+export type DbTournamentKnockoutResultInsert = Readonly<
   typeof tournamentKnockoutResults.$inferInsert
 >;
-export type TournamentKnockoutResultCreateInputs = readonly TournamentKnockoutResultCreateInput[];
+export type DbTournamentKnockoutResultInserts = readonly DbTournamentKnockoutResultInsert[];

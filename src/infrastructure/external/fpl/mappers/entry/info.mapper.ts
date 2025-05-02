@@ -1,6 +1,6 @@
+import { EntryInfo } from '@app/domain/models/entry-info.model';
 import { EntryID, validateEntryId } from '@app/domain/types/id.types';
 import { EntryInfoResponse } from '@app/infrastructure/external/fpl/schemas/entry/info.schema';
-import { EntryInfo } from '@app/shared/types/domain/entry-info.type';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 

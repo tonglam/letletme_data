@@ -26,8 +26,8 @@ export const entryEventTransfers = pgTable(
   (table) => [index('idx_entry_event_transfers_entry_id').on(table.entryId)],
 );
 
-export type EntryEventTransfer = Readonly<typeof entryEventTransfers.$inferSelect>;
-export type EntryEventTransfers = readonly EntryEventTransfer[];
+export type DbEntryEventTransfer = Readonly<typeof entryEventTransfers.$inferSelect>;
+export type DbEntryEventTransfers = readonly DbEntryEventTransfer[];
 
-export type EntryEventTransferCreateInput = Readonly<typeof entryEventTransfers.$inferInsert>;
-export type EntryEventTransferCreateInputs = readonly EntryEventTransferCreateInput[];
+export type DbEntryEventTransferInsert = Readonly<typeof entryEventTransfers.$inferInsert>;
+export type DbEntryEventTransferInserts = readonly DbEntryEventTransferInsert[];

@@ -1,3 +1,10 @@
+import { RawEventOverallResult } from '@app/domain/models/event-overall-result.model';
+import { Events } from '@app/domain/models/event.type';
+import { PhasesModel } from '@app/domain/models/phase.model';
+import { RawPlayerStats } from '@app/domain/models/player-stat.model';
+import { PlayerValueTracks } from '@app/domain/models/player-value-track.model';
+import { SourcePlayerValues } from '@app/domain/models/player-value.model';
+import { RawPlayers } from '@app/domain/models/player.model';
 import { EventID } from '@app/domain/types/id.types';
 import { apiConfig } from '@app/infrastructure/config/api.config';
 import { FplBootstrapDataService } from '@app/infrastructure/external/fpl/clients/types';
@@ -16,13 +23,6 @@ import {
   BootStrapResponseSchema,
 } from '@app/infrastructure/external/fpl/schemas/bootstrap/bootstrap.schema';
 import { TeamCreateInputs } from '@app/infrastructure/persistence/drizzle/repository/team/types';
-import { RawEventOverallResult } from '@app/shared/types/domain/event-overall-result.type';
-import { Events } from '@app/shared/types/domain/event.type';
-import { Phases } from '@app/shared/types/domain/phase.type';
-import { RawPlayerStats } from '@app/shared/types/domain/player-stat.type';
-import { PlayerValueTracks } from '@app/shared/types/domain/player-value-track.type';
-import { SourcePlayerValues } from '@app/shared/types/domain/player-value.type';
-import { RawPlayers } from '@app/shared/types/domain/player.type';
 import { DataLayerError, DataLayerErrorCode } from '@app/shared/types/error.types';
 import { createDataLayerError } from '@app/shared/utils/error.util';
 import { FplApiContext, logFplApiCall, logFplApiError } from '@app/shared/utils/logger.util';
@@ -165,7 +165,7 @@ export const createFplBootstrapDataService = (): FplBootstrapDataService => {
       ),
     );
 
-  const getPhases = (): TE.TaskEither<DataLayerError, Phases> =>
+  const getPhases = (): TE.TaskEither<DataLayerError, PhasesModel> =>
     pipe(
       getFplBootstrapDataInternal(),
       TE.chain((bootstrapData) =>

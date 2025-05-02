@@ -2,9 +2,13 @@ import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 
 // --- PlayerTypeID ---
-export type PlayerTypeID = 1 | 2 | 3 | 4 | 5;
+export const PlayerTypeIDs = [1, 2, 3, 4, 5] as const;
 
-export type PlayerTypeName = 'GKP' | 'DEF' | 'MID' | 'FWD' | 'MNG';
+export type PlayerTypeID = (typeof PlayerTypeIDs)[number];
+
+export const PlayerTypeNames = ['GKP', 'DEF', 'MID', 'FWD', 'MNG'] as const;
+
+export type PlayerTypeName = (typeof PlayerTypeNames)[number];
 
 export const PlayerTypeMap = {
   idToName: {
@@ -24,22 +28,24 @@ export const PlayerTypeMap = {
   } as const satisfies Record<PlayerTypeName, PlayerTypeID>,
 };
 
-export const validatePlayerTypeId = (value: unknown): E.Either<string, PlayerTypeID> => {
+export const validatePlayerTypeId = (value: unknown): E.Either<Error, PlayerTypeID> => {
   return pipe(
     value,
     E.fromPredicate(
       (v): v is PlayerTypeID => typeof v === 'number' && v in PlayerTypeMap.idToName,
-      () => 'Invalid player type ID: must be a number between 1 and 5',
+      (err) =>
+        new Error(`Invalid player type ID: must be a number between 1 and 5. Received: ${err}`),
     ),
   );
 };
 
-export const validatePlayerTypeName = (value: unknown): E.Either<string, PlayerTypeName> => {
+export const validatePlayerTypeName = (value: unknown): E.Either<Error, PlayerTypeName> => {
   return pipe(
     value,
     E.fromPredicate(
       (v): v is PlayerTypeName => typeof v === 'string' && v in PlayerTypeMap.nameToId,
-      () => 'Invalid player type name: must be GKP, DEF, MID, FWD, or MNG',
+      (err) =>
+        new Error(`Invalid player type name: must be GKP, DEF, MID, FWD, or MNG. Received: ${err}`),
     ),
   );
 };
@@ -61,32 +67,35 @@ export const getAllPlayerTypeNames = (): PlayerTypeName[] => {
 };
 
 // --- LeagueType ---
-export type LeagueType = 'Classic' | 'H2H';
+export const LeagueTypes = ['Classic', 'H2H'] as const;
 
-export const LeagueTypes: LeagueType[] = ['Classic', 'H2H'];
+export type LeagueType = (typeof LeagueTypes)[number];
 
-export const validateLeagueType = (value: unknown): E.Either<string, LeagueType> => {
+export const validateLeagueType = (value: unknown): E.Either<Error, LeagueType> => {
   return pipe(
     value,
     E.fromPredicate(
       (v): v is LeagueType => typeof v === 'string' && LeagueTypes.includes(v as LeagueType),
-      () => 'Invalid league type: must be Classic or H2H',
+      (err) => new Error(`Invalid league type: must be Classic or H2H. Received: ${err}`),
     ),
   );
 };
 
 // --- ValueChangeType ---
-export type ValueChangeType = 'start' | 'rise' | 'fall';
+export const ValueChangeTypes = ['start', 'rise', 'fall'] as const;
 
-export const ValueChangeTypes: ValueChangeType[] = ['start', 'rise', 'fall'];
+export type ValueChangeType = (typeof ValueChangeTypes)[number];
 
-export const validateValueChangeType = (value: unknown): E.Either<string, ValueChangeType> => {
+export const validateValueChangeType = (value: unknown): E.Either<Error, ValueChangeType> => {
   return pipe(
     value,
     E.fromPredicate(
       (v): v is ValueChangeType =>
         typeof v === 'string' && ValueChangeTypes.includes(v as ValueChangeType),
-      () => 'Invalid value change type: must be one of start, rise, or fall',
+      (err) =>
+        new Error(
+          `Invalid value change type: must be one of start, rise, or fall. Received: ${err}`,
+        ),
     ),
   );
 };

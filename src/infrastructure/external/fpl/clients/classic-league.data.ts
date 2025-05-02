@@ -1,3 +1,4 @@
+import { ClassicLeague, LeagueId } from '@app/domain/models/league.model';
 import { apiConfig } from '@app/infrastructure/config/api.config';
 import { FplClassicLeagueDataService } from '@app/infrastructure/external/fpl/clients/types';
 import { mapClassicLeagueResponseToDomain } from '@app/infrastructure/external/fpl/mappers/league/classic-league.mapper';
@@ -6,7 +7,6 @@ import {
   ClassicLeagueResponseSchema,
 } from '@app/infrastructure/external/fpl/schemas/league/classic-league.schema';
 import { ClassicResultResponses } from '@app/infrastructure/external/fpl/schemas/league/classic-result.schema';
-import { ClassicLeague, LeagueId } from '@app/shared/types/domain/league.type';
 import { DataLayerError, DataLayerErrorCode } from '@app/shared/types/error.types';
 import { createDataLayerError } from '@app/shared/utils/error.util';
 import { FplApiContext, logFplApiCall, logFplApiError } from '@app/shared/utils/logger.util';

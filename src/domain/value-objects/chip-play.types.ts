@@ -1,8 +1,9 @@
-import { Chip } from '@app/domain/types/chip.types';
+import { Chips } from '@app/domain/types/chip.types';
+import { z } from 'zod';
 
-export type ChipPlay = {
-  readonly chip_name: Chip;
-  readonly num_played: number;
-};
+export const ChipPlay = z.object({
+  chip_name: z.enum(Chips),
+  num_played: z.number().int().nonnegative(),
+});
 
-export type ChipPlays = readonly ChipPlay[];
+export type ChipPlay = z.infer<typeof ChipPlay>;

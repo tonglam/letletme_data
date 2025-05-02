@@ -45,8 +45,8 @@ export const tournamentInfos = pgTable(
   ],
 );
 
-export type TournamentInfo = Readonly<typeof tournamentInfos.$inferSelect>;
-export type TournamentInfos = readonly TournamentInfo[];
+export type DbTournamentInfo = Readonly<typeof tournamentInfos.$inferSelect>;
+export type DbTournamentInfos = readonly DbTournamentInfo[];
 
-export type TournamentInfoCreateInput = Readonly<typeof tournamentInfos.$inferInsert>;
-export type TournamentInfoCreateInputs = readonly TournamentInfoCreateInput[];
+export type DbTournamentInfoInsert = Readonly<typeof tournamentInfos.$inferInsert>;
+export type DbTournamentInfosInserts = readonly DbTournamentInfoInsert[];

@@ -1,3 +1,5 @@
+import { EntryInfo } from '@app/domain/models/entry-info.model';
+import { EntryLeagueInfos } from '@app/domain/models/entry-league-info.model';
 import { EntryID } from '@app/domain/types/id.types';
 import { LeagueTypes } from '@app/domain/types/type.types';
 import { apiConfig } from '@app/infrastructure/config/api.config';
@@ -8,8 +10,6 @@ import {
   EntryResponse,
   EntryResponseSchema,
 } from '@app/infrastructure/external/fpl/schemas/entry/entry.schema';
-import { EntryInfo } from '@app/shared/types/domain/entry-info.type';
-import { EntryLeagueInfos } from '@app/shared/types/domain/entry-league-info.type';
 import { DataLayerError, DataLayerErrorCode } from '@app/shared/types/error.types';
 import { createDataLayerError } from '@app/shared/utils/error.util';
 import { FplApiContext, logFplApiCall, logFplApiError } from '@app/shared/utils/logger.util';

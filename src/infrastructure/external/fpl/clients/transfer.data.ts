@@ -1,3 +1,4 @@
+import { RawEntryEventTransfers } from '@app/domain/models/entry-event-transfer.model';
 import { EntryID, EventID } from '@app/domain/types/id.types';
 import { apiConfig } from '@app/infrastructure/config/api.config';
 import { FplTransferDataService } from '@app/infrastructure/external/fpl/clients/types';
@@ -6,7 +7,6 @@ import {
   TransferResponseSchema,
   TransfersResponse,
 } from '@app/infrastructure/external/fpl/schemas/transfer/transfer.schema';
-import { RawEntryEventTransfers } from '@app/shared/types/domain/entry-event-transfer.type';
 import { DataLayerError, DataLayerErrorCode } from '@app/shared/types/error.types';
 import { createDataLayerError } from '@app/shared/utils/error.util';
 import { FplApiContext, logFplApiCall, logFplApiError } from '@app/shared/utils/logger.util';

@@ -1,10 +1,10 @@
+import { TeamModel } from '@app/domain/models/team.model';
 import { TeamID, validateTeamId } from '@app/domain/types/id.types';
 import { TeamResponse } from '@app/infrastructure/external/fpl/schemas/bootstrap/team.schema';
-import { Team } from '@app/shared/types/domain/team.type';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 
-export const mapTeamResponseToTeam = (raw: TeamResponse): E.Either<string, Team> =>
+export const mapTeamResponseToTeam = (raw: TeamResponse): E.Either<string, TeamModel> =>
   pipe(
     E.Do,
     E.bind('id', () => validateTeamId(raw.id)),

@@ -1,10 +1,10 @@
-import { EntryID, EventID, validatePlayerId } from '@app/domain/types/id.types';
-import { PickResponse } from '@app/infrastructure/external/fpl/schemas/pick/pick.schema';
 import {
   RawEntryEventPick,
   RawPickItem,
   RawPickItems,
-} from '@app/shared/types/domain/entry-event-pick.type';
+} from '@app/domain/models/entry-event-pick.model';
+import { EntryID, EventID, validatePlayerId } from '@app/domain/types/id.types';
+import { PickResponse } from '@app/infrastructure/external/fpl/schemas/pick/pick.schema';
 import * as A from 'fp-ts/Array';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';

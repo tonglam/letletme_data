@@ -27,8 +27,8 @@ export const events = pgTable('events', {
   ...createdAtField,
 });
 
-export type Event = Readonly<typeof events.$inferSelect>;
-export type Events = readonly Event[];
+export type DbEvent = Readonly<typeof events.$inferSelect>;
+export type DbEvents = readonly DbEvent[];
 
-export type EventCreateInput = Readonly<typeof events.$inferInsert>;
-export type EventCreateInputs = readonly EventCreateInput[];
+export type DbEventInsert = Readonly<typeof events.$inferInsert>;
+export type DbEventInserts = readonly DbEventInsert[];

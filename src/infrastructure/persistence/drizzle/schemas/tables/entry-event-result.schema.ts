@@ -40,8 +40,8 @@ export const entryEventResults = pgTable(
   ],
 );
 
-export type EntryEventResult = Readonly<typeof entryEventResults.$inferSelect>;
-export type EntryEventResults = readonly EntryEventResult[];
+export type DbEntryEventResult = Readonly<typeof entryEventResults.$inferSelect>;
+export type DbEntryEventResults = readonly DbEntryEventResult[];
 
-export type EntryEventResultCreateInput = Readonly<typeof entryEventResults.$inferInsert>;
-export type EntryEventResultCreateInputs = readonly EntryEventResultCreateInput[];
+export type DbEntryEventResultInsert = Readonly<typeof entryEventResults.$inferInsert>;
+export type DbEntryEventResultInserts = readonly DbEntryEventResultInsert[];

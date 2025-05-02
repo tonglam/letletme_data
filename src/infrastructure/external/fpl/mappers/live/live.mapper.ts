@@ -1,7 +1,7 @@
+import { RawEventLive } from '@app/domain/models/event-live.model';
+import { EventId } from '@app/domain/models/event.type';
+import { PlayerId, validatePlayerId } from '@app/domain/models/player.model';
 import { LiveResponse } from '@app/infrastructure/external/fpl/schemas/live/live.schema';
-import { RawEventLive } from '@app/shared/types/domain/event-live.type';
-import { EventId } from '@app/shared/types/domain/event.type';
-import { PlayerId, validatePlayerId } from '@app/shared/types/domain/player.type';
 import { safeStringToDecimal } from '@app/shared/utils/common.util';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';

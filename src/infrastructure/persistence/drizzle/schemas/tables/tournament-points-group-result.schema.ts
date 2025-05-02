@@ -39,13 +39,12 @@ export const tournamentPointsGroupResults = pgTable(
   ],
 );
 
-export type TournamentPointsGroupResult = Readonly<
+export type DbTournamentPointsGroupResult = Readonly<
   typeof tournamentPointsGroupResults.$inferSelect
 >;
-export type TournamentPointsGroupResults = readonly TournamentPointsGroupResult[];
+export type DbTournamentPointsGroupResults = readonly DbTournamentPointsGroupResult[];
 
-export type TournamentPointsGroupResultCreateInput = Readonly<
+export type DbTournamentPointsGroupResultInsert = Readonly<
   typeof tournamentPointsGroupResults.$inferInsert
 >;
-export type TournamentPointsGroupResultCreateInputs =
-  readonly TournamentPointsGroupResultCreateInput[];
+export type DbTournamentPointsGroupResultInserts = readonly DbTournamentPointsGroupResultInsert[];

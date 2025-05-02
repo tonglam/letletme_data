@@ -28,8 +28,8 @@ export const playerValues = pgTable(
   ],
 );
 
-export type PlayerValue = Readonly<typeof playerValues.$inferSelect>;
-export type PlayerValues = readonly PlayerValue[];
+export type DbPlayerValue = Readonly<typeof playerValues.$inferSelect>;
+export type DbPlayerValues = readonly DbPlayerValue[];
 
-export type PlayerValueCreateInput = Readonly<typeof playerValues.$inferInsert>;
-export type PlayerValueCreateInputs = readonly PlayerValueCreateInput[];
+export type DbPlayerValueInsert = Readonly<typeof playerValues.$inferInsert>;
+export type DbPlayerValuesInserts = readonly DbPlayerValueInsert[];

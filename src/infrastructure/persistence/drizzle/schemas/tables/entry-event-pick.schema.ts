@@ -26,8 +26,8 @@ export const entryEventPicks = pgTable(
   ],
 );
 
-export type EntryEventPick = Readonly<typeof entryEventPicks.$inferSelect>;
-export type EntryEventPicks = readonly EntryEventPick[];
+export type DbEntryEventPick = Readonly<typeof entryEventPicks.$inferSelect>;
+export type DbEntryEventPicks = readonly DbEntryEventPick[];
 
-export type EntryEventPickCreateInput = Readonly<typeof entryEventPicks.$inferInsert>;
-export type EntryEventPickCreateInputs = readonly EntryEventPickCreateInput[];
+export type DbEntryEventPickInsert = Readonly<typeof entryEventPicks.$inferInsert>;
+export type DbEntryEventPickInserts = readonly DbEntryEventPickInsert[];

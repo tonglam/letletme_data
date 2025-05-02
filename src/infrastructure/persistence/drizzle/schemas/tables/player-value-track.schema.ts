@@ -29,8 +29,8 @@ export const playerValueTracks = pgTable(
   ],
 );
 
-export type PlayerValueTrack = Readonly<typeof playerValueTracks.$inferSelect>;
-export type PlayerValueTracks = readonly PlayerValueTrack[];
+export type DbPlayerValueTrack = Readonly<typeof playerValueTracks.$inferSelect>;
+export type DbPlayerValueTracks = readonly DbPlayerValueTrack[];
 
-export type PlayerValueTrackCreateInput = Readonly<typeof playerValueTracks.$inferInsert>;
-export type PlayerValueTrackCreateInputs = readonly PlayerValueTrackCreateInput[];
+export type DbPlayerValueTrackInsert = Readonly<typeof playerValueTracks.$inferInsert>;
+export type DbPlayerValueTrackInserts = readonly DbPlayerValueTrackInsert[];

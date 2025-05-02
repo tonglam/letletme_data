@@ -21,8 +21,8 @@ export const entryInfos = pgTable('entry_infos', {
   ...createdAtField,
 });
 
-export type EntryInfo = Readonly<typeof entryInfos.$inferSelect>;
-export type EntryInfos = readonly EntryInfo[];
+export type DbEntryInfo = Readonly<typeof entryInfos.$inferSelect>;
+export type DbEntryInfos = readonly DbEntryInfo[];
 
-export type EntryInfoCreateInput = Readonly<typeof entryInfos.$inferInsert>;
-export type EntryInfoCreateInputs = readonly EntryInfoCreateInput[];
+export type DbEntryInfoInsert = Readonly<typeof entryInfos.$inferInsert>;
+export type DbEntryInfoInserts = readonly DbEntryInfoInsert[];

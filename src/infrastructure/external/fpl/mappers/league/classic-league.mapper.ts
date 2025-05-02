@@ -1,7 +1,7 @@
+import { ClassicLeague } from '@app/domain/models/league.model';
 import { EntryID, LeagueID } from '@app/domain/types/id.types';
 import { LeagueTypes } from '@app/domain/types/type.types';
 import { ClassicLeagueResponse } from '@app/infrastructure/external/fpl/schemas/league/classic-league.schema';
-import { ClassicLeague } from '@app/shared/types/domain/league.type';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 

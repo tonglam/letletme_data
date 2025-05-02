@@ -20,8 +20,8 @@ export const entryHistoryInfos = pgTable(
   ],
 );
 
-export type EntryHistoryInfo = Readonly<typeof entryHistoryInfos.$inferSelect>;
-export type EntryHistoryInfos = readonly EntryHistoryInfo[];
+export type DbEntryHistoryInfo = Readonly<typeof entryHistoryInfos.$inferSelect>;
+export type DbEntryHistoryInfos = readonly DbEntryHistoryInfo[];
 
-export type EntryHistoryInfoCreateInput = Readonly<typeof entryHistoryInfos.$inferInsert>;
-export type EntryHistoryInfoCreateInputs = readonly EntryHistoryInfoCreateInput[];
+export type DbEntryHistoryInfoInsert = Readonly<typeof entryHistoryInfos.$inferInsert>;
+export type DbEntryHistoryInfoInserts = readonly DbEntryHistoryInfoInsert[];

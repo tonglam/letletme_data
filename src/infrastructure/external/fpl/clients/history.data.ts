@@ -1,3 +1,4 @@
+import { EntryHistoryInfos } from '@app/domain/models/entry-history-info.model';
 import { EntryID } from '@app/domain/types/id.types';
 import { apiConfig } from '@app/infrastructure/config/api.config';
 import { FplHistoryDataService } from '@app/infrastructure/external/fpl/clients/types';
@@ -6,7 +7,6 @@ import {
   EntryHistoryResponse,
   EntryHistoryResponseSchema,
 } from '@app/infrastructure/external/fpl/schemas/history/history.schema';
-import { EntryHistoryInfos } from '@app/shared/types/domain/entry-history-info.type';
 import { DataLayerError, DataLayerErrorCode } from '@app/shared/types/error.types';
 import { createDataLayerError } from '@app/shared/utils/error.util';
 import { FplApiContext, logFplApiCall, logFplApiError } from '@app/shared/utils/logger.util';

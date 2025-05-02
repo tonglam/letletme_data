@@ -1,6 +1,6 @@
+import { EntryHistoryInfo } from '@app/domain/models/entry-history-info.model';
 import { EntryID } from '@app/domain/types/id.types';
 import { EntryHistoryInfoResponse } from '@app/infrastructure/external/fpl/schemas/history/info.schema';
-import { EntryHistoryInfo } from '@app/shared/types/domain/entry-history-info.type';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 

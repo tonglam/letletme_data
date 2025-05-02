@@ -1,3 +1,4 @@
+import { RawEventFixtures } from '@app/domain/models/event-fixture.model';
 import { EventID } from '@app/domain/types/id.types';
 import { apiConfig } from '@app/infrastructure/config/api.config';
 import { FplFixtureDataService } from '@app/infrastructure/external/fpl/clients/types';
@@ -6,7 +7,6 @@ import {
   EventFixturesResponse,
   EventFixturesResponseSchema,
 } from '@app/infrastructure/external/fpl/schemas/fixture/fixture.schema';
-import { RawEventFixtures } from '@app/shared/types/domain/event-fixture.type';
 import { DataLayerError, DataLayerErrorCode } from '@app/shared/types/error.types';
 import { createDataLayerError } from '@app/shared/utils/error.util';
 import { FplApiContext, logFplApiCall, logFplApiError } from '@app/shared/utils/logger.util';

@@ -61,8 +61,8 @@ export const playerStats = pgTable(
   ],
 );
 
-export type PlayerStat = Readonly<typeof playerStats.$inferSelect>;
-export type PlayerStats = readonly PlayerStat[];
+export type DbPlayerStat = Readonly<typeof playerStats.$inferSelect>;
+export type DbPlayerStats = readonly DbPlayerStat[];
 
-export type PlayerStatCreateInput = Readonly<typeof playerStats.$inferInsert>;
-export type PlayerStatCreateInputs = readonly PlayerStatCreateInput[];
+export type DbPlayerStatInsert = Readonly<typeof playerStats.$inferInsert>;
+export type DbPlayerStatInserts = readonly DbPlayerStatInsert[];

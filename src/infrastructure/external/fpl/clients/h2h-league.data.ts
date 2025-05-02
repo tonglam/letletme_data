@@ -1,3 +1,4 @@
+import { H2hLeague, LeagueId } from '@app/domain/models/league.model';
 import { apiConfig } from '@app/infrastructure/config/api.config';
 import { FplH2hLeagueDataService } from '@app/infrastructure/external/fpl/clients/types';
 import { mapH2hLeagueResponseToDomain } from '@app/infrastructure/external/fpl/mappers/league/h2h-league.mapper';
@@ -6,7 +7,6 @@ import {
   H2hLeagueResponseSchema,
 } from '@app/infrastructure/external/fpl/schemas/league/h2h-league.schema';
 import { H2hResultResponses } from '@app/infrastructure/external/fpl/schemas/league/h2h-result.schema';
-import { H2hLeague, LeagueId } from '@app/shared/types/domain/league.type';
 import { DataLayerError, DataLayerErrorCode } from '@app/shared/types/error.types';
 import { createDataLayerError } from '@app/shared/utils/error.util';
 import { FplApiContext, logFplApiCall, logFplApiError } from '@app/shared/utils/logger.util';

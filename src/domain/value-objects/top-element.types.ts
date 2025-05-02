@@ -1,8 +1,8 @@
-import { PlayerID } from '@app/domain/types/id.types';
+import { z } from 'zod';
 
-export type TopElement = {
-  readonly id: PlayerID;
-  readonly points: number;
-};
+export const TopElementInfo = z.object({
+  id: z.number().int().positive(),
+  points: z.number().int().nonnegative(),
+});
 
-export type TopElements = readonly TopElement[];
+export type TopElementInfo = z.infer<typeof TopElementInfo>;

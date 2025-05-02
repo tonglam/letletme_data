@@ -45,13 +45,12 @@ export const tournamentBattleGroupResults = pgTable(
   ],
 );
 
-export type TournamentBattleGroupResult = Readonly<
+export type DbTournamentBattleGroupResult = Readonly<
   typeof tournamentBattleGroupResults.$inferSelect
 >;
-export type TournamentBattleGroupResults = readonly TournamentBattleGroupResult[];
+export type DbTournamentBattleGroupResults = readonly DbTournamentBattleGroupResult[];
 
-export type TournamentBattleGroupResultCreateInput = Readonly<
+export type DbTournamentBattleGroupResultInsert = Readonly<
   typeof tournamentBattleGroupResults.$inferInsert
 >;
-export type TournamentBattleGroupResultCreateInputs =
-  readonly TournamentBattleGroupResultCreateInput[];
+export type DbTournamentBattleGroupResultInserts = readonly DbTournamentBattleGroupResultInsert[];

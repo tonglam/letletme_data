@@ -1,6 +1,6 @@
+import { RawEventOverallResult } from '@app/domain/models/event-overall-result.model';
 import { validateEventId } from '@app/domain/types/id.types';
 import { EventResponse } from '@app/infrastructure/external/fpl/schemas/bootstrap/event.schema';
-import { RawEventOverallResult } from '@app/shared/types/domain/event-overall-result.type';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 

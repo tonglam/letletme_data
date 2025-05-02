@@ -2,72 +2,76 @@ import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 
 // --- TournamentMode ---
-export type TournamentMode = 'normal';
+export const TournamentModes = ['normal'] as const;
 
-export const TournamentModes: TournamentMode[] = ['normal'];
+export type TournamentMode = (typeof TournamentModes)[number];
 
-export const validateTournamentMode = (value: unknown): E.Either<string, TournamentMode> => {
+export const validateTournamentMode = (value: unknown): E.Either<Error, TournamentMode> => {
   return pipe(
     value,
     E.fromPredicate(
       (v): v is TournamentMode =>
         typeof v === 'string' && TournamentModes.includes(v as TournamentMode),
-      () => 'Invalid tournament mode: must be normal',
+      (err) => new Error(`Invalid tournament mode: must be normal. Received: ${err}`),
     ),
   );
 };
 
 // --- GroupMode ---
-export type GroupMode = 'no_group' | 'points_races' | 'battle_races';
+export const GroupModes = ['no_group', 'points_races', 'battle_races'] as const;
 
-export const GroupModes: GroupMode[] = ['no_group', 'points_races', 'battle_races'];
+export type GroupMode = (typeof GroupModes)[number];
 
-export const validateGroupMode = (value: unknown): E.Either<string, GroupMode> => {
+export const validateGroupMode = (value: unknown): E.Either<Error, GroupMode> => {
   return pipe(
     value,
     E.fromPredicate(
       (v): v is GroupMode => GroupModes.includes(v as GroupMode),
-      () => 'Invalid group mode: must be no_group, points_races, or battle_races',
+      (err) =>
+        new Error(
+          `Invalid group mode: must be no_group, points_races, or battle_races. Received: ${err}`,
+        ),
     ),
   );
 };
 
 // --- KnockoutMode ---
-export type KnockoutMode =
-  | 'no_knockout'
-  | 'single_elimination'
-  | 'double_elimination'
-  | 'head_to_head';
-
-export const KnockoutModes: KnockoutMode[] = [
+export const KnockoutModes = [
   'no_knockout',
   'single_elimination',
   'double_elimination',
   'head_to_head',
-];
+] as const;
 
-export const validateKnockoutMode = (value: unknown): E.Either<string, KnockoutMode> => {
+export type KnockoutMode = (typeof KnockoutModes)[number];
+
+export const validateKnockoutMode = (value: unknown): E.Either<Error, KnockoutMode> => {
   return pipe(
     value,
     E.fromPredicate(
       (v): v is KnockoutMode => KnockoutModes.includes(v as KnockoutMode),
-      () =>
-        'Invalid knockout mode: must be no_knockout, single_elimination, double_elimination, or head_to_head',
+      (err) =>
+        new Error(
+          `Invalid knockout mode: must be no_knockout, single_elimination, double_elimination, or head_to_head. Received: ${err}`,
+        ),
     ),
   );
 };
 
 // --- TournamentState ---
-export type TournamentState = 'active' | 'inactive' | 'finished';
+export const TournamentStates = ['active', 'inactive', 'finished'] as const;
 
-export const TournamentStates: TournamentState[] = ['active', 'inactive', 'finished'];
+export type TournamentState = (typeof TournamentStates)[number];
 
-export const validateTournamentState = (value: unknown): E.Either<string, TournamentState> => {
+export const validateTournamentState = (value: unknown): E.Either<Error, TournamentState> => {
   return pipe(
     value,
     E.fromPredicate(
       (v): v is TournamentState => TournamentStates.includes(v as TournamentState),
-      () => 'Invalid tournament state: must be active, inactive, or finished',
+      (err) =>
+        new Error(
+          `Invalid tournament state: must be active, inactive, or finished. Received: ${err}`,
+        ),
     ),
   );
 };

@@ -1,3 +1,4 @@
+import { RawEntryEventPicks } from '@app/domain/models/entry-event-pick.model';
 import { EntryID, EventID } from '@app/domain/types/id.types';
 import { apiConfig } from '@app/infrastructure/config/api.config';
 import { FplPickDataService } from '@app/infrastructure/external/fpl/clients/types';
@@ -6,7 +7,6 @@ import {
   PickResponse,
   PickResponseSchema,
 } from '@app/infrastructure/external/fpl/schemas/pick/pick.schema';
-import { RawEntryEventPicks } from '@app/shared/types/domain/entry-event-pick.type';
 import { DataLayerError, DataLayerErrorCode } from '@app/shared/types/error.types';
 import { createDataLayerError } from '@app/shared/utils/error.util';
 import { FplApiContext, logFplApiCall, logFplApiError } from '@app/shared/utils/logger.util';

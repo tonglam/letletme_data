@@ -25,8 +25,8 @@ export const entryLeagueInfos = pgTable(
   ],
 );
 
-export type EntryLeagueInfo = Readonly<typeof entryLeagueInfos.$inferSelect>;
-export type EntryLeagueInfos = readonly EntryLeagueInfo[];
+export type DbEntryLeagueInfo = Readonly<typeof entryLeagueInfos.$inferSelect>;
+export type DbEntryLeagueInfos = readonly DbEntryLeagueInfo[];
 
-export type EntryLeagueInfoCreateInput = Readonly<typeof entryLeagueInfos.$inferInsert>;
-export type EntryLeagueInfoCreateInputs = readonly EntryLeagueInfoCreateInput[];
+export type DbEntryLeagueInfoInsert = Readonly<typeof entryLeagueInfos.$inferInsert>;
+export type DbEntryLeagueInfoInserts = readonly DbEntryLeagueInfoInsert[];

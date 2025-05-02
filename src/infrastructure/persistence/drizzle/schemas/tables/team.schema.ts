@@ -15,8 +15,8 @@ export const teams = pgTable('teams', {
   ...createdAtField,
 });
 
-export type Team = Readonly<typeof teams.$inferSelect>;
-export type Teams = readonly Team[];
+export type DbTeam = Readonly<typeof teams.$inferSelect>;
+export type DbTeams = readonly DbTeam[];
 
-export type TeamCreateInput = Readonly<typeof teams.$inferInsert>;
-export type TeamCreateInputs = readonly TeamCreateInput[];
+export type DbTeamInsert = Readonly<typeof teams.$inferInsert>;
+export type DbTeamsInserts = readonly DbTeamInsert[];

@@ -1,10 +1,10 @@
+import { RawPlayerStat } from '@app/domain/models/player-stat.model';
+import { PlayerValueTrack } from '@app/domain/models/player-value-track.model';
+import { SourcePlayerValue } from '@app/domain/models/player-value.model';
+import { RawPlayer } from '@app/domain/models/player.model';
 import { EventID, PlayerID, TeamID, validatePlayerId } from '@app/domain/types/id.types';
 import { PlayerTypeID } from '@app/domain/types/type.types';
 import { ElementResponse } from '@app/infrastructure/external/fpl/schemas/bootstrap/element.schema';
-import { RawPlayerStat } from '@app/shared/types/domain/player-stat.type';
-import { PlayerValueTrack } from '@app/shared/types/domain/player-value-track.type';
-import { SourcePlayerValue } from '@app/shared/types/domain/player-value.type';
-import { RawPlayer } from '@app/shared/types/domain/player.type';
 import { safeStringToNumber } from '@app/shared/utils/common.util';
 import { format } from 'date-fns';
 import * as E from 'fp-ts/Either';

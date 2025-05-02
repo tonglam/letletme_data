@@ -1,87 +1,124 @@
-import { DbEvent, DbEventInsert, EventCreateInput } from 'repository/event/types';
-import { ChipPlay, Event, EventId, TopElementInfo } from 'types/domain/event.type';
+import { Event } from '@app/domain/models/event.model';
+import { ChipPlay } from '@app/domain/value-objects/chip-play.types';
+import { TopElementInfo } from '@app/domain/value-objects/top-element.types';
+import { DbEvent, DbEventInsert } from '@app/schemas/tables/event.schema';
+import { DBError, DBErrorCode, createDBError } from '@app/shared/types/error.types';
+import * as E from 'fp-ts/Either';
+import { pipe } from 'fp-ts/function';
 
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
+export const fromPersistence = (dbEvent: DbEvent): E.Either<DBError, Event> => {
+  return pipe(
+    E.Do,
+    E.bind('parsedChipPlays', () =>
+      pipe(
+        E.tryCatch(
+          () => {
+            const jsonString = typeof dbEvent.chipPlays === 'string' ? dbEvent.chipPlays : '[]';
+            return JSON.parse(jsonString);
+          },
+          (e) =>
+            createDBError({
+              message: 'Invalid chipPlays JSON format',
+              code: DBErrorCode.TRANSFORMATION_ERROR,
+              cause: e as Error,
+            }),
+        ),
+        E.chainW((json) =>
+          pipe(ChipPlay.array().safeParse(json), (result) =>
+            result.success
+              ? E.right(result.data)
+              : E.left(
+                  createDBError({
+                    message: 'ChipPlays validation failed',
+                    code: DBErrorCode.VALIDATION_ERROR,
+                    details: result.error.format(),
+                  }),
+                ),
+          ),
+        ),
+      ),
+    ),
+    E.bind('parsedTopElementInfo', () =>
+      pipe(
+        E.tryCatch(
+          () => {
+            const jsonString =
+              typeof dbEvent.topElementInfo === 'string' ? dbEvent.topElementInfo : 'null';
+            return JSON.parse(jsonString);
+          },
+          (e) =>
+            createDBError({
+              message: 'Invalid topElementInfo JSON format',
+              code: DBErrorCode.TRANSFORMATION_ERROR,
+              cause: e as Error,
+            }),
+        ),
+        E.chainW((json) =>
+          pipe(TopElementInfo.nullable().safeParse(json), (result) =>
+            result.success
+              ? E.right(result.data)
+              : E.left(
+                  createDBError({
+                    message: 'TopElementInfo validation failed',
+                    code: DBErrorCode.VALIDATION_ERROR,
+                    details: result.error.format(),
+                  }),
+                ),
+          ),
+        ),
+      ),
+    ),
+    E.map(({ parsedChipPlays, parsedTopElementInfo }) => {
+      const eventId = dbEvent.id as Event['id'];
 
-function parseChipPlays(data: unknown): readonly ChipPlay[] {
-  if (!Array.isArray(data)) {
-    return [];
-  }
-
-  const validPlays: ChipPlay[] = [];
-  for (const item of data) {
-    if (
-      isObject(item) &&
-      typeof item.chip_name === 'string' &&
-      typeof item.num_played === 'number'
-    ) {
-      validPlays.push({ chip_name: item.chip_name, num_played: item.num_played });
-    }
-  }
-  return validPlays;
-}
-
-function parseTopElementInfo(data: unknown): TopElementInfo | null {
-  if (isObject(data) && typeof data.id === 'number' && typeof data.points === 'number') {
-    return { id: data.id, points: data.points };
-  }
-  return null;
-}
-
-export const mapDbEventToDomain = (dbEvent: DbEvent): Event => ({
-  id: dbEvent.id as EventId,
-  name: dbEvent.name,
-  deadlineTime: dbEvent.deadlineTime.toISOString(),
-  averageEntryScore: dbEvent.averageEntryScore,
-  finished: dbEvent.finished,
-  dataChecked: dbEvent.dataChecked,
-  highestScore: dbEvent.highestScore,
-  highestScoringEntry: dbEvent.highestScoringEntry,
-  isPrevious: dbEvent.isPrevious,
-  isCurrent: dbEvent.isCurrent,
-  isNext: dbEvent.isNext,
-  cupLeaguesCreated: dbEvent.cupLeaguesCreated,
-  h2hKoMatchesCreated: dbEvent.h2hKoMatchesCreated,
-  rankedCount: dbEvent.rankedCount,
-  chipPlays: parseChipPlays(dbEvent.chipPlays),
-  mostSelected: dbEvent.mostSelected,
-  mostTransferredIn: dbEvent.mostTransferredIn,
-  mostCaptained: dbEvent.mostCaptained,
-  mostViceCaptained: dbEvent.mostViceCaptained,
-  topElement: dbEvent.topElement,
-  topElementInfo: parseTopElementInfo(dbEvent.topElementInfo),
-  transfersMade: dbEvent.transfersMade,
-});
-
-export const mapDomainEventToDbCreate = (domainEvent: EventCreateInput): DbEventInsert => {
-  const chipPlaysInput =
-    domainEvent.chipPlays && domainEvent.chipPlays.length > 0 ? domainEvent.chipPlays : null;
-  const topElementInfoInput = domainEvent.topElementInfo ? domainEvent.topElementInfo : null;
-
-  return {
-    id: Number(domainEvent.id),
-    name: domainEvent.name,
-    deadlineTime: new Date(domainEvent.deadlineTime),
-    averageEntryScore: domainEvent.averageEntryScore,
-    finished: domainEvent.finished,
-    dataChecked: domainEvent.dataChecked,
-    highestScore: domainEvent.highestScore ?? undefined,
-    highestScoringEntry: domainEvent.highestScoringEntry ?? undefined,
-    isPrevious: domainEvent.isPrevious,
-    isCurrent: domainEvent.isCurrent,
-    isNext: domainEvent.isNext,
-    cupLeaguesCreated: domainEvent.cupLeaguesCreated,
-    h2hKoMatchesCreated: domainEvent.h2hKoMatchesCreated,
-    rankedCount: domainEvent.rankedCount,
-    chipPlays: chipPlaysInput,
-    mostSelected: domainEvent.mostSelected ?? undefined,
-    mostTransferredIn: domainEvent.mostTransferredIn ?? undefined,
-    mostCaptained: domainEvent.mostCaptained ?? undefined,
-    mostViceCaptained: domainEvent.mostViceCaptained ?? undefined,
-    topElement: domainEvent.topElement ?? undefined,
-    topElementInfo: topElementInfoInput,
-    transfersMade: domainEvent.transfersMade,
-  };
+      return {
+        id: eventId,
+        name: dbEvent.name,
+        deadlineTime: dbEvent.deadlineTime,
+        averageEntryScore: dbEvent.averageEntryScore,
+        finished: dbEvent.finished,
+        isPrevious: dbEvent.isPrevious,
+        isCurrent: dbEvent.isCurrent,
+        isNext: dbEvent.isNext,
+        dataChecked: dbEvent.dataChecked,
+        highestScore: dbEvent.highestScore,
+        highestScoringEntry: dbEvent.highestScoringEntry,
+        cupLeaguesCreated: dbEvent.cupLeaguesCreated,
+        h2hKoMatchesCreated: dbEvent.h2hKoMatchesCreated,
+        transfersMade: dbEvent.transfersMade,
+        rankedCount: dbEvent.rankedCount,
+        chipPlays: parsedChipPlays,
+        mostSelected: dbEvent.mostSelected,
+        mostTransferredIn: dbEvent.mostTransferredIn,
+        mostCaptained: dbEvent.mostCaptained,
+        mostViceCaptained: dbEvent.mostViceCaptained,
+        topElement: dbEvent.topElement,
+        topElementInfo: parsedTopElementInfo,
+      };
+    }),
+  );
 };
+
+export const toPersistence = (event: Event): DbEventInsert => ({
+  id: event.id,
+  name: event.name,
+  deadlineTime: new Date(event.deadlineTime),
+  finished: event.finished,
+  isPrevious: event.isPrevious,
+  isCurrent: event.isCurrent,
+  isNext: event.isNext,
+  dataChecked: event.dataChecked,
+  highestScore: event.highestScore,
+  highestScoringEntry: event.highestScoringEntry,
+  cupLeaguesCreated: event.cupLeaguesCreated,
+  h2hKoMatchesCreated: event.h2hKoMatchesCreated,
+  transfersMade: event.transfersMade,
+  rankedCount: event.rankedCount,
+  chipPlays: JSON.stringify(event.chipPlays),
+  mostSelected: event.mostSelected,
+  mostTransferredIn: event.mostTransferredIn,
+  mostCaptained: event.mostCaptained,
+  mostViceCaptained: event.mostViceCaptained,
+  topElement: event.topElement,
+  topElementInfo: JSON.stringify(event.topElementInfo),
+});

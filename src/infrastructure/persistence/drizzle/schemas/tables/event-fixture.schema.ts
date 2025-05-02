@@ -35,8 +35,8 @@ export const eventFixtures = pgTable(
   ],
 );
 
-export type EventFixture = Readonly<typeof eventFixtures.$inferSelect>;
-export type EventFixtures = readonly EventFixture[];
+export type DbEventFixture = Readonly<typeof eventFixtures.$inferSelect>;
+export type DbEventFixtures = readonly DbEventFixture[];
 
-export type EventFixtureCreateInput = Readonly<typeof eventFixtures.$inferInsert>;
-export type EventFixtureCreateInputs = readonly EventFixtureCreateInput[];
+export type DbEventFixtureInsert = Readonly<typeof eventFixtures.$inferInsert>;
+export type DbEventFixtureInserts = readonly DbEventFixtureInsert[];

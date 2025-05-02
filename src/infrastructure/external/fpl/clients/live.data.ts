@@ -1,3 +1,5 @@
+import { EventLiveExplains } from '@app/domain/models/event-live-explain.model';
+import { RawEventLives } from '@app/domain/models/event-live.model';
 import { EventID } from '@app/domain/types/id.types';
 import { apiConfig } from '@app/infrastructure/config/api.config';
 import { FplLiveDataService } from '@app/infrastructure/external/fpl/clients/types';
@@ -8,8 +10,6 @@ import {
   EventLiveResponseSchema,
 } from '@app/infrastructure/external/fpl/schemas/live/event-live.schema';
 import { LiveResponse } from '@app/infrastructure/external/fpl/schemas/live/live.schema';
-import { EventLiveExplains } from '@app/shared/types/domain/event-live-explain.type';
-import { RawEventLives } from '@app/shared/types/domain/event-live.type';
 import { DataLayerError, DataLayerErrorCode } from '@app/shared/types/error.types';
 import { createDataLayerError } from '@app/shared/utils/error.util';
 import * as E from 'fp-ts/Either';
