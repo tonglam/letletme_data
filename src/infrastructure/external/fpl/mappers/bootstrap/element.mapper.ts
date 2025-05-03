@@ -1,9 +1,8 @@
 import { RawPlayerStat } from '@app/domain/models/player-stat.model';
 import { PlayerValueTrack } from '@app/domain/models/player-value-track.model';
 import { SourcePlayerValue } from '@app/domain/models/player-value.model';
-import { RawPlayer } from '@app/domain/models/player.model';
-import { EventID, PlayerID, TeamID, validatePlayerId } from '@app/domain/types/id.types';
-import { PlayerTypeID } from '@app/domain/types/type.types';
+import { EventID, PlayerID, TeamID, validatePlayerId } from '@app/domain/shared/types/id.types';
+import { PlayerTypeID } from '@app/domain/shared/types/type.types';
 import { ElementResponse } from '@app/infrastructure/external/fpl/schemas/bootstrap/element.schema';
 import { safeStringToNumber } from '@app/shared/utils/common.util';
 import { format } from 'date-fns';
@@ -11,11 +10,11 @@ import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as O from 'fp-ts/Option';
 
-export const mapElementResponseToPlayer = (raw: ElementResponse): E.Either<string, RawPlayer> =>
+export const mapElementResponseToPlayer = (raw: ElementResponse): E.Either<string, Player> =>
   pipe(
     E.Do,
     E.bind('id', () => validatePlayerId(raw.id)),
-    E.map((data): RawPlayer => {
+    E.map((data): Player => {
       return {
         id: data.id as PlayerID,
         code: raw.code,

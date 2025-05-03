@@ -1,4 +1,4 @@
-import { PhaseID } from '@app/domain/types/id.types';
+import { PhaseID } from '@app/domain/shared/types/id.types';
 
 export interface PhaseModel {
   readonly id: PhaseID;

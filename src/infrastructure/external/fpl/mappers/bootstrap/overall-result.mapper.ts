@@ -1,12 +1,12 @@
-import { RawEventOverallResult } from '@app/domain/models/event-overall-result.model';
-import { validateEventId } from '@app/domain/types/id.types';
+import { EventOverallResult } from '@app/domain/models/event-overall-result.model';
+import { validateEventId } from '@app/domain/shared/types/id.types';
 import { EventResponse } from '@app/infrastructure/external/fpl/schemas/bootstrap/event.schema';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 
 export const mapEventResponseToEventOverallResult = (
   raw: EventResponse,
-): E.Either<string, RawEventOverallResult> =>
+): E.Either<string, EventOverallResult> =>
   pipe(
     E.Do,
     E.bind('id', () => validateEventId(raw.id)),

@@ -1,5 +1,5 @@
 import * as E from 'fp-ts/Either';
-import { pipe } from 'fp-ts/function';
+import { z } from 'zod';
 
 // --- PlayerTypeID ---
 export const PlayerTypeIDs = [1, 2, 3, 4, 5] as const;
@@ -28,26 +28,32 @@ export const PlayerTypeMap = {
   } as const satisfies Record<PlayerTypeName, PlayerTypeID>,
 };
 
+export const PlayerTypeIDSchema = z.union([
+  z.literal(1),
+  z.literal(2),
+  z.literal(3),
+  z.literal(4),
+  z.literal(5),
+]);
+
+export const PlayerTypeNameSchema = z.enum(PlayerTypeNames);
+
 export const validatePlayerTypeId = (value: unknown): E.Either<Error, PlayerTypeID> => {
-  return pipe(
-    value,
-    E.fromPredicate(
-      (v): v is PlayerTypeID => typeof v === 'number' && v in PlayerTypeMap.idToName,
-      (err) =>
-        new Error(`Invalid player type ID: must be a number between 1 and 5. Received: ${err}`),
-    ),
-  );
+  const result = PlayerTypeIDSchema.safeParse(value);
+  return result.success
+    ? E.right(result.data)
+    : E.left(new Error(`Invalid player type ID: must be 1-5. Received: ${value}`));
 };
 
 export const validatePlayerTypeName = (value: unknown): E.Either<Error, PlayerTypeName> => {
-  return pipe(
-    value,
-    E.fromPredicate(
-      (v): v is PlayerTypeName => typeof v === 'string' && v in PlayerTypeMap.nameToId,
-      (err) =>
-        new Error(`Invalid player type name: must be GKP, DEF, MID, FWD, or MNG. Received: ${err}`),
-    ),
-  );
+  const result = PlayerTypeNameSchema.safeParse(value);
+  return result.success
+    ? E.right(result.data)
+    : E.left(
+        new Error(
+          `Invalid player type name: must be GKP, DEF, MID, FWD, or MNG. Received: ${value}`,
+        ),
+      );
 };
 
 export const mapPlayerTypeIdToName = (id: PlayerTypeID): PlayerTypeName => {
@@ -71,14 +77,13 @@ export const LeagueTypes = ['Classic', 'H2H'] as const;
 
 export type LeagueType = (typeof LeagueTypes)[number];
 
+export const LeagueTypeSchema = z.enum(LeagueTypes);
+
 export const validateLeagueType = (value: unknown): E.Either<Error, LeagueType> => {
-  return pipe(
-    value,
-    E.fromPredicate(
-      (v): v is LeagueType => typeof v === 'string' && LeagueTypes.includes(v as LeagueType),
-      (err) => new Error(`Invalid league type: must be Classic or H2H. Received: ${err}`),
-    ),
-  );
+  const result = LeagueTypeSchema.safeParse(value);
+  return result.success
+    ? E.right(result.data)
+    : E.left(new Error(`Invalid league type: must be Classic or H2H. Received: ${value}`));
 };
 
 // --- ValueChangeType ---
@@ -86,18 +91,17 @@ export const ValueChangeTypes = ['start', 'rise', 'fall'] as const;
 
 export type ValueChangeType = (typeof ValueChangeTypes)[number];
 
+export const ValueChangeTypeSchema = z.enum(ValueChangeTypes);
+
 export const validateValueChangeType = (value: unknown): E.Either<Error, ValueChangeType> => {
-  return pipe(
-    value,
-    E.fromPredicate(
-      (v): v is ValueChangeType =>
-        typeof v === 'string' && ValueChangeTypes.includes(v as ValueChangeType),
-      (err) =>
+  const result = ValueChangeTypeSchema.safeParse(value);
+  return result.success
+    ? E.right(result.data)
+    : E.left(
         new Error(
-          `Invalid value change type: must be one of start, rise, or fall. Received: ${err}`,
+          `Invalid value change type: must be one of start, rise, or fall. Received: ${value}`,
         ),
-    ),
-  );
+      );
 };
 
 export const determineValueChangeType = (oldValue: number, newValue: number): ValueChangeType => {

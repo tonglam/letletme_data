@@ -14,8 +14,8 @@ import { RawPlayerStats } from '@app/domain/models/player-stat.model';
 import { PlayerValueTracks } from '@app/domain/models/player-value-track.model';
 import { SourcePlayerValues } from '@app/domain/models/player-value.model';
 import { RawPlayers } from '@app/domain/models/player.model';
-import { EntryID, EventID } from '@app/domain/types/id.types';
-import { TeamCreateInputs } from '@app/infrastructure/persistence/drizzle/repository/team/types';
+import { EntryID, EventID } from '@app/domain/shared/types/id.types';
+import { TeamCreateInputs } from '@app/infrastructure/persistence/drizzle/repositories/team/types';
 import { DataLayerError } from '@app/shared/types/error.types';
 import * as TE from 'fp-ts/TaskEither';
 

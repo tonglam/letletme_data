@@ -1,5 +1,5 @@
 import { RawEntryEventTransfer } from '@app/domain/models/entry-event-transfer.model';
-import { EntryID, EventID, PlayerID } from '@app/domain/types/id.types';
+import { EntryID, EventID, PlayerID } from '@app/domain/shared/types/id.types';
 import { TransferResponse } from '@app/infrastructure/external/fpl/schemas/transfer/transfer.schema';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';

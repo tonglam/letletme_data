@@ -1,7 +1,4 @@
-import { EntryId } from '@app/domain/models/entry-info.model';
-import { EventId } from '@app/domain/models/event.type';
-import { LeagueId } from '@app/domain/models/league.model';
-import { PlayerId } from '@app/domain/models/player.model';
+import { EntryID, EventID, LeagueID, PlayerID } from '@app/domain/shared/types/id.types';
 
 export const apiConfig = {
   baseUrl: 'https://fantasy.premierleague.com/api',
@@ -11,43 +8,43 @@ export const apiConfig = {
     },
 
     event: {
-      live: (params: { eventId: EventId }): string => {
+      live: (params: { eventId: EventID }): string => {
         return `/event/${params.eventId}/live/`;
       },
-      fixtures: (params: { eventId: EventId }): string => {
+      fixtures: (params: { eventId: EventID }): string => {
         return `/fixtures/?event=${params.eventId}`;
       },
     },
 
     entry: {
-      info: (params: { entryId: EntryId }): string => {
+      info: (params: { entryId: EntryID }): string => {
         return `/entry/${params.entryId}/`;
       },
-      history: (params: { entryId: EntryId }): string => {
+      history: (params: { entryId: EntryID }): string => {
         return `/entry/${params.entryId}/history/`;
       },
-      picks: (params: { entryId: EntryId; eventId: EventId }): string => {
+      picks: (params: { entryId: EntryID; eventId: EventID }): string => {
         return `/entry/${params.entryId}/event/${params.eventId}/picks/`;
       },
-      transfers: (params: { entryId: EntryId; eventId: EventId }): string => {
+      transfers: (params: { entryId: EntryID; eventId: EventID }): string => {
         return `/entry/${params.entryId}/event/${params.eventId}/transfers/`;
       },
     },
 
     element: {
-      summary: (params: { elementId: PlayerId }): string => {
+      summary: (params: { elementId: PlayerID }): string => {
         return `/element-summary/${params.elementId}/`;
       },
     },
 
     leagues: {
-      classic: (params: { leagueId: LeagueId; page: number }): string => {
+      classic: (params: { leagueId: LeagueID; page: number }): string => {
         return `/leagues-classic/${params.leagueId}/standings/?page_standings=${params.page}`;
       },
-      h2h: (params: { leagueId: LeagueId; page: number }): string => {
+      h2h: (params: { leagueId: LeagueID; page: number }): string => {
         return `/leagues-h2h/${params.leagueId}/standings/?page_standings=${params.page}`;
       },
-      cup: (params: { leagueId: LeagueId; page: number; entryId: EntryId }): string => {
+      cup: (params: { leagueId: LeagueID; page: number; entryId: EntryID }): string => {
         return `/leagues-h2h-matches/cup/${params.leagueId}?page=${params.page}&entry=${params.entryId}`;
       },
     },

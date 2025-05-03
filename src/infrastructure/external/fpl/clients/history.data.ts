@@ -1,5 +1,5 @@
 import { EntryHistoryInfos } from '@app/domain/models/entry-history-info.model';
-import { EntryID } from '@app/domain/types/id.types';
+import { EntryID } from '@app/domain/shared/types/id.types';
 import { apiConfig } from '@app/infrastructure/config/api.config';
 import { FplHistoryDataService } from '@app/infrastructure/external/fpl/clients/types';
 import { mapEntryHistoryResponseToDomain } from '@app/infrastructure/external/fpl/mappers/history/history.mapper';

@@ -1,5 +1,5 @@
 import { RawEventFixtures } from '@app/domain/models/event-fixture.model';
-import { EventID } from '@app/domain/types/id.types';
+import { EventID } from '@app/domain/shared/types/id.types';
 import { apiConfig } from '@app/infrastructure/config/api.config';
 import { FplFixtureDataService } from '@app/infrastructure/external/fpl/clients/types';
 import { mapEventFixtureResponseToDomain } from '@app/infrastructure/external/fpl/mappers/fixture/fixture.mapper';

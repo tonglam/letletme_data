@@ -1,6 +1,6 @@
 import { EventLiveExplains } from '@app/domain/models/event-live-explain.model';
 import { RawEventLives } from '@app/domain/models/event-live.model';
-import { EventID } from '@app/domain/types/id.types';
+import { EventID } from '@app/domain/shared/types/id.types';
 import { apiConfig } from '@app/infrastructure/config/api.config';
 import { FplLiveDataService } from '@app/infrastructure/external/fpl/clients/types';
 import { mapEventLiveExplainResponseToDomain } from '@app/infrastructure/external/fpl/mappers/live/explain.mapper';

@@ -1,5 +1,5 @@
-import { Event } from '@app/domain/models/event.model';
-import { EventID } from '@app/domain/types/id.types';
+import { Event } from '@app/domain/event/model';
+import { EventID } from '@app/domain/shared/types/id.types';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 

@@ -1,6 +1,6 @@
 import { DecoratedDependencies } from '@app/dependencies';
-import { PlayerID, TeamID } from '@app/domain/types/id.types';
-import { PlayerTypeID } from '@app/domain/types/type.types';
+import { PlayerID, TeamID } from '@app/domain/shared/types/id.types';
+import { PlayerTypeID } from '@app/domain/shared/types/type.types';
 import { unwrapOrThrow } from '@app/shared/utils/response.util';
 import { Elysia, t } from 'elysia';
 

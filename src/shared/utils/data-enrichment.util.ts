@@ -34,7 +34,7 @@ import { PlayerStat, PlayerStats, RawPlayerStat } from '@app/domain/models/playe
 import { PlayerValue, PlayerValues, RawPlayerValue } from '@app/domain/models/player-value.model';
 import { Player, Players, RawPlayers } from '@app/domain/models/player.model';
 import { TeamId, TeamModel } from '@app/domain/models/team.model';
-import { EntryInfoRepository } from '@app/infrastructure/persistence/drizzle/repository/entry-info/types';
+import { EntryInfoRepository } from '@app/infrastructure/persistence/drizzle/repositories/entry-info/types';
 import { PlayerCache } from '@app/old-domain/player/types';
 import { TeamCache } from '@app/old-domain/team/types';
 import { ElementTypeId, ElementTypeName, ElementTypeNames } from '@app/shared/types/base.types';

@@ -1,4 +1,4 @@
-import { PlayerInfo } from '@app/domain/value-objects/player-info.types';
+import { PlayerInfo } from '@app/domain/shared/value-objects/player-info.types';
 
 export interface PlayerModel {
   readonly info: PlayerInfo;

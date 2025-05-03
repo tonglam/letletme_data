@@ -1,5 +1,5 @@
 import { RawEntryEventTransfers } from '@app/domain/models/entry-event-transfer.model';
-import { EntryID, EventID } from '@app/domain/types/id.types';
+import { EntryID, EventID } from '@app/domain/shared/types/id.types';
 import { apiConfig } from '@app/infrastructure/config/api.config';
 import { FplTransferDataService } from '@app/infrastructure/external/fpl/clients/types';
 import { mapTransferResponseToEntryEventTransfer } from '@app/infrastructure/external/fpl/mappers/transfer/transfer.mapper';

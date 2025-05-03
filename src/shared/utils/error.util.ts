@@ -9,18 +9,17 @@ import {
   createDomainError,
   createServiceError,
   DataLayerError,
-  DataLayerErrorCode,
   DBError,
   DBErrorCode,
   DomainError,
   DomainErrorCode,
-  ErrorDetails,
   QueueError,
   QueueErrorCode,
   ServiceError,
   ServiceErrorCode,
 } from '@app/shared/types/error.types';
 import * as E from 'fp-ts/Either';
+import { ZodError } from 'zod';
 
 const isQueueError = (error: unknown): error is QueueError =>
   typeof error === 'object' &&
@@ -235,26 +234,22 @@ const queueErrorToApiErrorCode: Record<QueueErrorCode, APIErrorCode> = {
 const isDBError = (error: unknown): error is DBError =>
   typeof error === 'object' &&
   error !== null &&
-  'code' in error &&
-  Object.values(DBErrorCode).includes((error as DBError).code);
+  '_tag' in error &&
+  (error as DBError)._tag === 'DBError';
 
-export const queueErrorToApiError = (error: QueueError): APIError => ({
-  name: 'APIError',
-  code: queueErrorToApiErrorCode[error.code],
-  message: error.error.message,
-  details: { context: error.context },
-  cause: error.error,
-  stack: error.error.stack,
-  timestamp: new Date(),
-});
+export const queueErrorToApiError = (error: QueueError): APIError =>
+  createAPIError({
+    code: queueErrorToApiErrorCode[error.code],
+    message: error.error.message,
+    details: { context: error.context },
+    cause: error.error,
+  });
 
 const isServiceError = (error: unknown): error is ServiceError =>
   typeof error === 'object' &&
   error !== null &&
-  'name' in error &&
-  (error as ServiceError).name === 'ServiceError' &&
-  'code' in error &&
-  Object.values(ServiceErrorCode).includes((error as ServiceError).code);
+  '_tag' in error &&
+  (error as ServiceError)._tag === 'ServiceError';
 
 const serviceErrorToApiErrorCode: Record<ServiceErrorCode, APIErrorCode> = {
   [ServiceErrorCode.INTEGRATION_ERROR]: APIErrorCode.SERVICE_ERROR,
@@ -269,12 +264,16 @@ const serviceErrorToApiErrorCode: Record<ServiceErrorCode, APIErrorCode> = {
 };
 
 const isDomainError = (error: unknown): error is DomainError =>
-  typeof error === 'object' && error !== null && (error as DomainError).name === 'DomainError';
+  typeof error === 'object' &&
+  error !== null &&
+  '_tag' in error &&
+  (error as DomainError)._tag === 'DomainError';
 
 export const toAPIError = (error: unknown): APIError => {
-  // Check underlying cause first if available and it's a known error type
+  // Check underlying cause first if available and it's a known tagged error type
   if (typeof error === 'object' && error !== null && 'cause' in error && error.cause) {
     const cause = error.cause;
+    // Check if cause is DBError and NOT_FOUND
     if (isDBError(cause) && cause.code === DBErrorCode.NOT_FOUND) {
       return createAPIError({
         code: APIErrorCode.NOT_FOUND,
@@ -282,6 +281,7 @@ export const toAPIError = (error: unknown): APIError => {
         cause: cause,
       });
     }
+    // Check if cause is DomainError and NOT_FOUND
     if (isDomainError(cause) && cause.code === DomainErrorCode.NOT_FOUND) {
       return createAPIError({
         code: APIErrorCode.NOT_FOUND,
@@ -333,18 +333,6 @@ export const toAPIError = (error: unknown): APIError => {
   });
 };
 
-export const createDataLayerError = (params: {
-  code: DataLayerErrorCode;
-  message: string;
-  cause?: Error;
-  details?: ErrorDetails;
-}): DataLayerError => ({
-  name: 'DataLayerError',
-  stack: new Error().stack,
-  timestamp: new Date(),
-  ...params,
-});
-
 export const mapRepositoryErrorToCacheError =
   (message: string) =>
   (error: DBError): CacheError =>
@@ -384,5 +372,57 @@ export const mapCacheErrorToServiceError = (error: CacheError): ServiceError =>
     cause: error,
   });
 
-export const getErrorMessage = (error: unknown): string =>
-  error instanceof Error ? error.message : 'Unknown error';
+// Safely get an error message from any thrown value
+export const getErrorMessage = (error: unknown): string => {
+  if (error instanceof Error) return error.message;
+  if (typeof error === 'string') return error;
+  if (
+    error &&
+    typeof error === 'object' &&
+    'message' in error &&
+    typeof error.message === 'string'
+  ) {
+    return error.message;
+  }
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return 'An unknown error occurred';
+  }
+};
+
+/**
+ * Formats a ZodError into a standard Error object with a user-friendly message.
+ *
+ * @param error - The ZodError instance.
+ * @param context - Optional context string to include in the error message.
+ * @returns A standard Error object.
+ */
+export const formatZodError = (error: ZodError, context?: string): Error => {
+  const messages = error.errors
+    .map((e) => `${e.path.join('.') || 'value'}: ${e.message}`)
+    .join('; ');
+  const prefix = context ? `${context}: ` : '';
+  return new Error(`${prefix}Validation failed - ${messages}`);
+};
+
+// Basic Error Logger (Integrate with your actual logger like Pino)
+// You'll want to enhance this significantly for production
+export const logError = (error: unknown, context?: Record<string, unknown>): void => {
+  // TODO: Replace with actual Pino logger instance
+  console.error('--- ERROR ---');
+  if (error && typeof error === 'object' && '_tag' in error) {
+    // Log structured error
+    console.error(JSON.stringify({ error, context }, null, 2));
+  } else if (error instanceof Error) {
+    console.error(`Message: ${error.message}`);
+    if (context) console.error(`Context: ${JSON.stringify(context)}`);
+    console.error(`Stack: ${error.stack}`);
+  } else {
+    console.error(`Unknown Error: ${getErrorMessage(error)}`);
+    if (context) console.error(`Context: ${JSON.stringify(context)}`);
+  }
+  console.error('-------------');
+};
+
+// Add other generic utilities as needed

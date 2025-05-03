@@ -1,4 +1,5 @@
-import { CacheError, CacheErrorCode, createCacheError } from '@app/shared/types/error.types';
+import { CacheError, CacheErrorCode, createCacheError } from '@app/infrastructure/cache/errors';
+import { CachePrefix, DefaultTTL } from '@app/infrastructure/config/cache.config';
 import * as TE from 'fp-ts/TaskEither';
 import Redis from 'ioredis';
 
@@ -29,9 +30,9 @@ export const connectRedis = (): TE.TaskEither<CacheError, void> =>
       }
     },
     (error) =>
-      createCacheError({
-        code: CacheErrorCode.CONNECTION_ERROR,
-        message: `Failed to connect to Redis: ${error}`,
+      createCacheError(CacheErrorCode.CONNECTION_ERROR, {
+        message: `Failed to connect to Redis: ${error instanceof Error ? error.message : String(error)}`,
+        cause: error instanceof Error ? error : new Error(String(error)),
       }),
   );
 
@@ -43,8 +44,14 @@ export const disconnectRedis = (): TE.TaskEither<CacheError, void> =>
       }
     },
     (error) =>
-      createCacheError({
-        code: CacheErrorCode.CONNECTION_ERROR,
-        message: `Failed to disconnect from Redis: ${error}`,
+      createCacheError(CacheErrorCode.CONNECTION_ERROR, {
+        message: `Failed to disconnect from Redis: ${error instanceof Error ? error.message : String(error)}`,
+        cause: error instanceof Error ? error : new Error(String(error)),
       }),
   );
+
+export interface CacheConfig {
+  readonly keyPrefix: (typeof CachePrefix)[keyof typeof CachePrefix];
+  readonly season: string;
+  ttlSeconds: (typeof DefaultTTL)[keyof typeof DefaultTTL];
+}

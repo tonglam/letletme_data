@@ -1,5 +1,5 @@
 import { RawEventFixture, validateEventFixtureId } from '@app/domain/models/event-fixture.model';
-import { EventID, TeamID } from '@app/domain/types/id.types';
+import { EventID, TeamID } from '@app/domain/shared/types/id.types';
 import { EventFixtureResponse } from '@app/infrastructure/external/fpl/schemas/fixture/fixture.schema';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';

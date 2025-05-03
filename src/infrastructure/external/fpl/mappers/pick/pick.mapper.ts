@@ -3,7 +3,7 @@ import {
   RawPickItem,
   RawPickItems,
 } from '@app/domain/models/entry-event-pick.model';
-import { EntryID, EventID, validatePlayerId } from '@app/domain/types/id.types';
+import { EntryID, EventID, validatePlayerId } from '@app/domain/shared/types/id.types';
 import { PickResponse } from '@app/infrastructure/external/fpl/schemas/pick/pick.schema';
 import * as A from 'fp-ts/Array';
 import * as E from 'fp-ts/Either';

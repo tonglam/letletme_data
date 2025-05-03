@@ -1,5 +1,5 @@
-import { EventID, PlayerID, TeamID } from '@app/domain/types/id.types';
-import { PlayerTypeID, PlayerTypeName, ValueChangeType } from '@app/domain/types/type.types';
+import { EventID, PlayerID, TeamID } from '@app/domain/shared/types/id.types';
+import { PlayerTypeID, PlayerTypeName, ValueChangeType } from '@app/domain/shared/types/type.types';
 
 export interface PlayerValueModel {
   readonly elementId: PlayerID;

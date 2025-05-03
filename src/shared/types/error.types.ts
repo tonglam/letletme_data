@@ -1,16 +1,32 @@
-export interface ErrorDetails {
-  [key: string]: unknown;
+// --- Import Specific Error Types ---
+import { NotFoundError, ValidationError } from '@app/application/errors';
+import { EventDomainError } from '@app/domain/event/errors';
+import { CacheError } from '@app/infrastructure/cache/errors';
+import { NetworkError } from '@app/infrastructure/network/errors';
+import { DbError } from '@app/infrastructure/persistence/error';
+
+// --- Base Error Structure ---
+export type ErrorDetails = Record<string, unknown>;
+
+// BaseError now correctly extends the built-in Error
+export interface BaseError extends Error {
+  readonly _tag: string; // The discriminant (unique code/type identifier)
+  readonly code: string; // Specific code for the error type
+  // 'message' and 'name' properties are inherited from Error
+  readonly cause?: Error; // Capture the original error if any (ensure it's an Error)
+  readonly details?: ErrorDetails; // Optional structured details
+  readonly timestamp: Date;
 }
 
-export interface BaseError {
-  readonly name: string;
-  readonly message: string;
-  readonly code: string;
-  readonly timestamp: Date;
-  readonly stack?: string;
-  readonly cause?: Error;
-  readonly details?: ErrorDetails;
-}
+// --- Union of all possible handled errors ---
+// Useful for top-level error handling
+export type AppError =
+  | DbError
+  | CacheError
+  | NetworkError
+  | ValidationError
+  | NotFoundError
+  | EventDomainError; // Add other domain/app errors here
 
 export enum DBErrorCode {
   CONNECTION_ERROR = 'CONNECTION_ERROR',

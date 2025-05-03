@@ -1,5 +1,5 @@
 import { EventLiveExplain } from '@app/domain/models/event-live-explain.model';
-import { EventID, PlayerID, validatePlayerId } from '@app/domain/types/id.types';
+import { EventID, PlayerID, validatePlayerId } from '@app/domain/shared/types/id.types';
 import { EventLiveExplainResponse } from '@app/infrastructure/external/fpl/schemas/live/explain.schema';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';

@@ -1,5 +1,5 @@
 import { RawEntryEventPicks } from '@app/domain/models/entry-event-pick.model';
-import { EntryID, EventID } from '@app/domain/types/id.types';
+import { EntryID, EventID } from '@app/domain/shared/types/id.types';
 import { apiConfig } from '@app/infrastructure/config/api.config';
 import { FplPickDataService } from '@app/infrastructure/external/fpl/clients/types';
 import { mapPickResponseToEntryEventPick } from '@app/infrastructure/external/fpl/mappers/pick/pick.mapper';

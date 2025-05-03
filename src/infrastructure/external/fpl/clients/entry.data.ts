@@ -1,7 +1,7 @@
 import { EntryInfo } from '@app/domain/models/entry-info.model';
 import { EntryLeagueInfos } from '@app/domain/models/entry-league-info.model';
-import { EntryID } from '@app/domain/types/id.types';
-import { LeagueTypes } from '@app/domain/types/type.types';
+import { EntryID } from '@app/domain/shared/types/id.types';
+import { LeagueTypes } from '@app/domain/shared/types/type.types';
 import { apiConfig } from '@app/infrastructure/config/api.config';
 import { FplEntryDataService } from '@app/infrastructure/external/fpl/clients/types';
 import { mapEntryInfoResponseToEntryInfo } from '@app/infrastructure/external/fpl/mappers/entry/info.mapper';

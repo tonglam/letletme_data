@@ -1,5 +1,5 @@
 import { TeamModel } from '@app/domain/models/team.model';
-import { TeamID, validateTeamId } from '@app/domain/types/id.types';
+import { TeamID, validateTeamId } from '@app/domain/shared/types/id.types';
 import { TeamResponse } from '@app/infrastructure/external/fpl/schemas/bootstrap/team.schema';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';

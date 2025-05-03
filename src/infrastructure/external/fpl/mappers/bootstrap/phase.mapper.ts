@@ -1,5 +1,5 @@
 import { PhaseModel } from '@app/domain/models/phase.model';
-import { PhaseID, validatePhaseId } from '@app/domain/types/id.types';
+import { PhaseID, validatePhaseId } from '@app/domain/shared/types/id.types';
 import { PhaseResponse } from '@app/infrastructure/external/fpl/schemas/bootstrap/phase.schema';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
