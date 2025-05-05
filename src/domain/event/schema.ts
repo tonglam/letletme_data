@@ -28,6 +28,3 @@ export const EventSchema = z.object({
   topElement: z.number().nullable(),
   topElementInfo: TopElementInfoSchema.nullable(),
 });
-
-// Export the inferred type
-export type Event = z.infer<typeof EventSchema>;

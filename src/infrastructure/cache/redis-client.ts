@@ -1,4 +1,4 @@
-import { CacheError, CacheErrorCode, createCacheError } from '@app/infrastructure/cache/errors';
+import { CacheError, CacheErrorCode, createCacheError } from '@app/infrastructure/cache/error';
 import { CachePrefix, DefaultTTL } from '@app/infrastructure/config/cache.config';
 import * as TE from 'fp-ts/TaskEither';
 import Redis from 'ioredis';

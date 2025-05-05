@@ -1,5 +1,6 @@
 import { EventCachePort } from '@app/domain/event/cache';
-import { Event, EventSchema } from '@app/domain/event/schema';
+import { Event, Events } from '@app/domain/event/model';
+import { EventSchema } from '@app/domain/event/schema';
 import { EventID } from '@app/domain/shared/types/id.types';
 import { parseAndValidateJson, parseJsonMap } from '@app/infrastructure/cache/parse.util';
 import { CacheConfig, redisClient } from '@app/infrastructure/cache/redis-client';
@@ -34,7 +35,7 @@ export const createEventCache = (
             cause: error instanceof Error ? error : new Error(String(error)),
           }),
       ),
-      TE.chainW((cachedEventStrOrNull) =>
+      TE.chainW((cachedEventStrOrNull: string | null) =>
         pipe(
           O.fromNullable(cachedEventStrOrNull),
           O.match(
@@ -46,7 +47,11 @@ export const createEventCache = (
                 }),
               ),
             (cachedEventStr: string) =>
-              pipe(parseAndValidateJson(cachedEventStr, EventSchema), TE.fromEither),
+              pipe(
+                parseAndValidateJson(cachedEventStr, EventSchema),
+                TE.fromEither,
+                TE.map((parsedEvent) => parsedEvent as Event),
+              ),
           ),
         ),
       ),
@@ -58,7 +63,12 @@ export const createEventCache = (
         () => EventSchema.parse(event),
         (error: unknown): CacheError => {
           if (error instanceof ZodError) {
-            return formatZodErrorForCache(error, 'setCurrentEvent');
+            return createCacheError({
+              code: CacheErrorCode.SERIALIZATION_ERROR,
+              message: 'setCurrentEvent: Event failed schema validation before cache set',
+              details: error.format(),
+              cause: error,
+            });
           }
           return createCacheError({
             code: CacheErrorCode.SERIALIZATION_ERROR,
@@ -68,7 +78,7 @@ export const createEventCache = (
         },
       ),
       TE.fromEither,
-      TE.chain((validEvent) =>
+      TE.chain((validEvent: Event) =>
         TE.tryCatch(
           () =>
             redisClient.set(
@@ -105,21 +115,20 @@ export const createEventCache = (
   const getEvent = (id: EventID): TE.TaskEither<CacheError, Event> =>
     pipe(
       getAllEvents(),
-      TE.chain((events) => {
+      TE.chain((events: Events) => {
         const event = events.find((e) => e.id === id);
-        if (!event) {
-          return TE.left(
-            createCacheError({
-              code: CacheErrorCode.NOT_FOUND,
-              message: `Event ${id} not found in cache`,
-            }),
-          );
-        }
-        return TE.right(event);
+        return event
+          ? TE.right(event)
+          : TE.left(
+              createCacheError({
+                code: CacheErrorCode.NOT_FOUND,
+                message: `Event ${id} not found in cache`,
+              }),
+            );
       }),
     );
 
-  const getAllEvents = (): TE.TaskEither<CacheError, Event[]> =>
+  const getAllEvents = (): TE.TaskEither<CacheError, Events> =>
     pipe(
       TE.tryCatch(
         () => redisClient.hgetall(baseKey),
@@ -134,22 +143,31 @@ export const createEventCache = (
         flow(
           O.fromNullable,
           O.filter((eventsMap) => Object.keys(eventsMap).length > 0),
-          O.fold(
-            () => TE.right([] as Event[]),
-            (cachedEvents): TE.TaskEither<CacheError, Event[]> =>
-              pipe(parseJsonMap(cachedEvents, EventSchema), TE.fromEither),
+          O.match(
+            () => TE.right([] as Events),
+            (cachedEvents) =>
+              pipe(
+                parseJsonMap(cachedEvents, EventSchema),
+                TE.fromEither,
+                TE.map((parsedEvents) => parsedEvents as Events),
+              ),
           ),
         ),
       ),
     );
 
-  const setAllEvents = (events: Event[]): TE.TaskEither<CacheError, void> =>
+  const setAllEvents = (events: Events): TE.TaskEither<CacheError, void> =>
     pipe(
       E.tryCatch(
         () => z.array(EventSchema).parse(events),
         (error: unknown): CacheError => {
           if (error instanceof ZodError) {
-            return formatZodErrorForCache(error, 'setAllEvents');
+            return createCacheError({
+              code: CacheErrorCode.SERIALIZATION_ERROR,
+              message: 'setAllEvents: Event array failed schema validation before cache set',
+              details: error.format(),
+              cause: error,
+            });
           }
           return createCacheError({
             code: CacheErrorCode.SERIALIZATION_ERROR,
@@ -159,7 +177,7 @@ export const createEventCache = (
         },
       ),
       TE.fromEither,
-      TE.chain((validEvents) =>
+      TE.chain((validEvents: Events) =>
         TE.tryCatch(
           async () => {
             const multi = redisClient.multi();
@@ -184,6 +202,48 @@ export const createEventCache = (
       TE.map(() => undefined),
     );
 
+  const getLastEvent = (): TE.TaskEither<CacheError, Event> =>
+    pipe(
+      getCurrentEvent(),
+      TE.chain((currentEvent) => {
+        if (typeof currentEvent.id !== 'number' || !Number.isInteger(currentEvent.id)) {
+          return TE.left(
+            createCacheError({
+              code: CacheErrorCode.OPERATION_ERROR,
+              message: `Current event ID is not a valid number: ${currentEvent.id}`,
+            }),
+          );
+        }
+        const lastEventId = (currentEvent.id - 1) as EventID;
+        return getEvent(lastEventId);
+      }),
+      TE.mapLeft((error) => ({
+        ...error,
+        message: `Failed to get last event via current event logic: ${error.message}`,
+      })),
+    );
+
+  const getNextEvent = (): TE.TaskEither<CacheError, Event> =>
+    pipe(
+      getCurrentEvent(),
+      TE.chain((currentEvent) => {
+        if (typeof currentEvent.id !== 'number' || !Number.isInteger(currentEvent.id)) {
+          return TE.left(
+            createCacheError({
+              code: CacheErrorCode.OPERATION_ERROR,
+              message: `Current event ID is not a valid number: ${currentEvent.id}`,
+            }),
+          );
+        }
+        const nextEventId = (currentEvent.id + 1) as EventID;
+        return getEvent(nextEventId);
+      }),
+      TE.mapLeft((error) => ({
+        ...error,
+        message: `Failed to get next event via current event logic: ${error.message}`,
+      })),
+    );
+
   return {
     getCurrentEvent,
     setAllEvents,
@@ -191,5 +251,7 @@ export const createEventCache = (
     getEvent,
     getAllEvents,
     clearCurrentEvent,
+    getLastEvent,
+    getNextEvent,
   };
 };

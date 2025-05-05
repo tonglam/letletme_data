@@ -2,10 +2,10 @@ import { createEvent, Event } from '@app/domain/event/model';
 import { EventIDSchema } from '@app/domain/shared/types/id.types';
 import { ChipPlaySchema } from '@app/domain/shared/value-objects/chip-play.types';
 import { TopElementInfoSchema } from '@app/domain/shared/value-objects/top-element.types';
-import { formatZodErrorForDbError } from '@app/infrastructure/persistence/error';
+import { formatZodErrorForDbError } from '@app/infrastructure/persistence/utils/error.util';
+import { parseDbJsonField } from '@app/infrastructure/persistence/utils/json.util';
 import { DbEvent, DbEventInsert } from '@app/schemas/tables/event.schema';
 import { createDBError, DBError, DBErrorCode } from '@app/shared/types/error.types';
-import { safeParseJson } from '@app/shared/utils/common.util';
 import * as E from 'fp-ts/Either';
 import { z } from 'zod';
 
@@ -26,31 +26,39 @@ export const toDomain = (dbEvent: DbEvent): E.Either<DBError, Event> => {
   }
   const validatedDeadline = dbEvent.deadlineTime;
 
-  const chipPlaysResult = safeParseJson(z.array(ChipPlaySchema))(dbEvent.chipPlays);
-  if (E.isLeft(chipPlaysResult)) {
-    const parseError = chipPlaysResult.left;
+  if (typeof dbEvent.chipPlays !== 'string') {
     return E.left(
       createDBError({
         code: DBErrorCode.TRANSFORMATION_ERROR,
-        message: `Failed to parse chipPlays JSON from DB: ${parseError.message}`,
-        cause: parseError,
+        message: `Expected chipPlays to be a string from DB, but received ${typeof dbEvent.chipPlays}`,
       }),
     );
   }
+  const chipPlaysResult = parseDbJsonField(z.array(ChipPlaySchema), dbEvent.chipPlays, 'chipPlays');
+  if (E.isLeft(chipPlaysResult)) {
+    return chipPlaysResult;
+  }
   const parsedChipPlays = chipPlaysResult.right;
 
-  const topElementInfoResult = safeParseJson(TopElementInfoSchema.nullable())(
-    dbEvent.topElementInfo,
-  );
-  if (E.isLeft(topElementInfoResult)) {
-    const parseError = topElementInfoResult.left;
+  if (
+    dbEvent.topElementInfo !== null &&
+    dbEvent.topElementInfo !== undefined &&
+    typeof dbEvent.topElementInfo !== 'string'
+  ) {
     return E.left(
       createDBError({
         code: DBErrorCode.TRANSFORMATION_ERROR,
-        message: `Failed to parse topElementInfo JSON from DB: ${parseError.message}`,
-        cause: parseError,
+        message: `Expected topElementInfo to be a string, null, or undefined from DB, but received ${typeof dbEvent.topElementInfo}`,
       }),
     );
+  }
+  const topElementInfoResult = parseDbJsonField(
+    TopElementInfoSchema.nullable(),
+    dbEvent.topElementInfo,
+    'topElementInfo',
+  );
+  if (E.isLeft(topElementInfoResult)) {
+    return topElementInfoResult;
   }
   const parsedTopElementInfo = topElementInfoResult.right;
 
@@ -69,13 +77,13 @@ export const toDomain = (dbEvent: DbEvent): E.Either<DBError, Event> => {
     cupLeaguesCreated: dbEvent.cupLeaguesCreated,
     h2hKoMatchesCreated: dbEvent.h2hKoMatchesCreated,
     rankedCount: dbEvent.rankedCount,
-    chipPlays: parsedChipPlays as z.infer<typeof ChipPlaySchema>[],
+    chipPlays: parsedChipPlays,
     mostSelected: dbEvent.mostSelected,
     mostTransferredIn: dbEvent.mostTransferredIn,
     mostCaptained: dbEvent.mostCaptained,
     mostViceCaptained: dbEvent.mostViceCaptained,
     topElement: dbEvent.topElement,
-    topElementInfo: parsedTopElementInfo as z.infer<typeof TopElementInfoSchema> | null,
+    topElementInfo: parsedTopElementInfo,
     transfersMade: dbEvent.transfersMade,
   };
 

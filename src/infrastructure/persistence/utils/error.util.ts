@@ -2,7 +2,6 @@ import { createDBError, DBError, DBErrorCode } from '@app/shared/types/error.typ
 import { getErrorMessage } from '@app/shared/utils/error.util';
 import { ZodError } from 'zod';
 
-// Helper to format Zod errors into SHARED DBError
 export const formatZodErrorForDbError =
   (context: string) =>
   (error: ZodError): DBError => {
@@ -14,7 +13,6 @@ export const formatZodErrorForDbError =
     });
   };
 
-// Helper to map generic or CacheError to SHARED DBError
 export const mapErrorToDbError = (
   error: Error,
   defaultCode: DBErrorCode = DBErrorCode.OPERATION_ERROR,

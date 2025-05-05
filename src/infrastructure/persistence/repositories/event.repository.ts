@@ -1,9 +1,9 @@
+import { Event } from '@app/domain/event/model';
 import { EventRepository } from '@app/domain/event/repository';
-import { Event } from '@app/domain/event/schema';
 import { EventID } from '@app/domain/shared/types/id.types';
 import { createEventCache } from '@app/infrastructure/cache/event.cache';
 import { createEventRepository as createDrizzleEventRepository } from '@app/infrastructure/persistence/drizzle/repositories/drizzle-event.repository';
-import { mapErrorToDbError } from '@app/infrastructure/persistence/error';
+import { mapErrorToDbError } from '@app/infrastructure/persistence/utils/error.util';
 import { DBError } from '@app/shared/types/error.types';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
@@ -35,6 +35,20 @@ export const createEventRepository = (): EventRepository => {
           ),
         ),
       ),
+    );
+
+  const findLast = (): TE.TaskEither<DBError, Event> =>
+    pipe(
+      cache.getLastEvent(),
+      TE.mapLeft((err) => mapErrorToDbError(err, undefined, 'findLast cache fetch')),
+      TE.orElse((_dbErrorFromCache) => dbRepository.findLast()),
+    );
+
+  const findNext = (): TE.TaskEither<DBError, Event> =>
+    pipe(
+      cache.getNextEvent(),
+      TE.mapLeft((err) => mapErrorToDbError(err, undefined, 'findNext cache fetch')),
+      TE.orElse((_dbErrorFromCache) => dbRepository.findNext()),
     );
 
   const findAll = (): TE.TaskEither<DBError, Event[]> =>
@@ -83,6 +97,8 @@ export const createEventRepository = (): EventRepository => {
   return {
     findById,
     findCurrent,
+    findLast,
+    findNext,
     findAll,
     saveBatch,
     deleteAll,

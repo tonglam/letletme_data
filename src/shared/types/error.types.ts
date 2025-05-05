@@ -1,32 +1,37 @@
-// --- Import Specific Error Types ---
 import { NotFoundError, ValidationError } from '@app/application/errors';
-import { EventDomainError } from '@app/domain/event/errors';
-import { CacheError } from '@app/infrastructure/cache/errors';
-import { NetworkError } from '@app/infrastructure/network/errors';
-import { DbError } from '@app/infrastructure/persistence/error';
 
-// --- Base Error Structure ---
 export type ErrorDetails = Record<string, unknown>;
 
-// BaseError now correctly extends the built-in Error
 export interface BaseError extends Error {
-  readonly _tag: string; // The discriminant (unique code/type identifier)
-  readonly code: string; // Specific code for the error type
-  // 'message' and 'name' properties are inherited from Error
-  readonly cause?: Error; // Capture the original error if any (ensure it's an Error)
-  readonly details?: ErrorDetails; // Optional structured details
+  readonly _tag: string;
+  readonly code: string;
+  readonly cause?: Error;
+  readonly details?: ErrorDetails;
   readonly timestamp: Date;
 }
 
-// --- Union of all possible handled errors ---
-// Useful for top-level error handling
-export type AppError =
-  | DbError
-  | CacheError
-  | NetworkError
-  | ValidationError
-  | NotFoundError
-  | EventDomainError; // Add other domain/app errors here
+export interface DBError extends BaseError {
+  readonly _tag: 'DBError';
+  readonly code: DBErrorCode;
+}
+export interface CacheError extends BaseError {
+  readonly _tag: 'CacheError';
+  readonly code: CacheErrorCode;
+}
+
+export enum NetworkErrorCode {
+  TIMEOUT = 'NETWORK_TIMEOUT',
+  CONNECTION_REFUSED = 'NETWORK_CONNECTION_REFUSED',
+  DNS_LOOKUP_FAILED = 'NETWORK_DNS_LOOKUP_FAILED',
+  UNKNOWN = 'NETWORK_UNKNOWN',
+}
+
+export interface NetworkError extends BaseError {
+  readonly _tag: 'NetworkError';
+  readonly code: NetworkErrorCode;
+}
+
+export type AppError = DBError | CacheError | NetworkError | ValidationError | NotFoundError;
 
 export enum DBErrorCode {
   CONNECTION_ERROR = 'CONNECTION_ERROR',
@@ -38,16 +43,13 @@ export enum DBErrorCode {
   NOT_FOUND = 'NOT_FOUND',
 }
 
-export interface DBError extends BaseError {
-  readonly code: DBErrorCode;
-}
-
 export const createDBError = (params: {
   code: DBErrorCode;
   message: string;
   cause?: Error;
   details?: ErrorDetails;
 }): DBError => ({
+  _tag: 'DBError',
   name: 'DBError',
   stack: new Error().stack,
   timestamp: new Date(),
@@ -63,17 +65,27 @@ export enum CacheErrorCode {
   NOT_FOUND = 'CACHE_NOT_FOUND',
 }
 
-export interface CacheError extends BaseError {
-  readonly code: CacheErrorCode;
-}
-
 export const createCacheError = (params: {
   code: CacheErrorCode;
   message: string;
   cause?: Error;
   details?: ErrorDetails;
 }): CacheError => ({
+  _tag: 'CacheError',
   name: 'CacheError',
+  stack: new Error().stack,
+  timestamp: new Date(),
+  ...params,
+});
+
+export const createNetworkError = (params: {
+  code: NetworkErrorCode;
+  message: string;
+  cause?: Error;
+  details?: ErrorDetails;
+}): NetworkError => ({
+  _tag: 'NetworkError',
+  name: 'NetworkError',
   stack: new Error().stack,
   timestamp: new Date(),
   ...params,
@@ -86,28 +98,22 @@ export enum DomainErrorCode {
   NOT_FOUND = 'NOT_FOUND',
 }
 
-export interface DomainError {
-  readonly name: 'DomainError';
+export interface DomainError extends BaseError {
+  readonly _tag: 'DomainError';
   readonly code: DomainErrorCode;
-  readonly message: string;
-  readonly cause?: Error;
-  readonly timestamp: Date;
 }
 
-export const createDomainError = ({
-  code,
-  message,
-  cause,
-}: {
+export const createDomainError = (params: {
   code: DomainErrorCode;
   message: string;
   cause?: Error;
+  details?: ErrorDetails;
 }): DomainError => ({
+  _tag: 'DomainError',
   name: 'DomainError',
-  code,
-  message,
-  cause,
+  stack: new Error().stack,
   timestamp: new Date(),
+  ...params,
 });
 
 export enum APIErrorCode {
@@ -118,6 +124,7 @@ export enum APIErrorCode {
 }
 
 export interface APIError extends BaseError {
+  readonly _tag: 'APIError';
   readonly code: APIErrorCode;
 }
 
@@ -134,6 +141,7 @@ export const createAPIError = (params: {
   cause?: Error;
   details?: ErrorDetails;
 }): APIError => ({
+  _tag: 'APIError',
   name: 'APIError',
   stack: params.cause?.stack || undefined,
   timestamp: new Date(),
@@ -152,98 +160,3 @@ export const getErrorStatus = (error: APIError): number => {
       return 500;
   }
 };
-
-export enum QueueErrorCode {
-  // Queue errors
-  CREATE_QUEUE = 'CREATE_QUEUE',
-  INIT_QUEUE = 'INIT_QUEUE',
-  ADD_JOB = 'ADD_JOB',
-  REMOVE_JOB = 'REMOVE_JOB',
-  PAUSE_QUEUE = 'PAUSE_QUEUE',
-  RESUME_QUEUE = 'RESUME_QUEUE',
-  CLOSE_QUEUE = 'CLOSE_QUEUE',
-  INVALID_JOB_DATA = 'INVALID_JOB_DATA',
-
-  // Worker errors
-  CREATE_WORKER = 'CREATE_WORKER',
-  START_WORKER = 'START_WORKER',
-  STOP_WORKER = 'STOP_WORKER',
-  PROCESSING_ERROR = 'PROCESSING_ERROR',
-
-  // Flow errors
-  GET_FLOW_DEPENDENCIES = 'GET_FLOW_DEPENDENCIES',
-  GET_CHILDREN_VALUES = 'GET_CHILDREN_VALUES',
-
-  // Scheduler errors
-  CREATE_JOB_SCHEDULER = 'CREATE_JOB_SCHEDULER',
-  GET_JOB_SCHEDULERS = 'GET_JOB_SCHEDULERS',
-}
-
-export interface QueueError {
-  code: QueueErrorCode;
-  context: string;
-  error: Error;
-}
-
-export const createQueueError = (
-  code: QueueErrorCode,
-  context: string,
-  error: Error,
-): QueueError => ({
-  code,
-  context,
-  error,
-});
-
-export enum ServiceErrorCode {
-  UNKNOWN = 'UNKNOWN',
-  NOT_FOUND = 'NOT_FOUND',
-  VALIDATION_ERROR = 'VALIDATION_ERROR',
-  INTEGRATION_ERROR = 'INTEGRATION_ERROR',
-  CACHE_ERROR = 'CACHE_ERROR',
-  DB_ERROR = 'DB_ERROR',
-  QUEUE_ERROR = 'QUEUE_ERROR',
-  CONFIG_ERROR = 'CONFIG_ERROR',
-  CONDITION_NOT_MET = 'CONDITION_NOT_MET',
-}
-
-export interface ServiceError extends BaseError {
-  readonly code: ServiceErrorCode;
-}
-
-export const createServiceError = (params: {
-  code: ServiceErrorCode;
-  message: string;
-  cause?: Error;
-  details?: ErrorDetails;
-}): ServiceError => ({
-  name: 'ServiceError',
-  code: params.code,
-  message: params.message,
-  timestamp: new Date(),
-  stack: params.cause?.stack,
-  cause: params.cause,
-  details: params.details,
-});
-
-export const isServiceError = (e: unknown): e is ServiceError => {
-  return (
-    typeof e === 'object' &&
-    e !== null &&
-    'name' in e &&
-    e.name === 'ServiceError' &&
-    'code' in e &&
-    Object.values(ServiceErrorCode).includes(e.code as ServiceErrorCode)
-  );
-};
-
-export enum DataLayerErrorCode {
-  FETCH_ERROR = 'FETCH_ERROR',
-  VALIDATION_ERROR = 'VALIDATION_ERROR',
-  MAPPING_ERROR = 'MAPPING_ERROR',
-  INTERNAL_ERROR = 'INTERNAL_ERROR',
-}
-
-export interface DataLayerError extends BaseError {
-  readonly code: DataLayerErrorCode;
-}
