@@ -1,7 +1,7 @@
 import { DecoratedDependencies } from '@app/dependencies';
 import { PlayerID, TeamID } from '@app/domain/shared/types/id.types';
 import { PlayerTypeID } from '@app/domain/shared/types/type.types';
-import { unwrapOrThrow } from '@app/shared/utils/response.util';
+import { unwrapOrThrow } from '@app/utils/response.util';
 import { Elysia, t } from 'elysia';
 
 export const playersApi = (dependencies: DecoratedDependencies) =>

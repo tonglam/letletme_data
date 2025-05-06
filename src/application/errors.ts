@@ -1,4 +1,4 @@
-import { BaseError, ErrorDetails } from '@app/shared/types/error.types';
+import { BaseError, ErrorDetails } from '@app/types/error.types';
 
 // --- Validation Errors ---
 export type ValidationErrorCode = 'VALIDATION_ERROR';

@@ -4,7 +4,7 @@ import { EventID } from '@app/domain/shared/types/id.types';
 import { createEventCache } from '@app/infrastructure/cache/event.cache';
 import { createEventRepository as createDrizzleEventRepository } from '@app/infrastructure/persistence/drizzle/repositories/drizzle-event.repository';
 import { mapErrorToDbError } from '@app/infrastructure/persistence/utils/error.util';
-import { DBError } from '@app/shared/types/error.types';
+import { DBError } from '@app/types/error.types';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';
 

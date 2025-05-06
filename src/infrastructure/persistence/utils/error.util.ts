@@ -1,5 +1,5 @@
-import { createDBError, DBError, DBErrorCode } from '@app/shared/types/error.types';
-import { getErrorMessage } from '@app/shared/utils/error.util';
+import { createDBError, DBError, DBErrorCode } from '@app/types/error.types';
+import { getErrorMessage } from '@app/utils/error.util';
 import { ZodError } from 'zod';
 
 export const formatZodErrorForDbError =

@@ -1,6 +1,6 @@
 import { DecoratedDependencies } from '@app/dependencies';
 import { EventID } from '@app/domain/shared/types/id.types';
-import { unwrapOrThrow } from '@app/shared/utils/response.util';
+import { unwrapOrThrow } from '@app/utils/response.util';
 import { Elysia, t } from 'elysia';
 
 export const eventsApi = (dependencies: DecoratedDependencies) =>

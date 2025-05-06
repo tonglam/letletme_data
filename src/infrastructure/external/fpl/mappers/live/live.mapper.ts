@@ -2,7 +2,7 @@ import { RawEventLive } from '@app/domain/models/event-live.model';
 import { EventId } from '@app/domain/models/event.type';
 import { PlayerId, validatePlayerId } from '@app/domain/models/player.model';
 import { LiveResponse } from '@app/infrastructure/external/fpl/schemas/live/live.schema';
-import { safeStringToDecimal } from '@app/shared/utils/common.util';
+import { safeStringToDecimal } from '@app/utils/common.util';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as O from 'fp-ts/Option';

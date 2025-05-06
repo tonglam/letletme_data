@@ -5,7 +5,7 @@ import { TopElementInfoSchema } from '@app/domain/shared/value-objects/top-eleme
 import { formatZodErrorForDbError } from '@app/infrastructure/persistence/utils/error.util';
 import { parseDbJsonField } from '@app/infrastructure/persistence/utils/json.util';
 import { DbEvent, DbEventInsert } from '@app/schemas/tables/event.schema';
-import { createDBError, DBError, DBErrorCode } from '@app/shared/types/error.types';
+import { createDBError, DBError, DBErrorCode } from '@app/types/error.types';
 import * as E from 'fp-ts/Either';
 import { z } from 'zod';
 

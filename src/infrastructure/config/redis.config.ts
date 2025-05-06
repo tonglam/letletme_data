@@ -1,4 +1,4 @@
-import { RedisConnectionConfig } from '@app/shared/types/redis.types';
+import { RedisConnectionConfig } from '@app/types/redis.types';
 
 export const REDIS_CONFIG: RedisConnectionConfig = {
   host: process.env.REDIS_HOST ?? 'localhost',

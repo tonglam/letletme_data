@@ -1,6 +1,6 @@
 import { Event, Events } from '@app/domain/event/model';
 import { EventID } from '@app/domain/shared/types/id.types';
-import { CacheError } from '@app/shared/types/error.types';
+import { CacheError } from '@app/types/error.types';
 import * as TE from 'fp-ts/TaskEither';
 
 export interface EventCachePort {

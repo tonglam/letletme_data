@@ -4,7 +4,7 @@ import { SourcePlayerValue } from '@app/domain/models/player-value.model';
 import { EventID, PlayerID, TeamID, validatePlayerId } from '@app/domain/shared/types/id.types';
 import { PlayerTypeID } from '@app/domain/shared/types/type.types';
 import { ElementResponse } from '@app/infrastructure/external/fpl/schemas/bootstrap/element.schema';
-import { safeStringToNumber } from '@app/shared/utils/common.util';
+import { safeStringToNumber } from '@app/utils/common.util';
 import { format } from 'date-fns';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';

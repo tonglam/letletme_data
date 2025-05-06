@@ -1,5 +1,5 @@
-import { DBError, DBErrorCode, createDBError } from '@app/shared/types/error.types';
-import { safeParseJson } from '@app/shared/utils/common.util';
+import { DBError, DBErrorCode, createDBError } from '@app/types/error.types';
+import { safeParseJson } from '@app/utils/common.util';
 import * as E from 'fp-ts/Either';
 import { z } from 'zod';
 

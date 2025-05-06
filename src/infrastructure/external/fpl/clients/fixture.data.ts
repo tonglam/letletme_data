@@ -7,9 +7,9 @@ import {
   EventFixturesResponse,
   EventFixturesResponseSchema,
 } from '@app/infrastructure/external/fpl/schemas/fixture/fixture.schema';
-import { DataLayerError, DataLayerErrorCode } from '@app/shared/types/error.types';
-import { createDataLayerError } from '@app/shared/utils/error.util';
-import { FplApiContext, logFplApiCall, logFplApiError } from '@app/shared/utils/logger.util';
+import { DataLayerError, DataLayerErrorCode } from '@app/types/error.types';
+import { createDataLayerError } from '@app/utils/error.util';
+import { FplApiContext, logFplApiCall, logFplApiError } from '@app/utils/logger.util';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as TE from 'fp-ts/TaskEither';

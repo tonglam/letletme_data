@@ -17,7 +17,7 @@ import {
   QueueErrorCode,
   ServiceError,
   ServiceErrorCode,
-} from '@app/shared/types/error.types';
+} from '@app/types/error.types';
 import * as E from 'fp-ts/Either';
 import { ZodError } from 'zod';
 

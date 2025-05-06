@@ -10,8 +10,8 @@ import {
   EventLiveResponseSchema,
 } from '@app/infrastructure/external/fpl/schemas/live/event-live.schema';
 import { LiveResponse } from '@app/infrastructure/external/fpl/schemas/live/live.schema';
-import { DataLayerError, DataLayerErrorCode } from '@app/shared/types/error.types';
-import { createDataLayerError } from '@app/shared/utils/error.util';
+import { DataLayerError, DataLayerErrorCode } from '@app/types/error.types';
+import { createDataLayerError } from '@app/utils/error.util';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 import * as RA from 'fp-ts/ReadonlyArray';

@@ -1,8 +1,8 @@
 import { Event } from '@app/domain/event/model';
 import { EventSchema } from '@app/domain/event/schema';
 import { EventResponse } from '@app/infrastructure/external/fpl/schemas/bootstrap/event.schema';
-import { formatZodError } from '@app/shared/utils/error.util';
-import { safeParseResultToEither } from '@app/shared/utils/zod.utils';
+import { formatZodError } from '@app/utils/error.util';
+import { safeParseResultToEither } from '@app/utils/zod.utils';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';
 

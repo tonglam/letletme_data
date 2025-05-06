@@ -38,7 +38,7 @@ import { EntryInfoRepository } from '@app/infrastructure/persistence/drizzle/rep
 import { PlayerCache } from '@app/old-domain/player/types';
 import { TeamCache } from '@app/old-domain/team/types';
 import { ElementTypeId, ElementTypeName, ElementTypeNames } from '@app/shared/types/base.types';
-import { CacheError, CacheErrorCode, createCacheError } from '@app/shared/types/error.types';
+import { CacheError, CacheErrorCode, createCacheError } from '@app/types/error.types';
 import * as Eq from 'fp-ts/Eq';
 import { pipe } from 'fp-ts/function';
 import * as O from 'fp-ts/Option';

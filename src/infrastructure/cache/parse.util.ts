@@ -1,4 +1,4 @@
-import { CacheError, CacheErrorCode, createCacheError } from '@app/shared/types/error.types';
+import { CacheError, CacheErrorCode, createCacheError } from '@app/types/error.types';
 import * as A from 'fp-ts/Array';
 import * as E from 'fp-ts/Either';
 import { pipe } from 'fp-ts/function';

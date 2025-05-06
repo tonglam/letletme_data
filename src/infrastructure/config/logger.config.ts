@@ -1,6 +1,6 @@
 import * as path from 'path';
 
-import { formatLocalTime } from '@app/shared/utils/date.util';
+import { formatLocalTime } from '@app/utils/date.util';
 import { Logger, pino } from 'pino';
 
 export type LogLevel = 'error' | 'warn' | 'info' | 'debug';
