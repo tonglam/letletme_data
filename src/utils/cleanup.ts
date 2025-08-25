@@ -1,6 +1,6 @@
 import { redisSingleton } from '../cache/singleton';
 import { databaseSingleton } from '../db/singleton';
-import { logInfo } from './logger';
+import { logError, logInfo } from './logger';
 
 /**
  * Cleanup utility to properly close connections and allow process to exit
@@ -23,7 +23,7 @@ export async function cleanup(): Promise<void> {
 
     logInfo('✅ Cleanup completed successfully');
   } catch (error) {
-    console.error('❌ Error during cleanup:', error);
+    logError('Error during cleanup:', error);
   }
 }
 
@@ -38,14 +38,14 @@ export function registerCleanupHandlers(): void {
 
   // Handle Ctrl+C
   process.on('SIGINT', async () => {
-    console.log('\n🛑 Received SIGINT, cleaning up...');
+    logInfo('🛑 Received SIGINT, cleaning up...');
     await cleanup();
     process.exit(0);
   });
 
   // Handle kill signal
   process.on('SIGTERM', async () => {
-    console.log('\n🛑 Received SIGTERM, cleaning up...');
+    logInfo('🛑 Received SIGTERM, cleaning up...');
     await cleanup();
     process.exit(0);
   });

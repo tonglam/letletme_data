@@ -50,6 +50,8 @@ export const generateTeam = (overrides: Partial<Team> = {}): Team => ({
   strengthDefenceHome: 1200,
   strengthDefenceAway: 1200,
   pulseId: 1,
+  createdAt: null,
+  updatedAt: null,
   ...overrides,
 });
 

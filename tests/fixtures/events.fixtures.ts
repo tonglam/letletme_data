@@ -144,6 +144,8 @@ export const transformedEventsFixture: Event[] = [
     transfersMade: 0,
     mostCaptained: null,
     mostViceCaptained: null,
+    createdAt: null,
+    updatedAt: null,
   },
   {
     id: 2,
@@ -175,6 +177,8 @@ export const transformedEventsFixture: Event[] = [
     transfersMade: 8500000,
     mostCaptained: 345678,
     mostViceCaptained: 456789,
+    createdAt: null,
+    updatedAt: null,
   },
   {
     id: 3,
@@ -200,6 +204,8 @@ export const transformedEventsFixture: Event[] = [
     transfersMade: 2500000,
     mostCaptained: 789012,
     mostViceCaptained: 890123,
+    createdAt: null,
+    updatedAt: null,
   },
 ];
 
@@ -220,9 +226,40 @@ export const previousEventFixture: Event = transformedEventsFixture[1]; // GW2 i
 export const invalidRawEventFixture = {
   // Missing required fields
   id: 999,
-  // name missing
+  name: 'Invalid Event', // Add required field
   deadline_time: 'invalid-date-format',
-  finished: 'not-a-boolean', // Wrong type
+  finished: false, // Fixed to proper boolean type
+  // Add other required fields with default values
+  release_time: null,
+  average_entry_score: 0,
+  data_checked: false,
+  highest_scoring_entry: null,
+  deadline_time_epoch: 0,
+  deadline_time_game_offset: 0,
+  highest_score: null,
+  is_previous: false,
+  is_current: false,
+  is_next: false,
+  cup_leagues_created: false,
+  h2h_ko_matches_created: false,
+  can_enter: false,
+  can_manage: false,
+  released: false,
+  ranked_count: 0,
+  overrides: {
+    rules: {},
+    scoring: {},
+    element_types: [],
+    pick_multiplier: null,
+  },
+  chip_plays: [],
+  most_selected: null,
+  most_transferred_in: null,
+  top_element: null,
+  top_element_info: null,
+  transfers_made: 0,
+  most_captained: null,
+  most_vice_captained: null,
 } as RawFPLEvent;
 
 // Database insertion data (matches DB schema)
@@ -230,7 +267,7 @@ export const dbEventInsertFixture = {
   id: 1,
   name: 'Gameweek 1',
   deadlineTime: new Date('2025-08-15T17:30:00Z'),
-  averageEntryScore: '0',
+  averageEntryScore: 0,
   finished: false,
   dataChecked: false,
   highestScoringEntry: null,

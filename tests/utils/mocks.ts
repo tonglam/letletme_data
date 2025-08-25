@@ -102,7 +102,7 @@ export const createMockLogger = () => ({
 });
 
 // Mock fetch for HTTP requests
-export const createMockFetch = (mockResponse = mockBootstrapResponseFixture) => {
+export const createMockFetch = (mockResponse = teamsMockFixture) => {
   return async () => ({
     ok: true,
     status: 200,

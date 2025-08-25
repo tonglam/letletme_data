@@ -35,6 +35,8 @@ export function transformTeam(rawTeam: RawFPLTeam): Team {
       strengthDefenceHome: validatedRawTeam.strength_defence_home,
       strengthDefenceAway: validatedRawTeam.strength_defence_away,
       pulseId: validatedRawTeam.pulse_id,
+      createdAt: null,
+      updatedAt: null,
     };
 
     // Validate the transformed domain object

@@ -8,7 +8,7 @@ export const rawFPLTeamsFixture: RawFPLTeam[] = [
     name: 'Arsenal',
     short_name: 'ARS',
     strength: 4,
-    position: 0,
+    position: 1,
     points: 0,
     played: 0,
     win: 0,
@@ -31,7 +31,7 @@ export const rawFPLTeamsFixture: RawFPLTeam[] = [
     name: 'Aston Villa',
     short_name: 'AVL',
     strength: 3,
-    position: 0,
+    position: 2,
     points: 0,
     played: 0,
     win: 0,
@@ -54,7 +54,7 @@ export const rawFPLTeamsFixture: RawFPLTeam[] = [
     name: 'Burnley',
     short_name: 'BUR',
     strength: 2,
-    position: 0,
+    position: 3,
     points: 0,
     played: 0,
     win: 0,
@@ -73,7 +73,7 @@ export const rawFPLTeamsFixture: RawFPLTeam[] = [
   },
 ];
 
-// Expected transformed teams
+// Expected transformed teams (without database-only fields)
 export const transformedTeamsFixture: Team[] = [
   {
     id: 1,
@@ -85,7 +85,7 @@ export const transformedTeamsFixture: Team[] = [
     loss: 0,
     played: 0,
     points: 0,
-    position: 0,
+    position: 1,
     strength: 4,
     teamDivision: null,
     unavailable: false,
@@ -97,6 +97,8 @@ export const transformedTeamsFixture: Team[] = [
     strengthDefenceHome: 1290,
     strengthDefenceAway: 1300,
     pulseId: 1,
+    createdAt: null,
+    updatedAt: null,
   },
   {
     id: 2,
@@ -108,7 +110,7 @@ export const transformedTeamsFixture: Team[] = [
     loss: 0,
     played: 0,
     points: 0,
-    position: 0,
+    position: 2,
     strength: 3,
     teamDivision: null,
     unavailable: false,
@@ -120,6 +122,8 @@ export const transformedTeamsFixture: Team[] = [
     strengthDefenceHome: 1140,
     strengthDefenceAway: 1300,
     pulseId: 2,
+    createdAt: null,
+    updatedAt: null,
   },
   {
     id: 3,
@@ -131,7 +135,7 @@ export const transformedTeamsFixture: Team[] = [
     loss: 0,
     played: 0,
     points: 0,
-    position: 0,
+    position: 3,
     strength: 2,
     teamDivision: null,
     unavailable: false,
@@ -143,6 +147,8 @@ export const transformedTeamsFixture: Team[] = [
     strengthDefenceHome: 1050,
     strengthDefenceAway: 1050,
     pulseId: 43,
+    createdAt: null,
+    updatedAt: null,
   },
 ];
 
@@ -155,9 +161,25 @@ export const invalidRawTeamFixture = {
   // Missing required fields
   id: 999,
   code: 999,
-  // name missing
-  // short_name missing
+  name: 'Edge Case Team',
+  short_name: 'ECT',
   strength: 1,
+  position: 0, // Invalid position (should be 1-20)
+  points: 0,
+  win: 0,
+  draw: 0,
+  loss: 0,
+  played: 0,
+  form: null,
+  team_division: null,
+  unavailable: false,
+  strength_overall_home: 1000,
+  strength_overall_away: 1000,
+  strength_attack_home: 1000,
+  strength_attack_away: 1000,
+  strength_defence_home: 1000,
+  strength_defence_away: 1000,
+  pulse_id: 999,
 } as RawFPLTeam;
 
 // Database insertion data (matches DB schema)
@@ -167,7 +189,7 @@ export const dbTeamInsertFixture = {
   name: 'Arsenal',
   short_name: 'ARS',
   strength: 4,
-  position: 0,
+  position: 1,
   points: 0,
   win: 0,
   draw: 0,

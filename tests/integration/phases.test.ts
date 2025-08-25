@@ -128,14 +128,16 @@ describe('Phases Integration Tests - Complete Workflow', () => {
             const overallCache = cachedPhases.find((p: any) => p.name === 'Overall');
             expect(overallDb).toBeDefined();
             expect(overallCache).toBeDefined();
-            expect(overallDb!.id).toBe(overallCache.id);
-            expect(overallDb!.startEvent).toBe(overallCache.startEvent);
-            expect(overallDb!.stopEvent).toBe(overallCache.stopEvent);
+            if (overallCache) {
+              expect(overallDb!.id).toBe(overallCache.id);
+              expect(overallDb!.startEvent).toBe(overallCache.startEvent);
+              expect(overallDb!.stopEvent).toBe(overallCache.stopEvent);
+            }
           }
         }
 
         console.log(`✅ Complete workflow verified: ${dbPhases.length} phases processed`);
-      } catch (error) {
+      } catch (_error) {
         console.log('⚠️ Database schema mismatch - verifying API and transform steps only');
 
         // Still verify the API and transformation parts work
@@ -213,7 +215,7 @@ describe('Phases Integration Tests - Complete Workflow', () => {
         expect(dbPhases.length).toBe(phases.length); // Same count, no duplicates
 
         console.log('✅ Database upsert operations verified');
-      } catch (error) {
+      } catch (_error) {
         console.log('⚠️ Database schema mismatch - verifying data processing instead');
 
         // Verify we can still process the data
@@ -347,7 +349,7 @@ describe('Phases Integration Tests - Complete Workflow', () => {
         expect(gameweek1Phases.length).toBeGreaterThan(0);
 
         console.log('✅ Phase queries verified');
-      } catch (error) {
+      } catch (_error) {
         console.log('⚠️ Phase queries test skipped due to schema issues');
         expect(true).toBe(true);
       }
@@ -379,7 +381,7 @@ describe('Phases Integration Tests - Complete Workflow', () => {
         expect(totalTime).toBeLessThan(15000); // Should complete within 15 seconds
 
         console.log(`✅ Full workflow performance: ${totalTime.toFixed(2)}ms`);
-      } catch (error) {
+      } catch (_error) {
         // Still measure API performance
         const apiStartTime = performance.now();
         const bootstrapData = await fplClient.getBootstrap();

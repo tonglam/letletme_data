@@ -270,8 +270,10 @@ describe('Players Integration Tests - Complete Workflow', () => {
         const firstPlayer = testPlayers[0];
         const cachedPlayer = await playersCache.getPlayer(firstPlayer.id);
         expect(cachedPlayer).toBeDefined();
-        expect(cachedPlayer.id).toBe(firstPlayer.id);
-        expect(cachedPlayer.firstName).toBe(firstPlayer.firstName);
+        if (cachedPlayer) {
+          expect(cachedPlayer.id).toBe(firstPlayer.id);
+          expect(cachedPlayer.firstName).toBe(firstPlayer.firstName);
+        }
 
         // Test team-based filtering
         const teamPlayers = await playersCache.getPlayersByTeam(firstPlayer.teamId);
@@ -348,7 +350,9 @@ describe('Players Integration Tests - Complete Workflow', () => {
             // Test individual cache retrieval
             const individualPlayer = await playersCache.getPlayer(player.id);
             expect(individualPlayer).toBeDefined();
-            expect(individualPlayer.id).toBe(player.id);
+            if (individualPlayer) {
+              expect(individualPlayer.id).toBe(player.id);
+            }
           }
         }
 

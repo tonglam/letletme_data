@@ -1,7 +1,5 @@
 ---
-description: 
-globs: 
-alwaysApply: false
+alwaysApply: true
 ---
 # Tech Stack & Logging
 
@@ -26,3 +24,10 @@ Follow the layered structure outlined in the project documentation:
 - `/service`
 - `/infrastructure`
 - `/api`
+
+**Warning**
+
+- no any type
+- never use flush or delete all in redis
+- never trunk db tabels
+- connect to actual resources in integration tests

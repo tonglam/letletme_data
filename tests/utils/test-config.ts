@@ -38,8 +38,6 @@ export function createTestRedis() {
     host: testRedisConfig.host,
     port: testRedisConfig.port,
     db: testRedisConfig.db,
-    retryDelayOnFailover: 100,
-    maxRetriesPerRequest: 3,
     lazyConnect: true,
   });
 }

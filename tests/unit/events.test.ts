@@ -121,12 +121,12 @@ describe('Events Unit Tests', () => {
   });
 
   describe('EventRepository Unit Tests', () => {
-    let mockDb: any;
+    let _mockDb: any;
     let repository: EventRepository;
 
     beforeEach(() => {
       // Create mock database with simple functions
-      mockDb = {
+      _mockDb = {
         select: () => ({
           from: () => ({
             where: () => Promise.resolve([singleTransformedEventFixture]),
@@ -334,6 +334,7 @@ describe('Events Unit Tests', () => {
       const edgeCaseEvent = {
         id: 999,
         name: 'Edge Case Event',
+        release_time: null, // Add missing required field
         deadline_time: null, // Edge case: null deadline
         average_entry_score: 0, // Edge case: zero score
         finished: false,
@@ -523,9 +524,11 @@ describe('Events Unit Tests', () => {
       const eventWithChips = transformedEventsFixture[1]; // GW2 has chips
 
       expect(Array.isArray(eventWithChips.chipPlays)).toBe(true);
-      expect(eventWithChips.chipPlays.length).toBeGreaterThan(0);
-      expect(eventWithChips.chipPlays[0]).toHaveProperty('name');
-      expect(eventWithChips.chipPlays[0]).toHaveProperty('num_played');
+      if (eventWithChips.chipPlays) {
+        expect(eventWithChips.chipPlays.length).toBeGreaterThan(0);
+        expect(eventWithChips.chipPlays[0]).toHaveProperty('name');
+        expect(eventWithChips.chipPlays[0]).toHaveProperty('num_played');
+      }
     });
 
     test('should handle element info correctly', () => {

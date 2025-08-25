@@ -320,7 +320,7 @@ export async function handleGetPlayers(req: Request, res: Response): Promise<voi
   try {
     const { position, team, minPrice, maxPrice, limit, metadata } = req.query;
 
-    let players: Player[] | any[];
+    let players: Player[];
 
     // Get players with optional filters
     if (position && typeof position === 'string') {

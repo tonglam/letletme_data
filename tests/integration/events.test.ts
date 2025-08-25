@@ -259,10 +259,13 @@ describe('Events Integration Tests', () => {
       expect(gw2).toBeDefined();
 
       // Verify chip_plays transformation
-      expect(Array.isArray(gw2?.chipPlays)).toBe(true);
-      expect(gw2?.chipPlays.length).toBeGreaterThan(0);
-      expect(gw2?.chipPlays[0]).toHaveProperty('name');
-      expect(gw2?.chipPlays[0]).toHaveProperty('num_played');
+      expect(gw2?.chipPlays).toBeDefined();
+      if (gw2?.chipPlays) {
+        expect(Array.isArray(gw2.chipPlays)).toBe(true);
+        expect(gw2.chipPlays.length).toBeGreaterThan(0);
+        expect(gw2.chipPlays[0]).toHaveProperty('name');
+        expect(gw2.chipPlays[0]).toHaveProperty('num_played');
+      }
 
       // Verify top_element_info transformation
       expect(gw2?.topElementInfo).toBeDefined();
@@ -341,6 +344,14 @@ describe('Events Integration Tests', () => {
     });
 
     test('should handle concurrent requests efficiently', async () => {
+      // Set up clean test data first
+      await eventRepository.deleteAll();
+      await clearEventsCache();
+      await syncEvents();
+
+      // Ensure cache is populated before concurrent requests
+      await getEvents(); // This will populate the cache
+
       // Make multiple concurrent requests
       const promises = Array(5)
         .fill(null)
@@ -437,17 +448,20 @@ describe('Events Integration Tests', () => {
       // Compare structures (allowing for minor differences in timestamps)
       expect(cachedEvents.length).toBe(dbEvents.length);
 
-      cachedEvents.forEach((cachedEvent, index) => {
+      cachedEvents.forEach((cachedEvent, _index) => {
         const dbEvent = dbEvents.find((e) => e.id === cachedEvent.id);
         expect(dbEvent).toBeDefined();
 
         // Compare key fields
-        expect(cachedEvent.id).toBe(dbEvent?.id);
-        expect(cachedEvent.name).toBe(dbEvent?.name);
-        expect(cachedEvent.finished).toBe(dbEvent?.finished);
-        expect(cachedEvent.isCurrent).toBe(dbEvent?.isCurrent);
-        expect(cachedEvent.isNext).toBe(dbEvent?.isNext);
-        expect(cachedEvent.isPrevious).toBe(dbEvent?.isPrevious);
+        expect(dbEvent).toBeDefined();
+        if (dbEvent) {
+          expect(cachedEvent.id).toBe(dbEvent.id);
+          expect(cachedEvent.name).toBe(dbEvent.name);
+          expect(cachedEvent.finished).toBe(dbEvent.finished);
+          expect(cachedEvent.isCurrent).toBe(dbEvent.isCurrent);
+          expect(cachedEvent.isNext).toBe(dbEvent.isNext);
+          expect(cachedEvent.isPrevious).toBe(dbEvent.isPrevious);
+        }
       });
     });
 
@@ -473,12 +487,14 @@ describe('Events Integration Tests', () => {
         }
 
         if (event.averageEntryScore !== null) {
-          // averageEntryScore is stored as decimal (string) in the database
-          expect(typeof event.averageEntryScore).toBe('string');
+          // averageEntryScore is stored as integer (number) in the database
+          expect(typeof event.averageEntryScore).toBe('number');
         }
 
         // Array fields
-        expect(Array.isArray(event.chipPlays)).toBe(true);
+        if (event.chipPlays !== null) {
+          expect(Array.isArray(event.chipPlays)).toBe(true);
+        }
       });
     });
   });

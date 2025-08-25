@@ -26,6 +26,8 @@ export function transformEvent(rawEvent: RawFPLEvent): Event {
     transfersMade: rawEvent.transfers_made,
     mostCaptained: rawEvent.most_captained,
     mostViceCaptained: rawEvent.most_vice_captained,
+    createdAt: null,
+    updatedAt: null,
   };
 }
 

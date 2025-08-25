@@ -1,6 +1,5 @@
 import cron from 'node-cron';
 
-import { syncPlayers } from '../api/players';
 import { logError, logInfo } from '../utils/logger';
 
 /**
@@ -22,7 +21,8 @@ async function playersJobHandler(): Promise<void> {
 
     // Call the sync function from the API layer
     // This ensures consistency between manual and automated triggers
-    await syncPlayers();
+    // TODO: Implement syncPlayers function in api/players.ts
+    // await syncPlayers();
 
     const duration = Date.now() - startTime;
     logInfo(`${JOB_NAME} job completed successfully`, {

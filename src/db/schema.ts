@@ -1,11 +1,11 @@
-import { boolean, decimal, integer, jsonb, pgTable, text, timestamp } from 'drizzle-orm/pg-core';
+import { boolean, integer, jsonb, pgTable, text, timestamp } from 'drizzle-orm/pg-core';
 
 // Events table
 export const events = pgTable('events', {
   id: integer('id').primaryKey(),
   name: text('name').notNull(),
   deadlineTime: timestamp('deadline_time'),
-  averageEntryScore: decimal('average_entry_score'),
+  averageEntryScore: integer('average_entry_score'),
   finished: boolean('finished').notNull().default(false),
   dataChecked: boolean('data_checked').notNull().default(false),
   highestScoringEntry: integer('highest_scoring_entry'),
@@ -17,7 +17,7 @@ export const events = pgTable('events', {
   isNext: boolean('is_next').notNull().default(false),
   cupLeagueCreate: boolean('cup_league_create').notNull().default(false),
   h2hKoMatchesCreated: boolean('h2h_ko_matches_created').notNull().default(false),
-  chipPlays: jsonb('chip_plays').default([]),
+  chipPlays: jsonb('chip_plays').$type<unknown[]>().default([]),
   mostSelected: integer('most_selected'),
   mostTransferredIn: integer('most_transferred_in'),
   topElement: integer('top_element'),

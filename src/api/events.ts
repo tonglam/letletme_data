@@ -22,7 +22,9 @@ export async function getEvents(): Promise<Event[]> {
     const cached = await eventsCache.get();
     if (cached) {
       logInfo('Events retrieved from cache', { count: Array.isArray(cached) ? cached.length : 0 });
-      return cached as Event[];
+      // Cache returns simplified data, need to get full data from database
+      const dbEvents = await eventRepository.findAll();
+      return dbEvents;
     }
 
     // Fallback to database

@@ -22,7 +22,7 @@ export interface Event {
   isNext: boolean;
   cupLeagueCreate: boolean;
   h2hKoMatchesCreated: boolean;
-  chipPlays: unknown[];
+  chipPlays: unknown[] | null;
   mostSelected: number | null;
   mostTransferredIn: number | null;
   topElement: number | null;
@@ -30,6 +30,8 @@ export interface Event {
   transfersMade: number | null;
   mostCaptained: number | null;
   mostViceCaptained: number | null;
+  createdAt: Date | null;
+  updatedAt: Date | null;
 }
 
 // Player types
@@ -45,30 +47,8 @@ export interface Player {
   webName: string;
 }
 
-// Team types
-export interface Team {
-  id: TeamID;
-  name: string;
-  shortName: string;
-  code: number;
-  draw: number;
-  form: string | null;
-  loss: number;
-  played: number;
-  points: number;
-  position: number;
-  strength: number;
-  teamDivision: number | null;
-  unavailable: boolean;
-  win: number;
-  strengthOverallHome: number;
-  strengthOverallAway: number;
-  strengthAttackHome: number;
-  strengthAttackAway: number;
-  strengthDefenceHome: number;
-  strengthDefenceAway: number;
-  pulseId: number;
-}
+// Team types - using database schema types
+export type Team = import('../db/schema').Team;
 
 // Phase types
 export interface Phase {
