@@ -136,6 +136,30 @@ export const playerStats = pgTable('player_stats', {
   updatedAt: timestamp('updated_at').defaultNow(),
 });
 
+// Player Values table
+export const playerValues = pgTable('player_values', {
+  id: integer('id').primaryKey().generatedAlwaysAsIdentity(),
+  eventId: integer('event_id')
+    .notNull()
+    .references(() => events.id),
+  elementId: integer('element_id')
+    .notNull()
+    .references(() => players.id),
+  webName: text('web_name').notNull(),
+  elementType: integer('element_type').notNull(), // 1=GKP, 2=DEF, 3=MID, 4=FWD
+  elementTypeName: text('element_type_name').notNull(),
+  teamId: integer('team_id')
+    .notNull()
+    .references(() => teams.id),
+  teamName: text('team_name').notNull(),
+  teamShortName: text('team_short_name').notNull(),
+  value: integer('value').notNull(), // Current value in FPL units
+  lastValue: integer('last_value').notNull(), // Previous value in FPL units
+  changeDate: text('change_date').notNull(), // ISO date string
+  changeType: text('change_type').notNull(), // 'increase' | 'decrease' | 'stable' | 'unknown'
+  createdAt: timestamp('created_at').defaultNow(),
+});
+
 // Export types
 export type Event = typeof events.$inferSelect;
 export type NewEvent = typeof events.$inferInsert;
@@ -147,3 +171,5 @@ export type Player = typeof players.$inferSelect;
 export type NewPlayer = typeof players.$inferInsert;
 export type PlayerStat = typeof playerStats.$inferSelect;
 export type NewPlayerStat = typeof playerStats.$inferInsert;
+export type PlayerValue = typeof playerValues.$inferSelect;
+export type NewPlayerValue = typeof playerValues.$inferInsert;

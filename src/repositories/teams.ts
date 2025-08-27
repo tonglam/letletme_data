@@ -191,8 +191,9 @@ export class TeamRepository {
   async deleteAll(): Promise<void> {
     try {
       const db = await this.getDbInstance();
-      await db.delete(teams);
-      logInfo('Deleted all teams');
+      // Use TRUNCATE CASCADE to handle foreign key constraints
+      await db.execute('TRUNCATE TABLE teams CASCADE');
+      logInfo('Deleted all teams with CASCADE');
     } catch (error) {
       logError('Failed to delete all teams', error);
       throw new DatabaseError(

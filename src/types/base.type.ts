@@ -22,8 +22,18 @@ export const ELEMENT_TYPE_ID_MAP: Record<ElementTypeName, ElementTypeId> = {
 } as const;
 
 // ================================
+// Player Value Types
+// ================================
+
+export type ValueChangeType = 'increase' | 'decrease' | 'stable' | 'unknown';
+
+// ================================
 // Domain ID Types (for consistency with existing project)
 // ================================
 
 // Reexport existing types with new aliases for player stats domain
 export type { EventID as EventId, PlayerID as PlayerId, TeamID as TeamId } from './index';
+
+// Type aliases for player values domain
+export type PlayerTypeID = ElementTypeId;
+export type PlayerTypeName = ElementTypeName;

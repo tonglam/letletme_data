@@ -191,6 +191,7 @@ export const CACHE_TTL = {
   PLAYERS: 3600, // 1 hour
   FIXTURES: 1800, // 30 minutes
   LIVE_DATA: 60, // 1 minute
+  player_values: 7200, // 2 hours (player values change relatively slowly)
 } as const;
 
 // Convenience export for backward compatibility

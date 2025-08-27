@@ -1,11 +1,12 @@
 import { getCurrentSeason } from '../utils/conditions';
 import { CacheError } from '../utils/errors';
-import { logDebug, logError } from '../utils/logger';
+import { logDebug, logError, logInfo } from '../utils/logger';
 import { CACHE_TTL, DEFAULT_CACHE_CONFIG, redisSingleton } from './singleton';
 
 import type { PlayerStat } from '../domain/player-stats';
+import type { PlayerValue } from '../domain/player-values';
 import type { Event, Phase, Player, RawFPLEvent, Team } from '../types';
-import type { ElementTypeId, EventId, PlayerId, TeamId } from '../types/base.type';
+import type { ElementTypeId, EventId, PlayerId, TeamId, ValueChangeType } from '../types/base.type';
 
 export class CacheOperations {
   private getKey(key: string): string {
@@ -988,5 +989,323 @@ export const playerStatsCache = {
 
   async getLatestEventId(): Promise<EventId | null> {
     return this.private.getLatestEventId();
+  },
+};
+
+// ================================
+// Player Values Cache Class
+// ================================
+
+/**
+ * Player Values Hash Cache - for player value change tracking
+ */
+export class PlayerValuesHashCache extends CacheOperations {
+  private getEventKey(eventId: EventId): string {
+    return `PlayerStat:${eventId}`;
+  }
+
+  private getPlayerKey(eventId: EventId, playerId: PlayerId): string {
+    return `${playerId}`;
+  }
+
+  // Event-based operations
+  async getPlayerValuesByEvent(eventId: EventId): Promise<PlayerValue[] | null> {
+    try {
+      const redis = await redisSingleton.getClient();
+      const eventKey = this.getEventKey(eventId);
+      const playerValuesData = await redis.hgetall(eventKey);
+
+      if (!playerValuesData || Object.keys(playerValuesData).length === 0) {
+        return null;
+      }
+
+      const playerValues: PlayerValue[] = [];
+      for (const [playerId, serializedData] of Object.entries(playerValuesData)) {
+        try {
+          const playerValue = JSON.parse(serializedData) as PlayerValue;
+          playerValues.push(playerValue);
+        } catch (error) {
+          logError('Failed to parse cached player value', error, { eventId, playerId });
+        }
+      }
+
+      return playerValues;
+    } catch (error) {
+      logError('Failed to get cached player values by event', error, { eventId });
+      return null;
+    }
+  }
+
+  async setPlayerValuesByEvent(eventId: EventId, playerValues: PlayerValue[]): Promise<void> {
+    try {
+      const redis = await redisSingleton.getClient();
+      const eventKey = this.getEventKey(eventId);
+      const playerValuesData: Record<string, string> = {};
+
+      for (const playerValue of playerValues) {
+        const playerKey = this.getPlayerKey(eventId, playerValue.elementId);
+        playerValuesData[playerKey] = JSON.stringify(playerValue);
+      }
+
+      await redis.hset(eventKey, playerValuesData);
+      await redis.expire(eventKey, CACHE_TTL.player_values);
+    } catch (error) {
+      logError('Failed to cache player values by event', error, {
+        eventId,
+        count: playerValues.length,
+      });
+    }
+  }
+
+  // Individual player value operations
+  async getPlayerValue(eventId: EventId, playerId: PlayerId): Promise<PlayerValue | null> {
+    try {
+      const redis = await redisSingleton.getClient();
+      const eventKey = this.getEventKey(eventId);
+      const playerKey = this.getPlayerKey(eventId, playerId);
+      const serializedData = await redis.hget(eventKey, playerKey);
+
+      if (!serializedData) {
+        return null;
+      }
+
+      return JSON.parse(serializedData) as PlayerValue;
+    } catch (error) {
+      logError('Failed to get cached player value', error, { eventId, playerId });
+      return null;
+    }
+  }
+
+  async setPlayerValue(playerValue: PlayerValue): Promise<void> {
+    try {
+      const redis = await redisSingleton.getClient();
+      const eventKey = this.getEventKey(playerValue.eventId);
+      const playerKey = this.getPlayerKey(playerValue.eventId, playerValue.elementId);
+      const serializedData = JSON.stringify(playerValue);
+
+      await redis.hset(eventKey, playerKey, serializedData);
+      await redis.expire(eventKey, CACHE_TTL.player_values);
+    } catch (error) {
+      logError('Failed to cache player value', error, {
+        eventId: playerValue.eventId,
+        playerId: playerValue.elementId,
+      });
+    }
+  }
+
+  // Filtered operations
+  async getPlayerValuesByTeam(eventId: EventId, teamId: TeamId): Promise<PlayerValue[] | null> {
+    try {
+      const allPlayerValues = await this.getPlayerValuesByEvent(eventId);
+      if (!allPlayerValues) return null;
+
+      return allPlayerValues.filter((pv) => pv.teamId === teamId);
+    } catch (error) {
+      logError('Failed to get cached player values by team', error, { eventId, teamId });
+      return null;
+    }
+  }
+
+  async getPlayerValuesByPosition(
+    eventId: EventId,
+    elementType: ElementTypeId,
+  ): Promise<PlayerValue[] | null> {
+    try {
+      const allPlayerValues = await this.getPlayerValuesByEvent(eventId);
+      if (!allPlayerValues) return null;
+
+      return allPlayerValues.filter((pv) => pv.elementType === elementType);
+    } catch (error) {
+      logError('Failed to get cached player values by position', error, { eventId, elementType });
+      return null;
+    }
+  }
+
+  async getPlayerValuesByChangeType(
+    eventId: EventId,
+    changeType: ValueChangeType,
+  ): Promise<PlayerValue[] | null> {
+    try {
+      const allPlayerValues = await this.getPlayerValuesByEvent(eventId);
+      if (!allPlayerValues) return null;
+
+      return allPlayerValues.filter((pv) => pv.changeType === changeType);
+    } catch (error) {
+      logError('Failed to get cached player values by change type', error, { eventId, changeType });
+      return null;
+    }
+  }
+
+  // Utility operations
+  async clearByEvent(eventId: EventId): Promise<void> {
+    try {
+      const eventKey = this.getEventKey(eventId);
+      await this.del(eventKey);
+    } catch (error) {
+      logError('Failed to clear cached player values by event', error, { eventId });
+    }
+  }
+
+  async existsByEvent(eventId: EventId): Promise<boolean> {
+    try {
+      const eventKey = this.getEventKey(eventId);
+      return await this.exists(eventKey);
+    } catch (error) {
+      logError('Failed to check cached player values existence by event', error, { eventId });
+      return false;
+    }
+  }
+
+  async clearAll(): Promise<void> {
+    try {
+      const redis = await redisSingleton.getClient();
+      const pattern = `${DEFAULT_CACHE_CONFIG.prefix}player_values:*`;
+      const keys = await redis.keys(pattern);
+
+      if (keys.length > 0) {
+        await redis.del(...keys);
+      }
+    } catch (error) {
+      logError('Failed to clear all cached player values', error);
+    }
+  }
+
+  async getLatestEventId(): Promise<EventId | null> {
+    try {
+      const redis = await redisSingleton.getClient();
+      const pattern = `${DEFAULT_CACHE_CONFIG.prefix}player_values:event:*`;
+      const keys = await redis.keys(pattern);
+
+      if (keys.length === 0) return null;
+
+      // Extract event IDs and find the latest
+      const eventIds = keys
+        .map((key: string) => {
+          const match = key.match(/player_values:event:(\d+)$/);
+          return match ? parseInt(match[1]) : null;
+        })
+        .filter((id): id is number => id !== null)
+        .sort((a: number, b: number) => b - a);
+
+      return eventIds[0] || null;
+    } catch (error) {
+      logError('Failed to get latest event ID from cached player values', error);
+      return null;
+    }
+  }
+}
+
+/**
+ * Player values cache instance with hash-based operations
+ */
+export const playerValuesCache = {
+  private: new PlayerValuesHashCache(),
+
+  // Event-based operations
+  async getByEvent(eventId: EventId): Promise<PlayerValue[] | null> {
+    return this.private.getPlayerValuesByEvent(eventId);
+  },
+
+  async setByEvent(eventId: EventId, playerValues: PlayerValue[]): Promise<void> {
+    return this.private.setPlayerValuesByEvent(eventId, playerValues);
+  },
+
+  async clearByEvent(eventId: EventId): Promise<void> {
+    return this.private.clearByEvent(eventId);
+  },
+
+  async existsByEvent(eventId: EventId): Promise<boolean> {
+    return this.private.existsByEvent(eventId);
+  },
+
+  // Individual player value operations
+  async getPlayerValue(eventId: EventId, playerId: PlayerId): Promise<PlayerValue | null> {
+    return this.private.getPlayerValue(eventId, playerId);
+  },
+
+  async setPlayerValue(playerValue: PlayerValue): Promise<void> {
+    return this.private.setPlayerValue(playerValue);
+  },
+
+  // Filtered operations
+  async getByTeam(eventId: EventId, teamId: TeamId): Promise<PlayerValue[] | null> {
+    return this.private.getPlayerValuesByTeam(eventId, teamId);
+  },
+
+  async getByPosition(eventId: EventId, elementType: ElementTypeId): Promise<PlayerValue[] | null> {
+    return this.private.getPlayerValuesByPosition(eventId, elementType);
+  },
+
+  async getByChangeType(
+    eventId: EventId,
+    changeType: ValueChangeType,
+  ): Promise<PlayerValue[] | null> {
+    return this.private.getPlayerValuesByChangeType(eventId, changeType);
+  },
+
+  // Utility operations
+  async clearAll(): Promise<void> {
+    return this.private.clearAll();
+  },
+
+  async getLatestEventId(): Promise<EventId | null> {
+    return this.private.getLatestEventId();
+  },
+
+  // Daily operations (matching Java approach: PlayerValue::YYYYMMDD)
+  async setDailyChanges(changeDate: string, playerValues: PlayerValue[]): Promise<void> {
+    try {
+      const redis = await redisSingleton.getClient();
+      const key = `PlayerValue::${changeDate}`;
+      const value = JSON.stringify(playerValues);
+
+      // Cache for 1 day (24 hours)
+      await redis.setex(key, 86400, value);
+
+      logInfo('Daily player values cached', {
+        changeDate,
+        count: playerValues.length,
+        key,
+      });
+    } catch (error) {
+      logError('Failed to cache daily player values', error, { changeDate });
+      throw error;
+    }
+  },
+
+  async getDailyChanges(changeDate: string): Promise<PlayerValue[] | null> {
+    try {
+      const redis = await redisSingleton.getClient();
+      const key = `PlayerValue::${changeDate}`;
+      const cached = await redis.get(key);
+
+      if (!cached) {
+        return null;
+      }
+
+      const playerValues = JSON.parse(cached) as PlayerValue[];
+      logInfo('Daily player values retrieved from cache', {
+        changeDate,
+        count: playerValues.length,
+      });
+
+      return playerValues;
+    } catch (error) {
+      logError('Failed to get daily player values from cache', error, { changeDate });
+      return null;
+    }
+  },
+
+  async clearDailyChanges(changeDate: string): Promise<void> {
+    try {
+      const redis = await redisSingleton.getClient();
+      const key = `PlayerValue::${changeDate}`;
+      await redis.del(key);
+
+      logInfo('Daily player values cache cleared', { changeDate });
+    } catch (error) {
+      logError('Failed to clear daily player values cache', error, { changeDate });
+      throw error;
+    }
   },
 };
