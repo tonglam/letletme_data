@@ -6,6 +6,7 @@ import { eventsAPI } from './api/events.api';
 import { jobsAPI } from './api/jobs.api';
 import { phasesAPI } from './api/phases.api';
 import { playerStatsAPI } from './api/player-stats.api';
+import { playerValuesAPI } from './api/player-values.api';
 import { playersAPI } from './api/players.api';
 import { teamsAPI } from './api/teams.api';
 
@@ -88,6 +89,7 @@ const app = new Elysia()
   .use(teamsAPI)
   .use(playersAPI)
   .use(playerStatsAPI)
+  .use(playerValuesAPI)
   .use(phasesAPI)
   .use(jobsAPI)
 
@@ -109,7 +111,7 @@ const app = new Elysia()
 logInfo('🚀 Elysia server started', {
   port: 3000,
   environment: process.env.NODE_ENV || 'development',
-  apis: ['events', 'teams', 'players', 'phases', 'jobs'],
+  apis: ['events', 'teams', 'players', 'player-stats', 'player-values', 'phases', 'jobs'],
   jobs: ['data-sync', 'live-scores', 'maintenance'],
 });
 

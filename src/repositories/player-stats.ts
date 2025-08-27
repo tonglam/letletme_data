@@ -9,6 +9,57 @@ import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import type { PlayerStat } from '../domain/player-stats';
 import type { ElementTypeId, EventId, PlayerId, TeamId } from '../types/base.type';
 
+// Type for the SQL query result that matches PlayerStat domain model
+type PlayerStatQueryResult = {
+  eventId: number;
+  elementId: number;
+  webName: string;
+  elementType: number;
+  elementTypeName: string;
+  teamId: number;
+  teamName: string;
+  teamShortName: string;
+  value: number;
+  totalPoints: number | null;
+  form: number | null;
+  influence: number | null;
+  creativity: number | null;
+  threat: number | null;
+  ictIndex: number | null;
+  expectedGoals: number | null;
+  expectedAssists: number | null;
+  expectedGoalInvolvements: number | null;
+  expectedGoalsConceded: number | null;
+  minutes: number | null;
+  goalsScored: number | null;
+  assists: number | null;
+  cleanSheets: number | null;
+  goalsConceded: number | null;
+  ownGoals: number | null;
+  penaltiesSaved: number | null;
+  yellowCards: number | null;
+  redCards: number | null;
+  saves: number | null;
+  bonus: number | null;
+  bps: number | null;
+  starts: number | null;
+  influenceRank: number | null;
+  influenceRankType: number | null;
+  creativityRank: number | null;
+  creativityRankType: number | null;
+  threatRank: number | null;
+  threatRankType: number | null;
+  ictIndexRank: number | null;
+  ictIndexRankType: number | null;
+  mngWin: number | null;
+  mngDraw: number | null;
+  mngLoss: number | null;
+  mngUnderdogWin: number | null;
+  mngUnderdogDraw: number | null;
+  mngCleanSheets: number | null;
+  mngGoalsScored: number | null;
+};
+
 type DatabaseInstance = PostgresJsDatabase<Record<string, never>>;
 
 export class PlayerStatsRepository {
@@ -22,63 +73,7 @@ export class PlayerStatsRepository {
     return this.db || (await getDb());
   }
 
-  /**
-   * Map database record to PlayerStat domain object
-   * Removes internal DB fields (id, createdAt, updatedAt)
-   */
-  private mapDbRecordToDomain(dbRecord: any): PlayerStat {
-    return {
-      eventId: dbRecord.eventId,
-      elementId: dbRecord.elementId,
-      webName: dbRecord.webName,
-      elementType: dbRecord.elementType,
-      elementTypeName: dbRecord.elementTypeName,
-      teamId: dbRecord.teamId,
-      teamName: dbRecord.teamName,
-      teamShortName: dbRecord.teamShortName,
-      value: dbRecord.value,
-      totalPoints: dbRecord.totalPoints,
-      form: dbRecord.form,
-      influence: dbRecord.influence,
-      creativity: dbRecord.creativity,
-      threat: dbRecord.threat,
-      ictIndex: dbRecord.ictIndex,
-      expectedGoals: dbRecord.expectedGoals,
-      expectedAssists: dbRecord.expectedAssists,
-      expectedGoalInvolvements: dbRecord.expectedGoalInvolvements,
-      expectedGoalsConceded: dbRecord.expectedGoalsConceded,
-      minutes: dbRecord.minutes,
-      goalsScored: dbRecord.goalsScored,
-      assists: dbRecord.assists,
-      cleanSheets: dbRecord.cleanSheets,
-      goalsConceded: dbRecord.goalsConceded,
-      ownGoals: dbRecord.ownGoals,
-      penaltiesSaved: dbRecord.penaltiesSaved,
-      yellowCards: dbRecord.yellowCards,
-      redCards: dbRecord.redCards,
-      saves: dbRecord.saves,
-      bonus: dbRecord.bonus,
-      bps: dbRecord.bps,
-      starts: dbRecord.starts,
-      influenceRank: dbRecord.influenceRank,
-      influenceRankType: dbRecord.influenceRankType,
-      creativityRank: dbRecord.creativityRank,
-      creativityRankType: dbRecord.creativityRankType,
-      threatRank: dbRecord.threatRank,
-      threatRankType: dbRecord.threatRankType,
-      ictIndexRank: dbRecord.ictIndexRank,
-      ictIndexRankType: dbRecord.ictIndexRankType,
-      mngWin: dbRecord.mngWin,
-      mngDraw: dbRecord.mngDraw,
-      mngLoss: dbRecord.mngLoss,
-      mngUnderdogWin: dbRecord.mngUnderdogWin,
-      mngUnderdogDraw: dbRecord.mngUnderdogDraw,
-      mngCleanSheets: dbRecord.mngCleanSheets,
-      mngGoalsScored: dbRecord.mngGoalsScored,
-    };
-  }
-
-  async findAll(): Promise<PlayerStat[]> {
+  async findAll(): Promise<PlayerStatQueryResult[]> {
     try {
       const db = await this.getDbInstance();
       const result = await db.execute(sql`
@@ -145,7 +140,7 @@ export class PlayerStatsRepository {
         ORDER BY ps.event_id, ps.element_id
       `);
       logInfo('Retrieved all player stats', { count: result.length });
-      return result.map((record) => this.mapDbRecordToDomain(record));
+      return result as unknown as PlayerStatQueryResult[];
     } catch (error) {
       logError('Failed to find all player stats', error);
       throw new DatabaseError(
@@ -156,7 +151,7 @@ export class PlayerStatsRepository {
     }
   }
 
-  async findByEventId(eventId: EventId): Promise<PlayerStat[]> {
+  async findByEventId(eventId: EventId): Promise<PlayerStatQueryResult[]> {
     try {
       const db = await this.getDbInstance();
       const result = await db.execute(sql`
@@ -224,7 +219,7 @@ export class PlayerStatsRepository {
         ORDER BY ps.element_id
       `);
       logInfo('Retrieved player stats by event', { eventId, count: result.length });
-      return result.map((record) => this.mapDbRecordToDomain(record));
+      return result as unknown as PlayerStatQueryResult[];
     } catch (error) {
       logError('Failed to find player stats by event', error, { eventId });
       throw new DatabaseError(
@@ -235,7 +230,7 @@ export class PlayerStatsRepository {
     }
   }
 
-  async findByPlayerId(playerId: PlayerId): Promise<PlayerStat[]> {
+  async findByPlayerId(playerId: PlayerId): Promise<PlayerStatQueryResult[]> {
     try {
       const db = await this.getDbInstance();
       const result = await db.execute(sql`
@@ -303,7 +298,7 @@ export class PlayerStatsRepository {
         ORDER BY ps.event_id
       `);
       logInfo('Retrieved player stats by player', { playerId, count: result.length });
-      return result.map((record) => this.mapDbRecordToDomain(record));
+      return result as unknown as PlayerStatQueryResult[];
     } catch (error) {
       logError('Failed to find player stats by player', error, { playerId });
       throw new DatabaseError(
@@ -314,7 +309,7 @@ export class PlayerStatsRepository {
     }
   }
 
-  async findByTeamId(teamId: TeamId, eventId?: EventId): Promise<PlayerStat[]> {
+  async findByTeamId(teamId: TeamId, eventId?: EventId): Promise<PlayerStatQueryResult[]> {
     try {
       const db = await this.getDbInstance();
       const result = eventId
@@ -448,7 +443,7 @@ export class PlayerStatsRepository {
           `);
 
       logInfo('Retrieved player stats by team', { teamId, eventId, count: result.length });
-      return result.map((record) => this.mapDbRecordToDomain(record));
+      return result as unknown as PlayerStatQueryResult[];
     } catch (error) {
       logError('Failed to find player stats by team', error, { teamId, eventId });
       throw new DatabaseError(
@@ -459,7 +454,10 @@ export class PlayerStatsRepository {
     }
   }
 
-  async findByPosition(elementType: ElementTypeId, eventId?: EventId): Promise<PlayerStat[]> {
+  async findByPosition(
+    elementType: ElementTypeId,
+    eventId?: EventId,
+  ): Promise<PlayerStatQueryResult[]> {
     try {
       const db = await this.getDbInstance();
       const result = eventId
@@ -593,7 +591,7 @@ export class PlayerStatsRepository {
           `);
 
       logInfo('Retrieved player stats by position', { elementType, eventId, count: result.length });
-      return result.map((record) => this.mapDbRecordToDomain(record));
+      return result as unknown as PlayerStatQueryResult[];
     } catch (error) {
       logError('Failed to find player stats by position', error, { elementType, eventId });
       throw new DatabaseError(
@@ -604,7 +602,10 @@ export class PlayerStatsRepository {
     }
   }
 
-  async findByEventAndPlayer(eventId: EventId, playerId: PlayerId): Promise<PlayerStat | null> {
+  async findByEventAndPlayer(
+    eventId: EventId,
+    playerId: PlayerId,
+  ): Promise<PlayerStatQueryResult | null> {
     try {
       const db = await this.getDbInstance();
       const result = await db.execute(sql`
@@ -673,7 +674,7 @@ export class PlayerStatsRepository {
       `);
 
       logInfo('Retrieved player stat by event and player', { eventId, playerId });
-      return result[0] ? this.mapDbRecordToDomain(result[0]) : null;
+      return (result[0] as unknown as PlayerStatQueryResult) || null;
     } catch (error) {
       logError('Failed to find player stat by event and player', error, { eventId, playerId });
       throw new DatabaseError(

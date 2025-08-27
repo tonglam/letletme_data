@@ -325,29 +325,11 @@ function getChangeType(currentValue: number, lastValue: number): 'Start' | 'Rise
 }
 
 /**
- * Get element type name from element type ID
- */
-function getPlayerElementTypeName(elementType: number): string {
-  switch (elementType) {
-    case 1:
-      return 'GKP';
-    case 2:
-      return 'DEF';
-    case 3:
-      return 'MID';
-    case 4:
-      return 'FWD';
-    default:
-      return 'UNKNOWN';
-  }
-}
-
-/**
  * Transform players with price changes to PlayerValue objects (Daily approach)
  * Only processes players whose prices have actually changed from their last stored values
  */
 export function transformPlayerValuesWithChanges(
-  changedPlayers: RawFPLPlayer[],
+  changedPlayers: RawFPLElement[],
   eventId: EventId,
   teamsMap: Map<number, { name: string; shortName: string }>,
   lastValueMap: Map<number, number>,
@@ -374,22 +356,20 @@ export function transformPlayerValuesWithChanges(
       // Determine change type based on price comparison
       const changeType = getChangeType(currentValue, lastValue);
 
-      // Get element type name
-      const elementTypeName = getPlayerElementTypeName(player.element_type);
-
       const playerValue: PlayerValue = {
         eventId,
         elementId: player.id,
         webName: player.web_name,
-        elementType: player.element_type,
-        elementTypeName,
+        elementType: player.element_type as 1 | 2 | 3 | 4,
+        elementTypeName: ELEMENT_TYPE_MAP[player.element_type as 1 | 2 | 3 | 4],
         teamId: player.team,
         teamName: team.name,
         teamShortName: team.shortName,
         value: currentValue,
         lastValue,
         changeDate,
-        changeType,
+        changeType:
+          changeType === 'Start' ? 'stable' : changeType === 'Rise' ? 'increase' : 'decrease',
       };
 
       results.push(playerValue);

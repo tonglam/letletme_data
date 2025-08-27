@@ -10,7 +10,7 @@ import {
   syncCurrentPlayerValues,
 } from '../../src/services/player-values.service';
 
-describe('Player Values Daily Integration Tests', () => {
+describe('Player Values Integration Tests', () => {
   let changeDate: string;
 
   beforeAll(async () => {

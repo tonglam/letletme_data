@@ -17,6 +17,8 @@ import { createPreviousValuesMap, createTeamsMap } from '../transformers/player-
 import type { EventId, PlayerId, PlayerTypeID, TeamId, ValueChangeType } from '../types/base.type';
 import { logError, logInfo } from '../utils/logger';
 
+// PlayerValueQueryResult now matches PlayerValue exactly, so no transformation needed
+
 /**
  * Player Values Service - Business Logic Layer
  *
@@ -35,7 +37,7 @@ export async function getPlayerValues(): Promise<PlayerValue[]> {
     const dbPlayerValues = await playerValuesRepository.findAll();
 
     logInfo('Player values retrieved from database', { count: dbPlayerValues.length });
-    return dbPlayerValues as PlayerValue[];
+    return dbPlayerValues;
   } catch (error) {
     logError('Failed to get player values', error);
     throw error;
@@ -56,7 +58,7 @@ export async function getPlayerValuesByEvent(eventId: EventId): Promise<PlayerVa
 
     // 2. Fallback to database (slower path)
     const dbPlayerValues = await playerValuesRepository.findByEventId(eventId);
-    const playerValues = dbPlayerValues as PlayerValue[];
+    const playerValues = dbPlayerValues;
 
     // 3. Update cache for next time
     if (playerValues.length > 0) {
@@ -79,7 +81,7 @@ export async function getPlayerValuesByPlayer(playerId: PlayerId): Promise<Playe
     const dbPlayerValues = await playerValuesRepository.findByPlayerId(playerId);
 
     logInfo('Player values retrieved by player', { playerId, count: dbPlayerValues.length });
-    return dbPlayerValues as PlayerValue[];
+    return dbPlayerValues;
   } catch (error) {
     logError('Failed to get player values by player', error, { playerId });
     throw error;
@@ -110,7 +112,7 @@ export async function getPlayerValuesByTeam(
     const dbPlayerValues = await playerValuesRepository.findByTeamId(teamId, eventId);
 
     logInfo('Player values retrieved by team', { teamId, eventId, count: dbPlayerValues.length });
-    return dbPlayerValues as PlayerValue[];
+    return dbPlayerValues;
   } catch (error) {
     logError('Failed to get player values by team', error, { teamId, eventId });
     throw error;
@@ -145,7 +147,7 @@ export async function getPlayerValuesByPosition(
       eventId,
       count: dbPlayerValues.length,
     });
-    return dbPlayerValues as PlayerValue[];
+    return dbPlayerValues;
   } catch (error) {
     logError('Failed to get player values by position', error, { elementType, eventId });
     throw error;
@@ -180,7 +182,7 @@ export async function getPlayerValuesByChangeType(
       eventId,
       count: dbPlayerValues.length,
     });
-    return dbPlayerValues as PlayerValue[];
+    return dbPlayerValues;
   } catch (error) {
     logError('Failed to get player values by change type', error, { changeType, eventId });
     throw error;
@@ -211,7 +213,7 @@ export async function getPlayerValue(
     }
 
     logInfo('Player value retrieved from database', { eventId, playerId, found: !!dbPlayerValue });
-    return dbPlayerValue as PlayerValue | null;
+    return dbPlayerValue;
   } catch (error) {
     logError('Failed to get specific player value', error, { eventId, playerId });
     throw error;

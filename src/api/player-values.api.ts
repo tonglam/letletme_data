@@ -42,7 +42,7 @@ import {
 
 export const playerValuesAPI = new Elysia({ prefix: '/player-values' })
   .get('/', async ({ query }) => {
-    const { event, player, team, position, changeType, sortBy, limit } = query;
+    const { event, team, position, changeType, sortBy, limit } = query;
 
     // Parse query parameters
     const filters = {

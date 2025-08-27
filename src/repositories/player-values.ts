@@ -7,7 +7,31 @@ import { logError, logInfo } from '../utils/logger';
 
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import type { PlayerValue } from '../domain/player-values';
-import type { EventId, PlayerId, PlayerTypeID, TeamId, ValueChangeType } from '../types/base.type';
+import type {
+  ElementTypeId,
+  ElementTypeName,
+  EventId,
+  PlayerId,
+  PlayerTypeID,
+  TeamId,
+  ValueChangeType,
+} from '../types/base.type';
+
+// Type for the SQL query result that matches PlayerValue domain model
+export type PlayerValueQueryResult = {
+  elementId: PlayerId;
+  webName: string;
+  elementType: ElementTypeId;
+  elementTypeName: ElementTypeName;
+  eventId: EventId;
+  teamId: TeamId;
+  teamName: string;
+  teamShortName: string;
+  value: number;
+  changeDate: string;
+  changeType: ValueChangeType;
+  lastValue: number;
+};
 
 type DatabaseInstance = PostgresJsDatabase<Record<string, never>>;
 
@@ -22,28 +46,7 @@ export class PlayerValuesRepository {
     return this.db || (await getDb());
   }
 
-  /**
-   * Map database record to PlayerValue domain object
-   * Removes internal DB fields (id, createdAt, updatedAt) and adds computed fields
-   */
-  private mapDbRecordToDomain(dbRecord: any): PlayerValue {
-    return {
-      elementId: dbRecord.elementId,
-      webName: dbRecord.webName,
-      elementType: dbRecord.elementType,
-      elementTypeName: dbRecord.elementTypeName,
-      eventId: dbRecord.eventId,
-      teamId: dbRecord.teamId,
-      teamName: dbRecord.teamName,
-      teamShortName: dbRecord.teamShortName,
-      value: dbRecord.value,
-      changeDate: dbRecord.changeDate,
-      changeType: dbRecord.changeType,
-      lastValue: dbRecord.lastValue,
-    };
-  }
-
-  async findAll(): Promise<PlayerValue[]> {
+  async findAll(): Promise<PlayerValueQueryResult[]> {
     try {
       const db = await this.getDbInstance();
       const result = await db.execute(sql`
@@ -64,7 +67,7 @@ export class PlayerValuesRepository {
         ORDER BY event_id, element_id
       `);
       logInfo('Retrieved all player values', { count: result.length });
-      return result.map((record) => this.mapDbRecordToDomain(record));
+      return result as unknown as PlayerValueQueryResult[];
     } catch (error) {
       logError('Failed to find all player values', error);
       throw new DatabaseError(
@@ -75,7 +78,7 @@ export class PlayerValuesRepository {
     }
   }
 
-  async findByEventId(eventId: EventId): Promise<PlayerValue[]> {
+  async findByEventId(eventId: EventId): Promise<PlayerValueQueryResult[]> {
     try {
       const db = await this.getDbInstance();
       const result = await db.execute(sql`
@@ -97,7 +100,7 @@ export class PlayerValuesRepository {
         ORDER BY element_id
       `);
       logInfo('Retrieved player values by event', { eventId, count: result.length });
-      return result.map((record) => this.mapDbRecordToDomain(record));
+      return result as unknown as PlayerValueQueryResult[];
     } catch (error) {
       logError('Failed to find player values by event', error, { eventId });
       throw new DatabaseError(
@@ -108,7 +111,7 @@ export class PlayerValuesRepository {
     }
   }
 
-  async findByPlayerId(playerId: PlayerId): Promise<PlayerValue[]> {
+  async findByPlayerId(playerId: PlayerId): Promise<PlayerValueQueryResult[]> {
     try {
       const db = await this.getDbInstance();
       const result = await db.execute(sql`
@@ -130,7 +133,7 @@ export class PlayerValuesRepository {
         ORDER BY event_id
       `);
       logInfo('Retrieved player values by player', { playerId, count: result.length });
-      return result.map((record) => this.mapDbRecordToDomain(record));
+      return result as unknown as PlayerValueQueryResult[];
     } catch (error) {
       logError('Failed to find player values by player', error, { playerId });
       throw new DatabaseError(
@@ -141,7 +144,7 @@ export class PlayerValuesRepository {
     }
   }
 
-  async findByTeamId(teamId: TeamId, eventId?: EventId): Promise<PlayerValue[]> {
+  async findByTeamId(teamId: TeamId, eventId?: EventId): Promise<PlayerValueQueryResult[]> {
     try {
       const db = await this.getDbInstance();
       const result = eventId
@@ -183,7 +186,7 @@ export class PlayerValuesRepository {
         `);
 
       logInfo('Retrieved player values by team', { teamId, eventId, count: result.length });
-      return result.map((record) => this.mapDbRecordToDomain(record));
+      return result as unknown as PlayerValueQueryResult[];
     } catch (error) {
       logError('Failed to find player values by team', error, { teamId, eventId });
       throw new DatabaseError(
@@ -194,7 +197,10 @@ export class PlayerValuesRepository {
     }
   }
 
-  async findByPosition(elementType: PlayerTypeID, eventId?: EventId): Promise<PlayerValue[]> {
+  async findByPosition(
+    elementType: PlayerTypeID,
+    eventId?: EventId,
+  ): Promise<PlayerValueQueryResult[]> {
     try {
       const db = await this.getDbInstance();
       const result = eventId
@@ -240,7 +246,7 @@ export class PlayerValuesRepository {
         eventId,
         count: result.length,
       });
-      return result.map((record) => this.mapDbRecordToDomain(record));
+      return result as unknown as PlayerValueQueryResult[];
     } catch (error) {
       logError('Failed to find player values by position', error, { elementType, eventId });
       throw new DatabaseError(
@@ -251,7 +257,10 @@ export class PlayerValuesRepository {
     }
   }
 
-  async findByChangeType(changeType: ValueChangeType, eventId?: EventId): Promise<PlayerValue[]> {
+  async findByChangeType(
+    changeType: ValueChangeType,
+    eventId?: EventId,
+  ): Promise<PlayerValueQueryResult[]> {
     try {
       const db = await this.getDbInstance();
       const result = eventId
@@ -297,7 +306,7 @@ export class PlayerValuesRepository {
         eventId,
         count: result.length,
       });
-      return result.map((record) => this.mapDbRecordToDomain(record));
+      return result as unknown as PlayerValueQueryResult[];
     } catch (error) {
       logError('Failed to find player values by change type', error, { changeType, eventId });
       throw new DatabaseError(
@@ -308,7 +317,10 @@ export class PlayerValuesRepository {
     }
   }
 
-  async findByEventAndPlayer(eventId: EventId, playerId: PlayerId): Promise<PlayerValue | null> {
+  async findByEventAndPlayer(
+    eventId: EventId,
+    playerId: PlayerId,
+  ): Promise<PlayerValueQueryResult | null> {
     try {
       const db = await this.getDbInstance();
       const result = await db.execute(sql`
@@ -331,7 +343,7 @@ export class PlayerValuesRepository {
       `);
 
       logInfo('Retrieved player value by event and player', { eventId, playerId });
-      return result[0] ? this.mapDbRecordToDomain(result[0]) : null;
+      return (result[0] as unknown as PlayerValueQueryResult) || null;
     } catch (error) {
       logError('Failed to find player value by event and player', error, { eventId, playerId });
       throw new DatabaseError(

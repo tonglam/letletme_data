@@ -68,6 +68,10 @@ export default [
   {
     files: ['tests/**/*.ts', '**/*.test.ts', '**/*.spec.ts', 'vitest.config.ts', 'vitest.setup.ts'],
     languageOptions: {
+      parser: tseslint.parser,
+      parserOptions: {
+        project: null, // Disable TypeScript project linting for test files
+      },
       globals: {
         describe: 'readonly',
         it: 'readonly',
@@ -77,6 +81,7 @@ export default [
         afterEach: 'readonly',
         beforeAll: 'readonly',
         afterAll: 'readonly',
+        test: 'readonly',
       },
     },
     rules: {
