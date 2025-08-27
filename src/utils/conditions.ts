@@ -51,6 +51,27 @@ export function shouldRunLiveScores(date = new Date()): boolean {
 }
 
 /**
+ * Get current FPL season in format YYMM (e.g., 2526 for 2025-26 season)
+ * Premier League starts in August each year
+ */
+export function getCurrentSeason(date = new Date()): string {
+  const month = date.getMonth() + 1; // 1-based month
+  const year = date.getFullYear();
+
+  if (month >= 8) {
+    // August onwards - new season starts (Aug 2025 -> 2526)
+    const currentYearShort = year.toString().slice(-2);
+    const nextYearShort = (year + 1).toString().slice(-2);
+    return `${currentYearShort}${nextYearShort}`;
+  } else {
+    // July or earlier - previous season continues (Jul 2025 -> 2425)
+    const prevYearShort = (year - 1).toString().slice(-2);
+    const currentYearShort = year.toString().slice(-2);
+    return `${prevYearShort}${currentYearShort}`;
+  }
+}
+
+/**
  * Estimate current gameweek (rough calculation)
  */
 export function getCurrentGameweek(date = new Date()): number {

@@ -84,6 +84,58 @@ export const players = pgTable('players', {
   updatedAt: timestamp('updated_at').defaultNow(),
 });
 
+// Player Stats table
+export const playerStats = pgTable('player_stats', {
+  id: integer('id').primaryKey().generatedAlwaysAsIdentity(),
+  eventId: integer('event_id')
+    .notNull()
+    .references(() => events.id),
+  elementId: integer('element_id')
+    .notNull()
+    .references(() => players.id),
+  elementType: integer('element_type').notNull(), // 1=GKP, 2=DEF, 3=MID, 4=FWD
+  totalPoints: integer('total_points'),
+  form: text('form'),
+  influence: text('influence'),
+  creativity: text('creativity'),
+  threat: text('threat'),
+  ictIndex: text('ict_index'),
+  expectedGoals: text('expected_goals'),
+  expectedAssists: text('expected_assists'),
+  expectedGoalInvolvements: text('expected_goal_involvements'),
+  expectedGoalsConceded: text('expected_goals_conceded'),
+  minutes: integer('minutes'),
+  goalsScored: integer('goals_scored'),
+  assists: integer('assists'),
+  cleanSheets: integer('clean_sheets'),
+  goalsConceded: integer('goals_conceded'),
+  ownGoals: integer('own_goals'),
+  penaltiesSaved: integer('penalties_saved'),
+  yellowCards: integer('yellow_cards'),
+  redCards: integer('red_cards'),
+  saves: integer('saves'),
+  bonus: integer('bonus'),
+  bps: integer('bps'),
+  starts: integer('starts'),
+  influenceRank: integer('influence_rank'),
+  influenceRankType: integer('influence_rank_type'),
+  creativityRank: integer('creativity_rank'),
+  creativityRankType: integer('creativity_rank_type'),
+  threatRank: integer('threat_rank'),
+  threatRankType: integer('threat_rank_type'),
+  ictIndexRank: integer('ict_index_rank'),
+  ictIndexRankType: integer('ict_index_rank_type'),
+  mngWin: integer('mng_win'),
+  mngDraw: integer('mng_draw'),
+  mngLoss: integer('mng_loss'),
+  mngUnderdogWin: integer('mng_underdog_win'),
+  mngUnderdogDraw: integer('mng_underdog_draw'),
+  mngCleanSheets: integer('mng_clean_sheets'),
+  mngGoalsScored: integer('mng_goals_scored'),
+  createdAt: timestamp('created_at').defaultNow(),
+  updatedAt: timestamp('updated_at').defaultNow(),
+});
+
 // Export types
 export type Event = typeof events.$inferSelect;
 export type NewEvent = typeof events.$inferInsert;
@@ -93,3 +145,5 @@ export type Phase = typeof phases.$inferSelect;
 export type NewPhase = typeof phases.$inferInsert;
 export type Player = typeof players.$inferSelect;
 export type NewPlayer = typeof players.$inferInsert;
+export type PlayerStat = typeof playerStats.$inferSelect;
+export type NewPlayerStat = typeof playerStats.$inferInsert;
