@@ -24,23 +24,13 @@ export PATH="$HOME/.bun/bin:$PATH"
 bun --version
 ```
 
-### Install PostgreSQL
+### Configure Supabase (No PostgreSQL Installation Needed)
+
+Since you're using Supabase (managed PostgreSQL service), you don't need to install PostgreSQL locally. Instead, ensure your Supabase project is properly configured:
+
 ```bash
-# Update system packages
-sudo apt update && sudo apt upgrade -y
-
-# Install PostgreSQL
-sudo apt install postgresql postgresql-contrib -y
-
-# Start and enable PostgreSQL
-sudo systemctl start postgresql
-sudo systemctl enable postgresql
-
-# Create database and user
-sudo -u postgres psql -c "CREATE DATABASE letletme_data;"
-sudo -u postgres psql -c "CREATE USER letletme_user WITH PASSWORD 'your_secure_password';"
-sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE letletme_data TO letletme_user;"
-sudo -u postgres psql -c "ALTER USER letletme_user CREATEDB;" # For migrations
+# No local PostgreSQL installation needed
+# Your database is managed by Supabase
 ```
 
 ### Install Redis
@@ -75,10 +65,10 @@ sudo systemctl enable nginx
 ### Create Application User
 ```bash
 # Create dedicated user for security
-sudo useradd -r -s /bin/bash -d /opt/letletme -m letletme
+sudo useradd -r -s /bin/bash -d /opt/letletme -m deploy
 
 # Switch to app user for setup
-sudo -u letletme bash
+sudo -u deploy bash
 cd /opt/letletme
 ```
 
@@ -97,32 +87,14 @@ bun run build
 
 ### Configure Environment
 ```bash
-# Create production environment file
-cp env.example .env
+# Copy your existing environment configuration
+cp .env .env.production
 
-# Edit environment configuration
-nano .env
+# Edit production environment if needed
+nano .env.production
 ```
 
-Update `.env` with your production values:
-```bash
-# Production Environment Configuration
-NODE_ENV=production
-LOG_LEVEL=info
-APP_PORT=3000
-
-# Database
-DATABASE_URL=postgresql://letletme_user:your_secure_password@localhost:5432/letletme_data
-
-# Redis
-REDIS_HOST=localhost
-REDIS_PORT=6379
-REDIS_PASSWORD=your_redis_password
-REDIS_DB=0
-
-# FPL API
-FPL_API_BASE_URL=https://fantasy.premierleague.com/api
-```
+Your Supabase configuration is already set up in your project environment files.
 
 ### Run Database Migrations
 ```bash
@@ -150,16 +122,16 @@ Add this content:
 ```ini
 [Unit]
 Description=LetLetMe FPL Data Service
-After=network.target postgresql.service redis-server.service
-Wants=postgresql.service redis-server.service
+After=network.target redis-server.service
+Wants=redis-server.service
 
 [Service]
 Type=simple
-User=letletme
-Group=letletme
+User=deploy
+Group=deploy
 WorkingDirectory=/opt/letletme
 Environment=NODE_ENV=production
-ExecStart=/home/letletme/.bun/bin/bun start
+ExecStart=/home/deploy/.bun/bin/bun start
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
 RestartSec=10
@@ -181,7 +153,7 @@ WantedBy=multi-user.target
 ```bash
 # Create log directories
 sudo mkdir -p /var/log/letletme
-sudo chown letletme:letletme /var/log/letletme
+sudo chown deploy:deploy /var/log/letletme
 
 # Set up log rotation
 sudo nano /etc/logrotate.d/letletme-data
@@ -196,7 +168,7 @@ Add this logrotate configuration:
     delaycompress
     missingok
     notifempty
-    create 644 letletme letletme
+    create 644 deploy deploy
     postrotate
         systemctl reload letletme-data
     endscript
@@ -341,8 +313,8 @@ sudo journalctl -u letletme-data -f    # Follow logs
 sudo tail -f /var/log/letletme/app.log # Application logs
 
 # Database operations
-sudo -u letletme bun run db:migrate     # Run migrations
-sudo -u letletme bun run db:studio      # Database studio
+sudo -u deploy bun run db:migrate     # Run migrations
+# Note: Use Supabase dashboard for database management instead of db:studio
 
 # Test endpoints
 curl http://localhost:3000/health       # Health check
@@ -365,7 +337,7 @@ When you need to update the application:
 
 ```bash
 # Switch to app user
-sudo -u letletme bash
+sudo -u deploy bash
 cd /opt/letletme
 
 # Pull latest changes
