@@ -25,7 +25,7 @@ export const ELEMENT_TYPE_ID_MAP: Record<ElementTypeName, ElementTypeId> = {
 // Player Value Types
 // ================================
 
-export type ValueChangeType = 'increase' | 'decrease' | 'stable' | 'unknown';
+export type ValueChangeType = 'Start' | 'Rise' | 'Faller';
 
 // ================================
 // Domain ID Types (for consistency with existing project)

@@ -69,7 +69,8 @@ sudo useradd -r -s /bin/bash -d /opt/letletme -m deploy
 
 # Switch to app user for setup
 sudo -u deploy bash
-cd /opt/letletme
+mkdir -p /home/workspace/letletme_data
+cd /home/workspace/letletme_data
 ```
 
 ### Deploy Application Code
@@ -129,7 +130,7 @@ Wants=redis-server.service
 Type=simple
 User=deploy
 Group=deploy
-WorkingDirectory=/opt/letletme
+WorkingDirectory=/home/workspace/letletme_data
 Environment=NODE_ENV=production
 ExecStart=/home/deploy/.bun/bin/bun start
 ExecReload=/bin/kill -HUP $MAINPID
@@ -143,7 +144,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/opt/letletme/logs /var/log/letletme
+ReadWritePaths=/home/workspace/letletme_data/logs /var/log/letletme
 
 [Install]
 WantedBy=multi-user.target
@@ -152,6 +153,8 @@ WantedBy=multi-user.target
 ### Set Up Logging
 ```bash
 # Create log directories
+sudo mkdir -p /home/workspace/letletme_data/logs
+sudo chown deploy:deploy /home/workspace/letletme_data/logs
 sudo mkdir -p /var/log/letletme
 sudo chown deploy:deploy /var/log/letletme
 
@@ -363,3 +366,19 @@ sudo systemctl status letletme-data
 ```
 
 Your FPL data service should now be running on your Linux server! The API will be accessible at `http://your-domain.com` or `http://your-server-ip`.
+
+## Troubleshooting
+
+### Error: Failed to set up mount namespacing: /opt/letletme/logs: No such file or directory
+
+Cause: The systemd service hardens the filesystem and allows write access only to the paths listed in `ReadWritePaths=`. If `/opt/letletme/logs` does not exist, systemd fails to set up the namespace.
+
+Fix:
+```bash
+sudo mkdir -p /home/workspace/letletme_data/logs
+sudo chown deploy:deploy /home/workspace/letletme_data/logs
+sudo systemctl daemon-reload
+sudo systemctl restart letletme-data
+```
+
+Alternatively, remove `/home/workspace/letletme_data/logs` from `ReadWritePaths=` in the unit file if you don't need it (and rely only on `/var/log/letletme`).

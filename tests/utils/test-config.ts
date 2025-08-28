@@ -2,8 +2,6 @@ import { drizzle } from 'drizzle-orm/postgres-js';
 import Redis from 'ioredis';
 import postgres from 'postgres';
 
-import { logError, logInfo } from '../../src/utils/logger';
-
 // Test database configuration
 export const testDbConfig = {
   host: process.env.TEST_DB_HOST || 'localhost',
@@ -40,58 +38,6 @@ export function createTestRedis() {
     db: testRedisConfig.db,
     lazyConnect: true,
   });
-}
-
-// Test utilities
-export async function setupTestDb() {
-  try {
-    const db = createTestDb();
-    logInfo('Test database connection established');
-    return db;
-  } catch (error) {
-    logError('Failed to setup test database', error);
-    throw error;
-  }
-}
-
-export async function setupTestRedis() {
-  try {
-    const redis = createTestRedis();
-    await redis.connect();
-    await redis.flushdb(); // Clear test database
-    logInfo('Test Redis connection established and cleared');
-    return redis;
-  } catch (error) {
-    logError('Failed to setup test Redis', error);
-    throw error;
-  }
-}
-
-export async function cleanupTestDb(db: ReturnType<typeof createTestDb>) {
-  try {
-    // Clean up test data - in a real setup, you might want to use transactions
-    // For now, we'll clean specific tables in dependency order
-    await db.execute('TRUNCATE TABLE player_values, players, teams, events CASCADE');
-    logInfo('Test database cleaned up');
-  } catch (error) {
-    logError('Failed to cleanup test database', error);
-  }
-}
-
-export async function cleanupTestRedis(redis: Redis) {
-  try {
-    await redis.flushdb();
-    await redis.disconnect();
-    logInfo('Test Redis cleaned up');
-  } catch (error) {
-    logError('Failed to cleanup test Redis', error);
-  }
-}
-
-// Mock environment variables for testing
-export function setupTestEnv() {
-  process.env.NODE_ENV = 'test';
-  process.env.LOG_LEVEL = 'error'; // Reduce log noise in tests
 }
 
 // Test timeouts

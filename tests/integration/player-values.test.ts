@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, test } from 'bun:test';
+import { afterEach, beforeAll, describe, expect, test } from 'bun:test';
 
 import { playerValuesCache } from '../../src/cache/operations';
 import { playerValuesRepository } from '../../src/repositories/player-values';
@@ -92,9 +92,9 @@ describe('Player Values Integration Tests', () => {
     });
 
     test('should filter by change type correctly', async () => {
-      const increases = await getPlayerValuesByChangeType('increase');
-      const decreases = await getPlayerValuesByChangeType('decrease');
-      const stable = await getPlayerValuesByChangeType('stable');
+      const increases = await getPlayerValuesByChangeType('Rise');
+      const decreases = await getPlayerValuesByChangeType('Faller');
+      const stable = await getPlayerValuesByChangeType('Start');
 
       // All should be arrays (might be empty)
       expect(Array.isArray(increases)).toBe(true);
@@ -102,7 +102,7 @@ describe('Player Values Integration Tests', () => {
       expect(Array.isArray(stable)).toBe(true);
 
       console.log(
-        `✅ Change type filtering: ${increases.length} increases, ${decreases.length} decreases, ${stable.length} stable`,
+        `✅ Change type filtering: ${increases.length} Rise, ${decreases.length} Faller, ${stable.length} Start`,
       );
     });
   });
@@ -168,5 +168,18 @@ describe('Player Values Integration Tests', () => {
       expect(afterCount).toBe(beforeCount);
       console.log('✅ No duplicate records created across multiple syncs');
     }, 45000);
+  });
+
+  // Inspect DB and Redis after each test
+  afterEach(async () => {
+    const count = await getPlayerValuesCount();
+    const latestEventId = await playerValuesCache.getLatestEventId();
+    let cacheCount = 0;
+    if (latestEventId !== null) {
+      const cachedForLatest = await playerValuesCache.getByEvent(latestEventId);
+      cacheCount = cachedForLatest ? cachedForLatest.length : 0;
+    }
+    // eslint-disable-next-line no-console
+    console.log(`PlayerValues state -> DB: ${count}, Redis(latest-event): ${cacheCount}`);
   });
 });

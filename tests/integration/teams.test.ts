@@ -1,5 +1,6 @@
-import { beforeAll, describe, expect, test } from 'bun:test';
+import { afterEach, beforeAll, describe, expect, test } from 'bun:test';
 
+import { teamsCache } from '../../src/cache/operations';
 import { teamRepository } from '../../src/repositories/teams';
 import { clearTeamsCache, getTeam, getTeams, syncTeams } from '../../src/services/teams.service';
 
@@ -67,5 +68,15 @@ describe('Teams Integration Tests', () => {
       expect(serviceTeams[0].id).toBe(dbTeams[0].id);
       expect(serviceTeams[0].name).toBe(dbTeams[0].name);
     });
+  });
+
+  // Inspect DB and Redis after each test
+  afterEach(async () => {
+    const dbTeams = await teamRepository.findAll();
+    const cachedTeams = await teamsCache.get();
+    const dbCount = dbTeams.length;
+    const cacheCount = cachedTeams ? cachedTeams.length : 0;
+    // eslint-disable-next-line no-console
+    console.log(`Teams state -> DB: ${dbCount}, Redis: ${cacheCount}`);
   });
 });

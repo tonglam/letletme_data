@@ -364,7 +364,7 @@ export async function syncCurrentPlayerValues(): Promise<{ count: number }> {
 
     // 10. Update cache only if there are changes worth caching
     if (result.count > 0) {
-      const hasSignificantChanges = playerValues.some((pv) => pv.changeType !== 'stable');
+      const hasSignificantChanges = playerValues.some((pv) => pv.changeType !== 'Start');
       if (hasSignificantChanges) {
         await playerValuesCache.setDailyChanges(changeDate, playerValues);
         logInfo('Player values cache updated for date', { changeDate, count: result.count });

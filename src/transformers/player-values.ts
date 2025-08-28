@@ -368,8 +368,7 @@ export function transformPlayerValuesWithChanges(
         value: currentValue,
         lastValue,
         changeDate,
-        changeType:
-          changeType === 'Start' ? 'stable' : changeType === 'Rise' ? 'increase' : 'decrease',
+        changeType,
       };
 
       results.push(playerValue);
@@ -435,15 +434,15 @@ export function calculateValueChangeStats(playerValues: PlayerValue[]): {
     const changeAmount = pv.value - pv.lastValue;
 
     switch (pv.changeType) {
-      case 'increase':
+      case 'Rise':
         risers++;
         totalValueIncrease += changeAmount;
         break;
-      case 'decrease':
+      case 'Faller':
         fallers++;
         totalValueDecrease += Math.abs(changeAmount);
         break;
-      case 'stable':
+      case 'Start':
         stable++;
         break;
     }

@@ -62,8 +62,8 @@ export const PlayerValueSchema = z.object({
     .min(35, 'Value must be at least 3.5m')
     .max(150, 'Value cannot exceed 15.0m'),
   changeDate: z.string().min(1, 'Change date is required'),
-  changeType: z.enum(['increase', 'decrease', 'stable', 'unknown'], {
-    errorMap: () => ({ message: 'Change type must be increase, decrease, stable, or unknown' }),
+  changeType: z.enum(['Start', 'Rise', 'Faller'], {
+    errorMap: () => ({ message: 'Change type must be Start, Rise, or Faller' }),
   }),
   lastValue: z
     .number()
@@ -102,9 +102,10 @@ export function getValueChangePercentage(playerValue: PlayerValue): number {
  * Determine value change type based on current and last value
  */
 export function determineValueChangeType(currentValue: number, lastValue: number): ValueChangeType {
-  if (currentValue > lastValue) return 'increase';
-  if (currentValue < lastValue) return 'decrease';
-  return 'stable';
+  if (lastValue === 0) return 'Start';
+  if (currentValue > lastValue) return 'Rise';
+  if (currentValue < lastValue) return 'Faller';
+  return 'Start';
 }
 
 /**
@@ -126,14 +127,14 @@ export function getValueInMillions(value: number): number {
  * Check if player is rising in value
  */
 export function isRisingInValue(playerValue: PlayerValue): boolean {
-  return playerValue.changeType === 'increase';
+  return playerValue.changeType === 'Rise';
 }
 
 /**
  * Check if player is falling in value
  */
 export function isFallingInValue(playerValue: PlayerValue): boolean {
-  return playerValue.changeType === 'decrease';
+  return playerValue.changeType === 'Faller';
 }
 
 /**
@@ -142,7 +143,7 @@ export function isFallingInValue(playerValue: PlayerValue): boolean {
 export function getTopValueRisers(playerValues: PlayerValues, limit: number = 10): PlayerValues {
   if (limit <= 0) return [];
   return [...playerValues]
-    .filter((pv) => pv.changeType === 'increase')
+    .filter((pv) => pv.changeType === 'Rise')
     .sort((a, b) => getValueChangeAmount(b) - getValueChangeAmount(a))
     .slice(0, limit);
 }
@@ -153,7 +154,7 @@ export function getTopValueRisers(playerValues: PlayerValues, limit: number = 10
 export function getTopValueFallers(playerValues: PlayerValues, limit: number = 10): PlayerValues {
   if (limit <= 0) return [];
   return [...playerValues]
-    .filter((pv) => pv.changeType === 'decrease')
+    .filter((pv) => pv.changeType === 'Faller')
     .sort((a, b) => getValueChangeAmount(a) - getValueChangeAmount(b))
     .slice(0, limit);
 }
@@ -217,13 +218,13 @@ export function getValueChangeStats(playerValues: PlayerValues): {
 
   for (const pv of playerValues) {
     switch (pv.changeType) {
-      case 'increase':
+      case 'Rise':
         totalRisers++;
         break;
-      case 'decrease':
+      case 'Faller':
         totalFallers++;
         break;
-      case 'stable':
+      case 'Start':
         totalStable++;
         break;
     }

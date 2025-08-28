@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, test } from 'bun:test';
+import { afterEach, beforeAll, describe, expect, test } from 'bun:test';
 
 import { playersCache } from '../../src/cache/operations';
 import { playerRepository } from '../../src/repositories/players';
@@ -119,5 +119,15 @@ describe('Players Integration Tests', () => {
       expect(dbPlayer!.secondName).toBe(testPlayer.secondName);
       expect(dbPlayer!.type).toBe(testPlayer.type);
     });
+  });
+
+  // Inspect DB and Redis after each test
+  afterEach(async () => {
+    const dbPlayers = await playerRepository.findAll();
+    const cachedPlayers = await playersCache.get();
+    const dbCount = dbPlayers.length;
+    const cacheCount = cachedPlayers ? cachedPlayers.length : 0;
+    // eslint-disable-next-line no-console
+    console.log(`Players state -> DB: ${dbCount}, Redis: ${cacheCount}`);
   });
 });
