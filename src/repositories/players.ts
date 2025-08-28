@@ -1,6 +1,6 @@
 import { eq, sql } from 'drizzle-orm';
 
-import { players, type NewPlayer, type Player } from '../db/schema';
+import { players, type DbPlayer, type DbPlayerInsert } from '../db/schemas/index.schema';
 import { getDb } from '../db/singleton';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
@@ -21,7 +21,7 @@ export class PlayerRepository {
     return this.db || (await getDb());
   }
 
-  async findAll(): Promise<Player[]> {
+  async findAll(): Promise<DbPlayer[]> {
     try {
       const db = await this.getDbInstance();
       const result = await db.select().from(players).orderBy(players.id);
@@ -37,7 +37,7 @@ export class PlayerRepository {
     }
   }
 
-  async findById(id: number): Promise<Player | null> {
+  async findById(id: number): Promise<DbPlayer | null> {
     try {
       const db = await this.getDbInstance();
       const result = await db.select().from(players).where(eq(players.id, id));
@@ -60,7 +60,7 @@ export class PlayerRepository {
     }
   }
 
-  async findByTeam(teamId: number): Promise<Player[]> {
+  async findByTeam(teamId: number): Promise<DbPlayer[]> {
     try {
       const db = await this.getDbInstance();
       const result = await db.select().from(players).where(eq(players.teamId, teamId));
@@ -76,9 +76,9 @@ export class PlayerRepository {
     }
   }
 
-  async upsert(player: DomainPlayer): Promise<Player> {
+  async upsert(player: DomainPlayer): Promise<DbPlayer> {
     try {
-      const newPlayer: NewPlayer = {
+      const newPlayer: DbPlayerInsert = {
         id: player.id,
         code: player.code,
         type: player.type,
@@ -117,13 +117,13 @@ export class PlayerRepository {
     }
   }
 
-  async upsertBatch(domainPlayers: DomainPlayer[]): Promise<Player[]> {
+  async upsertBatch(domainPlayers: DomainPlayer[]): Promise<DbPlayer[]> {
     try {
       if (domainPlayers.length === 0) {
         return [];
       }
 
-      const newPlayers: NewPlayer[] = domainPlayers.map((player) => ({
+      const newPlayers: DbPlayerInsert[] = domainPlayers.map((player) => ({
         id: player.id,
         code: player.code,
         type: player.type,

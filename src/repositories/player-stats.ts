@@ -1,6 +1,10 @@
 import { eq, inArray, sql } from 'drizzle-orm';
 
-import { playerStats, type PlayerStat as DbPlayerStat, type NewPlayerStat } from '../db/schema';
+import {
+  playerStats,
+  type DbPlayerStat,
+  type DbPlayerStatInsert,
+} from '../db/schemas/index.schema';
 import { getDb } from '../db/singleton';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
@@ -687,7 +691,7 @@ export class PlayerStatsRepository {
 
   async upsert(playerStat: PlayerStat): Promise<DbPlayerStat> {
     try {
-      const newPlayerStat: NewPlayerStat = {
+      const newPlayerStat: DbPlayerStatInsert = {
         eventId: playerStat.eventId,
         elementId: playerStat.elementId,
         elementType: playerStat.elementType,
@@ -770,7 +774,7 @@ export class PlayerStatsRepository {
         return { count: 0 };
       }
 
-      const newPlayerStats: NewPlayerStat[] = playerStatsList.map((playerStat) => ({
+      const newPlayerStats: DbPlayerStatInsert[] = playerStatsList.map((playerStat) => ({
         eventId: playerStat.eventId,
         elementId: playerStat.elementId,
         elementType: playerStat.elementType,

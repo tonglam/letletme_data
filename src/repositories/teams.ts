@@ -1,6 +1,6 @@
 import { eq, sql } from 'drizzle-orm';
 
-import { teams, type NewTeam, type Team } from '../db/schema';
+import { teams, type DbTeam, type DbTeamInsert } from '../db/schemas/index.schema';
 import { getDb } from '../db/singleton';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
@@ -21,7 +21,7 @@ export class TeamRepository {
     return this.db || (await getDb());
   }
 
-  async findAll(): Promise<Team[]> {
+  async findAll(): Promise<DbTeam[]> {
     try {
       const db = await this.getDbInstance();
       const result = await db.select().from(teams).orderBy(teams.id);
@@ -37,7 +37,7 @@ export class TeamRepository {
     }
   }
 
-  async findById(id: number): Promise<Team | null> {
+  async findById(id: number): Promise<DbTeam | null> {
     try {
       const db = await this.getDbInstance();
       const result = await db.select().from(teams).where(eq(teams.id, id));
@@ -60,9 +60,9 @@ export class TeamRepository {
     }
   }
 
-  async upsert(team: DomainTeam): Promise<Team> {
+  async upsert(team: DomainTeam): Promise<DbTeam> {
     try {
-      const newTeam: NewTeam = {
+      const newTeam: DbTeamInsert = {
         id: team.id,
         name: team.name,
         shortName: team.shortName,
@@ -113,13 +113,13 @@ export class TeamRepository {
     }
   }
 
-  async upsertBatch(domainTeams: DomainTeam[]): Promise<Team[]> {
+  async upsertBatch(domainTeams: DomainTeam[]): Promise<DbTeam[]> {
     try {
       if (domainTeams.length === 0) {
         return [];
       }
 
-      const newTeams: NewTeam[] = domainTeams.map((team) => ({
+      const newTeams: DbTeamInsert[] = domainTeams.map((team) => ({
         id: team.id,
         name: team.name,
         shortName: team.shortName,

@@ -1,6 +1,6 @@
 import { eq, sql } from 'drizzle-orm';
 
-import { events, type Event, type NewEvent } from '../db/schema';
+import { events, type DbEvent } from '../db/schemas/index.schema';
 import { getDb } from '../db/singleton';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
@@ -20,7 +20,7 @@ export class EventRepository {
   private async getDbInstance() {
     return this.db || (await getDb());
   }
-  async findAll(): Promise<Event[]> {
+  async findAll(): Promise<DbEvent[]> {
     try {
       const db = await this.getDbInstance();
       const result = await db.select().from(events);
@@ -36,7 +36,7 @@ export class EventRepository {
     }
   }
 
-  async findById(id: number): Promise<Event | null> {
+  async findById(id: number): Promise<DbEvent | null> {
     try {
       const db = await this.getDbInstance();
       const result = await db.select().from(events).where(eq(events.id, id));
@@ -59,7 +59,7 @@ export class EventRepository {
     }
   }
 
-  async findCurrent(): Promise<Event | null> {
+  async findCurrent(): Promise<DbEvent | null> {
     try {
       const db = await this.getDbInstance();
       const result = await db.select().from(events).where(eq(events.isCurrent, true));
@@ -82,7 +82,7 @@ export class EventRepository {
     }
   }
 
-  async findNext(): Promise<Event | null> {
+  async findNext(): Promise<DbEvent | null> {
     try {
       const db = await this.getDbInstance();
       const result = await db.select().from(events).where(eq(events.isNext, true));
@@ -105,9 +105,9 @@ export class EventRepository {
     }
   }
 
-  async upsert(event: DomainEvent): Promise<Event> {
+  async upsert(event: DomainEvent): Promise<DbEvent> {
     try {
-      const newEvent: NewEvent = {
+      const newEvent: DbEventInsert = {
         id: event.id,
         name: event.name,
         deadlineTime: event.deadlineTime,
@@ -160,13 +160,13 @@ export class EventRepository {
     }
   }
 
-  async upsertBatch(domainEvents: DomainEvent[]): Promise<Event[]> {
+  async upsertBatch(domainEvents: DomainEvent[]): Promise<DbEvent[]> {
     try {
       if (domainEvents.length === 0) {
         return [];
       }
 
-      const newEvents: NewEvent[] = domainEvents.map((event) => ({
+      const newEvents: DbEventInsert[] = domainEvents.map((event) => ({
         id: event.id,
         name: event.name,
         deadlineTime: event.deadlineTime,

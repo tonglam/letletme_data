@@ -1,6 +1,10 @@
 import { eq, inArray, sql } from 'drizzle-orm';
 
-import { playerValues, type PlayerValue as DbPlayerValue, type NewPlayerValue } from '../db/schema';
+import {
+  playerValues,
+  type DbPlayerValue,
+  type DbPlayerValueInsert,
+} from '../db/schemas/index.schema';
 import { getDb } from '../db/singleton';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
@@ -20,10 +24,10 @@ import type {
 // Type for the SQL query result that matches PlayerValue domain model
 export type PlayerValueQueryResult = {
   elementId: PlayerId;
-  webName: string;
   elementType: ElementTypeId;
   elementTypeName: ElementTypeName;
   eventId: EventId;
+  webName: string;
   teamId: TeamId;
   teamName: string;
   teamShortName: string;
@@ -51,20 +55,28 @@ export class PlayerValuesRepository {
       const db = await this.getDbInstance();
       const result = await db.execute(sql`
         SELECT 
-          element_id as "elementId",
-          event_id as "eventId",
-          web_name as "webName",
-          element_type as "elementType",
-          element_type_name as "elementTypeName",
-          team_id as "teamId",
-          team_name as "teamName",
-          team_short_name as "teamShortName",
-          value,
-          last_value as "lastValue",
-          change_date as "changeDate",
-          change_type as "changeType"
-        FROM player_values
-        ORDER BY event_id, element_id
+          pv.element_id as "elementId",
+          pv.event_id as "eventId",
+          p.web_name as "webName",
+          pv.element_type as "elementType",
+          CASE pv.element_type
+            WHEN 1 THEN 'GKP'
+            WHEN 2 THEN 'DEF'
+            WHEN 3 THEN 'MID'
+            WHEN 4 THEN 'FWD'
+            ELSE 'UNK'
+          END as "elementTypeName",
+          t.id as "teamId",
+          t.name as "teamName",
+          t.short_name as "teamShortName",
+          pv.value,
+          pv.last_value as "lastValue",
+          pv.change_date as "changeDate",
+          pv.change_type as "changeType"
+        FROM player_values pv
+        INNER JOIN players p ON p.id = pv.element_id
+        INNER JOIN teams t ON t.id = p.team_id
+        ORDER BY pv.event_id, pv.element_id
       `);
       logInfo('Retrieved all player values', { count: result.length });
       return result as unknown as PlayerValueQueryResult[];
@@ -83,21 +95,29 @@ export class PlayerValuesRepository {
       const db = await this.getDbInstance();
       const result = await db.execute(sql`
         SELECT 
-          element_id as "elementId",
-          event_id as "eventId",
-          web_name as "webName",
-          element_type as "elementType",
-          element_type_name as "elementTypeName",
-          team_id as "teamId",
-          team_name as "teamName",
-          team_short_name as "teamShortName",
-          value,
-          last_value as "lastValue",
-          change_date as "changeDate",
-          change_type as "changeType"
-        FROM player_values
-        WHERE event_id = ${eventId}
-        ORDER BY element_id
+          pv.element_id as "elementId",
+          pv.event_id as "eventId",
+          p.web_name as "webName",
+          pv.element_type as "elementType",
+          CASE pv.element_type
+            WHEN 1 THEN 'GKP'
+            WHEN 2 THEN 'DEF'
+            WHEN 3 THEN 'MID'
+            WHEN 4 THEN 'FWD'
+            ELSE 'UNK'
+          END as "elementTypeName",
+          t.id as "teamId",
+          t.name as "teamName",
+          t.short_name as "teamShortName",
+          pv.value,
+          pv.last_value as "lastValue",
+          pv.change_date as "changeDate",
+          pv.change_type as "changeType"
+        FROM player_values pv
+        INNER JOIN players p ON p.id = pv.element_id
+        INNER JOIN teams t ON t.id = p.team_id
+        WHERE pv.event_id = ${eventId}
+        ORDER BY pv.element_id
       `);
       logInfo('Retrieved player values by event', { eventId, count: result.length });
       return result as unknown as PlayerValueQueryResult[];
@@ -116,21 +136,29 @@ export class PlayerValuesRepository {
       const db = await this.getDbInstance();
       const result = await db.execute(sql`
         SELECT 
-          element_id as "elementId",
-          event_id as "eventId",
-          web_name as "webName",
-          element_type as "elementType",
-          element_type_name as "elementTypeName",
-          team_id as "teamId",
-          team_name as "teamName",
-          team_short_name as "teamShortName",
-          value,
-          last_value as "lastValue",
-          change_date as "changeDate",
-          change_type as "changeType"
-        FROM player_values
-        WHERE element_id = ${playerId}
-        ORDER BY event_id
+          pv.element_id as "elementId",
+          pv.event_id as "eventId",
+          p.web_name as "webName",
+          pv.element_type as "elementType",
+          CASE pv.element_type
+            WHEN 1 THEN 'GKP'
+            WHEN 2 THEN 'DEF'
+            WHEN 3 THEN 'MID'
+            WHEN 4 THEN 'FWD'
+            ELSE 'UNK'
+          END as "elementTypeName",
+          t.id as "teamId",
+          t.name as "teamName",
+          t.short_name as "teamShortName",
+          pv.value,
+          pv.last_value as "lastValue",
+          pv.change_date as "changeDate",
+          pv.change_type as "changeType"
+        FROM player_values pv
+        INNER JOIN players p ON p.id = pv.element_id
+        INNER JOIN teams t ON t.id = p.team_id
+        WHERE pv.element_id = ${playerId}
+        ORDER BY pv.event_id
       `);
       logInfo('Retrieved player values by player', { playerId, count: result.length });
       return result as unknown as PlayerValueQueryResult[];
@@ -150,39 +178,55 @@ export class PlayerValuesRepository {
       const result = eventId
         ? await db.execute(sql`
         SELECT 
-          element_id as "elementId",
-          event_id as "eventId",
-          web_name as "webName",
-          element_type as "elementType",
-          element_type_name as "elementTypeName",
-          team_id as "teamId",
-          team_name as "teamName",
-          team_short_name as "teamShortName",
-          value,
-          last_value as "lastValue",
-          change_date as "changeDate",
-          change_type as "changeType"
-        FROM player_values
-        WHERE team_id = ${teamId} AND event_id = ${eventId}
-        ORDER BY event_id, element_id
+          pv.element_id as "elementId",
+          pv.event_id as "eventId",
+          p.web_name as "webName",
+          pv.element_type as "elementType",
+          CASE pv.element_type
+            WHEN 1 THEN 'GKP'
+            WHEN 2 THEN 'DEF'
+            WHEN 3 THEN 'MID'
+            WHEN 4 THEN 'FWD'
+            ELSE 'UNK'
+          END as "elementTypeName",
+          t.id as "teamId",
+          t.name as "teamName",
+          t.short_name as "teamShortName",
+          pv.value,
+          pv.last_value as "lastValue",
+          pv.change_date as "changeDate",
+          pv.change_type as "changeType"
+        FROM player_values pv
+        INNER JOIN players p ON p.id = pv.element_id
+        INNER JOIN teams t ON t.id = p.team_id
+        WHERE t.id = ${teamId} AND pv.event_id = ${eventId}
+        ORDER BY pv.event_id, pv.element_id
         `)
         : await db.execute(sql`
         SELECT 
-          element_id as "elementId",
-          event_id as "eventId",
-          web_name as "webName",
-          element_type as "elementType",
-          element_type_name as "elementTypeName",
-          team_id as "teamId",
-          team_name as "teamName",
-          team_short_name as "teamShortName",
-          value,
-          last_value as "lastValue",
-          change_date as "changeDate",
-          change_type as "changeType"
-        FROM player_values
-        WHERE team_id = ${teamId}
-        ORDER BY event_id, element_id
+          pv.element_id as "elementId",
+          pv.event_id as "eventId",
+          p.web_name as "webName",
+          pv.element_type as "elementType",
+          CASE pv.element_type
+            WHEN 1 THEN 'GKP'
+            WHEN 2 THEN 'DEF'
+            WHEN 3 THEN 'MID'
+            WHEN 4 THEN 'FWD'
+            ELSE 'UNK'
+          END as "elementTypeName",
+          t.id as "teamId",
+          t.name as "teamName",
+          t.short_name as "teamShortName",
+          pv.value,
+          pv.last_value as "lastValue",
+          pv.change_date as "changeDate",
+          pv.change_type as "changeType"
+        FROM player_values pv
+        INNER JOIN players p ON p.id = pv.element_id
+        INNER JOIN teams t ON t.id = p.team_id
+        WHERE t.id = ${teamId}
+        ORDER BY pv.event_id, pv.element_id
         `);
 
       logInfo('Retrieved player values by team', { teamId, eventId, count: result.length });
@@ -206,39 +250,55 @@ export class PlayerValuesRepository {
       const result = eventId
         ? await db.execute(sql`
         SELECT 
-          element_id as "elementId",
-          event_id as "eventId",
-          web_name as "webName",
-          element_type as "elementType",
-          element_type_name as "elementTypeName",
-          team_id as "teamId",
-          team_name as "teamName",
-          team_short_name as "teamShortName",
-          value,
-          last_value as "lastValue",
-          change_date as "changeDate",
-          change_type as "changeType"
-        FROM player_values
-        WHERE element_type = ${elementType} AND event_id = ${eventId}
-        ORDER BY event_id, element_id
+          pv.element_id as "elementId",
+          pv.event_id as "eventId",
+          p.web_name as "webName",
+          pv.element_type as "elementType",
+          CASE pv.element_type
+            WHEN 1 THEN 'GKP'
+            WHEN 2 THEN 'DEF'
+            WHEN 3 THEN 'MID'
+            WHEN 4 THEN 'FWD'
+            ELSE 'UNK'
+          END as "elementTypeName",
+          t.id as "teamId",
+          t.name as "teamName",
+          t.short_name as "teamShortName",
+          pv.value,
+          pv.last_value as "lastValue",
+          pv.change_date as "changeDate",
+          pv.change_type as "changeType"
+        FROM player_values pv
+        INNER JOIN players p ON p.id = pv.element_id
+        INNER JOIN teams t ON t.id = p.team_id
+        WHERE pv.element_type = ${elementType} AND pv.event_id = ${eventId}
+        ORDER BY pv.event_id, pv.element_id
         `)
         : await db.execute(sql`
         SELECT 
-          element_id as "elementId",
-          event_id as "eventId",
-          web_name as "webName",
-          element_type as "elementType",
-          element_type_name as "elementTypeName",
-          team_id as "teamId",
-          team_name as "teamName",
-          team_short_name as "teamShortName",
-          value,
-          last_value as "lastValue",
-          change_date as "changeDate",
-          change_type as "changeType"
-        FROM player_values
-        WHERE element_type = ${elementType}
-        ORDER BY event_id, element_id
+          pv.element_id as "elementId",
+          pv.event_id as "eventId",
+          p.web_name as "webName",
+          pv.element_type as "elementType",
+          CASE pv.element_type
+            WHEN 1 THEN 'GKP'
+            WHEN 2 THEN 'DEF'
+            WHEN 3 THEN 'MID'
+            WHEN 4 THEN 'FWD'
+            ELSE 'UNK'
+          END as "elementTypeName",
+          t.id as "teamId",
+          t.name as "teamName",
+          t.short_name as "teamShortName",
+          pv.value,
+          pv.last_value as "lastValue",
+          pv.change_date as "changeDate",
+          pv.change_type as "changeType"
+        FROM player_values pv
+        INNER JOIN players p ON p.id = pv.element_id
+        INNER JOIN teams t ON t.id = p.team_id
+        WHERE pv.element_type = ${elementType}
+        ORDER BY pv.event_id, pv.element_id
         `);
 
       logInfo('Retrieved player values by position', {
@@ -266,39 +326,55 @@ export class PlayerValuesRepository {
       const result = eventId
         ? await db.execute(sql`
         SELECT 
-          element_id as "elementId",
-          event_id as "eventId",
-          web_name as "webName",
-          element_type as "elementType",
-          element_type_name as "elementTypeName",
-          team_id as "teamId",
-          team_name as "teamName",
-          team_short_name as "teamShortName",
-          value,
-          last_value as "lastValue",
-          change_date as "changeDate",
-          change_type as "changeType"
-        FROM player_values
-        WHERE change_type = ${changeType} AND event_id = ${eventId}
-        ORDER BY element_id
+          pv.element_id as "elementId",
+          pv.event_id as "eventId",
+          p.web_name as "webName",
+          pv.element_type as "elementType",
+          CASE pv.element_type
+            WHEN 1 THEN 'GKP'
+            WHEN 2 THEN 'DEF'
+            WHEN 3 THEN 'MID'
+            WHEN 4 THEN 'FWD'
+            ELSE 'UNK'
+          END as "elementTypeName",
+          t.id as "teamId",
+          t.name as "teamName",
+          t.short_name as "teamShortName",
+          pv.value,
+          pv.last_value as "lastValue",
+          pv.change_date as "changeDate",
+          pv.change_type as "changeType"
+        FROM player_values pv
+        INNER JOIN players p ON p.id = pv.element_id
+        INNER JOIN teams t ON t.id = p.team_id
+        WHERE pv.change_type = ${changeType} AND pv.event_id = ${eventId}
+        ORDER BY pv.element_id
         `)
         : await db.execute(sql`
         SELECT 
-          element_id as "elementId",
-          event_id as "eventId",
-          web_name as "webName",
-          element_type as "elementType",
-          element_type_name as "elementTypeName",
-          team_id as "teamId",
-          team_name as "teamName",
-          team_short_name as "teamShortName",
-          value,
-          last_value as "lastValue",
-          change_date as "changeDate",
-          change_type as "changeType"
-        FROM player_values
-        WHERE change_type = ${changeType}
-        ORDER BY event_id, element_id
+          pv.element_id as "elementId",
+          pv.event_id as "eventId",
+          p.web_name as "webName",
+          pv.element_type as "elementType",
+          CASE pv.element_type
+            WHEN 1 THEN 'GKP'
+            WHEN 2 THEN 'DEF'
+            WHEN 3 THEN 'MID'
+            WHEN 4 THEN 'FWD'
+            ELSE 'UNK'
+          END as "elementTypeName",
+          t.id as "teamId",
+          t.name as "teamName",
+          t.short_name as "teamShortName",
+          pv.value,
+          pv.last_value as "lastValue",
+          pv.change_date as "changeDate",
+          pv.change_type as "changeType"
+        FROM player_values pv
+        INNER JOIN players p ON p.id = pv.element_id
+        INNER JOIN teams t ON t.id = p.team_id
+        WHERE pv.change_type = ${changeType}
+        ORDER BY pv.event_id, pv.element_id
         `);
 
       logInfo('Retrieved player values by change type', {
@@ -325,20 +401,28 @@ export class PlayerValuesRepository {
       const db = await this.getDbInstance();
       const result = await db.execute(sql`
         SELECT 
-          element_id as "elementId",
-          event_id as "eventId",
-          web_name as "webName",
-          element_type as "elementType",
-          element_type_name as "elementTypeName",
-          team_id as "teamId",
-          team_name as "teamName",
-          team_short_name as "teamShortName",
-          value,
-          last_value as "lastValue",
-          change_date as "changeDate",
-          change_type as "changeType"
-        FROM player_values
-        WHERE event_id = ${eventId} AND element_id = ${playerId}
+          pv.element_id as "elementId",
+          pv.event_id as "eventId",
+          p.web_name as "webName",
+          pv.element_type as "elementType",
+          CASE pv.element_type
+            WHEN 1 THEN 'GKP'
+            WHEN 2 THEN 'DEF'
+            WHEN 3 THEN 'MID'
+            WHEN 4 THEN 'FWD'
+            ELSE 'UNK'
+          END as "elementTypeName",
+          t.id as "teamId",
+          t.name as "teamName",
+          t.short_name as "teamShortName",
+          pv.value,
+          pv.last_value as "lastValue",
+          pv.change_date as "changeDate",
+          pv.change_type as "changeType"
+        FROM player_values pv
+        INNER JOIN players p ON p.id = pv.element_id
+        INNER JOIN teams t ON t.id = p.team_id
+        WHERE pv.event_id = ${eventId} AND pv.element_id = ${playerId}
         LIMIT 1
       `);
 
@@ -356,15 +440,10 @@ export class PlayerValuesRepository {
 
   async upsert(playerValue: PlayerValue): Promise<DbPlayerValue> {
     try {
-      const newPlayerValue: NewPlayerValue = {
+      const newPlayerValue: DbPlayerValueInsert = {
         elementId: playerValue.elementId,
         eventId: playerValue.eventId,
-        webName: playerValue.webName,
         elementType: playerValue.elementType,
-        elementTypeName: playerValue.elementTypeName,
-        teamId: playerValue.teamId,
-        teamName: playerValue.teamName,
-        teamShortName: playerValue.teamShortName,
         value: playerValue.value,
         lastValue: playerValue.lastValue,
         changeDate: playerValue.changeDate,
@@ -378,11 +457,6 @@ export class PlayerValuesRepository {
         .onConflictDoUpdate({
           target: [playerValues.eventId, playerValues.elementId],
           set: {
-            webName: newPlayerValue.webName,
-            elementTypeName: newPlayerValue.elementTypeName,
-            teamId: newPlayerValue.teamId,
-            teamName: newPlayerValue.teamName,
-            teamShortName: newPlayerValue.teamShortName,
             value: newPlayerValue.value,
             lastValue: newPlayerValue.lastValue,
             changeDate: newPlayerValue.changeDate,
@@ -416,15 +490,10 @@ export class PlayerValuesRepository {
         return { count: 0 };
       }
 
-      const newPlayerValues: NewPlayerValue[] = playerValuesData.map((playerValue) => ({
+      const newPlayerValues: DbPlayerValueInsert[] = playerValuesData.map((playerValue) => ({
         elementId: playerValue.elementId,
         eventId: playerValue.eventId,
-        webName: playerValue.webName,
         elementType: playerValue.elementType,
-        elementTypeName: playerValue.elementTypeName,
-        teamId: playerValue.teamId,
-        teamName: playerValue.teamName,
-        teamShortName: playerValue.teamShortName,
         value: playerValue.value,
         lastValue: playerValue.lastValue,
         changeDate: playerValue.changeDate,
@@ -438,11 +507,6 @@ export class PlayerValuesRepository {
         .onConflictDoUpdate({
           target: [playerValues.eventId, playerValues.elementId],
           set: {
-            webName: sql`excluded.web_name`,
-            elementTypeName: sql`excluded.element_type_name`,
-            teamId: sql`excluded.team_id`,
-            teamName: sql`excluded.team_name`,
-            teamShortName: sql`excluded.team_short_name`,
             value: sql`excluded.value`,
             lastValue: sql`excluded.last_value`,
             changeDate: sql`excluded.change_date`,

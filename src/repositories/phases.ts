@@ -1,6 +1,6 @@
 import { eq, sql } from 'drizzle-orm';
 
-import { phases, type NewPhase, type Phase } from '../db/schema';
+import { phases, type DbPhase } from '../db/schemas/index.schema';
 import { getDb } from '../db/singleton';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
@@ -21,7 +21,7 @@ export class PhaseRepository {
     return this.db || (await getDb());
   }
 
-  async findAll(): Promise<Phase[]> {
+  async findAll(): Promise<DbPhase[]> {
     try {
       const db = await this.getDbInstance();
       const result = await db.select().from(phases).orderBy(phases.id);
@@ -37,7 +37,7 @@ export class PhaseRepository {
     }
   }
 
-  async findById(id: number): Promise<Phase | null> {
+  async findById(id: number): Promise<DbPhase | null> {
     try {
       const db = await this.getDbInstance();
       const result = await db.select().from(phases).where(eq(phases.id, id));
@@ -60,7 +60,7 @@ export class PhaseRepository {
     }
   }
 
-  async findByGameweek(gameweek: number): Promise<Phase[]> {
+  async findByGameweek(gameweek: number): Promise<DbPhase[]> {
     try {
       const db = await this.getDbInstance();
       const result = await db
@@ -81,7 +81,7 @@ export class PhaseRepository {
     }
   }
 
-  async findOverallPhase(): Promise<Phase | null> {
+  async findOverallPhase(): Promise<DbPhase | null> {
     try {
       const db = await this.getDbInstance();
       const result = await db
@@ -109,7 +109,7 @@ export class PhaseRepository {
     }
   }
 
-  async findMonthlyPhases(): Promise<Phase[]> {
+  async findMonthlyPhases(): Promise<DbPhase[]> {
     try {
       const db = await this.getDbInstance();
       const monthNames = [
@@ -147,9 +147,9 @@ export class PhaseRepository {
     }
   }
 
-  async upsert(phase: DomainPhase): Promise<Phase> {
+  async upsert(phase: DomainPhase): Promise<DbPhase> {
     try {
-      const newPhase: NewPhase = {
+      const newPhase: DbPhaseInsert = {
         id: phase.id,
         name: phase.name,
         startEvent: phase.startEvent,
@@ -186,13 +186,13 @@ export class PhaseRepository {
     }
   }
 
-  async upsertBatch(domainPhases: DomainPhase[]): Promise<Phase[]> {
+  async upsertBatch(domainPhases: DomainPhase[]): Promise<DbPhase[]> {
     try {
       if (domainPhases.length === 0) {
         return [];
       }
 
-      const newPhases: NewPhase[] = domainPhases.map((phase) => ({
+      const newPhases: DbPhaseInsert[] = domainPhases.map((phase) => ({
         id: phase.id,
         name: phase.name,
         startEvent: phase.startEvent,
