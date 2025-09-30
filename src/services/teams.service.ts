@@ -15,24 +15,27 @@ import { logError, logInfo } from '../utils/logger';
  * - Data retrieval with fallbacks
  */
 
-// Get all teams (with cache fallback)
+// Get all teams (cache-first strategy: Redis → DB → update Redis)
 export async function getTeams(): Promise<Team[]> {
   try {
     logInfo('Getting all teams');
 
     // 1. Try cache first (fast path)
-    const cached = await teamsCache.get();
+    const cached = await teamsCache.getAll();
     if (cached) {
-      logInfo('Teams retrieved from cache', { count: Array.isArray(cached) ? cached.length : 0 });
-      return cached as Team[];
+      logInfo('Teams retrieved from cache', { count: cached.length });
+      return cached;
     }
 
-    // 2. Fallback to database (slower path)
+    // 2. Cache miss - fallback to database
+    logInfo('Cache miss - fetching from database');
     const dbTeams = await teamRepository.findAll();
 
-    // 3. Update cache for next time
+    // 3. Update cache for next time (async, don't block response)
     if (dbTeams.length > 0) {
-      await teamsCache.set(dbTeams);
+      teamsCache.set(dbTeams).catch((error) => {
+        logError('Failed to update teams cache', error);
+      });
     }
 
     logInfo('Teams retrieved from database', { count: dbTeams.length });
@@ -43,15 +46,36 @@ export async function getTeams(): Promise<Team[]> {
   }
 }
 
-// Get single team by ID
+// Get single team by ID (cache-first strategy: Redis → DB → update Redis)
 export async function getTeam(id: number): Promise<Team | null> {
   try {
     logInfo('Getting team by id', { id });
 
+    // 1. Try cache first (fast path)
+    const cached = await teamsCache.getById(id);
+    if (cached) {
+      logInfo('Team retrieved from cache', { id, name: cached.name });
+      return cached;
+    }
+
+    // 2. Cache miss - fallback to database
+    logInfo('Cache miss - fetching from database', { id });
     const team = await teamRepository.findById(id);
 
     if (team) {
-      logInfo('Team found', { id, name: team.name });
+      // 3. Update cache for next time (async, don't block response)
+      teamsCache.getAll().then((allTeams) => {
+        if (!allTeams) {
+          // If full cache doesn't exist, fetch all and cache
+          teamRepository.findAll().then((dbTeams) => {
+            teamsCache.set(dbTeams).catch((error) => {
+              logError('Failed to update teams cache', error);
+            });
+          });
+        }
+      });
+
+      logInfo('Team found in database', { id, name: team.name });
     } else {
       logInfo('Team not found', { id });
     }

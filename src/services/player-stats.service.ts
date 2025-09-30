@@ -1,4 +1,4 @@
-import { playerStatsCache } from '../cache/operations';
+import { playerStatsCache, teamsCache } from '../cache/operations';
 import { fplClient } from '../clients/fpl';
 import type { PlayerStat } from '../domain/player-stats';
 import { playerStatsRepository } from '../repositories/player-stats';
@@ -32,7 +32,7 @@ export async function getPlayerStats(): Promise<PlayerStat[]> {
   }
 }
 
-// Get player stats by event ID
+// Get player stats by event ID (cache-first strategy: Redis → DB → update Redis)
 export async function getPlayerStatsByEvent(eventId: EventId): Promise<PlayerStat[]> {
   try {
     logInfo('Getting player stats by event', { eventId });
@@ -44,13 +44,16 @@ export async function getPlayerStatsByEvent(eventId: EventId): Promise<PlayerSta
       return cached;
     }
 
-    // 2. Fallback to database (slower path)
+    // 2. Cache miss - fallback to database
+    logInfo('Cache miss - fetching from database', { eventId });
     const dbPlayerStats = await playerStatsRepository.findByEventId(eventId);
     const playerStats = dbPlayerStats as PlayerStat[];
 
-    // 3. Update cache for next time
+    // 3. Update cache for next time (async, don't block response)
     if (playerStats.length > 0) {
-      await playerStatsCache.setByEvent(eventId, playerStats);
+      playerStatsCache.setByEvent(eventId, playerStats).catch((error) => {
+        logError('Failed to update player stats cache', error);
+      });
     }
 
     logInfo('Player stats retrieved from database', { eventId, count: playerStats.length });
@@ -76,7 +79,7 @@ export async function getPlayerStatsByPlayer(playerId: PlayerId): Promise<Player
   }
 }
 
-// Get player stats by team ID
+// Get player stats by team ID (cache-first for latest event)
 export async function getPlayerStatsByTeam(
   teamId: TeamId,
   eventId?: EventId,
@@ -84,9 +87,40 @@ export async function getPlayerStatsByTeam(
   try {
     logInfo('Getting player stats by team', { teamId, eventId });
 
+    // If eventId provided, try cache first (for latest event)
+    if (eventId) {
+      const cached = await playerStatsCache.getByTeam(eventId, teamId);
+      if (cached) {
+        logInfo('Player stats retrieved from cache (filtered by team)', {
+          teamId,
+          eventId,
+          count: cached.length,
+        });
+        return cached;
+      }
+    }
+
+    // Cache miss or no eventId - fallback to database
+    logInfo('Cache miss or historical query - fetching from database', { teamId, eventId });
     const dbPlayerStats = await playerStatsRepository.findByTeamId(teamId, eventId);
 
-    logInfo('Player stats retrieved by team', { teamId, eventId, count: dbPlayerStats.length });
+    // Update cache if this is the latest event data
+    if (eventId && dbPlayerStats.length > 0) {
+      const allStats = await playerStatsCache.getByEvent(eventId);
+      if (!allStats) {
+        // Cache the full event data
+        const allEventStats = await playerStatsRepository.findByEventId(eventId);
+        playerStatsCache.setByEvent(eventId, allEventStats as PlayerStat[]).catch((error) => {
+          logError('Failed to update player stats cache', error);
+        });
+      }
+    }
+
+    logInfo('Player stats retrieved by team from database', {
+      teamId,
+      eventId,
+      count: dbPlayerStats.length,
+    });
     return dbPlayerStats as PlayerStat[];
   } catch (error) {
     logError('Failed to get player stats by team', error, { teamId, eventId });
@@ -94,7 +128,7 @@ export async function getPlayerStatsByTeam(
   }
 }
 
-// Get player stats by position
+// Get player stats by position (cache-first for latest event)
 export async function getPlayerStatsByPosition(
   elementType: ElementTypeId,
   eventId?: EventId,
@@ -102,9 +136,36 @@ export async function getPlayerStatsByPosition(
   try {
     logInfo('Getting player stats by position', { elementType, eventId });
 
+    // If eventId provided, try cache first (for latest event)
+    if (eventId) {
+      const cached = await playerStatsCache.getByPosition(eventId, elementType);
+      if (cached) {
+        logInfo('Player stats retrieved from cache (filtered by position)', {
+          elementType,
+          eventId,
+          count: cached.length,
+        });
+        return cached;
+      }
+    }
+
+    // Cache miss or no eventId - fallback to database
+    logInfo('Cache miss or historical query - fetching from database', { elementType, eventId });
     const dbPlayerStats = await playerStatsRepository.findByPosition(elementType, eventId);
 
-    logInfo('Player stats retrieved by position', {
+    // Update cache if this is the latest event data
+    if (eventId && dbPlayerStats.length > 0) {
+      const allStats = await playerStatsCache.getByEvent(eventId);
+      if (!allStats) {
+        // Cache the full event data
+        const allEventStats = await playerStatsRepository.findByEventId(eventId);
+        playerStatsCache.setByEvent(eventId, allEventStats as PlayerStat[]).catch((error) => {
+          logError('Failed to update player stats cache', error);
+        });
+      }
+    }
+
+    logInfo('Player stats retrieved by position from database', {
       elementType,
       eventId,
       count: dbPlayerStats.length,
@@ -237,15 +298,19 @@ export async function syncPlayerStatsForEvent(
       throw new Error('Invalid player elements data from FPL API');
     }
 
-    // 2. Get teams for mapping
-    const teams = await teamRepository.findAll();
-    const teamsMap = createTeamsMap(
-      teams.map((team) => ({
-        id: team.id,
-        name: team.name,
-        shortName: team.shortName,
-      })),
-    );
+    // 2. Get teams map (try cache first, fallback to DB)
+    let teamsMap = await teamsCache.getTeamsMap();
+    if (!teamsMap) {
+      logInfo('Teams map cache miss, fetching from database');
+      const teams = await teamRepository.findAll();
+      teamsMap = createTeamsMap(
+        teams.map((team) => ({
+          id: team.id,
+          name: team.name,
+          shortName: team.shortName,
+        })),
+      );
+    }
 
     // 3. Transform the data for the specific event
     const transformedPlayerStats: PlayerStat[] = [];

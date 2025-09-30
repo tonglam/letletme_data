@@ -173,13 +173,12 @@ describe('Player Values Integration Tests', () => {
   // Inspect DB and Redis after each test
   afterEach(async () => {
     const count = await getPlayerValuesCount();
-    const latestEventId = await playerValuesCache.getLatestEventId();
-    let cacheCount = 0;
-    if (latestEventId !== null) {
-      const cachedForLatest = await playerValuesCache.getByEvent(latestEventId);
-      cacheCount = cachedForLatest ? cachedForLatest.length : 0;
-    }
+    // Check today's cache (date-based)
+    const today = new Date();
+    const todayDate = today.toISOString().split('T')[0].replace(/-/g, '');
+    const cachedToday = await playerValuesCache.getByDate(todayDate);
+    const cacheCount = cachedToday ? cachedToday.length : 0;
     // eslint-disable-next-line no-console
-    console.log(`PlayerValues state -> DB: ${count}, Redis(latest-event): ${cacheCount}`);
+    console.log(`PlayerValues state -> DB: ${count}, Redis(today:${todayDate}): ${cacheCount}`);
   });
 });

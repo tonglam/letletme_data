@@ -1,5 +1,13 @@
-import { boolean, index, integer, pgTable, timestamp, uniqueIndex } from 'drizzle-orm/pg-core';
-import { createdAtField } from './_helpers.schema';
+import {
+  boolean,
+  index,
+  integer,
+  jsonb,
+  pgTable,
+  timestamp,
+  uniqueIndex,
+} from 'drizzle-orm/pg-core';
+import { timestamps } from './_helpers.schema';
 import { events } from './events.schema';
 import { teams } from './teams.schema';
 
@@ -8,24 +16,35 @@ export const eventFixtures = pgTable(
   {
     id: integer('id').primaryKey(),
     code: integer('code').notNull().unique(),
-    eventId: integer('event_id')
-      .notNull()
-      .references(() => events.id),
-    kickoffTime: timestamp('kickoff_time', { withTimezone: true }),
-    started: boolean('started').default(false).notNull(),
+    eventId: integer('event_id').references(() => events.id),
     finished: boolean('finished').default(false).notNull(),
+    finishedProvisional: boolean('finished_provisional').default(false).notNull(),
+    kickoffTime: timestamp('kickoff_time', { withTimezone: true }),
     minutes: integer('minutes').default(0).notNull(),
-    teamHId: integer('team_h_id')
-      .notNull()
-      .references(() => teams.id),
-    teamHDifficulty: integer('team_h_difficulty'),
-    teamHScore: integer('team_h_score'),
+    provisionalStartTime: boolean('provisional_start_time').default(false).notNull(),
+    started: boolean('started'),
     teamAId: integer('team_a_id')
       .notNull()
       .references(() => teams.id),
-    teamADifficulty: integer('team_a_difficulty'),
     teamAScore: integer('team_a_score'),
-    ...createdAtField,
+    teamHId: integer('team_h_id')
+      .notNull()
+      .references(() => teams.id),
+    teamHScore: integer('team_h_score'),
+    stats: jsonb('stats')
+      .$type<
+        Array<{
+          identifier: string;
+          a: Array<{ value: number; element: number }>;
+          h: Array<{ value: number; element: number }>;
+        }>
+      >()
+      .default([])
+      .notNull(),
+    teamHDifficulty: integer('team_h_difficulty'),
+    teamADifficulty: integer('team_a_difficulty'),
+    pulseId: integer('pulse_id').notNull(),
+    ...timestamps,
   },
   (table) => [
     uniqueIndex('uq_event_fixtures').on(table.eventId, table.teamHId, table.teamAId),

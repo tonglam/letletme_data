@@ -15,26 +15,27 @@ import { logError, logInfo } from '../utils/logger';
  * - Data retrieval with fallbacks
  */
 
-// Get all events (with cache fallback)
+// Get all events (cache-first strategy: Redis → DB → update Redis)
 export async function getEvents(): Promise<Event[]> {
   try {
     logInfo('Getting all events');
 
     // 1. Try cache first (fast path)
-    const cached = await eventsCache.get();
+    const cached = await eventsCache.getAll();
     if (cached) {
-      logInfo('Events retrieved from cache', { count: Array.isArray(cached) ? cached.length : 0 });
-      // Cache returns simplified data, need to get full data from database
-      const dbEvents = await eventRepository.findAll();
-      return dbEvents;
+      logInfo('Events retrieved from cache', { count: cached.length });
+      return cached;
     }
 
-    // 2. Fallback to database (slower path)
+    // 2. Cache miss - fallback to database
+    logInfo('Cache miss - fetching from database');
     const dbEvents = await eventRepository.findAll();
 
-    // 3. Update cache for next time
+    // 3. Update cache for next time (async, don't block response)
     if (dbEvents.length > 0) {
-      await eventsCache.set(dbEvents);
+      eventsCache.set(dbEvents).catch((error) => {
+        logError('Failed to update events cache', error);
+      });
     }
 
     logInfo('Events retrieved from database', { count: dbEvents.length });
@@ -45,15 +46,36 @@ export async function getEvents(): Promise<Event[]> {
   }
 }
 
-// Get single event by ID
+// Get single event by ID (cache-first strategy: Redis → DB → update Redis)
 export async function getEvent(id: number): Promise<Event | null> {
   try {
     logInfo('Getting event by id', { id });
 
+    // 1. Try cache first (fast path)
+    const cached = await eventsCache.getById(id);
+    if (cached) {
+      logInfo('Event retrieved from cache', { id });
+      return cached;
+    }
+
+    // 2. Cache miss - fallback to database
+    logInfo('Cache miss - fetching from database', { id });
     const event = await eventRepository.findById(id);
 
     if (event) {
-      logInfo('Event found', { id });
+      // 3. Update cache for next time (async, don't block response)
+      eventsCache.getAll().then((allEvents) => {
+        if (!allEvents) {
+          // If full cache doesn't exist, fetch all and cache
+          eventRepository.findAll().then((dbEvents) => {
+            eventsCache.set(dbEvents).catch((error) => {
+              logError('Failed to update events cache', error);
+            });
+          });
+        }
+      });
+
+      logInfo('Event found in database', { id });
     } else {
       logInfo('Event not found', { id });
     }
@@ -65,15 +87,35 @@ export async function getEvent(id: number): Promise<Event | null> {
   }
 }
 
-// Get current event
+// Get current event (cache-first strategy: Redis → DB → update Redis)
 export async function getCurrentEvent(): Promise<Event | null> {
   try {
     logInfo('Getting current event');
 
+    // 1. Try cache first (fast path)
+    const cached = await eventsCache.getCurrent();
+    if (cached) {
+      logInfo('Current event retrieved from cache', { id: cached.id });
+      return cached;
+    }
+
+    // 2. Cache miss - fallback to database
+    logInfo('Cache miss - fetching from database');
     const event = await eventRepository.findCurrent();
 
     if (event) {
-      logInfo('Current event found', { id: event.id });
+      // 3. Update cache for next time (async, don't block response)
+      eventsCache.getAll().then((allEvents) => {
+        if (!allEvents) {
+          eventRepository.findAll().then((dbEvents) => {
+            eventsCache.set(dbEvents).catch((error) => {
+              logError('Failed to update events cache', error);
+            });
+          });
+        }
+      });
+
+      logInfo('Current event found in database', { id: event.id });
     } else {
       logInfo('No current event found');
     }
@@ -85,15 +127,35 @@ export async function getCurrentEvent(): Promise<Event | null> {
   }
 }
 
-// Get next event
+// Get next event (cache-first strategy: Redis → DB → update Redis)
 export async function getNextEvent(): Promise<Event | null> {
   try {
     logInfo('Getting next event');
 
+    // 1. Try cache first (fast path)
+    const cached = await eventsCache.getNext();
+    if (cached) {
+      logInfo('Next event retrieved from cache', { id: cached.id });
+      return cached;
+    }
+
+    // 2. Cache miss - fallback to database
+    logInfo('Cache miss - fetching from database');
     const event = await eventRepository.findNext();
 
     if (event) {
-      logInfo('Next event found', { id: event.id });
+      // 3. Update cache for next time (async, don't block response)
+      eventsCache.getAll().then((allEvents) => {
+        if (!allEvents) {
+          eventRepository.findAll().then((dbEvents) => {
+            eventsCache.set(dbEvents).catch((error) => {
+              logError('Failed to update events cache', error);
+            });
+          });
+        }
+      });
+
+      logInfo('Next event found in database', { id: event.id });
     } else {
       logInfo('No next event found');
     }
@@ -131,8 +193,8 @@ export async function syncEvents(): Promise<{ count: number; errors: number }> {
     const savedEvents = await eventRepository.upsertBatch(events);
     logInfo('Events upserted to database', { count: savedEvents.length });
 
-    // 4. Update cache with raw deadline_time data (matching Java pattern)
-    await eventsCache.setRaw(bootstrapData.events);
+    // 4. Update cache with full event objects
+    await eventsCache.set(savedEvents);
     logInfo('Events cache updated');
 
     const result = {

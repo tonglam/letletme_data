@@ -4,6 +4,7 @@ export type PlayerID = number;
 export type TeamID = number;
 export type EntryID = number;
 export type PhaseID = number;
+export type FixtureID = number;
 
 // Event types
 export interface Event {
@@ -57,6 +58,35 @@ export interface Phase {
   startEvent: number;
   stopEvent: number;
   highestScore: number | null;
+}
+
+// Fixture types
+export interface FixtureStat {
+  identifier: string;
+  a: Array<{ value: number; element: number }>;
+  h: Array<{ value: number; element: number }>;
+}
+
+export interface Fixture {
+  id: FixtureID;
+  code: number;
+  event: EventID | null;
+  finished: boolean;
+  finishedProvisional: boolean;
+  kickoffTime: Date | null;
+  minutes: number;
+  provisionalStartTime: boolean;
+  started: boolean | null;
+  teamA: TeamID;
+  teamAScore: number | null;
+  teamH: TeamID;
+  teamHScore: number | null;
+  stats: FixtureStat[];
+  teamHDifficulty: number | null;
+  teamADifficulty: number | null;
+  pulseId: number;
+  createdAt: Date | null;
+  updatedAt: Date | null;
 }
 
 // Raw FPL API Response types
@@ -129,6 +159,32 @@ export interface RawFPLPhase {
   highest_score: number | null;
 }
 
+export interface RawFPLFixtureStat {
+  identifier: string;
+  a: Array<{ value: number; element: number }>;
+  h: Array<{ value: number; element: number }>;
+}
+
+export interface RawFPLFixture {
+  code: number;
+  event: number | null;
+  finished: boolean;
+  finished_provisional: boolean;
+  id: number;
+  kickoff_time: string | null;
+  minutes: number;
+  provisional_start_time: boolean;
+  started: boolean | null;
+  team_a: number;
+  team_a_score: number | null;
+  team_h: number;
+  team_h_score: number | null;
+  stats: RawFPLFixtureStat[];
+  team_h_difficulty: number | null;
+  team_a_difficulty: number | null;
+  pulse_id: number;
+}
+
 export interface RawFPLElement {
   id: number;
   code: number;
@@ -184,6 +240,17 @@ export interface RawFPLElement {
   expected_assists: string;
   expected_goal_involvements: string;
   expected_goals_conceded: string;
+  // These fields are NOT available in bootstrap-static endpoint
+  // They may be available in other endpoints like /element-summary/
+  starts?: number;
+  influence_rank?: number;
+  influence_rank_type?: number;
+  creativity_rank?: number;
+  creativity_rank_type?: number;
+  threat_rank?: number;
+  threat_rank_type?: number;
+  ict_index_rank?: number;
+  ict_index_rank_type?: number;
 }
 
 // API Response types

@@ -15,24 +15,27 @@ import { logError, logInfo } from '../utils/logger';
  * - Data retrieval with fallbacks
  */
 
-// Get all phases (with cache fallback)
+// Get all phases (cache-first strategy: Redis → DB → update Redis)
 export async function getPhases(): Promise<Phase[]> {
   try {
     logInfo('Getting all phases');
 
     // 1. Try cache first (fast path)
-    const cached = await phasesCache.get();
+    const cached = await phasesCache.getAll();
     if (cached) {
-      logInfo('Phases retrieved from cache', { count: Array.isArray(cached) ? cached.length : 0 });
-      return cached as Phase[];
+      logInfo('Phases retrieved from cache', { count: cached.length });
+      return cached;
     }
 
-    // 2. Fallback to database (slower path)
+    // 2. Cache miss - fallback to database
+    logInfo('Cache miss - fetching from database');
     const dbPhases = await phaseRepository.findAll();
 
-    // 3. Update cache for next time
+    // 3. Update cache for next time (async, don't block response)
     if (dbPhases.length > 0) {
-      await phasesCache.set(dbPhases);
+      phasesCache.set(dbPhases).catch((error) => {
+        logError('Failed to update phases cache', error);
+      });
     }
 
     logInfo('Phases retrieved from database', { count: dbPhases.length });
@@ -43,15 +46,36 @@ export async function getPhases(): Promise<Phase[]> {
   }
 }
 
-// Get single phase by ID
+// Get single phase by ID (cache-first strategy: Redis → DB → update Redis)
 export async function getPhase(id: number): Promise<Phase | null> {
   try {
     logInfo('Getting phase by id', { id });
 
+    // 1. Try cache first (fast path)
+    const cached = await phasesCache.getById(id);
+    if (cached) {
+      logInfo('Phase retrieved from cache', { id, name: cached.name });
+      return cached;
+    }
+
+    // 2. Cache miss - fallback to database
+    logInfo('Cache miss - fetching from database', { id });
     const phase = await phaseRepository.findById(id);
 
     if (phase) {
-      logInfo('Phase found', { id, name: phase.name });
+      // 3. Update cache for next time (async, don't block response)
+      phasesCache.getAll().then((allPhases) => {
+        if (!allPhases) {
+          // If full cache doesn't exist, fetch all and cache
+          phaseRepository.findAll().then((dbPhases) => {
+            phasesCache.set(dbPhases).catch((error) => {
+              logError('Failed to update phases cache', error);
+            });
+          });
+        }
+      });
+
+      logInfo('Phase found in database', { id, name: phase.name });
     } else {
       logInfo('Phase not found', { id });
     }

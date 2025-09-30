@@ -1,4 +1,4 @@
-import { playerValuesCache } from '../cache/operations';
+import { playerValuesCache, teamsCache } from '../cache/operations';
 import { fplClient } from '../clients/fpl';
 import type { PlayerValue } from '../domain/player-values';
 import {
@@ -44,31 +44,40 @@ export async function getPlayerValues(): Promise<PlayerValue[]> {
   }
 }
 
-// Get player values by event ID
+// Get player values by event ID (no cache - event-based queries go to DB)
 export async function getPlayerValuesByEvent(eventId: EventId): Promise<PlayerValue[]> {
   try {
     logInfo('Getting player values by event', { eventId });
 
+    // Event-based queries don't use cache (player values are cached by date)
+    const dbPlayerValues = await playerValuesRepository.findByEventId(eventId);
+
+    logInfo('Player values retrieved from database', { eventId, count: dbPlayerValues.length });
+    return dbPlayerValues;
+  } catch (error) {
+    logError('Failed to get player values by event', error, { eventId });
+    throw error;
+  }
+}
+
+// Get player values by change date (cache-first strategy)
+export async function getPlayerValuesByDate(changeDate: string): Promise<PlayerValue[]> {
+  try {
+    logInfo('Getting player values by date', { changeDate });
+
     // 1. Try cache first (fast path)
-    const cached = await playerValuesCache.getByEvent(eventId);
+    const cached = await playerValuesCache.getByDate(changeDate);
     if (cached) {
-      logInfo('Player values retrieved from cache', { eventId, count: cached.length });
+      logInfo('Player values retrieved from cache', { changeDate, count: cached.length });
       return cached;
     }
 
-    // 2. Fallback to database (slower path)
-    const dbPlayerValues = await playerValuesRepository.findByEventId(eventId);
-    const playerValues = dbPlayerValues;
-
-    // 3. Update cache for next time
-    if (playerValues.length > 0) {
-      await playerValuesCache.setByEvent(eventId, playerValues);
-    }
-
-    logInfo('Player values retrieved from database', { eventId, count: playerValues.length });
-    return playerValues;
+    // 2. Cache miss - this shouldn't happen often since cache is populated during sync
+    // Return empty array (cache should be the source of truth for date-based queries)
+    logInfo('Cache miss for date-based query', { changeDate });
+    return [];
   } catch (error) {
-    logError('Failed to get player values by event', error, { eventId });
+    logError('Failed to get player values by date', error, { changeDate });
     throw error;
   }
 }
@@ -96,19 +105,7 @@ export async function getPlayerValuesByTeam(
   try {
     logInfo('Getting player values by team', { teamId, eventId });
 
-    // Use cache if event ID is provided
-    if (eventId) {
-      const cached = await playerValuesCache.getByTeam(eventId, teamId);
-      if (cached) {
-        logInfo('Player values retrieved from cache by team', {
-          teamId,
-          eventId,
-          count: cached.length,
-        });
-        return cached;
-      }
-    }
-
+    // No cache for filtered queries (date-based cache only)
     const dbPlayerValues = await playerValuesRepository.findByTeamId(teamId, eventId);
 
     logInfo('Player values retrieved by team', { teamId, eventId, count: dbPlayerValues.length });
@@ -127,19 +124,7 @@ export async function getPlayerValuesByPosition(
   try {
     logInfo('Getting player values by position', { elementType, eventId });
 
-    // Use cache if event ID is provided
-    if (eventId) {
-      const cached = await playerValuesCache.getByPosition(eventId, elementType);
-      if (cached) {
-        logInfo('Player values retrieved from cache by position', {
-          elementType,
-          eventId,
-          count: cached.length,
-        });
-        return cached;
-      }
-    }
-
+    // No cache for filtered queries (date-based cache only)
     const dbPlayerValues = await playerValuesRepository.findByPosition(elementType, eventId);
 
     logInfo('Player values retrieved by position', {
@@ -162,19 +147,7 @@ export async function getPlayerValuesByChangeType(
   try {
     logInfo('Getting player values by change type', { changeType, eventId });
 
-    // Use cache if event ID is provided
-    if (eventId) {
-      const cached = await playerValuesCache.getByChangeType(eventId, changeType);
-      if (cached) {
-        logInfo('Player values retrieved from cache by change type', {
-          changeType,
-          eventId,
-          count: cached.length,
-        });
-        return cached;
-      }
-    }
-
+    // No cache for filtered queries (date-based cache only)
     const dbPlayerValues = await playerValuesRepository.findByChangeType(changeType, eventId);
 
     logInfo('Player values retrieved by change type', {
@@ -197,20 +170,8 @@ export async function getPlayerValue(
   try {
     logInfo('Getting specific player value', { eventId, playerId });
 
-    // 1. Try cache first
-    const cached = await playerValuesCache.getPlayerValue(eventId, playerId);
-    if (cached) {
-      logInfo('Player value retrieved from cache', { eventId, playerId });
-      return cached;
-    }
-
-    // 2. Fallback to database
+    // No cache for individual queries (date-based cache only)
     const dbPlayerValue = await playerValuesRepository.findByEventAndPlayer(eventId, playerId);
-
-    // 3. Update cache if found
-    if (dbPlayerValue) {
-      await playerValuesCache.setPlayerValue(dbPlayerValue);
-    }
 
     logInfo('Player value retrieved from database', { eventId, playerId, found: !!dbPlayerValue });
     return dbPlayerValue;
@@ -320,15 +281,19 @@ export async function syncCurrentPlayerValues(): Promise<{ count: number }> {
     const todaysRecords = await playerValuesRepository.findByChangeDate(changeDate);
     const todaysPlayerIds = new Set(todaysRecords.map((pv) => pv.elementId));
 
-    // 6. Get teams for transformation
-    const teams = await teamRepository.findAll();
-    const teamsMap = createTeamsMap(
-      teams.map((team) => ({
-        id: team.id,
-        name: team.name,
-        shortName: team.shortName,
-      })),
-    );
+    // 6. Get teams map (try cache first, fallback to DB)
+    let teamsMap = await teamsCache.getTeamsMap();
+    if (!teamsMap) {
+      logInfo('Teams map cache miss, fetching from database');
+      const teams = await teamRepository.findAll();
+      teamsMap = createTeamsMap(
+        teams.map((team) => ({
+          id: team.id,
+          name: team.name,
+          shortName: team.shortName,
+        })),
+      );
+    }
 
     // 7. Filter and transform only players with price changes
     const playersWithChanges = bootstrapData.elements.filter((player) => {
@@ -362,13 +327,10 @@ export async function syncCurrentPlayerValues(): Promise<{ count: number }> {
     // 9. Insert new records (not upsert since we filtered duplicates)
     const result = await playerValuesRepository.insertBatch(playerValues);
 
-    // 10. Update cache only if there are changes worth caching
+    // 10. Update cache with all changes for the date
     if (result.count > 0) {
-      const hasSignificantChanges = playerValues.some((pv) => pv.changeType !== 'Start');
-      if (hasSignificantChanges) {
-        await playerValuesCache.setDailyChanges(changeDate, playerValues);
-        logInfo('Player values cache updated for date', { changeDate, count: result.count });
-      }
+      await playerValuesCache.setByDate(changeDate, playerValues);
+      logInfo('Player values cache updated for date', { changeDate, count: result.count });
     }
 
     logInfo('Daily player values sync completed', {
@@ -394,15 +356,19 @@ export async function syncPlayerValuesForEvent(eventId: EventId): Promise<{ coun
     // 1. Fetch data from FPL API
     const bootstrapData = await fplClient.getBootstrap();
 
-    // 2. Get teams for transformation
-    const teams = await teamRepository.findAll();
-    const teamsMap = createTeamsMap(
-      teams.map((team) => ({
-        id: team.id,
-        name: team.name,
-        shortName: team.shortName,
-      })),
-    );
+    // 2. Get teams map (try cache first, fallback to DB)
+    let teamsMap = await teamsCache.getTeamsMap();
+    if (!teamsMap) {
+      logInfo('Teams map cache miss, fetching from database');
+      const teams = await teamRepository.findAll();
+      teamsMap = createTeamsMap(
+        teams.map((team) => ({
+          id: team.id,
+          name: team.name,
+          shortName: team.shortName,
+        })),
+      );
+    }
 
     // 3. Get previous values from database for comparison
     const previousPlayerValues = await playerValuesRepository.findByEventId(eventId - 1);
@@ -423,8 +389,12 @@ export async function syncPlayerValuesForEvent(eventId: EventId): Promise<{ coun
     // 5. Upsert to database
     const result = await playerValuesRepository.upsertBatch(playerValues);
 
-    // 6. Update cache
-    await playerValuesCache.setByEvent(eventId, playerValues);
+    // 6. Update cache (by changeDate, not eventId)
+    if (playerValues.length > 0) {
+      const changeDate = playerValues[0].changeDate;
+      await playerValuesCache.setByDate(changeDate, playerValues);
+      logInfo('Player values cache updated for date', { changeDate, count: result.count });
+    }
 
     logInfo('Player values sync for event completed', { eventId, count: result.count });
 
@@ -444,7 +414,7 @@ export async function deletePlayerValuesByEvent(eventId: EventId): Promise<void>
     await playerValuesRepository.deleteByEventId(eventId);
 
     // 2. Clear from cache
-    await playerValuesCache.clearByEvent(eventId);
+    // Cache is date-based, no event-specific clearing needed
 
     logInfo('Player values deleted by event', { eventId });
   } catch (error) {
@@ -458,14 +428,7 @@ export async function getLatestPlayerValuesEventId(): Promise<EventId | null> {
   try {
     logInfo('Getting latest player values event ID');
 
-    // 1. Try cache first
-    const cachedEventId = await playerValuesCache.getLatestEventId();
-    if (cachedEventId) {
-      logInfo('Latest event ID retrieved from cache', { eventId: cachedEventId });
-      return cachedEventId;
-    }
-
-    // 2. Fallback to database
+    // Get latest event directly from database (no cache for this metadata)
     const dbEventId = await playerValuesRepository.getLatestEventId();
 
     logInfo('Latest event ID retrieved from database', { eventId: dbEventId });

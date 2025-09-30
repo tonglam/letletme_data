@@ -47,13 +47,6 @@ export interface PlayerStat {
   readonly threatRankType: number | null;
   readonly ictIndexRank: number | null;
   readonly ictIndexRankType: number | null;
-  readonly mngWin: number | null;
-  readonly mngDraw: number | null;
-  readonly mngLoss: number | null;
-  readonly mngUnderdogWin: number | null;
-  readonly mngUnderdogDraw: number | null;
-  readonly mngCleanSheets: number | null;
-  readonly mngGoalsScored: number | null;
 }
 
 export type PlayerStats = readonly PlayerStat[];
@@ -120,13 +113,6 @@ export const PlayerStatSchema = z.object({
   threatRankType: z.number().int().positive('Threat rank type must be positive').nullable(),
   ictIndexRank: z.number().int().positive('ICT index rank must be positive').nullable(),
   ictIndexRankType: z.number().int().positive('ICT index rank type must be positive').nullable(),
-  mngWin: z.number().int().min(0, 'Manager win cannot be negative').nullable(),
-  mngDraw: z.number().int().min(0, 'Manager draw cannot be negative').nullable(),
-  mngLoss: z.number().int().min(0, 'Manager loss cannot be negative').nullable(),
-  mngUnderdogWin: z.number().int().min(0, 'Manager underdog win cannot be negative').nullable(),
-  mngUnderdogDraw: z.number().int().min(0, 'Manager underdog draw cannot be negative').nullable(),
-  mngCleanSheets: z.number().int().min(0, 'Manager clean sheets cannot be negative').nullable(),
-  mngGoalsScored: z.number().int().min(0, 'Manager goals scored cannot be negative').nullable(),
 });
 
 export const RawPlayerStatSchema = PlayerStatSchema.omit({

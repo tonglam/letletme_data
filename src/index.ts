@@ -3,6 +3,7 @@ import { Elysia } from 'elysia';
 
 // Import API route groups
 import { eventsAPI } from './api/events.api';
+import { fixturesAPI } from './api/fixtures.api';
 import { jobsAPI } from './api/jobs.api';
 import { phasesAPI } from './api/phases.api';
 import { playerStatsAPI } from './api/player-stats.api';
@@ -23,7 +24,7 @@ import { logError, logInfo } from './utils/logger';
  * Letletme Data API - Elysia Application
  *
  * A unified Elysia application that provides:
- * - HTTP API endpoints for FPL data (events, teams, players, player stats, phases)
+ * - HTTP API endpoints for FPL data (events, fixtures, teams, players, player stats, phases)
  * - Scheduled cron jobs for data synchronization
  * - Manual job triggers via HTTP API
  * - Structured logging and error handling
@@ -86,6 +87,7 @@ const app = new Elysia()
   // ================================
 
   .use(eventsAPI)
+  .use(fixturesAPI)
   .use(teamsAPI)
   .use(playersAPI)
   .use(playerStatsAPI)
@@ -111,7 +113,16 @@ const app = new Elysia()
 logInfo('🚀 Elysia server started', {
   port: 3000,
   environment: process.env.NODE_ENV || 'development',
-  apis: ['events', 'teams', 'players', 'player-stats', 'player-values', 'phases', 'jobs'],
+  apis: [
+    'events',
+    'fixtures',
+    'teams',
+    'players',
+    'player-stats',
+    'player-values',
+    'phases',
+    'jobs',
+  ],
   jobs: ['data-sync', 'live-scores', 'maintenance'],
 });
 

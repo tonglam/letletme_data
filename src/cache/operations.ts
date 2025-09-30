@@ -5,7 +5,7 @@ import { CACHE_TTL, DEFAULT_CACHE_CONFIG, redisSingleton } from './singleton';
 
 import type { PlayerStat } from '../domain/player-stats';
 import type { PlayerValue } from '../domain/player-values';
-import type { Event, Phase, Player, RawFPLEvent, Team } from '../types';
+import type { Event, Fixture, Phase, Player, Team } from '../types';
 import type { ElementTypeId, EventId, PlayerId, TeamId, ValueChangeType } from '../types/base.type';
 
 export class CacheOperations {
@@ -149,25 +149,106 @@ interface TeamCacheData {
 
 // Domain-specific cache operations following Entity::season::field pattern
 export const eventsCache = {
-  async get(): Promise<EventCacheData[] | null> {
+  // Get all events (full objects from hash)
+  async getAll(): Promise<Event[] | null> {
     try {
       const redis = await redisSingleton.getClient();
       const key = `Event:${getCurrentSeason()}`;
-
       const hash = await redis.hgetall(key);
-      if (!hash || Object.keys(hash).length === 0) return null;
 
-      // Convert hash back to event objects with deadline times
-      const events = [];
-      for (const [eventId, deadlineTime] of Object.entries(hash)) {
-        events.push({
-          id: parseInt(eventId),
-          deadlineTime: deadlineTime,
-        });
+      if (!hash || Object.keys(hash).length === 0) {
+        logDebug('Events cache miss (all)');
+        return null;
       }
 
-      // Sort events by ID
+      // Parse all event objects from hash
+      const events = Object.values(hash).map((value) => JSON.parse(value) as Event);
       events.sort((a, b) => a.id - b.id);
+
+      logDebug('Events cache hit (all)', { count: events.length });
+      return events;
+    } catch (error) {
+      logError('Events cache get all error', error);
+      return null;
+    }
+  },
+
+  // Get single event by ID from hash
+  async getById(id: number): Promise<Event | null> {
+    try {
+      const redis = await redisSingleton.getClient();
+      const key = `Event:${getCurrentSeason()}`;
+      const cached = await redis.hget(key, id.toString());
+
+      if (!cached) {
+        logDebug('Event cache miss', { id });
+        return null;
+      }
+
+      const event = JSON.parse(cached) as Event;
+      logDebug('Event cache hit', { id });
+      return event;
+    } catch (error) {
+      logError('Event cache get by id error', error, { id });
+      return null;
+    }
+  },
+
+  // Get current event (filter from all events in memory - fast for 38 events)
+  async getCurrent(): Promise<Event | null> {
+    try {
+      const allEvents = await eventsCache.getAll();
+      if (!allEvents) {
+        logDebug('Current event cache miss');
+        return null;
+      }
+
+      const currentEvent = allEvents.find((e) => e.isCurrent);
+      if (currentEvent) {
+        logDebug('Current event cache hit', { id: currentEvent.id });
+      }
+      return currentEvent || null;
+    } catch (error) {
+      logError('Current event cache get error', error);
+      return null;
+    }
+  },
+
+  // Get next event (filter from all events in memory - fast for 38 events)
+  async getNext(): Promise<Event | null> {
+    try {
+      const allEvents = await eventsCache.getAll();
+      if (!allEvents) {
+        logDebug('Next event cache miss');
+        return null;
+      }
+
+      const nextEvent = allEvents.find((e) => e.isNext);
+      if (nextEvent) {
+        logDebug('Next event cache hit', { id: nextEvent.id });
+      }
+      return nextEvent || null;
+    } catch (error) {
+      logError('Next event cache get error', error);
+      return null;
+    }
+  },
+
+  // Legacy method for backward compatibility (deadline times only)
+  async get(): Promise<EventCacheData[] | null> {
+    try {
+      const allEvents = await eventsCache.getAll();
+      if (!allEvents) return null;
+
+      // Convert to legacy format (just id and deadlineTime)
+      const events = allEvents.map((event) => ({
+        id: event.id,
+        deadlineTime:
+          event.deadlineTime instanceof Date
+            ? event.deadlineTime.toISOString()
+            : event.deadlineTime || '',
+      }));
+
       return events;
     } catch (error) {
       logError('Events cache get error', error);
@@ -175,63 +256,33 @@ export const eventsCache = {
     }
   },
 
+  // Store all events in a single hash (no duplication!)
   async set(events: Event[]): Promise<void> {
     try {
       const redis = await redisSingleton.getClient();
+      const season = getCurrentSeason();
+      const key = `Event:${season}`;
 
-      // Event:season -> {eventId: deadlineTime} (matching Java pattern)
-      const eventKey = `Event:${getCurrentSeason()}`;
-      await redis.del(eventKey);
+      // Use pipeline for atomic operation
+      const pipeline = redis.pipeline();
+
+      // Clear existing hash
+      pipeline.del(key);
 
       if (events.length > 0) {
+        // Store each event as a hash field (event ID -> full event JSON)
         const eventFields: Record<string, string> = {};
         for (const event of events) {
-          // Store only deadline time, not full object (matching Java: o.getDeadlineTime())
-          const deadlineTime =
-            event.deadlineTime instanceof Date
-              ? event.deadlineTime.toISOString()
-              : event.deadlineTime || '';
-          eventFields[event.id.toString()] = deadlineTime;
+          eventFields[event.id.toString()] = JSON.stringify(event);
         }
-        await redis.hset(eventKey, eventFields);
+        pipeline.hset(key, eventFields);
+        pipeline.expire(key, CACHE_TTL.EVENTS);
       }
 
-      // Set expiration
-      await redis.expire(eventKey, CACHE_TTL.EVENTS);
-
-      logDebug('Events cache updated', { eventKey, count: events.length });
+      await pipeline.exec();
+      logDebug('Events cache updated (hash)', { count: events.length, season });
     } catch (error) {
       logError('Events cache set error', error);
-      throw error;
-    }
-  },
-
-  async setRaw(rawEvents: RawFPLEvent[]): Promise<void> {
-    try {
-      const redis = await redisSingleton.getClient();
-
-      // Event:season -> {eventId: deadline_time} (raw API data matching Java pattern)
-      const eventKey = `Event:${getCurrentSeason()}`;
-      await redis.del(eventKey);
-
-      if (rawEvents.length > 0) {
-        const eventFields: Record<string, string> = {};
-        for (const rawEvent of rawEvents) {
-          // Store raw deadline_time string directly from API (matching Java: o.getDeadlineTime())
-          eventFields[rawEvent.id.toString()] = rawEvent.deadline_time || '';
-        }
-        await redis.hset(eventKey, eventFields);
-      }
-
-      // Set expiration
-      await redis.expire(eventKey, CACHE_TTL.EVENTS);
-
-      logDebug('Events cache updated with raw deadline_time', {
-        eventKey,
-        count: rawEvents.length,
-      });
-    } catch (error) {
-      logError('Events cache setRaw error', error);
       throw error;
     }
   },
@@ -239,9 +290,9 @@ export const eventsCache = {
   async clear(): Promise<void> {
     try {
       const redis = await redisSingleton.getClient();
-      const eventKey = `Event:${getCurrentSeason()}`;
-      await redis.del(eventKey);
-      logDebug('Events cache cleared', { eventKey });
+      const key = `Event:${getCurrentSeason()}`;
+      await redis.del(key);
+      logDebug('Events cache cleared', { key });
     } catch (error) {
       logError('Events cache clear error', error);
       throw error;
@@ -250,32 +301,94 @@ export const eventsCache = {
 };
 
 export const teamsCache = {
-  async get(): Promise<TeamCacheData[] | null> {
+  // Get all teams (full objects from hash)
+  async getAll(): Promise<Team[] | null> {
     try {
       const redis = await redisSingleton.getClient();
-      const season = getCurrentSeason();
-      const nameKey = `Team:${season}:name`;
-      const shortNameKey = `Team:${season}:shortName`;
+      const key = `Team:${getCurrentSeason()}`;
+      const hash = await redis.hgetall(key);
 
-      // Get team names and short names from both hashes
-      const nameHash = await redis.hgetall(nameKey);
-      const shortNameHash = await redis.hgetall(shortNameKey);
+      if (!hash || Object.keys(hash).length === 0) {
+        logDebug('Teams cache miss (all)');
+        return null;
+      }
 
-      if (!nameHash || Object.keys(nameHash).length === 0) return null;
+      // Parse all team objects from hash
+      const teams = Object.values(hash).map((value) => JSON.parse(value) as Team);
+      teams.sort((a, b) => a.id - b.id);
 
-      // Reconstruct team objects from the two hashes
-      const teams = [];
-      for (const [teamId, name] of Object.entries(nameHash)) {
-        const shortName = shortNameHash[teamId] || '';
-        teams.push({
-          id: parseInt(teamId),
-          name: name,
-          shortName: shortName,
+      logDebug('Teams cache hit (all)', { count: teams.length });
+      return teams;
+    } catch (error) {
+      logError('Teams cache get all error', error);
+      return null;
+    }
+  },
+
+  // Get single team by ID from hash
+  async getById(id: number): Promise<Team | null> {
+    try {
+      const redis = await redisSingleton.getClient();
+      const key = `Team:${getCurrentSeason()}`;
+      const cached = await redis.hget(key, id.toString());
+
+      if (!cached) {
+        logDebug('Team cache miss', { id });
+        return null;
+      }
+
+      const team = JSON.parse(cached) as Team;
+      logDebug('Team cache hit', { id });
+      return team;
+    } catch (error) {
+      logError('Team cache get by id error', error, { id });
+      return null;
+    }
+  },
+
+  // Get teams map for transformers (hot path: frequently used in player-stats/values sync)
+  async getTeamsMap(): Promise<Map<number, { name: string; shortName: string }> | null> {
+    try {
+      const redis = await redisSingleton.getClient();
+      const key = `Team:${getCurrentSeason()}`;
+      const hash = await redis.hgetall(key);
+
+      if (!hash || Object.keys(hash).length === 0) {
+        logDebug('Teams map cache miss');
+        return null;
+      }
+
+      // Build map efficiently - only parse needed fields
+      const teamsMap = new Map<number, { name: string; shortName: string }>();
+      for (const [teamId, teamJson] of Object.entries(hash)) {
+        const team = JSON.parse(teamJson) as Team;
+        teamsMap.set(team.id, {
+          name: team.name,
+          shortName: team.shortName,
         });
       }
 
-      // Sort teams by ID
-      teams.sort((a, b) => a.id - b.id);
+      logDebug('Teams map cache hit', { count: teamsMap.size });
+      return teamsMap;
+    } catch (error) {
+      logError('Teams map cache get error', error);
+      return null;
+    }
+  },
+
+  // Legacy method for backward compatibility
+  async get(): Promise<TeamCacheData[] | null> {
+    try {
+      const allTeams = await teamsCache.getAll();
+      if (!allTeams) return null;
+
+      // Convert to legacy format (just id, name, shortName)
+      const teams = allTeams.map((team) => ({
+        id: team.id,
+        name: team.name,
+        shortName: team.shortName,
+      }));
+
       return teams;
     } catch (error) {
       logError('Teams cache get error', error);
@@ -283,38 +396,31 @@ export const teamsCache = {
     }
   },
 
+  // Store all teams in a single hash (efficient batch operation)
   async set(teams: Team[]): Promise<void> {
     try {
       const redis = await redisSingleton.getClient();
-
-      // Following Java pattern: Team:season:name and Team:season:shortName
       const season = getCurrentSeason();
-      const nameKey = `Team:${season}:name`;
-      const shortNameKey = `Team:${season}:shortName`;
+      const key = `Team:${season}`;
 
-      // Clear existing data
-      await redis.del(nameKey, shortNameKey);
+      // Use pipeline for atomic operation
+      const pipeline = redis.pipeline();
+
+      // Clear existing hash
+      pipeline.del(key);
 
       if (teams.length > 0) {
-        // Prepare name and shortName hashes
-        const nameFields: Record<string, string> = {};
-        const shortNameFields: Record<string, string> = {};
-
+        // Store each team as a hash field (team ID -> full team JSON)
+        const teamFields: Record<string, string> = {};
         for (const team of teams) {
-          nameFields[team.id.toString()] = team.name || '';
-          shortNameFields[team.id.toString()] = team.shortName || '';
+          teamFields[team.id.toString()] = JSON.stringify(team);
         }
-
-        // Set both hashes
-        await redis.hset(nameKey, nameFields);
-        await redis.hset(shortNameKey, shortNameFields);
-
-        // Set expiration on both keys
-        await redis.expire(nameKey, CACHE_TTL.TEAMS);
-        await redis.expire(shortNameKey, CACHE_TTL.TEAMS);
+        pipeline.hset(key, teamFields);
+        pipeline.expire(key, CACHE_TTL.TEAMS);
       }
 
-      logDebug('Teams cache updated', { nameKey, shortNameKey, count: teams.length });
+      await pipeline.exec();
+      logDebug('Teams cache updated (hash)', { count: teams.length, season });
     } catch (error) {
       logError('Teams cache set error', error);
       throw error;
@@ -324,12 +430,9 @@ export const teamsCache = {
   async clear(): Promise<void> {
     try {
       const redis = await redisSingleton.getClient();
-      const season = getCurrentSeason();
-      const nameKey = `Team:${season}:name`;
-      const shortNameKey = `Team:${season}:shortName`;
-
-      await redis.del(nameKey, shortNameKey);
-      logDebug('Teams cache cleared', { nameKey, shortNameKey });
+      const key = `Team:${getCurrentSeason()}`;
+      await redis.del(key);
+      logDebug('Teams cache cleared', { key });
     } catch (error) {
       logError('Teams cache clear error', error);
       throw error;
@@ -338,49 +441,81 @@ export const teamsCache = {
 };
 
 export const phasesCache = {
-  async get(): Promise<Phase[] | null> {
+  // Get all phases (full objects from hash)
+  async getAll(): Promise<Phase[] | null> {
     try {
       const redis = await redisSingleton.getClient();
       const key = `Phase:${getCurrentSeason()}`;
+      const hash = await redis.hgetall(key);
 
-      const phaseIds = await redis.hkeys(key);
-      if (phaseIds.length === 0) return null;
-
-      const phases = [];
-      for (const id of phaseIds) {
-        const phaseData = await redis.hget(key, id);
-        if (phaseData) {
-          phases.push(JSON.parse(phaseData));
-        }
+      if (!hash || Object.keys(hash).length === 0) {
+        logDebug('Phases cache miss (all)');
+        return null;
       }
 
-      // Sort phases by ID to ensure consistent ordering
+      // Parse all phase objects from hash
+      const phases = Object.values(hash).map((value) => JSON.parse(value) as Phase);
       phases.sort((a, b) => a.id - b.id);
 
-      return phases.length > 0 ? phases : null;
+      logDebug('Phases cache hit (all)', { count: phases.length });
+      return phases;
     } catch (error) {
-      logError('Phases cache get error', error);
+      logError('Phases cache get all error', error);
       return null;
     }
   },
 
+  // Get single phase by ID from hash
+  async getById(id: number): Promise<Phase | null> {
+    try {
+      const redis = await redisSingleton.getClient();
+      const key = `Phase:${getCurrentSeason()}`;
+      const cached = await redis.hget(key, id.toString());
+
+      if (!cached) {
+        logDebug('Phase cache miss', { id });
+        return null;
+      }
+
+      const phase = JSON.parse(cached) as Phase;
+      logDebug('Phase cache hit', { id });
+      return phase;
+    } catch (error) {
+      logError('Phase cache get by id error', error, { id });
+      return null;
+    }
+  },
+
+  // Legacy method for backward compatibility
+  async get(): Promise<Phase[] | null> {
+    return phasesCache.getAll();
+  },
+
+  // Store all phases in a single hash (efficient batch operation)
   async set(phases: Phase[]): Promise<void> {
     try {
       const redis = await redisSingleton.getClient();
+      const season = getCurrentSeason();
+      const key = `Phase:${season}`;
 
-      // Phase:season - Full phase objects
-      const phaseKey = `Phase:${getCurrentSeason()}`;
-      await redis.del(phaseKey);
+      // Use pipeline for atomic operation
+      const pipeline = redis.pipeline();
 
-      for (const phase of phases) {
-        // Store full phase object
-        await redis.hset(phaseKey, phase.id.toString(), JSON.stringify(phase));
+      // Clear existing hash
+      pipeline.del(key);
+
+      if (phases.length > 0) {
+        // Store each phase as a hash field (phase ID -> full phase JSON)
+        const phaseFields: Record<string, string> = {};
+        for (const phase of phases) {
+          phaseFields[phase.id.toString()] = JSON.stringify(phase);
+        }
+        pipeline.hset(key, phaseFields);
+        pipeline.expire(key, CACHE_TTL.PHASES);
       }
 
-      // Set expiration
-      await redis.expire(phaseKey, CACHE_TTL.PHASES);
-
-      logDebug('Phases cache updated', { phaseKey, count: phases.length });
+      await pipeline.exec();
+      logDebug('Phases cache updated (hash)', { count: phases.length, season });
     } catch (error) {
       logError('Phases cache set error', error);
       throw error;
@@ -395,6 +530,249 @@ export const phasesCache = {
       logDebug('Phases cache cleared', { phaseKey });
     } catch (error) {
       logError('Phases cache clear error', error);
+      throw error;
+    }
+  },
+};
+
+export const fixturesCache = {
+  // Get all fixtures (aggregate from all event keys including unscheduled)
+  async getAll(): Promise<Fixture[] | null> {
+    try {
+      const redis = await redisSingleton.getClient();
+      const season = getCurrentSeason();
+      const pattern = `Fixtures:${season}:*`;
+      const keys = await redis.keys(pattern);
+
+      if (keys.length === 0) {
+        logDebug('Fixtures cache miss (all)');
+        return null;
+      }
+
+      const allFixtures: Fixture[] = [];
+      for (const key of keys) {
+        const hash = await redis.hgetall(key);
+        if (hash && Object.keys(hash).length > 0) {
+          const fixtures = Object.values(hash).map((value) => JSON.parse(value) as Fixture);
+          allFixtures.push(...fixtures);
+        }
+      }
+
+      if (allFixtures.length === 0) {
+        logDebug('Fixtures cache miss (all)');
+        return null;
+      }
+
+      allFixtures.sort((a, b) => a.id - b.id);
+      logDebug('Fixtures cache hit (all)', {
+        count: allFixtures.length,
+        keys: keys.length,
+      });
+      return allFixtures;
+    } catch (error) {
+      logError('Fixtures cache get all error', error);
+      return null;
+    }
+  },
+
+  // Get single fixture by ID (search across event keys)
+  async getById(id: number): Promise<Fixture | null> {
+    try {
+      const redis = await redisSingleton.getClient();
+      const season = getCurrentSeason();
+      const pattern = `Fixtures:${season}:*`;
+      const keys = await redis.keys(pattern);
+
+      for (const key of keys) {
+        const cached = await redis.hget(key, id.toString());
+        if (cached) {
+          const fixture = JSON.parse(cached) as Fixture;
+          logDebug('Fixture cache hit', { id });
+          return fixture;
+        }
+      }
+
+      logDebug('Fixture cache miss', { id });
+      return null;
+    } catch (error) {
+      logError('Fixture cache get by id error', error, { id });
+      return null;
+    }
+  },
+
+  // Get fixtures by event (direct hash lookup)
+  async getByEvent(eventId: number): Promise<Fixture[] | null> {
+    try {
+      const redis = await redisSingleton.getClient();
+      const season = getCurrentSeason();
+      const key = `Fixtures:${season}:${eventId}`;
+      const hash = await redis.hgetall(key);
+
+      if (!hash || Object.keys(hash).length === 0) {
+        logDebug('Fixtures by event cache miss', { eventId });
+        return null;
+      }
+
+      const fixtures = Object.values(hash).map((value) => JSON.parse(value) as Fixture);
+      fixtures.sort((a, b) => a.id - b.id);
+
+      logDebug('Fixtures by event cache hit', { eventId, count: fixtures.length });
+      return fixtures;
+    } catch (error) {
+      logError('Fixtures by event cache get error', error, { eventId });
+      return null;
+    }
+  },
+
+  // Get fixtures by team (search across all event keys)
+  async getByTeam(teamId: number): Promise<Fixture[] | null> {
+    try {
+      const allFixtures = await fixturesCache.getAll();
+      if (!allFixtures) {
+        logDebug('Fixtures by team cache miss', { teamId });
+        return null;
+      }
+
+      const teamFixtures = allFixtures.filter((f) => f.teamA === teamId || f.teamH === teamId);
+      if (teamFixtures.length > 0) {
+        logDebug('Fixtures by team cache hit', { teamId, count: teamFixtures.length });
+      }
+      return teamFixtures.length > 0 ? teamFixtures : null;
+    } catch (error) {
+      logError('Fixtures by team cache get error', error, { teamId });
+      return null;
+    }
+  },
+
+  // Store fixtures by event (event-specific hash)
+  async setByEvent(eventId: number, fixtures: Fixture[]): Promise<void> {
+    try {
+      const redis = await redisSingleton.getClient();
+      const season = getCurrentSeason();
+      const key = `Fixtures:${season}:${eventId}`;
+
+      // Use pipeline for atomic operation
+      const pipeline = redis.pipeline();
+
+      // Clear existing hash for this event
+      pipeline.del(key);
+
+      if (fixtures.length > 0) {
+        // Store each fixture as a hash field (fixture ID -> full fixture JSON)
+        const fixtureFields: Record<string, string> = {};
+        for (const fixture of fixtures) {
+          fixtureFields[fixture.id.toString()] = JSON.stringify(fixture);
+        }
+        pipeline.hset(key, fixtureFields);
+        pipeline.expire(key, CACHE_TTL.EVENTS);
+      }
+
+      await pipeline.exec();
+      logDebug('Fixtures cache updated by event', { eventId, count: fixtures.length, season });
+    } catch (error) {
+      logError('Fixtures cache set by event error', error, { eventId });
+      throw error;
+    }
+  },
+
+  // Store all fixtures (group by event)
+  async set(fixtures: Fixture[]): Promise<void> {
+    try {
+      const redis = await redisSingleton.getClient();
+      const season = getCurrentSeason();
+
+      // Group fixtures by event (including unscheduled)
+      const fixturesByEvent = new Map<number | string, Fixture[]>();
+      const unscheduledFixtures: Fixture[] = [];
+
+      for (const fixture of fixtures) {
+        if (!fixture.event) {
+          unscheduledFixtures.push(fixture);
+        } else {
+          if (!fixturesByEvent.has(fixture.event)) {
+            fixturesByEvent.set(fixture.event, []);
+          }
+          fixturesByEvent.get(fixture.event)!.push(fixture);
+        }
+      }
+
+      // Use pipeline for batch operation
+      const pipeline = redis.pipeline();
+
+      // Clear all existing fixture keys for this season
+      const pattern = `Fixtures:${season}:*`;
+      const existingKeys = await redis.keys(pattern);
+      if (existingKeys.length > 0) {
+        for (const key of existingKeys) {
+          pipeline.del(key);
+        }
+      }
+
+      // Set fixtures for each event
+      for (const [eventId, eventFixtures] of fixturesByEvent) {
+        const key = `Fixtures:${season}:${eventId}`;
+        const fixtureFields: Record<string, string> = {};
+        for (const fixture of eventFixtures) {
+          fixtureFields[fixture.id.toString()] = JSON.stringify(fixture);
+        }
+        pipeline.hset(key, fixtureFields);
+        pipeline.expire(key, CACHE_TTL.EVENTS);
+      }
+
+      // Store unscheduled fixtures separately
+      if (unscheduledFixtures.length > 0) {
+        const key = `Fixtures:${season}:unscheduled`;
+        const fixtureFields: Record<string, string> = {};
+        for (const fixture of unscheduledFixtures) {
+          fixtureFields[fixture.id.toString()] = JSON.stringify(fixture);
+        }
+        pipeline.hset(key, fixtureFields);
+        pipeline.expire(key, CACHE_TTL.EVENTS);
+      }
+
+      await pipeline.exec();
+      logDebug('Fixtures cache updated (all events)', {
+        count: fixtures.length,
+        scheduled: fixtures.length - unscheduledFixtures.length,
+        unscheduled: unscheduledFixtures.length,
+        events: fixturesByEvent.size,
+        season,
+      });
+    } catch (error) {
+      logError('Fixtures cache set error', error);
+      throw error;
+    }
+  },
+
+  // Clear all fixtures cache for season
+  async clear(): Promise<void> {
+    try {
+      const redis = await redisSingleton.getClient();
+      const season = getCurrentSeason();
+      const pattern = `Fixtures:${season}:*`;
+      const keys = await redis.keys(pattern);
+
+      if (keys.length > 0) {
+        await redis.del(...keys);
+      }
+
+      logDebug('Fixtures cache cleared', { season, keysCleared: keys.length });
+    } catch (error) {
+      logError('Fixtures cache clear error', error);
+      throw error;
+    }
+  },
+
+  // Clear fixtures cache for specific event
+  async clearByEvent(eventId: number): Promise<void> {
+    try {
+      const redis = await redisSingleton.getClient();
+      const season = getCurrentSeason();
+      const key = `Fixtures:${season}:${eventId}`;
+      await redis.del(key);
+      logDebug('Fixtures cache cleared by event', { eventId, season });
+    } catch (error) {
+      logError('Fixtures cache clear by event error', error, { eventId });
       throw error;
     }
   },
@@ -997,23 +1375,24 @@ export const playerStatsCache = {
 // ================================
 
 /**
- * Player Values Hash Cache - for player value change tracking
+ * Player Values Hash Cache - for player value change tracking by date
+ * Uses changeDate (YYYYMMDD) as primary cache key since price changes are daily
  */
 export class PlayerValuesHashCache extends CacheOperations {
-  private getEventKey(eventId: EventId): string {
-    return `PlayerStat:${eventId}`;
+  private getDateKey(changeDate: string): string {
+    return `PlayerValue:${changeDate}`;
   }
 
-  private getPlayerKey(eventId: EventId, playerId: PlayerId): string {
+  private getPlayerKey(playerId: PlayerId): string {
     return `${playerId}`;
   }
 
-  // Event-based operations
-  async getPlayerValuesByEvent(eventId: EventId): Promise<PlayerValue[] | null> {
+  // Date-based operations (primary cache strategy)
+  async getPlayerValuesByDate(changeDate: string): Promise<PlayerValue[] | null> {
     try {
       const redis = await redisSingleton.getClient();
-      const eventKey = this.getEventKey(eventId);
-      const playerValuesData = await redis.hgetall(eventKey);
+      const dateKey = this.getDateKey(changeDate);
+      const playerValuesData = await redis.hgetall(dateKey);
 
       if (!playerValuesData || Object.keys(playerValuesData).length === 0) {
         return null;
@@ -1025,35 +1404,47 @@ export class PlayerValuesHashCache extends CacheOperations {
           const playerValue = JSON.parse(serializedData) as PlayerValue;
           playerValues.push(playerValue);
         } catch (error) {
-          logError('Failed to parse cached player value', error, { eventId, playerId });
+          logError('Failed to parse cached player value', error, { changeDate, playerId });
         }
       }
 
       return playerValues;
     } catch (error) {
-      logError('Failed to get cached player values by event', error, { eventId });
+      logError('Failed to get cached player values by date', error, { changeDate });
       return null;
     }
   }
 
-  async setPlayerValuesByEvent(eventId: EventId, playerValues: PlayerValue[]): Promise<void> {
+  async setPlayerValuesByDate(changeDate: string, playerValues: PlayerValue[]): Promise<void> {
     try {
       const redis = await redisSingleton.getClient();
-      const eventKey = this.getEventKey(eventId);
+      const dateKey = this.getDateKey(changeDate);
       const playerValuesData: Record<string, string> = {};
 
       for (const playerValue of playerValues) {
-        const playerKey = this.getPlayerKey(eventId, playerValue.elementId);
+        const playerKey = this.getPlayerKey(playerValue.elementId);
         playerValuesData[playerKey] = JSON.stringify(playerValue);
       }
 
-      await redis.hset(eventKey, playerValuesData);
-      await redis.expire(eventKey, CACHE_TTL.player_values);
-    } catch (error) {
-      logError('Failed to cache player values by event', error, {
-        eventId,
+      if (Object.keys(playerValuesData).length === 0) {
+        logDebug('No valid player values to cache for date', { changeDate });
+        return;
+      }
+
+      await redis.hset(dateKey, playerValuesData);
+      await redis.expire(dateKey, CACHE_TTL.player_values);
+
+      logDebug('Player values cache set by date', {
+        changeDate,
+        key: dateKey,
         count: playerValues.length,
       });
+    } catch (error) {
+      logError('Failed to cache player values by date', error, {
+        changeDate,
+        count: playerValues.length,
+      });
+      throw error; // Re-throw so caller knows cache failed
     }
   }
 
@@ -1196,51 +1587,28 @@ export class PlayerValuesHashCache extends CacheOperations {
 }
 
 /**
- * Player values cache instance with hash-based operations
+ * Player values cache instance - date-based caching for daily price changes
  */
 export const playerValuesCache = {
   private: new PlayerValuesHashCache(),
 
-  // Event-based operations
-  async getByEvent(eventId: EventId): Promise<PlayerValue[] | null> {
-    return this.private.getPlayerValuesByEvent(eventId);
+  // Date-based operations (primary strategy)
+  async getByDate(changeDate: string): Promise<PlayerValue[] | null> {
+    return this.private.getPlayerValuesByDate(changeDate);
   },
 
-  async setByEvent(eventId: EventId, playerValues: PlayerValue[]): Promise<void> {
-    return this.private.setPlayerValuesByEvent(eventId, playerValues);
+  async setByDate(changeDate: string, playerValues: PlayerValue[]): Promise<void> {
+    return this.private.setPlayerValuesByDate(changeDate, playerValues);
   },
 
-  async clearByEvent(eventId: EventId): Promise<void> {
-    return this.private.clearByEvent(eventId);
-  },
-
-  async existsByEvent(eventId: EventId): Promise<boolean> {
-    return this.private.existsByEvent(eventId);
-  },
-
-  // Individual player value operations
-  async getPlayerValue(eventId: EventId, playerId: PlayerId): Promise<PlayerValue | null> {
-    return this.private.getPlayerValue(eventId, playerId);
-  },
-
-  async setPlayerValue(playerValue: PlayerValue): Promise<void> {
-    return this.private.setPlayerValue(playerValue);
-  },
-
-  // Filtered operations
-  async getByTeam(eventId: EventId, teamId: TeamId): Promise<PlayerValue[] | null> {
-    return this.private.getPlayerValuesByTeam(eventId, teamId);
-  },
-
-  async getByPosition(eventId: EventId, elementType: ElementTypeId): Promise<PlayerValue[] | null> {
-    return this.private.getPlayerValuesByPosition(eventId, elementType);
-  },
-
-  async getByChangeType(
-    eventId: EventId,
-    changeType: ValueChangeType,
-  ): Promise<PlayerValue[] | null> {
-    return this.private.getPlayerValuesByChangeType(eventId, changeType);
+  async clearByDate(changeDate: string): Promise<void> {
+    try {
+      const redis = await redisSingleton.getClient();
+      const key = this.private['getDateKey'](changeDate);
+      await redis.del(key);
+    } catch (error) {
+      logError('Failed to clear cached player values by date', error, { changeDate });
+    }
   },
 
   // Utility operations
@@ -1248,11 +1616,7 @@ export const playerValuesCache = {
     return this.private.clearAll();
   },
 
-  async getLatestEventId(): Promise<EventId | null> {
-    return this.private.getLatestEventId();
-  },
-
-  // Daily operations (matching Java approach: PlayerValue::YYYYMMDD)
+  // Deprecated: Legacy daily operations (kept for compatibility)
   async setDailyChanges(changeDate: string, playerValues: PlayerValue[]): Promise<void> {
     try {
       const redis = await redisSingleton.getClient();

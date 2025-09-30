@@ -45,13 +45,6 @@ export const playerStats = pgTable(
     threatRankType: integer('threat_rank_type'),
     ictIndexRank: integer('ict_index_rank'),
     ictIndexRankType: integer('ict_index_rank_type'),
-    mngWin: integer('mng_win'),
-    mngDraw: integer('mng_draw'),
-    mngLoss: integer('mng_loss'),
-    mngUnderdogWin: integer('mng_underdog_win'),
-    mngUnderdogDraw: integer('mng_underdog_draw'),
-    mngCleanSheets: integer('mng_clean_sheets'),
-    mngGoalsScored: integer('mng_goals_scored'),
     ...timestamps,
   },
   (table) => [

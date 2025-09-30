@@ -14,7 +14,8 @@ describe('Events Integration Tests', () => {
   beforeAll(async () => {
     // SINGLE setup - one API call for entire test suite
     await clearEventsCache();
-    await eventRepository.deleteAll();
+    // Don't delete events - they may have foreign key references from other tables
+    // syncEvents uses upsert which will update existing records
     await syncEvents(); // ONLY API call in entire test suite - tests: FPL API → DB → Redis
   });
 

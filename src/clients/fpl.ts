@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-import { FPLBootstrapResponse } from '../types';
+import { FPLBootstrapResponse, RawFPLFixture } from '../types';
 import { FPLClientError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 
@@ -130,6 +130,42 @@ const PhaseSchema = z.object({
   highest_score: z.number().nullable(),
 });
 
+const FixtureStatSchema = z.object({
+  identifier: z.string(),
+  a: z.array(
+    z.object({
+      value: z.number(),
+      element: z.number(),
+    }),
+  ),
+  h: z.array(
+    z.object({
+      value: z.number(),
+      element: z.number(),
+    }),
+  ),
+});
+
+const FixtureSchema = z.object({
+  code: z.number(),
+  event: z.number().nullable(),
+  finished: z.boolean(),
+  finished_provisional: z.boolean(),
+  id: z.number(),
+  kickoff_time: z.string().nullable(),
+  minutes: z.number(),
+  provisional_start_time: z.boolean(),
+  started: z.boolean().nullable(),
+  team_a: z.number(),
+  team_a_score: z.number().nullable(),
+  team_h: z.number(),
+  team_h_score: z.number().nullable(),
+  stats: z.array(FixtureStatSchema),
+  team_h_difficulty: z.number().nullable(),
+  team_a_difficulty: z.number().nullable(),
+  pulse_id: z.number(),
+});
+
 const BootstrapResponseSchema = z.object({
   events: z.array(EventSchema),
   teams: z.array(TeamSchema),
@@ -199,11 +235,13 @@ class FPLClient {
     }
   }
 
-  async getEventFixtures(eventId: number): Promise<unknown[]> {
-    const url = `${this.baseUrl}/fixtures/?event=${eventId}`;
+  async getFixtures(eventId?: number): Promise<RawFPLFixture[]> {
+    const url = eventId
+      ? `${this.baseUrl}/fixtures/?event=${eventId}`
+      : `${this.baseUrl}/fixtures/`;
 
     try {
-      logInfo('Fetching event fixtures', { eventId, url });
+      logInfo('Fetching fixtures', { eventId, url });
 
       const response = await fetch(url);
 
@@ -217,25 +255,34 @@ class FPLClient {
 
       const data: unknown = await response.json();
 
-      if (!Array.isArray(data)) {
-        throw new FPLClientError('Expected fixtures to be an array', undefined, 'VALIDATION_ERROR');
-      }
+      // Validate with Zod
+      const validated = z.array(FixtureSchema).parse(data);
 
-      logInfo('Successfully fetched event fixtures', {
+      logInfo('Successfully fetched and validated fixtures', {
         eventId,
-        fixtureCount: data.length,
+        fixtureCount: validated.length,
       });
 
-      return data;
+      return validated as RawFPLFixture[];
     } catch (error) {
+      if (error instanceof z.ZodError) {
+        logError('Fixtures data validation failed', error);
+        throw new FPLClientError(
+          'Invalid response format from FPL API',
+          undefined,
+          'VALIDATION_ERROR',
+          error,
+        );
+      }
+
       if (error instanceof FPLClientError) {
         logError('FPL client error', error);
         throw error;
       }
 
-      logError('Unexpected error fetching event fixtures', error);
+      logError('Unexpected error fetching fixtures', error);
       throw new FPLClientError(
-        'Failed to fetch event fixtures',
+        'Failed to fetch fixtures',
         undefined,
         'UNKNOWN_ERROR',
         error instanceof Error ? error : new Error(String(error)),

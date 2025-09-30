@@ -15,7 +15,7 @@ import { logError, logInfo } from '../utils/logger';
  * - Data retrieval with fallbacks and filtering
  */
 
-// Get all players (with cache fallback)
+// Get all players (cache-first strategy: Redis → DB → update Redis)
 export async function getPlayers(): Promise<Player[]> {
   try {
     logInfo('Getting all players');
@@ -23,16 +23,19 @@ export async function getPlayers(): Promise<Player[]> {
     // 1. Try cache first (fast path)
     const cached = await playersCache.get();
     if (cached) {
-      logInfo('Players retrieved from cache', { count: Array.isArray(cached) ? cached.length : 0 });
-      return cached as Player[];
+      logInfo('Players retrieved from cache', { count: cached.length });
+      return cached;
     }
 
-    // 2. Fallback to database (slower path)
+    // 2. Cache miss - fallback to database
+    logInfo('Cache miss - fetching from database');
     const dbPlayers = await playerRepository.findAll();
 
-    // 3. Update cache for next time
+    // 3. Update cache for next time (async, don't block response)
     if (dbPlayers.length > 0) {
-      await playersCache.set(dbPlayers);
+      playersCache.set(dbPlayers).catch((error) => {
+        logError('Failed to update players cache', error);
+      });
     }
 
     logInfo('Players retrieved from database', { count: dbPlayers.length });
@@ -43,15 +46,39 @@ export async function getPlayers(): Promise<Player[]> {
   }
 }
 
-// Get single player by ID
+// Get single player by ID (cache-first strategy: Redis → DB → update Redis)
 export async function getPlayer(id: number): Promise<Player | null> {
   try {
     logInfo('Getting player by id', { id });
 
+    // 1. Try cache first (fast path)
+    const cached = await playersCache.getPlayer(id);
+    if (cached) {
+      logInfo('Player retrieved from cache', {
+        id,
+        name: `${cached.firstName} ${cached.secondName}`,
+      });
+      return cached;
+    }
+
+    // 2. Cache miss - fallback to database
+    logInfo('Cache miss - fetching from database', { id });
     const player = await playerRepository.findById(id);
 
     if (player) {
-      logInfo('Player found', { id, name: `${player.firstName} ${player.secondName}` });
+      // 3. Update cache for next time (async, don't block response)
+      playersCache.get().then((allPlayers) => {
+        if (!allPlayers) {
+          // If full cache doesn't exist, fetch all and cache
+          playerRepository.findAll().then((dbPlayers) => {
+            playersCache.set(dbPlayers).catch((error) => {
+              logError('Failed to update players cache', error);
+            });
+          });
+        }
+      });
+
+      logInfo('Player found in database', { id, name: `${player.firstName} ${player.secondName}` });
     } else {
       logInfo('Player not found', { id });
     }
@@ -63,14 +90,35 @@ export async function getPlayer(id: number): Promise<Player | null> {
   }
 }
 
-// Get players by team
+// Get players by team (cache-first strategy: Redis → DB → update Redis)
 export async function getPlayersByTeam(teamId: number): Promise<Player[]> {
   try {
     logInfo('Getting players by team', { teamId });
 
-    const players = await playerRepository.findByTeam(teamId);
-    logInfo('Players retrieved by team', { teamId, count: players.length });
+    // 1. Try cache first (fast path - filters in-memory)
+    const cached = await playersCache.getPlayersByTeam(teamId);
+    if (cached) {
+      logInfo('Players retrieved from cache (filtered by team)', { teamId, count: cached.length });
+      return cached;
+    }
 
+    // 2. Cache miss - fallback to database
+    logInfo('Cache miss - fetching from database', { teamId });
+    const players = await playerRepository.findByTeam(teamId);
+
+    // 3. Update cache for next time (async, don't block response)
+    playersCache.get().then((allPlayers) => {
+      if (!allPlayers) {
+        // If full cache doesn't exist, fetch all and cache
+        playerRepository.findAll().then((dbPlayers) => {
+          playersCache.set(dbPlayers).catch((error) => {
+            logError('Failed to update players cache', error);
+          });
+        });
+      }
+    });
+
+    logInfo('Players retrieved from database by team', { teamId, count: players.length });
     return players;
   } catch (error) {
     logError('Failed to get players by team', error, { teamId });
