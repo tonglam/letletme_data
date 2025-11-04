@@ -53,7 +53,7 @@ export class FixtureRepository {
   async findAll(): Promise<DomainFixture[]> {
     try {
       const db = await this.getDbInstance();
-      const result = await db.select().from(eventFixtures);
+      const result = await db.select().from(eventFixtures).orderBy(eventFixtures.id);
       const domainFixtures = result.map(mapDbFixtureToDomain);
       logInfo('Retrieved all fixtures', { count: domainFixtures.length });
       return domainFixtures;

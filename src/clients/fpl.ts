@@ -1,6 +1,12 @@
 import { z } from 'zod';
 
-import { FPLBootstrapResponse, RawFPLFixture } from '../types';
+import {
+  FPLBootstrapResponse,
+  RawFPLEventLiveResponse,
+  RawFPLFixture,
+  RawFPLEntryHistoryResponse,
+  RawFPLEntryTransfersResponse,
+} from '../types';
 import { FPLClientError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 
@@ -290,7 +296,7 @@ class FPLClient {
     }
   }
 
-  async getEventLive(eventId: number): Promise<unknown> {
+  async getEventLive(eventId: number): Promise<RawFPLEventLiveResponse> {
     const url = `${this.baseUrl}/event/${eventId}/live/`;
 
     try {
@@ -308,10 +314,63 @@ class FPLClient {
 
       const data: unknown = await response.json();
 
-      logInfo('Successfully fetched event live data', { eventId });
+      // Validate with Zod
+      const EventLiveStatsSchema = z.object({
+        minutes: z.number(),
+        goals_scored: z.number(),
+        assists: z.number(),
+        clean_sheets: z.number(),
+        goals_conceded: z.number(),
+        own_goals: z.number(),
+        penalties_saved: z.number(),
+        penalties_missed: z.number(),
+        yellow_cards: z.number(),
+        red_cards: z.number(),
+        saves: z.number(),
+        bonus: z.number(),
+        bps: z.number(),
+        influence: z.string(),
+        creativity: z.string(),
+        threat: z.string(),
+        ict_index: z.string(),
+        starts: z.number(),
+        expected_goals: z.string(),
+        expected_assists: z.string(),
+        expected_goal_involvements: z.string(),
+        expected_goals_conceded: z.string(),
+        total_points: z.number(),
+        in_dreamteam: z.boolean(),
+      });
 
-      return data;
+      const EventLiveElementSchema = z.object({
+        id: z.number(),
+        stats: EventLiveStatsSchema,
+        explain: z.array(z.unknown()),
+      });
+
+      const EventLiveResponseSchema = z.object({
+        elements: z.array(EventLiveElementSchema),
+      });
+
+      const validated = EventLiveResponseSchema.parse(data);
+
+      logInfo('Successfully fetched and validated event live data', {
+        eventId,
+        elementCount: validated.elements.length,
+      });
+
+      return validated as RawFPLEventLiveResponse;
     } catch (error) {
+      if (error instanceof z.ZodError) {
+        logError('Event live data validation failed', error);
+        throw new FPLClientError(
+          'Invalid response format from FPL API',
+          undefined,
+          'VALIDATION_ERROR',
+          error,
+        );
+      }
+
       if (error instanceof FPLClientError) {
         logError('FPL client error', error);
         throw error;
@@ -320,6 +379,290 @@ class FPLClient {
       logError('Unexpected error fetching event live data', error);
       throw new FPLClientError(
         'Failed to fetch event live data',
+        undefined,
+        'UNKNOWN_ERROR',
+        error instanceof Error ? error : new Error(String(error)),
+      );
+    }
+  }
+
+  async getEntrySummary(entryId: number) {
+    const url = `${this.baseUrl}/entry/${entryId}/`;
+    try {
+      logInfo('Fetching entry summary', { entryId, url });
+
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new FPLClientError(
+          `HTTP ${response.status}: ${response.statusText}`,
+          response.status,
+          'HTTP_ERROR',
+        );
+      }
+
+      const data: unknown = await response.json();
+
+      // Validate a minimal subset we depend on
+      const LeagueItemSchema = z.object({
+        id: z.number(),
+        name: z.string(),
+        short_name: z.string().nullable().optional(),
+        created: z.string().optional(),
+        entry_rank: z.number().nullable(),
+        entry_last_rank: z.number().nullable(),
+        start_event: z.number().nullable().optional(),
+      });
+
+      const EntryLeaguesSchema = z
+        .object({
+          classic: z.array(LeagueItemSchema),
+          h2h: z.array(LeagueItemSchema),
+        })
+        .passthrough()
+        .optional();
+
+      const EntrySummarySchema = z.object({
+        id: z.number(),
+        name: z.string(),
+        player_first_name: z.string(),
+        player_last_name: z.string(),
+        player_region_name: z.string().nullable().optional(),
+        started_event: z.number().nullable().optional(),
+        summary_overall_points: z.number().nullable().optional(),
+        summary_overall_rank: z.number().nullable().optional(),
+        bank: z.number().nullable().optional(),
+        value: z.number().nullable().optional(),
+        last_deadline_total_transfers: z.number().nullable().optional(),
+        last_deadline_bank: z.number().nullable().optional(),
+        last_deadline_total_points: z.number().nullable().optional(),
+        last_deadline_rank: z.number().nullable().optional(),
+        last_deadline_value: z.number().nullable().optional(),
+        leagues: EntryLeaguesSchema,
+      });
+
+      const validated = EntrySummarySchema.parse(data);
+      logInfo('Successfully fetched and validated entry summary', { entryId });
+      return validated;
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        logError('Entry summary validation failed', error);
+        throw new FPLClientError(
+          'Invalid entry summary format from FPL API',
+          undefined,
+          'VALIDATION_ERROR',
+          error,
+        );
+      }
+      if (error instanceof FPLClientError) {
+        logError('FPL client error', error);
+        throw error;
+      }
+      logError('Unexpected error fetching entry summary', error);
+      throw new FPLClientError(
+        'Failed to fetch entry summary',
+        undefined,
+        'UNKNOWN_ERROR',
+        error instanceof Error ? error : new Error(String(error)),
+      );
+    }
+  }
+
+  async getEntryEventPicks(entryId: number, eventId: number) {
+    const url = `${this.baseUrl}/entry/${entryId}/event/${eventId}/picks/`;
+    try {
+      logInfo('Fetching entry event picks', { entryId, eventId, url });
+
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new FPLClientError(
+          `HTTP ${response.status}: ${response.statusText}`,
+          response.status,
+          'HTTP_ERROR',
+        );
+      }
+
+      const data: unknown = await response.json();
+
+      const PickItemSchema = z.object({
+        element: z.number(),
+        position: z.number(),
+        multiplier: z.number(),
+        is_captain: z.boolean(),
+        is_vice_captain: z.boolean(),
+      });
+
+      const EntryHistorySchema = z.object({
+        event: z.number(),
+        points: z.number(),
+        total_points: z.number(),
+        rank: z.number().nullable(),
+        overall_rank: z.number().nullable(),
+        bank: z.number(),
+        value: z.number(),
+        event_transfers: z.number(),
+        event_transfers_cost: z.number(),
+        points_on_bench: z.number(),
+      });
+
+      const PicksResponseSchema = z.object({
+        active_chip: z.enum(['wildcard', 'freehit', 'bboost', '3xc']).nullable(),
+        automatic_subs: z.array(z.unknown()),
+        entry_history: EntryHistorySchema,
+        picks: z.array(PickItemSchema),
+      });
+
+      const validated = PicksResponseSchema.parse(data);
+      logInfo('Successfully fetched and validated entry event picks', {
+        entryId,
+        eventId,
+        pickCount: validated.picks.length,
+        activeChip: validated.active_chip ?? 'n/a',
+      });
+      return validated;
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        logError('Entry event picks validation failed', error);
+        throw new FPLClientError(
+          'Invalid entry event picks format from FPL API',
+          undefined,
+          'VALIDATION_ERROR',
+          error,
+        );
+      }
+      if (error instanceof FPLClientError) {
+        logError('FPL client error', error);
+        throw error;
+      }
+      logError('Unexpected error fetching entry event picks', error);
+      throw new FPLClientError(
+        'Failed to fetch entry event picks',
+        undefined,
+        'UNKNOWN_ERROR',
+        error instanceof Error ? error : new Error(String(error)),
+      );
+    }
+  }
+
+  async getEntryTransfers(entryId: number): Promise<RawFPLEntryTransfersResponse> {
+    const url = `${this.baseUrl}/entry/${entryId}/transfers/`;
+    try {
+      logInfo('Fetching entry transfers', { entryId, url });
+
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new FPLClientError(
+          `HTTP ${response.status}: ${response.statusText}`,
+          response.status,
+          'HTTP_ERROR',
+        );
+      }
+
+      const data: unknown = await response.json();
+
+      const TransferSchema = z.object({
+        element_in: z.number(),
+        element_in_cost: z.number(),
+        element_in_points: z.number().nullable().optional(),
+        element_out: z.number(),
+        element_out_cost: z.number(),
+        element_out_points: z.number().nullable().optional(),
+        entry: z.number(),
+        event: z.number(),
+        time: z.string(),
+      });
+
+      const TransfersSchema = z.array(TransferSchema);
+      const validated = TransfersSchema.parse(data);
+
+      logInfo('Successfully fetched and validated entry transfers', {
+        entryId,
+        count: validated.length,
+      });
+      return validated as RawFPLEntryTransfersResponse;
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        logError('Entry transfers validation failed', error);
+        throw new FPLClientError(
+          'Invalid entry transfers format from FPL API',
+          undefined,
+          'VALIDATION_ERROR',
+          error,
+        );
+      }
+      if (error instanceof FPLClientError) {
+        logError('FPL client error', error);
+        throw error;
+      }
+      logError('Unexpected error fetching entry transfers', error);
+      throw new FPLClientError(
+        'Failed to fetch entry transfers',
+        undefined,
+        'UNKNOWN_ERROR',
+        error instanceof Error ? error : new Error(String(error)),
+      );
+    }
+  }
+
+  async getEntryHistory(entryId: number): Promise<RawFPLEntryHistoryResponse> {
+    const url = `${this.baseUrl}/entry/${entryId}/history/`;
+    try {
+      logInfo('Fetching entry history', { entryId, url });
+
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new FPLClientError(
+          `HTTP ${response.status}: ${response.statusText}`,
+          response.status,
+          'HTTP_ERROR',
+        );
+      }
+
+      const data: unknown = await response.json();
+
+      const EntryHistoryPastSeasonSchema = z.object({
+        season_name: z.string(),
+        total_points: z.number(),
+        rank: z.number(),
+      });
+
+      const EntryHistoryCurrentItemSchema = z.object({
+        event: z.number(),
+        points: z.number(),
+        total_points: z.number(),
+        rank: z.number().nullable().optional(),
+        overall_rank: z.number().nullable().optional(),
+      });
+
+      const EntryHistoryResponseSchema = z.object({
+        current: z.array(EntryHistoryCurrentItemSchema),
+        chips: z.array(z.unknown()),
+        past: z.array(EntryHistoryPastSeasonSchema),
+      });
+
+      const validated = EntryHistoryResponseSchema.parse(data);
+      logInfo('Successfully fetched and validated entry history', {
+        entryId,
+        pastSeasons: validated.past.length,
+        currentSnapshots: validated.current.length,
+      });
+      return validated as RawFPLEntryHistoryResponse;
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        logError('Entry history validation failed', error);
+        throw new FPLClientError(
+          'Invalid entry history format from FPL API',
+          undefined,
+          'VALIDATION_ERROR',
+          error,
+        );
+      }
+      if (error instanceof FPLClientError) {
+        logError('FPL client error', error);
+        throw error;
+      }
+      logError('Unexpected error fetching entry history', error);
+      throw new FPLClientError(
+        'Failed to fetch entry history',
         undefined,
         'UNKNOWN_ERROR',
         error instanceof Error ? error : new Error(String(error)),

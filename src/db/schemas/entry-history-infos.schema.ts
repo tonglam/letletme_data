@@ -9,7 +9,7 @@ export const entryHistoryInfos = pgTable(
     entryId: integer('entry_id')
       .notNull()
       .references(() => entryInfos.id),
-    season: char('season', { length: 4 }).notNull(),
+    season: char('season', { length: 7 }).notNull(),
     totalPoints: integer('total_points').default(0).notNull(),
     overallRank: integer('overall_rank').default(0).notNull(),
     ...createdAtField,

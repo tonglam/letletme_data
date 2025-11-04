@@ -1,5 +1,14 @@
 import { beforeEach, describe, expect, test } from 'bun:test';
 
+import {
+  getDifficultyForTeam,
+  getFixtureScoreline,
+  getFixtureWinner,
+  isFixtureFinished,
+  isFixtureUpcoming,
+  validateFixture,
+  validateRawFPLFixture,
+} from '../../src/domain/fixtures';
 import { FixtureRepository } from '../../src/repositories/fixtures';
 import { transformFixtures } from '../../src/transformers/fixtures';
 import {
@@ -12,6 +21,64 @@ import {
 } from '../fixtures/fixtures.fixtures';
 
 describe('Fixtures Unit Tests', () => {
+  describe('Fixture Domain Validation', () => {
+    test('should validate raw FPL fixture structure', () => {
+      const validated = validateRawFPLFixture(mockRawFPLFixture1);
+      expect(validated.code).toBe(mockRawFPLFixture1.code);
+      expect(validated.team_a).toBe(mockRawFPLFixture1.team_a);
+    });
+
+    test('should validate domain fixture structure', () => {
+      const fixture = transformFixtures([mockRawFPLFixture1])[0];
+      const validated = validateFixture(fixture);
+
+      expect(validated.id).toBe(fixture.id);
+      expect(validated.teamHScore).toBe(4);
+      expect(validated.stats).toHaveLength(2);
+    });
+
+    test('should reject fixtures with invalid difficulty values', () => {
+      const invalidFixture = {
+        ...mockRawFPLFixture1,
+        team_h_difficulty: 6,
+      };
+
+      expect(() => transformFixtures([invalidFixture])).toThrowError();
+    });
+  });
+
+  describe('Fixture Domain Helpers', () => {
+    const [finishedFixture, scorelessFixture, upcomingFixture] =
+      transformFixtures(mockRawFPLFixtures);
+
+    test('should detect finished fixtures', () => {
+      expect(isFixtureFinished(finishedFixture)).toBe(true);
+      expect(isFixtureFinished(upcomingFixture)).toBe(false);
+    });
+
+    test('should detect upcoming fixtures', () => {
+      expect(isFixtureUpcoming(upcomingFixture)).toBe(true);
+      expect(isFixtureUpcoming(finishedFixture)).toBe(false);
+    });
+
+    test('should compute scoreline text', () => {
+      expect(getFixtureScoreline(finishedFixture)).toBe('4-2');
+      expect(getFixtureScoreline(upcomingFixture)).toBe('TBD');
+    });
+
+    test('should identify fixture winner', () => {
+      expect(getFixtureWinner(finishedFixture)).toBe('home');
+      expect(getFixtureWinner(scorelessFixture)).toBe('draw');
+      expect(getFixtureWinner(upcomingFixture)).toBe('unknown');
+    });
+
+    test('should return difficulty values for teams', () => {
+      expect(getDifficultyForTeam(finishedFixture, true)).toBe(3);
+      expect(getDifficultyForTeam(finishedFixture, false)).toBe(5);
+      expect(getDifficultyForTeam(upcomingFixture, true)).toBe(4);
+    });
+  });
+
   describe('transformFixtures Function', () => {
     test('should transform single fixture correctly', () => {
       const result = transformFixtures([mockRawFPLFixture1]);

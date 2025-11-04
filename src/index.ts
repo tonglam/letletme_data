@@ -2,10 +2,12 @@ import { cors } from '@elysiajs/cors';
 import { Elysia } from 'elysia';
 
 // Import API route groups
+import { eventLivesAPI } from './api/event-lives.api';
 import { eventsAPI } from './api/events.api';
 import { fixturesAPI } from './api/fixtures.api';
 import { jobsAPI } from './api/jobs.api';
 import { phasesAPI } from './api/phases.api';
+import { entriesAPI } from './api/entries.api';
 import { playerStatsAPI } from './api/player-stats.api';
 import { playerValuesAPI } from './api/player-values.api';
 import { playersAPI } from './api/players.api';
@@ -15,6 +17,9 @@ import { teamsAPI } from './api/teams.api';
 import { registerDataSyncJobs } from './jobs/data-sync.jobs';
 import { registerLiveJobs } from './jobs/live.jobs';
 import { registerMaintenanceJobs } from './jobs/maintenance.jobs';
+import { registerEntryPicksJobs } from './jobs/entry-picks.jobs';
+import { registerEntryTransfersJobs } from './jobs/entry-transfers.jobs';
+import { registerEntryResultsJobs } from './jobs/entry-results.jobs';
 
 // Import utilities
 import { getErrorMessage } from './utils/errors';
@@ -87,12 +92,14 @@ const app = new Elysia()
   // ================================
 
   .use(eventsAPI)
+  .use(eventLivesAPI)
   .use(fixturesAPI)
   .use(teamsAPI)
   .use(playersAPI)
   .use(playerStatsAPI)
   .use(playerValuesAPI)
   .use(phasesAPI)
+  .use(entriesAPI)
   .use(jobsAPI)
 
   // ================================
@@ -102,6 +109,9 @@ const app = new Elysia()
   .use(registerDataSyncJobs)
   .use(registerLiveJobs)
   .use(registerMaintenanceJobs)
+  .use(registerEntryPicksJobs)
+  .use(registerEntryTransfersJobs)
+  .use(registerEntryResultsJobs)
 
   // ================================
   // Server Startup
@@ -115,15 +125,17 @@ logInfo('🚀 Elysia server started', {
   environment: process.env.NODE_ENV || 'development',
   apis: [
     'events',
+    'event-lives',
     'fixtures',
     'teams',
     'players',
     'player-stats',
     'player-values',
+    'entries',
     'phases',
     'jobs',
   ],
-  jobs: ['data-sync', 'live-scores', 'maintenance'],
+  jobs: ['data-sync', 'live-scores', 'maintenance', 'entry-picks', 'entry-transfers', 'entry-results'],
 });
 
 export default app;

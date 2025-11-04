@@ -4,7 +4,7 @@ import { events } from './events.schema';
 import { players } from './players.schema';
 
 export const eventLive = pgTable(
-  'event_live',
+  'event_lives',
   {
     ...autoIncrementId,
     eventId: integer('event_id')
@@ -37,13 +37,6 @@ export const eventLive = pgTable(
       precision: 10,
       scale: 2,
     }),
-    mngWin: integer('mng_win'),
-    mngDraw: integer('mng_draw'),
-    mngLoss: integer('mng_loss'),
-    mngUnderdogWin: integer('mng_underdog_win'),
-    mngUnderdogDraw: integer('mng_underdog_draw'),
-    mngCleanSheets: integer('mng_clean_sheets'),
-    mngGoalsScored: integer('mng_goals_scored'),
     inDreamTeam: boolean('in_dream_team'),
     totalPoints: integer('total_points').default(0).notNull(),
     ...createdAtField,

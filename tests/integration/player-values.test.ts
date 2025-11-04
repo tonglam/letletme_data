@@ -15,17 +15,16 @@ describe('Player Values Integration Tests', () => {
 
   beforeAll(async () => {
     // Setup - clear cache and generate today's date
-    await playerValuesCache.clearAll();
-
-    // Generate today's date in YYYYMMDD format (matching our daily logic)
     const today = new Date();
     changeDate = today.toISOString().split('T')[0].replace(/-/g, ''); // YYYYMMDD format
+
+    await playerValuesCache.clearByDate(changeDate);
   });
 
   describe('Daily Sync Integration', () => {
     test('should sync current player values using daily approach', async () => {
       // Clear existing data first
-      await playerValuesRepository.deleteAll();
+      await playerValuesRepository.deleteByChangeDate(changeDate);
 
       // This should sync only players with price changes (using our new daily logic)
       const result = await syncCurrentPlayerValues();

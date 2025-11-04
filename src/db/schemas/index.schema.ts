@@ -9,7 +9,6 @@ export * from './event-fixtures.schema';
 export * from './event-live-explains.schema';
 export * from './event-lives.schema';
 export * from './events.schema';
-export * from './fixtures.schema';
 export * from './phases.schema';
 export * from './player-stats.schema';
 export * from './player-values.schema';

@@ -33,6 +33,8 @@
     "src/**/*.ts",
     "tests/**/*.ts",
     "tests/**/*.json",
+    "scripts/**/*.ts",
+    "*.ts",
     "drizzle.config.ts",
     "node_modules/enums.schema.ts"
   ],

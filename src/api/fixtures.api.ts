@@ -86,7 +86,7 @@ export const fixturesAPI = new Elysia({ prefix: '/fixtures' })
     const result = await syncAllGameweeks();
     return {
       success: true,
-      message: `All gameweeks sync completed`,
+      message: 'All gameweeks sync completed',
       totalCount: result.totalCount,
       totalErrors: result.totalErrors,
       gameweeks: result.perGameweek.length,

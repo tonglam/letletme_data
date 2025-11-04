@@ -3,6 +3,7 @@ import { CacheError } from '../utils/errors';
 import { logDebug, logError, logInfo } from '../utils/logger';
 import { CACHE_TTL, DEFAULT_CACHE_CONFIG, redisSingleton } from './singleton';
 
+import type { EventLive } from '../domain/event-lives';
 import type { PlayerStat } from '../domain/player-stats';
 import type { PlayerValue } from '../domain/player-values';
 import type { Event, Fixture, Phase, Player, Team } from '../types';
@@ -360,7 +361,7 @@ export const teamsCache = {
 
       // Build map efficiently - only parse needed fields
       const teamsMap = new Map<number, { name: string; shortName: string }>();
-      for (const [teamId, teamJson] of Object.entries(hash)) {
+      for (const [_teamId, teamJson] of Object.entries(hash)) {
         const team = JSON.parse(teamJson) as Team;
         teamsMap.set(team.id, {
           name: team.name,
@@ -536,6 +537,21 @@ export const phasesCache = {
 };
 
 export const fixturesCache = {
+  revive(fixture: Fixture): Fixture {
+    const kickoffTime = fixture.kickoffTime
+      ? new Date(fixture.kickoffTime as unknown as string)
+      : null;
+    const createdAt = fixture.createdAt ? new Date(fixture.createdAt as unknown as string) : null;
+    const updatedAt = fixture.updatedAt ? new Date(fixture.updatedAt as unknown as string) : null;
+
+    return {
+      ...fixture,
+      kickoffTime: kickoffTime && !Number.isNaN(kickoffTime.getTime()) ? kickoffTime : null,
+      createdAt: createdAt && !Number.isNaN(createdAt.getTime()) ? createdAt : null,
+      updatedAt: updatedAt && !Number.isNaN(updatedAt.getTime()) ? updatedAt : null,
+    };
+  },
+
   // Get all fixtures (aggregate from all event keys including unscheduled)
   async getAll(): Promise<Fixture[] | null> {
     try {
@@ -553,7 +569,9 @@ export const fixturesCache = {
       for (const key of keys) {
         const hash = await redis.hgetall(key);
         if (hash && Object.keys(hash).length > 0) {
-          const fixtures = Object.values(hash).map((value) => JSON.parse(value) as Fixture);
+          const fixtures = Object.values(hash)
+            .map((value) => JSON.parse(value) as Fixture)
+            .map((fixture) => fixturesCache.revive(fixture));
           allFixtures.push(...fixtures);
         }
       }
@@ -586,7 +604,7 @@ export const fixturesCache = {
       for (const key of keys) {
         const cached = await redis.hget(key, id.toString());
         if (cached) {
-          const fixture = JSON.parse(cached) as Fixture;
+          const fixture = fixturesCache.revive(JSON.parse(cached) as Fixture);
           logDebug('Fixture cache hit', { id });
           return fixture;
         }
@@ -613,7 +631,9 @@ export const fixturesCache = {
         return null;
       }
 
-      const fixtures = Object.values(hash).map((value) => JSON.parse(value) as Fixture);
+      const fixtures = Object.values(hash)
+        .map((value) => JSON.parse(value) as Fixture)
+        .map((fixture) => fixturesCache.revive(fixture));
       fixtures.sort((a, b) => a.id - b.id);
 
       logDebug('Fixtures by event cache hit', { eventId, count: fixtures.length });
@@ -1669,6 +1689,126 @@ export const playerValuesCache = {
       logInfo('Daily player values cache cleared', { changeDate });
     } catch (error) {
       logError('Failed to clear daily player values cache', error, { changeDate });
+      throw error;
+    }
+  },
+};
+
+/**
+ * Event Live Cache Operations
+ * Pattern: EventLive:season:eventId -> hash of elementId -> EventLive data
+ */
+export const eventLivesCache = {
+  /**
+   * Get all event live data for a specific event
+   */
+  async getByEventId(eventId: EventId): Promise<EventLive[] | null> {
+    try {
+      const redis = await redisSingleton.getClient();
+      const key = `EventLive:${getCurrentSeason()}:${eventId}`;
+      const hash = await redis.hgetall(key);
+
+      if (!hash || Object.keys(hash).length === 0) {
+        logDebug('Event lives cache miss', { eventId });
+        return null;
+      }
+
+      const eventLives = Object.values(hash).map((value) => JSON.parse(value) as EventLive);
+      logDebug('Event lives cache hit', { eventId, count: eventLives.length });
+      return eventLives;
+    } catch (error) {
+      logError('Event lives cache get by event error', error, { eventId });
+      return null;
+    }
+  },
+
+  /**
+   * Get single event live record for a specific element in an event
+   */
+  async getByEventAndElement(eventId: EventId, elementId: PlayerId): Promise<EventLive | null> {
+    try {
+      const redis = await redisSingleton.getClient();
+      const key = `EventLive:${getCurrentSeason()}:${eventId}`;
+      const cached = await redis.hget(key, elementId.toString());
+
+      if (!cached) {
+        logDebug('Event live cache miss', { eventId, elementId });
+        return null;
+      }
+
+      const eventLive = JSON.parse(cached) as EventLive;
+      logDebug('Event live cache hit', { eventId, elementId });
+      return eventLive;
+    } catch (error) {
+      logError('Event live cache get by event and element error', error, { eventId, elementId });
+      return null;
+    }
+  },
+
+  /**
+   * Set event live data for an event (batch)
+   */
+  async set(eventId: EventId, eventLives: EventLive[]): Promise<void> {
+    try {
+      if (eventLives.length === 0) {
+        logInfo('No event live data to cache', { eventId });
+        return;
+      }
+
+      const redis = await redisSingleton.getClient();
+      const key = `EventLive:${getCurrentSeason()}:${eventId}`;
+
+      // Build hash: elementId -> EventLive data
+      const hashData: Record<string, string> = {};
+      for (const eventLive of eventLives) {
+        hashData[eventLive.elementId.toString()] = JSON.stringify(eventLive);
+      }
+
+      // Clear existing hash and set new data
+      await redis.del(key);
+      await redis.hset(key, hashData);
+      await redis.expire(key, CACHE_TTL.EVENT_LIVE);
+
+      logInfo('Event lives cached', { eventId, count: eventLives.length });
+    } catch (error) {
+      logError('Event lives cache set error', error, { eventId, count: eventLives.length });
+      throw error;
+    }
+  },
+
+  /**
+   * Clear cache for a specific event
+   */
+  async clearByEventId(eventId: EventId): Promise<void> {
+    try {
+      const redis = await redisSingleton.getClient();
+      const key = `EventLive:${getCurrentSeason()}:${eventId}`;
+      await redis.del(key);
+
+      logInfo('Event lives cache cleared', { eventId });
+    } catch (error) {
+      logError('Failed to clear event lives cache', error, { eventId });
+      throw error;
+    }
+  },
+
+  /**
+   * Clear all event lives cache for the current season
+   */
+  async clear(): Promise<void> {
+    try {
+      const redis = await redisSingleton.getClient();
+      const pattern = `${DEFAULT_CACHE_CONFIG.prefix}EventLive:${getCurrentSeason()}:*`;
+      const keys = await redis.keys(pattern);
+
+      if (keys.length > 0) {
+        await redis.del(...keys);
+        logInfo('All event lives cache cleared', { deletedKeys: keys.length });
+      } else {
+        logInfo('No event lives cache to clear');
+      }
+    } catch (error) {
+      logError('Failed to clear all event lives cache', error);
       throw error;
     }
   },

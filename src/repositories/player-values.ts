@@ -700,6 +700,21 @@ export class PlayerValuesRepository {
       );
     }
   }
+
+  async deleteByChangeDate(changeDate: string): Promise<void> {
+    try {
+      const db = await this.getDbInstance();
+      await db.delete(playerValues).where(eq(playerValues.changeDate, changeDate));
+      logInfo('Deleted player values by change date', { changeDate });
+    } catch (error) {
+      logError('Failed to delete player values by change date', error, { changeDate });
+      throw new DatabaseError(
+        `Failed to delete player values for change date: ${changeDate}`,
+        'DELETE_BY_DATE_ERROR',
+        error instanceof Error ? error : undefined,
+      );
+    }
+  }
 }
 
 // Export singleton instance

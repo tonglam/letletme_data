@@ -265,6 +265,146 @@ export interface FPLBootstrapResponse {
   element_types: unknown[];
 }
 
+// Raw FPL Event Live Response
+export interface RawFPLEventLiveStats {
+  minutes: number;
+  goals_scored: number;
+  assists: number;
+  clean_sheets: number;
+  goals_conceded: number;
+  own_goals: number;
+  penalties_saved: number;
+  penalties_missed: number;
+  yellow_cards: number;
+  red_cards: number;
+  saves: number;
+  bonus: number;
+  bps: number;
+  influence: string;
+  creativity: string;
+  threat: string;
+  ict_index: string;
+  starts: number;
+  expected_goals: string;
+  expected_assists: string;
+  expected_goal_involvements: string;
+  expected_goals_conceded: string;
+  total_points: number;
+  in_dreamteam: boolean;
+}
+
+export interface RawFPLEventLiveElement {
+  id: number;
+  stats: RawFPLEventLiveStats;
+  explain: unknown[];
+}
+
+export interface RawFPLEventLiveResponse {
+  elements: RawFPLEventLiveElement[];
+}
+
+// Entry summary (FPL: /api/entry/{entryId}/)
+export interface RawFPLEntrySummary {
+  id: number;
+  name: string;
+  player_first_name: string;
+  player_last_name: string;
+  player_region_name: string | null;
+  started_event: number | null;
+  summary_overall_points: number | null;
+  summary_overall_rank: number | null;
+  bank: number | null; // in tenths
+  value: number | null; // in tenths
+  last_deadline_total_transfers: number | null;
+  last_deadline_bank?: number | null;
+  last_deadline_total_points: number | null;
+  last_deadline_rank: number | null;
+  last_deadline_value: number | null; // in tenths
+  leagues?: RawFPLEntryLeagues; // optional leagues block
+}
+
+// Entry history (FPL: /api/entry/{entryId}/history/)
+export interface RawFPLEntryHistoryPastSeason {
+  season_name: string; // e.g., "2024/25"
+  total_points: number; // season total
+  rank: number; // final overall rank
+}
+
+export interface RawFPLEntryHistoryCurrentItem {
+  event: number; // GW
+  points: number;
+  total_points: number;
+  rank?: number | null; // GW rank (not used)
+  overall_rank?: number | null; // snapshot overall rank
+}
+
+export interface RawFPLEntryHistoryResponse {
+  current: RawFPLEntryHistoryCurrentItem[];
+  chips: unknown[];
+  past: RawFPLEntryHistoryPastSeason[];
+}
+
+// Leagues subsection of Entry Summary
+export interface RawFPLLeagueItem {
+  id: number;
+  name: string;
+  short_name?: string | null;
+  created?: string;
+  entry_rank: number | null;
+  entry_last_rank: number | null;
+  start_event?: number | null;
+}
+
+export interface RawFPLEntryLeagues {
+  classic: RawFPLLeagueItem[];
+  h2h: RawFPLLeagueItem[];
+  // other keys exist (cup, cup_matches); ignored
+}
+
+// Entry event picks (FPL: /api/entry/{entryId}/event/{eventId}/picks/)
+export interface RawFPLEntryEventPickItem {
+  element: number;
+  position: number;
+  multiplier: number;
+  is_captain: boolean;
+  is_vice_captain: boolean;
+}
+
+export interface RawFPLEntryEventPicksEntryHistory {
+  event: number;
+  points: number;
+  total_points: number;
+  rank: number | null;
+  overall_rank: number | null;
+  bank: number;
+  value: number;
+  event_transfers: number;
+  event_transfers_cost: number;
+  points_on_bench: number;
+}
+
+export interface RawFPLEntryEventPicksResponse {
+  active_chip: 'wildcard' | 'freehit' | 'bboost' | '3xc' | null;
+  automatic_subs: unknown[];
+  entry_history: RawFPLEntryEventPicksEntryHistory;
+  picks: RawFPLEntryEventPickItem[];
+}
+
+// Entry transfers (FPL: /api/entry/{entryId}/transfers/)
+export interface RawFPLEntryTransfer {
+  element_in: number;
+  element_in_cost: number; // tenths
+  element_in_points?: number | null; // sometimes unavailable
+  element_out: number;
+  element_out_cost: number; // tenths
+  element_out_points?: number | null; // sometimes unavailable
+  entry: number;
+  event: number; // GW
+  time: string; // ISO
+}
+
+export type RawFPLEntryTransfersResponse = RawFPLEntryTransfer[];
+
 // Error types
 export interface APIError extends Error {
   status?: number;
