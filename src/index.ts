@@ -152,4 +152,5 @@ logInfo('🚀 Elysia server started', {
   ],
 });
 
-export default app;
+export { app };
+export type AppInstance = typeof app;
