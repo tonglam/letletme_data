@@ -25,13 +25,13 @@ export function transformEventLive(eventId: number, rawElement: RawFPLEventLiveE
     bps: stats.bps,
     starts: stats.starts > 0,
     expectedGoals: stats.expected_goals,
-  expectedAssists: stats.expected_assists,
-  expectedGoalInvolvements: stats.expected_goal_involvements,
-  expectedGoalsConceded: stats.expected_goals_conceded,
-  inDreamTeam: stats.in_dreamteam,
-  totalPoints: stats.total_points,
-  createdAt: null,
-};
+    expectedAssists: stats.expected_assists,
+    expectedGoalInvolvements: stats.expected_goal_involvements,
+    expectedGoalsConceded: stats.expected_goals_conceded,
+    inDreamTeam: stats.in_dreamteam,
+    totalPoints: stats.total_points,
+    createdAt: null,
+  };
 }
 
 /**

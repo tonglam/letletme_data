@@ -38,4 +38,3 @@ main().catch((e) => {
   console.error('Failed to inspect entry summary', e);
   process.exit(1);
 });
-

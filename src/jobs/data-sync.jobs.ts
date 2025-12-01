@@ -1,10 +1,12 @@
 import { cron } from '@elysiajs/cron';
 import { Elysia } from 'elysia';
 
-import { syncEvents } from '../services/events.service';
-import { syncPhases } from '../services/phases.service';
-import { syncPlayers } from '../services/players.service';
-import { syncTeams } from '../services/teams.service';
+import {
+  enqueueEventsSyncJob,
+  enqueuePhasesSyncJob,
+  enqueuePlayersSyncJob,
+  enqueueTeamsSyncJob,
+} from './data-sync.queue';
 import { logError, logInfo } from '../utils/logger';
 
 /**
@@ -30,8 +32,8 @@ export function registerDataSyncJobs(app: Elysia) {
           async run() {
             logInfo('Cron job started: events-sync');
             try {
-              const result = await syncEvents();
-              logInfo('Cron job completed: events-sync', result);
+              const job = await enqueueEventsSyncJob('cron');
+              logInfo('Events sync job enqueued via cron', { jobId: job.id });
             } catch (error) {
               logError('Cron job failed: events-sync', error);
             }
@@ -47,8 +49,8 @@ export function registerDataSyncJobs(app: Elysia) {
           async run() {
             logInfo('Cron job started: teams-sync');
             try {
-              const result = await syncTeams();
-              logInfo('Cron job completed: teams-sync', result);
+              const job = await enqueueTeamsSyncJob('cron');
+              logInfo('Teams sync job enqueued via cron', { jobId: job.id });
             } catch (error) {
               logError('Cron job failed: teams-sync', error);
             }
@@ -64,8 +66,8 @@ export function registerDataSyncJobs(app: Elysia) {
           async run() {
             logInfo('Cron job started: players-sync');
             try {
-              const result = await syncPlayers();
-              logInfo('Cron job completed: players-sync', result);
+              const job = await enqueuePlayersSyncJob('cron');
+              logInfo('Players sync job enqueued via cron', { jobId: job.id });
             } catch (error) {
               logError('Cron job failed: players-sync', error);
             }
@@ -81,8 +83,8 @@ export function registerDataSyncJobs(app: Elysia) {
           async run() {
             logInfo('Cron job started: phases-sync');
             try {
-              const result = await syncPhases();
-              logInfo('Cron job completed: phases-sync', result);
+              const job = await enqueuePhasesSyncJob('cron');
+              logInfo('Phases sync job enqueued via cron', { jobId: job.id });
             } catch (error) {
               logError('Cron job failed: phases-sync', error);
             }

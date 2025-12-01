@@ -1,4 +1,3 @@
-import { and, eq } from 'drizzle-orm';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 
 import { entryEventTransfers, type DbEntryEventTransferInsert } from '../db/schemas/index.schema';
@@ -34,7 +33,10 @@ export class EntryEventTransfersRepository {
       }
 
       // Choose the most recent transfer within the event
-      const latest = byEvent.reduce((acc, t) => (new Date(t.time) > new Date(acc.time) ? t : acc), byEvent[0]);
+      const latest = byEvent.reduce(
+        (acc, t) => (new Date(t.time) > new Date(acc.time) ? t : acc),
+        byEvent[0],
+      );
 
       const inPts = pointsByElement?.get(latest.element_in) ?? null;
       const outPts = pointsByElement?.get(latest.element_out) ?? null;

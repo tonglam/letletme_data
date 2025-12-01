@@ -1,5 +1,5 @@
 import { index, integer, jsonb, pgTable, uniqueIndex } from 'drizzle-orm/pg-core';
-import { chipEnum } from 'enums.schema';
+import { chipEnum } from './enums.schema';
 import { autoIncrementId, timestamps } from './_helpers.schema';
 import { entryInfos } from './entry-infos.schema';
 import { events } from './events.schema';

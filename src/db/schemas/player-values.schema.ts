@@ -1,5 +1,5 @@
 import { char, index, integer, pgTable, timestamp, uniqueIndex } from 'drizzle-orm/pg-core';
-import { valueChangeTypeEnum } from 'enums.schema';
+import { valueChangeTypeEnum } from './enums.schema';
 import { autoIncrementId } from './_helpers.schema';
 import { events } from './events.schema';
 import { players } from './players.schema';

@@ -93,6 +93,9 @@ cp .env .env.production
 
 # Edit production environment if needed
 nano .env.production
+
+# Validate environment
+bun run env:check
 ```
 
 Your Supabase configuration is already set up in your project environment files.
@@ -145,6 +148,41 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/home/workspace/letletme_data/logs /var/log/letletme
+
+[Install]
+WantedBy=multi-user.target
+```
+
+### Create Worker Service
+
+BullMQ jobs run in a separate worker so API deploys don’t interrupt syncs. Create another unit:
+
+```bash
+sudo nano /etc/systemd/system/letletme-data-worker.service
+```
+
+```ini
+[Unit]
+Description=LetLetMe Data Worker
+After=network.target redis-server.service
+Wants=redis-server.service
+
+[Service]
+Type=simple
+User=deploy
+Group=deploy
+WorkingDirectory=/home/workspace/letletme_data
+Environment=NODE_ENV=production
+Environment=PATH=/home/deploy/.bun/bin:/usr/local/bin:/usr/bin
+ExecStart=/home/deploy/.bun/bin/bun worker:start
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
 
 [Install]
 WantedBy=multi-user.target
@@ -246,16 +284,20 @@ sudo systemctl reload nginx
 ## Step 5: Start Services
 
 ```bash
-# Reload systemd and start service
+# Reload systemd and start services
 sudo systemctl daemon-reload
 sudo systemctl enable letletme-data
 sudo systemctl start letletme-data
+sudo systemctl enable letletme-data-worker
+sudo systemctl start letletme-data-worker
 
 # Check service status
 sudo systemctl status letletme-data
+sudo systemctl status letletme-data-worker
 
 # View logs
 sudo journalctl -u letletme-data -f
+sudo journalctl -u letletme-data-worker -f
 ```
 
 ## Step 6: SSL Certificate (Optional but Recommended)

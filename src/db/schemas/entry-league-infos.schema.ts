@@ -1,5 +1,5 @@
 import { index, integer, pgTable, text, uniqueIndex } from 'drizzle-orm/pg-core';
-import { leagueTypeEnum } from 'enums.schema';
+import { leagueTypeEnum } from './enums.schema';
 import { autoIncrementId, createdAtField } from './_helpers.schema';
 import { entryInfos } from './entry-infos.schema';
 import { events } from './events.schema';

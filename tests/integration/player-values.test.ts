@@ -9,6 +9,7 @@ import {
   getPlayerValuesCount,
   syncCurrentPlayerValues,
 } from '../../src/services/player-values.service';
+import { logInfo } from '../../src/utils/logger';
 
 describe('Player Values Integration Tests', () => {
   let changeDate: string;
@@ -31,7 +32,7 @@ describe('Player Values Integration Tests', () => {
 
       // The result count could be 0 if no prices changed today, which is valid
       expect(result.count).toBeGreaterThanOrEqual(0);
-      console.log(`✅ Daily sync completed: ${result.count} price changes detected`);
+      logInfo('Daily sync completed', { count: result.count });
 
       if (result.count > 0) {
         // If there were changes, verify they were saved
@@ -48,7 +49,7 @@ describe('Player Values Integration Tests', () => {
 
       // Should return 0 since we just synced and no prices changed in the meantime
       expect(result.count).toBe(0);
-      console.log('✅ No duplicate records created on second sync');
+      logInfo('No duplicate records created on second sync');
     }, 30000);
 
     test('should have correct daily cache structure if changes exist', async () => {
@@ -58,9 +59,9 @@ describe('Player Values Integration Tests', () => {
         expect(Array.isArray(cachedChanges)).toBe(true);
         expect(cachedChanges[0]).toHaveProperty('changeDate');
         expect(cachedChanges[0]).toHaveProperty('changeType');
-        console.log(`✅ Daily cache contains ${cachedChanges.length} price changes`);
+        logInfo('Daily cache contains price changes', { count: cachedChanges.length });
       } else {
-        console.log('ℹ️ No cached changes found (no price changes today)');
+        logInfo('No cached changes found (no price changes today)');
         expect(cachedChanges).toBeNull();
       }
     });
@@ -70,7 +71,7 @@ describe('Player Values Integration Tests', () => {
     test('should get player values count', async () => {
       const count = await getPlayerValuesCount();
       expect(count).toBeGreaterThanOrEqual(0);
-      console.log(`✅ Total player value records: ${count}`);
+      logInfo('Total player value records', { count });
     });
 
     test('should get analytics even with minimal data', async () => {
@@ -87,7 +88,7 @@ describe('Player Values Integration Tests', () => {
       expect(analytics.totalFallers).toBeGreaterThanOrEqual(0);
       expect(analytics.totalStable).toBeGreaterThanOrEqual(0);
 
-      console.log('✅ Analytics calculated:', analytics);
+      logInfo('Analytics calculated', analytics);
     });
 
     test('should filter by change type correctly', async () => {
@@ -100,9 +101,11 @@ describe('Player Values Integration Tests', () => {
       expect(Array.isArray(decreases)).toBe(true);
       expect(Array.isArray(stable)).toBe(true);
 
-      console.log(
-        `✅ Change type filtering: ${increases.length} Rise, ${decreases.length} Faller, ${stable.length} Start`,
-      );
+      logInfo('Change type filtering', {
+        rise: increases.length,
+        faller: decreases.length,
+        start: stable.length,
+      });
     });
   });
 
@@ -111,7 +114,7 @@ describe('Player Values Integration Tests', () => {
       const latestValues = await playerValuesRepository.findLatestForAllPlayers();
 
       expect(Array.isArray(latestValues)).toBe(true);
-      console.log(`✅ Latest values retrieved: ${latestValues.length} players have stored values`);
+      logInfo('Latest values retrieved', { playersCount: latestValues.length });
 
       if (latestValues.length > 0) {
         expect(latestValues[0]).toHaveProperty('element_id');
@@ -124,7 +127,7 @@ describe('Player Values Integration Tests', () => {
       const todaysRecords = await playerValuesRepository.findByChangeDate(changeDate);
 
       expect(Array.isArray(todaysRecords)).toBe(true);
-      console.log(`✅ Today's records (${changeDate}): ${todaysRecords.length} records`);
+      logInfo('Records retrieved for date', { changeDate, count: todaysRecords.length });
 
       if (todaysRecords.length > 0) {
         expect(todaysRecords[0].changeDate).toBe(changeDate);
@@ -138,16 +141,17 @@ describe('Player Values Integration Tests', () => {
       const latestValues = await playerValuesRepository.findLatestForAllPlayers();
       const initialCount = await getPlayerValuesCount();
 
-      console.log(
-        `📊 Starting state: ${latestValues.length} players with stored values, ${initialCount} total records`,
-      );
+      logInfo('Starting state', {
+        playersWithValues: latestValues.length,
+        totalRecords: initialCount,
+      });
 
       // Our daily sync should work correctly regardless of whether prices changed
       const result = await syncCurrentPlayerValues();
 
       const finalCount = await getPlayerValuesCount();
 
-      console.log(`📊 After sync: ${result.count} new changes, ${finalCount} total records`);
+      logInfo('After sync', { newChanges: result.count, totalRecords: finalCount });
 
       // Final count should equal initial count plus new changes
       expect(finalCount).toBe(initialCount + result.count);
@@ -165,7 +169,7 @@ describe('Player Values Integration Tests', () => {
 
       // Count should remain the same since no new changes
       expect(afterCount).toBe(beforeCount);
-      console.log('✅ No duplicate records created across multiple syncs');
+      logInfo('No duplicate records created across multiple syncs');
     }, 45000);
   });
 
@@ -177,7 +181,6 @@ describe('Player Values Integration Tests', () => {
     const todayDate = today.toISOString().split('T')[0].replace(/-/g, '');
     const cachedToday = await playerValuesCache.getByDate(todayDate);
     const cacheCount = cachedToday ? cachedToday.length : 0;
-    // eslint-disable-next-line no-console
-    console.log(`PlayerValues state -> DB: ${count}, Redis(today:${todayDate}): ${cacheCount}`);
+    logInfo('PlayerValues state', { db: count, redis: cacheCount, date: todayDate });
   });
 });

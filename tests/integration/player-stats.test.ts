@@ -395,7 +395,6 @@ describe('Player Stats Integration Tests', () => {
         expect(statsAfter.length).toBe(0);
       } catch (_error) {
         // Event might not exist - that's ok for this test
-        console.log('Delete test skipped due to API constraints');
       }
     });
 

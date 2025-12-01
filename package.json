@@ -7,7 +7,12 @@
   "scripts": {
     "start": "NODE_ENV=production bun dist/index.js",
     "dev": "bun --watch src/index.ts",
-    "build": "bun build src/index.ts --target bun --outdir ./dist",
+    "worker": "bun src/worker.ts",
+    "worker:dev": "bun --watch src/worker.ts",
+    "worker:start": "NODE_ENV=production bun dist/worker.js",
+    "jobs:enqueue:events": "bun scripts/enqueue-events-job.ts",
+    "build": "bun build src/index.ts src/worker.ts --target bun --outdir ./dist",
+    "env:check": "bun validate-env.ts",
     "test": "bun test",
     "coverage": "bun test --coverage",
     "lint": "bunx eslint . --ext .ts,.tsx --cache --config eslint.config.mjs",
@@ -54,6 +59,7 @@
   "dependencies": {
     "@elysiajs/cors": "^1.1.1",
     "@elysiajs/cron": "^1.3.0",
+    "bullmq": "^5.65.0",
     "date-fns": "^4.1.0",
     "drizzle-orm": "^0.43.1",
     "elysia": "^1.1.31",

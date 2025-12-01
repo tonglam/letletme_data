@@ -50,7 +50,12 @@ export class EntryHistoryInfoRepository {
             set: { totalPoints, overallRank },
           });
 
-        logInfo('Upserted entry history past season', { entryId, season, totalPoints, overallRank });
+        logInfo('Upserted entry history past season', {
+          entryId,
+          season,
+          totalPoints,
+          overallRank,
+        });
       }
     } catch (error) {
       logError('Failed to upsert entry history info', error, { entryId });

@@ -75,7 +75,12 @@ export async function syncEntryEventTransfers(entryId: number, eventId?: number)
     for (const el of live.elements) {
       pointsByElement.set(el.id, el.stats.total_points);
     }
-    await entryEventTransfersRepository.replaceForEvent(entryId, targetEventId, transfers, pointsByElement);
+    await entryEventTransfersRepository.replaceForEvent(
+      entryId,
+      targetEventId,
+      transfers,
+      pointsByElement,
+    );
     logInfo('Entry event transfers sync completed', { entryId, eventId: targetEventId });
     return { entryId, eventId: targetEventId };
   } catch (error) {

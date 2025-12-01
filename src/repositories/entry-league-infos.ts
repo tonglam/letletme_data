@@ -79,4 +79,3 @@ export class EntryLeagueInfoRepository {
 }
 
 export const entryLeagueInfoRepository = new EntryLeagueInfoRepository();
-

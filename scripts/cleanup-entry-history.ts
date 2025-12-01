@@ -20,9 +20,7 @@ async function main() {
       );
     } else {
       console.log('Deleting all non-season_name rows globally...');
-      await client.unsafe(
-        `DELETE FROM entry_history_infos WHERE season NOT LIKE '____/__';`,
-      );
+      await client.unsafe(`DELETE FROM entry_history_infos WHERE season NOT LIKE '____/__';`);
     }
     console.log('✅ Cleanup complete.');
     process.exit(0);
@@ -33,4 +31,3 @@ async function main() {
 }
 
 main();
-

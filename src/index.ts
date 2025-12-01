@@ -24,6 +24,7 @@ import { registerEntryResultsJobs } from './jobs/entry-results.jobs';
 // Import utilities
 import { getErrorMessage } from './utils/errors';
 import { logError, logInfo } from './utils/logger';
+import { getConfig } from './utils/config';
 
 /**
  * Letletme Data API - Elysia Application
@@ -34,6 +35,9 @@ import { logError, logInfo } from './utils/logger';
  * - Manual job triggers via HTTP API
  * - Structured logging and error handling
  */
+
+// Validate environment and resolve config
+const { port } = getConfig();
 
 const app = new Elysia()
   // ================================
@@ -117,11 +121,14 @@ const app = new Elysia()
   // Server Startup
   // ================================
 
-  .listen(3000);
+  .listen({
+    port,
+    hostname: '0.0.0.0',
+  });
 
-// Log startup
+// Log startup after successful listen
 logInfo('🚀 Elysia server started', {
-  port: 3000,
+  port,
   environment: process.env.NODE_ENV || 'development',
   apis: [
     'events',
@@ -135,7 +142,14 @@ logInfo('🚀 Elysia server started', {
     'phases',
     'jobs',
   ],
-  jobs: ['data-sync', 'live-scores', 'maintenance', 'entry-picks', 'entry-transfers', 'entry-results'],
+  jobs: [
+    'data-sync',
+    'live-scores',
+    'maintenance',
+    'entry-picks',
+    'entry-transfers',
+    'entry-results',
+  ],
 });
 
 export default app;

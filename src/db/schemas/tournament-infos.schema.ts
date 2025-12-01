@@ -5,7 +5,7 @@ import {
   leagueTypeEnum,
   tournamentModeEnum,
   tournamentStateEnum,
-} from 'enums.schema';
+} from './enums.schema';
 import { autoIncrementId, timestamps } from './_helpers.schema';
 import { events } from './events.schema';
 

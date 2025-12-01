@@ -7,7 +7,9 @@ import { logError, logInfo } from '../utils/logger';
 
 type DatabaseInstance = PostgresJsDatabase<Record<string, never>>;
 
-function mapChip(chip: RawFPLEntryEventPicksResponse['active_chip']): 'n/a' | 'wildcard' | 'freehit' | 'bboost' | '3xc' | 'manager' {
+function mapChip(
+  chip: RawFPLEntryEventPicksResponse['active_chip'],
+): 'n/a' | 'wildcard' | 'freehit' | 'bboost' | '3xc' | 'manager' {
   return chip ?? 'n/a';
 }
 
@@ -21,14 +23,18 @@ export class EntryEventPicksRepository {
     return this.db || (await getDb());
   }
 
-  async upsertFromPicks(entryId: number, eventId: number, picks: RawFPLEntryEventPicksResponse): Promise<void> {
+  async upsertFromPicks(
+    entryId: number,
+    eventId: number,
+    picks: RawFPLEntryEventPicksResponse,
+  ): Promise<void> {
     try {
       const db = await this.getDbInstance();
       const insert: DbEntryEventPickInsert = {
         entryId,
         eventId,
         chip: mapChip(picks.active_chip),
-        picks: picks.picks as unknown as any,
+        picks: picks.picks as unknown,
         transfers: picks.entry_history.event_transfers,
         transfersCost: picks.entry_history.event_transfers_cost,
       };
@@ -48,10 +54,13 @@ export class EntryEventPicksRepository {
       logInfo('Upserted entry event picks', { entryId, eventId, chip: insert.chip });
     } catch (error) {
       logError('Failed to upsert entry event picks', error, { entryId, eventId });
-      throw new DatabaseError('Failed to upsert entry event picks', 'ENTRY_EVENT_PICKS_UPSERT_ERROR', error as Error);
+      throw new DatabaseError(
+        'Failed to upsert entry event picks',
+        'ENTRY_EVENT_PICKS_UPSERT_ERROR',
+        error as Error,
+      );
     }
   }
 }
 
 export const entryEventPicksRepository = new EntryEventPicksRepository();
-

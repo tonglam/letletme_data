@@ -19,4 +19,3 @@ main().catch((e) => {
   console.error('sync+inspect failed', e);
   process.exit(1);
 });
-

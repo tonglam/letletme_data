@@ -220,14 +220,14 @@ export class EventLiveRepository {
             bonus: sql`excluded.bonus`,
             bps: sql`excluded.bps`,
             starts: sql`excluded.starts`,
-          expectedGoals: sql`excluded.expected_goals`,
-          expectedAssists: sql`excluded.expected_assists`,
-          expectedGoalInvolvements: sql`excluded.expected_goal_involvements`,
-          expectedGoalsConceded: sql`excluded.expected_goals_conceded`,
-          inDreamTeam: sql`excluded.in_dream_team`,
-          totalPoints: sql`excluded.total_points`,
-        },
-      })
+            expectedGoals: sql`excluded.expected_goals`,
+            expectedAssists: sql`excluded.expected_assists`,
+            expectedGoalInvolvements: sql`excluded.expected_goal_involvements`,
+            expectedGoalsConceded: sql`excluded.expected_goals_conceded`,
+            inDreamTeam: sql`excluded.in_dream_team`,
+            totalPoints: sql`excluded.total_points`,
+          },
+        })
         .returning();
 
       logInfo('Batch upserted event live records', { count: result.length });

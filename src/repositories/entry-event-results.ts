@@ -1,5 +1,4 @@
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
-import { eq } from 'drizzle-orm';
 
 import { entryEventResults, type DbEntryEventResultInsert } from '../db/schemas/index.schema';
 import { getDb } from '../db/singleton';
@@ -35,7 +34,7 @@ export class EntryEventResultsRepository {
       for (const el of live.elements) {
         elementsPoints.set(el.id, el.stats.total_points);
       }
-      const captainPointsBase = captainPick ? elementsPoints.get(captainPick.element) ?? 0 : 0;
+      const captainPointsBase = captainPick ? (elementsPoints.get(captainPick.element) ?? 0) : 0;
       const captainPoints = captainPick ? captainPointsBase * (captainPick.multiplier || 1) : null;
 
       const insert: DbEntryEventResultInsert = {
@@ -51,8 +50,8 @@ export class EntryEventResultsRepository {
         eventChip: activeChip ?? null,
         eventPlayedCaptain: captainPick ? captainPick.element : null,
         eventCaptainPoints: captainPoints,
-        eventPicks: picks.picks as unknown as any,
-        eventAutoSub: (picks as any).automatic_subs as unknown as any,
+        eventPicks: picks.picks as unknown,
+        eventAutoSub: picks.automatic_subs as unknown,
         overallPoints: entryHistory.total_points,
         overallRank: entryHistory.overall_rank ?? 0,
         teamValue: entryHistory.value ?? null,
@@ -97,4 +96,3 @@ export class EntryEventResultsRepository {
 }
 
 export const entryEventResultsRepository = new EntryEventResultsRepository();
-

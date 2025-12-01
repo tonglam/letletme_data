@@ -1,11 +1,7 @@
 import { eq } from 'drizzle-orm';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 
-import {
-  entryInfos,
-  type DbEntryInfo,
-  type DbEntryInfoInsert,
-} from '../db/schemas/index.schema';
+import { entryInfos, type DbEntryInfo, type DbEntryInfoInsert } from '../db/schemas/index.schema';
 import { getDb } from '../db/singleton';
 import type { RawFPLEntrySummary } from '../types';
 import { DatabaseError } from '../utils/errors';
@@ -39,7 +35,11 @@ export class EntryInfoRepository {
       return res[0] || null;
     } catch (error) {
       logError('Failed to find entry info by id', error, { id });
-      throw new DatabaseError('Failed to retrieve entry info', 'ENTRY_INFO_FIND_ERROR', error as Error);
+      throw new DatabaseError(
+        'Failed to retrieve entry info',
+        'ENTRY_INFO_FIND_ERROR',
+        error as Error,
+      );
     }
   }
 
@@ -61,16 +61,16 @@ export class EntryInfoRepository {
         : uniqueNames([currentEntryName]);
 
       // Determine current snapshot values from summary
-      const currentTeamValue = (summary as any).last_deadline_value ?? (summary as any).value ?? null;
-      const currentBank = (summary as any).last_deadline_bank ?? (summary as any).bank ?? null;
+      const currentTeamValue = summary.last_deadline_value ?? summary.value ?? null;
+      const currentBank = summary.last_deadline_bank ?? summary.bank ?? null;
       const currentOverallPoints = summary.summary_overall_points ?? null;
       const currentOverallRank = summary.summary_overall_rank ?? null;
 
       // last_* fields: store previous record's current values; 0 if no previous
       const lastTeamValue = existing ? (existing.teamValue ?? 0) : 0;
       const lastBank = existing ? (existing.bank ?? 0) : 0;
-      const lastOverallPoints = existing ? existing.overallPoints ?? 0 : 0;
-      const lastOverallRank = existing ? existing.overallRank ?? 0 : 0;
+      const lastOverallPoints = existing ? (existing.overallPoints ?? 0) : 0;
+      const lastOverallRank = existing ? (existing.overallRank ?? 0) : 0;
       const lastEntryName = existing ? existing.entryName : null;
 
       const insert: DbEntryInfoInsert = {
@@ -104,7 +104,11 @@ export class EntryInfoRepository {
       return row;
     } catch (error) {
       logError('Failed to upsert entry info', error, { id: summary.id });
-      throw new DatabaseError('Failed to upsert entry info', 'ENTRY_INFO_UPSERT_ERROR', error as Error);
+      throw new DatabaseError(
+        'Failed to upsert entry info',
+        'ENTRY_INFO_UPSERT_ERROR',
+        error as Error,
+      );
     }
   }
 }

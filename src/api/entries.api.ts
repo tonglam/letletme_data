@@ -24,4 +24,3 @@ export const entriesAPI = new Elysia({ prefix: '/entries' })
       params: t.Object({ entryId: t.String() }),
     },
   );
-

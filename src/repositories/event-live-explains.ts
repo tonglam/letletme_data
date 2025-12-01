@@ -43,13 +43,18 @@ export class EventLiveExplainsRepository {
     }
   }
 
-  async findByEventAndElement(eventId: number, elementId: number): Promise<DbEventLiveExplain | null> {
+  async findByEventAndElement(
+    eventId: number,
+    elementId: number,
+  ): Promise<DbEventLiveExplain | null> {
     try {
       const db = await this.getDbInstance();
       const result = await db
         .select()
         .from(eventLiveExplains)
-        .where(and(eq(eventLiveExplains.eventId, eventId), eq(eventLiveExplains.elementId, elementId)));
+        .where(
+          and(eq(eventLiveExplains.eventId, eventId), eq(eventLiveExplains.elementId, elementId)),
+        );
       return result[0] || null;
     } catch (error) {
       logError('Failed to find event live explains by event and element', error, {

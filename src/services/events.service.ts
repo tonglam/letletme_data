@@ -171,9 +171,13 @@ export async function getNextEvent(): Promise<Event | null> {
 export async function syncEvents(): Promise<{ count: number; errors: number }> {
   try {
     logInfo('Starting events sync from FPL API');
+    const syncStart = Date.now();
 
     // 1. Fetch from FPL API
+    const fetchStart = Date.now();
     const bootstrapData = await fplClient.getBootstrap();
+    const fetchDuration = Date.now() - fetchStart;
+    logInfo('Events sync stage completed', { stage: 'fetch', durationMs: fetchDuration });
 
     if (!bootstrapData.events || !Array.isArray(bootstrapData.events)) {
       throw new Error('Invalid events data from FPL API');
@@ -182,27 +186,38 @@ export async function syncEvents(): Promise<{ count: number; errors: number }> {
     logInfo('Raw events data fetched', { count: bootstrapData.events.length });
 
     // 2. Transform to domain events
+    const transformStart = Date.now();
     const events = transformEvents(bootstrapData.events);
+    const transformDuration = Date.now() - transformStart;
     logInfo('Events transformed', {
       total: bootstrapData.events.length,
       successful: events.length,
       errors: bootstrapData.events.length - events.length,
+      durationMs: transformDuration,
     });
 
     // 3. Save to database (batch upsert)
+    const dbStart = Date.now();
     const savedEvents = await eventRepository.upsertBatch(events);
+    const dbDuration = Date.now() - dbStart;
     logInfo('Events upserted to database', { count: savedEvents.length });
+    logInfo('Events sync stage completed', { stage: 'database', durationMs: dbDuration });
 
     // 4. Update cache with full event objects
+    const cacheStart = Date.now();
     await eventsCache.set(savedEvents);
-    logInfo('Events cache updated');
+    const cacheDuration = Date.now() - cacheStart;
+    logInfo('Events cache updated', { durationMs: cacheDuration });
 
     const result = {
       count: savedEvents.length,
       errors: bootstrapData.events.length - events.length,
     };
 
-    logInfo('Events sync completed successfully', result);
+    logInfo('Events sync completed successfully', {
+      ...result,
+      totalDurationMs: Date.now() - syncStart,
+    });
     return result;
   } catch (error) {
     logError('Events sync failed', error);

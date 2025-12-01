@@ -1,11 +1,13 @@
 import { Elysia } from 'elysia';
 
-import { syncEvents } from '../services/events.service';
-import { syncPhases } from '../services/phases.service';
-import { syncPlayers } from '../services/players.service';
-import { syncTeams } from '../services/teams.service';
 import { getErrorMessage } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
+import {
+  enqueueEventsSyncJob,
+  enqueuePhasesSyncJob,
+  enqueuePlayersSyncJob,
+  enqueueTeamsSyncJob,
+} from '../jobs/data-sync.queue';
 
 // Job business logic functions (will be moved to jobs/ later)
 import { getCurrentGameweek, isFPLSeason, isMatchHours, isWeekend } from '../utils/conditions';
@@ -110,10 +112,10 @@ export const jobsAPI = new Elysia({ prefix: '/jobs' })
     const { name } = params;
 
     const jobMap: Record<string, () => Promise<unknown>> = {
-      'events-sync': syncEvents,
-      'teams-sync': syncTeams,
-      'players-sync': syncPlayers,
-      'phases-sync': syncPhases,
+      'events-sync': () => enqueueEventsSyncJob('manual'),
+      'teams-sync': () => enqueueTeamsSyncJob('manual'),
+      'players-sync': () => enqueuePlayersSyncJob('manual'),
+      'phases-sync': () => enqueuePhasesSyncJob('manual'),
       'live-scores': runLiveScores,
       'weekly-rankings': runWeeklyRankings,
       'monthly-cleanup': runMonthlyCleanup,
