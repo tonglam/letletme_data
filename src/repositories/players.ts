@@ -1,4 +1,4 @@
-import { eq, sql } from 'drizzle-orm';
+import { eq, inArray, sql } from 'drizzle-orm';
 
 import { players, type DbPlayer, type DbPlayerInsert } from '../db/schemas/index.schema';
 import { getDb } from '../db/singleton';
@@ -57,6 +57,34 @@ export class PlayerRepository {
         'FIND_BY_ID_ERROR',
         error instanceof Error ? error : undefined,
       );
+    }
+  }
+
+  async findByIds(ids: number[]): Promise<DbPlayer[]> {
+    if (ids.length === 0) {
+      return [];
+    }
+
+    try {
+      const db = await this.getDbInstance();
+      const uniqueIds = Array.from(new Set(ids));
+      const chunks: number[][] = [];
+
+      for (let index = 0; index < uniqueIds.length; index += 1000) {
+        chunks.push(uniqueIds.slice(index, index + 1000));
+      }
+
+      const results: DbPlayer[] = [];
+      for (const chunk of chunks) {
+        const rows = await db.select().from(players).where(inArray(players.id, chunk));
+        results.push(...rows);
+      }
+
+      logInfo('Retrieved players by ids', { count: results.length });
+      return results;
+    } catch (error) {
+      logError('Failed to retrieve players by ids', error);
+      throw new DatabaseError('Failed to retrieve players', 'FIND_BY_IDS_ERROR', error as Error);
     }
   }
 

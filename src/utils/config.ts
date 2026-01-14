@@ -23,6 +23,7 @@ const EnvSchema = z.object({
   // Optional Supabase hints (DB provider)
   SUPABASE_URL: z.string().optional(),
   SUPABASE_KEY: z.string().optional(),
+  PULSELIVE_COMP_SEASON: z.string().optional(),
 });
 
 export type AppConfig = z.infer<typeof EnvSchema>;

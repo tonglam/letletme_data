@@ -36,11 +36,20 @@ async function enqueueDataSyncJob(jobName: DataSyncJobName, source: DataSyncJobS
 export const enqueueEventsSyncJob = (source?: DataSyncJobSource) =>
   enqueueDataSyncJob('events', source);
 
+export const enqueueFixturesSyncJob = (source?: DataSyncJobSource) =>
+  enqueueDataSyncJob('fixtures', source);
+
 export const enqueueTeamsSyncJob = (source?: DataSyncJobSource) =>
   enqueueDataSyncJob('teams', source);
 
 export const enqueuePlayersSyncJob = (source?: DataSyncJobSource) =>
   enqueueDataSyncJob('players', source);
 
+export const enqueuePlayerStatsSyncJob = (source?: DataSyncJobSource) =>
+  enqueueDataSyncJob('player-stats', source);
+
 export const enqueuePhasesSyncJob = (source?: DataSyncJobSource) =>
   enqueueDataSyncJob('phases', source);
+
+export const enqueuePlayerValuesSyncJob = (source?: DataSyncJobSource) =>
+  enqueueDataSyncJob('player-values', source);

@@ -10,6 +10,7 @@ import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
+import type { RowList } from 'postgres';
 import type { PlayerValue } from '../domain/player-values';
 import type {
   ElementTypeId,
@@ -46,6 +47,10 @@ export class PlayerValuesRepository {
     this.db = dbInstance;
   }
 
+  private mapRowList<T>(result: RowList<Record<string, unknown>>): T[] {
+    return [...result] as T[];
+  }
+
   private async getDbInstance() {
     return this.db || (await getDb());
   }
@@ -78,8 +83,9 @@ export class PlayerValuesRepository {
         INNER JOIN teams t ON t.id = p.team_id
         ORDER BY pv.event_id, pv.element_id
       `);
-      logInfo('Retrieved all player values', { count: result.length });
-      return result as unknown as PlayerValueQueryResult[];
+      const rows = this.mapRowList<PlayerValueQueryResult>(result);
+      logInfo('Retrieved all player values', { count: rows.length });
+      return rows;
     } catch (error) {
       logError('Failed to find all player values', error);
       throw new DatabaseError(
@@ -119,8 +125,9 @@ export class PlayerValuesRepository {
         WHERE pv.event_id = ${eventId}
         ORDER BY pv.element_id
       `);
-      logInfo('Retrieved player values by event', { eventId, count: result.length });
-      return result as unknown as PlayerValueQueryResult[];
+      const rows = this.mapRowList<PlayerValueQueryResult>(result);
+      logInfo('Retrieved player values by event', { eventId, count: rows.length });
+      return rows;
     } catch (error) {
       logError('Failed to find player values by event', error, { eventId });
       throw new DatabaseError(
@@ -160,8 +167,9 @@ export class PlayerValuesRepository {
         WHERE pv.element_id = ${playerId}
         ORDER BY pv.event_id
       `);
-      logInfo('Retrieved player values by player', { playerId, count: result.length });
-      return result as unknown as PlayerValueQueryResult[];
+      const rows = this.mapRowList<PlayerValueQueryResult>(result);
+      logInfo('Retrieved player values by player', { playerId, count: rows.length });
+      return rows;
     } catch (error) {
       logError('Failed to find player values by player', error, { playerId });
       throw new DatabaseError(
@@ -229,8 +237,9 @@ export class PlayerValuesRepository {
         ORDER BY pv.event_id, pv.element_id
         `);
 
-      logInfo('Retrieved player values by team', { teamId, eventId, count: result.length });
-      return result as unknown as PlayerValueQueryResult[];
+      const rows = this.mapRowList<PlayerValueQueryResult>(result);
+      logInfo('Retrieved player values by team', { teamId, eventId, count: rows.length });
+      return rows;
     } catch (error) {
       logError('Failed to find player values by team', error, { teamId, eventId });
       throw new DatabaseError(
@@ -301,12 +310,13 @@ export class PlayerValuesRepository {
         ORDER BY pv.event_id, pv.element_id
         `);
 
+      const rows = this.mapRowList<PlayerValueQueryResult>(result);
       logInfo('Retrieved player values by position', {
         elementType,
         eventId,
-        count: result.length,
+        count: rows.length,
       });
-      return result as unknown as PlayerValueQueryResult[];
+      return rows;
     } catch (error) {
       logError('Failed to find player values by position', error, { elementType, eventId });
       throw new DatabaseError(
@@ -377,12 +387,13 @@ export class PlayerValuesRepository {
         ORDER BY pv.event_id, pv.element_id
         `);
 
+      const rows = this.mapRowList<PlayerValueQueryResult>(result);
       logInfo('Retrieved player values by change type', {
         changeType,
         eventId,
-        count: result.length,
+        count: rows.length,
       });
-      return result as unknown as PlayerValueQueryResult[];
+      return rows;
     } catch (error) {
       logError('Failed to find player values by change type', error, { changeType, eventId });
       throw new DatabaseError(
@@ -426,8 +437,13 @@ export class PlayerValuesRepository {
         LIMIT 1
       `);
 
-      logInfo('Retrieved player value by event and player', { eventId, playerId });
-      return (result[0] as unknown as PlayerValueQueryResult) || null;
+      const rows = this.mapRowList<PlayerValueQueryResult>(result);
+      logInfo('Retrieved player value by event and player', {
+        eventId,
+        playerId,
+        found: rows.length > 0,
+      });
+      return rows.length > 0 ? rows[0] : null;
     } catch (error) {
       logError('Failed to find player value by event and player', error, { eventId, playerId });
       throw new DatabaseError(
@@ -605,14 +621,24 @@ export class PlayerValuesRepository {
       const db = await this.getDbInstance();
 
       // Get the most recent record for each player
-      const result = await db.execute(`
-        SELECT DISTINCT ON (element_id) *
-        FROM player_values 
+      const result = await db.execute(sql`
+        SELECT DISTINCT ON (element_id)
+          id,
+          element_id as "elementId",
+          element_type as "elementType",
+          event_id as "eventId",
+          value,
+          change_date as "changeDate",
+          change_type as "changeType",
+          last_value as "lastValue",
+          created_at as "createdAt"
+        FROM player_values
         ORDER BY element_id, created_at DESC
       `);
 
-      logInfo('Retrieved latest values for all players', { count: result.length });
-      return result as unknown as DbPlayerValue[];
+      const rows = this.mapRowList<DbPlayerValue>(result);
+      logInfo('Retrieved latest values for all players', { count: rows.length });
+      return rows;
     } catch (error) {
       logError('Failed to find latest values for all players', error);
       throw new DatabaseError(

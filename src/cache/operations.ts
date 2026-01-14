@@ -4,9 +4,12 @@ import { logDebug, logError, logInfo } from '../utils/logger';
 import { CACHE_TTL, DEFAULT_CACHE_CONFIG, redisSingleton } from './singleton';
 
 import type { EventLive } from '../domain/event-lives';
+import type { EventLiveExplain } from '../domain/event-live-explains';
+import type { EventLiveSummary } from '../domain/event-live-summaries';
+import type { EventOverallResultData } from '../domain/event-overall-results';
 import type { PlayerStat } from '../domain/player-stats';
 import type { PlayerValue } from '../domain/player-values';
-import type { Event, Fixture, Phase, Player, Team } from '../types';
+import type { Event, EventStanding, Fixture, Phase, Player, Team } from '../types';
 import type { ElementTypeId, EventId, PlayerId, TeamId, ValueChangeType } from '../types/base.type';
 
 export class CacheOperations {
@@ -1809,6 +1812,323 @@ export const eventLivesCache = {
       }
     } catch (error) {
       logError('Failed to clear all event lives cache', error);
+      throw error;
+    }
+  },
+};
+
+/**
+ * Event Live Summary Cache Operations
+ * Pattern: EventLiveSummary:season:eventId -> hash of elementId -> summary data
+ */
+export const eventLiveSummaryCache = {
+  async getByEventId(eventId: EventId): Promise<EventLiveSummary[] | null> {
+    try {
+      const redis = await redisSingleton.getClient();
+      const key = `EventLiveSummary:${getCurrentSeason()}:${eventId}`;
+      const hash = await redis.hgetall(key);
+
+      if (!hash || Object.keys(hash).length === 0) {
+        logDebug('Event live summary cache miss', { eventId });
+        return null;
+      }
+
+      const summaries = Object.values(hash).map((value) => JSON.parse(value) as EventLiveSummary);
+      logDebug('Event live summary cache hit', { eventId, count: summaries.length });
+      return summaries;
+    } catch (error) {
+      logError('Event live summary cache get error', error, { eventId });
+      return null;
+    }
+  },
+
+  async set(eventId: EventId, summaries: EventLiveSummary[]): Promise<void> {
+    try {
+      if (summaries.length === 0) {
+        logInfo('No event live summary data to cache', { eventId });
+        return;
+      }
+
+      const redis = await redisSingleton.getClient();
+      const key = `EventLiveSummary:${getCurrentSeason()}:${eventId}`;
+
+      const hashData: Record<string, string> = {};
+      for (const summary of summaries) {
+        hashData[summary.elementId.toString()] = JSON.stringify(summary);
+      }
+
+      await redis.del(key);
+      await redis.hset(key, hashData);
+      await redis.expire(key, CACHE_TTL.EVENT_LIVE_SUMMARY);
+
+      logInfo('Event live summaries cached', { eventId, count: summaries.length });
+    } catch (error) {
+      logError('Event live summary cache set error', error, { eventId, count: summaries.length });
+      throw error;
+    }
+  },
+
+  async clearByEventId(eventId: EventId): Promise<void> {
+    try {
+      const redis = await redisSingleton.getClient();
+      const key = `EventLiveSummary:${getCurrentSeason()}:${eventId}`;
+      await redis.del(key);
+
+      logInfo('Event live summary cache cleared', { eventId });
+    } catch (error) {
+      logError('Failed to clear event live summary cache', error, { eventId });
+      throw error;
+    }
+  },
+
+  async clear(): Promise<void> {
+    try {
+      const redis = await redisSingleton.getClient();
+      const pattern = `${DEFAULT_CACHE_CONFIG.prefix}EventLiveSummary:${getCurrentSeason()}:*`;
+      const keys = await redis.keys(pattern);
+
+      if (keys.length > 0) {
+        await redis.del(...keys);
+        logInfo('All event live summary cache cleared', { deletedKeys: keys.length });
+      } else {
+        logInfo('No event live summary cache to clear');
+      }
+    } catch (error) {
+      logError('Failed to clear all event live summary cache', error);
+      throw error;
+    }
+  },
+};
+
+/**
+ * Event Live Explain Cache Operations
+ * Pattern: EventLiveExplain:season:eventId -> hash of elementId -> explain data
+ */
+export const eventLiveExplainCache = {
+  async getByEventId(eventId: EventId): Promise<EventLiveExplain[] | null> {
+    try {
+      const redis = await redisSingleton.getClient();
+      const key = `EventLiveExplain:${getCurrentSeason()}:${eventId}`;
+      const hash = await redis.hgetall(key);
+
+      if (!hash || Object.keys(hash).length === 0) {
+        logDebug('Event live explain cache miss', { eventId });
+        return null;
+      }
+
+      const explains = Object.values(hash).map((value) => JSON.parse(value) as EventLiveExplain);
+      logDebug('Event live explain cache hit', { eventId, count: explains.length });
+      return explains;
+    } catch (error) {
+      logError('Event live explain cache get error', error, { eventId });
+      return null;
+    }
+  },
+
+  async set(eventId: EventId, explains: EventLiveExplain[]): Promise<void> {
+    try {
+      if (explains.length === 0) {
+        logInfo('No event live explain data to cache', { eventId });
+        return;
+      }
+
+      const redis = await redisSingleton.getClient();
+      const key = `EventLiveExplain:${getCurrentSeason()}:${eventId}`;
+
+      const hashData: Record<string, string> = {};
+      for (const explain of explains) {
+        hashData[explain.elementId.toString()] = JSON.stringify(explain);
+      }
+
+      await redis.del(key);
+      await redis.hset(key, hashData);
+      await redis.expire(key, CACHE_TTL.EVENT_LIVE_EXPLAIN);
+
+      logInfo('Event live explains cached', { eventId, count: explains.length });
+    } catch (error) {
+      logError('Event live explain cache set error', error, { eventId, count: explains.length });
+      throw error;
+    }
+  },
+
+  async clearByEventId(eventId: EventId): Promise<void> {
+    try {
+      const redis = await redisSingleton.getClient();
+      const key = `EventLiveExplain:${getCurrentSeason()}:${eventId}`;
+      await redis.del(key);
+
+      logInfo('Event live explain cache cleared', { eventId });
+    } catch (error) {
+      logError('Failed to clear event live explain cache', error, { eventId });
+      throw error;
+    }
+  },
+
+  async clear(): Promise<void> {
+    try {
+      const redis = await redisSingleton.getClient();
+      const pattern = `${DEFAULT_CACHE_CONFIG.prefix}EventLiveExplain:${getCurrentSeason()}:*`;
+      const keys = await redis.keys(pattern);
+
+      if (keys.length > 0) {
+        await redis.del(...keys);
+        logInfo('All event live explain cache cleared', { deletedKeys: keys.length });
+      } else {
+        logInfo('No event live explain cache to clear');
+      }
+    } catch (error) {
+      logError('Failed to clear all event live explain cache', error);
+      throw error;
+    }
+  },
+};
+
+/**
+ * Event Standings Cache Operations
+ * Pattern: EventStandings:season:eventId -> hash of teamId -> standing data
+ */
+export const eventStandingsCache = {
+  async getByEventId(eventId: EventId): Promise<EventStanding[] | null> {
+    try {
+      const redis = await redisSingleton.getClient();
+      const key = `EventStandings:${getCurrentSeason()}:${eventId}`;
+      const hash = await redis.hgetall(key);
+
+      if (!hash || Object.keys(hash).length === 0) {
+        logDebug('Event standings cache miss', { eventId });
+        return null;
+      }
+
+      const standings = Object.values(hash).map((value) => JSON.parse(value) as EventStanding);
+      standings.sort((a, b) => a.position - b.position);
+      logDebug('Event standings cache hit', { eventId, count: standings.length });
+      return standings;
+    } catch (error) {
+      logError('Event standings cache get error', error, { eventId });
+      return null;
+    }
+  },
+
+  async set(eventId: EventId, standings: EventStanding[]): Promise<void> {
+    try {
+      if (standings.length === 0) {
+        logInfo('No event standings to cache', { eventId });
+        return;
+      }
+
+      const redis = await redisSingleton.getClient();
+      const key = `EventStandings:${getCurrentSeason()}:${eventId}`;
+
+      const hashData: Record<string, string> = {};
+      for (const standing of standings) {
+        hashData[standing.teamId.toString()] = JSON.stringify(standing);
+      }
+
+      await redis.del(key);
+      await redis.hset(key, hashData);
+      await redis.expire(key, CACHE_TTL.EVENT_STANDINGS);
+
+      logInfo('Event standings cached', { eventId, count: standings.length });
+    } catch (error) {
+      logError('Event standings cache set error', error, { eventId, count: standings.length });
+      throw error;
+    }
+  },
+
+  async clearByEventId(eventId: EventId): Promise<void> {
+    try {
+      const redis = await redisSingleton.getClient();
+      const key = `EventStandings:${getCurrentSeason()}:${eventId}`;
+      await redis.del(key);
+
+      logInfo('Event standings cache cleared', { eventId });
+    } catch (error) {
+      logError('Failed to clear event standings cache', error, { eventId });
+      throw error;
+    }
+  },
+
+  async clear(): Promise<void> {
+    try {
+      const redis = await redisSingleton.getClient();
+      const pattern = `${DEFAULT_CACHE_CONFIG.prefix}EventStandings:${getCurrentSeason()}:*`;
+      const keys = await redis.keys(pattern);
+
+      if (keys.length > 0) {
+        await redis.del(...keys);
+        logInfo('All event standings cache cleared', { deletedKeys: keys.length });
+      } else {
+        logInfo('No event standings cache to clear');
+      }
+    } catch (error) {
+      logError('Failed to clear all event standings cache', error);
+      throw error;
+    }
+  },
+};
+
+/**
+ * Event Overall Result Cache Operations
+ * Pattern: EventOverallResult:season -> hash of eventId -> result data
+ */
+export const eventOverallResultCache = {
+  async getAll(): Promise<EventOverallResultData[] | null> {
+    try {
+      const redis = await redisSingleton.getClient();
+      const key = `EventOverallResult:${getCurrentSeason()}`;
+      const hash = await redis.hgetall(key);
+
+      if (!hash || Object.keys(hash).length === 0) {
+        logDebug('Event overall result cache miss');
+        return null;
+      }
+
+      const results = Object.values(hash).map(
+        (value) => JSON.parse(value) as EventOverallResultData,
+      );
+      results.sort((a, b) => a.event - b.event);
+      logDebug('Event overall result cache hit', { count: results.length });
+      return results;
+    } catch (error) {
+      logError('Event overall result cache get error', error);
+      return null;
+    }
+  },
+
+  async setAll(results: EventOverallResultData[]): Promise<void> {
+    try {
+      if (results.length === 0) {
+        logInfo('No event overall results to cache');
+        return;
+      }
+
+      const redis = await redisSingleton.getClient();
+      const key = `EventOverallResult:${getCurrentSeason()}`;
+
+      const hashData: Record<string, string> = {};
+      for (const result of results) {
+        hashData[result.event.toString()] = JSON.stringify(result);
+      }
+
+      await redis.del(key);
+      await redis.hset(key, hashData);
+      await redis.expire(key, CACHE_TTL.EVENT_OVERALL_RESULT);
+
+      logInfo('Event overall results cached', { count: results.length });
+    } catch (error) {
+      logError('Event overall result cache set error', error, { count: results.length });
+      throw error;
+    }
+  },
+
+  async clear(): Promise<void> {
+    try {
+      const redis = await redisSingleton.getClient();
+      const key = `EventOverallResult:${getCurrentSeason()}`;
+      await redis.del(key);
+      logInfo('Event overall result cache cleared');
+    } catch (error) {
+      logError('Failed to clear event overall result cache', error);
       throw error;
     }
   },

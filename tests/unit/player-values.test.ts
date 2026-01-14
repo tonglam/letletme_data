@@ -34,6 +34,7 @@ import {
   transformPlayerValue,
   transformPlayerValues,
   transformPlayerValuesStrict,
+  transformPlayerValuesWithChanges,
 } from '../../src/transformers/player-values';
 import {
   createMockPreviousValuesMap,
@@ -358,6 +359,57 @@ describe('Player Values Unit Tests', () => {
         ];
 
         expect(() => transformPlayerValuesStrict(mixedElements, 15, teamsMap)).toThrow();
+      });
+    });
+
+    describe('Daily change transformation', () => {
+      const changeDate = '20250101';
+
+      test('should label first-time records as Start', () => {
+        const player = { ...singleRawFPLElementFixture, id: 501, now_cost: 60 };
+        const transformed = transformPlayerValuesWithChanges(
+          [player],
+          20,
+          teamsMap,
+          new Map(),
+          changeDate,
+        );
+
+        expect(transformed).toHaveLength(1);
+        expect(transformed[0].changeType).toBe('Start');
+        expect(transformed[0].lastValue).toBe(0);
+      });
+
+      test('should label increases as Rise after initial record', () => {
+        const player = { ...singleRawFPLElementFixture, id: 777, now_cost: 60 };
+        const lastValueMap = new Map<number, number>([[player.id, 55]]);
+
+        const transformed = transformPlayerValuesWithChanges(
+          [player],
+          21,
+          teamsMap,
+          lastValueMap,
+          changeDate,
+        );
+
+        expect(transformed[0].changeType).toBe('Rise');
+        expect(transformed[0].lastValue).toBe(55);
+      });
+
+      test('should label decreases as Faller after initial record', () => {
+        const player = { ...singleRawFPLElementFixture, id: 888, now_cost: 60 };
+        const lastValueMap = new Map<number, number>([[player.id, 65]]);
+
+        const transformed = transformPlayerValuesWithChanges(
+          [player],
+          22,
+          teamsMap,
+          lastValueMap,
+          changeDate,
+        );
+
+        expect(transformed[0].changeType).toBe('Faller');
+        expect(transformed[0].lastValue).toBe(65);
       });
     });
 

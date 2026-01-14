@@ -1,3 +1,4 @@
+import { and, eq, inArray } from 'drizzle-orm';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import { entryEventPicks, type DbEntryEventPickInsert } from '../db/schemas/index.schema';
 import { getDb } from '../db/singleton';
@@ -13,6 +14,18 @@ function mapChip(
   return chip ?? 'n/a';
 }
 
+function chunkArray<T>(items: T[], size: number): T[][] {
+  if (items.length === 0) {
+    return [];
+  }
+
+  const chunks: T[][] = [];
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+  return chunks;
+}
+
 export class EntryEventPicksRepository {
   private db?: DatabaseInstance;
   constructor(dbInstance?: DatabaseInstance) {
@@ -21,6 +34,43 @@ export class EntryEventPicksRepository {
 
   private async getDbInstance() {
     return this.db || (await getDb());
+  }
+
+  async findEntryIdsByEvent(eventId: number, entryIds?: number[]): Promise<number[]> {
+    try {
+      const db = await this.getDbInstance();
+
+      if (!entryIds || entryIds.length === 0) {
+        const rows = await db
+          .select({ entryId: entryEventPicks.entryId })
+          .from(entryEventPicks)
+          .where(eq(entryEventPicks.eventId, eventId));
+        return rows.map((row) => row.entryId);
+      }
+
+      const uniqueEntryIds = Array.from(new Set(entryIds));
+      const chunks = chunkArray(uniqueEntryIds, 1000);
+      const results: number[] = [];
+
+      for (const chunk of chunks) {
+        const rows = await db
+          .select({ entryId: entryEventPicks.entryId })
+          .from(entryEventPicks)
+          .where(
+            and(eq(entryEventPicks.eventId, eventId), inArray(entryEventPicks.entryId, chunk)),
+          );
+        results.push(...rows.map((row) => row.entryId));
+      }
+
+      return results;
+    } catch (error) {
+      logError('Failed to retrieve entry ids by event', error, { eventId });
+      throw new DatabaseError(
+        'Failed to retrieve entry ids by event',
+        'ENTRY_EVENT_PICKS_FIND_ERROR',
+        error as Error,
+      );
+    }
   }
 
   async upsertFromPicks(

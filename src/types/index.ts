@@ -89,6 +89,23 @@ export interface Fixture {
   updatedAt: Date | null;
 }
 
+// Event standings
+export interface EventStanding {
+  eventId: EventID;
+  position: number;
+  teamId: TeamID;
+  teamName: string;
+  teamShortName: string;
+  points: number;
+  played: number;
+  won: number;
+  drawn: number;
+  lost: number;
+  goalsFor: number;
+  goalsAgainst: number;
+  goalsDifference: number;
+}
+
 // Raw FPL API Response types
 export interface RawFPLEvent {
   id: number;
@@ -361,6 +378,59 @@ export interface RawFPLEntryLeagues {
   // other keys exist (cup, cup_matches); ignored
 }
 
+export interface RawFPLLeagueStandingsResult {
+  entry: number;
+}
+
+export interface RawFPLLeagueStandings {
+  results: RawFPLLeagueStandingsResult[];
+  has_next: boolean;
+}
+
+export interface RawFPLLeagueInfo {
+  id: number;
+  name: string;
+}
+
+export interface RawFPLLeagueStandingsResponse {
+  league?: RawFPLLeagueInfo;
+  standings: RawFPLLeagueStandings;
+}
+
+// Pulselive standings (Premier League tables)
+export interface RawPulseLiveStandingsClub {
+  abbr: string;
+}
+
+export interface RawPulseLiveStandingsTeam {
+  club: RawPulseLiveStandingsClub;
+}
+
+export interface RawPulseLiveStandingsOverall {
+  points: number;
+  played: number;
+  won: number;
+  drawn: number;
+  lost: number;
+  goalsFor: number;
+  goalsAgainst: number;
+  goalsDifference: number;
+}
+
+export interface RawPulseLiveStandingsEntry {
+  position: number;
+  team: RawPulseLiveStandingsTeam;
+  overall: RawPulseLiveStandingsOverall;
+}
+
+export interface RawPulseLiveStandingsTable {
+  entries: RawPulseLiveStandingsEntry[];
+}
+
+export interface RawPulseLiveStandingsResponse {
+  tables: RawPulseLiveStandingsTable[];
+}
+
 // Entry event picks (FPL: /api/entry/{entryId}/event/{eventId}/picks/)
 export interface RawFPLEntryEventPickItem {
   element: number;
@@ -404,6 +474,25 @@ export interface RawFPLEntryTransfer {
 }
 
 export type RawFPLEntryTransfersResponse = RawFPLEntryTransfer[];
+
+// Entry cup (FPL: /api/entry/{entryId}/cup/)
+export interface RawFPLEntryCupMatch {
+  event: number;
+  entry_1_entry: number;
+  entry_1_name: string;
+  entry_1_player_name: string;
+  entry_1_points: number | null;
+  entry_2_entry: number;
+  entry_2_name: string;
+  entry_2_player_name: string;
+  entry_2_points: number | null;
+  winner: number | null; // 0 when not decided
+}
+
+export interface RawFPLEntryCupResponse {
+  cup_matches: RawFPLEntryCupMatch[];
+  cup_status?: unknown;
+}
 
 // Error types
 export interface APIError extends Error {

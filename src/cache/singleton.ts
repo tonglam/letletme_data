@@ -192,6 +192,10 @@ export const CACHE_TTL = {
   FIXTURES: 1800, // 30 minutes
   LIVE_DATA: 60, // 1 minute
   EVENT_LIVE: 120, // 2 minutes (live data updates frequently during matches)
+  EVENT_LIVE_SUMMARY: 86400, // 24 hours (season-to-date summary)
+  EVENT_LIVE_EXPLAIN: 120, // 2 minutes (live explain data updates frequently during matches)
+  EVENT_OVERALL_RESULT: 86400, // 24 hours
+  EVENT_STANDINGS: 86400, // 24 hours
   player_values: 7200, // 2 hours (player values change relatively slowly)
 } as const;
 

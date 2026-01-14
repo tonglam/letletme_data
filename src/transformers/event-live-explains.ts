@@ -28,13 +28,6 @@ export interface EventLiveExplainRecord {
   redCardsPoints: number | null;
   saves: number | null;
   savesPoints: number | null;
-  mngWinPoints: number | null;
-  mngDrawPoints: number | null;
-  mngLossPoints: number | null;
-  mngUnderdogWinPoints: number | null;
-  mngUnderdogDrawPoints: number | null;
-  mngCleanSheetsPoints: number | null;
-  mngGoalsScoredPoints: number | null;
 }
 
 type ExplainItem = { stat: string; points: number; value: number };
@@ -113,13 +106,6 @@ export function transformSingleEventLiveExplain(
     redCardsPoints: pts('red_cards'),
     saves: val('saves'),
     savesPoints: pts('saves'),
-    mngWinPoints: null,
-    mngDrawPoints: null,
-    mngLossPoints: null,
-    mngUnderdogWinPoints: null,
-    mngUnderdogDrawPoints: null,
-    mngCleanSheetsPoints: null,
-    mngGoalsScoredPoints: null,
   };
 }
 

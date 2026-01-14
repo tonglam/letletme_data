@@ -36,13 +36,6 @@ export const eventLiveExplains = pgTable(
     redCardsPoints: integer('red_cards_points'),
     saves: integer('saves'),
     savesPoints: integer('saves_points'),
-    mngWinPoints: integer('mng_win_points'),
-    mngDrawPoints: integer('mng_draw_points'),
-    mngLossPoints: integer('mng_loss_points'),
-    mngUnderdogWinPoints: integer('mng_underdog_win_points'),
-    mngUnderdogDrawPoints: integer('mng_underdog_draw_points'),
-    mngCleanSheetsPoints: integer('mng_clean_sheets_points'),
-    mngGoalsScoredPoints: integer('mng_goals_scored_points'),
     ...createdAtField,
   },
   (table) => [

@@ -5,6 +5,8 @@ import {
   RawFPLEventLiveResponse,
   RawFPLFixture,
   RawFPLEntryHistoryResponse,
+  RawFPLLeagueStandingsResponse,
+  RawFPLEntryCupResponse,
   RawFPLEntryTransfersResponse,
 } from '../types';
 import { FPLClientError } from '../utils/errors';
@@ -543,6 +545,93 @@ class FPLClient {
     }
   }
 
+  private async getLeagueStandings(
+    url: string,
+    leagueId: number,
+    page: number,
+    leagueType: 'classic' | 'h2h',
+  ): Promise<RawFPLLeagueStandingsResponse> {
+    try {
+      logInfo('Fetching league standings', { leagueId, page, leagueType, url });
+
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new FPLClientError(
+          `HTTP ${response.status}: ${response.statusText}`,
+          response.status,
+          'HTTP_ERROR',
+        );
+      }
+
+      const data: unknown = await response.json();
+
+      const StandingsResultSchema = z.object({ entry: z.number() }).passthrough();
+      const StandingsSchema = z
+        .object({
+          has_next: z.boolean(),
+          results: z.array(StandingsResultSchema),
+        })
+        .passthrough();
+      const LeagueSchema = z
+        .object({
+          id: z.number(),
+          name: z.string(),
+        })
+        .passthrough();
+      const LeagueStandingsSchema = z
+        .object({ standings: StandingsSchema, league: LeagueSchema.optional() })
+        .passthrough();
+
+      const validated = LeagueStandingsSchema.parse(data);
+      logInfo('Successfully fetched league standings', {
+        leagueId,
+        page,
+        leagueType,
+        entryCount: validated.standings.results.length,
+      });
+      return validated as RawFPLLeagueStandingsResponse;
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        logError('League standings validation failed', error, { leagueId, leagueType, page });
+        throw new FPLClientError(
+          'Invalid league standings format from FPL API',
+          undefined,
+          'VALIDATION_ERROR',
+          error,
+        );
+      }
+
+      if (error instanceof FPLClientError) {
+        logError('FPL client error', error, { leagueId, leagueType, page });
+        throw error;
+      }
+
+      logError('Unexpected error fetching league standings', error, { leagueId, leagueType, page });
+      throw new FPLClientError(
+        'Failed to fetch league standings',
+        undefined,
+        'UNKNOWN_ERROR',
+        error instanceof Error ? error : new Error(String(error)),
+      );
+    }
+  }
+
+  async getLeagueClassicStandings(
+    leagueId: number,
+    page: number,
+  ): Promise<RawFPLLeagueStandingsResponse> {
+    const url = `${this.baseUrl}/leagues-classic/${leagueId}/standings/?page_standings=${page}`;
+    return this.getLeagueStandings(url, leagueId, page, 'classic');
+  }
+
+  async getLeagueH2HStandings(
+    leagueId: number,
+    page: number,
+  ): Promise<RawFPLLeagueStandingsResponse> {
+    const url = `${this.baseUrl}/leagues-h2h/${leagueId}/standings/?page_standings=${page}`;
+    return this.getLeagueStandings(url, leagueId, page, 'h2h');
+  }
+
   async getEntryTransfers(entryId: number): Promise<RawFPLEntryTransfersResponse> {
     const url = `${this.baseUrl}/entry/${entryId}/transfers/`;
     try {
@@ -663,6 +752,72 @@ class FPLClient {
       logError('Unexpected error fetching entry history', error);
       throw new FPLClientError(
         'Failed to fetch entry history',
+        undefined,
+        'UNKNOWN_ERROR',
+        error instanceof Error ? error : new Error(String(error)),
+      );
+    }
+  }
+
+  async getEntryCup(entryId: number): Promise<RawFPLEntryCupResponse> {
+    const url = `${this.baseUrl}/entry/${entryId}/cup/`;
+    try {
+      logInfo('Fetching entry cup', { entryId, url });
+
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new FPLClientError(
+          `HTTP ${response.status}: ${response.statusText}`,
+          response.status,
+          'HTTP_ERROR',
+        );
+      }
+
+      const data: unknown = await response.json();
+
+      const CupMatchSchema = z.object({
+        event: z.number(),
+        entry_1_entry: z.number(),
+        entry_1_name: z.string(),
+        entry_1_player_name: z.string(),
+        entry_1_points: z.number().nullable(),
+        entry_2_entry: z.number(),
+        entry_2_name: z.string(),
+        entry_2_player_name: z.string(),
+        entry_2_points: z.number().nullable(),
+        winner: z.number().nullable(),
+      });
+
+      const CupResponseSchema = z
+        .object({
+          cup_matches: z.array(CupMatchSchema),
+          cup_status: z.unknown().optional(),
+        })
+        .passthrough();
+
+      const validated = CupResponseSchema.parse(data);
+      logInfo('Successfully fetched and validated entry cup', {
+        entryId,
+        matchCount: validated.cup_matches.length,
+      });
+      return validated as RawFPLEntryCupResponse;
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        logError('Entry cup validation failed', error);
+        throw new FPLClientError(
+          'Invalid entry cup format from FPL API',
+          undefined,
+          'VALIDATION_ERROR',
+          error,
+        );
+      }
+      if (error instanceof FPLClientError) {
+        logError('FPL client error', error);
+        throw error;
+      }
+      logError('Unexpected error fetching entry cup', error);
+      throw new FPLClientError(
+        'Failed to fetch entry cup',
         undefined,
         'UNKNOWN_ERROR',
         error instanceof Error ? error : new Error(String(error)),

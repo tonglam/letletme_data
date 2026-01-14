@@ -9,6 +9,7 @@ import {
   getPlayerValuesByChangeType,
   getPlayerValuesByEvent,
   getPlayerValuesByPlayer,
+  getPlayerValuesByDate,
   getPlayerValuesByPosition,
   getPlayerValuesByTeam,
   getPlayerValuesCount,
@@ -59,11 +60,12 @@ export const playerValuesAPI = new Elysia({ prefix: '/player-values' })
 
     const parsedLimit = limit ? parseInt(limit) : undefined;
 
-    return await getFilteredAndSortedPlayerValues(
+    const data = await getFilteredAndSortedPlayerValues(
       cleanFilters,
       sortBy as 'value' | 'change' | 'name' | undefined,
       parsedLimit,
     );
+    return Response.json(data);
   })
 
   .get('/event/:eventId', async ({ params }) => {
@@ -71,7 +73,8 @@ export const playerValuesAPI = new Elysia({ prefix: '/player-values' })
     if (isNaN(eventId)) {
       throw new Error('Invalid event ID');
     }
-    return await getPlayerValuesByEvent(eventId);
+    const data = await getPlayerValuesByEvent(eventId);
+    return Response.json(data);
   })
 
   .get('/player/:playerId', async ({ params }) => {
@@ -79,7 +82,8 @@ export const playerValuesAPI = new Elysia({ prefix: '/player-values' })
     if (isNaN(playerId)) {
       throw new Error('Invalid player ID');
     }
-    return await getPlayerValuesByPlayer(playerId);
+    const data = await getPlayerValuesByPlayer(playerId);
+    return Response.json(data);
   })
 
   .get('/team/:teamId', async ({ params, query }) => {
@@ -93,7 +97,17 @@ export const playerValuesAPI = new Elysia({ prefix: '/player-values' })
       throw new Error('Invalid event ID');
     }
 
-    return await getPlayerValuesByTeam(teamId, eventId);
+    const data = await getPlayerValuesByTeam(teamId, eventId);
+    return Response.json(data);
+  })
+
+  .get('/date/:changeDate', async ({ params }) => {
+    const { changeDate } = params;
+    if (!/^\d{8}$/.test(changeDate)) {
+      throw new Error('Invalid change date (must be YYYYMMDD)');
+    }
+    const data = await getPlayerValuesByDate(changeDate);
+    return Response.json(data);
   })
 
   .get('/position/:position', async ({ params, query }) => {
@@ -107,7 +121,8 @@ export const playerValuesAPI = new Elysia({ prefix: '/player-values' })
       throw new Error('Invalid event ID');
     }
 
-    return await getPlayerValuesByPosition(position, eventId);
+    const data = await getPlayerValuesByPosition(position, eventId);
+    return Response.json(data);
   })
 
   .get('/change-type/:changeType', async ({ params, query }) => {
@@ -121,10 +136,11 @@ export const playerValuesAPI = new Elysia({ prefix: '/player-values' })
       throw new Error('Invalid event ID');
     }
 
-    return await getPlayerValuesByChangeType(
+    const data = await getPlayerValuesByChangeType(
       changeType as 'increase' | 'decrease' | 'stable' | 'unknown',
       eventId,
     );
+    return Response.json(data);
   })
 
   .get('/event/:eventId/player/:playerId', async ({ params }) => {
@@ -143,7 +159,7 @@ export const playerValuesAPI = new Elysia({ prefix: '/player-values' })
       throw new Error('Player value not found');
     }
 
-    return playerValue;
+    return Response.json(playerValue);
   })
 
   .get('/risers/:eventId', async ({ params, query }) => {
@@ -157,7 +173,8 @@ export const playerValuesAPI = new Elysia({ prefix: '/player-values' })
       throw new Error('Invalid limit (must be positive number)');
     }
 
-    return await getTopValueRisersForEvent(eventId, limit);
+    const data = await getTopValueRisersForEvent(eventId, limit);
+    return Response.json(data);
   })
 
   .get('/fallers/:eventId', async ({ params, query }) => {
@@ -171,7 +188,8 @@ export const playerValuesAPI = new Elysia({ prefix: '/player-values' })
       throw new Error('Invalid limit (must be positive number)');
     }
 
-    return await getTopValueFallersForEvent(eventId, limit);
+    const data = await getTopValueFallersForEvent(eventId, limit);
+    return Response.json(data);
   })
 
   .get('/analytics', async ({ query }) => {
@@ -181,11 +199,12 @@ export const playerValuesAPI = new Elysia({ prefix: '/player-values' })
       throw new Error('Invalid event ID');
     }
 
-    return await getPlayerValuesAnalytics(eventId);
+    const data = await getPlayerValuesAnalytics(eventId);
+    return Response.json(data);
   })
 
   .get('/count', async () => {
-    return { count: await getPlayerValuesCount() };
+    return Response.json({ count: await getPlayerValuesCount() });
   })
 
   .post('/sync', async () => {

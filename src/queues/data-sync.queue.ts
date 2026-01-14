@@ -4,7 +4,14 @@ import { getQueueConnection } from '../utils/queue';
 
 export const dataSyncQueueName = 'data-sync';
 
-export type DataSyncJobName = 'events' | 'teams' | 'players' | 'phases';
+export type DataSyncJobName =
+  | 'events'
+  | 'fixtures'
+  | 'teams'
+  | 'players'
+  | 'player-stats'
+  | 'phases'
+  | 'player-values';
 
 export interface DataSyncJobData {
   source?: 'cron' | 'manual' | 'api';

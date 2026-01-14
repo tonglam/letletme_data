@@ -2,8 +2,11 @@ import { QueueEvents, Worker } from 'bullmq';
 
 import { dataSyncQueueName } from '../queues/data-sync.queue';
 import { syncEvents } from '../services/events.service';
+import { syncFixtures } from '../services/fixtures.service';
 import { syncPhases } from '../services/phases.service';
 import { syncPlayers } from '../services/players.service';
+import { syncCurrentPlayerStats } from '../services/player-stats.service';
+import { syncCurrentPlayerValues } from '../services/player-values.service';
 import { syncTeams } from '../services/teams.service';
 import { getQueueConnection } from '../utils/queue';
 import { logError, logInfo } from '../utils/logger';
@@ -61,12 +64,18 @@ export function createDataSyncWorker() {
       switch (job.name) {
         case 'events':
           return finished(() => syncEvents());
+        case 'fixtures':
+          return finished(() => syncFixtures());
         case 'teams':
           return finished(() => syncTeams());
         case 'players':
           return finished(() => syncPlayers());
+        case 'player-stats':
+          return finished(() => syncCurrentPlayerStats());
         case 'phases':
           return finished(() => syncPhases());
+        case 'player-values':
+          return finished(() => syncCurrentPlayerValues());
         default:
           throw new Error(`Unknown data-sync job: ${job.name}`);
       }

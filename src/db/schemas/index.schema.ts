@@ -1,4 +1,5 @@
 export * from './entry-event-picks.schema';
+export * from './entry-event-cup-results.schema';
 export * from './entry-event-results.schema';
 export * from './entry-event-transfers.schema';
 export * from './entry-history-infos.schema';
@@ -8,7 +9,10 @@ export * from './enums.schema';
 export * from './event-fixtures.schema';
 export * from './event-live-explains.schema';
 export * from './event-lives.schema';
+export * from './event-live-summaries.schema';
 export * from './events.schema';
+export * from './event-standings.schema';
+export * from './league-event-results.schema';
 export * from './phases.schema';
 export * from './player-stats.schema';
 export * from './player-values.schema';

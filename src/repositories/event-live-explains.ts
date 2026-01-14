@@ -99,13 +99,6 @@ export class EventLiveExplainsRepository {
         redCardsPoints: r.redCardsPoints,
         saves: r.saves,
         savesPoints: r.savesPoints,
-        mngWinPoints: r.mngWinPoints,
-        mngDrawPoints: r.mngDrawPoints,
-        mngLossPoints: r.mngLossPoints,
-        mngUnderdogWinPoints: r.mngUnderdogWinPoints,
-        mngUnderdogDrawPoints: r.mngUnderdogDrawPoints,
-        mngCleanSheetsPoints: r.mngCleanSheetsPoints,
-        mngGoalsScoredPoints: r.mngGoalsScoredPoints,
       }));
 
       const db = await this.getDbInstance();
@@ -138,13 +131,6 @@ export class EventLiveExplainsRepository {
             redCardsPoints: sql`excluded.red_cards_points`,
             saves: sql`excluded.saves`,
             savesPoints: sql`excluded.saves_points`,
-            mngWinPoints: sql`excluded.mng_win_points`,
-            mngDrawPoints: sql`excluded.mng_draw_points`,
-            mngLossPoints: sql`excluded.mng_loss_points`,
-            mngUnderdogWinPoints: sql`excluded.mng_underdog_win_points`,
-            mngUnderdogDrawPoints: sql`excluded.mng_underdog_draw_points`,
-            mngCleanSheetsPoints: sql`excluded.mng_clean_sheets_points`,
-            mngGoalsScoredPoints: sql`excluded.mng_goals_scored_points`,
           },
         })
         .returning();

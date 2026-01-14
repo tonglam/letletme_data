@@ -15,11 +15,29 @@ import { teamsAPI } from './api/teams.api';
 
 // Import job registration functions
 import { registerDataSyncJobs } from './jobs/data-sync.jobs';
+import { registerEntryInfoJobs } from './jobs/entry-info.jobs';
 import { registerLiveJobs } from './jobs/live.jobs';
-import { registerMaintenanceJobs } from './jobs/maintenance.jobs';
 import { registerEntryPicksJobs } from './jobs/entry-picks.jobs';
 import { registerEntryTransfersJobs } from './jobs/entry-transfers.jobs';
 import { registerEntryResultsJobs } from './jobs/entry-results.jobs';
+import { registerLeagueEventPicksJobs } from './jobs/league-event-picks.jobs';
+import { registerLeagueEventResultsJobs } from './jobs/league-event-results.jobs';
+import { registerEventStandingsJobs } from './jobs/event-standings.jobs';
+import { registerTournamentEventPicksJobs } from './jobs/tournament-event-picks.jobs';
+import { registerTournamentEventResultsJobs } from './jobs/tournament-event-results.jobs';
+import {
+  registerTournamentEventTransfersPostJobs,
+  registerTournamentEventTransfersPreJobs,
+} from './jobs/tournament-event-transfers.jobs';
+import { registerTournamentEventCupResultsJobs } from './jobs/tournament-event-cup-results.jobs';
+import { registerTournamentInfoJobs } from './jobs/tournament-info.jobs';
+import {
+  registerTournamentPointsRaceResultsJobs,
+} from './jobs/tournament-points-race-results.jobs';
+import {
+  registerTournamentBattleRaceResultsJobs,
+} from './jobs/tournament-battle-race-results.jobs';
+import { registerTournamentKnockoutResultsJobs } from './jobs/tournament-knockout-results.jobs';
 
 // Import utilities
 import { getErrorMessage } from './utils/errors';
@@ -112,10 +130,22 @@ const app = new Elysia()
 
   .use(registerDataSyncJobs)
   .use(registerLiveJobs)
-  .use(registerMaintenanceJobs)
+  .use(registerEntryInfoJobs)
   .use(registerEntryPicksJobs)
   .use(registerEntryTransfersJobs)
   .use(registerEntryResultsJobs)
+  .use(registerLeagueEventPicksJobs)
+  .use(registerLeagueEventResultsJobs)
+  .use(registerEventStandingsJobs)
+  .use(registerTournamentEventPicksJobs)
+  .use(registerTournamentEventResultsJobs)
+  .use(registerTournamentEventTransfersPreJobs)
+  .use(registerTournamentEventTransfersPostJobs)
+  .use(registerTournamentEventCupResultsJobs)
+  .use(registerTournamentInfoJobs)
+  .use(registerTournamentPointsRaceResultsJobs)
+  .use(registerTournamentBattleRaceResultsJobs)
+  .use(registerTournamentKnockoutResultsJobs)
 
   // ================================
   // Server Startup
@@ -145,10 +175,25 @@ logInfo('🚀 Elysia server started', {
   jobs: [
     'data-sync',
     'live-scores',
-    'maintenance',
+    'event-live-summary',
+    'event-live-explain',
+    'event-overall-result',
+    'entry-info',
     'entry-picks',
     'entry-transfers',
     'entry-results',
+    'league-event-picks',
+    'league-event-results',
+    'event-standings',
+    'tournament-event-picks',
+    'tournament-event-results',
+    'tournament-event-transfers-pre',
+    'tournament-event-transfers-post',
+    'tournament-event-cup-results',
+    'tournament-info',
+    'tournament-points-race-results',
+    'tournament-battle-race-results',
+    'tournament-knockout-results',
   ],
 });
 

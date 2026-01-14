@@ -117,9 +117,9 @@ describe('Player Values Integration Tests', () => {
       logInfo('Latest values retrieved', { playersCount: latestValues.length });
 
       if (latestValues.length > 0) {
-        expect(latestValues[0]).toHaveProperty('element_id');
+        expect(latestValues[0]).toHaveProperty('elementId');
         expect(latestValues[0]).toHaveProperty('value');
-        expect(latestValues[0]).toHaveProperty('change_date');
+        expect(latestValues[0]).toHaveProperty('changeDate');
       }
     });
 

@@ -1,12 +1,25 @@
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
+import type { RowList } from 'postgres';
 
-import { entryEventResults, type DbEntryEventResultInsert } from '../db/schemas/index.schema';
+import {
+  entryEventResults,
+  type DbEntryEventResult,
+  type DbEntryEventResultInsert,
+} from '../db/schemas/index.schema';
 import { getDb } from '../db/singleton';
 import type { RawFPLEntryEventPicksResponse, RawFPLEventLiveResponse } from '../types';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 
 type DatabaseInstance = PostgresJsDatabase<Record<string, never>>;
+
+type EntryEventTotalsRow = {
+  entryId: number;
+  totalPoints: number;
+  totalTransfersCost: number;
+  totalNetPoints: number;
+};
 
 export class EntryEventResultsRepository {
   private db?: DatabaseInstance;
@@ -16,6 +29,83 @@ export class EntryEventResultsRepository {
 
   private async getDbInstance() {
     return this.db || (await getDb());
+  }
+
+  private mapRowList<T>(result: RowList<Record<string, unknown>>): T[] {
+    return [...result] as T[];
+  }
+
+  async aggregateTotalsByEntry(
+    entryIds: number[],
+    startEventId: number,
+    endEventId: number,
+  ): Promise<EntryEventTotalsRow[]> {
+    if (entryIds.length === 0) {
+      return [];
+    }
+
+    try {
+      const db = await this.getDbInstance();
+      const result = await db.execute(sql`
+        SELECT
+          entry_id as "entryId",
+          COALESCE(SUM(event_points), 0)::int as "totalPoints",
+          COALESCE(SUM(event_transfers_cost), 0)::int as "totalTransfersCost",
+          COALESCE(SUM(event_net_points), 0)::int as "totalNetPoints"
+        FROM entry_event_results
+        WHERE entry_id = ANY(${sql.array(entryIds)})
+          AND event_id >= ${startEventId}
+          AND event_id <= ${endEventId}
+        GROUP BY entry_id
+      `);
+
+      const rows = this.mapRowList<EntryEventTotalsRow>(result);
+      logInfo('Aggregated entry event results totals', { count: rows.length });
+      return rows;
+    } catch (error) {
+      logError('Failed to aggregate entry event results totals', error);
+      throw new DatabaseError(
+        'Failed to aggregate entry event results totals',
+        'ENTRY_EVENT_RESULTS_AGGREGATE_ERROR',
+        error as Error,
+      );
+    }
+  }
+
+  async findByEventAndEntryIds(eventId: number, entryIds: number[]): Promise<DbEntryEventResult[]> {
+    if (entryIds.length === 0) {
+      return [];
+    }
+
+    try {
+      const db = await this.getDbInstance();
+      const uniqueEntryIds = Array.from(new Set(entryIds));
+      const chunks: number[][] = [];
+      for (let index = 0; index < uniqueEntryIds.length; index += 1000) {
+        chunks.push(uniqueEntryIds.slice(index, index + 1000));
+      }
+
+      const results: DbEntryEventResult[] = [];
+      for (const chunk of chunks) {
+        const rows = await db
+          .select()
+          .from(entryEventResults)
+          .where(
+            and(eq(entryEventResults.eventId, eventId), inArray(entryEventResults.entryId, chunk)),
+          );
+        results.push(...rows);
+      }
+
+      logInfo('Retrieved entry event results', { eventId, count: results.length });
+      return results;
+    } catch (error) {
+      logError('Failed to retrieve entry event results', error, { eventId });
+      throw new DatabaseError(
+        'Failed to retrieve entry event results',
+        'ENTRY_EVENT_RESULTS_FIND_ERROR',
+        error as Error,
+      );
+    }
   }
 
   async upsertFromPicksAndLive(

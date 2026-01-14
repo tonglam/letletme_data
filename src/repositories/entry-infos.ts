@@ -1,4 +1,4 @@
-import { eq } from 'drizzle-orm';
+import { eq, inArray } from 'drizzle-orm';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 
 import { entryInfos, type DbEntryInfo, type DbEntryInfoInsert } from '../db/schemas/index.schema';
@@ -37,6 +37,38 @@ export class EntryInfoRepository {
       logError('Failed to find entry info by id', error, { id });
       throw new DatabaseError(
         'Failed to retrieve entry info',
+        'ENTRY_INFO_FIND_ERROR',
+        error as Error,
+      );
+    }
+  }
+
+  async findByIds(ids: number[]): Promise<DbEntryInfo[]> {
+    if (ids.length === 0) {
+      return [];
+    }
+
+    try {
+      const db = await this.getDbInstance();
+      const uniqueIds = Array.from(new Set(ids));
+      const chunks: number[][] = [];
+
+      for (let index = 0; index < uniqueIds.length; index += 1000) {
+        chunks.push(uniqueIds.slice(index, index + 1000));
+      }
+
+      const results: DbEntryInfo[] = [];
+      for (const chunk of chunks) {
+        const rows = await db.select().from(entryInfos).where(inArray(entryInfos.id, chunk));
+        results.push(...rows);
+      }
+
+      logInfo('Retrieved entry infos by ids', { count: results.length });
+      return results;
+    } catch (error) {
+      logError('Failed to retrieve entry infos by ids', error);
+      throw new DatabaseError(
+        'Failed to retrieve entry infos',
         'ENTRY_INFO_FIND_ERROR',
         error as Error,
       );
