@@ -39,6 +39,7 @@ export const createPhaseRepository = (dbInstance?: DatabaseInstance) => {
               startEvent: sql`excluded.start_event`,
               stopEvent: sql`excluded.stop_event`,
               highestScore: sql`excluded.highest_score`,
+              updatedAt: sql`NOW()`,
             },
           })
           .returning();

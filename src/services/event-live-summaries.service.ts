@@ -1,8 +1,8 @@
 import { eventLiveSummaryCache } from '../cache/operations';
 import type { EventLiveSummary } from '../domain/event-live-summaries';
 import { eventLiveSummariesRepository } from '../repositories/event-live-summaries';
-import { getCurrentEvent } from './events.service';
 import { logError, logInfo } from '../utils/logger';
+import { getCurrentEvent } from './events.service';
 
 import type { ElementTypeId } from '../types/base.type';
 
@@ -15,7 +15,7 @@ export async function syncEventLiveSummary(): Promise<{ count: number; eventId: 
 
     logInfo('Starting event live summary sync', { eventId: currentEvent.id });
 
-    const aggregated = await eventLiveSummariesRepository.aggregateSummaries();
+    const aggregated = await eventLiveSummariesRepository.aggregateSummaries(currentEvent.id);
     const summaries: EventLiveSummary[] = aggregated.map((row) => ({
       eventId: currentEvent.id,
       elementId: row.elementId,

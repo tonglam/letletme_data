@@ -111,36 +111,7 @@ describe('Teams Unit Tests', () => {
 
     test('should create repository instance', () => {
       expect(repository).toBeDefined();
-      expect(repository.findAll).toBeDefined();
-      expect(repository.findById).toBeDefined();
       expect(repository.upsertBatch).toBeDefined();
-    });
-
-    test('should handle findAll method', async () => {
-      // Override mock for this test
-      const mockSelect = () => ({
-        from: () => ({
-          orderBy: () => Promise.resolve(transformedTeamsFixture),
-        }),
-      });
-
-      // Temporarily replace the mock
-      const originalSelect = mockDb.select;
-      mockDb.select = mockSelect;
-
-      try {
-        const result = await repository.findAll();
-        expect(Array.isArray(result)).toBe(true);
-        expect(result).toEqual(transformedTeamsFixture);
-      } finally {
-        // Restore original mock
-        mockDb.select = originalSelect;
-      }
-    });
-
-    test('should handle findById method', async () => {
-      const result = await repository.findById(1);
-      expect(result).toBeDefined();
     });
 
     test('should handle upsertBatch with empty array', async () => {
@@ -314,7 +285,6 @@ describe('Teams Unit Tests', () => {
       const errorRepository = createTeamRepository(errorDb as any);
 
       // The errors are wrapped in DatabaseError with custom messages
-      await expect(errorRepository.findAll()).rejects.toThrow('Failed to retrieve teams');
       await expect(errorRepository.upsertBatch([singleTransformedTeamFixture])).rejects.toThrow();
     });
   });

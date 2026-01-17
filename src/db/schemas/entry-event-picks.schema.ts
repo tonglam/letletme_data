@@ -1,7 +1,7 @@
 import { index, integer, jsonb, pgTable, uniqueIndex } from 'drizzle-orm/pg-core';
-import { chipEnum } from './enums.schema';
-import { autoIncrementId, createdAtField } from './_helpers.schema';
+import { autoIncrementId, timestamps } from './_helpers.schema';
 import { entryInfos } from './entry-infos.schema';
+import { chipEnum } from './enums.schema';
 import { events } from './events.schema';
 
 export const entryEventPicks = pgTable(
@@ -18,7 +18,7 @@ export const entryEventPicks = pgTable(
     picks: jsonb('picks'),
     transfers: integer('transfers'),
     transfersCost: integer('transfers_cost'),
-    ...createdAtField,
+    ...timestamps,
   },
   (table) => [
     uniqueIndex('unique_entry_event_pick').on(table.entryId, table.eventId),

@@ -35,4 +35,17 @@ export const phasesCache = {
       throw error;
     }
   },
+
+  async clear(): Promise<void> {
+    try {
+      const redis = await redisSingleton.getClient();
+      const season = getCurrentSeason();
+      const key = `Phase:${season}`;
+      await redis.del(key);
+      logDebug('Phases cache cleared', { season });
+    } catch (error) {
+      logError('Phases cache clear error', error);
+      throw error;
+    }
+  },
 };

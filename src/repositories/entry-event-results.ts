@@ -172,6 +172,7 @@ export const createEntryEventResultsRepository = (dbInstance?: DatabaseInstance)
               overallRank: insert.overallRank,
               teamValue: insert.teamValue,
               bank: insert.bank,
+              updatedAt: new Date(),
             },
           });
 

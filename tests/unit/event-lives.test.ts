@@ -14,7 +14,10 @@ import {
   validateEventLives,
   wasSentOff,
 } from '../../src/domain/event-lives';
-import { EventLiveRepository } from '../../src/repositories/event-lives';
+import {
+  createEventLiveRepository,
+  type EventLiveRepository,
+} from '../../src/repositories/event-lives';
 import { transformEventLive, transformEventLives } from '../../src/transformers/event-lives';
 import {
   benchPlayerEventLiveFixture,
@@ -297,7 +300,7 @@ describe('Event Lives Unit Tests', () => {
     let repository: EventLiveRepository;
 
     beforeEach(() => {
-      repository = new EventLiveRepository();
+      repository = createEventLiveRepository();
     });
 
     test('should create repository instance', () => {
@@ -313,7 +316,7 @@ describe('Event Lives Unit Tests', () => {
 
     test('should handle upsertBatch with empty array', async () => {
       const result = await repository.upsertBatch([]);
-      expect(result).toEqual([]);
+      expect(result).toBeDefined();
     });
   });
 

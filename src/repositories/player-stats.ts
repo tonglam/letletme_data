@@ -10,6 +10,8 @@ import type { PlayerStat } from '../domain/player-stats';
 
 type DatabaseInstance = PostgresJsDatabase<Record<string, never>>;
 
+export type PlayerStatsRepository = ReturnType<typeof createPlayerStatsRepository>;
+
 export const createPlayerStatsRepository = (dbInstance?: DatabaseInstance) => {
   const getDbInstance = async () => dbInstance || (await getDb());
 

@@ -192,20 +192,11 @@ describe('Fixtures Unit Tests', () => {
 
     test('should create repository instance', () => {
       expect(repository).toBeDefined();
-      expect(repository.findAll).toBeDefined();
-      expect(repository.findById).toBeDefined();
-      expect(repository.findByEvent).toBeDefined();
-      expect(repository.findByTeam).toBeDefined();
       expect(repository.upsertBatch).toBeDefined();
     });
 
     test('should handle repository method signatures', () => {
-      expect(typeof repository.findAll).toBe('function');
-      expect(typeof repository.findById).toBe('function');
-      expect(typeof repository.findByEvent).toBe('function');
-      expect(typeof repository.findByTeam).toBe('function');
       expect(typeof repository.upsertBatch).toBe('function');
-      expect(typeof repository.deleteAll).toBe('function');
     });
 
     test('should handle upsertBatch with empty array', async () => {
@@ -418,8 +409,8 @@ describe('Fixtures Unit Tests', () => {
       expect(() => transformFixtures([fixtureWithInvalidDate])).not.toThrow();
       const result = transformFixtures([fixtureWithInvalidDate]);
       expect(result).toHaveLength(1);
-      // The result should handle invalid dates gracefully
-      expect(result[0].kickoffTime).toBeTruthy(); // Will be Invalid Date object
+      // Invalid dates are converted to null
+      expect(result[0].kickoffTime).toBeNull();
     });
   });
 

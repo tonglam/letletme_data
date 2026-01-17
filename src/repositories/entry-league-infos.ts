@@ -53,6 +53,7 @@ export const createEntryLeagueInfoRepository = (dbInstance?: DatabaseInstance) =
                 startedEvent: insert.startedEvent,
                 entryRank: insert.entryRank,
                 entryLastRank: insert.entryLastRank,
+                updatedAt: new Date(),
               },
             });
           logInfo('Upserted entry league info', {

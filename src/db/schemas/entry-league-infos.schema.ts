@@ -1,7 +1,7 @@
 import { index, integer, pgTable, text, uniqueIndex } from 'drizzle-orm/pg-core';
-import { leagueTypeEnum } from './enums.schema';
-import { autoIncrementId, createdAtField } from './_helpers.schema';
+import { autoIncrementId, timestamps } from './_helpers.schema';
 import { entryInfos } from './entry-infos.schema';
+import { leagueTypeEnum } from './enums.schema';
 import { events } from './events.schema';
 
 export const entryLeagueInfos = pgTable(
@@ -17,7 +17,7 @@ export const entryLeagueInfos = pgTable(
     startedEvent: integer('started_event').references(() => events.id),
     entryRank: integer('entry_rank'),
     entryLastRank: integer('entry_last_rank'),
-    ...createdAtField,
+    ...timestamps,
   },
   (table) => [
     uniqueIndex('unique_entry_league_info').on(table.entryId, table.leagueId),

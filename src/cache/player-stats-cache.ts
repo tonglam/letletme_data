@@ -153,4 +153,12 @@ export const playerStatsCache = {
   async setByEvent(eventId: EventId, playerStats: PlayerStat[]): Promise<void> {
     return playerStatsHashCacheInstance.setPlayerStatsByEvent(eventId, playerStats);
   },
+
+  async clearAll(): Promise<void> {
+    return playerStatsHashCacheInstance.clearAll();
+  },
+
+  async clearByEvent(eventId: EventId): Promise<void> {
+    return playerStatsHashCacheInstance.clearByEvent(eventId);
+  },
 };

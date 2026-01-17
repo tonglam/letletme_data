@@ -1,5 +1,5 @@
 import { boolean, decimal, index, integer, pgTable, uniqueIndex } from 'drizzle-orm/pg-core';
-import { autoIncrementId, createdAtField } from './_helpers.schema';
+import { autoIncrementId, timestamps } from './_helpers.schema';
 import { events } from './events.schema';
 import { players } from './players.schema';
 
@@ -39,7 +39,7 @@ export const eventLive = pgTable(
     }),
     inDreamTeam: boolean('in_dream_team'),
     totalPoints: integer('total_points').default(0).notNull(),
-    ...createdAtField,
+    ...timestamps,
   },
   (table) => [
     uniqueIndex('unique_event_live').on(table.eventId, table.elementId),

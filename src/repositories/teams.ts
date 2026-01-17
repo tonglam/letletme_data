@@ -71,6 +71,7 @@ export const createTeamRepository = (dbInstance?: DatabaseInstance) => {
               strengthDefenceHome: sql`excluded.strength_defence_home`,
               strengthDefenceAway: sql`excluded.strength_defence_away`,
               pulseId: sql`excluded.pulse_id`,
+              updatedAt: sql`NOW()`,
             },
           })
           .returning();

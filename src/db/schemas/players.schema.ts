@@ -1,5 +1,5 @@
 import { integer, pgTable, text } from 'drizzle-orm/pg-core';
-import { createdAtField } from './_helpers.schema';
+import { timestamps } from './_helpers.schema';
 import { teams } from './teams.schema';
 
 export const players = pgTable('players', {
@@ -14,7 +14,7 @@ export const players = pgTable('players', {
   firstName: text('first_name'),
   secondName: text('second_name'),
   webName: text('web_name').notNull(),
-  ...createdAtField,
+  ...timestamps,
 });
 
 export type DbPlayer = Readonly<typeof players.$inferSelect>;

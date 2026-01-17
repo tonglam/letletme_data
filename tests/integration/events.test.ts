@@ -1,20 +1,12 @@
 import { beforeAll, describe, expect, test } from 'bun:test';
 
 import { eventRepository } from '../../src/repositories/events';
-import {
-  clearEventsCache,
-  getCurrentEvent,
-  getNextEvent,
-  syncEvents,
-} from '../../src/services/events.service';
+import { getCurrentEvent, getNextEvent, syncEvents } from '../../src/services/events.service';
 
 describe('Events Integration Tests', () => {
   beforeAll(async () => {
-    // SINGLE setup - one API call for entire test suite
-    await clearEventsCache();
-    // Don't delete events - they may have foreign key references from other tables
-    // syncEvents uses upsert which will update existing records
-    await syncEvents(); // ONLY API call in entire test suite - tests: FPL API → DB → Redis
+    // Sync events once for all tests
+    await syncEvents();
   });
 
   describe('External Data Integration', () => {
@@ -29,6 +21,14 @@ describe('Events Integration Tests', () => {
       expect(nextEvent).toBeDefined();
       expect(nextEvent?.isNext).toBe(true);
     });
+
+    test('should have valid event structure', async () => {
+      const currentEvent = await eventRepository.findCurrent();
+      expect(currentEvent).toBeDefined();
+      expect(typeof currentEvent?.id).toBe('number');
+      expect(typeof currentEvent?.name).toBe('string');
+      expect(typeof currentEvent?.finished).toBe('boolean');
+    });
   });
 
   describe('Service Layer Integration', () => {
@@ -42,6 +42,12 @@ describe('Events Integration Tests', () => {
       const nextEvent = await getNextEvent();
       expect(nextEvent).toBeDefined();
       expect(nextEvent?.isNext).toBe(true);
+    });
+
+    test('should sync events successfully', async () => {
+      const result = await syncEvents();
+      expect(result.count).toBeGreaterThan(0);
+      expect(result.errors).toBeGreaterThanOrEqual(0);
     });
   });
 });

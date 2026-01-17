@@ -1,5 +1,5 @@
 import { integer, pgTable, text } from 'drizzle-orm/pg-core';
-import { createdAtField } from './_helpers.schema';
+import { timestamps } from './_helpers.schema';
 import { events } from './events.schema';
 
 export const entryInfos = pgTable('entry_infos', {
@@ -19,7 +19,7 @@ export const entryInfos = pgTable('entry_infos', {
   lastOverallRank: integer('last_overall_rank'),
   lastTeamValue: integer('last_team_value'),
   usedEntryNames: text('used_entry_names').array().default([]),
-  ...createdAtField,
+  ...timestamps,
 });
 
 export type DbEntryInfo = Readonly<typeof entryInfos.$inferSelect>;

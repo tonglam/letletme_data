@@ -82,6 +82,7 @@ bun.lockb
 .env.test.local
 .env.production.local
 .env.local
+.env.bak
 
 # parcel-bundler cache (https://parceljs.org/)
 .cache

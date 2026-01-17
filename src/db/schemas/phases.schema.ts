@@ -1,5 +1,5 @@
 import { integer, pgTable, text } from 'drizzle-orm/pg-core';
-import { createdAtField } from './_helpers.schema';
+import { timestamps } from './_helpers.schema';
 import { events } from './events.schema';
 
 export const phases = pgTable('phases', {
@@ -12,7 +12,7 @@ export const phases = pgTable('phases', {
     .notNull()
     .references(() => events.id),
   highestScore: integer('highest_score'),
-  ...createdAtField,
+  ...timestamps,
 });
 
 export type DbPhase = Readonly<typeof phases.$inferSelect>;

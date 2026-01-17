@@ -1,5 +1,5 @@
 import { integer, pgTable, text } from 'drizzle-orm/pg-core';
-import { createdAtField } from './_helpers.schema';
+import { timestamps } from './_helpers.schema';
 
 export const teams = pgTable('teams', {
   id: integer('id').primaryKey(),
@@ -23,7 +23,7 @@ export const teams = pgTable('teams', {
   strengthDefenceHome: integer('strength_defence_home').default(1000).notNull(),
   strengthDefenceAway: integer('strength_defence_away').default(1000).notNull(),
   pulseId: integer('pulse_id').notNull().unique(),
-  ...createdAtField,
+  ...timestamps,
 });
 
 export type DbTeam = Readonly<typeof teams.$inferSelect>;

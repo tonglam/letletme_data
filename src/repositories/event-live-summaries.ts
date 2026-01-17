@@ -41,7 +41,7 @@ export const createEventLiveSummariesRepository = (dbInstance?: DatabaseInstance
   const getDbInstance = async () => dbInstance || (await getDb());
 
   return {
-    aggregateSummaries: async (): Promise<EventLiveSummaryAggregateRow[]> => {
+    aggregateSummaries: async (eventId: number): Promise<EventLiveSummaryAggregateRow[]> => {
       try {
         const db = await getDbInstance();
         const result = await db.execute(sql`
@@ -65,6 +65,7 @@ export const createEventLiveSummariesRepository = (dbInstance?: DatabaseInstance
           COALESCE(SUM(el.total_points), 0)::int as "totalPoints"
         FROM event_lives el
         INNER JOIN players p ON p.id = el.element_id
+        WHERE el.event_id = ${eventId}
         GROUP BY el.element_id, p.type, p.team_id
         ORDER BY el.element_id
       `);

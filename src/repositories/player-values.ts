@@ -16,6 +16,8 @@ interface ValueRecord {
 
 type DatabaseInstance = PostgresJsDatabase<Record<string, never>>;
 
+export type PlayerValuesRepository = ReturnType<typeof createPlayerValuesRepository>;
+
 export const createPlayerValuesRepository = (dbInstance?: DatabaseInstance) => {
   const getDbInstance = async () => dbInstance || (await getDb());
 

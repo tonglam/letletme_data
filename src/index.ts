@@ -2,13 +2,13 @@ import { cors } from '@elysiajs/cors';
 import { Elysia } from 'elysia';
 
 // Import API route groups
+import { entryInfoAPI } from './api/entry-info.api';
+import { entrySyncAPI } from './api/entry-sync.api';
 import { eventLivesAPI } from './api/event-lives.api';
 import { eventsAPI } from './api/events.api';
 import { fixturesAPI } from './api/fixtures.api';
 import { jobsAPI } from './api/jobs.api';
 import { phasesAPI } from './api/phases.api';
-import { entryInfoAPI } from './api/entry-info.api';
-import { entrySyncAPI } from './api/entry-sync.api';
 import { playerStatsAPI } from './api/player-stats.api';
 import { playerValuesAPI } from './api/player-values.api';
 import { playersAPI } from './api/players.api';
@@ -17,15 +17,14 @@ import { teamsAPI } from './api/teams.api';
 // Import job registration functions
 import { registerDataJobs } from './jobs/data-jobs';
 import { registerEntryJobs } from './jobs/entry-sync.jobs';
-import { registerEventStandingsJobs } from './jobs/event-standings.jobs';
 import { registerLeagueJobs } from './jobs/league-jobs';
 import { registerLiveJobs } from './jobs/live.jobs';
 import { registerTournamentJobs } from './jobs/tournament-jobs';
 
 // Import utilities
+import { getConfig } from './utils/config';
 import { getErrorMessage } from './utils/errors';
 import { logError, logInfo } from './utils/logger';
-import { getConfig } from './utils/config';
 
 /**
  * Letletme Data API - Elysia Application
@@ -116,7 +115,6 @@ const app = new Elysia()
   .use(registerLiveJobs)
   .use(registerEntryJobs)
   .use(registerLeagueJobs)
-  .use(registerEventStandingsJobs)
   .use(registerTournamentJobs)
 
   // ================================
@@ -157,7 +155,6 @@ logInfo('🚀 Elysia server started', {
     'entry-results',
     'league-event-picks',
     'league-event-results',
-    'event-standings',
     'tournament-event-picks',
     'tournament-event-results',
     'tournament-event-transfers-pre',

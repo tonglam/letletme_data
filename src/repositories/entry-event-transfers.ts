@@ -77,6 +77,7 @@ export const createEntryEventTransfersRepository = (dbInstance?: DatabaseInstanc
               elementOutCost: row.elementOutCost,
               elementOutPoints: row.elementOutPoints,
               transferTime: row.transferTime,
+              updatedAt: new Date(),
             },
           });
         }

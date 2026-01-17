@@ -9,7 +9,6 @@ import {
   enqueuePlayerValuesSyncJob,
   enqueueTeamsSyncJob,
 } from '../jobs/data-sync.queue';
-import { runEventStandingsSync } from '../jobs/event-standings.jobs';
 import { runLeagueEventPicksSync } from '../jobs/league-event-picks.jobs';
 import { runLeagueEventResultsSync } from '../jobs/league-event-results.jobs';
 import {
@@ -271,7 +270,6 @@ export const jobsAPI = new Elysia({ prefix: '/jobs' })
         }
         await enqueueEventOverallResult(currentEvent.id, 'manual');
       },
-      'event-standings-sync': runEventStandingsSync,
       'live-scores': runLiveScores,
     };
 

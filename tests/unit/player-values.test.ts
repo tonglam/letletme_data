@@ -22,7 +22,10 @@ import {
   validatePlayerValues,
   validateRawPlayerValue,
 } from '../../src/domain/player-values';
-import { PlayerValuesRepository } from '../../src/repositories/player-values';
+import {
+  createPlayerValuesRepository,
+  type PlayerValuesRepository,
+} from '../../src/repositories/player-values';
 import {
   createPreviousValuesMap,
   createTeamsMap,
@@ -261,11 +264,15 @@ describe('Player Values Unit Tests', () => {
     let repository: PlayerValuesRepository;
 
     beforeEach(() => {
-      repository = new PlayerValuesRepository();
+      repository = createPlayerValuesRepository();
     });
 
     test('should create repository instance', () => {
-      expect(repository).toBeInstanceOf(PlayerValuesRepository);
+      expect(repository).toBeDefined();
+      expect(typeof repository.findLatestForAllPlayers).toBe('function');
+      expect(typeof repository.findByChangeDate).toBe('function');
+      expect(typeof repository.hasChangesForDate).toBe('function');
+      expect(typeof repository.insertBatch).toBe('function');
     });
   });
 

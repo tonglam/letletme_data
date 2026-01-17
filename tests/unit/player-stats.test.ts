@@ -23,7 +23,10 @@ import {
   validatePlayerStats,
   validateRawPlayerStat,
 } from '../../src/domain/player-stats';
-import { PlayerStatsRepository } from '../../src/repositories/player-stats';
+import {
+  createPlayerStatsRepository,
+  type PlayerStatsRepository,
+} from '../../src/repositories/player-stats';
 import {
   createTeamsMap,
   extractPlayerIds,
@@ -446,7 +449,7 @@ describe('Player Stats Unit Tests', () => {
         delete: () => Promise.resolve(undefined),
       };
 
-      repository = new PlayerStatsRepository();
+      repository = createPlayerStatsRepository();
       // Note: Real repository uses singleton db, this is just for testing structure
     });
 

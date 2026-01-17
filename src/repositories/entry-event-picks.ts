@@ -93,6 +93,7 @@ export const createEntryEventPicksRepository = (dbInstance?: DatabaseInstance) =
               picks: insert.picks,
               transfers: insert.transfers,
               transfersCost: insert.transfersCost,
+              updatedAt: new Date(),
             },
           });
         logInfo('Upserted entry event picks', { entryId, eventId, chip: insert.chip });

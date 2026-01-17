@@ -1,5 +1,5 @@
 import { boolean, index, integer, pgTable, timestamp } from 'drizzle-orm/pg-core';
-import { autoIncrementId, createdAtField } from './_helpers.schema';
+import { autoIncrementId, timestamps } from './_helpers.schema';
 import { entryInfos } from './entry-infos.schema';
 import { events } from './events.schema';
 import { players } from './players.schema';
@@ -22,7 +22,7 @@ export const entryEventTransfers = pgTable(
     elementOutCost: integer('element_out_cost'),
     elementOutPoints: integer('element_out_points'),
     transferTime: timestamp('transfer_time', { withTimezone: true }).notNull(),
-    ...createdAtField,
+    ...timestamps,
   },
   (table) => [index('idx_entry_event_transfers_entry_id').on(table.entryId)],
 );

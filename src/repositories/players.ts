@@ -90,6 +90,7 @@ export const createPlayerRepository = (dbInstance?: DatabaseInstance) => {
               firstName: sql`excluded.first_name`,
               secondName: sql`excluded.second_name`,
               webName: sql`excluded.web_name`,
+              updatedAt: sql`NOW()`,
             },
           })
           .returning();

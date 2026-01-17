@@ -12,5 +12,5 @@ export async function syncEntryInfo(entryId: number) {
   await entryHistoryInfoRepository.upsertFromHistory(entryId, history);
   await entryLeagueInfoRepository.upsertFromLeagues(entryId, summary.leagues);
   logInfo('Entry info sync completed', { entryId });
-  return { id: saved.id };
+  return saved;
 }

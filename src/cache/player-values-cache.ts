@@ -7,6 +7,8 @@ const getDateKey = (changeDate: string): string => {
   return `${DEFAULT_CACHE_CONFIG.prefix}PlayerValue:${changeDate}`;
 };
 
+export type PlayerValuesHashCache = ReturnType<typeof createPlayerValuesHashCache>;
+
 export const createPlayerValuesHashCache = () => {
   return {
     getByDate: async (changeDate: string): Promise<PlayerValue[] | null> => {
@@ -72,5 +74,8 @@ export const playerValuesCache = {
   },
   setByDate(changeDate: string, values: PlayerValue[]) {
     return playerValuesHashCacheInstance.setByDate(changeDate, values);
+  },
+  clearByDate(changeDate: string) {
+    return playerValuesHashCacheInstance.clearByDate(changeDate);
   },
 };

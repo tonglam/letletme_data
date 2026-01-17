@@ -74,18 +74,20 @@ export function transformFixtures(rawFixtures: RawFPLFixture[]): Fixture[] {
     });
   }
 
-  if (fixtures.length === 0) {
+  if (fixtures.length === 0 && rawFixtures.length > 0) {
     throw new ValidationError('No valid fixtures were transformed', 'ALL_FIXTURES_INVALID', {
       originalCount: rawFixtures.length,
       errors,
     });
   }
 
-  logInfo('Fixtures transformation completed', {
-    totalInput: rawFixtures.length,
-    successfulOutput: fixtures.length,
-    skippedCount: errors.length,
-  });
+  if (rawFixtures.length > 0) {
+    logInfo('Fixtures transformation completed', {
+      totalInput: rawFixtures.length,
+      successfulOutput: fixtures.length,
+      skippedCount: errors.length,
+    });
+  }
 
   return fixtures;
 }

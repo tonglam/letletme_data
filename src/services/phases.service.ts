@@ -12,6 +12,11 @@ import { logError, logInfo } from '../utils/logger';
  * - Database operations
  */
 
+// Clear phases cache
+export async function clearPhasesCache(): Promise<void> {
+  await phasesCache.clear();
+}
+
 // Sync phases from FPL API
 export async function syncPhases(): Promise<{ count: number; errors: number }> {
   try {

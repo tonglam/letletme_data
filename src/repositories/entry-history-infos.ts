@@ -39,7 +39,11 @@ export const createEntryHistoryInfoRepository = (dbInstance?: DatabaseInstance) 
             .values(insert)
             .onConflictDoUpdate({
               target: [entryHistoryInfos.entryId, entryHistoryInfos.season],
-              set: { totalPoints, overallRank },
+              set: {
+                totalPoints,
+                overallRank,
+                updatedAt: new Date(),
+              },
             });
 
           logInfo('Upserted entry history past season', {

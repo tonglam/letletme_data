@@ -13,6 +13,8 @@ import { logError, logInfo } from '../utils/logger';
 
 type DatabaseInstance = PostgresJsDatabase<Record<string, never>>;
 
+export type EventLiveRepository = ReturnType<typeof createEventLiveRepository>;
+
 /**
  * EventLiveRepository - Data Access Layer
  *
@@ -106,6 +108,7 @@ export const createEventLiveRepository = (dbInstance?: DatabaseInstance) => {
               expectedGoalsConceded: sql`excluded.expected_goals_conceded`,
               inDreamTeam: sql`excluded.in_dream_team`,
               totalPoints: sql`excluded.total_points`,
+              updatedAt: sql`NOW()`,
             },
           })
           .returning();

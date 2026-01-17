@@ -249,4 +249,8 @@ export const playersCache = {
   async set(players: Player[]): Promise<void> {
     return playerHashCacheInstance.setAllPlayers(players);
   },
+
+  async clear(): Promise<void> {
+    return playerHashCacheInstance.clear();
+  },
 };

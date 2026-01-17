@@ -110,7 +110,13 @@ export const createEntryInfoRepository = (dbInstance?: DatabaseInstance) => {
         const result = await db
           .insert(entryInfos)
           .values(insert)
-          .onConflictDoUpdate({ target: entryInfos.id, set: insert })
+          .onConflictDoUpdate({
+            target: entryInfos.id,
+            set: {
+              ...insert,
+              updatedAt: new Date(),
+            },
+          })
           .returning();
 
         const row = result[0];

@@ -89,23 +89,6 @@ export interface Fixture {
   updatedAt: Date | null;
 }
 
-// Event standings
-export interface EventStanding {
-  eventId: EventID;
-  position: number;
-  teamId: TeamID;
-  teamName: string;
-  teamShortName: string;
-  points: number;
-  played: number;
-  won: number;
-  drawn: number;
-  lost: number;
-  goalsFor: number;
-  goalsAgainst: number;
-  goalsDifference: number;
-}
-
 // Raw FPL API Response types
 export interface RawFPLEvent {
   id: number;
