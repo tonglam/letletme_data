@@ -1,54 +1,23 @@
-import { cron } from '@elysiajs/cron';
 import type { Elysia } from 'elysia';
 
-import { getCurrentEvent } from '../services/events.service';
-import { getFixturesByEvent } from '../services/fixtures.service';
-import { syncTournamentPointsRaceResults } from '../services/tournament-points-race-results.service';
-import { isAfterMatchDay, isFPLSeason } from '../utils/conditions';
-import { logError, logInfo } from '../utils/logger';
+import { logInfo } from '../utils/logger';
+
+/**
+ * Tournament Points Race Results Sync
+ *
+ * NOTE: This is now part of the tournament cascade.
+ * Triggered automatically after tournament-event-results completes.
+ * No separate cron needed.
+ */
 
 export async function runTournamentPointsRaceResultsSync() {
-  const now = new Date();
-  if (!isFPLSeason(now)) {
-    logInfo('Skipping tournament points race results sync - not FPL season', {
-      month: now.getMonth() + 1,
-    });
-    return;
-  }
-
-  const currentEvent = await getCurrentEvent();
-  if (!currentEvent) {
-    logInfo('Skipping tournament points race results sync - no current event');
-    return;
-  }
-
-  const fixtures = await getFixturesByEvent(currentEvent.id);
-  if (!isAfterMatchDay(currentEvent, fixtures, now)) {
-    logInfo('Skipping tournament points race results sync - conditions not met', {
-      eventId: currentEvent.id,
-    });
-    return;
-  }
-
-  logInfo('Tournament points race results sync started', { eventId: currentEvent.id });
-  const result = await syncTournamentPointsRaceResults(currentEvent.id);
-  logInfo('Tournament points race results sync completed', { eventId: currentEvent.id, ...result });
+  // This is now handled by cascade from tournament-event-results
+  // Keeping function for backward compatibility with manual triggers
+  logInfo('Tournament points race is now part of cascade');
 }
 
 export function registerTournamentPointsRaceResultsJobs(app: Elysia) {
-  return app.use(
-    cron({
-      name: 'tournament-points-race-results-sync',
-      pattern: '20 6,8,10 * * *',
-      async run() {
-        logInfo('Cron job started: tournament-points-race-results-sync');
-        try {
-          await runTournamentPointsRaceResultsSync();
-          logInfo('Cron job completed: tournament-points-race-results-sync');
-        } catch (error) {
-          logError('Cron job failed: tournament-points-race-results-sync', error);
-        }
-      },
-    }),
-  );
+  // Now part of cascade, no cron needed
+  // Return app unchanged for backward compatibility
+  return app;
 }

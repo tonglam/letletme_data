@@ -26,91 +26,86 @@ function chunkArray<T>(items: T[], size: number): T[][] {
   return chunks;
 }
 
-export class EntryEventPicksRepository {
-  private db?: DatabaseInstance;
-  constructor(dbInstance?: DatabaseInstance) {
-    this.db = dbInstance;
-  }
+export const createEntryEventPicksRepository = (dbInstance?: DatabaseInstance) => {
+  const getDbInstance = async () => dbInstance || (await getDb());
 
-  private async getDbInstance() {
-    return this.db || (await getDb());
-  }
+  return {
+    findEntryIdsByEvent: async (eventId: number, entryIds?: number[]): Promise<number[]> => {
+      try {
+        const db = await getDbInstance();
 
-  async findEntryIdsByEvent(eventId: number, entryIds?: number[]): Promise<number[]> {
-    try {
-      const db = await this.getDbInstance();
+        if (!entryIds || entryIds.length === 0) {
+          const rows = await db
+            .select({ entryId: entryEventPicks.entryId })
+            .from(entryEventPicks)
+            .where(eq(entryEventPicks.eventId, eventId));
+          return rows.map((row) => row.entryId);
+        }
 
-      if (!entryIds || entryIds.length === 0) {
-        const rows = await db
-          .select({ entryId: entryEventPicks.entryId })
-          .from(entryEventPicks)
-          .where(eq(entryEventPicks.eventId, eventId));
-        return rows.map((row) => row.entryId);
+        const uniqueEntryIds = Array.from(new Set(entryIds));
+        const chunks = chunkArray(uniqueEntryIds, 1000);
+        const results: number[] = [];
+
+        for (const chunk of chunks) {
+          const rows = await db
+            .select({ entryId: entryEventPicks.entryId })
+            .from(entryEventPicks)
+            .where(
+              and(eq(entryEventPicks.eventId, eventId), inArray(entryEventPicks.entryId, chunk)),
+            );
+          results.push(...rows.map((row) => row.entryId));
+        }
+
+        return results;
+      } catch (error) {
+        logError('Failed to retrieve entry ids by event', error, { eventId });
+        throw new DatabaseError(
+          'Failed to retrieve entry ids by event',
+          'ENTRY_EVENT_PICKS_FIND_ERROR',
+          error as Error,
+        );
       }
+    },
 
-      const uniqueEntryIds = Array.from(new Set(entryIds));
-      const chunks = chunkArray(uniqueEntryIds, 1000);
-      const results: number[] = [];
+    upsertFromPicks: async (
+      entryId: number,
+      eventId: number,
+      picks: RawFPLEntryEventPicksResponse,
+    ): Promise<void> => {
+      try {
+        const db = await getDbInstance();
+        const insert: DbEntryEventPickInsert = {
+          entryId,
+          eventId,
+          chip: mapChip(picks.active_chip),
+          picks: picks.picks as unknown,
+          transfers: picks.entry_history.event_transfers,
+          transfersCost: picks.entry_history.event_transfers_cost,
+        };
 
-      for (const chunk of chunks) {
-        const rows = await db
-          .select({ entryId: entryEventPicks.entryId })
-          .from(entryEventPicks)
-          .where(
-            and(eq(entryEventPicks.eventId, eventId), inArray(entryEventPicks.entryId, chunk)),
-          );
-        results.push(...rows.map((row) => row.entryId));
+        await db
+          .insert(entryEventPicks)
+          .values(insert)
+          .onConflictDoUpdate({
+            target: [entryEventPicks.entryId, entryEventPicks.eventId],
+            set: {
+              chip: insert.chip,
+              picks: insert.picks,
+              transfers: insert.transfers,
+              transfersCost: insert.transfersCost,
+            },
+          });
+        logInfo('Upserted entry event picks', { entryId, eventId, chip: insert.chip });
+      } catch (error) {
+        logError('Failed to upsert entry event picks', error, { entryId, eventId });
+        throw new DatabaseError(
+          'Failed to upsert entry event picks',
+          'ENTRY_EVENT_PICKS_UPSERT_ERROR',
+          error as Error,
+        );
       }
+    },
+  };
+};
 
-      return results;
-    } catch (error) {
-      logError('Failed to retrieve entry ids by event', error, { eventId });
-      throw new DatabaseError(
-        'Failed to retrieve entry ids by event',
-        'ENTRY_EVENT_PICKS_FIND_ERROR',
-        error as Error,
-      );
-    }
-  }
-
-  async upsertFromPicks(
-    entryId: number,
-    eventId: number,
-    picks: RawFPLEntryEventPicksResponse,
-  ): Promise<void> {
-    try {
-      const db = await this.getDbInstance();
-      const insert: DbEntryEventPickInsert = {
-        entryId,
-        eventId,
-        chip: mapChip(picks.active_chip),
-        picks: picks.picks as unknown,
-        transfers: picks.entry_history.event_transfers,
-        transfersCost: picks.entry_history.event_transfers_cost,
-      };
-
-      await db
-        .insert(entryEventPicks)
-        .values(insert)
-        .onConflictDoUpdate({
-          target: [entryEventPicks.entryId, entryEventPicks.eventId],
-          set: {
-            chip: insert.chip,
-            picks: insert.picks,
-            transfers: insert.transfers,
-            transfersCost: insert.transfersCost,
-          },
-        });
-      logInfo('Upserted entry event picks', { entryId, eventId, chip: insert.chip });
-    } catch (error) {
-      logError('Failed to upsert entry event picks', error, { entryId, eventId });
-      throw new DatabaseError(
-        'Failed to upsert entry event picks',
-        'ENTRY_EVENT_PICKS_UPSERT_ERROR',
-        error as Error,
-      );
-    }
-  }
-}
-
-export const entryEventPicksRepository = new EntryEventPicksRepository();
+export const entryEventPicksRepository = createEntryEventPicksRepository();

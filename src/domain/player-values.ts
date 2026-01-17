@@ -60,7 +60,7 @@ export const PlayerValueSchema = z.object({
     .number()
     .int()
     .min(35, 'Value must be at least 3.5m')
-    .max(150, 'Value cannot exceed 15.0m'),
+    .max(200, 'Value cannot exceed 20.0m'),
   changeDate: z.string().min(1, 'Change date is required'),
   changeType: z.enum(['Start', 'Rise', 'Faller'], {
     errorMap: () => ({ message: 'Change type must be Start, Rise, or Faller' }),
@@ -69,7 +69,7 @@ export const PlayerValueSchema = z.object({
     .number()
     .int()
     .min(35, 'Last value must be at least 3.5m')
-    .max(150, 'Last value cannot exceed 15.0m'),
+    .max(200, 'Last value cannot exceed 20.0m'),
 });
 
 export const RawPlayerValueSchema = PlayerValueSchema.omit({

@@ -81,7 +81,7 @@ export const PlayerStatSchema = z.object({
     .number()
     .int()
     .min(35, 'Value must be at least 3.5m')
-    .max(150, 'Value cannot exceed 15.0m'),
+    .max(200, 'Value cannot exceed 20.0m'),
   totalPoints: z.number().int().nullable(),
   form: z.string().nullable(),
   influence: z.string().nullable(),

@@ -2,10 +2,10 @@ import { eventStandingsCache } from '../cache/operations';
 import { pulseliveClient } from '../clients/pulselive';
 import type { EventStanding, RawPulseLiveStandingsEntry } from '../types';
 import { eventStandingsRepository } from '../repositories/event-standings';
-import { getTeams } from './teams.service';
 import { getCurrentEvent } from './events.service';
 import { getConfig } from '../utils/config';
 import { logError, logInfo, logWarn } from '../utils/logger';
+import { loadTeamsBasicInfo } from '../utils/teams';
 
 function mapStandings(
   eventId: number,
@@ -16,7 +16,7 @@ function mapStandings(
 
   for (const entry of entries) {
     const abbr = entry.team.club.abbr;
-    const team = teamMap.get(abbr) ?? teamMap.get(abbr.toUpperCase());
+    const team = teamMap.get(abbr.toUpperCase());
     if (!team) {
       logWarn('No team mapping for standings entry', { abbr });
       continue;
@@ -68,8 +68,8 @@ export async function syncEventStandings(
       return { eventId: currentEventId, count: 0 };
     }
 
-    const teams = await getTeams();
-    const teamMap = new Map(teams.map((team) => [team.shortName, team]));
+    const teams = await loadTeamsBasicInfo();
+    const teamMap = new Map(teams.map((team) => [team.shortName.toUpperCase(), team]));
     const standings = mapStandings(currentEventId, entries, teamMap);
 
     const count = await eventStandingsRepository.replaceAll(standings);

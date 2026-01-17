@@ -1,5 +1,5 @@
 import * as dotenv from 'dotenv';
-import { syncEntryInfo } from '../src/services/entries.service';
+import { syncEntryInfo } from '../src/services/entry-info.service';
 
 dotenv.config();
 

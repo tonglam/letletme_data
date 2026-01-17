@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, test } from 'bun:test';
 
-import { TeamRepository } from '../../src/repositories/teams';
+import { createTeamRepository } from '../../src/repositories/teams';
 import { transformTeams } from '../../src/transformers/teams';
 import {
   rawFPLTeamsFixture,
@@ -78,7 +78,7 @@ describe('Teams Unit Tests', () => {
 
   describe('TeamRepository Unit Tests', () => {
     let mockDb: any;
-    let repository: TeamRepository;
+    let repository: ReturnType<typeof createTeamRepository>;
 
     beforeEach(() => {
       // Create mock database with proper method chaining
@@ -103,7 +103,7 @@ describe('Teams Unit Tests', () => {
       };
 
       // Create repository with mock database injected
-      repository = new TeamRepository(mockDb as any);
+      repository = createTeamRepository(mockDb as any);
 
       // Ensure the mock is used by setting the db property directly
       (repository as any).db = mockDb;
@@ -113,9 +113,7 @@ describe('Teams Unit Tests', () => {
       expect(repository).toBeDefined();
       expect(repository.findAll).toBeDefined();
       expect(repository.findById).toBeDefined();
-      expect(repository.upsert).toBeDefined();
       expect(repository.upsertBatch).toBeDefined();
-      expect(repository.deleteAll).toBeDefined();
     });
 
     test('should handle findAll method', async () => {
@@ -142,11 +140,6 @@ describe('Teams Unit Tests', () => {
 
     test('should handle findById method', async () => {
       const result = await repository.findById(1);
-      expect(result).toBeDefined();
-    });
-
-    test('should handle upsert method', async () => {
-      const result = await repository.upsert(singleTransformedTeamFixture);
       expect(result).toBeDefined();
     });
 
@@ -177,10 +170,6 @@ describe('Teams Unit Tests', () => {
         // Restore original mock
         mockDb.insert = originalInsert;
       }
-    });
-
-    test('should handle deleteAll method', async () => {
-      await expect(repository.deleteAll()).resolves.toBeUndefined();
     });
   });
 
@@ -322,12 +311,11 @@ describe('Teams Unit Tests', () => {
         },
       };
 
-      const errorRepository = new TeamRepository(errorDb as any);
+      const errorRepository = createTeamRepository(errorDb as any);
 
       // The errors are wrapped in DatabaseError with custom messages
       await expect(errorRepository.findAll()).rejects.toThrow('Failed to retrieve teams');
-      await expect(errorRepository.upsert(singleTransformedTeamFixture)).rejects.toThrow();
-      await expect(errorRepository.deleteAll()).rejects.toThrow();
+      await expect(errorRepository.upsertBatch([singleTransformedTeamFixture])).rejects.toThrow();
     });
   });
 

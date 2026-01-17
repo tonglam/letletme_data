@@ -2,44 +2,22 @@ import { cron } from '@elysiajs/cron';
 import type { Elysia } from 'elysia';
 
 import { getCurrentEvent } from '../services/events.service';
-import { getFixturesByEvent } from '../services/fixtures.service';
-import {
-  syncTournamentEventTransfersPost,
-  syncTournamentEventTransfersPre,
-} from '../services/tournament-event-transfers.service';
-import { isAfterMatchDay, isFPLSeason, isSelectTime } from '../utils/conditions';
+import { isFPLSeason, isSelectTime } from '../utils/conditions';
+import { loadFixturesByEvent } from '../utils/fixtures';
 import { logError, logInfo } from '../utils/logger';
+import { enqueueTournamentTransfersPre } from './tournament-sync.jobs';
 
-export async function runTournamentEventTransfersPostSync() {
-  const now = new Date();
-  if (!isFPLSeason(now)) {
-    logInfo('Skipping tournament event transfers post sync - not FPL season', {
-      month: now.getMonth() + 1,
-    });
-    return;
-  }
-
-  const currentEvent = await getCurrentEvent();
-  if (!currentEvent) {
-    logInfo('Skipping tournament event transfers post sync - no current event');
-    return;
-  }
-
-  const fixtures = await getFixturesByEvent(currentEvent.id);
-  if (!isAfterMatchDay(currentEvent, fixtures, now)) {
-    logInfo('Skipping tournament event transfers post sync - conditions not met', {
-      eventId: currentEvent.id,
-    });
-    return;
-  }
-
-  logInfo('Tournament event transfers post sync started', { eventId: currentEvent.id });
-  const result = await syncTournamentEventTransfersPost(currentEvent.id);
-  logInfo('Tournament event transfers post sync completed', {
-    eventId: currentEvent.id,
-    ...result,
-  });
-}
+/**
+ * Tournament Event Transfers Sync Triggers
+ *
+ * Pre-Transfer (Before Deadline):
+ * - Runs every 5 minutes during select time (no hour restrictions)
+ * - Tracks transfers as they happen
+ *
+ * Post-Transfer (After Deadline):
+ * - Part of cascade (triggered by tournament-event-results completion)
+ * - No separate cron needed
+ */
 
 export async function runTournamentEventTransfersPreSync() {
   const now = new Date();
@@ -56,7 +34,7 @@ export async function runTournamentEventTransfersPreSync() {
     return;
   }
 
-  const fixtures = await getFixturesByEvent(currentEvent.id);
+  const fixtures = await loadFixturesByEvent(currentEvent.id);
   if (!isSelectTime(currentEvent, fixtures, now)) {
     logInfo('Skipping tournament event transfers pre sync - conditions not met', {
       eventId: currentEvent.id,
@@ -64,44 +42,38 @@ export async function runTournamentEventTransfersPreSync() {
     return;
   }
 
-  logInfo('Tournament event transfers pre sync started', { eventId: currentEvent.id });
-  const result = await syncTournamentEventTransfersPre(currentEvent.id);
-  logInfo('Tournament event transfers pre sync completed', {
+  // Enqueue job for background processing
+  const job = await enqueueTournamentTransfersPre(currentEvent.id, 'cron');
+  logInfo('Tournament event transfers pre job enqueued', {
+    jobId: job.id,
     eventId: currentEvent.id,
-    ...result,
   });
 }
 
+// Post-transfer is part of cascade, no separate function needed
+export async function runTournamentEventTransfersPostSync() {
+  // This is now handled by cascade from tournament-event-results
+  // Keeping function for backward compatibility with manual triggers
+  logInfo('Tournament transfers post is now part of cascade');
+}
+
 export function registerTournamentEventTransfersPostJobs(app: Elysia) {
-  return app.use(
-    cron({
-      name: 'tournament-event-transfers-post-sync',
-      pattern: '45 6,8,10 * * *',
-      async run() {
-        logInfo('Cron job started: tournament-event-transfers-post-sync');
-        try {
-          await runTournamentEventTransfersPostSync();
-          logInfo('Cron job completed: tournament-event-transfers-post-sync');
-        } catch (error) {
-          logError('Cron job failed: tournament-event-transfers-post-sync', error);
-        }
-      },
-    }),
-  );
+  // Post-transfer is now part of cascade, no cron needed
+  // Return app unchanged for backward compatibility
+  return app;
 }
 
 export function registerTournamentEventTransfersPreJobs(app: Elysia) {
   return app.use(
     cron({
-      name: 'tournament-event-transfers-pre-sync',
-      pattern: '*/5 0-4,18-23 * * *',
+      name: 'tournament-event-transfers-pre-trigger',
+      pattern: '*/5 * * * *',
       async run() {
-        logInfo('Cron job started: tournament-event-transfers-pre-sync');
+        logInfo('Cron trigger: tournament-event-transfers-pre-sync');
         try {
           await runTournamentEventTransfersPreSync();
-          logInfo('Cron job completed: tournament-event-transfers-pre-sync');
         } catch (error) {
-          logError('Cron job failed: tournament-event-transfers-pre-sync', error);
+          logError('Cron trigger failed: tournament-event-transfers-pre-sync', error);
         }
       },
     }),

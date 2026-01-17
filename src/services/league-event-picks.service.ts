@@ -5,8 +5,8 @@ import {
   tournamentInfoRepository,
   type TournamentInfoSummary,
 } from '../repositories/tournament-infos';
-import { syncEntryEventPicks } from './entries.service';
 import { logError, logInfo } from '../utils/logger';
+import { syncEntryEventPicks } from './entries.service';
 
 const DEFAULT_CONCURRENCY = 5;
 
@@ -83,70 +83,50 @@ async function resolveTournamentEntries(tournament: TournamentInfoSummary): Prom
   return fetchLeagueEntryIds(tournament);
 }
 
-export async function syncLeagueEventPicks(
+export async function syncLeagueEventPicksByTournament(
+  tournamentId: number,
   eventId: number,
   options?: { concurrency?: number },
 ): Promise<{
+  tournamentId: number;
   eventId: number;
   totalEntries: number;
   synced: number;
   skipped: number;
   errors: number;
 }> {
-  logInfo('Starting league event picks sync', { eventId });
+  logInfo('Starting league event picks sync for tournament', { tournamentId, eventId });
 
-  const tournaments = await tournamentInfoRepository.findActive();
-  if (tournaments.length === 0) {
-    logInfo('No active tournaments found for league event picks', { eventId });
-    return { eventId, totalEntries: 0, synced: 0, skipped: 0, errors: 0 };
+  const tournament = await tournamentInfoRepository.findById(tournamentId);
+  if (!tournament) {
+    throw new Error(`Tournament ${tournamentId} not found`);
   }
 
-  const entryBuckets: number[][] = [];
-
-  for (const tournament of tournaments) {
-    try {
-      const entryIds = await resolveTournamentEntries(tournament);
-      entryBuckets.push(entryIds);
-      logInfo('Resolved tournament entries for league picks', {
-        eventId,
-        tournamentId: tournament.id,
-        leagueId: tournament.leagueId,
-        leagueType: tournament.leagueType,
-        entries: entryIds.length,
-      });
-    } catch (error) {
-      logError('Failed to resolve tournament entries for league picks', error, {
-        eventId,
-        tournamentId: tournament.id,
-        leagueId: tournament.leagueId,
-        leagueType: tournament.leagueType,
-      });
-    }
-  }
-
-  const allEntryIds = uniqueNumbers(entryBuckets.flat());
-  if (allEntryIds.length === 0) {
-    logInfo('No entries resolved for league event picks', { eventId });
-    return { eventId, totalEntries: 0, synced: 0, skipped: 0, errors: 0 };
-  }
-
-  const existingEntryIds = await entryEventPicksRepository.findEntryIdsByEvent(
+  const entryIds = await resolveTournamentEntries(tournament);
+  logInfo('Resolved tournament entries for league picks', {
     eventId,
-    allEntryIds,
-  );
+    tournamentId,
+    leagueId: tournament.leagueId,
+    leagueType: tournament.leagueType,
+    entries: entryIds.length,
+  });
+
+  const existingEntryIds = await entryEventPicksRepository.findEntryIdsByEvent(eventId, entryIds);
   const existingSet = new Set(existingEntryIds);
-  const entriesToSync = allEntryIds.filter((entryId) => !existingSet.has(entryId));
+  const entriesToSync = entryIds.filter((entryId) => !existingSet.has(entryId));
   const concurrency = options?.concurrency ?? DEFAULT_CONCURRENCY;
 
   if (entriesToSync.length === 0) {
-    logInfo('League event picks already synced', {
+    logInfo('League event picks already synced for tournament', {
       eventId,
-      totalEntries: allEntryIds.length,
+      tournamentId,
+      totalEntries: entryIds.length,
       skipped: existingEntryIds.length,
     });
     return {
+      tournamentId,
       eventId,
-      totalEntries: allEntryIds.length,
+      totalEntries: entryIds.length,
       synced: 0,
       skipped: existingEntryIds.length,
       errors: 0,
@@ -158,7 +138,7 @@ export async function syncLeagueEventPicks(
       await syncEntryEventPicks(entryId, eventId);
       return { entryId, success: true } satisfies EntrySyncOutcome;
     } catch (error) {
-      logError('Failed to sync league entry picks', error, { eventId, entryId });
+      logError('Failed to sync league entry picks', error, { eventId, entryId, tournamentId });
       return { entryId, success: false } satisfies EntrySyncOutcome;
     }
   });
@@ -166,17 +146,19 @@ export async function syncLeagueEventPicks(
   const synced = results.filter((result) => result.success).length;
   const errors = results.length - synced;
 
-  logInfo('League event picks sync completed', {
+  logInfo('League event picks sync completed for tournament', {
     eventId,
-    totalEntries: allEntryIds.length,
+    tournamentId,
+    totalEntries: entryIds.length,
     synced,
     skipped: existingEntryIds.length,
     errors,
   });
 
   return {
+    tournamentId,
     eventId,
-    totalEntries: allEntryIds.length,
+    totalEntries: entryIds.length,
     synced,
     skipped: existingEntryIds.length,
     errors,

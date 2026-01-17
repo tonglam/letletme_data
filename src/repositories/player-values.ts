@@ -1,747 +1,101 @@
-import { eq, inArray, sql } from 'drizzle-orm';
+import { sql } from 'drizzle-orm';
 
-import {
-  playerValues,
-  type DbPlayerValue,
-  type DbPlayerValueInsert,
-} from '../db/schemas/index.schema';
+import { playerValues, type DbPlayerValueInsert } from '../db/schemas/index.schema';
 import { getDb } from '../db/singleton';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
-import type { RowList } from 'postgres';
 import type { PlayerValue } from '../domain/player-values';
-import type {
-  ElementTypeId,
-  ElementTypeName,
-  EventId,
-  PlayerId,
-  PlayerTypeID,
-  TeamId,
-  ValueChangeType,
-} from '../types/base.type';
 
-// Type for the SQL query result that matches PlayerValue domain model
-export type PlayerValueQueryResult = {
-  elementId: PlayerId;
-  elementType: ElementTypeId;
-  elementTypeName: ElementTypeName;
-  eventId: EventId;
-  webName: string;
-  teamId: TeamId;
-  teamName: string;
-  teamShortName: string;
+interface ValueRecord {
+  elementId: number;
   value: number;
   changeDate: string;
-  changeType: ValueChangeType;
-  lastValue: number;
-};
+}
 
 type DatabaseInstance = PostgresJsDatabase<Record<string, never>>;
 
-export class PlayerValuesRepository {
-  private db?: DatabaseInstance;
+export const createPlayerValuesRepository = (dbInstance?: DatabaseInstance) => {
+  const getDbInstance = async () => dbInstance || (await getDb());
 
-  constructor(dbInstance?: DatabaseInstance) {
-    this.db = dbInstance;
-  }
-
-  private mapRowList<T>(result: RowList<Record<string, unknown>>): T[] {
-    return [...result] as T[];
-  }
-
-  private async getDbInstance() {
-    return this.db || (await getDb());
-  }
-
-  async findAll(): Promise<PlayerValueQueryResult[]> {
-    try {
-      const db = await this.getDbInstance();
-      const result = await db.execute(sql`
-        SELECT 
-          pv.element_id as "elementId",
-          pv.event_id as "eventId",
-          p.web_name as "webName",
-          pv.element_type as "elementType",
-          CASE pv.element_type
-            WHEN 1 THEN 'GKP'
-            WHEN 2 THEN 'DEF'
-            WHEN 3 THEN 'MID'
-            WHEN 4 THEN 'FWD'
-            ELSE 'UNK'
-          END as "elementTypeName",
-          t.id as "teamId",
-          t.name as "teamName",
-          t.short_name as "teamShortName",
-          pv.value,
-          pv.last_value as "lastValue",
-          pv.change_date as "changeDate",
-          pv.change_type as "changeType"
-        FROM player_values pv
-        INNER JOIN players p ON p.id = pv.element_id
-        INNER JOIN teams t ON t.id = p.team_id
-        ORDER BY pv.event_id, pv.element_id
+  return {
+    findLatestForAllPlayers: async (): Promise<ValueRecord[]> => {
+      try {
+        const db = await getDbInstance();
+        const rows = await db.execute(sql`
+        SELECT DISTINCT ON (element_id)
+          element_id as "elementId",
+          value,
+          change_date as "changeDate"
+        FROM player_values
+        ORDER BY element_id, change_date DESC, created_at DESC
       `);
-      const rows = this.mapRowList<PlayerValueQueryResult>(result);
-      logInfo('Retrieved all player values', { count: rows.length });
-      return rows;
-    } catch (error) {
-      logError('Failed to find all player values', error);
-      throw new DatabaseError(
-        'Failed to retrieve player values',
-        'FIND_ALL_ERROR',
-        error instanceof Error ? error : undefined,
-      );
-    }
-  }
+        return rows as unknown as ValueRecord[];
+      } catch (error) {
+        logError('Failed to get latest player values', error);
+        throw new DatabaseError('Failed to get latest player values', 'LATEST_VALUES_ERROR');
+      }
+    },
 
-  async findByEventId(eventId: EventId): Promise<PlayerValueQueryResult[]> {
-    try {
-      const db = await this.getDbInstance();
-      const result = await db.execute(sql`
-        SELECT 
-          pv.element_id as "elementId",
-          pv.event_id as "eventId",
-          p.web_name as "webName",
-          pv.element_type as "elementType",
-          CASE pv.element_type
-            WHEN 1 THEN 'GKP'
-            WHEN 2 THEN 'DEF'
-            WHEN 3 THEN 'MID'
-            WHEN 4 THEN 'FWD'
-            ELSE 'UNK'
-          END as "elementTypeName",
-          t.id as "teamId",
-          t.name as "teamName",
-          t.short_name as "teamShortName",
-          pv.value,
-          pv.last_value as "lastValue",
-          pv.change_date as "changeDate",
-          pv.change_type as "changeType"
-        FROM player_values pv
-        INNER JOIN players p ON p.id = pv.element_id
-        INNER JOIN teams t ON t.id = p.team_id
-        WHERE pv.event_id = ${eventId}
-        ORDER BY pv.element_id
+    findByChangeDate: async (changeDate: string): Promise<ValueRecord[]> => {
+      try {
+        const db = await getDbInstance();
+        const rows = await db.execute(sql`
+        SELECT element_id as "elementId", value, change_date as "changeDate"
+        FROM player_values
+        WHERE change_date = ${changeDate}
       `);
-      const rows = this.mapRowList<PlayerValueQueryResult>(result);
-      logInfo('Retrieved player values by event', { eventId, count: rows.length });
-      return rows;
-    } catch (error) {
-      logError('Failed to find player values by event', error, { eventId });
-      throw new DatabaseError(
-        `Failed to retrieve player values for event: ${eventId}`,
-        'FIND_BY_EVENT_ERROR',
-        error instanceof Error ? error : undefined,
-      );
-    }
-  }
+        return rows as unknown as ValueRecord[];
+      } catch (error) {
+        logError('Failed to get player values by date', error, { changeDate });
+        throw new DatabaseError('Failed to get player values by date', 'FIND_BY_DATE_ERROR');
+      }
+    },
 
-  async findByPlayerId(playerId: PlayerId): Promise<PlayerValueQueryResult[]> {
-    try {
-      const db = await this.getDbInstance();
-      const result = await db.execute(sql`
-        SELECT 
-          pv.element_id as "elementId",
-          pv.event_id as "eventId",
-          p.web_name as "webName",
-          pv.element_type as "elementType",
-          CASE pv.element_type
-            WHEN 1 THEN 'GKP'
-            WHEN 2 THEN 'DEF'
-            WHEN 3 THEN 'MID'
-            WHEN 4 THEN 'FWD'
-            ELSE 'UNK'
-          END as "elementTypeName",
-          t.id as "teamId",
-          t.name as "teamName",
-          t.short_name as "teamShortName",
-          pv.value,
-          pv.last_value as "lastValue",
-          pv.change_date as "changeDate",
-          pv.change_type as "changeType"
-        FROM player_values pv
-        INNER JOIN players p ON p.id = pv.element_id
-        INNER JOIN teams t ON t.id = p.team_id
-        WHERE pv.element_id = ${playerId}
-        ORDER BY pv.event_id
-      `);
-      const rows = this.mapRowList<PlayerValueQueryResult>(result);
-      logInfo('Retrieved player values by player', { playerId, count: rows.length });
-      return rows;
-    } catch (error) {
-      logError('Failed to find player values by player', error, { playerId });
-      throw new DatabaseError(
-        `Failed to retrieve player values for player: ${playerId}`,
-        'FIND_BY_PLAYER_ERROR',
-        error instanceof Error ? error : undefined,
-      );
-    }
-  }
-
-  async findByTeamId(teamId: TeamId, eventId?: EventId): Promise<PlayerValueQueryResult[]> {
-    try {
-      const db = await this.getDbInstance();
-      const result = eventId
-        ? await db.execute(sql`
-        SELECT 
-          pv.element_id as "elementId",
-          pv.event_id as "eventId",
-          p.web_name as "webName",
-          pv.element_type as "elementType",
-          CASE pv.element_type
-            WHEN 1 THEN 'GKP'
-            WHEN 2 THEN 'DEF'
-            WHEN 3 THEN 'MID'
-            WHEN 4 THEN 'FWD'
-            ELSE 'UNK'
-          END as "elementTypeName",
-          t.id as "teamId",
-          t.name as "teamName",
-          t.short_name as "teamShortName",
-          pv.value,
-          pv.last_value as "lastValue",
-          pv.change_date as "changeDate",
-          pv.change_type as "changeType"
-        FROM player_values pv
-        INNER JOIN players p ON p.id = pv.element_id
-        INNER JOIN teams t ON t.id = p.team_id
-        WHERE t.id = ${teamId} AND pv.event_id = ${eventId}
-        ORDER BY pv.event_id, pv.element_id
-        `)
-        : await db.execute(sql`
-        SELECT 
-          pv.element_id as "elementId",
-          pv.event_id as "eventId",
-          p.web_name as "webName",
-          pv.element_type as "elementType",
-          CASE pv.element_type
-            WHEN 1 THEN 'GKP'
-            WHEN 2 THEN 'DEF'
-            WHEN 3 THEN 'MID'
-            WHEN 4 THEN 'FWD'
-            ELSE 'UNK'
-          END as "elementTypeName",
-          t.id as "teamId",
-          t.name as "teamName",
-          t.short_name as "teamShortName",
-          pv.value,
-          pv.last_value as "lastValue",
-          pv.change_date as "changeDate",
-          pv.change_type as "changeType"
-        FROM player_values pv
-        INNER JOIN players p ON p.id = pv.element_id
-        INNER JOIN teams t ON t.id = p.team_id
-        WHERE t.id = ${teamId}
-        ORDER BY pv.event_id, pv.element_id
-        `);
-
-      const rows = this.mapRowList<PlayerValueQueryResult>(result);
-      logInfo('Retrieved player values by team', { teamId, eventId, count: rows.length });
-      return rows;
-    } catch (error) {
-      logError('Failed to find player values by team', error, { teamId, eventId });
-      throw new DatabaseError(
-        `Failed to retrieve player values for team: ${teamId}`,
-        'FIND_BY_TEAM_ERROR',
-        error instanceof Error ? error : undefined,
-      );
-    }
-  }
-
-  async findByPosition(
-    elementType: PlayerTypeID,
-    eventId?: EventId,
-  ): Promise<PlayerValueQueryResult[]> {
-    try {
-      const db = await this.getDbInstance();
-      const result = eventId
-        ? await db.execute(sql`
-        SELECT 
-          pv.element_id as "elementId",
-          pv.event_id as "eventId",
-          p.web_name as "webName",
-          pv.element_type as "elementType",
-          CASE pv.element_type
-            WHEN 1 THEN 'GKP'
-            WHEN 2 THEN 'DEF'
-            WHEN 3 THEN 'MID'
-            WHEN 4 THEN 'FWD'
-            ELSE 'UNK'
-          END as "elementTypeName",
-          t.id as "teamId",
-          t.name as "teamName",
-          t.short_name as "teamShortName",
-          pv.value,
-          pv.last_value as "lastValue",
-          pv.change_date as "changeDate",
-          pv.change_type as "changeType"
-        FROM player_values pv
-        INNER JOIN players p ON p.id = pv.element_id
-        INNER JOIN teams t ON t.id = p.team_id
-        WHERE pv.element_type = ${elementType} AND pv.event_id = ${eventId}
-        ORDER BY pv.event_id, pv.element_id
-        `)
-        : await db.execute(sql`
-        SELECT 
-          pv.element_id as "elementId",
-          pv.event_id as "eventId",
-          p.web_name as "webName",
-          pv.element_type as "elementType",
-          CASE pv.element_type
-            WHEN 1 THEN 'GKP'
-            WHEN 2 THEN 'DEF'
-            WHEN 3 THEN 'MID'
-            WHEN 4 THEN 'FWD'
-            ELSE 'UNK'
-          END as "elementTypeName",
-          t.id as "teamId",
-          t.name as "teamName",
-          t.short_name as "teamShortName",
-          pv.value,
-          pv.last_value as "lastValue",
-          pv.change_date as "changeDate",
-          pv.change_type as "changeType"
-        FROM player_values pv
-        INNER JOIN players p ON p.id = pv.element_id
-        INNER JOIN teams t ON t.id = p.team_id
-        WHERE pv.element_type = ${elementType}
-        ORDER BY pv.event_id, pv.element_id
-        `);
-
-      const rows = this.mapRowList<PlayerValueQueryResult>(result);
-      logInfo('Retrieved player values by position', {
-        elementType,
-        eventId,
-        count: rows.length,
-      });
-      return rows;
-    } catch (error) {
-      logError('Failed to find player values by position', error, { elementType, eventId });
-      throw new DatabaseError(
-        `Failed to retrieve player values for position: ${elementType}`,
-        'FIND_BY_POSITION_ERROR',
-        error instanceof Error ? error : undefined,
-      );
-    }
-  }
-
-  async findByChangeType(
-    changeType: ValueChangeType,
-    eventId?: EventId,
-  ): Promise<PlayerValueQueryResult[]> {
-    try {
-      const db = await this.getDbInstance();
-      const result = eventId
-        ? await db.execute(sql`
-        SELECT 
-          pv.element_id as "elementId",
-          pv.event_id as "eventId",
-          p.web_name as "webName",
-          pv.element_type as "elementType",
-          CASE pv.element_type
-            WHEN 1 THEN 'GKP'
-            WHEN 2 THEN 'DEF'
-            WHEN 3 THEN 'MID'
-            WHEN 4 THEN 'FWD'
-            ELSE 'UNK'
-          END as "elementTypeName",
-          t.id as "teamId",
-          t.name as "teamName",
-          t.short_name as "teamShortName",
-          pv.value,
-          pv.last_value as "lastValue",
-          pv.change_date as "changeDate",
-          pv.change_type as "changeType"
-        FROM player_values pv
-        INNER JOIN players p ON p.id = pv.element_id
-        INNER JOIN teams t ON t.id = p.team_id
-        WHERE pv.change_type = ${changeType} AND pv.event_id = ${eventId}
-        ORDER BY pv.element_id
-        `)
-        : await db.execute(sql`
-        SELECT 
-          pv.element_id as "elementId",
-          pv.event_id as "eventId",
-          p.web_name as "webName",
-          pv.element_type as "elementType",
-          CASE pv.element_type
-            WHEN 1 THEN 'GKP'
-            WHEN 2 THEN 'DEF'
-            WHEN 3 THEN 'MID'
-            WHEN 4 THEN 'FWD'
-            ELSE 'UNK'
-          END as "elementTypeName",
-          t.id as "teamId",
-          t.name as "teamName",
-          t.short_name as "teamShortName",
-          pv.value,
-          pv.last_value as "lastValue",
-          pv.change_date as "changeDate",
-          pv.change_type as "changeType"
-        FROM player_values pv
-        INNER JOIN players p ON p.id = pv.element_id
-        INNER JOIN teams t ON t.id = p.team_id
-        WHERE pv.change_type = ${changeType}
-        ORDER BY pv.event_id, pv.element_id
-        `);
-
-      const rows = this.mapRowList<PlayerValueQueryResult>(result);
-      logInfo('Retrieved player values by change type', {
-        changeType,
-        eventId,
-        count: rows.length,
-      });
-      return rows;
-    } catch (error) {
-      logError('Failed to find player values by change type', error, { changeType, eventId });
-      throw new DatabaseError(
-        `Failed to retrieve player values for change type: ${changeType}`,
-        'FIND_BY_CHANGE_TYPE_ERROR',
-        error instanceof Error ? error : undefined,
-      );
-    }
-  }
-
-  async findByEventAndPlayer(
-    eventId: EventId,
-    playerId: PlayerId,
-  ): Promise<PlayerValueQueryResult | null> {
-    try {
-      const db = await this.getDbInstance();
-      const result = await db.execute(sql`
-        SELECT 
-          pv.element_id as "elementId",
-          pv.event_id as "eventId",
-          p.web_name as "webName",
-          pv.element_type as "elementType",
-          CASE pv.element_type
-            WHEN 1 THEN 'GKP'
-            WHEN 2 THEN 'DEF'
-            WHEN 3 THEN 'MID'
-            WHEN 4 THEN 'FWD'
-            ELSE 'UNK'
-          END as "elementTypeName",
-          t.id as "teamId",
-          t.name as "teamName",
-          t.short_name as "teamShortName",
-          pv.value,
-          pv.last_value as "lastValue",
-          pv.change_date as "changeDate",
-          pv.change_type as "changeType"
-        FROM player_values pv
-        INNER JOIN players p ON p.id = pv.element_id
-        INNER JOIN teams t ON t.id = p.team_id
-        WHERE pv.event_id = ${eventId} AND pv.element_id = ${playerId}
+    hasChangesForDate: async (changeDate: string): Promise<boolean> => {
+      try {
+        const db = await getDbInstance();
+        const rows = await db.execute(sql`
+        SELECT 1
+        FROM player_values
+        WHERE change_date = ${changeDate}
         LIMIT 1
       `);
-
-      const rows = this.mapRowList<PlayerValueQueryResult>(result);
-      logInfo('Retrieved player value by event and player', {
-        eventId,
-        playerId,
-        found: rows.length > 0,
-      });
-      return rows.length > 0 ? rows[0] : null;
-    } catch (error) {
-      logError('Failed to find player value by event and player', error, { eventId, playerId });
-      throw new DatabaseError(
-        `Failed to retrieve player value for event: ${eventId}, player: ${playerId}`,
-        'FIND_BY_EVENT_AND_PLAYER_ERROR',
-        error instanceof Error ? error : undefined,
-      );
-    }
-  }
-
-  async upsert(playerValue: PlayerValue): Promise<DbPlayerValue> {
-    try {
-      const newPlayerValue: DbPlayerValueInsert = {
-        elementId: playerValue.elementId,
-        eventId: playerValue.eventId,
-        elementType: playerValue.elementType,
-        value: playerValue.value,
-        lastValue: playerValue.lastValue,
-        changeDate: playerValue.changeDate,
-        changeType: playerValue.changeType,
-      };
-
-      const db = await this.getDbInstance();
-      const result = await db
-        .insert(playerValues)
-        .values(newPlayerValue)
-        .onConflictDoUpdate({
-          target: [playerValues.eventId, playerValues.elementId],
-          set: {
-            value: newPlayerValue.value,
-            lastValue: newPlayerValue.lastValue,
-            changeDate: newPlayerValue.changeDate,
-            changeType: newPlayerValue.changeType,
-          },
-        })
-        .returning();
-
-      const upsertedPlayerValue = result[0];
-      logInfo('Upserted player value', {
-        eventId: playerValue.eventId,
-        playerId: playerValue.elementId,
-      });
-      return upsertedPlayerValue;
-    } catch (error) {
-      logError('Failed to upsert player value', error, {
-        eventId: playerValue.eventId,
-        playerId: playerValue.elementId,
-      });
-      throw new DatabaseError(
-        `Failed to upsert player value for event: ${playerValue.eventId}, player: ${playerValue.elementId}`,
-        'UPSERT_ERROR',
-        error instanceof Error ? error : undefined,
-      );
-    }
-  }
-
-  async upsertBatch(playerValuesData: PlayerValue[]): Promise<{ count: number }> {
-    try {
-      if (playerValuesData.length === 0) {
-        return { count: 0 };
+        return rows.length > 0;
+      } catch (error) {
+        logError('Failed to check player values by date', error, { changeDate });
+        throw new DatabaseError('Failed to check player values by date', 'CHECK_DATE_ERROR');
       }
+    },
 
-      const newPlayerValues: DbPlayerValueInsert[] = playerValuesData.map((playerValue) => ({
-        elementId: playerValue.elementId,
-        eventId: playerValue.eventId,
-        elementType: playerValue.elementType,
-        value: playerValue.value,
-        lastValue: playerValue.lastValue,
-        changeDate: playerValue.changeDate,
-        changeType: playerValue.changeType,
-      }));
+    insertBatch: async (playerValuesList: PlayerValue[]): Promise<{ count: number }> => {
+      try {
+        if (playerValuesList.length === 0) {
+          return { count: 0 };
+        }
 
-      const db = await this.getDbInstance();
-      const result = await db
-        .insert(playerValues)
-        .values(newPlayerValues)
-        .onConflictDoUpdate({
-          target: [playerValues.eventId, playerValues.elementId],
-          set: {
-            value: sql`excluded.value`,
-            lastValue: sql`excluded.last_value`,
-            changeDate: sql`excluded.change_date`,
-            changeType: sql`excluded.change_type`,
-          },
-        })
-        .returning();
+        const rows: DbPlayerValueInsert[] = playerValuesList.map((playerValue) => ({
+          eventId: playerValue.eventId,
+          elementId: playerValue.elementId,
+          elementType: playerValue.elementType,
+          value: playerValue.value,
+          changeDate: playerValue.changeDate,
+          changeType:
+            playerValue.changeType.toLowerCase() as (typeof playerValues.changeType)['enumValues'][number],
+          lastValue: playerValue.lastValue,
+        }));
 
-      logInfo('Batch upserted player values', { count: result.length });
-      return { count: result.length };
-    } catch (error) {
-      logError('Failed to batch upsert player values', error, { count: playerValuesData.length });
-      throw new DatabaseError(
-        'Failed to batch upsert player values',
-        'BATCH_UPSERT_ERROR',
-        error instanceof Error ? error : undefined,
-      );
-    }
-  }
-
-  async deleteByEventId(eventId: EventId): Promise<void> {
-    try {
-      const db = await this.getDbInstance();
-      await db.delete(playerValues).where(eq(playerValues.eventId, eventId));
-      logInfo('Deleted player values by event', { eventId });
-    } catch (error) {
-      logError('Failed to delete player values by event', error, { eventId });
-      throw new DatabaseError(
-        `Failed to delete player values for event: ${eventId}`,
-        'DELETE_BY_EVENT_ERROR',
-        error instanceof Error ? error : undefined,
-      );
-    }
-  }
-
-  async deleteByPlayerIds(playerIds: PlayerId[]): Promise<void> {
-    try {
-      if (playerIds.length === 0) return;
-
-      const db = await this.getDbInstance();
-      await db.delete(playerValues).where(inArray(playerValues.elementId, playerIds));
-      logInfo('Deleted player values by player IDs', { count: playerIds.length });
-    } catch (error) {
-      logError('Failed to delete player values by player IDs', error, { count: playerIds.length });
-      throw new DatabaseError(
-        'Failed to delete player values by player IDs',
-        'DELETE_BY_PLAYER_IDS_ERROR',
-        error instanceof Error ? error : undefined,
-      );
-    }
-  }
-
-  async getLatestEventId(): Promise<EventId | null> {
-    try {
-      const db = await this.getDbInstance();
-      const result = await db
-        .select({ eventId: playerValues.eventId })
-        .from(playerValues)
-        .orderBy(sql`${playerValues.eventId} DESC`)
-        .limit(1);
-
-      const latestEventId = result[0]?.eventId || null;
-      logInfo('Retrieved latest event id', { latestEventId });
-      return latestEventId;
-    } catch (error) {
-      logError('Failed to retrieve latest event id', error);
-      throw new DatabaseError(
-        'Failed to retrieve latest event id',
-        'GET_LATEST_EVENT_ERROR',
-        error instanceof Error ? error : undefined,
-      );
-    }
-  }
-
-  async getPlayerValuesCount(): Promise<number> {
-    try {
-      const db = await this.getDbInstance();
-      const result = await db.select({ count: sql<number>`count(*)` }).from(playerValues);
-
-      const count = Number(result[0]?.count) || 0;
-      logInfo('Retrieved player values count', { count });
-      return count;
-    } catch (error) {
-      logError('Failed to get player values count', error);
-      throw new DatabaseError(
-        'Failed to retrieve player values count',
-        'GET_COUNT_ERROR',
-        error instanceof Error ? error : undefined,
-      );
-    }
-  }
-
-  // Find latest stored value for each player (for change detection)
-  async findLatestForAllPlayers(): Promise<DbPlayerValue[]> {
-    try {
-      const db = await this.getDbInstance();
-
-      // Get the most recent record for each player
-      const result = await db.execute(sql`
-        SELECT DISTINCT ON (element_id)
-          id,
-          element_id as "elementId",
-          element_type as "elementType",
-          event_id as "eventId",
-          value,
-          change_date as "changeDate",
-          change_type as "changeType",
-          last_value as "lastValue",
-          created_at as "createdAt"
-        FROM player_values
-        ORDER BY element_id, created_at DESC
-      `);
-
-      const rows = this.mapRowList<DbPlayerValue>(result);
-      logInfo('Retrieved latest values for all players', { count: rows.length });
-      return rows;
-    } catch (error) {
-      logError('Failed to find latest values for all players', error);
-      throw new DatabaseError(
-        'Failed to retrieve latest player values',
-        'FIND_LATEST_ALL_ERROR',
-        error instanceof Error ? error : undefined,
-      );
-    }
-  }
-
-  // Find player values by change date (daily records)
-  async findByChangeDate(changeDate: string): Promise<DbPlayerValue[]> {
-    try {
-      const db = await this.getDbInstance();
-
-      const result = await db
-        .select()
-        .from(playerValues)
-        .where(eq(playerValues.changeDate, changeDate));
-
-      logInfo('Retrieved player values by change date', {
-        changeDate,
-        count: result.length,
-      });
-      return result;
-    } catch (error) {
-      logError('Failed to find player values by change date', error, { changeDate });
-      throw new DatabaseError(
-        `Failed to retrieve player values for date: ${changeDate}`,
-        'FIND_BY_DATE_ERROR',
-        error instanceof Error ? error : undefined,
-      );
-    }
-  }
-
-  // Insert new records (not upsert, for daily change tracking)
-  async insertBatch(playerValuesData: PlayerValue[]): Promise<{ count: number }> {
-    try {
-      if (playerValuesData.length === 0) {
-        return { count: 0 };
+        const db = await getDbInstance();
+        const inserted = await db.insert(playerValues).values(rows).returning();
+        logInfo('Inserted player values', { count: inserted.length });
+        return { count: inserted.length };
+      } catch (error) {
+        logError('Failed to insert player values', error, { count: playerValuesList.length });
+        throw new DatabaseError('Failed to insert player values', 'INSERT_ERROR');
       }
+    },
+  };
+};
 
-      const newPlayerValues = playerValuesData.map((playerValue) => ({
-        elementId: playerValue.elementId,
-        eventId: playerValue.eventId,
-        webName: playerValue.webName,
-        elementType: playerValue.elementType,
-        elementTypeName: playerValue.elementTypeName,
-        teamId: playerValue.teamId,
-        teamName: playerValue.teamName,
-        teamShortName: playerValue.teamShortName,
-        value: playerValue.value,
-        lastValue: playerValue.lastValue,
-        changeDate: playerValue.changeDate,
-        changeType: playerValue.changeType,
-      }));
-
-      const db = await this.getDbInstance();
-      const result = await db.insert(playerValues).values(newPlayerValues).returning();
-
-      logInfo('Batch inserted player values', { count: result.length });
-      return { count: result.length };
-    } catch (error) {
-      logError('Failed to batch insert player values', error, { count: playerValuesData.length });
-      throw new DatabaseError(
-        'Failed to batch insert player values',
-        'BATCH_INSERT_ERROR',
-        error instanceof Error ? error : undefined,
-      );
-    }
-  }
-
-  // Delete all player values
-  async deleteAll(): Promise<void> {
-    try {
-      const db = await this.getDbInstance();
-      await db.execute('TRUNCATE TABLE player_values CASCADE');
-      logInfo('Deleted all player values with CASCADE');
-    } catch (error) {
-      logError('Failed to delete all player values', error);
-      throw new DatabaseError(
-        'Failed to delete all player values',
-        'DELETE_ALL_ERROR',
-        error instanceof Error ? error : undefined,
-      );
-    }
-  }
-
-  async deleteByChangeDate(changeDate: string): Promise<void> {
-    try {
-      const db = await this.getDbInstance();
-      await db.delete(playerValues).where(eq(playerValues.changeDate, changeDate));
-      logInfo('Deleted player values by change date', { changeDate });
-    } catch (error) {
-      logError('Failed to delete player values by change date', error, { changeDate });
-      throw new DatabaseError(
-        `Failed to delete player values for change date: ${changeDate}`,
-        'DELETE_BY_DATE_ERROR',
-        error instanceof Error ? error : undefined,
-      );
-    }
-  }
-}
-
-// Export singleton instance
-export const playerValuesRepository = new PlayerValuesRepository();
+export const playerValuesRepository = createPlayerValuesRepository();

@@ -326,17 +326,17 @@ export interface RawFPLEntrySummary {
   name: string;
   player_first_name: string;
   player_last_name: string;
-  player_region_name: string | null;
-  started_event: number | null;
-  summary_overall_points: number | null;
-  summary_overall_rank: number | null;
-  bank: number | null; // in tenths
-  value: number | null; // in tenths
-  last_deadline_total_transfers: number | null;
+  player_region_name?: string | null;
+  started_event?: number | null;
+  summary_overall_points?: number | null;
+  summary_overall_rank?: number | null;
+  bank?: number | null; // in tenths
+  value?: number | null; // in tenths
+  last_deadline_total_transfers?: number | null;
   last_deadline_bank?: number | null;
-  last_deadline_total_points: number | null;
-  last_deadline_rank: number | null;
-  last_deadline_value: number | null; // in tenths
+  last_deadline_total_points?: number | null;
+  last_deadline_rank?: number | null;
+  last_deadline_value?: number | null; // in tenths
   leagues?: RawFPLEntryLeagues; // optional leagues block
 }
 

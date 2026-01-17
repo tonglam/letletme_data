@@ -14,7 +14,7 @@ export const singlePlayerValueFixture: PlayerValue = {
   teamShortName: 'MCI',
   value: 142,
   changeDate: '2023-12-15T10:00:00.000Z',
-  changeType: 'increase' as ValueChangeType,
+  changeType: 'Rise' as ValueChangeType,
   lastValue: 138,
 };
 
@@ -26,7 +26,7 @@ export const singleRawPlayerValueFixture: RawPlayerValue = {
   teamId: 11 as TeamId,
   value: 142,
   changeDate: '2023-12-15T10:00:00.000Z',
-  changeType: 'increase' as ValueChangeType,
+  changeType: 'Rise' as ValueChangeType,
   lastValue: 138,
 };
 
@@ -42,7 +42,7 @@ export const gkpPlayerValueFixture: PlayerValue = {
   teamShortName: 'LIV',
   value: 55,
   changeDate: '2023-12-15T10:00:00.000Z',
-  changeType: 'stable' as ValueChangeType,
+  changeType: 'Start' as ValueChangeType,
   lastValue: 55,
 };
 
@@ -57,7 +57,7 @@ export const defPlayerValueFixture: PlayerValue = {
   teamShortName: 'LIV',
   value: 72,
   changeDate: '2023-12-15T10:00:00.000Z',
-  changeType: 'decrease' as ValueChangeType,
+  changeType: 'Faller' as ValueChangeType,
   lastValue: 74,
 };
 
@@ -72,7 +72,7 @@ export const midPlayerValueFixture: PlayerValue = {
   teamShortName: 'MCI',
   value: 102,
   changeDate: '2023-12-15T10:00:00.000Z',
-  changeType: 'increase' as ValueChangeType,
+  changeType: 'Rise' as ValueChangeType,
   lastValue: 100,
 };
 
@@ -87,7 +87,7 @@ export const fwdPlayerValueFixture: PlayerValue = {
   teamShortName: 'LIV',
   value: 125,
   changeDate: '2023-12-15T10:00:00.000Z',
-  changeType: 'stable' as ValueChangeType,
+  changeType: 'Start' as ValueChangeType,
   lastValue: 125,
 };
 
@@ -202,7 +202,7 @@ export function generatePlayerValue(overrides: Partial<PlayerValue> = {}): Playe
     teamShortName: 'TST',
     value: 80,
     changeDate: '2023-12-15T10:00:00.000Z',
-    changeType: 'stable' as ValueChangeType,
+    changeType: 'Start' as ValueChangeType,
     lastValue: 80,
     ...overrides,
   };
@@ -210,13 +210,14 @@ export function generatePlayerValue(overrides: Partial<PlayerValue> = {}): Playe
 
 // Generate array of player values
 export function generatePlayerValues(count: number = 3): PlayerValue[] {
+  const cycle: ValueChangeType[] = ['Rise', 'Faller', 'Start'];
   return Array.from({ length: count }, (_, index) =>
     generatePlayerValue({
       elementId: (index + 1) as PlayerId,
       webName: `Player ${index + 1}`,
       value: 60 + index * 10,
       lastValue: 58 + index * 10,
-      changeType: index % 3 === 0 ? 'increase' : index % 3 === 1 ? 'decrease' : 'stable',
+      changeType: cycle[index % cycle.length],
     }),
   );
 }
@@ -229,28 +230,21 @@ export function generatePlayerValuesWithChanges(): PlayerValue[] {
       webName: 'Rising Player',
       value: 90,
       lastValue: 80,
-      changeType: 'increase',
+      changeType: 'Rise',
     }),
     generatePlayerValue({
       elementId: 2 as PlayerId,
       webName: 'Falling Player',
       value: 70,
       lastValue: 80,
-      changeType: 'decrease',
+      changeType: 'Faller',
     }),
     generatePlayerValue({
       elementId: 3 as PlayerId,
       webName: 'Stable Player',
       value: 80,
       lastValue: 80,
-      changeType: 'stable',
-    }),
-    generatePlayerValue({
-      elementId: 4 as PlayerId,
-      webName: 'Unknown Player',
-      value: 80,
-      lastValue: 75,
-      changeType: 'unknown',
+      changeType: 'Start',
     }),
   ];
 }

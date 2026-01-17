@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, test } from 'bun:test';
 
-import { EventRepository } from '../../src/repositories/events';
+import { createEventRepository } from '../../src/repositories/events';
 import { transformEvents } from '../../src/transformers/events';
 import {
   rawFPLEventsFixture,
@@ -122,7 +122,7 @@ describe('Events Unit Tests', () => {
 
   describe('EventRepository Unit Tests', () => {
     let _mockDb: any;
-    let repository: EventRepository;
+    let repository: ReturnType<typeof createEventRepository>;
 
     beforeEach(() => {
       // Create mock database with simple functions
@@ -142,7 +142,7 @@ describe('Events Unit Tests', () => {
         delete: () => Promise.resolve(undefined),
       };
 
-      repository = new EventRepository();
+      repository = createEventRepository();
       // Note: Real repository uses singleton db, this is just for testing structure
     });
 

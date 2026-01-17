@@ -1,10 +1,10 @@
 import { eventLivesCache } from '../cache/operations';
 import { fplClient } from '../clients/fpl';
 import type { EventLive } from '../domain/event-lives';
-import { eventLiveRepository } from '../repositories/event-lives';
 import { eventLiveExplainsRepository } from '../repositories/event-live-explains';
-import { transformEventLives } from '../transformers/event-lives';
+import { eventLiveRepository } from '../repositories/event-lives';
 import { transformEventLiveExplains } from '../transformers/event-live-explains';
+import { transformEventLives } from '../transformers/event-lives';
 import { logError, logInfo } from '../utils/logger';
 
 /**
@@ -51,63 +51,45 @@ export async function getEventLivesByEventId(eventId: number): Promise<EventLive
 }
 
 /**
- * Get event live data for a specific player in a specific event
+ * Fast cache-only update for real-time match data (runs every 1 minute)
+ * Skips database persistence for performance
  */
-export async function getEventLiveByEventAndElement(
-  eventId: number,
-  elementId: number,
-): Promise<EventLive | null> {
+export async function updateEventLivesCache(eventId: number): Promise<{ count: number }> {
   try {
-    logInfo('Getting event live data by event and element', { eventId, elementId });
+    logInfo('Starting fast cache update', { eventId });
 
-    // 1. Try cache first (fast path)
-    const cached = await eventLivesCache.getByEventAndElement(eventId, elementId);
-    if (cached) {
-      logInfo('Event live retrieved from cache', { eventId, elementId });
-      return cached;
+    // 1. Fetch from FPL API
+    const liveData = await fplClient.getEventLive(eventId);
+
+    if (!liveData.elements || !Array.isArray(liveData.elements)) {
+      throw new Error('Invalid event live data from FPL API');
     }
 
-    // 2. Cache miss - fallback to database
-    logInfo('Cache miss - fetching from database', { eventId, elementId });
-    const eventLive = await eventLiveRepository.findByEventAndElement(eventId, elementId);
+    // 2. Transform to domain EventLives only (skip explains for speed)
+    const eventLives = transformEventLives(eventId, liveData.elements);
+    logInfo('Event lives transformed for cache', {
+      eventId,
+      count: eventLives.length,
+    });
 
-    if (eventLive) {
-      logInfo('Event live found in database', { eventId, elementId });
-    } else {
-      logInfo('Event live not found', { eventId, elementId });
-    }
+    // 3. Update cache ONLY (skip database writes)
+    await eventLivesCache.set(eventId, eventLives);
+    logInfo('Cache update completed', { eventId, count: eventLives.length });
 
-    return eventLive;
+    return { count: eventLives.length };
   } catch (error) {
-    logError('Failed to get event live data', error, { eventId, elementId });
+    logError('Cache update failed', error, { eventId });
     throw error;
   }
 }
 
 /**
- * Get all event live data for a specific player across all events
- */
-export async function getEventLivesByElementId(elementId: number): Promise<EventLive[]> {
-  try {
-    logInfo('Getting event live data by element ID', { elementId });
-
-    // For this query, we go directly to the database as it's not commonly cached
-    const eventLives = await eventLiveRepository.findByElementId(elementId);
-
-    logInfo('Event lives retrieved from database', { elementId, count: eventLives.length });
-    return eventLives;
-  } catch (error) {
-    logError('Failed to get event live data by element ID', error, { elementId });
-    throw error;
-  }
-}
-
-/**
- * Sync event live data from FPL API for a specific event
+ * Full sync with database persistence (runs every 10 minutes)
+ * Persists to database and updates cache
  */
 export async function syncEventLives(eventId: number): Promise<{ count: number; errors: number }> {
   try {
-    logInfo('Starting event live sync from FPL API', { eventId });
+    logInfo('Starting full event live sync with DB persistence', { eventId });
 
     // 1. Fetch from FPL API
     const liveData = await fplClient.getEventLive(eventId);
@@ -145,38 +127,10 @@ export async function syncEventLives(eventId: number): Promise<{ count: number; 
       errors: liveData.elements.length - eventLives.length,
     };
 
-    logInfo('Event live sync completed successfully', { eventId, ...result });
+    logInfo('Full event live sync completed successfully', { eventId, ...result });
     return result;
   } catch (error) {
     logError('Event live sync failed', error, { eventId });
-    throw error;
-  }
-}
-
-/**
- * Clear event lives cache for a specific event
- */
-export async function clearEventLivesCache(eventId: number): Promise<void> {
-  try {
-    logInfo('Clearing event lives cache', { eventId });
-    await eventLivesCache.clearByEventId(eventId);
-    logInfo('Event lives cache cleared', { eventId });
-  } catch (error) {
-    logError('Failed to clear event lives cache', error, { eventId });
-    throw error;
-  }
-}
-
-/**
- * Clear all event lives cache
- */
-export async function clearAllEventLivesCache(): Promise<void> {
-  try {
-    logInfo('Clearing all event lives cache');
-    await eventLivesCache.clear();
-    logInfo('All event lives cache cleared');
-  } catch (error) {
-    logError('Failed to clear all event lives cache', error);
     throw error;
   }
 }

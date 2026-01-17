@@ -9,7 +9,7 @@ import {
   validateFixture,
   validateRawFPLFixture,
 } from '../../src/domain/fixtures';
-import { FixtureRepository } from '../../src/repositories/fixtures';
+import { createFixtureRepository } from '../../src/repositories/fixtures';
 import { transformFixtures } from '../../src/transformers/fixtures';
 import {
   mockFixture1,
@@ -184,10 +184,10 @@ describe('Fixtures Unit Tests', () => {
   });
 
   describe('FixtureRepository Unit Tests', () => {
-    let repository: FixtureRepository;
+    let repository: ReturnType<typeof createFixtureRepository>;
 
     beforeEach(() => {
-      repository = new FixtureRepository();
+      repository = createFixtureRepository();
     });
 
     test('should create repository instance', () => {
@@ -196,9 +196,7 @@ describe('Fixtures Unit Tests', () => {
       expect(repository.findById).toBeDefined();
       expect(repository.findByEvent).toBeDefined();
       expect(repository.findByTeam).toBeDefined();
-      expect(repository.upsert).toBeDefined();
       expect(repository.upsertBatch).toBeDefined();
-      expect(repository.deleteAll).toBeDefined();
     });
 
     test('should handle repository method signatures', () => {
@@ -206,7 +204,6 @@ describe('Fixtures Unit Tests', () => {
       expect(typeof repository.findById).toBe('function');
       expect(typeof repository.findByEvent).toBe('function');
       expect(typeof repository.findByTeam).toBe('function');
-      expect(typeof repository.upsert).toBe('function');
       expect(typeof repository.upsertBatch).toBe('function');
       expect(typeof repository.deleteAll).toBe('function');
     });

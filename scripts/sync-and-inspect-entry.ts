@@ -1,4 +1,4 @@
-import { syncEntryInfo } from '../src/services/entries.service';
+import { syncEntryInfo } from '../src/services/entry-info.service';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 import { entryInfos } from '../src/db/schemas/index.schema';

@@ -1,4 +1,4 @@
-import { eq, inArray, sql } from 'drizzle-orm';
+import { inArray, sql } from 'drizzle-orm';
 
 import { players, type DbPlayer, type DbPlayerInsert } from '../db/schemas/index.schema';
 import { getDb } from '../db/singleton';
@@ -10,207 +10,104 @@ import type { Player as DomainPlayer } from '../types';
 
 type DatabaseInstance = PostgresJsDatabase<Record<string, never>>;
 
-export class PlayerRepository {
-  private db?: DatabaseInstance;
+function mapDbPlayerToDomain(player: DbPlayer): DomainPlayer {
+  return {
+    id: player.id,
+    code: player.code,
+    type: player.type,
+    teamId: player.teamId,
+    price: player.price,
+    startPrice: player.startPrice,
+    firstName: player.firstName ?? player.webName,
+    secondName: player.secondName ?? '',
+    webName: player.webName,
+  };
+}
 
-  constructor(dbInstance?: DatabaseInstance) {
-    this.db = dbInstance;
-  }
+export const createPlayerRepository = (dbInstance?: DatabaseInstance) => {
+  const getDbInstance = async () => dbInstance || (await getDb());
 
-  private async getDbInstance() {
-    return this.db || (await getDb());
-  }
-
-  async findAll(): Promise<DbPlayer[]> {
-    try {
-      const db = await this.getDbInstance();
-      const result = await db.select().from(players).orderBy(players.id);
-      logInfo('Retrieved all players', { count: result.length });
-      return result;
-    } catch (error) {
-      logError('Failed to find all players', error);
-      throw new DatabaseError(
-        'Failed to retrieve players',
-        'FIND_ALL_ERROR',
-        error instanceof Error ? error : undefined,
-      );
-    }
-  }
-
-  async findById(id: number): Promise<DbPlayer | null> {
-    try {
-      const db = await this.getDbInstance();
-      const result = await db.select().from(players).where(eq(players.id, id));
-      const player = result[0] || null;
-
-      if (player) {
-        logInfo('Retrieved player by id', { id });
-      } else {
-        logInfo('Player not found', { id });
-      }
-
-      return player;
-    } catch (error) {
-      logError('Failed to find player by id', error, { id });
-      throw new DatabaseError(
-        `Failed to retrieve player with id: ${id}`,
-        'FIND_BY_ID_ERROR',
-        error instanceof Error ? error : undefined,
-      );
-    }
-  }
-
-  async findByIds(ids: number[]): Promise<DbPlayer[]> {
-    if (ids.length === 0) {
-      return [];
-    }
-
-    try {
-      const db = await this.getDbInstance();
-      const uniqueIds = Array.from(new Set(ids));
-      const chunks: number[][] = [];
-
-      for (let index = 0; index < uniqueIds.length; index += 1000) {
-        chunks.push(uniqueIds.slice(index, index + 1000));
-      }
-
-      const results: DbPlayer[] = [];
-      for (const chunk of chunks) {
-        const rows = await db.select().from(players).where(inArray(players.id, chunk));
-        results.push(...rows);
-      }
-
-      logInfo('Retrieved players by ids', { count: results.length });
-      return results;
-    } catch (error) {
-      logError('Failed to retrieve players by ids', error);
-      throw new DatabaseError('Failed to retrieve players', 'FIND_BY_IDS_ERROR', error as Error);
-    }
-  }
-
-  async findByTeam(teamId: number): Promise<DbPlayer[]> {
-    try {
-      const db = await this.getDbInstance();
-      const result = await db.select().from(players).where(eq(players.teamId, teamId));
-      logInfo('Retrieved players by team', { teamId, count: result.length });
-      return result;
-    } catch (error) {
-      logError('Failed to find players by team', error, { teamId });
-      throw new DatabaseError(
-        `Failed to retrieve players for team: ${teamId}`,
-        'FIND_BY_TEAM_ERROR',
-        error instanceof Error ? error : undefined,
-      );
-    }
-  }
-
-  async upsert(player: DomainPlayer): Promise<DbPlayer> {
-    try {
-      const newPlayer: DbPlayerInsert = {
-        id: player.id,
-        code: player.code,
-        type: player.type,
-        teamId: player.teamId,
-        price: player.price,
-        startPrice: player.startPrice,
-        firstName: player.firstName,
-        secondName: player.secondName,
-        webName: player.webName,
-        updatedAt: new Date(),
-      };
-
-      const db = await this.getDbInstance();
-      const result = await db
-        .insert(players)
-        .values(newPlayer)
-        .onConflictDoUpdate({
-          target: players.id,
-          set: {
-            ...newPlayer,
-            updatedAt: new Date(),
-          },
-        })
-        .returning();
-
-      const upsertedPlayer = result[0];
-      logInfo('Upserted player', { id: upsertedPlayer.id });
-      return upsertedPlayer;
-    } catch (error) {
-      logError('Failed to upsert player', error, { id: player.id });
-      throw new DatabaseError(
-        `Failed to upsert player with id: ${player.id}`,
-        'UPSERT_ERROR',
-        error instanceof Error ? error : undefined,
-      );
-    }
-  }
-
-  async upsertBatch(domainPlayers: DomainPlayer[]): Promise<DbPlayer[]> {
-    try {
-      if (domainPlayers.length === 0) {
+  return {
+    findByIds: async (ids: number[]): Promise<DomainPlayer[]> => {
+      if (ids.length === 0) {
         return [];
       }
 
-      const newPlayers: DbPlayerInsert[] = domainPlayers.map((player) => ({
-        id: player.id,
-        code: player.code,
-        type: player.type,
-        teamId: player.teamId,
-        price: player.price,
-        startPrice: player.startPrice,
-        firstName: player.firstName,
-        secondName: player.secondName,
-        webName: player.webName,
-        updatedAt: new Date(),
-      }));
+      try {
+        const db = await getDbInstance();
+        const uniqueIds = Array.from(new Set(ids));
+        const chunks: number[][] = [];
 
-      const db = await this.getDbInstance();
-      const result = await db
-        .insert(players)
-        .values(newPlayers)
-        .onConflictDoUpdate({
-          target: players.id,
-          set: {
-            code: sql`excluded.code`,
-            type: sql`excluded.type`,
-            teamId: sql`excluded.team_id`,
-            price: sql`excluded.price`,
-            startPrice: sql`excluded.start_price`,
-            firstName: sql`excluded.first_name`,
-            secondName: sql`excluded.second_name`,
-            webName: sql`excluded.web_name`,
-            updatedAt: new Date(),
-          },
-        })
-        .returning();
+        for (let index = 0; index < uniqueIds.length; index += 1000) {
+          chunks.push(uniqueIds.slice(index, index + 1000));
+        }
 
-      logInfo('Batch upserted players', { count: result.length });
-      return result;
-    } catch (error) {
-      logError('Failed to batch upsert players', error, { count: domainPlayers.length });
-      throw new DatabaseError(
-        'Failed to batch upsert players',
-        'BATCH_UPSERT_ERROR',
-        error instanceof Error ? error : undefined,
-      );
-    }
-  }
+        const results: DbPlayer[] = [];
+        for (const chunk of chunks) {
+          const rows = await db.select().from(players).where(inArray(players.id, chunk));
+          results.push(...rows);
+        }
 
-  async deleteAll(): Promise<void> {
-    try {
-      const db = await this.getDbInstance();
-      await db.delete(players);
-      logInfo('Deleted all players');
-    } catch (error) {
-      logError('Failed to delete all players', error);
-      throw new DatabaseError(
-        'Failed to delete all players',
-        'DELETE_ALL_ERROR',
-        error instanceof Error ? error : undefined,
-      );
-    }
-  }
-}
+        const domainPlayers = results.map(mapDbPlayerToDomain);
+        logInfo('Retrieved players by ids', { count: domainPlayers.length });
+        return domainPlayers;
+      } catch (error) {
+        logError('Failed to retrieve players by ids', error);
+        throw new DatabaseError('Failed to retrieve players', 'FIND_BY_IDS_ERROR', error as Error);
+      }
+    },
+
+    upsertBatch: async (domainPlayers: DomainPlayer[]): Promise<DomainPlayer[]> => {
+      try {
+        if (domainPlayers.length === 0) {
+          return [];
+        }
+
+        const newPlayers: DbPlayerInsert[] = domainPlayers.map((player) => ({
+          id: player.id,
+          code: player.code,
+          type: player.type,
+          teamId: player.teamId,
+          price: player.price,
+          startPrice: player.startPrice,
+          firstName: player.firstName,
+          secondName: player.secondName,
+          webName: player.webName,
+        }));
+
+        const db = await getDbInstance();
+        const result = await db
+          .insert(players)
+          .values(newPlayers)
+          .onConflictDoUpdate({
+            target: players.id,
+            set: {
+              code: sql`excluded.code`,
+              type: sql`excluded.type`,
+              teamId: sql`excluded.team_id`,
+              price: sql`excluded.price`,
+              startPrice: sql`excluded.start_price`,
+              firstName: sql`excluded.first_name`,
+              secondName: sql`excluded.second_name`,
+              webName: sql`excluded.web_name`,
+            },
+          })
+          .returning();
+
+        const mappedPlayers = result.map(mapDbPlayerToDomain);
+        logInfo('Batch upserted players', { count: mappedPlayers.length });
+        return mappedPlayers;
+      } catch (error) {
+        logError('Failed to batch upsert players', error, { count: domainPlayers.length });
+        throw new DatabaseError(
+          'Failed to batch upsert players',
+          'BATCH_UPSERT_ERROR',
+          error instanceof Error ? error : undefined,
+        );
+      }
+    },
+  };
+};
 
 // Export singleton instance
-export const playerRepository = new PlayerRepository();
+export const playerRepository = createPlayerRepository();

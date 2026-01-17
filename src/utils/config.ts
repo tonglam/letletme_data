@@ -64,15 +64,14 @@ export function getConfig(): AppConfig {
 export function validateEnvForCli(): { ok: boolean; errors?: unknown } {
   try {
     const conf = getConfig();
-    // eslint-disable-next-line no-console
-    console.log('[env] OK', {
+    logInfo('[env] OK', {
       PORT: conf.PORT,
       DATABASE_URL: conf.DATABASE_URL ? 'set' : 'missing',
       REDIS: `${conf.REDIS_HOST}:${conf.REDIS_PORT}`,
     });
     return { ok: true };
   } catch (error) {
-    console.error('[env] FAILED', error);
+    logError('[env] FAILED', error);
     return { ok: false, errors: error };
   }
 }

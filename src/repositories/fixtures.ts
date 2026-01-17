@@ -1,4 +1,4 @@
-import { eq, or, sql } from 'drizzle-orm';
+import { inArray, sql } from 'drizzle-orm';
 
 import {
   eventFixtures,
@@ -39,231 +39,111 @@ function mapDbFixtureToDomain(dbFixture: DbEventFixture): DomainFixture {
   };
 }
 
-export class FixtureRepository {
-  private db?: DatabaseInstance;
+export const createFixtureRepository = (dbInstance?: DatabaseInstance) => {
+  const getDbInstance = async () => dbInstance || (await getDb());
 
-  constructor(dbInstance?: DatabaseInstance) {
-    this.db = dbInstance;
-  }
+  return {
+    findEventIdsByFixtureIds: async (ids: number[]): Promise<Map<number, number | null>> => {
+      try {
+        if (ids.length === 0) {
+          return new Map();
+        }
 
-  private async getDbInstance() {
-    return this.db || (await getDb());
-  }
+        const db = await getDbInstance();
+        const result = await db
+          .select({ id: eventFixtures.id, eventId: eventFixtures.eventId })
+          .from(eventFixtures)
+          .where(inArray(eventFixtures.id, ids));
 
-  async findAll(): Promise<DomainFixture[]> {
-    try {
-      const db = await this.getDbInstance();
-      const result = await db.select().from(eventFixtures).orderBy(eventFixtures.id);
-      const domainFixtures = result.map(mapDbFixtureToDomain);
-      logInfo('Retrieved all fixtures', { count: domainFixtures.length });
-      return domainFixtures;
-    } catch (error) {
-      logError('Failed to find all fixtures', error);
-      throw new DatabaseError(
-        'Failed to retrieve fixtures',
-        'FIND_ALL_ERROR',
-        error instanceof Error ? error : undefined,
-      );
-    }
-  }
-
-  async findById(id: number): Promise<DomainFixture | null> {
-    try {
-      const db = await this.getDbInstance();
-      const result = await db.select().from(eventFixtures).where(eq(eventFixtures.id, id));
-      const dbFixture = result[0] || null;
-
-      if (dbFixture) {
-        logInfo('Retrieved fixture by id', { id });
-        return mapDbFixtureToDomain(dbFixture);
-      } else {
-        logInfo('Fixture not found', { id });
-        return null;
+        return new Map(result.map((row) => [row.id, row.eventId]));
+      } catch (error) {
+        logError('Failed to find fixture event ids', error, { count: ids.length });
+        throw new DatabaseError(
+          'Failed to retrieve fixture event ids',
+          'FIND_EVENT_IDS_ERROR',
+          error instanceof Error ? error : undefined,
+        );
       }
-    } catch (error) {
-      logError('Failed to find fixture by id', error, { id });
-      throw new DatabaseError(
-        `Failed to retrieve fixture with id: ${id}`,
-        'FIND_BY_ID_ERROR',
-        error instanceof Error ? error : undefined,
-      );
-    }
-  }
+    },
 
-  async findByEvent(eventId: number): Promise<DomainFixture[]> {
-    try {
-      const db = await this.getDbInstance();
-      const result = await db
-        .select()
-        .from(eventFixtures)
-        .where(eq(eventFixtures.eventId, eventId));
+    upsertBatch: async (domainFixtures: DomainFixture[]): Promise<DomainFixture[]> => {
+      try {
+        if (domainFixtures.length === 0) {
+          return [];
+        }
+        const batchSize = 500;
+        const db = await getDbInstance();
+        const mappedFixtures: DomainFixture[] = [];
 
-      const domainFixtures = result.map(mapDbFixtureToDomain);
-      logInfo('Retrieved fixtures by event', { eventId, count: domainFixtures.length });
-      return domainFixtures;
-    } catch (error) {
-      logError('Failed to find fixtures by event', error, { eventId });
-      throw new DatabaseError(
-        `Failed to retrieve fixtures for event: ${eventId}`,
-        'FIND_BY_EVENT_ERROR',
-        error instanceof Error ? error : undefined,
-      );
-    }
-  }
-
-  async findByTeam(teamId: number): Promise<DomainFixture[]> {
-    try {
-      const db = await this.getDbInstance();
-      const result = await db
-        .select()
-        .from(eventFixtures)
-        .where(or(eq(eventFixtures.teamAId, teamId), eq(eventFixtures.teamHId, teamId)));
-
-      const domainFixtures = result.map(mapDbFixtureToDomain);
-      logInfo('Retrieved fixtures by team', { teamId, count: domainFixtures.length });
-      return domainFixtures;
-    } catch (error) {
-      logError('Failed to find fixtures by team', error, { teamId });
-      throw new DatabaseError(
-        `Failed to retrieve fixtures for team: ${teamId}`,
-        'FIND_BY_TEAM_ERROR',
-        error instanceof Error ? error : undefined,
-      );
-    }
-  }
-
-  async upsert(fixture: DomainFixture): Promise<DomainFixture> {
-    try {
-      const newFixture: DbEventFixtureInsert = {
-        id: fixture.id,
-        code: fixture.code,
-        eventId: fixture.event,
-        finished: fixture.finished,
-        finishedProvisional: fixture.finishedProvisional,
-        kickoffTime: fixture.kickoffTime,
-        minutes: fixture.minutes,
-        provisionalStartTime: fixture.provisionalStartTime,
-        started: fixture.started,
-        teamAId: fixture.teamA,
-        teamAScore: fixture.teamAScore,
-        teamHId: fixture.teamH,
-        teamHScore: fixture.teamHScore,
-        stats: fixture.stats,
-        teamHDifficulty: fixture.teamHDifficulty,
-        teamADifficulty: fixture.teamADifficulty,
-        pulseId: fixture.pulseId,
-        updatedAt: new Date(),
-      };
-
-      const db = await this.getDbInstance();
-      const result = await db
-        .insert(eventFixtures)
-        .values(newFixture)
-        .onConflictDoUpdate({
-          target: eventFixtures.id,
-          set: {
-            ...newFixture,
+        for (let index = 0; index < domainFixtures.length; index += batchSize) {
+          const batch = domainFixtures.slice(index, index + batchSize);
+          const newFixtures: DbEventFixtureInsert[] = batch.map((fixture) => ({
+            id: fixture.id,
+            code: fixture.code,
+            eventId: fixture.event,
+            finished: fixture.finished,
+            finishedProvisional: fixture.finishedProvisional,
+            kickoffTime: fixture.kickoffTime,
+            minutes: fixture.minutes,
+            provisionalStartTime: fixture.provisionalStartTime,
+            started: fixture.started,
+            teamAId: fixture.teamA,
+            teamAScore: fixture.teamAScore,
+            teamHId: fixture.teamH,
+            teamHScore: fixture.teamHScore,
+            stats: fixture.stats,
+            teamHDifficulty: fixture.teamHDifficulty,
+            teamADifficulty: fixture.teamADifficulty,
+            pulseId: fixture.pulseId,
             updatedAt: new Date(),
-          },
-        })
-        .returning();
+          }));
 
-      const upsertedFixture = mapDbFixtureToDomain(result[0]);
-      logInfo('Upserted fixture', { id: upsertedFixture.id });
-      return upsertedFixture;
-    } catch (error) {
-      logError('Failed to upsert fixture', error, { id: fixture.id });
-      throw new DatabaseError(
-        `Failed to upsert fixture with id: ${fixture.id}`,
-        'UPSERT_ERROR',
-        error instanceof Error ? error : undefined,
-      );
-    }
-  }
+          const result = await db
+            .insert(eventFixtures)
+            .values(newFixtures)
+            .onConflictDoUpdate({
+              target: eventFixtures.id,
+              set: {
+                code: sql`excluded.code`,
+                eventId: sql`excluded.event_id`,
+                finished: sql`excluded.finished`,
+                finishedProvisional: sql`excluded.finished_provisional`,
+                kickoffTime: sql`excluded.kickoff_time`,
+                minutes: sql`excluded.minutes`,
+                provisionalStartTime: sql`excluded.provisional_start_time`,
+                started: sql`excluded.started`,
+                teamAId: sql`excluded.team_a_id`,
+                teamAScore: sql`excluded.team_a_score`,
+                teamHId: sql`excluded.team_h_id`,
+                teamHScore: sql`excluded.team_h_score`,
+                stats: sql`excluded.stats`,
+                teamHDifficulty: sql`excluded.team_h_difficulty`,
+                teamADifficulty: sql`excluded.team_a_difficulty`,
+                pulseId: sql`excluded.pulse_id`,
+                updatedAt: new Date(),
+              },
+            })
+            .returning();
 
-  async upsertBatch(domainFixtures: DomainFixture[]): Promise<DomainFixture[]> {
-    try {
-      if (domainFixtures.length === 0) {
-        return [];
+          mappedFixtures.push(...result.map(mapDbFixtureToDomain));
+        }
+
+        logInfo('Batch upserted fixtures', {
+          count: mappedFixtures.length,
+          batches: Math.ceil(domainFixtures.length / batchSize),
+        });
+        return mappedFixtures;
+      } catch (error) {
+        logError('Failed to batch upsert fixtures', error, { count: domainFixtures.length });
+        throw new DatabaseError(
+          'Failed to batch upsert fixtures',
+          'BATCH_UPSERT_ERROR',
+          error instanceof Error ? error : undefined,
+        );
       }
-
-      const newFixtures: DbEventFixtureInsert[] = domainFixtures.map((fixture) => ({
-        id: fixture.id,
-        code: fixture.code,
-        eventId: fixture.event,
-        finished: fixture.finished,
-        finishedProvisional: fixture.finishedProvisional,
-        kickoffTime: fixture.kickoffTime,
-        minutes: fixture.minutes,
-        provisionalStartTime: fixture.provisionalStartTime,
-        started: fixture.started,
-        teamAId: fixture.teamA,
-        teamAScore: fixture.teamAScore,
-        teamHId: fixture.teamH,
-        teamHScore: fixture.teamHScore,
-        stats: fixture.stats,
-        teamHDifficulty: fixture.teamHDifficulty,
-        teamADifficulty: fixture.teamADifficulty,
-        pulseId: fixture.pulseId,
-        updatedAt: new Date(),
-      }));
-
-      const db = await this.getDbInstance();
-      const result = await db
-        .insert(eventFixtures)
-        .values(newFixtures)
-        .onConflictDoUpdate({
-          target: eventFixtures.id,
-          set: {
-            code: sql`excluded.code`,
-            eventId: sql`excluded.event_id`,
-            finished: sql`excluded.finished`,
-            finishedProvisional: sql`excluded.finished_provisional`,
-            kickoffTime: sql`excluded.kickoff_time`,
-            minutes: sql`excluded.minutes`,
-            provisionalStartTime: sql`excluded.provisional_start_time`,
-            started: sql`excluded.started`,
-            teamAId: sql`excluded.team_a_id`,
-            teamAScore: sql`excluded.team_a_score`,
-            teamHId: sql`excluded.team_h_id`,
-            teamHScore: sql`excluded.team_h_score`,
-            stats: sql`excluded.stats`,
-            teamHDifficulty: sql`excluded.team_h_difficulty`,
-            teamADifficulty: sql`excluded.team_a_difficulty`,
-            pulseId: sql`excluded.pulse_id`,
-            updatedAt: new Date(),
-          },
-        })
-        .returning();
-
-      const mappedFixtures = result.map(mapDbFixtureToDomain);
-      logInfo('Batch upserted fixtures', { count: mappedFixtures.length });
-      return mappedFixtures;
-    } catch (error) {
-      logError('Failed to batch upsert fixtures', error, { count: domainFixtures.length });
-      throw new DatabaseError(
-        'Failed to batch upsert fixtures',
-        'BATCH_UPSERT_ERROR',
-        error instanceof Error ? error : undefined,
-      );
-    }
-  }
-
-  async deleteAll(): Promise<void> {
-    try {
-      const db = await this.getDbInstance();
-      await db.delete(eventFixtures);
-      logInfo('Deleted all fixtures');
-    } catch (error) {
-      logError('Failed to delete all fixtures', error);
-      throw new DatabaseError(
-        'Failed to delete all fixtures',
-        'DELETE_ALL_ERROR',
-        error instanceof Error ? error : undefined,
-      );
-    }
-  }
-}
+    },
+  };
+};
 
 // Export singleton instance
-export const fixtureRepository = new FixtureRepository();
+export const fixtureRepository = createFixtureRepository();

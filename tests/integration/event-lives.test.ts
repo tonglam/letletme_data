@@ -1,19 +1,12 @@
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { beforeAll, describe, expect, test } from 'bun:test';
 
+import { eventLivesCache } from '../../src/cache/operations';
 import { eventLiveRepository } from '../../src/repositories/event-lives';
-import {
-  clearAllEventLivesCache,
-  clearEventLivesCache,
-  getEventLiveByEventAndElement,
-  getEventLivesByElementId,
-  getEventLivesByEventId,
-  syncEventLives,
-} from '../../src/services/event-lives.service';
+import { syncEventLives, updateEventLivesCache } from '../../src/services/event-lives.service';
 import { getCurrentEvent } from '../../src/services/events.service';
 
 describe('Event Lives Integration Tests', () => {
   let testEventId: number;
-  let testElementId: number;
 
   beforeAll(async () => {
     // Get current event ID for testing
@@ -23,43 +16,63 @@ describe('Event Lives Integration Tests', () => {
     }
     testEventId = currentEvent.id;
 
-    // Clear cache before starting
-    await clearAllEventLivesCache();
-
     // Sync event live data - tests: FPL API → Transform → DB → Redis
     const result = await syncEventLives(testEventId);
     expect(result.count).toBeGreaterThan(0);
-
-    // Get a test element ID from the synced data
-    const eventLives = await eventLiveRepository.findByEventId(testEventId);
-    if (eventLives.length > 0) {
-      testElementId = eventLives[0].elementId;
-    } else {
-      throw new Error('No event live data found after sync');
-    }
   });
 
-  afterAll(async () => {
-    // Clean up: clear cache (but keep database data for other tests)
-    await clearAllEventLivesCache();
-  });
-
-  describe('External Data Integration', () => {
-    test('should fetch and sync event live data from FPL API', async () => {
-      const eventLives = await getEventLivesByEventId(testEventId);
-      expect(eventLives.length).toBeGreaterThan(0);
-      expect(eventLives[0]).toHaveProperty('eventId');
-      expect(eventLives[0]).toHaveProperty('elementId');
-      expect(eventLives[0]).toHaveProperty('totalPoints');
-      expect(eventLives[0]).toHaveProperty('minutes');
-    });
-
-    test('should save event live data to database', async () => {
+  describe('Sync Integration', () => {
+    test('should sync event live data from FPL API to database', async () => {
       const dbEventLives = await eventLiveRepository.findByEventId(testEventId);
       expect(dbEventLives.length).toBeGreaterThan(0);
       expect(dbEventLives[0].eventId).toBeTypeOf('number');
       expect(dbEventLives[0].elementId).toBeTypeOf('number');
       expect(dbEventLives[0].totalPoints).toBeTypeOf('number');
+    });
+
+    test('should sync and populate cache', async () => {
+      // Sync should populate cache
+      const result = await syncEventLives(testEventId);
+      expect(result.count).toBeGreaterThan(0);
+
+      // Verify cache is populated
+      const cachedData = await eventLivesCache.getByEventId(testEventId);
+      expect(cachedData).toBeDefined();
+      expect(cachedData?.length).toBeGreaterThan(0);
+    });
+
+    test('should update cache only without DB writes', async () => {
+      // Get initial DB count
+      const beforeDbCount = (await eventLiveRepository.findByEventId(testEventId)).length;
+
+      // Update cache only
+      const result = await updateEventLivesCache(testEventId);
+      expect(result.count).toBeGreaterThan(0);
+
+      // Verify cache is updated
+      const cachedData = await eventLivesCache.getByEventId(testEventId);
+      expect(cachedData).toBeDefined();
+      expect(cachedData?.length).toBe(result.count);
+
+      // Verify DB count unchanged (no new writes from cache-only update)
+      const afterDbCount = (await eventLiveRepository.findByEventId(testEventId)).length;
+      expect(afterDbCount).toBe(beforeDbCount);
+    });
+
+    test('should be faster than full sync', async () => {
+      // Measure cache-only update time
+      const cacheStart = performance.now();
+      await updateEventLivesCache(testEventId);
+      const cacheTime = performance.now() - cacheStart;
+
+      // Measure full sync time
+      const syncStart = performance.now();
+      await syncEventLives(testEventId);
+      const syncTime = performance.now() - syncStart;
+
+      // Cache-only should be faster (no DB writes)
+      expect(cacheTime).toBeLessThan(syncTime);
+      expect(cacheTime).toBeLessThan(500); // Should complete in under 500ms
     });
 
     test('should respect unique constraint on (eventId, elementId)', async () => {
@@ -71,101 +84,19 @@ describe('Event Lives Integration Tests', () => {
 
       const existing = eventLives[0];
 
-      // Try to upsert same record with different points
+      // Try to upsert same record with different points using batch
       const updated = {
         ...existing,
         totalPoints: existing.totalPoints + 10,
       };
 
-      await expect(eventLiveRepository.upsert(updated)).resolves.toBeDefined();
-
-      // Verify it was updated, not duplicated
-      const afterUpdate = await eventLiveRepository.findByEventAndElement(
-        existing.eventId,
-        existing.elementId,
-      );
-      expect(afterUpdate).toBeDefined();
-      expect(afterUpdate?.totalPoints).toBe(updated.totalPoints);
+      const results = await eventLiveRepository.upsertBatch([updated]);
+      expect(results.length).toBe(1);
 
       // Verify no duplicates
       const allRecords = await eventLiveRepository.findByEventId(testEventId);
       const sameElement = allRecords.filter((r) => r.elementId === existing.elementId);
       expect(sameElement.length).toBe(1);
-    });
-  });
-
-  describe('Service Layer Integration', () => {
-    test('should retrieve event lives by event ID', async () => {
-      const eventLives = await getEventLivesByEventId(testEventId);
-      expect(eventLives.length).toBeGreaterThan(0);
-      expect(eventLives[0].eventId).toBe(testEventId);
-    });
-
-    test('should retrieve specific event live by event and element', async () => {
-      const eventLive = await getEventLiveByEventAndElement(testEventId, testElementId);
-      expect(eventLive).toBeDefined();
-      expect(eventLive?.eventId).toBe(testEventId);
-      expect(eventLive?.elementId).toBe(testElementId);
-    });
-
-    test('should retrieve event lives by element ID', async () => {
-      const eventLives = await getEventLivesByElementId(testElementId);
-      expect(eventLives.length).toBeGreaterThan(0);
-      expect(eventLives.some((el) => el.elementId === testElementId)).toBe(true);
-    });
-
-    test('should return null for non-existent event live', async () => {
-      const nonExistentElementId = 999999;
-      const eventLive = await getEventLiveByEventAndElement(testEventId, nonExistentElementId);
-      expect(eventLive).toBeNull();
-    });
-  });
-
-  describe('Cache Integration', () => {
-    test('should use cache for fast retrieval', async () => {
-      // First call - should populate cache
-      const firstCall = await getEventLivesByEventId(testEventId);
-
-      // Second call - should hit cache
-      const startTime = performance.now();
-      const secondCall = await getEventLivesByEventId(testEventId);
-      const endTime = performance.now();
-
-      expect(secondCall).toEqual(firstCall);
-      expect(endTime - startTime).toBeLessThan(300); // Cache should be fast (parsing 742 records)
-    });
-
-    test('should handle cache miss and database fallback', async () => {
-      // Clear cache to force database fallback
-      await clearEventLivesCache(testEventId);
-
-      // Should still work with database fallback
-      const eventLives = await getEventLivesByEventId(testEventId);
-      expect(eventLives.length).toBeGreaterThan(0);
-    });
-
-    test('should clear specific event cache', async () => {
-      // Populate cache
-      await getEventLivesByEventId(testEventId);
-
-      // Clear specific event cache
-      await clearEventLivesCache(testEventId);
-
-      // Next call should fetch from database
-      const eventLives = await getEventLivesByEventId(testEventId);
-      expect(eventLives.length).toBeGreaterThan(0);
-    });
-
-    test('should clear all event lives cache', async () => {
-      // Populate cache
-      await getEventLivesByEventId(testEventId);
-
-      // Clear all cache
-      await clearAllEventLivesCache();
-
-      // Next call should fetch from database
-      const eventLives = await getEventLivesByEventId(testEventId);
-      expect(eventLives.length).toBeGreaterThan(0);
     });
   });
 
@@ -176,20 +107,7 @@ describe('Event Lives Integration Tests', () => {
       expect(eventLives[0].eventId).toBe(testEventId);
     });
 
-    test('should find event live by event and element', async () => {
-      const eventLive = await eventLiveRepository.findByEventAndElement(testEventId, testElementId);
-      expect(eventLive).toBeDefined();
-      expect(eventLive?.eventId).toBe(testEventId);
-      expect(eventLive?.elementId).toBe(testElementId);
-    });
-
-    test('should find event lives by element ID', async () => {
-      const eventLives = await eventLiveRepository.findByElementId(testElementId);
-      expect(eventLives.length).toBeGreaterThan(0);
-      expect(eventLives.some((el) => el.elementId === testElementId)).toBe(true);
-    });
-
-    test('should upsert single event live', async () => {
+    test('should upsert single event live via batch', async () => {
       const eventLives = await eventLiveRepository.findByEventId(testEventId);
       if (eventLives.length === 0) return;
 
@@ -199,9 +117,9 @@ describe('Event Lives Integration Tests', () => {
         totalPoints: existing.totalPoints + 5,
       };
 
-      const result = await eventLiveRepository.upsert(updated);
-      expect(result).toBeDefined();
-      expect(result.totalPoints).toBe(updated.totalPoints);
+      const results = await eventLiveRepository.upsertBatch([updated]);
+      expect(results.length).toBe(1);
+      expect(results[0].totalPoints).toBe(updated.totalPoints);
     });
 
     test('should batch upsert event lives', async () => {
@@ -222,11 +140,7 @@ describe('Event Lives Integration Tests', () => {
   });
 
   describe('Data Consistency', () => {
-    test('should maintain consistent data across layers', async () => {
-      // Clear cache to ensure fresh data
-      await clearEventLivesCache(testEventId);
-
-      const serviceEventLives = await getEventLivesByEventId(testEventId);
+    test('should maintain consistent data between sync and repository', async () => {
       const dbEventLives = await eventLiveRepository.findByEventId(testEventId);
 
       expect(serviceEventLives.length).toBe(dbEventLives.length);
@@ -249,7 +163,7 @@ describe('Event Lives Integration Tests', () => {
 
   describe('Data Validation', () => {
     test('should have valid event live data structure', async () => {
-      const eventLives = await getEventLivesByEventId(testEventId);
+      const eventLives = await eventLiveRepository.findByEventId(testEventId);
       expect(eventLives.length).toBeGreaterThan(0);
 
       const eventLive = eventLives[0];
@@ -273,7 +187,7 @@ describe('Event Lives Integration Tests', () => {
     });
 
     test('should have valid point ranges', async () => {
-      const eventLives = await getEventLivesByEventId(testEventId);
+      const eventLives = await eventLiveRepository.findByEventId(testEventId);
 
       eventLives.forEach((eventLive) => {
         // Points should be within reasonable range
@@ -309,24 +223,6 @@ describe('Event Lives Integration Tests', () => {
       expect(eventLives.length).toBeGreaterThan(0);
       expect(endTime - startTime).toBeLessThan(1000); // Should complete in under 1 second
     });
-
-    test('should efficiently query by event and element', async () => {
-      const startTime = performance.now();
-      const eventLive = await eventLiveRepository.findByEventAndElement(testEventId, testElementId);
-      const endTime = performance.now();
-
-      expect(eventLive).toBeDefined();
-      expect(endTime - startTime).toBeLessThan(500); // Should be very fast with indexes
-    });
-
-    test('should efficiently query by element ID', async () => {
-      const startTime = performance.now();
-      const eventLives = await eventLiveRepository.findByElementId(testElementId);
-      const endTime = performance.now();
-
-      expect(eventLives.length).toBeGreaterThan(0);
-      expect(endTime - startTime).toBeLessThan(1000); // Should complete in under 1 second
-    });
   });
 
   describe('Sync Operation', () => {
@@ -339,20 +235,13 @@ describe('Event Lives Integration Tests', () => {
       expect(result.errors).toBe(0);
     });
 
-    test('should update cache after sync', async () => {
-      // Clear cache first
-      await clearEventLivesCache(testEventId);
+    test('should update database after sync', async () => {
+      const beforeCount = (await eventLiveRepository.findByEventId(testEventId)).length;
 
-      // Sync should populate cache
       await syncEventLives(testEventId);
 
-      // Next call should be cached (fast)
-      const startTime = performance.now();
-      const eventLives = await getEventLivesByEventId(testEventId);
-      const endTime = performance.now();
-
-      expect(eventLives.length).toBeGreaterThan(0);
-      expect(endTime - startTime).toBeLessThan(300); // Cache hit should be fast (parsing 742 records)
+      const afterCount = (await eventLiveRepository.findByEventId(testEventId)).length;
+      expect(afterCount).toBeGreaterThanOrEqual(beforeCount);
     });
   });
 
@@ -368,16 +257,6 @@ describe('Event Lives Integration Tests', () => {
       const eventLives = await eventLiveRepository.findByEventId(nonExistentEventId);
 
       expect(eventLives).toEqual([]);
-    });
-
-    test('should return null for non-existent event live', async () => {
-      const nonExistentElementId = 999999;
-      const eventLive = await eventLiveRepository.findByEventAndElement(
-        testEventId,
-        nonExistentElementId,
-      );
-
-      expect(eventLive).toBeNull();
     });
   });
 });

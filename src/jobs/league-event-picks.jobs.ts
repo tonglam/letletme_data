@@ -2,10 +2,19 @@ import { cron } from '@elysiajs/cron';
 import type { Elysia } from 'elysia';
 
 import { getCurrentEvent } from '../services/events.service';
-import { getFixturesByEvent } from '../services/fixtures.service';
-import { syncLeagueEventPicks } from '../services/league-event-picks.service';
 import { isFPLSeason, isSelectTime } from '../utils/conditions';
+import { loadFixturesByEvent } from '../utils/fixtures';
 import { logError, logInfo } from '../utils/logger';
+import { enqueueLeagueEventPicks } from './league-sync.jobs';
+
+/**
+ * League Event Picks Sync Trigger
+ *
+ * Strategy:
+ * - Cron checks conditions (FPL season, current event, select time)
+ * - Enqueues coordinator job which fans out to per-tournament jobs
+ * - Coordinator job runs in background worker
+ */
 
 export async function runLeagueEventPicksSync() {
   const now = new Date();
@@ -20,7 +29,7 @@ export async function runLeagueEventPicksSync() {
     return;
   }
 
-  const fixtures = await getFixturesByEvent(currentEvent.id);
+  const fixtures = await loadFixturesByEvent(currentEvent.id);
   if (!isSelectTime(currentEvent, fixtures, now)) {
     logInfo('Skipping league event picks sync - conditions not met', {
       eventId: currentEvent.id,
@@ -28,23 +37,25 @@ export async function runLeagueEventPicksSync() {
     return;
   }
 
-  logInfo('League event picks sync started', { eventId: currentEvent.id });
-  const result = await syncLeagueEventPicks(currentEvent.id);
-  logInfo('League event picks sync completed', { eventId: currentEvent.id, ...result });
+  // Enqueue coordinator job (will fan out to per-tournament jobs)
+  const job = await enqueueLeagueEventPicks(currentEvent.id, 'cron');
+  logInfo('League event picks coordinator job enqueued', {
+    jobId: job.id,
+    eventId: currentEvent.id,
+  });
 }
 
 export function registerLeagueEventPicksJobs(app: Elysia) {
   return app.use(
     cron({
-      name: 'league-event-picks-sync',
+      name: 'league-event-picks-trigger',
       pattern: '*/5 * * * *',
       async run() {
-        logInfo('Cron job started: league-event-picks-sync');
+        logInfo('Cron trigger: league-event-picks-sync');
         try {
           await runLeagueEventPicksSync();
-          logInfo('Cron job completed: league-event-picks-sync');
         } catch (error) {
-          logError('Cron job failed: league-event-picks-sync', error);
+          logError('Cron trigger failed: league-event-picks-sync', error);
         }
       },
     }),

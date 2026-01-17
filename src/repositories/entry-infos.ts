@@ -18,131 +18,114 @@ function uniqueNames(names: (string | null | undefined)[]): string[] {
   return result;
 }
 
-export class EntryInfoRepository {
-  private db?: DatabaseInstance;
-  constructor(dbInstance?: DatabaseInstance) {
-    this.db = dbInstance;
-  }
+export const createEntryInfoRepository = (dbInstance?: DatabaseInstance) => {
+  const getDbInstance = async () => dbInstance || (await getDb());
 
-  private async getDbInstance() {
-    return this.db || (await getDb());
-  }
-
-  async findById(id: number): Promise<DbEntryInfo | null> {
-    try {
-      const db = await this.getDbInstance();
-      const res = await db.select().from(entryInfos).where(eq(entryInfos.id, id));
-      return res[0] || null;
-    } catch (error) {
-      logError('Failed to find entry info by id', error, { id });
-      throw new DatabaseError(
-        'Failed to retrieve entry info',
-        'ENTRY_INFO_FIND_ERROR',
-        error as Error,
-      );
-    }
-  }
-
-  async findByIds(ids: number[]): Promise<DbEntryInfo[]> {
-    if (ids.length === 0) {
-      return [];
-    }
-
-    try {
-      const db = await this.getDbInstance();
-      const uniqueIds = Array.from(new Set(ids));
-      const chunks: number[][] = [];
-
-      for (let index = 0; index < uniqueIds.length; index += 1000) {
-        chunks.push(uniqueIds.slice(index, index + 1000));
+  return {
+    findByIds: async (ids: number[]): Promise<DbEntryInfo[]> => {
+      if (ids.length === 0) {
+        return [];
       }
 
-      const results: DbEntryInfo[] = [];
-      for (const chunk of chunks) {
-        const rows = await db.select().from(entryInfos).where(inArray(entryInfos.id, chunk));
-        results.push(...rows);
+      try {
+        const db = await getDbInstance();
+        const uniqueIds = Array.from(new Set(ids));
+        const chunks: number[][] = [];
+
+        for (let index = 0; index < uniqueIds.length; index += 1000) {
+          chunks.push(uniqueIds.slice(index, index + 1000));
+        }
+
+        const results: DbEntryInfo[] = [];
+        for (const chunk of chunks) {
+          const rows = await db.select().from(entryInfos).where(inArray(entryInfos.id, chunk));
+          results.push(...rows);
+        }
+
+        logInfo('Retrieved entry infos by ids', { count: results.length });
+        return results;
+      } catch (error) {
+        logError('Failed to retrieve entry infos by ids', error);
+        throw new DatabaseError(
+          'Failed to retrieve entry infos',
+          'ENTRY_INFO_FIND_ERROR',
+          error as Error,
+        );
       }
+    },
 
-      logInfo('Retrieved entry infos by ids', { count: results.length });
-      return results;
-    } catch (error) {
-      logError('Failed to retrieve entry infos by ids', error);
-      throw new DatabaseError(
-        'Failed to retrieve entry infos',
-        'ENTRY_INFO_FIND_ERROR',
-        error as Error,
-      );
-    }
-  }
+    upsertFromSummary: async (summary: RawFPLEntrySummary): Promise<DbEntryInfo> => {
+      try {
+        const db = await getDbInstance();
+        const existing = await (async () => {
+          const res = await db.select().from(entryInfos).where(eq(entryInfos.id, summary.id));
+          return res[0] || null;
+        })();
 
-  async upsertFromSummary(summary: RawFPLEntrySummary): Promise<DbEntryInfo> {
-    try {
-      const db = await this.getDbInstance();
-      const existing = await this.findById(summary.id);
+        const currentEntryName = summary.name;
+        const playerName = `${summary.player_first_name} ${summary.player_last_name}`.trim();
 
-      const currentEntryName = summary.name;
-      const playerName = `${summary.player_first_name} ${summary.player_last_name}`.trim();
+        // Always include the current entry name in history; also retain prior names
+        const usedEntryNames = existing
+          ? uniqueNames([
+              ...(existing.usedEntryNames || []),
+              currentEntryName,
+              existing.entryName !== currentEntryName ? existing.entryName : null,
+            ])
+          : uniqueNames([currentEntryName]);
 
-      // Always include the current entry name in history; also retain prior names
-      const usedEntryNames = existing
-        ? uniqueNames([
-            ...(existing.usedEntryNames || []),
-            currentEntryName,
-            existing.entryName !== currentEntryName ? existing.entryName : null,
-          ])
-        : uniqueNames([currentEntryName]);
+        // Determine current snapshot values from summary
+        const currentTeamValue = summary.last_deadline_value ?? summary.value ?? null;
+        const currentBank = summary.last_deadline_bank ?? summary.bank ?? null;
+        const currentOverallPoints = summary.summary_overall_points ?? null;
+        const currentOverallRank = summary.summary_overall_rank ?? null;
 
-      // Determine current snapshot values from summary
-      const currentTeamValue = summary.last_deadline_value ?? summary.value ?? null;
-      const currentBank = summary.last_deadline_bank ?? summary.bank ?? null;
-      const currentOverallPoints = summary.summary_overall_points ?? null;
-      const currentOverallRank = summary.summary_overall_rank ?? null;
+        // last_* fields: store previous record's current values; 0 if no previous
+        const lastTeamValue = existing ? (existing.teamValue ?? 0) : 0;
+        const lastBank = existing ? (existing.bank ?? 0) : 0;
+        const lastOverallPoints = existing ? (existing.overallPoints ?? 0) : 0;
+        const lastOverallRank = existing ? (existing.overallRank ?? 0) : 0;
+        const lastEntryName = existing ? existing.entryName : null;
 
-      // last_* fields: store previous record's current values; 0 if no previous
-      const lastTeamValue = existing ? (existing.teamValue ?? 0) : 0;
-      const lastBank = existing ? (existing.bank ?? 0) : 0;
-      const lastOverallPoints = existing ? (existing.overallPoints ?? 0) : 0;
-      const lastOverallRank = existing ? (existing.overallRank ?? 0) : 0;
-      const lastEntryName = existing ? existing.entryName : null;
+        const insert: DbEntryInfoInsert = {
+          id: summary.id,
+          entryName: currentEntryName,
+          playerName,
+          region: summary.player_region_name ?? null,
+          startedEvent: summary.started_event ?? null,
+          overallPoints: currentOverallPoints,
+          overallRank: currentOverallRank,
+          // Monetary fields are stored as tenths (raw ints from FPL summary last_deadline_*)
+          bank: currentBank ?? existing?.bank ?? null,
+          lastBank,
+          teamValue: currentTeamValue ?? existing?.teamValue ?? null,
+          totalTransfers: summary.last_deadline_total_transfers ?? null,
+          lastEntryName,
+          lastOverallPoints,
+          lastOverallRank,
+          lastTeamValue,
+          usedEntryNames,
+        };
 
-      const insert: DbEntryInfoInsert = {
-        id: summary.id,
-        entryName: currentEntryName,
-        playerName,
-        region: summary.player_region_name ?? null,
-        startedEvent: summary.started_event ?? null,
-        overallPoints: currentOverallPoints,
-        overallRank: currentOverallRank,
-        // Monetary fields are stored as tenths (raw ints from FPL summary last_deadline_*)
-        bank: currentBank ?? existing?.bank ?? null,
-        lastBank,
-        teamValue: currentTeamValue ?? existing?.teamValue ?? null,
-        totalTransfers: summary.last_deadline_total_transfers ?? null,
-        lastEntryName,
-        lastOverallPoints,
-        lastOverallRank,
-        lastTeamValue,
-        usedEntryNames,
-      };
+        const result = await db
+          .insert(entryInfos)
+          .values(insert)
+          .onConflictDoUpdate({ target: entryInfos.id, set: insert })
+          .returning();
 
-      const result = await db
-        .insert(entryInfos)
-        .values(insert)
-        .onConflictDoUpdate({ target: entryInfos.id, set: insert })
-        .returning();
+        const row = result[0];
+        logInfo('Upserted entry info', { id: row.id, entryName: row.entryName });
+        return row;
+      } catch (error) {
+        logError('Failed to upsert entry info', error, { id: summary.id });
+        throw new DatabaseError(
+          'Failed to upsert entry info',
+          'ENTRY_INFO_UPSERT_ERROR',
+          error as Error,
+        );
+      }
+    },
+  };
+};
 
-      const row = result[0];
-      logInfo('Upserted entry info', { id: row.id, entryName: row.entryName });
-      return row;
-    } catch (error) {
-      logError('Failed to upsert entry info', error, { id: summary.id });
-      throw new DatabaseError(
-        'Failed to upsert entry info',
-        'ENTRY_INFO_UPSERT_ERROR',
-        error as Error,
-      );
-    }
-  }
-}
-
-export const entryInfoRepository = new EntryInfoRepository();
+export const entryInfoRepository = createEntryInfoRepository();

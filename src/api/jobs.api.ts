@@ -1,39 +1,38 @@
 import { Elysia } from 'elysia';
 
-import { getErrorMessage } from '../utils/errors';
-import { logError, logInfo } from '../utils/logger';
 import {
   enqueueEventsSyncJob,
   enqueueFixturesSyncJob,
-  enqueuePlayerValuesSyncJob,
-  enqueuePlayerStatsSyncJob,
   enqueuePhasesSyncJob,
   enqueuePlayersSyncJob,
+  enqueuePlayerStatsSyncJob,
+  enqueuePlayerValuesSyncJob,
   enqueueTeamsSyncJob,
 } from '../jobs/data-sync.queue';
-import {
-  enqueueEntryInfoSyncJob,
-  enqueueEntryPicksSyncJob,
-  enqueueEntryResultsSyncJob,
-  enqueueEntryTransfersSyncJob,
-} from '../jobs/entry-sync.queue';
+import { runEventStandingsSync } from '../jobs/event-standings.jobs';
 import { runLeagueEventPicksSync } from '../jobs/league-event-picks.jobs';
 import { runLeagueEventResultsSync } from '../jobs/league-event-results.jobs';
-import { runEventStandingsSync } from '../jobs/event-standings.jobs';
+import {
+  enqueueEventLiveExplain,
+  enqueueEventLivesCacheUpdate,
+  enqueueEventLivesDbSync,
+  enqueueEventLiveSummary,
+  enqueueEventOverallResult,
+} from '../jobs/live-data.jobs';
+import { runTournamentBattleRaceResultsSync } from '../jobs/tournament-battle-race-results.jobs';
+import { runTournamentEventCupResultsSync } from '../jobs/tournament-event-cup-results.jobs';
 import { runTournamentEventPicksSync } from '../jobs/tournament-event-picks.jobs';
 import { runTournamentEventResultsSync } from '../jobs/tournament-event-results.jobs';
 import {
   runTournamentEventTransfersPostSync,
   runTournamentEventTransfersPreSync,
 } from '../jobs/tournament-event-transfers.jobs';
-import { runTournamentEventCupResultsSync } from '../jobs/tournament-event-cup-results.jobs';
 import { runTournamentInfoSync } from '../jobs/tournament-info.jobs';
-import { runTournamentPointsRaceResultsSync } from '../jobs/tournament-points-race-results.jobs';
-import { runTournamentBattleRaceResultsSync } from '../jobs/tournament-battle-race-results.jobs';
 import { runTournamentKnockoutResultsSync } from '../jobs/tournament-knockout-results.jobs';
-import { syncEventLiveExplain } from '../services/event-live-explains.service';
-import { syncEventLiveSummary } from '../services/event-live-summaries.service';
-import { syncEventOverallResult } from '../services/event-overall-results.service';
+import { runTournamentPointsRaceResultsSync } from '../jobs/tournament-points-race-results.jobs';
+import { getCurrentEvent } from '../services/events.service';
+import { getErrorMessage } from '../utils/errors';
+import { logError, logInfo } from '../utils/logger';
 
 // Job business logic functions (will be moved to jobs/ later)
 import { getCurrentGameweek, isFPLSeason, isMatchHours, isWeekend } from '../utils/conditions';
@@ -100,62 +99,42 @@ export const jobsAPI = new Elysia({ prefix: '/jobs' })
       {
         name: 'player-values-sync',
         description: 'Sync player values from FPL API',
-        schedule: 'Daily at 9:30 AM',
-      },
-      {
-        name: 'entry-info-sync',
-        description: 'Sync entry info from FPL API',
-        schedule: 'Daily at 10:30 AM',
-      },
-      {
-        name: 'entry-picks-sync',
-        description: 'Sync entry picks for current event',
-        schedule: 'Daily at 10:35 AM',
-      },
-      {
-        name: 'entry-transfers-sync',
-        description: 'Sync entry transfers for current event',
-        schedule: 'Daily at 10:40 AM',
-      },
-      {
-        name: 'entry-results-sync',
-        description: 'Sync entry results for current event',
-        schedule: 'Daily at 10:45 AM',
+        schedule: '09:25-09:35 AM window (stops after success)',
       },
       {
         name: 'league-event-picks-sync',
-        description: 'Sync league entry picks during selection window',
+        description: 'Sync league entry picks (per-tournament jobs)',
         schedule: 'Every 5 minutes (selection window)',
       },
       {
         name: 'league-event-results-sync',
-        description: 'Sync league results after matchday',
-        schedule: '08:00/10:00/12:00 (post-matchday)',
+        description: 'Sync league results (per-tournament jobs)',
+        schedule: 'Every 10 minutes (post-matchday)',
       },
       {
         name: 'tournament-event-picks-sync',
-        description: 'Sync tournament entry picks during selection window',
-        schedule: 'Every 5 minutes 00:00-04:59 & 18:00-23:59',
+        description: 'Sync tournament entry picks (background job)',
+        schedule: 'Every 5 minutes during select time',
       },
       {
         name: 'tournament-event-results-sync',
-        description: 'Sync tournament entry results after matchday',
-        schedule: '06:10/08:10/10:10 (post-matchday)',
+        description: 'Sync tournament results (triggers cascade)',
+        schedule: 'Every 10 minutes post-matchday',
       },
       {
         name: 'tournament-event-transfers-pre-sync',
-        description: 'Insert tournament entry transfers during selection window',
-        schedule: 'Every 5 minutes 00:00-04:59 & 18:00-23:59',
+        description: 'Track tournament transfers pre-deadline (background job)',
+        schedule: 'Every 5 minutes during select time',
       },
       {
         name: 'tournament-event-transfers-post-sync',
-        description: 'Update tournament entry transfers after matchday',
-        schedule: '06:45/08:45/10:45 (post-matchday)',
+        description: 'Finalize tournament transfers (cascade)',
+        schedule: 'Cascade after event-results',
       },
       {
         name: 'tournament-event-cup-results-sync',
-        description: 'Sync tournament entry cup results after matchday',
-        schedule: '06:55/08:55/10:55 (post-matchday)',
+        description: 'Calculate tournament cup results (cascade)',
+        schedule: 'Cascade after event-results',
       },
       {
         name: 'tournament-info-sync',
@@ -164,33 +143,43 @@ export const jobsAPI = new Elysia({ prefix: '/jobs' })
       },
       {
         name: 'tournament-points-race-results-sync',
-        description: 'Sync points race group standings after matchday',
-        schedule: '06:20/08:20/10:20 (post-matchday)',
+        description: 'Calculate points race standings (cascade)',
+        schedule: 'Cascade after event-results',
       },
       {
         name: 'tournament-battle-race-results-sync',
-        description: 'Sync battle race group standings after matchday',
-        schedule: '06:30/08:30/10:30 (post-matchday)',
+        description: 'Calculate battle race standings (cascade)',
+        schedule: 'Cascade after event-results',
       },
       {
         name: 'tournament-knockout-results-sync',
-        description: 'Sync knockout matchups after matchday',
-        schedule: '06:40/08:40/10:40 (post-matchday)',
+        description: 'Calculate knockout bracket results (cascade)',
+        schedule: 'Cascade after event-results',
+      },
+      {
+        name: 'event-lives-cache-update',
+        description: 'Cache-only update for event lives (fast, real-time)',
+        schedule: 'Every 1 minute during match hours',
+      },
+      {
+        name: 'event-lives-db-sync',
+        description: 'Full DB sync for event lives (triggers cascade)',
+        schedule: 'Every 10 minutes during match hours',
       },
       {
         name: 'event-live-summary-sync',
-        description: 'Sync event live summary snapshot',
-        schedule: 'Matchday 06:05/08:05/10:05',
+        description: 'Aggregate season totals (cascaded from DB sync)',
+        schedule: 'Cascade after DB sync',
       },
       {
         name: 'event-live-explain-sync',
-        description: 'Sync event live explain snapshot',
-        schedule: 'Matchday 06:08/08:08/10:08',
+        description: 'Sync event live explain data (cascaded from DB sync)',
+        schedule: 'Cascade after DB sync',
       },
       {
         name: 'event-overall-result-sync',
-        description: 'Sync event overall result snapshot',
-        schedule: 'Matchday 06:02/08:02/10:02',
+        description: 'Sync event overall results (cascaded from DB sync)',
+        schedule: 'Cascade after DB sync',
       },
       {
         name: 'event-standings-sync',
@@ -214,24 +203,74 @@ export const jobsAPI = new Elysia({ prefix: '/jobs' })
       'player-stats-sync': () => enqueuePlayerStatsSyncJob('manual'),
       'phases-sync': () => enqueuePhasesSyncJob('manual'),
       'player-values-sync': () => enqueuePlayerValuesSyncJob('manual'),
-      'entry-info-sync': () => enqueueEntryInfoSyncJob('manual'),
-      'entry-picks-sync': () => enqueueEntryPicksSyncJob('manual'),
-      'entry-transfers-sync': () => enqueueEntryTransfersSyncJob('manual'),
-      'entry-results-sync': () => enqueueEntryResultsSyncJob('manual'),
-      'league-event-picks-sync': runLeagueEventPicksSync,
-      'league-event-results-sync': runLeagueEventResultsSync,
-      'tournament-event-picks-sync': runTournamentEventPicksSync,
-      'tournament-event-results-sync': runTournamentEventResultsSync,
-      'tournament-event-transfers-pre-sync': runTournamentEventTransfersPreSync,
-      'tournament-event-transfers-post-sync': runTournamentEventTransfersPostSync,
-      'tournament-event-cup-results-sync': runTournamentEventCupResultsSync,
-      'tournament-info-sync': runTournamentInfoSync,
-      'tournament-points-race-results-sync': runTournamentPointsRaceResultsSync,
-      'tournament-battle-race-results-sync': runTournamentBattleRaceResultsSync,
-      'tournament-knockout-results-sync': runTournamentKnockoutResultsSync,
-      'event-live-summary-sync': () => syncEventLiveSummary(),
-      'event-live-explain-sync': () => syncEventLiveExplain(),
-      'event-overall-result-sync': () => syncEventOverallResult(),
+      'league-event-picks-sync': async () => {
+        await runLeagueEventPicksSync();
+      },
+      'league-event-results-sync': async () => {
+        await runLeagueEventResultsSync();
+      },
+      'tournament-event-picks-sync': async () => {
+        await runTournamentEventPicksSync();
+      },
+      'tournament-event-results-sync': async () => {
+        await runTournamentEventResultsSync();
+      },
+      'tournament-event-transfers-pre-sync': async () => {
+        await runTournamentEventTransfersPreSync();
+      },
+      'tournament-event-transfers-post-sync': async () => {
+        await runTournamentEventTransfersPostSync();
+      },
+      'tournament-event-cup-results-sync': async () => {
+        await runTournamentEventCupResultsSync();
+      },
+      'tournament-info-sync': async () => {
+        await runTournamentInfoSync();
+      },
+      'tournament-points-race-results-sync': async () => {
+        await runTournamentPointsRaceResultsSync();
+      },
+      'tournament-battle-race-results-sync': async () => {
+        await runTournamentBattleRaceResultsSync();
+      },
+      'tournament-knockout-results-sync': async () => {
+        await runTournamentKnockoutResultsSync();
+      },
+      'event-lives-cache-update': async () => {
+        const currentEvent = await getCurrentEvent();
+        if (!currentEvent) {
+          throw new Error('No current event found');
+        }
+        await enqueueEventLivesCacheUpdate(currentEvent.id, 'manual');
+      },
+      'event-lives-db-sync': async () => {
+        const currentEvent = await getCurrentEvent();
+        if (!currentEvent) {
+          throw new Error('No current event found');
+        }
+        await enqueueEventLivesDbSync(currentEvent.id, 'manual');
+      },
+      'event-live-summary-sync': async () => {
+        const currentEvent = await getCurrentEvent();
+        if (!currentEvent) {
+          throw new Error('No current event found');
+        }
+        await enqueueEventLiveSummary(currentEvent.id, 'manual');
+      },
+      'event-live-explain-sync': async () => {
+        const currentEvent = await getCurrentEvent();
+        if (!currentEvent) {
+          throw new Error('No current event found');
+        }
+        await enqueueEventLiveExplain(currentEvent.id, 'manual');
+      },
+      'event-overall-result-sync': async () => {
+        const currentEvent = await getCurrentEvent();
+        if (!currentEvent) {
+          throw new Error('No current event found');
+        }
+        await enqueueEventOverallResult(currentEvent.id, 'manual');
+      },
       'event-standings-sync': runEventStandingsSync,
       'live-scores': runLiveScores,
     };
@@ -244,8 +283,18 @@ export const jobsAPI = new Elysia({ prefix: '/jobs' })
 
     try {
       logInfo(`Manual job trigger: ${name}`);
-      await job();
-      logInfo(`Manual job completed: ${name}`);
+      const result = await job();
+      logInfo(`Manual job enqueued: ${name}`);
+
+      // If result is a BullMQ job, return job info
+      if (result && typeof result === 'object' && 'id' in result) {
+        return {
+          success: true,
+          message: `Job '${name}' enqueued successfully`,
+          jobId: result.id,
+        };
+      }
+
       return { success: true, message: `Job '${name}' executed successfully` };
     } catch (error) {
       logError(`Manual job failed: ${name}`, error);

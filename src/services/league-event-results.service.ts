@@ -1,4 +1,3 @@
-import type { RawFPLEntryEventPickItem, RawFPLEntryEventPicksResponse } from '../types';
 import { fplClient } from '../clients/fpl';
 import {
   type DbEntryEventResult,
@@ -15,6 +14,7 @@ import {
   tournamentInfoRepository,
   type TournamentInfoSummary,
 } from '../repositories/tournament-infos';
+import type { RawFPLEntryEventPickItem, RawFPLEntryEventPicksResponse } from '../types';
 import { logError, logInfo } from '../utils/logger';
 
 const DEFAULT_CONCURRENCY = 5;
@@ -313,46 +313,42 @@ function buildEntryResultData(
   };
 }
 
-export async function syncLeagueEventResults(
+export async function syncLeagueEventResultsByTournament(
+  tournamentId: number,
   eventId: number,
   options?: { concurrency?: number },
-): Promise<{ eventId: number; totalEntries: number; updated: number; skipped: number }> {
-  logInfo('Starting league event results sync', { eventId });
+): Promise<{
+  tournamentId: number;
+  eventId: number;
+  totalEntries: number;
+  updated: number;
+  skipped: number;
+}> {
+  logInfo('Starting league event results sync for tournament', { tournamentId, eventId });
 
-  const tournaments = await tournamentInfoRepository.findActive();
-  if (tournaments.length === 0) {
-    logInfo('No active tournaments found for league event results', { eventId });
-    return { eventId, totalEntries: 0, updated: 0, skipped: 0 };
+  const tournament = await tournamentInfoRepository.findById(tournamentId);
+  if (!tournament) {
+    throw new Error(`Tournament ${tournamentId} not found`);
   }
 
-  const tournamentEntries = await Promise.all(
-    tournaments.map(async (tournament) => ({
-      tournament,
-      entryIds: await resolveTournamentEntries(tournament),
-    })),
-  );
-
-  const allEntryIds = uniqueNumbers(tournamentEntries.flatMap((item) => item.entryIds));
-  const entryInfos = await entryInfoRepository.findByIds(allEntryIds);
+  const entryIds = await resolveTournamentEntries(tournament);
+  const entryInfos = await entryInfoRepository.findByIds(entryIds);
   const entryInfoMap = new Map(entryInfos.map((info) => [info.id, info]));
 
   const eventLives = await eventLiveRepository.findByEventId(eventId);
   if (eventLives.length === 0) {
-    logInfo('No event live data found for league event results', { eventId });
-    return { eventId, totalEntries: 0, updated: 0, skipped: 0 };
+    logInfo('No event live data found for league event results', { eventId, tournamentId });
+    return { tournamentId, eventId, totalEntries: 0, updated: 0, skipped: 0 };
   }
   const eventLiveMap = new Map(eventLives.map((live) => [live.elementId, live]));
   const playerIds = uniqueNumbers(eventLives.map((live) => live.elementId));
   const players = await playerRepository.findByIds(playerIds);
   const elementTypeMap = new Map(players.map((player) => [player.id, player.type]));
 
-  const entryResults = await entryEventResultsRepository.findByEventAndEntryIds(
-    eventId,
-    allEntryIds,
-  );
+  const entryResults = await entryEventResultsRepository.findByEventAndEntryIds(eventId, entryIds);
   const entryResultsMap = new Map(entryResults.map((result) => [result.entryId, result]));
 
-  const missingEntryIds = allEntryIds.filter((entryId) => !entryResultsMap.has(entryId));
+  const missingEntryIds = entryIds.filter((entryId) => !entryResultsMap.has(entryId));
   const concurrency = options?.concurrency ?? DEFAULT_CONCURRENCY;
   const missingPicksMap = new Map<number, RawFPLEntryEventPicksResponse>();
   let skipped = 0;
@@ -369,66 +365,66 @@ export async function syncLeagueEventResults(
   const inserts: DbLeagueEventResultInsert[] = [];
   let totalEntries = 0;
 
-  for (const { tournament, entryIds } of tournamentEntries) {
-    for (const entryId of entryIds) {
-      totalEntries += 1;
-      const entryInfo = entryInfoMap.get(entryId);
-      if (!entryInfo) {
-        skipped += 1;
-        logInfo('Skipping league entry without entry info', {
-          eventId,
-          entryId,
-          leagueId: tournament.leagueId,
-          leagueType: tournament.leagueType,
-        });
-        continue;
-      }
-
-      const entryResult = entryResultsMap.get(entryId);
-      const fallbackPicks = missingPicksMap.get(entryId) ?? null;
-      const data = buildEntryResultData(entryResult, fallbackPicks, eventLiveMap, elementTypeMap);
-      if (!data) {
-        skipped += 1;
-        logInfo('Skipping league entry without picks data', {
-          eventId,
-          entryId,
-          leagueId: tournament.leagueId,
-          leagueType: tournament.leagueType,
-        });
-        continue;
-      }
-
-      inserts.push({
-        leagueId: tournament.leagueId,
-        leagueType: tournament.leagueType,
+  for (const entryId of entryIds) {
+    totalEntries += 1;
+    const entryInfo = entryInfoMap.get(entryId);
+    if (!entryInfo) {
+      skipped += 1;
+      logInfo('Skipping league entry without entry info', {
         eventId,
         entryId,
-        entryName: entryInfo.entryName,
-        playerName: entryInfo.playerName,
-        overallPoints: data.overallPoints,
-        overallRank: data.overallRank,
-        teamValue: data.teamValue,
-        bank: data.bank,
-        eventPoints: data.eventPoints,
-        eventTransfers: data.eventTransfers,
-        eventTransfersCost: data.eventTransfersCost,
-        eventNetPoints: data.eventNetPoints,
-        eventBenchPoints: data.eventBenchPoints,
-        eventAutoSubPoints: data.eventAutoSubPoints,
-        eventRank: data.eventRank,
-        eventChip: data.eventChip,
-        captainId: data.captainId,
-        captainPoints: data.captainPoints,
-        captainBlank: data.captainBlank,
-        viceCaptainId: data.viceCaptainId,
-        viceCaptainPoints: data.viceCaptainPoints,
-        viceCaptainBlank: data.viceCaptainBlank,
-        playedCaptainId: data.playedCaptainId,
-        highestScoreElementId: data.highestScoreElementId,
-        highestScorePoints: data.highestScorePoints,
-        highestScoreBlank: data.highestScoreBlank,
+        tournamentId,
+        leagueId: tournament.leagueId,
+        leagueType: tournament.leagueType,
       });
+      continue;
     }
+
+    const entryResult = entryResultsMap.get(entryId);
+    const fallbackPicks = missingPicksMap.get(entryId) ?? null;
+    const data = buildEntryResultData(entryResult, fallbackPicks, eventLiveMap, elementTypeMap);
+    if (!data) {
+      skipped += 1;
+      logInfo('Skipping league entry without picks data', {
+        eventId,
+        entryId,
+        tournamentId,
+        leagueId: tournament.leagueId,
+        leagueType: tournament.leagueType,
+      });
+      continue;
+    }
+
+    inserts.push({
+      leagueId: tournament.leagueId,
+      leagueType: tournament.leagueType,
+      eventId,
+      entryId,
+      entryName: entryInfo.entryName,
+      playerName: entryInfo.playerName,
+      overallPoints: data.overallPoints,
+      overallRank: data.overallRank,
+      teamValue: data.teamValue,
+      bank: data.bank,
+      eventPoints: data.eventPoints,
+      eventTransfers: data.eventTransfers,
+      eventTransfersCost: data.eventTransfersCost,
+      eventNetPoints: data.eventNetPoints,
+      eventBenchPoints: data.eventBenchPoints,
+      eventAutoSubPoints: data.eventAutoSubPoints,
+      eventRank: data.eventRank,
+      eventChip: data.eventChip,
+      captainId: data.captainId,
+      captainPoints: data.captainPoints,
+      captainBlank: data.captainBlank,
+      viceCaptainId: data.viceCaptainId,
+      viceCaptainPoints: data.viceCaptainPoints,
+      viceCaptainBlank: data.viceCaptainBlank,
+      playedCaptainId: data.playedCaptainId,
+      highestScoreElementId: data.highestScoreElementId,
+      highestScorePoints: data.highestScorePoints,
+      highestScoreBlank: data.highestScoreBlank,
+    });
   }
 
   const batchSize = 500;
@@ -439,12 +435,13 @@ export async function syncLeagueEventResults(
     updated += await leagueEventResultsRepository.upsertBatch(batch);
   }
 
-  logInfo('League event results sync completed', {
+  logInfo('League event results sync completed for tournament', {
     eventId,
+    tournamentId,
     totalEntries,
     updated,
     skipped,
   });
 
-  return { eventId, totalEntries, updated, skipped };
+  return { tournamentId, eventId, totalEntries, updated, skipped };
 }

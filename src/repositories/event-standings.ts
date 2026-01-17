@@ -7,39 +7,33 @@ import { logError, logInfo } from '../utils/logger';
 
 type DatabaseInstance = PostgresJsDatabase<Record<string, never>>;
 
-export class EventStandingsRepository {
-  private db?: DatabaseInstance;
+export const createEventStandingsRepository = (dbInstance?: DatabaseInstance) => {
+  const getDbInstance = async () => dbInstance || (await getDb());
 
-  constructor(dbInstance?: DatabaseInstance) {
-    this.db = dbInstance;
-  }
+  return {
+    replaceAll: async (standings: DbEventStandingInsert[]): Promise<number> => {
+      try {
+        const db = await getDbInstance();
+        await db.delete(eventStandings);
 
-  private async getDbInstance() {
-    return this.db || (await getDb());
-  }
+        if (standings.length === 0) {
+          logInfo('No event standings to insert');
+          return 0;
+        }
 
-  async replaceAll(standings: DbEventStandingInsert[]): Promise<number> {
-    try {
-      const db = await this.getDbInstance();
-      await db.delete(eventStandings);
-
-      if (standings.length === 0) {
-        logInfo('No event standings to insert');
-        return 0;
+        await db.insert(eventStandings).values(standings);
+        logInfo('Inserted event standings', { count: standings.length });
+        return standings.length;
+      } catch (error) {
+        logError('Failed to replace event standings', error, { count: standings.length });
+        throw new DatabaseError(
+          'Failed to replace event standings',
+          'EVENT_STANDINGS_REPLACE_ERROR',
+          error as Error,
+        );
       }
+    },
+  };
+};
 
-      await db.insert(eventStandings).values(standings);
-      logInfo('Inserted event standings', { count: standings.length });
-      return standings.length;
-    } catch (error) {
-      logError('Failed to replace event standings', error, { count: standings.length });
-      throw new DatabaseError(
-        'Failed to replace event standings',
-        'EVENT_STANDINGS_REPLACE_ERROR',
-        error as Error,
-      );
-    }
-  }
-}
-
-export const eventStandingsRepository = new EventStandingsRepository();
+export const eventStandingsRepository = createEventStandingsRepository();

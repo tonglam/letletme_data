@@ -2,9 +2,9 @@ import { cron } from '@elysiajs/cron';
 import type { Elysia } from 'elysia';
 
 import { getCurrentEvent } from '../services/events.service';
-import { getFixturesByEvent } from '../services/fixtures.service';
 import { syncEventStandings } from '../services/event-standings.service';
 import { isAfterMatchDay, isFPLSeason } from '../utils/conditions';
+import { loadFixturesByEvent } from '../utils/fixtures';
 import { logError, logInfo } from '../utils/logger';
 
 export async function runEventStandingsSync() {
@@ -20,7 +20,7 @@ export async function runEventStandingsSync() {
     return;
   }
 
-  const fixtures = await getFixturesByEvent(currentEvent.id);
+  const fixtures = await loadFixturesByEvent(currentEvent.id);
   if (!isAfterMatchDay(currentEvent, fixtures, now)) {
     logInfo('Skipping event standings sync - conditions not met', { eventId: currentEvent.id });
     return;

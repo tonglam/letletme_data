@@ -2,164 +2,14 @@ import { fixturesCache } from '../cache/operations';
 import { fplClient } from '../clients/fpl';
 import { fixtureRepository } from '../repositories/fixtures';
 import { transformFixtures } from '../transformers/fixtures';
-import type { Fixture } from '../types';
-import { logError, logInfo } from '../utils/logger';
+import { loadAllFixtures } from '../utils/fixtures';
+import { logError, logInfo, logWarn } from '../utils/logger';
 
 /**
  * Fixtures Service - Business Logic Layer
  *
- * Handles all fixture-related operations:
- * - Data synchronization from FPL API
- * - Cache management
- * - Database operations
- * - Data retrieval with fallbacks
+ * Handles fixture operations focused on synchronization and cache management.
  */
-
-// Get all fixtures (cache-first strategy: Redis → DB → update Redis)
-export async function getFixtures(): Promise<Fixture[]> {
-  try {
-    logInfo('Getting all fixtures');
-
-    // 1. Try cache first (fast path)
-    const cached = await fixturesCache.getAll();
-    if (cached) {
-      logInfo('Fixtures retrieved from cache', { count: cached.length });
-      return cached;
-    }
-
-    // 2. Cache miss - fallback to database
-    logInfo('Cache miss - fetching from database');
-    const dbFixtures = await fixtureRepository.findAll();
-
-    // 3. Update cache for next time (async, don't block response)
-    if (dbFixtures.length > 0) {
-      fixturesCache.set(dbFixtures).catch((error) => {
-        logError('Failed to update fixtures cache', error);
-      });
-    }
-
-    logInfo('Fixtures retrieved from database', { count: dbFixtures.length });
-    return dbFixtures;
-  } catch (error) {
-    logError('Failed to get fixtures', error);
-    throw error;
-  }
-}
-
-// Get single fixture by ID (cache-first strategy: Redis → DB → update Redis)
-export async function getFixture(id: number): Promise<Fixture | null> {
-  try {
-    logInfo('Getting fixture by id', { id });
-
-    // 1. Try cache first (fast path)
-    const cached = await fixturesCache.getById(id);
-    if (cached) {
-      logInfo('Fixture retrieved from cache', { id });
-      return cached;
-    }
-
-    // 2. Cache miss - fallback to database
-    logInfo('Cache miss - fetching from database', { id });
-    const fixture = await fixtureRepository.findById(id);
-
-    if (fixture) {
-      // 3. Update cache for next time (async, don't block response)
-      fixturesCache.getAll().then((allFixtures) => {
-        if (!allFixtures) {
-          // If full cache doesn't exist, fetch all and cache
-          fixtureRepository.findAll().then((dbFixtures) => {
-            fixturesCache.set(dbFixtures).catch((error) => {
-              logError('Failed to update fixtures cache', error);
-            });
-          });
-        }
-      });
-
-      logInfo('Fixture found in database', { id });
-    } else {
-      logInfo('Fixture not found', { id });
-    }
-
-    return fixture;
-  } catch (error) {
-    logError('Failed to get fixture', error, { id });
-    throw error;
-  }
-}
-
-// Get fixtures by event (cache-first strategy: Redis → DB → update Redis)
-export async function getFixturesByEvent(eventId: number): Promise<Fixture[]> {
-  try {
-    logInfo('Getting fixtures by event', { eventId });
-
-    // 1. Try cache first (fast path)
-    const cached = await fixturesCache.getByEvent(eventId);
-    if (cached) {
-      logInfo('Fixtures by event retrieved from cache', { eventId, count: cached.length });
-      return cached;
-    }
-
-    // 2. Cache miss - fallback to database
-    logInfo('Cache miss - fetching from database', { eventId });
-    const dbFixtures = await fixtureRepository.findByEvent(eventId);
-
-    // 3. Update cache for next time (async, don't block response)
-    if (dbFixtures.length > 0) {
-      fixturesCache.getAll().then((allFixtures) => {
-        if (!allFixtures) {
-          fixtureRepository.findAll().then((allDbFixtures) => {
-            fixturesCache.set(allDbFixtures).catch((error) => {
-              logError('Failed to update fixtures cache', error);
-            });
-          });
-        }
-      });
-    }
-
-    logInfo('Fixtures by event retrieved from database', { eventId, count: dbFixtures.length });
-    return dbFixtures;
-  } catch (error) {
-    logError('Failed to get fixtures by event', error, { eventId });
-    throw error;
-  }
-}
-
-// Get fixtures by team (cache-first strategy: Redis → DB → update Redis)
-export async function getFixturesByTeam(teamId: number): Promise<Fixture[]> {
-  try {
-    logInfo('Getting fixtures by team', { teamId });
-
-    // 1. Try cache first (fast path)
-    const cached = await fixturesCache.getByTeam(teamId);
-    if (cached) {
-      logInfo('Fixtures by team retrieved from cache', { teamId, count: cached.length });
-      return cached;
-    }
-
-    // 2. Cache miss - fallback to database
-    logInfo('Cache miss - fetching from database', { teamId });
-    const dbFixtures = await fixtureRepository.findByTeam(teamId);
-
-    // 3. Update cache for next time (async, don't block response)
-    if (dbFixtures.length > 0) {
-      fixturesCache.getAll().then((allFixtures) => {
-        if (!allFixtures) {
-          fixtureRepository.findAll().then((allDbFixtures) => {
-            fixturesCache.set(allDbFixtures).catch((error) => {
-              logError('Failed to update fixtures cache', error);
-            });
-          });
-        }
-      });
-    }
-
-    logInfo('Fixtures by team retrieved from database', { teamId, count: dbFixtures.length });
-    return dbFixtures;
-  } catch (error) {
-    logError('Failed to get fixtures by team', error, { teamId });
-    throw error;
-  }
-}
 
 // Sync all fixtures from FPL API
 export async function syncFixtures(eventId?: number): Promise<{ count: number; errors: number }> {
@@ -175,6 +25,30 @@ export async function syncFixtures(eventId?: number): Promise<{ count: number; e
     }
 
     logInfo('Raw fixtures data fetched', { count: rawFixtures.length, ...logContext });
+
+    if (rawFixtures.length === 0) {
+      logWarn('No fixtures returned from FPL API', logContext);
+      return { count: 0, errors: 0 };
+    }
+
+    let staleEventIds: Set<number> | null = null;
+    let shouldClearUnscheduled = false;
+
+    if (eventId) {
+      const fixtureIds = rawFixtures
+        .map((fixture) => fixture.id)
+        .filter((fixtureId) => Number.isInteger(fixtureId));
+      const existingEvents = await fixtureRepository.findEventIdsByFixtureIds(fixtureIds);
+      staleEventIds = new Set<number>();
+
+      for (const existingEventId of existingEvents.values()) {
+        if (existingEventId === null) {
+          shouldClearUnscheduled = true;
+        } else if (existingEventId !== eventId) {
+          staleEventIds.add(existingEventId);
+        }
+      }
+    }
 
     // 2. Transform to domain fixtures
     const fixtures = transformFixtures(rawFixtures);
@@ -196,6 +70,21 @@ export async function syncFixtures(eventId?: number): Promise<{ count: number; e
     } else {
       // Cache all fixtures (grouped by event)
       await fixturesCache.set(savedFixtures);
+    }
+
+    if (eventId && staleEventIds && staleEventIds.size > 0) {
+      await Promise.all(
+        Array.from(staleEventIds).map((staleEventId) => fixturesCache.clearByEvent(staleEventId)),
+      );
+      logInfo('Cleared stale fixture caches', {
+        eventId,
+        staleEventIds: Array.from(staleEventIds),
+      });
+    }
+
+    if (eventId && shouldClearUnscheduled) {
+      await fixturesCache.clearUnscheduled();
+      logInfo('Cleared unscheduled fixture cache after event sync', { eventId });
     }
     logInfo('Fixtures cache updated', logContext);
 
@@ -251,7 +140,7 @@ export async function syncAllGameweeks(): Promise<{
     }
 
     // Final cache update with all fixtures
-    const allFixtures = await fixtureRepository.findAll();
+    const allFixtures = await loadAllFixtures();
     await fixturesCache.set(allFixtures);
 
     logInfo('All gameweeks sync completed', {

@@ -4,8 +4,6 @@ import { eventRepository } from '../../src/repositories/events';
 import {
   clearEventsCache,
   getCurrentEvent,
-  getEvent,
-  getEvents,
   getNextEvent,
   syncEvents,
 } from '../../src/services/events.service';
@@ -20,29 +18,20 @@ describe('Events Integration Tests', () => {
   });
 
   describe('External Data Integration', () => {
-    test('should fetch and sync events from FPL API', async () => {
-      const events = await getEvents();
-      expect(events.length).toBeGreaterThan(0); // FPL has 38 gameweeks
-      expect(events[0]).toHaveProperty('id');
-      expect(events[0]).toHaveProperty('name');
-      expect(events[0]).toHaveProperty('deadlineTime');
+    test('should save current event to database', async () => {
+      const currentEvent = await eventRepository.findCurrent();
+      expect(currentEvent).toBeDefined();
+      expect(currentEvent?.isCurrent).toBe(true);
     });
 
-    test('should save events to database', async () => {
-      const dbEvents = await eventRepository.findAll();
-      expect(dbEvents.length).toBeGreaterThan(0);
-      expect(dbEvents[0].id).toBeTypeOf('number');
-      expect(dbEvents[0].name).toBeTypeOf('string');
+    test('should save next event to database', async () => {
+      const nextEvent = await eventRepository.findNext();
+      expect(nextEvent).toBeDefined();
+      expect(nextEvent?.isNext).toBe(true);
     });
   });
 
   describe('Service Layer Integration', () => {
-    test('should retrieve event by ID', async () => {
-      const event = await getEvent(1);
-      expect(event).toBeDefined();
-      expect(event?.id).toBe(1);
-    });
-
     test('should get current event', async () => {
       const currentEvent = await getCurrentEvent();
       expect(currentEvent).toBeDefined();
@@ -53,34 +42,6 @@ describe('Events Integration Tests', () => {
       const nextEvent = await getNextEvent();
       expect(nextEvent).toBeDefined();
       expect(nextEvent?.isNext).toBe(true);
-    });
-
-    test('should get all events from cache', async () => {
-      const events = await getEvents(); // Should hit cache
-      expect(events.length).toBeGreaterThan(0);
-    });
-  });
-
-  describe('Cache Integration', () => {
-    test('should use cache for fast retrieval', async () => {
-      const events = await getEvents(); // Should hit cache
-      expect(events.length).toBeGreaterThan(0);
-    });
-
-    test('should handle database fallback', async () => {
-      await clearEventsCache(); // Clear once to test fallback
-      const events = await getEvents(); // Should fallback to database
-      expect(events.length).toBeGreaterThan(0);
-    });
-  });
-
-  describe('Data Consistency', () => {
-    test('should maintain consistent data across layers', async () => {
-      const serviceEvents = await getEvents();
-      const dbEvents = await eventRepository.findAll();
-
-      expect(serviceEvents.length).toBe(dbEvents.length);
-      expect(serviceEvents[0].id).toBe(dbEvents[0].id);
     });
   });
 });

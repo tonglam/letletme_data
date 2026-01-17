@@ -1,40 +1,8 @@
 import { fplClient } from '../clients/fpl';
-import { entryInfoRepository } from '../repositories/entry-infos';
-import { entryHistoryInfoRepository } from '../repositories/entry-history-infos';
-import { entryLeagueInfoRepository } from '../repositories/entry-league-infos';
 import { entryEventPicksRepository } from '../repositories/entry-event-picks';
 import { entryEventTransfersRepository } from '../repositories/entry-event-transfers';
 import { entryEventResultsRepository } from '../repositories/entry-event-results';
 import { logError, logInfo } from '../utils/logger';
-import { entryEventPicksRepository } from '../repositories/entry-event-picks';
-
-export async function getEntryInfo(entryId: number) {
-  try {
-    const row = await entryInfoRepository.findById(entryId);
-    return row;
-  } catch (error) {
-    logError('Failed to get entry info', error, { entryId });
-    throw error;
-  }
-}
-
-export async function syncEntryInfo(entryId: number) {
-  try {
-    logInfo('Starting entry info sync', { entryId });
-    const summary = await fplClient.getEntrySummary(entryId);
-    const saved = await entryInfoRepository.upsertFromSummary(summary);
-    // Also upsert seasonal history snapshot using history endpoint
-    const history = await fplClient.getEntryHistory(entryId);
-    await entryHistoryInfoRepository.upsertFromHistory(entryId, history);
-    // Upsert league infos from entry summary leagues
-    await entryLeagueInfoRepository.upsertFromLeagues(entryId, summary.leagues);
-    logInfo('Entry info sync completed', { entryId });
-    return { id: saved.id };
-  } catch (error) {
-    logError('Entry info sync failed', error, { entryId });
-    throw error;
-  }
-}
 
 export async function syncEntryEventPicks(entryId: number, eventId?: number) {
   try {
@@ -57,7 +25,39 @@ export async function syncEntryEventPicks(entryId: number, eventId?: number) {
   }
 }
 
-export async function syncEntryEventTransfers(entryId: number, eventId?: number) {
+const EVENT_LIVE_POINTS_CACHE_TTL_MS = 5 * 60_000;
+const eventLivePointsCache = new Map<number, { expiresAt: number; points: Map<number, number> }>();
+
+async function getPointsByElement(eventId: number): Promise<Map<number, number>> {
+  const cached = eventLivePointsCache.get(eventId);
+  const now = Date.now();
+  if (cached && cached.expiresAt > now) {
+    return cached.points;
+  }
+
+  const live = await fplClient.getEventLive(eventId);
+  const pointsByElement = new Map<number, number>();
+  for (const el of live.elements) {
+    pointsByElement.set(el.id, el.stats.total_points);
+  }
+
+  eventLivePointsCache.set(eventId, {
+    points: pointsByElement,
+    expiresAt: now + EVENT_LIVE_POINTS_CACHE_TTL_MS,
+  });
+
+  return pointsByElement;
+}
+
+interface EntryTransferSyncOptions {
+  pointsByElement?: Map<number, number>;
+}
+
+export async function syncEntryEventTransfers(
+  entryId: number,
+  eventId?: number,
+  options?: EntryTransferSyncOptions,
+) {
   try {
     logInfo('Starting entry event transfers sync', { entryId, eventId });
     // Determine event id if not provided (use current event)
@@ -69,12 +69,7 @@ export async function syncEntryEventTransfers(entryId: number, eventId?: number)
       targetEventId = current.id;
     }
     const transfers = await fplClient.getEntryTransfers(entryId);
-    // Build points map from event live for this event
-    const live = await fplClient.getEventLive(targetEventId);
-    const pointsByElement = new Map<number, number>();
-    for (const el of live.elements) {
-      pointsByElement.set(el.id, el.stats.total_points);
-    }
+    const pointsByElement = options?.pointsByElement ?? (await getPointsByElement(targetEventId));
     await entryEventTransfersRepository.replaceForEvent(
       entryId,
       targetEventId,

@@ -2,10 +2,19 @@ import { cron } from '@elysiajs/cron';
 import type { Elysia } from 'elysia';
 
 import { getCurrentEvent } from '../services/events.service';
-import { getFixturesByEvent } from '../services/fixtures.service';
-import { syncTournamentEventResults } from '../services/tournament-event-results.service';
 import { isAfterMatchDay, isFPLSeason } from '../utils/conditions';
+import { loadFixturesByEvent } from '../utils/fixtures';
 import { logError, logInfo } from '../utils/logger';
+import { enqueueTournamentEventResults } from './tournament-sync.jobs';
+
+/**
+ * Tournament Event Results Sync Trigger
+ *
+ * Strategy:
+ * - Runs every 10 minutes during after-match-day window
+ * - Enqueues base job which triggers cascade (points-race, battle-race, knockout, etc.)
+ * - Aligned with league-event-results for consistency
+ */
 
 export async function runTournamentEventResultsSync() {
   const now = new Date();
@@ -22,7 +31,7 @@ export async function runTournamentEventResultsSync() {
     return;
   }
 
-  const fixtures = await getFixturesByEvent(currentEvent.id);
+  const fixtures = await loadFixturesByEvent(currentEvent.id);
   if (!isAfterMatchDay(currentEvent, fixtures, now)) {
     logInfo('Skipping tournament event results sync - conditions not met', {
       eventId: currentEvent.id,
@@ -30,23 +39,25 @@ export async function runTournamentEventResultsSync() {
     return;
   }
 
-  logInfo('Tournament event results sync started', { eventId: currentEvent.id });
-  const result = await syncTournamentEventResults(currentEvent.id);
-  logInfo('Tournament event results sync completed', { eventId: currentEvent.id, ...result });
+  // Enqueue base job (will trigger cascade on completion)
+  const job = await enqueueTournamentEventResults(currentEvent.id, 'cron');
+  logInfo('Tournament event results job enqueued, will trigger cascade', {
+    jobId: job.id,
+    eventId: currentEvent.id,
+  });
 }
 
 export function registerTournamentEventResultsJobs(app: Elysia) {
   return app.use(
     cron({
-      name: 'tournament-event-results-sync',
-      pattern: '10 6,8,10 * * *',
+      name: 'tournament-event-results-trigger',
+      pattern: '*/10 * * * *',
       async run() {
-        logInfo('Cron job started: tournament-event-results-sync');
+        logInfo('Cron trigger: tournament-event-results-sync');
         try {
           await runTournamentEventResultsSync();
-          logInfo('Cron job completed: tournament-event-results-sync');
         } catch (error) {
-          logError('Cron job failed: tournament-event-results-sync', error);
+          logError('Cron trigger failed: tournament-event-results-sync', error);
         }
       },
     }),

@@ -1,8 +1,5 @@
 import { fplClient } from '../clients/fpl';
-import {
-  tournamentInfoRepository,
-  type TournamentInfoNameSummary,
-} from '../repositories/tournament-infos';
+import { tournamentInfoRepository } from '../repositories/tournament-infos';
 import { logError, logInfo } from '../utils/logger';
 
 const DEFAULT_CONCURRENCY = 5;
@@ -43,9 +40,9 @@ async function fetchLeagueName(leagueId: number, leagueType: 'classic' | 'h2h') 
   return standings.league?.name ?? null;
 }
 
-export async function syncTournamentInfo(
-  options?: { concurrency?: number },
-): Promise<{ total: number; updated: number; skipped: number; errors: number }> {
+export async function syncTournamentInfo(options?: {
+  concurrency?: number;
+}): Promise<{ total: number; updated: number; skipped: number; errors: number }> {
   logInfo('Starting tournament info sync');
 
   const tournaments = await tournamentInfoRepository.findAllNames();

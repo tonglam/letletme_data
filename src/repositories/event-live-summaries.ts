@@ -33,25 +33,18 @@ export type EventLiveSummaryAggregateRow = {
   totalPoints: number;
 };
 
-export class EventLiveSummariesRepository {
-  private db?: DatabaseInstance;
+function mapRowList<T>(result: RowList<Record<string, unknown>[]>): T[] {
+  return [...result] as T[];
+}
 
-  constructor(dbInstance?: DatabaseInstance) {
-    this.db = dbInstance;
-  }
+export const createEventLiveSummariesRepository = (dbInstance?: DatabaseInstance) => {
+  const getDbInstance = async () => dbInstance || (await getDb());
 
-  private mapRowList<T>(result: RowList<Record<string, unknown>>): T[] {
-    return [...result] as T[];
-  }
-
-  private async getDbInstance() {
-    return this.db || (await getDb());
-  }
-
-  async aggregateSummaries(): Promise<EventLiveSummaryAggregateRow[]> {
-    try {
-      const db = await this.getDbInstance();
-      const result = await db.execute(sql`
+  return {
+    aggregateSummaries: async (): Promise<EventLiveSummaryAggregateRow[]> => {
+      try {
+        const db = await getDbInstance();
+        const result = await db.execute(sql`
         SELECT
           el.element_id as "elementId",
           p.type as "elementType",
@@ -76,63 +69,64 @@ export class EventLiveSummariesRepository {
         ORDER BY el.element_id
       `);
 
-      const rows = this.mapRowList<EventLiveSummaryAggregateRow>(result);
-      logInfo('Aggregated event live summaries', { count: rows.length });
-      return rows;
-    } catch (error) {
-      logError('Failed to aggregate event live summaries', error);
-      throw new DatabaseError(
-        'Failed to aggregate event live summaries',
-        'AGGREGATE_SUMMARY_ERROR',
-        error instanceof Error ? error : undefined,
-      );
-    }
-  }
-
-  async replaceAll(summaries: EventLiveSummary[]): Promise<{ count: number }> {
-    try {
-      const db = await this.getDbInstance();
-
-      await db.execute(sql`TRUNCATE TABLE event_live_summaries`);
-
-      if (summaries.length === 0) {
-        logInfo('Event live summaries replaced with empty set');
-        return { count: 0 };
+        const rows = mapRowList<EventLiveSummaryAggregateRow>(result);
+        logInfo('Aggregated event live summaries', { count: rows.length });
+        return rows;
+      } catch (error) {
+        logError('Failed to aggregate event live summaries', error);
+        throw new DatabaseError(
+          'Failed to aggregate event live summaries',
+          'AGGREGATE_SUMMARY_ERROR',
+          error instanceof Error ? error : undefined,
+        );
       }
+    },
 
-      const inserts: DbEventLiveSummaryInsert[] = summaries.map((summary) => ({
-        eventId: summary.eventId,
-        elementId: summary.elementId,
-        elementType: summary.elementType,
-        teamId: summary.teamId,
-        minutes: summary.minutes,
-        goalsScored: summary.goalsScored,
-        assists: summary.assists,
-        cleanSheets: summary.cleanSheets,
-        goalsConceded: summary.goalsConceded,
-        ownGoals: summary.ownGoals,
-        penaltiesSaved: summary.penaltiesSaved,
-        penaltiesMissed: summary.penaltiesMissed,
-        yellowCards: summary.yellowCards,
-        redCards: summary.redCards,
-        saves: summary.saves,
-        bonus: summary.bonus,
-        bps: summary.bps,
-        totalPoints: summary.totalPoints,
-      }));
+    replaceAll: async (summaries: EventLiveSummary[]): Promise<{ count: number }> => {
+      try {
+        const db = await getDbInstance();
 
-      const result = await db.insert(eventLiveSummaries).values(inserts).returning();
-      logInfo('Replaced event live summaries', { count: result.length });
-      return { count: result.length };
-    } catch (error) {
-      logError('Failed to replace event live summaries', error, { count: summaries.length });
-      throw new DatabaseError(
-        'Failed to replace event live summaries',
-        'REPLACE_SUMMARY_ERROR',
-        error instanceof Error ? error : undefined,
-      );
-    }
-  }
-}
+        await db.execute(sql`TRUNCATE TABLE event_live_summaries`);
 
-export const eventLiveSummariesRepository = new EventLiveSummariesRepository();
+        if (summaries.length === 0) {
+          logInfo('Event live summaries replaced with empty set');
+          return { count: 0 };
+        }
+
+        const inserts: DbEventLiveSummaryInsert[] = summaries.map((summary) => ({
+          eventId: summary.eventId,
+          elementId: summary.elementId,
+          elementType: summary.elementType,
+          teamId: summary.teamId,
+          minutes: summary.minutes,
+          goalsScored: summary.goalsScored,
+          assists: summary.assists,
+          cleanSheets: summary.cleanSheets,
+          goalsConceded: summary.goalsConceded,
+          ownGoals: summary.ownGoals,
+          penaltiesSaved: summary.penaltiesSaved,
+          penaltiesMissed: summary.penaltiesMissed,
+          yellowCards: summary.yellowCards,
+          redCards: summary.redCards,
+          saves: summary.saves,
+          bonus: summary.bonus,
+          bps: summary.bps,
+          totalPoints: summary.totalPoints,
+        }));
+
+        const result = await db.insert(eventLiveSummaries).values(inserts).returning();
+        logInfo('Replaced event live summaries', { count: result.length });
+        return { count: result.length };
+      } catch (error) {
+        logError('Failed to replace event live summaries', error, { count: summaries.length });
+        throw new DatabaseError(
+          'Failed to replace event live summaries',
+          'REPLACE_SUMMARY_ERROR',
+          error instanceof Error ? error : undefined,
+        );
+      }
+    },
+  };
+};
+
+export const eventLiveSummariesRepository = createEventLiveSummariesRepository();

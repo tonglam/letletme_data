@@ -684,13 +684,6 @@ export const generatePlayerStat = (overrides: Partial<PlayerStat> = {}): PlayerS
   threatRankType: null,
   ictIndexRank: null,
   ictIndexRankType: null,
-  mngWin: null,
-  mngDraw: null,
-  mngLoss: null,
-  mngUnderdogWin: null,
-  mngUnderdogDraw: null,
-  mngCleanSheets: null,
-  mngGoalsScored: null,
   ...overrides,
 });
 

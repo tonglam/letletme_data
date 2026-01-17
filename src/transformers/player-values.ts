@@ -5,7 +5,7 @@ import {
   validateRawPlayerValue,
 } from '../domain/player-values';
 import type { RawFPLElement } from '../types';
-import type { EventId } from '../types/base.type';
+import type { EventId, ValueChangeType } from '../types/base.type';
 import { ELEMENT_TYPE_MAP } from '../types/base.type';
 import { logError, logInfo } from '../utils/logger';
 
@@ -396,12 +396,11 @@ export function transformPlayerValuesWithChanges(
  */
 export function groupPlayerValuesByChangeType(
   playerValues: PlayerValue[],
-): Record<string, PlayerValue[]> {
-  const grouped: Record<string, PlayerValue[]> = {
-    increase: [],
-    decrease: [],
-    stable: [],
-    unknown: [],
+): Record<ValueChangeType, PlayerValue[]> {
+  const grouped: Record<ValueChangeType, PlayerValue[]> = {
+    Start: [],
+    Rise: [],
+    Faller: [],
   };
 
   for (const pv of playerValues) {

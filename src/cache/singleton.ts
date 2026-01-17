@@ -7,175 +7,162 @@ import { logError, logInfo } from '../utils/logger';
  * Redis Singleton
  * Manages a single Redis connection throughout the application lifecycle
  */
-class RedisSingleton {
-  private static instance: RedisSingleton;
-  private client: Redis | null = null;
-  private isConnected = false;
-  private isConnecting = false;
+const createRedisSingleton = () => {
+  let client: Redis | null = null;
+  let isConnected = false;
+  let isConnecting = false;
 
-  private constructor() {
-    // Private constructor prevents direct instantiation
-  }
-
-  /**
-   * Get the singleton instance
-   */
-  public static getInstance(): RedisSingleton {
-    if (!RedisSingleton.instance) {
-      RedisSingleton.instance = new RedisSingleton();
-    }
-    return RedisSingleton.instance;
-  }
-
-  /**
-   * Initialize Redis connection (lazy initialization)
-   */
-  public async connect(): Promise<void> {
-    if (this.isConnected) {
-      return; // Already connected
-    }
-
-    if (this.isConnecting) {
-      // Wait for existing connection attempt
-      while (this.isConnecting) {
-        await new Promise((resolve) => setTimeout(resolve, 100));
+  return {
+    /**
+     * Initialize Redis connection (lazy initialization)
+     */
+    connect: async (): Promise<void> => {
+      if (isConnected) {
+        return; // Already connected
       }
-      return;
-    }
 
-    try {
-      this.isConnecting = true;
-      logInfo('Initializing Redis connection...');
+      if (isConnecting) {
+        // Wait for existing connection attempt
+        while (isConnecting) {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        return;
+      }
 
-      const redisConfig = {
-        host: process.env.REDIS_HOST || 'localhost',
-        port: Number(process.env.REDIS_PORT) || 6379,
-        password: process.env.REDIS_PASSWORD,
-        db: Number(process.env.REDIS_DB) || 0,
-        retryDelayOnFailover: 100,
-        enableReadyCheck: false,
-        maxRetriesPerRequest: null,
-      };
+      try {
+        isConnecting = true;
+        logInfo('Initializing Redis connection...');
 
-      this.client = new Redis(redisConfig);
+        const redisConfig = {
+          host: process.env.REDIS_HOST || 'localhost',
+          port: Number(process.env.REDIS_PORT) || 6379,
+          password: process.env.REDIS_PASSWORD,
+          db: Number(process.env.REDIS_DB) || 0,
+          retryDelayOnFailover: 100,
+          enableReadyCheck: false,
+          maxRetriesPerRequest: null,
+        };
 
-      // Set up event handlers
-      this.client.on('connect', () => {
-        this.isConnected = true;
-        logInfo('✅ Redis client connected');
-      });
+        client = new Redis(redisConfig);
 
-      this.client.on('ready', () => {
-        logInfo('✅ Redis client ready');
-      });
+        // Set up event handlers
+        client.on('connect', () => {
+          isConnected = true;
+          logInfo('✅ Redis client connected');
+        });
 
-      this.client.on('error', (error) => {
-        logError('❌ Redis client error', error);
-        this.isConnected = false;
-      });
+        client.on('ready', () => {
+          logInfo('✅ Redis client ready');
+        });
 
-      this.client.on('close', () => {
-        logInfo('Redis client connection closed');
-        this.isConnected = false;
-      });
+        client.on('error', (error) => {
+          logError('❌ Redis client error', error);
+          isConnected = false;
+        });
 
-      this.client.on('reconnecting', () => {
-        logInfo('Redis client reconnecting...');
-      });
+        client.on('close', () => {
+          logInfo('Redis client connection closed');
+          isConnected = false;
+        });
 
-      // Test connection
-      await this.client.ping();
+        client.on('reconnecting', () => {
+          logInfo('Redis client reconnecting...');
+        });
 
-      logInfo('✅ Redis connection established');
-    } catch (error) {
-      logError('❌ Failed to connect to Redis', error);
-      this.isConnected = false;
-      throw error;
-    } finally {
-      this.isConnecting = false;
-    }
-  }
+        // Test connection
+        await client.ping();
 
-  /**
-   * Get the Redis client (auto-connects if needed)
-   */
-  public async getClient(): Promise<Redis> {
-    if (!this.isConnected) {
-      await this.connect();
-    }
+        logInfo('✅ Redis connection established');
+      } catch (error) {
+        logError('❌ Failed to connect to Redis', error);
+        isConnected = false;
+        throw error;
+      } finally {
+        isConnecting = false;
+      }
+    },
 
-    if (!this.client) {
-      throw new Error('Redis client not initialized');
-    }
+    /**
+     * Get the Redis client (auto-connects if needed)
+     */
+    getClient: async (): Promise<Redis> => {
+      if (!isConnected) {
+        await redisSingleton.connect();
+      }
 
-    return this.client;
-  }
+      if (!client) {
+        throw new Error('Redis client not initialized');
+      }
 
-  /**
-   * Check if Redis is connected
-   */
-  public isHealthy(): boolean {
-    return this.isConnected && this.client !== null;
-  }
+      return client;
+    },
 
-  /**
-   * Test Redis connection
-   */
-  public async healthCheck(): Promise<boolean> {
-    try {
-      if (!this.isConnected || !this.client) {
+    /**
+     * Check if Redis is connected
+     */
+    isHealthy: (): boolean => {
+      return isConnected && client !== null;
+    },
+
+    /**
+     * Test Redis connection
+     */
+    healthCheck: async (): Promise<boolean> => {
+      try {
+        if (!isConnected || !client) {
+          return false;
+        }
+
+        const result = await client.ping();
+        return result === 'PONG';
+      } catch (error) {
+        logError('Redis health check failed', error);
         return false;
       }
+    },
 
-      const result = await this.client.ping();
-      return result === 'PONG';
-    } catch (error) {
-      logError('Redis health check failed', error);
-      return false;
-    }
-  }
+    /**
+     * Close Redis connection
+     */
+    disconnect: async (): Promise<void> => {
+      if (!client) {
+        return;
+      }
 
-  /**
-   * Close Redis connection
-   */
-  public async disconnect(): Promise<void> {
-    if (!this.client) {
-      return;
-    }
+      try {
+        logInfo('Closing Redis connection...');
+        await client.disconnect();
+        client = null;
+        isConnected = false;
+        logInfo('✅ Redis connection closed');
+      } catch (error) {
+        logError('❌ Error closing Redis connection', error);
+        throw error;
+      }
+    },
 
-    try {
-      logInfo('Closing Redis connection...');
-      await this.client.disconnect();
-      this.client = null;
-      this.isConnected = false;
-      logInfo('✅ Redis connection closed');
-    } catch (error) {
-      logError('❌ Error closing Redis connection', error);
-      throw error;
-    }
-  }
+    /**
+     * Force reconnection (useful for connection recovery)
+     */
+    reconnect: async (): Promise<void> => {
+      await redisSingleton.disconnect();
+      await redisSingleton.connect();
+    },
 
-  /**
-   * Force reconnection (useful for connection recovery)
-   */
-  public async reconnect(): Promise<void> {
-    await this.disconnect();
-    await this.connect();
-  }
-
-  /**
-   * Get connection status
-   */
-  public getStatus(): { connected: boolean; connecting: boolean } {
-    return {
-      connected: this.isConnected,
-      connecting: this.isConnecting,
-    };
-  }
-}
+    /**
+     * Get connection status
+     */
+    getStatus: (): { connected: boolean; connecting: boolean } => {
+      return {
+        connected: isConnected,
+        connecting: isConnecting,
+      };
+    },
+  };
+};
 
 // Export singleton instance
-export const redisSingleton = RedisSingleton.getInstance();
+export const redisSingleton = createRedisSingleton();
 
 // Default cache configuration
 export const DEFAULT_CACHE_CONFIG: CacheConfig = {

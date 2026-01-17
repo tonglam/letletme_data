@@ -19,12 +19,12 @@ export const PlayerSchema = z.object({
     .number()
     .int()
     .min(35, 'Price must be at least 3.5m')
-    .max(150, 'Price cannot exceed 15.0m'),
+    .max(200, 'Price cannot exceed 20.0m'),
   startPrice: z
     .number()
     .int()
     .min(35, 'Start price must be at least 3.5m')
-    .max(150, 'Start price cannot exceed 15.0m'),
+    .max(200, 'Start price cannot exceed 20.0m'),
   firstName: z.string().min(1, 'First name is required').max(50, 'First name too long'),
   secondName: z.string().min(1, 'Second name is required').max(50, 'Second name too long'),
   webName: z.string().min(1, 'Web name is required').max(30, 'Web name too long'),
@@ -35,7 +35,7 @@ export const RawFPLElementSchema = z.object({
   code: z.number().int().positive(),
   element_type: z.number().int().min(1).max(4),
   team: z.number().int().positive(),
-  now_cost: z.number().int().min(35).max(150),
+  now_cost: z.number().int().min(35).max(200),
   cost_change_start: z.number().int(),
   cost_change_event: z.number().int(),
   cost_change_event_fall: z.number().int(),

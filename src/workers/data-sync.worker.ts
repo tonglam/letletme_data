@@ -16,19 +16,6 @@ export function createDataSyncWorker() {
 
   const queueEvents = new QueueEvents(dataSyncQueueName, { connection });
 
-  queueEvents.on('failed', ({ jobId, failedReason }) => {
-    logError('Queue event failed', failedReason, { queue: dataSyncQueueName, jobId });
-  });
-
-  queueEvents.on('completed', ({ jobId }) => {
-    logInfo('Queue event completed', { queue: dataSyncQueueName, jobId });
-  });
-
-  queueEvents
-    .waitUntilReady()
-    .then(() => logInfo('Queue events ready', { queue: dataSyncQueueName }))
-    .catch((error) => logError('Queue events init failed', error, { queue: dataSyncQueueName }));
-
   const worker = new Worker(
     dataSyncQueueName,
     async (job) => {

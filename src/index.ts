@@ -7,37 +7,20 @@ import { eventsAPI } from './api/events.api';
 import { fixturesAPI } from './api/fixtures.api';
 import { jobsAPI } from './api/jobs.api';
 import { phasesAPI } from './api/phases.api';
-import { entriesAPI } from './api/entries.api';
+import { entryInfoAPI } from './api/entry-info.api';
+import { entrySyncAPI } from './api/entry-sync.api';
 import { playerStatsAPI } from './api/player-stats.api';
 import { playerValuesAPI } from './api/player-values.api';
 import { playersAPI } from './api/players.api';
 import { teamsAPI } from './api/teams.api';
 
 // Import job registration functions
-import { registerDataSyncJobs } from './jobs/data-sync.jobs';
-import { registerEntryInfoJobs } from './jobs/entry-info.jobs';
-import { registerLiveJobs } from './jobs/live.jobs';
-import { registerEntryPicksJobs } from './jobs/entry-picks.jobs';
-import { registerEntryTransfersJobs } from './jobs/entry-transfers.jobs';
-import { registerEntryResultsJobs } from './jobs/entry-results.jobs';
-import { registerLeagueEventPicksJobs } from './jobs/league-event-picks.jobs';
-import { registerLeagueEventResultsJobs } from './jobs/league-event-results.jobs';
+import { registerDataJobs } from './jobs/data-jobs';
+import { registerEntryJobs } from './jobs/entry-sync.jobs';
 import { registerEventStandingsJobs } from './jobs/event-standings.jobs';
-import { registerTournamentEventPicksJobs } from './jobs/tournament-event-picks.jobs';
-import { registerTournamentEventResultsJobs } from './jobs/tournament-event-results.jobs';
-import {
-  registerTournamentEventTransfersPostJobs,
-  registerTournamentEventTransfersPreJobs,
-} from './jobs/tournament-event-transfers.jobs';
-import { registerTournamentEventCupResultsJobs } from './jobs/tournament-event-cup-results.jobs';
-import { registerTournamentInfoJobs } from './jobs/tournament-info.jobs';
-import {
-  registerTournamentPointsRaceResultsJobs,
-} from './jobs/tournament-points-race-results.jobs';
-import {
-  registerTournamentBattleRaceResultsJobs,
-} from './jobs/tournament-battle-race-results.jobs';
-import { registerTournamentKnockoutResultsJobs } from './jobs/tournament-knockout-results.jobs';
+import { registerLeagueJobs } from './jobs/league-jobs';
+import { registerLiveJobs } from './jobs/live.jobs';
+import { registerTournamentJobs } from './jobs/tournament-jobs';
 
 // Import utilities
 import { getErrorMessage } from './utils/errors';
@@ -121,31 +104,20 @@ const app = new Elysia()
   .use(playerStatsAPI)
   .use(playerValuesAPI)
   .use(phasesAPI)
-  .use(entriesAPI)
+  .use(entryInfoAPI)
+  .use(entrySyncAPI)
   .use(jobsAPI)
 
   // ================================
   // Cron Job Registration
   // ================================
 
-  .use(registerDataSyncJobs)
+  .use(registerDataJobs)
   .use(registerLiveJobs)
-  .use(registerEntryInfoJobs)
-  .use(registerEntryPicksJobs)
-  .use(registerEntryTransfersJobs)
-  .use(registerEntryResultsJobs)
-  .use(registerLeagueEventPicksJobs)
-  .use(registerLeagueEventResultsJobs)
+  .use(registerEntryJobs)
+  .use(registerLeagueJobs)
   .use(registerEventStandingsJobs)
-  .use(registerTournamentEventPicksJobs)
-  .use(registerTournamentEventResultsJobs)
-  .use(registerTournamentEventTransfersPreJobs)
-  .use(registerTournamentEventTransfersPostJobs)
-  .use(registerTournamentEventCupResultsJobs)
-  .use(registerTournamentInfoJobs)
-  .use(registerTournamentPointsRaceResultsJobs)
-  .use(registerTournamentBattleRaceResultsJobs)
-  .use(registerTournamentKnockoutResultsJobs)
+  .use(registerTournamentJobs)
 
   // ================================
   // Server Startup
@@ -168,12 +140,13 @@ logInfo('🚀 Elysia server started', {
     'players',
     'player-stats',
     'player-values',
-    'entries',
+    'entry-info',
     'phases',
     'jobs',
   ],
   jobs: [
     'data-sync',
+    'player-values-window',
     'live-scores',
     'event-live-summary',
     'event-live-explain',

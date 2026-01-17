@@ -110,9 +110,9 @@ describe('Player Values Unit Tests', () => {
       });
 
       test('should determine value change type', () => {
-        expect(determineValueChangeType(90, 80)).toBe('increase');
-        expect(determineValueChangeType(70, 80)).toBe('decrease');
-        expect(determineValueChangeType(80, 80)).toBe('stable');
+        expect(determineValueChangeType(90, 80)).toBe('Rise');
+        expect(determineValueChangeType(70, 80)).toBe('Faller');
+        expect(determineValueChangeType(80, 80)).toBe('Start');
       });
 
       test('should check for significant value change', () => {
@@ -130,9 +130,9 @@ describe('Player Values Unit Tests', () => {
       });
 
       test('should check if player is rising/falling in value', () => {
-        const risingPlayer = generatePlayerValue({ changeType: 'increase' });
-        const fallingPlayer = generatePlayerValue({ changeType: 'decrease' });
-        const stablePlayer = generatePlayerValue({ changeType: 'stable' });
+        const risingPlayer = generatePlayerValue({ changeType: 'Rise' });
+        const fallingPlayer = generatePlayerValue({ changeType: 'Faller' });
+        const stablePlayer = generatePlayerValue({ changeType: 'Start' });
 
         expect(isRisingInValue(risingPlayer)).toBe(true);
         expect(isRisingInValue(fallingPlayer)).toBe(false);
@@ -146,9 +146,9 @@ describe('Player Values Unit Tests', () => {
     describe('Analytics Functions', () => {
       test('should get top value risers', () => {
         const playerValues = [
-          generatePlayerValue({ elementId: 1, value: 100, lastValue: 80, changeType: 'increase' }),
-          generatePlayerValue({ elementId: 2, value: 90, lastValue: 85, changeType: 'increase' }),
-          generatePlayerValue({ elementId: 3, value: 70, lastValue: 80, changeType: 'decrease' }),
+          generatePlayerValue({ elementId: 1, value: 100, lastValue: 80, changeType: 'Rise' }),
+          generatePlayerValue({ elementId: 2, value: 90, lastValue: 85, changeType: 'Rise' }),
+          generatePlayerValue({ elementId: 3, value: 70, lastValue: 80, changeType: 'Faller' }),
         ];
 
         const topRisers = getTopValueRisers(playerValues, 2);
@@ -159,9 +159,9 @@ describe('Player Values Unit Tests', () => {
 
       test('should get top value fallers', () => {
         const playerValues = [
-          generatePlayerValue({ elementId: 1, value: 60, lastValue: 80, changeType: 'decrease' }),
-          generatePlayerValue({ elementId: 2, value: 75, lastValue: 85, changeType: 'decrease' }),
-          generatePlayerValue({ elementId: 3, value: 100, lastValue: 80, changeType: 'increase' }),
+          generatePlayerValue({ elementId: 1, value: 60, lastValue: 80, changeType: 'Faller' }),
+          generatePlayerValue({ elementId: 2, value: 75, lastValue: 85, changeType: 'Faller' }),
+          generatePlayerValue({ elementId: 3, value: 100, lastValue: 80, changeType: 'Rise' }),
         ];
 
         const topFallers = getTopValueFallers(playerValues, 2);
@@ -177,8 +177,8 @@ describe('Player Values Unit Tests', () => {
         expect(stats.totalRisers).toBe(1);
         expect(stats.totalFallers).toBe(1);
         expect(stats.totalStable).toBe(1);
-        expect(stats.averageValue).toBe(80); // (90 + 70 + 80 + 80) / 4
-        expect(stats.totalValueChange).toBe(5); // 10 - 10 + 0 + 5
+        expect(stats.averageValue).toBe(80); // (90 + 70 + 80) / 3
+        expect(stats.totalValueChange).toBe(0); // 10 - 10 + 0
       });
     });
 
@@ -217,17 +217,17 @@ describe('Player Values Unit Tests', () => {
       test('should filter player values by change type', () => {
         const playerValues = generatePlayerValuesWithChanges();
 
-        const risers = filterPlayerValuesByChangeType(playerValues, 'increase' as ValueChangeType);
-        const fallers = filterPlayerValuesByChangeType(playerValues, 'decrease' as ValueChangeType);
-        const stable = filterPlayerValuesByChangeType(playerValues, 'stable' as ValueChangeType);
+        const risers = filterPlayerValuesByChangeType(playerValues, 'Rise' as ValueChangeType);
+        const fallers = filterPlayerValuesByChangeType(playerValues, 'Faller' as ValueChangeType);
+        const stable = filterPlayerValuesByChangeType(playerValues, 'Start' as ValueChangeType);
 
         expect(risers).toHaveLength(1);
         expect(fallers).toHaveLength(1);
         expect(stable).toHaveLength(1);
 
-        expect(risers[0].changeType).toBe('increase');
-        expect(fallers[0].changeType).toBe('decrease');
-        expect(stable[0].changeType).toBe('stable');
+        expect(risers[0].changeType).toBe('Rise');
+        expect(fallers[0].changeType).toBe('Faller');
+        expect(stable[0].changeType).toBe('Start');
       });
 
       test('should sort player values by value', () => {
@@ -292,7 +292,7 @@ describe('Player Values Unit Tests', () => {
         expect(transformed.teamShortName).toBe('MCI');
         expect(transformed.value).toBe(142);
         expect(transformed.lastValue).toBe(138);
-        expect(transformed.changeType).toBe('increase');
+        expect(transformed.changeType).toBe('Rise');
         expect(transformed.changeDate).toBe('2023-12-15T10:00:00.000Z');
       });
 
@@ -301,7 +301,7 @@ describe('Player Values Unit Tests', () => {
 
         expect(transformed.value).toBe(142);
         expect(transformed.lastValue).toBe(142); // Same as current when no previous
-        expect(transformed.changeType).toBe('stable');
+        expect(transformed.changeType).toBe('Start');
       });
 
       test('should throw on invalid team ID', () => {
@@ -478,13 +478,12 @@ describe('Player Values Unit Tests', () => {
         const playerValues = generatePlayerValuesWithChanges();
         const grouped = groupPlayerValuesByChangeType(playerValues);
 
-        expect(grouped.increase).toHaveLength(1);
-        expect(grouped.decrease).toHaveLength(1);
-        expect(grouped.stable).toHaveLength(1);
-        expect(grouped.unknown).toHaveLength(1);
+        expect(grouped.Rise).toHaveLength(1);
+        expect(grouped.Faller).toHaveLength(1);
+        expect(grouped.Start).toHaveLength(1);
 
-        expect(grouped.increase[0].webName).toBe('Rising Player');
-        expect(grouped.decrease[0].webName).toBe('Falling Player');
+        expect(grouped.Rise[0].webName).toBe('Rising Player');
+        expect(grouped.Faller[0].webName).toBe('Falling Player');
       });
     });
   });

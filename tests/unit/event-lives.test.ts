@@ -303,20 +303,12 @@ describe('Event Lives Unit Tests', () => {
     test('should create repository instance', () => {
       expect(repository).toBeDefined();
       expect(repository.findByEventId).toBeDefined();
-      expect(repository.findByEventAndElement).toBeDefined();
-      expect(repository.findByElementId).toBeDefined();
-      expect(repository.upsert).toBeDefined();
       expect(repository.upsertBatch).toBeDefined();
-      expect(repository.deleteByEventId).toBeDefined();
     });
 
     test('should handle repository method signatures', () => {
       expect(typeof repository.findByEventId).toBe('function');
-      expect(typeof repository.findByEventAndElement).toBe('function');
-      expect(typeof repository.findByElementId).toBe('function');
-      expect(typeof repository.upsert).toBe('function');
       expect(typeof repository.upsertBatch).toBe('function');
-      expect(typeof repository.deleteByEventId).toBe('function');
     });
 
     test('should handle upsertBatch with empty array', async () => {

@@ -12,132 +12,119 @@ import { logError, logInfo } from '../utils/logger';
 
 type DatabaseInstance = PostgresJsDatabase<Record<string, never>>;
 
-export class TournamentGroupRepository {
-  private db?: DatabaseInstance;
+export const createTournamentGroupRepository = (dbInstance?: DatabaseInstance) => {
+  const getDbInstance = async () => dbInstance || (await getDb());
 
-  constructor(dbInstance?: DatabaseInstance) {
-    this.db = dbInstance;
-  }
-
-  private async getDbInstance() {
-    return this.db || (await getDb());
-  }
-
-  async findByTournamentAndEntries(
-    tournamentId: number,
-    entryIds: number[],
-  ): Promise<DbTournamentGroup[]> {
-    if (entryIds.length === 0) {
-      return [];
-    }
-
-    try {
-      const db = await this.getDbInstance();
-      const uniqueIds = Array.from(new Set(entryIds));
-      const chunks: number[][] = [];
-      for (let index = 0; index < uniqueIds.length; index += 1000) {
-        chunks.push(uniqueIds.slice(index, index + 1000));
+  return {
+    findByTournamentAndEntries: async (
+      tournamentId: number,
+      entryIds: number[],
+    ): Promise<DbTournamentGroup[]> => {
+      if (entryIds.length === 0) {
+        return [];
       }
 
-      const results: DbTournamentGroup[] = [];
-      for (const chunk of chunks) {
+      try {
+        const db = await getDbInstance();
+        const uniqueIds = Array.from(new Set(entryIds));
+        const chunks: number[][] = [];
+        for (let index = 0; index < uniqueIds.length; index += 1000) {
+          chunks.push(uniqueIds.slice(index, index + 1000));
+        }
+
+        const results: DbTournamentGroup[] = [];
+        for (const chunk of chunks) {
+          const rows = await db
+            .select()
+            .from(tournamentGroups)
+            .where(
+              and(
+                eq(tournamentGroups.tournamentId, tournamentId),
+                inArray(tournamentGroups.entryId, chunk),
+              ),
+            );
+          results.push(...rows);
+        }
+
+        logInfo('Retrieved tournament groups', { tournamentId, count: results.length });
+        return results;
+      } catch (error) {
+        logError('Failed to retrieve tournament groups', error, { tournamentId });
+        throw new DatabaseError(
+          'Failed to retrieve tournament groups',
+          'TOURNAMENT_GROUPS_FIND_ERROR',
+          error as Error,
+        );
+      }
+    },
+
+    findByTournamentAndGroup: async (
+      tournamentId: number,
+      groupId: string,
+    ): Promise<DbTournamentGroup[]> => {
+      try {
+        const db = await getDbInstance();
         const rows = await db
           .select()
           .from(tournamentGroups)
           .where(
             and(
               eq(tournamentGroups.tournamentId, tournamentId),
-              inArray(tournamentGroups.entryId, chunk),
+              eq(tournamentGroups.groupId, groupId),
             ),
           );
-        results.push(...rows);
+        logInfo('Retrieved tournament group entries', {
+          tournamentId,
+          groupId,
+          count: rows.length,
+        });
+        return rows;
+      } catch (error) {
+        logError('Failed to retrieve tournament group entries', error, { tournamentId, groupId });
+        throw new DatabaseError(
+          'Failed to retrieve tournament group entries',
+          'TOURNAMENT_GROUPS_FIND_BY_GROUP_ERROR',
+          error as Error,
+        );
+      }
+    },
+
+    upsertBatch: async (groups: DbTournamentGroupInsert[]): Promise<number> => {
+      if (groups.length === 0) {
+        return 0;
       }
 
-      logInfo('Retrieved tournament groups', { tournamentId, count: results.length });
-      return results;
-    } catch (error) {
-      logError('Failed to retrieve tournament groups', error, { tournamentId });
-      throw new DatabaseError(
-        'Failed to retrieve tournament groups',
-        'TOURNAMENT_GROUP_FIND_ERROR',
-        error as Error,
-      );
-    }
-  }
+      try {
+        const db = await getDbInstance();
+        await db
+          .insert(tournamentGroups)
+          .values(groups)
+          .onConflictDoUpdate({
+            target: [tournamentGroups.tournamentId, tournamentGroups.entryId],
+            set: {
+              groupId: sql`excluded.group_id`,
+              groupRank: sql`excluded.group_rank`,
+              groupPoints: sql`excluded.group_points`,
+              groupWins: sql`excluded.group_wins`,
+              groupLoses: sql`excluded.group_loses`,
+              groupDraws: sql`excluded.group_draws`,
+              state: sql`excluded.state`,
+              updatedAt: new Date(),
+            },
+          });
 
-  async findByTournamentAndGroup(
-    tournamentId: number,
-    groupId: number,
-  ): Promise<DbTournamentGroup[]> {
-    try {
-      const db = await this.getDbInstance();
-      const rows = await db
-        .select()
-        .from(tournamentGroups)
-        .where(
-          and(
-            eq(tournamentGroups.tournamentId, tournamentId),
-            eq(tournamentGroups.groupId, groupId),
-          ),
-        )
-        .orderBy(tournamentGroups.groupIndex);
-      logInfo('Retrieved tournament group entries', {
-        tournamentId,
-        groupId,
-        count: rows.length,
-      });
-      return rows;
-    } catch (error) {
-      logError('Failed to retrieve tournament group entries', error, {
-        tournamentId,
-        groupId,
-      });
-      throw new DatabaseError(
-        'Failed to retrieve tournament group entries',
-        'TOURNAMENT_GROUP_FIND_ERROR',
-        error as Error,
-      );
-    }
-  }
+        logInfo('Upserted tournament groups', { count: groups.length });
+        return groups.length;
+      } catch (error) {
+        logError('Failed to upsert tournament groups', error, { count: groups.length });
+        throw new DatabaseError(
+          'Failed to upsert tournament groups',
+          'TOURNAMENT_GROUPS_UPSERT_ERROR',
+          error as Error,
+        );
+      }
+    },
+  };
+};
 
-  async upsertBatch(groups: DbTournamentGroupInsert[]): Promise<number> {
-    if (groups.length === 0) {
-      return 0;
-    }
-
-    try {
-      const db = await this.getDbInstance();
-      await db
-        .insert(tournamentGroups)
-        .values(groups)
-        .onConflictDoUpdate({
-          target: [
-            tournamentGroups.tournamentId,
-            tournamentGroups.groupId,
-            tournamentGroups.entryId,
-          ],
-          set: {
-            groupPoints: sql`excluded.group_points`,
-            groupRank: sql`excluded.group_rank`,
-            played: sql`excluded.played`,
-            totalPoints: sql`excluded.total_points`,
-            totalTransfersCost: sql`excluded.total_transfers_cost`,
-            totalNetPoints: sql`excluded.total_net_points`,
-            overallRank: sql`excluded.overall_rank`,
-          },
-        });
-
-      logInfo('Upserted tournament groups', { count: groups.length });
-      return groups.length;
-    } catch (error) {
-      logError('Failed to upsert tournament groups', error, { count: groups.length });
-      throw new DatabaseError(
-        'Failed to upsert tournament groups',
-        'TOURNAMENT_GROUP_UPSERT_ERROR',
-        error as Error,
-      );
-    }
-  }
-}
-
-export const tournamentGroupRepository = new TournamentGroupRepository();
+export const tournamentGroupRepository = createTournamentGroupRepository();

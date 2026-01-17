@@ -1,23 +1,24 @@
 import { cron } from '@elysiajs/cron';
 import { Elysia } from 'elysia';
 
-import { syncEventLiveExplain } from '../services/event-live-explains.service';
-import { syncEventLives } from '../services/event-lives.service';
-import { syncEventLiveSummary } from '../services/event-live-summaries.service';
-import { syncEventOverallResult } from '../services/event-overall-results.service';
 import { getCurrentEvent } from '../services/events.service';
-import { getFixturesByEvent } from '../services/fixtures.service';
-import { getCurrentGameweek, isFPLSeason, isMatchDay, isMatchDayTime } from '../utils/conditions';
+import { getCurrentGameweek, isFPLSeason, isMatchDayTime } from '../utils/conditions';
+import { loadFixturesByEvent } from '../utils/fixtures';
 import { logError, logInfo } from '../utils/logger';
+import { enqueueEventLivesCacheUpdate, enqueueEventLivesDbSync } from './live-data.jobs';
 
 /**
  * Live Data Cron Jobs
  *
- * Handles real-time and periodic data updates:
- * - Event lives sync (every 5 minutes during match hours)
- * - Live scores (every 15 minutes during match hours)
+ * Strategy:
+ * - Cron triggers PRIMARY syncs (cache + DB) as background jobs
+ * - PRIMARY jobs enqueue SECONDARY syncs on completion (cascade)
+ * - Ensures data consistency and proper sequencing
  *
- * These jobs are conditional and only run when appropriate.
+ * Jobs:
+ * - event-lives-cache-update: Every 1 minute (real-time cache)
+ * - event-lives-db-sync: Every 10 minutes (persistence + cascade)
+ * - Secondary jobs (summary, explain, overall): Cascaded from DB sync
  */
 
 async function runLiveScores() {
@@ -33,7 +34,7 @@ async function runLiveScores() {
     return;
   }
 
-  const fixtures = await getFixturesByEvent(currentEvent.id);
+  const fixtures = await loadFixturesByEvent(currentEvent.id);
 
   const shouldRun = isMatchDayTime(currentEvent, fixtures, now);
 
@@ -49,171 +50,91 @@ async function runLiveScores() {
   logInfo('Live scores sync completed (placeholder)');
 }
 
-async function runEventLivesSync() {
+async function runEventLivesCacheUpdate() {
   const now = new Date();
   if (!isFPLSeason(now)) {
-    logInfo('Skipping event lives sync - not FPL season', { month: now.getMonth() + 1 });
+    logInfo('Skipping cache update - not FPL season', { month: now.getMonth() + 1 });
     return;
   }
 
   const currentEvent = await getCurrentEvent();
   if (!currentEvent) {
-    logInfo('Skipping event lives sync - no current event');
+    logInfo('Skipping cache update - no current event');
     return;
   }
 
-  const fixtures = await getFixturesByEvent(currentEvent.id);
+  const fixtures = await loadFixturesByEvent(currentEvent.id);
 
   if (!isMatchDayTime(currentEvent, fixtures, now)) {
-    logInfo('Skipping event lives sync - conditions not met', { eventId: currentEvent.id });
+    logInfo('Skipping cache update - not match time', { eventId: currentEvent.id });
     return;
   }
 
-  logInfo('Event lives sync started', { eventId: currentEvent.id });
-  await syncEventLives(currentEvent.id);
-  logInfo('Event lives sync completed', { eventId: currentEvent.id });
+  // Enqueue as background job instead of direct execution
+  await enqueueEventLivesCacheUpdate(currentEvent.id, 'cron');
+  logInfo('Cache update job enqueued', { eventId: currentEvent.id });
 }
 
-async function runEventLiveSummarySync() {
+async function runEventLivesDbSync() {
   const now = new Date();
   if (!isFPLSeason(now)) {
-    logInfo('Skipping event live summary sync - not FPL season', { month: now.getMonth() + 1 });
+    logInfo('Skipping DB sync - not FPL season', { month: now.getMonth() + 1 });
     return;
   }
 
   const currentEvent = await getCurrentEvent();
   if (!currentEvent) {
-    logInfo('Skipping event live summary sync - no current event');
+    logInfo('Skipping DB sync - no current event');
     return;
   }
 
-  const fixtures = await getFixturesByEvent(currentEvent.id);
-  if (!isMatchDay(currentEvent, fixtures, now)) {
-    logInfo('Skipping event live summary sync - conditions not met', { eventId: currentEvent.id });
+  const fixtures = await loadFixturesByEvent(currentEvent.id);
+
+  if (!isMatchDayTime(currentEvent, fixtures, now)) {
+    logInfo('Skipping DB sync - not match time', { eventId: currentEvent.id });
     return;
   }
 
-  logInfo('Event live summary sync started', { eventId: currentEvent.id });
-  await syncEventLiveSummary();
-  logInfo('Event live summary sync completed', { eventId: currentEvent.id });
-}
-
-async function runEventLiveExplainSync() {
-  const now = new Date();
-  if (!isFPLSeason(now)) {
-    logInfo('Skipping event live explain sync - not FPL season', { month: now.getMonth() + 1 });
-    return;
-  }
-
-  const currentEvent = await getCurrentEvent();
-  if (!currentEvent) {
-    logInfo('Skipping event live explain sync - no current event');
-    return;
-  }
-
-  const fixtures = await getFixturesByEvent(currentEvent.id);
-  if (!isMatchDay(currentEvent, fixtures, now)) {
-    logInfo('Skipping event live explain sync - conditions not met', { eventId: currentEvent.id });
-    return;
-  }
-
-  logInfo('Event live explain sync started', { eventId: currentEvent.id });
-  await syncEventLiveExplain(currentEvent.id);
-  logInfo('Event live explain sync completed', { eventId: currentEvent.id });
-}
-
-async function runEventOverallResultSync() {
-  const now = new Date();
-  if (!isFPLSeason(now)) {
-    logInfo('Skipping event overall result sync - not FPL season', { month: now.getMonth() + 1 });
-    return;
-  }
-
-  const currentEvent = await getCurrentEvent();
-  if (!currentEvent) {
-    logInfo('Skipping event overall result sync - no current event');
-    return;
-  }
-
-  const fixtures = await getFixturesByEvent(currentEvent.id);
-  if (!isMatchDay(currentEvent, fixtures, now)) {
-    logInfo('Skipping event overall result sync - conditions not met', {
-      eventId: currentEvent.id,
-    });
-    return;
-  }
-
-  logInfo('Event overall result sync started', { eventId: currentEvent.id });
-  await syncEventOverallResult();
-  logInfo('Event overall result sync completed', { eventId: currentEvent.id });
+  // Enqueue DB sync job (will trigger cascade on completion)
+  const job = await enqueueEventLivesDbSync(currentEvent.id, 'cron');
+  logInfo('DB sync job enqueued, will trigger cascade on completion', {
+    jobId: job.id,
+    eventId: currentEvent.id,
+  });
 }
 
 export function registerLiveJobs(app: Elysia) {
   return (
     app
-      // Event lives sync - Every 5 minutes during match hours
+      // Event lives cache update - Every 1 minute during match hours (real-time)
+      // Enqueues background job for cache-only updates
       .use(
         cron({
-          name: 'event-lives-sync',
-          pattern: '*/5 * * * *',
+          name: 'event-lives-cache-trigger',
+          pattern: '* * * * *',
           async run() {
-            logInfo('Cron job started: event-lives-sync');
+            logInfo('Cron trigger: event-lives-cache-update');
             try {
-              await runEventLivesSync();
-              logInfo('Cron job completed: event-lives-sync');
+              await runEventLivesCacheUpdate();
             } catch (error) {
-              logError('Cron job failed: event-lives-sync', error);
+              logError('Cron trigger failed: event-lives-cache-update', error);
             }
           },
         }),
       )
 
-      // Event live summary sync - Matchday snapshots
+      // Event lives DB sync - Every 10 minutes during match hours (persistence)
+      // Enqueues background job which triggers cascade on completion
       .use(
         cron({
-          name: 'event-live-summary-sync',
-          pattern: '5 6,8,10 * * *',
+          name: 'event-lives-db-trigger',
+          pattern: '*/10 * * * *',
           async run() {
-            logInfo('Cron job started: event-live-summary-sync');
+            logInfo('Cron trigger: event-lives-db-sync');
             try {
-              await runEventLiveSummarySync();
-              logInfo('Cron job completed: event-live-summary-sync');
+              await runEventLivesDbSync();
             } catch (error) {
-              logError('Cron job failed: event-live-summary-sync', error);
-            }
-          },
-        }),
-      )
-
-      // Event live explain sync - Matchday snapshots
-      .use(
-        cron({
-          name: 'event-live-explain-sync',
-          pattern: '8 6,8,10 * * *',
-          async run() {
-            logInfo('Cron job started: event-live-explain-sync');
-            try {
-              await runEventLiveExplainSync();
-              logInfo('Cron job completed: event-live-explain-sync');
-            } catch (error) {
-              logError('Cron job failed: event-live-explain-sync', error);
-            }
-          },
-        }),
-      )
-
-      // Event overall result sync - Matchday snapshots
-      .use(
-        cron({
-          name: 'event-overall-result-sync',
-          pattern: '2 6,8,10 * * *',
-          async run() {
-            logInfo('Cron job started: event-overall-result-sync');
-            try {
-              await runEventOverallResultSync();
-              logInfo('Cron job completed: event-overall-result-sync');
-            } catch (error) {
-              logError('Cron job failed: event-overall-result-sync', error);
+              logError('Cron trigger failed: event-lives-db-sync', error);
             }
           },
         }),
@@ -223,7 +144,7 @@ export function registerLiveJobs(app: Elysia) {
       .use(
         cron({
           name: 'live-scores',
-          pattern: '*/15 * * * *', // Every 15 minutes
+          pattern: '*/15 * * * *',
           async run() {
             logInfo('Cron job started: live-scores');
             try {

@@ -2,7 +2,6 @@ import { phasesCache } from '../cache/operations';
 import { fplClient } from '../clients/fpl';
 import { phaseRepository } from '../repositories/phases';
 import { transformPhases } from '../transformers/phases';
-import type { Phase } from '../types';
 import { logError, logInfo } from '../utils/logger';
 
 /**
@@ -10,82 +9,8 @@ import { logError, logInfo } from '../utils/logger';
  *
  * Handles all phase-related operations:
  * - Data synchronization from FPL API
- * - Cache management
  * - Database operations
- * - Data retrieval with fallbacks
  */
-
-// Get all phases (cache-first strategy: Redis → DB → update Redis)
-export async function getPhases(): Promise<Phase[]> {
-  try {
-    logInfo('Getting all phases');
-
-    // 1. Try cache first (fast path)
-    const cached = await phasesCache.getAll();
-    if (cached) {
-      logInfo('Phases retrieved from cache', { count: cached.length });
-      return cached;
-    }
-
-    // 2. Cache miss - fallback to database
-    logInfo('Cache miss - fetching from database');
-    const dbPhases = await phaseRepository.findAll();
-
-    // 3. Update cache for next time (async, don't block response)
-    if (dbPhases.length > 0) {
-      phasesCache.set(dbPhases).catch((error) => {
-        logError('Failed to update phases cache', error);
-      });
-    }
-
-    logInfo('Phases retrieved from database', { count: dbPhases.length });
-    return dbPhases;
-  } catch (error) {
-    logError('Failed to get phases', error);
-    throw error;
-  }
-}
-
-// Get single phase by ID (cache-first strategy: Redis → DB → update Redis)
-export async function getPhase(id: number): Promise<Phase | null> {
-  try {
-    logInfo('Getting phase by id', { id });
-
-    // 1. Try cache first (fast path)
-    const cached = await phasesCache.getById(id);
-    if (cached) {
-      logInfo('Phase retrieved from cache', { id, name: cached.name });
-      return cached;
-    }
-
-    // 2. Cache miss - fallback to database
-    logInfo('Cache miss - fetching from database', { id });
-    const phase = await phaseRepository.findById(id);
-
-    if (phase) {
-      // 3. Update cache for next time (async, don't block response)
-      phasesCache.getAll().then((allPhases) => {
-        if (!allPhases) {
-          // If full cache doesn't exist, fetch all and cache
-          phaseRepository.findAll().then((dbPhases) => {
-            phasesCache.set(dbPhases).catch((error) => {
-              logError('Failed to update phases cache', error);
-            });
-          });
-        }
-      });
-
-      logInfo('Phase found in database', { id, name: phase.name });
-    } else {
-      logInfo('Phase not found', { id });
-    }
-
-    return phase;
-  } catch (error) {
-    logError('Failed to get phase', error, { id });
-    throw error;
-  }
-}
 
 // Sync phases from FPL API
 export async function syncPhases(): Promise<{ count: number; errors: number }> {
@@ -136,18 +61,6 @@ export async function syncPhases(): Promise<{ count: number; errors: number }> {
     return result;
   } catch (error) {
     logError('Phases sync failed', error);
-    throw error;
-  }
-}
-
-// Clear phases cache
-export async function clearPhasesCache(): Promise<void> {
-  try {
-    logInfo('Clearing phases cache');
-    await phasesCache.clear();
-    logInfo('Phases cache cleared');
-  } catch (error) {
-    logError('Failed to clear phases cache', error);
     throw error;
   }
 }

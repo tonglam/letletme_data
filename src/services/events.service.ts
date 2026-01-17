@@ -3,91 +3,23 @@ import { fplClient } from '../clients/fpl';
 import { eventRepository } from '../repositories/events';
 import { transformEvents } from '../transformers/events';
 import type { Event } from '../types';
-import { logError, logInfo } from '../utils/logger';
+import { logError, logInfo, logWarn } from '../utils/logger';
+
+type EventValidationIssue = {
+  eventId: number;
+  issues: string[];
+};
 
 /**
  * Events Service - Business Logic Layer
  *
  * Handles all event-related operations:
  * - Data synchronization from FPL API
- * - Cache management
  * - Database operations
- * - Data retrieval with fallbacks
+ * - Current/next event retrieval with fallbacks
  */
 
-// Get all events (cache-first strategy: Redis → DB → update Redis)
-export async function getEvents(): Promise<Event[]> {
-  try {
-    logInfo('Getting all events');
-
-    // 1. Try cache first (fast path)
-    const cached = await eventsCache.getAll();
-    if (cached) {
-      logInfo('Events retrieved from cache', { count: cached.length });
-      return cached;
-    }
-
-    // 2. Cache miss - fallback to database
-    logInfo('Cache miss - fetching from database');
-    const dbEvents = await eventRepository.findAll();
-
-    // 3. Update cache for next time (async, don't block response)
-    if (dbEvents.length > 0) {
-      eventsCache.set(dbEvents).catch((error) => {
-        logError('Failed to update events cache', error);
-      });
-    }
-
-    logInfo('Events retrieved from database', { count: dbEvents.length });
-    return dbEvents;
-  } catch (error) {
-    logError('Failed to get events', error);
-    throw error;
-  }
-}
-
-// Get single event by ID (cache-first strategy: Redis → DB → update Redis)
-export async function getEvent(id: number): Promise<Event | null> {
-  try {
-    logInfo('Getting event by id', { id });
-
-    // 1. Try cache first (fast path)
-    const cached = await eventsCache.getById(id);
-    if (cached) {
-      logInfo('Event retrieved from cache', { id });
-      return cached;
-    }
-
-    // 2. Cache miss - fallback to database
-    logInfo('Cache miss - fetching from database', { id });
-    const event = await eventRepository.findById(id);
-
-    if (event) {
-      // 3. Update cache for next time (async, don't block response)
-      eventsCache.getAll().then((allEvents) => {
-        if (!allEvents) {
-          // If full cache doesn't exist, fetch all and cache
-          eventRepository.findAll().then((dbEvents) => {
-            eventsCache.set(dbEvents).catch((error) => {
-              logError('Failed to update events cache', error);
-            });
-          });
-        }
-      });
-
-      logInfo('Event found in database', { id });
-    } else {
-      logInfo('Event not found', { id });
-    }
-
-    return event;
-  } catch (error) {
-    logError('Failed to get event', error, { id });
-    throw error;
-  }
-}
-
-// Get current event (cache-first strategy: Redis → DB → update Redis)
+// Get current event (cache-first strategy: Redis → DB fallback)
 export async function getCurrentEvent(): Promise<Event | null> {
   try {
     logInfo('Getting current event');
@@ -104,17 +36,6 @@ export async function getCurrentEvent(): Promise<Event | null> {
     const event = await eventRepository.findCurrent();
 
     if (event) {
-      // 3. Update cache for next time (async, don't block response)
-      eventsCache.getAll().then((allEvents) => {
-        if (!allEvents) {
-          eventRepository.findAll().then((dbEvents) => {
-            eventsCache.set(dbEvents).catch((error) => {
-              logError('Failed to update events cache', error);
-            });
-          });
-        }
-      });
-
       logInfo('Current event found in database', { id: event.id });
     } else {
       logInfo('No current event found');
@@ -127,7 +48,7 @@ export async function getCurrentEvent(): Promise<Event | null> {
   }
 }
 
-// Get next event (cache-first strategy: Redis → DB → update Redis)
+// Get next event (cache-first strategy: Redis → DB fallback)
 export async function getNextEvent(): Promise<Event | null> {
   try {
     logInfo('Getting next event');
@@ -144,17 +65,6 @@ export async function getNextEvent(): Promise<Event | null> {
     const event = await eventRepository.findNext();
 
     if (event) {
-      // 3. Update cache for next time (async, don't block response)
-      eventsCache.getAll().then((allEvents) => {
-        if (!allEvents) {
-          eventRepository.findAll().then((dbEvents) => {
-            eventsCache.set(dbEvents).catch((error) => {
-              logError('Failed to update events cache', error);
-            });
-          });
-        }
-      });
-
       logInfo('Next event found in database', { id: event.id });
     } else {
       logInfo('No next event found');
@@ -168,7 +78,11 @@ export async function getNextEvent(): Promise<Event | null> {
 }
 
 // Sync events from FPL API
-export async function syncEvents(): Promise<{ count: number; errors: number }> {
+export async function syncEvents(): Promise<{
+  count: number;
+  errors: number;
+  warningCount: number;
+}> {
   try {
     logInfo('Starting events sync from FPL API');
     const syncStart = Date.now();
@@ -185,14 +99,48 @@ export async function syncEvents(): Promise<{ count: number; errors: number }> {
 
     logInfo('Raw events data fetched', { count: bootstrapData.events.length });
 
+    const validationIssues: EventValidationIssue[] = [];
+
+    for (const event of bootstrapData.events) {
+      const issues: string[] = [];
+      if (!Number.isInteger(event.id) || event.id < 1) {
+        issues.push('id');
+      }
+
+      if (typeof event.name !== 'string' || event.name.trim().length === 0) {
+        issues.push('name');
+      }
+
+      if (event.deadline_time) {
+        const deadline = new Date(event.deadline_time);
+        if (Number.isNaN(deadline.getTime())) {
+          issues.push('deadline_time');
+        }
+      }
+
+      if (issues.length > 0) {
+        validationIssues.push({ eventId: event.id, issues });
+      }
+    }
+
+    if (validationIssues.length > 0) {
+      logWarn('Events sync validation warnings', {
+        issueCount: validationIssues.length,
+        sample: validationIssues.slice(0, 5),
+      });
+    }
+
     // 2. Transform to domain events
     const transformStart = Date.now();
     const events = transformEvents(bootstrapData.events);
     const transformDuration = Date.now() - transformStart;
+    const transformErrors = bootstrapData.events.length - events.length;
+
     logInfo('Events transformed', {
       total: bootstrapData.events.length,
       successful: events.length,
-      errors: bootstrapData.events.length - events.length,
+      transformErrors,
+      validationWarnings: validationIssues.length,
       durationMs: transformDuration,
     });
 
@@ -211,7 +159,8 @@ export async function syncEvents(): Promise<{ count: number; errors: number }> {
 
     const result = {
       count: savedEvents.length,
-      errors: bootstrapData.events.length - events.length,
+      errors: transformErrors + validationIssues.length,
+      warningCount: validationIssues.length,
     };
 
     logInfo('Events sync completed successfully', {
@@ -221,18 +170,6 @@ export async function syncEvents(): Promise<{ count: number; errors: number }> {
     return result;
   } catch (error) {
     logError('Events sync failed', error);
-    throw error;
-  }
-}
-
-// Clear events cache
-export async function clearEventsCache(): Promise<void> {
-  try {
-    logInfo('Clearing events cache');
-    await eventsCache.clear();
-    logInfo('Events cache cleared');
-  } catch (error) {
-    logError('Failed to clear events cache', error);
     throw error;
   }
 }

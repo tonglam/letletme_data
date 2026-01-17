@@ -6,8 +6,10 @@
 - ✅ `teams-sync`: daily 06:40 (`40 6 * * *`) via data sync queue.
 - ✅ `players-sync`: daily 06:43 (`43 6 * * *`) via data sync queue.
 - ✅ `phases-sync`: daily 06:45 (`45 6 * * *`) via data sync queue.
-- ✅ `player-values-sync`: daily 09:30 (`30 9 * * *`) via data sync queue.
 - ✅ `player-stats-sync`: daily 09:40 (`40 9 * * *`) via data sync queue.
+
+## Player Values Poller
+- ✅ `player-values-sync`: 09:25-09:35 every minute (`25-35 9 * * *`), stops once the day’s price changes have been stored.
 
 ## Entry **Jobs**
 - ✅ `entry-info-daily`: daily 10:30 (`30 10 * * *`) via entry sync queue.

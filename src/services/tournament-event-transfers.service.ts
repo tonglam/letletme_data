@@ -49,14 +49,10 @@ function pickElements(picks: RawFPLEntryEventPickItem[], chip: string | null): S
   if (chip === 'bboost') {
     return new Set(picks.map((pick) => pick.element));
   }
-  return new Set(
-    picks.filter((pick) => pick.position <= 11).map((pick) => pick.element),
-  );
+  return new Set(picks.filter((pick) => pick.position <= 11).map((pick) => pick.element));
 }
 
-export async function syncTournamentEventTransfersPost(
-  eventId: number,
-): Promise<{
+export async function syncTournamentEventTransfersPost(eventId: number): Promise<{
   eventId: number;
   totalEntries: number;
   updated: number;
@@ -97,13 +93,9 @@ export async function syncTournamentEventTransfersPost(
   ]);
 
   if (entryResults.length === 0) {
-    logError(
-      'Entry event results missing for tournament transfers',
-      new Error('No results'),
-      {
-        eventId,
-      },
-    );
+    logError('Entry event results missing for tournament transfers', new Error('No results'), {
+      eventId,
+    });
     return {
       eventId,
       totalEntries: entryIds.length,
@@ -114,13 +106,9 @@ export async function syncTournamentEventTransfersPost(
   }
 
   if (eventLives.length === 0) {
-    logError(
-      'Event live data missing for tournament transfers',
-      new Error('No event lives'),
-      {
-        eventId,
-      },
-    );
+    logError('Event live data missing for tournament transfers', new Error('No event lives'), {
+      eventId,
+    });
     return {
       eventId,
       totalEntries: entryIds.length,
@@ -131,13 +119,9 @@ export async function syncTournamentEventTransfersPost(
   }
 
   if (transfers.length === 0) {
-    logError(
-      'Entry event transfers missing for tournament transfers',
-      new Error('No transfers'),
-      {
-        eventId,
-      },
-    );
+    logError('Entry event transfers missing for tournament transfers', new Error('No transfers'), {
+      eventId,
+    });
     return {
       eventId,
       totalEntries: entryIds.length,
@@ -147,12 +131,8 @@ export async function syncTournamentEventTransfersPost(
     };
   }
 
-  const entryResultMap = new Map(
-    entryResults.map((result) => [result.entryId, result]),
-  );
-  const pointsMap = new Map(
-    eventLives.map((live) => [live.elementId, live.totalPoints]),
-  );
+  const entryResultMap = new Map(entryResults.map((result) => [result.entryId, result]));
+  const pointsMap = new Map(eventLives.map((live) => [live.elementId, live.totalPoints]));
   const transferMap = new Map<number, DbEntryEventTransfer[]>();
   for (const transfer of transfers) {
     const list = transferMap.get(transfer.entryId) ?? [];
