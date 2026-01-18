@@ -1,0 +1,31 @@
+# Node / Bun artifacts
+node_modules
+bun.lockb
+
+# Build outputs
+build
+dist
+
+# VCS
+.git
+.gitignore
+.github
+
+# IDE/editor
+.vscode
+.idea
+*.iml
+
+# Logs & temp
+logs
+*.log
+coverage
+
+# Environment files
+.env
+.env.*
+.env.production
+.env.deploy
+
+# Misc
+.DS_Store

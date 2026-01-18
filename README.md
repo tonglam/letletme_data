@@ -217,3 +217,14 @@ graph TB
 ```
 
 Each domain follows a standard structure with entities, repositories, services, and types, ensuring clear separation of concerns and maintainable code. For detailed design documentation, please refer to the design docs.
+
+## Deployment
+
+- The production stack runs inside Docker containers orchestrated by `docker compose`; copy `.env.deploy.example` to `.env.deploy`, then run `scripts/deploy.sh` to build images, start services, and execute database migrations locally or on the VPS.
+- Continuous delivery is handled via GitHub Actions (`.github/workflows/deploy.yml`), which builds a container image, pushes it to GHCR, and refreshes the VPS stack using the same compose file.
+- Refer to `DEPLOYMENT.md` and `docs/deployment-plan.md` for the full checklist, required GitHub secrets, and the legacy manual instructions kept for break-glass scenarios.
+
+## Testing
+
+- Run `bun test tests/unit` for the fast, deterministic suite that validates transformers, repositories, and utilities (this is what the CI workflow executes).
+- Run `bun test tests/integration` locally before production releases; these tests require external services (PostgreSQL, Redis, Bull queues, live FPL responses) and are intentionally skipped in CI/CD.

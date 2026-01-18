@@ -1,4 +1,44 @@
-# Manual Deployment Guide - Linux Server
+# Deployment Guide
+
+## Modern Flow (Docker + GitHub Actions)
+The production stack now runs inside Docker containers orchestrated by `docker compose` and refreshed automatically from GitHub Actions:
+
+1. `.github/workflows/ci.yml` runs linting, tests, and builds on every push/PR.
+2. `.github/workflows/deploy.yml` builds a Bun image on merges to `main`, pushes it to GHCR, and SSHes into the VPS to pull the image, restart the compose stack, and execute database migrations from within the API container.
+3. The VPS only needs Docker, the compose file, and a `.env.deploy` containing secrets—no manual Bun builds or systemd restarts.
+
+## Host Bootstrap Checklist
+1. **Install Docker + compose** following https://docs.docker.com/engine/install/ubuntu/ then add the `deploy` user to the `docker` group and re-login.
+2. **Clone the repo** into `/home/workspace/letletme_data` (or another directory referenced by `VPS_WORKDIR`).
+3. **Create `.env.deploy`** by copying `.env.deploy.example` and populate `DATABASE_URL`, `REDIS_*`, `SUPABASE_*`, etc. Keep this file on the server only.
+4. **First deploy**: run `bash scripts/deploy.sh deploy` to build the image, start services via compose, and run `bun run db:migrate`.
+5. **Proxy + hardening**: terminate TLS in Nginx/Caddy, forward to `127.0.0.1:3000`, lock Redis to the container/local network, and enable ufw.
+
+> ℹ️ **Testing note**: GitHub Actions executes only the unit test suite (no external services required). Run the integration tests locally (`bun test tests/integration`) as part of pre-release validation whenever the external dependencies are available.
+
+## GitHub Actions Secrets
+Add the following repository secrets so the deploy workflow can push images and SSH into the VPS:
+
+| Secret | Description |
+| --- | --- |
+| `GHCR_TOKEN` | Personal access token with `read:packages` + `write:packages` (used for pushing/pulling the container). |
+| `VPS_HOST` | Public IP / hostname for the VPS (e.g., `43.163.91.9`). |
+| `VPS_USER` | SSH user with Docker permissions (e.g., `deploy`). |
+| `VPS_SSH_KEY` | Private key that grants access to `VPS_USER`. |
+| `VPS_WORKDIR` | Absolute path containing `docker-compose.yml` on the server. |
+
+The workflow exports `APP_IMAGE=$IMAGE_REF` before running `docker compose pull/up`, ensuring the compose stack always references the freshly pushed GHCR tag.
+
+## Helpful Commands
+- `scripts/deploy.sh deploy` – build locally and run the compose stack with migrations.
+- `scripts/deploy.sh status` – `docker compose ps` summary.
+- `scripts/deploy.sh logs api` – follow logs for a specific service.
+- `docker compose run --rm -T api bun run db:migrate` – one-off migration run if needed.
+
+## Legacy Manual Deployment (Break Glass)
+The original bare-metal guide is retained below for emergencies when Docker/CI/CD are unavailable.
+
+### Manual Deployment Guide - Linux Server
 
 This guide covers deploying the FPL data service directly on a Linux server without Docker.
 

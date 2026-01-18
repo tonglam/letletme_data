@@ -1,0 +1,70 @@
+name: Deploy
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      REGISTRY: ghcr.io
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set image metadata
+        run: |
+          IMAGE_NAME=$(echo "${REGISTRY}/${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')
+          echo "IMAGE_NAME=${IMAGE_NAME}" >> $GITHUB_ENV
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GHCR_TOKEN }}
+
+      - name: Build and push image
+        run: |
+          docker buildx build \
+            --platform linux/amd64 \
+            --tag ${IMAGE_NAME}:${GITHUB_SHA} \
+            --tag ${IMAGE_NAME}:latest \
+            --push .
+          echo "IMAGE_REF=${IMAGE_NAME}:${GITHUB_SHA}" >> $GITHUB_ENV
+
+      - name: Add VPS to known_hosts
+        run: ssh-keyscan -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Deploy on VPS
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          IMAGE_REF: ${{ env.IMAGE_REF }}
+          GHCR_USER: ${{ github.repository_owner }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+          VPS_WORKDIR: ${{ secrets.VPS_WORKDIR }}
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script_stop: true
+          envs: IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR
+          script: |
+            set -euo pipefail
+            LOWER_USER=$(echo "$GHCR_USER" | tr '[:upper:]' '[:lower:]')
+            docker login ghcr.io -u "$LOWER_USER" -p "$GHCR_TOKEN"
+            cd "$VPS_WORKDIR"
+            git fetch --all
+            git reset --hard origin/main
+            APP_IMAGE="$IMAGE_REF" docker compose pull api worker || true
+            APP_IMAGE="$IMAGE_REF" docker compose up -d --remove-orphans
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun run db:migrate
+            APP_IMAGE="$IMAGE_REF" docker compose ps

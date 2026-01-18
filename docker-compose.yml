@@ -1,0 +1,51 @@
+x-app-image: &app-image ${APP_IMAGE:-letletme-data:local}
+
+services:
+  api:
+    image: *app-image
+    build:
+      context: .
+      target: runner
+    command: bun dist/index.js
+    env_file: .env.deploy
+    ports:
+      - "3000:3000"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  worker:
+    image: *app-image
+    build:
+      context: .
+      target: runner
+    command: bun dist/worker.js
+    env_file: .env.deploy
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4-alpine
+    env_file:
+      - .env.deploy
+    command: ["sh", "-c", "exec redis-server --requirepass \"$${REDIS_PASSWORD:-changeme}\""]
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "sh", "-c", "redis-cli -a \"$${REDIS_PASSWORD:-changeme}\" PING"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  redis-data:
