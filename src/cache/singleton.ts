@@ -172,18 +172,26 @@ export const DEFAULT_CACHE_CONFIG: CacheConfig = {
 
 // Cache TTL configurations for different data types
 export const CACHE_TTL = {
-  EVENTS: 3600, // 1 hour
-  TEAMS: 86400, // 24 hours
-  PHASES: 86400, // 24 hours (phases change rarely)
-  PLAYERS: 3600, // 1 hour
-  FIXTURES: 1800, // 30 minutes
-  LIVE_DATA: 60, // 1 minute
+  // Basic/Static Data - Long TTL (7-30 days)
+  EVENTS: 604800, // 7 days
+  TEAMS: 2592000, // 30 days (rarely change mid-season)
+  PHASES: 2592000, // 30 days (rarely change)
+  PLAYERS: 86400, // 24 hours (updates more frequently)
+  
+  // Game Data - Moderate TTL (2-6 hours)
+  FIXTURES: 21600, // 6 hours
+  PLAYER_STATS: 7200, // 2 hours
+  player_values: 7200, // 2 hours
+  
+  // Live Match Data - Short TTL (2 minutes)
   EVENT_LIVE: 120, // 2 minutes (live data updates frequently during matches)
-  EVENT_LIVE_SUMMARY: 86400, // 24 hours (season-to-date summary)
   EVENT_LIVE_EXPLAIN: 120, // 2 minutes (live explain data updates frequently during matches)
+  LIVE_DATA: 60, // 1 minute
+  
+  // Aggregated/Historical Data - Long TTL (24 hours)
+  EVENT_LIVE_SUMMARY: 86400, // 24 hours (season-to-date summary)
   EVENT_OVERALL_RESULT: 86400, // 24 hours
   EVENT_STANDINGS: 86400, // 24 hours
-  player_values: 7200, // 2 hours (player values change relatively slowly)
 } as const;
 
 // Convenience export for backward compatibility

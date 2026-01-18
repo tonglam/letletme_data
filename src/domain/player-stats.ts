@@ -39,6 +39,10 @@ export interface PlayerStat {
   readonly bonus: number | null;
   readonly bps: number | null;
   readonly starts: number | null;
+  readonly transfersIn: number | null;
+  readonly transfersInEvent: number | null;
+  readonly transfersOut: number | null;
+  readonly transfersOutEvent: number | null;
   readonly influenceRank: number | null;
   readonly influenceRankType: number | null;
   readonly creativityRank: number | null;
@@ -105,6 +109,10 @@ export const PlayerStatSchema = z.object({
   bonus: z.number().int().min(0, 'Bonus cannot be negative').nullable(),
   bps: z.number().int().nullable(),
   starts: z.number().int().min(0, 'Starts cannot be negative').nullable(),
+  transfersIn: z.number().int().min(0, 'Transfers in cannot be negative').nullable(),
+  transfersInEvent: z.number().int().min(0, 'Transfers in event cannot be negative').nullable(),
+  transfersOut: z.number().int().min(0, 'Transfers out cannot be negative').nullable(),
+  transfersOutEvent: z.number().int().min(0, 'Transfers out event cannot be negative').nullable(),
   influenceRank: z.number().int().positive('Influence rank must be positive').nullable(),
   influenceRankType: z.number().int().positive('Influence rank type must be positive').nullable(),
   creativityRank: z.number().int().positive('Creativity rank must be positive').nullable(),

@@ -54,6 +54,8 @@ export async function syncCurrentPlayerValues(): Promise<{ count: number }> {
 
   if (playersWithChanges.length === 0) {
     logInfo('No player price changes detected today');
+    // Clear cache for today if no changes (in case there was old data)
+    await playerValuesCache.clear(today);
     return { count: 0 };
   }
 
@@ -68,9 +70,10 @@ export async function syncCurrentPlayerValues(): Promise<{ count: number }> {
 
   const result = await playerValuesRepository.insertBatch(playerValues);
 
+  // Cache only the player values that changed on this date
   if (result.count > 0) {
-    await playerValuesCache.setByDate(today, playerValues);
-    logInfo('Player values cache updated for date', { changeDate: today, count: result.count });
+    await playerValuesCache.set(today, playerValues);
+    logInfo('Player values cache updated', { changeDate: today, count: playerValues.length });
   }
 
   logInfo('Daily player values sync completed', {

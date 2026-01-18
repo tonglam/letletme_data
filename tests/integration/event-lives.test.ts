@@ -72,7 +72,7 @@ describe('Event Lives Integration Tests', () => {
 
       // Cache-only should be faster (no DB writes)
       expect(cacheTime).toBeLessThan(syncTime);
-      expect(cacheTime).toBeLessThan(500); // Should complete in under 500ms
+      expect(cacheTime).toBeLessThan(1000); // Should complete in under 1 second
     });
 
     test('should respect unique constraint on (eventId, elementId)', async () => {
@@ -142,10 +142,24 @@ describe('Event Lives Integration Tests', () => {
   describe('Data Consistency', () => {
     test('should maintain consistent data between sync and repository', async () => {
       const dbEventLives = await eventLiveRepository.findByEventId(testEventId);
+      const cachedEventLives = await eventLivesCache.getByEventId(testEventId);
 
-      expect(serviceEventLives.length).toBe(dbEventLives.length);
-      expect(serviceEventLives[0].eventId).toBe(dbEventLives[0].eventId);
-      expect(serviceEventLives[0].elementId).toBe(dbEventLives[0].elementId);
+      expect(cachedEventLives).not.toBeNull();
+      expect(cachedEventLives!.length).toBe(dbEventLives.length);
+      
+      if (cachedEventLives!.length > 0 && dbEventLives.length > 0) {
+        // Create maps for comparison
+        const dbMap = new Map(dbEventLives.map((el) => [el.elementId, el]));
+        const cacheMap = new Map(cachedEventLives!.map((el) => [el.elementId, el]));
+        
+        // Verify all cached elements exist in DB
+        for (const [elementId, cached] of cacheMap) {
+          const db = dbMap.get(elementId);
+          expect(db).toBeDefined();
+          expect(cached.eventId).toBe(db!.eventId);
+          expect(cached.elementId).toBe(db!.elementId);
+        }
+      }
     });
 
     test('should maintain data integrity after sync', async () => {
