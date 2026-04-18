@@ -1,12 +1,25 @@
 name: Deploy
 
 on:
-  push:
-    branches: ["main"]
+  workflow_run:
+    workflows: ['CI']
+    types: [completed]
+    branches: ['main']
   workflow_dispatch:
+
+concurrency:
+  group: deploy-main
+  cancel-in-progress: true
 
 jobs:
   deploy:
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event_name == 'workflow_run' &&
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.head_branch == 'main'
+      )
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -14,12 +27,25 @@ jobs:
     env:
       REGISTRY: ghcr.io
     steps:
-      - name: Checkout
+      - name: Checkout workflow run commit
+        if: github.event_name == 'workflow_run'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Checkout manual dispatch ref
+        if: github.event_name == 'workflow_dispatch'
         uses: actions/checkout@v4
 
-      - name: Set image metadata
+      - name: Set deployment metadata
         run: |
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            DEPLOY_SHA="${{ github.event.workflow_run.head_sha }}"
+          else
+            DEPLOY_SHA="${GITHUB_SHA}"
+          fi
           IMAGE_NAME=$(echo "${REGISTRY}/${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')
+          echo "DEPLOY_SHA=${DEPLOY_SHA}" >> $GITHUB_ENV
           echo "IMAGE_NAME=${IMAGE_NAME}" >> $GITHUB_ENV
 
       - name: Set up Docker Buildx
@@ -36,10 +62,10 @@ jobs:
         run: |
           docker buildx build \
             --platform linux/amd64 \
-            --tag ${IMAGE_NAME}:${GITHUB_SHA} \
+            --tag ${IMAGE_NAME}:${DEPLOY_SHA} \
             --tag ${IMAGE_NAME}:latest \
             --push .
-          echo "IMAGE_REF=${IMAGE_NAME}:${GITHUB_SHA}" >> $GITHUB_ENV
+          echo "IMAGE_REF=${IMAGE_NAME}:${DEPLOY_SHA}" >> $GITHUB_ENV
 
       - name: Add VPS to known_hosts
         run: ssh-keyscan -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts
@@ -47,6 +73,7 @@ jobs:
       - name: Deploy on VPS
         uses: appleboy/ssh-action@v1.2.0
         env:
+          DEPLOY_SHA: ${{ env.DEPLOY_SHA }}
           IMAGE_REF: ${{ env.IMAGE_REF }}
           GHCR_USER: ${{ github.repository_owner }}
           GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
@@ -56,15 +83,17 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           script_stop: true
-          envs: IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR
+          envs: DEPLOY_SHA,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR
           script: |
             set -euo pipefail
             LOWER_USER=$(echo "$GHCR_USER" | tr '[:upper:]' '[:lower:]')
             docker login ghcr.io -u "$LOWER_USER" -p "$GHCR_TOKEN"
             cd "$VPS_WORKDIR"
             git fetch --all
-            git reset --hard origin/main
-            APP_IMAGE="$IMAGE_REF" docker compose pull api worker || true
-            APP_IMAGE="$IMAGE_REF" docker compose up -d --remove-orphans
+            git checkout --force main
+            git reset --hard "$DEPLOY_SHA"
+            APP_IMAGE="$IMAGE_REF" docker compose pull api worker
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun run db:migrate
+            APP_IMAGE="$IMAGE_REF" docker compose up -d --remove-orphans --no-build
+            curl --fail --silent http://127.0.0.1/health >/dev/null
             APP_IMAGE="$IMAGE_REF" docker compose ps
