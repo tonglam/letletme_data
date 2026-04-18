@@ -97,5 +97,16 @@ jobs:
             APP_IMAGE="$IMAGE_REF" docker compose pull api worker
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun run db:migrate
             APP_IMAGE="$IMAGE_REF" docker compose up -d --remove-orphans --no-build
-            curl --fail --silent http://127.0.0.1/health >/dev/null
+            for attempt in $(seq 1 30); do
+              if curl --fail --silent http://127.0.0.1/health >/dev/null; then
+                break
+              fi
+              if [ "$attempt" -eq 30 ]; then
+                echo "Health check failed after waiting for startup"
+                APP_IMAGE="$IMAGE_REF" docker compose ps
+                docker logs --tail 100 letletme_data-api-1 || true
+                exit 1
+              fi
+              sleep 2
+            done
             APP_IMAGE="$IMAGE_REF" docker compose ps
