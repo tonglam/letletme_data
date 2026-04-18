@@ -74,6 +74,10 @@ jobs:
           IMAGE_REF: ${{ env.IMAGE_REF }}
           GHCR_USER: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Expected deployment secrets:
+          # VPS_HOST=43.163.91.9
+          # VPS_USER=deploy
+          # VPS_WORKDIR=/home/workspace/letletme_data
           VPS_WORKDIR: ${{ secrets.VPS_WORKDIR }}
         with:
           host: ${{ secrets.VPS_HOST }}
