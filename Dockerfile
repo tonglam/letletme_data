@@ -33,7 +33,9 @@ COPY --from=build /app/validate-env.ts ./
 COPY --from=build /app/tsconfig.json ./
 
 RUN groupadd -g 1001 appuser \
-    && useradd -r -u 1001 -g appuser appuser
+    && useradd -r -u 1001 -g appuser appuser \
+    && mkdir -p /app/logs \
+    && chown -R appuser:appuser /app
 USER appuser
 
 EXPOSE 3000
