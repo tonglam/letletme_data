@@ -27,32 +27,12 @@ import {
   runTournamentEventTransfersPreSync,
 } from '../jobs/tournament-event-transfers.jobs';
 import { runTournamentInfoSync } from '../jobs/tournament-info.jobs';
+import { runLiveScores, runPostMatchConsolidation } from '../jobs/live.jobs';
 import { runTournamentKnockoutResultsSync } from '../jobs/tournament-knockout-results.jobs';
 import { runTournamentPointsRaceResultsSync } from '../jobs/tournament-points-race-results.jobs';
 import { getCurrentEvent } from '../services/events.service';
 import { getErrorMessage } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
-
-// Job business logic functions (will be moved to jobs/ later)
-import { getCurrentGameweek, isFPLSeason, isMatchHours, isWeekend } from '../utils/conditions';
-
-async function runLiveScores() {
-  const now = new Date();
-  const shouldRun = isWeekend(now) && isFPLSeason(now) && isMatchHours(now);
-
-  if (!shouldRun) {
-    logInfo('Skipping live scores - conditions not met', {
-      isWeekend: isWeekend(now),
-      isFPLSeason: isFPLSeason(now),
-      isMatchHours: isMatchHours(now),
-    });
-    return;
-  }
-
-  logInfo('Live scores sync started', { gameweek: getCurrentGameweek(now) });
-  // TODO: Implement live scores logic
-  logInfo('Live scores sync completed (placeholder)');
-}
 
 /**
  * Jobs Management API Routes
@@ -180,12 +160,12 @@ export const jobsAPI = new Elysia({ prefix: '/jobs' })
         description: 'Sync event overall results (cascaded from DB sync)',
         schedule: 'Cascade after DB sync',
       },
-      {
-        name: 'event-standings-sync',
-        description: 'Sync Premier League standings after matchday',
-        schedule: 'Daily 12:00 (post-matchday)',
-      },
       { name: 'live-scores', description: 'Update live scores', schedule: 'Every 15 minutes' },
+      {
+        name: 'post-match-consolidation',
+        description: 'Catch FPL overnight data finalization (bonus, corrected scores)',
+        schedule: '06:00, 08:00, 10:00 on match days',
+      },
     ];
 
     return { success: true, jobs, count: jobs.length };
@@ -271,6 +251,7 @@ export const jobsAPI = new Elysia({ prefix: '/jobs' })
         await enqueueEventOverallResult(currentEvent.id, 'manual');
       },
       'live-scores': runLiveScores,
+      'post-match-consolidation': runPostMatchConsolidation,
     };
 
     const job = jobMap[name];

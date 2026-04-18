@@ -8,7 +8,7 @@ import type {
 import { logError, logInfo } from '../utils/logger';
 
 type ChipPlayRecord = { chip_name?: unknown; num_played?: unknown };
-type TopElementRecord = { id?: unknown; points?: unknown };
+type TopElementRecord = { id?: unknown; element?: unknown; points?: unknown };
 
 function isChipPlayRecord(value: unknown): value is ChipPlayRecord {
   return Boolean(value) && typeof value === 'object';
@@ -38,7 +38,7 @@ function parseTopElementInfo(raw: unknown): EventTopElementData | null {
   }
 
   const record = raw as TopElementRecord;
-  const element = toNumber(record.id);
+  const element = toNumber(record.element ?? record.id);
   const points = toNumber(record.points);
   if (element === null || points === null) {
     return null;

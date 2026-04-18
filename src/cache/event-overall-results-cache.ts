@@ -49,7 +49,10 @@ export const eventOverallResultCache = {
 
       await redis.del(key);
       await redis.hset(key, hashData);
-      await redis.expire(key, CACHE_TTL.EVENT_OVERALL_RESULT);
+      // Only set expiration if TTL > 0 (TTL -1 means no expiration)
+      if (CACHE_TTL.EVENT_OVERALL_RESULT > 0) {
+        await redis.expire(key, CACHE_TTL.EVENT_OVERALL_RESULT);
+      }
 
       logInfo('Event overall results cached', { count: results.length });
     } catch (error) {

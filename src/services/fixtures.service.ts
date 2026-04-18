@@ -160,6 +160,36 @@ export async function syncAllGameweeks(): Promise<{
   }
 }
 
+// Sync live match scores for in-progress fixtures only (runs every 15 min during matches)
+// Distinct from syncFixtures: targets only started+unfinished fixtures, no cache update
+export async function syncLiveScores(eventId: number): Promise<{ updated: number }> {
+  try {
+    logInfo('Starting live scores sync', { eventId });
+
+    const rawFixtures = await fplClient.getFixtures(eventId);
+
+    if (!Array.isArray(rawFixtures)) {
+      throw new Error('Invalid fixtures data from FPL API');
+    }
+
+    const inProgress = rawFixtures.filter((f) => f.started === true && f.finished === false);
+
+    if (inProgress.length === 0) {
+      logInfo('No in-progress fixtures to sync', { eventId });
+      return { updated: 0 };
+    }
+
+    const fixtures = transformFixtures(inProgress);
+    const saved = await fixtureRepository.upsertBatch(fixtures);
+
+    logInfo('Live scores synced', { eventId, updated: saved.length });
+    return { updated: saved.length };
+  } catch (error) {
+    logError('Live scores sync failed', error, { eventId });
+    throw error;
+  }
+}
+
 // Clear fixtures cache
 export async function clearFixturesCache(): Promise<void> {
   try {

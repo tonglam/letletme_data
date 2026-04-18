@@ -55,7 +55,10 @@ export const eventLivesCache = {
       // Clear existing hash and set new data
       await redis.del(key);
       await redis.hset(key, hashData);
-      await redis.expire(key, CACHE_TTL.EVENT_LIVE);
+      // Only set expiration if TTL > 0 (TTL -1 means no expiration)
+      if (CACHE_TTL.EVENT_LIVE > 0) {
+        await redis.expire(key, CACHE_TTL.EVENT_LIVE);
+      }
 
       logInfo('Event lives cached', { eventId, count: eventLives.length });
     } catch (error) {

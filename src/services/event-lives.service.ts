@@ -5,7 +5,7 @@ import { eventLiveExplainsRepository } from '../repositories/event-live-explains
 import { eventLiveRepository } from '../repositories/event-lives';
 import { transformEventLiveExplains } from '../transformers/event-live-explains';
 import { transformEventLives } from '../transformers/event-lives';
-import { logError, logInfo } from '../utils/logger';
+import { logDebug, logError, logInfo } from '../utils/logger';
 
 /**
  * Event Lives Service - Business Logic Layer
@@ -22,27 +22,22 @@ import { logError, logInfo } from '../utils/logger';
  */
 export async function getEventLivesByEventId(eventId: number): Promise<EventLive[]> {
   try {
-    logInfo('Getting event live data by event ID', { eventId });
-
-    // 1. Try cache first (fast path)
     const cached = await eventLivesCache.getByEventId(eventId);
     if (cached) {
-      logInfo('Event lives retrieved from cache', { eventId, count: cached.length });
+      logDebug('Event lives retrieved from cache', { eventId, count: cached.length });
       return cached;
     }
 
-    // 2. Cache miss - fallback to database
-    logInfo('Cache miss - fetching from database', { eventId });
+    logDebug('Event lives cache miss - fetching from database', { eventId });
     const dbEventLives = await eventLiveRepository.findByEventId(eventId);
 
-    // 3. Update cache for next time (async, don't block response)
     if (dbEventLives.length > 0) {
       eventLivesCache.set(eventId, dbEventLives).catch((error) => {
         logError('Failed to update event lives cache', error, { eventId });
       });
     }
 
-    logInfo('Event lives retrieved from database', { eventId, count: dbEventLives.length });
+    logDebug('Event lives retrieved from database', { eventId, count: dbEventLives.length });
     return dbEventLives;
   } catch (error) {
     logError('Failed to get event live data', error, { eventId });
@@ -58,21 +53,15 @@ export async function updateEventLivesCache(eventId: number): Promise<{ count: n
   try {
     logInfo('Starting fast cache update', { eventId });
 
-    // 1. Fetch from FPL API
     const liveData = await fplClient.getEventLive(eventId);
 
     if (!liveData.elements || !Array.isArray(liveData.elements)) {
       throw new Error('Invalid event live data from FPL API');
     }
 
-    // 2. Transform to domain EventLives only (skip explains for speed)
     const eventLives = transformEventLives(eventId, liveData.elements);
-    logInfo('Event lives transformed for cache', {
-      eventId,
-      count: eventLives.length,
-    });
+    logDebug('Event lives transformed for cache', { eventId, count: eventLives.length });
 
-    // 3. Update cache ONLY (skip database writes)
     await eventLivesCache.set(eventId, eventLives);
     logInfo('Cache update completed', { eventId, count: eventLives.length });
 

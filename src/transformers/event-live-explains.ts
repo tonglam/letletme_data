@@ -1,83 +1,95 @@
-import type { RawFPLEventLiveElement } from '../types';
+import type { EventLiveExplain } from '../domain/event-live-explains';
+import type {
+  RawFPLEventExplainFixture,
+  RawFPLEventExplainStat,
+  RawFPLEventLiveElement,
+} from '../types';
 
-// Target shape matches event_live_explains Drizzle schema fields
-export interface EventLiveExplainRecord {
-  eventId: number;
-  elementId: number;
-  // points buckets
-  bonus: number | null;
-  minutes: number | null;
-  minutesPoints: number | null;
-  goalsScored: number | null;
-  goalsScoredPoints: number | null;
-  assists: number | null;
-  assistsPoints: number | null;
-  cleanSheets: number | null;
-  cleanSheetsPoints: number | null;
-  goalsConceded: number | null;
-  goalsConcededPoints: number | null;
-  ownGoals: number | null;
-  ownGoalsPoints: number | null;
-  penaltiesSaved: number | null;
-  penaltiesSavedPoints: number | null;
-  penaltiesMissed: number | null;
-  penaltiesMissedPoints: number | null;
-  yellowCards: number | null;
-  yellowCardsPoints: number | null;
-  redCards: number | null;
-  redCardsPoints: number | null;
-  saves: number | null;
-  savesPoints: number | null;
-}
+type StatAccumulator = Map<string, { value: number; points: number }>;
 
-type ExplainItem = { stat: string; points: number; value: number };
+const toFiniteNumber = (input: unknown): number => {
+  if (typeof input === 'number') {
+    return Number.isFinite(input) ? input : 0;
+  }
 
-function isExplainArray(value: unknown): value is ExplainItem[][] {
+  if (typeof input === 'string') {
+    const parsed = Number.parseFloat(input);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+
+  return 0;
+};
+
+const isExplainFixture = (value: unknown): value is RawFPLEventExplainFixture => {
   return (
-    Array.isArray(value) &&
-    value.every(
-      (inner) =>
-        Array.isArray(inner) &&
-        inner.every(
-          (item) =>
-            item &&
-            typeof item === 'object' &&
-            'stat' in item &&
-            'points' in item &&
-            'value' in item,
-        ),
-    )
+    typeof value === 'object' &&
+    value !== null &&
+    'fixture' in value &&
+    'stats' in value &&
+    Array.isArray((value as RawFPLEventExplainFixture).stats)
   );
-}
+};
 
-// Aggregate explains for one element
-export function transformSingleEventLiveExplain(
-  eventId: number,
-  element: RawFPLEventLiveElement,
-): EventLiveExplainRecord {
-  const acc = new Map<string, { value: number; points: number }>();
+const isExplainStat = (value: unknown): value is RawFPLEventExplainStat => {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as RawFPLEventExplainStat).identifier === 'string'
+  );
+};
 
-  if (isExplainArray(element.explain)) {
-    for (const part of element.explain) {
-      for (const item of part) {
-        const prev = acc.get(item.stat) || { value: 0, points: 0 };
-        acc.set(item.stat, {
-          value: prev.value + (Number.isFinite(item.value) ? item.value : 0),
-          points: prev.points + (Number.isFinite(item.points) ? item.points : 0),
-        });
+const buildStatAccumulator = (explain: RawFPLEventLiveElement['explain']): StatAccumulator => {
+  const accumulator: StatAccumulator = new Map();
+
+  if (!Array.isArray(explain)) {
+    return accumulator;
+  }
+
+  for (const fixture of explain) {
+    if (!isExplainFixture(fixture)) {
+      continue;
+    }
+
+    for (const stat of fixture.stats) {
+      if (!isExplainStat(stat)) {
+        continue;
       }
+
+      const identifier = stat.identifier.trim();
+      if (identifier.length === 0) {
+        continue;
+      }
+
+      const value = toFiniteNumber(stat.value);
+      const points = toFiniteNumber(stat.points);
+      const pointsModification = toFiniteNumber(stat.points_modification);
+
+      const prev = accumulator.get(identifier) ?? { value: 0, points: 0 };
+      accumulator.set(identifier, {
+        value: prev.value + value,
+        points: prev.points + points + pointsModification,
+      });
     }
   }
 
-  const get = (stat: string) => acc.get(stat);
-  const has = (stat: string): boolean => acc.has(stat);
+  return accumulator;
+};
+
+export function transformSingleEventLiveExplain(
+  eventId: number,
+  element: RawFPLEventLiveElement,
+): EventLiveExplain {
+  const accumulator = buildStatAccumulator(element.explain);
+
+  const get = (stat: string) => accumulator.get(stat);
+  const has = (stat: string): boolean => accumulator.has(stat);
   const val = (stat: string): number => {
-    const e = get(stat);
-    return e === undefined ? 0 : e.value;
+    const entry = get(stat);
+    return entry === undefined ? 0 : entry.value;
   };
   const pts = (stat: string): number => {
-    const e = get(stat);
-    return e === undefined ? 0 : e.points;
+    const entry = get(stat);
+    return entry === undefined ? 0 : entry.points;
   };
 
   return {
@@ -109,10 +121,9 @@ export function transformSingleEventLiveExplain(
   };
 }
 
-// Transform all explains
 export function transformEventLiveExplains(
   eventId: number,
   elements: RawFPLEventLiveElement[],
-): EventLiveExplainRecord[] {
+): EventLiveExplain[] {
   return elements.map((el) => transformSingleEventLiveExplain(eventId, el));
 }

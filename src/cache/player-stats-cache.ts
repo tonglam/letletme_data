@@ -70,7 +70,10 @@ export const createPlayerStatsHashCache = () => {
         }
 
         pipeline.hset(key, hashEntries);
-        pipeline.expire(key, CACHE_TTL.PLAYER_STATS);
+        // Only set expiration if TTL > 0 (TTL -1 means no expiration)
+        if (CACHE_TTL.PLAYER_STATS > 0) {
+          pipeline.expire(key, CACHE_TTL.PLAYER_STATS);
+        }
 
         await pipeline.exec();
         logDebug('Player stats cache batch set by event', {

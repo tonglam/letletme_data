@@ -2,14 +2,19 @@ import { Worker, Job } from 'bullmq';
 
 import { liveDataQueueName, LIVE_JOBS, type LiveDataJobData } from '../queues/live-data.queue';
 import { syncEventLives, updateEventLivesCache } from '../services/event-lives.service';
+import { syncLiveFixtureCache } from '../services/live-fixtures.service';
+import { syncLiveBonusCache } from '../services/live-bonus.service';
 import { syncEventLiveSummary } from '../services/event-live-summaries.service';
 import { syncEventLiveExplain } from '../services/event-live-explains.service';
 import { syncEventOverallResult } from '../services/event-overall-results.service';
+import { syncLiveScores } from '../services/fixtures.service';
 import { getQueueConnection } from '../utils/queue';
 import { logError, logInfo } from '../utils/logger';
 import {
   enqueueEventLiveSummary,
   enqueueEventLiveExplain,
+  enqueueLiveFixtureCache,
+  enqueueLiveBonusCache,
   enqueueEventOverallResult,
 } from '../jobs/live-data.jobs';
 
@@ -25,6 +30,8 @@ async function enqueueCascadeJobs(eventId: number) {
     const results = await Promise.allSettled([
       enqueueEventLiveSummary(eventId, 'cascade'),
       enqueueEventLiveExplain(eventId, 'cascade'),
+      enqueueLiveFixtureCache(eventId, 'cascade'),
+      enqueueLiveBonusCache(eventId, 'cascade'),
       enqueueEventOverallResult(eventId, 'cascade'),
     ]);
 
@@ -41,7 +48,7 @@ async function enqueueCascadeJobs(eventId: number) {
     // Log any failures
     results.forEach((result, index) => {
       if (result.status === 'rejected') {
-        const jobNames = ['summary', 'explain', 'overall'];
+        const jobNames = ['summary', 'explain', 'live-fixture', 'live-bonus', 'overall'];
         logError('Failed to enqueue cascade job', result.reason, {
           eventId,
           jobName: jobNames[index],
@@ -97,8 +104,20 @@ export const liveDataWorker = new Worker<LiveDataJobData>(
           await syncEventLiveExplain(eventId);
           break;
 
+        case LIVE_JOBS.LIVE_FIXTURE_CACHE:
+          await syncLiveFixtureCache(eventId);
+          break;
+
+        case LIVE_JOBS.LIVE_BONUS_CACHE:
+          await syncLiveBonusCache(eventId);
+          break;
+
         case LIVE_JOBS.EVENT_OVERALL_RESULT:
           await syncEventOverallResult();
+          break;
+
+        case LIVE_JOBS.LIVE_SCORES:
+          await syncLiveScores(eventId);
           break;
 
         default:

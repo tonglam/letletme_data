@@ -61,6 +61,7 @@ export const createPlayerStatsRepository = (dbInstance?: DatabaseInstance) => {
           threatRankType: playerStat.threatRankType ?? null,
           ictIndexRank: playerStat.ictIndexRank ?? null,
           ictIndexRankType: playerStat.ictIndexRankType ?? null,
+          selectedByPercent: playerStat.selectedByPercent ?? null,
           createdAt: new Date(),
           updatedAt: new Date(),
         }));
@@ -107,6 +108,7 @@ export const createPlayerStatsRepository = (dbInstance?: DatabaseInstance) => {
               threatRankType: sql`excluded.threat_rank_type`,
               ictIndexRank: sql`excluded.ict_index_rank`,
               ictIndexRankType: sql`excluded.ict_index_rank_type`,
+              selectedByPercent: sql`excluded.selected_by_percent`,
               updatedAt: sql`NOW()`,
             },
           })

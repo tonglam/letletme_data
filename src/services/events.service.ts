@@ -3,12 +3,7 @@ import { fplClient } from '../clients/fpl';
 import { eventRepository } from '../repositories/events';
 import { transformEvents } from '../transformers/events';
 import type { Event } from '../types';
-import { logError, logInfo, logWarn } from '../utils/logger';
-
-type EventValidationIssue = {
-  eventId: number;
-  issues: string[];
-};
+import { logDebug, logError, logInfo } from '../utils/logger';
 
 /**
  * Events Service - Business Logic Layer
@@ -22,25 +17,15 @@ type EventValidationIssue = {
 // Get current event (cache-first strategy: Redis → DB fallback)
 export async function getCurrentEvent(): Promise<Event | null> {
   try {
-    logInfo('Getting current event');
-
-    // 1. Try cache first (fast path)
     const cached = await eventsCache.getCurrent();
     if (cached) {
-      logInfo('Current event retrieved from cache', { id: cached.id });
+      logDebug('Current event retrieved from cache', { id: cached.id });
       return cached;
     }
 
-    // 2. Cache miss - fallback to database
-    logInfo('Cache miss - fetching from database');
+    logDebug('Current event cache miss - fetching from database');
     const event = await eventRepository.findCurrent();
-
-    if (event) {
-      logInfo('Current event found in database', { id: event.id });
-    } else {
-      logInfo('No current event found');
-    }
-
+    logDebug('Current event fetched from database', { id: event?.id ?? null });
     return event;
   } catch (error) {
     logError('Failed to get current event', error);
@@ -51,25 +36,15 @@ export async function getCurrentEvent(): Promise<Event | null> {
 // Get next event (cache-first strategy: Redis → DB fallback)
 export async function getNextEvent(): Promise<Event | null> {
   try {
-    logInfo('Getting next event');
-
-    // 1. Try cache first (fast path)
     const cached = await eventsCache.getNext();
     if (cached) {
-      logInfo('Next event retrieved from cache', { id: cached.id });
+      logDebug('Next event retrieved from cache', { id: cached.id });
       return cached;
     }
 
-    // 2. Cache miss - fallback to database
-    logInfo('Cache miss - fetching from database');
+    logDebug('Next event cache miss - fetching from database');
     const event = await eventRepository.findNext();
-
-    if (event) {
-      logInfo('Next event found in database', { id: event.id });
-    } else {
-      logInfo('No next event found');
-    }
-
+    logDebug('Next event fetched from database', { id: event?.id ?? null });
     return event;
   } catch (error) {
     logError('Failed to get next event', error);
@@ -99,38 +74,7 @@ export async function syncEvents(): Promise<{
 
     logInfo('Raw events data fetched', { count: bootstrapData.events.length });
 
-    const validationIssues: EventValidationIssue[] = [];
-
-    for (const event of bootstrapData.events) {
-      const issues: string[] = [];
-      if (!Number.isInteger(event.id) || event.id < 1) {
-        issues.push('id');
-      }
-
-      if (typeof event.name !== 'string' || event.name.trim().length === 0) {
-        issues.push('name');
-      }
-
-      if (event.deadline_time) {
-        const deadline = new Date(event.deadline_time);
-        if (Number.isNaN(deadline.getTime())) {
-          issues.push('deadline_time');
-        }
-      }
-
-      if (issues.length > 0) {
-        validationIssues.push({ eventId: event.id, issues });
-      }
-    }
-
-    if (validationIssues.length > 0) {
-      logWarn('Events sync validation warnings', {
-        issueCount: validationIssues.length,
-        sample: validationIssues.slice(0, 5),
-      });
-    }
-
-    // 2. Transform to domain events
+    // 2. Transform to domain events (transformer validates each record via Zod)
     const transformStart = Date.now();
     const events = transformEvents(bootstrapData.events);
     const transformDuration = Date.now() - transformStart;
@@ -139,8 +83,7 @@ export async function syncEvents(): Promise<{
     logInfo('Events transformed', {
       total: bootstrapData.events.length,
       successful: events.length,
-      transformErrors,
-      validationWarnings: validationIssues.length,
+      skipped: transformErrors,
       durationMs: transformDuration,
     });
 
@@ -159,8 +102,8 @@ export async function syncEvents(): Promise<{
 
     const result = {
       count: savedEvents.length,
-      errors: transformErrors + validationIssues.length,
-      warningCount: validationIssues.length,
+      errors: transformErrors,
+      warningCount: 0,
     };
 
     logInfo('Events sync completed successfully', {

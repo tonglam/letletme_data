@@ -6,6 +6,8 @@ export { eventLivesCache } from './event-lives-cache';
 export { eventOverallResultCache } from './event-overall-results-cache';
 export { eventsCache } from './events-cache';
 export { fixturesCache } from './fixtures-cache';
+export { liveFixturesCache } from './live-fixtures-cache';
+export { liveBonusCache } from './live-bonus-cache';
 export { phasesCache } from './phases-cache';
 export { playerStatsCache } from './player-stats-cache';
 export { playerValuesCache } from './player-values-cache';

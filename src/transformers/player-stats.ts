@@ -71,6 +71,7 @@ export function transformPlayerStat(
       threatRankType: rawElement.threat_rank_type ?? null,
       ictIndexRank: rawElement.ict_index_rank ?? null,
       ictIndexRankType: rawElement.ict_index_rank_type ?? null,
+      selectedByPercent: rawElement.selected_by_percent || null,
     };
 
     // Validate the transformed player stat
@@ -127,6 +128,7 @@ export function transformRawPlayerStat(rawElement: RawFPLElement, eventId: Event
       threatRankType: rawElement.threat_rank_type ?? null,
       ictIndexRank: rawElement.ict_index_rank ?? null,
       ictIndexRankType: rawElement.ict_index_rank_type ?? null,
+      selectedByPercent: rawElement.selected_by_percent || null,
     };
 
     return validateRawPlayerStat(rawPlayerStat);

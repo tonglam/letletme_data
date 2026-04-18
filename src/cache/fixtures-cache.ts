@@ -37,7 +37,10 @@ export const fixturesCache = {
           fields[fixture.id.toString()] = JSON.stringify(fixture);
         }
         pipeline.hset(key, fields);
-        pipeline.expire(key, CACHE_TTL.EVENTS);
+        // Only set expiration if TTL > 0 (TTL -1 means no expiration)
+        if (CACHE_TTL.FIXTURES > 0) {
+          pipeline.expire(key, CACHE_TTL.FIXTURES);
+        }
       }
 
       await pipeline.exec();
@@ -81,7 +84,10 @@ export const fixturesCache = {
           fields[fixture.id.toString()] = JSON.stringify(fixture);
         }
         pipeline.hset(key, fields);
-        pipeline.expire(key, CACHE_TTL.EVENTS);
+        // Only set expiration if TTL > 0 (TTL -1 means no expiration)
+        if (CACHE_TTL.FIXTURES > 0) {
+          pipeline.expire(key, CACHE_TTL.FIXTURES);
+        }
       }
 
       if (unscheduled.length > 0) {
@@ -91,7 +97,10 @@ export const fixturesCache = {
           fields[fixture.id.toString()] = JSON.stringify(fixture);
         }
         pipeline.hset(key, fields);
-        pipeline.expire(key, CACHE_TTL.EVENTS);
+        // Only set expiration if TTL > 0 (TTL -1 means no expiration)
+        if (CACHE_TTL.FIXTURES > 0) {
+          pipeline.expire(key, CACHE_TTL.FIXTURES);
+        }
       }
 
       await pipeline.exec();

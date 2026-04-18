@@ -49,6 +49,7 @@ export const playerStats = pgTable(
     threatRankType: integer('threat_rank_type'),
     ictIndexRank: integer('ict_index_rank'),
     ictIndexRankType: integer('ict_index_rank_type'),
+    selectedByPercent: text('selected_by_percent'),
     ...timestamps,
   },
   (table) => [

@@ -1,5 +1,6 @@
 import { boolean, integer, jsonb, pgTable, text, timestamp } from 'drizzle-orm/pg-core';
 import { timestamps } from './_helpers.schema';
+import type { EventChipData, EventTopElementData } from '../../domain/event-overall-results';
 
 export const events = pgTable('events', {
   id: integer('id').primaryKey(),
@@ -17,11 +18,11 @@ export const events = pgTable('events', {
   isNext: boolean('is_next').default(false).notNull(),
   cupLeagueCreate: boolean('cup_league_create').default(false).notNull(),
   h2hKoMatchesCreated: boolean('h2h_ko_matches_created').default(false).notNull(),
-  chipPlays: jsonb('chip_plays').$type<unknown[] | null>().default([]),
+  chipPlays: jsonb('chip_plays').$type<EventChipData[] | null>().default([]),
   mostSelected: integer('most_selected'),
   mostTransferredIn: integer('most_transferred_in'),
   topElement: integer('top_element'),
-  topElementInfo: jsonb('top_element_info'),
+  topElementInfo: jsonb('top_element_info').$type<EventTopElementData | null>(),
   transfersMade: integer('transfers_made'),
   mostCaptained: integer('most_captained'),
   mostViceCaptained: integer('most_vice_captained'),

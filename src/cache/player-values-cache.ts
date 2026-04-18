@@ -23,7 +23,10 @@ export const playerValuesCache = {
           valueFields[playerValue.elementId.toString()] = JSON.stringify(playerValue);
         }
         pipeline.hset(key, valueFields);
-        pipeline.expire(key, CACHE_TTL.player_values);
+        // Only set expiration if TTL > 0 (TTL -1 means no expiration)
+        if (CACHE_TTL.player_values > 0) {
+          pipeline.expire(key, CACHE_TTL.player_values);
+        }
       }
 
       await pipeline.exec();

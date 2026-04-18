@@ -49,10 +49,16 @@ describe('Entry Infos Integration Tests', () => {
     async () => {
       // First, read current snapshot
       const db = await getDb();
-      const beforeResult = await db.select().from(entryInfos).where(eq(entryInfos.id, TEST_ENTRY_ID));
+      const beforeResult = await db
+        .select()
+        .from(entryInfos)
+        .where(eq(entryInfos.id, TEST_ENTRY_ID));
       const before = beforeResult[0];
       await syncEntryInfo(TEST_ENTRY_ID);
-      const afterResult = await db.select().from(entryInfos).where(eq(entryInfos.id, TEST_ENTRY_ID));
+      const afterResult = await db
+        .select()
+        .from(entryInfos)
+        .where(eq(entryInfos.id, TEST_ENTRY_ID));
       const after = afterResult[0];
 
       expect(after).toBeDefined();

@@ -64,15 +64,15 @@ describe('Events Unit Tests', () => {
       const eventWithChips = {
         ...singleRawEventFixture,
         chip_plays: [
-          { name: 'wildcard', num_played: 1000 },
-          { name: 'bench_boost', num_played: 500 },
+          { chip_name: 'wildcard', num_played: 1000 },
+          { chip_name: 'bench_boost', num_played: 500 },
         ],
       };
 
       const result = transformEvents([eventWithChips]);
       expect(result[0].chipPlays).toEqual([
-        { name: 'wildcard', num_played: 1000 },
-        { name: 'bench_boost', num_played: 500 },
+        { chipName: 'wildcard', numberPlayed: 1000 },
+        { chipName: 'bench_boost', numberPlayed: 500 },
       ]);
     });
 
@@ -312,14 +312,11 @@ describe('Events Unit Tests', () => {
         id: 999,
         name: 'Incomplete Event',
         finished: false,
-        // Missing many fields - should still work with defaults
+        // Missing required fields (data_checked, is_previous, is_current, is_next, etc.)
       } as any;
 
-      expect(() => transformEvents([incompleteEvent])).not.toThrow();
-      const result = transformEvents([incompleteEvent]);
-      expect(result).toHaveLength(1);
-      expect(result[0].id).toBe(999);
-      expect(result[0].name).toBe('Incomplete Event');
+      // Zod validation rejects incomplete events; throws when none are valid
+      expect(() => transformEvents([incompleteEvent])).toThrow('No valid events were transformed');
     });
 
     test('should handle edge case values correctly', () => {
@@ -383,10 +380,8 @@ describe('Events Unit Tests', () => {
         },
       ] as any;
 
-      // Should not throw and should process what it can
-      expect(() => transformEvents(malformedEvents)).not.toThrow();
-      const result = transformEvents(malformedEvents);
-      expect(result).toHaveLength(2);
+      // Malformed events are skipped; throws when none are valid
+      expect(() => transformEvents(malformedEvents)).toThrow('No valid events were transformed');
     });
 
     test('should handle invalid date strings', () => {
@@ -518,8 +513,8 @@ describe('Events Unit Tests', () => {
       expect(Array.isArray(eventWithChips.chipPlays)).toBe(true);
       if (eventWithChips.chipPlays) {
         expect(eventWithChips.chipPlays.length).toBeGreaterThan(0);
-        expect(eventWithChips.chipPlays[0]).toHaveProperty('name');
-        expect(eventWithChips.chipPlays[0]).toHaveProperty('num_played');
+        expect(eventWithChips.chipPlays[0]).toHaveProperty('chipName');
+        expect(eventWithChips.chipPlays[0]).toHaveProperty('numberPlayed');
       }
     });
 
@@ -528,7 +523,7 @@ describe('Events Unit Tests', () => {
 
       expect(eventWithTopElement.topElement).toBe(234567);
       expect(eventWithTopElement.topElementInfo).toEqual({
-        id: 234567,
+        element: 234567,
         points: 15,
       });
     });

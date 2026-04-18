@@ -86,7 +86,10 @@ export const eventsCache = {
           eventFields[event.id.toString()] = JSON.stringify(event);
         }
         pipeline.hset(key, eventFields);
-        pipeline.expire(key, CACHE_TTL.EVENTS);
+        // Only set expiration if TTL > 0 (TTL -1 means no expiration)
+        if (CACHE_TTL.EVENTS > 0) {
+          pipeline.expire(key, CACHE_TTL.EVENTS);
+        }
       }
 
       await pipeline.exec();

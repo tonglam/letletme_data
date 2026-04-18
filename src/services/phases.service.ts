@@ -39,16 +39,6 @@ export async function syncPhases(): Promise<{ count: number; errors: number }> {
       errors: bootstrapData.phases.length - phases.length,
     });
 
-    // Log first phase as example
-    if (phases.length > 0) {
-      logInfo('Sample transformed phase', {
-        id: phases[0].id,
-        name: phases[0].name,
-        startEvent: phases[0].startEvent,
-        stopEvent: phases[0].stopEvent,
-      });
-    }
-
     // 3. Save to database (batch upsert)
     const savedPhases = await phaseRepository.upsertBatch(phases);
     logInfo('Phases saved to database', { count: savedPhases.length });

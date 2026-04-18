@@ -304,6 +304,10 @@ export const transformedPlayerStatsFixture: PlayerStat[] = [
     bonus: 3,
     bps: 156,
     starts: 11,
+    transfersIn: 12543,
+    transfersInEvent: 1234,
+    transfersOut: 15432,
+    transfersOutEvent: 1567,
     influenceRank: 245,
     influenceRankType: 45,
     creativityRank: 312,
@@ -312,6 +316,7 @@ export const transformedPlayerStatsFixture: PlayerStat[] = [
     threatRankType: 60,
     ictIndexRank: 287,
     ictIndexRankType: 51,
+    selectedByPercent: '3.2',
   },
   {
     eventId: 3,
@@ -346,6 +351,10 @@ export const transformedPlayerStatsFixture: PlayerStat[] = [
     bonus: 12,
     bps: 345,
     starts: 11,
+    transfersIn: 45632,
+    transfersInEvent: 5432,
+    transfersOut: 12345,
+    transfersOutEvent: 1234,
     influenceRank: 245,
     influenceRankType: 45,
     creativityRank: 312,
@@ -354,6 +363,7 @@ export const transformedPlayerStatsFixture: PlayerStat[] = [
     threatRankType: 60,
     ictIndexRank: 287,
     ictIndexRankType: 51,
+    selectedByPercent: '15.4',
   },
   {
     eventId: 3,
@@ -388,6 +398,10 @@ export const transformedPlayerStatsFixture: PlayerStat[] = [
     bonus: 28,
     bps: 567,
     starts: 11,
+    transfersIn: 123456,
+    transfersInEvent: 12345,
+    transfersOut: 54321,
+    transfersOutEvent: 5432,
     influenceRank: 245,
     influenceRankType: 45,
     creativityRank: 312,
@@ -396,6 +410,7 @@ export const transformedPlayerStatsFixture: PlayerStat[] = [
     threatRankType: 60,
     ictIndexRank: 287,
     ictIndexRankType: 51,
+    selectedByPercent: '42.3',
   },
   {
     eventId: 3,
@@ -430,6 +445,10 @@ export const transformedPlayerStatsFixture: PlayerStat[] = [
     bonus: 34,
     bps: 678,
     starts: 11,
+    transfersIn: 234567,
+    transfersInEvent: 23456,
+    transfersOut: 87654,
+    transfersOutEvent: 8765,
     influenceRank: 245,
     influenceRankType: 45,
     creativityRank: 312,
@@ -438,6 +457,7 @@ export const transformedPlayerStatsFixture: PlayerStat[] = [
     threatRankType: 60,
     ictIndexRank: 287,
     ictIndexRankType: 51,
+    selectedByPercent: '38.7',
   },
 ];
 
@@ -479,6 +499,10 @@ export const rawPlayerStatsFixture: RawPlayerStat[] = transformedPlayerStatsFixt
   bonus: stat.bonus,
   bps: stat.bps,
   starts: stat.starts,
+  transfersIn: stat.transfersIn,
+  transfersInEvent: stat.transfersInEvent,
+  transfersOut: stat.transfersOut,
+  transfersOutEvent: stat.transfersOutEvent,
   influenceRank: stat.influenceRank,
   influenceRankType: stat.influenceRankType,
   creativityRank: stat.creativityRank,
@@ -487,6 +511,7 @@ export const rawPlayerStatsFixture: RawPlayerStat[] = transformedPlayerStatsFixt
   threatRankType: stat.threatRankType,
   ictIndexRank: stat.ictIndexRank,
   ictIndexRankType: stat.ictIndexRankType,
+  selectedByPercent: stat.selectedByPercent,
 }));
 
 // Invalid/edge case data for error testing
@@ -676,6 +701,10 @@ export const generatePlayerStat = (overrides: Partial<PlayerStat> = {}): PlayerS
   bonus: 0,
   bps: 20,
   starts: null,
+  transfersIn: null,
+  transfersInEvent: null,
+  transfersOut: null,
+  transfersOutEvent: null,
   influenceRank: null,
   influenceRankType: null,
   creativityRank: null,
@@ -684,6 +713,7 @@ export const generatePlayerStat = (overrides: Partial<PlayerStat> = {}): PlayerS
   threatRankType: null,
   ictIndexRank: null,
   ictIndexRankType: null,
+  selectedByPercent: null,
   ...overrides,
 });
 

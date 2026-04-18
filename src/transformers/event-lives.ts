@@ -23,6 +23,7 @@ export function transformEventLive(eventId: number, rawElement: RawFPLEventLiveE
     saves: stats.saves,
     bonus: stats.bonus,
     bps: stats.bps,
+    defensiveContribution: stats.defensive_contribution ?? null,
     starts: stats.starts > 0,
     expectedGoals: stats.expected_goals,
     expectedAssists: stats.expected_assists,

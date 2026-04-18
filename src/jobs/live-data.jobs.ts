@@ -54,5 +54,14 @@ export const enqueueEventLiveSummary = (eventId: number, source?: LiveDataJobSou
 export const enqueueEventLiveExplain = (eventId: number, source?: LiveDataJobSource) =>
   enqueueLiveDataJob(LIVE_JOBS.EVENT_LIVE_EXPLAIN, eventId, source);
 
+export const enqueueLiveFixtureCache = (eventId: number, source?: LiveDataJobSource) =>
+  enqueueLiveDataJob(LIVE_JOBS.LIVE_FIXTURE_CACHE, eventId, source);
+
+export const enqueueLiveBonusCache = (eventId: number, source?: LiveDataJobSource) =>
+  enqueueLiveDataJob(LIVE_JOBS.LIVE_BONUS_CACHE, eventId, source);
+
 export const enqueueEventOverallResult = (eventId: number, source?: LiveDataJobSource) =>
   enqueueLiveDataJob(LIVE_JOBS.EVENT_OVERALL_RESULT, eventId, source);
+
+export const enqueueLiveScoresSync = (eventId: number, source?: LiveDataJobSource) =>
+  enqueueLiveDataJob(LIVE_JOBS.LIVE_SCORES, eventId, source);

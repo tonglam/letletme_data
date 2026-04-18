@@ -1,7 +1,8 @@
 import type { RawFPLEventLiveElement } from '../../src/types';
-import type { EventLiveExplainRecord } from '../../src/transformers/event-live-explains';
+import type { EventLiveExplain } from '../../src/domain/event-live-explains';
 
-// A minimal explain structure resembling FPL: array of arrays of { stat, points, value }
+// A minimal explain structure resembling the FPL API response
+// Each explain entry contains the fixture ID and stats contributions
 export const rawExplainElementsFixture: RawFPLEventLiveElement[] = [
   {
     id: 101,
@@ -32,12 +33,19 @@ export const rawExplainElementsFixture: RawFPLEventLiveElement[] = [
       in_dreamteam: false,
     },
     explain: [
-      [
-        { stat: 'minutes', value: 1, points: 2 },
-        { stat: 'goals_scored', value: 1, points: 4 },
-        { stat: 'assists', value: 1, points: 3 },
-        { stat: 'bonus', value: 0, points: 2 },
-      ],
+      {
+        fixture: 401,
+        stats: [
+          { identifier: 'minutes', value: 90, points: 2, points_modification: -1 },
+          { identifier: 'goals_scored', value: 1, points: 4 },
+          { identifier: 'assists', value: 1, points: 3 },
+          { identifier: 'bonus', value: 0, points: 1, points_modification: 1 },
+        ],
+      },
+      {
+        fixture: 402,
+        stats: [{ identifier: 'clean_sheets', value: 1, points: 4 }],
+      },
     ],
   },
   {
@@ -69,27 +77,30 @@ export const rawExplainElementsFixture: RawFPLEventLiveElement[] = [
       in_dreamteam: false,
     },
     explain: [
-      [
-        { stat: 'minutes', value: 1, points: 1 },
-        { stat: 'yellow_cards', value: 1, points: -1 },
-      ],
+      {
+        fixture: 501,
+        stats: [
+          { identifier: 'minutes', value: 30, points: 1 },
+          { identifier: 'yellow_cards', value: 1, points: -1, points_modification: -1 },
+        ],
+      },
     ],
   },
 ];
 
-export const transformedExplainsFixture: EventLiveExplainRecord[] = [
+export const transformedExplainsFixture: EventLiveExplain[] = [
   {
     eventId: 99,
     elementId: 101,
     bonus: 2,
     minutes: 90,
-    minutesPoints: 2,
+    minutesPoints: 1,
     goalsScored: 1,
     goalsScoredPoints: 4,
     assists: 1,
     assistsPoints: 3,
-    cleanSheets: 0,
-    cleanSheetsPoints: 0,
+    cleanSheets: 1,
+    cleanSheetsPoints: 4,
     goalsConceded: 0,
     goalsConcededPoints: 0,
     ownGoals: 0,
@@ -126,7 +137,7 @@ export const transformedExplainsFixture: EventLiveExplainRecord[] = [
     penaltiesMissed: 0,
     penaltiesMissedPoints: 0,
     yellowCards: 1,
-    yellowCardsPoints: -1,
+    yellowCardsPoints: -2,
     redCards: 0,
     redCardsPoints: 0,
     saves: 0,

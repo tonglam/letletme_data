@@ -51,6 +51,7 @@ export interface PlayerStat {
   readonly threatRankType: number | null;
   readonly ictIndexRank: number | null;
   readonly ictIndexRankType: number | null;
+  readonly selectedByPercent: string | null;
 }
 
 export type PlayerStats = readonly PlayerStat[];
@@ -121,6 +122,7 @@ export const PlayerStatSchema = z.object({
   threatRankType: z.number().int().positive('Threat rank type must be positive').nullable(),
   ictIndexRank: z.number().int().positive('ICT index rank must be positive').nullable(),
   ictIndexRankType: z.number().int().positive('ICT index rank type must be positive').nullable(),
+  selectedByPercent: z.string().nullable(),
 });
 
 export const RawPlayerStatSchema = PlayerStatSchema.omit({

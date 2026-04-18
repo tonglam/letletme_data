@@ -25,7 +25,10 @@ export const teamsCache = {
           teamFields[team.id.toString()] = JSON.stringify(team);
         }
         pipeline.hset(key, teamFields);
-        pipeline.expire(key, CACHE_TTL.TEAMS);
+        // Only set expiration if TTL > 0 (TTL -1 means no expiration)
+        if (CACHE_TTL.TEAMS > 0) {
+          pipeline.expire(key, CACHE_TTL.TEAMS);
+        }
       }
 
       await pipeline.exec();

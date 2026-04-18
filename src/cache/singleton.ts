@@ -171,27 +171,30 @@ export const DEFAULT_CACHE_CONFIG: CacheConfig = {
 };
 
 // Cache TTL configurations for different data types
+// TTL -1 means no expiration (cache persists indefinitely until manually deleted)
 export const CACHE_TTL = {
-  // Basic/Static Data - Long TTL (7-30 days)
-  EVENTS: 604800, // 7 days
-  TEAMS: 2592000, // 30 days (rarely change mid-season)
-  PHASES: 2592000, // 30 days (rarely change)
-  PLAYERS: 86400, // 24 hours (updates more frequently)
-  
-  // Game Data - Moderate TTL (2-6 hours)
-  FIXTURES: 21600, // 6 hours
-  PLAYER_STATS: 7200, // 2 hours
-  player_values: 7200, // 2 hours
-  
-  // Live Match Data - Short TTL (2 minutes)
-  EVENT_LIVE: 120, // 2 minutes (live data updates frequently during matches)
-  EVENT_LIVE_EXPLAIN: 120, // 2 minutes (live explain data updates frequently during matches)
-  LIVE_DATA: 60, // 1 minute
-  
-  // Aggregated/Historical Data - Long TTL (24 hours)
-  EVENT_LIVE_SUMMARY: 86400, // 24 hours (season-to-date summary)
-  EVENT_OVERALL_RESULT: 86400, // 24 hours
-  EVENT_STANDINGS: 86400, // 24 hours
+  // Basic/Static Data - No expiration (TTL -1)
+  EVENTS: -1, // No expiration
+  TEAMS: -1, // No expiration
+  PHASES: -1, // No expiration
+  PLAYERS: -1, // No expiration
+
+  // Game Data - No expiration (TTL -1)
+  FIXTURES: -1, // No expiration
+  PLAYER_STATS: -1, // No expiration
+  player_values: -1, // No expiration
+
+  // Live Match Data - No expiration (TTL -1)
+  EVENT_LIVE: -1, // No expiration
+  EVENT_LIVE_EXPLAIN: -1, // No expiration
+  LIVE_FIXTURE: -1, // No expiration
+  LIVE_BONUS: -1, // No expiration
+  LIVE_DATA: -1, // No expiration
+
+  // Aggregated/Historical Data - No expiration (TTL -1)
+  EVENT_LIVE_SUMMARY: -1, // No expiration
+  EVENT_OVERALL_RESULT: -1, // No expiration
+  EVENT_STANDINGS: -1, // No expiration
 } as const;
 
 // Convenience export for backward compatibility

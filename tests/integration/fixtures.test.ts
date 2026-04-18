@@ -33,7 +33,7 @@ describe('Fixtures Integration Tests', () => {
     const fixtures = await db.select().from(eventFixtures).limit(5);
 
     expect(fixtures.length).toBeGreaterThan(0);
-    
+
     // Some fixtures may not be assigned to an event yet
     const assignedFixtures = fixtures.filter((f) => f.event !== null);
     expect(assignedFixtures.length).toBeGreaterThan(0);

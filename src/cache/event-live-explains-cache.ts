@@ -47,7 +47,10 @@ export const eventLiveExplainCache = {
 
       await redis.del(key);
       await redis.hset(key, hashData);
-      await redis.expire(key, CACHE_TTL.EVENT_LIVE_EXPLAIN);
+      // Only set expiration if TTL > 0 (TTL -1 means no expiration)
+      if (CACHE_TTL.EVENT_LIVE_EXPLAIN > 0) {
+        await redis.expire(key, CACHE_TTL.EVENT_LIVE_EXPLAIN);
+      }
 
       logInfo('Event live explains cached', { eventId, count: explains.length });
     } catch (error) {

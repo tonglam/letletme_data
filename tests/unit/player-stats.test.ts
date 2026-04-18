@@ -88,6 +88,10 @@ describe('Player Stats Unit Tests', () => {
           bonus: 3,
           bps: 156,
           starts: null,
+          transfersIn: null,
+          transfersInEvent: null,
+          transfersOut: null,
+          transfersOutEvent: null,
           influenceRank: null,
           influenceRankType: null,
           creativityRank: null,
@@ -96,6 +100,7 @@ describe('Player Stats Unit Tests', () => {
           threatRankType: null,
           ictIndexRank: null,
           ictIndexRankType: null,
+          selectedByPercent: null,
         };
 
         expect(() => validateRawPlayerStat(rawStat)).not.toThrow();

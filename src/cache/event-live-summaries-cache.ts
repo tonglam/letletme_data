@@ -47,7 +47,10 @@ export const eventLiveSummaryCache = {
 
       await redis.del(key);
       await redis.hset(key, hashData);
-      await redis.expire(key, CACHE_TTL.EVENT_LIVE_SUMMARY);
+      // Only set expiration if TTL > 0 (TTL -1 means no expiration)
+      if (CACHE_TTL.EVENT_LIVE_SUMMARY > 0) {
+        await redis.expire(key, CACHE_TTL.EVENT_LIVE_SUMMARY);
+      }
 
       logInfo('Event live summaries cached', { eventId, count: summaries.length });
     } catch (error) {

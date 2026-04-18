@@ -36,7 +36,7 @@ describe('Player Values Operational Integration', () => {
       expect(cached).not.toBeNull();
       expect(cached!.length).toBe(result.count);
       expect(cached!.length).toBe(dbValues.length);
-      
+
       // Verify cache matches database
       const cachedElementIds = new Set(cached!.map((v) => v.elementId));
       const dbElementIds = new Set(dbValues.map((v) => v.elementId));

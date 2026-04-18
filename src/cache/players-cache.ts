@@ -60,8 +60,10 @@ const createPlayerHashCache = () => {
 
         await redis.hset(key, playerId.toString(), serialized);
 
-        // Set expiration on the hash key
-        await redis.expire(key, CACHE_TTL.PLAYERS);
+        // Set expiration on the hash key (only if TTL > 0)
+        if (CACHE_TTL.PLAYERS > 0) {
+          await redis.expire(key, CACHE_TTL.PLAYERS);
+        }
 
         logDebug('Player cache set', { playerId, key });
       } catch (error) {
@@ -139,7 +141,10 @@ const createPlayerHashCache = () => {
 
         // Set all players in single hash operation
         pipeline.hset(key, hashEntries);
-        pipeline.expire(key, CACHE_TTL.PLAYERS);
+        // Only set expiration if TTL > 0 (TTL -1 means no expiration)
+        if (CACHE_TTL.PLAYERS > 0) {
+          pipeline.expire(key, CACHE_TTL.PLAYERS);
+        }
 
         // No metadata key needed
 

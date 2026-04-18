@@ -1,3 +1,8 @@
+import type { EventChipData, EventTopElementData } from '../domain/event-overall-results';
+
+// Re-export for consumers that import from types
+export type { EventChipData, EventTopElementData };
+
 // Core domain types
 export type EventID = number;
 export type PlayerID = number;
@@ -23,11 +28,11 @@ export interface Event {
   isNext: boolean;
   cupLeagueCreate: boolean;
   h2hKoMatchesCreated: boolean;
-  chipPlays: unknown[] | null;
+  chipPlays: EventChipData[] | null;
   mostSelected: number | null;
   mostTransferredIn: number | null;
   topElement: number | null;
-  topElementInfo: unknown | null;
+  topElementInfo: EventTopElementData | null;
   transfersMade: number | null;
   mostCaptained: number | null;
   mostViceCaptained: number | null;
@@ -49,7 +54,7 @@ export interface Player {
 }
 
 // Team types - using database schema types
-export type Team = import('../db/schema').Team;
+export type Team = import('../db/schemas/index.schema').DbTeam;
 
 // Phase types
 export interface Phase {
@@ -117,11 +122,11 @@ export interface RawFPLEvent {
     element_types: unknown[];
     pick_multiplier: unknown;
   };
-  chip_plays: unknown[];
+  chip_plays: Array<{ chip_name: string; num_played: number } | { name: string; num_played: number }>;
   most_selected: number | null;
   most_transferred_in: number | null;
   top_element: number | null;
-  top_element_info: unknown | null;
+  top_element_info: ({ element: number; points: number } | { id: number; points: number }) | null;
   transfers_made: number | null;
   most_captained: number | null;
   most_vice_captained: number | null;
@@ -284,6 +289,10 @@ export interface RawFPLEventLiveStats {
   creativity: string;
   threat: string;
   ict_index: string;
+  clearances_blocks_interceptions?: number;
+  recoveries?: number;
+  tackles?: number;
+  defensive_contribution?: number;
   starts: number;
   expected_goals: string;
   expected_assists: string;
@@ -293,10 +302,22 @@ export interface RawFPLEventLiveStats {
   in_dreamteam: boolean;
 }
 
+export interface RawFPLEventExplainStat {
+  identifier: string;
+  points: number;
+  value: number;
+  points_modification?: number | null;
+}
+
+export interface RawFPLEventExplainFixture {
+  fixture: number;
+  stats: RawFPLEventExplainStat[];
+}
+
 export interface RawFPLEventLiveElement {
   id: number;
   stats: RawFPLEventLiveStats;
-  explain: unknown[];
+  explain: RawFPLEventExplainFixture[] | null;
 }
 
 export interface RawFPLEventLiveResponse {

@@ -1,10 +1,10 @@
 import { eventLiveExplainCache } from '../cache/operations';
-import { fplClient } from '../clients/fpl';
 import { eventLiveExplainsRepository } from '../repositories/event-live-explains';
-import { transformEventLiveExplains } from '../transformers/event-live-explains';
 import { getCurrentEvent } from './events.service';
 import { logError, logInfo } from '../utils/logger';
 
+// Cascade job: reads explain data already written by event-lives-db-sync and updates cache.
+// No FPL API call — avoids redundant fetch since syncEventLives already persisted this data.
 export async function syncEventLiveExplain(
   eventId?: number,
 ): Promise<{ count: number; eventId: number }> {
@@ -14,30 +14,24 @@ export async function syncEventLiveExplain(
       throw new Error('No current event found for event live explain');
     }
 
-    logInfo('Starting event live explain sync', { eventId: resolvedEventId });
+    logInfo('Starting event live explain cache update', { eventId: resolvedEventId });
 
-    const liveData = await fplClient.getEventLive(resolvedEventId);
-    if (!liveData.elements || !Array.isArray(liveData.elements)) {
-      throw new Error('Invalid event live data from FPL API');
-    }
+    const explains = await eventLiveExplainsRepository.findByEventId(resolvedEventId);
 
-    const explains = transformEventLiveExplains(resolvedEventId, liveData.elements);
-    const saved = await eventLiveExplainsRepository.upsertBatch(explains);
-
-    if (saved.length > 0) {
+    if (explains.length > 0) {
       await eventLiveExplainCache.set(resolvedEventId, explains);
     } else {
       await eventLiveExplainCache.clearByEventId(resolvedEventId);
     }
 
-    logInfo('Event live explain sync completed', {
+    logInfo('Event live explain cache update completed', {
       eventId: resolvedEventId,
-      count: saved.length,
+      count: explains.length,
     });
 
-    return { count: saved.length, eventId: resolvedEventId };
+    return { count: explains.length, eventId: resolvedEventId };
   } catch (error) {
-    logError('Event live explain sync failed', error);
+    logError('Event live explain cache update failed', error);
     throw error;
   }
 }

@@ -34,16 +34,6 @@ export async function syncTeams(): Promise<{ count: number; errors: number }> {
       errors: bootstrapData.teams.length - teams.length,
     });
 
-    // Log first team as example
-    if (teams.length > 0) {
-      logInfo('Sample transformed team', {
-        id: teams[0].id,
-        name: teams[0].name,
-        shortName: teams[0].shortName,
-        position: teams[0].position,
-      });
-    }
-
     // 3. Save to database (batch upsert)
     const savedTeams = await teamRepository.upsertBatch(teams);
     logInfo('Teams saved to database', { count: savedTeams.length });

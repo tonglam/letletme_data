@@ -26,6 +26,7 @@ export const eventLive = pgTable(
     saves: integer('saves'),
     bonus: integer('bonus'),
     bps: integer('bps'),
+    defensiveContribution: integer('defensive_contribution'),
     starts: boolean('starts'),
     expectedGoals: decimal('expected_goals', { precision: 10, scale: 2 }),
     expectedAssists: decimal('expected_assists', { precision: 10, scale: 2 }),

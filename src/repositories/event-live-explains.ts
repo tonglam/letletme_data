@@ -1,4 +1,4 @@
-import { sql } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 
 import {
@@ -10,7 +10,7 @@ import { getDb } from '../db/singleton';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 
-import type { EventLiveExplainRecord } from '../transformers/event-live-explains';
+import type { EventLiveExplain } from '../domain/event-live-explains';
 
 type DatabaseInstance = PostgresJsDatabase<Record<string, never>>;
 
@@ -18,7 +18,51 @@ export const createEventLiveExplainsRepository = (dbInstance?: DatabaseInstance)
   const getDbInstance = async () => dbInstance || (await getDb());
 
   return {
-    upsertBatch: async (records: EventLiveExplainRecord[]): Promise<DbEventLiveExplain[]> => {
+    findByEventId: async (eventId: number): Promise<EventLiveExplain[]> => {
+      try {
+        const db = await getDbInstance();
+        const rows = await db
+          .select()
+          .from(eventLiveExplains)
+          .where(eq(eventLiveExplains.eventId, eventId));
+        return rows.map((r) => ({
+          eventId: r.eventId,
+          elementId: r.elementId,
+          bonus: r.bonus,
+          minutes: r.minutes,
+          minutesPoints: r.minutesPoints,
+          goalsScored: r.goalsScored,
+          goalsScoredPoints: r.goalsScoredPoints,
+          assists: r.assists,
+          assistsPoints: r.assistsPoints,
+          cleanSheets: r.cleanSheets,
+          cleanSheetsPoints: r.cleanSheetsPoints,
+          goalsConceded: r.goalsConceded,
+          goalsConcededPoints: r.goalsConcededPoints,
+          ownGoals: r.ownGoals,
+          ownGoalsPoints: r.ownGoalsPoints,
+          penaltiesSaved: r.penaltiesSaved,
+          penaltiesSavedPoints: r.penaltiesSavedPoints,
+          penaltiesMissed: r.penaltiesMissed,
+          penaltiesMissedPoints: r.penaltiesMissedPoints,
+          yellowCards: r.yellowCards,
+          yellowCardsPoints: r.yellowCardsPoints,
+          redCards: r.redCards,
+          redCardsPoints: r.redCardsPoints,
+          saves: r.saves,
+          savesPoints: r.savesPoints,
+        }));
+      } catch (error) {
+        logError('Failed to find event live explains by event ID', error, { eventId });
+        throw new DatabaseError(
+          'Failed to find event live explains',
+          'FIND_BY_EVENT_ID_ERROR',
+          error instanceof Error ? error : undefined,
+        );
+      }
+    },
+
+    upsertBatch: async (records: EventLiveExplain[]): Promise<DbEventLiveExplain[]> => {
       try {
         if (records.length === 0) return [];
 

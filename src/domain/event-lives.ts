@@ -27,6 +27,7 @@ export interface EventLive {
   readonly saves: number | null;
   readonly bonus: number | null;
   readonly bps: number | null;
+  readonly defensiveContribution: number | null;
   readonly starts: boolean | null;
   readonly expectedGoals: string | null;
   readonly expectedAssists: string | null;
@@ -62,6 +63,7 @@ export const EventLiveSchema = z.object({
   saves: z.number().int().min(0).nullable(),
   bonus: z.number().int().min(0).max(3).nullable(),
   bps: z.number().int().min(0).nullable(),
+  defensiveContribution: z.number().int().min(0).nullable(),
   starts: z.boolean().nullable(),
   expectedGoals: z.string().nullable(),
   expectedAssists: z.string().nullable(),
@@ -103,81 +105,6 @@ export function safeValidateEventLive(data: unknown): EventLive | null {
 // ================================
 // Domain Business Logic
 // ================================
-
-/**
- * Calculate total points from individual stats
- * (For validation purposes - the API provides the actual value)
- */
-export function calculateTotalPoints(eventLive: EventLive): number {
-  let points = 0;
-
-  // Minutes played
-  if (eventLive.minutes !== null) {
-    if (eventLive.minutes > 0 && eventLive.minutes < 60) {
-      points += 1;
-    } else if (eventLive.minutes >= 60) {
-      points += 2;
-    }
-  }
-
-  // Goals scored (varies by position)
-  if (eventLive.goalsScored !== null) {
-    points += eventLive.goalsScored * 4; // Simplified - actual scoring depends on player position
-  }
-
-  // Assists
-  if (eventLive.assists !== null) {
-    points += eventLive.assists * 3;
-  }
-
-  // Clean sheets (varies by position)
-  if (eventLive.cleanSheets !== null && eventLive.cleanSheets > 0) {
-    points += 4; // Simplified - actual scoring depends on player position
-  }
-
-  // Goals conceded (defenders and goalkeepers only)
-  if (eventLive.goalsConceded !== null) {
-    const goalsPenalty = Math.floor(eventLive.goalsConceded / 2);
-    points -= goalsPenalty;
-  }
-
-  // Own goals
-  if (eventLive.ownGoals !== null) {
-    points -= eventLive.ownGoals * 2;
-  }
-
-  // Penalties saved
-  if (eventLive.penaltiesSaved !== null) {
-    points += eventLive.penaltiesSaved * 5;
-  }
-
-  // Penalties missed
-  if (eventLive.penaltiesMissed !== null) {
-    points -= eventLive.penaltiesMissed * 2;
-  }
-
-  // Yellow cards
-  if (eventLive.yellowCards !== null) {
-    points -= eventLive.yellowCards;
-  }
-
-  // Red cards
-  if (eventLive.redCards !== null) {
-    points -= eventLive.redCards * 3;
-  }
-
-  // Saves (goalkeepers only)
-  if (eventLive.saves !== null) {
-    points += Math.floor(eventLive.saves / 3);
-  }
-
-  // Bonus points
-  if (eventLive.bonus !== null) {
-    points += eventLive.bonus;
-  }
-
-  return Math.max(points, 0); // Minimum 0 points
-}
 
 /**
  * Check if a player played in the event

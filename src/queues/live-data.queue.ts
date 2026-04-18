@@ -9,7 +9,10 @@ export const LIVE_JOBS = {
   EVENT_LIVES_DB: 'event-lives-db',
   EVENT_LIVE_SUMMARY: 'event-live-summary',
   EVENT_LIVE_EXPLAIN: 'event-live-explain',
+  LIVE_FIXTURE_CACHE: 'live-fixture-cache',
+  LIVE_BONUS_CACHE: 'live-bonus-cache',
   EVENT_OVERALL_RESULT: 'event-overall-result',
+  LIVE_SCORES: 'live-scores',
 } as const;
 
 export type LiveDataJobName = (typeof LIVE_JOBS)[keyof typeof LIVE_JOBS];

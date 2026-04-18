@@ -25,7 +25,10 @@ export const phasesCache = {
           phaseFields[phase.id.toString()] = JSON.stringify(phase);
         }
         pipeline.hset(key, phaseFields);
-        pipeline.expire(key, CACHE_TTL.PHASES);
+        // Only set expiration if TTL > 0 (TTL -1 means no expiration)
+        if (CACHE_TTL.PHASES > 0) {
+          pipeline.expire(key, CACHE_TTL.PHASES);
+        }
       }
 
       await pipeline.exec();
