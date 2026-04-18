@@ -55,8 +55,8 @@ jobs:
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.GHCR_TOKEN }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push image
         run: |
@@ -75,8 +75,8 @@ jobs:
         env:
           DEPLOY_SHA: ${{ env.DEPLOY_SHA }}
           IMAGE_REF: ${{ env.IMAGE_REF }}
-          GHCR_USER: ${{ github.repository_owner }}
-          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VPS_WORKDIR: ${{ secrets.VPS_WORKDIR }}
         with:
           host: ${{ secrets.VPS_HOST }}
