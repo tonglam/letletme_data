@@ -31,10 +31,7 @@ const RawFPLEventSchema = z.object({
   is_next: z.boolean(),
   cup_leagues_created: z.boolean(),
   h2h_ko_matches_created: z.boolean(),
-  chip_plays: z
-    .array(ChipPlaySchema)
-    .optional()
-    .default([]),
+  chip_plays: z.array(ChipPlaySchema).optional().default([]),
   most_selected: z.number().nullable().optional(),
   most_transferred_in: z.number().nullable().optional(),
   top_element: z.number().nullable().optional(),

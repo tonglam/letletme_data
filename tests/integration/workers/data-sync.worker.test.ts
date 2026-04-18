@@ -2,13 +2,11 @@ import { QueueEvents } from 'bullmq';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 
 import { dataSyncQueue } from '../../../src/queues/data-sync.queue';
-import { getCurrentEvent } from '../../../src/services/events.service';
 import { getQueueConnection } from '../../../src/utils/queue';
 import { dataSyncWorker } from '../../../src/workers/data-sync.worker';
 
 describe('Data Sync Worker Integration Tests', () => {
   let queueEvents: QueueEvents;
-  let testEventId: number;
 
   beforeAll(
     async () => {
@@ -17,12 +15,6 @@ describe('Data Sync Worker Integration Tests', () => {
       queueEvents = new QueueEvents(dataSyncQueue.name, {
         connection: getQueueConnection(),
       });
-
-      const currentEvent = await getCurrentEvent();
-      if (!currentEvent) {
-        throw new Error('No current event found');
-      }
-      testEventId = currentEvent.id;
 
       await dataSyncQueue.drain();
       await dataSyncQueue.clean(0, 0, 'completed');
@@ -49,10 +41,8 @@ describe('Data Sync Worker Integration Tests', () => {
 
   describe('Queue Operations', () => {
     test('should accept jobs', async () => {
-      const countBefore = await dataSyncQueue.getJobCounts();
-
       // Add a test job (if data sync jobs exist)
-      // await dataSyncQueue.add('test-job', { eventId: testEventId });
+      // await dataSyncQueue.add('test-job', {});
 
       const countAfter = await dataSyncQueue.getJobCounts();
 

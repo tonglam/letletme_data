@@ -122,7 +122,9 @@ export interface RawFPLEvent {
     element_types: unknown[];
     pick_multiplier: unknown;
   };
-  chip_plays: Array<{ chip_name: string; num_played: number } | { name: string; num_played: number }>;
+  chip_plays: Array<
+    { chip_name: string; num_played: number } | { name: string; num_played: number }
+  >;
   most_selected: number | null;
   most_transferred_in: number | null;
   top_element: number | null;

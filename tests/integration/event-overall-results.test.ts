@@ -49,7 +49,7 @@ describe('Event Overall Results Integration Tests', () => {
     });
 
     test('should handle re-sync without errors', async () => {
-      const sync1 = await syncEventOverallResult();
+      await syncEventOverallResult();
       const sync2 = await syncEventOverallResult();
 
       // Should have same count (all events)
@@ -207,7 +207,7 @@ describe('Event Overall Results Integration Tests', () => {
     });
 
     test('should replace cache on re-sync', async () => {
-      const sync1 = await syncEventOverallResult();
+      await syncEventOverallResult();
       const cache1 = await eventOverallResultCache.getAll();
 
       const sync2 = await syncEventOverallResult();
@@ -332,7 +332,7 @@ describe('Event Overall Results Integration Tests', () => {
           event.chipPlays.forEach((chip) => {
             // Chip name should be one of the known types (or similar)
             const chipNameLower = chip.chipName.toLowerCase();
-            const isKnownChip = knownChips.some((known) => chipNameLower.includes(known));
+            knownChips.some((known) => chipNameLower.includes(known));
             // Just verify it's a non-empty string, as FPL may add new chips
             expect(chip.chipName.length).toBeGreaterThan(0);
           });
