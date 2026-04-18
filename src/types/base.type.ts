@@ -31,8 +31,7 @@ export type ValueChangeType = 'Start' | 'Rise' | 'Faller';
 // Domain ID Types (for consistency with existing project)
 // ================================
 
-// Reexport existing types with new aliases for player stats domain
-export type { EventID as EventId, PlayerID as PlayerId, TeamID as TeamId } from './index';
+export type { EventId, PlayerId, TeamId } from './index';
 
 // Type aliases for player values domain
 export type PlayerTypeID = ElementTypeId;

@@ -1,7 +1,7 @@
 import { cron } from '@elysiajs/cron';
 import type { Elysia } from 'elysia';
 
-import { enqueueEntryPicksSyncJob } from './entry-sync.queue';
+import { enqueueEntryPicksSyncJob } from './entry-sync-enqueue';
 import { getCurrentEvent } from '../services/events.service';
 import { isFPLSeason, isSelectTime } from '../utils/conditions';
 import { loadFixturesByEvent } from '../utils/fixtures';

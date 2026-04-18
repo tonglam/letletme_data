@@ -1,8 +1,8 @@
 import { createDataSyncWorker } from './workers/data-sync.worker';
 import { createEntrySyncWorker } from './workers/entry-sync.worker';
-import { liveDataWorker } from './workers/live-data.worker';
-import { leagueSyncWorker } from './workers/league-sync.worker';
-import { tournamentSyncWorker } from './workers/tournament-sync.worker';
+import { createLiveDataWorker } from './workers/live-data.worker';
+import { createLeagueSyncWorker } from './workers/league-sync.worker';
+import { createTournamentSyncWorker } from './workers/tournament-sync.worker';
 import { dataSyncQueue } from './queues/data-sync.queue';
 import { entrySyncQueue } from './queues/entry-sync.queue';
 import { liveDataQueue } from './queues/live-data.queue';
@@ -16,19 +16,22 @@ getConfig();
 
 const { worker: dataSyncWorker, queueEvents: dataSyncEvents } = createDataSyncWorker();
 const { worker: entrySyncWorker, queueEvents: entrySyncEvents } = createEntrySyncWorker();
+const { worker: liveDataWorker, queueEvents: liveDataEvents } = createLiveDataWorker();
+const { worker: leagueSyncWorker, queueEvents: leagueSyncEvents } = createLeagueSyncWorker();
+const { worker: tournamentSyncWorker, queueEvents: tournamentSyncEvents } =
+  createTournamentSyncWorker();
 
-const dataSyncMonitor = startQueueMonitor({
-  queue: dataSyncQueue,
-  queueEvents: dataSyncEvents,
+const dataSyncMonitor = startQueueMonitor({ queue: dataSyncQueue, queueEvents: dataSyncEvents });
+const entrySyncMonitor = startQueueMonitor({ queue: entrySyncQueue, queueEvents: entrySyncEvents });
+const liveDataMonitor = startQueueMonitor({ queue: liveDataQueue, queueEvents: liveDataEvents });
+const leagueSyncMonitor = startQueueMonitor({
+  queue: leagueSyncQueue,
+  queueEvents: leagueSyncEvents,
 });
-const entrySyncMonitor = startQueueMonitor({
-  queue: entrySyncQueue,
-  queueEvents: entrySyncEvents,
+const tournamentSyncMonitor = startQueueMonitor({
+  queue: tournamentSyncQueue,
+  queueEvents: tournamentSyncEvents,
 });
-
-logInfo('Live data worker initialized');
-logInfo('League sync worker initialized');
-logInfo('Tournament sync worker initialized');
 
 async function shutdown(signal: string) {
   logInfo('Worker shutting down', { signal });
@@ -38,14 +41,20 @@ async function shutdown(signal: string) {
     entrySyncWorker.close(),
     entrySyncEvents.close(),
     liveDataWorker.close(),
+    liveDataEvents.close(),
     liveDataQueue.close(),
     leagueSyncWorker.close(),
+    leagueSyncEvents.close(),
     leagueSyncQueue.close(),
     tournamentSyncWorker.close(),
+    tournamentSyncEvents.close(),
     tournamentSyncQueue.close(),
   ]);
   dataSyncMonitor.stop();
   entrySyncMonitor.stop();
+  liveDataMonitor.stop();
+  leagueSyncMonitor.stop();
+  tournamentSyncMonitor.stop();
   process.exit(0);
 }
 

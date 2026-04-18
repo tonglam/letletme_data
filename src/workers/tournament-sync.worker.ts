@@ -1,4 +1,4 @@
-import { Worker, Job } from 'bullmq';
+import { Worker, Job, QueueEvents } from 'bullmq';
 
 import {
   tournamentSyncQueueName,
@@ -86,103 +86,110 @@ async function enqueueTournamentCascade(eventId: number) {
  * Architecture:
  * event-results (base) → [points-race, battle-race, knockout, transfers-post, cup-results] (parallel)
  */
-export const tournamentSyncWorker = new Worker<TournamentSyncJobData>(
-  tournamentSyncQueueName,
-  async (job: Job<TournamentSyncJobData>) => {
-    const { eventId, source } = job.data;
+export function createTournamentSyncWorker() {
+  const connection = getQueueConnection();
+  const queueEvents = new QueueEvents(tournamentSyncQueueName, { connection });
 
-    logInfo('Processing tournament sync job', {
+  const worker = new Worker<TournamentSyncJobData>(
+    tournamentSyncQueueName,
+    async (job: Job<TournamentSyncJobData>) => {
+      const { eventId, source } = job.data;
+
+      logInfo('Processing tournament sync job', {
+        jobId: job.id,
+        jobName: job.name,
+        eventId,
+        source,
+        attempt: job.attemptsMade + 1,
+      });
+
+      try {
+        switch (job.name) {
+          case TOURNAMENT_JOBS.EVENT_RESULTS:
+            // Base job: sync results then trigger cascade
+            await syncTournamentEventResults(eventId);
+            await enqueueTournamentCascade(eventId);
+            break;
+
+          case TOURNAMENT_JOBS.POINTS_RACE:
+            await syncTournamentPointsRaceResults(eventId);
+            break;
+
+          case TOURNAMENT_JOBS.BATTLE_RACE:
+            await syncTournamentBattleRaceResults(eventId);
+            break;
+
+          case TOURNAMENT_JOBS.KNOCKOUT:
+            await syncTournamentKnockoutResults(eventId);
+            break;
+
+          case TOURNAMENT_JOBS.TRANSFERS_POST:
+            await syncTournamentEventTransfersPost(eventId);
+            break;
+
+          case TOURNAMENT_JOBS.CUP_RESULTS:
+            await syncTournamentEventCupResults(eventId);
+            break;
+
+          case TOURNAMENT_JOBS.EVENT_PICKS:
+            await syncTournamentEventPicks(eventId);
+            break;
+
+          case TOURNAMENT_JOBS.TRANSFERS_PRE:
+            await syncTournamentEventTransfersPre(eventId);
+            break;
+
+          case TOURNAMENT_JOBS.INFO:
+            await syncTournamentInfo();
+            break;
+
+          default:
+            throw new Error(`Unknown job name: ${job.name}`);
+        }
+
+        logInfo('Tournament sync job completed', {
+          jobId: job.id,
+          jobName: job.name,
+          eventId,
+          attempt: job.attemptsMade + 1,
+        });
+      } catch (error) {
+        logError('Tournament sync job failed', error, {
+          jobId: job.id,
+          jobName: job.name,
+          eventId,
+          attempt: job.attemptsMade + 1,
+        });
+        throw error;
+      }
+    },
+    {
+      connection,
+      concurrency: 10,
+      removeOnComplete: { count: 100 },
+      removeOnFail: { count: 50 },
+    },
+  );
+
+  worker.on('completed', (job) => {
+    logInfo('Tournament sync worker completed job', {
       jobId: job.id,
       jobName: job.name,
-      eventId,
-      source,
-      attempt: job.attemptsMade + 1,
+      eventId: job.data.eventId,
     });
-
-    try {
-      switch (job.name) {
-        case TOURNAMENT_JOBS.EVENT_RESULTS:
-          // Base job: sync results then trigger cascade
-          await syncTournamentEventResults(eventId);
-          await enqueueTournamentCascade(eventId);
-          break;
-
-        case TOURNAMENT_JOBS.POINTS_RACE:
-          await syncTournamentPointsRaceResults(eventId);
-          break;
-
-        case TOURNAMENT_JOBS.BATTLE_RACE:
-          await syncTournamentBattleRaceResults(eventId);
-          break;
-
-        case TOURNAMENT_JOBS.KNOCKOUT:
-          await syncTournamentKnockoutResults(eventId);
-          break;
-
-        case TOURNAMENT_JOBS.TRANSFERS_POST:
-          await syncTournamentEventTransfersPost(eventId);
-          break;
-
-        case TOURNAMENT_JOBS.CUP_RESULTS:
-          await syncTournamentEventCupResults(eventId);
-          break;
-
-        case TOURNAMENT_JOBS.EVENT_PICKS:
-          await syncTournamentEventPicks(eventId);
-          break;
-
-        case TOURNAMENT_JOBS.TRANSFERS_PRE:
-          await syncTournamentEventTransfersPre(eventId);
-          break;
-
-        case TOURNAMENT_JOBS.INFO:
-          await syncTournamentInfo();
-          break;
-
-        default:
-          throw new Error(`Unknown job name: ${job.name}`);
-      }
-
-      logInfo('Tournament sync job completed', {
-        jobId: job.id,
-        jobName: job.name,
-        eventId,
-        attempt: job.attemptsMade + 1,
-      });
-    } catch (error) {
-      logError('Tournament sync job failed', error, {
-        jobId: job.id,
-        jobName: job.name,
-        eventId,
-        attempt: job.attemptsMade + 1,
-      });
-      throw error;
-    }
-  },
-  {
-    connection: getQueueConnection(),
-    concurrency: 10, // Process up to 10 jobs in parallel
-    removeOnComplete: { count: 100 },
-    removeOnFail: { count: 50 },
-  },
-);
-
-tournamentSyncWorker.on('completed', (job) => {
-  logInfo('Tournament sync worker completed job', {
-    jobId: job.id,
-    jobName: job.name,
-    eventId: job.data.eventId,
   });
-});
 
-tournamentSyncWorker.on('failed', (job, err) => {
-  logError('Tournament sync worker failed job', err, {
-    jobId: job?.id,
-    jobName: job?.name,
-    eventId: job?.data.eventId,
+  worker.on('failed', (job, err) => {
+    logError('Tournament sync worker failed job', err, {
+      jobId: job?.id,
+      jobName: job?.name,
+      eventId: job?.data.eventId,
+    });
   });
-});
 
-tournamentSyncWorker.on('error', (err) => {
-  logError('Tournament sync worker error', err);
-});
+  worker.on('error', (err) => {
+    logError('Tournament sync worker error', err);
+  });
+
+  return { worker, queueEvents };
+}

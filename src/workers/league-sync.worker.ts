@@ -1,4 +1,4 @@
-import { Worker, Job } from 'bullmq';
+import { Worker, Job, QueueEvents } from 'bullmq';
 
 import {
   leagueSyncQueueName,
@@ -108,91 +108,98 @@ async function enqueueResultsPerTournament(eventId: number) {
  * - Failure isolation: One tournament failure doesn't block others
  * - Retry per tournament: Failed tournaments retry independently
  */
-export const leagueSyncWorker = new Worker<LeagueSyncJobData>(
-  leagueSyncQueueName,
-  async (job: Job<LeagueSyncJobData>) => {
-    const { eventId, tournamentId, source } = job.data;
+export function createLeagueSyncWorker() {
+  const connection = getQueueConnection();
+  const queueEvents = new QueueEvents(leagueSyncQueueName, { connection });
 
-    logInfo('Processing league sync job', {
-      jobId: job.id,
-      jobName: job.name,
-      eventId,
-      tournamentId,
-      source,
-      attempt: job.attemptsMade + 1,
-    });
+  const worker = new Worker<LeagueSyncJobData>(
+    leagueSyncQueueName,
+    async (job: Job<LeagueSyncJobData>) => {
+      const { eventId, tournamentId, source } = job.data;
 
-    try {
-      switch (job.name) {
-        case LEAGUE_JOBS.LEAGUE_EVENT_PICKS:
-          if (tournamentId) {
-            // Process specific tournament
-            const result = await syncLeagueEventPicksByTournament(tournamentId, eventId);
-            return result;
-          } else {
-            // Coordinator: enqueue per-tournament jobs
-            const result = await enqueuePicksPerTournament(eventId);
-            return result;
-          }
-
-        case LEAGUE_JOBS.LEAGUE_EVENT_RESULTS:
-          if (tournamentId) {
-            // Process specific tournament
-            const result = await syncLeagueEventResultsByTournament(tournamentId, eventId);
-            return result;
-          } else {
-            // Coordinator: enqueue per-tournament jobs
-            const result = await enqueueResultsPerTournament(eventId);
-            return result;
-          }
-
-        default:
-          throw new Error(`Unknown job name: ${job.name}`);
-      }
-    } catch (error) {
-      logError('League sync job failed', error, {
+      logInfo('Processing league sync job', {
         jobId: job.id,
         jobName: job.name,
         eventId,
         tournamentId,
+        source,
         attempt: job.attemptsMade + 1,
       });
-      throw error;
-    } finally {
-      logInfo('League sync job completed', {
-        jobId: job.id,
-        jobName: job.name,
-        eventId,
-        tournamentId,
-      });
-    }
-  },
-  {
-    connection: getQueueConnection(),
-    concurrency: 10, // Process up to 10 tournaments in parallel
-    removeOnComplete: { count: 100 },
-    removeOnFail: { count: 50 },
-  },
-);
 
-leagueSyncWorker.on('completed', (job) => {
-  logInfo('League sync worker completed job', {
-    jobId: job.id,
-    jobName: job.name,
-    eventId: job.data.eventId,
-    tournamentId: job.data.tournamentId,
+      try {
+        switch (job.name) {
+          case LEAGUE_JOBS.LEAGUE_EVENT_PICKS:
+            if (tournamentId) {
+              // Process specific tournament
+              const result = await syncLeagueEventPicksByTournament(tournamentId, eventId);
+              return result;
+            } else {
+              // Coordinator: enqueue per-tournament jobs
+              const result = await enqueuePicksPerTournament(eventId);
+              return result;
+            }
+
+          case LEAGUE_JOBS.LEAGUE_EVENT_RESULTS:
+            if (tournamentId) {
+              // Process specific tournament
+              const result = await syncLeagueEventResultsByTournament(tournamentId, eventId);
+              return result;
+            } else {
+              // Coordinator: enqueue per-tournament jobs
+              const result = await enqueueResultsPerTournament(eventId);
+              return result;
+            }
+
+          default:
+            throw new Error(`Unknown job name: ${job.name}`);
+        }
+      } catch (error) {
+        logError('League sync job failed', error, {
+          jobId: job.id,
+          jobName: job.name,
+          eventId,
+          tournamentId,
+          attempt: job.attemptsMade + 1,
+        });
+        throw error;
+      } finally {
+        logInfo('League sync job completed', {
+          jobId: job.id,
+          jobName: job.name,
+          eventId,
+          tournamentId,
+        });
+      }
+    },
+    {
+      connection,
+      concurrency: 10,
+      removeOnComplete: { count: 100 },
+      removeOnFail: { count: 50 },
+    },
+  );
+
+  worker.on('completed', (job) => {
+    logInfo('League sync worker completed job', {
+      jobId: job.id,
+      jobName: job.name,
+      eventId: job.data.eventId,
+      tournamentId: job.data.tournamentId,
+    });
   });
-});
 
-leagueSyncWorker.on('failed', (job, err) => {
-  logError('League sync worker failed job', err, {
-    jobId: job?.id,
-    jobName: job?.name,
-    eventId: job?.data.eventId,
-    tournamentId: job?.data.tournamentId,
+  worker.on('failed', (job, err) => {
+    logError('League sync worker failed job', err, {
+      jobId: job?.id,
+      jobName: job?.name,
+      eventId: job?.data.eventId,
+      tournamentId: job?.data.tournamentId,
+    });
   });
-});
 
-leagueSyncWorker.on('error', (err) => {
-  logError('League sync worker error', err);
-});
+  worker.on('error', (err) => {
+    logError('League sync worker error', err);
+  });
+
+  return { worker, queueEvents };
+}

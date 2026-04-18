@@ -8,7 +8,7 @@ import {
   enqueuePhasesSyncJob,
   enqueuePlayersSyncJob,
   enqueueTeamsSyncJob,
-} from './data-sync.queue';
+} from './data-sync-enqueue';
 import { isFPLSeason } from '../utils/conditions';
 import { logError, logInfo } from '../utils/logger';
 

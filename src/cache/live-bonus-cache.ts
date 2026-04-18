@@ -1,6 +1,6 @@
 import { getCurrentSeason } from '../utils/conditions';
 import { logDebug, logError, logInfo } from '../utils/logger';
-import { CACHE_TTL, redisSingleton } from './singleton';
+import { redisSingleton } from './singleton';
 
 import type { EventId } from '../types/base.type';
 import type { LiveBonusByTeam } from '../domain/live-bonus';
@@ -29,11 +29,6 @@ export const liveBonusCache = {
           fields[teamId] = JSON.stringify(byTeam[teamId]);
         }
         pipeline.hset(key, fields);
-
-        // TTL -1 means no expiration; only set expire when TTL > 0
-        if (CACHE_TTL.LIVE_BONUS > 0) {
-          pipeline.expire(key, CACHE_TTL.LIVE_BONUS);
-        }
       }
 
       await pipeline.exec();

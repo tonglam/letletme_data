@@ -1,5 +1,5 @@
 import { logDebug, logError } from '../utils/logger';
-import { CACHE_TTL, redisSingleton } from './singleton';
+import { redisSingleton } from './singleton';
 
 import type { PlayerValue } from '../domain/player-values';
 
@@ -23,10 +23,6 @@ export const playerValuesCache = {
           valueFields[playerValue.elementId.toString()] = JSON.stringify(playerValue);
         }
         pipeline.hset(key, valueFields);
-        // Only set expiration if TTL > 0 (TTL -1 means no expiration)
-        if (CACHE_TTL.player_values > 0) {
-          pipeline.expire(key, CACHE_TTL.player_values);
-        }
       }
 
       await pipeline.exec();

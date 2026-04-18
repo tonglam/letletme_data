@@ -1,6 +1,6 @@
 import { getCurrentSeason } from '../utils/conditions';
 import { logDebug, logError } from '../utils/logger';
-import { CACHE_TTL, redisSingleton } from './singleton';
+import { redisSingleton } from './singleton';
 
 import type { Phase } from '../types';
 
@@ -25,10 +25,6 @@ export const phasesCache = {
           phaseFields[phase.id.toString()] = JSON.stringify(phase);
         }
         pipeline.hset(key, phaseFields);
-        // Only set expiration if TTL > 0 (TTL -1 means no expiration)
-        if (CACHE_TTL.PHASES > 0) {
-          pipeline.expire(key, CACHE_TTL.PHASES);
-        }
       }
 
       await pipeline.exec();

@@ -1,7 +1,7 @@
 import { cron } from '@elysiajs/cron';
 import type { Elysia } from 'elysia';
 
-import { enqueueEntryResultsSyncJob } from './entry-sync.queue';
+import { enqueueEntryResultsSyncJob } from './entry-sync-enqueue';
 import { logError, logInfo } from '../utils/logger';
 
 /**

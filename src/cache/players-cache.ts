@@ -1,7 +1,7 @@
 import { getCurrentSeason } from '../utils/conditions';
 import { CacheError } from '../utils/errors';
 import { logDebug, logError } from '../utils/logger';
-import { CACHE_TTL, redisSingleton } from './singleton';
+import { redisSingleton } from './singleton';
 
 import type { Player } from '../types';
 
@@ -59,11 +59,6 @@ const createPlayerHashCache = () => {
         const serialized = JSON.stringify(player);
 
         await redis.hset(key, playerId.toString(), serialized);
-
-        // Set expiration on the hash key (only if TTL > 0)
-        if (CACHE_TTL.PLAYERS > 0) {
-          await redis.expire(key, CACHE_TTL.PLAYERS);
-        }
 
         logDebug('Player cache set', { playerId, key });
       } catch (error) {
@@ -141,10 +136,6 @@ const createPlayerHashCache = () => {
 
         // Set all players in single hash operation
         pipeline.hset(key, hashEntries);
-        // Only set expiration if TTL > 0 (TTL -1 means no expiration)
-        if (CACHE_TTL.PLAYERS > 0) {
-          pipeline.expire(key, CACHE_TTL.PLAYERS);
-        }
 
         // No metadata key needed
 

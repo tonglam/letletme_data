@@ -5,8 +5,11 @@ export type { EventChipData, EventTopElementData };
 
 // Core domain types
 export type EventID = number;
+export type EventId = EventID;
 export type PlayerID = number;
+export type PlayerId = PlayerID;
 export type TeamID = number;
+export type TeamId = TeamID;
 export type EntryID = number;
 export type PhaseID = number;
 export type FixtureID = number;

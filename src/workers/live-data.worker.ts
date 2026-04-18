@@ -1,4 +1,4 @@
-import { Worker, Job } from 'bullmq';
+import { Worker, Job, QueueEvents } from 'bullmq';
 
 import { liveDataQueueName, LIVE_JOBS, type LiveDataJobData } from '../queues/live-data.queue';
 import { syncEventLives, updateEventLivesCache } from '../services/event-lives.service';
@@ -71,99 +71,106 @@ async function enqueueCascadeJobs(eventId: number) {
  * - event-live-explain: Sync explain data (cascade)
  * - event-overall-result: Sync overall results (cascade)
  */
-export const liveDataWorker = new Worker<LiveDataJobData>(
-  liveDataQueueName,
-  async (job: Job<LiveDataJobData>) => {
-    const { eventId, source } = job.data;
+export function createLiveDataWorker() {
+  const connection = getQueueConnection();
+  const queueEvents = new QueueEvents(liveDataQueueName, { connection });
 
-    logInfo('Processing live data job', {
+  const worker = new Worker<LiveDataJobData>(
+    liveDataQueueName,
+    async (job: Job<LiveDataJobData>) => {
+      const { eventId, source } = job.data;
+
+      logInfo('Processing live data job', {
+        jobId: job.id,
+        jobName: job.name,
+        eventId,
+        source,
+        attempt: job.attemptsMade + 1,
+      });
+
+      try {
+        switch (job.name) {
+          case LIVE_JOBS.EVENT_LIVES_CACHE:
+            await updateEventLivesCache(eventId);
+            break;
+
+          case LIVE_JOBS.EVENT_LIVES_DB:
+            await syncEventLives(eventId);
+            // After DB sync completes, trigger dependent jobs
+            await enqueueCascadeJobs(eventId);
+            break;
+
+          case LIVE_JOBS.EVENT_LIVE_SUMMARY:
+            await syncEventLiveSummary();
+            break;
+
+          case LIVE_JOBS.EVENT_LIVE_EXPLAIN:
+            await syncEventLiveExplain(eventId);
+            break;
+
+          case LIVE_JOBS.LIVE_FIXTURE_CACHE:
+            await syncLiveFixtureCache(eventId);
+            break;
+
+          case LIVE_JOBS.LIVE_BONUS_CACHE:
+            await syncLiveBonusCache(eventId);
+            break;
+
+          case LIVE_JOBS.EVENT_OVERALL_RESULT:
+            await syncEventOverallResult();
+            break;
+
+          case LIVE_JOBS.LIVE_SCORES:
+            await syncLiveScores(eventId);
+            break;
+
+          default:
+            throw new Error(`Unknown job name: ${job.name}`);
+        }
+
+        logInfo('Live data job completed', {
+          jobId: job.id,
+          jobName: job.name,
+          eventId,
+          attempt: job.attemptsMade + 1,
+        });
+      } catch (error) {
+        logError('Live data job failed', error, {
+          jobId: job.id,
+          jobName: job.name,
+          eventId,
+          attempt: job.attemptsMade + 1,
+        });
+        throw error;
+      }
+    },
+    {
+      connection,
+      concurrency: 5,
+      removeOnComplete: { count: 100 },
+      removeOnFail: { count: 50 },
+    },
+  );
+
+  worker.on('completed', (job) => {
+    logInfo('Live data worker completed job', {
       jobId: job.id,
       jobName: job.name,
-      eventId,
-      source,
-      attempt: job.attemptsMade + 1,
+      eventId: job.data.eventId,
     });
-
-    try {
-      switch (job.name) {
-        case LIVE_JOBS.EVENT_LIVES_CACHE:
-          await updateEventLivesCache(eventId);
-          break;
-
-        case LIVE_JOBS.EVENT_LIVES_DB:
-          await syncEventLives(eventId);
-          // After DB sync completes, trigger dependent jobs
-          await enqueueCascadeJobs(eventId);
-          break;
-
-        case LIVE_JOBS.EVENT_LIVE_SUMMARY:
-          await syncEventLiveSummary();
-          break;
-
-        case LIVE_JOBS.EVENT_LIVE_EXPLAIN:
-          await syncEventLiveExplain(eventId);
-          break;
-
-        case LIVE_JOBS.LIVE_FIXTURE_CACHE:
-          await syncLiveFixtureCache(eventId);
-          break;
-
-        case LIVE_JOBS.LIVE_BONUS_CACHE:
-          await syncLiveBonusCache(eventId);
-          break;
-
-        case LIVE_JOBS.EVENT_OVERALL_RESULT:
-          await syncEventOverallResult();
-          break;
-
-        case LIVE_JOBS.LIVE_SCORES:
-          await syncLiveScores(eventId);
-          break;
-
-        default:
-          throw new Error(`Unknown job name: ${job.name}`);
-      }
-
-      logInfo('Live data job completed', {
-        jobId: job.id,
-        jobName: job.name,
-        eventId,
-        attempt: job.attemptsMade + 1,
-      });
-    } catch (error) {
-      logError('Live data job failed', error, {
-        jobId: job.id,
-        jobName: job.name,
-        eventId,
-        attempt: job.attemptsMade + 1,
-      });
-      throw error;
-    }
-  },
-  {
-    connection: getQueueConnection(),
-    concurrency: 5, // Process up to 5 jobs in parallel
-    removeOnComplete: { count: 100 },
-    removeOnFail: { count: 50 },
-  },
-);
-
-liveDataWorker.on('completed', (job) => {
-  logInfo('Live data worker completed job', {
-    jobId: job.id,
-    jobName: job.name,
-    eventId: job.data.eventId,
   });
-});
 
-liveDataWorker.on('failed', (job, err) => {
-  logError('Live data worker failed job', err, {
-    jobId: job?.id,
-    jobName: job?.name,
-    eventId: job?.data.eventId,
+  worker.on('failed', (job, err) => {
+    logError('Live data worker failed job', err, {
+      jobId: job?.id,
+      jobName: job?.name,
+      eventId: job?.data.eventId,
+    });
   });
-});
 
-liveDataWorker.on('error', (err) => {
-  logError('Live data worker error', err);
-});
+  worker.on('error', (err) => {
+    logError('Live data worker error', err);
+  });
+
+  return { worker, queueEvents };
+}

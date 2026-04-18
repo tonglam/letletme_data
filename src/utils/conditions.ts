@@ -6,7 +6,6 @@
  */
 
 import type { Event, Fixture } from '../types';
-import { logInfo } from './logger';
 
 /**
  * Check if it's currently FPL season (August to May)
@@ -14,22 +13,6 @@ import { logInfo } from './logger';
 export function isFPLSeason(date = new Date()): boolean {
   const month = date.getMonth() + 1; // 1-based month
   return month >= 8 || month <= 5; // Aug-May
-}
-
-/**
- * Check if it's currently weekend (Saturday or Sunday)
- */
-export function isWeekend(date = new Date()): boolean {
-  const day = date.getDay();
-  return day === 0 || day === 6; // Sunday or Saturday
-}
-
-/**
- * Check if it's during match hours (6 AM to 11 PM)
- */
-export function isMatchHours(date = new Date()): boolean {
-  const hour = date.getHours();
-  return hour >= 6 && hour <= 23;
 }
 
 function toUtcDateString(date: Date): string {
@@ -108,25 +91,6 @@ export function isSelectTime(event: Event, fixtures: Fixture[], date = new Date(
 
   const now = date.getTime();
   return now >= windowStart && now <= windowEnd;
-}
-
-/**
- * Check if all conditions for live scores update are met
- */
-export function shouldRunLiveScores(date = new Date()): boolean {
-  const weekend = isWeekend(date);
-  const season = isFPLSeason(date);
-  const matchHours = isMatchHours(date);
-
-  logInfo('Live scores conditions check', {
-    isWeekend: weekend,
-    isFPLSeason: season,
-    isMatchHours: matchHours,
-    month: date.getMonth() + 1,
-    hour: date.getHours(),
-  });
-
-  return weekend && season && matchHours;
 }
 
 /**

@@ -2,7 +2,7 @@ import type { Redis } from 'ioredis';
 
 import { getCurrentSeason } from '../utils/conditions';
 import { logDebug, logError } from '../utils/logger';
-import { CACHE_TTL, redisSingleton } from './singleton';
+import { redisSingleton } from './singleton';
 
 import type { Fixture } from '../types';
 
@@ -37,10 +37,6 @@ export const fixturesCache = {
           fields[fixture.id.toString()] = JSON.stringify(fixture);
         }
         pipeline.hset(key, fields);
-        // Only set expiration if TTL > 0 (TTL -1 means no expiration)
-        if (CACHE_TTL.FIXTURES > 0) {
-          pipeline.expire(key, CACHE_TTL.FIXTURES);
-        }
       }
 
       await pipeline.exec();
@@ -84,10 +80,6 @@ export const fixturesCache = {
           fields[fixture.id.toString()] = JSON.stringify(fixture);
         }
         pipeline.hset(key, fields);
-        // Only set expiration if TTL > 0 (TTL -1 means no expiration)
-        if (CACHE_TTL.FIXTURES > 0) {
-          pipeline.expire(key, CACHE_TTL.FIXTURES);
-        }
       }
 
       if (unscheduled.length > 0) {
@@ -97,10 +89,6 @@ export const fixturesCache = {
           fields[fixture.id.toString()] = JSON.stringify(fixture);
         }
         pipeline.hset(key, fields);
-        // Only set expiration if TTL > 0 (TTL -1 means no expiration)
-        if (CACHE_TTL.FIXTURES > 0) {
-          pipeline.expire(key, CACHE_TTL.FIXTURES);
-        }
       }
 
       await pipeline.exec();

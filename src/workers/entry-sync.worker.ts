@@ -18,7 +18,7 @@ import {
   enqueueEntryResultsSyncJob,
   enqueueEntryTransfersSyncJob,
   type EntrySyncJobOptions,
-} from '../jobs/entry-sync.queue';
+} from '../jobs/entry-sync-enqueue';
 import { syncEntryInfo } from '../services/entry-info.service';
 import {
   syncEntryEventPicks,

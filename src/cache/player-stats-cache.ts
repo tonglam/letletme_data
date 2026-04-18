@@ -1,7 +1,7 @@
 import { getCurrentSeason } from '../utils/conditions';
 import { CacheError } from '../utils/errors';
 import { logDebug, logError } from '../utils/logger';
-import { CACHE_TTL, redisSingleton } from './singleton';
+import { redisSingleton } from './singleton';
 
 import type { PlayerStat } from '../domain/player-stats';
 import type { EventId } from '../types/base.type';
@@ -70,10 +70,6 @@ export const createPlayerStatsHashCache = () => {
         }
 
         pipeline.hset(key, hashEntries);
-        // Only set expiration if TTL > 0 (TTL -1 means no expiration)
-        if (CACHE_TTL.PLAYER_STATS > 0) {
-          pipeline.expire(key, CACHE_TTL.PLAYER_STATS);
-        }
 
         await pipeline.exec();
         logDebug('Player stats cache batch set by event', {

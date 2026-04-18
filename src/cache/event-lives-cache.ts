@@ -1,6 +1,6 @@
 import { getCurrentSeason } from '../utils/conditions';
 import { logDebug, logError, logInfo } from '../utils/logger';
-import { CACHE_TTL, redisSingleton } from './singleton';
+import { redisSingleton } from './singleton';
 
 import type { EventLive } from '../domain/event-lives';
 import type { EventId } from '../types/base.type';
@@ -55,10 +55,6 @@ export const eventLivesCache = {
       // Clear existing hash and set new data
       await redis.del(key);
       await redis.hset(key, hashData);
-      // Only set expiration if TTL > 0 (TTL -1 means no expiration)
-      if (CACHE_TTL.EVENT_LIVE > 0) {
-        await redis.expire(key, CACHE_TTL.EVENT_LIVE);
-      }
 
       logInfo('Event lives cached', { eventId, count: eventLives.length });
     } catch (error) {

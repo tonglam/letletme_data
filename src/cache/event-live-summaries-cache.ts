@@ -1,6 +1,6 @@
 import { getCurrentSeason } from '../utils/conditions';
 import { logDebug, logError, logInfo } from '../utils/logger';
-import { CACHE_TTL, redisSingleton } from './singleton';
+import { redisSingleton } from './singleton';
 
 import type { EventLiveSummary } from '../domain/event-live-summaries';
 import type { EventId } from '../types/base.type';
@@ -47,10 +47,6 @@ export const eventLiveSummaryCache = {
 
       await redis.del(key);
       await redis.hset(key, hashData);
-      // Only set expiration if TTL > 0 (TTL -1 means no expiration)
-      if (CACHE_TTL.EVENT_LIVE_SUMMARY > 0) {
-        await redis.expire(key, CACHE_TTL.EVENT_LIVE_SUMMARY);
-      }
 
       logInfo('Event live summaries cached', { eventId, count: summaries.length });
     } catch (error) {

@@ -2,8 +2,6 @@ import type { QueueOptions } from 'bullmq';
 
 import { getConfig } from './config';
 
-export const DATA_SYNC_QUEUE_NAME = 'data-sync';
-
 export type QueueConnection = QueueOptions['connection'];
 
 export function getQueueConnection(): QueueConnection {

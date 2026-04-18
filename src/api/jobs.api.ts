@@ -8,7 +8,7 @@ import {
   enqueuePlayerStatsSyncJob,
   enqueuePlayerValuesSyncJob,
   enqueueTeamsSyncJob,
-} from '../jobs/data-sync.queue';
+} from '../jobs/data-sync-enqueue';
 import { runLeagueEventPicksSync } from '../jobs/league-event-picks.jobs';
 import { runLeagueEventResultsSync } from '../jobs/league-event-results.jobs';
 import {
