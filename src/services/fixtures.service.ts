@@ -59,8 +59,21 @@ export async function syncFixtures(eventId?: number): Promise<{ count: number; e
       ...logContext,
     });
 
-    // 3. Save to database (batch upsert)
-    const savedFixtures = await fixtureRepository.upsertBatch(fixtures);
+    const unscheduledFixtures = fixtures.filter((fixture) => fixture.event === null);
+    const schedulableFixtures = fixtures.filter((fixture) => fixture.event !== null);
+
+    if (unscheduledFixtures.length > 0) {
+      // Some FPL fixtures can be temporarily unscheduled (event = null).
+      // Current DB schema in production may reject null event_id, so skip DB upsert for these
+      // while still allowing scheduled fixtures to sync successfully.
+      logWarn('Skipping unscheduled fixtures for DB upsert', {
+        unscheduledCount: unscheduledFixtures.length,
+        fixtureIds: unscheduledFixtures.map((fixture) => fixture.id),
+      });
+    }
+
+    // 3. Save scheduled fixtures to database (batch upsert)
+    const savedFixtures = await fixtureRepository.upsertBatch(schedulableFixtures);
     logInfo('Fixtures upserted to database', { count: savedFixtures.length, ...logContext });
 
     // 4. Update cache with event-specific fixtures
@@ -68,8 +81,8 @@ export async function syncFixtures(eventId?: number): Promise<{ count: number; e
       // Cache fixtures for specific event
       await fixturesCache.setByEvent(eventId, savedFixtures);
     } else {
-      // Cache all fixtures (grouped by event)
-      await fixturesCache.set(savedFixtures);
+      // Cache all fixtures (grouped by event), including unscheduled records directly from FPL.
+      await fixturesCache.set([...savedFixtures, ...unscheduledFixtures]);
     }
 
     if (eventId && staleEventIds && staleEventIds.size > 0) {

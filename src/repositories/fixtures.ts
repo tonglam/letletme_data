@@ -134,7 +134,23 @@ export const createFixtureRepository = (dbInstance?: DatabaseInstance) => {
         });
         return mappedFixtures;
       } catch (error) {
-        logError('Failed to batch upsert fixtures', error, { count: domainFixtures.length });
+        const cause =
+          error instanceof Error && 'cause' in error && error.cause && typeof error.cause === 'object'
+            ? (error.cause as {
+                message?: string;
+                code?: string;
+                detail?: string;
+                constraint?: string;
+              })
+            : undefined;
+
+        logError('Failed to batch upsert fixtures', error, {
+          count: domainFixtures.length,
+          causeMessage: cause?.message,
+          causeCode: cause?.code,
+          causeDetail: cause?.detail,
+          causeConstraint: cause?.constraint,
+        });
         throw new DatabaseError(
           'Failed to batch upsert fixtures',
           'BATCH_UPSERT_ERROR',

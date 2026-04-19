@@ -47,26 +47,8 @@ export function registerDataSyncJobs(app: Elysia) {
     )
     .use(
       cron({
-        name: 'fixtures-sync',
-        pattern: '37 6 * * *',
-        async run() {
-          logInfo('Cron job started: fixtures-sync');
-          if (!shouldRunDataSync('fixtures-sync')) {
-            return;
-          }
-          try {
-            const job = await enqueueFixturesSyncJob('cron');
-            logInfo('Fixtures sync job enqueued via cron', { jobId: job.id });
-          } catch (error) {
-            logError('Cron job failed: fixtures-sync', error);
-          }
-        },
-      }),
-    )
-    .use(
-      cron({
         name: 'teams-sync',
-        pattern: '40 6 * * *',
+        pattern: '37 6 * * *',
         async run() {
           logInfo('Cron job started: teams-sync');
           if (!shouldRunDataSync('teams-sync')) {
@@ -77,6 +59,24 @@ export function registerDataSyncJobs(app: Elysia) {
             logInfo('Teams sync job enqueued via cron', { jobId: job.id });
           } catch (error) {
             logError('Cron job failed: teams-sync', error);
+          }
+        },
+      }),
+    )
+    .use(
+      cron({
+        name: 'fixtures-sync',
+        pattern: '40 6 * * *',
+        async run() {
+          logInfo('Cron job started: fixtures-sync');
+          if (!shouldRunDataSync('fixtures-sync')) {
+            return;
+          }
+          try {
+            const job = await enqueueFixturesSyncJob('cron');
+            logInfo('Fixtures sync job enqueued via cron', { jobId: job.id });
+          } catch (error) {
+            logError('Cron job failed: fixtures-sync', error);
           }
         },
       }),
