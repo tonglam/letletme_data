@@ -9,8 +9,15 @@ import {
   enqueuePlayerValuesSyncJob,
   enqueueTeamsSyncJob,
 } from '../jobs/data-sync-enqueue';
+import {
+  enqueueEntryInfoSyncJob,
+  enqueueEntryPicksSyncJob,
+  enqueueEntryResultsSyncJob,
+  enqueueEntryTransfersSyncJob,
+} from '../jobs/entry-sync-enqueue';
 import { runLeagueEventPicksSync } from '../jobs/league-event-picks.jobs';
 import { runLeagueEventResultsSync } from '../jobs/league-event-results.jobs';
+import { runLaunchHappening, runLaunchWarning } from '../jobs/launch.jobs';
 import {
   enqueueEventLiveExplain,
   enqueueEventLivesCacheUpdate,
@@ -53,12 +60,12 @@ export const jobsAPI = new Elysia({ prefix: '/jobs' })
       {
         name: 'fixtures-sync',
         description: 'Sync fixtures from FPL API',
-        schedule: 'Daily at 6:37 AM',
+        schedule: 'Daily at 6:40 AM',
       },
       {
         name: 'teams-sync',
         description: 'Sync teams from FPL API',
-        schedule: 'Daily at 6:40 AM',
+        schedule: 'Daily at 6:37 AM',
       },
       {
         name: 'players-sync',
@@ -79,6 +86,26 @@ export const jobsAPI = new Elysia({ prefix: '/jobs' })
         name: 'player-values-sync',
         description: 'Sync player values from FPL API',
         schedule: '09:25-09:35 AM window (stops after success)',
+      },
+      {
+        name: 'entry-info-daily',
+        description: 'Sync known entry profile data',
+        schedule: 'Daily at 10:30 AM',
+      },
+      {
+        name: 'entry-event-picks-daily',
+        description: 'Sync entry picks for current event',
+        schedule: 'Daily at 10:35 AM (selection window)',
+      },
+      {
+        name: 'entry-event-transfers-daily',
+        description: 'Sync entry transfers for current event',
+        schedule: 'Daily at 10:40 AM (after-matchday window)',
+      },
+      {
+        name: 'entry-event-results-daily',
+        description: 'Sync entry results for current event',
+        schedule: 'Daily at 10:45 AM',
       },
       {
         name: 'league-event-picks-sync',
@@ -166,6 +193,16 @@ export const jobsAPI = new Elysia({ prefix: '/jobs' })
         description: 'Catch FPL overnight data finalization (bonus, corrected scores)',
         schedule: '06:00, 08:00, 10:00 on match days',
       },
+      {
+        name: 'launch-warning',
+        description: 'Pre-season monitor message when FPL events are absent',
+        schedule: 'Manual only (launch cron not registered)',
+      },
+      {
+        name: 'launch-happening',
+        description: 'Season-start monitor message when new deadline appears',
+        schedule: 'Manual only (launch cron not registered)',
+      },
     ];
 
     return { success: true, jobs, count: jobs.length };
@@ -182,6 +219,22 @@ export const jobsAPI = new Elysia({ prefix: '/jobs' })
       'player-stats-sync': () => enqueuePlayerStatsSyncJob('manual'),
       'phases-sync': () => enqueuePhasesSyncJob('manual'),
       'player-values-sync': () => enqueuePlayerValuesSyncJob('manual'),
+      'entry-info-daily': () => enqueueEntryInfoSyncJob('manual'),
+      'entry-event-picks-daily': async () => {
+        const currentEvent = await getCurrentEvent();
+        if (!currentEvent) {
+          throw new Error('No current event found');
+        }
+        return enqueueEntryPicksSyncJob('manual', { eventId: currentEvent.id });
+      },
+      'entry-event-transfers-daily': async () => {
+        const currentEvent = await getCurrentEvent();
+        if (!currentEvent) {
+          throw new Error('No current event found');
+        }
+        return enqueueEntryTransfersSyncJob('manual', { eventId: currentEvent.id });
+      },
+      'entry-event-results-daily': () => enqueueEntryResultsSyncJob('manual'),
       'league-event-picks-sync': async () => {
         await runLeagueEventPicksSync();
       },
@@ -252,6 +305,8 @@ export const jobsAPI = new Elysia({ prefix: '/jobs' })
       },
       'live-scores': runLiveScores,
       'post-match-consolidation': runPostMatchConsolidation,
+      'launch-warning': runLaunchWarning,
+      'launch-happening': runLaunchHappening,
     };
 
     const job = jobMap[name];
