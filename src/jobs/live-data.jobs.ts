@@ -21,7 +21,7 @@ async function enqueueLiveDataJob(
       triggeredAt: new Date().toISOString(),
     };
 
-    const defaultJobId = `${jobName}:${eventId}`;
+    const defaultJobId = `${jobName}-${eventId}`;
 
     const job = await liveDataQueue.add(jobName, jobData, {
       jobId: options.jobId ?? defaultJobId,

@@ -25,9 +25,9 @@ async function enqueueLeagueSyncJob(
     // Generate job ID for deduplication
     let jobId: string;
     if (options.tournamentId) {
-      jobId = `${jobName}:${eventId}:t${options.tournamentId}`;
+      jobId = `${jobName}-${eventId}-t${options.tournamentId}`;
     } else {
-      jobId = `${jobName}:${eventId}:coordinator`;
+      jobId = `${jobName}-${eventId}-coordinator`;
     }
 
     const job = await leagueSyncQueue.add(jobName, jobData, {

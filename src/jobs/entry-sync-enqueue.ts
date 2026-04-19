@@ -50,9 +50,9 @@ async function enqueueEntrySyncJob(
     };
 
     const chunkKey =
-      options.eventId !== undefined ? `${chunkOffset}:event:${options.eventId}` : `${chunkOffset}`;
+      options.eventId !== undefined ? `${chunkOffset}-event-${options.eventId}` : `${chunkOffset}`;
     const dedupeJobId =
-      options.jobId ?? (options.entryIds ? undefined : `${jobName}:chunk:${chunkKey}`);
+      options.jobId ?? (options.entryIds ? undefined : `${jobName}-chunk-${chunkKey}`);
 
     const job = await entrySyncQueue.add(jobName, jobData, {
       attempts: 3,
