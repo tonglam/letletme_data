@@ -22,12 +22,14 @@ async function enqueueLeagueSyncJob(
       triggeredAt: new Date().toISOString(),
     };
 
-    // Generate job ID for deduplication
+    // Use unique IDs so cron/cascade runs for the same event are not deduped
+    // while completed jobs are still retained in BullMQ.
+    const runId = Date.now();
     let jobId: string;
     if (options.tournamentId) {
-      jobId = `${jobName}-${eventId}-t${options.tournamentId}`;
+      jobId = `${jobName}:${eventId}:t${options.tournamentId}:${runId}`;
     } else {
-      jobId = `${jobName}-${eventId}-coordinator`;
+      jobId = `${jobName}:${eventId}:coordinator:${runId}`;
     }
 
     const job = await leagueSyncQueue.add(jobName, jobData, {

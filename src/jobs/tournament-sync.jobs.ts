@@ -21,8 +21,8 @@ async function enqueueTournamentSyncJob(
       triggeredAt: new Date().toISOString(),
     };
 
-    // Generate job ID for deduplication (cannot use : separator in BullMQ)
-    const jobId = `${jobName}-e${eventId}`;
+    // Use unique IDs so recurring schedules are not deduped by completed jobs.
+    const jobId = `${jobName}:${eventId}:${Date.now()}`;
 
     const job = await tournamentSyncQueue.add(jobName, jobData, {
       jobId,
