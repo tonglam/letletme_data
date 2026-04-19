@@ -2,7 +2,8 @@ import { cron } from '@elysiajs/cron';
 import type { Elysia } from 'elysia';
 
 import { enqueueEntryResultsSyncJob } from './entry-sync-enqueue';
-import { logError, logInfo } from '../utils/logger';
+import { executeTrackedCron } from '../utils/job-run-logger';
+import { logInfo } from '../utils/logger';
 
 /**
  * Entry Event Results Cron Jobs
@@ -15,12 +16,13 @@ export function registerEntryResultsJobs(app: Elysia) {
       name: 'entry-event-results-daily',
       pattern: '45 10 * * *',
       async run() {
-        logInfo('Cron job started: entry-event-results-daily');
         try {
-          const job = await enqueueEntryResultsSyncJob('cron');
-          logInfo('Entry results sync job enqueued via cron', { jobId: job.id });
-        } catch (error) {
-          logError('Cron job failed: entry-event-results-daily', error);
+          await executeTrackedCron('entry-event-results-daily', async () => {
+            const job = await enqueueEntryResultsSyncJob('cron');
+            logInfo('Entry results sync job enqueued via cron', { jobId: job.id });
+          });
+        } catch {
+          // Failure details are already emitted by runTrackedJob.
         }
       },
     }),

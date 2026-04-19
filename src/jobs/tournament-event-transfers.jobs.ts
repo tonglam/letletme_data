@@ -4,7 +4,8 @@ import type { Elysia } from 'elysia';
 import { getCurrentEvent } from '../services/events.service';
 import { isFPLSeason, isSelectTime } from '../utils/conditions';
 import { loadFixturesByEvent } from '../utils/fixtures';
-import { logError, logInfo } from '../utils/logger';
+import { executeTrackedCron } from '../utils/job-run-logger';
+import { logInfo } from '../utils/logger';
 import { enqueueTournamentTransfersPre } from './tournament-sync.jobs';
 
 /**
@@ -69,11 +70,13 @@ export function registerTournamentEventTransfersPreJobs(app: Elysia) {
       name: 'tournament-event-transfers-pre-trigger',
       pattern: '*/5 * * * *',
       async run() {
-        logInfo('Cron trigger: tournament-event-transfers-pre-sync');
         try {
-          await runTournamentEventTransfersPreSync();
-        } catch (error) {
-          logError('Cron trigger failed: tournament-event-transfers-pre-sync', error);
+          await executeTrackedCron(
+            'tournament-event-transfers-pre-sync',
+            runTournamentEventTransfersPreSync,
+          );
+        } catch {
+          // Failure details are already emitted by runTrackedJob.
         }
       },
     }),

@@ -10,7 +10,8 @@ import {
   enqueueTeamsSyncJob,
 } from './data-sync-enqueue';
 import { isFPLSeason } from '../utils/conditions';
-import { logError, logInfo } from '../utils/logger';
+import { executeTrackedCron } from '../utils/job-run-logger';
+import { logInfo } from '../utils/logger';
 
 function shouldRunDataSync(jobName: string) {
   const now = new Date();
@@ -32,15 +33,16 @@ export function registerDataSyncJobs(app: Elysia) {
         name: 'events-sync',
         pattern: '35 6 * * *',
         async run() {
-          logInfo('Cron job started: events-sync');
-          if (!shouldRunDataSync('events-sync')) {
-            return;
-          }
           try {
-            const job = await enqueueEventsSyncJob('cron');
-            logInfo('Events sync job enqueued via cron', { jobId: job.id });
-          } catch (error) {
-            logError('Cron job failed: events-sync', error);
+            await executeTrackedCron('events-sync', async () => {
+              if (!shouldRunDataSync('events-sync')) {
+                return;
+              }
+              const job = await enqueueEventsSyncJob('cron');
+              logInfo('Events sync job enqueued via cron', { jobId: job.id });
+            });
+          } catch {
+            // Failure details are already emitted by runTrackedJob.
           }
         },
       }),
@@ -50,15 +52,16 @@ export function registerDataSyncJobs(app: Elysia) {
         name: 'teams-sync',
         pattern: '37 6 * * *',
         async run() {
-          logInfo('Cron job started: teams-sync');
-          if (!shouldRunDataSync('teams-sync')) {
-            return;
-          }
           try {
-            const job = await enqueueTeamsSyncJob('cron');
-            logInfo('Teams sync job enqueued via cron', { jobId: job.id });
-          } catch (error) {
-            logError('Cron job failed: teams-sync', error);
+            await executeTrackedCron('teams-sync', async () => {
+              if (!shouldRunDataSync('teams-sync')) {
+                return;
+              }
+              const job = await enqueueTeamsSyncJob('cron');
+              logInfo('Teams sync job enqueued via cron', { jobId: job.id });
+            });
+          } catch {
+            // Failure details are already emitted by runTrackedJob.
           }
         },
       }),
@@ -68,15 +71,16 @@ export function registerDataSyncJobs(app: Elysia) {
         name: 'fixtures-sync',
         pattern: '40 6 * * *',
         async run() {
-          logInfo('Cron job started: fixtures-sync');
-          if (!shouldRunDataSync('fixtures-sync')) {
-            return;
-          }
           try {
-            const job = await enqueueFixturesSyncJob('cron');
-            logInfo('Fixtures sync job enqueued via cron', { jobId: job.id });
-          } catch (error) {
-            logError('Cron job failed: fixtures-sync', error);
+            await executeTrackedCron('fixtures-sync', async () => {
+              if (!shouldRunDataSync('fixtures-sync')) {
+                return;
+              }
+              const job = await enqueueFixturesSyncJob('cron');
+              logInfo('Fixtures sync job enqueued via cron', { jobId: job.id });
+            });
+          } catch {
+            // Failure details are already emitted by runTrackedJob.
           }
         },
       }),
@@ -86,15 +90,16 @@ export function registerDataSyncJobs(app: Elysia) {
         name: 'players-sync',
         pattern: '43 6 * * *',
         async run() {
-          logInfo('Cron job started: players-sync');
-          if (!shouldRunDataSync('players-sync')) {
-            return;
-          }
           try {
-            const job = await enqueuePlayersSyncJob('cron');
-            logInfo('Players sync job enqueued via cron', { jobId: job.id });
-          } catch (error) {
-            logError('Cron job failed: players-sync', error);
+            await executeTrackedCron('players-sync', async () => {
+              if (!shouldRunDataSync('players-sync')) {
+                return;
+              }
+              const job = await enqueuePlayersSyncJob('cron');
+              logInfo('Players sync job enqueued via cron', { jobId: job.id });
+            });
+          } catch {
+            // Failure details are already emitted by runTrackedJob.
           }
         },
       }),
@@ -104,15 +109,16 @@ export function registerDataSyncJobs(app: Elysia) {
         name: 'player-stats-sync',
         pattern: '40 9 * * *',
         async run() {
-          logInfo('Cron job started: player-stats-sync');
-          if (!shouldRunDataSync('player-stats-sync')) {
-            return;
-          }
           try {
-            const job = await enqueuePlayerStatsSyncJob('cron');
-            logInfo('Player stats sync job enqueued via cron', { jobId: job.id });
-          } catch (error) {
-            logError('Cron job failed: player-stats-sync', error);
+            await executeTrackedCron('player-stats-sync', async () => {
+              if (!shouldRunDataSync('player-stats-sync')) {
+                return;
+              }
+              const job = await enqueuePlayerStatsSyncJob('cron');
+              logInfo('Player stats sync job enqueued via cron', { jobId: job.id });
+            });
+          } catch {
+            // Failure details are already emitted by runTrackedJob.
           }
         },
       }),
@@ -122,15 +128,16 @@ export function registerDataSyncJobs(app: Elysia) {
         name: 'phases-sync',
         pattern: '45 6 * * *',
         async run() {
-          logInfo('Cron job started: phases-sync');
-          if (!shouldRunDataSync('phases-sync')) {
-            return;
-          }
           try {
-            const job = await enqueuePhasesSyncJob('cron');
-            logInfo('Phases sync job enqueued via cron', { jobId: job.id });
-          } catch (error) {
-            logError('Cron job failed: phases-sync', error);
+            await executeTrackedCron('phases-sync', async () => {
+              if (!shouldRunDataSync('phases-sync')) {
+                return;
+              }
+              const job = await enqueuePhasesSyncJob('cron');
+              logInfo('Phases sync job enqueued via cron', { jobId: job.id });
+            });
+          } catch {
+            // Failure details are already emitted by runTrackedJob.
           }
         },
       }),

@@ -2,7 +2,7 @@ import { cron } from '@elysiajs/cron';
 import { Elysia } from 'elysia';
 
 import { getCurrentEvent } from '../services/events.service';
-import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
+import { executeTrackedCron } from '../utils/job-run-logger';
 import { isAfterMatchDay, isFPLSeason, isMatchDayTime } from '../utils/conditions';
 import { loadFixturesByEvent } from '../utils/fixtures';
 import { logInfo } from '../utils/logger';
@@ -131,16 +131,6 @@ export async function runPostMatchConsolidation() {
 
   const job = await enqueueEventLivesDbSync(currentEvent.id, 'cron');
   logInfo('Post-match consolidation job enqueued', { jobId: job.id, eventId: currentEvent.id });
-}
-
-async function executeTrackedCron(jobName: string, runner: () => Promise<void>) {
-  const context = {
-    jobType: 'cron' as const,
-    jobName,
-    source: 'cron',
-  };
-  logJobTriggered(context);
-  await runTrackedJob(context, runner);
 }
 
 export function registerLiveJobs(app: Elysia) {

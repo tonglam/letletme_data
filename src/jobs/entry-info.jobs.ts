@@ -4,6 +4,7 @@ import type { Elysia } from 'elysia';
 import { enqueueEntryInfoSyncJob } from './entry-sync-enqueue';
 import { cache } from '../cache/cache-operations';
 import { isFPLSeason } from '../utils/conditions';
+import { executeTrackedCron } from '../utils/job-run-logger';
 import { logError, logInfo } from '../utils/logger';
 
 const ENTRY_INFO_SYNC_CACHE_PREFIX = 'entry-info-sync:daily';
@@ -47,26 +48,28 @@ export function registerEntryInfoJobs(app: Elysia) {
       name: 'entry-info-daily',
       pattern: '30 10 * * *',
       async run() {
-        logInfo('Cron job started: entry-info-daily');
-        const now = new Date();
-        if (!isFPLSeason(now)) {
-          logInfo('Skipping entry info sync - not FPL season', {
-            month: now.getMonth() + 1,
-          });
-          return;
-        }
-        if (await hasSyncedToday(now)) {
-          logInfo('Skipping entry info sync - already synced today', {
-            date: getDateKey(now),
-          });
-          return;
-        }
         try {
-          const job = await enqueueEntryInfoSyncJob('cron');
-          logInfo('Entry info sync job enqueued via cron', { jobId: job.id });
-          await markSyncedToday(now, job.id);
-        } catch (error) {
-          logError('Cron job failed: entry-info-daily', error);
+          await executeTrackedCron('entry-info-daily', async () => {
+            const now = new Date();
+            if (!isFPLSeason(now)) {
+              logInfo('Skipping entry info sync - not FPL season', {
+                month: now.getMonth() + 1,
+              });
+              return;
+            }
+            if (await hasSyncedToday(now)) {
+              logInfo('Skipping entry info sync - already synced today', {
+                date: getDateKey(now),
+              });
+              return;
+            }
+
+            const job = await enqueueEntryInfoSyncJob('cron');
+            logInfo('Entry info sync job enqueued via cron', { jobId: job.id });
+            await markSyncedToday(now, job.id);
+          });
+        } catch {
+          // Failure details are already emitted by runTrackedJob.
         }
       },
     }),

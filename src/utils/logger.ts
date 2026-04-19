@@ -56,6 +56,43 @@ function writeFileLog(level: LogLevel, message: string, payload?: object) {
   }
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function serializeError(error: unknown): unknown {
+  if (error instanceof Error) {
+    const serialized: Record<string, unknown> = {
+      name: error.name,
+      message: error.message,
+      stack: error.stack,
+    };
+
+    const cause = (error as Error & { cause?: unknown }).cause;
+    if (cause !== undefined) {
+      serialized.cause = serializeError(cause);
+    }
+
+    for (const key of Object.getOwnPropertyNames(error)) {
+      if (key === 'name' || key === 'message' || key === 'stack' || key === 'cause') {
+        continue;
+      }
+      const value = (error as Record<string, unknown>)[key];
+      if (value !== undefined) {
+        serialized[key] = value;
+      }
+    }
+
+    return serialized;
+  }
+
+  if (isRecord(error)) {
+    return error;
+  }
+
+  return { message: String(error) };
+}
+
 /**
  * Logger configuration with file and console output
  *
@@ -104,7 +141,10 @@ export const logInfo = (message: string, data?: object) => {
 };
 
 export const logError = (message: string, error?: Error | unknown, data?: object) => {
-  const payload = { ...data, error };
+  const payload = {
+    ...(data ?? {}),
+    ...(error === undefined ? {} : { error: serializeError(error) }),
+  };
   logger.error(payload, message);
   writeFileLog('error', message, payload);
 };

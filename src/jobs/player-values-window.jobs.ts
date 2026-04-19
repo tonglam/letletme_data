@@ -4,7 +4,8 @@ import { Elysia } from 'elysia';
 import { syncCurrentPlayerValues } from '../services/player-values.service';
 import { playerValuesRepository } from '../repositories/player-values';
 import { isFPLSeason } from '../utils/conditions';
-import { logError, logInfo } from '../utils/logger';
+import { executeTrackedCron } from '../utils/job-run-logger';
+import { logInfo } from '../utils/logger';
 
 function getChangeDateKey(date: Date) {
   return date.toISOString().split('T')[0].replace(/-/g, '');
@@ -39,17 +40,17 @@ export function registerPlayerValuesWindowJobs(app: Elysia) {
       name: 'player-values-sync',
       pattern: '25-35 9 * * *',
       async run() {
-        logInfo('Cron job started: player-values-sync');
-        const now = new Date();
-        if (!(await shouldRunPlayerValuesSync(now))) {
-          return;
-        }
-
         try {
-          await syncCurrentPlayerValues();
-          logInfo('Cron job completed: player-values-sync');
-        } catch (error) {
-          logError('Cron job failed: player-values-sync', error);
+          await executeTrackedCron('player-values-sync', async () => {
+            const now = new Date();
+            if (!(await shouldRunPlayerValuesSync(now))) {
+              return;
+            }
+
+            await syncCurrentPlayerValues();
+          });
+        } catch {
+          // Failure details are already emitted by runTrackedJob.
         }
       },
     }),

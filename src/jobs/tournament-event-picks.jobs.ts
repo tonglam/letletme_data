@@ -4,7 +4,8 @@ import type { Elysia } from 'elysia';
 import { getCurrentEvent } from '../services/events.service';
 import { isFPLSeason, isSelectTime } from '../utils/conditions';
 import { loadFixturesByEvent } from '../utils/fixtures';
-import { logError, logInfo } from '../utils/logger';
+import { executeTrackedCron } from '../utils/job-run-logger';
+import { logInfo } from '../utils/logger';
 import { enqueueTournamentEventPicks } from './tournament-sync.jobs';
 
 /**
@@ -50,11 +51,10 @@ export function registerTournamentEventPicksJobs(app: Elysia) {
       name: 'tournament-event-picks-trigger',
       pattern: '*/5 * * * *',
       async run() {
-        logInfo('Cron trigger: tournament-event-picks-sync');
         try {
-          await runTournamentEventPicksSync();
-        } catch (error) {
-          logError('Cron trigger failed: tournament-event-picks-sync', error);
+          await executeTrackedCron('tournament-event-picks-sync', runTournamentEventPicksSync);
+        } catch {
+          // Failure details are already emitted by runTrackedJob.
         }
       },
     }),

@@ -3,7 +3,8 @@ import type { Elysia } from 'elysia';
 
 import { syncTournamentInfo } from '../services/tournament-info.service';
 import { isFPLSeason } from '../utils/conditions';
-import { logError, logInfo } from '../utils/logger';
+import { executeTrackedCron } from '../utils/job-run-logger';
+import { logInfo } from '../utils/logger';
 
 export async function runTournamentInfoSync() {
   const now = new Date();
@@ -25,12 +26,10 @@ export function registerTournamentInfoJobs(app: Elysia) {
       name: 'tournament-info-sync',
       pattern: '45 10 * * *',
       async run() {
-        logInfo('Cron job started: tournament-info-sync');
         try {
-          await runTournamentInfoSync();
-          logInfo('Cron job completed: tournament-info-sync');
-        } catch (error) {
-          logError('Cron job failed: tournament-info-sync', error);
+          await executeTrackedCron('tournament-info-sync', runTournamentInfoSync);
+        } catch {
+          // Failure details are already emitted by runTrackedJob.
         }
       },
     }),

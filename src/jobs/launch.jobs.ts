@@ -2,8 +2,9 @@ import { cron } from '@elysiajs/cron';
 import { Elysia } from 'elysia';
 
 import { fplClient } from '../clients/fpl';
+import { executeTrackedCron } from '../utils/job-run-logger';
 import { sendTelegramMessage } from '../utils/notify';
-import { logError, logInfo } from '../utils/logger';
+import { logInfo } from '../utils/logger';
 
 /**
  * Launch Monitor Jobs
@@ -14,36 +15,28 @@ import { logError, logInfo } from '../utils/logger';
  */
 
 export async function runLaunchWarning() {
-  try {
-    const bootstrap = await fplClient.getBootstrap();
-    if (bootstrap.events.length === 0) {
-      const message = '【NEW SEASON】WARNING! WARNING! WARNING!';
-      logInfo('Pre-season warning: FPL events list is empty');
-      await sendTelegramMessage(message);
-    }
-  } catch (error) {
-    logError('Launch warning check failed', error);
+  const bootstrap = await fplClient.getBootstrap();
+  if (bootstrap.events.length === 0) {
+    const message = '【NEW SEASON】WARNING! WARNING! WARNING!';
+    logInfo('Pre-season warning: FPL events list is empty');
+    await sendTelegramMessage(message);
   }
 }
 
 export async function runLaunchHappening() {
-  try {
-    const bootstrap = await fplClient.getBootstrap();
-    if (bootstrap.events.length === 0) return;
+  const bootstrap = await fplClient.getBootstrap();
+  if (bootstrap.events.length === 0) return;
 
-    const firstEvent = bootstrap.events[0];
-    const currentYear = new Date().getFullYear().toString();
+  const firstEvent = bootstrap.events[0];
+  const currentYear = new Date().getFullYear().toString();
 
-    if (firstEvent.deadline_time?.startsWith(currentYear)) {
-      const message = '【NEW SEASON】ITS HAPPENING!!!';
-      logInfo('New season detected: first event deadline is in current year', {
-        deadlineTime: firstEvent.deadline_time,
-        currentYear,
-      });
-      await sendTelegramMessage(message);
-    }
-  } catch (error) {
-    logError('Launch happening check failed', error);
+  if (firstEvent.deadline_time?.startsWith(currentYear)) {
+    const message = '【NEW SEASON】ITS HAPPENING!!!';
+    logInfo('New season detected: first event deadline is in current year', {
+      deadlineTime: firstEvent.deadline_time,
+      currentYear,
+    });
+    await sendTelegramMessage(message);
   }
 }
 
@@ -54,7 +47,11 @@ export function registerLaunchJobs(app: Elysia) {
         name: 'launch-warning',
         pattern: '* * * * *',
         async run() {
-          await runLaunchWarning();
+          try {
+            await executeTrackedCron('launch-warning', runLaunchWarning);
+          } catch {
+            // Failure details are already emitted by runTrackedJob.
+          }
         },
       }),
     )
@@ -63,7 +60,11 @@ export function registerLaunchJobs(app: Elysia) {
         name: 'launch-happening',
         pattern: '* * * * *',
         async run() {
-          await runLaunchHappening();
+          try {
+            await executeTrackedCron('launch-happening', runLaunchHappening);
+          } catch {
+            // Failure details are already emitted by runTrackedJob.
+          }
         },
       }),
     );

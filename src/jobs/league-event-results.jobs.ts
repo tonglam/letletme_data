@@ -4,7 +4,8 @@ import type { Elysia } from 'elysia';
 import { getCurrentEvent } from '../services/events.service';
 import { isAfterMatchDay, isFPLSeason } from '../utils/conditions';
 import { loadFixturesByEvent } from '../utils/fixtures';
-import { logError, logInfo } from '../utils/logger';
+import { executeTrackedCron } from '../utils/job-run-logger';
+import { logInfo } from '../utils/logger';
 import { enqueueLeagueEventResults } from './league-sync.jobs';
 
 /**
@@ -51,11 +52,10 @@ export function registerLeagueEventResultsJobs(app: Elysia) {
       name: 'league-event-results-trigger',
       pattern: '*/10 * * * *',
       async run() {
-        logInfo('Cron trigger: league-event-results-sync');
         try {
-          await runLeagueEventResultsSync();
-        } catch (error) {
-          logError('Cron trigger failed: league-event-results-sync', error);
+          await executeTrackedCron('league-event-results-sync', runLeagueEventResultsSync);
+        } catch {
+          // Failure details are already emitted by runTrackedJob.
         }
       },
     }),

@@ -78,3 +78,18 @@ export async function runTrackedJob<T>(
     throw error;
   }
 }
+
+export async function executeTrackedCron(
+  jobName: string,
+  runner: () => Promise<void>,
+  meta?: JobRunMeta,
+) {
+  const context: JobRunContext = {
+    jobType: 'cron',
+    jobName,
+    source: 'cron',
+  };
+
+  logJobTriggered(context, meta);
+  await runTrackedJob(context, runner, meta);
+}
