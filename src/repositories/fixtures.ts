@@ -135,7 +135,10 @@ export const createFixtureRepository = (dbInstance?: DatabaseInstance) => {
         return mappedFixtures;
       } catch (error) {
         const cause =
-          error instanceof Error && 'cause' in error && error.cause && typeof error.cause === 'object'
+          error instanceof Error &&
+          'cause' in error &&
+          error.cause &&
+          typeof error.cause === 'object'
             ? (error.cause as {
                 message?: string;
                 code?: string;
