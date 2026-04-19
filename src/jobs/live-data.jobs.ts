@@ -23,7 +23,7 @@ async function enqueueLiveDataJob(
 
     // Use unique IDs so recurring cron jobs can enqueue every tick.
     // Static IDs would dedupe and block subsequent runs while completed jobs are retained.
-    const defaultJobId = `${jobName}:${eventId}:${Date.now()}`;
+    const defaultJobId = `${jobName}-e${eventId}-${Date.now()}`;
 
     const job = await liveDataQueue.add(jobName, jobData, {
       jobId: options.jobId ?? defaultJobId,

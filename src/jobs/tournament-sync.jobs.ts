@@ -22,7 +22,7 @@ async function enqueueTournamentSyncJob(
     };
 
     // Use unique IDs so recurring schedules are not deduped by completed jobs.
-    const jobId = `${jobName}:${eventId}:${Date.now()}`;
+    const jobId = `${jobName}-e${eventId}-${Date.now()}`;
 
     const job = await tournamentSyncQueue.add(jobName, jobData, {
       jobId,

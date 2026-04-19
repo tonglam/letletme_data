@@ -53,8 +53,8 @@ async function enqueueEntrySyncJob(
       options.eventId !== undefined ? `${chunkOffset}-event-${options.eventId}` : `${chunkOffset}`;
     // Use unique IDs to avoid BullMQ deduping future cron cycles while completed jobs are retained.
     const defaultJobId = options.entryIds
-      ? `${jobName}:entry-list:${Date.now()}`
-      : `${jobName}:chunk:${chunkKey}:${Date.now()}`;
+      ? `${jobName}-entry-list-${Date.now()}`
+      : `${jobName}-chunk-${chunkKey}-${Date.now()}`;
     const jobId = options.jobId ?? defaultJobId;
 
     const job = await entrySyncQueue.add(jobName, jobData, {

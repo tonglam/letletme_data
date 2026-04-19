@@ -27,9 +27,9 @@ async function enqueueLeagueSyncJob(
     const runId = Date.now();
     let jobId: string;
     if (options.tournamentId) {
-      jobId = `${jobName}:${eventId}:t${options.tournamentId}:${runId}`;
+      jobId = `${jobName}-e${eventId}-t${options.tournamentId}-${runId}`;
     } else {
-      jobId = `${jobName}:${eventId}:coordinator:${runId}`;
+      jobId = `${jobName}-e${eventId}-coordinator-${runId}`;
     }
 
     const job = await leagueSyncQueue.add(jobName, jobData, {
