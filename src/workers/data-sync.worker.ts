@@ -7,6 +7,7 @@ import { syncPhases } from '../services/phases.service';
 import { syncPlayers } from '../services/players.service';
 import { syncCurrentPlayerStats } from '../services/player-stats.service';
 import { syncCurrentPlayerValues } from '../services/player-values.service';
+import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { syncTeams } from '../services/teams.service';
 import { getQueueConnection } from '../utils/queue';
 import { logError, logInfo } from '../utils/logger';
@@ -19,53 +20,37 @@ export function createDataSyncWorker() {
   const worker = new Worker(
     dataSyncQueueName,
     async (job) => {
-      const startedAt = Date.now();
-      logInfo('Data sync job received', {
+      const context = {
+        jobType: 'queue' as const,
+        queueName: dataSyncQueueName,
         jobId: job.id,
-        name: job.name,
-        source: job.data?.source,
-      });
-
-      const finished = async <T>(fn: () => Promise<T>) => {
-        try {
-          const result = await fn();
-          const finishedAt = Date.now();
-          logInfo('Data sync job finished', {
-            jobId: job.id,
-            name: job.name,
-            durationMs: finishedAt - startedAt,
-            result,
-          });
-          return result;
-        } catch (error) {
-          const finishedAt = Date.now();
-          logError('Data sync job failed', error, {
-            jobId: job.id,
-            name: job.name,
-            durationMs: finishedAt - startedAt,
-          });
-          throw error;
-        }
+        jobName: job.name,
+        source: job.data?.source as string | undefined,
+        attempt: job.attemptsMade + 1,
       };
 
-      switch (job.name) {
-        case 'events':
-          return finished(() => syncEvents());
-        case 'fixtures':
-          return finished(() => syncFixtures());
-        case 'teams':
-          return finished(() => syncTeams());
-        case 'players':
-          return finished(() => syncPlayers());
-        case 'player-stats':
-          return finished(() => syncCurrentPlayerStats());
-        case 'phases':
-          return finished(() => syncPhases());
-        case 'player-values':
-          return finished(() => syncCurrentPlayerValues());
-        default:
-          throw new Error(`Unknown data-sync job: ${job.name}`);
-      }
+      logJobTriggered(context);
+
+      return runTrackedJob(context, async () => {
+        switch (job.name) {
+          case 'events':
+            return syncEvents();
+          case 'fixtures':
+            return syncFixtures();
+          case 'teams':
+            return syncTeams();
+          case 'players':
+            return syncPlayers();
+          case 'player-stats':
+            return syncCurrentPlayerStats();
+          case 'phases':
+            return syncPhases();
+          case 'player-values':
+            return syncCurrentPlayerValues();
+          default:
+            throw new Error(`Unknown data-sync job: ${job.name}`);
+        }
+      });
     },
     { connection },
   );

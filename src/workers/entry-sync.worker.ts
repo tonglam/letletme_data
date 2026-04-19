@@ -25,6 +25,7 @@ import {
   syncEntryEventResults,
   syncEntryEventTransfers,
 } from '../services/entries.service';
+import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { logError, logInfo } from '../utils/logger';
 import { getQueueConnection } from '../utils/queue';
 
@@ -236,65 +237,47 @@ export function createEntrySyncWorker() {
   const worker = new Worker(
     entrySyncQueueName,
     async (job) => {
-      const startedAt = Date.now();
-      logInfo('Entry sync job received', {
+      const context = {
+        jobType: 'queue' as const,
+        queueName: entrySyncQueueName,
         jobId: job.id,
-        name: job.name,
-        source: job.data?.source,
-      });
-
-      const finished = async <T>(fn: () => Promise<T>) => {
-        try {
-          const result = await fn();
-          const finishedAt = Date.now();
-          logInfo('Entry sync job finished', {
-            jobId: job.id,
-            name: job.name,
-            durationMs: finishedAt - startedAt,
-            result,
-          });
-          return result;
-        } catch (error) {
-          const finishedAt = Date.now();
-          logError('Entry sync job failed', error, {
-            jobId: job.id,
-            name: job.name,
-            durationMs: finishedAt - startedAt,
-          });
-          throw error;
-        }
+        jobName: job.name,
+        source: job.data?.source as string | undefined,
+        eventId: job.data?.eventId,
+        attempt: job.attemptsMade + 1,
       };
 
-      switch (job.name) {
-        case 'entry-info':
-          return finished(() =>
-            handleEntryJob('entry-info', 'entry info sync', syncEntryInfo, job.data),
-          );
-        case 'entry-picks':
-          return finished(() =>
-            handleEntryJob(
+      logJobTriggered(context);
+
+      return runTrackedJob(context, async () => {
+        switch (job.name) {
+          case 'entry-info':
+            return handleEntryJob('entry-info', 'entry info sync', syncEntryInfo, job.data);
+          case 'entry-picks':
+            return handleEntryJob(
               'entry-picks',
               'entry picks sync',
               (entryId) => syncEntryEventPicks(entryId, job.data?.eventId),
               job.data,
-            ),
-          );
-        case 'entry-transfers':
-          return finished(() =>
-            handleEntryJob(
+            );
+          case 'entry-transfers':
+            return handleEntryJob(
               'entry-transfers',
               'entry transfers sync',
               (entryId) => syncEntryEventTransfers(entryId, job.data?.eventId),
               job.data,
-            ),
-          );
-        case 'entry-results':
-          return finished(() =>
-            handleEntryJob('entry-results', 'entry results sync', syncEntryEventResults, job.data),
-          );
-        default:
-          throw new Error(`Unknown entry-sync job: ${job.name}`);
-      }
+            );
+          case 'entry-results':
+            return handleEntryJob(
+              'entry-results',
+              'entry results sync',
+              syncEntryEventResults,
+              job.data,
+            );
+          default:
+            throw new Error(`Unknown entry-sync job: ${job.name}`);
+        }
+      });
     },
     { connection },
   );

@@ -10,6 +10,8 @@ services:
     env_file: .env.deploy
     ports:
       - "3000:3000"
+    volumes:
+      - ./log:/app/logs
     depends_on:
       redis:
         condition: service_healthy
@@ -34,6 +36,8 @@ services:
       target: runner
     command: bun dist/worker.js
     env_file: .env.deploy
+    volumes:
+      - ./log:/app/logs
     depends_on:
       redis:
         condition: service_healthy

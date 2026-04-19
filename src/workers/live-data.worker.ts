@@ -8,6 +8,7 @@ import { syncEventLiveSummary } from '../services/event-live-summaries.service';
 import { syncEventLiveExplain } from '../services/event-live-explains.service';
 import { syncEventOverallResult } from '../services/event-overall-results.service';
 import { syncLiveScores } from '../services/fixtures.service';
+import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { getQueueConnection } from '../utils/queue';
 import { logError, logInfo } from '../utils/logger';
 import {
@@ -79,16 +80,19 @@ export function createLiveDataWorker() {
     liveDataQueueName,
     async (job: Job<LiveDataJobData>) => {
       const { eventId, source } = job.data;
-
-      logInfo('Processing live data job', {
+      const context = {
+        jobType: 'queue' as const,
+        queueName: liveDataQueueName,
         jobId: job.id,
         jobName: job.name,
         eventId,
         source,
         attempt: job.attemptsMade + 1,
-      });
+      };
 
-      try {
+      logJobTriggered(context);
+
+      return runTrackedJob(context, async () => {
         switch (job.name) {
           case LIVE_JOBS.EVENT_LIVES_CACHE:
             await updateEventLivesCache(eventId);
@@ -127,22 +131,7 @@ export function createLiveDataWorker() {
           default:
             throw new Error(`Unknown job name: ${job.name}`);
         }
-
-        logInfo('Live data job completed', {
-          jobId: job.id,
-          jobName: job.name,
-          eventId,
-          attempt: job.attemptsMade + 1,
-        });
-      } catch (error) {
-        logError('Live data job failed', error, {
-          jobId: job.id,
-          jobName: job.name,
-          eventId,
-          attempt: job.attemptsMade + 1,
-        });
-        throw error;
-      }
+      });
     },
     {
       connection,

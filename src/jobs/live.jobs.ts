@@ -2,9 +2,10 @@ import { cron } from '@elysiajs/cron';
 import { Elysia } from 'elysia';
 
 import { getCurrentEvent } from '../services/events.service';
+import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { isAfterMatchDay, isFPLSeason, isMatchDayTime } from '../utils/conditions';
 import { loadFixturesByEvent } from '../utils/fixtures';
-import { logError, logInfo } from '../utils/logger';
+import { logInfo } from '../utils/logger';
 import {
   enqueueEventLivesCacheUpdate,
   enqueueEventLivesDbSync,
@@ -132,6 +133,16 @@ export async function runPostMatchConsolidation() {
   logInfo('Post-match consolidation job enqueued', { jobId: job.id, eventId: currentEvent.id });
 }
 
+async function executeTrackedCron(jobName: string, runner: () => Promise<void>) {
+  const context = {
+    jobType: 'cron' as const,
+    jobName,
+    source: 'cron',
+  };
+  logJobTriggered(context);
+  await runTrackedJob(context, runner);
+}
+
 export function registerLiveJobs(app: Elysia) {
   return (
     app
@@ -142,11 +153,10 @@ export function registerLiveJobs(app: Elysia) {
           name: 'event-lives-cache-trigger',
           pattern: '* * * * *',
           async run() {
-            logInfo('Cron trigger: event-lives-cache-update');
             try {
-              await runEventLivesCacheUpdate();
-            } catch (error) {
-              logError('Cron trigger failed: event-lives-cache-update', error);
+              await executeTrackedCron('event-lives-cache-update', runEventLivesCacheUpdate);
+            } catch {
+              // Failure details are already emitted by runTrackedJob.
             }
           },
         }),
@@ -159,11 +169,10 @@ export function registerLiveJobs(app: Elysia) {
           name: 'event-lives-db-trigger',
           pattern: '*/10 * * * *',
           async run() {
-            logInfo('Cron trigger: event-lives-db-sync');
             try {
-              await runEventLivesDbSync();
-            } catch (error) {
-              logError('Cron trigger failed: event-lives-db-sync', error);
+              await executeTrackedCron('event-lives-db-sync', runEventLivesDbSync);
+            } catch {
+              // Failure details are already emitted by runTrackedJob.
             }
           },
         }),
@@ -175,12 +184,10 @@ export function registerLiveJobs(app: Elysia) {
           name: 'live-scores',
           pattern: '*/15 * * * *',
           async run() {
-            logInfo('Cron job started: live-scores');
             try {
-              await runLiveScores();
-              logInfo('Cron job completed: live-scores');
-            } catch (error) {
-              logError('Cron job failed: live-scores', error);
+              await executeTrackedCron('live-scores', runLiveScores);
+            } catch {
+              // Failure details are already emitted by runTrackedJob.
             }
           },
         }),
@@ -194,11 +201,10 @@ export function registerLiveJobs(app: Elysia) {
           name: 'post-match-consolidation',
           pattern: '0 6,8,10 * * *',
           async run() {
-            logInfo('Cron trigger: post-match-consolidation');
             try {
-              await runPostMatchConsolidation();
-            } catch (error) {
-              logError('Cron trigger failed: post-match-consolidation', error);
+              await executeTrackedCron('post-match-consolidation', runPostMatchConsolidation);
+            } catch {
+              // Failure details are already emitted by runTrackedJob.
             }
           },
         }),

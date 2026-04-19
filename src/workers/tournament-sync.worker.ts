@@ -16,6 +16,7 @@ import {
 import { syncTournamentEventCupResults } from '../services/tournament-event-cup-results.service';
 import { syncTournamentEventPicks } from '../services/tournament-event-picks.service';
 import { syncTournamentInfo } from '../services/tournament-info.service';
+import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { getQueueConnection } from '../utils/queue';
 import { logError, logInfo } from '../utils/logger';
 import {
@@ -94,16 +95,19 @@ export function createTournamentSyncWorker() {
     tournamentSyncQueueName,
     async (job: Job<TournamentSyncJobData>) => {
       const { eventId, source } = job.data;
-
-      logInfo('Processing tournament sync job', {
+      const context = {
+        jobType: 'queue' as const,
+        queueName: tournamentSyncQueueName,
         jobId: job.id,
         jobName: job.name,
         eventId,
         source,
         attempt: job.attemptsMade + 1,
-      });
+      };
 
-      try {
+      logJobTriggered(context);
+
+      return runTrackedJob(context, async () => {
         switch (job.name) {
           case TOURNAMENT_JOBS.EVENT_RESULTS:
             // Base job: sync results then trigger cascade
@@ -146,22 +150,7 @@ export function createTournamentSyncWorker() {
           default:
             throw new Error(`Unknown job name: ${job.name}`);
         }
-
-        logInfo('Tournament sync job completed', {
-          jobId: job.id,
-          jobName: job.name,
-          eventId,
-          attempt: job.attemptsMade + 1,
-        });
-      } catch (error) {
-        logError('Tournament sync job failed', error, {
-          jobId: job.id,
-          jobName: job.name,
-          eventId,
-          attempt: job.attemptsMade + 1,
-        });
-        throw error;
-      }
+      });
     },
     {
       connection,

@@ -8,6 +8,7 @@ import {
 import { syncLeagueEventPicksByTournament } from '../services/league-event-picks.service';
 import { syncLeagueEventResultsByTournament } from '../services/league-event-results.service';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
+import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { getQueueConnection } from '../utils/queue';
 import { logError, logInfo } from '../utils/logger';
 import { enqueueLeagueEventPicks, enqueueLeagueEventResults } from '../jobs/league-sync.jobs';
@@ -116,17 +117,20 @@ export function createLeagueSyncWorker() {
     leagueSyncQueueName,
     async (job: Job<LeagueSyncJobData>) => {
       const { eventId, tournamentId, source } = job.data;
-
-      logInfo('Processing league sync job', {
+      const context = {
+        jobType: 'queue' as const,
+        queueName: leagueSyncQueueName,
         jobId: job.id,
         jobName: job.name,
         eventId,
-        tournamentId,
         source,
         attempt: job.attemptsMade + 1,
-      });
+        tournamentId,
+      };
 
-      try {
+      logJobTriggered(context);
+
+      return runTrackedJob(context, async () => {
         switch (job.name) {
           case LEAGUE_JOBS.LEAGUE_EVENT_PICKS:
             if (tournamentId) {
@@ -153,23 +157,7 @@ export function createLeagueSyncWorker() {
           default:
             throw new Error(`Unknown job name: ${job.name}`);
         }
-      } catch (error) {
-        logError('League sync job failed', error, {
-          jobId: job.id,
-          jobName: job.name,
-          eventId,
-          tournamentId,
-          attempt: job.attemptsMade + 1,
-        });
-        throw error;
-      } finally {
-        logInfo('League sync job completed', {
-          jobId: job.id,
-          jobName: job.name,
-          eventId,
-          tournamentId,
-        });
-      }
+      });
     },
     {
       connection,

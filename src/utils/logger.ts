@@ -1,11 +1,60 @@
+import { appendFileSync, mkdirSync } from 'fs';
 import pino from 'pino';
 import { join } from 'path';
+import { formatUtc8Timestamp } from './timezone';
 
 const isDevelopment = process.env.NODE_ENV !== 'production';
 const logLevel = process.env.LOG_LEVEL || 'info';
 
 // Determine logs directory path (root level)
 const logsDir = join(process.cwd(), 'logs');
+const combinedLogPath = join(logsDir, 'combined.log');
+const errorLogPath = join(logsDir, 'error.log');
+
+type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+
+const logLevelPriority: Record<LogLevel, number> = {
+  debug: 10,
+  info: 20,
+  warn: 30,
+  error: 40,
+};
+
+function resolveLogLevel(level: string): LogLevel {
+  if (level === 'debug' || level === 'info' || level === 'warn' || level === 'error') {
+    return level;
+  }
+  return 'info';
+}
+
+const configuredLogLevel = resolveLogLevel(logLevel);
+
+function shouldWrite(level: LogLevel) {
+  return logLevelPriority[level] >= logLevelPriority[configuredLogLevel];
+}
+
+function writeFileLog(level: LogLevel, message: string, payload?: object) {
+  if (!shouldWrite(level)) {
+    return;
+  }
+
+  try {
+    mkdirSync(logsDir, { recursive: true });
+    const line = JSON.stringify({
+      time: formatUtc8Timestamp(),
+      level,
+      message,
+      ...(payload ? { payload } : {}),
+    });
+
+    appendFileSync(combinedLogPath, `${line}\n`);
+    if (level === 'error') {
+      appendFileSync(errorLogPath, `${line}\n`);
+    }
+  } catch {
+    // Swallow file-write errors so app logging never crashes runtime.
+  }
+}
 
 /**
  * Logger configuration with file and console output
@@ -27,7 +76,7 @@ export const logger = pino(
         return { level: label };
       },
     },
-    timestamp: pino.stdTimeFunctions.isoTime,
+    timestamp: () => `,"time":"${formatUtc8Timestamp()}"`,
   },
   pino.transport({
     targets: [
@@ -38,40 +87,11 @@ export const logger = pino(
         options: isDevelopment
           ? {
               colorize: true,
-              translateTime: 'HH:MM:ss',
               ignore: 'pid,hostname',
             }
           : {
               destination: 1, // stdout
             },
-      },
-      // Combined log file (all levels)
-      {
-        target: 'pino-roll',
-        level: logLevel,
-        options: {
-          file: join(logsDir, 'combined.log'),
-          frequency: 'daily',
-          size: '10m', // max 10MB per file
-          limit: {
-            count: 14, // keep 14 days of logs
-          },
-          mkdir: true,
-        },
-      },
-      // Error log file (errors only)
-      {
-        target: 'pino-roll',
-        level: 'error',
-        options: {
-          file: join(logsDir, 'error.log'),
-          frequency: 'daily',
-          size: '10m',
-          limit: {
-            count: 14,
-          },
-          mkdir: true,
-        },
       },
     ],
   }),
@@ -80,16 +100,21 @@ export const logger = pino(
 // Logger helpers
 export const logInfo = (message: string, data?: object) => {
   logger.info(data, message);
+  writeFileLog('info', message, data);
 };
 
 export const logError = (message: string, error?: Error | unknown, data?: object) => {
-  logger.error({ ...data, error }, message);
+  const payload = { ...data, error };
+  logger.error(payload, message);
+  writeFileLog('error', message, payload);
 };
 
 export const logDebug = (message: string, data?: object) => {
   logger.debug(data, message);
+  writeFileLog('debug', message, data);
 };
 
 export const logWarn = (message: string, data?: object) => {
   logger.warn(data, message);
+  writeFileLog('warn', message, data);
 };
