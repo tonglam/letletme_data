@@ -8,6 +8,8 @@ services:
       target: runner
     command: bun dist/index.js
     env_file: .env.deploy
+    environment:
+      - TZ=Asia/Shanghai
     ports:
       - "3000:3000"
     volumes:
@@ -36,6 +38,8 @@ services:
       target: runner
     command: bun dist/worker.js
     env_file: .env.deploy
+    environment:
+      - TZ=Asia/Shanghai
     volumes:
       - ./log:/app/logs
     depends_on:
