@@ -192,8 +192,7 @@ export const toOptionalPositiveInteger = (value?: string): number | null => {
   return parsed;
 };
 
-export const isPowerOfTwo = (value: number): boolean =>
-  value > 1 && (value & (value - 1)) === 0;
+export const isPowerOfTwo = (value: number): boolean => value > 1 && (value & (value - 1)) === 0;
 
 const inferLeagueType = (segments: string[]): LeagueType => {
   const standingsIndex = segments.findIndex((segment) => segment === 'standings');

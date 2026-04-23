@@ -26,7 +26,10 @@ const getHashKey = () => `EntryInfo:${getCurrentSeason()}`;
  */
 const serializeEntryInfo = (entry: DbEntryInfo): Record<string, unknown> => {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const { createdAt, updatedAt, ...rest } = entry as DbEntryInfo & { createdAt?: Date; updatedAt?: Date };
+  const { createdAt, updatedAt, ...rest } = entry as DbEntryInfo & {
+    createdAt?: Date;
+    updatedAt?: Date;
+  };
   return rest;
 };
 
@@ -58,7 +61,9 @@ export const entryInfosCache = {
    * 2. Compare each entry with existing data
    * 3. Only HSET entries that changed
    */
-  async setEntries(entries: DbEntryInfo[]): Promise<{ added: number; updated: number; skipped: number }> {
+  async setEntries(
+    entries: DbEntryInfo[],
+  ): Promise<{ added: number; updated: number; skipped: number }> {
     try {
       const redis = await redisSingleton.getClient();
       const key = getHashKey();

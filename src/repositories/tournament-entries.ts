@@ -58,9 +58,7 @@ export const createTournamentEntryRepository = (dbInstance?: DatabaseInstance) =
       }
     },
 
-    findQualifiedEntriesByTournamentId: async (
-      tournamentId: number,
-    ): Promise<QualifiedEntry[]> => {
+    findQualifiedEntriesByTournamentId: async (tournamentId: number): Promise<QualifiedEntry[]> => {
       try {
         const client = await getDbClient();
         const rows = await client<QualifiedEntry[]>`

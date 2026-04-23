@@ -126,7 +126,9 @@ export const createTournamentKnockoutsRepository = (dbInstance?: DatabaseInstanc
 
     findRoundOne: async (
       tournamentId: number,
-    ): Promise<Array<{ matchId: number; homeEntryId: number | null; awayEntryId: number | null }>> => {
+    ): Promise<
+      Array<{ matchId: number; homeEntryId: number | null; awayEntryId: number | null }>
+    > => {
       try {
         const db = await getDbInstance();
         const rows = await db

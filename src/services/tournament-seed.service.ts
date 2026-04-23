@@ -81,8 +81,7 @@ export async function ensureKnockoutRoundOneSeeded(tournamentId: number): Promis
   let seededEntryIds: number[] = [];
 
   if (tournament.groupMode === 'no_group') {
-    const entrySeeds =
-      await tournamentEntryRepository.findEntrySeedsByTournamentId(tournamentId);
+    const entrySeeds = await tournamentEntryRepository.findEntrySeedsByTournamentId(tournamentId);
     seededEntryIds = sortEntrySeeds(entrySeeds)
       .slice(0, tournament.knockoutTeamNum)
       .map((entry) => entry.entryId);

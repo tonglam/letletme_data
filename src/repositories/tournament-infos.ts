@@ -314,9 +314,7 @@ export const createTournamentInfoRepository = (dbInstance?: DatabaseInstance) =>
       }
     },
 
-    findSetupStatus: async (
-      tournamentId: number,
-    ): Promise<TournamentSetupStatusRow | null> => {
+    findSetupStatus: async (tournamentId: number): Promise<TournamentSetupStatusRow | null> => {
       try {
         const client = await getDbClient();
         const rows = await client<
