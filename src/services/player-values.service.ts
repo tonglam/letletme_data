@@ -11,6 +11,7 @@ function formatPlayerValuesNotification(
   changeDate: string,
   playerValues: readonly PlayerValue[],
 ): string {
+  const formatPrice = (value: number) => `£${(value / 10).toFixed(1)}m`;
   const risers = playerValues
     .filter((pv) => pv.changeType === 'Rise')
     .slice()
@@ -25,7 +26,7 @@ function formatPlayerValuesNotification(
   const formatLine = (pv: PlayerValue) => {
     const delta = pv.value - pv.lastValue;
     const sign = delta > 0 ? '+' : '';
-    return `${pv.webName} (${pv.teamShortName}) ${pv.lastValue}->${pv.value} (${sign}${delta})`;
+    return `${pv.webName} (${pv.teamShortName}) ${formatPrice(pv.lastValue)}-> ${formatPrice(pv.value)} (${sign}${delta})`;
   };
 
   const top = (items: PlayerValue[]) => items.slice(0, 12).map(formatLine);
