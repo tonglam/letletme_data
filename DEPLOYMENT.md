@@ -10,9 +10,9 @@ The production stack now runs inside Docker containers orchestrated by `docker c
 ## Host Bootstrap Checklist
 1. **Install Docker + compose** following https://docs.docker.com/engine/install/ubuntu/ then add the `deploy` user to the `docker` group and re-login.
 2. **Clone the repo** into `/home/workspace/letletme_data` (or another directory referenced by `VPS_WORKDIR`).
-3. **Create `.env.deploy`** by copying `.env.deploy.example` and populate `DATABASE_URL`, `REDIS_*`, `SUPABASE_*`, etc. Keep this file on the server only.
+3. **Create `.env.deploy`** by copying `.env.deploy.example` and populate `DATABASE_URL`, `REDIS_*`, `SUPABASE_*`, etc. Keep this file on the server only. In the current production topology, the app and Redis are on the same VPS, and the containers connect to Redis via `43.163.91.9:6379`.
 4. **First deploy**: run `bash scripts/deploy.sh deploy` to build the image, start services via compose, and run `bun run db:migrate`.
-5. **Proxy + hardening**: terminate TLS in Nginx/Caddy, forward to `127.0.0.1:3000`, lock Redis to the container/local network, and enable ufw.
+5. **Proxy + hardening**: terminate TLS in Nginx/Caddy, forward to `127.0.0.1:3000`, restrict Redis access to trusted sources on the VPS/network, and enable ufw.
 
 > ℹ️ **Testing note**: GitHub Actions executes only the unit test suite (no external services required). Run the integration tests locally (`bun test tests/integration`) as part of pre-release validation whenever the external dependencies are available.
 

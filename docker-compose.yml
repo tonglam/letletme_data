@@ -14,9 +14,6 @@ services:
       - "3000:3000"
     volumes:
       - ./log:/app/logs
-    depends_on:
-      redis:
-        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test:
@@ -42,24 +39,4 @@ services:
       - TZ=Asia/Shanghai
     volumes:
       - ./log:/app/logs
-    depends_on:
-      redis:
-        condition: service_healthy
     restart: unless-stopped
-
-  redis:
-    image: redis:7.4-alpine
-    env_file:
-      - .env.deploy
-    command: ["sh", "-c", "exec redis-server --requirepass \"$${REDIS_PASSWORD:-changeme}\""]
-    volumes:
-      - redis-data:/data
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "sh", "-c", "redis-cli -a \"$${REDIS_PASSWORD:-changeme}\" PING"]
-      interval: 10s
-      timeout: 3s
-      retries: 5
-
-volumes:
-  redis-data:
