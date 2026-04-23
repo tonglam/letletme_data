@@ -27,6 +27,9 @@ const EnvSchema = z.object({
   // Telegram notifications (optional)
   TELEGRAM_BOT_TOKEN: z.string().optional(),
   TELEGRAM_CHAT_ID: z.string().optional(),
+  // Bot notification endpoints (optional)
+  TELEGRAM_NOTIFICATION_URL: z.string().url().optional(),
+  WECHAT_NOTIFICATION_URL: z.string().url().optional(),
 });
 
 export type AppConfig = z.infer<typeof EnvSchema>;

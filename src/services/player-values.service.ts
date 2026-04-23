@@ -1,9 +1,41 @@
 import { playerValuesCache } from '../cache/operations';
 import { fplClient } from '../clients/fpl';
+import type { PlayerValue } from '../domain/player-values';
 import { playerValuesRepository } from '../repositories/player-values';
 import { createTeamsMap } from '../transformers/player-values';
+import { notifyTwoBots } from '../utils/notify';
 import { logInfo } from '../utils/logger';
 import { loadTeamsBasicInfo } from '../utils/teams';
+
+function formatPlayerValuesNotification(
+  changeDate: string,
+  playerValues: readonly PlayerValue[],
+): string {
+  const risers = playerValues
+    .filter((pv) => pv.changeType === 'Rise')
+    .slice()
+    .sort((a, b) => b.value - b.lastValue - (a.value - a.lastValue));
+  const fallers = playerValues
+    .filter((pv) => pv.changeType === 'Faller')
+    .slice()
+    .sort((a, b) => a.value - a.lastValue - (b.value - b.lastValue));
+
+  const header = `[player-values] ${changeDate}: +${risers.length} -${fallers.length} (total ${playerValues.length})`;
+
+  const formatLine = (pv: PlayerValue) => {
+    const delta = pv.value - pv.lastValue;
+    const sign = delta > 0 ? '+' : '';
+    return `${pv.webName} (${pv.teamShortName}) ${pv.lastValue}->${pv.value} (${sign}${delta})`;
+  };
+
+  const top = (items: PlayerValue[]) => items.slice(0, 12).map(formatLine);
+
+  const lines = [header];
+  if (risers.length > 0) lines.push('Risers:', ...top(risers));
+  if (fallers.length > 0) lines.push('Fallers:', ...top(fallers));
+
+  return lines.join('\n');
+}
 
 /**
  * Sync current player values (checks today's date for price changes)
@@ -74,6 +106,9 @@ export async function syncCurrentPlayerValues(): Promise<{ count: number }> {
   if (result.count > 0) {
     await playerValuesCache.set(today, playerValues);
     logInfo('Player values cache updated', { changeDate: today, count: playerValues.length });
+
+    const message = formatPlayerValuesNotification(today, playerValues);
+    await notifyTwoBots(message);
   }
 
   logInfo('Daily player values sync completed', {
