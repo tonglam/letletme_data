@@ -1,7 +1,10 @@
 import { Worker, Job, QueueEvents } from 'bullmq';
 
+import { MUTATION_PRIORITY_ORDER, type MutationPriorityTier } from '../domain/job-priority';
 import {
-  tournamentSyncQueueName,
+  getTournamentSyncQueueName,
+  isTournamentSyncTieredQueueEnabled,
+  tournamentSyncQueuesByTier,
   TOURNAMENT_JOBS,
   type TournamentSyncJobData,
 } from '../queues/tournament-sync.queue';
@@ -16,16 +19,21 @@ import {
 import { syncTournamentEventCupResults } from '../services/tournament-event-cup-results.service';
 import { syncTournamentEventPicks } from '../services/tournament-event-picks.service';
 import { syncTournamentInfo } from '../services/tournament-info.service';
+import { refreshTournamentMaterializedViews } from '../services/tournament-materialized-views.service';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { getQueueConnection } from '../utils/queue';
 import { logError, logInfo } from '../utils/logger';
+import { withMutationConflictGuard } from '../utils/mutation-lock';
 import {
   enqueueTournamentPointsRace,
   enqueueTournamentBattleRace,
   enqueueTournamentKnockout,
   enqueueTournamentTransfersPost,
   enqueueTournamentCupResults,
+  enqueueTournamentMaterializedViewsRefresh,
 } from '../jobs/tournament-sync.jobs';
+import { startStrictPriorityGate } from './strict-priority-gate';
+import type { WorkerRuntime } from './worker-runtime';
 
 /**
  * Enqueue cascade jobs after tournament-event-results completes
@@ -70,6 +78,14 @@ async function enqueueTournamentCascade(eventId: number) {
         });
       }
     });
+
+    // Enqueue materialized view refresh with a 30s delay so parallel writes finish first
+    try {
+      await enqueueTournamentMaterializedViewsRefresh(eventId, 'cascade', { delay: 30_000 });
+      logInfo('Enqueued tournament materialized views refresh', { eventId, delayMs: 30_000 });
+    } catch (error) {
+      logError('Failed to enqueue materialized views refresh', error, { eventId });
+    }
   } catch (error) {
     logError('Failed to enqueue tournament cascade jobs', error, { eventId });
     throw error;
@@ -87,27 +103,29 @@ async function enqueueTournamentCascade(eventId: number) {
  * Architecture:
  * event-results (base) → [points-race, battle-race, knockout, transfers-post, cup-results] (parallel)
  */
-export function createTournamentSyncWorker() {
-  const connection = getQueueConnection();
-  const queueEvents = new QueueEvents(tournamentSyncQueueName, { connection });
+async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
+  const { eventId, source } = job.data;
+  const context = {
+    jobType: 'queue' as const,
+    queueName: job.queueName,
+    jobId: job.id,
+    jobName: job.name,
+    eventId,
+    source,
+    attempt: job.attemptsMade + 1,
+  };
 
-  const worker = new Worker<TournamentSyncJobData>(
-    tournamentSyncQueueName,
-    async (job: Job<TournamentSyncJobData>) => {
-      const { eventId, source } = job.data;
-      const context = {
-        jobType: 'queue' as const,
-        queueName: tournamentSyncQueueName,
-        jobId: job.id,
-        jobName: job.name,
-        eventId,
-        source,
-        attempt: job.attemptsMade + 1,
-      };
+  logJobTriggered(context);
 
-      logJobTriggered(context);
-
-      return runTrackedJob(context, async () => {
+  return withMutationConflictGuard(
+    {
+      queueName: job.queueName,
+      jobName: job.name,
+      jobId: String(job.id),
+      eventId,
+    },
+    () =>
+      runTrackedJob(context, async () => {
         switch (job.name) {
           case TOURNAMENT_JOBS.EVENT_RESULTS:
             // Base job: sync results then trigger cascade
@@ -143,6 +161,10 @@ export function createTournamentSyncWorker() {
             await syncTournamentEventTransfersPre(eventId);
             break;
 
+          case TOURNAMENT_JOBS.MATERIALIZED_VIEWS_REFRESH:
+            await refreshTournamentMaterializedViews();
+            break;
+
           case TOURNAMENT_JOBS.INFO:
             await syncTournamentInfo();
             break;
@@ -150,35 +172,85 @@ export function createTournamentSyncWorker() {
           default:
             throw new Error(`Unknown job name: ${job.name}`);
         }
-      });
-    },
-    {
+      }),
+  );
+}
+
+export function createTournamentSyncWorker(): WorkerRuntime {
+  const connection = getQueueConnection();
+  const activeTiers = isTournamentSyncTieredQueueEnabled
+    ? MUTATION_PRIORITY_ORDER
+    : (['p2'] as const);
+  const workers: Worker<TournamentSyncJobData>[] = [];
+  const queueEvents: QueueEvents[] = [];
+  const monitorTargets: WorkerRuntime['monitorTargets'] = [];
+
+  for (const tier of activeTiers) {
+    const queueName = getTournamentSyncQueueName(tier);
+    const worker = new Worker<TournamentSyncJobData>(queueName, processTournamentSyncJob, {
       connection,
       concurrency: 10,
       removeOnComplete: { count: 100 },
       removeOnFail: { count: 50 },
+    });
+    const events = new QueueEvents(queueName, { connection });
+
+    worker.on('completed', (job) => {
+      logInfo('Tournament sync worker completed job', {
+        jobId: job.id,
+        jobName: job.name,
+        eventId: job.data.eventId,
+        tier,
+      });
+    });
+
+    worker.on('failed', (job, err) => {
+      logError('Tournament sync worker failed job', err, {
+        jobId: job?.id,
+        jobName: job?.name,
+        eventId: job?.data.eventId,
+        tier,
+      });
+    });
+
+    worker.on('error', (err) => {
+      logError('Tournament sync worker error', err, { tier });
+    });
+
+    workers.push(worker);
+    queueEvents.push(events);
+    monitorTargets.push({
+      queue: tournamentSyncQueuesByTier[tier],
+      queueEvents: events,
+      queueName,
+      tier,
+    });
+  }
+
+  const workerByTier = buildWorkerTierMap(workers, activeTiers);
+  const gate = startStrictPriorityGate(
+    'tournament-sync',
+    {
+      p0: { queue: tournamentSyncQueuesByTier.p0, worker: workerByTier.p0 },
+      p1: { queue: tournamentSyncQueuesByTier.p1, worker: workerByTier.p1 },
+      p2: { queue: tournamentSyncQueuesByTier.p2, worker: workerByTier.p2 },
+      p3: { queue: tournamentSyncQueuesByTier.p3, worker: workerByTier.p3 },
     },
+    { enabled: isTournamentSyncTieredQueueEnabled },
   );
 
-  worker.on('completed', (job) => {
-    logInfo('Tournament sync worker completed job', {
-      jobId: job.id,
-      jobName: job.name,
-      eventId: job.data.eventId,
-    });
-  });
+  return { workers, queueEvents, monitorTargets, stop: gate.stop };
+}
 
-  worker.on('failed', (job, err) => {
-    logError('Tournament sync worker failed job', err, {
-      jobId: job?.id,
-      jobName: job?.name,
-      eventId: job?.data.eventId,
-    });
-  });
-
-  worker.on('error', (err) => {
-    logError('Tournament sync worker error', err);
-  });
-
-  return { worker, queueEvents };
+function buildWorkerTierMap(
+  workers: Worker<TournamentSyncJobData>[],
+  activeTiers: readonly MutationPriorityTier[],
+): Record<MutationPriorityTier, Worker<TournamentSyncJobData>> {
+  const fallback = workers[0];
+  const workerByTier = {} as Record<MutationPriorityTier, Worker<TournamentSyncJobData>>;
+  for (const tier of MUTATION_PRIORITY_ORDER) {
+    const index = activeTiers.indexOf(tier);
+    workerByTier[tier] = index >= 0 ? workers[index] : fallback;
+  }
+  return workerByTier;
 }

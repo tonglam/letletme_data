@@ -1,6 +1,5 @@
-import { Queue } from 'bullmq';
-
-import { getQueueConnection } from '../utils/queue';
+import type { MutationPriorityTier } from '../domain/job-priority';
+import { closeTieredQueues, createTieredQueueSet } from './tiered-queue';
 
 export const dataSyncQueueName = 'data-sync';
 
@@ -18,14 +17,26 @@ export interface DataSyncJobData {
   triggeredAt: string;
 }
 
-export const dataSyncQueue = new Queue<DataSyncJobData>(dataSyncQueueName, {
-  connection: getQueueConnection(),
-  defaultJobOptions: {
-    removeOnComplete: 100,
-    removeOnFail: 200,
-  },
-});
+const defaultJobOptions = {
+  removeOnComplete: 100,
+  removeOnFail: 200,
+};
+
+const tieredQueueSet = createTieredQueueSet<DataSyncJobData>(dataSyncQueueName, defaultJobOptions);
+
+export const isDataSyncTieredQueueEnabled = tieredQueueSet.enabled;
+export const dataSyncQueuesByTier = tieredQueueSet.queuesByTier;
+export const dataSyncQueueNamesByTier = tieredQueueSet.queueNamesByTier;
+export const dataSyncQueue = dataSyncQueuesByTier.p1;
+
+export function getDataSyncQueue(tier: MutationPriorityTier) {
+  return dataSyncQueuesByTier[tier];
+}
+
+export function getDataSyncQueueName(tier: MutationPriorityTier) {
+  return dataSyncQueueNamesByTier[tier];
+}
 
 export async function closeDataSyncQueue() {
-  await dataSyncQueue.close();
+  await closeTieredQueues(tieredQueueSet.uniqueQueues);
 }

@@ -1,11 +1,14 @@
-import { dataSyncQueue, type DataSyncJobName } from '../queues/data-sync.queue';
+import { getDataSyncJobPriority, type DataSyncPriorityJobName } from '../domain/job-priority';
+import { getDataSyncQueue, type DataSyncJobName } from '../queues/data-sync.queue';
 import { logError, logInfo } from '../utils/logger';
 
 export type DataSyncJobSource = 'cron' | 'manual' | 'api';
 
 async function enqueueDataSyncJob(jobName: DataSyncJobName, source: DataSyncJobSource = 'cron') {
   try {
-    const job = await dataSyncQueue.add(
+    const tier = getDataSyncJobPriority(jobName as DataSyncPriorityJobName);
+    const queue = getDataSyncQueue(tier);
+    const job = await queue.add(
       jobName,
       {
         source,
@@ -24,11 +27,14 @@ async function enqueueDataSyncJob(jobName: DataSyncJobName, source: DataSyncJobS
       jobId: job.id,
       jobName,
       source,
+      tier,
+      queue: queue.name,
     });
 
     return job;
   } catch (error) {
-    logError('Failed to enqueue data sync job', error, { jobName, source });
+    const tier = getDataSyncJobPriority(jobName as DataSyncPriorityJobName);
+    logError('Failed to enqueue data sync job', error, { jobName, source, tier });
     throw error;
   }
 }

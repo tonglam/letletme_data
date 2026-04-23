@@ -184,6 +184,9 @@ export const CACHE_TTL = {
   PLAYER_STATS: -1, // No expiration
   PLAYER_VALUES: -1, // No expiration
 
+  // Entry Data - No expiration (TTL -1)
+  ENTRY_INFOS: -1, // No expiration
+
   // Live Match Data - No expiration (TTL -1)
   EVENT_LIVE: -1, // No expiration
   EVENT_LIVE_EXPLAIN: -1, // No expiration

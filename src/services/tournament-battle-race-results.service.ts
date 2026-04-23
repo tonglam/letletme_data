@@ -217,19 +217,23 @@ export async function syncTournamentBattleRaceResults(
   let updatedGroups = 0;
   let updatedResults = 0;
   let skipped = 0;
-
-  for (const tournament of tournaments) {
-    try {
-      const result = await syncBattleRaceForTournament(tournament, eventId);
-      updatedGroups += result.updatedGroups;
-      updatedResults += result.updatedResults;
-      skipped += result.skipped;
-    } catch (error) {
-      logError('Failed to sync battle race results', error, {
-        tournamentId: tournament.id,
-        eventId,
-      });
-    }
+  const syncResults = await Promise.all(
+    tournaments.map(async (tournament) => {
+      try {
+        return await syncBattleRaceForTournament(tournament, eventId);
+      } catch (error) {
+        logError('Failed to sync battle race results', error, {
+          tournamentId: tournament.id,
+          eventId,
+        });
+        return { updatedGroups: 0, updatedResults: 0, skipped: 0 };
+      }
+    }),
+  );
+  for (const result of syncResults) {
+    updatedGroups += result.updatedGroups;
+    updatedResults += result.updatedResults;
+    skipped += result.skipped;
   }
 
   logInfo('Tournament battle race results sync completed', {

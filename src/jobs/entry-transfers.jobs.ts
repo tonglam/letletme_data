@@ -22,7 +22,7 @@ export function registerEntryTransfersJobs(app: Elysia) {
         try {
           await executeTrackedCron('entry-event-transfers-daily', async () => {
             const now = new Date();
-            if (!isFPLSeason(now)) {
+            if (!(await isFPLSeason(now))) {
               logInfo('Skipping entry transfers sync - not FPL season', {
                 month: now.getMonth() + 1,
               });

@@ -22,6 +22,22 @@ export const createEntryInfoRepository = (dbInstance?: DatabaseInstance) => {
   const getDbInstance = async () => dbInstance || (await getDb());
 
   return {
+    findAll: async (): Promise<DbEntryInfo[]> => {
+      try {
+        const db = await getDbInstance();
+        const rows = await db.select().from(entryInfos);
+        logInfo('Retrieved all entry infos', { count: rows.length });
+        return rows;
+      } catch (error) {
+        logError('Failed to retrieve all entry infos', error);
+        throw new DatabaseError(
+          'Failed to retrieve all entry infos',
+          'ENTRY_INFO_FIND_ALL_ERROR',
+          error as Error,
+        );
+      }
+    },
+
     findByIds: async (ids: number[]): Promise<DbEntryInfo[]> => {
       if (ids.length === 0) {
         return [];

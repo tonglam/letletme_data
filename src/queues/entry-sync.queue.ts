@@ -1,6 +1,5 @@
-import { Queue } from 'bullmq';
-
-import { getQueueConnection } from '../utils/queue';
+import type { MutationPriorityTier } from '../domain/job-priority';
+import { closeTieredQueues, createTieredQueueSet } from './tiered-queue';
 
 export const entrySyncQueueName = 'entry-sync';
 
@@ -43,14 +42,24 @@ export interface EntrySyncJobData {
   eventId?: number;
 }
 
-export const entrySyncQueue = new Queue<EntrySyncJobData>(entrySyncQueueName, {
-  connection: getQueueConnection(),
-  defaultJobOptions: {
-    removeOnComplete: 100,
-    removeOnFail: 200,
-  },
+const tieredQueueSet = createTieredQueueSet<EntrySyncJobData>(entrySyncQueueName, {
+  removeOnComplete: 100,
+  removeOnFail: 200,
 });
 
+export const isEntrySyncTieredQueueEnabled = tieredQueueSet.enabled;
+export const entrySyncQueuesByTier = tieredQueueSet.queuesByTier;
+export const entrySyncQueueNamesByTier = tieredQueueSet.queueNamesByTier;
+export const entrySyncQueue = entrySyncQueuesByTier.p2;
+
+export function getEntrySyncQueue(tier: MutationPriorityTier) {
+  return entrySyncQueuesByTier[tier];
+}
+
+export function getEntrySyncQueueName(tier: MutationPriorityTier) {
+  return entrySyncQueueNamesByTier[tier];
+}
+
 export async function closeEntrySyncQueue() {
-  await entrySyncQueue.close();
+  await closeTieredQueues(tieredQueueSet.uniqueQueues);
 }

@@ -1,6 +1,5 @@
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, gte, inArray, lte, sql } from 'drizzle-orm';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
-import type { RowList } from 'postgres';
 
 import {
   entryEventResults,
@@ -14,6 +13,11 @@ import { logError, logInfo } from '../utils/logger';
 
 type DatabaseInstance = PostgresJsDatabase<Record<string, never>>;
 
+type AutoSubItem = {
+  element_in?: number | null;
+  elementIn?: number | null;
+};
+
 type EntryEventTotalsRow = {
   entryId: number;
   totalPoints: number;
@@ -21,8 +25,23 @@ type EntryEventTotalsRow = {
   totalNetPoints: number;
 };
 
-function mapRowList<T>(result: RowList<Record<string, unknown>[]>): T[] {
-  return [...result] as T[];
+function normalizeAutoSubs(raw: unknown): AutoSubItem[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+
+  return raw as AutoSubItem[];
+}
+
+function getAutoSubPoints(autoSubs: AutoSubItem[], elementsPoints: Map<number, number>): number {
+  return autoSubs.reduce((total, sub) => {
+    const elementId = sub.element_in ?? sub.elementIn;
+    if (!elementId) {
+      return total;
+    }
+
+    return total + (elementsPoints.get(elementId) ?? 0);
+  }, 0);
 }
 
 export const createEntryEventResultsRepository = (dbInstance?: DatabaseInstance) => {
@@ -40,20 +59,34 @@ export const createEntryEventResultsRepository = (dbInstance?: DatabaseInstance)
 
       try {
         const db = await getDbInstance();
-        const result = await db.execute(sql`
-        SELECT
-          entry_id as "entryId",
-          COALESCE(SUM(event_points), 0)::int as "totalPoints",
-          COALESCE(SUM(event_transfers_cost), 0)::int as "totalTransfersCost",
-          COALESCE(SUM(event_net_points), 0)::int as "totalNetPoints"
-        FROM entry_event_results
-        WHERE entry_id = ANY(${entryIds})
-          AND event_id >= ${startEventId}
-          AND event_id <= ${endEventId}
-        GROUP BY entry_id
-      `);
+        const uniqueEntryIds = Array.from(new Set(entryIds));
+        const chunks: number[][] = [];
+        for (let index = 0; index < uniqueEntryIds.length; index += 1000) {
+          chunks.push(uniqueEntryIds.slice(index, index + 1000));
+        }
 
-        const rows = mapRowList<EntryEventTotalsRow>(result);
+        const rows: EntryEventTotalsRow[] = [];
+        for (const chunk of chunks) {
+          const chunkRows = await db
+            .select({
+              entryId: entryEventResults.entryId,
+              totalPoints: sql<number>`COALESCE(SUM(${entryEventResults.eventPoints}), 0)::int`,
+              totalTransfersCost: sql<number>`COALESCE(SUM(${entryEventResults.eventTransfersCost}), 0)::int`,
+              totalNetPoints: sql<number>`COALESCE(SUM(${entryEventResults.eventNetPoints}), 0)::int`,
+            })
+            .from(entryEventResults)
+            .where(
+              and(
+                inArray(entryEventResults.entryId, chunk),
+                gte(entryEventResults.eventId, startEventId),
+                lte(entryEventResults.eventId, endEventId),
+              ),
+            )
+            .groupBy(entryEventResults.entryId);
+
+          rows.push(...chunkRows);
+        }
+
         logInfo('Aggregated entry event results totals', { count: rows.length });
         return rows;
       } catch (error) {
@@ -124,6 +157,8 @@ export const createEntryEventResultsRepository = (dbInstance?: DatabaseInstance)
         for (const el of live.elements) {
           elementsPoints.set(el.id, el.stats.total_points);
         }
+        const autoSubs = normalizeAutoSubs(picks.automatic_subs);
+        const autoSubPoints = getAutoSubPoints(autoSubs, elementsPoints);
         const captainPointsBase = captainPick ? (elementsPoints.get(captainPick.element) ?? 0) : 0;
         const captainPoints = captainPick
           ? captainPointsBase * (captainPick.multiplier || 1)
@@ -137,7 +172,7 @@ export const createEntryEventResultsRepository = (dbInstance?: DatabaseInstance)
           eventTransfersCost: entryHistory.event_transfers_cost,
           eventNetPoints: entryHistory.points - entryHistory.event_transfers_cost,
           eventBenchPoints: entryHistory.points_on_bench ?? null,
-          eventAutoSubPoints: null,
+          eventAutoSubPoints: autoSubPoints,
           eventRank: entryHistory.rank ?? null,
           eventChip: activeChip ?? null,
           eventPlayedCaptain: captainPick ? captainPick.element : null,

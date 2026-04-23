@@ -12,6 +12,7 @@ import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 
 type DatabaseInstance = PostgresJsDatabase<Record<string, never>>;
+const EVENT_LIVE_SUMMARIES_LOCK_KEY = 872341;
 
 export type EventLiveSummaryAggregateRow = {
   elementId: number;
@@ -86,38 +87,40 @@ export const createEventLiveSummariesRepository = (dbInstance?: DatabaseInstance
     replaceAll: async (summaries: EventLiveSummary[]): Promise<{ count: number }> => {
       try {
         const db = await getDbInstance();
+        return await db.transaction(async (tx) => {
+          await tx.execute(sql`SELECT pg_advisory_xact_lock(${EVENT_LIVE_SUMMARIES_LOCK_KEY})`);
+          await tx.execute(sql`TRUNCATE TABLE event_live_summaries RESTART IDENTITY`);
 
-        await db.execute(sql`TRUNCATE TABLE event_live_summaries`);
+          if (summaries.length === 0) {
+            logInfo('Event live summaries replaced with empty set');
+            return { count: 0 };
+          }
 
-        if (summaries.length === 0) {
-          logInfo('Event live summaries replaced with empty set');
-          return { count: 0 };
-        }
+          const inserts: DbEventLiveSummaryInsert[] = summaries.map((summary) => ({
+            eventId: summary.eventId,
+            elementId: summary.elementId,
+            elementType: summary.elementType,
+            teamId: summary.teamId,
+            minutes: summary.minutes,
+            goalsScored: summary.goalsScored,
+            assists: summary.assists,
+            cleanSheets: summary.cleanSheets,
+            goalsConceded: summary.goalsConceded,
+            ownGoals: summary.ownGoals,
+            penaltiesSaved: summary.penaltiesSaved,
+            penaltiesMissed: summary.penaltiesMissed,
+            yellowCards: summary.yellowCards,
+            redCards: summary.redCards,
+            saves: summary.saves,
+            bonus: summary.bonus,
+            bps: summary.bps,
+            totalPoints: summary.totalPoints,
+          }));
 
-        const inserts: DbEventLiveSummaryInsert[] = summaries.map((summary) => ({
-          eventId: summary.eventId,
-          elementId: summary.elementId,
-          elementType: summary.elementType,
-          teamId: summary.teamId,
-          minutes: summary.minutes,
-          goalsScored: summary.goalsScored,
-          assists: summary.assists,
-          cleanSheets: summary.cleanSheets,
-          goalsConceded: summary.goalsConceded,
-          ownGoals: summary.ownGoals,
-          penaltiesSaved: summary.penaltiesSaved,
-          penaltiesMissed: summary.penaltiesMissed,
-          yellowCards: summary.yellowCards,
-          redCards: summary.redCards,
-          saves: summary.saves,
-          bonus: summary.bonus,
-          bps: summary.bps,
-          totalPoints: summary.totalPoints,
-        }));
-
-        const result = await db.insert(eventLiveSummaries).values(inserts).returning();
-        logInfo('Replaced event live summaries', { count: result.length });
-        return { count: result.length };
+          const result = await tx.insert(eventLiveSummaries).values(inserts).returning();
+          logInfo('Replaced event live summaries', { count: result.length });
+          return { count: result.length };
+        });
       } catch (error) {
         logError('Failed to replace event live summaries', error, { count: summaries.length });
         throw new DatabaseError(

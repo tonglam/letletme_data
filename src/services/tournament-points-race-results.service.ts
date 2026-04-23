@@ -1,11 +1,9 @@
+import type { TournamentSyncContext } from '../domain/tournament';
 import { entryEventResultsRepository } from '../repositories/entry-event-results';
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
 import { tournamentGroupRepository } from '../repositories/tournament-groups';
+import { tournamentInfoRepository } from '../repositories/tournament-infos';
 import { tournamentPointsGroupResultsRepository } from '../repositories/tournament-points-group-results';
-import {
-  tournamentInfoRepository,
-  type TournamentInfoSummary,
-} from '../repositories/tournament-infos';
 import { logError, logInfo } from '../utils/logger';
 
 type EntryTotals = {
@@ -60,8 +58,8 @@ async function loadTournamentEntryTotals(
   );
 }
 
-async function syncTournamentPointsRaceResultsForTournament(
-  tournament: TournamentInfoSummary,
+export async function syncTournamentPointsRaceResultsForTournament(
+  tournament: TournamentSyncContext,
   eventId: number,
 ): Promise<{ updatedGroups: number; updatedResults: number; skipped: number }> {
   if (!tournament.groupStartedEventId || !tournament.groupEndedEventId) {
@@ -195,6 +193,9 @@ async function syncTournamentPointsRaceResultsForTournament(
     const rank = groupRankMap.get(rankKey) ?? 0;
     group.groupRank = rank;
     group.groupPoints = group.totalNetPoints;
+    if (tournament.groupQualifyNum) {
+      group.qualified = rank > 0 && rank <= tournament.groupQualifyNum ? 1 : 0;
+    }
   }
 
   for (const result of updatedResults) {
@@ -218,6 +219,33 @@ async function syncTournamentPointsRaceResultsForTournament(
   return { updatedGroups: updatedGroupsCount, updatedResults: updatedResultsCount, skipped };
 }
 
+export async function syncTournamentPointsRaceResultsForTournamentId(
+  tournamentId: number,
+  eventId: number,
+): Promise<{ updatedGroups: number; updatedResults: number; skipped: number }> {
+  const tournament = await tournamentInfoRepository.findById(tournamentId);
+  if (!tournament) {
+    logInfo('Tournament not found for points race sync', { tournamentId, eventId });
+    return { updatedGroups: 0, updatedResults: 0, skipped: 0 };
+  }
+
+  if (
+    tournament.groupMode !== 'points_races' ||
+    !tournament.groupStartedEventId ||
+    !tournament.groupEndedEventId ||
+    eventId < tournament.groupStartedEventId ||
+    eventId > tournament.groupEndedEventId
+  ) {
+    logInfo('Skipping points race sync outside tournament group window', {
+      tournamentId,
+      eventId,
+    });
+    return { updatedGroups: 0, updatedResults: 0, skipped: 0 };
+  }
+
+  return syncTournamentPointsRaceResultsForTournament(tournament, eventId);
+}
+
 export async function syncTournamentPointsRaceResults(
   eventId: number,
 ): Promise<{ eventId: number; updatedGroups: number; updatedResults: number; skipped: number }> {
@@ -232,19 +260,23 @@ export async function syncTournamentPointsRaceResults(
   let updatedGroups = 0;
   let updatedResults = 0;
   let skipped = 0;
-
-  for (const tournament of tournaments) {
-    try {
-      const result = await syncTournamentPointsRaceResultsForTournament(tournament, eventId);
-      updatedGroups += result.updatedGroups;
-      updatedResults += result.updatedResults;
-      skipped += result.skipped;
-    } catch (error) {
-      logError('Failed to sync points race results', error, {
-        tournamentId: tournament.id,
-        eventId,
-      });
-    }
+  const syncResults = await Promise.all(
+    tournaments.map(async (tournament) => {
+      try {
+        return await syncTournamentPointsRaceResultsForTournament(tournament, eventId);
+      } catch (error) {
+        logError('Failed to sync points race results', error, {
+          tournamentId: tournament.id,
+          eventId,
+        });
+        return { updatedGroups: 0, updatedResults: 0, skipped: 0 };
+      }
+    }),
+  );
+  for (const result of syncResults) {
+    updatedGroups += result.updatedGroups;
+    updatedResults += result.updatedResults;
+    skipped += result.skipped;
   }
 
   logInfo('Tournament points race results sync completed', {

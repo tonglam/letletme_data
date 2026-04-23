@@ -12,7 +12,7 @@ function getChangeDateKey(date: Date) {
 }
 
 async function shouldRunPlayerValuesSync(now: Date) {
-  if (!isFPLSeason(now)) {
+  if (!(await isFPLSeason(now))) {
     logInfo('Skipping player values sync - not FPL season', { month: now.getMonth() + 1 });
     return false;
   }

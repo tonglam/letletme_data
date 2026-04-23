@@ -31,7 +31,7 @@ import {
 
 export async function runLiveScores() {
   const now = new Date();
-  if (!isFPLSeason(now)) {
+  if (!(await isFPLSeason(now))) {
     logInfo('Skipping live scores - not FPL season', { month: now.getMonth() + 1 });
     return;
   }
@@ -50,14 +50,14 @@ export async function runLiveScores() {
   }
 
   // Sync actual match scorelines (team_h_score / team_a_score) to DB
-  // Runs every 15 min — distinct from event-lives (player fantasy points, 1-min/10-min)
+  // Runs every 1 min — distinct from event-lives (player fantasy points, 1-min/10-min)
   const job = await enqueueLiveScoresSync(currentEvent.id, 'cron');
   logInfo('Live scores job enqueued', { jobId: job.id, eventId: currentEvent.id });
 }
 
 async function runEventLivesCacheUpdate() {
   const now = new Date();
-  if (!isFPLSeason(now)) {
+  if (!(await isFPLSeason(now))) {
     logInfo('Skipping cache update - not FPL season', { month: now.getMonth() + 1 });
     return;
   }
@@ -84,7 +84,7 @@ async function runEventLivesCacheUpdate() {
 
 async function runEventLivesDbSync() {
   const now = new Date();
-  if (!isFPLSeason(now)) {
+  if (!(await isFPLSeason(now))) {
     logInfo('Skipping DB sync - not FPL season', { month: now.getMonth() + 1 });
     return;
   }
@@ -114,7 +114,7 @@ async function runEventLivesDbSync() {
 // scores, data_checked flag). Runs on match days in the morning AFTER isMatchDayTime has ended.
 export async function runPostMatchConsolidation() {
   const now = new Date();
-  if (!isFPLSeason(now)) {
+  if (!(await isFPLSeason(now))) {
     return;
   }
 
@@ -144,6 +144,18 @@ export function registerLiveJobs(app: Elysia) {
           pattern: '* * * * *',
           async run() {
             try {
+              const now = new Date();
+              if (!(await isFPLSeason(now))) {
+                return;
+              }
+              const currentEvent = await getCurrentEvent();
+              if (!currentEvent) {
+                return;
+              }
+              const fixtures = await loadFixturesByEvent(currentEvent.id);
+              if (!isMatchDayTime(currentEvent, fixtures, now)) {
+                return;
+              }
               await executeTrackedCron('event-lives-cache-update', runEventLivesCacheUpdate);
             } catch {
               // Failure details are already emitted by runTrackedJob.
@@ -168,11 +180,11 @@ export function registerLiveJobs(app: Elysia) {
         }),
       )
 
-      // Live scores - Every 15 minutes (simplified for now)
+      // Live scores - Every 1 minute during match window
       .use(
         cron({
           name: 'live-scores',
-          pattern: '*/15 * * * *',
+          pattern: '* * * * *',
           async run() {
             try {
               await executeTrackedCron('live-scores', runLiveScores);

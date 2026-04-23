@@ -1,9 +1,10 @@
 import {
-  liveDataQueue,
+  getLiveDataQueue,
   LIVE_JOBS,
   type LiveDataJobName,
   type LiveDataJobData,
 } from '../queues/live-data.queue';
+import { getLiveDataJobPriority, type LiveDataPriorityJobName } from '../domain/job-priority';
 import { logError, logInfo } from '../utils/logger';
 
 export type LiveDataJobSource = 'cron' | 'manual' | 'cascade';
@@ -15,6 +16,8 @@ async function enqueueLiveDataJob(
   options: { delay?: number; jobId?: string } = {},
 ) {
   try {
+    const tier = getLiveDataJobPriority(jobName as LiveDataPriorityJobName);
+    const queue = getLiveDataQueue(tier);
     const jobData: LiveDataJobData = {
       eventId,
       source,
@@ -25,7 +28,7 @@ async function enqueueLiveDataJob(
     // Static IDs would dedupe and block subsequent runs while completed jobs are retained.
     const defaultJobId = `${jobName}-e${eventId}-${Date.now()}`;
 
-    const job = await liveDataQueue.add(jobName, jobData, {
+    const job = await queue.add(jobName, jobData, {
       jobId: options.jobId ?? defaultJobId,
       delay: options.delay,
     });
@@ -35,11 +38,14 @@ async function enqueueLiveDataJob(
       jobName,
       eventId,
       source,
+      tier,
+      queue: queue.name,
     });
 
     return job;
   } catch (error) {
-    logError('Failed to enqueue live data job', error, { jobName, eventId, source });
+    const tier = getLiveDataJobPriority(jobName as LiveDataPriorityJobName);
+    logError('Failed to enqueue live data job', error, { jobName, eventId, source, tier });
     throw error;
   }
 }

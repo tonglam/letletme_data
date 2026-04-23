@@ -4,6 +4,7 @@ import { entryEventCupResultsRepository } from '../repositories/entry-event-cup-
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
 import type { RawFPLEntryCupMatch } from '../types';
+import { mapWithConcurrency, uniqueNumbers } from '../utils/async';
 import { logError, logInfo } from '../utils/logger';
 
 const DEFAULT_CONCURRENCY = 5;
@@ -13,34 +14,6 @@ type EntryCupOutcome = {
   record: DbEntryEventCupResultInsert | null;
   error?: Error;
 };
-
-function uniqueNumbers(values: number[]): number[] {
-  return Array.from(new Set(values));
-}
-
-async function mapWithConcurrency<T, R>(
-  items: T[],
-  concurrency: number,
-  handler: (item: T) => Promise<R>,
-): Promise<R[]> {
-  if (items.length === 0) {
-    return [];
-  }
-
-  const results = new Array<R>(items.length);
-  let index = 0;
-
-  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
-    while (index < items.length) {
-      const currentIndex = index;
-      index += 1;
-      results[currentIndex] = await handler(items[currentIndex]);
-    }
-  });
-
-  await Promise.all(workers);
-  return results;
-}
 
 function resolveMatch(entryId: number, matches: RawFPLEntryCupMatch[], eventId: number) {
   const match = matches.find((item) => item.event === eventId);

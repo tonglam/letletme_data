@@ -1,10 +1,19 @@
-import { boolean, index, integer, pgTable, text, uniqueIndex } from 'drizzle-orm/pg-core';
+import {
+  boolean,
+  index,
+  integer,
+  pgTable,
+  text,
+  timestamp,
+  uniqueIndex,
+} from 'drizzle-orm/pg-core';
 import {
   groupModeEnum,
   knockoutModeEnum,
   leagueTypeEnum,
   tournamentModeEnum,
   tournamentStateEnum,
+  tournamentSetupStatusEnum,
 } from './enums.schema';
 import { autoIncrementId, timestamps } from './_helpers.schema';
 import { events } from './events.schema';
@@ -37,6 +46,10 @@ export const tournamentInfos = pgTable(
     knockoutEndedEventId: integer('knockout_ended_event_id').references(() => events.id),
     knockoutPlayAgainstNum: integer('knockout_play_against_num'),
     state: tournamentStateEnum('state').notNull(),
+    setupStatus: tournamentSetupStatusEnum('setup_status').notNull().default('pending'),
+    setupError: text('setup_error'),
+    setupStartedAt: timestamp('setup_started_at', { withTimezone: true }),
+    setupFinishedAt: timestamp('setup_finished_at', { withTimezone: true }),
     ...timestamps,
   },
   (table) => [

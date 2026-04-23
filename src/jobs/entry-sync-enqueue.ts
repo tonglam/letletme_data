@@ -1,11 +1,12 @@
 import {
-  entrySyncQueue,
+  getEntrySyncQueue,
   type EntrySyncJobName,
   type EntrySyncJobSource,
   ENTRY_SYNC_DEFAULT_CHUNK_SIZE,
   ENTRY_SYNC_DEFAULT_CONCURRENCY,
   ENTRY_SYNC_DEFAULT_THROTTLE_MS,
 } from '../queues/entry-sync.queue';
+import { getEntrySyncJobPriority, type EntrySyncPriorityJobName } from '../domain/job-priority';
 import { logError, logInfo } from '../utils/logger';
 
 export interface EntrySyncJobOptions {
@@ -32,6 +33,8 @@ async function enqueueEntrySyncJob(
   options: EntrySyncJobOptions = {},
 ) {
   try {
+    const tier = getEntrySyncJobPriority(jobName as EntrySyncPriorityJobName);
+    const queue = getEntrySyncQueue(tier);
     const chunkSize = sanitizePositiveInt(options.chunkSize, ENTRY_SYNC_DEFAULT_CHUNK_SIZE);
     const chunkOffset = Math.max(0, options.chunkOffset ?? 0);
     const concurrency = sanitizePositiveInt(options.concurrency, ENTRY_SYNC_DEFAULT_CONCURRENCY);
@@ -57,7 +60,7 @@ async function enqueueEntrySyncJob(
       : `${jobName}-chunk-${chunkKey}-${Date.now()}`;
     const jobId = options.jobId ?? defaultJobId;
 
-    const job = await entrySyncQueue.add(jobName, jobData, {
+    const job = await queue.add(jobName, jobData, {
       attempts: 3,
       backoff: {
         type: 'exponential',
@@ -71,12 +74,15 @@ async function enqueueEntrySyncJob(
       jobId: job.id,
       jobName,
       source,
+      tier,
+      queue: queue.name,
       chunkOffset,
       chunkSize,
     });
     return job;
   } catch (error) {
-    logError('Failed to enqueue entry sync job', error, { jobName, source });
+    const tier = getEntrySyncJobPriority(jobName as EntrySyncPriorityJobName);
+    logError('Failed to enqueue entry sync job', error, { jobName, source, tier });
     throw error;
   }
 }

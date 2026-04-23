@@ -72,6 +72,20 @@ describe('Event Live Summaries Integration Tests', () => {
       expect(afterSync.length).toBe(result.count);
       expect(afterSync.length).toBe(beforeSync.length);
     });
+
+    test('should keep a valid summary table under concurrent re-syncs', async () => {
+      const [first, second] = await Promise.all([syncEventLiveSummary(), syncEventLiveSummary()]);
+
+      const db = await getDb();
+      const summaries = await db.select().from(eventLiveSummaries);
+      const elementIds = summaries.map((summary) => summary.elementId);
+
+      expect(first.count).toBeGreaterThan(0);
+      expect(second.count).toBeGreaterThan(0);
+      expect(summaries.length).toBe(first.count);
+      expect(new Set(elementIds).size).toBe(summaries.length);
+      expect(summaries.every((summary) => summary.eventId === testEventId)).toBe(true);
+    });
   });
 
   describe('Data Aggregation', () => {

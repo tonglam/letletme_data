@@ -51,7 +51,7 @@ export function registerEntryInfoJobs(app: Elysia) {
         try {
           await executeTrackedCron('entry-info-daily', async () => {
             const now = new Date();
-            if (!isFPLSeason(now)) {
+            if (!(await isFPLSeason(now))) {
               logInfo('Skipping entry info sync - not FPL season', {
                 month: now.getMonth() + 1,
               });

@@ -70,7 +70,7 @@ export const createTournamentGroupRepository = (dbInstance?: DatabaseInstance) =
           .where(
             and(
               eq(tournamentGroups.tournamentId, tournamentId),
-              eq(tournamentGroups.groupId, groupId),
+              eq(tournamentGroups.groupId, Number(groupId)),
             ),
           );
         logInfo('Retrieved tournament group entries', {
@@ -89,6 +89,44 @@ export const createTournamentGroupRepository = (dbInstance?: DatabaseInstance) =
       }
     },
 
+    deleteByTournament: async (tournamentId: number): Promise<void> => {
+      try {
+        const db = await getDbInstance();
+        await db.delete(tournamentGroups).where(eq(tournamentGroups.tournamentId, tournamentId));
+      } catch (error) {
+        logError('Failed to delete tournament groups', error, { tournamentId });
+        throw new DatabaseError(
+          'Failed to delete tournament groups',
+          'TOURNAMENT_GROUPS_DELETE_ERROR',
+          error as Error,
+        );
+      }
+    },
+
+    findGroupSlots: async (
+      tournamentId: number,
+    ): Promise<Array<{ groupId: number; groupIndex: number }>> => {
+      try {
+        const db = await getDbInstance();
+        const rows = await db
+          .select({
+            groupId: tournamentGroups.groupId,
+            groupIndex: tournamentGroups.groupIndex,
+          })
+          .from(tournamentGroups)
+          .where(eq(tournamentGroups.tournamentId, tournamentId))
+          .orderBy(tournamentGroups.groupId, tournamentGroups.groupIndex);
+        return rows;
+      } catch (error) {
+        logError('Failed to find tournament group slots', error, { tournamentId });
+        throw new DatabaseError(
+          'Failed to find tournament group slots',
+          'TOURNAMENT_GROUPS_SLOTS_ERROR',
+          error as Error,
+        );
+      }
+    },
+
     upsertBatch: async (groups: DbTournamentGroupInsert[]): Promise<number> => {
       if (groups.length === 0) {
         return 0;
@@ -100,16 +138,28 @@ export const createTournamentGroupRepository = (dbInstance?: DatabaseInstance) =
           .insert(tournamentGroups)
           .values(groups)
           .onConflictDoUpdate({
-            target: [tournamentGroups.tournamentId, tournamentGroups.entryId],
+            target: [
+              tournamentGroups.tournamentId,
+              tournamentGroups.groupId,
+              tournamentGroups.entryId,
+            ],
             set: {
-              groupId: sql`excluded.group_id`,
-              groupRank: sql`excluded.group_rank`,
+              groupName: sql`excluded.group_name`,
+              groupIndex: sql`excluded.group_index`,
+              startedEventId: sql`excluded.started_event_id`,
+              endedEventId: sql`excluded.ended_event_id`,
               groupPoints: sql`excluded.group_points`,
-              groupWins: sql`excluded.group_wins`,
-              groupLoses: sql`excluded.group_loses`,
-              groupDraws: sql`excluded.group_draws`,
-              state: sql`excluded.state`,
-              updatedAt: new Date(),
+              groupRank: sql`excluded.group_rank`,
+              played: sql`excluded.played`,
+              won: sql`excluded.won`,
+              drawn: sql`excluded.drawn`,
+              lost: sql`excluded.lost`,
+              totalPoints: sql`excluded.total_points`,
+              totalTransfersCost: sql`excluded.total_transfers_cost`,
+              totalNetPoints: sql`excluded.total_net_points`,
+              qualified: sql`excluded.qualified`,
+              overallRank: sql`excluded.overall_rank`,
+              createdAt: sql`excluded.created_at`,
             },
           });
 

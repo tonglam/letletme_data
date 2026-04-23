@@ -22,7 +22,7 @@ import { enqueueTournamentTransfersPre } from './tournament-sync.jobs';
 
 export async function runTournamentEventTransfersPreSync() {
   const now = new Date();
-  if (!isFPLSeason(now)) {
+  if (!(await isFPLSeason(now))) {
     logInfo('Skipping tournament event transfers pre sync - not FPL season', {
       month: now.getMonth() + 1,
     });

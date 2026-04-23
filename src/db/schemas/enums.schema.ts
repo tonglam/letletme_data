@@ -20,3 +20,10 @@ export const knockoutModeEnum = pgEnum('knockout_mode', [
 ]);
 
 export const tournamentStateEnum = pgEnum('tournament_state', ['active', 'inactive', 'finished']);
+
+export const tournamentSetupStatusEnum = pgEnum('tournament_setup_status', [
+  'pending',
+  'processing',
+  'ready',
+  'failed',
+]);

@@ -1,5 +1,6 @@
 export { cache } from './cache-operations';
 export type { CacheOperations } from './cache-operations';
+export { entryInfosCache } from './entry-infos-cache';
 export { eventLiveExplainCache } from './event-live-explains-cache';
 export { eventLiveSummaryCache } from './event-live-summaries-cache';
 export { eventLivesCache } from './event-lives-cache';

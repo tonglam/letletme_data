@@ -18,7 +18,7 @@ import { enqueueTournamentEventPicks } from './tournament-sync.jobs';
 
 export async function runTournamentEventPicksSync() {
   const now = new Date();
-  if (!isFPLSeason(now)) {
+  if (!(await isFPLSeason(now))) {
     logInfo('Skipping tournament event picks sync - not FPL season', { month: now.getMonth() + 1 });
     return;
   }

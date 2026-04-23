@@ -19,7 +19,7 @@ import { enqueueLeagueEventPicks } from './league-sync.jobs';
 
 export async function runLeagueEventPicksSync() {
   const now = new Date();
-  if (!isFPLSeason(now)) {
+  if (!(await isFPLSeason(now))) {
     logInfo('Skipping league event picks sync - not FPL season', { month: now.getMonth() + 1 });
     return;
   }

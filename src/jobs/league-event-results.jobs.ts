@@ -7,6 +7,7 @@ import { loadFixturesByEvent } from '../utils/fixtures';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { logInfo } from '../utils/logger';
 import { enqueueLeagueEventResults } from './league-sync.jobs';
+import type { LeagueSyncJobSource } from './league-sync.jobs';
 
 /**
  * League Event Results Sync Trigger
@@ -17,9 +18,14 @@ import { enqueueLeagueEventResults } from './league-sync.jobs';
  * - Uses fresh event_lives data from DB for calculations
  */
 
-export async function runLeagueEventResultsSync() {
+export async function runLeagueEventResultsSync(options?: {
+  skipMatchWindowCheck?: boolean;
+  source?: LeagueSyncJobSource;
+}) {
+  const source = options?.source ?? 'cron';
+  const skipMatchWindowCheck = options?.skipMatchWindowCheck ?? false;
   const now = new Date();
-  if (!isFPLSeason(now)) {
+  if (!(await isFPLSeason(now))) {
     logInfo('Skipping league event results sync - not FPL season', { month: now.getMonth() + 1 });
     return;
   }
@@ -31,7 +37,7 @@ export async function runLeagueEventResultsSync() {
   }
 
   const fixtures = await loadFixturesByEvent(currentEvent.id);
-  if (!isAfterMatchDay(currentEvent, fixtures, now)) {
+  if (!skipMatchWindowCheck && !isAfterMatchDay(currentEvent, fixtures, now)) {
     logInfo('Skipping league event results sync - conditions not met', {
       eventId: currentEvent.id,
     });
@@ -39,10 +45,12 @@ export async function runLeagueEventResultsSync() {
   }
 
   // Enqueue coordinator job (will fan out to per-tournament jobs)
-  const job = await enqueueLeagueEventResults(currentEvent.id, 'cron');
+  const job = await enqueueLeagueEventResults(currentEvent.id, source);
   logInfo('League event results coordinator job enqueued', {
     jobId: job.id,
     eventId: currentEvent.id,
+    source,
+    skipMatchWindowCheck,
   });
 }
 

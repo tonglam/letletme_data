@@ -35,6 +35,7 @@ export class CacheError extends Error implements APIError {
 }
 
 export class ValidationError extends Error implements APIError {
+  public readonly status = 400;
   constructor(
     message: string,
     public code?: string,
@@ -45,9 +46,41 @@ export class ValidationError extends Error implements APIError {
   }
 }
 
+export class NotFoundError extends Error implements APIError {
+  public readonly status = 404;
+  constructor(
+    message: string,
+    public code?: string,
+    public details?: unknown,
+  ) {
+    super(message);
+    this.name = 'NotFoundError';
+  }
+}
+
+export class ConflictError extends Error implements APIError {
+  public readonly status = 409;
+  constructor(
+    message: string,
+    public code?: string,
+    public details?: unknown,
+  ) {
+    super(message);
+    this.name = 'ConflictError';
+  }
+}
+
 // Error handling utilities
 export function isAPIError(error: unknown): error is APIError {
   return error instanceof Error && 'status' in error;
+}
+
+export function getHttpStatusFromError(error: unknown): number {
+  if (error instanceof ValidationError) return error.status;
+  if (error instanceof NotFoundError) return error.status;
+  if (error instanceof ConflictError) return error.status;
+  if (isAPIError(error) && typeof error.status === 'number') return error.status;
+  return 500;
 }
 
 export function getErrorMessage(error: unknown): string {

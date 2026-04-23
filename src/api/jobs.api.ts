@@ -37,6 +37,7 @@ import { runTournamentInfoSync } from '../jobs/tournament-info.jobs';
 import { runLiveScores, runPostMatchConsolidation } from '../jobs/live.jobs';
 import { runTournamentKnockoutResultsSync } from '../jobs/tournament-knockout-results.jobs';
 import { runTournamentPointsRaceResultsSync } from '../jobs/tournament-points-race-results.jobs';
+import { refreshTournamentMaterializedViews } from '../services/tournament-materialized-views.service';
 import { getCurrentEvent } from '../services/events.service';
 import { getErrorMessage } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
@@ -163,6 +164,11 @@ export const jobsAPI = new Elysia({ prefix: '/jobs' })
         schedule: 'Cascade after event-results',
       },
       {
+        name: 'tournament-materialized-views-refresh',
+        description: 'Refresh tournament materialized views for GraphQL APIs',
+        schedule: 'Cascade 30s after event-results cascade jobs',
+      },
+      {
         name: 'event-lives-cache-update',
         description: 'Cache-only update for event lives (fast, real-time)',
         schedule: 'Every 1 minute during match hours',
@@ -239,7 +245,10 @@ export const jobsAPI = new Elysia({ prefix: '/jobs' })
         await runLeagueEventPicksSync();
       },
       'league-event-results-sync': async () => {
-        await runLeagueEventResultsSync();
+        await runLeagueEventResultsSync({
+          source: 'manual',
+          skipMatchWindowCheck: true,
+        });
       },
       'tournament-event-picks-sync': async () => {
         await runTournamentEventPicksSync();
@@ -267,6 +276,9 @@ export const jobsAPI = new Elysia({ prefix: '/jobs' })
       },
       'tournament-knockout-results-sync': async () => {
         await runTournamentKnockoutResultsSync();
+      },
+      'tournament-materialized-views-refresh': async () => {
+        await refreshTournamentMaterializedViews();
       },
       'event-lives-cache-update': async () => {
         const currentEvent = await getCurrentEvent();

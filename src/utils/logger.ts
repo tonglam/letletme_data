@@ -1,6 +1,8 @@
 import { appendFileSync, mkdirSync } from 'fs';
 import pino from 'pino';
 import { join } from 'path';
+
+import { getJobLogContext } from './job-log-context';
 import { formatUtc8Timestamp } from './timezone';
 
 const isDevelopment = process.env.NODE_ENV !== 'production';
@@ -8,7 +10,8 @@ const logLevel = process.env.LOG_LEVEL || 'info';
 
 // Determine logs directory path (root level)
 const logsDir = join(process.cwd(), 'logs');
-const combinedLogPath = join(logsDir, 'combined.log');
+const appLogPath = join(logsDir, 'app.log');
+const jobsLogPath = join(logsDir, 'jobs.log');
 const errorLogPath = join(logsDir, 'error.log');
 
 type LogLevel = 'debug' | 'info' | 'warn' | 'error';
@@ -33,7 +36,12 @@ function shouldWrite(level: LogLevel) {
   return logLevelPriority[level] >= logLevelPriority[configuredLogLevel];
 }
 
-function writeFileLog(level: LogLevel, message: string, payload?: object) {
+function writeFileLog(
+  level: LogLevel,
+  message: string,
+  payload?: object,
+  options: { stream?: 'app' | 'jobs' } = {},
+) {
   if (!shouldWrite(level)) {
     return;
   }
@@ -47,7 +55,9 @@ function writeFileLog(level: LogLevel, message: string, payload?: object) {
       ...(payload ? { payload } : {}),
     });
 
-    appendFileSync(combinedLogPath, `${line}\n`);
+    const stream = options.stream ?? 'app';
+    const destination = stream === 'jobs' ? jobsLogPath : appLogPath;
+    appendFileSync(destination, `${line}\n`);
     if (level === 'error') {
       appendFileSync(errorLogPath, `${line}\n`);
     }
@@ -134,15 +144,29 @@ export const logger = pino(
   }),
 );
 
+function mergeJobContext(data?: object): object | undefined {
+  const jobContext = getJobLogContext();
+  if (!jobContext) {
+    return data;
+  }
+
+  return {
+    ...(data ?? {}),
+    ...jobContext,
+  };
+}
+
 // Logger helpers
 export const logInfo = (message: string, data?: object) => {
-  logger.info(data, message);
-  writeFileLog('info', message, data);
+  const payload = mergeJobContext(data);
+  logger.info(payload, message);
+  writeFileLog('info', message, payload);
 };
 
 export const logError = (message: string, error?: Error | unknown, data?: object) => {
+  const payloadWithContext = mergeJobContext(data);
   const payload = {
-    ...(data ?? {}),
+    ...(payloadWithContext ?? {}),
     ...(error === undefined ? {} : { error: serializeError(error) }),
   };
   logger.error(payload, message);
@@ -150,11 +174,29 @@ export const logError = (message: string, error?: Error | unknown, data?: object
 };
 
 export const logDebug = (message: string, data?: object) => {
-  logger.debug(data, message);
-  writeFileLog('debug', message, data);
+  const payload = mergeJobContext(data);
+  logger.debug(payload, message);
+  writeFileLog('debug', message, payload);
 };
 
 export const logWarn = (message: string, data?: object) => {
-  logger.warn(data, message);
-  writeFileLog('warn', message, data);
+  const payload = mergeJobContext(data);
+  logger.warn(payload, message);
+  writeFileLog('warn', message, payload);
+};
+
+export const logJobInfo = (message: string, data?: object) => {
+  const payload = mergeJobContext(data);
+  logger.info(payload, message);
+  writeFileLog('info', message, payload, { stream: 'jobs' });
+};
+
+export const logJobError = (message: string, error?: Error | unknown, data?: object) => {
+  const payloadWithContext = mergeJobContext(data);
+  const payload = {
+    ...(payloadWithContext ?? {}),
+    ...(error === undefined ? {} : { error: serializeError(error) }),
+  };
+  logger.error(payload, message);
+  writeFileLog('error', message, payload, { stream: 'jobs' });
 };

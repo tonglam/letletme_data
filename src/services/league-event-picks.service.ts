@@ -5,6 +5,7 @@ import {
   tournamentInfoRepository,
   type TournamentInfoSummary,
 } from '../repositories/tournament-infos';
+import { mapWithConcurrency, uniqueNumbers } from '../utils/async';
 import { logError, logInfo } from '../utils/logger';
 import { syncEntryEventPicks } from './entries.service';
 
@@ -14,34 +15,6 @@ type EntrySyncOutcome = {
   entryId: number;
   success: boolean;
 };
-
-function uniqueNumbers(values: number[]): number[] {
-  return Array.from(new Set(values));
-}
-
-async function mapWithConcurrency<T, R>(
-  items: T[],
-  concurrency: number,
-  handler: (item: T) => Promise<R>,
-): Promise<R[]> {
-  if (items.length === 0) {
-    return [];
-  }
-
-  const results = new Array<R>(items.length);
-  let index = 0;
-
-  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
-    while (index < items.length) {
-      const currentIndex = index;
-      index += 1;
-      results[currentIndex] = await handler(items[currentIndex]);
-    }
-  });
-
-  await Promise.all(workers);
-  return results;
-}
 
 async function fetchLeagueEntryIds(tournament: TournamentInfoSummary): Promise<number[]> {
   const maxEntries = tournament.totalTeamNum > 0 ? tournament.totalTeamNum : undefined;

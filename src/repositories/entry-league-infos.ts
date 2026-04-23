@@ -1,3 +1,4 @@
+import { sql } from 'drizzle-orm';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import { entryLeagueInfos, type DbEntryLeagueInfoInsert } from '../db/schemas/index.schema';
 import { getDb } from '../db/singleton';
@@ -40,28 +41,29 @@ export const createEntryLeagueInfoRepository = (dbInstance?: DatabaseInstance) =
             entryLastRank: item.entry_last_rank ?? null,
           });
         }
-
-        for (const insert of rows) {
-          await db
-            .insert(entryLeagueInfos)
-            .values(insert)
-            .onConflictDoUpdate({
-              target: [entryLeagueInfos.entryId, entryLeagueInfos.leagueId],
-              set: {
-                leagueName: insert.leagueName,
-                leagueType: insert.leagueType,
-                startedEvent: insert.startedEvent,
-                entryRank: insert.entryRank,
-                entryLastRank: insert.entryLastRank,
-                updatedAt: new Date(),
-              },
-            });
-          logInfo('Upserted entry league info', {
-            entryId: insert.entryId,
-            leagueId: insert.leagueId,
-            leagueType: insert.leagueType,
-          });
+        if (rows.length === 0) {
+          return;
         }
+
+        await db
+          .insert(entryLeagueInfos)
+          .values(rows)
+          .onConflictDoUpdate({
+            target: [entryLeagueInfos.entryId, entryLeagueInfos.leagueId],
+            set: {
+              leagueName: sql`excluded.league_name`,
+              leagueType: sql`excluded.league_type`,
+              startedEvent: sql`excluded.started_event`,
+              entryRank: sql`excluded.entry_rank`,
+              entryLastRank: sql`excluded.entry_last_rank`,
+              updatedAt: new Date(),
+            },
+          });
+
+        logInfo('Upserted entry league infos', {
+          entryId,
+          count: rows.length,
+        });
       } catch (error) {
         logError('Failed to upsert entry league infos', error, { entryId });
         throw new DatabaseError(

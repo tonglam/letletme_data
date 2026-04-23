@@ -6,37 +6,10 @@ import { entryEventTransfersRepository } from '../repositories/entry-event-trans
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
 import { getEventLivesByEventId } from './event-lives.service';
+import { mapWithConcurrency, uniqueNumbers } from '../utils/async';
 import { logError, logInfo } from '../utils/logger';
 
 const DEFAULT_CONCURRENCY = 5;
-
-function uniqueNumbers(values: number[]): number[] {
-  return Array.from(new Set(values));
-}
-
-async function mapWithConcurrency<T, R>(
-  items: T[],
-  concurrency: number,
-  handler: (item: T) => Promise<R>,
-): Promise<R[]> {
-  if (items.length === 0) {
-    return [];
-  }
-
-  const results = new Array<R>(items.length);
-  let index = 0;
-
-  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
-    while (index < items.length) {
-      const currentIndex = index;
-      index += 1;
-      results[currentIndex] = await handler(items[currentIndex]);
-    }
-  });
-
-  await Promise.all(workers);
-  return results;
-}
 
 function normalizePicks(raw: unknown): RawFPLEntryEventPickItem[] {
   if (!Array.isArray(raw)) {

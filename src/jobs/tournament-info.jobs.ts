@@ -8,7 +8,7 @@ import { logInfo } from '../utils/logger';
 
 export async function runTournamentInfoSync() {
   const now = new Date();
-  if (!isFPLSeason(now)) {
+  if (!(await isFPLSeason(now))) {
     logInfo('Skipping tournament info sync - not FPL season', {
       month: now.getMonth() + 1,
     });

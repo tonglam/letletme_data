@@ -1,16 +1,20 @@
 import { QueueEvents, Worker } from 'bullmq';
 import { asc } from 'drizzle-orm';
 
+import { MUTATION_PRIORITY_ORDER } from '../domain/job-priority';
 import { entryInfos } from '../db/schemas/index.schema';
 import { getDb } from '../db/singleton';
 import {
-  entrySyncQueueName,
+  type MutationPriorityTier,
   type EntrySyncJobData,
   type EntrySyncJobSource,
   type EntrySyncJobName,
   ENTRY_SYNC_DEFAULT_CHUNK_SIZE,
   ENTRY_SYNC_DEFAULT_CONCURRENCY,
   ENTRY_SYNC_DEFAULT_THROTTLE_MS,
+  entrySyncQueuesByTier,
+  getEntrySyncQueueName,
+  isEntrySyncTieredQueueEnabled,
 } from '../queues/entry-sync.queue';
 import {
   enqueueEntryInfoSyncJob,
@@ -27,7 +31,10 @@ import {
 } from '../services/entries.service';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { logError, logInfo } from '../utils/logger';
+import { withMutationConflictGuard } from '../utils/mutation-lock';
 import { getQueueConnection } from '../utils/queue';
+import { startStrictPriorityGate } from './strict-priority-gate';
+import type { WorkerRuntime } from './worker-runtime';
 
 const maxRetryCycles = 2;
 const retryBaseDelayMs = 5 * 60_000;
@@ -229,70 +236,124 @@ async function handleEntryJob(
   return result;
 }
 
-export function createEntrySyncWorker() {
+export function createEntrySyncWorker(): WorkerRuntime {
   const connection = getQueueConnection();
+  const activeTiers = isEntrySyncTieredQueueEnabled ? MUTATION_PRIORITY_ORDER : (['p2'] as const);
+  const workers: Worker<EntrySyncJobData>[] = [];
+  const queueEvents: QueueEvents[] = [];
+  const monitorTargets: WorkerRuntime['monitorTargets'] = [];
 
-  const queueEvents = new QueueEvents(entrySyncQueueName, { connection });
+  const processor = async (job: {
+    id: string;
+    name: string;
+    data: EntrySyncJobData;
+    attemptsMade: number;
+    queueName: string;
+  }) => {
+    const context = {
+      jobType: 'queue' as const,
+      queueName: job.queueName,
+      jobId: job.id,
+      jobName: job.name,
+      source: job.data?.source as string | undefined,
+      eventId: job.data?.eventId,
+      attempt: job.attemptsMade + 1,
+    };
 
-  const worker = new Worker(
-    entrySyncQueueName,
-    async (job) => {
-      const context = {
-        jobType: 'queue' as const,
-        queueName: entrySyncQueueName,
-        jobId: job.id,
+    logJobTriggered(context);
+
+    return withMutationConflictGuard(
+      {
+        queueName: job.queueName,
         jobName: job.name,
-        source: job.data?.source as string | undefined,
+        jobId: String(job.id),
         eventId: job.data?.eventId,
-        attempt: job.attemptsMade + 1,
-      };
+      },
+      () =>
+        runTrackedJob(context, async () => {
+          switch (job.name) {
+            case 'entry-info':
+              return handleEntryJob('entry-info', 'entry info sync', syncEntryInfo, job.data);
+            case 'entry-picks':
+              return handleEntryJob(
+                'entry-picks',
+                'entry picks sync',
+                (entryId) => syncEntryEventPicks(entryId, job.data?.eventId),
+                job.data,
+              );
+            case 'entry-transfers':
+              return handleEntryJob(
+                'entry-transfers',
+                'entry transfers sync',
+                (entryId) => syncEntryEventTransfers(entryId, job.data?.eventId),
+                job.data,
+              );
+            case 'entry-results':
+              return handleEntryJob(
+                'entry-results',
+                'entry results sync',
+                syncEntryEventResults,
+                job.data,
+              );
+            default:
+              throw new Error(`Unknown entry-sync job: ${job.name}`);
+          }
+        }),
+    );
+  };
 
-      logJobTriggered(context);
+  for (const tier of activeTiers) {
+    const queueName = getEntrySyncQueueName(tier);
+    const worker = new Worker<EntrySyncJobData>(queueName, processor, { connection });
+    const events = new QueueEvents(queueName, { connection });
 
-      return runTrackedJob(context, async () => {
-        switch (job.name) {
-          case 'entry-info':
-            return handleEntryJob('entry-info', 'entry info sync', syncEntryInfo, job.data);
-          case 'entry-picks':
-            return handleEntryJob(
-              'entry-picks',
-              'entry picks sync',
-              (entryId) => syncEntryEventPicks(entryId, job.data?.eventId),
-              job.data,
-            );
-          case 'entry-transfers':
-            return handleEntryJob(
-              'entry-transfers',
-              'entry transfers sync',
-              (entryId) => syncEntryEventTransfers(entryId, job.data?.eventId),
-              job.data,
-            );
-          case 'entry-results':
-            return handleEntryJob(
-              'entry-results',
-              'entry results sync',
-              syncEntryEventResults,
-              job.data,
-            );
-          default:
-            throw new Error(`Unknown entry-sync job: ${job.name}`);
-        }
+    worker.on('completed', (job) => {
+      logInfo('Entry sync job completed', { jobId: job.id, name: job.name, tier });
+    });
+
+    worker.on('failed', (job, error) => {
+      logError('Entry sync job failed', error, {
+        jobId: job?.id,
+        name: job?.name,
+        attemptsMade: job?.attemptsMade,
+        tier,
       });
+    });
+
+    workers.push(worker);
+    queueEvents.push(events);
+    monitorTargets.push({
+      queue: entrySyncQueuesByTier[tier],
+      queueEvents: events,
+      queueName,
+      tier,
+    });
+  }
+
+  const workerByTier = buildWorkerTierMap(workers, activeTiers);
+  const gate = startStrictPriorityGate(
+    'entry-sync',
+    {
+      p0: { queue: entrySyncQueuesByTier.p0, worker: workerByTier.p0 },
+      p1: { queue: entrySyncQueuesByTier.p1, worker: workerByTier.p1 },
+      p2: { queue: entrySyncQueuesByTier.p2, worker: workerByTier.p2 },
+      p3: { queue: entrySyncQueuesByTier.p3, worker: workerByTier.p3 },
     },
-    { connection },
+    { enabled: isEntrySyncTieredQueueEnabled },
   );
 
-  worker.on('completed', (job) => {
-    logInfo('Entry sync job completed', { jobId: job.id, name: job.name });
-  });
+  return { workers, queueEvents, monitorTargets, stop: gate.stop };
+}
 
-  worker.on('failed', (job, error) => {
-    logError('Entry sync job failed', error, {
-      jobId: job?.id,
-      name: job?.name,
-      attemptsMade: job?.attemptsMade,
-    });
-  });
-
-  return { worker, queueEvents };
+function buildWorkerTierMap(
+  workers: Worker<EntrySyncJobData>[],
+  activeTiers: readonly MutationPriorityTier[],
+): Record<MutationPriorityTier, Worker<EntrySyncJobData>> {
+  const fallback = workers[0];
+  const workerByTier = {} as Record<MutationPriorityTier, Worker<EntrySyncJobData>>;
+  for (const tier of MUTATION_PRIORITY_ORDER) {
+    const index = activeTiers.indexOf(tier);
+    workerByTier[tier] = index >= 0 ? workers[index] : fallback;
+  }
+  return workerByTier;
 }

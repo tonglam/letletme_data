@@ -19,7 +19,7 @@ import { enqueueTournamentEventResults } from './tournament-sync.jobs';
 
 export async function runTournamentEventResultsSync() {
   const now = new Date();
-  if (!isFPLSeason(now)) {
+  if (!(await isFPLSeason(now))) {
     logInfo('Skipping tournament event results sync - not FPL season', {
       month: now.getMonth() + 1,
     });

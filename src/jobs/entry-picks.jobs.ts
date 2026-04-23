@@ -23,7 +23,7 @@ export function registerEntryPicksJobs(app: Elysia) {
         try {
           await executeTrackedCron('entry-event-picks-daily', async () => {
             const now = new Date();
-            if (!isFPLSeason(now)) {
+            if (!(await isFPLSeason(now))) {
               logInfo('Skipping entry picks sync - not FPL season', {
                 month: now.getMonth() + 1,
               });

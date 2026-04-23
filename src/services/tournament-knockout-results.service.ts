@@ -1,13 +1,13 @@
+import { fplClient } from '../clients/fpl';
+import type { TournamentSyncContext } from '../domain/tournament';
 import type { RawFPLEntryEventPickItem } from '../types';
 import { entryEventResultsRepository } from '../repositories/entry-event-results';
 import { eventLiveRepository } from '../repositories/event-lives';
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
-import {
-  tournamentInfoRepository,
-  type TournamentInfoSummary,
-} from '../repositories/tournament-infos';
+import { tournamentInfoRepository } from '../repositories/tournament-infos';
 import { tournamentKnockoutResultsRepository } from '../repositories/tournament-knockout-results';
 import { tournamentKnockoutsRepository } from '../repositories/tournament-knockouts';
+import { ensureKnockoutRoundOneSeeded } from './tournament-seed.service';
 import { logError, logInfo } from '../utils/logger';
 
 type KnockoutRoundSummary = {
@@ -32,6 +32,26 @@ function pickElements(picks: RawFPLEntryEventPickItem[], chip: string | null) {
     return picks.map((pick) => pick.element);
   }
   return picks.filter((pick) => pick.position <= 11).map((pick) => pick.element);
+}
+
+async function loadLiveMap(eventId: number) {
+  const eventLives = await eventLiveRepository.findByEventId(eventId);
+  if (eventLives.length > 0) {
+    return new Map(
+      eventLives.map((live) => [
+        live.elementId,
+        { goalsScored: live.goalsScored, goalsConceded: live.goalsConceded },
+      ]),
+    );
+  }
+
+  const live = await fplClient.getEventLive(eventId);
+  return new Map(
+    live.elements.map((element) => [
+      element.id,
+      { goalsScored: element.stats.goals_scored, goalsConceded: element.stats.goals_conceded },
+    ]),
+  );
 }
 
 function sumGoals(
@@ -71,7 +91,10 @@ function resolveMatchWinner(
   if (homeGoalsConceded < awayGoalsConceded) return homeEntryId;
   if (homeGoalsConceded > awayGoalsConceded) return awayEntryId;
 
-  return Math.random() < 0.5 ? homeEntryId : awayEntryId;
+  // Deterministic fallback: prefer the lower entry id so replays of the same
+  // inputs always resolve identically. This keeps knockout outcomes
+  // reproducible during backfills and audits.
+  return homeEntryId <= awayEntryId ? homeEntryId : awayEntryId;
 }
 
 function calcEntryWinningNum(
@@ -179,8 +202,8 @@ function resolveRoundWinner(
   );
 }
 
-async function syncKnockoutForTournament(
-  tournament: TournamentInfoSummary,
+export async function syncKnockoutForTournament(
+  tournament: TournamentSyncContext,
   eventId: number,
 ): Promise<{ updatedResults: number; updatedKnockouts: number; skipped: number }> {
   if (!tournament.knockoutStartedEventId || !tournament.knockoutEndedEventId) {
@@ -190,6 +213,8 @@ async function syncKnockoutForTournament(
     return { updatedResults: 0, updatedKnockouts: 0, skipped: 0 };
   }
 
+  await ensureKnockoutRoundOneSeeded(tournament.id);
+
   const entryIds = await tournamentEntryRepository.findEntryIdsByTournamentId(tournament.id);
   const eventResults = await entryEventResultsRepository.findByEventAndEntryIds(eventId, entryIds);
   if (eventResults.length === 0) {
@@ -198,17 +223,7 @@ async function syncKnockoutForTournament(
   }
   const eventResultMap = new Map(eventResults.map((result) => [result.entryId, result]));
 
-  const eventLives = await eventLiveRepository.findByEventId(eventId);
-  if (eventLives.length === 0) {
-    logInfo('Event live data missing for knockout', { tournamentId: tournament.id, eventId });
-    return { updatedResults: 0, updatedKnockouts: 0, skipped: entryIds.length };
-  }
-  const liveMap = new Map(
-    eventLives.map((live) => [
-      live.elementId,
-      { goalsScored: live.goalsScored, goalsConceded: live.goalsConceded },
-    ]),
-  );
+  const liveMap = await loadLiveMap(eventId);
 
   const knockoutResults = await tournamentKnockoutResultsRepository.findByTournamentAndEvent(
     tournament.id,
@@ -403,6 +418,33 @@ async function syncKnockoutForTournament(
   };
 }
 
+export async function syncTournamentKnockoutResultsForTournamentId(
+  tournamentId: number,
+  eventId: number,
+): Promise<{ updatedResults: number; updatedKnockouts: number; skipped: number }> {
+  const tournament = await tournamentInfoRepository.findById(tournamentId);
+  if (!tournament) {
+    logInfo('Tournament not found for knockout sync', { tournamentId, eventId });
+    return { updatedResults: 0, updatedKnockouts: 0, skipped: 0 };
+  }
+
+  if (
+    tournament.knockoutMode === 'no_knockout' ||
+    !tournament.knockoutStartedEventId ||
+    !tournament.knockoutEndedEventId ||
+    eventId < tournament.knockoutStartedEventId ||
+    eventId > tournament.knockoutEndedEventId
+  ) {
+    logInfo('Skipping knockout sync outside tournament knockout window', {
+      tournamentId,
+      eventId,
+    });
+    return { updatedResults: 0, updatedKnockouts: 0, skipped: 0 };
+  }
+
+  return syncKnockoutForTournament(tournament, eventId);
+}
+
 export async function syncTournamentKnockoutResults(
   eventId: number,
 ): Promise<{ eventId: number; updatedResults: number; updatedKnockouts: number; skipped: number }> {
@@ -417,19 +459,23 @@ export async function syncTournamentKnockoutResults(
   let updatedResults = 0;
   let updatedKnockouts = 0;
   let skipped = 0;
-
-  for (const tournament of tournaments) {
-    try {
-      const result = await syncKnockoutForTournament(tournament, eventId);
-      updatedResults += result.updatedResults;
-      updatedKnockouts += result.updatedKnockouts;
-      skipped += result.skipped;
-    } catch (error) {
-      logError('Failed to sync knockout results', error, {
-        tournamentId: tournament.id,
-        eventId,
-      });
-    }
+  const syncResults = await Promise.all(
+    tournaments.map(async (tournament) => {
+      try {
+        return await syncKnockoutForTournament(tournament, eventId);
+      } catch (error) {
+        logError('Failed to sync knockout results', error, {
+          tournamentId: tournament.id,
+          eventId,
+        });
+        return { updatedResults: 0, updatedKnockouts: 0, skipped: 0 };
+      }
+    }),
+  );
+  for (const result of syncResults) {
+    updatedResults += result.updatedResults;
+    updatedKnockouts += result.updatedKnockouts;
+    skipped += result.skipped;
   }
 
   logInfo('Tournament knockout results sync completed', {

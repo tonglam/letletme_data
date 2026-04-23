@@ -50,6 +50,22 @@ export const createTournamentBattleGroupResultsRepository = (dbInstance?: Databa
       }
     },
 
+    deleteByTournament: async (tournamentId: number): Promise<void> => {
+      try {
+        const db = await getDbInstance();
+        await db
+          .delete(tournamentBattleGroupResults)
+          .where(eq(tournamentBattleGroupResults.tournamentId, tournamentId));
+      } catch (error) {
+        logError('Failed to delete tournament battle group results', error, { tournamentId });
+        throw new DatabaseError(
+          'Failed to delete tournament battle group results',
+          'TOURNAMENT_BATTLE_RESULTS_DELETE_ERROR',
+          error as Error,
+        );
+      }
+    },
+
     upsertBatch: async (results: DbTournamentBattleGroupResultInsert[]): Promise<number> => {
       if (results.length === 0) {
         return 0;

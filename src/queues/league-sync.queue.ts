@@ -1,6 +1,5 @@
-import { Queue } from 'bullmq';
-
-import { getQueueConnection } from '../utils/queue';
+import type { MutationPriorityTier } from '../domain/job-priority';
+import { closeTieredQueues, createTieredQueueSet } from './tiered-queue';
 
 export const leagueSyncQueueName = 'league-sync';
 
@@ -18,25 +17,35 @@ export interface LeagueSyncJobData {
   triggeredAt: string;
 }
 
-export const leagueSyncQueue = new Queue<LeagueSyncJobData>(leagueSyncQueueName, {
-  connection: getQueueConnection(),
-  defaultJobOptions: {
-    attempts: 3,
-    backoff: {
-      type: 'exponential',
-      delay: 60_000, // 1 minute
-    },
-    removeOnComplete: {
-      age: 86400, // 24 hours
-      count: 100,
-    },
-    removeOnFail: {
-      age: 172800, // 48 hours
-      count: 50,
-    },
+const tieredQueueSet = createTieredQueueSet<LeagueSyncJobData>(leagueSyncQueueName, {
+  attempts: 3,
+  backoff: {
+    type: 'exponential',
+    delay: 60_000, // 1 minute
+  },
+  removeOnComplete: {
+    age: 86400, // 24 hours
+    count: 100,
+  },
+  removeOnFail: {
+    age: 172800, // 48 hours
+    count: 50,
   },
 });
 
+export const isLeagueSyncTieredQueueEnabled = tieredQueueSet.enabled;
+export const leagueSyncQueuesByTier = tieredQueueSet.queuesByTier;
+export const leagueSyncQueueNamesByTier = tieredQueueSet.queueNamesByTier;
+export const leagueSyncQueue = leagueSyncQueuesByTier.p3;
+
+export function getLeagueSyncQueue(tier: MutationPriorityTier) {
+  return leagueSyncQueuesByTier[tier];
+}
+
+export function getLeagueSyncQueueName(tier: MutationPriorityTier) {
+  return leagueSyncQueueNamesByTier[tier];
+}
+
 export async function closeLeagueSyncQueue() {
-  await leagueSyncQueue.close();
+  await closeTieredQueues(tieredQueueSet.uniqueQueues);
 }

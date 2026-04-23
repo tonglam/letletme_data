@@ -1,9 +1,13 @@
 import {
-  tournamentSyncQueue,
+  getTournamentSyncQueue,
   TOURNAMENT_JOBS,
   type TournamentSyncJobName,
   type TournamentSyncJobData,
 } from '../queues/tournament-sync.queue';
+import {
+  getTournamentSyncJobPriority,
+  type TournamentSyncPriorityJobName,
+} from '../domain/job-priority';
 import { logError, logInfo } from '../utils/logger';
 
 export type TournamentSyncJobSource = 'cron' | 'manual' | 'cascade';
@@ -15,6 +19,8 @@ async function enqueueTournamentSyncJob(
   options: { delay?: number } = {},
 ) {
   try {
+    const tier = getTournamentSyncJobPriority(jobName as TournamentSyncPriorityJobName);
+    const queue = getTournamentSyncQueue(tier);
     const jobData: TournamentSyncJobData = {
       eventId,
       source,
@@ -24,7 +30,7 @@ async function enqueueTournamentSyncJob(
     // Use unique IDs so recurring schedules are not deduped by completed jobs.
     const jobId = `${jobName}-e${eventId}-${Date.now()}`;
 
-    const job = await tournamentSyncQueue.add(jobName, jobData, {
+    const job = await queue.add(jobName, jobData, {
       jobId,
       delay: options.delay,
     });
@@ -34,14 +40,18 @@ async function enqueueTournamentSyncJob(
       jobName,
       eventId,
       source,
+      tier,
+      queue: queue.name,
     });
 
     return job;
   } catch (error) {
+    const tier = getTournamentSyncJobPriority(jobName as TournamentSyncPriorityJobName);
     logError('Failed to enqueue tournament sync job', error, {
       jobName,
       eventId,
       source,
+      tier,
     });
     throw error;
   }
@@ -66,6 +76,13 @@ export const enqueueTournamentTransfersPost = (eventId: number, source?: Tournam
 
 export const enqueueTournamentCupResults = (eventId: number, source?: TournamentSyncJobSource) =>
   enqueueTournamentSyncJob(TOURNAMENT_JOBS.CUP_RESULTS, eventId, source);
+
+// Materialized view refresh (delayed to run after parallel cascade jobs)
+export const enqueueTournamentMaterializedViewsRefresh = (
+  eventId: number,
+  source?: TournamentSyncJobSource,
+  options?: { delay?: number },
+) => enqueueTournamentSyncJob(TOURNAMENT_JOBS.MATERIALIZED_VIEWS_REFRESH, eventId, source, options);
 
 // Independent jobs
 export const enqueueTournamentEventPicks = (eventId: number, source?: TournamentSyncJobSource) =>

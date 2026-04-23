@@ -15,6 +15,7 @@ import {
   type TournamentInfoSummary,
 } from '../repositories/tournament-infos';
 import type { RawFPLEntryEventPickItem, RawFPLEntryEventPicksResponse } from '../types';
+import { mapWithConcurrency, uniqueNumbers } from '../utils/async';
 import { logError, logInfo } from '../utils/logger';
 
 const DEFAULT_CONCURRENCY = 5;
@@ -34,10 +35,6 @@ type HighestScoreResult = {
   points: number | null;
 };
 
-function uniqueNumbers(values: number[]): number[] {
-  return Array.from(new Set(values));
-}
-
 function normalizePicks(raw: unknown): RawFPLEntryEventPickItem[] {
   if (!Array.isArray(raw)) {
     return [];
@@ -52,30 +49,6 @@ function normalizeAutoSubs(raw: unknown): AutoSubItem[] {
   }
 
   return raw as AutoSubItem[];
-}
-
-async function mapWithConcurrency<T, R>(
-  items: T[],
-  concurrency: number,
-  handler: (item: T) => Promise<R>,
-): Promise<R[]> {
-  if (items.length === 0) {
-    return [];
-  }
-
-  const results = new Array<R>(items.length);
-  let index = 0;
-
-  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
-    while (index < items.length) {
-      const currentIndex = index;
-      index += 1;
-      results[currentIndex] = await handler(items[currentIndex]);
-    }
-  });
-
-  await Promise.all(workers);
-  return results;
 }
 
 function getAutoSubPoints(autoSubs: AutoSubItem[], eventLiveMap: Map<number, DbEventLive>): number {

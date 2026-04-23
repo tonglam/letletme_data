@@ -1,6 +1,12 @@
-import { QueueEvents, Worker } from 'bullmq';
+import { QueueEvents, Worker, type Job } from 'bullmq';
 
-import { dataSyncQueueName } from '../queues/data-sync.queue';
+import { MUTATION_PRIORITY_ORDER } from '../domain/job-priority';
+import {
+  type DataSyncJobData,
+  dataSyncQueuesByTier,
+  getDataSyncQueueName,
+  isDataSyncTieredQueueEnabled,
+} from '../queues/data-sync.queue';
 import { syncEvents } from '../services/events.service';
 import { syncFixtures } from '../services/fixtures.service';
 import { syncPhases } from '../services/phases.service';
@@ -11,27 +17,30 @@ import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { syncTeams } from '../services/teams.service';
 import { getQueueConnection } from '../utils/queue';
 import { logError, logInfo } from '../utils/logger';
+import { withMutationConflictGuard } from '../utils/mutation-lock';
+import { startStrictPriorityGate } from './strict-priority-gate';
+import type { WorkerRuntime } from './worker-runtime';
 
-export function createDataSyncWorker() {
-  const connection = getQueueConnection();
+const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
+  const context = {
+    jobType: 'queue' as const,
+    queueName: job.queueName,
+    jobId: job.id,
+    jobName: job.name,
+    source: job.data?.source as string | undefined,
+    attempt: job.attemptsMade + 1,
+  };
 
-  const queueEvents = new QueueEvents(dataSyncQueueName, { connection });
+  logJobTriggered(context);
 
-  const worker = new Worker(
-    dataSyncQueueName,
-    async (job) => {
-      const context = {
-        jobType: 'queue' as const,
-        queueName: dataSyncQueueName,
-        jobId: job.id,
-        jobName: job.name,
-        source: job.data?.source as string | undefined,
-        attempt: job.attemptsMade + 1,
-      };
-
-      logJobTriggered(context);
-
-      return runTrackedJob(context, async () => {
+  return withMutationConflictGuard(
+    {
+      queueName: job.queueName,
+      jobName: job.name,
+      jobId: String(job.id),
+    },
+    () =>
+      runTrackedJob(context, async () => {
         switch (job.name) {
           case 'events':
             return syncEvents();
@@ -50,22 +59,67 @@ export function createDataSyncWorker() {
           default:
             throw new Error(`Unknown data-sync job: ${job.name}`);
         }
+      }),
+  );
+};
+
+export function createDataSyncWorker(): WorkerRuntime {
+  const connection = getQueueConnection();
+  const activeTiers = isDataSyncTieredQueueEnabled ? MUTATION_PRIORITY_ORDER : (['p1'] as const);
+  const workers: Worker<DataSyncJobData>[] = [];
+  const queueEvents: QueueEvents[] = [];
+  const monitorTargets: WorkerRuntime['monitorTargets'] = [];
+
+  for (const tier of activeTiers) {
+    const queueName = getDataSyncQueueName(tier);
+    const worker = new Worker<DataSyncJobData>(queueName, processDataSyncJob, { connection });
+    const events = new QueueEvents(queueName, { connection });
+
+    worker.on('completed', (job) => {
+      logInfo('Data sync job completed', { jobId: job.id, name: job.name, tier });
+    });
+
+    worker.on('failed', (job, error) => {
+      logError('Data sync job failed', error, {
+        jobId: job?.id,
+        name: job?.name,
+        attemptsMade: job?.attemptsMade,
+        tier,
       });
+    });
+
+    workers.push(worker);
+    queueEvents.push(events);
+    monitorTargets.push({
+      queue: dataSyncQueuesByTier[tier],
+      queueEvents: events,
+      queueName,
+      tier,
+    });
+  }
+
+  const gate = startStrictPriorityGate(
+    'data-sync',
+    {
+      p0: { queue: dataSyncQueuesByTier.p0, worker: workersByTier(workers, activeTiers, 'p0') },
+      p1: { queue: dataSyncQueuesByTier.p1, worker: workersByTier(workers, activeTiers, 'p1') },
+      p2: { queue: dataSyncQueuesByTier.p2, worker: workersByTier(workers, activeTiers, 'p2') },
+      p3: { queue: dataSyncQueuesByTier.p3, worker: workersByTier(workers, activeTiers, 'p3') },
     },
-    { connection },
+    { enabled: isDataSyncTieredQueueEnabled },
   );
 
-  worker.on('completed', (job) => {
-    logInfo('Data sync job completed', { jobId: job.id, name: job.name });
-  });
+  return { workers, queueEvents, monitorTargets, stop: gate.stop };
+}
 
-  worker.on('failed', (job, error) => {
-    logError('Data sync job failed', error, {
-      jobId: job?.id,
-      name: job?.name,
-      attemptsMade: job?.attemptsMade,
-    });
-  });
-
-  return { worker, queueEvents };
+function workersByTier(
+  workers: Worker<DataSyncJobData>[],
+  activeTiers: readonly string[],
+  tier: 'p0' | 'p1' | 'p2' | 'p3',
+) {
+  const index = activeTiers.indexOf(tier);
+  if (index >= 0) {
+    return workers[index];
+  }
+  return workers[0];
 }

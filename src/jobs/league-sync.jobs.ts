@@ -1,9 +1,10 @@
 import {
-  leagueSyncQueue,
+  getLeagueSyncQueue,
   LEAGUE_JOBS,
   type LeagueSyncJobName,
   type LeagueSyncJobData,
 } from '../queues/league-sync.queue';
+import { getLeagueSyncJobPriority, type LeagueSyncPriorityJobName } from '../domain/job-priority';
 import { logError, logInfo } from '../utils/logger';
 
 export type LeagueSyncJobSource = 'cron' | 'manual' | 'cascade';
@@ -15,6 +16,8 @@ async function enqueueLeagueSyncJob(
   options: { tournamentId?: number; delay?: number } = {},
 ) {
   try {
+    const tier = getLeagueSyncJobPriority(jobName as LeagueSyncPriorityJobName);
+    const queue = getLeagueSyncQueue(tier);
     const jobData: LeagueSyncJobData = {
       eventId,
       tournamentId: options.tournamentId,
@@ -32,7 +35,7 @@ async function enqueueLeagueSyncJob(
       jobId = `${jobName}-e${eventId}-coordinator-${runId}`;
     }
 
-    const job = await leagueSyncQueue.add(jobName, jobData, {
+    const job = await queue.add(jobName, jobData, {
       jobId,
       delay: options.delay,
     });
@@ -43,15 +46,19 @@ async function enqueueLeagueSyncJob(
       eventId,
       tournamentId: options.tournamentId,
       source,
+      tier,
+      queue: queue.name,
     });
 
     return job;
   } catch (error) {
+    const tier = getLeagueSyncJobPriority(jobName as LeagueSyncPriorityJobName);
     logError('Failed to enqueue league sync job', error, {
       jobName,
       eventId,
       tournamentId: options.tournamentId,
       source,
+      tier,
     });
     throw error;
   }

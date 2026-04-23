@@ -6,7 +6,7 @@ import {
   type DbEntryEventTransfer,
   type DbEntryEventTransferInsert,
 } from '../db/schemas/index.schema';
-import { getDb } from '../db/singleton';
+import { getDb, getDbClient } from '../db/singleton';
 import type { RawFPLEntryTransfersResponse } from '../types';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
@@ -148,19 +148,26 @@ export const createEntryEventTransfersRepository = (dbInstance?: DatabaseInstanc
       }
 
       try {
-        const db = await getDbInstance();
-        await db.transaction(async (tx) => {
-          for (const update of updates) {
-            await tx
-              .update(entryEventTransfers)
-              .set({
-                elementInPoints: update.elementInPoints,
-                elementOutPoints: update.elementOutPoints,
-                elementInPlayed: update.elementInPlayed,
-              })
-              .where(eq(entryEventTransfers.id, update.id));
-          }
-        });
+        const client = await getDbClient();
+        const ids = updates.map((u) => u.id);
+        const inPoints = updates.map((u) => u.elementInPoints);
+        const outPoints = updates.map((u) => u.elementOutPoints);
+        const playedFlags = updates.map((u) => u.elementInPlayed);
+
+        await client`
+          update entry_event_transfers as eet
+          set element_in_points = data.in_points,
+              element_out_points = data.out_points,
+              element_in_played = data.in_played
+          from (
+            select
+              unnest(${ids}::int[]) as id,
+              unnest(${inPoints}::int[]) as in_points,
+              unnest(${outPoints}::int[]) as out_points,
+              unnest(${playedFlags}::boolean[]) as in_played
+          ) as data
+          where eet.id = data.id
+        `;
 
         logInfo('Updated entry event transfers', { count: updates.length });
         return updates.length;

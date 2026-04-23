@@ -3,62 +3,63 @@ import { createEntrySyncWorker } from './workers/entry-sync.worker';
 import { createLiveDataWorker } from './workers/live-data.worker';
 import { createLeagueSyncWorker } from './workers/league-sync.worker';
 import { createTournamentSyncWorker } from './workers/tournament-sync.worker';
-import { dataSyncQueue } from './queues/data-sync.queue';
-import { entrySyncQueue } from './queues/entry-sync.queue';
-import { liveDataQueue } from './queues/live-data.queue';
-import { leagueSyncQueue } from './queues/league-sync.queue';
-import { tournamentSyncQueue } from './queues/tournament-sync.queue';
+import { createTournamentSetupWorker } from './workers/tournament-setup.worker';
 import { getConfig } from './utils/config';
 import { startQueueMonitor } from './utils/queue-monitor';
 import { logInfo } from './utils/logger';
+import type { WorkerRuntime } from './workers/worker-runtime';
 
 getConfig();
 
-const { worker: dataSyncWorker, queueEvents: dataSyncEvents } = createDataSyncWorker();
-const { worker: entrySyncWorker, queueEvents: entrySyncEvents } = createEntrySyncWorker();
-const { worker: liveDataWorker, queueEvents: liveDataEvents } = createLiveDataWorker();
-const { worker: leagueSyncWorker, queueEvents: leagueSyncEvents } = createLeagueSyncWorker();
-const { worker: tournamentSyncWorker, queueEvents: tournamentSyncEvents } =
-  createTournamentSyncWorker();
+const mutationConflictGuardEnabled =
+  (process.env.ENABLE_MUTATION_CONFLICT_GUARD ?? 'true').toLowerCase() !== 'false';
+const tieredMutationQueuesEnabled =
+  (process.env.ENABLE_TIERED_MUTATION_QUEUES ?? 'false').toLowerCase() === 'true';
+const mutationLockConfig = {
+  ttlMs: Number(process.env.MUTATION_LOCK_TTL_MS ?? 30_000),
+  waitTimeoutMs: Number(process.env.MUTATION_LOCK_WAIT_TIMEOUT_MS ?? 120_000),
+  retryDelayMs: Number(process.env.MUTATION_LOCK_RETRY_DELAY_MS ?? 250),
+  heartbeatMs: Number(process.env.MUTATION_LOCK_HEARTBEAT_MS ?? 10_000),
+};
 
-const dataSyncMonitor = startQueueMonitor({ queue: dataSyncQueue, queueEvents: dataSyncEvents });
-const entrySyncMonitor = startQueueMonitor({ queue: entrySyncQueue, queueEvents: entrySyncEvents });
-const liveDataMonitor = startQueueMonitor({ queue: liveDataQueue, queueEvents: liveDataEvents });
-const leagueSyncMonitor = startQueueMonitor({
-  queue: leagueSyncQueue,
-  queueEvents: leagueSyncEvents,
-});
-const tournamentSyncMonitor = startQueueMonitor({
-  queue: tournamentSyncQueue,
-  queueEvents: tournamentSyncEvents,
-});
+const runtimes: WorkerRuntime[] = [
+  createDataSyncWorker(),
+  createEntrySyncWorker(),
+  createLiveDataWorker(),
+  createLeagueSyncWorker(),
+  createTournamentSyncWorker(),
+  createTournamentSetupWorker(),
+];
+
+const queueMonitors = runtimes.flatMap((runtime) =>
+  runtime.monitorTargets.map((target) =>
+    startQueueMonitor({
+      queue: target.queue,
+      queueEvents: target.queueEvents,
+      queueName: target.queueName,
+      tier: target.tier,
+    }),
+  ),
+);
+const allWorkers = runtimes.flatMap((runtime) => runtime.workers);
+const allQueueEvents = runtimes.flatMap((runtime) => runtime.queueEvents);
 
 async function shutdown(signal: string) {
   logInfo('Worker shutting down', { signal });
+  queueMonitors.forEach((monitor) => monitor.stop());
+  runtimes.forEach((runtime) => runtime.stop?.());
   await Promise.allSettled([
-    dataSyncWorker.close(),
-    dataSyncEvents.close(),
-    entrySyncWorker.close(),
-    entrySyncEvents.close(),
-    liveDataWorker.close(),
-    liveDataEvents.close(),
-    liveDataQueue.close(),
-    leagueSyncWorker.close(),
-    leagueSyncEvents.close(),
-    leagueSyncQueue.close(),
-    tournamentSyncWorker.close(),
-    tournamentSyncEvents.close(),
-    tournamentSyncQueue.close(),
+    ...allWorkers.map((worker) => worker.close()),
+    ...allQueueEvents.map((events) => events.close()),
   ]);
-  dataSyncMonitor.stop();
-  entrySyncMonitor.stop();
-  liveDataMonitor.stop();
-  leagueSyncMonitor.stop();
-  tournamentSyncMonitor.stop();
   process.exit(0);
 }
 
 process.on('SIGINT', () => void shutdown('SIGINT'));
 process.on('SIGTERM', () => void shutdown('SIGTERM'));
 
-logInfo('Background worker started');
+logInfo('Background worker started', {
+  mutationConflictGuardEnabled,
+  tieredMutationQueuesEnabled,
+  mutationLockConfig,
+});

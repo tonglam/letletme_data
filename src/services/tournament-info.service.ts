@@ -1,35 +1,12 @@
 import { fplClient } from '../clients/fpl';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
+import { mapWithConcurrency } from '../utils/async';
 import { logError, logInfo } from '../utils/logger';
 
 const DEFAULT_CONCURRENCY = 5;
 
 function normalizeName(value: string | null | undefined): string {
   return (value ?? '').trim().toLowerCase();
-}
-
-async function mapWithConcurrency<T, R>(
-  items: T[],
-  concurrency: number,
-  handler: (item: T) => Promise<R>,
-): Promise<R[]> {
-  if (items.length === 0) {
-    return [];
-  }
-
-  const results = new Array<R>(items.length);
-  let index = 0;
-
-  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
-    while (index < items.length) {
-      const currentIndex = index;
-      index += 1;
-      results[currentIndex] = await handler(items[currentIndex]);
-    }
-  });
-
-  await Promise.all(workers);
-  return results;
 }
 
 async function fetchLeagueName(leagueId: number, leagueType: 'classic' | 'h2h') {

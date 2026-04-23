@@ -13,6 +13,7 @@ import { playerStatsAPI } from './api/player-stats.api';
 import { playerValuesAPI } from './api/player-values.api';
 import { playersAPI } from './api/players.api';
 import { teamsAPI } from './api/teams.api';
+import { tournamentsAPI } from './api/tournaments.api';
 
 // Import job registration functions
 import { registerDataJobs } from './jobs/data-jobs';
@@ -106,6 +107,7 @@ const app = new Elysia()
   .use(entryInfoAPI)
   .use(entrySyncAPI)
   .use(jobsAPI)
+  .use(tournamentsAPI)
 
   // ================================
   // Cron Job Registration
@@ -141,6 +143,7 @@ logInfo('🚀 Elysia server started', {
     'entry-info',
     'phases',
     'jobs',
+    'tournaments',
   ],
   jobs: [
     'data-sync',
