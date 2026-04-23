@@ -24,9 +24,7 @@ function formatPlayerValuesNotification(
   const header = `[player-values] ${changeDate}: +${risers.length} -${fallers.length} (total ${playerValues.length})`;
 
   const formatLine = (pv: PlayerValue) => {
-    const delta = pv.value - pv.lastValue;
-    const sign = delta > 0 ? '+' : '';
-    return `${pv.webName} (${pv.teamShortName}) ${formatPrice(pv.lastValue)}-> ${formatPrice(pv.value)} (${sign}${delta})`;
+    return `${pv.webName} (${pv.teamShortName}) ${formatPrice(pv.lastValue)}-> ${formatPrice(pv.value)}`;
   };
 
   const top = (items: PlayerValue[]) => items.slice(0, 12).map(formatLine);
