@@ -1,8 +1,26 @@
+import { selectCurrentEventByDeadline } from '../domain/events';
 import { getCurrentSeason } from '../utils/conditions';
-import { logDebug, logError } from '../utils/logger';
+import { logDebug, logError, logInfo } from '../utils/logger';
 import { redisSingleton } from './singleton';
 
 import type { Event } from '../types';
+
+function normalizeDeadlineTime(event: Event): string | null {
+  if (typeof event.deadlineTime === 'string' && event.deadlineTime.length > 0) {
+    return event.deadlineTime;
+  }
+  if (event.deadlineTimeEpoch) {
+    return new Date(event.deadlineTimeEpoch * 1000).toISOString();
+  }
+  return null;
+}
+
+function serializeEvent(event: Event): string {
+  return JSON.stringify({
+    ...event,
+    deadlineTime: normalizeDeadlineTime(event),
+  });
+}
 
 async function loadEventsFromCache(): Promise<Event[] | null> {
   try {
@@ -24,46 +42,125 @@ async function loadEventsFromCache(): Promise<Event[] | null> {
   }
 }
 
+async function getNeighbourEvent(offset: number, label: string): Promise<Event | null> {
+  try {
+    const current = await eventsCache.getCurrent();
+    if (!current) {
+      logDebug(`${label} event cache miss - no current event`);
+      return null;
+    }
+    const targetId = current.id + offset;
+    if (targetId < 1 || targetId > 38) {
+      logDebug(`${label} event out of range`, { targetId });
+      return null;
+    }
+    const redis = await redisSingleton.getClient();
+    const value = await redis.hget(`Event:${getCurrentSeason()}`, targetId.toString());
+    if (!value) {
+      logDebug(`${label} event cache miss`, { targetId });
+      return null;
+    }
+    const event = JSON.parse(value) as Event;
+    logDebug(`${label} event cache hit`, { id: event.id });
+    return event;
+  } catch (error) {
+    logError(`${label} event cache get error`, error);
+    return null;
+  }
+}
+
+async function isDeadlineDay(): Promise<boolean> {
+  try {
+    const current = await eventsCache.getCurrent();
+    if (!current) return true;
+
+    const nextId = current.id + 1;
+    if (nextId > 38) return false;
+
+    const redis = await redisSingleton.getClient();
+    const nextStr = await redis.hget(`Event:${getCurrentSeason()}`, nextId.toString());
+    if (!nextStr) return false;
+
+    const nextEvent = JSON.parse(nextStr) as Event;
+    if (!nextEvent.deadlineTimeEpoch) return false;
+
+    const deadlineDate = new Date(nextEvent.deadlineTimeEpoch * 1000);
+    const now = new Date();
+    return deadlineDate.toDateString() === now.toDateString();
+  } catch (error) {
+    logError('isDeadlineDay check error', error);
+    return false;
+  }
+}
+
 // Domain-specific cache operations following Entity::season::field pattern
 export const eventsCache = {
-  // Get current event (filter from all events in memory - fast for 38 events)
   async getCurrent(): Promise<Event | null> {
     try {
+      const redis = await redisSingleton.getClient();
+      const key = 'event:current';
+      const value = await redis.get(key);
+      if (value) {
+        logDebug('Current event cache hit (dedicated key)');
+        return JSON.parse(value) as Event;
+      }
+      // Fallback: derive from full hash using deadline-based logic
       const allEvents = await loadEventsFromCache();
       if (!allEvents) {
         logDebug('Current event cache miss');
         return null;
       }
-
-      const currentEvent = allEvents.find((e) => e.isCurrent);
+      const currentEvent = selectCurrentEventByDeadline(allEvents);
       if (currentEvent) {
-        logDebug('Current event cache hit', { id: currentEvent.id });
+        logDebug('Current event cache hit (hash fallback)', { id: currentEvent.id });
       }
-      return currentEvent || null;
+      return currentEvent;
     } catch (error) {
       logError('Current event cache get error', error);
       return null;
     }
   },
 
-  // Get next event (filter from all events in memory - fast for 38 events)
+  // Next event = current event id + 1 (derived, not from FPL's lagging is_next flag)
   async getNext(): Promise<Event | null> {
+    return getNeighbourEvent(1, 'Next');
+  },
+
+  // Previous event = current event id - 1 (derived, not from FPL's is_previous flag)
+  async getPrevious(): Promise<Event | null> {
+    return getNeighbourEvent(-1, 'Previous');
+  },
+
+  async refreshCurrent(): Promise<boolean> {
     try {
       const allEvents = await loadEventsFromCache();
-      if (!allEvents) {
-        logDebug('Next event cache miss');
-        return null;
+      if (!allEvents) return false;
+
+      const derived = selectCurrentEventByDeadline(allEvents);
+      if (!derived) return false;
+
+      const redis = await redisSingleton.getClient();
+      const current = await redis.get('event:current');
+
+      if (current) {
+        const cached = JSON.parse(current) as Event;
+        if (cached.id === derived.id) return false;
       }
 
-      const nextEvent = allEvents.find((e) => e.isNext);
-      if (nextEvent) {
-        logDebug('Next event cache hit', { id: nextEvent.id });
-      }
-      return nextEvent || null;
+      await redis.set('event:current', serializeEvent(derived));
+      logInfo('event:current refreshed', {
+        previousId: current ? (JSON.parse(current) as Event).id : null,
+        newId: derived.id,
+      });
+      return true;
     } catch (error) {
-      logError('Next event cache get error', error);
-      return null;
+      logError('event:current refresh error', error);
+      return false;
     }
+  },
+
+  async isDeadlineDay(): Promise<boolean> {
+    return isDeadlineDay();
   },
 
   // Store all events in a single hash (no duplication!)
@@ -72,6 +169,9 @@ export const eventsCache = {
       const redis = await redisSingleton.getClient();
       const season = getCurrentSeason();
       const key = `Event:${season}`;
+
+      const currentEventKey = 'event:current';
+      const currentEvent = selectCurrentEventByDeadline(events);
 
       // Use pipeline for atomic operation
       const pipeline = redis.pipeline();
@@ -83,9 +183,15 @@ export const eventsCache = {
         // Store each event as a hash field (event ID -> full event JSON)
         const eventFields: Record<string, string> = {};
         for (const event of events) {
-          eventFields[event.id.toString()] = JSON.stringify(event);
+          eventFields[event.id.toString()] = serializeEvent(event);
         }
         pipeline.hset(key, eventFields);
+      }
+
+      if (currentEvent) {
+        pipeline.set(currentEventKey, serializeEvent(currentEvent));
+      } else {
+        pipeline.del(currentEventKey);
       }
 
       await pipeline.exec();

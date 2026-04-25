@@ -149,6 +149,7 @@ logInfo('🚀 Elysia server started', {
     'data-sync',
     'player-values-window',
     'live-scores',
+    'event-current-refresh',
     'event-live-summary',
     'event-live-explain',
     'event-overall-result',

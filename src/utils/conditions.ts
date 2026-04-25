@@ -173,13 +173,19 @@ export function isSelectTime(event: Event, fixtures: Fixture[], date = new Date(
     return false;
   }
 
-  if (!event.deadlineTime) {
+  const rawDeadline = event.deadlineTime;
+  if (!rawDeadline) {
     return false;
   }
 
-  const deadlineTime = event.deadlineTime.getTime();
-  const windowStart = deadlineTime + 30 * 60 * 1000;
-  const windowEnd = deadlineTime + 90 * 60 * 1000;
+  const deadlineMs = new Date(rawDeadline).getTime();
+
+  if (Number.isNaN(deadlineMs)) {
+    return false;
+  }
+
+  const windowStart = deadlineMs + 30 * 60 * 1000;
+  const windowEnd = deadlineMs + 90 * 60 * 1000;
 
   const now = date.getTime();
   return now >= windowStart && now <= windowEnd;

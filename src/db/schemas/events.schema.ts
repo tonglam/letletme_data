@@ -1,11 +1,11 @@
-import { boolean, integer, jsonb, pgTable, text, timestamp } from 'drizzle-orm/pg-core';
+import { boolean, integer, jsonb, pgTable, text } from 'drizzle-orm/pg-core';
 import { timestamps } from './_helpers.schema';
 import type { EventChipData, EventTopElementData } from '../../domain/event-overall-results';
 
 export const events = pgTable('events', {
   id: integer('id').primaryKey(),
   name: text('name').notNull(),
-  deadlineTime: timestamp('deadline_time'),
+  deadlineTime: text('deadline_time'),
   averageEntryScore: integer('average_entry_score'),
   finished: boolean('finished').default(false).notNull(),
   dataChecked: boolean('data_checked').default(false).notNull(),

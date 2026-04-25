@@ -18,7 +18,7 @@ describe('Events Unit Tests', () => {
       expect(result[0]).toEqual(singleTransformedEventFixture);
       expect(result[0].id).toBe(1);
       expect(result[0].name).toBe('Gameweek 1');
-      expect(result[0].deadlineTime).toEqual(new Date('2025-08-15T17:30:00Z'));
+      expect(result[0].deadlineTime).toBe('2025-08-15T17:30:00Z');
       expect(result[0].finished).toBe(false);
       expect(result[0].isNext).toBe(true);
     });
@@ -394,7 +394,7 @@ describe('Events Unit Tests', () => {
       const result = transformEvents([eventWithInvalidDate]);
       expect(result).toHaveLength(1);
       // The result should handle invalid dates gracefully
-      expect(result[0].deadlineTime).toBeTruthy(); // Will be Invalid Date object
+      expect(result[0].deadlineTime).toBeTruthy();
     });
   });
 
@@ -429,7 +429,7 @@ describe('Events Unit Tests', () => {
         expect(event.name.length).toBeGreaterThan(0);
 
         // Date field
-        expect(['object']).toContain(typeof event.deadlineTime); // Date object or null
+        expect(typeof event.deadlineTime === 'string' || event.deadlineTime === null).toBe(true);
       });
     });
 
@@ -460,7 +460,7 @@ describe('Events Unit Tests', () => {
 
         // Date transformation
         if (rawEvent.deadline_time) {
-          expect(transformedEvent.deadlineTime).toEqual(new Date(rawEvent.deadline_time));
+          expect(transformedEvent.deadlineTime).toBe(rawEvent.deadline_time);
         } else {
           expect(transformedEvent.deadlineTime).toBeNull();
         }
@@ -532,8 +532,8 @@ describe('Events Unit Tests', () => {
       const eventsWithDeadlines = transformedEventsFixture.filter((event) => event.deadlineTime);
 
       eventsWithDeadlines.forEach((event) => {
-        expect(event.deadlineTime).toBeInstanceOf(Date);
-        expect(event.deadlineTime?.getTime()).toBeGreaterThan(0);
+        expect(typeof event.deadlineTime === 'string').toBe(true);
+        expect(new Date(event.deadlineTime!).getTime()).toBeGreaterThan(0);
       });
     });
 

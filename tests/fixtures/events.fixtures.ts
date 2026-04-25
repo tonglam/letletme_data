@@ -123,7 +123,7 @@ export const transformedEventsFixture: Event[] = [
   {
     id: 1,
     name: 'Gameweek 1',
-    deadlineTime: new Date('2025-08-15T17:30:00Z'),
+    deadlineTime: '2025-08-15T17:30:00Z',
     averageEntryScore: 0,
     finished: false,
     dataChecked: false,
@@ -150,7 +150,7 @@ export const transformedEventsFixture: Event[] = [
   {
     id: 2,
     name: 'Gameweek 2',
-    deadlineTime: new Date('2025-08-22T17:30:00Z'),
+    deadlineTime: '2025-08-22T17:30:00Z',
     averageEntryScore: 45,
     finished: true,
     dataChecked: true,
@@ -183,7 +183,7 @@ export const transformedEventsFixture: Event[] = [
   {
     id: 3,
     name: 'Gameweek 3',
-    deadlineTime: new Date('2025-08-29T17:30:00Z'),
+    deadlineTime: '2025-08-29T17:30:00Z',
     averageEntryScore: 52,
     finished: false,
     dataChecked: false,
@@ -266,7 +266,7 @@ export const invalidRawEventFixture = {
 export const dbEventInsertFixture = {
   id: 1,
   name: 'Gameweek 1',
-  deadlineTime: new Date('2025-08-15T17:30:00Z'),
+  deadlineTime: '2025-08-15T17:30:00Z',
   averageEntryScore: 0,
   finished: false,
   dataChecked: false,

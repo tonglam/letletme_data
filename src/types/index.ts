@@ -18,7 +18,7 @@ export type FixtureID = number;
 export interface Event {
   id: EventID;
   name: string;
-  deadlineTime: Date | null;
+  deadlineTime: string | null;
   averageEntryScore: number | null;
   finished: boolean;
   dataChecked: boolean;

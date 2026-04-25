@@ -57,7 +57,7 @@ export function transformEvent(rawEvent: RawFPLEvent): Event {
     return {
       id: validated.id,
       name: validated.name,
-      deadlineTime: validated.deadline_time ? new Date(validated.deadline_time) : null,
+      deadlineTime: validated.deadline_time ?? null,
       averageEntryScore: validated.average_entry_score ?? null,
       finished: validated.finished,
       dataChecked: validated.data_checked,

@@ -7,7 +7,7 @@ export type { Event };
 export const EventSchema = z.object({
   id: z.number().int().positive(),
   name: z.string(),
-  deadlineTime: z.date().nullable(),
+  deadlineTime: z.string().nullable(),
   averageEntryScore: z.number().nullable(),
   finished: z.boolean(),
   dataChecked: z.boolean(),
@@ -46,3 +46,19 @@ export const isNext = (event: Event): boolean => event.isNext;
 export const isPrevious = (event: Event): boolean => event.isPrevious;
 export const isFinished = (event: Event): boolean => event.finished;
 export const isDataChecked = (event: Event): boolean => event.dataChecked;
+
+// Current event is the one whose deadline has most recently passed.
+// FPL's is_current flag lags at gameweek transitions, so derive from deadlineTimeEpoch instead.
+export function selectCurrentEventByDeadline(
+  events: Event[],
+  nowEpoch: number = Math.floor(Date.now() / 1000),
+): Event | null {
+  let best: Event | null = null;
+  for (const event of events) {
+    if (event.deadlineTimeEpoch == null || event.deadlineTimeEpoch > nowEpoch) continue;
+    if (best === null || event.deadlineTimeEpoch > (best.deadlineTimeEpoch ?? 0)) {
+      best = event;
+    }
+  }
+  return best;
+}
