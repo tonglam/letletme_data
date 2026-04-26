@@ -13,9 +13,7 @@ async function main() {
     console.log('✓ Removed NOT NULL constraint');
 
     // Remove default value (optional, but cleaner)
-    await db.execute(
-      sql`ALTER TABLE event_lives ALTER COLUMN defensive_contribution DROP DEFAULT`,
-    );
+    await db.execute(sql`ALTER TABLE event_lives ALTER COLUMN defensive_contribution DROP DEFAULT`);
     console.log('✓ Removed default value');
 
     // Update comment

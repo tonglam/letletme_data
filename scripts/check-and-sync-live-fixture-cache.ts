@@ -28,7 +28,9 @@ async function main() {
 
     console.log('[LiveFixture] Cache empty, syncing...');
     const synced = await syncLiveFixtureCache(eventId);
-    console.log(`[LiveFixture] Sync done: eventId=${synced.eventId}, teamCount=${synced.teamCount}`);
+    console.log(
+      `[LiveFixture] Sync done: eventId=${synced.eventId}, teamCount=${synced.teamCount}`,
+    );
 
     const after = await liveFixturesCache.get(eventId);
     const afterTeams = after ? Object.keys(after).length : 0;
@@ -43,4 +45,3 @@ main().catch((err) => {
   console.error('check-and-sync-live-fixture-cache failed:', err);
   process.exit(1);
 });
-

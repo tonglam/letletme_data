@@ -19,9 +19,7 @@ async function main() {
     console.log('✓ Set default value to 0');
 
     // Make it NOT NULL
-    await db.execute(
-      sql`ALTER TABLE event_lives ALTER COLUMN defensive_contribution SET NOT NULL`,
-    );
+    await db.execute(sql`ALTER TABLE event_lives ALTER COLUMN defensive_contribution SET NOT NULL`);
     console.log('✓ Made column NOT NULL');
 
     // Update comment

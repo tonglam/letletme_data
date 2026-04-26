@@ -1,4 +1,4 @@
-import { eq, sql } from 'drizzle-orm';
+import { and, desc, eq, isNotNull, lte, sql } from 'drizzle-orm';
 
 import { events, type DbEvent, type DbEventInsert } from '../db/schemas/index.schema';
 import { getDb } from '../db/singleton';
@@ -13,12 +13,55 @@ type DatabaseInstance = PostgresJsDatabase<Record<string, never>>;
 export const createEventRepository = (dbInstance?: DatabaseInstance) => {
   const getDbInstance = async () => dbInstance || (await getDb());
 
+  const findCurrentInternal = async (): Promise<DbEvent | null> => {
+    const db = await getDbInstance();
+    const nowEpoch = Math.floor(Date.now() / 1000);
+    const result = await db
+      .select()
+      .from(events)
+      .where(and(isNotNull(events.deadlineTimeEpoch), lte(events.deadlineTimeEpoch, nowEpoch)))
+      .orderBy(desc(events.deadlineTimeEpoch))
+      .limit(1);
+    return result[0] || null;
+  };
+
+  const findNeighbour = async (offset: number, label: string): Promise<DbEvent | null> => {
+    try {
+      const current = await findCurrentInternal();
+      if (!current) {
+        logInfo(`No current event - ${label} event unavailable`);
+        return null;
+      }
+      const targetId = current.id + offset;
+      if (targetId < 1 || targetId > 38) {
+        logInfo(`${label} event out of range`, { targetId });
+        return null;
+      }
+      const db = await getDbInstance();
+      const result = await db.select().from(events).where(eq(events.id, targetId)).limit(1);
+      const event = result[0] || null;
+
+      if (event) {
+        logInfo(`Retrieved ${label} event`, { id: event.id });
+      } else {
+        logInfo(`No ${label} event found`, { targetId });
+      }
+
+      return event;
+    } catch (error) {
+      logError(`Failed to find ${label} event`, error);
+      throw new DatabaseError(
+        `Failed to retrieve ${label} event`,
+        `FIND_${label.toUpperCase()}_ERROR`,
+        error instanceof Error ? error : undefined,
+      );
+    }
+  };
+
   return {
     findCurrent: async (): Promise<DbEvent | null> => {
       try {
-        const db = await getDbInstance();
-        const result = await db.select().from(events).where(eq(events.isCurrent, true));
-        const event = result[0] || null;
+        const event = await findCurrentInternal();
 
         if (event) {
           logInfo('Retrieved current event', { id: event.id });
@@ -37,28 +80,9 @@ export const createEventRepository = (dbInstance?: DatabaseInstance) => {
       }
     },
 
-    findNext: async (): Promise<DbEvent | null> => {
-      try {
-        const db = await getDbInstance();
-        const result = await db.select().from(events).where(eq(events.isNext, true));
-        const event = result[0] || null;
+    findNext: async (): Promise<DbEvent | null> => findNeighbour(1, 'next'),
 
-        if (event) {
-          logInfo('Retrieved next event', { id: event.id });
-        } else {
-          logInfo('No next event found');
-        }
-
-        return event;
-      } catch (error) {
-        logError('Failed to find next event', error);
-        throw new DatabaseError(
-          'Failed to retrieve next event',
-          'FIND_NEXT_ERROR',
-          error instanceof Error ? error : undefined,
-        );
-      }
-    },
+    findPrevious: async (): Promise<DbEvent | null> => findNeighbour(-1, 'previous'),
 
     upsertBatch: async (domainEvents: DomainEvent[]): Promise<DbEvent[]> => {
       try {

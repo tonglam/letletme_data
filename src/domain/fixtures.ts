@@ -89,6 +89,31 @@ export const RawFPLFixtureSchema = z.object({
 });
 
 // ================================
+// Team-perspective fixture (stored in FixturesByTeam cache)
+// ================================
+
+export interface TeamFixture {
+  event: number;
+  teamId: number;
+  teamName: string;
+  teamShortName: string;
+  againstTeamId: number;
+  againstTeamName: string;
+  againstTeamShortName: string;
+  difficulty: number;
+  kickoffTime: string | null;
+  started: boolean;
+  finished: boolean;
+  wasHome: boolean;
+  teamScore: number;
+  againstTeamScore: number;
+  score: string;
+  result: string; // "W" | "D" | "L" | "" (empty when not finished)
+  bgw: boolean;
+  dgw: boolean;
+}
+
+// ================================
 // Domain Business Logic
 // ================================
 

@@ -6,6 +6,7 @@ import type {
   EventTopElementData,
 } from '../domain/event-overall-results';
 import { logError, logInfo } from '../utils/logger';
+import { getCurrentEvent } from './events.service';
 
 type ChipPlayRecord = { chip_name?: unknown; num_played?: unknown };
 type TopElementRecord = { id?: unknown; element?: unknown; points?: unknown };
@@ -50,7 +51,7 @@ function parseTopElementInfo(raw: unknown): EventTopElementData | null {
 export async function syncEventOverallResult(): Promise<{ count: number; eventId: number | null }> {
   try {
     const bootstrapData = await fplClient.getBootstrap();
-    const currentEvent = bootstrapData.events.find((event) => event.is_current);
+    const currentEvent = await getCurrentEvent();
 
     if (!currentEvent || currentEvent.id < 1 || currentEvent.id > 38) {
       logInfo('Skipping event overall result sync - invalid event', { eventId: currentEvent?.id });

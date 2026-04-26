@@ -3,6 +3,7 @@ import { entryEventPicksRepository } from '../repositories/entry-event-picks';
 import { entryEventTransfersRepository } from '../repositories/entry-event-transfers';
 import { entryEventResultsRepository } from '../repositories/entry-event-results';
 import { logError, logInfo } from '../utils/logger';
+import { getCurrentEvent } from './events.service';
 
 export async function syncEntryEventPicks(entryId: number, eventId?: number) {
   try {
@@ -10,8 +11,7 @@ export async function syncEntryEventPicks(entryId: number, eventId?: number) {
     // Determine event id if not provided (use current event)
     let targetEventId = eventId;
     if (!targetEventId) {
-      const bootstrap = await fplClient.getBootstrap();
-      const current = bootstrap.events.find((e) => e.is_current);
+      const current = await getCurrentEvent();
       if (!current) throw new Error('No current event found');
       targetEventId = current.id;
     }
@@ -63,8 +63,7 @@ export async function syncEntryEventTransfers(
     // Determine event id if not provided (use current event)
     let targetEventId = eventId;
     if (!targetEventId) {
-      const bootstrap = await fplClient.getBootstrap();
-      const current = bootstrap.events.find((e) => e.is_current);
+      const current = await getCurrentEvent();
       if (!current) throw new Error('No current event found');
       targetEventId = current.id;
     }
@@ -90,8 +89,7 @@ export async function syncEntryEventResults(entryId: number, eventId?: number) {
     // Determine event id if not provided (use current event)
     let targetEventId = eventId;
     if (!targetEventId) {
-      const bootstrap = await fplClient.getBootstrap();
-      const current = bootstrap.events.find((e) => e.is_current);
+      const current = await getCurrentEvent();
       if (!current) throw new Error('No current event found');
       targetEventId = current.id;
     }

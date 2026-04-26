@@ -9,6 +9,7 @@ import {
 import type { EventId } from '../types/base.type';
 import { logInfo } from '../utils/logger';
 import { loadTeamsBasicInfo } from '../utils/teams';
+import { getCurrentEvent } from './events.service';
 
 export async function syncCurrentPlayerStats(): Promise<{
   count: number;
@@ -23,13 +24,9 @@ export async function syncCurrentPlayerStats(): Promise<{
     throw new Error('Invalid player elements data from FPL API');
   }
 
-  if (!Array.isArray(fplData.events)) {
-    throw new Error('Invalid events data from FPL API');
-  }
-
-  const currentEvent = fplData.events.find((event) => event.is_current);
+  const currentEvent = await getCurrentEvent();
   if (!currentEvent) {
-    throw new Error('No current event found in FPL API response');
+    throw new Error('No current event found');
   }
 
   if (fplData.elements.length === 0) {
@@ -41,7 +38,7 @@ export async function syncCurrentPlayerStats(): Promise<{
     eventId: currentEvent.id,
   });
 
-  const transformedPlayerStats = transformCurrentGameweekPlayerStats(fplData);
+  const transformedPlayerStats = transformCurrentGameweekPlayerStats(fplData, currentEvent.id);
   const errors = fplData.elements.length - transformedPlayerStats.length;
 
   logInfo('Player stats transformed', {

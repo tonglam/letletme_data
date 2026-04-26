@@ -240,17 +240,12 @@ export function createPreviousValuesMap(
 export function transformCurrentGameweekPlayerValues(
   fplBootstrapResponse: {
     elements: RawFPLElement[];
-    events: Array<{ id: number; is_current: boolean }>;
     teams: Array<{ id: number; name: string; short_name: string }>;
   },
+  currentEventId: EventId,
   previousValuesMap?: Map<number, number>,
   changeDate?: string,
 ): PlayerValue[] {
-  const currentEvent = fplBootstrapResponse.events.find((event) => event.is_current);
-  if (!currentEvent) {
-    throw new Error('No current event found in FPL bootstrap response');
-  }
-
   const teamsMap = createTeamsMap(
     fplBootstrapResponse.teams.map((team) => ({
       id: team.id,
@@ -261,7 +256,7 @@ export function transformCurrentGameweekPlayerValues(
 
   return transformPlayerValues(
     fplBootstrapResponse.elements,
-    currentEvent.id,
+    currentEventId,
     teamsMap,
     previousValuesMap,
     changeDate,

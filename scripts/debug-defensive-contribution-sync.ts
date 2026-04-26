@@ -25,20 +25,25 @@ async function main() {
       console.log(`  ID: ${sample.id}`);
       console.log(`  Stats keys: ${Object.keys(sample.stats).join(', ')}`);
       console.log(`  defensive_contribution in stats: ${'defensive_contribution' in sample.stats}`);
-      console.log(`  defensive_contribution value: ${(sample.stats as { defensive_contribution?: number }).defensive_contribution ?? 'undefined'}`);
-      
+      console.log(
+        `  defensive_contribution value: ${(sample.stats as { defensive_contribution?: number }).defensive_contribution ?? 'undefined'}`,
+      );
+
       // Show full stats object
       console.log('\n  Full stats object:');
       console.log(JSON.stringify(sample.stats, null, 2));
 
       // 3. Transform and check
       const transformed = transformEventLives(currentEvent.id, [sample]);
-      console.log(`\nTransformed defensive_contribution: ${transformed[0]?.defensiveContribution ?? 'undefined'}`);
+      console.log(
+        `\nTransformed defensive_contribution: ${transformed[0]?.defensiveContribution ?? 'undefined'}`,
+      );
 
       // 4. Find elements with defensive_contribution > 0
       const withDc = liveData.elements.filter(
-        (el) => (el.stats as { defensive_contribution?: number }).defensive_contribution && 
-                (el.stats as { defensive_contribution?: number }).defensive_contribution! > 0
+        (el) =>
+          (el.stats as { defensive_contribution?: number }).defensive_contribution &&
+          (el.stats as { defensive_contribution?: number }).defensive_contribution! > 0,
       );
       console.log(`\nElements with defensive_contribution > 0: ${withDc.length}`);
       if (withDc.length > 0) {
@@ -49,7 +54,6 @@ async function main() {
         });
       }
     }
-
   } catch (error) {
     console.error('Debug failed:', error);
     throw error;

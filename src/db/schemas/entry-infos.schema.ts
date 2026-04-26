@@ -12,6 +12,7 @@ export const entryInfos = pgTable('entry_infos', {
   overallRank: integer('overall_rank'),
   bank: integer('bank'),
   lastBank: integer('last_bank'),
+  lastEventId: integer('last_event_id').default(0),
   teamValue: integer('team_value'),
   totalTransfers: integer('total_transfers'),
   lastEntryName: text('last_entry_name'),

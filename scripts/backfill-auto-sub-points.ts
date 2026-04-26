@@ -135,12 +135,13 @@ async function waitForStageCompletion(params: {
   const deadline = stageStartedAtMs + timeoutMs;
 
   while (Date.now() <= deadline) {
-    const pending = await countMatchingJobs(
-      queues,
-      eventId,
-      allowedJobNames,
-      ['waiting', 'active', 'delayed', 'prioritized', 'waiting-children'],
-    );
+    const pending = await countMatchingJobs(queues, eventId, allowedJobNames, [
+      'waiting',
+      'active',
+      'delayed',
+      'prioritized',
+      'waiting-children',
+    ]);
     const recentFailures = await countRecentFailures(
       queues,
       eventId,
@@ -176,7 +177,8 @@ async function runStage(params: {
   pollIntervalMs: number;
   timeoutMs: number;
 }) {
-  const { stageLabel, eventId, enqueue, queues, allowedJobNames, pollIntervalMs, timeoutMs } = params;
+  const { stageLabel, eventId, enqueue, queues, allowedJobNames, pollIntervalMs, timeoutMs } =
+    params;
   const stageStartedAtMs = Date.now();
   const job = await enqueue();
   console.log(`[${stageLabel}] enqueued event=${eventId} jobId=${String(job.id ?? 'unknown')}`);
@@ -284,11 +286,7 @@ async function main() {
 
     console.log('\nAuto-sub backfill completed successfully.');
   } finally {
-    await Promise.all([
-      closeEntrySyncQueue(),
-      closeLeagueSyncQueue(),
-      closeTournamentSyncQueue(),
-    ]);
+    await Promise.all([closeEntrySyncQueue(), closeLeagueSyncQueue(), closeTournamentSyncQueue()]);
   }
 }
 

@@ -65,14 +65,19 @@ async function main() {
     const testQuery = await db
       .select({
         count: sql<number>`count(*)`.as('count'),
-        hasDefensiveContribution: sql<boolean>`count(defensive_contribution) > 0`.as('has_defensive_contribution'),
+        hasDefensiveContribution: sql<boolean>`count(defensive_contribution) > 0`.as(
+          'has_defensive_contribution',
+        ),
       })
       .from(eventLive)
       .limit(1);
 
     console.log('✓ Column is accessible in queries');
     console.log('  Total records:', testQuery[0]?.count ?? 0);
-    console.log('  Records with defensive_contribution:', testQuery[0]?.hasDefensiveContribution ? 'Yes' : 'No');
+    console.log(
+      '  Records with defensive_contribution:',
+      testQuery[0]?.hasDefensiveContribution ? 'Yes' : 'No',
+    );
 
     console.log('\n✅ Migration verification complete!');
   } catch (error) {

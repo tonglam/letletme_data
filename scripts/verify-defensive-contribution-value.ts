@@ -28,7 +28,9 @@ async function main() {
 
     console.log('\nSample records with defensive_contribution:');
     sample.forEach((record) => {
-      console.log(`  Element ${record.elementId}: defensive_contribution = ${record.defensiveContribution} (type: ${typeof record.defensiveContribution})`);
+      console.log(
+        `  Element ${record.elementId}: defensive_contribution = ${record.defensiveContribution} (type: ${typeof record.defensiveContribution})`,
+      );
     });
 
     // Verify all records have defensive_contribution set (not null)

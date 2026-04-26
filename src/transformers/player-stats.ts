@@ -248,16 +248,13 @@ export function createTeamsMap(
 /**
  * Transform current gameweek player stats from FPL bootstrap response
  */
-export function transformCurrentGameweekPlayerStats(fplBootstrapResponse: {
-  elements: RawFPLElement[];
-  events: Array<{ id: number; is_current: boolean }>;
-  teams: Array<{ id: number; name: string; short_name: string }>;
-}): PlayerStat[] {
-  const currentEvent = fplBootstrapResponse.events.find((event) => event.is_current);
-  if (!currentEvent) {
-    throw new Error('No current event found in FPL bootstrap response');
-  }
-
+export function transformCurrentGameweekPlayerStats(
+  fplBootstrapResponse: {
+    elements: RawFPLElement[];
+    teams: Array<{ id: number; name: string; short_name: string }>;
+  },
+  currentEventId: EventId,
+): PlayerStat[] {
   const teamsMap = createTeamsMap(
     fplBootstrapResponse.teams.map((team) => ({
       id: team.id,
@@ -266,7 +263,7 @@ export function transformCurrentGameweekPlayerStats(fplBootstrapResponse: {
     })),
   );
 
-  return transformPlayerStats(fplBootstrapResponse.elements, currentEvent.id, teamsMap);
+  return transformPlayerStats(fplBootstrapResponse.elements, currentEventId, teamsMap);
 }
 
 /**

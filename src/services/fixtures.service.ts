@@ -207,7 +207,7 @@ export async function syncLiveScores(eventId: number): Promise<{ updated: number
 export async function clearFixturesCache(): Promise<void> {
   try {
     logInfo('Clearing fixtures cache');
-    await fixturesCache.clear();
+    await Promise.all([fixturesCache.clear(), fixturesCache.clearAllByTeam()]);
     logInfo('Fixtures cache cleared');
   } catch (error) {
     logError('Failed to clear fixtures cache', error);

@@ -10,11 +10,10 @@ async function main() {
       console.log('[LiveBonus] No current event found');
       return;
     }
-    
+
     console.log(`[LiveBonus] Syncing for event ${currentEvent.id}...`);
     const result = await syncLiveBonusCache(currentEvent.id);
     console.log(`[LiveBonus] Sync completed:`, result);
-    
   } catch (error) {
     console.error('[LiveBonus] Sync failed:', error);
     throw error;

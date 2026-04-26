@@ -70,7 +70,10 @@ export const createEntryInfoRepository = (dbInstance?: DatabaseInstance) => {
       }
     },
 
-    upsertFromSummary: async (summary: RawFPLEntrySummary): Promise<DbEntryInfo> => {
+    upsertFromSummary: async (
+      summary: RawFPLEntrySummary,
+      lastEventId?: number | null,
+    ): Promise<DbEntryInfo> => {
       try {
         const db = await getDbInstance();
         const existing = await (async () => {
@@ -114,6 +117,7 @@ export const createEntryInfoRepository = (dbInstance?: DatabaseInstance) => {
           // Monetary fields are stored as tenths (raw ints from FPL summary last_deadline_*)
           bank: currentBank ?? existing?.bank ?? null,
           lastBank,
+          lastEventId: lastEventId ?? existing?.lastEventId ?? 0,
           teamValue: currentTeamValue ?? existing?.teamValue ?? null,
           totalTransfers: summary.last_deadline_total_transfers ?? null,
           lastEntryName,

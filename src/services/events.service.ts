@@ -52,6 +52,25 @@ export async function getNextEvent(): Promise<Event | null> {
   }
 }
 
+// Get previous event (cache-first strategy: Redis → DB fallback)
+export async function getPreviousEvent(): Promise<Event | null> {
+  try {
+    const cached = await eventsCache.getPrevious();
+    if (cached) {
+      logDebug('Previous event retrieved from cache', { id: cached.id });
+      return cached;
+    }
+
+    logDebug('Previous event cache miss - fetching from database');
+    const event = await eventRepository.findPrevious();
+    logDebug('Previous event fetched from database', { id: event?.id ?? null });
+    return event;
+  } catch (error) {
+    logError('Failed to get previous event', error);
+    throw error;
+  }
+}
+
 // Sync events from FPL API
 export async function syncEvents(): Promise<{
   count: number;
