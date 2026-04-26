@@ -6,22 +6,24 @@ import { createTeamsMap } from '../transformers/player-values';
 import { notifyTwoBots } from '../utils/notify';
 import { logInfo } from '../utils/logger';
 import { loadTeamsBasicInfo } from '../utils/teams';
+import { getCurrentEvent } from './events.service';
 
 function formatPlayerValuesNotification(
   changeDate: string,
   playerValues: readonly PlayerValue[],
 ): string {
   const formatPrice = (value: number) => `£${(value / 10).toFixed(1)}m`;
-  const risers = playerValues
+  const nonStart = playerValues.filter((pv) => pv.changeType !== 'Start');
+  const risers = nonStart
     .filter((pv) => pv.changeType === 'Rise')
     .slice()
     .sort((a, b) => b.value - b.lastValue - (a.value - a.lastValue));
-  const fallers = playerValues
+  const fallers = nonStart
     .filter((pv) => pv.changeType === 'Faller')
     .slice()
     .sort((a, b) => a.value - a.lastValue - (b.value - b.lastValue));
 
-  const header = `[player-values] ${changeDate}: +${risers.length} -${fallers.length} (total ${playerValues.length})`;
+  const header = `[player-values] ${changeDate}: +${risers.length} -${fallers.length} (total ${nonStart.length})`;
 
   const formatLine = (pv: PlayerValue) => {
     return `${pv.webName} (${pv.teamShortName}) ${formatPrice(pv.lastValue)}-> ${formatPrice(pv.value)}`;
@@ -52,9 +54,9 @@ export async function syncCurrentPlayerValues(): Promise<{ count: number }> {
   logInfo('Starting daily player values sync');
 
   const bootstrapData = await fplClient.getBootstrap();
-  const currentEvent = bootstrapData.events.find((event) => event.is_current);
+  const currentEvent = await getCurrentEvent();
   if (!currentEvent) {
-    throw new Error('No current event found in FPL bootstrap data');
+    throw new Error('No current event found');
   }
 
   if (!Array.isArray(bootstrapData.elements) || bootstrapData.elements.length === 0) {

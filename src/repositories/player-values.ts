@@ -55,6 +55,7 @@ export const createPlayerValuesRepository = (dbInstance?: DatabaseInstance) => {
       }
     },
 
+    /** True when at least one rise/fall row exists for the date (ignores `start` seed rows). */
     hasChangesForDate: async (changeDate: string): Promise<boolean> => {
       try {
         const db = await getDbInstance();
@@ -62,6 +63,7 @@ export const createPlayerValuesRepository = (dbInstance?: DatabaseInstance) => {
         SELECT 1
         FROM player_values
         WHERE change_date = ${changeDate}
+          AND change_type <> 'start'
         LIMIT 1
       `);
         return rows.length > 0;

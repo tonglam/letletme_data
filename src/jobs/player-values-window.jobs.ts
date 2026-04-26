@@ -20,7 +20,7 @@ async function shouldRunPlayerValuesSync(now: Date) {
   const changeDate = getChangeDateKey(now);
   const alreadySynced = await playerValuesRepository.hasChangesForDate(changeDate);
   if (alreadySynced) {
-    logInfo('Skipping player values sync - already synced today', { changeDate });
+    logInfo('Skipping player values sync - price changes already recorded for today', { changeDate });
     return false;
   }
 
