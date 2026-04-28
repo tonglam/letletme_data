@@ -10,7 +10,6 @@
     "worker": "bun src/worker.ts",
     "worker:dev": "bun --watch src/worker.ts",
     "worker:start": "NODE_ENV=production bun dist/worker.js",
-    "jobs:enqueue:events": "bun scripts/enqueue-events-job.ts",
     "build": "bun build src/index.ts src/worker.ts --target bun --outdir ./dist",
     "env:check": "bun validate-env.ts",
     "test": "bun test",

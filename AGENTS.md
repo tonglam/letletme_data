@@ -4,7 +4,7 @@
 - Source: `src/` with feature-focused folders: `api/`, `services/`, `jobs/`, `clients/`, `transformers/`, `repositories/`, `cache/`, `db/` (schemas, config), `types/`, `utils/`.
 - Tests: `tests/unit/*.test.ts`, `tests/integration/*.test.ts`, fixtures in `tests/fixtures/`.
 - Data & migrations: `migrations/`, `sql/`.
-- Scripts and ops: `scripts/`, single-purpose `.ts` tools in repo root.
+- Deploy helper: `scripts/deploy.sh` (Docker compose + migrations). No ad-hoc Bun CLI scripts in-repo.
 
 ## Build, Test, and Development Commands
 - `bun run dev` — start local server with watch (`src/index.ts`).

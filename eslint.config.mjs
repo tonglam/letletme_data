@@ -23,7 +23,6 @@ export default [
       'quick-test.ts',
       'test-*.ts',
       'test-*.js',
-      'scripts/**/*.ts',
       'create-*.ts',
       'migrate-*.ts',
       'show-*.ts',
