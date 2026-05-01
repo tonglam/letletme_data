@@ -69,30 +69,6 @@ async function getNeighbourEvent(offset: number, label: string): Promise<Event |
   }
 }
 
-async function isDeadlineDay(): Promise<boolean> {
-  try {
-    const current = await eventsCache.getCurrent();
-    if (!current) return true;
-
-    const nextId = current.id + 1;
-    if (nextId > 38) return false;
-
-    const redis = await redisSingleton.getClient();
-    const nextStr = await redis.hget(`Event:${getCurrentSeason()}`, nextId.toString());
-    if (!nextStr) return false;
-
-    const nextEvent = JSON.parse(nextStr) as Event;
-    if (!nextEvent.deadlineTimeEpoch) return false;
-
-    const deadlineDate = new Date(nextEvent.deadlineTimeEpoch * 1000);
-    const now = new Date();
-    return deadlineDate.toDateString() === now.toDateString();
-  } catch (error) {
-    logError('isDeadlineDay check error', error);
-    return false;
-  }
-}
-
 // Domain-specific cache operations following Entity::season::field pattern
 export const eventsCache = {
   async getCurrent(): Promise<Event | null> {
@@ -157,10 +133,6 @@ export const eventsCache = {
       logError('event:current refresh error', error);
       return false;
     }
-  },
-
-  async isDeadlineDay(): Promise<boolean> {
-    return isDeadlineDay();
   },
 
   // Store all events in a single hash (no duplication!)
