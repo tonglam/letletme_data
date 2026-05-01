@@ -37,6 +37,7 @@ import { runTournamentInfoSync } from '../jobs/tournament-info.jobs';
 import { runLiveScores, runPostMatchConsolidation } from '../jobs/live.jobs';
 import { runTournamentKnockoutResultsSync } from '../jobs/tournament-knockout-results.jobs';
 import { runTournamentPointsRaceResultsSync } from '../jobs/tournament-points-race-results.jobs';
+import { runManualEventCurrentRefresh } from '../jobs/event-current-refresh.job';
 import { refreshTournamentMaterializedViews } from '../services/tournament-materialized-views.service';
 import { getCurrentEvent } from '../services/events.service';
 import { getErrorMessage } from '../utils/errors';
@@ -57,6 +58,12 @@ export const jobsAPI = new Elysia({ prefix: '/jobs' })
         name: 'events-sync',
         description: 'Sync events from FPL API',
         schedule: 'Daily at 6:35 AM',
+      },
+      {
+        name: 'event-current-refresh',
+        description:
+          'Recompute Redis event:current from Event hash; enqueue events-sync if gameweek id changes',
+        schedule: 'Every minute (cron); POST here for immediate run (ignores season window)',
       },
       {
         name: 'fixtures-sync',
@@ -218,6 +225,7 @@ export const jobsAPI = new Elysia({ prefix: '/jobs' })
     const { name } = params;
 
     const jobMap: Record<string, () => Promise<unknown>> = {
+      'event-current-refresh': () => runManualEventCurrentRefresh(),
       'events-sync': () => enqueueEventsSyncJob('manual'),
       'fixtures-sync': () => enqueueFixturesSyncJob('manual'),
       'teams-sync': () => enqueueTeamsSyncJob('manual'),
@@ -330,9 +338,26 @@ export const jobsAPI = new Elysia({ prefix: '/jobs' })
     try {
       logInfo(`Manual job trigger: ${name}`);
       const result = await job();
-      logInfo(`Manual job enqueued: ${name}`);
 
-      // If result is a BullMQ job, return job info
+      if (name === 'event-current-refresh' && result && typeof result === 'object') {
+        const typed = result as { refreshed: boolean; eventsSyncJobId?: string };
+        logInfo(`Manual job finished: ${name}`, {
+          refreshed: typed.refreshed,
+          eventsSyncJobId: typed.eventsSyncJobId,
+        });
+        return {
+          success: true,
+          message: typed.refreshed
+            ? 'event:current updated; events-sync job enqueued'
+            : 'event:current unchanged (derived gameweek id already in Redis)',
+          refreshed: typed.refreshed,
+          ...(typed.eventsSyncJobId !== undefined
+            ? { eventsSyncJobId: typed.eventsSyncJobId }
+            : {}),
+        };
+      }
+
+      logInfo(`Manual job enqueued: ${name}`);
       if (result && typeof result === 'object' && 'id' in result) {
         return {
           success: true,

@@ -13,7 +13,7 @@ export type DataSyncJobName =
   | 'player-values';
 
 export interface DataSyncJobData {
-  source?: 'cron' | 'manual' | 'api';
+  source?: 'cron' | 'manual' | 'api' | 'event-transition';
   triggeredAt: string;
 }
 

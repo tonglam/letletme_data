@@ -2,7 +2,7 @@ import { getDataSyncJobPriority, type DataSyncPriorityJobName } from '../domain/
 import { getDataSyncQueue, type DataSyncJobName } from '../queues/data-sync.queue';
 import { logError, logInfo } from '../utils/logger';
 
-export type DataSyncJobSource = 'cron' | 'manual' | 'api';
+export type DataSyncJobSource = 'cron' | 'manual' | 'api' | 'event-transition';
 
 async function enqueueDataSyncJob(jobName: DataSyncJobName, source: DataSyncJobSource = 'cron') {
   try {
