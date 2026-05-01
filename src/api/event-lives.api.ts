@@ -1,6 +1,10 @@
 import { Elysia } from 'elysia';
 
-import { enqueueEventLivesCacheUpdate, enqueueEventLivesDbSync } from '../jobs/live-data.jobs';
+import {
+  enqueueEventLiveSummary,
+  enqueueEventLivesCacheUpdate,
+  enqueueEventLivesDbSync,
+} from '../jobs/live-data.jobs';
 import { getEventLivesByEventId } from '../services/event-lives.service';
 
 export const eventLivesAPI = new Elysia({ prefix: '/event-lives' })
@@ -39,6 +43,21 @@ export const eventLivesAPI = new Elysia({ prefix: '/event-lives' })
     return {
       success: true,
       message: `Event live cache update job enqueued for event ${eventId}`,
+      jobId: job.id,
+      eventId,
+    };
+  })
+  .post('/summary/:eventId', async ({ params, set }) => {
+    const eventId = parseInt(params.eventId);
+    if (isNaN(eventId)) {
+      set.status = 400;
+      return { success: false, error: 'Invalid event ID' };
+    }
+
+    const job = await enqueueEventLiveSummary(eventId, 'manual');
+    return {
+      success: true,
+      message: `Event live summary job enqueued for event ${eventId}`,
       jobId: job.id,
       eventId,
     };
