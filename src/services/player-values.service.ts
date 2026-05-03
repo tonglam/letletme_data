@@ -108,8 +108,13 @@ export async function syncCurrentPlayerValues(): Promise<{ count: number }> {
     await playerValuesCache.set(today, playerValues);
     logInfo('Player values cache updated', { changeDate: today, count: playerValues.length });
 
-    const message = formatPlayerValuesNotification(today, playerValues);
-    await notifyTwoBots(message);
+    const hasRiseOrFall = playerValues.some(
+      (pv) => pv.changeType === 'Rise' || pv.changeType === 'Faller',
+    );
+    if (hasRiseOrFall) {
+      const message = formatPlayerValuesNotification(today, playerValues);
+      await notifyTwoBots(message);
+    }
   }
 
   logInfo('Daily player values sync completed', {
