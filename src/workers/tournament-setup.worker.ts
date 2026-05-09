@@ -43,6 +43,9 @@ export function createTournamentSetupWorker(): WorkerRuntime {
       concurrency: 2,
       removeOnComplete: { count: 100 },
       removeOnFail: { count: 50 },
+      lockDuration: 120_000,
+      maxStalledCount: 2,
+      stalledInterval: 15_000,
     },
   );
 

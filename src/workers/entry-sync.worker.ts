@@ -1,11 +1,10 @@
-import { QueueEvents, Worker } from 'bullmq';
+import { QueueEvents, Worker, type Job } from 'bullmq';
 import { asc } from 'drizzle-orm';
 
-import { MUTATION_PRIORITY_ORDER } from '../domain/job-priority';
+import { MUTATION_PRIORITY_ORDER, type MutationPriorityTier } from '../domain/job-priority';
 import { entryInfos } from '../db/schemas/index.schema';
 import { getDb } from '../db/singleton';
 import {
-  type MutationPriorityTier,
   type EntrySyncJobData,
   type EntrySyncJobSource,
   type EntrySyncJobName,
@@ -243,17 +242,12 @@ export function createEntrySyncWorker(): WorkerRuntime {
   const queueEvents: QueueEvents[] = [];
   const monitorTargets: WorkerRuntime['monitorTargets'] = [];
 
-  const processor = async (job: {
-    id: string;
-    name: string;
-    data: EntrySyncJobData;
-    attemptsMade: number;
-    queueName: string;
-  }) => {
+  const processor = async (job: Job<EntrySyncJobData>) => {
+    const jobId = job.id ?? `${job.name}-${job.timestamp}`;
     const context = {
       jobType: 'queue' as const,
       queueName: job.queueName,
-      jobId: job.id,
+      jobId,
       jobName: job.name,
       source: job.data?.source as string | undefined,
       eventId: job.data?.eventId,
@@ -266,7 +260,7 @@ export function createEntrySyncWorker(): WorkerRuntime {
       {
         queueName: job.queueName,
         jobName: job.name,
-        jobId: String(job.id),
+        jobId,
         eventId: job.data?.eventId,
       },
       () =>
@@ -304,7 +298,12 @@ export function createEntrySyncWorker(): WorkerRuntime {
 
   for (const tier of activeTiers) {
     const queueName = getEntrySyncQueueName(tier);
-    const worker = new Worker<EntrySyncJobData>(queueName, processor, { connection });
+    const worker = new Worker<EntrySyncJobData>(queueName, processor, {
+      connection,
+      lockDuration: 120_000,
+      maxStalledCount: 2,
+      stalledInterval: 15_000,
+    });
     const events = new QueueEvents(queueName, { connection });
 
     worker.on('completed', (job) => {

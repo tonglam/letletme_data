@@ -184,6 +184,9 @@ export function createLeagueSyncWorker(): WorkerRuntime {
       concurrency: 10,
       removeOnComplete: { count: 100 },
       removeOnFail: { count: 50 },
+      lockDuration: 120_000,
+      maxStalledCount: 2,
+      stalledInterval: 15_000,
     });
     const events = new QueueEvents(queueName, { connection });
 

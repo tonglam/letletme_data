@@ -72,7 +72,12 @@ export function createDataSyncWorker(): WorkerRuntime {
 
   for (const tier of activeTiers) {
     const queueName = getDataSyncQueueName(tier);
-    const worker = new Worker<DataSyncJobData>(queueName, processDataSyncJob, { connection });
+    const worker = new Worker<DataSyncJobData>(queueName, processDataSyncJob, {
+      connection,
+      lockDuration: 120_000,
+      maxStalledCount: 2,
+      stalledInterval: 15_000,
+    });
     const events = new QueueEvents(queueName, { connection });
 
     worker.on('completed', (job) => {

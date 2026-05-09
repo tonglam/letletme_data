@@ -20,6 +20,7 @@ import { syncTournamentEventCupResults } from '../services/tournament-event-cup-
 import { syncTournamentEventPicks } from '../services/tournament-event-picks.service';
 import { syncTournamentInfo } from '../services/tournament-info.service';
 import { refreshTournamentMaterializedViews } from '../services/tournament-materialized-views.service';
+import { syncTournamentSelectionStats } from '../services/tournament-selection-stats.service';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { getQueueConnection } from '../utils/queue';
 import { logError, logInfo } from '../utils/logger';
@@ -31,6 +32,7 @@ import {
   enqueueTournamentTransfersPost,
   enqueueTournamentCupResults,
   enqueueTournamentMaterializedViewsRefresh,
+  enqueueTournamentSelectionStats,
 } from '../jobs/tournament-sync.jobs';
 import { startStrictPriorityGate } from './strict-priority-gate';
 import type { WorkerRuntime } from './worker-runtime';
@@ -147,10 +149,15 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
 
           case TOURNAMENT_JOBS.TRANSFERS_POST:
             await syncTournamentEventTransfersPost(eventId);
+            await enqueueTournamentSelectionStats(eventId, 'cascade');
             break;
 
           case TOURNAMENT_JOBS.CUP_RESULTS:
             await syncTournamentEventCupResults(eventId);
+            break;
+
+          case TOURNAMENT_JOBS.SELECTION_STATS:
+            await syncTournamentSelectionStats(eventId);
             break;
 
           case TOURNAMENT_JOBS.EVENT_PICKS:
@@ -192,6 +199,9 @@ export function createTournamentSyncWorker(): WorkerRuntime {
       concurrency: 10,
       removeOnComplete: { count: 100 },
       removeOnFail: { count: 50 },
+      lockDuration: 120_000,
+      maxStalledCount: 2,
+      stalledInterval: 15_000,
     });
     const events = new QueueEvents(queueName, { connection });
 
