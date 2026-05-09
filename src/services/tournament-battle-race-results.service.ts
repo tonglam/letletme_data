@@ -8,6 +8,8 @@ import {
 } from '../repositories/tournament-infos';
 import { logError, logInfo } from '../utils/logger';
 
+import type { DbTournamentGroupInsert } from '../db/schemas/index.schema';
+
 function groupRankKey(points: number, overallRank: number | null) {
   return `${points}-${overallRank ?? Number.MAX_SAFE_INTEGER}`;
 }
@@ -46,6 +48,8 @@ async function syncBattleRaceForTournament(
     });
     return { updatedGroups: 0, updatedResults: 0, skipped: 0 };
   }
+  const groupStartedEventId = tournament.groupStartedEventId;
+  const groupEndedEventId = tournament.groupEndedEventId;
 
   const entryIds = await tournamentEntryRepository.findEntryIdsByTournamentId(tournament.id);
   if (entryIds.length === 0) {
@@ -66,8 +70,8 @@ async function syncBattleRaceForTournament(
     (
       await entryEventResultsRepository.aggregateTotalsByEntry(
         entryIds,
-        tournament.groupStartedEventId,
-        Math.min(eventId, tournament.groupEndedEventId),
+        groupStartedEventId,
+        Math.min(eventId, groupEndedEventId),
       )
     ).map((row) => [row.entryId, row]),
   );
@@ -115,7 +119,7 @@ async function syncBattleRaceForTournament(
     };
   });
 
-  const updatedGroups = [];
+  const updatedGroups: DbTournamentGroupInsert[] = [];
   let skipped = 0;
 
   for (const [groupId, pointsMap] of matchPointsByGroup.entries()) {
@@ -131,7 +135,7 @@ async function syncBattleRaceForTournament(
         return null;
       }
 
-      const expectedPlayed = eventId - tournament.groupStartedEventId + 1;
+      const expectedPlayed = eventId - groupStartedEventId + 1;
       const alreadyPlayed = (group.played ?? 0) >= expectedPlayed;
       const matchPointsValue = pointsMap.get(entryId) ?? 0;
       let groupPoints = group.groupPoints ?? 0;
@@ -177,7 +181,9 @@ async function syncBattleRaceForTournament(
       };
     });
 
-    const filtered = groupUpdates.filter(Boolean) as typeof updatedGroups;
+    const filtered = groupUpdates.filter(
+      (group): group is NonNullable<(typeof groupUpdates)[number]> => group !== null,
+    );
     const rankMap = rankBattleGroups(
       filtered.map((entry) => ({
         groupPoints: entry.groupPoints ?? 0,

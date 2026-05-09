@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll } from 'bun:test';
 
 import {
   enqueueEventLivesCacheUpdate,
@@ -119,11 +119,16 @@ describe('Live Data Jobs Integration', () => {
       // Clean queue first
       await liveDataQueue.drain();
 
-      await enqueueEventLivesCacheUpdate(TEST_EVENT_ID, 'manual');
-      await enqueueEventLivesDbSync(TEST_EVENT_ID, 'manual');
+      const jobs = await Promise.all([
+        enqueueEventLivesCacheUpdate(TEST_EVENT_ID, 'manual'),
+        enqueueEventLivesDbSync(TEST_EVENT_ID, 'manual'),
+      ]);
 
-      const waitingCount = await liveDataQueue.getWaitingCount();
-      expect(waitingCount).toBeGreaterThanOrEqual(2);
+      const states = await Promise.all(jobs.map((job) => job.getState()));
+      expect(states).toHaveLength(2);
+      states.forEach((state) => {
+        expect(['waiting', 'delayed', 'active', 'completed']).toContain(state);
+      });
     });
   });
 });

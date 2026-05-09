@@ -152,19 +152,24 @@ export const createEntryEventTransfersRepository = (dbInstance?: DatabaseInstanc
         const ids = updates.map((u) => u.id);
         const inPoints = updates.map((u) => u.elementInPoints);
         const outPoints = updates.map((u) => u.elementOutPoints);
-        const playedFlags = updates.map((u) => u.elementInPlayed);
+        const playedFlags = updates.map((u) =>
+          u.elementInPlayed === null ? null : u.elementInPlayed ? 1 : 0,
+        );
 
         await client`
           update entry_event_transfers as eet
           set element_in_points = data.in_points,
               element_out_points = data.out_points,
-              element_in_played = data.in_played
+              element_in_played = case
+                when data.in_played_flag is null then null
+                else data.in_played_flag = 1
+              end
           from (
             select
               unnest(${ids}::int[]) as id,
               unnest(${inPoints}::int[]) as in_points,
               unnest(${outPoints}::int[]) as out_points,
-              unnest(${playedFlags}::boolean[]) as in_played
+              unnest(${playedFlags}::int[]) as in_played_flag
           ) as data
           where eet.id = data.id
         `;

@@ -49,7 +49,7 @@ describe('Event Overall Results Integration Tests', () => {
     });
 
     test('should handle re-sync without errors', async () => {
-      await syncEventOverallResult();
+      const sync1 = await syncEventOverallResult();
       const sync2 = await syncEventOverallResult();
 
       // Should have same count (all events)
@@ -215,7 +215,7 @@ describe('Event Overall Results Integration Tests', () => {
 
       expect(cache2).not.toBeNull();
       expect(cache2?.length).toBe(sync2.count);
-      expect(cache2?.length).toBe(cache1?.length);
+      expect(cache2?.length).toBe(cache1?.length ?? 0);
     });
   });
 
@@ -252,7 +252,7 @@ describe('Event Overall Results Integration Tests', () => {
       const cache2 = await eventOverallResultCache.getAll();
 
       expect(sync2.count).toBe(sync1.count);
-      expect(cache2?.length).toBe(cache1?.length);
+      expect(cache2?.length).toBe(cache1?.length ?? 0);
     });
 
     test('should have all events from 1 to current', async () => {

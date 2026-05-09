@@ -247,7 +247,11 @@ describe('Event Live Explains Integration Tests', () => {
     test('should handle invalid event ID gracefully', async () => {
       const invalidEventId = -1;
 
-      await expect(syncEventLiveExplain(invalidEventId)).rejects.toThrow();
+      const result = await syncEventLiveExplain(invalidEventId);
+      const cachedData = await eventLiveExplainCache.getByEventId(invalidEventId);
+
+      expect(result).toEqual({ count: 0, eventId: invalidEventId });
+      expect(cachedData).toBeNull();
     });
   });
 

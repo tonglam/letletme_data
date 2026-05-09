@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, test } from 'bun:test';
+import { eq } from 'drizzle-orm';
 
 import { getDb } from '../../src/db/singleton';
 import { tournamentPointsGroupResults } from '../../src/db/schemas/index.schema';
@@ -9,6 +10,7 @@ import { getCurrentEvent } from '../../src/services/events.service';
 describe('Tournament Points Race Results Integration Tests', () => {
   let testEventId: number;
   let hasPointsRaceTournaments: boolean;
+  let syncedResult: Awaited<ReturnType<typeof syncTournamentPointsRaceResults>>;
 
   beforeAll(async () => {
     const currentEvent = await getCurrentEvent();
@@ -22,17 +24,19 @@ describe('Tournament Points Race Results Integration Tests', () => {
 
     if (!hasPointsRaceTournaments) {
       console.log('⚠️  No points race tournaments found - some tests will be skipped');
+      syncedResult = { eventId: testEventId, updatedGroups: 0, updatedResults: 0, skipped: 0 };
+      return;
     }
+
+    syncedResult = await syncTournamentPointsRaceResults(testEventId);
   });
 
   describe('Sync Integration', () => {
     test('should sync points race results', async () => {
-      const result = await syncTournamentPointsRaceResults(testEventId);
-
-      expect(result).toBeDefined();
-      expect(result.eventId).toBe(testEventId);
-      expect(result.updatedGroups).toBeGreaterThanOrEqual(0);
-      expect(result.updatedResults).toBeGreaterThanOrEqual(0);
+      expect(syncedResult).toBeDefined();
+      expect(syncedResult.eventId).toBe(testEventId);
+      expect(syncedResult.updatedGroups).toBeGreaterThanOrEqual(0);
+      expect(syncedResult.updatedResults).toBeGreaterThanOrEqual(0);
     });
 
     test('should store results in database', async () => {
@@ -41,10 +45,11 @@ describe('Tournament Points Race Results Integration Tests', () => {
         return;
       }
 
-      await syncTournamentPointsRaceResults(testEventId);
-
       const db = await getDb();
-      const results = await db.select().from(tournamentPointsGroupResults);
+      const results = await db
+        .select()
+        .from(tournamentPointsGroupResults)
+        .where(eq(tournamentPointsGroupResults.eventId, testEventId));
 
       expect(results.length).toBeGreaterThanOrEqual(0);
 
@@ -53,8 +58,8 @@ describe('Tournament Points Race Results Integration Tests', () => {
         expect(typeof result.tournamentId).toBe('number');
         expect(typeof result.groupId).toBe('number');
         expect(typeof result.entryId).toBe('number');
-        expect(typeof result.rank).toBe('number');
-        expect(typeof result.totalPoints).toBe('number');
+        expect(typeof result.eventGroupRank).toBe('number');
+        expect(typeof result.eventPoints).toBe('number');
       }
     });
   });
@@ -66,15 +71,16 @@ describe('Tournament Points Race Results Integration Tests', () => {
         return;
       }
 
-      await syncTournamentPointsRaceResults(testEventId);
-
       const db = await getDb();
-      const results = await db.select().from(tournamentPointsGroupResults);
+      const results = await db
+        .select()
+        .from(tournamentPointsGroupResults)
+        .where(eq(tournamentPointsGroupResults.eventId, testEventId));
 
       if (results.length > 0) {
         const result = results[0];
-        expect(result.rank).toBeGreaterThan(0);
-        expect(result.totalPoints).toBeGreaterThanOrEqual(0);
+        expect(result.eventGroupRank ?? 0).toBeGreaterThan(0);
+        expect(result.eventPoints ?? 0).toBeGreaterThanOrEqual(0);
       }
     });
 
@@ -84,10 +90,11 @@ describe('Tournament Points Race Results Integration Tests', () => {
         return;
       }
 
-      await syncTournamentPointsRaceResults(testEventId);
-
       const db = await getDb();
-      const results = await db.select().from(tournamentPointsGroupResults);
+      const results = await db
+        .select()
+        .from(tournamentPointsGroupResults)
+        .where(eq(tournamentPointsGroupResults.eventId, testEventId));
 
       // Group by tournament and group ID
       const groups = new Map<string, typeof results>();
@@ -101,7 +108,7 @@ describe('Tournament Points Race Results Integration Tests', () => {
 
       // Each group should have unique ranks
       groups.forEach((groupResults) => {
-        const ranks = groupResults.map((r) => r.rank);
+        const ranks = groupResults.map((r) => r.eventGroupRank);
         const uniqueRanks = new Set(ranks);
         expect(uniqueRanks.size).toBe(ranks.length);
       });

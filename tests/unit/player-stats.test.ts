@@ -430,12 +430,12 @@ describe('Player Stats Unit Tests', () => {
   });
 
   describe('Repository Unit Tests', () => {
-    let _mockDb: any;
+    let mockDb: any;
     let repository: PlayerStatsRepository;
 
     beforeEach(() => {
       // Create mock database with simple functions
-      _mockDb = {
+      mockDb = {
         select: () => ({
           from: () => ({
             where: () => ({
@@ -454,7 +454,7 @@ describe('Player Stats Unit Tests', () => {
         delete: () => Promise.resolve(undefined),
       };
 
-      repository = createPlayerStatsRepository();
+      repository = createPlayerStatsRepository(mockDb);
       // Note: Real repository uses singleton db, this is just for testing structure
     });
 
@@ -659,7 +659,7 @@ describe('Player Stats Unit Tests', () => {
     });
 
     test('should handle memory efficiently with large datasets', () => {
-      const _teamsMap = createTeamsMap(mockTeamsForPlayerStats);
+      const teamsMap = createTeamsMap(mockTeamsForPlayerStats);
       const largeDataset = generatePlayerStats(1000);
 
       const startTime = performance.now();
@@ -667,6 +667,7 @@ describe('Player Stats Unit Tests', () => {
       const endTime = performance.now();
 
       expect(filtered.length).toBeGreaterThan(0);
+      expect(teamsMap.size).toBe(mockTeamsForPlayerStats.length);
       expect(endTime - startTime).toBeLessThan(100); // Should be fast
 
       // Check filtering worked correctly

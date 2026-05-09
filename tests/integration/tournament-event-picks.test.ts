@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, test } from 'bun:test';
+import { eq } from 'drizzle-orm';
 
 import { getDb } from '../../src/db/singleton';
 import { entryEventPicks } from '../../src/db/schemas/index.schema';
@@ -9,6 +10,7 @@ import { getCurrentEvent } from '../../src/services/events.service';
 describe('Tournament Event Picks Integration Tests', () => {
   let testEventId: number;
   let hasActiveTournaments: boolean;
+  let syncedResult: Awaited<ReturnType<typeof syncTournamentEventPicks>>;
 
   beforeAll(async () => {
     const currentEvent = await getCurrentEvent();
@@ -22,17 +24,25 @@ describe('Tournament Event Picks Integration Tests', () => {
 
     if (!hasActiveTournaments) {
       console.log('⚠️  No active tournaments found - some tests will be skipped');
+      syncedResult = {
+        eventId: testEventId,
+        totalEntries: 0,
+        synced: 0,
+        skipped: 0,
+        errors: 0,
+      };
+      return;
     }
+
+    syncedResult = await syncTournamentEventPicks(testEventId);
   });
 
   describe('Sync Integration', () => {
     test('should sync tournament event picks', async () => {
-      const result = await syncTournamentEventPicks(testEventId);
-
-      expect(result).toBeDefined();
-      expect(result.eventId).toBe(testEventId);
-      expect(result.totalEntries).toBeGreaterThanOrEqual(0);
-      expect(result.synced).toBeGreaterThanOrEqual(0);
+      expect(syncedResult).toBeDefined();
+      expect(syncedResult.eventId).toBe(testEventId);
+      expect(syncedResult.totalEntries).toBeGreaterThanOrEqual(0);
+      expect(syncedResult.synced).toBeGreaterThanOrEqual(0);
     });
 
     test('should store picks in database', async () => {
@@ -41,10 +51,11 @@ describe('Tournament Event Picks Integration Tests', () => {
         return;
       }
 
-      await syncTournamentEventPicks(testEventId);
-
       const db = await getDb();
-      const picks = await db.select().from(entryEventPicks);
+      const picks = await db
+        .select()
+        .from(entryEventPicks)
+        .where(eq(entryEventPicks.eventId, testEventId));
 
       expect(picks.length).toBeGreaterThanOrEqual(0);
 
@@ -70,10 +81,11 @@ describe('Tournament Event Picks Integration Tests', () => {
         return;
       }
 
-      await syncTournamentEventPicks(testEventId);
-
       const db = await getDb();
-      const picks = await db.select().from(entryEventPicks);
+      const picks = await db
+        .select()
+        .from(entryEventPicks)
+        .where(eq(entryEventPicks.eventId, testEventId));
 
       if (picks.length > 0) {
         const pick = picks[0];
@@ -94,10 +106,11 @@ describe('Tournament Event Picks Integration Tests', () => {
         return;
       }
 
-      await syncTournamentEventPicks(testEventId);
-
       const db = await getDb();
-      const picksRows = await db.select().from(entryEventPicks);
+      const picksRows = await db
+        .select()
+        .from(entryEventPicks)
+        .where(eq(entryEventPicks.eventId, testEventId));
 
       // Each row contains all 15 picks for one entry-event combination in JSONB
       picksRows.forEach((row) => {

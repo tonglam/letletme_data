@@ -56,8 +56,32 @@ export interface Player {
   webName: string;
 }
 
-// Team types - using database schema types
-export type Team = import('../db/schemas/index.schema').DbTeam;
+// Team types
+export interface Team {
+  id: TeamID;
+  name: string;
+  shortName: string;
+  code: number;
+  draw: number;
+  form: string | null;
+  loss: number;
+  played: number;
+  points: number;
+  position: number;
+  strength: number;
+  teamDivision: number | null;
+  unavailable: boolean;
+  win: number;
+  strengthOverallHome: number;
+  strengthOverallAway: number;
+  strengthAttackHome: number;
+  strengthAttackAway: number;
+  strengthDefenceHome: number;
+  strengthDefenceAway: number;
+  pulseId: number;
+  createdAt: Date | null;
+  updatedAt: Date | null;
+}
 
 // Phase types
 export interface Phase {
@@ -404,40 +428,6 @@ export interface RawFPLLeagueInfo {
 export interface RawFPLLeagueStandingsResponse {
   league?: RawFPLLeagueInfo;
   standings: RawFPLLeagueStandings;
-}
-
-// Pulselive standings (Premier League tables)
-export interface RawPulseLiveStandingsClub {
-  abbr: string;
-}
-
-export interface RawPulseLiveStandingsTeam {
-  club: RawPulseLiveStandingsClub;
-}
-
-export interface RawPulseLiveStandingsOverall {
-  points: number;
-  played: number;
-  won: number;
-  drawn: number;
-  lost: number;
-  goalsFor: number;
-  goalsAgainst: number;
-  goalsDifference: number;
-}
-
-export interface RawPulseLiveStandingsEntry {
-  position: number;
-  team: RawPulseLiveStandingsTeam;
-  overall: RawPulseLiveStandingsOverall;
-}
-
-export interface RawPulseLiveStandingsTable {
-  entries: RawPulseLiveStandingsEntry[];
-}
-
-export interface RawPulseLiveStandingsResponse {
-  tables: RawPulseLiveStandingsTable[];
 }
 
 // Entry event picks (FPL: /api/entry/{entryId}/event/{eventId}/picks/)

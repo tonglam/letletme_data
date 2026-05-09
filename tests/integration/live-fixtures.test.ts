@@ -21,7 +21,7 @@ describe('Live Fixtures Integration Tests', () => {
     eventId = currentEvent.id;
 
     await syncFixtures(eventId);
-  }, 30000);
+  });
 
   test('syncLiveFixtureCache populates Redis hash with TTL -1', async () => {
     const result = await syncLiveFixtureCache(eventId);

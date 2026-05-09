@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'bun:test';
 
 import {
   enqueueLeagueEventPicks,
@@ -75,11 +75,11 @@ describe('League Sync Jobs Integration', () => {
     });
   });
 
-  describe('Job Deduplication', () => {
+  describe('Job ID Generation', () => {
     it('should use coordinator job ID pattern', async () => {
       const job = await enqueueLeagueEventPicks(TEST_EVENT_ID, 'cron');
 
-      expect(job.id).toBe(`league-event-picks:${TEST_EVENT_ID}:coordinator`);
+      expect(job.id).toMatch(new RegExp(`^league-event-picks-e${TEST_EVENT_ID}-coordinator-\\d+$`));
     });
 
     it('should use tournament job ID pattern', async () => {
@@ -87,18 +87,19 @@ describe('League Sync Jobs Integration', () => {
         tournamentId: TEST_TOURNAMENT_ID,
       });
 
-      expect(job.id).toBe(`league-event-picks:${TEST_EVENT_ID}:t${TEST_TOURNAMENT_ID}`);
+      expect(job.id).toMatch(
+        new RegExp(`^league-event-picks-e${TEST_EVENT_ID}-t${TEST_TOURNAMENT_ID}-\\d+$`),
+      );
     });
 
-    it('should prevent duplicate coordinator jobs', async () => {
+    it('should create separate coordinator job runs', async () => {
       const job1 = await enqueueLeagueEventPicks(TEST_EVENT_ID, 'cron');
       const job2 = await enqueueLeagueEventPicks(TEST_EVENT_ID, 'cron');
 
-      // Same job ID should return the existing job
-      expect(job1.id).toBe(job2.id);
+      expect(job1.id).not.toBe(job2.id ?? '');
     });
 
-    it('should prevent duplicate tournament jobs', async () => {
+    it('should create separate tournament job runs', async () => {
       const job1 = await enqueueLeagueEventResults(TEST_EVENT_ID, 'cascade', {
         tournamentId: TEST_TOURNAMENT_ID,
       });
@@ -106,7 +107,7 @@ describe('League Sync Jobs Integration', () => {
         tournamentId: TEST_TOURNAMENT_ID,
       });
 
-      expect(job1.id).toBe(job2.id);
+      expect(job1.id).not.toBe(job2.id ?? '');
     });
   });
 
@@ -137,11 +138,13 @@ describe('League Sync Jobs Integration', () => {
       // Clean queue first
       await leagueSyncQueue.drain();
 
-      await enqueueLeagueEventPicks(TEST_EVENT_ID, 'manual');
-      await enqueueLeagueEventResults(TEST_EVENT_ID, 'manual');
+      const picksJob = await enqueueLeagueEventPicks(TEST_EVENT_ID, 'manual');
+      const resultsJob = await enqueueLeagueEventResults(TEST_EVENT_ID, 'manual');
 
-      const waitingCount = await leagueSyncQueue.getWaitingCount();
-      expect(waitingCount).toBeGreaterThanOrEqual(2);
+      const states = await Promise.all([picksJob.getState(), resultsJob.getState()]);
+      expect(
+        states.every((state) => ['waiting', 'delayed', 'active', 'completed'].includes(state)),
+      ).toBe(true);
     });
   });
 

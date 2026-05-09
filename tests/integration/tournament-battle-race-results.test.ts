@@ -53,8 +53,8 @@ describe('Tournament Battle Race Results Integration Tests', () => {
         const result = results[0];
         expect(typeof result.tournamentId).toBe('number');
         expect(typeof result.groupId).toBe('number');
-        expect(typeof result.entryId).toBe('number');
-        expect(typeof result.rank).toBe('number');
+        expect(typeof result.homeEntryId).toBe('number');
+        expect(typeof result.awayEntryId).toBe('number');
       }
     });
 
@@ -83,10 +83,10 @@ describe('Tournament Battle Race Results Integration Tests', () => {
 
       if (results.length > 0) {
         const result = results[0];
-        expect(result.rank).toBeGreaterThan(0);
-        expect(result.wins).toBeGreaterThanOrEqual(0);
-        expect(result.draws).toBeGreaterThanOrEqual(0);
-        expect(result.losses).toBeGreaterThanOrEqual(0);
+        expect(result.homeEntryId).toBeGreaterThan(0);
+        expect(result.awayEntryId).toBeGreaterThan(0);
+        expect(result.homeMatchPoints ?? 0).toBeGreaterThanOrEqual(0);
+        expect(result.awayMatchPoints ?? 0).toBeGreaterThanOrEqual(0);
       }
     });
 
@@ -102,9 +102,8 @@ describe('Tournament Battle Race Results Integration Tests', () => {
       const results = await db.select().from(tournamentBattleGroupResults);
 
       results.forEach((result) => {
-        // Wins * 3 + Draws should equal total points in battle races
-        const expectedPoints = result.wins * 3 + result.draws;
-        expect(result.totalPoints).toBe(expectedPoints);
+        expect([0, 1, 3]).toContain(result.homeMatchPoints ?? 0);
+        expect([0, 1, 3]).toContain(result.awayMatchPoints ?? 0);
       });
     });
   });

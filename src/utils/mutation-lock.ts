@@ -31,7 +31,6 @@ function getLockClient(): Redis {
     port: connection.port,
     password: connection.password,
     db: connection.db,
-    retryDelayOnFailover: 100,
     enableReadyCheck: false,
     maxRetriesPerRequest: null,
   });

@@ -96,6 +96,7 @@ export function resolveMutationScopes(input: MutationScopeInput): string[] {
       case 'tournament-event-picks':
       case 'tournament-transfers-pre':
       case 'tournament-transfers-post':
+      case 'tournament-selection-stats':
         return [
           withEvent('entry-event', eventId),
           withEvent('tournament-event-mutations', eventId),

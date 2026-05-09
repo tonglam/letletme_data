@@ -106,16 +106,6 @@ ON event_live_summaries FOR SELECT TO public USING (true);
 CREATE POLICY "Allow authenticated write access to event_live_summaries"
 ON event_live_summaries FOR ALL TO authenticated USING (true) WITH CHECK (true);
 
--- Event Standings (if exists)
-DO $$
-BEGIN
-  IF EXISTS (SELECT FROM pg_tables WHERE schemaname = 'public' AND tablename = 'event_standings') THEN
-    ALTER TABLE event_standings ENABLE ROW LEVEL SECURITY;
-    EXECUTE 'CREATE POLICY "Allow public read access to event_standings" ON event_standings FOR SELECT TO public USING (true)';
-    EXECUTE 'CREATE POLICY "Allow authenticated write access to event_standings" ON event_standings FOR ALL TO authenticated USING (true) WITH CHECK (true)';
-  END IF;
-END $$;
-
 -- ============================================================================
 -- ENTRY TABLES (Authenticated Access Only - User Data)
 -- ============================================================================

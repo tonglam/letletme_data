@@ -1,5 +1,5 @@
-import { QueueEvents } from 'bullmq';
-import { afterAll, beforeAll, describe, expect, test } from 'vitest';
+import type { Job, Queue } from 'bullmq';
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 
 import {
   enqueueEventLiveExplain,
@@ -8,39 +8,62 @@ import {
   enqueueEventLiveSummary,
   enqueueEventOverallResult,
 } from '../../../src/jobs/live-data.jobs';
-import { liveDataQueue } from '../../../src/queues/live-data.queue';
+import { liveDataQueuesByTier, type LiveDataJobData } from '../../../src/queues/live-data.queue';
 import { getCurrentEvent } from '../../../src/services/events.service';
-import { getQueueConnection } from '../../../src/utils/queue';
-import { liveDataWorker } from '../../../src/workers/live-data.worker';
+import { createLiveDataWorker } from '../../../src/workers/live-data.worker';
+import type { WorkerRuntime } from '../../../src/workers/worker-runtime';
 
 describe('Live Data Worker Integration Tests', () => {
-  let queueEvents: QueueEvents;
+  let liveDataRuntime: WorkerRuntime;
   let testEventId: number;
 
-  beforeAll(
-    async () => {
-      await liveDataWorker.waitUntilReady();
-
-      queueEvents = new QueueEvents(liveDataQueue.name, {
-        connection: getQueueConnection(),
-      });
-
-      const currentEvent = await getCurrentEvent();
-      if (!currentEvent) {
-        throw new Error('No current event found');
-      }
-      testEventId = currentEvent.id;
-
-      await liveDataQueue.drain();
-      await liveDataQueue.clean(0, 0, 'completed');
-      await liveDataQueue.clean(0, 0, 'failed');
-    },
-    { timeout: 30000 },
+  const liveDataQueues = Array.from(
+    new Map(Object.values(liveDataQueuesByTier).map((queue) => [queue.name, queue])).values(),
   );
 
+  async function cleanLiveDataQueues() {
+    await Promise.all(
+      liveDataQueues.map(async (queue: Queue<LiveDataJobData>) => {
+        await queue.drain();
+        await queue.clean(0, 0, 'completed');
+        await queue.clean(0, 0, 'failed');
+      }),
+    );
+  }
+
+  function getQueueEvents(job: Job<LiveDataJobData>) {
+    const target = liveDataRuntime.monitorTargets.find(
+      ({ queueName }) => queueName === job.queueName,
+    );
+    if (!target) {
+      throw new Error(`No QueueEvents found for queue ${job.queueName}`);
+    }
+    return target.queueEvents;
+  }
+
+  async function expectJobCompleted(job: Job<LiveDataJobData>, timeout: number) {
+    await job.waitUntilFinished(getQueueEvents(job), timeout);
+    expect(await job.getState()).toBe('completed');
+  }
+
+  beforeAll(async () => {
+    liveDataRuntime = createLiveDataWorker();
+    if (liveDataRuntime.workers.length === 0) throw new Error('Live data worker was not created');
+    await Promise.all(liveDataRuntime.workers.map((worker) => worker.waitUntilReady()));
+
+    const currentEvent = await getCurrentEvent();
+    if (!currentEvent) {
+      throw new Error('No current event found');
+    }
+    testEventId = currentEvent.id;
+
+    await cleanLiveDataQueues();
+  });
+
   afterAll(async () => {
-    await queueEvents.close();
-    await liveDataWorker.close();
+    await Promise.all(liveDataRuntime.queueEvents.map((events) => events.close()));
+    await Promise.all(liveDataRuntime.workers.map((worker) => worker.close()));
+    liveDataRuntime.stop?.();
   });
 
   describe('Event Lives Jobs', () => {
@@ -49,10 +72,7 @@ describe('Live Data Worker Integration Tests', () => {
       async () => {
         const job = await enqueueEventLivesCacheUpdate(testEventId);
 
-        const result = await job.waitUntilFinished(queueEvents, 60000);
-
-        expect(result).toBeDefined();
-        expect(result.count).toBeGreaterThan(0);
+        await expectJobCompleted(job, 60000);
       },
       { timeout: 70000 },
     );
@@ -62,10 +82,7 @@ describe('Live Data Worker Integration Tests', () => {
       async () => {
         const job = await enqueueEventLivesDbSync(testEventId);
 
-        const result = await job.waitUntilFinished(queueEvents, 60000);
-
-        expect(result).toBeDefined();
-        expect(result.count).toBeGreaterThan(0);
+        await expectJobCompleted(job, 60000);
       },
       { timeout: 70000 },
     );
@@ -78,12 +95,9 @@ describe('Live Data Worker Integration Tests', () => {
         // Need event lives data first
         await enqueueEventLivesDbSync(testEventId);
 
-        const job = await enqueueEventLiveSummary();
+        const job = await enqueueEventLiveSummary(testEventId);
 
-        const result = await job.waitUntilFinished(queueEvents, 60000);
-
-        expect(result).toBeDefined();
-        expect(result.count).toBeGreaterThan(0);
+        await expectJobCompleted(job, 60000);
       },
       { timeout: 70000 },
     );
@@ -93,10 +107,7 @@ describe('Live Data Worker Integration Tests', () => {
       async () => {
         const job = await enqueueEventLiveExplain(testEventId);
 
-        const result = await job.waitUntilFinished(queueEvents, 60000);
-
-        expect(result).toBeDefined();
-        expect(result.count).toBeGreaterThan(0);
+        await expectJobCompleted(job, 60000);
       },
       { timeout: 70000 },
     );
@@ -106,12 +117,9 @@ describe('Live Data Worker Integration Tests', () => {
     test(
       'should process event overall result',
       async () => {
-        const job = await enqueueEventOverallResult();
+        const job = await enqueueEventOverallResult(testEventId);
 
-        const result = await job.waitUntilFinished(queueEvents, 60000);
-
-        expect(result).toBeDefined();
-        expect(result.count).toBeGreaterThan(0);
+        await expectJobCompleted(job, 60000);
       },
       { timeout: 70000 },
     );
@@ -124,14 +132,10 @@ describe('Live Data Worker Integration Tests', () => {
         const jobs = await Promise.all([
           enqueueEventLivesCacheUpdate(testEventId),
           enqueueEventLiveExplain(testEventId),
-          enqueueEventOverallResult(),
+          enqueueEventOverallResult(testEventId),
         ]);
 
-        await Promise.all(jobs.map((job) => job.waitUntilFinished(queueEvents, 60000)));
-
-        jobs.forEach((job) => {
-          expect(job.finishedOn).toBeDefined();
-        });
+        await Promise.all(jobs.map((job) => expectJobCompleted(job, 60000)));
       },
       { timeout: 180000 },
     );

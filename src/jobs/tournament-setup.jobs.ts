@@ -32,7 +32,7 @@ export async function enqueueTournamentSetup(
       if (state === 'completed' || state === 'failed') {
         await existing.remove();
       } else if (options.forceNew) {
-        if (state === 'waiting' || state === 'delayed' || state === 'paused') {
+        if (state === 'waiting' || state === 'delayed') {
           await existing.remove();
         } else {
           jobId = `${baseJobId}-${Date.now()}`;

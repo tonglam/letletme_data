@@ -72,7 +72,7 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
         ...deltas,
       });
 
-      if (lastCounts && deltas.failedDelta > 0) {
+      if (lastCounts && (deltas.failedDelta ?? 0) > 0) {
         logWarn('Queue failed jobs increased', {
           queue: queueName,
           tier,

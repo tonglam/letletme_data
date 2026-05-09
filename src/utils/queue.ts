@@ -1,8 +1,8 @@
-import type { QueueOptions } from 'bullmq';
+import type { RedisOptions } from 'ioredis';
 
 import { getConfig } from './config';
 
-export type QueueConnection = QueueOptions['connection'];
+export type QueueConnection = RedisOptions;
 
 export function getQueueConnection(): QueueConnection {
   const config = getConfig();

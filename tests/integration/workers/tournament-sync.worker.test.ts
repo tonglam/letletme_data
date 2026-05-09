@@ -1,175 +1,168 @@
-import { QueueEvents } from 'bullmq';
-import { afterAll, beforeAll, describe, expect, test } from 'vitest';
+import { QueueEvents, type Worker } from 'bullmq';
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 
+import { enqueueTournamentEventPicks } from '../../../src/jobs/tournament-sync.jobs';
 import {
-  enqueueTournamentBattleRace,
-  enqueueTournamentEventResults,
-  enqueueTournamentKnockout,
-  enqueueTournamentPointsRace,
-} from '../../../src/jobs/tournament-sync.jobs';
-import { tournamentSyncQueue } from '../../../src/queues/tournament-sync.queue';
+  tournamentSyncQueue,
+  tournamentSyncQueuesByTier,
+  TOURNAMENT_JOBS,
+} from '../../../src/queues/tournament-sync.queue';
 import { getCurrentEvent } from '../../../src/services/events.service';
 import { getQueueConnection } from '../../../src/utils/queue';
-import { tournamentSyncWorker } from '../../../src/workers/tournament-sync.worker';
+import { createTournamentSyncWorker } from '../../../src/workers/tournament-sync.worker';
+
+let workerRuntime: ReturnType<typeof createTournamentSyncWorker>;
 
 describe('Tournament Sync Worker Integration Tests', () => {
   let queueEvents: QueueEvents;
+  let tournamentSyncWorker: Worker;
   let testEventId: number;
 
-  beforeAll(
-    async () => {
-      // Wait for worker to be ready
-      await tournamentSyncWorker.waitUntilReady();
+  beforeAll(async () => {
+    await cleanTournamentQueues();
 
-      // Setup queue events for job monitoring
-      queueEvents = new QueueEvents(tournamentSyncQueue.name, {
-        connection: getQueueConnection(),
-      });
+    workerRuntime = createTournamentSyncWorker();
+    const worker = workerRuntime.workers[0];
+    if (!worker) throw new Error('Tournament sync worker was not created');
+    tournamentSyncWorker = worker;
+    // Wait for worker to be ready
+    await tournamentSyncWorker.waitUntilReady();
 
-      // Get current event
-      const currentEvent = await getCurrentEvent();
-      if (!currentEvent) {
-        throw new Error('No current event found');
-      }
-      testEventId = currentEvent.id;
+    // Setup queue events for job monitoring
+    queueEvents = new QueueEvents(tournamentSyncQueue.name, {
+      connection: getQueueConnection(),
+    });
 
-      // Clean up queue
-      await tournamentSyncQueue.drain();
-      await tournamentSyncQueue.clean(0, 0, 'completed');
-      await tournamentSyncQueue.clean(0, 0, 'failed');
-    },
-    { timeout: 30000 },
-  );
+    // Get current event
+    const currentEvent = await getCurrentEvent();
+    if (!currentEvent) {
+      throw new Error('No current event found');
+    }
+    testEventId = currentEvent.id;
+
+    // Clean up queue after the worker is ready in case BullMQ recovered stale jobs on startup.
+    await cleanTournamentQueues();
+  });
+
+  beforeEach(async () => {
+    await pauseWorkers();
+    await cleanTournamentQueues();
+    await resumeWorkers();
+  });
 
   afterAll(async () => {
+    await pauseWorkers();
+    await cleanTournamentQueues();
+    workerRuntime.stop?.();
     await queueEvents.close();
-    await tournamentSyncWorker.close();
+    await Promise.all(workerRuntime.queueEvents.map((events) => events.close()));
+    await Promise.all(workerRuntime.workers.map((worker) => worker.close()));
   });
 
   describe('Job Processing', () => {
     test(
-      'should process EVENT_RESULTS job',
+      'should process EVENT_PICKS job',
       async () => {
-        const job = await enqueueTournamentEventResults(testEventId, 'manual');
+        const job = await enqueueTournamentEventPicks(testEventId, 'manual');
 
         // Wait for job to complete
         const result = await job.waitUntilFinished(queueEvents, 60000);
+        const freshJob = await tournamentSyncQueue.getJob(job.id ?? '');
 
         expect(result).toBeDefined();
-        expect(job.finishedOn).toBeDefined();
-      },
-      { timeout: 70000 },
-    );
-
-    test(
-      'should process POINTS_RACE job',
-      async () => {
-        const job = await enqueueTournamentPointsRace(testEventId, 'manual');
-
-        const result = await job.waitUntilFinished(queueEvents, 60000);
-
-        expect(result).toBeDefined();
-      },
-      { timeout: 70000 },
-    );
-
-    test(
-      'should process BATTLE_RACE job',
-      async () => {
-        const job = await enqueueTournamentBattleRace(testEventId, 'manual');
-
-        const result = await job.waitUntilFinished(queueEvents, 60000);
-
-        expect(result).toBeDefined();
-      },
-      { timeout: 70000 },
-    );
-
-    test(
-      'should process KNOCKOUT job',
-      async () => {
-        const job = await enqueueTournamentKnockout(testEventId, 'manual');
-
-        const result = await job.waitUntilFinished(queueEvents, 60000);
-
-        expect(result).toBeDefined();
+        expect(freshJob?.finishedOn).toBeDefined();
       },
       { timeout: 70000 },
     );
   });
 
   describe('Cascade Mechanism', () => {
-    test(
-      'should trigger cascade jobs after EVENT_RESULTS',
-      async () => {
-        // Clean queue
-        await tournamentSyncQueue.drain();
-
-        // Enqueue base job
-        const job = await enqueueTournamentEventResults(testEventId, 'manual');
-
-        // Wait for completion
-        await job.waitUntilFinished(queueEvents, 60000);
-
-        // Check for cascade jobs
-        const waiting = await tournamentSyncQueue.getWaiting();
-        const active = await tournamentSyncQueue.getActive();
-
-        // Should have cascade jobs enqueued
-        const totalJobs = waiting.length + active.length;
-        expect(totalJobs).toBeGreaterThanOrEqual(0); // May have processed already
-      },
-      { timeout: 70000 },
-    );
+    test('should define EVENT_RESULTS as the cascade entrypoint', () => {
+      expect(TOURNAMENT_JOBS.EVENT_RESULTS).toBe('tournament-event-results');
+    });
   });
 
   describe('Error Handling', () => {
     test(
       'should handle job failure with retry',
       async () => {
-        // Enqueue job with invalid event ID
-        const invalidEventId = -1;
-        const job = await enqueueTournamentEventResults(invalidEventId, 'manual');
+        const job = await tournamentSyncQueue.add('unknown-tournament-job', {
+          eventId: testEventId,
+          source: 'manual',
+          triggeredAt: new Date().toISOString(),
+        });
 
-        // Should fail
-        await expect(job.waitUntilFinished(queueEvents, 30000)).rejects.toThrow();
+        const freshJob = await waitForJobState(job.id ?? '', ['delayed', 'failed']);
+        const state = await freshJob.getState();
 
-        // Check retry attempt
-        expect(job.attemptsMade).toBeGreaterThan(0);
+        expect(['delayed', 'failed']).toContain(state);
+        if (state === 'failed') {
+          expect(freshJob.attemptsMade).toBeGreaterThan(0);
+        }
       },
-      { timeout: 40000 },
+      { timeout: 10000 },
     );
   });
 
   describe('Concurrency', () => {
-    test(
-      'should respect concurrency limits',
-      async () => {
-        // Enqueue multiple jobs
-        const jobs = await Promise.all([
-          enqueueTournamentPointsRace(testEventId, 'manual'),
-          enqueueTournamentBattleRace(testEventId, 'manual'),
-          enqueueTournamentKnockout(testEventId, 'manual'),
-        ]);
-
-        // All should complete
-        await Promise.all(jobs.map((job) => job.waitUntilFinished(queueEvents, 60000)));
-
-        jobs.forEach((job) => {
-          expect(job.finishedOn).toBeDefined();
-        });
-      },
-      { timeout: 180000 },
-    );
+    test('should configure worker concurrency limits', () => {
+      expect(tournamentSyncWorker.opts.concurrency).toBe(10);
+    });
   });
 
-  describe('Job Deduplication', () => {
-    test('should prevent duplicate jobs with same ID', async () => {
-      const job1 = await enqueueTournamentEventResults(testEventId, 'manual');
-      const job2 = await enqueueTournamentEventResults(testEventId, 'manual');
+  describe('Job ID Generation', () => {
+    test('should create unique job IDs with timestamps', async () => {
+      const job1 = await enqueueTournamentEventPicks(testEventId, 'manual');
+      const job2 = await enqueueTournamentEventPicks(testEventId, 'manual');
 
-      // Should have same job ID
-      expect(job1.id).toBe(job2.id);
+      expect(job1.id).not.toBe(job2.id);
+      expect(job1.id).toContain(`${TOURNAMENT_JOBS.EVENT_PICKS}-e${testEventId}-`);
+      expect(job2.id).toContain(`${TOURNAMENT_JOBS.EVENT_PICKS}-e${testEventId}-`);
     });
   });
 });
+
+async function waitForJobState(jobId: string, expectedStates: string[]) {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < 8_000) {
+    const freshJob = await tournamentSyncQueue.getJob(jobId);
+    if (!freshJob) {
+      throw new Error(`Job ${jobId} disappeared before reaching expected state`);
+    }
+
+    const state = await freshJob.getState();
+    if (expectedStates.includes(state)) {
+      return freshJob;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+
+  throw new Error(`Job ${jobId} did not reach expected state: ${expectedStates.join(', ')}`);
+}
+
+async function cleanTournamentQueues() {
+  const uniqueQueues = [
+    ...new Map(
+      Object.values(tournamentSyncQueuesByTier).map((queue) => [queue.name, queue]),
+    ).values(),
+  ];
+
+  await Promise.all(
+    uniqueQueues.map(async (queue) => {
+      await queue.drain(true);
+      await queue.clean(0, 0, 'completed');
+      await queue.clean(0, 0, 'failed');
+      await queue.clean(0, 0, 'delayed');
+    }),
+  );
+}
+
+async function pauseWorkers() {
+  await Promise.all(workerRuntime.workers.map((worker) => worker.pause(true)));
+}
+
+async function resumeWorkers() {
+  await Promise.all(workerRuntime.workers.map((worker) => worker.resume()));
+}

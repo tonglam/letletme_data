@@ -38,7 +38,7 @@ import { logError, logInfo } from './utils/logger';
  */
 
 // Validate environment and resolve config
-const { port } = getConfig();
+const { PORT: port } = getConfig();
 
 const app = new Elysia()
   // ================================

@@ -77,6 +77,12 @@ export const enqueueTournamentTransfersPost = (eventId: number, source?: Tournam
 export const enqueueTournamentCupResults = (eventId: number, source?: TournamentSyncJobSource) =>
   enqueueTournamentSyncJob(TOURNAMENT_JOBS.CUP_RESULTS, eventId, source);
 
+export const enqueueTournamentSelectionStats = (
+  eventId: number,
+  source?: TournamentSyncJobSource,
+  options?: { delay?: number },
+) => enqueueTournamentSyncJob(TOURNAMENT_JOBS.SELECTION_STATS, eventId, source, options);
+
 // Materialized view refresh (delayed to run after parallel cascade jobs)
 export const enqueueTournamentMaterializedViewsRefresh = (
   eventId: number,

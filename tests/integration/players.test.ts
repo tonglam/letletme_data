@@ -7,26 +7,25 @@ import { syncPlayers } from '../../src/services/players.service';
 
 describe('Players Integration Tests', () => {
   let syncResult: { count: number; errors: number };
+  let playerRows: (typeof players.$inferSelect)[];
 
   beforeAll(async () => {
     // Clear cache and sync once
     await playersCache.clear();
     syncResult = await syncPlayers();
+    const db = await getDb();
+    playerRows = await db.select().from(players);
   });
 
   test('syncPlayers persists player data to the database', async () => {
     expect(syncResult.count).toBeGreaterThan(0);
     expect(syncResult.errors).toBeGreaterThanOrEqual(0);
 
-    const db = await getDb();
-    const dbPlayers = await db.select().from(players);
-    expect(dbPlayers.length).toBeGreaterThan(0);
-    expect(dbPlayers.length).toBe(syncResult.count);
+    expect(playerRows.length).toBeGreaterThan(0);
+    expect(playerRows.length).toBe(syncResult.count);
   });
 
   test('should have valid player structure', async () => {
-    const db = await getDb();
-    const playerRows = await db.select().from(players).limit(1);
     expect(playerRows.length).toBeGreaterThan(0);
 
     const player = playerRows[0];
@@ -46,18 +45,12 @@ describe('Players Integration Tests', () => {
   });
 
   test('should have players from all teams', async () => {
-    const db = await getDb();
-    const playerRows = await db.select().from(players);
-
     const uniqueTeams = new Set(playerRows.map((p) => p.teamId));
     expect(uniqueTeams.size).toBeGreaterThan(15); // Most teams should have players
     expect(uniqueTeams.size).toBeLessThanOrEqual(20); // Max 20 Premier League teams
   });
 
   test('should have players with all positions', async () => {
-    const db = await getDb();
-    const playerRows = await db.select().from(players);
-
     const positions = new Set(playerRows.map((p) => p.type));
     expect(positions.has(1)).toBe(true); // GK
     expect(positions.has(2)).toBe(true); // DEF
@@ -65,24 +58,27 @@ describe('Players Integration Tests', () => {
     expect(positions.has(4)).toBe(true); // FWD
   });
 
-  test('playersCache.clear removes cached player data', async () => {
-    const cachedBefore = await playersCache.get();
-    expect(cachedBefore).not.toBeNull();
+  test(
+    'playersCache.clear removes cached player data',
+    async () => {
+      const cachedBefore = await playersCache.get();
+      expect(cachedBefore).not.toBeNull();
 
-    await playersCache.clear();
+      await playersCache.clear();
 
-    const cachedAfter = await playersCache.get();
-    expect(cachedAfter).toBeNull();
+      const cachedAfter = await playersCache.get();
+      expect(cachedAfter).toBeNull();
 
-    // Re-sync for other tests
-    await syncPlayers();
-  });
+      // Re-sync for other tests
+      syncResult = await syncPlayers();
+      const db = await getDb();
+      playerRows = await db.select().from(players);
+    },
+    { timeout: 20000 },
+  );
 
   test('should have created_at and updated_at timestamps', async () => {
-    const db = await getDb();
-    const playerRows = await db.select().from(players).limit(3);
-
-    playerRows.forEach((player) => {
+    playerRows.slice(0, 3).forEach((player) => {
       expect(player.createdAt).toBeDefined();
       expect(player.updatedAt).toBeDefined();
       expect(player.createdAt).toBeInstanceOf(Date);
@@ -90,25 +86,29 @@ describe('Players Integration Tests', () => {
     });
   });
 
-  test('should update updated_at on re-sync', async () => {
-    const db = await getDb();
+  test(
+    'should update updated_at on re-sync',
+    async () => {
+      const db = await getDb();
 
-    // Get initial timestamps
-    const before = await db.select().from(players).limit(1);
-    const beforeUpdatedAt = before[0].updatedAt;
+      // Get initial timestamps
+      const before = await db.select().from(players).limit(1);
+      const beforeUpdatedAt = before[0].updatedAt;
 
-    // Wait a moment to ensure timestamp difference
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+      // Wait a moment to ensure timestamp difference
+      await new Promise((resolve) => setTimeout(resolve, 1000));
 
-    // Re-sync players
-    await syncPlayers();
+      // Re-sync players
+      await syncPlayers();
 
-    // Get new timestamps
-    const after = await db.select().from(players).limit(1);
-    const afterUpdatedAt = after[0].updatedAt;
+      // Get new timestamps
+      const after = await db.select().from(players).limit(1);
+      const afterUpdatedAt = after[0].updatedAt;
 
-    // created_at should remain unchanged, updated_at should change
-    expect(after[0].createdAt).toEqual(before[0].createdAt);
-    expect(afterUpdatedAt?.getTime()).toBeGreaterThan(beforeUpdatedAt?.getTime() || 0);
-  });
+      // created_at should remain unchanged, updated_at should change
+      expect(after[0].createdAt).toEqual(before[0].createdAt);
+      expect(afterUpdatedAt?.getTime()).toBeGreaterThan(beforeUpdatedAt?.getTime() || 0);
+    },
+    { timeout: 20000 },
+  );
 });

@@ -4,27 +4,7 @@ These jobs exist in the Java `fpl-data` reference implementation but have not ye
 
 ---
 
-## 1. Standings Sync (`upsertStandings`)
-
-**Java source**: `MatchDayTask.upsertStandings()` → `eventUpdateService.upsertStandings()`
-**Java schedule**: `0 10 6,8,10 * * *` (06:10, 08:10, 10:10) — condition: `isMatchDay(event)`
-
-**What it does**: Syncs Premier League table standings after each matchday. The Java implementation fetches standings data (likely from FPL or Pulselive API) and persists them to a standings table.
-
-**What's needed**:
-- Investigate which API endpoint provides standings data (`fplClient` or `pulseliveClient`)
-- New DB table (e.g., `standings` or `event_standings`) with Drizzle schema + migration
-- New domain type + Zod schema in `src/domain/`
-- New transformer in `src/transformers/`
-- New repository in `src/repositories/`
-- New cache operations in `src/cache/` (optional — standings are static post-match)
-- New service function `syncStandings()` in `src/services/`
-- New job in the appropriate queue (likely `data-sync`)
-- Cron registration in `src/jobs/` — fire at 06:10, 08:10, 10:10 with `isMatchDay` condition
-
----
-
-## 2. Hourly Player Value History Snapshot (`insertPlayerValueInfo`)
+## 1. Hourly Player Value History Snapshot (`insertPlayerValueInfo`)
 
 **Java source**: `DailyTask.insertPlayerValueInfo()` → `dataService.insertPlayerValueInfo()`
 **Java schedule**: `0 10 */1 * * *` (minute :10 of every hour, unconditional)
@@ -39,7 +19,7 @@ These jobs exist in the Java `fpl-data` reference implementation but have not ye
 
 ---
 
-## 3. Pre-Season Warning Alert (`warning`)
+## 2. Pre-Season Warning Alert (`warning`)
 
 **Java source**: `LaunchTask.warning()` — `@Async("TaskThreadPool")`
 **Java schedule**: `0 */1 * * * *` (every minute, unconditional)
@@ -57,7 +37,7 @@ These jobs exist in the Java `fpl-data` reference implementation but have not ye
 
 ---
 
-## 4. New Season Launch Alert (`happening`)
+## 3. New Season Launch Alert (`happening`)
 
 **Java source**: `LaunchTask.happening()` — `@Async("TaskThreadPool")`
 **Java schedule**: `0 */1 * * * *` (every minute, unconditional)

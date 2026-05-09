@@ -136,7 +136,7 @@ describe('Teams Unit Tests', () => {
       try {
         const result = await repository.upsertBatch(transformedTeamsFixture);
         expect(Array.isArray(result)).toBe(true);
-        expect(result).toEqual(transformedTeamsFixture);
+        expect(result as unknown).toEqual(transformedTeamsFixture);
       } finally {
         // Restore original mock
         mockDb.insert = originalInsert;

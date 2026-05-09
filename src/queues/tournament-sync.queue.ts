@@ -12,6 +12,7 @@ export const TOURNAMENT_JOBS = {
   KNOCKOUT: 'tournament-knockout',
   TRANSFERS_POST: 'tournament-transfers-post',
   CUP_RESULTS: 'tournament-cup-results',
+  SELECTION_STATS: 'tournament-selection-stats',
   // Materialized view refresh (runs after cascade jobs finish)
   MATERIALIZED_VIEWS_REFRESH: 'tournament-materialized-views-refresh',
   // Independent jobs (separate timing)

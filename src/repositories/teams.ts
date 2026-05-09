@@ -33,7 +33,7 @@ export const createTeamRepository = (dbInstance?: DatabaseInstance) => {
           position: team.position,
           strength: team.strength,
           teamDivision: team.teamDivision,
-          unavailable: team.unavailable,
+          unavailable: team.unavailable ? 1 : 0,
           win: team.win,
           strengthOverallHome: team.strengthOverallHome,
           strengthOverallAway: team.strengthOverallAway,

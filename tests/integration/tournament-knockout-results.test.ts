@@ -51,8 +51,8 @@ describe('Tournament Knockout Results Integration Tests', () => {
       if (results.length > 0) {
         const result = results[0];
         expect(typeof result.tournamentId).toBe('number');
-        expect(typeof result.knockoutId).toBe('number');
-        expect(typeof result.entryId).toBe('number');
+        expect(typeof result.matchId).toBe('number');
+        expect(typeof result.playAgainstId).toBe('number');
       }
     });
   });
@@ -72,8 +72,8 @@ describe('Tournament Knockout Results Integration Tests', () => {
       if (results.length > 0) {
         const result = results[0];
         expect(result.tournamentId).toBeGreaterThan(0);
-        expect(result.knockoutId).toBeGreaterThan(0);
-        expect(result.entryId).toBeGreaterThan(0);
+        expect(result.matchId).toBeGreaterThan(0);
+        expect(result.playAgainstId).toBeGreaterThan(0);
       }
     });
   });

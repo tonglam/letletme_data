@@ -12,7 +12,12 @@ export const MUTATION_PRIORITY_TABLES = {
     'tournament_knockout_results',
   ],
   p1: ['entry_infos', 'entry_history_infos', 'entry_league_infos'],
-  p2: ['entry_event_results', 'entry_event_picks', 'entry_event_transfers'],
+  p2: [
+    'entry_event_results',
+    'entry_event_picks',
+    'entry_event_transfers',
+    'tournament_selection_stats',
+  ],
   p3: ['league_event_results'],
 } as const;
 
@@ -50,6 +55,7 @@ export type TournamentSyncPriorityJobName =
   | 'tournament-knockout'
   | 'tournament-transfers-post'
   | 'tournament-cup-results'
+  | 'tournament-selection-stats'
   | 'tournament-materialized-views-refresh'
   | 'tournament-event-picks'
   | 'tournament-transfers-pre'
@@ -109,6 +115,7 @@ export function getTournamentSyncJobPriority(
     case 'tournament-event-picks':
     case 'tournament-transfers-pre':
     case 'tournament-transfers-post':
+    case 'tournament-selection-stats':
       return 'p2';
     case 'tournament-info':
       return 'p1';

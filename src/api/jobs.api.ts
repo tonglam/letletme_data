@@ -39,6 +39,7 @@ import { runTournamentKnockoutResultsSync } from '../jobs/tournament-knockout-re
 import { runTournamentPointsRaceResultsSync } from '../jobs/tournament-points-race-results.jobs';
 import { runManualEventCurrentRefresh } from '../jobs/event-current-refresh.job';
 import { refreshTournamentMaterializedViews } from '../services/tournament-materialized-views.service';
+import { syncTournamentSelectionStats } from '../services/tournament-selection-stats.service';
 import { getCurrentEvent } from '../services/events.service';
 import { getErrorMessage } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
@@ -149,6 +150,11 @@ export const jobsAPI = new Elysia({ prefix: '/jobs' })
         name: 'tournament-event-cup-results-sync',
         description: 'Calculate tournament cup results (cascade)',
         schedule: 'Cascade after event-results',
+      },
+      {
+        name: 'tournament-selection-stats-sync',
+        description: 'Build tournament selection stats read model',
+        schedule: 'Cascade after tournament transfers post',
       },
       {
         name: 'tournament-info-sync',
@@ -272,6 +278,13 @@ export const jobsAPI = new Elysia({ prefix: '/jobs' })
       },
       'tournament-event-cup-results-sync': async () => {
         await runTournamentEventCupResultsSync();
+      },
+      'tournament-selection-stats-sync': async () => {
+        const currentEvent = await getCurrentEvent();
+        if (!currentEvent) {
+          throw new Error('No current event found');
+        }
+        await syncTournamentSelectionStats(currentEvent.id);
       },
       'tournament-info-sync': async () => {
         await runTournamentInfoSync();

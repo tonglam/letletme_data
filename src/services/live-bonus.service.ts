@@ -255,7 +255,8 @@ export async function syncLiveBonusCache(
 
       // If bonus > 0, FPL has already assigned it - track it and mark teams
       if ((eventLive.bonus ?? 0) > 0) {
-        fplAssignedBonus.set(eventLive.elementId, eventLive.bonus);
+        const bonus = eventLive.bonus ?? 0;
+        fplAssignedBonus.set(eventLive.elementId, bonus);
         // Mark both teams as having bonus already assigned
         teamsWithBonusAssigned.add(teamId);
         teamsWithBonusAssigned.add(againstId);
@@ -283,7 +284,7 @@ export async function syncLiveBonusCache(
         // Use FPL-assigned bonus values for players from this team
         for (const eventLive of teamLives) {
           if (eventLive.teamId === teamId && (eventLive.bonus ?? 0) > 0) {
-            bonusObj[eventLive.elementId.toString()] = eventLive.bonus;
+            bonusObj[eventLive.elementId.toString()] = eventLive.bonus ?? 0;
           }
         }
       } else {

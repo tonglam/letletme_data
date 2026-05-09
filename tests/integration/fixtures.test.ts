@@ -35,7 +35,7 @@ describe('Fixtures Integration Tests', () => {
     expect(fixtures.length).toBeGreaterThan(0);
 
     // Some fixtures may not be assigned to an event yet
-    const assignedFixtures = fixtures.filter((f) => f.event !== null);
+    const assignedFixtures = fixtures.filter((f) => f.eventId !== null);
     expect(assignedFixtures.length).toBeGreaterThan(0);
   });
 

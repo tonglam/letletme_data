@@ -87,7 +87,7 @@ function serializeError(error: unknown): unknown {
       if (key === 'name' || key === 'message' || key === 'stack' || key === 'cause') {
         continue;
       }
-      const value = (error as Record<string, unknown>)[key];
+      const value = (error as unknown as Record<string, unknown>)[key];
       if (value !== undefined) {
         serialized[key] = value;
       }

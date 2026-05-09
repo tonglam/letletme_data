@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, test } from 'bun:test';
+import { eq } from 'drizzle-orm';
 
 import { getDb } from '../../src/db/singleton';
 import { entryEventCupResults } from '../../src/db/schemas/index.schema';
@@ -9,6 +10,12 @@ import { getCurrentEvent } from '../../src/services/events.service';
 describe('Tournament Event Cup Results Integration Tests', () => {
   let testEventId: number;
   let hasActiveTournaments: boolean;
+  let syncPromise: ReturnType<typeof syncTournamentEventCupResults> | undefined;
+
+  function ensureSynced() {
+    syncPromise ??= syncTournamentEventCupResults(testEventId);
+    return syncPromise;
+  }
 
   beforeAll(async () => {
     const currentEvent = await getCurrentEvent();
@@ -26,53 +33,71 @@ describe('Tournament Event Cup Results Integration Tests', () => {
   });
 
   describe('Sync Integration', () => {
-    test('should sync tournament event cup results', async () => {
-      const result = await syncTournamentEventCupResults(testEventId);
+    test(
+      'should sync tournament event cup results',
+      async () => {
+        const result = await ensureSynced();
 
-      expect(result).toBeDefined();
-      expect(result.eventId).toBe(testEventId);
-      expect(result.totalEntries).toBeGreaterThanOrEqual(0);
-      expect(result.upserted).toBeGreaterThanOrEqual(0);
-    });
+        expect(result).toBeDefined();
+        expect(result.eventId).toBe(testEventId);
+        expect(result.totalEntries).toBeGreaterThanOrEqual(0);
+        expect(result.upserted).toBeGreaterThanOrEqual(0);
+      },
+      { timeout: 30000 },
+    );
 
-    test('should store cup results in database', async () => {
-      if (!hasActiveTournaments) {
-        console.log('⊘ Skipping - no active tournaments');
-        return;
-      }
+    test(
+      'should store cup results in database',
+      async () => {
+        if (!hasActiveTournaments) {
+          console.log('⊘ Skipping - no active tournaments');
+          return;
+        }
 
-      await syncTournamentEventCupResults(testEventId);
+        await ensureSynced();
 
-      const db = await getDb();
-      const results = await db.select().from(entryEventCupResults);
+        const db = await getDb();
+        const results = await db
+          .select()
+          .from(entryEventCupResults)
+          .where(eq(entryEventCupResults.eventId, testEventId));
 
-      expect(results.length).toBeGreaterThanOrEqual(0);
+        expect(results.length).toBeGreaterThanOrEqual(0);
 
-      if (results.length > 0) {
-        const result = results[0];
-        expect(typeof result.entryId).toBe('number');
-        expect(typeof result.eventId).toBe('number');
-      }
-    });
+        if (results.length > 0) {
+          const result = results[0];
+          expect(typeof result.entryId).toBe('number');
+          expect(typeof result.eventId).toBe('number');
+        }
+      },
+      { timeout: 30000 },
+    );
   });
 
   describe('Data Validation', () => {
-    test('should have valid cup result structure', async () => {
-      if (!hasActiveTournaments) {
-        console.log('⊘ Skipping - no active tournaments');
-        return;
-      }
+    test(
+      'should have valid cup result structure',
+      async () => {
+        if (!hasActiveTournaments) {
+          console.log('⊘ Skipping - no active tournaments');
+          return;
+        }
 
-      await syncTournamentEventCupResults(testEventId);
+        await ensureSynced();
 
-      const db = await getDb();
-      const results = await db.select().from(entryEventCupResults);
+        const db = await getDb();
+        const results = await db
+          .select()
+          .from(entryEventCupResults)
+          .where(eq(entryEventCupResults.eventId, testEventId));
 
-      if (results.length > 0) {
-        const result = results[0];
-        expect(result.entryId).toBeGreaterThan(0);
-        expect(result.eventId).toBeGreaterThan(0);
-      }
-    });
+        if (results.length > 0) {
+          const result = results[0];
+          expect(result.entryId).toBeGreaterThan(0);
+          expect(result.eventId).toBeGreaterThan(0);
+        }
+      },
+      { timeout: 30000 },
+    );
   });
 });

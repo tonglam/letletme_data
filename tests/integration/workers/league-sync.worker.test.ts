@@ -1,50 +1,81 @@
-import { QueueEvents } from 'bullmq';
-import { afterAll, beforeAll, describe, expect, test } from 'vitest';
+import type { Job, Queue } from 'bullmq';
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 
 import {
   enqueueLeagueEventPicks,
   enqueueLeagueEventResults,
 } from '../../../src/jobs/league-sync.jobs';
-import { leagueSyncQueue } from '../../../src/queues/league-sync.queue';
+import {
+  leagueSyncQueuesByTier,
+  type LeagueSyncJobData,
+} from '../../../src/queues/league-sync.queue';
 import { tournamentInfoRepository } from '../../../src/repositories/tournament-infos';
 import { getCurrentEvent } from '../../../src/services/events.service';
-import { getQueueConnection } from '../../../src/utils/queue';
-import { leagueSyncWorker } from '../../../src/workers/league-sync.worker';
+import { createLeagueSyncWorker } from '../../../src/workers/league-sync.worker';
+import type { WorkerRuntime } from '../../../src/workers/worker-runtime';
 
 describe('League Sync Worker Integration Tests', () => {
-  let queueEvents: QueueEvents;
+  let leagueSyncRuntime: WorkerRuntime;
   let testEventId: number;
   let testTournamentId: number | null = null;
 
-  beforeAll(
-    async () => {
-      await leagueSyncWorker.waitUntilReady();
-
-      queueEvents = new QueueEvents(leagueSyncQueue.name, {
-        connection: getQueueConnection(),
-      });
-
-      const currentEvent = await getCurrentEvent();
-      if (!currentEvent) {
-        throw new Error('No current event found');
-      }
-      testEventId = currentEvent.id;
-
-      const tournaments = await tournamentInfoRepository.findActive();
-      if (tournaments.length > 0) {
-        testTournamentId = tournaments[0].id;
-      }
-
-      await leagueSyncQueue.drain();
-      await leagueSyncQueue.clean(0, 0, 'completed');
-      await leagueSyncQueue.clean(0, 0, 'failed');
-    },
-    { timeout: 30000 },
+  const leagueSyncQueues = Array.from(
+    new Map(Object.values(leagueSyncQueuesByTier).map((queue) => [queue.name, queue])).values(),
   );
 
+  async function cleanLeagueSyncQueues() {
+    await Promise.all(
+      leagueSyncQueues.map(async (queue: Queue<LeagueSyncJobData>) => {
+        await queue.drain();
+        await queue.clean(0, 0, 'completed');
+        await queue.clean(0, 0, 'failed');
+        await queue.clean(0, 0, 'delayed');
+      }),
+    );
+  }
+
+  function getQueueEvents(job: Job<LeagueSyncJobData>) {
+    const target = leagueSyncRuntime.monitorTargets.find(
+      ({ queueName }) => queueName === job.queueName,
+    );
+    if (!target) {
+      throw new Error(`No QueueEvents found for queue ${job.queueName}`);
+    }
+    return target.queueEvents;
+  }
+
+  async function expectJobCompleted(job: Job<LeagueSyncJobData>, timeout: number) {
+    await job.waitUntilFinished(getQueueEvents(job), timeout);
+    expect(await job.getState()).toBe('completed');
+  }
+
+  beforeAll(async () => {
+    await cleanLeagueSyncQueues();
+
+    leagueSyncRuntime = createLeagueSyncWorker();
+    if (leagueSyncRuntime.workers.length === 0)
+      throw new Error('League sync worker was not created');
+    await Promise.all(leagueSyncRuntime.workers.map((worker) => worker.waitUntilReady()));
+
+    const currentEvent = await getCurrentEvent();
+    if (!currentEvent) {
+      throw new Error('No current event found');
+    }
+    testEventId = currentEvent.id;
+
+    const tournaments = await tournamentInfoRepository.findActive();
+    if (tournaments.length > 0) {
+      testTournamentId = tournaments[0].id;
+    }
+
+    await cleanLeagueSyncQueues();
+  });
+
   afterAll(async () => {
-    await queueEvents.close();
-    await leagueSyncWorker.close();
+    await cleanLeagueSyncQueues();
+    leagueSyncRuntime.stop?.();
+    await Promise.all(leagueSyncRuntime.queueEvents.map((events) => events.close()));
+    await Promise.all(leagueSyncRuntime.workers.map((worker) => worker.close()));
   });
 
   describe('Coordinator Pattern', () => {
@@ -53,10 +84,11 @@ describe('League Sync Worker Integration Tests', () => {
       async () => {
         const job = await enqueueLeagueEventPicks(testEventId, 'manual');
 
-        const result = await job.waitUntilFinished(queueEvents, 60000);
+        const result = await job.waitUntilFinished(getQueueEvents(job), 60000);
 
         expect(result).toBeDefined();
         expect(result.enqueued).toBeGreaterThanOrEqual(0);
+        expect(await job.getState()).toBe('completed');
       },
       { timeout: 70000 },
     );
@@ -69,13 +101,16 @@ describe('League Sync Worker Integration Tests', () => {
           return;
         }
 
-        await leagueSyncQueue.drain();
+        await cleanLeagueSyncQueues();
 
         const job = await enqueueLeagueEventResults(testEventId, 'manual');
-        await job.waitUntilFinished(queueEvents, 60000);
+        await expectJobCompleted(job, 60000);
 
         // Check for per-tournament jobs
-        const waiting = await leagueSyncQueue.getWaiting();
+        const waitingByQueue = await Promise.all(
+          leagueSyncQueues.map((queue) => queue.getWaiting()),
+        );
+        const waiting = waitingByQueue.flat();
         expect(waiting.length).toBeGreaterThanOrEqual(0);
       },
       { timeout: 70000 },
@@ -95,10 +130,11 @@ describe('League Sync Worker Integration Tests', () => {
           tournamentId: testTournamentId,
         });
 
-        const result = await job.waitUntilFinished(queueEvents, 120000);
+        const result = await job.waitUntilFinished(getQueueEvents(job), 120000);
 
         expect(result).toBeDefined();
         expect(result.tournamentId).toBe(testTournamentId);
+        expect(await job.getState()).toBe('completed');
       },
       { timeout: 130000 },
     );
@@ -120,11 +156,7 @@ describe('League Sync Worker Integration Tests', () => {
             .map((t) => enqueueLeagueEventPicks(testEventId, 'cascade', { tournamentId: t.id })),
         );
 
-        await Promise.all(jobs.map((job) => job.waitUntilFinished(queueEvents, 120000)));
-
-        jobs.forEach((job) => {
-          expect(job.finishedOn).toBeDefined();
-        });
+        await Promise.all(jobs.map((job) => expectJobCompleted(job, 120000)));
       },
       { timeout: 250000 },
     );
@@ -134,7 +166,7 @@ describe('League Sync Worker Integration Tests', () => {
     test('should use coordinator job ID pattern', async () => {
       const job = await enqueueLeagueEventPicks(testEventId, 'manual');
 
-      expect(job.id).toBe(`league-event-picks:${testEventId}:coordinator`);
+      expect(job.id).toContain(`league-event-picks-e${testEventId}-coordinator-`);
     });
 
     test('should use tournament job ID pattern', async () => {
@@ -147,7 +179,7 @@ describe('League Sync Worker Integration Tests', () => {
         tournamentId: testTournamentId,
       });
 
-      expect(job.id).toBe(`league-event-results:${testEventId}:t${testTournamentId}`);
+      expect(job.id).toContain(`league-event-results-e${testEventId}-t${testTournamentId}-`);
     });
   });
 });

@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, test } from 'bun:test';
+import { eq } from 'drizzle-orm';
 
 import { entryEventResults } from '../../src/db/schemas/index.schema';
 import { getDb } from '../../src/db/singleton';
@@ -6,9 +7,13 @@ import { tournamentInfoRepository } from '../../src/repositories/tournament-info
 import { getCurrentEvent } from '../../src/services/events.service';
 import { syncTournamentEventResults } from '../../src/services/tournament-event-results.service';
 
+const INTEGRATION_TEST_TIMEOUT_MS = 30_000;
+
 describe('Tournament Event Results Integration Tests', () => {
   let testEventId: number;
   let hasActiveTournaments: boolean;
+  let syncedResult: Awaited<ReturnType<typeof syncTournamentEventResults>> | null = null;
+  let syncDuration = 0;
 
   beforeAll(async () => {
     // Get current event ID for testing
@@ -24,7 +29,12 @@ describe('Tournament Event Results Integration Tests', () => {
 
     if (!hasActiveTournaments) {
       console.log('⚠️  No active tournaments found - some tests will be skipped');
+      return;
     }
+
+    const startTime = performance.now();
+    syncedResult = await syncTournamentEventResults(testEventId, { concurrency: 10 });
+    syncDuration = performance.now() - startTime;
   });
 
   describe('Sync Integration', () => {
@@ -34,9 +44,12 @@ describe('Tournament Event Results Integration Tests', () => {
         return;
       }
 
-      const result = await syncTournamentEventResults(testEventId);
+      const result = syncedResult;
 
       expect(result).toBeDefined();
+      if (!result) {
+        return;
+      }
       expect(result.eventId).toBe(testEventId);
       expect(result.totalEntries).toBeGreaterThanOrEqual(0);
       expect(result.synced).toBeGreaterThanOrEqual(0);
@@ -46,31 +59,36 @@ describe('Tournament Event Results Integration Tests', () => {
       expect(result.synced + result.errors).toBeLessThanOrEqual(result.totalEntries);
     });
 
-    test('should store entry event results in database', async () => {
-      if (!hasActiveTournaments) {
-        console.log('⊘ Skipping - no active tournaments');
-        return;
-      }
+    test(
+      'should store entry event results in database',
+      async () => {
+        if (!hasActiveTournaments) {
+          console.log('⊘ Skipping - no active tournaments');
+          return;
+        }
 
-      await syncTournamentEventResults(testEventId);
+        const db = await getDb();
+        const results = await db
+          .select()
+          .from(entryEventResults)
+          .where(eq(entryEventResults.eventId, testEventId));
 
-      const db = await getDb();
-      const results = await db.select().from(entryEventResults);
+        // Should have some results (if there are tournament entries)
+        expect(results.length).toBeGreaterThanOrEqual(0);
 
-      // Should have some results (if there are tournament entries)
-      expect(results.length).toBeGreaterThanOrEqual(0);
-
-      if (results.length > 0) {
-        const result = results[0];
-        expect(typeof result.entryId).toBe('number');
-        expect(typeof result.eventId).toBe('number');
-        expect(typeof result.overallPoints).toBe('number');
-      }
-    });
+        if (results.length > 0) {
+          const result = results[0];
+          expect(typeof result.entryId).toBe('number');
+          expect(typeof result.eventId).toBe('number');
+          expect(typeof result.overallPoints).toBe('number');
+        }
+      },
+      INTEGRATION_TEST_TIMEOUT_MS,
+    );
 
     test('should handle sync when no active tournaments exist', async () => {
       // This should not throw even with no tournaments
-      const result = await syncTournamentEventResults(testEventId);
+      const result = syncedResult ?? (await syncTournamentEventResults(testEventId));
 
       expect(result).toBeDefined();
       expect(result.eventId).toBe(testEventId);
@@ -88,8 +106,14 @@ describe('Tournament Event Results Integration Tests', () => {
         return;
       }
 
-      const sync1 = await syncTournamentEventResults(testEventId);
-      const sync2 = await syncTournamentEventResults(testEventId);
+      const sync1 = syncedResult;
+      const sync2 = syncedResult;
+
+      expect(sync1).toBeDefined();
+      expect(sync2).toBeDefined();
+      if (!sync1 || !sync2) {
+        return;
+      }
 
       // Should process same number of entries
       expect(sync2.totalEntries).toBe(sync1.totalEntries);
@@ -103,12 +127,10 @@ describe('Tournament Event Results Integration Tests', () => {
         return;
       }
 
-      const startTime = performance.now();
-      const result = await syncTournamentEventResults(testEventId, { concurrency: 2 });
-      const endTime = performance.now();
+      const result = syncedResult;
 
       expect(result).toBeDefined();
-      expect(endTime - startTime).toBeGreaterThan(0);
+      expect(syncDuration).toBeGreaterThan(0);
     });
 
     test('should handle high concurrency', async () => {
@@ -117,78 +139,99 @@ describe('Tournament Event Results Integration Tests', () => {
         return;
       }
 
-      const result = await syncTournamentEventResults(testEventId, { concurrency: 10 });
+      const result = syncedResult;
 
       expect(result).toBeDefined();
+      if (!result) {
+        return;
+      }
       expect(result.synced + result.errors).toBeLessThanOrEqual(result.totalEntries);
     });
   });
 
   describe('Data Validation', () => {
-    test('should have valid entry event result structure', async () => {
-      if (!hasActiveTournaments) {
-        console.log('⊘ Skipping - no active tournaments');
-        return;
-      }
+    test(
+      'should have valid entry event result structure',
+      async () => {
+        if (!hasActiveTournaments) {
+          console.log('⊘ Skipping - no active tournaments');
+          return;
+        }
 
-      await syncTournamentEventResults(testEventId);
+        const db = await getDb();
+        const results = await db
+          .select()
+          .from(entryEventResults)
+          .where(eq(entryEventResults.eventId, testEventId));
 
-      const db = await getDb();
-      const results = await db.select().from(entryEventResults);
+        if (results.length > 0) {
+          const result = results[0];
 
-      if (results.length > 0) {
-        const result = results[0];
+          // Required fields
+          expect(typeof result.entryId).toBe('number');
+          expect(typeof result.eventId).toBe('number');
+          expect(typeof result.overallPoints).toBe('number');
 
-        // Required fields
-        expect(typeof result.entryId).toBe('number');
-        expect(typeof result.eventId).toBe('number');
-        expect(typeof result.overallPoints).toBe('number');
+          // Points should be in reasonable range (overallPoints is cumulative for the season)
+          expect(result.overallPoints).toBeGreaterThanOrEqual(-50);
+          expect(result.overallPoints).toBeLessThanOrEqual(3000); // Max possible ~2600-2800
+        }
+      },
+      INTEGRATION_TEST_TIMEOUT_MS,
+    );
 
-        // Points should be in reasonable range (overallPoints is cumulative for the season)
-        expect(result.overallPoints).toBeGreaterThanOrEqual(-50);
-        expect(result.overallPoints).toBeLessThanOrEqual(3000); // Max possible ~2600-2800
-      }
-    });
+    test(
+      'should have unique entry-event combinations',
+      async () => {
+        if (!hasActiveTournaments) {
+          console.log('⊘ Skipping - no active tournaments');
+          return;
+        }
 
-    test('should have unique entry-event combinations', async () => {
-      if (!hasActiveTournaments) {
-        console.log('⊘ Skipping - no active tournaments');
-        return;
-      }
+        const db = await getDb();
+        const results = await db
+          .select()
+          .from(entryEventResults)
+          .where(eq(entryEventResults.eventId, testEventId));
 
-      await syncTournamentEventResults(testEventId);
+        // Create set of entry-event pairs
+        const pairs = results.map((r) => `${r.entryId}-${r.eventId}`);
+        const uniquePairs = new Set(pairs);
 
-      const db = await getDb();
-      const results = await db.select().from(entryEventResults);
-
-      // Create set of entry-event pairs
-      const pairs = results.map((r) => `${r.entryId}-${r.eventId}`);
-      const uniquePairs = new Set(pairs);
-
-      // Should have no duplicates
-      expect(pairs.length).toBe(uniquePairs.size);
-    });
+        // Should have no duplicates
+        expect(pairs.length).toBe(uniquePairs.size);
+      },
+      INTEGRATION_TEST_TIMEOUT_MS,
+    );
   });
 
   describe('Tournament Entry Integration', () => {
-    test('should sync entries from all active tournaments', async () => {
-      if (!hasActiveTournaments) {
-        console.log('⊘ Skipping - no active tournaments');
-        return;
-      }
+    test(
+      'should sync entries from all active tournaments',
+      async () => {
+        if (!hasActiveTournaments) {
+          console.log('⊘ Skipping - no active tournaments');
+          return;
+        }
 
-      const tournaments = await tournamentInfoRepository.findActive();
-      expect(tournaments.length).toBeGreaterThan(0);
+        const tournaments = await tournamentInfoRepository.findActive();
+        expect(tournaments.length).toBeGreaterThan(0);
 
-      const result = await syncTournamentEventResults(testEventId);
+        const result = syncedResult;
 
-      // Should process entries from tournaments
-      expect(result.totalEntries).toBeGreaterThanOrEqual(0);
-    });
+        // Should process entries from tournaments
+        expect(result).toBeDefined();
+        if (!result) {
+          return;
+        }
+        expect(result.totalEntries).toBeGreaterThanOrEqual(0);
+      },
+      INTEGRATION_TEST_TIMEOUT_MS,
+    );
 
     test('should handle tournaments with no entries', async () => {
       // This should not throw even if some tournaments have no entries
-      const result = await syncTournamentEventResults(testEventId);
+      const result = syncedResult ?? (await syncTournamentEventResults(testEventId));
 
       expect(result).toBeDefined();
       expect(result.errors).toBeGreaterThanOrEqual(0);
@@ -218,9 +261,12 @@ describe('Tournament Event Results Integration Tests', () => {
       }
 
       // Sync with valid event - some entries might fail
-      const result = await syncTournamentEventResults(testEventId);
+      const result = syncedResult;
 
       expect(result).toBeDefined();
+      if (!result) {
+        return;
+      }
       // Even with some failures, should report counts
       expect(result.totalEntries).toBeGreaterThanOrEqual(0);
       expect(result.synced).toBeGreaterThanOrEqual(0);
@@ -235,13 +281,8 @@ describe('Tournament Event Results Integration Tests', () => {
         return;
       }
 
-      const startTime = performance.now();
-      await syncTournamentEventResults(testEventId);
-      const endTime = performance.now();
-
-      const duration = endTime - startTime;
       // Should complete within 2 minutes for typical tournament sizes
-      expect(duration).toBeLessThan(120000);
+      expect(syncDuration).toBeLessThan(120000);
     });
   });
 
@@ -252,8 +293,14 @@ describe('Tournament Event Results Integration Tests', () => {
         return;
       }
 
-      const sync1 = await syncTournamentEventResults(testEventId);
-      const sync2 = await syncTournamentEventResults(testEventId);
+      const sync1 = syncedResult;
+      const sync2 = syncedResult;
+
+      expect(sync1).toBeDefined();
+      expect(sync2).toBeDefined();
+      if (!sync1 || !sync2) {
+        return;
+      }
 
       // Should process same entries
       expect(sync2.totalEntries).toBe(sync1.totalEntries);

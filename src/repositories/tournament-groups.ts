@@ -60,7 +60,7 @@ export const createTournamentGroupRepository = (dbInstance?: DatabaseInstance) =
 
     findByTournamentAndGroup: async (
       tournamentId: number,
-      groupId: string,
+      groupId: number | string,
     ): Promise<DbTournamentGroup[]> => {
       try {
         const db = await getDbInstance();

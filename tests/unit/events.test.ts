@@ -121,12 +121,12 @@ describe('Events Unit Tests', () => {
   });
 
   describe('EventRepository Unit Tests', () => {
-    let _mockDb: any;
+    let mockDb: any;
     let repository: ReturnType<typeof createEventRepository>;
 
     beforeEach(() => {
       // Create mock database with simple functions
-      _mockDb = {
+      mockDb = {
         select: () => ({
           from: () => ({
             where: () => Promise.resolve([singleTransformedEventFixture]),
@@ -142,7 +142,7 @@ describe('Events Unit Tests', () => {
         delete: () => Promise.resolve(undefined),
       };
 
-      repository = createEventRepository();
+      repository = createEventRepository(mockDb);
       // Note: Real repository uses singleton db, this is just for testing structure
     });
 

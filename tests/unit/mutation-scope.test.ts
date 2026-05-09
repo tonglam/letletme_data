@@ -33,4 +33,14 @@ describe('resolveMutationScopes', () => {
     expect(scopes).toContain('tournament-structure:tournament:789');
     expect(scopes).toContain('entry-core:all');
   });
+
+  it('keeps tournament selection stats serialized with tournament event mutations', () => {
+    const scopes = resolveMutationScopes({
+      queueName: 'tournament-sync-p2',
+      jobName: 'tournament-selection-stats',
+      eventId: 35,
+    });
+    expect(scopes).toContain('entry-event:event:35');
+    expect(scopes).toContain('tournament-event-mutations:event:35');
+  });
 });

@@ -24,3 +24,4 @@ export * from './tournament-infos.schema';
 export * from './tournament-knockout-results.schema';
 export * from './tournament-knockouts.schema';
 export * from './tournament-points-group-results.schema';
+export * from './tournament-selection-stats.schema';

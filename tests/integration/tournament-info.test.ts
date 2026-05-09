@@ -5,65 +5,84 @@ import { getDb } from '../../src/db/singleton';
 import { syncTournamentInfo } from '../../src/services/tournament-info.service';
 
 describe('Tournament Info Integration Tests', () => {
+  let syncPromise: ReturnType<typeof syncTournamentInfo> | undefined;
+
+  function ensureSynced() {
+    syncPromise ??= syncTournamentInfo();
+    return syncPromise;
+  }
+
   describe('Sync Integration', () => {
-    test('should sync tournament info', async () => {
-      const result = await syncTournamentInfo();
+    test(
+      'should sync tournament info',
+      async () => {
+        const result = await ensureSynced();
 
-      expect(result).toBeDefined();
-      expect(typeof result.updated).toBe('number');
-      expect(result.updated).toBeGreaterThanOrEqual(0);
-      expect(result.total).toBeGreaterThanOrEqual(0);
-    });
+        expect(result).toBeDefined();
+        expect(typeof result.updated).toBe('number');
+        expect(result.updated).toBeGreaterThanOrEqual(0);
+        expect(result.total).toBeGreaterThanOrEqual(0);
+      },
+      { timeout: 10000 },
+    );
 
-    test('should store tournament info in database', async () => {
-      await syncTournamentInfo();
+    test(
+      'should store tournament info in database',
+      async () => {
+        await ensureSynced();
 
-      const db = await getDb();
-      const infos = await db.select().from(tournamentInfos);
+        const db = await getDb();
+        const infos = await db.select().from(tournamentInfos);
 
-      expect(infos.length).toBeGreaterThanOrEqual(0);
+        expect(infos.length).toBeGreaterThanOrEqual(0);
 
-      if (infos.length > 0) {
-        const info = infos[0];
-        expect(typeof info.id).toBe('number');
-        expect(typeof info.leagueId).toBe('number');
-        expect(typeof info.leagueType).toBe('string');
-        expect(['classic', 'h2h']).toContain(info.leagueType);
-      }
-    });
+        if (infos.length > 0) {
+          const info = infos[0];
+          expect(typeof info.id).toBe('number');
+          expect(typeof info.leagueId).toBe('number');
+          expect(typeof info.leagueType).toBe('string');
+          expect(['classic', 'h2h']).toContain(info.leagueType);
+        }
+      },
+      { timeout: 10000 },
+    );
   });
 
   describe('Data Validation', () => {
-    test('should have valid tournament info structure', async () => {
-      await syncTournamentInfo();
+    test(
+      'should have valid tournament info structure',
+      async () => {
+        await ensureSynced();
 
-      const db = await getDb();
-      const infos = await db.select().from(tournamentInfos);
+        const db = await getDb();
+        const infos = await db.select().from(tournamentInfos);
 
-      if (infos.length > 0) {
-        const info = infos[0];
+        if (infos.length > 0) {
+          const info = infos[0];
 
-        // Validate group mode
-        expect(['no_group', 'points_races', 'battle_races']).toContain(info.groupMode);
+          // Validate group mode
+          expect(['no_group', 'points_races', 'battle_races']).toContain(info.groupMode);
 
-        // Validate knockout mode
-        expect([
-          'no_knockout',
-          'single_elimination',
-          'double_elimination',
-          'head_to_head',
-        ]).toContain(info.knockoutMode);
+          // Validate knockout mode
+          expect([
+            'no_knockout',
+            'single_elimination',
+            'double_elimination',
+            'head_to_head',
+          ]).toContain(info.knockoutMode);
 
-        // Validate state
-        expect(['active', 'inactive', 'finished']).toContain(info.state);
+          // Validate state
+          expect(['active', 'inactive', 'finished']).toContain(info.state);
 
-        // Total team num should be positive
-        expect(info.totalTeamNum).toBeGreaterThan(0);
-      }
-    });
+          // Total team num should be positive
+          expect(info.totalTeamNum).toBeGreaterThan(0);
+        }
+      },
+      { timeout: 10000 },
+    );
 
     test('should have valid event ID ranges', async () => {
-      await syncTournamentInfo();
+      await ensureSynced();
 
       const db = await getDb();
       const infos = await db.select().from(tournamentInfos);
@@ -96,7 +115,7 @@ describe('Tournament Info Integration Tests', () => {
     });
 
     test('should have consistent group/knockout modes with event IDs', async () => {
-      await syncTournamentInfo();
+      await ensureSynced();
 
       const db = await getDb();
       const infos = await db.select().from(tournamentInfos);
@@ -117,7 +136,7 @@ describe('Tournament Info Integration Tests', () => {
 
   describe('Active Tournaments', () => {
     test('should identify active tournaments correctly', async () => {
-      await syncTournamentInfo();
+      await ensureSynced();
 
       const db = await getDb();
       const infos = await db.select().from(tournamentInfos);

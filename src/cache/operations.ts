@@ -12,6 +12,5 @@ export { liveBonusCache } from './live-bonus-cache';
 export { phasesCache } from './phases-cache';
 export { playerStatsCache } from './player-stats-cache';
 export { playerValuesCache } from './player-values-cache';
-export type { PlayerValuesHashCache } from './player-values-cache';
 export { playersCache } from './players-cache';
 export { teamsCache } from './teams-cache';

@@ -1,31 +1,41 @@
-import { QueueEvents } from 'bullmq';
-import { afterAll, beforeAll, describe, expect, test } from 'vitest';
+import type { Queue, Worker } from 'bullmq';
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 
-import { entrySyncQueue } from '../../../src/queues/entry-sync.queue';
-import { getQueueConnection } from '../../../src/utils/queue';
-import { entrySyncWorker } from '../../../src/workers/entry-sync.worker';
+import { entrySyncQueuesByTier, type EntrySyncJobData } from '../../../src/queues/entry-sync.queue';
+import { createEntrySyncWorker } from '../../../src/workers/entry-sync.worker';
+import type { WorkerRuntime } from '../../../src/workers/worker-runtime';
 
 describe('Entry Sync Worker Integration Tests', () => {
-  let queueEvents: QueueEvents;
-
-  beforeAll(
-    async () => {
-      await entrySyncWorker.waitUntilReady();
-
-      queueEvents = new QueueEvents(entrySyncQueue.name, {
-        connection: getQueueConnection(),
-      });
-
-      await entrySyncQueue.drain();
-      await entrySyncQueue.clean(0, 0, 'completed');
-      await entrySyncQueue.clean(0, 0, 'failed');
-    },
-    { timeout: 30000 },
+  let entrySyncRuntime: WorkerRuntime;
+  let entrySyncWorker: Worker;
+  const entrySyncQueues = Array.from(
+    new Map(Object.values(entrySyncQueuesByTier).map((queue) => [queue.name, queue])).values(),
   );
 
+  async function cleanEntrySyncQueues() {
+    await Promise.all(
+      entrySyncQueues.map(async (queue: Queue<EntrySyncJobData>) => {
+        await queue.drain();
+        await queue.clean(0, 0, 'completed');
+        await queue.clean(0, 0, 'failed');
+      }),
+    );
+  }
+
+  beforeAll(async () => {
+    entrySyncRuntime = createEntrySyncWorker();
+    const worker = entrySyncRuntime.workers[0];
+    if (!worker) throw new Error('Entry sync worker was not created');
+    entrySyncWorker = worker;
+    await Promise.all(entrySyncRuntime.workers.map((worker) => worker.waitUntilReady()));
+
+    await cleanEntrySyncQueues();
+  });
+
   afterAll(async () => {
-    await queueEvents.close();
-    await entrySyncWorker.close();
+    entrySyncRuntime.stop?.();
+    await Promise.all(entrySyncRuntime.workers.map((worker) => worker.close()));
+    await Promise.all(entrySyncRuntime.queueEvents.map((events) => events.close()));
   });
 
   describe('Worker Status', () => {
@@ -35,7 +45,7 @@ describe('Entry Sync Worker Integration Tests', () => {
     });
 
     test('should have correct queue name', () => {
-      expect(entrySyncWorker.name).toBe(entrySyncQueue.name);
+      expect(entrySyncQueues.map((queue) => queue.name)).toContain(entrySyncWorker.name);
     });
   });
 
@@ -44,7 +54,7 @@ describe('Entry Sync Worker Integration Tests', () => {
       // Add a test job (if entry sync jobs exist)
       // await entrySyncQueue.add('test-job', {});
 
-      const countAfter = await entrySyncQueue.getJobCounts();
+      const countAfter = await entrySyncQueues[0]?.getJobCounts();
 
       expect(countAfter).toBeDefined();
     });
