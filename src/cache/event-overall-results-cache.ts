@@ -1,4 +1,4 @@
-import { getCurrentSeason } from '../utils/conditions';
+import { getActiveCacheSeason } from './cache-season';
 import { logDebug, logError, logInfo } from '../utils/logger';
 import { redisSingleton } from './singleton';
 
@@ -12,7 +12,7 @@ export const eventOverallResultCache = {
   async getAll(): Promise<EventOverallResultData[] | null> {
     try {
       const redis = await redisSingleton.getClient();
-      const key = `EventOverallResult:${getCurrentSeason()}`;
+      const key = `EventOverallResult:${await getActiveCacheSeason()}`;
       const hash = await redis.hgetall(key);
 
       if (!hash || Object.keys(hash).length === 0) {
@@ -40,7 +40,7 @@ export const eventOverallResultCache = {
       }
 
       const redis = await redisSingleton.getClient();
-      const key = `EventOverallResult:${getCurrentSeason()}`;
+      const key = `EventOverallResult:${await getActiveCacheSeason()}`;
 
       const hashData: Record<string, string> = {};
       for (const result of results) {

@@ -1,13 +1,13 @@
-import { getCurrentSeason } from '../utils/conditions';
 import { CacheError } from '../utils/errors';
 import { logDebug, logError } from '../utils/logger';
+import { getActiveCacheSeason } from './cache-season';
 import { redisSingleton } from './singleton';
 
 import type { PlayerStat } from '../domain/player-stats';
 import type { EventId } from '../types/base.type';
 
-const getHashKey = (): string => {
-  return `PlayerStat:${getCurrentSeason()}`;
+const getHashKey = async (): Promise<string> => {
+  return `PlayerStat:${await getActiveCacheSeason()}`;
 };
 
 export const createPlayerStatsHashCache = () => {
@@ -15,7 +15,7 @@ export const createPlayerStatsHashCache = () => {
     getPlayerStatsByEvent: async (eventId: EventId): Promise<PlayerStat[] | null> => {
       try {
         const redis = await redisSingleton.getClient();
-        const key = getHashKey();
+        const key = await getHashKey();
         const hash = await redis.hgetall(key);
 
         if (!hash || Object.keys(hash).length === 0) {
@@ -51,7 +51,7 @@ export const createPlayerStatsHashCache = () => {
     setPlayerStatsByEvent: async (eventId: EventId, playerStats: PlayerStat[]): Promise<void> => {
       try {
         const redis = await redisSingleton.getClient();
-        const key = getHashKey();
+        const key = await getHashKey();
 
         const hashEntries: Record<string, string> = {};
         for (const playerStat of playerStats) {
@@ -94,7 +94,7 @@ export const createPlayerStatsHashCache = () => {
     clearByEvent: async (eventId: EventId): Promise<void> => {
       try {
         const redis = await redisSingleton.getClient();
-        const key = getHashKey();
+        const key = await getHashKey();
 
         await redis.del(key);
         logDebug('Player stats cache cleared by event', { eventId, key });
@@ -111,7 +111,7 @@ export const createPlayerStatsHashCache = () => {
     clearAll: async (): Promise<void> => {
       try {
         const redis = await redisSingleton.getClient();
-        const key = getHashKey();
+        const key = await getHashKey();
         await redis.del(key);
         logDebug('All player stats cache cleared', { key });
       } catch (error) {
@@ -127,7 +127,7 @@ export const createPlayerStatsHashCache = () => {
     getLatestEventId: async (): Promise<EventId | null> => {
       try {
         const redis = await redisSingleton.getClient();
-        const key = getHashKey();
+        const key = await getHashKey();
         const hash = await redis.hgetall(key);
 
         if (!hash || Object.keys(hash).length === 0) return null;

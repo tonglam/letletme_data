@@ -9,6 +9,8 @@ export const playerValuesCache = {
     try {
       const redis = await redisSingleton.getClient();
       const key = `PlayerValue:${changeDate}`;
+      // PlayerValueMissing:* is written by an external consumer; delete it here
+      // defensively whenever we refresh the real PlayerValue hash for that date.
       const missingKey = `PlayerValueMissing:${changeDate}`;
 
       // Use pipeline for atomic operation

@@ -25,7 +25,10 @@ async function shouldSendLaunchNotification(key: string): Promise<boolean> {
 export async function runLaunchWarning() {
   const bootstrap = await fplClient.getBootstrap();
   if (bootstrap.events.length === 0) {
-    const shouldSend = await shouldSendLaunchNotification('LaunchNotification:warning');
+    // Year-suffixed so the warning can re-arm each pre-season (season string is
+    // unknowable while the events list is still empty).
+    const year = new Date().getFullYear();
+    const shouldSend = await shouldSendLaunchNotification(`LaunchNotification:warning:${year}`);
     if (!shouldSend) {
       return;
     }

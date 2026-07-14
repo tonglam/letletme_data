@@ -26,6 +26,12 @@ async function shouldRunSeasonDataSync(jobName: string) {
   return true;
 }
 
+/**
+ * Core entity syncs (events/teams/fixtures/players/phases) run year-round so a
+ * newly published FPL season is picked up before the calendar season window
+ * opens. Services short-circuit on empty pre-season payloads. Player-stats
+ * remains gated by isFPLSeason via shouldRunSeasonDataSync.
+ */
 export function registerDataSyncJobs(app: Elysia) {
   return app
     .use(

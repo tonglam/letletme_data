@@ -1,4 +1,4 @@
-import { getCurrentSeason } from '../utils/conditions';
+import { getActiveCacheSeason } from './cache-season';
 import { logDebug, logError, logInfo } from '../utils/logger';
 import { redisSingleton } from './singleton';
 
@@ -13,7 +13,7 @@ export const eventLiveExplainCache = {
   async getByEventId(eventId: EventId): Promise<EventLiveExplain[] | null> {
     try {
       const redis = await redisSingleton.getClient();
-      const key = `EventLiveExplain:${getCurrentSeason()}:${eventId}`;
+      const key = `EventLiveExplain:${await getActiveCacheSeason()}:${eventId}`;
       const hash = await redis.hgetall(key);
 
       if (!hash || Object.keys(hash).length === 0) {
@@ -38,7 +38,7 @@ export const eventLiveExplainCache = {
       }
 
       const redis = await redisSingleton.getClient();
-      const key = `EventLiveExplain:${getCurrentSeason()}:${eventId}`;
+      const key = `EventLiveExplain:${await getActiveCacheSeason()}:${eventId}`;
 
       const hashData: Record<string, string> = {};
       for (const explain of explains) {
@@ -58,7 +58,7 @@ export const eventLiveExplainCache = {
   async clearByEventId(eventId: EventId): Promise<void> {
     try {
       const redis = await redisSingleton.getClient();
-      const key = `EventLiveExplain:${getCurrentSeason()}:${eventId}`;
+      const key = `EventLiveExplain:${await getActiveCacheSeason()}:${eventId}`;
       await redis.del(key);
 
       logInfo('Event live explain cache cleared', { eventId });

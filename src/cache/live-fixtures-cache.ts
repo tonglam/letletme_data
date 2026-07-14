@@ -1,4 +1,4 @@
-import { getCurrentSeason } from '../utils/conditions';
+import { getActiveCacheSeason } from './cache-season';
 import { logDebug, logError, logInfo } from '../utils/logger';
 import { redisSingleton } from './singleton';
 
@@ -16,7 +16,7 @@ export const liveFixturesCache = {
   async set(eventId: EventId, byTeam: LiveFixturesByTeam): Promise<void> {
     try {
       const redis = await redisSingleton.getClient();
-      const season = getCurrentSeason();
+      const season = await getActiveCacheSeason();
       const key = `LiveFixture:${season}:${eventId}`;
 
       const pipeline = redis.pipeline();
@@ -42,7 +42,7 @@ export const liveFixturesCache = {
   async get(eventId: EventId): Promise<LiveFixturesByTeam | null> {
     try {
       const redis = await redisSingleton.getClient();
-      const season = getCurrentSeason();
+      const season = await getActiveCacheSeason();
       const key = `LiveFixture:${season}:${eventId}`;
       const hash = await redis.hgetall(key);
 
@@ -67,7 +67,7 @@ export const liveFixturesCache = {
   async clear(eventId: EventId): Promise<void> {
     try {
       const redis = await redisSingleton.getClient();
-      const season = getCurrentSeason();
+      const season = await getActiveCacheSeason();
       const key = `LiveFixture:${season}:${eventId}`;
       await redis.del(key);
       logInfo('Live fixtures cache cleared', { eventId, season });

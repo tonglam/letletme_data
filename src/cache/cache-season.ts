@@ -111,7 +111,7 @@ export async function getActiveCacheSeason(): Promise<string> {
   return getCurrentSeason();
 }
 
-export async function setActiveCacheSeason(season: string): Promise<void> {
+export async function setActiveCacheSeason(season: string): Promise<boolean> {
   if (!isValidSeason(season)) {
     throw new Error(`Invalid active cache season: ${season}`);
   }
@@ -123,11 +123,12 @@ export async function setActiveCacheSeason(season: string): Promise<void> {
       candidate: season,
       current,
     });
-    return;
+    return false;
   }
 
   await redis.set(ACTIVE_SEASON_KEY, season);
   logInfo('Active cache season updated', { season, previous: current });
+  return true;
 }
 
 export async function clearStaleSeasonCache(
@@ -159,6 +160,9 @@ export async function finalizeSeasonCacheWrite(
   season: string,
   prefixes: readonly string[],
 ): Promise<void> {
-  await setActiveCacheSeason(season);
+  const changed = await setActiveCacheSeason(season);
+  if (!changed) {
+    return;
+  }
   await clearStaleSeasonCache(season, prefixes);
 }

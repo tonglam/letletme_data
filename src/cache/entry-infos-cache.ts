@@ -1,6 +1,6 @@
-import { getCurrentSeason } from '../utils/conditions';
 import { CacheError } from '../utils/errors';
 import { logDebug, logError, logInfo } from '../utils/logger';
+import { getActiveCacheSeason } from './cache-season';
 import { redisSingleton } from './singleton';
 
 import type { DbEntryInfo } from '../db/schemas/index.schema';
@@ -19,7 +19,7 @@ import type { DbEntryInfo } from '../db/schemas/index.schema';
  * to avoid rewriting the entire hash every day.
  */
 
-const getHashKey = () => `EntryInfo:${getCurrentSeason()}`;
+const getHashKey = async () => `EntryInfo:${await getActiveCacheSeason()}`;
 
 /**
  * Strip createdAt/updatedAt from entry info before serializing to Redis
@@ -40,7 +40,7 @@ export const entryInfosCache = {
   async setEntry(entry: DbEntryInfo): Promise<void> {
     try {
       const redis = await redisSingleton.getClient();
-      const key = getHashKey();
+      const key = await getHashKey();
       const value = JSON.stringify(serializeEntryInfo(entry));
 
       await redis.hset(key, entry.id.toString(), value);
@@ -66,7 +66,7 @@ export const entryInfosCache = {
   ): Promise<{ added: number; updated: number; skipped: number }> {
     try {
       const redis = await redisSingleton.getClient();
-      const key = getHashKey();
+      const key = await getHashKey();
 
       // Read existing hash
       const existingHash = await redis.hgetall(key);
@@ -129,7 +129,7 @@ export const entryInfosCache = {
   async getEntry(entryId: number): Promise<DbEntryInfo | null> {
     try {
       const redis = await redisSingleton.getClient();
-      const key = getHashKey();
+      const key = await getHashKey();
       const value = await redis.hget(key, entryId.toString());
 
       if (!value) {
@@ -157,7 +157,7 @@ export const entryInfosCache = {
   async getEntries(entryIds: number[]): Promise<Map<number, DbEntryInfo>> {
     try {
       const redis = await redisSingleton.getClient();
-      const key = getHashKey();
+      const key = await getHashKey();
 
       const results = new Map<number, DbEntryInfo>();
       if (entryIds.length === 0) {
@@ -201,7 +201,7 @@ export const entryInfosCache = {
   async getAll(): Promise<DbEntryInfo[] | null> {
     try {
       const redis = await redisSingleton.getClient();
-      const key = getHashKey();
+      const key = await getHashKey();
       const hash = await redis.hgetall(key);
 
       if (!hash || Object.keys(hash).length === 0) {
@@ -228,7 +228,7 @@ export const entryInfosCache = {
   async clear(): Promise<void> {
     try {
       const redis = await redisSingleton.getClient();
-      const key = getHashKey();
+      const key = await getHashKey();
       await redis.del(key);
       logDebug('Entry infos cache cleared', { key });
     } catch (error) {

@@ -1,4 +1,4 @@
-import { getCurrentSeason } from '../utils/conditions';
+import { getActiveCacheSeason } from './cache-season';
 import { logDebug, logError, logInfo } from '../utils/logger';
 import { redisSingleton } from './singleton';
 
@@ -16,7 +16,7 @@ export const eventLivesCache = {
   async getByEventId(eventId: EventId): Promise<EventLive[] | null> {
     try {
       const redis = await redisSingleton.getClient();
-      const key = `EventLive:${getCurrentSeason()}:${eventId}`;
+      const key = `EventLive:${await getActiveCacheSeason()}:${eventId}`;
       const hash = await redis.hgetall(key);
 
       if (!hash || Object.keys(hash).length === 0) {
@@ -44,7 +44,7 @@ export const eventLivesCache = {
       }
 
       const redis = await redisSingleton.getClient();
-      const key = `EventLive:${getCurrentSeason()}:${eventId}`;
+      const key = `EventLive:${await getActiveCacheSeason()}:${eventId}`;
 
       // Build hash: elementId -> EventLive data
       const hashData: Record<string, string> = {};
