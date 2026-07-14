@@ -155,5 +155,11 @@ export async function syncTournamentEventCupResults(
     errors,
   });
 
+  if (errors > 0) {
+    throw new Error(
+      `Tournament event cup results sync failed for ${errors} of ${entryIds.length} entries`,
+    );
+  }
+
   return { eventId, totalEntries: entryIds.length, upserted, skipped, errors };
 }

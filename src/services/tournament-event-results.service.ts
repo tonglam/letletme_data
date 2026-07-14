@@ -76,9 +76,15 @@ export async function syncTournamentEventResultsForEntryIds(
   });
 
   const synced = results.filter((result) => result.success).length;
+  const totalEntries = uniqueEntryIds.length;
+  if (errors > 0) {
+    throw new Error(
+      `Tournament event results sync failed for ${errors} of ${totalEntries} entries`,
+    );
+  }
   return {
     eventId,
-    totalEntries: uniqueEntryIds.length,
+    totalEntries,
     synced,
     errors,
   };
