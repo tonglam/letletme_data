@@ -28,6 +28,7 @@ import {
   syncEntryEventResults,
   syncEntryEventTransfers,
 } from '../services/entries.service';
+import { markEntryInfoSyncedToday } from '../jobs/entry-info-sync-marker';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { logError, logInfo } from '../utils/logger';
 import { withMutationConflictGuard } from '../utils/mutation-lock';
@@ -266,8 +267,17 @@ export function createEntrySyncWorker(): WorkerRuntime {
       () =>
         runTrackedJob(context, async () => {
           switch (job.name) {
-            case 'entry-info':
-              return handleEntryJob('entry-info', 'entry info sync', syncEntryInfo, job.data);
+            case 'entry-info': {
+              const result = await handleEntryJob(
+                'entry-info',
+                'entry info sync',
+                syncEntryInfo,
+                job.data,
+              );
+              // Mark only after the worker succeeds so a failed job can retry the same day.
+              await markEntryInfoSyncedToday(new Date(), job.id);
+              return result;
+            }
             case 'entry-picks':
               return handleEntryJob(
                 'entry-picks',

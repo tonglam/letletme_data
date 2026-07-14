@@ -4,7 +4,15 @@ import { logError, logInfo } from '../utils/logger';
 
 export type DataSyncJobSource = 'cron' | 'manual' | 'api' | 'event-transition';
 
-async function enqueueDataSyncJob(jobName: DataSyncJobName, source: DataSyncJobSource = 'cron') {
+interface DataSyncEnqueueOptions {
+  jobId?: string;
+}
+
+async function enqueueDataSyncJob(
+  jobName: DataSyncJobName,
+  source: DataSyncJobSource = 'cron',
+  options: DataSyncEnqueueOptions = {},
+) {
   try {
     const tier = getDataSyncJobPriority(jobName as DataSyncPriorityJobName);
     const queue = getDataSyncQueue(tier);
@@ -20,6 +28,7 @@ async function enqueueDataSyncJob(jobName: DataSyncJobName, source: DataSyncJobS
           type: 'exponential',
           delay: 60_000,
         },
+        jobId: options.jobId,
       },
     );
 
@@ -57,5 +66,7 @@ export const enqueuePlayerStatsSyncJob = (source?: DataSyncJobSource) =>
 export const enqueuePhasesSyncJob = (source?: DataSyncJobSource) =>
   enqueueDataSyncJob('phases', source);
 
-export const enqueuePlayerValuesSyncJob = (source?: DataSyncJobSource) =>
-  enqueueDataSyncJob('player-values', source);
+export const enqueuePlayerValuesSyncJob = (
+  source?: DataSyncJobSource,
+  options?: DataSyncEnqueueOptions,
+) => enqueueDataSyncJob('player-values', source, options);

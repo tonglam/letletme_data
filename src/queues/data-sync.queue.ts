@@ -18,6 +18,11 @@ export interface DataSyncJobData {
 }
 
 const defaultJobOptions = {
+  attempts: 3,
+  backoff: {
+    type: 'exponential' as const,
+    delay: 60_000,
+  },
   removeOnComplete: 100,
   removeOnFail: 200,
 };

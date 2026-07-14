@@ -154,6 +154,15 @@ const app = new Elysia()
     hostname: '0.0.0.0',
   });
 
+async function shutdown(signal: string) {
+  logInfo('API server shutting down', { signal });
+  await app.stop();
+  process.exit(0);
+}
+
+process.on('SIGINT', () => void shutdown('SIGINT'));
+process.on('SIGTERM', () => void shutdown('SIGTERM'));
+
 // Log startup after successful listen
 logInfo('🚀 Elysia server started', {
   port,
