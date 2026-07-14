@@ -1,27 +1,40 @@
 import { relations } from 'drizzle-orm';
-import { pgTable, text, timestamp, boolean, integer, index } from 'drizzle-orm/pg-core';
+import {
+  boolean,
+  index,
+  integer,
+  pgSchema,
+  text,
+  timestamp,
+} from 'drizzle-orm/pg-core';
 
-export const user = pgTable('user', {
+/**
+ * Better Auth tables live in the dedicated `bauth` schema so they do not
+ * collide with legacy `public.user` / `public.session` tables.
+ */
+export const bauthSchema = pgSchema('bauth');
+
+export const user = bauthSchema.table('user', {
   id: text('id').primaryKey(),
   name: text('name').notNull(),
   email: text('email').notNull().unique(),
   emailVerified: boolean('email_verified').default(false).notNull(),
   image: text('image'),
-  createdAt: timestamp('created_at').defaultNow().notNull(),
-  updatedAt: timestamp('updated_at')
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true })
     .defaultNow()
     .$onUpdate(() => /* @__PURE__ */ new Date())
     .notNull(),
 });
 
-export const session = pgTable(
+export const session = bauthSchema.table(
   'session',
   {
     id: text('id').primaryKey(),
-    expiresAt: timestamp('expires_at').notNull(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
     token: text('token').notNull().unique(),
-    createdAt: timestamp('created_at').defaultNow().notNull(),
-    updatedAt: timestamp('updated_at')
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true })
       .$onUpdate(() => /* @__PURE__ */ new Date())
       .notNull(),
     ipAddress: text('ip_address'),
@@ -33,7 +46,7 @@ export const session = pgTable(
   (table) => [index('session_userId_idx').on(table.userId)],
 );
 
-export const account = pgTable(
+export const account = bauthSchema.table(
   'account',
   {
     id: text('id').primaryKey(),
@@ -45,27 +58,27 @@ export const account = pgTable(
     accessToken: text('access_token'),
     refreshToken: text('refresh_token'),
     idToken: text('id_token'),
-    accessTokenExpiresAt: timestamp('access_token_expires_at'),
-    refreshTokenExpiresAt: timestamp('refresh_token_expires_at'),
+    accessTokenExpiresAt: timestamp('access_token_expires_at', { withTimezone: true }),
+    refreshTokenExpiresAt: timestamp('refresh_token_expires_at', { withTimezone: true }),
     scope: text('scope'),
     password: text('password'),
-    createdAt: timestamp('created_at').defaultNow().notNull(),
-    updatedAt: timestamp('updated_at')
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true })
       .$onUpdate(() => /* @__PURE__ */ new Date())
       .notNull(),
   },
   (table) => [index('account_userId_idx').on(table.userId)],
 );
 
-export const verification = pgTable(
+export const verification = bauthSchema.table(
   'verification',
   {
     id: text('id').primaryKey(),
     identifier: text('identifier').notNull(),
     value: text('value').notNull(),
-    expiresAt: timestamp('expires_at').notNull(),
-    createdAt: timestamp('created_at').defaultNow().notNull(),
-    updatedAt: timestamp('updated_at')
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true })
       .defaultNow()
       .$onUpdate(() => /* @__PURE__ */ new Date())
       .notNull(),
@@ -73,7 +86,7 @@ export const verification = pgTable(
   (table) => [index('verification_identifier_idx').on(table.identifier)],
 );
 
-export const apikey = pgTable(
+export const apikey = bauthSchema.table(
   'apikey',
   {
     id: text('id').primaryKey(),
@@ -85,17 +98,17 @@ export const apikey = pgTable(
     key: text('key').notNull(),
     refillInterval: integer('refill_interval'),
     refillAmount: integer('refill_amount'),
-    lastRefillAt: timestamp('last_refill_at'),
+    lastRefillAt: timestamp('last_refill_at', { withTimezone: true }),
     enabled: boolean('enabled').default(true),
     rateLimitEnabled: boolean('rate_limit_enabled').default(true),
     rateLimitTimeWindow: integer('rate_limit_time_window').default(60000),
     rateLimitMax: integer('rate_limit_max').default(100),
     requestCount: integer('request_count').default(0),
     remaining: integer('remaining'),
-    lastRequest: timestamp('last_request'),
-    expiresAt: timestamp('expires_at'),
-    createdAt: timestamp('created_at').notNull(),
-    updatedAt: timestamp('updated_at').notNull(),
+    lastRequest: timestamp('last_request', { withTimezone: true }),
+    expiresAt: timestamp('expires_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull(),
     permissions: text('permissions'),
     metadata: text('metadata'),
   },
