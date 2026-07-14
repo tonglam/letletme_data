@@ -41,11 +41,7 @@ const createPlayerHashCache = () => {
         return parsed;
       } catch (error) {
         logError('Player cache get error', error, { playerId });
-        throw new CacheError(
-          `Failed to get player from cache: ${playerId}`,
-          'PLAYER_GET_ERROR',
-          error instanceof Error ? error : undefined,
-        );
+        return null;
       }
     },
 
@@ -93,11 +89,7 @@ const createPlayerHashCache = () => {
         return players;
       } catch (error) {
         logError('Players cache get all error', error);
-        throw new CacheError(
-          'Failed to get all players from cache',
-          'PLAYERS_GET_ALL_ERROR',
-          error instanceof Error ? error : undefined,
-        );
+        return null;
       }
     },
 
