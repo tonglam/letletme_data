@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, test } from 'bun:test';
+import { describe, expect, test } from 'bun:test';
 
 import { getDb } from '../../src/db/singleton';
 import { tournamentKnockoutResults } from '../../src/db/schemas/index.schema';
@@ -6,24 +6,13 @@ import { tournamentInfoRepository } from '../../src/repositories/tournament-info
 import { syncTournamentKnockoutResults } from '../../src/services/tournament-knockout-results.service';
 import { getCurrentEvent } from '../../src/services/events.service';
 
-describe('Tournament Knockout Results Integration Tests', () => {
-  let testEventId: number;
-  let hasKnockoutTournaments: boolean;
+const currentEvent = await getCurrentEvent();
+const tournaments = await tournamentInfoRepository.findActive();
+const hasSeedData =
+  Boolean(currentEvent) && tournaments.some((t) => t.knockoutMode !== 'no_knockout');
 
-  beforeAll(async () => {
-    const currentEvent = await getCurrentEvent();
-    if (!currentEvent) {
-      throw new Error('No current event found - cannot run integration tests');
-    }
-    testEventId = currentEvent.id;
-
-    const tournaments = await tournamentInfoRepository.findActive();
-    hasKnockoutTournaments = tournaments.some((t) => t.knockoutMode !== 'no_knockout');
-
-    if (!hasKnockoutTournaments) {
-      console.log('⚠️  No knockout tournaments found - some tests will be skipped');
-    }
-  });
+describe.skipIf(!hasSeedData)('Tournament Knockout Results Integration Tests', () => {
+  const testEventId = currentEvent!.id;
 
   describe('Sync Integration', () => {
     test('should sync knockout results', async () => {
@@ -36,11 +25,6 @@ describe('Tournament Knockout Results Integration Tests', () => {
     });
 
     test('should store results in database', async () => {
-      if (!hasKnockoutTournaments) {
-        console.log('⊘ Skipping - no knockout tournaments');
-        return;
-      }
-
       await syncTournamentKnockoutResults(testEventId);
 
       const db = await getDb();
@@ -59,11 +43,6 @@ describe('Tournament Knockout Results Integration Tests', () => {
 
   describe('Data Validation', () => {
     test('should have valid knockout result structure', async () => {
-      if (!hasKnockoutTournaments) {
-        console.log('⊘ Skipping - no knockout tournaments');
-        return;
-      }
-
       await syncTournamentKnockoutResults(testEventId);
 
       const db = await getDb();

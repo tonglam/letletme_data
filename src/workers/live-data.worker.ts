@@ -36,37 +36,69 @@ import type { WorkerRuntime } from './worker-runtime';
  * Enqueue cascade jobs after event-lives DB sync completes
  * These jobs depend on fresh event_lives data
  */
-async function isLiveMatchWindowForEvent(eventId: number): Promise<boolean> {
-  const currentEvent = await getCurrentEvent();
+export async function isLiveMatchWindowForEvent(
+  eventId: number,
+  deps: {
+    getCurrentEvent: typeof getCurrentEvent;
+    loadFixturesByEvent: typeof loadFixturesByEvent;
+    isMatchDayTime: typeof isMatchDayTime;
+  } = {
+    getCurrentEvent,
+    loadFixturesByEvent,
+    isMatchDayTime,
+  },
+): Promise<boolean> {
+  const currentEvent = await deps.getCurrentEvent();
   if (!currentEvent) {
     return false;
   }
   if (currentEvent.id !== eventId) {
     return false;
   }
-  const fixtures = await loadFixturesByEvent(eventId);
-  return isMatchDayTime(currentEvent, fixtures, new Date());
+  const fixtures = await deps.loadFixturesByEvent(eventId);
+  return deps.isMatchDayTime(currentEvent, fixtures, new Date());
 }
 
-async function enqueueCascadeJobs(eventId: number) {
+export type CascadeEnqueueDeps = {
+  isLiveMatchWindowForEvent: (eventId: number) => Promise<boolean>;
+  enqueueEventLiveSummary: typeof enqueueEventLiveSummary;
+  enqueueEventLiveExplain: typeof enqueueEventLiveExplain;
+  enqueueLiveFixtureCache: typeof enqueueLiveFixtureCache;
+  enqueueLiveBonusCache: typeof enqueueLiveBonusCache;
+  enqueueEventOverallResult: typeof enqueueEventOverallResult;
+};
+
+export async function enqueueCascadeJobs(
+  eventId: number,
+  deps: CascadeEnqueueDeps = {
+    isLiveMatchWindowForEvent,
+    enqueueEventLiveSummary,
+    enqueueEventLiveExplain,
+    enqueueLiveFixtureCache,
+    enqueueLiveBonusCache,
+    enqueueEventOverallResult,
+  },
+) {
   logInfo('Enqueueing cascade jobs after DB sync', { eventId });
 
   try {
-    const matchWindowOpen = await isLiveMatchWindowForEvent(eventId);
+    const matchWindowOpen = await deps.isLiveMatchWindowForEvent(eventId);
     const enqueueTasks = [
-      enqueueEventLiveSummary(eventId, 'cascade'),
-      enqueueEventLiveExplain(eventId, 'cascade'),
+      deps.enqueueEventLiveSummary(eventId, 'cascade'),
+      deps.enqueueEventLiveExplain(eventId, 'cascade'),
       ...(matchWindowOpen
-        ? [enqueueLiveFixtureCache(eventId, 'cascade'), enqueueLiveBonusCache(eventId, 'cascade')]
+        ? [
+            deps.enqueueLiveFixtureCache(eventId, 'cascade'),
+            deps.enqueueLiveBonusCache(eventId, 'cascade'),
+          ]
         : []),
-      enqueueEventOverallResult(eventId, 'cascade'),
+      deps.enqueueEventOverallResult(eventId, 'cascade'),
     ];
 
     if (!matchWindowOpen) {
       logInfo('Skipping live fixture/bonus cascade enqueue - not match time', { eventId });
     }
 
-    // Enqueue dependent jobs
     const results = await Promise.allSettled(enqueueTasks);
 
     const successful = results.filter((r) => r.status === 'fulfilled').length;
@@ -79,7 +111,6 @@ async function enqueueCascadeJobs(eventId: number) {
       failed,
     });
 
-    // Log any failures
     results.forEach((result, index) => {
       if (result.status === 'rejected') {
         const jobNames = ['summary', 'explain', 'live-fixture', 'live-bonus', 'overall'];
@@ -89,6 +120,23 @@ async function enqueueCascadeJobs(eventId: number) {
         });
       }
     });
+
+    return {
+      eventId,
+      matchWindowOpen,
+      total: results.length,
+      successful,
+      failed,
+      jobNames: matchWindowOpen
+        ? ([
+            'event-live-summary',
+            'event-live-explain',
+            'live-fixture-cache',
+            'live-bonus-cache',
+            'event-overall-result',
+          ] as const)
+        : (['event-live-summary', 'event-live-explain', 'event-overall-result'] as const),
+    };
   } catch (error) {
     logError('Failed to enqueue cascade jobs', error, { eventId });
     throw error;

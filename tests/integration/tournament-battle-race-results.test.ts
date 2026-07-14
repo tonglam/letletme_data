@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, test } from 'bun:test';
+import { describe, expect, test } from 'bun:test';
 
 import { getDb } from '../../src/db/singleton';
 import { tournamentBattleGroupResults } from '../../src/db/schemas/index.schema';
@@ -6,25 +6,13 @@ import { tournamentInfoRepository } from '../../src/repositories/tournament-info
 import { syncTournamentBattleRaceResults } from '../../src/services/tournament-battle-race-results.service';
 import { getCurrentEvent } from '../../src/services/events.service';
 
-describe('Tournament Battle Race Results Integration Tests', () => {
-  let testEventId: number;
-  let hasBattleRaceTournaments: boolean;
+const currentEvent = await getCurrentEvent();
+const tournaments = await tournamentInfoRepository.findActive();
+const hasSeedData =
+  Boolean(currentEvent) && tournaments.some((t) => t.groupMode === 'battle_races');
 
-  beforeAll(async () => {
-    const currentEvent = await getCurrentEvent();
-    if (!currentEvent) {
-      throw new Error('No current event found - cannot run integration tests');
-    }
-    testEventId = currentEvent.id;
-
-    // Check if there are active battle race tournaments
-    const tournaments = await tournamentInfoRepository.findActive();
-    hasBattleRaceTournaments = tournaments.some((t) => t.groupMode === 'battle_races');
-
-    if (!hasBattleRaceTournaments) {
-      console.log('⚠️  No battle race tournaments found - some tests will be skipped');
-    }
-  });
+describe.skipIf(!hasSeedData)('Tournament Battle Race Results Integration Tests', () => {
+  const testEventId = currentEvent!.id;
 
   describe('Sync Integration', () => {
     test('should sync battle race results', async () => {
@@ -37,11 +25,6 @@ describe('Tournament Battle Race Results Integration Tests', () => {
     });
 
     test('should store results in database', async () => {
-      if (!hasBattleRaceTournaments) {
-        console.log('⊘ Skipping - no battle race tournaments');
-        return;
-      }
-
       await syncTournamentBattleRaceResults(testEventId);
 
       const db = await getDb();
@@ -62,20 +45,11 @@ describe('Tournament Battle Race Results Integration Tests', () => {
       const result = await syncTournamentBattleRaceResults(testEventId);
 
       expect(result).toBeDefined();
-      if (!hasBattleRaceTournaments) {
-        expect(result.updatedGroups).toBe(0);
-        expect(result.updatedResults).toBe(0);
-      }
     });
   });
 
   describe('Data Validation', () => {
     test('should have valid battle race result structure', async () => {
-      if (!hasBattleRaceTournaments) {
-        console.log('⊘ Skipping - no battle race tournaments');
-        return;
-      }
-
       await syncTournamentBattleRaceResults(testEventId);
 
       const db = await getDb();
@@ -91,11 +65,6 @@ describe('Tournament Battle Race Results Integration Tests', () => {
     });
 
     test('should have valid points calculation', async () => {
-      if (!hasBattleRaceTournaments) {
-        console.log('⊘ Skipping - no battle race tournaments');
-        return;
-      }
-
       await syncTournamentBattleRaceResults(testEventId);
 
       const db = await getDb();

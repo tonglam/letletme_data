@@ -9,29 +9,16 @@ import { syncTournamentEventResults } from '../../src/services/tournament-event-
 
 const INTEGRATION_TEST_TIMEOUT_MS = 30_000;
 
-describe('Tournament Event Results Integration Tests', () => {
-  let testEventId: number;
-  let hasActiveTournaments: boolean;
-  let syncedResult: Awaited<ReturnType<typeof syncTournamentEventResults>> | null = null;
+const currentEvent = await getCurrentEvent();
+const tournaments = await tournamentInfoRepository.findActive();
+const hasSeedData = Boolean(currentEvent) && tournaments.length > 0;
+
+describe.skipIf(!hasSeedData)('Tournament Event Results Integration Tests', () => {
+  const testEventId = currentEvent!.id;
+  let syncedResult: Awaited<ReturnType<typeof syncTournamentEventResults>>;
   let syncDuration = 0;
 
   beforeAll(async () => {
-    // Get current event ID for testing
-    const currentEvent = await getCurrentEvent();
-    if (!currentEvent) {
-      throw new Error('No current event found - cannot run integration tests');
-    }
-    testEventId = currentEvent.id;
-
-    // Check if there are active tournaments
-    const tournaments = await tournamentInfoRepository.findActive();
-    hasActiveTournaments = tournaments.length > 0;
-
-    if (!hasActiveTournaments) {
-      console.log('⚠️  No active tournaments found - some tests will be skipped');
-      return;
-    }
-
     const startTime = performance.now();
     syncedResult = await syncTournamentEventResults(testEventId, { concurrency: 10 });
     syncDuration = performance.now() - startTime;
@@ -39,17 +26,9 @@ describe('Tournament Event Results Integration Tests', () => {
 
   describe('Sync Integration', () => {
     test('should sync tournament event results from FPL API to database', async () => {
-      if (!hasActiveTournaments) {
-        console.log('⊘ Skipping - no active tournaments');
-        return;
-      }
-
       const result = syncedResult;
 
       expect(result).toBeDefined();
-      if (!result) {
-        return;
-      }
       expect(result.eventId).toBe(testEventId);
       expect(result.totalEntries).toBeGreaterThanOrEqual(0);
       expect(result.synced).toBeGreaterThanOrEqual(0);
@@ -62,11 +41,6 @@ describe('Tournament Event Results Integration Tests', () => {
     test(
       'should store entry event results in database',
       async () => {
-        if (!hasActiveTournaments) {
-          console.log('⊘ Skipping - no active tournaments');
-          return;
-        }
-
         const db = await getDb();
         const results = await db
           .select()
@@ -88,32 +62,18 @@ describe('Tournament Event Results Integration Tests', () => {
 
     test('should handle sync when no active tournaments exist', async () => {
       // This should not throw even with no tournaments
-      const result = syncedResult ?? (await syncTournamentEventResults(testEventId));
+      const result = syncedResult;
 
       expect(result).toBeDefined();
       expect(result.eventId).toBe(testEventId);
-
-      if (!hasActiveTournaments) {
-        expect(result.totalEntries).toBe(0);
-        expect(result.synced).toBe(0);
-        expect(result.errors).toBe(0);
-      }
     });
 
     test('should handle re-sync without duplicates', async () => {
-      if (!hasActiveTournaments) {
-        console.log('⊘ Skipping - no active tournaments');
-        return;
-      }
-
       const sync1 = syncedResult;
       const sync2 = syncedResult;
 
       expect(sync1).toBeDefined();
       expect(sync2).toBeDefined();
-      if (!sync1 || !sync2) {
-        return;
-      }
 
       // Should process same number of entries
       expect(sync2.totalEntries).toBe(sync1.totalEntries);
@@ -122,11 +82,6 @@ describe('Tournament Event Results Integration Tests', () => {
 
   describe('Concurrency Control', () => {
     test('should respect concurrency limit', async () => {
-      if (!hasActiveTournaments) {
-        console.log('⊘ Skipping - no active tournaments');
-        return;
-      }
-
       const result = syncedResult;
 
       expect(result).toBeDefined();
@@ -134,17 +89,9 @@ describe('Tournament Event Results Integration Tests', () => {
     });
 
     test('should handle high concurrency', async () => {
-      if (!hasActiveTournaments) {
-        console.log('⊘ Skipping - no active tournaments');
-        return;
-      }
-
       const result = syncedResult;
 
       expect(result).toBeDefined();
-      if (!result) {
-        return;
-      }
       expect(result.synced + result.errors).toBeLessThanOrEqual(result.totalEntries);
     });
   });
@@ -153,11 +100,6 @@ describe('Tournament Event Results Integration Tests', () => {
     test(
       'should have valid entry event result structure',
       async () => {
-        if (!hasActiveTournaments) {
-          console.log('⊘ Skipping - no active tournaments');
-          return;
-        }
-
         const db = await getDb();
         const results = await db
           .select()
@@ -183,11 +125,6 @@ describe('Tournament Event Results Integration Tests', () => {
     test(
       'should have unique entry-event combinations',
       async () => {
-        if (!hasActiveTournaments) {
-          console.log('⊘ Skipping - no active tournaments');
-          return;
-        }
-
         const db = await getDb();
         const results = await db
           .select()
@@ -209,21 +146,13 @@ describe('Tournament Event Results Integration Tests', () => {
     test(
       'should sync entries from all active tournaments',
       async () => {
-        if (!hasActiveTournaments) {
-          console.log('⊘ Skipping - no active tournaments');
-          return;
-        }
-
-        const tournaments = await tournamentInfoRepository.findActive();
-        expect(tournaments.length).toBeGreaterThan(0);
+        const activeTournaments = await tournamentInfoRepository.findActive();
+        expect(activeTournaments.length).toBeGreaterThan(0);
 
         const result = syncedResult;
 
         // Should process entries from tournaments
         expect(result).toBeDefined();
-        if (!result) {
-          return;
-        }
         expect(result.totalEntries).toBeGreaterThanOrEqual(0);
       },
       INTEGRATION_TEST_TIMEOUT_MS,
@@ -231,7 +160,7 @@ describe('Tournament Event Results Integration Tests', () => {
 
     test('should handle tournaments with no entries', async () => {
       // This should not throw even if some tournaments have no entries
-      const result = syncedResult ?? (await syncTournamentEventResults(testEventId));
+      const result = syncedResult;
 
       expect(result).toBeDefined();
       expect(result.errors).toBeGreaterThanOrEqual(0);
@@ -247,26 +176,19 @@ describe('Tournament Event Results Integration Tests', () => {
         await syncTournamentEventResults(invalidEventId);
         // If we get here, either the event exists or there are no tournaments
         expect(true).toBe(true);
-      } catch (error: any) {
+      } catch (error: unknown) {
         // Expected: FPL API returns 404 for invalid events
-        expect(error.status).toBe(404);
-        expect(error.code).toBe('HTTP_ERROR');
+        const err = error as { status?: number; code?: string };
+        expect(err.status).toBe(404);
+        expect(err.code).toBe('HTTP_ERROR');
       }
     });
 
     test('should continue on individual entry failures', async () => {
-      if (!hasActiveTournaments) {
-        console.log('⊘ Skipping - no active tournaments');
-        return;
-      }
-
       // Sync with valid event - some entries might fail
       const result = syncedResult;
 
       expect(result).toBeDefined();
-      if (!result) {
-        return;
-      }
       // Even with some failures, should report counts
       expect(result.totalEntries).toBeGreaterThanOrEqual(0);
       expect(result.synced).toBeGreaterThanOrEqual(0);
@@ -276,11 +198,6 @@ describe('Tournament Event Results Integration Tests', () => {
 
   describe('Performance', () => {
     test('should complete sync within reasonable time', async () => {
-      if (!hasActiveTournaments) {
-        console.log('⊘ Skipping - no active tournaments');
-        return;
-      }
-
       // Should complete within 2 minutes for typical tournament sizes
       expect(syncDuration).toBeLessThan(120000);
     });
@@ -288,19 +205,11 @@ describe('Tournament Event Results Integration Tests', () => {
 
   describe('Data Consistency', () => {
     test('should maintain consistency after multiple syncs', async () => {
-      if (!hasActiveTournaments) {
-        console.log('⊘ Skipping - no active tournaments');
-        return;
-      }
-
       const sync1 = syncedResult;
       const sync2 = syncedResult;
 
       expect(sync1).toBeDefined();
       expect(sync2).toBeDefined();
-      if (!sync1 || !sync2) {
-        return;
-      }
 
       // Should process same entries
       expect(sync2.totalEntries).toBe(sync1.totalEntries);

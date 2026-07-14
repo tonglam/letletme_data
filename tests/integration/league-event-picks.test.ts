@@ -7,48 +7,29 @@ import { tournamentInfoRepository } from '../../src/repositories/tournament-info
 import { getCurrentEvent } from '../../src/services/events.service';
 import { syncLeagueEventPicksByTournament } from '../../src/services/league-event-picks.service';
 
-describe('League Event Picks Integration Tests', () => {
-  let testEventId: number;
-  let testTournamentId: number | null = null;
-  let syncedResult: Awaited<ReturnType<typeof syncLeagueEventPicksByTournament>> | null = null;
+const currentEvent = await getCurrentEvent();
+const tournaments = await tournamentInfoRepository.findActive();
+const hasSeedData = Boolean(currentEvent) && tournaments.length > 0;
+
+describe.skipIf(!hasSeedData)('League Event Picks Integration Tests', () => {
+  const testEventId = currentEvent!.id;
+  const testTournamentId = tournaments[0]!.id;
+  let syncedResult: Awaited<ReturnType<typeof syncLeagueEventPicksByTournament>>;
 
   beforeAll(async () => {
-    const currentEvent = await getCurrentEvent();
-    if (!currentEvent) {
-      throw new Error('No current event found - cannot run integration tests');
-    }
-    testEventId = currentEvent.id;
-
-    // Get a tournament for testing
-    const tournaments = await tournamentInfoRepository.findActive();
-    if (tournaments.length > 0) {
-      testTournamentId = tournaments[0].id;
-      syncedResult = await syncLeagueEventPicksByTournament(testTournamentId, testEventId);
-    } else {
-      console.log('⚠️  No active tournaments found - some tests will be skipped');
-    }
+    syncedResult = await syncLeagueEventPicksByTournament(testTournamentId, testEventId);
   });
 
   describe('Sync Integration', () => {
     test('should sync league event picks for tournament', async () => {
-      if (!testTournamentId) {
-        console.log('⊘ Skipping - no test tournament available');
-        return;
-      }
-
       expect(syncedResult).toBeDefined();
-      expect(syncedResult?.tournamentId).toBe(testTournamentId);
-      expect(syncedResult?.eventId).toBe(testEventId);
-      expect(syncedResult?.totalEntries).toBeGreaterThanOrEqual(0);
-      expect(syncedResult?.synced).toBeGreaterThanOrEqual(0);
+      expect(syncedResult.tournamentId).toBe(testTournamentId);
+      expect(syncedResult.eventId).toBe(testEventId);
+      expect(syncedResult.totalEntries).toBeGreaterThanOrEqual(0);
+      expect(syncedResult.synced).toBeGreaterThanOrEqual(0);
     });
 
     test('should store picks in database', async () => {
-      if (!testTournamentId) {
-        console.log('⊘ Skipping - no test tournament available');
-        return;
-      }
-
       const db = await getDb();
       const picks = await db
         .select()
@@ -64,7 +45,10 @@ describe('League Event Picks Integration Tests', () => {
         expect(pick.picks).toBeDefined();
         // picks is JSONB array, check first element
         if (Array.isArray(pick.picks) && pick.picks.length > 0) {
-          const firstPick = pick.picks[0] as any;
+          const firstPick = pick.picks[0] as {
+            element: number;
+            position: number;
+          };
           expect(typeof firstPick.element).toBe('number');
           expect(typeof firstPick.position).toBe('number');
         }
@@ -74,11 +58,6 @@ describe('League Event Picks Integration Tests', () => {
 
   describe('Data Validation', () => {
     test('should have valid pick structure', async () => {
-      if (!testTournamentId) {
-        console.log('⊘ Skipping - no test tournament available');
-        return;
-      }
-
       const db = await getDb();
       const picks = await db
         .select()
@@ -90,7 +69,11 @@ describe('League Event Picks Integration Tests', () => {
         expect(pick.picks).toBeDefined();
         // picks is JSONB array of pick objects
         if (Array.isArray(pick.picks) && pick.picks.length > 0) {
-          const firstPick = pick.picks[0] as any;
+          const firstPick = pick.picks[0] as {
+            element: number;
+            position: number;
+            multiplier: number;
+          };
           expect(firstPick.position).toBeGreaterThanOrEqual(1);
           expect(firstPick.position).toBeLessThanOrEqual(15);
           expect(firstPick.element).toBeGreaterThan(0);
@@ -102,11 +85,6 @@ describe('League Event Picks Integration Tests', () => {
     });
 
     test('should have 15 picks per entry per event', async () => {
-      if (!testTournamentId) {
-        console.log('⊘ Skipping - no test tournament available');
-        return;
-      }
-
       const db = await getDb();
       const picksRows = await db
         .select()
@@ -122,11 +100,6 @@ describe('League Event Picks Integration Tests', () => {
     });
 
     test('should have unique positions per entry per event', async () => {
-      if (!testTournamentId) {
-        console.log('⊘ Skipping - no test tournament available');
-        return;
-      }
-
       const db = await getDb();
       const picksRows = await db
         .select()
@@ -136,7 +109,7 @@ describe('League Event Picks Integration Tests', () => {
       // Each row contains all picks in JSONB, check positions are unique
       picksRows.forEach((row) => {
         if (Array.isArray(row.picks)) {
-          const positions = row.picks.map((p: any) => p.position);
+          const positions = row.picks.map((p: { position: number }) => p.position);
           const uniquePositions = new Set(positions);
           expect(uniquePositions.size).toBe(positions.length);
         }
@@ -146,11 +119,6 @@ describe('League Event Picks Integration Tests', () => {
 
   describe('Captain and Vice Captain', () => {
     test('should have one captain (2x or 3x multiplier)', async () => {
-      if (!testTournamentId) {
-        console.log('⊘ Skipping - no test tournament available');
-        return;
-      }
-
       const db = await getDb();
       const picksRows = await db
         .select()
@@ -160,7 +128,7 @@ describe('League Event Picks Integration Tests', () => {
       // Each row contains all picks in JSONB, check for captain (multiplier >= 2)
       picksRows.forEach((row) => {
         if (Array.isArray(row.picks)) {
-          const captainPicks = row.picks.filter((p: any) => p.multiplier >= 2);
+          const captainPicks = row.picks.filter((p: { multiplier: number }) => p.multiplier >= 2);
           expect(captainPicks.length).toBeGreaterThanOrEqual(1);
         }
       });
@@ -169,12 +137,7 @@ describe('League Event Picks Integration Tests', () => {
 
   describe('Performance', () => {
     test('should complete sync within reasonable time', async () => {
-      if (!testTournamentId) {
-        console.log('⊘ Skipping - no test tournament available');
-        return;
-      }
-
-      expect(syncedResult?.totalEntries ?? 0).toBeGreaterThanOrEqual(0);
+      expect(syncedResult.totalEntries).toBeGreaterThanOrEqual(0);
     });
   });
 });

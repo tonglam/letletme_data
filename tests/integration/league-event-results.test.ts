@@ -7,42 +7,29 @@ import { tournamentInfoRepository } from '../../src/repositories/tournament-info
 import { getCurrentEvent } from '../../src/services/events.service';
 import { syncLeagueEventResultsByTournament } from '../../src/services/league-event-results.service';
 
-describe('League Event Results Integration Tests', () => {
-  let testEventId: number;
-  let testTournamentId: number | null = null;
-  let syncedResult: Awaited<ReturnType<typeof syncLeagueEventResultsByTournament>> | null = null;
+const currentEvent = await getCurrentEvent();
+const tournaments = await tournamentInfoRepository.findActive();
+const hasSeedData = Boolean(currentEvent) && tournaments.length > 0;
+
+describe.skipIf(!hasSeedData)('League Event Results Integration Tests', () => {
+  const testEventId = currentEvent!.id;
+  const testTournamentId = tournaments[0]!.id;
+  let syncedResult: Awaited<ReturnType<typeof syncLeagueEventResultsByTournament>>;
 
   beforeAll(async () => {
-    const currentEvent = await getCurrentEvent();
-    if (!currentEvent) {
-      throw new Error('No current event found - cannot run integration tests');
-    }
-    testEventId = currentEvent.id;
-
-    const tournaments = await tournamentInfoRepository.findActive();
-    if (tournaments.length > 0) {
-      testTournamentId = tournaments[0].id;
-      syncedResult = await syncLeagueEventResultsByTournament(testTournamentId, testEventId);
-    } else {
-      console.log('⚠️  No active tournaments found - some tests will be skipped');
-    }
+    syncedResult = await syncLeagueEventResultsByTournament(testTournamentId, testEventId);
   });
 
   describe('Sync Integration', () => {
     test(
       'should sync league event results for tournament',
       async () => {
-        if (!testTournamentId) {
-          console.log('⊘ Skipping - no test tournament available');
-          return;
-        }
-
         expect(syncedResult).toBeDefined();
-        expect(syncedResult?.tournamentId).toBe(testTournamentId);
-        expect(syncedResult?.eventId).toBe(testEventId);
-        expect(syncedResult?.totalEntries).toBeGreaterThanOrEqual(0);
-        expect(syncedResult?.updated).toBeGreaterThanOrEqual(0);
-        expect(syncedResult?.skipped).toBeGreaterThanOrEqual(0);
+        expect(syncedResult.tournamentId).toBe(testTournamentId);
+        expect(syncedResult.eventId).toBe(testEventId);
+        expect(syncedResult.totalEntries).toBeGreaterThanOrEqual(0);
+        expect(syncedResult.updated).toBeGreaterThanOrEqual(0);
+        expect(syncedResult.skipped).toBeGreaterThanOrEqual(0);
       },
       { timeout: 15000 },
     );
@@ -50,11 +37,6 @@ describe('League Event Results Integration Tests', () => {
     test(
       'should store results in database',
       async () => {
-        if (!testTournamentId) {
-          console.log('⊘ Skipping - no test tournament available');
-          return;
-        }
-
         const db = await getDb();
         const results = await db
           .select()
@@ -80,11 +62,6 @@ describe('League Event Results Integration Tests', () => {
     test(
       'should have valid result structure',
       async () => {
-        if (!testTournamentId) {
-          console.log('⊘ Skipping - no test tournament available');
-          return;
-        }
-
         const db = await getDb();
         const results = await db
           .select()
@@ -105,11 +82,6 @@ describe('League Event Results Integration Tests', () => {
     test(
       'should have consistent points calculation',
       async () => {
-        if (!testTournamentId) {
-          console.log('⊘ Skipping - no test tournament available');
-          return;
-        }
-
         const db = await getDb();
         const results = await db
           .select()
@@ -133,12 +105,7 @@ describe('League Event Results Integration Tests', () => {
     test(
       'should complete sync within reasonable time',
       async () => {
-        if (!testTournamentId) {
-          console.log('⊘ Skipping - no test tournament available');
-          return;
-        }
-
-        expect(syncedResult?.totalEntries ?? 0).toBeGreaterThanOrEqual(0);
+        expect(syncedResult.totalEntries).toBeGreaterThanOrEqual(0);
       },
       { timeout: 15000 },
     );

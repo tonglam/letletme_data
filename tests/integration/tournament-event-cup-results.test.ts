@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, test } from 'bun:test';
+import { describe, expect, test } from 'bun:test';
 import { eq } from 'drizzle-orm';
 
 import { getDb } from '../../src/db/singleton';
@@ -7,30 +7,18 @@ import { tournamentInfoRepository } from '../../src/repositories/tournament-info
 import { syncTournamentEventCupResults } from '../../src/services/tournament-event-cup-results.service';
 import { getCurrentEvent } from '../../src/services/events.service';
 
-describe('Tournament Event Cup Results Integration Tests', () => {
-  let testEventId: number;
-  let hasActiveTournaments: boolean;
+const currentEvent = await getCurrentEvent();
+const tournaments = await tournamentInfoRepository.findActive();
+const hasSeedData = Boolean(currentEvent) && tournaments.length > 0;
+
+describe.skipIf(!hasSeedData)('Tournament Event Cup Results Integration Tests', () => {
+  const testEventId = currentEvent!.id;
   let syncPromise: ReturnType<typeof syncTournamentEventCupResults> | undefined;
 
   function ensureSynced() {
     syncPromise ??= syncTournamentEventCupResults(testEventId);
     return syncPromise;
   }
-
-  beforeAll(async () => {
-    const currentEvent = await getCurrentEvent();
-    if (!currentEvent) {
-      throw new Error('No current event found - cannot run integration tests');
-    }
-    testEventId = currentEvent.id;
-
-    const tournaments = await tournamentInfoRepository.findActive();
-    hasActiveTournaments = tournaments.length > 0;
-
-    if (!hasActiveTournaments) {
-      console.log('⚠️  No active tournaments found - some tests will be skipped');
-    }
-  });
 
   describe('Sync Integration', () => {
     test(
@@ -49,11 +37,6 @@ describe('Tournament Event Cup Results Integration Tests', () => {
     test(
       'should store cup results in database',
       async () => {
-        if (!hasActiveTournaments) {
-          console.log('⊘ Skipping - no active tournaments');
-          return;
-        }
-
         await ensureSynced();
 
         const db = await getDb();
@@ -78,11 +61,6 @@ describe('Tournament Event Cup Results Integration Tests', () => {
     test(
       'should have valid cup result structure',
       async () => {
-        if (!hasActiveTournaments) {
-          console.log('⊘ Skipping - no active tournaments');
-          return;
-        }
-
         await ensureSynced();
 
         const db = await getDb();

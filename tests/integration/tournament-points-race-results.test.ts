@@ -7,27 +7,16 @@ import { tournamentInfoRepository } from '../../src/repositories/tournament-info
 import { syncTournamentPointsRaceResults } from '../../src/services/tournament-points-race-results.service';
 import { getCurrentEvent } from '../../src/services/events.service';
 
-describe('Tournament Points Race Results Integration Tests', () => {
-  let testEventId: number;
-  let hasPointsRaceTournaments: boolean;
+const currentEvent = await getCurrentEvent();
+const tournaments = await tournamentInfoRepository.findActive();
+const hasSeedData =
+  Boolean(currentEvent) && tournaments.some((t) => t.groupMode === 'points_races');
+
+describe.skipIf(!hasSeedData)('Tournament Points Race Results Integration Tests', () => {
+  const testEventId = currentEvent!.id;
   let syncedResult: Awaited<ReturnType<typeof syncTournamentPointsRaceResults>>;
 
   beforeAll(async () => {
-    const currentEvent = await getCurrentEvent();
-    if (!currentEvent) {
-      throw new Error('No current event found - cannot run integration tests');
-    }
-    testEventId = currentEvent.id;
-
-    const tournaments = await tournamentInfoRepository.findActive();
-    hasPointsRaceTournaments = tournaments.some((t) => t.groupMode === 'points_races');
-
-    if (!hasPointsRaceTournaments) {
-      console.log('⚠️  No points race tournaments found - some tests will be skipped');
-      syncedResult = { eventId: testEventId, updatedGroups: 0, updatedResults: 0, skipped: 0 };
-      return;
-    }
-
     syncedResult = await syncTournamentPointsRaceResults(testEventId);
   });
 
@@ -40,11 +29,6 @@ describe('Tournament Points Race Results Integration Tests', () => {
     });
 
     test('should store results in database', async () => {
-      if (!hasPointsRaceTournaments) {
-        console.log('⊘ Skipping - no points race tournaments');
-        return;
-      }
-
       const db = await getDb();
       const results = await db
         .select()
@@ -66,11 +50,6 @@ describe('Tournament Points Race Results Integration Tests', () => {
 
   describe('Data Validation', () => {
     test('should have valid points race structure', async () => {
-      if (!hasPointsRaceTournaments) {
-        console.log('⊘ Skipping - no points race tournaments');
-        return;
-      }
-
       const db = await getDb();
       const results = await db
         .select()
@@ -85,11 +64,6 @@ describe('Tournament Points Race Results Integration Tests', () => {
     });
 
     test('should have unique ranks per group', async () => {
-      if (!hasPointsRaceTournaments) {
-        console.log('⊘ Skipping - no points race tournaments');
-        return;
-      }
-
       const db = await getDb();
       const results = await db
         .select()
