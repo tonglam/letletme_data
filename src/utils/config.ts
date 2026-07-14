@@ -20,6 +20,22 @@ const EnvSchema = z.object({
     .enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace'])
     .optional()
     .default('info'),
+  // Auth (Better Auth + API keys)
+  ENABLE_AUTH: z
+    .union([z.boolean(), z.string()])
+    .optional()
+    .transform((value) => {
+      if (value === undefined) {
+        return process.env.NODE_ENV === 'production';
+      }
+      if (typeof value === 'boolean') {
+        return value;
+      }
+      return value === 'true' || value === '1';
+    }),
+  BETTER_AUTH_SECRET: z.string().optional(),
+  BETTER_AUTH_URL: z.string().url().optional(),
+  CORS_ORIGINS: z.string().optional(),
   // Optional Supabase hints (DB provider)
   SUPABASE_URL: z.string().optional(),
   SUPABASE_KEY: z.string().optional(),
@@ -33,6 +49,13 @@ const EnvSchema = z.object({
 });
 
 export type AppConfig = z.infer<typeof EnvSchema>;
+
+export type AuthConfig = {
+  ENABLE_AUTH: boolean;
+  BETTER_AUTH_SECRET: string;
+  BETTER_AUTH_URL: string;
+  CORS_ORIGINS: string[];
+};
 
 let cachedConfig: AppConfig | null = null;
 
@@ -80,4 +103,49 @@ export function validateEnvForCli(): { ok: boolean; errors?: unknown } {
     logError('[env] FAILED', error);
     return { ok: false, errors: error };
   }
+}
+
+function resolveAuthConfig(parsed: AppConfig): AuthConfig {
+  const enableAuth = parsed.ENABLE_AUTH ?? parsed.NODE_ENV === 'production';
+
+  if (!enableAuth) {
+    return {
+      ENABLE_AUTH: false,
+      BETTER_AUTH_SECRET:
+        parsed.BETTER_AUTH_SECRET ?? 'dev-only-auth-secret-not-used-in-production',
+      BETTER_AUTH_URL: parsed.BETTER_AUTH_URL ?? `http://localhost:${parsed.PORT}`,
+      CORS_ORIGINS: parseCorsOrigins(parsed.CORS_ORIGINS),
+    };
+  }
+
+  if (!parsed.BETTER_AUTH_SECRET || parsed.BETTER_AUTH_SECRET.length < 32) {
+    throw new Error('BETTER_AUTH_SECRET is required (min 32 chars) when ENABLE_AUTH=true');
+  }
+
+  if (!parsed.BETTER_AUTH_URL) {
+    throw new Error('BETTER_AUTH_URL is required when ENABLE_AUTH=true');
+  }
+
+  return {
+    ENABLE_AUTH: true,
+    BETTER_AUTH_SECRET: parsed.BETTER_AUTH_SECRET,
+    BETTER_AUTH_URL: parsed.BETTER_AUTH_URL,
+    CORS_ORIGINS: parseCorsOrigins(parsed.CORS_ORIGINS),
+  };
+}
+
+function parseCorsOrigins(value: string | undefined): string[] {
+  if (!value) {
+    return [];
+  }
+
+  return value
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter((origin) => origin.length > 0);
+}
+
+export function getAuthConfig(): AuthConfig {
+  const parsed = getConfig();
+  return resolveAuthConfig(parsed);
 }

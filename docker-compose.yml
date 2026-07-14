@@ -17,7 +17,9 @@ services:
       - TZ=Asia/Shanghai
     logging: *default-logging
     ports:
-      - '3000:3000'
+      - '127.0.0.1:3000:3000'
+    volumes:
+      - ./log:/app/logs
     restart: unless-stopped
     healthcheck:
       test:
@@ -42,4 +44,6 @@ services:
     environment:
       - TZ=Asia/Shanghai
     logging: *default-logging
+    volumes:
+      - ./log:/app/logs
     restart: unless-stopped

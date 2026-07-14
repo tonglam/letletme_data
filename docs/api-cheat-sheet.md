@@ -6,9 +6,16 @@ Current production base URL:
 
 Important:
 
-- These endpoints are currently publicly reachable.
-- Many of them trigger syncs, mutate data, or enqueue background jobs.
-- There is no app-level auth protecting them right now.
+- `GET` endpoints are public.
+- `POST`, `PUT`, `PATCH`, and `DELETE` require an API key in the `x-api-key` header when `ENABLE_AUTH=true`.
+- Bootstrap a key once with `bun run auth:create-admin-key` on the server.
+
+## Auth header for mutations
+
+```bash
+export API_KEY='llm_...'
+curl -X POST http://43.163.91.9/events/sync -H "x-api-key: $API_KEY"
+```
 
 ## Base
 
@@ -24,7 +31,7 @@ Important:
 - `GET /events/next`
   - `curl http://43.163.91.9/events/next`
 - `POST /events/sync`
-  - `curl -X POST http://43.163.91.9/events/sync`
+  - `curl -X POST http://43.163.91.9/events/sync -H "x-api-key: $API_KEY"`
 
 ## Event Lives
 

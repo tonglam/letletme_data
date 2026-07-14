@@ -1,16 +1,16 @@
-import { getCurrentSeason } from '../utils/conditions';
 import { logDebug, logError } from '../utils/logger';
+import { finalizeSeasonCacheWrite, getActiveCacheSeason } from './cache-season';
 import { redisSingleton } from './singleton';
 
 import type { Phase } from '../types';
 
 export const phasesCache = {
   // Store all phases in a single hash (efficient batch operation)
-  async set(phases: Phase[]): Promise<void> {
+  async set(phases: Phase[], season?: string): Promise<void> {
     try {
       const redis = await redisSingleton.getClient();
-      const season = getCurrentSeason();
-      const key = `Phase:${season}`;
+      const activeSeason = season ?? (await getActiveCacheSeason());
+      const key = `Phase:${activeSeason}`;
 
       // Use pipeline for atomic operation
       const pipeline = redis.pipeline();
@@ -28,7 +28,8 @@ export const phasesCache = {
       }
 
       await pipeline.exec();
-      logDebug('Phases cache updated (hash)', { count: phases.length, season });
+      await finalizeSeasonCacheWrite(activeSeason, ['Phase']);
+      logDebug('Phases cache updated (hash)', { count: phases.length, season: activeSeason });
     } catch (error) {
       logError('Phases cache set error', error);
       throw error;
@@ -38,7 +39,7 @@ export const phasesCache = {
   async clear(): Promise<void> {
     try {
       const redis = await redisSingleton.getClient();
-      const season = getCurrentSeason();
+      const season = await getActiveCacheSeason();
       const key = `Phase:${season}`;
       await redis.del(key);
       logDebug('Phases cache cleared', { season });

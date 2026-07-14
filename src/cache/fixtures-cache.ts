@@ -1,7 +1,7 @@
 import type { Redis } from 'ioredis';
 
-import { getCurrentSeason } from '../utils/conditions';
 import { logDebug, logError } from '../utils/logger';
+import { finalizeSeasonCacheWrite, getActiveCacheSeason } from './cache-season';
 import { redisSingleton } from './singleton';
 
 import type { TeamFixture } from '../domain/fixtures';
@@ -97,11 +97,11 @@ function buildFixturesByTeam(
 }
 
 export const fixturesCache = {
-  async setByEvent(eventId: number, fixtures: Fixture[]): Promise<void> {
+  async setByEvent(eventId: number, fixtures: Fixture[], season?: string): Promise<void> {
     try {
       const redis = await redisSingleton.getClient();
-      const season = getCurrentSeason();
-      const key = `Fixtures:${season}:${eventId}`;
+      const activeSeason = season ?? (await getActiveCacheSeason());
+      const key = `Fixtures:${activeSeason}:${eventId}`;
 
       const pipeline = redis.pipeline();
       pipeline.del(key);
@@ -115,17 +115,22 @@ export const fixturesCache = {
       }
 
       await pipeline.exec();
-      logDebug('Fixtures cache updated by event', { eventId, count: fixtures.length, season });
+      await finalizeSeasonCacheWrite(activeSeason, ['Fixtures']);
+      logDebug('Fixtures cache updated by event', {
+        eventId,
+        count: fixtures.length,
+        season: activeSeason,
+      });
     } catch (error) {
       logError('Fixtures cache set by event error', error, { eventId });
       throw error;
     }
   },
 
-  async set(fixtures: Fixture[]): Promise<void> {
+  async set(fixtures: Fixture[], season?: string): Promise<void> {
     try {
       const redis = await redisSingleton.getClient();
-      const season = getCurrentSeason();
+      const activeSeason = season ?? (await getActiveCacheSeason());
 
       const fixturesByEvent = new Map<number | string, Fixture[]>();
       const unscheduled: Fixture[] = [];
@@ -142,14 +147,14 @@ export const fixturesCache = {
       }
 
       const pipeline = redis.pipeline();
-      const pattern = `Fixtures:${season}:*`;
+      const pattern = `Fixtures:${activeSeason}:*`;
       const existingKeys = await scanKeys(redis, pattern);
       for (const key of existingKeys) {
         pipeline.del(key);
       }
 
       for (const [eventId, eventFixtures] of fixturesByEvent) {
-        const key = `Fixtures:${season}:${eventId}`;
+        const key = `Fixtures:${activeSeason}:${eventId}`;
         const fields: Record<string, string> = {};
         for (const fixture of eventFixtures) {
           fields[fixture.id.toString()] = JSON.stringify(fixture);
@@ -158,7 +163,7 @@ export const fixturesCache = {
       }
 
       if (unscheduled.length > 0) {
-        const key = `Fixtures:${season}:unscheduled`;
+        const key = `Fixtures:${activeSeason}:unscheduled`;
         const fields: Record<string, string> = {};
         for (const fixture of unscheduled) {
           fields[fixture.id.toString()] = JSON.stringify(fixture);
@@ -169,21 +174,21 @@ export const fixturesCache = {
       await pipeline.exec();
 
       // Write FixturesByTeam:{season}:{teamId} — team IDs and names from Team:{season}
-      const teamRaw = await redis.hgetall(`Team:${season}`);
+      const teamRaw = await redis.hgetall(`Team:${activeSeason}`);
       const teamById = new Map<number, TeamInfo>();
       for (const [id, json] of Object.entries(teamRaw)) {
         const t = JSON.parse(json) as { name: string; shortName: string };
         teamById.set(Number(id), { name: t.name, shortName: t.shortName });
       }
       const byTeam = buildFixturesByTeam([...teamById.keys()], fixtures, teamById);
-      const teamPattern = `FixturesByTeam:${season}:*`;
+      const teamPattern = `FixturesByTeam:${activeSeason}:*`;
       const staleTeamKeys = await scanKeys(redis, teamPattern);
       const teamPipeline = redis.pipeline();
       for (const key of staleTeamKeys) {
         teamPipeline.del(key);
       }
       for (const [teamId, eventMap] of byTeam) {
-        const teamKey = `FixturesByTeam:${season}:${teamId}`;
+        const teamKey = `FixturesByTeam:${activeSeason}:${teamId}`;
         const fields: Record<string, string> = {};
         for (const [eventId, teamFixture] of eventMap) {
           fields[eventId.toString()] = JSON.stringify(teamFixture);
@@ -193,6 +198,7 @@ export const fixturesCache = {
         }
       }
       await teamPipeline.exec();
+      await finalizeSeasonCacheWrite(activeSeason, ['Fixtures', 'FixturesByTeam']);
 
       logDebug('Fixtures cache updated (all events + teams)', {
         count: fixtures.length,
@@ -200,7 +206,7 @@ export const fixturesCache = {
         unscheduled: unscheduled.length,
         events: fixturesByEvent.size,
         teams: byTeam.size,
-        season,
+        season: activeSeason,
       });
     } catch (error) {
       logError('Fixtures cache set error', error);
@@ -211,7 +217,7 @@ export const fixturesCache = {
   async clear(): Promise<void> {
     try {
       const redis = await redisSingleton.getClient();
-      const season = getCurrentSeason();
+      const season = await getActiveCacheSeason();
       const pattern = `Fixtures:${season}:*`;
       const keys = await scanKeys(redis, pattern);
 
@@ -229,7 +235,7 @@ export const fixturesCache = {
   async clearByEvent(eventId: number): Promise<void> {
     try {
       const redis = await redisSingleton.getClient();
-      const season = getCurrentSeason();
+      const season = await getActiveCacheSeason();
       const key = `Fixtures:${season}:${eventId}`;
       await redis.del(key);
       logDebug('Fixtures cache cleared by event', { eventId, season });
@@ -242,7 +248,7 @@ export const fixturesCache = {
   async clearUnscheduled(): Promise<void> {
     try {
       const redis = await redisSingleton.getClient();
-      const season = getCurrentSeason();
+      const season = await getActiveCacheSeason();
       const key = `Fixtures:${season}:unscheduled`;
       await redis.del(key);
       logDebug('Fixtures cache cleared for unscheduled', { season });
@@ -252,11 +258,11 @@ export const fixturesCache = {
     }
   },
 
-  async setByTeam(teamId: number, teamFixtures: TeamFixture[]): Promise<void> {
+  async setByTeam(teamId: number, teamFixtures: TeamFixture[], season?: string): Promise<void> {
     try {
       const redis = await redisSingleton.getClient();
-      const season = getCurrentSeason();
-      const key = `FixturesByTeam:${season}:${teamId}`;
+      const activeSeason = season ?? (await getActiveCacheSeason());
+      const key = `FixturesByTeam:${activeSeason}:${teamId}`;
 
       const pipeline = redis.pipeline();
       pipeline.del(key);
@@ -270,7 +276,12 @@ export const fixturesCache = {
       }
 
       await pipeline.exec();
-      logDebug('Fixtures cache updated by team', { teamId, count: teamFixtures.length, season });
+      await finalizeSeasonCacheWrite(activeSeason, ['FixturesByTeam']);
+      logDebug('Fixtures cache updated by team', {
+        teamId,
+        count: teamFixtures.length,
+        season: activeSeason,
+      });
     } catch (error) {
       logError('Fixtures cache set by team error', error, { teamId });
       throw error;
@@ -280,7 +291,7 @@ export const fixturesCache = {
   async getByTeam(teamId: number): Promise<TeamFixture[] | null> {
     try {
       const redis = await redisSingleton.getClient();
-      const season = getCurrentSeason();
+      const season = await getActiveCacheSeason();
       const key = `FixturesByTeam:${season}:${teamId}`;
       const hash = await redis.hgetall(key);
 
@@ -301,7 +312,7 @@ export const fixturesCache = {
   async clearByTeam(teamId: number): Promise<void> {
     try {
       const redis = await redisSingleton.getClient();
-      const season = getCurrentSeason();
+      const season = await getActiveCacheSeason();
       const key = `FixturesByTeam:${season}:${teamId}`;
       await redis.del(key);
       logDebug('Fixtures cache cleared by team', { teamId, season });
@@ -314,7 +325,7 @@ export const fixturesCache = {
   async clearAllByTeam(): Promise<void> {
     try {
       const redis = await redisSingleton.getClient();
-      const season = getCurrentSeason();
+      const season = await getActiveCacheSeason();
       const pattern = `FixturesByTeam:${season}:*`;
       const keys = await scanKeys(redis, pattern);
 

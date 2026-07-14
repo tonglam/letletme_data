@@ -96,6 +96,7 @@ jobs:
             git reset --hard "$DEPLOY_SHA"
             APP_IMAGE="$IMAGE_REF" docker compose pull api worker
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun run db:migrate
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun scripts/apply-sql-migrations.ts
             APP_IMAGE="$IMAGE_REF" docker compose up -d --remove-orphans --no-build
             for attempt in $(seq 1 30); do
               if curl --fail --silent http://127.0.0.1/health >/dev/null; then

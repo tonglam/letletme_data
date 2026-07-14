@@ -1,4 +1,5 @@
 import { fixturesCache } from '../cache/operations';
+import { deriveSeasonFromFixtures } from '../cache/cache-season';
 import { fplClient } from '../clients/fpl';
 import { fixtureRepository } from '../repositories/fixtures';
 import { transformFixtures } from '../transformers/fixtures';
@@ -61,6 +62,7 @@ export async function syncFixtures(eventId?: number): Promise<{ count: number; e
 
     const unscheduledFixtures = fixtures.filter((fixture) => fixture.event === null);
     const schedulableFixtures = fixtures.filter((fixture) => fixture.event !== null);
+    const cacheSeason = deriveSeasonFromFixtures(rawFixtures) ?? undefined;
 
     if (unscheduledFixtures.length > 0) {
       // Some FPL fixtures can be temporarily unscheduled (event = null).
@@ -79,10 +81,10 @@ export async function syncFixtures(eventId?: number): Promise<{ count: number; e
     // 4. Update cache with event-specific fixtures
     if (eventId) {
       // Cache fixtures for specific event
-      await fixturesCache.setByEvent(eventId, savedFixtures);
+      await fixturesCache.setByEvent(eventId, savedFixtures, cacheSeason);
     } else {
       // Cache all fixtures (grouped by event), including unscheduled records directly from FPL.
-      await fixturesCache.set([...savedFixtures, ...unscheduledFixtures]);
+      await fixturesCache.set([...savedFixtures, ...unscheduledFixtures], cacheSeason);
     }
 
     if (eventId && staleEventIds && staleEventIds.size > 0) {

@@ -9,12 +9,13 @@ export const playerValuesCache = {
     try {
       const redis = await redisSingleton.getClient();
       const key = `PlayerValue:${changeDate}`;
+      const missingKey = `PlayerValueMissing:${changeDate}`;
 
       // Use pipeline for atomic operation
       const pipeline = redis.pipeline();
 
       // Clear existing hash
-      pipeline.del(key);
+      pipeline.del(key, missingKey);
 
       if (playerValues.length > 0) {
         // Store each player value as a hash field (element ID -> full player value JSON)
@@ -57,7 +58,8 @@ export const playerValuesCache = {
     try {
       const redis = await redisSingleton.getClient();
       const key = `PlayerValue:${changeDate}`;
-      await redis.del(key);
+      const missingKey = `PlayerValueMissing:${changeDate}`;
+      await redis.del(key, missingKey);
       logDebug('Player values cache cleared', { changeDate });
     } catch (error) {
       logError('Player values cache clear error', error);

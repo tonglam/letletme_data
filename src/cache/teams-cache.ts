@@ -1,16 +1,16 @@
-import { getCurrentSeason } from '../utils/conditions';
 import { logDebug, logError } from '../utils/logger';
+import { finalizeSeasonCacheWrite, getActiveCacheSeason } from './cache-season';
 import { redisSingleton } from './singleton';
 
 import type { Team } from '../types';
 
 export const teamsCache = {
   // Store all teams in a single hash (efficient batch operation)
-  async set(teams: Team[]): Promise<void> {
+  async set(teams: Team[], season?: string): Promise<void> {
     try {
       const redis = await redisSingleton.getClient();
-      const season = getCurrentSeason();
-      const key = `Team:${season}`;
+      const activeSeason = season ?? (await getActiveCacheSeason());
+      const key = `Team:${activeSeason}`;
 
       // Use pipeline for atomic operation
       const pipeline = redis.pipeline();
@@ -28,7 +28,8 @@ export const teamsCache = {
       }
 
       await pipeline.exec();
-      logDebug('Teams cache updated (hash)', { count: teams.length, season });
+      await finalizeSeasonCacheWrite(activeSeason, ['Team']);
+      logDebug('Teams cache updated (hash)', { count: teams.length, season: activeSeason });
     } catch (error) {
       logError('Teams cache set error', error);
       throw error;

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, test } from 'bun:test';
 
+import { selectNextEventByDeadline } from '../../src/domain/events';
 import { createEventRepository } from '../../src/repositories/events';
 import { transformEvents } from '../../src/transformers/events';
 import {
@@ -189,6 +190,14 @@ describe('Events Unit Tests', () => {
       expect(nextEvent?.isNext).toBe(true);
       expect(nextEvent?.isCurrent).toBe(false);
       expect(nextEvent?.isPrevious).toBe(false);
+    });
+
+    test('should select GW1 as next event before first deadline', () => {
+      const result = transformEvents(rawFPLEventsFixture);
+      const nextEvent = selectNextEventByDeadline(result, 1_754_000_000);
+
+      expect(nextEvent?.id).toBe(1);
+      expect(nextEvent?.name).toBe('Gameweek 1');
     });
 
     test('should correctly identify previous event', () => {

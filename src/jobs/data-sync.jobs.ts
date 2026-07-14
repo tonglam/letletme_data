@@ -13,7 +13,7 @@ import { isFPLSeason } from '../utils/conditions';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { logDebug, logInfo } from '../utils/logger';
 
-async function shouldRunDataSync(jobName: string) {
+async function shouldRunSeasonDataSync(jobName: string) {
   const now = new Date();
   if (!(await isFPLSeason(now))) {
     logDebug('Skipping data sync job - not FPL season', {
@@ -35,9 +35,6 @@ export function registerDataSyncJobs(app: Elysia) {
         async run() {
           try {
             await executeTrackedCron('events-sync', async () => {
-              if (!(await shouldRunDataSync('events-sync'))) {
-                return;
-              }
               const job = await enqueueEventsSyncJob('cron');
               logInfo('Events sync job enqueued via cron', { jobId: job.id });
             });
@@ -54,9 +51,6 @@ export function registerDataSyncJobs(app: Elysia) {
         async run() {
           try {
             await executeTrackedCron('teams-sync', async () => {
-              if (!(await shouldRunDataSync('teams-sync'))) {
-                return;
-              }
               const job = await enqueueTeamsSyncJob('cron');
               logInfo('Teams sync job enqueued via cron', { jobId: job.id });
             });
@@ -73,9 +67,6 @@ export function registerDataSyncJobs(app: Elysia) {
         async run() {
           try {
             await executeTrackedCron('fixtures-sync', async () => {
-              if (!(await shouldRunDataSync('fixtures-sync'))) {
-                return;
-              }
               const job = await enqueueFixturesSyncJob('cron');
               logInfo('Fixtures sync job enqueued via cron', { jobId: job.id });
             });
@@ -92,9 +83,6 @@ export function registerDataSyncJobs(app: Elysia) {
         async run() {
           try {
             await executeTrackedCron('players-sync', async () => {
-              if (!(await shouldRunDataSync('players-sync'))) {
-                return;
-              }
               const job = await enqueuePlayersSyncJob('cron');
               logInfo('Players sync job enqueued via cron', { jobId: job.id });
             });
@@ -111,7 +99,7 @@ export function registerDataSyncJobs(app: Elysia) {
         async run() {
           try {
             await executeTrackedCron('player-stats-sync', async () => {
-              if (!(await shouldRunDataSync('player-stats-sync'))) {
+              if (!(await shouldRunSeasonDataSync('player-stats-sync'))) {
                 return;
               }
               const job = await enqueuePlayerStatsSyncJob('cron');
@@ -130,9 +118,6 @@ export function registerDataSyncJobs(app: Elysia) {
         async run() {
           try {
             await executeTrackedCron('phases-sync', async () => {
-              if (!(await shouldRunDataSync('phases-sync'))) {
-                return;
-              }
               const job = await enqueuePhasesSyncJob('cron');
               logInfo('Phases sync job enqueued via cron', { jobId: job.id });
             });

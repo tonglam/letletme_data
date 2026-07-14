@@ -2,6 +2,7 @@ import { cors } from '@elysiajs/cors';
 import { Elysia } from 'elysia';
 
 // Import API route groups
+import { betterAuthPlugin, registerMutationAuthGuard } from './api/auth.guard';
 import { entryInfoAPI } from './api/entry-info.api';
 import { entrySyncAPI } from './api/entry-sync.api';
 import { eventLivesAPI } from './api/event-lives.api';
@@ -19,11 +20,12 @@ import { tournamentsAPI } from './api/tournaments.api';
 import { registerDataJobs } from './jobs/data-jobs';
 import { registerEntryJobs } from './jobs/entry-sync.jobs';
 import { registerLeagueJobs } from './jobs/league-jobs';
+import { registerLaunchJobs } from './jobs/launch.jobs';
 import { registerLiveJobs } from './jobs/live.jobs';
 import { registerTournamentJobs } from './jobs/tournament-jobs';
 
 // Import utilities
-import { getConfig } from './utils/config';
+import { getAuthConfig, getConfig } from './utils/config';
 import { getErrorMessage } from './utils/errors';
 import { getHttpErrorLogLevel, getHttpRequestLogContext } from './utils/http-logging';
 import { logDebug, logError, logInfo, logWarn } from './utils/logger';
@@ -40,14 +42,23 @@ import { logDebug, logError, logInfo, logWarn } from './utils/logger';
 
 // Validate environment and resolve config
 const { PORT: port } = getConfig();
+const { CORS_ORIGINS, ENABLE_AUTH } = getAuthConfig();
 
 const app = new Elysia()
   // ================================
   // Middleware & Configuration
   // ================================
 
-  // CORS support
-  .use(cors())
+  .use(
+    cors({
+      origin: CORS_ORIGINS.length > 0 ? CORS_ORIGINS : false,
+      methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+      allowedHeaders: ['Content-Type', 'x-api-key'],
+    }),
+  )
+
+  .use(betterAuthPlugin)
+  .use(registerMutationAuthGuard)
 
   // Request logging
   .onRequest(({ request }) => {
@@ -128,6 +139,7 @@ const app = new Elysia()
   // ================================
 
   .use(registerDataJobs)
+  .use(registerLaunchJobs)
   .use(registerLiveJobs)
   .use(registerEntryJobs)
   .use(registerLeagueJobs)
@@ -146,6 +158,7 @@ const app = new Elysia()
 logInfo('🚀 Elysia server started', {
   port,
   environment: process.env.NODE_ENV || 'development',
+  authEnabled: ENABLE_AUTH,
   apis: [
     'events',
     'event-lives',
@@ -161,6 +174,7 @@ logInfo('🚀 Elysia server started', {
   ],
   jobs: [
     'data-sync',
+    'launch-monitor',
     'player-values-window',
     'live-scores',
     'event-current-refresh',

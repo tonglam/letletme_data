@@ -1,6 +1,6 @@
-import { getCurrentSeason } from '../utils/conditions';
 import { CacheError } from '../utils/errors';
 import { logDebug, logError } from '../utils/logger';
+import { finalizeSeasonCacheWrite, getActiveCacheSeason } from './cache-season';
 import { redisSingleton } from './singleton';
 
 import type { Player } from '../types';
@@ -18,7 +18,7 @@ import type { Player } from '../types';
  * When new player data comes in, replace entire cache
  */
 
-const getHashKey = () => `Player:${getCurrentSeason()}`; // Dynamic season key
+const getHashKey = async (season?: string) => `Player:${season ?? (await getActiveCacheSeason())}`;
 
 const createPlayerHashCache = () => {
   return {
@@ -28,7 +28,7 @@ const createPlayerHashCache = () => {
     getPlayer: async (playerId: number): Promise<Player | null> => {
       try {
         const redis = await redisSingleton.getClient();
-        const key = getHashKey();
+        const key = await getHashKey();
         const value = await redis.hget(key, playerId.toString());
 
         if (!value) {
@@ -55,7 +55,7 @@ const createPlayerHashCache = () => {
     setPlayer: async (playerId: number, player: Player): Promise<void> => {
       try {
         const redis = await redisSingleton.getClient();
-        const key = getHashKey();
+        const key = await getHashKey();
         const serialized = JSON.stringify(player);
 
         await redis.hset(key, playerId.toString(), serialized);
@@ -77,7 +77,7 @@ const createPlayerHashCache = () => {
     getAllPlayers: async (): Promise<Player[] | null> => {
       try {
         const redis = await redisSingleton.getClient();
-        const key = getHashKey();
+        const key = await getHashKey();
         const hash = await redis.hgetall(key);
 
         if (!hash || Object.keys(hash).length === 0) {
@@ -107,10 +107,11 @@ const createPlayerHashCache = () => {
      * Hash field keys: Element IDs (1, 2, 3, ...) as strings
      * Hash field values: Complete player JSON objects
      */
-    setAllPlayers: async (players: Player[]): Promise<void> => {
+    setAllPlayers: async (players: Player[], season?: string): Promise<void> => {
       try {
         const redis = await redisSingleton.getClient();
-        const key = getHashKey();
+        const activeSeason = season ?? (await getActiveCacheSeason());
+        const key = await getHashKey(activeSeason);
 
         // Create hash entries using element ID as hash field key
         const hashEntries: Record<string, string> = {};
@@ -140,6 +141,7 @@ const createPlayerHashCache = () => {
         // No metadata key needed
 
         await pipeline.exec();
+        await finalizeSeasonCacheWrite(activeSeason, ['Player']);
         logDebug('Players cache batch set', {
           key,
           count: players.length,
@@ -201,7 +203,7 @@ const createPlayerHashCache = () => {
     clear: async (): Promise<void> => {
       try {
         const redis = await redisSingleton.getClient();
-        const key = getHashKey();
+        const key = await getHashKey();
 
         await redis.del(key);
         logDebug('Players cache cleared', { key });
@@ -221,7 +223,7 @@ const createPlayerHashCache = () => {
     exists: async (): Promise<boolean> => {
       try {
         const redis = await redisSingleton.getClient();
-        const key = getHashKey();
+        const key = await getHashKey();
         const result = await redis.exists(key);
         return result === 1;
       } catch (error) {
@@ -242,8 +244,8 @@ export const playersCache = {
     return playerHashCacheInstance.getAllPlayers();
   },
 
-  async set(players: Player[]): Promise<void> {
-    return playerHashCacheInstance.setAllPlayers(players);
+  async set(players: Player[], season?: string): Promise<void> {
+    return playerHashCacheInstance.setAllPlayers(players, season);
   },
 
   async clear(): Promise<void> {

@@ -1,6 +1,6 @@
-import { selectCurrentEventByDeadline } from '../domain/events';
-import { getCurrentSeason } from '../utils/conditions';
+import { selectCurrentEventByDeadline, selectNextEventByDeadline } from '../domain/events';
 import { logDebug, logError, logInfo } from '../utils/logger';
+import { finalizeSeasonCacheWrite, getActiveCacheSeason } from './cache-season';
 import { redisSingleton } from './singleton';
 
 import type { Event } from '../types';
@@ -25,7 +25,8 @@ function serializeEvent(event: Event): string {
 async function loadEventsFromCache(): Promise<Event[] | null> {
   try {
     const redis = await redisSingleton.getClient();
-    const key = `Event:${getCurrentSeason()}`;
+    const season = await getActiveCacheSeason();
+    const key = `Event:${season}`;
     const hash = await redis.hgetall(key);
 
     if (!hash || Object.keys(hash).length === 0) {
@@ -45,6 +46,22 @@ async function loadEventsFromCache(): Promise<Event[] | null> {
 async function getNeighbourEvent(offset: number, label: string): Promise<Event | null> {
   try {
     const current = await eventsCache.getCurrent();
+    const redis = await redisSingleton.getClient();
+    const season = await getActiveCacheSeason();
+
+    if (!current && offset === 1) {
+      const allEvents = await loadEventsFromCache();
+      if (!allEvents) {
+        logDebug(`${label} event cache miss - no current event`);
+        return null;
+      }
+      const nextEvent = selectNextEventByDeadline(allEvents);
+      if (nextEvent) {
+        logDebug(`${label} event cache hit (pre-current fallback)`, { id: nextEvent.id });
+      }
+      return nextEvent;
+    }
+
     if (!current) {
       logDebug(`${label} event cache miss - no current event`);
       return null;
@@ -54,8 +71,7 @@ async function getNeighbourEvent(offset: number, label: string): Promise<Event |
       logDebug(`${label} event out of range`, { targetId });
       return null;
     }
-    const redis = await redisSingleton.getClient();
-    const value = await redis.hget(`Event:${getCurrentSeason()}`, targetId.toString());
+    const value = await redis.hget(`Event:${season}`, targetId.toString());
     if (!value) {
       logDebug(`${label} event cache miss`, { targetId });
       return null;
@@ -136,11 +152,11 @@ export const eventsCache = {
   },
 
   // Store all events in a single hash (no duplication!)
-  async set(events: Event[]): Promise<void> {
+  async set(events: Event[], season?: string): Promise<void> {
     try {
       const redis = await redisSingleton.getClient();
-      const season = getCurrentSeason();
-      const key = `Event:${season}`;
+      const activeSeason = season ?? (await getActiveCacheSeason());
+      const key = `Event:${activeSeason}`;
 
       const currentEventKey = 'event:current';
       const currentEvent = selectCurrentEventByDeadline(events);
@@ -167,7 +183,8 @@ export const eventsCache = {
       }
 
       await pipeline.exec();
-      logDebug('Events cache updated (hash)', { count: events.length, season });
+      await finalizeSeasonCacheWrite(activeSeason, ['Event']);
+      logDebug('Events cache updated (hash)', { count: events.length, season: activeSeason });
     } catch (error) {
       logError('Events cache set error', error);
       throw error;

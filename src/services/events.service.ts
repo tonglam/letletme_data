@@ -2,6 +2,7 @@ import { eventsCache } from '../cache/operations';
 import { fplClient } from '../clients/fpl';
 import { eventRepository } from '../repositories/events';
 import { transformEvents } from '../transformers/events';
+import { resolvePublishedSeasonFromEvents } from './cache-season.service';
 import type { Event } from '../types';
 import { logDebug, logError, logInfo } from '../utils/logger';
 
@@ -93,6 +94,15 @@ export async function syncEvents(): Promise<{
 
     logInfo('Raw events data fetched', { count: bootstrapData.events.length });
 
+    if (bootstrapData.events.length === 0) {
+      logInfo('No events returned from FPL API; preserving existing events cache');
+      return {
+        count: 0,
+        errors: 0,
+        warningCount: 0,
+      };
+    }
+
     // 2. Transform to domain events (transformer validates each record via Zod)
     const transformStart = Date.now();
     const events = transformEvents(bootstrapData.events);
@@ -115,7 +125,10 @@ export async function syncEvents(): Promise<{
 
     // 4. Update cache with full event objects
     const cacheStart = Date.now();
-    await eventsCache.set(savedEvents);
+    await eventsCache.set(
+      savedEvents,
+      await resolvePublishedSeasonFromEvents(bootstrapData.events),
+    );
     const cacheDuration = Date.now() - cacheStart;
     logInfo('Events cache updated', { durationMs: cacheDuration });
 

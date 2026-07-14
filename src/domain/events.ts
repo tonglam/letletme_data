@@ -62,3 +62,17 @@ export function selectCurrentEventByDeadline(
   }
   return best;
 }
+
+export function selectNextEventByDeadline(
+  events: Event[],
+  nowEpoch: number = Math.floor(Date.now() / 1000),
+): Event | null {
+  let best: Event | null = null;
+  for (const event of events) {
+    if (event.deadlineTimeEpoch == null || event.deadlineTimeEpoch <= nowEpoch) continue;
+    if (best === null || event.deadlineTimeEpoch < (best.deadlineTimeEpoch ?? Infinity)) {
+      best = event;
+    }
+  }
+  return best;
+}

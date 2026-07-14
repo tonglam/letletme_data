@@ -3,6 +3,7 @@ import { fplClient } from '../clients/fpl';
 import { phaseRepository } from '../repositories/phases';
 import { transformPhases } from '../transformers/phases';
 import { logError, logInfo } from '../utils/logger';
+import { resolvePublishedSeasonFromEvents } from './cache-season.service';
 
 /**
  * Phases Service - Business Logic Layer
@@ -31,6 +32,11 @@ export async function syncPhases(): Promise<{ count: number; errors: number }> {
 
     logInfo('FPL bootstrap data fetched', { phaseCount: bootstrapData.phases.length });
 
+    if (bootstrapData.phases.length === 0) {
+      logInfo('No phases returned from FPL API; preserving existing phases cache');
+      return { count: 0, errors: 0 };
+    }
+
     // 2. Transform to domain phases
     const phases = transformPhases(bootstrapData.phases);
     logInfo('Phases transformed', {
@@ -44,7 +50,7 @@ export async function syncPhases(): Promise<{ count: number; errors: number }> {
     logInfo('Phases saved to database', { count: savedPhases.length });
 
     // 4. Update cache
-    await phasesCache.set(phases);
+    await phasesCache.set(phases, await resolvePublishedSeasonFromEvents(bootstrapData.events));
     logInfo('Phases cache updated');
 
     const result = {

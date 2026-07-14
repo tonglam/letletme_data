@@ -3,6 +3,7 @@ import { fplClient } from '../clients/fpl';
 import { teamRepository } from '../repositories/teams';
 import { transformTeams } from '../transformers/teams';
 import { logError, logInfo } from '../utils/logger';
+import { resolvePublishedSeasonFromEvents } from './cache-season.service';
 
 /**
  * Teams Service - Business Logic Layer
@@ -26,6 +27,11 @@ export async function syncTeams(): Promise<{ count: number; errors: number }> {
 
     logInfo('FPL bootstrap data fetched', { teamCount: bootstrapData.teams.length });
 
+    if (bootstrapData.teams.length === 0) {
+      logInfo('No teams returned from FPL API; preserving existing teams cache');
+      return { count: 0, errors: 0 };
+    }
+
     // 2. Transform to domain teams
     const teams = transformTeams(bootstrapData.teams);
     logInfo('Teams transformed', {
@@ -39,7 +45,7 @@ export async function syncTeams(): Promise<{ count: number; errors: number }> {
     logInfo('Teams saved to database', { count: savedTeams.length });
 
     // 4. Update cache
-    await teamsCache.set(teams);
+    await teamsCache.set(teams, await resolvePublishedSeasonFromEvents(bootstrapData.events));
     logInfo('Teams cache updated');
 
     const result = {

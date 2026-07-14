@@ -3,6 +3,7 @@ import { fplClient } from '../clients/fpl';
 import { playerRepository } from '../repositories/players';
 import { transformPlayers } from '../transformers/players';
 import { logError, logInfo } from '../utils/logger';
+import { resolvePublishedSeasonFromEvents } from './cache-season.service';
 
 /**
  * Players Service - Business Logic Layer
@@ -27,7 +28,8 @@ export async function syncPlayers(): Promise<{ count: number; errors: number }> 
     logInfo('Raw players data fetched', { count: fplData.elements.length });
 
     if (fplData.elements.length === 0) {
-      throw new Error('No players returned from FPL API');
+      logInfo('No players returned from FPL API; preserving existing players cache');
+      return { count: 0, errors: 0 };
     }
 
     // 2. Transform and validate the data
@@ -46,7 +48,7 @@ export async function syncPlayers(): Promise<{ count: number; errors: number }> 
     logInfo('Players upserted to database', { count: upsertedPlayers.length });
 
     // 4. Update cache with fresh data
-    await playersCache.set(upsertedPlayers);
+    await playersCache.set(upsertedPlayers, await resolvePublishedSeasonFromEvents(fplData.events));
     logInfo('Players cache updated');
 
     const result = {

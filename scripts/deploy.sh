@@ -50,7 +50,11 @@ deploy() {
   compose up -d --remove-orphans
   log_info "Running migrations"
   if ! compose run --rm -T api bun run db:migrate; then
-    log_warn "Migrations reported an error; check the logs."
+    log_warn "Drizzle migrations reported an error; check the logs."
+  fi
+  log_info "Applying numbered SQL migrations (0006+)"
+  if ! compose run --rm -T api bun scripts/apply-sql-migrations.ts; then
+    log_warn "SQL migrations reported an error; check the logs."
   fi
   log_info "Current service status"
   compose ps
