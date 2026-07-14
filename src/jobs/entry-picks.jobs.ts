@@ -6,7 +6,7 @@ import { getCurrentEvent } from '../services/events.service';
 import { isFPLSeason, isSelectTime } from '../utils/conditions';
 import { loadFixturesByEvent } from '../utils/fixtures';
 import { executeTrackedCron } from '../utils/job-run-logger';
-import { logInfo } from '../utils/logger';
+import { logDebug, logInfo } from '../utils/logger';
 
 /**
  * Entry Event Picks Cron Jobs
@@ -24,7 +24,7 @@ export function registerEntryPicksJobs(app: Elysia) {
           await executeTrackedCron('entry-event-picks-daily', async () => {
             const now = new Date();
             if (!(await isFPLSeason(now))) {
-              logInfo('Skipping entry picks sync - not FPL season', {
+              logDebug('Skipping entry picks sync - not FPL season', {
                 month: now.getMonth() + 1,
               });
               return;

@@ -5,7 +5,7 @@ import { getCurrentEvent } from '../services/events.service';
 import { isAfterMatchDay, isFPLSeason } from '../utils/conditions';
 import { loadFixturesByEvent } from '../utils/fixtures';
 import { executeTrackedCron } from '../utils/job-run-logger';
-import { logInfo } from '../utils/logger';
+import { logDebug, logInfo } from '../utils/logger';
 import { enqueueTournamentEventResults } from './tournament-sync.jobs';
 
 /**
@@ -20,7 +20,7 @@ import { enqueueTournamentEventResults } from './tournament-sync.jobs';
 export async function runTournamentEventResultsSync() {
   const now = new Date();
   if (!(await isFPLSeason(now))) {
-    logInfo('Skipping tournament event results sync - not FPL season', {
+    logDebug('Skipping tournament event results sync - not FPL season', {
       month: now.getMonth() + 1,
     });
     return;

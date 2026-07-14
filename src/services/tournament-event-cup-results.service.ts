@@ -5,9 +5,11 @@ import { tournamentEntryRepository } from '../repositories/tournament-entries';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
 import type { RawFPLEntryCupMatch } from '../types';
 import { mapWithConcurrency, uniqueNumbers } from '../utils/async';
-import { logError, logInfo } from '../utils/logger';
+import { logDebug, logError, logInfo } from '../utils/logger';
 
 const DEFAULT_CONCURRENCY = 5;
+
+type GetEntryCup = typeof fplClient.getEntryCup;
 
 type EntryCupOutcome = {
   entryId: number;
@@ -53,14 +55,15 @@ function resolveMatch(entryId: number, matches: RawFPLEntryCupMatch[], eventId: 
 async function buildEntryCupResult(
   entryId: number,
   eventId: number,
+  getEntryCup: GetEntryCup,
 ): Promise<DbEntryEventCupResultInsert | null> {
-  const cup = await fplClient.getEntryCup(entryId);
+  const cup = await getEntryCup(entryId);
+  if (!cup) {
+    return null;
+  }
   const match = resolveMatch(entryId, cup.cup_matches ?? [], eventId);
   if (!match) {
-    logError('Entry cup match missing for event', new Error('No cup match'), {
-      entryId,
-      eventId,
-    });
+    logDebug('Entry cup match missing for event', { entryId, eventId });
     return null;
   }
 
@@ -68,6 +71,40 @@ async function buildEntryCupResult(
     entryId,
     eventId,
     ...match,
+  };
+}
+
+export async function collectEntryCupResults(
+  entryIds: number[],
+  eventId: number,
+  options?: { concurrency?: number; getEntryCup?: GetEntryCup },
+) {
+  const concurrency = options?.concurrency ?? DEFAULT_CONCURRENCY;
+  const getEntryCup = options?.getEntryCup ?? fplClient.getEntryCup.bind(fplClient);
+  let skipped = 0;
+  let errors = 0;
+
+  const outcomes = await mapWithConcurrency(entryIds, concurrency, async (entryId) => {
+    try {
+      const record = await buildEntryCupResult(entryId, eventId, getEntryCup);
+      if (!record) {
+        skipped += 1;
+        return { entryId, record: null } satisfies EntryCupOutcome;
+      }
+      return { entryId, record } satisfies EntryCupOutcome;
+    } catch (error) {
+      errors += 1;
+      logError('Failed to fetch entry cup result', error, { entryId, eventId });
+      return { entryId, record: null, error: error as Error } satisfies EntryCupOutcome;
+    }
+  });
+
+  return {
+    records: outcomes
+      .map((outcome) => outcome.record)
+      .filter((record): record is DbEntryEventCupResultInsert => Boolean(record)),
+    skipped,
+    errors,
   };
 }
 
@@ -106,28 +143,7 @@ export async function syncTournamentEventCupResults(
     return { eventId, totalEntries: 0, upserted: 0, skipped: 0, errors: 0 };
   }
 
-  const concurrency = options?.concurrency ?? DEFAULT_CONCURRENCY;
-  let skipped = 0;
-  let errors = 0;
-
-  const outcomes = await mapWithConcurrency(entryIds, concurrency, async (entryId) => {
-    try {
-      const record = await buildEntryCupResult(entryId, eventId);
-      if (!record) {
-        skipped += 1;
-        return { entryId, record: null } satisfies EntryCupOutcome;
-      }
-      return { entryId, record } satisfies EntryCupOutcome;
-    } catch (error) {
-      errors += 1;
-      logError('Failed to fetch entry cup result', error, { entryId, eventId });
-      return { entryId, record: null, error: error as Error } satisfies EntryCupOutcome;
-    }
-  });
-
-  const records = outcomes
-    .map((outcome) => outcome.record)
-    .filter((record): record is DbEntryEventCupResultInsert => Boolean(record));
+  const { records, skipped, errors } = await collectEntryCupResults(entryIds, eventId, options);
 
   const upserted = await entryEventCupResultsRepository.upsertBatch(records);
 

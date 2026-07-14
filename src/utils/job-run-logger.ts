@@ -1,4 +1,4 @@
-import { logJobError, logJobInfo } from './logger';
+import { logDebug, logJobError } from './logger';
 import { runWithJobLogContext } from './job-log-context';
 import { formatUtc8Timestamp } from './timezone';
 
@@ -47,7 +47,7 @@ export async function runTrackedJob<T>(
     const startedAtMs = Date.now();
     const startedAtUtc8 = formatUtc8Timestamp(new Date(startedAtMs));
 
-    logJobInfo('Job lifecycle', {
+    logDebug('Job lifecycle', {
       ...getBasePayload(context, 'started'),
       startedAtUtc8,
     });
@@ -56,7 +56,7 @@ export async function runTrackedJob<T>(
       const result = await runner();
       const finishedAtMs = Date.now();
 
-      logJobInfo('Job lifecycle', {
+      logDebug('Job lifecycle', {
         ...getBasePayload(context, 'success'),
         startedAtUtc8,
         finishedAtUtc8: formatUtc8Timestamp(new Date(finishedAtMs)),

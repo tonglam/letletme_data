@@ -1,6 +1,4 @@
-import { appendFileSync, mkdirSync } from 'fs';
 import pino from 'pino';
-import { join } from 'path';
 
 import { getJobLogContext } from './job-log-context';
 import { formatUtc8Timestamp } from './timezone';
@@ -8,141 +6,106 @@ import { formatUtc8Timestamp } from './timezone';
 const isDevelopment = process.env.NODE_ENV !== 'production';
 const logLevel = process.env.LOG_LEVEL || 'info';
 
-// Determine logs directory path (root level)
-const logsDir = join(process.cwd(), 'logs');
-const appLogPath = join(logsDir, 'app.log');
-const jobsLogPath = join(logsDir, 'jobs.log');
-const errorLogPath = join(logsDir, 'error.log');
+const MAX_ERROR_MESSAGE_LENGTH = 2_000;
+const MAX_ERROR_STACK_LENGTH = 8_000;
+const MAX_ERROR_CAUSE_DEPTH = 2;
 
-type LogLevel = 'debug' | 'info' | 'warn' | 'error';
-
-const logLevelPriority: Record<LogLevel, number> = {
-  debug: 10,
-  info: 20,
-  warn: 30,
-  error: 40,
-};
-
-function resolveLogLevel(level: string): LogLevel {
-  if (level === 'debug' || level === 'info' || level === 'warn' || level === 'error') {
-    return level;
-  }
-  return 'info';
-}
-
-const configuredLogLevel = resolveLogLevel(logLevel);
-
-function shouldWrite(level: LogLevel) {
-  return logLevelPriority[level] >= logLevelPriority[configuredLogLevel];
-}
-
-function writeFileLog(
-  level: LogLevel,
-  message: string,
-  payload?: object,
-  options: { stream?: 'app' | 'jobs' } = {},
-) {
-  if (!shouldWrite(level)) {
-    return;
-  }
-
-  try {
-    mkdirSync(logsDir, { recursive: true });
-    const line = JSON.stringify({
-      time: formatUtc8Timestamp(),
-      level,
-      message,
-      ...(payload ? { payload } : {}),
-    });
-
-    const stream = options.stream ?? 'app';
-    const destination = stream === 'jobs' ? jobsLogPath : appLogPath;
-    appendFileSync(destination, `${line}\n`);
-    if (level === 'error') {
-      appendFileSync(errorLogPath, `${line}\n`);
-    }
-  } catch {
-    // Swallow file-write errors so app logging never crashes runtime.
-  }
+function truncate(value: string, maxLength: number) {
+  return value.length <= maxLength ? value : `${value.slice(0, maxLength)}...[truncated]`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
-function serializeError(error: unknown): unknown {
+export function serializeError(error: unknown, depth = 0): unknown {
   if (error instanceof Error) {
+    const errorWithMetadata = error as Error & {
+      cause?: unknown;
+      code?: unknown;
+      status?: unknown;
+    };
     const serialized: Record<string, unknown> = {
       name: error.name,
-      message: error.message,
-      stack: error.stack,
+      message: truncate(error.message, MAX_ERROR_MESSAGE_LENGTH),
     };
 
-    const cause = (error as Error & { cause?: unknown }).cause;
-    if (cause !== undefined) {
-      serialized.cause = serializeError(cause);
+    if (error.stack) {
+      serialized.stack = truncate(error.stack, MAX_ERROR_STACK_LENGTH);
     }
-
-    for (const key of Object.getOwnPropertyNames(error)) {
-      if (key === 'name' || key === 'message' || key === 'stack' || key === 'cause') {
-        continue;
-      }
-      const value = (error as unknown as Record<string, unknown>)[key];
-      if (value !== undefined) {
-        serialized[key] = value;
-      }
+    if (errorWithMetadata.code !== undefined) {
+      serialized.code = errorWithMetadata.code;
+    }
+    if (errorWithMetadata.status !== undefined) {
+      serialized.status = errorWithMetadata.status;
+    }
+    if (errorWithMetadata.cause !== undefined && depth < MAX_ERROR_CAUSE_DEPTH) {
+      serialized.cause = serializeError(errorWithMetadata.cause, depth + 1);
     }
 
     return serialized;
   }
 
   if (isRecord(error)) {
-    return error;
+    const metadata = Object.fromEntries(
+      Object.entries(error)
+        .slice(0, 20)
+        .flatMap(([key, value]) => {
+          if (typeof value === 'string') {
+            return [[key, truncate(value, MAX_ERROR_MESSAGE_LENGTH)]];
+          }
+          if (typeof value === 'number' || typeof value === 'boolean' || value === null) {
+            return [[key, value]];
+          }
+          return [];
+        }),
+    );
+
+    return {
+      message: truncate(
+        typeof error.message === 'string' ? error.message : 'Non-Error object thrown',
+        MAX_ERROR_MESSAGE_LENGTH,
+      ),
+      ...metadata,
+    };
   }
 
-  return { message: String(error) };
+  return { message: truncate(String(error), MAX_ERROR_MESSAGE_LENGTH) };
 }
 
 /**
- * Logger configuration with file and console output
+ * Structured logger configuration.
  *
  * Development:
  * - Console: pretty formatted output
- * - Files: combined.log (all), error.log (errors only)
+ * - Output: pretty console logs
  *
  * Production:
- * - Console: JSON formatted output
- * - Files: combined.log (all), error.log (errors only)
- * - Log rotation: daily, keeps 14 days
+ * - Output: JSON on stdout; Docker owns rotation and retention
  */
-export const logger = pino(
-  {
-    level: logLevel,
-    formatters: {
-      level: (label) => {
-        return { level: label };
-      },
+const loggerOptions: pino.LoggerOptions = {
+  level: logLevel,
+  formatters: {
+    level: (label) => {
+      return { level: label };
     },
-    timestamp: () => `,"time":"${formatUtc8Timestamp()}"`,
   },
-  pino.transport({
-    targets: [
-      // Console output
-      {
-        target: isDevelopment ? 'pino-pretty' : 'pino/file',
+  timestamp: () => `,"time":"${formatUtc8Timestamp()}"`,
+};
+
+export const logger = isDevelopment
+  ? pino(
+      loggerOptions,
+      pino.transport({
+        target: 'pino-pretty',
         level: logLevel,
-        options: isDevelopment
-          ? {
-              colorize: true,
-              ignore: 'pid,hostname',
-            }
-          : {
-              destination: 1, // stdout
-            },
-      },
-    ],
-  }),
-);
+        options: {
+          colorize: true,
+          ignore: 'pid,hostname',
+        },
+      }),
+    )
+  : pino(loggerOptions);
 
 function mergeJobContext(data?: object): object | undefined {
   const jobContext = getJobLogContext();
@@ -160,7 +123,6 @@ function mergeJobContext(data?: object): object | undefined {
 export const logInfo = (message: string, data?: object) => {
   const payload = mergeJobContext(data);
   logger.info(payload, message);
-  writeFileLog('info', message, payload);
 };
 
 export const logError = (message: string, error?: Error | unknown, data?: object) => {
@@ -170,25 +132,16 @@ export const logError = (message: string, error?: Error | unknown, data?: object
     ...(error === undefined ? {} : { error: serializeError(error) }),
   };
   logger.error(payload, message);
-  writeFileLog('error', message, payload);
 };
 
 export const logDebug = (message: string, data?: object) => {
   const payload = mergeJobContext(data);
   logger.debug(payload, message);
-  writeFileLog('debug', message, payload);
 };
 
 export const logWarn = (message: string, data?: object) => {
   const payload = mergeJobContext(data);
   logger.warn(payload, message);
-  writeFileLog('warn', message, payload);
-};
-
-export const logJobInfo = (message: string, data?: object) => {
-  const payload = mergeJobContext(data);
-  logger.info(payload, message);
-  writeFileLog('info', message, payload, { stream: 'jobs' });
 };
 
 export const logJobError = (message: string, error?: Error | unknown, data?: object) => {
@@ -198,5 +151,4 @@ export const logJobError = (message: string, error?: Error | unknown, data?: obj
     ...(error === undefined ? {} : { error: serializeError(error) }),
   };
   logger.error(payload, message);
-  writeFileLog('error', message, payload, { stream: 'jobs' });
 };

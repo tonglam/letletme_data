@@ -1,6 +1,6 @@
 import type { Queue, QueueEvents } from 'bullmq';
 
-import { logError, logInfo, logWarn } from './logger';
+import { logDebug, logError, logInfo, logWarn } from './logger';
 
 type QueueCounts = Record<string, number>;
 
@@ -64,7 +64,7 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
       );
       const deltas = summarizeCounts(counts, lastCounts ?? undefined);
 
-      logInfo('Queue job counts', {
+      logDebug('Queue job counts', {
         queue: queueName,
         tier,
         context,
@@ -102,7 +102,7 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
 
   queueEvents.on('completed', ({ jobId, prev }) => {
     void resolveJobName(queue, jobId).then((jobName) => {
-      logInfo('Queue event completed', {
+      logDebug('Queue event completed', {
         queue: queueName,
         tier,
         jobId,
