@@ -7,6 +7,14 @@ export function getEntryInfoSyncDateKey(date: Date) {
   return date.toISOString().split('T')[0];
 }
 
+/**
+ * Only mark the day synced after the final chunk completes with zero failures.
+ * Mid-chunk success or pending failed-id retries must not suppress same-day re-enqueue.
+ */
+export function shouldMarkEntryInfoSynced(hasMore: boolean, failed: number): boolean {
+  return !hasMore && failed === 0;
+}
+
 function getSecondsUntilNextDay(now: Date) {
   const tomorrow = new Date(now);
   tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);

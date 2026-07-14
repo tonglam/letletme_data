@@ -28,7 +28,7 @@ import {
   syncEntryEventResults,
   syncEntryEventTransfers,
 } from '../services/entries.service';
-import { markEntryInfoSyncedToday } from '../jobs/entry-info-sync-marker';
+import { markEntryInfoSyncedToday, shouldMarkEntryInfoSynced } from '../jobs/entry-info-sync-marker';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { logError, logInfo } from '../utils/logger';
 import { withMutationConflictGuard } from '../utils/mutation-lock';
@@ -187,7 +187,7 @@ async function handleEntryJob(
       jobName,
       chunkOffset: loaded.chunkOffset,
     });
-    return { total: 0, success: 0, failed: 0, failedIds: [] };
+    return { total: 0, success: 0, failed: 0, failedIds: [] as number[], hasMore: false };
   }
 
   const concurrency = jobData?.concurrency ?? ENTRY_SYNC_DEFAULT_CONCURRENCY;
@@ -233,7 +233,7 @@ async function handleEntryJob(
     }
   }
 
-  return result;
+  return { ...result, hasMore: loaded.hasMore };
 }
 
 export function createEntrySyncWorker(): WorkerRuntime {
@@ -274,8 +274,11 @@ export function createEntrySyncWorker(): WorkerRuntime {
                 syncEntryInfo,
                 job.data,
               );
-              // Mark only after the worker succeeds so a failed job can retry the same day.
-              await markEntryInfoSyncedToday(new Date(), job.id);
+              // Mark only after the final chunk succeeds with zero failures so
+              // mid-chunk crashes and pending retries can still re-run same day.
+              if (shouldMarkEntryInfoSynced(result.hasMore, result.failed)) {
+                await markEntryInfoSyncedToday(new Date(), job.id);
+              }
               return result;
             }
             case 'entry-picks':
