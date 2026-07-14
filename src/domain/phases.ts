@@ -159,6 +159,14 @@ export function validatePhase(phase: unknown): Phase {
   return validated;
 }
 
+export function safeValidatePhase(phase: unknown): Phase | null {
+  try {
+    return validatePhase(phase);
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Validate raw FPL phase data
  */

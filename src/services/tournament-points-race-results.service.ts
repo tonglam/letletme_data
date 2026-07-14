@@ -260,6 +260,7 @@ export async function syncTournamentPointsRaceResults(
   let updatedGroups = 0;
   let updatedResults = 0;
   let skipped = 0;
+  const failedTournamentIds: number[] = [];
   const syncResults = await Promise.all(
     tournaments.map(async (tournament) => {
       try {
@@ -269,6 +270,7 @@ export async function syncTournamentPointsRaceResults(
           tournamentId: tournament.id,
           eventId,
         });
+        failedTournamentIds.push(tournament.id);
         return { updatedGroups: 0, updatedResults: 0, skipped: 0 };
       }
     }),
@@ -284,7 +286,12 @@ export async function syncTournamentPointsRaceResults(
     updatedGroups,
     updatedResults,
     skipped,
+    failedCount: failedTournamentIds.length,
   });
+
+  if (failedTournamentIds.length > 0) {
+    throw new Error(`Points race sync failed for tournament(s): ${failedTournamentIds.join(', ')}`);
+  }
 
   return { eventId, updatedGroups, updatedResults, skipped };
 }

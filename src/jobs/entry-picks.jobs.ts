@@ -4,7 +4,7 @@ import type { Elysia } from 'elysia';
 import { enqueueEntryPicksSyncJob } from './entry-sync-enqueue';
 import { getCurrentEvent } from '../services/events.service';
 import { isFPLSeason, isSelectTime } from '../utils/conditions';
-import { loadFixturesByEvent } from '../utils/fixtures';
+import { fixtureRepository } from '../repositories/fixtures';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { logDebug, logInfo } from '../utils/logger';
 
@@ -36,7 +36,7 @@ export function registerEntryPicksJobs(app: Elysia) {
               return;
             }
 
-            const fixtures = await loadFixturesByEvent(currentEvent.id);
+            const fixtures = await fixtureRepository.findByEvent(currentEvent.id);
             if (!isSelectTime(currentEvent, fixtures, now)) {
               logInfo('Skipping entry picks sync - outside pick window', {
                 eventId: currentEvent.id,

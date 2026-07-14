@@ -17,7 +17,7 @@ import { syncEventLiveExplain } from '../services/event-live-explains.service';
 import { syncEventOverallResult } from '../services/event-overall-results.service';
 import { syncLiveScores } from '../services/fixtures.service';
 import { isMatchDayTime } from '../utils/conditions';
-import { loadFixturesByEvent } from '../utils/fixtures';
+import { fixtureRepository } from '../repositories/fixtures';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { getQueueConnection } from '../utils/queue';
 import { logError, logInfo } from '../utils/logger';
@@ -40,11 +40,11 @@ export async function isLiveMatchWindowForEvent(
   eventId: number,
   deps: {
     getCurrentEvent: typeof getCurrentEvent;
-    loadFixturesByEvent: typeof loadFixturesByEvent;
+    findFixturesByEvent: typeof fixtureRepository.findByEvent;
     isMatchDayTime: typeof isMatchDayTime;
   } = {
     getCurrentEvent,
-    loadFixturesByEvent,
+    findFixturesByEvent: (eventId) => fixtureRepository.findByEvent(eventId),
     isMatchDayTime,
   },
 ): Promise<boolean> {
@@ -55,7 +55,7 @@ export async function isLiveMatchWindowForEvent(
   if (currentEvent.id !== eventId) {
     return false;
   }
-  const fixtures = await deps.loadFixturesByEvent(eventId);
+  const fixtures = await deps.findFixturesByEvent(eventId);
   return deps.isMatchDayTime(currentEvent, fixtures, new Date());
 }
 

@@ -76,3 +76,23 @@ export function selectNextEventByDeadline(
   }
   return best;
 }
+
+export function neighbourEventId(currentId: number, offset: number): number | null {
+  const targetId = currentId + offset;
+  if (targetId < 1 || targetId > 38) return null;
+  return targetId;
+}
+
+export function selectNeighbourEvent(
+  events: Event[],
+  current: Event | null,
+  offset: number,
+): Event | null {
+  if (!current) {
+    if (offset === 1) return selectNextEventByDeadline(events);
+    return null;
+  }
+  const targetId = neighbourEventId(current.id, offset);
+  if (targetId === null) return null;
+  return events.find((event) => event.id === targetId) ?? null;
+}

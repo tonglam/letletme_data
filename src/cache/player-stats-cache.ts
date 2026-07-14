@@ -40,11 +40,7 @@ export const createPlayerStatsHashCache = () => {
         return playerStats;
       } catch (error) {
         logError('Player stats cache get by event error', error, { eventId });
-        throw new CacheError(
-          `Failed to get player stats from cache for event: ${eventId}`,
-          'PLAYER_STATS_GET_BY_EVENT_ERROR',
-          error instanceof Error ? error : undefined,
-        );
+        return null;
       }
     },
 

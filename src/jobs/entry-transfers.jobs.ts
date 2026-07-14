@@ -4,7 +4,7 @@ import type { Elysia } from 'elysia';
 import { enqueueEntryTransfersSyncJob } from './entry-sync-enqueue';
 import { getCurrentEvent } from '../services/events.service';
 import { isAfterMatchDay, isFPLSeason } from '../utils/conditions';
-import { loadFixturesByEvent } from '../utils/fixtures';
+import { fixtureRepository } from '../repositories/fixtures';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { logDebug, logInfo } from '../utils/logger';
 
@@ -35,7 +35,7 @@ export function registerEntryTransfersJobs(app: Elysia) {
               return;
             }
 
-            const fixtures = await loadFixturesByEvent(currentEvent.id);
+            const fixtures = await fixtureRepository.findByEvent(currentEvent.id);
             if (!isAfterMatchDay(currentEvent, fixtures, now)) {
               logInfo('Skipping entry transfers sync - before matchday end', {
                 eventId: currentEvent.id,

@@ -158,6 +158,11 @@ export function validateFixture(fixture: unknown): Fixture {
   return FixtureSchema.parse(fixture);
 }
 
+export function safeValidateFixture(fixture: unknown): Fixture | null {
+  const result = FixtureSchema.safeParse(fixture);
+  return result.success ? (result.data as Fixture) : null;
+}
+
 export function validateFixtures(fixtures: unknown[]): Fixture[] {
   return fixtures.map(validateFixture);
 }

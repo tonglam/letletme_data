@@ -143,6 +143,11 @@ export function validateTeam(team: unknown): Team {
   return TeamSchema.parse(team);
 }
 
+export function safeValidateTeam(team: unknown): Team | null {
+  const result = TeamSchema.safeParse(team);
+  return result.success ? (result.data as Team) : null;
+}
+
 /**
  * Validate raw FPL team data
  */

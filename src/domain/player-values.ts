@@ -252,6 +252,11 @@ export function validatePlayerValue(playerValue: unknown): PlayerValue {
   return PlayerValueSchema.parse(playerValue);
 }
 
+export function safeValidatePlayerValue(playerValue: unknown): PlayerValue | null {
+  const result = PlayerValueSchema.safeParse(playerValue);
+  return result.success ? (result.data as PlayerValue) : null;
+}
+
 /**
  * Validate raw player value data
  */

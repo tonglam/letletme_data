@@ -2,7 +2,7 @@ import { liveFixturesCache } from '../cache/operations';
 import { getDb } from '../db/singleton';
 import { teams } from '../db/schemas/index.schema';
 import type { EventId, TeamId } from '../types/base.type';
-import { loadFixturesByEvent } from '../utils/fixtures';
+import { fixtureRepository } from '../repositories/fixtures';
 import { logError, logInfo } from '../utils/logger';
 import { getCurrentEvent } from './events.service';
 
@@ -161,7 +161,7 @@ export async function syncLiveFixtureCache(
 
     logInfo('Starting live fixture cache sync', { eventId: resolvedEventId });
 
-    const fixtures = await loadFixturesByEvent(resolvedEventId);
+    const fixtures = await fixtureRepository.findByEvent(resolvedEventId);
     const { nameById, shortNameById, positionById } = await loadTeamMaps();
     const byTeam = buildLiveFixturesByTeam(fixtures, nameById, shortNameById, positionById);
 

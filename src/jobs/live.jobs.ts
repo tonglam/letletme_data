@@ -3,7 +3,7 @@ import { Elysia } from 'elysia';
 
 import { getCurrentEvent } from '../services/events.service';
 import { isAfterMatchDay, isFPLSeason, isMatchDayTime } from '../utils/conditions';
-import { loadFixturesByEvent } from '../utils/fixtures';
+import { fixtureRepository } from '../repositories/fixtures';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { logDebug, logInfo } from '../utils/logger';
 import {
@@ -42,7 +42,7 @@ export async function runLiveScores() {
     return;
   }
 
-  const fixtures = await loadFixturesByEvent(currentEvent.id);
+  const fixtures = await fixtureRepository.findByEvent(currentEvent.id);
 
   if (!isMatchDayTime(currentEvent, fixtures, now)) {
     logInfo('Skipping live scores - conditions not met', { eventId: currentEvent.id });
@@ -68,7 +68,7 @@ async function runEventLivesCacheUpdate() {
     return;
   }
 
-  const fixtures = await loadFixturesByEvent(currentEvent.id);
+  const fixtures = await fixtureRepository.findByEvent(currentEvent.id);
 
   if (!isMatchDayTime(currentEvent, fixtures, now)) {
     logInfo('Skipping cache update - not match time', { eventId: currentEvent.id });
@@ -95,7 +95,7 @@ async function runEventLivesDbSync() {
     return;
   }
 
-  const fixtures = await loadFixturesByEvent(currentEvent.id);
+  const fixtures = await fixtureRepository.findByEvent(currentEvent.id);
 
   if (!isMatchDayTime(currentEvent, fixtures, now)) {
     logInfo('Skipping DB sync - not match time', { eventId: currentEvent.id });
@@ -123,7 +123,7 @@ export async function runPostMatchConsolidation() {
     return;
   }
 
-  const fixtures = await loadFixturesByEvent(currentEvent.id);
+  const fixtures = await fixtureRepository.findByEvent(currentEvent.id);
 
   if (!isAfterMatchDay(currentEvent, fixtures, now)) {
     return;
@@ -152,7 +152,7 @@ export function registerLiveJobs(app: Elysia) {
               if (!currentEvent) {
                 return;
               }
-              const fixtures = await loadFixturesByEvent(currentEvent.id);
+              const fixtures = await fixtureRepository.findByEvent(currentEvent.id);
               if (!isMatchDayTime(currentEvent, fixtures, now)) {
                 return;
               }

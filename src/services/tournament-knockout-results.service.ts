@@ -459,6 +459,7 @@ export async function syncTournamentKnockoutResults(
   let updatedResults = 0;
   let updatedKnockouts = 0;
   let skipped = 0;
+  const failedTournamentIds: number[] = [];
   const syncResults = await Promise.all(
     tournaments.map(async (tournament) => {
       try {
@@ -468,6 +469,7 @@ export async function syncTournamentKnockoutResults(
           tournamentId: tournament.id,
           eventId,
         });
+        failedTournamentIds.push(tournament.id);
         return { updatedResults: 0, updatedKnockouts: 0, skipped: 0 };
       }
     }),
@@ -483,7 +485,12 @@ export async function syncTournamentKnockoutResults(
     updatedResults,
     updatedKnockouts,
     skipped,
+    failedCount: failedTournamentIds.length,
   });
+
+  if (failedTournamentIds.length > 0) {
+    throw new Error(`Knockout sync failed for tournament(s): ${failedTournamentIds.join(', ')}`);
+  }
 
   return { eventId, updatedResults, updatedKnockouts, skipped };
 }

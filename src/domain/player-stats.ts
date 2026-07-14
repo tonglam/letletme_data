@@ -309,6 +309,11 @@ export function validatePlayerStat(playerStat: unknown): PlayerStat {
   return PlayerStatSchema.parse(playerStat);
 }
 
+export function safeValidatePlayerStat(playerStat: unknown): PlayerStat | null {
+  const result = PlayerStatSchema.safeParse(playerStat);
+  return result.success ? (result.data as PlayerStat) : null;
+}
+
 /**
  * Validate raw player stat data
  */

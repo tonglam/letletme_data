@@ -5,8 +5,8 @@ import {
   checkTournamentNameAvailability,
   createTournament,
   getTournamentSetupStatus,
-  tournamentCreateInputSchema,
 } from '../services/tournament-create.service';
+import { validateTournamentCreateInput } from '../domain/tournament';
 import { requeueTournamentSetup } from '../services/tournament-setup.service';
 import { getErrorMessage, getHttpStatusFromError } from '../utils/errors';
 
@@ -73,7 +73,7 @@ export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
     '/',
     async ({ body, set }) => {
       try {
-        const payload = tournamentCreateInputSchema.parse(body);
+        const payload = validateTournamentCreateInput(body);
         const result = await createTournament(payload);
         set.status = result.setupStatus === 'failed' ? 202 : 201;
         return {

@@ -3,7 +3,7 @@ import { logDebug, logError, logInfo } from '../utils/logger';
 import { getActiveCacheSeason } from './cache-season';
 import { redisSingleton } from './singleton';
 
-import type { DbEntryInfo } from '../db/schemas/index.schema';
+import { toEntryInfo, type EntryInfo } from '../domain/entry-infos';
 
 // ================================
 // Hash-based Cache Operations for Entry Infos
@@ -13,7 +13,7 @@ import type { DbEntryInfo } from '../db/schemas/index.schema';
  * Entry info cache operations using Redis Hashes
  * Redis key: EntryInfo:2526
  * Hash fields: Entry IDs (1234567, ...) as strings
- * Hash values: Complete entry info JSON objects (all fields except createdAt/updatedAt)
+ * Hash values: Complete entry info JSON objects (domain EntryInfo, no timestamps)
  *
  * Diff-based update: when setting multiple entries, only HSET entries that changed
  * to avoid rewriting the entire hash every day.
@@ -21,27 +21,23 @@ import type { DbEntryInfo } from '../db/schemas/index.schema';
 
 const getHashKey = async () => `EntryInfo:${await getActiveCacheSeason()}`;
 
-/**
- * Strip createdAt/updatedAt from entry info before serializing to Redis
- */
-const serializeEntryInfo = (entry: DbEntryInfo): Record<string, unknown> => {
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const { createdAt, updatedAt, ...rest } = entry as DbEntryInfo & {
-    createdAt?: Date;
-    updatedAt?: Date;
-  };
-  return rest;
+const serializeEntryInfo = (entry: EntryInfo): string => {
+  return JSON.stringify(toEntryInfo(entry));
+};
+
+const deserializeEntryInfo = (value: string): EntryInfo => {
+  return toEntryInfo(JSON.parse(value) as EntryInfo);
 };
 
 export const entryInfosCache = {
   /**
    * Set a single entry in the hash (called after each syncEntryInfo)
    */
-  async setEntry(entry: DbEntryInfo): Promise<void> {
+  async setEntry(entry: EntryInfo): Promise<void> {
     try {
       const redis = await redisSingleton.getClient();
       const key = await getHashKey();
-      const value = JSON.stringify(serializeEntryInfo(entry));
+      const value = serializeEntryInfo(entry);
 
       await redis.hset(key, entry.id.toString(), value);
       logDebug('Entry info cache set', { entryId: entry.id, key });
@@ -62,7 +58,7 @@ export const entryInfosCache = {
    * 3. Only HSET entries that changed
    */
   async setEntries(
-    entries: DbEntryInfo[],
+    entries: EntryInfo[],
   ): Promise<{ added: number; updated: number; skipped: number }> {
     try {
       const redis = await redisSingleton.getClient();
@@ -82,19 +78,16 @@ export const entryInfosCache = {
 
       for (const entry of entries) {
         const fieldKey = entry.id.toString();
-        const newValue = JSON.stringify(serializeEntryInfo(entry));
+        const newValue = serializeEntryInfo(entry);
         const existingValue = existingMap.get(fieldKey);
 
         if (!existingValue) {
-          // New entry
           toSet[fieldKey] = newValue;
           added++;
         } else if (existingValue !== newValue) {
-          // Changed entry
           toSet[fieldKey] = newValue;
           updated++;
         } else {
-          // Unchanged - skip
           skipped++;
         }
       }
@@ -126,7 +119,7 @@ export const entryInfosCache = {
   /**
    * Get a single entry by ID from the hash
    */
-  async getEntry(entryId: number): Promise<DbEntryInfo | null> {
+  async getEntry(entryId: number): Promise<EntryInfo | null> {
     try {
       const redis = await redisSingleton.getClient();
       const key = await getHashKey();
@@ -137,41 +130,35 @@ export const entryInfosCache = {
         return null;
       }
 
-      const parsed = JSON.parse(value) as DbEntryInfo;
+      const parsed = deserializeEntryInfo(value);
       logDebug('Entry info cache hit', { entryId, key });
       return parsed;
     } catch (error) {
       logError('Entry info cache get error', error, { entryId });
-      throw new CacheError(
-        `Failed to get entry info from cache: ${entryId}`,
-        'ENTRY_INFO_GET_ERROR',
-        error instanceof Error ? error : undefined,
-      );
+      return null;
     }
   },
 
   /**
    * Get multiple entries by IDs from the hash
-   * Returns a Map of entryId -> DbEntryInfo for found entries
+   * Returns a Map of entryId -> EntryInfo for found entries
    */
-  async getEntries(entryIds: number[]): Promise<Map<number, DbEntryInfo>> {
+  async getEntries(entryIds: number[]): Promise<Map<number, EntryInfo>> {
     try {
       const redis = await redisSingleton.getClient();
       const key = await getHashKey();
 
-      const results = new Map<number, DbEntryInfo>();
+      const results = new Map<number, EntryInfo>();
       if (entryIds.length === 0) {
         return results;
       }
 
-      // HMGET supports multiple fields in one call
       const values = await redis.hmget(key, ...entryIds.map(String));
 
       for (let i = 0; i < entryIds.length; i++) {
         const value = values[i];
         if (value) {
-          const parsed = JSON.parse(value) as DbEntryInfo;
-          results.set(entryIds[i], parsed);
+          results.set(entryIds[i], deserializeEntryInfo(value));
         }
       }
 
@@ -187,18 +174,14 @@ export const entryInfosCache = {
       return results;
     } catch (error) {
       logError('Entry infos cache multi-get error', error, { count: entryIds.length });
-      throw new CacheError(
-        'Failed to get entry infos from cache',
-        'ENTRY_INFOS_MULTI_GET_ERROR',
-        error instanceof Error ? error : undefined,
-      );
+      return new Map();
     }
   },
 
   /**
    * Get all entries from the hash
    */
-  async getAll(): Promise<DbEntryInfo[] | null> {
+  async getAll(): Promise<EntryInfo[] | null> {
     try {
       const redis = await redisSingleton.getClient();
       const key = await getHashKey();
@@ -209,16 +192,12 @@ export const entryInfosCache = {
         return null;
       }
 
-      const entries = Object.values(hash).map((value) => JSON.parse(value) as DbEntryInfo);
+      const entries = Object.values(hash).map(deserializeEntryInfo);
       logDebug('Entry infos cache hit (all)', { key, count: entries.length });
       return entries;
     } catch (error) {
       logError('Entry infos cache get all error', error);
-      throw new CacheError(
-        'Failed to get all entry infos from cache',
-        'ENTRY_INFOS_GET_ALL_ERROR',
-        error instanceof Error ? error : undefined,
-      );
+      return null;
     }
   },
 

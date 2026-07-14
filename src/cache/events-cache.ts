@@ -1,4 +1,8 @@
-import { selectCurrentEventByDeadline, selectNextEventByDeadline } from '../domain/events';
+import {
+  neighbourEventId,
+  selectCurrentEventByDeadline,
+  selectNextEventByDeadline,
+} from '../domain/events';
 import { logDebug, logError, logInfo } from '../utils/logger';
 import { finalizeSeasonCacheWrite, getActiveCacheSeason } from './cache-season';
 import { redisSingleton } from './singleton';
@@ -66,9 +70,9 @@ async function getNeighbourEvent(offset: number, label: string): Promise<Event |
       logDebug(`${label} event cache miss - no current event`);
       return null;
     }
-    const targetId = current.id + offset;
-    if (targetId < 1 || targetId > 38) {
-      logDebug(`${label} event out of range`, { targetId });
+    const targetId = neighbourEventId(current.id, offset);
+    if (targetId === null) {
+      logDebug(`${label} event out of range`, { currentId: current.id, offset });
       return null;
     }
     const value = await redis.hget(`Event:${season}`, targetId.toString());

@@ -2,6 +2,7 @@ import { and, desc, eq, isNotNull, lte, sql } from 'drizzle-orm';
 
 import { events, type DbEvent, type DbEventInsert } from '../db/schemas/index.schema';
 import { getDb } from '../db/singleton';
+import { neighbourEventId } from '../domain/events';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 
@@ -32,9 +33,9 @@ export const createEventRepository = (dbInstance?: DatabaseInstance) => {
         logInfo(`No current event - ${label} event unavailable`);
         return null;
       }
-      const targetId = current.id + offset;
-      if (targetId < 1 || targetId > 38) {
-        logInfo(`${label} event out of range`, { targetId });
+      const targetId = neighbourEventId(current.id, offset);
+      if (targetId === null) {
+        logInfo(`${label} event out of range`, { currentId: current.id, offset });
         return null;
       }
       const db = await getDbInstance();

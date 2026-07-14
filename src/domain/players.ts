@@ -321,6 +321,11 @@ export function validatePlayer(player: unknown): Player {
   return PlayerSchema.parse(player);
 }
 
+export function safeValidatePlayer(player: unknown): Player | null {
+  const result = PlayerSchema.safeParse(player);
+  return result.success ? result.data : null;
+}
+
 /**
  * Validate raw FPL element data
  */

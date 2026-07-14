@@ -1,4 +1,4 @@
-import { inArray, sql } from 'drizzle-orm';
+import { eq, inArray, sql } from 'drizzle-orm';
 
 import {
   eventFixtures,
@@ -43,6 +43,39 @@ export const createFixtureRepository = (dbInstance?: DatabaseInstance) => {
   const getDbInstance = async () => dbInstance || (await getDb());
 
   return {
+    findByEvent: async (eventId: number): Promise<DomainFixture[]> => {
+      try {
+        const db = await getDbInstance();
+        const rows = await db
+          .select()
+          .from(eventFixtures)
+          .where(eq(eventFixtures.eventId, eventId));
+        return rows.map(mapDbFixtureToDomain);
+      } catch (error) {
+        logError('Failed to find fixtures by event', error, { eventId });
+        throw new DatabaseError(
+          'Failed to retrieve fixtures by event',
+          'FIND_BY_EVENT_ERROR',
+          error instanceof Error ? error : undefined,
+        );
+      }
+    },
+
+    findAll: async (): Promise<DomainFixture[]> => {
+      try {
+        const db = await getDbInstance();
+        const rows = await db.select().from(eventFixtures).orderBy(eventFixtures.id);
+        return rows.map(mapDbFixtureToDomain);
+      } catch (error) {
+        logError('Failed to find all fixtures', error);
+        throw new DatabaseError(
+          'Failed to retrieve all fixtures',
+          'FIND_ALL_ERROR',
+          error instanceof Error ? error : undefined,
+        );
+      }
+    },
+
     findEventIdsByFixtureIds: async (ids: number[]): Promise<Map<number, number | null>> => {
       try {
         if (ids.length === 0) {

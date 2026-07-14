@@ -7,6 +7,7 @@ import {
   selectParticipants,
   tournamentCreateInputSchema,
   uniqueParticipantIds,
+  validateTournamentCreateInput,
   type LeagueType,
   type TournamentCreateInput,
   type TournamentParticipant,
@@ -16,7 +17,7 @@ import { enqueueTournamentSetup } from '../jobs/tournament-setup.jobs';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
 import { ConflictError, ValidationError } from '../utils/errors';
 
-export { tournamentCreateInputSchema };
+export { tournamentCreateInputSchema, validateTournamentCreateInput };
 export type { TournamentCreateInput, TournamentSetupStatus };
 
 async function fetchLeagueParticipants(leagueUrl: string): Promise<{

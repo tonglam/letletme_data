@@ -3,7 +3,7 @@ import type { Elysia } from 'elysia';
 
 import { getCurrentEvent } from '../services/events.service';
 import { isFPLSeason, isSelectTime } from '../utils/conditions';
-import { loadFixturesByEvent } from '../utils/fixtures';
+import { fixtureRepository } from '../repositories/fixtures';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { logDebug, logInfo } from '../utils/logger';
 import { enqueueTournamentTransfersPre } from './tournament-sync.jobs';
@@ -35,7 +35,7 @@ export async function runTournamentEventTransfersPreSync() {
     return;
   }
 
-  const fixtures = await loadFixturesByEvent(currentEvent.id);
+  const fixtures = await fixtureRepository.findByEvent(currentEvent.id);
   if (!isSelectTime(currentEvent, fixtures, now)) {
     logInfo('Skipping tournament event transfers pre sync - conditions not met', {
       eventId: currentEvent.id,

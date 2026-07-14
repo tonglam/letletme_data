@@ -3,7 +3,7 @@ import type { Elysia } from 'elysia';
 
 import { getCurrentEvent } from '../services/events.service';
 import { isAfterMatchDay, isFPLSeason } from '../utils/conditions';
-import { loadFixturesByEvent } from '../utils/fixtures';
+import { fixtureRepository } from '../repositories/fixtures';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { logDebug, logInfo } from '../utils/logger';
 import { enqueueLeagueEventResults } from './league-sync.jobs';
@@ -38,7 +38,7 @@ export async function runLeagueEventResultsSync(options?: {
     return;
   }
 
-  const fixtures = await loadFixturesByEvent(currentEvent.id);
+  const fixtures = await fixtureRepository.findByEvent(currentEvent.id);
   if (!skipMatchWindowCheck && !isAfterMatchDay(currentEvent, fixtures, now)) {
     logInfo('Skipping league event results sync - conditions not met', {
       eventId: currentEvent.id,

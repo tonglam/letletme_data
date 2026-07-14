@@ -3,7 +3,6 @@ import { deriveSeasonFromFixtures } from '../cache/cache-season';
 import { fplClient } from '../clients/fpl';
 import { fixtureRepository } from '../repositories/fixtures';
 import { transformFixtures } from '../transformers/fixtures';
-import { loadAllFixtures } from '../utils/fixtures';
 import { logError, logInfo, logWarn } from '../utils/logger';
 
 /**
@@ -155,7 +154,7 @@ export async function syncAllGameweeks(): Promise<{
     }
 
     // Final cache update with all fixtures
-    const allFixtures = await loadAllFixtures();
+    const allFixtures = await fixtureRepository.findAll();
     await fixturesCache.set(allFixtures);
 
     logInfo('All gameweeks sync completed', {

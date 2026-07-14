@@ -26,6 +26,15 @@ export type TournamentCreateInput = z.infer<typeof tournamentCreateInputSchema>;
 export type TournamentSetupStatus = 'pending' | 'processing' | 'ready' | 'failed';
 export type LeagueType = 'classic' | 'h2h';
 
+export function validateTournamentCreateInput(data: unknown): TournamentCreateInput {
+  return tournamentCreateInputSchema.parse(data);
+}
+
+export function safeValidateTournamentCreateInput(data: unknown): TournamentCreateInput | null {
+  const result = tournamentCreateInputSchema.safeParse(data);
+  return result.success ? result.data : null;
+}
+
 export type GroupMode = 'no_group' | 'points_races' | 'battle_races';
 export type KnockoutMode =
   | 'no_knockout'

@@ -6,7 +6,7 @@
  */
 
 import type { Event, Fixture } from '../types';
-import { loadFixturesByEvent } from './fixtures';
+import { fixtureRepository } from '../repositories/fixtures';
 
 const MATCH_WINDOW_MS = 2 * 60 * 60 * 1000;
 const FINISH_FLAG_GRACE_MS = 6 * 60 * 60 * 1000;
@@ -43,8 +43,8 @@ async function loadSeasonWindow(now: Date): Promise<SeasonWindow | null> {
   }
 
   const [gw1Fixtures, gw38Fixtures] = await Promise.all([
-    loadFixturesByEvent(1),
-    loadFixturesByEvent(38),
+    fixtureRepository.findByEvent(1),
+    fixtureRepository.findByEvent(38),
   ]);
   const gw1Kickoffs = extractKickoffs(gw1Fixtures);
   const gw38Kickoffs = extractKickoffs(gw38Fixtures);

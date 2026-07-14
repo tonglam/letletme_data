@@ -1,5 +1,6 @@
 import { entryInfosCache } from '../cache/entry-infos-cache';
 import { fplClient } from '../clients/fpl';
+import { toEntryInfo } from '../domain/entry-infos';
 import { getCurrentEvent } from './events.service';
 import { entryHistoryInfoRepository } from '../repositories/entry-history-infos';
 import { entryInfoRepository } from '../repositories/entry-infos';
@@ -19,7 +20,7 @@ export async function syncEntryInfo(entryId: number) {
     entryHistoryInfoRepository.upsertFromHistory(entryId, history),
     entryLeagueInfoRepository.upsertFromLeagues(entryId, summary.leagues),
   ]);
-  await entryInfosCache.setEntry(saved);
+  await entryInfosCache.setEntry(toEntryInfo(saved));
   logInfo('Entry info sync completed', { entryId });
   return saved;
 }
