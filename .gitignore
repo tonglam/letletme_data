@@ -181,3 +181,4 @@ $RECYCLE.BIN/
 *.swp
 *.swo
 *~
+.admin-api-key
