@@ -5,7 +5,7 @@ import { getCurrentEvent } from '../services/events.service';
 import { isFPLSeason, isSelectTime } from '../utils/conditions';
 import { loadFixturesByEvent } from '../utils/fixtures';
 import { executeTrackedCron } from '../utils/job-run-logger';
-import { logInfo } from '../utils/logger';
+import { logDebug, logInfo } from '../utils/logger';
 import { enqueueTournamentTransfersPre } from './tournament-sync.jobs';
 
 /**
@@ -23,7 +23,7 @@ import { enqueueTournamentTransfersPre } from './tournament-sync.jobs';
 export async function runTournamentEventTransfersPreSync() {
   const now = new Date();
   if (!(await isFPLSeason(now))) {
-    logInfo('Skipping tournament event transfers pre sync - not FPL season', {
+    logDebug('Skipping tournament event transfers pre sync - not FPL season', {
       month: now.getMonth() + 1,
     });
     return;

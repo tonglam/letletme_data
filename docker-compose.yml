@@ -1,4 +1,9 @@
 x-app-image: &app-image ${APP_IMAGE:-letletme-data:local}
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: '20m'
+    max-file: '5'
 
 services:
   api:
@@ -10,10 +15,9 @@ services:
     env_file: .env.deploy
     environment:
       - TZ=Asia/Shanghai
+    logging: *default-logging
     ports:
       - '3000:3000'
-    volumes:
-      - ./log:/app/logs
     restart: unless-stopped
     healthcheck:
       test:
@@ -37,6 +41,5 @@ services:
     env_file: .env.deploy
     environment:
       - TZ=Asia/Shanghai
-    volumes:
-      - ./log:/app/logs
+    logging: *default-logging
     restart: unless-stopped

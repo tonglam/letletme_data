@@ -5,7 +5,7 @@ import { getCurrentEvent } from '../services/events.service';
 import { isAfterMatchDay, isFPLSeason, isMatchDayTime } from '../utils/conditions';
 import { loadFixturesByEvent } from '../utils/fixtures';
 import { executeTrackedCron } from '../utils/job-run-logger';
-import { logInfo } from '../utils/logger';
+import { logDebug, logInfo } from '../utils/logger';
 import {
   enqueueEventLivesCacheUpdate,
   enqueueEventLivesDbSync,
@@ -32,7 +32,7 @@ import {
 export async function runLiveScores() {
   const now = new Date();
   if (!(await isFPLSeason(now))) {
-    logInfo('Skipping live scores - not FPL season', { month: now.getMonth() + 1 });
+    logDebug('Skipping live scores - not FPL season', { month: now.getMonth() + 1 });
     return;
   }
 
@@ -58,7 +58,7 @@ export async function runLiveScores() {
 async function runEventLivesCacheUpdate() {
   const now = new Date();
   if (!(await isFPLSeason(now))) {
-    logInfo('Skipping cache update - not FPL season', { month: now.getMonth() + 1 });
+    logDebug('Skipping cache update - not FPL season', { month: now.getMonth() + 1 });
     return;
   }
 
@@ -85,7 +85,7 @@ async function runEventLivesCacheUpdate() {
 async function runEventLivesDbSync() {
   const now = new Date();
   if (!(await isFPLSeason(now))) {
-    logInfo('Skipping DB sync - not FPL season', { month: now.getMonth() + 1 });
+    logDebug('Skipping DB sync - not FPL season', { month: now.getMonth() + 1 });
     return;
   }
 

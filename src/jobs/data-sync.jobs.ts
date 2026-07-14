@@ -11,12 +11,12 @@ import {
 } from './data-sync-enqueue';
 import { isFPLSeason } from '../utils/conditions';
 import { executeTrackedCron } from '../utils/job-run-logger';
-import { logInfo } from '../utils/logger';
+import { logDebug, logInfo } from '../utils/logger';
 
 async function shouldRunDataSync(jobName: string) {
   const now = new Date();
   if (!(await isFPLSeason(now))) {
-    logInfo('Skipping data sync job - not FPL season', {
+    logDebug('Skipping data sync job - not FPL season', {
       jobName,
       month: now.getMonth() + 1,
     });

@@ -10,7 +10,7 @@ import {
   RawFPLEntryTransfersResponse,
 } from '../types';
 import { FPLClientError } from '../utils/errors';
-import { logError, logInfo } from '../utils/logger';
+import { logDebug } from '../utils/logger';
 
 // Zod schemas for validation
 const EventSchema = z.object({
@@ -192,7 +192,7 @@ class FPLClient {
     const url = `${this.baseUrl}/bootstrap-static/`;
 
     try {
-      logInfo('Fetching FPL bootstrap data', { url });
+      logDebug('Fetching FPL bootstrap data', { url });
 
       const response = await fetch(url);
 
@@ -209,7 +209,7 @@ class FPLClient {
       // Validate with Zod
       const validated = BootstrapResponseSchema.parse(data);
 
-      logInfo('Successfully fetched and validated FPL bootstrap data', {
+      logDebug('Successfully fetched and validated FPL bootstrap data', {
         eventCount: validated.events.length,
         teamCount: validated.teams.length,
         playerCount: validated.elements.length,
@@ -219,7 +219,6 @@ class FPLClient {
       return validated as FPLBootstrapResponse;
     } catch (error) {
       if (error instanceof z.ZodError) {
-        logError('FPL bootstrap data validation failed', error);
         throw new FPLClientError(
           'Invalid response format from FPL API',
           undefined,
@@ -229,11 +228,9 @@ class FPLClient {
       }
 
       if (error instanceof FPLClientError) {
-        logError('FPL client error', error);
         throw error;
       }
 
-      logError('Unexpected error fetching FPL bootstrap data', error);
       throw new FPLClientError(
         'Failed to fetch bootstrap data',
         undefined,
@@ -249,7 +246,7 @@ class FPLClient {
       : `${this.baseUrl}/fixtures/`;
 
     try {
-      logInfo('Fetching fixtures', { eventId, url });
+      logDebug('Fetching fixtures', { eventId, url });
 
       const response = await fetch(url);
 
@@ -266,7 +263,7 @@ class FPLClient {
       // Validate with Zod
       const validated = z.array(FixtureSchema).parse(data);
 
-      logInfo('Successfully fetched and validated fixtures', {
+      logDebug('Successfully fetched and validated fixtures', {
         eventId,
         fixtureCount: validated.length,
       });
@@ -274,7 +271,6 @@ class FPLClient {
       return validated as RawFPLFixture[];
     } catch (error) {
       if (error instanceof z.ZodError) {
-        logError('Fixtures data validation failed', error);
         throw new FPLClientError(
           'Invalid response format from FPL API',
           undefined,
@@ -284,11 +280,9 @@ class FPLClient {
       }
 
       if (error instanceof FPLClientError) {
-        logError('FPL client error', error);
         throw error;
       }
 
-      logError('Unexpected error fetching fixtures', error);
       throw new FPLClientError(
         'Failed to fetch fixtures',
         undefined,
@@ -302,7 +296,7 @@ class FPLClient {
     const url = `${this.baseUrl}/event/${eventId}/live/`;
 
     try {
-      logInfo('Fetching event live data', { eventId, url });
+      logDebug('Fetching event live data', { eventId, url });
 
       const response = await fetch(url);
 
@@ -360,7 +354,7 @@ class FPLClient {
 
       const validated = EventLiveResponseSchema.parse(data);
 
-      logInfo('Successfully fetched and validated event live data', {
+      logDebug('Successfully fetched and validated event live data', {
         eventId,
         elementCount: validated.elements.length,
       });
@@ -368,7 +362,6 @@ class FPLClient {
       return validated as RawFPLEventLiveResponse;
     } catch (error) {
       if (error instanceof z.ZodError) {
-        logError('Event live data validation failed', error);
         throw new FPLClientError(
           'Invalid response format from FPL API',
           undefined,
@@ -378,11 +371,9 @@ class FPLClient {
       }
 
       if (error instanceof FPLClientError) {
-        logError('FPL client error', error);
         throw error;
       }
 
-      logError('Unexpected error fetching event live data', error);
       throw new FPLClientError(
         'Failed to fetch event live data',
         undefined,
@@ -395,7 +386,7 @@ class FPLClient {
   async getEntrySummary(entryId: number) {
     const url = `${this.baseUrl}/entry/${entryId}/`;
     try {
-      logInfo('Fetching entry summary', { entryId, url });
+      logDebug('Fetching entry summary', { entryId, url });
 
       const response = await fetch(url);
       if (!response.ok) {
@@ -447,11 +438,10 @@ class FPLClient {
       });
 
       const validated = EntrySummarySchema.parse(data);
-      logInfo('Successfully fetched and validated entry summary', { entryId });
+      logDebug('Successfully fetched and validated entry summary', { entryId });
       return validated;
     } catch (error) {
       if (error instanceof z.ZodError) {
-        logError('Entry summary validation failed', error);
         throw new FPLClientError(
           'Invalid entry summary format from FPL API',
           undefined,
@@ -460,10 +450,8 @@ class FPLClient {
         );
       }
       if (error instanceof FPLClientError) {
-        logError('FPL client error', error);
         throw error;
       }
-      logError('Unexpected error fetching entry summary', error);
       throw new FPLClientError(
         'Failed to fetch entry summary',
         undefined,
@@ -476,7 +464,7 @@ class FPLClient {
   async getEntryEventPicks(entryId: number, eventId: number) {
     const url = `${this.baseUrl}/entry/${entryId}/event/${eventId}/picks/`;
     try {
-      logInfo('Fetching entry event picks', { entryId, eventId, url });
+      logDebug('Fetching entry event picks', { entryId, eventId, url });
 
       const response = await fetch(url);
       if (!response.ok) {
@@ -518,7 +506,7 @@ class FPLClient {
       });
 
       const validated = PicksResponseSchema.parse(data);
-      logInfo('Successfully fetched and validated entry event picks', {
+      logDebug('Successfully fetched and validated entry event picks', {
         entryId,
         eventId,
         pickCount: validated.picks.length,
@@ -527,7 +515,6 @@ class FPLClient {
       return validated;
     } catch (error) {
       if (error instanceof z.ZodError) {
-        logError('Entry event picks validation failed', error);
         throw new FPLClientError(
           'Invalid entry event picks format from FPL API',
           undefined,
@@ -536,10 +523,8 @@ class FPLClient {
         );
       }
       if (error instanceof FPLClientError) {
-        logError('FPL client error', error);
         throw error;
       }
-      logError('Unexpected error fetching entry event picks', error);
       throw new FPLClientError(
         'Failed to fetch entry event picks',
         undefined,
@@ -556,7 +541,7 @@ class FPLClient {
     leagueType: 'classic' | 'h2h',
   ): Promise<RawFPLLeagueStandingsResponse> {
     try {
-      logInfo('Fetching league standings', { leagueId, page, leagueType, url });
+      logDebug('Fetching league standings', { leagueId, page, leagueType, url });
 
       const response = await fetch(url);
       if (!response.ok) {
@@ -587,7 +572,7 @@ class FPLClient {
         .passthrough();
 
       const validated = LeagueStandingsSchema.parse(data);
-      logInfo('Successfully fetched league standings', {
+      logDebug('Successfully fetched league standings', {
         leagueId,
         page,
         leagueType,
@@ -596,7 +581,6 @@ class FPLClient {
       return validated as RawFPLLeagueStandingsResponse;
     } catch (error) {
       if (error instanceof z.ZodError) {
-        logError('League standings validation failed', error, { leagueId, leagueType, page });
         throw new FPLClientError(
           'Invalid league standings format from FPL API',
           undefined,
@@ -606,11 +590,9 @@ class FPLClient {
       }
 
       if (error instanceof FPLClientError) {
-        logError('FPL client error', error, { leagueId, leagueType, page });
         throw error;
       }
 
-      logError('Unexpected error fetching league standings', error, { leagueId, leagueType, page });
       throw new FPLClientError(
         'Failed to fetch league standings',
         undefined,
@@ -639,7 +621,7 @@ class FPLClient {
   async getEntryTransfers(entryId: number): Promise<RawFPLEntryTransfersResponse> {
     const url = `${this.baseUrl}/entry/${entryId}/transfers/`;
     try {
-      logInfo('Fetching entry transfers', { entryId, url });
+      logDebug('Fetching entry transfers', { entryId, url });
 
       const response = await fetch(url);
       if (!response.ok) {
@@ -667,14 +649,13 @@ class FPLClient {
       const TransfersSchema = z.array(TransferSchema);
       const validated = TransfersSchema.parse(data);
 
-      logInfo('Successfully fetched and validated entry transfers', {
+      logDebug('Successfully fetched and validated entry transfers', {
         entryId,
         count: validated.length,
       });
       return validated as RawFPLEntryTransfersResponse;
     } catch (error) {
       if (error instanceof z.ZodError) {
-        logError('Entry transfers validation failed', error);
         throw new FPLClientError(
           'Invalid entry transfers format from FPL API',
           undefined,
@@ -683,10 +664,8 @@ class FPLClient {
         );
       }
       if (error instanceof FPLClientError) {
-        logError('FPL client error', error);
         throw error;
       }
-      logError('Unexpected error fetching entry transfers', error);
       throw new FPLClientError(
         'Failed to fetch entry transfers',
         undefined,
@@ -699,7 +678,7 @@ class FPLClient {
   async getEntryHistory(entryId: number): Promise<RawFPLEntryHistoryResponse> {
     const url = `${this.baseUrl}/entry/${entryId}/history/`;
     try {
-      logInfo('Fetching entry history', { entryId, url });
+      logDebug('Fetching entry history', { entryId, url });
 
       const response = await fetch(url);
       if (!response.ok) {
@@ -733,7 +712,7 @@ class FPLClient {
       });
 
       const validated = EntryHistoryResponseSchema.parse(data);
-      logInfo('Successfully fetched and validated entry history', {
+      logDebug('Successfully fetched and validated entry history', {
         entryId,
         pastSeasons: validated.past.length,
         currentSnapshots: validated.current.length,
@@ -741,7 +720,6 @@ class FPLClient {
       return validated as RawFPLEntryHistoryResponse;
     } catch (error) {
       if (error instanceof z.ZodError) {
-        logError('Entry history validation failed', error);
         throw new FPLClientError(
           'Invalid entry history format from FPL API',
           undefined,
@@ -750,10 +728,8 @@ class FPLClient {
         );
       }
       if (error instanceof FPLClientError) {
-        logError('FPL client error', error);
         throw error;
       }
-      logError('Unexpected error fetching entry history', error);
       throw new FPLClientError(
         'Failed to fetch entry history',
         undefined,
@@ -763,12 +739,16 @@ class FPLClient {
     }
   }
 
-  async getEntryCup(entryId: number): Promise<RawFPLEntryCupResponse> {
+  async getEntryCup(entryId: number): Promise<RawFPLEntryCupResponse | null> {
     const url = `${this.baseUrl}/entry/${entryId}/cup/`;
     try {
-      logInfo('Fetching entry cup', { entryId, url });
+      logDebug('Fetching entry cup', { entryId, url });
 
       const response = await fetch(url);
+      if (response.status === 404) {
+        logDebug('Entry cup data unavailable', { entryId });
+        return null;
+      }
       if (!response.ok) {
         throw new FPLClientError(
           `HTTP ${response.status}: ${response.statusText}`,
@@ -800,14 +780,13 @@ class FPLClient {
         .passthrough();
 
       const validated = CupResponseSchema.parse(data);
-      logInfo('Successfully fetched and validated entry cup', {
+      logDebug('Successfully fetched and validated entry cup', {
         entryId,
         matchCount: validated.cup_matches.length,
       });
       return validated as RawFPLEntryCupResponse;
     } catch (error) {
       if (error instanceof z.ZodError) {
-        logError('Entry cup validation failed', error);
         throw new FPLClientError(
           'Invalid entry cup format from FPL API',
           undefined,
@@ -816,10 +795,8 @@ class FPLClient {
         );
       }
       if (error instanceof FPLClientError) {
-        logError('FPL client error', error);
         throw error;
       }
-      logError('Unexpected error fetching entry cup', error);
       throw new FPLClientError(
         'Failed to fetch entry cup',
         undefined,

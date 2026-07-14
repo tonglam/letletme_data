@@ -5,7 +5,7 @@ import { syncCurrentPlayerValues } from '../services/player-values.service';
 import { playerValuesRepository } from '../repositories/player-values';
 import { isFPLSeason } from '../utils/conditions';
 import { executeTrackedCron } from '../utils/job-run-logger';
-import { logInfo } from '../utils/logger';
+import { logDebug, logInfo } from '../utils/logger';
 
 function getChangeDateKey(date: Date) {
   return date.toISOString().split('T')[0].replace(/-/g, '');
@@ -13,7 +13,7 @@ function getChangeDateKey(date: Date) {
 
 async function shouldRunPlayerValuesSync(now: Date) {
   if (!(await isFPLSeason(now))) {
-    logInfo('Skipping player values sync - not FPL season', { month: now.getMonth() + 1 });
+    logDebug('Skipping player values sync - not FPL season', { month: now.getMonth() + 1 });
     return false;
   }
 

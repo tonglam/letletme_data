@@ -5,7 +5,7 @@ import { getCurrentEvent } from '../services/events.service';
 import { isFPLSeason, isSelectTime } from '../utils/conditions';
 import { loadFixturesByEvent } from '../utils/fixtures';
 import { executeTrackedCron } from '../utils/job-run-logger';
-import { logInfo } from '../utils/logger';
+import { logDebug, logInfo } from '../utils/logger';
 import { enqueueLeagueEventPicks } from './league-sync.jobs';
 
 /**
@@ -20,7 +20,9 @@ import { enqueueLeagueEventPicks } from './league-sync.jobs';
 export async function runLeagueEventPicksSync() {
   const now = new Date();
   if (!(await isFPLSeason(now))) {
-    logInfo('Skipping league event picks sync - not FPL season', { month: now.getMonth() + 1 });
+    logDebug('Skipping league event picks sync - not FPL season', {
+      month: now.getMonth() + 1,
+    });
     return;
   }
 

@@ -6,7 +6,7 @@ import { getCurrentEvent } from '../services/events.service';
 import { isAfterMatchDay, isFPLSeason } from '../utils/conditions';
 import { loadFixturesByEvent } from '../utils/fixtures';
 import { executeTrackedCron } from '../utils/job-run-logger';
-import { logInfo } from '../utils/logger';
+import { logDebug, logInfo } from '../utils/logger';
 
 /**
  * Entry Event Transfers Cron Jobs
@@ -23,7 +23,7 @@ export function registerEntryTransfersJobs(app: Elysia) {
           await executeTrackedCron('entry-event-transfers-daily', async () => {
             const now = new Date();
             if (!(await isFPLSeason(now))) {
-              logInfo('Skipping entry transfers sync - not FPL season', {
+              logDebug('Skipping entry transfers sync - not FPL season', {
                 month: now.getMonth() + 1,
               });
               return;

@@ -4,12 +4,12 @@ import type { Elysia } from 'elysia';
 import { syncTournamentInfo } from '../services/tournament-info.service';
 import { isFPLSeason } from '../utils/conditions';
 import { executeTrackedCron } from '../utils/job-run-logger';
-import { logInfo } from '../utils/logger';
+import { logDebug, logInfo } from '../utils/logger';
 
 export async function runTournamentInfoSync() {
   const now = new Date();
   if (!(await isFPLSeason(now))) {
-    logInfo('Skipping tournament info sync - not FPL season', {
+    logDebug('Skipping tournament info sync - not FPL season', {
       month: now.getMonth() + 1,
     });
     return;

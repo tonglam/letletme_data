@@ -7,6 +7,10 @@ The production stack now runs inside Docker containers orchestrated by `docker c
 2. `.github/workflows/deploy.yml` builds a Bun image on merges to `main`, pushes it to GHCR, and SSHes into the VPS to pull the image, restart the compose stack, and execute database migrations from within the API container.
 3. The VPS only needs Docker, the compose file, and a `.env.deploy` containing secrets—no manual Bun builds or systemd restarts.
 
+Production logs are structured JSON on container stdout. Docker retains at most five 20 MB
+files per service; use `docker compose logs` rather than workspace log files. The legacy
+systemd units and `/var/log/letletme` files are not part of the Docker deployment.
+
 ## Host Bootstrap Checklist
 1. **Install Docker + compose** following https://docs.docker.com/engine/install/ubuntu/ then add the `deploy` user to the `docker` group and re-login.
 2. **Clone the repo** into `/home/workspace/letletme_data` (or another directory referenced by `VPS_WORKDIR`).
@@ -33,10 +37,13 @@ The workflow exports `APP_IMAGE=$IMAGE_REF` before running `docker compose pull/
 - `scripts/deploy.sh deploy` – build locally and run the compose stack with migrations.
 - `scripts/deploy.sh status` – `docker compose ps` summary.
 - `scripts/deploy.sh logs api` – follow logs for a specific service.
+- `docker compose logs --since 1h api worker` – inspect bounded production stdout logs.
 - `docker compose run --rm -T api bun run db:migrate` – one-off migration run if needed.
 
 ## Legacy Manual Deployment (Break Glass)
 The original bare-metal guide is retained below for emergencies when Docker/CI/CD are unavailable.
+Do not enable its systemd services alongside Docker; doing so creates duplicate processes and
+separate unbounded log destinations.
 
 ### Manual Deployment Guide - Linux Server
 

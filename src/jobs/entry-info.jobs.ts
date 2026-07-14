@@ -5,7 +5,7 @@ import { enqueueEntryInfoSyncJob } from './entry-sync-enqueue';
 import { cache } from '../cache/cache-operations';
 import { isFPLSeason } from '../utils/conditions';
 import { executeTrackedCron } from '../utils/job-run-logger';
-import { logError, logInfo } from '../utils/logger';
+import { logDebug, logError, logInfo } from '../utils/logger';
 
 const ENTRY_INFO_SYNC_CACHE_PREFIX = 'entry-info-sync:daily';
 
@@ -52,7 +52,7 @@ export function registerEntryInfoJobs(app: Elysia) {
           await executeTrackedCron('entry-info-daily', async () => {
             const now = new Date();
             if (!(await isFPLSeason(now))) {
-              logInfo('Skipping entry info sync - not FPL season', {
+              logDebug('Skipping entry info sync - not FPL season', {
                 month: now.getMonth() + 1,
               });
               return;

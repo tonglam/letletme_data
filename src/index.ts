@@ -25,7 +25,8 @@ import { registerTournamentJobs } from './jobs/tournament-jobs';
 // Import utilities
 import { getConfig } from './utils/config';
 import { getErrorMessage } from './utils/errors';
-import { logError, logInfo } from './utils/logger';
+import { getHttpErrorLogLevel, getHttpRequestLogContext } from './utils/http-logging';
+import { logDebug, logError, logInfo, logWarn } from './utils/logger';
 
 /**
  * Letletme Data API - Elysia Application
@@ -50,18 +51,31 @@ const app = new Elysia()
 
   // Request logging
   .onRequest(({ request }) => {
-    logInfo('HTTP Request', {
-      method: request.method,
-      url: request.url,
-      userAgent: request.headers.get('user-agent'),
-    });
+    const requestContext = getHttpRequestLogContext(request);
+    if (requestContext) {
+      logDebug('HTTP Request', requestContext);
+    }
   })
 
   // Global error handling
-  .onError(({ code, error, set }) => {
-    logError('HTTP Error', error, { code });
-
+  .onError(({ code, error, request, set }) => {
     const message = getErrorMessage(error);
+    const requestContext = getHttpRequestLogContext(request) ?? {
+      method: request.method,
+      pathname: new URL(request.url).pathname,
+    };
+    const logContext = { code, ...requestContext };
+
+    switch (getHttpErrorLogLevel(code)) {
+      case 'debug':
+        logDebug('HTTP Not Found', logContext);
+        break;
+      case 'warn':
+        logWarn('HTTP Validation Error', { ...logContext, message });
+        break;
+      default:
+        logError('HTTP Error', error, logContext);
+    }
 
     switch (code) {
       case 'NOT_FOUND':
