@@ -1,6 +1,7 @@
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 
+import { getConfig } from '../utils/config';
 import { logError, logInfo } from '../utils/logger';
 import * as schema from './schemas/index.schema';
 
@@ -49,8 +50,7 @@ class DatabaseSingleton {
       this.isConnecting = true;
       logInfo('Initializing database connection...');
 
-      const connectionString =
-        process.env.DATABASE_URL || 'postgresql://localhost:5432/letletme_data';
+      const connectionString = getConfig().DATABASE_URL;
 
       this.client = postgres(connectionString, {
         max: 10,

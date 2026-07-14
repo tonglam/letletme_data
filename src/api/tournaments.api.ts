@@ -27,8 +27,7 @@ export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
   .get(
     '/:tournamentId/setup-status',
     async ({ params, set }) => {
-      const tournamentId = Number(params.tournamentId);
-      const status = await getTournamentSetupStatus(tournamentId);
+      const status = await getTournamentSetupStatus(params.tournamentId);
 
       if (!status) {
         set.status = 404;
@@ -37,7 +36,7 @@ export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
 
       return {
         success: true,
-        tournamentId,
+        tournamentId: params.tournamentId,
         setupStatus: status.setupStatus,
         setupError: status.setupError,
         setupStartedAt: status.setupStartedAt,
@@ -45,19 +44,18 @@ export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
       };
     },
     {
-      params: t.Object({ tournamentId: t.String() }),
+      params: t.Object({ tournamentId: t.Numeric() }),
     },
   )
   .post(
     '/:tournamentId/setup',
     async ({ params, set }) => {
       try {
-        const tournamentId = Number(params.tournamentId);
-        const job = await requeueTournamentSetup(tournamentId);
+        const job = await requeueTournamentSetup(params.tournamentId);
         set.status = 202;
         return {
           success: true,
-          tournamentId,
+          tournamentId: params.tournamentId,
           jobId: job.id,
           setupStatus: 'pending',
         };
@@ -68,7 +66,7 @@ export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
       }
     },
     {
-      params: t.Object({ tournamentId: t.String() }),
+      params: t.Object({ tournamentId: t.Numeric() }),
     },
   )
   .post(

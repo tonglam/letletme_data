@@ -4,11 +4,10 @@ import { syncEntryInfo } from '../services/entry-info.service';
 export const entryInfoAPI = new Elysia({ prefix: '/entry-info' }).post(
   '/:entryId/sync',
   async ({ params }) => {
-    const id = Number(params.entryId);
-    const res = await syncEntryInfo(id);
+    const res = await syncEntryInfo(params.entryId);
     return { success: true, data: res };
   },
   {
-    params: t.Object({ entryId: t.String() }),
+    params: t.Object({ entryId: t.Numeric() }),
   },
 );

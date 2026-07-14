@@ -8,7 +8,7 @@ import {
 import { logError } from '../utils/logger';
 
 const entrySyncBodySchema = t.Object({
-  entryIds: t.Array(t.Number(), { minItems: 1 }),
+  entryIds: t.Array(t.Number(), { minItems: 1, maxItems: 100 }),
   eventId: t.Optional(t.Number()),
 });
 
