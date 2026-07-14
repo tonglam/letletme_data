@@ -27,7 +27,19 @@ jobs:
         run: bun run lint
 
       - name: Unit tests only
+        env:
+          # Unit tests should not require live infra; placeholder env keeps config Zod happy
+          # if any module still evaluates getConfig() during import.
+          DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
+          REDIS_HOST: 127.0.0.1
+          REDIS_PORT: '6379'
+          BETTER_AUTH_SECRET: ci-test-secret-min-32-characters-long
         run: bun test tests/unit
 
       - name: Build
+        env:
+          DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
+          REDIS_HOST: 127.0.0.1
+          REDIS_PORT: '6379'
+          BETTER_AUTH_SECRET: ci-test-secret-min-32-characters-long
         run: bun run build

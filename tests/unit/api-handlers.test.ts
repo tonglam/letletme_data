@@ -20,15 +20,26 @@ mock.module('../../src/services/entries.service', () => ({
   syncEntryEventResults,
 }));
 
-const enqueueEventsSyncJob = mock(async () => ({ id: 'job-events-1' }));
-mock.module('../../src/jobs/data-sync-enqueue', () => ({
-  enqueueEventsSyncJob,
-  enqueueFixturesSyncJob: mock(async () => ({ id: 'fixtures' })),
-  enqueuePhasesSyncJob: mock(async () => ({ id: 'phases' })),
-  enqueuePlayersSyncJob: mock(async () => ({ id: 'players' })),
-  enqueuePlayerStatsSyncJob: mock(async () => ({ id: 'player-stats' })),
-  enqueuePlayerValuesSyncJob: mock(async () => ({ id: 'player-values' })),
-  enqueueTeamsSyncJob: mock(async () => ({ id: 'teams' })),
+class JobNotFoundError extends Error {
+  constructor(name: string) {
+    super(`Job '${name}' not found`);
+    this.name = 'JobNotFoundError';
+  }
+}
+
+const listTriggerableJobs = mock(() => [
+  { name: 'events-sync', description: 'Sync events from FPL API', schedule: 'Daily at 6:35 AM' },
+]);
+const triggerJob = mock(async (name: string) => {
+  if (name === 'events-sync') {
+    return { kind: 'enqueued' as const, jobId: 'job-events-1', message: 'Job triggered' };
+  }
+  throw new JobNotFoundError(name);
+});
+mock.module('../../src/services/job-trigger.service', () => ({
+  JobNotFoundError,
+  listTriggerableJobs,
+  triggerJob,
 }));
 
 const syncFixtures = mock(async () => ({ count: 10 }));
@@ -92,7 +103,8 @@ describe('eventsAPI handlers', () => {
 
 describe('jobsAPI handlers', () => {
   beforeEach(() => {
-    enqueueEventsSyncJob.mockClear();
+    listTriggerableJobs.mockClear();
+    triggerJob.mockClear();
   });
 
   test('GET /jobs lists available jobs', async () => {
@@ -104,6 +116,7 @@ describe('jobsAPI handlers', () => {
     };
     expect(body.success).toBe(true);
     expect(body.jobs.some((job) => job.name === 'events-sync')).toBe(true);
+    expect(listTriggerableJobs).toHaveBeenCalledTimes(1);
   });
 
   test('POST /jobs/events-sync/trigger enqueues the job', async () => {
@@ -118,7 +131,7 @@ describe('jobsAPI handlers', () => {
     };
     expect(body.success).toBe(true);
     expect(body.jobId).toBe('job-events-1');
-    expect(enqueueEventsSyncJob).toHaveBeenCalledTimes(1);
+    expect(triggerJob).toHaveBeenCalledWith('events-sync');
   });
 
   test('POST /jobs/unknown/trigger returns 404', async () => {

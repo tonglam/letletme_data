@@ -1,6 +1,9 @@
 import { describe, expect, mock, test } from 'bun:test';
 
-import { enqueueCascadeJobs, type CascadeEnqueueDeps } from '../../src/workers/live-data.worker';
+import {
+  enqueueCascadeJobs,
+  type CascadeEnqueueDeps,
+} from '../../src/services/live-data-cascade.service';
 
 function createEnqueueMock(): CascadeEnqueueDeps['enqueueEventLiveSummary'] {
   return mock(async () => ({
