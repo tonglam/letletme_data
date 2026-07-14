@@ -13,6 +13,7 @@
     "build": "bun build src/index.ts src/worker.ts --target bun --outdir ./dist",
     "env:check": "bun validate-env.ts",
     "test": "bun test",
+    "typecheck": "bunx tsc --noEmit",
     "coverage": "bun test --coverage",
     "lint": "bunx eslint . --ext .ts,.tsx --cache --config eslint.config.mjs",
     "lint:fix": "bunx eslint . --ext .ts,.tsx --cache --fix --config eslint.config.mjs",

@@ -17,11 +17,12 @@ export function getHttpRequestLogContext(request: Request): HttpRequestLogContex
   };
 }
 
-export function getHttpErrorLogLevel(code: string): HttpErrorLogLevel {
-  if (code === 'NOT_FOUND') {
+export function getHttpErrorLogLevel(code: string | number): HttpErrorLogLevel {
+  const normalized = String(code);
+  if (normalized === 'NOT_FOUND') {
     return 'debug';
   }
-  if (code === 'VALIDATION') {
+  if (normalized === 'VALIDATION') {
     return 'warn';
   }
   return 'error';

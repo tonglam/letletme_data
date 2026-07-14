@@ -11,7 +11,9 @@ afterEach(() => {
 
 describe('FPL entry cup client', () => {
   test('returns null when an entry has no cup data', async () => {
-    globalThis.fetch = mock(async () => new Response(null, { status: 404 })) as typeof fetch;
+    globalThis.fetch = mock(
+      async () => new Response(null, { status: 404 }),
+    ) as unknown as typeof fetch;
 
     await expect(fplClient.getEntryCup(123)).resolves.toBeNull();
   });
@@ -19,7 +21,7 @@ describe('FPL entry cup client', () => {
   test('continues to throw upstream failures', async () => {
     globalThis.fetch = mock(
       async () => new Response(null, { status: 503, statusText: 'Service Unavailable' }),
-    ) as typeof fetch;
+    ) as unknown as typeof fetch;
 
     try {
       await fplClient.getEntryCup(123);

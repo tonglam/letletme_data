@@ -47,19 +47,18 @@ export function serializeError(error: unknown, depth = 0): unknown {
   }
 
   if (isRecord(error)) {
-    const metadata = Object.fromEntries(
-      Object.entries(error)
-        .slice(0, 20)
-        .flatMap(([key, value]) => {
-          if (typeof value === 'string') {
-            return [[key, truncate(value, MAX_ERROR_MESSAGE_LENGTH)]];
-          }
-          if (typeof value === 'number' || typeof value === 'boolean' || value === null) {
-            return [[key, value]];
-          }
-          return [];
-        }),
-    );
+    const metadataEntries: Array<[string, string | number | boolean | null]> = Object.entries(error)
+      .slice(0, 20)
+      .flatMap(([key, value]): Array<[string, string | number | boolean | null]> => {
+        if (typeof value === 'string') {
+          return [[key, truncate(value, MAX_ERROR_MESSAGE_LENGTH)]];
+        }
+        if (typeof value === 'number' || typeof value === 'boolean' || value === null) {
+          return [[key, value]];
+        }
+        return [];
+      });
+    const metadata = Object.fromEntries(metadataEntries);
 
     return {
       message: truncate(
