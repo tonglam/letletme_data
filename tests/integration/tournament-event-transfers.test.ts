@@ -2,19 +2,17 @@ import { describe, expect, test } from 'bun:test';
 
 import { getDb } from '../../src/db/singleton';
 import { entryEventTransfers } from '../../src/db/schemas/index.schema';
-import { tournamentInfoRepository } from '../../src/repositories/tournament-infos';
 import {
   syncTournamentEventTransfersPost,
   syncTournamentEventTransfersPre,
 } from '../../src/services/tournament-event-transfers.service';
-import { getCurrentEvent } from '../../src/services/events.service';
+import { resolveIntegrationSeedAvailability } from './helpers/tournament-seed';
 
-const currentEvent = await getCurrentEvent();
-const tournaments = await tournamentInfoRepository.findActive();
-const hasSeedData = Boolean(currentEvent) && tournaments.length > 0;
+const resolved = await resolveIntegrationSeedAvailability('any');
 
-describe.skipIf(!hasSeedData)('Tournament Event Transfers Integration Tests', () => {
-  const testEventId = currentEvent!.id;
+describe.skipIf(!resolved.canRun)('Tournament Event Transfers Integration Tests', () => {
+  const seed = resolved.seed!;
+  const testEventId = seed.currentEvent.id;
 
   describe('Pre-Event Transfers Sync', () => {
     test('should sync pre-event transfers', async () => {

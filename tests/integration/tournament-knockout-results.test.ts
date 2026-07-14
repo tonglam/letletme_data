@@ -2,17 +2,14 @@ import { describe, expect, test } from 'bun:test';
 
 import { getDb } from '../../src/db/singleton';
 import { tournamentKnockoutResults } from '../../src/db/schemas/index.schema';
-import { tournamentInfoRepository } from '../../src/repositories/tournament-infos';
 import { syncTournamentKnockoutResults } from '../../src/services/tournament-knockout-results.service';
-import { getCurrentEvent } from '../../src/services/events.service';
+import { resolveIntegrationSeedAvailability } from './helpers/tournament-seed';
 
-const currentEvent = await getCurrentEvent();
-const tournaments = await tournamentInfoRepository.findActive();
-const hasSeedData =
-  Boolean(currentEvent) && tournaments.some((t) => t.knockoutMode !== 'no_knockout');
+const resolved = await resolveIntegrationSeedAvailability('knockout');
 
-describe.skipIf(!hasSeedData)('Tournament Knockout Results Integration Tests', () => {
-  const testEventId = currentEvent!.id;
+describe.skipIf(!resolved.canRun)('Tournament Knockout Results Integration Tests', () => {
+  const seed = resolved.seed!;
+  const testEventId = seed.currentEvent.id;
 
   describe('Sync Integration', () => {
     test('should sync knockout results', async () => {

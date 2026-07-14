@@ -3,17 +3,14 @@ import { eq } from 'drizzle-orm';
 
 import { getDb } from '../../src/db/singleton';
 import { tournamentPointsGroupResults } from '../../src/db/schemas/index.schema';
-import { tournamentInfoRepository } from '../../src/repositories/tournament-infos';
 import { syncTournamentPointsRaceResults } from '../../src/services/tournament-points-race-results.service';
-import { getCurrentEvent } from '../../src/services/events.service';
+import { resolveIntegrationSeedAvailability } from './helpers/tournament-seed';
 
-const currentEvent = await getCurrentEvent();
-const tournaments = await tournamentInfoRepository.findActive();
-const hasSeedData =
-  Boolean(currentEvent) && tournaments.some((t) => t.groupMode === 'points_races');
+const resolved = await resolveIntegrationSeedAvailability('points_races');
 
-describe.skipIf(!hasSeedData)('Tournament Points Race Results Integration Tests', () => {
-  const testEventId = currentEvent!.id;
+describe.skipIf(!resolved.canRun)('Tournament Points Race Results Integration Tests', () => {
+  const seed = resolved.seed!;
+  const testEventId = seed.currentEvent.id;
   let syncedResult: Awaited<ReturnType<typeof syncTournamentPointsRaceResults>>;
 
   beforeAll(async () => {

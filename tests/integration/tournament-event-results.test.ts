@@ -4,17 +4,16 @@ import { eq } from 'drizzle-orm';
 import { entryEventResults } from '../../src/db/schemas/index.schema';
 import { getDb } from '../../src/db/singleton';
 import { tournamentInfoRepository } from '../../src/repositories/tournament-infos';
-import { getCurrentEvent } from '../../src/services/events.service';
 import { syncTournamentEventResults } from '../../src/services/tournament-event-results.service';
+import { resolveIntegrationSeedAvailability } from './helpers/tournament-seed';
 
 const INTEGRATION_TEST_TIMEOUT_MS = 30_000;
 
-const currentEvent = await getCurrentEvent();
-const tournaments = await tournamentInfoRepository.findActive();
-const hasSeedData = Boolean(currentEvent) && tournaments.length > 0;
+const resolved = await resolveIntegrationSeedAvailability('any');
 
-describe.skipIf(!hasSeedData)('Tournament Event Results Integration Tests', () => {
-  const testEventId = currentEvent!.id;
+describe.skipIf(!resolved.canRun)('Tournament Event Results Integration Tests', () => {
+  const seed = resolved.seed!;
+  const testEventId = seed.currentEvent.id;
   let syncedResult: Awaited<ReturnType<typeof syncTournamentEventResults>>;
   let syncDuration = 0;
 

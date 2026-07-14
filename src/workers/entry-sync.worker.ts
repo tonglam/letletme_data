@@ -28,7 +28,10 @@ import {
   syncEntryEventResults,
   syncEntryEventTransfers,
 } from '../services/entries.service';
-import { markEntryInfoSyncedToday, shouldMarkEntryInfoSynced } from '../jobs/entry-info-sync-marker';
+import {
+  markEntryInfoSyncedToday,
+  shouldMarkEntryInfoSynced,
+} from '../jobs/entry-info-sync-marker';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { logError, logInfo } from '../utils/logger';
 import { withMutationConflictGuard } from '../utils/mutation-lock';

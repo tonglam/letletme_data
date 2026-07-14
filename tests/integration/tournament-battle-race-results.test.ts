@@ -2,17 +2,14 @@ import { describe, expect, test } from 'bun:test';
 
 import { getDb } from '../../src/db/singleton';
 import { tournamentBattleGroupResults } from '../../src/db/schemas/index.schema';
-import { tournamentInfoRepository } from '../../src/repositories/tournament-infos';
 import { syncTournamentBattleRaceResults } from '../../src/services/tournament-battle-race-results.service';
-import { getCurrentEvent } from '../../src/services/events.service';
+import { resolveIntegrationSeedAvailability } from './helpers/tournament-seed';
 
-const currentEvent = await getCurrentEvent();
-const tournaments = await tournamentInfoRepository.findActive();
-const hasSeedData =
-  Boolean(currentEvent) && tournaments.some((t) => t.groupMode === 'battle_races');
+const resolved = await resolveIntegrationSeedAvailability('battle_races');
 
-describe.skipIf(!hasSeedData)('Tournament Battle Race Results Integration Tests', () => {
-  const testEventId = currentEvent!.id;
+describe.skipIf(!resolved.canRun)('Tournament Battle Race Results Integration Tests', () => {
+  const seed = resolved.seed!;
+  const testEventId = seed.currentEvent.id;
 
   describe('Sync Integration', () => {
     test('should sync battle race results', async () => {
