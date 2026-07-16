@@ -128,4 +128,4 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
 
 | FP | Commit SHA | Date | Notes |
 |----|-----------|------|-------|
-| — | — | — | — |
+| FP-01 | 47baf1f (PR #3) | 2026-07-17 | Prod no-ops verified; teams.unavailable prod drift noted for FP-21 |
