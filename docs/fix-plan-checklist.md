@@ -127,4 +127,4 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
 
 | FP | Commit SHA | Date | Notes |
 |----|-----------|------|-------|
-| — | — | — | — |
+| FP-02 | 692a977 (PR pending) | 2026-07-17 | bun shared-registry made import-throw insufficient; call-style guard |
