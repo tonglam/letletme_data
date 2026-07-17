@@ -135,3 +135,4 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
 | FP-04 | 81ef6e4 (PR #6) | 2026-07-17 | Unknown chips now logWarn + pass through per row |
 | FP-08 | 5a53a87 (PR #10) | 2026-07-17 | — |
 | FP-15 | 8a0c80a (PR #17) | 2026-07-17 | PR #17 |
+| FP-16 | 76f493f | 2026-07-17 | PR pending |
