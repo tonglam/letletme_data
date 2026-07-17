@@ -127,4 +127,4 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
 
 | FP | Commit SHA | Date | Notes |
 |----|-----------|------|-------|
-| — | — | — | — |
+| FP-08 | 5a53a87 (PR #10) | 2026-07-17 | — |
