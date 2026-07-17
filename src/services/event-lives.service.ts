@@ -1,8 +1,9 @@
 import { eventLivesCache } from '../cache/operations';
 import { fplClient } from '../clients/fpl';
+import { getDb } from '../db/singleton';
 import type { EventLive } from '../domain/event-lives';
-import { eventLiveExplainsRepository } from '../repositories/event-live-explains';
-import { eventLiveRepository } from '../repositories/event-lives';
+import { createEventLiveExplainsRepository } from '../repositories/event-live-explains';
+import { createEventLiveRepository, eventLiveRepository } from '../repositories/event-lives';
 import { transformEventLiveExplains } from '../transformers/event-live-explains';
 import { transformEventLives } from '../transformers/event-lives';
 import { logDebug, logError, logInfo } from '../utils/logger';
@@ -99,13 +100,25 @@ export async function syncEventLives(eventId: number): Promise<{ count: number; 
       errors: liveData.elements.length - eventLives.length,
     });
 
-    // 3. Save to database (batch upsert)
-    const savedEventLives = await eventLiveRepository.upsertBatch(eventLives);
-    logInfo('Event lives upserted to database', { eventId, count: savedEventLives.length });
+    // 3. Save to database: lives + explains are one logical write — if the
+    // explains upsert fails after lives committed, the pair goes stale, so
+    // both upserts share a single transaction.
+    const db = await getDb();
+    const savedEventLives = await db.transaction(async (tx) => {
+      const txEventLiveRepository = createEventLiveRepository(tx);
+      const txExplainsRepository = createEventLiveExplainsRepository(tx);
 
-    // 3b. Save explains to database (batch upsert)
-    const savedExplains = await eventLiveExplainsRepository.upsertBatch(explains);
-    logInfo('Event live explains upserted to database', { eventId, count: savedExplains.length });
+      const savedLives = await txEventLiveRepository.upsertBatch(eventLives);
+      logInfo('Event lives upserted to database', { eventId, count: savedLives.length });
+
+      const savedExplains = await txExplainsRepository.upsertBatch(explains);
+      logInfo('Event live explains upserted to database', {
+        eventId,
+        count: savedExplains.length,
+      });
+
+      return savedLives;
+    });
 
     // 4. Update cache with full event live objects
     await eventLivesCache.set(eventId, savedEventLives);

@@ -1,19 +1,16 @@
 import { and, eq, inArray, sql } from 'drizzle-orm';
-import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 
 import {
   tournamentKnockoutResults,
   type DbTournamentKnockoutResult,
   type DbTournamentKnockoutResultInsert,
 } from '../db/schemas/index.schema';
-import { getDb, getDbClient } from '../db/singleton';
+import { getDb, getDbClient, type DbOrTransaction } from '../db/singleton';
 import type { SeedPair } from '../domain/tournament';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 
-type DatabaseInstance = PostgresJsDatabase<Record<string, never>>;
-
-export const createTournamentKnockoutResultsRepository = (dbInstance?: DatabaseInstance) => {
+export const createTournamentKnockoutResultsRepository = (dbInstance?: DbOrTransaction) => {
   const getDbInstance = async () => dbInstance || (await getDb());
 
   return {

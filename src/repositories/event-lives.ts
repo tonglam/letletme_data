@@ -1,17 +1,14 @@
 import { eq, sql } from 'drizzle-orm';
-import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 
 import {
   eventLive,
   type DbEventLive,
   type DbEventLiveInsert,
 } from '../db/schemas/event-lives.schema';
-import { getDb } from '../db/singleton';
+import { getDb, type DbOrTransaction } from '../db/singleton';
 import type { EventLive } from '../domain/event-lives';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
-
-type DatabaseInstance = PostgresJsDatabase<Record<string, never>>;
 
 export type EventLiveRepository = ReturnType<typeof createEventLiveRepository>;
 
@@ -23,7 +20,7 @@ export type EventLiveRepository = ReturnType<typeof createEventLiveRepository>;
  * - Single and batch upserts
  * - Optimized for bulk sync operations
  */
-export const createEventLiveRepository = (dbInstance?: DatabaseInstance) => {
+export const createEventLiveRepository = (dbInstance?: DbOrTransaction) => {
   const getDbInstance = async () => dbInstance || (await getDb());
 
   return {
