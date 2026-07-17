@@ -1,4 +1,4 @@
-import { and, eq, gte, lte, max, sql } from 'drizzle-orm';
+import { and, eq, gte, isNotNull, lte, max, sql } from 'drizzle-orm';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 
 import {
@@ -89,9 +89,10 @@ export const createTournamentBattleGroupResultsRepository = (dbInstance?: Databa
     },
 
     /**
-     * Latest event_id with battle rows for this tournament in [start, end].
-     * Used so a delayed backfill of an older GW does not recompute standings
-     * only through that older GW and wipe later counters (FP-09 Codex P1).
+     * Latest event_id with **scored** battle rows (non-null match points) in
+     * [start, end]. Pre-created future fixtures (NULL points) must not extend
+     * the recompute horizon — that would load missing entry results and skip
+     * all group updates (FP-09 Codex P1).
      */
     findMaxEventIdInRange: async (
       tournamentId: number,
@@ -108,6 +109,8 @@ export const createTournamentBattleGroupResultsRepository = (dbInstance?: Databa
               eq(tournamentBattleGroupResults.tournamentId, tournamentId),
               gte(tournamentBattleGroupResults.eventId, startEventId),
               lte(tournamentBattleGroupResults.eventId, endEventId),
+              isNotNull(tournamentBattleGroupResults.homeMatchPoints),
+              isNotNull(tournamentBattleGroupResults.awayMatchPoints),
             ),
           );
         const value = rows[0]?.maxEventId;
