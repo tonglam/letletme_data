@@ -5,7 +5,7 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
 - **Full detail (file-level changes, acceptance criteria):** [fix-plan-2026-07-17.md](./fix-plan-2026-07-17.md)
 - **Findings evidence:** [code-review-2026-07-17.md](./code-review-2026-07-17.md)
 
-**Progress:** P0 `5/6` · P1 `1/10` · P2 `0/9` · Deferred `0/4`
+**Progress:** P0 `5/6` · P1 `2/10` · P2 `0/9` · Deferred `0/4`
 
 **Ground rules**
 1. Redis keys/shapes are **frozen** — fixes within existing shapes; new data → additive keys only; deletions need consumer sign-off.
@@ -78,12 +78,12 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
   - [ ] f. Deterministic chunk job IDs (`${jobName}-${runId}-chunk-${offset}`)
   - [ ] g. Cascade fan-outs throw when any enqueue fails (3 call sites)
   - [ ] h. Per-table scopes (`entry-event-picks|transfers|results:event:N`)
-- [ ] **FP-15 · Deploy safety pack** (H12, H13, M23, M24 · M · *after FP-01*)
-  - [ ] Worker heartbeat file + Docker/compose healthcheck; deploy asserts both services healthy
-  - [ ] `cancel-in-progress: false`; `workflow_dispatch` `inputs.sha`; targeted prune (keep last 3)
-  - [ ] `deploy.sh`: migrate before `up -d`; exit non-zero on migration failure
-  - [ ] Dockerfile: pin `oven/bun:1.3.3`; production-only `node_modules` stage
-  - [ ] `package.json`: `"packageManager": "bun@1.3.3"`
+- [x] **FP-15 · Deploy safety pack** (H12, H13, M23, M24 · M · *after FP-01*)
+  - [x] Worker heartbeat file + Docker/compose healthcheck; deploy asserts both services healthy
+  - [x] `cancel-in-progress: false`; `workflow_dispatch` `inputs.sha`; targeted prune (keep last 3)
+  - [x] `deploy.sh`: migrate before `up -d`; exit non-zero on migration failure
+  - [x] Dockerfile: pin `oven/bun:1.3.3`; production-only `node_modules` stage
+  - [x] `package.json`: `"packageManager": "bun@1.3.3"`
 - [ ] **FP-16 · Transaction coverage pack** (M5–M7 · M)
   - [ ] `syncEventLives`: both upserts in one `db.transaction`
   - [ ] `syncKnockoutForTournament`: four upserts in one transaction
@@ -134,3 +134,4 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
 | FP-03 | a896251 (PR #5) | 2026-07-17 | Watch DB load during Redis blips after deploy |
 | FP-04 | 81ef6e4 (PR #6) | 2026-07-17 | Unknown chips now logWarn + pass through per row |
 | FP-08 | 5a53a87 (PR #10) | 2026-07-17 | — |
+| FP-15 | 8a0c80a (PR #17) | 2026-07-17 | PR #17 |

@@ -46,16 +46,20 @@ deploy() {
   require_files
   log_info "Building/pulling containers"
   compose build --pull
-  log_info "Starting services"
-  compose up -d --remove-orphans
+  # Migrate BEFORE starting services: the API must never boot against an
+  # unmigrated schema. Any migration failure aborts the deploy (non-zero exit).
   log_info "Running migrations"
   if ! compose run --rm -T api bun run db:migrate; then
-    log_warn "Drizzle migrations reported an error; check the logs."
+    log_error "Drizzle migrations failed; aborting deploy before services start."
+    exit 1
   fi
   log_info "Applying numbered SQL migrations (0006+)"
   if ! compose run --rm -T api bun scripts/apply-sql-migrations.ts; then
-    log_warn "SQL migrations reported an error; check the logs."
+    log_error "SQL migrations failed; aborting deploy before services start."
+    exit 1
   fi
+  log_info "Starting services"
+  compose up -d --remove-orphans
   log_info "Current service status"
   compose ps
 }
@@ -86,7 +90,7 @@ show_usage() {
 Usage: scripts/deploy.sh [command]
 
 Commands:
-  deploy        Build containers, start stack, run migrations (default)
+  deploy        Build containers, run migrations, then start stack (default)
   update        git pull --ff-only, then deploy
   status        Show docker compose service status
   logs [svc]    Tail logs (all services by default)
