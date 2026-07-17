@@ -8,6 +8,7 @@ import {
 } from '../queues/entry-sync.queue';
 import { getEntrySyncJobPriority, type EntrySyncPriorityJobName } from '../domain/job-priority';
 import { logError, logInfo } from '../utils/logger';
+import { stableHash } from '../utils/stable-hash';
 
 export interface EntrySyncJobOptions {
   entryIds?: number[];
@@ -19,6 +20,11 @@ export interface EntrySyncJobOptions {
   jobId?: string;
   delayMs?: number;
   eventId?: number;
+}
+
+function hashEntryListKey(entryIds: readonly number[], eventId?: number): string {
+  const sorted = [...entryIds].sort((a, b) => a - b).join(',');
+  return stableHash(`${sorted}|e${eventId ?? ''}`);
 }
 
 function sanitizePositiveInt(value: number | undefined, fallback: number) {
@@ -54,9 +60,13 @@ async function enqueueEntrySyncJob(
 
     const chunkKey =
       options.eventId !== undefined ? `${chunkOffset}-event-${options.eventId}` : `${chunkOffset}`;
-    // Use unique IDs to avoid BullMQ deduping future cron cycles while completed jobs are retained.
-    const defaultJobId = options.entryIds
-      ? `${jobName}-entry-list-${Date.now()}`
+    // Entry-list jobs (manual/API HTTP triggers) get a deterministic content-based ID
+    // so repeat triggers with the same payload dedupe in the waiting room. Cron chunk
+    // jobs stay unique per cycle — static IDs would dedupe future cycles while
+    // completed jobs are retained.
+    const isEntryList = options.entryIds !== undefined;
+    const defaultJobId = isEntryList
+      ? `${jobName}-entry-list-${hashEntryListKey(options.entryIds ?? [], options.eventId)}`
       : `${jobName}-chunk-${chunkKey}-${Date.now()}`;
     const jobId = options.jobId ?? defaultJobId;
 
@@ -68,6 +78,9 @@ async function enqueueEntrySyncJob(
       },
       jobId,
       delay: options.delayMs,
+      // See live-data.jobs.ts: deterministic IDs must not block re-triggers after
+      // the previous run settles, so entry-list jobs clean up immediately.
+      ...(isEntryList ? { removeOnComplete: true, removeOnFail: true } : {}),
     });
 
     logInfo('Entry sync job enqueued', {

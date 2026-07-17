@@ -22,7 +22,7 @@ function mapErrorToResponse(error: unknown): { status: number; message: string }
 
 export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
   .get('/check-name', async ({ query }) => checkTournamentNameAvailability(query.name), {
-    query: t.Object({ name: t.String() }),
+    query: t.Object({ name: t.String({ minLength: 1 }) }),
   })
   .get(
     '/:tournamentId/setup-status',
@@ -34,11 +34,12 @@ export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
         return { success: false, error: 'Tournament not found.' };
       }
 
+      // setupError is internal diagnostics (stack fragments, infra details) — logged
+      // server-side, never exposed on the public status payload.
       return {
         success: true,
         tournamentId: params.tournamentId,
         setupStatus: status.setupStatus,
-        setupError: status.setupError,
         setupStartedAt: status.setupStartedAt,
         setupFinishedAt: status.setupFinishedAt,
       };

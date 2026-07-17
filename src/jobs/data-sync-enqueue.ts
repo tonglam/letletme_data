@@ -6,6 +6,7 @@ export type DataSyncJobSource = 'cron' | 'manual' | 'api' | 'event-transition';
 
 interface DataSyncEnqueueOptions {
   jobId?: string;
+  eventId?: number;
 }
 
 async function enqueueDataSyncJob(
@@ -21,6 +22,7 @@ async function enqueueDataSyncJob(
       {
         source,
         triggeredAt: new Date().toISOString(),
+        ...(options.eventId !== undefined ? { eventId: options.eventId } : {}),
       },
       {
         attempts: 3,
@@ -51,8 +53,10 @@ async function enqueueDataSyncJob(
 export const enqueueEventsSyncJob = (source?: DataSyncJobSource) =>
   enqueueDataSyncJob('events', source);
 
-export const enqueueFixturesSyncJob = (source?: DataSyncJobSource) =>
-  enqueueDataSyncJob('fixtures', source);
+export const enqueueFixturesSyncJob = (
+  source?: DataSyncJobSource,
+  options?: DataSyncEnqueueOptions,
+) => enqueueDataSyncJob('fixtures', source, options);
 
 export const enqueueTeamsSyncJob = (source?: DataSyncJobSource) =>
   enqueueDataSyncJob('teams', source);
@@ -60,8 +64,10 @@ export const enqueueTeamsSyncJob = (source?: DataSyncJobSource) =>
 export const enqueuePlayersSyncJob = (source?: DataSyncJobSource) =>
   enqueueDataSyncJob('players', source);
 
-export const enqueuePlayerStatsSyncJob = (source?: DataSyncJobSource) =>
-  enqueueDataSyncJob('player-stats', source);
+export const enqueuePlayerStatsSyncJob = (
+  source?: DataSyncJobSource,
+  options?: DataSyncEnqueueOptions,
+) => enqueueDataSyncJob('player-stats', source, options);
 
 export const enqueuePhasesSyncJob = (source?: DataSyncJobSource) =>
   enqueueDataSyncJob('phases', source);

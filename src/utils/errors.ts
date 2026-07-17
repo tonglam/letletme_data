@@ -96,3 +96,19 @@ export function getErrorStatus(error: unknown): number {
   }
   return 500;
 }
+
+export function isProductionEnv(): boolean {
+  return process.env.NODE_ENV === 'production';
+}
+
+/**
+ * Message safe to send to API clients. 4xx messages are client-actionable and always
+ * exposed; 5xx internals (stack fragments, DB/Redis details) stay in the logs and
+ * collapse to a generic message in production.
+ */
+export function getPublicErrorMessage(error: unknown, status: number): string {
+  if (status >= 500 && isProductionEnv()) {
+    return 'Internal server error';
+  }
+  return getErrorMessage(error);
+}

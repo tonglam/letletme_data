@@ -1,6 +1,7 @@
 import { Elysia } from 'elysia';
 
-import { getCurrentEvent, getNextEvent, syncEvents } from '../services/events.service';
+import { enqueueEventsSyncJob } from '../jobs/data-sync-enqueue';
+import { getCurrentEvent, getNextEvent } from '../services/events.service';
 
 export const eventsAPI = new Elysia({ prefix: '/events' })
   .get('/current', async () => {
@@ -11,7 +12,8 @@ export const eventsAPI = new Elysia({ prefix: '/events' })
     const data = await getNextEvent();
     return { success: true, data };
   })
-  .post('/sync', async () => {
-    const result = await syncEvents();
-    return { success: true, message: 'Events sync completed', ...result };
+  .post('/sync', async ({ set }) => {
+    const job = await enqueueEventsSyncJob('api');
+    set.status = 202;
+    return { success: true, message: 'Events sync job enqueued', jobId: job.id };
   });
