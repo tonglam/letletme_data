@@ -252,10 +252,21 @@ class FPLClient {
    */
   private async request(url: string): Promise<Response> {
     let lastError: unknown = null;
+    /** Last buffered 429/5xx — returned if the deadline expires during backoff. */
+    let lastRetryableResponse: Response | null = null;
     const deadlineMs = getEnvMs('FPL_REQUEST_DEADLINE_MS', REQUEST_DEADLINE_MS);
     const started = Date.now();
 
     const remainingMs = (): number => Math.max(deadlineMs - (Date.now() - started), 0);
+
+    const bufferResponse = async (response: Response): Promise<Response> => {
+      const body = await response.arrayBuffer();
+      return new Response(body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+      });
+    };
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       const remaining = remainingMs();
@@ -273,16 +284,18 @@ class FPLClient {
           headers: { 'User-Agent': USER_AGENT },
         });
 
-        // Fully consume the body inside the retry loop so socket stalls during
-        // body download are retryable (Codex P2), not only header-stage failures.
-        const body = await response.arrayBuffer();
-        const buffered = new Response(body, {
-          status: response.status,
-          statusText: response.statusText,
-          headers: response.headers,
-        });
+        // Non-retryable (incl. 404): return immediately without requiring a full
+        // body download — hung 404 bodies must not flip cup lookups to UNKNOWN_ERROR.
+        if (!isRetryableStatus(response.status)) {
+          return response;
+        }
 
-        if (!isRetryableStatus(response.status) || attempt === MAX_RETRIES) {
+        // Retryable 429/5xx (and last attempt): buffer body so hung downloads
+        // after headers are still retryable / returnable with status preserved.
+        const buffered = await bufferResponse(response);
+        lastRetryableResponse = buffered;
+
+        if (attempt === MAX_RETRIES) {
           return buffered;
         }
 
@@ -308,6 +321,12 @@ class FPLClient {
           await sleep(delayMs);
         }
       }
+    }
+
+    // Prefer the last retryable HTTP status over a synthetic UNKNOWN_ERROR when
+    // the wall-clock deadline was spent during backoff after a 429/5xx.
+    if (lastRetryableResponse) {
+      return lastRetryableResponse;
     }
 
     // Re-throw the raw failure so each caller wraps it with its own endpoint
