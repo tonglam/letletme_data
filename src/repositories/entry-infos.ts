@@ -1,4 +1,4 @@
-import { eq, inArray } from 'drizzle-orm';
+import { inArray, sql } from 'drizzle-orm';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 
 import { entryInfos, type DbEntryInfo, type DbEntryInfoInsert } from '../db/schemas/index.schema';
@@ -76,22 +76,9 @@ export const createEntryInfoRepository = (dbInstance?: DatabaseInstance) => {
     ): Promise<DbEntryInfo> => {
       try {
         const db = await getDbInstance();
-        const existing = await (async () => {
-          const res = await db.select().from(entryInfos).where(eq(entryInfos.id, summary.id));
-          return res[0] || null;
-        })();
 
         const currentEntryName = summary.name;
         const playerName = `${summary.player_first_name} ${summary.player_last_name}`.trim();
-
-        // Always include the current entry name in history; also retain prior names
-        const usedEntryNames = existing
-          ? uniqueNames([
-              ...(existing.usedEntryNames || []),
-              currentEntryName,
-              existing.entryName !== currentEntryName ? existing.entryName : null,
-            ])
-          : uniqueNames([currentEntryName]);
 
         // Determine current snapshot values from summary
         const currentTeamValue = summary.last_deadline_value ?? summary.value ?? null;
@@ -99,13 +86,10 @@ export const createEntryInfoRepository = (dbInstance?: DatabaseInstance) => {
         const currentOverallPoints = summary.summary_overall_points ?? null;
         const currentOverallRank = summary.summary_overall_rank ?? null;
 
-        // last_* fields: store previous record's current values; 0 if no previous
-        const lastTeamValue = existing ? (existing.teamValue ?? 0) : 0;
-        const lastBank = existing ? (existing.bank ?? 0) : 0;
-        const lastOverallPoints = existing ? (existing.overallPoints ?? 0) : 0;
-        const lastOverallRank = existing ? (existing.overallRank ?? 0) : 0;
-        const lastEntryName = existing ? existing.entryName : null;
-
+        // Insert-path values (no pre-existing row): last_* start at 0/null.
+        // On conflict, the SET clause computes last_* in SQL from the
+        // pre-update row — no read-modify-write, so concurrent upserts chain
+        // correctly off each other's committed state.
         const insert: DbEntryInfoInsert = {
           id: summary.id,
           entryName: currentEntryName,
@@ -115,16 +99,16 @@ export const createEntryInfoRepository = (dbInstance?: DatabaseInstance) => {
           overallPoints: currentOverallPoints,
           overallRank: currentOverallRank,
           // Monetary fields are stored as tenths (raw ints from FPL summary last_deadline_*)
-          bank: currentBank ?? existing?.bank ?? null,
-          lastBank,
-          lastEventId: lastEventId ?? existing?.lastEventId ?? 0,
-          teamValue: currentTeamValue ?? existing?.teamValue ?? null,
+          bank: currentBank,
+          lastBank: 0,
+          lastEventId: lastEventId ?? 0,
+          teamValue: currentTeamValue,
           totalTransfers: summary.last_deadline_total_transfers ?? null,
-          lastEntryName,
-          lastOverallPoints,
-          lastOverallRank,
-          lastTeamValue,
-          usedEntryNames,
+          lastEntryName: null,
+          lastOverallPoints: 0,
+          lastOverallRank: 0,
+          lastTeamValue: 0,
+          usedEntryNames: uniqueNames([currentEntryName]),
         };
 
         const result = await db
@@ -133,7 +117,45 @@ export const createEntryInfoRepository = (dbInstance?: DatabaseInstance) => {
           .onConflictDoUpdate({
             target: entryInfos.id,
             set: {
-              ...insert,
+              entryName: insert.entryName,
+              playerName: insert.playerName,
+              region: insert.region,
+              startedEvent: insert.startedEvent,
+              overallPoints: insert.overallPoints,
+              overallRank: insert.overallRank,
+              totalTransfers: insert.totalTransfers,
+              // Keep the stored value when the summary carries no new one
+              bank: sql`COALESCE(excluded.bank, ${entryInfos.bank})`,
+              teamValue: sql`COALESCE(excluded.team_value, ${entryInfos.teamValue})`,
+              lastEventId: sql`COALESCE(excluded.last_event_id, ${entryInfos.lastEventId}, 0)`,
+              // Snapshot the pre-update row into last_* (table-qualified
+              // references in DO UPDATE read the existing row, not excluded)
+              lastBank: sql`COALESCE(${entryInfos.bank}, 0)`,
+              lastEntryName: sql`${entryInfos.entryName}`,
+              lastOverallPoints: sql`COALESCE(${entryInfos.overallPoints}, 0)`,
+              lastOverallRank: sql`COALESCE(${entryInfos.overallRank}, 0)`,
+              lastTeamValue: sql`COALESCE(${entryInfos.teamValue}, 0)`,
+              // Prior names + current name + previous entry_name when renamed;
+              // uniqueNames semantics (first occurrence wins, drop empty)
+              usedEntryNames: sql`
+                (
+                  SELECT COALESCE(array_agg(name ORDER BY first_idx), '{}'::text[])
+                  FROM (
+                    SELECT name, MIN(idx) AS first_idx
+                    FROM unnest(
+                      COALESCE(${entryInfos.usedEntryNames}, '{}'::text[])
+                      || excluded.used_entry_names
+                      || CASE
+                           WHEN ${entryInfos.entryName} IS DISTINCT FROM excluded.entry_name
+                           THEN ARRAY[${entryInfos.entryName}]
+                           ELSE '{}'::text[]
+                         END
+                    ) WITH ORDINALITY AS names(name, idx)
+                    WHERE name IS NOT NULL AND name <> ''
+                    GROUP BY name
+                  ) dedup
+                )
+              `,
               updatedAt: new Date(),
             },
           })

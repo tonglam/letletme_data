@@ -84,10 +84,10 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
   - [x] `deploy.sh`: migrate before `up -d`; exit non-zero on migration failure
   - [x] Dockerfile: pin `oven/bun:1.3.3`; production-only `node_modules` stage
   - [x] `package.json`: `"packageManager": "bun@1.3.3"`
-- [ ] **FP-16 · Transaction coverage pack** (M5–M7 · M)
-  - [ ] `syncEventLives`: both upserts in one `db.transaction`
-  - [ ] `syncKnockoutForTournament`: four upserts in one transaction
-  - [ ] `upsertFromSummary`: `last_*` computed in SQL; delete read-modify-write
+- [x] **FP-16 · Transaction coverage pack** (M5–M7 · M)
+  - [x] `syncEventLives`: both upserts in one `db.transaction`
+  - [x] `syncKnockoutForTournament`: four upserts in one transaction
+  - [x] `upsertFromSummary`: `last_*` computed in SQL; delete read-modify-write
 
 ## P2 — Hardening & maintainability (~10 days)
 

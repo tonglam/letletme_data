@@ -1,12 +1,16 @@
 import { fplClient } from '../clients/fpl';
+import { getDb } from '../db/singleton';
 import type { TournamentSyncContext } from '../domain/tournament';
 import type { RawFPLEntryEventPickItem } from '../types';
 import { entryEventResultsRepository } from '../repositories/entry-event-results';
 import { eventLiveRepository } from '../repositories/event-lives';
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
-import { tournamentKnockoutResultsRepository } from '../repositories/tournament-knockout-results';
-import { tournamentKnockoutsRepository } from '../repositories/tournament-knockouts';
+import {
+  createTournamentKnockoutResultsRepository,
+  tournamentKnockoutResultsRepository,
+} from '../repositories/tournament-knockout-results';
+import { createTournamentKnockoutsRepository } from '../repositories/tournament-knockouts';
 import { ensureKnockoutRoundOneSeeded } from './tournament-seed.service';
 import { logError, logInfo } from '../utils/logger';
 
@@ -270,152 +274,155 @@ export async function syncKnockoutForTournament(
     };
   });
 
-  const updatedResultsCount = await tournamentKnockoutResultsRepository.upsertBatch(updatedResults);
+  // Results, bracket state, and next-round seeding form one dependent write
+  // chain: every read below must see this sync's own upserts, and a failure
+  // anywhere must not leave a half-advanced bracket — single transaction.
+  const db = await getDb();
+  return await db.transaction(async (tx) => {
+    const txKnockoutResults = createTournamentKnockoutResultsRepository(tx);
+    const txKnockouts = createTournamentKnockoutsRepository(tx);
 
-  const matchIds = Array.from(new Set(updatedResults.map((result) => result.matchId)));
-  const allMatchResults = await tournamentKnockoutResultsRepository.findByTournamentAndMatchIds(
-    tournament.id,
-    matchIds,
-  );
+    const updatedResultsCount = await txKnockoutResults.upsertBatch(updatedResults);
 
-  const matchResultsByMatch = new Map<number, typeof allMatchResults>();
-  for (const result of allMatchResults) {
-    const list = matchResultsByMatch.get(result.matchId) ?? [];
-    list.push(result);
-    matchResultsByMatch.set(result.matchId, list);
-  }
+    const matchIds = Array.from(new Set(updatedResults.map((result) => result.matchId)));
+    const allMatchResults = await txKnockoutResults.findByTournamentAndMatchIds(
+      tournament.id,
+      matchIds,
+    );
 
-  const knockouts = await tournamentKnockoutsRepository.findByTournamentAndEndedEvent(
-    tournament.id,
-    eventId,
-  );
-  const updatedKnockouts = [];
-  const nextRoundMap = new Map<number, KnockoutRoundSummary>();
-
-  for (const knockout of knockouts) {
-    const results = matchResultsByMatch.get(knockout.matchId) ?? [];
-    const homeEntryId = knockout.homeEntryId ?? null;
-    const awayEntryId = knockout.awayEntryId ?? null;
-
-    let homeNetPoints = 0;
-    let awayNetPoints = 0;
-    let homeGoalsScored = 0;
-    let awayGoalsScored = 0;
-    let homeGoalsConceded = 0;
-    let awayGoalsConceded = 0;
-
-    for (const result of results) {
-      if (result.homeEntryId === homeEntryId) {
-        homeNetPoints += result.homeNetPoints ?? 0;
-        homeGoalsScored += result.homeGoalsScored ?? 0;
-        homeGoalsConceded += result.homeGoalsConceded ?? 0;
-      }
-      if (result.awayEntryId === homeEntryId) {
-        homeNetPoints += result.awayNetPoints ?? 0;
-        homeGoalsScored += result.awayGoalsScored ?? 0;
-        homeGoalsConceded += result.awayGoalsConceded ?? 0;
-      }
-      if (result.homeEntryId === awayEntryId) {
-        awayNetPoints += result.homeNetPoints ?? 0;
-        awayGoalsScored += result.homeGoalsScored ?? 0;
-        awayGoalsConceded += result.homeGoalsConceded ?? 0;
-      }
-      if (result.awayEntryId === awayEntryId) {
-        awayNetPoints += result.awayNetPoints ?? 0;
-        awayGoalsScored += result.awayGoalsScored ?? 0;
-        awayGoalsConceded += result.awayGoalsConceded ?? 0;
-      }
+    const matchResultsByMatch = new Map<number, typeof allMatchResults>();
+    for (const result of allMatchResults) {
+      const list = matchResultsByMatch.get(result.matchId) ?? [];
+      list.push(result);
+      matchResultsByMatch.set(result.matchId, list);
     }
 
-    const roundWinner = resolveRoundWinner(results, homeEntryId, awayEntryId);
-    const homeWins = calcEntryWinningNum(results, homeEntryId);
-    const awayWins = calcEntryWinningNum(results, awayEntryId);
+    const knockouts = await txKnockouts.findByTournamentAndEndedEvent(tournament.id, eventId);
+    const updatedKnockouts = [];
+    const nextRoundMap = new Map<number, KnockoutRoundSummary>();
 
-    updatedKnockouts.push({
-      ...knockout,
-      homeNetPoints,
-      homeGoalsScored,
-      homeGoalsConceded,
-      homeWins,
-      awayNetPoints,
-      awayGoalsScored,
-      awayGoalsConceded,
-      awayWins,
-      roundWinner,
-    });
+    for (const knockout of knockouts) {
+      const results = matchResultsByMatch.get(knockout.matchId) ?? [];
+      const homeEntryId = knockout.homeEntryId ?? null;
+      const awayEntryId = knockout.awayEntryId ?? null;
 
-    if (knockout.nextMatchId && roundWinner) {
-      const existing = nextRoundMap.get(knockout.nextMatchId) ?? {
-        matchId: knockout.matchId,
-        round: knockout.round,
-        nextMatchId: knockout.nextMatchId,
-        roundWinner: null,
-        nextRound: knockout.round + 1,
-        nextHomeEntryId: null,
-        nextAwayEntryId: null,
-      };
-      if (knockout.matchId % 2 === 1) {
-        existing.nextHomeEntryId = roundWinner;
-      } else {
-        existing.nextAwayEntryId = roundWinner;
-      }
-      nextRoundMap.set(knockout.nextMatchId, existing);
-    }
-  }
+      let homeNetPoints = 0;
+      let awayNetPoints = 0;
+      let homeGoalsScored = 0;
+      let awayGoalsScored = 0;
+      let homeGoalsConceded = 0;
+      let awayGoalsConceded = 0;
 
-  const updatedKnockoutsCount = await tournamentKnockoutsRepository.upsertBatch(updatedKnockouts);
-
-  if (nextRoundMap.size > 0) {
-    const nextRound = [...nextRoundMap.values()][0]?.nextRound ?? null;
-    if (nextRound) {
-      const nextKnockouts = await tournamentKnockoutsRepository.findByTournamentAndRound(
-        tournament.id,
-        nextRound,
-      );
-      const updatedNextKnockouts = nextKnockouts.map((knockout) => {
-        const nextData = nextRoundMap.get(knockout.matchId);
-        if (!nextData) {
-          return knockout;
+      for (const result of results) {
+        if (result.homeEntryId === homeEntryId) {
+          homeNetPoints += result.homeNetPoints ?? 0;
+          homeGoalsScored += result.homeGoalsScored ?? 0;
+          homeGoalsConceded += result.homeGoalsConceded ?? 0;
         }
-        return {
-          ...knockout,
-          homeEntryId: nextData.nextHomeEntryId ?? knockout.homeEntryId,
-          awayEntryId: nextData.nextAwayEntryId ?? knockout.awayEntryId,
-        };
+        if (result.awayEntryId === homeEntryId) {
+          homeNetPoints += result.awayNetPoints ?? 0;
+          homeGoalsScored += result.awayGoalsScored ?? 0;
+          homeGoalsConceded += result.awayGoalsConceded ?? 0;
+        }
+        if (result.homeEntryId === awayEntryId) {
+          awayNetPoints += result.homeNetPoints ?? 0;
+          awayGoalsScored += result.homeGoalsScored ?? 0;
+          awayGoalsConceded += result.homeGoalsConceded ?? 0;
+        }
+        if (result.awayEntryId === awayEntryId) {
+          awayNetPoints += result.awayNetPoints ?? 0;
+          awayGoalsScored += result.awayGoalsScored ?? 0;
+          awayGoalsConceded += result.awayGoalsConceded ?? 0;
+        }
+      }
+
+      const roundWinner = resolveRoundWinner(results, homeEntryId, awayEntryId);
+      const homeWins = calcEntryWinningNum(results, homeEntryId);
+      const awayWins = calcEntryWinningNum(results, awayEntryId);
+
+      updatedKnockouts.push({
+        ...knockout,
+        homeNetPoints,
+        homeGoalsScored,
+        homeGoalsConceded,
+        homeWins,
+        awayNetPoints,
+        awayGoalsScored,
+        awayGoalsConceded,
+        awayWins,
+        roundWinner,
       });
-      await tournamentKnockoutsRepository.upsertBatch(updatedNextKnockouts);
 
-      const nextMatchIds = [...nextRoundMap.keys()];
-      const nextResults = await tournamentKnockoutResultsRepository.findByTournamentAndMatchIds(
-        tournament.id,
-        nextMatchIds,
-      );
-      const updatedNextResults = nextResults.map((result) => {
-        const nextData = nextRoundMap.get(result.matchId);
-        if (!nextData) {
-          return result;
-        }
-        const homeEntryId = nextData.nextHomeEntryId;
-        const awayEntryId = nextData.nextAwayEntryId;
-        if (!homeEntryId || !awayEntryId) {
-          return result;
-        }
-        const swap = result.playAgainstId % 2 === 0;
-        return {
-          ...result,
-          homeEntryId: swap ? awayEntryId : homeEntryId,
-          awayEntryId: swap ? homeEntryId : awayEntryId,
+      if (knockout.nextMatchId && roundWinner) {
+        const existing = nextRoundMap.get(knockout.nextMatchId) ?? {
+          matchId: knockout.matchId,
+          round: knockout.round,
+          nextMatchId: knockout.nextMatchId,
+          roundWinner: null,
+          nextRound: knockout.round + 1,
+          nextHomeEntryId: null,
+          nextAwayEntryId: null,
         };
-      });
-      await tournamentKnockoutResultsRepository.upsertBatch(updatedNextResults);
+        if (knockout.matchId % 2 === 1) {
+          existing.nextHomeEntryId = roundWinner;
+        } else {
+          existing.nextAwayEntryId = roundWinner;
+        }
+        nextRoundMap.set(knockout.nextMatchId, existing);
+      }
     }
-  }
 
-  return {
-    updatedResults: updatedResultsCount,
-    updatedKnockouts: updatedKnockoutsCount,
-    skipped: 0,
-  };
+    const updatedKnockoutsCount = await txKnockouts.upsertBatch(updatedKnockouts);
+
+    if (nextRoundMap.size > 0) {
+      const nextRound = [...nextRoundMap.values()][0]?.nextRound ?? null;
+      if (nextRound) {
+        const nextKnockouts = await txKnockouts.findByTournamentAndRound(tournament.id, nextRound);
+        const updatedNextKnockouts = nextKnockouts.map((knockout) => {
+          const nextData = nextRoundMap.get(knockout.matchId);
+          if (!nextData) {
+            return knockout;
+          }
+          return {
+            ...knockout,
+            homeEntryId: nextData.nextHomeEntryId ?? knockout.homeEntryId,
+            awayEntryId: nextData.nextAwayEntryId ?? knockout.awayEntryId,
+          };
+        });
+        await txKnockouts.upsertBatch(updatedNextKnockouts);
+
+        const nextMatchIds = [...nextRoundMap.keys()];
+        const nextResults = await txKnockoutResults.findByTournamentAndMatchIds(
+          tournament.id,
+          nextMatchIds,
+        );
+        const updatedNextResults = nextResults.map((result) => {
+          const nextData = nextRoundMap.get(result.matchId);
+          if (!nextData) {
+            return result;
+          }
+          const homeEntryId = nextData.nextHomeEntryId;
+          const awayEntryId = nextData.nextAwayEntryId;
+          if (!homeEntryId || !awayEntryId) {
+            return result;
+          }
+          const swap = result.playAgainstId % 2 === 0;
+          return {
+            ...result,
+            homeEntryId: swap ? awayEntryId : homeEntryId,
+            awayEntryId: swap ? homeEntryId : awayEntryId,
+          };
+        });
+        await txKnockoutResults.upsertBatch(updatedNextResults);
+      }
+    }
+
+    return {
+      updatedResults: updatedResultsCount,
+      updatedKnockouts: updatedKnockoutsCount,
+      skipped: 0,
+    };
+  });
 }
 
 export async function syncTournamentKnockoutResultsForTournamentId(
