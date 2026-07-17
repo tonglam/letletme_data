@@ -127,4 +127,4 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
 
 | FP | Commit SHA | Date | Notes |
 |----|-----------|------|-------|
-| — | — | — | — |
+| FP-07 | 69ad72d (PR #9) | 2026-07-17 | New integration file needs env-guard after FP-02 merges |
