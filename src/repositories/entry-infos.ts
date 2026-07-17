@@ -101,7 +101,10 @@ export const createEntryInfoRepository = (dbInstance?: DatabaseInstance) => {
           // Monetary fields are stored as tenths (raw ints from FPL summary last_deadline_*)
           bank: currentBank,
           lastBank: 0,
-          lastEventId: lastEventId ?? 0,
+          // null means "no known current event" — must stay null on insert so the
+          // ON CONFLICT COALESCE can fall through to the existing last_event_id
+          // instead of materializing 0 and wiping progress (Codex P2).
+          lastEventId: lastEventId ?? null,
           teamValue: currentTeamValue,
           totalTransfers: summary.last_deadline_total_transfers ?? null,
           lastEntryName: null,

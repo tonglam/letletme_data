@@ -287,6 +287,19 @@ describe('upsertFromSummary (M7: last_* computed in SQL, no read-modify-write)',
     expect(insert.lastEventId).toBe(7);
   });
 
+  it('keeps lastEventId null when no current event is known (does not materialize 0)', async () => {
+    const repo = createEntryInfoRepository(fake.db as never);
+    await repo.upsertFromSummary(summary, null);
+
+    const insert = fake.values.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(insert.lastEventId).toBeNull();
+    // Update path still COALESCE(excluded, existing, 0) so null excluded preserves existing
+    const config = fake.onConflictDoUpdate.mock.calls[0]?.[0] as {
+      set: Record<string, unknown>;
+    };
+    expect(renderSetFragment(config.set.lastEventId)).toContain('COALESCE(excluded.last_event_id');
+  });
+
   it('computes last_* from the pre-update row inside onConflictDoUpdate', async () => {
     const repo = createEntryInfoRepository(fake.db as never);
     await repo.upsertFromSummary(summary, 7);
