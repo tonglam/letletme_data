@@ -290,4 +290,25 @@ describe('computeLiveBonusByTeam', () => {
     // Live 1v3 still estimated
     expect(byTeam.get(3)?.get(31)).toBe(3);
   });
+
+  it('does not treat prior DGW official bonus as settled for a later fixture', () => {
+    // Team 1 finished vs 2 with official bonus, then finishes vs 3 before FPL
+    // posts match-2 bonus. Prior event-level bonus on team 1 must not skip
+    // provisional 3/2/1 for 1v3 (single-match team 3 has no official yet).
+    const matches = [match(1, 2, 't1', true), match(1, 3, 't2', true)];
+    const byTeam = computeLiveBonusByTeam(matches, [
+      live(11, 1, 40, 3), // official from 1v2 only
+      live(12, 1, 10, 0),
+      live(21, 2, 35, 2),
+      live(22, 2, 5, 1),
+      live(31, 3, 50, 0), // needs provisional for finished 1v3
+      live(32, 3, 20, 0),
+    ]);
+
+    expect(byTeam.get(1)?.get(11)).toBe(3); // seed preserved
+    expect(byTeam.get(2)?.get(21)).toBe(2);
+    // 1v3 still estimates among non-official players
+    expect(byTeam.get(3)?.get(31)).toBe(3);
+    expect(byTeam.get(3)?.get(32)).toBe(2);
+  });
 });
