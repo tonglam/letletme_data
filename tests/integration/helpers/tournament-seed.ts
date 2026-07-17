@@ -1,9 +1,12 @@
+import { afterAll } from 'bun:test';
+
 import {
   planTournamentStructure,
   type TournamentCreateInput,
   type TournamentParticipant,
   type TournamentStructurePlan,
 } from '../../../src/domain/tournament';
+import { getDbClient } from '../../../src/db/singleton';
 import type { TournamentInfoSummary } from '../../../src/repositories/tournament-infos';
 import { tournamentInfoRepository } from '../../../src/repositories/tournament-infos';
 import { getCurrentEvent } from '../../../src/services/events.service';
@@ -15,14 +18,22 @@ export type IntegrationSeed = {
 
 export type SeedMode = 'any' | 'points_races' | 'battle_races' | 'knockout';
 
+// Synthetic entry IDs live far outside the real FPL entry id space (~12M max),
+// so seeded rows can never collide with — or be mistaken for — real data.
+const SEED_ENTRY_BASE = 99000001;
+const SEED_ENTRY_RANGE = 1000;
 const SEED_LEAGUE_ID = 900001;
-const SEED_ADMIN_ID = '900001';
+const SEED_ADMIN_ID = String(SEED_ENTRY_BASE);
 const SEED_CREATOR = 'integration-seed';
 const SEED_LEAGUE_URL = 'https://fantasy.premierleague.com/leagues/900001/standings/c';
 
+// Tournaments created by this module (never pre-existing ones it reuses),
+// so afterAll can remove exactly the rows the seed wrote.
+const seededTournamentIds: number[] = [];
+
 function buildStubParticipants(count: number): TournamentParticipant[] {
   return Array.from({ length: count }, (_, index) => {
-    const id = SEED_LEAGUE_ID + index;
+    const id = SEED_ENTRY_BASE + index;
     return {
       id: String(id),
       team: `Seed Team ${id}`,
@@ -135,6 +146,7 @@ export async function ensureIntegrationTournamentSeed(
 
   const plan = buildTournamentPlan(mode, currentEvent.id);
   const created = await tournamentInfoRepository.createTournamentWithEntries(plan);
+  seededTournamentIds.push(created.id);
   return { currentEvent, tournamentId: created.id };
 }
 
@@ -149,3 +161,39 @@ export async function resolveIntegrationSeedAvailability(mode: SeedMode = 'any')
     return { canRun: false, seed: null };
   }
 }
+
+/**
+ * Delete exactly what the seed wrote: tournaments this module created (child
+ * rows first — tournament FKs have no ON DELETE cascade) and the synthetic
+ * stub entry rows. Tournaments it merely reused are left untouched.
+ */
+export async function cleanupIntegrationTournamentSeeds(): Promise<void> {
+  const tournamentIds = seededTournamentIds.splice(0);
+  const client = await getDbClient();
+
+  await client.begin(async (tx) => {
+    for (const tournamentId of tournamentIds) {
+      await tx`DELETE FROM tournament_points_group_results WHERE tournament_id = ${tournamentId}`;
+      await tx`DELETE FROM tournament_battle_group_results WHERE tournament_id = ${tournamentId}`;
+      await tx`DELETE FROM tournament_knockout_results WHERE tournament_id = ${tournamentId}`;
+      await tx`DELETE FROM tournament_knockouts WHERE tournament_id = ${tournamentId}`;
+      await tx`DELETE FROM tournament_groups WHERE tournament_id = ${tournamentId}`;
+      await tx`DELETE FROM tournament_entries WHERE tournament_id = ${tournamentId}`;
+      await tx`DELETE FROM tournament_infos WHERE id = ${tournamentId}`;
+    }
+
+    // Stub entries live in a synthetic id range that cannot collide with real data.
+    const rangeEnd = SEED_ENTRY_BASE + SEED_ENTRY_RANGE;
+    await tx`DELETE FROM entry_event_cup_results WHERE entry_id >= ${SEED_ENTRY_BASE} AND entry_id < ${rangeEnd}`;
+    await tx`DELETE FROM entry_event_results WHERE entry_id >= ${SEED_ENTRY_BASE} AND entry_id < ${rangeEnd}`;
+    await tx`DELETE FROM entry_event_picks WHERE entry_id >= ${SEED_ENTRY_BASE} AND entry_id < ${rangeEnd}`;
+    await tx`DELETE FROM entry_event_transfers WHERE entry_id >= ${SEED_ENTRY_BASE} AND entry_id < ${rangeEnd}`;
+    await tx`DELETE FROM entry_history_infos WHERE entry_id >= ${SEED_ENTRY_BASE} AND entry_id < ${rangeEnd}`;
+    await tx`DELETE FROM entry_league_infos WHERE entry_id >= ${SEED_ENTRY_BASE} AND entry_id < ${rangeEnd}`;
+    await tx`DELETE FROM entry_infos WHERE id >= ${SEED_ENTRY_BASE} AND id < ${rangeEnd}`;
+  });
+}
+
+afterAll(async () => {
+  await cleanupIntegrationTournamentSeeds();
+});

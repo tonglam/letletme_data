@@ -5,7 +5,7 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
 - **Full detail (file-level changes, acceptance criteria):** [fix-plan-2026-07-17.md](./fix-plan-2026-07-17.md)
 - **Findings evidence:** [code-review-2026-07-17.md](./code-review-2026-07-17.md)
 
-**Progress:** P0 `1/6` · P1 `1/10` · P2 `0/9` · Deferred `0/4`
+**Progress:** P0 `5/6` · P1 `1/10` · P2 `0/9` · Deferred `0/4`
 
 **Ground rules**
 1. Redis keys/shapes are **frozen** — fixes within existing shapes; new data → additive keys only; deletions need consumer sign-off.
@@ -25,21 +25,21 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
   - [x] `apply-sql-migrations.ts` excludes journal-listed files; add `migrations/README` note ("db:generate frozen, hand-write `NNNN_name.sql`")
   - [x] Fresh-install rehearsal: empty Postgres → `db:migrate` + `db:apply-sql` green; `tournament_selection_stats`, `bauth.*`, unique index verified
   - [x] *Found during rehearsal:* journaled `0005` `teams.unavailable` bool→int alter was un-castable (added `USING` + default fix; prod never applied it — still boolean, timestamp-gated so it never re-runs); `0006_align_event_lives_table_name.sql` (0005 created `event_live`, prod/schema use `event_lives`); `0023_add_tournament_points_group_cum_columns.sql` (4 `cum_*` columns existed only in prod, views 0023/0024 need them)
-- [ ] **FP-02 · Fence integration tests off real infra** (C2 · M)
-  - [ ] `test` → `bun test tests/unit`; add `test:integration` (`RUN_INTEGRATION=1`) and `test:all`
-  - [ ] `tests/integration/helpers/env-guard.ts` (RUN_INTEGRATION=1 + test-pattern DATABASE_URL + non-0 Redis DB), wired to `tests/utils/test-config.ts`
-  - [ ] Import guard first in all 33 integration files
-  - [ ] `tournament-seed.ts`: delete seeded rows in `afterAll`
-- [ ] **FP-03 · Harden Redis client against outages** (C3, M15 · M · contract-safe)
-  - [ ] `commandTimeout: 5000` + `connectTimeout: 5000` in `src/cache/singleton.ts`
-  - [ ] Create client once; `connect()` idempotent; never `new Redis()` over a live instance (kills reconnect leak)
-  - [ ] Initial `ping()` raced against timeout (no `isConnecting` spin)
-  - [ ] Unit test: black-holed Redis → ops reject/return null within ~5 s
-- [ ] **FP-04 · FPL boundary schema timebombs** (H3, H4 · S)
-  - [ ] `fpl.ts:348` → `explain: z.array(z.unknown()).nullable()`
-  - [ ] `fpl.ts:502` → `active_chip: z.string().nullable()` + known-chip mapping with `logWarn` on unknown
-  - [ ] Regression tests: `explain: null` element; `active_chip: 'manager'` picks payload
-- [ ] **FP-05 · CI typecheck step** (H14 · XS) — `bun run typecheck` in `ci.yml` after Lint *(verified green 2026-07-17)*
+- [x] **FP-02 · Fence integration tests off real infra** (C2 · M)
+  - [x] `test` → `bun test tests/unit`; add `test:integration` (`RUN_INTEGRATION=1`) and `test:all`
+  - [x] `tests/integration/helpers/env-guard.ts` (RUN_INTEGRATION=1 + test-pattern DATABASE_URL + non-0 Redis DB), wired to `tests/utils/test-config.ts`
+  - [x] Import guard first in all 33 integration files *(call-style `assertIntegrationEnv()` — bun shares the module registry across files, so a top-level module throw only fenced the first file)*
+  - [x] `tournament-seed.ts`: delete seeded rows in `afterAll` *(seed entry IDs moved to synthetic range 99000001+ so cleanup can't touch real entries)*
+- [x] **FP-03 · Harden Redis client against outages** (C3, M15 · M · contract-safe)
+  - [x] `commandTimeout: 5000` + `connectTimeout: 5000` in `src/cache/singleton.ts`
+  - [x] Create client once; `connect()` idempotent; never `new Redis()` over a live instance (kills reconnect leak)
+  - [x] Initial `ping()` raced against timeout (no `isConnecting` spin)
+  - [x] Unit test: black-holed Redis → ops reject/return null within ~5 s
+- [x] **FP-04 · FPL boundary schema timebombs** (H3, H4 · S)
+  - [x] `fpl.ts:348` → `explain: z.array(z.unknown()).nullable()`
+  - [x] `fpl.ts:502` → `active_chip: z.string().nullable()` + known-chip mapping with `logWarn` on unknown (new `src/domain/chips.ts`)
+  - [x] Regression tests: `explain: null` element; `active_chip: manager` picks payload
+- [x] **FP-05 · CI typecheck step** (H14 · XS) — `bun run typecheck` in `ci.yml` after Lint *(verified green 2026-07-17)*
 - [ ] **FP-06 · Redis key contract doc** (new · S · *needs Tong's consumer inventory*)
   - [ ] `docs/redis-contract.md`: key patterns, hash fields, JSON shapes, TTL behavior
   - [ ] Consumers section (from Tong's inventory)
@@ -129,4 +129,8 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
 | FP | Commit SHA | Date | Notes |
 |----|-----------|------|-------|
 | FP-01 | 47baf1f (PR #3) | 2026-07-17 | Prod no-ops verified; teams.unavailable prod drift noted for FP-21 |
+| FP-05 | 78a9660 (PR #7) | 2026-07-17 | tsc now blocks merges |
+| FP-02 | 692a977 (PR #4) | 2026-07-17 | bun shared-registry made import-throw insufficient; call-style guard |
+| FP-03 | a896251 (PR #5) | 2026-07-17 | Watch DB load during Redis blips after deploy |
+| FP-04 | 81ef6e4 (PR #6) | 2026-07-17 | Unknown chips now logWarn + pass through per row |
 | FP-08 | 5a53a87 (PR #10) | 2026-07-17 | — |
