@@ -1,3 +1,7 @@
+import { assertIntegrationEnv } from './helpers/env-guard';
+
+assertIntegrationEnv();
+
 import { afterAll, describe, expect, test } from 'bun:test';
 
 import { planTournamentStructure, type TournamentParticipant } from '../../src/domain/tournament';
