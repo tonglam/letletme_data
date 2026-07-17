@@ -91,12 +91,12 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
 
 ## P2 — Hardening & maintainability (~10 days)
 
-- [ ] **FP-17 · Cache hygiene — shape-preserving** (M8, M16, M17, L7 · M)
-  - [ ] `ttl > 0 ? setex : set` in `cache-operations.set` *(audit external readers of those keys first)*; delete dead `CACHE_TTL`
-  - [ ] Season-rollover cleanup → manual runbook + sign-off checklist in `redis-contract.md` (no auto-delete, no PlayerValue retention job)
-  - [ ] Per-field `JSON.parse` tolerance + corrupt-field logging
-  - [ ] `Season:active` in-process cache (~5 s)
-  - [ ] Battle-race N+1 → batch `findByTournamentAndEntries` + in-memory bucket
+- [x] **FP-17 · Cache hygiene — shape-preserving** (M8, M16, M17, L7 · M)
+  - [x] `ttl > 0 ? setex : set` in `cache-operations.set` *(audit external readers of those keys first)*; delete dead `CACHE_TTL`
+  - [x] Season-rollover cleanup → manual runbook + sign-off checklist in `redis-contract.md` (no auto-delete, no PlayerValue retention job)
+  - [x] Per-field `JSON.parse` tolerance + corrupt-field logging
+  - [x] `Season:active` in-process cache (~5 s)
+  - [x] Battle-race N+1 → batch `findByTournamentAndEntries` + in-memory bucket
 - [ ] **FP-18 · FPL client resilience** (M18 · M) — one `request()` helper (10 s timeout, ≤3 jittered retries honoring `Retry-After`, User-Agent); all 9 call sites; mocked-fetch tests
 - [ ] **FP-19 · Type & transformer consolidation** (L5, L6, L8 · M) — `z.infer` RawFPL types from client schemas; delete `types/index.ts` duplicates; `transformEventLive` validates output; dedupe `getChangeType`
 - [ ] **FP-20 · RLS & migration-ledger hardening** (M19, L17 · M · *after FP-01*) — RLS into numbered migrations; delete stale `sql/*.sql`; advisory lock + `ON CONFLICT` in `apply-sql-migrations`; update `RLS_SECURITY.md` to reality
@@ -136,3 +136,4 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
 | FP-08 | 5a53a87 (PR #10) | 2026-07-17 | — |
 | FP-15 | 8a0c80a (PR #17) | 2026-07-17 | PR #17 |
 | FP-06 | (PR #8) | 2026-07-17 | Codex P2s addressed: ops keys, FixturesByTeam current behavior, auto season cleanup |
+| FP-17 | a8034df | 2026-07-17 | PR TBD |
