@@ -76,9 +76,10 @@ mock.module('../../src/queues/live-data.queue', () => ({
 // syncEventLives and breaks transaction-coverage.test.ts when suites share
 // the mock registry).
 const eventLivesService = await import('../../src/services/event-lives.service');
-const getEventLivesByEventId = spyOn(eventLivesService, 'getEventLivesByEventId').mockImplementation(
-  async (eventId: number) => [{ elementId: 1, eventId }] as never,
-);
+const getEventLivesByEventId = spyOn(
+  eventLivesService,
+  'getEventLivesByEventId',
+).mockImplementation(async (eventId: number) => [{ elementId: 1, eventId }] as never);
 
 const fixturesService = await import('../../src/services/fixtures.service');
 const clearFixturesCache = spyOn(fixturesService, 'clearFixturesCache').mockImplementation(
