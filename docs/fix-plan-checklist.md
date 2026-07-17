@@ -39,10 +39,10 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
   - [ ] `fpl.ts:502` → `active_chip: z.string().nullable()` + known-chip mapping with `logWarn` on unknown
   - [ ] Regression tests: `explain: null` element; `active_chip: 'manager'` picks payload
 - [ ] **FP-05 · CI typecheck step** (H14 · XS) — `bun run typecheck` in `ci.yml` after Lint *(verified green 2026-07-17)*
-- [ ] **FP-06 · Redis key contract doc** (new · S · *needs Tong's consumer inventory*)
-  - [ ] `docs/redis-contract.md`: key patterns, hash fields, JSON shapes, TTL behavior
-  - [ ] Consumers section (from Tong's inventory)
-  - [ ] Ground rules added to `CLAUDE.md`
+- [x] **FP-06 · Redis key contract doc** (new · S · *needs Tong's consumer inventory*)
+  - [x] `docs/redis-contract.md`: key patterns, hash fields, JSON shapes, TTL behavior
+  - [ ] Consumers section (from Tong's inventory) — placeholder committed, all keys treated as consumed until provided
+  - [x] Ground rules added to `CLAUDE.md`
 
 ## P1 — Data integrity & operability (~9–10 days, parallel except noted)
 
