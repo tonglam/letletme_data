@@ -15,6 +15,9 @@ const originals = {
   findByEventAndEntryIds: entryEventResultsRepository.findByEventAndEntryIds,
   aggregateTotalsByEntry: entryEventResultsRepository.aggregateTotalsByEntry,
   battleFindByTournamentAndEvent: tournamentBattleGroupResultsRepository.findByTournamentAndEvent,
+  battleFindByTournamentAndEventRange:
+    tournamentBattleGroupResultsRepository.findByTournamentAndEventRange,
+  battleFindMaxEventIdInRange: tournamentBattleGroupResultsRepository.findMaxEventIdInRange,
   battleUpsertBatch: tournamentBattleGroupResultsRepository.upsertBatch,
   groupFindByTournamentAndEntries: tournamentGroupRepository.findByTournamentAndEntries,
   groupFindByTournamentAndGroup: tournamentGroupRepository.findByTournamentAndGroup,
@@ -28,6 +31,10 @@ afterAll(() => {
   entryEventResultsRepository.aggregateTotalsByEntry = originals.aggregateTotalsByEntry;
   tournamentBattleGroupResultsRepository.findByTournamentAndEvent =
     originals.battleFindByTournamentAndEvent;
+  tournamentBattleGroupResultsRepository.findByTournamentAndEventRange =
+    originals.battleFindByTournamentAndEventRange;
+  tournamentBattleGroupResultsRepository.findMaxEventIdInRange =
+    originals.battleFindMaxEventIdInRange;
   tournamentBattleGroupResultsRepository.upsertBatch = originals.battleUpsertBatch;
   tournamentGroupRepository.findByTournamentAndEntries = originals.groupFindByTournamentAndEntries;
   tournamentGroupRepository.findByTournamentAndGroup = originals.groupFindByTournamentAndGroup;
@@ -73,9 +80,44 @@ describe('battle race results batching', () => {
       { entryId: 103, totalPoints: 7, totalTransfersCost: 0, totalNetPoints: 7 },
       { entryId: 104, totalPoints: 7, totalTransfersCost: 0, totalNetPoints: 7 },
     ]) as never;
-    tournamentBattleGroupResultsRepository.findByTournamentAndEvent = mock(async () => [
-      { id: 501, tournamentId: 7, eventId: 1, groupId: 1, homeEntryId: 101, awayEntryId: 102 },
-      { id: 502, tournamentId: 7, eventId: 1, groupId: 2, homeEntryId: 103, awayEntryId: 104 },
+    const scoredMatchups = [
+      {
+        id: 501,
+        tournamentId: 7,
+        eventId: 1,
+        groupId: 1,
+        homeEntryId: 101,
+        awayEntryId: 102,
+        homeMatchPoints: 3,
+        awayMatchPoints: 0,
+      },
+      {
+        id: 502,
+        tournamentId: 7,
+        eventId: 1,
+        groupId: 2,
+        homeEntryId: 103,
+        awayEntryId: 104,
+        homeMatchPoints: 1,
+        awayMatchPoints: 1,
+      },
+    ];
+    tournamentBattleGroupResultsRepository.findByTournamentAndEvent = mock(
+      async () => scoredMatchups,
+    ) as never;
+    // After scoring event 1, recompute reads the same horizon from history.
+    tournamentBattleGroupResultsRepository.findMaxEventIdInRange = mock(async () => 1) as never;
+    tournamentBattleGroupResultsRepository.findByTournamentAndEventRange = mock(async () => [
+      {
+        ...scoredMatchups[0],
+        homeMatchPoints: 3,
+        awayMatchPoints: 0,
+      },
+      {
+        ...scoredMatchups[1],
+        homeMatchPoints: 1,
+        awayMatchPoints: 1,
+      },
     ]) as never;
 
     const findByEntries = mock(async (_tournamentId: number, _entryIds: number[]) => [
