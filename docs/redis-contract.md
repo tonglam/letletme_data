@@ -79,15 +79,14 @@ replaces the *entire* hash (`DEL` + `HSET`) with the stats of the event being
 synced. Consumers must read it as "stats as of the latest synced event", never
 as per-event history.
 
-**Current writer behavior:** any event sync (including backfills) can replace
-the whole view.
-
-**Planned (FP-12, not yet implemented):** writer guard so only the current
-event may rewrite the cache; old-event syncs write DB only. Read-side
-semantics stay "latest synced event wins" once FP-12 lands.
+Writer rule (FP-12): only a sync for the **current event** may write this view
+(enforced by `shouldWritePlayerStatsView` in `player-stats.service.ts`);
+syncs of older events persist to the DB only, so a backfill can never clobber
+the current view.
 
 The misleadingly-named internal helper `clearByEvent(eventId)` also clears the
-**whole** hash — it is not per-event. Same FP-12 guard item.
+**whole** hash — it is not per-event (documented at the method; the argument
+is ignored).
 
 ## 6. `FixturesByTeam:{season}:{teamId}` — one fixture per (team, event)
 
@@ -96,14 +95,11 @@ per event**. In double gameweeks the second fixture overwrites the first.
 Fixing this requires a shape change → **deferred**: it will be served from a
 new additive key only if a consumer requests it (see fix-plan "Deferred").
 
-**Current writer behavior** (`src/cache/fixtures-cache.ts`): on fixtures
-`set`, the writer always scans `FixturesByTeam:{season}:*`, `DEL`s those keys,
-then rebuilds from `Team:{season}` + fixtures. If `Team:{season}` is empty
-(fixtures-before-teams sync order), the rebuild is empty and the keys are
-**wiped**.
-
-**Planned (FP-12, not yet implemented):** when `Team:{season}` is empty, skip
-the delete+rebuild so that ordering cannot wipe `FixturesByTeam:*`.
+**Current writer behavior** (`src/cache/fixtures-cache.ts`, FP-12): on fixtures
+`set`, the writer rebuilds `FixturesByTeam:{season}:*` from `Team:{season}` +
+fixtures. If `Team:{season}` is empty (fixtures-before-teams sync order), it
+**skips** the delete+rebuild and logs a warning so ordering cannot wipe the
+view; existing keys stay intact until a later sync with teams present.
 
 ## 7. Mutation locks (internal)
 
@@ -167,9 +163,82 @@ assumed gone after rollover):
 - Ops markers (`LaunchNotification:*`, `letletme:entry-info-sync:*`)
 - `mutation-lock:*`, BullMQ `bull:*` keys
 
-### Manual / planned (FP-17)
+### Manual rollover runbook (FP-17)
 
-A sign-off-approved runbook (full key list + checklist) ships with FP-17 for
-broader retention and any cleanup beyond the automatic prefix pass. Until
-then: do **not** add new automatic deletion jobs; do **not** manually delete
-consumer-facing keys without sign-off.
+Automatic cleanup intentionally covers only the prefixes above. Everything
+else is deleted **manually, after consumer sign-off** — there are no automatic
+retention jobs, and none may be added without updating this contract.
+
+**When to run:** after `Season:active` has advanced to the new season and the
+first full round of new-season syncs (events, teams, players, phases,
+fixtures) has completed.
+
+**Step 1 — verify the new season is live (read-only)**
+
+```bash
+redis-cli GET Season:active            # => new season code, e.g. 2627
+redis-cli HLEN Event:<new-season>      # > 0
+redis-cli HLEN Team:<new-season>       # = 20
+redis-cli HLEN Player:<new-season>     # > 0
+```
+
+**Step 2 — inventory old-season leftovers (read-only)**
+
+```bash
+OLD=<old-season>   # e.g. 2526
+for p in Event Team Player Phase PlayerStat EntryInfo Fixtures FixturesByTeam \
+         EventLive EventLiveExplain EventLiveSummary EventOverallResult \
+         LiveFixture LiveBonus; do
+  echo "$p: $(redis-cli --scan --pattern "$p:$OLD*" | wc -l)"
+done
+```
+
+**Step 3 — consumer sign-off checklist** (every box required before any DEL)
+
+- [ ] `Season:active` points at the new season and new-season hashes are
+      populated (Step 1).
+- [ ] Every consumer in §9 has confirmed it no longer reads `<old-season>`
+      keys. Until §9 is filled in, that means **Tong explicitly approves the
+      deletion** — all keys are treated as externally consumed.
+- [ ] The old season's tournaments/leagues have fully concluded (no late
+      entry-sync or tournament-result jobs still reading old-season live
+      hashes).
+- [ ] A backup exists if any consumer might need old-season data later
+      (`redis-cli --rdb` snapshot or a per-key `DUMP` export).
+
+**Step 4 — delete (manual, old season only)**
+
+Delete **only** the leftover old-season keys from Step 2. Never use
+`FLUSHDB`/`FLUSHALL`; prefer `--scan` batches over `KEYS` in production:
+
+```bash
+redis-cli --scan --pattern "EntryInfo:$OLD"          | xargs -r redis-cli DEL
+redis-cli --scan --pattern "EventLive:$OLD:*"        | xargs -r redis-cli DEL
+redis-cli --scan --pattern "EventLiveExplain:$OLD:*" | xargs -r redis-cli DEL
+redis-cli --scan --pattern "EventLiveSummary:$OLD:*" | xargs -r redis-cli DEL
+redis-cli --scan --pattern "EventOverallResult:$OLD" | xargs -r redis-cli DEL
+redis-cli --scan --pattern "LiveFixture:$OLD:*"      | xargs -r redis-cli DEL
+redis-cli --scan --pattern "LiveBonus:$OLD:*"        | xargs -r redis-cli DEL
+redis-cli --scan --pattern "PlayerStat:$OLD"         | xargs -r redis-cli DEL
+```
+
+(`Event`, `Team`, `Player`, `Phase`, `Fixtures*`, `FixturesByTeam*` for the old
+season are normally already gone via the automatic prefix pass; delete them
+manually only if Step 2 shows leftovers.)
+
+**Step 5 — verify**
+
+- [ ] The Step 2 inventory prints `0` for every prefix.
+- [ ] Consumers report healthy reads on new-season keys.
+
+**Explicitly NOT cleaned up (retention by agreement, never by job):**
+
+- `PlayerValue:{YYYYMMDD}` — historical price data; stays until Tong and
+  consumers agree on a retention window. No automatic retention job, ever.
+- `PlayerValueMissing:{YYYYMMDD}` — consumer-owned; this service only deletes
+  it when refreshing/clearing the matching `PlayerValue` date (§4).
+- `Season:active`, `event:current` — live control keys; `event:current` is
+  overwritten in place, nothing to clean.
+- `LaunchNotification:*` — re-arms per year/season by design (§3).
+- `letletme:entry-info-sync:daily:*`, `mutation-lock:*` — expire via TTL.
+- `bull:*` — managed by BullMQ (§8).

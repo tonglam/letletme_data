@@ -228,40 +228,12 @@ export const redisSingleton = createRedisSingleton();
 // Exported for tests that need an isolated client lifecycle (e.g. timeout tests)
 export { createRedisSingleton };
 
-// Default cache configuration
+// Default cache configuration. Entity caches write with TTL -1 (refresh on
+// write, never expire); only short-lived coordination keys pass an explicit
+// ttl to cache-operations.set.
 export const DEFAULT_CACHE_CONFIG: CacheConfig = {
-  ttl: 300, // 5 minutes
   prefix: 'letletme:',
 };
-
-// Cache TTL configurations for different data types
-// TTL -1 means no expiration (cache persists indefinitely until manually deleted)
-export const CACHE_TTL = {
-  // Basic/Static Data - No expiration (TTL -1)
-  EVENTS: -1, // No expiration
-  TEAMS: -1, // No expiration
-  PHASES: -1, // No expiration
-  PLAYERS: -1, // No expiration
-
-  // Game Data - No expiration (TTL -1)
-  FIXTURES: -1, // No expiration
-  PLAYER_STATS: -1, // No expiration
-  PLAYER_VALUES: -1, // No expiration
-
-  // Entry Data - No expiration (TTL -1)
-  ENTRY_INFOS: -1, // No expiration
-
-  // Live Match Data - No expiration (TTL -1)
-  EVENT_LIVE: -1, // No expiration
-  EVENT_LIVE_EXPLAIN: -1, // No expiration
-  LIVE_FIXTURE: -1, // No expiration
-  LIVE_BONUS: -1, // No expiration
-  LIVE_DATA: -1, // No expiration
-
-  // Aggregated/Historical Data - No expiration (TTL -1)
-  EVENT_LIVE_SUMMARY: -1, // No expiration
-  EVENT_OVERALL_RESULT: -1, // No expiration
-} as const;
 
 // Convenience export for backward compatibility
 export const getRedis = () => redisSingleton.getClient();

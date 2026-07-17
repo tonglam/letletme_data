@@ -163,3 +163,12 @@ export const databaseSingleton = DatabaseSingleton.getInstance();
 // Convenience exports for backward compatibility
 export const getDb = () => databaseSingleton.getDb();
 export const getDbClient = () => databaseSingleton.getClient();
+
+/**
+ * Database handle, or an active transaction scoped to it. Repository factories
+ * accept either so multi-write service flows can run atomically inside
+ * `db.transaction((tx) => ...)` without type gymnastics.
+ */
+export type DbHandle = Awaited<ReturnType<typeof getDb>>;
+export type TransactionHandle = Parameters<Parameters<DbHandle['transaction']>[0]>[0];
+export type DbOrTransaction = DbHandle | TransactionHandle;

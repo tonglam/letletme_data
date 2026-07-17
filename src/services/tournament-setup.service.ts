@@ -1,19 +1,20 @@
+import { tournamentSetupRebuildScopes } from '../domain/mutation-scope';
+import { getTournamentBackfillWindow } from '../domain/tournament';
 import { enqueueTournamentSetup } from '../jobs/tournament-setup.jobs';
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
 import { NotFoundError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
+import { withMutationConflictGuard } from '../utils/mutation-lock';
 
 import { getCurrentEvent } from './events.service';
 import { runTournamentAuditAndFixup } from './tournament-audit.service';
 import {
   backfillTournamentHistory,
   syncTournamentEntryDetails,
+  type TournamentSetupIssue,
 } from './tournament-backfill.service';
 import { rebuildTournamentStructure } from './tournament-structure.service';
-
-import { getTournamentBackfillWindow } from '../domain/tournament';
-import type { TournamentSetupIssue } from './tournament-backfill.service';
 
 export { ensureKnockoutRoundOneSeeded } from './tournament-seed.service';
 
@@ -45,13 +46,37 @@ export async function setupTournamentStructure(tournamentId: number): Promise<vo
     }
 
     const entryIds = await tournamentEntryRepository.findEntryIdsByTournamentId(tournamentId);
-    setupIssues.push(...(await syncTournamentEntryDetails(entryIds)));
+
+    // Entry FPL sync: entry-core only — do NOT hold tournament-structure:global
+    // across potentially long external HTTP (FP-07 Codex P1).
+    setupIssues.push(
+      ...(await withMutationConflictGuard(
+        {
+          queueName: 'tournament-setup',
+          jobName: 'tournament-setup',
+          tournamentId,
+          scopes: ['entry-core:all'],
+        },
+        () => syncTournamentEntryDetails(entryIds),
+      )),
+    );
 
     const entrySeeds = await tournamentEntryRepository.findEntrySeedsByTournamentId(tournamentId);
-    await rebuildTournamentStructure(tournament, entrySeeds);
+
+    // Structure rebuild: per-tournament + global (C4 mutual exclusion with results).
+    await withMutationConflictGuard(
+      {
+        queueName: 'tournament-setup',
+        jobName: 'tournament-setup',
+        tournamentId,
+        scopes: tournamentSetupRebuildScopes(tournamentId),
+      },
+      () => rebuildTournamentStructure(tournament, entrySeeds),
+    );
 
     const currentEvent = await getCurrentEvent();
     const window = getTournamentBackfillWindow(tournament, currentEvent?.id ?? null);
+    // Per-event structure locks inside backfillTournamentHistory / audit backfill.
     setupIssues.push(
       ...(await backfillTournamentHistory(tournamentId, tournament, entryIds, window)),
     );

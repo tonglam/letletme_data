@@ -13,6 +13,7 @@ import { phasesAPI } from './api/phases.api';
 import { playerStatsAPI } from './api/player-stats.api';
 import { playerValuesAPI } from './api/player-values.api';
 import { playersAPI } from './api/players.api';
+import { registerMutationRateLimit } from './api/rate-limit';
 import { teamsAPI } from './api/teams.api';
 import { tournamentsAPI } from './api/tournaments.api';
 
@@ -26,7 +27,7 @@ import { registerTournamentJobs } from './jobs/tournament-jobs';
 
 // Import utilities
 import { getAuthConfig, getConfig } from './utils/config';
-import { getErrorMessage } from './utils/errors';
+import { getErrorMessage, getHttpStatusFromError, getPublicErrorMessage } from './utils/errors';
 import { getHttpErrorLogLevel, getHttpRequestLogContext } from './utils/http-logging';
 import { logDebug, logError, logInfo, logWarn } from './utils/logger';
 
@@ -58,6 +59,7 @@ const app = new Elysia()
   )
 
   .use(betterAuthPlugin)
+  .use(registerMutationRateLimit)
   .use(registerMutationAuthGuard)
 
   // Request logging
@@ -95,9 +97,11 @@ const app = new Elysia()
       case 'VALIDATION':
         set.status = 400;
         return { success: false, error: 'Validation failed', details: message };
-      default:
-        set.status = 500;
-        return { success: false, error: message };
+      default: {
+        const status = getHttpStatusFromError(error);
+        set.status = status;
+        return { success: false, error: getPublicErrorMessage(error, status) };
+      }
     }
   })
 

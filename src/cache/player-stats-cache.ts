@@ -1,6 +1,7 @@
 import { CacheError } from '../utils/errors';
 import { logDebug, logError } from '../utils/logger';
 import { getActiveCacheSeason } from './cache-season';
+import { parseHashValues } from './hash-read';
 import { redisSingleton } from './singleton';
 
 import type { PlayerStat } from '../domain/player-stats';
@@ -23,9 +24,9 @@ export const createPlayerStatsHashCache = () => {
           return null;
         }
 
-        const playerStats = Object.values(hash)
-          .map((value) => JSON.parse(value) as PlayerStat)
-          .filter((stat) => stat.eventId === eventId);
+        const playerStats = parseHashValues<PlayerStat>(hash, { eventId, key }).filter(
+          (stat) => stat.eventId === eventId,
+        );
 
         if (playerStats.length === 0) {
           logDebug('Player stats cache miss by event (no matching event ID)', { eventId, key });
@@ -87,6 +88,12 @@ export const createPlayerStatsHashCache = () => {
       }
     },
 
+    /**
+     * Despite the name, this deletes the ENTIRE PlayerStat:{season} hash —
+     * the view holds only the latest synced event, so there is no per-event
+     * subset to clear. The eventId argument is accepted for call-site
+     * symmetry but ignored.
+     */
     clearByEvent: async (eventId: EventId): Promise<void> => {
       try {
         const redis = await redisSingleton.getClient();
@@ -153,6 +160,10 @@ export const playerStatsCache = {
     return playerStatsHashCacheInstance.clearAll();
   },
 
+  /**
+   * Clears the whole PlayerStat:{season} view (see the implementation note —
+   * eventId is ignored; this is NOT a per-event clear).
+   */
   async clearByEvent(eventId: EventId): Promise<void> {
     return playerStatsHashCacheInstance.clearByEvent(eventId);
   },
