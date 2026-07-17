@@ -97,7 +97,7 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
   - [ ] Per-field `JSON.parse` tolerance + corrupt-field logging
   - [ ] `Season:active` in-process cache (~5 s)
   - [ ] Battle-race N+1 → batch `findByTournamentAndEntries` + in-memory bucket
-- [ ] **FP-18 · FPL client resilience** (M18 · M) — one `request()` helper (10 s timeout, ≤3 jittered retries honoring `Retry-After`, User-Agent); all 9 call sites; mocked-fetch tests
+- [x] **FP-18 · FPL client resilience** (M18 · M) — one `request()` helper (10 s timeout, ≤3 jittered retries honoring `Retry-After`, User-Agent); all 9 call sites; mocked-fetch tests
 - [ ] **FP-19 · Type & transformer consolidation** (L5, L6, L8 · M) — `z.infer` RawFPL types from client schemas; delete `types/index.ts` duplicates; `transformEventLive` validates output; dedupe `getChangeType`
 - [ ] **FP-20 · RLS & migration-ledger hardening** (M19, L17 · M · *after FP-01*) — RLS into numbered migrations; delete stale `sql/*.sql`; advisory lock + `ON CONFLICT` in `apply-sql-migrations`; update `RLS_SECURITY.md` to reality
 - [ ] **FP-21 · Schema types + season semantics** (M20, M21 · M) — `text→numeric(10,2)` metric columns; `deadline_time→timestamptz`; document single-season semantics (accepted design)
@@ -136,3 +136,4 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
 | FP-08 | 5a53a87 (PR #10) | 2026-07-17 | — |
 | FP-15 | 8a0c80a (PR #17) | 2026-07-17 | PR #17 |
 | FP-06 | (PR #8) | 2026-07-17 | Codex P2s addressed: ops keys, FixturesByTeam current behavior, auto season cleanup |
+| FP-18 | 8a6fcda | 2026-07-17 | PR TBD |
