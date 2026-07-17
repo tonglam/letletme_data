@@ -13,9 +13,11 @@ import { FPLClientError } from '../utils/errors';
 import { logDebug } from '../utils/logger';
 
 const REQUEST_TIMEOUT_MS = 10_000;
+/** Wall-clock budget for one logical request including retries/backoff. */
+const REQUEST_DEADLINE_MS = 40_000;
 const MAX_RETRIES = 3;
 const RETRY_BASE_DELAY_MS = 500;
-const RETRY_MAX_DELAY_MS = 30_000;
+const RETRY_MAX_DELAY_MS = 5_000;
 const USER_AGENT = 'letletme-data/1.0.0 (+https://github.com/tonglam/letletme_data)';
 
 // Env overrides exist for tests (keep retry waits in the millisecond range);
@@ -240,44 +242,71 @@ class FPLClient {
   private readonly baseUrl = 'https://fantasy.premierleague.com/api';
 
   /**
-   * Single fetch entry point for every FPL call: per-attempt timeout, bounded
-   * retries with jitter on 429/5xx/network failures (Retry-After honored), and
-   * a descriptive User-Agent. Non-retryable statuses are returned as-is so
-   * callers keep their existing `!response.ok` handling (e.g. entry cup 404).
+   * Single fetch entry point for every FPL call: per-attempt timeout, wall-clock
+   * deadline across retries (fits under tournament 45s withTimeout guards),
+   * retries with jitter on 429/5xx/network failures (Retry-After honored, capped),
+   * and a descriptive User-Agent. The response body is fully buffered inside the
+   * retry loop so hung/truncated bodies after a 200 header are also retried.
+   * Non-retryable statuses are returned as-is so callers keep `!response.ok`
+   * handling (e.g. entry cup 404).
    */
   private async request(url: string): Promise<Response> {
     let lastError: unknown = null;
+    const deadlineMs = getEnvMs('FPL_REQUEST_DEADLINE_MS', REQUEST_DEADLINE_MS);
+    const started = Date.now();
+
+    const remainingMs = (): number => Math.max(deadlineMs - (Date.now() - started), 0);
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      const remaining = remainingMs();
+      if (remaining <= 0) {
+        break;
+      }
+
       try {
+        const attemptTimeout = Math.min(
+          getEnvMs('FPL_REQUEST_TIMEOUT_MS', REQUEST_TIMEOUT_MS),
+          remaining,
+        );
         const response = await fetch(url, {
-          signal: AbortSignal.timeout(getEnvMs('FPL_REQUEST_TIMEOUT_MS', REQUEST_TIMEOUT_MS)),
+          signal: AbortSignal.timeout(attemptTimeout),
           headers: { 'User-Agent': USER_AGENT },
         });
 
+        // Fully consume the body inside the retry loop so socket stalls during
+        // body download are retryable (Codex P2), not only header-stage failures.
+        const body = await response.arrayBuffer();
+        const buffered = new Response(body, {
+          status: response.status,
+          statusText: response.statusText,
+          headers: response.headers,
+        });
+
         if (!isRetryableStatus(response.status) || attempt === MAX_RETRIES) {
-          return response;
+          return buffered;
         }
 
         const retryAfterMs = parseRetryAfterMs(response.headers.get('retry-after'));
-        const delayMs = retryAfterMs ?? computeBackoffMs(attempt);
+        const delayMs = Math.min(retryAfterMs ?? computeBackoffMs(attempt), remainingMs());
         logDebug('Retryable FPL response; backing off', {
           url,
           status: response.status,
           attempt,
           delayMs,
         });
-        // Drain the body so the connection can be reused for the retry.
-        await response.arrayBuffer().catch(() => new ArrayBuffer(0));
-        await sleep(delayMs);
+        if (delayMs > 0) {
+          await sleep(delayMs);
+        }
       } catch (error) {
         lastError = error;
-        if (attempt === MAX_RETRIES) {
+        if (attempt === MAX_RETRIES || remainingMs() <= 0) {
           break;
         }
-        const delayMs = computeBackoffMs(attempt);
+        const delayMs = Math.min(computeBackoffMs(attempt), remainingMs());
         logDebug('FPL request failed; backing off', { url, attempt, delayMs });
-        await sleep(delayMs);
+        if (delayMs > 0) {
+          await sleep(delayMs);
+        }
       }
     }
 
