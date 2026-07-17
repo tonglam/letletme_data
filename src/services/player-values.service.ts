@@ -104,10 +104,12 @@ export async function syncCurrentPlayerValues(): Promise<{ count: number }> {
   const result = await playerValuesRepository.insertBatch(playerValues);
 
   // Cache/notify only rows that were actually inserted — partial ON CONFLICT
-  // DO NOTHING must not publish skipped values to Redis/Telegram (FP-10).
+  // DO NOTHING must not publish skipped values to Telegram (FP-10).
+  // Merge into Redis (do not replace the whole hash) so concurrent daily syncs
+  // that each insert different elements do not erase each other's winners.
   if (result.count > 0) {
-    await playerValuesCache.set(today, result.inserted);
-    logInfo('Player values cache updated', {
+    await playerValuesCache.merge(today, result.inserted);
+    logInfo('Player values cache merged', {
       changeDate: today,
       count: result.inserted.length,
     });
