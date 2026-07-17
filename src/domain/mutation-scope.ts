@@ -6,18 +6,37 @@ type MutationScopeInput = {
 };
 
 /**
- * Shared scope held by BOTH tournament setup rebuilds and every tournament
- * structure-results job (points-race, battle-race, knockout, cup-results).
- * Before FP-07 the two sides used disjoint scopes
- * (`tournament-structure:tournament:N` vs `tournament-structure:event:N`), so a
- * setup rebuild could tear down groups/knockouts while a results sync was
- * writing against them (C4).
+ * Shared scope held by tournament structure rebuilds and structure-results
+ * jobs (points-race, battle-race, knockout). Before FP-07 setup used
+ * `tournament-structure:tournament:N` while results used
+ * `tournament-structure:event:N` — disjoint keys, so a rebuild could tear down
+ * groups/knockouts while a results sync was writing (C4).
  *
- * Documented tradeoff: results jobs across different events now serialize
- * against each other. They are seconds-long on a 10-minute cadence, so the
- * mutual exclusion costs nothing in practice.
+ * Documented tradeoff: structure results jobs across different events serialize
+ * against each other. They are seconds-long on a 10-minute cadence.
+ *
+ * Setup acquires this only around structure-writing phases (rebuild + per-event
+ * history backfill), not during entry-info FPL sync (FP-07 Codex P1).
  */
-const TOURNAMENT_STRUCTURE_GLOBAL_SCOPE = 'tournament-structure:global';
+export const TOURNAMENT_STRUCTURE_GLOBAL_SCOPE = 'tournament-structure:global';
+
+/** Locks for the one-shot structure rebuild during tournament setup. */
+export function tournamentSetupRebuildScopes(tournamentId: number): string[] {
+  return [
+    Number.isFinite(tournamentId)
+      ? `tournament-structure:tournament:${tournamentId}`
+      : 'tournament-structure:all',
+    TOURNAMENT_STRUCTURE_GLOBAL_SCOPE,
+  ];
+}
+
+/** Locks for one event of setup history backfill (points/knockout writes). */
+export function tournamentSetupBackfillEventScopes(eventId: number): string[] {
+  return [
+    Number.isFinite(eventId) ? `tournament-structure:event:${eventId}` : 'tournament-structure:all',
+    TOURNAMENT_STRUCTURE_GLOBAL_SCOPE,
+  ];
+}
 
 function baseQueueName(queueName: string): string {
   return queueName.replace(/-p[0-3]$/, '');
@@ -139,13 +158,9 @@ export function resolveMutationScopes(input: MutationScopeInput): string[] {
   }
 
   if (queue === 'tournament-setup') {
-    if (jobName === 'tournament-setup') {
-      return [
-        withTournament('tournament-structure', tournamentId),
-        TOURNAMENT_STRUCTURE_GLOBAL_SCOPE,
-        'entry-core:all',
-      ];
-    }
+    // Default scopes empty: multi-phase setup must not hold global for entry
+    // FPL sync. Structure phases use tournamentSetupRebuildScopes /
+    // tournamentSetupBackfillEventScopes via explicit guard scopes.
     return [];
   }
 

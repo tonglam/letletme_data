@@ -4,6 +4,7 @@ assertIntegrationEnv();
 
 import { afterAll, describe, expect, test } from 'bun:test';
 
+import { tournamentSetupRebuildScopes } from '../../src/domain/mutation-scope';
 import { closeLockClient, withMutationConflictGuard } from '../../src/utils/mutation-lock';
 
 afterAll(async () => {
@@ -36,8 +37,15 @@ describe('mutation lock serialization (FP-07)', () => {
       const runs: GuardRun[] = [];
       await Promise.all([
         runGuarded(
-          'setup',
-          { queueName: 'tournament-setup', jobName: 'tournament-setup', tournamentId: 999001 },
+          'setup-rebuild',
+          {
+            queueName: 'tournament-setup',
+            jobName: 'tournament-setup',
+            tournamentId: 999001,
+            // Explicit rebuild scopes (setup job defaults are empty so FPL sync
+            // is not covered by the global structure lock).
+            scopes: tournamentSetupRebuildScopes(999001),
+          },
           400,
           runs,
         ),

@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'bun:test';
 
-import { resolveMutationScopes } from '../../src/domain/mutation-scope';
+import {
+  resolveMutationScopes,
+  tournamentSetupBackfillEventScopes,
+  tournamentSetupRebuildScopes,
+} from '../../src/domain/mutation-scope';
 
 describe('resolveMutationScopes', () => {
   it('normalizes tiered queue names', () => {
@@ -24,14 +28,24 @@ describe('resolveMutationScopes', () => {
     expect(scopes).toContain('league-event-results:tournament:1001');
   });
 
-  it('locks tournament setup by tournament id', () => {
+  it('does not lock the whole setup job by default (phase locks are explicit)', () => {
     const scopes = resolveMutationScopes({
       queueName: 'tournament-setup-p0',
       jobName: 'tournament-setup',
       tournamentId: 789,
     });
-    expect(scopes).toContain('tournament-structure:tournament:789');
-    expect(scopes).toContain('entry-core:all');
+    expect(scopes).toEqual([]);
+  });
+
+  it('exposes rebuild and per-event backfill scopes for setup phases', () => {
+    expect(tournamentSetupRebuildScopes(789)).toEqual([
+      'tournament-structure:tournament:789',
+      'tournament-structure:global',
+    ]);
+    expect(tournamentSetupBackfillEventScopes(33)).toEqual([
+      'tournament-structure:event:33',
+      'tournament-structure:global',
+    ]);
   });
 
   it('keeps tournament selection stats serialized with tournament event mutations', () => {
@@ -42,16 +56,6 @@ describe('resolveMutationScopes', () => {
     });
     expect(scopes).toContain('entry-event:event:35');
     expect(scopes).toContain('tournament-event-mutations:event:35');
-  });
-
-  it('gives tournament setup the shared global structure scope (FP-07)', () => {
-    const scopes = resolveMutationScopes({
-      queueName: 'tournament-setup',
-      jobName: 'tournament-setup',
-      tournamentId: 789,
-    });
-    expect(scopes).toContain('tournament-structure:global');
-    expect(scopes).toContain('tournament-structure:tournament:789');
   });
 
   it.each(['tournament-points-race', 'tournament-battle-race', 'tournament-knockout'])(
@@ -77,12 +81,8 @@ describe('resolveMutationScopes', () => {
     expect(scopes).not.toContain('tournament-structure:global');
   });
 
-  it('makes setup rebuilds and structure results syncs mutually exclusive (C4)', () => {
-    const setupScopes = resolveMutationScopes({
-      queueName: 'tournament-setup',
-      jobName: 'tournament-setup',
-      tournamentId: 789,
-    });
+  it('makes setup rebuild scopes mutually exclusive with structure results (C4)', () => {
+    const setupScopes = tournamentSetupRebuildScopes(789);
     for (const jobName of [
       'tournament-points-race',
       'tournament-battle-race',
@@ -96,14 +96,6 @@ describe('resolveMutationScopes', () => {
       const overlap = setupScopes.filter((scope) => resultsScopes.includes(scope));
       expect(overlap).toContain('tournament-structure:global');
     }
-
-    // Cup is not a structure writer — no global overlap required.
-    const cupScopes = resolveMutationScopes({
-      queueName: 'tournament-sync',
-      jobName: 'tournament-cup-results',
-      eventId: 33,
-    });
-    expect(setupScopes.filter((scope) => cupScopes.includes(scope))).toEqual([]);
   });
 
   it('serializes materialized-views refresh with structure writers, not cup (FP-07)', () => {
@@ -118,17 +110,20 @@ describe('resolveMutationScopes', () => {
       'tournament-points-race',
       'tournament-battle-race',
       'tournament-knockout',
-      'tournament-setup',
     ]) {
       const other = resolveMutationScopes({
-        queueName: jobName === 'tournament-setup' ? 'tournament-setup' : 'tournament-sync',
+        queueName: 'tournament-sync',
         jobName,
         eventId: 33,
-        tournamentId: 789,
       });
-      const overlap = refreshScopes.filter((scope) => other.includes(scope));
-      expect(overlap).toContain('tournament-structure:global');
+      expect(refreshScopes.filter((scope) => other.includes(scope))).toContain(
+        'tournament-structure:global',
+      );
     }
+
+    expect(
+      refreshScopes.filter((scope) => tournamentSetupRebuildScopes(789).includes(scope)),
+    ).toContain('tournament-structure:global');
 
     const cupScopes = resolveMutationScopes({
       queueName: 'tournament-sync',

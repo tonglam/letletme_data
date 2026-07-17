@@ -1,8 +1,10 @@
+import { tournamentSetupBackfillEventScopes } from '../domain/mutation-scope';
 import type { TournamentBackfillWindow, TournamentConfig } from '../domain/tournament';
+import { ENTRY_SYNC_DEFAULT_CONCURRENCY } from '../queues/entry-sync.queue';
 import { uniqueNumbers } from '../utils/async';
 import { mapWithConcurrency } from '../utils/async';
 import { logError, logInfo, logWarn } from '../utils/logger';
-import { ENTRY_SYNC_DEFAULT_CONCURRENCY } from '../queues/entry-sync.queue';
+import { withMutationConflictGuard } from '../utils/mutation-lock';
 
 import { syncEntryInfo } from './entry-info.service';
 import { syncLeagueEventResultsByTournament } from './league-event-results.service';
@@ -178,11 +180,17 @@ export async function backfillTournamentHistory(
 
   const issues: TournamentSetupIssue[] = [];
   for (let eventId = window.startEventId; eventId <= window.endEventId; eventId += 1) {
-    const eventIssues = await runTournamentEventBackfill(
-      tournamentId,
-      tournament,
-      entryIds,
-      eventId,
+    // Per-event structure lock: allows cascade points/battle/knockout to run
+    // between events instead of waiting for the entire multi-GW history pass.
+    const eventIssues = await withMutationConflictGuard(
+      {
+        queueName: 'tournament-setup',
+        jobName: 'tournament-setup',
+        tournamentId,
+        eventId,
+        scopes: tournamentSetupBackfillEventScopes(eventId),
+      },
+      () => runTournamentEventBackfill(tournamentId, tournament, entryIds, eventId),
     );
     issues.push(...eventIssues);
   }

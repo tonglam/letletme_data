@@ -17,6 +17,12 @@ type MutationLockInput = {
   jobId?: string;
   eventId?: number;
   tournamentId?: number;
+  /**
+   * Optional explicit scopes. When set, bypasses `resolveMutationScopes` so
+   * long multi-phase jobs (e.g. tournament setup) can lock only the phases
+   * that write shared structure tables (FP-07 Codex P1).
+   */
+  scopes?: string[];
 };
 
 let lockClient: Redis | null = null;
@@ -106,7 +112,8 @@ export async function withMutationConflictGuard<T>(
     return operation();
   }
 
-  const scopes = resolveMutationScopes(input);
+  const scopes =
+    input.scopes && input.scopes.length > 0 ? input.scopes : resolveMutationScopes(input);
   if (scopes.length === 0) {
     return operation();
   }
