@@ -2,6 +2,37 @@ import { afterEach, describe, expect, it, mock } from 'bun:test';
 
 const store = new Map<string, string>();
 
+/**
+ * Minimal Redis mock that implements the cascade barrier Lua script used by
+ * noteCascadeStructureJobComplete (SET NX + DECR + optional pending).
+ */
+function evalBarrierScript(
+  _script: string,
+  _numKeys: number,
+  slotKey: string,
+  remainingKey: string,
+  pendingKey: string,
+  ttl: string,
+): number {
+  if (store.has(slotKey)) {
+    return -2;
+  }
+  store.set(slotKey, '1');
+  const remaining = Number(store.get(remainingKey) ?? '0') - 1;
+  if (remaining === 0) {
+    store.delete(remainingKey);
+    store.set(pendingKey, '1');
+    return 0;
+  }
+  if (remaining < 0) {
+    store.delete(remainingKey);
+    return -1;
+  }
+  store.set(remainingKey, String(remaining));
+  void ttl;
+  return remaining;
+}
+
 mock.module('../../src/cache/singleton', () => ({
   redisSingleton: {
     getClient: async () => ({
@@ -17,10 +48,9 @@ mock.module('../../src/cache/singleton', () => ({
         store.set(key, String(value));
         return 'OK';
       },
-      decr: async (key: string) => {
-        const next = Number(store.get(key) ?? '0') - 1;
-        store.set(key, String(next));
-        return next;
+      eval: async (script: string, numKeys: number, ...args: string[]): Promise<number> => {
+        const [slotKey, remainingKey, pendingKey, ttl] = args;
+        return evalBarrierScript(script, numKeys, slotKey, remainingKey, pendingKey, ttl);
       },
       del: async (...keys: string[]) => {
         let n = 0;
@@ -79,22 +109,33 @@ describe('cascade structure barrier (FP-07)', () => {
     expect(await tryClaimCascadeRefreshEnqueue(cascadeId)).toBe(true);
   });
 
-  it('preserves refresh enqueue across failed queue.add then retry (Codex P2)', async () => {
+  it('preserves refresh enqueue across failed queue.add then retry', async () => {
     const cascadeId = createCascadeId(35);
     await initCascadeStructureBarrier(cascadeId);
     await noteCascadeStructureJobComplete(cascadeId, 'tournament-points-race');
     await noteCascadeStructureJobComplete(cascadeId, 'tournament-battle-race');
     await noteCascadeStructureJobComplete(cascadeId, 'tournament-knockout');
 
-    // First attempt claims lease then fails before markCascadeRefreshEnqueued
     expect(await tryClaimCascadeRefreshEnqueue(cascadeId)).toBe(true);
     await releaseCascadeRefreshEnqueueClaim(cascadeId);
 
-    // Retry (e.g. structure job re-run after crash) can claim again
     expect(await tryClaimCascadeRefreshEnqueue(cascadeId)).toBe(true);
     await markCascadeRefreshEnqueued(cascadeId);
 
-    // Fully done — further retries no-op
     expect(await tryClaimCascadeRefreshEnqueue(cascadeId)).toBe(false);
+  });
+
+  it('atomically claims slot and decrements (Lua path — no stranded SET NX)', async () => {
+    const cascadeId = createCascadeId(36);
+    await initCascadeStructureBarrier(cascadeId);
+
+    // One atomic eval per job — if it returns, remaining is consistent.
+    await noteCascadeStructureJobComplete(cascadeId, 'tournament-points-race');
+    await noteCascadeStructureJobComplete(cascadeId, 'tournament-battle-race');
+    await noteCascadeStructureJobComplete(cascadeId, 'tournament-knockout');
+
+    // Pending must be set even though we never issued a separate SET pending
+    // outside the script.
+    expect(await tryClaimCascadeRefreshEnqueue(cascadeId)).toBe(true);
   });
 });

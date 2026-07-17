@@ -67,43 +67,72 @@ export async function initCascadeStructureBarrier(cascadeId: string): Promise<vo
 }
 
 /**
+ * Atomic slot claim + remaining DECR + optional refresh-pending set.
+ *
+ * Returns:
+ *  -2 already claimed (idempotent retry — no DECR)
+ *  -1 remaining went negative (logged)
+ *   0 last slot — refresh-pending set
+ *  >0 slots still remaining
+ *
+ * Must be one Redis script so a crash after SET NX cannot strand the cascade
+ * without DECR (Codex P2 atomic barrier).
+ */
+const NOTE_CASCADE_STRUCTURE_COMPLETE_LUA = `
+local claimed = redis.call('SET', KEYS[1], '1', 'EX', ARGV[1], 'NX')
+if not claimed then
+  return -2
+end
+local remaining = redis.call('DECR', KEYS[2])
+if remaining == 0 then
+  redis.call('DEL', KEYS[2])
+  redis.call('SET', KEYS[3], '1', 'EX', ARGV[1])
+  return 0
+end
+if remaining < 0 then
+  redis.call('DEL', KEYS[2])
+  return -1
+end
+return remaining
+`;
+
+/**
  * Record that one structure barrier participant finished.
  *
  * `jobKey` must be stable per logical participant (e.g. job name, or
- * `enqueue-failed:tournament-points-race`). Uses SET NX so retries of the same
- * BullMQ job cannot double-DECR (Codex P1).
+ * `enqueue-failed:tournament-points-race`). Slot claim + DECR + pending flag
+ * run in one Lua script so retries cannot double-DECR and crashes cannot
+ * strand a claimed slot without decrementing.
  *
  * When the last slot is claimed, sets a durable `refresh-pending` flag so a
- * later crash after this call still allows a retry to enqueue MV refresh
- * (Codex P2: preserve final cascade refresh across retries).
+ * later crash still allows a retry to enqueue MV refresh.
  */
 export async function noteCascadeStructureJobComplete(
   cascadeId: string,
   jobKey: string,
 ): Promise<void> {
   const redis = await redisSingleton.getClient();
-  const slotKey = cascadeSlotKey(cascadeId, jobKey);
-  const claimed = await redis.set(slotKey, '1', 'EX', CASCADE_BARRIER_TTL_SECONDS, 'NX');
-  if (claimed !== 'OK') {
+  const result = (await redis.eval(
+    NOTE_CASCADE_STRUCTURE_COMPLETE_LUA,
+    3,
+    cascadeSlotKey(cascadeId, jobKey),
+    cascadeBarrierKey(cascadeId),
+    cascadeRefreshPendingKey(cascadeId),
+    String(CASCADE_BARRIER_TTL_SECONDS),
+  )) as number;
+
+  if (result === -2) {
     logInfo('Cascade structure barrier slot already claimed (idempotent skip)', {
       cascadeId,
       jobKey,
     });
     return;
   }
-
-  const remaining = await redis.decr(cascadeBarrierKey(cascadeId));
-  if (remaining === 0) {
-    await redis.del(cascadeBarrierKey(cascadeId));
-    await redis.set(cascadeRefreshPendingKey(cascadeId), '1', 'EX', CASCADE_BARRIER_TTL_SECONDS);
-    return;
-  }
-  if (remaining < 0) {
-    await redis.del(cascadeBarrierKey(cascadeId));
+  if (result === -1) {
     logError('Cascade structure barrier went negative', undefined, {
       cascadeId,
       jobKey,
-      remaining,
+      remaining: result,
     });
   }
 }
