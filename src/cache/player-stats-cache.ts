@@ -1,6 +1,7 @@
 import { CacheError } from '../utils/errors';
 import { logDebug, logError } from '../utils/logger';
 import { getActiveCacheSeason } from './cache-season';
+import { parseHashValues } from './hash-read';
 import { redisSingleton } from './singleton';
 
 import type { PlayerStat } from '../domain/player-stats';
@@ -23,9 +24,9 @@ export const createPlayerStatsHashCache = () => {
           return null;
         }
 
-        const playerStats = Object.values(hash)
-          .map((value) => JSON.parse(value) as PlayerStat)
-          .filter((stat) => stat.eventId === eventId);
+        const playerStats = parseHashValues<PlayerStat>(hash, { eventId, key }).filter(
+          (stat) => stat.eventId === eventId,
+        );
 
         if (playerStats.length === 0) {
           logDebug('Player stats cache miss by event (no matching event ID)', { eventId, key });

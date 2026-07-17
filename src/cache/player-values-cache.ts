@@ -1,4 +1,5 @@
 import { logDebug, logError } from '../utils/logger';
+import { parseHashValues } from './hash-read';
 import { redisSingleton } from './singleton';
 
 import type { PlayerValue } from '../domain/player-values';
@@ -79,7 +80,7 @@ export const playerValuesCache = {
         return null;
       }
 
-      const values = Object.values(hash).map((value) => JSON.parse(value) as PlayerValue);
+      const values = parseHashValues<PlayerValue>(hash, { key, changeDate });
       logDebug('Player values cache hit', { count: values.length, changeDate });
       return values;
     } catch (error) {

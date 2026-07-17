@@ -8,7 +8,7 @@ import {
 } from '../repositories/tournament-infos';
 import { logError, logInfo, logWarn } from '../utils/logger';
 
-import type { DbTournamentGroupInsert } from '../db/schemas/index.schema';
+import type { DbTournamentGroup, DbTournamentGroupInsert } from '../db/schemas/index.schema';
 
 function groupRankKey(points: number, overallRank: number | null) {
   return `${points}-${overallRank ?? Number.MAX_SAFE_INTEGER}`;
@@ -210,11 +210,24 @@ async function syncBattleRaceForTournament(
   // of the same event never inflate the counter.
   const played = recomputeThroughEventId - groupStartedEventId + 1;
 
+  // Batch-load every group row for this tournament's entries in one (chunked)
+  // query and bucket by groupId in memory, instead of one query per group (FP-17).
+  const groupEntriesByGroupId = new Map<number, DbTournamentGroup[]>();
+  const allGroupEntries = await tournamentGroupRepository.findByTournamentAndEntries(
+    tournament.id,
+    entryIds,
+  );
+  for (const group of allGroupEntries) {
+    const bucket = groupEntriesByGroupId.get(group.groupId);
+    if (bucket) {
+      bucket.push(group);
+    } else {
+      groupEntriesByGroupId.set(group.groupId, [group]);
+    }
+  }
+
   for (const groupId of groupIds) {
-    const groupEntries = await tournamentGroupRepository.findByTournamentAndGroup(
-      tournament.id,
-      groupId,
-    );
+    const groupEntries = groupEntriesByGroupId.get(groupId) ?? [];
     const groupCounters = countersByGroup.get(groupId) ?? new Map<number, Counter>();
     const groupUpdates = groupEntries.map((group) => {
       const entryId = group.entryId;

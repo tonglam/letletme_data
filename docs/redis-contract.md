@@ -163,9 +163,82 @@ assumed gone after rollover):
 - Ops markers (`LaunchNotification:*`, `letletme:entry-info-sync:*`)
 - `mutation-lock:*`, BullMQ `bull:*` keys
 
-### Manual / planned (FP-17)
+### Manual rollover runbook (FP-17)
 
-A sign-off-approved runbook (full key list + checklist) ships with FP-17 for
-broader retention and any cleanup beyond the automatic prefix pass. Until
-then: do **not** add new automatic deletion jobs; do **not** manually delete
-consumer-facing keys without sign-off.
+Automatic cleanup intentionally covers only the prefixes above. Everything
+else is deleted **manually, after consumer sign-off** — there are no automatic
+retention jobs, and none may be added without updating this contract.
+
+**When to run:** after `Season:active` has advanced to the new season and the
+first full round of new-season syncs (events, teams, players, phases,
+fixtures) has completed.
+
+**Step 1 — verify the new season is live (read-only)**
+
+```bash
+redis-cli GET Season:active            # => new season code, e.g. 2627
+redis-cli HLEN Event:<new-season>      # > 0
+redis-cli HLEN Team:<new-season>       # = 20
+redis-cli HLEN Player:<new-season>     # > 0
+```
+
+**Step 2 — inventory old-season leftovers (read-only)**
+
+```bash
+OLD=<old-season>   # e.g. 2526
+for p in Event Team Player Phase PlayerStat EntryInfo Fixtures FixturesByTeam \
+         EventLive EventLiveExplain EventLiveSummary EventOverallResult \
+         LiveFixture LiveBonus; do
+  echo "$p: $(redis-cli --scan --pattern "$p:$OLD*" | wc -l)"
+done
+```
+
+**Step 3 — consumer sign-off checklist** (every box required before any DEL)
+
+- [ ] `Season:active` points at the new season and new-season hashes are
+      populated (Step 1).
+- [ ] Every consumer in §9 has confirmed it no longer reads `<old-season>`
+      keys. Until §9 is filled in, that means **Tong explicitly approves the
+      deletion** — all keys are treated as externally consumed.
+- [ ] The old season's tournaments/leagues have fully concluded (no late
+      entry-sync or tournament-result jobs still reading old-season live
+      hashes).
+- [ ] A backup exists if any consumer might need old-season data later
+      (`redis-cli --rdb` snapshot or a per-key `DUMP` export).
+
+**Step 4 — delete (manual, old season only)**
+
+Delete **only** the leftover old-season keys from Step 2. Never use
+`FLUSHDB`/`FLUSHALL`; prefer `--scan` batches over `KEYS` in production:
+
+```bash
+redis-cli --scan --pattern "EntryInfo:$OLD"          | xargs -r redis-cli DEL
+redis-cli --scan --pattern "EventLive:$OLD:*"        | xargs -r redis-cli DEL
+redis-cli --scan --pattern "EventLiveExplain:$OLD:*" | xargs -r redis-cli DEL
+redis-cli --scan --pattern "EventLiveSummary:$OLD:*" | xargs -r redis-cli DEL
+redis-cli --scan --pattern "EventOverallResult:$OLD" | xargs -r redis-cli DEL
+redis-cli --scan --pattern "LiveFixture:$OLD:*"      | xargs -r redis-cli DEL
+redis-cli --scan --pattern "LiveBonus:$OLD:*"        | xargs -r redis-cli DEL
+redis-cli --scan --pattern "PlayerStat:$OLD"         | xargs -r redis-cli DEL
+```
+
+(`Event`, `Team`, `Player`, `Phase`, `Fixtures*`, `FixturesByTeam*` for the old
+season are normally already gone via the automatic prefix pass; delete them
+manually only if Step 2 shows leftovers.)
+
+**Step 5 — verify**
+
+- [ ] The Step 2 inventory prints `0` for every prefix.
+- [ ] Consumers report healthy reads on new-season keys.
+
+**Explicitly NOT cleaned up (retention by agreement, never by job):**
+
+- `PlayerValue:{YYYYMMDD}` — historical price data; stays until Tong and
+  consumers agree on a retention window. No automatic retention job, ever.
+- `PlayerValueMissing:{YYYYMMDD}` — consumer-owned; this service only deletes
+  it when refreshing/clearing the matching `PlayerValue` date (§4).
+- `Season:active`, `event:current` — live control keys; `event:current` is
+  overwritten in place, nothing to clean.
+- `LaunchNotification:*` — re-arms per year/season by design (§3).
+- `letletme:entry-info-sync:daily:*`, `mutation-lock:*` — expire via TTL.
+- `bull:*` — managed by BullMQ (§8).

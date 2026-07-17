@@ -1,4 +1,5 @@
 import { getActiveCacheSeason } from './cache-season';
+import { parseHashValues } from './hash-read';
 import { logDebug, logError, logInfo } from '../utils/logger';
 import { redisSingleton } from './singleton';
 
@@ -21,7 +22,7 @@ export const eventLiveSummaryCache = {
         return null;
       }
 
-      const summaries = Object.values(hash).map((value) => JSON.parse(value) as EventLiveSummary);
+      const summaries = parseHashValues<EventLiveSummary>(hash, { key, eventId });
       logDebug('Event live summary cache hit', { eventId, count: summaries.length });
       return summaries;
     } catch (error) {

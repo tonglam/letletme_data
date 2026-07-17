@@ -1,9 +1,10 @@
 import { getActiveCacheSeason } from './cache-season';
+import { parseHashEntries } from './hash-read';
 import { logDebug, logError, logInfo } from '../utils/logger';
 import { redisSingleton } from './singleton';
 
 import type { EventId } from '../types/base.type';
-import type { LiveFixturesByTeam } from '../domain/live-fixtures';
+import type { LiveFixtureByStatus, LiveFixturesByTeam } from '../domain/live-fixtures';
 
 /**
  * Live Fixture Cache Operations
@@ -51,9 +52,13 @@ export const liveFixturesCache = {
         return null;
       }
 
-      const byTeam: Record<string, unknown> = {};
-      for (const [teamId, value] of Object.entries(hash)) {
-        byTeam[teamId] = JSON.parse(value);
+      const byTeam: Record<string, LiveFixtureByStatus> = {};
+      for (const [teamId, value] of parseHashEntries<LiveFixtureByStatus>(hash, {
+        key,
+        eventId,
+        season,
+      })) {
+        byTeam[teamId] = value;
       }
 
       logDebug('Live fixtures cache hit', { eventId, season, teams: Object.keys(byTeam).length });

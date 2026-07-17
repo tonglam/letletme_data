@@ -5,6 +5,7 @@ import {
 } from '../domain/events';
 import { logDebug, logError, logInfo } from '../utils/logger';
 import { finalizeSeasonCacheWrite, getActiveCacheSeason } from './cache-season';
+import { parseHashValues } from './hash-read';
 import { redisSingleton } from './singleton';
 
 import type { Event } from '../types';
@@ -38,7 +39,7 @@ async function loadEventsFromCache(): Promise<Event[] | null> {
       return null;
     }
 
-    const events = Object.values(hash).map((value) => JSON.parse(value) as Event);
+    const events = parseHashValues<Event>(hash, { key });
     logDebug('Events cache hit', { count: events.length });
     return events;
   } catch (error) {
