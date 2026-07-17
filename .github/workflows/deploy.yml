@@ -6,10 +6,20 @@ on:
     types: [completed]
     branches: ['main']
   workflow_dispatch:
+    inputs:
+      sha:
+        description: >-
+          Commit SHA or ref to deploy. Leave empty for current main HEAD;
+          pass a previous SHA to roll back.
+        required: false
+        type: string
 
+# Never cancel a deploy mid-flight: the SSH session runs git reset, migrations
+# and compose up as one critical section — interrupting it strands the VPS
+# checkout/DB ahead of the running containers.
 concurrency:
   group: deploy-main
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   deploy:
@@ -36,13 +46,17 @@ jobs:
       - name: Checkout manual dispatch ref
         if: github.event_name == 'workflow_dispatch'
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.sha || github.sha }}
 
       - name: Set deployment metadata
         run: |
           if [ "${{ github.event_name }}" = "workflow_run" ]; then
             DEPLOY_SHA="${{ github.event.workflow_run.head_sha }}"
           else
-            DEPLOY_SHA="${GITHUB_SHA}"
+            # Resolve whatever ref/SHA was dispatched to a full commit SHA so
+            # the image tag and the VPS git reset are unambiguous.
+            DEPLOY_SHA="$(git rev-parse HEAD)"
           fi
           IMAGE_NAME=$(echo "${REGISTRY}/${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')
           echo "DEPLOY_SHA=${DEPLOY_SHA}" >> $GITHUB_ENV
@@ -110,8 +124,43 @@ jobs:
               fi
               sleep 2
             done
+
+            # The worker exposes no HTTP port; assert its Docker healthcheck
+            # (heartbeat file mtime, see docker-compose.yml) reports healthy.
+            WORKER_CID=$(APP_IMAGE="$IMAGE_REF" docker compose ps -q worker)
+            if [ -z "$WORKER_CID" ]; then
+              echo "Worker container not found after deploy"
+              APP_IMAGE="$IMAGE_REF" docker compose ps
+              exit 1
+            fi
+            for attempt in $(seq 1 30); do
+              STATUS=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$WORKER_CID" 2>/dev/null || echo unknown)
+              if [ "$STATUS" = "healthy" ]; then
+                break
+              fi
+              if [ "$attempt" -eq 30 ]; then
+                echo "Worker health check failed after waiting for startup (last status: $STATUS)"
+                APP_IMAGE="$IMAGE_REF" docker compose ps
+                docker logs --tail 100 "$WORKER_CID" || true
+                exit 1
+              fi
+              sleep 2
+            done
             APP_IMAGE="$IMAGE_REF" docker compose ps
 
-            # Commit-tagged images remain available in GHCR, so remove VPS copies
-            # that are no longer referenced by a container after a healthy deploy.
-            docker image prune --all --force
+            # Targeted prune: keep the newest 3 commit-tagged copies of the app
+            # image (current deploy + 2 local rollback candidates); GHCR stays
+            # the full archive. Dangling layers are always pruned.
+            IMAGE_NAME="${IMAGE_REF%:*}"
+            KEEP_TAGS=3
+            mapfile -t image_rows < <(
+              docker images "$IMAGE_NAME" --format '{{.CreatedAt}}|{{.Repository}}:{{.Tag}}' \
+                | grep -E ':[0-9a-f]{40}$' \
+                | sort -r || true
+            )
+            for ((i = KEEP_TAGS; i < ${#image_rows[@]}; i++)); do
+              OLD_REF="${image_rows[$i]#*|}"
+              echo "Pruning old image $OLD_REF"
+              docker rmi "$OLD_REF" >/dev/null 2>&1 || true
+            done
+            docker image prune --force

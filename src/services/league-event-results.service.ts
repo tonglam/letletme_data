@@ -4,6 +4,7 @@ import {
   type DbEventLive,
   type DbLeagueEventResultInsert,
 } from '../db/schemas/index.schema';
+import { toNullableDbChip } from '../domain/chips';
 import { entryEventResultsRepository } from '../repositories/entry-event-results';
 import { entryInfoRepository } from '../repositories/entry-infos';
 import { eventLiveRepository } from '../repositories/event-lives';
@@ -220,7 +221,7 @@ function buildEntryResultData(
   const eventAutoSubPoints =
     entryResult?.eventAutoSubPoints ?? getAutoSubPoints(autoSubs, eventLiveMap);
   const eventRank = entryResult?.eventRank ?? fallbackPicks?.entry_history.rank ?? null;
-  const eventChip = entryResult?.eventChip ?? fallbackPicks?.active_chip ?? null;
+  const eventChip = entryResult?.eventChip ?? toNullableDbChip(fallbackPicks?.active_chip);
   const overallPoints =
     entryResult?.overallPoints ?? fallbackPicks?.entry_history.total_points ?? 0;
   const overallRank = entryResult?.overallRank ?? fallbackPicks?.entry_history.overall_rank ?? 0;

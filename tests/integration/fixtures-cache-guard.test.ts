@@ -1,3 +1,7 @@
+import { assertIntegrationEnv } from './helpers/env-guard';
+
+assertIntegrationEnv();
+
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 
 import { fixturesCache } from '../../src/cache/fixtures-cache';
@@ -10,8 +14,11 @@ import type { Fixture } from '../../src/types';
  *
  * Fresh deploys sync fixtures before teams; with an empty Team:{season}
  * hash the old code deleted every FixturesByTeam:{season}:* key and rebuilt
- * nothing. The guarded writer skips the delete+rebuild instead. Runs
- * against a dedicated local Redis logical DB (see test:integration env).
+ * nothing. The guarded writer skips the delete+rebuild instead.
+ *
+ * Env-guarded (FP-02 / Codex P1): refuses to run unless RUN_INTEGRATION=1 and
+ * Redis DB indexes are non-zero, so a default `bun test` cannot wipe shared
+ * fixture caches via finalizeSeasonCacheWrite.
  */
 
 const SEASON = '9899';

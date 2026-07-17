@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Hard rules
 
-1. **Redis keys/shapes are frozen.** Multiple external systems read this Redis. Fixes stay within existing key patterns, hash fields, and JSON shapes; new data needs go to **new additive keys only**; deletions (season rollover, retention) require consumer sign-off and are manual runbooks, never automatic jobs. Full inventory: `docs/redis-contract.md`.
+1. **Redis keys/shapes are frozen.** Multiple external systems read this Redis. Fixes stay within existing key patterns, hash fields, and JSON shapes; new data needs go to **new additive keys only**. Consumer-facing deletions need sign-off (prefer manual runbooks). Exception already in code: when `Season:active` advances, entity writers auto-`DEL` stale keys for their prefixes — see `docs/redis-contract.md` §10. Do not add new automatic cleanup jobs without updating that contract.
 2. **`bun run db:generate` is frozen** (would emit a schema-reset migration). Add migrations as hand-written, idempotent `migrations/NNNN_name.sql` files — see `migrations/README.md`.
 3. One fix-plan item = one PR. Tracker: `docs/fix-plan-checklist.md`.
 
