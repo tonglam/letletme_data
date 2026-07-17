@@ -1,3 +1,7 @@
+import { assertIntegrationEnv } from './helpers/env-guard';
+
+assertIntegrationEnv();
+
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 
 import type { PlayerValue } from '../../src/domain/player-values';
@@ -23,7 +27,9 @@ const VALUE_PLAYER_B = 990014;
 const EVENT_ID = 10;
 const CHANGE_DATE = '20260717';
 
-const client = await getDbClient();
+async function db() {
+  return getDbClient();
+}
 const transfersRepository = createEntryEventTransfersRepository();
 const playerValuesRepository = createPlayerValuesRepository();
 
@@ -55,7 +61,9 @@ const TRANSFER: RawFPLEntryTransfer = {
 };
 
 beforeAll(async () => {
-  await client.begin(async (tx) => {
+  await (
+    await db()
+  ).begin(async (tx) => {
     // Events may already exist in a prod-shaped database — never overwrite
     await tx`
       INSERT INTO events (id, name) VALUES (${EVENT_ID}, 'FP-10 GW'), (1, 'FP-10 GW 1')
@@ -87,7 +95,9 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await client.begin(async (tx) => {
+  await (
+    await db()
+  ).begin(async (tx) => {
     await tx`DELETE FROM player_values WHERE element_id IN (${VALUE_PLAYER_A}, ${VALUE_PLAYER_B})`;
     await tx`DELETE FROM entry_event_transfers WHERE entry_id = ${ENTRY_ID}`;
     await tx`DELETE FROM players WHERE id IN (${PLAYER_IN}, ${PLAYER_OUT}, ${VALUE_PLAYER_A}, ${VALUE_PLAYER_B})`;
@@ -102,7 +112,7 @@ describe('entry-event-transfers element_in_played (H5)', () => {
     await transfersRepository.replaceForEvent(ENTRY_ID, EVENT_ID, [TRANSFER], undefined, {
       elementInPlayed: true,
     });
-    const initial = await client<{ element_in_played: boolean | null }[]>`
+    const initial = await (await db())<{ element_in_played: boolean | null }[]>`
       SELECT element_in_played FROM entry_event_transfers
       WHERE entry_id = ${ENTRY_ID} AND event_id = ${EVENT_ID}
     `;
@@ -114,7 +124,7 @@ describe('entry-event-transfers element_in_played (H5)', () => {
     });
 
     // Then: the stored flag survives
-    const afterNull = await client<{ element_in_played: boolean | null }[]>`
+    const afterNull = await (await db())<{ element_in_played: boolean | null }[]>`
       SELECT element_in_played FROM entry_event_transfers
       WHERE entry_id = ${ENTRY_ID} AND event_id = ${EVENT_ID}
     `;
@@ -124,7 +134,7 @@ describe('entry-event-transfers element_in_played (H5)', () => {
     await transfersRepository.replaceForEvent(ENTRY_ID, EVENT_ID, [TRANSFER], undefined, {
       elementInPlayed: false,
     });
-    const afterUpdate = await client<{ element_in_played: boolean | null }[]>`
+    const afterUpdate = await (await db())<{ element_in_played: boolean | null }[]>`
       SELECT element_in_played FROM entry_event_transfers
       WHERE entry_id = ${ENTRY_ID} AND event_id = ${EVENT_ID}
     `;
@@ -145,7 +155,7 @@ describe('player-values concurrent insert race (H6)', () => {
     // Both batches resolved; winners sum to the distinct keys
     expect(resultA.count + resultB.count).toBe(2);
 
-    const stored = await client<{ count: string }[]>`
+    const stored = await (await db())<{ count: string }[]>`
       SELECT count(*) as count FROM player_values
       WHERE element_id IN (${VALUE_PLAYER_A}, ${VALUE_PLAYER_B}) AND change_date = ${CHANGE_DATE}
     `;

@@ -1,3 +1,6 @@
+import { assertIntegrationEnv } from './helpers/env-guard';
+
+assertIntegrationEnv();
 import { describe, expect, it, beforeAll } from 'bun:test';
 import { redisSingleton } from '../../src/cache/singleton';
 import { syncLiveBonusCache } from '../../src/services/live-bonus.service';

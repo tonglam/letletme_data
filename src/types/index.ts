@@ -453,7 +453,9 @@ export interface RawFPLEntryEventPicksEntryHistory {
 }
 
 export interface RawFPLEntryEventPicksResponse {
-  active_chip: 'wildcard' | 'freehit' | 'bboost' | '3xc' | null;
+  // Any chip string FPL invents next; mapped onto the DB chip enum downstream
+  // (src/domain/chips.ts) instead of being rejected at the boundary.
+  active_chip: string | null;
   automatic_subs: unknown[];
   entry_history: RawFPLEntryEventPicksEntryHistory;
   picks: RawFPLEntryEventPickItem[];

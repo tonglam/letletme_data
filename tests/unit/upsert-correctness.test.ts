@@ -93,9 +93,14 @@ describe('player-values insertBatch (H6)', () => {
     expect(queries[0].sql).toContain('on conflict ("element_id","change_date") do nothing');
   });
 
-  it('reports the actually inserted count, not the batch size', async () => {
-    // Simulate 2 of 3 rows winning the race — the rest hit DO NOTHING
-    const { db } = createCapturingDb([{ id: 1 }, { id: 2 }]);
+  it('reports the actually inserted count and only those domain rows', async () => {
+    // Simulate 2 of 3 rows winning the race — the rest hit DO NOTHING.
+    // pg-proxy returning() expects array rows in column order:
+    // id, element_id, element_type, event_id, value, change_date, change_type, last_value, created_at
+    const { db } = createCapturingDb([
+      [1, 1, 1, 1, 50, '20260717', 'rise', 49, new Date()],
+      [2, 2, 1, 1, 50, '20260717', 'rise', 49, new Date()],
+    ]);
     const repo = createPlayerValuesRepository(db);
 
     const result = await repo.insertBatch([
@@ -105,6 +110,8 @@ describe('player-values insertBatch (H6)', () => {
     ]);
 
     expect(result.count).toBe(2);
+    expect(result.inserted.map((pv) => pv.elementId)).toEqual([1, 2]);
+    expect(result.inserted.some((pv) => pv.elementId === 3)).toBe(false);
   });
 
   it('short-circuits empty batches without touching the database', async () => {
@@ -114,6 +121,7 @@ describe('player-values insertBatch (H6)', () => {
     const result = await repo.insertBatch([]);
 
     expect(result.count).toBe(0);
+    expect(result.inserted).toEqual([]);
     expect(queries).toHaveLength(0);
   });
 });

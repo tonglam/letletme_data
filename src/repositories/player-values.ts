@@ -73,10 +73,12 @@ export const createPlayerValuesRepository = (dbInstance?: DatabaseInstance) => {
       }
     },
 
-    insertBatch: async (playerValuesList: PlayerValue[]): Promise<{ count: number }> => {
+    insertBatch: async (
+      playerValuesList: PlayerValue[],
+    ): Promise<{ count: number; inserted: PlayerValue[] }> => {
       try {
         if (playerValuesList.length === 0) {
-          return { count: 0 };
+          return { count: 0, inserted: [] };
         }
 
         const rows: DbPlayerValueInsert[] = playerValuesList.map((playerValue) => ({
@@ -93,19 +95,26 @@ export const createPlayerValuesRepository = (dbInstance?: DatabaseInstance) => {
         const db = await getDbInstance();
         // H6: (element_id, change_date) is unique — a concurrent or repeated
         // sync of the same day must not blow up the whole batch. returning()
-        // then yields only the rows actually inserted, so `count` is truthful.
-        const inserted = await db
+        // yields only rows actually inserted so callers can cache/notify
+        // without republishing conflict-skipped values (FP-10 Codex P2).
+        const insertedRows = await db
           .insert(playerValues)
           .values(rows)
           .onConflictDoNothing({
             target: [playerValues.elementId, playerValues.changeDate],
           })
           .returning();
+        const insertedKeys = new Set(
+          insertedRows.map((row) => `${row.elementId}|${row.changeDate}`),
+        );
+        const inserted = playerValuesList.filter((pv) =>
+          insertedKeys.has(`${pv.elementId}|${pv.changeDate}`),
+        );
         logInfo('Inserted player values', {
           count: inserted.length,
           skipped: rows.length - inserted.length,
         });
-        return { count: inserted.length };
+        return { count: inserted.length, inserted };
       } catch (error) {
         logError('Failed to insert player values', error, { count: playerValuesList.length });
         throw new DatabaseError('Failed to insert player values', 'INSERT_ERROR');

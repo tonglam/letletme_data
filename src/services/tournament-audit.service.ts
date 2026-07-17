@@ -1,4 +1,5 @@
 import { getDbClient } from '../db/singleton';
+import { tournamentSetupRebuildScopes } from '../domain/mutation-scope';
 import {
   buildKnockoutRows,
   type TournamentBackfillWindow,
@@ -8,6 +9,7 @@ import { tournamentEntryRepository } from '../repositories/tournament-entries';
 import { tournamentGroupRepository } from '../repositories/tournament-groups';
 import { uniqueNumbers } from '../utils/async';
 import { logInfo, logWarn } from '../utils/logger';
+import { withMutationConflictGuard } from '../utils/mutation-lock';
 
 import {
   backfillTournamentHistory,
@@ -268,13 +270,33 @@ export async function runTournamentAuditAndFixup(
     ...audit.missingEntryLeagueInfoIds,
   ]);
   if (missingEntryIds.length > 0) {
-    const entrySyncIssues = await syncTournamentEntryDetails(missingEntryIds);
+    // Entry FPL only — no structure global (same as primary setup path).
+    const entrySyncIssues = await withMutationConflictGuard(
+      {
+        queueName: 'tournament-setup',
+        jobName: 'tournament-setup',
+        tournamentId: tournament.id,
+        scopes: ['entry-core:all'],
+      },
+      () => syncTournamentEntryDetails(missingEntryIds),
+    );
     warnings.push(...entrySyncIssues);
   }
 
   if (audit.requiresStructureRebuild) {
     const entrySeeds = await tournamentEntryRepository.findEntrySeedsByTournamentId(tournament.id);
-    await rebuildTournamentStructure(tournament, entrySeeds);
+    // C4: audit rebuild must hold structure global (setup worker no longer
+    // wraps the whole job — FP-07 Codex P1).
+    await withMutationConflictGuard(
+      {
+        queueName: 'tournament-setup',
+        jobName: 'tournament-setup',
+        tournamentId: tournament.id,
+        scopes: tournamentSetupRebuildScopes(tournament.id),
+      },
+      () => rebuildTournamentStructure(tournament, entrySeeds),
+    );
+    // Per-event structure locks inside backfillTournamentHistory.
     const backfillIssues = await backfillTournamentHistory(
       tournament.id,
       tournament,
@@ -284,6 +306,7 @@ export async function runTournamentAuditAndFixup(
     warnings.push(...backfillIssues);
   } else {
     for (const eventId of audit.rerunEventIds) {
+      // Structure locks live inside runTournamentEventBackfill (points/knockout only).
       const rerunIssues = await runTournamentEventBackfill(
         tournament.id,
         tournament,
