@@ -22,6 +22,7 @@ function fixture(
   teamId: number,
   againstId: number,
   kickoffTime: string | null = null,
+  finished = false,
 ): LiveFixtureData {
   return {
     teamId,
@@ -38,20 +39,22 @@ function fixture(
     score: '0 - 0',
     wasHome: true,
     started: true,
-    finished: false,
+    finished,
   };
 }
 
-function match(teamA: number, teamB: number, kickoff = 'unknown') {
+function match(teamA: number, teamB: number, kickoff = 'unknown', finished = false) {
   const a = Math.min(teamA, teamB);
   const b = Math.max(teamA, teamB);
-  return { teamA: a, teamB: b, matchKey: `${a}-${b}-${kickoff}` };
+  return { teamA: a, teamB: b, matchKey: `${a}-${b}-${kickoff}`, finished };
 }
 
 function fixturesByTeam(entries: Record<number, LiveFixtureData[]>): LiveFixturesByTeam {
   const result: Record<string, LiveFixturesByTeam[string]> = {};
   for (const [teamId, fixtures] of Object.entries(entries)) {
-    result[teamId] = { Playing: fixtures, Not_Start: [], Finished: [] };
+    const playing = fixtures.filter((f) => !f.finished);
+    const finished = fixtures.filter((f) => f.finished);
+    result[teamId] = { Playing: playing, Not_Start: [], Finished: finished };
   }
   return result;
 }
@@ -64,7 +67,19 @@ describe('buildPlayingMatches', () => {
         2: [fixture(2, 1, '2026-01-01T12:00:00Z')],
       }),
     );
-    expect(matches).toEqual([match(1, 2, '2026-01-01T12:00:00Z')]);
+    expect(matches).toEqual([match(1, 2, '2026-01-01T12:00:00Z', false)]);
+  });
+
+  it('marks finished fixtures so settled DGW matches can skip estimation', () => {
+    const matches = buildPlayingMatches(
+      fixturesByTeam({
+        1: [fixture(1, 2, 't1', true), fixture(1, 3, 't2', false)],
+        2: [fixture(2, 1, 't1', true)],
+        3: [fixture(3, 1, 't2', false)],
+      }),
+    );
+    expect(matches.find((m) => m.matchKey === '1-2-t1')?.finished).toBe(true);
+    expect(matches.find((m) => m.matchKey === '1-3-t2')?.finished).toBe(false);
   });
 
   it('maps every fixture of a double-gameweek team, not just the first', () => {
@@ -215,9 +230,10 @@ describe('computeLiveBonusByTeam', () => {
   });
 
   it('seeds official DGW bonus and still estimates later fixture from remaining players', () => {
-    // Team 1 plays 2 and 3. Official bonus on 11 from fixture 1 is preserved;
-    // fixture 1v3 estimates among players without official bonus.
-    const matches = [match(1, 2, 't1'), match(1, 3, 't2')];
+    // Team 1 plays 2 (finished) and 3 (live). Official bonus on 11 from fixture 1
+    // is preserved; finished 1v2 is not re-estimated; live 1v3 estimates among
+    // players without official bonus.
+    const matches = [match(1, 2, 't1', true), match(1, 3, 't2', false)];
     const byTeam = computeLiveBonusByTeam(matches, [
       live(11, 1, 40, 3), // official bonus — seeded, excluded from 1v3 BPS pool
       live(12, 1, 10, 0),
@@ -229,5 +245,28 @@ describe('computeLiveBonusByTeam', () => {
 
     expect(byTeam.get(1)?.get(11)).toBe(3); // official preserved
     expect(byTeam.get(3)?.get(31)).toBe(3); // provisional for later fixture
+  });
+
+  it('does not re-estimate a finished DGW fixture over official zeros', () => {
+    // 1v2 finished with official 3/2/1; 1v3 still live. Players on team 2 with
+    // official 0 must not pick up provisional bonus from re-ranking 1v2.
+    const matches = [match(1, 2, 't1', true), match(1, 3, 't2', false)];
+    const byTeam = computeLiveBonusByTeam(matches, [
+      live(11, 1, 40, 3),
+      live(12, 1, 25, 0), // high BPS but official 0 in finished fixture
+      live(21, 2, 35, 2),
+      live(22, 2, 30, 0), // would get provisional 3 if 1v2 were re-estimated
+      live(23, 2, 20, 1),
+      live(31, 3, 50, 0),
+      live(32, 3, 15, 0),
+    ]);
+
+    expect(byTeam.get(1)?.get(11)).toBe(3);
+    expect(byTeam.get(2)?.get(21)).toBe(2);
+    expect(byTeam.get(2)?.get(23)).toBe(1);
+    // Team 2 only played the finished fixture — official zeros stay out
+    expect(byTeam.get(2)?.get(22)).toBeUndefined();
+    // Live fixture still estimates among non-official players
+    expect(byTeam.get(3)?.get(31)).toBe(3);
   });
 });
