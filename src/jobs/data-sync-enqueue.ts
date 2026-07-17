@@ -7,6 +7,8 @@ export type DataSyncJobSource = 'cron' | 'manual' | 'api' | 'event-transition';
 interface DataSyncEnqueueOptions {
   jobId?: string;
   eventId?: number;
+  /** When true (default for explicit jobId), remove job on settle so re-triggers work. */
+  removeOnSettle?: boolean;
 }
 
 async function enqueueDataSyncJob(
@@ -17,6 +19,8 @@ async function enqueueDataSyncJob(
   try {
     const tier = getDataSyncJobPriority(jobName as DataSyncPriorityJobName);
     const queue = getDataSyncQueue(tier);
+    const hasDeterministicId = options.jobId !== undefined;
+    const removeOnSettle = options.removeOnSettle ?? hasDeterministicId;
     const job = await queue.add(
       jobName,
       {
@@ -31,6 +35,7 @@ async function enqueueDataSyncJob(
           delay: 60_000,
         },
         jobId: options.jobId,
+        ...(removeOnSettle ? { removeOnComplete: true, removeOnFail: true } : {}),
       },
     );
 

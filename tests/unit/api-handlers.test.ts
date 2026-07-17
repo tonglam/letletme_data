@@ -48,13 +48,26 @@ mock.module('../../src/jobs/entry-sync-enqueue', () => ({
   enqueueEntryResultsSyncJob,
 }));
 
-const enqueueEventLivesDbSync = mock(async () => ({ id: 'lives-db-job-1' }));
-const enqueueEventLivesCacheUpdate = mock(async () => ({ id: 'lives-cache-job-1' }));
-const enqueueEventLiveSummary = mock(async () => ({ id: 'lives-summary-job-1' }));
-mock.module('../../src/jobs/live-data.jobs', () => ({
-  enqueueEventLivesDbSync,
-  enqueueEventLivesCacheUpdate,
-  enqueueEventLiveSummary,
+// Mock the live-data queue (not live-data.jobs) so real enqueue helpers run and
+// unit suites stay isolated from manual-job-ids.test.ts which also exercises
+// the real live-data.jobs module.
+mock.module('../../src/queues/live-data.queue', () => ({
+  LIVE_JOBS: {
+    EVENT_LIVES_CACHE: 'event-lives-cache',
+    EVENT_LIVES_DB: 'event-lives-db',
+    EVENT_LIVE_SUMMARY: 'event-live-summary',
+    EVENT_LIVE_EXPLAIN: 'event-live-explain',
+    LIVE_FIXTURE_CACHE: 'live-fixture-cache',
+    LIVE_BONUS_CACHE: 'live-bonus-cache',
+    EVENT_OVERALL_RESULT: 'event-overall-result',
+    LIVE_SCORES: 'live-scores',
+  },
+  getLiveDataQueue: () => ({
+    name: 'live-data-p1',
+    add: async (_name: string, _data: unknown, opts: { jobId?: string }) => ({
+      id: opts.jobId ?? 'generated-live-id',
+    }),
+  }),
 }));
 
 const getEventLivesByEventId = mock(async (eventId: number) => ({ eventId, elements: [] }));
@@ -264,7 +277,9 @@ describe('fixturesAPI handlers', () => {
       new Request('http://localhost/fixtures/sync-all-gameweeks', { method: 'POST' }),
     );
     expect(response.status).toBe(202);
-    expect(enqueueFixturesSyncJob).toHaveBeenCalledWith('api');
+    expect(enqueueFixturesSyncJob).toHaveBeenCalledWith('api', {
+      jobId: 'fixtures-sync-all-gameweeks-api',
+    });
   });
 
   test('DELETE /fixtures/cache clears the cache', async () => {
@@ -306,14 +321,19 @@ describe('playerStatsAPI handlers', () => {
     expect(response.status).toBe(422);
     expect(enqueuePlayerStatsSyncJob).not.toHaveBeenCalled();
   });
+
+  test('POST /player-stats/sync/:eventId rejects non-integer event ids', async () => {
+    const response = await playerStatsAPI.handle(
+      new Request('http://localhost/player-stats/sync/1.5', { method: 'POST' }),
+    );
+    expect(response.status).toBe(422);
+    expect(enqueuePlayerStatsSyncJob).not.toHaveBeenCalled();
+  });
 });
 
 describe('eventLivesAPI handlers', () => {
   beforeEach(() => {
     getEventLivesByEventId.mockClear();
-    enqueueEventLivesDbSync.mockClear();
-    enqueueEventLivesCacheUpdate.mockClear();
-    enqueueEventLiveSummary.mockClear();
   });
 
   test('GET /event-lives/:eventId returns live data with a numeric event id', async () => {
@@ -338,8 +358,7 @@ describe('eventLivesAPI handlers', () => {
     expect(response.status).toBe(202);
     const body = (await response.json()) as { success: boolean; jobId: string };
     expect(body.success).toBe(true);
-    expect(body.jobId).toBe('lives-db-job-1');
-    expect(enqueueEventLivesDbSync).toHaveBeenCalledWith(12, 'manual');
+    expect(body.jobId).toBe('event-lives-db-e12-manual');
   });
 
   test('POST /event-lives/cache/:eventId enqueues the cache update and returns 202', async () => {
@@ -347,7 +366,8 @@ describe('eventLivesAPI handlers', () => {
       new Request('http://localhost/event-lives/cache/12', { method: 'POST' }),
     );
     expect(response.status).toBe(202);
-    expect(enqueueEventLivesCacheUpdate).toHaveBeenCalledWith(12, 'manual');
+    const body = (await response.json()) as { jobId: string };
+    expect(body.jobId).toBe('event-lives-cache-e12-manual');
   });
 
   test('POST /event-lives/summary/:eventId enqueues the summary job and returns 202', async () => {
@@ -355,7 +375,8 @@ describe('eventLivesAPI handlers', () => {
       new Request('http://localhost/event-lives/summary/12', { method: 'POST' }),
     );
     expect(response.status).toBe(202);
-    expect(enqueueEventLiveSummary).toHaveBeenCalledWith(12, 'manual');
+    const body = (await response.json()) as { jobId: string };
+    expect(body.jobId).toBe('event-live-summary-e12-manual');
   });
 });
 

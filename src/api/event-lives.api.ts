@@ -7,7 +7,8 @@ import {
 } from '../jobs/live-data.jobs';
 import { getEventLivesByEventId } from '../services/event-lives.service';
 
-const eventIdParams = t.Object({ eventId: t.Numeric() });
+// Positive integer only — t.Numeric() accepts decimals like 1.5
+const eventIdParams = t.Object({ eventId: t.Number({ minimum: 1, multipleOf: 1 }) });
 
 export const eventLivesAPI = new Elysia({ prefix: '/event-lives' })
   .get(

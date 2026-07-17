@@ -10,6 +10,9 @@ import { enqueuePlayerStatsSyncJob } from '../jobs/data-sync-enqueue';
  * - POST /player-stats/sync/:eventId - Enqueue player stats sync for specific event, 202
  */
 
+/** Positive integer path/query param (rejects decimals like 1.5). */
+const positiveEventId = t.Number({ minimum: 1, multipleOf: 1 });
+
 export const playerStatsAPI = new Elysia({ prefix: '/player-stats' })
   .post('/sync', async ({ set }) => {
     const job = await enqueuePlayerStatsSyncJob('api');
@@ -29,6 +32,6 @@ export const playerStatsAPI = new Elysia({ prefix: '/player-stats' })
       };
     },
     {
-      params: t.Object({ eventId: t.Numeric() }),
+      params: t.Object({ eventId: positiveEventId }),
     },
   );

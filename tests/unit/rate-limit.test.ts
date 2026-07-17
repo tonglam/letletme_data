@@ -95,17 +95,25 @@ describe('createFixedWindowRateLimiter', () => {
 });
 
 describe('getClientIp', () => {
-  test('prefers the first x-forwarded-for entry', () => {
+  test('prefers x-real-ip over client-spoofable x-forwarded-for', () => {
+    const request = new Request('http://localhost/', {
+      headers: {
+        'x-forwarded-for': '203.0.113.1, 10.0.0.1',
+        'x-real-ip': '198.51.100.2',
+      },
+    });
+    expect(getClientIp(request)).toBe('198.51.100.2');
+  });
+
+  test('uses the last x-forwarded-for hop when x-real-ip is absent', () => {
+    // nginx $proxy_add_x_forwarded_for appends the real peer at the end
     const request = new Request('http://localhost/', {
       headers: { 'x-forwarded-for': '203.0.113.1, 10.0.0.1' },
     });
-    expect(getClientIp(request)).toBe('203.0.113.1');
+    expect(getClientIp(request)).toBe('10.0.0.1');
   });
 
-  test('falls back to x-real-ip, then unknown', () => {
-    expect(
-      getClientIp(new Request('http://localhost/', { headers: { 'x-real-ip': '198.51.100.2' } })),
-    ).toBe('198.51.100.2');
+  test('falls back to unknown', () => {
     expect(getClientIp(new Request('http://localhost/'))).toBe('unknown');
   });
 });

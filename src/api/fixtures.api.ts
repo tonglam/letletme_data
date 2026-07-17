@@ -30,15 +30,17 @@ export const fixturesAPI = new Elysia({ prefix: '/fixtures' })
       };
     },
     {
-      query: t.Object({ event: t.Optional(t.Numeric()) }),
+      query: t.Object({ event: t.Optional(t.Number({ minimum: 1, multipleOf: 1 })) }),
     },
   )
 
   .post('/sync-all-gameweeks', async ({ set }) => {
     // The fixtures job with no event filter syncs every gameweek's fixtures and
     // rebuilds the full fixtures cache — the same end state as the old inline
-    // 38-request loop, with queue retries and dedup.
-    const job = await enqueueFixturesSyncJob('api');
+    // 38-request loop, with queue retries and dedup via a stable jobId.
+    const job = await enqueueFixturesSyncJob('api', {
+      jobId: 'fixtures-sync-all-gameweeks-api',
+    });
     set.status = 202;
     return {
       success: true,

@@ -75,15 +75,33 @@ export function createFixedWindowRateLimiter(options: {
   };
 }
 
+/**
+ * Client IP for rate limiting.
+ *
+ * Prefer `X-Real-IP` (set by our nginx to the connecting peer) over the first
+ * `X-Forwarded-For` hop. With `$proxy_add_x_forwarded_for`, clients can prepend
+ * spoofed values; the first hop is therefore untrusted. Fall back to the last
+ * XFF hop (proxy-appended) when X-Real-IP is absent.
+ */
 export function getClientIp(request: Request): string {
+  const realIp = request.headers.get('x-real-ip')?.trim();
+  if (realIp) {
+    return realIp;
+  }
+
   const forwardedFor = request.headers.get('x-forwarded-for');
   if (forwardedFor) {
-    const first = forwardedFor.split(',')[0]?.trim();
-    if (first) {
-      return first;
+    const hops = forwardedFor
+      .split(',')
+      .map((part) => part.trim())
+      .filter((part) => part.length > 0);
+    const last = hops[hops.length - 1];
+    if (last) {
+      return last;
     }
   }
-  return request.headers.get('x-real-ip') ?? 'unknown';
+
+  return 'unknown';
 }
 
 type GuardContext = {
