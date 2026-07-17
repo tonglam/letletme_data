@@ -10,7 +10,6 @@ mock.module('../../src/cache/singleton', () => ({
         value: string,
         ...args: Array<string | number>
       ): Promise<string | null> => {
-        // Support SET key value EX ttl NX
         const nx = args.includes('NX');
         if (nx && store.has(key)) {
           return null;
@@ -23,10 +22,14 @@ mock.module('../../src/cache/singleton', () => ({
         store.set(key, String(next));
         return next;
       },
-      del: async (key: string) => {
-        store.delete(key);
-        return 1;
+      del: async (...keys: string[]) => {
+        let n = 0;
+        for (const key of keys) {
+          if (store.delete(key)) n += 1;
+        }
+        return n;
       },
+      exists: async (...keys: string[]) => keys.filter((k) => store.has(k)).length,
     }),
   },
 }));
@@ -35,6 +38,9 @@ const {
   createCascadeId,
   initCascadeStructureBarrier,
   noteCascadeStructureJobComplete,
+  tryClaimCascadeRefreshEnqueue,
+  markCascadeRefreshEnqueued,
+  releaseCascadeRefreshEnqueueClaim,
   CASCADE_STRUCTURE_BARRIER_JOBS,
 } = await import('../../src/jobs/tournament-sync.jobs');
 
@@ -43,27 +49,52 @@ describe('cascade structure barrier (FP-07)', () => {
     store.clear();
   });
 
-  it('tracks three structure jobs and signals only on the last complete', async () => {
+  it('tracks three structure jobs and allows refresh claim only after the last', async () => {
     const cascadeId = createCascadeId(33);
     expect(CASCADE_STRUCTURE_BARRIER_JOBS).toHaveLength(3);
 
     await initCascadeStructureBarrier(cascadeId);
 
-    expect(await noteCascadeStructureJobComplete(cascadeId, 'tournament-points-race')).toBe(false);
-    expect(await noteCascadeStructureJobComplete(cascadeId, 'tournament-battle-race')).toBe(false);
-    expect(await noteCascadeStructureJobComplete(cascadeId, 'tournament-knockout')).toBe(true);
+    await noteCascadeStructureJobComplete(cascadeId, 'tournament-points-race');
+    expect(await tryClaimCascadeRefreshEnqueue(cascadeId)).toBe(false);
+
+    await noteCascadeStructureJobComplete(cascadeId, 'tournament-battle-race');
+    expect(await tryClaimCascadeRefreshEnqueue(cascadeId)).toBe(false);
+
+    await noteCascadeStructureJobComplete(cascadeId, 'tournament-knockout');
+    expect(await tryClaimCascadeRefreshEnqueue(cascadeId)).toBe(true);
   });
 
   it('is idempotent for the same jobKey (retry must not double-DECR)', async () => {
     const cascadeId = createCascadeId(34);
     await initCascadeStructureBarrier(cascadeId);
 
-    expect(await noteCascadeStructureJobComplete(cascadeId, 'tournament-points-race')).toBe(false);
-    // Simulated BullMQ retry of the same job after crash post-success
-    expect(await noteCascadeStructureJobComplete(cascadeId, 'tournament-points-race')).toBe(false);
+    await noteCascadeStructureJobComplete(cascadeId, 'tournament-points-race');
+    await noteCascadeStructureJobComplete(cascadeId, 'tournament-points-race'); // retry
 
-    expect(await noteCascadeStructureJobComplete(cascadeId, 'tournament-battle-race')).toBe(false);
-    // Still need knockout — retry of points must not have released early
-    expect(await noteCascadeStructureJobComplete(cascadeId, 'tournament-knockout')).toBe(true);
+    await noteCascadeStructureJobComplete(cascadeId, 'tournament-battle-race');
+    expect(await tryClaimCascadeRefreshEnqueue(cascadeId)).toBe(false);
+
+    await noteCascadeStructureJobComplete(cascadeId, 'tournament-knockout');
+    expect(await tryClaimCascadeRefreshEnqueue(cascadeId)).toBe(true);
+  });
+
+  it('preserves refresh enqueue across failed queue.add then retry (Codex P2)', async () => {
+    const cascadeId = createCascadeId(35);
+    await initCascadeStructureBarrier(cascadeId);
+    await noteCascadeStructureJobComplete(cascadeId, 'tournament-points-race');
+    await noteCascadeStructureJobComplete(cascadeId, 'tournament-battle-race');
+    await noteCascadeStructureJobComplete(cascadeId, 'tournament-knockout');
+
+    // First attempt claims lease then fails before markCascadeRefreshEnqueued
+    expect(await tryClaimCascadeRefreshEnqueue(cascadeId)).toBe(true);
+    await releaseCascadeRefreshEnqueueClaim(cascadeId);
+
+    // Retry (e.g. structure job re-run after crash) can claim again
+    expect(await tryClaimCascadeRefreshEnqueue(cascadeId)).toBe(true);
+    await markCascadeRefreshEnqueued(cascadeId);
+
+    // Fully done — further retries no-op
+    expect(await tryClaimCascadeRefreshEnqueue(cascadeId)).toBe(false);
   });
 });

@@ -29,6 +29,9 @@ import {
   createCascadeId,
   initCascadeStructureBarrier,
   noteCascadeStructureJobComplete,
+  tryClaimCascadeRefreshEnqueue,
+  markCascadeRefreshEnqueued,
+  releaseCascadeRefreshEnqueueClaim,
   enqueueTournamentPointsRace,
   enqueueTournamentBattleRace,
   enqueueTournamentKnockout,
@@ -104,20 +107,42 @@ async function enqueueTournamentCascade(eventId: number) {
       if (results[i].status !== 'rejected') {
         continue;
       }
-      const shouldRefresh = await noteCascadeStructureJobComplete(
-        cascadeId,
-        `enqueue-failed:${structureJobNames[i]}`,
-      );
-      if (shouldRefresh) {
-        await enqueueTournamentMaterializedViewsRefresh(eventId, 'cascade');
-        logInfo('Enqueued tournament materialized views refresh after structure enqueue gaps', {
-          eventId,
-          cascadeId,
-        });
-      }
+      await noteCascadeStructureJobComplete(cascadeId, `enqueue-failed:${structureJobNames[i]}`);
     }
+    await maybeEnqueueCascadeMaterializedRefresh(eventId, cascadeId, 'structure-enqueue-gaps');
   } catch (error) {
     logError('Failed to enqueue tournament cascade jobs', error, { eventId });
+    throw error;
+  }
+}
+
+/**
+ * Enqueue MV refresh once the structure barrier is complete.
+ * Durable pending flag + lease: survives crashes after slot claim / failed queue.add.
+ */
+async function maybeEnqueueCascadeMaterializedRefresh(
+  eventId: number,
+  cascadeId: string,
+  lastJob: string,
+): Promise<void> {
+  if (!(await tryClaimCascadeRefreshEnqueue(cascadeId))) {
+    return;
+  }
+  try {
+    await enqueueTournamentMaterializedViewsRefresh(eventId, 'cascade');
+    await markCascadeRefreshEnqueued(cascadeId);
+    logInfo('Enqueued tournament materialized views refresh after structure cascade', {
+      eventId,
+      cascadeId,
+      lastJob,
+    });
+  } catch (error) {
+    await releaseCascadeRefreshEnqueueClaim(cascadeId);
+    logError('Failed to enqueue materialized views refresh after structure cascade', error, {
+      eventId,
+      cascadeId,
+      lastJob,
+    });
     throw error;
   }
 }
@@ -131,26 +156,10 @@ async function afterCascadeStructureJob(
   if (!cascadeId) {
     return;
   }
-  // jobName is the stable barrier slot — retries of the same job no-op.
-  const shouldRefresh = await noteCascadeStructureJobComplete(cascadeId, jobName);
-  if (!shouldRefresh) {
-    return;
-  }
-  try {
-    await enqueueTournamentMaterializedViewsRefresh(eventId, 'cascade');
-    logInfo('Enqueued tournament materialized views refresh after structure cascade', {
-      eventId,
-      cascadeId,
-      lastJob: jobName,
-    });
-  } catch (error) {
-    logError('Failed to enqueue materialized views refresh after structure cascade', error, {
-      eventId,
-      cascadeId,
-      lastJob: jobName,
-    });
-    throw error;
-  }
+  // jobName is the stable barrier slot — retries of the same job no-op for DECR.
+  await noteCascadeStructureJobComplete(cascadeId, jobName);
+  // Retries still re-attempt enqueue if pending and not yet successfully enqueued.
+  await maybeEnqueueCascadeMaterializedRefresh(eventId, cascadeId, jobName);
 }
 
 /**

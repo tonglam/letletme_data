@@ -35,13 +35,26 @@ function cascadeSlotKey(cascadeId: string, jobKey: string): string {
   return `tournament-cascade:structure-done:${cascadeId}:${jobKey}`;
 }
 
+function cascadeRefreshPendingKey(cascadeId: string): string {
+  return `tournament-cascade:refresh-pending:${cascadeId}`;
+}
+
+function cascadeRefreshDoneKey(cascadeId: string): string {
+  return `tournament-cascade:refresh-enqueued:${cascadeId}`;
+}
+
+function cascadeRefreshLeaseKey(cascadeId: string): string {
+  return `tournament-cascade:refresh-lease:${cascadeId}`;
+}
+
 export function createCascadeId(eventId: number): string {
   return `${eventId}-${Date.now()}`;
 }
 
 /**
  * Initialize the structure-completion barrier for one cascade fan-out.
- * Each of points/battle/knockout claims one slot on success; last one enqueues MV refresh.
+ * Each of points/battle/knockout claims one slot on success; when all three
+ * are done a durable refresh-pending flag is set for MV enqueue.
  */
 export async function initCascadeStructureBarrier(cascadeId: string): Promise<void> {
   const redis = await redisSingleton.getClient();
@@ -58,15 +71,16 @@ export async function initCascadeStructureBarrier(cascadeId: string): Promise<vo
  *
  * `jobKey` must be stable per logical participant (e.g. job name, or
  * `enqueue-failed:tournament-points-race`). Uses SET NX so retries of the same
- * BullMQ job cannot double-DECR and release the barrier early (Codex P1).
+ * BullMQ job cannot double-DECR (Codex P1).
  *
- * Returns true only when this call was the first claim for `jobKey` **and**
- * it was the last remaining structure slot (caller should enqueue MV refresh).
+ * When the last slot is claimed, sets a durable `refresh-pending` flag so a
+ * later crash after this call still allows a retry to enqueue MV refresh
+ * (Codex P2: preserve final cascade refresh across retries).
  */
 export async function noteCascadeStructureJobComplete(
   cascadeId: string,
   jobKey: string,
-): Promise<boolean> {
+): Promise<void> {
   const redis = await redisSingleton.getClient();
   const slotKey = cascadeSlotKey(cascadeId, jobKey);
   const claimed = await redis.set(slotKey, '1', 'EX', CASCADE_BARRIER_TTL_SECONDS, 'NX');
@@ -75,23 +89,55 @@ export async function noteCascadeStructureJobComplete(
       cascadeId,
       jobKey,
     });
-    return false;
+    return;
   }
 
   const remaining = await redis.decr(cascadeBarrierKey(cascadeId));
   if (remaining === 0) {
     await redis.del(cascadeBarrierKey(cascadeId));
-    return true;
+    await redis.set(cascadeRefreshPendingKey(cascadeId), '1', 'EX', CASCADE_BARRIER_TTL_SECONDS);
+    return;
   }
   if (remaining < 0) {
     await redis.del(cascadeBarrierKey(cascadeId));
-    logError('Cascade structure barrier went negative; skipping MV enqueue', undefined, {
+    logError('Cascade structure barrier went negative', undefined, {
       cascadeId,
       jobKey,
       remaining,
     });
   }
-  return false;
+}
+
+/**
+ * Claim the right to enqueue the cascade MV refresh.
+ * True only when structure barrier is complete (pending) and refresh has not
+ * been successfully enqueued yet. Concurrent callers: only one gets the lease.
+ * On enqueue failure, call `releaseCascadeRefreshEnqueueClaim` so a retry can re-claim.
+ */
+export async function tryClaimCascadeRefreshEnqueue(cascadeId: string): Promise<boolean> {
+  const redis = await redisSingleton.getClient();
+  if (await redis.exists(cascadeRefreshDoneKey(cascadeId))) {
+    return false;
+  }
+  if (!(await redis.exists(cascadeRefreshPendingKey(cascadeId)))) {
+    return false;
+  }
+  const lease = await redis.set(cascadeRefreshLeaseKey(cascadeId), '1', 'EX', 120, 'NX');
+  return lease === 'OK';
+}
+
+/** Mark MV refresh as successfully enqueued (durable; retries will no-op). */
+export async function markCascadeRefreshEnqueued(cascadeId: string): Promise<void> {
+  const redis = await redisSingleton.getClient();
+  await redis.set(cascadeRefreshDoneKey(cascadeId), '1', 'EX', CASCADE_BARRIER_TTL_SECONDS);
+  await redis.del(cascadeRefreshPendingKey(cascadeId));
+  await redis.del(cascadeRefreshLeaseKey(cascadeId));
+}
+
+/** Release enqueue lease after a failed queue.add so BullMQ retries can try again. */
+export async function releaseCascadeRefreshEnqueueClaim(cascadeId: string): Promise<void> {
+  const redis = await redisSingleton.getClient();
+  await redis.del(cascadeRefreshLeaseKey(cascadeId));
 }
 
 async function enqueueTournamentSyncJob(
