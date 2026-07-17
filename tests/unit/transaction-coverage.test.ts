@@ -80,8 +80,14 @@ mock.module('../../src/repositories/event-live-explains', () => ({
 }));
 
 const eventLivesCacheSet = mock(async () => {});
+const realCacheOps = await import('../../src/cache/operations');
 mock.module('../../src/cache/operations', () => ({
-  eventLivesCache: { set: eventLivesCacheSet, getByEventId: mock(async () => null) },
+  ...realCacheOps,
+  eventLivesCache: {
+    ...realCacheOps.eventLivesCache,
+    set: eventLivesCacheSet,
+    getByEventId: mock(async () => null),
+  },
 }));
 
 // ---------------------------------------------------------------------------
