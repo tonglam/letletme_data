@@ -12,6 +12,57 @@ import {
 import { FPLClientError } from '../utils/errors';
 import { logDebug } from '../utils/logger';
 
+const REQUEST_TIMEOUT_MS = 10_000;
+const MAX_RETRIES = 3;
+const RETRY_BASE_DELAY_MS = 500;
+const RETRY_MAX_DELAY_MS = 30_000;
+const USER_AGENT = 'letletme-data/1.0.0 (+https://github.com/tonglam/letletme_data)';
+
+// Env overrides exist for tests (keep retry waits in the millisecond range);
+// production uses the constants above.
+function getEnvMs(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw !== undefined) {
+    const parsed = Number.parseInt(raw, 10);
+    if (Number.isFinite(parsed) && parsed >= 0) {
+      return parsed;
+    }
+  }
+  return fallback;
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+function isRetryableStatus(status: number): boolean {
+  return status === 429 || (status >= 500 && status <= 599);
+}
+
+function parseRetryAfterMs(header: string | null): number | null {
+  if (!header) {
+    return null;
+  }
+  const cap = getEnvMs('FPL_RETRY_MAX_DELAY_MS', RETRY_MAX_DELAY_MS);
+  const seconds = Number(header);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    // Capped so a multi-minute Retry-After cannot park a worker for hours.
+    return Math.min(seconds * 1000, cap);
+  }
+  const dateMs = Date.parse(header);
+  if (!Number.isNaN(dateMs)) {
+    return Math.min(Math.max(dateMs - Date.now(), 0), cap);
+  }
+  return null;
+}
+
+function computeBackoffMs(attempt: number): number {
+  const base = getEnvMs('FPL_RETRY_BASE_DELAY_MS', RETRY_BASE_DELAY_MS);
+  const cap = getEnvMs('FPL_RETRY_MAX_DELAY_MS', RETRY_MAX_DELAY_MS);
+  // Full jitter on an exponential ceiling: concurrent workers spread across
+  // the window instead of stampeding the API in lockstep.
+  const ceiling = Math.min(base * 2 ** attempt, cap);
+  return Math.floor(Math.random() * (ceiling + 1));
+}
+
 // Zod schemas for validation
 const EventSchema = z.object({
   id: z.number(),
@@ -188,13 +239,60 @@ const BootstrapResponseSchema = z.object({
 class FPLClient {
   private readonly baseUrl = 'https://fantasy.premierleague.com/api';
 
+  /**
+   * Single fetch entry point for every FPL call: per-attempt timeout, bounded
+   * retries with jitter on 429/5xx/network failures (Retry-After honored), and
+   * a descriptive User-Agent. Non-retryable statuses are returned as-is so
+   * callers keep their existing `!response.ok` handling (e.g. entry cup 404).
+   */
+  private async request(url: string): Promise<Response> {
+    let lastError: unknown = null;
+
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        const response = await fetch(url, {
+          signal: AbortSignal.timeout(getEnvMs('FPL_REQUEST_TIMEOUT_MS', REQUEST_TIMEOUT_MS)),
+          headers: { 'User-Agent': USER_AGENT },
+        });
+
+        if (!isRetryableStatus(response.status) || attempt === MAX_RETRIES) {
+          return response;
+        }
+
+        const retryAfterMs = parseRetryAfterMs(response.headers.get('retry-after'));
+        const delayMs = retryAfterMs ?? computeBackoffMs(attempt);
+        logDebug('Retryable FPL response; backing off', {
+          url,
+          status: response.status,
+          attempt,
+          delayMs,
+        });
+        // Drain the body so the connection can be reused for the retry.
+        await response.arrayBuffer().catch(() => new ArrayBuffer(0));
+        await sleep(delayMs);
+      } catch (error) {
+        lastError = error;
+        if (attempt === MAX_RETRIES) {
+          break;
+        }
+        const delayMs = computeBackoffMs(attempt);
+        logDebug('FPL request failed; backing off', { url, attempt, delayMs });
+        await sleep(delayMs);
+      }
+    }
+
+    // Re-throw the raw failure so each caller wraps it with its own endpoint
+    // context (message + UNKNOWN_ERROR code), as before retries existed.
+    throw lastError instanceof Error ? lastError : new Error(String(lastError));
+  }
+
   async getBootstrap(): Promise<FPLBootstrapResponse> {
     const url = `${this.baseUrl}/bootstrap-static/`;
 
     try {
       logDebug('Fetching FPL bootstrap data', { url });
 
-      const response = await fetch(url);
+      const response = await this.request(url);
 
       if (!response.ok) {
         throw new FPLClientError(
@@ -248,7 +346,7 @@ class FPLClient {
     try {
       logDebug('Fetching fixtures', { eventId, url });
 
-      const response = await fetch(url);
+      const response = await this.request(url);
 
       if (!response.ok) {
         throw new FPLClientError(
@@ -298,7 +396,7 @@ class FPLClient {
     try {
       logDebug('Fetching event live data', { eventId, url });
 
-      const response = await fetch(url);
+      const response = await this.request(url);
 
       if (!response.ok) {
         throw new FPLClientError(
@@ -389,7 +487,7 @@ class FPLClient {
     try {
       logDebug('Fetching entry summary', { entryId, url });
 
-      const response = await fetch(url);
+      const response = await this.request(url);
       if (!response.ok) {
         throw new FPLClientError(
           `HTTP ${response.status}: ${response.statusText}`,
@@ -467,7 +565,7 @@ class FPLClient {
     try {
       logDebug('Fetching entry event picks', { entryId, eventId, url });
 
-      const response = await fetch(url);
+      const response = await this.request(url);
       if (!response.ok) {
         throw new FPLClientError(
           `HTTP ${response.status}: ${response.statusText}`,
@@ -547,7 +645,7 @@ class FPLClient {
     try {
       logDebug('Fetching league standings', { leagueId, page, leagueType, url });
 
-      const response = await fetch(url);
+      const response = await this.request(url);
       if (!response.ok) {
         throw new FPLClientError(
           `HTTP ${response.status}: ${response.statusText}`,
@@ -627,7 +725,7 @@ class FPLClient {
     try {
       logDebug('Fetching entry transfers', { entryId, url });
 
-      const response = await fetch(url);
+      const response = await this.request(url);
       if (!response.ok) {
         throw new FPLClientError(
           `HTTP ${response.status}: ${response.statusText}`,
@@ -684,7 +782,7 @@ class FPLClient {
     try {
       logDebug('Fetching entry history', { entryId, url });
 
-      const response = await fetch(url);
+      const response = await this.request(url);
       if (!response.ok) {
         throw new FPLClientError(
           `HTTP ${response.status}: ${response.statusText}`,
@@ -748,7 +846,7 @@ class FPLClient {
     try {
       logDebug('Fetching entry cup', { entryId, url });
 
-      const response = await fetch(url);
+      const response = await this.request(url);
       if (response.status === 404) {
         logDebug('Entry cup data unavailable', { entryId });
         return null;
