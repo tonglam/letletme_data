@@ -49,9 +49,9 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
 - [ ] **FP-07 · Unify tournament lock scopes** (C4 · M) — shared `tournament-structure:global` scope for setup + 4 results jobs; scope unit tests
 - [ ] **FP-08 · Tournament creation rank poisoning** (C5 · S) — `entry_infos` upsert → `ON CONFLICT (id) DO NOTHING`; test with already-synced entry
 - [ ] **FP-09 · Battle-race counters** (C6 · M · *after FP-07*) — skip matchup on missing entry result; derive `played` like points-race; expose `skipped` count
-- [ ] **FP-10 · Upsert correctness pack** (H5, H6 · S · *after FP-01*)
-  - [ ] `entry-event-transfers` conflict update: `elementInPlayed` → `COALESCE(excluded, existing)`
-  - [ ] `player-values.insertBatch` → `.onConflictDoNothing({ target: [elementId, changeDate] })`
+- [x] **FP-10 · Upsert correctness pack** (H5, H6 · S · *after FP-01*)
+  - [x] `entry-event-transfers` conflict update: `elementInPlayed` → `COALESCE(excluded, existing)`
+  - [x] `player-values.insertBatch` → `.onConflictDoNothing({ target: [elementId, changeDate] })`
 - [ ] **FP-11 · Live bonus per match** (H7 · M) — rank combined match bucket (≤6 pts/match); fix DGW `buildPlayingMap`; tests for both
 - [ ] **FP-12 · Cache writer bugs — shape-preserving** (H8, H9 · M · *after FP-06*)
   - [ ] `fixtures-cache.ts:177-189`: skip delete+rebuild of `FixturesByTeam:*` when `teamById` empty

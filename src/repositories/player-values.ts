@@ -91,8 +91,20 @@ export const createPlayerValuesRepository = (dbInstance?: DatabaseInstance) => {
         }));
 
         const db = await getDbInstance();
-        const inserted = await db.insert(playerValues).values(rows).returning();
-        logInfo('Inserted player values', { count: inserted.length });
+        // H6: (element_id, change_date) is unique — a concurrent or repeated
+        // sync of the same day must not blow up the whole batch. returning()
+        // then yields only the rows actually inserted, so `count` is truthful.
+        const inserted = await db
+          .insert(playerValues)
+          .values(rows)
+          .onConflictDoNothing({
+            target: [playerValues.elementId, playerValues.changeDate],
+          })
+          .returning();
+        logInfo('Inserted player values', {
+          count: inserted.length,
+          skipped: rows.length - inserted.length,
+        });
         return { count: inserted.length };
       } catch (error) {
         logError('Failed to insert player values', error, { count: playerValuesList.length });
