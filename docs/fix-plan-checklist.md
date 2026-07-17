@@ -5,7 +5,7 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
 - **Full detail (file-level changes, acceptance criteria):** [fix-plan-2026-07-17.md](./fix-plan-2026-07-17.md)
 - **Findings evidence:** [code-review-2026-07-17.md](./code-review-2026-07-17.md)
 
-**Progress:** P0 `5/6` · P1 `2/10` · P2 `0/9` · Deferred `0/4`
+**Progress:** P0 `6/6` · P1 `2/10` · P2 `0/9` · Deferred `0/4`
 
 **Ground rules**
 1. Redis keys/shapes are **frozen** — fixes within existing shapes; new data → additive keys only; deletions need consumer sign-off.
@@ -40,10 +40,10 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
   - [x] `fpl.ts:502` → `active_chip: z.string().nullable()` + known-chip mapping with `logWarn` on unknown (new `src/domain/chips.ts`)
   - [x] Regression tests: `explain: null` element; `active_chip: manager` picks payload
 - [x] **FP-05 · CI typecheck step** (H14 · XS) — `bun run typecheck` in `ci.yml` after Lint *(verified green 2026-07-17)*
-- [ ] **FP-06 · Redis key contract doc** (new · S · *needs Tong's consumer inventory*)
-  - [ ] `docs/redis-contract.md`: key patterns, hash fields, JSON shapes, TTL behavior
-  - [ ] Consumers section (from Tong's inventory)
-  - [ ] Ground rules added to `CLAUDE.md`
+- [x] **FP-06 · Redis key contract doc** (new · S · *needs Tong's consumer inventory*)
+  - [x] `docs/redis-contract.md`: key patterns, hash fields, JSON shapes, TTL behavior *(ops markers + honest current-vs-planned writer semantics included)*
+  - [ ] Consumers section (from Tong's inventory) — still TBD; every key treated as externally consumed until filled
+  - [x] Ground rules added to `CLAUDE.md`
 
 ## P1 — Data integrity & operability (~9–10 days, parallel except noted)
 
@@ -135,3 +135,4 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
 | FP-04 | 81ef6e4 (PR #6) | 2026-07-17 | Unknown chips now logWarn + pass through per row |
 | FP-08 | 5a53a87 (PR #10) | 2026-07-17 | — |
 | FP-15 | 8a0c80a (PR #17) | 2026-07-17 | PR #17 |
+| FP-06 | (PR #8) | 2026-07-17 | Codex P2s addressed: ops keys, FixturesByTeam current behavior, auto season cleanup |
