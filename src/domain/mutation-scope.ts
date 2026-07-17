@@ -115,14 +115,20 @@ export function resolveMutationScopes(input: MutationScopeInput): string[] {
           withEvent('entry-event', eventId),
           withEvent('tournament-event-mutations', eventId),
         ];
+      // Structure-table writers (groups / battle / knockout). Share global with
+      // setup rebuilds so C4 cannot tear down structure mid-write.
       case 'tournament-points-race':
       case 'tournament-battle-race':
       case 'tournament-knockout':
-      case 'tournament-cup-results':
         return [withEvent('tournament-structure', eventId), TOURNAMENT_STRUCTURE_GLOBAL_SCOPE];
-      // Cascade enqueues this with a soft delay, but under the global structure
-      // lock the four structure jobs run one-at-a-time and can exceed that delay.
-      // Hold the same global scope so REFRESH cannot observe partial writes.
+      // Cup only upserts entry_event_cup_results (FPL HTTP heavy). It does not
+      // mutate group/knockout structure tables, so it must NOT hold the global
+      // structure lock (would block setup/points/battle/knockout on FPL latency).
+      case 'tournament-cup-results':
+        return [withEvent('tournament-cup-results', eventId)];
+      // Cascade enqueues refresh only after points/battle/knockout complete
+      // (barrier). Still take the global scope so a concurrent setup rebuild
+      // cannot race the REFRESH itself.
       case 'tournament-materialized-views-refresh':
         return [TOURNAMENT_STRUCTURE_GLOBAL_SCOPE];
       case 'tournament-info':

@@ -54,22 +54,30 @@ describe('resolveMutationScopes', () => {
     expect(scopes).toContain('tournament-structure:tournament:789');
   });
 
-  it.each([
-    'tournament-points-race',
-    'tournament-battle-race',
-    'tournament-knockout',
-    'tournament-cup-results',
-  ])('gives %s the shared global structure scope (FP-07)', (jobName) => {
+  it.each(['tournament-points-race', 'tournament-battle-race', 'tournament-knockout'])(
+    'gives %s the shared global structure scope (FP-07)',
+    (jobName) => {
+      const scopes = resolveMutationScopes({
+        queueName: 'tournament-sync',
+        jobName,
+        eventId: 33,
+      });
+      expect(scopes).toContain('tournament-structure:global');
+      expect(scopes).toContain('tournament-structure:event:33');
+    },
+  );
+
+  it('keeps cup-results off the global structure lock (FP-07 Codex P2)', () => {
     const scopes = resolveMutationScopes({
       queueName: 'tournament-sync',
-      jobName,
+      jobName: 'tournament-cup-results',
       eventId: 33,
     });
-    expect(scopes).toContain('tournament-structure:global');
-    expect(scopes).toContain('tournament-structure:event:33');
+    expect(scopes).toEqual(['tournament-cup-results:event:33']);
+    expect(scopes).not.toContain('tournament-structure:global');
   });
 
-  it('makes setup rebuilds and results syncs mutually exclusive (C4)', () => {
+  it('makes setup rebuilds and structure results syncs mutually exclusive (C4)', () => {
     const setupScopes = resolveMutationScopes({
       queueName: 'tournament-setup',
       jobName: 'tournament-setup',
@@ -79,7 +87,6 @@ describe('resolveMutationScopes', () => {
       'tournament-points-race',
       'tournament-battle-race',
       'tournament-knockout',
-      'tournament-cup-results',
     ]) {
       const resultsScopes = resolveMutationScopes({
         queueName: 'tournament-sync',
@@ -87,11 +94,19 @@ describe('resolveMutationScopes', () => {
         eventId: 33,
       });
       const overlap = setupScopes.filter((scope) => resultsScopes.includes(scope));
-      expect(overlap.length).toBeGreaterThan(0);
+      expect(overlap).toContain('tournament-structure:global');
     }
+
+    // Cup is not a structure writer — no global overlap required.
+    const cupScopes = resolveMutationScopes({
+      queueName: 'tournament-sync',
+      jobName: 'tournament-cup-results',
+      eventId: 33,
+    });
+    expect(setupScopes.filter((scope) => cupScopes.includes(scope))).toEqual([]);
   });
 
-  it('serializes materialized-views refresh behind structure writes (FP-07 Codex P2)', () => {
+  it('serializes materialized-views refresh with structure writers, not cup (FP-07)', () => {
     const refreshScopes = resolveMutationScopes({
       queueName: 'tournament-sync',
       jobName: 'tournament-materialized-views-refresh',
@@ -103,7 +118,6 @@ describe('resolveMutationScopes', () => {
       'tournament-points-race',
       'tournament-battle-race',
       'tournament-knockout',
-      'tournament-cup-results',
       'tournament-setup',
     ]) {
       const other = resolveMutationScopes({
@@ -115,5 +129,12 @@ describe('resolveMutationScopes', () => {
       const overlap = refreshScopes.filter((scope) => other.includes(scope));
       expect(overlap).toContain('tournament-structure:global');
     }
+
+    const cupScopes = resolveMutationScopes({
+      queueName: 'tournament-sync',
+      jobName: 'tournament-cup-results',
+      eventId: 33,
+    });
+    expect(refreshScopes.filter((scope) => cupScopes.includes(scope))).toEqual([]);
   });
 });
