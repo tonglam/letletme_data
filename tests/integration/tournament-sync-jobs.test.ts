@@ -1,3 +1,6 @@
+import { assertIntegrationEnv } from './helpers/env-guard';
+
+assertIntegrationEnv();
 import { beforeAll, describe, expect, it } from 'bun:test';
 
 import {

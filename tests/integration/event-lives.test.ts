@@ -1,3 +1,6 @@
+import { assertIntegrationEnv } from './helpers/env-guard';
+
+assertIntegrationEnv();
 import { beforeAll, describe, expect, test } from 'bun:test';
 
 import { eventLivesCache } from '../../src/cache/operations';

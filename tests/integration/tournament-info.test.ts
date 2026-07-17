@@ -1,3 +1,6 @@
+import { assertIntegrationEnv } from './helpers/env-guard';
+
+assertIntegrationEnv();
 import { describe, expect, test } from 'bun:test';
 
 import { tournamentInfos } from '../../src/db/schemas/index.schema';

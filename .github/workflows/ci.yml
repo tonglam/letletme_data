@@ -26,6 +26,9 @@ jobs:
       - name: Lint
         run: bun run lint
 
+      - name: Typecheck
+        run: bun run typecheck
+
       - name: Unit tests only
         env:
           # Unit tests should not require live infra; placeholder env keeps config Zod happy
