@@ -64,16 +64,22 @@ describe('FPL entry cup client', () => {
   });
 
   test('continues to throw upstream failures', async () => {
-    globalThis.fetch = mock(
-      async () => new Response(null, { status: 503, statusText: 'Service Unavailable' }),
-    ) as unknown as typeof fetch;
-
+    // FP-18: 5xx now retries with backoff — keep the waits at milliseconds.
+    process.env.FPL_RETRY_BASE_DELAY_MS = '1';
     try {
-      await fplClient.getEntryCup(123);
-      throw new Error('Expected getEntryCup to fail');
-    } catch (error) {
-      expect(error).toBeInstanceOf(FPLClientError);
-      expect((error as FPLClientError).status).toBe(503);
+      globalThis.fetch = mock(
+        async () => new Response(null, { status: 503, statusText: 'Service Unavailable' }),
+      ) as unknown as typeof fetch;
+
+      try {
+        await fplClient.getEntryCup(123);
+        throw new Error('Expected getEntryCup to fail');
+      } catch (error) {
+        expect(error).toBeInstanceOf(FPLClientError);
+        expect((error as FPLClientError).status).toBe(503);
+      }
+    } finally {
+      delete process.env.FPL_RETRY_BASE_DELAY_MS;
     }
   });
 });
