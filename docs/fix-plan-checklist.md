@@ -5,7 +5,7 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
 - **Full detail (file-level changes, acceptance criteria):** [fix-plan-2026-07-17.md](./fix-plan-2026-07-17.md)
 - **Findings evidence:** [code-review-2026-07-17.md](./code-review-2026-07-17.md)
 
-**Progress:** P0 `2/6` · P1 `0/10` · P2 `0/9` · Deferred `0/4`
+**Progress:** P0 `3/6` · P1 `0/10` · P2 `0/9` · Deferred `0/4`
 
 **Ground rules**
 1. Redis keys/shapes are **frozen** — fixes within existing shapes; new data → additive keys only; deletions need consumer sign-off.
@@ -25,11 +25,11 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
   - [x] `apply-sql-migrations.ts` excludes journal-listed files; add `migrations/README` note ("db:generate frozen, hand-write `NNNN_name.sql`")
   - [x] Fresh-install rehearsal: empty Postgres → `db:migrate` + `db:apply-sql` green; `tournament_selection_stats`, `bauth.*`, unique index verified
   - [x] *Found during rehearsal:* journaled `0005` `teams.unavailable` bool→int alter was un-castable (added `USING` + default fix; prod never applied it — still boolean, timestamp-gated so it never re-runs); `0006_align_event_lives_table_name.sql` (0005 created `event_live`, prod/schema use `event_lives`); `0023_add_tournament_points_group_cum_columns.sql` (4 `cum_*` columns existed only in prod, views 0023/0024 need them)
-- [ ] **FP-02 · Fence integration tests off real infra** (C2 · M)
-  - [ ] `test` → `bun test tests/unit`; add `test:integration` (`RUN_INTEGRATION=1`) and `test:all`
-  - [ ] `tests/integration/helpers/env-guard.ts` (RUN_INTEGRATION=1 + test-pattern DATABASE_URL + non-0 Redis DB), wired to `tests/utils/test-config.ts`
-  - [ ] Import guard first in all 33 integration files
-  - [ ] `tournament-seed.ts`: delete seeded rows in `afterAll`
+- [x] **FP-02 · Fence integration tests off real infra** (C2 · M)
+  - [x] `test` → `bun test tests/unit`; add `test:integration` (`RUN_INTEGRATION=1`) and `test:all`
+  - [x] `tests/integration/helpers/env-guard.ts` (RUN_INTEGRATION=1 + test-pattern DATABASE_URL + non-0 Redis DB), wired to `tests/utils/test-config.ts`
+  - [x] Import guard first in all 33 integration files *(call-style `assertIntegrationEnv()` — bun shares the module registry across files, so a top-level module throw only fenced the first file)*
+  - [x] `tournament-seed.ts`: delete seeded rows in `afterAll` *(seed entry IDs moved to synthetic range 99000001+ so cleanup can't touch real entries)*
 - [ ] **FP-03 · Harden Redis client against outages** (C3, M15 · M · contract-safe)
   - [ ] `commandTimeout: 5000` + `connectTimeout: 5000` in `src/cache/singleton.ts`
   - [ ] Create client once; `connect()` idempotent; never `new Redis()` over a live instance (kills reconnect leak)
@@ -130,3 +130,4 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
 |----|-----------|------|-------|
 | FP-01 | 47baf1f (PR #3) | 2026-07-17 | Prod no-ops verified; teams.unavailable prod drift noted for FP-21 |
 | FP-05 | 78a9660 (PR #7) | 2026-07-17 | tsc now blocks merges |
+| FP-02 | 692a977 (PR #4) | 2026-07-17 | bun shared-registry made import-throw insufficient; call-style guard |

@@ -1,3 +1,6 @@
+import { assertIntegrationEnv } from '../helpers/env-guard';
+
+assertIntegrationEnv();
 import type { Job, Queue } from 'bullmq';
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 
