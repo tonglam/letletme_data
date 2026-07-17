@@ -439,6 +439,10 @@ export const createTournamentInfoRepository = (dbInstance?: DatabaseInstance) =>
       try {
         const client = await getDbClient();
         return await client.begin(async (tx) => {
+          // Insert stub rows for participants we have never synced, but NEVER
+          // overwrite an existing entry: overall_rank/overall_points belong to
+          // the FPL detail sync, and resetting them to league-standings values
+          // (or 0) used to poison knockout seeding and rank displays (C5/FP-08).
           await tx`
             insert into entry_infos ${tx(
               plan.selectedParticipants.map((participant) => ({
@@ -454,12 +458,7 @@ export const createTournamentInfoRepository = (dbInstance?: DatabaseInstance) =>
               'overall_rank',
               'overall_points',
             )}
-            on conflict (id) do update set
-              entry_name = excluded.entry_name,
-              player_name = excluded.player_name,
-              overall_rank = excluded.overall_rank,
-              overall_points = excluded.overall_points,
-              updated_at = now()
+            on conflict (id) do nothing
           `;
 
           const insertedTournament = await tx<

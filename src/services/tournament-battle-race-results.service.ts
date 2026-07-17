@@ -108,6 +108,17 @@ async function syncBattleRaceForTournament(
         missingHome: !homeResult,
         missingAway: !awayResult,
       });
+      // Clear any previously written phantom 3/0 points so history recompute
+      // does not keep counting a stale win (FP-09 Codex P1).
+      scoredBattleResults.push({
+        ...result,
+        homeNetPoints: null,
+        homeRank: null,
+        homeMatchPoints: null,
+        awayNetPoints: null,
+        awayRank: null,
+        awayMatchPoints: null,
+      });
       continue;
     }
 

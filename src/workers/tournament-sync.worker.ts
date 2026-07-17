@@ -26,6 +26,12 @@ import { getQueueConnection } from '../utils/queue';
 import { logError, logInfo } from '../utils/logger';
 import { withMutationConflictGuard } from '../utils/mutation-lock';
 import {
+  createCascadeId,
+  initCascadeStructureBarrier,
+  noteCascadeStructureJobComplete,
+  tryClaimCascadeRefreshEnqueue,
+  markCascadeRefreshEnqueued,
+  releaseCascadeRefreshEnqueueClaim,
   enqueueTournamentPointsRace,
   enqueueTournamentBattleRace,
   enqueueTournamentKnockout,
@@ -38,18 +44,26 @@ import { startStrictPriorityGate } from './strict-priority-gate';
 import type { WorkerRuntime } from './worker-runtime';
 
 /**
- * Enqueue cascade jobs after tournament-event-results completes
- * These jobs depend on fresh tournament event results
+ * Enqueue cascade jobs after tournament-event-results completes.
+ * These jobs depend on fresh tournament event results.
+ *
+ * MV refresh is NOT delayed-enqueued here: a fixed delay can fire between
+ * serialized structure jobs. Instead points/battle/knockout share a cascade
+ * barrier and the last successful one enqueues the refresh (FP-07).
  */
 async function enqueueTournamentCascade(eventId: number) {
   logInfo('Enqueueing tournament cascade jobs', { eventId });
 
   try {
-    // Enqueue all dependent jobs to run in parallel
+    const cascadeId = createCascadeId(eventId);
+    await initCascadeStructureBarrier(cascadeId);
+    const structureOpts = { cascadeId };
+
+    // Structure jobs carry cascadeId for the MV barrier; cup/transfers do not.
     const results = await Promise.allSettled([
-      enqueueTournamentPointsRace(eventId, 'cascade'),
-      enqueueTournamentBattleRace(eventId, 'cascade'),
-      enqueueTournamentKnockout(eventId, 'cascade'),
+      enqueueTournamentPointsRace(eventId, 'cascade', structureOpts),
+      enqueueTournamentBattleRace(eventId, 'cascade', structureOpts),
+      enqueueTournamentKnockout(eventId, 'cascade', structureOpts),
       enqueueTournamentTransfersPost(eventId, 'cascade'),
       enqueueTournamentCupResults(eventId, 'cascade'),
     ]);
@@ -59,12 +73,12 @@ async function enqueueTournamentCascade(eventId: number) {
 
     logInfo('Tournament cascade jobs enqueued', {
       eventId,
+      cascadeId,
       total: results.length,
       successful,
       failed,
     });
 
-    // Log any failures
     results.forEach((result, index) => {
       if (result.status === 'rejected') {
         const jobNames = [
@@ -76,22 +90,83 @@ async function enqueueTournamentCascade(eventId: number) {
         ];
         logError('Failed to enqueue cascade job', result.reason, {
           eventId,
+          cascadeId,
           jobName: jobNames[index],
         });
       }
     });
 
-    // Enqueue materialized view refresh with a 30s delay so parallel writes finish first
-    try {
-      await enqueueTournamentMaterializedViewsRefresh(eventId, 'cascade', { delay: 30_000 });
-      logInfo('Enqueued tournament materialized views refresh', { eventId, delayMs: 30_000 });
-    } catch (error) {
-      logError('Failed to enqueue materialized views refresh', error, { eventId });
+    // If a structure job failed to enqueue, the barrier would never reach 0.
+    // Claim a stable enqueue-failed slot per job so a partial cascade still refreshes.
+    const structureJobNames = [
+      TOURNAMENT_JOBS.POINTS_RACE,
+      TOURNAMENT_JOBS.BATTLE_RACE,
+      TOURNAMENT_JOBS.KNOCKOUT,
+    ];
+    for (let i = 0; i < 3; i++) {
+      if (results[i].status !== 'rejected') {
+        continue;
+      }
+      await noteCascadeStructureJobComplete(cascadeId, `enqueue-failed:${structureJobNames[i]}`);
     }
+    await maybeEnqueueCascadeMaterializedRefresh(eventId, cascadeId, 'structure-enqueue-gaps');
   } catch (error) {
     logError('Failed to enqueue tournament cascade jobs', error, { eventId });
     throw error;
   }
+}
+
+/**
+ * Enqueue MV refresh once the structure barrier is complete.
+ * Durable pending flag + lease: survives crashes after slot claim / failed queue.add.
+ * If the lease is held by a dead worker, throw so BullMQ retries (Codex P2).
+ */
+async function maybeEnqueueCascadeMaterializedRefresh(
+  eventId: number,
+  cascadeId: string,
+  lastJob: string,
+): Promise<void> {
+  const claim = await tryClaimCascadeRefreshEnqueue(cascadeId);
+  if (claim === 'already-enqueued' || claim === 'not-pending') {
+    return;
+  }
+  if (claim === 'lease-busy') {
+    // Do not complete successfully behind a stale lease — retry until the
+    // lease expires or the holder finishes markCascadeRefreshEnqueued.
+    throw new Error(`Cascade MV refresh enqueue lease busy for cascadeId=${cascadeId}; will retry`);
+  }
+  try {
+    await enqueueTournamentMaterializedViewsRefresh(eventId, 'cascade');
+    await markCascadeRefreshEnqueued(cascadeId);
+    logInfo('Enqueued tournament materialized views refresh after structure cascade', {
+      eventId,
+      cascadeId,
+      lastJob,
+    });
+  } catch (error) {
+    await releaseCascadeRefreshEnqueueClaim(cascadeId);
+    logError('Failed to enqueue materialized views refresh after structure cascade', error, {
+      eventId,
+      cascadeId,
+      lastJob,
+    });
+    throw error;
+  }
+}
+
+/** After a structure cascade job succeeds, maybe enqueue MV refresh. */
+async function afterCascadeStructureJob(
+  eventId: number,
+  cascadeId: string | undefined,
+  jobName: string,
+): Promise<void> {
+  if (!cascadeId) {
+    return;
+  }
+  // jobName is the stable barrier slot — retries of the same job no-op for DECR.
+  await noteCascadeStructureJobComplete(cascadeId, jobName);
+  // Retries still re-attempt enqueue if pending and not yet successfully enqueued.
+  await maybeEnqueueCascadeMaterializedRefresh(eventId, cascadeId, jobName);
 }
 
 /**
@@ -106,7 +181,7 @@ async function enqueueTournamentCascade(eventId: number) {
  * event-results (base) → [points-race, battle-race, knockout, transfers-post, cup-results] (parallel)
  */
 async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
-  const { eventId, source } = job.data;
+  const { eventId, source, cascadeId } = job.data;
   const context = {
     jobType: 'queue' as const,
     queueName: job.queueName,
@@ -137,15 +212,19 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
 
           case TOURNAMENT_JOBS.POINTS_RACE:
             await syncTournamentPointsRaceResults(eventId);
+            await afterCascadeStructureJob(eventId, cascadeId, job.name);
             break;
 
-          case TOURNAMENT_JOBS.BATTLE_RACE:
-            // Return the result so the job's returnvalue surfaces `skipped`
-            // (matchups skipped for missing entry results) to observers.
-            return await syncTournamentBattleRaceResults(eventId);
+          case TOURNAMENT_JOBS.BATTLE_RACE: {
+            // Surface `skipped` (missing entry results) on the job returnvalue.
+            const battleResult = await syncTournamentBattleRaceResults(eventId);
+            await afterCascadeStructureJob(eventId, cascadeId, job.name);
+            return battleResult;
+          }
 
           case TOURNAMENT_JOBS.KNOCKOUT:
             await syncTournamentKnockoutResults(eventId);
+            await afterCascadeStructureJob(eventId, cascadeId, job.name);
             break;
 
           case TOURNAMENT_JOBS.TRANSFERS_POST:

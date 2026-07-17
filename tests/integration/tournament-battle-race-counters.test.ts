@@ -1,4 +1,8 @@
-import { afterAll, describe, expect, test } from 'bun:test';
+import { assertIntegrationEnv } from './helpers/env-guard';
+
+assertIntegrationEnv();
+
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 
 import { planTournamentStructure, type TournamentParticipant } from '../../src/domain/tournament';
 import { getDbClient } from '../../src/db/singleton';
@@ -24,11 +28,12 @@ const GROUP_ID = 1;
 const NET = { [ENTRY_A]: 50, [ENTRY_B]: 40, [ENTRY_C]: 60, [ENTRY_D]: 55 } as const;
 const OVERALL_RANK = { [ENTRY_A]: 1000, [ENTRY_B]: 2000, [ENTRY_C]: 500, [ENTRY_D]: 800 } as const;
 
-const client = await getDbClient();
-const eventRows = await client<{ id: number }[]>`SELECT id FROM events ORDER BY id DESC LIMIT 1`;
-const testEventId = eventRows[0]?.id ?? null;
-
 let tournamentId: number | null = null;
+let testEventId: number | null = null;
+
+async function db() {
+  return getDbClient();
+}
 
 type BattleRow = {
   home_entry_id: number;
@@ -50,7 +55,7 @@ type GroupRow = {
 };
 
 async function fetchBattleRows(): Promise<BattleRow[]> {
-  return client<BattleRow[]>`
+  return (await db())<BattleRow[]>`
     SELECT home_entry_id, away_entry_id, home_net_points, home_match_points,
            away_net_points, away_match_points
     FROM tournament_battle_group_results
@@ -60,7 +65,7 @@ async function fetchBattleRows(): Promise<BattleRow[]> {
 }
 
 async function fetchGroupRows(): Promise<Map<number, GroupRow>> {
-  const rows = await client<GroupRow[]>`
+  const rows = await (await db())<GroupRow[]>`
     SELECT entry_id, group_points, group_rank, played, won, drawn, lost
     FROM tournament_groups
     WHERE tournament_id = ${tournamentId}
@@ -70,7 +75,7 @@ async function fetchGroupRows(): Promise<Map<number, GroupRow>> {
 
 async function insertEntryResult(entryId: number, eventId: number): Promise<void> {
   const net = NET[entryId as keyof typeof NET];
-  await client`
+  await (await db())`
     INSERT INTO entry_event_results (
       entry_id, event_id, event_points, event_transfers, event_transfers_cost,
       event_net_points, event_rank, overall_points, overall_rank
@@ -84,8 +89,8 @@ async function insertEntryResult(entryId: number, eventId: number): Promise<void
 }
 
 async function seedTournament(eventId: number): Promise<number> {
-  await client`
-    INSERT INTO entry_infos ${client(
+  await (await db())`
+    INSERT INTO entry_infos ${(await db())(
       [ENTRY_A, ENTRY_B, ENTRY_C, ENTRY_D].map((id, index) => ({
         id,
         entry_name: `FP-09 Team ${index + 1}`,
@@ -129,14 +134,14 @@ async function seedTournament(eventId: number): Promise<number> {
   const created = await tournamentInfoRepository.createTournamentWithEntries(plan);
 
   // Force a deterministic single-event group window
-  await client`
+  await (await db())`
     UPDATE tournament_infos
     SET group_started_event_id = ${eventId}, group_ended_event_id = ${eventId}
     WHERE id = ${created.id}
   `;
 
-  await client`
-    INSERT INTO tournament_groups ${client(
+  await (await db())`
+    INSERT INTO tournament_groups ${(await db())(
       [ENTRY_A, ENTRY_B, ENTRY_C, ENTRY_D].map((entryId, index) => ({
         tournament_id: created.id,
         group_id: GROUP_ID,
@@ -150,7 +155,7 @@ async function seedTournament(eventId: number): Promise<number> {
   `;
 
   // Fixtures: A vs B (both results present), C vs D (D missing until backfill)
-  await client`
+  await (await db())`
     INSERT INTO tournament_battle_group_results (
       tournament_id, group_id, event_id,
       home_index, home_entry_id, away_index, away_entry_id
@@ -163,6 +168,7 @@ async function seedTournament(eventId: number): Promise<number> {
 }
 
 afterAll(async () => {
+  const client = await db();
   await client.begin(async (tx) => {
     if (tournamentId !== null) {
       await tx`DELETE FROM tournament_battle_group_results WHERE tournament_id = ${tournamentId}`;
@@ -175,11 +181,20 @@ afterAll(async () => {
   });
 });
 
-describe.skipIf(testEventId === null)('Battle-race phantom-zero guard (FP-09)', () => {
+describe('Battle-race phantom-zero guard (FP-09)', () => {
+  beforeAll(async () => {
+    const client = await db();
+    const eventRows = await client<
+      { id: number }[]
+    >`SELECT id FROM events ORDER BY id DESC LIMIT 1`;
+    testEventId = eventRows[0]?.id ?? null;
+  });
+
   test(
     'missing entry result → no match points awarded; backfill + re-run converges',
     async () => {
-      const eventId = testEventId!;
+      expect(testEventId).not.toBeNull();
+      const eventId = testEventId as number;
       tournamentId = await seedTournament(eventId);
 
       // Given: entry results for A, B, C — D is missing

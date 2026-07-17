@@ -2,25 +2,22 @@ import { drizzle } from 'drizzle-orm/postgres-js';
 import Redis from 'ioredis';
 import postgres from 'postgres';
 
-// Test database configuration
-export const testDbConfig = {
-  host: process.env.TEST_DB_HOST || 'localhost',
-  port: parseInt(process.env.TEST_DB_PORT || '5432'),
-  database: process.env.TEST_DB_NAME || 'letletme_data_test',
-  username: process.env.TEST_DB_USER || 'postgres',
-  password: process.env.TEST_DB_PASSWORD || 'postgres',
-};
+import { assertIntegrationEnv } from '../integration/helpers/env-guard';
 
-// Test Redis configuration
-export const testRedisConfig = {
-  host: process.env.TEST_REDIS_HOST || 'localhost',
-  port: parseInt(process.env.TEST_REDIS_PORT || '6379'),
-  db: parseInt(process.env.TEST_REDIS_DB || '1'), // Use DB 1 for tests
-};
-
-// Create test database connection
+/**
+ * Direct connection helpers for integration tests.
+ *
+ * Connections derive from the SAME environment the app singletons use, and the
+ * env-guard is re-asserted at creation time — never use separate TEST_*
+ * overrides that could silently point at different infrastructure.
+ */
 export function createTestDb() {
-  const connectionString = `postgres://${testDbConfig.username}:${testDbConfig.password}@${testDbConfig.host}:${testDbConfig.port}/${testDbConfig.database}`;
+  assertIntegrationEnv();
+
+  const connectionString = process.env.DATABASE_URL;
+  if (!connectionString) {
+    throw new Error('DATABASE_URL is required for integration tests');
+  }
 
   const client = postgres(connectionString, {
     max: 1, // Limit connections for tests
@@ -30,12 +27,14 @@ export function createTestDb() {
   return drizzle(client);
 }
 
-// Create test Redis connection
 export function createTestRedis() {
+  assertIntegrationEnv();
+
   return new Redis({
-    host: testRedisConfig.host,
-    port: testRedisConfig.port,
-    db: testRedisConfig.db,
+    host: process.env.REDIS_HOST || 'localhost',
+    port: Number(process.env.REDIS_PORT || 6379),
+    password: process.env.REDIS_PASSWORD || undefined,
+    db: Number(process.env.REDIS_DB || 0),
     lazyConnect: true,
   });
 }
