@@ -141,6 +141,49 @@ describe('FPL client resilience (FP-18)', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  test('hung 200 body is retried and succeeds on the next attempt', async () => {
+    let calls = 0;
+    globalThis.fetch = mock(async () => {
+      calls += 1;
+      if (calls === 1) {
+        // Headers look fine; body consume fails (stall/truncation).
+        const stalled = new ReadableStream({
+          pull() {
+            throw new Error('body stalled');
+          },
+        });
+        return new Response(stalled, { status: 200 });
+      }
+      return new Response('[]', { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const fixtures = await fplClient.getFixtures(1);
+    expect(fixtures).toEqual([]);
+    expect(calls).toBe(2);
+  });
+
+  test('hung 429 body still surfaces 429 after retries exhaust', async () => {
+    process.env.FPL_REQUEST_TIMEOUT_MS = '50';
+    const fetchMock = mock(async () => {
+      const stalled = new ReadableStream({
+        pull() {
+          throw new Error('rate-limit body stalled');
+        },
+      });
+      return new Response(stalled, { status: 429, statusText: 'Too Many Requests' });
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    try {
+      await fplClient.getFixtures(1);
+      throw new Error('Expected getFixtures to fail');
+    } catch (error) {
+      expect(error).toBeInstanceOf(FPLClientError);
+      expect((error as FPLClientError).status).toBe(429);
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
   test('sends a descriptive User-Agent on every request', async () => {
     let seenUserAgent: string | null = null;
     globalThis.fetch = mock(async (_url: string, init?: RequestInit) => {

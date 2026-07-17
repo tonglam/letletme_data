@@ -245,19 +245,29 @@ class FPLClient {
    * Single fetch entry point for every FPL call: per-attempt timeout, wall-clock
    * deadline across retries (fits under tournament 45s withTimeout guards),
    * retries with jitter on 429/5xx/network failures (Retry-After honored, capped),
-   * and a descriptive User-Agent. The response body is fully buffered inside the
-   * retry loop so hung/truncated bodies after a 200 header are also retried.
-   * Non-retryable statuses are returned as-is so callers keep `!response.ok`
-   * handling (e.g. entry cup 404).
+   * and a descriptive User-Agent.
+   *
+   * Body handling inside the retry loop:
+   * - 2xx: buffer fully so hung/truncated bodies after a 200 header are retried
+   * - 429/5xx: record status first, then buffer (status preserved if body stalls)
+   * - other non-ok (e.g. 404): return immediately without buffering so hung 404
+   *   bodies do not flip cup lookups to UNKNOWN_ERROR
    */
   private async request(url: string): Promise<Response> {
     let lastError: unknown = null;
-    /** Last buffered 429/5xx — returned if the deadline expires during backoff. */
+    /** Last 429/5xx (status-only or buffered) — preferred over UNKNOWN_ERROR. */
     let lastRetryableResponse: Response | null = null;
     const deadlineMs = getEnvMs('FPL_REQUEST_DEADLINE_MS', REQUEST_DEADLINE_MS);
     const started = Date.now();
 
     const remainingMs = (): number => Math.max(deadlineMs - (Date.now() - started), 0);
+
+    const statusOnlyResponse = (response: Response): Response =>
+      new Response(null, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+      });
 
     const bufferResponse = async (response: Response): Promise<Response> => {
       const body = await response.arrayBuffer();
@@ -284,32 +294,39 @@ class FPLClient {
           headers: { 'User-Agent': USER_AGENT },
         });
 
-        // Non-retryable (incl. 404): return immediately without requiring a full
-        // body download — hung 404 bodies must not flip cup lookups to UNKNOWN_ERROR.
-        if (!isRetryableStatus(response.status)) {
+        if (isRetryableStatus(response.status)) {
+          // Record status before consuming the body so a hung 429/5xx body still
+          // surfaces the upstream HTTP status if buffering fails or deadline hits.
+          lastRetryableResponse = statusOnlyResponse(response);
+          const buffered = await bufferResponse(response);
+          lastRetryableResponse = buffered;
+
+          if (attempt === MAX_RETRIES) {
+            return buffered;
+          }
+
+          const retryAfterMs = parseRetryAfterMs(response.headers.get('retry-after'));
+          const delayMs = Math.min(retryAfterMs ?? computeBackoffMs(attempt), remainingMs());
+          logDebug('Retryable FPL response; backing off', {
+            url,
+            status: response.status,
+            attempt,
+            delayMs,
+          });
+          if (delayMs > 0) {
+            await sleep(delayMs);
+          }
+          continue;
+        }
+
+        // Non-retryable error (404, 400, …): return without buffering — hung 404
+        // bodies must not flip cup lookups to UNKNOWN_ERROR.
+        if (!response.ok) {
           return response;
         }
 
-        // Retryable 429/5xx (and last attempt): buffer body so hung downloads
-        // after headers are still retryable / returnable with status preserved.
-        const buffered = await bufferResponse(response);
-        lastRetryableResponse = buffered;
-
-        if (attempt === MAX_RETRIES) {
-          return buffered;
-        }
-
-        const retryAfterMs = parseRetryAfterMs(response.headers.get('retry-after'));
-        const delayMs = Math.min(retryAfterMs ?? computeBackoffMs(attempt), remainingMs());
-        logDebug('Retryable FPL response; backing off', {
-          url,
-          status: response.status,
-          attempt,
-          delayMs,
-        });
-        if (delayMs > 0) {
-          await sleep(delayMs);
-        }
+        // Success: buffer so hung/truncated JSON after headers remains retryable.
+        return await bufferResponse(response);
       } catch (error) {
         lastError = error;
         if (attempt === MAX_RETRIES || remainingMs() <= 0) {
