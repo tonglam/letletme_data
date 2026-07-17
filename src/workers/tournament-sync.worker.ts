@@ -95,7 +95,9 @@ async function enqueueTournamentCascade(eventId: number) {
 
     // If a structure job failed to enqueue, the barrier would never reach 0.
     // Decrement for each failed enqueue so a partial cascade still refreshes.
-    const structureEnqueueFailed = results.slice(0, 3).filter((r) => r.status === 'rejected').length;
+    const structureEnqueueFailed = results
+      .slice(0, 3)
+      .filter((r) => r.status === 'rejected').length;
     for (let i = 0; i < structureEnqueueFailed; i++) {
       const shouldRefresh = await noteCascadeStructureJobComplete(cascadeId);
       if (shouldRefresh) {
