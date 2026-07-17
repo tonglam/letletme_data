@@ -25,11 +25,9 @@ export const CASCADE_STRUCTURE_BARRIER_JOBS = [
   TOURNAMENT_JOBS.KNOCKOUT,
 ] as const;
 
-const CASCADE_BARRIER_TTL_SECONDS = 60 * 60; // 1h — longer than any reasonable cascade
-
-function cascadeBarrierKey(cascadeId: string): string {
-  return `tournament-cascade:structure-remaining:${cascadeId}`;
-}
+/** Slot TTL: long enough for p0 backlog / setup / worker outage (Codex P2). */
+const CASCADE_BARRIER_TTL_SECONDS = 24 * 60 * 60; // 24h
+const CASCADE_REFRESH_LEASE_TTL_SECONDS = 120;
 
 function cascadeSlotKey(cascadeId: string, jobKey: string): string {
   return `tournament-cascade:structure-done:${cascadeId}:${jobKey}`;
@@ -47,19 +45,23 @@ function cascadeRefreshLeaseKey(cascadeId: string): string {
   return `tournament-cascade:refresh-lease:${cascadeId}`;
 }
 
+function cascadeMetaKey(cascadeId: string): string {
+  return `tournament-cascade:meta:${cascadeId}`;
+}
+
 export function createCascadeId(eventId: number): string {
   return `${eventId}-${Date.now()}`;
 }
 
 /**
- * Initialize the structure-completion barrier for one cascade fan-out.
- * Each of points/battle/knockout claims one slot on success; when all three
- * are done a durable refresh-pending flag is set for MV enqueue.
+ * Mark a cascade fan-out as started (observability + TTL anchor).
+ * Completion does not rely on a DECR counter — it counts per-role slot keys
+ * so an expired counter cannot strand the barrier.
  */
 export async function initCascadeStructureBarrier(cascadeId: string): Promise<void> {
   const redis = await redisSingleton.getClient();
   await redis.set(
-    cascadeBarrierKey(cascadeId),
+    cascadeMetaKey(cascadeId),
     String(CASCADE_STRUCTURE_BARRIER_JOBS.length),
     'EX',
     CASCADE_BARRIER_TTL_SECONDS,
@@ -67,59 +69,98 @@ export async function initCascadeStructureBarrier(cascadeId: string): Promise<vo
 }
 
 /**
- * Atomic slot claim + remaining DECR + optional refresh-pending set.
+ * Atomic slot claim + role completion count + optional refresh-pending.
  *
- * Returns:
- *  -2 already claimed (idempotent retry — no DECR)
- *  -1 remaining went negative (logged)
- *   0 last slot — refresh-pending set
- *  >0 slots still remaining
+ * KEYS[1] = this job's slot
+ * KEYS[2] = refresh-pending
+ * KEYS[3..8] = for each of 3 roles: success slot, enqueue-failed slot
+ * ARGV[1] = TTL seconds
  *
- * Must be one Redis script so a crash after SET NX cannot strand the cascade
- * without DECR (Codex P2 atomic barrier).
+ * A role is done if either its success or enqueue-failed slot exists.
+ * No shared DECR counter — immune to counter TTL expiry (Codex P2).
+ *
+ * Returns: -2 already claimed; 0 all roles done (pending set); >0 remaining roles
  */
 const NOTE_CASCADE_STRUCTURE_COMPLETE_LUA = `
 local claimed = redis.call('SET', KEYS[1], '1', 'EX', ARGV[1], 'NX')
 if not claimed then
   return -2
 end
-local remaining = redis.call('DECR', KEYS[2])
-if remaining == 0 then
-  redis.call('DEL', KEYS[2])
-  redis.call('SET', KEYS[3], '1', 'EX', ARGV[1])
+local done = 0
+for i = 3, 8, 2 do
+  local okKey = KEYS[i]
+  local failKey = KEYS[i + 1]
+  if redis.call('EXISTS', okKey) == 1 or redis.call('EXISTS', failKey) == 1 then
+    done = done + 1
+    if redis.call('EXISTS', okKey) == 1 then
+      redis.call('EXPIRE', okKey, ARGV[1])
+    end
+    if redis.call('EXISTS', failKey) == 1 then
+      redis.call('EXPIRE', failKey, ARGV[1])
+    end
+  end
+end
+if done >= 3 then
+  redis.call('SET', KEYS[2], '1', 'EX', ARGV[1])
   return 0
 end
-if remaining < 0 then
-  redis.call('DEL', KEYS[2])
-  return -1
+return 3 - done
+`;
+
+/**
+ * Atomic claim for MV refresh enqueue.
+ * KEYS[1]=done KEYS[2]=pending KEYS[3]=lease  ARGV[1]=lease TTL
+ * Returns: 1 claimed, 2 already-enqueued, 3 not-pending, 4 lease-busy
+ */
+const TRY_CLAIM_CASCADE_REFRESH_LUA = `
+if redis.call('EXISTS', KEYS[1]) == 1 then
+  return 2
 end
-return remaining
+if redis.call('EXISTS', KEYS[2]) == 0 then
+  return 3
+end
+local lease = redis.call('SET', KEYS[3], '1', 'EX', ARGV[1], 'NX')
+if not lease then
+  return 4
+end
+-- Recheck done after lease to close the race with markCascadeRefreshEnqueued.
+if redis.call('EXISTS', KEYS[1]) == 1 then
+  redis.call('DEL', KEYS[3])
+  return 2
+end
+return 1
 `;
 
 /**
  * Record that one structure barrier participant finished.
  *
  * `jobKey` must be stable per logical participant (e.g. job name, or
- * `enqueue-failed:tournament-points-race`). Slot claim + DECR + pending flag
- * run in one Lua script so retries cannot double-DECR and crashes cannot
- * strand a claimed slot without decrementing.
- *
- * When the last slot is claimed, sets a durable `refresh-pending` flag so a
- * later crash still allows a retry to enqueue MV refresh.
+ * `enqueue-failed:tournament-points-race`). Uses per-role slot keys (not a
+ * shared DECR counter) so long waits cannot expire the barrier state.
  */
 export async function noteCascadeStructureJobComplete(
   cascadeId: string,
   jobKey: string,
 ): Promise<void> {
   const redis = await redisSingleton.getClient();
+  const ttl = String(CASCADE_BARRIER_TTL_SECONDS);
+  const roles = CASCADE_STRUCTURE_BARRIER_JOBS;
   const result = (await redis.eval(
     NOTE_CASCADE_STRUCTURE_COMPLETE_LUA,
-    3,
+    8,
     cascadeSlotKey(cascadeId, jobKey),
-    cascadeBarrierKey(cascadeId),
     cascadeRefreshPendingKey(cascadeId),
-    String(CASCADE_BARRIER_TTL_SECONDS),
+    cascadeSlotKey(cascadeId, roles[0]),
+    cascadeSlotKey(cascadeId, `enqueue-failed:${roles[0]}`),
+    cascadeSlotKey(cascadeId, roles[1]),
+    cascadeSlotKey(cascadeId, `enqueue-failed:${roles[1]}`),
+    cascadeSlotKey(cascadeId, roles[2]),
+    cascadeSlotKey(cascadeId, `enqueue-failed:${roles[2]}`),
+    ttl,
   )) as number;
+
+  // Keep meta alive while structure jobs complete.
+  await redis.expire(cascadeMetaKey(cascadeId), CASCADE_BARRIER_TTL_SECONDS);
 
   if (result === -2) {
     logInfo('Cascade structure barrier slot already claimed (idempotent skip)', {
@@ -128,12 +169,8 @@ export async function noteCascadeStructureJobComplete(
     });
     return;
   }
-  if (result === -1) {
-    logError('Cascade structure barrier went negative', undefined, {
-      cascadeId,
-      jobKey,
-      remaining: result,
-    });
+  if (result === 0) {
+    logInfo('Cascade structure barrier complete; refresh pending', { cascadeId, jobKey });
   }
 }
 
@@ -152,22 +189,34 @@ export type CascadeRefreshClaimResult =
   | 'lease-busy';
 
 /**
- * Claim the right to enqueue the cascade MV refresh.
- * Concurrent callers: only one gets the lease. On enqueue failure, call
- * `releaseCascadeRefreshEnqueueClaim` so a retry can re-claim.
+ * Claim the right to enqueue the cascade MV refresh (atomic done/pending/lease).
  */
 export async function tryClaimCascadeRefreshEnqueue(
   cascadeId: string,
 ): Promise<CascadeRefreshClaimResult> {
   const redis = await redisSingleton.getClient();
-  if (await redis.exists(cascadeRefreshDoneKey(cascadeId))) {
-    return 'already-enqueued';
+  const code = (await redis.eval(
+    TRY_CLAIM_CASCADE_REFRESH_LUA,
+    3,
+    cascadeRefreshDoneKey(cascadeId),
+    cascadeRefreshPendingKey(cascadeId),
+    cascadeRefreshLeaseKey(cascadeId),
+    String(CASCADE_REFRESH_LEASE_TTL_SECONDS),
+  )) as number;
+
+  switch (code) {
+    case 1:
+      return 'claimed';
+    case 2:
+      return 'already-enqueued';
+    case 3:
+      return 'not-pending';
+    case 4:
+      return 'lease-busy';
+    default:
+      logError('Unexpected cascade refresh claim code', undefined, { cascadeId, code });
+      return 'not-pending';
   }
-  if (!(await redis.exists(cascadeRefreshPendingKey(cascadeId)))) {
-    return 'not-pending';
-  }
-  const lease = await redis.set(cascadeRefreshLeaseKey(cascadeId), '1', 'EX', 120, 'NX');
-  return lease === 'OK' ? 'claimed' : 'lease-busy';
 }
 
 /** Mark MV refresh as successfully enqueued (durable; retries will no-op). */
