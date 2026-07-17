@@ -6,6 +6,7 @@ export const dataSyncQueueName = 'data-sync';
 export type DataSyncJobName =
   | 'events'
   | 'fixtures'
+  | 'fixtures-all-gameweeks'
   | 'teams'
   | 'players'
   | 'player-stats'
@@ -15,6 +16,8 @@ export type DataSyncJobName =
 export interface DataSyncJobData {
   source?: 'cron' | 'manual' | 'api' | 'event-transition';
   triggeredAt: string;
+  /** Optional event filter (fixtures, player-stats); absent = current/all behavior */
+  eventId?: number;
 }
 
 const defaultJobOptions = {

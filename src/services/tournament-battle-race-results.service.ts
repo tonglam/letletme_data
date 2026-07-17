@@ -6,7 +6,7 @@ import {
   tournamentInfoRepository,
   type TournamentInfoSummary,
 } from '../repositories/tournament-infos';
-import { logError, logInfo } from '../utils/logger';
+import { logError, logInfo, logWarn } from '../utils/logger';
 
 import type { DbTournamentGroup, DbTournamentGroupInsert } from '../db/schemas/index.schema';
 
@@ -66,15 +66,6 @@ async function syncBattleRaceForTournament(
     return { updatedGroups: 0, updatedResults: 0, skipped: entryIds.length };
   }
   const eventResultMap = new Map(eventResults.map((result) => [result.entryId, result]));
-  const totalsMap = new Map(
-    (
-      await entryEventResultsRepository.aggregateTotalsByEntry(
-        entryIds,
-        groupStartedEventId,
-        Math.min(eventId, groupEndedEventId),
-      )
-    ).map((row) => [row.entryId, row]),
-  );
 
   const battleResults = await tournamentBattleGroupResultsRepository.findByTournamentAndEvent(
     tournament.id,
@@ -88,42 +79,139 @@ async function syncBattleRaceForTournament(
     return { updatedGroups: 0, updatedResults: 0, skipped: entryIds.length };
   }
 
-  const matchPointsByGroup = new Map<number, Map<number, number>>();
-  const updatedBattleResults = battleResults.map((result) => {
-    const homeEntry = result.homeEntryId;
-    const awayEntry = result.awayEntryId;
-    const homeResult = eventResultMap.get(homeEntry);
-    const awayResult = eventResultMap.get(awayEntry);
-    const homeNet = homeResult?.eventNetPoints ?? 0;
-    const awayNet = awayResult?.eventNetPoints ?? 0;
-    const homeMatchPoints = matchPoints(homeNet, awayNet);
-    const awayMatchPoints = matchPoints(awayNet, homeNet);
-
-    const groupMap = matchPointsByGroup.get(result.groupId) ?? new Map<number, number>();
-    if (homeEntry) {
-      groupMap.set(homeEntry, homeMatchPoints);
+  // Score this event's matchups. A matchup is scored only when BOTH sides have
+  // an entry_event_results row — scoring a missing side as 0 would award
+  // phantom-zero wins (FP-09 / C6). Skipped matchups keep their NULL points and
+  // are excluded from the upsert; they can be scored later once results arrive.
+  let skipped = 0;
+  const scoredBattleResults = [];
+  for (const result of battleResults) {
+    const homeResult = eventResultMap.get(result.homeEntryId);
+    const awayResult = eventResultMap.get(result.awayEntryId);
+    if (!homeResult || !awayResult) {
+      skipped += 1;
+      logWarn('Skipping battle race matchup with missing entry event result', {
+        tournamentId: tournament.id,
+        eventId,
+        groupId: result.groupId,
+        homeEntryId: result.homeEntryId,
+        awayEntryId: result.awayEntryId,
+        missingHome: !homeResult,
+        missingAway: !awayResult,
+      });
+      // Clear any previously written phantom 3/0 points so history recompute
+      // does not keep counting a stale win (FP-09 Codex P1).
+      scoredBattleResults.push({
+        ...result,
+        homeNetPoints: null,
+        homeRank: null,
+        homeMatchPoints: null,
+        awayNetPoints: null,
+        awayRank: null,
+        awayMatchPoints: null,
+      });
+      continue;
     }
-    if (awayEntry) {
-      groupMap.set(awayEntry, awayMatchPoints);
-    }
-    matchPointsByGroup.set(result.groupId, groupMap);
 
-    return {
+    const homeNet = homeResult.eventNetPoints;
+    const awayNet = awayResult.eventNetPoints;
+    scoredBattleResults.push({
       ...result,
       homeNetPoints: homeNet,
-      homeRank: homeResult?.eventRank ?? null,
-      homeMatchPoints,
+      homeRank: homeResult.eventRank ?? null,
+      homeMatchPoints: matchPoints(homeNet, awayNet),
       awayNetPoints: awayNet,
-      awayRank: awayResult?.eventRank ?? null,
-      awayMatchPoints,
-    };
-  });
+      awayRank: awayResult.eventRank ?? null,
+      awayMatchPoints: matchPoints(awayNet, homeNet),
+    });
+  }
+
+  // Upsert scored matchups BEFORE reading the history so the recompute below
+  // sees this event's points.
+  const updatedResultsCount =
+    await tournamentBattleGroupResultsRepository.upsertBatch(scoredBattleResults);
+
+  // Recompute through the latest event that has battle rows in the group
+  // window — not only through this job's eventId. A delayed/retried backfill
+  // of an older GW must not overwrite standings with a prefix total and drop
+  // later GWs (FP-09 Codex P1).
+  const maxStoredEventId = await tournamentBattleGroupResultsRepository.findMaxEventIdInRange(
+    tournament.id,
+    groupStartedEventId,
+    groupEndedEventId,
+  );
+  const recomputeThroughEventId = Math.min(
+    groupEndedEventId,
+    Math.max(eventId, maxStoredEventId ?? eventId),
+  );
+
+  // Recompute group counters from the full matchup history in the group
+  // window. Re-runs are idempotent and backfill + re-run converges; the old
+  // one-way increment guard (played >= expected → skip) locked wrong counters
+  // in place forever (FP-09 / C6).
+  const history = await tournamentBattleGroupResultsRepository.findByTournamentAndEventRange(
+    tournament.id,
+    groupStartedEventId,
+    recomputeThroughEventId,
+  );
+
+  const totalsMap = new Map(
+    (
+      await entryEventResultsRepository.aggregateTotalsByEntry(
+        entryIds,
+        groupStartedEventId,
+        recomputeThroughEventId,
+      )
+    ).map((row) => [row.entryId, row]),
+  );
+
+  // Overall ranks for tie-breaks: use results at the recompute horizon.
+  const rankingResultMap =
+    recomputeThroughEventId === eventId
+      ? eventResultMap
+      : new Map(
+          (
+            await entryEventResultsRepository.findByEventAndEntryIds(
+              recomputeThroughEventId,
+              entryIds,
+            )
+          ).map((result) => [result.entryId, result]),
+        );
+
+  type Counter = { points: number; won: number; drawn: number; lost: number };
+  const newCounter = (): Counter => ({ points: 0, won: 0, drawn: 0, lost: 0 });
+  const groupIds = [...new Set(history.map((row) => row.groupId))];
+  const countersByGroup = new Map<number, Map<number, Counter>>();
+  for (const row of history) {
+    if (row.homeMatchPoints === null || row.awayMatchPoints === null) {
+      continue; // unplayed or skipped matchup — no match points awarded yet
+    }
+    const groupCounters = countersByGroup.get(row.groupId) ?? new Map<number, Counter>();
+    for (const [entryId, points] of [
+      [row.homeEntryId, row.homeMatchPoints],
+      [row.awayEntryId, row.awayMatchPoints],
+    ] as const) {
+      const counter = groupCounters.get(entryId) ?? newCounter();
+      counter.points += points;
+      if (points === 3) {
+        counter.won += 1;
+      } else if (points === 1) {
+        counter.drawn += 1;
+      } else {
+        counter.lost += 1;
+      }
+      groupCounters.set(entryId, counter);
+    }
+    countersByGroup.set(row.groupId, groupCounters);
+  }
 
   const updatedGroups: DbTournamentGroupInsert[] = [];
-  let skipped = 0;
+  // Derived absolutely (like points-race) instead of incremented, so re-runs
+  // of the same event never inflate the counter.
+  const played = recomputeThroughEventId - groupStartedEventId + 1;
 
   // Batch-load every group row for this tournament's entries in one (chunked)
-  // query and bucket by groupId in memory, instead of one query per group.
+  // query and bucket by groupId in memory, instead of one query per group (FP-17).
   const groupEntriesByGroupId = new Map<number, DbTournamentGroup[]>();
   const allGroupEntries = await tournamentGroupRepository.findByTournamentAndEntries(
     tournament.id,
@@ -138,37 +226,18 @@ async function syncBattleRaceForTournament(
     }
   }
 
-  for (const [groupId, pointsMap] of matchPointsByGroup.entries()) {
+  for (const groupId of groupIds) {
     const groupEntries = groupEntriesByGroupId.get(groupId) ?? [];
+    const groupCounters = countersByGroup.get(groupId) ?? new Map<number, Counter>();
     const groupUpdates = groupEntries.map((group) => {
       const entryId = group.entryId;
-      const eventResult = eventResultMap.get(entryId);
+      const eventResult = rankingResultMap.get(entryId);
       if (!eventResult) {
         skipped += 1;
         return null;
       }
 
-      const expectedPlayed = eventId - groupStartedEventId + 1;
-      const alreadyPlayed = (group.played ?? 0) >= expectedPlayed;
-      const matchPointsValue = pointsMap.get(entryId) ?? 0;
-      let groupPoints = group.groupPoints ?? 0;
-      let played = group.played ?? 0;
-      let win = group.won ?? 0;
-      let draw = group.drawn ?? 0;
-      let lose = group.lost ?? 0;
-
-      if (!alreadyPlayed) {
-        groupPoints += matchPointsValue;
-        played += 1;
-        if (matchPointsValue === 3) {
-          win += 1;
-        } else if (matchPointsValue === 1) {
-          draw += 1;
-        } else if (matchPointsValue === 0) {
-          lose += 1;
-        }
-      }
-
+      const counter = groupCounters.get(entryId) ?? newCounter();
       const totals = totalsMap.get(entryId);
       return {
         id: group.id,
@@ -179,12 +248,12 @@ async function syncBattleRaceForTournament(
         entryId: group.entryId,
         startedEventId: group.startedEventId,
         endedEventId: group.endedEventId,
-        groupPoints,
+        groupPoints: counter.points,
         groupRank: group.groupRank,
         played,
-        won: win,
-        drawn: draw,
-        lost: lose,
+        won: counter.won,
+        drawn: counter.drawn,
+        lost: counter.lost,
         totalPoints: totals?.totalPoints ?? 0,
         totalTransfersCost: totals?.totalTransfersCost ?? 0,
         totalNetPoints: totals?.totalNetPoints ?? 0,
@@ -216,8 +285,6 @@ async function syncBattleRaceForTournament(
   }
 
   const updatedGroupsCount = await tournamentGroupRepository.upsertBatch(updatedGroups);
-  const updatedResultsCount =
-    await tournamentBattleGroupResultsRepository.upsertBatch(updatedBattleResults);
 
   return { updatedGroups: updatedGroupsCount, updatedResults: updatedResultsCount, skipped };
 }

@@ -1,6 +1,6 @@
 import type { Redis } from 'ioredis';
 
-import { logDebug, logError } from '../utils/logger';
+import { logDebug, logError, logWarn } from '../utils/logger';
 import { finalizeSeasonCacheWrite, getActiveCacheSeason } from './cache-season';
 import { parseHashValues } from './hash-read';
 import { redisSingleton } from './singleton';
@@ -181,24 +181,37 @@ export const fixturesCache = {
         const t = JSON.parse(json) as { name: string; shortName: string };
         teamById.set(Number(id), { name: t.name, shortName: t.shortName });
       }
-      const byTeam = buildFixturesByTeam([...teamById.keys()], fixtures, teamById);
-      const teamPattern = `FixturesByTeam:${activeSeason}:*`;
-      const staleTeamKeys = await scanKeys(redis, teamPattern);
-      const teamPipeline = redis.pipeline();
-      for (const key of staleTeamKeys) {
-        teamPipeline.del(key);
-      }
-      for (const [teamId, eventMap] of byTeam) {
-        const teamKey = `FixturesByTeam:${activeSeason}:${teamId}`;
-        const fields: Record<string, string> = {};
-        for (const [eventId, teamFixture] of eventMap) {
-          fields[eventId.toString()] = JSON.stringify(teamFixture);
+
+      let fixturesByTeamCount = 0;
+      if (teamById.size === 0) {
+        // H8: without team metadata the rebuild produces nothing, yet the
+        // delete below would still wipe every FixturesByTeam key (fresh
+        // deploys sync fixtures before teams). Keep existing keys intact;
+        // a later fixtures sync (after teams land) rebuilds the view.
+        logWarn('Skipping FixturesByTeam rebuild: team cache is empty', {
+          season: activeSeason,
+        });
+      } else {
+        const byTeam = buildFixturesByTeam([...teamById.keys()], fixtures, teamById);
+        fixturesByTeamCount = byTeam.size;
+        const teamPattern = `FixturesByTeam:${activeSeason}:*`;
+        const staleTeamKeys = await scanKeys(redis, teamPattern);
+        const teamPipeline = redis.pipeline();
+        for (const key of staleTeamKeys) {
+          teamPipeline.del(key);
         }
-        if (Object.keys(fields).length > 0) {
-          teamPipeline.hset(teamKey, fields);
+        for (const [teamId, eventMap] of byTeam) {
+          const teamKey = `FixturesByTeam:${activeSeason}:${teamId}`;
+          const fields: Record<string, string> = {};
+          for (const [eventId, teamFixture] of eventMap) {
+            fields[eventId.toString()] = JSON.stringify(teamFixture);
+          }
+          if (Object.keys(fields).length > 0) {
+            teamPipeline.hset(teamKey, fields);
+          }
         }
+        await teamPipeline.exec();
       }
-      await teamPipeline.exec();
       await finalizeSeasonCacheWrite(activeSeason, ['Fixtures', 'FixturesByTeam']);
 
       logDebug('Fixtures cache updated (all events + teams)', {
@@ -206,7 +219,7 @@ export const fixturesCache = {
         scheduled: fixtures.length - unscheduled.length,
         unscheduled: unscheduled.length,
         events: fixturesByEvent.size,
-        teams: byTeam.size,
+        teams: fixturesByTeamCount,
         season: activeSeason,
       });
     } catch (error) {

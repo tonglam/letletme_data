@@ -24,13 +24,22 @@ async function enqueueLiveDataJob(
       triggeredAt: new Date().toISOString(),
     };
 
-    // Use unique IDs so recurring cron jobs can enqueue every tick.
-    // Static IDs would dedupe and block subsequent runs while completed jobs are retained.
-    const defaultJobId = `${jobName}-e${eventId}-${Date.now()}`;
+    // Manual triggers share a deterministic ID per (job, event) so repeat triggers
+    // dedupe while the job waits in the queue. Cron/cascade runs stay unique per
+    // tick — static IDs would dedupe and block subsequent runs while completed
+    // jobs are retained.
+    const isManual = source === 'manual';
+    const defaultJobId = isManual
+      ? `${jobName}-e${eventId}-manual`
+      : `${jobName}-e${eventId}-${Date.now()}`;
 
     const job = await queue.add(jobName, jobData, {
       jobId: options.jobId ?? defaultJobId,
       delay: options.delay,
+      // Deterministic IDs dedupe across retained jobs too — without immediate
+      // cleanup a settled manual job would silently swallow every later re-trigger
+      // for the rest of the retention window. Run history lives in the job-run log.
+      ...(isManual ? { removeOnComplete: true, removeOnFail: true } : {}),
     });
 
     logInfo('Live data job enqueued', {

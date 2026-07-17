@@ -1,20 +1,17 @@
 import { eq, sql } from 'drizzle-orm';
-import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 
 import {
   eventLiveExplains,
   type DbEventLiveExplain,
   type DbEventLiveExplainInsert,
 } from '../db/schemas/index.schema';
-import { getDb } from '../db/singleton';
+import { getDb, type DbOrTransaction } from '../db/singleton';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 
 import type { EventLiveExplain } from '../domain/event-live-explains';
 
-type DatabaseInstance = PostgresJsDatabase<Record<string, never>>;
-
-export const createEventLiveExplainsRepository = (dbInstance?: DatabaseInstance) => {
+export const createEventLiveExplainsRepository = (dbInstance?: DbOrTransaction) => {
   const getDbInstance = async () => dbInstance || (await getDb());
 
   return {

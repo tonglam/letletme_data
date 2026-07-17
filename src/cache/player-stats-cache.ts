@@ -88,6 +88,12 @@ export const createPlayerStatsHashCache = () => {
       }
     },
 
+    /**
+     * Despite the name, this deletes the ENTIRE PlayerStat:{season} hash —
+     * the view holds only the latest synced event, so there is no per-event
+     * subset to clear. The eventId argument is accepted for call-site
+     * symmetry but ignored.
+     */
     clearByEvent: async (eventId: EventId): Promise<void> => {
       try {
         const redis = await redisSingleton.getClient();
@@ -154,6 +160,10 @@ export const playerStatsCache = {
     return playerStatsHashCacheInstance.clearAll();
   },
 
+  /**
+   * Clears the whole PlayerStat:{season} view (see the implementation note —
+   * eventId is ignored; this is NOT a per-event clear).
+   */
   async clearByEvent(eventId: EventId): Promise<void> {
     return playerStatsHashCacheInstance.clearByEvent(eventId);
   },

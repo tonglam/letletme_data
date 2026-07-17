@@ -6,6 +6,7 @@ import type { PlayerValue } from '../domain/player-values';
 
 export const playerValuesCache = {
   // Store player values by changeDate: PlayerValue:{changeDate}
+  // Replaces the whole hash (use after a full re-read of the date, or clear).
   async set(changeDate: string, playerValues: PlayerValue[]): Promise<void> {
     try {
       const redis = await redisSingleton.getClient();
@@ -33,6 +34,37 @@ export const playerValuesCache = {
       logDebug('Player values cache updated (hash)', { count: playerValues.length, changeDate });
     } catch (error) {
       logError('Player values cache set error', error);
+      throw error;
+    }
+  },
+
+  /**
+   * Merge fields into PlayerValue:{date} without deleting the existing hash.
+   * Used after partial ON CONFLICT DO NOTHING inserts so concurrent daily syncs
+   * do not erase each other's winners (FP-10 Codex P2).
+   */
+  async merge(changeDate: string, playerValues: PlayerValue[]): Promise<void> {
+    try {
+      if (playerValues.length === 0) {
+        return;
+      }
+      const redis = await redisSingleton.getClient();
+      const key = `PlayerValue:${changeDate}`;
+      const missingKey = `PlayerValueMissing:${changeDate}`;
+      const valueFields: Record<string, string> = {};
+      for (const playerValue of playerValues) {
+        valueFields[playerValue.elementId.toString()] = JSON.stringify(playerValue);
+      }
+      const pipeline = redis.pipeline();
+      pipeline.del(missingKey);
+      pipeline.hset(key, valueFields);
+      await pipeline.exec();
+      logDebug('Player values cache merged (hash fields)', {
+        count: playerValues.length,
+        changeDate,
+      });
+    } catch (error) {
+      logError('Player values cache merge error', error);
       throw error;
     }
   },

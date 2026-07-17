@@ -79,15 +79,14 @@ replaces the *entire* hash (`DEL` + `HSET`) with the stats of the event being
 synced. Consumers must read it as "stats as of the latest synced event", never
 as per-event history.
 
-**Current writer behavior:** any event sync (including backfills) can replace
-the whole view.
-
-**Planned (FP-12, not yet implemented):** writer guard so only the current
-event may rewrite the cache; old-event syncs write DB only. Read-side
-semantics stay "latest synced event wins" once FP-12 lands.
+Writer rule (FP-12): only a sync for the **current event** may write this view
+(enforced by `shouldWritePlayerStatsView` in `player-stats.service.ts`);
+syncs of older events persist to the DB only, so a backfill can never clobber
+the current view.
 
 The misleadingly-named internal helper `clearByEvent(eventId)` also clears the
-**whole** hash — it is not per-event. Same FP-12 guard item.
+**whole** hash — it is not per-event (documented at the method; the argument
+is ignored).
 
 ## 6. `FixturesByTeam:{season}:{teamId}` — one fixture per (team, event)
 
@@ -96,14 +95,11 @@ per event**. In double gameweeks the second fixture overwrites the first.
 Fixing this requires a shape change → **deferred**: it will be served from a
 new additive key only if a consumer requests it (see fix-plan "Deferred").
 
-**Current writer behavior** (`src/cache/fixtures-cache.ts`): on fixtures
-`set`, the writer always scans `FixturesByTeam:{season}:*`, `DEL`s those keys,
-then rebuilds from `Team:{season}` + fixtures. If `Team:{season}` is empty
-(fixtures-before-teams sync order), the rebuild is empty and the keys are
-**wiped**.
-
-**Planned (FP-12, not yet implemented):** when `Team:{season}` is empty, skip
-the delete+rebuild so that ordering cannot wipe `FixturesByTeam:*`.
+**Current writer behavior** (`src/cache/fixtures-cache.ts`, FP-12): on fixtures
+`set`, the writer rebuilds `FixturesByTeam:{season}:*` from `Team:{season}` +
+fixtures. If `Team:{season}` is empty (fixtures-before-teams sync order), it
+**skips** the delete+rebuild and logs a warning so ordering cannot wipe the
+view; existing keys stay intact until a later sync with teams present.
 
 ## 7. Mutation locks (internal)
 

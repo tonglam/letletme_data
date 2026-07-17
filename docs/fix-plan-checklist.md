@@ -5,7 +5,7 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
 - **Full detail (file-level changes, acceptance criteria):** [fix-plan-2026-07-17.md](./fix-plan-2026-07-17.md)
 - **Findings evidence:** [code-review-2026-07-17.md](./code-review-2026-07-17.md)
 
-**Progress:** P0 `6/6` · P1 `2/10` · P2 `0/9` · Deferred `0/4`
+**Progress:** P0 `6/6` · P1 `6/10` · P2 `0/9` · Deferred `0/4`
 
 **Ground rules**
 1. Redis keys/shapes are **frozen** — fixes within existing shapes; new data → additive keys only; deletions need consumer sign-off.
@@ -47,28 +47,28 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
 
 ## P1 — Data integrity & operability (~9–10 days, parallel except noted)
 
-- [ ] **FP-07 · Unify tournament lock scopes** (C4 · M) — shared `tournament-structure:global` scope for setup + 4 results jobs; scope unit tests
+- [x] **FP-07 · Unify tournament lock scopes** (C4 · M) — shared `tournament-structure:global` scope for setup + 4 results jobs + MV refresh; scope unit tests
 - [x] **FP-08 · Tournament creation rank poisoning** (C5 · S) — `entry_infos` upsert → `ON CONFLICT (id) DO NOTHING`; integration test with already-synced entry
-- [ ] **FP-09 · Battle-race counters** (C6 · M · *after FP-07*) — skip matchup on missing entry result; derive `played` like points-race; expose `skipped` count
-- [ ] **FP-10 · Upsert correctness pack** (H5, H6 · S · *after FP-01*)
-  - [ ] `entry-event-transfers` conflict update: `elementInPlayed` → `COALESCE(excluded, existing)`
-  - [ ] `player-values.insertBatch` → `.onConflictDoNothing({ target: [elementId, changeDate] })`
-- [ ] **FP-11 · Live bonus per match** (H7 · M) — rank combined match bucket (≤6 pts/match); fix DGW `buildPlayingMap`; tests for both
-- [ ] **FP-12 · Cache writer bugs — shape-preserving** (H8, H9 · M · *after FP-06*)
-  - [ ] `fixtures-cache.ts:177-189`: skip delete+rebuild of `FixturesByTeam:*` when `teamById` empty
-  - [ ] Player-stats cache = latest-event-wins view: only write when `eventId` is current event; old-event syncs → DB only
-  - [ ] Document both semantics + DGW one-fixture limitation in `redis-contract.md`
-- [ ] **FP-13 · API hardening pack** (H1, H2, M1–M4, L1–L4 · L · *client-visible: announce error-envelope change*)
-  - [ ] a. Generic 5xx message in prod; `getHttpStatusFromError` in global handler
-  - [ ] b. Rate limit on POST/DELETE (trigger + sync routes), independent of `ENABLE_AUTH`
-  - [ ] c. Deterministic job IDs for manual triggers (drop `Date.now()`)
-  - [ ] d. Inline syncs → enqueue + 202 (`sync-all-gameweeks`, entity `/sync` routes)
-  - [ ] e. `entry-sync` via queue / `mapWithConcurrency` cap
-  - [ ] f. Mount better-auth under `/api/auth` (restore JSON 404 envelope)
-  - [ ] g. `t.Numeric()` schemas; delete bare `parseInt`
-  - [ ] h. Standardize `{ success, data?, error? }`; 200 sync / 202 enqueued
-  - [ ] i. `check-name` minLength 1; drop `setupError` from public `setup-status`
-  - [ ] j. 429 on `RATE_LIMITED`; try/catch → 503 on auth-infra failure
+- [x] **FP-09 · Battle-race counters** (C6 · M · *after FP-07*) — skip matchup on missing entry result; clear stale phantom points; recompute counters; env-guarded integration test
+- [x] **FP-10 · Upsert correctness pack** (H5, H6 · S · *after FP-01*)
+  - [x] `entry-event-transfers` conflict update: `elementInPlayed` → `COALESCE(excluded, existing)`
+  - [x] `player-values.insertBatch` → `.onConflictDoNothing({ target: [elementId, changeDate] })` + return only inserted rows for cache/notify
+- [x] **FP-11 · Live bonus per match** (H7 · M) — rank combined match bucket (≤6 pts/match); DGW-safe pairing; finished multi-match seed-only; live multi-match full rank + keepMax
+- [x] **FP-12 · Cache writer bugs — shape-preserving** (H8, H9 · M · *after FP-06*)
+  - [x] `fixtures-cache.ts`: skip delete+rebuild of `FixturesByTeam:*` when `teamById` empty
+  - [x] Player-stats cache = latest-event-wins view: only write when `eventId` is current event; old-event syncs → DB only
+  - [x] Document both semantics + DGW one-fixture limitation in `redis-contract.md`
+- [x] **FP-13 · API hardening pack** (H1, H2, M1–M4, L1–L4 · L · *client-visible: announce error-envelope change*)
+  - [x] a. Generic 5xx message in prod; `getHttpStatusFromError` in global handler
+  - [x] b. Rate limit on POST/DELETE (trigger + sync routes), independent of `ENABLE_AUTH`
+  - [x] c. Deterministic job IDs for manual triggers (drop `Date.now()`)
+  - [x] d. Inline syncs → enqueue + 202 (`sync-all-gameweeks`, entity `/sync` routes)
+  - [x] e. `entry-sync` via queue / `mapWithConcurrency` cap
+  - [x] f. Mount better-auth under `/api/auth` (restore JSON 404 envelope)
+  - [x] g. `t.Numeric()` schemas; delete bare `parseInt`
+  - [x] h. Standardize `{ success, data?, error? }`; 200 sync / 202 enqueued
+  - [x] i. `check-name` minLength 1; drop `setupError` from public `setup-status`
+  - [x] j. 429 on `RATE_LIMITED`; try/catch → 503 on auth-infra failure
 - [ ] **FP-14 · Job safety pack** (H10, H11, M9–M14 · L · *alerting needs prod `TELEGRAM_*` envs*)
   - [ ] a. `entry-event-results-daily`: `isFPLSeason` + current-event guards
   - [ ] b. Watchdog checks active job/lock before recovering setups
@@ -84,10 +84,10 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
   - [x] `deploy.sh`: migrate before `up -d`; exit non-zero on migration failure
   - [x] Dockerfile: pin `oven/bun:1.3.3`; production-only `node_modules` stage
   - [x] `package.json`: `"packageManager": "bun@1.3.3"`
-- [ ] **FP-16 · Transaction coverage pack** (M5–M7 · M)
-  - [ ] `syncEventLives`: both upserts in one `db.transaction`
-  - [ ] `syncKnockoutForTournament`: four upserts in one transaction
-  - [ ] `upsertFromSummary`: `last_*` computed in SQL; delete read-modify-write
+- [x] **FP-16 · Transaction coverage pack** (M5–M7 · M)
+  - [x] `syncEventLives`: both upserts in one `db.transaction`
+  - [x] `syncKnockoutForTournament`: four upserts in one transaction
+  - [x] `upsertFromSummary`: `last_*` computed in SQL; delete read-modify-write
 
 ## P2 — Hardening & maintainability (~10 days)
 
@@ -136,4 +136,11 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
 | FP-08 | 5a53a87 (PR #10) | 2026-07-17 | — |
 | FP-15 | 8a0c80a (PR #17) | 2026-07-17 | PR #17 |
 | FP-06 | (PR #8) | 2026-07-17 | Codex P2s addressed: ops keys, FixturesByTeam current behavior, auto season cleanup |
-| FP-17 | a8034df | 2026-07-17 | PR #19 |
+| FP-07 | (PR #9) | 2026-07-17 | global structure lock; MV refresh waits on same scope (Codex P2) |
+| FP-09 | (PR #11) | 2026-07-17 | clear phantom points on skip; integration env guard |
+| FP-10 | (PR #12) | 2026-07-17 | COALESCE elementInPlayed; player-values DO NOTHING + return inserted |
+| FP-11 | (PR #13) | 2026-07-17 | per-match 3/2/1; DGW finished seed-only; live full rank + keepMax |
+| FP-12 | (PR #14) | 2026-07-17 | FixturesByTeam empty-teams guard; PlayerStat current-event-only write |
+| FP-13 | (PR #15) | 2026-07-17 | error envelope, rate limit, queue-first entry/entity syncs |
+| FP-16 | (PR #18) | 2026-07-17 | transaction coverage: event-lives, knockout, upsertFromSummary |
+| FP-17 | (PR #19) | 2026-07-17 | cache hygiene: TTL, resilient hash reads, season memo, battle-race batch |
