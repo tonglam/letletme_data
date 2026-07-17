@@ -3,6 +3,7 @@ import { describe, expect, it } from 'bun:test';
 import {
   resolveMutationScopes,
   tournamentSetupBackfillEventScopes,
+  tournamentSetupLifecycleScope,
   tournamentSetupRebuildScopes,
 } from '../../src/domain/mutation-scope';
 
@@ -37,7 +38,7 @@ describe('resolveMutationScopes', () => {
     expect(scopes).toEqual([]);
   });
 
-  it('exposes rebuild and per-event backfill scopes for setup phases', () => {
+  it('exposes rebuild, backfill, and lifecycle scopes for setup phases', () => {
     expect(tournamentSetupRebuildScopes(789)).toEqual([
       'tournament-structure:tournament:789',
       'tournament-structure:global',
@@ -46,6 +47,7 @@ describe('resolveMutationScopes', () => {
       'tournament-structure:event:33',
       'tournament-structure:global',
     ]);
+    expect(tournamentSetupLifecycleScope(789)).toBe('tournament-setup:tournament:789');
   });
 
   it('keeps tournament selection stats serialized with tournament event mutations', () => {

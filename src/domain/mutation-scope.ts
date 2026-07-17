@@ -38,6 +38,17 @@ export function tournamentSetupBackfillEventScopes(eventId: number): string[] {
   ];
 }
 
+/**
+ * Lightweight per-tournament setup lifecycle lock. Serializes concurrent setup
+ * jobs for the same tournament (force-requeue / concurrency>1) without holding
+ * tournament-structure:global during entry FPL or other slow phases.
+ */
+export function tournamentSetupLifecycleScope(tournamentId: number): string {
+  return Number.isFinite(tournamentId)
+    ? `tournament-setup:tournament:${tournamentId}`
+    : 'tournament-setup:all';
+}
+
 function baseQueueName(queueName: string): string {
   return queueName.replace(/-p[0-3]$/, '');
 }

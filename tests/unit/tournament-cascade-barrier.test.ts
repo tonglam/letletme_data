@@ -86,13 +86,13 @@ describe('cascade structure barrier (FP-07)', () => {
     await initCascadeStructureBarrier(cascadeId);
 
     await noteCascadeStructureJobComplete(cascadeId, 'tournament-points-race');
-    expect(await tryClaimCascadeRefreshEnqueue(cascadeId)).toBe(false);
+    expect(await tryClaimCascadeRefreshEnqueue(cascadeId)).toBe('not-pending');
 
     await noteCascadeStructureJobComplete(cascadeId, 'tournament-battle-race');
-    expect(await tryClaimCascadeRefreshEnqueue(cascadeId)).toBe(false);
+    expect(await tryClaimCascadeRefreshEnqueue(cascadeId)).toBe('not-pending');
 
     await noteCascadeStructureJobComplete(cascadeId, 'tournament-knockout');
-    expect(await tryClaimCascadeRefreshEnqueue(cascadeId)).toBe(true);
+    expect(await tryClaimCascadeRefreshEnqueue(cascadeId)).toBe('claimed');
   });
 
   it('is idempotent for the same jobKey (retry must not double-DECR)', async () => {
@@ -103,39 +103,37 @@ describe('cascade structure barrier (FP-07)', () => {
     await noteCascadeStructureJobComplete(cascadeId, 'tournament-points-race'); // retry
 
     await noteCascadeStructureJobComplete(cascadeId, 'tournament-battle-race');
-    expect(await tryClaimCascadeRefreshEnqueue(cascadeId)).toBe(false);
+    expect(await tryClaimCascadeRefreshEnqueue(cascadeId)).toBe('not-pending');
 
     await noteCascadeStructureJobComplete(cascadeId, 'tournament-knockout');
-    expect(await tryClaimCascadeRefreshEnqueue(cascadeId)).toBe(true);
+    expect(await tryClaimCascadeRefreshEnqueue(cascadeId)).toBe('claimed');
   });
 
-  it('preserves refresh enqueue across failed queue.add then retry', async () => {
+  it('reports lease-busy so callers can retry instead of silently completing', async () => {
     const cascadeId = createCascadeId(35);
     await initCascadeStructureBarrier(cascadeId);
     await noteCascadeStructureJobComplete(cascadeId, 'tournament-points-race');
     await noteCascadeStructureJobComplete(cascadeId, 'tournament-battle-race');
     await noteCascadeStructureJobComplete(cascadeId, 'tournament-knockout');
 
-    expect(await tryClaimCascadeRefreshEnqueue(cascadeId)).toBe(true);
+    expect(await tryClaimCascadeRefreshEnqueue(cascadeId)).toBe('claimed');
+    // Second claim while lease held (simulates concurrent / retried worker)
+    expect(await tryClaimCascadeRefreshEnqueue(cascadeId)).toBe('lease-busy');
+
     await releaseCascadeRefreshEnqueueClaim(cascadeId);
-
-    expect(await tryClaimCascadeRefreshEnqueue(cascadeId)).toBe(true);
+    expect(await tryClaimCascadeRefreshEnqueue(cascadeId)).toBe('claimed');
     await markCascadeRefreshEnqueued(cascadeId);
-
-    expect(await tryClaimCascadeRefreshEnqueue(cascadeId)).toBe(false);
+    expect(await tryClaimCascadeRefreshEnqueue(cascadeId)).toBe('already-enqueued');
   });
 
   it('atomically claims slot and decrements (Lua path — no stranded SET NX)', async () => {
     const cascadeId = createCascadeId(36);
     await initCascadeStructureBarrier(cascadeId);
 
-    // One atomic eval per job — if it returns, remaining is consistent.
     await noteCascadeStructureJobComplete(cascadeId, 'tournament-points-race');
     await noteCascadeStructureJobComplete(cascadeId, 'tournament-battle-race');
     await noteCascadeStructureJobComplete(cascadeId, 'tournament-knockout');
 
-    // Pending must be set even though we never issued a separate SET pending
-    // outside the script.
-    expect(await tryClaimCascadeRefreshEnqueue(cascadeId)).toBe(true);
+    expect(await tryClaimCascadeRefreshEnqueue(cascadeId)).toBe('claimed');
   });
 });

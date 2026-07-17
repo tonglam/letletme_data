@@ -1,8 +1,5 @@
 import { getDbClient } from '../db/singleton';
-import {
-  tournamentSetupBackfillEventScopes,
-  tournamentSetupRebuildScopes,
-} from '../domain/mutation-scope';
+import { tournamentSetupRebuildScopes } from '../domain/mutation-scope';
 import {
   buildKnockoutRows,
   type TournamentBackfillWindow,
@@ -309,17 +306,12 @@ export async function runTournamentAuditAndFixup(
     warnings.push(...backfillIssues);
   } else {
     for (const eventId of audit.rerunEventIds) {
-      // Direct event re-runs (not via backfillTournamentHistory) need the same
-      // per-event structure lock as cascade structure writers.
-      const rerunIssues = await withMutationConflictGuard(
-        {
-          queueName: 'tournament-setup',
-          jobName: 'tournament-setup',
-          tournamentId: tournament.id,
-          eventId,
-          scopes: tournamentSetupBackfillEventScopes(eventId),
-        },
-        () => runTournamentEventBackfill(tournament.id, tournament, entryIds, eventId),
+      // Structure locks live inside runTournamentEventBackfill (points/knockout only).
+      const rerunIssues = await runTournamentEventBackfill(
+        tournament.id,
+        tournament,
+        entryIds,
+        eventId,
       );
       warnings.push(...rerunIssues);
     }

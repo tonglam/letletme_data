@@ -119,14 +119,21 @@ async function enqueueTournamentCascade(eventId: number) {
 /**
  * Enqueue MV refresh once the structure barrier is complete.
  * Durable pending flag + lease: survives crashes after slot claim / failed queue.add.
+ * If the lease is held by a dead worker, throw so BullMQ retries (Codex P2).
  */
 async function maybeEnqueueCascadeMaterializedRefresh(
   eventId: number,
   cascadeId: string,
   lastJob: string,
 ): Promise<void> {
-  if (!(await tryClaimCascadeRefreshEnqueue(cascadeId))) {
+  const claim = await tryClaimCascadeRefreshEnqueue(cascadeId);
+  if (claim === 'already-enqueued' || claim === 'not-pending') {
     return;
+  }
+  if (claim === 'lease-busy') {
+    // Do not complete successfully behind a stale lease — retry until the
+    // lease expires or the holder finishes markCascadeRefreshEnqueued.
+    throw new Error(`Cascade MV refresh enqueue lease busy for cascadeId=${cascadeId}; will retry`);
   }
   try {
     await enqueueTournamentMaterializedViewsRefresh(eventId, 'cascade');

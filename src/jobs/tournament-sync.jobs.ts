@@ -138,21 +138,36 @@ export async function noteCascadeStructureJobComplete(
 }
 
 /**
- * Claim the right to enqueue the cascade MV refresh.
- * True only when structure barrier is complete (pending) and refresh has not
- * been successfully enqueued yet. Concurrent callers: only one gets the lease.
- * On enqueue failure, call `releaseCascadeRefreshEnqueueClaim` so a retry can re-claim.
+ * Result of trying to claim the MV refresh enqueue lease.
+ * - claimed: this caller owns the lease and should enqueue
+ * - already-enqueued: durable done flag set; no work
+ * - not-pending: barrier not finished yet
+ * - lease-busy: another worker holds the lease (may be dead mid-enqueue);
+ *   caller should throw so BullMQ retries instead of silently succeeding
  */
-export async function tryClaimCascadeRefreshEnqueue(cascadeId: string): Promise<boolean> {
+export type CascadeRefreshClaimResult =
+  | 'claimed'
+  | 'already-enqueued'
+  | 'not-pending'
+  | 'lease-busy';
+
+/**
+ * Claim the right to enqueue the cascade MV refresh.
+ * Concurrent callers: only one gets the lease. On enqueue failure, call
+ * `releaseCascadeRefreshEnqueueClaim` so a retry can re-claim.
+ */
+export async function tryClaimCascadeRefreshEnqueue(
+  cascadeId: string,
+): Promise<CascadeRefreshClaimResult> {
   const redis = await redisSingleton.getClient();
   if (await redis.exists(cascadeRefreshDoneKey(cascadeId))) {
-    return false;
+    return 'already-enqueued';
   }
   if (!(await redis.exists(cascadeRefreshPendingKey(cascadeId)))) {
-    return false;
+    return 'not-pending';
   }
   const lease = await redis.set(cascadeRefreshLeaseKey(cascadeId), '1', 'EX', 120, 'NX');
-  return lease === 'OK';
+  return lease === 'OK' ? 'claimed' : 'lease-busy';
 }
 
 /** Mark MV refresh as successfully enqueued (durable; retries will no-op). */
