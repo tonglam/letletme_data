@@ -387,7 +387,9 @@ ALTER TABLE "players" ALTER COLUMN "created_at" SET DATA TYPE timestamp with tim
 ALTER TABLE "players" ALTER COLUMN "created_at" SET DEFAULT now();--> statement-breakpoint
 ALTER TABLE "players" ALTER COLUMN "created_at" SET NOT NULL;--> statement-breakpoint
 ALTER TABLE "teams" ALTER COLUMN "position" SET DEFAULT 0;--> statement-breakpoint
-ALTER TABLE "teams" ALTER COLUMN "unavailable" SET DATA TYPE integer;--> statement-breakpoint
+ALTER TABLE "teams" ALTER COLUMN "unavailable" DROP DEFAULT;--> statement-breakpoint
+ALTER TABLE "teams" ALTER COLUMN "unavailable" SET DATA TYPE integer USING (CASE WHEN "unavailable" THEN 1 ELSE 0 END);--> statement-breakpoint
+ALTER TABLE "teams" ALTER COLUMN "unavailable" SET DEFAULT 0;--> statement-breakpoint
 ALTER TABLE "teams" ALTER COLUMN "strength_overall_home" SET DEFAULT 1000;--> statement-breakpoint
 ALTER TABLE "teams" ALTER COLUMN "strength_overall_away" SET DEFAULT 1000;--> statement-breakpoint
 ALTER TABLE "teams" ALTER COLUMN "strength_attack_home" SET DEFAULT 1000;--> statement-breakpoint

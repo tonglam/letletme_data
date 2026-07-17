@@ -17,14 +17,17 @@ export type RateLimitDecision = { allowed: true } | { allowed: false; retryAfter
 
 type Bucket = { windowStart: number; count: number };
 
-const MAX_TRACKED_KEYS = 10_000;
+const DEFAULT_MAX_TRACKED_KEYS = 10_000;
 
 export function createFixedWindowRateLimiter(options: {
   maxRequests: number;
   windowMs: number;
   now?: () => number;
+  /** Hard cap on distinct keys (default 10_000). Overridable for tests. */
+  maxTrackedKeys?: number;
 }) {
   const { maxRequests, windowMs } = options;
+  const maxTrackedKeys = options.maxTrackedKeys ?? DEFAULT_MAX_TRACKED_KEYS;
   const now = options.now ?? Date.now;
   const buckets = new Map<string, Bucket>();
 
@@ -39,12 +42,17 @@ export function createFixedWindowRateLimiter(options: {
   return {
     check(key: string): RateLimitDecision {
       const timestamp = now();
-      if (buckets.size >= MAX_TRACKED_KEYS) {
+      if (buckets.size >= maxTrackedKeys) {
         sweepExpired(timestamp);
       }
 
       const bucket = buckets.get(key);
       if (!bucket || timestamp - bucket.windowStart >= windowMs) {
+        // Cap is hard: if every tracked key is still live, refuse new keys
+        // rather than letting a burst of unique client IPs grow the map.
+        if (!buckets.has(key) && buckets.size >= maxTrackedKeys) {
+          return { allowed: false, retryAfterSeconds: 1 };
+        }
         buckets.set(key, { windowStart: timestamp, count: 1 });
         return { allowed: true };
       }

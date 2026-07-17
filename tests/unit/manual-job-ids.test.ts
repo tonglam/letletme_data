@@ -118,6 +118,21 @@ describe('entry-sync entry-list job IDs', () => {
     expect(noEvent.id).not.toBe(base.id as string);
   });
 
+  test('retryCount distinguishes delayed full-batch retries from the active job', async () => {
+    const original = await enqueueEntryPicksSyncJob('api', {
+      entryIds: [1, 2],
+      eventId: 20,
+    });
+    const retry = await enqueueEntryPicksSyncJob('api', {
+      entryIds: [1, 2],
+      eventId: 20,
+      retryCount: 1,
+    });
+
+    expect(retry.id).not.toBe(original.id as string);
+    expect(retry.id).toMatch(/^entry-picks-entry-list-[0-9a-f]{8}$/);
+  });
+
   test('cron chunk jobs keep time-based per-cycle IDs', async () => {
     const job = await enqueueEntryPicksSyncJob('cron', { chunkOffset: 0 });
 

@@ -22,9 +22,15 @@ export interface EntrySyncJobOptions {
   eventId?: number;
 }
 
-function hashEntryListKey(entryIds: readonly number[], eventId?: number): string {
+function hashEntryListKey(
+  entryIds: readonly number[],
+  eventId?: number,
+  retryCount?: number,
+): string {
   const sorted = [...entryIds].sort((a, b) => a - b).join(',');
-  return stableHash(`${sorted}|e${eventId ?? ''}`);
+  // Include retryCount so delayed full-batch retries do not collide with the
+  // still-active original jobId (BullMQ dedupes identical jobIds).
+  return stableHash(`${sorted}|e${eventId ?? ''}|r${retryCount ?? 0}`);
 }
 
 function sanitizePositiveInt(value: number | undefined, fallback: number) {
@@ -66,7 +72,7 @@ async function enqueueEntrySyncJob(
     // completed jobs are retained.
     const isEntryList = options.entryIds !== undefined;
     const defaultJobId = isEntryList
-      ? `${jobName}-entry-list-${hashEntryListKey(options.entryIds ?? [], options.eventId)}`
+      ? `${jobName}-entry-list-${hashEntryListKey(options.entryIds ?? [], options.eventId, options.retryCount)}`
       : `${jobName}-chunk-${chunkKey}-${Date.now()}`;
     const jobId = options.jobId ?? defaultJobId;
 

@@ -47,3 +47,12 @@ services:
     volumes:
       - ./log:/app/logs
     restart: unless-stopped
+    healthcheck:
+      # worker.ts touches /tmp/worker-heartbeat every 30s; a stale file means
+      # the event loop is hung even though the process still runs. find exits
+      # 0 without matches, so assert on non-empty output.
+      test: ['CMD-SHELL', 'test -n "$$(find /tmp/worker-heartbeat -mmin -2 2>/dev/null)"']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s

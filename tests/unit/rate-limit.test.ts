@@ -66,6 +66,32 @@ describe('createFixedWindowRateLimiter', () => {
       expect(blocked.retryAfterSeconds).toBe(1);
     }
   });
+
+  test('does not grow beyond maxTrackedKeys when all buckets are live', () => {
+    let now = 1_000_000;
+    const limiter = createFixedWindowRateLimiter({
+      maxRequests: 5,
+      windowMs: 60_000,
+      maxTrackedKeys: 3,
+      now: () => now,
+    });
+
+    expect(limiter.check('ip-1').allowed).toBe(true);
+    expect(limiter.check('ip-2').allowed).toBe(true);
+    expect(limiter.check('ip-3').allowed).toBe(true);
+    expect(limiter.trackedKeys()).toBe(3);
+
+    // All live — new unique key refused, map size unchanged
+    expect(limiter.check('ip-4').allowed).toBe(false);
+    expect(limiter.trackedKeys()).toBe(3);
+
+    // Existing keys still served
+    expect(limiter.check('ip-1').allowed).toBe(true);
+
+    // After expiry, sweep frees room for a new key
+    now += 61_000;
+    expect(limiter.check('ip-4').allowed).toBe(true);
+  });
 });
 
 describe('getClientIp', () => {
