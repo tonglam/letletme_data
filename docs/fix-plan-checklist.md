@@ -53,10 +53,10 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
   - [ ] `entry-event-transfers` conflict update: `elementInPlayed` → `COALESCE(excluded, existing)`
   - [ ] `player-values.insertBatch` → `.onConflictDoNothing({ target: [elementId, changeDate] })`
 - [ ] **FP-11 · Live bonus per match** (H7 · M) — rank combined match bucket (≤6 pts/match); fix DGW `buildPlayingMap`; tests for both
-- [ ] **FP-12 · Cache writer bugs — shape-preserving** (H8, H9 · M · *after FP-06*)
-  - [ ] `fixtures-cache.ts:177-189`: skip delete+rebuild of `FixturesByTeam:*` when `teamById` empty
-  - [ ] Player-stats cache = latest-event-wins view: only write when `eventId` is current event; old-event syncs → DB only
-  - [ ] Document both semantics + DGW one-fixture limitation in `redis-contract.md`
+- [x] **FP-12 · Cache writer bugs — shape-preserving** (H8, H9 · M · *after FP-06*)
+  - [x] `fixtures-cache.ts:177-189`: skip delete+rebuild of `FixturesByTeam:*` when `teamById` empty
+  - [x] Player-stats cache = latest-event-wins view: only write when `eventId` is current event; old-event syncs → DB only
+  - [x] Document both semantics + DGW one-fixture limitation in `redis-contract.md`
 - [ ] **FP-13 · API hardening pack** (H1, H2, M1–M4, L1–L4 · L · *client-visible: announce error-envelope change*)
   - [ ] a. Generic 5xx message in prod; `getHttpStatusFromError` in global handler
   - [ ] b. Rate limit on POST/DELETE (trigger + sync routes), independent of `ENABLE_AUTH`

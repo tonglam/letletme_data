@@ -16,6 +16,7 @@ import {
   hasGoodValue,
   isDifferentialPick,
   isRegularStarter,
+  shouldWritePlayerStatsView,
   sortPlayerStatsByPoints,
   sortPlayerStatsByPointsPerMillion,
   sortPlayerStatsByValue,
@@ -720,5 +721,14 @@ describe('Player Stats Unit Tests', () => {
       expect(getPointsPerMillion(premiumMid)).toBeCloseTo(12.5, 1);
       expect(hasGoodValue(premiumMid, 10)).toBe(true);
     });
+  });
+});
+
+describe('shouldWritePlayerStatsView (FP-12 / H9)', () => {
+  test('only the current event may write the latest-event-wins view', () => {
+    expect(shouldWritePlayerStatsView(10, 10)).toBe(true);
+    expect(shouldWritePlayerStatsView(9, 10)).toBe(false);
+    expect(shouldWritePlayerStatsView(11, 10)).toBe(false);
+    expect(shouldWritePlayerStatsView(10, null)).toBe(false);
   });
 });

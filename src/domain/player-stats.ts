@@ -217,6 +217,19 @@ export function hasGoodValue(playerStat: PlayerStat, threshold: number = 10): bo
 }
 
 /**
+ * PlayerStat:{season} is a latest-event-wins cache view consumed externally
+ * (H9): every write wholesale-replaces the hash. Only a sync for the
+ * current event may write it — older-event syncs persist to the DB only,
+ * otherwise a backfill would clobber the current view with stale data.
+ */
+export function shouldWritePlayerStatsView(
+  eventId: EventId,
+  currentEventId: EventId | null,
+): boolean {
+  return currentEventId !== null && eventId === currentEventId;
+}
+
+/**
  * Get attacking returns (goals + assists)
  */
 export function getAttackingReturns(playerStat: PlayerStat): number | null {

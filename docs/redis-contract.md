@@ -61,11 +61,16 @@ season comes from `Season:active` (§2) — writers resolve it at write time via
 `PlayerStat:{season}` is a **current view**, not an archive: each stats sync
 replaces the *entire* hash (`DEL` + `HSET`) with the stats of the event being
 synced. Consumers must read it as "stats as of the latest synced event", never
-as per-event history. (FP-12 adds a writer guard so backfills of old events
-stop clobbering the view; the read-side semantics are unchanged.)
+as per-event history.
+
+Writer rule (FP-12): only a sync for the **current event** may write this view
+(enforced by `shouldWritePlayerStatsView` in `player-stats.service.ts`);
+syncs of older events persist to the DB only, so a backfill can never clobber
+the current view.
 
 The misleadingly-named internal helper `clearByEvent(eventId)` also clears the
-**whole** hash — it is not per-event. Same guard item.
+**whole** hash — it is not per-event (documented at the method; the argument
+is ignored).
 
 ## 5. `FixturesByTeam:{season}:{teamId}` — one fixture per (team, event)
 
