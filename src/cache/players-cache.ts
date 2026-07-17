@@ -1,6 +1,7 @@
 import { CacheError } from '../utils/errors';
 import { logDebug, logError } from '../utils/logger';
 import { finalizeSeasonCacheWrite, getActiveCacheSeason } from './cache-season';
+import { parseHashValues } from './hash-read';
 import { redisSingleton } from './singleton';
 
 import type { Player } from '../types';
@@ -81,7 +82,7 @@ const createPlayerHashCache = () => {
           return null;
         }
 
-        const players = Object.values(hash).map((value) => JSON.parse(value));
+        const players = parseHashValues<Player>(hash, { key });
         logDebug('Players cache hit', {
           key,
           count: players.length,

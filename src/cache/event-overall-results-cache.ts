@@ -1,4 +1,5 @@
 import { getActiveCacheSeason } from './cache-season';
+import { parseHashValues } from './hash-read';
 import { logDebug, logError, logInfo } from '../utils/logger';
 import { redisSingleton } from './singleton';
 
@@ -20,9 +21,7 @@ export const eventOverallResultCache = {
         return null;
       }
 
-      const results = Object.values(hash).map(
-        (value) => JSON.parse(value) as EventOverallResultData,
-      );
+      const results = parseHashValues<EventOverallResultData>(hash, { key });
       results.sort((a, b) => a.event - b.event);
       logDebug('Event overall result cache hit', { count: results.length });
       return results;

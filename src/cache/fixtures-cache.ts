@@ -2,6 +2,7 @@ import type { Redis } from 'ioredis';
 
 import { logDebug, logError } from '../utils/logger';
 import { finalizeSeasonCacheWrite, getActiveCacheSeason } from './cache-season';
+import { parseHashValues } from './hash-read';
 import { redisSingleton } from './singleton';
 
 import type { TeamFixture } from '../domain/fixtures';
@@ -300,7 +301,7 @@ export const fixturesCache = {
         return null;
       }
 
-      const teamFixtures = Object.values(hash).map((v) => JSON.parse(v) as TeamFixture);
+      const teamFixtures = parseHashValues<TeamFixture>(hash, { key, teamId, season });
       logDebug('Fixtures cache hit by team', { teamId, season, count: teamFixtures.length });
       return teamFixtures;
     } catch (error) {

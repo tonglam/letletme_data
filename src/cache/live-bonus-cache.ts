@@ -1,4 +1,5 @@
 import { getActiveCacheSeason } from './cache-season';
+import { parseHashEntries } from './hash-read';
 import { logDebug, logError, logInfo } from '../utils/logger';
 import { redisSingleton } from './singleton';
 
@@ -52,8 +53,12 @@ export const liveBonusCache = {
       }
 
       const byTeam: Record<string, Record<string, number>> = {};
-      for (const [teamId, value] of Object.entries(hash)) {
-        byTeam[teamId] = JSON.parse(value);
+      for (const [teamId, value] of parseHashEntries<Record<string, number>>(hash, {
+        key,
+        eventId,
+        season,
+      })) {
+        byTeam[teamId] = value;
       }
 
       logDebug('Live bonus cache hit', { eventId, season, teams: Object.keys(byTeam).length });

@@ -1,4 +1,5 @@
 import { getActiveCacheSeason } from './cache-season';
+import { parseHashValues } from './hash-read';
 import { logDebug, logError, logInfo } from '../utils/logger';
 import { redisSingleton } from './singleton';
 
@@ -21,7 +22,7 @@ export const eventLiveExplainCache = {
         return null;
       }
 
-      const explains = Object.values(hash).map((value) => JSON.parse(value) as EventLiveExplain);
+      const explains = parseHashValues<EventLiveExplain>(hash, { key, eventId });
       logDebug('Event live explain cache hit', { eventId, count: explains.length });
       return explains;
     } catch (error) {

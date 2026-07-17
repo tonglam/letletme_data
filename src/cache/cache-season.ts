@@ -8,6 +8,44 @@ import type { Event, Fixture, RawFPLEvent, RawFPLFixture } from '../types';
 
 export const ACTIVE_SEASON_KEY = 'Season:active';
 
+export const DEFAULT_ACTIVE_SEASON_MEMO_TTL_MS = 5_000;
+
+// In-process memo for Season:active. Every season-scoped cache read resolves
+// the active season first, making this the hottest read in the system; a ~5s
+// memo halves those round trips while a rollover (once a year) still
+// propagates within seconds. Only valid Redis values are memoized — read
+// failures keep failing fast per FP-03. Tests may override the TTL via
+// ACTIVE_SEASON_MEMO_TTL_MS and reset via resetActiveSeasonMemo().
+let activeSeasonMemo: { season: string; expiresAt: number } | null = null;
+
+function getActiveSeasonMemoTtlMs(): number {
+  const raw = process.env.ACTIVE_SEASON_MEMO_TTL_MS;
+  if (raw !== undefined) {
+    const parsed = Number.parseInt(raw, 10);
+    if (Number.isFinite(parsed) && parsed >= 0) {
+      return parsed;
+    }
+  }
+  return DEFAULT_ACTIVE_SEASON_MEMO_TTL_MS;
+}
+
+function memoizeActiveSeason(season: string): void {
+  activeSeasonMemo = { season, expiresAt: Date.now() + getActiveSeasonMemoTtlMs() };
+}
+
+function readActiveSeasonMemo(): string | null {
+  if (activeSeasonMemo && activeSeasonMemo.expiresAt > Date.now()) {
+    return activeSeasonMemo.season;
+  }
+  activeSeasonMemo = null;
+  return null;
+}
+
+/** Test hook: drop the in-process memo so each test starts cold. */
+export function resetActiveSeasonMemo(): void {
+  activeSeasonMemo = null;
+}
+
 const SEASON_CACHE_PREFIXES = ['Event', 'Team', 'Player', 'Phase', 'Fixtures', 'FixturesByTeam'];
 
 type EventLike = Pick<RawFPLEvent, 'id' | 'deadline_time'> | Pick<Event, 'id' | 'deadlineTime'>;
@@ -98,10 +136,16 @@ export function deriveSeasonFromFixtures(fixtures: readonly FixtureLike[]): stri
 }
 
 export async function getActiveCacheSeason(): Promise<string> {
+  const memoized = readActiveSeasonMemo();
+  if (memoized) {
+    return memoized;
+  }
+
   try {
     const redis = await redisSingleton.getClient();
     const activeSeason = await redis.get(ACTIVE_SEASON_KEY);
     if (isValidSeason(activeSeason)) {
+      memoizeActiveSeason(activeSeason);
       return activeSeason;
     }
   } catch (error) {
@@ -123,10 +167,16 @@ export async function setActiveCacheSeason(season: string): Promise<boolean> {
       candidate: season,
       current,
     });
+    // Re-arm the memo from Redis truth so a skipped update still converges
+    // the memo (e.g. another writer advanced the key while our memo was cold).
+    if (isValidSeason(current)) {
+      memoizeActiveSeason(current);
+    }
     return false;
   }
 
   await redis.set(ACTIVE_SEASON_KEY, season);
+  memoizeActiveSeason(season);
   logInfo('Active cache season updated', { season, previous: current });
   return true;
 }

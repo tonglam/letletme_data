@@ -38,17 +38,22 @@ export const createCacheOperations = (): CacheOperations => {
       }
     },
 
-    set: async <T>(
-      key: string,
-      value: T,
-      ttl: number = DEFAULT_CACHE_CONFIG.ttl,
-    ): Promise<void> => {
+    /**
+     * Write a cache value. Entity caches are refreshed-on-write and never
+     * expire, so a missing/non-positive ttl stores without expiry (SET);
+     * short-lived coordination keys pass an explicit positive ttl (SETEX).
+     */
+    set: async <T>(key: string, value: T, ttl?: number): Promise<void> => {
       try {
         const redis = await redisSingleton.getClient();
         const fullKey = getKey(key);
         const serialized = JSON.stringify(value);
 
-        await redis.setex(fullKey, ttl, serialized);
+        if (ttl !== undefined && ttl > 0) {
+          await redis.setex(fullKey, ttl, serialized);
+        } else {
+          await redis.set(fullKey, serialized);
+        }
         logDebug('Cache set', { key: fullKey, ttl });
       } catch (error) {
         logError('Cache set error', error, { key, ttl });

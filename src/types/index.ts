@@ -503,6 +503,5 @@ export interface APIError extends Error {
 
 // Cache types
 export interface CacheConfig {
-  ttl: number;
   prefix: string;
 }
