@@ -67,9 +67,10 @@ live Redis state and belong in this inventory.
 
 ## 4. Player values (date-scoped, historical)
 
-| Key pattern | Type | Hash field | Value | Retention |
+| Key pattern | Type | Hash field | Value | Retention / ownership |
 |---|---|---|---|---|
-| `PlayerValue:{YYYYMMDD}` | hash | `elementId` | Domain `PlayerValue` JSON | **No automatic deletion.** One key per price-change date accumulates forever. Retention requires consumer sign-off (manual runbook only). |
+| `PlayerValue:{YYYYMMDD}` | hash | `elementId` | Domain `PlayerValue` JSON | **Written by this service.** No automatic retention job — one key per price-change date accumulates forever. Broader retention requires consumer sign-off (manual runbook only). |
+| `PlayerValueMissing:{YYYYMMDD}` | *(consumer-owned)* | — | *(consumer-defined)* | **Not written by this service** — an external consumer creates it. **This service deletes it** on every `playerValuesCache.set` / `clear` for that date (`src/cache/player-values-cache.ts`), defensively, whenever the real `PlayerValue:{date}` hash is refreshed or cleared. Freeze/sign-off rules still apply: do not rename or repurpose the key; the delete-on-refresh behavior is part of the contract. |
 
 ## 5. `PlayerStat:{season}` — latest-event-wins view (important)
 
@@ -159,7 +160,8 @@ prior-season `Event:*`, `Team:*`, `Player:*`, `Phase:*`, `Fixtures*`, and
 Examples that **do not** go through the prefix cleanup above (and must not be
 assumed gone after rollover):
 
-- `PlayerValue:{YYYYMMDD}` (explicit no-auto-delete policy)
+- `PlayerValue:{YYYYMMDD}` (explicit no-auto-delete / retention policy; still deleted only via explicit `clear` or future runbook)
+- `PlayerValueMissing:{YYYYMMDD}` (consumer-owned; this service only DELs it when refreshing/clearing that date’s `PlayerValue` — see §4)
 - `EntryInfo:{season}`, live hashes (`EventLive*`, `LiveFixture`, `LiveBonus`),
   `EventOverallResult`, `event:current`
 - Ops markers (`LaunchNotification:*`, `letletme:entry-info-sync:*`)
