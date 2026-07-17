@@ -136,4 +136,4 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
 | FP-08 | 5a53a87 (PR #10) | 2026-07-17 | — |
 | FP-15 | 8a0c80a (PR #17) | 2026-07-17 | PR #17 |
 | FP-06 | (PR #8) | 2026-07-17 | Codex P2s addressed: ops keys, FixturesByTeam current behavior, auto season cleanup |
-| FP-18 | 8a6fcda | 2026-07-17 | PR TBD |
+| FP-18 | 8a6fcda | 2026-07-17 | PR #20 |
