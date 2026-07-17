@@ -31,13 +31,17 @@ function cascadeBarrierKey(cascadeId: string): string {
   return `tournament-cascade:structure-remaining:${cascadeId}`;
 }
 
+function cascadeSlotKey(cascadeId: string, jobKey: string): string {
+  return `tournament-cascade:structure-done:${cascadeId}:${jobKey}`;
+}
+
 export function createCascadeId(eventId: number): string {
   return `${eventId}-${Date.now()}`;
 }
 
 /**
  * Initialize the structure-completion barrier for one cascade fan-out.
- * Each of points/battle/knockout decrements on success; last one enqueues MV refresh.
+ * Each of points/battle/knockout claims one slot on success; last one enqueues MV refresh.
  */
 export async function initCascadeStructureBarrier(cascadeId: string): Promise<void> {
   const redis = await redisSingleton.getClient();
@@ -50,22 +54,40 @@ export async function initCascadeStructureBarrier(cascadeId: string): Promise<vo
 }
 
 /**
- * Called after a cascade structure job succeeds. Returns true when this call
- * was the last remaining structure job (caller should enqueue MV refresh).
+ * Record that one structure barrier participant finished.
+ *
+ * `jobKey` must be stable per logical participant (e.g. job name, or
+ * `enqueue-failed:tournament-points-race`). Uses SET NX so retries of the same
+ * BullMQ job cannot double-DECR and release the barrier early (Codex P1).
+ *
+ * Returns true only when this call was the first claim for `jobKey` **and**
+ * it was the last remaining structure slot (caller should enqueue MV refresh).
  */
-export async function noteCascadeStructureJobComplete(cascadeId: string): Promise<boolean> {
+export async function noteCascadeStructureJobComplete(
+  cascadeId: string,
+  jobKey: string,
+): Promise<boolean> {
   const redis = await redisSingleton.getClient();
-  const key = cascadeBarrierKey(cascadeId);
-  const remaining = await redis.decr(key);
+  const slotKey = cascadeSlotKey(cascadeId, jobKey);
+  const claimed = await redis.set(slotKey, '1', 'EX', CASCADE_BARRIER_TTL_SECONDS, 'NX');
+  if (claimed !== 'OK') {
+    logInfo('Cascade structure barrier slot already claimed (idempotent skip)', {
+      cascadeId,
+      jobKey,
+    });
+    return false;
+  }
+
+  const remaining = await redis.decr(cascadeBarrierKey(cascadeId));
   if (remaining === 0) {
-    await redis.del(key);
+    await redis.del(cascadeBarrierKey(cascadeId));
     return true;
   }
-  // Negative means double-complete or missing init — do not enqueue again.
   if (remaining < 0) {
-    await redis.del(key);
+    await redis.del(cascadeBarrierKey(cascadeId));
     logError('Cascade structure barrier went negative; skipping MV enqueue', undefined, {
       cascadeId,
+      jobKey,
       remaining,
     });
   }

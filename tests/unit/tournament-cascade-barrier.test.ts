@@ -5,8 +5,17 @@ const store = new Map<string, string>();
 mock.module('../../src/cache/singleton', () => ({
   redisSingleton: {
     getClient: async () => ({
-      set: async (key: string, value: string) => {
-        store.set(key, value);
+      set: async (
+        key: string,
+        value: string,
+        ...args: Array<string | number>
+      ): Promise<string | null> => {
+        // Support SET key value EX ttl NX
+        const nx = args.includes('NX');
+        if (nx && store.has(key)) {
+          return null;
+        }
+        store.set(key, String(value));
         return 'OK';
       },
       decr: async (key: string) => {
@@ -40,10 +49,21 @@ describe('cascade structure barrier (FP-07)', () => {
 
     await initCascadeStructureBarrier(cascadeId);
 
-    expect(await noteCascadeStructureJobComplete(cascadeId)).toBe(false);
-    expect(await noteCascadeStructureJobComplete(cascadeId)).toBe(false);
-    expect(await noteCascadeStructureJobComplete(cascadeId)).toBe(true);
-    // Extra completes must not re-trigger
-    expect(await noteCascadeStructureJobComplete(cascadeId)).toBe(false);
+    expect(await noteCascadeStructureJobComplete(cascadeId, 'tournament-points-race')).toBe(false);
+    expect(await noteCascadeStructureJobComplete(cascadeId, 'tournament-battle-race')).toBe(false);
+    expect(await noteCascadeStructureJobComplete(cascadeId, 'tournament-knockout')).toBe(true);
+  });
+
+  it('is idempotent for the same jobKey (retry must not double-DECR)', async () => {
+    const cascadeId = createCascadeId(34);
+    await initCascadeStructureBarrier(cascadeId);
+
+    expect(await noteCascadeStructureJobComplete(cascadeId, 'tournament-points-race')).toBe(false);
+    // Simulated BullMQ retry of the same job after crash post-success
+    expect(await noteCascadeStructureJobComplete(cascadeId, 'tournament-points-race')).toBe(false);
+
+    expect(await noteCascadeStructureJobComplete(cascadeId, 'tournament-battle-race')).toBe(false);
+    // Still need knockout — retry of points must not have released early
+    expect(await noteCascadeStructureJobComplete(cascadeId, 'tournament-knockout')).toBe(true);
   });
 });

@@ -94,12 +94,20 @@ async function enqueueTournamentCascade(eventId: number) {
     });
 
     // If a structure job failed to enqueue, the barrier would never reach 0.
-    // Decrement for each failed enqueue so a partial cascade still refreshes.
-    const structureEnqueueFailed = results
-      .slice(0, 3)
-      .filter((r) => r.status === 'rejected').length;
-    for (let i = 0; i < structureEnqueueFailed; i++) {
-      const shouldRefresh = await noteCascadeStructureJobComplete(cascadeId);
+    // Claim a stable enqueue-failed slot per job so a partial cascade still refreshes.
+    const structureJobNames = [
+      TOURNAMENT_JOBS.POINTS_RACE,
+      TOURNAMENT_JOBS.BATTLE_RACE,
+      TOURNAMENT_JOBS.KNOCKOUT,
+    ];
+    for (let i = 0; i < 3; i++) {
+      if (results[i].status !== 'rejected') {
+        continue;
+      }
+      const shouldRefresh = await noteCascadeStructureJobComplete(
+        cascadeId,
+        `enqueue-failed:${structureJobNames[i]}`,
+      );
       if (shouldRefresh) {
         await enqueueTournamentMaterializedViewsRefresh(eventId, 'cascade');
         logInfo('Enqueued tournament materialized views refresh after structure enqueue gaps', {
@@ -123,7 +131,8 @@ async function afterCascadeStructureJob(
   if (!cascadeId) {
     return;
   }
-  const shouldRefresh = await noteCascadeStructureJobComplete(cascadeId);
+  // jobName is the stable barrier slot — retries of the same job no-op.
+  const shouldRefresh = await noteCascadeStructureJobComplete(cascadeId, jobName);
   if (!shouldRefresh) {
     return;
   }
