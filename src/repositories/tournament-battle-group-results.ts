@@ -1,4 +1,4 @@
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, gte, lte, sql } from 'drizzle-orm';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 
 import {
@@ -45,6 +45,44 @@ export const createTournamentBattleGroupResultsRepository = (dbInstance?: Databa
         throw new DatabaseError(
           'Failed to retrieve tournament battle group results',
           'TOURNAMENT_BATTLE_RESULTS_FIND_ERROR',
+          error as Error,
+        );
+      }
+    },
+
+    findByTournamentAndEventRange: async (
+      tournamentId: number,
+      startEventId: number,
+      endEventId: number,
+    ): Promise<DbTournamentBattleGroupResult[]> => {
+      try {
+        const db = await getDbInstance();
+        const rows = await db
+          .select()
+          .from(tournamentBattleGroupResults)
+          .where(
+            and(
+              eq(tournamentBattleGroupResults.tournamentId, tournamentId),
+              gte(tournamentBattleGroupResults.eventId, startEventId),
+              lte(tournamentBattleGroupResults.eventId, endEventId),
+            ),
+          );
+        logInfo('Retrieved tournament battle group results for event range', {
+          tournamentId,
+          startEventId,
+          endEventId,
+          count: rows.length,
+        });
+        return rows;
+      } catch (error) {
+        logError('Failed to retrieve tournament battle group results for event range', error, {
+          tournamentId,
+          startEventId,
+          endEventId,
+        });
+        throw new DatabaseError(
+          'Failed to retrieve tournament battle group results for event range',
+          'TOURNAMENT_BATTLE_RESULTS_FIND_RANGE_ERROR',
           error as Error,
         );
       }

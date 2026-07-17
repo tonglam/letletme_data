@@ -140,8 +140,9 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
             break;
 
           case TOURNAMENT_JOBS.BATTLE_RACE:
-            await syncTournamentBattleRaceResults(eventId);
-            break;
+            // Return the result so the job's returnvalue surfaces `skipped`
+            // (matchups skipped for missing entry results) to observers.
+            return await syncTournamentBattleRaceResults(eventId);
 
           case TOURNAMENT_JOBS.KNOCKOUT:
             await syncTournamentKnockoutResults(eventId);
@@ -179,6 +180,7 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
           default:
             throw new Error(`Unknown job name: ${job.name}`);
         }
+        return null;
       }),
   );
 }
