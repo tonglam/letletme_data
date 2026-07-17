@@ -4,92 +4,150 @@ import { CacheConfig } from '../types';
 import { getConfig } from '../utils/config';
 import { logError, logInfo } from '../utils/logger';
 
+// Cache commands must fail fast so services fall back to the database during a
+// Redis outage (FP-03). BullMQ connections live elsewhere and intentionally do
+// NOT use these timeouts (blocking commands must not time out).
+const COMMAND_TIMEOUT_MS = 5000;
+const CONNECT_TIMEOUT_MS = 5000;
+const INITIAL_PING_TIMEOUT_MS = 5000;
+
+const withTimeout = <T>(promise: Promise<T>, ms: number, label: string): Promise<T> =>
+  Promise.race([
+    promise,
+    new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+    }),
+  ]);
+
 /**
  * Redis Singleton
- * Manages a single Redis connection throughout the application lifecycle
+ *
+ * Manages a single Redis connection throughout the application lifecycle.
+ * The client is created exactly once and never replaced over a live instance
+ * (re-creating used to orphan still-reconnecting clients). `connect()` is
+ * idempotent: concurrent callers share one in-flight attempt.
+ *
+ * `connectionOptions` exists for tests; production uses the app config.
  */
-const createRedisSingleton = () => {
+type RedisConnectionOptions = {
+  host: string;
+  port: number;
+  password?: string;
+  db: number;
+};
+
+const createRedisSingleton = (connectionOptions?: RedisConnectionOptions) => {
   let client: Redis | null = null;
   let isConnected = false;
-  let isConnecting = false;
+  let connectPromise: Promise<void> | null = null;
+
+  const resolveConnectionOptions = (): RedisConnectionOptions => {
+    if (connectionOptions) {
+      return connectionOptions;
+    }
+    const config = getConfig();
+    return {
+      host: config.REDIS_HOST,
+      port: config.REDIS_PORT,
+      password: config.REDIS_PASSWORD,
+      db: config.REDIS_DB,
+    };
+  };
+
+  const getOrCreateClient = (): Redis => {
+    if (client) {
+      return client;
+    }
+
+    logInfo('Initializing Redis connection...');
+
+    const { host, port, password, db } = resolveConnectionOptions();
+    const redisConfig = {
+      host,
+      port,
+      password,
+      db,
+      retryDelayOnFailover: 100,
+      enableReadyCheck: false,
+      maxRetriesPerRequest: null,
+      commandTimeout: COMMAND_TIMEOUT_MS,
+      connectTimeout: CONNECT_TIMEOUT_MS,
+      lazyConnect: true,
+    };
+
+    client = new Redis(redisConfig);
+
+    client.on('connect', () => {
+      isConnected = true;
+      logInfo('✅ Redis client connected');
+    });
+
+    client.on('ready', () => {
+      logInfo('✅ Redis client ready');
+    });
+
+    client.on('error', (error) => {
+      logError('❌ Redis client error', error);
+      isConnected = false;
+    });
+
+    client.on('close', () => {
+      logInfo('Redis client connection closed');
+      isConnected = false;
+    });
+
+    client.on('reconnecting', () => {
+      logInfo('Redis client reconnecting...');
+    });
+
+    return client;
+  };
+
+  const connect = async (): Promise<void> => {
+    if (isConnected) {
+      return;
+    }
+    if (connectPromise) {
+      return connectPromise;
+    }
+
+    connectPromise = (async () => {
+      const redis = getOrCreateClient();
+      try {
+        // ioredis only accepts connect() from the 'wait'/'end' states; in any
+        // other state it is already connecting/connected on its own.
+        if (redis.status === 'wait' || redis.status === 'end') {
+          await redis.connect();
+        }
+        // Race the ping so a black-holed socket can't leave a connection
+        // attempt pending forever (commandTimeout backs this up too).
+        await withTimeout(redis.ping(), INITIAL_PING_TIMEOUT_MS, 'Initial Redis ping');
+        isConnected = true;
+        logInfo('✅ Redis connection established');
+      } catch (error) {
+        isConnected = false;
+        logError('❌ Failed to connect to Redis', error);
+        throw error;
+      } finally {
+        connectPromise = null;
+      }
+    })();
+
+    return connectPromise;
+  };
 
   return {
     /**
-     * Initialize Redis connection (lazy initialization)
+     * Initialize Redis connection (lazy, idempotent)
      */
-    connect: async (): Promise<void> => {
-      if (isConnected) {
-        return; // Already connected
-      }
-
-      if (isConnecting) {
-        // Wait for existing connection attempt
-        while (isConnecting) {
-          await new Promise((resolve) => setTimeout(resolve, 100));
-        }
-        return;
-      }
-
-      try {
-        isConnecting = true;
-        logInfo('Initializing Redis connection...');
-
-        const config = getConfig();
-        const redisConfig = {
-          host: config.REDIS_HOST,
-          port: config.REDIS_PORT,
-          password: config.REDIS_PASSWORD,
-          db: config.REDIS_DB,
-          retryDelayOnFailover: 100,
-          enableReadyCheck: false,
-          maxRetriesPerRequest: null,
-        };
-
-        client = new Redis(redisConfig);
-
-        // Set up event handlers
-        client.on('connect', () => {
-          isConnected = true;
-          logInfo('✅ Redis client connected');
-        });
-
-        client.on('ready', () => {
-          logInfo('✅ Redis client ready');
-        });
-
-        client.on('error', (error) => {
-          logError('❌ Redis client error', error);
-          isConnected = false;
-        });
-
-        client.on('close', () => {
-          logInfo('Redis client connection closed');
-          isConnected = false;
-        });
-
-        client.on('reconnecting', () => {
-          logInfo('Redis client reconnecting...');
-        });
-
-        // Test connection
-        await client.ping();
-
-        logInfo('✅ Redis connection established');
-      } catch (error) {
-        logError('❌ Failed to connect to Redis', error);
-        isConnected = false;
-        throw error;
-      } finally {
-        isConnecting = false;
-      }
-    },
+    connect,
 
     /**
      * Get the Redis client (auto-connects if needed)
      */
     getClient: async (): Promise<Redis> => {
       if (!isConnected) {
-        await redisSingleton.connect();
+        await connect();
       }
 
       if (!client) {
@@ -124,7 +182,7 @@ const createRedisSingleton = () => {
     },
 
     /**
-     * Close Redis connection
+     * Close Redis connection (the shared instance is kept for reuse)
      */
     disconnect: async (): Promise<void> => {
       if (!client) {
@@ -133,8 +191,7 @@ const createRedisSingleton = () => {
 
       try {
         logInfo('Closing Redis connection...');
-        await client.disconnect();
-        client = null;
+        client.disconnect();
         isConnected = false;
         logInfo('✅ Redis connection closed');
       } catch (error) {
@@ -144,11 +201,13 @@ const createRedisSingleton = () => {
     },
 
     /**
-     * Force reconnection (useful for connection recovery)
+     * Force reconnection on the same client instance (never orphans a client)
      */
     reconnect: async (): Promise<void> => {
-      await redisSingleton.disconnect();
-      await redisSingleton.connect();
+      const redis = getOrCreateClient();
+      redis.disconnect();
+      isConnected = false;
+      await connect();
     },
 
     /**
@@ -157,7 +216,7 @@ const createRedisSingleton = () => {
     getStatus: (): { connected: boolean; connecting: boolean } => {
       return {
         connected: isConnected,
-        connecting: isConnecting,
+        connecting: connectPromise !== null,
       };
     },
   };
@@ -165,6 +224,9 @@ const createRedisSingleton = () => {
 
 // Export singleton instance
 export const redisSingleton = createRedisSingleton();
+
+// Exported for tests that need an isolated client lifecycle (e.g. timeout tests)
+export { createRedisSingleton };
 
 // Default cache configuration
 export const DEFAULT_CACHE_CONFIG: CacheConfig = {

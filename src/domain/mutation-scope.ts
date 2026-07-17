@@ -120,6 +120,11 @@ export function resolveMutationScopes(input: MutationScopeInput): string[] {
       case 'tournament-knockout':
       case 'tournament-cup-results':
         return [withEvent('tournament-structure', eventId), TOURNAMENT_STRUCTURE_GLOBAL_SCOPE];
+      // Cascade enqueues this with a soft delay, but under the global structure
+      // lock the four structure jobs run one-at-a-time and can exceed that delay.
+      // Hold the same global scope so REFRESH cannot observe partial writes.
+      case 'tournament-materialized-views-refresh':
+        return [TOURNAMENT_STRUCTURE_GLOBAL_SCOPE];
       case 'tournament-info':
         return ['tournament-info:all'];
       default:

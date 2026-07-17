@@ -81,7 +81,9 @@ async function enqueueTournamentCascade(eventId: number) {
       }
     });
 
-    // Enqueue materialized view refresh with a 30s delay so parallel writes finish first
+    // Soft 30s delay reduces lock contention; hard guarantee is the shared
+    // tournament-structure:global mutation scope on the refresh job (FP-07),
+    // which waits until structure writes (points/battle/knockout/cup) finish.
     try {
       await enqueueTournamentMaterializedViewsRefresh(eventId, 'cascade', { delay: 30_000 });
       logInfo('Enqueued tournament materialized views refresh', { eventId, delayMs: 30_000 });

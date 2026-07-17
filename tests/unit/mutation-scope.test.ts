@@ -90,4 +90,30 @@ describe('resolveMutationScopes', () => {
       expect(overlap.length).toBeGreaterThan(0);
     }
   });
+
+  it('serializes materialized-views refresh behind structure writes (FP-07 Codex P2)', () => {
+    const refreshScopes = resolveMutationScopes({
+      queueName: 'tournament-sync',
+      jobName: 'tournament-materialized-views-refresh',
+      eventId: 33,
+    });
+    expect(refreshScopes).toContain('tournament-structure:global');
+
+    for (const jobName of [
+      'tournament-points-race',
+      'tournament-battle-race',
+      'tournament-knockout',
+      'tournament-cup-results',
+      'tournament-setup',
+    ]) {
+      const other = resolveMutationScopes({
+        queueName: jobName === 'tournament-setup' ? 'tournament-setup' : 'tournament-sync',
+        jobName,
+        eventId: 33,
+        tournamentId: 789,
+      });
+      const overlap = refreshScopes.filter((scope) => other.includes(scope));
+      expect(overlap).toContain('tournament-structure:global');
+    }
+  });
 });

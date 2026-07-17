@@ -2,17 +2,12 @@ import { and, eq, inArray } from 'drizzle-orm';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import { entryEventPicks, type DbEntryEventPickInsert } from '../db/schemas/index.schema';
 import { getDb } from '../db/singleton';
+import { toDbChip } from '../domain/chips';
 import type { RawFPLEntryEventPicksResponse } from '../types';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 
 type DatabaseInstance = PostgresJsDatabase<Record<string, never>>;
-
-function mapChip(
-  chip: RawFPLEntryEventPicksResponse['active_chip'],
-): 'n/a' | 'wildcard' | 'freehit' | 'bboost' | '3xc' | 'manager' {
-  return chip ?? 'n/a';
-}
 
 function chunkArray<T>(items: T[], size: number): T[][] {
   if (items.length === 0) {
@@ -77,7 +72,7 @@ export const createEntryEventPicksRepository = (dbInstance?: DatabaseInstance) =
         const insert: DbEntryEventPickInsert = {
           entryId,
           eventId,
-          chip: mapChip(picks.active_chip),
+          chip: toDbChip(picks.active_chip),
           picks: picks.picks as unknown,
           transfers: picks.entry_history.event_transfers,
           transfersCost: picks.entry_history.event_transfers_cost,
