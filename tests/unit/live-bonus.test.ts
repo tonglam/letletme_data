@@ -269,4 +269,25 @@ describe('computeLiveBonusByTeam', () => {
     // Live fixture still estimates among non-official players
     expect(byTeam.get(3)?.get(31)).toBe(3);
   });
+
+  it('still estimates a finished DGW fixture until official bonus appears', () => {
+    // Post-whistle provisional window: fixture is Finished but FPL has not
+    // posted bonus yet. Must still emit provisional 3/2/1 (unlike settled+official).
+    const matches = [match(1, 2, 't1', true), match(1, 3, 't2', false)];
+    const byTeam = computeLiveBonusByTeam(matches, [
+      live(11, 1, 40, 0),
+      live(12, 1, 25, 0),
+      live(21, 2, 30, 0),
+      live(22, 2, 10, 0),
+      live(31, 3, 50, 0),
+      live(32, 3, 15, 0),
+    ]);
+
+    // Finished 1v2: 11=3, 21=2, 12=1 from BPS
+    expect(byTeam.get(1)?.get(11)).toBe(3);
+    expect(byTeam.get(2)?.get(21)).toBe(2);
+    expect(byTeam.get(1)?.get(12)).toBe(1);
+    // Live 1v3 still estimated
+    expect(byTeam.get(3)?.get(31)).toBe(3);
+  });
 });

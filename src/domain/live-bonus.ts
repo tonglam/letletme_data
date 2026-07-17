@@ -162,12 +162,13 @@ export function calculateMatchBonus(matchLives: BonusEligibleLive[]): Map<number
  * gameweek aggregates, not fixture-scoped. Strategy:
  * 1. Always seed FPL-assigned `bonus` values into the cache first.
  * 2. Single-match buckets with official bonus: skip BPS re-estimation.
- * 3. Multi-match finished fixtures: skip BPS re-estimation (seed only) so
- *    players with official 0 are not given provisional 3/2/1.
- * 4. Multi-match live fixtures: estimate from BPS with keepMax, excluding
- *    players who already have official bonus so a settled fixture's winners
- *    do not dominate provisional ranking for other fixtures. Full fixture-
- *    level BPS would need richer data.
+ * 3. Multi-match finished fixtures with official bonus: seed only — do not
+ *    re-rank remaining players over FPL's official zeros. Finished alone is
+ *    not enough (provisional post-whistle windows still need BPS estimates).
+ * 4. Multi-match live (or finished-without-official) fixtures: estimate from
+ *    BPS with keepMax, excluding players who already have official bonus so a
+ *    settled fixture's winners do not dominate provisional ranking for other
+ *    fixtures. Full fixture-level BPS would need richer data.
  */
 export function computeLiveBonusByTeam(
   matches: PlayingMatch[],
@@ -219,15 +220,18 @@ export function computeLiveBonusByTeam(
       continue;
     }
 
-    // Settled multi-match (DGW finished fixture): seed only — do not re-rank
+    // Multi-match finished + official present: seed only — do not re-rank
     // remaining players with provisional 3/2/1 over FPL's official zeros.
-    if (multiMatchTeam && finished) {
+    // If finished but no official yet (provisional post-whistle), fall through
+    // and estimate like a live multi-match fixture.
+    if (multiMatchTeam && finished && hasOfficial) {
       continue;
     }
 
-    // Multi-match live: exclude players with official bonus from provisional
-    // BPS ranking so aggregate rows from a finished fixture do not displace
-    // the live fixture's true contenders (event_lives has no fixture scope).
+    // Multi-match (live or finished-without-official): exclude players with
+    // official bonus from provisional BPS ranking so aggregate rows from a
+    // settled fixture do not displace the other fixture's true contenders
+    // (event_lives has no fixture scope).
     const estimationBucket = multiMatchTeam ? bucket.filter((el) => (el.bonus ?? 0) === 0) : bucket;
 
     for (const [elementId, bonus] of calculateMatchBonus(estimationBucket)) {
