@@ -8,7 +8,7 @@ import {
 } from '../repositories/tournament-infos';
 import { logError, logInfo } from '../utils/logger';
 
-import type { DbTournamentGroupInsert } from '../db/schemas/index.schema';
+import type { DbTournamentGroup, DbTournamentGroupInsert } from '../db/schemas/index.schema';
 
 function groupRankKey(points: number, overallRank: number | null) {
   return `${points}-${overallRank ?? Number.MAX_SAFE_INTEGER}`;
@@ -122,11 +122,24 @@ async function syncBattleRaceForTournament(
   const updatedGroups: DbTournamentGroupInsert[] = [];
   let skipped = 0;
 
+  // Batch-load every group row for this tournament's entries in one (chunked)
+  // query and bucket by groupId in memory, instead of one query per group.
+  const groupEntriesByGroupId = new Map<number, DbTournamentGroup[]>();
+  const allGroupEntries = await tournamentGroupRepository.findByTournamentAndEntries(
+    tournament.id,
+    entryIds,
+  );
+  for (const group of allGroupEntries) {
+    const bucket = groupEntriesByGroupId.get(group.groupId);
+    if (bucket) {
+      bucket.push(group);
+    } else {
+      groupEntriesByGroupId.set(group.groupId, [group]);
+    }
+  }
+
   for (const [groupId, pointsMap] of matchPointsByGroup.entries()) {
-    const groupEntries = await tournamentGroupRepository.findByTournamentAndGroup(
-      tournament.id,
-      groupId,
-    );
+    const groupEntries = groupEntriesByGroupId.get(groupId) ?? [];
     const groupUpdates = groupEntries.map((group) => {
       const entryId = group.entryId;
       const eventResult = eventResultMap.get(entryId);
