@@ -18,7 +18,11 @@ function live(elementId: number, teamId: number, bps: number | null, bonus = 0):
   return { elementId, teamId, minutes: 90, bps, bonus };
 }
 
-function fixture(teamId: number, againstId: number): LiveFixtureData {
+function fixture(
+  teamId: number,
+  againstId: number,
+  kickoffTime: string | null = null,
+): LiveFixtureData {
   return {
     teamId,
     teamName: `Team ${teamId}`,
@@ -30,12 +34,18 @@ function fixture(teamId: number, againstId: number): LiveFixtureData {
     againstShortName: `T${againstId}`,
     againstTeamScore: 0,
     againstTeamPosition: againstId,
-    kickoffTime: null,
+    kickoffTime,
     score: '0 - 0',
     wasHome: true,
     started: true,
     finished: false,
   };
+}
+
+function match(teamA: number, teamB: number, kickoff = 'unknown') {
+  const a = Math.min(teamA, teamB);
+  const b = Math.max(teamA, teamB);
+  return { teamA: a, teamB: b, matchKey: `${a}-${b}-${kickoff}` };
 }
 
 function fixturesByTeam(entries: Record<number, LiveFixtureData[]>): LiveFixturesByTeam {
@@ -48,24 +58,37 @@ function fixturesByTeam(entries: Record<number, LiveFixtureData[]>): LiveFixture
 
 describe('buildPlayingMatches', () => {
   it('pairs both directions of a fixture into one match', () => {
-    const matches = buildPlayingMatches(fixturesByTeam({ 1: [fixture(1, 2)], 2: [fixture(2, 1)] }));
-    expect(matches).toEqual([{ teamA: 1, teamB: 2 }]);
+    const matches = buildPlayingMatches(
+      fixturesByTeam({
+        1: [fixture(1, 2, '2026-01-01T12:00:00Z')],
+        2: [fixture(2, 1, '2026-01-01T12:00:00Z')],
+      }),
+    );
+    expect(matches).toEqual([match(1, 2, '2026-01-01T12:00:00Z')]);
   });
 
   it('maps every fixture of a double-gameweek team, not just the first', () => {
     const matches = buildPlayingMatches(
       fixturesByTeam({
-        1: [fixture(1, 2), fixture(1, 3)],
-        2: [fixture(2, 1)],
-        3: [fixture(3, 1)],
-        4: [fixture(4, 5)],
-        5: [fixture(5, 4)],
+        1: [fixture(1, 2, 't1'), fixture(1, 3, 't2')],
+        2: [fixture(2, 1, 't1')],
+        3: [fixture(3, 1, 't2')],
+        4: [fixture(4, 5, 't3')],
+        5: [fixture(5, 4, 't3')],
       }),
     );
     expect(matches).toHaveLength(3);
-    expect(matches).toContainEqual({ teamA: 1, teamB: 2 });
-    expect(matches).toContainEqual({ teamA: 1, teamB: 3 });
-    expect(matches).toContainEqual({ teamA: 4, teamB: 5 });
+    expect(matches.map((m) => m.matchKey).sort()).toEqual(['1-2-t1', '1-3-t2', '4-5-t3']);
+  });
+
+  it('keeps two fixtures between the same clubs as separate matches', () => {
+    const matches = buildPlayingMatches(
+      fixturesByTeam({
+        1: [fixture(1, 2, 'sat'), fixture(1, 2, 'tue')],
+        2: [fixture(2, 1, 'sat'), fixture(2, 1, 'tue')],
+      }),
+    );
+    expect(matches).toHaveLength(2);
   });
 
   it('returns no matches for null or fixture-less input', () => {
@@ -130,7 +153,7 @@ describe('calculateMatchBonus', () => {
 describe('computeLiveBonusByTeam', () => {
   it('distributes exactly 6 bonus points across both teams of a match', () => {
     const byTeam = computeLiveBonusByTeam(
-      [{ teamA: 1, teamB: 2 }],
+      [match(1, 2)],
       [live(11, 1, 30), live(12, 1, 25), live(13, 1, 15), live(21, 2, 20), live(22, 2, 10)],
     );
 
@@ -149,7 +172,7 @@ describe('computeLiveBonusByTeam', () => {
 
   it('skips players with zero minutes', () => {
     const byTeam = computeLiveBonusByTeam(
-      [{ teamA: 1, teamB: 2 }],
+      [match(1, 2)],
       [{ ...live(11, 1, 40), minutes: 0 }, live(21, 2, 20)],
     );
     expect(byTeam.get(1)).toBeUndefined();
@@ -158,7 +181,7 @@ describe('computeLiveBonusByTeam', () => {
 
   it('uses FPL-assigned bonus values when a match is already settled', () => {
     const byTeam = computeLiveBonusByTeam(
-      [{ teamA: 1, teamB: 2 }],
+      [match(1, 2)],
       [live(11, 1, 99, 3), live(12, 1, 50, 2), live(21, 2, 80, 1), live(22, 2, 70, 0)],
     );
     expect(byTeam.get(1)).toEqual(
@@ -172,7 +195,11 @@ describe('computeLiveBonusByTeam', () => {
 
   it('ranks a double-gameweek player in each fixture and keeps the best award', () => {
     const matches = buildPlayingMatches(
-      fixturesByTeam({ 1: [fixture(1, 2), fixture(1, 3)], 2: [fixture(2, 1)], 3: [fixture(3, 1)] }),
+      fixturesByTeam({
+        1: [fixture(1, 2, 't1'), fixture(1, 3, 't2')],
+        2: [fixture(2, 1, 't1')],
+        3: [fixture(3, 1, 't2')],
+      }),
     );
     const byTeam = computeLiveBonusByTeam(matches, [
       live(11, 1, 30), // DGW player: top BPS in both matches
@@ -187,25 +214,20 @@ describe('computeLiveBonusByTeam', () => {
     expect(byTeam.get(3)).toEqual(new Map([[31, 2]]));
   });
 
-  it('does not let event-level bonus from one DGW fixture suppress BPS for the other', () => {
-    // Team 1 plays 2 and 3. Fixture 1v2 has FPL-assigned bonus on the event-live
-    // aggregate; fixture 1v3 still needs provisional BPS ranking. The multi-match
-    // path must estimate 1v3 instead of short-circuiting on team-1's bonus.
-    const matches = [
-      { teamA: 1, teamB: 2 },
-      { teamA: 1, teamB: 3 },
-    ];
+  it('seeds official DGW bonus and still estimates later fixture from remaining players', () => {
+    // Team 1 plays 2 and 3. Official bonus on 11 from fixture 1 is preserved;
+    // fixture 1v3 estimates among players without official bonus.
+    const matches = [match(1, 2, 't1'), match(1, 3, 't2')];
     const byTeam = computeLiveBonusByTeam(matches, [
-      live(11, 1, 40, 3), // event-level bonus from 1v2; also high BPS
+      live(11, 1, 40, 3), // official bonus — seeded, excluded from 1v3 BPS pool
       live(12, 1, 10, 0),
       live(21, 2, 35, 2),
       live(22, 2, 5, 1),
-      live(31, 3, 50, 0), // top BPS in 1v3 — must get provisional 3
+      live(31, 3, 50, 0), // top among non-official for 1v3
       live(32, 3, 15, 0),
     ]);
 
-    expect(byTeam.get(3)?.get(31)).toBe(3);
-    // DGW team keeps best single-match award (official 3 from first path / BPS)
-    expect(byTeam.get(1)?.get(11)).toBe(3);
+    expect(byTeam.get(1)?.get(11)).toBe(3); // official preserved
+    expect(byTeam.get(3)?.get(31)).toBe(3); // provisional for later fixture
   });
 });

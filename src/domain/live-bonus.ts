@@ -58,6 +58,8 @@ export function hasAnyBonus(payload: LiveBonusCachePayload): boolean {
 export interface PlayingMatch {
   readonly teamA: TeamId;
   readonly teamB: TeamId;
+  /** Unordered pair + kickoff so two fixtures between the same clubs stay distinct. */
+  readonly matchKey: string;
 }
 
 /** Minimal event-live shape the bonus calculation needs. */
@@ -71,9 +73,9 @@ export interface BonusEligibleLive {
 
 /**
  * Build unique matches from the live-fixture cache. Every Playing/Finished
- * fixture contributes its (team, opponent) pairing, deduplicated as an
- * unordered pair — a double-gameweek team therefore appears in one match
- * per fixture instead of only against its first fixture's opponent.
+ * fixture contributes one match. Keys are unordered team pair + kickoffTime
+ * so (a) DGW teams map every opponent and (b) two fixtures between the same
+ * clubs in one event are not collapsed (FP-11 Codex P3).
  */
 export function buildPlayingMatches(liveFixtures: LiveFixturesByTeam | null): PlayingMatch[] {
   const matches = new Map<string, PlayingMatch>();
@@ -93,9 +95,9 @@ export function buildPlayingMatches(liveFixtures: LiveFixturesByTeam | null): Pl
       const againstId = fixture.againstId;
       const teamA = Math.min(teamId, againstId);
       const teamB = Math.max(teamId, againstId);
-      const key = `${teamA}-${teamB}`;
+      const key = `${teamA}-${teamB}-${fixture.kickoffTime ?? 'unknown'}`;
       if (!matches.has(key)) {
-        matches.set(key, { teamA, teamB });
+        matches.set(key, { teamA, teamB, matchKey: key });
       }
     }
   }
@@ -149,10 +151,14 @@ export function calculateMatchBonus(matchLives: BonusEligibleLive[]): Map<number
 /**
  * Compute bonus per team for an event.
  *
- * Per match: when FPL has already assigned bonus (any bucket player with
- * bonus > 0) and neither team is multi-match this event, use those values.
- * Event-live bonus is not fixture-scoped, so DGW teams always use BPS ranking
- * per fixture. Cache holds one 0–3 value per element; best single-match wins.
+ * Event-live rows are unique per (event, element) — minutes/bps/bonus are
+ * gameweek aggregates, not fixture-scoped. Strategy:
+ * 1. Always seed FPL-assigned `bonus` values into the cache first.
+ * 2. Single-match buckets with official bonus: skip BPS re-estimation.
+ * 3. Multi-match (DGW) buckets: estimate from BPS with keepMax, excluding
+ *    players who already have official bonus so a settled fixture's winners
+ *    do not dominate provisional ranking for other fixtures (and official
+ *    awards stay seeded). Full fixture-level BPS would need richer data.
  */
 export function computeLiveBonusByTeam(
   matches: PlayingMatch[],
@@ -182,28 +188,34 @@ export function computeLiveBonusByTeam(
     byTeam.set(teamId, teamMap);
   };
 
+  // Seed official FPL bonuses first so multi-match estimation cannot drop them.
+  for (const el of eligible) {
+    if ((el.bonus ?? 0) > 0) {
+      setBonus(el.teamId, el.elementId, el.bonus ?? 0, true);
+    }
+  }
+
   for (const { teamA, teamB } of matches) {
     const bucket = [...(livesByTeam.get(teamA) ?? []), ...(livesByTeam.get(teamB) ?? [])];
     if (bucket.length === 0) {
       continue;
     }
 
-    // Event-live bonus is aggregate for the whole event. For DGW teams, a
-    // finished fixture's official bonus must not short-circuit BPS estimation
-    // for later fixtures (FP-11 Codex P1).
     const multiMatchTeam =
       (matchCountByTeam.get(teamA) ?? 0) > 1 || (matchCountByTeam.get(teamB) ?? 0) > 1;
+    const hasOfficial = bucket.some((el) => (el.bonus ?? 0) > 0);
 
-    if (!multiMatchTeam && bucket.some((el) => (el.bonus ?? 0) > 0)) {
-      for (const el of bucket) {
-        if ((el.bonus ?? 0) > 0) {
-          setBonus(el.teamId, el.elementId, el.bonus ?? 0, false);
-        }
-      }
+    // Single-match + FPL already assigned: official seed is enough.
+    if (!multiMatchTeam && hasOfficial) {
       continue;
     }
 
-    for (const [elementId, bonus] of calculateMatchBonus(bucket)) {
+    // Multi-match: exclude players with official bonus from provisional BPS
+    // ranking so aggregate rows from a finished fixture do not displace the
+    // live fixture's true contenders (event_lives has no fixture scope).
+    const estimationBucket = multiMatchTeam ? bucket.filter((el) => (el.bonus ?? 0) === 0) : bucket;
+
+    for (const [elementId, bonus] of calculateMatchBonus(estimationBucket)) {
       const owner = ownerByElement.get(elementId);
       if (owner !== undefined) {
         setBonus(owner, elementId, bonus, true);
