@@ -150,10 +150,9 @@ export function calculateMatchBonus(matchLives: BonusEligibleLive[]): Map<number
  * Compute bonus per team for an event.
  *
  * Per match: when FPL has already assigned bonus (any bucket player with
- * bonus > 0) those authoritative values are used as-is; otherwise the
- * combined bucket is ranked by BPS. A double-gameweek player is ranked in
- * each of their fixtures — the cache shape holds one 0–3 value per element
- * (see LiveBonusByTeamSchema), so the best single-match award wins.
+ * bonus > 0) and neither team is multi-match this event, use those values.
+ * Event-live bonus is not fixture-scoped, so DGW teams always use BPS ranking
+ * per fixture. Cache holds one 0–3 value per element; best single-match wins.
  */
 export function computeLiveBonusByTeam(
   matches: PlayingMatch[],
@@ -171,6 +170,12 @@ export function computeLiveBonusByTeam(
     ownerByElement.set(el.elementId, el.teamId);
   }
 
+  const matchCountByTeam = new Map<TeamId, number>();
+  for (const { teamA, teamB } of matches) {
+    matchCountByTeam.set(teamA, (matchCountByTeam.get(teamA) ?? 0) + 1);
+    matchCountByTeam.set(teamB, (matchCountByTeam.get(teamB) ?? 0) + 1);
+  }
+
   const setBonus = (teamId: TeamId, elementId: number, bonus: number, keepMax: boolean) => {
     const teamMap = byTeam.get(teamId) ?? new Map<number, number>();
     teamMap.set(elementId, keepMax ? Math.max(teamMap.get(elementId) ?? 0, bonus) : bonus);
@@ -183,8 +188,13 @@ export function computeLiveBonusByTeam(
       continue;
     }
 
-    if (bucket.some((el) => (el.bonus ?? 0) > 0)) {
-      // FPL has assigned bonus for this match — use the authoritative values
+    // Event-live bonus is aggregate for the whole event. For DGW teams, a
+    // finished fixture's official bonus must not short-circuit BPS estimation
+    // for later fixtures (FP-11 Codex P1).
+    const multiMatchTeam =
+      (matchCountByTeam.get(teamA) ?? 0) > 1 || (matchCountByTeam.get(teamB) ?? 0) > 1;
+
+    if (!multiMatchTeam && bucket.some((el) => (el.bonus ?? 0) > 0)) {
       for (const el of bucket) {
         if ((el.bonus ?? 0) > 0) {
           setBonus(el.teamId, el.elementId, el.bonus ?? 0, false);

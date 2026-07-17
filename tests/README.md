@@ -1,5 +1,15 @@
 # Teams Testing Suite
 
+> **How tests are gated (FP-02):**
+> - `bun test` / `bun run test` — **unit tests only** (`tests/unit`), no infrastructure needed.
+> - `bun run test:integration` — integration tests (`tests/integration`). Requires
+>   `RUN_INTEGRATION=1` (set by the script), a `DATABASE_URL` pointing at test
+>   infrastructure (`localhost`/`127.0.0.1`/`*_test`), and a non-zero `REDIS_DB`
+>   (and `QUEUE_REDIS_DB` when used). Every integration file asserts this via
+>   `tests/integration/helpers/env-guard.ts` before any test runs — the suite
+>   refuses to start against anything else, because these tests write real data.
+> - `bun run test:all` — everything (integration gating still applies).
+
 This directory contains comprehensive tests for the teams functionality, covering both unit and integration testing scenarios.
 
 ## 📁 Test Structure

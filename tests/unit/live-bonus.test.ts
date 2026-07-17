@@ -186,4 +186,26 @@ describe('computeLiveBonusByTeam', () => {
     expect(byTeam.get(2)).toEqual(new Map([[21, 2]]));
     expect(byTeam.get(3)).toEqual(new Map([[31, 2]]));
   });
+
+  it('does not let event-level bonus from one DGW fixture suppress BPS for the other', () => {
+    // Team 1 plays 2 and 3. Fixture 1v2 has FPL-assigned bonus on the event-live
+    // aggregate; fixture 1v3 still needs provisional BPS ranking. The multi-match
+    // path must estimate 1v3 instead of short-circuiting on team-1's bonus.
+    const matches = [
+      { teamA: 1, teamB: 2 },
+      { teamA: 1, teamB: 3 },
+    ];
+    const byTeam = computeLiveBonusByTeam(matches, [
+      live(11, 1, 40, 3), // event-level bonus from 1v2; also high BPS
+      live(12, 1, 10, 0),
+      live(21, 2, 35, 2),
+      live(22, 2, 5, 1),
+      live(31, 3, 50, 0), // top BPS in 1v3 — must get provisional 3
+      live(32, 3, 15, 0),
+    ]);
+
+    expect(byTeam.get(3)?.get(31)).toBe(3);
+    // DGW team keeps best single-match award (official 3 from first path / BPS)
+    expect(byTeam.get(1)?.get(11)).toBe(3);
+  });
 });

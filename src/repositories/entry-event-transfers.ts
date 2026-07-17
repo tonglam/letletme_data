@@ -1,4 +1,4 @@
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 
 import {
@@ -72,7 +72,9 @@ export const createEntryEventTransfersRepository = (dbInstance?: DatabaseInstanc
               elementInId: row.elementInId,
               elementInCost: row.elementInCost,
               elementInPoints: row.elementInPoints,
-              elementInPlayed: row.elementInPlayed,
+              // Never null out a previously computed value on re-sync (H5):
+              // keep the existing flag when this sync has nothing to say.
+              elementInPlayed: sql`COALESCE(excluded.element_in_played, entry_event_transfers.element_in_played)`,
               elementOutId: row.elementOutId,
               elementOutCost: row.elementOutCost,
               elementOutPoints: row.elementOutPoints,

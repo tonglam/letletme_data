@@ -1,4 +1,4 @@
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, gte, isNotNull, lte, max, sql } from 'drizzle-orm';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 
 import {
@@ -45,6 +45,85 @@ export const createTournamentBattleGroupResultsRepository = (dbInstance?: Databa
         throw new DatabaseError(
           'Failed to retrieve tournament battle group results',
           'TOURNAMENT_BATTLE_RESULTS_FIND_ERROR',
+          error as Error,
+        );
+      }
+    },
+
+    findByTournamentAndEventRange: async (
+      tournamentId: number,
+      startEventId: number,
+      endEventId: number,
+    ): Promise<DbTournamentBattleGroupResult[]> => {
+      try {
+        const db = await getDbInstance();
+        const rows = await db
+          .select()
+          .from(tournamentBattleGroupResults)
+          .where(
+            and(
+              eq(tournamentBattleGroupResults.tournamentId, tournamentId),
+              gte(tournamentBattleGroupResults.eventId, startEventId),
+              lte(tournamentBattleGroupResults.eventId, endEventId),
+            ),
+          );
+        logInfo('Retrieved tournament battle group results for event range', {
+          tournamentId,
+          startEventId,
+          endEventId,
+          count: rows.length,
+        });
+        return rows;
+      } catch (error) {
+        logError('Failed to retrieve tournament battle group results for event range', error, {
+          tournamentId,
+          startEventId,
+          endEventId,
+        });
+        throw new DatabaseError(
+          'Failed to retrieve tournament battle group results for event range',
+          'TOURNAMENT_BATTLE_RESULTS_FIND_RANGE_ERROR',
+          error as Error,
+        );
+      }
+    },
+
+    /**
+     * Latest event_id with **scored** battle rows (non-null match points) in
+     * [start, end]. Pre-created future fixtures (NULL points) must not extend
+     * the recompute horizon — that would load missing entry results and skip
+     * all group updates (FP-09 Codex P1).
+     */
+    findMaxEventIdInRange: async (
+      tournamentId: number,
+      startEventId: number,
+      endEventId: number,
+    ): Promise<number | null> => {
+      try {
+        const db = await getDbInstance();
+        const rows = await db
+          .select({ maxEventId: max(tournamentBattleGroupResults.eventId) })
+          .from(tournamentBattleGroupResults)
+          .where(
+            and(
+              eq(tournamentBattleGroupResults.tournamentId, tournamentId),
+              gte(tournamentBattleGroupResults.eventId, startEventId),
+              lte(tournamentBattleGroupResults.eventId, endEventId),
+              isNotNull(tournamentBattleGroupResults.homeMatchPoints),
+              isNotNull(tournamentBattleGroupResults.awayMatchPoints),
+            ),
+          );
+        const value = rows[0]?.maxEventId;
+        return typeof value === 'number' ? value : value != null ? Number(value) : null;
+      } catch (error) {
+        logError('Failed to find max battle group result event id', error, {
+          tournamentId,
+          startEventId,
+          endEventId,
+        });
+        throw new DatabaseError(
+          'Failed to find max battle group result event id',
+          'TOURNAMENT_BATTLE_RESULTS_MAX_EVENT_ERROR',
           error as Error,
         );
       }

@@ -9,6 +9,7 @@ import {
   recoverStuckTournamentSetups,
   setupTournamentStructure,
 } from '../services/tournament-setup.service';
+import { tournamentSetupLifecycleScope } from '../domain/mutation-scope';
 import { logError, logInfo } from '../utils/logger';
 import { withMutationConflictGuard } from '../utils/mutation-lock';
 import { getQueueConnection } from '../utils/queue';
@@ -28,12 +29,18 @@ export function createTournamentSetupWorker(): WorkerRuntime {
   const worker = new Worker<TournamentSetupJobData>(
     queueName,
     async (job: Job<TournamentSetupJobData>) => {
+      // Per-tournament lifecycle lock only (not tournament-structure:global):
+      // serializes force-requeue / concurrency>1 for the same tournament so
+      // markSetupProcessing/Result cannot interleave, without starving cascade
+      // structure writers. Structure global is acquired only around rebuild /
+      // points/knockout writes inside setup phases (FP-07 Codex P2).
       await withMutationConflictGuard(
         {
           queueName: job.queueName,
           jobName: job.name,
           jobId: String(job.id),
           tournamentId: job.data.tournamentId,
+          scopes: [tournamentSetupLifecycleScope(job.data.tournamentId)],
         },
         () => setupTournamentStructure(job.data.tournamentId),
       );
