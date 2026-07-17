@@ -128,4 +128,4 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
 | FP | Commit SHA | Date | Notes |
 |----|-----------|------|-------|
 | FP-13 | 58bcd28 | 2026-07-17 | PR #15 |
-| FP-14 | f2c7f94 | 2026-07-17 | pending PR |
+| FP-14 | f2c7f94 | 2026-07-17 | PR #16 |
