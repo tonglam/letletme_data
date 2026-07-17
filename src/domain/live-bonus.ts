@@ -1,6 +1,8 @@
 import { z } from 'zod';
 
-import type { EventId } from '../types/base.type';
+import type { EventId, TeamId } from '../types/base.type';
+
+import type { LiveFixturesByTeam } from './live-fixtures';
 
 /**
  * Live Bonus Cache Data
@@ -41,4 +43,163 @@ export function getBonusForElement(
 
 export function hasAnyBonus(payload: LiveBonusCachePayload): boolean {
   return Object.values(payload.byTeam).some((team) => Object.keys(team).length > 0);
+}
+
+/**
+ * Live bonus match logic (FP-11 / H7).
+ *
+ * FPL awards bonus per MATCH, not per team: the top 3 BPS players across
+ * BOTH teams of a fixture receive 3/2/1 (max 6 points per match, tie
+ * handling aside). Awarding a top-3 per team inflated a match to up to 12
+ * bonus points. Pairing must also be per fixture so double gameweeks map
+ * every opponent, not just the first fixture's.
+ */
+
+export interface PlayingMatch {
+  readonly teamA: TeamId;
+  readonly teamB: TeamId;
+}
+
+/** Minimal event-live shape the bonus calculation needs. */
+export interface BonusEligibleLive {
+  readonly elementId: number;
+  readonly teamId: TeamId;
+  readonly minutes: number | null;
+  readonly bps: number | null;
+  readonly bonus: number | null;
+}
+
+/**
+ * Build unique matches from the live-fixture cache. Every Playing/Finished
+ * fixture contributes its (team, opponent) pairing, deduplicated as an
+ * unordered pair — a double-gameweek team therefore appears in one match
+ * per fixture instead of only against its first fixture's opponent.
+ */
+export function buildPlayingMatches(liveFixtures: LiveFixturesByTeam | null): PlayingMatch[] {
+  const matches = new Map<string, PlayingMatch>();
+
+  if (!liveFixtures) {
+    return [];
+  }
+
+  for (const [teamIdStr, statusMap] of Object.entries(liveFixtures)) {
+    const teamId = Number.parseInt(teamIdStr, 10);
+    if (Number.isNaN(teamId)) {
+      continue;
+    }
+
+    const fixtures = [...(statusMap.Playing || []), ...(statusMap.Finished || [])];
+    for (const fixture of fixtures) {
+      const againstId = fixture.againstId;
+      const teamA = Math.min(teamId, againstId);
+      const teamB = Math.max(teamId, againstId);
+      const key = `${teamA}-${teamB}`;
+      if (!matches.has(key)) {
+        matches.set(key, { teamA, teamB });
+      }
+    }
+  }
+
+  return [...matches.values()];
+}
+
+/**
+ * Rank a combined match bucket (both teams) by BPS and award 3/2/1.
+ * Ties share the tier and consume its slots, matching FPL: two tied at the
+ * top both get 3 and the next player gets 1; players tied for second push
+ * the 1-point tier out once three or more players already scored.
+ */
+export function calculateMatchBonus(matchLives: BonusEligibleLive[]): Map<number, number> {
+  const bonusMap = new Map<number, number>();
+  const ranked = matchLives
+    .filter((el) => (el.bps ?? 0) > 0)
+    .sort((a, b) => (b.bps ?? 0) - (a.bps ?? 0));
+
+  if (ranked.length === 0) {
+    return bonusMap;
+  }
+
+  // Award `bonus` to the whole tied tier starting at fromIndex; returns the
+  // index of the next distinct BPS tier.
+  const award = (bonus: number, fromIndex: number): number => {
+    const tierBps = ranked[fromIndex].bps ?? 0;
+    let index = fromIndex;
+    while (index < ranked.length && (ranked[index].bps ?? 0) === tierBps) {
+      bonusMap.set(ranked[index].elementId, bonus);
+      index += 1;
+    }
+    return index;
+  };
+
+  let index = award(3, 0);
+  if (index >= 3 || index >= ranked.length) {
+    return bonusMap;
+  }
+  if (index === 1) {
+    // Exactly one outright leader — the runner-up tier earns 2
+    index = award(2, index);
+    if (index >= 3 || index >= ranked.length) {
+      return bonusMap;
+    }
+  }
+  award(1, index);
+  return bonusMap;
+}
+
+/**
+ * Compute bonus per team for an event.
+ *
+ * Per match: when FPL has already assigned bonus (any bucket player with
+ * bonus > 0) those authoritative values are used as-is; otherwise the
+ * combined bucket is ranked by BPS. A double-gameweek player is ranked in
+ * each of their fixtures — the cache shape holds one 0–3 value per element
+ * (see LiveBonusByTeamSchema), so the best single-match award wins.
+ */
+export function computeLiveBonusByTeam(
+  matches: PlayingMatch[],
+  lives: BonusEligibleLive[],
+): Map<TeamId, Map<number, number>> {
+  const byTeam = new Map<TeamId, Map<number, number>>();
+  const eligible = lives.filter((el) => (el.minutes ?? 0) > 0);
+
+  const livesByTeam = new Map<TeamId, BonusEligibleLive[]>();
+  const ownerByElement = new Map<number, TeamId>();
+  for (const el of eligible) {
+    const list = livesByTeam.get(el.teamId) ?? [];
+    list.push(el);
+    livesByTeam.set(el.teamId, list);
+    ownerByElement.set(el.elementId, el.teamId);
+  }
+
+  const setBonus = (teamId: TeamId, elementId: number, bonus: number, keepMax: boolean) => {
+    const teamMap = byTeam.get(teamId) ?? new Map<number, number>();
+    teamMap.set(elementId, keepMax ? Math.max(teamMap.get(elementId) ?? 0, bonus) : bonus);
+    byTeam.set(teamId, teamMap);
+  };
+
+  for (const { teamA, teamB } of matches) {
+    const bucket = [...(livesByTeam.get(teamA) ?? []), ...(livesByTeam.get(teamB) ?? [])];
+    if (bucket.length === 0) {
+      continue;
+    }
+
+    if (bucket.some((el) => (el.bonus ?? 0) > 0)) {
+      // FPL has assigned bonus for this match — use the authoritative values
+      for (const el of bucket) {
+        if ((el.bonus ?? 0) > 0) {
+          setBonus(el.teamId, el.elementId, el.bonus ?? 0, false);
+        }
+      }
+      continue;
+    }
+
+    for (const [elementId, bonus] of calculateMatchBonus(bucket)) {
+      const owner = ownerByElement.get(elementId);
+      if (owner !== undefined) {
+        setBonus(owner, elementId, bonus, true);
+      }
+    }
+  }
+
+  return byTeam;
 }

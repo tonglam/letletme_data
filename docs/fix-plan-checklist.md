@@ -52,7 +52,7 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
 - [ ] **FP-10 · Upsert correctness pack** (H5, H6 · S · *after FP-01*)
   - [ ] `entry-event-transfers` conflict update: `elementInPlayed` → `COALESCE(excluded, existing)`
   - [ ] `player-values.insertBatch` → `.onConflictDoNothing({ target: [elementId, changeDate] })`
-- [ ] **FP-11 · Live bonus per match** (H7 · M) — rank combined match bucket (≤6 pts/match); fix DGW `buildPlayingMap`; tests for both
+- [x] **FP-11 · Live bonus per match** (H7 · M) — rank combined match bucket (≤6 pts/match); fix DGW `buildPlayingMap`; tests for both
 - [ ] **FP-12 · Cache writer bugs — shape-preserving** (H8, H9 · M · *after FP-06*)
   - [ ] `fixtures-cache.ts:177-189`: skip delete+rebuild of `FixturesByTeam:*` when `teamById` empty
   - [ ] Player-stats cache = latest-event-wins view: only write when `eventId` is current event; old-event syncs → DB only
