@@ -127,4 +127,4 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
 
 | FP | Commit SHA | Date | Notes |
 |----|-----------|------|-------|
-| — | — | — | — |
+| FP-05 | 78a9660 (PR #7) | 2026-07-17 | tsc now blocks merges |
