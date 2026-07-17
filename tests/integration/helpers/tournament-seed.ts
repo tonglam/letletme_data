@@ -21,7 +21,6 @@ export type SeedMode = 'any' | 'points_races' | 'battle_races' | 'knockout';
 // Synthetic entry IDs live far outside the real FPL entry id space (~12M max),
 // so seeded rows can never collide with — or be mistaken for — real data.
 const SEED_ENTRY_BASE = 99000001;
-const SEED_ENTRY_RANGE = 1000;
 const SEED_LEAGUE_ID = 900001;
 const SEED_ADMIN_ID = String(SEED_ENTRY_BASE);
 const SEED_CREATOR = 'integration-seed';
