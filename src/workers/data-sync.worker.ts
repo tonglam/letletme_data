@@ -8,10 +8,10 @@ import {
   isDataSyncTieredQueueEnabled,
 } from '../queues/data-sync.queue';
 import { syncEvents } from '../services/events.service';
-import { syncFixtures } from '../services/fixtures.service';
+import { syncAllGameweeks, syncFixtures } from '../services/fixtures.service';
 import { syncPhases } from '../services/phases.service';
 import { syncPlayers } from '../services/players.service';
-import { syncCurrentPlayerStats } from '../services/player-stats.service';
+import { syncCurrentPlayerStats, syncPlayerStatsForEvent } from '../services/player-stats.service';
 import { syncCurrentPlayerValues } from '../services/player-values.service';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { syncTeams } from '../services/teams.service';
@@ -45,13 +45,18 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
           case 'events':
             return syncEvents();
           case 'fixtures':
-            return syncFixtures();
+            return syncFixtures(job.data.eventId);
+          case 'fixtures-all-gameweeks':
+            // Per-GW loop with isolated errors — not the same as syncFixtures(undefined).
+            return syncAllGameweeks();
           case 'teams':
             return syncTeams();
           case 'players':
             return syncPlayers();
           case 'player-stats':
-            return syncCurrentPlayerStats();
+            return job.data.eventId !== undefined
+              ? syncPlayerStatsForEvent(job.data.eventId)
+              : syncCurrentPlayerStats();
           case 'phases':
             return syncPhases();
           case 'player-values':

@@ -58,17 +58,17 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
   - [x] `fixtures-cache.ts`: skip delete+rebuild of `FixturesByTeam:*` when `teamById` empty
   - [x] Player-stats cache = latest-event-wins view: only write when `eventId` is current event; old-event syncs → DB only
   - [x] Document both semantics + DGW one-fixture limitation in `redis-contract.md`
-- [ ] **FP-13 · API hardening pack** (H1, H2, M1–M4, L1–L4 · L · *client-visible: announce error-envelope change*)
-  - [ ] a. Generic 5xx message in prod; `getHttpStatusFromError` in global handler
-  - [ ] b. Rate limit on POST/DELETE (trigger + sync routes), independent of `ENABLE_AUTH`
-  - [ ] c. Deterministic job IDs for manual triggers (drop `Date.now()`)
-  - [ ] d. Inline syncs → enqueue + 202 (`sync-all-gameweeks`, entity `/sync` routes)
-  - [ ] e. `entry-sync` via queue / `mapWithConcurrency` cap
-  - [ ] f. Mount better-auth under `/api/auth` (restore JSON 404 envelope)
-  - [ ] g. `t.Numeric()` schemas; delete bare `parseInt`
-  - [ ] h. Standardize `{ success, data?, error? }`; 200 sync / 202 enqueued
-  - [ ] i. `check-name` minLength 1; drop `setupError` from public `setup-status`
-  - [ ] j. 429 on `RATE_LIMITED`; try/catch → 503 on auth-infra failure
+- [x] **FP-13 · API hardening pack** (H1, H2, M1–M4, L1–L4 · L · *client-visible: announce error-envelope change*)
+  - [x] a. Generic 5xx message in prod; `getHttpStatusFromError` in global handler
+  - [x] b. Rate limit on POST/DELETE (trigger + sync routes), independent of `ENABLE_AUTH`
+  - [x] c. Deterministic job IDs for manual triggers (drop `Date.now()`)
+  - [x] d. Inline syncs → enqueue + 202 (`sync-all-gameweeks`, entity `/sync` routes)
+  - [x] e. `entry-sync` via queue / `mapWithConcurrency` cap
+  - [x] f. Mount better-auth under `/api/auth` (restore JSON 404 envelope)
+  - [x] g. `t.Numeric()` schemas; delete bare `parseInt`
+  - [x] h. Standardize `{ success, data?, error? }`; 200 sync / 202 enqueued
+  - [x] i. `check-name` minLength 1; drop `setupError` from public `setup-status`
+  - [x] j. 429 on `RATE_LIMITED`; try/catch → 503 on auth-infra failure
 - [ ] **FP-14 · Job safety pack** (H10, H11, M9–M14 · L · *alerting needs prod `TELEGRAM_*` envs*)
   - [ ] a. `entry-event-results-daily`: `isFPLSeason` + current-event guards
   - [ ] b. Watchdog checks active job/lock before recovering setups
@@ -141,3 +141,4 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
 | FP-10 | (PR #12) | 2026-07-17 | COALESCE elementInPlayed; player-values DO NOTHING + return inserted |
 | FP-11 | (PR #13) | 2026-07-17 | per-match 3/2/1; DGW finished seed-only; live full rank + keepMax |
 | FP-12 | (PR #14) | 2026-07-17 | FixturesByTeam empty-teams guard; PlayerStat current-event-only write |
+| FP-13 | (PR #15) | 2026-07-17 | error envelope, rate limit, queue-first entry/entity syncs |

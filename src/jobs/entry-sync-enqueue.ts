@@ -8,6 +8,7 @@ import {
 } from '../queues/entry-sync.queue';
 import { getEntrySyncJobPriority, type EntrySyncPriorityJobName } from '../domain/job-priority';
 import { logError, logInfo } from '../utils/logger';
+import { stableHash } from '../utils/stable-hash';
 
 export interface EntrySyncJobOptions {
   entryIds?: number[];
@@ -19,6 +20,17 @@ export interface EntrySyncJobOptions {
   jobId?: string;
   delayMs?: number;
   eventId?: number;
+}
+
+function hashEntryListKey(
+  entryIds: readonly number[],
+  eventId?: number,
+  retryCount?: number,
+): string {
+  const sorted = [...entryIds].sort((a, b) => a - b).join(',');
+  // Include retryCount so delayed full-batch retries do not collide with the
+  // still-active original jobId (BullMQ dedupes identical jobIds).
+  return stableHash(`${sorted}|e${eventId ?? ''}|r${retryCount ?? 0}`);
 }
 
 function sanitizePositiveInt(value: number | undefined, fallback: number) {
@@ -54,11 +66,19 @@ async function enqueueEntrySyncJob(
 
     const chunkKey =
       options.eventId !== undefined ? `${chunkOffset}-event-${options.eventId}` : `${chunkOffset}`;
-    // Use unique IDs to avoid BullMQ deduping future cron cycles while completed jobs are retained.
-    const defaultJobId = options.entryIds
-      ? `${jobName}-entry-list-${Date.now()}`
-      : `${jobName}-chunk-${chunkKey}-${Date.now()}`;
+    // Entry-list jobs (API with explicit IDs) and manual/API full-table chunk-0
+    // triggers get deterministic IDs so repeat POSTs dedupe. Cron chunks stay
+    // time-based so every schedule tick enqueues.
+    const isEntryList = options.entryIds !== undefined;
+    const isManualTableScan =
+      !isEntryList && (source === 'api' || source === 'manual') && options.retryCount === undefined;
+    const defaultJobId = isEntryList
+      ? `${jobName}-entry-list-${hashEntryListKey(options.entryIds ?? [], options.eventId, options.retryCount)}`
+      : isManualTableScan
+        ? `${jobName}-chunk-${chunkKey}-${source}`
+        : `${jobName}-chunk-${chunkKey}-${Date.now()}`;
     const jobId = options.jobId ?? defaultJobId;
+    const removeOnSettle = isEntryList || isManualTableScan;
 
     const job = await queue.add(jobName, jobData, {
       attempts: 3,
@@ -68,6 +88,8 @@ async function enqueueEntrySyncJob(
       },
       jobId,
       delay: options.delayMs,
+      // Deterministic IDs must not block re-triggers after settle.
+      ...(removeOnSettle ? { removeOnComplete: true, removeOnFail: true } : {}),
     });
 
     logInfo('Entry sync job enqueued', {

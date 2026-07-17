@@ -1,20 +1,23 @@
 /**
  * Integration-test safety fence (FP-02 / review finding C2).
  *
- * Every file under tests/integration imports this module FIRST and calls
- * `assertIntegrationEnv()` as its first statement, before any test runs:
+ * Every file under tests/integration must import this module FIRST (before any
+ * src/* / queue imports) and also call `assertIntegrationEnv()` in the module
+ * body:
  *
  *   import { assertIntegrationEnv } from './helpers/env-guard';
  *
  *   assertIntegrationEnv();
  *
- * (A top-level throw in this module is NOT sufficient: `bun test` shares the
- * module registry across test files, so a module that throws during evaluation
- * is not re-executed — nor re-thrown — for the remaining files. The per-file
- * call is what fences every file. DB/Redis connections in src/* are lazy, so
- * throwing here still precedes any connection being opened.)
+ * Dual fence:
+ * 1. Top-level assert at the bottom of THIS module — when this file is the first
+ *    import of a test, ESM evaluates it before sibling imports, so BullMQ Queue
+ *    construction in later imports never runs against an unsafe env.
+ * 2. Per-file `assertIntegrationEnv()` call — `bun test` shares the module
+ *    registry across files, so a prior successful load would skip re-evaluation;
+ *    the call re-checks every file.
  *
- * Importing it throws unless ALL of the following hold:
+ * Fails unless ALL of the following hold:
  *
  *   1. RUN_INTEGRATION=1 — integration tests only run via `bun run test:integration`.
  *   2. DATABASE_URL points at test infrastructure (matches localhost | 127.0.0.1 | _test).
@@ -66,3 +69,7 @@ export function assertIntegrationEnv(): void {
     fail('QUEUE_REDIS_DB resolves to 0 (BullMQ queues would drain against the shared DB)');
   }
 }
+
+// First-import fence: when a test lists this module before infra imports,
+// evaluation stops here on an unsafe env so Queue constructors never run.
+assertIntegrationEnv();

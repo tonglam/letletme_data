@@ -1,7 +1,7 @@
 import { Elysia } from 'elysia';
 
 import { JobNotFoundError, listTriggerableJobs, triggerJob } from '../services/job-trigger.service';
-import { getErrorMessage } from '../utils/errors';
+import { getHttpStatusFromError, getPublicErrorMessage } from '../utils/errors';
 import { logError } from '../utils/logger';
 
 /**
@@ -50,7 +50,8 @@ export const jobsAPI = new Elysia({ prefix: '/jobs' })
       }
 
       logError(`Manual job failed: ${name}`, error);
-      set.status = 500;
-      return { success: false, error: getErrorMessage(error) };
+      const status = getHttpStatusFromError(error);
+      set.status = status;
+      return { success: false, error: getPublicErrorMessage(error, status) };
     }
   });
