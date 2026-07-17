@@ -5,7 +5,7 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
 - **Full detail (file-level changes, acceptance criteria):** [fix-plan-2026-07-17.md](./fix-plan-2026-07-17.md)
 - **Findings evidence:** [code-review-2026-07-17.md](./code-review-2026-07-17.md)
 
-**Progress:** P0 `6/6` · P1 `2/10` · P2 `0/9` · Deferred `0/4`
+**Progress:** P0 `6/6` · P1 `3/10` · P2 `0/9` · Deferred `0/4`
 
 **Ground rules**
 1. Redis keys/shapes are **frozen** — fixes within existing shapes; new data → additive keys only; deletions need consumer sign-off.
@@ -47,7 +47,7 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
 
 ## P1 — Data integrity & operability (~9–10 days, parallel except noted)
 
-- [ ] **FP-07 · Unify tournament lock scopes** (C4 · M) — shared `tournament-structure:global` scope for setup + 4 results jobs; scope unit tests
+- [x] **FP-07 · Unify tournament lock scopes** (C4 · M) — shared `tournament-structure:global` scope for setup + 4 results jobs + MV refresh; scope unit tests
 - [x] **FP-08 · Tournament creation rank poisoning** (C5 · S) — `entry_infos` upsert → `ON CONFLICT (id) DO NOTHING`; integration test with already-synced entry
 - [ ] **FP-09 · Battle-race counters** (C6 · M · *after FP-07*) — skip matchup on missing entry result; derive `played` like points-race; expose `skipped` count
 - [ ] **FP-10 · Upsert correctness pack** (H5, H6 · S · *after FP-01*)
@@ -136,3 +136,4 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
 | FP-08 | 5a53a87 (PR #10) | 2026-07-17 | — |
 | FP-15 | 8a0c80a (PR #17) | 2026-07-17 | PR #17 |
 | FP-06 | (PR #8) | 2026-07-17 | Codex P2s addressed: ops keys, FixturesByTeam current behavior, auto season cleanup |
+| FP-07 | (PR #9) | 2026-07-17 | global structure lock; MV refresh waits on same scope (Codex P2) |

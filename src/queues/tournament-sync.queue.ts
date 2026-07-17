@@ -28,6 +28,12 @@ export interface TournamentSyncJobData {
   eventId: number;
   source: 'cron' | 'manual' | 'cascade';
   triggeredAt: string;
+  /**
+   * Shared id for one cascade fan-out. Structure jobs (points/battle/knockout)
+   * that finish under this id decrement a Redis barrier; the last one enqueues
+   * the materialized-views refresh so it cannot interleave mid-cascade.
+   */
+  cascadeId?: string;
 }
 
 const tieredQueueSet = createTieredQueueSet<TournamentSyncJobData>(tournamentSyncQueueName, {
