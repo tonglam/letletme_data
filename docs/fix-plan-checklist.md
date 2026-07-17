@@ -5,7 +5,7 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
 - **Full detail (file-level changes, acceptance criteria):** [fix-plan-2026-07-17.md](./fix-plan-2026-07-17.md)
 - **Findings evidence:** [code-review-2026-07-17.md](./code-review-2026-07-17.md)
 
-**Progress:** P0 `0/6` · P1 `0/10` · P2 `0/9` · Deferred `0/4`
+**Progress:** P0 `2/6` · P1 `0/10` · P2 `0/9` · Deferred `0/4`
 
 **Ground rules**
 1. Redis keys/shapes are **frozen** — fixes within existing shapes; new data → additive keys only; deletions need consumer sign-off.
@@ -18,12 +18,13 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
 
 ## P0 — Safety & correctness foundations (~3 days, sequential)
 
-- [ ] **FP-01 · Repair fresh-database bootstrap** (C1, L15 · effort L) — *blocks FP-10, FP-15*
-  - [ ] `migrations/0026_create_tournament_selection_stats.sql` — `CREATE TABLE IF NOT EXISTS` per Drizzle schema (sorts before the RLS file)
-  - [ ] `migrations/0028_add_entry_event_transfers_unique_index.sql` — `CREATE UNIQUE INDEX IF NOT EXISTS … (entry_id, event_id)` + matching `uniqueIndex` in `entry-event-transfers.schema.ts` *(check prod for an existing constraint name first)*
-  - [ ] Delete orphan duplicates `0003_create_player_values_table.sql`, `0005_remove_unused_player_stats_fields.sql`
-  - [ ] `apply-sql-migrations.ts` excludes journal-listed files; add `migrations/README` note ("db:generate frozen, hand-write `NNNN_name.sql`")
-  - [ ] Fresh-install rehearsal: empty Postgres → `db:migrate` + `db:apply-sql` green; `tournament_selection_stats`, `bauth.*`, unique index verified
+- [x] **FP-01 · Repair fresh-database bootstrap** (C1, L15 · effort L) — *blocks FP-10, FP-15*
+  - [x] `migrations/0026_create_tournament_selection_stats.sql` — `CREATE TABLE IF NOT EXISTS` per Drizzle schema (sorts before the RLS file)
+  - [x] `migrations/0028_add_entry_event_transfers_unique_index.sql` — `CREATE UNIQUE INDEX IF NOT EXISTS … (entry_id, event_id)` + matching `uniqueIndex` in `entry-event-transfers.schema.ts` *(prod check found existing `unique_entry_event_transfer`; reused that name — no duplicate index)*
+  - [x] Delete orphan duplicates `0003_create_player_values_table.sql`, `0005_remove_unused_player_stats_fields.sql`
+  - [x] `apply-sql-migrations.ts` excludes journal-listed files; add `migrations/README` note ("db:generate frozen, hand-write `NNNN_name.sql`")
+  - [x] Fresh-install rehearsal: empty Postgres → `db:migrate` + `db:apply-sql` green; `tournament_selection_stats`, `bauth.*`, unique index verified
+  - [x] *Found during rehearsal:* journaled `0005` `teams.unavailable` bool→int alter was un-castable (added `USING` + default fix; prod never applied it — still boolean, timestamp-gated so it never re-runs); `0006_align_event_lives_table_name.sql` (0005 created `event_live`, prod/schema use `event_lives`); `0023_add_tournament_points_group_cum_columns.sql` (4 `cum_*` columns existed only in prod, views 0023/0024 need them)
 - [ ] **FP-02 · Fence integration tests off real infra** (C2 · M)
   - [ ] `test` → `bun test tests/unit`; add `test:integration` (`RUN_INTEGRATION=1`) and `test:all`
   - [ ] `tests/integration/helpers/env-guard.ts` (RUN_INTEGRATION=1 + test-pattern DATABASE_URL + non-0 Redis DB), wired to `tests/utils/test-config.ts`
@@ -38,7 +39,7 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
   - [ ] `fpl.ts:348` → `explain: z.array(z.unknown()).nullable()`
   - [ ] `fpl.ts:502` → `active_chip: z.string().nullable()` + known-chip mapping with `logWarn` on unknown
   - [ ] Regression tests: `explain: null` element; `active_chip: 'manager'` picks payload
-- [ ] **FP-05 · CI typecheck step** (H14 · XS) — `bun run typecheck` in `ci.yml` after Lint *(verified green 2026-07-17)*
+- [x] **FP-05 · CI typecheck step** (H14 · XS) — `bun run typecheck` in `ci.yml` after Lint *(verified green 2026-07-17)*
 - [ ] **FP-06 · Redis key contract doc** (new · S · *needs Tong's consumer inventory*)
   - [ ] `docs/redis-contract.md`: key patterns, hash fields, JSON shapes, TTL behavior
   - [ ] Consumers section (from Tong's inventory)
@@ -127,4 +128,5 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
 
 | FP | Commit SHA | Date | Notes |
 |----|-----------|------|-------|
+| FP-01 | 47baf1f (PR #3) | 2026-07-17 | Prod no-ops verified; teams.unavailable prod drift noted for FP-21 |
 | FP-05 | 78a9660 (PR #7) | 2026-07-17 | tsc now blocks merges |
