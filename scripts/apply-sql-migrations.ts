@@ -21,11 +21,32 @@ async function ensureLedger(): Promise<void> {
   `;
 }
 
+function listJournaledMigrationFiles(): Set<string> {
+  const journalPath = join(migrationsDir, 'meta', '_journal.json');
+  try {
+    const journal = JSON.parse(readFileSync(journalPath, 'utf8')) as {
+      entries?: { tag?: string }[];
+    };
+    return new Set(
+      (journal.entries ?? [])
+        .map((entry) => entry.tag)
+        .filter((tag): tag is string => typeof tag === 'string')
+        .map((tag) => `${tag}.sql`),
+    );
+  } catch {
+    console.warn(
+      `[sql-migrate] no readable journal at ${journalPath}; treating all files as pending`,
+    );
+    return new Set();
+  }
+}
+
 function listSqlMigrationFiles(): string[] {
+  const journaled = listJournaledMigrationFiles();
   return readdirSync(migrationsDir)
     .filter((name) => /^\d{4}_.+\.sql$/.test(name))
-    .sort()
-    .filter((name) => Number(name.slice(0, 4)) > 5);
+    .filter((name) => !journaled.has(name))
+    .sort();
 }
 
 async function isApplied(filename: string): Promise<boolean> {

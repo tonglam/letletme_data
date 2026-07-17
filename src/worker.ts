@@ -7,6 +7,7 @@ import { createTournamentSetupWorker } from './workers/tournament-setup.worker';
 import { getConfig } from './utils/config';
 import { startQueueMonitor } from './utils/queue-monitor';
 import { logInfo } from './utils/logger';
+import { startWorkerHeartbeat } from './utils/worker-heartbeat';
 import type { WorkerRuntime } from './workers/worker-runtime';
 
 getConfig();
@@ -44,8 +45,13 @@ const queueMonitors = runtimes.flatMap((runtime) =>
 const allWorkers = runtimes.flatMap((runtime) => runtime.workers);
 const allQueueEvents = runtimes.flatMap((runtime) => runtime.queueEvents);
 
+// Docker healthcheck reads this file's mtime; a stale heartbeat means the
+// event loop is hung even if the process is still alive.
+const stopHeartbeat = startWorkerHeartbeat();
+
 async function shutdown(signal: string) {
   logInfo('Worker shutting down', { signal });
+  stopHeartbeat();
   queueMonitors.forEach((monitor) => monitor.stop());
   runtimes.forEach((runtime) => runtime.stop?.());
   await Promise.allSettled([

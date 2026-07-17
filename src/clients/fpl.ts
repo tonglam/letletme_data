@@ -345,7 +345,8 @@ class FPLClient {
       const EventLiveElementSchema = z.object({
         id: z.number(),
         stats: EventLiveStatsSchema,
-        explain: z.array(z.unknown()),
+        // FPL returns explain: null for players with no recorded stats yet
+        explain: z.array(z.unknown()).nullable(),
       });
 
       const EventLiveResponseSchema = z.object({
@@ -499,7 +500,10 @@ class FPLClient {
       });
 
       const PicksResponseSchema = z.object({
-        active_chip: z.enum(['wildcard', 'freehit', 'bboost', '3xc']).nullable(),
+        // Accept any chip string at the boundary — FPL adds chip types faster
+        // than downstream enums track (e.g. 'manager'). Mapping happens in
+        // src/domain/chips.ts.
+        active_chip: z.string().nullable(),
         automatic_subs: z.array(z.unknown()),
         entry_history: EntryHistorySchema,
         picks: z.array(PickItemSchema),
