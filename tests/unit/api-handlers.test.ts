@@ -32,10 +32,12 @@ mock.module('../../src/services/job-trigger.service', () => ({
 
 const enqueueEventsSyncJob = mock(async () => ({ id: 'events-job-1' }));
 const enqueueFixturesSyncJob = mock(async () => ({ id: 'fixtures-job-1' }));
+const enqueueFixturesAllGameweeksSyncJob = mock(async () => ({ id: 'fixtures-all-gw-job-1' }));
 const enqueuePlayerStatsSyncJob = mock(async () => ({ id: 'player-stats-job-1' }));
 mock.module('../../src/jobs/data-sync-enqueue', () => ({
   enqueueEventsSyncJob,
   enqueueFixturesSyncJob,
+  enqueueFixturesAllGameweeksSyncJob,
   enqueuePlayerStatsSyncJob,
 }));
 
@@ -242,6 +244,7 @@ describe('entrySyncAPI handlers', () => {
 describe('fixturesAPI handlers', () => {
   beforeEach(() => {
     enqueueFixturesSyncJob.mockClear();
+    enqueueFixturesAllGameweeksSyncJob.mockClear();
     clearFixturesCache.mockClear();
   });
 
@@ -272,14 +275,13 @@ describe('fixturesAPI handlers', () => {
     expect(enqueueFixturesSyncJob).not.toHaveBeenCalled();
   });
 
-  test('POST /fixtures/sync-all-gameweeks enqueues the full backfill and returns 202', async () => {
+  test('POST /fixtures/sync-all-gameweeks enqueues the per-GW backfill and returns 202', async () => {
     const response = await fixturesAPI.handle(
       new Request('http://localhost/fixtures/sync-all-gameweeks', { method: 'POST' }),
     );
     expect(response.status).toBe(202);
-    expect(enqueueFixturesSyncJob).toHaveBeenCalledWith('api', {
-      jobId: 'fixtures-sync-all-gameweeks-api',
-    });
+    expect(enqueueFixturesAllGameweeksSyncJob).toHaveBeenCalledWith('api');
+    expect(enqueueFixturesSyncJob).not.toHaveBeenCalled();
   });
 
   test('DELETE /fixtures/cache clears the cache', async () => {

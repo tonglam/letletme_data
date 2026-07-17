@@ -66,15 +66,19 @@ async function enqueueEntrySyncJob(
 
     const chunkKey =
       options.eventId !== undefined ? `${chunkOffset}-event-${options.eventId}` : `${chunkOffset}`;
-    // Entry-list jobs (manual/API HTTP triggers) get a deterministic content-based ID
-    // so repeat triggers with the same payload dedupe in the waiting room. Cron chunk
-    // jobs stay unique per cycle — static IDs would dedupe future cycles while
-    // completed jobs are retained.
+    // Entry-list jobs (API with explicit IDs) and manual/API full-table chunk-0
+    // triggers get deterministic IDs so repeat POSTs dedupe. Cron chunks stay
+    // time-based so every schedule tick enqueues.
     const isEntryList = options.entryIds !== undefined;
+    const isManualTableScan =
+      !isEntryList && (source === 'api' || source === 'manual') && options.retryCount === undefined;
     const defaultJobId = isEntryList
       ? `${jobName}-entry-list-${hashEntryListKey(options.entryIds ?? [], options.eventId, options.retryCount)}`
-      : `${jobName}-chunk-${chunkKey}-${Date.now()}`;
+      : isManualTableScan
+        ? `${jobName}-chunk-${chunkKey}-${source}`
+        : `${jobName}-chunk-${chunkKey}-${Date.now()}`;
     const jobId = options.jobId ?? defaultJobId;
+    const removeOnSettle = isEntryList || isManualTableScan;
 
     const job = await queue.add(jobName, jobData, {
       attempts: 3,
@@ -84,9 +88,8 @@ async function enqueueEntrySyncJob(
       },
       jobId,
       delay: options.delayMs,
-      // See live-data.jobs.ts: deterministic IDs must not block re-triggers after
-      // the previous run settles, so entry-list jobs clean up immediately.
-      ...(isEntryList ? { removeOnComplete: true, removeOnFail: true } : {}),
+      // Deterministic IDs must not block re-triggers after settle.
+      ...(removeOnSettle ? { removeOnComplete: true, removeOnFail: true } : {}),
     });
 
     logInfo('Entry sync job enqueued', {

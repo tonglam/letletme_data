@@ -8,7 +8,7 @@ import {
   isDataSyncTieredQueueEnabled,
 } from '../queues/data-sync.queue';
 import { syncEvents } from '../services/events.service';
-import { syncFixtures } from '../services/fixtures.service';
+import { syncAllGameweeks, syncFixtures } from '../services/fixtures.service';
 import { syncPhases } from '../services/phases.service';
 import { syncPlayers } from '../services/players.service';
 import { syncCurrentPlayerStats, syncPlayerStatsForEvent } from '../services/player-stats.service';
@@ -46,6 +46,9 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
             return syncEvents();
           case 'fixtures':
             return syncFixtures(job.data.eventId);
+          case 'fixtures-all-gameweeks':
+            // Per-GW loop with isolated errors — not the same as syncFixtures(undefined).
+            return syncAllGameweeks();
           case 'teams':
             return syncTeams();
           case 'players':

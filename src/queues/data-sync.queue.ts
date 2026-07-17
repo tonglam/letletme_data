@@ -6,6 +6,7 @@ export const dataSyncQueueName = 'data-sync';
 export type DataSyncJobName =
   | 'events'
   | 'fixtures'
+  | 'fixtures-all-gameweeks'
   | 'teams'
   | 'players'
   | 'player-stats'

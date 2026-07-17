@@ -26,7 +26,16 @@ export const entryEventTransfers = pgTable(
   },
   (table) => [
     index('idx_entry_event_transfers_entry_id').on(table.entryId),
-    uniqueIndex('unique_entry_event_transfer').on(table.entryId, table.eventId),
+    // FPL can return several transfers for one entry in one gameweek.  The
+    // timestamp plus player pair identifies a transfer while still making
+    // retries idempotent.
+    uniqueIndex('unique_entry_event_transfer').on(
+      table.entryId,
+      table.eventId,
+      table.transferTime,
+      table.elementInId,
+      table.elementOutId,
+    ),
   ],
 );
 

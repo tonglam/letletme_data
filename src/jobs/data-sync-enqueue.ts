@@ -11,6 +11,19 @@ interface DataSyncEnqueueOptions {
   removeOnSettle?: boolean;
 }
 
+function defaultDataSyncJobId(
+  jobName: DataSyncJobName,
+  source: DataSyncJobSource,
+  options: DataSyncEnqueueOptions,
+): string | undefined {
+  // API/manual triggers dedupe in the waiting room; cron stays unique per tick.
+  if (source !== 'api' && source !== 'manual') {
+    return undefined;
+  }
+  const eventPart = options.eventId !== undefined ? `-e${options.eventId}` : '';
+  return `${jobName}${eventPart}-${source}`;
+}
+
 async function enqueueDataSyncJob(
   jobName: DataSyncJobName,
   source: DataSyncJobSource = 'cron',
@@ -19,7 +32,8 @@ async function enqueueDataSyncJob(
   try {
     const tier = getDataSyncJobPriority(jobName as DataSyncPriorityJobName);
     const queue = getDataSyncQueue(tier);
-    const hasDeterministicId = options.jobId !== undefined;
+    const jobId = options.jobId ?? defaultDataSyncJobId(jobName, source, options);
+    const hasDeterministicId = jobId !== undefined;
     const removeOnSettle = options.removeOnSettle ?? hasDeterministicId;
     const job = await queue.add(
       jobName,
@@ -34,7 +48,7 @@ async function enqueueDataSyncJob(
           type: 'exponential',
           delay: 60_000,
         },
-        jobId: options.jobId,
+        jobId,
         ...(removeOnSettle ? { removeOnComplete: true, removeOnFail: true } : {}),
       },
     );
@@ -62,6 +76,10 @@ export const enqueueFixturesSyncJob = (
   source?: DataSyncJobSource,
   options?: DataSyncEnqueueOptions,
 ) => enqueueDataSyncJob('fixtures', source, options);
+
+/** Full GW1–38 fixtures backfill with per-gameweek error isolation. */
+export const enqueueFixturesAllGameweeksSyncJob = (source?: DataSyncJobSource) =>
+  enqueueDataSyncJob('fixtures-all-gameweeks', source);
 
 export const enqueueTeamsSyncJob = (source?: DataSyncJobSource) =>
   enqueueDataSyncJob('teams', source);

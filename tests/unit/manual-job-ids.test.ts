@@ -138,6 +138,16 @@ describe('entry-sync entry-list job IDs', () => {
 
     expect(job.id).toMatch(/^entry-picks-chunk-0-\d+$/);
   });
+
+  test('manual table-scan chunk jobs get a deterministic ID with settle cleanup', async () => {
+    const first = await enqueueEntryPicksSyncJob('manual', { chunkOffset: 0 });
+    const second = await enqueueEntryPicksSyncJob('manual', { chunkOffset: 0 });
+
+    expect(first.id).toBe('entry-picks-chunk-0-manual');
+    expect(second.id).toBe(first.id as string);
+    expect(entrySyncAddCalls[0].opts.removeOnComplete).toBe(true);
+    expect(entrySyncAddCalls[0].opts.removeOnFail).toBe(true);
+  });
 });
 
 describe('stableHash', () => {

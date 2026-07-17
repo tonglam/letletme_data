@@ -69,12 +69,14 @@ export function resolveMutationScopes(input: MutationScopeInput): string[] {
     switch (jobName) {
       case 'events':
       case 'fixtures':
+      case 'fixtures-all-gameweeks':
       case 'teams':
       case 'players':
       case 'player-stats':
       case 'phases':
       case 'player-values':
-        return [`data-core:${jobName}`];
+        // All-gameweek backfill shares the fixtures core lock with single-event syncs.
+        return [`data-core:${jobName === 'fixtures-all-gameweeks' ? 'fixtures' : jobName}`];
       default:
         return [];
     }

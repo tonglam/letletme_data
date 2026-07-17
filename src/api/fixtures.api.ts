@@ -1,6 +1,9 @@
 import { Elysia, t } from 'elysia';
 
-import { enqueueFixturesSyncJob } from '../jobs/data-sync-enqueue';
+import {
+  enqueueFixturesAllGameweeksSyncJob,
+  enqueueFixturesSyncJob,
+} from '../jobs/data-sync-enqueue';
 import { clearFixturesCache } from '../services/fixtures.service';
 
 /**
@@ -8,7 +11,7 @@ import { clearFixturesCache } from '../services/fixtures.service';
  *
  * Handles all fixture-related HTTP endpoints:
  * - POST /fixtures/sync - Enqueue fixtures sync (all or specific event), 202
- * - POST /fixtures/sync-all-gameweeks - Enqueue full backfill of every gameweek, 202
+ * - POST /fixtures/sync-all-gameweeks - Enqueue per-GW backfill (isolated errors), 202
  * - DELETE /fixtures/cache - Clear fixtures cache
  */
 
@@ -35,16 +38,13 @@ export const fixturesAPI = new Elysia({ prefix: '/fixtures' })
   )
 
   .post('/sync-all-gameweeks', async ({ set }) => {
-    // The fixtures job with no event filter syncs every gameweek's fixtures and
-    // rebuilds the full fixtures cache — the same end state as the old inline
-    // 38-request loop, with queue retries and dedup via a stable jobId.
-    const job = await enqueueFixturesSyncJob('api', {
-      jobId: 'fixtures-sync-all-gameweeks-api',
-    });
+    // Dedicated job → syncAllGameweeks(): per-GW try/catch so one bad week
+    // does not abort the whole 1–38 backfill (unlike syncFixtures(undefined)).
+    const job = await enqueueFixturesAllGameweeksSyncJob('api');
     set.status = 202;
     return {
       success: true,
-      message: 'Fixtures sync job enqueued for all gameweeks',
+      message: 'Fixtures all-gameweeks backfill job enqueued',
       jobId: job.id,
     };
   })

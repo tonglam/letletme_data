@@ -32,59 +32,106 @@ export const createEntryEventTransfersRepository = (dbInstance?: DatabaseInstanc
         const db = await getDbInstance();
         const byEvent = transfers.filter((t) => t.event === eventId);
         if (byEvent.length === 0) {
-          logInfo('No transfers to insert for event', { entryId, eventId });
-          return;
+          logInfo('Replacing event transfers with an empty set', { entryId, eventId });
         }
-
-        // Choose the most recent transfer within the event
-        const latest = byEvent.reduce(
-          (acc, t) => (new Date(t.time) > new Date(acc.time) ? t : acc),
-          byEvent[0],
-        );
 
         const fallbackPoints = options?.defaultPoints ?? null;
-        const inPts = pointsByElement?.get(latest.element_in) ?? fallbackPoints;
-        const outPts = pointsByElement?.get(latest.element_out) ?? fallbackPoints;
         const elementInPlayed = options?.elementInPlayed ?? null;
 
-        const row: DbEntryEventTransferInsert = {
-          entryId,
-          eventId,
-          elementInId: latest.element_in,
-          elementInCost: latest.element_in_cost ?? null,
-          elementInPoints: inPts,
-          elementInPlayed,
-          elementOutId: latest.element_out,
-          elementOutCost: latest.element_out_cost ?? null,
-          elementOutPoints: outPts,
-          transferTime: new Date(latest.time),
-        };
+        // Replace the complete event atomically.  FPL returns the full
+        // transfer history, so keeping only the latest row silently loses
+        // wildcard/multiple-transfer activity and corrupts transfer costs.
+        const rows: DbEntryEventTransferInsert[] = byEvent
+          .slice()
+          .sort((a, b) => new Date(a.time).getTime() - new Date(b.time).getTime())
+          .map((transfer) => ({
+            entryId,
+            eventId,
+            elementInId: transfer.element_in,
+            elementInCost: transfer.element_in_cost ?? null,
+            elementInPoints: pointsByElement?.get(transfer.element_in) ?? fallbackPoints,
+            elementInPlayed,
+            elementOutId: transfer.element_out,
+            elementOutCost: transfer.element_out_cost ?? null,
+            elementOutPoints: pointsByElement?.get(transfer.element_out) ?? fallbackPoints,
+            transferTime: new Date(transfer.time),
+          }));
 
-        const insertQuery = db.insert(entryEventTransfers).values(row);
-        if (options?.onConflict === 'ignore') {
-          await insertQuery.onConflictDoNothing({
-            target: [entryEventTransfers.entryId, entryEventTransfers.eventId],
-          });
-        } else {
-          await insertQuery.onConflictDoUpdate({
-            target: [entryEventTransfers.entryId, entryEventTransfers.eventId],
-            set: {
-              elementInId: row.elementInId,
-              elementInCost: row.elementInCost,
-              elementInPoints: row.elementInPoints,
-              // Never null out a previously computed value on re-sync (H5):
-              // keep the existing flag when this sync has nothing to say.
-              elementInPlayed: sql`COALESCE(excluded.element_in_played, entry_event_transfers.element_in_played)`,
-              elementOutId: row.elementOutId,
-              elementOutCost: row.elementOutCost,
-              elementOutPoints: row.elementOutPoints,
-              transferTime: row.transferTime,
-              updatedAt: new Date(),
-            },
-          });
-        }
+        // Keep a computed played flag when a later sync has no value to add.
+        // The delete/insert runs in one transaction so readers see either
+        // the previous complete set or the new complete set.
+        await db.transaction(async (tx) => {
+          const existing = await tx
+            .select({
+              transferTime: entryEventTransfers.transferTime,
+              elementInId: entryEventTransfers.elementInId,
+              elementOutId: entryEventTransfers.elementOutId,
+              elementInPlayed: entryEventTransfers.elementInPlayed,
+            })
+            .from(entryEventTransfers)
+            .where(
+              and(
+                eq(entryEventTransfers.entryId, entryId),
+                eq(entryEventTransfers.eventId, eventId),
+              ),
+            );
+          const existingPlayed = new Map(
+            existing.map((row) => [
+              `${row.transferTime.toISOString()}|${row.elementInId}|${row.elementOutId}`,
+              row.elementInPlayed,
+            ]),
+          );
+          const rowsWithPreservedFlags = rows.map((row) => ({
+            ...row,
+            elementInPlayed:
+              row.elementInPlayed ??
+              existingPlayed.get(
+                `${row.transferTime.toISOString()}|${row.elementInId}|${row.elementOutId}`,
+              ) ??
+              null,
+          }));
+          await tx
+            .delete(entryEventTransfers)
+            .where(
+              and(
+                eq(entryEventTransfers.entryId, entryId),
+                eq(entryEventTransfers.eventId, eventId),
+              ),
+            );
+          if (rowsWithPreservedFlags.length === 0) return;
+          const insertQuery = tx.insert(entryEventTransfers).values(rowsWithPreservedFlags);
+          if (options?.onConflict === 'ignore') {
+            await insertQuery.onConflictDoNothing({
+              target: [
+                entryEventTransfers.entryId,
+                entryEventTransfers.eventId,
+                entryEventTransfers.transferTime,
+                entryEventTransfers.elementInId,
+                entryEventTransfers.elementOutId,
+              ],
+            });
+          } else {
+            await insertQuery.onConflictDoUpdate({
+              target: [
+                entryEventTransfers.entryId,
+                entryEventTransfers.eventId,
+                entryEventTransfers.transferTime,
+                entryEventTransfers.elementInId,
+                entryEventTransfers.elementOutId,
+              ],
+              set: {
+                elementInCost: sql`excluded.element_in_cost`,
+                elementInPoints: sql`excluded.element_in_points`,
+                elementInPlayed: sql`COALESCE(excluded.element_in_played, entry_event_transfers.element_in_played)`,
+                elementOutCost: sql`excluded.element_out_cost`,
+                elementOutPoints: sql`excluded.element_out_points`,
+                updatedAt: new Date(),
+              },
+            });
+          }
+        });
 
-        logInfo('Upserted latest entry event transfer', { entryId, eventId });
+        logInfo('Replaced entry event transfers', { entryId, eventId, count: rows.length });
       } catch (error) {
         logError('Failed to upsert entry event transfers', error, { entryId, eventId });
         throw new DatabaseError(
