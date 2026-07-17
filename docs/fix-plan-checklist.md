@@ -53,11 +53,11 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
 - [x] **FP-10 · Upsert correctness pack** (H5, H6 · S · *after FP-01*)
   - [x] `entry-event-transfers` conflict update: `elementInPlayed` → `COALESCE(excluded, existing)`
   - [x] `player-values.insertBatch` → `.onConflictDoNothing({ target: [elementId, changeDate] })` + return only inserted rows for cache/notify
-- [x] **FP-11 · Live bonus per match** (H7 · M) — rank combined match bucket (≤6 pts/match); DGW-safe pairing; no event-level bonus short-circuit for multi-match teams
-- [ ] **FP-12 · Cache writer bugs — shape-preserving** (H8, H9 · M · *after FP-06*)
-  - [ ] `fixtures-cache.ts:177-189`: skip delete+rebuild of `FixturesByTeam:*` when `teamById` empty
-  - [ ] Player-stats cache = latest-event-wins view: only write when `eventId` is current event; old-event syncs → DB only
-  - [ ] Document both semantics + DGW one-fixture limitation in `redis-contract.md`
+- [x] **FP-11 · Live bonus per match** (H7 · M) — rank combined match bucket (≤6 pts/match); DGW-safe pairing; finished multi-match seed-only; live multi-match full rank + keepMax
+- [x] **FP-12 · Cache writer bugs — shape-preserving** (H8, H9 · M · *after FP-06*)
+  - [x] `fixtures-cache.ts`: skip delete+rebuild of `FixturesByTeam:*` when `teamById` empty
+  - [x] Player-stats cache = latest-event-wins view: only write when `eventId` is current event; old-event syncs → DB only
+  - [x] Document both semantics + DGW one-fixture limitation in `redis-contract.md`
 - [ ] **FP-13 · API hardening pack** (H1, H2, M1–M4, L1–L4 · L · *client-visible: announce error-envelope change*)
   - [ ] a. Generic 5xx message in prod; `getHttpStatusFromError` in global handler
   - [ ] b. Rate limit on POST/DELETE (trigger + sync routes), independent of `ENABLE_AUTH`
@@ -139,4 +139,5 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
 | FP-07 | (PR #9) | 2026-07-17 | global structure lock; MV refresh waits on same scope (Codex P2) |
 | FP-09 | (PR #11) | 2026-07-17 | clear phantom points on skip; integration env guard |
 | FP-10 | (PR #12) | 2026-07-17 | COALESCE elementInPlayed; player-values DO NOTHING + return inserted |
-| FP-11 | (PR #13) | 2026-07-17 | per-match 3/2/1; DGW multi-match skips FPL bonus shortcut |
+| FP-11 | (PR #13) | 2026-07-17 | per-match 3/2/1; DGW finished seed-only; live full rank + keepMax |
+| FP-12 | (PR #14) | 2026-07-17 | FixturesByTeam empty-teams guard; PlayerStat current-event-only write |

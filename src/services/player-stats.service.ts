@@ -1,5 +1,6 @@
 import { playerStatsCache } from '../cache/operations';
 import { fplClient } from '../clients/fpl';
+import { shouldWritePlayerStatsView } from '../domain/player-stats';
 import { playerStatsRepository } from '../repositories/player-stats';
 import {
   createTeamsMap,
@@ -104,11 +105,23 @@ export async function syncPlayerStatsForEvent(
   });
 
   if (upsertResult.count > 0) {
-    await playerStatsCache.setByEvent(eventId, transformedPlayerStats);
-    logInfo('Player stats cache updated for event', {
-      eventId,
-      count: transformedPlayerStats.length,
-    });
+    // H9: PlayerStat:{season} is a latest-event-wins view consumed
+    // externally — every setByEvent wholesale-replaces it. Only the current
+    // event may write it; older-event syncs persist to the DB only so a
+    // backfill can never clobber the current view.
+    const currentEvent = await getCurrentEvent();
+    if (shouldWritePlayerStatsView(eventId, currentEvent?.id ?? null)) {
+      await playerStatsCache.setByEvent(eventId, transformedPlayerStats);
+      logInfo('Player stats cache updated for event', {
+        eventId,
+        count: transformedPlayerStats.length,
+      });
+    } else {
+      logInfo('Skipping player stats cache write for non-current event', {
+        eventId,
+        currentEventId: currentEvent?.id ?? null,
+      });
+    }
   }
 
   const result = {
