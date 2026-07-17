@@ -309,17 +309,6 @@ export function groupPlayerValuesByTeam(
 }
 
 /**
- * Get change type based on price comparison (matching Java implementation)
- */
-function getChangeType(currentValue: number, lastValue: number): 'Start' | 'Rise' | 'Faller' {
-  if (lastValue === 0) {
-    return 'Start'; // First time recording this player
-  }
-
-  return currentValue > lastValue ? 'Rise' : 'Faller';
-}
-
-/**
  * Transform players with price changes to PlayerValue objects (Daily approach)
  * Only processes players whose prices have actually changed from their last stored values
  */
@@ -349,7 +338,7 @@ export function transformPlayerValuesWithChanges(
       const currentValue = player.now_cost;
 
       // Determine change type based on price comparison
-      const changeType = getChangeType(currentValue, lastValue);
+      const changeType = determineValueChangeType(currentValue, lastValue);
 
       const playerValue: PlayerValue = {
         eventId,
