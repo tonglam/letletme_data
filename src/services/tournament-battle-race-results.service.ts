@@ -66,15 +66,6 @@ async function syncBattleRaceForTournament(
     return { updatedGroups: 0, updatedResults: 0, skipped: entryIds.length };
   }
   const eventResultMap = new Map(eventResults.map((result) => [result.entryId, result]));
-  const totalsMap = new Map(
-    (
-      await entryEventResultsRepository.aggregateTotalsByEntry(
-        entryIds,
-        groupStartedEventId,
-        Math.min(eventId, groupEndedEventId),
-      )
-    ).map((row) => [row.entryId, row]),
-  );
 
   const battleResults = await tournamentBattleGroupResultsRepository.findByTournamentAndEvent(
     tournament.id,
@@ -140,6 +131,20 @@ async function syncBattleRaceForTournament(
   const updatedResultsCount =
     await tournamentBattleGroupResultsRepository.upsertBatch(scoredBattleResults);
 
+  // Recompute through the latest event that has battle rows in the group
+  // window — not only through this job's eventId. A delayed/retried backfill
+  // of an older GW must not overwrite standings with a prefix total and drop
+  // later GWs (FP-09 Codex P1).
+  const maxStoredEventId = await tournamentBattleGroupResultsRepository.findMaxEventIdInRange(
+    tournament.id,
+    groupStartedEventId,
+    groupEndedEventId,
+  );
+  const recomputeThroughEventId = Math.min(
+    groupEndedEventId,
+    Math.max(eventId, maxStoredEventId ?? eventId),
+  );
+
   // Recompute group counters from the full matchup history in the group
   // window. Re-runs are idempotent and backfill + re-run converges; the old
   // one-way increment guard (played >= expected → skip) locked wrong counters
@@ -147,8 +152,31 @@ async function syncBattleRaceForTournament(
   const history = await tournamentBattleGroupResultsRepository.findByTournamentAndEventRange(
     tournament.id,
     groupStartedEventId,
-    Math.min(eventId, groupEndedEventId),
+    recomputeThroughEventId,
   );
+
+  const totalsMap = new Map(
+    (
+      await entryEventResultsRepository.aggregateTotalsByEntry(
+        entryIds,
+        groupStartedEventId,
+        recomputeThroughEventId,
+      )
+    ).map((row) => [row.entryId, row]),
+  );
+
+  // Overall ranks for tie-breaks: use results at the recompute horizon.
+  const rankingResultMap =
+    recomputeThroughEventId === eventId
+      ? eventResultMap
+      : new Map(
+          (
+            await entryEventResultsRepository.findByEventAndEntryIds(
+              recomputeThroughEventId,
+              entryIds,
+            )
+          ).map((result) => [result.entryId, result]),
+        );
 
   type Counter = { points: number; won: number; drawn: number; lost: number };
   const newCounter = (): Counter => ({ points: 0, won: 0, drawn: 0, lost: 0 });
@@ -180,7 +208,7 @@ async function syncBattleRaceForTournament(
   const updatedGroups: DbTournamentGroupInsert[] = [];
   // Derived absolutely (like points-race) instead of incremented, so re-runs
   // of the same event never inflate the counter.
-  const played = eventId - groupStartedEventId + 1;
+  const played = recomputeThroughEventId - groupStartedEventId + 1;
 
   for (const groupId of groupIds) {
     const groupEntries = await tournamentGroupRepository.findByTournamentAndGroup(
@@ -190,7 +218,7 @@ async function syncBattleRaceForTournament(
     const groupCounters = countersByGroup.get(groupId) ?? new Map<number, Counter>();
     const groupUpdates = groupEntries.map((group) => {
       const entryId = group.entryId;
-      const eventResult = eventResultMap.get(entryId);
+      const eventResult = rankingResultMap.get(entryId);
       if (!eventResult) {
         skipped += 1;
         return null;

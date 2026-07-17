@@ -1,4 +1,4 @@
-import { and, eq, gte, lte, sql } from 'drizzle-orm';
+import { and, eq, gte, lte, max, sql } from 'drizzle-orm';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 
 import {
@@ -83,6 +83,44 @@ export const createTournamentBattleGroupResultsRepository = (dbInstance?: Databa
         throw new DatabaseError(
           'Failed to retrieve tournament battle group results for event range',
           'TOURNAMENT_BATTLE_RESULTS_FIND_RANGE_ERROR',
+          error as Error,
+        );
+      }
+    },
+
+    /**
+     * Latest event_id with battle rows for this tournament in [start, end].
+     * Used so a delayed backfill of an older GW does not recompute standings
+     * only through that older GW and wipe later counters (FP-09 Codex P1).
+     */
+    findMaxEventIdInRange: async (
+      tournamentId: number,
+      startEventId: number,
+      endEventId: number,
+    ): Promise<number | null> => {
+      try {
+        const db = await getDbInstance();
+        const rows = await db
+          .select({ maxEventId: max(tournamentBattleGroupResults.eventId) })
+          .from(tournamentBattleGroupResults)
+          .where(
+            and(
+              eq(tournamentBattleGroupResults.tournamentId, tournamentId),
+              gte(tournamentBattleGroupResults.eventId, startEventId),
+              lte(tournamentBattleGroupResults.eventId, endEventId),
+            ),
+          );
+        const value = rows[0]?.maxEventId;
+        return typeof value === 'number' ? value : value != null ? Number(value) : null;
+      } catch (error) {
+        logError('Failed to find max battle group result event id', error, {
+          tournamentId,
+          startEventId,
+          endEventId,
+        });
+        throw new DatabaseError(
+          'Failed to find max battle group result event id',
+          'TOURNAMENT_BATTLE_RESULTS_MAX_EVENT_ERROR',
           error as Error,
         );
       }
