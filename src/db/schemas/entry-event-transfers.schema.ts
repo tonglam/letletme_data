@@ -1,4 +1,4 @@
-import { boolean, index, integer, pgTable, timestamp } from 'drizzle-orm/pg-core';
+import { boolean, index, integer, pgTable, timestamp, uniqueIndex } from 'drizzle-orm/pg-core';
 import { autoIncrementId, timestamps } from './_helpers.schema';
 import { entryInfos } from './entry-infos.schema';
 import { events } from './events.schema';
@@ -24,7 +24,10 @@ export const entryEventTransfers = pgTable(
     transferTime: timestamp('transfer_time', { withTimezone: true }).notNull(),
     ...timestamps,
   },
-  (table) => [index('idx_entry_event_transfers_entry_id').on(table.entryId)],
+  (table) => [
+    index('idx_entry_event_transfers_entry_id').on(table.entryId),
+    uniqueIndex('unique_entry_event_transfer').on(table.entryId, table.eventId),
+  ],
 );
 
 export type DbEntryEventTransfer = Readonly<typeof entryEventTransfers.$inferSelect>;
