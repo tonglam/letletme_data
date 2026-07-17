@@ -215,10 +215,12 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
             await afterCascadeStructureJob(eventId, cascadeId, job.name);
             break;
 
-          case TOURNAMENT_JOBS.BATTLE_RACE:
-            await syncTournamentBattleRaceResults(eventId);
+          case TOURNAMENT_JOBS.BATTLE_RACE: {
+            // Surface `skipped` (missing entry results) on the job returnvalue.
+            const battleResult = await syncTournamentBattleRaceResults(eventId);
             await afterCascadeStructureJob(eventId, cascadeId, job.name);
-            break;
+            return battleResult;
+          }
 
           case TOURNAMENT_JOBS.KNOCKOUT:
             await syncTournamentKnockoutResults(eventId);
@@ -257,6 +259,7 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
           default:
             throw new Error(`Unknown job name: ${job.name}`);
         }
+        return null;
       }),
   );
 }
