@@ -1,3 +1,7 @@
+import { assertIntegrationEnv } from './helpers/env-guard';
+
+assertIntegrationEnv();
+
 import { afterAll, describe, expect, test } from 'bun:test';
 
 import { closeLockClient, withMutationConflictGuard } from '../../src/utils/mutation-lock';
