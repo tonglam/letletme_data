@@ -6,6 +6,22 @@ export type DataSyncJobSource = 'cron' | 'manual' | 'api' | 'event-transition';
 
 interface DataSyncEnqueueOptions {
   jobId?: string;
+  eventId?: number;
+  /** When true (default for explicit jobId), remove job on settle so re-triggers work. */
+  removeOnSettle?: boolean;
+}
+
+function defaultDataSyncJobId(
+  jobName: DataSyncJobName,
+  source: DataSyncJobSource,
+  options: DataSyncEnqueueOptions,
+): string | undefined {
+  // API/manual triggers dedupe in the waiting room; cron stays unique per tick.
+  if (source !== 'api' && source !== 'manual') {
+    return undefined;
+  }
+  const eventPart = options.eventId !== undefined ? `-e${options.eventId}` : '';
+  return `${jobName}${eventPart}-${source}`;
 }
 
 async function enqueueDataSyncJob(
@@ -16,11 +32,15 @@ async function enqueueDataSyncJob(
   try {
     const tier = getDataSyncJobPriority(jobName as DataSyncPriorityJobName);
     const queue = getDataSyncQueue(tier);
+    const jobId = options.jobId ?? defaultDataSyncJobId(jobName, source, options);
+    const hasDeterministicId = jobId !== undefined;
+    const removeOnSettle = options.removeOnSettle ?? hasDeterministicId;
     const job = await queue.add(
       jobName,
       {
         source,
         triggeredAt: new Date().toISOString(),
+        ...(options.eventId !== undefined ? { eventId: options.eventId } : {}),
       },
       {
         attempts: 3,
@@ -28,7 +48,8 @@ async function enqueueDataSyncJob(
           type: 'exponential',
           delay: 60_000,
         },
-        jobId: options.jobId,
+        jobId,
+        ...(removeOnSettle ? { removeOnComplete: true, removeOnFail: true } : {}),
       },
     );
 
@@ -51,8 +72,14 @@ async function enqueueDataSyncJob(
 export const enqueueEventsSyncJob = (source?: DataSyncJobSource) =>
   enqueueDataSyncJob('events', source);
 
-export const enqueueFixturesSyncJob = (source?: DataSyncJobSource) =>
-  enqueueDataSyncJob('fixtures', source);
+export const enqueueFixturesSyncJob = (
+  source?: DataSyncJobSource,
+  options?: DataSyncEnqueueOptions,
+) => enqueueDataSyncJob('fixtures', source, options);
+
+/** Full GW1–38 fixtures backfill with per-gameweek error isolation. */
+export const enqueueFixturesAllGameweeksSyncJob = (source?: DataSyncJobSource) =>
+  enqueueDataSyncJob('fixtures-all-gameweeks', source);
 
 export const enqueueTeamsSyncJob = (source?: DataSyncJobSource) =>
   enqueueDataSyncJob('teams', source);
@@ -60,8 +87,10 @@ export const enqueueTeamsSyncJob = (source?: DataSyncJobSource) =>
 export const enqueuePlayersSyncJob = (source?: DataSyncJobSource) =>
   enqueueDataSyncJob('players', source);
 
-export const enqueuePlayerStatsSyncJob = (source?: DataSyncJobSource) =>
-  enqueueDataSyncJob('player-stats', source);
+export const enqueuePlayerStatsSyncJob = (
+  source?: DataSyncJobSource,
+  options?: DataSyncEnqueueOptions,
+) => enqueueDataSyncJob('player-stats', source, options);
 
 export const enqueuePhasesSyncJob = (source?: DataSyncJobSource) =>
   enqueueDataSyncJob('phases', source);

@@ -302,7 +302,7 @@ export function createEntrySyncWorker(): WorkerRuntime {
               return handleEntryJob(
                 'entry-results',
                 'entry results sync',
-                syncEntryEventResults,
+                (entryId) => syncEntryEventResults(entryId, job.data?.eventId),
                 job.data,
               );
             default:

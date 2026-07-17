@@ -36,6 +36,8 @@ const EnvSchema = z.object({
   BETTER_AUTH_SECRET: z.string().optional(),
   BETTER_AUTH_URL: z.string().url().optional(),
   CORS_ORIGINS: z.string().optional(),
+  // HTTP mutation rate limit (fixed window per client IP; 0 disables)
+  RATE_LIMIT_MUTATIONS_PER_MINUTE: z.coerce.number().int().min(0).default(60),
   // Optional Supabase hints (DB provider)
   SUPABASE_URL: z.string().optional(),
   SUPABASE_KEY: z.string().optional(),

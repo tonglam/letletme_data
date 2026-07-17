@@ -103,16 +103,22 @@ export async function syncCurrentPlayerValues(): Promise<{ count: number }> {
 
   const result = await playerValuesRepository.insertBatch(playerValues);
 
-  // Cache only the player values that changed on this date
+  // Cache/notify only rows that were actually inserted — partial ON CONFLICT
+  // DO NOTHING must not publish skipped values to Telegram (FP-10).
+  // Merge into Redis (do not replace the whole hash) so concurrent daily syncs
+  // that each insert different elements do not erase each other's winners.
   if (result.count > 0) {
-    await playerValuesCache.set(today, playerValues);
-    logInfo('Player values cache updated', { changeDate: today, count: playerValues.length });
+    await playerValuesCache.merge(today, result.inserted);
+    logInfo('Player values cache merged', {
+      changeDate: today,
+      count: result.inserted.length,
+    });
 
-    const hasRiseOrFall = playerValues.some(
+    const hasRiseOrFall = result.inserted.some(
       (pv) => pv.changeType === 'Rise' || pv.changeType === 'Faller',
     );
     if (hasRiseOrFall) {
-      const message = formatPlayerValuesNotification(today, playerValues);
+      const message = formatPlayerValuesNotification(today, result.inserted);
       await notifyTwoBots(message);
     }
   }
@@ -125,5 +131,5 @@ export async function syncCurrentPlayerValues(): Promise<{ count: number }> {
     recordsInserted: result.count,
   });
 
-  return result;
+  return { count: result.count };
 }

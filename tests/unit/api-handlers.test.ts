@@ -2,22 +2,10 @@ import { beforeEach, describe, expect, mock, test } from 'bun:test';
 
 const getCurrentEvent = mock(async () => ({ id: 20, name: 'Gameweek 20' }));
 const getNextEvent = mock(async () => ({ id: 21, name: 'Gameweek 21' }));
-const syncEvents = mock(async () => ({ count: 38 }));
 
 mock.module('../../src/services/events.service', () => ({
   getCurrentEvent,
   getNextEvent,
-  syncEvents,
-}));
-
-const syncEntryEventPicks = mock(async (entryId: number) => ({ entryId, ok: true }));
-const syncEntryEventTransfers = mock(async (entryId: number) => ({ entryId, ok: true }));
-const syncEntryEventResults = mock(async (entryId: number) => ({ entryId, ok: true }));
-
-mock.module('../../src/services/entries.service', () => ({
-  syncEntryEventPicks,
-  syncEntryEventTransfers,
-  syncEntryEventResults,
 }));
 
 class JobNotFoundError extends Error {
@@ -42,21 +30,67 @@ mock.module('../../src/services/job-trigger.service', () => ({
   triggerJob,
 }));
 
-const syncFixtures = mock(async () => ({ count: 10 }));
+const enqueueEventsSyncJob = mock(async () => ({ id: 'events-job-1' }));
+const enqueueFixturesSyncJob = mock(async () => ({ id: 'fixtures-job-1' }));
+const enqueueFixturesAllGameweeksSyncJob = mock(async () => ({ id: 'fixtures-all-gw-job-1' }));
+const enqueuePlayerStatsSyncJob = mock(async () => ({ id: 'player-stats-job-1' }));
+mock.module('../../src/jobs/data-sync-enqueue', () => ({
+  enqueueEventsSyncJob,
+  enqueueFixturesSyncJob,
+  enqueueFixturesAllGameweeksSyncJob,
+  enqueuePlayerStatsSyncJob,
+}));
+
+const enqueueEntryPicksSyncJob = mock(async () => ({ id: 'picks-job-1' }));
+const enqueueEntryTransfersSyncJob = mock(async () => ({ id: 'transfers-job-1' }));
+const enqueueEntryResultsSyncJob = mock(async () => ({ id: 'results-job-1' }));
+mock.module('../../src/jobs/entry-sync-enqueue', () => ({
+  enqueueEntryPicksSyncJob,
+  enqueueEntryTransfersSyncJob,
+  enqueueEntryResultsSyncJob,
+}));
+
+// Mock the live-data queue (not live-data.jobs) so real enqueue helpers run and
+// unit suites stay isolated from manual-job-ids.test.ts which also exercises
+// the real live-data.jobs module.
+mock.module('../../src/queues/live-data.queue', () => ({
+  LIVE_JOBS: {
+    EVENT_LIVES_CACHE: 'event-lives-cache',
+    EVENT_LIVES_DB: 'event-lives-db',
+    EVENT_LIVE_SUMMARY: 'event-live-summary',
+    EVENT_LIVE_EXPLAIN: 'event-live-explain',
+    LIVE_FIXTURE_CACHE: 'live-fixture-cache',
+    LIVE_BONUS_CACHE: 'live-bonus-cache',
+    EVENT_OVERALL_RESULT: 'event-overall-result',
+    LIVE_SCORES: 'live-scores',
+  },
+  getLiveDataQueue: () => ({
+    name: 'live-data-p1',
+    add: async (_name: string, _data: unknown, opts: { jobId?: string }) => ({
+      id: opts.jobId ?? 'generated-live-id',
+    }),
+  }),
+}));
+
+const getEventLivesByEventId = mock(async (eventId: number) => ({ eventId, elements: [] }));
+mock.module('../../src/services/event-lives.service', () => ({
+  getEventLivesByEventId,
+}));
+
+const clearFixturesCache = mock(async () => undefined);
 mock.module('../../src/services/fixtures.service', () => ({
-  syncFixtures,
-  syncAllGameweeks: mock(async () => ({ totalCount: 0, totalErrors: 0, perGameweek: [] })),
-  clearFixturesCache: mock(async () => undefined),
+  clearFixturesCache,
 }));
 
 const checkTournamentNameAvailability = mock(async (name: string) => ({
   available: name !== 'taken',
   name,
 }));
+const getTournamentSetupStatus = mock(async () => null as null | Record<string, unknown>);
 mock.module('../../src/services/tournament-create.service', () => ({
   checkTournamentNameAvailability,
   createTournament: mock(async () => ({})),
-  getTournamentSetupStatus: mock(async () => null),
+  getTournamentSetupStatus,
 }));
 
 const syncEntryInfo = mock(async (entryId: number) => ({ id: entryId, name: 'Test' }));
@@ -68,6 +102,8 @@ const { eventsAPI } = await import('../../src/api/events.api');
 const { jobsAPI } = await import('../../src/api/jobs.api');
 const { entrySyncAPI } = await import('../../src/api/entry-sync.api');
 const { fixturesAPI } = await import('../../src/api/fixtures.api');
+const { playerStatsAPI } = await import('../../src/api/player-stats.api');
+const { eventLivesAPI } = await import('../../src/api/event-lives.api');
 const { tournamentsAPI } = await import('../../src/api/tournaments.api');
 const { entryInfoAPI } = await import('../../src/api/entry-info.api');
 
@@ -75,7 +111,7 @@ describe('eventsAPI handlers', () => {
   beforeEach(() => {
     getCurrentEvent.mockClear();
     getNextEvent.mockClear();
-    syncEvents.mockClear();
+    enqueueEventsSyncJob.mockClear();
   });
 
   test('GET /events/current returns current event payload', async () => {
@@ -89,15 +125,15 @@ describe('eventsAPI handlers', () => {
     expect(getCurrentEvent).toHaveBeenCalledTimes(1);
   });
 
-  test('POST /events/sync triggers syncEvents', async () => {
+  test('POST /events/sync enqueues the events sync job and returns 202', async () => {
     const response = await eventsAPI.handle(
       new Request('http://localhost/events/sync', { method: 'POST' }),
     );
-    expect(response.status).toBe(200);
-    const body = (await response.json()) as { success: boolean; count: number };
+    expect(response.status).toBe(202);
+    const body = (await response.json()) as { success: boolean; jobId: string };
     expect(body.success).toBe(true);
-    expect(body.count).toBe(38);
-    expect(syncEvents).toHaveBeenCalledTimes(1);
+    expect(body.jobId).toBe('events-job-1');
+    expect(enqueueEventsSyncJob).toHaveBeenCalledWith('api');
   });
 });
 
@@ -144,12 +180,12 @@ describe('jobsAPI handlers', () => {
 
 describe('entrySyncAPI handlers', () => {
   beforeEach(() => {
-    syncEntryEventPicks.mockClear();
-    syncEntryEventTransfers.mockClear();
-    syncEntryEventResults.mockClear();
+    enqueueEntryPicksSyncJob.mockClear();
+    enqueueEntryTransfersSyncJob.mockClear();
+    enqueueEntryResultsSyncJob.mockClear();
   });
 
-  test('POST /entry-sync/picks syncs each entry id', async () => {
+  test('POST /entry-sync/picks enqueues an entry-list job and returns 202', async () => {
     const response = await entrySyncAPI.handle(
       new Request('http://localhost/entry-sync/picks', {
         method: 'POST',
@@ -157,16 +193,39 @@ describe('entrySyncAPI handlers', () => {
         body: JSON.stringify({ entryIds: [1, 2], eventId: 20 }),
       }),
     );
-    expect(response.status).toBe(200);
+    expect(response.status).toBe(202);
+    const body = (await response.json()) as { success: boolean; jobId: string };
+    expect(body.success).toBe(true);
+    expect(body.jobId).toBe('picks-job-1');
+    expect(enqueueEntryPicksSyncJob).toHaveBeenCalledWith('api', {
+      entryIds: [1, 2],
+      eventId: 20,
+    });
+  });
+
+  test('POST /entry-sync/all enqueues picks, transfers, and results jobs', async () => {
+    const response = await entrySyncAPI.handle(
+      new Request('http://localhost/entry-sync/all', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ entryIds: [7] }),
+      }),
+    );
+    expect(response.status).toBe(202);
     const body = (await response.json()) as {
       success: boolean;
-      processed: number;
-      successCount: number;
+      jobIds: { picks: string; transfers: string; results: string };
     };
     expect(body.success).toBe(true);
-    expect(body.processed).toBe(2);
-    expect(body.successCount).toBe(2);
-    expect(syncEntryEventPicks).toHaveBeenCalledTimes(2);
+    expect(body.jobIds).toEqual({
+      picks: 'picks-job-1',
+      transfers: 'transfers-job-1',
+      results: 'results-job-1',
+    });
+    expect(enqueueEntryPicksSyncJob).toHaveBeenCalledWith('api', {
+      entryIds: [7],
+      eventId: undefined,
+    });
   });
 
   test('rejects entryIds arrays larger than 100', async () => {
@@ -178,29 +237,155 @@ describe('entrySyncAPI handlers', () => {
       }),
     );
     expect(response.status).toBe(422);
+    expect(enqueueEntryPicksSyncJob).not.toHaveBeenCalled();
   });
 });
 
 describe('fixturesAPI handlers', () => {
   beforeEach(() => {
-    syncFixtures.mockClear();
+    enqueueFixturesSyncJob.mockClear();
+    enqueueFixturesAllGameweeksSyncJob.mockClear();
+    clearFixturesCache.mockClear();
   });
 
-  test('POST /fixtures/sync triggers syncFixtures', async () => {
+  test('POST /fixtures/sync enqueues the fixtures job and returns 202', async () => {
     const response = await fixturesAPI.handle(
       new Request('http://localhost/fixtures/sync', { method: 'POST' }),
     );
-    expect(response.status).toBe(200);
-    const body = (await response.json()) as { success: boolean; count: number };
+    expect(response.status).toBe(202);
+    const body = (await response.json()) as { success: boolean; jobId: string };
     expect(body.success).toBe(true);
-    expect(body.count).toBe(10);
-    expect(syncFixtures).toHaveBeenCalledTimes(1);
+    expect(body.jobId).toBe('fixtures-job-1');
+    expect(enqueueFixturesSyncJob).toHaveBeenCalledWith('api', {});
+  });
+
+  test('POST /fixtures/sync?event= coerces a numeric event filter', async () => {
+    const response = await fixturesAPI.handle(
+      new Request('http://localhost/fixtures/sync?event=12', { method: 'POST' }),
+    );
+    expect(response.status).toBe(202);
+    expect(enqueueFixturesSyncJob).toHaveBeenCalledWith('api', { eventId: 12 });
+  });
+
+  test('POST /fixtures/sync rejects a non-numeric event filter', async () => {
+    const response = await fixturesAPI.handle(
+      new Request('http://localhost/fixtures/sync?event=abc', { method: 'POST' }),
+    );
+    expect(response.status).toBe(422);
+    expect(enqueueFixturesSyncJob).not.toHaveBeenCalled();
+  });
+
+  test('POST /fixtures/sync-all-gameweeks enqueues the per-GW backfill and returns 202', async () => {
+    const response = await fixturesAPI.handle(
+      new Request('http://localhost/fixtures/sync-all-gameweeks', { method: 'POST' }),
+    );
+    expect(response.status).toBe(202);
+    expect(enqueueFixturesAllGameweeksSyncJob).toHaveBeenCalledWith('api');
+    expect(enqueueFixturesSyncJob).not.toHaveBeenCalled();
+  });
+
+  test('DELETE /fixtures/cache clears the cache', async () => {
+    const response = await fixturesAPI.handle(
+      new Request('http://localhost/fixtures/cache', { method: 'DELETE' }),
+    );
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { success: boolean };
+    expect(body.success).toBe(true);
+    expect(clearFixturesCache).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('playerStatsAPI handlers', () => {
+  beforeEach(() => {
+    enqueuePlayerStatsSyncJob.mockClear();
+  });
+
+  test('POST /player-stats/sync enqueues the current sync and returns 202', async () => {
+    const response = await playerStatsAPI.handle(
+      new Request('http://localhost/player-stats/sync', { method: 'POST' }),
+    );
+    expect(response.status).toBe(202);
+    expect(enqueuePlayerStatsSyncJob).toHaveBeenCalledWith('api');
+  });
+
+  test('POST /player-stats/sync/:eventId enqueues with a numeric event id', async () => {
+    const response = await playerStatsAPI.handle(
+      new Request('http://localhost/player-stats/sync/15', { method: 'POST' }),
+    );
+    expect(response.status).toBe(202);
+    expect(enqueuePlayerStatsSyncJob).toHaveBeenCalledWith('api', { eventId: 15 });
+  });
+
+  test('POST /player-stats/sync/:eventId rejects non-numeric ids', async () => {
+    const response = await playerStatsAPI.handle(
+      new Request('http://localhost/player-stats/sync/abc', { method: 'POST' }),
+    );
+    expect(response.status).toBe(422);
+    expect(enqueuePlayerStatsSyncJob).not.toHaveBeenCalled();
+  });
+
+  test('POST /player-stats/sync/:eventId rejects non-integer event ids', async () => {
+    const response = await playerStatsAPI.handle(
+      new Request('http://localhost/player-stats/sync/1.5', { method: 'POST' }),
+    );
+    expect(response.status).toBe(422);
+    expect(enqueuePlayerStatsSyncJob).not.toHaveBeenCalled();
+  });
+});
+
+describe('eventLivesAPI handlers', () => {
+  beforeEach(() => {
+    getEventLivesByEventId.mockClear();
+  });
+
+  test('GET /event-lives/:eventId returns live data with a numeric event id', async () => {
+    const response = await eventLivesAPI.handle(new Request('http://localhost/event-lives/12'));
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { success: boolean; eventId: number };
+    expect(body.success).toBe(true);
+    expect(body.eventId).toBe(12);
+    expect(getEventLivesByEventId).toHaveBeenCalledWith(12);
+  });
+
+  test('GET /event-lives/:eventId rejects non-numeric ids', async () => {
+    const response = await eventLivesAPI.handle(new Request('http://localhost/event-lives/abc'));
+    expect(response.status).toBe(422);
+    expect(getEventLivesByEventId).not.toHaveBeenCalled();
+  });
+
+  test('POST /event-lives/sync/:eventId enqueues the DB sync and returns 202', async () => {
+    const response = await eventLivesAPI.handle(
+      new Request('http://localhost/event-lives/sync/12', { method: 'POST' }),
+    );
+    expect(response.status).toBe(202);
+    const body = (await response.json()) as { success: boolean; jobId: string };
+    expect(body.success).toBe(true);
+    expect(body.jobId).toBe('event-lives-db-e12-manual');
+  });
+
+  test('POST /event-lives/cache/:eventId enqueues the cache update and returns 202', async () => {
+    const response = await eventLivesAPI.handle(
+      new Request('http://localhost/event-lives/cache/12', { method: 'POST' }),
+    );
+    expect(response.status).toBe(202);
+    const body = (await response.json()) as { jobId: string };
+    expect(body.jobId).toBe('event-lives-cache-e12-manual');
+  });
+
+  test('POST /event-lives/summary/:eventId enqueues the summary job and returns 202', async () => {
+    const response = await eventLivesAPI.handle(
+      new Request('http://localhost/event-lives/summary/12', { method: 'POST' }),
+    );
+    expect(response.status).toBe(202);
+    const body = (await response.json()) as { jobId: string };
+    expect(body.jobId).toBe('event-live-summary-e12-manual');
   });
 });
 
 describe('tournamentsAPI handlers', () => {
   beforeEach(() => {
     checkTournamentNameAvailability.mockClear();
+    getTournamentSetupStatus.mockClear();
   });
 
   test('GET /tournaments/check-name returns availability', async () => {
@@ -211,6 +396,35 @@ describe('tournamentsAPI handlers', () => {
     const body = (await response.json()) as { available: boolean; name: string };
     expect(body).toEqual({ available: true, name: 'MyCup' });
     expect(checkTournamentNameAvailability).toHaveBeenCalledWith('MyCup');
+  });
+
+  test('GET /tournaments/check-name rejects an empty name', async () => {
+    const response = await tournamentsAPI.handle(
+      new Request('http://localhost/tournaments/check-name?name='),
+    );
+    expect(response.status).toBe(422);
+    expect(checkTournamentNameAvailability).not.toHaveBeenCalled();
+  });
+
+  test('GET /tournaments/:id/setup-status omits the internal setupError field', async () => {
+    getTournamentSetupStatus.mockImplementation(async () => ({
+      setupStatus: 'failed',
+      setupError: 'Connection terminated unexpectedly at internal-host:5432',
+      setupStartedAt: '2026-07-17T01:00:00.000Z',
+      setupFinishedAt: '2026-07-17T01:05:00.000Z',
+    }));
+
+    const response = await tournamentsAPI.handle(
+      new Request('http://localhost/tournaments/55/setup-status'),
+    );
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as Record<string, unknown>;
+    expect(body.success).toBe(true);
+    expect(body.setupStatus).toBe('failed');
+    expect('setupError' in body).toBe(false);
+    expect(JSON.stringify(body)).not.toContain('internal-host');
+
+    getTournamentSetupStatus.mockImplementation(async () => null);
   });
 });
 

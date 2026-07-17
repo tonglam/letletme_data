@@ -1,8 +1,10 @@
+import { tournamentSetupBackfillEventScopes } from '../domain/mutation-scope';
 import type { TournamentBackfillWindow, TournamentConfig } from '../domain/tournament';
+import { ENTRY_SYNC_DEFAULT_CONCURRENCY } from '../queues/entry-sync.queue';
 import { uniqueNumbers } from '../utils/async';
 import { mapWithConcurrency } from '../utils/async';
 import { logError, logInfo, logWarn } from '../utils/logger';
-import { ENTRY_SYNC_DEFAULT_CONCURRENCY } from '../queues/entry-sync.queue';
+import { withMutationConflictGuard } from '../utils/mutation-lock';
 
 import { syncEntryInfo } from './entry-info.service';
 import { syncLeagueEventResultsByTournament } from './league-event-results.service';
@@ -115,6 +117,10 @@ export async function runTournamentEventBackfill(
     });
   }
 
+  // Structure writes only: hold tournament-structure:global around points /
+  // knockout upserts — not around FPL entry/league fetch above (Codex P2).
+  const structureScopes = tournamentSetupBackfillEventScopes(eventId);
+
   if (
     tournament.groupMode === 'points_races' &&
     tournament.groupStartedEventId &&
@@ -122,9 +128,15 @@ export async function runTournamentEventBackfill(
     eventId >= tournament.groupStartedEventId &&
     eventId <= tournament.groupEndedEventId
   ) {
-    const pointsRaceResult = await syncTournamentPointsRaceResultsForTournament(
-      tournament,
-      eventId,
+    const pointsRaceResult = await withMutationConflictGuard(
+      {
+        queueName: 'tournament-setup',
+        jobName: 'tournament-setup',
+        tournamentId,
+        eventId,
+        scopes: structureScopes,
+      },
+      () => syncTournamentPointsRaceResultsForTournament(tournament, eventId),
     );
     if (pointsRaceResult.skipped > 0) {
       issues.push({
@@ -148,7 +160,16 @@ export async function runTournamentEventBackfill(
     eventId <= tournament.knockoutEndedEventId
   ) {
     const { syncKnockoutForTournament } = await import('./tournament-knockout-results.service');
-    const knockoutResult = await syncKnockoutForTournament(tournament, eventId);
+    const knockoutResult = await withMutationConflictGuard(
+      {
+        queueName: 'tournament-setup',
+        jobName: 'tournament-setup',
+        tournamentId,
+        eventId,
+        scopes: structureScopes,
+      },
+      () => syncKnockoutForTournament(tournament, eventId),
+    );
     if (knockoutResult.skipped > 0) {
       issues.push({
         scope: 'knockout',
@@ -178,6 +199,8 @@ export async function backfillTournamentHistory(
 
   const issues: TournamentSetupIssue[] = [];
   for (let eventId = window.startEventId; eventId <= window.endEventId; eventId += 1) {
+    // Structure locks are acquired only around points/knockout writes inside
+    // runTournamentEventBackfill — not around FPL fetch for the whole event.
     const eventIssues = await runTournamentEventBackfill(
       tournamentId,
       tournament,
