@@ -11,6 +11,7 @@ import {
 } from '../services/tournament-setup.service';
 import { logError, logInfo } from '../utils/logger';
 import { withMutationConflictGuard } from '../utils/mutation-lock';
+import { alertOnFinalFailure } from '../utils/notify';
 import { getQueueConnection } from '../utils/queue';
 import type { WorkerRuntime } from './worker-runtime';
 
@@ -61,6 +62,16 @@ export function createTournamentSetupWorker(): WorkerRuntime {
       jobId: job?.id,
       tournamentId: job?.data.tournamentId,
     });
+    if (job) {
+      void alertOnFinalFailure({
+        queueName: job.queueName,
+        jobName: job.name,
+        jobId: String(job.id),
+        attemptsMade: job.attemptsMade,
+        attempts: job.opts.attempts ?? 1,
+        error: err,
+      });
+    }
   });
 
   worker.on('error', (err) => {

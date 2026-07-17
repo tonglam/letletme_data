@@ -96,3 +96,47 @@ export async function notifyTwoBots(text: string): Promise<void> {
   await sendTelegramBotNotification(text).catch(() => {});
   await sendWeChatBotNotification(text).catch(() => {});
 }
+
+export type FinalFailureAlert = {
+  queueName: string;
+  jobName?: string;
+  jobId?: string;
+  attemptsMade?: number;
+  attempts?: number;
+  tier?: string;
+  error: unknown;
+};
+
+/**
+ * Telegram alert for jobs that exhausted all BullMQ attempts. Never throws and
+ * never alerts for intermediate (retryable) failures — alerting must not turn a
+ * worker 'failed' event into another failure, and noisy per-attempt pings would
+ * bury the signal. No-op with a warn when TELEGRAM_* envs are unset.
+ */
+export async function alertOnFinalFailure(
+  alert: FinalFailureAlert,
+  send: (message: string) => Promise<void> = sendTelegramMessage,
+): Promise<void> {
+  const attemptsMade = alert.attemptsMade ?? 0;
+  const attempts = Math.max(alert.attempts ?? 1, 1);
+  if (attemptsMade < attempts) {
+    return;
+  }
+
+  const errorMessage = alert.error instanceof Error ? alert.error.message : String(alert.error);
+  const message = (
+    `[letletme_data] Job permanently failed: ${alert.queueName}/${alert.jobName ?? 'unknown'} ` +
+    `(id ${alert.jobId ?? 'unknown'}) after ${attemptsMade}/${attempts} attempts` +
+    `${alert.tier ? ` [${alert.tier}]` : ''}: ${errorMessage}`
+  ).slice(0, 900);
+
+  try {
+    await send(message);
+  } catch (error) {
+    logError('Failed to send final-failure alert', error, {
+      queueName: alert.queueName,
+      jobName: alert.jobName,
+      jobId: alert.jobId,
+    });
+  }
+}

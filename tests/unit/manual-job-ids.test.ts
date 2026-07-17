@@ -1,9 +1,11 @@
 import { beforeEach, describe, expect, mock, test } from 'bun:test';
 
 type AddCall = { name: string; data: Record<string, unknown>; opts: Record<string, unknown> };
+type PendingJob = { id: string; name: string; data: { eventId: number } };
 
 const liveDataAddCalls: AddCall[] = [];
 const entrySyncAddCalls: AddCall[] = [];
+const liveDataPendingJobs: PendingJob[] = [];
 
 mock.module('../../src/queues/live-data.queue', () => ({
   LIVE_JOBS: {
@@ -22,6 +24,7 @@ mock.module('../../src/queues/live-data.queue', () => ({
       liveDataAddCalls.push({ name, data, opts });
       return { id: (opts.jobId as string | undefined) ?? 'generated-id' };
     },
+    getJobs: async () => liveDataPendingJobs,
   }),
 }));
 
@@ -87,6 +90,56 @@ describe('live-data manual job IDs', () => {
     expect(job.id).not.toBe('event-lives-db-e10-manual');
     // Cron jobs keep queue-level retention (no per-job cleanup override)
     expect(liveDataAddCalls[0].opts.removeOnComplete).toBeUndefined();
+  });
+});
+
+describe('live-data cron waiting-room dedup', () => {
+  beforeEach(() => {
+    liveDataAddCalls.length = 0;
+    liveDataPendingJobs.length = 0;
+  });
+
+  test('cron enqueue reuses a waiting job for the same (job, event)', async () => {
+    liveDataPendingJobs.push({ id: 'existing-1', name: 'event-lives-db', data: { eventId: 10 } });
+
+    const job = await enqueueEventLivesDbSync(10, 'cron');
+
+    expect(job.id).toBe('existing-1');
+    expect(liveDataAddCalls).toHaveLength(0);
+  });
+
+  test('cron enqueue proceeds for a different event or job name', async () => {
+    liveDataPendingJobs.push({ id: 'existing-1', name: 'event-lives-db', data: { eventId: 11 } });
+    liveDataPendingJobs.push({
+      id: 'existing-2',
+      name: 'event-lives-cache',
+      data: { eventId: 10 },
+    });
+
+    await enqueueEventLivesDbSync(10, 'cron');
+
+    expect(liveDataAddCalls).toHaveLength(1);
+  });
+
+  test('cascade and manual enqueues skip the waiting-room check', async () => {
+    liveDataPendingJobs.push({ id: 'existing-1', name: 'event-lives-db', data: { eventId: 10 } });
+
+    await enqueueEventLivesDbSync(10, 'cascade');
+    await enqueueEventLivesDbSync(10, 'manual');
+
+    expect(liveDataAddCalls).toHaveLength(2);
+  });
+
+  test('skipWindowCheck rides into the job data for post-match consolidation', async () => {
+    await enqueueEventLivesDbSync(10, 'cron', { skipWindowCheck: true });
+
+    expect(liveDataAddCalls[0].data.skipWindowCheck).toBe(true);
+  });
+
+  test('regular cron jobs carry no skipWindowCheck flag', async () => {
+    await enqueueEventLivesDbSync(10, 'cron');
+
+    expect(liveDataAddCalls[0].data.skipWindowCheck).toBeUndefined();
   });
 });
 

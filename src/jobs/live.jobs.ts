@@ -129,7 +129,9 @@ export async function runPostMatchConsolidation() {
     return;
   }
 
-  const job = await enqueueEventLivesDbSync(currentEvent.id, 'cron');
+  // Consolidation runs after the live window ends, so the worker-side window
+  // re-check must not skip it.
+  const job = await enqueueEventLivesDbSync(currentEvent.id, 'cron', { skipWindowCheck: true });
   logInfo('Post-match consolidation job enqueued', { jobId: job.id, eventId: currentEvent.id });
 }
 

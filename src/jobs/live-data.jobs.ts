@@ -9,19 +9,57 @@ import { logError, logInfo } from '../utils/logger';
 
 export type LiveDataJobSource = 'cron' | 'manual' | 'cascade';
 
+interface LiveDataEnqueueOptions {
+  delay?: number;
+  jobId?: string;
+  /** Post-match consolidation runs outside the live window; skips the worker re-check */
+  skipWindowCheck?: boolean;
+}
+
+/**
+ * A backed-up queue must not pile up duplicate cron ticks for the same
+ * (job, event): when an earlier tick is still waiting or delayed, reuse it.
+ * Manual jobs self-dedupe via deterministic IDs; cascade jobs are one-shot
+ * per parent completion and stay untouched.
+ */
+async function findWaitingJob(
+  queue: ReturnType<typeof getLiveDataQueue>,
+  jobName: LiveDataJobName,
+  eventId: number,
+) {
+  const pending = await queue.getJobs(['waiting', 'delayed']);
+  return pending.find((job) => job.name === jobName && job.data.eventId === eventId);
+}
+
 async function enqueueLiveDataJob(
   jobName: LiveDataJobName,
   eventId: number,
   source: LiveDataJobSource = 'cron',
-  options: { delay?: number; jobId?: string } = {},
+  options: LiveDataEnqueueOptions = {},
 ) {
   try {
     const tier = getLiveDataJobPriority(jobName as LiveDataPriorityJobName);
     const queue = getLiveDataQueue(tier);
+
+    if (source === 'cron') {
+      const waiting = await findWaitingJob(queue, jobName, eventId);
+      if (waiting) {
+        logInfo('Skipping enqueue - waiting job already queued for event', {
+          jobName,
+          eventId,
+          existingJobId: waiting.id,
+          tier,
+          queue: queue.name,
+        });
+        return waiting;
+      }
+    }
+
     const jobData: LiveDataJobData = {
       eventId,
       source,
       triggeredAt: new Date().toISOString(),
+      ...(options.skipWindowCheck ? { skipWindowCheck: true } : {}),
     };
 
     // Manual triggers share a deterministic ID per (job, event) so repeat triggers
@@ -62,8 +100,11 @@ async function enqueueLiveDataJob(
 export const enqueueEventLivesCacheUpdate = (eventId: number, source?: LiveDataJobSource) =>
   enqueueLiveDataJob(LIVE_JOBS.EVENT_LIVES_CACHE, eventId, source);
 
-export const enqueueEventLivesDbSync = (eventId: number, source?: LiveDataJobSource) =>
-  enqueueLiveDataJob(LIVE_JOBS.EVENT_LIVES_DB, eventId, source);
+export const enqueueEventLivesDbSync = (
+  eventId: number,
+  source?: LiveDataJobSource,
+  options?: LiveDataEnqueueOptions,
+) => enqueueLiveDataJob(LIVE_JOBS.EVENT_LIVES_DB, eventId, source, options);
 
 export const enqueueEventLiveSummary = (eventId: number, source?: LiveDataJobSource) =>
   enqueueLiveDataJob(LIVE_JOBS.EVENT_LIVE_SUMMARY, eventId, source);

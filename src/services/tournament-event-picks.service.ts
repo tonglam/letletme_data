@@ -71,5 +71,10 @@ export async function syncTournamentEventPicks(
     errors,
   });
 
+  // Fail the job on partial failure so BullMQ retries instead of leaving silent gaps
+  if (errors > 0) {
+    throw new Error(`Tournament event picks sync failed for ${errors} of ${toSync.length} entries`);
+  }
+
   return { eventId, totalEntries: entryIds.length, synced, skipped, errors };
 }

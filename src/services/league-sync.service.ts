@@ -41,6 +41,14 @@ export async function enqueuePicksPerTournament(eventId: number) {
     }
   });
 
+  // A partially-enqueued fan-out leaves some tournaments silently stale —
+  // fail the coordinator job so BullMQ retries the whole fan-out.
+  if (failed > 0) {
+    throw new Error(
+      `League picks cascade enqueue failed for ${failed} of ${tournaments.length} tournaments`,
+    );
+  }
+
   return { enqueued: successful };
 }
 
@@ -80,6 +88,14 @@ export async function enqueueResultsPerTournament(eventId: number) {
       });
     }
   });
+
+  // A partially-enqueued fan-out leaves some tournaments silently stale —
+  // fail the coordinator job so BullMQ retries the whole fan-out.
+  if (failed > 0) {
+    throw new Error(
+      `League results cascade enqueue failed for ${failed} of ${tournaments.length} tournaments`,
+    );
+  }
 
   return { enqueued: successful };
 }

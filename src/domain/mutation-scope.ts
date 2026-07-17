@@ -40,10 +40,15 @@ export function resolveMutationScopes(input: MutationScopeInput): string[] {
     switch (jobName) {
       case 'entry-info':
         return ['entry-core:all'];
+      // Per-table scopes: jobs writing different entry tables no longer serialize
+      // against each other; jobs writing the SAME table share its scope across the
+      // entry/league/tournament domains below.
       case 'entry-picks':
+        return [withEvent('entry-event-picks', eventId)];
       case 'entry-transfers':
+        return [withEvent('entry-event-transfers', eventId)];
       case 'entry-results':
-        return [withEvent('entry-event', eventId)];
+        return [withEvent('entry-event-results', eventId)];
       default:
         return [];
     }
@@ -75,12 +80,12 @@ export function resolveMutationScopes(input: MutationScopeInput): string[] {
     switch (jobName) {
       case 'league-event-picks':
         return [
-          withEvent('entry-event', eventId),
+          withEvent('entry-event-picks', eventId),
           withTournament('league-event-picks', tournamentId),
         ];
       case 'league-event-results':
         return [
-          withEvent('entry-event', eventId),
+          withEvent('entry-event-results', eventId),
           withEvent('league-event-results', eventId),
           withTournament('league-event-results', tournamentId),
         ];
@@ -92,13 +97,28 @@ export function resolveMutationScopes(input: MutationScopeInput): string[] {
   if (queue === 'tournament-sync') {
     switch (jobName) {
       case 'tournament-event-results':
-        return [withEvent('entry-event', eventId), withEvent('tournament-event-results', eventId)];
+        return [
+          withEvent('entry-event-results', eventId),
+          withEvent('tournament-event-results', eventId),
+        ];
       case 'tournament-event-picks':
+        return [
+          withEvent('entry-event-picks', eventId),
+          withEvent('tournament-event-mutations', eventId),
+        ];
       case 'tournament-transfers-pre':
       case 'tournament-transfers-post':
-      case 'tournament-selection-stats':
         return [
-          withEvent('entry-event', eventId),
+          withEvent('entry-event-transfers', eventId),
+          withEvent('tournament-event-mutations', eventId),
+        ];
+      case 'tournament-selection-stats':
+        // Reads all three entry tables to build the stats snapshot — serialize
+        // with writers of each so the snapshot is not taken mid-write.
+        return [
+          withEvent('entry-event-picks', eventId),
+          withEvent('entry-event-transfers', eventId),
+          withEvent('entry-event-results', eventId),
           withEvent('tournament-event-mutations', eventId),
         ];
       case 'tournament-points-race':

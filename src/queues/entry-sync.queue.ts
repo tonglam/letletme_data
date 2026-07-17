@@ -40,6 +40,8 @@ export interface EntrySyncJobData {
   concurrency?: number;
   throttleMs?: number;
   eventId?: number;
+  /** Chain identifier shared by all chunks of one run (first job's BullMQ id) */
+  runId?: string;
 }
 
 const tieredQueueSet = createTieredQueueSet<EntrySyncJobData>(entrySyncQueueName, {

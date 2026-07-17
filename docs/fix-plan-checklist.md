@@ -68,15 +68,15 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
   - [x] h. Standardize `{ success, data?, error? }`; 200 sync / 202 enqueued
   - [x] i. `check-name` minLength 1; drop `setupError` from public `setup-status`
   - [x] j. 429 on `RATE_LIMITED`; try/catch → 503 on auth-infra failure
-- [ ] **FP-14 · Job safety pack** (H10, H11, M9–M14 · L · *alerting needs prod `TELEGRAM_*` envs*)
-  - [ ] a. `entry-event-results-daily`: `isFPLSeason` + current-event guards
-  - [ ] b. Watchdog checks active job/lock before recovering setups
-  - [ ] c. `errors > 0 → throw` in tournament-event-picks, transfers (pre+post), tournament-info
-  - [ ] d. `alertOnFinalFailure(job)` → Telegram in every worker `failed` handler
-  - [ ] e. `event-lives-db`: window re-check in worker + waiting-room dedup
-  - [ ] f. Deterministic chunk job IDs (`${jobName}-${runId}-chunk-${offset}`)
-  - [ ] g. Cascade fan-outs throw when any enqueue fails (3 call sites)
-  - [ ] h. Per-table scopes (`entry-event-picks|transfers|results:event:N`)
+- [x] **FP-14 · Job safety pack** (H10, H11, M9–M14 · L · *alerting needs prod `TELEGRAM_*` envs*)
+  - [x] a. `entry-event-results-daily`: `isFPLSeason` + current-event guards
+  - [x] b. Watchdog checks active job/lock before recovering setups
+  - [x] c. `errors > 0 → throw` in tournament-event-picks, transfers (pre+post), tournament-info
+  - [x] d. `alertOnFinalFailure(job)` → Telegram in every worker `failed` handler
+  - [x] e. `event-lives-db`: window re-check in worker + waiting-room dedup
+  - [x] f. Deterministic chunk job IDs (`${jobName}-${runId}-chunk-${offset}`)
+  - [x] g. Cascade fan-outs throw when any enqueue fails (3 call sites)
+  - [x] h. Per-table scopes (`entry-event-picks|transfers|results:event:N`)
 - [ ] **FP-15 · Deploy safety pack** (H12, H13, M23, M24 · M · *after FP-01*)
   - [ ] Worker heartbeat file + Docker/compose healthcheck; deploy asserts both services healthy
   - [ ] `cancel-in-progress: false`; `workflow_dispatch` `inputs.sha`; targeted prune (keep last 3)

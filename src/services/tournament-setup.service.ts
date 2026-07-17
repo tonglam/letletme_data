@@ -1,4 +1,4 @@
-import { enqueueTournamentSetup } from '../jobs/tournament-setup.jobs';
+import { enqueueTournamentSetup, getTournamentSetupJobState } from '../jobs/tournament-setup.jobs';
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
 import { NotFoundError } from '../utils/errors';
@@ -94,6 +94,20 @@ export async function recoverStuckTournamentSetups(
   const recovered: number[] = [];
   for (const row of stuck) {
     try {
+      // A live BullMQ job means the setup is slow, not stuck — marking it failed
+      // mid-run would flip-flop the status and forceNew would race a duplicate
+      // setup against the active one. Only recover when no live job exists.
+      const liveJob = await getTournamentSetupJobState(row.id);
+      if (liveJob && ['waiting', 'delayed', 'active', 'prioritized'].includes(liveJob.state)) {
+        logInfo('Watchdog skipping setup with live job', {
+          tournamentId: row.id,
+          jobId: liveJob.jobId,
+          jobState: liveJob.state,
+          setupStartedAt: row.setupStartedAt,
+        });
+        continue;
+      }
+
       await tournamentInfoRepository.markSetupResult(
         row.id,
         'failed',
@@ -104,6 +118,7 @@ export async function recoverStuckTournamentSetups(
       logInfo('Watchdog recovered stuck tournament setup', {
         tournamentId: row.id,
         setupStartedAt: row.setupStartedAt,
+        previousJobState: liveJob?.state ?? 'missing',
       });
     } catch (error) {
       logError('Watchdog failed to recover stuck tournament setup', error, {

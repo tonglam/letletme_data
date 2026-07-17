@@ -10,6 +10,23 @@ export interface EnqueueTournamentSetupOptions {
   forceNew?: boolean;
 }
 
+/**
+ * State of the canonical setup job (`tournament-setup-${tournamentId}`), or null when
+ * no such job exists in any state. Used by the watchdog to tell a genuinely stuck
+ * setup (DB says "processing", no live job) apart from a merely slow one.
+ */
+export async function getTournamentSetupJobState(
+  tournamentId: number,
+): Promise<{ jobId: string; state: string } | null> {
+  const tier = getTournamentSetupJobPriority('tournament-setup');
+  const queue = getTournamentSetupQueue(tier);
+  const existing = await queue.getJob(`tournament-setup-${tournamentId}`);
+  if (!existing) {
+    return null;
+  }
+  return { jobId: String(existing.id), state: await existing.getState() };
+}
+
 export async function enqueueTournamentSetup(
   tournamentId: number,
   source: TournamentSetupJobSource = 'create',

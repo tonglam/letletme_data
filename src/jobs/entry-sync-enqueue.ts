@@ -20,6 +20,7 @@ export interface EntrySyncJobOptions {
   jobId?: string;
   delayMs?: number;
   eventId?: number;
+  runId?: string;
 }
 
 function hashEntryListKey(entryIds: readonly number[], eventId?: number): string {
@@ -56,6 +57,7 @@ async function enqueueEntrySyncJob(
       concurrency,
       throttleMs,
       eventId: options.eventId,
+      runId: options.runId,
     };
 
     const chunkKey =

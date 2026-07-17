@@ -82,5 +82,10 @@ export async function syncTournamentInfo(options?: {
     errors,
   });
 
+  // Fail the job on partial failure so BullMQ retries instead of leaving stale names
+  if (errors > 0) {
+    throw new Error(`Tournament info sync failed for ${errors} of ${tournaments.length} leagues`);
+  }
+
   return { total: tournaments.length, updated, skipped, errors };
 }

@@ -23,6 +23,7 @@ import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { getQueueConnection } from '../utils/queue';
 import { logError, logInfo } from '../utils/logger';
 import { withMutationConflictGuard } from '../utils/mutation-lock';
+import { alertOnFinalFailure } from '../utils/notify';
 import { startStrictPriorityGate } from './strict-priority-gate';
 import type { WorkerRuntime } from './worker-runtime';
 
@@ -69,6 +70,17 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
             break;
 
           case LIVE_JOBS.EVENT_LIVES_DB:
+            // Re-check the window at execution time: a cron tick enqueued during
+            // match hours may only run after the window closed (backed-up queue,
+            // retry). Consolidation (skipWindowCheck) and manual triggers always run.
+            if (
+              job.data.source === 'cron' &&
+              !job.data.skipWindowCheck &&
+              !(await isLiveMatchWindowForEvent(eventId))
+            ) {
+              logInfo('Skipping event lives DB job - live window closed', { eventId });
+              break;
+            }
             await syncEventLives(eventId);
             // After DB sync completes, trigger dependent jobs
             await enqueueCascadeJobs(eventId);
@@ -149,6 +161,17 @@ export function createLiveDataWorker(): WorkerRuntime {
         eventId: job?.data.eventId,
         tier,
       });
+      if (job) {
+        void alertOnFinalFailure({
+          queueName: job.queueName,
+          jobName: job.name,
+          jobId: String(job.id),
+          attemptsMade: job.attemptsMade,
+          attempts: job.opts.attempts ?? 1,
+          tier,
+          error: err,
+        });
+      }
     });
 
     worker.on('error', (err) => {

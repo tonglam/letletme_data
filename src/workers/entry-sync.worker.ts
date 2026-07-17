@@ -35,6 +35,7 @@ import {
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { logError, logInfo } from '../utils/logger';
 import { withMutationConflictGuard } from '../utils/mutation-lock';
+import { alertOnFinalFailure } from '../utils/notify';
 import { getQueueConnection } from '../utils/queue';
 import { startStrictPriorityGate } from './strict-priority-gate';
 import type { WorkerRuntime } from './worker-runtime';
@@ -183,6 +184,7 @@ async function handleEntryJob(
   label: string,
   handler: (entryId: number) => Promise<unknown>,
   jobData?: EntrySyncJobData,
+  runId?: string,
 ) {
   const loaded = await loadEntryIds(jobData);
   if (loaded.entryIds.length === 0) {
@@ -203,12 +205,19 @@ async function handleEntryJob(
 
   if (!jobData?.entryIds && loaded.fetchedFromDb && loaded.hasMore) {
     const nextOffset = loaded.nextOffset;
+    // Deterministic per-run chain IDs: a BullMQ retry of this chunk re-enqueues the
+    // next chunk with the SAME id, so BullMQ dedupes instead of forking a second
+    // chain (unique Date.now() ids let every retry fork one). runId ties the whole
+    // chain to the first job of the run, so separate cycles never collide.
+    const chainRunId = runId ?? `fallback-${Date.now()}`;
     const nextJob = await enqueueEntryJob(jobName, jobData?.source, {
       chunkOffset: nextOffset,
       chunkSize: loaded.chunkSize,
       concurrency,
       throttleMs,
       eventId: jobData?.eventId,
+      runId: chainRunId,
+      jobId: `${jobName}-${chainRunId}-chunk-${nextOffset}`,
     });
     logInfo('Entry sync next chunk enqueued', {
       jobName,
@@ -260,6 +269,10 @@ export function createEntrySyncWorker(): WorkerRuntime {
 
     logJobTriggered(context);
 
+    // All chunks of one run share the first job's id as their runId (propagated via
+    // job data), so a retried chunk re-enqueues the same deterministic next-chunk id.
+    const runId = job.data?.runId ?? jobId;
+
     return withMutationConflictGuard(
       {
         queueName: job.queueName,
@@ -276,6 +289,7 @@ export function createEntrySyncWorker(): WorkerRuntime {
                 'entry info sync',
                 syncEntryInfo,
                 job.data,
+                runId,
               );
               // Mark only after the final chunk succeeds with zero failures so
               // mid-chunk crashes and pending retries can still re-run same day.
@@ -290,6 +304,7 @@ export function createEntrySyncWorker(): WorkerRuntime {
                 'entry picks sync',
                 (entryId) => syncEntryEventPicks(entryId, job.data?.eventId),
                 job.data,
+                runId,
               );
             case 'entry-transfers':
               return handleEntryJob(
@@ -297,13 +312,15 @@ export function createEntrySyncWorker(): WorkerRuntime {
                 'entry transfers sync',
                 (entryId) => syncEntryEventTransfers(entryId, job.data?.eventId),
                 job.data,
+                runId,
               );
             case 'entry-results':
               return handleEntryJob(
                 'entry-results',
                 'entry results sync',
-                syncEntryEventResults,
+                (entryId) => syncEntryEventResults(entryId, job.data?.eventId),
                 job.data,
+                runId,
               );
             default:
               throw new Error(`Unknown entry-sync job: ${job.name}`);
@@ -333,6 +350,17 @@ export function createEntrySyncWorker(): WorkerRuntime {
         attemptsMade: job?.attemptsMade,
         tier,
       });
+      if (job) {
+        void alertOnFinalFailure({
+          queueName: job.queueName,
+          jobName: job.name,
+          jobId: String(job.id),
+          attemptsMade: job.attemptsMade,
+          attempts: job.opts.attempts ?? 1,
+          tier,
+          error,
+        });
+      }
     });
 
     workers.push(worker);

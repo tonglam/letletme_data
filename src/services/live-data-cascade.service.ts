@@ -46,6 +46,9 @@ export async function enqueueCascadeJobs(
 
   try {
     const matchWindowOpen = await resolved.isLiveMatchWindowForEvent(eventId);
+    const taskNames = matchWindowOpen
+      ? (['summary', 'explain', 'live-fixture', 'live-bonus', 'overall'] as const)
+      : (['summary', 'explain', 'overall'] as const);
     const enqueueTasks = [
       resolved.enqueueEventLiveSummary(eventId, 'cascade'),
       resolved.enqueueEventLiveExplain(eventId, 'cascade'),
@@ -76,13 +79,21 @@ export async function enqueueCascadeJobs(
 
     results.forEach((result, index) => {
       if (result.status === 'rejected') {
-        const jobNames = ['summary', 'explain', 'live-fixture', 'live-bonus', 'overall'];
         logError('Failed to enqueue cascade job', result.reason, {
           eventId,
-          jobName: jobNames[index],
+          jobName: taskNames[index],
         });
       }
     });
+
+    // A partially-enqueued cascade leaves downstream data silently stale —
+    // fail the parent job so BullMQ retries the whole fan-out.
+    if (failed > 0) {
+      const failedNames = taskNames.filter((_, index) => results[index].status === 'rejected');
+      throw new Error(
+        `Cascade enqueue failed for ${failed} of ${results.length} jobs: ${failedNames.join(', ')}`,
+      );
+    }
 
     return {
       eventId,

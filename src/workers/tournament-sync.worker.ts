@@ -25,6 +25,7 @@ import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { getQueueConnection } from '../utils/queue';
 import { logError, logInfo } from '../utils/logger';
 import { withMutationConflictGuard } from '../utils/mutation-lock';
+import { alertOnFinalFailure } from '../utils/notify';
 import {
   enqueueTournamentPointsRace,
   enqueueTournamentBattleRace,
@@ -65,29 +66,36 @@ async function enqueueTournamentCascade(eventId: number) {
     });
 
     // Log any failures
+    const cascadeJobNames = [
+      'points-race',
+      'battle-race',
+      'knockout',
+      'transfers-post',
+      'cup-results',
+    ];
     results.forEach((result, index) => {
       if (result.status === 'rejected') {
-        const jobNames = [
-          'points-race',
-          'battle-race',
-          'knockout',
-          'transfers-post',
-          'cup-results',
-        ];
         logError('Failed to enqueue cascade job', result.reason, {
           eventId,
-          jobName: jobNames[index],
+          jobName: cascadeJobNames[index],
         });
       }
     });
 
-    // Enqueue materialized view refresh with a 30s delay so parallel writes finish first
-    try {
-      await enqueueTournamentMaterializedViewsRefresh(eventId, 'cascade', { delay: 30_000 });
-      logInfo('Enqueued tournament materialized views refresh', { eventId, delayMs: 30_000 });
-    } catch (error) {
-      logError('Failed to enqueue materialized views refresh', error, { eventId });
+    // A partially-enqueued cascade leaves downstream results silently stale —
+    // fail the parent job so BullMQ retries the whole fan-out.
+    if (failed > 0) {
+      const failedNames = cascadeJobNames.filter(
+        (_, index) => results[index].status === 'rejected',
+      );
+      throw new Error(
+        `Tournament cascade enqueue failed for ${failed} of ${results.length} jobs: ${failedNames.join(', ')}`,
+      );
     }
+
+    // Enqueue materialized view refresh with a 30s delay so parallel writes finish first
+    await enqueueTournamentMaterializedViewsRefresh(eventId, 'cascade', { delay: 30_000 });
+    logInfo('Enqueued tournament materialized views refresh', { eventId, delayMs: 30_000 });
   } catch (error) {
     logError('Failed to enqueue tournament cascade jobs', error, { eventId });
     throw error;
@@ -221,6 +229,17 @@ export function createTournamentSyncWorker(): WorkerRuntime {
         eventId: job?.data.eventId,
         tier,
       });
+      if (job) {
+        void alertOnFinalFailure({
+          queueName: job.queueName,
+          jobName: job.name,
+          jobId: String(job.id),
+          attemptsMade: job.attemptsMade,
+          attempts: job.opts.attempts ?? 1,
+          tier,
+          error: err,
+        });
+      }
     });
 
     worker.on('error', (err) => {

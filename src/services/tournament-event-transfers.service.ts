@@ -120,34 +120,35 @@ export async function syncTournamentEventTransfersPost(eventId: number): Promise
     elementInPlayed: boolean | null;
   }> = [];
   let skipped = 0;
+  let errors = 0;
 
   for (const entryId of entryIds) {
+    // Post sync runs as a cascade after event-results succeeded, so a missing
+    // result or empty picks here is an anomaly worth failing (and retrying) the
+    // job for — not a data gap to silently skip.
     const entryResult = entryResultMap.get(entryId);
     if (!entryResult) {
+      errors += 1;
       logError('Entry event result missing for transfer update', new Error('No result'), {
         eventId,
         entryId,
       });
-      skipped += 1;
       continue;
     }
 
     const picks = normalizePicks(entryResult.eventPicks);
     if (picks.length === 0) {
+      errors += 1;
       logError('Entry picks missing for transfer update', new Error('No picks'), {
         eventId,
         entryId,
       });
-      skipped += 1;
       continue;
     }
 
+    // Zero transfer rows is legitimate — the entry made no transfers this event.
     const entryTransfers = transferMap.get(entryId);
     if (!entryTransfers || entryTransfers.length === 0) {
-      logError('Entry event transfers missing for update', new Error('No transfers'), {
-        eventId,
-        entryId,
-      });
       skipped += 1;
       continue;
     }
@@ -180,9 +181,16 @@ export async function syncTournamentEventTransfersPost(eventId: number): Promise
     totalEntries: entryIds.length,
     updated,
     skipped,
+    errors,
   });
 
-  return { eventId, totalEntries: entryIds.length, updated, skipped, errors: 0 };
+  if (errors > 0) {
+    throw new Error(
+      `Tournament event transfers post sync failed for ${errors} of ${entryIds.length} entries`,
+    );
+  }
+
+  return { eventId, totalEntries: entryIds.length, updated, skipped, errors };
 }
 
 export async function syncTournamentEventTransfersPre(
@@ -278,6 +286,13 @@ export async function syncTournamentEventTransfersPre(
     skipped,
     errors,
   });
+
+  // Fail the job on partial failure so BullMQ retries instead of leaving silent gaps
+  if (errors > 0) {
+    throw new Error(
+      `Tournament event transfers pre sync failed for ${errors} of ${entryIds.length} entries`,
+    );
+  }
 
   return { eventId, totalEntries: entryIds.length, inserted, skipped, errors };
 }

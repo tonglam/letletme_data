@@ -20,6 +20,8 @@ export interface LiveDataJobData {
   eventId: number;
   source: 'cron' | 'manual' | 'cascade';
   triggeredAt: string;
+  /** Post-match consolidation runs outside the live window; skips the worker re-check */
+  skipWindowCheck?: boolean;
 }
 
 const tieredQueueSet = createTieredQueueSet<LiveDataJobData>(liveDataQueueName, {
