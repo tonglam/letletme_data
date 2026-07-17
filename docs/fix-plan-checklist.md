@@ -5,7 +5,7 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
 - **Full detail (file-level changes, acceptance criteria):** [fix-plan-2026-07-17.md](./fix-plan-2026-07-17.md)
 - **Findings evidence:** [code-review-2026-07-17.md](./code-review-2026-07-17.md)
 
-**Progress:** P0 `0/6` · P1 `0/10` · P2 `0/9` · Deferred `0/4`
+**Progress:** P0 `1/6` · P1 `0/10` · P2 `0/9` · Deferred `0/4`
 
 **Ground rules**
 1. Redis keys/shapes are **frozen** — fixes within existing shapes; new data → additive keys only; deletions need consumer sign-off.
@@ -29,11 +29,11 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
   - [ ] `tests/integration/helpers/env-guard.ts` (RUN_INTEGRATION=1 + test-pattern DATABASE_URL + non-0 Redis DB), wired to `tests/utils/test-config.ts`
   - [ ] Import guard first in all 33 integration files
   - [ ] `tournament-seed.ts`: delete seeded rows in `afterAll`
-- [ ] **FP-03 · Harden Redis client against outages** (C3, M15 · M · contract-safe)
-  - [ ] `commandTimeout: 5000` + `connectTimeout: 5000` in `src/cache/singleton.ts`
-  - [ ] Create client once; `connect()` idempotent; never `new Redis()` over a live instance (kills reconnect leak)
-  - [ ] Initial `ping()` raced against timeout (no `isConnecting` spin)
-  - [ ] Unit test: black-holed Redis → ops reject/return null within ~5 s
+- [x] **FP-03 · Harden Redis client against outages** (C3, M15 · M · contract-safe)
+  - [x] `commandTimeout: 5000` + `connectTimeout: 5000` in `src/cache/singleton.ts`
+  - [x] Create client once; `connect()` idempotent; never `new Redis()` over a live instance (kills reconnect leak)
+  - [x] Initial `ping()` raced against timeout (no `isConnecting` spin)
+  - [x] Unit test: black-holed Redis → ops reject/return null within ~5 s
 - [ ] **FP-04 · FPL boundary schema timebombs** (H3, H4 · S)
   - [ ] `fpl.ts:348` → `explain: z.array(z.unknown()).nullable()`
   - [ ] `fpl.ts:502` → `active_chip: z.string().nullable()` + known-chip mapping with `logWarn` on unknown
