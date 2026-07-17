@@ -128,3 +128,4 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
 | FP | Commit SHA | Date | Notes |
 |----|-----------|------|-------|
 | FP-06 | 9bc8141 (PR #8) | 2026-07-17 | Consumers section pending Tong's inventory |
+| FP-12 | 45db098 | 2026-07-17 | PR #14 (stacked on FP-06) |
