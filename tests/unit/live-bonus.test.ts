@@ -229,22 +229,21 @@ describe('computeLiveBonusByTeam', () => {
     expect(byTeam.get(3)).toEqual(new Map([[31, 2]]));
   });
 
-  it('seeds official DGW bonus and still estimates later fixture from remaining players', () => {
-    // Team 1 plays 2 (finished) and 3 (live). Official bonus on 11 from fixture 1
-    // is preserved; finished 1v2 is not re-estimated; live 1v3 estimates among
-    // players without official bonus.
+  it('seeds official DGW bonus and still estimates a later live fixture', () => {
+    // Team 1 plays 2 (finished) and 3 (live). Official bonus from fixture 1 is
+    // seeded; finished 1v2 is not re-estimated; live 1v3 ranks the full bucket.
     const matches = [match(1, 2, 't1', true), match(1, 3, 't2', false)];
     const byTeam = computeLiveBonusByTeam(matches, [
-      live(11, 1, 40, 3), // official bonus — seeded, excluded from 1v3 BPS pool
+      live(11, 1, 40, 3),
       live(12, 1, 10, 0),
       live(21, 2, 35, 2),
       live(22, 2, 5, 1),
-      live(31, 3, 50, 0), // top among non-official for 1v3
+      live(31, 3, 50, 0),
       live(32, 3, 15, 0),
     ]);
 
-    expect(byTeam.get(1)?.get(11)).toBe(3); // official preserved
-    expect(byTeam.get(3)?.get(31)).toBe(3); // provisional for later fixture
+    expect(byTeam.get(1)?.get(11)).toBe(3); // seed preserved (keepMax)
+    expect(byTeam.get(3)?.get(31)).toBe(3); // provisional for live fixture
   });
 
   it('does not re-estimate a finished DGW fixture over official zeros', () => {
@@ -253,9 +252,9 @@ describe('computeLiveBonusByTeam', () => {
     const matches = [match(1, 2, 't1', true), match(1, 3, 't2', false)];
     const byTeam = computeLiveBonusByTeam(matches, [
       live(11, 1, 40, 3),
-      live(12, 1, 25, 0), // high BPS but official 0 in finished fixture
+      live(12, 1, 25, 0),
       live(21, 2, 35, 2),
-      live(22, 2, 30, 0), // would get provisional 3 if 1v2 were re-estimated
+      live(22, 2, 30, 0), // would get provisional if finished 1v2 were re-estimated
       live(23, 2, 20, 1),
       live(31, 3, 50, 0),
       live(32, 3, 15, 0),
@@ -264,15 +263,51 @@ describe('computeLiveBonusByTeam', () => {
     expect(byTeam.get(1)?.get(11)).toBe(3);
     expect(byTeam.get(2)?.get(21)).toBe(2);
     expect(byTeam.get(2)?.get(23)).toBe(1);
-    // Team 2 only played the finished fixture — official zeros stay out
     expect(byTeam.get(2)?.get(22)).toBeUndefined();
-    // Live fixture still estimates among non-official players
     expect(byTeam.get(3)?.get(31)).toBe(3);
   });
 
-  it('still estimates a finished DGW fixture until official bonus appears', () => {
-    // Post-whistle provisional window: fixture is Finished but FPL has not
-    // posted bonus yet. Must still emit provisional 3/2/1 (unlike settled+official).
+  it('skips finished multi-match re-estimation even when all official is on the DGW side', () => {
+    // All 3/2/1 on multi-match team 1; team 2 (single-match) has official zeros.
+    // Must not invent provisional awards for team 2 from aggregate BPS.
+    const matches = [match(1, 2, 't1', true), match(1, 3, 't2', false)];
+    const byTeam = computeLiveBonusByTeam(matches, [
+      live(11, 1, 40, 3),
+      live(12, 1, 30, 2),
+      live(13, 1, 20, 1),
+      live(21, 2, 35, 0), // high BPS, official 0
+      live(22, 2, 25, 0),
+      live(31, 3, 50, 0),
+    ]);
+
+    expect(byTeam.get(1)?.get(11)).toBe(3);
+    expect(byTeam.get(1)?.get(12)).toBe(2);
+    expect(byTeam.get(1)?.get(13)).toBe(1);
+    expect(byTeam.get(2)?.get(21)).toBeUndefined();
+    expect(byTeam.get(2)?.get(22)).toBeUndefined();
+  });
+
+  it('lets a DGW official winner improve on a later live fixture via keepMax', () => {
+    // Player 11 got official 1 in match 1; currently top BPS for live match 2.
+    const matches = [match(1, 2, 't1', true), match(1, 3, 't2', false)];
+    const byTeam = computeLiveBonusByTeam(matches, [
+      live(11, 1, 50, 1), // official 1 from match 1; top BPS overall
+      live(12, 1, 10, 0),
+      live(21, 2, 20, 3),
+      live(22, 2, 15, 2),
+      live(31, 3, 30, 0),
+      live(32, 3, 25, 0),
+    ]);
+
+    // Live 1v3 ranks 11 (50) → 3, keepMax upgrades seed 1 → 3
+    expect(byTeam.get(1)?.get(11)).toBe(3);
+    expect(byTeam.get(3)?.get(31)).toBe(2);
+    expect(byTeam.get(3)?.get(32)).toBe(1);
+  });
+
+  it('does not invent provisional bonus for finished multi-match without official', () => {
+    // Finished multi-match is seed-only (aggregates cannot safely re-rank).
+    // Live sibling still estimates.
     const matches = [match(1, 2, 't1', true), match(1, 3, 't2', false)];
     const byTeam = computeLiveBonusByTeam(matches, [
       live(11, 1, 40, 0),
@@ -283,32 +318,9 @@ describe('computeLiveBonusByTeam', () => {
       live(32, 3, 15, 0),
     ]);
 
-    // Finished 1v2: 11=3, 21=2, 12=1 from BPS
-    expect(byTeam.get(1)?.get(11)).toBe(3);
-    expect(byTeam.get(2)?.get(21)).toBe(2);
-    expect(byTeam.get(1)?.get(12)).toBe(1);
-    // Live 1v3 still estimated
+    // Finished 1v2: no official seed, no re-estimate
+    expect(byTeam.get(2)).toBeUndefined();
+    // Live 1v3 still estimated (includes team 1 aggregate BPS)
     expect(byTeam.get(3)?.get(31)).toBe(3);
-  });
-
-  it('does not treat prior DGW official bonus as settled for a later fixture', () => {
-    // Team 1 finished vs 2 with official bonus, then finishes vs 3 before FPL
-    // posts match-2 bonus. Prior event-level bonus on team 1 must not skip
-    // provisional 3/2/1 for 1v3 (single-match team 3 has no official yet).
-    const matches = [match(1, 2, 't1', true), match(1, 3, 't2', true)];
-    const byTeam = computeLiveBonusByTeam(matches, [
-      live(11, 1, 40, 3), // official from 1v2 only
-      live(12, 1, 10, 0),
-      live(21, 2, 35, 2),
-      live(22, 2, 5, 1),
-      live(31, 3, 50, 0), // needs provisional for finished 1v3
-      live(32, 3, 20, 0),
-    ]);
-
-    expect(byTeam.get(1)?.get(11)).toBe(3); // seed preserved
-    expect(byTeam.get(2)?.get(21)).toBe(2);
-    // 1v3 still estimates among non-official players
-    expect(byTeam.get(3)?.get(31)).toBe(3);
-    expect(byTeam.get(3)?.get(32)).toBe(2);
   });
 });
