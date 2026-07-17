@@ -257,6 +257,11 @@ class FPLClient {
     let lastError: unknown = null;
     /** Last 429/5xx (status-only or buffered) — preferred over UNKNOWN_ERROR. */
     let lastRetryableResponse: Response | null = null;
+    /**
+     * Backoff captured from a retryable response's Retry-After (or jitter) before
+     * body buffering. Used if the body stalls so the catch path still honors it.
+     */
+    let pendingBackoffMs: number | null = null;
     const deadlineMs = getEnvMs('FPL_REQUEST_DEADLINE_MS', REQUEST_DEADLINE_MS);
     const started = Date.now();
 
@@ -295,18 +300,22 @@ class FPLClient {
         });
 
         if (isRetryableStatus(response.status)) {
-          // Record status before consuming the body so a hung 429/5xx body still
-          // surfaces the upstream HTTP status if buffering fails or deadline hits.
+          // Record status + Retry-After before consuming the body so a hung
+          // 429/5xx body still preserves status and honors the rate-limit delay.
           lastRetryableResponse = statusOnlyResponse(response);
+          const retryAfterMs = parseRetryAfterMs(response.headers.get('retry-after'));
+          pendingBackoffMs = retryAfterMs ?? computeBackoffMs(attempt);
+
           const buffered = await bufferResponse(response);
           lastRetryableResponse = buffered;
 
           if (attempt === MAX_RETRIES) {
+            pendingBackoffMs = null;
             return buffered;
           }
 
-          const retryAfterMs = parseRetryAfterMs(response.headers.get('retry-after'));
-          const delayMs = Math.min(retryAfterMs ?? computeBackoffMs(attempt), remainingMs());
+          const delayMs = Math.min(pendingBackoffMs, remainingMs());
+          pendingBackoffMs = null;
           logDebug('Retryable FPL response; backing off', {
             url,
             status: response.status,
@@ -322,17 +331,23 @@ class FPLClient {
         // Non-retryable error (404, 400, …): return without buffering — hung 404
         // bodies must not flip cup lookups to UNKNOWN_ERROR.
         if (!response.ok) {
+          pendingBackoffMs = null;
           return response;
         }
 
-        // Success: buffer so hung/truncated JSON after headers remains retryable.
+        // A later 2xx supersedes any earlier 429/5xx: if the body stalls we should
+        // surface a body-read failure, not a stale HTTP_ERROR from a prior attempt.
+        lastRetryableResponse = null;
+        pendingBackoffMs = null;
         return await bufferResponse(response);
       } catch (error) {
         lastError = error;
         if (attempt === MAX_RETRIES || remainingMs() <= 0) {
+          pendingBackoffMs = null;
           break;
         }
-        const delayMs = Math.min(computeBackoffMs(attempt), remainingMs());
+        const delayMs = Math.min(pendingBackoffMs ?? computeBackoffMs(attempt), remainingMs());
+        pendingBackoffMs = null;
         logDebug('FPL request failed; backing off', { url, attempt, delayMs });
         if (delayMs > 0) {
           await sleep(delayMs);

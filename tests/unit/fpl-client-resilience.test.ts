@@ -184,6 +184,62 @@ describe('FPL client resilience (FP-18)', () => {
     expect(fetchMock).toHaveBeenCalledTimes(4);
   });
 
+  test('stale 429 is not returned after a later 2xx body stalls', async () => {
+    let calls = 0;
+    globalThis.fetch = mock(async () => {
+      calls += 1;
+      if (calls === 1) {
+        return new Response('rate limited', { status: 429 });
+      }
+      // Subsequent attempts look successful at the header layer but body fails.
+      const stalled = new ReadableStream({
+        pull() {
+          throw new Error('body stalled after prior 429');
+        },
+      });
+      return new Response(stalled, { status: 200 });
+    }) as unknown as typeof fetch;
+
+    try {
+      await fplClient.getFixtures(1);
+      throw new Error('Expected getFixtures to fail');
+    } catch (error) {
+      expect(error).toBeInstanceOf(FPLClientError);
+      // Must not surface the earlier 429 once a 2xx was observed.
+      expect((error as FPLClientError).status).toBeUndefined();
+      expect((error as FPLClientError).code).toBe('UNKNOWN_ERROR');
+    }
+    expect(calls).toBe(4);
+  });
+
+  test('hung 429 body still honors Retry-After before the next attempt', async () => {
+    process.env.FPL_RETRY_MAX_DELAY_MS = '1500';
+    let calls = 0;
+    globalThis.fetch = mock(async () => {
+      calls += 1;
+      if (calls === 1) {
+        const stalled = new ReadableStream({
+          pull() {
+            throw new Error('rate-limit body stalled');
+          },
+        });
+        return new Response(stalled, {
+          status: 429,
+          headers: { 'Retry-After': '1' },
+        });
+      }
+      return new Response('[]', { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const started = Date.now();
+    const fixtures = await fplClient.getFixtures(1);
+    const elapsed = Date.now() - started;
+
+    expect(fixtures).toEqual([]);
+    expect(calls).toBe(2);
+    expect(elapsed).toBeGreaterThanOrEqual(900);
+  });
+
   test('sends a descriptive User-Agent on every request', async () => {
     let seenUserAgent: string | null = null;
     globalThis.fetch = mock(async (_url: string, init?: RequestInit) => {
