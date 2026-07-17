@@ -43,4 +43,51 @@ describe('resolveMutationScopes', () => {
     expect(scopes).toContain('entry-event:event:35');
     expect(scopes).toContain('tournament-event-mutations:event:35');
   });
+
+  it('gives tournament setup the shared global structure scope (FP-07)', () => {
+    const scopes = resolveMutationScopes({
+      queueName: 'tournament-setup',
+      jobName: 'tournament-setup',
+      tournamentId: 789,
+    });
+    expect(scopes).toContain('tournament-structure:global');
+    expect(scopes).toContain('tournament-structure:tournament:789');
+  });
+
+  it.each([
+    'tournament-points-race',
+    'tournament-battle-race',
+    'tournament-knockout',
+    'tournament-cup-results',
+  ])('gives %s the shared global structure scope (FP-07)', (jobName) => {
+    const scopes = resolveMutationScopes({
+      queueName: 'tournament-sync',
+      jobName,
+      eventId: 33,
+    });
+    expect(scopes).toContain('tournament-structure:global');
+    expect(scopes).toContain('tournament-structure:event:33');
+  });
+
+  it('makes setup rebuilds and results syncs mutually exclusive (C4)', () => {
+    const setupScopes = resolveMutationScopes({
+      queueName: 'tournament-setup',
+      jobName: 'tournament-setup',
+      tournamentId: 789,
+    });
+    for (const jobName of [
+      'tournament-points-race',
+      'tournament-battle-race',
+      'tournament-knockout',
+      'tournament-cup-results',
+    ]) {
+      const resultsScopes = resolveMutationScopes({
+        queueName: 'tournament-sync',
+        jobName,
+        eventId: 33,
+      });
+      const overlap = setupScopes.filter((scope) => resultsScopes.includes(scope));
+      expect(overlap.length).toBeGreaterThan(0);
+    }
+  });
 });

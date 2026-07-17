@@ -46,7 +46,7 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
 
 ## P1 — Data integrity & operability (~9–10 days, parallel except noted)
 
-- [ ] **FP-07 · Unify tournament lock scopes** (C4 · M) — shared `tournament-structure:global` scope for setup + 4 results jobs; scope unit tests
+- [x] **FP-07 · Unify tournament lock scopes** (C4 · M) — shared `tournament-structure:global` scope for setup + 4 results jobs; scope unit tests + serialization integration test
 - [ ] **FP-08 · Tournament creation rank poisoning** (C5 · S) — `entry_infos` upsert → `ON CONFLICT (id) DO NOTHING`; test with already-synced entry
 - [ ] **FP-09 · Battle-race counters** (C6 · M · *after FP-07*) — skip matchup on missing entry result; derive `played` like points-race; expose `skipped` count
 - [ ] **FP-10 · Upsert correctness pack** (H5, H6 · S · *after FP-01*)

@@ -37,6 +37,15 @@ function getLockClient(): Redis {
   return lockClient;
 }
 
+/** Close the shared lock client (worker shutdown, integration test teardown). */
+export async function closeLockClient(): Promise<void> {
+  if (!lockClient) {
+    return;
+  }
+  lockClient.disconnect();
+  lockClient = null;
+}
+
 function randomToken() {
   return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }

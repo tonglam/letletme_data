@@ -5,6 +5,20 @@ type MutationScopeInput = {
   tournamentId?: number;
 };
 
+/**
+ * Shared scope held by BOTH tournament setup rebuilds and every tournament
+ * structure-results job (points-race, battle-race, knockout, cup-results).
+ * Before FP-07 the two sides used disjoint scopes
+ * (`tournament-structure:tournament:N` vs `tournament-structure:event:N`), so a
+ * setup rebuild could tear down groups/knockouts while a results sync was
+ * writing against them (C4).
+ *
+ * Documented tradeoff: results jobs across different events now serialize
+ * against each other. They are seconds-long on a 10-minute cadence, so the
+ * mutual exclusion costs nothing in practice.
+ */
+const TOURNAMENT_STRUCTURE_GLOBAL_SCOPE = 'tournament-structure:global';
+
 function baseQueueName(queueName: string): string {
   return queueName.replace(/-p[0-3]$/, '');
 }
@@ -105,7 +119,7 @@ export function resolveMutationScopes(input: MutationScopeInput): string[] {
       case 'tournament-battle-race':
       case 'tournament-knockout':
       case 'tournament-cup-results':
-        return [withEvent('tournament-structure', eventId)];
+        return [withEvent('tournament-structure', eventId), TOURNAMENT_STRUCTURE_GLOBAL_SCOPE];
       case 'tournament-info':
         return ['tournament-info:all'];
       default:
@@ -115,7 +129,11 @@ export function resolveMutationScopes(input: MutationScopeInput): string[] {
 
   if (queue === 'tournament-setup') {
     if (jobName === 'tournament-setup') {
-      return [withTournament('tournament-structure', tournamentId), 'entry-core:all'];
+      return [
+        withTournament('tournament-structure', tournamentId),
+        TOURNAMENT_STRUCTURE_GLOBAL_SCOPE,
+        'entry-core:all',
+      ];
     }
     return [];
   }
