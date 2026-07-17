@@ -26,11 +26,6 @@ function createCapturingDb(rowsForAll: unknown[] = []) {
     queries.push({ sql: query, method });
     return { rows: method === 'execute' ? [] : rowsForAll };
   }) as unknown as NonNullable<ProxyDb>;
-  // The production repository uses a transaction for replace-all semantics.
-  // The proxy driver intentionally has no built-in transaction support, so
-  // this unit double delegates the callback to the same query-capturing db.
-  (db as unknown as { transaction: (fn: (tx: typeof db) => unknown) => unknown }).transaction =
-    async (fn) => fn(db);
   return { db, queries };
 }
 
@@ -68,20 +63,11 @@ describe('entry-event-transfers upsert (H5)', () => {
 
     await repo.replaceForEvent(12345, 10, [TRANSFER]);
 
-    expect(
-      queries.some((query) =>
-        query.sql.includes(
-          'on conflict ("entry_id","event_id","transfer_time","element_in_id","element_out_id") do update',
-        ),
-      ),
-    ).toBe(true);
-    expect(
-      queries.some((query) =>
-        query.sql.includes(
-          '"element_in_played" = COALESCE(excluded.element_in_played, entry_event_transfers.element_in_played)',
-        ),
-      ),
-    ).toBe(true);
+    expect(queries).toHaveLength(1);
+    expect(queries[0].sql).toContain('on conflict ("entry_id","event_id") do update');
+    expect(queries[0].sql).toContain(
+      '"element_in_played" = COALESCE(excluded.element_in_played, entry_event_transfers.element_in_played)',
+    );
   });
 
   it('keeps the onConflict=ignore path untouched', async () => {
@@ -90,14 +76,9 @@ describe('entry-event-transfers upsert (H5)', () => {
 
     await repo.replaceForEvent(12345, 10, [TRANSFER], undefined, { onConflict: 'ignore' });
 
-    expect(
-      queries.some((query) =>
-        query.sql.includes(
-          'on conflict ("entry_id","event_id","transfer_time","element_in_id","element_out_id") do nothing',
-        ),
-      ),
-    ).toBe(true);
-    expect(queries.some((query) => query.sql.includes('COALESCE'))).toBe(false);
+    expect(queries).toHaveLength(1);
+    expect(queries[0].sql).toContain('on conflict ("entry_id","event_id") do nothing');
+    expect(queries[0].sql).not.toContain('COALESCE');
   });
 });
 
