@@ -7,6 +7,7 @@ import {
   type DbEntryEventResultInsert,
 } from '../db/schemas/index.schema';
 import { getDb } from '../db/singleton';
+import { toNullableDbChip } from '../domain/chips';
 import type { RawFPLEntryEventPicksResponse, RawFPLEventLiveResponse } from '../types';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
@@ -174,7 +175,7 @@ export const createEntryEventResultsRepository = (dbInstance?: DatabaseInstance)
           eventBenchPoints: entryHistory.points_on_bench ?? null,
           eventAutoSubPoints: autoSubPoints,
           eventRank: entryHistory.rank ?? null,
-          eventChip: activeChip ?? null,
+          eventChip: toNullableDbChip(activeChip),
           eventPlayedCaptain: captainPick ? captainPick.element : null,
           eventCaptainPoints: captainPoints,
           eventPicks: picks.picks as unknown,
