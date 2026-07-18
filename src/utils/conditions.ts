@@ -19,6 +19,7 @@ type SeasonWindow = {
 };
 
 let cachedSeasonWindow: SeasonWindow | null = null;
+let cachedSeasonWindowNullAtMs: number | null = null;
 
 function toUtcDayStartMs(date: Date): number {
   return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), 0, 0, 0, 0);
@@ -42,6 +43,13 @@ async function loadSeasonWindow(now: Date): Promise<SeasonWindow | null> {
     return cachedSeasonWindow;
   }
 
+  if (
+    cachedSeasonWindowNullAtMs !== null &&
+    now.getTime() - cachedSeasonWindowNullAtMs < SEASON_WINDOW_CACHE_TTL_MS
+  ) {
+    return null;
+  }
+
   const [gw1Fixtures, gw38Fixtures] = await Promise.all([
     fixtureRepository.findByEvent(1),
     fixtureRepository.findByEvent(38),
@@ -49,6 +57,7 @@ async function loadSeasonWindow(now: Date): Promise<SeasonWindow | null> {
   const gw1Kickoffs = extractKickoffs(gw1Fixtures);
   const gw38Kickoffs = extractKickoffs(gw38Fixtures);
   if (gw1Kickoffs.length === 0 || gw38Kickoffs.length === 0) {
+    cachedSeasonWindowNullAtMs = now.getTime();
     cachedSeasonWindow = null;
     return null;
   }
@@ -64,6 +73,7 @@ async function loadSeasonWindow(now: Date): Promise<SeasonWindow | null> {
     loadedAtMs: now.getTime(),
   };
   cachedSeasonWindow = resolved;
+  cachedSeasonWindowNullAtMs = null;
   return resolved;
 }
 

@@ -9,8 +9,8 @@ const DEFAULT_POLL_MS = 5_000;
 type GateWorkerSet<T> = Record<MutationPriorityTier, { queue: Queue<T>; worker: Worker<T> }>;
 
 async function getBacklogCount<T>(queue: Queue<T>): Promise<number> {
-  const counts = await queue.getJobCounts('waiting', 'active', 'delayed');
-  return (counts.waiting ?? 0) + (counts.active ?? 0) + (counts.delayed ?? 0);
+  const counts = await queue.getJobCounts('waiting', 'delayed');
+  return (counts.waiting ?? 0) + (counts.delayed ?? 0);
 }
 
 export function startStrictPriorityGate<T>(

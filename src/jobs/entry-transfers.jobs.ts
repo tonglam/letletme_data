@@ -7,6 +7,7 @@ import { isAfterMatchDay, isFPLSeason } from '../utils/conditions';
 import { fixtureRepository } from '../repositories/fixtures';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { logDebug, logInfo } from '../utils/logger';
+import { CRON_TIMEZONE } from '../utils/timezone';
 
 /**
  * Entry Event Transfers Cron Jobs
@@ -18,6 +19,7 @@ export function registerEntryTransfersJobs(app: Elysia) {
     cron({
       name: 'entry-event-transfers-daily',
       pattern: '40 10 * * *',
+      timezone: CRON_TIMEZONE,
       async run() {
         try {
           await executeTrackedCron('entry-event-transfers-daily', async () => {

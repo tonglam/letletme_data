@@ -1,10 +1,11 @@
 import { cron } from '@elysiajs/cron';
 import type { Elysia } from 'elysia';
 
-import { syncTournamentInfo } from '../services/tournament-info.service';
 import { isFPLSeason } from '../utils/conditions';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { logDebug, logInfo } from '../utils/logger';
+import { CRON_TIMEZONE } from '../utils/timezone';
+import { enqueueTournamentInfo } from './tournament-sync.jobs';
 
 export async function runTournamentInfoSync() {
   const now = new Date();
@@ -15,9 +16,9 @@ export async function runTournamentInfoSync() {
     return;
   }
 
-  logInfo('Tournament info sync started');
-  const result = await syncTournamentInfo();
-  logInfo('Tournament info sync completed', result);
+  logInfo('Enqueueing tournament info sync job');
+  const job = await enqueueTournamentInfo(0, 'cron');
+  logInfo('Tournament info sync job enqueued', { jobId: job.id });
 }
 
 export function registerTournamentInfoJobs(app: Elysia) {
@@ -25,6 +26,7 @@ export function registerTournamentInfoJobs(app: Elysia) {
     cron({
       name: 'tournament-info-sync',
       pattern: '45 10 * * *',
+      timezone: CRON_TIMEZONE,
       async run() {
         try {
           await executeTrackedCron('tournament-info-sync', runTournamentInfoSync);

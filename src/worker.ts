@@ -6,8 +6,9 @@ import { createTournamentSyncWorker } from './workers/tournament-sync.worker';
 import { createTournamentSetupWorker } from './workers/tournament-setup.worker';
 import { getConfig } from './utils/config';
 import { startQueueMonitor } from './utils/queue-monitor';
-import { logInfo } from './utils/logger';
+import { logError, logInfo } from './utils/logger';
 import { startWorkerHeartbeat } from './utils/worker-heartbeat';
+import { closeLockClient } from './utils/mutation-lock';
 import type { WorkerRuntime } from './workers/worker-runtime';
 
 getConfig();
@@ -48,15 +49,31 @@ const allQueueEvents = runtimes.flatMap((runtime) => runtime.queueEvents);
 // event loop is hung even if the process is still alive.
 const stopHeartbeat = startWorkerHeartbeat();
 
+const SHUTDOWN_TIMEOUT_MS = 30_000;
+
 async function shutdown(signal: string) {
   logInfo('Worker shutting down', { signal });
   stopHeartbeat();
   queueMonitors.forEach((monitor) => monitor.stop());
   runtimes.forEach((runtime) => runtime.stop?.());
-  await Promise.allSettled([
+
+  const closeAll = Promise.allSettled([
     ...allWorkers.map((worker) => worker.close()),
     ...allQueueEvents.map((events) => events.close()),
+    closeLockClient(),
   ]);
+
+  const timeout = new Promise<void>((_, reject) => {
+    setTimeout(() => reject(new Error('Shutdown timed out')), SHUTDOWN_TIMEOUT_MS).unref?.();
+  });
+
+  try {
+    await Promise.race([closeAll, timeout]);
+  } catch (error) {
+    logError('Worker shutdown did not complete within timeout; exiting uncleanly', error);
+    process.exit(1);
+  }
+
   process.exit(0);
 }
 

@@ -6,6 +6,7 @@ import { isAfterMatchDay, isFPLSeason, isMatchDayTime } from '../utils/condition
 import { fixtureRepository } from '../repositories/fixtures';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { logDebug, logInfo } from '../utils/logger';
+import { CRON_TIMEZONE } from '../utils/timezone';
 import {
   enqueueEventLivesCacheUpdate,
   enqueueEventLivesDbSync,
@@ -148,6 +149,7 @@ export function registerLiveJobs(app: Elysia) {
         cron({
           name: 'event-lives-cache-trigger',
           pattern: '* * * * *',
+          timezone: CRON_TIMEZONE,
           async run() {
             try {
               const now = new Date();
@@ -176,6 +178,7 @@ export function registerLiveJobs(app: Elysia) {
         cron({
           name: 'event-lives-db-trigger',
           pattern: '*/10 * * * *',
+          timezone: CRON_TIMEZONE,
           async run() {
             try {
               await executeTrackedCron('event-lives-db-sync', runEventLivesDbSync);
@@ -191,6 +194,7 @@ export function registerLiveJobs(app: Elysia) {
         cron({
           name: 'live-scores',
           pattern: '* * * * *',
+          timezone: CRON_TIMEZONE,
           async run() {
             try {
               await executeTrackedCron('live-scores', runLiveScores);
@@ -208,6 +212,7 @@ export function registerLiveJobs(app: Elysia) {
         cron({
           name: 'post-match-consolidation',
           pattern: '0 6,8,10 * * *',
+          timezone: CRON_TIMEZONE,
           async run() {
             try {
               await executeTrackedCron('post-match-consolidation', runPostMatchConsolidation);
