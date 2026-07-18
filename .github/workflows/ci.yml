@@ -46,3 +46,94 @@ jobs:
           REDIS_PORT: '6379'
           BETTER_AUTH_SECRET: ci-test-secret-min-32-characters-long
         run: bun run build
+
+  integration:
+    # Non-blocking until fresh-DB schema columns (e.g. updated_at) are fully
+    # aligned with drizzle schemas; unit tests remain the merge gate.
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        bun-version: ['1.3.3']
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: ci
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+      redis:
+        image: redis:7
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ matrix.bun-version }}
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Migrate database
+        env:
+          DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
+        run: bun run db:migrate
+
+
+      - name: Stub Supabase auth roles/schema (plain Postgres CI)
+        env:
+          DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
+        run: |
+          cat > /tmp/stub-auth.mjs <<'EOF'
+          import postgres from 'postgres';
+          const sql = postgres(process.env.DATABASE_URL, { max: 1 });
+          // Supabase roles referenced by RLS policies in migrations/0026+0029
+          for (const role of ['anon', 'authenticated', 'service_role']) {
+            await sql.unsafe(`DO $$ BEGIN CREATE ROLE ${role} NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$`);
+          }
+          await sql`CREATE SCHEMA IF NOT EXISTS auth`;
+          await sql.unsafe(
+            "CREATE OR REPLACE FUNCTION auth.role() RETURNS text LANGUAGE sql STABLE AS $fn$ SELECT current_setting('request.jwt.claim.role', true) $fn$"
+          );
+          // Default claim so policies using auth.role() evaluate in CI
+          await sql.unsafe("SELECT set_config('request.jwt.claim.role', 'service_role', false)");
+          await sql.end();
+          console.log('[ci] supabase auth roles + auth.role() stub ready');
+          EOF
+          bun /tmp/stub-auth.mjs
+
+
+
+      - name: Apply SQL migrations
+        env:
+          DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
+        run: bun run db:apply-sql
+
+      - name: Hermetic integration tests
+        env:
+          RUN_INTEGRATION: 1
+          DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
+          REDIS_HOST: 127.0.0.1
+          REDIS_PORT: '6379'
+          REDIS_DB: '9'
+          QUEUE_REDIS_DB: '9'
+          BETTER_AUTH_SECRET: ci-test-secret-min-32-characters-long
+        run: bun run test:integration
