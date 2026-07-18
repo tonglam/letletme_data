@@ -13,6 +13,12 @@
 -- Classification:
 --   - PUBLIC_READ tables: anonymous can SELECT; authenticated can do ALL.
 --   - AUTHENTICATED_ONLY tables: no anonymous access; authenticated can do ALL.
+--
+-- Identifier note: PostgreSQL truncates identifiers to 63 bytes (NAMEDATALEN-1).
+-- Policy names must be truncated with left(..., 63) *before* both the
+-- pg_policies existence check and CREATE POLICY. Checking the untruncated name
+-- while CREATE POLICY stores the truncated form causes false misses and
+-- "policy already exists" on re-run (deploy failure on long table names).
 -- ============================================================================
 
 DO $$
@@ -58,7 +64,8 @@ BEGIN
         IF EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = v_table) THEN
             EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', v_table);
 
-            v_policy := 'Allow public read access to ' || v_table;
+            -- Match Postgres identifier truncation so re-runs find existing policies.
+            v_policy := left('Allow public read access to ' || v_table, 63);
             IF NOT EXISTS (
                 SELECT 1 FROM pg_policies
                 WHERE schemaname = 'public' AND tablename = v_table AND policyname = v_policy
@@ -69,7 +76,7 @@ BEGIN
                 );
             END IF;
 
-            v_policy := 'Allow authenticated write access to ' || v_table;
+            v_policy := left('Allow authenticated write access to ' || v_table, 63);
             IF NOT EXISTS (
                 SELECT 1 FROM pg_policies
                 WHERE schemaname = 'public' AND tablename = v_table AND policyname = v_policy
@@ -88,7 +95,7 @@ BEGIN
         IF EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = v_table) THEN
             EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', v_table);
 
-            v_policy := 'Allow authenticated full access to ' || v_table;
+            v_policy := left('Allow authenticated full access to ' || v_table, 63);
             IF NOT EXISTS (
                 SELECT 1 FROM pg_policies
                 WHERE schemaname = 'public' AND tablename = v_table AND policyname = v_policy
@@ -114,7 +121,7 @@ BEGIN
         IF EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'bauth' AND tablename = v_table) THEN
             EXECUTE format('ALTER TABLE bauth.%I ENABLE ROW LEVEL SECURITY', v_table);
 
-            v_policy := 'Allow authenticated full access to bauth.' || v_table;
+            v_policy := left('Allow authenticated full access to bauth.' || v_table, 63);
             IF NOT EXISTS (
                 SELECT 1 FROM pg_policies
                 WHERE schemaname = 'bauth' AND tablename = v_table AND policyname = v_policy
