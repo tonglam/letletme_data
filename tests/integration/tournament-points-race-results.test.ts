@@ -11,9 +11,9 @@ import { resolveIntegrationSeedAvailability } from './helpers/tournament-seed';
 
 const resolved = await resolveIntegrationSeedAvailability('points_races');
 
-describe.skipIf(!resolved.canRun)('Tournament Points Race Results Integration Tests', () => {
-  const seed = resolved.seed!;
-  const testEventId = seed.currentEvent.id;
+describe.skipIf(!resolved.canRun || !resolved.seed?.currentEvent)('Tournament Points Race Results Integration Tests', () => {
+  const seed = resolved.seed;
+  const testEventId = seed?.currentEvent?.id ?? -1;
   let syncedResult: Awaited<ReturnType<typeof syncTournamentPointsRaceResults>>;
 
   beforeAll(async () => {

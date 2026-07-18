@@ -11,10 +11,10 @@ import { resolveIntegrationSeedAvailability } from './helpers/tournament-seed';
 
 const resolved = await resolveIntegrationSeedAvailability('any');
 
-describe.skipIf(!resolved.canRun)('League Event Results Integration Tests', () => {
-  const seed = resolved.seed!;
-  const testEventId = seed.currentEvent.id;
-  const testTournamentId = seed.tournamentId;
+describe.skipIf(!resolved.canRun || !resolved.seed?.currentEvent)('League Event Results Integration Tests', () => {
+  const seed = resolved.seed;
+  const testEventId = seed?.currentEvent?.id ?? -1;
+  const testTournamentId = (seed?.tournamentId ?? -1);
   let syncedResult: Awaited<ReturnType<typeof syncLeagueEventResultsByTournament>>;
 
   beforeAll(async () => {

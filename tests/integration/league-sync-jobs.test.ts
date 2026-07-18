@@ -104,11 +104,13 @@ describe('League Sync Jobs Integration', () => {
     });
 
     it('dedupes concurrent tournament cascade enqueues', async () => {
-      const job1 = await enqueueLeagueEventResults(TEST_EVENT_ID, 'cascade', {
-        tournamentId: TEST_TOURNAMENT_ID,
+      const eventId = 920_000 + (Date.now() % 100_000);
+      const tournamentId = 930_000 + (Date.now() % 100_000);
+      const job1 = await enqueueLeagueEventResults(eventId, 'cascade', {
+        tournamentId,
       });
-      const job2 = await enqueueLeagueEventResults(TEST_EVENT_ID, 'cascade', {
-        tournamentId: TEST_TOURNAMENT_ID,
+      const job2 = await enqueueLeagueEventResults(eventId, 'cascade', {
+        tournamentId,
       });
 
       expect(job1).not.toBeNull();

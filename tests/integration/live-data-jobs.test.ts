@@ -88,8 +88,10 @@ describe('Live Data Jobs Integration', () => {
     it('dedupes concurrent cron enqueues for the same event (waiting-room)', async () => {
       // FP-14: deterministic job IDs mean a second enqueue while the first is
       // still waiting returns null instead of forking a duplicate chain.
-      const job1 = await enqueueEventLivesCacheUpdate(TEST_EVENT_ID, 'cron');
-      const job2 = await enqueueEventLivesCacheUpdate(TEST_EVENT_ID, 'cron');
+      // Use a unique event id so earlier tests do not leave a waiting job.
+      const eventId = 900_000 + (Date.now() % 100_000);
+      const job1 = await enqueueEventLivesCacheUpdate(eventId, 'cron');
+      const job2 = await enqueueEventLivesCacheUpdate(eventId, 'cron');
 
       expect(job1).not.toBeNull();
       expect(String(job1!.id)).toContain('event-lives-cache');

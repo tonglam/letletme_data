@@ -11,9 +11,9 @@ import { resolveIntegrationSeedAvailability } from './helpers/tournament-seed';
 
 const resolved = await resolveIntegrationSeedAvailability('any');
 
-describe.skipIf(!resolved.canRun)('Tournament Event Cup Results Integration Tests', () => {
-  const seed = resolved.seed!;
-  const testEventId = seed.currentEvent.id;
+describe.skipIf(!resolved.canRun || !resolved.seed?.currentEvent)('Tournament Event Cup Results Integration Tests', () => {
+  const seed = resolved.seed;
+  const testEventId = seed?.currentEvent?.id ?? -1;
   let syncPromise: ReturnType<typeof syncTournamentEventCupResults> | undefined;
 
   function ensureSynced() {

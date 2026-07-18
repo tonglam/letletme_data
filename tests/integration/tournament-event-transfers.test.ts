@@ -13,9 +13,9 @@ import { resolveIntegrationSeedAvailability } from './helpers/tournament-seed';
 
 const resolved = await resolveIntegrationSeedAvailability('any');
 
-describe.skipIf(!resolved.canRun)('Tournament Event Transfers Integration Tests', () => {
-  const seed = resolved.seed!;
-  const testEventId = seed.currentEvent.id;
+describe.skipIf(!resolved.canRun || !resolved.seed?.currentEvent)('Tournament Event Transfers Integration Tests', () => {
+  const seed = resolved.seed;
+  const testEventId = seed?.currentEvent?.id ?? -1;
 
   describe('Pre-Event Transfers Sync', () => {
     test('should sync pre-event transfers', async () => {

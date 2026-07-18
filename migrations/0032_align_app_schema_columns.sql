@@ -34,6 +34,17 @@ ALTER TABLE IF EXISTS event_live_explains ADD COLUMN IF NOT EXISTS updated_at ti
 ALTER TABLE entry_history_infos
   ALTER COLUMN season TYPE char(7);
 
+-- player_stats was created in 0002 with denormalized NOT NULL columns the app
+-- no longer writes (web_name, team_name, …). Drop them so upserts match the
+-- current Drizzle schema.
+ALTER TABLE player_stats DROP COLUMN IF EXISTS web_name;
+ALTER TABLE player_stats DROP COLUMN IF EXISTS element_type_name;
+ALTER TABLE player_stats DROP COLUMN IF EXISTS team_name;
+ALTER TABLE player_stats DROP COLUMN IF EXISTS team_short_name;
+ALTER TABLE player_stats DROP COLUMN IF EXISTS value;
+-- team_id remains on some DBs from 0002; schema no longer maps it.
+ALTER TABLE player_stats DROP COLUMN IF EXISTS team_id;
+
 -- Upserts that re-insert rows selected earlier include explicit `id` values.
 -- GENERATED ALWAYS rejects those; BY DEFAULT allows explicit ids when needed.
 -- Skip tables that use SERIAL (not IDENTITY) or have no identity column.

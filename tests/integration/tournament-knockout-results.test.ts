@@ -10,9 +10,9 @@ import { resolveIntegrationSeedAvailability } from './helpers/tournament-seed';
 
 const resolved = await resolveIntegrationSeedAvailability('knockout');
 
-describe.skipIf(!resolved.canRun)('Tournament Knockout Results Integration Tests', () => {
-  const seed = resolved.seed!;
-  const testEventId = seed.currentEvent.id;
+describe.skipIf(!resolved.canRun || !resolved.seed?.currentEvent)('Tournament Knockout Results Integration Tests', () => {
+  const seed = resolved.seed;
+  const testEventId = seed?.currentEvent?.id ?? -1;
 
   describe('Sync Integration', () => {
     test('should sync knockout results', async () => {
