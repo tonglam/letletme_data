@@ -19,7 +19,7 @@ function toNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
-function parseChipPlays(raw: unknown[]): EventChipData[] {
+export function parseChipPlays(raw: unknown[]): EventChipData[] {
   return raw
     .filter(isChipPlayRecord)
     .map((item) => {
@@ -33,7 +33,7 @@ function parseChipPlays(raw: unknown[]): EventChipData[] {
     .filter((item): item is EventChipData => item !== null);
 }
 
-function parseTopElementInfo(raw: unknown): EventTopElementData | null {
+export function parseTopElementInfo(raw: unknown): EventTopElementData | null {
   if (!raw || typeof raw !== 'object') {
     return null;
   }

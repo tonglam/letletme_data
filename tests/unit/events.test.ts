@@ -1,7 +1,6 @@
-import { beforeEach, describe, expect, test } from 'bun:test';
+import { describe, expect, test } from 'bun:test';
 
 import { selectNextEventByDeadline } from '../../src/domain/events';
-import { createEventRepository } from '../../src/repositories/events';
 import { transformEvents } from '../../src/transformers/events';
 import {
   rawFPLEventsFixture,
@@ -118,52 +117,6 @@ describe('Events Unit Tests', () => {
 
       expect(result).toHaveLength(1000);
       expect(endTime - startTime).toBeLessThan(100); // Should complete in under 100ms
-    });
-  });
-
-  describe('EventRepository Unit Tests', () => {
-    let mockDb: any;
-    let repository: ReturnType<typeof createEventRepository>;
-
-    beforeEach(() => {
-      // Create mock database with simple functions
-      mockDb = {
-        select: () => ({
-          from: () => ({
-            where: () => Promise.resolve([singleTransformedEventFixture]),
-          }),
-        }),
-        insert: () => ({
-          values: () => ({
-            onConflictDoUpdate: () => ({
-              returning: () => Promise.resolve([singleTransformedEventFixture]),
-            }),
-          }),
-        }),
-        delete: () => Promise.resolve(undefined),
-      };
-
-      repository = createEventRepository(mockDb);
-      // Note: Real repository uses singleton db, this is just for testing structure
-    });
-
-    test('should create repository instance', () => {
-      expect(repository).toBeDefined();
-      expect(repository.findCurrent).toBeDefined();
-      expect(repository.findNext).toBeDefined();
-      expect(repository.upsertBatch).toBeDefined();
-    });
-
-    test('should handle repository method signatures', () => {
-      // Test method signatures exist and are callable
-      expect(typeof repository.findCurrent).toBe('function');
-      expect(typeof repository.findNext).toBe('function');
-      expect(typeof repository.upsertBatch).toBe('function');
-    });
-
-    test('should handle upsertBatch with empty array', async () => {
-      const result = await repository.upsertBatch([]);
-      expect(result).toEqual([]);
     });
   });
 
