@@ -103,18 +103,20 @@ describe('League Sync Jobs Integration', () => {
       expect(job2 === null || job2.id === job1!.id).toBe(true);
     });
 
-    it('dedupes concurrent tournament cascade enqueues', async () => {
+    it('creates separate tournament cascade job runs', async () => {
       const eventId = 920_000 + (Date.now() % 100_000);
       const tournamentId = 930_000 + (Date.now() % 100_000);
       const job1 = await enqueueLeagueEventResults(eventId, 'cascade', {
         tournamentId,
       });
+      await Bun.sleep(2);
       const job2 = await enqueueLeagueEventResults(eventId, 'cascade', {
         tournamentId,
       });
 
       expect(job1).not.toBeNull();
-      expect(job2 === null || job2.id === job1!.id).toBe(true);
+      expect(job2).not.toBeNull();
+      expect(job1!.id).not.toBe(job2!.id);
     });
   });
 

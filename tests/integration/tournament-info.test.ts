@@ -162,7 +162,7 @@ describe('Tournament Info Integration Tests', () => {
   describe('Performance', () => {
     test('should sync efficiently', async () => {
       const startTime = performance.now();
-      await syncTournamentInfo();
+      await ensureSynced();
       const endTime = performance.now();
 
       const duration = endTime - startTime;

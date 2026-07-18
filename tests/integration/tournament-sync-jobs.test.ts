@@ -79,25 +79,30 @@ describe('Tournament Sync Jobs Integration', () => {
   });
 
   describe('Job Deduplication', () => {
-    it('uses a stable job ID prefix and dedupes concurrent cron enqueues', async () => {
+    it('uses a stable job ID prefix for recurring schedules', async () => {
       const eventId = 900_000 + (Date.now() % 100_000);
       const job1 = await enqueueTournamentEventResults(eventId, 'cron');
+      // Tiny delay so Date.now()-based job IDs differ
+      await Bun.sleep(2);
       const job2 = await enqueueTournamentEventResults(eventId, 'cron');
 
       expect(job1).not.toBeNull();
+      expect(job2).not.toBeNull();
       expect(String(job1!.id).startsWith(`tournament-event-results-e${eventId}-`)).toBe(true);
-      // Waiting-room dedupe: second enqueue is skipped or returns the same id.
-      expect(job2 === null || job2.id === job1!.id).toBe(true);
+      expect(String(job2!.id).startsWith(`tournament-event-results-e${eventId}-`)).toBe(true);
+      expect(job1!.id).not.toBe(job2!.id);
     });
 
-    it('uses a stable cascade job ID prefix and dedupes concurrent enqueues', async () => {
+    it('uses a stable cascade job ID prefix', async () => {
       const eventId = 910_000 + (Date.now() % 100_000);
       const job1 = await enqueueTournamentPointsRace(eventId, 'cascade');
+      await Bun.sleep(2);
       const job2 = await enqueueTournamentPointsRace(eventId, 'cascade');
 
       expect(job1).not.toBeNull();
+      expect(job2).not.toBeNull();
       expect(String(job1!.id).startsWith(`tournament-points-race-e${eventId}-`)).toBe(true);
-      expect(job2 === null || job2.id === job1!.id).toBe(true);
+      expect(job1!.id).not.toBe(job2!.id);
     });
   });
 
