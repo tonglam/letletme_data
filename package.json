@@ -45,8 +45,6 @@
   "license": "MIT",
   "devDependencies": {
     "@types/bun": "^1.2.11",
-    "@types/node": "^20.11.5",
-    "@types/supertest": "^6.0.3",
     "@typescript-eslint/eslint-plugin": "^8.25.0",
     "@typescript-eslint/parser": "^8.25.0",
     "bun-types": "^1.2.10",

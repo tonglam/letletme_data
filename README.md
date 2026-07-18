@@ -1,6 +1,6 @@
 # Overall
 
-Letletme_data is a robust data service that fetches data from the Fantasy Premier League (FPL) servers, cleans and transforms the data, and then stores it in PostgreSQL and Redis, providing RESTful APIs for querying data. The service is built with TypeScript using functional programming principles, ensuring type safety and maintainability.
+Letletme_data is a data service that fetches data from the Fantasy Premier League (FPL) servers, cleans and transforms it, and stores it in PostgreSQL and Redis, providing RESTful APIs for querying data. The service is built with TypeScript and Bun, using Zod for runtime validation at the FPL boundary.
 
 Key Features:
 
@@ -85,8 +85,8 @@ flowchart LR
     end
 
     subgraph Transform
-        C --> |fp-ts| C1[Data Mapping]
-        C --> |Either| C2[Error Handling]
+        C --> C1[Data Mapping]
+        C --> C2[Error Handling]
     end
 
     subgraph Storage
@@ -100,91 +100,29 @@ flowchart LR
 Core:
 
 - TypeScript (with strict type checking)
-- Node.js (v18+)
-- Bun (runtime & package manager)
+- Bun (runtime, package manager, bundler, and test runner)
 - ElysiaJS (REST API framework)
 
 Storage:
 
 - PostgreSQL (primary database)
-- Redis (caching layer, via ioredis)
+- Redis (caching layer and BullMQ queues, via ioredis)
 - Drizzle ORM (type-safe ORM)
 
 Testing & Quality:
 
-- Bun Test Runner (Jest-compatible)
+- Bun Test Runner
 - ESLint & Prettier (code quality tools)
 
 Utilities:
 
 - Pino (structured logging)
 - Zod (runtime type validation)
-- fp-ts (functional programming utilities)
 
 DevOps:
 
 - Docker (containerization)
 - Docker Compose (multi-container orchestration)
-
-# Functional Programming
-
-This project is designed using functional programming principles, making it particularly well-suited for data transformation workflows. The FP approach offers several benefits:
-
-1. Data Flow:
-
-   - Clear, unidirectional data flow
-   - Immutable data transformations
-   - Pure functions for predictable results
-   - Extensive use of fp-ts for functional patterns
-
-2. Type Safety:
-
-   - Advanced TypeScript generics
-   - No 'any' types allowed
-   - Strong type inference
-   - Runtime type validation with Zod
-
-3. Benefits:
-   - Highly testable code
-   - Easy to maintain and extend
-   - Reduced side effects
-   - Better error handling through Either and Option types
-   - Composable functions
-
-While the learning curve with TypeScript generics and FP patterns can be steep, especially coming from an OOP background, the resulting codebase is more maintainable, predictable, and elegant.
-
-# Getting Started
-
-1. Prerequisites:
-
-   ```bash
-   Node.js v18+
-   Bun v1+
-   Docker & Docker Compose
-   PostgreSQL
-   Redis
-   ```
-
-2. Installation:
-
-   ```bash
-   git clone [repository-url]
-   cd letletme_data
-   bun install
-   ```
-
-3. Configuration:
-
-   ```bash
-   cp .env.example .env
-   # Edit .env with your settings
-   ```
-
-4. Run:
-   ```bash
-   docker-compose up -d
-   bun run dev
-   ```
 
 # Domain-Driven Design
 
@@ -216,15 +154,25 @@ graph TB
     Scout --> Live
 ```
 
-Each domain follows a standard structure with entities, repositories, services, and types, ensuring clear separation of concerns and maintainable code. For detailed design documentation, please refer to the design docs.
+Each domain follows a standard structure with entities, repositories, services, and types, ensuring clear separation of concerns and maintainable code.
 
 ## Deployment
 
 - The production stack runs inside Docker containers orchestrated by `docker compose`; copy `.env.deploy.example` to `.env.deploy`, then run `scripts/deploy.sh` to build images, start services, and execute database migrations locally or on the VPS.
 - Continuous delivery is handled via GitHub Actions (`.github/workflows/deploy.yml`), which builds a container image, pushes it to GHCR, and refreshes the VPS stack using the same compose file.
-- Refer to `DEPLOYMENT.md` and `docs/deployment-plan.md` for the full checklist, required GitHub secrets, and the legacy manual instructions kept for break-glass scenarios.
+- Refer to `DEPLOYMENT.md` for the full checklist and required GitHub secrets.
 
 ## Testing
 
 - Run `bun test tests/unit` for the fast, deterministic suite that validates transformers, repositories, and utilities (this is what the CI workflow executes).
-- Run `bun test tests/integration` locally before production releases; these tests require external services (PostgreSQL, Redis, Bull queues, live FPL responses) and are intentionally skipped in CI/CD.
+- Run `bun run test:integration` locally before production releases; these tests require PostgreSQL and Redis and are gated to test-only infrastructure. See `tests/README.md` for setup details.
+
+## Scheduled major upgrades
+
+The following major-version upgrades are planned once the current fix plan lands and CI is green:
+
+- Zod 4
+- Pino 10
+- ESLint 10
+
+Track them in dependency-renovation PRs; do not mix them with fix-plan items.

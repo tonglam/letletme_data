@@ -3,6 +3,7 @@ import { eq } from 'drizzle-orm';
 import { auth } from '../src/auth';
 import { user } from '../src/db/schemas/auth.schema';
 import { getDb } from '../src/db/singleton';
+import { getConfig } from '../src/utils/config';
 import { logError, logInfo } from '../src/utils/logger';
 
 type CreateAdminKeyOptions = {
@@ -21,6 +22,21 @@ function parseArgs(argv: string[]): CreateAdminKeyOptions {
     name: nameArg?.split('=')[1] ?? 'Letletme Admin',
     keyName: keyNameArg?.split('=')[1] ?? 'admin-bootstrap',
   };
+}
+
+function assertEnvironment() {
+  const config = getConfig();
+  if (!config.DATABASE_URL) {
+    throw new Error('DATABASE_URL is required to create an admin API key');
+  }
+  if (!config.BETTER_AUTH_SECRET || config.BETTER_AUTH_SECRET.length < 32) {
+    throw new Error('BETTER_AUTH_SECRET (min 32 chars) is required to create an admin API key');
+  }
+  if (config.NODE_ENV === 'production' && !process.argv.includes('--allow-prod')) {
+    throw new Error(
+      'Refusing to create an admin key in production without --allow-prod. This command prints a secret to stdout.',
+    );
+  }
 }
 
 async function findUserIdByEmail(email: string): Promise<string | null> {
@@ -55,6 +71,7 @@ async function ensureAdminUser(options: CreateAdminKeyOptions): Promise<string> 
 }
 
 async function main() {
+  assertEnvironment();
   const options = parseArgs(process.argv.slice(2));
   const userId = await ensureAdminUser(options);
 
@@ -76,7 +93,8 @@ async function main() {
     start: created.start,
   });
 
-  console.log('\nStore this key securely — it will not be shown again:\n');
+  console.log('\nStore this key securely — it will not be shown again.');
+  console.log('DO NOT paste it into chat, logs, screenshots, or tickets.\n');
   console.log(created.key);
   console.log('');
 }
