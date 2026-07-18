@@ -6,6 +6,7 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
 - **Findings evidence:** [code-review-2026-07-17.md](./code-review-2026-07-17.md)
 
 **Progress:** P0 `6/6` · P1 `6/10` · P2 `1/9` · Deferred `0/4`
+**Progress:** P0 `6/6` · P1 `7/10` · P2 `0/9` · Deferred `0/4`
 
 **Ground rules**
 1. Redis keys/shapes are **frozen** — fixes within existing shapes; new data → additive keys only; deletions need consumer sign-off.
@@ -69,7 +70,7 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
   - [x] h. Standardize `{ success, data?, error? }`; 200 sync / 202 enqueued
   - [x] i. `check-name` minLength 1; drop `setupError` from public `setup-status`
   - [x] j. 429 on `RATE_LIMITED`; try/catch → 503 on auth-infra failure
-- [ ] **FP-14 · Job safety pack** (H10, H11, M9–M14 · L · *alerting needs prod `TELEGRAM_*` envs*)
+- [x] **FP-14 · Job safety pack** (H10, H11, M9–M14 · L · *alerting needs prod `TELEGRAM_*` envs*)
   - [ ] a. `entry-event-results-daily`: `isFPLSeason` + current-event guards
   - [ ] b. Watchdog checks active job/lock before recovering setups
   - [ ] c. `errors > 0 → throw` in tournament-event-picks, transfers (pre+post), tournament-info
@@ -147,3 +148,4 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
 | FP-18 | (PR #20) | 2026-07-17 | one resilient FPL request() with timeout/retries |
 | FP-19 | 270bb0b | 2026-07-17 | PR #21 |
 | FP-20 | ab08fa2 (PR #23) | 2026-07-18 | RLS in numbered migration; migration-ledger advisory lock + ON CONFLICT DO NOTHING; RLS_SECURITY.md updated |
+| FP-14 | bb663a7 (PR #22) | 2026-07-18 | job safety pack: guards, watchdog, alerts, deterministic IDs, cascade throws, per-table scopes |

@@ -32,14 +32,24 @@ export async function enqueuePicksPerTournament(eventId: number) {
     failed,
   });
 
-  results.forEach((result, index) => {
-    if (result.status === 'rejected') {
-      logError('Failed to enqueue picks job for tournament', result.reason, {
+  if (failed > 0) {
+    const failures = results
+      .map((result, index) => ({ result, tournament: tournaments[index] }))
+      .filter(({ result }) => result.status === 'rejected')
+      .map(({ result, tournament }) => ({
+        tournamentId: tournament.id,
+        reason: result.status === 'rejected' ? result.reason : null,
+      }));
+    failures.forEach(({ tournamentId, reason }) => {
+      logError('Failed to enqueue picks job for tournament', reason, {
         eventId,
-        tournamentId: tournaments[index].id,
+        tournamentId,
       });
-    }
-  });
+    });
+    throw new Error(
+      `League picks cascade enqueue failed for ${failed} tournament(s) (eventId=${eventId})`,
+    );
+  }
 
   return { enqueued: successful };
 }
@@ -72,14 +82,24 @@ export async function enqueueResultsPerTournament(eventId: number) {
     failed,
   });
 
-  results.forEach((result, index) => {
-    if (result.status === 'rejected') {
-      logError('Failed to enqueue results job for tournament', result.reason, {
+  if (failed > 0) {
+    const failures = results
+      .map((result, index) => ({ result, tournament: tournaments[index] }))
+      .filter(({ result }) => result.status === 'rejected')
+      .map(({ result, tournament }) => ({
+        tournamentId: tournament.id,
+        reason: result.status === 'rejected' ? result.reason : null,
+      }));
+    failures.forEach(({ tournamentId, reason }) => {
+      logError('Failed to enqueue results job for tournament', reason, {
         eventId,
-        tournamentId: tournaments[index].id,
+        tournamentId,
       });
-    }
-  });
+    });
+    throw new Error(
+      `League results cascade enqueue failed for ${failed} tournament(s) (eventId=${eventId})`,
+    );
+  }
 
   return { enqueued: successful };
 }

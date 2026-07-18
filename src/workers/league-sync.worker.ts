@@ -15,6 +15,7 @@ import {
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { getQueueConnection } from '../utils/queue';
 import { logError, logInfo } from '../utils/logger';
+import { alertOnFinalFailure } from '../utils/notify';
 import { withMutationConflictGuard } from '../utils/mutation-lock';
 import { startStrictPriorityGate } from './strict-priority-gate';
 import type { WorkerRuntime } from './worker-runtime';
@@ -103,6 +104,9 @@ export function createLeagueSyncWorker(): WorkerRuntime {
         tournamentId: job?.data.tournamentId,
         tier,
       });
+      if (job) {
+        void alertOnFinalFailure(job, err);
+      }
     });
 
     worker.on('error', (err) => {

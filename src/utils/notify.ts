@@ -1,3 +1,4 @@
+import type { Job } from 'bullmq';
 import { getConfig } from './config';
 import { logError, logInfo, logWarn } from './logger';
 
@@ -85,6 +86,47 @@ export async function sendWeChatBotNotification(
   } catch (error) {
     logError('Failed to send WeChat bot notification', error);
     throw error;
+  }
+}
+
+/**
+ * Alert when a BullMQ job has exhausted all attempts. No-ops silently if
+ * Telegram is not configured (plan FP-14d: alerting requires prod envs).
+ */
+export async function alertOnFinalFailure(job: Job, error: unknown): Promise<void> {
+  const attempts = job.opts.attempts ?? 1;
+  if (job.attemptsMade < attempts) {
+    return;
+  }
+
+  const config = getConfig();
+  if (!config.TELEGRAM_BOT_TOKEN || !config.TELEGRAM_CHAT_ID) {
+    logWarn('Final failure alert skipped — Telegram not configured', {
+      jobId: job.id,
+      jobName: job.name,
+      queueName: job.queueName,
+    });
+    return;
+  }
+
+  const errorMessage = error instanceof Error ? error.message : String(error);
+  const text = [
+    '🚨 Job permanently failed',
+    `Queue: ${job.queueName}`,
+    `Job: ${job.name}`,
+    `ID: ${job.id}`,
+    `Attempts: ${job.attemptsMade}/${attempts}`,
+    `Error: ${errorMessage}`,
+  ].join('\n');
+
+  try {
+    await sendTelegramMessage(text);
+  } catch (sendError) {
+    logError('Failed to send final failure alert', sendError, {
+      jobId: job.id,
+      jobName: job.name,
+      queueName: job.queueName,
+    });
   }
 }
 

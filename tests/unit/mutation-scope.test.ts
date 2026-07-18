@@ -24,7 +24,7 @@ describe('resolveMutationScopes', () => {
       eventId: 33,
       tournamentId: 1001,
     });
-    expect(scopes).toContain('entry-event:event:33');
+    expect(scopes).toContain('entry-event-results:event:33');
     expect(scopes).toContain('league-event-results:event:33');
     expect(scopes).toContain('league-event-results:tournament:1001');
   });
@@ -56,8 +56,7 @@ describe('resolveMutationScopes', () => {
       jobName: 'tournament-selection-stats',
       eventId: 35,
     });
-    expect(scopes).toContain('entry-event:event:35');
-    expect(scopes).toContain('tournament-event-mutations:event:35');
+    expect(scopes).toEqual(['tournament-event-mutations:event:35']);
   });
 
   it.each(['tournament-points-race', 'tournament-battle-race', 'tournament-knockout'])(
@@ -72,6 +71,18 @@ describe('resolveMutationScopes', () => {
       expect(scopes).toContain('tournament-structure:event:33');
     },
   );
+
+  it('narrows tournament event results to per-table entry scopes (FP-14h)', () => {
+    const scopes = resolveMutationScopes({
+      queueName: 'tournament-sync-p2',
+      jobName: 'tournament-event-results',
+      eventId: 35,
+    });
+    expect(scopes).toContain('entry-event-picks:event:35');
+    expect(scopes).toContain('entry-event-transfers:event:35');
+    expect(scopes).toContain('entry-event-results:event:35');
+    expect(scopes).toContain('tournament-event-results:event:35');
+  });
 
   it('keeps cup-results off the global structure lock (FP-07 Codex P2)', () => {
     const scopes = resolveMutationScopes({

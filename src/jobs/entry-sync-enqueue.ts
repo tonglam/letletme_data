@@ -1,3 +1,5 @@
+import { randomUUID } from 'crypto';
+
 import {
   getEntrySyncQueue,
   type EntrySyncJobName,
@@ -20,6 +22,7 @@ export interface EntrySyncJobOptions {
   jobId?: string;
   delayMs?: number;
   eventId?: number;
+  runId?: string;
 }
 
 function hashEntryListKey(
@@ -52,6 +55,14 @@ async function enqueueEntrySyncJob(
     const concurrency = sanitizePositiveInt(options.concurrency, ENTRY_SYNC_DEFAULT_CONCURRENCY);
     const throttleMs = sanitizePositiveInt(options.throttleMs, ENTRY_SYNC_DEFAULT_THROTTLE_MS);
 
+    // Stable runId for this chain. Retries keep the same runId so retried chunks
+    // reuse the same deterministic jobId and cannot fork duplicate chains (FP-14f).
+    // Manual table-scans default to a stable runId so repeat triggers dedupe in the
+    // waiting room; cron ticks use a fresh runId so every cycle queues its own job.
+    const runId =
+      options.runId ??
+      (source === 'cron' ? `${Date.now()}` : source === 'manual' ? 'manual' : randomUUID());
+
     const jobData = {
       source,
       triggeredAt: new Date().toISOString(),
@@ -62,23 +73,21 @@ async function enqueueEntrySyncJob(
       concurrency,
       throttleMs,
       eventId: options.eventId,
+      runId,
     };
 
     const chunkKey =
       options.eventId !== undefined ? `${chunkOffset}-event-${options.eventId}` : `${chunkOffset}`;
-    // Entry-list jobs (API with explicit IDs) and manual/API full-table chunk-0
-    // triggers get deterministic IDs so repeat POSTs dedupe. Cron chunks stay
-    // time-based so every schedule tick enqueues.
+    // Entry-list jobs (API with explicit IDs) keep their content-based ID.
+    // Table-scan chunks get deterministic IDs keyed by runId + offset so retries
+    // dedupe and cannot fork parallel chains.
     const isEntryList = options.entryIds !== undefined;
-    const isManualTableScan =
-      !isEntryList && (source === 'api' || source === 'manual') && options.retryCount === undefined;
     const defaultJobId = isEntryList
       ? `${jobName}-entry-list-${hashEntryListKey(options.entryIds ?? [], options.eventId, options.retryCount)}`
-      : isManualTableScan
-        ? `${jobName}-chunk-${chunkKey}-${source}`
-        : `${jobName}-chunk-${chunkKey}-${Date.now()}`;
+      : `${jobName}-${runId}-chunk-${chunkKey}`;
     const jobId = options.jobId ?? defaultJobId;
-    const removeOnSettle = isEntryList || isManualTableScan;
+    // Deterministic IDs must not block re-triggers after settle.
+    const removeOnSettle = isEntryList || source === 'manual';
 
     const job = await queue.add(jobName, jobData, {
       attempts: 3,
@@ -88,7 +97,6 @@ async function enqueueEntrySyncJob(
       },
       jobId,
       delay: options.delayMs,
-      // Deterministic IDs must not block re-triggers after settle.
       ...(removeOnSettle ? { removeOnComplete: true, removeOnFail: true } : {}),
     });
 
@@ -100,6 +108,7 @@ async function enqueueEntrySyncJob(
       queue: queue.name,
       chunkOffset,
       chunkSize,
+      runId,
     });
     return job;
   } catch (error) {

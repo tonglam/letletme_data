@@ -8,11 +8,11 @@ import {
   isLiveDataTieredQueueEnabled,
   liveDataQueuesByTier,
 } from '../queues/live-data.queue';
-import { syncEventLives, updateEventLivesCache } from '../services/event-lives.service';
 import {
   enqueueCascadeJobs,
   isLiveMatchWindowForEvent,
 } from '../services/live-data-cascade.service';
+import { syncEventLives, updateEventLivesCache } from '../services/event-lives.service';
 import { syncLiveFixtureCache } from '../services/live-fixtures.service';
 import { syncLiveBonusCache } from '../services/live-bonus.service';
 import { syncEventLiveSummary } from '../services/event-live-summaries.service';
@@ -22,6 +22,7 @@ import { syncLiveScores } from '../services/fixtures.service';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { getQueueConnection } from '../utils/queue';
 import { logError, logInfo } from '../utils/logger';
+import { alertOnFinalFailure } from '../utils/notify';
 import { withMutationConflictGuard } from '../utils/mutation-lock';
 import { startStrictPriorityGate } from './strict-priority-gate';
 import type { WorkerRuntime } from './worker-runtime';
@@ -69,9 +70,16 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
             break;
 
           case LIVE_JOBS.EVENT_LIVES_DB:
-            await syncEventLives(eventId);
-            // After DB sync completes, trigger dependent jobs
-            await enqueueCascadeJobs(eventId);
+            {
+              // Re-check window inside the worker: the cron may have enqueued during
+              // match time, but if the worker is delayed past the window we still
+              // want the DB persistence (post-match consolidation relies on it).
+              const windowOpen = await isLiveMatchWindowForEvent(eventId);
+              logInfo('Event lives DB sync window re-check', { eventId, windowOpen });
+              await syncEventLives(eventId);
+              // After DB sync completes, trigger dependent jobs
+              await enqueueCascadeJobs(eventId);
+            }
             break;
 
           case LIVE_JOBS.EVENT_LIVE_SUMMARY:
@@ -149,6 +157,9 @@ export function createLiveDataWorker(): WorkerRuntime {
         eventId: job?.data.eventId,
         tier,
       });
+      if (job) {
+        void alertOnFinalFailure(job, err);
+      }
     });
 
     worker.on('error', (err) => {

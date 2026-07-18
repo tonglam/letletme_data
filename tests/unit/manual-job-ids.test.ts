@@ -53,8 +53,10 @@ describe('live-data manual job IDs', () => {
     const first = await enqueueEventLivesDbSync(10, 'manual');
     const second = await enqueueEventLivesDbSync(10, 'manual');
 
-    expect(first.id).toBe('event-lives-db-e10-manual');
-    expect(second.id).toBe('event-lives-db-e10-manual');
+    expect(first).not.toBeNull();
+    expect(second).not.toBeNull();
+    expect(first!.id).toBe('event-lives-db-e10-manual');
+    expect(second!.id).toBe('event-lives-db-e10-manual');
     // Repeat trigger hits BullMQ's jobId dedup instead of queueing duplicate work
     expect(liveDataAddCalls[1].opts.jobId).toBe('event-lives-db-e10-manual');
   });
@@ -73,18 +75,22 @@ describe('live-data manual job IDs', () => {
     const cacheUpdate = await enqueueEventLivesCacheUpdate(10, 'manual');
     const otherEvent = await enqueueEventLivesDbSync(11, 'manual');
 
-    expect(dbSync.id).toBe('event-lives-db-e10-manual');
-    expect(cacheUpdate.id).toBe('event-lives-cache-e10-manual');
-    expect(otherEvent.id).toBe('event-lives-db-e11-manual');
+    expect(dbSync).not.toBeNull();
+    expect(cacheUpdate).not.toBeNull();
+    expect(otherEvent).not.toBeNull();
+    expect(dbSync!.id).toBe('event-lives-db-e10-manual');
+    expect(cacheUpdate!.id).toBe('event-lives-cache-e10-manual');
+    expect(otherEvent!.id).toBe('event-lives-db-e11-manual');
   });
 
   test('cron runs keep time-based IDs so every tick enqueues', async () => {
     const job = await enqueueEventLivesDbSync(10, 'cron');
 
+    expect(job).not.toBeNull();
     // Time-based suffix (not the deterministic manual ID) — cron ticks are seconds
     // apart in practice, so each cycle gets its own job instead of deduping.
-    expect(job.id).toMatch(/^event-lives-db-e10-\d+$/);
-    expect(job.id).not.toBe('event-lives-db-e10-manual');
+    expect(job!.id).toMatch(/^event-lives-db-e10-\d+$/);
+    expect(job!.id).not.toBe('event-lives-db-e10-manual');
     // Cron jobs keep queue-level retention (no per-job cleanup override)
     expect(liveDataAddCalls[0].opts.removeOnComplete).toBeUndefined();
   });
@@ -99,9 +105,11 @@ describe('entry-sync entry-list job IDs', () => {
     const first = await enqueueEntryPicksSyncJob('api', { entryIds: [3, 1, 2], eventId: 20 });
     const second = await enqueueEntryPicksSyncJob('api', { entryIds: [1, 2, 3], eventId: 20 });
 
-    expect(first.id).toMatch(/^entry-picks-entry-list-[0-9a-f]{8}$/);
+    expect(first).not.toBeNull();
+    expect(second).not.toBeNull();
+    expect(first!.id).toMatch(/^entry-picks-entry-list-[0-9a-f]{8}$/);
     // Same entries in any order dedupe to the same job
-    expect(second.id).toBe(first.id as string);
+    expect(second!.id).toBe(first!.id as string);
     // Entry-list jobs clean up on settle so repeat API calls after completion re-run
     expect(entrySyncAddCalls[0].opts.removeOnComplete).toBe(true);
     expect(entrySyncAddCalls[0].opts.removeOnFail).toBe(true);
@@ -113,9 +121,13 @@ describe('entry-sync entry-list job IDs', () => {
     const otherEvent = await enqueueEntryPicksSyncJob('api', { entryIds: [1, 2], eventId: 21 });
     const noEvent = await enqueueEntryPicksSyncJob('api', { entryIds: [1, 2] });
 
-    expect(otherIds.id).not.toBe(base.id as string);
-    expect(otherEvent.id).not.toBe(base.id as string);
-    expect(noEvent.id).not.toBe(base.id as string);
+    expect(base).not.toBeNull();
+    expect(otherIds).not.toBeNull();
+    expect(otherEvent).not.toBeNull();
+    expect(noEvent).not.toBeNull();
+    expect(otherIds!.id).not.toBe(base!.id as string);
+    expect(otherEvent!.id).not.toBe(base!.id as string);
+    expect(noEvent!.id).not.toBe(base!.id as string);
   });
 
   test('retryCount distinguishes delayed full-batch retries from the active job', async () => {
@@ -129,22 +141,27 @@ describe('entry-sync entry-list job IDs', () => {
       retryCount: 1,
     });
 
-    expect(retry.id).not.toBe(original.id as string);
-    expect(retry.id).toMatch(/^entry-picks-entry-list-[0-9a-f]{8}$/);
+    expect(original).not.toBeNull();
+    expect(retry).not.toBeNull();
+    expect(retry!.id).not.toBe(original!.id as string);
+    expect(retry!.id).toMatch(/^entry-picks-entry-list-[0-9a-f]{8}$/);
   });
 
   test('cron chunk jobs keep time-based per-cycle IDs', async () => {
     const job = await enqueueEntryPicksSyncJob('cron', { chunkOffset: 0 });
 
-    expect(job.id).toMatch(/^entry-picks-chunk-0-\d+$/);
+    expect(job).not.toBeNull();
+    expect(job!.id).toMatch(/^entry-picks-\d+-chunk-0$/);
   });
 
   test('manual table-scan chunk jobs get a deterministic ID with settle cleanup', async () => {
     const first = await enqueueEntryPicksSyncJob('manual', { chunkOffset: 0 });
     const second = await enqueueEntryPicksSyncJob('manual', { chunkOffset: 0 });
 
-    expect(first.id).toBe('entry-picks-chunk-0-manual');
-    expect(second.id).toBe(first.id as string);
+    expect(first).not.toBeNull();
+    expect(second).not.toBeNull();
+    expect(first!.id).toBe('entry-picks-manual-chunk-0');
+    expect(second!.id).toBe(first!.id as string);
     expect(entrySyncAddCalls[0].opts.removeOnComplete).toBe(true);
     expect(entrySyncAddCalls[0].opts.removeOnFail).toBe(true);
   });

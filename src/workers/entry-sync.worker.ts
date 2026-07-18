@@ -34,6 +34,7 @@ import {
 } from '../jobs/entry-info-sync-marker';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { logError, logInfo } from '../utils/logger';
+import { alertOnFinalFailure } from '../utils/notify';
 import { withMutationConflictGuard } from '../utils/mutation-lock';
 import { getQueueConnection } from '../utils/queue';
 import { startStrictPriorityGate } from './strict-priority-gate';
@@ -175,6 +176,7 @@ async function scheduleRetry(
     throttleMs: jobData?.throttleMs,
     delayMs,
     eventId: jobData?.eventId,
+    runId: jobData?.runId,
   });
 }
 
@@ -209,6 +211,7 @@ async function handleEntryJob(
       concurrency,
       throttleMs,
       eventId: jobData?.eventId,
+      runId: jobData?.runId,
     });
     logInfo('Entry sync next chunk enqueued', {
       jobName,
@@ -333,6 +336,9 @@ export function createEntrySyncWorker(): WorkerRuntime {
         attemptsMade: job?.attemptsMade,
         tier,
       });
+      if (job) {
+        void alertOnFinalFailure(job, error);
+      }
     });
 
     workers.push(worker);

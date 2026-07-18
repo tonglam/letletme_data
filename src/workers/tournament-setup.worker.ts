@@ -2,6 +2,7 @@ import { Job, QueueEvents, Worker } from 'bullmq';
 
 import {
   getTournamentSetupQueueName,
+  tournamentSetupQueue,
   tournamentSetupQueuesByTier,
   type TournamentSetupJobData,
 } from '../queues/tournament-setup.queue';
@@ -11,6 +12,7 @@ import {
 } from '../services/tournament-setup.service';
 import { tournamentSetupLifecycleScope } from '../domain/mutation-scope';
 import { logError, logInfo } from '../utils/logger';
+import { alertOnFinalFailure } from '../utils/notify';
 import { withMutationConflictGuard } from '../utils/mutation-lock';
 import { getQueueConnection } from '../utils/queue';
 import type { WorkerRuntime } from './worker-runtime';
@@ -19,6 +21,17 @@ const STUCK_PROCESSING_CUTOFF_MINUTES = Number(
   process.env.TOURNAMENT_SETUP_STUCK_CUTOFF_MINUTES ?? 15,
 );
 const WATCHDOG_INTERVAL_MS = Number(process.env.TOURNAMENT_SETUP_WATCHDOG_INTERVAL_MS ?? 300_000);
+
+async function hasActiveSetupJob(tournamentId: number): Promise<boolean> {
+  try {
+    const activeJobs = await tournamentSetupQueue.getJobs(['active']);
+    return activeJobs.some((job) => job.data.tournamentId === tournamentId);
+  } catch (error) {
+    logError('Failed to check active setup jobs', error, { tournamentId });
+    // If we can't tell, be conservative and don't recover.
+    return true;
+  }
+}
 
 export function createTournamentSetupWorker(): WorkerRuntime {
   const connection = getQueueConnection();
@@ -68,6 +81,9 @@ export function createTournamentSetupWorker(): WorkerRuntime {
       jobId: job?.id,
       tournamentId: job?.data.tournamentId,
     });
+    if (job) {
+      void alertOnFinalFailure(job, err);
+    }
   });
 
   worker.on('error', (err) => {
@@ -107,11 +123,20 @@ export function createTournamentSetupWorker(): WorkerRuntime {
 
 async function runStartupWatchdog(): Promise<void> {
   try {
-    const { recovered } = await recoverStuckTournamentSetups(STUCK_PROCESSING_CUTOFF_MINUTES);
+    const { recovered, skippedActive } = await recoverStuckTournamentSetups(
+      STUCK_PROCESSING_CUTOFF_MINUTES,
+      hasActiveSetupJob,
+    );
     if (recovered.length > 0) {
       logInfo('Tournament setup watchdog recovered stuck setups', {
         count: recovered.length,
         tournamentIds: recovered,
+      });
+    }
+    if (skippedActive.length > 0) {
+      logInfo('Tournament setup watchdog skipped active setups', {
+        count: skippedActive.length,
+        tournamentIds: skippedActive,
       });
     }
   } catch (error) {

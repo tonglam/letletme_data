@@ -82,5 +82,9 @@ export async function syncTournamentInfo(options?: {
     errors,
   });
 
+  if (errors > 0) {
+    throw new Error(`Tournament info sync failed for ${errors} leagues`);
+  }
+
   return { total: tournaments.length, updated, skipped, errors };
 }

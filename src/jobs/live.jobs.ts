@@ -52,7 +52,9 @@ export async function runLiveScores() {
   // Sync actual match scorelines (team_h_score / team_a_score) to DB
   // Runs every 1 min — distinct from event-lives (player fantasy points, 1-min/10-min)
   const job = await enqueueLiveScoresSync(currentEvent.id, 'cron');
-  logInfo('Live scores job enqueued', { jobId: job.id, eventId: currentEvent.id });
+  if (job) {
+    logInfo('Live scores job enqueued', { jobId: job.id, eventId: currentEvent.id });
+  }
 }
 
 async function runEventLivesCacheUpdate() {
@@ -104,10 +106,12 @@ async function runEventLivesDbSync() {
 
   // Enqueue DB sync job (will trigger cascade on completion)
   const job = await enqueueEventLivesDbSync(currentEvent.id, 'cron');
-  logInfo('DB sync job enqueued, will trigger cascade on completion', {
-    jobId: job.id,
-    eventId: currentEvent.id,
-  });
+  if (job) {
+    logInfo('DB sync job enqueued, will trigger cascade on completion', {
+      jobId: job.id,
+      eventId: currentEvent.id,
+    });
+  }
 }
 
 // Post-match consolidation: catches FPL overnight data finalization (bonus points, corrected
@@ -130,7 +134,9 @@ export async function runPostMatchConsolidation() {
   }
 
   const job = await enqueueEventLivesDbSync(currentEvent.id, 'cron');
-  logInfo('Post-match consolidation job enqueued', { jobId: job.id, eventId: currentEvent.id });
+  if (job) {
+    logInfo('Post-match consolidation job enqueued', { jobId: job.id, eventId: currentEvent.id });
+  }
 }
 
 export function registerLiveJobs(app: Elysia) {

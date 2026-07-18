@@ -24,6 +24,7 @@ import { syncTournamentSelectionStats } from '../services/tournament-selection-s
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { getQueueConnection } from '../utils/queue';
 import { logError, logInfo } from '../utils/logger';
+import { alertOnFinalFailure } from '../utils/notify';
 import { withMutationConflictGuard } from '../utils/mutation-lock';
 import {
   createCascadeId,
@@ -79,22 +80,26 @@ async function enqueueTournamentCascade(eventId: number) {
       failed,
     });
 
-    results.forEach((result, index) => {
-      if (result.status === 'rejected') {
-        const jobNames = [
-          'points-race',
-          'battle-race',
-          'knockout',
-          'transfers-post',
-          'cup-results',
-        ];
-        logError('Failed to enqueue cascade job', result.reason, {
+    if (failed > 0) {
+      const jobNames = ['points-race', 'battle-race', 'knockout', 'transfers-post', 'cup-results'];
+      const failures = results
+        .map((result, index) => ({ result, jobName: jobNames[index] }))
+        .filter(({ result }) => result.status === 'rejected')
+        .map(({ result, jobName }) => ({
+          jobName,
+          reason: result.status === 'rejected' ? result.reason : null,
+        }));
+      failures.forEach(({ jobName, reason }) => {
+        logError('Failed to enqueue cascade job', reason, {
           eventId,
           cascadeId,
-          jobName: jobNames[index],
+          jobName,
         });
-      }
-    });
+      });
+      throw new Error(
+        `Tournament cascade enqueue failed for ${failed} job(s) (eventId=${eventId})`,
+      );
+    }
 
     // If a structure job failed to enqueue, the barrier would never reach 0.
     // Claim a stable enqueue-failed slot per job so a partial cascade still refreshes.
@@ -302,6 +307,9 @@ export function createTournamentSyncWorker(): WorkerRuntime {
         eventId: job?.data.eventId,
         tier,
       });
+      if (job) {
+        void alertOnFinalFailure(job, err);
+      }
     });
 
     worker.on('error', (err) => {
