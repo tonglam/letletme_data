@@ -18,6 +18,9 @@ RUN bun install --frozen-lockfile --production
 
 # Build the application
 FROM deps AS build
+# Ensure `bun build` inlines production NODE_ENV so the prod logger path is used
+# and pino-pretty (devDependency) is not required at runtime.
+ENV NODE_ENV=production
 COPY . ./
 RUN bun run build
 
