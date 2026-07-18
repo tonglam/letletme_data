@@ -1,4 +1,4 @@
-import type { EventLive } from '../domain/event-lives';
+import { EventLiveSchema, type EventLive } from '../domain/event-lives';
 import type { RawFPLEventLiveElement } from '../types';
 
 /**
@@ -7,7 +7,7 @@ import type { RawFPLEventLiveElement } from '../types';
 export function transformEventLive(eventId: number, rawElement: RawFPLEventLiveElement): EventLive {
   const stats = rawElement.stats;
 
-  return {
+  const transformed = {
     eventId,
     elementId: rawElement.id,
     minutes: stats.minutes,
@@ -33,6 +33,8 @@ export function transformEventLive(eventId: number, rawElement: RawFPLEventLiveE
     totalPoints: stats.total_points,
     createdAt: null,
   };
+
+  return EventLiveSchema.parse(transformed);
 }
 
 /**

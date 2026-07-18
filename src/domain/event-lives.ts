@@ -50,7 +50,8 @@ export type EventLives = readonly EventLive[];
 export const EventLiveSchema = z.object({
   eventId: z.number().int().positive(),
   elementId: z.number().int().positive(),
-  minutes: z.number().int().min(0).max(90).nullable(),
+  // max 150: extra time (90+30) + stoppage; penalties don't count as minutes.
+  minutes: z.number().int().min(0).max(150).nullable(),
   goalsScored: z.number().int().min(0).nullable(),
   assists: z.number().int().min(0).nullable(),
   cleanSheets: z.number().int().min(0).max(1).nullable(),

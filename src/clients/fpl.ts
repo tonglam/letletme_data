@@ -1,14 +1,5 @@
 import { z } from 'zod';
 
-import {
-  FPLBootstrapResponse,
-  RawFPLEventLiveResponse,
-  RawFPLFixture,
-  RawFPLEntryHistoryResponse,
-  RawFPLLeagueStandingsResponse,
-  RawFPLEntryCupResponse,
-  RawFPLEntryTransfersResponse,
-} from '../types';
 import { FPLClientError } from '../utils/errors';
 import { logDebug } from '../utils/logger';
 
@@ -65,8 +56,14 @@ function computeBackoffMs(attempt: number): number {
   return Math.floor(Math.random() * (ceiling + 1));
 }
 
-// Zod schemas for validation
-const EventSchema = z.object({
+// ---------------------------------------------------------------------------
+// Zod schemas — exported as the canonical boundary validation + type source.
+// Each schema validates the raw FPL JSON at the API boundary. The inferred
+// types (z.infer) replace the hand-maintained RawFPL* interfaces that lived in
+// src/types/index.ts before FP-19.
+// ---------------------------------------------------------------------------
+
+export const EventSchema = z.object({
   id: z.number(),
   name: z.string(),
   deadline_time: z.string().nullable(),
@@ -103,7 +100,7 @@ const EventSchema = z.object({
   most_vice_captained: z.number().nullable(),
 });
 
-const TeamSchema = z.object({
+export const TeamSchema = z.object({
   code: z.number(),
   draw: z.number(),
   form: z.string().nullable(),
@@ -127,7 +124,7 @@ const TeamSchema = z.object({
   pulse_id: z.number(),
 });
 
-const ElementSchema = z.object({
+export const ElementSchema = z.object({
   id: z.number(),
   code: z.number(),
   element_type: z.number(),
@@ -160,6 +157,7 @@ const ElementSchema = z.object({
   transfers_out: z.number(),
   transfers_in_event: z.number(),
   transfers_out_event: z.number(),
+  // Performance stats (many more fields available)
   minutes: z.number(),
   goals_scored: z.number(),
   assists: z.number(),
@@ -181,9 +179,19 @@ const ElementSchema = z.object({
   expected_assists: z.string(),
   expected_goal_involvements: z.string(),
   expected_goals_conceded: z.string(),
+  // Optional fields — available in some endpoint responses (e.g. element-summary)
+  starts: z.number().optional(),
+  influence_rank: z.number().optional(),
+  influence_rank_type: z.number().optional(),
+  creativity_rank: z.number().optional(),
+  creativity_rank_type: z.number().optional(),
+  threat_rank: z.number().optional(),
+  threat_rank_type: z.number().optional(),
+  ict_index_rank: z.number().optional(),
+  ict_index_rank_type: z.number().optional(),
 });
 
-const PhaseSchema = z.object({
+export const PhaseSchema = z.object({
   id: z.number(),
   name: z.string(),
   start_event: z.number(),
@@ -191,7 +199,7 @@ const PhaseSchema = z.object({
   highest_score: z.number().nullable(),
 });
 
-const FixtureStatSchema = z.object({
+export const FixtureStatSchema = z.object({
   identifier: z.string(),
   a: z.array(
     z.object({
@@ -207,7 +215,7 @@ const FixtureStatSchema = z.object({
   ),
 });
 
-const FixtureSchema = z.object({
+export const FixtureSchema = z.object({
   code: z.number(),
   event: z.number().nullable(),
   finished: z.boolean(),
@@ -227,7 +235,7 @@ const FixtureSchema = z.object({
   pulse_id: z.number(),
 });
 
-const BootstrapResponseSchema = z.object({
+export const BootstrapResponseSchema = z.object({
   events: z.array(EventSchema),
   teams: z.array(TeamSchema),
   elements: z.array(ElementSchema),
@@ -237,6 +245,242 @@ const BootstrapResponseSchema = z.object({
   element_stats: z.array(z.unknown()),
   element_types: z.array(z.unknown()),
 });
+
+// Event Live schemas
+export const EventLiveStatsSchema = z.object({
+  minutes: z.number(),
+  goals_scored: z.number(),
+  assists: z.number(),
+  clean_sheets: z.number(),
+  goals_conceded: z.number(),
+  own_goals: z.number(),
+  penalties_saved: z.number(),
+  penalties_missed: z.number(),
+  yellow_cards: z.number(),
+  red_cards: z.number(),
+  saves: z.number(),
+  bonus: z.number(),
+  bps: z.number(),
+  influence: z.string(),
+  creativity: z.string(),
+  threat: z.string(),
+  ict_index: z.string(),
+  clearances_blocks_interceptions: z.number().optional(),
+  recoveries: z.number().optional(),
+  tackles: z.number().optional(),
+  defensive_contribution: z.number().optional(),
+  starts: z.number(),
+  expected_goals: z.string(),
+  expected_assists: z.string(),
+  expected_goal_involvements: z.string(),
+  expected_goals_conceded: z.string(),
+  total_points: z.number(),
+  in_dreamteam: z.boolean(),
+});
+
+export const EventLiveElementSchema = z.object({
+  id: z.number(),
+  stats: EventLiveStatsSchema,
+  // FPL returns explain: null for players with no recorded stats yet
+  explain: z.array(z.unknown()).nullable(),
+});
+
+export const EventLiveResponseSchema = z.object({
+  elements: z.array(EventLiveElementSchema),
+});
+
+// Entry summary schema (FPL: /api/entry/{entryId}/)
+const EntryLeagueItemSchema = z.object({
+  id: z.number(),
+  name: z.string(),
+  short_name: z.string().nullable().optional(),
+  created: z.string().optional(),
+  entry_rank: z.number().nullable(),
+  entry_last_rank: z.number().nullable(),
+  start_event: z.number().nullable().optional(),
+});
+
+const EntryLeaguesSchema = z
+  .object({
+    classic: z.array(EntryLeagueItemSchema),
+    h2h: z.array(EntryLeagueItemSchema),
+  })
+  .passthrough()
+  .optional();
+
+export const EntrySummarySchema = z.object({
+  id: z.number(),
+  name: z.string(),
+  player_first_name: z.string(),
+  player_last_name: z.string(),
+  player_region_name: z.string().nullable().optional(),
+  started_event: z.number().nullable().optional(),
+  summary_overall_points: z.number().nullable().optional(),
+  summary_overall_rank: z.number().nullable().optional(),
+  bank: z.number().nullable().optional(),
+  value: z.number().nullable().optional(),
+  last_deadline_total_transfers: z.number().nullable().optional(),
+  last_deadline_bank: z.number().nullable().optional(),
+  last_deadline_total_points: z.number().nullable().optional(),
+  last_deadline_rank: z.number().nullable().optional(),
+  last_deadline_value: z.number().nullable().optional(),
+  leagues: EntryLeaguesSchema,
+});
+
+// Entry event picks schemas (FPL: /api/entry/{entryId}/event/{eventId}/picks/)
+export const PickItemSchema = z.object({
+  element: z.number(),
+  position: z.number(),
+  multiplier: z.number(),
+  is_captain: z.boolean(),
+  is_vice_captain: z.boolean(),
+});
+
+export const PicksEntryHistorySchema = z.object({
+  event: z.number(),
+  points: z.number(),
+  total_points: z.number(),
+  rank: z.number().nullable(),
+  overall_rank: z.number().nullable(),
+  bank: z.number(),
+  value: z.number(),
+  event_transfers: z.number(),
+  event_transfers_cost: z.number(),
+  points_on_bench: z.number(),
+});
+
+export const PicksResponseSchema = z.object({
+  // Accept any chip string at the boundary — FPL adds chip types faster
+  // than downstream enums track (e.g. 'manager'). Mapping happens in
+  // src/domain/chips.ts.
+  active_chip: z.string().nullable(),
+  automatic_subs: z.array(z.unknown()),
+  entry_history: PicksEntryHistorySchema,
+  picks: z.array(PickItemSchema),
+});
+
+// League standings schemas
+const StandingsResultSchema = z.object({ entry: z.number() }).passthrough();
+const StandingsSchema = z
+  .object({
+    has_next: z.boolean(),
+    results: z.array(StandingsResultSchema),
+  })
+  .passthrough();
+const StandingsLeagueSchema = z
+  .object({
+    id: z.number(),
+    name: z.string(),
+  })
+  .passthrough();
+export const LeagueStandingsSchema = z
+  .object({ standings: StandingsSchema, league: StandingsLeagueSchema.optional() })
+  .passthrough();
+
+// Entry history schemas (FPL: /api/entry/{entryId}/history/)
+export const EntryHistoryPastSeasonSchema = z.object({
+  season_name: z.string(),
+  total_points: z.number(),
+  rank: z.number(),
+});
+
+export const EntryHistoryCurrentItemSchema = z.object({
+  event: z.number(),
+  points: z.number(),
+  total_points: z.number(),
+  rank: z.number().nullable().optional(),
+  overall_rank: z.number().nullable().optional(),
+});
+
+export const EntryHistoryResponseSchema = z.object({
+  current: z.array(EntryHistoryCurrentItemSchema),
+  chips: z.array(z.unknown()),
+  past: z.array(EntryHistoryPastSeasonSchema),
+});
+
+// Entry transfers schema (FPL: /api/entry/{entryId}/transfers/)
+export const TransferSchema = z.object({
+  element_in: z.number(),
+  element_in_cost: z.number(),
+  element_in_points: z.number().nullable().optional(),
+  element_out: z.number(),
+  element_out_cost: z.number(),
+  element_out_points: z.number().nullable().optional(),
+  entry: z.number(),
+  event: z.number(),
+  time: z.string(),
+});
+
+export const TransfersSchema = z.array(TransferSchema);
+
+// Entry cup schemas (FPL: /api/entry/{entryId}/cup/)
+export const CupMatchSchema = z.object({
+  event: z.number(),
+  entry_1_entry: z.number(),
+  entry_1_name: z.string(),
+  entry_1_player_name: z.string(),
+  entry_1_points: z.number().nullable(),
+  entry_2_entry: z.number(),
+  entry_2_name: z.string(),
+  entry_2_player_name: z.string(),
+  entry_2_points: z.number().nullable(),
+  winner: z.number().nullable(),
+});
+
+export const CupResponseSchema = z
+  .object({
+    cup_matches: z.array(CupMatchSchema),
+    cup_status: z.unknown().optional(),
+  })
+  .passthrough();
+
+// ---------------------------------------------------------------------------
+// Inferred types — replaces hand-maintained RawFPL* interfaces.
+// ---------------------------------------------------------------------------
+
+export type RawFPLEvent = z.infer<typeof EventSchema>;
+export type RawFPLTeam = z.infer<typeof TeamSchema>;
+export type RawFPLElement = z.infer<typeof ElementSchema>;
+export type RawFPLPhase = z.infer<typeof PhaseSchema>;
+export type RawFPLFixtureStat = z.infer<typeof FixtureStatSchema>;
+export type RawFPLFixture = z.infer<typeof FixtureSchema>;
+export type FPLBootstrapResponse = z.infer<typeof BootstrapResponseSchema>;
+export type RawFPLEventLiveStats = z.infer<typeof EventLiveStatsSchema>;
+export type RawFPLEventLiveElement = z.infer<typeof EventLiveElementSchema>;
+export type RawFPLEventLiveResponse = z.infer<typeof EventLiveResponseSchema>;
+export type RawFPLEntrySummary = z.infer<typeof EntrySummarySchema>;
+export type RawFPLLeagueItem = z.infer<typeof EntryLeagueItemSchema>;
+export type RawFPLEntryLeagues = z.infer<typeof EntryLeaguesSchema>;
+export type RawFPLEntryEventPickItem = z.infer<typeof PickItemSchema>;
+export type RawFPLEntryEventPicksEntryHistory = z.infer<typeof PicksEntryHistorySchema>;
+export type RawFPLEntryEventPicksResponse = z.infer<typeof PicksResponseSchema>;
+export type RawFPLLeagueStandingsResult = z.infer<typeof StandingsResultSchema>;
+export type RawFPLLeagueStandings = z.infer<typeof StandingsSchema>;
+export type RawFPLLeagueInfo = z.infer<typeof StandingsLeagueSchema>;
+export type RawFPLLeagueStandingsResponse = z.infer<typeof LeagueStandingsSchema>;
+export type RawFPLEntryHistoryPastSeason = z.infer<typeof EntryHistoryPastSeasonSchema>;
+export type RawFPLEntryHistoryCurrentItem = z.infer<typeof EntryHistoryCurrentItemSchema>;
+export type RawFPLEntryHistoryResponse = z.infer<typeof EntryHistoryResponseSchema>;
+export type RawFPLEntryTransfer = z.infer<typeof TransferSchema>;
+export type RawFPLEntryTransfersResponse = z.infer<typeof TransfersSchema>;
+export type RawFPLEntryCupMatch = z.infer<typeof CupMatchSchema>;
+export type RawFPLEntryCupResponse = z.infer<typeof CupResponseSchema>;
+
+// Explain schemas (for event-live-explains transformer)
+export const EventExplainStatSchema = z.object({
+  identifier: z.string(),
+  points: z.number(),
+  value: z.number(),
+  points_modification: z.number().nullable().optional(),
+});
+
+export const EventExplainFixtureSchema = z.object({
+  fixture: z.number(),
+  stats: z.array(EventExplainStatSchema),
+});
+
+export type RawFPLEventExplainStat = z.infer<typeof EventExplainStatSchema>;
+export type RawFPLEventExplainFixture = z.infer<typeof EventExplainFixtureSchema>;
 
 class FPLClient {
   private readonly baseUrl = 'https://fantasy.premierleague.com/api';
@@ -394,7 +638,7 @@ class FPLClient {
         phaseCount: validated.phases.length,
       });
 
-      return validated as FPLBootstrapResponse;
+      return validated;
     } catch (error) {
       if (error instanceof z.ZodError) {
         throw new FPLClientError(
@@ -446,7 +690,7 @@ class FPLClient {
         fixtureCount: validated.length,
       });
 
-      return validated as RawFPLFixture[];
+      return validated;
     } catch (error) {
       if (error instanceof z.ZodError) {
         throw new FPLClientError(
@@ -488,49 +732,7 @@ class FPLClient {
 
       const data: unknown = await response.json();
 
-      // Validate with Zod
-      const EventLiveStatsSchema = z.object({
-        minutes: z.number(),
-        goals_scored: z.number(),
-        assists: z.number(),
-        clean_sheets: z.number(),
-        goals_conceded: z.number(),
-        own_goals: z.number(),
-        penalties_saved: z.number(),
-        penalties_missed: z.number(),
-        yellow_cards: z.number(),
-        red_cards: z.number(),
-        saves: z.number(),
-        bonus: z.number(),
-        bps: z.number(),
-        influence: z.string(),
-        creativity: z.string(),
-        threat: z.string(),
-        ict_index: z.string(),
-        clearances_blocks_interceptions: z.number().optional(),
-        recoveries: z.number().optional(),
-        tackles: z.number().optional(),
-        defensive_contribution: z.number().optional(),
-        starts: z.number(),
-        expected_goals: z.string(),
-        expected_assists: z.string(),
-        expected_goal_involvements: z.string(),
-        expected_goals_conceded: z.string(),
-        total_points: z.number(),
-        in_dreamteam: z.boolean(),
-      });
-
-      const EventLiveElementSchema = z.object({
-        id: z.number(),
-        stats: EventLiveStatsSchema,
-        // FPL returns explain: null for players with no recorded stats yet
-        explain: z.array(z.unknown()).nullable(),
-      });
-
-      const EventLiveResponseSchema = z.object({
-        elements: z.array(EventLiveElementSchema),
-      });
-
+      // Validate with Zod (schemas at module level)
       const validated = EventLiveResponseSchema.parse(data);
 
       logDebug('Successfully fetched and validated event live data', {
@@ -538,7 +740,7 @@ class FPLClient {
         elementCount: validated.elements.length,
       });
 
-      return validated as RawFPLEventLiveResponse;
+      return validated;
     } catch (error) {
       if (error instanceof z.ZodError) {
         throw new FPLClientError(
@@ -577,44 +779,6 @@ class FPLClient {
       }
 
       const data: unknown = await response.json();
-
-      // Validate a minimal subset we depend on
-      const LeagueItemSchema = z.object({
-        id: z.number(),
-        name: z.string(),
-        short_name: z.string().nullable().optional(),
-        created: z.string().optional(),
-        entry_rank: z.number().nullable(),
-        entry_last_rank: z.number().nullable(),
-        start_event: z.number().nullable().optional(),
-      });
-
-      const EntryLeaguesSchema = z
-        .object({
-          classic: z.array(LeagueItemSchema),
-          h2h: z.array(LeagueItemSchema),
-        })
-        .passthrough()
-        .optional();
-
-      const EntrySummarySchema = z.object({
-        id: z.number(),
-        name: z.string(),
-        player_first_name: z.string(),
-        player_last_name: z.string(),
-        player_region_name: z.string().nullable().optional(),
-        started_event: z.number().nullable().optional(),
-        summary_overall_points: z.number().nullable().optional(),
-        summary_overall_rank: z.number().nullable().optional(),
-        bank: z.number().nullable().optional(),
-        value: z.number().nullable().optional(),
-        last_deadline_total_transfers: z.number().nullable().optional(),
-        last_deadline_bank: z.number().nullable().optional(),
-        last_deadline_total_points: z.number().nullable().optional(),
-        last_deadline_rank: z.number().nullable().optional(),
-        last_deadline_value: z.number().nullable().optional(),
-        leagues: EntryLeaguesSchema,
-      });
 
       const validated = EntrySummarySchema.parse(data);
       logDebug('Successfully fetched and validated entry summary', { entryId });
@@ -655,37 +819,6 @@ class FPLClient {
       }
 
       const data: unknown = await response.json();
-
-      const PickItemSchema = z.object({
-        element: z.number(),
-        position: z.number(),
-        multiplier: z.number(),
-        is_captain: z.boolean(),
-        is_vice_captain: z.boolean(),
-      });
-
-      const EntryHistorySchema = z.object({
-        event: z.number(),
-        points: z.number(),
-        total_points: z.number(),
-        rank: z.number().nullable(),
-        overall_rank: z.number().nullable(),
-        bank: z.number(),
-        value: z.number(),
-        event_transfers: z.number(),
-        event_transfers_cost: z.number(),
-        points_on_bench: z.number(),
-      });
-
-      const PicksResponseSchema = z.object({
-        // Accept any chip string at the boundary — FPL adds chip types faster
-        // than downstream enums track (e.g. 'manager'). Mapping happens in
-        // src/domain/chips.ts.
-        active_chip: z.string().nullable(),
-        automatic_subs: z.array(z.unknown()),
-        entry_history: EntryHistorySchema,
-        picks: z.array(PickItemSchema),
-      });
 
       const validated = PicksResponseSchema.parse(data);
       logDebug('Successfully fetched and validated entry event picks', {
@@ -736,23 +869,6 @@ class FPLClient {
 
       const data: unknown = await response.json();
 
-      const StandingsResultSchema = z.object({ entry: z.number() }).passthrough();
-      const StandingsSchema = z
-        .object({
-          has_next: z.boolean(),
-          results: z.array(StandingsResultSchema),
-        })
-        .passthrough();
-      const LeagueSchema = z
-        .object({
-          id: z.number(),
-          name: z.string(),
-        })
-        .passthrough();
-      const LeagueStandingsSchema = z
-        .object({ standings: StandingsSchema, league: LeagueSchema.optional() })
-        .passthrough();
-
       const validated = LeagueStandingsSchema.parse(data);
       logDebug('Successfully fetched league standings', {
         leagueId,
@@ -760,7 +876,7 @@ class FPLClient {
         leagueType,
         entryCount: validated.standings.results.length,
       });
-      return validated as RawFPLLeagueStandingsResponse;
+      return validated;
     } catch (error) {
       if (error instanceof z.ZodError) {
         throw new FPLClientError(
@@ -816,26 +932,13 @@ class FPLClient {
 
       const data: unknown = await response.json();
 
-      const TransferSchema = z.object({
-        element_in: z.number(),
-        element_in_cost: z.number(),
-        element_in_points: z.number().nullable().optional(),
-        element_out: z.number(),
-        element_out_cost: z.number(),
-        element_out_points: z.number().nullable().optional(),
-        entry: z.number(),
-        event: z.number(),
-        time: z.string(),
-      });
-
-      const TransfersSchema = z.array(TransferSchema);
       const validated = TransfersSchema.parse(data);
 
       logDebug('Successfully fetched and validated entry transfers', {
         entryId,
         count: validated.length,
       });
-      return validated as RawFPLEntryTransfersResponse;
+      return validated;
     } catch (error) {
       if (error instanceof z.ZodError) {
         throw new FPLClientError(
@@ -873,33 +976,13 @@ class FPLClient {
 
       const data: unknown = await response.json();
 
-      const EntryHistoryPastSeasonSchema = z.object({
-        season_name: z.string(),
-        total_points: z.number(),
-        rank: z.number(),
-      });
-
-      const EntryHistoryCurrentItemSchema = z.object({
-        event: z.number(),
-        points: z.number(),
-        total_points: z.number(),
-        rank: z.number().nullable().optional(),
-        overall_rank: z.number().nullable().optional(),
-      });
-
-      const EntryHistoryResponseSchema = z.object({
-        current: z.array(EntryHistoryCurrentItemSchema),
-        chips: z.array(z.unknown()),
-        past: z.array(EntryHistoryPastSeasonSchema),
-      });
-
       const validated = EntryHistoryResponseSchema.parse(data);
       logDebug('Successfully fetched and validated entry history', {
         entryId,
         pastSeasons: validated.past.length,
         currentSnapshots: validated.current.length,
       });
-      return validated as RawFPLEntryHistoryResponse;
+      return validated;
     } catch (error) {
       if (error instanceof z.ZodError) {
         throw new FPLClientError(
@@ -941,32 +1024,12 @@ class FPLClient {
 
       const data: unknown = await response.json();
 
-      const CupMatchSchema = z.object({
-        event: z.number(),
-        entry_1_entry: z.number(),
-        entry_1_name: z.string(),
-        entry_1_player_name: z.string(),
-        entry_1_points: z.number().nullable(),
-        entry_2_entry: z.number(),
-        entry_2_name: z.string(),
-        entry_2_player_name: z.string(),
-        entry_2_points: z.number().nullable(),
-        winner: z.number().nullable(),
-      });
-
-      const CupResponseSchema = z
-        .object({
-          cup_matches: z.array(CupMatchSchema),
-          cup_status: z.unknown().optional(),
-        })
-        .passthrough();
-
       const validated = CupResponseSchema.parse(data);
       logDebug('Successfully fetched and validated entry cup', {
         entryId,
         matchCount: validated.cup_matches.length,
       });
-      return validated as RawFPLEntryCupResponse;
+      return validated;
     } catch (error) {
       if (error instanceof z.ZodError) {
         throw new FPLClientError(
