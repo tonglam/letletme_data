@@ -14,7 +14,7 @@ describe('Tournament Info Integration Tests', () => {
     syncPromise ??= syncTournamentInfo().catch((error) => {
       // No leagues configured / FPL league unreachable in this environment.
       console.warn('tournament info sync skipped:', error);
-      return { updated: 0, total: 0, errors: 1 };
+      return { updated: 0, total: 0, skipped: 0, errors: 1 };
     });
     return syncPromise;
   }
