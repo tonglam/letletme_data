@@ -74,6 +74,7 @@ describe('Live Data Worker Integration Tests', () => {
       'should process event lives cache update',
       async () => {
         const job = await enqueueEventLivesCacheUpdate(testEventId);
+        if (!job) throw new Error('Expected job to be enqueued');
 
         await expectJobCompleted(job, 60000);
       },
@@ -84,6 +85,7 @@ describe('Live Data Worker Integration Tests', () => {
       'should process event lives DB sync',
       async () => {
         const job = await enqueueEventLivesDbSync(testEventId);
+        if (!job) throw new Error('Expected job to be enqueued');
 
         await expectJobCompleted(job, 60000);
       },
@@ -99,6 +101,7 @@ describe('Live Data Worker Integration Tests', () => {
         await enqueueEventLivesDbSync(testEventId);
 
         const job = await enqueueEventLiveSummary(testEventId);
+        if (!job) throw new Error('Expected job to be enqueued');
 
         await expectJobCompleted(job, 60000);
       },
@@ -109,6 +112,7 @@ describe('Live Data Worker Integration Tests', () => {
       'should process event live explain',
       async () => {
         const job = await enqueueEventLiveExplain(testEventId);
+        if (!job) throw new Error('Expected job to be enqueued');
 
         await expectJobCompleted(job, 60000);
       },
@@ -121,6 +125,7 @@ describe('Live Data Worker Integration Tests', () => {
       'should process event overall result',
       async () => {
         const job = await enqueueEventOverallResult(testEventId);
+        if (!job) throw new Error('Expected job to be enqueued');
 
         await expectJobCompleted(job, 60000);
       },
@@ -137,8 +142,9 @@ describe('Live Data Worker Integration Tests', () => {
           enqueueEventLiveExplain(testEventId),
           enqueueEventOverallResult(testEventId),
         ]);
+        if (jobs.some((job) => !job)) throw new Error('Expected all jobs to be enqueued');
 
-        await Promise.all(jobs.map((job) => expectJobCompleted(job, 60000)));
+        await Promise.all(jobs.map((job) => expectJobCompleted(job!, 60000)));
       },
       { timeout: 180000 },
     );
@@ -149,6 +155,7 @@ describe('Live Data Worker Integration Tests', () => {
       const job1 = await enqueueEventLivesCacheUpdate(testEventId);
       const job2 = await enqueueEventLivesCacheUpdate(testEventId);
 
+      if (!job1 || !job2) throw new Error('Expected both jobs to be enqueued');
       // Should have different IDs due to timestamp
       expect(job1.id).not.toBe(job2.id);
     });

@@ -74,15 +74,26 @@ export async function enqueueCascadeJobs(
       failed,
     });
 
-    results.forEach((result, index) => {
-      if (result.status === 'rejected') {
-        const jobNames = ['summary', 'explain', 'live-fixture', 'live-bonus', 'overall'];
-        logError('Failed to enqueue cascade job', result.reason, {
+    const jobNames = matchWindowOpen
+      ? (['summary', 'explain', 'live-fixture', 'live-bonus', 'overall'] as const)
+      : (['summary', 'explain', 'overall'] as const);
+
+    if (failed > 0) {
+      const failures = results
+        .map((result, index) => ({ result, jobName: jobNames[index] }))
+        .filter(({ result }) => result.status === 'rejected')
+        .map(({ result, jobName }) => ({
+          jobName,
+          reason: result.status === 'rejected' ? result.reason : null,
+        }));
+      failures.forEach(({ jobName, reason }) => {
+        logError('Failed to enqueue cascade job', reason, {
           eventId,
-          jobName: jobNames[index],
+          jobName,
         });
-      }
-    });
+      });
+      throw new Error(`Live-data cascade enqueue failed for ${failed} job(s) (eventId=${eventId})`);
+    }
 
     return {
       eventId,

@@ -71,5 +71,11 @@ export async function syncTournamentEventPicks(
     errors,
   });
 
+  if (errors > 0) {
+    throw new Error(
+      `Tournament event picks sync failed for ${errors} entries (eventId=${eventId})`,
+    );
+  }
+
   return { eventId, totalEntries: entryIds.length, synced, skipped, errors };
 }

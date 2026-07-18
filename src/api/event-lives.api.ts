@@ -23,6 +23,9 @@ export const eventLivesAPI = new Elysia({ prefix: '/event-lives' })
     '/sync/:eventId',
     async ({ params, set }) => {
       const job = await enqueueEventLivesDbSync(params.eventId, 'manual');
+      if (!job) {
+        throw new Error('Failed to enqueue event live DB sync job');
+      }
       set.status = 202;
       return {
         success: true,
@@ -37,6 +40,9 @@ export const eventLivesAPI = new Elysia({ prefix: '/event-lives' })
     '/cache/:eventId',
     async ({ params, set }) => {
       const job = await enqueueEventLivesCacheUpdate(params.eventId, 'manual');
+      if (!job) {
+        throw new Error('Failed to enqueue event live cache update job');
+      }
       set.status = 202;
       return {
         success: true,
@@ -51,6 +57,9 @@ export const eventLivesAPI = new Elysia({ prefix: '/event-lives' })
     '/summary/:eventId',
     async ({ params, set }) => {
       const job = await enqueueEventLiveSummary(params.eventId, 'manual');
+      if (!job) {
+        throw new Error('Failed to enqueue event live summary job');
+      }
       set.status = 202;
       return {
         success: true,

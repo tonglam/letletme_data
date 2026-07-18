@@ -17,6 +17,7 @@ import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { syncTeams } from '../services/teams.service';
 import { getQueueConnection } from '../utils/queue';
 import { logError, logInfo } from '../utils/logger';
+import { alertOnFinalFailure } from '../utils/notify';
 import { withMutationConflictGuard } from '../utils/mutation-lock';
 import { startStrictPriorityGate } from './strict-priority-gate';
 import type { WorkerRuntime } from './worker-runtime';
@@ -96,6 +97,9 @@ export function createDataSyncWorker(): WorkerRuntime {
         attemptsMade: job?.attemptsMade,
         tier,
       });
+      if (job) {
+        void alertOnFinalFailure(job, error);
+      }
     });
 
     workers.push(worker);

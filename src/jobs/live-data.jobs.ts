@@ -9,6 +9,21 @@ import { logError, logInfo } from '../utils/logger';
 
 export type LiveDataJobSource = 'cron' | 'manual' | 'cascade';
 
+async function hasWaitingOrDelayedJob(
+  queue: ReturnType<typeof getLiveDataQueue>,
+  jobName: LiveDataJobName,
+  eventId: number,
+): Promise<boolean> {
+  try {
+    const jobs = await queue.getJobs(['waiting', 'delayed']);
+    return jobs.some((job) => job.name === jobName && job.data.eventId === eventId);
+  } catch (error) {
+    logError('Failed to check waiting live-data jobs', error, { jobName, eventId });
+    // If we can't tell, allow enqueue (safer than dropping a tick).
+    return false;
+  }
+}
+
 async function enqueueLiveDataJob(
   jobName: LiveDataJobName,
   eventId: number,
@@ -18,6 +33,13 @@ async function enqueueLiveDataJob(
   try {
     const tier = getLiveDataJobPriority(jobName as LiveDataPriorityJobName);
     const queue = getLiveDataQueue(tier);
+
+    // Skip duplicate waiting work so a slow tick can't stack identical jobs.
+    if (source === 'cron' && (await hasWaitingOrDelayedJob(queue, jobName, eventId))) {
+      logInfo('Live data job already waiting; skipping enqueue', { jobName, eventId, source });
+      return null;
+    }
+
     const jobData: LiveDataJobData = {
       eventId,
       source,

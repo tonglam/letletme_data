@@ -279,5 +279,11 @@ export async function syncTournamentEventTransfersPre(
     errors,
   });
 
+  if (errors > 0) {
+    throw new Error(
+      `Tournament event transfers pre sync failed for ${errors} entries (eventId=${eventId})`,
+    );
+  }
+
   return { eventId, totalEntries: entryIds.length, inserted, skipped, errors };
 }

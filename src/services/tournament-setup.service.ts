@@ -110,15 +110,26 @@ export async function requeueTournamentSetup(tournamentId: number) {
 
 export async function recoverStuckTournamentSetups(
   cutoffMinutes: number,
-): Promise<{ recovered: number[] }> {
+  isActive?: (tournamentId: number) => Promise<boolean>,
+): Promise<{ recovered: number[]; skippedActive: number[] }> {
   const stuck = await tournamentInfoRepository.findStuckProcessing(cutoffMinutes);
   if (stuck.length === 0) {
-    return { recovered: [] };
+    return { recovered: [], skippedActive: [] };
   }
 
   const recovered: number[] = [];
+  const skippedActive: number[] = [];
   for (const row of stuck) {
     try {
+      if (isActive && (await isActive(row.id))) {
+        skippedActive.push(row.id);
+        logInfo('Skipping recovery of setup with active worker job', {
+          tournamentId: row.id,
+          setupStartedAt: row.setupStartedAt,
+        });
+        continue;
+      }
+
       await tournamentInfoRepository.markSetupResult(
         row.id,
         'failed',
@@ -137,5 +148,5 @@ export async function recoverStuckTournamentSetups(
     }
   }
 
-  return { recovered };
+  return { recovered, skippedActive };
 }

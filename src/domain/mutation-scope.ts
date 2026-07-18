@@ -87,9 +87,11 @@ export function resolveMutationScopes(input: MutationScopeInput): string[] {
       case 'entry-info':
         return ['entry-core:all'];
       case 'entry-picks':
+        return [withEvent('entry-event-picks', eventId)];
       case 'entry-transfers':
+        return [withEvent('entry-event-transfers', eventId)];
       case 'entry-results':
-        return [withEvent('entry-event', eventId)];
+        return [withEvent('entry-event-results', eventId)];
       default:
         return [];
     }
@@ -121,12 +123,12 @@ export function resolveMutationScopes(input: MutationScopeInput): string[] {
     switch (jobName) {
       case 'league-event-picks':
         return [
-          withEvent('entry-event', eventId),
+          withEvent('entry-event-picks', eventId),
           withTournament('league-event-picks', tournamentId),
         ];
       case 'league-event-results':
         return [
-          withEvent('entry-event', eventId),
+          withEvent('entry-event-results', eventId),
           withEvent('league-event-results', eventId),
           withTournament('league-event-results', tournamentId),
         ];
@@ -138,15 +140,27 @@ export function resolveMutationScopes(input: MutationScopeInput): string[] {
   if (queue === 'tournament-sync') {
     switch (jobName) {
       case 'tournament-event-results':
-        return [withEvent('entry-event', eventId), withEvent('tournament-event-results', eventId)];
-      case 'tournament-event-picks':
-      case 'tournament-transfers-pre':
-      case 'tournament-transfers-post':
-      case 'tournament-selection-stats':
         return [
-          withEvent('entry-event', eventId),
+          withEvent('entry-event-picks', eventId),
+          withEvent('entry-event-transfers', eventId),
+          withEvent('entry-event-results', eventId),
+          withEvent('tournament-event-results', eventId),
+        ];
+      case 'tournament-event-picks':
+        return [
+          withEvent('entry-event-picks', eventId),
           withEvent('tournament-event-mutations', eventId),
         ];
+      case 'tournament-transfers-pre':
+      case 'tournament-transfers-post':
+        return [
+          withEvent('entry-event-transfers', eventId),
+          withEvent('tournament-event-mutations', eventId),
+        ];
+      case 'tournament-selection-stats':
+        // Reads entry_event_picks/transfers but only writes tournament_selection_stats;
+        // tournament-event-mutations covers its write target.
+        return [withEvent('tournament-event-mutations', eventId)];
       // Structure-table writers (groups / battle / knockout). Share global with
       // setup rebuilds so C4 cannot tear down structure mid-write.
       case 'tournament-points-race':
