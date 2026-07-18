@@ -19,10 +19,15 @@ describe('Events Integration Tests', () => {
       expect(currentEvent?.isCurrent).toBe(true);
     });
 
-    test('should save next event to database', async () => {
+    test('should save next event to database when FPL marks one', async () => {
+      // End of season: bootstrap may have is_current=GW38 finished and no is_next.
       const nextEvent = await eventRepository.findNext();
-      expect(nextEvent).toBeDefined();
-      expect(nextEvent?.isNext).toBe(true);
+      if (!nextEvent) {
+        const current = await eventRepository.findCurrent();
+        expect(current?.finished).toBe(true);
+        return;
+      }
+      expect(nextEvent.isNext).toBe(true);
     });
 
     test('should have valid event structure', async () => {
@@ -41,10 +46,14 @@ describe('Events Integration Tests', () => {
       expect(currentEvent?.isCurrent).toBe(true);
     });
 
-    test('should get next event', async () => {
+    test('should get next event when FPL marks one', async () => {
       const nextEvent = await getNextEvent();
-      expect(nextEvent).toBeDefined();
-      expect(nextEvent?.isNext).toBe(true);
+      if (!nextEvent) {
+        const current = await getCurrentEvent();
+        expect(current?.finished).toBe(true);
+        return;
+      }
+      expect(nextEvent.isNext).toBe(true);
     });
 
     test('should sync events successfully', async () => {

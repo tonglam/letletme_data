@@ -44,7 +44,8 @@ export const EventLiveSummarySchema = z.object({
   redCards: z.number().int().min(0),
   saves: z.number().int().min(0),
   bonus: z.number().int().min(0),
-  bps: z.number().int().min(0),
+  // FPL can return negative BPS for poor performances; do not clamp at 0.
+  bps: z.number().int(),
   totalPoints: z.number().int(),
   createdAt: z.date().nullable(),
   updatedAt: z.date().nullable(),
