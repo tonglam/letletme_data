@@ -8,6 +8,7 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
 **Progress:** P0 `6/6` · P1 `6/10` · P2 `1/9` · Deferred `0/4`
 **Progress:** P0 `6/6` · P1 `7/10` · P2 `0/9` · Deferred `0/4`
 **Progress:** P0 `6/6` · P1 `6/10` · P2 `2/9` · Deferred `0/4`
+**Progress:** P0 `6/6` · P1 `10/10` · P2 `9/9` · Deferred `0/4`
 
 **Ground rules**
 1. Redis keys/shapes are **frozen** — fixes within existing shapes; new data → additive keys only; deletions need consumer sign-off.
@@ -103,19 +104,28 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
 - [x] **FP-19 · Type & transformer consolidation** (L5, L6, L8 · M) — `z.infer` RawFPL types from client schemas; delete `types/index.ts` duplicates; `transformEventLive` validates output; dedupe `getChangeType`
 - [x] **FP-20 · RLS & migration-ledger hardening** (M19, L17 · M · *after FP-01*) — RLS into numbered migrations; delete stale `sql/*.sql`; advisory lock + `ON CONFLICT` in `apply-sql-migrations`; update `RLS_SECURITY.md` to reality
 - [x] **FP-21 · Schema types + season semantics** (M20, M21 · M) — `text→numeric(10,2)` metric columns; `deadline_time→timestamptz`; document single-season semantics (accepted design)
-- [ ] **FP-22 · Config & logging hygiene** (M22, L16 · S) — 6 env flags into Zod `EnvSchema` (one transform); pino `redact` paths; scrub `notify.ts` URL/chat-ID logging
-- [ ] **FP-23 · Job-system leftovers** (L9–L14 · M)
+- [x] **FP-22 · Config & logging hygiene** (M22, L16 · S) — 6 env flags into Zod `EnvSchema` (one transform); pino `redact` paths; scrub `notify.ts` URL/chat-ID logging
+- [x] **FP-23 · Job-system leftovers** (L9–L14 · M)
   - [ ] `tournament-info` cron → enqueue (delete inline path)
   - [ ] Worker shutdown: 30 s `Promise.race` timeout; `closeLockClient()`
   - [ ] Priority gate: count `waiting`+`delayed` only
   - [ ] `player-values` failed-job retry so same-day ticks aren't blocked
   - [ ] Explicit `timezone` on all `cron()` registrations; cache null season-window
   - [ ] `mutation-lock` `finally` release try/catch; correct error labeling
-- [ ] **FP-24 · Test infrastructure** (L18, L19 · L · *after FP-02*)
+- [x] **FP-24 · Test infrastructure** (L18, L19 · L · *after FP-02*)
   - [ ] Delete `tests/utils/mocks.ts` / `test-helpers.ts`; rewrite `tests/README.md`
   - [ ] Hermetic integration suite: mock FPL boundary with recorded fixtures; CI job with pg/redis services
   - [ ] DI service tests for the 9 untested services; replace mock-echo repository tests
-- [ ] **FP-25 · Docs & dependency hygiene** (L20 · S) — README fixes (fp-ts, deployment-plan ref, Bun); drop `@types/supertest`; admin-key "do not log" warning + env guard; schedule major upgrades (zod 4, pino 10, eslint 10)
+- [x] **FP-25 · Docs & dependency hygiene** (L20 · S) — README fixes (fp-ts, deployment-plan ref, Bun); drop `@types/supertest`; admin-key "do not log" warning + env guard; schedule major upgrades (zod 4, pino 10, eslint 10)
+  - [x] `tournament-info` cron → enqueue (delete inline path)
+  - [x] Worker shutdown: 30 s `Promise.race` timeout; `closeLockClient()`
+  - [x] Priority gate: count `waiting`+`delayed` only
+  - [x] `player-values` failed-job retry so same-day ticks aren't blocked
+  - [x] Explicit `timezone` on all `cron()` registrations; cache null season-window
+  - [x] `mutation-lock` `finally` release try/catch; correct error labeling
+  - [x] Delete `tests/utils/mocks.ts` / `test-helpers.ts`; rewrite `tests/README.md`
+  - [x] Hermetic integration suite: mock FPL boundary with recorded fixtures; CI job with pg/redis services
+  - [x] DI service tests for the 9 untested services; replace mock-echo repository tests
 
 ## Deferred — accepted risks (documented, not scheduled)
 
@@ -151,3 +161,7 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
 | FP-20 | ab08fa2 (PR #23) | 2026-07-18 | RLS in numbered migration; migration-ledger advisory lock + ON CONFLICT DO NOTHING; RLS_SECURITY.md updated |
 | FP-14 | bb663a7 (PR #22) | 2026-07-18 | job safety pack: guards, watchdog, alerts, deterministic IDs, cascade throws, per-table scopes |
 | FP-21 | PLACEHOLDER (PR #24) | 2026-07-18 | player_stats metrics numeric(10,2); events.deadline_time timestamptz; single-season DB semantics doc |
+| FP-22 | e3d1079 (PR #25) | 2026-07-18 | centralize mutation env flags; pino redact; scrub notify logs |
+| FP-23 | 96a884c (PR #26) | 2026-07-18 | tournament-info enqueue; shutdown timeout; priority gate waiting+delayed; player-values retry; cron timezone; cached null season-window |
+| FP-24 | de09773 (PR #27) | 2026-07-18 | delete dead test helpers; hermetic FPL mock + CI integration job; service tests |
+| FP-25 | 70609cf (PR #28) | 2026-07-18 | README fixes; drop @types/supertest + @types/node; admin-key env guard + DO-NOT-LOG warning |
