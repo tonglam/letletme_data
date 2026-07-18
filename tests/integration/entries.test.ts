@@ -1,14 +1,19 @@
 import { assertIntegrationEnv } from './helpers/env-guard';
 
 assertIntegrationEnv();
-import { describe, expect, test } from 'bun:test';
+import { beforeAll, describe, expect, test } from 'bun:test';
 
 import { entryInfos } from '../../src/db/schemas/index.schema';
 import { getDb } from '../../src/db/singleton';
 import { syncEntryInfo } from '../../src/services/entry-info.service';
+import { syncEvents } from '../../src/services/events.service';
 
 describe('Entries Integration Tests', () => {
   const TEST_ENTRY_ID = 15702; // Using a known entry ID
+
+  beforeAll(async () => {
+    await syncEvents();
+  }, 120_000);
 
   describe('Entry Info Sync', () => {
     test('should sync entry info from FPL API', async () => {

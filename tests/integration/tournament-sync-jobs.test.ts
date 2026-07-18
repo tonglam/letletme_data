@@ -79,20 +79,23 @@ describe('Tournament Sync Jobs Integration', () => {
   });
 
   describe('Job Deduplication', () => {
-    it('should use unique job ID pattern for recurring schedules', async () => {
+    it('uses a stable job ID prefix and dedupes concurrent cron enqueues', async () => {
       const job1 = await enqueueTournamentEventResults(TEST_EVENT_ID, 'cron');
       const job2 = await enqueueTournamentEventResults(TEST_EVENT_ID, 'cron');
 
-      expect(job1.id).not.toBe(job2.id);
-      expect(String(job1.id).startsWith(`tournament-event-results-e${TEST_EVENT_ID}-`)).toBe(true);
+      expect(job1).not.toBeNull();
+      expect(String(job1!.id).startsWith(`tournament-event-results-e${TEST_EVENT_ID}-`)).toBe(true);
+      // Waiting-room dedupe: second enqueue is skipped or returns the same id.
+      expect(job2 === null || job2.id === job1!.id).toBe(true);
     });
 
-    it('should use unique IDs for cascade jobs', async () => {
+    it('uses a stable cascade job ID prefix and dedupes concurrent enqueues', async () => {
       const job1 = await enqueueTournamentPointsRace(TEST_EVENT_ID, 'cascade');
       const job2 = await enqueueTournamentPointsRace(TEST_EVENT_ID, 'cascade');
 
-      expect(job1.id).not.toBe(job2.id);
-      expect(String(job1.id).startsWith(`tournament-points-race-e${TEST_EVENT_ID}-`)).toBe(true);
+      expect(job1).not.toBeNull();
+      expect(String(job1!.id).startsWith(`tournament-points-race-e${TEST_EVENT_ID}-`)).toBe(true);
+      expect(job2 === null || job2.id === job1!.id).toBe(true);
     });
   });
 

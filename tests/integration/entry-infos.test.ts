@@ -1,17 +1,23 @@
 import { assertIntegrationEnv } from './helpers/env-guard';
 
 assertIntegrationEnv();
-import { describe, expect, test } from 'bun:test';
+import { beforeAll, describe, expect, test } from 'bun:test';
 import { eq } from 'drizzle-orm';
 
 import { entryInfos } from '../../src/db/schemas/index.schema';
 import { getDb } from '../../src/db/singleton';
 import { syncEntryInfo } from '../../src/services/entry-info.service';
+import { syncEvents } from '../../src/services/events.service';
 
 // Use a real FPL entry ID for integration testing
 const TEST_ENTRY_ID = 15702;
 
 describe('Entry Infos Integration Tests', () => {
+  beforeAll(async () => {
+    // entry_infos.started_event FKs to events — seed events first on a fresh DB.
+    await syncEvents();
+  }, 120_000);
+
   test(
     'should sync entry info from FPL API',
     async () => {

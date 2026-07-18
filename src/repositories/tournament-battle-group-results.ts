@@ -152,9 +152,17 @@ export const createTournamentBattleGroupResultsRepository = (dbInstance?: Databa
 
       try {
         const db = await getDbInstance();
+        // Drop identity `id` when re-upserting rows loaded from a prior SELECT;
+        // GENERATED ALWAYS (and some drivers) reject explicit id values.
+        const rows = results.map((row) => {
+          const { id: _omitId, ...rest } = row as DbTournamentBattleGroupResultInsert & {
+            id?: number;
+          };
+          return rest;
+        });
         await db
           .insert(tournamentBattleGroupResults)
-          .values(results)
+          .values(rows)
           .onConflictDoUpdate({
             target: [
               tournamentBattleGroupResults.tournamentId,

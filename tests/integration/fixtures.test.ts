@@ -9,9 +9,11 @@ import { syncAllGameweeks, syncFixtures } from '../../src/services/fixtures.serv
 
 describe('Fixtures Integration Tests', () => {
   beforeAll(async () => {
-    // Sync fixtures once
+    // event_fixtures.event_id FKs to events — seed events before fixtures.
+    const { syncEvents } = await import('../../src/services/events.service');
+    await syncEvents();
     await syncFixtures();
-  });
+  }, 180_000);
 
   test('syncFixtures persists data to database', async () => {
     const db = await getDb();

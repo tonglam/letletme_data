@@ -95,14 +95,15 @@ describe('League Sync Jobs Integration', () => {
       );
     });
 
-    it('should create separate coordinator job runs', async () => {
+    it('dedupes concurrent coordinator cron enqueues', async () => {
       const job1 = await enqueueLeagueEventPicks(TEST_EVENT_ID, 'cron');
       const job2 = await enqueueLeagueEventPicks(TEST_EVENT_ID, 'cron');
 
-      expect(job1.id).not.toBe(job2.id ?? '');
+      expect(job1).not.toBeNull();
+      expect(job2 === null || job2.id === job1!.id).toBe(true);
     });
 
-    it('should create separate tournament job runs', async () => {
+    it('dedupes concurrent tournament cascade enqueues', async () => {
       const job1 = await enqueueLeagueEventResults(TEST_EVENT_ID, 'cascade', {
         tournamentId: TEST_TOURNAMENT_ID,
       });
@@ -110,7 +111,8 @@ describe('League Sync Jobs Integration', () => {
         tournamentId: TEST_TOURNAMENT_ID,
       });
 
-      expect(job1.id).not.toBe(job2.id ?? '');
+      expect(job1).not.toBeNull();
+      expect(job2 === null || job2.id === job1!.id).toBe(true);
     });
   });
 
