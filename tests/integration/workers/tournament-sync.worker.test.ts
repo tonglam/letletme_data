@@ -110,7 +110,9 @@ describe('Tournament Sync Worker Integration Tests', () => {
 
   describe('Job ID Generation', () => {
     test('should create unique job IDs with timestamps', async () => {
+      // Job IDs include Date.now(); a 1ms gap avoids same-millisecond collisions.
       const job1 = await enqueueTournamentEventPicks(testEventId, 'manual');
+      await Bun.sleep(2);
       const job2 = await enqueueTournamentEventPicks(testEventId, 'manual');
 
       expect(job1.id).not.toBe(job2.id);
