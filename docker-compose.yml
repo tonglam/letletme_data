@@ -14,6 +14,9 @@ services:
     command: bun dist/index.js
     env_file: .env.deploy
     environment:
+      # Force production even if .env.deploy omits/overrides NODE_ENV — logger
+      # must not load pino-pretty (devDependency) in the runtime image.
+      - NODE_ENV=production
       - TZ=Asia/Shanghai
     logging: *default-logging
     ports:
@@ -42,6 +45,7 @@ services:
     command: bun dist/worker.js
     env_file: .env.deploy
     environment:
+      - NODE_ENV=production
       - TZ=Asia/Shanghai
     logging: *default-logging
     volumes:

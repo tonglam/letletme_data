@@ -3,7 +3,17 @@ import pino from 'pino';
 import { getJobLogContext } from './job-log-context';
 import { formatUtc8Timestamp } from './timezone';
 
-const isDevelopment = process.env.NODE_ENV !== 'production';
+/**
+ * Production detection must survive bundling: `bun build` can inline
+ * `process.env.NODE_ENV` at compile time. Prefer an explicit production path
+ * and never require `pino-pretty` (devDependency) at runtime.
+ */
+function isProductionRuntime(): boolean {
+  // Read via dynamic key so some bundlers leave this as a real env lookup.
+  const nodeEnv = process.env['NODE_ENV'];
+  return nodeEnv === 'production';
+}
+
 const logLevel = process.env.LOG_LEVEL || 'info';
 
 const MAX_ERROR_MESSAGE_LENGTH = 2_000;
@@ -96,8 +106,15 @@ const loggerOptions: pino.LoggerOptions = {
   },
 };
 
-export const logger = isDevelopment
-  ? pino(
+function createLogger(): pino.Logger {
+  // Always JSON in production (and when NODE_ENV is unset in a prod image).
+  if (isProductionRuntime()) {
+    return pino(loggerOptions);
+  }
+
+  // Local/dev: pretty logs when pino-pretty is installed; fall back to JSON.
+  try {
+    return pino(
       loggerOptions,
       pino.transport({
         target: 'pino-pretty',
@@ -107,8 +124,13 @@ export const logger = isDevelopment
           ignore: 'pid,hostname',
         },
       }),
-    )
-  : pino(loggerOptions);
+    );
+  } catch {
+    return pino(loggerOptions);
+  }
+}
+
+export const logger = createLogger();
 
 function mergeJobContext(data?: object): object | undefined {
   const jobContext = getJobLogContext();
