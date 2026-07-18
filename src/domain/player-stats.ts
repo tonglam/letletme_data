@@ -17,15 +17,15 @@ export interface PlayerStat {
   readonly teamShortName: string;
   readonly value: number;
   readonly totalPoints: number | null;
-  readonly form: string | null;
+  readonly form: number | null;
   readonly influence: string | null;
   readonly creativity: string | null;
   readonly threat: string | null;
-  readonly ictIndex: string | null;
-  readonly expectedGoals: string | null;
-  readonly expectedAssists: string | null;
-  readonly expectedGoalInvolvements: string | null;
-  readonly expectedGoalsConceded: string | null;
+  readonly ictIndex: number | null;
+  readonly expectedGoals: number | null;
+  readonly expectedAssists: number | null;
+  readonly expectedGoalInvolvements: number | null;
+  readonly expectedGoalsConceded: number | null;
   readonly minutes: number | null;
   readonly goalsScored: number | null;
   readonly assists: number | null;
@@ -88,15 +88,15 @@ export const PlayerStatSchema = z.object({
     .min(35, 'Value must be at least 3.5m')
     .max(200, 'Value cannot exceed 20.0m'),
   totalPoints: z.number().int().nullable(),
-  form: z.string().nullable(),
+  form: z.number().nullable(),
   influence: z.string().nullable(),
   creativity: z.string().nullable(),
   threat: z.string().nullable(),
-  ictIndex: z.string().nullable(),
-  expectedGoals: z.string().nullable(),
-  expectedAssists: z.string().nullable(),
-  expectedGoalInvolvements: z.string().nullable(),
-  expectedGoalsConceded: z.string().nullable(),
+  ictIndex: z.number().nullable(),
+  expectedGoals: z.number().nullable(),
+  expectedAssists: z.number().nullable(),
+  expectedGoalInvolvements: z.number().nullable(),
+  expectedGoalsConceded: z.number().nullable(),
   minutes: z.number().int().min(0, 'Minutes cannot be negative').nullable(),
   goalsScored: z.number().int().min(0, 'Goals scored cannot be negative').nullable(),
   assists: z.number().int().min(0, 'Assists cannot be negative').nullable(),
@@ -149,12 +149,10 @@ export function getPointsPerMillion(playerStat: PlayerStat): number | null {
 }
 
 /**
- * Calculate form as a number
+ * Calculate form as a number (now stored as a number; kept for compatibility).
  */
 export function getFormAsNumber(playerStat: PlayerStat): number | null {
-  if (!playerStat.form) return null;
-  const form = parseFloat(playerStat.form);
-  return isNaN(form) ? null : form;
+  return playerStat.form;
 }
 
 /**
@@ -173,30 +171,24 @@ export function getFormRating(
 }
 
 /**
- * Calculate expected goals as number
+ * Calculate expected goals as a number (now stored as a number; kept for compatibility).
  */
 export function getExpectedGoalsAsNumber(playerStat: PlayerStat): number | null {
-  if (!playerStat.expectedGoals) return null;
-  const xg = parseFloat(playerStat.expectedGoals);
-  return isNaN(xg) ? null : xg;
+  return playerStat.expectedGoals;
 }
 
 /**
- * Calculate expected assists as number
+ * Calculate expected assists as a number (now stored as a number; kept for compatibility).
  */
 export function getExpectedAssistsAsNumber(playerStat: PlayerStat): number | null {
-  if (!playerStat.expectedAssists) return null;
-  const xa = parseFloat(playerStat.expectedAssists);
-  return isNaN(xa) ? null : xa;
+  return playerStat.expectedAssists;
 }
 
 /**
- * Calculate ICT Index as number
+ * Calculate ICT Index as a number (now stored as a number; kept for compatibility).
  */
 export function getIctIndexAsNumber(playerStat: PlayerStat): number | null {
-  if (!playerStat.ictIndex) return null;
-  const ict = parseFloat(playerStat.ictIndex);
-  return isNaN(ict) ? null : ict;
+  return playerStat.ictIndex;
 }
 
 /**
