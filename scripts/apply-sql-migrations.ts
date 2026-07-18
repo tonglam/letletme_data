@@ -59,10 +59,13 @@ async function isApplied(filename: string): Promise<boolean> {
   return rows.length > 0;
 }
 
+const advisoryLockKey = 912_883_471; // arbitrary 32-bit key for this migrator
+
 async function markApplied(filename: string): Promise<void> {
   await sql`
     INSERT INTO sql_migrations (filename)
     VALUES (${filename})
+    ON CONFLICT (filename) DO NOTHING
   `;
 }
 
@@ -76,17 +79,24 @@ async function applyFile(filename: string): Promise<void> {
 
 async function main(): Promise<void> {
   await ensureLedger();
+  await sql`SELECT pg_advisory_lock(${advisoryLockKey})`;
 
-  for (const filename of listSqlMigrationFiles()) {
-    if (await isApplied(filename)) {
-      console.log(`[sql-migrate] skip ${filename}`);
-      continue;
+  try {
+    for (const filename of listSqlMigrationFiles()) {
+      if (await isApplied(filename)) {
+        console.log(`[sql-migrate] skip ${filename}`);
+        continue;
+      }
+
+      await applyFile(filename);
     }
 
-    await applyFile(filename);
+    console.log('[sql-migrate] up to date');
+  } finally {
+    await sql`SELECT pg_advisory_unlock(${advisoryLockKey})`.catch((error) => {
+      console.error('[sql-migrate] failed to release advisory lock', error);
+    });
   }
-
-  console.log('[sql-migrate] up to date');
 }
 
 main()

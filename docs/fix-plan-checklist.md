@@ -5,7 +5,7 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
 - **Full detail (file-level changes, acceptance criteria):** [fix-plan-2026-07-17.md](./fix-plan-2026-07-17.md)
 - **Findings evidence:** [code-review-2026-07-17.md](./code-review-2026-07-17.md)
 
-**Progress:** P0 `6/6` · P1 `6/10` · P2 `0/9` · Deferred `0/4`
+**Progress:** P0 `6/6` · P1 `6/10` · P2 `1/9` · Deferred `0/4`
 
 **Ground rules**
 1. Redis keys/shapes are **frozen** — fixes within existing shapes; new data → additive keys only; deletions need consumer sign-off.
@@ -99,7 +99,7 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
   - [x] Battle-race N+1 → batch `findByTournamentAndEntries` + in-memory bucket
 - [x] **FP-18 · FPL client resilience** (M18 · M) — one `request()` helper (10 s timeout, ≤3 jittered retries honoring `Retry-After`, User-Agent); all 9 call sites; mocked-fetch tests
 - [x] **FP-19 · Type & transformer consolidation** (L5, L6, L8 · M) — `z.infer` RawFPL types from client schemas; delete `types/index.ts` duplicates; `transformEventLive` validates output; dedupe `getChangeType`
-- [ ] **FP-20 · RLS & migration-ledger hardening** (M19, L17 · M · *after FP-01*) — RLS into numbered migrations; delete stale `sql/*.sql`; advisory lock + `ON CONFLICT` in `apply-sql-migrations`; update `RLS_SECURITY.md` to reality
+- [x] **FP-20 · RLS & migration-ledger hardening** (M19, L17 · M · *after FP-01*) — RLS into numbered migrations; delete stale `sql/*.sql`; advisory lock + `ON CONFLICT` in `apply-sql-migrations`; update `RLS_SECURITY.md` to reality
 - [ ] **FP-21 · Schema types + season semantics** (M20, M21 · M) — `text→numeric(10,2)` metric columns; `deadline_time→timestamptz`; document single-season semantics (accepted design)
 - [ ] **FP-22 · Config & logging hygiene** (M22, L16 · S) — 6 env flags into Zod `EnvSchema` (one transform); pino `redact` paths; scrub `notify.ts` URL/chat-ID logging
 - [ ] **FP-23 · Job-system leftovers** (L9–L14 · M)
@@ -146,3 +146,4 @@ Living tracker for the 2026-07-17 code-review fix plan. Check items off as they 
 | FP-17 | (PR #19) | 2026-07-17 | cache hygiene: TTL, resilient hash reads, season memo, battle-race batch |
 | FP-18 | (PR #20) | 2026-07-17 | one resilient FPL request() with timeout/retries |
 | FP-19 | 270bb0b | 2026-07-17 | PR #21 |
+| FP-20 | ab08fa2 (PR #23) | 2026-07-18 | RLS in numbered migration; migration-ledger advisory lock + ON CONFLICT DO NOTHING; RLS_SECURITY.md updated |
