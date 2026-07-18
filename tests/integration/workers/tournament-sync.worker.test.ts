@@ -120,26 +120,6 @@ describe('Tournament Sync Worker Integration Tests', () => {
   });
 });
 
-async function waitForJobState(jobId: string, expectedStates: string[]) {
-  const startedAt = Date.now();
-
-  while (Date.now() - startedAt < 8_000) {
-    const freshJob = await tournamentSyncQueue.getJob(jobId);
-    if (!freshJob) {
-      throw new Error(`Job ${jobId} disappeared before reaching expected state`);
-    }
-
-    const state = await freshJob.getState();
-    if (expectedStates.includes(state)) {
-      return freshJob;
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-
-  throw new Error(`Job ${jobId} did not reach expected state: ${expectedStates.join(', ')}`);
-}
-
 async function cleanTournamentQueues() {
   const uniqueQueues = [
     ...new Map(
