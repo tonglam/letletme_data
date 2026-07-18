@@ -1,4 +1,4 @@
-import { index, integer, pgTable, text, uniqueIndex } from 'drizzle-orm/pg-core';
+import { index, integer, numeric, pgTable, text, uniqueIndex } from 'drizzle-orm/pg-core';
 import { autoIncrementId, timestamps } from './_helpers.schema';
 import { events } from './events.schema';
 import { players } from './players.schema';
@@ -15,15 +15,23 @@ export const playerStats = pgTable(
       .references(() => players.id),
     elementType: integer('element_type').notNull(),
     totalPoints: integer('total_points'),
-    form: text('form'),
+    form: numeric('form', { precision: 10, scale: 2, mode: 'number' }),
     influence: text('influence'),
     creativity: text('creativity'),
     threat: text('threat'),
-    ictIndex: text('ict_index'),
-    expectedGoals: text('expected_goals'),
-    expectedAssists: text('expected_assists'),
-    expectedGoalInvolvements: text('expected_goal_involvements'),
-    expectedGoalsConceded: text('expected_goals_conceded'),
+    ictIndex: numeric('ict_index', { precision: 10, scale: 2, mode: 'number' }),
+    expectedGoals: numeric('expected_goals', { precision: 10, scale: 2, mode: 'number' }),
+    expectedAssists: numeric('expected_assists', { precision: 10, scale: 2, mode: 'number' }),
+    expectedGoalInvolvements: numeric('expected_goal_involvements', {
+      precision: 10,
+      scale: 2,
+      mode: 'number',
+    }),
+    expectedGoalsConceded: numeric('expected_goals_conceded', {
+      precision: 10,
+      scale: 2,
+      mode: 'number',
+    }),
     minutes: integer('minutes'),
     goalsScored: integer('goals_scored'),
     assists: integer('assists'),

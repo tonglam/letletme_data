@@ -242,3 +242,19 @@ manually only if Step 2 shows leftovers.)
 - `LaunchNotification:*` — re-arms per year/season by design (§3).
 - `letletme:entry-info-sync:daily:*`, `mutation-lock:*` — expire via TTL.
 - `bull:*` — managed by BullMQ (§8).
+
+## 11. Database single-season semantics (FP-21)
+
+The PostgreSQL database stores **one FPL season at a time**:
+
+- `events.id` restarts at 1 each season; a new season's syncs overwrite the
+  prior season's rows. There is no `season` column on event or player tables.
+- `player_stats` is keyed by `(event_id, element_id)`. Old-event rows remain
+  until the same `(event_id, element_id)` pair is overwritten by the new
+  season, at which point they naturally become new-season data.
+- `PlayerStat:{season}` in Redis is a **latest-event-wins view** (§5). Only
+  syncs for the current gameweek write it; older-event backfills persist to
+  DB only.
+
+This is an accepted design decision, not a temporary limitation. Multi-season
+history would require additive schema changes and explicit consumer demand.

@@ -67,15 +67,15 @@ describe('Player Stats Unit Tests', () => {
           elementId: 1,
           elementType: 1 as ElementTypeId,
           totalPoints: 42,
-          form: '4.2',
+          form: 4.2,
           influence: '78.2',
           creativity: '12.4',
           threat: '5.1',
-          ictIndex: '9.6',
-          expectedGoals: '0.12',
-          expectedAssists: '0.45',
-          expectedGoalInvolvements: '0.57',
-          expectedGoalsConceded: '14.2',
+          ictIndex: 9.6,
+          expectedGoals: 0.12,
+          expectedAssists: 0.45,
+          expectedGoalInvolvements: 0.57,
+          expectedGoalsConceded: 14.2,
           minutes: 990,
           goalsScored: 0,
           assists: 1,
@@ -139,27 +139,26 @@ describe('Player Stats Unit Tests', () => {
         expect(ppm).toBeNull();
       });
 
-      test('should convert form string to number', () => {
-        expect(getFormAsNumber(generatePlayerStat({ form: '5.2' }))).toBe(5.2);
+      test('should return form number', () => {
+        expect(getFormAsNumber(generatePlayerStat({ form: 5.2 }))).toBe(5.2);
         expect(getFormAsNumber(generatePlayerStat({ form: null }))).toBeNull();
-        expect(getFormAsNumber(generatePlayerStat({ form: 'invalid' }))).toBeNull();
       });
 
       test('should rate form correctly', () => {
-        expect(getFormRating(generatePlayerStat({ form: '5.5' }))).toBe('excellent');
-        expect(getFormRating(generatePlayerStat({ form: '4.0' }))).toBe('good');
-        expect(getFormRating(generatePlayerStat({ form: '2.5' }))).toBe('average');
-        expect(getFormRating(generatePlayerStat({ form: '1.0' }))).toBe('poor');
+        expect(getFormRating(generatePlayerStat({ form: 5.5 }))).toBe('excellent');
+        expect(getFormRating(generatePlayerStat({ form: 4.0 }))).toBe('good');
+        expect(getFormRating(generatePlayerStat({ form: 2.5 }))).toBe('average');
+        expect(getFormRating(generatePlayerStat({ form: 1.0 }))).toBe('poor');
         expect(getFormRating(generatePlayerStat({ form: null }))).toBe('unknown');
       });
 
-      test('should convert expected goals to number', () => {
-        expect(getExpectedGoalsAsNumber(generatePlayerStat({ expectedGoals: '2.45' }))).toBe(2.45);
+      test('should return expected goals number', () => {
+        expect(getExpectedGoalsAsNumber(generatePlayerStat({ expectedGoals: 2.45 }))).toBe(2.45);
         expect(getExpectedGoalsAsNumber(generatePlayerStat({ expectedGoals: null }))).toBeNull();
       });
 
-      test('should convert expected assists to number', () => {
-        expect(getExpectedAssistsAsNumber(generatePlayerStat({ expectedAssists: '1.75' }))).toBe(
+      test('should return expected assists number', () => {
+        expect(getExpectedAssistsAsNumber(generatePlayerStat({ expectedAssists: 1.75 }))).toBe(
           1.75,
         );
         expect(
@@ -167,8 +166,8 @@ describe('Player Stats Unit Tests', () => {
         ).toBeNull();
       });
 
-      test('should convert ICT index to number', () => {
-        expect(getIctIndexAsNumber(generatePlayerStat({ ictIndex: '45.6' }))).toBe(45.6);
+      test('should return ICT index number', () => {
+        expect(getIctIndexAsNumber(generatePlayerStat({ ictIndex: 45.6 }))).toBe(45.6);
         expect(getIctIndexAsNumber(generatePlayerStat({ ictIndex: null }))).toBeNull();
       });
 
@@ -206,12 +205,12 @@ describe('Player Stats Unit Tests', () => {
 
       test('should identify differential picks', () => {
         const differential = generatePlayerStat({
-          form: '4.0',
+          form: 4.0,
           value: 70, // 7.0m
           totalPoints: 80, // 11.4 points per million
         });
         const template = generatePlayerStat({
-          form: '2.0', // Low form
+          form: 2.0, // Low form
           value: 70,
           totalPoints: 80,
         });
@@ -336,7 +335,7 @@ describe('Player Stats Unit Tests', () => {
           expect(stat.teamId).toBe(rawElement.team);
           expect(stat.value).toBe(rawElement.now_cost);
           expect(stat.totalPoints).toBe(rawElement.total_points);
-          expect(stat.form).toBe(rawElement.form);
+          expect(stat.form).toBe(Number(rawElement.form));
         });
       });
 
@@ -626,7 +625,7 @@ describe('Player Stats Unit Tests', () => {
 
         // Nullable fields
         expect(['number', 'object']).toContain(typeof stat.totalPoints); // number or null
-        expect(['string', 'object']).toContain(typeof stat.form); // string or null
+        expect(['number', 'object']).toContain(typeof stat.form); // number or null
         expect(['number', 'object']).toContain(typeof stat.minutes); // number or null
 
         // Value ranges

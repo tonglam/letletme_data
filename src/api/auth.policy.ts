@@ -7,7 +7,8 @@ export function shouldRequireApiKey(method: string, path: string): boolean {
     return false;
   }
 
-  if (path.startsWith('/api/auth')) {
+  // Better Auth routes handle their own authentication.
+  if (path.startsWith('/api/auth/')) {
     return false;
   }
 

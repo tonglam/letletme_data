@@ -5,6 +5,14 @@ import type { EventId } from '../types/base.type';
 import { ELEMENT_TYPE_MAP } from '../types/base.type';
 import { logError, logInfo } from '../utils/logger';
 
+function parseMetricString(value: string | null | undefined): number | null {
+  if (value === null || value === undefined || value === '') {
+    return null;
+  }
+  const parsed = parseFloat(value);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
 // ================================
 // Data Transformation Functions
 // ================================
@@ -37,15 +45,15 @@ export function transformPlayerStat(
       teamShortName: teamInfo.shortName,
       value: rawElement.now_cost,
       totalPoints: rawElement.total_points,
-      form: rawElement.form || null,
+      form: parseMetricString(rawElement.form),
       influence: rawElement.influence || null,
       creativity: rawElement.creativity || null,
       threat: rawElement.threat || null,
-      ictIndex: rawElement.ict_index || null,
-      expectedGoals: rawElement.expected_goals || null,
-      expectedAssists: rawElement.expected_assists || null,
-      expectedGoalInvolvements: rawElement.expected_goal_involvements || null,
-      expectedGoalsConceded: rawElement.expected_goals_conceded || null,
+      ictIndex: parseMetricString(rawElement.ict_index),
+      expectedGoals: parseMetricString(rawElement.expected_goals),
+      expectedAssists: parseMetricString(rawElement.expected_assists),
+      expectedGoalInvolvements: parseMetricString(rawElement.expected_goal_involvements),
+      expectedGoalsConceded: parseMetricString(rawElement.expected_goals_conceded),
       minutes: rawElement.minutes,
       goalsScored: rawElement.goals_scored,
       assists: rawElement.assists,
@@ -94,15 +102,15 @@ export function transformRawPlayerStat(rawElement: RawFPLElement, eventId: Event
       elementId: rawElement.id,
       elementType: rawElement.element_type as 1 | 2 | 3 | 4,
       totalPoints: rawElement.total_points,
-      form: rawElement.form || null,
+      form: parseMetricString(rawElement.form),
       influence: rawElement.influence || null,
       creativity: rawElement.creativity || null,
       threat: rawElement.threat || null,
-      ictIndex: rawElement.ict_index || null,
-      expectedGoals: rawElement.expected_goals || null,
-      expectedAssists: rawElement.expected_assists || null,
-      expectedGoalInvolvements: rawElement.expected_goal_involvements || null,
-      expectedGoalsConceded: rawElement.expected_goals_conceded || null,
+      ictIndex: parseMetricString(rawElement.ict_index),
+      expectedGoals: parseMetricString(rawElement.expected_goals),
+      expectedAssists: parseMetricString(rawElement.expected_assists),
+      expectedGoalInvolvements: parseMetricString(rawElement.expected_goal_involvements),
+      expectedGoalsConceded: parseMetricString(rawElement.expected_goals_conceded),
       minutes: rawElement.minutes,
       goalsScored: rawElement.goals_scored,
       assists: rawElement.assists,
