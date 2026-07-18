@@ -151,13 +151,15 @@ describe('Live Data Worker Integration Tests', () => {
   });
 
   describe('Job ID Generation', () => {
-    test('should create unique job IDs with timestamp', async () => {
-      const job1 = await enqueueEventLivesCacheUpdate(testEventId);
-      const job2 = await enqueueEventLivesCacheUpdate(testEventId);
+    test('dedupes concurrent cache-update enqueues for the same event', async () => {
+      // Use a fresh event id so earlier suite jobs do not occupy the waiting room.
+      const eventId = 950_000 + (Date.now() % 100_000);
+      const job1 = await enqueueEventLivesCacheUpdate(eventId, 'cron');
+      const job2 = await enqueueEventLivesCacheUpdate(eventId, 'cron');
 
-      if (!job1 || !job2) throw new Error('Expected both jobs to be enqueued');
-      // Should have different IDs due to timestamp
-      expect(job1.id).not.toBe(job2.id);
+      expect(job1).not.toBeNull();
+      // Waiting-room dedupe: second enqueue is skipped or returns the same id.
+      expect(job2 === null || job2.id === job1!.id).toBe(true);
     });
   });
 });
