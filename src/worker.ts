@@ -12,15 +12,14 @@ import type { WorkerRuntime } from './workers/worker-runtime';
 
 getConfig();
 
-const mutationConflictGuardEnabled =
-  (process.env.ENABLE_MUTATION_CONFLICT_GUARD ?? 'true').toLowerCase() !== 'false';
-const tieredMutationQueuesEnabled =
-  (process.env.ENABLE_TIERED_MUTATION_QUEUES ?? 'false').toLowerCase() === 'true';
+const config = getConfig();
+const mutationConflictGuardEnabled = config.ENABLE_MUTATION_CONFLICT_GUARD;
+const tieredMutationQueuesEnabled = config.ENABLE_TIERED_MUTATION_QUEUES;
 const mutationLockConfig = {
-  ttlMs: Number(process.env.MUTATION_LOCK_TTL_MS ?? 30_000),
-  waitTimeoutMs: Number(process.env.MUTATION_LOCK_WAIT_TIMEOUT_MS ?? 120_000),
-  retryDelayMs: Number(process.env.MUTATION_LOCK_RETRY_DELAY_MS ?? 250),
-  heartbeatMs: Number(process.env.MUTATION_LOCK_HEARTBEAT_MS ?? 10_000),
+  ttlMs: config.MUTATION_LOCK_TTL_MS,
+  waitTimeoutMs: config.MUTATION_LOCK_WAIT_TIMEOUT_MS,
+  retryDelayMs: config.MUTATION_LOCK_RETRY_DELAY_MS,
+  heartbeatMs: config.MUTATION_LOCK_HEARTBEAT_MS,
 };
 
 const runtimes: WorkerRuntime[] = [

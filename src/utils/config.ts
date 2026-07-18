@@ -1,6 +1,25 @@
 import { z } from 'zod';
 import { logError, logInfo, logWarn } from './logger';
 
+function booleanEnv(defaultValue: boolean) {
+  return z
+    .union([z.boolean(), z.string()])
+    .optional()
+    .transform((value) => {
+      if (value === undefined) {
+        return defaultValue;
+      }
+      if (typeof value === 'boolean') {
+        return value;
+      }
+      return ['true', '1', 'yes', 'on'].includes(value.toLowerCase());
+    });
+}
+
+function integerEnv(defaultValue: number) {
+  return z.coerce.number().int().default(defaultValue);
+}
+
 const EnvSchema = z.object({
   DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),
   // Redis
@@ -21,23 +40,19 @@ const EnvSchema = z.object({
     .optional()
     .default('info'),
   // Auth (Better Auth + API keys)
-  ENABLE_AUTH: z
-    .union([z.boolean(), z.string()])
-    .optional()
-    .transform((value) => {
-      if (value === undefined) {
-        return process.env.NODE_ENV === 'production';
-      }
-      if (typeof value === 'boolean') {
-        return value;
-      }
-      return value === 'true' || value === '1';
-    }),
+  ENABLE_AUTH: booleanEnv(process.env.NODE_ENV === 'production'),
   BETTER_AUTH_SECRET: z.string().optional(),
   BETTER_AUTH_URL: z.string().url().optional(),
   CORS_ORIGINS: z.string().optional(),
   // HTTP mutation rate limit (fixed window per client IP; 0 disables)
   RATE_LIMIT_MUTATIONS_PER_MINUTE: z.coerce.number().int().min(0).default(60),
+  // Mutation conflict guard + tiered mutation queues (feature flags)
+  ENABLE_TIERED_MUTATION_QUEUES: booleanEnv(false),
+  ENABLE_MUTATION_CONFLICT_GUARD: booleanEnv(true),
+  MUTATION_LOCK_TTL_MS: integerEnv(30_000),
+  MUTATION_LOCK_WAIT_TIMEOUT_MS: integerEnv(120_000),
+  MUTATION_LOCK_RETRY_DELAY_MS: integerEnv(250),
+  MUTATION_LOCK_HEARTBEAT_MS: integerEnv(10_000),
   // Optional Supabase hints (DB provider)
   SUPABASE_URL: z.string().optional(),
   SUPABASE_KEY: z.string().optional(),
