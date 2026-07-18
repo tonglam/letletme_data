@@ -94,11 +94,7 @@ describe('Tournament Sync Worker Integration Tests', () => {
         });
 
         // Worker switch may fail or complete depending on default case handling.
-        const freshJob = await waitForJobState(job.id ?? '', [
-          'delayed',
-          'failed',
-          'completed',
-        ]);
+        const freshJob = await waitForJobState(job.id ?? '', ['delayed', 'failed', 'completed']);
         const state = await freshJob.getState();
 
         expect(['delayed', 'failed', 'completed']).toContain(state);
