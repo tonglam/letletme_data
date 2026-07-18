@@ -151,15 +151,17 @@ describe('Live Data Worker Integration Tests', () => {
   });
 
   describe('Job ID Generation', () => {
-    test('dedupes concurrent cache-update enqueues for the same event', async () => {
-      // Use a fresh event id so earlier suite jobs do not occupy the waiting room.
+    test('creates unique cron job IDs per enqueue tick', async () => {
+      // Cron/cascade IDs include Date.now(); only skip when an identical job is
+      // already waiting. With a worker draining the queue both enqueues succeed.
       const eventId = 950_000 + (Date.now() % 100_000);
       const job1 = await enqueueEventLivesCacheUpdate(eventId, 'cron');
+      await Bun.sleep(2);
       const job2 = await enqueueEventLivesCacheUpdate(eventId, 'cron');
 
       expect(job1).not.toBeNull();
-      // Waiting-room dedupe: second enqueue is skipped or returns the same id.
-      expect(job2 === null || job2.id === job1!.id).toBe(true);
+      expect(job2).not.toBeNull();
+      expect(job1!.id).not.toBe(job2!.id);
     });
   });
 });
