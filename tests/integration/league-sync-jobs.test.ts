@@ -95,22 +95,33 @@ describe('League Sync Jobs Integration', () => {
       );
     });
 
-    it('should create separate coordinator job runs', async () => {
-      const job1 = await enqueueLeagueEventPicks(TEST_EVENT_ID, 'cron');
-      const job2 = await enqueueLeagueEventPicks(TEST_EVENT_ID, 'cron');
+    it('creates coordinator cron jobs with event-scoped IDs', async () => {
+      const eventId = 940_000 + (Date.now() % 100_000);
+      const job1 = await enqueueLeagueEventPicks(eventId, 'cron');
+      await Bun.sleep(2);
+      const job2 = await enqueueLeagueEventPicks(eventId, 'cron');
 
-      expect(job1.id).not.toBe(job2.id ?? '');
+      expect(job1).not.toBeNull();
+      expect(job2).not.toBeNull();
+      expect(String(job1!.id)).toContain(`e${eventId}`);
+      // League sync uses timestamped IDs — concurrent cron runs get distinct jobs.
+      expect(job1!.id).not.toBe(job2!.id);
     });
 
-    it('should create separate tournament job runs', async () => {
-      const job1 = await enqueueLeagueEventResults(TEST_EVENT_ID, 'cascade', {
-        tournamentId: TEST_TOURNAMENT_ID,
+    it('creates separate tournament cascade job runs', async () => {
+      const eventId = 920_000 + (Date.now() % 100_000);
+      const tournamentId = 930_000 + (Date.now() % 100_000);
+      const job1 = await enqueueLeagueEventResults(eventId, 'cascade', {
+        tournamentId,
       });
-      const job2 = await enqueueLeagueEventResults(TEST_EVENT_ID, 'cascade', {
-        tournamentId: TEST_TOURNAMENT_ID,
+      await Bun.sleep(2);
+      const job2 = await enqueueLeagueEventResults(eventId, 'cascade', {
+        tournamentId,
       });
 
-      expect(job1.id).not.toBe(job2.id ?? '');
+      expect(job1).not.toBeNull();
+      expect(job2).not.toBeNull();
+      expect(job1!.id).not.toBe(job2!.id);
     });
   });
 

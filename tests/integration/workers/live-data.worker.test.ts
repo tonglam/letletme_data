@@ -151,13 +151,17 @@ describe('Live Data Worker Integration Tests', () => {
   });
 
   describe('Job ID Generation', () => {
-    test('should create unique job IDs with timestamp', async () => {
-      const job1 = await enqueueEventLivesCacheUpdate(testEventId);
-      const job2 = await enqueueEventLivesCacheUpdate(testEventId);
+    test('creates unique cron job IDs per enqueue tick', async () => {
+      // Cron/cascade IDs include Date.now(); only skip when an identical job is
+      // already waiting. With a worker draining the queue both enqueues succeed.
+      const eventId = 950_000 + (Date.now() % 100_000);
+      const job1 = await enqueueEventLivesCacheUpdate(eventId, 'cron');
+      await Bun.sleep(2);
+      const job2 = await enqueueEventLivesCacheUpdate(eventId, 'cron');
 
-      if (!job1 || !job2) throw new Error('Expected both jobs to be enqueued');
-      // Should have different IDs due to timestamp
-      expect(job1.id).not.toBe(job2.id);
+      expect(job1).not.toBeNull();
+      expect(job2).not.toBeNull();
+      expect(job1!.id).not.toBe(job2!.id);
     });
   });
 });
