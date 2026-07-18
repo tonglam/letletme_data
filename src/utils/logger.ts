@@ -90,6 +90,17 @@ const loggerOptions: pino.LoggerOptions = {
     },
   },
   timestamp: () => `,"time":"${formatUtc8Timestamp()}"`,
+  redact: {
+    paths: [
+      '*.token',
+      '*.secret',
+      '*.password',
+      '*.key',
+      '*.apiKey',
+      'req.headers["x-api-key"]',
+    ],
+    censor: '[REDACTED]',
+  },
 };
 
 export const logger = isDevelopment

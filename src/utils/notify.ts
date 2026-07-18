@@ -24,9 +24,9 @@ export async function sendTelegramMessage(message: string): Promise<void> {
       throw new Error(`Telegram API error: ${response.status} ${response.statusText}`);
     }
 
-    logInfo('Telegram notification sent', { chatId, message });
+    logInfo('Telegram notification sent', { messageLength: message.length });
   } catch (error) {
-    logError('Failed to send Telegram notification', error, { message });
+    logError('Failed to send Telegram notification', error, { messageLength: message.length });
     throw error;
   }
 }
@@ -51,9 +51,9 @@ export async function sendTelegramBotNotification(text: string): Promise<void> {
       throw new Error(`Telegram bot notification error: ${response.status} ${response.statusText}`);
     }
 
-    logInfo('Telegram bot notification sent', { url });
+    logInfo('Telegram bot notification sent');
   } catch (error) {
-    logError('Failed to send Telegram bot notification', error, { url });
+    logError('Failed to send Telegram bot notification', error);
     throw error;
   }
 }
@@ -81,9 +81,9 @@ export async function sendWeChatBotNotification(
       throw new Error(`WeChat bot notification error: ${response.status} ${response.statusText}`);
     }
 
-    logInfo('WeChat bot notification sent', { url, targetsCount: targets.length });
+    logInfo('WeChat bot notification sent', { targetsCount: targets.length });
   } catch (error) {
-    logError('Failed to send WeChat bot notification', error, { url });
+    logError('Failed to send WeChat bot notification', error);
     throw error;
   }
 }

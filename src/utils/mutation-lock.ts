@@ -1,15 +1,16 @@
 import Redis from 'ioredis';
 
 import { resolveMutationScopes } from '../domain/mutation-scope';
+import { getConfig } from './config';
 import { logError, logInfo, logWarn } from './logger';
 import { getQueueConnection } from './queue';
 
-const DEFAULT_LOCK_TTL_MS = Number(process.env.MUTATION_LOCK_TTL_MS ?? 30_000);
-const DEFAULT_WAIT_TIMEOUT_MS = Number(process.env.MUTATION_LOCK_WAIT_TIMEOUT_MS ?? 120_000);
-const DEFAULT_RETRY_DELAY_MS = Number(process.env.MUTATION_LOCK_RETRY_DELAY_MS ?? 250);
-const DEFAULT_HEARTBEAT_MS = Number(process.env.MUTATION_LOCK_HEARTBEAT_MS ?? 10_000);
-const LOCK_ENABLED =
-  (process.env.ENABLE_MUTATION_CONFLICT_GUARD ?? 'true').toLowerCase() !== 'false';
+const config = getConfig();
+const DEFAULT_LOCK_TTL_MS = config.MUTATION_LOCK_TTL_MS;
+const DEFAULT_WAIT_TIMEOUT_MS = config.MUTATION_LOCK_WAIT_TIMEOUT_MS;
+const DEFAULT_RETRY_DELAY_MS = config.MUTATION_LOCK_RETRY_DELAY_MS;
+const DEFAULT_HEARTBEAT_MS = config.MUTATION_LOCK_HEARTBEAT_MS;
+const LOCK_ENABLED = config.ENABLE_MUTATION_CONFLICT_GUARD;
 
 type MutationLockInput = {
   queueName: string;

@@ -2,25 +2,11 @@ import { Queue, type JobsOptions } from 'bullmq';
 
 import type { MutationPriorityTier } from '../domain/job-priority';
 import { MUTATION_PRIORITY_ORDER } from '../domain/job-priority';
+import { getConfig } from '../utils/config';
 import { getQueueConnection } from '../utils/queue';
 
-function parseBoolean(value: string | undefined, fallback: boolean): boolean {
-  if (!value) {
-    return fallback;
-  }
-
-  const normalized = value.trim().toLowerCase();
-  if (['1', 'true', 'yes', 'on'].includes(normalized)) {
-    return true;
-  }
-  if (['0', 'false', 'no', 'off'].includes(normalized)) {
-    return false;
-  }
-  return fallback;
-}
-
 export function isTieredMutationQueueEnabled(): boolean {
-  return parseBoolean(process.env.ENABLE_TIERED_MUTATION_QUEUES, false);
+  return getConfig().ENABLE_TIERED_MUTATION_QUEUES;
 }
 
 type TieredQueueSet<T> = {
