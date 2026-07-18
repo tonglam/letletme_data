@@ -95,21 +95,28 @@ jobs:
         run: bun run db:migrate
 
 
-      - name: Stub Supabase auth schema (plain Postgres CI)
+      - name: Stub Supabase auth roles/schema (plain Postgres CI)
         env:
           DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
         run: |
           cat > /tmp/stub-auth.mjs <<'EOF'
           import postgres from 'postgres';
           const sql = postgres(process.env.DATABASE_URL, { max: 1 });
+          // Supabase roles referenced by RLS policies in migrations/0026+0029
+          for (const role of ['anon', 'authenticated', 'service_role']) {
+            await sql.unsafe(`DO $$ BEGIN CREATE ROLE ${role} NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$`);
+          }
           await sql`CREATE SCHEMA IF NOT EXISTS auth`;
           await sql.unsafe(
-            "CREATE OR REPLACE FUNCTION auth.role() RETURNS text LANGUAGE sql AS $fn$ SELECT 'service_role'::text $fn$"
+            "CREATE OR REPLACE FUNCTION auth.role() RETURNS text LANGUAGE sql STABLE AS $fn$ SELECT current_setting('request.jwt.claim.role', true) $fn$"
           );
+          // Default claim so policies using auth.role() evaluate in CI
+          await sql.unsafe("SELECT set_config('request.jwt.claim.role', 'service_role', false)");
           await sql.end();
-          console.log('[ci] auth.role() stub ready');
+          console.log('[ci] supabase auth roles + auth.role() stub ready');
           EOF
           bun /tmp/stub-auth.mjs
+
 
 
       - name: Apply SQL migrations
