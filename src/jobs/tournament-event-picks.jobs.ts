@@ -7,6 +7,7 @@ import { fixtureRepository } from '../repositories/fixtures';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { logDebug, logInfo } from '../utils/logger';
 import { enqueueTournamentEventPicks } from './tournament-sync.jobs';
+import { CRON_TIMEZONE } from '../utils/timezone';
 
 /**
  * Tournament Event Picks Sync Trigger
@@ -52,6 +53,7 @@ export function registerTournamentEventPicksJobs(app: Elysia) {
     cron({
       name: 'tournament-event-picks-trigger',
       pattern: '*/5 * * * *',
+      timezone: CRON_TIMEZONE,
       async run() {
         try {
           await executeTrackedCron('tournament-event-picks-sync', runTournamentEventPicksSync);

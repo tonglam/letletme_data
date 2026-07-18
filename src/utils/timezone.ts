@@ -1,3 +1,5 @@
+export const CRON_TIMEZONE = 'Asia/Shanghai';
+
 const utc8Formatter = new Intl.DateTimeFormat('en-CA', {
   timeZone: 'Asia/Shanghai',
   year: 'numeric',

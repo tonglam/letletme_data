@@ -171,11 +171,13 @@ export async function withMutationConflictGuard<T>(
 
     return await operation();
   } catch (error) {
-    logError('Mutation conflict guard failed', error, {
+    // Don't label operation failures as guard failures; the guard held locks.
+    logInfo('Mutation conflict guard releasing locks after operation error', {
       queueName: input.queueName,
       jobName: input.jobName,
       jobId: input.jobId,
       lockKeys,
+      error: error instanceof Error ? error.message : String(error),
     });
     throw error;
   } finally {
@@ -183,13 +185,22 @@ export async function withMutationConflictGuard<T>(
       clearInterval(heartbeat);
     }
     if (acquiredKeys.length > 0) {
-      await Promise.all(acquiredKeys.map((key) => releaseLock(client, key, token)));
-      logInfo('Mutation conflict guard released locks', {
-        queueName: input.queueName,
-        jobName: input.jobName,
-        jobId: input.jobId,
-        lockKeys: acquiredKeys,
-      });
+      try {
+        await Promise.all(acquiredKeys.map((key) => releaseLock(client, key, token)));
+        logInfo('Mutation conflict guard released locks', {
+          queueName: input.queueName,
+          jobName: input.jobName,
+          jobId: input.jobId,
+          lockKeys: acquiredKeys,
+        });
+      } catch (releaseError) {
+        logError('Failed to release mutation locks (ignored)', releaseError, {
+          queueName: input.queueName,
+          jobName: input.jobName,
+          jobId: input.jobId,
+          lockKeys: acquiredKeys,
+        });
+      }
     }
   }
 }

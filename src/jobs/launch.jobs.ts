@@ -7,6 +7,7 @@ import { fplClient } from '../clients/fpl';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { sendTelegramMessage } from '../utils/notify';
 import { logInfo } from '../utils/logger';
+import { CRON_TIMEZONE } from '../utils/timezone';
 
 /**
  * Launch Monitor Jobs
@@ -70,6 +71,7 @@ export function registerLaunchJobs(app: Elysia) {
       cron({
         name: 'launch-warning',
         pattern: '* * * * *',
+        timezone: CRON_TIMEZONE,
         async run() {
           try {
             await executeTrackedCron('launch-warning', runLaunchWarning);
@@ -83,6 +85,7 @@ export function registerLaunchJobs(app: Elysia) {
       cron({
         name: 'launch-happening',
         pattern: '* * * * *',
+        timezone: CRON_TIMEZONE,
         async run() {
           try {
             await executeTrackedCron('launch-happening', runLaunchHappening);

@@ -8,6 +8,7 @@ import { executeTrackedCron } from '../utils/job-run-logger';
 import { logDebug, logInfo } from '../utils/logger';
 import { enqueueLeagueEventResults } from './league-sync.jobs';
 import type { LeagueSyncJobSource } from './league-sync.jobs';
+import { CRON_TIMEZONE } from '../utils/timezone';
 
 /**
  * League Event Results Sync Trigger
@@ -61,6 +62,7 @@ export function registerLeagueEventResultsJobs(app: Elysia) {
     cron({
       name: 'league-event-results-trigger',
       pattern: '*/10 * * * *',
+      timezone: CRON_TIMEZONE,
       async run() {
         try {
           await executeTrackedCron('league-event-results-sync', runLeagueEventResultsSync);

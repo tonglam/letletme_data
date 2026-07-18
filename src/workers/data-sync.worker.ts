@@ -90,7 +90,7 @@ export function createDataSyncWorker(): WorkerRuntime {
       logInfo('Data sync job completed', { jobId: job.id, name: job.name, tier });
     });
 
-    worker.on('failed', (job, error) => {
+    worker.on('failed', async (job, error) => {
       logError('Data sync job failed', error, {
         jobId: job?.id,
         name: job?.name,
@@ -99,6 +99,16 @@ export function createDataSyncWorker(): WorkerRuntime {
       });
       if (job) {
         void alertOnFinalFailure(job, error);
+      }
+
+      // Same-day player-values ticks should not be blocked by a transient failure.
+      if (job && job.name === 'player-values' && job.attemptsMade < 3) {
+        try {
+          await job.retry();
+          logInfo('Retried failed player-values job', { jobId: job.id, attempt: job.attemptsMade });
+        } catch (retryError) {
+          logError('Failed to retry player-values job', retryError, { jobId: job.id });
+        }
       }
     });
 

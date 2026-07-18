@@ -7,6 +7,7 @@ import { isFPLSeason, isSelectTime } from '../utils/conditions';
 import { fixtureRepository } from '../repositories/fixtures';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { logDebug, logInfo } from '../utils/logger';
+import { CRON_TIMEZONE } from '../utils/timezone';
 
 /**
  * Entry Event Picks Cron Jobs
@@ -19,6 +20,7 @@ export function registerEntryPicksJobs(app: Elysia) {
     cron({
       name: 'entry-event-picks-daily',
       pattern: '35 10 * * *',
+      timezone: CRON_TIMEZONE,
       async run() {
         try {
           await executeTrackedCron('entry-event-picks-daily', async () => {

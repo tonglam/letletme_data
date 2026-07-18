@@ -6,6 +6,7 @@ import { playerValuesRepository } from '../repositories/player-values';
 import { isFPLSeason } from '../utils/conditions';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { logDebug, logInfo } from '../utils/logger';
+import { CRON_TIMEZONE } from '../utils/timezone';
 
 function getChangeDateKey(date: Date) {
   return date.toISOString().split('T')[0].replace(/-/g, '');
@@ -42,6 +43,7 @@ export function registerPlayerValuesWindowJobs(app: Elysia) {
     cron({
       name: 'player-values-sync',
       pattern: '25-35 9 * * *',
+      timezone: CRON_TIMEZONE,
       async run() {
         try {
           await executeTrackedCron('player-values-sync', async () => {

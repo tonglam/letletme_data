@@ -6,6 +6,7 @@ import { executeTrackedCron } from '../utils/job-run-logger';
 import { isFPLSeason } from '../utils/conditions';
 import { getCurrentEvent } from '../services/events.service';
 import { logInfo } from '../utils/logger';
+import { CRON_TIMEZONE } from '../utils/timezone';
 
 /**
  * Entry Event Results Cron Jobs
@@ -17,6 +18,7 @@ export function registerEntryResultsJobs(app: Elysia) {
     cron({
       name: 'entry-event-results-daily',
       pattern: '45 10 * * *',
+      timezone: CRON_TIMEZONE,
       async run() {
         try {
           await executeTrackedCron('entry-event-results-daily', async () => {

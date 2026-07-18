@@ -6,12 +6,14 @@ import { getEntryInfoSyncDateKey, hasEntryInfoSyncedToday } from './entry-info-s
 import { isFPLSeason } from '../utils/conditions';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { logDebug, logInfo } from '../utils/logger';
+import { CRON_TIMEZONE } from '../utils/timezone';
 
 export function registerEntryInfoJobs(app: Elysia) {
   return app.use(
     cron({
       name: 'entry-info-daily',
       pattern: '30 10 * * *',
+      timezone: CRON_TIMEZONE,
       async run() {
         try {
           await executeTrackedCron('entry-info-daily', async () => {

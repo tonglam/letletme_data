@@ -6,6 +6,7 @@ import { isFPLSeason } from '../utils/conditions';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { logInfo } from '../utils/logger';
 import { enqueueEventsSyncJob } from './data-sync-enqueue';
+import { CRON_TIMEZONE } from '../utils/timezone';
 
 export type ManualEventCurrentRefreshResult = {
   refreshed: boolean;
@@ -59,6 +60,7 @@ export function registerEventCurrentRefreshJobs(app: Elysia) {
     cron({
       name: 'event-current-refresh',
       pattern: '* * * * *',
+      timezone: CRON_TIMEZONE,
       async run() {
         try {
           await executeTrackedCron('event-current-refresh', runEventCurrentRefresh);

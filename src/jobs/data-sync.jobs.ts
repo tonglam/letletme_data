@@ -12,6 +12,7 @@ import {
 import { isFPLSeason } from '../utils/conditions';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { logDebug, logInfo } from '../utils/logger';
+import { CRON_TIMEZONE } from '../utils/timezone';
 
 async function shouldRunSeasonDataSync(jobName: string) {
   const now = new Date();
@@ -38,6 +39,7 @@ export function registerDataSyncJobs(app: Elysia) {
       cron({
         name: 'events-sync',
         pattern: '35 6 * * *',
+        timezone: CRON_TIMEZONE,
         async run() {
           try {
             await executeTrackedCron('events-sync', async () => {
@@ -54,6 +56,7 @@ export function registerDataSyncJobs(app: Elysia) {
       cron({
         name: 'teams-sync',
         pattern: '37 6 * * *',
+        timezone: CRON_TIMEZONE,
         async run() {
           try {
             await executeTrackedCron('teams-sync', async () => {
@@ -70,6 +73,7 @@ export function registerDataSyncJobs(app: Elysia) {
       cron({
         name: 'fixtures-sync',
         pattern: '40 6 * * *',
+        timezone: CRON_TIMEZONE,
         async run() {
           try {
             await executeTrackedCron('fixtures-sync', async () => {
@@ -86,6 +90,7 @@ export function registerDataSyncJobs(app: Elysia) {
       cron({
         name: 'players-sync',
         pattern: '43 6 * * *',
+        timezone: CRON_TIMEZONE,
         async run() {
           try {
             await executeTrackedCron('players-sync', async () => {
@@ -102,6 +107,7 @@ export function registerDataSyncJobs(app: Elysia) {
       cron({
         name: 'player-stats-sync',
         pattern: '40 9 * * *',
+        timezone: CRON_TIMEZONE,
         async run() {
           try {
             await executeTrackedCron('player-stats-sync', async () => {
@@ -121,6 +127,7 @@ export function registerDataSyncJobs(app: Elysia) {
       cron({
         name: 'phases-sync',
         pattern: '45 6 * * *',
+        timezone: CRON_TIMEZONE,
         async run() {
           try {
             await executeTrackedCron('phases-sync', async () => {
