@@ -94,6 +94,20 @@ jobs:
           DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
         run: bun run db:migrate
 
+
+      - name: Stub Supabase auth schema (plain Postgres CI)
+        env:
+          DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
+        run: |
+          bun -e '
+          import postgres from "postgres";
+          const sql = postgres(process.env.DATABASE_URL, { max: 1 });
+          await sql`CREATE SCHEMA IF NOT EXISTS auth`;
+          await sql.unsafe(`CREATE OR REPLACE FUNCTION auth.role() RETURNS text LANGUAGE sql AS $$ SELECT '''service_role'''::text $$`);
+          await sql.end();
+          console.log("[ci] auth.role() stub ready");
+          '
+
       - name: Apply SQL migrations
         env:
           DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
