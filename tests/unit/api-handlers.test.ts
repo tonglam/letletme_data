@@ -41,13 +41,26 @@ mock.module('../../src/jobs/data-sync-enqueue', () => ({
   enqueuePlayerStatsSyncJob,
 }));
 
-const enqueueEntryPicksSyncJob = mock(async () => ({ id: 'picks-job-1' }));
-const enqueueEntryTransfersSyncJob = mock(async () => ({ id: 'transfers-job-1' }));
-const enqueueEntryResultsSyncJob = mock(async () => ({ id: 'results-job-1' }));
-mock.module('../../src/jobs/entry-sync-enqueue', () => ({
-  enqueueEntryPicksSyncJob,
-  enqueueEntryTransfersSyncJob,
-  enqueueEntryResultsSyncJob,
+// Mock the entry-sync queue (not entry-sync-enqueue) so real enqueue helpers run.
+// mock.module of entry-sync-enqueue pollutes entry-sync-enqueue.test.ts /
+// manual-job-ids.test.ts when Bun shares the mock registry across files.
+type EntrySyncAddCall = {
+  name: string;
+  data: Record<string, unknown>;
+  opts: Record<string, unknown>;
+};
+const entrySyncAddCalls: EntrySyncAddCall[] = [];
+mock.module('../../src/queues/entry-sync.queue', () => ({
+  ENTRY_SYNC_DEFAULT_CHUNK_SIZE: 100,
+  ENTRY_SYNC_DEFAULT_CONCURRENCY: 5,
+  ENTRY_SYNC_DEFAULT_THROTTLE_MS: 150,
+  getEntrySyncQueue: () => ({
+    name: 'entry-sync-p2',
+    add: async (name: string, data: Record<string, unknown>, opts: Record<string, unknown>) => {
+      entrySyncAddCalls.push({ name, data, opts });
+      return { id: (opts.jobId as string | undefined) ?? 'generated-id' };
+    },
+  }),
 }));
 
 // Mock the live-data queue (not live-data.jobs) so real enqueue helpers run and
@@ -184,9 +197,7 @@ describe('jobsAPI handlers', () => {
 
 describe('entrySyncAPI handlers', () => {
   beforeEach(() => {
-    enqueueEntryPicksSyncJob.mockClear();
-    enqueueEntryTransfersSyncJob.mockClear();
-    enqueueEntryResultsSyncJob.mockClear();
+    entrySyncAddCalls.length = 0;
   });
 
   test('POST /entry-sync/picks enqueues an entry-list job and returns 202', async () => {
@@ -200,8 +211,11 @@ describe('entrySyncAPI handlers', () => {
     expect(response.status).toBe(202);
     const body = (await response.json()) as { success: boolean; jobId: string };
     expect(body.success).toBe(true);
-    expect(body.jobId).toBe('picks-job-1');
-    expect(enqueueEntryPicksSyncJob).toHaveBeenCalledWith('api', {
+    expect(body.jobId).toMatch(/^entry-picks-entry-list-/);
+    expect(entrySyncAddCalls).toHaveLength(1);
+    expect(entrySyncAddCalls[0].name).toBe('entry-picks');
+    expect(entrySyncAddCalls[0].data).toMatchObject({
+      source: 'api',
       entryIds: [1, 2],
       eventId: 20,
     });
@@ -221,15 +235,17 @@ describe('entrySyncAPI handlers', () => {
       jobIds: { picks: string; transfers: string; results: string };
     };
     expect(body.success).toBe(true);
-    expect(body.jobIds).toEqual({
-      picks: 'picks-job-1',
-      transfers: 'transfers-job-1',
-      results: 'results-job-1',
-    });
-    expect(enqueueEntryPicksSyncJob).toHaveBeenCalledWith('api', {
-      entryIds: [7],
-      eventId: undefined,
-    });
+    expect(body.jobIds.picks).toMatch(/^entry-picks-entry-list-/);
+    expect(body.jobIds.transfers).toMatch(/^entry-transfers-entry-list-/);
+    expect(body.jobIds.results).toMatch(/^entry-results-entry-list-/);
+    expect(entrySyncAddCalls.map((c) => c.name).sort()).toEqual([
+      'entry-picks',
+      'entry-results',
+      'entry-transfers',
+    ]);
+    for (const call of entrySyncAddCalls) {
+      expect(call.data).toMatchObject({ source: 'api', entryIds: [7] });
+    }
   });
 
   test('rejects entryIds arrays larger than 100', async () => {
@@ -241,7 +257,7 @@ describe('entrySyncAPI handlers', () => {
       }),
     );
     expect(response.status).toBe(422);
-    expect(enqueueEntryPicksSyncJob).not.toHaveBeenCalled();
+    expect(entrySyncAddCalls).toHaveLength(0);
   });
 });
 
