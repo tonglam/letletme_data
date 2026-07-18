@@ -13,7 +13,7 @@ describe('Fixtures Integration Tests', () => {
     const { syncEvents } = await import('../../src/services/events.service');
     await syncEvents();
     await syncFixtures();
-  }, 180_000);
+  });
 
   test('syncFixtures persists data to database', async () => {
     const db = await getDb();

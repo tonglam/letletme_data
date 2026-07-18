@@ -16,7 +16,7 @@ describe('Entry Infos Integration Tests', () => {
   beforeAll(async () => {
     // entry_infos.started_event FKs to events — seed events first on a fresh DB.
     await syncEvents();
-  }, 120_000);
+  });
 
   test(
     'should sync entry info from FPL API',

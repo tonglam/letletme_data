@@ -13,7 +13,7 @@ describe('Entries Integration Tests', () => {
 
   beforeAll(async () => {
     await syncEvents();
-  }, 120_000);
+  });
 
   describe('Entry Info Sync', () => {
     test('should sync entry info from FPL API', async () => {
