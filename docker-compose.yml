@@ -12,7 +12,9 @@ services:
       context: .
       target: runner
     command: bun dist/index.js
-    env_file: .env.deploy
+    env_file:
+      - path: .env.deploy
+        required: false
     environment:
       # Force production even if .env.deploy omits/overrides NODE_ENV — logger
       # must not load pino-pretty (devDependency) in the runtime image.
@@ -21,8 +23,6 @@ services:
     logging: *default-logging
     ports:
       - '127.0.0.1:3000:3000'
-    volumes:
-      - ./log:/app/logs
     restart: unless-stopped
     healthcheck:
       test:
@@ -43,13 +43,13 @@ services:
       context: .
       target: runner
     command: bun dist/worker.js
-    env_file: .env.deploy
+    env_file:
+      - path: .env.deploy
+        required: false
     environment:
       - NODE_ENV=production
       - TZ=Asia/Shanghai
     logging: *default-logging
-    volumes:
-      - ./log:/app/logs
     restart: unless-stopped
     healthcheck:
       # worker.ts touches /tmp/worker-heartbeat every 30s; a stale file means

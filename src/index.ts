@@ -2,7 +2,7 @@ import { cors } from '@elysiajs/cors';
 import { Elysia } from 'elysia';
 
 // Import API route groups
-import { betterAuthPlugin, registerMutationAuthGuard } from './api/auth.guard';
+import { registerMutationAuthGuard } from './api/auth.guard';
 import { entryInfoAPI } from './api/entry-info.api';
 import { entrySyncAPI } from './api/entry-sync.api';
 import { eventLivesAPI } from './api/event-lives.api';
@@ -14,6 +14,7 @@ import { playerStatsAPI } from './api/player-stats.api';
 import { playerValuesAPI } from './api/player-values.api';
 import { playersAPI } from './api/players.api';
 import { registerMutationRateLimit } from './api/rate-limit';
+import { checkReadiness } from './api/health';
 import { teamsAPI } from './api/teams.api';
 import { tournamentsAPI } from './api/tournaments.api';
 
@@ -58,7 +59,6 @@ const app = new Elysia()
     }),
   )
 
-  .use(betterAuthPlugin)
   .use(registerMutationRateLimit)
   .use(registerMutationAuthGuard)
 
@@ -115,11 +115,16 @@ const app = new Elysia()
     timestamp: new Date().toISOString(),
   }))
 
-  .get('/health', () => ({
-    success: true,
-    status: 'healthy',
-    timestamp: new Date().toISOString(),
-  }))
+  .get('/health', async ({ set }) => {
+    const readiness = await checkReadiness();
+    if (!readiness.ready) set.status = 503;
+    return {
+      success: readiness.ready,
+      status: readiness.ready ? 'ready' : 'not_ready',
+      dependencies: readiness.dependencies,
+      timestamp: new Date().toISOString(),
+    };
+  })
 
   // ================================
   // API Route Groups

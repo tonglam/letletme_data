@@ -8,7 +8,6 @@ import {
 } from '../../src/cache/cache-season';
 import { parseHashEntries, parseHashValues } from '../../src/cache/hash-read';
 import { redisSingleton } from '../../src/cache/singleton';
-import { getCurrentSeason } from '../../src/utils/conditions';
 
 // Direct method mutation + restore: bun's mock.module overwrites exports of
 // already-loaded modules globally, leaking into other test files.
@@ -120,21 +119,21 @@ describe('getActiveCacheSeason memo', () => {
     expect(redis.get).toHaveBeenCalledTimes(2);
   });
 
-  test('falls back to the calendar season on Redis errors without memoizing', async () => {
+  test('rejects Redis errors without memoizing', async () => {
     const redis = installFakeRedis({
       get: async () => {
         throw new Error('redis down');
       },
     });
-    expect(await getActiveCacheSeason()).toBe(getCurrentSeason());
-    expect(await getActiveCacheSeason()).toBe(getCurrentSeason());
+    await expect(getActiveCacheSeason()).rejects.toThrow('redis down');
+    await expect(getActiveCacheSeason()).rejects.toThrow('redis down');
     expect(redis.get).toHaveBeenCalledTimes(2);
   });
 
-  test('does not memoize invalid stored values', async () => {
+  test('rejects and does not memoize invalid stored values', async () => {
     const redis = installFakeRedis({ get: async () => 'not-a-season' });
-    expect(await getActiveCacheSeason()).toBe(getCurrentSeason());
-    expect(await getActiveCacheSeason()).toBe(getCurrentSeason());
+    await expect(getActiveCacheSeason()).rejects.toThrow('Season:active is missing or malformed');
+    await expect(getActiveCacheSeason()).rejects.toThrow('Season:active is missing or malformed');
     expect(redis.get).toHaveBeenCalledTimes(2);
   });
 

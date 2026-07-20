@@ -89,7 +89,7 @@ jobs:
           GHCR_USER: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Expected deployment config:
-          # vars.VPS_HOST=43.163.91.9
+          # vars.VPS_HOST=data.internal.example
           # vars.VPS_USER=deploy
           # vars.VPS_WORKDIR=/home/workspace/letletme_data
           # secrets.VPS_SSH_KEY=<private key for deploy>
@@ -111,6 +111,7 @@ jobs:
             APP_IMAGE="$IMAGE_REF" docker compose pull api worker
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun run db:migrate
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun scripts/apply-sql-migrations.ts
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun run db:migrate:status
             APP_IMAGE="$IMAGE_REF" docker compose up -d --remove-orphans --no-build
             for attempt in $(seq 1 30); do
               if curl --fail --silent http://127.0.0.1/health >/dev/null; then

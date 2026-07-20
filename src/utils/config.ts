@@ -39,16 +39,17 @@ const EnvSchema = z.object({
     .enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace'])
     .optional()
     .default('info'),
-  // Auth (Better Auth + API keys)
+  // Internal mutation authentication. Store only SHA-256 digests so a config
+  // leak does not disclose a usable service credential.
   ENABLE_AUTH: booleanEnv(process.env.NODE_ENV === 'production'),
-  BETTER_AUTH_SECRET: z.string().optional(),
-  BETTER_AUTH_URL: z.string().url().optional(),
+  DATA_API_KEY_HASHES: z.string().optional(),
   CORS_ORIGINS: z.string().optional(),
   // HTTP mutation rate limit (fixed window per client IP; 0 disables)
   RATE_LIMIT_MUTATIONS_PER_MINUTE: z.coerce.number().int().min(0).default(60),
   // Mutation conflict guard + tiered mutation queues (feature flags)
   ENABLE_TIERED_MUTATION_QUEUES: booleanEnv(false),
   ENABLE_MUTATION_CONFLICT_GUARD: booleanEnv(true),
+  TRANSFER_SYNC_MODE: z.enum(['latest', 'all']).default('latest'),
   MUTATION_LOCK_TTL_MS: integerEnv(30_000),
   MUTATION_LOCK_WAIT_TIMEOUT_MS: integerEnv(120_000),
   MUTATION_LOCK_RETRY_DELAY_MS: integerEnv(250),
@@ -69,8 +70,7 @@ export type AppConfig = z.infer<typeof EnvSchema>;
 
 export type AuthConfig = {
   ENABLE_AUTH: boolean;
-  BETTER_AUTH_SECRET: string;
-  BETTER_AUTH_URL: string;
+  DATA_API_KEY_HASHES: readonly string[];
   CORS_ORIGINS: string[];
 };
 
@@ -124,29 +124,31 @@ export function validateEnvForCli(): { ok: boolean; errors?: unknown } {
 
 function resolveAuthConfig(parsed: AppConfig): AuthConfig {
   const enableAuth = parsed.ENABLE_AUTH ?? parsed.NODE_ENV === 'production';
+  const keyHashes = (parsed.DATA_API_KEY_HASHES ?? '')
+    .split(',')
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean);
+
+  const invalidHash = keyHashes.find((value) => !/^[a-f0-9]{64}$/.test(value));
+  if (invalidHash) {
+    throw new Error('DATA_API_KEY_HASHES must contain comma-separated SHA-256 hex digests');
+  }
 
   if (!enableAuth) {
     return {
       ENABLE_AUTH: false,
-      BETTER_AUTH_SECRET:
-        parsed.BETTER_AUTH_SECRET ?? 'dev-only-auth-secret-not-used-in-production',
-      BETTER_AUTH_URL: parsed.BETTER_AUTH_URL ?? `http://localhost:${parsed.PORT}`,
+      DATA_API_KEY_HASHES: keyHashes,
       CORS_ORIGINS: parseCorsOrigins(parsed.CORS_ORIGINS),
     };
   }
 
-  if (!parsed.BETTER_AUTH_SECRET || parsed.BETTER_AUTH_SECRET.length < 32) {
-    throw new Error('BETTER_AUTH_SECRET is required (min 32 chars) when ENABLE_AUTH=true');
-  }
-
-  if (!parsed.BETTER_AUTH_URL) {
-    throw new Error('BETTER_AUTH_URL is required when ENABLE_AUTH=true');
+  if (keyHashes.length === 0) {
+    throw new Error('DATA_API_KEY_HASHES requires at least one digest when ENABLE_AUTH=true');
   }
 
   return {
     ENABLE_AUTH: true,
-    BETTER_AUTH_SECRET: parsed.BETTER_AUTH_SECRET,
-    BETTER_AUTH_URL: parsed.BETTER_AUTH_URL,
+    DATA_API_KEY_HASHES: keyHashes,
     CORS_ORIGINS: parseCorsOrigins(parsed.CORS_ORIGINS),
   };
 }

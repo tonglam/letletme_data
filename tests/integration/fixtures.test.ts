@@ -6,12 +6,12 @@ import { beforeAll, describe, expect, test } from 'bun:test';
 import { eventFixtures } from '../../src/db/schemas/index.schema';
 import { getDb } from '../../src/db/singleton';
 import { syncAllGameweeks, syncFixtures } from '../../src/services/fixtures.service';
+import { ensureTeams } from './helpers/reference-data';
 
 describe('Fixtures Integration Tests', () => {
   beforeAll(async () => {
-    // event_fixtures.event_id FKs to events — seed events before fixtures.
-    const { syncEvents } = await import('../../src/services/events.service');
-    await syncEvents();
+    // Fixtures reference events and both home/away teams.
+    await ensureTeams();
     await syncFixtures();
   });
 

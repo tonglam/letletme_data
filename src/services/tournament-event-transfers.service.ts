@@ -11,6 +11,12 @@ import { logError, logInfo } from '../utils/logger';
 
 const DEFAULT_CONCURRENCY = 5;
 
+export type EntryTransfersClient = Pick<typeof fplClient, 'getEntryTransfers'>;
+export type TournamentTransferSyncOptions = {
+  concurrency?: number;
+  client?: EntryTransfersClient;
+};
+
 function normalizePicks(raw: unknown): RawFPLEntryEventPickItem[] {
   if (!Array.isArray(raw)) {
     return [];
@@ -187,7 +193,7 @@ export async function syncTournamentEventTransfersPost(eventId: number): Promise
 
 export async function syncTournamentEventTransfersPre(
   eventId: number,
-  options?: { concurrency?: number },
+  options?: TournamentTransferSyncOptions,
 ): Promise<{
   eventId: number;
   totalEntries: number;
@@ -242,12 +248,13 @@ export async function syncTournamentEventTransfersPre(
   }
 
   const concurrency = options?.concurrency ?? DEFAULT_CONCURRENCY;
+  const client = options?.client ?? fplClient;
   let inserted = 0;
   let errors = 0;
 
   await mapWithConcurrency(pendingEntryIds, concurrency, async (entryId) => {
     try {
-      const transfers = await fplClient.getEntryTransfers(entryId);
+      const transfers = await client.getEntryTransfers(entryId);
       const hasEventTransfers = transfers.some((transfer) => transfer.event === eventId);
       if (!hasEventTransfers) {
         skipped += 1;
@@ -257,7 +264,6 @@ export async function syncTournamentEventTransfersPre(
       await entryEventTransfersRepository.replaceForEvent(entryId, eventId, transfers, undefined, {
         elementInPlayed: false,
         defaultPoints: 0,
-        onConflict: 'ignore',
       });
       inserted += 1;
       return null;

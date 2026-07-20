@@ -7,6 +7,7 @@ import { playersCache } from '../../src/cache/operations';
 import { players } from '../../src/db/schemas/index.schema';
 import { getDb } from '../../src/db/singleton';
 import { syncPlayers } from '../../src/services/players.service';
+import { ensureTeams } from './helpers/reference-data';
 
 describe('Players Integration Tests', () => {
   let syncResult: { count: number; errors: number };
@@ -14,6 +15,7 @@ describe('Players Integration Tests', () => {
 
   beforeAll(async () => {
     // Clear cache and sync once
+    await ensureTeams();
     await playersCache.clear();
     syncResult = await syncPlayers();
     const db = await getDb();

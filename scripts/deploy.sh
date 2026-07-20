@@ -58,6 +58,7 @@ deploy() {
     log_error "SQL migrations failed; aborting deploy before services start."
     exit 1
   fi
+  compose run --rm -T api bun run db:migrate:status
   log_info "Starting services"
   compose up -d --remove-orphans
   log_info "Current service status"

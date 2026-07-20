@@ -7,17 +7,18 @@ import { entryInfos } from '../../src/db/schemas/index.schema';
 import { getDb } from '../../src/db/singleton';
 import { syncEntryInfo } from '../../src/services/entry-info.service';
 import { syncEvents } from '../../src/services/events.service';
+import { recordedEntryClient, recordedEntryId } from '../fixtures/entry-info.fixtures';
 
 describe('Entries Integration Tests', () => {
-  const TEST_ENTRY_ID = 15702; // Using a known entry ID
+  const TEST_ENTRY_ID = recordedEntryId;
 
   beforeAll(async () => {
     await syncEvents();
   });
 
   describe('Entry Info Sync', () => {
-    test('should sync entry info from FPL API', async () => {
-      const result = await syncEntryInfo(TEST_ENTRY_ID);
+    test('should sync a recorded FPL entry snapshot', async () => {
+      const result = await syncEntryInfo(TEST_ENTRY_ID, recordedEntryClient);
 
       expect(result).toBeDefined();
       expect(result.id).toBe(TEST_ENTRY_ID);
@@ -26,7 +27,7 @@ describe('Entries Integration Tests', () => {
     });
 
     test('should store entry info in database', async () => {
-      await syncEntryInfo(TEST_ENTRY_ID);
+      await syncEntryInfo(TEST_ENTRY_ID, recordedEntryClient);
 
       const db = await getDb();
       const infos = await db.select().from(entryInfos);
@@ -42,7 +43,7 @@ describe('Entries Integration Tests', () => {
 
   describe('Data Validation', () => {
     test('should have valid entry info structure', async () => {
-      const result = await syncEntryInfo(TEST_ENTRY_ID);
+      const result = await syncEntryInfo(TEST_ENTRY_ID, recordedEntryClient);
 
       expect(result.id).toBeGreaterThan(0);
       expect(result.entryName.length).toBeGreaterThan(0);
@@ -56,7 +57,7 @@ describe('Entries Integration Tests', () => {
     });
 
     test('should maintain entry name history', async () => {
-      await syncEntryInfo(TEST_ENTRY_ID);
+      await syncEntryInfo(TEST_ENTRY_ID, recordedEntryClient);
 
       const db = await getDb();
       const infos = await db.select().from(entryInfos);
@@ -76,7 +77,7 @@ describe('Entries Integration Tests', () => {
       const beforeResult = await db.select().from(entryInfos);
       const before = beforeResult.find((i) => i.id === TEST_ENTRY_ID);
 
-      await syncEntryInfo(TEST_ENTRY_ID);
+      await syncEntryInfo(TEST_ENTRY_ID, recordedEntryClient);
 
       const afterResult = await db.select().from(entryInfos);
       const after = afterResult.find((i) => i.id === TEST_ENTRY_ID);
@@ -91,7 +92,7 @@ describe('Entries Integration Tests', () => {
 
   describe('Rankings and Points', () => {
     test('should have valid ranking data', async () => {
-      const result = await syncEntryInfo(TEST_ENTRY_ID);
+      const result = await syncEntryInfo(TEST_ENTRY_ID, recordedEntryClient);
 
       if (result.overallRank !== null) {
         expect(result.overallRank).toBeGreaterThan(0);
@@ -106,7 +107,7 @@ describe('Entries Integration Tests', () => {
   describe('Performance', () => {
     test('should sync entry efficiently', async () => {
       const startTime = performance.now();
-      await syncEntryInfo(TEST_ENTRY_ID);
+      await syncEntryInfo(TEST_ENTRY_ID, recordedEntryClient);
       const endTime = performance.now();
 
       const duration = endTime - startTime;

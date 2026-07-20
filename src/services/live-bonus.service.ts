@@ -1,8 +1,13 @@
 import { eq } from 'drizzle-orm';
-import { liveBonusCache, liveFixturesCache } from '../cache/operations';
+import { liveBonusCache, liveBonusV2Cache, liveFixturesCache } from '../cache/operations';
 import { eventLive, players } from '../db/schemas/index.schema';
 import { getDb } from '../db/singleton';
-import { buildPlayingMatches, computeLiveBonusByTeam } from '../domain/live-bonus';
+import {
+  buildPlayingMatches,
+  computeFixtureSummedBonusByTeam,
+  computeLiveBonusByTeam,
+} from '../domain/live-bonus';
+import { fixtureRepository } from '../repositories/fixtures';
 import type { EventId, TeamId } from '../types/base.type';
 import { logDebug, logError, logInfo } from '../utils/logger';
 import { getCurrentEvent } from './events.service';
@@ -109,32 +114,53 @@ export async function syncLiveBonusCache(
       logDebug('No playing fixtures found, skipping live bonus cache', {
         eventId: resolvedEventId,
       });
-      await liveBonusCache.clear(resolvedEventId);
+      await Promise.all([
+        liveBonusCache.clear(resolvedEventId),
+        liveBonusV2Cache.clear(resolvedEventId),
+      ]);
       return { eventId: resolvedEventId, teamCount: 0 };
     }
 
-    // 2. Get event lives with teamId
-    const eventLives = await loadEventLivesWithTeam(resolvedEventId);
+    // 2. Load aggregate event lives for the legacy contract and fixture-scoped
+    // stats for the additive V2 contract.
+    const [eventLives, fixtures] = await Promise.all([
+      loadEventLivesWithTeam(resolvedEventId),
+      fixtureRepository.findByEvent(resolvedEventId),
+    ]);
 
     // 3. Compute bonus per match (combined bucket) and distribute by team
     const bonusByTeam = computeLiveBonusByTeam(matches, eventLives);
+    const bonusV2ByTeam = computeFixtureSummedBonusByTeam(fixtures);
 
-    const byTeam: Record<string, Record<string, number>> = {};
-    for (const [teamId, teamBonus] of bonusByTeam.entries()) {
-      const bonusObj: Record<string, number> = {};
-      for (const [elementId, bonus] of teamBonus.entries()) {
-        bonusObj[elementId.toString()] = bonus;
+    const serialize = (source: Map<TeamId, Map<number, number>>) => {
+      const result: Record<string, Record<string, number>> = {};
+      for (const [teamId, teamBonus] of source.entries()) {
+        const bonusObj: Record<string, number> = {};
+        for (const [elementId, bonus] of teamBonus.entries()) {
+          bonusObj[elementId.toString()] = bonus;
+        }
+        if (Object.keys(bonusObj).length > 0) {
+          result[teamId.toString()] = bonusObj;
+        }
       }
-      if (Object.keys(bonusObj).length > 0) {
-        byTeam[teamId.toString()] = bonusObj;
-      }
-    }
+      return result;
+    };
 
-    // 4. Cache the results
-    await liveBonusCache.set(resolvedEventId, byTeam);
+    const byTeam = serialize(bonusByTeam);
+    const byTeamV2 = serialize(bonusV2ByTeam);
+
+    // 4. Write both contracts. GraphQL controls its read cutover independently.
+    await Promise.all([
+      liveBonusCache.set(resolvedEventId, byTeam),
+      liveBonusV2Cache.set(resolvedEventId, byTeamV2),
+    ]);
 
     const teamCount = Object.keys(byTeam).length;
-    logInfo('Live bonus cache sync completed', { eventId: resolvedEventId, teamCount });
+    logInfo('Live bonus cache sync completed', {
+      eventId: resolvedEventId,
+      teamCount,
+      v2TeamCount: Object.keys(byTeamV2).length,
+    });
     return { eventId: resolvedEventId, teamCount };
   } catch (error) {
     logError('Live bonus cache sync failed', error, { eventId });
