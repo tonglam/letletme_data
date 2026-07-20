@@ -5,6 +5,8 @@ import { join } from 'node:path';
 
 import postgres from 'postgres';
 
+import { inspectMigrationHistory } from './migration-history';
+
 const migrationsDir = process.env.MIGRATIONS_DIR ?? 'migrations';
 const databaseUrl = process.env.DATABASE_URL;
 const statusOnly = process.argv.includes('--status');
@@ -110,12 +112,16 @@ async function applyFile(filename: string, contents: string, digest: string): Pr
 
 async function printStatus(files: string[], ledger: Map<string, LedgerRow>): Promise<void> {
   let invalid = false;
-  const local = new Set(files);
+  const { missing, backdated, latestApplied } = inspectMigrationHistory(files, ledger.keys());
+  const backdatedSet = new Set(backdated);
 
   for (const filename of files) {
     const migration = readMigration(filename);
     const row = ledger.get(filename);
-    if (!row) {
+    if (backdatedSet.has(filename)) {
+      console.log(`backdated ${filename} (latest applied: ${latestApplied})`);
+      invalid = true;
+    } else if (!row) {
       console.log(`pending  ${filename}`);
       invalid = true;
     } else if (row.checksum === null) {
@@ -129,11 +135,9 @@ async function printStatus(files: string[], ledger: Map<string, LedgerRow>): Pro
     }
   }
 
-  for (const filename of ledger.keys()) {
-    if (!local.has(filename)) {
-      console.log(`missing  ${filename} (ledgered file absent)`);
-      invalid = true;
-    }
+  for (const filename of missing) {
+    console.log(`missing  ${filename} (ledgered file absent)`);
+    invalid = true;
   }
 
   if (invalid) process.exitCode = 1;
@@ -143,10 +147,14 @@ async function applyMigrations(files: string[]): Promise<void> {
   await sql`SELECT pg_advisory_lock(${advisoryLockKey})`;
   try {
     const ledger = await loadLedger();
-    const local = new Set(files);
-    const missing = [...ledger.keys()].filter((filename) => !local.has(filename));
+    const { missing, backdated, latestApplied } = inspectMigrationHistory(files, ledger.keys());
     if (missing.length > 0) {
       throw new Error(`ledgered migration files are missing: ${missing.join(', ')}`);
+    }
+    if (backdated.length > 0) {
+      throw new Error(
+        `pending migrations sort before the applied tail ${latestApplied}: ${backdated.join(', ')}`,
+      );
     }
 
     for (const filename of files) {

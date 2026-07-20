@@ -65,8 +65,9 @@ back if the widened index is missing.
 
 ## Operational invariants
 
-- Run both migrators, then `bun run db:migrate:status`; a checksum mismatch or
-  missing ledgered file blocks deployment.
+- Run both migrators, then `bun run db:migrate:status`; a checksum mismatch,
+  missing ledgered file, or migration inserted before the applied tail blocks
+  deployment.
 - `/health` is readiness, not process liveness: PostgreSQL, Redis, and a valid
   `Season:active` authority key must all respond or it returns 503.
 - After a fresh install or Redis restore without that key, trigger the
