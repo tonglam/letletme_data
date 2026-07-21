@@ -68,12 +68,13 @@ back if the widened index is missing.
 - Run both migrators, then `bun run db:migrate:status`; a checksum mismatch,
   missing ledgered file, or migration inserted before the applied tail blocks
   deployment.
-- `/health` is readiness, not process liveness: PostgreSQL, Redis, and a valid
-  `Season:active` authority key must all respond or it returns 503.
+- `/health` is process liveness and is the Docker/deploy restart gate. `/ready`
+  is dependency readiness: PostgreSQL, Redis, and a valid `Season:active`
+  authority key must all respond or it returns 503.
 - After a fresh install or Redis restore without that key, trigger the
   authenticated `events-sync` job from the trusted network. It derives the
   season from FPL GW1 metadata and establishes the key; do not set a guessed
-  calendar value merely to make readiness green.
+  calendar value merely to make `/ready` green.
 - LiveBonus V2 is additive. Keep GraphQL `LIVE_POINTS_V2=false` until the V2 hash
   has been sampled for single and double gameweeks.
 - Never deploy one repository's contract switch before its producer/validator
