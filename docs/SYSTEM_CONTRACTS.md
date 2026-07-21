@@ -33,7 +33,7 @@ This repository participates in one four-repository system:
 | Website and Mini Program identity | PostgreSQL `bauth`, written by Web/Better Auth | Signed request envelopes and bearer sessions |
 | Active cache namespace | Redis string `Season:active`, written by Data | Season-scoped cache keys |
 | External input | Validated FPL API response captured by the running sync | Raw response objects in memory |
-| Migration history | Drizzle journals plus checksum-protected `sql_migrations` | Deployment logs |
+| Migration history | Repository-owned ledgers: Data `drizzle.__drizzle_migrations` and `public.sql_migrations`; GraphQL `public.graphql_schema_migrations`; Web `bauth.__drizzle_migrations` | Deployment logs |
 
 If canonical PostgreSQL and a cache disagree, PostgreSQL wins and the cache is
 rebuilt. If an FPL response fails validation, the sync fails without overwriting
