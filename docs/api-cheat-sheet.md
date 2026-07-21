@@ -8,9 +8,10 @@ Important:
 
 - `GET` endpoints are operational reads, not the public product API. Network
   policy should restrict this service to trusted callers; clients use GraphQL.
-- `/health` returns 503 until PostgreSQL, Redis, and the FPL-derived
+- `/health` is process liveness and remains usable during first-deploy recovery.
+  `/ready` returns 503 until PostgreSQL, Redis, and the FPL-derived
   `Season:active` key are ready. On a fresh Redis restore, use the authenticated
-  `events-sync` trigger to establish the key.
+  `events-sync` trigger to establish the key, then confirm `/ready`.
 - `POST`, `PUT`, `PATCH`, and `DELETE` require an API key in the `x-api-key` header when `ENABLE_AUTH=true`.
 - Generate a random key outside the service, store its SHA-256 digest in
   `DATA_API_KEY_HASHES`, and store the plaintext only in the trusted caller's
@@ -29,6 +30,8 @@ curl -X POST http://data.internal.example/events/sync -H "x-api-key: $API_KEY"
   - `curl http://data.internal.example/`
 - `GET /health`
   - `curl http://data.internal.example/health`
+- `GET /ready`
+  - `curl http://data.internal.example/ready`
 
 ## Events
 

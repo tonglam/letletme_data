@@ -115,7 +115,13 @@ const app = new Elysia()
     timestamp: new Date().toISOString(),
   }))
 
-  .get('/health', async ({ set }) => {
+  .get('/health', () => ({
+    success: true,
+    status: 'alive',
+    timestamp: new Date().toISOString(),
+  }))
+
+  .get('/ready', async ({ set }) => {
     const readiness = await checkReadiness();
     if (!readiness.ready) set.status = 503;
     return {
