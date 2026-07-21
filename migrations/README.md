@@ -17,3 +17,7 @@ Two migrators share this directory:
 running it now would emit a schema-reset migration. Until the freeze is lifted,
 add new migrations as hand-written, idempotent (`IF NOT EXISTS`) `NNNN_name.sql`
 files with the next sequential number, so already-migrated environments are no-ops.
+
+`0034_widen_entry_event_transfers_identity.sql` is a staged cutover. Deploy the
+service with `TRANSFER_SYNC_MODE=latest` first, apply 0034, then change the mode
+to `all` and trigger the existing entry-transfers sync job to backfill history.

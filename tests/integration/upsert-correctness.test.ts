@@ -66,7 +66,10 @@ beforeAll(async () => {
   ).begin(async (tx) => {
     // Events may already exist in a prod-shaped database — never overwrite
     await tx`
-      INSERT INTO events (id, name) VALUES (${EVENT_ID}, 'FP-10 GW'), (1, 'FP-10 GW 1')
+      INSERT INTO events (id, name) VALUES
+        (${EVENT_ID}, 'FP-10 GW'),
+        (${EVENT_ID - 1}, 'FP-10 Previous GW'),
+        (1, 'FP-10 GW 1')
       ON CONFLICT (id) DO NOTHING
     `;
     await tx`
@@ -139,6 +142,57 @@ describe('entry-event-transfers element_in_played (H5)', () => {
       WHERE entry_id = ${ENTRY_ID} AND event_id = ${EVENT_ID}
     `;
     expect(afterUpdate[0]?.element_in_played).toBe(false);
+  });
+
+  test('all mode stores and idempotently refreshes complete transfer history', async () => {
+    const previousEventTransfer: RawFPLEntryTransfer = {
+      ...TRANSFER,
+      event: EVENT_ID - 1,
+      time: '2026-07-10T10:00:00Z',
+    };
+    const secondSameEventTransfer: RawFPLEntryTransfer = {
+      ...TRANSFER,
+      element_in: PLAYER_OUT,
+      element_out: PLAYER_IN,
+      time: '2026-07-17T11:00:00Z',
+    };
+    const history = [previousEventTransfer, TRANSFER, secondSameEventTransfer];
+
+    await transfersRepository.replaceForEvent(ENTRY_ID, EVENT_ID, history, undefined, {
+      elementInPlayed: true,
+      syncMode: 'all',
+    });
+
+    const firstSync = await (await db())<
+      { event_id: number; element_in_id: number; element_in_played: boolean | null }[]
+    >`
+      SELECT event_id, element_in_id, element_in_played
+      FROM entry_event_transfers
+      WHERE entry_id = ${ENTRY_ID}
+      ORDER BY transfer_time
+    `;
+    expect(firstSync).toHaveLength(3);
+    expect(firstSync.map((row) => row.event_id)).toEqual([EVENT_ID - 1, EVENT_ID, EVENT_ID]);
+    expect(firstSync.filter((row) => row.event_id === EVENT_ID)).toHaveLength(2);
+
+    // A later raw refresh has no computed played flag. Signature matching must
+    // preserve the prior derived values without duplicating any history rows.
+    await transfersRepository.replaceForEvent(ENTRY_ID, EVENT_ID, history, undefined, {
+      elementInPlayed: null,
+      syncMode: 'all',
+    });
+    const secondSync = await (await db())<
+      { event_id: number; element_in_played: boolean | null }[]
+    >`
+      SELECT event_id, element_in_played
+      FROM entry_event_transfers
+      WHERE entry_id = ${ENTRY_ID}
+      ORDER BY transfer_time
+    `;
+    expect(secondSync).toHaveLength(3);
+    expect(
+      secondSync.filter((row) => row.event_id === EVENT_ID).every((row) => row.element_in_played),
+    ).toBe(true);
   });
 });
 

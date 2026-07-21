@@ -26,7 +26,13 @@ export const entryEventTransfers = pgTable(
   },
   (table) => [
     index('idx_entry_event_transfers_entry_id').on(table.entryId),
-    uniqueIndex('unique_entry_event_transfer').on(table.entryId, table.eventId),
+    uniqueIndex('unique_entry_event_transfer').on(
+      table.entryId,
+      table.eventId,
+      table.elementInId,
+      table.elementOutId,
+      table.transferTime,
+    ),
   ],
 );
 
