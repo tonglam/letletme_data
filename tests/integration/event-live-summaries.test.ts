@@ -9,11 +9,14 @@ import { getDb } from '../../src/db/singleton';
 import { syncEventLiveSummary } from '../../src/services/event-live-summaries.service';
 import { syncEventLives } from '../../src/services/event-lives.service';
 import { getCurrentEvent } from '../../src/services/events.service';
+import { ensurePlayers } from './helpers/reference-data';
 
 describe('Event Live Summaries Integration Tests', () => {
   let testEventId: number;
 
   beforeAll(async () => {
+    await ensurePlayers();
+
     // Get current event ID for testing
     const currentEvent = await getCurrentEvent();
     if (!currentEvent) {

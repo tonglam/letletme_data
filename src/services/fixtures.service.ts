@@ -4,6 +4,8 @@ import { fplClient } from '../clients/fpl';
 import { fixtureRepository } from '../repositories/fixtures';
 import { transformFixtures } from '../transformers/fixtures';
 import { logError, logInfo, logWarn } from '../utils/logger';
+import { getCurrentEvent } from './events.service';
+import { syncLiveBonusV2Cache } from './live-bonus.service';
 
 /**
  * Fixtures Service - Business Logic Layer
@@ -99,6 +101,18 @@ export async function syncFixtures(eventId?: number): Promise<{ count: number; e
     if (eventId && shouldClearUnscheduled) {
       await fixturesCache.clearUnscheduled();
       logInfo('Cleared unscheduled fixture cache after event sync', { eventId });
+    }
+
+    // FPL can publish final fixture bonus stats after the live window closes.
+    // Refresh the current event's fixture-scoped derivative directly from the
+    // rows just persisted instead of waiting for a live-bonus cron that will no
+    // longer run. Full fixture syncs resolve the current event explicitly.
+    const bonusEventId = eventId ?? (await getCurrentEvent())?.id;
+    if (bonusEventId) {
+      const bonusFixtures = savedFixtures.filter((fixture) => fixture.event === bonusEventId);
+      if (bonusFixtures.length > 0) {
+        await syncLiveBonusV2Cache(bonusEventId, { fixtures: bonusFixtures });
+      }
     }
     logInfo('Fixtures cache updated', logContext);
 

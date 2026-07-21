@@ -12,11 +12,13 @@ import {
   syncCurrentPlayerStats,
   syncPlayerStatsForEvent,
 } from '../../src/services/player-stats.service';
+import { ensurePlayers } from './helpers/reference-data';
 
 let syncedEventId: number;
 
 describe('Player Stats Operational Integration', () => {
   beforeAll(async () => {
+    await ensurePlayers();
     await playerStatsCache.clearAll();
     const result = await syncCurrentPlayerStats();
     syncedEventId = result.eventId;

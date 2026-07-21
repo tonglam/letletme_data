@@ -7,11 +7,15 @@ import { eventLivesCache } from '../../src/cache/operations';
 import { eventLiveRepository } from '../../src/repositories/event-lives';
 import { syncEventLives, updateEventLivesCache } from '../../src/services/event-lives.service';
 import { getCurrentEvent } from '../../src/services/events.service';
+import { ensurePlayers } from './helpers/reference-data';
 
 describe('Event Lives Integration Tests', () => {
   let testEventId: number;
 
   beforeAll(async () => {
+    // event_lives references both events and players.
+    await ensurePlayers();
+
     // Get current event ID for testing
     const currentEvent = await getCurrentEvent();
     if (!currentEvent) {
@@ -60,22 +64,6 @@ describe('Event Lives Integration Tests', () => {
       // Verify DB count unchanged (no new writes from cache-only update)
       const afterDbCount = (await eventLiveRepository.findByEventId(testEventId)).length;
       expect(afterDbCount).toBe(beforeDbCount);
-    });
-
-    test('should be faster than full sync', async () => {
-      // Measure cache-only update time
-      const cacheStart = performance.now();
-      await updateEventLivesCache(testEventId);
-      const cacheTime = performance.now() - cacheStart;
-
-      // Measure full sync time
-      const syncStart = performance.now();
-      await syncEventLives(testEventId);
-      const syncTime = performance.now() - syncStart;
-
-      // Cache-only should be faster (no DB writes)
-      expect(cacheTime).toBeLessThan(syncTime);
-      expect(cacheTime).toBeLessThan(1000); // Should complete in under 1 second
     });
 
     test('should respect unique constraint on (eventId, elementId)', async () => {

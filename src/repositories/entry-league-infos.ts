@@ -1,14 +1,11 @@
 import { sql } from 'drizzle-orm';
-import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import { entryLeagueInfos, type DbEntryLeagueInfoInsert } from '../db/schemas/index.schema';
-import { getDb } from '../db/singleton';
+import { getDb, type DbOrTransaction } from '../db/singleton';
 import type { RawFPLEntryLeagues } from '../types';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 
-type DatabaseInstance = PostgresJsDatabase<Record<string, never>>;
-
-export const createEntryLeagueInfoRepository = (dbInstance?: DatabaseInstance) => {
+export const createEntryLeagueInfoRepository = (dbInstance?: DbOrTransaction) => {
   const getDbInstance = async () => dbInstance || (await getDb());
 
   return {

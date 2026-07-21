@@ -1,16 +1,64 @@
 import { eq } from 'drizzle-orm';
-import { liveBonusCache, liveFixturesCache } from '../cache/operations';
+import { liveBonusCache, liveBonusV2Cache, liveFixturesCache } from '../cache/operations';
 import { eventLive, players } from '../db/schemas/index.schema';
 import { getDb } from '../db/singleton';
-import { buildPlayingMatches, computeLiveBonusByTeam } from '../domain/live-bonus';
+import {
+  buildPlayingMatches,
+  computeFixtureSummedBonusByTeam,
+  computeLiveBonusByTeam,
+} from '../domain/live-bonus';
+import { fixtureRepository } from '../repositories/fixtures';
 import type { EventId, TeamId } from '../types/base.type';
 import { logDebug, logError, logInfo } from '../utils/logger';
 import { getCurrentEvent } from './events.service';
 
 import type { EventLive } from '../domain/event-lives';
+import type { LiveBonusByTeam } from '../domain/live-bonus';
+import type { Fixture } from '../types';
 
 interface EventLiveWithTeam extends EventLive {
   teamId: TeamId;
+}
+
+type LiveBonusV2CacheWriter = {
+  set: (eventId: EventId, byTeam: LiveBonusByTeam) => Promise<void>;
+};
+
+type FixtureBonusSource = Pick<
+  Fixture,
+  'finished' | 'finishedProvisional' | 'started' | 'stats' | 'teamA' | 'teamH'
+>;
+
+function serializeBonusByTeam(source: Map<TeamId, Map<number, number>>): LiveBonusByTeam {
+  const result: Record<string, Record<string, number>> = {};
+  for (const [teamId, teamBonus] of source.entries()) {
+    const bonusObj: Record<string, number> = {};
+    for (const [elementId, bonus] of teamBonus.entries()) {
+      bonusObj[elementId.toString()] = bonus;
+    }
+    if (Object.keys(bonusObj).length > 0) {
+      result[teamId.toString()] = bonusObj;
+    }
+  }
+  return result as LiveBonusByTeam;
+}
+
+/**
+ * Rebuild the fixture-scoped bonus cache from authoritative fixture rows.
+ * This path intentionally does not depend on the live-match window: FPL can
+ * publish final bonus stats after a fixture has moved to `finished`.
+ */
+export async function syncLiveBonusV2Cache(
+  eventId: EventId,
+  options: { fixtures?: readonly FixtureBonusSource[]; cache?: LiveBonusV2CacheWriter } = {},
+): Promise<{ eventId: EventId; teamCount: number }> {
+  const fixtures = options.fixtures ?? (await fixtureRepository.findByEvent(eventId));
+  const byTeam = serializeBonusByTeam(computeFixtureSummedBonusByTeam(fixtures));
+  await (options.cache ?? liveBonusV2Cache).set(eventId, byTeam);
+
+  const teamCount = Object.keys(byTeam).length;
+  logInfo('Fixture-scoped live bonus cache sync completed', { eventId, teamCount });
+  return { eventId, teamCount };
 }
 
 /**
@@ -105,6 +153,10 @@ export async function syncLiveBonusCache(
     const liveFixtures = await liveFixturesCache.get(resolvedEventId);
     const matches = buildPlayingMatches(liveFixtures);
 
+    // V2 is derived from persisted fixture stats and must still refresh after
+    // the live window closes, when FPL may publish settled bonus values.
+    const v2Result = await syncLiveBonusV2Cache(resolvedEventId);
+
     if (matches.length === 0) {
       logDebug('No playing fixtures found, skipping live bonus cache', {
         eventId: resolvedEventId,
@@ -113,28 +165,23 @@ export async function syncLiveBonusCache(
       return { eventId: resolvedEventId, teamCount: 0 };
     }
 
-    // 2. Get event lives with teamId
+    // 2. Load aggregate event lives for the legacy contract.
     const eventLives = await loadEventLivesWithTeam(resolvedEventId);
 
     // 3. Compute bonus per match (combined bucket) and distribute by team
     const bonusByTeam = computeLiveBonusByTeam(matches, eventLives);
+    const byTeam = serializeBonusByTeam(bonusByTeam);
 
-    const byTeam: Record<string, Record<string, number>> = {};
-    for (const [teamId, teamBonus] of bonusByTeam.entries()) {
-      const bonusObj: Record<string, number> = {};
-      for (const [elementId, bonus] of teamBonus.entries()) {
-        bonusObj[elementId.toString()] = bonus;
-      }
-      if (Object.keys(bonusObj).length > 0) {
-        byTeam[teamId.toString()] = bonusObj;
-      }
-    }
-
-    // 4. Cache the results
+    // 4. V2 was written above; keep the legacy contract available until the
+    // GraphQL read cutover is complete.
     await liveBonusCache.set(resolvedEventId, byTeam);
 
     const teamCount = Object.keys(byTeam).length;
-    logInfo('Live bonus cache sync completed', { eventId: resolvedEventId, teamCount });
+    logInfo('Live bonus cache sync completed', {
+      eventId: resolvedEventId,
+      teamCount,
+      v2TeamCount: v2Result.teamCount,
+    });
     return { eventId: resolvedEventId, teamCount };
   } catch (error) {
     logError('Live bonus cache sync failed', error, { eventId });

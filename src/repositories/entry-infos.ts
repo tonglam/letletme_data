@@ -1,13 +1,9 @@
 import { inArray, sql } from 'drizzle-orm';
-import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
-
 import { entryInfos, type DbEntryInfo, type DbEntryInfoInsert } from '../db/schemas/index.schema';
-import { getDb } from '../db/singleton';
+import { getDb, type DbOrTransaction } from '../db/singleton';
 import type { RawFPLEntrySummary } from '../types';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
-
-type DatabaseInstance = PostgresJsDatabase<Record<string, never>>;
 
 function uniqueNames(names: (string | null | undefined)[]): string[] {
   const result: string[] = [];
@@ -18,7 +14,7 @@ function uniqueNames(names: (string | null | undefined)[]): string[] {
   return result;
 }
 
-export const createEntryInfoRepository = (dbInstance?: DatabaseInstance) => {
+export const createEntryInfoRepository = (dbInstance?: DbOrTransaction) => {
   const getDbInstance = async () => dbInstance || (await getDb());
 
   return {
