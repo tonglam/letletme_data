@@ -1,0 +1,41 @@
+import { describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
+
+const baseEnv = {
+  ...process.env,
+  DATABASE_URL: 'postgresql://localhost:5432/letletme_test',
+  ENABLE_AUTH: 'true',
+  NODE_ENV: 'production',
+  REDIS_DB: '9',
+};
+
+async function runEnvCheck(dataApiKeyHashes: string): Promise<number> {
+  const child = Bun.spawn(['bun', 'validate-env.ts'], {
+    cwd: process.cwd(),
+    env: { ...baseEnv, DATA_API_KEY_HASHES: dataApiKeyHashes },
+    stderr: 'ignore',
+    stdout: 'ignore',
+  });
+  return child.exited;
+}
+
+describe('production environment preflight', () => {
+  test('rejects enabled API auth without a configured key digest', async () => {
+    expect(await runEnvCheck('')).not.toBe(0);
+  });
+
+  test('accepts a valid SHA-256 API key digest', async () => {
+    expect(await runEnvCheck('a'.repeat(64))).toBe(0);
+  });
+
+  test('runs before production migrations and service replacement', () => {
+    const workflow = readFileSync('.github/workflows/deploy.yml', 'utf8');
+    const preflight = workflow.indexOf('bun run env:check');
+    const migrate = workflow.indexOf('bun run db:migrate');
+    const replaceServices = workflow.indexOf('docker compose up -d');
+
+    expect(preflight).toBeGreaterThan(0);
+    expect(preflight).toBeLessThan(migrate);
+    expect(preflight).toBeLessThan(replaceServices);
+  });
+});
