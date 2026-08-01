@@ -8,8 +8,53 @@ import { getDbClient } from '../../src/db/singleton';
 
 type NamedFinding = { name: string };
 
+const DATA_TABLES = [
+  'entry_event_cup_results',
+  'entry_event_picks',
+  'entry_event_results',
+  'entry_event_transfers',
+  'entry_history_infos',
+  'entry_infos',
+  'entry_league_infos',
+  'event_fixtures',
+  'event_live_explains',
+  'event_live_summaries',
+  'event_lives',
+  'events',
+  'league_event_results',
+  'phases',
+  'player_stats',
+  'player_values',
+  'players',
+  'teams',
+  'tournament_battle_group_results',
+  'tournament_entries',
+  'tournament_groups',
+  'tournament_infos',
+  'tournament_knockout_results',
+  'tournament_knockouts',
+  'tournament_points_group_results',
+  'tournament_selection_stats',
+] as const;
+
+const DATA_VIEWS = [
+  'mv_tournament_event_snapshot',
+  'mv_tournament_snapshot',
+  'v_tournament_event_result',
+  'v_tournament_event_snapshot',
+  'v_tournament_selection_stats',
+  'v_tournament_snapshot',
+] as const;
+
+const DATA_FUNCTIONS = [
+  'get_captain_counts',
+  'get_pick_aggregation',
+  'get_players_for_picker',
+  'get_transfer_aggregation',
+] as const;
+
 describe('Database trust boundary', () => {
-  test('keeps every public table fail-closed behind service-owned APIs', async () => {
+  test('keeps Data-owned FPL relations fail-closed behind service-owned APIs', async () => {
     const sql = await getDbClient();
 
     const clientRoles = await sql<NamedFinding[]>`
@@ -28,6 +73,7 @@ describe('Database trust boundary', () => {
       JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
       WHERE namespace.nspname = 'public'
         AND relation.relkind IN ('r', 'p')
+        AND relation.relname = ANY(${DATA_TABLES}::text[])
         AND NOT relation.relrowsecurity
       ORDER BY name
     `;
@@ -37,6 +83,7 @@ describe('Database trust boundary', () => {
       SELECT format('%I.%I:%I', schemaname, tablename, policyname) AS name
       FROM pg_policies
       WHERE schemaname = 'public'
+        AND tablename = ANY(${DATA_TABLES}::text[])
       ORDER BY name
     `;
     expect(policies.map((finding) => finding.name)).toEqual([]);
@@ -48,6 +95,7 @@ describe('Database trust boundary', () => {
       JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
       WHERE namespace.nspname = 'public'
         AND relation.relkind IN ('r', 'p', 'v', 'm')
+        AND relation.relname = ANY(${[...DATA_TABLES, ...DATA_VIEWS]}::text[])
         AND (
           has_table_privilege(client.role_name, relation.oid, 'SELECT')
           OR has_table_privilege(client.role_name, relation.oid, 'INSERT')
@@ -63,8 +111,11 @@ describe('Database trust boundary', () => {
       FROM (VALUES ('anon'), ('authenticated')) client(role_name)
       CROSS JOIN pg_class relation
       JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+      JOIN pg_depend dependency ON dependency.objid = relation.oid
+      JOIN pg_class owner_table ON owner_table.oid = dependency.refobjid
       WHERE namespace.nspname = 'public'
         AND relation.relkind = 'S'
+        AND owner_table.relname = ANY(${DATA_TABLES}::text[])
         AND (
           has_sequence_privilege(client.role_name, relation.oid, 'USAGE')
           OR has_sequence_privilege(client.role_name, relation.oid, 'SELECT')
@@ -81,6 +132,7 @@ describe('Database trust boundary', () => {
       CROSS JOIN pg_proc routine
       JOIN pg_namespace namespace ON namespace.oid = routine.pronamespace
       WHERE namespace.nspname = 'public'
+        AND routine.proname = ANY(${DATA_FUNCTIONS}::text[])
         AND has_function_privilege(client.role_name, routine.oid, 'EXECUTE')
       ORDER BY name
     `;

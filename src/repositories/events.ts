@@ -1,4 +1,4 @@
-import { and, desc, eq, isNotNull, lte, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, isNotNull, lte, sql } from 'drizzle-orm';
 
 import { events, type DbEvent, type DbEventInsert } from '../db/schemas/index.schema';
 import { getDb } from '../db/singleton';
@@ -30,6 +30,17 @@ export const createEventRepository = (dbInstance?: DatabaseInstance) => {
     try {
       const current = await findCurrentInternal();
       if (!current) {
+        if (offset === 1) {
+          const db = await getDbInstance();
+          const nowEpoch = Math.floor(Date.now() / 1000);
+          const result = await db
+            .select()
+            .from(events)
+            .where(and(isNotNull(events.deadlineTimeEpoch), gt(events.deadlineTimeEpoch, nowEpoch)))
+            .orderBy(asc(events.deadlineTimeEpoch))
+            .limit(1);
+          return result[0] || null;
+        }
         logInfo(`No current event - ${label} event unavailable`);
         return null;
       }

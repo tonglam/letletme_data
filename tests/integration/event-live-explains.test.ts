@@ -9,21 +9,16 @@ import { eventLiveExplains } from '../../src/db/schemas/index.schema';
 import { getDb } from '../../src/db/singleton';
 import { syncEventLiveExplain } from '../../src/services/event-live-explains.service';
 import { syncEventLives } from '../../src/services/event-lives.service';
-import { getCurrentEvent } from '../../src/services/events.service';
+import { resolveCurrentEvent } from './helpers/current-event';
 import { ensurePlayers } from './helpers/reference-data';
 
-describe('Event Live Explains Integration Tests', () => {
-  let testEventId: number;
+const currentEvent = await resolveCurrentEvent();
+
+describe.skipIf(!currentEvent)('Event Live Explains Integration Tests', () => {
+  const testEventId = currentEvent?.id ?? -1;
 
   beforeAll(async () => {
     await ensurePlayers();
-
-    // Get current event ID for testing
-    const currentEvent = await getCurrentEvent();
-    if (!currentEvent) {
-      throw new Error('No current event found - cannot run integration tests');
-    }
-    testEventId = currentEvent.id;
 
     // Clear cache before tests
     await eventLiveExplainCache.clearByEventId(testEventId);

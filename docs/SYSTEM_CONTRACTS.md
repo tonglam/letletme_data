@@ -55,13 +55,12 @@ the last accepted canonical state.
 
 ## Transfer cutover
 
-`TRANSFER_SYNC_MODE=latest` is compatible with the legacy one-row-per-event
-index. Deploy this code first. The follow-up transfer-schema PR widens the unique
-index; only after that migration succeeds may operators set
-`TRANSFER_SYNC_MODE=all` and trigger the existing `entry-transfers` job. The FPL
-endpoint returns the full history, so that ordinary job performs the backfill
-without a one-off script. All-mode verifies the persisted signatures and rolls
-back if the widened index is missing.
+`TRANSFER_SYNC_MODE=all` is the canonical production mode after migration 0034
+widens the legacy one-row-per-event index. The FPL endpoint returns the full
+history, so the ordinary `entry-transfers` job performs the backfill without a
+one-off script. All-mode verifies the persisted signatures and rolls back if
+the widened index is missing. `latest` remains an emergency compatibility mode
+for deployments that have not completed the migration.
 
 ## Operational invariants
 

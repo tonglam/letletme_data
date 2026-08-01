@@ -30,7 +30,7 @@ describe('Teams Integration Tests', () => {
     expect(typeof team.code).toBe('number');
     expect(typeof team.name).toBe('string');
     expect(typeof team.shortName).toBe('string');
-    expect(typeof team.strength).toBe('number');
+    expect(team.strength === null || typeof team.strength === 'number').toBe(true);
   });
 
   test('should have teams with valid pulse_id', async () => {
@@ -43,18 +43,20 @@ describe('Teams Integration Tests', () => {
     });
   });
 
-  test('should have teams with strength ratings', async () => {
+  test('should preserve nullable preseason and positive published strength ratings', async () => {
     const db = await getDb();
     const teamRows = await db.select().from(teams);
 
     teamRows.forEach((team) => {
-      expect(team.strength).toBeGreaterThan(0);
-      expect(team.strengthOverallHome).toBeGreaterThan(0);
-      expect(team.strengthOverallAway).toBeGreaterThan(0);
-      expect(team.strengthAttackHome).toBeGreaterThan(0);
-      expect(team.strengthAttackAway).toBeGreaterThan(0);
-      expect(team.strengthDefenceHome).toBeGreaterThan(0);
-      expect(team.strengthDefenceAway).toBeGreaterThan(0);
+      if (team.strength !== null) {
+        expect(team.strength).toBeGreaterThan(0);
+      }
+      expect(team.strengthOverallHome).toBeGreaterThanOrEqual(0);
+      expect(team.strengthOverallAway).toBeGreaterThanOrEqual(0);
+      expect(team.strengthAttackHome).toBeGreaterThanOrEqual(0);
+      expect(team.strengthAttackAway).toBeGreaterThanOrEqual(0);
+      expect(team.strengthDefenceHome).toBeGreaterThanOrEqual(0);
+      expect(team.strengthDefenceAway).toBeGreaterThanOrEqual(0);
     });
   });
 

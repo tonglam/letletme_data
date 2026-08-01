@@ -7,21 +7,19 @@ import { redisSingleton } from '../../src/cache/singleton';
 import { syncEvents } from '../../src/services/events.service';
 import { syncFixtures } from '../../src/services/fixtures.service';
 import { syncTeams } from '../../src/services/teams.service';
-import { getCurrentEvent } from '../../src/services/events.service';
 import { syncLiveFixtureCache } from '../../src/services/live-fixtures.service';
 import { getCurrentSeason } from '../../src/utils/conditions';
+import { resolveCurrentEvent } from './helpers/current-event';
 
-describe('Live Fixtures Integration Tests', () => {
-  let eventId: number;
+const currentEvent = await resolveCurrentEvent();
+
+describe.skipIf(!currentEvent)('Live Fixtures Integration Tests', () => {
+  const eventId = currentEvent?.id ?? -1;
 
   beforeAll(async () => {
     // Ensure base data exists (events/teams/fixtures)
     await syncEvents();
     await syncTeams();
-
-    const currentEvent = await getCurrentEvent();
-    if (!currentEvent) throw new Error('No current event found');
-    eventId = currentEvent.id;
 
     await syncFixtures(eventId);
   });

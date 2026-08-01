@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, mock, test } from 'bun:test';
 
-import { fplClient } from '../../src/clients/fpl';
+import { FixtureSchema, TeamSchema, fplClient } from '../../src/clients/fpl';
 import { toDbChip, toNullableDbChip } from '../../src/domain/chips';
 import { FPLClientError } from '../../src/utils/errors';
+import { preseasonRawFPLFixture } from '../fixtures/fixtures.fixtures';
+import { preseasonRawTeamFixture } from '../fixtures/teams.fixtures';
 
 const originalFetch = globalThis.fetch;
 
@@ -85,6 +87,15 @@ describe('FPL entry cup client', () => {
 });
 
 describe('FPL boundary schemas (FP-04)', () => {
+  test('accepts the 26/27 preseason placeholders without coercion', () => {
+    const team = TeamSchema.parse(preseasonRawTeamFixture);
+    const fixture = FixtureSchema.parse(preseasonRawFPLFixture);
+
+    expect(team.position).toBe(0);
+    expect(team.strength).toBeNull();
+    expect(fixture.pulse_id).toBe(0);
+  });
+
   test('getEventLive tolerates elements with explain: null', async () => {
     const payload = {
       elements: [

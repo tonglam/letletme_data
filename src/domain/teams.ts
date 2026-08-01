@@ -16,17 +16,22 @@ export const TeamSchema = z.object({
   loss: z.number().int().min(0, 'Loss count cannot be negative'),
   played: z.number().int().min(0, 'Played count cannot be negative'),
   points: z.number().int().min(0, 'Points cannot be negative'),
-  position: z.number().int().min(1).max(20, 'Position must be between 1-20'),
-  strength: z.number().int().min(1).max(5, 'Strength must be between 1-5'),
+  position: z.number().int().min(0).max(20, 'Position must be between 0-20'),
+  strength: z
+    .number()
+    .int()
+    .min(1, 'Strength must be between 1-5')
+    .max(5, 'Strength must be between 1-5')
+    .nullable(),
   teamDivision: z.number().int().nullable(),
   unavailable: z.boolean(),
   win: z.number().int().min(0, 'Win count cannot be negative'),
-  strengthOverallHome: z.number().int().min(500).max(1500, 'Invalid strength value'),
-  strengthOverallAway: z.number().int().min(500).max(1500, 'Invalid strength value'),
-  strengthAttackHome: z.number().int().min(500).max(1500, 'Invalid strength value'),
-  strengthAttackAway: z.number().int().min(500).max(1500, 'Invalid strength value'),
-  strengthDefenceHome: z.number().int().min(500).max(1500, 'Invalid strength value'),
-  strengthDefenceAway: z.number().int().min(500).max(1500, 'Invalid strength value'),
+  strengthOverallHome: z.number().int().min(0).max(1500, 'Invalid strength value'),
+  strengthOverallAway: z.number().int().min(0).max(1500, 'Invalid strength value'),
+  strengthAttackHome: z.number().int().min(0).max(1500, 'Invalid strength value'),
+  strengthAttackAway: z.number().int().min(0).max(1500, 'Invalid strength value'),
+  strengthDefenceHome: z.number().int().min(0).max(1500, 'Invalid strength value'),
+  strengthDefenceAway: z.number().int().min(0).max(1500, 'Invalid strength value'),
   pulseId: z.number().int().positive('Pulse ID must be a positive integer'),
   createdAt: z.date().nullable(),
   updatedAt: z.date().nullable(),
@@ -42,8 +47,8 @@ export const RawFPLTeamSchema = z.object({
   loss: z.number().int().min(0),
   played: z.number().int().min(0),
   points: z.number().int().min(0),
-  position: z.number().int().min(1).max(20),
-  strength: z.number().int().min(1).max(5),
+  position: z.number().int().min(0).max(20),
+  strength: z.number().int().min(1).max(5).nullable(),
   team_division: z.number().int().nullable(),
   unavailable: z.boolean(),
   win: z.number().int().min(0),
@@ -64,7 +69,7 @@ export const RawFPLTeamSchema = z.object({
  * Check if a team is considered strong based on FPL strength rating
  */
 export function isStrongTeam(team: Team): boolean {
-  return team.strength >= 4;
+  return team.strength !== null && team.strength >= 4;
 }
 
 /**
@@ -183,6 +188,9 @@ export function filterTeamsByStrength(
   maxStrength?: number,
 ): Team[] {
   return teams.filter((team) => {
+    if (team.strength === null) {
+      return false;
+    }
     if (maxStrength !== undefined) {
       return team.strength >= minStrength && team.strength <= maxStrength;
     }
@@ -199,7 +207,9 @@ export function getTopPerformingTeams(teams: Team[], count: number = 6): Team[] 
     .sort((a, b) => {
       // Sort by points (descending), then by position (ascending)
       if (a.points !== b.points) return b.points - a.points;
-      return a.position - b.position;
+      const aPosition = a.position === 0 ? Number.POSITIVE_INFINITY : a.position;
+      const bPosition = b.position === 0 ? Number.POSITIVE_INFINITY : b.position;
+      return aPosition - bPosition;
     })
     .slice(0, count);
 }

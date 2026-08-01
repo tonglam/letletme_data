@@ -49,7 +49,7 @@ const EnvSchema = z.object({
   // Mutation conflict guard + tiered mutation queues (feature flags)
   ENABLE_TIERED_MUTATION_QUEUES: booleanEnv(false),
   ENABLE_MUTATION_CONFLICT_GUARD: booleanEnv(true),
-  TRANSFER_SYNC_MODE: z.enum(['latest', 'all']).default('latest'),
+  TRANSFER_SYNC_MODE: z.enum(['latest', 'all']).default('all'),
   MUTATION_LOCK_TTL_MS: integerEnv(30_000),
   MUTATION_LOCK_WAIT_TIMEOUT_MS: integerEnv(120_000),
   MUTATION_LOCK_RETRY_DELAY_MS: integerEnv(250),

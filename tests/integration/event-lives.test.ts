@@ -6,22 +6,17 @@ import { beforeAll, describe, expect, test } from 'bun:test';
 import { eventLivesCache } from '../../src/cache/operations';
 import { eventLiveRepository } from '../../src/repositories/event-lives';
 import { syncEventLives, updateEventLivesCache } from '../../src/services/event-lives.service';
-import { getCurrentEvent } from '../../src/services/events.service';
+import { resolveCurrentEvent } from './helpers/current-event';
 import { ensurePlayers } from './helpers/reference-data';
 
-describe('Event Lives Integration Tests', () => {
-  let testEventId: number;
+const currentEvent = await resolveCurrentEvent();
+
+describe.skipIf(!currentEvent)('Event Lives Integration Tests', () => {
+  const testEventId = currentEvent?.id ?? -1;
 
   beforeAll(async () => {
     // event_lives references both events and players.
     await ensurePlayers();
-
-    // Get current event ID for testing
-    const currentEvent = await getCurrentEvent();
-    if (!currentEvent) {
-      throw new Error('No current event found - cannot run integration tests');
-    }
-    testEventId = currentEvent.id;
 
     // Sync event live data - tests: FPL API → Transform → DB → Redis
     const result = await syncEventLives(testEventId);

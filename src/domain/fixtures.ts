@@ -45,7 +45,7 @@ export const FixtureSchema = z.object({
     .default([]),
   teamHDifficulty: z.number().int().min(1).max(5).nullable(),
   teamADifficulty: z.number().int().min(1).max(5).nullable(),
-  pulseId: z.number().int().positive('Pulse ID must be a positive integer'),
+  pulseId: z.number().int().min(0, 'Pulse ID cannot be negative'),
   createdAt: z.date().nullable(),
   updatedAt: z.date().nullable(),
 });
@@ -85,7 +85,7 @@ export const RawFPLFixtureSchema = z.object({
     .default([]),
   team_h_difficulty: z.number().int().min(1).max(5).nullable(),
   team_a_difficulty: z.number().int().min(1).max(5).nullable(),
-  pulse_id: z.number().int().positive(),
+  pulse_id: z.number().int().min(0),
 });
 
 // ================================

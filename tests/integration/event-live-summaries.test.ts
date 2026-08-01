@@ -8,21 +8,16 @@ import { eventLiveSummaries } from '../../src/db/schemas/event-live-summaries.sc
 import { getDb } from '../../src/db/singleton';
 import { syncEventLiveSummary } from '../../src/services/event-live-summaries.service';
 import { syncEventLives } from '../../src/services/event-lives.service';
-import { getCurrentEvent } from '../../src/services/events.service';
+import { resolveCurrentEvent } from './helpers/current-event';
 import { ensurePlayers } from './helpers/reference-data';
 
-describe('Event Live Summaries Integration Tests', () => {
-  let testEventId: number;
+const currentEvent = await resolveCurrentEvent();
+
+describe.skipIf(!currentEvent)('Event Live Summaries Integration Tests', () => {
+  const testEventId = currentEvent?.id ?? -1;
 
   beforeAll(async () => {
     await ensurePlayers();
-
-    // Get current event ID for testing
-    const currentEvent = await getCurrentEvent();
-    if (!currentEvent) {
-      throw new Error('No current event found - cannot run integration tests');
-    }
-    testEventId = currentEvent.id;
 
     // Ensure event lives data exists (summaries depend on it)
     await syncEventLives(testEventId);

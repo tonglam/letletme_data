@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
 
 import { inspectMigrationHistory } from '../../scripts/migration-history';
 
@@ -35,5 +36,17 @@ describe('migration history inspection', () => {
       backdated: [],
       latestApplied: null,
     });
+  });
+});
+
+describe('public Data API lockdown migration', () => {
+  test('is scoped to Data-owned relations in the shared public schema', () => {
+    const migration = readFileSync('migrations/0033_lock_down_public_data_api.sql', 'utf8');
+
+    expect(migration).toContain('target_tables text[]');
+    expect(migration).toMatch(/'events'/);
+    expect(migration).toMatch(/'tournament_infos'/);
+    expect(migration).not.toContain('ON ALL TABLES IN SCHEMA public');
+    expect(migration).not.toContain('ALTER DEFAULT PRIVILEGES');
   });
 });
