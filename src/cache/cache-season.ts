@@ -45,7 +45,23 @@ export function resetActiveSeasonMemo(): void {
   activeSeasonMemo = null;
 }
 
-const SEASON_CACHE_PREFIXES = ['Event', 'Team', 'Player', 'Phase', 'Fixtures', 'FixturesByTeam'];
+export const SEASON_CACHE_PREFIXES = [
+  'Event',
+  'Team',
+  'Player',
+  'Phase',
+  'Fixtures',
+  'FixturesByTeam',
+  'EventLive',
+  'EventLiveSummary',
+  'EventLiveExplain',
+  'LiveFixture',
+  'LiveBonus',
+  'LiveBonusV2',
+  'EventOverallResult',
+  'EntryInfo',
+  'PlayerStat',
+] as const;
 
 type EventLike = Pick<RawFPLEvent, 'id' | 'deadline_time'> | Pick<Event, 'id' | 'deadlineTime'>;
 
@@ -190,7 +206,12 @@ export async function clearStaleSeasonCache(
 
   for (const prefix of prefixes) {
     const keys = await scanKeys(redis, `${prefix}:*`);
-    staleKeys.push(...keys.filter((key) => !key.startsWith(`${prefix}:${activeSeason}`)));
+    const currentSeasonPrefix = `${prefix}:${activeSeason}`;
+    staleKeys.push(
+      ...keys.filter(
+        (key) => key !== currentSeasonPrefix && !key.startsWith(`${currentSeasonPrefix}:`),
+      ),
+    );
   }
 
   if (staleKeys.length === 0) {
@@ -214,5 +235,6 @@ export async function finalizeSeasonCacheWrite(
   if (!changed) {
     return;
   }
-  await clearStaleSeasonCache(season, prefixes);
+  const rolloverPrefixes = [...new Set([...SEASON_CACHE_PREFIXES, ...prefixes])];
+  await clearStaleSeasonCache(season, rolloverPrefixes);
 }

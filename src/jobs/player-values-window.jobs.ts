@@ -1,25 +1,37 @@
 import { cron } from '@elysiajs/cron';
 import { Elysia } from 'elysia';
 
+import { shouldRunCurrentEventJob } from './current-event-gate';
 import { enqueuePlayerValuesSyncJob } from './data-sync-enqueue';
 import { playerValuesRepository } from '../repositories/player-values';
-import { isFPLSeason } from '../utils/conditions';
 import { executeTrackedCron } from '../utils/job-run-logger';
-import { logDebug, logInfo } from '../utils/logger';
+import { logInfo } from '../utils/logger';
 import { CRON_TIMEZONE } from '../utils/timezone';
 
 function getChangeDateKey(date: Date) {
   return date.toISOString().split('T')[0].replace(/-/g, '');
 }
 
-async function shouldRunPlayerValuesSync(now: Date) {
-  if (!(await isFPLSeason(now))) {
-    logDebug('Skipping player values sync - not FPL season', { month: now.getMonth() + 1 });
+export type PlayerValuesWindowDependencies = {
+  shouldRunCurrentEventJob: (jobName: string, date: Date) => Promise<boolean>;
+  hasChangesForDate: (changeDate: string) => Promise<boolean>;
+};
+
+const defaultDependencies: PlayerValuesWindowDependencies = {
+  shouldRunCurrentEventJob,
+  hasChangesForDate: (changeDate) => playerValuesRepository.hasChangesForDate(changeDate),
+};
+
+export async function shouldRunPlayerValuesSync(
+  now: Date,
+  dependencies: PlayerValuesWindowDependencies = defaultDependencies,
+) {
+  if (!(await dependencies.shouldRunCurrentEventJob('player-values-sync', now))) {
     return false;
   }
 
   const changeDate = getChangeDateKey(now);
-  const alreadySynced = await playerValuesRepository.hasChangesForDate(changeDate);
+  const alreadySynced = await dependencies.hasChangesForDate(changeDate);
   if (alreadySynced) {
     logInfo('Skipping player values sync - price changes already recorded for today', {
       changeDate,

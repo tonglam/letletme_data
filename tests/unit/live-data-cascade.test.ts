@@ -2,8 +2,10 @@ import { describe, expect, mock, test } from 'bun:test';
 
 import {
   enqueueCascadeJobs,
+  enqueueFinalLeagueResultsAfterLiveSync,
   type CascadeEnqueueDeps,
 } from '../../src/services/live-data-cascade.service';
+import type { Event } from '../../src/types';
 
 function createEnqueueMock(): CascadeEnqueueDeps['enqueueEventLiveSummary'] {
   return mock(async () => ({
@@ -65,5 +67,35 @@ describe('event-lives-db cascade enqueue', () => {
     ]);
     expect(enqueueLiveFixtureCache).toHaveBeenCalledWith(12, 'cascade');
     expect(enqueueLiveBonusCache).toHaveBeenCalledWith(12, 'cascade');
+  });
+
+  test('enqueues a distinct final league correction after fresh live data is persisted', async () => {
+    const enqueueLeagueEventResults = mock(async () => ({ id: 'league-final' }));
+
+    const result = await enqueueFinalLeagueResultsAfterLiveSync(12, {
+      getCurrentEvent: async () => ({ id: 12, dataChecked: true }) as Event,
+      findFixturesByEvent: async () => [],
+      getPostMatchResultsSlot: () => 'final-10',
+      enqueueLeagueEventResults,
+    });
+
+    expect(result).toEqual({ id: 'league-final' });
+    expect(enqueueLeagueEventResults).toHaveBeenCalledWith(12, 'cascade', {
+      jobId: 'league-event-results-e12-coordinator-live-final-10',
+    });
+  });
+
+  test('does not enqueue a live-data final correction before data is checked', async () => {
+    const enqueueLeagueEventResults = mock(async () => ({ id: 'unexpected' }));
+
+    const result = await enqueueFinalLeagueResultsAfterLiveSync(12, {
+      getCurrentEvent: async () => ({ id: 12, dataChecked: false }) as Event,
+      findFixturesByEvent: async () => [],
+      getPostMatchResultsSlot: () => 'provisional-10',
+      enqueueLeagueEventResults,
+    });
+
+    expect(result).toBeNull();
+    expect(enqueueLeagueEventResults).not.toHaveBeenCalled();
   });
 });

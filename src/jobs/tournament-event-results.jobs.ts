@@ -1,11 +1,11 @@
 import { cron } from '@elysiajs/cron';
 import type { Elysia } from 'elysia';
 
+import { getPostMatchResultsSlot } from '../domain/post-match-results';
 import { getCurrentEvent } from '../services/events.service';
-import { isAfterMatchDay, isFPLSeason } from '../utils/conditions';
 import { fixtureRepository } from '../repositories/fixtures';
 import { executeTrackedCron } from '../utils/job-run-logger';
-import { logDebug, logInfo } from '../utils/logger';
+import { logInfo } from '../utils/logger';
 import { enqueueTournamentEventResults } from './tournament-sync.jobs';
 import { CRON_TIMEZONE } from '../utils/timezone';
 
@@ -13,20 +13,14 @@ import { CRON_TIMEZONE } from '../utils/timezone';
  * Tournament Event Results Sync Trigger
  *
  * Strategy:
- * - Runs every 10 minutes during after-match-day window
+ * - Polls every 10 minutes for a bounded post-match result slot
+ * - Uses deterministic hourly/final job IDs so duplicate cron ticks are idempotent
  * - Enqueues base job which triggers cascade (points-race, battle-race, knockout, etc.)
  * - Aligned with league-event-results for consistency
  */
 
 export async function runTournamentEventResultsSync() {
   const now = new Date();
-  if (!(await isFPLSeason(now))) {
-    logDebug('Skipping tournament event results sync - not FPL season', {
-      month: now.getMonth() + 1,
-    });
-    return;
-  }
-
   const currentEvent = await getCurrentEvent();
   if (!currentEvent) {
     logInfo('Skipping tournament event results sync - no current event');
@@ -34,7 +28,8 @@ export async function runTournamentEventResultsSync() {
   }
 
   const fixtures = await fixtureRepository.findByEvent(currentEvent.id);
-  if (!isAfterMatchDay(currentEvent, fixtures, now)) {
+  const resultSlot = getPostMatchResultsSlot(currentEvent, fixtures, now);
+  if (!resultSlot) {
     logInfo('Skipping tournament event results sync - conditions not met', {
       eventId: currentEvent.id,
     });
@@ -42,10 +37,13 @@ export async function runTournamentEventResultsSync() {
   }
 
   // Enqueue base job (will trigger cascade on completion)
-  const job = await enqueueTournamentEventResults(currentEvent.id, 'cron');
+  const job = await enqueueTournamentEventResults(currentEvent.id, 'cron', {
+    jobId: `tournament-event-results-e${currentEvent.id}-${resultSlot}`,
+  });
   logInfo('Tournament event results job enqueued, will trigger cascade', {
     jobId: job.id,
     eventId: currentEvent.id,
+    resultSlot,
   });
 }
 

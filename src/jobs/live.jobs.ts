@@ -1,8 +1,9 @@
 import { cron } from '@elysiajs/cron';
 import { Elysia } from 'elysia';
 
+import { getPostMatchResultsSlot } from '../domain/post-match-results';
 import { getCurrentEvent } from '../services/events.service';
-import { isAfterMatchDay, isFPLSeason, isMatchDayTime } from '../utils/conditions';
+import { isFPLSeason, isMatchDayTime } from '../utils/conditions';
 import { fixtureRepository } from '../repositories/fixtures';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { logDebug, logInfo } from '../utils/logger';
@@ -119,24 +120,24 @@ async function runEventLivesDbSync() {
 // scores, data_checked flag). Runs on match days in the morning AFTER isMatchDayTime has ended.
 export async function runPostMatchConsolidation() {
   const now = new Date();
-  if (!(await isFPLSeason(now))) {
-    return;
-  }
-
   const currentEvent = await getCurrentEvent();
   if (!currentEvent) {
     return;
   }
 
   const fixtures = await fixtureRepository.findByEvent(currentEvent.id);
-
-  if (!isAfterMatchDay(currentEvent, fixtures, now)) {
+  const resultSlot = getPostMatchResultsSlot(currentEvent, fixtures, now);
+  if (!resultSlot) {
     return;
   }
 
   const job = await enqueueEventLivesDbSync(currentEvent.id, 'cron');
   if (job) {
-    logInfo('Post-match consolidation job enqueued', { jobId: job.id, eventId: currentEvent.id });
+    logInfo('Post-match consolidation job enqueued', {
+      jobId: job.id,
+      eventId: currentEvent.id,
+      resultSlot,
+    });
   }
 }
 

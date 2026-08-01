@@ -9,29 +9,16 @@ import {
   enqueuePlayersSyncJob,
   enqueueTeamsSyncJob,
 } from './data-sync-enqueue';
-import { isFPLSeason } from '../utils/conditions';
+import { shouldRunCurrentEventJob } from './current-event-gate';
 import { executeTrackedCron } from '../utils/job-run-logger';
-import { logDebug, logInfo } from '../utils/logger';
+import { logInfo } from '../utils/logger';
 import { CRON_TIMEZONE } from '../utils/timezone';
-
-async function shouldRunSeasonDataSync(jobName: string) {
-  const now = new Date();
-  if (!(await isFPLSeason(now))) {
-    logDebug('Skipping data sync job - not FPL season', {
-      jobName,
-      month: now.getMonth() + 1,
-    });
-    return false;
-  }
-
-  return true;
-}
 
 /**
  * Core entity syncs (events/teams/fixtures/players/phases) run year-round so a
  * newly published FPL season is picked up before the calendar season window
  * opens. Services short-circuit on empty pre-season payloads. Player-stats
- * remains gated by isFPLSeason via shouldRunSeasonDataSync.
+ * remains gated by the season window and the presence of a current event.
  */
 export function registerDataSyncJobs(app: Elysia) {
   return app
@@ -111,7 +98,7 @@ export function registerDataSyncJobs(app: Elysia) {
         async run() {
           try {
             await executeTrackedCron('player-stats-sync', async () => {
-              if (!(await shouldRunSeasonDataSync('player-stats-sync'))) {
+              if (!(await shouldRunCurrentEventJob('player-stats-sync'))) {
                 return;
               }
               const job = await enqueuePlayerStatsSyncJob('cron');
