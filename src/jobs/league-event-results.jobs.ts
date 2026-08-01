@@ -1,8 +1,9 @@
 import { cron } from '@elysiajs/cron';
 import type { Elysia } from 'elysia';
 
+import { getPostMatchResultsSlot } from '../domain/post-match-results';
 import { getCurrentEvent } from '../services/events.service';
-import { isAfterMatchDay, isFPLSeason } from '../utils/conditions';
+import { isFPLSeason } from '../utils/conditions';
 import { fixtureRepository } from '../repositories/fixtures';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { logDebug, logInfo } from '../utils/logger';
@@ -14,7 +15,8 @@ import { CRON_TIMEZONE } from '../utils/timezone';
  * League Event Results Sync Trigger
  *
  * Strategy:
- * - Runs every 10 minutes during after-match-day window (aligned with live-events-db-sync)
+ * - Polls every 10 minutes for a bounded post-match result slot
+ * - Uses deterministic hourly/final job IDs so duplicate cron ticks are idempotent
  * - Enqueues coordinator job which fans out to per-tournament jobs
  * - Uses fresh event_lives data from DB for calculations
  */
@@ -40,7 +42,10 @@ export async function runLeagueEventResultsSync(options?: {
   }
 
   const fixtures = await fixtureRepository.findByEvent(currentEvent.id);
-  if (!skipMatchWindowCheck && !isAfterMatchDay(currentEvent, fixtures, now)) {
+  const resultSlot = skipMatchWindowCheck
+    ? null
+    : getPostMatchResultsSlot(currentEvent, fixtures, now);
+  if (!skipMatchWindowCheck && !resultSlot) {
     logInfo('Skipping league event results sync - conditions not met', {
       eventId: currentEvent.id,
     });
@@ -48,12 +53,17 @@ export async function runLeagueEventResultsSync(options?: {
   }
 
   // Enqueue coordinator job (will fan out to per-tournament jobs)
-  const job = await enqueueLeagueEventResults(currentEvent.id, source);
+  const job = await enqueueLeagueEventResults(currentEvent.id, source, {
+    ...(resultSlot
+      ? { jobId: `league-event-results-e${currentEvent.id}-coordinator-${resultSlot}` }
+      : {}),
+  });
   logInfo('League event results coordinator job enqueued', {
     jobId: job.id,
     eventId: currentEvent.id,
     source,
     skipMatchWindowCheck,
+    resultSlot,
   });
 }
 

@@ -1,6 +1,7 @@
 import { Worker, Job, QueueEvents } from 'bullmq';
 
 import { MUTATION_PRIORITY_ORDER, type MutationPriorityTier } from '../domain/job-priority';
+import { shouldEnqueueTournamentCascade } from '../domain/tournament-event-results';
 import {
   getTournamentSyncQueueName,
   isTournamentSyncTieredQueueEnabled,
@@ -209,11 +210,16 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
     () =>
       runTrackedJob(context, async () => {
         switch (job.name) {
-          case TOURNAMENT_JOBS.EVENT_RESULTS:
+          case TOURNAMENT_JOBS.EVENT_RESULTS: {
             // Base job: sync results then trigger cascade
-            await syncTournamentEventResults(eventId);
+            const result = await syncTournamentEventResults(eventId);
+            if (!shouldEnqueueTournamentCascade(result)) {
+              logInfo('Skipping tournament cascade - no active tournament entries', { eventId });
+              break;
+            }
             await enqueueTournamentCascade(eventId);
             break;
+          }
 
           case TOURNAMENT_JOBS.POINTS_RACE:
             await syncTournamentPointsRaceResults(eventId);

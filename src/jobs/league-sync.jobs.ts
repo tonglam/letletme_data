@@ -9,11 +9,17 @@ import { logError, logInfo } from '../utils/logger';
 
 export type LeagueSyncJobSource = 'cron' | 'manual' | 'cascade';
 
+export type LeagueSyncEnqueueOptions = {
+  tournamentId?: number;
+  delay?: number;
+  jobId?: string;
+};
+
 async function enqueueLeagueSyncJob(
   jobName: LeagueSyncJobName,
   eventId: number,
   source: LeagueSyncJobSource = 'cron',
-  options: { tournamentId?: number; delay?: number } = {},
+  options: LeagueSyncEnqueueOptions = {},
 ) {
   try {
     const tier = getLeagueSyncJobPriority(jobName as LeagueSyncPriorityJobName);
@@ -25,19 +31,23 @@ async function enqueueLeagueSyncJob(
       triggeredAt: new Date().toISOString(),
     };
 
-    // Use unique IDs so cron/cascade runs for the same event are not deduped
-    // while completed jobs are still retained in BullMQ.
+    // Callers may provide a deterministic ID for bounded recurring slots.
+    // Other cron, manual, and cascade runs retain unique IDs.
     const runId = Date.now();
-    let jobId: string;
-    if (options.tournamentId) {
-      jobId = `${jobName}-e${eventId}-t${options.tournamentId}-${runId}`;
-    } else {
-      jobId = `${jobName}-e${eventId}-coordinator-${runId}`;
-    }
+    const generatedJobId = options.tournamentId
+      ? `${jobName}-e${eventId}-t${options.tournamentId}-${runId}`
+      : `${jobName}-e${eventId}-coordinator-${runId}`;
+    const jobId = options.jobId ?? generatedJobId;
 
     const job = await queue.add(jobName, jobData, {
       jobId,
       delay: options.delay,
+      ...(options.jobId
+        ? {
+            removeOnComplete: { age: 86_400 },
+            removeOnFail: { age: 172_800 },
+          }
+        : {}),
     });
 
     logInfo('League sync job enqueued', {
@@ -67,11 +77,11 @@ async function enqueueLeagueSyncJob(
 export const enqueueLeagueEventPicks = (
   eventId: number,
   source?: LeagueSyncJobSource,
-  options?: { tournamentId?: number },
+  options?: LeagueSyncEnqueueOptions,
 ) => enqueueLeagueSyncJob(LEAGUE_JOBS.LEAGUE_EVENT_PICKS, eventId, source, options);
 
 export const enqueueLeagueEventResults = (
   eventId: number,
   source?: LeagueSyncJobSource,
-  options?: { tournamentId?: number },
+  options?: LeagueSyncEnqueueOptions,
 ) => enqueueLeagueSyncJob(LEAGUE_JOBS.LEAGUE_EVENT_RESULTS, eventId, source, options);

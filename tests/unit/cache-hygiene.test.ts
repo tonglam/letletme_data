@@ -2,8 +2,11 @@ import { afterAll, beforeEach, describe, expect, mock, test } from 'bun:test';
 
 import { cache } from '../../src/cache/cache-operations';
 import {
+  clearStaleSeasonCache,
+  finalizeSeasonCacheWrite,
   getActiveCacheSeason,
   resetActiveSeasonMemo,
+  SEASON_CACHE_PREFIXES,
   setActiveCacheSeason,
 } from '../../src/cache/cache-season';
 import { parseHashEntries, parseHashValues } from '../../src/cache/hash-read';
@@ -18,11 +21,15 @@ function installFakeRedis(overrides: {
   get?: (key: string) => Promise<string | null>;
   set?: (key: string, value: string) => Promise<string>;
   setex?: (key: string, ttl: number, value: string) => Promise<string>;
+  scan?: (...args: Array<string | number>) => Promise<[string, string[]]>;
+  del?: (...keys: string[]) => Promise<number>;
 }) {
   const fake = {
     get: mock(overrides.get ?? (async () => null)),
     set: mock(overrides.set ?? (async () => 'OK')),
     setex: mock(overrides.setex ?? (async () => 'OK')),
+    scan: mock(overrides.scan ?? (async () => ['0', []])),
+    del: mock(overrides.del ?? (async () => 0)),
   };
   redisSingleton.getClient = async () => fake as never;
   return fake;
@@ -151,5 +158,67 @@ describe('getActiveCacheSeason memo', () => {
     expect(await setActiveCacheSeason('2526')).toBe(false);
     expect(await getActiveCacheSeason()).toBe('2627');
     expect(redis.get).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('season rollover cleanup', () => {
+  test('covers every durable season cache family', () => {
+    expect(SEASON_CACHE_PREFIXES).toEqual([
+      'Event',
+      'Team',
+      'Player',
+      'Phase',
+      'Fixtures',
+      'FixturesByTeam',
+      'EventLive',
+      'EventLiveSummary',
+      'EventLiveExplain',
+      'LiveFixture',
+      'LiveBonus',
+      'LiveBonusV2',
+      'EventOverallResult',
+      'EntryInfo',
+      'PlayerStat',
+    ]);
+  });
+
+  test('deletes stale families while preserving exact current-season keys', async () => {
+    const staleKeys = SEASON_CACHE_PREFIXES.map((prefix) => `${prefix}:2526`);
+    const currentKeys = SEASON_CACHE_PREFIXES.map((prefix) => `${prefix}:2627`);
+    const keys = [...staleKeys, ...currentKeys, 'Event:2627:1', 'Event:26270', 'PlayerValue:2526'];
+    const redis = installFakeRedis({
+      scan: async (...args) => {
+        const pattern = String(args[2]);
+        const prefix = pattern.slice(0, -1);
+        return ['0', keys.filter((key) => key.startsWith(prefix))];
+      },
+      del: async (...deletedKeys) => deletedKeys.length,
+    });
+
+    await clearStaleSeasonCache('2627');
+
+    expect(redis.scan).toHaveBeenCalledTimes(SEASON_CACHE_PREFIXES.length);
+    expect(redis.del).toHaveBeenCalledTimes(1);
+    expect(new Set(redis.del.mock.calls[0])).toEqual(new Set([...staleKeys, 'Event:26270']));
+    expect(redis.del.mock.calls[0]).not.toContain('Event:2627');
+    expect(redis.del.mock.calls[0]).not.toContain('Event:2627:1');
+    expect(redis.del.mock.calls[0]).not.toContain('PlayerValue:2526');
+  });
+
+  test('cleans every family when the first core write advances the season', async () => {
+    const redis = installFakeRedis({
+      get: async () => '2526',
+      scan: async (...args) => {
+        const pattern = String(args[2]);
+        return ['0', pattern === 'EventOverallResult:*' ? ['EventOverallResult:2526'] : []];
+      },
+      del: async (...deletedKeys) => deletedKeys.length,
+    });
+
+    await finalizeSeasonCacheWrite('2627', ['Event']);
+
+    expect(redis.set).toHaveBeenCalledWith('Season:active', '2627');
+    expect(redis.scan).toHaveBeenCalledTimes(SEASON_CACHE_PREFIXES.length);
+    expect(redis.del).toHaveBeenCalledWith('EventOverallResult:2526');
   });
 });

@@ -16,6 +16,7 @@ export type TournamentSyncJobSource = 'cron' | 'manual' | 'cascade';
 export type TournamentSyncEnqueueOptions = {
   delay?: number;
   cascadeId?: string;
+  jobId?: string;
 };
 
 /** Structure cascade jobs that feed tournament MVs and hold tournament-structure:global. */
@@ -249,12 +250,19 @@ async function enqueueTournamentSyncJob(
       ...(options.cascadeId ? { cascadeId: options.cascadeId } : {}),
     };
 
-    // Use unique IDs so recurring schedules are not deduped by completed jobs.
-    const jobId = `${jobName}-e${eventId}-${Date.now()}`;
+    // Callers may provide a deterministic ID for bounded recurring slots.
+    // Other cron, manual, and cascade runs retain unique IDs.
+    const jobId = options.jobId ?? `${jobName}-e${eventId}-${Date.now()}`;
 
     const job = await queue.add(jobName, jobData, {
       jobId,
       delay: options.delay,
+      ...(options.jobId
+        ? {
+            removeOnComplete: { age: 86_400 },
+            removeOnFail: { age: 172_800 },
+          }
+        : {}),
     });
 
     logInfo('Tournament sync job enqueued', {
@@ -281,8 +289,11 @@ async function enqueueTournamentSyncJob(
 }
 
 // Base job (triggers cascade)
-export const enqueueTournamentEventResults = (eventId: number, source?: TournamentSyncJobSource) =>
-  enqueueTournamentSyncJob(TOURNAMENT_JOBS.EVENT_RESULTS, eventId, source);
+export const enqueueTournamentEventResults = (
+  eventId: number,
+  source?: TournamentSyncJobSource,
+  options?: TournamentSyncEnqueueOptions,
+) => enqueueTournamentSyncJob(TOURNAMENT_JOBS.EVENT_RESULTS, eventId, source, options);
 
 // Cascade jobs
 export const enqueueTournamentPointsRace = (
