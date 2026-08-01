@@ -110,6 +110,7 @@ export function getConfig(): AppConfig {
 export function validateEnvForCli(): { ok: boolean; errors?: unknown } {
   try {
     const conf = getConfig();
+    resolveAuthConfig(conf);
     logInfo('[env] OK', {
       PORT: conf.PORT,
       DATABASE_URL: conf.DATABASE_URL ? 'set' : 'missing',

@@ -109,6 +109,7 @@ jobs:
             git checkout --force main
             git reset --hard "$DEPLOY_SHA"
             APP_IMAGE="$IMAGE_REF" docker compose pull api worker
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun run env:check
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun run db:migrate
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun scripts/apply-sql-migrations.ts
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun run db:migrate:status
