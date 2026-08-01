@@ -9,8 +9,9 @@ export const POST_MATCH_RESULTS_WINDOW_MS = 24 * 60 * 60 * 1000;
  * Resolve the bounded, idempotent post-match result slot for an event.
  *
  * The first 24 hours after the final fixture are split into hourly provisional
- * slots. Once FPL marks the event data checked, every remaining cron tick maps
- * to one stable final slot instead. Callers use the slot in the BullMQ job ID.
+ * slots. Once FPL marks the event data checked, slots become final but remain
+ * hourly so later live-data consolidation can publish a corrected snapshot.
+ * Callers use the slot in the BullMQ job ID.
  */
 export function getPostMatchResultsSlot(
   event: Pick<Event, 'dataChecked'>,
@@ -40,7 +41,7 @@ export function getPostMatchResultsSlot(
   }
 
   if (event.dataChecked) {
-    return 'final';
+    return `final-${Math.floor(elapsedMs / RESULT_SLOT_MS)}`;
   }
 
   return `provisional-${Math.floor(elapsedMs / RESULT_SLOT_MS)}`;

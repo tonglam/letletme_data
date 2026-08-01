@@ -10,6 +10,7 @@ import {
 } from '../queues/live-data.queue';
 import {
   enqueueCascadeJobs,
+  enqueueFinalLeagueResultsAfterLiveSync,
   isLiveMatchWindowForEvent,
 } from '../services/live-data-cascade.service';
 import { syncEventLives, updateEventLivesCache } from '../services/event-lives.service';
@@ -79,6 +80,7 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
               await syncEventLives(eventId);
               // After DB sync completes, trigger dependent jobs
               await enqueueCascadeJobs(eventId);
+              await enqueueFinalLeagueResultsAfterLiveSync(eventId);
             }
             break;
 

@@ -45,7 +45,7 @@ async function enqueueLeagueSyncJob(
       ...(options.jobId
         ? {
             removeOnComplete: { age: 86_400 },
-            removeOnFail: { age: 172_800 },
+            removeOnFail: true,
           }
         : {}),
     });

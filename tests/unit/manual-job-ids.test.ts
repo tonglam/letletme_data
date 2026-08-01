@@ -4,6 +4,8 @@ type AddCall = { name: string; data: Record<string, unknown>; opts: Record<strin
 
 const liveDataAddCalls: AddCall[] = [];
 const entrySyncAddCalls: AddCall[] = [];
+const tournamentSyncAddCalls: AddCall[] = [];
+const leagueSyncAddCalls: AddCall[] = [];
 
 mock.module('../../src/queues/live-data.queue', () => ({
   LIVE_JOBS: {
@@ -38,10 +40,49 @@ mock.module('../../src/queues/entry-sync.queue', () => ({
   }),
 }));
 
+mock.module('../../src/queues/tournament-sync.queue', () => ({
+  TOURNAMENT_JOBS: {
+    EVENT_RESULTS: 'tournament-event-results',
+    POINTS_RACE: 'tournament-points-race',
+    BATTLE_RACE: 'tournament-battle-race',
+    KNOCKOUT: 'tournament-knockout',
+    TRANSFERS_POST: 'tournament-transfers-post',
+    CUP_RESULTS: 'tournament-cup-results',
+    SELECTION_STATS: 'tournament-selection-stats',
+    MATERIALIZED_VIEWS_REFRESH: 'tournament-materialized-views-refresh',
+    EVENT_PICKS: 'tournament-event-picks',
+    TRANSFERS_PRE: 'tournament-transfers-pre',
+    INFO: 'tournament-info',
+  },
+  getTournamentSyncQueue: () => ({
+    name: 'tournament-sync-p2',
+    add: async (name: string, data: Record<string, unknown>, opts: Record<string, unknown>) => {
+      tournamentSyncAddCalls.push({ name, data, opts });
+      return { id: (opts.jobId as string | undefined) ?? 'generated-id' };
+    },
+  }),
+}));
+
+mock.module('../../src/queues/league-sync.queue', () => ({
+  LEAGUE_JOBS: {
+    LEAGUE_EVENT_PICKS: 'league-event-picks',
+    LEAGUE_EVENT_RESULTS: 'league-event-results',
+  },
+  getLeagueSyncQueue: () => ({
+    name: 'league-sync-p3',
+    add: async (name: string, data: Record<string, unknown>, opts: Record<string, unknown>) => {
+      leagueSyncAddCalls.push({ name, data, opts });
+      return { id: (opts.jobId as string | undefined) ?? 'generated-id' };
+    },
+  }),
+}));
+
 const { enqueueEventLivesDbSync, enqueueEventLivesCacheUpdate } = await import(
   '../../src/jobs/live-data.jobs'
 );
 const { enqueueEntryPicksSyncJob } = await import('../../src/jobs/entry-sync-enqueue');
+const { enqueueTournamentEventResults } = await import('../../src/jobs/tournament-sync.jobs');
+const { enqueueLeagueEventResults } = await import('../../src/jobs/league-sync.jobs');
 const { stableHash } = await import('../../src/utils/stable-hash');
 
 describe('live-data manual job IDs', () => {
@@ -164,6 +205,27 @@ describe('entry-sync entry-list job IDs', () => {
     expect(second!.id).toBe(first!.id as string);
     expect(entrySyncAddCalls[0].opts.removeOnComplete).toBe(true);
     expect(entrySyncAddCalls[0].opts.removeOnFail).toBe(true);
+  });
+});
+
+describe('deterministic result job retention', () => {
+  beforeEach(() => {
+    tournamentSyncAddCalls.length = 0;
+    leagueSyncAddCalls.length = 0;
+  });
+
+  test('retains successful jobs for dedupe but removes failed jobs for cron retry', async () => {
+    await enqueueTournamentEventResults(12, 'cron', {
+      jobId: 'tournament-event-results-e12-final-10',
+    });
+    await enqueueLeagueEventResults(12, 'cron', {
+      jobId: 'league-event-results-e12-coordinator-final-10',
+    });
+
+    for (const call of [tournamentSyncAddCalls[0], leagueSyncAddCalls[0]]) {
+      expect(call.opts.removeOnComplete).toEqual({ age: 86_400 });
+      expect(call.opts.removeOnFail).toBe(true);
+    }
   });
 });
 

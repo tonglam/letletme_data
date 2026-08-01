@@ -73,14 +73,40 @@ describe('bounded post-match result slots', () => {
     ).toBe('provisional-1');
   });
 
-  test('uses one final slot after FPL checks the event data', () => {
+  test('keeps final slots hourly after FPL checks the event data', () => {
     expect(
       getPostMatchResultsSlot(
         { dataChecked: true },
         fixtures,
         new Date('2026-08-22T22:00:00.000Z'),
       ),
-    ).toBe('final');
+    ).toBe('final-2');
+    expect(
+      getPostMatchResultsSlot(
+        { dataChecked: true },
+        fixtures,
+        new Date('2026-08-22T22:50:00.000Z'),
+      ),
+    ).toBe('final-2');
+    expect(
+      getPostMatchResultsSlot(
+        { dataChecked: true },
+        fixtures,
+        new Date('2026-08-22T23:00:00.000Z'),
+      ),
+    ).toBe('final-3');
+  });
+
+  test('keeps the GW38 final window open on the next UTC day', () => {
+    const gw38Fixtures = [buildFixture('2027-05-23T18:00:00.000Z', 38)];
+
+    expect(
+      getPostMatchResultsSlot(
+        { dataChecked: true },
+        gw38Fixtures,
+        new Date('2027-05-24T06:35:00.000Z'),
+      ),
+    ).toBe('final-10');
   });
 
   test('closes after 24 hours and rejects missing or invalid kickoff data', () => {

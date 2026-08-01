@@ -22,6 +22,21 @@ export type MatchWindowDeps = {
   isMatchDayTime: (currentEvent: Event, fixtures: Fixture[], now: Date) => boolean;
 };
 
+export type FinalLeagueResultsDeps = {
+  getCurrentEvent: () => Promise<Event | null>;
+  findFixturesByEvent: (eventId: number) => Promise<Fixture[]>;
+  getPostMatchResultsSlot: (
+    event: Pick<Event, 'dataChecked'>,
+    fixtures: readonly Fixture[],
+    date: Date,
+  ) => string | null;
+  enqueueLeagueEventResults: (
+    eventId: number,
+    source: 'cascade',
+    options: { jobId: string },
+  ) => Promise<unknown>;
+};
+
 /**
  * Enqueue cascade jobs after event-lives DB sync completes.
  * These jobs depend on fresh event_lives data.
@@ -133,6 +148,36 @@ export async function isLiveMatchWindowForEvent(
   return resolved.isMatchDayTime(currentEvent, fixtures, new Date());
 }
 
+/**
+ * Publish final league results only after fresh event_lives have been persisted.
+ * The live-sync suffix keeps this correction distinct from the scheduler slot.
+ */
+export async function enqueueFinalLeagueResultsAfterLiveSync(
+  eventId: number,
+  deps?: FinalLeagueResultsDeps,
+): Promise<unknown | null> {
+  const resolved = deps ?? (await loadDefaultFinalLeagueResultsDeps());
+  const currentEvent = await resolved.getCurrentEvent();
+  if (!currentEvent || currentEvent.id !== eventId || !currentEvent.dataChecked) {
+    return null;
+  }
+
+  const fixtures = await resolved.findFixturesByEvent(eventId);
+  const resultSlot = resolved.getPostMatchResultsSlot(currentEvent, fixtures, new Date());
+  if (!resultSlot?.startsWith('final-')) {
+    return null;
+  }
+
+  const job = await resolved.enqueueLeagueEventResults(eventId, 'cascade', {
+    jobId: `league-event-results-e${eventId}-coordinator-live-${resultSlot}`,
+  });
+  logInfo('Final league event results enqueued after live DB consolidation', {
+    eventId,
+    resultSlot,
+  });
+  return job;
+}
+
 async function loadDefaultMatchWindowDeps() {
   const [{ getCurrentEvent }, { isMatchDayTime }, { fixtureRepository }] = await Promise.all([
     import('./events.service'),
@@ -144,6 +189,22 @@ async function loadDefaultMatchWindowDeps() {
     getCurrentEvent,
     findFixturesByEvent: (id: number) => fixtureRepository.findByEvent(id),
     isMatchDayTime,
+  };
+}
+
+async function loadDefaultFinalLeagueResultsDeps(): Promise<FinalLeagueResultsDeps> {
+  const [eventsService, fixturesRepository, postMatchResults, leagueJobs] = await Promise.all([
+    import('./events.service'),
+    import('../repositories/fixtures'),
+    import('../domain/post-match-results'),
+    import('../jobs/league-sync.jobs'),
+  ]);
+
+  return {
+    getCurrentEvent: eventsService.getCurrentEvent,
+    findFixturesByEvent: (id: number) => fixturesRepository.fixtureRepository.findByEvent(id),
+    getPostMatchResultsSlot: postMatchResults.getPostMatchResultsSlot,
+    enqueueLeagueEventResults: leagueJobs.enqueueLeagueEventResults,
   };
 }
 

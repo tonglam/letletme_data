@@ -3,10 +3,9 @@ import type { Elysia } from 'elysia';
 
 import { getPostMatchResultsSlot } from '../domain/post-match-results';
 import { getCurrentEvent } from '../services/events.service';
-import { isFPLSeason } from '../utils/conditions';
 import { fixtureRepository } from '../repositories/fixtures';
 import { executeTrackedCron } from '../utils/job-run-logger';
-import { logDebug, logInfo } from '../utils/logger';
+import { logInfo } from '../utils/logger';
 import { enqueueLeagueEventResults } from './league-sync.jobs';
 import type { LeagueSyncJobSource } from './league-sync.jobs';
 import { CRON_TIMEZONE } from '../utils/timezone';
@@ -28,13 +27,6 @@ export async function runLeagueEventResultsSync(options?: {
   const source = options?.source ?? 'cron';
   const skipMatchWindowCheck = options?.skipMatchWindowCheck ?? false;
   const now = new Date();
-  if (!(await isFPLSeason(now))) {
-    logDebug('Skipping league event results sync - not FPL season', {
-      month: now.getMonth() + 1,
-    });
-    return;
-  }
-
   const currentEvent = await getCurrentEvent();
   if (!currentEvent) {
     logInfo('Skipping league event results sync - no current event');
