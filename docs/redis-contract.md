@@ -41,10 +41,12 @@ are `-1` (no expiry) — data is refreshed **on write**, never expired.
 | `EventOverallResult:{season}` | hash | `eventId` | Overall-result payload incl. chip data | overall-result sync |
 | `LiveFixture:{season}:{eventId}` | hash | `teamId` | `LiveFixtureByStatus` JSON | live-fixture cache job |
 | `LiveBonus:{season}:{eventId}` | hash | `teamId` | `{ [elementId]: bonus }` JSON | live-bonus cache job |
+| `LiveBonusV2:{season}:{eventId}` | hash | `teamId` | `{ [elementId]: fixture-summed bonus }` JSON | live-bonus cache job |
 
 `{season}` is the FPL season short code, e.g. `2526` (2025/26). The active
 season comes from `Season:active` (§2) — writers resolve it at write time via
-`getActiveCacheSeason()`.
+`getActiveCacheSeason()`. Missing, malformed, or unavailable metadata is an
+error; readers and writers never substitute a calendar-derived season.
 
 ## 2. Control keys
 
@@ -118,13 +120,10 @@ Internal to the worker fleet — do not consume directly.
 
 ## 9. Consumers
 
-> **Pending Tong's inventory** (requested 2026-07-17 in the fix plan). Until it
-> is provided, **every key above is treated as externally consumed** and the
-> ground rules apply to all of them.
-
 | Consumer | Keys read | Contact/notes |
 |---|---|---|
-| _TBD_ | _TBD_ | _TBD_ |
+| `letletme-graphql` | Positive entity hashes, `Season:active`, `event:current`, `LiveBonus*`, `PlayerValue:*` | Public read API; owns only `gql:v2:*` shaped/negative caches plus the coordinated `PlayerValueMissing:*` marker. |
+| Data API and workers | All Data-owned hashes, mutation locks, BullMQ keys | Writer/control plane in this repository. |
 
 ## 10. Season rollover
 
@@ -158,7 +157,7 @@ assumed gone after rollover):
 
 - `PlayerValue:{YYYYMMDD}` (explicit no-auto-delete / retention policy; still deleted only via explicit `clear` or future runbook)
 - `PlayerValueMissing:{YYYYMMDD}` (consumer-owned; this service only DELs it when refreshing/clearing that date’s `PlayerValue` — see §4)
-- `EntryInfo:{season}`, live hashes (`EventLive*`, `LiveFixture`, `LiveBonus`),
+- `EntryInfo:{season}`, live hashes (`EventLive*`, `LiveFixture`, `LiveBonus*`),
   `EventOverallResult`, `event:current`
 - Ops markers (`LaunchNotification:*`, `letletme:entry-info-sync:*`)
 - `mutation-lock:*`, BullMQ `bull:*` keys
@@ -188,7 +187,7 @@ redis-cli HLEN Player:<new-season>     # > 0
 OLD=<old-season>   # e.g. 2526
 for p in Event Team Player Phase PlayerStat EntryInfo Fixtures FixturesByTeam \
          EventLive EventLiveExplain EventLiveSummary EventOverallResult \
-         LiveFixture LiveBonus; do
+         LiveFixture LiveBonus LiveBonusV2; do
   echo "$p: $(redis-cli --scan --pattern "$p:$OLD*" | wc -l)"
 done
 ```
@@ -219,6 +218,7 @@ redis-cli --scan --pattern "EventLiveSummary:$OLD:*" | xargs -r redis-cli DEL
 redis-cli --scan --pattern "EventOverallResult:$OLD" | xargs -r redis-cli DEL
 redis-cli --scan --pattern "LiveFixture:$OLD:*"      | xargs -r redis-cli DEL
 redis-cli --scan --pattern "LiveBonus:$OLD:*"        | xargs -r redis-cli DEL
+redis-cli --scan --pattern "LiveBonusV2:$OLD:*"      | xargs -r redis-cli DEL
 redis-cli --scan --pattern "PlayerStat:$OLD"         | xargs -r redis-cli DEL
 ```
 

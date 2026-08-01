@@ -1,11 +1,15 @@
 # Overall
 
-Letletme_data is a data service that fetches data from the Fantasy Premier League (FPL) servers, cleans and transforms it, and stores it in PostgreSQL and Redis, providing RESTful APIs for querying data. The service is built with TypeScript and Bun, using Zod for runtime validation at the FPL boundary.
+Letletme_data is the sole writer for LetLetMe's FPL domain data. It fetches the
+Fantasy Premier League (FPL) APIs, validates and transforms the responses, and
+persists canonical rows in PostgreSQL plus disposable read models in Redis.
+Its REST surface is an internal ingestion/control plane; `letletme-graphql` is
+the public product data API.
 
 Key Features:
 
 - Real-time FPL data fetching and transformation
-- Clean, structured data through RESTful APIs
+- Protected operational REST endpoints for sync and tournament commands
 - Efficient data persistence with PostgreSQL
 - Performance optimization using Redis caching
 - Type-safe implementation with strict TypeScript
@@ -70,6 +74,11 @@ sequenceDiagram
         A->>R: Update cache
     end
 ```
+
+See [docs/SYSTEM_CONTRACTS.md](docs/SYSTEM_CONTRACTS.md) for repository
+ownership, trust boundaries, authentication, cache ownership, and rollout
+rules. See [docs/redis-contract.md](docs/redis-contract.md) for the binding key
+inventory.
 
 ## Data Processing Pipeline
 
@@ -161,6 +170,9 @@ Each domain follows a standard structure with entities, repositories, services, 
 - The production stack runs inside Docker containers orchestrated by `docker compose`; copy `.env.deploy.example` to `.env.deploy`, then run `scripts/deploy.sh` to build images, start services, and execute database migrations locally or on the VPS.
 - Continuous delivery is handled via GitHub Actions (`.github/workflows/deploy.yml`), which builds a container image, pushes it to GHCR, and refreshes the VPS stack using the same compose file.
 - Refer to `DEPLOYMENT.md` for the full checklist and required GitHub secrets.
+- Production mutations require `ENABLE_AUTH=true` and one or more SHA-256
+  digests in `DATA_API_KEY_HASHES`. The web server keeps the matching plaintext
+  key in its server-only `TOURNAMENT_API_KEY`; browsers never receive it.
 
 ## Testing
 

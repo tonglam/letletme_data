@@ -13,13 +13,15 @@ import {
   type LeagueSyncJobData,
 } from '../../../src/queues/league-sync.queue';
 import { tournamentInfoRepository } from '../../../src/repositories/tournament-infos';
-import { getCurrentEvent } from '../../../src/services/events.service';
 import { createLeagueSyncWorker } from '../../../src/workers/league-sync.worker';
 import type { WorkerRuntime } from '../../../src/workers/worker-runtime';
+import { resolveCurrentEvent } from '../helpers/current-event';
 
-describe('League Sync Worker Integration Tests', () => {
+const currentEvent = await resolveCurrentEvent();
+
+describe.skipIf(!currentEvent)('League Sync Worker Integration Tests', () => {
   let leagueSyncRuntime: WorkerRuntime;
-  let testEventId: number;
+  const testEventId = currentEvent?.id ?? -1;
   let testTournamentId: number | null = null;
 
   const leagueSyncQueues = Array.from(
@@ -59,12 +61,6 @@ describe('League Sync Worker Integration Tests', () => {
     if (leagueSyncRuntime.workers.length === 0)
       throw new Error('League sync worker was not created');
     await Promise.all(leagueSyncRuntime.workers.map((worker) => worker.waitUntilReady()));
-
-    const currentEvent = await getCurrentEvent();
-    if (!currentEvent) {
-      throw new Error('No current event found');
-    }
-    testEventId = currentEvent.id;
 
     const tournaments = await tournamentInfoRepository.findActive();
     if (tournaments.length > 0) {

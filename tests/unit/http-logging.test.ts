@@ -4,9 +4,11 @@ import { getHttpErrorLogLevel, getHttpRequestLogContext } from '../../src/utils/
 
 describe('HTTP logging policy', () => {
   test('suppresses health checks', () => {
-    const request = new Request('http://127.0.0.1:3000/health?source=docker');
+    const health = new Request('http://127.0.0.1:3000/health?source=docker');
+    const ready = new Request('http://127.0.0.1:3000/ready?source=monitor');
 
-    expect(getHttpRequestLogContext(request)).toBeNull();
+    expect(getHttpRequestLogContext(health)).toBeNull();
+    expect(getHttpRequestLogContext(ready)).toBeNull();
   });
 
   test('keeps only method and pathname for debug request logs', () => {

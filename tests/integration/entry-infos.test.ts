@@ -8,9 +8,9 @@ import { entryInfos } from '../../src/db/schemas/index.schema';
 import { getDb } from '../../src/db/singleton';
 import { syncEntryInfo } from '../../src/services/entry-info.service';
 import { syncEvents } from '../../src/services/events.service';
+import { recordedEntryClient, recordedEntryId } from '../fixtures/entry-info.fixtures';
 
-// Use a real FPL entry ID for integration testing
-const TEST_ENTRY_ID = 15702;
+const TEST_ENTRY_ID = recordedEntryId;
 
 describe('Entry Infos Integration Tests', () => {
   beforeAll(async () => {
@@ -19,9 +19,9 @@ describe('Entry Infos Integration Tests', () => {
   });
 
   test(
-    'should sync entry info from FPL API',
+    'should sync a recorded FPL entry snapshot',
     async () => {
-      const res = await syncEntryInfo(TEST_ENTRY_ID);
+      const res = await syncEntryInfo(TEST_ENTRY_ID, recordedEntryClient);
       expect(res).toBeDefined();
       expect(res.id).toBe(TEST_ENTRY_ID);
 
@@ -63,7 +63,7 @@ describe('Entry Infos Integration Tests', () => {
         .from(entryInfos)
         .where(eq(entryInfos.id, TEST_ENTRY_ID));
       const before = beforeResult[0];
-      await syncEntryInfo(TEST_ENTRY_ID);
+      await syncEntryInfo(TEST_ENTRY_ID, recordedEntryClient);
       const afterResult = await db
         .select()
         .from(entryInfos)

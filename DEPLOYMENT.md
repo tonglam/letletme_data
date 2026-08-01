@@ -14,9 +14,9 @@ systemd units and `/var/log/letletme` files are not part of the Docker deploymen
 ## Host Bootstrap Checklist
 1. **Install Docker + compose** following https://docs.docker.com/engine/install/ubuntu/ then add the `deploy` user to the `docker` group and re-login.
 2. **Clone the repo** into `/home/workspace/letletme_data` (or another directory referenced by `VPS_WORKDIR`).
-3. **Create `.env.deploy`** by copying `.env.deploy.example` and populate `DATABASE_URL`, `REDIS_*`, `SUPABASE_*`, `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL`, and `ENABLE_AUTH=true`. Keep this file on the server only. In the current production topology, the app and Redis are on the same VPS, and the containers connect to Redis via `43.163.91.9:6379`.
+3. **Create `.env.deploy`** by copying `.env.deploy.example` and populate `DATABASE_URL`, `REDIS_*`, `SUPABASE_*`, `ENABLE_AUTH=true`, and `DATA_API_KEY_HASHES`. Keep this file on the server only. In the current production topology, the app and Redis are on the same VPS, and the containers connect to Redis via `43.163.91.9:6379`.
 4. **First deploy**: run `bash scripts/deploy.sh deploy` to build the image, start services via compose, and run database migrations (`db:migrate` + numbered SQL migrations).
-5. **Bootstrap API key** (one-time): `docker compose run --rm api bun run auth:create-admin-key` and store the printed `llm_...` key securely.
+5. **Bootstrap the internal service key** (one-time): generate a high-entropy plaintext key, store that plaintext only as the trusted Web server's `TOURNAMENT_API_KEY`, and put its lowercase SHA-256 hex digest in Data's `DATA_API_KEY_HASHES`. To rotate without downtime, add the new digest, deploy both services, switch the Web secret, verify mutations, then remove the old digest. Data never stores or prints the plaintext key.
 6. **Proxy + hardening**: terminate TLS in Nginx/Caddy, forward to `127.0.0.1:3000`, restrict Redis access to trusted sources on the VPS/network, and enable ufw.
 
 > ℹ️ **Testing note**: GitHub Actions executes only the unit test suite (no external services required). Run the integration tests locally (`bun test tests/integration`) as part of pre-release validation whenever the external dependencies are available.
@@ -410,7 +410,8 @@ sudo -u deploy bun run db:migrate     # Run migrations
 # Note: Use Supabase dashboard for database management instead of db:studio
 
 # Test endpoints
-curl http://localhost:3000/health       # Health check
+curl http://localhost:3000/health       # Process liveness
+curl http://localhost:3000/ready        # PostgreSQL, Redis, and season readiness
 curl http://your-domain.com/api/teams   # Test API
 ```
 

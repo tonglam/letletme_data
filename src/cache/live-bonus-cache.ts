@@ -13,12 +13,12 @@ import type { LiveBonusByTeam } from '../domain/live-bonus';
  *
  * Cache-only: delete-before-insert, TTL -1 (no expiration) by default.
  */
-export const liveBonusCache = {
+const createLiveBonusCache = (prefix: 'LiveBonus' | 'LiveBonusV2') => ({
   async set(eventId: EventId, byTeam: LiveBonusByTeam): Promise<void> {
     try {
       const redis = await redisSingleton.getClient();
       const season = await getActiveCacheSeason();
-      const key = `LiveBonus:${season}:${eventId}`;
+      const key = `${prefix}:${season}:${eventId}`;
 
       const pipeline = redis.pipeline();
       pipeline.del(key);
@@ -44,7 +44,7 @@ export const liveBonusCache = {
     try {
       const redis = await redisSingleton.getClient();
       const season = await getActiveCacheSeason();
-      const key = `LiveBonus:${season}:${eventId}`;
+      const key = `${prefix}:${season}:${eventId}`;
       const hash = await redis.hgetall(key);
 
       if (!hash || Object.keys(hash).length === 0) {
@@ -73,7 +73,7 @@ export const liveBonusCache = {
     try {
       const redis = await redisSingleton.getClient();
       const season = await getActiveCacheSeason();
-      const key = `LiveBonus:${season}:${eventId}`;
+      const key = `${prefix}:${season}:${eventId}`;
       await redis.del(key);
       logInfo('Live bonus cache cleared', { eventId, season });
     } catch (error) {
@@ -81,4 +81,7 @@ export const liveBonusCache = {
       throw error;
     }
   },
-};
+});
+
+export const liveBonusCache = createLiveBonusCache('LiveBonus');
+export const liveBonusV2Cache = createLiveBonusCache('LiveBonusV2');

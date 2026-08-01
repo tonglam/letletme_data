@@ -1,8 +1,15 @@
 import { beforeEach, describe, expect, test } from 'bun:test';
 
+import {
+  filterTeamsByStrength,
+  getTopPerformingTeams,
+  isStrongTeam,
+  validateRawFPLTeam,
+} from '../../src/domain/teams';
 import { createTeamRepository } from '../../src/repositories/teams';
 import { transformTeams } from '../../src/transformers/teams';
 import {
+  preseasonRawTeamFixture,
   rawFPLTeamsFixture,
   singleRawTeamFixture,
   singleTransformedTeamFixture,
@@ -53,6 +60,19 @@ describe('Teams Unit Tests', () => {
       const result = transformTeams([teamWithNulls]);
       expect(result[0].form).toBeNull();
       expect(result[0].teamDivision).toBeNull();
+    });
+
+    test('should preserve preseason null strength and unranked position', () => {
+      const result = transformTeams([preseasonRawTeamFixture]);
+
+      expect(result).toHaveLength(1);
+      expect(result[0].strength).toBeNull();
+      expect(result[0].position).toBe(0);
+      expect(result[0].strengthOverallHome).toBe(4);
+      expect(result[0].strengthOverallAway).toBe(5);
+      expect(result[0].strengthAttackHome).toBe(0);
+      expect(result[0].strengthDefenceHome).toBe(0);
+      expect(result[0].pulseId).toBe(preseasonRawTeamFixture.pulse_id);
     });
 
     test('should handle large datasets efficiently', () => {
@@ -351,6 +371,31 @@ describe('Teams Unit Tests', () => {
         expect(transformedTeam.strengthOverallHome).toBe(rawTeam.strength_overall_home);
         expect(transformedTeam.pulseId).toBe(rawTeam.pulse_id);
       });
+    });
+  });
+
+  describe('Preseason placeholder handling', () => {
+    test('should validate the exact 26/27 team placeholders', () => {
+      expect(validateRawFPLTeam(preseasonRawTeamFixture)).toMatchObject({
+        position: 0,
+        strength: null,
+      });
+
+      const [team] = transformTeams([preseasonRawTeamFixture]);
+      expect(isStrongTeam(team)).toBe(false);
+      expect(filterTeamsByStrength([team], 1)).toEqual([]);
+    });
+
+    test('should keep unranked teams behind ranked teams in point ties', () => {
+      const rankedTeam = transformTeams([singleRawTeamFixture])[0];
+      const unrankedTeam = transformTeams([
+        { ...preseasonRawTeamFixture, points: rankedTeam.points },
+      ])[0];
+
+      expect(getTopPerformingTeams([unrankedTeam, rankedTeam], 2)).toEqual([
+        rankedTeam,
+        unrankedTeam,
+      ]);
     });
   });
 

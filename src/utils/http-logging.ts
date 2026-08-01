@@ -7,7 +7,7 @@ export interface HttpRequestLogContext {
 
 export function getHttpRequestLogContext(request: Request): HttpRequestLogContext | null {
   const pathname = new URL(request.url).pathname;
-  if (pathname === '/health') {
+  if (pathname === '/health' || pathname === '/ready') {
     return null;
   }
 

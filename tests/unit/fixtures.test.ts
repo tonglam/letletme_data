@@ -18,6 +18,7 @@ import {
   mockRawFPLFixture2,
   mockRawFPLFixture3,
   mockRawFPLFixtures,
+  preseasonRawFPLFixture,
 } from '../fixtures/fixtures.fixtures';
 
 describe('Fixtures Unit Tests', () => {
@@ -142,6 +143,13 @@ describe('Fixtures Unit Tests', () => {
       const result = transformFixtures([fixtureWithNullScores]);
       expect(result[0].teamAScore).toBeNull();
       expect(result[0].teamHScore).toBeNull();
+    });
+
+    test('should preserve the preseason zero pulse id placeholder', () => {
+      const result = transformFixtures([preseasonRawFPLFixture]);
+
+      expect(result).toHaveLength(1);
+      expect(result[0].pulseId).toBe(0);
     });
 
     test('should handle stats array correctly', () => {
@@ -284,7 +292,7 @@ describe('Fixtures Unit Tests', () => {
         expect(fixture.id).toBeGreaterThan(0);
         expect(fixture.code).toBeGreaterThan(0);
         expect(fixture.minutes).toBeGreaterThanOrEqual(0);
-        expect(fixture.pulseId).toBeGreaterThan(0);
+        expect(fixture.pulseId).toBeGreaterThanOrEqual(0);
 
         // Date field
         expect(['object']).toContain(typeof fixture.kickoffTime); // Date object or null

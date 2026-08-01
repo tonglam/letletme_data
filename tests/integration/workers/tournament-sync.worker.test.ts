@@ -10,16 +10,17 @@ import {
   tournamentSyncQueuesByTier,
   TOURNAMENT_JOBS,
 } from '../../../src/queues/tournament-sync.queue';
-import { getCurrentEvent } from '../../../src/services/events.service';
 import { getQueueConnection } from '../../../src/utils/queue';
 import { createTournamentSyncWorker } from '../../../src/workers/tournament-sync.worker';
+import { resolveCurrentEvent } from '../helpers/current-event';
 
 let workerRuntime: ReturnType<typeof createTournamentSyncWorker>;
+const currentEvent = await resolveCurrentEvent();
 
-describe('Tournament Sync Worker Integration Tests', () => {
+describe.skipIf(!currentEvent)('Tournament Sync Worker Integration Tests', () => {
   let queueEvents: QueueEvents;
   let tournamentSyncWorker: Worker;
-  let testEventId: number;
+  const testEventId = currentEvent?.id ?? -1;
 
   beforeAll(async () => {
     await cleanTournamentQueues();
@@ -35,13 +36,6 @@ describe('Tournament Sync Worker Integration Tests', () => {
     queueEvents = new QueueEvents(tournamentSyncQueue.name, {
       connection: getQueueConnection(),
     });
-
-    // Get current event
-    const currentEvent = await getCurrentEvent();
-    if (!currentEvent) {
-      throw new Error('No current event found');
-    }
-    testEventId = currentEvent.id;
 
     // Clean up queue after the worker is ready in case BullMQ recovered stale jobs on startup.
     await cleanTournamentQueues();

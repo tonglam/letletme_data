@@ -1,4 +1,3 @@
-export * from './auth.schema';
 export * from './entry-event-cup-results.schema';
 export * from './entry-event-picks.schema';
 export * from './entry-event-results.schema';

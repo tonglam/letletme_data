@@ -13,10 +13,17 @@ describe('Events Integration Tests', () => {
   });
 
   describe('External Data Integration', () => {
-    test('should save current event to database', async () => {
+    test('should preserve the current or preseason next event marker', async () => {
       const currentEvent = await eventRepository.findCurrent();
-      expect(currentEvent).toBeDefined();
-      expect(currentEvent?.isCurrent).toBe(true);
+      if (currentEvent) {
+        expect(currentEvent.isCurrent).toBe(true);
+        return;
+      }
+
+      const nextEvent = await eventRepository.findNext();
+      expect(nextEvent).toBeDefined();
+      expect(nextEvent?.isNext).toBe(true);
+      expect(nextEvent?.finished).toBe(false);
     });
 
     test('should save next event to database when FPL marks one', async () => {
@@ -31,19 +38,24 @@ describe('Events Integration Tests', () => {
     });
 
     test('should have valid event structure', async () => {
-      const currentEvent = await eventRepository.findCurrent();
-      expect(currentEvent).toBeDefined();
-      expect(typeof currentEvent?.id).toBe('number');
-      expect(typeof currentEvent?.name).toBe('string');
-      expect(typeof currentEvent?.finished).toBe('boolean');
+      const event = (await eventRepository.findCurrent()) ?? (await eventRepository.findNext());
+      expect(event).toBeDefined();
+      expect(typeof event?.id).toBe('number');
+      expect(typeof event?.name).toBe('string');
+      expect(typeof event?.finished).toBe('boolean');
     });
   });
 
   describe('Service Layer Integration', () => {
-    test('should get current event', async () => {
+    test('should get the current event when FPL marks one', async () => {
       const currentEvent = await getCurrentEvent();
-      expect(currentEvent).toBeDefined();
-      expect(currentEvent?.isCurrent).toBe(true);
+      if (currentEvent) {
+        expect(currentEvent.isCurrent).toBe(true);
+        return;
+      }
+
+      const nextEvent = await getNextEvent();
+      expect(nextEvent?.isNext).toBe(true);
     });
 
     test('should get next event when FPL marks one', async () => {

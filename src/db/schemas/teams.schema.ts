@@ -1,4 +1,4 @@
-import { integer, pgTable, text } from 'drizzle-orm/pg-core';
+import { boolean, integer, pgTable, text } from 'drizzle-orm/pg-core';
 import { timestamps } from './_helpers.schema';
 
 export const teams = pgTable('teams', {
@@ -6,7 +6,7 @@ export const teams = pgTable('teams', {
   code: integer('code').notNull().unique(),
   name: text('name').notNull(),
   shortName: text('short_name').notNull(),
-  strength: integer('strength').notNull(),
+  strength: integer('strength'),
   position: integer('position').default(0).notNull(),
   points: integer('points').default(0).notNull(),
   played: integer('played').default(0).notNull(),
@@ -15,7 +15,7 @@ export const teams = pgTable('teams', {
   loss: integer('loss').default(0).notNull(),
   form: text('form'),
   teamDivision: integer('team_division'),
-  unavailable: integer('unavailable').default(0).notNull(),
+  unavailable: boolean('unavailable').default(false).notNull(),
   strengthOverallHome: integer('strength_overall_home').default(1000).notNull(),
   strengthOverallAway: integer('strength_overall_away').default(1000).notNull(),
   strengthAttackHome: integer('strength_attack_home').default(1000).notNull(),

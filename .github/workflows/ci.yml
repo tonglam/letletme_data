@@ -36,7 +36,6 @@ jobs:
           DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
           REDIS_HOST: 127.0.0.1
           REDIS_PORT: '6379'
-          BETTER_AUTH_SECRET: ci-test-secret-min-32-characters-long
         run: bun test tests/unit
 
       - name: Build
@@ -44,7 +43,6 @@ jobs:
           DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
           REDIS_HOST: 127.0.0.1
           REDIS_PORT: '6379'
-          BETTER_AUTH_SECRET: ci-test-secret-min-32-characters-long
         run: bun run build
 
   integration:
@@ -94,7 +92,6 @@ jobs:
           DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
         run: bun run db:migrate
 
-
       - name: Stub Supabase auth roles/schema (plain Postgres CI)
         env:
           DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
@@ -117,14 +114,19 @@ jobs:
           EOF
           bun /tmp/stub-auth.mjs
 
-
-
       - name: Apply SQL migrations
         env:
           DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
         run: bun run db:apply-sql
 
-      - name: Hermetic integration tests
+      - name: Verify SQL migrations are idempotent and complete
+        env:
+          DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
+        run: |
+          bun run db:apply-sql
+          bun run db:migrate:status
+
+      - name: Fresh-database integration tests
         env:
           RUN_INTEGRATION: 1
           DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
@@ -132,5 +134,4 @@ jobs:
           REDIS_PORT: '6379'
           REDIS_DB: '9'
           QUEUE_REDIS_DB: '9'
-          BETTER_AUTH_SECRET: ci-test-secret-min-32-characters-long
         run: bun run test:integration

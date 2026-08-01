@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'bun:test';
 
 import type { Event, Fixture } from '../../src/types';
-import { isAfterMatchDay, isMatchDayTime } from '../../src/utils/conditions';
+import { isAfterMatchDay, isMatchDayTime, isSelectTime } from '../../src/utils/conditions';
+import { ENTRY_PICKS_CRON_PATTERN } from '../../src/domain/job-schedules';
 
 function buildEvent(overrides: Partial<Event> = {}): Event {
   return {
@@ -107,5 +108,21 @@ describe('isAfterMatchDay', () => {
 
     expect(isAfterMatchDay(event, fixtures, new Date('2026-04-22T19:59:59.999Z'))).toBe(false);
     expect(isAfterMatchDay(event, fixtures, new Date('2026-04-22T20:00:00.001Z'))).toBe(true);
+  });
+});
+
+describe('pick publication window', () => {
+  const event = buildEvent({ deadlineTime: '2026-08-21T17:30:00.000Z' });
+  const fixtures = [buildFixture('2026-08-21T19:00:00.000Z', 401)];
+
+  it('covers the 30-to-90-minute interval after the deadline', () => {
+    expect(isSelectTime(event, fixtures, new Date('2026-08-21T17:59:59.999Z'))).toBe(false);
+    expect(isSelectTime(event, fixtures, new Date('2026-08-21T18:00:00.000Z'))).toBe(true);
+    expect(isSelectTime(event, fixtures, new Date('2026-08-21T19:00:00.000Z'))).toBe(true);
+    expect(isSelectTime(event, fixtures, new Date('2026-08-21T19:00:00.001Z'))).toBe(false);
+  });
+
+  it('polls every five minutes instead of relying on a fixed daily time', () => {
+    expect(ENTRY_PICKS_CRON_PATTERN).toBe('*/5 * * * *');
   });
 });

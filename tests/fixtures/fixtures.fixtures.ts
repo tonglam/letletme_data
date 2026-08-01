@@ -104,6 +104,12 @@ export const mockRawFPLFixtures: RawFPLFixture[] = [
   mockRawFPLFixture3,
 ];
 
+// Exact preseason 26/27 placeholder observed from the FPL fixtures response.
+export const preseasonRawFPLFixture: RawFPLFixture = {
+  ...mockRawFPLFixture1,
+  pulse_id: 0,
+};
+
 export const mockFixture1: Fixture = {
   id: 1,
   code: 2561895,

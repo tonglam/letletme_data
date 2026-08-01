@@ -5,19 +5,14 @@ import { beforeAll, describe, expect, test } from 'bun:test';
 
 import { eventOverallResultCache } from '../../src/cache/operations';
 import { syncEventOverallResult } from '../../src/services/event-overall-results.service';
-import { getCurrentEvent } from '../../src/services/events.service';
+import { resolveCurrentEvent } from './helpers/current-event';
 
-describe('Event Overall Results Integration Tests', () => {
-  let testEventId: number;
+const currentEvent = await resolveCurrentEvent();
+
+describe.skipIf(!currentEvent)('Event Overall Results Integration Tests', () => {
+  const testEventId = currentEvent?.id ?? -1;
 
   beforeAll(async () => {
-    // Get current event ID for testing
-    const currentEvent = await getCurrentEvent();
-    if (!currentEvent) {
-      throw new Error('No current event found - cannot run integration tests');
-    }
-    testEventId = currentEvent.id;
-
     // Sync event overall results - fetches from FPL API and caches
     const result = await syncEventOverallResult();
     expect(result.count).toBeGreaterThan(0);

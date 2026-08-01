@@ -1,6 +1,5 @@
 import type { Redis } from 'ioredis';
 
-import { getCurrentSeason } from '../utils/conditions';
 import { logDebug, logError, logInfo } from '../utils/logger';
 import { redisSingleton } from './singleton';
 
@@ -149,10 +148,11 @@ export async function getActiveCacheSeason(): Promise<string> {
       return activeSeason;
     }
   } catch (error) {
-    logError('Failed to read active cache season; falling back to calendar season', error);
+    logError('Failed to read active cache season', error);
+    throw error;
   }
 
-  return getCurrentSeason();
+  throw new Error(`${ACTIVE_SEASON_KEY} is missing or malformed`);
 }
 
 export async function setActiveCacheSeason(season: string): Promise<boolean> {

@@ -66,7 +66,7 @@ export interface Team {
   played: number;
   points: number;
   position: number;
-  strength: number;
+  strength: number | null;
   teamDivision: number | null;
   unavailable: boolean;
   win: number;

@@ -8,29 +8,29 @@ import { eventLiveExplainCache } from '../../src/cache/operations';
 import { eventLiveExplains } from '../../src/db/schemas/index.schema';
 import { getDb } from '../../src/db/singleton';
 import { syncEventLiveExplain } from '../../src/services/event-live-explains.service';
-import { getCurrentEvent } from '../../src/services/events.service';
+import { syncEventLives } from '../../src/services/event-lives.service';
+import { resolveCurrentEvent } from './helpers/current-event';
+import { ensurePlayers } from './helpers/reference-data';
 
-describe('Event Live Explains Integration Tests', () => {
-  let testEventId: number;
+const currentEvent = await resolveCurrentEvent();
+
+describe.skipIf(!currentEvent)('Event Live Explains Integration Tests', () => {
+  const testEventId = currentEvent?.id ?? -1;
 
   beforeAll(async () => {
-    // Get current event ID for testing
-    const currentEvent = await getCurrentEvent();
-    if (!currentEvent) {
-      throw new Error('No current event found - cannot run integration tests');
-    }
-    testEventId = currentEvent.id;
+    await ensurePlayers();
 
     // Clear cache before tests
     await eventLiveExplainCache.clearByEventId(testEventId);
 
-    // Sync event live explain data - tests: FPL API → Transform → DB → Redis
+    // The explain stage is a cache cascade over canonical event-live rows.
+    await syncEventLives(testEventId);
     const result = await syncEventLiveExplain(testEventId);
     expect(result.count).toBeGreaterThan(0);
   });
 
   describe('Sync Integration', () => {
-    test('should sync event live explain data from FPL API to database', async () => {
+    test('should expose event live explain data persisted by the live sync', async () => {
       const db = await getDb();
       const dbExplains = await db
         .select()

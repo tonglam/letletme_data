@@ -1,17 +1,13 @@
 import { sql } from 'drizzle-orm';
-import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
-
 import { entryHistoryInfos, type DbEntryHistoryInfoInsert } from '../db/schemas/index.schema';
-import { getDb } from '../db/singleton';
+import { getDb, type DbOrTransaction } from '../db/singleton';
 import type { RawFPLEntryHistoryResponse } from '../types';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 
-type DatabaseInstance = PostgresJsDatabase<Record<string, never>>;
-
 // No-op helper removed: we only persist past seasons (e.g., "2016/17")
 
-export const createEntryHistoryInfoRepository = (dbInstance?: DatabaseInstance) => {
+export const createEntryHistoryInfoRepository = (dbInstance?: DbOrTransaction) => {
   const getDbInstance = async () => dbInstance || (await getDb());
 
   return {

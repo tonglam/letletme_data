@@ -10,6 +10,7 @@ import { getDbClient } from '../../../src/db/singleton';
 import type { TournamentInfoSummary } from '../../../src/repositories/tournament-infos';
 import { tournamentInfoRepository } from '../../../src/repositories/tournament-infos';
 import { getCurrentEvent } from '../../../src/services/events.service';
+import { ensureEvents } from './reference-data';
 
 export type IntegrationSeed = {
   currentEvent: NonNullable<Awaited<ReturnType<typeof getCurrentEvent>>>;
@@ -140,6 +141,7 @@ export async function ensureIntegrationTournamentSeed(
 ): Promise<IntegrationSeed | null> {
   let currentEvent: Awaited<ReturnType<typeof getCurrentEvent>>;
   try {
+    await ensureEvents();
     currentEvent = await getCurrentEvent();
   } catch {
     return null;

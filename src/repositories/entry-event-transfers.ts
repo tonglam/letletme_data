@@ -8,10 +8,98 @@ import {
 } from '../db/schemas/index.schema';
 import { getDb, getDbClient } from '../db/singleton';
 import type { RawFPLEntryTransfersResponse } from '../types';
+import { getConfig } from '../utils/config';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 
 type DatabaseInstance = PostgresJsDatabase<Record<string, never>>;
+
+const TRANSFER_LOCK_NAMESPACE = 1_102_204_716;
+
+function transferSignature(transfer: {
+  eventId: number;
+  elementInId: number | null;
+  elementOutId: number | null;
+  transferTime: Date;
+}): string {
+  return [
+    transfer.eventId,
+    transfer.elementInId ?? '',
+    transfer.elementOutId ?? '',
+    transfer.transferTime.toISOString(),
+  ].join(':');
+}
+
+export type TransferSyncMode = 'latest' | 'all';
+
+export function buildTransferReplacementRows({
+  entryId,
+  eventId,
+  transfers,
+  existing,
+  pointsByElement,
+  elementInPlayed,
+  defaultPoints = null,
+  syncMode,
+}: {
+  entryId: number;
+  eventId: number;
+  transfers: RawFPLEntryTransfersResponse;
+  existing: readonly DbEntryEventTransfer[];
+  pointsByElement?: Map<number, number>;
+  elementInPlayed?: boolean | null;
+  defaultPoints?: number | null;
+  syncMode: TransferSyncMode;
+}): DbEntryEventTransferInsert[] {
+  const byEvent = transfers.filter((transfer) => transfer.event === eventId);
+  const selected =
+    syncMode === 'all'
+      ? transfers
+      : byEvent.length === 0
+        ? []
+        : [
+            byEvent.reduce((latest, candidate) =>
+              new Date(candidate.time) > new Date(latest.time) ? candidate : latest,
+            ),
+          ];
+  const existingBySignature = new Map(existing.map((row) => [transferSignature(row), row]));
+
+  return selected
+    .map((transfer): DbEntryEventTransferInsert => {
+      const transferTime = new Date(transfer.time);
+      const signature = transferSignature({
+        eventId: transfer.event,
+        elementInId: transfer.element_in,
+        elementOutId: transfer.element_out,
+        transferTime,
+      });
+      const previous = existingBySignature.get(signature);
+      const isTargetEvent = transfer.event === eventId;
+
+      return {
+        entryId,
+        eventId: transfer.event,
+        elementInId: transfer.element_in,
+        elementInCost: transfer.element_in_cost ?? null,
+        elementInPoints:
+          (isTargetEvent ? pointsByElement?.get(transfer.element_in) : undefined) ??
+          transfer.element_in_points ??
+          previous?.elementInPoints ??
+          defaultPoints,
+        elementInPlayed:
+          (isTargetEvent ? elementInPlayed : undefined) ?? previous?.elementInPlayed ?? null,
+        elementOutId: transfer.element_out,
+        elementOutCost: transfer.element_out_cost ?? null,
+        elementOutPoints:
+          (isTargetEvent ? pointsByElement?.get(transfer.element_out) : undefined) ??
+          transfer.element_out_points ??
+          previous?.elementOutPoints ??
+          defaultPoints,
+        transferTime,
+      };
+    })
+    .sort((a, b) => (a.transferTime as Date).getTime() - (b.transferTime as Date).getTime());
+}
 
 export const createEntryEventTransfersRepository = (dbInstance?: DatabaseInstance) => {
   const getDbInstance = async () => dbInstance || (await getDb());
@@ -25,66 +113,97 @@ export const createEntryEventTransfersRepository = (dbInstance?: DatabaseInstanc
       options?: {
         elementInPlayed?: boolean | null;
         defaultPoints?: number | null;
-        onConflict?: 'update' | 'ignore';
+        syncMode?: 'latest' | 'all';
       },
     ): Promise<void> => {
       try {
         const db = await getDbInstance();
-        const byEvent = transfers.filter((t) => t.event === eventId);
-        if (byEvent.length === 0) {
-          logInfo('No transfers to insert for event', { entryId, eventId });
-          return;
-        }
-
-        // Choose the most recent transfer within the event
-        const latest = byEvent.reduce(
-          (acc, t) => (new Date(t.time) > new Date(acc.time) ? t : acc),
-          byEvent[0],
-        );
-
+        const syncMode = options?.syncMode ?? getConfig().TRANSFER_SYNC_MODE;
         const fallbackPoints = options?.defaultPoints ?? null;
-        const inPts = pointsByElement?.get(latest.element_in) ?? fallbackPoints;
-        const outPts = pointsByElement?.get(latest.element_out) ?? fallbackPoints;
-        const elementInPlayed = options?.elementInPlayed ?? null;
 
-        const row: DbEntryEventTransferInsert = {
+        await db.transaction(async (tx) => {
+          // Serialize replacement for one entry without blocking unrelated entries.
+          await tx.execute(
+            sql`SELECT pg_advisory_xact_lock(${TRANSFER_LOCK_NAMESPACE}, ${entryId})`,
+          );
+
+          const existing = await tx
+            .select()
+            .from(entryEventTransfers)
+            .where(
+              syncMode === 'all'
+                ? eq(entryEventTransfers.entryId, entryId)
+                : and(
+                    eq(entryEventTransfers.entryId, entryId),
+                    eq(entryEventTransfers.eventId, eventId),
+                  ),
+            );
+          await tx
+            .delete(entryEventTransfers)
+            .where(
+              syncMode === 'all'
+                ? eq(entryEventTransfers.entryId, entryId)
+                : and(
+                    eq(entryEventTransfers.entryId, entryId),
+                    eq(entryEventTransfers.eventId, eventId),
+                  ),
+            );
+
+          const rows = buildTransferReplacementRows({
+            entryId,
+            eventId,
+            transfers,
+            existing,
+            pointsByElement,
+            elementInPlayed: options?.elementInPlayed,
+            defaultPoints: fallbackPoints,
+            syncMode,
+          });
+
+          if (rows.length > 0) {
+            // No explicit conflict target keeps latest-mode compatible before and
+            // after the widened V2 unique index is deployed.
+            await tx.insert(entryEventTransfers).values(rows).onConflictDoNothing();
+          }
+
+          if (syncMode === 'all') {
+            const persisted = await tx
+              .select({
+                eventId: entryEventTransfers.eventId,
+                elementInId: entryEventTransfers.elementInId,
+                elementOutId: entryEventTransfers.elementOutId,
+                transferTime: entryEventTransfers.transferTime,
+              })
+              .from(entryEventTransfers)
+              .where(eq(entryEventTransfers.entryId, entryId));
+            const expected = new Set(
+              rows.map((row) =>
+                transferSignature({
+                  eventId: row.eventId,
+                  elementInId: row.elementInId ?? null,
+                  elementOutId: row.elementOutId ?? null,
+                  transferTime: row.transferTime as Date,
+                }),
+              ),
+            );
+            const actual = new Set(persisted.map(transferSignature));
+            if (actual.size !== expected.size || [...expected].some((key) => !actual.has(key))) {
+              throw new Error(
+                'TRANSFER_SYNC_MODE=all requires the widened entry transfer unique index',
+              );
+            }
+          }
+        });
+
+        logInfo('Replaced entry event transfers', {
           entryId,
           eventId,
-          elementInId: latest.element_in,
-          elementInCost: latest.element_in_cost ?? null,
-          elementInPoints: inPts,
-          elementInPlayed,
-          elementOutId: latest.element_out,
-          elementOutCost: latest.element_out_cost ?? null,
-          elementOutPoints: outPts,
-          transferTime: new Date(latest.time),
-        };
-
-        const insertQuery = db.insert(entryEventTransfers).values(row);
-        if (options?.onConflict === 'ignore') {
-          await insertQuery.onConflictDoNothing({
-            target: [entryEventTransfers.entryId, entryEventTransfers.eventId],
-          });
-        } else {
-          await insertQuery.onConflictDoUpdate({
-            target: [entryEventTransfers.entryId, entryEventTransfers.eventId],
-            set: {
-              elementInId: row.elementInId,
-              elementInCost: row.elementInCost,
-              elementInPoints: row.elementInPoints,
-              // Never null out a previously computed value on re-sync (H5):
-              // keep the existing flag when this sync has nothing to say.
-              elementInPlayed: sql`COALESCE(excluded.element_in_played, entry_event_transfers.element_in_played)`,
-              elementOutId: row.elementOutId,
-              elementOutCost: row.elementOutCost,
-              elementOutPoints: row.elementOutPoints,
-              transferTime: row.transferTime,
-              updatedAt: new Date(),
-            },
-          });
-        }
-
-        logInfo('Upserted latest entry event transfer', { entryId, eventId });
+          syncMode,
+          count:
+            syncMode === 'all'
+              ? transfers.length
+              : Number(transfers.some((transfer) => transfer.event === eventId)),
+        });
       } catch (error) {
         logError('Failed to upsert entry event transfers', error, { entryId, eventId });
         throw new DatabaseError(

@@ -12,11 +12,15 @@ import {
   syncCurrentPlayerStats,
   syncPlayerStatsForEvent,
 } from '../../src/services/player-stats.service';
+import { resolveCurrentEvent } from './helpers/current-event';
+import { ensurePlayers } from './helpers/reference-data';
 
 let syncedEventId: number;
+const currentEvent = await resolveCurrentEvent();
 
-describe('Player Stats Operational Integration', () => {
+describe.skipIf(!currentEvent)('Player Stats Operational Integration', () => {
   beforeAll(async () => {
+    await ensurePlayers();
     await playerStatsCache.clearAll();
     const result = await syncCurrentPlayerStats();
     syncedEventId = result.eventId;

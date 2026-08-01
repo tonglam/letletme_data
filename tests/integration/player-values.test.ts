@@ -9,12 +9,14 @@ import { playerValuesCache } from '../../src/cache/operations';
 import { playerValues } from '../../src/db/schemas/index.schema';
 import { getDb } from '../../src/db/singleton';
 import { syncCurrentPlayerValues } from '../../src/services/player-values.service';
+import { resolveCurrentEvent } from './helpers/current-event';
 
 const todayDate = () => new Date().toISOString().split('T')[0].replace(/-/g, '');
 
 let changeDate: string;
+const currentEvent = await resolveCurrentEvent();
 
-describe('Player Values Operational Integration', () => {
+describe.skipIf(!currentEvent)('Player Values Operational Integration', () => {
   beforeAll(async () => {
     changeDate = todayDate();
     await playerValuesCache.clear(changeDate);

@@ -156,6 +156,19 @@ export const transformedTeamsFixture: Team[] = [
 export const singleRawTeamFixture: RawFPLTeam = rawFPLTeamsFixture[0];
 export const singleTransformedTeamFixture: Team = transformedTeamsFixture[0];
 
+// Exact preseason 26/27 placeholders observed from the FPL bootstrap response.
+export const preseasonRawTeamFixture: RawFPLTeam = {
+  ...singleRawTeamFixture,
+  position: 0,
+  strength: null,
+  strength_overall_home: 4,
+  strength_overall_away: 5,
+  strength_attack_home: 0,
+  strength_attack_away: 0,
+  strength_defence_home: 0,
+  strength_defence_away: 0,
+};
+
 // Invalid/edge case data for error testing
 export const invalidRawTeamFixture = {
   // Missing required fields
@@ -164,7 +177,7 @@ export const invalidRawTeamFixture = {
   name: 'Edge Case Team',
   short_name: 'ECT',
   strength: 1,
-  position: 0, // Invalid position (should be 1-20)
+  position: 21, // Invalid position (must be between 0-20)
   points: 0,
   win: 0,
   draw: 0,

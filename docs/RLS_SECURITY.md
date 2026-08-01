@@ -1,70 +1,57 @@
-# Row Level Security (RLS)
+# Row Level Security and Data API exposure
 
-**Date:** 2026-01-18  
-**Updated:** 2026-07-18 (FP-20)
+**Updated:** 2026-07-21
 
----
+## Decision
 
-## Purpose
+The Supabase Data API is not a LetLetMe product interface. Browser and Mini
+Program reads go through GraphQL, and writes go through trusted Data/Web
+services. Migration `0033_lock_down_public_data_api.sql` therefore:
 
-RLS policies protect the Supabase Data API (PostgREST) from anonymous reads and
-writes. They do **not** restrict the application backend, which connects with a
-service role that bypasses RLS.
+- enables RLS on every `public` table;
+- drops the permissive policies introduced by historical migration `0029`;
+- revokes table, view, materialized-view, sequence, and function privileges from `PUBLIC`,
+  `anon`, and `authenticated`; and
+- revokes default privileges for future relations created by the migration role.
 
-## Important reality
+Trusted direct database owners and Supabase `service_role` connections keep
+their intended access. Do not use an end-user JWT as a backend database
+credential.
 
-- The application role (`postgres` / service role / `supabase_admin`) has
-  `BYPASSRLS`. Every query from the Elysia API and BullMQ workers runs as that
-  role, so RLS policies have **no effect** on normal application operations.
-- Policies only matter when tables are exposed through the Supabase Data API
-  using the anonymous / `public` role or a user JWT.
-- There is currently no user-scoped data access; the `authenticated` policy
-  grants full access to any authenticated Data API caller. If user-level
-  isolation is needed later, replace those policies with `user_id = auth.uid()`
-  predicates and keep the app on the bypass role.
-
-## What is enabled
-
-Migration `0029_enable_rls_all_tables.sql` enables RLS and creates policies for
-all tables in the `public` schema plus the `bauth.*` auth tables:
-
-- **Public read** tables (anonymous `SELECT`, authenticated `ALL`):
-  `events`, `fixtures`, `phases`, `teams`, `players`, `player_values`,
-  `player_stats`, `event_fixtures`, `event_lives`, `event_live_explains`,
-  `event_live_summaries`.
-- **Authenticated-only** tables (no anonymous access): all entry tables, league
-  tables, tournament tables, `sql_migrations`, and `bauth.*` tables.
-
-## Ledgered application
-
-RLS is applied through the SQL-migration ledger (`bun run db:apply-sql`), not
-through ad-hoc `psql` scripts. The migration is idempotent and is recorded in
-the `sql_migrations` table.
-
-## Operational notes
-
-- `scripts/apply-sql-migrations.ts` takes a PostgreSQL advisory lock while it
-  runs and uses `ON CONFLICT DO NOTHING` when recording applied files, so
-  concurrent deploys cannot double-apply migrations.
-- New tables added after this migration must include their own RLS setup in the
-  same numbered migration that creates them, or in a later migration that
-  follows the same public-read / authenticated-only classification.
+The `bauth` schema is owned and migrated by `letletme-web`; its lockdown lives in
+the Web migration journal. Data's historical `0027` API-key table migration is
+retained only because applied migration history is immutable. Data no longer
+imports or writes any `bauth` table.
 
 ## Verification
 
+Run as an administrative database role:
+
 ```sql
-SELECT schemaname, tablename, rowsecurity AS rls_enabled
+SELECT schemaname, tablename, rowsecurity
 FROM pg_tables
-WHERE schemaname IN ('public', 'bauth')
-ORDER BY schemaname, tablename;
+WHERE schemaname = 'public'
+ORDER BY tablename;
 
 SELECT schemaname, tablename, policyname, cmd, roles
 FROM pg_policies
-WHERE schemaname IN ('public', 'bauth')
-ORDER BY schemaname, tablename, policyname;
+WHERE schemaname = 'public'
+ORDER BY tablename, policyname;
+
+SELECT grantee, table_schema, table_name, privilege_type
+FROM information_schema.role_table_grants
+WHERE table_schema = 'public'
+  AND grantee IN ('PUBLIC', 'anon', 'authenticated')
+ORDER BY grantee, table_name, privilege_type;
+
+SELECT routine_schema, routine_name, grantee, privilege_type
+FROM information_schema.role_routine_grants
+WHERE routine_schema = 'public'
+  AND grantee IN ('PUBLIC', 'anon', 'authenticated')
+ORDER BY grantee, routine_name, privilege_type;
 ```
 
-## Historical scripts (removed)
-
-The one-off `sql/enable-rls-*.sql` and `sql/create-missing-tables.sql` scripts
-were removed in FP-20. Use the numbered migration instead.
+Expected result: every public table has RLS enabled, no public-table policies
+remain, and no client-role table or function grants remain. GraphQL's forward
+migration grants only the required RPCs to `service_role`. Separately smoke-test
+GraphQL with its service credential and Data with its direct database connection.

@@ -109,9 +109,9 @@ export const TeamSchema = z.object({
   name: z.string(),
   played: z.number(),
   points: z.number(),
-  position: z.number(),
+  position: z.number().int().min(0),
   short_name: z.string(),
-  strength: z.number(),
+  strength: z.number().int().min(1).max(5).nullable(),
   team_division: z.number().nullable(),
   unavailable: z.boolean(),
   win: z.number(),
@@ -232,7 +232,7 @@ export const FixtureSchema = z.object({
   stats: z.array(FixtureStatSchema),
   team_h_difficulty: z.number().nullable(),
   team_a_difficulty: z.number().nullable(),
-  pulse_id: z.number(),
+  pulse_id: z.number().int().min(0),
 });
 
 export const BootstrapResponseSchema = z.object({

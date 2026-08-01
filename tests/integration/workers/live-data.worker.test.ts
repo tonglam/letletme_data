@@ -12,13 +12,15 @@ import {
   enqueueEventOverallResult,
 } from '../../../src/jobs/live-data.jobs';
 import { liveDataQueuesByTier, type LiveDataJobData } from '../../../src/queues/live-data.queue';
-import { getCurrentEvent } from '../../../src/services/events.service';
 import { createLiveDataWorker } from '../../../src/workers/live-data.worker';
 import type { WorkerRuntime } from '../../../src/workers/worker-runtime';
+import { resolveCurrentEvent } from '../helpers/current-event';
 
-describe('Live Data Worker Integration Tests', () => {
+const currentEvent = await resolveCurrentEvent();
+
+describe.skipIf(!currentEvent)('Live Data Worker Integration Tests', () => {
   let liveDataRuntime: WorkerRuntime;
-  let testEventId: number;
+  const testEventId = currentEvent?.id ?? -1;
 
   const liveDataQueues = Array.from(
     new Map(Object.values(liveDataQueuesByTier).map((queue) => [queue.name, queue])).values(),
@@ -53,12 +55,6 @@ describe('Live Data Worker Integration Tests', () => {
     liveDataRuntime = createLiveDataWorker();
     if (liveDataRuntime.workers.length === 0) throw new Error('Live data worker was not created');
     await Promise.all(liveDataRuntime.workers.map((worker) => worker.waitUntilReady()));
-
-    const currentEvent = await getCurrentEvent();
-    if (!currentEvent) {
-      throw new Error('No current event found');
-    }
-    testEventId = currentEvent.id;
 
     await cleanLiveDataQueues();
   });

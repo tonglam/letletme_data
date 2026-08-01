@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 import type { EventId, TeamId } from '../types/base.type';
+import type { Fixture, FixtureStat } from '../types';
 
 import type { LiveFixturesByTeam } from './live-fixtures';
 
@@ -237,6 +238,100 @@ export function computeLiveBonusByTeam(
       if (owner !== undefined) {
         setBonus(owner, elementId, bonus, true);
       }
+    }
+  }
+
+  return byTeam;
+}
+
+type FixtureBonusCandidate = {
+  readonly elementId: number;
+  readonly teamId: TeamId;
+  readonly value: number;
+};
+
+function statCandidates(
+  stat: FixtureStat | undefined,
+  fixture: Pick<Fixture, 'teamA' | 'teamH'>,
+): FixtureBonusCandidate[] {
+  if (!stat) return [];
+  return [
+    ...stat.h.map((item) => ({
+      elementId: item.element,
+      teamId: fixture.teamH,
+      value: item.value,
+    })),
+    ...stat.a.map((item) => ({
+      elementId: item.element,
+      teamId: fixture.teamA,
+      value: item.value,
+    })),
+  ];
+}
+
+/**
+ * Build the V2 bonus contract from fixture-scoped FPL stats.
+ *
+ * Unlike event_lives, fixture stats do not collapse double gameweeks. Official
+ * `bonus` rows win once present; otherwise the current fixture-level `bps`
+ * ranking supplies a provisional 3/2/1 estimate. A player's awards are summed
+ * across every fixture in the event before the team hash is written.
+ */
+export function computeFixtureSummedBonusByTeam(
+  fixtures: readonly Pick<
+    Fixture,
+    'finished' | 'finishedProvisional' | 'started' | 'stats' | 'teamA' | 'teamH'
+  >[],
+): Map<TeamId, Map<number, number>> {
+  const byTeam = new Map<TeamId, Map<number, number>>();
+
+  const addBonus = (candidate: FixtureBonusCandidate) => {
+    if (
+      !Number.isInteger(candidate.elementId) ||
+      candidate.elementId <= 0 ||
+      candidate.value <= 0
+    ) {
+      return;
+    }
+    const team = byTeam.get(candidate.teamId) ?? new Map<number, number>();
+    team.set(candidate.elementId, (team.get(candidate.elementId) ?? 0) + candidate.value);
+    byTeam.set(candidate.teamId, team);
+  };
+
+  for (const fixture of fixtures) {
+    if (!fixture.started && !fixture.finished && !fixture.finishedProvisional) continue;
+
+    const official = statCandidates(
+      fixture.stats.find((stat) => stat.identifier === 'bonus'),
+      fixture,
+    ).filter((candidate) => candidate.value > 0);
+
+    if (official.length > 0) {
+      official.forEach(addBonus);
+      continue;
+    }
+
+    // A finished fixture with no official rows has no bonus to award. Do not
+    // resurrect a provisional BPS estimate after FPL has settled the fixture.
+    if (fixture.finished || fixture.finishedProvisional) continue;
+
+    const bps = statCandidates(
+      fixture.stats.find((stat) => stat.identifier === 'bps'),
+      fixture,
+    );
+    const provisional = calculateMatchBonus(
+      bps.map((candidate) => ({
+        elementId: candidate.elementId,
+        teamId: candidate.teamId,
+        minutes: 1,
+        bps: candidate.value,
+        bonus: 0,
+      })),
+    );
+    const teamByElement = new Map(bps.map((candidate) => [candidate.elementId, candidate.teamId]));
+    for (const [elementId, value] of provisional) {
+      const teamId = teamByElement.get(elementId);
+      if (teamId !== undefined) addBonus({ elementId, teamId, value });
     }
   }
 

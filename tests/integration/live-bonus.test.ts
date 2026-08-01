@@ -9,23 +9,19 @@ import { syncTeams } from '../../src/services/teams.service';
 import { syncFixtures } from '../../src/services/fixtures.service';
 import { syncEventLives } from '../../src/services/event-lives.service';
 import { syncLiveFixtureCache } from '../../src/services/live-fixtures.service';
-import { getCurrentEvent } from '../../src/services/events.service';
 import { getCurrentSeason } from '../../src/utils/conditions';
+import { resolveCurrentEvent } from './helpers/current-event';
 
-describe('Live Bonus Integration Tests', () => {
-  let testEventId: number;
+const currentEvent = await resolveCurrentEvent();
+
+describe.skipIf(!currentEvent)('Live Bonus Integration Tests', () => {
+  const testEventId = currentEvent?.id ?? -1;
 
   beforeAll(async () => {
     // Ensure prerequisites are synced
     await syncEvents();
     await syncTeams();
     await syncFixtures();
-
-    const currentEvent = await getCurrentEvent();
-    if (!currentEvent) {
-      throw new Error('No current event found');
-    }
-    testEventId = currentEvent.id;
 
     // Ensure event lives are synced (required for bonus calculation)
     await syncEventLives(testEventId);

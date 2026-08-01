@@ -3,7 +3,7 @@ import { describe, expect, it } from 'bun:test';
 import { drizzle } from 'drizzle-orm/pg-proxy';
 
 import type { PlayerValue } from '../../src/domain/player-values';
-import { createEntryEventTransfersRepository } from '../../src/repositories/entry-event-transfers';
+import { buildTransferReplacementRows } from '../../src/repositories/entry-event-transfers';
 import { createPlayerValuesRepository } from '../../src/repositories/player-values';
 import type { RawFPLEntryTransfer } from '../../src/types';
 
@@ -57,28 +57,74 @@ const TRANSFER: RawFPLEntryTransfer = {
 };
 
 describe('entry-event-transfers upsert (H5)', () => {
-  it('COALESCEs element_in_played on conflict so re-syncs never null the computed value', async () => {
-    const { db, queries } = createCapturingDb();
-    const repo = createEntryEventTransfersRepository(db);
+  it('keeps computed fields when an identical transfer is refreshed without them', () => {
+    const rows = buildTransferReplacementRows({
+      entryId: 12345,
+      eventId: 10,
+      transfers: [TRANSFER],
+      existing: [
+        {
+          id: 1,
+          entryId: 12345,
+          eventId: 10,
+          elementInId: 100,
+          elementInCost: 55,
+          elementInPoints: 8,
+          elementInPlayed: true,
+          elementOutId: 200,
+          elementOutCost: 60,
+          elementOutPoints: 2,
+          transferTime: new Date(TRANSFER.time),
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        },
+      ],
+      syncMode: 'latest',
+    });
 
-    await repo.replaceForEvent(12345, 10, [TRANSFER]);
-
-    expect(queries).toHaveLength(1);
-    expect(queries[0].sql).toContain('on conflict ("entry_id","event_id") do update');
-    expect(queries[0].sql).toContain(
-      '"element_in_played" = COALESCE(excluded.element_in_played, entry_event_transfers.element_in_played)',
-    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.elementInPlayed).toBe(true);
+    expect(rows[0]?.elementInPoints).toBe(8);
+    expect(rows[0]?.elementOutPoints).toBe(2);
   });
 
-  it('keeps the onConflict=ignore path untouched', async () => {
-    const { db, queries } = createCapturingDb();
-    const repo = createEntryEventTransfersRepository(db);
+  it('keeps only the latest transfer before the schema cutover', () => {
+    const rows = buildTransferReplacementRows({
+      entryId: 12345,
+      eventId: 10,
+      transfers: [
+        TRANSFER,
+        {
+          ...TRANSFER,
+          element_in: 101,
+          element_out: 201,
+          time: '2026-07-17T11:00:00Z',
+        },
+      ],
+      existing: [],
+      syncMode: 'latest',
+    });
 
-    await repo.replaceForEvent(12345, 10, [TRANSFER], undefined, { onConflict: 'ignore' });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.elementInId).toBe(101);
+  });
 
-    expect(queries).toHaveLength(1);
-    expect(queries[0].sql).toContain('on conflict ("entry_id","event_id") do nothing');
-    expect(queries[0].sql).not.toContain('COALESCE');
+  it('plans the complete ordered history after the schema cutover', () => {
+    const rows = buildTransferReplacementRows({
+      entryId: 12345,
+      eventId: 10,
+      transfers: [
+        { ...TRANSFER, event: 9, time: '2026-07-10T10:00:00Z' },
+        TRANSFER,
+        { ...TRANSFER, element_in: 101, element_out: 201, time: '2026-07-17T11:00:00Z' },
+      ],
+      existing: [],
+      syncMode: 'all',
+    });
+
+    expect(rows).toHaveLength(3);
+    expect(rows.map((row) => row.eventId)).toEqual([9, 10, 10]);
+    expect(rows.map((row) => row.elementInId)).toEqual([100, 100, 101]);
   });
 });
 
