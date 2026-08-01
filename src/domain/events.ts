@@ -41,6 +41,40 @@ export function safeValidateEvent(data: unknown): Event | null {
   return result.success ? (result.data as Event) : null;
 }
 
+export function normalizeEventDeadlineTime(
+  deadlineTime: string | null,
+  deadlineTimeEpoch: number | null,
+): string | null {
+  if (typeof deadlineTime === 'string' && deadlineTime.trim().length > 0) {
+    const normalizedInput = deadlineTime
+      .trim()
+      .replace(/^(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})/, '$1T$2')
+      .replace(/([+-]\d{2})$/, '$1:00');
+    const timestamp = Date.parse(normalizedInput);
+    if (Number.isFinite(timestamp)) {
+      const date = new Date(timestamp);
+      if (Number.isFinite(date.getTime())) return date.toISOString();
+    }
+  }
+
+  if (deadlineTimeEpoch !== null && Number.isFinite(deadlineTimeEpoch)) {
+    const timestamp = deadlineTimeEpoch * 1000;
+    if (Number.isFinite(timestamp)) {
+      const date = new Date(timestamp);
+      if (Number.isFinite(date.getTime())) return date.toISOString();
+    }
+  }
+
+  return null;
+}
+
+export function normalizeEventDeadline(event: Event): Event {
+  return {
+    ...event,
+    deadlineTime: normalizeEventDeadlineTime(event.deadlineTime, event.deadlineTimeEpoch),
+  };
+}
+
 export const isCurrent = (event: Event): boolean => event.isCurrent;
 export const isNext = (event: Event): boolean => event.isNext;
 export const isPrevious = (event: Event): boolean => event.isPrevious;
