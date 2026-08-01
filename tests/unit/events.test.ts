@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
-import { selectNextEventByDeadline } from '../../src/domain/events';
+import { normalizeEventDeadlineTime, selectNextEventByDeadline } from '../../src/domain/events';
 import { transformEvents } from '../../src/transformers/events';
 import {
   rawFPLEventsFixture,
@@ -10,6 +10,18 @@ import {
 } from '../fixtures/events.fixtures';
 
 describe('Events Unit Tests', () => {
+  describe('deadline normalization', () => {
+    test.each([
+      ['RFC3339', '2026-08-21T17:30:00Z', null, '2026-08-21T17:30:00.000Z'],
+      ['PostgreSQL', '2026-08-21 17:30:00+00', null, '2026-08-21T17:30:00.000Z'],
+      ['null', null, null, null],
+      ['invalid with epoch fallback', 'not-a-date', 1_787_333_400, '2026-08-21T17:30:00.000Z'],
+      ['invalid without epoch', 'not-a-date', null, null],
+    ])('normalizes a %s deadline', (_label, deadline, epoch, expected) => {
+      expect(normalizeEventDeadlineTime(deadline, epoch)).toBe(expected);
+    });
+  });
+
   describe('transformEvents Function', () => {
     test('should transform single event correctly', () => {
       const result = transformEvents([singleRawEventFixture]);

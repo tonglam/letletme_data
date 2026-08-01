@@ -1,5 +1,6 @@
 import {
   neighbourEventId,
+  normalizeEventDeadline,
   selectCurrentEventByDeadline,
   selectNextEventByDeadline,
 } from '../domain/events';
@@ -10,21 +11,8 @@ import { redisSingleton } from './singleton';
 
 import type { Event } from '../types';
 
-function normalizeDeadlineTime(event: Event): string | null {
-  if (typeof event.deadlineTime === 'string' && event.deadlineTime.length > 0) {
-    return event.deadlineTime;
-  }
-  if (event.deadlineTimeEpoch) {
-    return new Date(event.deadlineTimeEpoch * 1000).toISOString();
-  }
-  return null;
-}
-
 function serializeEvent(event: Event): string {
-  return JSON.stringify({
-    ...event,
-    deadlineTime: normalizeDeadlineTime(event),
-  });
+  return JSON.stringify(normalizeEventDeadline(event));
 }
 
 async function loadEventsFromCache(): Promise<Event[] | null> {
@@ -39,7 +27,7 @@ async function loadEventsFromCache(): Promise<Event[] | null> {
       return null;
     }
 
-    const events = parseHashValues<Event>(hash, { key });
+    const events = parseHashValues<Event>(hash, { key }).map(normalizeEventDeadline);
     logDebug('Events cache hit', { count: events.length });
     return events;
   } catch (error) {
@@ -81,7 +69,7 @@ async function getNeighbourEvent(offset: number, label: string): Promise<Event |
       logDebug(`${label} event cache miss`, { targetId });
       return null;
     }
-    const event = JSON.parse(value) as Event;
+    const event = normalizeEventDeadline(JSON.parse(value) as Event);
     logDebug(`${label} event cache hit`, { id: event.id });
     return event;
   } catch (error) {
@@ -99,7 +87,7 @@ export const eventsCache = {
       const value = await redis.get(key);
       if (value) {
         logDebug('Current event cache hit (dedicated key)');
-        return JSON.parse(value) as Event;
+        return normalizeEventDeadline(JSON.parse(value) as Event);
       }
       // Fallback: derive from full hash using deadline-based logic
       const allEvents = await loadEventsFromCache();
