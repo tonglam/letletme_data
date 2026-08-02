@@ -249,7 +249,9 @@ export function createPlayerValuesSync(dependencies: PlayerValuesSyncDependencie
     const elementsById = new Map(bootstrapData.elements.map((element) => [element.id, element]));
     const missingLivePlayerIds = Array.from(
       new Set(
-        cacheableRows.map((row) => row.elementId).filter((elementId) => !elementsById.has(elementId)),
+        cacheableRows
+          .map((row) => row.elementId)
+          .filter((elementId) => !elementsById.has(elementId)),
       ),
     );
     const retainedPlayers =
