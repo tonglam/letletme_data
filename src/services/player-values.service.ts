@@ -241,12 +241,15 @@ export function createPlayerValuesSync(dependencies: PlayerValuesSyncDependencie
       }
     }
 
+    // Start rows seed the season baseline for lastValue computation but are
+    // not price changes; only actual changes are published to the Redis hash.
+    // Filter before enrich: a Start row for a player who left the game must
+    // not fail the whole sync inside enrichStoredRows.
+    const cacheableRows = persistedRows.filter((row) => row.changeType !== 'Start');
     const elementsById = new Map(bootstrapData.elements.map((element) => [element.id, element]));
     const missingLivePlayerIds = Array.from(
       new Set(
-        persistedRows
-          .map((row) => row.elementId)
-          .filter((elementId) => !elementsById.has(elementId)),
+        cacheableRows.map((row) => row.elementId).filter((elementId) => !elementsById.has(elementId)),
       ),
     );
     const retainedPlayers =
@@ -255,16 +258,20 @@ export function createPlayerValuesSync(dependencies: PlayerValuesSyncDependencie
         : [];
     const retainedPlayersById = new Map(retainedPlayers.map((player) => [player.id, player]));
     const expectedCacheRows = enrichStoredRows(
-      persistedRows,
+      cacheableRows,
       elementsById,
       retainedPlayersById,
       teamsMap,
     );
     const cacheSnapshot = await dependencies.inspectCachedValues(changeDate);
     const cacheRepairs = planPlayerValueCacheRepairs(expectedCacheRows, cacheSnapshot);
-    // Even when every history field already matches, rewrite one verified
-    // positive field before deleting the negative marker. This makes a retry
-    // recover when a prior HSET succeeded but its subsequent DEL failed.
+    // When every history field already matches, rewrite one verified positive
+    // field before deleting the negative marker so a retry recovers when a
+    // prior HSET succeeded but its subsequent DEL failed. On Start-only days
+    // there is no positive field: merge() is skipped, any stale fields are
+    // deleted below, and a lingering negative marker expires on its own
+    // (GraphQL sets it with a 10-minute TTL and reads the hash first, so it
+    // can never shadow positive data).
     const cacheWrites =
       cacheRepairs.writes.length > 0 ? cacheRepairs.writes : expectedCacheRows.slice(0, 1);
     if (cacheWrites.length > 0) {
