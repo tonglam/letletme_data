@@ -161,6 +161,42 @@ describe('FPL boundary schemas (FP-04)', () => {
     const result = await fplClient.getEntryEventPicks(123, 1);
     expect(result.active_chip).toBeNull();
   });
+
+  test('classic standings retain preseason new entries and both pagination cursors', async () => {
+    let requestedUrl = '';
+    const payload = {
+      league: {
+        id: 8863,
+        name: 'Classic League',
+        start_event: 1,
+        scoring: 'c',
+      },
+      standings: { has_next: false, page: 1, results: [] },
+      new_entries: {
+        has_next: true,
+        page: 2,
+        results: [
+          {
+            entry: 7819,
+            entry_name: 'Preseason Team',
+            player_first_name: 'Preseason',
+            player_last_name: 'Manager',
+          },
+        ],
+      },
+    };
+    globalThis.fetch = mock(async (url: string | URL | Request) => {
+      requestedUrl = String(url);
+      return new Response(JSON.stringify(payload), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const result = await fplClient.getLeagueClassicStandings(8863, 1, 2);
+
+    expect(requestedUrl).toContain('page_standings=1');
+    expect(requestedUrl).toContain('page_new_entries=2');
+    expect(result.league?.start_event).toBe(1);
+    expect(result.new_entries?.results[0]?.entry).toBe(7819);
+  });
 });
 
 describe('chip mapping at the DB boundary', () => {

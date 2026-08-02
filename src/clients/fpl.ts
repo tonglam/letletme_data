@@ -371,10 +371,16 @@ const StandingsLeagueSchema = z
   .object({
     id: z.number(),
     name: z.string(),
+    start_event: z.number().int().min(1).max(38).optional(),
+    scoring: z.string().optional(),
   })
   .passthrough();
 export const LeagueStandingsSchema = z
-  .object({ standings: StandingsSchema, league: StandingsLeagueSchema.optional() })
+  .object({
+    standings: StandingsSchema,
+    new_entries: StandingsSchema.optional(),
+    league: StandingsLeagueSchema.optional(),
+  })
   .passthrough();
 
 // Entry history schemas (FPL: /api/entry/{entryId}/history/)
@@ -902,18 +908,20 @@ class FPLClient {
 
   async getLeagueClassicStandings(
     leagueId: number,
-    page: number,
+    standingsPage: number,
+    newEntriesPage = 1,
   ): Promise<RawFPLLeagueStandingsResponse> {
-    const url = `${this.baseUrl}/leagues-classic/${leagueId}/standings/?page_standings=${page}`;
-    return this.getLeagueStandings(url, leagueId, page, 'classic');
+    const url = `${this.baseUrl}/leagues-classic/${leagueId}/standings/?page_standings=${standingsPage}&page_new_entries=${newEntriesPage}`;
+    return this.getLeagueStandings(url, leagueId, standingsPage, 'classic');
   }
 
   async getLeagueH2HStandings(
     leagueId: number,
-    page: number,
+    standingsPage: number,
+    newEntriesPage = 1,
   ): Promise<RawFPLLeagueStandingsResponse> {
-    const url = `${this.baseUrl}/leagues-h2h/${leagueId}/standings/?page_standings=${page}`;
-    return this.getLeagueStandings(url, leagueId, page, 'h2h');
+    const url = `${this.baseUrl}/leagues-h2h/${leagueId}/standings/?page_standings=${standingsPage}&page_new_entries=${newEntriesPage}`;
+    return this.getLeagueStandings(url, leagueId, standingsPage, 'h2h');
   }
 
   async getEntryTransfers(entryId: number): Promise<RawFPLEntryTransfersResponse> {

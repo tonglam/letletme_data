@@ -1,69 +1,20 @@
-import { fplClient } from '../clients/fpl';
 import {
-  mapStandingsResultToParticipant,
   normalizeTournamentName,
-  parseLeagueUrl,
   planTournamentStructure,
   selectParticipants,
   tournamentCreateInputSchema,
   uniqueParticipantIds,
   validateTournamentCreateInput,
-  type LeagueType,
   type TournamentCreateInput,
-  type TournamentParticipant,
   type TournamentSetupStatus,
 } from '../domain/tournament';
 import { enqueueTournamentSetup } from '../jobs/tournament-setup.jobs';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
-import { ConflictError, ValidationError } from '../utils/errors';
+import { ConflictError } from '../utils/errors';
+import { fetchLeagueParticipants } from './tournament-league-members.service';
 
 export { tournamentCreateInputSchema, validateTournamentCreateInput };
 export type { TournamentCreateInput, TournamentSetupStatus };
-
-async function fetchLeagueParticipants(leagueUrl: string): Promise<{
-  leagueId: number;
-  leagueType: LeagueType;
-  participants: TournamentParticipant[];
-}> {
-  const { leagueId, leagueType } = parseLeagueUrl(leagueUrl);
-  const participantMap = new Map<string, TournamentParticipant>();
-  let page = 1;
-  let hasNext = true;
-
-  while (hasNext) {
-    const response =
-      leagueType === 'h2h'
-        ? await fplClient.getLeagueH2HStandings(leagueId, page)
-        : await fplClient.getLeagueClassicStandings(leagueId, page);
-
-    for (const rawResult of response.standings.results) {
-      const participant = mapStandingsResultToParticipant(rawResult);
-      if (participant) {
-        participantMap.set(participant.id, participant);
-      }
-    }
-
-    hasNext = response.standings.has_next;
-    page += 1;
-
-    if (page > 100) {
-      throw new ValidationError(
-        'League standings pagination exceeded the safety limit.',
-        'TOURNAMENT_LEAGUE_PAGINATION_LIMIT',
-      );
-    }
-  }
-
-  const participants = Array.from(participantMap.values());
-  if (participants.length === 0) {
-    throw new ValidationError(
-      'No participants were found for that league.',
-      'TOURNAMENT_LEAGUE_EMPTY',
-    );
-  }
-
-  return { leagueId, leagueType, participants };
-}
 
 export async function checkTournamentNameAvailability(name: string) {
   const normalizedName = normalizeTournamentName(name);

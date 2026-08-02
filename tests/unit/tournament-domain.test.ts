@@ -29,6 +29,15 @@ describe('parseLeagueUrl', () => {
     });
   });
 
+  test('parses the localized classic standings URL copied from FPL', () => {
+    expect(parseLeagueUrl('https://fantasy.premierleague.com/en/leagues/8863/standings/c')).toEqual(
+      {
+        leagueId: 8863,
+        leagueType: 'classic',
+      },
+    );
+  });
+
   test('parses h2h league URLs', () => {
     expect(parseLeagueUrl('https://fantasy.premierleague.com/leagues/99/standings/h')).toEqual({
       leagueId: 99,
@@ -40,6 +49,18 @@ describe('parseLeagueUrl', () => {
     expect(() => parseLeagueUrl('https://example.com/leagues/1/standings/c')).toThrow(
       ValidationError,
     );
+  });
+
+  test('rejects arbitrary path prefixes before leagues', () => {
+    expect(() =>
+      parseLeagueUrl('https://fantasy.premierleague.com/not-a-locale/leagues/1/standings/c'),
+    ).toThrow(ValidationError);
+  });
+
+  test('rejects league IDs that cannot be represented safely', () => {
+    expect(() =>
+      parseLeagueUrl('https://fantasy.premierleague.com/leagues/9007199254740992/standings/c'),
+    ).toThrow(ValidationError);
   });
 });
 
