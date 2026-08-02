@@ -120,11 +120,20 @@ const managedTournament = {
   createdAt: '2026-08-01T00:00:00.000Z',
   updatedAt: '2026-08-02T00:00:00.000Z',
 };
-const updateTournament = mock(async () => managedTournament);
-const deleteTournament = mock(async () => managedTournament);
-mock.module('../../src/services/tournament-management.service', () => ({
-  tournamentManagementService: { updateTournament, deleteTournament },
-}));
+// Spy on the singleton instead of replacing the whole module. Bun shares the
+// module mock registry across test files, and a partial mock here would hide
+// createTournamentManagementService from tournament-management.test.ts.
+const tournamentManagementServiceModule = await import(
+  '../../src/services/tournament-management.service'
+);
+const updateTournament = spyOn(
+  tournamentManagementServiceModule.tournamentManagementService,
+  'updateTournament',
+).mockImplementation(async () => managedTournament);
+const deleteTournament = spyOn(
+  tournamentManagementServiceModule.tournamentManagementService,
+  'deleteTournament',
+).mockImplementation(async () => managedTournament);
 
 const syncEntryInfo = mock(async (entryId: number) => ({ id: entryId, name: 'Test' }));
 mock.module('../../src/services/entry-info.service', () => ({
