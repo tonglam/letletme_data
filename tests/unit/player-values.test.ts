@@ -277,7 +277,6 @@ describe('Player Values Unit Tests', () => {
     test('should create repository instance', () => {
       expect(repository).toBeDefined();
       expect(typeof repository.findLatestForAllPlayers).toBe('function');
-      expect(typeof repository.findDistinctPlayerIds).toBe('function');
       expect(typeof repository.findByChangeDate).toBe('function');
       expect(typeof repository.hasChangesForDate).toBe('function');
       expect(typeof repository.insertBatch).toBe('function');

@@ -1,4 +1,5 @@
 import { playerValuesCache } from '../cache/operations';
+import type { PlayerValueCacheSnapshot } from '../cache/player-values-cache';
 import { fplClient } from '../clients/fpl';
 import type { PlayerValue } from '../domain/player-values';
 import { enqueuePlayerPricesSyncJob } from '../jobs/data-sync-enqueue';
@@ -21,8 +22,9 @@ export type PlayerValuesSyncDependencies = {
   findByChangeDate: typeof playerValuesRepository.findByChangeDate;
   insertBatch: typeof playerValuesRepository.insertBatch;
   loadTeamsBasicInfo: typeof loadTeamsBasicInfo;
-  getCachedValues: typeof playerValuesCache.get;
+  inspectCachedValues: typeof playerValuesCache.inspect;
   mergeCachedValues: typeof playerValuesCache.merge;
+  deleteCachedFields: typeof playerValuesCache.deleteFields;
   enqueuePlayerPrices: typeof enqueuePlayerPricesSyncJob;
   notify: typeof notifyTwoBots;
   getCurrentChangeDate: () => string;
@@ -35,8 +37,9 @@ const defaultDependencies: PlayerValuesSyncDependencies = {
   findByChangeDate: playerValuesRepository.findByChangeDate,
   insertBatch: playerValuesRepository.insertBatch,
   loadTeamsBasicInfo,
-  getCachedValues: playerValuesCache.get,
+  inspectCachedValues: playerValuesCache.inspect,
   mergeCachedValues: playerValuesCache.merge,
+  deleteCachedFields: playerValuesCache.deleteFields,
   enqueuePlayerPrices: enqueuePlayerPricesSyncJob,
   notify: notifyTwoBots,
   getCurrentChangeDate: () => formatCronDateKey(),
@@ -101,15 +104,18 @@ function playerValueMatches(left: PlayerValue, right: PlayerValue): boolean {
   );
 }
 
-export function findPlayerValueCacheRepairs(
+export function planPlayerValueCacheRepairs(
   expected: PlayerValue[],
-  cached: PlayerValue[] | null,
-): PlayerValue[] {
-  const cachedById = new Map((cached ?? []).map((row) => [row.elementId, row]));
-  return expected.filter((row) => {
-    const cachedRow = cachedById.get(row.elementId);
+  snapshot: PlayerValueCacheSnapshot,
+): { writes: PlayerValue[]; staleFields: string[] } {
+  const expectedFields = new Set(expected.map((row) => String(row.elementId)));
+  const cachedByField = new Map(snapshot.entries);
+  const writes = expected.filter((row) => {
+    const cachedRow = cachedByField.get(String(row.elementId));
     return !cachedRow || !playerValueMatches(row, cachedRow);
   });
+  const staleFields = snapshot.fields.filter((field) => !expectedFields.has(field));
+  return { writes, staleFields };
 }
 
 function enrichStoredRows(
@@ -227,19 +233,24 @@ export function createPlayerValuesSync(dependencies: PlayerValuesSyncDependencie
 
     const elementsById = new Map(bootstrapData.elements.map((element) => [element.id, element]));
     const expectedCacheRows = enrichStoredRows(persistedRows, elementsById, teamsMap);
-    const cachedRows = await dependencies.getCachedValues(changeDate);
-    const cacheRepairs = findPlayerValueCacheRepairs(expectedCacheRows, cachedRows);
+    const cacheSnapshot = await dependencies.inspectCachedValues(changeDate);
+    const cacheRepairs = planPlayerValueCacheRepairs(expectedCacheRows, cacheSnapshot);
     // Even when every history field already matches, rewrite one verified
     // positive field before deleting the negative marker. This makes a retry
     // recover when a prior HSET succeeded but its subsequent DEL failed.
-    const cacheWrites = cacheRepairs.length > 0 ? cacheRepairs : expectedCacheRows.slice(0, 1);
+    const cacheWrites =
+      cacheRepairs.writes.length > 0 ? cacheRepairs.writes : expectedCacheRows.slice(0, 1);
     if (cacheWrites.length > 0) {
       await dependencies.mergeCachedValues(changeDate, cacheWrites);
     }
-    if (cacheRepairs.length > 0) {
+    if (cacheRepairs.staleFields.length > 0) {
+      await dependencies.deleteCachedFields(changeDate, cacheRepairs.staleFields);
+    }
+    if (cacheRepairs.writes.length > 0 || cacheRepairs.staleFields.length > 0) {
       logInfo('Player values cache fields repaired', {
         changeDate,
-        count: cacheRepairs.length,
+        writes: cacheRepairs.writes.length,
+        deletes: cacheRepairs.staleFields.length,
       });
     }
 

@@ -1,8 +1,13 @@
 import { logDebug, logError } from '../utils/logger';
-import { parseHashValues } from './hash-read';
+import { parseHashEntries, parseHashValues } from './hash-read';
 import { redisSingleton } from './singleton';
 
 import type { PlayerValue } from '../domain/player-values';
+
+export type PlayerValueCacheSnapshot = {
+  fields: string[];
+  entries: Array<[field: string, value: PlayerValue]>;
+};
 
 export const playerValuesCache = {
   /**
@@ -54,6 +59,42 @@ export const playerValuesCache = {
     } catch (error) {
       logError('Player values cache get error', error);
       return null;
+    }
+  },
+
+  /** Read both raw field names and valid values so repair can fix the key set. */
+  async inspect(changeDate: string): Promise<PlayerValueCacheSnapshot> {
+    try {
+      const redis = await redisSingleton.getClient();
+      const key = `PlayerValue:${changeDate}`;
+      const hash = await redis.hgetall(key);
+      return {
+        fields: Object.keys(hash),
+        entries: parseHashEntries<PlayerValue>(hash, { key, changeDate }),
+      };
+    } catch (error) {
+      logError('Player values cache inspect error', error, { changeDate });
+      throw error;
+    }
+  },
+
+  /** Remove only fields that cannot be backed by persisted rows. */
+  async deleteFields(changeDate: string, fields: string[]): Promise<void> {
+    if (fields.length === 0) {
+      return;
+    }
+
+    try {
+      const redis = await redisSingleton.getClient();
+      const key = `PlayerValue:${changeDate}`;
+      await redis.hdel(key, ...fields);
+      logDebug('Player values cache stale fields deleted', {
+        changeDate,
+        count: fields.length,
+      });
+    } catch (error) {
+      logError('Player values cache field deletion error', error, { changeDate, fields });
+      throw error;
     }
   },
 

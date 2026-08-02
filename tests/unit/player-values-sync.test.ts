@@ -6,10 +6,7 @@ import {
   createPlayerValuesSync,
   type PlayerValuesSyncDependencies,
 } from '../../src/services/player-values.service';
-import {
-  getPlayerValueSeasonFloor,
-  getPlayerValueSeasonFloorForDate,
-} from '../../src/utils/player-value-season';
+import { getPlayerValueSeasonFloor } from '../../src/utils/player-value-season';
 import {
   mockTeamsForPlayerValues,
   singleRawFPLElementFixture,
@@ -47,8 +44,9 @@ function buildDependencies(
     findByChangeDate: async () => [],
     insertBatch: async (rows) => ({ count: rows.length, inserted: rows }),
     loadTeamsBasicInfo: async () => mockTeamsForPlayerValues as never,
-    getCachedValues: async () => null,
+    inspectCachedValues: async () => ({ fields: [], entries: [] }),
     mergeCachedValues: async () => undefined,
+    deleteCachedFields: async () => undefined,
     enqueuePlayerPrices: async () => ({ id: 'player-prices-immediate' }) as never,
     notify: async () => undefined,
     getCurrentChangeDate: () => changeDate,
@@ -60,7 +58,6 @@ describe('player-values synchronization orchestration', () => {
   test('keeps the same season floor after the calendar year changes', () => {
     expect(getPlayerValueSeasonFloor('2026-08-15T17:30:00Z')).toBe('20260601');
     expect(getPlayerValueSeasonFloor('2027-01-02T11:00:00Z')).toBe('20260601');
-    expect(getPlayerValueSeasonFloorForDate('20270102')).toBe('20260601');
   });
 
   test('discards a delayed capture after its configured date without reading upstream', async () => {
@@ -123,8 +120,9 @@ describe('player-values synchronization orchestration', () => {
   test('performs no database or Redis mutation on a true no-change run', async () => {
     const insertBatch = mock(async () => ({ count: 0, inserted: [] }));
     const loadTeamsBasicInfo = mock(async () => mockTeamsForPlayerValues as never);
-    const getCachedValues = mock(async () => null);
+    const inspectCachedValues = mock(async () => ({ fields: [], entries: [] }));
     const mergeCachedValues = mock(async () => undefined);
+    const deleteCachedFields = mock(async () => undefined);
     const enqueuePlayerPrices = mock(async () => ({ id: 'unexpected' }) as never);
 
     const sync = createPlayerValuesSync(
@@ -138,8 +136,9 @@ describe('player-values synchronization orchestration', () => {
         ],
         insertBatch,
         loadTeamsBasicInfo,
-        getCachedValues,
+        inspectCachedValues,
         mergeCachedValues,
+        deleteCachedFields,
         enqueuePlayerPrices,
       }),
     );
@@ -147,8 +146,9 @@ describe('player-values synchronization orchestration', () => {
     expect(await sync(changeDate)).toEqual({ count: 0 });
     expect(insertBatch).not.toHaveBeenCalled();
     expect(loadTeamsBasicInfo).not.toHaveBeenCalled();
-    expect(getCachedValues).not.toHaveBeenCalled();
+    expect(inspectCachedValues).not.toHaveBeenCalled();
     expect(mergeCachedValues).not.toHaveBeenCalled();
+    expect(deleteCachedFields).not.toHaveBeenCalled();
     expect(enqueuePlayerPrices).not.toHaveBeenCalled();
   });
 
@@ -213,7 +213,10 @@ describe('player-values synchronization orchestration', () => {
           },
         ],
         findByChangeDate: async () => [persisted],
-        getCachedValues: async () => [cachedValue],
+        inspectCachedValues: async () => ({
+          fields: [String(cachedValue.elementId)],
+          entries: [[String(cachedValue.elementId), cachedValue]],
+        }),
         mergeCachedValues,
       }),
     );
@@ -221,6 +224,47 @@ describe('player-values synchronization orchestration', () => {
     expect(await sync(changeDate)).toEqual({ count: 0 });
     expect(mergeCachedValues).toHaveBeenCalledTimes(1);
     expect(mergeCachedValues).toHaveBeenCalledWith(changeDate, [cachedValue]);
+  });
+
+  test('writes verified fields before deleting stale or mis-keyed fields', async () => {
+    const persisted = storedValue(singleRawFPLElementFixture.now_cost, 'Start', 0);
+    const cachedValue: PlayerValue = {
+      ...persisted,
+      elementType: 4,
+      elementTypeName: 'FWD',
+      webName: singleRawFPLElementFixture.web_name,
+      teamId: singleRawFPLElementFixture.team,
+      teamName: 'Manchester City',
+      teamShortName: 'MCI',
+    };
+    const operations: string[] = [];
+    const sync = createPlayerValuesSync(
+      buildDependencies({
+        findLatestForAllPlayers: async () => [
+          {
+            elementId: singleRawFPLElementFixture.id,
+            value: singleRawFPLElementFixture.now_cost,
+            changeDate: '20260802',
+          },
+        ],
+        findByChangeDate: async () => [persisted],
+        inspectCachedValues: async () => ({
+          fields: ['wrong-field'],
+          entries: [['wrong-field', cachedValue]],
+        }),
+        mergeCachedValues: async (_date, rows) => {
+          operations.push('hset');
+          expect(rows).toEqual([cachedValue]);
+        },
+        deleteCachedFields: async (_date, fields) => {
+          operations.push('hdel');
+          expect(fields).toEqual(['wrong-field']);
+        },
+      }),
+    );
+
+    expect(await sync(changeDate)).toEqual({ count: 0 });
+    expect(operations).toEqual(['hset', 'hdel']);
   });
 
   test('notification failure does not invalidate a successful capture', async () => {

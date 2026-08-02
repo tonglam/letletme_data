@@ -18,17 +18,3 @@ export function getPlayerValueSeasonFloor(deadlineTime: string | null): string {
 
   return `${seasonStartYear(deadline.getUTCFullYear(), deadline.getUTCMonth() + 1, 7)}0601`;
 }
-
-export function getPlayerValueSeasonFloorForDate(changeDate: string): string {
-  if (!/^\d{8}$/.test(changeDate)) {
-    throw new Error(`Invalid player value change date: ${changeDate}`);
-  }
-
-  const year = Number.parseInt(changeDate.slice(0, 4), 10);
-  const month = Number.parseInt(changeDate.slice(4, 6), 10);
-  if (month < 1 || month > 12) {
-    throw new Error(`Invalid player value change date: ${changeDate}`);
-  }
-
-  return `${seasonStartYear(year, month, 6)}0601`;
-}

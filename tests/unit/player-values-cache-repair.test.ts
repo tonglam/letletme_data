@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import type { PlayerValue } from '../../src/domain/player-values';
-import { findPlayerValueCacheRepairs } from '../../src/services/player-values.service';
+import { planPlayerValueCacheRepairs } from '../../src/services/player-values.service';
 
 const value: PlayerValue = {
   elementId: 1,
@@ -20,12 +20,25 @@ const value: PlayerValue = {
 
 describe('player-values cache repair selection', () => {
   test('does not rewrite a complete no-change cache', () => {
-    expect(findPlayerValueCacheRepairs([value], [{ ...value }])).toEqual([]);
+    expect(
+      planPlayerValueCacheRepairs([value], {
+        fields: ['1'],
+        entries: [['1', { ...value }]],
+      }),
+    ).toEqual({ writes: [], staleFields: [] });
   });
 
   test('repairs missing or stale persisted fields with HSET candidates', () => {
-    expect(findPlayerValueCacheRepairs([value], null)).toEqual([value]);
-    expect(findPlayerValueCacheRepairs([value], [{ ...value, lastValue: 50 }])).toEqual([value]);
+    expect(planPlayerValueCacheRepairs([value], { fields: [], entries: [] })).toEqual({
+      writes: [value],
+      staleFields: [],
+    });
+    expect(
+      planPlayerValueCacheRepairs([value], {
+        fields: ['1'],
+        entries: [['1', { ...value, lastValue: 50 }]],
+      }),
+    ).toEqual({ writes: [value], staleFields: [] });
   });
 
   test('repairs stale enrichment fields as part of the complete cached shape', () => {
@@ -38,7 +51,33 @@ describe('player-values cache repair selection', () => {
     ];
 
     for (const staleValue of staleValues) {
-      expect(findPlayerValueCacheRepairs([value], [staleValue])).toEqual([value]);
+      expect(
+        planPlayerValueCacheRepairs([value], {
+          fields: ['1'],
+          entries: [['1', staleValue]],
+        }),
+      ).toEqual({ writes: [value], staleFields: [] });
     }
+  });
+
+  test('repairs the canonical field and removes extra or mis-keyed fields', () => {
+    expect(
+      planPlayerValueCacheRepairs([value], {
+        fields: ['wrong-field', '999'],
+        entries: [
+          ['wrong-field', value],
+          ['999', { ...value, elementId: 999 }],
+        ],
+      }),
+    ).toEqual({ writes: [value], staleFields: ['wrong-field', '999'] });
+  });
+
+  test('overwrites a corrupt expected field without deleting its hash field', () => {
+    expect(
+      planPlayerValueCacheRepairs([value], {
+        fields: ['1'],
+        entries: [],
+      }),
+    ).toEqual({ writes: [value], staleFields: [] });
   });
 });

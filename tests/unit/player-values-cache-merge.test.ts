@@ -66,4 +66,26 @@ describe('player-values cache merge', () => {
 
     expect(deleteCalls).toBe(0);
   });
+
+  test('deletes only named stale fields without replacing the hash', async () => {
+    const originalGetClient = redisSingleton.getClient;
+    const calls: Array<{ command: string; args: string[] }> = [];
+    redisSingleton.getClient = async () =>
+      ({
+        hdel: async (...fields: string[]) => {
+          calls.push({ command: 'hdel', args: fields });
+          return fields.length;
+        },
+      }) as never;
+
+    try {
+      await playerValuesCache.deleteFields('20260802', ['wrong-field', '999']);
+    } finally {
+      redisSingleton.getClient = originalGetClient;
+    }
+
+    expect(calls).toEqual([
+      { command: 'hdel', args: ['PlayerValue:20260802', 'wrong-field', '999'] },
+    ]);
+  });
 });
