@@ -2,6 +2,7 @@ import { describe, expect, mock, test } from 'bun:test';
 
 import { createPlayerPricesSync } from '../../src/services/player-prices.service';
 import type { Player } from '../../src/types';
+import { singleRawFPLElementFixture } from '../fixtures/player-values.fixtures';
 
 const stored = (
   elementId: number,
@@ -32,7 +33,14 @@ const player = (id: number, price: number): Player => ({
 
 const bootstrap = (ids: number[]) =>
   ({
-    elements: ids.map((id) => ({ id })),
+    elements: ids.map((id) => ({
+      ...singleRawFPLElementFixture,
+      id,
+      code: singleRawFPLElementFixture.code + id,
+      first_name: `First ${id}`,
+      second_name: `Last ${id}`,
+      web_name: `Player ${id}`,
+    })),
     events: [{ id: 1, deadline_time: '2026-08-15T17:30:00Z' }],
   }) as never;
 
@@ -119,5 +127,28 @@ describe('player-prices sync', () => {
     expect(findLatestForPlayerIds).not.toHaveBeenCalled();
     expect(updatePrices).not.toHaveBeenCalled();
     expect(mergePlayersCache).not.toHaveBeenCalled();
+  });
+
+  test('checks cache completeness against only transformable bootstrap players', async () => {
+    const mergePlayersCache = mock(async () => undefined);
+    const validBootstrap = bootstrap([1, 2]) as {
+      elements: Array<Record<string, unknown>>;
+      events: Array<Record<string, unknown>>;
+    };
+    validBootstrap.elements.push({
+      ...singleRawFPLElementFixture,
+      id: 3,
+      first_name: '',
+    });
+    const sync = createPlayerPricesSync({
+      findByChangeDate: async () => [stored(2, 61, '20260803', 'Rise')],
+      findLatestForPlayerIds: async () => [stored(2, 61, '20260803', 'Rise')],
+      getBootstrap: async () => validBootstrap as never,
+      updatePrices: async () => [player(2, 61)],
+      mergePlayersCache,
+    });
+
+    expect(await sync('20260803')).toEqual({ count: 1, changeDate: '20260803' });
+    expect(mergePlayersCache).toHaveBeenCalledWith([player(2, 61)], [1, 2]);
   });
 });

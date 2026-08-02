@@ -45,6 +45,7 @@ function buildDependencies(
       }) as never,
     findLatestForAllPlayers: async () => [],
     findByChangeDate: async () => [],
+    findPlayersByIds: async () => [],
     insertBatch: async (rows) => ({ count: rows.length, inserted: rows }),
     loadTeamsBasicInfo: async () => mockTeamsForPlayerValues as never,
     inspectCachedValues: async () => ({ fields: [], entries: [] }),
@@ -272,6 +273,58 @@ describe('player-values synchronization orchestration', () => {
 
     expect(await sync(changeDate)).toEqual({ count: 0 });
     expect(operations).toEqual(['hset', 'hdel']);
+  });
+
+  test('repairs persisted history from retained player data after a roster omission', async () => {
+    const currentElement = { ...singleRawFPLElementFixture, id: 2, code: 223095 };
+    const persisted = storedValue(143, 'Rise', 142);
+    const mergeCachedValues = mock(async (_date: string, rows: PlayerValue[]) => {
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        elementId: singleRawFPLElementFixture.id,
+        webName: 'Retained Player',
+        teamId: singleRawFPLElementFixture.team,
+        value: 143,
+      });
+    });
+    const findPlayersByIds = mock(async (ids: number[]) => {
+      expect(ids).toEqual([singleRawFPLElementFixture.id]);
+      return [
+        {
+          id: singleRawFPLElementFixture.id,
+          code: singleRawFPLElementFixture.code,
+          type: singleRawFPLElementFixture.element_type,
+          teamId: singleRawFPLElementFixture.team,
+          price: 143,
+          startPrice: 142,
+          firstName: 'Retained',
+          secondName: 'Player',
+          webName: 'Retained Player',
+        },
+      ];
+    });
+    const enqueuePlayerPrices = mock(async () => ({ id: 'player-prices-immediate' }) as never);
+    const sync = createPlayerValuesSync(
+      buildDependencies({
+        getBootstrap: async () => ({ elements: [currentElement], teams: [] }) as never,
+        findLatestForAllPlayers: async () => [
+          {
+            elementId: currentElement.id,
+            value: currentElement.now_cost,
+            changeDate: '20260802',
+          },
+        ],
+        findByChangeDate: async () => [persisted],
+        findPlayersByIds,
+        mergeCachedValues,
+        enqueuePlayerPrices,
+      }),
+    );
+
+    expect(await sync(changeDate)).toEqual({ count: 0 });
+    expect(findPlayersByIds).toHaveBeenCalledTimes(1);
+    expect(mergeCachedValues).toHaveBeenCalledTimes(1);
+    expect(enqueuePlayerPrices).toHaveBeenCalledTimes(1);
   });
 
   test('notification failure does not invalidate a successful capture', async () => {

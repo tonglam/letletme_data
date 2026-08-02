@@ -2,6 +2,7 @@ import { playersCache } from '../cache/operations';
 import { fplClient } from '../clients/fpl';
 import { playerValuesRepository } from '../repositories/player-values';
 import { playerRepository } from '../repositories/players';
+import { transformPlayers } from '../transformers/players';
 import { logInfo } from '../utils/logger';
 import { getPlayerValueSeasonBounds } from '../utils/player-value-season';
 
@@ -47,7 +48,15 @@ export function createPlayerPricesSync(dependencies: PlayerPricesSyncDependencie
     if (!Array.isArray(bootstrap.elements) || bootstrap.elements.length === 0) {
       throw new Error('No published player roster returned from FPL API');
     }
-    const publishedPlayerIds = bootstrap.elements.map((player) => player.id);
+    // The full players sync publishes only elements that pass the player
+    // transformer. Use the same roster here so the partial-merge guard checks
+    // the exact field set that syncPlayers writes, not unpublishable raw rows.
+    const publishedPlayerIds = Array.from(
+      new Set(transformPlayers(bootstrap.elements).map((player) => player.id)),
+    );
+    if (publishedPlayerIds.length === 0) {
+      throw new Error('No valid published player roster returned from FPL API');
+    }
     const publishedIdSet = new Set(publishedPlayerIds);
     const currentChangedIds = changedIds.filter((elementId) => publishedIdSet.has(elementId));
     if (currentChangedIds.length === 0) {

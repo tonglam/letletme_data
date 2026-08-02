@@ -5,8 +5,9 @@ import type { PlayerValue } from '../domain/player-values';
 import { enqueuePlayerPricesSyncJob } from '../jobs/data-sync-enqueue';
 import type { StoredPlayerValue } from '../repositories/player-values';
 import { playerValuesRepository } from '../repositories/player-values';
+import { playerRepository } from '../repositories/players';
 import { createTeamsMap, transformPlayerValuesWithChanges } from '../transformers/player-values';
-import type { RawFPLElement } from '../types';
+import type { Player, RawFPLElement } from '../types';
 import { ELEMENT_TYPE_MAP } from '../types/base.type';
 import { notifyTwoBots } from '../utils/notify';
 import { logError, logInfo } from '../utils/logger';
@@ -20,6 +21,7 @@ export type PlayerValuesSyncDependencies = {
   resolvePlayerSyncEvent: typeof resolvePlayerSyncEvent;
   findLatestForAllPlayers: typeof playerValuesRepository.findLatestForAllPlayers;
   findByChangeDate: typeof playerValuesRepository.findByChangeDate;
+  findPlayersByIds: typeof playerRepository.findByIds;
   insertBatch: typeof playerValuesRepository.insertBatch;
   loadTeamsBasicInfo: typeof loadTeamsBasicInfo;
   inspectCachedValues: typeof playerValuesCache.inspect;
@@ -35,6 +37,7 @@ const defaultDependencies: PlayerValuesSyncDependencies = {
   resolvePlayerSyncEvent,
   findLatestForAllPlayers: playerValuesRepository.findLatestForAllPlayers,
   findByChangeDate: playerValuesRepository.findByChangeDate,
+  findPlayersByIds: playerRepository.findByIds,
   insertBatch: playerValuesRepository.insertBatch,
   loadTeamsBasicInfo,
   inspectCachedValues: playerValuesCache.inspect,
@@ -121,24 +124,31 @@ export function planPlayerValueCacheRepairs(
 function enrichStoredRows(
   rows: StoredPlayerValue[],
   elementsById: Map<number, RawFPLElement>,
+  retainedPlayersById: Map<number, Player>,
   teamsMap: Map<number, { name: string; shortName: string }>,
 ): PlayerValue[] {
   return rows.map((row) => {
-    const player = elementsById.get(row.elementId);
-    if (!player) {
-      throw new Error(`Bootstrap player missing for stored value: ${row.elementId}`);
+    const livePlayer = elementsById.get(row.elementId);
+    const retainedPlayer = retainedPlayersById.get(row.elementId);
+    const identity = livePlayer
+      ? { teamId: livePlayer.team, webName: livePlayer.web_name }
+      : retainedPlayer
+        ? { teamId: retainedPlayer.teamId, webName: retainedPlayer.webName }
+        : null;
+    if (!identity) {
+      throw new Error(`Player identity missing for stored value: ${row.elementId}`);
     }
-    const team = teamsMap.get(player.team);
+    const team = teamsMap.get(identity.teamId);
     if (!team) {
-      throw new Error(`Team missing for stored player value: ${player.team}`);
+      throw new Error(`Team missing for stored player value: ${identity.teamId}`);
     }
 
     return {
       ...row,
       elementType: row.elementType as 1 | 2 | 3 | 4,
       elementTypeName: ELEMENT_TYPE_MAP[row.elementType as 1 | 2 | 3 | 4],
-      webName: player.web_name,
-      teamId: player.team,
+      webName: identity.webName,
+      teamId: identity.teamId,
       teamName: team.name,
       teamShortName: team.shortName,
     };
@@ -232,7 +242,24 @@ export function createPlayerValuesSync(dependencies: PlayerValuesSyncDependencie
     }
 
     const elementsById = new Map(bootstrapData.elements.map((element) => [element.id, element]));
-    const expectedCacheRows = enrichStoredRows(persistedRows, elementsById, teamsMap);
+    const missingLivePlayerIds = Array.from(
+      new Set(
+        persistedRows
+          .map((row) => row.elementId)
+          .filter((elementId) => !elementsById.has(elementId)),
+      ),
+    );
+    const retainedPlayers =
+      missingLivePlayerIds.length > 0
+        ? await dependencies.findPlayersByIds(missingLivePlayerIds)
+        : [];
+    const retainedPlayersById = new Map(retainedPlayers.map((player) => [player.id, player]));
+    const expectedCacheRows = enrichStoredRows(
+      persistedRows,
+      elementsById,
+      retainedPlayersById,
+      teamsMap,
+    );
     const cacheSnapshot = await dependencies.inspectCachedValues(changeDate);
     const cacheRepairs = planPlayerValueCacheRepairs(expectedCacheRows, cacheSnapshot);
     // Even when every history field already matches, rewrite one verified
