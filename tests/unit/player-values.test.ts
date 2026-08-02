@@ -79,6 +79,13 @@ describe('Player Values Unit Tests', () => {
         expect(validatedValues).toEqual(playerValues);
       });
 
+      test('requires Start rows to keep lastValue at zero', () => {
+        expect(() => validatePlayerValue({ ...gkpPlayerValueFixture, lastValue: 0 })).not.toThrow();
+        expect(() => validatePlayerValue({ ...gkpPlayerValueFixture, lastValue: 55 })).toThrow(
+          'Start rows must use 0',
+        );
+      });
+
       test('should throw on invalid player value', () => {
         expect(() => validatePlayerValue(invalidPlayerValueFixture)).toThrow();
       });
@@ -287,7 +294,7 @@ describe('Player Values Unit Tests', () => {
           15,
           teamsMap,
           previousValuesMap,
-          '2023-12-15T10:00:00.000Z',
+          '20231215',
         );
 
         expect(transformed.elementId).toBe(1);
@@ -300,14 +307,14 @@ describe('Player Values Unit Tests', () => {
         expect(transformed.value).toBe(142);
         expect(transformed.lastValue).toBe(138);
         expect(transformed.changeType).toBe('Rise');
-        expect(transformed.changeDate).toBe('2023-12-15T10:00:00.000Z');
+        expect(transformed.changeDate).toBe('20231215');
       });
 
       test('should handle transformation without previous values', () => {
         const transformed = transformPlayerValue(singleRawFPLElementFixture, 15, teamsMap);
 
         expect(transformed.value).toBe(142);
-        expect(transformed.lastValue).toBe(142); // Same as current when no previous
+        expect(transformed.lastValue).toBe(0);
         expect(transformed.changeType).toBe('Start');
       });
 
@@ -342,10 +349,10 @@ describe('Player Values Unit Tests', () => {
           previousValuesMap,
         );
 
-        expect(transformed).toHaveLength(3);
+        // Alisson is unchanged from the previous-value map, so no history row is emitted.
+        expect(transformed).toHaveLength(2);
         expect(transformed[0].webName).toBe('Haaland');
-        expect(transformed[1].webName).toBe('Alisson');
-        expect(transformed[2].webName).toBe('Alexander-Arnold');
+        expect(transformed[1].webName).toBe('Alexander-Arnold');
       });
 
       test('should handle partial transformation errors gracefully', () => {
@@ -417,6 +424,15 @@ describe('Player Values Unit Tests', () => {
 
         expect(transformed[0].changeType).toBe('Faller');
         expect(transformed[0].lastValue).toBe(65);
+      });
+
+      test('fails the complete changed batch when any player cannot be transformed', () => {
+        const valid = { ...singleRawFPLElementFixture, id: 901, now_cost: 60 };
+        const invalid = { ...valid, id: 902, team: 999 };
+
+        expect(() =>
+          transformPlayerValuesWithChanges([valid, invalid], 22, teamsMap, new Map(), changeDate),
+        ).toThrow('index 1');
       });
     });
 

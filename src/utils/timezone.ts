@@ -15,6 +15,16 @@ function getPart(parts: Intl.DateTimeFormatPart[], type: Intl.DateTimeFormatPart
   return parts.find((part) => part.type === type)?.value ?? '00';
 }
 
+export function formatCronDateKey(date: Date = new Date()): string {
+  const parts = utc8Formatter.formatToParts(date);
+  return `${getPart(parts, 'year')}${getPart(parts, 'month')}${getPart(parts, 'day')}`;
+}
+
+export function getCronMinute(date: Date = new Date()): number {
+  const minute = Number.parseInt(getPart(utc8Formatter.formatToParts(date), 'minute'), 10);
+  return Number.isFinite(minute) ? minute : 0;
+}
+
 /**
  * Format timestamp as ISO-like UTC+8 string.
  * Example: 2026-04-19T23:05:01.123+08:00

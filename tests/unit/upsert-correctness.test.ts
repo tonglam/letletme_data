@@ -16,14 +16,14 @@ import type { RawFPLEntryTransfer } from '../../src/types';
  * blow up the batch.
  */
 
-type CapturedQuery = { sql: string; method: string };
+type CapturedQuery = { sql: string; method: string; params: unknown[] };
 
 type ProxyDb = Parameters<typeof createPlayerValuesRepository>[0];
 
 function createCapturingDb(rowsForAll: unknown[] = []) {
   const queries: CapturedQuery[] = [];
-  const db = drizzle(async (query, _params, method) => {
-    queries.push({ sql: query, method });
+  const db = drizzle(async (query, params, method) => {
+    queries.push({ sql: query, method, params });
     return { rows: method === 'execute' ? [] : rowsForAll };
   }) as unknown as NonNullable<ProxyDb>;
   return { db, queries };
@@ -137,6 +137,16 @@ describe('player-values insertBatch (H6)', () => {
 
     expect(queries).toHaveLength(1);
     expect(queries[0].sql).toContain('on conflict ("element_id","change_date") do nothing');
+  });
+
+  it('maps the domain Faller label to the database fall enum', async () => {
+    const { db, queries } = createCapturingDb();
+    const repo = createPlayerValuesRepository(db);
+
+    await repo.insertBatch([{ ...buildPlayerValue(1), changeType: 'Faller' }]);
+
+    expect(queries[0].params).toContain('fall');
+    expect(queries[0].params).not.toContain('faller');
   });
 
   it('reports the actually inserted count and only those domain rows', async () => {

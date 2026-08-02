@@ -5,39 +5,6 @@ import { redisSingleton } from './singleton';
 import type { PlayerValue } from '../domain/player-values';
 
 export const playerValuesCache = {
-  // Store player values by changeDate: PlayerValue:{changeDate}
-  // Replaces the whole hash (use after a full re-read of the date, or clear).
-  async set(changeDate: string, playerValues: PlayerValue[]): Promise<void> {
-    try {
-      const redis = await redisSingleton.getClient();
-      const key = `PlayerValue:${changeDate}`;
-      // PlayerValueMissing:* is written by an external consumer; delete it here
-      // defensively whenever we refresh the real PlayerValue hash for that date.
-      const missingKey = `PlayerValueMissing:${changeDate}`;
-
-      // Use pipeline for atomic operation
-      const pipeline = redis.pipeline();
-
-      // Clear existing hash
-      pipeline.del(key, missingKey);
-
-      if (playerValues.length > 0) {
-        // Store each player value as a hash field (element ID -> full player value JSON)
-        const valueFields: Record<string, string> = {};
-        for (const playerValue of playerValues) {
-          valueFields[playerValue.elementId.toString()] = JSON.stringify(playerValue);
-        }
-        pipeline.hset(key, valueFields);
-      }
-
-      await pipeline.exec();
-      logDebug('Player values cache updated (hash)', { count: playerValues.length, changeDate });
-    } catch (error) {
-      logError('Player values cache set error', error);
-      throw error;
-    }
-  },
-
   /**
    * Merge fields into PlayerValue:{date} without deleting the existing hash.
    * Used after partial ON CONFLICT DO NOTHING inserts so concurrent daily syncs
@@ -55,10 +22,11 @@ export const playerValuesCache = {
       for (const playerValue of playerValues) {
         valueFields[playerValue.elementId.toString()] = JSON.stringify(playerValue);
       }
-      const pipeline = redis.pipeline();
-      pipeline.del(missingKey);
-      pipeline.hset(key, valueFields);
-      await pipeline.exec();
+      // HSET first so a WRONGTYPE/OOM/network failure leaves the negative
+      // marker intact and rejects the job. The marker is cleared only after
+      // positive history fields were successfully written.
+      await redis.hset(key, valueFields);
+      await redis.del(missingKey);
       logDebug('Player values cache merged (hash fields)', {
         count: playerValues.length,
         changeDate,

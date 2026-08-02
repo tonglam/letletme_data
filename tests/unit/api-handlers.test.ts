@@ -17,10 +17,18 @@ class JobNotFoundError extends Error {
 
 const listTriggerableJobs = mock(() => [
   { name: 'events-sync', description: 'Sync events from FPL API', schedule: 'Daily at 6:35 AM' },
+  {
+    name: 'player-prices',
+    description: 'Replay persisted price changes',
+    schedule: 'Daily at 9:40 AM',
+  },
 ]);
-const triggerJob = mock(async (name: string) => {
+const triggerJob = mock(async (name: string, _input?: unknown) => {
   if (name === 'events-sync') {
     return { kind: 'enqueued' as const, jobId: 'job-events-1', message: 'Job triggered' };
+  }
+  if (name === 'player-prices') {
+    return { kind: 'enqueued' as const, jobId: 'job-player-prices-1', message: 'Job triggered' };
   }
   throw new JobNotFoundError(name);
 });
@@ -209,7 +217,20 @@ describe('jobsAPI handlers', () => {
     };
     expect(body.success).toBe(true);
     expect(body.jobId).toBe('job-events-1');
-    expect(triggerJob).toHaveBeenCalledWith('events-sync');
+    expect(triggerJob).toHaveBeenCalledWith('events-sync', undefined);
+  });
+
+  test('POST /jobs/player-prices/trigger forwards the required change date', async () => {
+    const response = await jobsAPI.handle(
+      new Request('http://localhost/jobs/player-prices/trigger', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ changeDate: '20260803' }),
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(triggerJob).toHaveBeenCalledWith('player-prices', { changeDate: '20260803' });
   });
 
   test('POST /jobs/unknown/trigger returns 404', async () => {

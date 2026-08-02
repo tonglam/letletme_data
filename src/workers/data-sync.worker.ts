@@ -11,6 +11,7 @@ import { syncEvents } from '../services/events.service';
 import { syncAllGameweeks, syncFixtures } from '../services/fixtures.service';
 import { syncPhases } from '../services/phases.service';
 import { syncPlayers } from '../services/players.service';
+import { syncPlayerPricesForDate } from '../services/player-prices.service';
 import { syncCurrentPlayerStats, syncPlayerStatsForEvent } from '../services/player-stats.service';
 import { syncCurrentPlayerValues } from '../services/player-values.service';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
@@ -19,6 +20,7 @@ import { getQueueConnection } from '../utils/queue';
 import { logError, logInfo } from '../utils/logger';
 import { alertOnFinalFailure } from '../utils/notify';
 import { withMutationConflictGuard } from '../utils/mutation-lock';
+import { formatCronDateKey } from '../utils/timezone';
 import { startStrictPriorityGate } from './strict-priority-gate';
 import type { WorkerRuntime } from './worker-runtime';
 
@@ -54,6 +56,11 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
             return syncTeams();
           case 'players':
             return syncPlayers();
+          case 'player-prices':
+            if (!job.data.changeDate) {
+              throw new Error('player-prices job requires changeDate');
+            }
+            return syncPlayerPricesForDate(job.data.changeDate);
           case 'player-stats':
             return job.data.eventId !== undefined
               ? syncPlayerStatsForEvent(job.data.eventId)
@@ -61,7 +68,9 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
           case 'phases':
             return syncPhases();
           case 'player-values':
-            return syncCurrentPlayerValues();
+            return syncCurrentPlayerValues(
+              job.data.changeDate ?? formatCronDateKey(new Date(job.data.triggeredAt)),
+            );
           default:
             throw new Error(`Unknown data-sync job: ${job.name}`);
         }

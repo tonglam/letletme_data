@@ -1,12 +1,14 @@
 import { getDataSyncJobPriority, type DataSyncPriorityJobName } from '../domain/job-priority';
 import { getDataSyncQueue, type DataSyncJobName } from '../queues/data-sync.queue';
 import { logError, logInfo } from '../utils/logger';
+import { formatCronDateKey } from '../utils/timezone';
 
-export type DataSyncJobSource = 'cron' | 'manual' | 'api' | 'event-transition';
+export type DataSyncJobSource = 'cron' | 'manual' | 'api' | 'event-transition' | 'cascade';
 
-interface DataSyncEnqueueOptions {
+export interface DataSyncEnqueueOptions {
   jobId?: string;
   eventId?: number;
+  changeDate?: string;
   /** When true (default for explicit jobId), remove job on settle so re-triggers work. */
   removeOnSettle?: boolean;
 }
@@ -21,7 +23,8 @@ function defaultDataSyncJobId(
     return undefined;
   }
   const eventPart = options.eventId !== undefined ? `-e${options.eventId}` : '';
-  return `${jobName}${eventPart}-${source}`;
+  const datePart = options.changeDate !== undefined ? `-${options.changeDate}` : '';
+  return `${jobName}${eventPart}${datePart}-${source}`;
 }
 
 async function enqueueDataSyncJob(
@@ -41,6 +44,7 @@ async function enqueueDataSyncJob(
         source,
         triggeredAt: new Date().toISOString(),
         ...(options.eventId !== undefined ? { eventId: options.eventId } : {}),
+        ...(options.changeDate !== undefined ? { changeDate: options.changeDate } : {}),
       },
       {
         attempts: 3,
@@ -87,6 +91,11 @@ export const enqueueTeamsSyncJob = (source?: DataSyncJobSource) =>
 export const enqueuePlayersSyncJob = (source?: DataSyncJobSource) =>
   enqueueDataSyncJob('players', source);
 
+export const enqueuePlayerPricesSyncJob = (
+  source: DataSyncJobSource,
+  options: DataSyncEnqueueOptions & { changeDate: string },
+) => enqueueDataSyncJob('player-prices', source, options);
+
 export const enqueuePlayerStatsSyncJob = (
   source?: DataSyncJobSource,
   options?: DataSyncEnqueueOptions,
@@ -98,4 +107,8 @@ export const enqueuePhasesSyncJob = (source?: DataSyncJobSource) =>
 export const enqueuePlayerValuesSyncJob = (
   source?: DataSyncJobSource,
   options?: DataSyncEnqueueOptions,
-) => enqueueDataSyncJob('player-values', source, options);
+) =>
+  enqueueDataSyncJob('player-values', source, {
+    ...options,
+    changeDate: options?.changeDate ?? formatCronDateKey(),
+  });

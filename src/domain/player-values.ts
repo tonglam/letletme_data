@@ -40,7 +40,7 @@ export type RawPlayerValues = readonly RawPlayerValue[];
 // Domain Validation Schemas
 // ================================
 
-export const PlayerValueSchema = z.object({
+const PlayerValueBaseSchema = z.object({
   elementId: z.number().int().positive('Element ID must be a positive integer'),
   webName: z.string().min(1, 'Web name is required').max(30, 'Web name too long'),
   elementType: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4)], {
@@ -61,23 +61,46 @@ export const PlayerValueSchema = z.object({
     .int()
     .min(35, 'Value must be at least 3.5m')
     .max(200, 'Value cannot exceed 20.0m'),
-  changeDate: z.string().min(1, 'Change date is required'),
+  changeDate: z.string().regex(/^\d{8}$/, 'Change date must use YYYYMMDD format'),
   changeType: z.enum(['Start', 'Rise', 'Faller'], {
     errorMap: () => ({ message: 'Change type must be Start, Rise, or Faller' }),
   }),
   lastValue: z
     .number()
     .int()
-    .min(35, 'Last value must be at least 3.5m')
+    .min(0, 'Last value cannot be negative')
     .max(200, 'Last value cannot exceed 20.0m'),
 });
 
-export const RawPlayerValueSchema = PlayerValueSchema.omit({
+function validateLastValueSemantics(
+  value: { changeType: ValueChangeType; lastValue: number },
+  context: z.RefinementCtx,
+) {
+  if (value.changeType === 'Start' && value.lastValue !== 0) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['lastValue'],
+      message: 'Start rows must use 0 as the last value',
+    });
+  }
+
+  if (value.changeType !== 'Start' && value.lastValue < 35) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['lastValue'],
+      message: 'Changed rows must have a previous value of at least 3.5m',
+    });
+  }
+}
+
+export const PlayerValueSchema = PlayerValueBaseSchema.superRefine(validateLastValueSemantics);
+
+export const RawPlayerValueSchema = PlayerValueBaseSchema.omit({
   webName: true,
   elementTypeName: true,
   teamName: true,
   teamShortName: true,
-});
+}).superRefine(validateLastValueSemantics);
 
 // ================================
 // Domain Business Logic
@@ -229,7 +252,9 @@ export function getValueChangeStats(playerValues: PlayerValues): {
         break;
     }
     totalValue += pv.value;
-    totalValueChange += getValueChangeAmount(pv);
+    if (pv.changeType !== 'Start') {
+      totalValueChange += getValueChangeAmount(pv);
+    }
   }
 
   return {

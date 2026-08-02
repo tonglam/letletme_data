@@ -27,6 +27,7 @@ export type DataSyncPriorityJobName =
   | 'fixtures-all-gameweeks'
   | 'teams'
   | 'players'
+  | 'player-prices'
   | 'player-stats'
   | 'phases'
   | 'player-values';

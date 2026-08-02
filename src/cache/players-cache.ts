@@ -150,6 +150,32 @@ const createPlayerHashCache = () => {
       }
     },
 
+    /** Merge only the supplied player fields; every other hash field is preserved. */
+    mergePlayers: async (players: Player[], season?: string): Promise<void> => {
+      if (players.length === 0) {
+        return;
+      }
+
+      try {
+        const key = await getHashKey(season);
+        const redis = await redisSingleton.getClient();
+        const hashEntries: Record<string, string> = {};
+        for (const player of players) {
+          hashEntries[String(player.id)] = JSON.stringify(player);
+        }
+
+        await redis.hset(key, hashEntries);
+        logDebug('Players cache fields merged', { key, count: players.length });
+      } catch (error) {
+        logError('Players cache merge error', error, { count: players.length });
+        throw new CacheError(
+          'Failed to merge players in cache',
+          'PLAYERS_MERGE_ERROR',
+          error instanceof Error ? error : undefined,
+        );
+      }
+    },
+
     /**
      * Get players by team ID
      */
@@ -239,6 +265,10 @@ export const playersCache = {
 
   async set(players: Player[], season?: string): Promise<void> {
     return playerHashCacheInstance.setAllPlayers(players, season);
+  },
+
+  async merge(players: Player[], season?: string): Promise<void> {
+    return playerHashCacheInstance.mergePlayers(players, season);
   },
 
   async clear(): Promise<void> {

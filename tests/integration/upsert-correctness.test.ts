@@ -8,6 +8,7 @@ import type { PlayerValue } from '../../src/domain/player-values';
 import { getDbClient } from '../../src/db/singleton';
 import { createEntryEventTransfersRepository } from '../../src/repositories/entry-event-transfers';
 import { createPlayerValuesRepository } from '../../src/repositories/player-values';
+import { createPlayerRepository } from '../../src/repositories/players';
 import type { RawFPLEntryTransfer } from '../../src/types';
 
 /**
@@ -32,6 +33,7 @@ async function db() {
 }
 const transfersRepository = createEntryEventTransfersRepository();
 const playerValuesRepository = createPlayerValuesRepository();
+const playerRepository = createPlayerRepository();
 
 function buildPlayerValue(elementId: number, value: number): PlayerValue {
   return {
@@ -84,6 +86,8 @@ beforeAll(async () => {
           code: id,
           type: 1,
           team_id: TEAM_ID,
+          price: 50,
+          start_price: 50,
           web_name: `Player ${id}`,
         })),
       )}
@@ -218,5 +222,42 @@ describe('player-values concurrent insert race (H6)', () => {
     // Idempotent re-run of the same day inserts nothing
     const rerun = await playerValuesRepository.insertBatch(batchA);
     expect(rerun.count).toBe(0);
+  });
+});
+
+describe('affected-player current price update', () => {
+  test('updates and returns only requested complete player rows idempotently', async () => {
+    const client = await db();
+    await client`
+      UPDATE players
+      SET price = CASE
+        WHEN id = ${VALUE_PLAYER_A} THEN 50
+        WHEN id = ${VALUE_PLAYER_B} THEN 100
+        WHEN id = ${PLAYER_OUT} THEN 77
+        ELSE price
+      END
+      WHERE id IN (${VALUE_PLAYER_A}, ${VALUE_PLAYER_B}, ${PLAYER_OUT})
+    `;
+
+    const updates = [
+      { elementId: VALUE_PLAYER_A, value: 51 },
+      { elementId: VALUE_PLAYER_B, value: 99 },
+    ];
+    const first = await playerRepository.updatePrices(updates);
+    const second = await playerRepository.updatePrices(updates);
+
+    expect(first.map((row) => row.id).sort()).toEqual([VALUE_PLAYER_A, VALUE_PLAYER_B]);
+    expect(first.every((row) => row.webName.length > 0 && row.teamId === TEAM_ID)).toBe(true);
+    expect(second.map((row) => row.price).sort((a, b) => a - b)).toEqual([51, 99]);
+
+    const stored = await client<{ id: number; price: number }[]>`
+      SELECT id, price
+      FROM players
+      WHERE id IN (${VALUE_PLAYER_A}, ${VALUE_PLAYER_B}, ${PLAYER_OUT})
+      ORDER BY id
+    `;
+    expect(stored.find((row) => row.id === VALUE_PLAYER_A)?.price).toBe(51);
+    expect(stored.find((row) => row.id === VALUE_PLAYER_B)?.price).toBe(99);
+    expect(stored.find((row) => row.id === PLAYER_OUT)?.price).toBe(77);
   });
 });

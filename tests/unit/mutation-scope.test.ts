@@ -17,6 +17,17 @@ describe('resolveMutationScopes', () => {
     expect(scopes).toEqual(['event-live:event:33']);
   });
 
+  it('serializes partial price updates with the full players sync', () => {
+    const fullSync = resolveMutationScopes({ queueName: 'data-sync-p1', jobName: 'players' });
+    const priceSync = resolveMutationScopes({
+      queueName: 'data-sync-p1',
+      jobName: 'player-prices',
+    });
+
+    expect(fullSync).toEqual(['data-core:players']);
+    expect(priceSync).toEqual(fullSync);
+  });
+
   it('adds event-scoped conflict groups for league event results', () => {
     const scopes = resolveMutationScopes({
       queueName: 'league-sync-p3',

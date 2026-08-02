@@ -1,24 +1,24 @@
 import { cron } from '@elysiajs/cron';
 import { Elysia } from 'elysia';
 
-import { shouldRunCurrentEventJob } from './current-event-gate';
 import { enqueuePlayerValuesSyncJob } from './data-sync-enqueue';
+import { PLAYER_VALUES_CRON_PATTERN } from '../domain/job-schedules';
 import { playerValuesRepository } from '../repositories/player-values';
+import {
+  resolvePlayerSyncEvent,
+  type PlayerSyncEvent,
+} from '../services/player-sync-event.service';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { logInfo } from '../utils/logger';
-import { CRON_TIMEZONE } from '../utils/timezone';
-
-function getChangeDateKey(date: Date) {
-  return date.toISOString().split('T')[0].replace(/-/g, '');
-}
+import { CRON_TIMEZONE, formatCronDateKey, getCronMinute } from '../utils/timezone';
 
 export type PlayerValuesWindowDependencies = {
-  shouldRunCurrentEventJob: (jobName: string, date: Date) => Promise<boolean>;
+  resolvePlayerSyncEvent: (date: Date) => Promise<PlayerSyncEvent | null>;
   hasChangesForDate: (changeDate: string) => Promise<boolean>;
 };
 
 const defaultDependencies: PlayerValuesWindowDependencies = {
-  shouldRunCurrentEventJob,
+  resolvePlayerSyncEvent,
   hasChangesForDate: (changeDate) => playerValuesRepository.hasChangesForDate(changeDate),
 };
 
@@ -26,11 +26,18 @@ export async function shouldRunPlayerValuesSync(
   now: Date,
   dependencies: PlayerValuesWindowDependencies = defaultDependencies,
 ) {
-  if (!(await dependencies.shouldRunCurrentEventJob('player-values-sync', now))) {
+  const syncEvent = await dependencies.resolvePlayerSyncEvent(now);
+  if (!syncEvent) {
     return false;
   }
 
-  const changeDate = getChangeDateKey(now);
+  // The cron covers the full in-season polling window. Before GW1, only its
+  // first tick is allowed through so an unchanged bootstrap is checked once.
+  if (syncEvent.phase === 'preseason' && getCronMinute(now) !== 25) {
+    return false;
+  }
+
+  const changeDate = formatCronDateKey(now);
   const alreadySynced = await dependencies.hasChangesForDate(changeDate);
   if (alreadySynced) {
     logInfo('Skipping player values sync - price changes already recorded for today', {
@@ -45,16 +52,14 @@ export async function shouldRunPlayerValuesSync(
 /**
  * Player Values Window Cron
  *
- * Polls FPL player prices every minute between 09:25 and 09:35 to
- * capture the once-per-day price update. Enqueues a BullMQ data-sync job
- * (retry/backoff) instead of running the sync inline so ticks cannot overlap.
- * The cron bails out immediately once today's price changes have been recorded.
+ * Before GW1 only the 09:25 tick runs. Once an event is current, prices are
+ * polled every minute between 09:25 and 09:35 until the daily change is stored.
  */
 export function registerPlayerValuesWindowJobs(app: Elysia) {
   return app.use(
     cron({
       name: 'player-values-sync',
-      pattern: '25-35 9 * * *',
+      pattern: PLAYER_VALUES_CRON_PATTERN,
       timezone: CRON_TIMEZONE,
       async run() {
         try {
@@ -64,10 +69,11 @@ export function registerPlayerValuesWindowJobs(app: Elysia) {
               return;
             }
 
-            const changeDate = getChangeDateKey(now);
+            const changeDate = formatCronDateKey(now);
             const job = await enqueuePlayerValuesSyncJob('cron', {
               // Stable id prevents stacking duplicate jobs during the 09:25-09:35 window.
               jobId: `player-values-${changeDate}`,
+              changeDate,
             });
             logInfo('Player values sync job enqueued via cron', { jobId: job.id });
           });

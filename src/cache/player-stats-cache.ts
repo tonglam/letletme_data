@@ -1,3 +1,5 @@
+import { randomUUID } from 'crypto';
+
 import { CacheError } from '../utils/errors';
 import { logDebug, logError } from '../utils/logger';
 import { getActiveCacheSeason } from './cache-season';
@@ -46,9 +48,18 @@ export const createPlayerStatsHashCache = () => {
     },
 
     setPlayerStatsByEvent: async (eventId: EventId, playerStats: PlayerStat[]): Promise<void> => {
+      if (playerStats.length === 0) {
+        throw new CacheError(
+          `Refusing to publish an empty player stats view for event: ${eventId}`,
+          'PLAYER_STATS_EMPTY_VIEW_ERROR',
+        );
+      }
+
+      let stagingKey: string | null = null;
       try {
         const redis = await redisSingleton.getClient();
         const key = await getHashKey();
+        stagingKey = `${key}:staging:${randomUUID()}`;
 
         const hashEntries: Record<string, string> = {};
         for (const playerStat of playerStats) {
@@ -57,18 +68,23 @@ export const createPlayerStatsHashCache = () => {
           }
         }
 
-        const pipeline = redis.pipeline();
-        pipeline.del(key);
-
-        if (Object.keys(hashEntries).length === 0) {
-          await pipeline.exec();
-          logDebug('Player stats cache cleared (no entries to set)', { key, eventId });
-          return;
+        const expectedFields = Object.keys(hashEntries).length;
+        if (expectedFields !== playerStats.length) {
+          throw new Error('Player stats contain duplicate element IDs');
         }
 
-        pipeline.hset(key, hashEntries);
-
-        await pipeline.exec();
+        // Build a complete staging hash, verify it, then atomically rename it
+        // over the latest view. Readers see either the old complete view or
+        // the new complete view, never a delete/rebuild gap.
+        await redis.hset(stagingKey, hashEntries);
+        const stagedFields = await redis.hlen(stagingKey);
+        if (stagedFields !== expectedFields) {
+          throw new Error(
+            `Incomplete player stats staging hash: expected ${expectedFields}, got ${stagedFields}`,
+          );
+        }
+        await redis.rename(stagingKey, key);
+        stagingKey = null;
         logDebug('Player stats cache batch set by event', {
           key,
           eventId,
@@ -76,6 +92,14 @@ export const createPlayerStatsHashCache = () => {
           elementIds: Object.keys(hashEntries).slice(0, 5),
         });
       } catch (error) {
+        if (stagingKey) {
+          try {
+            const redis = await redisSingleton.getClient();
+            await redis.del(stagingKey);
+          } catch {
+            // Preserve the original publication failure.
+          }
+        }
         logError('Player stats cache batch set by event error', error, {
           eventId,
           count: playerStats.length,
