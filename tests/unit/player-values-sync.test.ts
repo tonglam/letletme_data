@@ -93,6 +93,8 @@ describe('player-values synchronization orchestration', () => {
     );
     const enqueuePlayerPrices = mock(async () => ({ id: 'unexpected' }) as never);
     const notify = mock(async () => undefined);
+    const mergeCachedValues = mock(async () => undefined);
+    const deleteCachedFields = mock(async () => undefined);
     const sync = createPlayerValuesSync(
       buildDependencies({
         resolvePlayerSyncEvent: async () =>
@@ -116,11 +118,16 @@ describe('player-values synchronization orchestration', () => {
         },
         enqueuePlayerPrices,
         notify,
+        mergeCachedValues,
+        deleteCachedFields,
       }),
     );
 
     expect(await sync(changeDate)).toEqual({ count: 1 });
     expect(persisted[0]).toMatchObject({ changeType: 'Start', lastValue: 0 });
+    // Start rows seed the DB baseline but must never be published to Redis.
+    expect(mergeCachedValues).not.toHaveBeenCalled();
+    expect(deleteCachedFields).not.toHaveBeenCalled();
     expect(enqueuePlayerPrices).not.toHaveBeenCalled();
     expect(notify).not.toHaveBeenCalled();
   });
@@ -200,7 +207,7 @@ describe('player-values synchronization orchestration', () => {
   });
 
   test('retries negative-marker deletion after a complete positive hash write', async () => {
-    const persisted = storedValue(singleRawFPLElementFixture.now_cost, 'Start', 0);
+    const persisted = storedValue(singleRawFPLElementFixture.now_cost, 'Rise', 141);
     const cachedValue: PlayerValue = {
       ...persisted,
       elementType: 4,
@@ -235,7 +242,7 @@ describe('player-values synchronization orchestration', () => {
   });
 
   test('writes verified fields before deleting stale or mis-keyed fields', async () => {
-    const persisted = storedValue(singleRawFPLElementFixture.now_cost, 'Start', 0);
+    const persisted = storedValue(singleRawFPLElementFixture.now_cost, 'Rise', 141);
     const cachedValue: PlayerValue = {
       ...persisted,
       elementType: 4,
@@ -273,6 +280,81 @@ describe('player-values synchronization orchestration', () => {
 
     expect(await sync(changeDate)).toEqual({ count: 0 });
     expect(operations).toEqual(['hset', 'hdel']);
+  });
+
+  test('excludes Start rows from the cache while persisting them', async () => {
+    const riseRow = storedValue(singleRawFPLElementFixture.now_cost, 'Rise', 141);
+    const startRow: StoredPlayerValue = {
+      elementId: 999, // newly listed player; deliberately absent from bootstrap
+      elementType: 4,
+      eventId: 1,
+      value: 55,
+      changeDate,
+      changeType: 'Start',
+      lastValue: 0,
+    };
+    const mergeCachedValues = mock(async (_date: string, rows: PlayerValue[]) => {
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        elementId: singleRawFPLElementFixture.id,
+        changeType: 'Rise',
+      });
+    });
+    const deleteCachedFields = mock(async () => undefined);
+    const sync = createPlayerValuesSync(
+      buildDependencies({
+        findLatestForAllPlayers: async () => [
+          {
+            elementId: singleRawFPLElementFixture.id,
+            value: singleRawFPLElementFixture.now_cost,
+            changeDate: '20260802',
+          },
+        ],
+        findByChangeDate: async () => [riseRow, startRow],
+        mergeCachedValues,
+        deleteCachedFields,
+      }),
+    );
+
+    expect(await sync(changeDate)).toEqual({ count: 0 });
+    expect(mergeCachedValues).toHaveBeenCalledTimes(1);
+    expect(deleteCachedFields).not.toHaveBeenCalled();
+  });
+
+  test('a Start-only day deletes stale hash fields without merging', async () => {
+    const persisted = storedValue(singleRawFPLElementFixture.now_cost, 'Start', 0);
+    const staleValue: PlayerValue = {
+      ...persisted,
+      elementType: 4,
+      elementTypeName: 'FWD',
+      webName: 'Ghost Player',
+      teamId: singleRawFPLElementFixture.team,
+      teamName: 'Manchester City',
+      teamShortName: 'MCI',
+    };
+    const mergeCachedValues = mock(async () => undefined);
+    const deleteCachedFields = mock(async (_date: string, fields: string[]) => {
+      expect(fields).toEqual(['999']);
+    });
+    const sync = createPlayerValuesSync(
+      buildDependencies({
+        findLatestForAllPlayers: async () => [
+          {
+            elementId: singleRawFPLElementFixture.id,
+            value: singleRawFPLElementFixture.now_cost,
+            changeDate: '20260802',
+          },
+        ],
+        findByChangeDate: async () => [persisted],
+        inspectCachedValues: async () => ({ fields: ['999'], entries: [['999', staleValue]] }),
+        mergeCachedValues,
+        deleteCachedFields,
+      }),
+    );
+
+    expect(await sync(changeDate)).toEqual({ count: 0 });
+    expect(mergeCachedValues).not.toHaveBeenCalled();
+    expect(deleteCachedFields).toHaveBeenCalledTimes(1);
   });
 
   test('repairs persisted history from retained player data after a roster omission', async () => {
