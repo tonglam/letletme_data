@@ -27,4 +27,18 @@ describe('player-values cache repair selection', () => {
     expect(findPlayerValueCacheRepairs([value], null)).toEqual([value]);
     expect(findPlayerValueCacheRepairs([value], [{ ...value, lastValue: 50 }])).toEqual([value]);
   });
+
+  test('repairs stale enrichment fields as part of the complete cached shape', () => {
+    const staleValues: PlayerValue[] = [
+      { ...value, webName: 'Old Player' },
+      { ...value, elementTypeName: 'FWD' },
+      { ...value, teamId: 2 },
+      { ...value, teamName: 'Old Team' },
+      { ...value, teamShortName: 'OLD' },
+    ];
+
+    for (const staleValue of staleValues) {
+      expect(findPlayerValueCacheRepairs([value], [staleValue])).toEqual([value]);
+    }
+  });
 });

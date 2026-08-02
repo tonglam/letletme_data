@@ -84,8 +84,13 @@ function formatPlayerValuesNotification(
 function playerValueMatches(left: PlayerValue, right: PlayerValue): boolean {
   return (
     left.elementId === right.elementId &&
+    left.webName === right.webName &&
     left.eventId === right.eventId &&
     left.elementType === right.elementType &&
+    left.elementTypeName === right.elementTypeName &&
+    left.teamId === right.teamId &&
+    left.teamName === right.teamName &&
+    left.teamShortName === right.teamShortName &&
     left.value === right.value &&
     left.lastValue === right.lastValue &&
     left.changeDate === right.changeDate &&
@@ -210,8 +215,14 @@ export function createPlayerValuesSync(dependencies: PlayerValuesSyncDependencie
     const expectedCacheRows = enrichStoredRows(persistedRows, elementsById, teamsMap);
     const cachedRows = await dependencies.getCachedValues(changeDate);
     const cacheRepairs = findPlayerValueCacheRepairs(expectedCacheRows, cachedRows);
+    // Even when every history field already matches, rewrite one verified
+    // positive field before deleting the negative marker. This makes a retry
+    // recover when a prior HSET succeeded but its subsequent DEL failed.
+    const cacheWrites = cacheRepairs.length > 0 ? cacheRepairs : expectedCacheRows.slice(0, 1);
+    if (cacheWrites.length > 0) {
+      await dependencies.mergeCachedValues(changeDate, cacheWrites);
+    }
     if (cacheRepairs.length > 0) {
-      await dependencies.mergeCachedValues(changeDate, cacheRepairs);
       logInfo('Player values cache fields repaired', {
         changeDate,
         count: cacheRepairs.length,

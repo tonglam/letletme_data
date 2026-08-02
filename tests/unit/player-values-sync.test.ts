@@ -1,5 +1,6 @@
 import { describe, expect, mock, test } from 'bun:test';
 
+import type { PlayerValue } from '../../src/domain/player-values';
 import type { StoredPlayerValue } from '../../src/repositories/player-values';
 import {
   createPlayerValuesSync,
@@ -116,6 +117,38 @@ describe('player-values synchronization orchestration', () => {
 
     expect(await sync(changeDate)).toEqual({ count: 1 });
     expect(operations).toEqual(['persist', 'cache', 'enqueue', 'notify']);
+  });
+
+  test('retries negative-marker deletion after a complete positive hash write', async () => {
+    const persisted = storedValue(singleRawFPLElementFixture.now_cost, 'Start', 0);
+    const cachedValue: PlayerValue = {
+      ...persisted,
+      elementType: 4,
+      elementTypeName: 'FWD',
+      webName: singleRawFPLElementFixture.web_name,
+      teamId: singleRawFPLElementFixture.team,
+      teamName: 'Manchester City',
+      teamShortName: 'MCI',
+    };
+    const mergeCachedValues = mock(async () => undefined);
+    const sync = createPlayerValuesSync(
+      buildDependencies({
+        findLatestForAllPlayers: async () => [
+          {
+            elementId: singleRawFPLElementFixture.id,
+            value: singleRawFPLElementFixture.now_cost,
+            changeDate: '20260802',
+          },
+        ],
+        findByChangeDate: async () => [persisted],
+        getCachedValues: async () => [cachedValue],
+        mergeCachedValues,
+      }),
+    );
+
+    expect(await sync(changeDate)).toEqual({ count: 0 });
+    expect(mergeCachedValues).toHaveBeenCalledTimes(1);
+    expect(mergeCachedValues).toHaveBeenCalledWith(changeDate, [cachedValue]);
   });
 
   test('notification failure does not invalidate a successful capture', async () => {
