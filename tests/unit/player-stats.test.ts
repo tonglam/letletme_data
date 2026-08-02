@@ -724,10 +724,16 @@ describe('Player Stats Unit Tests', () => {
 });
 
 describe('shouldWritePlayerStatsView (FP-12 / H9)', () => {
-  test('only the current event may write the latest-event-wins view', () => {
+  test('prefers the current event for the latest-event-wins view', () => {
     expect(shouldWritePlayerStatsView(10, 10)).toBe(true);
     expect(shouldWritePlayerStatsView(9, 10)).toBe(false);
     expect(shouldWritePlayerStatsView(11, 10)).toBe(false);
-    expect(shouldWritePlayerStatsView(10, null)).toBe(false);
+    expect(shouldWritePlayerStatsView(11, 10, 11)).toBe(false);
+  });
+
+  test('allows the next event only when no current event exists', () => {
+    expect(shouldWritePlayerStatsView(1, null, 1)).toBe(true);
+    expect(shouldWritePlayerStatsView(2, null, 1)).toBe(false);
+    expect(shouldWritePlayerStatsView(1, null, null)).toBe(false);
   });
 });

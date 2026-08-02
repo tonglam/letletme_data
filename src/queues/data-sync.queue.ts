@@ -9,15 +9,18 @@ export type DataSyncJobName =
   | 'fixtures-all-gameweeks'
   | 'teams'
   | 'players'
+  | 'player-prices'
   | 'player-stats'
   | 'phases'
   | 'player-values';
 
 export interface DataSyncJobData {
-  source?: 'cron' | 'manual' | 'api' | 'event-transition';
+  source?: 'cron' | 'manual' | 'api' | 'event-transition' | 'cascade';
   triggeredAt: string;
   /** Optional event filter (fixtures, player-stats); absent = current/all behavior */
   eventId?: number;
+  /** Price-history date in the configured cron timezone (YYYYMMDD). */
+  changeDate?: string;
 }
 
 const defaultJobOptions = {

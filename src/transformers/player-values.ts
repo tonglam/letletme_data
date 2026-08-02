@@ -8,6 +8,7 @@ import type { RawFPLElement } from '../types';
 import type { EventId, ValueChangeType } from '../types/base.type';
 import { ELEMENT_TYPE_MAP } from '../types/base.type';
 import { logError, logInfo } from '../utils/logger';
+import { formatCronDateKey } from '../utils/timezone';
 
 // ================================
 // Data Transformation Functions
@@ -32,14 +33,14 @@ export function transformPlayerValue(
     }
 
     // Get previous value for comparison
-    const lastValue = previousValuesMap?.get(rawElement.id) || rawElement.now_cost;
+    const lastValue = previousValuesMap?.get(rawElement.id) ?? 0;
     const currentValue = rawElement.now_cost;
 
     // Determine change type
     const changeType = determineValueChangeType(currentValue, lastValue);
 
     // Use current date if no change date provided
-    const effectiveChangeDate = changeDate || new Date().toISOString();
+    const effectiveChangeDate = changeDate ?? formatCronDateKey();
 
     // Transform to domain model
     const playerValue: PlayerValue = {
@@ -78,9 +79,9 @@ export function transformRawPlayerValue(
 ): RawPlayerValue {
   try {
     const currentValue = rawElement.now_cost;
-    const effectiveLastValue = lastValue || currentValue;
+    const effectiveLastValue = lastValue ?? 0;
     const changeType = determineValueChangeType(currentValue, effectiveLastValue);
-    const effectiveChangeDate = changeDate || new Date().toISOString();
+    const effectiveChangeDate = changeDate ?? formatCronDateKey();
 
     const rawPlayerValue: RawPlayerValue = {
       elementId: rawElement.id,
@@ -319,28 +320,18 @@ export function transformPlayerValuesWithChanges(
   lastValueMap: Map<number, number>,
   changeDate: string,
 ): PlayerValue[] {
-  const results: PlayerValue[] = [];
-  let successCount = 0;
-  let errorCount = 0;
-
-  for (const player of changedPlayers) {
+  return changedPlayers.map((player, index) => {
     try {
-      // Get team information
       const team = teamsMap.get(player.team);
       if (!team) {
-        logError('Team not found for player', { playerId: player.id, teamId: player.team });
-        errorCount++;
-        continue;
+        throw new Error(`Team not found for ID: ${player.team}`);
       }
 
-      // Get last known value for this player
-      const lastValue = lastValueMap.get(player.id) || 0;
+      const lastValue = lastValueMap.get(player.id) ?? 0;
       const currentValue = player.now_cost;
-
-      // Determine change type based on price comparison
       const changeType = determineValueChangeType(currentValue, lastValue);
 
-      const playerValue: PlayerValue = {
+      return validatePlayerValue({
         eventId,
         elementId: player.id,
         webName: player.web_name,
@@ -353,26 +344,15 @@ export function transformPlayerValuesWithChanges(
         lastValue,
         changeDate,
         changeType,
-      };
-
-      results.push(playerValue);
-      successCount++;
-    } catch (error) {
-      logError('Failed to transform player value', error, {
-        playerId: player.id,
-        playerName: player.web_name,
       });
-      errorCount++;
+    } catch (error) {
+      throw new Error(
+        `Failed to transform changed player at index ${index}: ${
+          error instanceof Error ? error.message : 'Unknown error'
+        }`,
+      );
     }
-  }
-
-  logInfo('Player values transformation completed', {
-    totalInput: changedPlayers.length,
-    successfulOutput: successCount,
-    skippedCount: errorCount,
   });
-
-  return results;
 }
 
 /**

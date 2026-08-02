@@ -1,12 +1,52 @@
 import { playerValuesCache } from '../cache/operations';
+import type { PlayerValueCacheSnapshot } from '../cache/player-values-cache';
 import { fplClient } from '../clients/fpl';
 import type { PlayerValue } from '../domain/player-values';
+import { enqueuePlayerPricesSyncJob } from '../jobs/data-sync-enqueue';
+import type { StoredPlayerValue } from '../repositories/player-values';
 import { playerValuesRepository } from '../repositories/player-values';
-import { createTeamsMap } from '../transformers/player-values';
+import { playerRepository } from '../repositories/players';
+import { createTeamsMap, transformPlayerValuesWithChanges } from '../transformers/player-values';
+import type { Player, RawFPLElement } from '../types';
+import { ELEMENT_TYPE_MAP } from '../types/base.type';
 import { notifyTwoBots } from '../utils/notify';
-import { logInfo } from '../utils/logger';
+import { logError, logInfo } from '../utils/logger';
+import { getPlayerValueSeasonFloor } from '../utils/player-value-season';
 import { loadTeamsBasicInfo } from '../utils/teams';
-import { getCurrentEvent } from './events.service';
+import { formatCronDateKey } from '../utils/timezone';
+import { resolvePlayerSyncEvent } from './player-sync-event.service';
+
+export type PlayerValuesSyncDependencies = {
+  getBootstrap: typeof fplClient.getBootstrap;
+  resolvePlayerSyncEvent: typeof resolvePlayerSyncEvent;
+  findLatestForAllPlayers: typeof playerValuesRepository.findLatestForAllPlayers;
+  findByChangeDate: typeof playerValuesRepository.findByChangeDate;
+  findPlayersByIds: typeof playerRepository.findByIds;
+  insertBatch: typeof playerValuesRepository.insertBatch;
+  loadTeamsBasicInfo: typeof loadTeamsBasicInfo;
+  inspectCachedValues: typeof playerValuesCache.inspect;
+  mergeCachedValues: typeof playerValuesCache.merge;
+  deleteCachedFields: typeof playerValuesCache.deleteFields;
+  enqueuePlayerPrices: typeof enqueuePlayerPricesSyncJob;
+  notify: typeof notifyTwoBots;
+  getCurrentChangeDate: () => string;
+};
+
+const defaultDependencies: PlayerValuesSyncDependencies = {
+  getBootstrap: () => fplClient.getBootstrap(),
+  resolvePlayerSyncEvent,
+  findLatestForAllPlayers: playerValuesRepository.findLatestForAllPlayers,
+  findByChangeDate: playerValuesRepository.findByChangeDate,
+  findPlayersByIds: playerRepository.findByIds,
+  insertBatch: playerValuesRepository.insertBatch,
+  loadTeamsBasicInfo,
+  inspectCachedValues: playerValuesCache.inspect,
+  mergeCachedValues: playerValuesCache.merge,
+  deleteCachedFields: playerValuesCache.deleteFields,
+  enqueuePlayerPrices: enqueuePlayerPricesSyncJob,
+  notify: notifyTwoBots,
+  getCurrentChangeDate: () => formatCronDateKey(),
+};
 
 function formatPlayerValuesNotification(
   changeDate: string,
@@ -50,86 +90,230 @@ function formatPlayerValuesNotification(
  *
  * Player values are date-based (changeDate in YYYYMMDD format)
  */
-export async function syncCurrentPlayerValues(): Promise<{ count: number }> {
-  logInfo('Starting daily player values sync');
-
-  const bootstrapData = await fplClient.getBootstrap();
-  const currentEvent = await getCurrentEvent();
-  if (!currentEvent) {
-    throw new Error('No current event found');
-  }
-
-  if (!Array.isArray(bootstrapData.elements) || bootstrapData.elements.length === 0) {
-    throw new Error('No player values returned from FPL API');
-  }
-
-  // Generate today's date in YYYYMMDD format (e.g., "20260118")
-  const today = new Date().toISOString().split('T')[0].replace(/-/g, '');
-
-  // Get last stored value for each player
-  const lastStoredValues = await playerValuesRepository.findLatestForAllPlayers();
-  const lastValueMap = new Map<number, number>();
-  lastStoredValues.forEach((pv) => lastValueMap.set(pv.elementId, pv.value));
-
-  // Check if we've already recorded changes for today
-  const todaysRecords = await playerValuesRepository.findByChangeDate(today);
-  const todaysPlayerIds = new Set(todaysRecords.map((pv) => pv.elementId));
-
-  const teams = await loadTeamsBasicInfo();
-  const teamsMap = createTeamsMap(teams);
-
-  // Find players with price changes that haven't been recorded today
-  const playersWithChanges = bootstrapData.elements.filter((player) => {
-    if (todaysPlayerIds.has(player.id)) return false;
-    const lastValue = lastValueMap.get(player.id) || 0;
-    return player.now_cost !== lastValue;
-  });
-
-  if (playersWithChanges.length === 0) {
-    logInfo('No player price changes detected today');
-    // Clear cache for today if no changes (in case there was old data)
-    await playerValuesCache.clear(today);
-    return { count: 0 };
-  }
-
-  const { transformPlayerValuesWithChanges } = await import('../transformers/player-values');
-  const playerValues = transformPlayerValuesWithChanges(
-    playersWithChanges,
-    currentEvent.id,
-    teamsMap,
-    lastValueMap,
-    today,
+function playerValueMatches(left: PlayerValue, right: PlayerValue): boolean {
+  return (
+    left.elementId === right.elementId &&
+    left.webName === right.webName &&
+    left.eventId === right.eventId &&
+    left.elementType === right.elementType &&
+    left.elementTypeName === right.elementTypeName &&
+    left.teamId === right.teamId &&
+    left.teamName === right.teamName &&
+    left.teamShortName === right.teamShortName &&
+    left.value === right.value &&
+    left.lastValue === right.lastValue &&
+    left.changeDate === right.changeDate &&
+    left.changeType === right.changeType
   );
+}
 
-  const result = await playerValuesRepository.insertBatch(playerValues);
+export function planPlayerValueCacheRepairs(
+  expected: PlayerValue[],
+  snapshot: PlayerValueCacheSnapshot,
+): { writes: PlayerValue[]; staleFields: string[] } {
+  const expectedFields = new Set(expected.map((row) => String(row.elementId)));
+  const cachedByField = new Map(snapshot.entries);
+  const writes = expected.filter((row) => {
+    const cachedRow = cachedByField.get(String(row.elementId));
+    return !cachedRow || !playerValueMatches(row, cachedRow);
+  });
+  const staleFields = snapshot.fields.filter((field) => !expectedFields.has(field));
+  return { writes, staleFields };
+}
 
-  // Cache/notify only rows that were actually inserted — partial ON CONFLICT
-  // DO NOTHING must not publish skipped values to Telegram (FP-10).
-  // Merge into Redis (do not replace the whole hash) so concurrent daily syncs
-  // that each insert different elements do not erase each other's winners.
-  if (result.count > 0) {
-    await playerValuesCache.merge(today, result.inserted);
-    logInfo('Player values cache merged', {
-      changeDate: today,
-      count: result.inserted.length,
+function enrichStoredRows(
+  rows: StoredPlayerValue[],
+  elementsById: Map<number, RawFPLElement>,
+  retainedPlayersById: Map<number, Player>,
+  teamsMap: Map<number, { name: string; shortName: string }>,
+): PlayerValue[] {
+  return rows.map((row) => {
+    const livePlayer = elementsById.get(row.elementId);
+    const retainedPlayer = retainedPlayersById.get(row.elementId);
+    const identity = livePlayer
+      ? { teamId: livePlayer.team, webName: livePlayer.web_name }
+      : retainedPlayer
+        ? { teamId: retainedPlayer.teamId, webName: retainedPlayer.webName }
+        : null;
+    if (!identity) {
+      throw new Error(`Player identity missing for stored value: ${row.elementId}`);
+    }
+    const team = teamsMap.get(identity.teamId);
+    if (!team) {
+      throw new Error(`Team missing for stored player value: ${identity.teamId}`);
+    }
+
+    return {
+      ...row,
+      elementType: row.elementType as 1 | 2 | 3 | 4,
+      elementTypeName: ELEMENT_TYPE_MAP[row.elementType as 1 | 2 | 3 | 4],
+      webName: identity.webName,
+      teamId: identity.teamId,
+      teamName: team.name,
+      teamShortName: team.shortName,
+    };
+  });
+}
+
+export function createPlayerValuesSync(dependencies: PlayerValuesSyncDependencies) {
+  return async function syncForDate(
+    changeDate: string = formatCronDateKey(),
+  ): Promise<{ count: number }> {
+    logInfo('Starting daily player values sync');
+
+    if (!/^\d{8}$/.test(changeDate)) {
+      throw new Error(`Invalid player value change date: ${changeDate}`);
+    }
+
+    const currentChangeDate = dependencies.getCurrentChangeDate();
+    if (changeDate !== currentChangeDate) {
+      logInfo('Skipping player values capture outside its scheduled date', {
+        changeDate,
+        currentChangeDate,
+      });
+      return { count: 0 };
+    }
+
+    const [bootstrapData, syncEvent] = await Promise.all([
+      dependencies.getBootstrap(),
+      dependencies.resolvePlayerSyncEvent(),
+    ]);
+    if (!syncEvent) {
+      throw new Error('No current or next event found for player values');
+    }
+
+    if (!Array.isArray(bootstrapData.elements) || bootstrapData.elements.length === 0) {
+      throw new Error('No player values returned from FPL API');
+    }
+
+    // Get the last value inside this published season only. Element IDs are
+    // reused by FPL and must not be compared with prior-season players.
+    const seasonFloor = getPlayerValueSeasonFloor(syncEvent.event.deadlineTime);
+    const lastStoredValues = await dependencies.findLatestForAllPlayers(seasonFloor, changeDate);
+    const lastValueMap = new Map<number, number>();
+    lastStoredValues.forEach((pv) => lastValueMap.set(pv.elementId, pv.value));
+
+    // Check if we've already recorded changes for today
+    const todaysRecords = await dependencies.findByChangeDate(changeDate);
+    const todaysPlayerIds = new Set(todaysRecords.map((pv) => pv.elementId));
+
+    // Find players with price changes that haven't been recorded today
+    const playersWithChanges = bootstrapData.elements.filter((player) => {
+      if (todaysPlayerIds.has(player.id)) return false;
+      const lastValue = lastValueMap.get(player.id);
+      return lastValue === undefined || player.now_cost !== lastValue;
     });
 
-    const hasRiseOrFall = result.inserted.some(
-      (pv) => pv.changeType === 'Rise' || pv.changeType === 'Faller',
-    );
-    if (hasRiseOrFall) {
-      const message = formatPlayerValuesNotification(today, result.inserted);
-      await notifyTwoBots(message);
+    if (playersWithChanges.length === 0 && todaysRecords.length === 0) {
+      logInfo('No player price changes detected; preserving database and cache', { changeDate });
+      return { count: 0 };
     }
-  }
 
-  logInfo('Daily player values sync completed', {
-    eventId: currentEvent.id,
-    changeDate: today,
-    totalChecked: bootstrapData.elements.length,
-    changesDetected: playersWithChanges.length,
-    recordsInserted: result.count,
-  });
+    const teams = await dependencies.loadTeamsBasicInfo();
+    const teamsMap = createTeamsMap(teams);
 
-  return { count: result.count };
+    const playerValues = transformPlayerValuesWithChanges(
+      playersWithChanges,
+      syncEvent.event.id,
+      teamsMap,
+      lastValueMap,
+      changeDate,
+    );
+
+    const result = await dependencies.insertBatch(playerValues);
+
+    const persistedRows =
+      playersWithChanges.length > 0
+        ? await dependencies.findByChangeDate(changeDate)
+        : todaysRecords;
+    const persistedById = new Map(persistedRows.map((row) => [row.elementId, row]));
+    for (const expected of playerValues) {
+      const persisted = persistedById.get(expected.elementId);
+      if (
+        !persisted ||
+        persisted.value !== expected.value ||
+        persisted.lastValue !== expected.lastValue ||
+        persisted.changeType !== expected.changeType
+      ) {
+        throw new Error(
+          `Player value persistence verification failed for player ${expected.elementId}`,
+        );
+      }
+    }
+
+    const elementsById = new Map(bootstrapData.elements.map((element) => [element.id, element]));
+    const missingLivePlayerIds = Array.from(
+      new Set(
+        persistedRows
+          .map((row) => row.elementId)
+          .filter((elementId) => !elementsById.has(elementId)),
+      ),
+    );
+    const retainedPlayers =
+      missingLivePlayerIds.length > 0
+        ? await dependencies.findPlayersByIds(missingLivePlayerIds)
+        : [];
+    const retainedPlayersById = new Map(retainedPlayers.map((player) => [player.id, player]));
+    const expectedCacheRows = enrichStoredRows(
+      persistedRows,
+      elementsById,
+      retainedPlayersById,
+      teamsMap,
+    );
+    const cacheSnapshot = await dependencies.inspectCachedValues(changeDate);
+    const cacheRepairs = planPlayerValueCacheRepairs(expectedCacheRows, cacheSnapshot);
+    // Even when every history field already matches, rewrite one verified
+    // positive field before deleting the negative marker. This makes a retry
+    // recover when a prior HSET succeeded but its subsequent DEL failed.
+    const cacheWrites =
+      cacheRepairs.writes.length > 0 ? cacheRepairs.writes : expectedCacheRows.slice(0, 1);
+    if (cacheWrites.length > 0) {
+      await dependencies.mergeCachedValues(changeDate, cacheWrites);
+    }
+    if (cacheRepairs.staleFields.length > 0) {
+      await dependencies.deleteCachedFields(changeDate, cacheRepairs.staleFields);
+    }
+    if (cacheRepairs.writes.length > 0 || cacheRepairs.staleFields.length > 0) {
+      logInfo('Player values cache fields repaired', {
+        changeDate,
+        writes: cacheRepairs.writes.length,
+        deletes: cacheRepairs.staleFields.length,
+      });
+    }
+
+    const hasPersistedPriceChanges = persistedRows.some(
+      (row) => row.changeType === 'Rise' || row.changeType === 'Faller',
+    );
+    if (hasPersistedPriceChanges) {
+      await dependencies.enqueuePlayerPrices('cascade', {
+        changeDate,
+        jobId: `player-prices-${changeDate}-immediate`,
+        removeOnSettle: true,
+      });
+    }
+
+    const insertedPriceChanges = result.inserted.filter(
+      (row) => row.changeType === 'Rise' || row.changeType === 'Faller',
+    );
+    if (insertedPriceChanges.length > 0) {
+      try {
+        const message = formatPlayerValuesNotification(changeDate, result.inserted);
+        await dependencies.notify(message);
+      } catch (error) {
+        logError('Failed to send player values notification', error, { changeDate });
+      }
+    }
+
+    logInfo('Daily player values sync completed', {
+      eventId: syncEvent.event.id,
+      changeDate,
+      totalChecked: bootstrapData.elements.length,
+      changesDetected: playersWithChanges.length,
+      recordsInserted: result.count,
+    });
+
+    return { count: result.count };
+  };
 }
+
+export const syncCurrentPlayerValues = createPlayerValuesSync(defaultDependencies);

@@ -1,6 +1,6 @@
 import { Elysia } from 'elysia';
 
-import { syncPlayers } from '../services/players.service';
+import { enqueuePlayersSyncJob } from '../jobs/data-sync-enqueue';
 
 /**
  * Players API Routes
@@ -9,7 +9,8 @@ import { syncPlayers } from '../services/players.service';
  * - POST /players/sync - Trigger players sync
  */
 
-export const playersAPI = new Elysia({ prefix: '/players' }).post('/sync', async () => {
-  const result = await syncPlayers();
-  return { success: true, message: 'Players sync completed', ...result };
+export const playersAPI = new Elysia({ prefix: '/players' }).post('/sync', async ({ set }) => {
+  const job = await enqueuePlayersSyncJob('api');
+  set.status = 202;
+  return { success: true, message: 'Players sync job enqueued', jobId: job.id };
 });

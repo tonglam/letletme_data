@@ -1,6 +1,6 @@
 import { Elysia } from 'elysia';
 
-import { syncCurrentPlayerValues } from '../services/player-values.service';
+import { enqueuePlayerValuesSyncJob } from '../jobs/data-sync-enqueue';
 
 /**
  * Player Values API Routes
@@ -12,11 +12,15 @@ import { syncCurrentPlayerValues } from '../services/player-values.service';
  * Each record is uniquely identified by (elementId, changeDate).
  */
 
-export const playerValuesAPI = new Elysia({ prefix: '/player-values' }).post('/sync', async () => {
-  const result = await syncCurrentPlayerValues();
-  return {
-    success: true,
-    message: 'Current player values sync completed',
-    data: result,
-  };
-});
+export const playerValuesAPI = new Elysia({ prefix: '/player-values' }).post(
+  '/sync',
+  async ({ set }) => {
+    const job = await enqueuePlayerValuesSyncJob('api');
+    set.status = 202;
+    return {
+      success: true,
+      message: 'Player values sync job enqueued',
+      jobId: job.id,
+    };
+  },
+);

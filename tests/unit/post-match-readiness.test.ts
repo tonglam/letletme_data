@@ -158,11 +158,11 @@ describe('current-event job gate', () => {
   });
 });
 
-describe('player-values current-event guard', () => {
-  test('does not query daily values when there is no current event', async () => {
+describe('player-values player-event guard', () => {
+  test('does not query daily values when there is no current or next event', async () => {
     const hasChangesForDate = mock(async () => false);
     const shouldRun = await shouldRunPlayerValuesSync(new Date('2026-08-21T01:25:00.000Z'), {
-      shouldRunCurrentEventJob: async () => false,
+      resolvePlayerSyncEvent: async () => null,
       hasChangesForDate,
     });
 
@@ -170,22 +170,42 @@ describe('player-values current-event guard', () => {
     expect(hasChangesForDate).not.toHaveBeenCalled();
   });
 
-  test('runs only when a current event exists and today has not been recorded', async () => {
+  test('polls a current event until today has been recorded', async () => {
     const date = new Date('2026-08-22T01:25:00.000Z');
-    const shouldRunCurrentEvent = async () => true;
+    const resolvePlayerEvent = async () => ({
+      event: { id: 1 } as Event,
+      phase: 'current' as const,
+    });
 
     expect(
       await shouldRunPlayerValuesSync(date, {
-        shouldRunCurrentEventJob: shouldRunCurrentEvent,
+        resolvePlayerSyncEvent: resolvePlayerEvent,
         hasChangesForDate: async () => true,
       }),
     ).toBe(false);
     expect(
       await shouldRunPlayerValuesSync(date, {
-        shouldRunCurrentEventJob: shouldRunCurrentEvent,
+        resolvePlayerSyncEvent: resolvePlayerEvent,
         hasChangesForDate: async () => false,
       }),
     ).toBe(true);
+  });
+
+  test('allows only the 09:25 tick before GW1', async () => {
+    const dependencies = {
+      resolvePlayerSyncEvent: async () => ({
+        event: { id: 1 } as Event,
+        phase: 'preseason' as const,
+      }),
+      hasChangesForDate: async () => false,
+    };
+
+    expect(
+      await shouldRunPlayerValuesSync(new Date('2026-08-22T01:25:00.000Z'), dependencies),
+    ).toBe(true);
+    expect(
+      await shouldRunPlayerValuesSync(new Date('2026-08-22T01:26:00.000Z'), dependencies),
+    ).toBe(false);
   });
 });
 

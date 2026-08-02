@@ -6,19 +6,24 @@ import {
   enqueueFixturesSyncJob,
   enqueuePlayerStatsSyncJob,
   enqueuePhasesSyncJob,
+  enqueuePlayerPricesSyncJob,
   enqueuePlayersSyncJob,
   enqueueTeamsSyncJob,
 } from './data-sync-enqueue';
-import { shouldRunCurrentEventJob } from './current-event-gate';
+import {
+  PLAYER_PRICES_REPLAY_CRON_PATTERN,
+  PLAYER_STATS_CRON_PATTERN,
+} from '../domain/job-schedules';
+import { resolvePlayerSyncEvent } from '../services/player-sync-event.service';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { logInfo } from '../utils/logger';
-import { CRON_TIMEZONE } from '../utils/timezone';
+import { CRON_TIMEZONE, formatCronDateKey } from '../utils/timezone';
 
 /**
  * Core entity syncs (events/teams/fixtures/players/phases) run year-round so a
  * newly published FPL season is picked up before the calendar season window
- * opens. Services short-circuit on empty pre-season payloads. Player-stats
- * remains gated by the season window and the presence of a current event.
+ * opens. Services short-circuit on empty pre-season payloads. Player-specific
+ * jobs use current ?? next so GW1 data is refreshed before the first kickoff.
  */
 export function registerDataSyncJobs(app: Elysia) {
   return app
@@ -32,6 +37,31 @@ export function registerDataSyncJobs(app: Elysia) {
             await executeTrackedCron('events-sync', async () => {
               const job = await enqueueEventsSyncJob('cron');
               logInfo('Events sync job enqueued via cron', { jobId: job.id });
+            });
+          } catch {
+            // Failure details are already emitted by runTrackedJob.
+          }
+        },
+      }),
+    )
+    .use(
+      cron({
+        name: 'player-prices-sync',
+        pattern: PLAYER_PRICES_REPLAY_CRON_PATTERN,
+        timezone: CRON_TIMEZONE,
+        async run() {
+          try {
+            await executeTrackedCron('player-prices-sync', async () => {
+              if (!(await resolvePlayerSyncEvent())) {
+                return;
+              }
+              const changeDate = formatCronDateKey();
+              const job = await enqueuePlayerPricesSyncJob('cron', {
+                changeDate,
+                jobId: `player-prices-${changeDate}-replay`,
+                removeOnSettle: true,
+              });
+              logInfo('Player prices replay job enqueued via cron', { jobId: job.id, changeDate });
             });
           } catch {
             // Failure details are already emitted by runTrackedJob.
@@ -93,12 +123,12 @@ export function registerDataSyncJobs(app: Elysia) {
     .use(
       cron({
         name: 'player-stats-sync',
-        pattern: '40 9 * * *',
+        pattern: PLAYER_STATS_CRON_PATTERN,
         timezone: CRON_TIMEZONE,
         async run() {
           try {
             await executeTrackedCron('player-stats-sync', async () => {
-              if (!(await shouldRunCurrentEventJob('player-stats-sync'))) {
+              if (!(await resolvePlayerSyncEvent())) {
                 return;
               }
               const job = await enqueuePlayerStatsSyncJob('cron');

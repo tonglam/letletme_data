@@ -13,7 +13,7 @@ export const singlePlayerValueFixture: PlayerValue = {
   teamName: 'Manchester City',
   teamShortName: 'MCI',
   value: 142,
-  changeDate: '2023-12-15T10:00:00.000Z',
+  changeDate: '20231215',
   changeType: 'Rise' as ValueChangeType,
   lastValue: 138,
 };
@@ -25,7 +25,7 @@ export const singleRawPlayerValueFixture: RawPlayerValue = {
   eventId: 15 as EventId,
   teamId: 11 as TeamId,
   value: 142,
-  changeDate: '2023-12-15T10:00:00.000Z',
+  changeDate: '20231215',
   changeType: 'Rise' as ValueChangeType,
   lastValue: 138,
 };
@@ -41,9 +41,9 @@ export const gkpPlayerValueFixture: PlayerValue = {
   teamName: 'Liverpool',
   teamShortName: 'LIV',
   value: 55,
-  changeDate: '2023-12-15T10:00:00.000Z',
+  changeDate: '20231215',
   changeType: 'Start' as ValueChangeType,
-  lastValue: 55,
+  lastValue: 0,
 };
 
 export const defPlayerValueFixture: PlayerValue = {
@@ -56,7 +56,7 @@ export const defPlayerValueFixture: PlayerValue = {
   teamName: 'Liverpool',
   teamShortName: 'LIV',
   value: 72,
-  changeDate: '2023-12-15T10:00:00.000Z',
+  changeDate: '20231215',
   changeType: 'Faller' as ValueChangeType,
   lastValue: 74,
 };
@@ -71,7 +71,7 @@ export const midPlayerValueFixture: PlayerValue = {
   teamName: 'Manchester City',
   teamShortName: 'MCI',
   value: 102,
-  changeDate: '2023-12-15T10:00:00.000Z',
+  changeDate: '20231215',
   changeType: 'Rise' as ValueChangeType,
   lastValue: 100,
 };
@@ -86,9 +86,9 @@ export const fwdPlayerValueFixture: PlayerValue = {
   teamName: 'Liverpool',
   teamShortName: 'LIV',
   value: 125,
-  changeDate: '2023-12-15T10:00:00.000Z',
+  changeDate: '20231215',
   changeType: 'Start' as ValueChangeType,
-  lastValue: 125,
+  lastValue: 0,
 };
 
 // Array of player values for different teams and positions
@@ -201,9 +201,9 @@ export function generatePlayerValue(overrides: Partial<PlayerValue> = {}): Playe
     teamName: 'Test Team',
     teamShortName: 'TST',
     value: 80,
-    changeDate: '2023-12-15T10:00:00.000Z',
+    changeDate: '20231215',
     changeType: 'Start' as ValueChangeType,
-    lastValue: 80,
+    lastValue: 0,
     ...overrides,
   };
 }
@@ -211,15 +211,16 @@ export function generatePlayerValue(overrides: Partial<PlayerValue> = {}): Playe
 // Generate array of player values
 export function generatePlayerValues(count: number = 3): PlayerValue[] {
   const cycle: ValueChangeType[] = ['Rise', 'Faller', 'Start'];
-  return Array.from({ length: count }, (_, index) =>
-    generatePlayerValue({
+  return Array.from({ length: count }, (_, index) => {
+    const changeType = cycle[index % cycle.length];
+    return generatePlayerValue({
       elementId: (index + 1) as PlayerId,
       webName: `Player ${index + 1}`,
       value: 60 + index * 10,
-      lastValue: 58 + index * 10,
-      changeType: cycle[index % cycle.length],
-    }),
-  );
+      lastValue: changeType === 'Start' ? 0 : 58 + index * 10,
+      changeType,
+    });
+  });
 }
 
 // Generate player values with different change types
@@ -243,7 +244,7 @@ export function generatePlayerValuesWithChanges(): PlayerValue[] {
       elementId: 3 as PlayerId,
       webName: 'Stable Player',
       value: 80,
-      lastValue: 80,
+      lastValue: 0,
       changeType: 'Start',
     }),
   ];

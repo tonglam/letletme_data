@@ -271,7 +271,7 @@ export function transformCurrentGameweekPlayerStats(
     })),
   );
 
-  return transformPlayerStats(fplBootstrapResponse.elements, currentEventId, teamsMap);
+  return transformPlayerStatsStrict(fplBootstrapResponse.elements, currentEventId, teamsMap);
 }
 
 /**

@@ -1,4 +1,4 @@
-import { sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, lt, sql } from 'drizzle-orm';
 
 import { playerValues, type DbPlayerValueInsert } from '../db/schemas/index.schema';
 import { getDb } from '../db/singleton';
@@ -7,11 +7,33 @@ import { logError, logInfo } from '../utils/logger';
 
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import type { PlayerValue } from '../domain/player-values';
+import type { ValueChangeType } from '../types/base.type';
 
 interface ValueRecord {
   elementId: number;
   value: number;
   changeDate: string;
+}
+
+export interface StoredPlayerValue extends ValueRecord {
+  eventId: number;
+  elementType: number;
+  changeType: ValueChangeType;
+  lastValue: number;
+}
+
+function mapStoredPlayerValue(row: {
+  elementId: number;
+  value: number;
+  changeDate: string;
+  eventId: number;
+  elementType: number;
+  changeType: 'start' | 'rise' | 'fall';
+  lastValue: number;
+}): StoredPlayerValue {
+  const changeType: ValueChangeType =
+    row.changeType === 'start' ? 'Start' : row.changeType === 'rise' ? 'Rise' : 'Faller';
+  return { ...row, changeType };
 }
 
 type DatabaseInstance = PostgresJsDatabase<Record<string, never>>;
@@ -22,7 +44,10 @@ export const createPlayerValuesRepository = (dbInstance?: DatabaseInstance) => {
   const getDbInstance = async () => dbInstance || (await getDb());
 
   return {
-    findLatestForAllPlayers: async (): Promise<ValueRecord[]> => {
+    findLatestForAllPlayers: async (
+      fromChangeDate: string,
+      throughChangeDate: string,
+    ): Promise<ValueRecord[]> => {
       try {
         const db = await getDbInstance();
         const rows = await db.execute(sql`
@@ -31,27 +56,97 @@ export const createPlayerValuesRepository = (dbInstance?: DatabaseInstance) => {
           value,
           change_date as "changeDate"
         FROM player_values
+        WHERE change_date >= ${fromChangeDate}
+          AND change_date <= ${throughChangeDate}
         ORDER BY element_id, change_date DESC, created_at DESC
       `);
         return rows as unknown as ValueRecord[];
       } catch (error) {
-        logError('Failed to get latest player values', error);
+        logError('Failed to get latest player values', error, {
+          fromChangeDate,
+          throughChangeDate,
+        });
         throw new DatabaseError('Failed to get latest player values', 'LATEST_VALUES_ERROR');
       }
     },
 
-    findByChangeDate: async (changeDate: string): Promise<ValueRecord[]> => {
+    findByChangeDate: async (changeDate: string): Promise<StoredPlayerValue[]> => {
       try {
         const db = await getDbInstance();
-        const rows = await db.execute(sql`
-        SELECT element_id as "elementId", value, change_date as "changeDate"
-        FROM player_values
-        WHERE change_date = ${changeDate}
-      `);
-        return rows as unknown as ValueRecord[];
+        const rows = await db
+          .select({
+            elementId: playerValues.elementId,
+            value: playerValues.value,
+            changeDate: playerValues.changeDate,
+            eventId: playerValues.eventId,
+            elementType: playerValues.elementType,
+            changeType: playerValues.changeType,
+            lastValue: playerValues.lastValue,
+          })
+          .from(playerValues)
+          .where(eq(playerValues.changeDate, changeDate));
+        return rows.map(mapStoredPlayerValue);
       } catch (error) {
         logError('Failed to get player values by date', error, { changeDate });
         throw new DatabaseError('Failed to get player values by date', 'FIND_BY_DATE_ERROR');
+      }
+    },
+
+    findLatestForPlayerIds: async (
+      elementIds: number[],
+      fromChangeDate: string,
+      beforeChangeDate: string,
+    ): Promise<StoredPlayerValue[]> => {
+      if (elementIds.length === 0) {
+        return [];
+      }
+
+      try {
+        const db = await getDbInstance();
+        const uniqueIds = Array.from(new Set(elementIds));
+        const rows = await db
+          .select({
+            elementId: playerValues.elementId,
+            value: playerValues.value,
+            changeDate: playerValues.changeDate,
+            eventId: playerValues.eventId,
+            elementType: playerValues.elementType,
+            changeType: playerValues.changeType,
+            lastValue: playerValues.lastValue,
+          })
+          .from(playerValues)
+          .where(
+            and(
+              inArray(playerValues.elementId, uniqueIds),
+              gte(playerValues.changeDate, fromChangeDate),
+              lt(playerValues.changeDate, beforeChangeDate),
+            ),
+          )
+          .orderBy(
+            asc(playerValues.elementId),
+            desc(playerValues.changeDate),
+            desc(playerValues.createdAt),
+          );
+
+        const seen = new Set<number>();
+        const latest: StoredPlayerValue[] = [];
+        for (const row of rows) {
+          if (!seen.has(row.elementId)) {
+            seen.add(row.elementId);
+            latest.push(mapStoredPlayerValue(row));
+          }
+        }
+        return latest;
+      } catch (error) {
+        logError('Failed to get latest player values by player IDs', error, {
+          count: elementIds.length,
+          fromChangeDate,
+          beforeChangeDate,
+        });
+        throw new DatabaseError(
+          'Failed to get latest player values by player IDs',
+          'LATEST_VALUES_BY_IDS_ERROR',
+        );
       }
     },
 
@@ -88,7 +183,9 @@ export const createPlayerValuesRepository = (dbInstance?: DatabaseInstance) => {
           value: playerValue.value,
           changeDate: playerValue.changeDate,
           changeType:
-            playerValue.changeType.toLowerCase() as (typeof playerValues.changeType)['enumValues'][number],
+            playerValue.changeType === 'Faller'
+              ? 'fall'
+              : (playerValue.changeType.toLowerCase() as 'start' | 'rise'),
           lastValue: playerValue.lastValue,
         }));
 

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 
 import {
+  getDataSyncJobPriority,
   getEntrySyncJobPriority,
   getLeagueSyncJobPriority,
   getLiveDataJobPriority,
@@ -22,6 +23,10 @@ describe('job priority mapping', () => {
     expect(getEntrySyncJobPriority('entry-picks')).toBe('p2');
     expect(getEntrySyncJobPriority('entry-transfers')).toBe('p2');
     expect(getEntrySyncJobPriority('entry-results')).toBe('p2');
+  });
+
+  it('keeps player price reconciliation in the primary data tier', () => {
+    expect(getDataSyncJobPriority('player-prices')).toBe('p1');
   });
 
   it('maps tournament and league jobs to expected tiers', () => {

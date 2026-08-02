@@ -17,10 +17,18 @@ class JobNotFoundError extends Error {
 
 const listTriggerableJobs = mock(() => [
   { name: 'events-sync', description: 'Sync events from FPL API', schedule: 'Daily at 6:35 AM' },
+  {
+    name: 'player-prices',
+    description: 'Replay persisted price changes',
+    schedule: 'Daily at 9:40 AM',
+  },
 ]);
-const triggerJob = mock(async (name: string) => {
+const triggerJob = mock(async (name: string, _input?: unknown) => {
   if (name === 'events-sync') {
     return { kind: 'enqueued' as const, jobId: 'job-events-1', message: 'Job triggered' };
+  }
+  if (name === 'player-prices') {
+    return { kind: 'enqueued' as const, jobId: 'job-player-prices-1', message: 'Job triggered' };
   }
   throw new JobNotFoundError(name);
 });
@@ -33,11 +41,15 @@ mock.module('../../src/services/job-trigger.service', () => ({
 const enqueueEventsSyncJob = mock(async () => ({ id: 'events-job-1' }));
 const enqueueFixturesSyncJob = mock(async () => ({ id: 'fixtures-job-1' }));
 const enqueueFixturesAllGameweeksSyncJob = mock(async () => ({ id: 'fixtures-all-gw-job-1' }));
+const enqueuePlayersSyncJob = mock(async () => ({ id: 'players-job-1' }));
+const enqueuePlayerValuesSyncJob = mock(async () => ({ id: 'player-values-job-1' }));
 const enqueuePlayerStatsSyncJob = mock(async () => ({ id: 'player-stats-job-1' }));
 mock.module('../../src/jobs/data-sync-enqueue', () => ({
   enqueueEventsSyncJob,
   enqueueFixturesSyncJob,
   enqueueFixturesAllGameweeksSyncJob,
+  enqueuePlayersSyncJob,
+  enqueuePlayerValuesSyncJob,
   enqueuePlayerStatsSyncJob,
 }));
 
@@ -144,6 +156,8 @@ const { eventsAPI } = await import('../../src/api/events.api');
 const { jobsAPI } = await import('../../src/api/jobs.api');
 const { entrySyncAPI } = await import('../../src/api/entry-sync.api');
 const { fixturesAPI } = await import('../../src/api/fixtures.api');
+const { playersAPI } = await import('../../src/api/players.api');
+const { playerValuesAPI } = await import('../../src/api/player-values.api');
 const { playerStatsAPI } = await import('../../src/api/player-stats.api');
 const { eventLivesAPI } = await import('../../src/api/event-lives.api');
 const { tournamentsAPI } = await import('../../src/api/tournaments.api');
@@ -179,6 +193,28 @@ describe('eventsAPI handlers', () => {
   });
 });
 
+describe('playersAPI handlers', () => {
+  test('POST /players/sync enqueues the shared-lock players job', async () => {
+    const response = await playersAPI.handle(
+      new Request('http://localhost/players/sync', { method: 'POST' }),
+    );
+    expect(response.status).toBe(202);
+    expect(await response.json()).toMatchObject({ success: true, jobId: 'players-job-1' });
+    expect(enqueuePlayersSyncJob).toHaveBeenCalledWith('api');
+  });
+});
+
+describe('playerValuesAPI handlers', () => {
+  test('POST /player-values/sync enqueues the mutation-scoped job', async () => {
+    const response = await playerValuesAPI.handle(
+      new Request('http://localhost/player-values/sync', { method: 'POST' }),
+    );
+    expect(response.status).toBe(202);
+    expect(await response.json()).toMatchObject({ success: true, jobId: 'player-values-job-1' });
+    expect(enqueuePlayerValuesSyncJob).toHaveBeenCalledWith('api');
+  });
+});
+
 describe('jobsAPI handlers', () => {
   beforeEach(() => {
     listTriggerableJobs.mockClear();
@@ -209,7 +245,20 @@ describe('jobsAPI handlers', () => {
     };
     expect(body.success).toBe(true);
     expect(body.jobId).toBe('job-events-1');
-    expect(triggerJob).toHaveBeenCalledWith('events-sync');
+    expect(triggerJob).toHaveBeenCalledWith('events-sync', undefined);
+  });
+
+  test('POST /jobs/player-prices/trigger forwards the required change date', async () => {
+    const response = await jobsAPI.handle(
+      new Request('http://localhost/jobs/player-prices/trigger', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ changeDate: '20260803' }),
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(triggerJob).toHaveBeenCalledWith('player-prices', { changeDate: '20260803' });
   });
 
   test('POST /jobs/unknown/trigger returns 404', async () => {

@@ -2,6 +2,7 @@ import {
   enqueueEventsSyncJob,
   enqueueFixturesSyncJob,
   enqueuePhasesSyncJob,
+  enqueuePlayerPricesSyncJob,
   enqueuePlayersSyncJob,
   enqueuePlayerStatsSyncJob,
   enqueuePlayerValuesSyncJob,
@@ -40,6 +41,7 @@ import { getCurrentEvent } from './events.service';
 import { refreshTournamentMaterializedViews } from './tournament-materialized-views.service';
 import { syncTournamentSelectionStats } from './tournament-selection-stats.service';
 import { logInfo } from '../utils/logger';
+import { ValidationError } from '../utils/errors';
 
 export type TriggerableJobInfo = {
   name: string;
@@ -99,9 +101,14 @@ const TRIGGERABLE_JOBS: TriggerableJobInfo[] = [
     schedule: 'Daily at 6:43 AM',
   },
   {
+    name: 'player-prices',
+    description: 'Replay persisted price changes into current player prices',
+    schedule: 'Daily at 09:40 UTC+8 plus immediate player-values cascade',
+  },
+  {
     name: 'player-stats-sync',
     description: 'Sync player stats from FPL API',
-    schedule: 'Daily at 9:40 AM',
+    schedule: 'Daily at 09:40 UTC+8 (current event or preseason next event)',
   },
   {
     name: 'phases-sync',
@@ -111,7 +118,7 @@ const TRIGGERABLE_JOBS: TriggerableJobInfo[] = [
   {
     name: 'player-values-sync',
     description: 'Sync player values from FPL API',
-    schedule: '09:25-09:35 AM window (stops after success)',
+    schedule: 'Preseason 09:25; in-season 09:25-09:35 until changes are stored',
   },
   {
     name: 'entry-info-daily',
@@ -241,13 +248,31 @@ const TRIGGERABLE_JOBS: TriggerableJobInfo[] = [
   },
 ];
 
-function buildJobMap(): Record<string, () => Promise<unknown>> {
+function requirePlayerPricesChangeDate(input: unknown): string {
+  const changeDate =
+    input && typeof input === 'object' && !Array.isArray(input)
+      ? (input as Record<string, unknown>).changeDate
+      : undefined;
+  if (typeof changeDate !== 'string' || !/^\d{8}$/.test(changeDate)) {
+    throw new ValidationError(
+      'Job player-prices requires a changeDate in YYYYMMDD format',
+      'PLAYER_PRICES_CHANGE_DATE_REQUIRED',
+    );
+  }
+  return changeDate;
+}
+
+function buildJobMap(input?: unknown): Record<string, () => Promise<unknown>> {
   return {
     'event-current-refresh': () => runManualEventCurrentRefresh(),
     'events-sync': () => enqueueEventsSyncJob('manual'),
     'fixtures-sync': () => enqueueFixturesSyncJob('manual'),
     'teams-sync': () => enqueueTeamsSyncJob('manual'),
     'players-sync': () => enqueuePlayersSyncJob('manual'),
+    'player-prices': () =>
+      enqueuePlayerPricesSyncJob('manual', {
+        changeDate: requirePlayerPricesChangeDate(input),
+      }),
     'player-stats-sync': () => enqueuePlayerStatsSyncJob('manual'),
     'phases-sync': () => enqueuePhasesSyncJob('manual'),
     'player-values-sync': () => enqueuePlayerValuesSyncJob('manual'),
@@ -359,8 +384,8 @@ export function listTriggerableJobs(): TriggerableJobInfo[] {
   return TRIGGERABLE_JOBS;
 }
 
-export async function triggerJob(name: string): Promise<JobTriggerResult> {
-  const jobMap = buildJobMap();
+export async function triggerJob(name: string, input?: unknown): Promise<JobTriggerResult> {
+  const jobMap = buildJobMap(input);
   const job = jobMap[name];
   if (!job) {
     throw new JobNotFoundError(name);

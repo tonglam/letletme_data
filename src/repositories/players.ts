@@ -57,6 +57,46 @@ export const createPlayerRepository = (dbInstance?: DatabaseInstance) => {
       }
     },
 
+    updatePrices: async (
+      priceUpdates: Array<{ elementId: number; value: number }>,
+    ): Promise<DomainPlayer[]> => {
+      if (priceUpdates.length === 0) {
+        return [];
+      }
+
+      try {
+        const deduplicated = Array.from(
+          new Map(priceUpdates.map((update) => [update.elementId, update])).values(),
+        );
+        const elementIds = deduplicated.map((update) => update.elementId);
+        const priceCases = deduplicated.map(
+          (update) => sql`WHEN ${update.elementId} THEN ${update.value}`,
+        );
+        const priceExpression = sql`CASE ${players.id} ${sql.join(
+          priceCases,
+          sql.raw(' '),
+        )} ELSE ${players.price} END`;
+
+        const db = await getDbInstance();
+        const updated = await db
+          .update(players)
+          .set({ price: priceExpression, updatedAt: sql`NOW()` })
+          .where(inArray(players.id, elementIds))
+          .returning();
+
+        const mappedPlayers = updated.map(mapDbPlayerToDomain);
+        logInfo('Batch updated player prices', { count: mappedPlayers.length });
+        return mappedPlayers;
+      } catch (error) {
+        logError('Failed to batch update player prices', error, { count: priceUpdates.length });
+        throw new DatabaseError(
+          'Failed to batch update player prices',
+          'BATCH_PRICE_UPDATE_ERROR',
+          error instanceof Error ? error : undefined,
+        );
+      }
+    },
+
     upsertBatch: async (domainPlayers: DomainPlayer[]): Promise<DomainPlayer[]> => {
       try {
         if (domainPlayers.length === 0) {

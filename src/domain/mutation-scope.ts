@@ -67,11 +67,13 @@ export function resolveMutationScopes(input: MutationScopeInput): string[] {
 
   if (queue === 'data-sync') {
     switch (jobName) {
+      case 'players':
+      case 'player-prices':
+        return ['data-core:players'];
       case 'events':
       case 'fixtures':
       case 'fixtures-all-gameweeks':
       case 'teams':
-      case 'players':
       case 'player-stats':
       case 'phases':
       case 'player-values':

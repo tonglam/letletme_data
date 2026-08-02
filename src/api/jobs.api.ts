@@ -17,11 +17,11 @@ export const jobsAPI = new Elysia({ prefix: '/jobs' })
     return { success: true, jobs, count: jobs.length };
   })
 
-  .post('/:name/trigger', async ({ params, set }) => {
+  .post('/:name/trigger', async ({ params, body, set }) => {
     const { name } = params;
 
     try {
-      const result = await triggerJob(name);
+      const result = await triggerJob(name, body);
 
       if (result.kind === 'event-current-refresh') {
         return {
