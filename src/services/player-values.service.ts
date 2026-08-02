@@ -136,6 +136,28 @@ function enrichStoredRows(
   });
 }
 
+/**
+ * player_values is intentionally date-keyed and has no season column. Scope
+ * comparisons to the published season inferred from the target event's
+ * deadline so reused element IDs cannot inherit prior-season price history.
+ */
+export function getPlayerValueSeasonFloor(deadlineTime: string | null): string {
+  if (!deadlineTime) {
+    throw new Error('Player value season cannot be resolved without an event deadline');
+  }
+
+  const deadline = new Date(deadlineTime);
+  if (Number.isNaN(deadline.getTime())) {
+    throw new Error(`Invalid event deadline for player value season: ${deadlineTime}`);
+  }
+
+  // The previous FPL season finishes in May. June 1 is therefore a stable
+  // boundary that also permits unusually early preseason bootstrap releases.
+  const deadlineYear = deadline.getUTCFullYear();
+  const seasonStartYear = deadline.getUTCMonth() >= 6 ? deadlineYear : deadlineYear - 1;
+  return `${seasonStartYear}0601`;
+}
+
 export function createPlayerValuesSync(dependencies: PlayerValuesSyncDependencies) {
   return async function syncForDate(
     changeDate: string = formatCronDateKey(),
@@ -158,8 +180,10 @@ export function createPlayerValuesSync(dependencies: PlayerValuesSyncDependencie
       throw new Error('No player values returned from FPL API');
     }
 
-    // Get last stored value for each player
-    const lastStoredValues = await dependencies.findLatestForAllPlayers();
+    // Get the last value inside this published season only. Element IDs are
+    // reused by FPL and must not be compared with prior-season players.
+    const seasonFloor = getPlayerValueSeasonFloor(syncEvent.event.deadlineTime);
+    const lastStoredValues = await dependencies.findLatestForAllPlayers(seasonFloor, changeDate);
     const lastValueMap = new Map<number, number>();
     lastStoredValues.forEach((pv) => lastValueMap.set(pv.elementId, pv.value));
 

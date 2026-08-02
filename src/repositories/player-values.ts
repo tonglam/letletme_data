@@ -44,7 +44,10 @@ export const createPlayerValuesRepository = (dbInstance?: DatabaseInstance) => {
   const getDbInstance = async () => dbInstance || (await getDb());
 
   return {
-    findLatestForAllPlayers: async (): Promise<ValueRecord[]> => {
+    findLatestForAllPlayers: async (
+      fromChangeDate: string,
+      throughChangeDate: string,
+    ): Promise<ValueRecord[]> => {
       try {
         const db = await getDbInstance();
         const rows = await db.execute(sql`
@@ -53,11 +56,16 @@ export const createPlayerValuesRepository = (dbInstance?: DatabaseInstance) => {
           value,
           change_date as "changeDate"
         FROM player_values
+        WHERE change_date >= ${fromChangeDate}
+          AND change_date <= ${throughChangeDate}
         ORDER BY element_id, change_date DESC, created_at DESC
       `);
         return rows as unknown as ValueRecord[];
       } catch (error) {
-        logError('Failed to get latest player values', error);
+        logError('Failed to get latest player values', error, {
+          fromChangeDate,
+          throughChangeDate,
+        });
         throw new DatabaseError('Failed to get latest player values', 'LATEST_VALUES_ERROR');
       }
     },

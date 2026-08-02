@@ -46,6 +46,7 @@ describe('player-prices sync', () => {
         stored(2, 61, '20260803', 'Rise'),
         stored(3, 49, '20260803', 'Faller'),
       ],
+      findAllPlayerIds: async () => [1, 2, 3],
       updatePrices,
       mergePlayersCache,
     });
@@ -55,7 +56,7 @@ describe('player-prices sync', () => {
       { elementId: 2, value: 61 },
       { elementId: 3, value: 49 },
     ]);
-    expect(mergePlayersCache).toHaveBeenCalledTimes(1);
+    expect(mergePlayersCache).toHaveBeenCalledWith([player(2, 61), player(3, 49)], [1, 2, 3]);
   });
 
   test('uses each affected player latest value during an old-date replay', async () => {
@@ -65,6 +66,7 @@ describe('player-prices sync', () => {
     const sync = createPlayerPricesSync({
       findByChangeDate: async () => [stored(2, 61, '20260803', 'Rise')],
       findLatestForPlayerIds: async () => [stored(2, 63, '20260805', 'Rise')],
+      findAllPlayerIds: async () => [1, 2],
       updatePrices,
       mergePlayersCache: async () => undefined,
     });
@@ -79,6 +81,7 @@ describe('player-prices sync', () => {
     const sync = createPlayerPricesSync({
       findByChangeDate: async () => [stored(1, 50, '20260802', 'Start')],
       findLatestForPlayerIds: async () => [],
+      findAllPlayerIds: async () => [1],
       updatePrices,
       mergePlayersCache,
     });

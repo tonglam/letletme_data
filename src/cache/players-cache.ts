@@ -150,8 +150,15 @@ const createPlayerHashCache = () => {
       }
     },
 
-    /** Merge only the supplied player fields; every other hash field is preserved. */
-    mergePlayers: async (players: Player[], season?: string): Promise<void> => {
+    /**
+     * Merge only the supplied player fields after verifying the existing hash
+     * is the complete database-backed player view.
+     */
+    mergePlayers: async (
+      players: Player[],
+      expectedPlayerIds: number[],
+      season?: string,
+    ): Promise<void> => {
       if (players.length === 0) {
         return;
       }
@@ -159,6 +166,19 @@ const createPlayerHashCache = () => {
       try {
         const key = await getHashKey(season);
         const redis = await redisSingleton.getClient();
+        const cachedFields = await redis.hkeys(key);
+        const cachedIds = new Set(cachedFields);
+        const expectedIds = new Set(expectedPlayerIds.map(String));
+        const completeView =
+          cachedIds.size === expectedIds.size &&
+          Array.from(expectedIds).every((elementId) => cachedIds.has(elementId));
+        if (!completeView) {
+          throw new CacheError(
+            `Refusing to merge prices into incomplete players cache: ${key}`,
+            'PLAYERS_MERGE_INCOMPLETE_VIEW',
+          );
+        }
+
         const hashEntries: Record<string, string> = {};
         for (const player of players) {
           hashEntries[String(player.id)] = JSON.stringify(player);
@@ -168,6 +188,9 @@ const createPlayerHashCache = () => {
         logDebug('Players cache fields merged', { key, count: players.length });
       } catch (error) {
         logError('Players cache merge error', error, { count: players.length });
+        if (error instanceof CacheError) {
+          throw error;
+        }
         throw new CacheError(
           'Failed to merge players in cache',
           'PLAYERS_MERGE_ERROR',
@@ -267,8 +290,8 @@ export const playersCache = {
     return playerHashCacheInstance.setAllPlayers(players, season);
   },
 
-  async merge(players: Player[], season?: string): Promise<void> {
-    return playerHashCacheInstance.mergePlayers(players, season);
+  async merge(players: Player[], expectedPlayerIds: number[], season?: string): Promise<void> {
+    return playerHashCacheInstance.mergePlayers(players, expectedPlayerIds, season);
   },
 
   async clear(): Promise<void> {

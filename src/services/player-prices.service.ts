@@ -6,6 +6,7 @@ import { logInfo } from '../utils/logger';
 export type PlayerPricesSyncDependencies = {
   findByChangeDate: typeof playerValuesRepository.findByChangeDate;
   findLatestForPlayerIds: typeof playerValuesRepository.findLatestForPlayerIds;
+  findAllPlayerIds: typeof playerRepository.findAllIds;
   updatePrices: typeof playerRepository.updatePrices;
   mergePlayersCache: typeof playersCache.merge;
 };
@@ -13,6 +14,7 @@ export type PlayerPricesSyncDependencies = {
 const defaultDependencies: PlayerPricesSyncDependencies = {
   findByChangeDate: playerValuesRepository.findByChangeDate,
   findLatestForPlayerIds: playerValuesRepository.findLatestForPlayerIds,
+  findAllPlayerIds: playerRepository.findAllIds,
   updatePrices: playerRepository.updatePrices,
   mergePlayersCache: playersCache.merge,
 };
@@ -60,7 +62,8 @@ export function createPlayerPricesSync(dependencies: PlayerPricesSyncDependencie
       throw new Error(`Player rows missing for price update: ${missingPlayers.join(', ')}`);
     }
 
-    await dependencies.mergePlayersCache(updatedPlayers);
+    const allPlayerIds = await dependencies.findAllPlayerIds();
+    await dependencies.mergePlayersCache(updatedPlayers, allPlayerIds);
     logInfo('Player prices updated in database and cache', {
       changeDate,
       count: updatedPlayers.length,

@@ -4,6 +4,7 @@ import type { PlayerValue } from '../../src/domain/player-values';
 import type { StoredPlayerValue } from '../../src/repositories/player-values';
 import {
   createPlayerValuesSync,
+  getPlayerValueSeasonFloor,
   type PlayerValuesSyncDependencies,
 } from '../../src/services/player-values.service';
 import {
@@ -34,7 +35,11 @@ function buildDependencies(
 ): PlayerValuesSyncDependencies {
   return {
     getBootstrap: async () => ({ elements: [singleRawFPLElementFixture], teams: [] }) as never,
-    resolvePlayerSyncEvent: async () => ({ event: { id: 1 }, phase: 'current' }) as never,
+    resolvePlayerSyncEvent: async () =>
+      ({
+        event: { id: 1, deadlineTime: '2026-08-15T17:30:00Z' },
+        phase: 'current',
+      }) as never,
     findLatestForAllPlayers: async () => [],
     findByChangeDate: async () => [],
     insertBatch: async (rows) => ({ count: rows.length, inserted: rows }),
@@ -48,6 +53,55 @@ function buildDependencies(
 }
 
 describe('player-values synchronization orchestration', () => {
+  test('keeps the same season floor after the calendar year changes', () => {
+    expect(getPlayerValueSeasonFloor('2026-08-15T17:30:00Z')).toBe('20260601');
+    expect(getPlayerValueSeasonFloor('2027-01-02T11:00:00Z')).toBe('20260601');
+  });
+
+  test('scopes preseason history to the published season before seeding Start rows', async () => {
+    let persisted: StoredPlayerValue[] = [];
+    const findLatestForAllPlayers = mock(
+      async (fromChangeDate: string, throughChangeDate: string) => {
+        expect(fromChangeDate).toBe('20260601');
+        expect(throughChangeDate).toBe(changeDate);
+        // Prior-season rows are excluded by the bounded repository query.
+        return [];
+      },
+    );
+    const enqueuePlayerPrices = mock(async () => ({ id: 'unexpected' }) as never);
+    const notify = mock(async () => undefined);
+    const sync = createPlayerValuesSync(
+      buildDependencies({
+        resolvePlayerSyncEvent: async () =>
+          ({
+            event: { id: 1, deadlineTime: '2026-08-15T17:30:00Z' },
+            phase: 'preseason',
+          }) as never,
+        findLatestForAllPlayers,
+        findByChangeDate: async () => persisted,
+        insertBatch: async (rows) => {
+          persisted = rows.map((row) => ({
+            elementId: row.elementId,
+            elementType: row.elementType,
+            eventId: row.eventId,
+            value: row.value,
+            changeDate: row.changeDate,
+            changeType: row.changeType,
+            lastValue: row.lastValue,
+          }));
+          return { count: rows.length, inserted: rows };
+        },
+        enqueuePlayerPrices,
+        notify,
+      }),
+    );
+
+    expect(await sync(changeDate)).toEqual({ count: 1 });
+    expect(persisted[0]).toMatchObject({ changeType: 'Start', lastValue: 0 });
+    expect(enqueuePlayerPrices).not.toHaveBeenCalled();
+    expect(notify).not.toHaveBeenCalled();
+  });
+
   test('performs no database or Redis mutation on a true no-change run', async () => {
     const insertBatch = mock(async () => ({ count: 0, inserted: [] }));
     const loadTeamsBasicInfo = mock(async () => mockTeamsForPlayerValues as never);

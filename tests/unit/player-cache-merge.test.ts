@@ -14,6 +14,7 @@ describe('players cache merge', () => {
     let deleteCalls = 0;
     redisSingleton.getClient = async () =>
       ({
+        hkeys: async () => Array.from(fields.keys()),
         hset: async (_key: string, entries: Record<string, string>) => {
           for (const [field, value] of Object.entries(entries)) fields.set(field, value);
           return Object.keys(entries).length;
@@ -36,7 +37,7 @@ describe('players cache merge', () => {
       webName: 'Changed',
     };
     try {
-      await playersCache.merge([changed], '2627');
+      await playersCache.merge([changed], [1, 2], '2627');
     } finally {
       redisSingleton.getClient = originalGetClient;
     }
@@ -48,5 +49,44 @@ describe('players cache merge', () => {
     });
     expect(JSON.parse(fields.get('2') ?? '{}')).toEqual(changed);
     expect(deleteCalls).toBe(0);
+  });
+
+  test('refuses to create or extend an incomplete player view', async () => {
+    const originalGetClient = redisSingleton.getClient;
+    let hsetCalls = 0;
+    redisSingleton.getClient = async () =>
+      ({
+        hkeys: async () => ['2'],
+        hset: async () => {
+          hsetCalls += 1;
+          return 1;
+        },
+      }) as never;
+
+    try {
+      await expect(
+        playersCache.merge(
+          [
+            {
+              id: 2,
+              code: 1002,
+              type: 3,
+              teamId: 1,
+              price: 61,
+              startPrice: 60,
+              firstName: 'Price',
+              secondName: 'Change',
+              webName: 'Changed',
+            },
+          ],
+          [1, 2],
+          '2627',
+        ),
+      ).rejects.toThrow('Refusing to merge prices into incomplete players cache');
+    } finally {
+      redisSingleton.getClient = originalGetClient;
+    }
+
+    expect(hsetCalls).toBe(0);
   });
 });
