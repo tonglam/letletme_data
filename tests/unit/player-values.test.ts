@@ -98,13 +98,31 @@ describe('Player Values Unit Tests', () => {
 
     describe('Business Logic Functions', () => {
       test('should calculate value change amount', () => {
-        const risingPlayer = generatePlayerValue({ value: 90, lastValue: 80 });
-        const fallingPlayer = generatePlayerValue({ value: 70, lastValue: 80 });
-        const stablePlayer = generatePlayerValue({ value: 80, lastValue: 80 });
+        const risingPlayer = generatePlayerValue({
+          value: 90,
+          lastValue: 80,
+          changeType: 'Rise',
+        });
+        const fallingPlayer = generatePlayerValue({
+          value: 70,
+          lastValue: 80,
+          changeType: 'Faller',
+        });
+        const stablePlayer = generatePlayerValue({
+          value: 80,
+          lastValue: 0,
+          changeType: 'Start',
+        });
+        const startPlayer = generatePlayerValue({
+          value: 80,
+          lastValue: 0,
+          changeType: 'Start',
+        });
 
         expect(getValueChangeAmount(risingPlayer)).toBe(10);
         expect(getValueChangeAmount(fallingPlayer)).toBe(-10);
         expect(getValueChangeAmount(stablePlayer)).toBe(0);
+        expect(getValueChangeAmount(startPlayer)).toBe(0);
       });
 
       test('should calculate value change percentage', () => {
@@ -126,11 +144,25 @@ describe('Player Values Unit Tests', () => {
       });
 
       test('should check for significant value change', () => {
-        const significantRise = generatePlayerValue({ value: 90, lastValue: 75 }); // 15 = 1.5m
-        const minorRise = generatePlayerValue({ value: 85, lastValue: 80 }); // 5 = 0.5m
+        const significantRise = generatePlayerValue({
+          value: 90,
+          lastValue: 75,
+          changeType: 'Rise',
+        }); // 15 = 1.5m
+        const minorRise = generatePlayerValue({
+          value: 85,
+          lastValue: 80,
+          changeType: 'Rise',
+        }); // 5 = 0.5m
+        const startPlayer = generatePlayerValue({
+          value: 80,
+          lastValue: 0,
+          changeType: 'Start',
+        });
 
         expect(hasSignificantValueChange(significantRise)).toBe(true);
         expect(hasSignificantValueChange(minorRise)).toBe(false);
+        expect(hasSignificantValueChange(startPlayer)).toBe(false);
       });
 
       test('should convert value to millions', () => {
@@ -254,15 +286,36 @@ describe('Player Values Unit Tests', () => {
 
       test('should sort player values by change amount', () => {
         const playerValues = [
-          generatePlayerValue({ elementId: 1, value: 90, lastValue: 80 }), // +10
-          generatePlayerValue({ elementId: 2, value: 75, lastValue: 85 }), // -10
-          generatePlayerValue({ elementId: 3, value: 105, lastValue: 80 }), // +25
+          generatePlayerValue({
+            elementId: 1,
+            value: 90,
+            lastValue: 80,
+            changeType: 'Rise',
+          }), // +10
+          generatePlayerValue({
+            elementId: 2,
+            value: 75,
+            lastValue: 85,
+            changeType: 'Faller',
+          }), // -10
+          generatePlayerValue({
+            elementId: 3,
+            value: 105,
+            lastValue: 80,
+            changeType: 'Rise',
+          }), // +25
+          generatePlayerValue({
+            elementId: 4,
+            value: 80,
+            lastValue: 0,
+            changeType: 'Start',
+          }),
         ];
 
         const sorted = sortPlayerValuesByChangeAmount(playerValues);
         const changeAmounts = sorted.map((p) => getValueChangeAmount(p));
-        expect(changeAmounts).toEqual([25, 10, -10]); // Descending order
-        expect(sorted.map((p) => p.elementId)).toEqual([3, 1, 2]);
+        expect(changeAmounts).toEqual([25, 10, 0, -10]); // Descending order
+        expect(sorted.map((p) => p.elementId)).toEqual([3, 1, 4, 2]);
       });
     });
   });

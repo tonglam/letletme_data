@@ -110,6 +110,9 @@ export const RawPlayerValueSchema = PlayerValueBaseSchema.omit({
  * Calculate value change amount
  */
 export function getValueChangeAmount(playerValue: PlayerValue): number {
+  if (playerValue.changeType === 'Start') {
+    return 0;
+  }
   return playerValue.value - playerValue.lastValue;
 }
 
