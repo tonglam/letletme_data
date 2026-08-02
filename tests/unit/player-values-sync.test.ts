@@ -6,7 +6,10 @@ import {
   createPlayerValuesSync,
   type PlayerValuesSyncDependencies,
 } from '../../src/services/player-values.service';
-import { getPlayerValueSeasonFloor } from '../../src/utils/player-value-season';
+import {
+  getPlayerValueSeasonBounds,
+  getPlayerValueSeasonFloor,
+} from '../../src/utils/player-value-season';
 import {
   mockTeamsForPlayerValues,
   singleRawFPLElementFixture,
@@ -58,6 +61,10 @@ describe('player-values synchronization orchestration', () => {
   test('keeps the same season floor after the calendar year changes', () => {
     expect(getPlayerValueSeasonFloor('2026-08-15T17:30:00Z')).toBe('20260601');
     expect(getPlayerValueSeasonFloor('2027-01-02T11:00:00Z')).toBe('20260601');
+    expect(getPlayerValueSeasonBounds('2027-01-02T11:00:00Z')).toEqual({
+      fromChangeDate: '20260601',
+      beforeChangeDate: '20270601',
+    });
   });
 
   test('discards a delayed capture after its configured date without reading upstream', async () => {

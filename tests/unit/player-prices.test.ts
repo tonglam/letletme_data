@@ -30,25 +30,30 @@ const player = (id: number, price: number): Player => ({
   webName: `Player ${id}`,
 });
 
+const bootstrap = (ids: number[]) =>
+  ({
+    elements: ids.map((id) => ({ id })),
+    events: [{ id: 1, deadline_time: '2026-08-15T17:30:00Z' }],
+  }) as never;
+
 describe('player-prices sync', () => {
   test('updates only risers and fallers and merges their complete cache fields', async () => {
     const updatePrices = mock(async (updates: Array<{ elementId: number; value: number }>) =>
       updates.map((update) => player(update.elementId, update.value)),
     );
     const mergePlayersCache = mock(async () => undefined);
-    const getBootstrap = mock(
-      async () => ({ elements: [{ id: 1 }, { id: 2 }, { id: 3 }] }) as never,
-    );
+    const getBootstrap = mock(async () => bootstrap([1, 2, 3]));
+    const findLatestForPlayerIds = mock(async () => [
+      stored(2, 61, '20260803', 'Rise'),
+      stored(3, 49, '20260803', 'Faller'),
+    ]);
     const sync = createPlayerPricesSync({
       findByChangeDate: async () => [
         stored(1, 50, '20260803', 'Start'),
         stored(2, 61, '20260803', 'Rise'),
         stored(3, 49, '20260803', 'Faller'),
       ],
-      findLatestForPlayerIds: async () => [
-        stored(2, 61, '20260803', 'Rise'),
-        stored(3, 49, '20260803', 'Faller'),
-      ],
+      findLatestForPlayerIds,
       getBootstrap,
       updatePrices,
       mergePlayersCache,
@@ -60,6 +65,7 @@ describe('player-prices sync', () => {
       { elementId: 3, value: 49 },
     ]);
     expect(getBootstrap).toHaveBeenCalledTimes(1);
+    expect(findLatestForPlayerIds).toHaveBeenCalledWith([2, 3], '20260601', '20270601');
     expect(mergePlayersCache).toHaveBeenCalledWith([player(2, 61), player(3, 49)], [1, 2, 3]);
   });
 
@@ -70,7 +76,7 @@ describe('player-prices sync', () => {
     const sync = createPlayerPricesSync({
       findByChangeDate: async () => [stored(2, 61, '20260803', 'Rise')],
       findLatestForPlayerIds: async () => [stored(2, 63, '20260805', 'Rise')],
-      getBootstrap: async () => ({ elements: [{ id: 1 }, { id: 2 }] }) as never,
+      getBootstrap: async () => bootstrap([1, 2]),
       updatePrices,
       mergePlayersCache: async () => undefined,
     });
@@ -82,7 +88,7 @@ describe('player-prices sync', () => {
   test('skips cleanly when a date contains only Start rows', async () => {
     const updatePrices = mock(async () => []);
     const mergePlayersCache = mock(async () => undefined);
-    const getBootstrap = mock(async () => ({ elements: [{ id: 1 }] }) as never);
+    const getBootstrap = mock(async () => bootstrap([1]));
     const sync = createPlayerPricesSync({
       findByChangeDate: async () => [stored(1, 50, '20260802', 'Start')],
       findLatestForPlayerIds: async () => [],
@@ -104,7 +110,7 @@ describe('player-prices sync', () => {
     const sync = createPlayerPricesSync({
       findByChangeDate: async () => [stored(2, 61, '20260803', 'Rise')],
       findLatestForPlayerIds,
-      getBootstrap: async () => ({ elements: [{ id: 1 }, { id: 3 }] }) as never,
+      getBootstrap: async () => bootstrap([1, 3]),
       updatePrices,
       mergePlayersCache,
     });

@@ -18,3 +18,15 @@ export function getPlayerValueSeasonFloor(deadlineTime: string | null): string {
 
   return `${seasonStartYear(deadline.getUTCFullYear(), deadline.getUTCMonth() + 1, 7)}0601`;
 }
+
+export function getPlayerValueSeasonBounds(deadlineTime: string | null): {
+  fromChangeDate: string;
+  beforeChangeDate: string;
+} {
+  const fromChangeDate = getPlayerValueSeasonFloor(deadlineTime);
+  const startYear = Number.parseInt(fromChangeDate.slice(0, 4), 10);
+  return {
+    fromChangeDate,
+    beforeChangeDate: `${startYear + 1}0601`,
+  };
+}

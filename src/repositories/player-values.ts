@@ -1,4 +1,4 @@
-import { asc, desc, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, lt, sql } from 'drizzle-orm';
 
 import { playerValues, type DbPlayerValueInsert } from '../db/schemas/index.schema';
 import { getDb } from '../db/singleton';
@@ -92,7 +92,11 @@ export const createPlayerValuesRepository = (dbInstance?: DatabaseInstance) => {
       }
     },
 
-    findLatestForPlayerIds: async (elementIds: number[]): Promise<StoredPlayerValue[]> => {
+    findLatestForPlayerIds: async (
+      elementIds: number[],
+      fromChangeDate: string,
+      beforeChangeDate: string,
+    ): Promise<StoredPlayerValue[]> => {
       if (elementIds.length === 0) {
         return [];
       }
@@ -111,7 +115,13 @@ export const createPlayerValuesRepository = (dbInstance?: DatabaseInstance) => {
             lastValue: playerValues.lastValue,
           })
           .from(playerValues)
-          .where(inArray(playerValues.elementId, uniqueIds))
+          .where(
+            and(
+              inArray(playerValues.elementId, uniqueIds),
+              gte(playerValues.changeDate, fromChangeDate),
+              lt(playerValues.changeDate, beforeChangeDate),
+            ),
+          )
           .orderBy(
             asc(playerValues.elementId),
             desc(playerValues.changeDate),
@@ -130,6 +140,8 @@ export const createPlayerValuesRepository = (dbInstance?: DatabaseInstance) => {
       } catch (error) {
         logError('Failed to get latest player values by player IDs', error, {
           count: elementIds.length,
+          fromChangeDate,
+          beforeChangeDate,
         });
         throw new DatabaseError(
           'Failed to get latest player values by player IDs',

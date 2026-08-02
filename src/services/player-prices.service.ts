@@ -3,6 +3,7 @@ import { fplClient } from '../clients/fpl';
 import { playerValuesRepository } from '../repositories/player-values';
 import { playerRepository } from '../repositories/players';
 import { logInfo } from '../utils/logger';
+import { getPlayerValueSeasonBounds } from '../utils/player-value-season';
 
 export type PlayerPricesSyncDependencies = {
   findByChangeDate: typeof playerValuesRepository.findByChangeDate;
@@ -53,11 +54,18 @@ export function createPlayerPricesSync(dependencies: PlayerPricesSyncDependencie
       logInfo('Affected price rows no longer belong to the published roster', { changeDate });
       return { count: 0, changeDate };
     }
+    const gw1Deadline = bootstrap.events.find((event) => event.id === 1)?.deadline_time ?? null;
+    const { fromChangeDate, beforeChangeDate } = getPlayerValueSeasonBounds(gw1Deadline);
 
     // The date selects the affected players, while the latest row selects the
     // value. A delayed replay of an older date therefore cannot regress a
-    // player who has changed again since that date.
-    const latestRows = await dependencies.findLatestForPlayerIds(currentChangedIds);
+    // player who has changed again since that date. The published-season
+    // bounds prevent a reused FPL element ID from reading prior-season history.
+    const latestRows = await dependencies.findLatestForPlayerIds(
+      currentChangedIds,
+      fromChangeDate,
+      beforeChangeDate,
+    );
     const latestById = new Map(latestRows.map((row) => [row.elementId, row]));
     const missingLatest = currentChangedIds.filter((elementId) => !latestById.has(elementId));
     if (missingLatest.length > 0) {

@@ -42,12 +42,14 @@ const enqueueEventsSyncJob = mock(async () => ({ id: 'events-job-1' }));
 const enqueueFixturesSyncJob = mock(async () => ({ id: 'fixtures-job-1' }));
 const enqueueFixturesAllGameweeksSyncJob = mock(async () => ({ id: 'fixtures-all-gw-job-1' }));
 const enqueuePlayersSyncJob = mock(async () => ({ id: 'players-job-1' }));
+const enqueuePlayerValuesSyncJob = mock(async () => ({ id: 'player-values-job-1' }));
 const enqueuePlayerStatsSyncJob = mock(async () => ({ id: 'player-stats-job-1' }));
 mock.module('../../src/jobs/data-sync-enqueue', () => ({
   enqueueEventsSyncJob,
   enqueueFixturesSyncJob,
   enqueueFixturesAllGameweeksSyncJob,
   enqueuePlayersSyncJob,
+  enqueuePlayerValuesSyncJob,
   enqueuePlayerStatsSyncJob,
 }));
 
@@ -155,6 +157,7 @@ const { jobsAPI } = await import('../../src/api/jobs.api');
 const { entrySyncAPI } = await import('../../src/api/entry-sync.api');
 const { fixturesAPI } = await import('../../src/api/fixtures.api');
 const { playersAPI } = await import('../../src/api/players.api');
+const { playerValuesAPI } = await import('../../src/api/player-values.api');
 const { playerStatsAPI } = await import('../../src/api/player-stats.api');
 const { eventLivesAPI } = await import('../../src/api/event-lives.api');
 const { tournamentsAPI } = await import('../../src/api/tournaments.api');
@@ -198,6 +201,17 @@ describe('playersAPI handlers', () => {
     expect(response.status).toBe(202);
     expect(await response.json()).toMatchObject({ success: true, jobId: 'players-job-1' });
     expect(enqueuePlayersSyncJob).toHaveBeenCalledWith('api');
+  });
+});
+
+describe('playerValuesAPI handlers', () => {
+  test('POST /player-values/sync enqueues the mutation-scoped job', async () => {
+    const response = await playerValuesAPI.handle(
+      new Request('http://localhost/player-values/sync', { method: 'POST' }),
+    );
+    expect(response.status).toBe(202);
+    expect(await response.json()).toMatchObject({ success: true, jobId: 'player-values-job-1' });
+    expect(enqueuePlayerValuesSyncJob).toHaveBeenCalledWith('api');
   });
 });
 
