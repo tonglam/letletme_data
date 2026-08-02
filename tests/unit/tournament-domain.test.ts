@@ -5,6 +5,7 @@ import {
   parseLeagueUrl,
   planTournamentStructure,
   seedBracketEntries,
+  tournamentCreateInputSchema,
   type TournamentConfig,
   type TournamentCreateInput,
   type TournamentParticipant,
@@ -143,5 +144,45 @@ describe('planTournamentStructure', () => {
     expect(() =>
       planTournamentStructure(basePayload, participants([1, 2, 3]), 1, 'classic'),
     ).toThrow(ValidationError);
+  });
+});
+
+describe('tournamentCreateInputSchema', () => {
+  const validPayload = {
+    tournamentName: 'Test Cup',
+    adminId: '1',
+    creator: 'admin',
+    participantSource: 'custom' as const,
+    tournamentType: 'standard' as const,
+    leagueUrl: 'https://fantasy.premierleague.com/leagues/1/standings/c',
+    groupFormat: 'points' as const,
+    startGameweek: 'GW1',
+    endGameweek: 'GW10',
+    groupNum: '2',
+    qualifiersPerGroup: '2',
+    knockoutFormat: 'single' as const,
+    selectedParticipantIds: ['1', '2', '3', '4'],
+  };
+
+  test('accepts a bounded tournament payload', () => {
+    expect(tournamentCreateInputSchema.safeParse(validPayload).success).toBe(true);
+  });
+
+  test('rejects invalid numeric fields, insecure URLs, and reversed gameweeks', () => {
+    const result = tournamentCreateInputSchema.safeParse({
+      ...validPayload,
+      leagueUrl: 'http://fantasy.premierleague.com/leagues/1/standings/c',
+      startGameweek: 'GW12',
+      endGameweek: 'GW4',
+      groupNum: 'not-a-number',
+      qualifiersPerGroup: '0',
+    });
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(new Set(result.error.issues.map((issue) => issue.path[0]))).toEqual(
+        new Set(['leagueUrl', 'endGameweek', 'groupNum', 'qualifiersPerGroup']),
+      );
+    }
   });
 });

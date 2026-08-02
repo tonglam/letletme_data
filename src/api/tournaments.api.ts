@@ -8,6 +8,7 @@ import {
 } from '../services/tournament-create.service';
 import { validateTournamentCreateInput } from '../domain/tournament';
 import { requeueTournamentSetup } from '../services/tournament-setup.service';
+import { tournamentManagementService } from '../services/tournament-management.service';
 import { getErrorMessage, getHttpStatusFromError } from '../utils/errors';
 
 function mapErrorToResponse(error: unknown): { status: number; message: string } {
@@ -90,19 +91,66 @@ export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
     },
     {
       body: t.Object({
-        tournamentName: t.String(),
+        tournamentName: t.String({ minLength: 3, maxLength: 80 }),
         adminId: t.String(),
-        creator: t.String(),
+        creator: t.String({ minLength: 1, maxLength: 80 }),
         participantSource: t.Union([t.Literal('official'), t.Literal('custom')]),
         tournamentType: t.Optional(t.String()),
-        leagueUrl: t.String(),
+        leagueUrl: t.String({ minLength: 1, maxLength: 512 }),
         groupFormat: t.Union([t.Literal('none'), t.Literal('points')]),
         startGameweek: t.String(),
         endGameweek: t.String(),
         groupNum: t.Optional(t.String()),
         qualifiersPerGroup: t.Optional(t.String()),
         knockoutFormat: t.Union([t.Literal('none'), t.Literal('single'), t.Literal('double')]),
-        selectedParticipantIds: t.Optional(t.Array(t.String())),
+        selectedParticipantIds: t.Optional(t.Array(t.String(), { maxItems: 5000 })),
       }),
+    },
+  )
+  .patch(
+    '/:tournamentId',
+    async ({ params, body, set }) => {
+      try {
+        const tournament = await tournamentManagementService.updateTournament(
+          params.tournamentId,
+          body,
+        );
+        return { success: true, tournament };
+      } catch (error) {
+        const { status, message } = mapErrorToResponse(error);
+        set.status = status;
+        return { success: false, error: message };
+      }
+    },
+    {
+      params: t.Object({ tournamentId: t.Numeric() }),
+      body: t.Object({
+        name: t.String({ minLength: 3, maxLength: 80 }),
+        adminEntryId: t.Numeric(),
+      }),
+    },
+  )
+  .delete(
+    '/:tournamentId',
+    async ({ params, body, set }) => {
+      try {
+        const tournament = await tournamentManagementService.deleteTournament(
+          params.tournamentId,
+          body,
+        );
+        return {
+          success: true,
+          tournamentId: tournament.id,
+          deletedName: tournament.name,
+        };
+      } catch (error) {
+        const { status, message } = mapErrorToResponse(error);
+        set.status = status;
+        return { success: false, error: message };
+      }
+    },
+    {
+      params: t.Object({ tournamentId: t.Numeric() }),
+      body: t.Object({ adminEntryId: t.Numeric() }),
     },
   );

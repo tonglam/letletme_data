@@ -6,21 +6,67 @@ export const MAX_RANK = 2147483647;
 
 const FPL_HOSTNAME = 'fantasy.premierleague.com';
 
-export const tournamentCreateInputSchema = z.object({
-  tournamentName: z.string().min(3),
-  adminId: z.string().regex(/^\d+$/),
-  creator: z.string().trim().min(1),
-  participantSource: z.enum(['official', 'custom']),
-  tournamentType: z.string().optional(),
-  leagueUrl: z.string().url(),
-  groupFormat: z.enum(['none', 'points']),
-  startGameweek: z.string(),
-  endGameweek: z.string(),
-  groupNum: z.string().optional(),
-  qualifiersPerGroup: z.string().optional(),
-  knockoutFormat: z.enum(['none', 'single', 'double']),
-  selectedParticipantIds: z.array(z.string()).optional(),
-});
+const gameweekSchema = z.string().regex(/^GW(?:[1-9]|[12]\d|3[0-8])$/i);
+const optionalPositiveIntegerStringSchema = z.union([
+  z.literal(''),
+  z.string().regex(/^[1-9]\d*$/),
+]);
+
+export const tournamentCreateInputSchema = z
+  .object({
+    tournamentName: z.string().trim().min(3).max(80),
+    adminId: z.string().regex(/^\d+$/),
+    creator: z.string().trim().min(1).max(80),
+    participantSource: z.enum(['official', 'custom']),
+    tournamentType: z.literal('standard').optional(),
+    leagueUrl: z
+      .string()
+      .max(512)
+      .url()
+      .refine((value) => {
+        const url = new URL(value);
+        return url.protocol === 'https:' && url.hostname === FPL_HOSTNAME;
+      }, 'Only secure Fantasy Premier League URLs are allowed.'),
+    groupFormat: z.enum(['none', 'points']),
+    startGameweek: gameweekSchema,
+    endGameweek: gameweekSchema,
+    groupNum: optionalPositiveIntegerStringSchema.optional(),
+    qualifiersPerGroup: optionalPositiveIntegerStringSchema.optional(),
+    knockoutFormat: z.enum(['none', 'single', 'double']),
+    selectedParticipantIds: z
+      .array(z.string().regex(/^[1-9]\d*$/))
+      .max(5000)
+      .optional(),
+  })
+  .superRefine((values, context) => {
+    const startGameweek = parseGameweek(values.startGameweek);
+    const endGameweek = parseGameweek(values.endGameweek);
+    if (!startGameweek || !endGameweek || endGameweek < startGameweek) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['endGameweek'],
+        message: 'End gameweek must be on or after the start gameweek.',
+      });
+    }
+    if (values.groupFormat === 'points' && !values.groupNum) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['groupNum'],
+        message: 'Group number is required for a points race.',
+      });
+    }
+    if (
+      values.groupFormat === 'points' &&
+      values.knockoutFormat !== 'none' &&
+      !values.qualifiersPerGroup
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['qualifiersPerGroup'],
+        message: 'Qualifiers per group are required for a knockout phase.',
+      });
+    }
+  });
 
 export type TournamentCreateInput = z.infer<typeof tournamentCreateInputSchema>;
 export type TournamentSetupStatus = 'pending' | 'processing' | 'ready' | 'failed';
