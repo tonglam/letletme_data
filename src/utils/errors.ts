@@ -70,6 +70,18 @@ export class ConflictError extends Error implements APIError {
   }
 }
 
+export class ForbiddenError extends Error implements APIError {
+  public readonly status = 403;
+  constructor(
+    message: string,
+    public code?: string,
+    public details?: unknown,
+  ) {
+    super(message);
+    this.name = 'ForbiddenError';
+  }
+}
+
 // Error handling utilities
 export function isAPIError(error: unknown): error is APIError {
   return error instanceof Error && 'status' in error;
@@ -79,6 +91,7 @@ export function getHttpStatusFromError(error: unknown): number {
   if (error instanceof ValidationError) return error.status;
   if (error instanceof NotFoundError) return error.status;
   if (error instanceof ConflictError) return error.status;
+  if (error instanceof ForbiddenError) return error.status;
   if (isAPIError(error) && typeof error.status === 'number') return error.status;
   return 500;
 }

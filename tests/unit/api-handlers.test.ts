@@ -110,6 +110,31 @@ mock.module('../../src/services/tournament-create.service', () => ({
   getTournamentSetupStatus,
 }));
 
+const managedTournament = {
+  id: 55,
+  name: 'Managed Cup',
+  creator: 'Manager',
+  adminEntryId: 123,
+  totalTeamNum: 8,
+  state: 'active' as const,
+  createdAt: '2026-08-01T00:00:00.000Z',
+  updatedAt: '2026-08-02T00:00:00.000Z',
+};
+// Spy on the singleton instead of replacing the whole module. Bun shares the
+// module mock registry across test files, and a partial mock here would hide
+// createTournamentManagementService from tournament-management.test.ts.
+const tournamentManagementServiceModule = await import(
+  '../../src/services/tournament-management.service'
+);
+const updateTournament = spyOn(
+  tournamentManagementServiceModule.tournamentManagementService,
+  'updateTournament',
+).mockImplementation(async () => managedTournament);
+const deleteTournament = spyOn(
+  tournamentManagementServiceModule.tournamentManagementService,
+  'deleteTournament',
+).mockImplementation(async () => managedTournament);
+
 const syncEntryInfo = mock(async (entryId: number) => ({ id: entryId, name: 'Test' }));
 mock.module('../../src/services/entry-info.service', () => ({
   syncEntryInfo,
@@ -406,6 +431,10 @@ describe('tournamentsAPI handlers', () => {
   beforeEach(() => {
     checkTournamentNameAvailability.mockClear();
     getTournamentSetupStatus.mockClear();
+    updateTournament.mockClear();
+    deleteTournament.mockClear();
+    updateTournament.mockImplementation(async () => managedTournament);
+    deleteTournament.mockImplementation(async () => managedTournament);
   });
 
   test('GET /tournaments/check-name returns availability', async () => {
@@ -445,6 +474,62 @@ describe('tournamentsAPI handlers', () => {
     expect(JSON.stringify(body)).not.toContain('internal-host');
 
     getTournamentSetupStatus.mockImplementation(async () => null);
+  });
+
+  test('PATCH /tournaments/:id forwards a validated management command', async () => {
+    const response = await tournamentsAPI.handle(
+      new Request('http://localhost/tournaments/55', {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'Managed Cup', adminEntryId: 123 }),
+      }),
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ success: true, tournament: managedTournament });
+    expect(updateTournament).toHaveBeenCalledWith(55, {
+      name: 'Managed Cup',
+      adminEntryId: 123,
+    });
+  });
+
+  test('DELETE /tournaments/:id forwards ownership and returns a bounded receipt', async () => {
+    const response = await tournamentsAPI.handle(
+      new Request('http://localhost/tournaments/55', {
+        method: 'DELETE',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ adminEntryId: 123 }),
+      }),
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      success: true,
+      tournamentId: 55,
+      deletedName: 'Managed Cup',
+    });
+    expect(deleteTournament).toHaveBeenCalledWith(55, { adminEntryId: 123 });
+  });
+
+  test('maps management ownership failures to 403', async () => {
+    deleteTournament.mockImplementationOnce(async () => {
+      throw Object.assign(
+        new Error('Only the tournament administrator can delete this tournament.'),
+        {
+          status: 403,
+        },
+      );
+    });
+    const response = await tournamentsAPI.handle(
+      new Request('http://localhost/tournaments/55', {
+        method: 'DELETE',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ adminEntryId: 999 }),
+      }),
+    );
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({
+      success: false,
+      error: 'Only the tournament administrator can delete this tournament.',
+    });
   });
 });
 
