@@ -267,7 +267,13 @@ export const parseLeagueUrl = (rawUrl: string): { leagueId: number; leagueType: 
     );
   }
 
-  if (parsedUrl.hostname !== FPL_HOSTNAME) {
+  if (
+    parsedUrl.protocol !== 'https:' ||
+    parsedUrl.hostname !== FPL_HOSTNAME ||
+    parsedUrl.port ||
+    parsedUrl.username ||
+    parsedUrl.password
+  ) {
     throw new ValidationError(
       'Only URLs from fantasy.premierleague.com are allowed.',
       'TOURNAMENT_LEAGUE_URL_HOST_INVALID',
@@ -275,15 +281,33 @@ export const parseLeagueUrl = (rawUrl: string): { leagueId: number; leagueType: 
   }
 
   const pathSegments = parsedUrl.pathname.split('/').filter(Boolean);
-  if (pathSegments.length < 3 || pathSegments[0] !== 'leagues') {
+  const hasLocalePrefix = /^[a-z]{2}(?:-[a-z]{2})?$/i.test(pathSegments[0] ?? '');
+  const leaguesIndex =
+    pathSegments[0] === 'leagues' ? 0 : hasLocalePrefix && pathSegments[1] === 'leagues' ? 1 : -1;
+  if (leaguesIndex < 0 || pathSegments.length < leaguesIndex + 3) {
     throw new ValidationError(
       'Unsupported league URL format.',
       'TOURNAMENT_LEAGUE_URL_FORMAT_INVALID',
     );
   }
 
-  const leagueId = Number(pathSegments[1]);
-  if (!Number.isInteger(leagueId) || leagueId <= 0) {
+  const surface = pathSegments[leaguesIndex + 2];
+  if (!['standings', 'admin', 'join'].includes(surface)) {
+    throw new ValidationError(
+      'Unsupported league URL format.',
+      'TOURNAMENT_LEAGUE_URL_FORMAT_INVALID',
+    );
+  }
+  const standingsSuffix = surface === 'standings' ? pathSegments[leaguesIndex + 3] : undefined;
+  if (standingsSuffix && !['c', 'classic', 'h', 'h2h'].includes(standingsSuffix.toLowerCase())) {
+    throw new ValidationError(
+      'Unsupported league standings type.',
+      'TOURNAMENT_LEAGUE_URL_FORMAT_INVALID',
+    );
+  }
+
+  const leagueId = Number(pathSegments[leaguesIndex + 1]);
+  if (!Number.isSafeInteger(leagueId) || leagueId <= 0) {
     throw new ValidationError(
       'League ID could not be parsed from the URL.',
       'TOURNAMENT_LEAGUE_ID_INVALID',
@@ -292,7 +316,7 @@ export const parseLeagueUrl = (rawUrl: string): { leagueId: number; leagueType: 
 
   return {
     leagueId,
-    leagueType: inferLeagueType(pathSegments),
+    leagueType: inferLeagueType(pathSegments.slice(leaguesIndex)),
   };
 };
 
