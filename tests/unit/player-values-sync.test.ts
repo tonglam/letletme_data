@@ -4,9 +4,12 @@ import type { PlayerValue } from '../../src/domain/player-values';
 import type { StoredPlayerValue } from '../../src/repositories/player-values';
 import {
   createPlayerValuesSync,
-  getPlayerValueSeasonFloor,
   type PlayerValuesSyncDependencies,
 } from '../../src/services/player-values.service';
+import {
+  getPlayerValueSeasonFloor,
+  getPlayerValueSeasonFloorForDate,
+} from '../../src/utils/player-value-season';
 import {
   mockTeamsForPlayerValues,
   singleRawFPLElementFixture,
@@ -48,6 +51,7 @@ function buildDependencies(
     mergeCachedValues: async () => undefined,
     enqueuePlayerPrices: async () => ({ id: 'player-prices-immediate' }) as never,
     notify: async () => undefined,
+    getCurrentChangeDate: () => changeDate,
     ...overrides,
   };
 }
@@ -56,6 +60,20 @@ describe('player-values synchronization orchestration', () => {
   test('keeps the same season floor after the calendar year changes', () => {
     expect(getPlayerValueSeasonFloor('2026-08-15T17:30:00Z')).toBe('20260601');
     expect(getPlayerValueSeasonFloor('2027-01-02T11:00:00Z')).toBe('20260601');
+    expect(getPlayerValueSeasonFloorForDate('20270102')).toBe('20260601');
+  });
+
+  test('discards a delayed capture after its configured date without reading upstream', async () => {
+    const getBootstrap = mock(async () => ({ elements: [singleRawFPLElementFixture] }) as never);
+    const sync = createPlayerValuesSync(
+      buildDependencies({
+        getBootstrap,
+        getCurrentChangeDate: () => '20260804',
+      }),
+    );
+
+    expect(await sync(changeDate)).toEqual({ count: 0 });
+    expect(getBootstrap).not.toHaveBeenCalled();
   });
 
   test('scopes preseason history to the published season before seeding Start rows', async () => {

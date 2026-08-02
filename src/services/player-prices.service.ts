@@ -2,11 +2,12 @@ import { playersCache } from '../cache/operations';
 import { playerValuesRepository } from '../repositories/player-values';
 import { playerRepository } from '../repositories/players';
 import { logInfo } from '../utils/logger';
+import { getPlayerValueSeasonFloorForDate } from '../utils/player-value-season';
 
 export type PlayerPricesSyncDependencies = {
   findByChangeDate: typeof playerValuesRepository.findByChangeDate;
   findLatestForPlayerIds: typeof playerValuesRepository.findLatestForPlayerIds;
-  findAllPlayerIds: typeof playerRepository.findAllIds;
+  findDistinctPlayerIds: typeof playerValuesRepository.findDistinctPlayerIds;
   updatePrices: typeof playerRepository.updatePrices;
   mergePlayersCache: typeof playersCache.merge;
 };
@@ -14,7 +15,7 @@ export type PlayerPricesSyncDependencies = {
 const defaultDependencies: PlayerPricesSyncDependencies = {
   findByChangeDate: playerValuesRepository.findByChangeDate,
   findLatestForPlayerIds: playerValuesRepository.findLatestForPlayerIds,
-  findAllPlayerIds: playerRepository.findAllIds,
+  findDistinctPlayerIds: playerValuesRepository.findDistinctPlayerIds,
   updatePrices: playerRepository.updatePrices,
   mergePlayersCache: playersCache.merge,
 };
@@ -62,8 +63,12 @@ export function createPlayerPricesSync(dependencies: PlayerPricesSyncDependencie
       throw new Error(`Player rows missing for price update: ${missingPlayers.join(', ')}`);
     }
 
-    const allPlayerIds = await dependencies.findAllPlayerIds();
-    await dependencies.mergePlayersCache(updatedPlayers, allPlayerIds);
+    // The season's player-value seed is captured from the complete published
+    // bootstrap roster. Do not use the single-season players table here: its
+    // retained prior-roster IDs are valid history owners but not cache fields.
+    const seasonFloor = getPlayerValueSeasonFloorForDate(changeDate);
+    const publishedPlayerIds = await dependencies.findDistinctPlayerIds(seasonFloor, changeDate);
+    await dependencies.mergePlayersCache(updatedPlayers, publishedPlayerIds);
     logInfo('Player prices updated in database and cache', {
       changeDate,
       count: updatedPlayers.length,

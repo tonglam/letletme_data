@@ -36,6 +36,7 @@ describe('player-prices sync', () => {
       updates.map((update) => player(update.elementId, update.value)),
     );
     const mergePlayersCache = mock(async () => undefined);
+    const findDistinctPlayerIds = mock(async () => [1, 2, 3]);
     const sync = createPlayerPricesSync({
       findByChangeDate: async () => [
         stored(1, 50, '20260803', 'Start'),
@@ -46,7 +47,7 @@ describe('player-prices sync', () => {
         stored(2, 61, '20260803', 'Rise'),
         stored(3, 49, '20260803', 'Faller'),
       ],
-      findAllPlayerIds: async () => [1, 2, 3],
+      findDistinctPlayerIds,
       updatePrices,
       mergePlayersCache,
     });
@@ -56,6 +57,7 @@ describe('player-prices sync', () => {
       { elementId: 2, value: 61 },
       { elementId: 3, value: 49 },
     ]);
+    expect(findDistinctPlayerIds).toHaveBeenCalledWith('20260601', '20260803');
     expect(mergePlayersCache).toHaveBeenCalledWith([player(2, 61), player(3, 49)], [1, 2, 3]);
   });
 
@@ -66,7 +68,7 @@ describe('player-prices sync', () => {
     const sync = createPlayerPricesSync({
       findByChangeDate: async () => [stored(2, 61, '20260803', 'Rise')],
       findLatestForPlayerIds: async () => [stored(2, 63, '20260805', 'Rise')],
-      findAllPlayerIds: async () => [1, 2],
+      findDistinctPlayerIds: async () => [1, 2],
       updatePrices,
       mergePlayersCache: async () => undefined,
     });
@@ -81,7 +83,7 @@ describe('player-prices sync', () => {
     const sync = createPlayerPricesSync({
       findByChangeDate: async () => [stored(1, 50, '20260802', 'Start')],
       findLatestForPlayerIds: async () => [],
-      findAllPlayerIds: async () => [1],
+      findDistinctPlayerIds: async () => [1],
       updatePrices,
       mergePlayersCache,
     });

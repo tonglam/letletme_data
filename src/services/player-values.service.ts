@@ -9,6 +9,7 @@ import type { RawFPLElement } from '../types';
 import { ELEMENT_TYPE_MAP } from '../types/base.type';
 import { notifyTwoBots } from '../utils/notify';
 import { logError, logInfo } from '../utils/logger';
+import { getPlayerValueSeasonFloor } from '../utils/player-value-season';
 import { loadTeamsBasicInfo } from '../utils/teams';
 import { formatCronDateKey } from '../utils/timezone';
 import { resolvePlayerSyncEvent } from './player-sync-event.service';
@@ -24,6 +25,7 @@ export type PlayerValuesSyncDependencies = {
   mergeCachedValues: typeof playerValuesCache.merge;
   enqueuePlayerPrices: typeof enqueuePlayerPricesSyncJob;
   notify: typeof notifyTwoBots;
+  getCurrentChangeDate: () => string;
 };
 
 const defaultDependencies: PlayerValuesSyncDependencies = {
@@ -37,6 +39,7 @@ const defaultDependencies: PlayerValuesSyncDependencies = {
   mergeCachedValues: playerValuesCache.merge,
   enqueuePlayerPrices: enqueuePlayerPricesSyncJob,
   notify: notifyTwoBots,
+  getCurrentChangeDate: () => formatCronDateKey(),
 };
 
 function formatPlayerValuesNotification(
@@ -136,28 +139,6 @@ function enrichStoredRows(
   });
 }
 
-/**
- * player_values is intentionally date-keyed and has no season column. Scope
- * comparisons to the published season inferred from the target event's
- * deadline so reused element IDs cannot inherit prior-season price history.
- */
-export function getPlayerValueSeasonFloor(deadlineTime: string | null): string {
-  if (!deadlineTime) {
-    throw new Error('Player value season cannot be resolved without an event deadline');
-  }
-
-  const deadline = new Date(deadlineTime);
-  if (Number.isNaN(deadline.getTime())) {
-    throw new Error(`Invalid event deadline for player value season: ${deadlineTime}`);
-  }
-
-  // The previous FPL season finishes in May. June 1 is therefore a stable
-  // boundary that also permits unusually early preseason bootstrap releases.
-  const deadlineYear = deadline.getUTCFullYear();
-  const seasonStartYear = deadline.getUTCMonth() >= 6 ? deadlineYear : deadlineYear - 1;
-  return `${seasonStartYear}0601`;
-}
-
 export function createPlayerValuesSync(dependencies: PlayerValuesSyncDependencies) {
   return async function syncForDate(
     changeDate: string = formatCronDateKey(),
@@ -166,6 +147,15 @@ export function createPlayerValuesSync(dependencies: PlayerValuesSyncDependencie
 
     if (!/^\d{8}$/.test(changeDate)) {
       throw new Error(`Invalid player value change date: ${changeDate}`);
+    }
+
+    const currentChangeDate = dependencies.getCurrentChangeDate();
+    if (changeDate !== currentChangeDate) {
+      logInfo('Skipping player values capture outside its scheduled date', {
+        changeDate,
+        currentChangeDate,
+      });
+      return { count: 0 };
     }
 
     const [bootstrapData, syncEvent] = await Promise.all([

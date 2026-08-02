@@ -70,6 +70,31 @@ export const createPlayerValuesRepository = (dbInstance?: DatabaseInstance) => {
       }
     },
 
+    findDistinctPlayerIds: async (
+      fromChangeDate: string,
+      throughChangeDate: string,
+    ): Promise<number[]> => {
+      try {
+        const db = await getDbInstance();
+        const rows = await db
+          .selectDistinct({ elementId: playerValues.elementId })
+          .from(playerValues).where(sql`
+            ${playerValues.changeDate} >= ${fromChangeDate}
+            AND ${playerValues.changeDate} <= ${throughChangeDate}
+          `);
+        return rows.map((row) => row.elementId);
+      } catch (error) {
+        logError('Failed to get current-season player value IDs', error, {
+          fromChangeDate,
+          throughChangeDate,
+        });
+        throw new DatabaseError(
+          'Failed to get current-season player value IDs',
+          'PLAYER_VALUE_IDS_ERROR',
+        );
+      }
+    },
+
     findByChangeDate: async (changeDate: string): Promise<StoredPlayerValue[]> => {
       try {
         const db = await getDbInstance();

@@ -28,21 +28,6 @@ export const createPlayerRepository = (dbInstance?: DatabaseInstance) => {
   const getDbInstance = async () => dbInstance || (await getDb());
 
   return {
-    findAllIds: async (): Promise<number[]> => {
-      try {
-        const db = await getDbInstance();
-        const rows = await db.select({ id: players.id }).from(players);
-        return rows.map((row) => row.id);
-      } catch (error) {
-        logError('Failed to retrieve player IDs', error);
-        throw new DatabaseError(
-          'Failed to retrieve player IDs',
-          'FIND_PLAYER_IDS_ERROR',
-          error instanceof Error ? error : undefined,
-        );
-      }
-    },
-
     findByIds: async (ids: number[]): Promise<DomainPlayer[]> => {
       if (ids.length === 0) {
         return [];
