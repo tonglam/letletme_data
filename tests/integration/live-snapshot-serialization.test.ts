@@ -24,8 +24,10 @@ describe('live snapshot PostgreSQL serialization', () => {
     const releaseFirst = deferred();
     const secondEntered = deferred();
     const otherEventEntered = deferred();
+    const sharedCheckedAt: Date[] = [];
 
-    const first = withLiveSnapshotSerialization(eventId, async () => {
+    const first = withLiveSnapshotSerialization(eventId, async (checkedAt) => {
+      sharedCheckedAt.push(checkedAt);
       firstEntered.resolve();
       await releaseFirst.promise;
     });
@@ -48,6 +50,8 @@ describe('live snapshot PostgreSQL serialization', () => {
     await Promise.all([first, second, otherEvent]);
 
     expect(sameEventState).toBe('blocked');
+    expect(sharedCheckedAt[0]).toBeInstanceOf(Date);
+    expect(Number.isFinite(sharedCheckedAt[0]?.getTime())).toBe(true);
   });
 
   test('serializes fixture ownership discovery even for different events', async () => {

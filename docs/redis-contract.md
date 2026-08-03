@@ -118,11 +118,12 @@ accepted upstream pair:
 - `LiveBonus:{season}:{eventId}` (frozen compatibility calculation)
 - `LiveBonusV2:{season}:{eventId}` (fixture-scoped calculation)
 
-Before deriving any view, the writer requires the upstream fixture ID set to
-match the fixture identities already persisted for that event exactly. Missing,
-unexpected, duplicate, mixed-event, or partially transformed fixtures reject
-the whole poll. This prevents a transient truncated FPL response from becoming
-a smaller but internally self-consistent published snapshot.
+Before deriving any view, the writer requires both upstream identity sets to be
+complete: fixture IDs must match the fixtures persisted for that event, and
+event-live element IDs must match the loaded player baseline. Missing,
+unexpected, duplicate, mixed-event, or partially transformed data rejects the
+whole poll. This prevents a transient truncated FPL response from becoming a
+smaller but internally self-consistent published snapshot.
 
 The writer builds uniquely named staging hashes, verifies every field count,
 then validates and publishes all six views plus `LiveSnapshotMeta` in one
@@ -138,10 +139,13 @@ views refuse empty publication.
 Every event refresh also holds `pg_advisory_xact_lock(namespace, eventId)` for
 the complete fetch, validation, PostgreSQL persistence, and Redis publication
 flow. This PostgreSQL-owned lock is mandatory and survives Redis lock expiry or
-configuration changes; different events remain parallel. As a second fence,
-the Redis publisher compares the incoming `checkedAt` token both before staging
-and inside the commit script, and rejects a publisher older than the currently
-published metadata. `checkedAt` is captured before the upstream requests begin.
+configuration changes; different events remain parallel. After the lock is
+held, PostgreSQL `clock_timestamp()` supplies the shared `checkedAt` ordering
+token before the upstream requests begin, so host clock skew cannot make a
+newer serialized poll appear older. As a second fence, the Redis publisher
+compares that token both before staging and inside the commit script. Lua honors
+only metadata that satisfies the complete schema and canonical timestamp shape;
+malformed JSON values are replaced rather than becoming permanent fences.
 
 Consumers that combine two or more live views MUST use this retry protocol:
 
@@ -186,6 +190,9 @@ the documented PostgreSQL fallback; they never consume a stale partial event.
 Retirement-before-upsert also keeps retries safe: a Redis failure leaves the
 old database owner discoverable, while a later database failure leaves only a
 safe cache miss that the next snapshot can rebuild.
+When a fixture becomes unscheduled, its nullable PostgreSQL `event_id` is also
+set to `NULL` before scheduled rows are upserted. The retired event therefore
+cannot keep the moved fixture in its next expected-identity baseline.
 Transient staging keys use `{target}:staging:{uuid}`, expire after fifteen
 minutes if a worker is terminated, and are deleted on every success or handled
 failure. The atomic rename removes that temporary TTL from published hashes;

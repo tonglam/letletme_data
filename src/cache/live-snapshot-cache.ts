@@ -72,11 +72,70 @@ const LIVE_SNAPSHOT_VIEW_PREFIXES = [
   'LiveBonusV2',
 ] as const;
 
-const SET_LIVE_SNAPSHOT_META_IF_FRESH_SCRIPT = `
+const LIVE_SNAPSHOT_META_VALIDATION_LUA = `
+local function is_nonnegative_integer(value)
+  return type(value) == 'number' and value >= 0 and value == math.floor(value)
+end
+
+local function is_positive_integer(value)
+  return is_nonnegative_integer(value) and value > 0
+end
+
+local function is_leap_year(year)
+  return year % 4 == 0 and (year % 100 ~= 0 or year % 400 == 0)
+end
+
+local function is_canonical_timestamp(value)
+  if type(value) ~= 'string' or string.len(value) ~= 24 then
+    return false
+  end
+  local year_raw, month_raw, day_raw, hour_raw, minute_raw, second_raw = string.match(
+    value,
+    '^(%d%d%d%d)%-(%d%d)%-(%d%d)T(%d%d):(%d%d):(%d%d)%.%d%d%dZ$'
+  )
+  if year_raw == nil then
+    return false
+  end
+  local year = tonumber(year_raw)
+  local month = tonumber(month_raw)
+  local day = tonumber(day_raw)
+  local hour = tonumber(hour_raw)
+  local minute = tonumber(minute_raw)
+  local second = tonumber(second_raw)
+  if month < 1 or month > 12 or hour > 23 or minute > 59 or second > 59 then
+    return false
+  end
+  local month_days = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 }
+  if month == 2 and is_leap_year(year) then
+    month_days[2] = 29
+  end
+  return day >= 1 and day <= month_days[month]
+end
+
+local function is_live_snapshot_meta(value)
+  return type(value) == 'table'
+    and value.schemaVersion == 1
+    and type(value.season) == 'string'
+    and string.match(value.season, '^%d%d%d%d$') ~= nil
+    and is_positive_integer(value.eventId)
+    and type(value.revision) == 'string'
+    and string.len(value.revision) == 24
+    and string.match(value.revision, '^[0-9a-f]+$') ~= nil
+    and (value.state == 'scheduled' or value.state == 'live' or value.state == 'settled')
+    and is_canonical_timestamp(value.publishedAt)
+    and is_canonical_timestamp(value.checkedAt)
+    and is_positive_integer(value.eventLiveCount)
+    and is_positive_integer(value.fixtureCount)
+    and is_positive_integer(value.fixtureTeamCount)
+    and is_nonnegative_integer(value.bonusTeamCount)
+end
+`;
+
+const SET_LIVE_SNAPSHOT_META_IF_FRESH_SCRIPT = `${LIVE_SNAPSHOT_META_VALIDATION_LUA}
 local current_raw = redis.pcall('GET', KEYS[1])
 if type(current_raw) == 'string' then
   local decoded, current = pcall(cjson.decode, current_raw)
-  if decoded and type(current.checkedAt) == 'string' and current.checkedAt > ARGV[2] then
+  if decoded and is_live_snapshot_meta(current) and current.checkedAt > ARGV[2] then
     return 0
   end
 end
@@ -98,7 +157,7 @@ return removed
  * commands after a runtime command error; the preflight inside this atomic
  * script prevents that failure mode from exposing a mixed revision.
  */
-const PUBLISH_LIVE_SNAPSHOT_SCRIPT = `
+const PUBLISH_LIVE_SNAPSHOT_SCRIPT = `${LIVE_SNAPSHOT_META_VALIDATION_LUA}
 local staged_count = tonumber(ARGV[1])
 local empty_count = tonumber(ARGV[2])
 local meta_key = KEYS[(staged_count * 2) + empty_count + 1]
@@ -112,7 +171,7 @@ end
 local current_raw = redis.pcall('GET', meta_key)
 if type(current_raw) == 'string' then
   local decoded, current = pcall(cjson.decode, current_raw)
-  if decoded and type(current.checkedAt) == 'string' and current.checkedAt > ARGV[4] then
+  if decoded and is_live_snapshot_meta(current) and current.checkedAt > ARGV[4] then
     return -1
   end
 end

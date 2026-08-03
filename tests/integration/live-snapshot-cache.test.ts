@@ -1,7 +1,7 @@
 import { assertIntegrationEnv } from './helpers/env-guard';
 
 assertIntegrationEnv();
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { afterAll, beforeEach, describe, expect, test } from 'bun:test';
 
 import {
   createLiveSnapshotCache,
@@ -93,9 +93,11 @@ function payload(score: number, checkedAt: Date): LiveSnapshotCachePayload {
 }
 
 describe('coordinated live snapshot Redis integration', () => {
-  beforeAll(async () => {
+  beforeEach(async () => {
     const redis = await redisSingleton.getClient();
     await redis.del(...KEYS);
+    const staging = await redis.keys(`*:${SEASON}:${EVENT_ID}:staging:*`);
+    if (staging.length > 0) await redis.del(...staging);
   });
 
   afterAll(async () => {
@@ -157,6 +159,40 @@ describe('coordinated live snapshot Redis integration', () => {
       expect(await redis.ttl(key)).toBe(-1);
     }
 
+    expect(await redis.keys(`*:${SEASON}:${EVENT_ID}:staging:*`)).toEqual([]);
+  });
+
+  test('replaces malformed metadata objects and decoded primitives', async () => {
+    const redis = await redisSingleton.getClient();
+    const cache = createLiveSnapshotCache({
+      getRedisClient: async () => redis,
+      getSeason: async () => SEASON,
+    });
+    const metaKey = `LiveSnapshotMeta:${SEASON}:${EVENT_ID}`;
+
+    await redis.set(
+      metaKey,
+      JSON.stringify({
+        ...payload(3, new Date('2025-08-15T20:00:01.000Z')),
+        schemaVersion: 1,
+        season: SEASON,
+        revision: 'a'.repeat(24),
+        state: 'live',
+        publishedAt: '9999-99-99T99:99:99.999Z',
+        checkedAt: '9999-99-99T99:99:99.999Z',
+        eventLiveCount: 1,
+        fixtureCount: 1,
+        fixtureTeamCount: 1,
+        bonusTeamCount: 0,
+      }),
+    );
+    const fromObject = await cache.publish(payload(4, new Date('2025-08-15T20:00:02.000Z')));
+    expect(fromObject).toMatchObject({ changed: true, stale: false });
+
+    await redis.set(metaKey, '7');
+    const fromPrimitive = await cache.publish(payload(5, new Date('2025-08-15T20:00:03.000Z')));
+    expect(fromPrimitive).toMatchObject({ changed: true, stale: false });
+    expect((await cache.get(EVENT_ID))?.revision).toBe(fromPrimitive.meta.revision);
     expect(await redis.keys(`*:${SEASON}:${EVENT_ID}:staging:*`)).toEqual([]);
   });
 });

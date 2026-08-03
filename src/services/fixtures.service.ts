@@ -54,9 +54,9 @@ export async function syncFixtures(eventId?: number): Promise<{ count: number; e
 
     if (unscheduledFixtures.length > 0) {
       // Some FPL fixtures can be temporarily unscheduled (event = null).
-      // Current DB schema in production may reject null event_id, so skip DB upsert for these
-      // while still allowing scheduled fixtures to sync successfully.
-      logWarn('Skipping unscheduled fixtures for DB upsert', {
+      // Persist the nullable ownership separately before scheduled-row upserts;
+      // the rest of an unscheduled payload may be temporarily incomplete.
+      logWarn('Persisting only event ownership for unscheduled fixtures', {
         unscheduledCount: unscheduledFixtures.length,
         fixtureIds: unscheduledFixtures.map((fixture) => fixture.id),
       });
@@ -86,6 +86,15 @@ export async function syncFixtures(eventId?: number): Promise<{ count: number; e
           logInfo('Retired stale live snapshots after fixture event moves', {
             ...(eventId ? { eventId } : {}),
             staleEventIds: Array.from(transitions.staleEventIds),
+          });
+        }
+        if (unscheduledFixtures.length > 0) {
+          const markedUnscheduled = await fixtureRepository.markUnscheduled(
+            unscheduledFixtures.map((fixture) => fixture.id),
+          );
+          logInfo('Persisted unscheduled fixture ownership', {
+            requested: unscheduledFixtures.length,
+            updated: markedUnscheduled,
           });
         }
         const savedFixtures = await fixtureRepository.upsertBatch(schedulableFixtures);

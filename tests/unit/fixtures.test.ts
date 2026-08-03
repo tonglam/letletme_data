@@ -205,11 +205,40 @@ describe('Fixtures Unit Tests', () => {
 
     test('should handle repository method signatures', () => {
       expect(typeof repository.upsertBatch).toBe('function');
+      expect(typeof repository.markUnscheduled).toBe('function');
     });
 
     test('should handle upsertBatch with empty array', async () => {
       const result = await repository.upsertBatch([]);
       expect(result).toEqual([]);
+    });
+
+    test('should skip an empty unscheduled ownership update', async () => {
+      expect(await repository.markUnscheduled([])).toBe(0);
+    });
+
+    test('should persist only nullable ownership for valid unscheduled fixture IDs', async () => {
+      const updates: Array<Record<string, unknown>> = [];
+      const fakeDb = {
+        update: () => ({
+          set: (values: Record<string, unknown>) => {
+            updates.push(values);
+            return {
+              where: () => ({
+                returning: async () => [{ id: 3 }, { id: 9 }],
+              }),
+            };
+          },
+        }),
+      };
+      const injectedRepository = createFixtureRepository(fakeDb as never);
+
+      const count = await injectedRepository.markUnscheduled([3, 3, -1, 9, 1.5]);
+
+      expect(count).toBe(2);
+      expect(updates).toHaveLength(1);
+      expect(updates[0]?.eventId).toBeNull();
+      expect(updates[0]?.updatedAt).toBeInstanceOf(Date);
     });
   });
 

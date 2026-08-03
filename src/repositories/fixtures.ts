@@ -99,6 +99,29 @@ export const createFixtureRepository = (dbInstance?: DatabaseInstance) => {
       }
     },
 
+    markUnscheduled: async (ids: number[]): Promise<number> => {
+      try {
+        const uniqueIds = [...new Set(ids.filter((id) => Number.isInteger(id) && id > 0))];
+        if (uniqueIds.length === 0) return 0;
+
+        const db = await getDbInstance();
+        const result = await db
+          .update(eventFixtures)
+          .set({ eventId: null, updatedAt: new Date() })
+          .where(inArray(eventFixtures.id, uniqueIds))
+          .returning({ id: eventFixtures.id });
+        logInfo('Marked fixtures as unscheduled', { count: result.length });
+        return result.length;
+      } catch (error) {
+        logError('Failed to mark fixtures as unscheduled', error, { count: ids.length });
+        throw new DatabaseError(
+          'Failed to mark fixtures as unscheduled',
+          'MARK_UNSCHEDULED_ERROR',
+          error instanceof Error ? error : undefined,
+        );
+      }
+    },
+
     upsertBatch: async (domainFixtures: DomainFixture[]): Promise<DomainFixture[]> => {
       try {
         if (domainFixtures.length === 0) {

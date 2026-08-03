@@ -15,7 +15,7 @@ import type { LiveSnapshotState } from '../domain/live-snapshot';
 import { fixtureRepository } from '../repositories/fixtures';
 import { transformFixtures } from '../transformers/fixtures';
 import type { Fixture, RawFPLEventLiveResponse, RawFPLFixture } from '../types';
-import { logInfo, logWarn } from '../utils/logger';
+import { logInfo } from '../utils/logger';
 import {
   persistPreparedEventLives,
   prepareEventLives,
@@ -47,7 +47,6 @@ export interface PreparedLiveSnapshot {
   liveBonus: LiveBonusByTeam;
   liveBonusV2: LiveBonusByTeam;
   state: LiveSnapshotState;
-  missingPlayerTeamCount: number;
 }
 
 export interface LiveSnapshotSyncResult {
@@ -69,11 +68,10 @@ type LiveSnapshotDependencies = {
   getFixtures: (eventId: number) => Promise<RawFPLFixture[]>;
   getExpectedFixtureIds: (eventId: number) => Promise<readonly number[]>;
   getReferenceData: () => Promise<LiveSnapshotReferenceData>;
-  serialize: <T>(eventId: number, operation: () => Promise<T>) => Promise<T>;
+  serialize: <T>(eventId: number, operation: (checkedAt: Date) => Promise<T>) => Promise<T>;
   publish: typeof liveSnapshotCache.publish;
   persistFixtures: (fixtures: Fixture[]) => Promise<Fixture[]>;
   persistEventLives: (prepared: PreparedEventLives) => Promise<readonly unknown[]>;
-  now: () => Date;
 };
 
 /**
@@ -85,7 +83,7 @@ type LiveSnapshotDependencies = {
  */
 export async function withLiveSnapshotSerialization<T>(
   eventId: number,
-  operation: () => Promise<T>,
+  operation: (checkedAt: Date) => Promise<T>,
 ): Promise<T> {
   return withLiveSnapshotEventsSerialization([eventId], operation);
 }
@@ -97,7 +95,7 @@ export async function withLiveSnapshotSerialization<T>(
  */
 export async function withLiveSnapshotEventsSerialization<T>(
   eventIds: readonly number[],
-  operation: () => Promise<T>,
+  operation: (checkedAt: Date) => Promise<T>,
 ): Promise<T> {
   const uniqueEventIds = [...new Set(eventIds)].sort((left, right) => left - right);
   if (
@@ -113,7 +111,17 @@ export async function withLiveSnapshotEventsSerialization<T>(
         sql`SELECT pg_advisory_xact_lock(${LIVE_SNAPSHOT_LOCK_NAMESPACE}, ${lockedEventId})`,
       );
     }
-    return operation();
+    const rows = await tx.execute<{ checkedAt: Date | string }>(
+      sql`SELECT clock_timestamp() AS "checkedAt"`,
+    );
+    const checkedAt =
+      rows[0]?.checkedAt instanceof Date
+        ? rows[0].checkedAt
+        : new Date(String(rows[0]?.checkedAt ?? ''));
+    if (!Number.isFinite(checkedAt.getTime())) {
+      throw new Error('PostgreSQL returned an invalid live snapshot ordering timestamp');
+    }
+    return operation(checkedAt);
   });
 }
 
@@ -210,6 +218,25 @@ export function prepareLiveSnapshot(
   if (new Set(liveElementIds).size !== liveElementIds.length) {
     throw new Error(`FPL event live response contains duplicate element IDs for event ${eventId}`);
   }
+  const expectedLiveElementIds = [...referenceData.playerTeamById.keys()];
+  if (expectedLiveElementIds.length === 0) {
+    throw new Error(`No persisted player identity baseline for live snapshot event ${eventId}`);
+  }
+  const liveElementIdSet = new Set(liveElementIds);
+  const expectedLiveElementIdSet = new Set(expectedLiveElementIds);
+  const missingLiveElementIds = expectedLiveElementIds.filter(
+    (elementId) => !liveElementIdSet.has(elementId),
+  );
+  const unexpectedLiveElementIds = liveElementIds.filter(
+    (elementId) => !expectedLiveElementIdSet.has(elementId),
+  );
+  if (missingLiveElementIds.length > 0 || unexpectedLiveElementIds.length > 0) {
+    throw new Error(
+      `Player identity mismatch for live snapshot event ${eventId}; ` +
+        `missing expected IDs: ${missingLiveElementIds.sort((a, b) => a - b).join(', ') || 'none'}; ` +
+        `unexpected IDs: ${unexpectedLiveElementIds.sort((a, b) => a - b).join(', ') || 'none'}`,
+    );
+  }
   if (!Array.isArray(rawFixtures) || rawFixtures.length === 0) {
     throw new Error('FPL fixtures response contains no fixtures');
   }
@@ -276,15 +303,10 @@ export function prepareLiveSnapshot(
   const fixtures = transformedFixtures;
   const fixtureViews = buildLiveFixtureViews(fixtures, referenceData);
   const liveBonusV2 = serializeBonusByTeam(computeFixtureSummedBonusByTeam(fixtures));
-  let missingPlayerTeamCount = 0;
-  const livesWithTeam = eventLives.eventLives.flatMap((live) => {
-    const teamId = referenceData.playerTeamById.get(live.elementId);
-    if (teamId === undefined) {
-      missingPlayerTeamCount += 1;
-      return [];
-    }
-    return [{ ...live, teamId }];
-  });
+  const livesWithTeam = eventLives.eventLives.map((live) => ({
+    ...live,
+    teamId: referenceData.playerTeamById.get(live.elementId)!,
+  }));
   const matches = buildPlayingMatches(fixtureViews.legacy);
   const liveBonus = serializeBonusByTeam(computeLiveBonusByTeam(matches, livesWithTeam));
 
@@ -296,7 +318,6 @@ export function prepareLiveSnapshot(
     liveBonus,
     liveBonusV2,
     state: resolveSnapshotState(fixtures),
-    missingPlayerTeamCount,
   };
 }
 
@@ -310,7 +331,6 @@ const defaultDependencies: LiveSnapshotDependencies = {
   publish: (payload, options) => liveSnapshotCache.publish(payload, options),
   persistFixtures: (fixtures) => fixtureRepository.upsertBatch(fixtures),
   persistEventLives: persistPreparedEventLives,
-  now: () => new Date(),
 };
 
 /**
@@ -330,10 +350,9 @@ export async function syncLiveSnapshot(
   if (!Number.isInteger(eventId) || eventId <= 0) {
     throw new Error(`Invalid live snapshot event ID: ${eventId}`);
   }
-  return dependencies.serialize(eventId, async () => {
-    // Capture the ordering token before either upstream request starts. The
-    // cache publisher also fences on this value as a second line of defense.
-    const checkedAt = dependencies.now();
+  return dependencies.serialize(eventId, async (checkedAt) => {
+    // The shared PostgreSQL clock is read after taking the advisory lock and
+    // before either upstream request starts. Redis fences on the same token.
     const [liveResponse, rawFixtures, expectedFixtureIds, referenceData] = await Promise.all([
       dependencies.getEventLive(eventId),
       dependencies.getFixtures(eventId),
@@ -347,13 +366,6 @@ export async function syncLiveSnapshot(
       referenceData,
       expectedFixtureIds,
     );
-
-    if (prepared.missingPlayerTeamCount > 0) {
-      logWarn('Live snapshot skipped players missing stable team metadata', {
-        eventId,
-        count: prepared.missingPlayerTeamCount,
-      });
-    }
 
     let persistedFixtures = false;
     const published = await dependencies.publish(
