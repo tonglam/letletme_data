@@ -3,27 +3,48 @@ import { assertIntegrationEnv } from './helpers/env-guard';
 assertIntegrationEnv();
 import { beforeAll, describe, expect, test } from 'bun:test';
 
-import { eq } from 'drizzle-orm';
+import { count, eq } from 'drizzle-orm';
 
 import { playerStatsCache } from '../../src/cache/operations';
-import { playerStats } from '../../src/db/schemas/index.schema';
+import { playerMarketSnapshots, playerStats } from '../../src/db/schemas/index.schema';
 import { getDb } from '../../src/db/singleton';
 import {
   syncCurrentPlayerStats,
   syncPlayerStatsForEvent,
 } from '../../src/services/player-stats.service';
-import { resolveCurrentEvent } from './helpers/current-event';
-import { ensurePlayers } from './helpers/reference-data';
+import { resolvePlayerSyncEvent } from '../../src/services/player-sync-event.service';
+import { ensureEvents, ensurePlayers } from './helpers/reference-data';
 
 let syncedEventId: number;
-const currentEvent = await resolveCurrentEvent();
+let syncedSnapshotDate: string;
+await ensureEvents();
+const syncEvent = await resolvePlayerSyncEvent();
 
-describe.skipIf(!currentEvent)('Player Stats Operational Integration', () => {
+describe.skipIf(!syncEvent)('Player Stats Operational Integration', () => {
   beforeAll(async () => {
     await ensurePlayers();
     await playerStatsCache.clearAll();
     const result = await syncCurrentPlayerStats();
     syncedEventId = result.eventId;
+    syncedSnapshotDate = result.snapshotDate;
+  });
+
+  test('syncCurrentPlayerStats stores one complete idempotent daily market roster', async () => {
+    const db = await getDb();
+    const [beforeRetry] = await db
+      .select({ count: count() })
+      .from(playerMarketSnapshots)
+      .where(eq(playerMarketSnapshots.snapshotDate, syncedSnapshotDate));
+
+    const retry = await syncCurrentPlayerStats();
+    const [afterRetry] = await db
+      .select({ count: count() })
+      .from(playerMarketSnapshots)
+      .where(eq(playerMarketSnapshots.snapshotDate, syncedSnapshotDate));
+
+    expect(beforeRetry.count).toBeGreaterThan(0);
+    expect(beforeRetry.count).toBe(retry.marketSnapshotCount);
+    expect(afterRetry.count).toBe(beforeRetry.count);
   });
 
   test('syncCurrentPlayerStats stores event data in DB and cache', async () => {

@@ -1,18 +1,15 @@
 import { sql } from 'drizzle-orm';
 
 import { playerStats, type DbPlayerStatInsert } from '../db/schemas/index.schema';
-import { getDb } from '../db/singleton';
+import { getDb, type DbOrTransaction } from '../db/singleton';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 
-import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import type { PlayerStat } from '../domain/player-stats';
-
-type DatabaseInstance = PostgresJsDatabase<Record<string, never>>;
 
 export type PlayerStatsRepository = ReturnType<typeof createPlayerStatsRepository>;
 
-export const createPlayerStatsRepository = (dbInstance?: DatabaseInstance) => {
+export const createPlayerStatsRepository = (dbInstance?: DbOrTransaction) => {
   const getDbInstance = async () => dbInstance || (await getDb());
 
   return {

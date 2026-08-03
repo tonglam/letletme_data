@@ -283,6 +283,22 @@ The PostgreSQL database stores **one FPL season at a time**:
 - `PlayerStat:{season}` in Redis is a **latest-event-wins view** (§5). Only
   syncs for the current gameweek write it; older-event backfills persist to
   DB only.
+- `player_market_snapshots` is the deliberate season-long exception: it keeps
+  one complete daily roster from the first capture through the end of the
+  current season. Include it in the read-only rollover inventory. After the
+  outgoing season is backed up and the new upstream roster is confirmed,
+  remove the outgoing rows before the new season's first 09:40 UTC+8 capture;
+  never mix seasons to manufacture a comparison window.
+
+Read-only inventory before the season reset:
+
+```sql
+SELECT min(snapshot_date) AS first_date,
+       max(snapshot_date) AS latest_date,
+       count(DISTINCT snapshot_date) AS observed_days,
+       count(*) AS rows
+FROM player_market_snapshots;
+```
 
 This is an accepted design decision, not a temporary limitation. Multi-season
 history would require additive schema changes and explicit consumer demand.

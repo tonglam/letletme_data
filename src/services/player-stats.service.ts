@@ -1,7 +1,10 @@
 import { playerStatsCache } from '../cache/operations';
 import { fplClient } from '../clients/fpl';
+import { getDb } from '../db/singleton';
 import { shouldWritePlayerStatsView } from '../domain/player-stats';
-import { playerStatsRepository } from '../repositories/player-stats';
+import { createPlayerMarketSnapshotsRepository } from '../repositories/player-market-snapshots';
+import { createPlayerStatsRepository, playerStatsRepository } from '../repositories/player-stats';
+import { transformPlayerMarketSnapshots } from '../transformers/player-market-snapshots';
 import {
   createTeamsMap,
   transformCurrentGameweekPlayerStats,
@@ -17,6 +20,8 @@ export async function syncCurrentPlayerStats(): Promise<{
   count: number;
   eventId: EventId;
   errors: number;
+  marketSnapshotCount: number;
+  snapshotDate: string;
 }> {
   logInfo('Starting player stats sync for current gameweek');
 
@@ -40,7 +45,9 @@ export async function syncCurrentPlayerStats(): Promise<{
     eventId: syncEvent.event.id,
   });
 
+  const capturedAt = new Date();
   const transformedPlayerStats = transformCurrentGameweekPlayerStats(fplData, syncEvent.event.id);
+  const marketSnapshots = transformPlayerMarketSnapshots(fplData, capturedAt);
   const errors = fplData.elements.length - transformedPlayerStats.length;
 
   logInfo('Player stats transformed', {
@@ -50,10 +57,32 @@ export async function syncCurrentPlayerStats(): Promise<{
     eventId: syncEvent.event.id,
   });
 
-  const upsertResult = await playerStatsRepository.upsertBatch(transformedPlayerStats);
-  logInfo('Player stats upserted to database', { count: upsertResult.count });
+  const db = await getDb();
+  const persisted = await db.transaction(async (tx) => {
+    const txPlayerStatsRepository = createPlayerStatsRepository(tx);
+    const txMarketSnapshotsRepository = createPlayerMarketSnapshotsRepository(tx);
 
-  if (upsertResult.count > 0) {
+    const upsertResult = await txPlayerStatsRepository.upsertBatch(transformedPlayerStats);
+    if (upsertResult.count !== fplData.elements.length) {
+      throw new Error(
+        `Incomplete player stats write: expected ${fplData.elements.length}, persisted ${upsertResult.count}`,
+      );
+    }
+
+    const marketResult = await txMarketSnapshotsRepository.upsertCompleteDay(
+      marketSnapshots,
+      fplData.elements.length,
+    );
+    return { upsertResult, marketResult };
+  });
+  logInfo('Player stats and market snapshot committed', {
+    expectedCount: fplData.elements.length,
+    playerStatsCount: persisted.upsertResult.count,
+    marketSnapshotCount: persisted.marketResult.persistedCount,
+    snapshotDate: persisted.marketResult.snapshotDate,
+  });
+
+  if (persisted.upsertResult.count > 0) {
     await playerStatsCache.setByEvent(syncEvent.event.id, transformedPlayerStats);
     logInfo('Player stats cache updated', {
       eventId: syncEvent.event.id,
@@ -62,9 +91,11 @@ export async function syncCurrentPlayerStats(): Promise<{
   }
 
   const result = {
-    count: upsertResult.count,
+    count: persisted.upsertResult.count,
     eventId: syncEvent.event.id,
     errors,
+    marketSnapshotCount: persisted.marketResult.persistedCount,
+    snapshotDate: persisted.marketResult.snapshotDate,
   };
 
   logInfo('Player stats sync completed', result);
