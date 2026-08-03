@@ -9,14 +9,20 @@ import { logError, logInfo } from '../utils/logger';
 
 export type LiveDataJobSource = 'cron' | 'manual' | 'cascade';
 
-async function hasPendingJob(
+async function hasSupersedingPendingJob(
   queue: ReturnType<typeof getLiveDataQueue>,
   jobName: LiveDataJobName,
   eventId: number,
+  persistEventLives: boolean,
 ): Promise<boolean> {
   try {
     const jobs = await queue.getJobs(['waiting', 'delayed', 'active']);
-    return jobs.some((job) => job.name === jobName && job.data.eventId === eventId);
+    return jobs.some(
+      (job) =>
+        job.name === jobName &&
+        job.data.eventId === eventId &&
+        (!persistEventLives || job.data.persistEventLives === true),
+    );
   } catch (error) {
     logError('Failed to check pending live-data jobs', error, { jobName, eventId });
     // If we can't tell, allow enqueue (safer than dropping a tick).
@@ -37,7 +43,10 @@ async function enqueueLiveDataJob(
     // Skip duplicate pending work so a slow minute cannot stack behind itself.
     // This applies even when the scheduler supplies a deterministic minute ID:
     // the next minute has a different ID while the previous job may still run.
-    if (source === 'cron' && (await hasPendingJob(queue, jobName, eventId))) {
+    if (
+      source === 'cron' &&
+      (await hasSupersedingPendingJob(queue, jobName, eventId, options.persistEventLives === true))
+    ) {
       logInfo('Live data job already pending; skipping enqueue', { jobName, eventId, source });
       return null;
     }

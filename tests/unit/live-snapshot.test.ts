@@ -3,6 +3,7 @@ import type Redis from 'ioredis';
 
 import {
   createLiveSnapshotCache,
+  LIVE_SNAPSHOT_STAGING_TTL_SECONDS,
   type LiveSnapshotCachePayload,
   type LiveSnapshotPublishOptions,
 } from '../../src/cache/live-snapshot-cache';
@@ -19,6 +20,7 @@ import { mockRawFPLFixture1 } from '../fixtures/fixtures.fixtures';
 class FakeRedis {
   readonly strings = new Map<string, string>();
   readonly hashes = new Map<string, Map<string, string>>();
+  readonly ttls = new Map<string, number>();
   incompleteHlenPrefix: string | null = null;
   deleteStagingBeforeEvalPrefix: string | null = null;
   readonly wrongTypeHashKeys = new Set<string>();
@@ -43,6 +45,29 @@ class FakeRedis {
     return created;
   }
 
+  multi() {
+    const commands: Array<() => Promise<unknown>> = [];
+    const chain = {
+      hset: (key: string, fields: Record<string, string>) => {
+        commands.push(() => this.hset(key, fields));
+        return chain;
+      },
+      expire: (key: string, seconds: number) => {
+        commands.push(async () => {
+          this.ttls.set(key, seconds);
+          return 1;
+        });
+        return chain;
+      },
+      exec: async () => {
+        const results: Array<[null, unknown]> = [];
+        for (const command of commands) results.push([null, await command()]);
+        return results;
+      },
+    };
+    return chain;
+  }
+
   async hlen(key: string): Promise<number> {
     if (this.wrongTypeHashKeys.has(key)) {
       throw new Error('WRONGTYPE Operation against a key holding the wrong kind of value');
@@ -51,6 +76,14 @@ class FakeRedis {
     return this.incompleteHlenPrefix && key.startsWith(this.incompleteHlenPrefix)
       ? Math.max(0, actual - 1)
       : actual;
+  }
+
+  async hmget(key: string, ...fields: string[]): Promise<(string | null)[]> {
+    if (this.wrongTypeHashKeys.has(key)) {
+      throw new Error('WRONGTYPE Operation against a key holding the wrong kind of value');
+    }
+    const hash = this.hashes.get(key);
+    return fields.map((field) => hash?.get(field) ?? null);
   }
 
   async exists(...keys: string[]): Promise<number> {
@@ -62,6 +95,7 @@ class FakeRedis {
     for (const key of keys) {
       if (this.hashes.delete(key)) deleted += 1;
       if (this.strings.delete(key)) deleted += 1;
+      this.ttls.delete(key);
     }
     return deleted;
   }
@@ -86,7 +120,9 @@ class FakeRedis {
     const targetKeys = keys.slice(stagedCount, stagedCount * 2);
     for (let index = 0; index < stagedCount; index += 1) {
       this.hashes.set(targetKeys[index], new Map(this.hashes.get(stagingKeys[index])!));
+      this.ttls.delete(targetKeys[index]);
       this.hashes.delete(stagingKeys[index]);
+      this.ttls.delete(stagingKeys[index]);
     }
     for (const key of keys.slice(stagedCount * 2, stagedCount * 2 + emptyCount)) {
       await this.del(key);
@@ -217,6 +253,17 @@ describe('prepareLiveSnapshot', () => {
       prepareLiveSnapshot(1, mockEventLiveResponseFixture, [liveRawFixture()], references),
     ).toThrow('team metadata for IDs: 12');
   });
+
+  test('rejects a partially transformed fixture response', () => {
+    expect(() =>
+      prepareLiveSnapshot(
+        1,
+        mockEventLiveResponseFixture,
+        [liveRawFixture(), liveRawFixture({ id: 2, code: 2, team_h_difficulty: 6 })],
+        referenceData(),
+      ),
+    ).toThrow('Incomplete fixture transformation for live snapshot event 1; missing IDs: 2');
+  });
 });
 
 describe('live snapshot cache publication', () => {
@@ -233,6 +280,7 @@ describe('live snapshot cache publication', () => {
     expect(redis.hashes.has('LiveFixtureV2:2526:1')).toBe(true);
     expect(redis.hashes.has('LiveBonus:2526:1')).toBe(true);
     expect(redis.hashes.has('LiveBonusV2:2526:1')).toBe(true);
+    expect(redis.ttls.has('Fixtures:2526:1')).toBe(false);
 
     const second = await cache.publish(
       cachePayload(2, new Date('2025-08-15T20:01:00.000Z')).payload,
@@ -333,6 +381,18 @@ describe('live snapshot cache publication', () => {
     );
   });
 
+  test('repairs a same-length view whose contents no longer match its revision', async () => {
+    const redis = new FakeRedis();
+    const cache = cacheWith(redis);
+    const first = await cache.publish(cachePayload().payload);
+    redis.hashes.get('Fixtures:2526:1')?.set('1', '{"independentWriter":true}');
+
+    const repaired = await cache.publish(cachePayload().payload);
+    expect(repaired.changed).toBe(true);
+    expect(repaired.meta.revision).toBe(first.meta.revision);
+    expect(redis.hashes.get('Fixtures:2526:1')?.get('1')).not.toContain('independentWriter');
+  });
+
   test('replaces a wrong-type populated view instead of wedging publication', async () => {
     const redis = new FakeRedis();
     const cache = cacheWith(redis);
@@ -355,6 +415,11 @@ describe('live snapshot cache publication', () => {
     await expect(
       cache.publish(changedPayload, {
         beforeCommit: async () => {
+          const stagingKeys = redis.stagingKeys();
+          expect(stagingKeys.length).toBeGreaterThan(0);
+          expect(
+            stagingKeys.every((key) => redis.ttls.get(key) === LIVE_SNAPSHOT_STAGING_TTL_SECONDS),
+          ).toBe(true);
           throw new Error('fixture persistence unavailable');
         },
       }),

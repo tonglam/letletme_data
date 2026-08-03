@@ -153,10 +153,25 @@ export function prepareLiveSnapshot(
   }
 
   const eventLives = prepareEventLives(eventId, liveResponse.elements);
-  const fixtures = transformFixtures(rawFixtures).filter((fixture) => fixture.event === eventId);
-  if (fixtures.length === 0) {
-    throw new Error(`No valid fixtures remained for live snapshot event ${eventId}`);
+  const rawFixtureIds = rawFixtures.map((fixture) => fixture.id);
+  if (new Set(rawFixtureIds).size !== rawFixtureIds.length) {
+    throw new Error(`FPL fixtures response contains duplicate fixture IDs for event ${eventId}`);
   }
+  const transformedFixtures = transformFixtures(rawFixtures);
+  const transformedIds = new Set(transformedFixtures.map((fixture) => fixture.id));
+  const missingFixtureIds = rawFixtureIds.filter((fixtureId) => !transformedIds.has(fixtureId));
+  const wrongTransformedEvent = transformedFixtures.find((fixture) => fixture.event !== eventId);
+  if (
+    missingFixtureIds.length > 0 ||
+    transformedFixtures.length !== rawFixtures.length ||
+    wrongTransformedEvent
+  ) {
+    throw new Error(
+      `Incomplete fixture transformation for live snapshot event ${eventId}; ` +
+        `missing IDs: ${missingFixtureIds.join(', ') || 'none'}`,
+    );
+  }
+  const fixtures = transformedFixtures;
   const fixtureViews = buildLiveFixtureViews(fixtures, referenceData);
   const liveBonusV2 = serializeBonusByTeam(computeFixtureSummedBonusByTeam(fixtures));
   let missingPlayerTeamCount = 0;

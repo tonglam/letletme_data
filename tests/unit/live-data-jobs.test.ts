@@ -3,7 +3,10 @@ import { beforeEach, describe, expect, mock, test } from 'bun:test';
 type AddCall = { name: string; data: Record<string, unknown>; opts: Record<string, unknown> };
 
 const addCalls: AddCall[] = [];
-const waitingJobs: Array<{ name: string; data: { eventId: number } }> = [];
+const waitingJobs: Array<{
+  name: string;
+  data: { eventId: number; persistEventLives?: boolean };
+}> = [];
 const getJobsCalls: string[][] = [];
 
 mock.module('../../src/queues/live-data.queue', () => ({
@@ -64,6 +67,37 @@ describe('live-data cron duplicate suppression', () => {
     expect(job).toBeNull();
     expect(addCalls).toHaveLength(0);
     expect(getJobsCalls).toEqual([['waiting', 'delayed', 'active']]);
+  });
+
+  test('cron persistence tick is not dropped behind a cache-only snapshot', async () => {
+    waitingJobs.push({
+      name: 'live-snapshot',
+      data: { eventId: 12, persistEventLives: false },
+    });
+
+    const job = await enqueueLiveSnapshot(12, 'cron', {
+      persistEventLives: true,
+      now: new Date('2025-08-15T20:10:00.000Z'),
+    });
+
+    expect(job).not.toBeNull();
+    expect(addCalls).toHaveLength(1);
+    expect(addCalls[0].data.persistEventLives).toBe(true);
+  });
+
+  test('pending persistence snapshot supersedes another persistence tick', async () => {
+    waitingJobs.push({
+      name: 'live-snapshot',
+      data: { eventId: 12, persistEventLives: true },
+    });
+
+    const job = await enqueueLiveSnapshot(12, 'cron', {
+      persistEventLives: true,
+      now: new Date('2025-08-15T20:10:00.000Z'),
+    });
+
+    expect(job).toBeNull();
+    expect(addCalls).toHaveLength(0);
   });
 
   test('manual source always enqueues even when a waiting job exists', async () => {

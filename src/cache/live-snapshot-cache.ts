@@ -17,6 +17,7 @@ import { getActiveCacheSeason } from './cache-season';
 import { redisSingleton } from './singleton';
 
 export const LIVE_SNAPSHOT_META_PREFIX = 'LiveSnapshotMeta';
+export const LIVE_SNAPSHOT_STAGING_TTL_SECONDS = 15 * 60;
 
 type HashFields = Record<string, string>;
 
@@ -73,6 +74,7 @@ end
 
 for index = 1, staged_count do
   redis.call('RENAME', KEYS[index], KEYS[staged_count + index])
+  redis.call('PERSIST', KEYS[staged_count + index])
 end
 
 for index = 1, empty_count do
@@ -118,7 +120,16 @@ async function stageHash(redis: Redis, targetKey: string, fields: HashFields): P
   const stagingKey = `${targetKey}:staging:${randomUUID()}`;
   const expected = Object.keys(fields).length;
   try {
-    await redis.hset(stagingKey, fields);
+    const staged = await redis
+      .multi()
+      .hset(stagingKey, fields)
+      .expire(stagingKey, LIVE_SNAPSHOT_STAGING_TTL_SECONDS)
+      .exec();
+    if (!staged) {
+      throw new Error(`Live snapshot staging transaction aborted for ${targetKey}`);
+    }
+    const commandError = staged.find(([error]) => error)?.[0];
+    if (commandError) throw commandError;
     const actual = await redis.hlen(stagingKey);
     if (actual !== expected) {
       throw new Error(`Incomplete live snapshot staging hash ${targetKey}: ${actual}/${expected}`);
@@ -128,7 +139,7 @@ async function stageHash(redis: Redis, targetKey: string, fields: HashFields): P
     try {
       await redis.del(stagingKey);
     } catch {
-      // Preserve the staging failure. Rollover cleanup also removes stale families.
+      // Preserve the staging failure. The bounded staging TTL is the crash fallback.
     }
     throw error;
   }
@@ -148,13 +159,20 @@ async function readPublishedMeta(redis: Redis, metaKey: string): Promise<LiveSna
   }
 }
 
-async function publishedHashLength(redis: Redis, key: string): Promise<number> {
+async function publishedHashMatches(
+  redis: Redis,
+  key: string,
+  expectedFields: HashFields,
+): Promise<boolean> {
   try {
-    return await redis.hlen(key);
+    const fieldNames = Object.keys(expectedFields);
+    if ((await redis.hlen(key)) !== fieldNames.length) return false;
+    const values = await redis.hmget(key, ...fieldNames);
+    return values.every((value, index) => value === expectedFields[fieldNames[index]]);
   } catch (error) {
     if (!isWrongTypeError(error)) throw error;
     logWarn('Replacing wrong-type live snapshot view', { key });
-    return -1;
+    return false;
   }
 }
 
@@ -236,13 +254,13 @@ export function createLiveSnapshotCache(
       const emptyKeys = views
         .filter((view) => Object.keys(view.fields).length === 0)
         .map((view) => view.key);
-      const [publishedFieldCounts, staleEmptyViewCount] = await Promise.all([
-        Promise.all(populatedViews.map((view) => publishedHashLength(redis, view.key))),
+      const [publishedViewsMatch, staleEmptyViewCount] = await Promise.all([
+        Promise.all(
+          populatedViews.map((view) => publishedHashMatches(redis, view.key, view.fields)),
+        ),
         emptyKeys.length > 0 ? redis.exists(...emptyKeys) : Promise.resolve(0),
       ]);
-      const populatedViewsComplete = populatedViews.every(
-        (view, index) => publishedFieldCounts[index] === Object.keys(view.fields).length,
-      );
+      const populatedViewsComplete = publishedViewsMatch.every(Boolean);
       const changed =
         currentMeta?.revision !== revision || !populatedViewsComplete || staleEmptyViewCount > 0;
       const publishedAt =

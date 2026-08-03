@@ -126,8 +126,10 @@ independently timed jobs. Unlike a Redis `MULTI`/`EXEC` runtime command error,
 a missing staging key fails the script before any published key changes. Empty
 bonus views deliberately delete the old bonus hash inside the same script; the
 four required views refuse empty publication.
-Transient staging keys use `{target}:staging:{uuid}` and are deleted on every
-success or handled failure; season rollover is the final recovery cleanup.
+Transient staging keys use `{target}:staging:{uuid}`, expire after fifteen
+minutes if a worker is terminated, and are deleted on every success or handled
+failure. The atomic rename removes that temporary TTL from published hashes;
+season rollover is the final recovery cleanup.
 
 `LiveSnapshotMeta` is JSON with this additive contract:
 
@@ -141,8 +143,10 @@ success or handled failure; season rollover is the final recovery cleanup.
 | `checkedAt` | When the upstream pair was last accepted, including no-change polls |
 | `eventLiveCount`, `fixtureCount`, `fixtureTeamCount`, `bonusTeamCount` | Bounded completeness/diagnostic counts |
 
-No live hash or metadata key expires. A content-identical poll updates only
-`checkedAt`; it does not rewrite the large hashes. When football content
+No live hash or metadata key expires. A revision-identical poll verifies the
+exact published hash contents (not only cardinality), updates only `checkedAt`,
+and does not rewrite the large hashes unless an independent compatibility
+writer damaged a view. When football content
 changes, fixture rows (roughly ten per event) are persisted after staging
 validation and before the atomic Redis swap; a failed DB write therefore leaves
 the old revision published and remains retryable. The much larger event-live
