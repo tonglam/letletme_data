@@ -116,8 +116,9 @@ async function runEventLivesDbSync() {
   }
 }
 
-// Post-match consolidation: catches FPL overnight data finalization (bonus points, corrected
-// scores, data_checked flag). Runs on match days in the morning AFTER isMatchDayTime has ended.
+// Post-match consolidation catches delayed FPL finalization (bonus points,
+// corrected scores, data_checked). Fixed morning ticks enqueue only while the
+// fixture-bounded 24-hour result window is open, including the day after GW38.
 export async function runPostMatchConsolidation() {
   const now = new Date();
   const currentEvent = await getCurrentEvent();
@@ -206,7 +207,7 @@ export function registerLiveJobs(app: Elysia) {
         }),
       )
 
-      // Post-match consolidation - 06:00, 08:00, 10:00 on match days
+      // Post-match consolidation - 06:00, 08:00, 10:00 during the result window
       // FPL finalises bonus points, corrects scores, and sets data_checked hours after matches end.
       // This catches those overnight updates that the 10-min live job misses once isMatchDayTime ends.
       .use(

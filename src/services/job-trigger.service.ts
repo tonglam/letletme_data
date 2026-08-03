@@ -77,7 +77,7 @@ const TRIGGERABLE_JOBS: TriggerableJobInfo[] = [
   {
     name: 'events-sync',
     description: 'Sync events from FPL API',
-    schedule: 'Daily at 6:35 AM',
+    schedule: 'Daily at 06:35 UTC+8 (year-round discovery)',
   },
   {
     name: 'event-current-refresh',
@@ -88,17 +88,17 @@ const TRIGGERABLE_JOBS: TriggerableJobInfo[] = [
   {
     name: 'fixtures-sync',
     description: 'Sync fixtures from FPL API',
-    schedule: 'Daily at 6:40 AM',
+    schedule: 'Daily at 06:40 UTC+8 (year-round discovery)',
   },
   {
     name: 'teams-sync',
     description: 'Sync teams from FPL API',
-    schedule: 'Daily at 6:37 AM',
+    schedule: 'Daily at 06:37 UTC+8 (year-round discovery)',
   },
   {
     name: 'players-sync',
     description: 'Sync players from FPL API',
-    schedule: 'Daily at 6:43 AM',
+    schedule: 'Daily at 06:43 UTC+8 (year-round discovery)',
   },
   {
     name: 'player-prices',
@@ -113,7 +113,7 @@ const TRIGGERABLE_JOBS: TriggerableJobInfo[] = [
   {
     name: 'phases-sync',
     description: 'Sync phases from FPL API',
-    schedule: 'Daily at 6:45 AM',
+    schedule: 'Daily at 06:45 UTC+8 (year-round discovery)',
   },
   {
     name: 'player-values-sync',
@@ -128,7 +128,7 @@ const TRIGGERABLE_JOBS: TriggerableJobInfo[] = [
   {
     name: 'entry-event-picks-daily',
     description: 'Sync entry picks for current event',
-    schedule: 'Daily at 10:35 AM (selection window)',
+    schedule: 'Every 5 minutes during the selection publication window',
   },
   {
     name: 'entry-event-transfers-daily',
@@ -148,7 +148,7 @@ const TRIGGERABLE_JOBS: TriggerableJobInfo[] = [
   {
     name: 'league-event-results-sync',
     description: 'Sync league results (per-tournament jobs)',
-    schedule: 'Every 10 minutes (post-matchday)',
+    schedule: 'Every 10 minutes in the 24-hour post-match result window',
   },
   {
     name: 'tournament-event-picks-sync',
@@ -158,7 +158,7 @@ const TRIGGERABLE_JOBS: TriggerableJobInfo[] = [
   {
     name: 'tournament-event-results-sync',
     description: 'Sync tournament results (triggers cascade)',
-    schedule: 'Every 10 minutes post-matchday',
+    schedule: 'Every 10 minutes in the 24-hour post-match result window',
   },
   {
     name: 'tournament-event-transfers-pre-sync',
@@ -203,7 +203,7 @@ const TRIGGERABLE_JOBS: TriggerableJobInfo[] = [
   {
     name: 'tournament-materialized-views-refresh',
     description: 'Refresh tournament materialized views for GraphQL APIs',
-    schedule: 'Cascade 30s after event-results cascade jobs',
+    schedule: 'Cascade after the three structure jobs complete their barrier',
   },
   {
     name: 'event-lives-cache-update',
@@ -230,21 +230,25 @@ const TRIGGERABLE_JOBS: TriggerableJobInfo[] = [
     description: 'Sync event overall results (cascaded from DB sync)',
     schedule: 'Cascade after DB sync',
   },
-  { name: 'live-scores', description: 'Update live scores', schedule: 'Every 15 minutes' },
+  {
+    name: 'live-scores',
+    description: 'Update live scores',
+    schedule: 'Every minute during matches',
+  },
   {
     name: 'post-match-consolidation',
     description: 'Catch FPL overnight data finalization (bonus, corrected scores)',
-    schedule: '06:00, 08:00, 10:00 on match days',
+    schedule: '06:00, 08:00, 10:00 UTC+8 inside the 24-hour post-match window',
   },
   {
     name: 'launch-warning',
     description: 'Pre-season monitor message when FPL events are absent',
-    schedule: 'Manual only (launch cron not registered)',
+    schedule: 'Every minute year-round (deduplicated once per year)',
   },
   {
     name: 'launch-happening',
     description: 'Season-start monitor message when new deadline appears',
-    schedule: 'Manual only (launch cron not registered)',
+    schedule: 'Every minute year-round (deduplicated once per season)',
   },
 ];
 

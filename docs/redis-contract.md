@@ -1,6 +1,6 @@
 # Redis Key Contract — letletme_data
 
-**Status:** authoritative inventory of every Redis key this system writes, as of 2026-07-17.
+**Status:** authoritative inventory of every Redis key this system writes, as of 2026-08-01.
 **Audience:** anyone changing cache code, and every external system that reads this Redis.
 
 ## Ground rules (binding)
@@ -72,19 +72,19 @@ live Redis state and belong in this inventory.
 | Key pattern | Type | Hash field | Value | Retention / ownership |
 |---|---|---|---|---|
 | `PlayerValue:{YYYYMMDD}` | hash | `elementId` | Domain `PlayerValue` JSON | **Written by this service.** No automatic retention job — one key per price-change date accumulates forever. Broader retention requires consumer sign-off (manual runbook only). |
-| `PlayerValueMissing:{YYYYMMDD}` | *(consumer-owned)* | — | *(consumer-defined)* | **Not written by this service** — an external consumer creates it. **This service deletes it** on every `playerValuesCache.set` / `clear` for that date (`src/cache/player-values-cache.ts`), defensively, whenever the real `PlayerValue:{date}` hash is refreshed or cleared. Freeze/sign-off rules still apply: do not rename or repurpose the key; the delete-on-refresh behavior is part of the contract. |
+| `PlayerValueMissing:{YYYYMMDD}` | *(consumer-owned)* | — | *(consumer-defined)* | **Not written by this service** — an external consumer creates it. A positive `HSET` repair clears the marker only after the real history fields are written; a true no-change run leaves both keys untouched. Explicit cache clearing also removes the matching marker. |
 
 ## 5. `PlayerStat:{season}` — latest-event-wins view (important)
 
-`PlayerStat:{season}` is a **current view**, not an archive: each stats sync
-replaces the *entire* hash (`DEL` + `HSET`) with the stats of the event being
-synced. Consumers must read it as "stats as of the latest synced event", never
-as per-event history.
+`PlayerStat:{season}` is a **current view**, not an archive: each eligible stats
+sync builds a complete staging hash and atomically renames it over the entire
+view. Consumers must read it as "stats for the current event", or the next event
+only when no current event exists, never as per-event history.
 
-Writer rule (FP-12): only a sync for the **current event** may write this view
-(enforced by `shouldWritePlayerStatsView` in `player-stats.service.ts`);
-syncs of older events persist to the DB only, so a backfill can never clobber
-the current view.
+Writer rule (FP-12): a sync for the **current event** may write this view. When
+there is no current event, the next event may write it for preseason. Historical
+and manual backfills persist to the DB only, so they cannot clobber the latest
+view (enforced by `shouldWritePlayerStatsView`).
 
 The misleadingly-named internal helper `clearByEvent(eventId)` also clears the
 **whole** hash — it is not per-event (documented at the method; the argument
@@ -109,6 +109,19 @@ view; existing keys stay intact until a later sync with teams present.
 |---|---|---|
 | `mutation-lock:{scope}` | string | Redlock-style mutex (`SET NX PX` with a random token, TTL from `MUTATION_LOCK_TTL_MS`). Scopes come from `src/domain/mutation-scope.ts` (e.g. `tournament-structure:global`, `entry-event:event:N`). Internal coordination only — **do not read or write from other systems.** |
 
+Tournament result cascades also use short-lived internal coordination keys:
+
+| Key pattern | Type | TTL | Notes |
+|---|---|---:|---|
+| `tournament-cascade:meta:{cascadeId}` | string | 24h | Expected structure participant count |
+| `tournament-cascade:structure-done:{cascadeId}:{jobKey}` | string | 24h | Idempotent success or enqueue-failure slot per structure job |
+| `tournament-cascade:refresh-pending:{cascadeId}` | string | 24h | Structure barrier completed; materialized-view refresh is pending |
+| `tournament-cascade:refresh-enqueued:{cascadeId}` | string | 24h | Durable refresh-enqueued marker |
+| `tournament-cascade:refresh-lease:{cascadeId}` | string | 120s | Recoverable lease around refresh enqueue |
+
+These are worker coordination state, not consumer data. They expire
+automatically and must not be included in season cleanup.
+
 ## 8. BullMQ queue keys (internal)
 
 BullMQ stores queue state under `bull:{queueName}:*` on the **queue Redis**
@@ -117,6 +130,12 @@ BullMQ stores queue state under `bull:{queueName}:*` on the **queue Redis**
 `tournament-setup`. When `ENABLE_TIERED_MUTATION_QUEUES` is on (default off),
 each base queue is replaced by `…-p0` / `…-p1` / `…-p2` / `…-p3` tier queues.
 Internal to the worker fleet — do not consume directly.
+
+Post-match league and tournament schedulers use deterministic hourly job IDs.
+Successful deterministic jobs remain for 24 hours to deduplicate repeated cron
+ticks. Failed deterministic jobs are removed so a later tick can retry the same
+slot. This retention applies only to BullMQ job state; it does not change the
+entity-key retention rules above.
 
 ## 9. Consumers
 
@@ -127,50 +146,53 @@ Internal to the worker fleet — do not consume directly.
 
 ## 10. Season rollover
 
-### Automatic today (when `Season:active` changes)
+### Automatic today (when `Season:active` advances)
 
-Entity writers call `finalizeSeasonCacheWrite(season, prefixes)`, which:
+Core entity writers call `finalizeSeasonCacheWrite(season, prefixes)`, which:
 
-1. Updates `Season:active` if the write season is newer.
-2. If (and only if) that value **changed**, calls `clearStaleSeasonCache` to
-   `DEL` keys under the given prefixes that are **not** for the new active
-   season.
+1. Updates `Season:active` only when the validated FPL-derived season is newer.
+2. If (and only if) that value **changed**, expands the cleanup set to the full
+   `SEASON_CACHE_PREFIXES` inventory and deletes keys that are not scoped to the
+   new active season.
 
-Prefixes currently passed in by writers:
+The automatic rollover prefixes are:
 
-| Prefixes | Call site family |
+| Core metadata | Current-event and entry views |
 |---|---|
-| `Event` | events cache |
-| `Team` | teams cache |
-| `Player` | players cache |
-| `Phase` | phases cache |
-| `Fixtures`, `FixturesByTeam` | fixtures cache |
+| `Event` | `EventLive` |
+| `Team` | `EventLiveSummary` |
+| `Player` | `EventLiveExplain` |
+| `Phase` | `LiveFixture` |
+| `Fixtures` | `LiveBonus` |
+| `FixturesByTeam` | `LiveBonusV2` |
+|  | `EventOverallResult` |
+|  | `EntryInfo` |
+|  | `PlayerStat` |
 
-So on a real season transition, the **next** sync for those entities can delete
-prior-season `Event:*`, `Team:*`, `Player:*`, `Phase:*`, `Fixtures*`, and
-`FixturesByTeam*` keys automatically. This is **not** a full Redis wipe.
+The first core cache write that advances `Season:active` therefore removes
+prior-season keys for all fifteen families in one pass, even if that family is
+not part of the current write. This is **not** a full Redis wipe.
 
-### Not auto-deleted today
+### Not auto-deleted
 
-Examples that **do not** go through the prefix cleanup above (and must not be
-assumed gone after rollover):
+These keys are outside `SEASON_CACHE_PREFIXES` and must not be assumed gone
+after rollover:
 
-- `PlayerValue:{YYYYMMDD}` (explicit no-auto-delete / retention policy; still deleted only via explicit `clear` or future runbook)
-- `PlayerValueMissing:{YYYYMMDD}` (consumer-owned; this service only DELs it when refreshing/clearing that date’s `PlayerValue` — see §4)
-- `EntryInfo:{season}`, live hashes (`EventLive*`, `LiveFixture`, `LiveBonus*`),
-  `EventOverallResult`, `event:current`
-- Ops markers (`LaunchNotification:*`, `letletme:entry-info-sync:*`)
-- `mutation-lock:*`, BullMQ `bull:*` keys
+- `PlayerValue:{YYYYMMDD}` (explicit no-auto-delete retention policy).
+- `PlayerValueMissing:{YYYYMMDD}` (consumer-owned; Data clears the matching
+  marker only after a positive history write or an explicit clear; see §4).
+- `event:current` (overwritten in place from the active Event hash).
+- Ops markers (`LaunchNotification:*`, `letletme:entry-info-sync:*`).
+- `mutation-lock:*`, `tournament-cascade:*`, and BullMQ `bull:*` keys.
 
-### Manual rollover runbook (FP-17)
+### Manual rollover recovery runbook (FP-17)
 
-Automatic cleanup intentionally covers only the prefixes above. Everything
-else is deleted **manually, after consumer sign-off** — there are no automatic
-retention jobs, and none may be added without updating this contract.
+Manual deletion is a recovery path for a bypassed or failed automatic rollover,
+not an ordinary season-start step. It always requires consumer sign-off.
 
-**When to run:** after `Season:active` has advanced to the new season and the
-first full round of new-season syncs (events, teams, players, phases,
-fixtures) has completed.
+**When to run:** only after `Season:active` has advanced, the first full core
+sync (events, teams, fixtures, players, phases) has completed, and the read-only
+inventory still shows old-season keys.
 
 **Step 1 — verify the new season is live (read-only)**
 
@@ -211,6 +233,12 @@ Delete **only** the leftover old-season keys from Step 2. Never use
 `FLUSHDB`/`FLUSHALL`; prefer `--scan` batches over `KEYS` in production:
 
 ```bash
+redis-cli --scan --pattern "Event:$OLD"              | xargs -r redis-cli DEL
+redis-cli --scan --pattern "Team:$OLD"               | xargs -r redis-cli DEL
+redis-cli --scan --pattern "Player:$OLD"             | xargs -r redis-cli DEL
+redis-cli --scan --pattern "Phase:$OLD"              | xargs -r redis-cli DEL
+redis-cli --scan --pattern "Fixtures:$OLD:*"         | xargs -r redis-cli DEL
+redis-cli --scan --pattern "FixturesByTeam:$OLD:*"   | xargs -r redis-cli DEL
 redis-cli --scan --pattern "EntryInfo:$OLD"          | xargs -r redis-cli DEL
 redis-cli --scan --pattern "EventLive:$OLD:*"        | xargs -r redis-cli DEL
 redis-cli --scan --pattern "EventLiveExplain:$OLD:*" | xargs -r redis-cli DEL
@@ -222,9 +250,8 @@ redis-cli --scan --pattern "LiveBonusV2:$OLD:*"      | xargs -r redis-cli DEL
 redis-cli --scan --pattern "PlayerStat:$OLD"         | xargs -r redis-cli DEL
 ```
 
-(`Event`, `Team`, `Player`, `Phase`, `Fixtures*`, `FixturesByTeam*` for the old
-season are normally already gone via the automatic prefix pass; delete them
-manually only if Step 2 shows leftovers.)
+(All fifteen season-scoped families are normally already gone via the automatic
+prefix pass. Delete only the explicit leftovers reported by Step 2.)
 
 **Step 5 — verify**
 
@@ -235,12 +262,13 @@ manually only if Step 2 shows leftovers.)
 
 - `PlayerValue:{YYYYMMDD}` — historical price data; stays until Tong and
   consumers agree on a retention window. No automatic retention job, ever.
-- `PlayerValueMissing:{YYYYMMDD}` — consumer-owned; this service only deletes
-  it when refreshing/clearing the matching `PlayerValue` date (§4).
+- `PlayerValueMissing:{YYYYMMDD}` — consumer-owned; this service clears it only
+  after a positive history write or an explicit clear of the matching date (§4).
 - `Season:active`, `event:current` — live control keys; `event:current` is
   overwritten in place, nothing to clean.
 - `LaunchNotification:*` — re-arms per year/season by design (§3).
-- `letletme:entry-info-sync:daily:*`, `mutation-lock:*` — expire via TTL.
+- `letletme:entry-info-sync:daily:*`, `mutation-lock:*`, and
+  `tournament-cascade:*` — expire via TTL.
 - `bull:*` — managed by BullMQ (§8).
 
 ## 11. Database single-season semantics (FP-21)

@@ -19,18 +19,21 @@ systemd units and `/var/log/letletme` files are not part of the Docker deploymen
 5. **Bootstrap the internal service key** (one-time): generate a high-entropy plaintext key, store that plaintext only as the trusted Web server's `TOURNAMENT_API_KEY`, and put its lowercase SHA-256 hex digest in Data's `DATA_API_KEY_HASHES`. To rotate without downtime, add the new digest, deploy both services, switch the Web secret, verify mutations, then remove the old digest. Data never stores or prints the plaintext key.
 6. **Proxy + hardening**: terminate TLS in Nginx/Caddy, forward to `127.0.0.1:3000`, restrict Redis access to trusted sources on the VPS/network, and enable ufw.
 
-> ℹ️ **Testing note**: GitHub Actions executes only the unit test suite (no external services required). Run the integration tests locally (`bun test tests/integration`) as part of pre-release validation whenever the external dependencies are available.
+> ℹ️ **Testing note**: GitHub Actions runs lint, typecheck, unit tests, build,
+> both migration paths, migration idempotency/status checks, and integration
+> tests against isolated PostgreSQL and Redis services.
 
-## GitHub Actions Secrets
-Add the following repository secrets so the deploy workflow can push images and SSH into the VPS:
+## GitHub Actions configuration
 
-| Secret | Description |
-| --- | --- |
-| `GHCR_TOKEN` | Personal access token with `read:packages` + `write:packages` (used for pushing/pulling the container). |
-| `VPS_HOST` | Public IP / hostname for the VPS (e.g., `43.163.91.9`). |
-| `VPS_USER` | SSH user with Docker permissions (e.g., `deploy`). |
-| `VPS_SSH_KEY` | Private key that grants access to `VPS_USER`. |
-| `VPS_WORKDIR` | Absolute path containing `docker-compose.yml` on the server. |
+The workflow uses GitHub's built-in `GITHUB_TOKEN` for GHCR. Configure these
+repository variables and secret for the SSH deployment:
+
+| Type | Name | Description |
+| --- | --- | --- |
+| Variable | `VPS_HOST` | Public IP or hostname of the VPS |
+| Variable | `VPS_USER` | SSH user with Docker permissions, normally `deploy` |
+| Variable | `VPS_WORKDIR` | Absolute path containing `docker-compose.yml` |
+| Secret | `VPS_SSH_KEY` | Private key that grants access to `VPS_USER` |
 
 The workflow exports `APP_IMAGE=$IMAGE_REF` before running `docker compose pull/up`, ensuring the compose stack always references the freshly pushed GHCR tag.
 
@@ -40,6 +43,18 @@ The workflow exports `APP_IMAGE=$IMAGE_REF` before running `docker compose pull/
 - `scripts/deploy.sh logs api` – follow logs for a specific service.
 - `docker compose logs --since 1h api worker` – inspect bounded production stdout logs.
 - `docker compose run --rm -T api bun run db:migrate` – one-off migration run if needed.
+
+## Post-deploy season readiness
+
+`/health` proves API liveness. `/ready` additionally requires PostgreSQL,
+Redis, and a valid FPL-derived `Season:active`; a fresh Redis deployment can be
+healthy while readiness remains `503` until events sync completes.
+
+For a new season, run the staged write and independent PostgreSQL/Redis audit in
+[docs/fpl-season-readiness.md](docs/fpl-season-readiness.md). Do not set
+`Season:active` manually, infer an endpoint's availability from local data, or
+treat a successful container rollout as proof that current-season data is
+complete.
 
 ## Legacy Manual Deployment (Break Glass)
 The original bare-metal guide is retained below for emergencies when Docker/CI/CD are unavailable.

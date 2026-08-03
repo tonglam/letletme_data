@@ -1,6 +1,7 @@
 # API Cheat Sheet
 
-Current production base URL:
+Examples use this placeholder internal base URL; substitute the actual trusted
+environment endpoint:
 
 - `http://data.internal.example`
 
@@ -13,9 +14,16 @@ Important:
   `Season:active` key are ready. On a fresh Redis restore, use the authenticated
   `events-sync` trigger to establish the key, then confirm `/ready`.
 - `POST`, `PUT`, `PATCH`, and `DELETE` require an API key in the `x-api-key` header when `ENABLE_AUTH=true`.
+- Mutation examples below omit the repeated auth header for readability unless
+  it is the focus of the example. Add `-H "x-api-key: $API_KEY"` to every
+  mutation in an authenticated environment.
 - Generate a random key outside the service, store its SHA-256 digest in
   `DATA_API_KEY_HASHES`, and store the plaintext only in the trusted caller's
   secret manager. Comma-separated digests allow overlap during rotation.
+- Sync responses normally confirm enqueueing, not completion. Keep the worker
+  running and verify the BullMQ job result before auditing database/cache data.
+- For new-season order, readiness stages, and read-only verification, use the
+  [FPL season readiness runbook](fpl-season-readiness.md).
 
 ## Auth header for mutations
 
@@ -96,18 +104,25 @@ curl -X POST http://data.internal.example/events/sync -H "x-api-key: $API_KEY"
   - `curl http://data.internal.example/jobs`
 - `POST /jobs/:name/trigger`
   - `curl -X POST http://data.internal.example/jobs/events-sync/trigger`
+  - `curl -X POST -H 'content-type: application/json' -d '{"changeDate":"20260803"}' http://data.internal.example/jobs/player-prices/trigger`
   - `curl -X POST http://data.internal.example/jobs/event-lives-db-sync/trigger`
   - `curl -X POST http://data.internal.example/jobs/live-scores/trigger`
 
 Supported job names:
 
 - `events-sync`
+- `event-current-refresh`
 - `fixtures-sync`
 - `teams-sync`
 - `players-sync`
+- `player-prices` (requires JSON body `{ "changeDate": "YYYYMMDD" }`)
 - `player-stats-sync`
 - `phases-sync`
 - `player-values-sync`
+- `entry-info-daily`
+- `entry-event-picks-daily`
+- `entry-event-transfers-daily`
+- `entry-event-results-daily`
 - `league-event-picks-sync`
 - `league-event-results-sync`
 - `tournament-event-picks-sync`
@@ -115,10 +130,12 @@ Supported job names:
 - `tournament-event-transfers-pre-sync`
 - `tournament-event-transfers-post-sync`
 - `tournament-event-cup-results-sync`
+- `tournament-selection-stats-sync`
 - `tournament-info-sync`
 - `tournament-points-race-results-sync`
 - `tournament-battle-race-results-sync`
 - `tournament-knockout-results-sync`
+- `tournament-materialized-views-refresh`
 - `event-lives-cache-update`
 - `event-lives-db-sync`
 - `event-live-summary-sync`
@@ -126,3 +143,8 @@ Supported job names:
 - `event-overall-result-sync`
 - `live-scores`
 - `post-match-consolidation`
+- `launch-warning`
+- `launch-happening`
+
+`GET /jobs` is the runtime authority for the complete trigger list and current
+descriptions.
