@@ -21,8 +21,11 @@ import { runLaunchHappening, runLaunchWarning } from '../jobs/launch.jobs';
 import {
   enqueueEventLiveExplain,
   enqueueEventLiveSummary,
+  enqueueEventLivesCacheUpdate,
+  enqueueEventLivesDbSync,
   enqueueEventOverallResult,
   enqueueLiveSnapshot,
+  enqueueLiveScoresSync,
 } from '../jobs/live-data.jobs';
 import { runPostMatchConsolidation } from '../jobs/live.jobs';
 import { runTournamentBattleRaceResultsSync } from '../jobs/tournament-battle-race-results.jobs';
@@ -358,14 +361,14 @@ function buildJobMap(input?: unknown): Record<string, () => Promise<unknown>> {
       if (!currentEvent) {
         throw new Error('No current event found');
       }
-      return enqueueLiveSnapshot(currentEvent.id, 'manual', { persistEventLives: false });
+      return enqueueEventLivesCacheUpdate(currentEvent.id, 'manual');
     },
     'event-lives-db-sync': async () => {
       const currentEvent = await getCurrentEvent();
       if (!currentEvent) {
         throw new Error('No current event found');
       }
-      return enqueueLiveSnapshot(currentEvent.id, 'manual', { persistEventLives: true });
+      return enqueueEventLivesDbSync(currentEvent.id, 'manual');
     },
     'event-live-summary-sync': async () => {
       const currentEvent = await getCurrentEvent();
@@ -393,7 +396,7 @@ function buildJobMap(input?: unknown): Record<string, () => Promise<unknown>> {
       if (!currentEvent) {
         throw new Error('No current event found');
       }
-      return enqueueLiveSnapshot(currentEvent.id, 'manual', { persistEventLives: false });
+      return enqueueLiveScoresSync(currentEvent.id, 'manual');
     },
     'post-match-consolidation': runPostMatchConsolidation,
     'launch-warning': runLaunchWarning,

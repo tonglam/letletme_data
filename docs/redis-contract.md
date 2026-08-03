@@ -148,6 +148,11 @@ Consumers that combine two or more live views MUST use this retry protocol:
 `letletme-graphql` implements this contract in its live snapshot coordinator,
 including a sibling-root barrier before GraphQL exposes any candidate. Writer
 or reader changes to this protocol must update and test both repositories.
+The old `event-lives-cache`, `event-lives-db`, `live-fixture-cache`,
+`live-bonus-cache`, and `live-scores` queue names are compatibility aliases:
+new calls enqueue `live-snapshot`, and workers route any old waiting entries
+through the same complete publisher. No supported job may replace one published
+live view independently while snapshot metadata exists.
 Transient staging keys use `{target}:staging:{uuid}`, expire after fifteen
 minutes if a worker is terminated, and are deleted on every success or handled
 failure. The atomic rename removes that temporary TTL from published hashes;

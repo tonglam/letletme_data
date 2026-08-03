@@ -5,6 +5,8 @@ export const liveDataQueueName = 'live-data';
 
 export const LIVE_JOBS = {
   LIVE_SNAPSHOT: 'live-snapshot',
+  // Retained so jobs already waiting during a rolling deployment remain
+  // processable. New compatibility enqueues route all of these to LIVE_SNAPSHOT.
   EVENT_LIVES_CACHE: 'event-lives-cache',
   EVENT_LIVES_DB: 'event-lives-db',
   EVENT_LIVE_SUMMARY: 'event-live-summary',

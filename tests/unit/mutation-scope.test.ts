@@ -14,7 +14,20 @@ describe('resolveMutationScopes', () => {
       jobName: 'event-lives-db',
       eventId: 33,
     });
-    expect(scopes).toEqual(['live-snapshot:event:33']);
+    expect(scopes).toEqual(['data-core:fixtures', 'live-snapshot:event:33']);
+  });
+
+  it.each([
+    'event-lives-cache',
+    'event-lives-db',
+    'live-fixture-cache',
+    'live-bonus-cache',
+    'live-scores',
+  ])('gives legacy live view job %s the complete snapshot scopes', (jobName) => {
+    expect(resolveMutationScopes({ queueName: 'live-data-p0', jobName, eventId: 33 })).toEqual([
+      'data-core:fixtures',
+      'live-snapshot:event:33',
+    ]);
   });
 
   it('serializes the snapshot fixture write with ordinary fixture syncs', () => {

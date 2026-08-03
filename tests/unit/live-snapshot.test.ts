@@ -8,6 +8,7 @@ import {
   type LiveSnapshotPublishOptions,
 } from '../../src/cache/live-snapshot-cache';
 import {
+  resolveLiveSnapshotPersistence,
   shouldSkipQueuedLiveSnapshot,
   type LiveSnapshotMeta,
 } from '../../src/domain/live-snapshot';
@@ -292,6 +293,21 @@ describe('queued live snapshot window policy', () => {
     expect(shouldSkipQueuedLiveSnapshot('cron', false, true)).toBe(false);
     expect(shouldSkipQueuedLiveSnapshot('manual', false, false)).toBe(false);
     expect(shouldSkipQueuedLiveSnapshot('cascade', true, false)).toBe(false);
+  });
+
+  test('routes every legacy live-view job through the coherent publisher', () => {
+    expect(resolveLiveSnapshotPersistence('live-snapshot', false)).toBe(false);
+    expect(resolveLiveSnapshotPersistence('live-snapshot', true)).toBe(true);
+    expect(resolveLiveSnapshotPersistence('event-lives-db')).toBe(true);
+    for (const jobName of [
+      'event-lives-cache',
+      'live-fixture-cache',
+      'live-bonus-cache',
+      'live-scores',
+    ]) {
+      expect(resolveLiveSnapshotPersistence(jobName)).toBe(false);
+    }
+    expect(resolveLiveSnapshotPersistence('event-live-summary')).toBeNull();
   });
 });
 

@@ -1,7 +1,10 @@
 import { Worker, Job, QueueEvents } from 'bullmq';
 
 import { MUTATION_PRIORITY_ORDER, type MutationPriorityTier } from '../domain/job-priority';
-import { shouldSkipQueuedLiveSnapshot } from '../domain/live-snapshot';
+import {
+  resolveLiveSnapshotPersistence,
+  shouldSkipQueuedLiveSnapshot,
+} from '../domain/live-snapshot';
 import {
   LIVE_JOBS,
   type LiveDataJobData,
@@ -14,13 +17,9 @@ import {
   enqueueFinalLeagueResultsAfterLiveSync,
   isLiveMatchWindowForEvent,
 } from '../services/live-data-cascade.service';
-import { syncEventLives, updateEventLivesCache } from '../services/event-lives.service';
-import { syncLiveFixtureCache } from '../services/live-fixtures.service';
-import { syncLiveBonusCache } from '../services/live-bonus.service';
 import { syncEventLiveSummary } from '../services/event-live-summaries.service';
 import { syncEventLiveExplain } from '../services/event-live-explains.service';
 import { syncEventOverallResult } from '../services/event-overall-results.service';
-import { syncLiveScores } from '../services/fixtures.service';
 import { syncLiveSnapshot } from '../services/live-snapshot.service';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { getQueueConnection } from '../utils/queue';
@@ -35,8 +34,7 @@ import type { WorkerRuntime } from './worker-runtime';
  *
  * Processes live data sync jobs:
  * - live-snapshot: coherent upstream fetch + atomic Redis publication (1-min)
- * - event-lives-cache: Fast cache-only updates (1-min)
- * - event-lives-db: Database persistence (10-min) + trigger cascade
+ * - legacy live view names: compatibility aliases routed through live-snapshot
  * - event-live-summary: Aggregate season totals (cascade)
  * - event-live-explain: Sync explain data (cascade)
  * - event-overall-result: Sync overall results (cascade)
@@ -64,49 +62,30 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
     },
     () =>
       runTrackedJob(context, async () => {
-        switch (job.name) {
-          case LIVE_JOBS.LIVE_SNAPSHOT:
-            {
-              const persistEventLives = job.data.persistEventLives ?? false;
-              if (source === 'cron') {
-                const windowOpen = await isLiveMatchWindowForEvent(eventId);
-                if (shouldSkipQueuedLiveSnapshot(source, persistEventLives, windowOpen)) {
-                  logInfo('Skipping cache-only live snapshot job - not match time', { eventId });
-                  break;
-                }
-              }
-              await syncLiveSnapshot(eventId, {
-                persistEventLives,
+        const persistEventLives = resolveLiveSnapshotPersistence(
+          job.name,
+          job.data.persistEventLives ?? false,
+        );
+        if (persistEventLives !== null) {
+          if (source === 'cron') {
+            const windowOpen = await isLiveMatchWindowForEvent(eventId);
+            if (shouldSkipQueuedLiveSnapshot(source, persistEventLives, windowOpen)) {
+              logInfo('Skipping cache-only live snapshot job - not match time', {
+                eventId,
+                requestedJobName: job.name,
               });
-              if (persistEventLives) {
-                await enqueueCascadeJobs(eventId, undefined, { includeLiveDerivatives: false });
-                await enqueueFinalLeagueResultsAfterLiveSync(eventId);
-              }
+              return;
             }
-            break;
+          }
+          await syncLiveSnapshot(eventId, { persistEventLives });
+          if (persistEventLives) {
+            await enqueueCascadeJobs(eventId, undefined, { includeLiveDerivatives: false });
+            await enqueueFinalLeagueResultsAfterLiveSync(eventId);
+          }
+          return;
+        }
 
-          case LIVE_JOBS.EVENT_LIVES_CACHE:
-            if (!(await isLiveMatchWindowForEvent(eventId))) {
-              logInfo('Skipping event lives cache job - not match time', { eventId });
-              break;
-            }
-            await updateEventLivesCache(eventId);
-            break;
-
-          case LIVE_JOBS.EVENT_LIVES_DB:
-            {
-              // Re-check window inside the worker: the cron may have enqueued during
-              // match time, but if the worker is delayed past the window we still
-              // want the DB persistence (post-match consolidation relies on it).
-              const windowOpen = await isLiveMatchWindowForEvent(eventId);
-              logInfo('Event lives DB sync window re-check', { eventId, windowOpen });
-              await syncEventLives(eventId);
-              // After DB sync completes, trigger dependent jobs
-              await enqueueCascadeJobs(eventId);
-              await enqueueFinalLeagueResultsAfterLiveSync(eventId);
-            }
-            break;
-
+        switch (job.name) {
           case LIVE_JOBS.EVENT_LIVE_SUMMARY:
             await syncEventLiveSummary();
             break;
@@ -115,28 +94,8 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
             await syncEventLiveExplain(eventId);
             break;
 
-          case LIVE_JOBS.LIVE_FIXTURE_CACHE:
-            if (!(await isLiveMatchWindowForEvent(eventId))) {
-              logInfo('Skipping live fixture cache job - not match time', { eventId });
-              break;
-            }
-            await syncLiveFixtureCache(eventId);
-            break;
-
-          case LIVE_JOBS.LIVE_BONUS_CACHE:
-            if (!(await isLiveMatchWindowForEvent(eventId))) {
-              logInfo('Skipping live bonus cache job - not match time', { eventId });
-              break;
-            }
-            await syncLiveBonusCache(eventId);
-            break;
-
           case LIVE_JOBS.EVENT_OVERALL_RESULT:
             await syncEventOverallResult();
-            break;
-
-          case LIVE_JOBS.LIVE_SCORES:
-            await syncLiveScores(eventId);
             break;
 
           default:

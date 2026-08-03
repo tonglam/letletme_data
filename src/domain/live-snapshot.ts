@@ -29,6 +29,30 @@ export function shouldSkipQueuedLiveSnapshot(
   return source === 'cron' && !persistEventLives && !windowOpen;
 }
 
+/**
+ * Old queue names can survive a rolling worker deployment. Treat every job
+ * that used to replace one live Redis view as a coordinated snapshot so none
+ * can invalidate LiveSnapshotMeta after the new publisher is active.
+ */
+export function resolveLiveSnapshotPersistence(
+  jobName: string,
+  requestedPersistence = false,
+): boolean | null {
+  switch (jobName) {
+    case 'live-snapshot':
+      return requestedPersistence;
+    case 'event-lives-db':
+      return true;
+    case 'event-lives-cache':
+    case 'live-fixture-cache':
+    case 'live-bonus-cache':
+    case 'live-scores':
+      return false;
+    default:
+      return null;
+  }
+}
+
 export function parseLiveSnapshotMeta(value: string | null): LiveSnapshotMeta | null {
   if (!value) return null;
   try {

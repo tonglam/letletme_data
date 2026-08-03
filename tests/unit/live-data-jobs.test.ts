@@ -49,8 +49,11 @@ describe('live-data cron duplicate suppression', () => {
     getJobsCalls.length = 0;
   });
 
-  test('cron source skips enqueue when an identical job is already waiting', async () => {
-    waitingJobs.push({ name: 'event-lives-db', data: { eventId: 12 } });
+  test('persistent compatibility alias skips a pending persistent snapshot', async () => {
+    waitingJobs.push({
+      name: 'live-snapshot',
+      data: { eventId: 12, persistEventLives: true },
+    });
 
     const job = await enqueueEventLivesDbSync(12, 'cron');
     expect(job).toBeNull();
@@ -101,11 +104,28 @@ describe('live-data cron duplicate suppression', () => {
   });
 
   test('manual source always enqueues even when a waiting job exists', async () => {
-    waitingJobs.push({ name: 'event-lives-cache', data: { eventId: 12 } });
+    waitingJobs.push({ name: 'live-snapshot', data: { eventId: 12 } });
 
     const job = await enqueueEventLivesCacheUpdate(12, 'manual');
     expect(job).not.toBeNull();
     expect(addCalls).toHaveLength(1);
+    expect(addCalls[0]).toMatchObject({
+      name: 'live-snapshot',
+      data: { eventId: 12, persistEventLives: false },
+      opts: { jobId: 'event-lives-cache-e12-manual' },
+    });
     expect(getJobsCalls).toHaveLength(0);
+  });
+
+  test('DB compatibility alias publishes one persistent snapshot', async () => {
+    const job = await enqueueEventLivesDbSync(12, 'manual');
+
+    expect(job).not.toBeNull();
+    expect(addCalls).toHaveLength(1);
+    expect(addCalls[0]).toMatchObject({
+      name: 'live-snapshot',
+      data: { eventId: 12, persistEventLives: true },
+      opts: { jobId: 'event-lives-db-e12-manual' },
+    });
   });
 });

@@ -29,7 +29,7 @@ export const eventLivesAPI = new Elysia({ prefix: '/event-lives' })
       set.status = 202;
       return {
         success: true,
-        message: `Event live DB sync job enqueued for event ${params.eventId}`,
+        message: `Persistent live snapshot job enqueued for event ${params.eventId}`,
         jobId: job.id,
         eventId: params.eventId,
       };
@@ -46,7 +46,7 @@ export const eventLivesAPI = new Elysia({ prefix: '/event-lives' })
       set.status = 202;
       return {
         success: true,
-        message: `Event live cache update job enqueued for event ${params.eventId}`,
+        message: `Coherent live snapshot job enqueued for event ${params.eventId}`,
         jobId: job.id,
         eventId: params.eventId,
       };
