@@ -6,9 +6,13 @@ This directory contains the test suite for `letletme_data`. Tests are split by s
 
 | Command | What it runs | Infrastructure |
 |---|---|---|
-| `bun test` / `bun run test` | Unit tests only (`tests/unit`) | None |
+| `bun run test` or `bun test tests/unit` | Unit tests only (`tests/unit`) | None |
 | `bun run test:integration` | Integration tests (`tests/integration`) | Postgres + Redis (test instance only) |
-| `bun run test:all` | Unit + integration | Postgres + Redis (test instance only) |
+| `RUN_INTEGRATION=1 bun run test:all` | Unit + integration | Postgres + Redis (test instance only) |
+
+Do not use bare `bun test` as a unit-test shortcut. Bun discovers both test
+directories directly, so the integration environment guard will reject the run
+unless the explicit test-only infrastructure variables are present.
 
 Integration tests are gated by `tests/integration/helpers/env-guard.ts`. They refuse to start unless **all** of the following are true:
 

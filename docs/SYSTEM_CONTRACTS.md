@@ -19,7 +19,9 @@ This repository participates in one four-repository system:
    rebuildable acceleration layer, never the system of record.
 5. GraphQL reads PostgreSQL and Data-owned positive hashes, then exposes the
    product schema. It must preserve a database fallback or an explicit error;
-   cache misses cannot become invented data.
+   cache misses cannot become invented data. Team strength is nullable while
+   FPL has not published its pre-season rating; readers must preserve that
+   unknown state rather than substitute a numeric value.
 6. Web signs short-lived user and ingress envelopes for GraphQL. Web-authenticated
    tournament mutations are forwarded to Data with a separate internal API key.
 7. The Mini Program obtains a hashed bearer session from Web and uses it for
@@ -74,6 +76,20 @@ for deployments that have not completed the migration.
   authenticated `events-sync` job from the trusted network. It derives the
   season from FPL GW1 metadata and establishes the key; do not set a guessed
   calendar value merely to make `/ready` green.
+- Core discovery jobs (events, teams, fixtures, players, phases) run year-round
+  so new-season metadata can be accepted before the fixture-derived season
+  window opens. Empty core arrays are no-ops that preserve accepted state.
+- Valid pre-season placeholders remain explicit: team `strength=null`, team
+  `position=0`, and fixture `pulseId=0`. They mean unknown, unranked, and not
+  assigned respectively; downstream code must not infer stronger values.
+- When a core write advances `Season:active`, Data removes prior-season keys
+  for every family in `SEASON_CACHE_PREFIXES`. Price-history, ops, lock,
+  cascade-coordination, BullMQ, and consumer-owned keys remain outside that
+  cleanup.
+- League and tournament result polling uses the fixture-bounded 24-hour
+  post-match window rather than the calendar season boundary. Final league
+  results are corrected again after fresh `event_lives` persistence so GW38
+  and delayed FPL finalization cannot leave a stale snapshot.
 - LiveBonus V2 is additive. Keep GraphQL `LIVE_POINTS_V2=false` until the V2 hash
   has been sampled for single and double gameweeks.
 - Never deploy one repository's contract switch before its producer/validator

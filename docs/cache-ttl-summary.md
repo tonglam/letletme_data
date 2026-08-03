@@ -1,52 +1,57 @@
-# Cache TTL Summary
+# Cache retention summary
 
-All cache TTL (Time To Live) configurations in seconds.
+This page is a quick retention view. The binding key names, shapes, ownership,
+and rollover rules are in [redis-contract.md](redis-contract.md).
 
-**Note:** TTL -1 means no expiration (cache persists indefinitely until manually deleted).
+## Data read models
 
-## Cache TTL Values (No Expiration Strategy)
+Data hashes do not expire by TTL. They are replaced by sync writers and the
+season-scoped families are removed when `Season:active` advances.
 
-| Cache Type | TTL (seconds) | TTL (human) | Cache Key Pattern | Category |
-|------------|---------------|-------------|-------------------|----------|
-| **EVENTS** | -1 | No expiration | `Event:{season}` | Basic/Static |
-| **TEAMS** | -1 | No expiration | `Team:{season}` | Basic/Static |
-| **PHASES** | -1 | No expiration | `Phase:{season}` | Basic/Static |
-| **PLAYERS** | -1 | No expiration | `Player:{season}` | Basic/Static |
-| **FIXTURES** | -1 | No expiration | `Fixtures:{season}:{eventId}` | Game Data |
-| **PLAYER_STATS** | -1 | No expiration | `PlayerStat:{season}` | Game Data |
-| **player_values** | -1 | No expiration | `PlayerValue:{changeDate}` | Game Data |
-| **EVENT_LIVE** | -1 | No expiration | `EventLive:{season}:{eventId}` | Live Match Data |
-| **EVENT_LIVE_EXPLAIN** | -1 | No expiration | `EventLiveExplain:{season}:{eventId}` | Live Match Data |
-| **LIVE_FIXTURE** | -1 | No expiration | `LiveFixture:{season}:{eventId}` | Live Match Data |
-| **LIVE_BONUS** | -1 | No expiration | `LiveBonus:{season}:{eventId}` | Live Match Data |
-| **EVENT_LIVE_SUMMARY** | -1 | No expiration | `EventLiveSummary:{season}:{eventId}` | Aggregated Data |
-| **EVENT_OVERALL_RESULT** | -1 | No expiration | `EventOverallResult:{season}` | Aggregated Data |
-| **EVENT_STANDINGS** | -1 | No expiration | `EventStandings:{season}` | Aggregated Data |
-| **LIVE_DATA** | -1 | No expiration | N/A | Live Match Data |
+| Family | Key pattern | TTL |
+|---|---|---:|
+| Events | `Event:{season}` | none |
+| Teams | `Team:{season}` | none |
+| Phases | `Phase:{season}` | none |
+| Players | `Player:{season}` | none |
+| Player stats | `PlayerStat:{season}` | none |
+| Entry info | `EntryInfo:{season}` | none |
+| Fixtures | `Fixtures:{season}:{eventId}` | none |
+| Unscheduled fixtures | `Fixtures:{season}:unscheduled` | none |
+| Team fixtures | `FixturesByTeam:{season}:{teamId}` | none |
+| Event live | `EventLive:{season}:{eventId}` | none |
+| Event live explain | `EventLiveExplain:{season}:{eventId}` | none |
+| Event live summary | `EventLiveSummary:{season}:{eventId}` | none |
+| Overall result | `EventOverallResult:{season}` | none |
+| Live fixtures | `LiveFixture:{season}:{eventId}` | none |
+| Live bonus | `LiveBonus:{season}:{eventId}` | none |
+| Live bonus V2 | `LiveBonusV2:{season}:{eventId}` | none |
 
-## Default Cache Config
+`PlayerValue:{YYYYMMDD}` is date-scoped historical data, also with no TTL, but
+it is deliberately outside automatic season rollover.
 
-- **DEFAULT_CACHE_CONFIG.ttl**: 300 seconds (5 minutes)
-  - Used by generic cache operations when no specific TTL is provided
+## Control and internal state
 
-## TTL Strategy Rationale
+| Key family | Retention |
+|---|---|
+| `Season:active` | No TTL; advances only from validated FPL season metadata |
+| `event:current` | No TTL; overwritten in place from the active Event hash |
+| `LaunchNotification:*` | No TTL; year/season suffix provides re-arming |
+| `letletme:entry-info-sync:daily:*` | Expires at the next UTC midnight, minimum 60 seconds |
+| `mutation-lock:*` | Millisecond TTL from `MUTATION_LOCK_TTL_MS` |
+| `tournament-cascade:*` | 24 hours, except the refresh lease at 120 seconds |
+| `bull:*` | Managed by BullMQ queue/worker retention settings |
 
-### Why No Expiration (TTL -1)?
-Since **read operations don't update the cache** (only sync operations do), using TTL -1 (no expiration) ensures:
-- **No cache misses** - Cache persists indefinitely until manually cleared
-- **Consistent performance** - No unexpected cache expiration
-- **Reduced database load** - Cache always available
-- **Predictable behavior** - Cache only updates during sync operations
+Post-match jobs with deterministic IDs retain successful BullMQ jobs for 24
+hours to deduplicate repeated ticks. Failed deterministic jobs are removed so
+the same hourly slot can be retried.
 
-### Cache Update Strategy
-- **Delete before insert**: All cache `set()` operations delete the existing key before inserting new data
-- **Sync-only updates**: Caches are updated by scheduled sync jobs (not by read operations)
-- **Manual cleanup**: Caches can be manually cleared when needed (e.g., during data migrations or when stale data is detected)
+## Update and rollover behavior
 
-### Cache Operations
-All cache `set()` methods follow this pattern:
-1. Delete existing cache key (`del(key)`)
-2. Insert new data (`hset(key, data)`)
-3. Set expiration only if TTL > 0 (skip if TTL is -1)
-
-This ensures clean cache updates without stale data accumulation.
+- Entity writers replace affected hashes; reads do not extend retention.
+- Empty core upstream arrays preserve the previously accepted cache.
+- The first core write that advances `Season:active` scans all fifteen
+  season-scoped families and deletes prior-season keys.
+- Rollover does not delete player-value history, notification markers, locks,
+  cascade coordination, BullMQ state, or consumer-owned negative markers.
+- Never use `FLUSHDB` or `FLUSHALL` for cache maintenance.

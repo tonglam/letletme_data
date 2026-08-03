@@ -1,190 +1,233 @@
-# Overall
+# LetLetMe Data
 
-Letletme_data is the sole writer for LetLetMe's FPL domain data. It fetches the
-Fantasy Premier League (FPL) APIs, validates and transforms the responses, and
-persists canonical rows in PostgreSQL plus disposable read models in Redis.
-Its REST surface is an internal ingestion/control plane; `letletme-graphql` is
-the public product data API.
+`letletme_data` is the sole writer for LetLetMe's Fantasy Premier League (FPL)
+domain data. It fetches official FPL endpoints, validates and transforms every
+accepted payload, persists canonical rows in PostgreSQL, and publishes
+rebuildable Redis read models. Its REST API is an internal ingestion and
+operations surface; product clients read through `letletme-graphql`.
 
-Key Features:
+## What this service owns
 
-- Real-time FPL data fetching and transformation
-- Protected operational REST endpoints for sync and tournament commands
-- Efficient data persistence with PostgreSQL
-- Performance optimization using Redis caching
-- Type-safe implementation with strict TypeScript
-- Docker containerization for easy deployment
+- Official FPL API access, retries, timeouts, and boundary validation.
+- Core season data: events, teams, fixtures, players, and phases.
+- Current-gameweek, entry, league, tournament, live, and price-change jobs.
+- Canonical FPL and tournament rows in PostgreSQL.
+- Data-owned Redis hashes, the `Season:active` authority key, and BullMQ jobs.
+- Protected operational endpoints for manual synchronization and recovery.
 
-# Architecture & Workflow
+It does not own browser authentication or the public product schema. See
+[System contracts](docs/SYSTEM_CONTRACTS.md) for the four-repository ownership
+model and [Redis contract](docs/redis-contract.md) for the binding key shapes.
 
-## System Architecture
-
-```mermaid
-graph TB
-    FPL[FPL API] --> |Raw Data| Fetcher[Data Fetcher]
-    Fetcher --> |JSON| Transform[Data Transformer]
-    Transform --> |Validated Data| Storage[Data Storage]
-    Storage --> |Write| DB[(PostgreSQL)]
-    Storage --> |Cache| Cache[(Redis)]
-    API[REST API] --> |Read| Cache
-    API --> |Read/Write| DB
-    Cron[Cron Jobs] --> |Trigger| Fetcher
-
-    subgraph Data Processing
-        Fetcher
-        Transform
-        Storage
-    end
-
-    subgraph Data Access
-        API
-    end
-
-    subgraph Scheduling
-        Cron
-    end
-```
-
-## Data Flow
-
-```mermaid
-sequenceDiagram
-    participant C as Cron Job
-    participant F as Fetcher
-    participant T as Transformer
-    participant P as PostgreSQL
-    participant R as Redis
-    participant A as API
-
-    C->>F: Trigger data fetch
-    F->>FPL: Request data
-    FPL-->>F: Return raw data
-    F->>T: Pass raw JSON
-    T->>T: Validate & transform
-    T->>P: Store processed data
-    T->>R: Cache frequently accessed data
-
-    Note over A,R: API Data Access Flow
-    A->>R: Check cache
-    alt Cache hit
-        R-->>A: Return cached data
-    else Cache miss
-        A->>P: Query database
-        P-->>A: Return data
-        A->>R: Update cache
-    end
-```
-
-See [docs/SYSTEM_CONTRACTS.md](docs/SYSTEM_CONTRACTS.md) for repository
-ownership, trust boundaries, authentication, cache ownership, and rollout
-rules. See [docs/redis-contract.md](docs/redis-contract.md) for the binding key
-inventory.
-
-## Data Processing Pipeline
+## Architecture
 
 ```mermaid
 flowchart LR
-    A[Raw FPL Data] --> B[Validation Layer]
-    B --> C[Transform Layer]
-    C --> D[Business Logic]
-    D --> E[Storage Layer]
-
-    subgraph Validation
-        B --> |zod| B1[Schema Validation]
-    end
-
-    subgraph Transform
-        C --> C1[Data Mapping]
-        C --> C2[Error Handling]
-    end
-
-    subgraph Storage
-        E --> E1[PostgreSQL]
-        E --> E2[Redis Cache]
-    end
+    S["Cron scheduler or internal REST command"] --> Q["BullMQ queues"]
+    Q --> W["Background workers"]
+    W --> F["Official FPL API"]
+    F --> V["Zod boundary validation"]
+    V --> T["Domain transformation"]
+    T --> P[("PostgreSQL canonical state")]
+    T --> R[("Redis read models")]
+    P --> G["letletme-graphql"]
+    R --> G
+    G --> C["Product clients"]
 ```
 
-# Tech Stack
+The API process owns HTTP routes and cron registration. The worker process
+consumes the data, entry, live, league, tournament, and tournament-setup queue
+families. Run both processes; an API-only deployment can enqueue work but
+cannot complete it.
 
-Core:
+PostgreSQL is authoritative. Redis is disposable acceleration state. A failed
+FPL request or validation error fails the sync without replacing the last
+accepted canonical state.
 
-- TypeScript (with strict type checking)
-- Bun (runtime, package manager, bundler, and test runner)
-- ElysiaJS (REST API framework)
+## 2026/27 season compatibility
 
-Storage:
+The current code accepts the official pre-season placeholders observed for
+2026/27 without inventing substitute values:
 
-- PostgreSQL (primary database)
-- Redis (caching layer and BullMQ queues, via ioredis)
-- Drizzle ORM (type-safe ORM)
+| Upstream field | Accepted value | Meaning in this service |
+|---|---:|---|
+| Team `strength` | `null` | FPL has not published a strength rating |
+| Team `position` | `0` | Team is not ranked yet; it sorts after ranked teams |
+| Fixture `pulse_id` | `0` | Pulse identifier has not been assigned |
 
-Testing & Quality:
+Core discovery jobs run year-round so a newly published season is detected
+before the fixture-derived season window opens. The season code comes from the
+GW1 deadline or kickoff metadata (`2026/27` becomes `2627`); it is never guessed
+from the server calendar.
 
-- Bun Test Runner
-- ESLint & Prettier (code quality tools)
+The first core bootstrap updates five PostgreSQL tables and seven Redis
+families:
 
-Utilities:
+| Domain | PostgreSQL | Redis |
+|---|---|---|
+| Events | `events` | `Season:active`, `Event:{season}` |
+| Teams | `teams` | `Team:{season}` |
+| Fixtures | `event_fixtures` | `Fixtures:{season}:*`, `FixturesByTeam:{season}:*` |
+| Players | `players` | `Player:{season}` |
+| Phases | `phases` | `Phase:{season}` |
 
-- Pino (structured logging)
-- Zod (runtime type validation)
+Entry records, player statistics and values, picks, event-live data, results,
+and tournament derivatives require their own upstream data and job gates. They
+are not evidence that the core bootstrap failed when GW1 or a current event has
+not been published yet.
 
-DevOps:
+Endpoint availability changes throughout pre-season. Do not copy a one-time
+"active endpoint count" into operational decisions. Use the read-only checks
+and staged update matrix in the
+[FPL season readiness runbook](docs/fpl-season-readiness.md).
 
-- Docker (containerization)
-- Docker Compose (multi-container orchestration)
+## Season rollover guarantees
 
-# Domain-Driven Design
+- Empty core arrays preserve existing database and cache state.
+- `Season:active` advances only to a newer, valid four-digit season derived
+  from FPL metadata.
+- When that key advances through a core write, all documented season-scoped
+  Data cache families are scanned and prior-season keys are removed. This does
+  not flush Redis, BullMQ state, price history, or consumer-owned keys.
+- PostgreSQL intentionally stores one FPL season at a time. IDs reused by FPL
+  overwrite the prior season's canonical rows.
+- Player stats/values and live/selection jobs require both the fixture-derived
+  season window and a current event. Core discovery jobs do not; bounded
+  post-match result jobs intentionally remain eligible after the GW38 date.
+- League and tournament results poll only during the bounded 24-hour window
+  after the final fixture's expected end. Hourly provisional/final job IDs
+  deduplicate repeated ticks, failed deterministic jobs remain retryable, and
+  a final league correction runs after fresh `event_lives` persistence.
 
-The project follows DDD principles with clear domain boundaries and type-safe implementations.
+## Local setup
 
-```mermaid
-graph TB
-    subgraph Core Domain
-        Event[Event Domain]
-        Player[Player Domain]
-        Team[Team Domain]
-        Entry[Entry Domain]
-        League[League Domain]
-    end
+Prerequisites:
 
-    subgraph Supporting Domains
-        Scout[Scout Domain]
-        Stats[Statistics Domain]
-        Live[Live Domain]
-    end
+- Bun `1.3.3` (the version pinned in `package.json`)
+- PostgreSQL
+- Redis for cache and BullMQ; queue Redis may use a separate database
 
-    Event --> Stats
-    Player --> Stats
-    Team --> Stats
-    Entry --> Stats
-    League --> Stats
+Install and configure:
 
-    Stats --> Live
-    Scout --> Live
+```bash
+cp .env.example .env
+bun install --frozen-lockfile
+bun run env:check
+bun run db:migrate
+bun run db:apply-sql
+bun run db:migrate:status
 ```
 
-Each domain follows a standard structure with entities, repositories, services, and types, ensuring clear separation of concerns and maintainable code.
+At minimum, configure `DATABASE_URL` and `REDIS_*`. `QUEUE_REDIS_*` defaults to
+the cache Redis connection. Supabase and notification variables are optional
+runtime integrations. Production must use `ENABLE_AUTH=true` with at least one
+SHA-256 digest in `DATA_API_KEY_HASHES`.
+
+Start the two processes in separate terminals:
+
+```bash
+bun run dev
+```
+
+```bash
+bun run worker:dev
+```
+
+The API listens on `http://localhost:3000` by default.
+
+## Health and readiness
+
+```bash
+curl http://localhost:3000/health
+curl http://localhost:3000/ready
+```
+
+- `/health` checks API process liveness.
+- `/ready` requires PostgreSQL, Redis, and a valid FPL-derived
+  `Season:active`. A fresh Redis instance is expected to return `503` until a
+  successful events sync establishes the active season.
+
+Do not write `Season:active` manually to make readiness green. Trigger events
+sync and let the validated GW1 metadata establish it:
+
+```bash
+curl -X POST http://localhost:3000/events/sync \
+  -H "x-api-key: $DATA_API_KEY"
+```
+
+The header is required when `ENABLE_AUTH=true` and may be omitted in an
+explicitly unauthenticated local environment.
+
+## Manual core-season bootstrap
+
+Each mutation returns after enqueueing a job. Keep the worker running and wait
+for each job to complete before moving to the next dependency-sensitive step:
+
+```bash
+curl -X POST http://localhost:3000/events/sync \
+  -H "x-api-key: $DATA_API_KEY"
+curl -X POST http://localhost:3000/teams/sync \
+  -H "x-api-key: $DATA_API_KEY"
+curl -X POST http://localhost:3000/fixtures/sync \
+  -H "x-api-key: $DATA_API_KEY"
+curl -X POST http://localhost:3000/players/sync \
+  -H "x-api-key: $DATA_API_KEY"
+curl -X POST http://localhost:3000/phases/sync \
+  -H "x-api-key: $DATA_API_KEY"
+```
+
+Teams precede fixtures because the `FixturesByTeam` cache is rebuilt from the
+active team hash. The writer preserves an existing team-fixture view if teams
+are absent, but the ordered bootstrap avoids an incomplete first build.
+
+Use `GET /jobs` to list manual operational triggers. Full request examples are
+in the [API cheat sheet](docs/api-cheat-sheet.md).
+
+## Development commands
+
+| Command | Purpose |
+|---|---|
+| `bun run dev` | Start the API with watch mode |
+| `bun run worker:dev` | Start all BullMQ workers with watch mode |
+| `bun run build` | Build API and worker into `dist/` |
+| `bun start` | Run the production API bundle |
+| `bun run worker:start` | Run the production worker bundle |
+| `bun run test` or `bun test tests/unit` | Run the hermetic unit suite |
+| `bun run test:integration` | Run guarded PostgreSQL/Redis integration tests |
+| `RUN_INTEGRATION=1 bun run test:all` | Run unit and integration tests with the guarded test environment |
+| `bun run typecheck` | Type-check without emitting files |
+| `bun run lint` | Run ESLint |
+| `bun run coverage` | Run unit tests with coverage |
+| `bun run db:migrate` | Apply Drizzle-journaled migrations |
+| `bun run db:apply-sql` | Apply repository-numbered SQL migrations |
+| `bun run db:migrate:status` | Verify both migration histories and checksums |
+
+Integration tests refuse production-like database or Redis targets. See
+[tests/README.md](tests/README.md) for the required isolated setup.
 
 ## Deployment
 
-- The production stack runs inside Docker containers orchestrated by `docker compose`; copy `.env.deploy.example` to `.env.deploy`, then run `scripts/deploy.sh` to build images, start services, and execute database migrations locally or on the VPS.
-- Continuous delivery is handled via GitHub Actions (`.github/workflows/deploy.yml`), which builds a container image, pushes it to GHCR, and refreshes the VPS stack using the same compose file.
-- Refer to `DEPLOYMENT.md` for the full checklist and required GitHub secrets.
-- Production mutations require `ENABLE_AUTH=true` and one or more SHA-256
-  digests in `DATA_API_KEY_HASHES`. The web server keeps the matching plaintext
-  key in its server-only `TOURNAMENT_API_KEY`; browsers never receive it.
+Production uses the API and worker images in `docker-compose.yml`. Migrations
+run before either service is restarted, logs go to bounded Docker JSON files,
+and the worker health check uses its heartbeat file.
 
-## Testing
+```bash
+cp .env.deploy.example .env.deploy
+bash scripts/deploy.sh deploy
+```
 
-- Run `bun test tests/unit` for the fast, deterministic suite that validates transformers, repositories, and utilities (this is what the CI workflow executes).
-- Run `bun run test:integration` locally before production releases; these tests require PostgreSQL and Redis and are gated to test-only infrastructure. See `tests/README.md` for setup details.
+Merges to `main` deploy only after the CI workflow succeeds. See
+[DEPLOYMENT.md](DEPLOYMENT.md) for host bootstrap, GitHub configuration,
+rollback, and troubleshooting. Merging is not permission to bypass the
+production data audit in the season-readiness runbook.
 
-## Scheduled major upgrades
+## Documentation
 
-The following major-version upgrades are planned once the current fix plan lands and CI is green:
-
-- Zod 4
-- Pino 10
-- ESLint 10
-
-Track them in dependency-renovation PRs; do not mix them with fix-plan items.
+- [FPL season readiness runbook](docs/fpl-season-readiness.md)
+- [System contracts](docs/SYSTEM_CONTRACTS.md)
+- [Redis key contract](docs/redis-contract.md)
+- [Job schedule and gates](docs/job-schedule.md)
+- [Internal API cheat sheet](docs/api-cheat-sheet.md)
+- [Migration ownership](migrations/README.md)
+- [Test strategy](tests/README.md)
+- [Deployment guide](DEPLOYMENT.md)

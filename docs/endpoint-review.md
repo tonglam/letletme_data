@@ -1,5 +1,11 @@
 # Job Review
 
+> Historical review snapshot from July 2026. Findings and proposed improvements
+> below describe the code at review time and are retained for traceability. Use
+> [job-schedule.md](job-schedule.md) for current cron expressions and gates,
+> [redis-contract.md](redis-contract.md) for current cache behavior, and
+> [fpl-season-readiness.md](fpl-season-readiness.md) for season rollover.
+
 Assumption: background jobs are the only source of trust.
 
 ## Data Sync Jobs (queue-based)
@@ -76,16 +82,13 @@ Assumption: background jobs are the only source of trust.
 - Location: `src/jobs/player-values-window.jobs.ts`, `src/jobs/data-sync.queue.ts`,
   `src/workers/data-sync.worker.ts`.
 - Aim: refresh current player value changes.
-- Main logic: cron 09:25-09:35 (every minute) runs `syncCurrentPlayerValues()` directly and skips the
-  remaining minutes once a change-date row exists; manual triggers still enqueue the data-sync job.
-- Deep dive: `syncCurrentPlayerValues()` uses bootstrap, finds current event, compares current
-  `now_cost` with last stored values, transforms via `transformPlayerValuesWithChanges()`, inserts
-  new records, then caches by `changeDate`.
-- Potential issues: empty `elements` yields `{ count: 0 }` with no explicit warning; transform errors
-  are logged but not surfaced in result; event-specific sync uses ISO `changeDate`, which doesn’t
-  match the `YYYYMMDD` date cache convention.
-- Improvements: season gate added; consider empty-response guard and warning counts; align
-  event-sync `changeDate` format with date cache keys.
+- Main logic: before GW1 only the 09:25 tick runs against the next event. Once an event is current,
+  09:25-09:35 ticks enqueue `player-values` until the UTC+8 date has a Rise/Faller batch.
+- Deep dive: `syncCurrentPlayerValues()` compares bootstrap `now_cost` with persisted history,
+  inserts one strict logical row per player/date, repairs Redis with `HSET`, then enqueues the
+  separate `player-prices` current-price job before best-effort notifications.
+- No-change behavior: if bootstrap prices match history and the date has no persisted batch, the
+  service performs no database or Redis mutation.
 
 ## Entry Sync Jobs (queue-based)
 

@@ -1,46 +1,137 @@
-# Job Schedule
+# Job schedule and execution gates
 
-## Daily Data Sync
-- ✅ `events-sync`: daily 06:35 (`35 6 * * *`) via data sync queue.
-- ✅ `teams-sync`: daily 06:37 (`37 6 * * *`) via data sync queue.
-- ✅ `fixtures-sync`: daily 06:40 (`40 6 * * *`) via data sync queue.
-- ✅ `players-sync`: daily 06:43 (`43 6 * * *`) via data sync queue.
-- ✅ `phases-sync`: daily 06:45 (`45 6 * * *`) via data sync queue.
-- ✅ `player-stats-sync`: daily 09:40 (`40 9 * * *`) via data sync queue.
+All cron expressions run in `Asia/Shanghai` (UTC+8). Cron ticks are candidates,
+not guarantees of a write: each job applies its documented season, current
+event, fixture-window, and data-availability gates before enqueueing.
 
-## Player Values Poller
-- ✅ `player-values-sync`: 09:25-09:35 every minute (`25-35 9 * * *`), stops once the day’s price changes have been stored.
+## Core season discovery
 
-## Entry **Jobs**
-- ✅ `entry-info-daily`: daily 10:30 (`30 10 * * *`) via entry sync queue.
-- ✅ `entry-event-picks-daily`: daily 10:35 (`35 10 * * *`) via entry sync queue.
-- ✅ `entry-event-transfers-daily`: daily 10:40 (`40 10 * * *`) via entry sync queue.
-- ✅ `entry-event-results-daily`: daily 10:45 (`45 10 * * *`) via entry sync queue.
-- ✅ Entry sync retries failed entry IDs up to 2 cycles.
+These jobs run year-round so a newly published season can be discovered before
+the fixture-derived `isFPLSeason` window opens.
 
-## Matchday Jobs
-- ✅ `event-lives-cache-trigger`: every minute (`* * * * *`), gated by `isMatchDayTime`.
-- ✅ `event-lives-db-trigger`: every 10 minutes (`*/10 * * * *`), gated by `isMatchDayTime`.
-- ✅ `live-scores`: every 15 minutes (`*/15 * * * *`), gated by `isMatchDayTime`.
-- ✅ `post-match-consolidation`: 06:00/08:00/10:00 (`0 6,8,10 * * *`), gated by `isAfterMatchDay`.
-- ✅ Cascade-only live jobs (no direct cron): `event-live-summary`, `event-live-explain`, `event-overall-result`.
-- ✅ Minute-triggered cache jobs: `live-fixture-cache`, `live-bonus-cache`.
+| Job | Cron | Gate |
+|---|---|---|
+| `events-sync` | `35 6 * * *` | None; empty events preserve existing state |
+| `teams-sync` | `37 6 * * *` | None; empty teams preserve existing state |
+| `fixtures-sync` | `40 6 * * *` | None; empty fixtures preserve existing state |
+| `players-sync` | `43 6 * * *` | None; empty players preserve existing state |
+| `phases-sync` | `45 6 * * *` | None; empty phases preserve existing state |
 
-## Selection Window Jobs (Pre-deadline)
-- ✅ `league-event-picks-sync`: every 5 minutes (`*/5 * * * *`), gated by `isSelectTime`.
-- ✅ `tournament-event-picks-sync`: every 5 minutes (`*/5 * * * *`), gated by `isSelectTime`.
-- ✅ `tournament-event-transfers-pre-sync`: every 5 minutes (`*/5 * * * *`), gated by `isSelectTime`.
+`player-stats-sync` runs at `40 9 * * *` but is not a discovery job. Player
+values and stats use the player-specific `current ?? next` resolver so GW1 can
+be initialized before the ordinary current-event gate opens.
 
-## Post-Matchday Jobs
-- ✅ `league-event-results-sync`: every 10 minutes (`*/10 * * * *`), gated by `isAfterMatchDay`.
-- ✅ `tournament-event-results-sync`: every 10 minutes (`*/10 * * * *`), gated by `isAfterMatchDay`.
-- ✅ Cascade-only tournament jobs (no direct cron): `tournament-points-race`, `tournament-battle-race`, `tournament-knockout`, `tournament-transfers-post`, `tournament-cup-results`.
+## Season launch and current-event control
 
-## Daily Tournament Metadata
-- ✅ `tournament-info-sync`: daily 10:45 (`45 10 * * *`).
+| Job | Cron | Gate / behavior |
+|---|---|---|
+| `launch-warning` | `* * * * *` | Year-round; sends once per year when bootstrap events are empty |
+| `launch-happening` | `* * * * *` | Year-round; sends once per FPL-derived season when a current-year GW1 deadline appears |
+| `event-current-refresh` | `* * * * *` | `isFPLSeason`; rebuilds `event:current` and enqueues events sync when the GW changes |
 
-## Matchday Helpers
-- ✅ `isMatchDay`: today is in fixture kickoff dates (UTC), skips if event finished.
-- ✅ `isMatchDayTime`: between earliest kickoff and (latest kickoff + 2h).
-- ✅ `isAfterMatchDay`: event finished or now > (latest kickoff + 2h).
-- ✅ `isSelectTime`: between deadline + 30m and +60m on matchday.
+Launch jobs call the FPL bootstrap endpoint directly from the API process. All
+other synchronization work is queue-backed.
+
+## Player values
+
+| Job | Cron | Gate / behavior |
+|---|---|---|
+| `player-values-sync` | `25-35 9 * * *` | Before GW1 only 09:25 runs against the next event; once current, every minute until that UTC+8 date's Rise/Faller batch exists |
+| `player-prices-sync` | `40 9 * * *` | Replays that UTC+8 date's persisted Rise/Faller rows into affected current players; skips cleanly when none exist |
+| `player-stats-sync` | `40 9 * * *` | Refreshes the current event, or the next event only when no current event exists |
+
+The window uses one deterministic daily job ID to prevent overlap. The data
+worker retries failures, and settled deterministic jobs are removed so another
+tick can enqueue when needed.
+
+## Entry jobs
+
+| Job | Cron | Gate / behavior |
+|---|---|---|
+| `entry-info-daily` | `30 10 * * *` | `isFPLSeason`; once per UTC date marker |
+| `entry-event-picks-window` | `*/5 * * * *` | `isFPLSeason`, current event, selection publication window |
+| `entry-event-transfers-daily` | `40 10 * * *` | `isFPLSeason`, current event, `isAfterMatchDay` |
+| `entry-event-results-daily` | `45 10 * * *` | `isFPLSeason` and current event |
+
+Entry jobs operate only on known `entry_infos`; core season bootstrap does not
+create entry bindings. Failed entry IDs can be retried by the entry worker's
+bounded retry cycle.
+
+## Match-window live jobs
+
+| Job | Cron | Gate / behavior |
+|---|---|---|
+| `event-lives-cache-trigger` | `* * * * *` | `isFPLSeason`, current event, `isMatchDayTime` |
+| `event-lives-db-trigger` | `*/10 * * * *` | Same gate; DB persistence then dependent cascade |
+| `live-scores` | `* * * * *` | Same gate; updates in-progress fixture scores |
+| `post-match-consolidation` | `0 6,8,10 * * *` | Current event and bounded post-match result slot |
+
+After an event-lives DB sync succeeds, the worker always enqueues summary,
+explain, and overall-result jobs. Live-fixture and live-bonus jobs are included
+only while the match window remains open. If the event is data-checked inside
+the post-match window, the worker also enqueues a distinct final league-results
+correction after the fresh `event_lives` rows are persisted.
+
+## Selection publication window
+
+The following poll every five minutes:
+
+- `league-event-picks-trigger`
+- `tournament-event-picks-trigger`
+- `tournament-event-transfers-pre-trigger`
+
+They require `isFPLSeason`, a current event, and `isSelectTime`. Selection time
+is the UTC match date from 30 through 90 minutes after the FPL deadline. It is
+the post-deadline publication window for immutable picks, despite the legacy
+"pre" name on tournament transfer tracking.
+
+## Post-match league and tournament results
+
+| Job | Cron | Gate / behavior |
+|---|---|---|
+| `league-event-results-trigger` | `*/10 * * * *` | Current event plus bounded post-match slot |
+| `tournament-event-results-trigger` | `*/10 * * * *` | Current event plus bounded post-match slot |
+
+The result window starts after the final fixture's expected end
+(`latest kickoff + 2 hours`) and remains open for 24 hours. It intentionally
+does not use the calendar `isFPLSeason` gate, so the next-day GW38 finalization
+can still run.
+
+Each hour maps to `provisional-N` or `final-N` according to the event's
+`data_checked` flag. Deterministic job IDs make repeated ten-minute ticks
+idempotent. Successful jobs remain in BullMQ for 24 hours; failed jobs are
+removed so a later tick can retry the same slot.
+
+The tournament event-results job starts its cascade only when at least one
+active tournament entry was processed. The cascade contains:
+
+- points-race, battle-race, and knockout structure jobs;
+- post-event transfer calculation and selection stats;
+- cup results;
+- one materialized-view refresh after the three structure jobs reach their
+  Redis-backed completion barrier.
+
+## Tournament metadata
+
+| Job | Cron | Gate / behavior |
+|---|---|---|
+| `tournament-info-sync` | `45 10 * * *` | `isFPLSeason` |
+
+## Gate definitions
+
+- `isFPLSeason`: UTC day range from the earliest GW1 kickoff through the
+  latest GW38 kickoff date. It returns false until both fixture sets exist.
+- `isMatchDay`: today matches at least one fixture kickoff date and the event
+  is not finished.
+- `isMatchDayTime`: any fixture is between kickoff and kickoff +2h; a started,
+  unfinished fixture may keep its interval open up to +6h for delayed FPL
+  finish flags.
+- `isAfterMatchDay`: event is finished or now is later than the final kickoff
+  +2h.
+- `isSelectTime`: match day and 30–90 minutes after the event deadline.
+- Post-match result slot: later than final kickoff +2h but earlier than 24
+  hours after that expected end.
+
+Manual triggers are listed by `GET /jobs`. Some manual paths intentionally
+bypass a cron time gate for recovery; operators must verify upstream readiness
+before using them.
