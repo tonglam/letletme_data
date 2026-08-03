@@ -254,6 +254,22 @@ describe('prepareLiveSnapshot', () => {
     ).toThrow('team metadata for IDs: 12');
   });
 
+  test('rejects duplicate live element IDs before deriving publishable views', () => {
+    expect(() =>
+      prepareLiveSnapshot(
+        1,
+        {
+          elements: [
+            ...mockEventLiveResponseFixture.elements,
+            mockEventLiveResponseFixture.elements[0],
+          ],
+        },
+        [liveRawFixture()],
+        referenceData(),
+      ),
+    ).toThrow('duplicate element IDs for event 1');
+  });
+
   test('rejects a partially transformed fixture response', () => {
     expect(() =>
       prepareLiveSnapshot(
@@ -438,6 +454,38 @@ describe('live snapshot cache publication', () => {
 });
 
 describe('syncLiveSnapshot', () => {
+  test('does not publish or persist a response with duplicate live element IDs', async () => {
+    const publish = mock(async () => {
+      throw new Error('publish must not be called');
+    });
+    const persistFixtures = mock(async () => []);
+    const persistEventLives = mock(async () => []);
+
+    await expect(
+      syncLiveSnapshot(1, {
+        persistEventLives: true,
+        dependencies: {
+          getEventLive: async () => ({
+            elements: [
+              ...mockEventLiveResponseFixture.elements,
+              mockEventLiveResponseFixture.elements[0],
+            ],
+          }),
+          getFixtures: async () => [liveRawFixture()],
+          getReferenceData: async () => referenceData(),
+          publish,
+          persistFixtures,
+          persistEventLives,
+          now: () => new Date('2025-08-15T20:00:00.000Z'),
+        },
+      }),
+    ).rejects.toThrow('duplicate element IDs for event 1');
+
+    expect(publish).not.toHaveBeenCalled();
+    expect(persistFixtures).not.toHaveBeenCalled();
+    expect(persistEventLives).not.toHaveBeenCalled();
+  });
+
   test('fetches independent inputs concurrently and persists changed fixtures before commit', async () => {
     const calls: string[] = [];
     const publish = mock(

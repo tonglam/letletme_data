@@ -126,6 +126,10 @@ export function prepareLiveSnapshot(
   if (!Array.isArray(liveResponse.elements) || liveResponse.elements.length === 0) {
     throw new Error('FPL event live response contains no elements');
   }
+  const liveElementIds = liveResponse.elements.map((element) => element.id);
+  if (new Set(liveElementIds).size !== liveElementIds.length) {
+    throw new Error(`FPL event live response contains duplicate element IDs for event ${eventId}`);
+  }
   if (!Array.isArray(rawFixtures) || rawFixtures.length === 0) {
     throw new Error('FPL fixtures response contains no fixtures');
   }
