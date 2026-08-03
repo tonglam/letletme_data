@@ -20,6 +20,11 @@ export function formatCronDateKey(date: Date = new Date()): string {
   return `${getPart(parts, 'year')}${getPart(parts, 'month')}${getPart(parts, 'day')}`;
 }
 
+export function formatCronCalendarDate(date: Date = new Date()): string {
+  const dateKey = formatCronDateKey(date);
+  return `${dateKey.slice(0, 4)}-${dateKey.slice(4, 6)}-${dateKey.slice(6, 8)}`;
+}
+
 export function getCronMinute(date: Date = new Date()): number {
   const minute = Number.parseInt(getPart(utc8Formatter.formatToParts(date), 'minute'), 10);
   return Number.isFinite(minute) ? minute : 0;

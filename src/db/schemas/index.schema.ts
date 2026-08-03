@@ -14,6 +14,7 @@ export * from './events.schema';
 export * from './league-event-results.schema';
 export * from './phases.schema';
 export * from './player-stats.schema';
+export * from './player-market-snapshots.schema';
 export * from './player-values.schema';
 export * from './players.schema';
 export * from './teams.schema';

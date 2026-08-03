@@ -50,3 +50,15 @@ describe('public Data API lockdown migration', () => {
     expect(migration).not.toContain('ALTER DEFAULT PRIVILEGES');
   });
 });
+
+describe('player market snapshot migration', () => {
+  test('creates a unique complete-day store behind the service trust boundary', () => {
+    const migration = readFileSync('migrations/0037_create_player_market_snapshots.sql', 'utf8');
+
+    expect(migration).toContain('player_market_snapshots');
+    expect(migration).toContain('snapshot_date, element_id');
+    expect(migration).toContain('selected_by_percent BETWEEN 0 AND 100');
+    expect(migration).toContain('ENABLE ROW LEVEL SECURITY');
+    expect(migration).toContain('REVOKE ALL ON TABLE');
+  });
+});

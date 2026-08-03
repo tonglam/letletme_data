@@ -24,6 +24,7 @@ const DATA_TABLES = [
   'league_event_results',
   'phases',
   'player_stats',
+  'player_market_snapshots',
   'player_values',
   'players',
   'teams',
