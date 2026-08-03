@@ -77,8 +77,8 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
               return;
             }
           }
-          await syncLiveSnapshot(eventId, { persistEventLives });
-          if (persistEventLives) {
+          const snapshot = await syncLiveSnapshot(eventId, { persistEventLives });
+          if (persistEventLives && !snapshot.stale) {
             await enqueueCascadeJobs(eventId, undefined, { includeLiveDerivatives: false });
             await enqueueFinalLeagueResultsAfterLiveSync(eventId);
           }

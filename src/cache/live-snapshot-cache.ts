@@ -36,6 +36,7 @@ export interface LiveSnapshotCachePayload {
 
 export interface LiveSnapshotPublishResult {
   changed: boolean;
+  stale: boolean;
   meta: LiveSnapshotMeta;
 }
 
@@ -45,6 +46,11 @@ export interface LiveSnapshotPublishOptions {
    * verified, but before the atomic Redis swap exposes the new revision.
    */
   beforeCommit?: () => Promise<void>;
+}
+
+export interface LiveSnapshotRetireResult {
+  eventId: number;
+  removedKeys: number;
 }
 
 type LiveSnapshotCacheDependencies = {
@@ -57,6 +63,35 @@ const defaultDependencies: LiveSnapshotCacheDependencies = {
   getSeason: getActiveCacheSeason,
 };
 
+const LIVE_SNAPSHOT_VIEW_PREFIXES = [
+  'EventLive',
+  'Fixtures',
+  'LiveFixture',
+  'LiveFixtureV2',
+  'LiveBonus',
+  'LiveBonusV2',
+] as const;
+
+const SET_LIVE_SNAPSHOT_META_IF_FRESH_SCRIPT = `
+local current_raw = redis.pcall('GET', KEYS[1])
+if type(current_raw) == 'string' then
+  local decoded, current = pcall(cjson.decode, current_raw)
+  if decoded and type(current.checkedAt) == 'string' and current.checkedAt > ARGV[2] then
+    return 0
+  end
+end
+redis.call('SET', KEYS[1], ARGV[1])
+return 1
+`;
+
+const RETIRE_LIVE_SNAPSHOT_SCRIPT = `
+local removed = 0
+for index = 1, #KEYS do
+  removed = removed + redis.call('DEL', KEYS[index])
+end
+return removed
+`;
+
 /**
  * Validate every staging hash before changing any published key, then swap all
  * views and metadata in one Redis script. Redis transactions execute later
@@ -66,10 +101,19 @@ const defaultDependencies: LiveSnapshotCacheDependencies = {
 const PUBLISH_LIVE_SNAPSHOT_SCRIPT = `
 local staged_count = tonumber(ARGV[1])
 local empty_count = tonumber(ARGV[2])
+local meta_key = KEYS[(staged_count * 2) + empty_count + 1]
 
 for index = 1, staged_count do
   if redis.call('EXISTS', KEYS[index]) ~= 1 then
     return redis.error_reply('missing live snapshot staging key')
+  end
+end
+
+local current_raw = redis.pcall('GET', meta_key)
+if type(current_raw) == 'string' then
+  local decoded, current = pcall(cjson.decode, current_raw)
+  if decoded and type(current.checkedAt) == 'string' and current.checkedAt > ARGV[4] then
+    return -1
   end
 end
 
@@ -82,7 +126,7 @@ for index = 1, empty_count do
   redis.call('DEL', KEYS[(staged_count * 2) + index])
 end
 
-redis.call('SET', KEYS[(staged_count * 2) + empty_count + 1], ARGV[3])
+redis.call('SET', meta_key, ARGV[3])
 return staged_count
 `;
 
@@ -160,6 +204,29 @@ async function readPublishedMeta(redis: Redis, metaKey: string): Promise<LiveSna
   }
 }
 
+function isPublishedMetaNewer(meta: LiveSnapshotMeta, checkedAt: Date): boolean {
+  return Date.parse(meta.checkedAt) > checkedAt.getTime();
+}
+
+async function stalePublishResult(
+  redis: Redis,
+  metaKey: string,
+  eventId: number,
+  incomingCheckedAt: string,
+): Promise<LiveSnapshotPublishResult> {
+  const winner = await readPublishedMeta(redis, metaKey);
+  if (!winner) {
+    throw new Error(`Stale live snapshot ${eventId} has no published winner metadata`);
+  }
+  logInfo('Rejected stale live snapshot publication', {
+    eventId,
+    incomingCheckedAt,
+    winnerCheckedAt: winner.checkedAt,
+    winnerRevision: winner.revision,
+  });
+  return { changed: false, stale: true, meta: winner };
+}
+
 async function publishedHashMatches(
   redis: Redis,
   key: string,
@@ -187,6 +254,30 @@ export function createLiveSnapshotCache(
         dependencies.getSeason(),
       ]);
       return parseLiveSnapshotMeta(await redis.get(liveSnapshotMetaKey(season, eventId)));
+    },
+
+    /**
+     * Fixture rescheduling invalidates every event-scoped derivative, not just
+     * Fixtures. Remove the metadata pointer and all six coordinated views in
+     * one command so readers either see the old snapshot or a complete miss.
+     */
+    async retire(eventId: number): Promise<LiveSnapshotRetireResult> {
+      const [redis, season] = await Promise.all([
+        dependencies.getRedisClient(),
+        dependencies.getSeason(),
+      ]);
+      const keys = [
+        ...LIVE_SNAPSHOT_VIEW_PREFIXES.map((prefix) => `${prefix}:${season}:${eventId}`),
+        liveSnapshotMetaKey(season, eventId),
+      ];
+      const removedKeys = Number(
+        await redis.eval(RETIRE_LIVE_SNAPSHOT_SCRIPT, keys.length, ...keys),
+      );
+      if (!Number.isInteger(removedKeys) || removedKeys < 0) {
+        throw new Error(`Unexpected live snapshot retirement result: ${String(removedKeys)}`);
+      }
+      logInfo('Atomically retired live snapshot ownership', { eventId, season, removedKeys });
+      return { eventId, removedKeys };
     },
 
     async publish(
@@ -249,6 +340,9 @@ export function createLiveSnapshotCache(
 
       const revision = snapshotRevision(views);
       const currentMeta = await readPublishedMeta(redis, metaKey);
+      if (currentMeta && isPublishedMetaNewer(currentMeta, checkedAt)) {
+        return stalePublishResult(redis, metaKey, payload.eventId, checkedAt.toISOString());
+      }
       const populatedViews = views.filter((view) => Object.keys(view.fields).length > 0);
       const emptyKeys = views
         .filter((view) => Object.keys(view.fields).length === 0)
@@ -279,13 +373,25 @@ export function createLiveSnapshotCache(
       };
 
       if (!changed) {
-        await redis.set(metaKey, JSON.stringify(meta));
+        const updated = await redis.eval(
+          SET_LIVE_SNAPSHOT_META_IF_FRESH_SCRIPT,
+          1,
+          metaKey,
+          JSON.stringify(meta),
+          meta.checkedAt,
+        );
+        if (updated === 0) {
+          return stalePublishResult(redis, metaKey, payload.eventId, meta.checkedAt);
+        }
+        if (updated !== 1) {
+          throw new Error(`Unexpected live snapshot metadata update result: ${String(updated)}`);
+        }
         logInfo('Live snapshot checked with no football data change', {
           eventId: payload.eventId,
           revision,
           checkedAt: meta.checkedAt,
         });
-        return { changed: false, meta };
+        return { changed: false, stale: false, meta };
       }
 
       const staged: Array<{ targetKey: string; stagingKey: string }> = [];
@@ -322,7 +428,12 @@ export function createLiveSnapshotCache(
           String(stagedKeys.length),
           String(emptyTargetKeys.length),
           JSON.stringify(meta),
+          meta.checkedAt,
         );
+        if (result === -1) {
+          if (stagedKeys.length > 0) await redis.del(...stagedKeys);
+          return stalePublishResult(redis, metaKey, payload.eventId, meta.checkedAt);
+        }
         if (result !== stagedKeys.length) {
           throw new Error(`Unexpected live snapshot publish result: ${String(result)}`);
         }
@@ -335,7 +446,7 @@ export function createLiveSnapshotCache(
           fixtureCount: meta.fixtureCount,
           bonusTeamCount: meta.bonusTeamCount,
         });
-        return { changed: true, meta };
+        return { changed: true, stale: false, meta };
       } catch (error) {
         if (staged.length > 0) {
           try {

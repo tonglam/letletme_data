@@ -118,6 +118,12 @@ accepted upstream pair:
 - `LiveBonus:{season}:{eventId}` (frozen compatibility calculation)
 - `LiveBonusV2:{season}:{eventId}` (fixture-scoped calculation)
 
+Before deriving any view, the writer requires the upstream fixture ID set to
+match the fixture identities already persisted for that event exactly. Missing,
+unexpected, duplicate, mixed-event, or partially transformed fixtures reject
+the whole poll. This prevents a transient truncated FPL response from becoming
+a smaller but internally self-consistent published snapshot.
+
 The writer builds uniquely named staging hashes, verifies every field count,
 then validates and publishes all six views plus `LiveSnapshotMeta` in one
 atomic Lua script. This prevents a partial writer commit: one Redis command sees
@@ -128,6 +134,14 @@ calls. Unlike a Redis `MULTI`/`EXEC` runtime command error, a missing staging
 key fails the script before any published key changes. Empty bonus views
 deliberately delete the old bonus hash inside the same script; the four required
 views refuse empty publication.
+
+Every event refresh also holds `pg_advisory_xact_lock(namespace, eventId)` for
+the complete fetch, validation, PostgreSQL persistence, and Redis publication
+flow. This PostgreSQL-owned lock is mandatory and survives Redis lock expiry or
+configuration changes; different events remain parallel. As a second fence,
+the Redis publisher compares the incoming `checkedAt` token both before staging
+and inside the commit script, and rejects a publisher older than the currently
+published metadata. `checkedAt` is captured before the upstream requests begin.
 
 Consumers that combine two or more live views MUST use this retry protocol:
 
@@ -161,6 +175,17 @@ The daily/full fixture refresh still upserts PostgreSQL, rebuilds
 `FixturesByTeam`, and refreshes events without snapshot metadata, but preserves
 all snapshot-owned event hashes. Only the coordinated publisher (or explicit
 season cleanup that removes metadata and its views together) may change them.
+If FPL moves a fixture to a different event, either an event-specific or full
+fixture sync compares the accepted fixture identities with their prior database
+ownership. Fixture syncs first enter a mandatory global advisory lane, then
+take every prior and destination event lock in numeric order. While those locks
+are held, the writer atomically deletes `LiveSnapshotMeta` plus all six
+coordinated views before changing database ownership. Readers
+therefore observe either the old complete snapshot or a complete miss and use
+the documented PostgreSQL fallback; they never consume a stale partial event.
+Retirement-before-upsert also keeps retries safe: a Redis failure leaves the
+old database owner discoverable, while a later database failure leaves only a
+safe cache miss that the next snapshot can rebuild.
 Transient staging keys use `{target}:staging:{uuid}`, expire after fifteen
 minutes if a worker is terminated, and are deleted on every success or handled
 failure. The atomic rename removes that temporary TTL from published hashes;
@@ -189,9 +214,11 @@ and explain rows are persisted every ten minutes and during post-match
 consolidation. PostgreSQL remains canonical recovery/history data; Redis is the
 low-latency coherent read model.
 
-The one-minute job owns `live-snapshot:event:{eventId}`. Legacy live jobs share
-that mutation scope and remain only as recovery compatibility paths; normal
-cron scheduling must not run them in parallel.
+The one-minute job owns the optional Redis mutation scope
+`live-snapshot:event:{eventId}`. Legacy live jobs share that scope and remain
+only as recovery compatibility paths; normal cron scheduling must not run them
+in parallel. Correctness does not depend on this expiring lease: the mandatory
+PostgreSQL advisory lock described above is the final per-event serializer.
 
 ## 8. Mutation locks (internal)
 

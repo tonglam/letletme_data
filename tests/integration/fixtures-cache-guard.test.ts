@@ -8,6 +8,7 @@ import { eventLivesCache } from '../../src/cache/event-lives-cache';
 import { fixturesCache } from '../../src/cache/fixtures-cache';
 import { liveBonusCache, liveBonusV2Cache } from '../../src/cache/live-bonus-cache';
 import { liveFixturesCache } from '../../src/cache/live-fixtures-cache';
+import { liveSnapshotCache } from '../../src/cache/live-snapshot-cache';
 import { redisSingleton } from '../../src/cache/singleton';
 import type { EventLive } from '../../src/domain/event-lives';
 import type { LiveFixturesByTeam } from '../../src/domain/live-fixtures';
@@ -148,6 +149,7 @@ describe('FixturesByTeam empty-teams guard (FP-12)', () => {
       [`Fixtures:${SEASON}:10`]: ['snapshot-fixture', 'fixture-v1'],
       [`EventLive:${SEASON}:10`]: ['snapshot-player', 'event-live-v1'],
       [`LiveFixture:${SEASON}:10`]: ['snapshot-team', 'live-fixture-v1'],
+      [`LiveFixtureV2:${SEASON}:10`]: ['snapshot-team', 'live-fixture-v2-v1'],
       [`LiveBonus:${SEASON}:10`]: ['snapshot-team', 'live-bonus-v1'],
       [`LiveBonusV2:${SEASON}:10`]: ['snapshot-team', 'live-bonus-v2-v1'],
     } as const;
@@ -179,9 +181,20 @@ describe('FixturesByTeam empty-teams guard (FP-12)', () => {
     }
     expect(await redis.exists(`Fixtures:${SEASON}:11`)).toBe(0);
 
-    // Ownership is released only when metadata is explicitly removed; ordinary
-    // writers can then rebuild an unmanaged event cache again.
-    await redis.del(`LiveSnapshotMeta:${SEASON}:10`);
+    // A fixture event move retires metadata and every coordinated view in one
+    // Redis script. Ordinary writers can rebuild the now-unmanaged cache.
+    expect(await liveSnapshotCache.retire(10)).toEqual({ eventId: 10, removedKeys: 7 });
+    for (const prefix of [
+      'Fixtures',
+      'EventLive',
+      'LiveFixture',
+      'LiveFixtureV2',
+      'LiveBonus',
+      'LiveBonusV2',
+      'LiveSnapshotMeta',
+    ]) {
+      expect(await redis.exists(`${prefix}:${SEASON}:10`)).toBe(0);
+    }
     await fixturesCache.setByEvent(10, [refreshedEvent10], SEASON);
     expect(Object.keys(await redis.hgetall(`Fixtures:${SEASON}:10`))).toEqual(['201']);
   });

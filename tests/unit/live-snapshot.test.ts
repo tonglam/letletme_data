@@ -104,9 +104,24 @@ class FakeRedis {
     return deleted;
   }
 
-  async eval(_script: string, numberOfKeys: number, ...args: string[]): Promise<number> {
+  async eval(script: string, numberOfKeys: number, ...args: string[]): Promise<number> {
     const keys = args.slice(0, numberOfKeys);
     const argv = args.slice(numberOfKeys);
+
+    if (script.includes('local removed = 0')) {
+      return this.del(...keys);
+    }
+
+    if (script.includes('current.checkedAt > ARGV[2]')) {
+      const currentRaw = this.strings.get(keys[0]);
+      if (currentRaw) {
+        const current = JSON.parse(currentRaw) as { checkedAt?: string };
+        if (typeof current.checkedAt === 'string' && current.checkedAt > argv[1]) return 0;
+      }
+      this.strings.set(keys[0], argv[0]);
+      return 1;
+    }
+
     const stagedCount = Number(argv[0]);
     const emptyCount = Number(argv[1]);
 
@@ -121,6 +136,13 @@ class FakeRedis {
       throw new Error('missing live snapshot staging key');
     }
 
+    const metaKey = keys[stagedCount * 2 + emptyCount];
+    const currentRaw = this.strings.get(metaKey);
+    if (currentRaw) {
+      const current = JSON.parse(currentRaw) as { checkedAt?: string };
+      if (typeof current.checkedAt === 'string' && current.checkedAt > argv[3]) return -1;
+    }
+
     const targetKeys = keys.slice(stagedCount, stagedCount * 2);
     for (let index = 0; index < stagedCount; index += 1) {
       this.hashes.set(targetKeys[index], new Map(this.hashes.get(stagingKeys[index])!));
@@ -131,7 +153,7 @@ class FakeRedis {
     for (const key of keys.slice(stagedCount * 2, stagedCount * 2 + emptyCount)) {
       await this.del(key);
     }
-    this.strings.set(keys[stagedCount * 2 + emptyCount], argv[2]);
+    this.strings.set(metaKey, argv[2]);
     return stagedCount;
   }
 
@@ -199,6 +221,7 @@ function cachePayload(score = 2, checkedAt = new Date('2025-08-15T20:00:00.000Z'
     mockEventLiveResponseFixture,
     [liveRawFixture({ team_h_score: score })],
     referenceData(),
+    [1],
   );
   const payload: LiveSnapshotCachePayload = {
     eventId: 1,
@@ -248,13 +271,14 @@ describe('prepareLiveSnapshot', () => {
         mockEventLiveResponseFixture,
         [liveRawFixture({ event: 2 })],
         referenceData(),
+        [1],
       ),
     ).toThrow('mixed event 2');
 
     const references = referenceData();
     references.nameById.delete(12);
     expect(() =>
-      prepareLiveSnapshot(1, mockEventLiveResponseFixture, [liveRawFixture()], references),
+      prepareLiveSnapshot(1, mockEventLiveResponseFixture, [liveRawFixture()], references, [1]),
     ).toThrow('team metadata for IDs: 12');
   });
 
@@ -270,6 +294,7 @@ describe('prepareLiveSnapshot', () => {
         },
         [liveRawFixture()],
         referenceData(),
+        [1],
       ),
     ).toThrow('duplicate element IDs for event 1');
   });
@@ -281,8 +306,23 @@ describe('prepareLiveSnapshot', () => {
         mockEventLiveResponseFixture,
         [liveRawFixture(), liveRawFixture({ id: 2, code: 2, team_h_difficulty: 6 })],
         referenceData(),
+        [1, 2],
       ),
     ).toThrow('Incomplete fixture transformation for live snapshot event 1; missing IDs: 2');
+  });
+
+  test('rejects a truncated fixture response against the persisted identity baseline', () => {
+    expect(() =>
+      prepareLiveSnapshot(
+        1,
+        mockEventLiveResponseFixture,
+        [liveRawFixture()],
+        referenceData(),
+        [1, 2],
+      ),
+    ).toThrow(
+      'Fixture identity mismatch for live snapshot event 1; missing expected IDs: 2; unexpected IDs: none',
+    );
   });
 });
 
@@ -480,6 +520,49 @@ describe('live snapshot cache publication', () => {
     expect(retried.meta.revision).not.toBe(first.meta.revision);
     expect(persist).toHaveBeenCalledTimes(1);
   });
+
+  test('rejects an older publisher without replacing newer views', async () => {
+    const redis = new FakeRedis();
+    const cache = cacheWith(redis);
+    const newer = await cache.publish(
+      cachePayload(3, new Date('2025-08-15T20:00:02.000Z')).payload,
+    );
+    const beforeCommit = mock(async () => {});
+
+    const stale = await cache.publish(
+      cachePayload(4, new Date('2025-08-15T20:00:01.000Z')).payload,
+      { beforeCommit },
+    );
+
+    expect(stale).toMatchObject({ changed: false, stale: true });
+    expect(stale.meta.revision).toBe(newer.meta.revision);
+    expect(beforeCommit).not.toHaveBeenCalled();
+    expect(JSON.parse(redis.hashes.get('Fixtures:2526:1')!.get('1')!)).toMatchObject({
+      teamHScore: 3,
+    });
+    expect(redis.stagingKeys()).toEqual([]);
+  });
+
+  test('retires metadata and every coordinated live view atomically', async () => {
+    const redis = new FakeRedis();
+    const cache = cacheWith(redis);
+    await cache.publish(cachePayload().payload);
+
+    const retired = await cache.retire(1);
+
+    expect(retired).toEqual({ eventId: 1, removedKeys: 7 });
+    for (const prefix of [
+      'EventLive',
+      'Fixtures',
+      'LiveFixture',
+      'LiveFixtureV2',
+      'LiveBonus',
+      'LiveBonusV2',
+      'LiveSnapshotMeta',
+    ]) {
+      expect(await redis.exists(`${prefix}:2526:1`)).toBe(0);
+    }
+  });
 });
 
 describe('syncLiveSnapshot', () => {
@@ -501,7 +584,9 @@ describe('syncLiveSnapshot', () => {
             ],
           }),
           getFixtures: async () => [liveRawFixture()],
+          getExpectedFixtureIds: async () => [1],
           getReferenceData: async () => referenceData(),
+          serialize: async (_eventId, operation) => operation(),
           publish,
           persistFixtures,
           persistEventLives,
@@ -524,6 +609,7 @@ describe('syncLiveSnapshot', () => {
         calls.push('publish-commit');
         return {
           changed: true,
+          stale: false,
           meta: {
             schemaVersion: 1 as const,
             season: '2526',
@@ -558,8 +644,15 @@ describe('syncLiveSnapshot', () => {
     const result = await syncLiveSnapshot(1, {
       persistEventLives: true,
       dependencies: {
+        serialize: async (_eventId, operation) => {
+          calls.push('serialize-enter');
+          const value = await operation();
+          calls.push('serialize-exit');
+          return value;
+        },
         getEventLive: () => markStart('fetch-live', mockEventLiveResponseFixture),
         getFixtures: () => markStart('fetch-fixtures', [liveRawFixture()]),
+        getExpectedFixtureIds: () => markStart('fetch-expected', [1]),
         getReferenceData: () => markStart('fetch-reference', referenceData()),
         publish,
         persistFixtures,
@@ -568,13 +661,21 @@ describe('syncLiveSnapshot', () => {
       },
     });
 
-    expect(started).toBe(3);
-    expect(calls.slice(0, 3).sort()).toEqual(['fetch-fixtures', 'fetch-live', 'fetch-reference']);
+    expect(started).toBe(4);
+    expect(calls[0]).toBe('serialize-enter');
+    expect(calls.slice(1, 5).sort()).toEqual([
+      'fetch-expected',
+      'fetch-fixtures',
+      'fetch-live',
+      'fetch-reference',
+    ]);
     expect(calls.indexOf('publish-stage')).toBeLessThan(calls.indexOf('persist-fixtures'));
     expect(calls.indexOf('persist-fixtures')).toBeLessThan(calls.indexOf('publish-commit'));
     expect(calls.indexOf('publish-commit')).toBeLessThan(calls.indexOf('persist-event-lives'));
+    expect(calls.at(-1)).toBe('serialize-exit');
     expect(result).toMatchObject({
       changed: true,
+      stale: false,
       revision: 'a'.repeat(24),
       state: 'live',
       persistedFixtures: true,
@@ -591,9 +692,12 @@ describe('syncLiveSnapshot', () => {
       dependencies: {
         getEventLive: async () => mockEventLiveResponseFixture,
         getFixtures: async () => [liveRawFixture()],
+        getExpectedFixtureIds: async () => [1],
         getReferenceData: async () => referenceData(),
+        serialize: async (_eventId, operation) => operation(),
         publish: async (payload) => ({
           changed: false,
+          stale: false,
           meta: {
             schemaVersion: 1 as const,
             season: '2526',
@@ -618,8 +722,54 @@ describe('syncLiveSnapshot', () => {
     expect(persistEventLives).toHaveBeenCalledTimes(1);
     expect(result).toMatchObject({
       changed: false,
+      stale: false,
       persistedFixtures: false,
       persistedEventLives: true,
+    });
+  });
+
+  test('does not persist stale event-live checkpoints', async () => {
+    const persistFixtures = mock(async () => []);
+    const persistEventLives = mock(async () => []);
+
+    const result = await syncLiveSnapshot(1, {
+      persistEventLives: true,
+      dependencies: {
+        getEventLive: async () => mockEventLiveResponseFixture,
+        getFixtures: async () => [liveRawFixture()],
+        getExpectedFixtureIds: async () => [1],
+        getReferenceData: async () => referenceData(),
+        serialize: async (_eventId, operation) => operation(),
+        publish: async (payload) => ({
+          changed: false,
+          stale: true,
+          meta: {
+            schemaVersion: 1 as const,
+            season: '2526',
+            eventId: payload.eventId,
+            revision: 'c'.repeat(24),
+            state: payload.state,
+            publishedAt: '2025-08-15T20:00:01.000Z',
+            checkedAt: '2025-08-15T20:00:01.000Z',
+            eventLiveCount: payload.eventLives.length,
+            fixtureCount: payload.fixtures.length,
+            fixtureTeamCount: Object.keys(payload.liveFixturesV2).length,
+            bonusTeamCount: Object.keys(payload.liveBonusV2).length,
+          },
+        }),
+        persistFixtures,
+        persistEventLives,
+        now: () => new Date('2025-08-15T20:00:00.000Z'),
+      },
+    });
+
+    expect(persistFixtures).not.toHaveBeenCalled();
+    expect(persistEventLives).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      changed: false,
+      stale: true,
+      persistedFixtures: false,
+      persistedEventLives: false,
     });
   });
 });

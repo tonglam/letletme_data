@@ -77,6 +77,7 @@ function payload(score: number, checkedAt: Date): LiveSnapshotCachePayload {
     mockEventLiveResponseFixture,
     [rawFixture],
     referenceData(),
+    [rawFixture.id],
   );
   return {
     eventId: EVENT_ID,
@@ -111,14 +112,30 @@ describe('coordinated live snapshot Redis integration', () => {
       getSeason: async () => SEASON,
     });
 
-    const [scoreTwo, scoreThree] = await Promise.all([
-      cache.publish(payload(2, new Date('2025-08-15T20:00:00.000Z'))),
-      cache.publish(payload(3, new Date('2025-08-15T20:00:01.000Z'))),
-    ]);
+    let signalOlderStaged!: () => void;
+    let releaseOlder!: () => void;
+    const olderStaged = new Promise<void>((resolve) => {
+      signalOlderStaged = resolve;
+    });
+    const olderMayCommit = new Promise<void>((resolve) => {
+      releaseOlder = resolve;
+    });
+    const scoreTwoPromise = cache.publish(payload(2, new Date('2025-08-15T20:00:00.000Z')), {
+      beforeCommit: async () => {
+        signalOlderStaged();
+        await olderMayCommit;
+      },
+    });
+    await olderStaged;
+    const scoreThree = await cache.publish(payload(3, new Date('2025-08-15T20:00:01.000Z')));
+    releaseOlder();
+    const scoreTwo = await scoreTwoPromise;
 
     const meta = await cache.get(EVENT_ID);
     expect(meta).not.toBeNull();
-    expect([scoreTwo.meta.revision, scoreThree.meta.revision]).toContain(meta!.revision);
+    expect(scoreThree.stale).toBe(false);
+    expect(scoreTwo.stale).toBe(true);
+    expect(meta!.revision).toBe(scoreThree.meta.revision);
 
     const fixtureJson = await redis.hget(`Fixtures:${SEASON}:${EVENT_ID}`, '1');
     const liveFixtureJson = await redis.hget(`LiveFixtureV2:${SEASON}:${EVENT_ID}`, '12');
@@ -132,6 +149,8 @@ describe('coordinated live snapshot Redis integration', () => {
       fixtureId: 1,
       teamScore: fixture.teamHScore,
     });
+    expect(fixture.teamHScore).toBe(3);
+    expect(scoreTwo.meta.revision).toBe(meta!.revision);
 
     for (const key of KEYS) {
       expect(await redis.exists(key)).toBe(1);

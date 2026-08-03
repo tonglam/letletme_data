@@ -1,11 +1,13 @@
-import { fixturesCache } from '../cache/operations';
+import { fixturesCache, liveSnapshotCache } from '../cache/operations';
 import { deriveSeasonFromFixtures } from '../cache/cache-season';
 import { fplClient } from '../clients/fpl';
+import { resolveFixtureCacheTransitions } from '../domain/fixture-cache-transition';
 import { fixtureRepository } from '../repositories/fixtures';
 import { transformFixtures } from '../transformers/fixtures';
 import { logError, logInfo, logWarn } from '../utils/logger';
 import { getCurrentEvent } from './events.service';
 import { syncLiveBonusV2Cache } from './live-bonus.service';
+import { syncLiveSnapshot, withFixtureSyncSerialization } from './live-snapshot.service';
 
 /**
  * Fixtures Service - Business Logic Layer
@@ -33,24 +35,9 @@ export async function syncFixtures(eventId?: number): Promise<{ count: number; e
       return { count: 0, errors: 0 };
     }
 
-    let staleEventIds: Set<number> | null = null;
-    let shouldClearUnscheduled = false;
-
-    if (eventId) {
-      const fixtureIds = rawFixtures
-        .map((fixture) => fixture.id)
-        .filter((fixtureId) => Number.isInteger(fixtureId));
-      const existingEvents = await fixtureRepository.findEventIdsByFixtureIds(fixtureIds);
-      staleEventIds = new Set<number>();
-
-      for (const existingEventId of existingEvents.values()) {
-        if (existingEventId === null) {
-          shouldClearUnscheduled = true;
-        } else if (existingEventId !== eventId) {
-          staleEventIds.add(existingEventId);
-        }
-      }
-    }
+    const fixtureIds = rawFixtures
+      .map((fixture) => fixture.id)
+      .filter((fixtureId): fixtureId is number => Number.isInteger(fixtureId));
 
     // 2. Transform to domain fixtures
     const fixtures = transformFixtures(rawFixtures);
@@ -75,46 +62,64 @@ export async function syncFixtures(eventId?: number): Promise<{ count: number; e
       });
     }
 
-    // 3. Save scheduled fixtures to database (batch upsert)
-    const savedFixtures = await fixtureRepository.upsertBatch(schedulableFixtures);
-    logInfo('Fixtures upserted to database', { count: savedFixtures.length, ...logContext });
+    // 3. Save scheduled fixtures to database (batch upsert). Snapshot retirement
+    // deliberately happens first: if Redis is unavailable the DB ownership is
+    // unchanged and a retry can still discover the prior event to retire.
+    const { savedFixtures } = await withFixtureSyncSerialization(
+      async () => {
+        const existingEvents = await fixtureRepository.findEventIdsByFixtureIds(fixtureIds);
+        const transitions = resolveFixtureCacheTransitions(fixtures, existingEvents);
+        const affectedEventIds = new Set<number>(transitions.staleEventIds);
+        for (const fixture of schedulableFixtures) affectedEventIds.add(fixture.event!);
+        return {
+          eventIds: [...affectedEventIds],
+          context: transitions,
+        };
+      },
+      async (transitions) => {
+        if (transitions.staleEventIds.size > 0) {
+          await Promise.all(
+            Array.from(transitions.staleEventIds).map((staleEventId) =>
+              liveSnapshotCache.retire(staleEventId),
+            ),
+          );
+          logInfo('Retired stale live snapshots after fixture event moves', {
+            ...(eventId ? { eventId } : {}),
+            staleEventIds: Array.from(transitions.staleEventIds),
+          });
+        }
+        const savedFixtures = await fixtureRepository.upsertBatch(schedulableFixtures);
+        logInfo('Fixtures upserted to database', { count: savedFixtures.length, ...logContext });
 
-    // 4. Update cache with event-specific fixtures
-    if (eventId) {
-      // Cache fixtures for specific event
-      await fixturesCache.setByEvent(eventId, savedFixtures, cacheSeason);
-    } else {
-      // Cache all fixtures (grouped by event), including unscheduled records directly from FPL.
-      await fixturesCache.set([...savedFixtures, ...unscheduledFixtures], cacheSeason);
-    }
+        if (eventId) {
+          await fixturesCache.setByEvent(eventId, savedFixtures, cacheSeason);
+        } else {
+          await fixturesCache.set([...savedFixtures, ...unscheduledFixtures], cacheSeason);
+        }
 
-    if (eventId && staleEventIds && staleEventIds.size > 0) {
-      await Promise.all(
-        Array.from(staleEventIds).map((staleEventId) => fixturesCache.clearByEvent(staleEventId)),
-      );
-      logInfo('Cleared stale fixture caches', {
-        eventId,
-        staleEventIds: Array.from(staleEventIds),
-      });
-    }
+        if (transitions.shouldClearUnscheduled) {
+          await fixturesCache.clearUnscheduled();
+          logInfo('Cleared unscheduled fixture cache after fixture event moves', logContext);
+        }
 
-    if (eventId && shouldClearUnscheduled) {
-      await fixturesCache.clearUnscheduled();
-      logInfo('Cleared unscheduled fixture cache after event sync', { eventId });
-    }
+        // FPL can publish final fixture bonus stats after the live window
+        // closes. Refresh from the rows just persisted rather than waiting
+        // for a live-bonus cron that will no longer run.
+        const bonusEventId = eventId ?? (await getCurrentEvent())?.id;
+        if (bonusEventId) {
+          const bonusFixtures = savedFixtures.filter((fixture) => fixture.event === bonusEventId);
+          if (bonusFixtures.length > 0) {
+            await syncLiveBonusV2Cache(bonusEventId, { fixtures: bonusFixtures });
+          }
+        }
+        logInfo('Fixtures cache updated', logContext);
 
-    // FPL can publish final fixture bonus stats after the live window closes.
-    // Refresh the current event's fixture-scoped derivative directly from the
-    // rows just persisted instead of waiting for a live-bonus cron that will no
-    // longer run. Full fixture syncs resolve the current event explicitly.
-    const bonusEventId = eventId ?? (await getCurrentEvent())?.id;
-    if (bonusEventId) {
-      const bonusFixtures = savedFixtures.filter((fixture) => fixture.event === bonusEventId);
-      if (bonusFixtures.length > 0) {
-        await syncLiveBonusV2Cache(bonusEventId, { fixtures: bonusFixtures });
-      }
-    }
-    logInfo('Fixtures cache updated', logContext);
+        return {
+          ...transitions,
+          savedFixtures,
+        };
+      },
+    );
 
     const result = {
       count: savedFixtures.length,
@@ -167,9 +172,16 @@ export async function syncAllGameweeks(): Promise<{
       }
     }
 
-    // Final cache update with all fixtures
-    const allFixtures = await fixtureRepository.findAll();
-    await fixturesCache.set(allFixtures);
+    // Final cache update with all fixtures. Keep it in the same mandatory lane
+    // as normal fixture syncs so a later sync cannot be overwritten by this
+    // backfill's trailing rebuild.
+    await withFixtureSyncSerialization(
+      async () => ({ eventIds: [], context: undefined }),
+      async () => {
+        const allFixtures = await fixtureRepository.findAll();
+        await fixturesCache.set(allFixtures);
+      },
+    );
 
     logInfo('All gameweeks sync completed', {
       totalCount,
@@ -188,30 +200,19 @@ export async function syncAllGameweeks(): Promise<{
   }
 }
 
-// Sync live match scores for in-progress fixtures only (runs every 15 min during matches)
-// Distinct from syncFixtures: targets only started+unfinished fixtures, no cache update
+// Compatibility service retained for callers outside BullMQ. Use the canonical
+// coordinated publisher so no direct fixture upsert can race the six live views.
 export async function syncLiveScores(eventId: number): Promise<{ updated: number }> {
   try {
-    logInfo('Starting live scores sync', { eventId });
-
-    const rawFixtures = await fplClient.getFixtures(eventId);
-
-    if (!Array.isArray(rawFixtures)) {
-      throw new Error('Invalid fixtures data from FPL API');
-    }
-
-    const inProgress = rawFixtures.filter((f) => f.started === true && f.finished === false);
-
-    if (inProgress.length === 0) {
-      logInfo('No in-progress fixtures to sync', { eventId });
-      return { updated: 0 };
-    }
-
-    const fixtures = transformFixtures(inProgress);
-    const saved = await fixtureRepository.upsertBatch(fixtures);
-
-    logInfo('Live scores synced', { eventId, updated: saved.length });
-    return { updated: saved.length };
+    const snapshot = await syncLiveSnapshot(eventId, { persistEventLives: false });
+    const updated = snapshot.persistedFixtures ? snapshot.fixtureCount : 0;
+    logInfo('Live scores compatibility sync completed through live snapshot', {
+      eventId,
+      updated,
+      revision: snapshot.revision,
+      stale: snapshot.stale,
+    });
+    return { updated };
   } catch (error) {
     logError('Live scores sync failed', error, { eventId });
     throw error;
