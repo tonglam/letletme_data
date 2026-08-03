@@ -9,8 +9,11 @@ import { getCurrentEvent } from './events.service';
 import type { Fixture } from '../types';
 import type {
   LiveFixtureByStatus,
+  LiveFixtureByStatusV2,
   LiveFixtureData,
+  LiveFixtureDataV2,
   LiveFixturesByTeam,
+  LiveFixturesV2ByTeam,
   MatchPlayStatus,
 } from '../domain/live-fixtures';
 
@@ -24,11 +27,22 @@ function initTeamBucket(): LiveFixtureByStatus {
   return { Playing: [], Not_Start: [], Finished: [] };
 }
 
-async function loadTeamMaps(): Promise<{
+function initTeamBucketV2(): LiveFixtureByStatusV2 {
+  return { Playing: [], Not_Start: [], Finished: [] };
+}
+
+export interface LiveFixtureTeamMaps {
   nameById: Map<number, string>;
   shortNameById: Map<number, string>;
   positionById: Map<number, number>;
-}> {
+}
+
+export interface LiveFixtureViews {
+  legacy: LiveFixturesByTeam;
+  v2: LiveFixturesV2ByTeam;
+}
+
+export async function loadLiveFixtureTeamMaps(): Promise<LiveFixtureTeamMaps> {
   const db = await getDb();
   const rows = await db
     .select({
@@ -52,7 +66,7 @@ async function loadTeamMaps(): Promise<{
   return { nameById, shortNameById, positionById };
 }
 
-function toLiveFixture(
+function toLiveFixtureViews(
   fixture: Fixture,
   teamId: TeamId,
   againstId: TeamId,
@@ -62,14 +76,14 @@ function toLiveFixture(
   nameById: Map<number, string>,
   shortNameById: Map<number, string>,
   positionById: Map<number, number>,
-): LiveFixtureData {
+): { legacy: LiveFixtureData; v2: LiveFixtureDataV2 } {
   const kickoffTime = fixture.kickoffTime ? fixture.kickoffTime.toISOString() : null;
   const started = fixture.started ?? false;
   const finished = Boolean(fixture.finishedProvisional || fixture.finished);
   const safeTeamScore = teamScore ?? 0;
   const safeAgainstScore = againstScore ?? 0;
 
-  return {
+  const legacy: LiveFixtureData = {
     teamId,
     teamName: nameById.get(teamId) ?? '',
     teamShortName: shortNameById.get(teamId) ?? '',
@@ -86,17 +100,22 @@ function toLiveFixture(
     started,
     finished,
   };
+
+  return {
+    legacy,
+    v2: { fixtureId: fixture.id, ...legacy },
+  };
 }
 
-function buildLiveFixturesByTeam(
+export function buildLiveFixtureViews(
   fixtures: Fixture[],
-  nameById: Map<number, string>,
-  shortNameById: Map<number, string>,
-  positionById: Map<number, number>,
-): LiveFixturesByTeam {
-  const byTeam = new Map<number, LiveFixtureByStatus>();
+  maps: LiveFixtureTeamMaps,
+): LiveFixtureViews {
+  const legacyByTeam = new Map<number, LiveFixtureByStatus>();
+  const v2ByTeam = new Map<number, LiveFixtureByStatusV2>();
+  const { nameById, shortNameById, positionById } = maps;
 
-  for (const fixture of fixtures) {
+  for (const fixture of [...fixtures].sort((a, b) => a.id - b.id)) {
     const started = fixture.started ?? false;
     const finished = Boolean(fixture.finishedProvisional || fixture.finished);
     const status = getPlayStatus(started, finished);
@@ -104,44 +123,60 @@ function buildLiveFixturesByTeam(
     const homeId = fixture.teamH as TeamId;
     const awayId = fixture.teamA as TeamId;
 
-    const homeBucket = byTeam.get(homeId) ?? initTeamBucket();
-    homeBucket[status].push(
-      toLiveFixture(
-        fixture,
-        homeId,
-        awayId,
-        true,
-        fixture.teamHScore,
-        fixture.teamAScore,
-        nameById,
-        shortNameById,
-        positionById,
-      ),
+    const homeFixture = toLiveFixtureViews(
+      fixture,
+      homeId,
+      awayId,
+      true,
+      fixture.teamHScore,
+      fixture.teamAScore,
+      nameById,
+      shortNameById,
+      positionById,
     );
-    byTeam.set(homeId, homeBucket);
+    const homeLegacyBucket = legacyByTeam.get(homeId) ?? initTeamBucket();
+    homeLegacyBucket[status].push(homeFixture.legacy);
+    legacyByTeam.set(homeId, homeLegacyBucket);
+    const homeV2Bucket = v2ByTeam.get(homeId) ?? initTeamBucketV2();
+    homeV2Bucket[status].push(homeFixture.v2);
+    v2ByTeam.set(homeId, homeV2Bucket);
 
-    const awayBucket = byTeam.get(awayId) ?? initTeamBucket();
-    awayBucket[status].push(
-      toLiveFixture(
-        fixture,
-        awayId,
-        homeId,
-        false,
-        fixture.teamAScore,
-        fixture.teamHScore,
-        nameById,
-        shortNameById,
-        positionById,
-      ),
+    const awayFixture = toLiveFixtureViews(
+      fixture,
+      awayId,
+      homeId,
+      false,
+      fixture.teamAScore,
+      fixture.teamHScore,
+      nameById,
+      shortNameById,
+      positionById,
     );
-    byTeam.set(awayId, awayBucket);
+    const awayLegacyBucket = legacyByTeam.get(awayId) ?? initTeamBucket();
+    awayLegacyBucket[status].push(awayFixture.legacy);
+    legacyByTeam.set(awayId, awayLegacyBucket);
+    const awayV2Bucket = v2ByTeam.get(awayId) ?? initTeamBucketV2();
+    awayV2Bucket[status].push(awayFixture.v2);
+    v2ByTeam.set(awayId, awayV2Bucket);
   }
 
-  const out: Record<string, LiveFixtureByStatus> = {};
-  for (const [teamId, bucket] of byTeam.entries()) {
-    out[String(teamId)] = bucket;
+  const legacy: Record<string, LiveFixtureByStatus> = {};
+  for (const [teamId, bucket] of legacyByTeam.entries()) {
+    legacy[String(teamId)] = bucket;
   }
-  return out;
+  const v2: Record<string, LiveFixtureByStatusV2> = {};
+  for (const [teamId, bucket] of v2ByTeam.entries()) {
+    v2[String(teamId)] = bucket;
+  }
+
+  return { legacy, v2 };
+}
+
+export function buildLiveFixturesByTeam(
+  fixtures: Fixture[],
+  maps: LiveFixtureTeamMaps,
+): LiveFixturesByTeam {
+  return buildLiveFixtureViews(fixtures, maps).legacy;
 }
 
 /**
@@ -162,8 +197,8 @@ export async function syncLiveFixtureCache(
     logInfo('Starting live fixture cache sync', { eventId: resolvedEventId });
 
     const fixtures = await fixtureRepository.findByEvent(resolvedEventId);
-    const { nameById, shortNameById, positionById } = await loadTeamMaps();
-    const byTeam = buildLiveFixturesByTeam(fixtures, nameById, shortNameById, positionById);
+    const maps = await loadLiveFixtureTeamMaps();
+    const byTeam = buildLiveFixturesByTeam(fixtures, maps);
 
     await liveFixturesCache.set(resolvedEventId, byTeam);
 

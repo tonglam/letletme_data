@@ -61,15 +61,19 @@ bounded retry cycle.
 
 | Job | Cron | Gate / behavior |
 |---|---|---|
-| `event-lives-cache-trigger` | `* * * * *` | `isFPLSeason`, current event, `isMatchDayTime` |
-| `event-lives-db-trigger` | `*/10 * * * *` | Same gate; DB persistence then dependent cascade |
-| `live-scores` | `* * * * *` | Same gate; updates in-progress fixture scores |
-| `post-match-consolidation` | `0 6,8,10 * * *` | Current event and bounded post-match result slot |
+| `live-snapshot-trigger` | `* * * * *` | `isFPLSeason`, current event, `isMatchDayTime`; one job concurrently fetches event-live + fixtures, atomically publishes every live Redis view, and persists fixture rows only when football content changes. Every UTC ten-minute boundary also persists event-live/explain rows and runs the dependent cascade. Deterministic event/minute IDs dedupe scheduler replicas, while a waiting/delayed/active check prevents a slow prior minute from stacking. |
+| `post-match-consolidation` | `0 6,8,10 * * *` | Current event and bounded post-match result slot; forces a persistent snapshot with a deterministic result-slot ID. |
 
-After an event-lives DB sync succeeds, the worker always enqueues summary,
-explain, and overall-result jobs. Live-fixture and live-bonus jobs are included
-only while the match window remains open. If the event is data-checked inside
-the post-match window, the worker also enqueues a distinct final league-results
+The snapshot derives `EventLive`, `Fixtures`, legacy/V2 live-fixture, and
+legacy/V2 bonus hashes from the same accepted upstream pair. Changed views are
+published together; content-identical minutes update only freshness metadata.
+This replaces the former independent cache, score, fixture, and bonus cron
+paths, which could race or derive from different minutes.
+
+After a persistent snapshot succeeds, the worker enqueues summary, explain,
+and overall-result jobs. Fixture and bonus derivatives are already in the
+snapshot, so they are not re-enqueued. If the event is data-checked inside the
+post-match window, the worker also enqueues a distinct final league-results
 correction after the fresh `event_lives` rows are persisted.
 
 ## Selection publication window
@@ -123,9 +127,10 @@ active tournament entry was processed. The cascade contains:
   latest GW38 kickoff date. It returns false until both fixture sets exist.
 - `isMatchDay`: today matches at least one fixture kickoff date and the event
   is not finished.
-- `isMatchDayTime`: any fixture is between kickoff and kickoff +2h; a started,
-  unfinished fixture may keep its interval open up to +6h for delayed FPL
-  finish flags.
+- `isMatchDayTime`: any fixture is between kickoff -5m and kickoff +2h. The
+  five-minute prewarm ensures the first complete snapshot exists before users
+  open the live screen; a started, unfinished fixture may keep its interval
+  open up to +6h for delayed FPL finish flags.
 - `isAfterMatchDay`: event is finished or now is later than the final kickoff
   +2h.
 - `isSelectTime`: match day and 30–90 minutes after the event deadline.

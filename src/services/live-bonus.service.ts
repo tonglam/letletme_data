@@ -29,7 +29,7 @@ type FixtureBonusSource = Pick<
   'finished' | 'finishedProvisional' | 'started' | 'stats' | 'teamA' | 'teamH'
 >;
 
-function serializeBonusByTeam(source: Map<TeamId, Map<number, number>>): LiveBonusByTeam {
+export function serializeBonusByTeam(source: Map<TeamId, Map<number, number>>): LiveBonusByTeam {
   const result: Record<string, Record<string, number>> = {};
   for (const [teamId, teamBonus] of source.entries()) {
     const bonusObj: Record<string, number> = {};

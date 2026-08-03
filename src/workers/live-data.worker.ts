@@ -20,6 +20,7 @@ import { syncEventLiveSummary } from '../services/event-live-summaries.service';
 import { syncEventLiveExplain } from '../services/event-live-explains.service';
 import { syncEventOverallResult } from '../services/event-overall-results.service';
 import { syncLiveScores } from '../services/fixtures.service';
+import { syncLiveSnapshot } from '../services/live-snapshot.service';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { getQueueConnection } from '../utils/queue';
 import { logError, logInfo } from '../utils/logger';
@@ -32,6 +33,7 @@ import type { WorkerRuntime } from './worker-runtime';
  * Live Data Worker
  *
  * Processes live data sync jobs:
+ * - live-snapshot: coherent upstream fetch + atomic Redis publication (1-min)
  * - event-lives-cache: Fast cache-only updates (1-min)
  * - event-lives-db: Database persistence (10-min) + trigger cascade
  * - event-live-summary: Aggregate season totals (cascade)
@@ -62,6 +64,22 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
     () =>
       runTrackedJob(context, async () => {
         switch (job.name) {
+          case LIVE_JOBS.LIVE_SNAPSHOT:
+            {
+              if (source === 'cron' && !(await isLiveMatchWindowForEvent(eventId))) {
+                logInfo('Skipping live snapshot job - not match time', { eventId });
+                break;
+              }
+              await syncLiveSnapshot(eventId, {
+                persistEventLives: job.data.persistEventLives ?? false,
+              });
+              if (job.data.persistEventLives) {
+                await enqueueCascadeJobs(eventId, undefined, { includeLiveDerivatives: false });
+                await enqueueFinalLeagueResultsAfterLiveSync(eventId);
+              }
+            }
+            break;
+
           case LIVE_JOBS.EVENT_LIVES_CACHE:
             if (!(await isLiveMatchWindowForEvent(eventId))) {
               logInfo('Skipping event lives cache job - not match time', { eventId });

@@ -2,11 +2,14 @@ import { eventLivesCache } from '../cache/operations';
 import { fplClient } from '../clients/fpl';
 import { getDb } from '../db/singleton';
 import type { EventLive } from '../domain/event-lives';
+import type { EventLiveExplain } from '../domain/event-live-explains';
 import { createEventLiveExplainsRepository } from '../repositories/event-live-explains';
 import { createEventLiveRepository, eventLiveRepository } from '../repositories/event-lives';
 import { transformEventLiveExplains } from '../transformers/event-live-explains';
 import { transformEventLives } from '../transformers/event-lives';
 import { logDebug, logError, logInfo } from '../utils/logger';
+
+import type { RawFPLEventLiveElement } from '../types';
 
 /**
  * Event Lives Service - Business Logic Layer
@@ -17,6 +20,55 @@ import { logDebug, logError, logInfo } from '../utils/logger';
  * - Database operations
  * - Data retrieval with fallbacks
  */
+
+export interface PreparedEventLives {
+  eventId: number;
+  sourceCount: number;
+  eventLives: EventLive[];
+  explains: EventLiveExplain[];
+  errors: number;
+}
+
+export function prepareEventLives(
+  eventId: number,
+  elements: RawFPLEventLiveElement[],
+): PreparedEventLives {
+  const eventLives = transformEventLives(eventId, elements);
+  const explains = transformEventLiveExplains(eventId, elements);
+  return {
+    eventId,
+    sourceCount: elements.length,
+    eventLives,
+    explains,
+    errors: elements.length - eventLives.length,
+  };
+}
+
+/**
+ * Persist one already-fetched FPL snapshot. Network I/O must happen before this
+ * function so the transaction only contains the two related UPSERTs.
+ */
+export async function persistPreparedEventLives(
+  prepared: PreparedEventLives,
+): Promise<EventLive[]> {
+  const { eventId, eventLives, explains } = prepared;
+  const db = await getDb();
+  return db.transaction(async (tx) => {
+    const txEventLiveRepository = createEventLiveRepository(tx);
+    const txExplainsRepository = createEventLiveExplainsRepository(tx);
+
+    const savedLives = await txEventLiveRepository.upsertBatch(eventLives);
+    logInfo('Event lives upserted to database', { eventId, count: savedLives.length });
+
+    const savedExplains = await txExplainsRepository.upsertBatch(explains);
+    logInfo('Event live explains upserted to database', {
+      eventId,
+      count: savedExplains.length,
+    });
+
+    return savedLives;
+  });
+}
 
 /**
  * Get all event live data for a specific event (cache-first strategy: Redis → DB → update Redis)
@@ -60,7 +112,7 @@ export async function updateEventLivesCache(eventId: number): Promise<{ count: n
       throw new Error('Invalid event live data from FPL API');
     }
 
-    const eventLives = transformEventLives(eventId, liveData.elements);
+    const { eventLives } = prepareEventLives(eventId, liveData.elements);
     logDebug('Event lives transformed for cache', { eventId, count: eventLives.length });
 
     await eventLivesCache.set(eventId, eventLives);
@@ -91,8 +143,8 @@ export async function syncEventLives(eventId: number): Promise<{ count: number; 
     logInfo('Raw event live data fetched', { eventId, count: liveData.elements.length });
 
     // 2. Transform to domain EventLives and Explains
-    const eventLives = transformEventLives(eventId, liveData.elements);
-    const explains = transformEventLiveExplains(eventId, liveData.elements);
+    const prepared = prepareEventLives(eventId, liveData.elements);
+    const { eventLives } = prepared;
     logInfo('Event lives transformed', {
       eventId,
       total: liveData.elements.length,
@@ -103,22 +155,7 @@ export async function syncEventLives(eventId: number): Promise<{ count: number; 
     // 3. Save to database: lives + explains are one logical write — if the
     // explains upsert fails after lives committed, the pair goes stale, so
     // both upserts share a single transaction.
-    const db = await getDb();
-    const savedEventLives = await db.transaction(async (tx) => {
-      const txEventLiveRepository = createEventLiveRepository(tx);
-      const txExplainsRepository = createEventLiveExplainsRepository(tx);
-
-      const savedLives = await txEventLiveRepository.upsertBatch(eventLives);
-      logInfo('Event lives upserted to database', { eventId, count: savedLives.length });
-
-      const savedExplains = await txExplainsRepository.upsertBatch(explains);
-      logInfo('Event live explains upserted to database', {
-        eventId,
-        count: savedExplains.length,
-      });
-
-      return savedLives;
-    });
+    const savedEventLives = await persistPreparedEventLives(prepared);
 
     // 4. Update cache with full event live objects
     await eventLivesCache.set(eventId, savedEventLives);
@@ -126,7 +163,7 @@ export async function syncEventLives(eventId: number): Promise<{ count: number; 
 
     const result = {
       count: savedEventLives.length,
-      errors: liveData.elements.length - eventLives.length,
+      errors: prepared.errors,
     };
 
     logInfo('Full event live sync completed successfully', { eventId, ...result });

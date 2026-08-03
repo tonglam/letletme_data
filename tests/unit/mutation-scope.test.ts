@@ -14,7 +14,24 @@ describe('resolveMutationScopes', () => {
       jobName: 'event-lives-db',
       eventId: 33,
     });
-    expect(scopes).toEqual(['event-live:event:33']);
+    expect(scopes).toEqual(['live-snapshot:event:33']);
+  });
+
+  it('serializes the snapshot fixture write with ordinary fixture syncs', () => {
+    const snapshotScopes = resolveMutationScopes({
+      queueName: 'live-data-p0',
+      jobName: 'live-snapshot',
+      eventId: 33,
+    });
+    const fixtureScopes = resolveMutationScopes({
+      queueName: 'data-sync-p1',
+      jobName: 'fixtures',
+      eventId: 33,
+    });
+
+    expect(snapshotScopes).toContain('data-core:fixtures');
+    expect(snapshotScopes).toContain('live-snapshot:event:33');
+    expect(fixtureScopes).toEqual(['data-core:fixtures']);
   });
 
   it('serializes partial price updates with the full players sync', () => {

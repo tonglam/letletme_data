@@ -105,6 +105,7 @@ curl -X POST http://data.internal.example/events/sync -H "x-api-key: $API_KEY"
 - `POST /jobs/:name/trigger`
   - `curl -X POST http://data.internal.example/jobs/events-sync/trigger`
   - `curl -X POST -H 'content-type: application/json' -d '{"changeDate":"20260803"}' http://data.internal.example/jobs/player-prices/trigger`
+  - `curl -X POST http://data.internal.example/jobs/live-snapshot/trigger`
   - `curl -X POST http://data.internal.example/jobs/event-lives-db-sync/trigger`
   - `curl -X POST http://data.internal.example/jobs/live-scores/trigger`
 
@@ -136,12 +137,13 @@ Supported job names:
 - `tournament-battle-race-results-sync`
 - `tournament-knockout-results-sync`
 - `tournament-materialized-views-refresh`
+- `live-snapshot` (preferred; atomically publishes all live views, cache-only persistence mode)
 - `event-lives-cache-update`
-- `event-lives-db-sync`
+- `event-lives-db-sync` (compatibility alias; persistent snapshot)
 - `event-live-summary-sync`
 - `event-live-explain-sync`
 - `event-overall-result-sync`
-- `live-scores`
+- `live-scores` (compatibility alias; cache-only snapshot)
 - `post-match-consolidation`
 - `launch-warning`
 - `launch-happening`

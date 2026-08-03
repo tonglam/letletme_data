@@ -1,0 +1,143 @@
+import { assertIntegrationEnv } from './helpers/env-guard';
+
+assertIntegrationEnv();
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+
+import {
+  createLiveSnapshotCache,
+  type LiveSnapshotCachePayload,
+} from '../../src/cache/live-snapshot-cache';
+import { redisSingleton } from '../../src/cache/singleton';
+import {
+  prepareLiveSnapshot,
+  type LiveSnapshotReferenceData,
+} from '../../src/services/live-snapshot.service';
+import type { RawFPLFixture } from '../../src/types';
+import { mockEventLiveResponseFixture } from '../fixtures/event-lives.fixtures';
+import { mockRawFPLFixture1 } from '../fixtures/fixtures.fixtures';
+
+const SEASON = '2526';
+const EVENT_ID = 37;
+const KEYS = [
+  `EventLive:${SEASON}:${EVENT_ID}`,
+  `Fixtures:${SEASON}:${EVENT_ID}`,
+  `LiveFixture:${SEASON}:${EVENT_ID}`,
+  `LiveFixtureV2:${SEASON}:${EVENT_ID}`,
+  `LiveBonus:${SEASON}:${EVENT_ID}`,
+  `LiveBonusV2:${SEASON}:${EVENT_ID}`,
+  `LiveSnapshotMeta:${SEASON}:${EVENT_ID}`,
+];
+
+function referenceData(): LiveSnapshotReferenceData {
+  return {
+    nameById: new Map([
+      [4, 'Burnley'],
+      [12, 'Liverpool'],
+    ]),
+    shortNameById: new Map([
+      [4, 'BUR'],
+      [12, 'LIV'],
+    ]),
+    positionById: new Map([
+      [4, 16],
+      [12, 1],
+    ]),
+    playerTeamById: new Map([
+      [350, 12],
+      [234, 4],
+      [567, 12],
+    ]),
+  };
+}
+
+function payload(score: number, checkedAt: Date): LiveSnapshotCachePayload {
+  const rawFixture: RawFPLFixture = {
+    ...mockRawFPLFixture1,
+    event: EVENT_ID,
+    started: true,
+    finished: false,
+    finished_provisional: false,
+    minutes: 55,
+    team_h_score: score,
+    team_a_score: 1,
+    stats: [
+      ...mockRawFPLFixture1.stats,
+      {
+        identifier: 'bps',
+        h: [
+          { element: 350, value: 45 },
+          { element: 567, value: 5 },
+        ],
+        a: [{ element: 234, value: 28 }],
+      },
+    ],
+  };
+  const prepared = prepareLiveSnapshot(
+    EVENT_ID,
+    mockEventLiveResponseFixture,
+    [rawFixture],
+    referenceData(),
+  );
+  return {
+    eventId: EVENT_ID,
+    state: prepared.state,
+    eventLives: prepared.eventLives.eventLives,
+    fixtures: prepared.fixtures,
+    liveFixtures: prepared.fixtureViews.legacy,
+    liveFixturesV2: prepared.fixtureViews.v2,
+    liveBonus: prepared.liveBonus,
+    liveBonusV2: prepared.liveBonusV2,
+    checkedAt,
+  };
+}
+
+describe('coordinated live snapshot Redis integration', () => {
+  beforeAll(async () => {
+    const redis = await redisSingleton.getClient();
+    await redis.del(...KEYS);
+  });
+
+  afterAll(async () => {
+    const redis = await redisSingleton.getClient();
+    const staging = await redis.scan('0', 'MATCH', `*:${SEASON}:${EVENT_ID}:staging:*`);
+    await redis.del(...KEYS, ...staging[1]);
+    await redisSingleton.disconnect();
+  });
+
+  test('publishes no-expiry views and keeps metadata aligned under concurrent refreshes', async () => {
+    const redis = await redisSingleton.getClient();
+    const cache = createLiveSnapshotCache({
+      getRedisClient: async () => redis,
+      getSeason: async () => SEASON,
+    });
+
+    const [scoreTwo, scoreThree] = await Promise.all([
+      cache.publish(payload(2, new Date('2025-08-15T20:00:00.000Z'))),
+      cache.publish(payload(3, new Date('2025-08-15T20:00:01.000Z'))),
+    ]);
+
+    const meta = await cache.get(EVENT_ID);
+    expect(meta).not.toBeNull();
+    expect([scoreTwo.meta.revision, scoreThree.meta.revision]).toContain(meta!.revision);
+
+    const fixtureJson = await redis.hget(`Fixtures:${SEASON}:${EVENT_ID}`, '1');
+    const liveFixtureJson = await redis.hget(`LiveFixtureV2:${SEASON}:${EVENT_ID}`, '12');
+    expect(fixtureJson).not.toBeNull();
+    expect(liveFixtureJson).not.toBeNull();
+    const fixture = JSON.parse(fixtureJson!) as { teamHScore: number };
+    const liveFixture = JSON.parse(liveFixtureJson!) as {
+      Playing: Array<{ fixtureId: number; teamScore: number }>;
+    };
+    expect(liveFixture.Playing[0]).toMatchObject({
+      fixtureId: 1,
+      teamScore: fixture.teamHScore,
+    });
+
+    for (const key of KEYS) {
+      expect(await redis.exists(key)).toBe(1);
+      expect(await redis.ttl(key)).toBe(-1);
+    }
+
+    expect(await redis.keys(`*:${SEASON}:${EVENT_ID}:staging:*`)).toEqual([]);
+  });
+});

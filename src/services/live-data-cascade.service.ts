@@ -47,6 +47,7 @@ export type FinalLeagueResultsDeps = {
 export async function enqueueCascadeJobs(
   eventId: number,
   deps?: CascadeEnqueueDeps,
+  options: { includeLiveDerivatives?: boolean } = {},
 ): Promise<{
   eventId: number;
   matchWindowOpen: boolean;
@@ -61,10 +62,11 @@ export async function enqueueCascadeJobs(
 
   try {
     const matchWindowOpen = await resolved.isLiveMatchWindowForEvent(eventId);
+    const includeLiveDerivatives = matchWindowOpen && (options.includeLiveDerivatives ?? true);
     const enqueueTasks = [
       resolved.enqueueEventLiveSummary(eventId, 'cascade'),
       resolved.enqueueEventLiveExplain(eventId, 'cascade'),
-      ...(matchWindowOpen
+      ...(includeLiveDerivatives
         ? [
             resolved.enqueueLiveFixtureCache(eventId, 'cascade'),
             resolved.enqueueLiveBonusCache(eventId, 'cascade'),
@@ -73,8 +75,11 @@ export async function enqueueCascadeJobs(
       resolved.enqueueEventOverallResult(eventId, 'cascade'),
     ];
 
-    if (!matchWindowOpen) {
-      logInfo('Skipping live fixture/bonus cascade enqueue - not match time', { eventId });
+    if (!includeLiveDerivatives) {
+      logInfo('Skipping legacy live fixture/bonus cascade enqueue', {
+        eventId,
+        matchWindowOpen,
+      });
     }
 
     const results = await Promise.allSettled(enqueueTasks);
@@ -89,7 +94,7 @@ export async function enqueueCascadeJobs(
       failed,
     });
 
-    const jobNames = matchWindowOpen
+    const jobNames = includeLiveDerivatives
       ? (['summary', 'explain', 'live-fixture', 'live-bonus', 'overall'] as const)
       : (['summary', 'explain', 'overall'] as const);
 
@@ -116,7 +121,7 @@ export async function enqueueCascadeJobs(
       total: results.length,
       successful,
       failed,
-      jobNames: matchWindowOpen
+      jobNames: includeLiveDerivatives
         ? ([
             'event-live-summary',
             'event-live-explain',

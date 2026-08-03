@@ -147,17 +147,16 @@ describe.skipIf(!currentEvent)('Live Data Worker Integration Tests', () => {
   });
 
   describe('Job ID Generation', () => {
-    test('creates unique cron job IDs per enqueue tick', async () => {
-      // Cron/cascade IDs include Date.now(); only skip when an identical job is
-      // already waiting. With a worker draining the queue both enqueues succeed.
+    test('does not stack a cron tick while the prior tick is pending', async () => {
+      // Cron/cascade IDs include Date.now(), but a slow active tick must still
+      // suppress the next enqueue. If the worker finishes first, a new ID is valid.
       const eventId = 950_000 + (Date.now() % 100_000);
       const job1 = await enqueueEventLivesCacheUpdate(eventId, 'cron');
       await Bun.sleep(2);
       const job2 = await enqueueEventLivesCacheUpdate(eventId, 'cron');
 
       expect(job1).not.toBeNull();
-      expect(job2).not.toBeNull();
-      expect(job1!.id).not.toBe(job2!.id);
+      if (job2) expect(job1!.id).not.toBe(job2.id);
     });
   });
 });

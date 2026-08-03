@@ -9,6 +9,7 @@ import type { Event, Fixture } from '../types';
 import { fixtureRepository } from '../repositories/fixtures';
 
 const MATCH_WINDOW_MS = 2 * 60 * 60 * 1000;
+const MATCH_PREWARM_MS = 5 * 60 * 1000;
 const FINISH_FLAG_GRACE_MS = 6 * 60 * 60 * 1000;
 const SEASON_WINDOW_CACHE_TTL_MS = 10 * 60 * 1000;
 
@@ -117,12 +118,12 @@ function getMatchIntervals(fixtures: Fixture[]) {
     .filter((fixture): fixture is Fixture & { kickoffTime: Date } => Boolean(fixture.kickoffTime))
     .map((fixture) => {
       const kickoff = fixture.kickoffTime;
-      const startMs = kickoff.getTime();
+      const kickoffMs = kickoff.getTime();
       return {
         fixture,
-        startMs,
-        endMs: startMs + MATCH_WINDOW_MS,
-        hardEndMs: startMs + FINISH_FLAG_GRACE_MS,
+        startMs: kickoffMs - MATCH_PREWARM_MS,
+        endMs: kickoffMs + MATCH_WINDOW_MS,
+        hardEndMs: kickoffMs + FINISH_FLAG_GRACE_MS,
       };
     });
 }

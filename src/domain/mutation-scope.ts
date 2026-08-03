@@ -101,17 +101,19 @@ export function resolveMutationScopes(input: MutationScopeInput): string[] {
 
   if (queue === 'live-data') {
     switch (jobName) {
+      case 'live-snapshot':
+        return ['data-core:fixtures', withEvent('live-snapshot', eventId)];
       case 'event-lives-cache':
       case 'event-lives-db':
-        return [withEvent('event-live', eventId)];
+        return [withEvent('live-snapshot', eventId)];
       case 'event-live-explain':
-        return [withEvent('event-live', eventId), withEvent('event-live-explain', eventId)];
+        return [withEvent('live-snapshot', eventId), withEvent('event-live-explain', eventId)];
       case 'live-fixture-cache':
-        return [withEvent('event-live', eventId), withEvent('live-fixture', eventId)];
+        return [withEvent('live-snapshot', eventId), withEvent('live-fixture', eventId)];
       case 'live-bonus-cache':
-        return [withEvent('event-live', eventId), withEvent('live-bonus', eventId)];
+        return [withEvent('live-snapshot', eventId), withEvent('live-bonus', eventId)];
       case 'live-scores':
-        return [withEvent('live-scores', eventId)];
+        return ['data-core:fixtures', withEvent('live-snapshot', eventId)];
       case 'event-live-summary':
         return ['event-live-summary:season'];
       case 'event-overall-result':

@@ -9,16 +9,16 @@ import { logError, logInfo } from '../utils/logger';
 
 export type LiveDataJobSource = 'cron' | 'manual' | 'cascade';
 
-async function hasWaitingOrDelayedJob(
+async function hasPendingJob(
   queue: ReturnType<typeof getLiveDataQueue>,
   jobName: LiveDataJobName,
   eventId: number,
 ): Promise<boolean> {
   try {
-    const jobs = await queue.getJobs(['waiting', 'delayed']);
+    const jobs = await queue.getJobs(['waiting', 'delayed', 'active']);
     return jobs.some((job) => job.name === jobName && job.data.eventId === eventId);
   } catch (error) {
-    logError('Failed to check waiting live-data jobs', error, { jobName, eventId });
+    logError('Failed to check pending live-data jobs', error, { jobName, eventId });
     // If we can't tell, allow enqueue (safer than dropping a tick).
     return false;
   }
@@ -28,15 +28,17 @@ async function enqueueLiveDataJob(
   jobName: LiveDataJobName,
   eventId: number,
   source: LiveDataJobSource = 'cron',
-  options: { delay?: number; jobId?: string } = {},
+  options: { delay?: number; jobId?: string; persistEventLives?: boolean } = {},
 ) {
   try {
     const tier = getLiveDataJobPriority(jobName as LiveDataPriorityJobName);
     const queue = getLiveDataQueue(tier);
 
-    // Skip duplicate waiting work so a slow tick can't stack identical jobs.
-    if (source === 'cron' && (await hasWaitingOrDelayedJob(queue, jobName, eventId))) {
-      logInfo('Live data job already waiting; skipping enqueue', { jobName, eventId, source });
+    // Skip duplicate pending work so a slow minute cannot stack behind itself.
+    // This applies even when the scheduler supplies a deterministic minute ID:
+    // the next minute has a different ID while the previous job may still run.
+    if (source === 'cron' && (await hasPendingJob(queue, jobName, eventId))) {
+      logInfo('Live data job already pending; skipping enqueue', { jobName, eventId, source });
       return null;
     }
 
@@ -44,6 +46,9 @@ async function enqueueLiveDataJob(
       eventId,
       source,
       triggeredAt: new Date().toISOString(),
+      ...(options.persistEventLives !== undefined
+        ? { persistEventLives: options.persistEventLives }
+        : {}),
     };
 
     // Manual triggers share a deterministic ID per (job, event) so repeat triggers
@@ -80,6 +85,24 @@ async function enqueueLiveDataJob(
     throw error;
   }
 }
+
+export function liveSnapshotMinuteBucket(date: Date): string {
+  return date.toISOString().slice(0, 16).replace(/\D/g, '');
+}
+
+export const enqueueLiveSnapshot = (
+  eventId: number,
+  source: LiveDataJobSource = 'cron',
+  options: { persistEventLives?: boolean; now?: Date; jobId?: string } = {},
+) =>
+  enqueueLiveDataJob(LIVE_JOBS.LIVE_SNAPSHOT, eventId, source, {
+    persistEventLives: options.persistEventLives ?? false,
+    jobId:
+      options.jobId ??
+      (source === 'cron'
+        ? `live-snapshot-e${eventId}-${liveSnapshotMinuteBucket(options.now ?? new Date())}`
+        : undefined),
+  });
 
 export const enqueueEventLivesCacheUpdate = (eventId: number, source?: LiveDataJobSource) =>
   enqueueLiveDataJob(LIVE_JOBS.EVENT_LIVES_CACHE, eventId, source);

@@ -4,9 +4,11 @@ type AddCall = { name: string; data: Record<string, unknown>; opts: Record<strin
 
 const addCalls: AddCall[] = [];
 const waitingJobs: Array<{ name: string; data: { eventId: number } }> = [];
+const getJobsCalls: string[][] = [];
 
 mock.module('../../src/queues/live-data.queue', () => ({
   LIVE_JOBS: {
+    LIVE_SNAPSHOT: 'live-snapshot',
     EVENT_LIVES_CACHE: 'event-lives-cache',
     EVENT_LIVES_DB: 'event-lives-db',
     EVENT_LIVE_SUMMARY: 'event-live-summary',
@@ -22,7 +24,10 @@ mock.module('../../src/queues/live-data.queue', () => ({
       addCalls.push({ name, data, opts });
       return { id: (opts.jobId as string | undefined) ?? 'generated-id' };
     },
-    getJobs: async () => waitingJobs,
+    getJobs: async (states: string[]) => {
+      getJobsCalls.push(states);
+      return waitingJobs;
+    },
   }),
 }));
 
@@ -30,7 +35,7 @@ mock.module('../../src/domain/job-priority', () => ({
   getLiveDataJobPriority: () => 'p3',
 }));
 
-const { enqueueEventLivesCacheUpdate, enqueueEventLivesDbSync } = await import(
+const { enqueueEventLivesCacheUpdate, enqueueEventLivesDbSync, enqueueLiveSnapshot } = await import(
   '../../src/jobs/live-data.jobs'
 );
 
@@ -38,6 +43,7 @@ describe('live-data cron duplicate suppression', () => {
   beforeEach(() => {
     addCalls.length = 0;
     waitingJobs.length = 0;
+    getJobsCalls.length = 0;
   });
 
   test('cron source skips enqueue when an identical job is already waiting', async () => {
@@ -46,6 +52,18 @@ describe('live-data cron duplicate suppression', () => {
     const job = await enqueueEventLivesDbSync(12, 'cron');
     expect(job).toBeNull();
     expect(addCalls).toHaveLength(0);
+    expect(getJobsCalls).toEqual([['waiting', 'delayed', 'active']]);
+  });
+
+  test('cron snapshot skips an active prior minute despite its explicit minute job ID', async () => {
+    waitingJobs.push({ name: 'live-snapshot', data: { eventId: 12 } });
+
+    const job = await enqueueLiveSnapshot(12, 'cron', {
+      now: new Date('2025-08-15T20:01:00.000Z'),
+    });
+    expect(job).toBeNull();
+    expect(addCalls).toHaveLength(0);
+    expect(getJobsCalls).toEqual([['waiting', 'delayed', 'active']]);
   });
 
   test('manual source always enqueues even when a waiting job exists', async () => {
@@ -54,5 +72,6 @@ describe('live-data cron duplicate suppression', () => {
     const job = await enqueueEventLivesCacheUpdate(12, 'manual');
     expect(job).not.toBeNull();
     expect(addCalls).toHaveLength(1);
+    expect(getJobsCalls).toHaveLength(0);
   });
 });
