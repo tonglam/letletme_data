@@ -1,5 +1,6 @@
 import { getActiveCacheSeason } from './cache-season';
 import { parseHashValues } from './hash-read';
+import { replaceHashesUnlessLiveSnapshotOwned } from './live-snapshot-ownership';
 import { logDebug, logError, logInfo } from '../utils/logger';
 import { redisSingleton } from './singleton';
 
@@ -17,7 +18,8 @@ export const eventLivesCache = {
   async getByEventId(eventId: EventId): Promise<EventLive[] | null> {
     try {
       const redis = await redisSingleton.getClient();
-      const key = `EventLive:${await getActiveCacheSeason()}:${eventId}`;
+      const season = await getActiveCacheSeason();
+      const key = `EventLive:${season}:${eventId}`;
       const hash = await redis.hgetall(key);
 
       if (!hash || Object.keys(hash).length === 0) {
@@ -45,7 +47,8 @@ export const eventLivesCache = {
       }
 
       const redis = await redisSingleton.getClient();
-      const key = `EventLive:${await getActiveCacheSeason()}:${eventId}`;
+      const season = await getActiveCacheSeason();
+      const key = `EventLive:${season}:${eventId}`;
 
       // Build hash: elementId -> EventLive data
       const hashData: Record<string, string> = {};
@@ -53,11 +56,17 @@ export const eventLivesCache = {
         hashData[eventLive.elementId.toString()] = JSON.stringify(eventLive);
       }
 
-      // Clear existing hash and set new data
-      await redis.del(key);
-      await redis.hset(key, hashData);
-
-      logInfo('Event lives cached', { eventId, count: eventLives.length });
+      const snapshotOwnedEventIds = await replaceHashesUnlessLiveSnapshotOwned(redis, season, [
+        { eventId, key, fields: hashData },
+      ]);
+      if (snapshotOwnedEventIds.has(eventId)) {
+        logInfo('Preserved snapshot-owned EventLive cache during compatibility write', {
+          eventId,
+          season,
+        });
+      } else {
+        logInfo('Event lives cached', { eventId, season, count: eventLives.length });
+      }
     } catch (error) {
       logError('Event lives cache set error', error, { eventId, count: eventLives.length });
       throw error;

@@ -1,5 +1,6 @@
 import { getActiveCacheSeason } from './cache-season';
 import { parseHashEntries } from './hash-read';
+import { replaceHashesUnlessLiveSnapshotOwned } from './live-snapshot-ownership';
 import { logDebug, logError, logInfo } from '../utils/logger';
 import { redisSingleton } from './singleton';
 
@@ -20,20 +21,27 @@ const createLiveBonusCache = (prefix: 'LiveBonus' | 'LiveBonusV2') => ({
       const season = await getActiveCacheSeason();
       const key = `${prefix}:${season}:${eventId}`;
 
-      const pipeline = redis.pipeline();
-      pipeline.del(key);
-
       const teamIds = Object.keys(byTeam);
-      if (teamIds.length > 0) {
-        const fields: Record<string, string> = {};
-        for (const teamId of teamIds) {
-          fields[teamId] = JSON.stringify(byTeam[teamId]);
-        }
-        pipeline.hset(key, fields);
+      const fields: Record<string, string> = {};
+      for (const teamId of teamIds) {
+        fields[teamId] = JSON.stringify(byTeam[teamId]);
       }
-
-      await pipeline.exec();
-      logInfo('Live bonus cache updated', { eventId, season, teams: teamIds.length });
+      const snapshotOwnedEventIds = await replaceHashesUnlessLiveSnapshotOwned(redis, season, [
+        { eventId, key, fields },
+      ]);
+      if (snapshotOwnedEventIds.has(eventId)) {
+        logInfo(`Preserved snapshot-owned ${prefix} cache during compatibility write`, {
+          eventId,
+          season,
+        });
+      } else {
+        logInfo('Live bonus cache updated', {
+          eventId,
+          season,
+          prefix,
+          teams: teamIds.length,
+        });
+      }
     } catch (error) {
       logError('Live bonus cache set error', error, { eventId });
       throw error;
@@ -74,8 +82,15 @@ const createLiveBonusCache = (prefix: 'LiveBonus' | 'LiveBonusV2') => ({
       const redis = await redisSingleton.getClient();
       const season = await getActiveCacheSeason();
       const key = `${prefix}:${season}:${eventId}`;
-      await redis.del(key);
-      logInfo('Live bonus cache cleared', { eventId, season });
+      const snapshotOwnedEventIds = await replaceHashesUnlessLiveSnapshotOwned(redis, season, [
+        { eventId, key, fields: {} },
+      ]);
+      logInfo(
+        snapshotOwnedEventIds.has(eventId)
+          ? `Preserved snapshot-owned ${prefix} cache during compatibility clear`
+          : 'Live bonus cache cleared',
+        { eventId, season, prefix },
+      );
     } catch (error) {
       logError('Live bonus cache clear error', error, { eventId });
       throw error;

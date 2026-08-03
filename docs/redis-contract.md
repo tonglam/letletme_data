@@ -153,6 +153,14 @@ The old `event-lives-cache`, `event-lives-db`, `live-fixture-cache`,
 new calls enqueue `live-snapshot`, and workers route any old waiting entries
 through the same complete publisher. No supported job may replace one published
 live view independently while snapshot metadata exists.
+This ownership boundary is also enforced inside the compatibility cache
+helpers: replacing or clearing `Fixtures`, `EventLive`, `LiveFixture`,
+`LiveBonus`, or `LiveBonusV2` performs an atomic metadata-existence check and
+leaves the hash untouched when `LiveSnapshotMeta:{season}:{eventId}` exists.
+The daily/full fixture refresh still upserts PostgreSQL, rebuilds
+`FixturesByTeam`, and refreshes events without snapshot metadata, but preserves
+all snapshot-owned event hashes. Only the coordinated publisher (or explicit
+season cleanup that removes metadata and its views together) may change them.
 Transient staging keys use `{target}:staging:{uuid}`, expire after fifteen
 minutes if a worker is terminated, and are deleted on every success or handled
 failure. The atomic rename removes that temporary TTL from published hashes;

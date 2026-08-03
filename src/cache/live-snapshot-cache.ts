@@ -14,9 +14,10 @@ import {
 } from '../domain/live-snapshot';
 import { logError, logInfo, logWarn } from '../utils/logger';
 import { getActiveCacheSeason } from './cache-season';
+import { liveSnapshotMetaKey } from './live-snapshot-ownership';
 import { redisSingleton } from './singleton';
 
-export const LIVE_SNAPSHOT_META_PREFIX = 'LiveSnapshotMeta';
+export { LIVE_SNAPSHOT_META_PREFIX } from './live-snapshot-ownership';
 export const LIVE_SNAPSHOT_STAGING_TTL_SECONDS = 15 * 60;
 
 type HashFields = Record<string, string>;
@@ -185,9 +186,7 @@ export function createLiveSnapshotCache(
         dependencies.getRedisClient(),
         dependencies.getSeason(),
       ]);
-      return parseLiveSnapshotMeta(
-        await redis.get(`${LIVE_SNAPSHOT_META_PREFIX}:${season}:${eventId}`),
-      );
+      return parseLiveSnapshotMeta(await redis.get(liveSnapshotMetaKey(season, eventId)));
     },
 
     async publish(
@@ -199,7 +198,7 @@ export function createLiveSnapshotCache(
         dependencies.getRedisClient(),
         dependencies.getSeason(),
       ]);
-      const metaKey = `${LIVE_SNAPSHOT_META_PREFIX}:${season}:${payload.eventId}`;
+      const metaKey = liveSnapshotMetaKey(season, payload.eventId);
 
       const views = [
         {
