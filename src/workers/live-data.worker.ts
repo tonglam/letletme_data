@@ -1,6 +1,7 @@
 import { Worker, Job, QueueEvents } from 'bullmq';
 
 import { MUTATION_PRIORITY_ORDER, type MutationPriorityTier } from '../domain/job-priority';
+import { shouldSkipQueuedLiveSnapshot } from '../domain/live-snapshot';
 import {
   LIVE_JOBS,
   type LiveDataJobData,
@@ -66,14 +67,18 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
         switch (job.name) {
           case LIVE_JOBS.LIVE_SNAPSHOT:
             {
-              if (source === 'cron' && !(await isLiveMatchWindowForEvent(eventId))) {
-                logInfo('Skipping live snapshot job - not match time', { eventId });
-                break;
+              const persistEventLives = job.data.persistEventLives ?? false;
+              if (source === 'cron') {
+                const windowOpen = await isLiveMatchWindowForEvent(eventId);
+                if (shouldSkipQueuedLiveSnapshot(source, persistEventLives, windowOpen)) {
+                  logInfo('Skipping cache-only live snapshot job - not match time', { eventId });
+                  break;
+                }
               }
               await syncLiveSnapshot(eventId, {
-                persistEventLives: job.data.persistEventLives ?? false,
+                persistEventLives,
               });
-              if (job.data.persistEventLives) {
+              if (persistEventLives) {
                 await enqueueCascadeJobs(eventId, undefined, { includeLiveDerivatives: false });
                 await enqueueFinalLeagueResultsAfterLiveSync(eventId);
               }

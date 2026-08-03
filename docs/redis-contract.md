@@ -120,12 +120,34 @@ accepted upstream pair:
 
 The writer builds uniquely named staging hashes, verifies every field count,
 then validates and publishes all six views plus `LiveSnapshotMeta` in one
-atomic Lua script. Readers therefore observe the complete previous revision or
-the complete next revision, never a delete-first gap or a mixture of
-independently timed jobs. Unlike a Redis `MULTI`/`EXEC` runtime command error,
-a missing staging key fails the script before any published key changes. Empty
-bonus views deliberately delete the old bonus hash inside the same script; the
-four required views refuse empty publication.
+atomic Lua script. This prevents a partial writer commit: one Redis command sees
+the complete previous revision or the complete next revision, never a
+delete-first gap or independently timed live jobs. It does **not** make several
+consumer commands atomic; publication can occur between two `HGETALL`/`HMGET`
+calls. Unlike a Redis `MULTI`/`EXEC` runtime command error, a missing staging
+key fails the script before any published key changes. Empty bonus views
+deliberately delete the old bonus hash inside the same script; the four required
+views refuse empty publication.
+
+Consumers that combine two or more live views MUST use this retry protocol:
+
+1. Read and validate `LiveSnapshotMeta` immediately before the first live-view
+   command.
+2. Read every required view and validate its fields/cardinality against the
+   metadata counts. A required view may not fall back independently.
+3. Read metadata fresh again after the final live-view command.
+4. Accept the calculation only when both metadata reads exist and have the same
+   revision. If the revision advanced, discard every value and retry the whole
+   calculation once from fresh metadata.
+5. If metadata disappears or becomes malformed, a view is incomplete, sibling
+   roots finish on different revisions, or publication advances again during
+   the retry, discard every Redis candidate and run the whole event calculation
+   from one PostgreSQL fallback mode. Never mix a DB fixture with Redis live or
+   bonus rows.
+
+`letletme-graphql` implements this contract in its live snapshot coordinator,
+including a sibling-root barrier before GraphQL exposes any candidate. Writer
+or reader changes to this protocol must update and test both repositories.
 Transient staging keys use `{target}:staging:{uuid}`, expire after fifteen
 minutes if a worker is terminated, and are deleted on every success or handled
 failure. The atomic rename removes that temporary TTL from published hashes;

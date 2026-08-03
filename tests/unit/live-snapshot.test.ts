@@ -7,7 +7,10 @@ import {
   type LiveSnapshotCachePayload,
   type LiveSnapshotPublishOptions,
 } from '../../src/cache/live-snapshot-cache';
-import type { LiveSnapshotMeta } from '../../src/domain/live-snapshot';
+import {
+  shouldSkipQueuedLiveSnapshot,
+  type LiveSnapshotMeta,
+} from '../../src/domain/live-snapshot';
 import {
   prepareLiveSnapshot,
   syncLiveSnapshot,
@@ -279,6 +282,16 @@ describe('prepareLiveSnapshot', () => {
         referenceData(),
       ),
     ).toThrow('Incomplete fixture transformation for live snapshot event 1; missing IDs: 2');
+  });
+});
+
+describe('queued live snapshot window policy', () => {
+  test('skips only cache-only cron work after the match window closes', () => {
+    expect(shouldSkipQueuedLiveSnapshot('cron', false, false)).toBe(true);
+    expect(shouldSkipQueuedLiveSnapshot('cron', true, false)).toBe(false);
+    expect(shouldSkipQueuedLiveSnapshot('cron', false, true)).toBe(false);
+    expect(shouldSkipQueuedLiveSnapshot('manual', false, false)).toBe(false);
+    expect(shouldSkipQueuedLiveSnapshot('cascade', true, false)).toBe(false);
   });
 });
 

@@ -21,6 +21,14 @@ export const LiveSnapshotMetaSchema = z.object({
 export type LiveSnapshotState = z.infer<typeof LiveSnapshotStateSchema>;
 export type LiveSnapshotMeta = z.infer<typeof LiveSnapshotMetaSchema>;
 
+export function shouldSkipQueuedLiveSnapshot(
+  source: 'cron' | 'manual' | 'cascade',
+  persistEventLives: boolean,
+  windowOpen: boolean,
+): boolean {
+  return source === 'cron' && !persistEventLives && !windowOpen;
+}
+
 export function parseLiveSnapshotMeta(value: string | null): LiveSnapshotMeta | null {
   if (!value) return null;
   try {
