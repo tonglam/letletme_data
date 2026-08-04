@@ -205,6 +205,8 @@ describe('entry-sync entry-list job IDs', () => {
     expect(second).not.toBeNull();
     expect(first!.id).toBe('entry-picks-manual-chunk-0');
     expect(second!.id).toBe(first!.id as string);
+    expect(entrySyncAddCalls[0].data.runId).not.toBe('manual');
+    expect(entrySyncAddCalls[1].data.runId).not.toBe(entrySyncAddCalls[0].data.runId);
     expect(entrySyncAddCalls[0].opts.removeOnComplete).toBe(true);
     expect(entrySyncAddCalls[0].opts.removeOnFail).toBe(true);
   });

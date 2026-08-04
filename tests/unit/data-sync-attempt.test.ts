@@ -42,6 +42,15 @@ describe('data sync attempt reporting', () => {
     ).toBe(4);
   });
 
+  test('excludes an explicitly scheduled retry delay from queue wait', () => {
+    expect(
+      resolveBullMqAttemptQueueWaitMs(
+        { timestamp: 1_000, processedOn: 601_250, attemptsMade: 0, delay: 600_000 },
+        601_251,
+      ),
+    ).toBe(250);
+  });
+
   test('normalizes the result shapes returned by core and entry sync services', () => {
     expect(inferDataSyncWorkSummary({ count: 20, errors: 2 })).toEqual({
       requiredUnits: 22,

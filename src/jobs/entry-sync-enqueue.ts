@@ -55,13 +55,11 @@ async function enqueueEntrySyncJob(
     const concurrency = sanitizePositiveInt(options.concurrency, ENTRY_SYNC_DEFAULT_CONCURRENCY);
     const throttleMs = sanitizePositiveInt(options.throttleMs, ENTRY_SYNC_DEFAULT_THROTTLE_MS);
 
-    // Stable runId for this chain. Retries keep the same runId so retried chunks
-    // reuse the same deterministic jobId and cannot fork duplicate chains (FP-14f).
-    // Manual table-scans default to a stable runId so repeat triggers dedupe in the
-    // waiting room; cron ticks use a fresh runId so every cycle queues its own job.
-    const runId =
-      options.runId ??
-      (source === 'cron' ? `${Date.now()}` : source === 'manual' ? 'manual' : randomUUID());
+    // Stable runId for this chain. Retries and following chunks keep the same
+    // runId. Every new manual scan gets a distinct correlation ID; its first
+    // chunk still uses a separate stable queue key to dedupe concurrent triggers.
+    const runId = options.runId ?? (source === 'cron' ? `${Date.now()}` : randomUUID());
+    const tableScanQueueKey = source === 'manual' && options.runId === undefined ? 'manual' : runId;
 
     const jobData = {
       source,
@@ -84,7 +82,7 @@ async function enqueueEntrySyncJob(
     const isEntryList = options.entryIds !== undefined;
     const defaultJobId = isEntryList
       ? `${jobName}-entry-list-${hashEntryListKey(options.entryIds ?? [], options.eventId, options.retryCount)}`
-      : `${jobName}-${runId}-chunk-${chunkKey}`;
+      : `${jobName}-${tableScanQueueKey}-chunk-${chunkKey}`;
     const jobId = options.jobId ?? defaultJobId;
     // Deterministic IDs must not block re-triggers after settle.
     const removeOnSettle = isEntryList || source === 'manual';

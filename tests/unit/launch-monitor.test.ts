@@ -155,24 +155,24 @@ describe('launch monitor', () => {
     expect(sends).toBe(1);
   });
 
-  test('releases the lock after delivery failure so the next tick can retry', async () => {
+  test('retains the lock after an ambiguous delivery failure', async () => {
     const redis = new FakeRedis();
-    let shouldFail = true;
+    let sends = 0;
     const deps = dependencies({
       redis,
       send: async () => {
-        if (shouldFail) throw new Error('notification unavailable');
+        sends += 1;
+        throw new Error('notification response lost');
       },
     });
 
-    await expect(evaluateLaunchMonitor(deps)).rejects.toThrow('notification unavailable');
-    expect(redis.values.has('LaunchNotification:warning:2026:lock')).toBe(false);
+    await expect(evaluateLaunchMonitor(deps)).rejects.toThrow('notification response lost');
+    expect(redis.values.has('LaunchNotification:warning:2026:lock')).toBe(true);
     expect(redis.values.has('LaunchNotification:warning:2026')).toBe(false);
 
-    shouldFail = false;
     const retry = await evaluateLaunchMonitor(deps);
-    expect(retry.delivery).toBe('sent');
-    expect(redis.values.has('LaunchNotification:warning:2026')).toBe(true);
+    expect(retry.delivery).toBe('locked');
+    expect(sends).toBe(1);
   });
 
   test('retries the delivered marker before releasing the notification lock', async () => {

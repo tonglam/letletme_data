@@ -96,17 +96,18 @@ async function sendLaunchNotificationOnce(
   const lockKey = `${doneKey}:lock`;
   const token = dependencies.createLockToken();
   // This once-per-transition side effect spans Telegram and Redis, so there is
-  // no atomic commit. Keep the lock without an expiry: confirmed pre-delivery
-  // failures release it, while an ambiguous delivered-without-marker state
-  // remains at-most-once until an operator reconciles it.
+  // no atomic commit. Keep the lock without an expiry once delivery is attempted:
+  // a thrown transport error can still mean Telegram accepted the request.
   const acquired = await redis.set(lockKey, token, 'NX');
   if (acquired !== 'OK') return 'locked';
 
   let deliveryError: unknown;
+  let deliveryAttempted = false;
   let notificationDelivered = false;
   let markerPersisted = false;
   try {
     if (await redis.get(doneKey)) return 'already_sent';
+    deliveryAttempted = true;
     await dependencies.sendNotification(message);
     notificationDelivered = true;
     await persistNotificationMarker(redis, doneKey, dependencies.now().toISOString(), dependencies);
@@ -116,9 +117,11 @@ async function sendLaunchNotificationOnce(
     deliveryError = error;
     throw error;
   } finally {
-    if (notificationDelivered && !markerPersisted) {
+    if (deliveryAttempted && !markerPersisted) {
       logError(
-        'Launch notification was delivered but its marker was not persisted; retaining lock',
+        notificationDelivered
+          ? 'Launch notification was delivered but its marker was not persisted; retaining lock'
+          : 'Launch notification delivery outcome is ambiguous; retaining lock',
         deliveryError,
       );
     } else {

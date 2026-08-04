@@ -44,12 +44,13 @@ export function resolveDataSyncAttempt(
 }
 
 export function resolveBullMqAttemptQueueWaitMs(
-  timing: { timestamp: number; processedOn?: number; attemptsMade: number },
+  timing: { timestamp: number; processedOn?: number; attemptsMade: number; delay?: number },
   now = Date.now(),
 ): number {
   const processedOn = timing.processedOn ?? now;
   if (timing.attemptsMade === 0) {
-    return Math.max(0, Math.floor(processedOn - timing.timestamp));
+    const scheduledDelay = Math.max(0, Math.floor(timing.delay ?? 0));
+    return Math.max(0, Math.floor(processedOn - timing.timestamp - scheduledDelay));
   }
 
   // BullMQ retains the original job timestamp across automatic retries and
