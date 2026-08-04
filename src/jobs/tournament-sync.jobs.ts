@@ -8,6 +8,7 @@ import {
   getTournamentSyncJobPriority,
   type TournamentSyncPriorityJobName,
 } from '../domain/job-priority';
+import type { TournamentFinalizationTarget } from '../domain/tournament';
 import { redisSingleton } from '../cache/singleton';
 import { logError, logInfo } from '../utils/logger';
 
@@ -17,7 +18,7 @@ export type TournamentSyncEnqueueOptions = {
   delay?: number;
   cascadeId?: string;
   jobId?: string;
-  tournamentIds?: number[];
+  finalizationTargets?: TournamentFinalizationTarget[];
 };
 
 /** Cascade jobs that must finish before event publication can finish tournaments. */
@@ -252,8 +253,20 @@ async function enqueueTournamentSyncJob(
       source,
       triggeredAt: new Date().toISOString(),
       ...(options.cascadeId ? { cascadeId: options.cascadeId } : {}),
-      ...(options.tournamentIds
-        ? { tournamentIds: [...new Set(options.tournamentIds.filter((id) => id > 0))] }
+      ...(options.finalizationTargets
+        ? {
+            finalizationTargets: [
+              ...new Map(
+                options.finalizationTargets
+                  .filter(
+                    (target) =>
+                      target.tournamentId > 0 &&
+                      Number.isFinite(Date.parse(target.standingsReadyAt)),
+                  )
+                  .map((target) => [target.tournamentId, target]),
+              ).values(),
+            ],
+          }
         : {}),
     };
 
@@ -280,7 +293,7 @@ async function enqueueTournamentSyncJob(
       tier,
       queue: queue.name,
       cascadeId: options.cascadeId,
-      tournamentCount: options.tournamentIds?.length,
+      tournamentCount: options.finalizationTargets?.length,
     });
 
     return job;

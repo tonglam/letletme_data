@@ -2,6 +2,22 @@ import { getDbClient } from '../db/singleton';
 import { logError, logInfo } from '../utils/logger';
 
 /**
+ * Refresh the event-level source before an atomic standings publication.
+ * The tournament-level view is refreshed in the readiness transaction so a
+ * filtered row and its readiness timestamp become visible together.
+ */
+export async function refreshTournamentEventSnapshotMaterializedView(): Promise<void> {
+  const client = await getDbClient();
+  try {
+    await client`REFRESH MATERIALIZED VIEW CONCURRENTLY mv_tournament_event_snapshot`;
+    logInfo('Refreshed mv_tournament_event_snapshot');
+  } catch (error) {
+    logError('Failed to refresh tournament event snapshot materialized view', error);
+    throw error;
+  }
+}
+
+/**
  * Refresh tournament materialized views.
  *
  * These views power the GraphQL tournament APIs (tournamentEntryRankingSummary

@@ -1,4 +1,4 @@
-import { and, eq, gte, inArray, isNotNull, lt, lte, sql } from 'drizzle-orm';
+import { and, eq, getTableColumns, gte, inArray, isNotNull, lt, lte, sql } from 'drizzle-orm';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 
 import { acquireActiveSeasonReadFence, getActiveCacheSeasonUncached } from '../cache/cache-season';
@@ -39,6 +39,7 @@ export interface TournamentInfoSummary {
   knockoutStartedEventId: number | null;
   knockoutEndedEventId: number | null;
   state: 'active' | 'inactive' | 'finished';
+  standingsReadyAt: string | null;
 }
 
 export interface TournamentInfoNameSummary {
@@ -86,7 +87,11 @@ export interface OfficialSyncTournamentRow {
   state: 'active' | 'inactive' | 'finished';
 }
 
-function mapTournamentInfo(row: DbTournamentInfo): TournamentInfoSummary {
+function mapTournamentInfo(
+  row: Omit<DbTournamentInfo, 'standingsReadyAt'> & {
+    standingsReadyAt: Date | string | null;
+  },
+): TournamentInfoSummary {
   return {
     id: row.id,
     leagueId: row.leagueId,
@@ -100,6 +105,10 @@ function mapTournamentInfo(row: DbTournamentInfo): TournamentInfoSummary {
     knockoutStartedEventId: row.knockoutStartedEventId,
     knockoutEndedEventId: row.knockoutEndedEventId,
     state: row.state,
+    standingsReadyAt:
+      row.standingsReadyAt instanceof Date
+        ? row.standingsReadyAt.toISOString()
+        : row.standingsReadyAt,
   };
 }
 
@@ -197,7 +206,12 @@ export const createTournamentInfoRepository = (dbInstance?: DatabaseInstance) =>
       try {
         const db = await getDbInstance();
         const rows = await db
-          .select()
+          .select({
+            ...getTableColumns(tournamentInfos),
+            // Preserve PostgreSQL's full timestamp precision for the cascade
+            // generation fence instead of truncating it through JavaScript Date.
+            standingsReadyAt: sql<string>`${tournamentInfos.standingsReadyAt}::text`,
+          })
           .from(tournamentInfos)
           .where(
             and(eq(tournamentInfos.state, 'active'), isNotNull(tournamentInfos.standingsReadyAt)),
@@ -522,14 +536,23 @@ export const createTournamentInfoRepository = (dbInstance?: DatabaseInstance) =>
               `Active season changed from ${expectedSeason} to ${activeSeason} before standings publication`,
             );
           }
-          await tx
+          const published = await tx
             .update(tournamentInfos)
             .set({
               standingsReadyAt: sql`COALESCE(${tournamentInfos.standingsReadyAt}, now())`,
               setupProgressUpdatedAt: new Date(),
               updatedAt: new Date(),
             })
-            .where(eq(tournamentInfos.id, tournamentId));
+            .where(eq(tournamentInfos.id, tournamentId))
+            .returning({ id: tournamentInfos.id });
+          if (published.length === 0) {
+            throw new Error(`Tournament ${tournamentId} no longer exists`);
+          }
+
+          // CONCURRENTLY is not allowed inside a transaction. This bounded
+          // top-level refresh sees the update above, and PostgreSQL exposes
+          // both the readiness gate and its filtered snapshot only at commit.
+          await tx.execute(sql`REFRESH MATERIALIZED VIEW public.mv_tournament_snapshot`);
         });
       } catch (error) {
         logError('Failed to publish tournament standings readiness', error, { tournamentId });

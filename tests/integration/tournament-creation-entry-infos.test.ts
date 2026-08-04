@@ -4,6 +4,8 @@ assertIntegrationEnv();
 
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 
+import { resetActiveSeasonMemo } from '../../src/cache/cache-season';
+import { redisSingleton } from '../../src/cache/singleton';
 import { planTournamentStructure, type TournamentParticipant } from '../../src/domain/tournament';
 import { getDbClient } from '../../src/db/singleton';
 import { tournamentInfoRepository } from '../../src/repositories/tournament-infos';
@@ -235,7 +237,7 @@ describe('tournament creation vs entry_infos (FP-08)', () => {
           standings_ready_at = NULL
       WHERE id = ${created.id}
     `;
-    expect(await tournamentRosterRepository.finishThroughEvent(12, [created.id])).toBe(0);
+    expect(await tournamentRosterRepository.finishThroughEvent(12, [])).toBe(0);
 
     await client`
       UPDATE tournament_infos
@@ -244,7 +246,20 @@ describe('tournament creation vs entry_infos (FP-08)', () => {
           standings_ready_at = now()
       WHERE id = ${created.id}
     `;
-    expect(await tournamentRosterRepository.finishThroughEvent(12, [created.id])).toBe(0);
+    const capturedRows = await client<Array<{ standingsReadyAt: string }>>`
+      SELECT standings_ready_at::text AS "standingsReadyAt"
+      FROM tournament_infos
+      WHERE id = ${created.id}
+    `;
+    const capturedTarget = {
+      tournamentId: created.id,
+      standingsReadyAt: capturedRows[0]!.standingsReadyAt,
+    };
+    const activeTournament = (await tournamentInfoRepository.findActive()).find(
+      (tournament) => tournament.id === created.id,
+    );
+    expect(activeTournament?.standingsReadyAt).toBe(capturedTarget.standingsReadyAt);
+    expect(await tournamentRosterRepository.finishThroughEvent(12, [capturedTarget])).toBe(0);
 
     await client`
       INSERT INTO tournament_points_group_results (
@@ -259,7 +274,22 @@ describe('tournament creation vs entry_infos (FP-08)', () => {
       VALUES (${created.id}, 1, 12, ${SYNCED_ENTRY.id}, 50, 0, 50)
     `;
     expect(await tournamentRosterRepository.finishThroughEvent(12, [])).toBe(0);
-    expect(await tournamentRosterRepository.finishThroughEvent(12, [created.id])).toBe(1);
+    await client`
+      UPDATE tournament_infos
+      SET standings_ready_at = standings_ready_at + interval '1 microsecond'
+      WHERE id = ${created.id}
+    `;
+    expect(await tournamentRosterRepository.finishThroughEvent(12, [capturedTarget])).toBe(0);
+    const currentRows = await client<Array<{ standingsReadyAt: string }>>`
+      SELECT standings_ready_at::text AS "standingsReadyAt"
+      FROM tournament_infos
+      WHERE id = ${created.id}
+    `;
+    expect(
+      await tournamentRosterRepository.finishThroughEvent(12, [
+        { tournamentId: created.id, standingsReadyAt: currentRows[0]!.standingsReadyAt },
+      ]),
+    ).toBe(1);
     const rows = await client<Array<{ state: string }>>`
       SELECT state FROM tournament_infos WHERE id = ${created.id}
     `;
@@ -503,7 +533,7 @@ describe('tournament creation vs entry_infos (FP-08)', () => {
     expect(state[0]).toEqual({ setup_status: 'ready', setup_phase: 'ready' });
   });
 
-  test('keeps a knockout-only tournament in the aggregate snapshot', async () => {
+  test('omits a pending shell and publishes a ready knockout-only snapshot', async () => {
     const client = await getDbClient();
     const participants = buildParticipants();
     const plan = planTournamentStructure(
@@ -535,6 +565,29 @@ describe('tournament creation vs entry_infos (FP-08)', () => {
       )
     `;
     await client`REFRESH MATERIALIZED VIEW mv_tournament_snapshot`;
+    const pendingRows = await client<Array<{ tournament_id: number }>>`
+      select tournament_id
+      from mv_tournament_snapshot
+      where tournament_id = ${created.id}
+    `;
+    expect(pendingRows).toHaveLength(0);
+
+    const redis = await redisSingleton.getClient();
+    const previousSeason = await redis.get('Season:active');
+    const publicationSeason = /^\d{4}$/.test(previousSeason ?? '') ? previousSeason! : '2526';
+    if (publicationSeason !== previousSeason) {
+      await redis.set('Season:active', publicationSeason);
+      resetActiveSeasonMemo();
+    }
+    try {
+      await tournamentInfoRepository.markStandingsReady(created.id, publicationSeason);
+    } finally {
+      if (publicationSeason !== previousSeason) {
+        if (previousSeason === null) await redis.del('Season:active');
+        else await redis.set('Season:active', previousSeason);
+        resetActiveSeasonMemo();
+      }
+    }
     const rows = await client<
       Array<{ tournament_id: number; latest_event_id: number | null; total_entries: number }>
     >`
@@ -575,6 +628,11 @@ describe('tournament creation vs entry_infos (FP-08)', () => {
     );
     const created = await tournamentInfoRepository.createTournamentWithEntries(plan);
     createdTournamentIds.push(created.id);
+    await client`
+      update tournament_infos
+      set standings_ready_at = now()
+      where id = ${created.id}
+    `;
     await client`REFRESH MATERIALIZED VIEW mv_tournament_snapshot`;
 
     expect(
@@ -623,6 +681,11 @@ describe('tournament creation vs entry_infos (FP-08)', () => {
     const created = await tournamentInfoRepository.createTournamentWithEntries(plan);
     createdTournamentIds.push(created.id);
     await client`
+      update tournament_infos
+      set standings_ready_at = now()
+      where id = ${created.id}
+    `;
+    await client`
       INSERT INTO tournament_battle_group_results (
         tournament_id, group_id, event_id,
         home_index, home_entry_id, home_match_points,
@@ -668,6 +731,11 @@ describe('tournament creation vs entry_infos (FP-08)', () => {
 
     const created = await tournamentInfoRepository.createTournamentWithEntries(plan);
     createdTournamentIds.push(created.id);
+    await client`
+      update tournament_infos
+      set standings_ready_at = now()
+      where id = ${created.id}
+    `;
     await client`
       insert into tournament_points_group_results (
         tournament_id, group_id, event_id, entry_id, event_group_rank,

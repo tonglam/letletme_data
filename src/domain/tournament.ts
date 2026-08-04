@@ -151,6 +151,12 @@ export type TournamentSyncContext = {
   knockoutEndedEventId: number | null;
 };
 
+/** Exact standings publication selected by one event-results cascade. */
+export type TournamentFinalizationTarget = {
+  tournamentId: number;
+  standingsReadyAt: string;
+};
+
 export type EntrySeed = {
   entryId: number;
   overallRank: number | null;

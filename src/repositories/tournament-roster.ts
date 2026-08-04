@@ -2,6 +2,7 @@ import { getDbClient } from '../db/singleton';
 import type {
   LeagueType,
   TournamentConfig,
+  TournamentFinalizationTarget,
   TournamentParticipant,
   TournamentRosterMode,
 } from '../domain/tournament';
@@ -390,18 +391,41 @@ export const tournamentRosterRepository = {
     `;
   },
 
-  finishThroughEvent: async (eventId: number, tournamentIds: number[]): Promise<number> => {
-    const eligibleTournamentIds = [...new Set(tournamentIds.filter((id) => id > 0))];
-    if (eligibleTournamentIds.length === 0) {
+  finishThroughEvent: async (
+    eventId: number,
+    targets: TournamentFinalizationTarget[],
+  ): Promise<number> => {
+    const eligibleTargets = [
+      ...new Map(
+        targets
+          .filter(
+            (target) =>
+              target.tournamentId > 0 && Number.isFinite(Date.parse(target.standingsReadyAt)),
+          )
+          .map((target) => [target.tournamentId, target]),
+      ).values(),
+    ];
+    if (eligibleTargets.length === 0) {
       logInfo('No cascade-owned tournaments eligible for finish', { eventId });
       return 0;
     }
+    const targetPayload = JSON.stringify(
+      eligibleTargets.map((target) => ({
+        tournament_id: target.tournamentId,
+        standings_ready_at: target.standingsReadyAt,
+      })),
+    );
     const client = await getDbClient();
     const rows = await client<{ id: number }[]>`
       update tournament_infos as tournament
       set state = 'finished', updated_at = now()
-      where tournament.state = 'active'
-        and tournament.id = any(${eligibleTournamentIds}::int[])
+      from jsonb_to_recordset(${targetPayload}::jsonb) as target(
+        tournament_id int,
+        standings_ready_at timestamptz
+      )
+      where tournament.id = target.tournament_id
+        and tournament.standings_ready_at = target.standings_ready_at
+        and tournament.state = 'active'
         and tournament.setup_status = 'ready'
         and tournament.standings_ready_at is not null
         and greatest(
@@ -453,7 +477,7 @@ export const tournamentRosterRepository = {
     `;
     logInfo('Marked cascade-owned completed tournaments finished', {
       eventId,
-      eligibleTournamentCount: eligibleTournamentIds.length,
+      eligibleTournamentCount: eligibleTargets.length,
       count: rows.length,
     });
     return rows.length;

@@ -8,6 +8,7 @@ import {
   tournamentSetupRebuildScopes,
 } from '../domain/mutation-scope';
 import { diffTournamentRoster, getTournamentBackfillWindow } from '../domain/tournament';
+import type { TournamentFinalizationTarget } from '../domain/tournament';
 import { ENTRY_SYNC_DEFAULT_CONCURRENCY } from '../queues/entry-sync.queue';
 import { ConflictError, NotFoundError, ValidationError } from '../utils/errors';
 import { mapWithConcurrency } from '../utils/async';
@@ -264,7 +265,7 @@ export async function reconcileOfficialTournamentRosters(): Promise<{
 
 export async function finishTournamentsThroughEvent(
   eventId: number,
-  tournamentIds: number[],
+  targets: TournamentFinalizationTarget[],
 ): Promise<number> {
-  return tournamentRosterRepository.finishThroughEvent(eventId, tournamentIds);
+  return tournamentRosterRepository.finishThroughEvent(eventId, targets);
 }

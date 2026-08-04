@@ -1,4 +1,5 @@
 import type { MutationPriorityTier } from '../domain/job-priority';
+import type { TournamentFinalizationTarget } from '../domain/tournament';
 import { closeTieredQueues, createTieredQueueSet } from './tiered-queue';
 
 export const tournamentSyncQueueName = 'tournament-sync';
@@ -35,8 +36,8 @@ export interface TournamentSyncJobData {
    * materialized-views refresh and terminal lifecycle publication.
    */
   cascadeId?: string;
-  /** Active tournaments selected by the base event-results job. */
-  tournamentIds?: number[];
+  /** Exact standings publications selected by the base event-results job. */
+  finalizationTargets?: TournamentFinalizationTarget[];
 }
 
 const tieredQueueSet = createTieredQueueSet<TournamentSyncJobData>(tournamentSyncQueueName, {

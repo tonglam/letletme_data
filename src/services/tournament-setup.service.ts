@@ -27,7 +27,10 @@ import {
   type TournamentEntrySyncPlan,
   type TournamentSetupIssue,
 } from './tournament-backfill.service';
-import { refreshTournamentMaterializedViews } from './tournament-materialized-views.service';
+import {
+  refreshTournamentEventSnapshotMaterializedView,
+  refreshTournamentMaterializedViews,
+} from './tournament-materialized-views.service';
 import { rebuildTournamentStructure } from './tournament-structure.service';
 
 export { ensureKnockoutRoundOneSeeded } from './tournament-seed.service';
@@ -347,7 +350,7 @@ export async function setupTournamentStructure(tournamentId: number): Promise<vo
     if (blockingCoreIssues.length > 0) {
       throw new Error(`Core tournament audit failed: ${blockingCoreIssues.join('; ')}`);
     }
-    await refreshTournamentMaterializedViews();
+    await refreshTournamentEventSnapshotMaterializedView();
     await tournamentInfoRepository.markStandingsReady(tournamentId, setupSeason);
     standingsPublished = true;
     await invalidateTournamentGraphQLCaches('standings-publication');

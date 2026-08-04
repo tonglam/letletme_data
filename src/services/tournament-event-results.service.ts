@@ -1,6 +1,7 @@
 import { getActiveCacheSeason } from '../cache/cache-season';
 import { fplClient } from '../clients/fpl';
 import type { TransactionHandle } from '../db/singleton';
+import type { TournamentFinalizationTarget } from '../domain/tournament';
 import { createEntryEventPicksRepository } from '../repositories/entry-event-picks';
 import {
   createEntryEventResultsRepository,
@@ -225,15 +226,21 @@ export async function syncTournamentEventResults(
   totalEntries: number;
   synced: number;
   errors: number;
-  tournamentIds: number[];
+  finalizationTargets: TournamentFinalizationTarget[];
 }> {
   logInfo('Starting tournament event results sync', { eventId });
 
   const tournaments = await tournamentInfoRepository.findActive();
   if (tournaments.length === 0) {
     logInfo('No active tournaments found for tournament event results', { eventId });
-    return { eventId, totalEntries: 0, synced: 0, errors: 0, tournamentIds: [] };
+    return { eventId, totalEntries: 0, synced: 0, errors: 0, finalizationTargets: [] };
   }
+
+  const finalizationTargets = tournaments.flatMap((tournament) =>
+    tournament.standingsReadyAt
+      ? [{ tournamentId: tournament.id, standingsReadyAt: tournament.standingsReadyAt }]
+      : [],
+  );
 
   const entryLists = await Promise.all(
     tournaments.map((tournament) =>
@@ -249,7 +256,7 @@ export async function syncTournamentEventResults(
       totalEntries: 0,
       synced: 0,
       errors: 0,
-      tournamentIds: tournaments.map((tournament) => tournament.id),
+      finalizationTargets,
     };
   }
   const { totalEntries, synced, errors } = await syncTournamentEventResultsForEntryIds(
@@ -270,6 +277,6 @@ export async function syncTournamentEventResults(
     totalEntries,
     synced,
     errors,
-    tournamentIds: tournaments.map((tournament) => tournament.id),
+    finalizationTargets,
   };
 }

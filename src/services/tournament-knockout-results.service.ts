@@ -1,5 +1,10 @@
-import { fplClient } from '../clients/fpl';
-import { getDb } from '../db/singleton';
+import {
+  acquireActiveSeasonReadFence,
+  getActiveCacheSeason,
+  getActiveCacheSeasonUncached,
+} from '../cache/cache-season';
+import type { DbEventLive } from '../db/schemas/index.schema';
+import { getDb, type TransactionHandle } from '../db/singleton';
 import type { TournamentSyncContext } from '../domain/tournament';
 import type { RawFPLEntryEventPickItem } from '../types';
 import { entryEventResultsRepository } from '../repositories/entry-event-results';
@@ -12,6 +17,7 @@ import {
 } from '../repositories/tournament-knockout-results';
 import { createTournamentKnockoutsRepository } from '../repositories/tournament-knockouts';
 import { ensureKnockoutRoundOneSeeded } from './tournament-seed.service';
+import { uniqueNumbers } from '../utils/async';
 import { logError, logInfo } from '../utils/logger';
 
 type KnockoutRoundSummary = {
@@ -38,24 +44,53 @@ function pickElements(picks: RawFPLEntryEventPickItem[], chip: string | null) {
   return picks.filter((pick) => pick.position <= 11).map((pick) => pick.element);
 }
 
-async function loadLiveMap(eventId: number) {
-  const eventLives = await eventLiveRepository.findByEventId(eventId);
-  if (eventLives.length > 0) {
-    return new Map(
-      eventLives.map((live) => [
-        live.elementId,
-        { goalsScored: live.goalsScored, goalsConceded: live.goalsConceded },
-      ]),
-    );
-  }
+type KnockoutSeasonGuard = {
+  getSeason: () => Promise<string>;
+  assertCurrent: (tx: TransactionHandle, expectedSeason: string) => Promise<void>;
+};
 
-  const live = await fplClient.getEventLive(eventId);
-  return new Map(
-    live.elements.map((element) => [
-      element.id,
-      { goalsScored: element.stats.goals_scored, goalsConceded: element.stats.goals_conceded },
+const defaultKnockoutSeasonGuard: KnockoutSeasonGuard = {
+  getSeason: getActiveCacheSeason,
+  assertCurrent: async (tx, expectedSeason) => {
+    await acquireActiveSeasonReadFence(tx);
+    const activeSeason = await getActiveCacheSeasonUncached();
+    if (activeSeason !== expectedSeason) {
+      throw new Error(
+        `Active season changed from ${expectedSeason} to ${activeSeason} during knockout sync`,
+      );
+    }
+  },
+};
+
+export async function loadFinalizedKnockoutLiveMap(
+  eventId: number,
+  checkpointSeason: string,
+  requiredElementIds: readonly number[],
+  findRows: (
+    targetEventId: number,
+    season: string,
+  ) => Promise<ReadonlyArray<Pick<DbEventLive, 'elementId' | 'goalsScored' | 'goalsConceded'>>> = (
+    targetEventId,
+    season,
+  ) => eventLiveRepository.findFinalizedByEventIdForSeason(targetEventId, season),
+) {
+  const eventLives = await findRows(eventId, checkpointSeason);
+  const liveMap = new Map(
+    eventLives.map((live) => [
+      live.elementId,
+      { goalsScored: live.goalsScored, goalsConceded: live.goalsConceded },
     ]),
   );
+  const missingElementIds = uniqueNumbers(requiredElementIds).filter(
+    (elementId) => !liveMap.has(elementId),
+  );
+  if (missingElementIds.length > 0) {
+    throw new Error(
+      `Finalized event live data is incomplete for knockout event ${eventId}; ` +
+        `missing elements: ${missingElementIds.slice(0, 10).join(',')}`,
+    );
+  }
+  return liveMap;
 }
 
 function sumGoals(
@@ -209,6 +244,7 @@ function resolveRoundWinner(
 export async function syncKnockoutForTournament(
   tournament: TournamentSyncContext,
   eventId: number,
+  seasonGuard: KnockoutSeasonGuard = defaultKnockoutSeasonGuard,
 ): Promise<{ updatedResults: number; updatedKnockouts: number; skipped: number }> {
   if (!tournament.knockoutStartedEventId || !tournament.knockoutEndedEventId) {
     logInfo('Skipping knockout tournament without knockout window', {
@@ -227,8 +263,6 @@ export async function syncKnockoutForTournament(
   }
   const eventResultMap = new Map(eventResults.map((result) => [result.entryId, result]));
 
-  const liveMap = await loadLiveMap(eventId);
-
   const knockoutResults = await tournamentKnockoutResultsRepository.findByTournamentAndEvent(
     tournament.id,
     eventId,
@@ -237,6 +271,25 @@ export async function syncKnockoutForTournament(
     logInfo('No knockout fixtures found for event', { tournamentId: tournament.id, eventId });
     return { updatedResults: 0, updatedKnockouts: 0, skipped: entryIds.length };
   }
+
+  const participatingEntryIds = uniqueNumbers(
+    knockoutResults
+      .flatMap((result) => [result.homeEntryId, result.awayEntryId])
+      .filter((entryId): entryId is number => entryId !== null && entryId > 0),
+  );
+  const requiredElementIds: number[] = [];
+  for (const entryId of participatingEntryIds) {
+    const entryResult = eventResultMap.get(entryId);
+    const picks = normalizePicks(entryResult?.eventPicks);
+    if (!entryResult || picks.length === 0) {
+      throw new Error(
+        `Canonical picks are missing for knockout entry ${entryId} in event ${eventId}`,
+      );
+    }
+    requiredElementIds.push(...pickElements(picks, entryResult.eventChip ?? null));
+  }
+  const checkpointSeason = await seasonGuard.getSeason();
+  const liveMap = await loadFinalizedKnockoutLiveMap(eventId, checkpointSeason, requiredElementIds);
 
   const updatedResults = knockoutResults.map((result) => {
     const homeEntryId = result.homeEntryId ?? null;
@@ -279,6 +332,7 @@ export async function syncKnockoutForTournament(
   // anywhere must not leave a half-advanced bracket — single transaction.
   const db = await getDb();
   return await db.transaction(async (tx) => {
+    await seasonGuard.assertCurrent(tx, checkpointSeason);
     const txKnockoutResults = createTournamentKnockoutResultsRepository(tx);
     const txKnockouts = createTournamentKnockoutsRepository(tx);
 

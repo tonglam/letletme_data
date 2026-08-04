@@ -75,6 +75,9 @@ mock.module('../../src/repositories/event-lives', () => ({
   eventLiveRepository: {
     ...realEventLivesRepo.eventLiveRepository,
     findByEventId: mock(async () => []),
+    findFinalizedByEventIdForSeason: mock(async () => [
+      { elementId: 1, goalsScored: 0, goalsConceded: 0 },
+    ]),
   },
 }));
 mock.module('../../src/repositories/event-live-explains', () => ({
@@ -203,8 +206,18 @@ mock.module('../../src/repositories/tournament-knockouts', () => ({
 mock.module('../../src/repositories/entry-event-results', () => ({
   entryEventResultsRepository: {
     findByEventAndEntryIds: mock(async () => [
-      { entryId: 11, eventNetPoints: 50, eventPicks: [], eventChip: null },
-      { entryId: 22, eventNetPoints: 40, eventPicks: [], eventChip: null },
+      {
+        entryId: 11,
+        eventNetPoints: 50,
+        eventPicks: [{ element: 1, position: 1 }],
+        eventChip: null,
+      },
+      {
+        entryId: 22,
+        eventNetPoints: 40,
+        eventPicks: [{ element: 1, position: 1 }],
+        eventChip: null,
+      },
     ]),
   },
 }));
@@ -405,6 +418,11 @@ describe('syncKnockoutForTournament (M6: four dependent upserts in one transacti
     knockoutStartedEventId: 5,
     knockoutEndedEventId: 9,
   } as unknown as TournamentSyncContext;
+  const assertKnockoutSeasonCurrent = mock(async () => {});
+  const seasonGuard = {
+    getSeason: async () => '2526',
+    assertCurrent: assertKnockoutSeasonCurrent,
+  };
 
   beforeEach(() => {
     knockoutCallLog.length = 0;
@@ -416,6 +434,7 @@ describe('syncKnockoutForTournament (M6: four dependent upserts in one transacti
     txResultsFindByMatchIds.mockClear();
     txKnockoutsFindByEndedEvent.mockClear();
     txKnockoutsFindByRound.mockClear();
+    assertKnockoutSeasonCurrent.mockClear();
   });
 
   it('wraps all four upserts and their dependent reads in a single transaction', async () => {
@@ -423,13 +442,14 @@ describe('syncKnockoutForTournament (M6: four dependent upserts in one transacti
     const transaction = mock(async (cb: TxCallback) => cb(tx));
     currentDb = { transaction };
 
-    const result = await syncKnockoutForTournament(tournament, 5);
+    const result = await syncKnockoutForTournament(tournament, 5, seasonGuard);
 
     expect(transaction).toHaveBeenCalledTimes(1);
     expect(createTournamentKnockoutResultsRepository).toHaveBeenCalledTimes(1);
     expect(createTournamentKnockoutsRepository).toHaveBeenCalledTimes(1);
     expect(createTournamentKnockoutResultsRepository.mock.calls[0]?.[0]).toBe(tx);
     expect(createTournamentKnockoutsRepository.mock.calls[0]?.[0]).toBe(tx);
+    expect(assertKnockoutSeasonCurrent).toHaveBeenCalledWith(tx, '2526');
 
     // Four upserts in dependency order; all reads served by tx-scoped repos
     expect(knockoutCallLog).toEqual(['results', 'knockouts', 'knockouts', 'results']);
@@ -455,7 +475,7 @@ describe('syncKnockoutForTournament (M6: four dependent upserts in one transacti
       throw new Error('knockouts upsert failed');
     });
 
-    await expect(syncKnockoutForTournament(tournament, 5)).rejects.toThrow(
+    await expect(syncKnockoutForTournament(tournament, 5, seasonGuard)).rejects.toThrow(
       'knockouts upsert failed',
     );
     // First upsert ran, second failed, the two next-round upserts never ran

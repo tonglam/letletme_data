@@ -216,6 +216,10 @@ LEFT JOIN latest_event le ON le.tournament_id = ti.id
 LEFT JOIN current_snapshot cs ON cs.tournament_id = ti.id
 LEFT JOIN top10_snapshot t10 ON t10.tournament_id = ti.id AND t10.entry_id = cs.entry_id
 LEFT JOIN membership_counts mc ON mc.tournament_id = ti.id
+-- This is a standings read model, not the setup shell. Pending and failed
+-- tournaments remain available through tournament_infos but never publish an
+-- aggregate snapshot during unrelated refreshes.
+WHERE ti.standings_ready_at IS NOT NULL
 GROUP BY ti.id, ti.name, ti.league_id, ti.league_type, le.latest_event_id, mc.total_entries;
 
 -- Unique index required for REFRESH MATERIALIZED VIEW CONCURRENTLY
