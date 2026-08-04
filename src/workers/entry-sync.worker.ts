@@ -2,6 +2,7 @@ import { QueueEvents, Worker, type Job } from 'bullmq';
 import { asc } from 'drizzle-orm';
 
 import { MUTATION_PRIORITY_ORDER, type MutationPriorityTier } from '../domain/job-priority';
+import { resolveEntrySyncTargetEventId } from '../domain/entry-sync';
 import { entryInfos } from '../db/schemas/index.schema';
 import { getDb } from '../db/singleton';
 import {
@@ -23,6 +24,7 @@ import {
   type EntrySyncJobOptions,
 } from '../jobs/entry-sync-enqueue';
 import { syncEntryInfo } from '../services/entry-info.service';
+import { getCurrentEvent } from '../services/events.service';
 import {
   syncEntryEventPicks,
   syncEntryEventResults,
@@ -36,6 +38,7 @@ import {
   resolveBullMqAttemptQueueWaitMs,
   resolveDataSyncAttempt,
   runDataSyncAttempt,
+  type DataSyncAttemptContext,
 } from '../utils/data-sync-attempt';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { logError, logInfo } from '../utils/logger';
@@ -281,70 +284,80 @@ export function createEntrySyncWorker(): WorkerRuntime {
 
     logJobTriggered(context);
 
-    return runDataSyncAttempt(
-      {
-        queue: job.queueName,
-        jobName: job.name,
-        runId: job.data?.runId ?? String(jobId),
-        source: attempt.source,
-        attempt: attempt.attempt,
-        targetEventId: job.data?.eventId,
-        queueWaitMs: context.queueWaitMs,
-      },
-      () =>
-        withMutationConflictGuard(
-          {
-            queueName: job.queueName,
-            jobName: job.name,
-            jobId,
-            eventId: job.data?.eventId,
-          },
-          () =>
-            runTrackedJob(context, async () => {
-              switch (job.name) {
-                case 'entry-info': {
-                  const result = await handleEntryJob(
-                    'entry-info',
-                    'entry info sync',
-                    syncEntryInfo,
-                    job.data,
-                  );
-                  // Only a complete database scan can satisfy the daily marker;
-                  // targeted API and retry jobs must leave the full scan eligible.
-                  if (
-                    shouldMarkEntryInfoSynced(result.fetchedFromDb, result.hasMore, result.failed)
-                  ) {
-                    await markEntryInfoSyncedToday(new Date(), job.id);
-                  }
-                  return result;
+    const attemptContext: DataSyncAttemptContext = {
+      queue: job.queueName,
+      jobName: job.name,
+      runId: job.data?.runId ?? String(jobId),
+      source: attempt.source,
+      attempt: attempt.attempt,
+      targetEventId: job.data?.eventId,
+      queueWaitMs: context.queueWaitMs,
+    };
+
+    return runDataSyncAttempt(attemptContext, async () => {
+      const targetEventId = await resolveEntrySyncTargetEventId(
+        job.name as EntrySyncJobName,
+        job.data?.eventId,
+        async () => (await getCurrentEvent())?.id ?? null,
+      );
+      const effectiveJobData =
+        targetEventId !== undefined ? { ...job.data, eventId: targetEventId } : job.data;
+      context.eventId = targetEventId;
+      attemptContext.targetEventId = targetEventId;
+
+      return withMutationConflictGuard(
+        {
+          queueName: job.queueName,
+          jobName: job.name,
+          jobId,
+          eventId: targetEventId,
+        },
+        () =>
+          runTrackedJob(context, async () => {
+            switch (job.name) {
+              case 'entry-info': {
+                const result = await handleEntryJob(
+                  'entry-info',
+                  'entry info sync',
+                  syncEntryInfo,
+                  effectiveJobData,
+                );
+                // Only a complete database scan can satisfy the daily marker;
+                // targeted API and retry jobs must leave the full scan eligible.
+                if (
+                  shouldMarkEntryInfoSynced(result.fetchedFromDb, result.hasMore, result.failed)
+                ) {
+                  await markEntryInfoSyncedToday(new Date(), job.id);
                 }
-                case 'entry-picks':
-                  return handleEntryJob(
-                    'entry-picks',
-                    'entry picks sync',
-                    (entryId) => syncEntryEventPicks(entryId, job.data?.eventId),
-                    job.data,
-                  );
-                case 'entry-transfers':
-                  return handleEntryJob(
-                    'entry-transfers',
-                    'entry transfers sync',
-                    (entryId) => syncEntryEventTransfers(entryId, job.data?.eventId),
-                    job.data,
-                  );
-                case 'entry-results':
-                  return handleEntryJob(
-                    'entry-results',
-                    'entry results sync',
-                    (entryId) => syncEntryEventResults(entryId, job.data?.eventId),
-                    job.data,
-                  );
-                default:
-                  throw new Error(`Unknown entry-sync job: ${job.name}`);
+                return result;
               }
-            }),
-        ),
-    );
+              case 'entry-picks':
+                return handleEntryJob(
+                  'entry-picks',
+                  'entry picks sync',
+                  (entryId) => syncEntryEventPicks(entryId, targetEventId),
+                  effectiveJobData,
+                );
+              case 'entry-transfers':
+                return handleEntryJob(
+                  'entry-transfers',
+                  'entry transfers sync',
+                  (entryId) => syncEntryEventTransfers(entryId, targetEventId),
+                  effectiveJobData,
+                );
+              case 'entry-results':
+                return handleEntryJob(
+                  'entry-results',
+                  'entry results sync',
+                  (entryId) => syncEntryEventResults(entryId, targetEventId),
+                  effectiveJobData,
+                );
+              default:
+                throw new Error(`Unknown entry-sync job: ${job.name}`);
+            }
+          }),
+      );
+    });
   };
 
   for (const tier of activeTiers) {

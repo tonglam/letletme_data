@@ -9,6 +9,7 @@ import {
 
 class FakeRedis {
   readonly values = new Map<string, string>();
+  readonly setCalls: Array<{ key: string; args: Array<string | number> }> = [];
   private markerFailuresRemaining: number;
 
   constructor(markerFailures = 0) {
@@ -20,6 +21,7 @@ class FakeRedis {
   }
 
   async set(key: string, value: string, ...args: Array<string | number>): Promise<string | null> {
+    this.setCalls.push({ key, args });
     if (args.includes('NX') && this.values.has(key)) return null;
     if (!key.endsWith(':lock') && this.markerFailuresRemaining > 0) {
       this.markerFailuresRemaining -= 1;
@@ -205,6 +207,9 @@ describe('launch monitor', () => {
     await expect(evaluateLaunchMonitor(deps)).rejects.toThrow('marker storage unavailable');
     expect(redis.values.has('LaunchNotification:warning:2026')).toBe(false);
     expect(redis.values.has('LaunchNotification:warning:2026:lock')).toBe(true);
+    expect(
+      redis.setCalls.find((call) => call.key === 'LaunchNotification:warning:2026:lock')?.args,
+    ).toEqual(['NX']);
 
     const nextTick = await evaluateLaunchMonitor(deps);
     expect(nextTick.delivery).toBe('locked');

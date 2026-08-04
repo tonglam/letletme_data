@@ -177,7 +177,7 @@ league URLs, and administrator identity.
 Trace one run or one target event:
 
 ```bash
-docker compose logs --no-color --no-log-prefix --since 24h worker \
+docker compose logs --no-color --no-log-prefix --since 24h api worker \
   | jq -Rc --arg runId "entry-picks-2627-7" --argjson eventId 7 '
       fromjson?
       | select(.event == "data_sync_attempt")
@@ -198,7 +198,7 @@ FROM public.entry_infos;
 Aggregate outcome, upstream pressure, and reuse for a comparable observation window:
 
 ```bash
-docker compose logs --no-color --no-log-prefix --since 7d worker \
+docker compose logs --no-color --no-log-prefix --since 7d api worker \
   | jq -Rsc '
       split("\n")
       | map(fromjson? | select(.event == "data_sync_attempt")) as $rows
@@ -216,6 +216,11 @@ docker compose logs --no-color --no-log-prefix --since 7d worker \
 
 Do not infer success from a worker completion line alone: a `partial` outcome or non-zero failed
 unit count remains actionable. Existing final-failure Telegram alerts remain the alerting path.
+
+A retained `LaunchNotification:*:lock` means delivery may have succeeded while the durable marker
+could not be written. Check the notification destination first. If it was delivered, write the
+corresponding marker before deleting the lock; if delivery definitely failed, delete only that
+exact transition lock so the next monitor tick can retry.
 
 ## Post-deploy season readiness
 

@@ -288,11 +288,7 @@ function buildEntryResultData(
   };
 }
 
-export async function syncLeagueEventResultsByTournament(
-  tournamentId: number,
-  eventId: number,
-  options?: { concurrency?: number; season?: string },
-): Promise<{
+export type LeagueEventResultsSyncSummary = {
   tournamentId: number;
   eventId: number;
   totalEntries: number;
@@ -302,7 +298,31 @@ export async function syncLeagueEventResultsByTournament(
   reusedUnits: number;
   succeededUnits: number;
   failedUnits: number;
-}> {
+};
+
+export function summarizeMissingLeagueEventLiveData(
+  tournamentId: number,
+  eventId: number,
+  entryCount: number,
+): LeagueEventResultsSyncSummary {
+  return {
+    tournamentId,
+    eventId,
+    totalEntries: entryCount,
+    updated: 0,
+    skipped: entryCount,
+    requiredUnits: entryCount,
+    reusedUnits: 0,
+    succeededUnits: 0,
+    failedUnits: entryCount,
+  };
+}
+
+export async function syncLeagueEventResultsByTournament(
+  tournamentId: number,
+  eventId: number,
+  options?: { concurrency?: number; season?: string },
+): Promise<LeagueEventResultsSyncSummary> {
   logInfo('Starting league event results sync for tournament', { tournamentId, eventId });
 
   const tournament = await tournamentInfoRepository.findById(tournamentId);
@@ -320,9 +340,8 @@ export async function syncLeagueEventResultsByTournament(
     checkpointSeason,
   );
   if (eventLives.length === 0) {
-    throw new Error(
-      `Finalized event live data is unavailable for league event results: event ${eventId}`,
-    );
+    logInfo('No event live data found for league event results', { eventId, tournamentId });
+    return summarizeMissingLeagueEventLiveData(tournamentId, eventId, entryIds.length);
   }
   const eventLiveMap = new Map(eventLives.map((live) => [live.elementId, live]));
   const playerIds = uniqueNumbers(eventLives.map((live) => live.elementId));

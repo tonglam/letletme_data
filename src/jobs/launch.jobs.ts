@@ -13,7 +13,6 @@ import { sendTelegramMessage } from '../utils/notify';
 import { CRON_TIMEZONE } from '../utils/timezone';
 
 export const LAUNCH_MONITOR_CRON_PATTERN = '*/5 * * * *';
-const NOTIFICATION_LOCK_TTL_MS = 10 * 60_000;
 const NOTIFICATION_MARKER_ATTEMPTS = 3;
 const NOTIFICATION_MARKER_RETRY_MS = 50;
 
@@ -96,7 +95,11 @@ async function sendLaunchNotificationOnce(
 
   const lockKey = `${doneKey}:lock`;
   const token = dependencies.createLockToken();
-  const acquired = await redis.set(lockKey, token, 'PX', NOTIFICATION_LOCK_TTL_MS, 'NX');
+  // This once-per-transition side effect spans Telegram and Redis, so there is
+  // no atomic commit. Keep the lock without an expiry: confirmed pre-delivery
+  // failures release it, while an ambiguous delivered-without-marker state
+  // remains at-most-once until an operator reconciles it.
+  const acquired = await redis.set(lockKey, token, 'NX');
   if (acquired !== 'OK') return 'locked';
 
   let deliveryError: unknown;
