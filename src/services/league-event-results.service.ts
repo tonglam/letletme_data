@@ -446,6 +446,12 @@ export async function syncLeagueEventResultsByTournament(
     skipped,
   });
 
+  // The repository fences rows by the entry's current season. A rollover can
+  // therefore reject rows after we built them; those rows are required units,
+  // not successful no-ops, and must remain visible to the retry/reporting
+  // layer instead of producing a false ready result.
+  const unpersisted = Math.max(0, inserts.length - updated);
+
   return {
     tournamentId,
     eventId,
@@ -455,6 +461,6 @@ export async function syncLeagueEventResultsByTournament(
     requiredUnits: totalEntries,
     reusedUnits: 0,
     succeededUnits: updated,
-    failedUnits: skipped,
+    failedUnits: skipped + unpersisted,
   };
 }

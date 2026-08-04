@@ -127,6 +127,11 @@ describe('launch monitor', () => {
     expect(skipped).toMatchObject({ outcome: 'noop', delivery: 'skipped', requiredUnits: 0 });
     expect(redis.values.has('LaunchNotification:warning:2026')).toBe(false);
     expect(redis.values.has('LaunchNotification:warning:2026:lock')).toBe(false);
+    expect(
+      redis.setCalls.find(
+        (call) => call.key === 'LaunchNotification:warning:2026:lock' && call.args.includes('XX'),
+      )?.args,
+    ).toEqual(['PX', 60_000, 'XX']);
 
     let sends = 0;
     const delivered = await evaluateLaunchMonitor(

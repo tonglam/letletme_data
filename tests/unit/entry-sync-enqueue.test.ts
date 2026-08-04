@@ -89,6 +89,20 @@ describe('entry-sync enqueue runId propagation', () => {
     expect(addCalls).toHaveLength(0);
   });
 
+  test('does not reuse a manual scan rooted for a different event', async () => {
+    pendingJobs.push({
+      id: 'entry-picks-manual-chunk-0-event-12',
+      name: 'entry-picks',
+      data: { source: 'manual', queueKey: 'manual', eventId: 12, runId: 'existing-run' },
+    });
+
+    const job = await enqueueEntryPicksSyncJob('manual', { eventId: 13 });
+
+    expect(job!.id).toBe('entry-picks-manual-chunk-0-event-13');
+    expect(addCalls).toHaveLength(1);
+    expect(addCalls[0].data.eventId).toBe(13);
+  });
+
   test('reuses a legacy manual continuation that predates queue keys', async () => {
     pendingJobs.push({
       id: 'entry-picks-manual-chunk-500',

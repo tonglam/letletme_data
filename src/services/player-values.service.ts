@@ -175,14 +175,16 @@ export function createPlayerValuesSync(dependencies: PlayerValuesSyncDependencie
       return { count: 0, outcome: 'noop' };
     }
 
-    const [bootstrapData, syncEvent] = await Promise.all([
-      dependencies.getBootstrap(),
-      dependencies.resolvePlayerSyncEvent(),
-    ]);
+    // Resolve and report the target before the fallible bootstrap request. A
+    // bootstrap outage must still leave the attempt correlated to the event
+    // that was selected for this date.
+    const syncEvent = await dependencies.resolvePlayerSyncEvent();
     if (!syncEvent) {
       throw new Error('No current or next event found for player values');
     }
     options?.onTargetEventResolved?.(syncEvent.event.id);
+
+    const bootstrapData = await dependencies.getBootstrap();
 
     if (!Array.isArray(bootstrapData.elements) || bootstrapData.elements.length === 0) {
       throw new Error('No player values returned from FPL API');

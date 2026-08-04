@@ -139,6 +139,17 @@ async function sendLaunchNotificationOnce(
     deliveryError = error;
     throw error;
   } finally {
+    if (deliverySkipped) {
+      // Telegram-disabled delivery is a definite no-op, not an ambiguous
+      // send. The lock was made persistent before the request so an actual
+      // send cannot be duplicated; restore a short lease before best-effort
+      // cleanup so a failed DEL cannot block every later tick forever.
+      try {
+        await redis.set(lockKey, token, 'PX', NOTIFICATION_PRE_DELIVERY_LEASE_MS, 'XX');
+      } catch (error) {
+        logError('Failed to restore skipped launch notification lock lease', error);
+      }
+    }
     if (deliveryAttempted && !deliverySkipped && !markerPersisted) {
       logError(
         notificationDelivered
