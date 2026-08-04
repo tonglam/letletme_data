@@ -401,8 +401,7 @@ describe.skipIf(!RUN_BENCHMARK)('tournament setup performance benchmark', () => 
         const sql = await getDbClient();
         await sql`
           UPDATE entry_infos
-          SET entry_snapshot_synced_through_event_id = NULL,
-              entry_snapshot_synced_season = NULL
+          SET entry_snapshot_synced_through_event_id = 37
           WHERE id = ${mediumEntryIds[0]}
         `;
         await sql`

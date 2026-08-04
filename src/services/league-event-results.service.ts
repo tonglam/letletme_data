@@ -1,3 +1,4 @@
+import { getActiveCacheSeason } from '../cache/cache-season';
 import { fplClient } from '../clients/fpl';
 import {
   type DbEntryEventResult,
@@ -304,6 +305,7 @@ export async function syncLeagueEventResultsByTournament(
   if (!tournament) {
     throw new Error(`Tournament ${tournamentId} not found`);
   }
+  const checkpointSeason = await getActiveCacheSeason();
 
   const entryIds = await resolveTournamentEntries(tournament);
   const entryInfos = await entryInfoRepository.findByIds(entryIds);
@@ -406,7 +408,7 @@ export async function syncLeagueEventResultsByTournament(
 
   for (let index = 0; index < inserts.length; index += batchSize) {
     const batch = inserts.slice(index, index + batchSize);
-    updated += await leagueEventResultsRepository.upsertBatch(batch);
+    updated += await leagueEventResultsRepository.upsertBatch(batch, checkpointSeason);
   }
 
   logInfo('League event results sync completed for tournament', {

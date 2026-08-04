@@ -9,6 +9,7 @@ import { resetActiveSeasonMemo } from '../../src/cache/cache-season';
 import { getDbClient } from '../../src/db/singleton';
 import { entryEventTransfersRepository } from '../../src/repositories/entry-event-transfers';
 import { entryInfoRepository } from '../../src/repositories/entry-infos';
+import { leagueEventResultsRepository } from '../../src/repositories/league-event-results';
 import { syncEntryInfo, type EntryInfoClient } from '../../src/services/entry-info.service';
 import {
   ensureTournamentCoreResults,
@@ -212,6 +213,79 @@ describe('tournament initialization checkpoints', () => {
     expect(resetRows[0]).toEqual({ picks: 0, transfers: 0, resultPicks: null });
   });
 
+  test('legacy null season ownership clears rich entry and league rows before adoption', async () => {
+    const sql = await getDbClient();
+    await sql`
+      UPDATE entry_infos
+      SET entry_snapshot_synced_through_event_id = NULL,
+          entry_snapshot_synced_season = NULL,
+          entry_transfers_synced_through_event_id = NULL,
+          entry_transfers_synced_season = NULL
+      WHERE id = ${ENTRY_ID}
+    `;
+    await sql`
+      INSERT INTO entry_event_picks (entry_id, event_id, chip, picks, transfers, transfers_cost)
+      VALUES (${ENTRY_ID}, 12, 'n/a', '[]'::jsonb, 0, 0)
+      ON CONFLICT (entry_id, event_id) DO UPDATE SET picks = excluded.picks
+    `;
+    await sql`
+      INSERT INTO entry_event_results (
+        entry_id,
+        event_id,
+        event_points,
+        event_transfers,
+        event_transfers_cost,
+        event_net_points,
+        overall_points,
+        overall_rank,
+        event_picks
+      )
+      VALUES (${ENTRY_ID}, 12, 99, 0, 0, 99, 999, 1, '[]'::jsonb)
+      ON CONFLICT (entry_id, event_id) DO UPDATE SET event_picks = excluded.event_picks
+    `;
+    await sql`
+      INSERT INTO entry_event_cup_results (entry_id, event_id, result)
+      VALUES (${ENTRY_ID}, 12, 'win')
+      ON CONFLICT (entry_id, event_id) DO UPDATE SET result = excluded.result
+    `;
+    await sql`
+      INSERT INTO league_event_results (
+        league_id,
+        league_type,
+        entry_id,
+        event_id,
+        overall_rank,
+        team_value
+      )
+      VALUES (99042, 'classic', ${ENTRY_ID}, 12, 1, 1500)
+      ON CONFLICT (league_id, league_type, event_id, entry_id)
+      DO UPDATE SET overall_rank = excluded.overall_rank, team_value = excluded.team_value
+    `;
+
+    await syncEntryInfo(ENTRY_ID, client, 1, TEST_SEASON);
+
+    const rows = await sql<
+      Array<{ picks: number; results: number; cup: number; league: number; coreRows: number }>
+    >`
+      SELECT
+        (SELECT count(*)::int FROM entry_event_picks
+         WHERE entry_id = ${ENTRY_ID} AND event_id = 12) AS picks,
+        (SELECT count(*)::int FROM entry_event_results
+         WHERE entry_id = ${ENTRY_ID} AND event_id = 12) AS results,
+        (SELECT count(*)::int FROM entry_event_cup_results
+         WHERE entry_id = ${ENTRY_ID} AND event_id = 12) AS cup,
+        (SELECT count(*)::int FROM league_event_results
+         WHERE entry_id = ${ENTRY_ID}) AS league,
+        (SELECT count(*)::int FROM entry_event_results
+         WHERE entry_id = ${ENTRY_ID} AND event_id = 1 AND event_picks IS NULL) AS "coreRows"
+    `;
+    expect(rows[0]).toEqual({ picks: 0, results: 0, cup: 0, league: 0, coreRows: 1 });
+    expect(await checkpointRow()).toMatchObject({
+      snapshot: 1,
+      snapshotSeason: TEST_SEASON,
+    });
+  });
+
   test('snapshot rollover preserves transfers already proven for the active season', async () => {
     const sql = await getDbClient();
     await sql`DELETE FROM entry_event_transfers WHERE entry_id = ${ENTRY_ID}`;
@@ -243,6 +317,43 @@ describe('tournament initialization checkpoints', () => {
       transfers: 1,
       transfersSeason: TEST_SEASON,
     });
+  });
+
+  test('league result publication rejects entries no longer owned by the checkpoint season', async () => {
+    const sql = await getDbClient();
+    await sql`DELETE FROM league_event_results WHERE entry_id = ${ENTRY_ID}`;
+    await sql`
+      UPDATE entry_infos
+      SET entry_snapshot_synced_through_event_id = 12,
+          entry_snapshot_synced_season = '2627'
+      WHERE id = ${ENTRY_ID}
+    `;
+
+    const persisted = await leagueEventResultsRepository.upsertBatch(
+      [
+        {
+          leagueId: 99042,
+          leagueType: 'classic',
+          entryId: ENTRY_ID,
+          eventId: 12,
+        },
+      ],
+      TEST_SEASON,
+    );
+    const rows = await sql<Array<{ count: number }>>`
+      SELECT count(*)::int AS count
+      FROM league_event_results
+      WHERE entry_id = ${ENTRY_ID}
+    `;
+    expect(persisted).toBe(0);
+    expect(rows[0]?.count).toBe(0);
+
+    await sql`
+      UPDATE entry_infos
+      SET entry_snapshot_synced_through_event_id = 12,
+          entry_snapshot_synced_season = ${TEST_SEASON}
+      WHERE id = ${ENTRY_ID}
+    `;
   });
 
   test('a latest GW1 sync clears unproven transfer rows from the previous season', async () => {
@@ -474,7 +585,7 @@ describe('tournament initialization checkpoints', () => {
       }
 
       expect((rejected as { cause?: Error })?.cause?.message).toContain(
-        'Active season changed from 2526 to 2627 during entry transfer sync',
+        'Active season changed from 2526 to 2627 during entry event sync',
       );
       const rows = await sql<Array<{ count: number }>>`
         SELECT count(*)::int AS count
@@ -948,6 +1059,149 @@ describe('tournament initialization checkpoints', () => {
       expect((await checkpointRow())?.transfers).toBe(12);
     } finally {
       resetMockFPLClient();
+    }
+  });
+
+  test('season rollover rejects picks, results, and transfers as one atomic write', async () => {
+    const sql = await getDbClient();
+    const redis = await redisSingleton.getClient();
+    await sql`DELETE FROM entry_event_transfers WHERE entry_id = ${ENTRY_ID}`;
+    await sql`DELETE FROM entry_event_picks WHERE entry_id = ${ENTRY_ID} AND event_id = 12`;
+    await sql`DELETE FROM entry_event_results WHERE entry_id = ${ENTRY_ID} AND event_id = 12`;
+    await sql`
+      UPDATE entry_infos
+      SET entry_snapshot_synced_through_event_id = 12,
+          entry_snapshot_synced_season = ${TEST_SEASON},
+          entry_transfers_synced_through_event_id = NULL,
+          entry_transfers_synced_season = NULL
+      WHERE id = ${ENTRY_ID}
+    `;
+    await redis.set('Season:active', TEST_SEASON);
+    resetActiveSeasonMemo();
+    mockFPLClient({
+      async getEntryEventPicks() {
+        return {
+          active_chip: null,
+          automatic_subs: [],
+          entry_history: {
+            event: 12,
+            points: 50,
+            total_points: 600,
+            rank: 100,
+            overall_rank: 1_000,
+            bank: 5,
+            value: 1_000,
+            event_transfers: 0,
+            event_transfers_cost: 0,
+            points_on_bench: 3,
+          },
+          picks: [],
+        };
+      },
+      async getEntryTransfers() {
+        await redis.set('Season:active', '2627');
+        return [];
+      },
+    });
+
+    try {
+      await expect(
+        syncTournamentEventResultsForEntryIds([ENTRY_ID], 12, {
+          live: { elements: [] },
+        }),
+      ).rejects.toThrow('Tournament event results sync failed for 1 of 1 entries');
+      const rows = await sql<Array<{ picks: number; results: number; transfers: number }>>`
+        SELECT
+          (SELECT count(*)::int FROM entry_event_picks
+           WHERE entry_id = ${ENTRY_ID} AND event_id = 12) AS picks,
+          (SELECT count(*)::int FROM entry_event_results
+           WHERE entry_id = ${ENTRY_ID} AND event_id = 12) AS results,
+          (SELECT count(*)::int FROM entry_event_transfers
+           WHERE entry_id = ${ENTRY_ID}) AS transfers
+      `;
+      expect(rows[0]).toEqual({ picks: 0, results: 0, transfers: 0 });
+      expect((await checkpointRow())?.transfers).toBeNull();
+    } finally {
+      resetMockFPLClient();
+      await redis.set('Season:active', TEST_SEASON);
+      resetActiveSeasonMemo();
+    }
+  });
+
+  test('event result sync fetches authoritative live points instead of stored provisional rows', async () => {
+    const sql = await getDbClient();
+    await sql`DELETE FROM entry_event_transfers WHERE entry_id = ${ENTRY_ID}`;
+    await sql`DELETE FROM entry_event_picks WHERE entry_id = ${ENTRY_ID} AND event_id = 12`;
+    await sql`DELETE FROM entry_event_results WHERE entry_id = ${ENTRY_ID} AND event_id = 12`;
+    await sql`
+      UPDATE entry_infos
+      SET entry_snapshot_synced_through_event_id = 12,
+          entry_snapshot_synced_season = ${TEST_SEASON},
+          entry_transfers_synced_through_event_id = NULL,
+          entry_transfers_synced_season = NULL
+      WHERE id = ${ENTRY_ID}
+    `;
+    await sql`
+      INSERT INTO event_lives (event_id, element_id, total_points)
+      VALUES (12, ${PICK_PLAYER_ID}, 1)
+      ON CONFLICT (event_id, element_id) DO UPDATE SET total_points = excluded.total_points
+    `;
+    let liveCalls = 0;
+    mockFPLClient({
+      async getEventLive() {
+        liveCalls += 1;
+        return {
+          elements: [{ id: PICK_PLAYER_ID, stats: { total_points: 7 } }],
+        };
+      },
+      async getEntryEventPicks() {
+        return {
+          active_chip: null,
+          automatic_subs: [],
+          entry_history: {
+            event: 12,
+            points: 50,
+            total_points: 600,
+            rank: 100,
+            overall_rank: 1_000,
+            bank: 5,
+            value: 1_000,
+            event_transfers: 0,
+            event_transfers_cost: 0,
+            points_on_bench: 3,
+          },
+          picks: [
+            {
+              element: PICK_PLAYER_ID,
+              position: 1,
+              multiplier: 2,
+              is_captain: true,
+              is_vice_captain: false,
+            },
+          ],
+        };
+      },
+      async getEntryTransfers() {
+        return [];
+      },
+    });
+
+    try {
+      const result = await syncTournamentEventResultsForEntryIds([ENTRY_ID], 12);
+      expect(result.synced).toBe(1);
+      const rows = await sql<Array<{ captainPoints: number | null }>>`
+        SELECT event_captain_points AS "captainPoints"
+        FROM entry_event_results
+        WHERE entry_id = ${ENTRY_ID} AND event_id = 12
+      `;
+      expect(liveCalls).toBe(1);
+      expect(rows[0]?.captainPoints).toBe(14);
+    } finally {
+      resetMockFPLClient();
+      await sql`
+        DELETE FROM event_lives
+        WHERE event_id = 12 AND element_id = ${PICK_PLAYER_ID}
+      `;
     }
   });
 

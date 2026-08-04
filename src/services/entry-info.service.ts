@@ -20,6 +20,7 @@ import {
   entryEventResults,
   entryEventTransfers,
   entryInfos,
+  leagueEventResults,
 } from '../db/schemas/index.schema';
 import { ENTRY_SEASON_SYNC_LOCK_NAMESPACE } from '../repositories/entry-event-transfers';
 import { eventRepository } from '../repositories/events';
@@ -80,21 +81,21 @@ export async function syncEntryInfo(
       );
     }
 
-    // Once a checkpoint has a proven season, a different active season means
-    // the event-numbered rich rows belong to the prior campaign. Clear them in
-    // the same per-entry transaction before seeding current core history.
-    // Legacy NULL season markers are deliberately adopted without deletion.
-    if (current?.snapshotSeason && current.snapshotSeason !== activeSeason) {
+    // A different or legacy NULL checkpoint cannot prove ownership of
+    // event-numbered rows. Clear them in the same per-entry transaction before
+    // adopting the active season and seeding current core history.
+    if (current?.snapshotSeason !== activeSeason) {
       await Promise.all([
         tx.delete(entryEventCupResults).where(eq(entryEventCupResults.entryId, entryId)),
         tx.delete(entryEventPicks).where(eq(entryEventPicks.entryId, entryId)),
         tx.delete(entryEventResults).where(eq(entryEventResults.entryId, entryId)),
+        tx.delete(leagueEventResults).where(eq(leagueEventResults.entryId, entryId)),
       ]);
       // A current-season transfer sync can win this per-entry lock before the
       // first current-season snapshot. Its checkpoint proves those rows are
       // already current, so the later snapshot rollover must preserve them.
       // NULL or another season cannot prove ownership and is cleared.
-      if (current.transferSeason !== activeSeason) {
+      if (current?.transferSeason !== activeSeason) {
         await tx.delete(entryEventTransfers).where(eq(entryEventTransfers.entryId, entryId));
       }
     }

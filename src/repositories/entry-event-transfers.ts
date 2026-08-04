@@ -8,7 +8,7 @@ import {
   type DbEntryEventTransfer,
   type DbEntryEventTransferInsert,
 } from '../db/schemas/index.schema';
-import { getDb, getDbClient } from '../db/singleton';
+import { getDb, getDbClient, type TransactionHandle } from '../db/singleton';
 import type { RawFPLEntryTransfersResponse } from '../types';
 import { getConfig } from '../utils/config';
 import { DatabaseError } from '../utils/errors';
@@ -33,6 +33,62 @@ function transferSignature(transfer: {
 }
 
 export type TransferSyncMode = 'latest' | 'all';
+
+type EntrySeasonCheckpoint = {
+  snapshotSeason: string | null;
+  transferSeason: string | null;
+};
+
+async function lockAndValidateEntrySeason(
+  tx: TransactionHandle,
+  entryId: number,
+  checkpointSeason: string,
+): Promise<EntrySeasonCheckpoint | undefined> {
+  await tx.execute(
+    sql`SELECT pg_advisory_xact_lock(${ENTRY_SEASON_SYNC_LOCK_NAMESPACE}, ${entryId})`,
+  );
+  await acquireActiveSeasonReadFence(tx);
+  const canonicalSeason = await getActiveCacheSeasonUncached();
+  if (canonicalSeason !== checkpointSeason) {
+    throw new Error(
+      `Active season changed from ${checkpointSeason} to ${canonicalSeason} during entry event sync`,
+    );
+  }
+
+  const entryRows = await tx
+    .select({
+      snapshotSeason: entryInfos.entrySnapshotSyncedSeason,
+      transferSeason: entryInfos.entryTransfersSyncedSeason,
+    })
+    .from(entryInfos)
+    .where(eq(entryInfos.id, entryId));
+  const current = entryRows[0];
+  const newestPersistedSeason = [current?.snapshotSeason, current?.transferSeason]
+    .filter((season): season is string => season !== null && season !== undefined)
+    .sort()
+    .at(-1);
+  if (newestPersistedSeason && newestPersistedSeason > checkpointSeason) {
+    throw new Error(
+      `Refusing stale ${checkpointSeason} entry event sync after ${newestPersistedSeason}`,
+    );
+  }
+  return current;
+}
+
+export async function withEntrySeasonSyncTransaction<T>(
+  entryId: number,
+  checkpointSeason: string,
+  operation: (tx: TransactionHandle) => Promise<T>,
+): Promise<T> {
+  if (!/^\d{4}$/.test(checkpointSeason)) {
+    throw new Error('A valid four-digit checkpoint season is required');
+  }
+  const db = await getDb();
+  return db.transaction(async (tx) => {
+    await lockAndValidateEntrySeason(tx, entryId, checkpointSeason);
+    return operation(tx);
+  });
+}
 
 export function buildTransferReplacementRows({
   entryId,
@@ -173,6 +229,7 @@ export const createEntryEventTransfersRepository = (dbInstance?: DatabaseInstanc
         defaultPoints?: number | null;
         syncMode?: 'latest' | 'all';
         checkpointSeason: string;
+        persistEventData?: (tx: TransactionHandle) => Promise<void>;
       },
     ): Promise<void> => {
       try {
@@ -185,37 +242,10 @@ export const createEntryEventTransfersRepository = (dbInstance?: DatabaseInstanc
         const fallbackPoints = options?.defaultPoints ?? null;
 
         await db.transaction(async (tx) => {
-          // Serialize replacement for one entry without blocking unrelated entries.
-          await tx.execute(
-            sql`SELECT pg_advisory_xact_lock(${ENTRY_SEASON_SYNC_LOCK_NAMESPACE}, ${entryId})`,
-          );
-          await acquireActiveSeasonReadFence(tx);
-          const canonicalSeason = await getActiveCacheSeasonUncached();
-          if (canonicalSeason !== checkpointSeason) {
-            throw new Error(
-              `Active season changed from ${checkpointSeason} to ${canonicalSeason} during entry transfer sync`,
-            );
-          }
+          const current = await lockAndValidateEntrySeason(tx, entryId, checkpointSeason);
+          await options?.persistEventData?.(tx);
 
-          const entryRows = await tx
-            .select({
-              snapshotSeason: entryInfos.entrySnapshotSyncedSeason,
-              transferSeason: entryInfos.entryTransfersSyncedSeason,
-            })
-            .from(entryInfos)
-            .where(eq(entryInfos.id, entryId));
-          const newestPersistedSeason = [entryRows[0]?.snapshotSeason, entryRows[0]?.transferSeason]
-            .filter((season): season is string => season !== null && season !== undefined)
-            .sort()
-            .at(-1);
-          if (newestPersistedSeason && newestPersistedSeason > checkpointSeason) {
-            throw new Error(
-              `Refusing stale ${checkpointSeason} transfer checkpoint after ` +
-                newestPersistedSeason,
-            );
-          }
-
-          const transferSeasonChanged = entryRows[0]?.transferSeason !== checkpointSeason;
+          const transferSeasonChanged = current?.transferSeason !== checkpointSeason;
 
           // Event IDs repeat every season. A latest-mode sync may be the first
           // writer after rollover, so clear every unproven prior-season row.

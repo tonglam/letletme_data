@@ -1,21 +1,20 @@
 import { getActiveCacheSeason } from '../cache/cache-season';
-import { eventLivesCache } from '../cache/operations';
 import { fplClient } from '../clients/fpl';
-import { entryEventPicksRepository } from '../repositories/entry-event-picks';
+import type { TransactionHandle } from '../db/singleton';
+import { createEntryEventPicksRepository } from '../repositories/entry-event-picks';
 import {
-  entryEventResultsRepository,
+  createEntryEventResultsRepository,
   type EventPointsPayload,
 } from '../repositories/entry-event-results';
-import { entryEventTransfersRepository } from '../repositories/entry-event-transfers';
-import { eventLiveRepository } from '../repositories/event-lives';
+import {
+  entryEventTransfersRepository,
+  withEntrySeasonSyncTransaction,
+} from '../repositories/entry-event-transfers';
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
 import type { RawFPLEntryTransfersResponse } from '../types';
-import { transformEventLives } from '../transformers/event-lives';
 import { mapWithConcurrency, uniqueNumbers, withTimeout } from '../utils/async';
 import { logError, logInfo } from '../utils/logger';
-
-import { getEventLivesByEventId } from './event-lives.service';
 
 const DEFAULT_CONCURRENCY = 5;
 const EVENT_LIVE_FETCH_TIMEOUT_MS = Number(process.env.TOURNAMENT_EVENT_LIVE_TIMEOUT_MS ?? 45_000);
@@ -40,16 +39,6 @@ async function resolveEventPointsPayload(
 ): Promise<EventPointsPayload> {
   if (provided) return provided;
 
-  const stored = await getEventLivesByEventId(eventId);
-  if (stored.length > 0) {
-    return {
-      elements: stored.map((row) => ({
-        id: row.elementId,
-        stats: { total_points: row.totalPoints },
-      })),
-    };
-  }
-
   const live = await withTimeout(
     fplClient.getEventLive(eventId),
     EVENT_LIVE_FETCH_TIMEOUT_MS,
@@ -59,9 +48,41 @@ async function resolveEventPointsPayload(
     throw new Error('Invalid event live data from FPL API');
   }
 
-  const saved = await eventLiveRepository.upsertBatch(transformEventLives(eventId, live.elements));
-  await eventLivesCache.set(eventId, saved);
   return live;
+}
+
+async function persistEntryEventData(
+  entryId: number,
+  eventId: number,
+  picks: Awaited<ReturnType<typeof fplClient.getEntryEventPicks>>,
+  live: EventPointsPayload,
+  checkpointSeason: string,
+  transfers: RawFPLEntryTransfersResponse | null,
+  pointsByElement: Map<number, number>,
+): Promise<void> {
+  const persistPicksAndResults = async (tx: TransactionHandle) => {
+    const resultsRepository = createEntryEventResultsRepository(tx);
+    const picksRepository = createEntryEventPicksRepository(tx);
+    await resultsRepository.upsertFromPicksAndLive(entryId, eventId, picks, live);
+    await picksRepository.upsertFromPicks(entryId, eventId, picks);
+  };
+
+  if (transfers) {
+    await entryEventTransfersRepository.replaceForEvent(
+      entryId,
+      eventId,
+      transfers,
+      pointsByElement,
+      {
+        syncMode: 'all',
+        checkpointSeason,
+        persistEventData: persistPicksAndResults,
+      },
+    );
+    return;
+  }
+
+  await withEntrySeasonSyncTransaction(entryId, checkpointSeason, persistPicksAndResults);
 }
 
 export async function syncTournamentEventResultsForEntryIds(
@@ -74,8 +95,8 @@ export async function syncTournamentEventResultsForEntryIds(
     return { eventId, totalEntries: 0, synced: 0, errors: 0 };
   }
 
+  const checkpointSeason = await getActiveCacheSeason();
   const live = await resolveEventPointsPayload(eventId, options?.live);
-  const checkpointSeason = options?.skipTransfers ? null : await getActiveCacheSeason();
   const pointsByElement = new Map<number, number>();
   for (const element of live.elements) {
     pointsByElement.set(element.id, element.stats.total_points);
@@ -98,23 +119,16 @@ export async function syncTournamentEventResultsForEntryIds(
         ENTRY_FETCH_TIMEOUT_MS,
         `Timed out fetching entry payloads for entry ${entryId}, event ${eventId} after ${ENTRY_FETCH_TIMEOUT_MS}ms`,
       );
-      const persistence = [
-        entryEventResultsRepository.upsertFromPicksAndLive(entryId, eventId, picks, live),
-        entryEventPicksRepository.upsertFromPicks(entryId, eventId, picks),
-      ];
-      if (transfers) {
-        persistence.push(
-          entryEventTransfersRepository.replaceForEvent(
-            entryId,
-            eventId,
-            transfers,
-            pointsByElement,
-            { syncMode: 'all', checkpointSeason: checkpointSeason! },
-          ),
-        );
-      }
       await withTimeout(
-        Promise.all(persistence),
+        persistEntryEventData(
+          entryId,
+          eventId,
+          picks,
+          live,
+          checkpointSeason,
+          transfers,
+          pointsByElement,
+        ),
         ENTRY_PERSIST_TIMEOUT_MS,
         `Timed out persisting entry payloads for entry ${entryId}, event ${eventId} after ${ENTRY_PERSIST_TIMEOUT_MS}ms`,
       );
