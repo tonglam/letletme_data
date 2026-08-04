@@ -1,7 +1,10 @@
 import { fixturesCache, liveSnapshotCache } from '../cache/operations';
 import { deriveSeasonFromFixtures } from '../cache/cache-season';
 import { fplClient } from '../clients/fpl';
-import { resolveFixtureCacheTransitions } from '../domain/fixture-cache-transition';
+import {
+  findOmittedEventFixtureIds,
+  resolveFixtureCacheTransitions,
+} from '../domain/fixture-cache-transition';
 import { fixtureRepository } from '../repositories/fixtures';
 import { transformFixtures } from '../transformers/fixtures';
 import { logError, logInfo, logWarn } from '../utils/logger';
@@ -22,7 +25,7 @@ export async function syncFixtures(eventId?: number): Promise<{ count: number; e
     logInfo('Starting fixtures sync from FPL API', logContext);
 
     // 1. Fetch from FPL API
-    const rawFixtures = await fplClient.getFixtures(eventId);
+    let rawFixtures = await fplClient.getFixtures(eventId);
 
     if (!Array.isArray(rawFixtures)) {
       throw new Error('Invalid fixtures data from FPL API');
@@ -30,21 +33,61 @@ export async function syncFixtures(eventId?: number): Promise<{ count: number; e
 
     logInfo('Raw fixtures data fetched', { count: rawFixtures.length, ...logContext });
 
+    // 2. Transform to domain fixtures. An event-filtered response does not
+    // contain fixtures that moved away from that event. Detect that against
+    // persisted ownership and promote only that rare case to one full-feed
+    // recovery, so the new destination/null ownership can be persisted and
+    // every affected snapshot/cache can be repaired coherently.
+    let fixtures = transformFixtures(rawFixtures);
+    const eventScopedFixtureIds = new Set(fixtures.map((fixture) => fixture.id));
+    let recoveredFullFixtureFeed = false;
+    if (eventId) {
+      const persistedEventFixtures = await fixtureRepository.findByEvent(eventId);
+      const omittedFixtureIds = findOmittedEventFixtureIds(
+        eventId,
+        persistedEventFixtures,
+        eventScopedFixtureIds,
+      );
+      if (omittedFixtureIds.length > 0) {
+        const fullRawFixtures = await fplClient.getFixtures();
+        if (!Array.isArray(fullRawFixtures) || fullRawFixtures.length === 0) {
+          throw new Error(
+            `Full fixture recovery returned no data for event ${eventId}; omitted fixture IDs: ${omittedFixtureIds.join(', ')}`,
+          );
+        }
+        const fullFixtures = transformFixtures(fullRawFixtures);
+        const fullFixtureIds = new Set(fullFixtures.map((fixture) => fixture.id));
+        const unresolvedFixtureIds = omittedFixtureIds.filter(
+          (fixtureId) => !fullFixtureIds.has(fixtureId),
+        );
+        if (unresolvedFixtureIds.length > 0) {
+          throw new Error(
+            `Full fixture recovery could not resolve omitted fixture IDs for event ${eventId}: ${unresolvedFixtureIds.join(', ')}`,
+          );
+        }
+        rawFixtures = fullRawFixtures;
+        fixtures = fullFixtures;
+        recoveredFullFixtureFeed = true;
+        logWarn('Promoted event-scoped fixture sync to full-feed recovery', {
+          eventId,
+          omittedFixtureIds,
+          recoveredCount: fixtures.length,
+        });
+      }
+    }
+
     if (rawFixtures.length === 0) {
       logWarn('No fixtures returned from FPL API', logContext);
       return { count: 0, errors: 0 };
     }
 
-    const fixtureIds = rawFixtures
-      .map((fixture) => fixture.id)
-      .filter((fixtureId): fixtureId is number => Number.isInteger(fixtureId));
+    const fixtureIds = fixtures.map((fixture) => fixture.id);
 
-    // 2. Transform to domain fixtures
-    const fixtures = transformFixtures(rawFixtures);
     logInfo('Fixtures transformed', {
       total: rawFixtures.length,
       successful: fixtures.length,
       errors: rawFixtures.length - fixtures.length,
+      recoveredFullFixtureFeed,
       ...logContext,
     });
 
@@ -67,6 +110,28 @@ export async function syncFixtures(eventId?: number): Promise<{ count: number; e
     // unchanged and a retry can still discover the prior event to retire.
     const { savedFixtures } = await withFixtureSyncSerialization(
       async () => {
+        if (eventId) {
+          const currentPersistedEventFixtures = await fixtureRepository.findByEvent(eventId);
+          const omittedFixtureIds = findOmittedEventFixtureIds(
+            eventId,
+            currentPersistedEventFixtures,
+            eventScopedFixtureIds,
+          );
+          if (omittedFixtureIds.length > 0 && !recoveredFullFixtureFeed) {
+            throw new Error(
+              `Fixture ownership changed during event ${eventId} sync; retry to resolve omitted fixture IDs: ${omittedFixtureIds.join(', ')}`,
+            );
+          }
+          const recoveredFixtureIds = new Set(fixtures.map((fixture) => fixture.id));
+          const unresolvedFixtureIds = omittedFixtureIds.filter(
+            (fixtureId) => !recoveredFixtureIds.has(fixtureId),
+          );
+          if (unresolvedFixtureIds.length > 0) {
+            throw new Error(
+              `Accepted full fixture feed is missing persisted event ${eventId} fixture IDs: ${unresolvedFixtureIds.join(', ')}`,
+            );
+          }
+        }
         const existingEvents = await fixtureRepository.findEventIdsByFixtureIds(fixtureIds);
         const transitions = resolveFixtureCacheTransitions(fixtures, existingEvents);
         return {
@@ -98,21 +163,31 @@ export async function syncFixtures(eventId?: number): Promise<{ count: number; e
         const savedFixtures = await fixtureRepository.upsertBatch(schedulableFixtures);
         logInfo('Fixtures upserted to database', { count: savedFixtures.length, ...logContext });
 
-        if (eventId) {
-          await fixturesCache.setByEvent(eventId, savedFixtures, cacheSeason);
+        if (eventId && !recoveredFullFixtureFeed) {
+          await fixturesCache.setByEvent(
+            eventId,
+            savedFixtures.filter((fixture) => fixture.event === eventId),
+            cacheSeason,
+          );
         } else {
           await fixturesCache.set([...savedFixtures, ...unscheduledFixtures], cacheSeason);
         }
 
-        if (transitions.shouldClearUnscheduled) {
-          await fixturesCache.clearUnscheduled();
-          logInfo('Cleared unscheduled fixture cache after fixture event moves', logContext);
+        if (
+          eventId &&
+          !recoveredFullFixtureFeed &&
+          transitions.unscheduledFixtureIdsToRemove.size > 0
+        ) {
+          await fixturesCache.removeUnscheduledFixtureIds([
+            ...transitions.unscheduledFixtureIdsToRemove,
+          ]);
         }
 
         // FPL can publish final fixture bonus stats after the live window
         // closes. Refresh from the rows just persisted rather than waiting
         // for a live-bonus cron that will no longer run.
-        const bonusEventId = eventId ?? (await getCurrentEvent())?.id;
+        const bonusEventId =
+          eventId && !recoveredFullFixtureFeed ? eventId : (await getCurrentEvent())?.id;
         if (bonusEventId) {
           const bonusFixtures = savedFixtures.filter((fixture) => fixture.event === bonusEventId);
           if (bonusFixtures.length > 0) {

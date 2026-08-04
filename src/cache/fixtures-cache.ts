@@ -312,6 +312,26 @@ export const fixturesCache = {
     }
   },
 
+  async removeUnscheduledFixtureIds(fixtureIds: readonly number[]): Promise<void> {
+    try {
+      const validIds = [...new Set(fixtureIds.filter((id) => Number.isInteger(id) && id > 0))];
+      if (validIds.length === 0) return;
+      const redis = await redisSingleton.getClient();
+      const season = await getActiveCacheSeason();
+      const key = `Fixtures:${season}:unscheduled`;
+      await redis.hdel(key, ...validIds.map(String));
+      logDebug('Removed reassigned fixtures from unscheduled cache', {
+        season,
+        fixtureIds: validIds,
+      });
+    } catch (error) {
+      logError('Fixtures cache remove unscheduled fields error', error, {
+        count: fixtureIds.length,
+      });
+      throw error;
+    }
+  },
+
   async setByTeam(teamId: number, teamFixtures: TeamFixture[], season?: string): Promise<void> {
     try {
       const redis = await redisSingleton.getClient();

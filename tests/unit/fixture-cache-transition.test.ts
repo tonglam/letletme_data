@@ -1,6 +1,25 @@
 import { describe, expect, test } from 'bun:test';
 
-import { resolveFixtureCacheTransitions } from '../../src/domain/fixture-cache-transition';
+import {
+  findOmittedEventFixtureIds,
+  resolveFixtureCacheTransitions,
+} from '../../src/domain/fixture-cache-transition';
+
+describe('event-scoped fixture coverage', () => {
+  test('detects persisted fixtures omitted after moving out of an event', () => {
+    expect(
+      findOmittedEventFixtureIds(
+        10,
+        [
+          { id: 101, event: 10 },
+          { id: 102, event: 10 },
+          { id: 103, event: 11 },
+        ],
+        new Set([102, 103]),
+      ),
+    ).toEqual([101]);
+  });
+});
 
 describe('fixture cache transitions', () => {
   test('retires the prior event when a fixture moves to another event', () => {
@@ -10,7 +29,7 @@ describe('fixture cache transitions', () => {
     );
 
     expect([...transitions.invalidatedEventIds]).toEqual([10, 11]);
-    expect(transitions.shouldClearUnscheduled).toBe(false);
+    expect([...transitions.unscheduledFixtureIdsToRemove]).toEqual([]);
   });
 
   test('retires the prior event when a fixture becomes unscheduled', () => {
@@ -20,17 +39,17 @@ describe('fixture cache transitions', () => {
     );
 
     expect([...transitions.invalidatedEventIds]).toEqual([10]);
-    expect(transitions.shouldClearUnscheduled).toBe(false);
+    expect([...transitions.unscheduledFixtureIdsToRemove]).toEqual([]);
   });
 
-  test('clears the unscheduled bucket when a fixture gains an event', () => {
+  test('removes only the reassigned fixture from the unscheduled bucket', () => {
     const transitions = resolveFixtureCacheTransitions(
       [{ id: 101, event: 10 }],
       new Map([[101, null]]),
     );
 
     expect([...transitions.invalidatedEventIds]).toEqual([10]);
-    expect(transitions.shouldClearUnscheduled).toBe(true);
+    expect([...transitions.unscheduledFixtureIdsToRemove]).toEqual([101]);
   });
 
   test('ignores unchanged ownership and invalidates a newly assigned destination', () => {
@@ -43,6 +62,6 @@ describe('fixture cache transitions', () => {
     );
 
     expect([...transitions.invalidatedEventIds]).toEqual([11]);
-    expect(transitions.shouldClearUnscheduled).toBe(false);
+    expect([...transitions.unscheduledFixtureIdsToRemove]).toEqual([]);
   });
 });

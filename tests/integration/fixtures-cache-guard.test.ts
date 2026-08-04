@@ -4,6 +4,7 @@ assertIntegrationEnv();
 
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 
+import { resetActiveSeasonMemo } from '../../src/cache/cache-season';
 import { eventLivesCache } from '../../src/cache/event-lives-cache';
 import { fixturesCache } from '../../src/cache/fixtures-cache';
 import { liveBonusCache, liveBonusV2Cache } from '../../src/cache/live-bonus-cache';
@@ -74,6 +75,7 @@ afterAll(async () => {
   } else {
     await redis.del('Season:active');
   }
+  resetActiveSeasonMemo();
 });
 
 describe('FixturesByTeam empty-teams guard (FP-12)', () => {
@@ -123,6 +125,24 @@ describe('FixturesByTeam empty-teams guard (FP-12)', () => {
 
     const teamThree = await redis.hgetall(`FixturesByTeam:${SEASON}:3`);
     expect(JSON.parse(teamThree['10'])).toMatchObject({ againstTeamId: 4 });
+  });
+
+  test('removing one reassigned fixture preserves other unscheduled fixtures', async () => {
+    const redis = await redisSingleton.getClient();
+    await redis.set('Season:active', SEASON);
+    resetActiveSeasonMemo();
+    await redis.hset(
+      `Fixtures:${SEASON}:unscheduled`,
+      '90101',
+      'reassigned',
+      '90102',
+      'still-unscheduled',
+    );
+
+    await fixturesCache.removeUnscheduledFixtureIds([90101, 90101, -1]);
+
+    expect(await redis.hget(`Fixtures:${SEASON}:unscheduled`, '90101')).toBeNull();
+    expect(await redis.hget(`Fixtures:${SEASON}:unscheduled`, '90102')).toBe('still-unscheduled');
   });
 
   test('full refreshes and compatibility helpers preserve snapshot-owned event hashes', async () => {
