@@ -70,6 +70,16 @@ export const tournamentCreateInputSchema = z
 
 export type TournamentCreateInput = z.infer<typeof tournamentCreateInputSchema>;
 export type TournamentSetupStatus = 'pending' | 'processing' | 'ready' | 'failed';
+export type TournamentSetupPhase =
+  | 'queued'
+  | 'syncing_entries'
+  | 'building_structure'
+  | 'calculating_standings'
+  | 'enriching_history'
+  | 'finalizing'
+  | 'ready'
+  | 'failed';
+export type TournamentRosterMode = 'snapshot' | 'official_sync';
 export type LeagueType = 'classic' | 'h2h';
 
 export function validateTournamentCreateInput(data: unknown): TournamentCreateInput {
@@ -178,11 +188,52 @@ export type TournamentBackfillWindow = {
   endEventId: number;
 };
 
+export type TournamentSetupRequestEstimate = {
+  legacyColdStart: number;
+  optimizedColdStartUpperBound: number;
+  optimizedTransferHistoryRequests: number;
+  coreStandingsBaseline: number;
+};
+
+export const estimateTournamentSetupRequests = (
+  entryCount: number,
+  eventCount: number,
+): TournamentSetupRequestEstimate => {
+  const entries = Math.max(0, Math.trunc(entryCount));
+  const events = Math.max(0, Math.trunc(eventCount));
+  return {
+    legacyColdStart: 2 * entries + events + 2 * entries * events,
+    optimizedColdStartUpperBound: 3 * entries + events + entries * events,
+    optimizedTransferHistoryRequests: entries,
+    coreStandingsBaseline: 2 * entries,
+  };
+};
+
+export function diffTournamentRoster(
+  existingEntryIds: readonly number[],
+  authoritativeEntryIds: readonly number[],
+): { addedEntryIds: number[]; removedEntryIds: number[] } {
+  const existing = [...new Set(existingEntryIds.filter((entryId) => entryId > 0))].sort(
+    (left, right) => left - right,
+  );
+  const authoritative = [...new Set(authoritativeEntryIds.filter((entryId) => entryId > 0))].sort(
+    (left, right) => left - right,
+  );
+  const existingSet = new Set(existing);
+  const authoritativeSet = new Set(authoritative);
+  return {
+    addedEntryIds: authoritative.filter((entryId) => !existingSet.has(entryId)),
+    removedEntryIds: existing.filter((entryId) => !authoritativeSet.has(entryId)),
+  };
+}
+
 export type SeedPair = { homeEntryId: number | null; awayEntryId: number | null };
 
 export type TournamentStructurePlan = {
   leagueId: number;
   leagueType: LeagueType;
+  sourceLeagueName?: string | null;
+  rosterMode?: TournamentRosterMode;
   tournamentName: string;
   creator: string;
   adminEntryId: number;
@@ -552,6 +603,7 @@ export function planTournamentStructure(
   selectedParticipants: TournamentParticipant[],
   leagueId: number,
   leagueType: LeagueType,
+  sourceLeagueName: string | null = null,
 ): TournamentStructurePlan {
   if (selectedParticipants.length < 2) {
     throw new ValidationError(
@@ -648,6 +700,15 @@ export function planTournamentStructure(
   return {
     leagueId,
     leagueType,
+    sourceLeagueName,
+    rosterMode:
+      payload.participantSource === 'official' &&
+      leagueType === 'classic' &&
+      payload.groupFormat === 'points' &&
+      groupNum === 1 &&
+      payload.knockoutFormat === 'none'
+        ? 'official_sync'
+        : 'snapshot',
     tournamentName: normalizeTournamentName(payload.tournamentName),
     creator: payload.creator.trim(),
     adminEntryId,

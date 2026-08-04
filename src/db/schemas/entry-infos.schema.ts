@@ -13,6 +13,8 @@ export const entryInfos = pgTable('entry_infos', {
   bank: integer('bank'),
   lastBank: integer('last_bank'),
   lastEventId: integer('last_event_id').default(0),
+  entrySnapshotSyncedThroughEventId: integer('entry_snapshot_synced_through_event_id'),
+  entryTransfersSyncedThroughEventId: integer('entry_transfers_synced_through_event_id'),
   teamValue: integer('team_value'),
   totalTransfers: integer('total_transfers'),
   lastEntryName: text('last_entry_name'),

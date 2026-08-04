@@ -7,6 +7,7 @@ import { afterAll, describe, expect, test } from 'bun:test';
 import { planTournamentStructure, type TournamentParticipant } from '../../src/domain/tournament';
 import { getDbClient } from '../../src/db/singleton';
 import { tournamentInfoRepository } from '../../src/repositories/tournament-infos';
+import { tournamentRosterRepository } from '../../src/repositories/tournament-roster';
 
 /**
  * FP-08 (C5): tournament creation must not poison entry_infos.
@@ -56,6 +57,12 @@ function buildParticipants(): TournamentParticipant[] {
 }
 
 describe('tournament creation vs entry_infos (FP-08)', () => {
+  test('watchdog cutoff query binds safely against PostgreSQL', async () => {
+    const rows = await tournamentInfoRepository.findStuckProcessing(15);
+
+    expect(Array.isArray(rows)).toBe(true);
+  });
+
   test(
     'existing synced entries keep their rank/points; new entries get stub rows',
     async () => {
@@ -118,4 +125,64 @@ describe('tournament creation vs entry_infos (FP-08)', () => {
     },
     { timeout: 30_000 },
   );
+
+  test('records the authoritative roster as ready for an official-sync shell', async () => {
+    const client = await getDbClient();
+    const participants = buildParticipants();
+    const plan = planTournamentStructure(
+      {
+        tournamentName: `Official Sync Shell ${Date.now()}`,
+        adminId: String(SYNCED_ENTRY.id),
+        creator: 'official-sync-test',
+        participantSource: 'official',
+        leagueUrl: 'https://fantasy.premierleague.com/leagues/900003/standings/c',
+        groupFormat: 'points',
+        startGameweek: 'GW1',
+        endGameweek: 'GW38',
+        groupNum: '1',
+        qualifiersPerGroup: '',
+        knockoutFormat: 'none',
+      },
+      participants,
+      900003,
+      'classic',
+      'Official Source League',
+    );
+
+    const created = await tournamentInfoRepository.createTournamentWithEntries(plan);
+    createdTournamentIds.push(created.id);
+    const rows = await client<
+      Array<{
+        roster_mode: string;
+        roster_sync_status: string | null;
+        roster_last_synced_at: Date | null;
+        source_league_name: string | null;
+      }>
+    >`
+      select roster_mode, roster_sync_status, roster_last_synced_at, source_league_name
+      from tournament_infos
+      where id = ${created.id}
+    `;
+
+    expect(rows[0]).toMatchObject({
+      roster_mode: 'official_sync',
+      roster_sync_status: 'ready',
+      source_league_name: 'Official Source League',
+    });
+    expect(rows[0]?.roster_last_synced_at).not.toBeNull();
+
+    await client`
+      update tournament_infos
+      set state = 'inactive', roster_sync_status = 'processing'
+      where id = ${created.id}
+    `;
+    await tournamentRosterRepository.markReadyAndResume(created.id);
+
+    const resumed = await client<Array<{ state: string; roster_sync_status: string }>>`
+      select state, roster_sync_status
+      from tournament_infos
+      where id = ${created.id}
+    `;
+    expect(resumed[0]).toEqual({ state: 'active', roster_sync_status: 'ready' });
+  });
 });

@@ -15,6 +15,7 @@
     "env:check": "bun validate-env.ts",
     "test": "bun test tests/unit",
     "test:integration": "RUN_INTEGRATION=1 bun test tests/integration",
+    "test:tournament-benchmark": "LOG_LEVEL=error RUN_INTEGRATION=1 RUN_TOURNAMENT_BENCHMARK=1 bun test tests/integration/tournament-setup-benchmark.test.ts",
     "test:all": "bun test",
     "typecheck": "bunx tsc --noEmit",
     "coverage": "bun test --coverage",

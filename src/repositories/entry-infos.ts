@@ -66,9 +66,50 @@ export const createEntryInfoRepository = (dbInstance?: DbOrTransaction) => {
       }
     },
 
+    findIdsNeedingSnapshotSync: async (ids: number[], targetEventId: number): Promise<number[]> => {
+      if (ids.length === 0) {
+        return [];
+      }
+
+      try {
+        const db = await getDbInstance();
+        const uniqueIds = Array.from(new Set(ids));
+        const results: number[] = [];
+        for (let index = 0; index < uniqueIds.length; index += 1000) {
+          const chunk = uniqueIds.slice(index, index + 1000);
+          const rows = await db
+            .select({
+              id: entryInfos.id,
+              syncedThroughEventId: entryInfos.entrySnapshotSyncedThroughEventId,
+            })
+            .from(entryInfos)
+            .where(inArray(entryInfos.id, chunk));
+          const checkpoints = new Map(rows.map((row) => [row.id, row.syncedThroughEventId]));
+          results.push(
+            ...chunk.filter((id) => {
+              const checkpoint = checkpoints.get(id);
+              return checkpoint === undefined || checkpoint === null || checkpoint < targetEventId;
+            }),
+          );
+        }
+        return results;
+      } catch (error) {
+        logError('Failed to find entry snapshot sync gaps', error, {
+          count: ids.length,
+          targetEventId,
+        });
+        throw new DatabaseError(
+          'Failed to find entry snapshot sync gaps',
+          'ENTRY_INFO_SYNC_GAPS_ERROR',
+          error as Error,
+        );
+      }
+    },
+
     upsertFromSummary: async (
       summary: RawFPLEntrySummary,
       lastEventId?: number | null,
+      snapshotSyncedThroughEventId?: number | null,
     ): Promise<DbEntryInfo> => {
       try {
         const db = await getDbInstance();
@@ -101,6 +142,7 @@ export const createEntryInfoRepository = (dbInstance?: DbOrTransaction) => {
           // ON CONFLICT COALESCE can fall through to the existing last_event_id
           // instead of materializing 0 and wiping progress (Codex P2).
           lastEventId: lastEventId ?? null,
+          entrySnapshotSyncedThroughEventId: snapshotSyncedThroughEventId ?? null,
           teamValue: currentTeamValue,
           totalTransfers: summary.last_deadline_total_transfers ?? null,
           lastEntryName: null,
@@ -127,6 +169,16 @@ export const createEntryInfoRepository = (dbInstance?: DbOrTransaction) => {
               bank: sql`COALESCE(excluded.bank, ${entryInfos.bank})`,
               teamValue: sql`COALESCE(excluded.team_value, ${entryInfos.teamValue})`,
               lastEventId: sql`COALESCE(excluded.last_event_id, ${entryInfos.lastEventId}, 0)`,
+              entrySnapshotSyncedThroughEventId: sql`
+                CASE
+                  WHEN excluded.entry_snapshot_synced_through_event_id IS NULL
+                    THEN ${entryInfos.entrySnapshotSyncedThroughEventId}
+                  ELSE GREATEST(
+                    COALESCE(${entryInfos.entrySnapshotSyncedThroughEventId}, 0),
+                    excluded.entry_snapshot_synced_through_event_id
+                  )
+                END
+              `,
               // Snapshot the pre-update row into last_* (table-qualified
               // references in DO UPDATE read the existing row, not excluded)
               lastBank: sql`COALESCE(${entryInfos.bank}, 0)`,

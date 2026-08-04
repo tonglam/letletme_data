@@ -13,6 +13,11 @@ const tournament: TournamentManagementRecord = {
   creator: 'Manager',
   adminEntryId: 123,
   totalTeamNum: 8,
+  leagueType: 'classic',
+  groupMode: 'points_races',
+  groupNum: 1,
+  knockoutMode: 'no_knockout',
+  rosterMode: 'snapshot',
   state: 'active',
   createdAt: '2026-08-01T00:00:00.000Z',
   updatedAt: '2026-08-01T00:00:00.000Z',
@@ -25,6 +30,11 @@ function createRepository(
     findById: async () => tournament,
     checkNameExistsExcluding: async () => false,
     updateNameOwned: async (_id, _adminEntryId, name) => ({ ...tournament, name }),
+    updateStateOwned: async (_id, _adminEntryId, state) => ({ ...tournament, state }),
+    updateRosterModeOwned: async (_id, _adminEntryId, rosterMode) => ({
+      ...tournament,
+      rosterMode,
+    }),
     deleteOwned: async () => ({ status: 'deleted', tournament }),
     ...overrides,
   };
@@ -74,6 +84,15 @@ describe('tournament management service', () => {
     await expect(
       service.updateTournament(42, { name: 'Renamed Cup', adminEntryId: 123 }),
     ).rejects.toBeInstanceOf(NotFoundError);
+  });
+
+  test('does not enable official roster synchronization after a tournament finishes', async () => {
+    const service = createTournamentManagementService(
+      createRepository({ findById: async () => ({ ...tournament, state: 'finished' }) }),
+    );
+    await expect(
+      service.setRosterMode(42, { adminEntryId: 123, rosterMode: 'official_sync' }),
+    ).rejects.toBeInstanceOf(ConflictError);
   });
 
   test('deletes an owned tournament', async () => {

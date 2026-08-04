@@ -342,3 +342,8 @@ export const enqueueTournamentTransfersPre = (eventId: number, source?: Tourname
 
 export const enqueueTournamentInfo = (eventId: number, source?: TournamentSyncJobSource) =>
   enqueueTournamentSyncJob(TOURNAMENT_JOBS.INFO, eventId, source);
+
+export const enqueueTournamentRosterSync = (source?: TournamentSyncJobSource) =>
+  enqueueTournamentSyncJob(TOURNAMENT_JOBS.ROSTER_SYNC, 0, source, {
+    jobId: `tournament-roster-sync-${new Date().toISOString().slice(0, 10)}`,
+  });

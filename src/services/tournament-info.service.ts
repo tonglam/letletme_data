@@ -5,10 +5,6 @@ import { logError, logInfo } from '../utils/logger';
 
 const DEFAULT_CONCURRENCY = 5;
 
-function normalizeName(value: string | null | undefined): string {
-  return (value ?? '').trim().toLowerCase();
-}
-
 async function fetchLeagueName(leagueId: number, leagueType: 'classic' | 'h2h') {
   const standings =
     leagueType === 'h2h'
@@ -65,14 +61,14 @@ export async function syncTournamentInfo(options?: {
       if (!fetchedName) {
         return null;
       }
-      if (normalizeName(fetchedName) === normalizeName(tournament.name)) {
+      if (fetchedName.trim() === tournament.sourceLeagueName?.trim()) {
         return null;
       }
-      return { id: tournament.id, name: fetchedName };
+      return { id: tournament.id, sourceLeagueName: fetchedName.trim() };
     })
-    .filter((update): update is { id: number; name: string } => Boolean(update));
+    .filter((update): update is { id: number; sourceLeagueName: string } => Boolean(update));
 
-  const updated = await tournamentInfoRepository.updateNames(updates);
+  const updated = await tournamentInfoRepository.updateSourceLeagueNames(updates);
   const skipped = tournaments.length - updated;
 
   logInfo('Tournament info sync completed', {

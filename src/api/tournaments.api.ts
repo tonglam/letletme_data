@@ -7,7 +7,6 @@ import {
   getTournamentSetupStatus,
 } from '../services/tournament-create.service';
 import { validateTournamentCreateInput } from '../domain/tournament';
-import { requeueTournamentSetup } from '../services/tournament-setup.service';
 import { tournamentManagementService } from '../services/tournament-management.service';
 import { getErrorMessage, getHttpStatusFromError } from '../utils/errors';
 
@@ -41,6 +40,12 @@ export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
         success: true,
         tournamentId: params.tournamentId,
         setupStatus: status.setupStatus,
+        setupPhase: status.setupPhase,
+        setupCompletedUnits: status.setupCompletedUnits,
+        setupTotalUnits: status.setupTotalUnits,
+        setupProgressUpdatedAt: status.setupProgressUpdatedAt,
+        standingsReadyAt: status.standingsReadyAt,
+        setupHasWarnings: status.setupWarningCount > 0,
         setupStartedAt: status.setupStartedAt,
         setupFinishedAt: status.setupFinishedAt,
       };
@@ -51,9 +56,9 @@ export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
   )
   .post(
     '/:tournamentId/setup',
-    async ({ params, set }) => {
+    async ({ params, body, set }) => {
       try {
-        const job = await requeueTournamentSetup(params.tournamentId);
+        const job = await tournamentManagementService.retrySetup(params.tournamentId, body);
         set.status = 202;
         return {
           success: true,
@@ -69,6 +74,73 @@ export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
     },
     {
       params: t.Object({ tournamentId: t.Numeric() }),
+      body: t.Object({ adminEntryId: t.Numeric() }),
+    },
+  )
+  .post(
+    '/:tournamentId/roster-sync',
+    async ({ params, body, set }) => {
+      try {
+        const result = await tournamentManagementService.retryRoster(params.tournamentId, body);
+        set.status = result.changed ? 202 : 200;
+        return { success: true, ...result };
+      } catch (error) {
+        const { status, message } = mapErrorToResponse(error);
+        set.status = status;
+        return { success: false, error: message };
+      }
+    },
+    {
+      params: t.Object({ tournamentId: t.Numeric() }),
+      body: t.Object({ adminEntryId: t.Numeric() }),
+    },
+  )
+  .patch(
+    '/:tournamentId/roster-mode',
+    async ({ params, body, set }) => {
+      try {
+        const tournament = await tournamentManagementService.setRosterMode(
+          params.tournamentId,
+          body,
+        );
+        set.status = 202;
+        return { success: true, tournament };
+      } catch (error) {
+        const { status, message } = mapErrorToResponse(error);
+        set.status = status;
+        return { success: false, error: message };
+      }
+    },
+    {
+      params: t.Object({ tournamentId: t.Numeric() }),
+      body: t.Object({
+        adminEntryId: t.Numeric(),
+        rosterMode: t.Literal('official_sync'),
+      }),
+    },
+  )
+  .patch(
+    '/:tournamentId/state',
+    async ({ params, body, set }) => {
+      try {
+        const tournament = await tournamentManagementService.setTournamentState(
+          params.tournamentId,
+          body,
+        );
+        if (body.state === 'active' && tournament.state !== 'active') set.status = 202;
+        return { success: true, tournament };
+      } catch (error) {
+        const { status, message } = mapErrorToResponse(error);
+        set.status = status;
+        return { success: false, error: message };
+      }
+    },
+    {
+      params: t.Object({ tournamentId: t.Numeric() }),
+      body: t.Object({
+        adminEntryId: t.Numeric(),
+        state: t.Union([t.Literal('active'), t.Literal('inactive')]),
+      }),
     },
   )
   .post(

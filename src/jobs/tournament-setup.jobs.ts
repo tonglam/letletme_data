@@ -1,13 +1,36 @@
 import {
   getTournamentSetupQueue,
+  tournamentSetupQueuesByTier,
   type TournamentSetupJobData,
 } from '../queues/tournament-setup.queue';
 import { getTournamentSetupJobPriority } from '../domain/job-priority';
 import { logError, logInfo, logWarn } from '../utils/logger';
 
-export type TournamentSetupJobSource = 'create' | 'manual' | 'watchdog';
+export type TournamentSetupJobSource = 'create' | 'manual' | 'watchdog' | 'roster' | 'resume';
 export interface EnqueueTournamentSetupOptions {
   forceNew?: boolean;
+}
+
+export async function cancelWaitingTournamentSetupJobs(tournamentId: number): Promise<number> {
+  const queues = [...new Set(Object.values(tournamentSetupQueuesByTier))];
+  let removed = 0;
+  for (const queue of queues) {
+    const jobs = await queue.getJobs(['waiting', 'delayed', 'paused']);
+    for (const job of jobs) {
+      if (job.data.tournamentId !== tournamentId) continue;
+      try {
+        await job.remove();
+        removed += 1;
+      } catch (error) {
+        logWarn('Unable to remove waiting tournament setup job', {
+          tournamentId,
+          jobId: job.id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  }
+  return removed;
 }
 
 export async function enqueueTournamentSetup(
@@ -26,7 +49,7 @@ export async function enqueueTournamentSetup(
 
     const baseJobId = `tournament-setup-${tournamentId}`;
     const existing = await queue.getJob(baseJobId);
-    let jobId = baseJobId;
+    const jobId = baseJobId;
     if (existing) {
       const state = await existing.getState();
       if (state === 'completed' || state === 'failed') {
@@ -35,14 +58,13 @@ export async function enqueueTournamentSetup(
         if (state === 'waiting' || state === 'delayed') {
           await existing.remove();
         } else {
-          jobId = `${baseJobId}-${Date.now()}`;
-          logWarn('Tournament setup active job detected, enqueueing forced replacement job', {
+          logInfo('Tournament setup is already active; reusing its lifecycle job', {
             tournamentId,
             existingJobId: existing.id,
-            replacementJobId: jobId,
             state,
             source,
           });
+          return existing;
         }
       } else {
         logInfo('Tournament setup job already active; reusing existing', {

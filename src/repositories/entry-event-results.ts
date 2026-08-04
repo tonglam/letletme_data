@@ -1,18 +1,20 @@
 import { and, eq, gte, inArray, lte, sql } from 'drizzle-orm';
-import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 
 import {
   entryEventResults,
   type DbEntryEventResult,
   type DbEntryEventResultInsert,
 } from '../db/schemas/index.schema';
-import { getDb } from '../db/singleton';
+import { getDb, type DbOrTransaction } from '../db/singleton';
 import { toNullableDbChip } from '../domain/chips';
-import type { RawFPLEntryEventPicksResponse, RawFPLEventLiveResponse } from '../types';
+import type { RawFPLEntryEventPicksResponse, RawFPLEntryHistoryCurrentItem } from '../types';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
-
-type DatabaseInstance = PostgresJsDatabase<Record<string, never>>;
+import {
+  buildCoreHistoryConflictSet,
+  buildCoreHistoryUpsertPlan,
+  chunkCoreHistoryRows,
+} from './entry-event-results-history';
 
 type AutoSubItem = {
   element_in?: number | null;
@@ -24,6 +26,13 @@ type EntryEventTotalsRow = {
   totalPoints: number;
   totalTransfersCost: number;
   totalNetPoints: number;
+};
+
+export type EventPointsPayload = {
+  elements: Array<{
+    id: number;
+    stats: { total_points: number };
+  }>;
 };
 
 function normalizeAutoSubs(raw: unknown): AutoSubItem[] {
@@ -45,10 +54,47 @@ function getAutoSubPoints(autoSubs: AutoSubItem[], elementsPoints: Map<number, n
   }, 0);
 }
 
-export const createEntryEventResultsRepository = (dbInstance?: DatabaseInstance) => {
+export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) => {
   const getDbInstance = async () => dbInstance || (await getDb());
 
   return {
+    upsertCoreFromHistory: async (
+      entryId: number,
+      history: readonly RawFPLEntryHistoryCurrentItem[],
+    ): Promise<{ upsertedEventIds: number[]; fallbackEventIds: number[] }> => {
+      const plan = buildCoreHistoryUpsertPlan(entryId, history);
+
+      try {
+        const db = await getDbInstance();
+        for (const rows of chunkCoreHistoryRows(plan.rows)) {
+          await db
+            .insert(entryEventResults)
+            .values(rows)
+            .onConflictDoUpdate({
+              target: [entryEventResults.entryId, entryEventResults.eventId],
+              set: buildCoreHistoryConflictSet(),
+            });
+        }
+
+        logInfo('Upserted core entry event results from history', {
+          entryId,
+          upserted: plan.upsertedEventIds.length,
+          fallback: plan.fallbackEventIds.length,
+        });
+        return {
+          upsertedEventIds: plan.upsertedEventIds,
+          fallbackEventIds: plan.fallbackEventIds,
+        };
+      } catch (error) {
+        logError('Failed to upsert core entry event results from history', error, { entryId });
+        throw new DatabaseError(
+          'Failed to upsert core entry event results from history',
+          'ENTRY_EVENT_RESULTS_HISTORY_UPSERT_ERROR',
+          error as Error,
+        );
+      }
+    },
+
     aggregateTotalsByEntry: async (
       entryIds: number[],
       startEventId: number,
@@ -146,7 +192,7 @@ export const createEntryEventResultsRepository = (dbInstance?: DatabaseInstance)
       entryId: number,
       eventId: number,
       picks: RawFPLEntryEventPicksResponse,
-      live: RawFPLEventLiveResponse,
+      live: EventPointsPayload,
     ): Promise<void> => {
       try {
         const db = await getDbInstance();

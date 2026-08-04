@@ -12,6 +12,7 @@ const MAX_LEAGUE_PAGES = 100;
 export async function fetchLeagueParticipants(leagueUrl: string): Promise<{
   leagueId: number;
   leagueType: LeagueType;
+  leagueName: string | null;
   participants: TournamentParticipant[];
 }> {
   const { leagueId, leagueType } = parseLeagueUrl(leagueUrl);
@@ -20,12 +21,15 @@ export async function fetchLeagueParticipants(leagueUrl: string): Promise<{
   let newEntriesPage = 1;
   let readStandings = true;
   let readNewEntries = true;
+  let leagueName: string | null = null;
 
   while (readStandings || readNewEntries) {
     const response =
       leagueType === 'h2h'
         ? await fplClient.getLeagueH2HStandings(leagueId, standingsPage, newEntriesPage)
         : await fplClient.getLeagueClassicStandings(leagueId, standingsPage, newEntriesPage);
+
+    leagueName ??= response.league?.name?.trim() || null;
 
     // Ranked standings are authoritative if an entry briefly appears in both
     // cursors because they carry current rank and points.
@@ -64,5 +68,5 @@ export async function fetchLeagueParticipants(leagueUrl: string): Promise<{
     );
   }
 
-  return { leagueId, leagueType, participants };
+  return { leagueId, leagueType, leagueName, participants };
 }

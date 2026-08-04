@@ -18,6 +18,11 @@ describe('mutation auth policy', () => {
     expect(shouldRequireApiKey('OPTIONS', '/events/current')).toBe(false);
   });
 
+  test('keeps setup progress behind the authenticated Web service', () => {
+    expect(shouldRequireApiKey('GET', '/tournaments/42/setup-status')).toBe(true);
+    expect(shouldRequireApiKey('OPTIONS', '/tournaments/42/setup-status')).toBe(false);
+  });
+
   test('requires an API key for every mutation route', () => {
     expect(shouldRequireApiKey('POST', '/jobs/events-sync/trigger')).toBe(true);
     expect(shouldRequireApiKey('DELETE', '/fixtures/cache')).toBe(true);

@@ -9,6 +9,7 @@ export interface JobLogContext {
   tournamentId?: number;
   source?: string;
   attempt?: number;
+  queueWaitMs?: number | null;
 }
 
 const jobLogContextStore = new AsyncLocalStorage<JobLogContext>();

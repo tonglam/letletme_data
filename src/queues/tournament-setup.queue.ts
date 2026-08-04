@@ -5,7 +5,7 @@ export const tournamentSetupQueueName = 'tournament-setup';
 
 export interface TournamentSetupJobData {
   tournamentId: number;
-  source: 'create' | 'manual' | 'watchdog';
+  source: 'create' | 'manual' | 'watchdog' | 'roster' | 'resume';
   triggeredAt: string;
 }
 

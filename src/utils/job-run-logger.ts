@@ -14,6 +14,7 @@ export interface JobRunContext {
   tournamentId?: number;
   source?: string;
   attempt?: number;
+  queueWaitMs?: number | null;
 }
 
 type JobRunMeta = Record<string, unknown>;
@@ -26,8 +27,10 @@ function getBasePayload(context: JobRunContext, status: JobRunStatus): JobRunMet
     queueName: context.queueName,
     jobId: context.jobId,
     eventId: context.eventId,
+    tournamentId: context.tournamentId,
     source: context.source,
     attempt: context.attempt,
+    queueWaitMs: context.queueWaitMs,
   };
 }
 

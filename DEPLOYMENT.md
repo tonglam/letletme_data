@@ -44,6 +44,128 @@ The workflow exports `APP_IMAGE=$IMAGE_REF` before running `docker compose pull/
 - `docker compose logs --since 1h api worker` – inspect bounded production stdout logs.
 - `docker compose run --rm -T api bun run db:migrate` – one-off migration run if needed.
 
+## Tournament creation operations
+
+Tournament creation and setup emit three correlated, bounded JSON events:
+`tournament_creation_proxy` from Web, `tournament_creation` from the Data API, and
+`tournament_setup_attempt` from the worker. All three include `tournamentId` when a shell was
+created. The reports deliberately exclude league URLs, raw upstream URLs, manager/team names, and
+creator/admin identity.
+
+### Current state and milestone timing
+
+This query is read-only. Replace the psql variable value with the tournament being investigated:
+
+```sql
+\set tournament_id 123
+
+SELECT
+  id,
+  setup_status,
+  setup_phase,
+  setup_completed_units,
+  setup_total_units,
+  setup_progress_updated_at,
+  setup_warning_count,
+  roster_mode,
+  roster_sync_status,
+  created_at,
+  setup_started_at,
+  standings_ready_at,
+  setup_finished_at,
+  round(extract(epoch FROM (standings_ready_at - created_at)) * 1000) AS creation_to_standings_ms,
+  round(extract(epoch FROM (setup_finished_at - standings_ready_at)) * 1000) AS enrichment_ms,
+  round(extract(epoch FROM (setup_finished_at - created_at)) * 1000) AS creation_to_ready_ms
+FROM public.tournament_infos
+WHERE id = :'tournament_id'::integer;
+```
+
+### Trace one tournament
+
+Use `--no-log-prefix` so each line remains valid Pino JSON. Data API and worker events can be
+correlated with one command:
+
+```bash
+docker compose logs --no-color --no-log-prefix --since 24h api worker \
+  | jq -Rc --argjson tournamentId 123 '
+      fromjson?
+      | select(.tournamentId == $tournamentId)
+      | select(.event == "tournament_creation" or .event == "tournament_setup_attempt")
+    '
+```
+
+Run the equivalent command against the Web service for the server-visible POST duration:
+
+```bash
+docker compose logs --no-color --no-log-prefix --since 24h web \
+  | jq -Rc --argjson tournamentId 123 '
+      fromjson?
+      | select(.event == "tournament_creation_proxy" and .tournamentId == $tournamentId)
+    '
+```
+
+### Aggregate setup reliability
+
+The following example reports sample count, outcome rates, milestone p50/p95, upstream call and
+retry totals, 429 attempts, and the canonical-data reuse ratio:
+
+```bash
+docker compose logs --no-color --no-log-prefix --since 30d worker \
+  | jq -Rsc '
+      def percentile($p):
+        sort | if length == 0 then null else .[((length - 1) * $p | floor)] end;
+      split("\n")
+      | map(fromjson? | select(.event == "tournament_setup_attempt")) as $rows
+      | ($rows | length) as $sampleCount
+      | {
+          sampleCount: $sampleCount,
+          outcomeRates: (
+            $rows
+            | group_by(.outcome)
+            | map({
+                outcome: .[0].outcome,
+                count: length,
+                rate: (if $sampleCount == 0 then 0 else length / $sampleCount end)
+              })
+          ),
+          creationToStandingsMs: {
+            p50: ([$rows[] | .creationToStandingsMs | select(. != null)] | percentile(0.50)),
+            p95: ([$rows[] | .creationToStandingsMs | select(. != null)] | percentile(0.95))
+          },
+          creationToReadyMs: {
+            p50: ([$rows[] | .creationToReadyMs | select(. != null)] | percentile(0.50)),
+            p95: ([$rows[] | .creationToReadyMs | select(. != null)] | percentile(0.95))
+          },
+          upstream: {
+            logicalCalls: ([$rows[] | .fpl.logicalRequests // 0] | add // 0),
+            attempts: ([$rows[] | .fpl.attempts // 0] | add // 0),
+            retries: ([$rows[] | .fpl.retries // 0] | add // 0),
+            rateLimitedAttempts: ([$rows[] | .fpl.attemptsByOutcome["429"] // 0] | add // 0)
+          },
+          reuseRatio: (
+            ([$rows[] |
+              (.work.entrySnapshots.reusedEntries // 0)
+              + (.work.coreResults.reusedPairs // 0)
+              + (.work.enrichment.reusedPickPairs // 0)
+              + (.work.enrichment.reusedTransferEntries // 0)
+            ] | add // 0) as $reused
+            | ([$rows[] |
+              (.work.entrySnapshots.totalEntries // 0)
+              + (.work.coreResults.totalPairs // 0)
+              + (.work.enrichment.totalPickPairs // 0)
+              + (.work.enrichment.totalTransferEntries // 0)
+            ] | add // 0) as $eligible
+            | if $eligible == 0 then null else $reused / $eligible end
+          )
+        }
+    '
+```
+
+Only show p50 after at least 20 comparable samples. Treat p95 as provisional until at least 100
+comparable samples exist. Segment materially different participant/event windows before comparing
+them. These measurements are operational evidence only; this release does not expose an ETA to
+users.
+
 ## Post-deploy season readiness
 
 `/health` proves API liveness. `/ready` additionally requires PostgreSQL,

@@ -1,6 +1,11 @@
 import { z } from 'zod';
 
 import { FPLClientError } from '../utils/errors';
+import {
+  beginFplLogicalRequest,
+  classifyFplRequestError,
+  classifyFplResponseStatus,
+} from '../utils/fpl-request-metrics';
 import { logDebug } from '../utils/logger';
 
 const REQUEST_TIMEOUT_MS = 10_000;
@@ -396,6 +401,11 @@ export const EntryHistoryCurrentItemSchema = z.object({
   total_points: z.number(),
   rank: z.number().nullable().optional(),
   overall_rank: z.number().nullable().optional(),
+  bank: z.number().nullable().optional(),
+  value: z.number().nullable().optional(),
+  event_transfers: z.number().nullable().optional(),
+  event_transfers_cost: z.number().nullable().optional(),
+  points_on_bench: z.number().nullable().optional(),
 });
 
 export const EntryHistoryResponseSchema = z.object({
@@ -504,116 +514,130 @@ class FPLClient {
    *   bodies do not flip cup lookups to UNKNOWN_ERROR
    */
   private async request(url: string): Promise<Response> {
-    let lastError: unknown = null;
-    /** Last 429/5xx (status-only or buffered) — preferred over UNKNOWN_ERROR. */
-    let lastRetryableResponse: Response | null = null;
-    /**
-     * Backoff captured from a retryable response's Retry-After (or jitter) before
-     * body buffering. Used if the body stalls so the catch path still honors it.
-     */
-    let pendingBackoffMs: number | null = null;
-    const deadlineMs = getEnvMs('FPL_REQUEST_DEADLINE_MS', REQUEST_DEADLINE_MS);
-    const started = Date.now();
+    const requestMetric = beginFplLogicalRequest(url);
+    try {
+      let lastError: unknown = null;
+      /** Last 429/5xx (status-only or buffered) — preferred over UNKNOWN_ERROR. */
+      let lastRetryableResponse: Response | null = null;
+      /**
+       * Backoff captured from a retryable response's Retry-After (or jitter) before
+       * body buffering. Used if the body stalls so the catch path still honors it.
+       */
+      let pendingBackoffMs: number | null = null;
+      const deadlineMs = getEnvMs('FPL_REQUEST_DEADLINE_MS', REQUEST_DEADLINE_MS);
+      const started = Date.now();
 
-    const remainingMs = (): number => Math.max(deadlineMs - (Date.now() - started), 0);
+      const remainingMs = (): number => Math.max(deadlineMs - (Date.now() - started), 0);
 
-    const statusOnlyResponse = (response: Response): Response =>
-      new Response(null, {
-        status: response.status,
-        statusText: response.statusText,
-        headers: response.headers,
-      });
-
-    const bufferResponse = async (response: Response): Promise<Response> => {
-      const body = await response.arrayBuffer();
-      return new Response(body, {
-        status: response.status,
-        statusText: response.statusText,
-        headers: response.headers,
-      });
-    };
-
-    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-      const remaining = remainingMs();
-      if (remaining <= 0) {
-        break;
-      }
-
-      try {
-        const attemptTimeout = Math.min(
-          getEnvMs('FPL_REQUEST_TIMEOUT_MS', REQUEST_TIMEOUT_MS),
-          remaining,
-        );
-        const response = await fetch(url, {
-          signal: AbortSignal.timeout(attemptTimeout),
-          headers: { 'User-Agent': USER_AGENT },
+      const statusOnlyResponse = (response: Response): Response =>
+        new Response(null, {
+          status: response.status,
+          statusText: response.statusText,
+          headers: response.headers,
         });
 
-        if (isRetryableStatus(response.status)) {
-          // Record status + Retry-After before consuming the body so a hung
-          // 429/5xx body still preserves status and honors the rate-limit delay.
-          lastRetryableResponse = statusOnlyResponse(response);
-          const retryAfterMs = parseRetryAfterMs(response.headers.get('retry-after'));
-          pendingBackoffMs = retryAfterMs ?? computeBackoffMs(attempt);
+      const bufferResponse = async (response: Response): Promise<Response> => {
+        const body = await response.arrayBuffer();
+        return new Response(body, {
+          status: response.status,
+          statusText: response.statusText,
+          headers: response.headers,
+        });
+      };
 
-          const buffered = await bufferResponse(response);
-          lastRetryableResponse = buffered;
+      for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+        const remaining = remainingMs();
+        if (remaining <= 0) {
+          break;
+        }
 
-          if (attempt === MAX_RETRIES) {
+        let attemptRecorded = false;
+        try {
+          const attemptTimeout = Math.min(
+            getEnvMs('FPL_REQUEST_TIMEOUT_MS', REQUEST_TIMEOUT_MS),
+            remaining,
+          );
+          const response = await fetch(url, {
+            signal: AbortSignal.timeout(attemptTimeout),
+            headers: { 'User-Agent': USER_AGENT },
+          });
+
+          if (isRetryableStatus(response.status)) {
+            // Record status + Retry-After before consuming the body so a hung
+            // 429/5xx body still preserves status and honors the rate-limit delay.
+            requestMetric.recordAttempt(classifyFplResponseStatus(response.status));
+            attemptRecorded = true;
+            lastRetryableResponse = statusOnlyResponse(response);
+            const retryAfterMs = parseRetryAfterMs(response.headers.get('retry-after'));
+            pendingBackoffMs = retryAfterMs ?? computeBackoffMs(attempt);
+
+            const buffered = await bufferResponse(response);
+            lastRetryableResponse = buffered;
+
+            if (attempt === MAX_RETRIES) {
+              pendingBackoffMs = null;
+              return buffered;
+            }
+
+            const delayMs = Math.min(pendingBackoffMs, remainingMs());
             pendingBackoffMs = null;
-            return buffered;
+            logDebug('Retryable FPL response; backing off', {
+              url,
+              status: response.status,
+              attempt,
+              delayMs,
+            });
+            if (delayMs > 0) {
+              await sleep(delayMs);
+            }
+            continue;
           }
 
-          const delayMs = Math.min(pendingBackoffMs, remainingMs());
+          // Non-retryable error (404, 400, …): return without buffering — hung 404
+          // bodies must not flip cup lookups to UNKNOWN_ERROR.
+          if (!response.ok) {
+            requestMetric.recordAttempt(classifyFplResponseStatus(response.status));
+            pendingBackoffMs = null;
+            return response;
+          }
+
+          // A later 2xx supersedes any earlier 429/5xx: if the body stalls we should
+          // surface a body-read failure, not a stale HTTP_ERROR from a prior attempt.
+          lastRetryableResponse = null;
           pendingBackoffMs = null;
-          logDebug('Retryable FPL response; backing off', {
-            url,
-            status: response.status,
-            attempt,
-            delayMs,
-          });
+          const buffered = await bufferResponse(response);
+          requestMetric.recordAttempt(classifyFplResponseStatus(response.status));
+          return buffered;
+        } catch (error) {
+          if (!attemptRecorded) {
+            requestMetric.recordAttempt(classifyFplRequestError(error));
+          }
+          lastError = error;
+          if (attempt === MAX_RETRIES || remainingMs() <= 0) {
+            pendingBackoffMs = null;
+            break;
+          }
+          const delayMs = Math.min(pendingBackoffMs ?? computeBackoffMs(attempt), remainingMs());
+          pendingBackoffMs = null;
+          logDebug('FPL request failed; backing off', { url, attempt, delayMs });
           if (delayMs > 0) {
             await sleep(delayMs);
           }
-          continue;
-        }
-
-        // Non-retryable error (404, 400, …): return without buffering — hung 404
-        // bodies must not flip cup lookups to UNKNOWN_ERROR.
-        if (!response.ok) {
-          pendingBackoffMs = null;
-          return response;
-        }
-
-        // A later 2xx supersedes any earlier 429/5xx: if the body stalls we should
-        // surface a body-read failure, not a stale HTTP_ERROR from a prior attempt.
-        lastRetryableResponse = null;
-        pendingBackoffMs = null;
-        return await bufferResponse(response);
-      } catch (error) {
-        lastError = error;
-        if (attempt === MAX_RETRIES || remainingMs() <= 0) {
-          pendingBackoffMs = null;
-          break;
-        }
-        const delayMs = Math.min(pendingBackoffMs ?? computeBackoffMs(attempt), remainingMs());
-        pendingBackoffMs = null;
-        logDebug('FPL request failed; backing off', { url, attempt, delayMs });
-        if (delayMs > 0) {
-          await sleep(delayMs);
         }
       }
-    }
 
-    // Prefer the last retryable HTTP status over a synthetic UNKNOWN_ERROR when
-    // the wall-clock deadline was spent during backoff after a 429/5xx.
-    if (lastRetryableResponse) {
-      return lastRetryableResponse;
-    }
+      // Prefer the last retryable HTTP status over a synthetic UNKNOWN_ERROR when
+      // the wall-clock deadline was spent during backoff after a 429/5xx.
+      if (lastRetryableResponse) {
+        return lastRetryableResponse;
+      }
 
-    // Re-throw the raw failure so each caller wraps it with its own endpoint
-    // context (message + UNKNOWN_ERROR code), as before retries existed.
-    throw lastError instanceof Error ? lastError : new Error(String(lastError));
+      // Re-throw the raw failure so each caller wraps it with its own endpoint
+      // context (message + UNKNOWN_ERROR code), as before retries existed.
+      throw lastError instanceof Error ? lastError : new Error(String(lastError));
+    } finally {
+      requestMetric.finish();
+    }
   }
 
   async getBootstrap(): Promise<FPLBootstrapResponse> {

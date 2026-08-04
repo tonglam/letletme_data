@@ -135,3 +135,14 @@ jobs:
           REDIS_DB: '9'
           QUEUE_REDIS_DB: '9'
         run: bun run test:integration
+
+      - name: Tournament setup benchmark
+        env:
+          RUN_INTEGRATION: 1
+          RUN_TOURNAMENT_BENCHMARK: 1
+          DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
+          REDIS_HOST: 127.0.0.1
+          REDIS_PORT: '6379'
+          REDIS_DB: '9'
+          QUEUE_REDIS_DB: '9'
+        run: bun run test:tournament-benchmark

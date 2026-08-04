@@ -22,6 +22,11 @@ import { syncTournamentEventPicks } from '../services/tournament-event-picks.ser
 import { syncTournamentInfo } from '../services/tournament-info.service';
 import { refreshTournamentMaterializedViews } from '../services/tournament-materialized-views.service';
 import { syncTournamentSelectionStats } from '../services/tournament-selection-stats.service';
+import {
+  finishTournamentsThroughEvent,
+  reconcileOfficialTournamentRosters,
+} from '../services/tournament-roster.service';
+import { invalidateTournamentGraphQLCaches } from '../cache/tournament-graphql-cache';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { getQueueConnection } from '../utils/queue';
 import { logError, logInfo } from '../utils/logger';
@@ -261,11 +266,23 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
 
           case TOURNAMENT_JOBS.MATERIALIZED_VIEWS_REFRESH:
             await refreshTournamentMaterializedViews();
+            if (eventId > 0) {
+              const finished = await finishTournamentsThroughEvent(eventId);
+              if (finished > 0) await invalidateTournamentGraphQLCaches('finish');
+            }
             break;
 
           case TOURNAMENT_JOBS.INFO:
             await syncTournamentInfo();
             break;
+
+          case TOURNAMENT_JOBS.ROSTER_SYNC: {
+            const result = await reconcileOfficialTournamentRosters();
+            if (result.errors > 0) {
+              throw new Error(`Official roster sync failed for ${result.errors} tournament(s)`);
+            }
+            return result;
+          }
 
           default:
             throw new Error(`Unknown job name: ${job.name}`);

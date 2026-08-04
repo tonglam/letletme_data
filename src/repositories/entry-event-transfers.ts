@@ -3,6 +3,7 @@ import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 
 import {
   entryEventTransfers,
+  entryInfos,
   type DbEntryEventTransfer,
   type DbEntryEventTransferInsert,
 } from '../db/schemas/index.schema';
@@ -105,6 +106,49 @@ export const createEntryEventTransfersRepository = (dbInstance?: DatabaseInstanc
   const getDbInstance = async () => dbInstance || (await getDb());
 
   return {
+    findEntryIdsNeedingSync: async (
+      entryIds: number[],
+      targetEventId: number,
+    ): Promise<number[]> => {
+      if (entryIds.length === 0) {
+        return [];
+      }
+
+      try {
+        const db = await getDbInstance();
+        const uniqueEntryIds = Array.from(new Set(entryIds));
+        const results: number[] = [];
+        for (let index = 0; index < uniqueEntryIds.length; index += 1000) {
+          const chunk = uniqueEntryIds.slice(index, index + 1000);
+          const rows = await db
+            .select({
+              id: entryInfos.id,
+              syncedThroughEventId: entryInfos.entryTransfersSyncedThroughEventId,
+            })
+            .from(entryInfos)
+            .where(inArray(entryInfos.id, chunk));
+          const checkpoints = new Map(rows.map((row) => [row.id, row.syncedThroughEventId]));
+          results.push(
+            ...chunk.filter((entryId) => {
+              const checkpoint = checkpoints.get(entryId);
+              return checkpoint === undefined || checkpoint === null || checkpoint < targetEventId;
+            }),
+          );
+        }
+        return results;
+      } catch (error) {
+        logError('Failed to find entry transfer sync gaps', error, {
+          count: entryIds.length,
+          targetEventId,
+        });
+        throw new DatabaseError(
+          'Failed to find entry transfer sync gaps',
+          'ENTRY_EVENT_TRANSFERS_SYNC_GAPS_ERROR',
+          error as Error,
+        );
+      }
+    },
+
     replaceForEvent: async (
       entryId: number,
       eventId: number,
@@ -193,6 +237,28 @@ export const createEntryEventTransfersRepository = (dbInstance?: DatabaseInstanc
               );
             }
           }
+
+          await tx
+            .update(entryInfos)
+            .set({
+              entryTransfersSyncedThroughEventId:
+                syncMode === 'all'
+                  ? sql`GREATEST(
+                      COALESCE(${entryInfos.entryTransfersSyncedThroughEventId}, 0),
+                      ${eventId}
+                    )`
+                  : sql`CASE
+                      WHEN ${entryInfos.entryTransfersSyncedThroughEventId} IS NOT NULL
+                        AND ${entryInfos.entryTransfersSyncedThroughEventId} >= ${eventId - 1}
+                      THEN GREATEST(
+                        ${entryInfos.entryTransfersSyncedThroughEventId},
+                        ${eventId}
+                      )
+                      ELSE ${entryInfos.entryTransfersSyncedThroughEventId}
+                    END`,
+              updatedAt: new Date(),
+            })
+            .where(eq(entryInfos.id, entryId));
         });
 
         logInfo('Replaced entry event transfers', {

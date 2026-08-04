@@ -129,6 +129,11 @@ const managedTournament = {
   creator: 'Manager',
   adminEntryId: 123,
   totalTeamNum: 8,
+  leagueType: 'classic' as const,
+  groupMode: 'points_races' as const,
+  groupNum: 1,
+  knockoutMode: 'no_knockout' as const,
+  rosterMode: 'snapshot' as const,
   state: 'active' as const,
   createdAt: '2026-08-01T00:00:00.000Z',
   updatedAt: '2026-08-02T00:00:00.000Z',
@@ -509,6 +514,12 @@ describe('tournamentsAPI handlers', () => {
     getTournamentSetupStatus.mockImplementation(async () => ({
       setupStatus: 'failed',
       setupError: 'Connection terminated unexpectedly at internal-host:5432',
+      setupPhase: 'failed',
+      setupCompletedUnits: 17,
+      setupTotalUnits: 75,
+      setupProgressUpdatedAt: '2026-07-17T01:04:00.000Z',
+      standingsReadyAt: null,
+      setupWarningCount: 0,
       setupStartedAt: '2026-07-17T01:00:00.000Z',
       setupFinishedAt: '2026-07-17T01:05:00.000Z',
     }));
@@ -520,7 +531,11 @@ describe('tournamentsAPI handlers', () => {
     const body = (await response.json()) as Record<string, unknown>;
     expect(body.success).toBe(true);
     expect(body.setupStatus).toBe('failed');
+    expect(body.setupPhase).toBe('failed');
+    expect(body.setupCompletedUnits).toBe(17);
+    expect(body.setupHasWarnings).toBe(false);
     expect('setupError' in body).toBe(false);
+    expect('rosterSyncError' in body).toBe(false);
     expect(JSON.stringify(body)).not.toContain('internal-host');
 
     getTournamentSetupStatus.mockImplementation(async () => null);

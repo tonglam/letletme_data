@@ -1,4 +1,4 @@
-import { and, eq, gte, lt, lte, sql } from 'drizzle-orm';
+import { and, eq, gte, isNotNull, lt, lte, sql } from 'drizzle-orm';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 
 import { tournamentInfos, type DbTournamentInfo } from '../db/schemas/index.schema';
@@ -8,13 +8,22 @@ import type {
   KnockoutMode,
   LeagueType,
   TournamentConfig,
+  TournamentRosterMode,
+  TournamentSetupPhase,
   TournamentSetupStatus,
   TournamentStructurePlan,
 } from '../domain/tournament';
-import { DatabaseError } from '../utils/errors';
+import { ConflictError, DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 
 type DatabaseInstance = PostgresJsDatabase<Record<string, never>>;
+
+export const isTournamentNameConflict = (error: unknown): boolean => {
+  if (!error || typeof error !== 'object') return false;
+  const record = error as { code?: unknown; constraint_name?: unknown; constraint?: unknown };
+  const constraint = String(record.constraint_name ?? record.constraint ?? '');
+  return record.code === '23505' && constraint === 'unique_tournament_name';
+};
 
 export interface TournamentInfoSummary {
   id: number;
@@ -34,13 +43,21 @@ export interface TournamentInfoSummary {
 export interface TournamentInfoNameSummary {
   id: number;
   name: string;
+  sourceLeagueName: string | null;
   leagueId: number;
   leagueType: LeagueType;
 }
 
 export interface TournamentSetupStatusRow {
+  createdAt: string;
   setupStatus: TournamentSetupStatus;
   setupError: string | null;
+  setupPhase: TournamentSetupPhase;
+  setupCompletedUnits: number;
+  setupTotalUnits: number;
+  setupProgressUpdatedAt: string | null;
+  standingsReadyAt: string | null;
+  setupWarningCount: number;
   setupStartedAt: string | null;
   setupFinishedAt: string | null;
 }
@@ -56,7 +73,16 @@ export interface TournamentCreatedRow {
 
 export interface StuckTournamentRow {
   id: number;
-  setupStartedAt: string | null;
+  setupProgressUpdatedAt: string | null;
+}
+
+export interface OfficialSyncTournamentRow {
+  id: number;
+  adminEntryId: number;
+  leagueId: number;
+  leagueType: LeagueType;
+  rosterMode: TournamentRosterMode;
+  state: 'active' | 'inactive' | 'finished';
 }
 
 function mapTournamentInfo(row: DbTournamentInfo): TournamentInfoSummary {
@@ -87,6 +113,7 @@ export const createTournamentInfoRepository = (dbInstance?: DatabaseInstance) =>
           .select({
             id: tournamentInfos.id,
             name: tournamentInfos.name,
+            sourceLeagueName: tournamentInfos.sourceLeagueName,
             leagueId: tournamentInfos.leagueId,
             leagueType: tournamentInfos.leagueType,
           })
@@ -103,7 +130,9 @@ export const createTournamentInfoRepository = (dbInstance?: DatabaseInstance) =>
       }
     },
 
-    updateNames: async (updates: Array<{ id: number; name: string }>): Promise<number> => {
+    updateSourceLeagueNames: async (
+      updates: Array<{ id: number; sourceLeagueName: string }>,
+    ): Promise<number> => {
       if (updates.length === 0) {
         return 0;
       }
@@ -111,25 +140,27 @@ export const createTournamentInfoRepository = (dbInstance?: DatabaseInstance) =>
       try {
         const client = await getDbClient();
         const ids = updates.map((u) => u.id);
-        const names = updates.map((u) => u.name);
+        const names = updates.map((u) => u.sourceLeagueName);
 
         await client`
           update tournament_infos as ti
-          set name = data.new_name,
+          set source_league_name = data.source_league_name,
               updated_at = now()
           from (
             select unnest(${ids}::int[]) as id,
-                   unnest(${names}::text[]) as new_name
+                   unnest(${names}::text[]) as source_league_name
           ) as data
           where ti.id = data.id
         `;
 
-        logInfo('Updated tournament info names', { count: updates.length });
+        logInfo('Updated tournament source league names', { count: updates.length });
         return updates.length;
       } catch (error) {
-        logError('Failed to update tournament info names', error, { count: updates.length });
+        logError('Failed to update tournament source league names', error, {
+          count: updates.length,
+        });
         throw new DatabaseError(
-          'Failed to update tournament info names',
+          'Failed to update tournament source league names',
           'TOURNAMENT_INFO_UPDATE_ERROR',
           error as Error,
         );
@@ -167,7 +198,9 @@ export const createTournamentInfoRepository = (dbInstance?: DatabaseInstance) =>
         const rows = await db
           .select()
           .from(tournamentInfos)
-          .where(eq(tournamentInfos.state, 'active'));
+          .where(
+            and(eq(tournamentInfos.state, 'active'), isNotNull(tournamentInfos.standingsReadyAt)),
+          );
         const result = rows.map(mapTournamentInfo);
         logInfo('Retrieved active tournament infos', { count: result.length });
         return result;
@@ -190,6 +223,7 @@ export const createTournamentInfoRepository = (dbInstance?: DatabaseInstance) =>
           .where(
             and(
               eq(tournamentInfos.state, 'active'),
+              isNotNull(tournamentInfos.standingsReadyAt),
               eq(tournamentInfos.groupMode, 'points_races'),
               lte(tournamentInfos.groupStartedEventId, eventId),
               gte(tournamentInfos.groupEndedEventId, eventId),
@@ -217,6 +251,7 @@ export const createTournamentInfoRepository = (dbInstance?: DatabaseInstance) =>
           .where(
             and(
               eq(tournamentInfos.state, 'active'),
+              isNotNull(tournamentInfos.standingsReadyAt),
               eq(tournamentInfos.groupMode, 'battle_races'),
               lte(tournamentInfos.groupStartedEventId, eventId),
               gte(tournamentInfos.groupEndedEventId, eventId),
@@ -244,6 +279,7 @@ export const createTournamentInfoRepository = (dbInstance?: DatabaseInstance) =>
           .where(
             and(
               eq(tournamentInfos.state, 'active'),
+              isNotNull(tournamentInfos.standingsReadyAt),
               sql`${tournamentInfos.knockoutMode} <> 'no_knockout'`,
               lte(tournamentInfos.knockoutStartedEventId, eventId),
               gte(tournamentInfos.knockoutEndedEventId, eventId),
@@ -319,15 +355,29 @@ export const createTournamentInfoRepository = (dbInstance?: DatabaseInstance) =>
         const client = await getDbClient();
         const rows = await client<
           {
+            created_at: string;
             setup_status: TournamentSetupStatus;
             setup_error: string | null;
+            setup_phase: TournamentSetupPhase;
+            setup_completed_units: number;
+            setup_total_units: number;
+            setup_progress_updated_at: string | null;
+            standings_ready_at: string | null;
+            setup_warning_count: number;
             setup_started_at: string | null;
             setup_finished_at: string | null;
           }[]
         >`
           select
+            created_at::text,
             setup_status,
             setup_error,
+            setup_phase,
+            setup_completed_units,
+            setup_total_units,
+            setup_progress_updated_at::text,
+            standings_ready_at::text,
+            setup_warning_count,
             setup_started_at::text,
             setup_finished_at::text
           from tournament_infos
@@ -339,8 +389,15 @@ export const createTournamentInfoRepository = (dbInstance?: DatabaseInstance) =>
           return null;
         }
         return {
+          createdAt: rows[0].created_at,
           setupStatus: rows[0].setup_status,
           setupError: rows[0].setup_error,
+          setupPhase: rows[0].setup_phase,
+          setupCompletedUnits: rows[0].setup_completed_units,
+          setupTotalUnits: rows[0].setup_total_units,
+          setupProgressUpdatedAt: rows[0].setup_progress_updated_at,
+          standingsReadyAt: rows[0].standings_ready_at,
+          setupWarningCount: rows[0].setup_warning_count,
           setupStartedAt: rows[0].setup_started_at,
           setupFinishedAt: rows[0].setup_finished_at,
         };
@@ -362,6 +419,11 @@ export const createTournamentInfoRepository = (dbInstance?: DatabaseInstance) =>
           .set({
             setupStatus: 'processing',
             setupError: null,
+            setupPhase: 'syncing_entries',
+            setupCompletedUnits: 0,
+            setupTotalUnits: 0,
+            setupProgressUpdatedAt: new Date(),
+            setupWarningCount: 0,
             setupStartedAt: new Date(),
             setupFinishedAt: null,
             updatedAt: new Date(),
@@ -377,10 +439,67 @@ export const createTournamentInfoRepository = (dbInstance?: DatabaseInstance) =>
       }
     },
 
+    markSetupProgress: async (
+      tournamentId: number,
+      phase: TournamentSetupPhase,
+      completedUnits: number,
+      totalUnits: number,
+    ): Promise<void> => {
+      try {
+        const db = await getDbInstance();
+        const safeTotal = Math.max(0, Math.trunc(totalUnits));
+        const safeCompleted = Math.min(safeTotal, Math.max(0, Math.trunc(completedUnits)));
+        await db
+          .update(tournamentInfos)
+          .set({
+            setupPhase: phase,
+            setupCompletedUnits: safeCompleted,
+            setupTotalUnits: safeTotal,
+            setupProgressUpdatedAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .where(eq(tournamentInfos.id, tournamentId));
+      } catch (error) {
+        logError('Failed to update tournament setup progress', error, {
+          tournamentId,
+          phase,
+          completedUnits,
+          totalUnits,
+        });
+        throw new DatabaseError(
+          'Failed to update tournament setup progress',
+          'TOURNAMENT_INFO_MARK_PROGRESS_ERROR',
+          error as Error,
+        );
+      }
+    },
+
+    markStandingsReady: async (tournamentId: number): Promise<void> => {
+      try {
+        const db = await getDbInstance();
+        await db
+          .update(tournamentInfos)
+          .set({
+            standingsReadyAt: sql`COALESCE(${tournamentInfos.standingsReadyAt}, now())`,
+            setupProgressUpdatedAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .where(eq(tournamentInfos.id, tournamentId));
+      } catch (error) {
+        logError('Failed to publish tournament standings readiness', error, { tournamentId });
+        throw new DatabaseError(
+          'Failed to publish tournament standings readiness',
+          'TOURNAMENT_INFO_MARK_STANDINGS_READY_ERROR',
+          error as Error,
+        );
+      }
+    },
+
     markSetupResult: async (
       tournamentId: number,
       status: 'ready' | 'failed',
       error?: string | null,
+      warningCount = status === 'ready' && error ? 1 : 0,
     ): Promise<void> => {
       try {
         const db = await getDbInstance();
@@ -388,7 +507,10 @@ export const createTournamentInfoRepository = (dbInstance?: DatabaseInstance) =>
           .update(tournamentInfos)
           .set({
             setupStatus: status,
+            setupPhase: status,
+            setupWarningCount: status === 'ready' ? Math.max(0, warningCount) : 0,
             setupError: error ?? null,
+            setupProgressUpdatedAt: new Date(),
             setupFinishedAt: new Date(),
             updatedAt: new Date(),
           })
@@ -406,22 +528,37 @@ export const createTournamentInfoRepository = (dbInstance?: DatabaseInstance) =>
     findStuckProcessing: async (cutoffMinutes: number): Promise<StuckTournamentRow[]> => {
       try {
         const db = await getDbInstance();
-        const cutoff = new Date(Date.now() - cutoffMinutes * 60_000);
+        // This predicate wraps timestamp columns in a raw COALESCE expression,
+        // so Drizzle cannot infer the encoder for a JavaScript Date. Bind a
+        // portable ISO value and let PostgreSQL infer timestamptz from the
+        // comparison instead of handing postgres.js an untyped Date.
+        const cutoff = new Date(Date.now() - cutoffMinutes * 60_000).toISOString();
         const rows = await db
           .select({
             id: tournamentInfos.id,
-            setupStartedAt: tournamentInfos.setupStartedAt,
+            setupProgressUpdatedAt: sql<Date | null>`COALESCE(
+              ${tournamentInfos.setupProgressUpdatedAt},
+              ${tournamentInfos.setupStartedAt}
+            )`,
           })
           .from(tournamentInfos)
           .where(
             and(
               eq(tournamentInfos.setupStatus, 'processing'),
-              lt(tournamentInfos.setupStartedAt, cutoff),
+              lt(
+                sql`COALESCE(
+                  ${tournamentInfos.setupProgressUpdatedAt},
+                  ${tournamentInfos.setupStartedAt}
+                )`,
+                cutoff,
+              ),
             ),
           );
         return rows.map((row) => ({
           id: row.id,
-          setupStartedAt: row.setupStartedAt ? row.setupStartedAt.toISOString() : null,
+          setupProgressUpdatedAt: row.setupProgressUpdatedAt
+            ? row.setupProgressUpdatedAt.toISOString()
+            : null,
         }));
       } catch (error) {
         logError('Failed to find stuck processing tournaments', error, { cutoffMinutes });
@@ -477,6 +614,10 @@ export const createTournamentInfoRepository = (dbInstance?: DatabaseInstance) =>
               admin_entry_id,
               league_id,
               league_type,
+              source_league_name,
+              roster_mode,
+              roster_sync_status,
+              roster_last_synced_at,
               total_team_num,
               tournament_mode,
               group_mode,
@@ -497,6 +638,8 @@ export const createTournamentInfoRepository = (dbInstance?: DatabaseInstance) =>
               knockout_play_against_num,
               state,
               setup_status,
+              setup_phase,
+              setup_progress_updated_at,
               updated_at
             ) values (
               ${plan.tournamentName},
@@ -504,6 +647,10 @@ export const createTournamentInfoRepository = (dbInstance?: DatabaseInstance) =>
               ${plan.adminEntryId},
               ${plan.leagueId},
               ${plan.leagueType},
+              ${plan.sourceLeagueName ?? null},
+              ${plan.rosterMode ?? 'snapshot'},
+              ${plan.rosterMode === 'official_sync' ? 'ready' : null},
+              ${plan.rosterMode === 'official_sync' ? new Date().toISOString() : null},
               ${plan.selectedParticipants.length},
               ${'normal'},
               ${plan.groupMode},
@@ -524,6 +671,8 @@ export const createTournamentInfoRepository = (dbInstance?: DatabaseInstance) =>
               ${plan.knockoutPlayAgainstNum},
               ${'active'},
               ${'pending'},
+              ${'queued'},
+              now(),
               now()
             )
             returning id, name, creator, admin_entry_id, league_id, total_team_num
@@ -561,6 +710,9 @@ export const createTournamentInfoRepository = (dbInstance?: DatabaseInstance) =>
           };
         });
       } catch (error) {
+        if (isTournamentNameConflict(error)) {
+          throw new ConflictError('Tournament name already exists.', 'TOURNAMENT_NAME_EXISTS');
+        }
         if (error instanceof DatabaseError) {
           throw error;
         }

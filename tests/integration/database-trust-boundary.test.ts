@@ -52,9 +52,138 @@ const DATA_FUNCTIONS = [
   'get_pick_aggregation',
   'get_players_for_picker',
   'get_transfer_aggregation',
+  'search_players_for_picker',
 ] as const;
 
 describe('Database trust boundary', () => {
+  test('installs private entry sync checkpoints with bounded event ranges', async () => {
+    const sql = await getDbClient();
+    const columns = await sql<NamedFinding[]>`
+      SELECT column_name AS name
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'entry_infos'
+        AND column_name IN (
+          'entry_snapshot_synced_through_event_id',
+          'entry_transfers_synced_through_event_id'
+        )
+      ORDER BY name
+    `;
+    expect(columns.map((finding) => finding.name)).toEqual([
+      'entry_snapshot_synced_through_event_id',
+      'entry_transfers_synced_through_event_id',
+    ]);
+
+    const constraints = await sql<NamedFinding[]>`
+      SELECT constraint_name AS name
+      FROM information_schema.table_constraints
+      WHERE table_schema = 'public'
+        AND table_name = 'entry_infos'
+        AND constraint_name IN (
+          'entry_snapshot_sync_event_range',
+          'entry_transfers_sync_event_range'
+        )
+      ORDER BY name
+    `;
+    expect(constraints.map((finding) => finding.name)).toEqual([
+      'entry_snapshot_sync_event_range',
+      'entry_transfers_sync_event_range',
+    ]);
+  });
+
+  test('installs the tournament materialized views required by runtime refreshes', async () => {
+    const sql = await getDbClient();
+
+    const readModels = await sql<NamedFinding[]>`
+      SELECT relation.relname AS name
+      FROM pg_class relation
+      JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+      WHERE namespace.nspname = 'public'
+        AND relation.relkind IN ('v', 'm')
+        AND relation.relname = ANY(${DATA_VIEWS}::text[])
+      ORDER BY name
+    `;
+    expect(readModels.map((finding) => finding.name)).toEqual([...DATA_VIEWS]);
+
+    const materializedViews = await sql<NamedFinding[]>`
+      SELECT relation.relname AS name
+      FROM pg_class relation
+      JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+      WHERE namespace.nspname = 'public'
+        AND relation.relkind = 'm'
+        AND relation.relname = ANY(${DATA_VIEWS}::text[])
+      ORDER BY name
+    `;
+    expect(materializedViews.map((finding) => finding.name)).toEqual([
+      'mv_tournament_event_snapshot',
+      'mv_tournament_snapshot',
+    ]);
+
+    const refreshIndexes = await sql<NamedFinding[]>`
+      SELECT index_relation.relname AS name
+      FROM pg_index index_definition
+      JOIN pg_class index_relation ON index_relation.oid = index_definition.indexrelid
+      JOIN pg_class owner_relation ON owner_relation.oid = index_definition.indrelid
+      JOIN pg_namespace namespace ON namespace.oid = owner_relation.relnamespace
+      WHERE namespace.nspname = 'public'
+        AND owner_relation.relname IN (
+          'mv_tournament_event_snapshot',
+          'mv_tournament_snapshot'
+        )
+        AND index_definition.indisunique
+      ORDER BY name
+    `;
+    expect(refreshIndexes.map((finding) => finding.name)).toEqual([
+      'idx_mv_tes_pk',
+      'idx_mv_ts_pk',
+    ]);
+
+    const inaccessibleToServiceRole = await sql<NamedFinding[]>`
+      SELECT expected.name
+      FROM (VALUES
+        ('mv_tournament_event_snapshot'),
+        ('mv_tournament_snapshot')
+      ) expected(name)
+      WHERE NOT has_table_privilege(
+        'service_role',
+        format('public.%I', expected.name),
+        'SELECT'
+      )
+      ORDER BY expected.name
+    `;
+    expect(inaccessibleToServiceRole.map((finding) => finding.name)).toEqual([]);
+
+    const readFunctions = await sql<NamedFinding[]>`
+      SELECT routine.proname AS name
+      FROM pg_proc routine
+      JOIN pg_namespace namespace ON namespace.oid = routine.pronamespace
+      WHERE namespace.nspname = 'public'
+        AND routine.proname = ANY(${DATA_FUNCTIONS}::text[])
+      ORDER BY name
+    `;
+    expect(readFunctions.map((finding) => finding.name)).toEqual([...DATA_FUNCTIONS]);
+
+    const functionsInaccessibleToServiceRole = await sql<NamedFinding[]>`
+      SELECT routine.proname AS name
+      FROM pg_proc routine
+      JOIN pg_namespace namespace ON namespace.oid = routine.pronamespace
+      WHERE namespace.nspname = 'public'
+        AND routine.proname = ANY(${DATA_FUNCTIONS}::text[])
+        AND NOT has_function_privilege('service_role', routine.oid, 'EXECUTE')
+      ORDER BY name
+    `;
+    expect(functionsInaccessibleToServiceRole.map((finding) => finding.name)).toEqual([]);
+
+    const [eventResultViewPrivilege] = await sql<{ allowed: boolean }[]>`
+      SELECT has_table_privilege(
+        'service_role',
+        'public.v_tournament_event_result',
+        'SELECT'
+      ) AS allowed
+    `;
+    expect(eventResultViewPrivilege?.allowed).toBe(true);
+  });
+
   test('keeps Data-owned FPL relations fail-closed behind service-owned APIs', async () => {
     const sql = await getDbClient();
 

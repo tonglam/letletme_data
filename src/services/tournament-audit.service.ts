@@ -278,7 +278,10 @@ export async function runTournamentAuditAndFixup(
         tournamentId: tournament.id,
         scopes: ['entry-core:all'],
       },
-      () => syncTournamentEntryDetails(missingEntryIds),
+      () =>
+        syncTournamentEntryDetails(missingEntryIds, {
+          targetEventId: window?.endEventId ?? 0,
+        }),
     );
     warnings.push(...entrySyncIssues);
   }

@@ -96,6 +96,26 @@ export const createEventRepository = (dbInstance?: DatabaseInstance) => {
 
     findPrevious: async (): Promise<DbEvent | null> => findNeighbour(-1, 'previous'),
 
+    findLatestFinalized: async (): Promise<DbEvent | null> => {
+      try {
+        const db = await getDbInstance();
+        const result = await db
+          .select()
+          .from(events)
+          .where(and(eq(events.finished, true), eq(events.dataChecked, true)))
+          .orderBy(desc(events.id))
+          .limit(1);
+        return result[0] ?? null;
+      } catch (error) {
+        logError('Failed to find latest finalized event', error);
+        throw new DatabaseError(
+          'Failed to retrieve latest finalized event',
+          'FIND_LATEST_FINALIZED_ERROR',
+          error instanceof Error ? error : undefined,
+        );
+      }
+    },
+
     upsertBatch: async (domainEvents: DomainEvent[]): Promise<DbEvent[]> => {
       try {
         if (domainEvents.length === 0) {

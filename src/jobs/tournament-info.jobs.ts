@@ -5,7 +5,7 @@ import { isFPLSeason } from '../utils/conditions';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { logDebug, logInfo } from '../utils/logger';
 import { CRON_TIMEZONE } from '../utils/timezone';
-import { enqueueTournamentInfo } from './tournament-sync.jobs';
+import { enqueueTournamentInfo, enqueueTournamentRosterSync } from './tournament-sync.jobs';
 
 export async function runTournamentInfoSync() {
   const now = new Date();
@@ -17,8 +17,14 @@ export async function runTournamentInfoSync() {
   }
 
   logInfo('Enqueueing tournament info sync job');
-  const job = await enqueueTournamentInfo(0, 'cron');
-  logInfo('Tournament info sync job enqueued', { jobId: job.id });
+  const [rosterJob, infoJob] = await Promise.all([
+    enqueueTournamentRosterSync('cron'),
+    enqueueTournamentInfo(0, 'cron'),
+  ]);
+  logInfo('Tournament metadata jobs enqueued', {
+    rosterJobId: rosterJob.id,
+    infoJobId: infoJob.id,
+  });
 }
 
 export function registerTournamentInfoJobs(app: Elysia) {
