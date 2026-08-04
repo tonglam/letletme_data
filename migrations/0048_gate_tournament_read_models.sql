@@ -329,26 +329,105 @@ JOIN public.tournament_infos tournament
 
 ALTER VIEW public.v_tournament_snapshot SET (security_invoker = true);
 
--- Selection statistics are persisted in the canonical table by the sync
--- worker. Expose the same columns through the legacy view, but never expose
--- rows while the tournament is retrying or has not published standings.
+-- Preserve the legacy selection-stat calculation while adding the same
+-- readiness barrier. The table is a write checkpoint, not a replacement for
+-- the view's current picks/transfers aggregation semantics.
 CREATE OR REPLACE VIEW public.v_tournament_selection_stats AS
+WITH pick_data AS (
+  SELECT
+    te.tournament_id,
+    eer.event_id,
+    (pick.item ->> 'element')::int AS element_id,
+    COUNT(*) AS pick_count,
+    COUNT(*) FILTER (WHERE (pick.item ->> 'is_captain')::boolean) AS captain_count,
+    COUNT(*) FILTER (WHERE (pick.item ->> 'is_vice_captain')::boolean) AS vice_captain_count
+  FROM public.tournament_entries te
+  JOIN public.entry_event_results eer ON eer.entry_id = te.entry_id
+  CROSS JOIN LATERAL jsonb_array_elements(eer.event_picks) AS pick(item)
+  GROUP BY te.tournament_id, eer.event_id, (pick.item ->> 'element')::int
+), transfer_in AS (
+  SELECT
+    te.tournament_id,
+    eet.event_id,
+    eet.element_in_id AS element_id,
+    COUNT(*) AS transfer_in_count
+  FROM public.tournament_entries te
+  JOIN public.entry_event_transfers eet ON eet.entry_id = te.entry_id
+  WHERE eet.element_in_id IS NOT NULL
+  GROUP BY te.tournament_id, eet.event_id, eet.element_in_id
+), transfer_out AS (
+  SELECT
+    te.tournament_id,
+    eet.event_id,
+    eet.element_out_id AS element_id,
+    COUNT(*) AS transfer_out_count
+  FROM public.tournament_entries te
+  JOIN public.entry_event_transfers eet ON eet.entry_id = te.entry_id
+  WHERE eet.element_out_id IS NOT NULL
+  GROUP BY te.tournament_id, eet.event_id, eet.element_out_id
+), entry_counts AS (
+  SELECT
+    te.tournament_id,
+    eer.event_id,
+    COUNT(DISTINCT te.entry_id)::int AS total_entries
+  FROM public.tournament_entries te
+  JOIN public.entry_event_results eer ON eer.entry_id = te.entry_id
+  GROUP BY te.tournament_id, eer.event_id
+)
 SELECT
-  stats.tournament_id,
-  stats.event_id,
-  stats.total_entries,
-  stats.element_id,
-  stats.pick_count,
-  stats.captain_count,
-  stats.vice_captain_count,
-  stats.transfer_in_count,
-  stats.transfer_out_count
-FROM public.tournament_selection_stats stats
-JOIN public.tournament_infos tournament
-  ON tournament.id = stats.tournament_id
-  AND tournament.standings_ready_at IS NOT NULL;
+  COALESCE(pd.tournament_id, ti.tournament_id, to2.tournament_id) AS tournament_id,
+  COALESCE(pd.event_id, ti.event_id, to2.event_id) AS event_id,
+  ec.total_entries,
+  COALESCE(pd.element_id, ti.element_id, to2.element_id) AS element_id,
+  COALESCE(pd.pick_count, 0)::int AS pick_count,
+  COALESCE(pd.captain_count, 0)::int AS captain_count,
+  COALESCE(pd.vice_captain_count, 0)::int AS vice_captain_count,
+  COALESCE(ti.transfer_in_count, 0)::int AS transfer_in_count,
+  COALESCE(to2.transfer_out_count, 0)::int AS transfer_out_count
+FROM pick_data pd
+FULL OUTER JOIN transfer_in ti
+  ON ti.tournament_id = pd.tournament_id
+  AND ti.event_id = pd.event_id
+  AND ti.element_id = pd.element_id
+FULL OUTER JOIN transfer_out to2
+  ON to2.tournament_id = COALESCE(pd.tournament_id, ti.tournament_id)
+  AND to2.event_id = COALESCE(pd.event_id, ti.event_id)
+  AND to2.element_id = COALESCE(pd.element_id, ti.element_id)
+JOIN entry_counts ec
+  ON ec.tournament_id = COALESCE(pd.tournament_id, ti.tournament_id, to2.tournament_id)
+  AND ec.event_id = COALESCE(pd.event_id, ti.event_id, to2.event_id)
+JOIN public.tournament_infos ready_tournament
+  ON ready_tournament.id = ec.tournament_id
+  AND ready_tournament.standings_ready_at IS NOT NULL;
 
 ALTER VIEW public.v_tournament_selection_stats SET (security_invoker = true);
+
+-- Dropping and recreating a view removes its old ACL. Restore the same trust
+-- boundary explicitly so service-role GraphQL reads continue to work while
+-- direct anon/authenticated Data API reads remain revoked.
+REVOKE ALL ON TABLE public.v_tournament_event_snapshot FROM PUBLIC;
+REVOKE ALL ON TABLE public.v_tournament_snapshot FROM PUBLIC;
+REVOKE ALL ON TABLE public.v_tournament_selection_stats FROM PUBLIC;
+
+DO $$
+DECLARE
+  client_role text;
+BEGIN
+  FOREACH client_role IN ARRAY ARRAY['anon', 'authenticated']
+  LOOP
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = client_role) THEN
+      EXECUTE format('REVOKE ALL ON TABLE public.v_tournament_event_snapshot FROM %I', client_role);
+      EXECUTE format('REVOKE ALL ON TABLE public.v_tournament_snapshot FROM %I', client_role);
+      EXECUTE format('REVOKE ALL ON TABLE public.v_tournament_selection_stats FROM %I', client_role);
+    END IF;
+  END LOOP;
+
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN
+    GRANT SELECT ON TABLE public.v_tournament_event_snapshot TO service_role;
+    GRANT SELECT ON TABLE public.v_tournament_snapshot TO service_role;
+    GRANT SELECT ON TABLE public.v_tournament_selection_stats TO service_role;
+  END IF;
+END $$;
 
 -- The direct event-result view is also a granted read model. Do not expose
 -- canonical tournament rows before the standings publication barrier.
