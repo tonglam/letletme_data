@@ -42,7 +42,7 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
     {
       queue: job.queueName,
       jobName: job.name,
-      runId: String(job.id ?? `${job.name}-${job.timestamp}`),
+      runId: job.data?.runId ?? String(job.id ?? `${job.name}-${job.timestamp}`),
       source: job.data?.source,
       attempt: job.attemptsMade + 1,
       targetEventId: job.data?.eventId,

@@ -17,6 +17,8 @@ export type DataSyncJobName =
 export interface DataSyncJobData {
   source?: 'cron' | 'manual' | 'api' | 'event-transition' | 'cascade';
   triggeredAt: string;
+  /** Correlates one logical execution across BullMQ retries; independent of queue dedupe ID. */
+  runId?: string;
   /** Optional event filter (fixtures, player-stats); absent = current/all behavior */
   eventId?: number;
   /** Price-history date in the configured cron timezone (YYYYMMDD). */

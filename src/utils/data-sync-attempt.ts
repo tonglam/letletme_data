@@ -10,7 +10,13 @@ import { logInfo } from './logger';
 export const DATA_SYNC_ATTEMPT_OUTCOMES = ['ready', 'partial', 'failed', 'noop'] as const;
 export type DataSyncAttemptOutcome = (typeof DATA_SYNC_ATTEMPT_OUTCOMES)[number];
 
-export type DataSyncAttemptSource = 'cron' | 'manual' | 'retry' | 'watchdog' | 'coordinator';
+export type DataSyncAttemptSource =
+  | 'cron'
+  | 'manual'
+  | 'api'
+  | 'retry'
+  | 'watchdog'
+  | 'coordinator';
 
 export interface DataSyncAttemptContext {
   queue: string;
@@ -159,6 +165,7 @@ export function inferDataSyncWorkSummary(result: unknown): DataSyncWorkSummary {
 function normalizeSource(context: DataSyncAttemptContext): DataSyncAttemptSource {
   if ((context.attempt ?? 1) > 1 || context.source === 'retry') return 'retry';
   if (context.source === 'cron') return 'cron';
+  if (context.source === 'api') return 'api';
   if (context.source === 'watchdog') return 'watchdog';
   if (context.source === 'cascade' || context.source === 'event-transition') return 'coordinator';
   if (context.source === 'coordinator') return 'coordinator';
@@ -188,9 +195,13 @@ export async function runDataSyncAttempt<T>(
     const startedAt = performance.now();
     let summary: DataSyncWorkSummary = {};
     let outcome: DataSyncAttemptOutcome = 'failed';
+    let targetEventId = context.targetEventId;
 
     try {
       const result = await runner();
+      if (targetEventId === undefined && isRecord(result)) {
+        targetEventId = firstBoundedUnit(result.eventId);
+      }
       summary = options.summarize?.(result) ?? inferDataSyncWorkSummary(result);
       outcome = resolveOutcome(summary);
       return result;
@@ -202,7 +213,7 @@ export async function runDataSyncAttempt<T>(
         jobName: context.jobName,
         runId: context.runId,
         source: normalizeSource(context),
-        ...(context.targetEventId !== undefined ? { targetEventId: context.targetEventId } : {}),
+        ...(targetEventId !== undefined ? { targetEventId } : {}),
         outcome,
         queueWaitMs: Math.max(0, Math.floor(context.queueWaitMs ?? 0)),
         durationMs: Math.max(0, Math.round(performance.now() - startedAt)),

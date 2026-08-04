@@ -15,6 +15,7 @@ import { CRON_TIMEZONE } from '../utils/timezone';
 export const LAUNCH_MONITOR_CRON_PATTERN = '*/5 * * * *';
 const NOTIFICATION_MARKER_ATTEMPTS = 3;
 const NOTIFICATION_MARKER_RETRY_MS = 50;
+const NOTIFICATION_PRE_DELIVERY_LEASE_MS = 60_000;
 
 type LaunchRedisClient = {
   get: (key: string) => Promise<string | null>;
@@ -57,12 +58,27 @@ const RELEASE_LOCK_SCRIPT = [
   'return 0',
 ].join('\n');
 
+const PERSIST_LOCK_SCRIPT = [
+  'if redis.call("get", KEYS[1]) == ARGV[1] then',
+  '  return redis.call("persist", KEYS[1])',
+  'end',
+  'return 0',
+].join('\n');
+
 async function releaseNotificationLock(
   redis: LaunchRedisClient,
   lockKey: string,
   token: string,
 ): Promise<void> {
   await redis.eval(RELEASE_LOCK_SCRIPT, 1, lockKey, token);
+}
+
+async function persistNotificationLock(
+  redis: LaunchRedisClient,
+  lockKey: string,
+  token: string,
+): Promise<boolean> {
+  return (await redis.eval(PERSIST_LOCK_SCRIPT, 1, lockKey, token)) === 1;
 }
 
 async function persistNotificationMarker(
@@ -95,10 +111,10 @@ async function sendLaunchNotificationOnce(
 
   const lockKey = `${doneKey}:lock`;
   const token = dependencies.createLockToken();
-  // This once-per-transition side effect spans Telegram and Redis, so there is
-  // no atomic commit. Keep the lock without an expiry once delivery is attempted:
-  // a thrown transport error can still mean Telegram accepted the request.
-  const acquired = await redis.set(lockKey, token, 'NX');
+  // A crash before delivery must recover automatically. Convert this short
+  // pre-delivery lease into a durable ambiguity lock immediately before the
+  // Telegram request begins.
+  const acquired = await redis.set(lockKey, token, 'PX', NOTIFICATION_PRE_DELIVERY_LEASE_MS, 'NX');
   if (acquired !== 'OK') return 'locked';
 
   let deliveryError: unknown;
@@ -107,6 +123,7 @@ async function sendLaunchNotificationOnce(
   let markerPersisted = false;
   try {
     if (await redis.get(doneKey)) return 'already_sent';
+    if (!(await persistNotificationLock(redis, lockKey, token))) return 'locked';
     deliveryAttempted = true;
     await dependencies.sendNotification(message);
     notificationDelivered = true;
@@ -129,7 +146,6 @@ async function sendLaunchNotificationOnce(
         await releaseNotificationLock(redis, lockKey, token);
       } catch (error) {
         logError('Failed to release launch notification lock', error);
-        if (deliveryError === undefined) throw error;
       }
     }
   }

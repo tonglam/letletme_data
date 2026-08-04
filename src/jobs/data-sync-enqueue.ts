@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import { getDataSyncJobPriority, type DataSyncPriorityJobName } from '../domain/job-priority';
 import { getDataSyncQueue, type DataSyncJobName } from '../queues/data-sync.queue';
 import { logError, logInfo } from '../utils/logger';
@@ -43,6 +45,7 @@ async function enqueueDataSyncJob(
       {
         source,
         triggeredAt: new Date().toISOString(),
+        runId: randomUUID(),
         ...(options.eventId !== undefined ? { eventId: options.eventId } : {}),
         ...(options.changeDate !== undefined ? { changeDate: options.changeDate } : {}),
       },

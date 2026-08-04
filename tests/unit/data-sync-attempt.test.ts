@@ -181,6 +181,41 @@ describe('data sync attempt reporting', () => {
     expect(JSON.stringify(reports[0])).not.toContain('private name');
   });
 
+  test('keeps first-attempt API traffic distinct from operator manual traffic', async () => {
+    const infoSpy = spyOn(logger, 'info').mockImplementation(() => undefined as never);
+
+    await runDataSyncAttempt(
+      {
+        queue: 'data-sync',
+        jobName: 'teams',
+        runId: 'api-run',
+        source: 'api',
+      },
+      async () => ({ count: 20, errors: 0 }),
+    );
+
+    expect(reportsFrom(infoSpy)[0]?.source).toBe('api');
+  });
+
+  test('records a target event resolved by an unscoped sync result', async () => {
+    const infoSpy = spyOn(logger, 'info').mockImplementation(() => undefined as never);
+
+    await runDataSyncAttempt(
+      {
+        queue: 'data-sync',
+        jobName: 'player-stats',
+        runId: 'current-player-stats',
+        source: 'cron',
+      },
+      async () => ({ count: 700, errors: 0, eventId: 12 }),
+    );
+
+    expect(reportsFrom(infoSpy)[0]).toMatchObject({
+      jobName: 'player-stats',
+      targetEventId: 12,
+    });
+  });
+
   test('isolates concurrent top-level attempt metrics', async () => {
     const infoSpy = spyOn(logger, 'info').mockImplementation(() => undefined as never);
 

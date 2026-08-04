@@ -11,9 +11,13 @@ class FakeRedis {
   readonly values = new Map<string, string>();
   readonly setCalls: Array<{ key: string; args: Array<string | number> }> = [];
   private markerFailuresRemaining: number;
+  private releaseFailuresRemaining: number;
+  private readonly persistResult: number | null;
 
-  constructor(markerFailures = 0) {
+  constructor(markerFailures = 0, options?: { releaseFailures?: number; persistResult?: number }) {
     this.markerFailuresRemaining = markerFailures;
+    this.releaseFailuresRemaining = options?.releaseFailures ?? 0;
+    this.persistResult = options?.persistResult ?? null;
   }
 
   async get(key: string): Promise<string | null> {
@@ -31,8 +35,13 @@ class FakeRedis {
     return 'OK';
   }
 
-  async eval(_script: string, _numberOfKeys: number, key: string, token: string) {
+  async eval(script: string, _numberOfKeys: number, key: string, token: string) {
     if (this.values.get(key) !== token) return 0;
+    if (script.includes('persist')) return this.persistResult ?? 1;
+    if (this.releaseFailuresRemaining > 0) {
+      this.releaseFailuresRemaining -= 1;
+      throw new Error('lock cleanup unavailable');
+    }
     this.values.delete(key);
     return 1;
   }
@@ -155,6 +164,26 @@ describe('launch monitor', () => {
     expect(sends).toBe(1);
   });
 
+  test('uses a recoverable lease until notification delivery begins', async () => {
+    const redis = new FakeRedis(0, { persistResult: 0 });
+    let sends = 0;
+
+    const result = await evaluateLaunchMonitor(
+      dependencies({
+        redis,
+        send: async () => {
+          sends += 1;
+        },
+      }),
+    );
+
+    expect(result.delivery).toBe('locked');
+    expect(sends).toBe(0);
+    expect(
+      redis.setCalls.find((call) => call.key === 'LaunchNotification:warning:2026:lock')?.args,
+    ).toEqual(['PX', 60_000, 'NX']);
+  });
+
   test('retains the lock after an ambiguous delivery failure', async () => {
     const redis = new FakeRedis();
     let sends = 0;
@@ -194,6 +223,24 @@ describe('launch monitor', () => {
     expect(redis.values.has('LaunchNotification:warning:2026:lock')).toBe(false);
   });
 
+  test('reports sent after marker persistence even when lock cleanup fails', async () => {
+    const redis = new FakeRedis(0, { releaseFailures: 1 });
+    let sends = 0;
+
+    const result = await evaluateLaunchMonitor(
+      dependencies({
+        redis,
+        send: async () => {
+          sends += 1;
+        },
+      }),
+    );
+
+    expect(result.delivery).toBe('sent');
+    expect(sends).toBe(1);
+    expect(redis.values.has('LaunchNotification:warning:2026')).toBe(true);
+  });
+
   test('retains the lock when delivery succeeds but every marker write fails', async () => {
     const redis = new FakeRedis(3);
     let sends = 0;
@@ -209,7 +256,7 @@ describe('launch monitor', () => {
     expect(redis.values.has('LaunchNotification:warning:2026:lock')).toBe(true);
     expect(
       redis.setCalls.find((call) => call.key === 'LaunchNotification:warning:2026:lock')?.args,
-    ).toEqual(['NX']);
+    ).toEqual(['PX', 60_000, 'NX']);
 
     const nextTick = await evaluateLaunchMonitor(deps);
     expect(nextTick.delivery).toBe('locked');
