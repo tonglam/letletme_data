@@ -181,6 +181,18 @@ async function afterCascadeStructureJob(
   await maybeEnqueueCascadeMaterializedRefresh(eventId, cascadeId, jobName);
 }
 
+export function assertTournamentStructureSyncComplete(
+  result: { skipped: number },
+  eventId: number,
+  jobName: string,
+): void {
+  if (result.skipped > 0) {
+    throw new Error(
+      `${jobName} skipped ${result.skipped} required unit(s) for event ${eventId}`,
+    );
+  }
+}
+
 const tournamentEventFinalizationDependencies = {
   finish: finishTournamentsThroughEvent,
   refresh: refreshTournamentMaterializedViews,
@@ -240,22 +252,27 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
             break;
           }
 
-          case TOURNAMENT_JOBS.POINTS_RACE:
-            await syncTournamentPointsRaceResults(eventId);
+          case TOURNAMENT_JOBS.POINTS_RACE: {
+            const pointsResult = await syncTournamentPointsRaceResults(eventId);
+            assertTournamentStructureSyncComplete(pointsResult, eventId, job.name);
             await afterCascadeStructureJob(eventId, cascadeId, job.name);
-            break;
+            return pointsResult;
+          }
 
           case TOURNAMENT_JOBS.BATTLE_RACE: {
             // Surface `skipped` (missing entry results) on the job returnvalue.
             const battleResult = await syncTournamentBattleRaceResults(eventId);
+            assertTournamentStructureSyncComplete(battleResult, eventId, job.name);
             await afterCascadeStructureJob(eventId, cascadeId, job.name);
             return battleResult;
           }
 
-          case TOURNAMENT_JOBS.KNOCKOUT:
-            await syncTournamentKnockoutResults(eventId);
+          case TOURNAMENT_JOBS.KNOCKOUT: {
+            const knockoutResult = await syncTournamentKnockoutResults(eventId);
+            assertTournamentStructureSyncComplete(knockoutResult, eventId, job.name);
             await afterCascadeStructureJob(eventId, cascadeId, job.name);
-            break;
+            return knockoutResult;
+          }
 
           case TOURNAMENT_JOBS.TRANSFERS_POST:
             await syncTournamentEventTransfersPost(eventId);

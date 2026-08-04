@@ -42,6 +42,40 @@ describe('tournament lifecycle invariants', () => {
     ).toBe('remove');
   });
 
+  test('reserves one stable setup successor slot per tournament', async () => {
+    process.env.DATABASE_URL ??= 'postgresql://unit:unit@127.0.0.1:5432/unit';
+    process.env.REDIS_HOST ??= '127.0.0.1';
+    process.env.REDIS_PORT ??= '6379';
+    const { getTournamentSetupJobIds, decideExistingSetupSuccessorAction } = await import(
+      '../../src/jobs/tournament-setup.jobs'
+    );
+
+    expect(getTournamentSetupJobIds(321)).toEqual({
+      baseJobId: 'tournament-setup-321',
+      successorJobId: 'tournament-setup-321-successor',
+    });
+    expect(decideExistingSetupSuccessorAction('waiting')).toBe('reuse');
+    expect(decideExistingSetupSuccessorAction('active')).toBe('reuse');
+    expect(decideExistingSetupSuccessorAction('completed')).toBe('remove');
+    expect(decideExistingSetupSuccessorAction('failed')).toBe('remove');
+  });
+
+  test('treats skipped structure units as a failed cascade slot', async () => {
+    process.env.DATABASE_URL ??= 'postgresql://unit:unit@127.0.0.1:5432/unit';
+    process.env.REDIS_HOST ??= '127.0.0.1';
+    process.env.REDIS_PORT ??= '6379';
+    const { assertTournamentStructureSyncComplete } = await import(
+      '../../src/workers/tournament-sync.worker'
+    );
+
+    expect(() =>
+      assertTournamentStructureSyncComplete({ skipped: 0 }, 38, 'tournament-points-race'),
+    ).not.toThrow();
+    expect(() =>
+      assertTournamentStructureSyncComplete({ skipped: 2 }, 38, 'tournament-knockout'),
+    ).toThrow('tournament-knockout skipped 2 required unit(s) for event 38');
+  });
+
   test('blocks standings when failed entry snapshots cannot prove the active season', async () => {
     process.env.DATABASE_URL ??= 'postgresql://unit:unit@127.0.0.1:5432/unit';
     process.env.REDIS_HOST ??= '127.0.0.1';

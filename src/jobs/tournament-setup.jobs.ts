@@ -27,6 +27,21 @@ export interface EnqueueTournamentSetupOptions {
 
 export type ExistingSetupJobAction = 'remove' | 'reuse' | 'reject' | 'enqueue_successor';
 
+export function getTournamentSetupJobIds(tournamentId: number): {
+  baseJobId: string;
+  successorJobId: string;
+} {
+  const baseJobId = `tournament-setup-${tournamentId}`;
+  return {
+    baseJobId,
+    successorJobId: `${baseJobId}-successor`,
+  };
+}
+
+export function decideExistingSetupSuccessorAction(state: string): 'remove' | 'reuse' {
+  return state === 'completed' || state === 'failed' ? 'remove' : 'reuse';
+}
+
 export function decideExistingSetupJobAction(
   state: string,
   options: Pick<
@@ -92,7 +107,26 @@ export async function enqueueTournamentSetup(
       triggeredAt: new Date().toISOString(),
     };
 
-    const baseJobId = `tournament-setup-${tournamentId}`;
+    const { baseJobId, successorJobId } = getTournamentSetupJobIds(tournamentId);
+    // A lifecycle-locked caller can leave one durable successor behind an
+    // active base job. Always inspect that stable slot first: otherwise later
+    // reconciliations only see the base ID and can queue duplicate rebuilds.
+    const existingSuccessor = await queue.getJob(successorJobId);
+    if (existingSuccessor) {
+      const successorState = await existingSuccessor.getState();
+      if (decideExistingSetupSuccessorAction(successorState) === 'remove') {
+        await existingSuccessor.remove();
+      } else {
+        logInfo('Tournament setup successor already pending; reusing existing', {
+          tournamentId,
+          jobId: successorJobId,
+          state: successorState,
+          source,
+        });
+        return existingSuccessor;
+      }
+    }
+
     const existing = await queue.getJob(baseJobId);
     let jobId: string | undefined = baseJobId;
     if (existing) {
@@ -102,10 +136,10 @@ export async function enqueueTournamentSetup(
         await existing.remove();
       } else if (action === 'enqueue_successor') {
         // BullMQ cannot replace an active deterministic job. An automatically
-        // assigned ID permits exactly this reconciliation attempt to leave a
-        // durable successor, whether the active job is finishing bookkeeping
-        // or waiting behind the caller's lifecycle lock.
-        jobId = undefined;
+        // assigned ID would be invisible to later deduplication checks. A
+        // stable second slot permits exactly one durable reconciliation behind
+        // the active base job.
+        jobId = successorJobId;
       } else if (action === 'reject') {
         throw new ConflictError(
           'Tournament setup is already running.',
