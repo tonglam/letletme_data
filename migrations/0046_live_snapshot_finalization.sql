@@ -5,16 +5,19 @@ ALTER TABLE public.events
   ADD COLUMN IF NOT EXISTS live_snapshot_finalized_at timestamptz;
 
 -- Existing workers only had the shared durable-write fence. Preserve usable
--- historical rows when that older marker is already strong evidence: the
--- event was finalized, the marker followed the event sync, at least one row
--- exists, and no accepted row predates the marker. New writes use the
--- explicit post-match marker above and do not rely on this inference.
+-- historical rows when that older marker is the latest durable evidence: the
+-- event is finalized, at least one row exists, and no accepted row predates
+-- the marker. Do not compare with events.updated_at here: the daily event
+-- sync advances that generic timestamp even when the event payload is
+-- unchanged, which would strand every older gameweek. New writes use the
+-- explicit post-match marker and do not rely on this inference.
 UPDATE public.events AS event
 SET live_snapshot_finalized_at = event.live_snapshot_checked_at
 WHERE event.finished = true
   AND event.data_checked = true
+  AND event.deadline_time IS NOT NULL
   AND event.live_snapshot_checked_at IS NOT NULL
-  AND event.live_snapshot_checked_at >= event.updated_at
+  AND event.live_snapshot_checked_at >= event.deadline_time
   AND EXISTS (
     SELECT 1
     FROM public.event_lives AS live
