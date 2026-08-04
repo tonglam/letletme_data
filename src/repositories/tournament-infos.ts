@@ -1,6 +1,7 @@
 import { and, eq, gte, inArray, isNotNull, lt, lte, sql } from 'drizzle-orm';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 
+import { acquireActiveSeasonReadFence, getActiveCacheSeasonUncached } from '../cache/cache-season';
 import { tournamentInfos, type DbTournamentInfo } from '../db/schemas/index.schema';
 import { getDb, getDbClient } from '../db/singleton';
 import type {
@@ -504,17 +505,32 @@ export const createTournamentInfoRepository = (dbInstance?: DatabaseInstance) =>
       }
     },
 
-    markStandingsReady: async (tournamentId: number): Promise<void> => {
+    markStandingsReady: async (tournamentId: number, expectedSeason: string): Promise<void> => {
       try {
+        if (!/^\d{4}$/.test(expectedSeason)) {
+          throw new Error('A valid four-digit setup season is required');
+        }
         const db = await getDbInstance();
-        await db
-          .update(tournamentInfos)
-          .set({
-            standingsReadyAt: sql`COALESCE(${tournamentInfos.standingsReadyAt}, now())`,
-            setupProgressUpdatedAt: new Date(),
-            updatedAt: new Date(),
-          })
-          .where(eq(tournamentInfos.id, tournamentId));
+        await db.transaction(async (tx) => {
+          // Pin annual authority through the readiness write. A rollover takes
+          // the exclusive form of this lock, so an old plan cannot publish
+          // event-numbered standings after Season:active advances.
+          await acquireActiveSeasonReadFence(tx);
+          const activeSeason = await getActiveCacheSeasonUncached();
+          if (activeSeason !== expectedSeason) {
+            throw new Error(
+              `Active season changed from ${expectedSeason} to ${activeSeason} before standings publication`,
+            );
+          }
+          await tx
+            .update(tournamentInfos)
+            .set({
+              standingsReadyAt: sql`COALESCE(${tournamentInfos.standingsReadyAt}, now())`,
+              setupProgressUpdatedAt: new Date(),
+              updatedAt: new Date(),
+            })
+            .where(eq(tournamentInfos.id, tournamentId));
+        });
       } catch (error) {
         logError('Failed to publish tournament standings readiness', error, { tournamentId });
         throw new DatabaseError(

@@ -235,7 +235,7 @@ describe('tournament creation vs entry_infos (FP-08)', () => {
           standings_ready_at = NULL
       WHERE id = ${created.id}
     `;
-    expect(await tournamentRosterRepository.finishThroughEvent(12)).toBe(0);
+    expect(await tournamentRosterRepository.finishThroughEvent(12, [created.id])).toBe(0);
 
     await client`
       UPDATE tournament_infos
@@ -244,7 +244,7 @@ describe('tournament creation vs entry_infos (FP-08)', () => {
           standings_ready_at = now()
       WHERE id = ${created.id}
     `;
-    expect(await tournamentRosterRepository.finishThroughEvent(12)).toBe(0);
+    expect(await tournamentRosterRepository.finishThroughEvent(12, [created.id])).toBe(0);
 
     await client`
       INSERT INTO tournament_points_group_results (
@@ -258,7 +258,8 @@ describe('tournament creation vs entry_infos (FP-08)', () => {
       )
       VALUES (${created.id}, 1, 12, ${SYNCED_ENTRY.id}, 50, 0, 50)
     `;
-    expect(await tournamentRosterRepository.finishThroughEvent(12)).toBe(1);
+    expect(await tournamentRosterRepository.finishThroughEvent(12, [])).toBe(0);
+    expect(await tournamentRosterRepository.finishThroughEvent(12, [created.id])).toBe(1);
     const rows = await client<Array<{ state: string }>>`
       SELECT state FROM tournament_infos WHERE id = ${created.id}
     `;

@@ -17,6 +17,7 @@ export type TournamentSyncEnqueueOptions = {
   delay?: number;
   cascadeId?: string;
   jobId?: string;
+  tournamentIds?: number[];
 };
 
 /** Cascade jobs that must finish before event publication can finish tournaments. */
@@ -251,6 +252,9 @@ async function enqueueTournamentSyncJob(
       source,
       triggeredAt: new Date().toISOString(),
       ...(options.cascadeId ? { cascadeId: options.cascadeId } : {}),
+      ...(options.tournamentIds
+        ? { tournamentIds: [...new Set(options.tournamentIds.filter((id) => id > 0))] }
+        : {}),
     };
 
     // Callers may provide a deterministic ID for bounded recurring slots.
@@ -276,6 +280,7 @@ async function enqueueTournamentSyncJob(
       tier,
       queue: queue.name,
       cascadeId: options.cascadeId,
+      tournamentCount: options.tournamentIds?.length,
     });
 
     return job;

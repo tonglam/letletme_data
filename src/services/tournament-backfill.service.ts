@@ -1,5 +1,5 @@
 import { tournamentSetupBackfillEventScopes } from '../domain/mutation-scope';
-import { getActiveCacheSeason } from '../cache/cache-season';
+import { getActiveCacheSeason, getActiveCacheSeasonUncached } from '../cache/cache-season';
 import type { TournamentBackfillWindow, TournamentConfig } from '../domain/tournament';
 import { ENTRY_SYNC_DEFAULT_CONCURRENCY } from '../queues/entry-sync.queue';
 import { entryEventPicksRepository } from '../repositories/entry-event-picks';
@@ -88,6 +88,7 @@ export async function syncTournamentEntryDetails(
   entryIds: number[],
   options?: {
     targetEventId?: number;
+    season?: string;
     onPlan?: (plan: TournamentEntrySyncPlan) => void | Promise<void>;
     onProgress?: (completed: number, total: number) => Promise<void>;
   },
@@ -99,7 +100,7 @@ export async function syncTournamentEntryDetails(
   }
 
   const targetEventId = options?.targetEventId ?? 0;
-  const season = await getActiveCacheSeason();
+  const season = options?.season ?? (await getActiveCacheSeason());
   const requestedEntryIds = await entryInfoRepository.findIdsNeedingSnapshotSync(
     sanitized,
     targetEventId,
@@ -128,6 +129,16 @@ export async function syncTournamentEntryDetails(
     });
     completed += batch.length;
     await options?.onProgress?.(completed, requestedEntryIds.length);
+  }
+
+  // Reused entries make no downstream FPL call, so the caller cannot rely on
+  // per-entry commit fences alone. Abort the whole plan if annual authority
+  // changed while snapshots were selected or fetched.
+  const canonicalSeason = await getActiveCacheSeasonUncached();
+  if (canonicalSeason !== season) {
+    throw new Error(
+      `Active season changed from ${season} to ${canonicalSeason} during tournament entry sync`,
+    );
   }
 
   if (failures.length > 0) {

@@ -60,7 +60,12 @@ export const createEntryEventCupResultsRepository = (dbInstance?: DatabaseInstan
 
           await tx
             .insert(entryEventCupResults)
-            .values(eligibleResults)
+            .values(
+              eligibleResults.map((result) => ({
+                ...result,
+                sourceSeason: checkpointSeason,
+              })),
+            )
             .onConflictDoUpdate({
               target: [entryEventCupResults.entryId, entryEventCupResults.eventId],
               set: {
@@ -72,6 +77,7 @@ export const createEntryEventCupResultsRepository = (dbInstance?: DatabaseInstan
                 againstPlayerName: sql`excluded.against_player_name`,
                 againstEventPoints: sql`excluded.against_event_points`,
                 result: sql`excluded.result`,
+                sourceSeason: sql`excluded.source_season`,
                 updatedAt: new Date(),
               },
             });

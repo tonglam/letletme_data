@@ -1,4 +1,4 @@
-import { eq, sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 
 import { entryInfosCache } from '../cache/entry-infos-cache';
 import {
@@ -86,7 +86,14 @@ export async function syncEntryInfo(
     // adopting the active season and seeding current core history.
     if (current?.snapshotSeason !== activeSeason) {
       await Promise.all([
-        tx.delete(entryEventCupResults).where(eq(entryEventCupResults.entryId, entryId)),
+        tx
+          .delete(entryEventCupResults)
+          .where(
+            and(
+              eq(entryEventCupResults.entryId, entryId),
+              sql`${entryEventCupResults.sourceSeason} IS DISTINCT FROM ${activeSeason}`,
+            ),
+          ),
         tx.delete(entryEventPicks).where(eq(entryEventPicks.entryId, entryId)),
         tx.delete(entryEventResults).where(eq(entryEventResults.entryId, entryId)),
         tx.delete(leagueEventResults).where(eq(leagueEventResults.entryId, entryId)),

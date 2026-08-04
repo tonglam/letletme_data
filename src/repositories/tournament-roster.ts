@@ -390,12 +390,18 @@ export const tournamentRosterRepository = {
     `;
   },
 
-  finishThroughEvent: async (eventId: number): Promise<number> => {
+  finishThroughEvent: async (eventId: number, tournamentIds: number[]): Promise<number> => {
+    const eligibleTournamentIds = [...new Set(tournamentIds.filter((id) => id > 0))];
+    if (eligibleTournamentIds.length === 0) {
+      logInfo('No cascade-owned tournaments eligible for finish', { eventId });
+      return 0;
+    }
     const client = await getDbClient();
     const rows = await client<{ id: number }[]>`
       update tournament_infos as tournament
       set state = 'finished', updated_at = now()
       where tournament.state = 'active'
+        and tournament.id = any(${eligibleTournamentIds}::int[])
         and tournament.setup_status = 'ready'
         and tournament.standings_ready_at is not null
         and greatest(
@@ -445,7 +451,11 @@ export const tournamentRosterRepository = {
         )
       returning tournament.id
     `;
-    logInfo('Marked completed tournaments finished', { eventId, count: rows.length });
+    logInfo('Marked cascade-owned completed tournaments finished', {
+      eventId,
+      eligibleTournamentCount: eligibleTournamentIds.length,
+      count: rows.length,
+    });
     return rows.length;
   },
 };

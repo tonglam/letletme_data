@@ -26,13 +26,26 @@ describe('tournament transfer enrichment readiness', () => {
     );
   });
 
+  test('rejects a partial canonical snapshot missing a transferred element', () => {
+    expect(() =>
+      buildTournamentTransferPointsMap(12, [{ elementId: 101, totalPoints: 7 }], [101, 202]),
+    ).toThrow(
+      'Event live data is incomplete for tournament transfer enrichment in event 12; missing elements: 202',
+    );
+  });
+
   test('loads post-event points through the canonical row reader', async () => {
     const canonicalRead = mock(async () => [
       { elementId: 201, totalPoints: 7 },
       { elementId: 202, totalPoints: 3 },
     ]);
 
-    const result = await loadCanonicalTournamentTransferPointsMap(12, canonicalRead);
+    const result = await loadCanonicalTournamentTransferPointsMap(
+      12,
+      '2526',
+      [201, 202],
+      canonicalRead,
+    );
 
     expect(result).toEqual(
       new Map([
@@ -40,6 +53,6 @@ describe('tournament transfer enrichment readiness', () => {
         [202, 3],
       ]),
     );
-    expect(canonicalRead).toHaveBeenCalledWith(12);
+    expect(canonicalRead).toHaveBeenCalledWith(12, '2526');
   });
 });

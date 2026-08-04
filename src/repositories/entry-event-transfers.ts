@@ -8,7 +8,7 @@ import {
   type DbEntryEventTransfer,
   type DbEntryEventTransferInsert,
 } from '../db/schemas/index.schema';
-import { getDb, getDbClient, type TransactionHandle } from '../db/singleton';
+import { getDb, type TransactionHandle } from '../db/singleton';
 import type { RawFPLEntryTransfersResponse } from '../types';
 import { getConfig } from '../utils/config';
 import { DatabaseError } from '../utils/errors';
@@ -443,43 +443,66 @@ export const createEntryEventTransfersRepository = (dbInstance?: DatabaseInstanc
     updateBatchById: async (
       updates: Array<{
         id: number;
+        entryId: number;
         elementInPoints: number | null;
         elementOutPoints: number | null;
         elementInPlayed: boolean | null;
       }>,
+      checkpointSeason: string,
     ): Promise<number> => {
       if (updates.length === 0) {
         return 0;
       }
 
       try {
-        const client = await getDbClient();
-        const ids = updates.map((u) => u.id);
-        const inPoints = updates.map((u) => u.elementInPoints);
-        const outPoints = updates.map((u) => u.elementOutPoints);
-        const playedFlags = updates.map((u) =>
-          u.elementInPlayed === null ? null : u.elementInPlayed ? 1 : 0,
+        if (!/^\d{4}$/.test(checkpointSeason)) {
+          throw new Error('A valid four-digit checkpoint season is required');
+        }
+        const db = await getDbInstance();
+        const payload = JSON.stringify(
+          updates.map((update) => ({
+            id: update.id,
+            in_points: update.elementInPoints,
+            out_points: update.elementOutPoints,
+            in_played_flag: update.elementInPlayed === null ? null : update.elementInPlayed ? 1 : 0,
+          })),
         );
 
-        await client`
-          update entry_event_transfers as eet
-          set element_in_points = data.in_points,
-              element_out_points = data.out_points,
-              element_in_played = case
-                when data.in_played_flag is null then null
-                else data.in_played_flag = 1
-              end
-          from (
-            select
-              unnest(${ids}::int[]) as id,
-              unnest(${inPoints}::int[]) as in_points,
-              unnest(${outPoints}::int[]) as out_points,
-              unnest(${playedFlags}::int[]) as in_played_flag
-          ) as data
-          where eet.id = data.id
-        `;
+        await db.transaction(async (tx) => {
+          await acquireEntrySeasonWriteFence(
+            tx,
+            updates.map((update) => update.entryId),
+            checkpointSeason,
+          );
+          await tx.execute(sql`
+            update entry_event_transfers as eet
+            set element_in_points = data.in_points,
+                element_out_points = data.out_points,
+                element_in_played = case
+                  when data.in_played_flag is null then null
+                  else data.in_played_flag = 1
+                end
+            from (
+              select
+                data.id,
+                data.in_points,
+                data.out_points,
+                data.in_played_flag
+              from jsonb_to_recordset(${payload}::jsonb) as data(
+                id int,
+                in_points int,
+                out_points int,
+                in_played_flag int
+              )
+            ) as data
+            where eet.id = data.id
+          `);
+        });
 
-        logInfo('Updated entry event transfers', { count: updates.length });
+        logInfo('Updated entry event transfers', {
+          count: updates.length,
+          checkpointSeason,
+        });
         return updates.length;
       } catch (error) {
         logError('Failed to update entry event transfers', error, { count: updates.length });

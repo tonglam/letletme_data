@@ -262,6 +262,9 @@ export async function reconcileOfficialTournamentRosters(): Promise<{
   };
 }
 
-export async function finishTournamentsThroughEvent(eventId: number): Promise<number> {
-  return tournamentRosterRepository.finishThroughEvent(eventId);
+export async function finishTournamentsThroughEvent(
+  eventId: number,
+  tournamentIds: number[],
+): Promise<number> {
+  return tournamentRosterRepository.finishThroughEvent(eventId, tournamentIds);
 }

@@ -53,13 +53,14 @@ describe('Tournament Sync Jobs Integration', () => {
 
     it('should enqueue cascade jobs', async () => {
       const cascadeId = `integration-${Date.now()}`;
+      const tournamentIds = [901, 902];
       const jobs = await Promise.all([
-        enqueueTournamentPointsRace(TEST_EVENT_ID, 'cascade', { cascadeId }),
-        enqueueTournamentBattleRace(TEST_EVENT_ID, 'cascade', { cascadeId }),
-        enqueueTournamentKnockout(TEST_EVENT_ID, 'cascade', { cascadeId }),
-        enqueueTournamentTransfersPost(TEST_EVENT_ID, 'cascade', { cascadeId }),
-        enqueueTournamentCupResults(TEST_EVENT_ID, 'cascade', { cascadeId }),
-        enqueueTournamentSelectionStats(TEST_EVENT_ID, 'cascade', { cascadeId }),
+        enqueueTournamentPointsRace(TEST_EVENT_ID, 'cascade', { cascadeId, tournamentIds }),
+        enqueueTournamentBattleRace(TEST_EVENT_ID, 'cascade', { cascadeId, tournamentIds }),
+        enqueueTournamentKnockout(TEST_EVENT_ID, 'cascade', { cascadeId, tournamentIds }),
+        enqueueTournamentTransfersPost(TEST_EVENT_ID, 'cascade', { cascadeId, tournamentIds }),
+        enqueueTournamentCupResults(TEST_EVENT_ID, 'cascade', { cascadeId, tournamentIds }),
+        enqueueTournamentSelectionStats(TEST_EVENT_ID, 'cascade', { cascadeId, tournamentIds }),
       ]);
 
       expect(jobs).toHaveLength(6);
@@ -68,6 +69,7 @@ describe('Tournament Sync Jobs Integration', () => {
         expect(job.data.source).toBe('cascade');
         expect(job.data.eventId).toBe(TEST_EVENT_ID);
         expect(job.data.cascadeId).toBe(cascadeId);
+        expect(job.data.tournamentIds).toEqual(tournamentIds);
       });
     });
 

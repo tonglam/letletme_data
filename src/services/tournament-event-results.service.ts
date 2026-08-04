@@ -220,13 +220,19 @@ export async function syncTournamentEventResultsForTournament(
 export async function syncTournamentEventResults(
   eventId: number,
   options?: { concurrency?: number },
-): Promise<{ eventId: number; totalEntries: number; synced: number; errors: number }> {
+): Promise<{
+  eventId: number;
+  totalEntries: number;
+  synced: number;
+  errors: number;
+  tournamentIds: number[];
+}> {
   logInfo('Starting tournament event results sync', { eventId });
 
   const tournaments = await tournamentInfoRepository.findActive();
   if (tournaments.length === 0) {
     logInfo('No active tournaments found for tournament event results', { eventId });
-    return { eventId, totalEntries: 0, synced: 0, errors: 0 };
+    return { eventId, totalEntries: 0, synced: 0, errors: 0, tournamentIds: [] };
   }
 
   const entryLists = await Promise.all(
@@ -238,7 +244,13 @@ export async function syncTournamentEventResults(
   const entryIds = uniqueNumbers(entryLists.flat());
   if (entryIds.length === 0) {
     logInfo('No tournament entries found for event results', { eventId });
-    return { eventId, totalEntries: 0, synced: 0, errors: 0 };
+    return {
+      eventId,
+      totalEntries: 0,
+      synced: 0,
+      errors: 0,
+      tournamentIds: tournaments.map((tournament) => tournament.id),
+    };
   }
   const { totalEntries, synced, errors } = await syncTournamentEventResultsForEntryIds(
     entryIds,
@@ -253,5 +265,11 @@ export async function syncTournamentEventResults(
     errors,
   });
 
-  return { eventId, totalEntries, synced, errors };
+  return {
+    eventId,
+    totalEntries,
+    synced,
+    errors,
+    tournamentIds: tournaments.map((tournament) => tournament.id),
+  };
 }

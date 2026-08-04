@@ -35,6 +35,8 @@ export interface TournamentSyncJobData {
    * materialized-views refresh and terminal lifecycle publication.
    */
   cascadeId?: string;
+  /** Active tournaments selected by the base event-results job. */
+  tournamentIds?: number[];
 }
 
 const tieredQueueSet = createTieredQueueSet<TournamentSyncJobData>(tournamentSyncQueueName, {

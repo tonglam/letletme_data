@@ -13,12 +13,14 @@ import {
   entryEventTransfersRepository,
 } from '../../src/repositories/entry-event-transfers';
 import { entryInfoRepository } from '../../src/repositories/entry-infos';
+import { eventLiveRepository } from '../../src/repositories/event-lives';
 import { leagueEventResultsRepository } from '../../src/repositories/league-event-results';
 import { syncEntryInfo, type EntryInfoClient } from '../../src/services/entry-info.service';
 import { syncEntryEventPicks, syncEntryEventResults } from '../../src/services/entries.service';
 import {
   ensureTournamentCoreResults,
   enrichTournamentHistory,
+  syncTournamentEntryDetails,
   type TournamentCoreSyncPlan,
   type TournamentEnrichmentPlan,
 } from '../../src/services/tournament-backfill.service';
@@ -30,6 +32,7 @@ const LATE_ENTRY_ID = 99_042_002;
 const PICK_TEAM_ID = 99_042_101;
 const PICK_PLAYER_ID = 99_042_101;
 const TRANSFER_PLAYER_ID = 99_042_102;
+const SOURCE_PLAYER_ID = 99_042_103;
 const TEST_SEASON = '2526';
 
 async function expectBlockedByEntrySeasonLock<T>(operation: () => Promise<T>): Promise<T> {
@@ -137,7 +140,8 @@ beforeAll(async () => {
     INSERT INTO players (id, code, type, team_id, web_name)
     VALUES
       (${PICK_PLAYER_ID}, ${PICK_PLAYER_ID}, 1, ${PICK_TEAM_ID}, 'Checkpoint Player'),
-      (${TRANSFER_PLAYER_ID}, ${TRANSFER_PLAYER_ID}, 1, ${PICK_TEAM_ID}, 'Transfer Player')
+      (${TRANSFER_PLAYER_ID}, ${TRANSFER_PLAYER_ID}, 1, ${PICK_TEAM_ID}, 'Transfer Player'),
+      (${SOURCE_PLAYER_ID}, ${SOURCE_PLAYER_ID}, 1, ${PICK_TEAM_ID}, 'Source Player')
     ON CONFLICT (id) DO NOTHING
   `;
   await sql`
@@ -163,7 +167,11 @@ afterAll(async () => {
   await sql`DELETE FROM entry_infos WHERE id = ${ENTRY_ID}`;
   await sql`DELETE FROM entry_event_results WHERE entry_id = ${LATE_ENTRY_ID}`;
   await sql`DELETE FROM entry_infos WHERE id = ${LATE_ENTRY_ID}`;
-  await sql`DELETE FROM players WHERE id IN (${PICK_PLAYER_ID}, ${TRANSFER_PLAYER_ID})`;
+  await sql`DELETE FROM event_lives WHERE element_id = ${SOURCE_PLAYER_ID}`;
+  await sql`
+    DELETE FROM players
+    WHERE id IN (${PICK_PLAYER_ID}, ${TRANSFER_PLAYER_ID}, ${SOURCE_PLAYER_ID})
+  `;
   await sql`DELETE FROM teams WHERE id = ${PICK_TEAM_ID}`;
   const redis = await redisSingleton.getClient();
   await redis.hdel(`EntryInfo:${TEST_SEASON}`, String(ENTRY_ID));
@@ -447,6 +455,24 @@ describe('tournament initialization checkpoints', () => {
           entryEventCupResultsRepository.upsertBatch([record], TEST_SEASON),
         ),
       ).toBe(1);
+      const adoptedRows = await sql<Array<{ sourceSeason: string | null }>>`
+        SELECT source_season AS "sourceSeason"
+        FROM entry_event_cup_results
+        WHERE entry_id = ${ENTRY_ID} AND event_id = 12
+      `;
+      expect(adoptedRows[0]?.sourceSeason).toBe(TEST_SEASON);
+
+      // Establishing the broader snapshot later must preserve the cup row that
+      // already carries direct current-season ownership.
+      await syncEntryInfo(ENTRY_ID, client, 1, TEST_SEASON);
+      const preservedRows = await sql<Array<{ count: number }>>`
+        SELECT count(*)::int AS count
+        FROM entry_event_cup_results
+        WHERE entry_id = ${ENTRY_ID}
+          AND event_id = 12
+          AND source_season = ${TEST_SEASON}
+      `;
+      expect(preservedRows[0]?.count).toBe(1);
 
       await sql`
         UPDATE entry_infos
@@ -771,6 +797,97 @@ describe('tournament initialization checkpoints', () => {
     }
   });
 
+  test('reused tournament snapshots abort when the planned season changes', async () => {
+    const sql = await getDbClient();
+    const redis = await redisSingleton.getClient();
+    await sql`
+      UPDATE entry_infos
+      SET entry_snapshot_synced_through_event_id = 12,
+          entry_snapshot_synced_season = ${TEST_SEASON}
+      WHERE id = ${ENTRY_ID}
+    `;
+
+    try {
+      await expect(
+        syncTournamentEntryDetails([ENTRY_ID], {
+          targetEventId: 12,
+          season: TEST_SEASON,
+          onPlan: async (plan) => {
+            expect(plan.requestedEntries).toBe(0);
+            await redis.set('Season:active', '2627');
+            resetActiveSeasonMemo();
+          },
+        }),
+      ).rejects.toThrow('Active season changed from 2526 to 2627 during tournament entry sync');
+    } finally {
+      await redis.set('Season:active', TEST_SEASON);
+      resetActiveSeasonMemo();
+    }
+  });
+
+  test('post-event live reads require finalized current-season source evidence', async () => {
+    const sql = await getDbClient();
+    const originalEvents = await sql<
+      Array<{
+        id: number;
+        deadlineTime: Date | null;
+        finished: boolean;
+        dataChecked: boolean;
+      }>
+    >`
+      SELECT
+        id,
+        deadline_time AS "deadlineTime",
+        finished,
+        data_checked AS "dataChecked"
+      FROM events
+      WHERE id IN (1, 12)
+      ORDER BY id
+    `;
+
+    try {
+      await sql`
+        UPDATE events
+        SET deadline_time = CASE id
+              WHEN 1 THEN '2025-08-15T18:30:00Z'::timestamptz
+              ELSE '2025-11-01T18:30:00Z'::timestamptz
+            END,
+            finished = true,
+            data_checked = true
+        WHERE id IN (1, 12)
+      `;
+      await sql`DELETE FROM event_lives WHERE element_id = ${SOURCE_PLAYER_ID}`;
+      await sql`
+        INSERT INTO event_lives (event_id, element_id, total_points, updated_at)
+        VALUES (12, ${SOURCE_PLAYER_ID}, 9, '2024-11-02T00:00:00Z'::timestamptz)
+      `;
+
+      const stale = await eventLiveRepository.findFinalizedByEventIdForSeason(12, TEST_SEASON);
+      expect(stale.some((row) => row.elementId === SOURCE_PLAYER_ID)).toBe(false);
+
+      await sql`
+        UPDATE event_lives
+        SET updated_at = '2025-11-02T00:00:00Z'::timestamptz
+        WHERE element_id = ${SOURCE_PLAYER_ID}
+      `;
+      const current = await eventLiveRepository.findFinalizedByEventIdForSeason(12, TEST_SEASON);
+      expect(current.find((row) => row.elementId === SOURCE_PLAYER_ID)?.totalPoints).toBe(9);
+      const wrongSeason = await eventLiveRepository.findFinalizedByEventIdForSeason(12, '2627');
+      expect(wrongSeason.some((row) => row.elementId === SOURCE_PLAYER_ID)).toBe(false);
+    } finally {
+      await sql`DELETE FROM event_lives WHERE element_id = ${SOURCE_PLAYER_ID}`;
+      for (const event of originalEvents) {
+        await sql`
+          UPDATE events
+          SET deadline_time = ${event.deadlineTime},
+              finished = ${event.finished},
+              data_checked = ${event.dataChecked}
+          WHERE id = ${event.id}
+        `;
+      }
+    }
+  });
+
   test('season rollover before commit rejects stale transfer history atomically', async () => {
     const sql = await getDbClient();
     const redis = await redisSingleton.getClient();
@@ -813,6 +930,94 @@ describe('tournament initialization checkpoints', () => {
     } finally {
       await redis.set('Season:active', TEST_SEASON);
       resetActiveSeasonMemo();
+    }
+  });
+
+  test('post-event transfer points update under the entry and season fences', async () => {
+    const sql = await getDbClient();
+    const redis = await redisSingleton.getClient();
+    await sql`DELETE FROM entry_event_transfers WHERE entry_id = ${ENTRY_ID} AND event_id = 12`;
+    await sql`
+      UPDATE entry_infos
+      SET entry_snapshot_synced_through_event_id = 12,
+          entry_snapshot_synced_season = ${TEST_SEASON}
+      WHERE id = ${ENTRY_ID}
+    `;
+    const inserted = await sql<Array<{ id: number }>>`
+      INSERT INTO entry_event_transfers (
+        entry_id,
+        event_id,
+        element_in_id,
+        element_out_id,
+        transfer_time,
+        element_in_points,
+        element_out_points
+      )
+      VALUES (
+        ${ENTRY_ID},
+        12,
+        ${PICK_PLAYER_ID},
+        ${TRANSFER_PLAYER_ID},
+        '2026-01-01T00:00:00Z',
+        0,
+        0
+      )
+      RETURNING id
+    `;
+    const update = {
+      id: inserted[0]!.id,
+      entryId: ENTRY_ID,
+      elementInPoints: 8,
+      elementOutPoints: 2,
+      elementInPlayed: true,
+    };
+
+    try {
+      expect(await entryEventTransfersRepository.updateBatchById([update], TEST_SEASON)).toBe(1);
+      const current = await sql<
+        Array<{
+          elementInPoints: number | null;
+          elementOutPoints: number | null;
+          elementInPlayed: boolean | null;
+        }>
+      >`
+        SELECT
+          element_in_points AS "elementInPoints",
+          element_out_points AS "elementOutPoints",
+          element_in_played AS "elementInPlayed"
+        FROM entry_event_transfers
+        WHERE id = ${update.id}
+      `;
+      expect(current[0]).toEqual({
+        elementInPoints: 8,
+        elementOutPoints: 2,
+        elementInPlayed: true,
+      });
+
+      await redis.set('Season:active', '2627');
+      resetActiveSeasonMemo();
+      let rejected: unknown;
+      try {
+        await entryEventTransfersRepository.updateBatchById(
+          [{ ...update, elementInPoints: 99 }],
+          TEST_SEASON,
+        );
+      } catch (error) {
+        rejected = error;
+      }
+      expect((rejected as { cause?: Error })?.cause?.message).toContain(
+        'Active season changed from 2526 to 2627 during entry event sync',
+      );
+      const preserved = await sql<Array<{ elementInPoints: number | null }>>`
+        SELECT element_in_points AS "elementInPoints"
+        FROM entry_event_transfers
+        WHERE id = ${update.id}
+      `;
+      expect(preserved[0]?.elementInPoints).toBe(8);
+    } finally {
+      await redis.set('Season:active', TEST_SEASON);
+      resetActiveSeasonMemo();
+      await sql`DELETE FROM entry_event_transfers WHERE id = ${update.id}`;
     }
   });
 

@@ -35,23 +35,43 @@ function pickElements(picks: RawFPLEntryEventPickItem[], chip: string | null): S
 export function buildTournamentTransferPointsMap(
   eventId: number,
   eventLives: ReadonlyArray<Pick<DbEventLive, 'elementId' | 'totalPoints'>>,
+  requiredElementIds: readonly number[] = [],
 ): Map<number, number> {
   if (eventLives.length === 0) {
     throw new Error(
       `Event live data is not consolidated for tournament transfer enrichment in event ${eventId}`,
     );
   }
-  return new Map(eventLives.map((live) => [live.elementId, live.totalPoints]));
+  const points = new Map(eventLives.map((live) => [live.elementId, live.totalPoints]));
+  const missingElementIds = uniqueNumbers(requiredElementIds).filter(
+    (elementId) => !points.has(elementId),
+  );
+  if (missingElementIds.length > 0) {
+    throw new Error(
+      `Event live data is incomplete for tournament transfer enrichment in event ${eventId}; ` +
+        `missing elements: ${missingElementIds.slice(0, 10).join(',')}`,
+    );
+  }
+  return points;
 }
 
 export async function loadCanonicalTournamentTransferPointsMap(
   eventId: number,
+  checkpointSeason: string,
+  requiredElementIds: readonly number[] = [],
   findCanonicalRows: (
     eventId: number,
-  ) => Promise<ReadonlyArray<Pick<DbEventLive, 'elementId' | 'totalPoints'>>> = (targetEventId) =>
-    eventLiveRepository.findByEventId(targetEventId),
+    season: string,
+  ) => Promise<ReadonlyArray<Pick<DbEventLive, 'elementId' | 'totalPoints'>>> = (
+    targetEventId,
+    season,
+  ) => eventLiveRepository.findFinalizedByEventIdForSeason(targetEventId, season),
 ): Promise<Map<number, number>> {
-  return buildTournamentTransferPointsMap(eventId, await findCanonicalRows(eventId));
+  return buildTournamentTransferPointsMap(
+    eventId,
+    await findCanonicalRows(eventId, checkpointSeason),
+    requiredElementIds,
+  );
 }
 
 export async function syncTournamentEventTransfersPost(eventId: number): Promise<{
@@ -69,6 +89,7 @@ export async function syncTournamentEventTransfersPost(eventId: number): Promise
   }
 
   logInfo('Starting tournament event transfers post sync', { eventId });
+  const checkpointSeason = await getActiveCacheSeason();
 
   const tournaments = await tournamentInfoRepository.findActive();
   if (tournaments.length === 0) {
@@ -88,9 +109,8 @@ export async function syncTournamentEventTransfersPost(eventId: number): Promise
     return { eventId, totalEntries: 0, updated: 0, skipped: 0, errors: 0 };
   }
 
-  const [entryResults, pointsMap, transfers] = await Promise.all([
+  const [entryResults, transfers] = await Promise.all([
     entryEventResultsRepository.findByEventAndEntryIds(eventId, entryIds),
-    loadCanonicalTournamentTransferPointsMap(eventId),
     entryEventTransfersRepository.findByEventAndEntryIds(eventId, entryIds),
   ]);
 
@@ -120,6 +140,17 @@ export async function syncTournamentEventTransfersPost(eventId: number): Promise
     };
   }
 
+  const requiredElementIds = uniqueNumbers(
+    transfers
+      .flatMap((transfer) => [transfer.elementInId, transfer.elementOutId])
+      .filter((elementId): elementId is number => elementId !== null && elementId > 0),
+  );
+  const pointsMap = await loadCanonicalTournamentTransferPointsMap(
+    eventId,
+    checkpointSeason,
+    requiredElementIds,
+  );
+
   const entryResultMap = new Map(entryResults.map((result) => [result.entryId, result]));
   const transferMap = new Map<number, DbEntryEventTransfer[]>();
   for (const transfer of transfers) {
@@ -130,6 +161,7 @@ export async function syncTournamentEventTransfersPost(eventId: number): Promise
 
   const updates: Array<{
     id: number;
+    entryId: number;
     elementInPoints: number | null;
     elementOutPoints: number | null;
     elementInPlayed: boolean | null;
@@ -182,6 +214,7 @@ export async function syncTournamentEventTransfersPost(eventId: number): Promise
 
       updates.push({
         id: transfer.id,
+        entryId,
         elementInPoints,
         elementOutPoints,
         elementInPlayed,
@@ -189,7 +222,7 @@ export async function syncTournamentEventTransfersPost(eventId: number): Promise
     }
   }
 
-  const updated = await entryEventTransfersRepository.updateBatchById(updates);
+  const updated = await entryEventTransfersRepository.updateBatchById(updates, checkpointSeason);
   logInfo('Tournament event transfers post sync completed', {
     eventId,
     totalEntries: entryIds.length,

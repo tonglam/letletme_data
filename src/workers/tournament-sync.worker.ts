@@ -59,13 +59,13 @@ import type { WorkerRuntime } from './worker-runtime';
  * terminal enrichment jobs. The existing cascade barrier publishes only when
  * structure, transfers, cup, and selection statistics have all completed.
  */
-async function enqueueTournamentCascade(eventId: number) {
+async function enqueueTournamentCascade(eventId: number, tournamentIds: number[]) {
   logInfo('Enqueueing tournament cascade jobs', { eventId });
 
   try {
     const cascadeId = createCascadeId(eventId);
     await initCascadeStructureBarrier(cascadeId);
-    const structureOpts = { cascadeId };
+    const structureOpts = { cascadeId, tournamentIds };
 
     // Every terminal cascade job carries the same completion-barrier ID.
     const results = await Promise.allSettled([
@@ -121,7 +121,12 @@ async function enqueueTournamentCascade(eventId: number) {
       }
       await noteCascadeStructureJobComplete(cascadeId, `enqueue-failed:${structureJobNames[i]}`);
     }
-    await maybeEnqueueCascadeMaterializedRefresh(eventId, cascadeId, 'structure-enqueue-gaps');
+    await maybeEnqueueCascadeMaterializedRefresh(
+      eventId,
+      cascadeId,
+      'structure-enqueue-gaps',
+      tournamentIds,
+    );
   } catch (error) {
     logError('Failed to enqueue tournament cascade jobs', error, { eventId });
     throw error;
@@ -137,6 +142,7 @@ async function maybeEnqueueCascadeMaterializedRefresh(
   eventId: number,
   cascadeId: string,
   lastJob: string,
+  tournamentIds: number[],
 ): Promise<void> {
   const claim = await tryClaimCascadeRefreshEnqueue(cascadeId);
   if (claim === 'already-enqueued' || claim === 'not-pending') {
@@ -148,7 +154,10 @@ async function maybeEnqueueCascadeMaterializedRefresh(
     throw new Error(`Cascade MV refresh enqueue lease busy for cascadeId=${cascadeId}; will retry`);
   }
   try {
-    await enqueueTournamentMaterializedViewsRefresh(eventId, 'cascade');
+    await enqueueTournamentMaterializedViewsRefresh(eventId, 'cascade', {
+      cascadeId,
+      tournamentIds,
+    });
     await markCascadeRefreshEnqueued(cascadeId);
     logInfo('Enqueued tournament materialized views refresh after structure cascade', {
       eventId,
@@ -171,6 +180,7 @@ async function afterCascadeStructureJob(
   eventId: number,
   cascadeId: string | undefined,
   jobName: string,
+  tournamentIds: number[],
 ): Promise<void> {
   if (!cascadeId) {
     return;
@@ -178,7 +188,7 @@ async function afterCascadeStructureJob(
   // jobName is the stable barrier slot — retries of the same job no-op for DECR.
   await noteCascadeStructureJobComplete(cascadeId, jobName);
   // Retries still re-attempt enqueue if pending and not yet successfully enqueued.
-  await maybeEnqueueCascadeMaterializedRefresh(eventId, cascadeId, jobName);
+  await maybeEnqueueCascadeMaterializedRefresh(eventId, cascadeId, jobName, tournamentIds);
 }
 
 export function assertTournamentStructureSyncComplete(
@@ -191,11 +201,13 @@ export function assertTournamentStructureSyncComplete(
   }
 }
 
-const tournamentEventFinalizationDependencies = {
-  finish: finishTournamentsThroughEvent,
-  refresh: refreshTournamentMaterializedViews,
-  invalidate: invalidateTournamentGraphQLCaches,
-};
+function tournamentEventFinalizationDependencies(tournamentIds: number[]) {
+  return {
+    finish: (eventId: number) => finishTournamentsThroughEvent(eventId, tournamentIds),
+    refresh: refreshTournamentMaterializedViews,
+    invalidate: invalidateTournamentGraphQLCaches,
+  };
+}
 
 /**
  * Tournament Sync Worker
@@ -210,6 +222,7 @@ const tournamentEventFinalizationDependencies = {
  */
 async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
   const { eventId, source, cascadeId } = job.data;
+  const tournamentIds = job.data.tournamentIds ?? [];
   const context = {
     jobType: 'queue' as const,
     queueName: job.queueName,
@@ -238,7 +251,7 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
             if (!shouldEnqueueTournamentCascade(result)) {
               logInfo('Skipping tournament cascade - no active tournament entries', { eventId });
               await finalizeTournamentEventLifecycle(eventId, {
-                ...tournamentEventFinalizationDependencies,
+                ...tournamentEventFinalizationDependencies([]),
                 // A prior attempt may already have committed the terminal row
                 // and then failed refreshing the derived snapshots. Refresh on
                 // every skipped-cascade retry so that checkpoint can recover.
@@ -246,14 +259,14 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
               });
               break;
             }
-            await enqueueTournamentCascade(eventId);
+            await enqueueTournamentCascade(eventId, result.tournamentIds);
             break;
           }
 
           case TOURNAMENT_JOBS.POINTS_RACE: {
             const pointsResult = await syncTournamentPointsRaceResults(eventId);
             assertTournamentStructureSyncComplete(pointsResult, eventId, job.name);
-            await afterCascadeStructureJob(eventId, cascadeId, job.name);
+            await afterCascadeStructureJob(eventId, cascadeId, job.name, tournamentIds);
             return pointsResult;
           }
 
@@ -261,31 +274,34 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
             // Surface `skipped` (missing entry results) on the job returnvalue.
             const battleResult = await syncTournamentBattleRaceResults(eventId);
             assertTournamentStructureSyncComplete(battleResult, eventId, job.name);
-            await afterCascadeStructureJob(eventId, cascadeId, job.name);
+            await afterCascadeStructureJob(eventId, cascadeId, job.name, tournamentIds);
             return battleResult;
           }
 
           case TOURNAMENT_JOBS.KNOCKOUT: {
             const knockoutResult = await syncTournamentKnockoutResults(eventId);
             assertTournamentStructureSyncComplete(knockoutResult, eventId, job.name);
-            await afterCascadeStructureJob(eventId, cascadeId, job.name);
+            await afterCascadeStructureJob(eventId, cascadeId, job.name, tournamentIds);
             return knockoutResult;
           }
 
           case TOURNAMENT_JOBS.TRANSFERS_POST:
             await syncTournamentEventTransfersPost(eventId);
-            await enqueueTournamentSelectionStats(eventId, 'cascade', { cascadeId });
-            await afterCascadeStructureJob(eventId, cascadeId, job.name);
+            await enqueueTournamentSelectionStats(eventId, 'cascade', {
+              cascadeId,
+              tournamentIds,
+            });
+            await afterCascadeStructureJob(eventId, cascadeId, job.name, tournamentIds);
             break;
 
           case TOURNAMENT_JOBS.CUP_RESULTS:
             await syncTournamentEventCupResults(eventId);
-            await afterCascadeStructureJob(eventId, cascadeId, job.name);
+            await afterCascadeStructureJob(eventId, cascadeId, job.name, tournamentIds);
             break;
 
           case TOURNAMENT_JOBS.SELECTION_STATS:
             await syncTournamentSelectionStats(eventId);
-            await afterCascadeStructureJob(eventId, cascadeId, job.name);
+            await afterCascadeStructureJob(eventId, cascadeId, job.name, tournamentIds);
             break;
 
           case TOURNAMENT_JOBS.EVENT_PICKS:
@@ -298,7 +314,7 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
 
           case TOURNAMENT_JOBS.MATERIALIZED_VIEWS_REFRESH:
             await finalizeTournamentEventLifecycle(eventId, {
-              ...tournamentEventFinalizationDependencies,
+              ...tournamentEventFinalizationDependencies(tournamentIds),
               refreshAlways: true,
             });
             break;

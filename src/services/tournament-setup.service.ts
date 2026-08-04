@@ -3,6 +3,7 @@ import {
   tournamentSetupRebuildScopes,
 } from '../domain/mutation-scope';
 import { invalidateTournamentGraphQLCaches } from '../cache/tournament-graphql-cache';
+import { getActiveCacheSeason } from '../cache/cache-season';
 import { estimateTournamentSetupRequests, getTournamentBackfillWindow } from '../domain/tournament';
 import { enqueueTournamentSetup } from '../jobs/tournament-setup.jobs';
 import { eventRepository } from '../repositories/events';
@@ -203,6 +204,7 @@ export async function setupTournamentStructure(tournamentId: number): Promise<vo
     const window = getTournamentBackfillWindow(tournament, finalizedEvent?.id ?? null);
     eventCount = window ? window.endEventId - window.startEventId + 1 : 0;
     const targetEventId = window?.endEventId ?? 0;
+    const setupSeason = await getActiveCacheSeason();
     let phaseStartedAtMs = performance.now();
 
     // Entry FPL sync: entry-core only — do NOT hold tournament-structure:global
@@ -217,6 +219,7 @@ export async function setupTournamentStructure(tournamentId: number): Promise<vo
       () =>
         syncTournamentEntryDetails(entryIds, {
           targetEventId,
+          season: setupSeason,
           onPlan: async (plan) => {
             entryPlan = plan;
             await tournamentInfoRepository.markSetupProgress(
@@ -345,7 +348,7 @@ export async function setupTournamentStructure(tournamentId: number): Promise<vo
       throw new Error(`Core tournament audit failed: ${blockingCoreIssues.join('; ')}`);
     }
     await refreshTournamentMaterializedViews();
-    await tournamentInfoRepository.markStandingsReady(tournamentId);
+    await tournamentInfoRepository.markStandingsReady(tournamentId, setupSeason);
     standingsPublished = true;
     await invalidateTournamentGraphQLCaches('standings-publication');
     phaseDurationsMs.calculating_standings = Math.round(performance.now() - phaseStartedAtMs);
