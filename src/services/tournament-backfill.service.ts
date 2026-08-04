@@ -3,8 +3,14 @@ import { getActiveCacheSeason, getActiveCacheSeasonUncached } from '../cache/cac
 import type { TournamentBackfillWindow, TournamentConfig } from '../domain/tournament';
 import { ENTRY_SYNC_DEFAULT_CONCURRENCY } from '../queues/entry-sync.queue';
 import { entryEventPicksRepository } from '../repositories/entry-event-picks';
-import { entryEventResultsRepository } from '../repositories/entry-event-results';
-import { entryEventTransfersRepository } from '../repositories/entry-event-transfers';
+import {
+  createEntryEventResultsRepository,
+  entryEventResultsRepository,
+} from '../repositories/entry-event-results';
+import {
+  entryEventTransfersRepository,
+  withEntrySeasonSyncTransaction,
+} from '../repositories/entry-event-transfers';
 import { entryInfoRepository } from '../repositories/entry-infos';
 import { uniqueNumbers } from '../utils/async';
 import { mapWithConcurrency } from '../utils/async';
@@ -202,7 +208,21 @@ async function seedPreEntryCoreBaselines(
       units.push({ entryId, eventId });
     }
   }
-  return entryEventResultsRepository.seedPreEntryBaselines(units);
+  const checkpointSeason = await getActiveCacheSeason();
+  const unitsByEntry = new Map<number, Array<{ entryId: number; eventId: number }>>();
+  for (const unit of units) {
+    const entryUnits = unitsByEntry.get(unit.entryId) ?? [];
+    entryUnits.push(unit);
+    unitsByEntry.set(unit.entryId, entryUnits);
+  }
+
+  let inserted = 0;
+  for (const [entryId, entryUnits] of unitsByEntry) {
+    inserted += await withEntrySeasonSyncTransaction(entryId, checkpointSeason, async (tx) =>
+      createEntryEventResultsRepository(tx).seedPreEntryBaselines(entryUnits),
+    );
+  }
+  return inserted;
 }
 
 async function auditMissingUnits(

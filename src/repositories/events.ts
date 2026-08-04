@@ -184,6 +184,7 @@ export const createEventRepository = (dbInstance?: DatabaseInstance) => {
               liveSnapshotFinalizedAt: sql`
                 CASE
                   WHEN excluded.finished = false OR excluded.data_checked = false THEN NULL
+                  WHEN events.deadline_time IS DISTINCT FROM excluded.deadline_time THEN NULL
                   WHEN events.data_checked = false AND excluded.data_checked = true THEN NULL
                   ELSE events.live_snapshot_finalized_at
                 END

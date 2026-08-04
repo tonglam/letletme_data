@@ -322,6 +322,7 @@ export const tournamentRosterRepository = {
         await tx`
           update tournament_infos
           set total_team_num = ${participants.length},
+              group_team_num = ${participants.length},
               source_league_name = coalesce(${sourceLeagueName}, source_league_name),
               roster_sync_status = ${
                 automaticallyPaused ? 'failed' : options?.resumeAfterSetup ? 'processing' : 'ready'

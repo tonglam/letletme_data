@@ -346,6 +346,39 @@ describe('tournament creation vs entry_infos (FP-08)', () => {
     });
     expect(rows[0]?.roster_last_synced_at).not.toBeNull();
 
+    const expandedParticipants = [
+      ...participants,
+      {
+        id: String(ENTRY_BASE + 4),
+        team: 'New Team 4',
+        manager: 'New Manager 4',
+        overallRank: 4,
+        totalPoints: 104,
+      },
+    ];
+    const initialRoster = await tournamentRosterRepository.findById(created.id);
+    if (!initialRoster) throw new Error('Expected tournament roster record');
+    const expanded = await tournamentRosterRepository.publishAuthoritativeRoster(
+      initialRoster,
+      expandedParticipants,
+      'Official Source League',
+    );
+    expect(expanded.changed).toBe(true);
+    const expandedCounts = await client<Array<{ total: number; group: number | null }>>`
+      SELECT total_team_num AS total, group_team_num AS group
+      FROM tournament_infos
+      WHERE id = ${created.id}
+    `;
+    expect(expandedCounts[0]).toEqual({ total: 5, group: 5 });
+
+    const expandedRoster = await tournamentRosterRepository.findById(created.id);
+    if (!expandedRoster) throw new Error('Expected expanded tournament roster record');
+    await tournamentRosterRepository.publishAuthoritativeRoster(
+      expandedRoster,
+      participants,
+      'Official Source League',
+    );
+
     await client`
       update tournament_infos
       set state = 'inactive', roster_sync_status = 'processing'

@@ -35,7 +35,11 @@ const TRANSFER_PLAYER_ID = 99_042_102;
 const SOURCE_PLAYER_ID = 99_042_103;
 const TEST_SEASON = '2526';
 
-async function expectBlockedByEntrySeasonLock<T>(operation: () => Promise<T>): Promise<T> {
+async function expectBlockedByEntrySeasonLock<T>(
+  operation: () => Promise<T>,
+  entryId = ENTRY_ID,
+  beforeRelease?: () => Promise<void>,
+): Promise<T> {
   const sql = await getDbClient();
   let releaseLock: () => void = () => undefined;
   let markLockAcquired: () => void = () => undefined;
@@ -46,7 +50,7 @@ async function expectBlockedByEntrySeasonLock<T>(operation: () => Promise<T>): P
     releaseLock = resolve;
   });
   const blocker = sql.begin(async (tx) => {
-    await tx`SELECT pg_advisory_xact_lock(${ENTRY_SEASON_SYNC_LOCK_NAMESPACE}, ${ENTRY_ID})`;
+    await tx`SELECT pg_advisory_xact_lock(${ENTRY_SEASON_SYNC_LOCK_NAMESPACE}, ${entryId})`;
     markLockAcquired();
     await lockRelease;
   });
@@ -60,6 +64,7 @@ async function expectBlockedByEntrySeasonLock<T>(operation: () => Promise<T>): P
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(settled).toBe(false);
   } finally {
+    await beforeRelease?.();
     releaseLock();
     await blocker;
   }
@@ -1274,6 +1279,33 @@ describe('tournament initialization checkpoints', () => {
     expect(rows.slice(0, 9).every((row) => row.eventPoints === 0)).toBe(true);
     expect(rows.slice(0, 9).every((row) => row.overallRank === 2_147_483_647)).toBe(true);
     expect(plans).toEqual([{ totalPairs: 3, missingPairs: 0, reusedPairs: 3 }]);
+  });
+
+  test('seeds pre-entry baselines under the entry season write fence', async () => {
+    try {
+      await expectBlockedByEntrySeasonLock(
+        () =>
+          ensureTournamentCoreResults([LATE_ENTRY_ID], {
+            startEventId: 1,
+            endEventId: 12,
+          }),
+        LATE_ENTRY_ID,
+        async () => {
+          const redis = await redisSingleton.getClient();
+          await redis.set('Season:active', '2627');
+          resetActiveSeasonMemo();
+        },
+      );
+      throw new Error('Expected baseline seeding to reject the stale season');
+    } catch (error) {
+      expect(String((error as { cause?: Error })?.cause?.message ?? error)).toContain(
+        'Active season changed from 2526 to 2627 during entry event sync',
+      );
+    } finally {
+      const redis = await redisSingleton.getClient();
+      await redis.set('Season:active', TEST_SEASON);
+      resetActiveSeasonMemo();
+    }
   });
 
   test('requires canonical picks before treating knockout core rows as complete', async () => {
