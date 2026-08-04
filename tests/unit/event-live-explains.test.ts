@@ -64,8 +64,10 @@ describe('Event Live Explains - totalPoints', () => {
         redCardsPoints: null,
         saves: null,
         savesPoints: null,
+        defensiveContribution: 10,
+        defensiveContributionPoints: 2,
       }),
-    ).toBe(14);
+    ).toBe(16);
   });
 
   test('returns zero when every component is null', () => {
@@ -96,6 +98,8 @@ describe('Event Live Explains - totalPoints', () => {
         redCardsPoints: null,
         saves: null,
         savesPoints: null,
+        defensiveContribution: null,
+        defensiveContributionPoints: null,
       }),
     ).toBe(0);
   });

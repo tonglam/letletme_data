@@ -1,11 +1,21 @@
 import type { Redis } from 'ioredis';
+import { sql } from 'drizzle-orm';
 
+import { getDb, type DbOrTransaction } from '../db/singleton';
 import { logDebug, logError, logInfo } from '../utils/logger';
 import { redisSingleton } from './singleton';
 
 import type { Event, Fixture, RawFPLEvent, RawFPLFixture } from '../types';
 
 export const ACTIVE_SEASON_KEY = 'Season:active';
+
+// "LLSN" as a signed-safe 32-bit advisory-lock namespace. Live snapshot and
+// fixture writers hold the shared form while a season rollover holds the
+// exclusive form. Shared locks preserve cross-event parallelism; rollover
+// cannot change Redis truth or delete old-season keys until every in-flight
+// live/fixture operation has finished its PostgreSQL and Redis commits.
+export const ACTIVE_SEASON_LOCK_NAMESPACE = 0x4c4c534e;
+export const ACTIVE_SEASON_LOCK_ID = 0;
 
 export const DEFAULT_ACTIVE_SEASON_MEMO_TTL_MS = 5_000;
 
@@ -55,9 +65,12 @@ export const SEASON_CACHE_PREFIXES = [
   'EventLive',
   'EventLiveSummary',
   'EventLiveExplain',
+  'EventLiveExplainV2',
   'LiveFixture',
+  'LiveFixtureV2',
   'LiveBonus',
   'LiveBonusV2',
+  'LiveSnapshotMeta',
   'EventOverallResult',
   'EntryInfo',
   'PlayerStat',
@@ -156,11 +169,21 @@ export async function getActiveCacheSeason(): Promise<string> {
     return memoized;
   }
 
+  const activeSeason = await getActiveCacheSeasonUncached();
+  memoizeActiveSeason(activeSeason);
+  return activeSeason;
+}
+
+/**
+ * Read Redis truth without consulting or refreshing the process memo. Mutation
+ * fences use this during the once-a-year rollover so an old worker cannot
+ * publish or persist under a season that another process already retired.
+ */
+export async function getActiveCacheSeasonUncached(): Promise<string> {
   try {
     const redis = await redisSingleton.getClient();
     const activeSeason = await redis.get(ACTIVE_SEASON_KEY);
     if (isValidSeason(activeSeason)) {
-      memoizeActiveSeason(activeSeason);
       return activeSeason;
     }
   } catch (error) {
@@ -171,30 +194,71 @@ export async function getActiveCacheSeason(): Promise<string> {
   throw new Error(`${ACTIVE_SEASON_KEY} is missing or malformed`);
 }
 
-export async function setActiveCacheSeason(season: string): Promise<boolean> {
+/**
+ * Pin the active season for the remainder of an existing PostgreSQL
+ * transaction. Live publishers take event locks first. Fixture discovery may
+ * take this shared lock before its dynamically discovered event locks; shared
+ * readers do not conflict, and the exclusive rollover path takes no event
+ * lock, so that ordering cannot form an advisory-lock cycle.
+ */
+export async function acquireActiveSeasonReadFence(tx: DbOrTransaction): Promise<void> {
+  await tx.execute(
+    sql`SELECT pg_advisory_xact_lock_shared(${ACTIVE_SEASON_LOCK_NAMESPACE}, ${ACTIVE_SEASON_LOCK_ID})`,
+  );
+}
+
+async function withActiveSeasonWriteFence<T>(operation: () => Promise<T>): Promise<T> {
+  const db = await getDb();
+  return db.transaction(async (tx) => {
+    await tx.execute(
+      sql`SELECT pg_advisory_xact_lock(${ACTIVE_SEASON_LOCK_NAMESPACE}, ${ACTIVE_SEASON_LOCK_ID})`,
+    );
+    return operation();
+  });
+}
+
+async function advanceActiveCacheSeason(
+  season: string,
+  afterAdvance?: () => Promise<void>,
+): Promise<boolean> {
   if (!isValidSeason(season)) {
     throw new Error(`Invalid active cache season: ${season}`);
   }
 
   const redis = await redisSingleton.getClient();
-  const current = await redis.get(ACTIVE_SEASON_KEY);
-  if (!isNewerSeason(season, current)) {
+  const preflight = await redis.get(ACTIVE_SEASON_KEY);
+  if (!isNewerSeason(season, preflight)) {
     logDebug('Skipping active cache season update; candidate is not newer', {
       candidate: season,
-      current,
+      current: preflight,
     });
-    // Re-arm the memo from Redis truth so a skipped update still converges
-    // the memo (e.g. another writer advanced the key while our memo was cold).
-    if (isValidSeason(current)) {
-      memoizeActiveSeason(current);
-    }
+    if (isValidSeason(preflight)) memoizeActiveSeason(preflight);
     return false;
   }
 
-  await redis.set(ACTIVE_SEASON_KEY, season);
-  memoizeActiveSeason(season);
-  logInfo('Active cache season updated', { season, previous: current });
-  return true;
+  return withActiveSeasonWriteFence(async () => {
+    // Another season publisher may have won while this process waited for
+    // live snapshot readers. Re-check under the exclusive fence.
+    const current = await redis.get(ACTIVE_SEASON_KEY);
+    if (!isNewerSeason(season, current)) {
+      logDebug('Skipping active cache season update after fenced recheck', {
+        candidate: season,
+        current,
+      });
+      if (isValidSeason(current)) memoizeActiveSeason(current);
+      return false;
+    }
+
+    await redis.set(ACTIVE_SEASON_KEY, season);
+    memoizeActiveSeason(season);
+    await afterAdvance?.();
+    logInfo('Active cache season updated', { season, previous: current });
+    return true;
+  });
+}
+
+export async function setActiveCacheSeason(season: string): Promise<boolean> {
+  return advanceActiveCacheSeason(season);
 }
 
 export async function clearStaleSeasonCache(
@@ -231,10 +295,6 @@ export async function finalizeSeasonCacheWrite(
   season: string,
   prefixes: readonly string[],
 ): Promise<void> {
-  const changed = await setActiveCacheSeason(season);
-  if (!changed) {
-    return;
-  }
   const rolloverPrefixes = [...new Set([...SEASON_CACHE_PREFIXES, ...prefixes])];
-  await clearStaleSeasonCache(season, rolloverPrefixes);
+  await advanceActiveCacheSeason(season, () => clearStaleSeasonCache(season, rolloverPrefixes));
 }

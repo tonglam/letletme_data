@@ -20,12 +20,14 @@ import { runLeagueEventResultsSync } from '../jobs/league-event-results.jobs';
 import { runLaunchHappening, runLaunchWarning } from '../jobs/launch.jobs';
 import {
   enqueueEventLiveExplain,
+  enqueueEventLiveSummary,
   enqueueEventLivesCacheUpdate,
   enqueueEventLivesDbSync,
-  enqueueEventLiveSummary,
   enqueueEventOverallResult,
+  enqueueLiveSnapshot,
+  enqueueLiveScoresSync,
 } from '../jobs/live-data.jobs';
-import { runLiveScores, runPostMatchConsolidation } from '../jobs/live.jobs';
+import { runPostMatchConsolidation } from '../jobs/live.jobs';
 import { runTournamentBattleRaceResultsSync } from '../jobs/tournament-battle-race-results.jobs';
 import { runTournamentEventCupResultsSync } from '../jobs/tournament-event-cup-results.jobs';
 import { runTournamentEventPicksSync } from '../jobs/tournament-event-picks.jobs';
@@ -206,14 +208,19 @@ const TRIGGERABLE_JOBS: TriggerableJobInfo[] = [
     schedule: 'Cascade after the three structure jobs complete their barrier',
   },
   {
+    name: 'live-snapshot',
+    description: 'Fetch and atomically publish one coherent live football snapshot',
+    schedule: 'Every 1 minute during match hours; persists full live rows every 10 minutes',
+  },
+  {
     name: 'event-lives-cache-update',
-    description: 'Cache-only update for event lives (fast, real-time)',
-    schedule: 'Every 1 minute during match hours',
+    description: 'Compatibility alias for a cache-only live snapshot',
+    schedule: 'Manual compatibility alias',
   },
   {
     name: 'event-lives-db-sync',
-    description: 'Full DB sync for event lives (triggers cascade)',
-    schedule: 'Every 10 minutes during match hours',
+    description: 'Compatibility alias for a persistent live snapshot',
+    schedule: 'Manual compatibility alias',
   },
   {
     name: 'event-live-summary-sync',
@@ -232,8 +239,8 @@ const TRIGGERABLE_JOBS: TriggerableJobInfo[] = [
   },
   {
     name: 'live-scores',
-    description: 'Update live scores',
-    schedule: 'Every minute during matches',
+    description: 'Compatibility alias for a cache-only live snapshot',
+    schedule: 'Manual compatibility alias',
   },
   {
     name: 'post-match-consolidation',
@@ -342,19 +349,26 @@ function buildJobMap(input?: unknown): Record<string, () => Promise<unknown>> {
     'tournament-materialized-views-refresh': async () => {
       await refreshTournamentMaterializedViews();
     },
+    'live-snapshot': async () => {
+      const currentEvent = await getCurrentEvent();
+      if (!currentEvent) {
+        throw new Error('No current event found');
+      }
+      return enqueueLiveSnapshot(currentEvent.id, 'manual', { persistEventLives: false });
+    },
     'event-lives-cache-update': async () => {
       const currentEvent = await getCurrentEvent();
       if (!currentEvent) {
         throw new Error('No current event found');
       }
-      await enqueueEventLivesCacheUpdate(currentEvent.id, 'manual');
+      return enqueueEventLivesCacheUpdate(currentEvent.id, 'manual');
     },
     'event-lives-db-sync': async () => {
       const currentEvent = await getCurrentEvent();
       if (!currentEvent) {
         throw new Error('No current event found');
       }
-      await enqueueEventLivesDbSync(currentEvent.id, 'manual');
+      return enqueueEventLivesDbSync(currentEvent.id, 'manual');
     },
     'event-live-summary-sync': async () => {
       const currentEvent = await getCurrentEvent();
@@ -377,7 +391,13 @@ function buildJobMap(input?: unknown): Record<string, () => Promise<unknown>> {
       }
       await enqueueEventOverallResult(currentEvent.id, 'manual');
     },
-    'live-scores': runLiveScores,
+    'live-scores': async () => {
+      const currentEvent = await getCurrentEvent();
+      if (!currentEvent) {
+        throw new Error('No current event found');
+      }
+      return enqueueLiveScoresSync(currentEvent.id, 'manual');
+    },
     'post-match-consolidation': runPostMatchConsolidation,
     'launch-warning': runLaunchWarning,
     'launch-happening': runLaunchHappening,

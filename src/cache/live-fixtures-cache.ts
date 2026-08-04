@@ -1,5 +1,6 @@
 import { getActiveCacheSeason } from './cache-season';
 import { parseHashEntries } from './hash-read';
+import { replaceHashesUnlessLiveSnapshotOwned } from './live-snapshot-ownership';
 import { logDebug, logError, logInfo } from '../utils/logger';
 import { redisSingleton } from './singleton';
 
@@ -20,20 +21,22 @@ export const liveFixturesCache = {
       const season = await getActiveCacheSeason();
       const key = `LiveFixture:${season}:${eventId}`;
 
-      const pipeline = redis.pipeline();
-      pipeline.del(key);
-
       const teamIds = Object.keys(byTeam);
-      if (teamIds.length > 0) {
-        const fields: Record<string, string> = {};
-        for (const teamId of teamIds) {
-          fields[teamId] = JSON.stringify(byTeam[teamId]);
-        }
-        pipeline.hset(key, fields);
+      const fields: Record<string, string> = {};
+      for (const teamId of teamIds) {
+        fields[teamId] = JSON.stringify(byTeam[teamId]);
       }
-
-      await pipeline.exec();
-      logInfo('Live fixtures cache updated', { eventId, season, teams: teamIds.length });
+      const snapshotOwnedEventIds = await replaceHashesUnlessLiveSnapshotOwned(redis, season, [
+        { eventId, key, fields },
+      ]);
+      if (snapshotOwnedEventIds.has(eventId)) {
+        logInfo('Preserved snapshot-owned LiveFixture cache during compatibility write', {
+          eventId,
+          season,
+        });
+      } else {
+        logInfo('Live fixtures cache updated', { eventId, season, teams: teamIds.length });
+      }
     } catch (error) {
       logError('Live fixtures cache set error', error, { eventId });
       throw error;
@@ -74,8 +77,15 @@ export const liveFixturesCache = {
       const redis = await redisSingleton.getClient();
       const season = await getActiveCacheSeason();
       const key = `LiveFixture:${season}:${eventId}`;
-      await redis.del(key);
-      logInfo('Live fixtures cache cleared', { eventId, season });
+      const snapshotOwnedEventIds = await replaceHashesUnlessLiveSnapshotOwned(redis, season, [
+        { eventId, key, fields: {} },
+      ]);
+      logInfo(
+        snapshotOwnedEventIds.has(eventId)
+          ? 'Preserved snapshot-owned LiveFixture cache during compatibility clear'
+          : 'Live fixtures cache cleared',
+        { eventId, season },
+      );
     } catch (error) {
       logError('Live fixtures cache clear error', error, { eventId });
       throw error;

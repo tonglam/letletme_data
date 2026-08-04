@@ -20,7 +20,8 @@ season-scoped families are removed when `Season:active` advances.
 | Unscheduled fixtures | `Fixtures:{season}:unscheduled` | none |
 | Team fixtures | `FixturesByTeam:{season}:{teamId}` | none |
 | Event live | `EventLive:{season}:{eventId}` | none |
-| Event live explain | `EventLiveExplain:{season}:{eventId}` | none |
+| Event live explain (frozen legacy) | `EventLiveExplain:{season}:{eventId}` | none |
+| Event live explain V2 | `EventLiveExplainV2:{season}:{eventId}` | none |
 | Event live summary | `EventLiveSummary:{season}:{eventId}` | none |
 | Overall result | `EventOverallResult:{season}` | none |
 | Live fixtures | `LiveFixture:{season}:{eventId}` | none |

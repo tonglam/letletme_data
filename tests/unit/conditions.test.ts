@@ -81,6 +81,14 @@ describe('isMatchDayTime', () => {
     expect(isMatchDayTime(event, fixtures, new Date('2026-04-20T20:00:00.001Z'))).toBe(false);
   });
 
+  it('prewarms the snapshot five minutes before kickoff', () => {
+    const event = buildEvent();
+    const fixtures = [buildFixture('2026-04-20T18:00:00.000Z', 205)];
+
+    expect(isMatchDayTime(event, fixtures, new Date('2026-04-20T17:54:59.999Z'))).toBe(false);
+    expect(isMatchDayTime(event, fixtures, new Date('2026-04-20T17:55:00.000Z'))).toBe(true);
+  });
+
   it('keeps window open when finish flag is delayed', () => {
     const event = buildEvent();
     const fixtures: Fixture[] = [

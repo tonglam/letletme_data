@@ -18,7 +18,10 @@ import { singleRawEventLiveElementFixture } from '../fixtures/event-lives.fixtur
 // ---------------------------------------------------------------------------
 
 type TxCallback = (tx: unknown) => Promise<unknown>;
-let currentDb: { transaction: (cb: TxCallback) => Promise<unknown> };
+const defaultTx = { execute: mock(async () => []) };
+let currentDb: { transaction: (cb: TxCallback) => Promise<unknown> } = {
+  transaction: async (cb) => cb(defaultTx),
+};
 
 mock.module('../../src/db/singleton', () => ({
   getDb: async () => currentDb,
@@ -365,7 +368,7 @@ describe('syncEventLives (M5: lives + explains upsert in one transaction)', () =
   });
 
   it('runs both upserts on the same transaction handle before touching cache', async () => {
-    const tx = { tag: 'tx-event-lives' };
+    const tx = { tag: 'tx-event-lives', execute: mock(async () => []) };
     const transaction = mock(async (cb: TxCallback) => cb(tx));
     currentDb = { transaction };
     activeTx = tx;
@@ -384,7 +387,7 @@ describe('syncEventLives (M5: lives + explains upsert in one transaction)', () =
   });
 
   it('propagates an explains failure and never updates the cache', async () => {
-    const tx = { tag: 'tx-event-lives-fail' };
+    const tx = { tag: 'tx-event-lives-fail', execute: mock(async () => []) };
     currentDb = { transaction: mock(async (cb: TxCallback) => cb(tx)) };
     activeTx = tx;
     txExplainsUpsertBatch.mockImplementation(async () => {
@@ -416,7 +419,7 @@ describe('syncKnockoutForTournament (M6: four dependent upserts in one transacti
   });
 
   it('wraps all four upserts and their dependent reads in a single transaction', async () => {
-    const tx = { tag: 'tx-knockout' };
+    const tx = { tag: 'tx-knockout', execute: mock(async () => []) };
     const transaction = mock(async (cb: TxCallback) => cb(tx));
     currentDb = { transaction };
 
@@ -446,7 +449,7 @@ describe('syncKnockoutForTournament (M6: four dependent upserts in one transacti
   });
 
   it('rolls the whole chain back when any upsert fails', async () => {
-    const tx = { tag: 'tx-knockout-fail' };
+    const tx = { tag: 'tx-knockout-fail', execute: mock(async () => []) };
     currentDb = { transaction: mock(async (cb: TxCallback) => cb(tx)) };
     txKnockoutsUpsertBatch.mockImplementationOnce(async () => {
       throw new Error('knockouts upsert failed');

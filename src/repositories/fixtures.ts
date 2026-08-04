@@ -5,14 +5,11 @@ import {
   type DbEventFixture,
   type DbEventFixtureInsert,
 } from '../db/schemas/index.schema';
-import { getDb } from '../db/singleton';
+import { getDb, type DbOrTransaction } from '../db/singleton';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 
-import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import type { Fixture as DomainFixture } from '../types';
-
-type DatabaseInstance = PostgresJsDatabase<Record<string, never>>;
 
 // Map DbEventFixture to domain Fixture
 function mapDbFixtureToDomain(dbFixture: DbEventFixture): DomainFixture {
@@ -39,7 +36,7 @@ function mapDbFixtureToDomain(dbFixture: DbEventFixture): DomainFixture {
   };
 }
 
-export const createFixtureRepository = (dbInstance?: DatabaseInstance) => {
+export const createFixtureRepository = (dbInstance?: DbOrTransaction) => {
   const getDbInstance = async () => dbInstance || (await getDb());
 
   return {
@@ -94,6 +91,29 @@ export const createFixtureRepository = (dbInstance?: DatabaseInstance) => {
         throw new DatabaseError(
           'Failed to retrieve fixture event ids',
           'FIND_EVENT_IDS_ERROR',
+          error instanceof Error ? error : undefined,
+        );
+      }
+    },
+
+    markUnscheduled: async (ids: number[]): Promise<number> => {
+      try {
+        const uniqueIds = [...new Set(ids.filter((id) => Number.isInteger(id) && id > 0))];
+        if (uniqueIds.length === 0) return 0;
+
+        const db = await getDbInstance();
+        const result = await db
+          .update(eventFixtures)
+          .set({ eventId: null, updatedAt: new Date() })
+          .where(inArray(eventFixtures.id, uniqueIds))
+          .returning({ id: eventFixtures.id });
+        logInfo('Marked fixtures as unscheduled', { count: result.length });
+        return result.length;
+      } catch (error) {
+        logError('Failed to mark fixtures as unscheduled', error, { count: ids.length });
+        throw new DatabaseError(
+          'Failed to mark fixtures as unscheduled',
+          'MARK_UNSCHEDULED_ERROR',
           error instanceof Error ? error : undefined,
         );
       }

@@ -9,6 +9,7 @@ const leagueSyncAddCalls: AddCall[] = [];
 
 mock.module('../../src/queues/live-data.queue', () => ({
   LIVE_JOBS: {
+    LIVE_SNAPSHOT: 'live-snapshot',
     EVENT_LIVES_CACHE: 'event-lives-cache',
     EVENT_LIVES_DB: 'event-lives-db',
     EVENT_LIVE_SUMMARY: 'event-live-summary',
@@ -20,6 +21,7 @@ mock.module('../../src/queues/live-data.queue', () => ({
   },
   getLiveDataQueue: () => ({
     name: 'live-data-p1',
+    getJobs: async () => [],
     add: async (name: string, data: Record<string, unknown>, opts: Record<string, unknown>) => {
       liveDataAddCalls.push({ name, data, opts });
       return { id: (opts.jobId as string | undefined) ?? 'generated-id' };
@@ -128,9 +130,9 @@ describe('live-data manual job IDs', () => {
     const job = await enqueueEventLivesDbSync(10, 'cron');
 
     expect(job).not.toBeNull();
-    // Time-based suffix (not the deterministic manual ID) — cron ticks are seconds
-    // apart in practice, so each cycle gets its own job instead of deduping.
-    expect(job!.id).toMatch(/^event-lives-db-e10-\d+$/);
+    // Compatibility wire jobs use their own minute bucket; the waiting-room
+    // check prevents a slow prior minute from stacking behind itself.
+    expect(job!.id).toMatch(/^event-lives-db-e10-\d{12}$/);
     expect(job!.id).not.toBe('event-lives-db-e10-manual');
     // Cron jobs keep queue-level retention (no per-job cleanup override)
     expect(liveDataAddCalls[0].opts.removeOnComplete).toBeUndefined();

@@ -48,6 +48,8 @@ export const createEventLiveExplainsRepository = (dbInstance?: DbOrTransaction) 
           redCardsPoints: r.redCardsPoints,
           saves: r.saves,
           savesPoints: r.savesPoints,
+          defensiveContribution: r.defensiveContribution,
+          defensiveContributionPoints: r.defensiveContributionPoints,
         }));
       } catch (error) {
         logError('Failed to find event live explains by event ID', error, { eventId });
@@ -89,6 +91,8 @@ export const createEventLiveExplainsRepository = (dbInstance?: DbOrTransaction) 
           redCardsPoints: r.redCardsPoints,
           saves: r.saves,
           savesPoints: r.savesPoints,
+          defensiveContribution: r.defensiveContribution,
+          defensiveContributionPoints: r.defensiveContributionPoints,
         }));
 
         const db = await getDbInstance();
@@ -121,6 +125,8 @@ export const createEventLiveExplainsRepository = (dbInstance?: DbOrTransaction) 
               redCardsPoints: sql`excluded.red_cards_points`,
               saves: sql`excluded.saves`,
               savesPoints: sql`excluded.saves_points`,
+              defensiveContribution: sql`excluded.defensive_contribution`,
+              defensiveContributionPoints: sql`excluded.defensive_contribution_points`,
             },
           })
           .returning();

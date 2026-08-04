@@ -2,227 +2,152 @@ import { cron } from '@elysiajs/cron';
 import { Elysia } from 'elysia';
 
 import { getPostMatchResultsSlot } from '../domain/post-match-results';
+import { fixtureRepository } from '../repositories/fixtures';
 import { getCurrentEvent } from '../services/events.service';
 import { isFPLSeason, isMatchDayTime } from '../utils/conditions';
-import { fixtureRepository } from '../repositories/fixtures';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { logDebug, logInfo } from '../utils/logger';
 import { CRON_TIMEZONE } from '../utils/timezone';
-import {
-  enqueueEventLivesCacheUpdate,
-  enqueueEventLivesDbSync,
-  enqueueLiveBonusCache,
-  enqueueLiveFixtureCache,
-  enqueueLiveScoresSync,
-} from './live-data.jobs';
+import { enqueueLiveSnapshot } from './live-data.jobs';
+
+export const LIVE_SNAPSHOT_SCHEDULES = {
+  cache: {
+    name: 'live-snapshot-trigger',
+    pattern: '* * * * *',
+    persistEventLives: false,
+  },
+  persistence: {
+    name: 'live-snapshot-persistence-trigger',
+    pattern: '*/10 * * * *',
+    persistEventLives: true,
+  },
+} as const;
 
 /**
- * Live Data Cron Jobs
- *
- * Strategy:
- * - Cron triggers PRIMARY syncs (cache + DB) as background jobs
- * - PRIMARY jobs enqueue SECONDARY syncs on completion (cascade)
- * - Ensures data consistency and proper sequencing
- *
- * Jobs:
- * - event-lives-cache-update: Every 1 minute (real-time cache)
- * - event-lives-db-sync: Every 10 minutes (persistence + cascade)
- * - post-match-consolidation: 06:00, 08:00, 10:00 on match days (catch FPL overnight finalization)
- * - Secondary jobs (summary, explain, overall): Cascaded from DB sync
+ * One coordinated one-minute job replaces four independently racing live jobs.
+ * The job fetches event-live and fixtures concurrently, derives every live view
+ * from that same pair, and publishes the Redis revision atomically. The larger
+ * event-live/explain DB write is enabled every ten minutes only.
  */
-
-export async function runLiveScores() {
-  const now = new Date();
+export async function runLiveSnapshot(
+  now = new Date(),
+  persistEventLives = false,
+): Promise<unknown | null> {
   if (!(await isFPLSeason(now))) {
-    logDebug('Skipping live scores - not FPL season', { month: now.getMonth() + 1 });
-    return;
+    logDebug('Skipping live snapshot - not FPL season', { month: now.getMonth() + 1 });
+    return null;
   }
 
   const currentEvent = await getCurrentEvent();
   if (!currentEvent) {
-    logInfo('Skipping live scores - no current event');
-    return;
+    logInfo('Skipping live snapshot - no current event');
+    return null;
   }
 
   const fixtures = await fixtureRepository.findByEvent(currentEvent.id);
-
   if (!isMatchDayTime(currentEvent, fixtures, now)) {
-    logInfo('Skipping live scores - conditions not met', { eventId: currentEvent.id });
-    return;
+    logInfo('Skipping live snapshot - not match time', { eventId: currentEvent.id });
+    return null;
   }
 
-  // Sync actual match scorelines (team_h_score / team_a_score) to DB
-  // Runs every 1 min — distinct from event-lives (player fantasy points, 1-min/10-min)
-  const job = await enqueueLiveScoresSync(currentEvent.id, 'cron');
+  const job = await enqueueLiveSnapshot(currentEvent.id, 'cron', {
+    persistEventLives,
+    now,
+  });
   if (job) {
-    logInfo('Live scores job enqueued', { jobId: job.id, eventId: currentEvent.id });
-  }
-}
-
-async function runEventLivesCacheUpdate() {
-  const now = new Date();
-  if (!(await isFPLSeason(now))) {
-    logDebug('Skipping cache update - not FPL season', { month: now.getMonth() + 1 });
-    return;
-  }
-
-  const currentEvent = await getCurrentEvent();
-  if (!currentEvent) {
-    logInfo('Skipping cache update - no current event');
-    return;
-  }
-
-  const fixtures = await fixtureRepository.findByEvent(currentEvent.id);
-
-  if (!isMatchDayTime(currentEvent, fixtures, now)) {
-    logInfo('Skipping cache update - not match time', { eventId: currentEvent.id });
-    return;
-  }
-
-  // Enqueue as background job instead of direct execution
-  await enqueueEventLivesCacheUpdate(currentEvent.id, 'cron');
-  await enqueueLiveFixtureCache(currentEvent.id, 'cron');
-  await enqueueLiveBonusCache(currentEvent.id, 'cron');
-  logInfo('Cache update job enqueued', { eventId: currentEvent.id });
-}
-
-async function runEventLivesDbSync() {
-  const now = new Date();
-  if (!(await isFPLSeason(now))) {
-    logDebug('Skipping DB sync - not FPL season', { month: now.getMonth() + 1 });
-    return;
-  }
-
-  const currentEvent = await getCurrentEvent();
-  if (!currentEvent) {
-    logInfo('Skipping DB sync - no current event');
-    return;
-  }
-
-  const fixtures = await fixtureRepository.findByEvent(currentEvent.id);
-
-  if (!isMatchDayTime(currentEvent, fixtures, now)) {
-    logInfo('Skipping DB sync - not match time', { eventId: currentEvent.id });
-    return;
-  }
-
-  // Enqueue DB sync job (will trigger cascade on completion)
-  const job = await enqueueEventLivesDbSync(currentEvent.id, 'cron');
-  if (job) {
-    logInfo('DB sync job enqueued, will trigger cascade on completion', {
+    logInfo('Live snapshot job enqueued', {
       jobId: job.id,
       eventId: currentEvent.id,
+      persistEventLives,
     });
   }
+  return job;
 }
 
-// Post-match consolidation catches delayed FPL finalization (bonus points,
-// corrected scores, data_checked). Fixed morning ticks enqueue only while the
-// fixture-bounded 24-hour result window is open, including the day after GW38.
-export async function runPostMatchConsolidation() {
+/** Backward-compatible manual trigger name; the coordinated snapshot owns scores now. */
+export async function runLiveScores(): Promise<unknown | null> {
+  return runLiveSnapshot(new Date(), false);
+}
+
+// Fixed morning ticks catch delayed FPL finalization and force canonical
+// persistence even after the ordinary live polling window has closed.
+export async function runPostMatchConsolidation(): Promise<unknown | null> {
   const now = new Date();
   const currentEvent = await getCurrentEvent();
-  if (!currentEvent) {
-    return;
-  }
+  if (!currentEvent) return null;
 
   const fixtures = await fixtureRepository.findByEvent(currentEvent.id);
   const resultSlot = getPostMatchResultsSlot(currentEvent, fixtures, now);
-  if (!resultSlot) {
-    return;
-  }
+  if (!resultSlot) return null;
 
-  const job = await enqueueEventLivesDbSync(currentEvent.id, 'cron');
+  const job = await enqueueLiveSnapshot(currentEvent.id, 'cascade', {
+    persistEventLives: true,
+    jobId: `live-snapshot-e${currentEvent.id}-post-${resultSlot}`,
+  });
   if (job) {
-    logInfo('Post-match consolidation job enqueued', {
+    logInfo('Post-match live snapshot consolidation enqueued', {
       jobId: job.id,
       eventId: currentEvent.id,
       resultSlot,
     });
   }
+  return job;
 }
 
 export function registerLiveJobs(app: Elysia) {
-  return (
-    app
-      // Event lives cache update - Every 1 minute during match hours (real-time)
-      // Enqueues background job for cache-only updates
-      .use(
-        cron({
-          name: 'event-lives-cache-trigger',
-          pattern: '* * * * *',
-          timezone: CRON_TIMEZONE,
-          async run() {
-            try {
-              const now = new Date();
-              if (!(await isFPLSeason(now))) {
-                return;
-              }
-              const currentEvent = await getCurrentEvent();
-              if (!currentEvent) {
-                return;
-              }
-              const fixtures = await fixtureRepository.findByEvent(currentEvent.id);
-              if (!isMatchDayTime(currentEvent, fixtures, now)) {
-                return;
-              }
-              await executeTrackedCron('event-lives-cache-update', runEventLivesCacheUpdate);
-            } catch {
-              // Failure details are already emitted by runTrackedJob.
-            }
-          },
-        }),
-      )
-
-      // Event lives DB sync - Every 10 minutes during match hours (persistence)
-      // Enqueues background job which triggers cascade on completion
-      .use(
-        cron({
-          name: 'event-lives-db-trigger',
-          pattern: '*/10 * * * *',
-          timezone: CRON_TIMEZONE,
-          async run() {
-            try {
-              await executeTrackedCron('event-lives-db-sync', runEventLivesDbSync);
-            } catch {
-              // Failure details are already emitted by runTrackedJob.
-            }
-          },
-        }),
-      )
-
-      // Live scores - Every 1 minute during match window
-      .use(
-        cron({
-          name: 'live-scores',
-          pattern: '* * * * *',
-          timezone: CRON_TIMEZONE,
-          async run() {
-            try {
-              await executeTrackedCron('live-scores', runLiveScores);
-            } catch {
-              // Failure details are already emitted by runTrackedJob.
-            }
-          },
-        }),
-      )
-
-      // Post-match consolidation - 06:00, 08:00, 10:00 during the result window
-      // FPL finalises bonus points, corrects scores, and sets data_checked hours after matches end.
-      // This catches those overnight updates that the 10-min live job misses once isMatchDayTime ends.
-      .use(
-        cron({
-          name: 'post-match-consolidation',
-          pattern: '0 6,8,10 * * *',
-          timezone: CRON_TIMEZONE,
-          async run() {
-            try {
-              await executeTrackedCron('post-match-consolidation', runPostMatchConsolidation);
-            } catch {
-              // Failure details are already emitted by runTrackedJob.
-            }
-          },
-        }),
-      )
-  );
+  return app
+    .use(
+      cron({
+        name: LIVE_SNAPSHOT_SCHEDULES.cache.name,
+        pattern: LIVE_SNAPSHOT_SCHEDULES.cache.pattern,
+        timezone: CRON_TIMEZONE,
+        async run() {
+          try {
+            await executeTrackedCron('live-snapshot', async () => {
+              await runLiveSnapshot(new Date(), LIVE_SNAPSHOT_SCHEDULES.cache.persistEventLives);
+            });
+          } catch {
+            // Failure details are already emitted by runTrackedJob.
+          }
+        },
+      }),
+    )
+    .use(
+      cron({
+        name: LIVE_SNAPSHOT_SCHEDULES.persistence.name,
+        pattern: LIVE_SNAPSHOT_SCHEDULES.persistence.pattern,
+        timezone: CRON_TIMEZONE,
+        async run() {
+          try {
+            await executeTrackedCron('live-snapshot-persistence', async () => {
+              // Persistence intent belongs to this scheduled callback, not to
+              // its actual start minute. A delayed boundary tick still writes
+              // the PostgreSQL checkpoint and triggers its cascades.
+              await runLiveSnapshot(
+                new Date(),
+                LIVE_SNAPSHOT_SCHEDULES.persistence.persistEventLives,
+              );
+            });
+          } catch {
+            // Failure details are already emitted by runTrackedJob.
+          }
+        },
+      }),
+    )
+    .use(
+      cron({
+        name: 'post-match-consolidation',
+        pattern: '0 6,8,10 * * *',
+        timezone: CRON_TIMEZONE,
+        async run() {
+          try {
+            await executeTrackedCron('post-match-consolidation', async () => {
+              await runPostMatchConsolidation();
+            });
+          } catch {
+            // Failure details are already emitted by runTrackedJob.
+          }
+        },
+      }),
+    );
 }

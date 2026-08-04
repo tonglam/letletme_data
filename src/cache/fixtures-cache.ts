@@ -3,12 +3,31 @@ import type { Redis } from 'ioredis';
 import { logDebug, logError, logWarn } from '../utils/logger';
 import { finalizeSeasonCacheWrite, getActiveCacheSeason } from './cache-season';
 import { parseHashValues } from './hash-read';
+import { replaceHashesUnlessLiveSnapshotOwned } from './live-snapshot-ownership';
 import { redisSingleton } from './singleton';
 
 import type { TeamFixture } from '../domain/fixtures';
 import type { Fixture } from '../types';
 
 type TeamInfo = { name: string; shortName: string };
+
+function fixturesToHash(fixtures: readonly Fixture[]): Record<string, string> {
+  return Object.fromEntries(
+    fixtures.map((fixture) => [String(fixture.id), JSON.stringify(fixture)]),
+  );
+}
+
+function eventIdFromFixturesKey(key: string, season: string): number | null {
+  const suffix = key.slice(`Fixtures:${season}:`.length);
+  if (!/^\d+$/.test(suffix)) return null;
+  const eventId = Number(suffix);
+  return Number.isInteger(eventId) && eventId > 0 ? eventId : null;
+}
+
+function isLiveSnapshotStagingKey(key: string, season: string): boolean {
+  const suffix = key.slice(`Fixtures:${season}:`.length);
+  return /^\d+:staging:[^:]+$/.test(suffix);
+}
 
 async function scanKeys(redis: Redis, pattern: string): Promise<string[]> {
   const keys: string[] = [];
@@ -103,37 +122,36 @@ export const fixturesCache = {
       const redis = await redisSingleton.getClient();
       const activeSeason = season ?? (await getActiveCacheSeason());
       const key = `Fixtures:${activeSeason}:${eventId}`;
-
-      const pipeline = redis.pipeline();
-      pipeline.del(key);
-
-      if (fixtures.length > 0) {
-        const fields: Record<string, string> = {};
-        for (const fixture of fixtures) {
-          fields[fixture.id.toString()] = JSON.stringify(fixture);
-        }
-        pipeline.hset(key, fields);
-      }
-
-      await pipeline.exec();
+      const snapshotOwnedEventIds = await replaceHashesUnlessLiveSnapshotOwned(
+        redis,
+        activeSeason,
+        [{ eventId, key, fields: fixturesToHash(fixtures) }],
+      );
       await finalizeSeasonCacheWrite(activeSeason, ['Fixtures']);
-      logDebug('Fixtures cache updated by event', {
-        eventId,
-        count: fixtures.length,
-        season: activeSeason,
-      });
+      if (snapshotOwnedEventIds.has(eventId)) {
+        logDebug('Preserved snapshot-owned Fixtures cache during event refresh', {
+          eventId,
+          season: activeSeason,
+        });
+      } else {
+        logDebug('Fixtures cache updated by event', {
+          eventId,
+          count: fixtures.length,
+          season: activeSeason,
+        });
+      }
     } catch (error) {
       logError('Fixtures cache set by event error', error, { eventId });
       throw error;
     }
   },
 
-  async set(fixtures: Fixture[], season?: string): Promise<void> {
+  async set(fixtures: Fixture[], season?: string): Promise<Set<number>> {
     try {
       const redis = await redisSingleton.getClient();
       const activeSeason = season ?? (await getActiveCacheSeason());
 
-      const fixturesByEvent = new Map<number | string, Fixture[]>();
+      const fixturesByEvent = new Map<number, Fixture[]>();
       const unscheduled: Fixture[] = [];
 
       for (const fixture of fixtures) {
@@ -147,31 +165,42 @@ export const fixturesCache = {
         }
       }
 
-      const pipeline = redis.pipeline();
       const pattern = `Fixtures:${activeSeason}:*`;
       const existingKeys = await scanKeys(redis, pattern);
+      const eventIds = new Set(fixturesByEvent.keys());
+      const nonEventKeys: string[] = [];
       for (const key of existingKeys) {
-        pipeline.del(key);
-      }
-
-      for (const [eventId, eventFixtures] of fixturesByEvent) {
-        const key = `Fixtures:${activeSeason}:${eventId}`;
-        const fields: Record<string, string> = {};
-        for (const fixture of eventFixtures) {
-          fields[fixture.id.toString()] = JSON.stringify(fixture);
+        const existingEventId = eventIdFromFixturesKey(key, activeSeason);
+        if (existingEventId === null) {
+          // A live publisher can be between stage and atomic swap while this
+          // scan runs if an external lock disappears. Never treat its bounded,
+          // uniquely named staging hash as malformed legacy cache data.
+          if (!isLiveSnapshotStagingKey(key, activeSeason)) nonEventKeys.push(key);
+        } else {
+          eventIds.add(existingEventId);
         }
-        pipeline.hset(key, fields);
       }
+      const replacements = [...eventIds]
+        .sort((a, b) => a - b)
+        .map((eventId) => ({
+          eventId,
+          key: `Fixtures:${activeSeason}:${eventId}`,
+          fields: fixturesToHash(fixturesByEvent.get(eventId) ?? []),
+        }));
+      const snapshotOwnedEventIds = await replaceHashesUnlessLiveSnapshotOwned(
+        redis,
+        activeSeason,
+        replacements,
+      );
 
+      // Unscheduled and any malformed legacy suffixes are outside the
+      // event-scoped snapshot contract and can be rebuilt normally.
+      const pipeline = redis.pipeline();
+      for (const key of nonEventKeys) pipeline.del(key);
       if (unscheduled.length > 0) {
         const key = `Fixtures:${activeSeason}:unscheduled`;
-        const fields: Record<string, string> = {};
-        for (const fixture of unscheduled) {
-          fields[fixture.id.toString()] = JSON.stringify(fixture);
-        }
-        pipeline.hset(key, fields);
+        pipeline.hset(key, fixturesToHash(unscheduled));
       }
-
       await pipeline.exec();
 
       // Write FixturesByTeam:{season}:{teamId} — team IDs and names from Team:{season}
@@ -219,9 +248,11 @@ export const fixturesCache = {
         scheduled: fixtures.length - unscheduled.length,
         unscheduled: unscheduled.length,
         events: fixturesByEvent.size,
+        snapshotOwnedEvents: [...snapshotOwnedEventIds].sort((a, b) => a - b),
         teams: fixturesByTeamCount,
         season: activeSeason,
       });
+      return snapshotOwnedEventIds;
     } catch (error) {
       logError('Fixtures cache set error', error);
       throw error;
@@ -234,12 +265,26 @@ export const fixturesCache = {
       const season = await getActiveCacheSeason();
       const pattern = `Fixtures:${season}:*`;
       const keys = await scanKeys(redis, pattern);
+      const replacements = keys.flatMap((key) => {
+        const eventId = eventIdFromFixturesKey(key, season);
+        return eventId === null ? [] : [{ eventId, key, fields: {} }];
+      });
+      const nonEventKeys = keys.filter(
+        (key) =>
+          eventIdFromFixturesKey(key, season) === null && !isLiveSnapshotStagingKey(key, season),
+      );
+      const snapshotOwnedEventIds = await replaceHashesUnlessLiveSnapshotOwned(
+        redis,
+        season,
+        replacements,
+      );
+      if (nonEventKeys.length > 0) await redis.del(...nonEventKeys);
 
-      if (keys.length > 0) {
-        await redis.del(...keys);
-      }
-
-      logDebug('Fixtures cache cleared', { season, keysCleared: keys.length });
+      logDebug('Fixtures cache cleared outside snapshot ownership', {
+        season,
+        keysCleared: keys.length - snapshotOwnedEventIds.size,
+        snapshotOwnedEvents: [...snapshotOwnedEventIds].sort((a, b) => a - b),
+      });
     } catch (error) {
       logError('Fixtures cache clear error', error);
       throw error;
@@ -251,8 +296,15 @@ export const fixturesCache = {
       const redis = await redisSingleton.getClient();
       const season = await getActiveCacheSeason();
       const key = `Fixtures:${season}:${eventId}`;
-      await redis.del(key);
-      logDebug('Fixtures cache cleared by event', { eventId, season });
+      const snapshotOwnedEventIds = await replaceHashesUnlessLiveSnapshotOwned(redis, season, [
+        { eventId, key, fields: {} },
+      ]);
+      logDebug(
+        snapshotOwnedEventIds.has(eventId)
+          ? 'Preserved snapshot-owned Fixtures cache during clear'
+          : 'Fixtures cache cleared by event',
+        { eventId, season },
+      );
     } catch (error) {
       logError('Fixtures cache clear by event error', error, { eventId });
       throw error;
@@ -268,6 +320,26 @@ export const fixturesCache = {
       logDebug('Fixtures cache cleared for unscheduled', { season });
     } catch (error) {
       logError('Fixtures cache clear unscheduled error', error);
+      throw error;
+    }
+  },
+
+  async removeUnscheduledFixtureIds(fixtureIds: readonly number[]): Promise<void> {
+    try {
+      const validIds = [...new Set(fixtureIds.filter((id) => Number.isInteger(id) && id > 0))];
+      if (validIds.length === 0) return;
+      const redis = await redisSingleton.getClient();
+      const season = await getActiveCacheSeason();
+      const key = `Fixtures:${season}:unscheduled`;
+      await redis.hdel(key, ...validIds.map(String));
+      logDebug('Removed reassigned fixtures from unscheduled cache', {
+        season,
+        fixtureIds: validIds,
+      });
+    } catch (error) {
+      logError('Fixtures cache remove unscheduled fields error', error, {
+        count: fixtureIds.length,
+      });
       throw error;
     }
   },

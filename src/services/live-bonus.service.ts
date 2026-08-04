@@ -1,5 +1,10 @@
 import { eq } from 'drizzle-orm';
-import { liveBonusCache, liveBonusV2Cache, liveFixturesCache } from '../cache/operations';
+import {
+  liveBonusCache,
+  liveBonusV2Cache,
+  liveFixturesCache,
+  liveSnapshotCache,
+} from '../cache/operations';
 import { eventLive, players } from '../db/schemas/index.schema';
 import { getDb } from '../db/singleton';
 import {
@@ -24,12 +29,20 @@ type LiveBonusV2CacheWriter = {
   set: (eventId: EventId, byTeam: LiveBonusByTeam) => Promise<void>;
 };
 
+type FixtureDerivativeSnapshotCoordinator = {
+  refreshFixtureDerivatives: (
+    eventId: EventId,
+    fixtures: readonly Fixture[],
+    byTeam: LiveBonusByTeam,
+  ) => Promise<unknown>;
+};
+
 type FixtureBonusSource = Pick<
   Fixture,
   'finished' | 'finishedProvisional' | 'started' | 'stats' | 'teamA' | 'teamH'
 >;
 
-function serializeBonusByTeam(source: Map<TeamId, Map<number, number>>): LiveBonusByTeam {
+export function serializeBonusByTeam(source: Map<TeamId, Map<number, number>>): LiveBonusByTeam {
   const result: Record<string, Record<string, number>> = {};
   for (const [teamId, teamBonus] of source.entries()) {
     const bonusObj: Record<string, number> = {};
@@ -50,7 +63,10 @@ function serializeBonusByTeam(source: Map<TeamId, Map<number, number>>): LiveBon
  */
 export async function syncLiveBonusV2Cache(
   eventId: EventId,
-  options: { fixtures?: readonly FixtureBonusSource[]; cache?: LiveBonusV2CacheWriter } = {},
+  options: {
+    fixtures?: readonly FixtureBonusSource[];
+    cache?: LiveBonusV2CacheWriter;
+  } = {},
 ): Promise<{ eventId: EventId; teamCount: number }> {
   const fixtures = options.fixtures ?? (await fixtureRepository.findByEvent(eventId));
   const byTeam = serializeBonusByTeam(computeFixtureSummedBonusByTeam(fixtures));
@@ -58,6 +74,28 @@ export async function syncLiveBonusV2Cache(
 
   const teamCount = Object.keys(byTeam).length;
   logInfo('Fixture-scoped live bonus cache sync completed', { eventId, teamCount });
+  return { eventId, teamCount };
+}
+
+/**
+ * Reconcile every fixture-derived source hash against snapshot ownership.
+ * Fixture refreshes use this path so score/status/kickoff corrections cannot
+ * leave otherwise-valid metadata pointing at stale derived views.
+ */
+export async function syncFixtureDerivedSnapshotCache(
+  eventId: EventId,
+  fixtures: readonly Fixture[],
+  coordinator: FixtureDerivativeSnapshotCoordinator = liveSnapshotCache,
+): Promise<{ eventId: EventId; teamCount: number }> {
+  const byTeam = serializeBonusByTeam(computeFixtureSummedBonusByTeam(fixtures));
+  await coordinator.refreshFixtureDerivatives(eventId, fixtures, byTeam);
+
+  const teamCount = Object.keys(byTeam).length;
+  logInfo('Fixture-derived snapshot cache reconciliation completed', {
+    eventId,
+    fixtureCount: fixtures.length,
+    teamCount,
+  });
   return { eventId, teamCount };
 }
 

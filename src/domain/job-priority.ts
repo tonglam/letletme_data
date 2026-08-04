@@ -39,6 +39,7 @@ export type EntrySyncPriorityJobName =
   | 'entry-results';
 
 export type LiveDataPriorityJobName =
+  | 'live-snapshot'
   | 'event-lives-cache'
   | 'event-lives-db'
   | 'event-live-summary'
@@ -82,6 +83,7 @@ export function getEntrySyncJobPriority(jobName: EntrySyncPriorityJobName): Muta
 
 export function getLiveDataJobPriority(jobName: LiveDataPriorityJobName): MutationPriorityTier {
   switch (jobName) {
+    case 'live-snapshot':
     case 'event-lives-cache':
     case 'event-lives-db':
     case 'event-live-explain':

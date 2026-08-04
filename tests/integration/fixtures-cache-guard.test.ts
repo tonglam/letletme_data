@@ -4,8 +4,15 @@ assertIntegrationEnv();
 
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 
+import { resetActiveSeasonMemo } from '../../src/cache/cache-season';
+import { eventLivesCache } from '../../src/cache/event-lives-cache';
 import { fixturesCache } from '../../src/cache/fixtures-cache';
+import { liveBonusCache, liveBonusV2Cache } from '../../src/cache/live-bonus-cache';
+import { liveFixturesCache } from '../../src/cache/live-fixtures-cache';
+import { liveSnapshotCache } from '../../src/cache/live-snapshot-cache';
 import { redisSingleton } from '../../src/cache/singleton';
+import type { EventLive } from '../../src/domain/event-lives';
+import type { LiveFixturesByTeam } from '../../src/domain/live-fixtures';
 import type { Fixture } from '../../src/types';
 
 /**
@@ -68,6 +75,7 @@ afterAll(async () => {
   } else {
     await redis.del('Season:active');
   }
+  resetActiveSeasonMemo();
 });
 
 describe('FixturesByTeam empty-teams guard (FP-12)', () => {
@@ -117,5 +125,114 @@ describe('FixturesByTeam empty-teams guard (FP-12)', () => {
 
     const teamThree = await redis.hgetall(`FixturesByTeam:${SEASON}:3`);
     expect(JSON.parse(teamThree['10'])).toMatchObject({ againstTeamId: 4 });
+  });
+
+  test('full refresh and clear never delete in-flight live snapshot staging hashes', async () => {
+    const redis = await redisSingleton.getClient();
+    const stagingKey = `Fixtures:${SEASON}:10:staging:fixture-race-regression`;
+    await redis.hset(stagingKey, '101', '{"staged":true}');
+    await redis.expire(stagingKey, 900);
+
+    await fixturesCache.set(FIXTURES, SEASON);
+    expect(await redis.hget(stagingKey, '101')).toBe('{"staged":true}');
+
+    await fixturesCache.clear();
+    expect(await redis.hget(stagingKey, '101')).toBe('{"staged":true}');
+  });
+
+  test('removing one reassigned fixture preserves other unscheduled fixtures', async () => {
+    const redis = await redisSingleton.getClient();
+    await redis.set('Season:active', SEASON);
+    resetActiveSeasonMemo();
+    await redis.hset(
+      `Fixtures:${SEASON}:unscheduled`,
+      '90101',
+      'reassigned',
+      '90102',
+      'still-unscheduled',
+    );
+
+    await fixturesCache.removeUnscheduledFixtureIds([90101, 90101, -1]);
+
+    expect(await redis.hget(`Fixtures:${SEASON}:unscheduled`, '90101')).toBeNull();
+    expect(await redis.hget(`Fixtures:${SEASON}:unscheduled`, '90102')).toBe('still-unscheduled');
+  });
+
+  test('full refreshes and compatibility helpers preserve snapshot-owned event hashes', async () => {
+    const redis = await redisSingleton.getClient();
+    await redis.set('Season:active', SEASON);
+    await redis.set(
+      `LiveSnapshotMeta:${SEASON}:10`,
+      JSON.stringify({
+        schemaVersion: 1,
+        season: SEASON,
+        eventId: 10,
+        revision: 'a'.repeat(24),
+        state: 'settled',
+        publishedAt: '2026-08-03T00:00:00.000Z',
+        checkedAt: '2026-08-03T00:00:00.000Z',
+        eventLiveCount: 1,
+        fixtureCount: 1,
+        fixtureTeamCount: 1,
+        bonusTeamCount: 1,
+      }),
+    );
+
+    const sentinels = {
+      [`Fixtures:${SEASON}:10`]: ['snapshot-fixture', 'fixture-v1'],
+      [`EventLive:${SEASON}:10`]: ['snapshot-player', 'event-live-v1'],
+      [`LiveFixture:${SEASON}:10`]: ['snapshot-team', 'live-fixture-v1'],
+      [`LiveFixtureV2:${SEASON}:10`]: ['snapshot-team', 'live-fixture-v2-v1'],
+      [`LiveBonus:${SEASON}:10`]: ['snapshot-team', 'live-bonus-v1'],
+      [`LiveBonusV2:${SEASON}:10`]: ['snapshot-team', 'live-bonus-v2-v1'],
+    } as const;
+    for (const [key, [field, value]] of Object.entries(sentinels)) {
+      await redis.del(key);
+      await redis.hset(key, field, value);
+    }
+
+    const refreshedEvent10 = buildFixture(201, 10, 1, 2);
+    const refreshedEvent11 = buildFixture(202, 11, 3, 4);
+    const snapshotOwnedEventIds = await fixturesCache.set(
+      [refreshedEvent10, refreshedEvent11],
+      SEASON,
+    );
+    expect([...snapshotOwnedEventIds]).toEqual([10]);
+    await eventLivesCache.set(10, [{ eventId: 10, elementId: 1 } as EventLive]);
+    await liveFixturesCache.set(10, {
+      '1': { Not_Start: [], Playing: [], Finished: [] },
+    } as LiveFixturesByTeam);
+    await liveBonusCache.set(10, { '1': { '1': 3 } });
+    await liveBonusV2Cache.set(10, { '1': { '1': 3 } });
+    expect(Object.keys(await redis.hgetall(`Fixtures:${SEASON}:11`))).toEqual(['202']);
+    await Promise.all([
+      fixturesCache.clear(),
+      liveFixturesCache.clear(10),
+      liveBonusCache.clear(10),
+      liveBonusV2Cache.clear(10),
+    ]);
+
+    for (const [key, [field, value]] of Object.entries(sentinels)) {
+      expect(await redis.hget(key, field)).toBe(value);
+      expect(await redis.hlen(key)).toBe(1);
+    }
+    expect(await redis.exists(`Fixtures:${SEASON}:11`)).toBe(0);
+
+    // A fixture event move retires metadata and every coordinated view in one
+    // Redis script. Ordinary writers can rebuild the now-unmanaged cache.
+    expect(await liveSnapshotCache.retire(10)).toEqual({ eventId: 10, removedKeys: 7 });
+    for (const prefix of [
+      'Fixtures',
+      'EventLive',
+      'LiveFixture',
+      'LiveFixtureV2',
+      'LiveBonus',
+      'LiveBonusV2',
+      'LiveSnapshotMeta',
+    ]) {
+      expect(await redis.exists(`${prefix}:${SEASON}:10`)).toBe(0);
+    }
+    await fixturesCache.setByEvent(10, [refreshedEvent10], SEASON);
+    expect(Object.keys(await redis.hgetall(`Fixtures:${SEASON}:10`))).toEqual(['201']);
   });
 });

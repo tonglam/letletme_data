@@ -23,7 +23,7 @@ describe('Live Data Jobs Integration', () => {
   });
 
   describe('Job Enqueueing', () => {
-    it('should enqueue event lives cache update job', async () => {
+    it('should enqueue a cache snapshot on the old-worker-compatible wire name', async () => {
       const job = await enqueueEventLivesCacheUpdate(TEST_EVENT_ID, 'manual');
       if (!job) throw new Error('Expected job to be enqueued');
 
@@ -32,10 +32,11 @@ describe('Live Data Jobs Integration', () => {
       expect(job.data).toMatchObject({
         eventId: TEST_EVENT_ID,
         source: 'manual',
+        persistEventLives: false,
       });
     });
 
-    it('should enqueue event lives DB sync job', async () => {
+    it('should enqueue a persistent snapshot on the old-worker-compatible wire name', async () => {
       const job = await enqueueEventLivesDbSync(TEST_EVENT_ID, 'manual');
       if (!job) throw new Error('Expected job to be enqueued');
 
@@ -44,6 +45,7 @@ describe('Live Data Jobs Integration', () => {
       expect(job.data).toMatchObject({
         eventId: TEST_EVENT_ID,
         source: 'manual',
+        persistEventLives: true,
       });
     });
 

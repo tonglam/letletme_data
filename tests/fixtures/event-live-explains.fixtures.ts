@@ -39,6 +39,7 @@ export const rawExplainElementsFixture: RawFPLEventLiveElement[] = [
           { identifier: 'minutes', value: 90, points: 2, points_modification: -1 },
           { identifier: 'goals_scored', value: 1, points: 4 },
           { identifier: 'assists', value: 1, points: 3 },
+          { identifier: 'defensive_contribution', value: 10, points: 2 },
           { identifier: 'bonus', value: 0, points: 1, points_modification: 1 },
         ],
       },
@@ -115,6 +116,8 @@ export const transformedExplainsFixture: EventLiveExplain[] = [
     redCardsPoints: 0,
     saves: 0,
     savesPoints: 0,
+    defensiveContribution: 10,
+    defensiveContributionPoints: 2,
   },
   {
     eventId: 99,
@@ -142,5 +145,7 @@ export const transformedExplainsFixture: EventLiveExplain[] = [
     redCardsPoints: 0,
     saves: 0,
     savesPoints: 0,
+    defensiveContribution: 0,
+    defensiveContributionPoints: 0,
   },
 ];

@@ -101,17 +101,17 @@ export function resolveMutationScopes(input: MutationScopeInput): string[] {
 
   if (queue === 'live-data') {
     switch (jobName) {
+      case 'live-snapshot':
       case 'event-lives-cache':
       case 'event-lives-db':
-        return [withEvent('event-live', eventId)];
-      case 'event-live-explain':
-        return [withEvent('event-live', eventId), withEvent('event-live-explain', eventId)];
       case 'live-fixture-cache':
-        return [withEvent('event-live', eventId), withEvent('live-fixture', eventId)];
       case 'live-bonus-cache':
-        return [withEvent('event-live', eventId), withEvent('live-bonus', eventId)];
       case 'live-scores':
-        return [withEvent('live-scores', eventId)];
+        // New enqueues use live-snapshot directly; the legacy names remain for
+        // rolling-deploy queue entries and execute the same coordinated writer.
+        return ['data-core:fixtures', withEvent('live-snapshot', eventId)];
+      case 'event-live-explain':
+        return [withEvent('live-snapshot', eventId), withEvent('event-live-explain', eventId)];
       case 'event-live-summary':
         return ['event-live-summary:season'];
       case 'event-overall-result':

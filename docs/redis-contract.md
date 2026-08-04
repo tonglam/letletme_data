@@ -1,6 +1,6 @@
 # Redis Key Contract — letletme_data
 
-**Status:** authoritative inventory of every Redis key this system writes, as of 2026-08-01.
+**Status:** authoritative inventory of every Redis key this system writes, as of 2026-08-04.
 **Audience:** anyone changing cache code, and every external system that reads this Redis.
 
 ## Ground rules (binding)
@@ -13,7 +13,7 @@
 3. **Consumer-facing deletions need sign-off** (broader retention, full
    inventory wipe). Prefer manual runbooks. **Exception (current code):** when
    `Season:active` advances, entity writers auto-`DEL` stale keys for the
-   prefixes they own — see §10. That is documented behavior, not a license to
+   prefixes they own — see §11. That is documented behavior, not a license to
    delete other keys or invent new cleanup jobs.
 4. When you change anything on this page, update this document in the same PR.
 
@@ -32,16 +32,18 @@ are `-1` (no expiry) — data is refreshed **on write**, never expired.
 | `Player:{season}` | hash | `elementId` | Domain `Player` | players sync |
 | `PlayerStat:{season}` | hash | `elementId` | Domain `PlayerStat` | player-stats sync (**see §5**) |
 | `EntryInfo:{season}` | hash | `entryId` | Domain `EntryInfo` | entry-info sync |
-| `Fixtures:{season}:{eventId}` | hash | `fixtureId` | Domain `EventFixture` | fixtures sync |
+| `Fixtures:{season}:{eventId}` | hash | `fixtureId` | Domain `EventFixture` | fixtures sync; coordinated live snapshot during match windows |
 | `Fixtures:{season}:unscheduled` | hash | `fixtureId` | Domain `EventFixture` | fixtures sync |
 | `FixturesByTeam:{season}:{teamId}` | hash | `eventId` | Team-fixture view (**see §6**) | fixtures sync |
-| `EventLive:{season}:{eventId}` | hash | `elementId` | Domain `EventLive` | live-data sync |
-| `EventLiveExplain:{season}:{eventId}` | hash | `elementId` | Domain `EventLiveExplain` | live explain sync |
+| `EventLive:{season}:{eventId}` | hash | `elementId` | Domain `EventLive` | coordinated live snapshot; legacy manual live-data sync |
+| `EventLiveExplain:{season}:{eventId}` | hash | `elementId` | Frozen legacy explain shape through `savesPoints`; defensive-contribution properties are deliberately omitted | live explain sync |
+| `EventLiveExplainV2:{season}:{eventId}` | hash | `elementId` | Complete Domain `EventLiveExplain`, including `defensiveContribution` and `defensiveContributionPoints` | live explain sync |
 | `EventLiveSummary:{season}:{eventId}` | hash | `elementId` | Domain `EventLiveSummary` | live summary sync |
 | `EventOverallResult:{season}` | hash | `eventId` | Overall-result payload incl. chip data | overall-result sync |
-| `LiveFixture:{season}:{eventId}` | hash | `teamId` | `LiveFixtureByStatus` JSON | live-fixture cache job |
-| `LiveBonus:{season}:{eventId}` | hash | `teamId` | `{ [elementId]: bonus }` JSON | live-bonus cache job |
-| `LiveBonusV2:{season}:{eventId}` | hash | `teamId` | `{ [elementId]: fixture-summed bonus }` JSON | live-bonus cache job |
+| `LiveFixture:{season}:{eventId}` | hash | `teamId` | Frozen `LiveFixtureByStatus` JSON | coordinated live snapshot; legacy manual cache job |
+| `LiveFixtureV2:{season}:{eventId}` | hash | `teamId` | `LiveFixtureByStatusV2` JSON; every fixture includes `fixtureId` | coordinated live snapshot |
+| `LiveBonus:{season}:{eventId}` | hash | `teamId` | Frozen `{ [elementId]: bonus }` JSON | coordinated live snapshot; legacy manual cache job |
+| `LiveBonusV2:{season}:{eventId}` | hash | `teamId` | `{ [elementId]: fixture-summed bonus }` JSON | coordinated live snapshot; legacy manual cache job |
 
 `{season}` is the FPL season short code, e.g. `2526` (2025/26). The active
 season comes from `Season:active` (§2) — writers resolve it at write time via
@@ -54,6 +56,7 @@ error; readers and writers never substitute a calendar-derived season.
 |---|---|---|---|
 | `Season:active` | string | season code, e.g. `2526` | Single source of truth for which `{season}` the entity hashes use. Set when a newer season is detected from events/fixtures. |
 | `event:current` | string | Domain `Event` JSON | Denormalized "current gameweek" for hot reads. Refreshed by `events-cache` and the `event-current-refresh` ops trigger; derived from the `Event:{season}` hash. |
+| `LiveSnapshotMeta:{season}:{eventId}` | string | `LiveSnapshotMeta` JSON | Revision/freshness pointer for the six coordinated live hashes; no TTL. See §7. |
 
 ## 3. Ops / job-marker keys (internal)
 
@@ -103,7 +106,129 @@ fixtures. If `Team:{season}` is empty (fixtures-before-teams sync order), it
 **skips** the delete+rebuild and logs a warning so ordering cannot wipe the
 view; existing keys stay intact until a later sync with teams present.
 
-## 7. Mutation locks (internal)
+## 7. Coordinated live snapshot
+
+During an actual match window, one `live-snapshot` job fetches FPL event-live
+and fixture responses concurrently and derives these views from that same
+accepted upstream pair:
+
+- `EventLive:{season}:{eventId}`
+- `Fixtures:{season}:{eventId}`
+- `LiveFixture:{season}:{eventId}` (frozen compatibility shape)
+- `LiveFixtureV2:{season}:{eventId}` (fixture-safe additive shape)
+- `LiveBonus:{season}:{eventId}` (frozen compatibility calculation)
+- `LiveBonusV2:{season}:{eventId}` (fixture-scoped calculation)
+
+Before deriving any view, the writer requires both upstream identity sets to be
+complete: fixture IDs must match the fixtures persisted for that event, and
+event-live element IDs must match the loaded player baseline. Missing,
+unexpected, duplicate, mixed-event, or partially transformed data rejects the
+whole poll. This prevents a transient truncated FPL response from becoming a
+smaller but internally self-consistent published snapshot.
+
+The writer builds uniquely named staging hashes, verifies every field count,
+then validates and publishes all six views plus `LiveSnapshotMeta` in one
+atomic Lua script. This prevents a partial writer commit: one Redis command sees
+the complete previous revision or the complete next revision, never a
+delete-first gap or independently timed live jobs. It does **not** make several
+consumer commands atomic; publication can occur between two `HGETALL`/`HMGET`
+calls. Unlike a Redis `MULTI`/`EXEC` runtime command error, a missing staging
+key fails the script before any published key changes. Empty bonus views
+deliberately delete the old bonus hash inside the same script; the four required
+views refuse empty publication.
+
+Every event refresh also holds `pg_advisory_xact_lock(namespace, eventId)` for
+the complete fetch, validation, PostgreSQL persistence, and Redis publication
+flow. This PostgreSQL-owned lock is mandatory and survives Redis lock expiry or
+configuration changes; different events remain parallel. After the lock is
+held, PostgreSQL `clock_timestamp()` supplies the shared `checkedAt` ordering
+token before the upstream requests begin, so host clock skew cannot make a
+newer serialized poll appear older. As a second fence, the Redis publisher
+compares that token both before staging and inside the commit script. Lua honors
+only metadata that satisfies the complete schema and canonical timestamp shape;
+malformed JSON values are replaced rather than becoming permanent fences.
+
+Consumers that combine two or more live views MUST use this retry protocol:
+
+1. Read and validate `LiveSnapshotMeta` immediately before the first live-view
+   command.
+2. Read every required view and validate its fields/cardinality against the
+   metadata counts. A required view may not fall back independently.
+3. Read metadata fresh again after the final live-view command.
+4. Accept the calculation only when both metadata reads exist and have the same
+   revision. If the revision advanced, discard every value and retry the whole
+   calculation once from fresh metadata.
+5. If metadata disappears or becomes malformed, a view is incomplete, sibling
+   roots finish on different revisions, or publication advances again during
+   the retry, discard every Redis candidate and run the whole event calculation
+   from one PostgreSQL fallback mode. Never mix a DB fixture with Redis live or
+   bonus rows.
+
+`letletme-graphql` implements this contract in its live snapshot coordinator,
+including a sibling-root barrier before GraphQL exposes any candidate. Writer
+or reader changes to this protocol must update and test both repositories.
+The old `event-lives-cache`, `event-lives-db`, `live-fixture-cache`,
+`live-bonus-cache`, and `live-scores` queue names are compatibility aliases:
+new calls enqueue `live-snapshot`, and workers route any old waiting entries
+through the same complete publisher. No supported job may replace one published
+live view independently while snapshot metadata exists.
+This ownership boundary is also enforced inside the compatibility cache
+helpers: replacing or clearing `Fixtures`, `EventLive`, `LiveFixture`,
+`LiveBonus`, or `LiveBonusV2` performs an atomic metadata-existence check and
+leaves the hash untouched when `LiveSnapshotMeta:{season}:{eventId}` exists.
+The daily/full fixture refresh still upserts PostgreSQL, rebuilds
+`FixturesByTeam`, and refreshes events without snapshot metadata, but preserves
+all snapshot-owned event hashes. Only the coordinated publisher (or explicit
+season cleanup that removes metadata and its views together) may change them.
+If FPL moves a fixture to a different event, either an event-specific or full
+fixture sync compares the accepted fixture identities with their prior database
+ownership. Fixture syncs first enter a mandatory global advisory lane, then
+take every prior and destination event lock in numeric order. While those locks
+are held, the writer atomically deletes `LiveSnapshotMeta` plus all six
+coordinated views before changing database ownership. Readers
+therefore observe either the old complete snapshot or a complete miss and use
+the documented PostgreSQL fallback; they never consume a stale partial event.
+Retirement-before-upsert also keeps retries safe: a Redis failure leaves the
+old database owner discoverable, while a later database failure leaves only a
+safe cache miss that the next snapshot can rebuild.
+When a fixture becomes unscheduled, its nullable PostgreSQL `event_id` is also
+set to `NULL` before scheduled rows are upserted. The retired event therefore
+cannot keep the moved fixture in its next expected-identity baseline.
+Transient staging keys use `{target}:staging:{uuid}`, expire after fifteen
+minutes if a worker is terminated, and are deleted on every success or handled
+failure. The atomic rename removes that temporary TTL from published hashes;
+season rollover is the final recovery cleanup.
+
+`LiveSnapshotMeta` is JSON with this additive contract:
+
+| Property | Meaning |
+|---|---|
+| `schemaVersion` | Integer contract version; currently `1` |
+| `season`, `eventId` | Snapshot scope |
+| `revision` | First 24 hexadecimal characters of a deterministic SHA-256 over all six view contents |
+| `state` | `scheduled`, `live`, or `settled` |
+| `publishedAt` | When football content last changed or a missing required view was repaired |
+| `checkedAt` | When the upstream pair was last accepted, including no-change polls |
+| `eventLiveCount`, `fixtureCount`, `fixtureTeamCount`, `bonusTeamCount` | Bounded completeness/diagnostic counts |
+
+No live hash or metadata key expires. A revision-identical poll verifies the
+exact published hash contents (not only cardinality), updates only `checkedAt`,
+and does not rewrite the large hashes unless an independent compatibility
+writer damaged a view. When football content
+changes, fixture rows (roughly ten per event) are persisted after staging
+validation and before the atomic Redis swap; a failed DB write therefore leaves
+the old revision published and remains retryable. The much larger event-live
+and explain rows are persisted every ten minutes and during post-match
+consolidation. PostgreSQL remains canonical recovery/history data; Redis is the
+low-latency coherent read model.
+
+The one-minute job owns the optional Redis mutation scope
+`live-snapshot:event:{eventId}`. Legacy live jobs share that scope and remain
+only as recovery compatibility paths; normal cron scheduling must not run them
+in parallel. Correctness does not depend on this expiring lease: the mandatory
+PostgreSQL advisory lock described above is the final per-event serializer.
+
+## 8. Mutation locks (internal)
 
 | Key pattern | Type | Notes |
 |---|---|---|
@@ -122,7 +247,7 @@ Tournament result cascades also use short-lived internal coordination keys:
 These are worker coordination state, not consumer data. They expire
 automatically and must not be included in season cleanup.
 
-## 8. BullMQ queue keys (internal)
+## 9. BullMQ queue keys (internal)
 
 BullMQ stores queue state under `bull:{queueName}:*` on the **queue Redis**
 (`QUEUE_REDIS_*`, falling back to `REDIS_*`). Queue names: `data-sync`,
@@ -137,14 +262,14 @@ ticks. Failed deterministic jobs are removed so a later tick can retry the same
 slot. This retention applies only to BullMQ job state; it does not change the
 entity-key retention rules above.
 
-## 9. Consumers
+## 10. Consumers
 
 | Consumer | Keys read | Contact/notes |
 |---|---|---|
-| `letletme-graphql` | Positive entity hashes, `Season:active`, `event:current`, `LiveBonus*`, `PlayerValue:*` | Public read API; owns only `gql:v2:*` shaped/negative caches plus the coordinated `PlayerValueMissing:*` marker. |
+| `letletme-graphql` | Positive entity hashes, `Season:active`, `event:current`, `LiveSnapshotMeta:*`, `LiveFixtureV2:*`, `LiveBonus*`, `PlayerValue:*` | Public read API; owns only `gql:v2:*` shaped/negative caches plus the coordinated `PlayerValueMissing:*` marker. |
 | Data API and workers | All Data-owned hashes, mutation locks, BullMQ keys | Writer/control plane in this repository. |
 
-## 10. Season rollover
+## 11. Season rollover
 
 ### Automatic today (when `Season:active` advances)
 
@@ -162,16 +287,19 @@ The automatic rollover prefixes are:
 | `Event` | `EventLive` |
 | `Team` | `EventLiveSummary` |
 | `Player` | `EventLiveExplain` |
+|  | `EventLiveExplainV2` |
 | `Phase` | `LiveFixture` |
 | `Fixtures` | `LiveBonus` |
 | `FixturesByTeam` | `LiveBonusV2` |
+|  | `LiveFixtureV2` |
+|  | `LiveSnapshotMeta` |
 |  | `EventOverallResult` |
 |  | `EntryInfo` |
 |  | `PlayerStat` |
 
 The first core cache write that advances `Season:active` therefore removes
-prior-season keys for all fifteen families in one pass, even if that family is
-not part of the current write. This is **not** a full Redis wipe.
+prior-season keys for all eighteen families in one pass, even if that family
+is not part of the current write. This is **not** a full Redis wipe.
 
 ### Not auto-deleted
 
@@ -208,8 +336,8 @@ redis-cli HLEN Player:<new-season>     # > 0
 ```bash
 OLD=<old-season>   # e.g. 2526
 for p in Event Team Player Phase PlayerStat EntryInfo Fixtures FixturesByTeam \
-         EventLive EventLiveExplain EventLiveSummary EventOverallResult \
-         LiveFixture LiveBonus LiveBonusV2; do
+         EventLive EventLiveExplain EventLiveExplainV2 EventLiveSummary EventOverallResult \
+         LiveFixture LiveFixtureV2 LiveBonus LiveBonusV2 LiveSnapshotMeta; do
   echo "$p: $(redis-cli --scan --pattern "$p:$OLD*" | wc -l)"
 done
 ```
@@ -218,8 +346,8 @@ done
 
 - [ ] `Season:active` points at the new season and new-season hashes are
       populated (Step 1).
-- [ ] Every consumer in §9 has confirmed it no longer reads `<old-season>`
-      keys. Until §9 is filled in, that means **Tong explicitly approves the
+- [ ] Every consumer in §10 has confirmed it no longer reads `<old-season>`
+      keys. Until §10 is filled in, that means **Tong explicitly approves the
       deletion** — all keys are treated as externally consumed.
 - [ ] The old season's tournaments/leagues have fully concluded (no late
       entry-sync or tournament-result jobs still reading old-season live
@@ -242,16 +370,19 @@ redis-cli --scan --pattern "FixturesByTeam:$OLD:*"   | xargs -r redis-cli DEL
 redis-cli --scan --pattern "EntryInfo:$OLD"          | xargs -r redis-cli DEL
 redis-cli --scan --pattern "EventLive:$OLD:*"        | xargs -r redis-cli DEL
 redis-cli --scan --pattern "EventLiveExplain:$OLD:*" | xargs -r redis-cli DEL
+redis-cli --scan --pattern "EventLiveExplainV2:$OLD:*" | xargs -r redis-cli DEL
 redis-cli --scan --pattern "EventLiveSummary:$OLD:*" | xargs -r redis-cli DEL
 redis-cli --scan --pattern "EventOverallResult:$OLD" | xargs -r redis-cli DEL
 redis-cli --scan --pattern "LiveFixture:$OLD:*"      | xargs -r redis-cli DEL
+redis-cli --scan --pattern "LiveFixtureV2:$OLD:*"    | xargs -r redis-cli DEL
 redis-cli --scan --pattern "LiveBonus:$OLD:*"        | xargs -r redis-cli DEL
 redis-cli --scan --pattern "LiveBonusV2:$OLD:*"      | xargs -r redis-cli DEL
+redis-cli --scan --pattern "LiveSnapshotMeta:$OLD:*" | xargs -r redis-cli DEL
 redis-cli --scan --pattern "PlayerStat:$OLD"         | xargs -r redis-cli DEL
 ```
 
-(All fifteen season-scoped families are normally already gone via the automatic
-prefix pass. Delete only the explicit leftovers reported by Step 2.)
+(All eighteen season-scoped families are normally already gone via the
+automatic prefix pass. Delete only the explicit leftovers reported by Step 2.)
 
 **Step 5 — verify**
 
@@ -269,9 +400,9 @@ prefix pass. Delete only the explicit leftovers reported by Step 2.)
 - `LaunchNotification:*` — re-arms per year/season by design (§3).
 - `letletme:entry-info-sync:daily:*`, `mutation-lock:*`, and
   `tournament-cascade:*` — expire via TTL.
-- `bull:*` — managed by BullMQ (§8).
+- `bull:*` — managed by BullMQ (§9).
 
-## 11. Database single-season semantics (FP-21)
+## 12. Database single-season semantics (FP-21)
 
 The PostgreSQL database stores **one FPL season at a time**:
 

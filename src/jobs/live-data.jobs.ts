@@ -5,20 +5,35 @@ import {
   type LiveDataJobData,
 } from '../queues/live-data.queue';
 import { getLiveDataJobPriority, type LiveDataPriorityJobName } from '../domain/job-priority';
+import { resolveLiveSnapshotPersistence } from '../domain/live-snapshot';
 import { logError, logInfo } from '../utils/logger';
 
 export type LiveDataJobSource = 'cron' | 'manual' | 'cascade';
 
-async function hasWaitingOrDelayedJob(
+async function hasSupersedingPendingJob(
   queue: ReturnType<typeof getLiveDataQueue>,
   jobName: LiveDataJobName,
   eventId: number,
+  persistEventLives: boolean,
 ): Promise<boolean> {
   try {
-    const jobs = await queue.getJobs(['waiting', 'delayed']);
-    return jobs.some((job) => job.name === jobName && job.data.eventId === eventId);
+    const jobs = await queue.getJobs(['waiting', 'delayed', 'active']);
+    const requestedSnapshotPersistence = resolveLiveSnapshotPersistence(jobName, persistEventLives);
+    return jobs.some((job) => {
+      if (job.data.eventId !== eventId) return false;
+      if (requestedSnapshotPersistence === null) return job.name === jobName;
+
+      const pendingSnapshotPersistence = resolveLiveSnapshotPersistence(
+        job.name,
+        job.data.persistEventLives === true,
+      );
+      return (
+        pendingSnapshotPersistence !== null &&
+        (!requestedSnapshotPersistence || pendingSnapshotPersistence)
+      );
+    });
   } catch (error) {
-    logError('Failed to check waiting live-data jobs', error, { jobName, eventId });
+    logError('Failed to check pending live-data jobs', error, { jobName, eventId });
     // If we can't tell, allow enqueue (safer than dropping a tick).
     return false;
   }
@@ -28,15 +43,20 @@ async function enqueueLiveDataJob(
   jobName: LiveDataJobName,
   eventId: number,
   source: LiveDataJobSource = 'cron',
-  options: { delay?: number; jobId?: string } = {},
+  options: { delay?: number; jobId?: string; persistEventLives?: boolean } = {},
 ) {
   try {
     const tier = getLiveDataJobPriority(jobName as LiveDataPriorityJobName);
     const queue = getLiveDataQueue(tier);
 
-    // Skip duplicate waiting work so a slow tick can't stack identical jobs.
-    if (source === 'cron' && (await hasWaitingOrDelayedJob(queue, jobName, eventId))) {
-      logInfo('Live data job already waiting; skipping enqueue', { jobName, eventId, source });
+    // Skip duplicate pending work so a slow minute cannot stack behind itself.
+    // This applies even when the scheduler supplies a deterministic minute ID:
+    // the next minute has a different ID while the previous job may still run.
+    if (
+      source === 'cron' &&
+      (await hasSupersedingPendingJob(queue, jobName, eventId, options.persistEventLives === true))
+    ) {
+      logInfo('Live data job already pending; skipping enqueue', { jobName, eventId, source });
       return null;
     }
 
@@ -44,6 +64,9 @@ async function enqueueLiveDataJob(
       eventId,
       source,
       triggeredAt: new Date().toISOString(),
+      ...(options.persistEventLives !== undefined
+        ? { persistEventLives: options.persistEventLives }
+        : {}),
     };
 
     // Manual triggers share a deterministic ID per (job, event) so repeat triggers
@@ -81,11 +104,58 @@ async function enqueueLiveDataJob(
   }
 }
 
-export const enqueueEventLivesCacheUpdate = (eventId: number, source?: LiveDataJobSource) =>
-  enqueueLiveDataJob(LIVE_JOBS.EVENT_LIVES_CACHE, eventId, source);
+export function liveSnapshotMinuteBucket(date: Date): string {
+  return date.toISOString().slice(0, 16).replace(/\D/g, '');
+}
 
-export const enqueueEventLivesDbSync = (eventId: number, source?: LiveDataJobSource) =>
-  enqueueLiveDataJob(LIVE_JOBS.EVENT_LIVES_DB, eventId, source);
+export const enqueueLiveSnapshot = (
+  eventId: number,
+  source: LiveDataJobSource = 'cron',
+  options: { persistEventLives?: boolean; now?: Date; jobId?: string } = {},
+) => {
+  const persistEventLives = options.persistEventLives ?? false;
+  // Production has one unscaled Compose worker container, replaced in place:
+  // old and new worker generations never consume this queue concurrently.
+  // Legacy wire names cover either service replacement order. If the API is
+  // replaced first, the old worker can consume them; if the worker is replaced
+  // first, the old worker is already stopped and the new handler coordinates
+  // them. A new-only wire name would instead fail the API-first ordering.
+  const wireJobName = persistEventLives ? LIVE_JOBS.EVENT_LIVES_DB : LIVE_JOBS.EVENT_LIVES_CACHE;
+  return enqueueLiveDataJob(wireJobName, eventId, source, {
+    persistEventLives,
+    jobId:
+      options.jobId ??
+      (source === 'cron'
+        ? `live-snapshot-e${eventId}-${liveSnapshotMinuteBucket(options.now ?? new Date())}-${persistEventLives ? 'persist' : 'cache'}`
+        : undefined),
+  });
+};
+
+function enqueueLiveSnapshotAlias(
+  alias: LiveDataJobName,
+  eventId: number,
+  source: LiveDataJobSource = 'cron',
+  persistEventLives = false,
+) {
+  return enqueueLiveDataJob(alias, eventId, source, {
+    persistEventLives,
+    // Keep compatibility triggers independently deduplicated. In particular,
+    // a cache-only manual trigger must not swallow a following persistence
+    // trigger merely because both now use the live-snapshot worker job.
+    jobId:
+      source === 'manual'
+        ? `${alias}-e${eventId}-manual`
+        : source === 'cron'
+          ? `${alias}-e${eventId}-${liveSnapshotMinuteBucket(new Date())}`
+          : undefined,
+  });
+}
+
+export const enqueueEventLivesCacheUpdate = (eventId: number, source: LiveDataJobSource = 'cron') =>
+  enqueueLiveSnapshotAlias(LIVE_JOBS.EVENT_LIVES_CACHE, eventId, source);
+
+export const enqueueEventLivesDbSync = (eventId: number, source: LiveDataJobSource = 'cron') =>
+  enqueueLiveSnapshotAlias(LIVE_JOBS.EVENT_LIVES_DB, eventId, source, true);
 
 export const enqueueEventLiveSummary = (eventId: number, source?: LiveDataJobSource) =>
   enqueueLiveDataJob(LIVE_JOBS.EVENT_LIVE_SUMMARY, eventId, source);
@@ -93,14 +163,14 @@ export const enqueueEventLiveSummary = (eventId: number, source?: LiveDataJobSou
 export const enqueueEventLiveExplain = (eventId: number, source?: LiveDataJobSource) =>
   enqueueLiveDataJob(LIVE_JOBS.EVENT_LIVE_EXPLAIN, eventId, source);
 
-export const enqueueLiveFixtureCache = (eventId: number, source?: LiveDataJobSource) =>
-  enqueueLiveDataJob(LIVE_JOBS.LIVE_FIXTURE_CACHE, eventId, source);
+export const enqueueLiveFixtureCache = (eventId: number, source: LiveDataJobSource = 'cron') =>
+  enqueueLiveSnapshotAlias(LIVE_JOBS.LIVE_FIXTURE_CACHE, eventId, source);
 
-export const enqueueLiveBonusCache = (eventId: number, source?: LiveDataJobSource) =>
-  enqueueLiveDataJob(LIVE_JOBS.LIVE_BONUS_CACHE, eventId, source);
+export const enqueueLiveBonusCache = (eventId: number, source: LiveDataJobSource = 'cron') =>
+  enqueueLiveSnapshotAlias(LIVE_JOBS.LIVE_BONUS_CACHE, eventId, source);
 
 export const enqueueEventOverallResult = (eventId: number, source?: LiveDataJobSource) =>
   enqueueLiveDataJob(LIVE_JOBS.EVENT_OVERALL_RESULT, eventId, source);
 
-export const enqueueLiveScoresSync = (eventId: number, source?: LiveDataJobSource) =>
-  enqueueLiveDataJob(LIVE_JOBS.LIVE_SCORES, eventId, source);
+export const enqueueLiveScoresSync = (eventId: number, source: LiveDataJobSource = 'cron') =>
+  enqueueLiveSnapshotAlias(LIVE_JOBS.LIVE_SCORES, eventId, source);

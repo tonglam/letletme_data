@@ -45,11 +45,11 @@ const bootstrap = (ids: number[]) =>
   }) as never;
 
 describe('player-prices sync', () => {
-  test('updates only risers and fallers and merges their complete cache fields', async () => {
+  test('updates only risers and fallers and sends price-only cache patches', async () => {
     const updatePrices = mock(async (updates: Array<{ elementId: number; value: number }>) =>
       updates.map((update) => player(update.elementId, update.value)),
     );
-    const mergePlayersCache = mock(async () => undefined);
+    const mergePlayerPricesCache = mock(async () => undefined);
     const getBootstrap = mock(async () => bootstrap([1, 2, 3]));
     const findLatestForPlayerIds = mock(async () => [
       stored(2, 61, '20260803', 'Rise'),
@@ -64,7 +64,7 @@ describe('player-prices sync', () => {
       findLatestForPlayerIds,
       getBootstrap,
       updatePrices,
-      mergePlayersCache,
+      mergePlayerPricesCache,
     });
 
     expect(await sync('20260803')).toEqual({ count: 2, changeDate: '20260803' });
@@ -74,7 +74,13 @@ describe('player-prices sync', () => {
     ]);
     expect(getBootstrap).toHaveBeenCalledTimes(1);
     expect(findLatestForPlayerIds).toHaveBeenCalledWith([2, 3], '20260601', '20270601');
-    expect(mergePlayersCache).toHaveBeenCalledWith([player(2, 61), player(3, 49)], [1, 2, 3]);
+    expect(mergePlayerPricesCache).toHaveBeenCalledWith(
+      [
+        { elementId: 2, value: 61 },
+        { elementId: 3, value: 49 },
+      ],
+      [1, 2, 3],
+    );
   });
 
   test('uses each affected player latest value during an old-date replay', async () => {
@@ -86,7 +92,7 @@ describe('player-prices sync', () => {
       findLatestForPlayerIds: async () => [stored(2, 63, '20260805', 'Rise')],
       getBootstrap: async () => bootstrap([1, 2]),
       updatePrices,
-      mergePlayersCache: async () => undefined,
+      mergePlayerPricesCache: async () => undefined,
     });
 
     await sync('20260803');
@@ -95,42 +101,42 @@ describe('player-prices sync', () => {
 
   test('skips cleanly when a date contains only Start rows', async () => {
     const updatePrices = mock(async () => []);
-    const mergePlayersCache = mock(async () => undefined);
+    const mergePlayerPricesCache = mock(async () => undefined);
     const getBootstrap = mock(async () => bootstrap([1]));
     const sync = createPlayerPricesSync({
       findByChangeDate: async () => [stored(1, 50, '20260802', 'Start')],
       findLatestForPlayerIds: async () => [],
       getBootstrap,
       updatePrices,
-      mergePlayersCache,
+      mergePlayerPricesCache,
     });
 
     expect(await sync('20260802')).toEqual({ count: 0, changeDate: '20260802' });
     expect(getBootstrap).not.toHaveBeenCalled();
     expect(updatePrices).not.toHaveBeenCalled();
-    expect(mergePlayersCache).not.toHaveBeenCalled();
+    expect(mergePlayerPricesCache).not.toHaveBeenCalled();
   });
 
   test('does not replay a historical change for a player outside the live roster', async () => {
     const findLatestForPlayerIds = mock(async () => []);
     const updatePrices = mock(async () => []);
-    const mergePlayersCache = mock(async () => undefined);
+    const mergePlayerPricesCache = mock(async () => undefined);
     const sync = createPlayerPricesSync({
       findByChangeDate: async () => [stored(2, 61, '20260803', 'Rise')],
       findLatestForPlayerIds,
       getBootstrap: async () => bootstrap([1, 3]),
       updatePrices,
-      mergePlayersCache,
+      mergePlayerPricesCache,
     });
 
     expect(await sync('20260803')).toEqual({ count: 0, changeDate: '20260803' });
     expect(findLatestForPlayerIds).not.toHaveBeenCalled();
     expect(updatePrices).not.toHaveBeenCalled();
-    expect(mergePlayersCache).not.toHaveBeenCalled();
+    expect(mergePlayerPricesCache).not.toHaveBeenCalled();
   });
 
   test('checks cache completeness against only transformable bootstrap players', async () => {
-    const mergePlayersCache = mock(async () => undefined);
+    const mergePlayerPricesCache = mock(async () => undefined);
     const validBootstrap = bootstrap([1, 2]) as {
       elements: Array<Record<string, unknown>>;
       events: Array<Record<string, unknown>>;
@@ -145,10 +151,10 @@ describe('player-prices sync', () => {
       findLatestForPlayerIds: async () => [stored(2, 61, '20260803', 'Rise')],
       getBootstrap: async () => validBootstrap as never,
       updatePrices: async () => [player(2, 61)],
-      mergePlayersCache,
+      mergePlayerPricesCache,
     });
 
     expect(await sync('20260803')).toEqual({ count: 1, changeDate: '20260803' });
-    expect(mergePlayersCache).toHaveBeenCalledWith([player(2, 61)], [1, 2]);
+    expect(mergePlayerPricesCache).toHaveBeenCalledWith([{ elementId: 2, value: 61 }], [1, 2]);
   });
 });

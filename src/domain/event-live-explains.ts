@@ -26,6 +26,8 @@ export interface EventLiveExplain {
   readonly redCardsPoints: number | null;
   readonly saves: number | null;
   readonly savesPoints: number | null;
+  readonly defensiveContribution: number | null;
+  readonly defensiveContributionPoints: number | null;
 }
 
 export type EventLiveExplains = readonly EventLiveExplain[];
@@ -58,6 +60,8 @@ export const EventLiveExplainSchema = z.object({
   redCardsPoints: nullableInt,
   saves: nullableInt,
   savesPoints: nullableInt,
+  defensiveContribution: nullableInt.default(null),
+  defensiveContributionPoints: nullableInt.default(null),
 });
 
 export const EventLiveExplainsSchema = z.array(EventLiveExplainSchema);
@@ -88,6 +92,7 @@ export function totalPoints(explain: EventLiveExplain): number {
     explain.yellowCardsPoints,
     explain.redCardsPoints,
     explain.savesPoints,
+    explain.defensiveContributionPoints,
     explain.bonus,
   ];
   return values.reduce<number>((sum, v) => sum + (v ?? 0), 0);

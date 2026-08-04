@@ -80,6 +80,7 @@ mock.module('../../src/queues/entry-sync.queue', () => ({
 // the real live-data.jobs module.
 mock.module('../../src/queues/live-data.queue', () => ({
   LIVE_JOBS: {
+    LIVE_SNAPSHOT: 'live-snapshot',
     EVENT_LIVES_CACHE: 'event-lives-cache',
     EVENT_LIVES_DB: 'event-lives-db',
     EVENT_LIVE_SUMMARY: 'event-live-summary',
@@ -447,7 +448,7 @@ describe('eventLivesAPI handlers', () => {
     expect(getEventLivesByEventId).not.toHaveBeenCalled();
   });
 
-  test('POST /event-lives/sync/:eventId enqueues the DB sync and returns 202', async () => {
+  test('POST /event-lives/sync/:eventId enqueues a persistent snapshot and returns 202', async () => {
     const response = await eventLivesAPI.handle(
       new Request('http://localhost/event-lives/sync/12', { method: 'POST' }),
     );
@@ -457,7 +458,7 @@ describe('eventLivesAPI handlers', () => {
     expect(body.jobId).toBe('event-lives-db-e12-manual');
   });
 
-  test('POST /event-lives/cache/:eventId enqueues the cache update and returns 202', async () => {
+  test('POST /event-lives/cache/:eventId enqueues a coherent snapshot and returns 202', async () => {
     const response = await eventLivesAPI.handle(
       new Request('http://localhost/event-lives/cache/12', { method: 'POST' }),
     );

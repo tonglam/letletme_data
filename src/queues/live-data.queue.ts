@@ -4,6 +4,10 @@ import { closeTieredQueues, createTieredQueueSet } from './tiered-queue';
 export const liveDataQueueName = 'live-data';
 
 export const LIVE_JOBS = {
+  LIVE_SNAPSHOT: 'live-snapshot',
+  // Legacy names remain the producer wire format during sequential Compose
+  // replacement. New workers route them through LIVE_SNAPSHOT semantics, and
+  // still accept LIVE_SNAPSHOT jobs left by an earlier candidate deployment.
   EVENT_LIVES_CACHE: 'event-lives-cache',
   EVENT_LIVES_DB: 'event-lives-db',
   EVENT_LIVE_SUMMARY: 'event-live-summary',
@@ -20,6 +24,8 @@ export interface LiveDataJobData {
   eventId: number;
   source: 'cron' | 'manual' | 'cascade';
   triggeredAt: string;
+  /** Large event-live/explain UPSERTs run every ten minutes and at consolidation. */
+  persistEventLives?: boolean;
 }
 
 const tieredQueueSet = createTieredQueueSet<LiveDataJobData>(liveDataQueueName, {
