@@ -311,10 +311,14 @@ export async function syncLeagueEventResultsByTournament(
   const entryInfos = await entryInfoRepository.findByIds(entryIds);
   const entryInfoMap = new Map(entryInfos.map((info) => [info.id, info]));
 
-  const eventLives = await eventLiveRepository.findByEventId(eventId);
+  const eventLives = await eventLiveRepository.findFinalizedByEventIdForSeason(
+    eventId,
+    checkpointSeason,
+  );
   if (eventLives.length === 0) {
-    logInfo('No event live data found for league event results', { eventId, tournamentId });
-    return { tournamentId, eventId, totalEntries: 0, updated: 0, skipped: 0 };
+    throw new Error(
+      `Finalized event live data is unavailable for league event results: event ${eventId}`,
+    );
   }
   const eventLiveMap = new Map(eventLives.map((live) => [live.elementId, live]));
   const playerIds = uniqueNumbers(eventLives.map((live) => live.elementId));

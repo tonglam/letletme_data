@@ -4,6 +4,11 @@
 -- already-applied materialized-view definitions; the earlier migrations stay
 -- immutable.
 
+-- The legacy snapshot views are replaced below and, after the first run,
+-- depend on these materialized views. Drop them first so a migration replay
+-- (or a repaired deployment) can rebuild the objects in the same order.
+DROP VIEW IF EXISTS public.v_tournament_snapshot;
+DROP VIEW IF EXISTS public.v_tournament_event_snapshot;
 DROP MATERIALIZED VIEW IF EXISTS public.mv_tournament_snapshot;
 DROP MATERIALIZED VIEW IF EXISTS public.mv_tournament_event_snapshot;
 
@@ -73,10 +78,11 @@ WITH snapshot_base AS (
         FROM public.events season_start
         WHERE season_start.id = 1
           AND season_start.deadline_time IS NOT NULL
-          AND to_char(live_event.deadline_time AT TIME ZONE 'UTC', 'YY') ||
-              to_char((live_event.deadline_time AT TIME ZONE 'UTC') + interval '1 year', 'YY') =
-              to_char(season_start.deadline_time AT TIME ZONE 'UTC', 'YY') ||
-              to_char((season_start.deadline_time AT TIME ZONE 'UTC') + interval '1 year', 'YY')
+          -- Event IDs repeat every season. GW1 is the season anchor; do not
+          -- derive a new season from the calendar year of every deadline
+          -- (late-season fixtures can cross New Year's Day).
+          AND live_event.deadline_time >= season_start.deadline_time
+          AND live_event.deadline_time < season_start.deadline_time + interval '1 year'
       )
     LEFT JOIN public.event_lives el
       ON el.event_id = eer_pos.event_id
@@ -248,6 +254,101 @@ BEGIN
     GRANT SELECT ON TABLE public.mv_tournament_snapshot TO service_role;
   END IF;
 END $$;
+
+-- Keep the legacy view contracts safe as well. They are still granted to the
+-- trusted GraphQL service and may be used by older readers, so readiness must
+-- be enforced at the view boundary rather than relying on cache invalidation.
+CREATE OR REPLACE VIEW public.v_tournament_event_snapshot AS
+SELECT
+  snapshot.tournament_id,
+  snapshot.event_id,
+  snapshot.entry_id,
+  snapshot.tournament_overall_rank,
+  snapshot.overall_rank,
+  snapshot.team_value,
+  snapshot.cum_transfers_num,
+  snapshot.cum_total_costs,
+  snapshot.cum_total_bench_points,
+  snapshot.cum_auto_sub_points,
+  snapshot.tournament_team_value_rank,
+  snapshot.tournament_transfers_rank,
+  snapshot.tournament_costs_rank,
+  snapshot.tournament_bench_points_rank,
+  snapshot.tournament_auto_sub_rank,
+  snapshot.cum_total_captain_points,
+  snapshot.highese_captian_points,
+  snapshot.average_catain_points,
+  snapshot.captain_points_percentage,
+  snapshot.tournament_captain_points_rank,
+  snapshot.tournament_captain_points_percentage_rank,
+  snapshot.most_selected_captain,
+  snapshot.cum_total_gk_points,
+  snapshot.cum_total_def_points,
+  snapshot.cum_total_mid_points,
+  snapshot.cum_total_fwd_points
+FROM public.mv_tournament_event_snapshot snapshot
+JOIN public.tournament_infos tournament
+  ON tournament.id = snapshot.tournament_id
+  AND tournament.standings_ready_at IS NOT NULL;
+
+ALTER VIEW public.v_tournament_event_snapshot SET (security_invoker = true);
+
+CREATE OR REPLACE VIEW public.v_tournament_snapshot AS
+SELECT
+  snapshot.tournament_id,
+  snapshot.tournament_name,
+  snapshot.league_id,
+  snapshot.league_type,
+  snapshot.latest_event_id,
+  snapshot.total_entries,
+  snapshot.top10_entry_count,
+  snapshot.top10_avg_total_points,
+  snapshot.top10_avg_captain_points,
+  snapshot.top10_avg_captain_points_percentage,
+  snapshot.top10_avg_gk_points,
+  snapshot.top10_avg_def_points,
+  snapshot.top10_avg_mid_points,
+  snapshot.top10_avg_fwd_points,
+  snapshot.top10_avg_team_value,
+  snapshot.top10_avg_overall_rank,
+  snapshot.top10_avg_cum_transfer_num,
+  snapshot.top10_avg_cum_total_cost,
+  snapshot.top10_avg_cum_bench_points,
+  snapshot.top10_avg_cum_auto_sub_points,
+  snapshot.all_avg_total_points,
+  snapshot.all_avg_captain_points,
+  snapshot.all_avg_captain_points_percentage,
+  snapshot.all_avg_gk_points,
+  snapshot.all_avg_def_points,
+  snapshot.all_avg_mid_points,
+  snapshot.all_avg_fwd_points
+FROM public.mv_tournament_snapshot snapshot
+JOIN public.tournament_infos tournament
+  ON tournament.id = snapshot.tournament_id
+  AND tournament.standings_ready_at IS NOT NULL;
+
+ALTER VIEW public.v_tournament_snapshot SET (security_invoker = true);
+
+-- Selection statistics are persisted in the canonical table by the sync
+-- worker. Expose the same columns through the legacy view, but never expose
+-- rows while the tournament is retrying or has not published standings.
+CREATE OR REPLACE VIEW public.v_tournament_selection_stats AS
+SELECT
+  stats.tournament_id,
+  stats.event_id,
+  stats.total_entries,
+  stats.element_id,
+  stats.pick_count,
+  stats.captain_count,
+  stats.vice_captain_count,
+  stats.transfer_in_count,
+  stats.transfer_out_count
+FROM public.tournament_selection_stats stats
+JOIN public.tournament_infos tournament
+  ON tournament.id = stats.tournament_id
+  AND tournament.standings_ready_at IS NOT NULL;
+
+ALTER VIEW public.v_tournament_selection_stats SET (security_invoker = true);
 
 -- The direct event-result view is also a granted read model. Do not expose
 -- canonical tournament rows before the standings publication barrier.

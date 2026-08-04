@@ -279,6 +279,12 @@ describe('tournament creation vs entry_infos (FP-08)', () => {
       SET standings_ready_at = standings_ready_at + interval '1 microsecond'
       WHERE id = ${created.id}
     `;
+    await client`
+      UPDATE events
+      SET finished = true,
+          data_checked = true
+      WHERE id = 12
+    `;
     expect(await tournamentRosterRepository.finishThroughEvent(12, [capturedTarget])).toBe(0);
     const currentRows = await client<Array<{ standingsReadyAt: string }>>`
       SELECT standings_ready_at::text AS "standingsReadyAt"

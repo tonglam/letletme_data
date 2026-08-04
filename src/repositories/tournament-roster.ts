@@ -459,6 +459,13 @@ export const tournamentRosterRepository = {
         and tournament.state = 'active'
         and tournament.setup_status = 'ready'
         and tournament.standings_ready_at is not null
+        and exists (
+          select 1
+          from events terminal_event
+          where terminal_event.id = ${eventId}
+            and terminal_event.finished = true
+            and terminal_event.data_checked = true
+        )
         and greatest(
           coalesce(tournament.group_ended_event_id, 0),
           coalesce(tournament.knockout_ended_event_id, 0)
