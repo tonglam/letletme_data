@@ -162,6 +162,7 @@ async function auditMissingUnits(
   entryIds: number[],
   window: TournamentBackfillWindow,
   kind: 'results' | 'picks',
+  requiredPicksEvents: ReadonlySet<number> = new Set(),
 ): Promise<MissingTournamentUnitsAudit> {
   const missing = new Map<number, number[]>();
   const entryStartEvents = await loadEntryStartEvents(entryIds);
@@ -172,12 +173,22 @@ async function auditMissingUnits(
     );
     totalPairs += eligibleEntryIds.length;
     if (eligibleEntryIds.length === 0) continue;
-    const present =
-      kind === 'results'
-        ? (await entryEventResultsRepository.findByEventAndEntryIds(eventId, eligibleEntryIds)).map(
-            (row) => row.entryId,
-          )
-        : await entryEventPicksRepository.findEntryIdsByEvent(eventId, eligibleEntryIds);
+    let present: number[];
+    if (kind === 'results') {
+      const resultEntryIds = (
+        await entryEventResultsRepository.findByEventAndEntryIds(eventId, eligibleEntryIds)
+      ).map((row) => row.entryId);
+      if (requiredPicksEvents.has(eventId)) {
+        const pickEntryIds = new Set(
+          await entryEventPicksRepository.findEntryIdsByEvent(eventId, eligibleEntryIds),
+        );
+        present = resultEntryIds.filter((entryId) => pickEntryIds.has(entryId));
+      } else {
+        present = resultEntryIds;
+      }
+    } else {
+      present = await entryEventPicksRepository.findEntryIdsByEvent(eventId, eligibleEntryIds);
+    }
     const presentSet = new Set(present);
     const missingEntryIds = eligibleEntryIds.filter((entryId) => !presentSet.has(entryId));
     if (missingEntryIds.length > 0) {
@@ -206,9 +217,11 @@ export async function ensureTournamentCoreResults(
   window: TournamentBackfillWindow,
   onProgress?: (completed: number, total: number) => Promise<void>,
   onPlan?: (plan: TournamentCoreSyncPlan) => void | Promise<void>,
+  options?: { requirePicksForEvents?: readonly number[] },
 ): Promise<void> {
+  const requiredPicksEvents = new Set(options?.requirePicksForEvents ?? []);
   const seededBaselines = await seedPreEntryCoreBaselines(entryIds, window);
-  const audit = await auditMissingUnits(entryIds, window, 'results');
+  const audit = await auditMissingUnits(entryIds, window, 'results', requiredPicksEvents);
   const missing = audit.missing;
   const total = [...missing.values()].reduce((sum, ids) => sum + ids.length, 0);
   const totalPairs = audit.totalPairs;
@@ -231,7 +244,8 @@ export async function ensureTournamentCoreResults(
     await onProgress?.(completed, total);
   }
 
-  const remaining = (await auditMissingUnits(entryIds, window, 'results')).missing;
+  const remaining = (await auditMissingUnits(entryIds, window, 'results', requiredPicksEvents))
+    .missing;
   if (remaining.size > 0) {
     const preview = [...remaining]
       .slice(0, 5)

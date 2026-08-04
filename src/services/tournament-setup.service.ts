@@ -279,6 +279,25 @@ export async function setupTournamentStructure(tournamentId: number): Promise<vo
             plan.missingPairs + eventCount,
           );
         },
+        {
+          requirePicksForEvents:
+            tournament.knockoutMode !== 'no_knockout' &&
+            tournament.knockoutStartedEventId &&
+            tournament.knockoutEndedEventId
+              ? Array.from(
+                  {
+                    length: Math.max(
+                      0,
+                      Math.min(window.endEventId, tournament.knockoutEndedEventId) -
+                        Math.max(window.startEventId, tournament.knockoutStartedEventId) +
+                        1,
+                    ),
+                  },
+                  (_, index) =>
+                    Math.max(window.startEventId, tournament.knockoutStartedEventId!) + index,
+                )
+              : [],
+        },
       );
     }
     await calculateTournamentHistoryFromStoredResults(

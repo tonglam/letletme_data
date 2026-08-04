@@ -20,6 +20,7 @@ describe('mutation auth policy', () => {
 
   test('keeps setup progress behind the authenticated Web service', () => {
     expect(shouldRequireApiKey('GET', '/tournaments/42/setup-status')).toBe(true);
+    expect(shouldRequireApiKey('GET', '/tournaments/42/setup-status/')).toBe(true);
     expect(shouldRequireApiKey('OPTIONS', '/tournaments/42/setup-status')).toBe(false);
   });
 

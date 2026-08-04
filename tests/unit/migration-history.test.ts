@@ -62,3 +62,14 @@ describe('player market snapshot migration', () => {
     expect(migration).toContain('REVOKE ALL ON TABLE');
   });
 });
+
+describe('tournament lifecycle progress migration', () => {
+  test('restores readiness only for legacy tournaments with canonical structure', () => {
+    const migration = readFileSync('migrations/0038_tournament_lifecycle_progress.sql', 'utf8');
+
+    expect(migration).toMatch(/setup_status = 'ready'/);
+    expect(migration).toMatch(/FROM public\.tournament_entries/);
+    expect(migration).toMatch(/FROM public\.tournament_groups/);
+    expect(migration).toMatch(/FROM public\.tournament_knockouts/);
+  });
+});

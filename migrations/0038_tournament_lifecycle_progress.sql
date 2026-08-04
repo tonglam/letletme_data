@@ -24,6 +24,37 @@ ALTER TABLE public.tournament_infos
   ADD COLUMN standings_ready_at timestamptz,
   ADD COLUMN setup_warning_count integer NOT NULL DEFAULT 0;
 
+-- Before this migration, setup_status could remain pending after the legacy
+-- worker had already built a usable tournament. Preserve only established
+-- tournaments whose membership and required structure are present; genuinely
+-- incomplete shells stay queued for worker recovery.
+UPDATE public.tournament_infos AS tournament
+SET
+  setup_status = 'ready',
+  setup_finished_at = COALESCE(tournament.setup_finished_at, tournament.updated_at, now())
+WHERE tournament.setup_status = 'pending'
+  AND EXISTS (
+    SELECT 1
+    FROM public.tournament_entries AS membership
+    WHERE membership.tournament_id = tournament.id
+  )
+  AND (
+    tournament.group_mode = 'no_group'
+    OR EXISTS (
+      SELECT 1
+      FROM public.tournament_groups AS tournament_group
+      WHERE tournament_group.tournament_id = tournament.id
+    )
+  )
+  AND (
+    tournament.knockout_mode = 'no_knockout'
+    OR EXISTS (
+      SELECT 1
+      FROM public.tournament_knockouts AS knockout
+      WHERE knockout.tournament_id = tournament.id
+    )
+  );
+
 UPDATE public.tournament_infos
 SET
   setup_phase = CASE setup_status

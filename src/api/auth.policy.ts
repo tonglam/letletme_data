@@ -2,7 +2,7 @@ export const API_KEY_HEADER = 'x-api-key';
 
 export const SAFE_HTTP_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
-const SERVICE_ONLY_READ_PATHS = [/^\/tournaments\/\d+\/setup-status$/] as const;
+const SERVICE_ONLY_READ_PATHS = [/^\/tournaments\/\d+\/setup-status\/?$/] as const;
 
 export function shouldRequireApiKey(method: string, path: string): boolean {
   if (

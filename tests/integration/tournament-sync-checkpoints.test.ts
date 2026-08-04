@@ -93,6 +93,7 @@ beforeAll(async () => {
 afterAll(async () => {
   const sql = await getDbClient();
   await sql`DELETE FROM entry_event_transfers WHERE entry_id = ${ENTRY_ID}`;
+  await sql`DELETE FROM entry_event_picks WHERE entry_id IN (${ENTRY_ID}, ${LATE_ENTRY_ID})`;
   await sql`DELETE FROM entry_event_results WHERE entry_id = ${ENTRY_ID}`;
   await sql`DELETE FROM entry_league_infos WHERE entry_id = ${ENTRY_ID}`;
   await sql`DELETE FROM entry_history_infos WHERE entry_id = ${ENTRY_ID}`;
@@ -271,6 +272,81 @@ describe('tournament initialization checkpoints', () => {
     expect(rows.slice(0, 9).every((row) => row.eventPoints === 0)).toBe(true);
     expect(rows.slice(0, 9).every((row) => row.overallRank === 2_147_483_647)).toBe(true);
     expect(plans).toEqual([{ totalPairs: 3, missingPairs: 0, reusedPairs: 3 }]);
+  });
+
+  test('requires canonical picks before treating knockout core rows as complete', async () => {
+    const sql = await getDbClient();
+    await sql`
+      INSERT INTO entry_event_results (
+        entry_id,
+        event_id,
+        event_points,
+        event_transfers,
+        event_transfers_cost,
+        event_net_points,
+        overall_points,
+        overall_rank
+      )
+      VALUES (${ENTRY_ID}, 12, 55, 0, 0, 55, 600, 500)
+      ON CONFLICT (entry_id, event_id) DO UPDATE SET event_points = 55
+    `;
+    await sql`DELETE FROM entry_event_picks WHERE entry_id = ${ENTRY_ID} AND event_id = 12`;
+    let picksCalls = 0;
+    mockFPLClient({
+      getEventLive: async () => ({ elements: [] }),
+      getEntryEventPicks: async () => {
+        picksCalls += 1;
+        return {
+          active_chip: null,
+          automatic_subs: [],
+          entry_history: {
+            event: 12,
+            points: 55,
+            total_points: 600,
+            rank: 1,
+            overall_rank: 500,
+            bank: 10,
+            value: 1010,
+            event_transfers: 0,
+            event_transfers_cost: 0,
+            points_on_bench: 0,
+          },
+          picks: [
+            {
+              element: 1,
+              position: 1,
+              multiplier: 1,
+              is_captain: true,
+              is_vice_captain: false,
+            },
+          ],
+        };
+      },
+    });
+
+    try {
+      const plans: TournamentCoreSyncPlan[] = [];
+      await ensureTournamentCoreResults(
+        [ENTRY_ID],
+        { startEventId: 12, endEventId: 12 },
+        undefined,
+        (plan) => {
+          plans.push(plan);
+        },
+        { requirePicksForEvents: [12] },
+      );
+
+      expect(picksCalls).toBe(1);
+      expect(plans).toEqual([{ totalPairs: 1, missingPairs: 1, reusedPairs: 0 }]);
+      const rows = await sql<{ count: number }[]>`
+        SELECT count(*)::int AS count
+        FROM entry_event_picks
+        WHERE entry_id = ${ENTRY_ID} AND event_id = 12
+      `;
+      expect(rows[0]?.count).toBe(1);
+    } finally {
+      resetMockFPLClient();
+    }
   });
 
   test('empty full transfer history is a completed canonical sync', async () => {

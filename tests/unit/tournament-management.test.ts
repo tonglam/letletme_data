@@ -96,9 +96,26 @@ describe('tournament management service', () => {
   });
 
   test('deletes an owned tournament', async () => {
-    const service = createTournamentManagementService(createRepository());
+    const calls: string[] = [];
+    const service = createTournamentManagementService(
+      createRepository({
+        deleteOwned: async () => {
+          calls.push('delete');
+          return { status: 'deleted', tournament };
+        },
+      }),
+      {
+        refreshViews: async () => {
+          calls.push('refresh-views');
+        },
+        invalidateCaches: async () => {
+          calls.push('invalidate-caches');
+        },
+      },
+    );
     const deleted = await service.deleteTournament(42, { adminEntryId: 123 });
     expect(deleted).toEqual(tournament);
+    expect(calls).toEqual(['delete', 'refresh-views', 'invalidate-caches']);
   });
 
   test('rejects deletion from a different FPL entry', async () => {

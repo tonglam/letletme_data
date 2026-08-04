@@ -1,5 +1,6 @@
 import { eventRepository } from '../repositories/events';
 import { entryEventTransfersRepository } from '../repositories/entry-event-transfers';
+import { tournamentInfoRepository } from '../repositories/tournament-infos';
 import { tournamentRosterRepository } from '../repositories/tournament-roster';
 import { enqueueTournamentSetup } from '../jobs/tournament-setup.jobs';
 import {
@@ -174,7 +175,12 @@ async function reconcileTournamentRosterUnlocked(
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Tournament roster sync failed.';
-    await tournamentRosterRepository.markSyncFailed(tournamentId, message);
+    await Promise.allSettled([
+      tournamentRosterRepository.markSyncFailed(tournamentId, message),
+      ...(options?.resumeAfterSetup
+        ? [tournamentInfoRepository.markSetupResult(tournamentId, 'failed', message)]
+        : []),
+    ]);
     throw error;
   }
 }

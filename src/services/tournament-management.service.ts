@@ -6,8 +6,10 @@ import {
 } from '../repositories/tournament-management';
 import { normalizeTournamentName } from '../domain/tournament';
 import { ConflictError, ForbiddenError, NotFoundError } from '../utils/errors';
+import { tournamentInfoRepository } from '../repositories/tournament-infos';
 import { tournamentRosterRepository } from '../repositories/tournament-roster';
 import { invalidateTournamentGraphQLCaches } from '../cache/tournament-graphql-cache';
+import { refreshTournamentMaterializedViews } from './tournament-materialized-views.service';
 
 const updateTournamentSchema = z.object({
   name: z.string().trim().min(3).max(80),
@@ -66,6 +68,7 @@ export type TournamentManagementLifecycle = {
     adminEntryId: number,
   ) => ReturnType<TournamentManagementRepository['deleteOwned']>;
   invalidateCaches?: (reason: string) => Promise<unknown>;
+  refreshViews?: () => Promise<unknown>;
 };
 
 export function createTournamentManagementService(
@@ -133,7 +136,17 @@ export function createTournamentManagementService(
       } else {
         const { enqueueTournamentSetup } = await import('../jobs/tournament-setup.jobs');
         await tournamentRosterRepository.markResumeProcessing(tournamentId);
-        await enqueueTournamentSetup(tournamentId, 'resume', { forceNew: true });
+        try {
+          await enqueueTournamentSetup(tournamentId, 'resume', { forceNew: true });
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : 'Unable to enqueue resume setup.';
+          await Promise.allSettled([
+            tournamentRosterRepository.markSyncFailed(tournamentId, message),
+            tournamentInfoRepository.markSetupResult(tournamentId, 'failed', message),
+          ]);
+          throw error;
+        }
       }
       await invalidateCaches('resume-requested');
       return (await repository.findById(tournamentId)) ?? current;
@@ -203,6 +216,7 @@ export function createTournamentManagementService(
           'TOURNAMENT_ADMIN_REQUIRED',
         );
       }
+      await lifecycle.refreshViews?.();
       await invalidateCaches('delete');
       return result.tournament;
     },
@@ -213,6 +227,7 @@ export const tournamentManagementService = createTournamentManagementService(
   tournamentManagementRepository,
   {
     invalidateCaches: invalidateTournamentGraphQLCaches,
+    refreshViews: refreshTournamentMaterializedViews,
     deleteOwned: async (tournamentId, adminEntryId) => {
       const { cancelWaitingTournamentSetupJobs } = await import('../jobs/tournament-setup.jobs');
       const { tournamentSetupLifecycleScope } = await import('../domain/mutation-scope');
