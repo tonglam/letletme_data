@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
 
+import type { TournamentSetupStatusRow } from '../../src/repositories/tournament-infos';
+
 const getCurrentEvent = mock(async () => ({ id: 20, name: 'Gameweek 20' }));
 const getNextEvent = mock(async () => ({ id: 21, name: 'Gameweek 21' }));
 
@@ -114,14 +116,20 @@ const clearFixturesCache = spyOn(fixturesService, 'clearFixturesCache').mockImpl
 
 const checkTournamentNameAvailability = mock(async (name: string) => ({
   available: name !== 'taken',
-  name,
+  message: name,
 }));
-const getTournamentSetupStatus = mock(async () => null as null | Record<string, unknown>);
-mock.module('../../src/services/tournament-create.service', () => ({
+const getTournamentSetupStatus = mock(
+  async (_tournamentId: number): Promise<TournamentSetupStatusRow | null> => null,
+);
+// Spy on only the two reads used here. Replacing this whole module leaks into
+// tournament-create.test.ts when Bun executes unit files in one shared registry.
+const tournamentCreateServiceModule = await import('../../src/services/tournament-create.service');
+spyOn(tournamentCreateServiceModule, 'checkTournamentNameAvailability').mockImplementation(
   checkTournamentNameAvailability,
-  createTournament: mock(async () => ({})),
+);
+spyOn(tournamentCreateServiceModule, 'getTournamentSetupStatus').mockImplementation(
   getTournamentSetupStatus,
-}));
+);
 
 const managedTournament = {
   id: 55,
@@ -497,8 +505,8 @@ describe('tournamentsAPI handlers', () => {
       new Request('http://localhost/tournaments/check-name?name=MyCup'),
     );
     expect(response.status).toBe(200);
-    const body = (await response.json()) as { available: boolean; name: string };
-    expect(body).toEqual({ available: true, name: 'MyCup' });
+    const body = (await response.json()) as { available: boolean; message: string };
+    expect(body).toEqual({ available: true, message: 'MyCup' });
     expect(checkTournamentNameAvailability).toHaveBeenCalledWith('MyCup');
   });
 
@@ -512,6 +520,7 @@ describe('tournamentsAPI handlers', () => {
 
   test('GET /tournaments/:id/setup-status omits the internal setupError field', async () => {
     getTournamentSetupStatus.mockImplementation(async () => ({
+      createdAt: '2026-07-17T00:59:00.000Z',
       setupStatus: 'failed',
       setupError: 'Connection terminated unexpectedly at internal-host:5432',
       setupPhase: 'failed',

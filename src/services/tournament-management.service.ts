@@ -65,12 +65,15 @@ export type TournamentManagementLifecycle = {
     tournamentId: number,
     adminEntryId: number,
   ) => ReturnType<TournamentManagementRepository['deleteOwned']>;
+  invalidateCaches?: (reason: string) => Promise<unknown>;
 };
 
 export function createTournamentManagementService(
   repository: TournamentManagementRepository,
   lifecycle: TournamentManagementLifecycle = {},
 ) {
+  const invalidateCaches = lifecycle.invalidateCaches ?? (async () => undefined);
+
   const assertOwner = async (tournamentId: number, adminEntryId: number) => {
     const tournament = await repository.findById(tournamentId);
     if (!tournament) {
@@ -98,7 +101,7 @@ export function createTournamentManagementService(
       if (!updated) {
         throw new NotFoundError('Tournament not found.', 'TOURNAMENT_NOT_FOUND');
       }
-      await invalidateTournamentGraphQLCaches('rename');
+      await invalidateCaches('rename');
       return updated;
     },
 
@@ -117,7 +120,7 @@ export function createTournamentManagementService(
           'inactive',
         );
         if (!paused) throw new NotFoundError('Tournament not found.', 'TOURNAMENT_NOT_FOUND');
-        await invalidateTournamentGraphQLCaches('pause');
+        await invalidateCaches('pause');
         return paused;
       }
 
@@ -132,7 +135,7 @@ export function createTournamentManagementService(
         await tournamentRosterRepository.markResumeProcessing(tournamentId);
         await enqueueTournamentSetup(tournamentId, 'resume', { forceNew: true });
       }
-      await invalidateTournamentGraphQLCaches('resume-requested');
+      await invalidateCaches('resume-requested');
       return (await repository.findById(tournamentId)) ?? current;
     },
 
@@ -167,7 +170,7 @@ export function createTournamentManagementService(
         const { reconcileTournamentRoster } = await import('./tournament-roster.service');
         await reconcileTournamentRoster(tournamentId);
       }
-      await invalidateTournamentGraphQLCaches('roster-mode');
+      await invalidateCaches('roster-mode');
       return (await repository.findById(tournamentId)) ?? updated;
     },
 
@@ -200,7 +203,7 @@ export function createTournamentManagementService(
           'TOURNAMENT_ADMIN_REQUIRED',
         );
       }
-      await invalidateTournamentGraphQLCaches('delete');
+      await invalidateCaches('delete');
       return result.tournament;
     },
   };
@@ -209,6 +212,7 @@ export function createTournamentManagementService(
 export const tournamentManagementService = createTournamentManagementService(
   tournamentManagementRepository,
   {
+    invalidateCaches: invalidateTournamentGraphQLCaches,
     deleteOwned: async (tournamentId, adminEntryId) => {
       const { cancelWaitingTournamentSetupJobs } = await import('../jobs/tournament-setup.jobs');
       const { tournamentSetupLifecycleScope } = await import('../domain/mutation-scope');

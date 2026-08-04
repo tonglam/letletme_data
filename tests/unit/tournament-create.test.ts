@@ -9,7 +9,6 @@ const originalFetch = globalThis.fetch;
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
-  mock.restore();
 });
 
 describe('tournament league membership import', () => {
@@ -129,31 +128,34 @@ describe('tournament league membership import', () => {
   test('emits one privacy-bounded creation report for a rejected attempt', async () => {
     const infoSpy = spyOn(logger, 'info').mockImplementation(() => undefined as never);
     const privateMarker = 'Private Manager Marker';
+    try {
+      await expect(
+        createTournament({
+          tournamentName: 'Rejected creation fixture',
+          adminId: '123456',
+          creator: privateMarker,
+          participantSource: 'official',
+          leagueUrl: 'https://example.com/private-league-url',
+          groupFormat: 'points',
+          startGameweek: 'GW1',
+          endGameweek: 'GW38',
+          groupNum: '1',
+          qualifiersPerGroup: '',
+          knockoutFormat: 'none',
+        }),
+      ).rejects.toBeInstanceOf(ValidationError);
 
-    await expect(
-      createTournament({
-        tournamentName: 'Rejected creation fixture',
-        adminId: '123456',
-        creator: privateMarker,
-        participantSource: 'official',
-        leagueUrl: 'https://example.com/private-league-url',
-        groupFormat: 'points',
-        startGameweek: 'GW1',
-        endGameweek: 'GW38',
-        groupNum: '1',
-        qualifiersPerGroup: '',
-        knockoutFormat: 'none',
-      }),
-    ).rejects.toBeInstanceOf(ValidationError);
-
-    const reports = infoSpy.mock.calls
-      .map(([payload]) => payload as unknown as Record<string, unknown>)
-      .filter((payload) => payload.event === 'tournament_creation');
-    expect(reports).toHaveLength(1);
-    expect(reports[0]).toMatchObject({ outcome: 'rejected', tournamentId: null });
-    const serialized = JSON.stringify(reports[0]);
-    expect(serialized).not.toContain(privateMarker);
-    expect(serialized).not.toContain('private-league-url');
-    expect(serialized).not.toContain('123456');
+      const reports = infoSpy.mock.calls
+        .map(([payload]) => payload as unknown as Record<string, unknown>)
+        .filter((payload) => payload.event === 'tournament_creation');
+      expect(reports).toHaveLength(1);
+      expect(reports[0]).toMatchObject({ outcome: 'rejected', tournamentId: null });
+      const serialized = JSON.stringify(reports[0]);
+      expect(serialized).not.toContain(privateMarker);
+      expect(serialized).not.toContain('private-league-url');
+      expect(serialized).not.toContain('123456');
+    } finally {
+      infoSpy.mockRestore();
+    }
   });
 });
