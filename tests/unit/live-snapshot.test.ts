@@ -14,6 +14,7 @@ import {
   type LiveSnapshotMeta,
 } from '../../src/domain/live-snapshot';
 import {
+  buildCurrentSeasonPlayerTeamMap,
   prepareLiveSnapshot,
   syncLiveSnapshot,
   type LiveSnapshotReferenceData,
@@ -251,6 +252,38 @@ function cacheWith(redis: FakeRedis) {
 }
 
 describe('prepareLiveSnapshot', () => {
+  test('builds player identity only from the complete current-season roster', () => {
+    expect(
+      buildCurrentSeasonPlayerTeamMap(
+        [
+          { id: 350, teamId: 12 },
+          { id: 234, teamId: 4 },
+        ],
+        '2526',
+      ),
+    ).toEqual(
+      new Map([
+        [350, 12],
+        [234, 4],
+      ]),
+    );
+  });
+
+  test('rejects duplicate or invalid current-season player identities', () => {
+    expect(() =>
+      buildCurrentSeasonPlayerTeamMap(
+        [
+          { id: 350, teamId: 12 },
+          { id: 350, teamId: 4 },
+        ],
+        '2526',
+      ),
+    ).toThrow('duplicate player IDs');
+    expect(() => buildCurrentSeasonPlayerTeamMap([{ id: 0, teamId: 12 }], '2526')).toThrow(
+      'invalid player identity',
+    );
+  });
+
   test('derives coherent live views and fixture-scoped bonus from one upstream pair', () => {
     const { prepared } = cachePayload();
 

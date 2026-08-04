@@ -9,7 +9,7 @@ describe('fixture cache transitions', () => {
       new Map([[101, 10]]),
     );
 
-    expect([...transitions.staleEventIds]).toEqual([10]);
+    expect([...transitions.invalidatedEventIds]).toEqual([10, 11]);
     expect(transitions.shouldClearUnscheduled).toBe(false);
   });
 
@@ -19,7 +19,7 @@ describe('fixture cache transitions', () => {
       new Map([[101, 10]]),
     );
 
-    expect([...transitions.staleEventIds]).toEqual([10]);
+    expect([...transitions.invalidatedEventIds]).toEqual([10]);
     expect(transitions.shouldClearUnscheduled).toBe(false);
   });
 
@@ -29,11 +29,11 @@ describe('fixture cache transitions', () => {
       new Map([[101, null]]),
     );
 
-    expect([...transitions.staleEventIds]).toEqual([]);
+    expect([...transitions.invalidatedEventIds]).toEqual([10]);
     expect(transitions.shouldClearUnscheduled).toBe(true);
   });
 
-  test('ignores unchanged and previously unknown fixture ownership', () => {
+  test('ignores unchanged ownership and invalidates a newly assigned destination', () => {
     const transitions = resolveFixtureCacheTransitions(
       [
         { id: 101, event: 10 },
@@ -42,7 +42,7 @@ describe('fixture cache transitions', () => {
       new Map([[101, 10]]),
     );
 
-    expect([...transitions.staleEventIds]).toEqual([]);
+    expect([...transitions.invalidatedEventIds]).toEqual([11]);
     expect(transitions.shouldClearUnscheduled).toBe(false);
   });
 });

@@ -4,6 +4,7 @@ import { playerRepository } from '../repositories/players';
 import { transformPlayers } from '../transformers/players';
 import { logError, logInfo } from '../utils/logger';
 import { resolvePublishedSeasonFromEvents } from './cache-season.service';
+import { invalidateLiveSnapshotPlayerRoster } from './live-snapshot-reference-state';
 
 /**
  * Players Service - Business Logic Layer
@@ -49,6 +50,7 @@ export async function syncPlayers(): Promise<{ count: number; errors: number }> 
 
     // 4. Update cache with fresh data
     await playersCache.set(upsertedPlayers, await resolvePublishedSeasonFromEvents(fplData.events));
+    invalidateLiveSnapshotPlayerRoster();
     logInfo('Players cache updated');
 
     const result = {

@@ -36,7 +36,8 @@ are `-1` (no expiry) — data is refreshed **on write**, never expired.
 | `Fixtures:{season}:unscheduled` | hash | `fixtureId` | Domain `EventFixture` | fixtures sync |
 | `FixturesByTeam:{season}:{teamId}` | hash | `eventId` | Team-fixture view (**see §6**) | fixtures sync |
 | `EventLive:{season}:{eventId}` | hash | `elementId` | Domain `EventLive` | coordinated live snapshot; legacy manual live-data sync |
-| `EventLiveExplain:{season}:{eventId}` | hash | `elementId` | Domain `EventLiveExplain` | live explain sync |
+| `EventLiveExplain:{season}:{eventId}` | hash | `elementId` | Frozen legacy explain shape through `savesPoints`; defensive-contribution properties are deliberately omitted | live explain sync |
+| `EventLiveExplainV2:{season}:{eventId}` | hash | `elementId` | Complete Domain `EventLiveExplain`, including `defensiveContribution` and `defensiveContributionPoints` | live explain sync |
 | `EventLiveSummary:{season}:{eventId}` | hash | `elementId` | Domain `EventLiveSummary` | live summary sync |
 | `EventOverallResult:{season}` | hash | `eventId` | Overall-result payload incl. chip data | overall-result sync |
 | `LiveFixture:{season}:{eventId}` | hash | `teamId` | Frozen `LiveFixtureByStatus` JSON | coordinated live snapshot; legacy manual cache job |
@@ -286,6 +287,7 @@ The automatic rollover prefixes are:
 | `Event` | `EventLive` |
 | `Team` | `EventLiveSummary` |
 | `Player` | `EventLiveExplain` |
+|  | `EventLiveExplainV2` |
 | `Phase` | `LiveFixture` |
 | `Fixtures` | `LiveBonus` |
 | `FixturesByTeam` | `LiveBonusV2` |
@@ -296,7 +298,7 @@ The automatic rollover prefixes are:
 |  | `PlayerStat` |
 
 The first core cache write that advances `Season:active` therefore removes
-prior-season keys for all seventeen families in one pass, even if that family
+prior-season keys for all eighteen families in one pass, even if that family
 is not part of the current write. This is **not** a full Redis wipe.
 
 ### Not auto-deleted
@@ -334,7 +336,7 @@ redis-cli HLEN Player:<new-season>     # > 0
 ```bash
 OLD=<old-season>   # e.g. 2526
 for p in Event Team Player Phase PlayerStat EntryInfo Fixtures FixturesByTeam \
-         EventLive EventLiveExplain EventLiveSummary EventOverallResult \
+         EventLive EventLiveExplain EventLiveExplainV2 EventLiveSummary EventOverallResult \
          LiveFixture LiveFixtureV2 LiveBonus LiveBonusV2 LiveSnapshotMeta; do
   echo "$p: $(redis-cli --scan --pattern "$p:$OLD*" | wc -l)"
 done
@@ -368,6 +370,7 @@ redis-cli --scan --pattern "FixturesByTeam:$OLD:*"   | xargs -r redis-cli DEL
 redis-cli --scan --pattern "EntryInfo:$OLD"          | xargs -r redis-cli DEL
 redis-cli --scan --pattern "EventLive:$OLD:*"        | xargs -r redis-cli DEL
 redis-cli --scan --pattern "EventLiveExplain:$OLD:*" | xargs -r redis-cli DEL
+redis-cli --scan --pattern "EventLiveExplainV2:$OLD:*" | xargs -r redis-cli DEL
 redis-cli --scan --pattern "EventLiveSummary:$OLD:*" | xargs -r redis-cli DEL
 redis-cli --scan --pattern "EventOverallResult:$OLD" | xargs -r redis-cli DEL
 redis-cli --scan --pattern "LiveFixture:$OLD:*"      | xargs -r redis-cli DEL
@@ -378,7 +381,7 @@ redis-cli --scan --pattern "LiveSnapshotMeta:$OLD:*" | xargs -r redis-cli DEL
 redis-cli --scan --pattern "PlayerStat:$OLD"         | xargs -r redis-cli DEL
 ```
 
-(All seventeen season-scoped families are normally already gone via the
+(All eighteen season-scoped families are normally already gone via the
 automatic prefix pass. Delete only the explicit leftovers reported by Step 2.)
 
 **Step 5 — verify**

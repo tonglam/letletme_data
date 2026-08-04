@@ -69,23 +69,21 @@ export async function syncFixtures(eventId?: number): Promise<{ count: number; e
       async () => {
         const existingEvents = await fixtureRepository.findEventIdsByFixtureIds(fixtureIds);
         const transitions = resolveFixtureCacheTransitions(fixtures, existingEvents);
-        const affectedEventIds = new Set<number>(transitions.staleEventIds);
-        for (const fixture of schedulableFixtures) affectedEventIds.add(fixture.event!);
         return {
-          eventIds: [...affectedEventIds],
+          eventIds: [...transitions.invalidatedEventIds],
           context: transitions,
         };
       },
       async (transitions) => {
-        if (transitions.staleEventIds.size > 0) {
+        if (transitions.invalidatedEventIds.size > 0) {
           await Promise.all(
-            Array.from(transitions.staleEventIds).map((staleEventId) =>
-              liveSnapshotCache.retire(staleEventId),
+            Array.from(transitions.invalidatedEventIds).map((invalidatedEventId) =>
+              liveSnapshotCache.retire(invalidatedEventId),
             ),
           );
-          logInfo('Retired stale live snapshots after fixture event moves', {
+          logInfo('Retired live snapshots before fixture identity changes', {
             ...(eventId ? { eventId } : {}),
-            staleEventIds: Array.from(transitions.staleEventIds),
+            invalidatedEventIds: Array.from(transitions.invalidatedEventIds),
           });
         }
         if (unscheduledFixtures.length > 0) {

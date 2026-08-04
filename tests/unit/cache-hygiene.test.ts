@@ -173,6 +173,7 @@ describe('season rollover cleanup', () => {
       'EventLive',
       'EventLiveSummary',
       'EventLiveExplain',
+      'EventLiveExplainV2',
       'LiveFixture',
       'LiveFixtureV2',
       'LiveBonus',

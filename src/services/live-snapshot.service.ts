@@ -1,10 +1,9 @@
 import { sql } from 'drizzle-orm';
 
-import { players } from '../db/schemas/index.schema';
 import { getDb } from '../db/singleton';
 import { fplClient } from '../clients/fpl';
 import { getActiveCacheSeason } from '../cache/cache-season';
-import { liveSnapshotCache } from '../cache/operations';
+import { liveSnapshotCache, playersCache } from '../cache/operations';
 import {
   buildPlayingMatches,
   computeFixtureSummedBonusByTeam,
@@ -28,6 +27,7 @@ import {
   type LiveFixtureViews,
 } from './live-fixtures.service';
 import { serializeBonusByTeam } from './live-bonus.service';
+import { getLiveSnapshotPlayerRosterVersion } from './live-snapshot-reference-state';
 
 const REFERENCE_DATA_TTL_MS = 15 * 60 * 1000;
 // "LLME" as a signed-safe 32-bit advisory-lock namespace. The event ID is
@@ -156,6 +156,7 @@ export async function withFixtureSyncSerialization<TContext, TResult>(
 
 let referenceDataMemo: {
   season: string;
+  playerRosterVersion: number;
   value: LiveSnapshotReferenceData;
   expiresAt: number;
 } | null = null;
@@ -166,25 +167,59 @@ export function resetLiveSnapshotReferenceDataMemo(): void {
 
 export async function loadLiveSnapshotReferenceData(): Promise<LiveSnapshotReferenceData> {
   const season = await getActiveCacheSeason();
+  const playerRosterVersion = getLiveSnapshotPlayerRosterVersion();
   if (
     referenceDataMemo &&
     referenceDataMemo.season === season &&
+    referenceDataMemo.playerRosterVersion === playerRosterVersion &&
     referenceDataMemo.expiresAt > Date.now()
   ) {
     return referenceDataMemo.value;
   }
 
-  const db = await getDb();
-  const [teamMaps, playerRows] = await Promise.all([
+  const [teamMaps, currentPlayers] = await Promise.all([
     loadLiveFixtureTeamMaps(),
-    db.select({ id: players.id, teamId: players.teamId }).from(players),
+    playersCache.get(),
   ]);
+  if (!currentPlayers || currentPlayers.length === 0) {
+    throw new Error(
+      `Current-season Player:${season} roster is missing; refusing to prepare a live snapshot`,
+    );
+  }
+  const playerTeamById = buildCurrentSeasonPlayerTeamMap(currentPlayers, season);
   const value: LiveSnapshotReferenceData = {
     ...teamMaps,
-    playerTeamById: new Map(playerRows.map((row) => [row.id, row.teamId])),
+    playerTeamById,
   };
-  referenceDataMemo = { season, value, expiresAt: Date.now() + REFERENCE_DATA_TTL_MS };
+  referenceDataMemo = {
+    season,
+    playerRosterVersion,
+    value,
+    expiresAt: Date.now() + REFERENCE_DATA_TTL_MS,
+  };
   return value;
+}
+
+export function buildCurrentSeasonPlayerTeamMap(
+  currentPlayers: readonly { id: number; teamId: number }[],
+  season: string,
+): Map<number, number> {
+  const playerTeamById = new Map<number, number>();
+  for (const player of currentPlayers) {
+    if (
+      !Number.isInteger(player.id) ||
+      player.id <= 0 ||
+      !Number.isInteger(player.teamId) ||
+      player.teamId <= 0
+    ) {
+      throw new Error(`Current-season Player:${season} roster contains invalid player identity`);
+    }
+    if (playerTeamById.has(player.id)) {
+      throw new Error(`Current-season Player:${season} roster contains duplicate player IDs`);
+    }
+    playerTeamById.set(player.id, player.teamId);
+  }
+  return playerTeamById;
 }
 
 function resolveSnapshotState(fixtures: readonly Fixture[]): LiveSnapshotState {
@@ -220,7 +255,9 @@ export function prepareLiveSnapshot(
   }
   const expectedLiveElementIds = [...referenceData.playerTeamById.keys()];
   if (expectedLiveElementIds.length === 0) {
-    throw new Error(`No persisted player identity baseline for live snapshot event ${eventId}`);
+    throw new Error(
+      `No current-season player identity baseline for live snapshot event ${eventId}`,
+    );
   }
   const liveElementIdSet = new Set(liveElementIds);
   const expectedLiveElementIdSet = new Set(expectedLiveElementIds);

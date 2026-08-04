@@ -4,13 +4,16 @@ assertIntegrationEnv();
 import { beforeAll, describe, expect, test } from 'bun:test';
 import { eq } from 'drizzle-orm';
 
+import { createEventLiveExplainCache } from '../../src/cache/event-live-explains-cache';
 import { eventLiveExplainCache } from '../../src/cache/operations';
+import { redisSingleton } from '../../src/cache/singleton';
 import { eventLiveExplains } from '../../src/db/schemas/index.schema';
 import { getDb } from '../../src/db/singleton';
 import { syncEventLiveExplain } from '../../src/services/event-live-explains.service';
 import { syncEventLives } from '../../src/services/event-lives.service';
 import { resolveCurrentEvent } from './helpers/current-event';
 import { ensurePlayers } from './helpers/reference-data';
+import { transformedExplainsFixture } from '../fixtures/event-live-explains.fixtures';
 
 const currentEvent = await resolveCurrentEvent();
 
@@ -287,5 +290,44 @@ describe.skipIf(!currentEvent)('Event Live Explains Integration Tests', () => {
         expect(cacheElementIds.has(id)).toBe(true);
       });
     });
+  });
+});
+
+describe('Event Live Explain Redis Contract Integration', () => {
+  test('keeps legacy JSON frozen and publishes/clears additive V2 in real Redis', async () => {
+    const redis = await redisSingleton.getClient();
+    const season = '9999';
+    const eventId = 99;
+    const cache = createEventLiveExplainCache({
+      getRedisClient: async () => redis,
+      getSeason: async () => season,
+    });
+
+    try {
+      await cache.clearByEventId(eventId);
+      await cache.set(eventId, transformedExplainsFixture);
+      const [legacyRaw, v2Raw] = await Promise.all([
+        redis.hget(`EventLiveExplain:${season}:${eventId}`, '101'),
+        redis.hget(`EventLiveExplainV2:${season}:${eventId}`, '101'),
+      ]);
+
+      expect(legacyRaw).not.toBeNull();
+      expect(v2Raw).not.toBeNull();
+      expect(JSON.parse(legacyRaw!)).not.toHaveProperty('defensiveContribution');
+      expect(JSON.parse(v2Raw!)).toMatchObject({
+        defensiveContribution: 10,
+        defensiveContributionPoints: 2,
+      });
+
+      await cache.clearByEventId(eventId);
+      expect(
+        await redis.exists(
+          `EventLiveExplain:${season}:${eventId}`,
+          `EventLiveExplainV2:${season}:${eventId}`,
+        ),
+      ).toBe(0);
+    } finally {
+      await cache.clearByEventId(eventId);
+    }
   });
 });

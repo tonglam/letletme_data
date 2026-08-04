@@ -55,6 +55,7 @@ export const SEASON_CACHE_PREFIXES = [
   'EventLive',
   'EventLiveSummary',
   'EventLiveExplain',
+  'EventLiveExplainV2',
   'LiveFixture',
   'LiveFixtureV2',
   'LiveBonus',

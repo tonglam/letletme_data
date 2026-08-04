@@ -4,32 +4,37 @@ export interface FixtureEventIdentity {
 }
 
 export interface FixtureCacheTransitions {
-  staleEventIds: Set<number>;
+  invalidatedEventIds: Set<number>;
   shouldClearUnscheduled: boolean;
 }
 
 /**
  * Compare the just-accepted FPL fixture identities with their persisted event
  * ownership before upsert. Any prior event loses its entire coordinated live
- * snapshot when a fixture moves away; a fixture leaving the unscheduled bucket
- * invalidates that separate cache as well.
+ * snapshot when a fixture moves away. Any assigned destination also loses its
+ * snapshot because its accepted fixture identity set is changing; otherwise a
+ * snapshot-owned destination hash would reject the compatibility fixture write
+ * and retain an incomplete view. A fixture leaving the unscheduled bucket also
+ * invalidates that separate cache.
  */
 export function resolveFixtureCacheTransitions(
   fixtures: readonly FixtureEventIdentity[],
   previousEventByFixtureId: ReadonlyMap<number, number | null>,
 ): FixtureCacheTransitions {
-  const staleEventIds = new Set<number>();
+  const invalidatedEventIds = new Set<number>();
   let shouldClearUnscheduled = false;
 
   for (const fixture of fixtures) {
+    const hadPreviousOwnership = previousEventByFixtureId.has(fixture.id);
     const previousEventId = previousEventByFixtureId.get(fixture.id);
-    if (previousEventId === undefined || previousEventId === fixture.event) continue;
-    if (previousEventId === null) {
+    if (hadPreviousOwnership && previousEventId === fixture.event) continue;
+    if (hadPreviousOwnership && previousEventId === null) {
       if (fixture.event !== null) shouldClearUnscheduled = true;
-    } else {
-      staleEventIds.add(previousEventId);
+    } else if (previousEventId !== undefined && previousEventId !== null) {
+      invalidatedEventIds.add(previousEventId);
     }
+    if (fixture.event !== null) invalidatedEventIds.add(fixture.event);
   }
 
-  return { staleEventIds, shouldClearUnscheduled };
+  return { invalidatedEventIds, shouldClearUnscheduled };
 }
