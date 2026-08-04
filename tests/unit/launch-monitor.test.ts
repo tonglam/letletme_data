@@ -6,6 +6,7 @@ import {
   LAUNCH_MONITOR_CRON_PATTERN,
   type LaunchMonitorDependencies,
 } from '../../src/jobs/launch.jobs';
+import { NotificationDeliveryRejectedError } from '../../src/utils/notify';
 
 class FakeRedis {
   readonly values = new Map<string, string>();
@@ -239,6 +240,33 @@ describe('launch monitor', () => {
     const retry = await evaluateLaunchMonitor(deps);
     expect(retry.delivery).toBe('locked');
     expect(sends).toBe(1);
+  });
+
+  test('releases the lock after a definite Telegram rejection so the next tick can retry', async () => {
+    const redis = new FakeRedis();
+    let sends = 0;
+    const deps = dependencies({
+      redis,
+      send: async () => {
+        sends += 1;
+        throw new NotificationDeliveryRejectedError(429, 'Too Many Requests');
+      },
+    });
+
+    await expect(evaluateLaunchMonitor(deps)).rejects.toThrow('Telegram API error: 429');
+    expect(redis.values.has('LaunchNotification:warning:2026:lock')).toBe(false);
+
+    const retry = await evaluateLaunchMonitor(
+      dependencies({
+        redis,
+        send: async () => {
+          sends += 1;
+        },
+      }),
+    );
+
+    expect(retry.delivery).toBe('sent');
+    expect(sends).toBe(2);
   });
 
   test('retries the delivered marker before releasing the notification lock', async () => {

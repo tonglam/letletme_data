@@ -9,7 +9,11 @@ import { fplClient, type FPLBootstrapResponse } from '../clients/fpl';
 import { runDataSyncAttempt } from '../utils/data-sync-attempt';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { logError, logInfo } from '../utils/logger';
-import { sendTelegramMessage, type NotificationDeliveryResult } from '../utils/notify';
+import {
+  NotificationDeliveryRejectedError,
+  sendTelegramMessage,
+  type NotificationDeliveryResult,
+} from '../utils/notify';
 import { CRON_TIMEZONE } from '../utils/timezone';
 
 export const LAUNCH_MONITOR_CRON_PATTERN = '*/5 * * * *';
@@ -150,7 +154,9 @@ async function sendLaunchNotificationOnce(
         logError('Failed to restore skipped launch notification lock lease', error);
       }
     }
-    if (deliveryAttempted && !deliverySkipped && !markerPersisted) {
+    const rejectedDelivery =
+      deliveryError instanceof NotificationDeliveryRejectedError ? deliveryError : null;
+    if (deliveryAttempted && !deliverySkipped && !markerPersisted && !rejectedDelivery) {
       logError(
         notificationDelivered
           ? 'Launch notification was delivered but its marker was not persisted; retaining lock'
@@ -158,6 +164,11 @@ async function sendLaunchNotificationOnce(
         deliveryError,
       );
     } else {
+      if (rejectedDelivery) {
+        logInfo('Launch notification was rejected by Telegram; releasing the retry lock', {
+          status: rejectedDelivery.status,
+        });
+      }
       try {
         await releaseNotificationLock(redis, lockKey, token);
       } catch (error) {

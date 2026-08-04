@@ -4,6 +4,17 @@ import { logError, logInfo, logWarn } from './logger';
 
 export type NotificationDeliveryResult = 'sent' | 'skipped';
 
+/** The provider answered with a definite rejection; no message was accepted. */
+export class NotificationDeliveryRejectedError extends Error {
+  readonly status: number;
+
+  constructor(status: number, statusText: string) {
+    super(`Telegram API error: ${status} ${statusText}`);
+    this.name = 'NotificationDeliveryRejectedError';
+    this.status = status;
+  }
+}
+
 export async function sendTelegramMessage(message: string): Promise<NotificationDeliveryResult> {
   const config = getConfig();
   const token = config.TELEGRAM_BOT_TOKEN;
@@ -24,7 +35,7 @@ export async function sendTelegramMessage(message: string): Promise<Notification
     });
 
     if (!response.ok) {
-      throw new Error(`Telegram API error: ${response.status} ${response.statusText}`);
+      throw new NotificationDeliveryRejectedError(response.status, response.statusText);
     }
 
     logInfo('Telegram notification sent', { messageLength: message.length });
