@@ -30,6 +30,7 @@ import type { WorkerRuntime } from './worker-runtime';
  */
 async function processLeagueSyncJob(job: Job<LeagueSyncJobData>) {
   const { eventId, tournamentId, source } = job.data;
+  const runId = job.data.runId ?? String(job.id ?? `${job.name}-${job.timestamp}`);
   const context = {
     jobType: 'queue' as const,
     queueName: job.queueName,
@@ -48,7 +49,7 @@ async function processLeagueSyncJob(job: Job<LeagueSyncJobData>) {
     {
       queue: job.queueName,
       jobName: job.name,
-      runId: String(job.id ?? `${job.name}-${job.timestamp}`),
+      runId,
       source: tournamentId === undefined ? 'coordinator' : source,
       attempt: job.attemptsMade + 1,
       targetEventId: eventId,
@@ -67,10 +68,10 @@ async function processLeagueSyncJob(job: Job<LeagueSyncJobData>) {
           runTrackedJob(context, async () => {
             switch (job.name) {
               case LEAGUE_JOBS.LEAGUE_EVENT_PICKS:
-                return processLeagueEventPicksJob(eventId, tournamentId);
+                return processLeagueEventPicksJob(eventId, tournamentId, runId);
 
               case LEAGUE_JOBS.LEAGUE_EVENT_RESULTS:
-                return processLeagueEventResultsJob(eventId, tournamentId);
+                return processLeagueEventResultsJob(eventId, tournamentId, runId);
 
               default:
                 throw new Error(`Unknown job name: ${job.name}`);

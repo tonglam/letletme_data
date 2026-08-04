@@ -15,6 +15,8 @@ export interface LeagueSyncJobData {
   tournamentId?: number; // If specified, process only this tournament; if not, coordinator job
   source: 'cron' | 'manual' | 'cascade';
   triggeredAt: string;
+  /** Correlates a coordinator and all of its per-tournament child attempts. */
+  runId?: string;
 }
 
 const tieredQueueSet = createTieredQueueSet<LeagueSyncJobData>(leagueSyncQueueName, {

@@ -231,6 +231,15 @@ describe('deterministic result job retention', () => {
       expect(call.opts.removeOnFail).toBe(true);
     }
   });
+
+  test('preserves a coordinator correlation ID in league child job data', async () => {
+    await enqueueLeagueEventResults(12, 'cascade', {
+      tournamentId: 42,
+      runId: 'league-run-42',
+    });
+
+    expect(leagueSyncAddCalls[0].data.runId).toBe('league-run-42');
+  });
 });
 
 describe('stableHash', () => {

@@ -16,7 +16,9 @@ import { loadTeamsBasicInfo } from '../utils/teams';
 import { getCurrentEvent, getNextEvent } from './events.service';
 import { resolvePlayerSyncEvent } from './player-sync-event.service';
 
-export async function syncCurrentPlayerStats(): Promise<{
+export async function syncCurrentPlayerStats(options?: {
+  onTargetEventResolved?: (eventId: EventId) => void;
+}): Promise<{
   count: number;
   eventId: EventId;
   errors: number;
@@ -35,6 +37,7 @@ export async function syncCurrentPlayerStats(): Promise<{
   if (!syncEvent) {
     throw new Error('No current or next event found for player stats');
   }
+  options?.onTargetEventResolved?.(syncEvent.event.id);
 
   if (fplData.elements.length === 0) {
     throw new Error('No player stats returned from FPL API');

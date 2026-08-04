@@ -59,6 +59,24 @@ function buildDependencies(
 }
 
 describe('player-values synchronization orchestration', () => {
+  test('reports the resolved target before later synchronization work fails', async () => {
+    const resolvedEvents: number[] = [];
+    const sync = createPlayerValuesSync(
+      buildDependencies({
+        findLatestForAllPlayers: async () => {
+          throw new Error('database unavailable after target resolution');
+        },
+      }),
+    );
+
+    await expect(
+      sync(changeDate, {
+        onTargetEventResolved: (eventId) => resolvedEvents.push(eventId),
+      }),
+    ).rejects.toThrow('database unavailable after target resolution');
+    expect(resolvedEvents).toEqual([1]);
+  });
+
   test('keeps the same season floor after the calendar year changes', () => {
     expect(getPlayerValueSeasonFloor('2026-08-15T17:30:00Z')).toBe('20260601');
     expect(getPlayerValueSeasonFloor('2027-01-02T11:00:00Z')).toBe('20260601');

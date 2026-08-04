@@ -158,6 +158,7 @@ function enrichStoredRows(
 export function createPlayerValuesSync(dependencies: PlayerValuesSyncDependencies) {
   return async function syncForDate(
     changeDate: string = formatCronDateKey(),
+    options?: { onTargetEventResolved?: (eventId: number) => void },
   ): Promise<{ count: number; eventId?: number }> {
     logInfo('Starting daily player values sync');
 
@@ -181,6 +182,7 @@ export function createPlayerValuesSync(dependencies: PlayerValuesSyncDependencie
     if (!syncEvent) {
       throw new Error('No current or next event found for player values');
     }
+    options?.onTargetEventResolved?.(syncEvent.event.id);
 
     if (!Array.isArray(bootstrapData.elements) || bootstrapData.elements.length === 0) {
       throw new Error('No player values returned from FPL API');

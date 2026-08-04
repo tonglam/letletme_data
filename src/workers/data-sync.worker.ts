@@ -14,7 +14,11 @@ import { syncPlayers } from '../services/players.service';
 import { syncPlayerPricesForDate } from '../services/player-prices.service';
 import { syncCurrentPlayerStats, syncPlayerStatsForEvent } from '../services/player-stats.service';
 import { syncCurrentPlayerValues } from '../services/player-values.service';
-import { resolveBullMqAttemptQueueWaitMs, runDataSyncAttempt } from '../utils/data-sync-attempt';
+import {
+  resolveBullMqAttemptQueueWaitMs,
+  runDataSyncAttempt,
+  type DataSyncAttemptContext,
+} from '../utils/data-sync-attempt';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { syncTeams } from '../services/teams.service';
 import { getQueueConnection } from '../utils/queue';
@@ -35,60 +39,63 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
     attempt: job.attemptsMade + 1,
     queueWaitMs: resolveBullMqAttemptQueueWaitMs(job),
   };
+  const attemptContext: DataSyncAttemptContext = {
+    queue: job.queueName,
+    jobName: job.name,
+    runId: job.data?.runId ?? String(job.id ?? `${job.name}-${job.timestamp}`),
+    source: job.data?.source,
+    attempt: job.attemptsMade + 1,
+    targetEventId: job.data?.eventId,
+    queueWaitMs: context.queueWaitMs,
+  };
+  const recordResolvedTarget = (eventId: number) => {
+    attemptContext.targetEventId = eventId;
+  };
 
   logJobTriggered(context);
 
-  return runDataSyncAttempt(
-    {
-      queue: job.queueName,
-      jobName: job.name,
-      runId: job.data?.runId ?? String(job.id ?? `${job.name}-${job.timestamp}`),
-      source: job.data?.source,
-      attempt: job.attemptsMade + 1,
-      targetEventId: job.data?.eventId,
-      queueWaitMs: context.queueWaitMs,
-    },
-    () =>
-      withMutationConflictGuard(
-        {
-          queueName: job.queueName,
-          jobName: job.name,
-          jobId: String(job.id),
-        },
-        () =>
-          runTrackedJob(context, async () => {
-            switch (job.name) {
-              case 'events':
-                return syncEvents();
-              case 'fixtures':
-                return syncFixtures(job.data.eventId);
-              case 'fixtures-all-gameweeks':
-                // Per-GW loop with isolated errors — not the same as syncFixtures(undefined).
-                return syncAllGameweeks();
-              case 'teams':
-                return syncTeams();
-              case 'players':
-                return syncPlayers();
-              case 'player-prices':
-                if (!job.data.changeDate) {
-                  throw new Error('player-prices job requires changeDate');
-                }
-                return syncPlayerPricesForDate(job.data.changeDate);
-              case 'player-stats':
-                return job.data.eventId !== undefined
-                  ? syncPlayerStatsForEvent(job.data.eventId)
-                  : syncCurrentPlayerStats();
-              case 'phases':
-                return syncPhases();
-              case 'player-values':
-                return syncCurrentPlayerValues(
-                  job.data.changeDate ?? formatCronDateKey(new Date(job.data.triggeredAt)),
-                );
-              default:
-                throw new Error(`Unknown data-sync job: ${job.name}`);
-            }
-          }),
-      ),
+  return runDataSyncAttempt(attemptContext, () =>
+    withMutationConflictGuard(
+      {
+        queueName: job.queueName,
+        jobName: job.name,
+        jobId: String(job.id),
+      },
+      () =>
+        runTrackedJob(context, async () => {
+          switch (job.name) {
+            case 'events':
+              return syncEvents();
+            case 'fixtures':
+              return syncFixtures(job.data.eventId);
+            case 'fixtures-all-gameweeks':
+              // Per-GW loop with isolated errors — not the same as syncFixtures(undefined).
+              return syncAllGameweeks();
+            case 'teams':
+              return syncTeams();
+            case 'players':
+              return syncPlayers();
+            case 'player-prices':
+              if (!job.data.changeDate) {
+                throw new Error('player-prices job requires changeDate');
+              }
+              return syncPlayerPricesForDate(job.data.changeDate);
+            case 'player-stats':
+              return job.data.eventId !== undefined
+                ? syncPlayerStatsForEvent(job.data.eventId)
+                : syncCurrentPlayerStats({ onTargetEventResolved: recordResolvedTarget });
+            case 'phases':
+              return syncPhases();
+            case 'player-values':
+              return syncCurrentPlayerValues(
+                job.data.changeDate ?? formatCronDateKey(new Date(job.data.triggeredAt)),
+                { onTargetEventResolved: recordResolvedTarget },
+              );
+            default:
+              throw new Error(`Unknown data-sync job: ${job.name}`);
+          }
+        }),
+    ),
   );
 };
 

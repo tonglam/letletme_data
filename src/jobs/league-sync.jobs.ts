@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import {
   getLeagueSyncQueue,
   LEAGUE_JOBS,
@@ -13,6 +15,7 @@ export type LeagueSyncEnqueueOptions = {
   tournamentId?: number;
   delay?: number;
   jobId?: string;
+  runId?: string;
 };
 
 async function enqueueLeagueSyncJob(
@@ -24,19 +27,21 @@ async function enqueueLeagueSyncJob(
   try {
     const tier = getLeagueSyncJobPriority(jobName as LeagueSyncPriorityJobName);
     const queue = getLeagueSyncQueue(tier);
+    const runId = options.runId ?? randomUUID();
     const jobData: LeagueSyncJobData = {
       eventId,
       tournamentId: options.tournamentId,
       source,
       triggeredAt: new Date().toISOString(),
+      runId,
     };
 
     // Callers may provide a deterministic ID for bounded recurring slots.
     // Other cron, manual, and cascade runs retain unique IDs.
-    const runId = Date.now();
+    const jobNonce = Date.now();
     const generatedJobId = options.tournamentId
-      ? `${jobName}-e${eventId}-t${options.tournamentId}-${runId}`
-      : `${jobName}-e${eventId}-coordinator-${runId}`;
+      ? `${jobName}-e${eventId}-t${options.tournamentId}-${jobNonce}`
+      : `${jobName}-e${eventId}-coordinator-${jobNonce}`;
     const jobId = options.jobId ?? generatedJobId;
 
     const job = await queue.add(jobName, jobData, {
@@ -53,6 +58,7 @@ async function enqueueLeagueSyncJob(
     logInfo('League sync job enqueued', {
       jobId: job.id,
       jobName,
+      runId: job.data?.runId ?? runId,
       eventId,
       tournamentId: options.tournamentId,
       source,

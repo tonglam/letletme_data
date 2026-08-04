@@ -22,7 +22,8 @@ async function enqueueDataSyncJob(
     const jobId = options.jobId ?? defaultDataSyncJobId(jobName, source, options);
     const hasDeterministicId = jobId !== undefined;
     const removeOnSettle = options.removeOnSettle ?? hasDeterministicId;
-    const job = await queue.add(jobName, createDataSyncJobData(source, options), {
+    const jobData = createDataSyncJobData(source, options);
+    const job = await queue.add(jobName, jobData, {
       attempts: 3,
       backoff: {
         type: 'exponential',
@@ -34,6 +35,10 @@ async function enqueueDataSyncJob(
 
     logInfo('Data sync job enqueued', {
       jobId: job.id,
+      // BullMQ returns the existing job when a deterministic ID is already
+      // queued. Log that stored correlation ID rather than the discarded
+      // candidate so an operator can join a trigger to its attempt report.
+      runId: job.data?.runId ?? jobData.runId,
       jobName,
       source,
       tier,
