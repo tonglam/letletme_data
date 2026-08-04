@@ -1,33 +1,15 @@
-import { randomUUID } from 'node:crypto';
-
 import { getDataSyncJobPriority, type DataSyncPriorityJobName } from '../domain/job-priority';
 import { getDataSyncQueue, type DataSyncJobName } from '../queues/data-sync.queue';
 import { logError, logInfo } from '../utils/logger';
 import { formatCronDateKey } from '../utils/timezone';
+import {
+  createDataSyncJobData,
+  defaultDataSyncJobId,
+  type DataSyncEnqueueOptions,
+  type DataSyncJobSource,
+} from './data-sync-job-definition';
 
-export type DataSyncJobSource = 'cron' | 'manual' | 'api' | 'event-transition' | 'cascade';
-
-export interface DataSyncEnqueueOptions {
-  jobId?: string;
-  eventId?: number;
-  changeDate?: string;
-  /** When true (default for explicit jobId), remove job on settle so re-triggers work. */
-  removeOnSettle?: boolean;
-}
-
-function defaultDataSyncJobId(
-  jobName: DataSyncJobName,
-  source: DataSyncJobSource,
-  options: DataSyncEnqueueOptions,
-): string | undefined {
-  // API/manual triggers dedupe in the waiting room; cron stays unique per tick.
-  if (source !== 'api' && source !== 'manual') {
-    return undefined;
-  }
-  const eventPart = options.eventId !== undefined ? `-e${options.eventId}` : '';
-  const datePart = options.changeDate !== undefined ? `-${options.changeDate}` : '';
-  return `${jobName}${eventPart}${datePart}-${source}`;
-}
+export type { DataSyncEnqueueOptions, DataSyncJobSource } from './data-sync-job-definition';
 
 async function enqueueDataSyncJob(
   jobName: DataSyncJobName,
@@ -40,25 +22,15 @@ async function enqueueDataSyncJob(
     const jobId = options.jobId ?? defaultDataSyncJobId(jobName, source, options);
     const hasDeterministicId = jobId !== undefined;
     const removeOnSettle = options.removeOnSettle ?? hasDeterministicId;
-    const job = await queue.add(
-      jobName,
-      {
-        source,
-        triggeredAt: new Date().toISOString(),
-        runId: randomUUID(),
-        ...(options.eventId !== undefined ? { eventId: options.eventId } : {}),
-        ...(options.changeDate !== undefined ? { changeDate: options.changeDate } : {}),
+    const job = await queue.add(jobName, createDataSyncJobData(source, options), {
+      attempts: 3,
+      backoff: {
+        type: 'exponential',
+        delay: 60_000,
       },
-      {
-        attempts: 3,
-        backoff: {
-          type: 'exponential',
-          delay: 60_000,
-        },
-        jobId,
-        ...(removeOnSettle ? { removeOnComplete: true, removeOnFail: true } : {}),
-      },
-    );
+      jobId,
+      ...(removeOnSettle ? { removeOnComplete: true, removeOnFail: true } : {}),
+    });
 
     logInfo('Data sync job enqueued', {
       jobId: job.id,
