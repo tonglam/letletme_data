@@ -364,6 +364,7 @@ export async function setupTournamentStructure(tournamentId: number): Promise<vo
     await tournamentInfoRepository.markSetupProgress(tournamentId, 'enriching_history', 0, 0);
     setupIssues.push(
       ...(await enrichTournamentHistory(tournamentId, entryIds, window, {
+        setupSeason,
         onPlan: (plan) => {
           enrichmentPlan = plan;
         },

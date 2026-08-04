@@ -78,6 +78,7 @@ async function reconcileTournamentRosterUnlocked(
   } else {
     await tournamentRosterRepository.markSyncProcessing(tournamentId);
   }
+  let setupEnqueueRequired = false;
   try {
     // Capture annual authority before the upstream roster read. The same
     // season is revalidated under the publication transaction's shared fence
@@ -173,7 +174,8 @@ async function reconcileTournamentRosterUnlocked(
 
     const needsSetup =
       publication.changed || options?.resumeAfterSetup || tournament.standingsReadyAt === null;
-    if (needsSetup && !publication.automaticallyPaused) {
+    setupEnqueueRequired = needsSetup && !publication.automaticallyPaused;
+    if (setupEnqueueRequired) {
       await enqueueTournamentSetup(tournamentId, options?.resumeAfterSetup ? 'resume' : 'roster', {
         forceNew: true,
         // The lifecycle lock is held here. If BullMQ still reports an active
@@ -204,7 +206,7 @@ async function reconcileTournamentRosterUnlocked(
     const message = error instanceof Error ? error.message : 'Tournament roster sync failed.';
     await Promise.allSettled([
       tournamentRosterRepository.markSyncFailed(tournamentId, message),
-      ...(options?.resumeAfterSetup
+      ...(options?.resumeAfterSetup || setupEnqueueRequired
         ? [tournamentInfoRepository.markSetupResult(tournamentId, 'failed', message)]
         : []),
     ]);

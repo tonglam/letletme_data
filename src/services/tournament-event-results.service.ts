@@ -32,6 +32,8 @@ export type TournamentEventResultsSyncOptions = {
   live?: EventPointsPayload;
   skipTransfers?: boolean;
   transfersByEntry?: ReadonlyMap<number, RawFPLEntryTransfersResponse>;
+  /** Season captured before the setup/read-model plan began. */
+  season?: string;
 };
 
 async function resolveEventPointsPayload(
@@ -96,7 +98,7 @@ export async function syncTournamentEventResultsForEntryIds(
     return { eventId, totalEntries: 0, synced: 0, errors: 0 };
   }
 
-  const checkpointSeason = await getActiveCacheSeason();
+  const checkpointSeason = options?.season ?? (await getActiveCacheSeason());
   const live = await resolveEventPointsPayload(eventId, options?.live);
   const pointsByElement = new Map<number, number>();
   for (const element of live.elements) {

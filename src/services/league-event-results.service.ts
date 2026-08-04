@@ -291,7 +291,7 @@ function buildEntryResultData(
 export async function syncLeagueEventResultsByTournament(
   tournamentId: number,
   eventId: number,
-  options?: { concurrency?: number },
+  options?: { concurrency?: number; season?: string },
 ): Promise<{
   tournamentId: number;
   eventId: number;
@@ -305,7 +305,7 @@ export async function syncLeagueEventResultsByTournament(
   if (!tournament) {
     throw new Error(`Tournament ${tournamentId} not found`);
   }
-  const checkpointSeason = await getActiveCacheSeason();
+  const checkpointSeason = options?.season ?? (await getActiveCacheSeason());
 
   const entryIds = await resolveTournamentEntries(tournament);
   const entryInfos = await entryInfoRepository.findByIds(entryIds);

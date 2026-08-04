@@ -82,7 +82,9 @@ export async function runPostMatchConsolidation(): Promise<unknown | null> {
 
   const job = await enqueueLiveSnapshot(currentEvent.id, 'cascade', {
     persistEventLives: true,
-    finalizeEvent: true,
+    // Provisional slots are useful for recovery, but the worker must not be
+    // asked to publish a final event checkpoint until FPL marks data checked.
+    finalizeEvent: resultSlot.startsWith('final-'),
     jobId: `live-snapshot-e${currentEvent.id}-post-${resultSlot}`,
   });
   if (job) {

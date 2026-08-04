@@ -35,12 +35,15 @@ export async function syncEntryInfo(
   snapshotSeason?: string,
 ) {
   logInfo('Starting entry info sync', { entryId });
-  const [summary, history, currentEvent, latestFinalizedEvent, activeSeason] = await Promise.all([
+  // Capture season authority before any upstream reads. A rollover during the
+  // parallel FPL requests must fail the fenced commit rather than pairing old
+  // payloads with the new season.
+  const activeSeason = snapshotSeason ?? (await getActiveCacheSeason());
+  const [summary, history, currentEvent, latestFinalizedEvent] = await Promise.all([
     client.getEntrySummary(entryId),
     client.getEntryHistory(entryId),
     getCurrentEvent(),
     eventRepository.findLatestFinalized(),
-    snapshotSeason ? Promise.resolve(snapshotSeason) : getActiveCacheSeason(),
   ]);
   const lastEventId = currentEvent ? currentEvent.id - 1 : null;
   const snapshotSyncedThroughEventId = Math.max(

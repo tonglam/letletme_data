@@ -441,14 +441,24 @@ export async function enrichTournamentHistory(
   window: TournamentBackfillWindow | null,
   options?: {
     includeTransferHistory?: boolean;
+    /** Keep every enrichment writer fenced to the setup's captured season. */
+    setupSeason?: string;
     onPlan?: (plan: TournamentEnrichmentPlan) => void | Promise<void>;
     onProgress?: (completed: number, total: number) => Promise<void>;
   },
 ): Promise<TournamentSetupIssue[]> {
   const issues: TournamentSetupIssue[] = [];
   const targetEventId = window?.endEventId ?? 0;
-  const transferSeason =
-    options?.includeTransferHistory === false ? null : await getActiveCacheSeason();
+  // Capture once and reuse it for every enrichment writer. Disabling transfer
+  // history must not disable the season fence for picks/results/league rows.
+  const setupSeason = options?.setupSeason ?? (await getActiveCacheSeason());
+  const canonicalSeason = await getActiveCacheSeasonUncached();
+  if (canonicalSeason !== setupSeason) {
+    throw new Error(
+      `Active season changed from ${setupSeason} to ${canonicalSeason} before tournament enrichment`,
+    );
+  }
+  const transferSeason = options?.includeTransferHistory === false ? null : setupSeason;
   const pickAudit = window
     ? await auditMissingUnits(entryIds, window, 'picks')
     : { missing: new Map<number, number[]>(), totalPairs: 0 };
@@ -516,10 +526,12 @@ export async function enrichTournamentHistory(
         await syncTournamentEventResultsForEntryIds(missingEntryIds, eventId, {
           concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
           skipTransfers: true,
+          season: setupSeason,
         });
       }
       const leagueResult = await syncLeagueEventResultsByTournament(tournamentId, eventId, {
         concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
+        season: setupSeason,
       });
       if (leagueResult.updated < entryIds.length || leagueResult.skipped > 0) {
         issues.push({
