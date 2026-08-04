@@ -132,6 +132,7 @@ export function createTournamentManagementService(
 
       if (current.rosterMode === 'official_sync') {
         const { reconcileTournamentRoster } = await import('./tournament-roster.service');
+        await tournamentRosterRepository.markResumeProcessing(tournamentId);
         await reconcileTournamentRoster(tournamentId, {
           allowInactive: true,
           resumeAfterSetup: true,

@@ -181,7 +181,7 @@ export const tournamentRosterRepository = {
     tournament: TournamentRosterRecord,
     participants: TournamentParticipant[],
     sourceLeagueName: string | null,
-    options?: { allowInactive?: boolean },
+    options?: { allowInactive?: boolean; resumeAfterSetup?: boolean },
   ): Promise<RosterPublicationResult> => {
     try {
       const participantIds = participants.map((participant) => Number(participant.id));
@@ -193,6 +193,7 @@ export const tournamentRosterRepository = {
             id: number;
             state: 'active' | 'inactive' | 'finished';
             rosterMode: TournamentRosterMode;
+            rosterSyncStatus: 'pending' | 'processing' | 'ready' | 'failed' | null;
             totalTeamNum: number;
           }[]
         >`
@@ -200,6 +201,7 @@ export const tournamentRosterRepository = {
             id,
             state,
             roster_mode as "rosterMode",
+            roster_sync_status as "rosterSyncStatus",
             total_team_num as "totalTeamNum"
           from tournament_infos
           where id = ${tournament.id}
@@ -210,6 +212,14 @@ export const tournamentRosterRepository = {
           return {
             changed: false,
             participantCount: 0,
+            automaticallyPaused: false,
+            skipped: true,
+          };
+        }
+        if (options?.resumeAfterSetup && current.rosterSyncStatus !== 'processing') {
+          return {
+            changed: false,
+            participantCount: current.totalTeamNum,
             automaticallyPaused: false,
             skipped: true,
           };
@@ -251,7 +261,7 @@ export const tournamentRosterRepository = {
         if (!changed) {
           await tx`
             update tournament_infos
-            set roster_sync_status = 'ready',
+            set roster_sync_status = ${options?.resumeAfterSetup ? 'processing' : 'ready'},
                 roster_sync_error = null,
                 roster_last_synced_at = now(),
                 source_league_name = coalesce(${sourceLeagueName}, source_league_name),
@@ -312,7 +322,9 @@ export const tournamentRosterRepository = {
           update tournament_infos
           set total_team_num = ${participants.length},
               source_league_name = coalesce(${sourceLeagueName}, source_league_name),
-              roster_sync_status = ${automaticallyPaused ? 'failed' : 'ready'},
+              roster_sync_status = ${
+                automaticallyPaused ? 'failed' : options?.resumeAfterSetup ? 'processing' : 'ready'
+              },
               roster_sync_error = ${
                 automaticallyPaused ? 'Official league has fewer than two participants.' : null
               },

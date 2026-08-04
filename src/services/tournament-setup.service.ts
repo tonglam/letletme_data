@@ -464,11 +464,18 @@ export async function requeueTournamentSetup(tournamentId: number) {
     throw new NotFoundError('Tournament not found.', 'TOURNAMENT_NOT_FOUND');
   }
 
-  await tournamentInfoRepository.markSetupRetryQueued(tournamentId);
+  let retryStatePrepared = false;
   try {
-    await invalidateTournamentGraphQLCaches('setup-retry-queued');
-    return await enqueueTournamentSetup(tournamentId, 'manual', { forceNew: true });
+    return await enqueueTournamentSetup(tournamentId, 'manual', {
+      forceNew: true,
+      prepareEnqueue: async () => {
+        await tournamentInfoRepository.markSetupRetryQueued(tournamentId);
+        retryStatePrepared = true;
+        await invalidateTournamentGraphQLCaches('setup-retry-queued');
+      },
+    });
   } catch (error) {
+    if (!retryStatePrepared) throw error;
     const message = error instanceof Error ? error.message : 'Unable to enqueue setup retry.';
     await tournamentInfoRepository.markSetupResult(tournamentId, 'failed', message, 0);
     await invalidateTournamentGraphQLCaches('setup-retry-failed');

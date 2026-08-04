@@ -213,6 +213,43 @@ describe('tournament creation vs entry_infos (FP-08)', () => {
 
     await client`
       update tournament_infos
+      set state = 'inactive', roster_sync_status = 'processing'
+      where id = ${created.id}
+    `;
+    const cancelledResumeRecord = await tournamentRosterRepository.findById(created.id);
+    if (!cancelledResumeRecord) throw new Error('Expected tournament roster record');
+    await tournamentManagementRepository.updateStateOwned(created.id, SYNCED_ENTRY.id, 'inactive');
+    const cancelledPublication = await tournamentRosterRepository.publishAuthoritativeRoster(
+      cancelledResumeRecord,
+      participants,
+      'Official Source League',
+      { allowInactive: true, resumeAfterSetup: true },
+    );
+    expect(cancelledPublication.skipped).toBe(true);
+
+    await client`
+      update tournament_infos
+      set state = 'inactive', roster_sync_status = 'processing'
+      where id = ${created.id}
+    `;
+    const uninterruptedResumeRecord = await tournamentRosterRepository.findById(created.id);
+    if (!uninterruptedResumeRecord) throw new Error('Expected tournament roster record');
+    const uninterruptedPublication = await tournamentRosterRepository.publishAuthoritativeRoster(
+      uninterruptedResumeRecord,
+      participants,
+      'Official Source League',
+      { allowInactive: true, resumeAfterSetup: true },
+    );
+    expect(uninterruptedPublication.skipped).toBe(false);
+    const resumeMarker = await client<Array<{ roster_sync_status: string }>>`
+      select roster_sync_status
+      from tournament_infos
+      where id = ${created.id}
+    `;
+    expect(resumeMarker[0]?.roster_sync_status).toBe('processing');
+
+    await client`
+      update tournament_infos
       set state = 'active',
           setup_status = 'ready',
           setup_phase = 'ready',

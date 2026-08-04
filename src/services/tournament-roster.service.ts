@@ -68,7 +68,9 @@ async function reconcileTournamentRosterUnlocked(
     throw new ConflictError('Paused tournaments are not synchronized.', 'TOURNAMENT_PAUSED');
   }
 
-  await tournamentRosterRepository.markSyncProcessing(tournamentId);
+  if (!options?.resumeAfterSetup) {
+    await tournamentRosterRepository.markSyncProcessing(tournamentId);
+  }
   try {
     const source = await fetchLeagueParticipants(
       officialLeagueUrl(tournament.leagueId, tournament.leagueType),
@@ -124,7 +126,10 @@ async function reconcileTournamentRosterUnlocked(
           tournament,
           source.participants,
           source.leagueName,
-          { allowInactive: options?.allowInactive },
+          {
+            allowInactive: options?.allowInactive,
+            resumeAfterSetup: options?.resumeAfterSetup,
+          },
         ),
     );
     if (publication.skipped) {
@@ -143,10 +148,6 @@ async function reconcileTournamentRosterUnlocked(
     }
     if (publication.changed) {
       await invalidateTournamentGraphQLCaches('roster-publication');
-    }
-
-    if (options?.resumeAfterSetup && !publication.automaticallyPaused) {
-      await tournamentRosterRepository.markResumeProcessing(tournamentId);
     }
 
     const needsSetup =

@@ -11,6 +11,26 @@ afterEach(() => {
 });
 
 describe('tournament lifecycle invariants', () => {
+  test('does not reset readiness when a manual retry finds an active setup job', async () => {
+    process.env.DATABASE_URL ??= 'postgresql://unit:unit@127.0.0.1:5432/unit';
+    process.env.REDIS_HOST ??= '127.0.0.1';
+    process.env.REDIS_PORT ??= '6379';
+    const { decideExistingSetupJobAction } = await import('../../src/jobs/tournament-setup.jobs');
+
+    expect(
+      decideExistingSetupJobAction('active', {
+        forceNew: true,
+        prepareEnqueue: async () => undefined,
+      }),
+    ).toBe('reject');
+    expect(
+      decideExistingSetupJobAction('waiting', {
+        forceNew: true,
+        prepareEnqueue: async () => undefined,
+      }),
+    ).toBe('remove');
+  });
+
   test('resumes before terminalizing a post-publication warning', async () => {
     process.env.DATABASE_URL ??= 'postgresql://unit:unit@127.0.0.1:5432/unit';
     process.env.REDIS_HOST ??= '127.0.0.1';

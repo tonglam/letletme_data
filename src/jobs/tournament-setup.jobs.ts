@@ -4,11 +4,25 @@ import {
   type TournamentSetupJobData,
 } from '../queues/tournament-setup.queue';
 import { getTournamentSetupJobPriority } from '../domain/job-priority';
+import { ConflictError } from '../utils/errors';
 import { logError, logInfo, logWarn } from '../utils/logger';
 
 export type TournamentSetupJobSource = 'create' | 'manual' | 'watchdog' | 'roster' | 'resume';
 export interface EnqueueTournamentSetupOptions {
   forceNew?: boolean;
+  prepareEnqueue?: () => Promise<void>;
+}
+
+export type ExistingSetupJobAction = 'remove' | 'reuse' | 'reject';
+
+export function decideExistingSetupJobAction(
+  state: string,
+  options: Pick<EnqueueTournamentSetupOptions, 'forceNew' | 'prepareEnqueue'>,
+): ExistingSetupJobAction {
+  if (state === 'completed' || state === 'failed') return 'remove';
+  if (!options.forceNew) return 'reuse';
+  if (state === 'waiting' || state === 'delayed') return 'remove';
+  return options.prepareEnqueue ? 'reject' : 'reuse';
 }
 
 export async function cancelWaitingTournamentSetupJobs(tournamentId: number): Promise<number> {
@@ -52,20 +66,14 @@ export async function enqueueTournamentSetup(
     const jobId = baseJobId;
     if (existing) {
       const state = await existing.getState();
-      if (state === 'completed' || state === 'failed') {
+      const action = decideExistingSetupJobAction(state, options);
+      if (action === 'remove') {
         await existing.remove();
-      } else if (options.forceNew) {
-        if (state === 'waiting' || state === 'delayed') {
-          await existing.remove();
-        } else {
-          logInfo('Tournament setup is already active; reusing its lifecycle job', {
-            tournamentId,
-            existingJobId: existing.id,
-            state,
-            source,
-          });
-          return existing;
-        }
+      } else if (action === 'reject') {
+        throw new ConflictError(
+          'Tournament setup is already running.',
+          'TOURNAMENT_SETUP_IN_PROGRESS',
+        );
       } else {
         logInfo('Tournament setup job already active; reusing existing', {
           tournamentId,
@@ -77,6 +85,7 @@ export async function enqueueTournamentSetup(
       }
     }
 
+    await options.prepareEnqueue?.();
     const job = await queue.add('tournament-setup', jobData, {
       jobId,
     });
