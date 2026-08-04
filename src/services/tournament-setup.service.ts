@@ -521,6 +521,7 @@ export async function recoverStuckTournamentSetups(
           jobName: 'recover-stuck-setup',
           tournamentId: row.id,
           scopes: [tournamentSetupLifecycleScope(row.id)],
+          required: true,
         },
         async () => {
           // The initial stale query and BullMQ probe are only candidates. A

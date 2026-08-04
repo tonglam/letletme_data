@@ -278,6 +278,27 @@ describe('tournament creation vs entry_infos (FP-08)', () => {
 
     await client`
       update tournament_infos
+      set setup_status = 'ready',
+          setup_phase = 'ready',
+          standings_ready_at = now()
+      where id = ${created.id}
+    `;
+    await tournamentInfoRepository.markSetupProcessing(created.id);
+    const automaticRetryGate = await client<
+      Array<{ setup_status: string; setup_phase: string; standings_ready_at: Date | null }>
+    >`
+      select setup_status, setup_phase, standings_ready_at
+      from tournament_infos
+      where id = ${created.id}
+    `;
+    expect(automaticRetryGate[0]).toEqual({
+      setup_status: 'processing',
+      setup_phase: 'syncing_entries',
+      standings_ready_at: null,
+    });
+
+    await client`
+      update tournament_infos
       set state = 'finished', roster_sync_status = 'processing'
       where id = ${created.id}
     `;

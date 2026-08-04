@@ -29,11 +29,27 @@ describe('tournament lifecycle invariants', () => {
       }),
     ).toBe('reject');
     expect(
-      decideExistingSetupJobAction('active', {
-        forceNew: true,
-        ensureSuccessorOnActive: true,
-      }),
+      decideExistingSetupJobAction(
+        'active',
+        {
+          forceNew: true,
+          ensureSuccessorOnActive: true,
+        },
+        'settling',
+      ),
     ).toBe('enqueue_successor');
+    expect(
+      decideExistingSetupJobAction(
+        'active',
+        { forceNew: true, ensureSuccessorOnActive: true },
+        'waiting_for_lifecycle',
+      ),
+    ).toBe('reuse');
+    expect(
+      decideExistingSetupJobAction('unknown', {
+        forceNew: true,
+      }),
+    ).toBe('enqueue_base');
     expect(
       decideExistingSetupJobAction('waiting', {
         forceNew: true,
@@ -59,6 +75,21 @@ describe('tournament lifecycle invariants', () => {
     expect(decideExistingSetupSuccessorAction('completed')).toBe('remove');
     expect(decideExistingSetupSuccessorAction('failed')).toBe('remove');
     expect(decideExistingSetupSuccessorAction('unknown')).toBe('enqueue');
+    expect(
+      decideExistingSetupSuccessorAction('active', 'settling', {
+        forceNew: true,
+        ensureSuccessorOnActive: true,
+      }),
+    ).toBe('enqueue');
+    expect(decideExistingSetupSuccessorAction('active', 'settling', { forceNew: true })).toBe(
+      'reject',
+    );
+    expect(
+      decideExistingSetupSuccessorAction('active', 'waiting_for_lifecycle', {
+        forceNew: true,
+        ensureSuccessorOnActive: true,
+      }),
+    ).toBe('reuse');
   });
 
   test('treats skipped structure units as a failed cascade slot', async () => {

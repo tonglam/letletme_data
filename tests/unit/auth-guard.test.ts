@@ -21,6 +21,9 @@ describe('mutation auth policy', () => {
   test('keeps setup progress behind the authenticated Web service', () => {
     expect(shouldRequireApiKey('GET', '/tournaments/42/setup-status')).toBe(true);
     expect(shouldRequireApiKey('GET', '/tournaments/42/setup-status/')).toBe(true);
+    expect(shouldRequireApiKey('GET', '/tournaments/42.0/setup-status')).toBe(true);
+    expect(shouldRequireApiKey('GET', '/tournaments/4.2e1/setup-status')).toBe(true);
+    expect(shouldRequireApiKey('GET', '/tournaments/not-a-number/setup-status')).toBe(true);
     expect(shouldRequireApiKey('OPTIONS', '/tournaments/42/setup-status')).toBe(false);
   });
 

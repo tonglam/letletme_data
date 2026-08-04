@@ -4,8 +4,10 @@ import {
   type TournamentSetupJobData,
 } from '../queues/tournament-setup.queue';
 import { getTournamentSetupJobPriority } from '../domain/job-priority';
+import { tournamentSetupEnqueueScope } from '../domain/mutation-scope';
 import { ConflictError } from '../utils/errors';
 import { logError, logInfo, logWarn } from '../utils/logger';
+import { withMutationConflictGuard } from '../utils/mutation-lock';
 
 export type TournamentSetupJobSource = 'create' | 'manual' | 'watchdog' | 'roster' | 'resume';
 export interface EnqueueTournamentSetupOptions {
@@ -25,7 +27,12 @@ export interface EnqueueTournamentSetupOptions {
   activeSettleTimeoutMs?: number;
 }
 
-export type ExistingSetupJobAction = 'remove' | 'reuse' | 'reject' | 'enqueue_successor';
+export type ExistingSetupJobAction =
+  | 'remove'
+  | 'reuse'
+  | 'reject'
+  | 'enqueue_base'
+  | 'enqueue_successor';
 
 export function getTournamentSetupJobIds(tournamentId: number): {
   baseJobId: string;
@@ -38,9 +45,18 @@ export function getTournamentSetupJobIds(tournamentId: number): {
   };
 }
 
-export function decideExistingSetupSuccessorAction(state: string): 'remove' | 'reuse' | 'enqueue' {
+export function decideExistingSetupSuccessorAction(
+  state: string,
+  progress?: unknown,
+  options: Pick<EnqueueTournamentSetupOptions, 'forceNew' | 'ensureSuccessorOnActive'> = {},
+): 'remove' | 'reuse' | 'enqueue' | 'reject' {
   if (state === 'unknown') return 'enqueue';
-  return state === 'completed' || state === 'failed' ? 'remove' : 'reuse';
+  if (state === 'completed' || state === 'failed') return 'remove';
+  if (state === 'active' && progress === 'settling') {
+    if (options.ensureSuccessorOnActive) return 'enqueue';
+    if (options.forceNew) return 'reject';
+  }
+  return 'reuse';
 }
 
 export function decideExistingSetupJobAction(
@@ -49,11 +65,15 @@ export function decideExistingSetupJobAction(
     EnqueueTournamentSetupOptions,
     'forceNew' | 'prepareEnqueue' | 'ensureSuccessorOnActive'
   >,
+  progress?: unknown,
 ): ExistingSetupJobAction {
+  if (state === 'unknown') return 'enqueue_base';
   if (state === 'completed' || state === 'failed') return 'remove';
   if (!options.forceNew) return 'reuse';
   if (state === 'waiting' || state === 'delayed') return 'remove';
-  if (state === 'active' && options.ensureSuccessorOnActive) return 'enqueue_successor';
+  if (state === 'active' && options.ensureSuccessorOnActive) {
+    return progress === 'waiting_for_lifecycle' ? 'reuse' : 'enqueue_successor';
+  }
   return 'reject';
 }
 
@@ -94,7 +114,7 @@ export async function cancelWaitingTournamentSetupJobs(tournamentId: number): Pr
   return removed;
 }
 
-export async function enqueueTournamentSetup(
+async function enqueueTournamentSetupUnlocked(
   tournamentId: number,
   source: TournamentSetupJobSource = 'create',
   options: EnqueueTournamentSetupOptions = {},
@@ -112,10 +132,15 @@ export async function enqueueTournamentSetup(
     // A lifecycle-locked caller can leave one durable successor behind an
     // active base job. Always inspect that stable slot first: otherwise later
     // reconciliations only see the base ID and can queue duplicate rebuilds.
+    let successorSlotUnavailable = false;
     const existingSuccessor = await queue.getJob(successorJobId);
     if (existingSuccessor) {
       const successorState = await existingSuccessor.getState();
-      const successorAction = decideExistingSetupSuccessorAction(successorState);
+      const successorAction = decideExistingSetupSuccessorAction(
+        successorState,
+        existingSuccessor.progress,
+        options,
+      );
       if (successorAction === 'remove') {
         await existingSuccessor.remove();
       } else if (successorAction === 'reuse') {
@@ -126,6 +151,13 @@ export async function enqueueTournamentSetup(
           source,
         });
         return existingSuccessor;
+      } else if (successorAction === 'reject') {
+        throw new ConflictError(
+          'Tournament setup is already settling.',
+          'TOURNAMENT_SETUP_IN_PROGRESS',
+        );
+      } else {
+        successorSlotUnavailable = successorState === 'active';
       }
     }
 
@@ -133,14 +165,22 @@ export async function enqueueTournamentSetup(
     let jobId: string | undefined = baseJobId;
     if (existing) {
       const state = await waitForActiveJobToSettle(existing, options.activeSettleTimeoutMs ?? 0);
-      const action = decideExistingSetupJobAction(state, options);
+      const action = decideExistingSetupJobAction(state, options, existing.progress);
       if (action === 'remove') {
         await existing.remove();
+      } else if (action === 'enqueue_base') {
+        jobId = baseJobId;
       } else if (action === 'enqueue_successor') {
         // BullMQ cannot replace an active deterministic job. An automatically
         // assigned ID would be invisible to later deduplication checks. A
         // stable second slot permits exactly one durable reconciliation behind
         // the active base job.
+        if (successorSlotUnavailable) {
+          throw new ConflictError(
+            'Tournament setup is already settling.',
+            'TOURNAMENT_SETUP_IN_PROGRESS',
+          );
+        }
         jobId = successorJobId;
       } else if (action === 'reject') {
         throw new ConflictError(
@@ -182,4 +222,21 @@ export async function enqueueTournamentSetup(
     });
     throw error;
   }
+}
+
+export function enqueueTournamentSetup(
+  tournamentId: number,
+  source: TournamentSetupJobSource = 'create',
+  options: EnqueueTournamentSetupOptions = {},
+) {
+  return withMutationConflictGuard(
+    {
+      queueName: 'tournament-setup-enqueue',
+      jobName: 'tournament-setup-enqueue',
+      tournamentId,
+      scopes: [tournamentSetupEnqueueScope(tournamentId)],
+      required: true,
+    },
+    () => enqueueTournamentSetupUnlocked(tournamentId, source, options),
+  );
 }

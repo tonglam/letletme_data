@@ -217,6 +217,7 @@ export async function reconcileTournamentRoster(
       jobName: 'reconcile-authoritative-roster',
       tournamentId,
       scopes: [tournamentSetupLifecycleScope(tournamentId)],
+      required: true,
     },
     () => reconcileTournamentRosterUnlocked(tournamentId, options),
   );

@@ -426,6 +426,7 @@ export const createTournamentInfoRepository = (dbInstance?: DatabaseInstance) =>
             setupWarningCount: 0,
             setupStartedAt: new Date(),
             setupFinishedAt: null,
+            standingsReadyAt: null,
             updatedAt: new Date(),
           })
           .where(eq(tournamentInfos.id, tournamentId));

@@ -44,6 +44,7 @@ export function createTournamentSetupWorker(): WorkerRuntime {
   const worker = new Worker<TournamentSetupJobData>(
     queueName,
     async (job: Job<TournamentSetupJobData>) => {
+      await job.updateProgress('waiting_for_lifecycle');
       const triggeredAtMs = Date.parse(job.data.triggeredAt);
       const queueWaitMs = Number.isNaN(triggeredAtMs)
         ? null
@@ -72,10 +73,18 @@ export function createTournamentSetupWorker(): WorkerRuntime {
               jobId: String(job.id),
               tournamentId: job.data.tournamentId,
               scopes: [tournamentSetupLifecycleScope(job.data.tournamentId)],
+              required: true,
             },
             async () => {
-              logInfo('Tournament setup worker started job');
-              await setupTournamentStructure(job.data.tournamentId);
+              await job.updateProgress('running');
+              try {
+                logInfo('Tournament setup worker started job');
+                await setupTournamentStructure(job.data.tournamentId);
+              } finally {
+                // Written before the mandatory lifecycle lock is released, so
+                // an enqueuer that later acquires it can safely alternate slots.
+                await job.updateProgress('settling');
+              }
             },
           ),
         ),
