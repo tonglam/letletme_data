@@ -212,7 +212,7 @@ describe('coordinated live snapshot Redis integration', () => {
     expect(await redis.keys(`*:${SEASON}:${EVENT_ID}:staging:*`)).toEqual([]);
   });
 
-  test('preserves identical owned bonus but retires a snapshot for a late correction', async () => {
+  test('preserves identical owned fixture derivatives but retires for a score correction', async () => {
     const redis = await redisSingleton.getClient();
     const cache = createLiveSnapshotCache({
       getRedisClient: async () => redis,
@@ -222,18 +222,27 @@ describe('coordinated live snapshot Redis integration', () => {
     const initial = payload(3, new Date('2025-08-15T20:00:01.000Z'));
     await cache.publish(initial);
 
-    const unchanged = await cache.refreshLiveBonusV2(EVENT_ID, initial.liveBonusV2);
+    const unchanged = await cache.refreshFixtureDerivatives(
+      EVENT_ID,
+      initial.fixtures,
+      initial.liveBonusV2,
+    );
     expect(unchanged).toEqual({ eventId: EVENT_ID, owned: true, retired: false });
     expect(await redis.exists(`LiveSnapshotMeta:${SEASON}:${EVENT_ID}`)).toBe(1);
     expect(await redis.exists(`Fixtures:${SEASON}:${EVENT_ID}`)).toBe(1);
 
-    const corrected = await cache.refreshLiveBonusV2(EVENT_ID, {
-      '12': { '350': 99 },
-    });
+    const correctedFixtures = initial.fixtures.map((fixture) => ({
+      ...fixture,
+      teamHScore: (fixture.teamHScore ?? 0) + 1,
+    }));
+    const corrected = await cache.refreshFixtureDerivatives(
+      EVENT_ID,
+      correctedFixtures,
+      initial.liveBonusV2,
+    );
     expect(corrected).toEqual({ eventId: EVENT_ID, owned: true, retired: true });
     for (const prefix of [
       'EventLive',
-      'Fixtures',
       'LiveFixture',
       'LiveFixtureV2',
       'LiveBonus',
@@ -241,6 +250,31 @@ describe('coordinated live snapshot Redis integration', () => {
     ]) {
       expect(await redis.exists(`${prefix}:${SEASON}:${EVENT_ID}`)).toBe(0);
     }
+    const correctedFixture = JSON.parse(
+      (await redis.hget(`Fixtures:${SEASON}:${EVENT_ID}`, String(correctedFixtures[0].id)))!,
+    ) as { teamHScore: number };
+    expect(correctedFixture.teamHScore).toBe(correctedFixtures[0].teamHScore);
+    expect(await redis.hgetall(`LiveBonusV2:${SEASON}:${EVENT_ID}`)).toEqual({
+      '12': JSON.stringify(initial.liveBonusV2['12']),
+      '4': JSON.stringify(initial.liveBonusV2['4']),
+    });
+  });
+
+  test('retires an owned snapshot for a late fixture-derived bonus correction', async () => {
+    const redis = await redisSingleton.getClient();
+    const cache = createLiveSnapshotCache({
+      getRedisClient: async () => redis,
+      getSeason: async () => SEASON,
+      getAuthoritativeSeason: async () => SEASON,
+    });
+    const initial = payload(3, new Date('2025-08-15T20:00:01.000Z'));
+    await cache.publish(initial);
+
+    const corrected = await cache.refreshFixtureDerivatives(EVENT_ID, initial.fixtures, {
+      '12': { '350': 99 },
+    });
+    expect(corrected).toEqual({ eventId: EVENT_ID, owned: true, retired: true });
+    expect(await redis.exists(`LiveSnapshotMeta:${SEASON}:${EVENT_ID}`)).toBe(0);
     expect(await redis.hgetall(`LiveBonusV2:${SEASON}:${EVENT_ID}`)).toEqual({
       '12': JSON.stringify({ '350': 99 }),
     });

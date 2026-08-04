@@ -2,7 +2,7 @@ import { assertIntegrationEnv } from './helpers/env-guard';
 
 assertIntegrationEnv();
 
-import { describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { eq } from 'drizzle-orm';
 
 import { resetActiveSeasonMemo, setActiveCacheSeason } from '../../src/cache/cache-season';
@@ -23,6 +23,29 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
   });
   return { promise, resolve };
 }
+
+let suitePreviousActiveSeason: string | null = null;
+
+beforeAll(async () => {
+  const redis = await redisSingleton.getClient();
+  suitePreviousActiveSeason = await redis.get('Season:active');
+});
+
+beforeEach(async () => {
+  const redis = await redisSingleton.getClient();
+  await redis.set('Season:active', '2526');
+  resetActiveSeasonMemo();
+});
+
+afterAll(async () => {
+  const redis = await redisSingleton.getClient();
+  if (suitePreviousActiveSeason === null) {
+    await redis.del('Season:active');
+  } else {
+    await redis.set('Season:active', suitePreviousActiveSeason);
+  }
+  resetActiveSeasonMemo();
+});
 
 describe('live snapshot PostgreSQL serialization', () => {
   test('blocks the same event while allowing a different event to run', async () => {
@@ -91,6 +114,51 @@ describe('live snapshot PostgreSQL serialization', () => {
     } finally {
       releaseSnapshot.resolve();
       await snapshot.catch(() => undefined);
+      await rollover.catch(() => undefined);
+      if (previousActiveSeason === null) {
+        await redis.del('Season:active');
+      } else {
+        await redis.set('Season:active', previousActiveSeason);
+      }
+      resetActiveSeasonMemo();
+    }
+  });
+
+  test('pins active season across fixture discovery and cache publication', async () => {
+    const eventId = 2_000_000_007;
+    const prepareEntered = deferred();
+    const releasePrepare = deferred();
+    const redis = await redisSingleton.getClient();
+    const previousActiveSeason = await redis.get('Season:active');
+    await redis.set('Season:active', '2526');
+    resetActiveSeasonMemo();
+
+    const fixtureRefresh = withFixtureSyncSerialization(
+      async () => {
+        prepareEntered.resolve();
+        await releasePrepare.promise;
+        return { eventIds: [eventId], context: undefined };
+      },
+      async (_context, _checkedAt, _lockedEventIds, activeSeason) => activeSeason,
+    );
+    await prepareEntered.promise;
+
+    const rollover = setActiveCacheSeason('2627');
+    const rolloverState = await Promise.race([
+      rollover.then(() => 'advanced' as const),
+      new Promise<'blocked'>((resolve) => setTimeout(() => resolve('blocked'), 75)),
+    ]);
+
+    try {
+      expect(rolloverState).toBe('blocked');
+      expect(await redis.get('Season:active')).toBe('2526');
+      releasePrepare.resolve();
+      const [refreshSeason] = await Promise.all([fixtureRefresh, rollover]);
+      expect(refreshSeason).toBe('2526');
+      expect(await redis.get('Season:active')).toBe('2627');
+    } finally {
+      releasePrepare.resolve();
+      await fixtureRefresh.catch(() => undefined);
       await rollover.catch(() => undefined);
       if (previousActiveSeason === null) {
         await redis.del('Season:active');

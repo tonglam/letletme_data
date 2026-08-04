@@ -114,9 +114,12 @@ export const enqueueLiveSnapshot = (
   options: { persistEventLives?: boolean; now?: Date; jobId?: string } = {},
 ) => {
   const persistEventLives = options.persistEventLives ?? false;
-  // Keep the queue wire format consumable by both worker generations during
-  // sequential Compose replacement. The new worker resolves these aliases to
-  // the coherent publisher; the old worker has no `live-snapshot` case.
+  // Production has one unscaled Compose worker container, replaced in place:
+  // old and new worker generations never consume this queue concurrently.
+  // Legacy wire names cover either service replacement order. If the API is
+  // replaced first, the old worker can consume them; if the worker is replaced
+  // first, the old worker is already stopped and the new handler coordinates
+  // them. A new-only wire name would instead fail the API-first ordering.
   const wireJobName = persistEventLives ? LIVE_JOBS.EVENT_LIVES_DB : LIVE_JOBS.EVENT_LIVES_CACHE;
   return enqueueLiveDataJob(wireJobName, eventId, source, {
     persistEventLives,

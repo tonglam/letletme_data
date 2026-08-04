@@ -12,7 +12,7 @@ import { transformFixtures } from '../transformers/fixtures';
 import type { Fixture, RawFPLFixture } from '../types';
 import { logError, logInfo, logWarn } from '../utils/logger';
 import { getCurrentEvent } from './events.service';
-import { syncLiveBonusV2Cache } from './live-bonus.service';
+import { syncFixtureDerivedSnapshotCache } from './live-bonus.service';
 import {
   syncLiveSnapshot,
   withFixtureSyncSerialization,
@@ -37,7 +37,7 @@ export async function syncFixtures(eventId?: number): Promise<{ count: number; e
       recoveredFullFixtureFeed: boolean;
       unscheduledFixtures: Fixture[];
       schedulableFixtures: Fixture[];
-      cacheSeason?: string;
+      payloadSeason?: string;
       transitions: FixtureCacheTransitions;
     };
 
@@ -112,19 +112,19 @@ export async function syncFixtures(eventId?: number): Promise<{ count: number; e
             recoveredFullFixtureFeed,
             unscheduledFixtures,
             schedulableFixtures,
-            cacheSeason: deriveSeasonFromFixtures(rawFixtures) ?? undefined,
+            payloadSeason: deriveSeasonFromFixtures(rawFixtures) ?? undefined,
             transitions,
           },
         };
       },
-      async (context, checkedAt, lockedEventIds) => {
+      async (context, checkedAt, lockedEventIds, activeSeason) => {
         const {
           rawFixtures,
           fixtures,
           recoveredFullFixtureFeed,
           unscheduledFixtures,
           schedulableFixtures,
-          cacheSeason,
+          payloadSeason,
           transitions,
         } = context;
         if (rawFixtures.length === 0) {
@@ -136,6 +136,11 @@ export async function syncFixtures(eventId?: number): Promise<{ count: number; e
             unscheduledCount: unscheduledFixtures.length,
             fixtureIds: unscheduledFixtures.map((fixture) => fixture.id),
           });
+        }
+        if (payloadSeason && payloadSeason !== activeSeason) {
+          throw new Error(
+            `Fixture payload season ${payloadSeason} does not match fenced active season ${activeSeason}; sync events first`,
+          );
         }
 
         // Claim every affected event in one transaction. The callback runs only
@@ -181,10 +186,10 @@ export async function syncFixtures(eventId?: number): Promise<{ count: number; e
           await fixturesCache.setByEvent(
             eventId,
             savedFixtures.filter((fixture) => fixture.event === eventId),
-            cacheSeason,
+            activeSeason,
           );
         } else {
-          await fixturesCache.set([...savedFixtures, ...unscheduledFixtures], cacheSeason);
+          await fixturesCache.set([...savedFixtures, ...unscheduledFixtures], activeSeason);
         }
 
         if (
@@ -205,10 +210,7 @@ export async function syncFixtures(eventId?: number): Promise<{ count: number; e
         if (bonusEventId) {
           const bonusFixtures = savedFixtures.filter((fixture) => fixture.event === bonusEventId);
           if (bonusFixtures.length > 0) {
-            await syncLiveBonusV2Cache(bonusEventId, {
-              fixtures: bonusFixtures,
-              snapshotCoordinator: liveSnapshotCache,
-            });
+            await syncFixtureDerivedSnapshotCache(bonusEventId, bonusFixtures, liveSnapshotCache);
           }
         }
         logInfo('Fixtures cache updated', logContext);
@@ -277,8 +279,14 @@ export async function syncAllGameweeks(): Promise<{
           context: allFixtures,
         };
       },
-      async (allFixtures) => {
-        await fixturesCache.set(allFixtures);
+      async (allFixtures, _checkedAt, _lockedEventIds, activeSeason) => {
+        const payloadSeason = deriveSeasonFromFixtures(allFixtures);
+        if (payloadSeason && payloadSeason !== activeSeason) {
+          throw new Error(
+            `Fixture payload season ${payloadSeason} does not match fenced active season ${activeSeason}; sync events first`,
+          );
+        }
+        await fixturesCache.set(allFixtures, activeSeason);
       },
     );
 

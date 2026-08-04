@@ -8,7 +8,11 @@ import {
   type BonusEligibleLive,
 } from '../../src/domain/live-bonus';
 import type { LiveFixtureData, LiveFixturesByTeam } from '../../src/domain/live-fixtures';
-import { syncLiveBonusV2Cache } from '../../src/services/live-bonus.service';
+import {
+  syncFixtureDerivedSnapshotCache,
+  syncLiveBonusV2Cache,
+} from '../../src/services/live-bonus.service';
+import type { Fixture } from '../../src/types';
 
 /**
  * FP-11 (H7): bonus is awarded per MATCH (top 3 BPS across both teams,
@@ -207,27 +211,48 @@ describe('computeFixtureSummedBonusByTeam', () => {
     ]);
   });
 
-  it('routes fixture corrections through coordinated snapshot publication when requested', async () => {
-    const writes: Array<{ eventId: number; byTeam: Record<string, Record<string, number>> }> = [];
+  it('routes complete fixture corrections through coordinated snapshot publication', async () => {
+    const writes: Array<{
+      eventId: number;
+      fixtureIds: number[];
+      byTeam: Record<string, Record<string, number>>;
+    }> = [];
+    const bonusStats = fixtureStats(
+      1,
+      2,
+      { h: [[10, 50]], a: [[20, 40]] },
+      { h: [[10, 3]], a: [] },
+      true,
+    );
+    const fullFixture: Fixture = {
+      ...bonusStats,
+      id: 100,
+      code: 100,
+      event: 12,
+      kickoffTime: new Date('2026-01-01T12:00:00.000Z'),
+      minutes: 90,
+      provisionalStartTime: false,
+      teamAScore: 0,
+      teamHScore: 1,
+      teamHDifficulty: 2,
+      teamADifficulty: 4,
+      pulseId: 100,
+      createdAt: null,
+      updatedAt: null,
+    };
 
-    const result = await syncLiveBonusV2Cache(12, {
-      fixtures: [
-        fixtureStats(1, 2, { h: [[10, 50]], a: [[20, 40]] }, { h: [[10, 3]], a: [] }, true),
-      ],
-      cache: {
-        set: async () => {
-          throw new Error('ordinary ownership-guarded writer must not run');
-        },
-      },
-      snapshotCoordinator: {
-        refreshLiveBonusV2: async (eventId, byTeam) => {
-          writes.push({ eventId, byTeam });
-        },
+    const result = await syncFixtureDerivedSnapshotCache(12, [fullFixture], {
+      refreshFixtureDerivatives: async (eventId, fixtures, byTeam) => {
+        writes.push({
+          eventId,
+          fixtureIds: fixtures.map((fixture) => fixture.id),
+          byTeam,
+        });
       },
     });
 
     expect(result).toEqual({ eventId: 12, teamCount: 1 });
-    expect(writes).toEqual([{ eventId: 12, byTeam: { '1': { '10': 3 } } }]);
+    expect(writes).toEqual([{ eventId: 12, fixtureIds: [100], byTeam: { '1': { '10': 3 } } }]);
   });
 });
 

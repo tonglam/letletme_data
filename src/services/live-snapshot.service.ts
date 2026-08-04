@@ -346,6 +346,7 @@ export async function withFixtureSyncSerialization<TContext, TResult>(
     context: TContext,
     checkedAt: Date,
     lockedEventIds: readonly number[],
+    activeSeason: string,
   ) => Promise<TResult>,
 ): Promise<TResult> {
   const db = await getDb();
@@ -353,6 +354,13 @@ export async function withFixtureSyncSerialization<TContext, TResult>(
     await tx.execute(
       sql`SELECT pg_advisory_xact_lock(${LIVE_SNAPSHOT_LOCK_NAMESPACE}, ${FIXTURE_SYNC_LOCK_ID})`,
     );
+    // Event ownership is discovered from the upstream response, so the season
+    // fence must precede prepare(). This does not invert a conflicting lock:
+    // fixture/live writers both take the shared form, while the exclusive
+    // rollover path never takes an event lock. The fence pins Redis season
+    // truth across fetch, dynamic event locking, PostgreSQL, and cache writes.
+    await acquireActiveSeasonReadFence(tx);
+    const activeSeason = await getActiveCacheSeasonUncached();
     // The token precedes upstream fixture I/O in prepare(). If a live snapshot
     // publishes while this writer is still discovering its affected events,
     // the durable multi-event fence rejects this older payload after locks are
@@ -368,7 +376,7 @@ export async function withFixtureSyncSerialization<TContext, TResult>(
         sql`SELECT pg_advisory_xact_lock(${LIVE_SNAPSHOT_LOCK_NAMESPACE}, ${lockedEventId})`,
       );
     }
-    return operation(plan.context, checkedAt, uniqueEventIds);
+    return operation(plan.context, checkedAt, uniqueEventIds, activeSeason);
   });
 }
 

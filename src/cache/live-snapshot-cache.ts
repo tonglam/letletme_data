@@ -61,7 +61,7 @@ export interface LiveSnapshotRetireResult {
   removedKeys: number;
 }
 
-export interface LiveSnapshotBonusRefreshResult {
+export interface LiveSnapshotFixtureRefreshResult {
   eventId: number;
   owned: boolean;
   retired: boolean;
@@ -87,6 +87,7 @@ const LIVE_SNAPSHOT_VIEW_PREFIXES = [
   'LiveBonus',
   'LiveBonusV2',
 ] as const;
+const FIXTURES_KEY_INDEX = LIVE_SNAPSHOT_VIEW_PREFIXES.indexOf('Fixtures') + 1;
 const LIVE_BONUS_V2_KEY_INDEX = LIVE_SNAPSHOT_VIEW_PREFIXES.indexOf('LiveBonusV2') + 1;
 
 const LIVE_SNAPSHOT_META_VALIDATION_LUA = `
@@ -172,58 +173,75 @@ return removed
 `;
 
 // Late FPL fixture corrections must not be hidden by snapshot ownership. If
-// the V2 bonus view differs, retire all coordinated views and publish the
-// corrected unowned V2 hash in the same Redis script. Readers then use the
-// durable fallback until the next complete snapshot publication.
-const REFRESH_LIVE_BONUS_V2_SCRIPT = `
-if redis.call('GET', KEYS[#KEYS]) ~= ARGV[2] then
+// either the accepted fixture rows or fixture-derived V2 bonus differs, retire
+// all coordinated views and publish the corrected unowned source hashes in the
+// same Redis script. Coherent readers then use the durable fallback until the
+// next complete snapshot publication.
+const REFRESH_FIXTURE_DERIVATIVES_SCRIPT = `
+if redis.call('GET', KEYS[#KEYS]) ~= ARGV[3] then
   return -2
 end
 
-local expected = cjson.decode(ARGV[1])
-local expected_count = 0
-for _ in pairs(expected) do
-  expected_count = expected_count + 1
+local function entry_count(values)
+  local count = 0
+  for _ in pairs(values) do
+    count = count + 1
+  end
+  return count
 end
 
-local bonus_key = KEYS[tonumber(ARGV[3])]
+local function hash_matches(key, expected)
+  local expected_count = entry_count(expected)
+  local actual_count = redis.pcall('HLEN', key)
+  if type(actual_count) ~= 'number' or actual_count ~= expected_count then
+    return false
+  end
+  for field, value in pairs(expected) do
+    if redis.pcall('HGET', key, field) ~= value then
+      return false
+    end
+  end
+  return true
+end
+
+local function replace_hash(key, values)
+  redis.call('DEL', key)
+  for field, value in pairs(values) do
+    redis.call('HSET', key, field, value)
+  end
+end
+
+local expected_fixtures = cjson.decode(ARGV[1])
+local expected_bonus = cjson.decode(ARGV[2])
+local fixtures_key = KEYS[tonumber(ARGV[4])]
+local bonus_key = KEYS[tonumber(ARGV[5])]
 local meta_key = KEYS[#KEYS - 1]
 local owned = redis.call('EXISTS', meta_key) == 1
-local matches = true
+local matches = hash_matches(fixtures_key, expected_fixtures)
+  and hash_matches(bonus_key, expected_bonus)
 local meta_raw = redis.pcall('GET', meta_key)
 if owned then
   local decoded, meta = pcall(cjson.decode, meta_raw)
-  if not decoded or type(meta) ~= 'table' or meta.bonusTeamCount ~= expected_count then
+  if not decoded
+    or type(meta) ~= 'table'
+    or meta.fixtureCount ~= entry_count(expected_fixtures)
+    or meta.bonusTeamCount ~= entry_count(expected_bonus)
+  then
     matches = false
   end
 end
-local actual_count = redis.pcall('HLEN', bonus_key)
-if type(actual_count) ~= 'number' or actual_count ~= expected_count then
-  matches = false
-end
-if matches then
-  for field, value in pairs(expected) do
-    if redis.pcall('HGET', bonus_key, field) ~= value then
-      matches = false
-      break
-    end
-  end
-end
 
-if owned and matches then
-  return 1
+if matches then
+  return owned and 1 or 0
 end
 
 if owned then
   for index = 1, #KEYS - 1 do
     redis.call('DEL', KEYS[index])
   end
-else
-  redis.call('DEL', bonus_key)
 end
-for field, value in pairs(expected) do
-  redis.call('HSET', bonus_key, field, value)
-end
+replace_hash(fixtures_key, expected_fixtures)
+replace_hash(bonus_key, expected_bonus)
 return owned and 2 or 0
 `;
 
@@ -296,6 +314,10 @@ function liveBonusToHash(byTeam: LiveBonusByTeam): HashFields {
     fields[teamId] = JSON.stringify(sortedBonus);
   }
   return fields;
+}
+
+function fixturesToHash(fixtures: readonly Fixture[]): HashFields {
+  return recordToHash(Object.fromEntries(fixtures.map((fixture) => [String(fixture.id), fixture])));
 }
 
 function snapshotRevision(views: ReadonlyArray<{ name: string; fields: HashFields }>): string {
@@ -452,15 +474,22 @@ export function createLiveSnapshotCache(
     },
 
     /**
-     * Apply a late fixture-derived V2 bonus correction without allowing the
-     * ownership guard to preserve stale values. A changed owned view retires
-     * the entire snapshot and writes only the corrected V2 compatibility hash;
-     * coherent readers therefore fall back durably until a full republish.
+     * Reconcile accepted fixture rows and their V2 bonus source without
+     * allowing snapshot ownership to preserve stale score/status/kickoff data.
+     * A changed owned source retires the entire snapshot and writes corrected
+     * unowned source hashes; coherent readers then fall back durably until a
+     * full republish derives every view from one upstream pair.
      */
-    async refreshLiveBonusV2(
+    async refreshFixtureDerivatives(
       eventId: number,
+      fixtures: readonly Fixture[],
       byTeam: LiveBonusByTeam,
-    ): Promise<LiveSnapshotBonusRefreshResult> {
+    ): Promise<LiveSnapshotFixtureRefreshResult> {
+      if (fixtures.length === 0) {
+        throw new Error(
+          `Refusing empty fixture-derived refresh for live snapshot event ${eventId}`,
+        );
+      }
       const [redis, season] = await Promise.all([
         dependencies.getRedisClient(),
         dependencies.getAuthoritativeSeason(),
@@ -472,21 +501,23 @@ export function createLiveSnapshotCache(
       ];
       const result = Number(
         await redis.eval(
-          REFRESH_LIVE_BONUS_V2_SCRIPT,
+          REFRESH_FIXTURE_DERIVATIVES_SCRIPT,
           keys.length,
           ...keys,
+          JSON.stringify(fixturesToHash(fixtures)),
           JSON.stringify(liveBonusToHash(byTeam)),
           season,
+          String(FIXTURES_KEY_INDEX),
           String(LIVE_BONUS_V2_KEY_INDEX),
         ),
       );
       if (result === -2) {
         throw new Error(
-          `Live bonus V2 season changed from ${season} before coordinated refresh; retry`,
+          `Live fixture-derived season changed from ${season} before coordinated refresh; retry`,
         );
       }
       if (result !== 0 && result !== 1 && result !== 2) {
-        throw new Error(`Unexpected coordinated live bonus V2 refresh result: ${String(result)}`);
+        throw new Error(`Unexpected coordinated fixture refresh result: ${String(result)}`);
       }
 
       const refresh = {
@@ -495,9 +526,10 @@ export function createLiveSnapshotCache(
         retired: result === 2,
       };
       if (refresh.retired) {
-        logInfo('Retired live snapshot after fixture-derived bonus changed', {
+        logInfo('Retired live snapshot after accepted fixture derivatives changed', {
           eventId,
           season,
+          fixtureCount: fixtures.length,
           teamCount: Object.keys(byTeam).length,
         });
       }
@@ -528,9 +560,7 @@ export function createLiveSnapshotCache(
         {
           name: 'Fixtures',
           key: `Fixtures:${season}:${payload.eventId}`,
-          fields: recordToHash(
-            Object.fromEntries(payload.fixtures.map((fixture) => [String(fixture.id), fixture])),
-          ),
+          fields: fixturesToHash(payload.fixtures),
           required: true,
         },
         {

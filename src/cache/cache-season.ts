@@ -9,11 +9,11 @@ import type { Event, Fixture, RawFPLEvent, RawFPLFixture } from '../types';
 
 export const ACTIVE_SEASON_KEY = 'Season:active';
 
-// "LLSN" as a signed-safe 32-bit advisory-lock namespace. Live snapshot
-// writers hold the shared form while a season rollover holds the exclusive
-// form. Shared locks preserve cross-event parallelism; the exclusive rollover
+// "LLSN" as a signed-safe 32-bit advisory-lock namespace. Live snapshot and
+// fixture writers hold the shared form while a season rollover holds the
+// exclusive form. Shared locks preserve cross-event parallelism; rollover
 // cannot change Redis truth or delete old-season keys until every in-flight
-// snapshot has finished its PostgreSQL and Redis commits.
+// live/fixture operation has finished its PostgreSQL and Redis commits.
 export const ACTIVE_SEASON_LOCK_NAMESPACE = 0x4c4c534e;
 export const ACTIVE_SEASON_LOCK_ID = 0;
 
@@ -196,8 +196,10 @@ export async function getActiveCacheSeasonUncached(): Promise<string> {
 
 /**
  * Pin the active season for the remainder of an existing PostgreSQL
- * transaction. Callers must acquire their event advisory locks first so
- * fixture writers and live publishers use one consistent lock order.
+ * transaction. Live publishers take event locks first. Fixture discovery may
+ * take this shared lock before its dynamically discovered event locks; shared
+ * readers do not conflict, and the exclusive rollover path takes no event
+ * lock, so that ordering cannot form an advisory-lock cycle.
  */
 export async function acquireActiveSeasonReadFence(tx: DbOrTransaction): Promise<void> {
   await tx.execute(
