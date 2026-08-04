@@ -15,6 +15,7 @@ import {
 } from '../../src/domain/live-snapshot';
 import {
   buildCurrentSeasonPlayerTeamMap,
+  createLiveSnapshotReferenceDataLoader,
   prepareLiveSnapshot,
   syncLiveSnapshot,
   type LiveSnapshotReferenceData,
@@ -252,6 +253,43 @@ function cacheWith(redis: FakeRedis) {
 }
 
 describe('prepareLiveSnapshot', () => {
+  test('reloads the shared player roster on every producer cycle', async () => {
+    let teamId = 12;
+    let rosterReads = 0;
+    const rosterSeasons: Array<string | undefined> = [];
+    const loadReferenceData = createLiveSnapshotReferenceDataLoader({
+      getSeason: async () => '2526',
+      getTeamMaps: async () => ({
+        nameById: new Map([[12, 'Liverpool']]),
+        shortNameById: new Map([[12, 'LIV']]),
+        positionById: new Map([[12, 1]]),
+      }),
+      getPlayers: async (season) => {
+        rosterReads += 1;
+        rosterSeasons.push(season);
+        return [
+          {
+            id: 350,
+            code: 350,
+            type: 3,
+            teamId,
+            price: 100,
+            startPrice: 100,
+            firstName: 'Player',
+            secondName: 'One',
+            webName: 'Player',
+          },
+        ];
+      },
+    });
+
+    expect((await loadReferenceData()).playerTeamById.get(350)).toBe(12);
+    teamId = 4;
+    expect((await loadReferenceData()).playerTeamById.get(350)).toBe(4);
+    expect(rosterReads).toBe(2);
+    expect(rosterSeasons).toEqual(['2526', '2526']);
+  });
+
   test('builds player identity only from the complete current-season roster', () => {
     expect(
       buildCurrentSeasonPlayerTeamMap(

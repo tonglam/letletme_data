@@ -71,10 +71,10 @@ const createPlayerHashCache = () => {
     /**
      * Get all players from the hash (Player:2526 -> {elementId: playerObject})
      */
-    getAllPlayers: async (): Promise<Player[] | null> => {
+    getAllPlayers: async (season?: string): Promise<Player[] | null> => {
       try {
         const redis = await redisSingleton.getClient();
-        const key = await getHashKey();
+        const key = await getHashKey(season);
         const hash = await redis.hgetall(key);
 
         if (!hash || Object.keys(hash).length === 0) {
@@ -116,24 +116,28 @@ const createPlayerHashCache = () => {
           }
         }
 
-        // Use pipeline for atomic operation (similar to RedisUtils.pipelineHashCache)
-        const pipeline = redis.pipeline();
-
-        // Always clear existing hash key before writing to avoid stale data
-        pipeline.del(key);
+        // Redis MULTI keeps readers on either the complete old roster or the
+        // complete new roster; a pipeline alone does not provide isolation.
+        const transaction = redis.multi().del(key);
 
         if (Object.keys(hashEntries).length === 0) {
-          await pipeline.exec();
+          const results = await transaction.exec();
+          if (!results) throw new Error(`Players cache transaction aborted for ${key}`);
+          const commandError = results.find(([error]) => error !== null)?.[0];
+          if (commandError) throw commandError;
           logDebug('Players cache cleared (no entries to set)', { key });
           return;
         }
 
         // Set all players in single hash operation
-        pipeline.hset(key, hashEntries);
+        transaction.hset(key, hashEntries);
 
         // No metadata key needed
 
-        await pipeline.exec();
+        const results = await transaction.exec();
+        if (!results) throw new Error(`Players cache transaction aborted for ${key}`);
+        const commandError = results.find(([error]) => error !== null)?.[0];
+        if (commandError) throw commandError;
         await finalizeSeasonCacheWrite(activeSeason, ['Player']);
         logDebug('Players cache batch set', {
           key,
@@ -282,8 +286,8 @@ const createPlayerHashCache = () => {
 const playerHashCacheInstance = createPlayerHashCache();
 
 export const playersCache = {
-  async get(): Promise<Player[] | null> {
-    return playerHashCacheInstance.getAllPlayers();
+  async get(season?: string): Promise<Player[] | null> {
+    return playerHashCacheInstance.getAllPlayers(season);
   },
 
   async set(players: Player[], season?: string): Promise<void> {

@@ -27,9 +27,7 @@ import {
   type LiveFixtureViews,
 } from './live-fixtures.service';
 import { serializeBonusByTeam } from './live-bonus.service';
-import { getLiveSnapshotPlayerRosterVersion } from './live-snapshot-reference-state';
 
-const REFERENCE_DATA_TTL_MS = 15 * 60 * 1000;
 // "LLME" as a signed-safe 32-bit advisory-lock namespace. The event ID is
 // the second key, so unrelated events can still prepare in parallel.
 export const LIVE_SNAPSHOT_LOCK_NAMESPACE = 0x4c4c4d45;
@@ -154,51 +152,45 @@ export async function withFixtureSyncSerialization<TContext, TResult>(
   });
 }
 
-let referenceDataMemo: {
-  season: string;
-  playerRosterVersion: number;
-  value: LiveSnapshotReferenceData;
-  expiresAt: number;
-} | null = null;
+export type LiveSnapshotReferenceDataDependencies = {
+  getSeason: typeof getActiveCacheSeason;
+  getTeamMaps: typeof loadLiveFixtureTeamMaps;
+  getPlayers: typeof playersCache.get;
+};
 
-export function resetLiveSnapshotReferenceDataMemo(): void {
-  referenceDataMemo = null;
+const defaultReferenceDataDependencies: LiveSnapshotReferenceDataDependencies = {
+  getSeason: getActiveCacheSeason,
+  getTeamMaps: loadLiveFixtureTeamMaps,
+  getPlayers: playersCache.get,
+};
+
+export function createLiveSnapshotReferenceDataLoader(
+  dependencies: LiveSnapshotReferenceDataDependencies,
+) {
+  return async function loadLiveSnapshotReferenceData(): Promise<LiveSnapshotReferenceData> {
+    const season = await dependencies.getSeason();
+    // This runs once per snapshot producer cycle, not once per website read.
+    // Always read the shared Redis roster so every BullMQ process observes a
+    // completed roster replacement without a worker-local invalidation window.
+    const [teamMaps, currentPlayers] = await Promise.all([
+      dependencies.getTeamMaps(),
+      dependencies.getPlayers(season),
+    ]);
+    if (!currentPlayers || currentPlayers.length === 0) {
+      throw new Error(
+        `Current-season Player:${season} roster is missing; refusing to prepare a live snapshot`,
+      );
+    }
+    return {
+      ...teamMaps,
+      playerTeamById: buildCurrentSeasonPlayerTeamMap(currentPlayers, season),
+    };
+  };
 }
 
-export async function loadLiveSnapshotReferenceData(): Promise<LiveSnapshotReferenceData> {
-  const season = await getActiveCacheSeason();
-  const playerRosterVersion = getLiveSnapshotPlayerRosterVersion();
-  if (
-    referenceDataMemo &&
-    referenceDataMemo.season === season &&
-    referenceDataMemo.playerRosterVersion === playerRosterVersion &&
-    referenceDataMemo.expiresAt > Date.now()
-  ) {
-    return referenceDataMemo.value;
-  }
-
-  const [teamMaps, currentPlayers] = await Promise.all([
-    loadLiveFixtureTeamMaps(),
-    playersCache.get(),
-  ]);
-  if (!currentPlayers || currentPlayers.length === 0) {
-    throw new Error(
-      `Current-season Player:${season} roster is missing; refusing to prepare a live snapshot`,
-    );
-  }
-  const playerTeamById = buildCurrentSeasonPlayerTeamMap(currentPlayers, season);
-  const value: LiveSnapshotReferenceData = {
-    ...teamMaps,
-    playerTeamById,
-  };
-  referenceDataMemo = {
-    season,
-    playerRosterVersion,
-    value,
-    expiresAt: Date.now() + REFERENCE_DATA_TTL_MS,
-  };
-  return value;
-}
+export const loadLiveSnapshotReferenceData = createLiveSnapshotReferenceDataLoader(
+  defaultReferenceDataDependencies,
+);
 
 export function buildCurrentSeasonPlayerTeamMap(
   currentPlayers: readonly { id: number; teamId: number }[],

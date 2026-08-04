@@ -1,7 +1,7 @@
 import { assertIntegrationEnv } from './helpers/env-guard';
 
 assertIntegrationEnv();
-import { beforeAll, describe, expect, test } from 'bun:test';
+import { beforeAll, describe, expect, setDefaultTimeout, test } from 'bun:test';
 
 import { deriveSeasonFromFixtures } from '../../src/cache/cache-season';
 import { redisSingleton } from '../../src/cache/singleton';
@@ -12,9 +12,14 @@ import { fixtureRepository } from '../../src/repositories/fixtures';
 import { syncAllGameweeks, syncFixtures } from '../../src/services/fixtures.service';
 import { ensureTeams } from './helpers/reference-data';
 
+// This file calls the real FPL API during setup and recovery verification.
+setDefaultTimeout(30000);
+
 describe('Fixtures Integration Tests', () => {
   beforeAll(async () => {
-    // Fixtures reference events and both home/away teams.
+    // Fixtures reference events and both home/away teams. These calls use the
+    // real FPL API, so keep the hook aligned with the explicit network-test
+    // budgets below rather than Bun's five-second unit-test default.
     await ensureTeams();
     await syncFixtures();
   });

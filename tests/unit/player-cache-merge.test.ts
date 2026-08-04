@@ -1,10 +1,62 @@
 import { describe, expect, test } from 'bun:test';
 
 import { playersCache } from '../../src/cache/operations';
+import { resetActiveSeasonMemo } from '../../src/cache/cache-season';
 import { redisSingleton } from '../../src/cache/singleton';
 import type { Player } from '../../src/types';
 
 describe('players cache merge', () => {
+  test('replaces the complete roster in one Redis transaction', async () => {
+    const originalGetClient = redisSingleton.getClient;
+    const commands: string[] = [];
+    let transactionExecutions = 0;
+    const transaction = {
+      del: (_key: string) => {
+        commands.push('del');
+        return transaction;
+      },
+      hset: (_key: string, _entries: Record<string, string>) => {
+        commands.push('hset');
+        return transaction;
+      },
+      exec: async () => {
+        transactionExecutions += 1;
+        return commands.map(() => [null, 1]);
+      },
+    };
+    redisSingleton.getClient = async () =>
+      ({
+        multi: () => transaction,
+        get: async () => '2526',
+      }) as never;
+    resetActiveSeasonMemo();
+
+    try {
+      await playersCache.set(
+        [
+          {
+            id: 1,
+            code: 1001,
+            type: 3,
+            teamId: 1,
+            price: 60,
+            startPrice: 60,
+            firstName: 'Complete',
+            secondName: 'Roster',
+            webName: 'Complete',
+          },
+        ],
+        '2526',
+      );
+    } finally {
+      redisSingleton.getClient = originalGetClient;
+      resetActiveSeasonMemo();
+    }
+
+    expect(commands).toEqual(['del', 'hset']);
+    expect(transactionExecutions).toBe(1);
+  });
+
   test('updates supplied fields without deleting unrelated players', async () => {
     const originalGetClient = redisSingleton.getClient;
     const fields = new Map<string, string>([

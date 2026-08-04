@@ -4,6 +4,7 @@ assertIntegrationEnv();
 import { beforeAll, describe, expect, test } from 'bun:test';
 
 import { playersCache } from '../../src/cache/operations';
+import { fplClient } from '../../src/clients/fpl';
 import { players } from '../../src/db/schemas/index.schema';
 import { getDb } from '../../src/db/singleton';
 import { syncPlayers } from '../../src/services/players.service';
@@ -48,6 +49,37 @@ describe('Players Integration Tests', () => {
     expect(cachedPlayers).not.toBeNull();
     expect(cachedPlayers!.length).toBe(syncResult.count);
   });
+
+  test(
+    'invalid bootstrap element preserves the complete published roster',
+    async () => {
+      const cachedBefore = await playersCache.get();
+      expect(cachedBefore).not.toBeNull();
+      const originalGetBootstrap = fplClient.getBootstrap;
+      const fetchBootstrap = originalGetBootstrap.bind(fplClient);
+      fplClient.getBootstrap = async () => {
+        const response = await fetchBootstrap();
+        return {
+          ...response,
+          elements: response.elements.map((element, index) =>
+            index === 0 ? { ...element, id: -1 } : element,
+          ),
+        };
+      };
+
+      try {
+        await expect(syncPlayers()).rejects.toThrow('Failed to transform player at index 0');
+      } finally {
+        fplClient.getBootstrap = originalGetBootstrap;
+      }
+
+      const cachedAfter = await playersCache.get();
+      const normalize = (rows: NonNullable<typeof cachedBefore>) =>
+        [...rows].sort((left, right) => left.id - right.id);
+      expect(normalize(cachedAfter ?? [])).toEqual(normalize(cachedBefore ?? []));
+    },
+    { timeout: 20000 },
+  );
 
   test('should have players from all teams', async () => {
     const uniqueTeams = new Set(playerRows.map((p) => p.teamId));
