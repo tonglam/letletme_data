@@ -168,6 +168,14 @@ async function sendLaunchNotificationOnce(
         logInfo('Launch notification was rejected by Telegram; releasing the retry lock', {
           status: rejectedDelivery.status,
         });
+        // The lock was made persistent before the request. Restore a bounded
+        // lease first so a Redis failure during the compare-and-delete cannot
+        // strand a definite rejection forever.
+        try {
+          await redis.set(lockKey, token, 'PX', NOTIFICATION_PRE_DELIVERY_LEASE_MS, 'XX');
+        } catch (error) {
+          logError('Failed to restore rejected launch notification lock lease', error);
+        }
       }
       try {
         await releaseNotificationLock(redis, lockKey, token);
