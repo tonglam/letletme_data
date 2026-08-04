@@ -114,6 +114,7 @@ describe('coordinated live snapshot Redis integration', () => {
     const cache = createLiveSnapshotCache({
       getRedisClient: async () => redis,
       getSeason: async () => SEASON,
+      getAuthoritativeSeason: async () => SEASON,
     });
 
     let signalOlderStaged!: () => void;
@@ -169,6 +170,7 @@ describe('coordinated live snapshot Redis integration', () => {
     const cache = createLiveSnapshotCache({
       getRedisClient: async () => redis,
       getSeason: async () => SEASON,
+      getAuthoritativeSeason: async () => SEASON,
     });
     const metaKey = `LiveSnapshotMeta:${SEASON}:${EVENT_ID}`;
 

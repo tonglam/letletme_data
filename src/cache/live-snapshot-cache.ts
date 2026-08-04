@@ -13,7 +13,7 @@ import {
   type LiveSnapshotState,
 } from '../domain/live-snapshot';
 import { logError, logInfo, logWarn } from '../utils/logger';
-import { getActiveCacheSeason } from './cache-season';
+import { getActiveCacheSeason, getActiveCacheSeasonUncached } from './cache-season';
 import { liveSnapshotMetaKey } from './live-snapshot-ownership';
 import { redisSingleton } from './singleton';
 
@@ -60,11 +60,13 @@ export interface LiveSnapshotRetireResult {
 type LiveSnapshotCacheDependencies = {
   getRedisClient: () => Promise<Redis>;
   getSeason: () => Promise<string>;
+  getAuthoritativeSeason: () => Promise<string>;
 };
 
 const defaultDependencies: LiveSnapshotCacheDependencies = {
   getRedisClient: () => redisSingleton.getClient(),
   getSeason: getActiveCacheSeason,
+  getAuthoritativeSeason: getActiveCacheSeasonUncached,
 };
 
 const LIVE_SNAPSHOT_VIEW_PREFIXES = [
@@ -328,7 +330,7 @@ export function createLiveSnapshotCache(
     async retire(eventId: number): Promise<LiveSnapshotRetireResult> {
       const [redis, season] = await Promise.all([
         dependencies.getRedisClient(),
-        dependencies.getSeason(),
+        dependencies.getAuthoritativeSeason(),
       ]);
       const keys = [
         ...LIVE_SNAPSHOT_VIEW_PREFIXES.map((prefix) => `${prefix}:${season}:${eventId}`),
@@ -351,7 +353,7 @@ export function createLiveSnapshotCache(
       const checkedAt = payload.checkedAt ?? new Date();
       const [redis, activeSeason] = await Promise.all([
         dependencies.getRedisClient(),
-        dependencies.getSeason(),
+        dependencies.getAuthoritativeSeason(),
       ]);
       if (activeSeason !== payload.season) {
         logWarn('Refusing live snapshot publication after active season changed', {

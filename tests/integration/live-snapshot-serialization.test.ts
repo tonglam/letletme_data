@@ -9,6 +9,7 @@ import { events } from '../../src/db/schemas/index.schema';
 import { getDb } from '../../src/db/singleton';
 import {
   withFixtureSyncSerialization,
+  withLiveSnapshotDurableEventsWriteFence,
   withLiveSnapshotDurableWriteFence,
   withLiveSnapshotSerialization,
 } from '../../src/services/live-snapshot.service';
@@ -125,6 +126,99 @@ describe('live snapshot PostgreSQL serialization', () => {
         .where(eq(events.id, eventId));
       expect(stored.checkedAt).toEqual(new Date('2026-08-04T01:00:02.000Z'));
     } finally {
+      await db.delete(events).where(eq(events.id, eventId));
+    }
+  });
+
+  test('multi-event fixture fence rolls back every earlier claim when one event is newer', async () => {
+    const firstEventId = 2_000_000_031;
+    const secondEventId = 2_000_000_032;
+    const firstOriginal = new Date('2026-08-04T01:00:00.000Z');
+    const incoming = new Date('2026-08-04T01:00:01.000Z');
+    const secondWinner = new Date('2026-08-04T01:00:02.000Z');
+    const db = await getDb();
+    await db.delete(events).where(eq(events.id, firstEventId));
+    await db.delete(events).where(eq(events.id, secondEventId));
+    await db.insert(events).values([
+      {
+        id: firstEventId,
+        name: 'Fixture fence rollback first',
+        liveSnapshotCheckedAt: firstOriginal,
+      },
+      {
+        id: secondEventId,
+        name: 'Fixture fence rollback winner',
+        liveSnapshotCheckedAt: secondWinner,
+      },
+    ]);
+    const writes: string[] = [];
+
+    try {
+      const result = await withLiveSnapshotDurableEventsWriteFence(
+        [secondEventId, firstEventId],
+        incoming,
+        async () => {
+          writes.push('stale-fixtures');
+        },
+      );
+
+      expect(result).toMatchObject({
+        accepted: false,
+        rejectedEventId: secondEventId,
+        winnerCheckedAt: secondWinner,
+      });
+      expect(writes).toEqual([]);
+      const stored = await db
+        .select({ id: events.id, checkedAt: events.liveSnapshotCheckedAt })
+        .from(events)
+        .where(eq(events.id, firstEventId));
+      expect(stored).toEqual([{ id: firstEventId, checkedAt: firstOriginal }]);
+    } finally {
+      await db.delete(events).where(eq(events.id, firstEventId));
+      await db.delete(events).where(eq(events.id, secondEventId));
+    }
+  });
+
+  test('rejects a fixture payload fetched before a competing live snapshot commits', async () => {
+    const eventId = 2_000_000_041;
+    const fixtureFetchEntered = deferred();
+    const releaseFixtureFetch = deferred();
+    const db = await getDb();
+    await db.delete(events).where(eq(events.id, eventId));
+    await db.insert(events).values({ id: eventId, name: 'Fixture fetch ordering fence' });
+    const writes: string[] = [];
+
+    try {
+      const fixtureWrite = withFixtureSyncSerialization(
+        async () => {
+          fixtureFetchEntered.resolve();
+          await releaseFixtureFetch.promise;
+          return { eventIds: [eventId], context: undefined };
+        },
+        async (_context, fixtureCheckedAt, lockedEventIds) =>
+          withLiveSnapshotDurableEventsWriteFence(lockedEventIds, fixtureCheckedAt, async () => {
+            writes.push('fixture');
+          }),
+      );
+      await fixtureFetchEntered.promise;
+
+      const liveWrite = await withLiveSnapshotSerialization(eventId, async (liveCheckedAt) =>
+        withLiveSnapshotDurableWriteFence(eventId, liveCheckedAt, async () => {
+          writes.push('live');
+        }),
+      );
+      releaseFixtureFetch.resolve();
+      const fixtureResult = await fixtureWrite;
+
+      expect(liveWrite.accepted).toBe(true);
+      expect(fixtureResult).toMatchObject({
+        accepted: false,
+        rejectedEventId: eventId,
+        winnerCheckedAt: liveWrite.winnerCheckedAt,
+      });
+      expect(writes).toEqual(['live']);
+    } finally {
+      releaseFixtureFetch.resolve();
       await db.delete(events).where(eq(events.id, eventId));
     }
   });

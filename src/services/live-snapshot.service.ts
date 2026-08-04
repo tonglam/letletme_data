@@ -95,6 +95,19 @@ export interface LiveSnapshotDurableFenceResult<T> {
   value?: T;
 }
 
+export interface LiveSnapshotDurableEventsFenceResult<T> extends LiveSnapshotDurableFenceResult<T> {
+  rejectedEventId?: number;
+}
+
+class DurableEventsFenceRejected extends Error {
+  constructor(
+    readonly eventId: number,
+    readonly winnerCheckedAt: Date,
+  ) {
+    super(`A newer durable live snapshot already owns event ${eventId}`);
+  }
+}
+
 export async function withLiveSnapshotDurableWriteFence<T>(
   eventId: number,
   checkedAt: Date,
@@ -139,6 +152,76 @@ export async function withLiveSnapshotDurableWriteFence<T>(
       value: await operation(tx),
     };
   });
+}
+
+/**
+ * Atomically claim one ordering token across every event touched by a broad
+ * fixture write. Throwing the private rejection sentinel rolls back claims
+ * made for earlier event IDs, so an older payload can never advance a subset
+ * of checkpoints or execute its mutation callback.
+ */
+export async function withLiveSnapshotDurableEventsWriteFence<T>(
+  eventIds: readonly number[],
+  checkedAt: Date,
+  operation: (tx: DbOrTransaction) => Promise<T>,
+): Promise<LiveSnapshotDurableEventsFenceResult<T>> {
+  const uniqueEventIds = [...new Set(eventIds)].sort((left, right) => left - right);
+  if (uniqueEventIds.some((candidate) => !Number.isInteger(candidate) || candidate <= 0)) {
+    throw new Error(`Invalid durable live snapshot event IDs: ${eventIds.join(', ')}`);
+  }
+  const db = await getDb();
+  try {
+    return await db.transaction(async (tx) => {
+      for (const eventId of uniqueEventIds) {
+        const claimed = await tx
+          .update(events)
+          .set({ liveSnapshotCheckedAt: checkedAt })
+          .where(
+            and(
+              eq(events.id, eventId),
+              or(
+                isNull(events.liveSnapshotCheckedAt),
+                lte(events.liveSnapshotCheckedAt, checkedAt),
+              ),
+            ),
+          )
+          .returning({ checkedAt: events.liveSnapshotCheckedAt });
+        if (claimed.length > 0) continue;
+
+        const [current] = await tx
+          .select({ checkedAt: events.liveSnapshotCheckedAt })
+          .from(events)
+          .where(eq(events.id, eventId))
+          .limit(1);
+        if (!current) {
+          throw new Error(`Cannot fence live snapshot writes for missing event ${eventId}`);
+        }
+        if (!current.checkedAt || current.checkedAt.getTime() <= checkedAt.getTime()) {
+          throw new Error(`Live snapshot durable fence did not advance for event ${eventId}`);
+        }
+        throw new DurableEventsFenceRejected(eventId, current.checkedAt);
+      }
+
+      return {
+        accepted: true,
+        winnerCheckedAt: checkedAt,
+        value: await operation(tx),
+      };
+    });
+  } catch (error) {
+    if (!(error instanceof DurableEventsFenceRejected)) throw error;
+    logInfo('Rejected stale multi-event durable fixture writes', {
+      eventIds: uniqueEventIds,
+      rejectedEventId: error.eventId,
+      incomingCheckedAt: checkedAt.toISOString(),
+      winnerCheckedAt: error.winnerCheckedAt.toISOString(),
+    });
+    return {
+      accepted: false,
+      winnerCheckedAt: error.winnerCheckedAt,
+      rejectedEventId: error.eventId,
+    };
+  }
 }
 
 /**
@@ -215,18 +298,22 @@ export async function withLiveSnapshotEventsSerialization<T>(
         sql`SELECT pg_advisory_xact_lock(${LIVE_SNAPSHOT_LOCK_NAMESPACE}, ${lockedEventId})`,
       );
     }
-    const rows = await tx.execute<{ checkedAt: Date | string }>(
-      sql`SELECT clock_timestamp() AS "checkedAt"`,
-    );
-    const checkedAt =
-      rows[0]?.checkedAt instanceof Date
-        ? rows[0].checkedAt
-        : new Date(String(rows[0]?.checkedAt ?? ''));
-    if (!Number.isFinite(checkedAt.getTime())) {
-      throw new Error('PostgreSQL returned an invalid live snapshot ordering timestamp');
-    }
-    return operation(checkedAt);
+    return operation(await readLiveSnapshotOrderingTimestamp(tx));
   });
+}
+
+async function readLiveSnapshotOrderingTimestamp(tx: DbOrTransaction): Promise<Date> {
+  const rows = await tx.execute<{ checkedAt: Date | string }>(
+    sql`SELECT clock_timestamp() AS "checkedAt"`,
+  );
+  const checkedAt =
+    rows[0]?.checkedAt instanceof Date
+      ? rows[0].checkedAt
+      : new Date(String(rows[0]?.checkedAt ?? ''));
+  if (!Number.isFinite(checkedAt.getTime())) {
+    throw new Error('PostgreSQL returned an invalid live snapshot ordering timestamp');
+  }
+  return checkedAt;
 }
 
 /**
@@ -237,13 +324,22 @@ export async function withLiveSnapshotEventsSerialization<T>(
  */
 export async function withFixtureSyncSerialization<TContext, TResult>(
   prepare: () => Promise<{ eventIds: readonly number[]; context: TContext }>,
-  operation: (context: TContext) => Promise<TResult>,
+  operation: (
+    context: TContext,
+    checkedAt: Date,
+    lockedEventIds: readonly number[],
+  ) => Promise<TResult>,
 ): Promise<TResult> {
   const db = await getDb();
   return db.transaction(async (tx) => {
     await tx.execute(
       sql`SELECT pg_advisory_xact_lock(${LIVE_SNAPSHOT_LOCK_NAMESPACE}, ${FIXTURE_SYNC_LOCK_ID})`,
     );
+    // The token precedes upstream fixture I/O in prepare(). If a live snapshot
+    // publishes while this writer is still discovering its affected events,
+    // the durable multi-event fence rejects this older payload after locks are
+    // acquired instead of letting it overwrite PostgreSQL fallback rows.
+    const checkedAt = await readLiveSnapshotOrderingTimestamp(tx);
     const plan = await prepare();
     const uniqueEventIds = [...new Set(plan.eventIds)].sort((left, right) => left - right);
     if (uniqueEventIds.some((candidate) => !Number.isInteger(candidate) || candidate <= 0)) {
@@ -254,7 +350,7 @@ export async function withFixtureSyncSerialization<TContext, TResult>(
         sql`SELECT pg_advisory_xact_lock(${LIVE_SNAPSHOT_LOCK_NAMESPACE}, ${lockedEventId})`,
       );
     }
-    return operation(plan.context);
+    return operation(plan.context, checkedAt, uniqueEventIds);
   });
 }
 

@@ -5,6 +5,7 @@ import {
   clearStaleSeasonCache,
   finalizeSeasonCacheWrite,
   getActiveCacheSeason,
+  getActiveCacheSeasonUncached,
   resetActiveSeasonMemo,
   SEASON_CACHE_PREFIXES,
   setActiveCacheSeason,
@@ -123,6 +124,16 @@ describe('getActiveCacheSeason memo', () => {
     const redis = installFakeRedis({ get: async () => '2526' });
     expect(await getActiveCacheSeason()).toBe('2526');
     expect(await getActiveCacheSeason()).toBe('2526');
+    expect(redis.get).toHaveBeenCalledTimes(2);
+  });
+
+  test('authoritative reads bypass a still-valid process memo', async () => {
+    let activeSeason = '2526';
+    const redis = installFakeRedis({ get: async () => activeSeason });
+    expect(await getActiveCacheSeason()).toBe('2526');
+    activeSeason = '2627';
+    expect(await getActiveCacheSeason()).toBe('2526');
+    expect(await getActiveCacheSeasonUncached()).toBe('2627');
     expect(redis.get).toHaveBeenCalledTimes(2);
   });
 

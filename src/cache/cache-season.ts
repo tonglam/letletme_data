@@ -159,11 +159,21 @@ export async function getActiveCacheSeason(): Promise<string> {
     return memoized;
   }
 
+  const activeSeason = await getActiveCacheSeasonUncached();
+  memoizeActiveSeason(activeSeason);
+  return activeSeason;
+}
+
+/**
+ * Read Redis truth without consulting or refreshing the process memo. Mutation
+ * fences use this during the once-a-year rollover so an old worker cannot
+ * publish or persist under a season that another process already retired.
+ */
+export async function getActiveCacheSeasonUncached(): Promise<string> {
   try {
     const redis = await redisSingleton.getClient();
     const activeSeason = await redis.get(ACTIVE_SEASON_KEY);
     if (isValidSeason(activeSeason)) {
-      memoizeActiveSeason(activeSeason);
       return activeSeason;
     }
   } catch (error) {

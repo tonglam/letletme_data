@@ -5,13 +5,19 @@ import {
   findOmittedEventFixtureIds,
   resolveFixtureCacheLockEventIds,
   resolveFixtureCacheTransitions,
+  type FixtureCacheTransitions,
 } from '../domain/fixture-cache-transition';
-import { fixtureRepository } from '../repositories/fixtures';
+import { createFixtureRepository, fixtureRepository } from '../repositories/fixtures';
 import { transformFixtures } from '../transformers/fixtures';
+import type { Fixture, RawFPLFixture } from '../types';
 import { logError, logInfo, logWarn } from '../utils/logger';
 import { getCurrentEvent } from './events.service';
 import { syncLiveBonusV2Cache } from './live-bonus.service';
-import { syncLiveSnapshot, withFixtureSyncSerialization } from './live-snapshot.service';
+import {
+  syncLiveSnapshot,
+  withFixtureSyncSerialization,
+  withLiveSnapshotDurableEventsWriteFence,
+} from './live-snapshot.service';
 
 /**
  * Fixtures Service - Business Logic Layer
@@ -25,143 +31,150 @@ export async function syncFixtures(eventId?: number): Promise<{ count: number; e
     const logContext = eventId ? { eventId } : {};
     logInfo('Starting fixtures sync from FPL API', logContext);
 
-    // 1. Fetch from FPL API
-    let rawFixtures = await fplClient.getFixtures(eventId);
+    type FixtureSyncContext = {
+      rawFixtures: RawFPLFixture[];
+      fixtures: Fixture[];
+      recoveredFullFixtureFeed: boolean;
+      unscheduledFixtures: Fixture[];
+      schedulableFixtures: Fixture[];
+      cacheSeason?: string;
+      transitions: FixtureCacheTransitions;
+    };
 
-    if (!Array.isArray(rawFixtures)) {
-      throw new Error('Invalid fixtures data from FPL API');
-    }
-
-    logInfo('Raw fixtures data fetched', { count: rawFixtures.length, ...logContext });
-
-    // 2. Transform to domain fixtures. An event-filtered response does not
-    // contain fixtures that moved away from that event. Detect that against
-    // persisted ownership and promote only that rare case to one full-feed
-    // recovery, so the new destination/null ownership can be persisted and
-    // every affected snapshot/cache can be repaired coherently.
-    let fixtures = transformFixtures(rawFixtures);
-    const eventScopedFixtureIds = new Set(fixtures.map((fixture) => fixture.id));
-    let recoveredFullFixtureFeed = false;
-    if (eventId) {
-      const persistedEventFixtures = await fixtureRepository.findByEvent(eventId);
-      const omittedFixtureIds = findOmittedEventFixtureIds(
-        eventId,
-        persistedEventFixtures,
-        eventScopedFixtureIds,
-      );
-      if (omittedFixtureIds.length > 0) {
-        const fullRawFixtures = await fplClient.getFixtures();
-        if (!Array.isArray(fullRawFixtures) || fullRawFixtures.length === 0) {
-          throw new Error(
-            `Full fixture recovery returned no data for event ${eventId}; omitted fixture IDs: ${omittedFixtureIds.join(', ')}`,
-          );
+    const result = await withFixtureSyncSerialization(
+      async (): Promise<{ eventIds: readonly number[]; context: FixtureSyncContext }> => {
+        // Fetch only after entering the global fixture lane. The PostgreSQL
+        // ordering token is already fixed by withFixtureSyncSerialization, so
+        // a live snapshot that wins an event lock during this fetch makes the
+        // later durable fence reject this payload.
+        let rawFixtures = await fplClient.getFixtures(eventId);
+        if (!Array.isArray(rawFixtures)) {
+          throw new Error('Invalid fixtures data from FPL API');
         }
-        const fullFixtures = transformFixtures(fullRawFixtures);
-        const fullFixtureIds = new Set(fullFixtures.map((fixture) => fixture.id));
-        const unresolvedFixtureIds = omittedFixtureIds.filter(
-          (fixtureId) => !fullFixtureIds.has(fixtureId),
-        );
-        if (unresolvedFixtureIds.length > 0) {
-          throw new Error(
-            `Full fixture recovery could not resolve omitted fixture IDs for event ${eventId}: ${unresolvedFixtureIds.join(', ')}`,
-          );
-        }
-        rawFixtures = fullRawFixtures;
-        fixtures = fullFixtures;
-        recoveredFullFixtureFeed = true;
-        logWarn('Promoted event-scoped fixture sync to full-feed recovery', {
-          eventId,
-          omittedFixtureIds,
-          recoveredCount: fixtures.length,
-        });
-      }
-    }
+        logInfo('Raw fixtures data fetched', { count: rawFixtures.length, ...logContext });
 
-    if (rawFixtures.length === 0) {
-      logWarn('No fixtures returned from FPL API', logContext);
-      return { count: 0, errors: 0 };
-    }
-
-    const fixtureIds = fixtures.map((fixture) => fixture.id);
-
-    logInfo('Fixtures transformed', {
-      total: rawFixtures.length,
-      successful: fixtures.length,
-      errors: rawFixtures.length - fixtures.length,
-      recoveredFullFixtureFeed,
-      ...logContext,
-    });
-
-    const unscheduledFixtures = fixtures.filter((fixture) => fixture.event === null);
-    const schedulableFixtures = fixtures.filter((fixture) => fixture.event !== null);
-    const cacheSeason = deriveSeasonFromFixtures(rawFixtures) ?? undefined;
-
-    if (unscheduledFixtures.length > 0) {
-      // Some FPL fixtures can be temporarily unscheduled (event = null).
-      // Persist the nullable ownership separately before scheduled-row upserts;
-      // the rest of an unscheduled payload may be temporarily incomplete.
-      logWarn('Persisting only event ownership for unscheduled fixtures', {
-        unscheduledCount: unscheduledFixtures.length,
-        fixtureIds: unscheduledFixtures.map((fixture) => fixture.id),
-      });
-    }
-
-    // 3. Save scheduled fixtures to database (batch upsert). Snapshot retirement
-    // deliberately happens first: if Redis is unavailable the DB ownership is
-    // unchanged and a retry can still discover the prior event to retire.
-    const { savedFixtures } = await withFixtureSyncSerialization(
-      async () => {
+        let fixtures = transformFixtures(rawFixtures);
+        const eventScopedFixtureIds = new Set(fixtures.map((fixture) => fixture.id));
+        let recoveredFullFixtureFeed = false;
         if (eventId) {
-          const currentPersistedEventFixtures = await fixtureRepository.findByEvent(eventId);
+          const persistedEventFixtures = await fixtureRepository.findByEvent(eventId);
           const omittedFixtureIds = findOmittedEventFixtureIds(
             eventId,
-            currentPersistedEventFixtures,
+            persistedEventFixtures,
             eventScopedFixtureIds,
           );
-          if (omittedFixtureIds.length > 0 && !recoveredFullFixtureFeed) {
-            throw new Error(
-              `Fixture ownership changed during event ${eventId} sync; retry to resolve omitted fixture IDs: ${omittedFixtureIds.join(', ')}`,
+          if (omittedFixtureIds.length > 0) {
+            const fullRawFixtures = await fplClient.getFixtures();
+            if (!Array.isArray(fullRawFixtures) || fullRawFixtures.length === 0) {
+              throw new Error(
+                `Full fixture recovery returned no data for event ${eventId}; omitted fixture IDs: ${omittedFixtureIds.join(', ')}`,
+              );
+            }
+            const fullFixtures = transformFixtures(fullRawFixtures);
+            const fullFixtureIds = new Set(fullFixtures.map((fixture) => fixture.id));
+            const unresolvedFixtureIds = omittedFixtureIds.filter(
+              (fixtureId) => !fullFixtureIds.has(fixtureId),
             );
-          }
-          const recoveredFixtureIds = new Set(fixtures.map((fixture) => fixture.id));
-          const unresolvedFixtureIds = omittedFixtureIds.filter(
-            (fixtureId) => !recoveredFixtureIds.has(fixtureId),
-          );
-          if (unresolvedFixtureIds.length > 0) {
-            throw new Error(
-              `Accepted full fixture feed is missing persisted event ${eventId} fixture IDs: ${unresolvedFixtureIds.join(', ')}`,
-            );
+            if (unresolvedFixtureIds.length > 0) {
+              throw new Error(
+                `Full fixture recovery could not resolve omitted fixture IDs for event ${eventId}: ${unresolvedFixtureIds.join(', ')}`,
+              );
+            }
+            rawFixtures = fullRawFixtures;
+            fixtures = fullFixtures;
+            recoveredFullFixtureFeed = true;
+            logWarn('Promoted event-scoped fixture sync to full-feed recovery', {
+              eventId,
+              omittedFixtureIds,
+              recoveredCount: fixtures.length,
+            });
           }
         }
+
+        const fixtureIds = fixtures.map((fixture) => fixture.id);
         const existingEvents = await fixtureRepository.findEventIdsByFixtureIds(fixtureIds);
         const transitions = resolveFixtureCacheTransitions(fixtures, existingEvents);
+        const unscheduledFixtures = fixtures.filter((fixture) => fixture.event === null);
+        const schedulableFixtures = fixtures.filter((fixture) => fixture.event !== null);
+        logInfo('Fixtures transformed', {
+          total: rawFixtures.length,
+          successful: fixtures.length,
+          errors: rawFixtures.length - fixtures.length,
+          recoveredFullFixtureFeed,
+          ...logContext,
+        });
+
         return {
           eventIds: resolveFixtureCacheLockEventIds(fixtures, transitions.invalidatedEventIds),
-          context: transitions,
+          context: {
+            rawFixtures,
+            fixtures,
+            recoveredFullFixtureFeed,
+            unscheduledFixtures,
+            schedulableFixtures,
+            cacheSeason: deriveSeasonFromFixtures(rawFixtures) ?? undefined,
+            transitions,
+          },
         };
       },
-      async (transitions) => {
-        if (transitions.invalidatedEventIds.size > 0) {
-          await Promise.all(
-            Array.from(transitions.invalidatedEventIds).map((invalidatedEventId) =>
-              liveSnapshotCache.retire(invalidatedEventId),
-            ),
-          );
-          logInfo('Retired live snapshots before fixture identity changes', {
-            ...(eventId ? { eventId } : {}),
-            invalidatedEventIds: Array.from(transitions.invalidatedEventIds),
-          });
+      async (context, checkedAt, lockedEventIds) => {
+        const {
+          rawFixtures,
+          fixtures,
+          recoveredFullFixtureFeed,
+          unscheduledFixtures,
+          schedulableFixtures,
+          cacheSeason,
+          transitions,
+        } = context;
+        if (rawFixtures.length === 0) {
+          logWarn('No fixtures returned from FPL API', logContext);
+          return { count: 0, errors: 0 };
         }
         if (unscheduledFixtures.length > 0) {
-          const markedUnscheduled = await fixtureRepository.markUnscheduled(
-            unscheduledFixtures.map((fixture) => fixture.id),
-          );
-          logInfo('Persisted unscheduled fixture ownership', {
-            requested: unscheduledFixtures.length,
-            updated: markedUnscheduled,
+          logWarn('Persisting only event ownership for unscheduled fixtures', {
+            unscheduledCount: unscheduledFixtures.length,
+            fixtureIds: unscheduledFixtures.map((fixture) => fixture.id),
           });
         }
-        const savedFixtures = await fixtureRepository.upsertBatch(schedulableFixtures);
+
+        // Claim every affected event in one transaction. The callback runs only
+        // if all claims win; Redis retirement precedes the fixture mutation so
+        // a Redis failure still rolls back PostgreSQL ownership and checkpoints.
+        const durable = await withLiveSnapshotDurableEventsWriteFence(
+          lockedEventIds,
+          checkedAt,
+          async (tx) => {
+            if (transitions.invalidatedEventIds.size > 0) {
+              await Promise.all(
+                Array.from(transitions.invalidatedEventIds).map((invalidatedEventId) =>
+                  liveSnapshotCache.retire(invalidatedEventId),
+                ),
+              );
+              logInfo('Retired live snapshots before fixture identity changes', {
+                ...(eventId ? { eventId } : {}),
+                invalidatedEventIds: Array.from(transitions.invalidatedEventIds),
+              });
+            }
+            const repository = createFixtureRepository(tx);
+            if (unscheduledFixtures.length > 0) {
+              const markedUnscheduled = await repository.markUnscheduled(
+                unscheduledFixtures.map((fixture) => fixture.id),
+              );
+              logInfo('Persisted unscheduled fixture ownership', {
+                requested: unscheduledFixtures.length,
+                updated: markedUnscheduled,
+              });
+            }
+            return repository.upsertBatch(schedulableFixtures);
+          },
+        );
+        if (!durable.accepted || !durable.value) {
+          throw new Error(
+            `Fixture sync for ${eventId ? `event ${eventId}` : 'all events'} was superseded by live snapshot event ${durable.rejectedEventId ?? 'unknown'} at ${durable.winnerCheckedAt.toISOString()}; retry`,
+          );
+        }
+        const savedFixtures = durable.value;
         logInfo('Fixtures upserted to database', { count: savedFixtures.length, ...logContext });
 
         if (eventId && !recoveredFullFixtureFeed) {
@@ -198,16 +211,11 @@ export async function syncFixtures(eventId?: number): Promise<{ count: number; e
         logInfo('Fixtures cache updated', logContext);
 
         return {
-          ...transitions,
-          savedFixtures,
+          count: savedFixtures.length,
+          errors: rawFixtures.length - fixtures.length,
         };
       },
     );
-
-    const result = {
-      count: savedFixtures.length,
-      errors: rawFixtures.length - fixtures.length,
-    };
 
     logInfo('Fixtures sync completed successfully', result);
     return result;

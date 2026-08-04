@@ -252,6 +252,7 @@ function cacheWith(redis: FakeRedis) {
   return createLiveSnapshotCache({
     getRedisClient: async () => redis as unknown as Redis,
     getSeason: async () => '2526',
+    getAuthoritativeSeason: async () => '2526',
   });
 }
 
@@ -466,7 +467,10 @@ describe('live snapshot cache publication', () => {
     const beforeCommit = mock(async () => true);
     const cache = createLiveSnapshotCache({
       getRedisClient: async () => redis as unknown as Redis,
-      getSeason: async () => '2627',
+      // Simulate a worker-local memo that still says 2526 while Redis truth
+      // has already advanced in another process.
+      getSeason: async () => '2526',
+      getAuthoritativeSeason: async () => '2627',
     });
 
     await expect(cache.publish(cachePayload().payload, { beforeCommit })).rejects.toThrow(
