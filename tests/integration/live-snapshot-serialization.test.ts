@@ -265,6 +265,17 @@ describe('live snapshot PostgreSQL serialization', () => {
     } as never;
 
     try {
+      await expect(
+        persistLiveSnapshotDurably({
+          eventId,
+          checkedAt,
+          prepared,
+          persistFixtures: true,
+          persistEventLives: false,
+          finalizeEvent: true,
+        }),
+      ).rejects.toThrow('A final live snapshot requires durable event-live persistence');
+
       const ordinary = await persistLiveSnapshotDurably({
         eventId,
         checkedAt,

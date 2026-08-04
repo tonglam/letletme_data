@@ -178,6 +178,16 @@ export const createEventRepository = (dbInstance?: DatabaseInstance) => {
               transfersMade: sql`excluded.transfers_made`,
               mostCaptained: sql`excluded.most_captained`,
               mostViceCaptained: sql`excluded.most_vice_captained`,
+              // A reopened or newly data-checked event invalidates any prior
+              // terminal live authority. The post-match consolidation must
+              // publish a fresh marker before tournament terminal reads resume.
+              liveSnapshotFinalizedAt: sql`
+                CASE
+                  WHEN excluded.finished = false OR excluded.data_checked = false THEN NULL
+                  WHEN events.data_checked = false AND excluded.data_checked = true THEN NULL
+                  ELSE events.live_snapshot_finalized_at
+                END
+              `,
               updatedAt: new Date(),
             },
           })

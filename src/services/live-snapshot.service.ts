@@ -242,6 +242,9 @@ export async function persistLiveSnapshotDurably({
   persistEventLives,
   finalizeEvent = false,
 }: LiveSnapshotDurablePersistenceRequest): Promise<LiveSnapshotDurablePersistenceResult> {
+  if (finalizeEvent && !persistEventLives) {
+    throw new Error('A final live snapshot requires durable event-live persistence');
+  }
   if (!persistFixtures && !persistEventLives) {
     return {
       accepted: true,
