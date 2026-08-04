@@ -35,10 +35,12 @@ export const LIVE_SNAPSHOT_LOCK_NAMESPACE = 0x4c4c4d45;
 const FIXTURE_SYNC_LOCK_ID = 0;
 
 export interface LiveSnapshotReferenceData extends LiveFixtureTeamMaps {
+  season: string;
   playerTeamById: Map<number, number>;
 }
 
 export interface PreparedLiveSnapshot {
+  season: string;
   eventId: number;
   eventLives: PreparedEventLives;
   fixtures: Fixture[];
@@ -286,6 +288,7 @@ export function createLiveSnapshotReferenceDataLoader(
       );
     }
     return {
+      season,
       ...teamMaps,
       playerTeamById: buildCurrentSeasonPlayerTeamMap(currentPlayers, season),
     };
@@ -444,6 +447,7 @@ export function prepareLiveSnapshot(
   const liveBonus = serializeBonusByTeam(computeLiveBonusByTeam(matches, livesWithTeam));
 
   return {
+    season: referenceData.season,
     eventId,
     eventLives,
     fixtures,
@@ -503,6 +507,7 @@ export async function syncLiveSnapshot(
     let persistedEventLives = false;
     const published = await dependencies.publish(
       {
+        season: prepared.season,
         eventId,
         state: prepared.state,
         eventLives: prepared.eventLives.eventLives,

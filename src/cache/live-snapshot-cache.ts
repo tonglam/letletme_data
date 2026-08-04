@@ -23,6 +23,8 @@ export const LIVE_SNAPSHOT_STAGING_TTL_SECONDS = 15 * 60;
 type HashFields = Record<string, string>;
 
 export interface LiveSnapshotCachePayload {
+  /** Season whose roster and reference data produced every derived view. */
+  season: string;
   eventId: number;
   state: LiveSnapshotState;
   eventLives: readonly EventLive[];
@@ -347,10 +349,23 @@ export function createLiveSnapshotCache(
       options: LiveSnapshotPublishOptions = {},
     ): Promise<LiveSnapshotPublishResult> {
       const checkedAt = payload.checkedAt ?? new Date();
-      const [redis, season] = await Promise.all([
+      const [redis, activeSeason] = await Promise.all([
         dependencies.getRedisClient(),
         dependencies.getSeason(),
       ]);
+      if (activeSeason !== payload.season) {
+        logWarn('Refusing live snapshot publication after active season changed', {
+          preparedSeason: payload.season,
+          activeSeason,
+          eventId: payload.eventId,
+        });
+        throw new Error(
+          `Live snapshot season changed from ${payload.season} to ${activeSeason}; retry with current reference data`,
+        );
+      }
+      // From here on, key construction is bound to the reference-data season;
+      // the active-season read above is only a publication fence.
+      const season = payload.season;
       const metaKey = liveSnapshotMetaKey(season, payload.eventId);
 
       const views = [

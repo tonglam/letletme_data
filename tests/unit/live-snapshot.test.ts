@@ -10,6 +10,7 @@ import {
 import {
   parseLiveSnapshotMeta,
   resolveLiveSnapshotPersistence,
+  shouldCascadePersistedLiveSnapshot,
   shouldSkipQueuedLiveSnapshot,
   type LiveSnapshotMeta,
 } from '../../src/domain/live-snapshot';
@@ -203,6 +204,7 @@ function liveRawFixture(overrides: Partial<RawFPLFixture> = {}): RawFPLFixture {
 
 function referenceData(): LiveSnapshotReferenceData {
   return {
+    season: '2526',
     nameById: new Map([
       [4, 'Burnley'],
       [12, 'Liverpool'],
@@ -232,6 +234,7 @@ function cachePayload(score = 2, checkedAt = new Date('2025-08-15T20:00:00.000Z'
     [1],
   );
   const payload: LiveSnapshotCachePayload = {
+    season: prepared.season,
     eventId: 1,
     state: prepared.state,
     eventLives: prepared.eventLives.eventLives,
@@ -283,9 +286,13 @@ describe('prepareLiveSnapshot', () => {
       },
     });
 
-    expect((await loadReferenceData()).playerTeamById.get(350)).toBe(12);
+    const first = await loadReferenceData();
+    expect(first.season).toBe('2526');
+    expect(first.playerTeamById.get(350)).toBe(12);
     teamId = 4;
-    expect((await loadReferenceData()).playerTeamById.get(350)).toBe(4);
+    const second = await loadReferenceData();
+    expect(second.season).toBe('2526');
+    expect(second.playerTeamById.get(350)).toBe(4);
     expect(rosterReads).toBe(2);
     expect(rosterSeasons).toEqual(['2526', '2526']);
   });
@@ -325,6 +332,7 @@ describe('prepareLiveSnapshot', () => {
   test('derives coherent live views and fixture-scoped bonus from one upstream pair', () => {
     const { prepared } = cachePayload();
 
+    expect(prepared.season).toBe('2526');
     expect(prepared.state).toBe('live');
     expect(prepared.eventLives.eventLives).toHaveLength(3);
     expect(prepared.fixtureViews.legacy['12'].Playing[0]).not.toHaveProperty('fixtureId');
@@ -441,9 +449,34 @@ describe('queued live snapshot window policy', () => {
     }
     expect(resolveLiveSnapshotPersistence('event-live-summary')).toBeNull();
   });
+
+  test('cascades derivatives after a durable checkpoint even if Redis publication is stale', () => {
+    expect(shouldCascadePersistedLiveSnapshot({ stale: true, persistedEventLives: true })).toBe(
+      true,
+    );
+    expect(shouldCascadePersistedLiveSnapshot({ stale: false, persistedEventLives: false })).toBe(
+      false,
+    );
+  });
 });
 
 describe('live snapshot cache publication', () => {
+  test('rejects a snapshot prepared from a different active season before persistence', async () => {
+    const redis = new FakeRedis();
+    const beforeCommit = mock(async () => true);
+    const cache = createLiveSnapshotCache({
+      getRedisClient: async () => redis as unknown as Redis,
+      getSeason: async () => '2627',
+    });
+
+    await expect(cache.publish(cachePayload().payload, { beforeCommit })).rejects.toThrow(
+      'Live snapshot season changed from 2526 to 2627; retry with current reference data',
+    );
+    expect(beforeCommit).not.toHaveBeenCalled();
+    expect(redis.hashes.size).toBe(0);
+    expect(redis.strings.size).toBe(0);
+  });
+
   test('atomically publishes all views and only advances revision for football changes', async () => {
     const redis = new FakeRedis();
     const cache = cacheWith(redis);
@@ -769,6 +802,7 @@ describe('syncLiveSnapshot', () => {
     const publish = mock(
       async (payload: LiveSnapshotCachePayload, options: LiveSnapshotPublishOptions = {}) => {
         calls.push('publish-stage');
+        expect(payload.season).toBe('2526');
         expect(payload.checkedAt).toEqual(new Date('2025-08-15T20:00:00.000Z'));
         await options.beforeCommit?.(true);
         calls.push('publish-commit');

@@ -3,6 +3,7 @@ import { Worker, Job, QueueEvents } from 'bullmq';
 import { MUTATION_PRIORITY_ORDER, type MutationPriorityTier } from '../domain/job-priority';
 import {
   resolveLiveSnapshotPersistence,
+  shouldCascadePersistedLiveSnapshot,
   shouldSkipQueuedLiveSnapshot,
 } from '../domain/live-snapshot';
 import {
@@ -78,7 +79,7 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
             }
           }
           const snapshot = await syncLiveSnapshot(eventId, { persistEventLives });
-          if (persistEventLives && !snapshot.stale) {
+          if (shouldCascadePersistedLiveSnapshot(snapshot)) {
             await enqueueCascadeJobs(eventId, undefined, { includeLiveDerivatives: false });
             await enqueueFinalLeagueResultsAfterLiveSync(eventId);
           }

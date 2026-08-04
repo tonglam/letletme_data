@@ -30,6 +30,7 @@ const KEYS = [
 
 function referenceData(): LiveSnapshotReferenceData {
   return {
+    season: SEASON,
     nameById: new Map([
       [4, 'Burnley'],
       [12, 'Liverpool'],
@@ -80,6 +81,7 @@ function payload(score: number, checkedAt: Date): LiveSnapshotCachePayload {
     [rawFixture.id],
   );
   return {
+    season: prepared.season,
     eventId: EVENT_ID,
     state: prepared.state,
     eventLives: prepared.eventLives.eventLives,

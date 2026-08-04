@@ -30,6 +30,18 @@ export function shouldSkipQueuedLiveSnapshot(
 }
 
 /**
+ * Downstream DB derivatives follow the durable checkpoint, not the Redis
+ * publication result. A newer cache-only worker can win Redis metadata after
+ * this worker commits event_live rows; that must not suppress the cascade.
+ */
+export function shouldCascadePersistedLiveSnapshot(snapshot: {
+  stale: boolean;
+  persistedEventLives: boolean;
+}): boolean {
+  return snapshot.persistedEventLives;
+}
+
+/**
  * Old queue names can survive a rolling worker deployment. Treat every job
  * that used to replace one live Redis view as a coordinated snapshot so none
  * can invalidate LiveSnapshotMeta after the new publisher is active.
