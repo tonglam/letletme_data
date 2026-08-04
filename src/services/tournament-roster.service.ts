@@ -69,7 +69,12 @@ async function reconcileTournamentRosterUnlocked(
     throw new ConflictError('Paused tournaments are not synchronized.', 'TOURNAMENT_PAUSED');
   }
 
-  if (!options?.resumeAfterSetup) {
+  if (options?.resumeAfterSetup) {
+    // This runs inside the per-tournament lifecycle lock. The resume marker is
+    // therefore written only after any prior setup attempt has finished its
+    // canonical transition, never before waiting on that worker.
+    await tournamentRosterRepository.markResumeProcessing(tournamentId);
+  } else {
     await tournamentRosterRepository.markSyncProcessing(tournamentId);
   }
   try {
@@ -159,6 +164,10 @@ async function reconcileTournamentRosterUnlocked(
     if (needsSetup && !publication.automaticallyPaused) {
       await enqueueTournamentSetup(tournamentId, options?.resumeAfterSetup ? 'resume' : 'roster', {
         forceNew: true,
+        // reconcileTournamentRoster holds the lifecycle lock. If the preceding
+        // worker has returned but BullMQ still says active, allow that bounded
+        // bookkeeping boundary to settle so this requested replacement exists.
+        activeSettleTimeoutMs: 2_000,
       });
     }
 

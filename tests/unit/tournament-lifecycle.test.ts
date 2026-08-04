@@ -24,6 +24,11 @@ describe('tournament lifecycle invariants', () => {
       }),
     ).toBe('reject');
     expect(
+      decideExistingSetupJobAction('active', {
+        forceNew: true,
+      }),
+    ).toBe('reject');
+    expect(
       decideExistingSetupJobAction('waiting', {
         forceNew: true,
         prepareEnqueue: async () => undefined,

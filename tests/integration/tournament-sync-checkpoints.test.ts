@@ -208,6 +208,39 @@ describe('tournament initialization checkpoints', () => {
     expect(resetRows[0]).toEqual({ picks: 0, transfers: 0, resultPicks: null });
   });
 
+  test('snapshot rollover preserves transfers already proven for the active season', async () => {
+    const sql = await getDbClient();
+    await sql`DELETE FROM entry_event_transfers WHERE entry_id = ${ENTRY_ID}`;
+    await sql`
+      UPDATE entry_infos
+      SET entry_snapshot_synced_through_event_id = 38,
+          entry_snapshot_synced_season = '2425',
+          entry_transfers_synced_through_event_id = 1,
+          entry_transfers_synced_season = ${TEST_SEASON}
+      WHERE id = ${ENTRY_ID}
+    `;
+    await sql`
+      INSERT INTO entry_event_transfers (entry_id, event_id, transfer_time)
+      VALUES (${ENTRY_ID}, 1, '2026-08-01T00:00:00Z')
+    `;
+
+    await syncEntryInfo(ENTRY_ID, client, 1, TEST_SEASON);
+
+    const rows = await sql<Array<{ count: number }>>`
+      SELECT count(*)::int AS count
+      FROM entry_event_transfers
+      WHERE entry_id = ${ENTRY_ID}
+        AND transfer_time = '2026-08-01T00:00:00Z'
+    `;
+    expect(rows[0]?.count).toBe(1);
+    expect(await checkpointRow()).toMatchObject({
+      snapshot: 1,
+      snapshotSeason: TEST_SEASON,
+      transfers: 1,
+      transfersSeason: TEST_SEASON,
+    });
+  });
+
   test('preseason zero is complete only for a preseason target', async () => {
     const sql = await getDbClient();
     await sql`

@@ -71,6 +71,48 @@ export type TournamentManagementLifecycle = {
   refreshViews?: () => Promise<unknown>;
 };
 
+type SnapshotResumeDependencies = {
+  enqueue: (
+    tournamentId: number,
+    source: 'resume',
+    options: {
+      forceNew: true;
+      prepareEnqueue: () => Promise<void>;
+    },
+  ) => Promise<unknown>;
+  markResumeProcessing: (tournamentId: number) => Promise<void>;
+  markRosterFailed: (tournamentId: number, error: string) => Promise<void>;
+  markSetupFailed: (tournamentId: number, error: string) => Promise<void>;
+};
+
+export async function requestSnapshotTournamentResume(
+  tournamentId: number,
+  dependencies: SnapshotResumeDependencies,
+): Promise<void> {
+  let resumePrepared = false;
+  try {
+    await dependencies.enqueue(tournamentId, 'resume', {
+      forceNew: true,
+      prepareEnqueue: async () => {
+        await dependencies.markResumeProcessing(tournamentId);
+        resumePrepared = true;
+      },
+    });
+  } catch (error) {
+    // An active job is rejected before prepareEnqueue runs. Preserve its
+    // canonical state instead of replacing ready/processing with a false
+    // pending or failed resume marker. Fail only a transition we wrote.
+    if (resumePrepared) {
+      const message = error instanceof Error ? error.message : 'Unable to enqueue resume setup.';
+      await Promise.allSettled([
+        dependencies.markRosterFailed(tournamentId, message),
+        dependencies.markSetupFailed(tournamentId, message),
+      ]);
+    }
+    throw error;
+  }
+}
+
 export function createTournamentManagementService(
   repository: TournamentManagementRepository,
   lifecycle: TournamentManagementLifecycle = {},
@@ -144,25 +186,19 @@ export function createTournamentManagementService(
 
       if (current.rosterMode === 'official_sync') {
         const { reconcileTournamentRoster } = await import('./tournament-roster.service');
-        await tournamentRosterRepository.markResumeProcessing(tournamentId);
         await reconcileTournamentRoster(tournamentId, {
           allowInactive: true,
           resumeAfterSetup: true,
         });
       } else {
         const { enqueueTournamentSetup } = await import('../jobs/tournament-setup.jobs');
-        await tournamentRosterRepository.markResumeProcessing(tournamentId);
-        try {
-          await enqueueTournamentSetup(tournamentId, 'resume', { forceNew: true });
-        } catch (error) {
-          const message =
-            error instanceof Error ? error.message : 'Unable to enqueue resume setup.';
-          await Promise.allSettled([
-            tournamentRosterRepository.markSyncFailed(tournamentId, message),
-            tournamentInfoRepository.markSetupResult(tournamentId, 'failed', message),
-          ]);
-          throw error;
-        }
+        await requestSnapshotTournamentResume(tournamentId, {
+          enqueue: enqueueTournamentSetup,
+          markResumeProcessing: tournamentRosterRepository.markResumeProcessing,
+          markRosterFailed: tournamentRosterRepository.markSyncFailed,
+          markSetupFailed: (id, message) =>
+            tournamentInfoRepository.markSetupResult(id, 'failed', message),
+        });
       }
       await invalidateCaches('resume-requested');
       return (await repository.findById(tournamentId)) ?? current;

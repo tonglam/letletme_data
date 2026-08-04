@@ -11,6 +11,12 @@ export type TournamentSetupJobSource = 'create' | 'manual' | 'watchdog' | 'roste
 export interface EnqueueTournamentSetupOptions {
   forceNew?: boolean;
   prepareEnqueue?: () => Promise<void>;
+  /**
+   * Only callers already holding the tournament lifecycle lock may use this.
+   * It bridges the short interval between a worker releasing that lock and
+   * BullMQ recording the job as completed.
+   */
+  activeSettleTimeoutMs?: number;
 }
 
 export type ExistingSetupJobAction = 'remove' | 'reuse' | 'reject';
@@ -22,7 +28,22 @@ export function decideExistingSetupJobAction(
   if (state === 'completed' || state === 'failed') return 'remove';
   if (!options.forceNew) return 'reuse';
   if (state === 'waiting' || state === 'delayed') return 'remove';
-  return options.prepareEnqueue ? 'reject' : 'reuse';
+  return 'reject';
+}
+
+async function waitForActiveJobToSettle(
+  job: { getState(): Promise<string> },
+  timeoutMs: number,
+): Promise<string> {
+  let state = await job.getState();
+  if (state !== 'active' || timeoutMs <= 0) return state;
+
+  const deadline = performance.now() + timeoutMs;
+  while (state === 'active' && performance.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    state = await job.getState();
+  }
+  return state;
 }
 
 export async function cancelWaitingTournamentSetupJobs(tournamentId: number): Promise<number> {
@@ -65,7 +86,7 @@ export async function enqueueTournamentSetup(
     const existing = await queue.getJob(baseJobId);
     const jobId = baseJobId;
     if (existing) {
-      const state = await existing.getState();
+      const state = await waitForActiveJobToSettle(existing, options.activeSettleTimeoutMs ?? 0);
       const action = decideExistingSetupJobAction(state, options);
       if (action === 'remove') {
         await existing.remove();

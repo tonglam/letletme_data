@@ -24,7 +24,7 @@ describe('tournament event finalization', () => {
     expect(calls).toEqual(['finish:12', 'refresh', 'invalidate:finish']);
   });
 
-  test('retains the cascade refresh without unnecessary cache invalidation', async () => {
+  test('invalidates after a recovery refresh when finish was already committed', async () => {
     const calls: string[] = [];
 
     await finalizeTournamentEventLifecycle(12, {
@@ -36,11 +36,11 @@ describe('tournament event finalization', () => {
       refresh: async () => {
         calls.push('refresh');
       },
-      invalidate: async () => {
-        calls.push('invalidate');
+      invalidate: async (reason) => {
+        calls.push(`invalidate:${reason}`);
       },
     });
 
-    expect(calls).toEqual(['finish', 'refresh']);
+    expect(calls).toEqual(['finish', 'refresh', 'invalidate:event-publication']);
   });
 });

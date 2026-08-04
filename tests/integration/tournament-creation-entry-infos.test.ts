@@ -284,4 +284,72 @@ describe('tournament creation vs entry_infos (FP-08)', () => {
     `;
     expect(finishedWins[0]).toEqual({ state: 'finished', roster_sync_status: 'ready' });
   });
+
+  test('watchdog compare-and-swap cannot overwrite an advanced setup state', async () => {
+    const client = await getDbClient();
+    const participants = buildParticipants();
+    const plan = planTournamentStructure(
+      {
+        tournamentName: `Watchdog CAS ${Date.now()}`,
+        adminId: String(SYNCED_ENTRY.id),
+        creator: 'watchdog-cas-test',
+        participantSource: 'custom',
+        leagueUrl: 'https://fantasy.premierleague.com/leagues/900004/standings/c',
+        groupFormat: 'points',
+        startGameweek: 'GW1',
+        endGameweek: 'GW38',
+        groupNum: '1',
+        qualifiersPerGroup: '',
+        knockoutFormat: 'none',
+      },
+      participants,
+      900004,
+      'classic',
+    );
+    const created = await tournamentInfoRepository.createTournamentWithEntries(plan);
+    createdTournamentIds.push(created.id);
+    await client`
+      update tournament_infos
+      set setup_status = 'processing',
+          setup_phase = 'syncing_entries',
+          setup_started_at = '2026-08-01T00:00:00Z',
+          setup_progress_updated_at = '2026-08-01T00:01:00Z'
+      where id = ${created.id}
+    `;
+
+    await client`
+      update tournament_infos
+      set setup_progress_updated_at = '2026-08-01T00:02:00Z'
+      where id = ${created.id}
+    `;
+    const advancedHeartbeatWrite = await tournamentInfoRepository.markStuckSetupFailedIfUnchanged(
+      created.id,
+      '2026-08-01T00:01:00Z',
+      'stale watchdog observation',
+    );
+    const progressing = await client<Array<{ setup_status: string }>>`
+      select setup_status from tournament_infos where id = ${created.id}
+    `;
+    expect(advancedHeartbeatWrite).toBe(false);
+    expect(progressing[0]?.setup_status).toBe('processing');
+
+    await client`
+      update tournament_infos
+      set setup_status = 'ready', setup_phase = 'ready', setup_progress_updated_at = now()
+      where id = ${created.id}
+    `;
+    const terminalWrite = await tournamentInfoRepository.markStuckSetupFailedIfUnchanged(
+      created.id,
+      '2026-08-01T00:01:00Z',
+      'stale watchdog observation',
+    );
+    const state = await client<Array<{ setup_status: string; setup_phase: string }>>`
+      select setup_status, setup_phase
+      from tournament_infos
+      where id = ${created.id}
+    `;
+
+    expect(terminalWrite).toBe(false);
+    expect(state[0]).toEqual({ setup_status: 'ready', setup_phase: 'ready' });
+  });
 });

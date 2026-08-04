@@ -1,4 +1,7 @@
-import { tournamentSetupRebuildScopes } from '../domain/mutation-scope';
+import {
+  tournamentSetupLifecycleScope,
+  tournamentSetupRebuildScopes,
+} from '../domain/mutation-scope';
 import { invalidateTournamentGraphQLCaches } from '../cache/tournament-graphql-cache';
 import { estimateTournamentSetupRequests, getTournamentBackfillWindow } from '../domain/tournament';
 import { enqueueTournamentSetup } from '../jobs/tournament-setup.jobs';
@@ -505,17 +508,41 @@ export async function recoverStuckTournamentSetups(
         continue;
       }
 
-      await tournamentInfoRepository.markSetupResult(
-        row.id,
-        'failed',
-        `Setup stopped progressing at ${row.setupProgressUpdatedAt ?? 'unknown'}; re-enqueued by watchdog.`,
+      await withMutationConflictGuard(
+        {
+          queueName: 'tournament-setup-watchdog',
+          jobName: 'recover-stuck-setup',
+          tournamentId: row.id,
+          scopes: [tournamentSetupLifecycleScope(row.id)],
+        },
+        async () => {
+          // The initial stale query and BullMQ probe are only candidates. A
+          // worker may publish readiness or advance its heartbeat before this
+          // lock is acquired, so compare-and-swap the exact observed heartbeat
+          // before changing canonical state.
+          const marked = await tournamentInfoRepository.markStuckSetupFailedIfUnchanged(
+            row.id,
+            row.setupProgressUpdatedAt,
+            `Setup stopped progressing at ${row.setupProgressUpdatedAt ?? 'unknown'}; re-enqueued by watchdog.`,
+          );
+          if (!marked) {
+            logInfo('Skipping watchdog recovery after setup state advanced', {
+              tournamentId: row.id,
+              observedSetupProgressUpdatedAt: row.setupProgressUpdatedAt,
+            });
+            return;
+          }
+          await enqueueTournamentSetup(row.id, 'watchdog', {
+            forceNew: true,
+            activeSettleTimeoutMs: 2_000,
+          });
+          recovered.push(row.id);
+          logInfo('Watchdog recovered stuck tournament setup', {
+            tournamentId: row.id,
+            setupProgressUpdatedAt: row.setupProgressUpdatedAt,
+          });
+        },
       );
-      await enqueueTournamentSetup(row.id, 'watchdog', { forceNew: true });
-      recovered.push(row.id);
-      logInfo('Watchdog recovered stuck tournament setup', {
-        tournamentId: row.id,
-        setupProgressUpdatedAt: row.setupProgressUpdatedAt,
-      });
     } catch (error) {
       logError('Watchdog failed to recover stuck tournament setup', error, {
         tournamentId: row.id,

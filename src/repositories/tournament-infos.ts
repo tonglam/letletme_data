@@ -565,10 +565,13 @@ export const createTournamentInfoRepository = (dbInstance?: DatabaseInstance) =>
         const rows = await db
           .select({
             id: tournamentInfos.id,
-            setupProgressUpdatedAt: sql<Date | null>`COALESCE(
+            // Keep PostgreSQL's full timestamp precision for the watchdog's
+            // compare-and-swap. Converting through JavaScript Date would trim
+            // microseconds and make a genuinely stale row impossible to match.
+            setupProgressUpdatedAt: sql<string | null>`COALESCE(
               ${tournamentInfos.setupProgressUpdatedAt},
               ${tournamentInfos.setupStartedAt}
-            )`,
+            )::text`,
           })
           .from(tournamentInfos)
           .where(
@@ -585,15 +588,57 @@ export const createTournamentInfoRepository = (dbInstance?: DatabaseInstance) =>
           );
         return rows.map((row) => ({
           id: row.id,
-          setupProgressUpdatedAt: row.setupProgressUpdatedAt
-            ? row.setupProgressUpdatedAt.toISOString()
-            : null,
+          setupProgressUpdatedAt: row.setupProgressUpdatedAt,
         }));
       } catch (error) {
         logError('Failed to find stuck processing tournaments', error, { cutoffMinutes });
         throw new DatabaseError(
           'Failed to find stuck processing tournaments',
           'TOURNAMENT_INFO_FIND_STUCK_ERROR',
+          error as Error,
+        );
+      }
+    },
+
+    markStuckSetupFailedIfUnchanged: async (
+      tournamentId: number,
+      expectedProgressUpdatedAt: string | null,
+      internalError: string,
+    ): Promise<boolean> => {
+      try {
+        const db = await getDbInstance();
+        const now = new Date();
+        const rows = await db
+          .update(tournamentInfos)
+          .set({
+            setupStatus: 'failed',
+            setupPhase: 'failed',
+            setupWarningCount: 0,
+            setupError: internalError,
+            setupProgressUpdatedAt: now,
+            setupFinishedAt: now,
+            updatedAt: now,
+          })
+          .where(
+            and(
+              eq(tournamentInfos.id, tournamentId),
+              eq(tournamentInfos.setupStatus, 'processing'),
+              sql`COALESCE(
+                ${tournamentInfos.setupProgressUpdatedAt},
+                ${tournamentInfos.setupStartedAt}
+              ) IS NOT DISTINCT FROM ${expectedProgressUpdatedAt}::timestamptz`,
+            ),
+          )
+          .returning({ id: tournamentInfos.id });
+        return rows.length === 1;
+      } catch (error) {
+        logError('Failed to conditionally mark stuck tournament setup', error, {
+          tournamentId,
+          expectedProgressUpdatedAt,
+        });
+        throw new DatabaseError(
+          'Failed to conditionally mark stuck tournament setup',
+          'TOURNAMENT_INFO_MARK_STUCK_ERROR',
           error as Error,
         );
       }

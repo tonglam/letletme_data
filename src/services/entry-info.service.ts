@@ -75,8 +75,14 @@ export async function syncEntryInfo(
         tx.delete(entryEventCupResults).where(eq(entryEventCupResults.entryId, entryId)),
         tx.delete(entryEventPicks).where(eq(entryEventPicks.entryId, entryId)),
         tx.delete(entryEventResults).where(eq(entryEventResults.entryId, entryId)),
-        tx.delete(entryEventTransfers).where(eq(entryEventTransfers.entryId, entryId)),
       ]);
+      // A current-season transfer sync can win this per-entry lock before the
+      // first current-season snapshot. Its checkpoint proves those rows are
+      // already current, so the later snapshot rollover must preserve them.
+      // NULL or another season cannot prove ownership and is cleared.
+      if (current.transferSeason !== activeSeason) {
+        await tx.delete(entryEventTransfers).where(eq(entryEventTransfers.entryId, entryId));
+      }
     }
 
     const entryInfoRepository = createEntryInfoRepository(tx);

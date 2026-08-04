@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test';
 import type { TournamentManagementRecord } from '../../src/repositories/tournament-management';
 import {
   createTournamentManagementService,
+  requestSnapshotTournamentResume,
   type TournamentManagementRepository,
 } from '../../src/services/tournament-management.service';
 import { ConflictError, ForbiddenError, NotFoundError } from '../../src/utils/errors';
@@ -41,6 +42,65 @@ function createRepository(
 }
 
 describe('tournament management service', () => {
+  test('does not publish resume markers when an active setup rejects the replacement', async () => {
+    const calls: string[] = [];
+    const activeError = new ConflictError(
+      'Tournament setup is already running.',
+      'TOURNAMENT_SETUP_IN_PROGRESS',
+    );
+
+    await expect(
+      requestSnapshotTournamentResume(42, {
+        enqueue: async () => {
+          calls.push('enqueue-rejected');
+          throw activeError;
+        },
+        markResumeProcessing: async () => {
+          calls.push('mark-pending');
+        },
+        markRosterFailed: async () => {
+          calls.push('mark-roster-failed');
+        },
+        markSetupFailed: async () => {
+          calls.push('mark-setup-failed');
+        },
+      }),
+    ).rejects.toBe(activeError);
+
+    expect(calls).toEqual(['enqueue-rejected']);
+  });
+
+  test('marks only a prepared resume failed when queue publication fails', async () => {
+    const calls: string[] = [];
+    const enqueueError = new Error('queue unavailable');
+
+    await expect(
+      requestSnapshotTournamentResume(42, {
+        enqueue: async (_id, _source, options) => {
+          await options.prepareEnqueue();
+          calls.push('enqueue-failed');
+          throw enqueueError;
+        },
+        markResumeProcessing: async () => {
+          calls.push('mark-pending');
+        },
+        markRosterFailed: async () => {
+          calls.push('mark-roster-failed');
+        },
+        markSetupFailed: async () => {
+          calls.push('mark-setup-failed');
+        },
+      }),
+    ).rejects.toBe(enqueueError);
+
+    expect(calls).toEqual([
+      'mark-pending',
+      'enqueue-failed',
+      'mark-roster-failed',
+      'mark-setup-failed',
+    ]);
+  });
+
   test('updates only an administrator-owned tournament and trims the name', async () => {
     let updatedName = '';
     const calls: string[] = [];
