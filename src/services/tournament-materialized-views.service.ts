@@ -35,3 +35,30 @@ export async function refreshTournamentMaterializedViews(): Promise<{
     throw error;
   }
 }
+
+/**
+ * Repair only a deletion that is still present in the published snapshot.
+ * This keeps a retry idempotent after the canonical row has gone without
+ * allowing arbitrary missing IDs to trigger an expensive global refresh.
+ */
+export async function repairDeletedTournamentMaterializedViews(
+  tournamentId: number,
+): Promise<boolean> {
+  const client = await getDbClient();
+  const rows = await client<{ exists: boolean }[]>`
+    SELECT
+      EXISTS (
+        SELECT 1
+        FROM mv_tournament_snapshot
+        WHERE tournament_id = ${tournamentId}
+      ) OR EXISTS (
+        SELECT 1
+        FROM mv_tournament_event_snapshot
+        WHERE tournament_id = ${tournamentId}
+      ) AS exists
+  `;
+  if (rows[0]?.exists !== true) return false;
+
+  await refreshTournamentMaterializedViews();
+  return true;
+}

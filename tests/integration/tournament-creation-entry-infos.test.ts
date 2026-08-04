@@ -9,6 +9,7 @@ import { getDbClient } from '../../src/db/singleton';
 import { tournamentInfoRepository } from '../../src/repositories/tournament-infos';
 import { tournamentManagementRepository } from '../../src/repositories/tournament-management';
 import { tournamentRosterRepository } from '../../src/repositories/tournament-roster';
+import { repairDeletedTournamentMaterializedViews } from '../../src/services/tournament-materialized-views.service';
 
 /**
  * FP-08 (C5): tournament creation must not poison entry_infos.
@@ -141,6 +142,56 @@ describe('tournament creation vs entry_infos (FP-08)', () => {
     },
     { timeout: 30_000 },
   );
+
+  test('watchdog includes a stale pending setup prepared before queue publication', async () => {
+    const client = await getDbClient();
+    const participants = buildParticipants();
+    const plan = planTournamentStructure(
+      {
+        tournamentName: `Pending Watchdog ${Date.now()}`,
+        adminId: String(SYNCED_ENTRY.id),
+        creator: 'pending-watchdog-test',
+        participantSource: 'custom',
+        leagueUrl: 'https://fantasy.premierleague.com/leagues/900005/standings/c',
+        groupFormat: 'points',
+        startGameweek: 'GW1',
+        endGameweek: 'GW38',
+        groupNum: '1',
+        qualifiersPerGroup: '',
+        knockoutFormat: 'none',
+      },
+      participants,
+      900005,
+      'classic',
+    );
+    const created = await tournamentInfoRepository.createTournamentWithEntries(plan);
+    createdTournamentIds.push(created.id);
+    const staleHeartbeat = '2026-08-01T00:01:00Z';
+    await client`
+      UPDATE tournament_infos
+      SET setup_status = 'pending',
+          setup_phase = 'queued',
+          setup_started_at = NULL,
+          setup_progress_updated_at = ${staleHeartbeat}
+      WHERE id = ${created.id}
+    `;
+
+    const candidates = await tournamentInfoRepository.findStuckProcessing(15);
+    expect(candidates.some((row) => row.id === created.id)).toBe(true);
+    expect(
+      await tournamentInfoRepository.markStuckSetupFailedIfUnchanged(
+        created.id,
+        staleHeartbeat,
+        'stale prepared enqueue',
+      ),
+    ).toBe(true);
+    const rows = await client<Array<{ setup_status: string; setup_phase: string }>>`
+      SELECT setup_status, setup_phase
+      FROM tournament_infos
+      WHERE id = ${created.id}
+    `;
+    expect(rows[0]).toEqual({ setup_status: 'failed', setup_phase: 'failed' });
+  });
 
   test('records the authoritative roster as ready for an official-sync shell', async () => {
     const client = await getDbClient();
@@ -426,6 +477,51 @@ describe('tournament creation vs entry_infos (FP-08)', () => {
         total_entries: participants.length,
       },
     ]);
+  });
+
+  test('repairs a materialized snapshot left stale after canonical deletion', async () => {
+    const client = await getDbClient();
+    const participants = buildParticipants();
+    const plan = planTournamentStructure(
+      {
+        tournamentName: `Delete Publication ${Date.now()}`,
+        adminId: String(SYNCED_ENTRY.id),
+        creator: 'delete-publication-test',
+        participantSource: 'custom',
+        leagueUrl: 'https://fantasy.premierleague.com/leagues/900007/standings/c',
+        groupFormat: 'points',
+        startGameweek: 'GW1',
+        endGameweek: 'GW38',
+        groupNum: '1',
+        qualifiersPerGroup: '',
+        knockoutFormat: 'none',
+      },
+      participants,
+      900007,
+      'classic',
+    );
+    const created = await tournamentInfoRepository.createTournamentWithEntries(plan);
+    createdTournamentIds.push(created.id);
+    await client`REFRESH MATERIALIZED VIEW mv_tournament_snapshot`;
+
+    expect(
+      await tournamentManagementRepository.deleteOwned(created.id, created.adminEntryId),
+    ).toMatchObject({ status: 'deleted' });
+    const staleRows = await client<Array<{ tournament_id: number }>>`
+      SELECT tournament_id
+      FROM mv_tournament_snapshot
+      WHERE tournament_id = ${created.id}
+    `;
+    expect(staleRows).toHaveLength(1);
+
+    expect(await repairDeletedTournamentMaterializedViews(created.id)).toBe(true);
+    const repairedRows = await client<Array<{ tournament_id: number }>>`
+      SELECT tournament_id
+      FROM mv_tournament_snapshot
+      WHERE tournament_id = ${created.id}
+    `;
+    expect(repairedRows).toHaveLength(0);
+    expect(await repairDeletedTournamentMaterializedViews(created.id)).toBe(false);
   });
 
   test('ignores pre-created battle fixtures until match points are calculated', async () => {

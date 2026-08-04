@@ -1,4 +1,4 @@
-import { and, eq, gte, isNotNull, lt, lte, sql } from 'drizzle-orm';
+import { and, eq, gte, inArray, isNotNull, lt, lte, sql } from 'drizzle-orm';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 
 import { tournamentInfos, type DbTournamentInfo } from '../db/schemas/index.schema';
@@ -577,7 +577,7 @@ export const createTournamentInfoRepository = (dbInstance?: DatabaseInstance) =>
           .from(tournamentInfos)
           .where(
             and(
-              eq(tournamentInfos.setupStatus, 'processing'),
+              inArray(tournamentInfos.setupStatus, ['pending', 'processing']),
               lt(
                 sql`COALESCE(
                   ${tournamentInfos.setupProgressUpdatedAt},
@@ -623,7 +623,7 @@ export const createTournamentInfoRepository = (dbInstance?: DatabaseInstance) =>
           .where(
             and(
               eq(tournamentInfos.id, tournamentId),
-              eq(tournamentInfos.setupStatus, 'processing'),
+              inArray(tournamentInfos.setupStatus, ['pending', 'processing']),
               sql`COALESCE(
                 ${tournamentInfos.setupProgressUpdatedAt},
                 ${tournamentInfos.setupStartedAt}

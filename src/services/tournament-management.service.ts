@@ -9,7 +9,10 @@ import { ConflictError, ForbiddenError, NotFoundError } from '../utils/errors';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
 import { tournamentRosterRepository } from '../repositories/tournament-roster';
 import { invalidateTournamentGraphQLCaches } from '../cache/tournament-graphql-cache';
-import { refreshTournamentMaterializedViews } from './tournament-materialized-views.service';
+import {
+  refreshTournamentMaterializedViews,
+  repairDeletedTournamentMaterializedViews,
+} from './tournament-materialized-views.service';
 
 const updateTournamentSchema = z.object({
   name: z.string().trim().min(3).max(80),
@@ -69,6 +72,7 @@ export type TournamentManagementLifecycle = {
   ) => ReturnType<TournamentManagementRepository['deleteOwned']>;
   invalidateCaches?: (reason: string) => Promise<unknown>;
   refreshViews?: () => Promise<unknown>;
+  repairDeletedViews?: (tournamentId: number) => Promise<boolean>;
 };
 
 type SnapshotResumeDependencies = {
@@ -132,6 +136,16 @@ export function createTournamentManagementService(
       );
     }
     return tournament;
+  };
+
+  const repairMissingDeletion = async (tournamentId: number): Promise<void> => {
+    try {
+      const repaired = await lifecycle.repairDeletedViews?.(tournamentId);
+      if (repaired) await invalidateCaches('delete-repair');
+    } catch (error) {
+      await invalidateCaches('delete-repair-failed');
+      throw error;
+    }
   };
 
   return {
@@ -255,11 +269,22 @@ export function createTournamentManagementService(
 
     deleteTournament: async (tournamentId: number, input: unknown) => {
       const payload = deleteTournamentSchema.parse(input);
-      await assertOwner(tournamentId, payload.adminEntryId);
+      const current = await repository.findById(tournamentId);
+      if (!current) {
+        await repairMissingDeletion(tournamentId);
+        throw new NotFoundError('Tournament not found.', 'TOURNAMENT_NOT_FOUND');
+      }
+      if (current.adminEntryId !== payload.adminEntryId) {
+        throw new ForbiddenError(
+          'Only the tournament administrator can delete this tournament.',
+          'TOURNAMENT_ADMIN_REQUIRED',
+        );
+      }
       const result = lifecycle.deleteOwned
         ? await lifecycle.deleteOwned(tournamentId, payload.adminEntryId)
         : await repository.deleteOwned(tournamentId, payload.adminEntryId);
       if (result.status === 'not_found') {
+        await repairMissingDeletion(tournamentId);
         throw new NotFoundError('Tournament not found.', 'TOURNAMENT_NOT_FOUND');
       }
       if (result.status === 'forbidden') {
@@ -286,6 +311,7 @@ export const tournamentManagementService = createTournamentManagementService(
   {
     invalidateCaches: invalidateTournamentGraphQLCaches,
     refreshViews: refreshTournamentMaterializedViews,
+    repairDeletedViews: repairDeletedTournamentMaterializedViews,
     deleteOwned: async (tournamentId, adminEntryId) => {
       const { cancelWaitingTournamentSetupJobs } = await import('../jobs/tournament-setup.jobs');
       const { tournamentSetupLifecycleScope } = await import('../domain/mutation-scope');

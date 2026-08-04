@@ -254,4 +254,25 @@ describe('tournament management service', () => {
     await expect(service.deleteTournament(42, { adminEntryId: 123 })).rejects.toBe(refreshError);
     expect(calls).toEqual(['refresh-views', 'invalidate-caches']);
   });
+
+  test('repairs a stale deleted snapshot when an owner retries after refresh failure', async () => {
+    const calls: string[] = [];
+    const service = createTournamentManagementService(
+      createRepository({ findById: async () => null }),
+      {
+        repairDeletedViews: async (tournamentId) => {
+          calls.push(`repair-views:${tournamentId}`);
+          return true;
+        },
+        invalidateCaches: async (reason) => {
+          calls.push(`invalidate-caches:${reason}`);
+        },
+      },
+    );
+
+    await expect(
+      service.deleteTournament(42, { adminEntryId: tournament.adminEntryId }),
+    ).rejects.toBeInstanceOf(NotFoundError);
+    expect(calls).toEqual(['repair-views:42', 'invalidate-caches:delete-repair']);
+  });
 });

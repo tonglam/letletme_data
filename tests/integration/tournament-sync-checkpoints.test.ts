@@ -241,6 +241,42 @@ describe('tournament initialization checkpoints', () => {
     });
   });
 
+  test('a latest GW1 sync clears unproven transfer rows from the previous season', async () => {
+    const sql = await getDbClient();
+    await sql`DELETE FROM entry_event_transfers WHERE entry_id = ${ENTRY_ID}`;
+    await sql`
+      UPDATE entry_infos
+      SET entry_snapshot_synced_through_event_id = 38,
+          entry_snapshot_synced_season = '2425',
+          entry_transfers_synced_through_event_id = 38,
+          entry_transfers_synced_season = '2425'
+      WHERE id = ${ENTRY_ID}
+    `;
+    await sql`
+      INSERT INTO entry_event_transfers (entry_id, event_id, transfer_time)
+      VALUES (${ENTRY_ID}, 2, '2025-08-08T00:00:00Z')
+    `;
+
+    await entryEventTransfersRepository.replaceForEvent(ENTRY_ID, 1, [], undefined, {
+      syncMode: 'latest',
+      checkpointSeason: TEST_SEASON,
+    });
+    await syncEntryInfo(ENTRY_ID, client, 1, TEST_SEASON);
+
+    const rows = await sql<Array<{ count: number }>>`
+      SELECT count(*)::int AS count
+      FROM entry_event_transfers
+      WHERE entry_id = ${ENTRY_ID}
+    `;
+    expect(rows[0]?.count).toBe(0);
+    expect(await checkpointRow()).toMatchObject({
+      snapshot: 1,
+      snapshotSeason: TEST_SEASON,
+      transfers: 1,
+      transfersSeason: TEST_SEASON,
+    });
+  });
+
   test('preseason zero is complete only for a preseason target', async () => {
     const sql = await getDbClient();
     await sql`

@@ -202,25 +202,34 @@ export const createEntryEventTransfersRepository = (dbInstance?: DatabaseInstanc
             .at(-1);
           if (newestPersistedSeason && newestPersistedSeason > checkpointSeason) {
             throw new Error(
-              `Refusing stale ${checkpointSeason} transfer checkpoint after ${newestPersistedSeason}`,
+              `Refusing stale ${checkpointSeason} transfer checkpoint after ` +
+                newestPersistedSeason,
             );
           }
 
-          const existing = await tx
-            .select()
-            .from(entryEventTransfers)
-            .where(
-              syncMode === 'all'
-                ? eq(entryEventTransfers.entryId, entryId)
-                : and(
-                    eq(entryEventTransfers.entryId, entryId),
-                    eq(entryEventTransfers.eventId, eventId),
-                  ),
-            );
+          const transferSeasonChanged = entryRows[0]?.transferSeason !== checkpointSeason;
+
+          // Event IDs repeat every season. A latest-mode GW1 sync may be the
+          // first writer after rollover, so clear every unproven prior-season
+          // row before establishing the new season checkpoint. Do not reuse
+          // computed fields from rows whose season ownership is unknown.
+          const existing = transferSeasonChanged
+            ? []
+            : await tx
+                .select()
+                .from(entryEventTransfers)
+                .where(
+                  syncMode === 'all'
+                    ? eq(entryEventTransfers.entryId, entryId)
+                    : and(
+                        eq(entryEventTransfers.entryId, entryId),
+                        eq(entryEventTransfers.eventId, eventId),
+                      ),
+                );
           await tx
             .delete(entryEventTransfers)
             .where(
-              syncMode === 'all'
+              syncMode === 'all' || transferSeasonChanged
                 ? eq(entryEventTransfers.entryId, entryId)
                 : and(
                     eq(entryEventTransfers.entryId, entryId),
