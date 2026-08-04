@@ -23,12 +23,12 @@ describe('Live Data Jobs Integration', () => {
   });
 
   describe('Job Enqueueing', () => {
-    it('should route the event lives cache alias to a coherent snapshot', async () => {
+    it('should enqueue a cache snapshot on the old-worker-compatible wire name', async () => {
       const job = await enqueueEventLivesCacheUpdate(TEST_EVENT_ID, 'manual');
       if (!job) throw new Error('Expected job to be enqueued');
 
       expect(job.id).toBeDefined();
-      expect(job.name).toBe('live-snapshot');
+      expect(job.name).toBe('event-lives-cache');
       expect(job.data).toMatchObject({
         eventId: TEST_EVENT_ID,
         source: 'manual',
@@ -36,12 +36,12 @@ describe('Live Data Jobs Integration', () => {
       });
     });
 
-    it('should route the event lives DB alias to a persistent snapshot', async () => {
+    it('should enqueue a persistent snapshot on the old-worker-compatible wire name', async () => {
       const job = await enqueueEventLivesDbSync(TEST_EVENT_ID, 'manual');
       if (!job) throw new Error('Expected job to be enqueued');
 
       expect(job.id).toBeDefined();
-      expect(job.name).toBe('live-snapshot');
+      expect(job.name).toBe('event-lives-db');
       expect(job.data).toMatchObject({
         eventId: TEST_EVENT_ID,
         source: 'manual',
@@ -96,7 +96,7 @@ describe('Live Data Jobs Integration', () => {
       const job2 = await enqueueEventLivesCacheUpdate(eventId, 'cron');
 
       expect(job1).not.toBeNull();
-      expect(String(job1!.id)).toContain('live-snapshot');
+      expect(String(job1!.id)).toContain('event-lives-cache');
       // Second call is skipped while the first job is still in the waiting room.
       expect(job2 === null || job2.id === job1!.id).toBe(true);
     });

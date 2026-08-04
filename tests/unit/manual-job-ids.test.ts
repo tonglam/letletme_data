@@ -130,9 +130,9 @@ describe('live-data manual job IDs', () => {
     const job = await enqueueEventLivesDbSync(10, 'cron');
 
     expect(job).not.toBeNull();
-    // Snapshot cron IDs use the minute bucket; the waiting-room check prevents
-    // a slow prior minute from stacking behind itself.
-    expect(job!.id).toMatch(/^live-snapshot-e10-\d{12}$/);
+    // Compatibility wire jobs use their own minute bucket; the waiting-room
+    // check prevents a slow prior minute from stacking behind itself.
+    expect(job!.id).toMatch(/^event-lives-db-e10-\d{12}$/);
     expect(job!.id).not.toBe('event-lives-db-e10-manual');
     // Cron jobs keep queue-level retention (no per-job cleanup override)
     expect(liveDataAddCalls[0].opts.removeOnComplete).toBeUndefined();

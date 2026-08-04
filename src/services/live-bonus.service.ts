@@ -24,6 +24,10 @@ type LiveBonusV2CacheWriter = {
   set: (eventId: EventId, byTeam: LiveBonusByTeam) => Promise<void>;
 };
 
+type LiveBonusV2SnapshotCoordinator = {
+  refreshLiveBonusV2: (eventId: EventId, byTeam: LiveBonusByTeam) => Promise<unknown>;
+};
+
 type FixtureBonusSource = Pick<
   Fixture,
   'finished' | 'finishedProvisional' | 'started' | 'stats' | 'teamA' | 'teamH'
@@ -50,11 +54,19 @@ export function serializeBonusByTeam(source: Map<TeamId, Map<number, number>>): 
  */
 export async function syncLiveBonusV2Cache(
   eventId: EventId,
-  options: { fixtures?: readonly FixtureBonusSource[]; cache?: LiveBonusV2CacheWriter } = {},
+  options: {
+    fixtures?: readonly FixtureBonusSource[];
+    cache?: LiveBonusV2CacheWriter;
+    snapshotCoordinator?: LiveBonusV2SnapshotCoordinator;
+  } = {},
 ): Promise<{ eventId: EventId; teamCount: number }> {
   const fixtures = options.fixtures ?? (await fixtureRepository.findByEvent(eventId));
   const byTeam = serializeBonusByTeam(computeFixtureSummedBonusByTeam(fixtures));
-  await (options.cache ?? liveBonusV2Cache).set(eventId, byTeam);
+  if (options.snapshotCoordinator) {
+    await options.snapshotCoordinator.refreshLiveBonusV2(eventId, byTeam);
+  } else {
+    await (options.cache ?? liveBonusV2Cache).set(eventId, byTeam);
+  }
 
   const teamCount = Object.keys(byTeam).length;
   logInfo('Fixture-scoped live bonus cache sync completed', { eventId, teamCount });

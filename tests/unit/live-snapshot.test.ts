@@ -32,6 +32,7 @@ class FakeRedis {
   incompleteHlenPrefix: string | null = null;
   deleteStagingBeforeEvalPrefix: string | null = null;
   metaBeforeFreshnessEval: string | null = null;
+  activeSeasonBeforeEval: string | null = null;
   readonly wrongTypeHashKeys = new Set<string>();
 
   async get(key: string): Promise<string | null> {
@@ -117,7 +118,36 @@ class FakeRedis {
       return this.del(...keys);
     }
 
+    if (script.includes('local bonus_key = KEYS[tonumber(ARGV[3])]')) {
+      if (this.activeSeasonBeforeEval !== null) {
+        this.strings.set('Season:active', this.activeSeasonBeforeEval);
+        this.activeSeasonBeforeEval = null;
+      }
+      if (this.strings.get(keys.at(-1)!) !== argv[1]) return -2;
+      const expected = JSON.parse(argv[0]) as Record<string, string>;
+      const bonusKey = keys[Number(argv[2]) - 1];
+      const metaKey = keys.at(-2)!;
+      const owned = this.strings.has(metaKey) || this.hashes.has(metaKey);
+      const current = this.hashes.get(bonusKey);
+      const matches =
+        (current?.size ?? 0) === Object.keys(expected).length &&
+        Object.entries(expected).every(([field, value]) => current?.get(field) === value);
+      if (owned && matches) return 1;
+      if (owned) {
+        await this.del(...keys.slice(0, -1));
+      } else {
+        await this.del(bonusKey);
+      }
+      if (Object.keys(expected).length > 0) await this.hset(bonusKey, expected);
+      return owned ? 2 : 0;
+    }
+
     if (script.includes('current.checkedAt > ARGV[2]')) {
+      if (this.activeSeasonBeforeEval !== null) {
+        this.strings.set('Season:active', this.activeSeasonBeforeEval);
+        this.activeSeasonBeforeEval = null;
+      }
+      if (this.strings.get(keys[1]) !== argv[2]) return -2;
       if (this.metaBeforeFreshnessEval !== null) {
         this.strings.set(keys[0], this.metaBeforeFreshnessEval);
         this.metaBeforeFreshnessEval = null;
@@ -131,6 +161,13 @@ class FakeRedis {
 
     const stagedCount = Number(argv[0]);
     const emptyCount = Number(argv[1]);
+
+    if (this.activeSeasonBeforeEval !== null) {
+      this.strings.set('Season:active', this.activeSeasonBeforeEval);
+      this.activeSeasonBeforeEval = null;
+    }
+    const activeSeasonKey = keys[stagedCount * 2 + emptyCount + 1];
+    if (this.strings.get(activeSeasonKey) !== argv[4]) return -2;
 
     if (this.deleteStagingBeforeEvalPrefix) {
       const key = keys
@@ -249,6 +286,7 @@ function cachePayload(score = 2, checkedAt = new Date('2025-08-15T20:00:00.000Z'
 }
 
 function cacheWith(redis: FakeRedis) {
+  redis.strings.set('Season:active', '2526');
   return createLiveSnapshotCache({
     getRedisClient: async () => redis as unknown as Redis,
     getSeason: async () => '2526',
@@ -479,6 +517,57 @@ describe('live snapshot cache publication', () => {
     expect(beforeCommit).not.toHaveBeenCalled();
     expect(redis.hashes.size).toBe(0);
     expect(redis.strings.size).toBe(0);
+  });
+
+  test('rechecks the active season after staging and before durable persistence', async () => {
+    const redis = new FakeRedis();
+    redis.strings.set('Season:active', '2526');
+    let seasonRead = 0;
+    const beforeCommit = mock(async () => true);
+    const cache = createLiveSnapshotCache({
+      getRedisClient: async () => redis as unknown as Redis,
+      getSeason: async () => '2526',
+      getAuthoritativeSeason: async () => (++seasonRead === 1 ? '2526' : '2627'),
+    });
+
+    await expect(cache.publish(cachePayload().payload, { beforeCommit })).rejects.toThrow(
+      'Live snapshot season changed from 2526 to 2627; retry with current reference data',
+    );
+    expect(beforeCommit).not.toHaveBeenCalled();
+    expect(redis.stagingKeys()).toEqual([]);
+    expect(redis.hashes.has('Fixtures:2526:1')).toBe(false);
+    expect(redis.strings.has('LiveSnapshotMeta:2526:1')).toBe(false);
+  });
+
+  test('atomically rejects a season flip at the Redis publication boundary', async () => {
+    const redis = new FakeRedis();
+    const cache = cacheWith(redis);
+    const beforeCommit = mock(async () => true);
+    redis.activeSeasonBeforeEval = '2627';
+
+    await expect(cache.publish(cachePayload().payload, { beforeCommit })).rejects.toThrow(
+      'Live snapshot season changed from 2526 before Redis publication commit; retry',
+    );
+
+    expect(beforeCommit).toHaveBeenCalledWith(true);
+    expect(redis.strings.get('Season:active')).toBe('2627');
+    expect(redis.stagingKeys()).toEqual([]);
+    expect(redis.hashes.has('Fixtures:2526:1')).toBe(false);
+    expect(redis.strings.has('LiveSnapshotMeta:2526:1')).toBe(false);
+  });
+
+  test('atomically rejects a season flip at the metadata-only boundary', async () => {
+    const redis = new FakeRedis();
+    const cache = cacheWith(redis);
+    const first = await cache.publish(cachePayload().payload);
+    redis.activeSeasonBeforeEval = '2627';
+
+    await expect(
+      cache.publish(cachePayload(2, new Date('2025-08-15T20:01:00.000Z')).payload),
+    ).rejects.toThrow('Live snapshot season changed from 2526 before Redis metadata commit; retry');
+
+    expect(redis.parsedMeta('LiveSnapshotMeta:2526:1').checkedAt).toBe(first.meta.checkedAt);
+    expect(redis.strings.get('Season:active')).toBe('2627');
   });
 
   test('atomically publishes all views and only advances revision for football changes', async () => {

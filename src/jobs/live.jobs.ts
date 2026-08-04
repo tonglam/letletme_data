@@ -10,6 +10,19 @@ import { logDebug, logInfo } from '../utils/logger';
 import { CRON_TIMEZONE } from '../utils/timezone';
 import { enqueueLiveSnapshot } from './live-data.jobs';
 
+export const LIVE_SNAPSHOT_SCHEDULES = {
+  cache: {
+    name: 'live-snapshot-trigger',
+    pattern: '* * * * *',
+    persistEventLives: false,
+  },
+  persistence: {
+    name: 'live-snapshot-persistence-trigger',
+    pattern: '*/10 * * * *',
+    persistEventLives: true,
+  },
+} as const;
+
 /**
  * One coordinated one-minute job replaces four independently racing live jobs.
  * The job fetches event-live and fixtures concurrently, derives every live view
@@ -18,7 +31,7 @@ import { enqueueLiveSnapshot } from './live-data.jobs';
  */
 export async function runLiveSnapshot(
   now = new Date(),
-  forcePersistEventLives?: boolean,
+  persistEventLives = false,
 ): Promise<unknown | null> {
   if (!(await isFPLSeason(now))) {
     logDebug('Skipping live snapshot - not FPL season', { month: now.getMonth() + 1 });
@@ -37,7 +50,6 @@ export async function runLiveSnapshot(
     return null;
   }
 
-  const persistEventLives = forcePersistEventLives ?? now.getUTCMinutes() % 10 === 0;
   const job = await enqueueLiveSnapshot(currentEvent.id, 'cron', {
     persistEventLives,
     now,
@@ -86,13 +98,35 @@ export function registerLiveJobs(app: Elysia) {
   return app
     .use(
       cron({
-        name: 'live-snapshot-trigger',
-        pattern: '* * * * *',
+        name: LIVE_SNAPSHOT_SCHEDULES.cache.name,
+        pattern: LIVE_SNAPSHOT_SCHEDULES.cache.pattern,
         timezone: CRON_TIMEZONE,
         async run() {
           try {
             await executeTrackedCron('live-snapshot', async () => {
-              await runLiveSnapshot();
+              await runLiveSnapshot(new Date(), LIVE_SNAPSHOT_SCHEDULES.cache.persistEventLives);
+            });
+          } catch {
+            // Failure details are already emitted by runTrackedJob.
+          }
+        },
+      }),
+    )
+    .use(
+      cron({
+        name: LIVE_SNAPSHOT_SCHEDULES.persistence.name,
+        pattern: LIVE_SNAPSHOT_SCHEDULES.persistence.pattern,
+        timezone: CRON_TIMEZONE,
+        async run() {
+          try {
+            await executeTrackedCron('live-snapshot-persistence', async () => {
+              // Persistence intent belongs to this scheduled callback, not to
+              // its actual start minute. A delayed boundary tick still writes
+              // the PostgreSQL checkpoint and triggers its cascades.
+              await runLiveSnapshot(
+                new Date(),
+                LIVE_SNAPSHOT_SCHEDULES.persistence.persistEventLives,
+              );
             });
           } catch {
             // Failure details are already emitted by runTrackedJob.

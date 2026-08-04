@@ -5,6 +5,8 @@ assertIntegrationEnv();
 import { describe, expect, test } from 'bun:test';
 import { eq } from 'drizzle-orm';
 
+import { resetActiveSeasonMemo, setActiveCacheSeason } from '../../src/cache/cache-season';
+import { redisSingleton } from '../../src/cache/singleton';
 import { events } from '../../src/db/schemas/index.schema';
 import { getDb } from '../../src/db/singleton';
 import {
@@ -57,6 +59,46 @@ describe('live snapshot PostgreSQL serialization', () => {
     expect(sameEventState).toBe('blocked');
     expect(sharedCheckedAt[0]).toBeInstanceOf(Date);
     expect(Number.isFinite(sharedCheckedAt[0]?.getTime())).toBe(true);
+  });
+
+  test('blocks active-season rollover until in-flight live commits finish', async () => {
+    const eventId = 2_000_000_006;
+    const snapshotEntered = deferred();
+    const releaseSnapshot = deferred();
+    const redis = await redisSingleton.getClient();
+    const previousActiveSeason = await redis.get('Season:active');
+    await redis.set('Season:active', '2526');
+    resetActiveSeasonMemo();
+
+    const snapshot = withLiveSnapshotSerialization(eventId, async () => {
+      snapshotEntered.resolve();
+      await releaseSnapshot.promise;
+    });
+    await snapshotEntered.promise;
+
+    const rollover = setActiveCacheSeason('2627');
+    const rolloverState = await Promise.race([
+      rollover.then(() => 'advanced' as const),
+      new Promise<'blocked'>((resolve) => setTimeout(() => resolve('blocked'), 75)),
+    ]);
+
+    try {
+      expect(rolloverState).toBe('blocked');
+      expect(await redis.get('Season:active')).toBe('2526');
+      releaseSnapshot.resolve();
+      await Promise.all([snapshot, rollover]);
+      expect(await redis.get('Season:active')).toBe('2627');
+    } finally {
+      releaseSnapshot.resolve();
+      await snapshot.catch(() => undefined);
+      await rollover.catch(() => undefined);
+      if (previousActiveSeason === null) {
+        await redis.del('Season:active');
+      } else {
+        await redis.set('Season:active', previousActiveSeason);
+      }
+      resetActiveSeasonMemo();
+    }
   });
 
   test('serializes fixture ownership discovery even for different events', async () => {

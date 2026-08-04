@@ -206,6 +206,29 @@ describe('computeFixtureSummedBonusByTeam', () => {
       },
     ]);
   });
+
+  it('routes fixture corrections through coordinated snapshot publication when requested', async () => {
+    const writes: Array<{ eventId: number; byTeam: Record<string, Record<string, number>> }> = [];
+
+    const result = await syncLiveBonusV2Cache(12, {
+      fixtures: [
+        fixtureStats(1, 2, { h: [[10, 50]], a: [[20, 40]] }, { h: [[10, 3]], a: [] }, true),
+      ],
+      cache: {
+        set: async () => {
+          throw new Error('ordinary ownership-guarded writer must not run');
+        },
+      },
+      snapshotCoordinator: {
+        refreshLiveBonusV2: async (eventId, byTeam) => {
+          writes.push({ eventId, byTeam });
+        },
+      },
+    });
+
+    expect(result).toEqual({ eventId: 12, teamCount: 1 });
+    expect(writes).toEqual([{ eventId: 12, byTeam: { '1': { '10': 3 } } }]);
+  });
 });
 
 describe('calculateMatchBonus', () => {

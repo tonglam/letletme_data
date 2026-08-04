@@ -13,7 +13,11 @@ import {
   type LiveSnapshotState,
 } from '../domain/live-snapshot';
 import { logError, logInfo, logWarn } from '../utils/logger';
-import { getActiveCacheSeason, getActiveCacheSeasonUncached } from './cache-season';
+import {
+  ACTIVE_SEASON_KEY,
+  getActiveCacheSeason,
+  getActiveCacheSeasonUncached,
+} from './cache-season';
 import { liveSnapshotMetaKey } from './live-snapshot-ownership';
 import { redisSingleton } from './singleton';
 
@@ -57,6 +61,12 @@ export interface LiveSnapshotRetireResult {
   removedKeys: number;
 }
 
+export interface LiveSnapshotBonusRefreshResult {
+  eventId: number;
+  owned: boolean;
+  retired: boolean;
+}
+
 type LiveSnapshotCacheDependencies = {
   getRedisClient: () => Promise<Redis>;
   getSeason: () => Promise<string>;
@@ -77,6 +87,7 @@ const LIVE_SNAPSHOT_VIEW_PREFIXES = [
   'LiveBonus',
   'LiveBonusV2',
 ] as const;
+const LIVE_BONUS_V2_KEY_INDEX = LIVE_SNAPSHOT_VIEW_PREFIXES.indexOf('LiveBonusV2') + 1;
 
 const LIVE_SNAPSHOT_META_VALIDATION_LUA = `
 local function is_nonnegative_integer(value)
@@ -138,6 +149,9 @@ end
 `;
 
 const SET_LIVE_SNAPSHOT_META_IF_FRESH_SCRIPT = `${LIVE_SNAPSHOT_META_VALIDATION_LUA}
+if redis.call('GET', KEYS[2]) ~= ARGV[3] then
+  return -2
+end
 local current_raw = redis.pcall('GET', KEYS[1])
 if type(current_raw) == 'string' then
   local decoded, current = pcall(cjson.decode, current_raw)
@@ -157,6 +171,62 @@ end
 return removed
 `;
 
+// Late FPL fixture corrections must not be hidden by snapshot ownership. If
+// the V2 bonus view differs, retire all coordinated views and publish the
+// corrected unowned V2 hash in the same Redis script. Readers then use the
+// durable fallback until the next complete snapshot publication.
+const REFRESH_LIVE_BONUS_V2_SCRIPT = `
+if redis.call('GET', KEYS[#KEYS]) ~= ARGV[2] then
+  return -2
+end
+
+local expected = cjson.decode(ARGV[1])
+local expected_count = 0
+for _ in pairs(expected) do
+  expected_count = expected_count + 1
+end
+
+local bonus_key = KEYS[tonumber(ARGV[3])]
+local meta_key = KEYS[#KEYS - 1]
+local owned = redis.call('EXISTS', meta_key) == 1
+local matches = true
+local meta_raw = redis.pcall('GET', meta_key)
+if owned then
+  local decoded, meta = pcall(cjson.decode, meta_raw)
+  if not decoded or type(meta) ~= 'table' or meta.bonusTeamCount ~= expected_count then
+    matches = false
+  end
+end
+local actual_count = redis.pcall('HLEN', bonus_key)
+if type(actual_count) ~= 'number' or actual_count ~= expected_count then
+  matches = false
+end
+if matches then
+  for field, value in pairs(expected) do
+    if redis.pcall('HGET', bonus_key, field) ~= value then
+      matches = false
+      break
+    end
+  end
+end
+
+if owned and matches then
+  return 1
+end
+
+if owned then
+  for index = 1, #KEYS - 1 do
+    redis.call('DEL', KEYS[index])
+  end
+else
+  redis.call('DEL', bonus_key)
+end
+for field, value in pairs(expected) do
+  redis.call('HSET', bonus_key, field, value)
+end
+return owned and 2 or 0
+`;
+
 /**
  * Validate every staging hash before changing any published key, then swap all
  * views and metadata in one Redis script. Redis transactions execute later
@@ -167,6 +237,11 @@ const PUBLISH_LIVE_SNAPSHOT_SCRIPT = `${LIVE_SNAPSHOT_META_VALIDATION_LUA}
 local staged_count = tonumber(ARGV[1])
 local empty_count = tonumber(ARGV[2])
 local meta_key = KEYS[(staged_count * 2) + empty_count + 1]
+local active_season_key = KEYS[(staged_count * 2) + empty_count + 2]
+
+if redis.call('GET', active_season_key) ~= ARGV[5] then
+  return -2
+end
 
 for index = 1, staged_count do
   if redis.call('EXISTS', KEYS[index]) ~= 1 then
@@ -207,6 +282,18 @@ function recordToHash<T>(record: Readonly<Record<string, T>>): HashFields {
   const fields: HashFields = {};
   for (const key of Object.keys(record).sort((a, b) => Number(a) - Number(b))) {
     fields[key] = JSON.stringify(record[key]);
+  }
+  return fields;
+}
+
+function liveBonusToHash(byTeam: LiveBonusByTeam): HashFields {
+  const fields: HashFields = {};
+  for (const teamId of Object.keys(byTeam).sort((a, b) => Number(a) - Number(b))) {
+    const sortedBonus: Record<string, number> = {};
+    for (const elementId of Object.keys(byTeam[teamId]).sort((a, b) => Number(a) - Number(b))) {
+      sortedBonus[elementId] = byTeam[teamId][elementId];
+    }
+    fields[teamId] = JSON.stringify(sortedBonus);
   }
   return fields;
 }
@@ -313,6 +400,24 @@ async function publishedHashMatches(
 export function createLiveSnapshotCache(
   dependencies: LiveSnapshotCacheDependencies = defaultDependencies,
 ) {
+  async function assertPreparedSeasonActive(
+    preparedSeason: string,
+    eventId: number,
+    boundary: string,
+  ): Promise<void> {
+    const activeSeason = await dependencies.getAuthoritativeSeason();
+    if (activeSeason === preparedSeason) return;
+    logWarn('Refusing live snapshot operation after active season changed', {
+      preparedSeason,
+      activeSeason,
+      eventId,
+      boundary,
+    });
+    throw new Error(
+      `Live snapshot season changed from ${preparedSeason} to ${activeSeason}; retry with current reference data`,
+    );
+  }
+
   return {
     async get(eventId: number): Promise<LiveSnapshotMeta | null> {
       const [redis, season] = await Promise.all([
@@ -346,25 +451,68 @@ export function createLiveSnapshotCache(
       return { eventId, removedKeys };
     },
 
+    /**
+     * Apply a late fixture-derived V2 bonus correction without allowing the
+     * ownership guard to preserve stale values. A changed owned view retires
+     * the entire snapshot and writes only the corrected V2 compatibility hash;
+     * coherent readers therefore fall back durably until a full republish.
+     */
+    async refreshLiveBonusV2(
+      eventId: number,
+      byTeam: LiveBonusByTeam,
+    ): Promise<LiveSnapshotBonusRefreshResult> {
+      const [redis, season] = await Promise.all([
+        dependencies.getRedisClient(),
+        dependencies.getAuthoritativeSeason(),
+      ]);
+      const keys = [
+        ...LIVE_SNAPSHOT_VIEW_PREFIXES.map((prefix) => `${prefix}:${season}:${eventId}`),
+        liveSnapshotMetaKey(season, eventId),
+        ACTIVE_SEASON_KEY,
+      ];
+      const result = Number(
+        await redis.eval(
+          REFRESH_LIVE_BONUS_V2_SCRIPT,
+          keys.length,
+          ...keys,
+          JSON.stringify(liveBonusToHash(byTeam)),
+          season,
+          String(LIVE_BONUS_V2_KEY_INDEX),
+        ),
+      );
+      if (result === -2) {
+        throw new Error(
+          `Live bonus V2 season changed from ${season} before coordinated refresh; retry`,
+        );
+      }
+      if (result !== 0 && result !== 1 && result !== 2) {
+        throw new Error(`Unexpected coordinated live bonus V2 refresh result: ${String(result)}`);
+      }
+
+      const refresh = {
+        eventId,
+        owned: result !== 0,
+        retired: result === 2,
+      };
+      if (refresh.retired) {
+        logInfo('Retired live snapshot after fixture-derived bonus changed', {
+          eventId,
+          season,
+          teamCount: Object.keys(byTeam).length,
+        });
+      }
+      return refresh;
+    },
+
     async publish(
       payload: LiveSnapshotCachePayload,
       options: LiveSnapshotPublishOptions = {},
     ): Promise<LiveSnapshotPublishResult> {
       const checkedAt = payload.checkedAt ?? new Date();
-      const [redis, activeSeason] = await Promise.all([
+      const [redis] = await Promise.all([
         dependencies.getRedisClient(),
-        dependencies.getAuthoritativeSeason(),
+        assertPreparedSeasonActive(payload.season, payload.eventId, 'publication preflight'),
       ]);
-      if (activeSeason !== payload.season) {
-        logWarn('Refusing live snapshot publication after active season changed', {
-          preparedSeason: payload.season,
-          activeSeason,
-          eventId: payload.eventId,
-        });
-        throw new Error(
-          `Live snapshot season changed from ${payload.season} to ${activeSeason}; retry with current reference data`,
-        );
-      }
       // From here on, key construction is bound to the reference-data season;
       // the active-season read above is only a publication fence.
       const season = payload.season;
@@ -400,13 +548,13 @@ export function createLiveSnapshotCache(
         {
           name: 'LiveBonus',
           key: `LiveBonus:${season}:${payload.eventId}`,
-          fields: recordToHash(payload.liveBonus),
+          fields: liveBonusToHash(payload.liveBonus),
           required: false,
         },
         {
           name: 'LiveBonusV2',
           key: `LiveBonusV2:${season}:${payload.eventId}`,
-          fields: recordToHash(payload.liveBonusV2),
+          fields: liveBonusToHash(payload.liveBonusV2),
           required: false,
         },
       ] as const;
@@ -452,17 +600,25 @@ export function createLiveSnapshotCache(
       };
 
       if (!changed) {
+        await assertPreparedSeasonActive(season, payload.eventId, 'durable commit');
         const durableAccepted = (await options.beforeCommit?.(false)) !== false;
         if (!durableAccepted) {
           return stalePublishResult(redis, metaKey, payload.eventId, meta.checkedAt);
         }
         const updated = await redis.eval(
           SET_LIVE_SNAPSHOT_META_IF_FRESH_SCRIPT,
-          1,
+          2,
           metaKey,
+          ACTIVE_SEASON_KEY,
           JSON.stringify(meta),
           meta.checkedAt,
+          season,
         );
+        if (updated === -2) {
+          throw new Error(
+            `Live snapshot season changed from ${season} before Redis metadata commit; retry`,
+          );
+        }
         if (updated === 0) {
           return stalePublishResult(redis, metaKey, payload.eventId, meta.checkedAt);
         }
@@ -500,6 +656,7 @@ export function createLiveSnapshotCache(
         const emptyTargetKeys = views
           .filter((view) => !staged.some((candidate) => candidate.targetKey === view.key))
           .map((view) => view.key);
+        await assertPreparedSeasonActive(season, payload.eventId, 'durable commit');
         const durableAccepted = (await options.beforeCommit?.(true)) !== false;
         if (!durableAccepted) {
           if (stagedKeys.length > 0) await redis.del(...stagedKeys);
@@ -507,16 +664,23 @@ export function createLiveSnapshotCache(
         }
         const result = await redis.eval(
           PUBLISH_LIVE_SNAPSHOT_SCRIPT,
-          stagedKeys.length * 2 + emptyTargetKeys.length + 1,
+          stagedKeys.length * 2 + emptyTargetKeys.length + 2,
           ...stagedKeys,
           ...targetKeys,
           ...emptyTargetKeys,
           metaKey,
+          ACTIVE_SEASON_KEY,
           String(stagedKeys.length),
           String(emptyTargetKeys.length),
           JSON.stringify(meta),
           meta.checkedAt,
+          season,
         );
+        if (result === -2) {
+          throw new Error(
+            `Live snapshot season changed from ${season} before Redis publication commit; retry`,
+          );
+        }
         if (result === -1) {
           if (stagedKeys.length > 0) await redis.del(...stagedKeys);
           return stalePublishResult(redis, metaKey, payload.eventId, meta.checkedAt);

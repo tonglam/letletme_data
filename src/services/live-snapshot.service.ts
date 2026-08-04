@@ -3,7 +3,11 @@ import { and, eq, isNull, lte, or, sql } from 'drizzle-orm';
 import { getDb, type DbOrTransaction } from '../db/singleton';
 import { events } from '../db/schemas/index.schema';
 import { fplClient } from '../clients/fpl';
-import { getActiveCacheSeason } from '../cache/cache-season';
+import {
+  acquireActiveSeasonReadFence,
+  getActiveCacheSeason,
+  getActiveCacheSeasonUncached,
+} from '../cache/cache-season';
 import { liveSnapshotCache, playersCache } from '../cache/operations';
 import {
   buildPlayingMatches,
@@ -252,6 +256,16 @@ export async function persistLiveSnapshotDurably({
     if (persistEventLives) {
       await persistPreparedEventLives(prepared.eventLives, tx);
     }
+
+    // This is the final awaited statement in the durable transaction. The
+    // default serializer also pins the season with a shared PostgreSQL lock;
+    // this uncached check protects direct or injected persistence callers.
+    const activeSeason = await getActiveCacheSeasonUncached();
+    if (activeSeason !== prepared.season) {
+      throw new Error(
+        `Live snapshot season changed from ${prepared.season} to ${activeSeason} before durable commit`,
+      );
+    }
   });
   return {
     accepted: fenced.accepted,
@@ -298,6 +312,10 @@ export async function withLiveSnapshotEventsSerialization<T>(
         sql`SELECT pg_advisory_xact_lock(${LIVE_SNAPSHOT_LOCK_NAMESPACE}, ${lockedEventId})`,
       );
     }
+    // Event locks come first. Fixture writers that can trigger rollover use
+    // the same order, while shared mode preserves parallel snapshots for
+    // unrelated events.
+    await acquireActiveSeasonReadFence(tx);
     return operation(await readLiveSnapshotOrderingTimestamp(tx));
   });
 }

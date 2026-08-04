@@ -205,7 +205,10 @@ export async function syncFixtures(eventId?: number): Promise<{ count: number; e
         if (bonusEventId) {
           const bonusFixtures = savedFixtures.filter((fixture) => fixture.event === bonusEventId);
           if (bonusFixtures.length > 0) {
-            await syncLiveBonusV2Cache(bonusEventId, { fixtures: bonusFixtures });
+            await syncLiveBonusV2Cache(bonusEventId, {
+              fixtures: bonusFixtures,
+              snapshotCoordinator: liveSnapshotCache,
+            });
           }
         }
         logInfo('Fixtures cache updated', logContext);

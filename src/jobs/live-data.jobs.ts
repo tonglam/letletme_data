@@ -5,6 +5,7 @@ import {
   type LiveDataJobData,
 } from '../queues/live-data.queue';
 import { getLiveDataJobPriority, type LiveDataPriorityJobName } from '../domain/job-priority';
+import { resolveLiveSnapshotPersistence } from '../domain/live-snapshot';
 import { logError, logInfo } from '../utils/logger';
 
 export type LiveDataJobSource = 'cron' | 'manual' | 'cascade';
@@ -17,12 +18,20 @@ async function hasSupersedingPendingJob(
 ): Promise<boolean> {
   try {
     const jobs = await queue.getJobs(['waiting', 'delayed', 'active']);
-    return jobs.some(
-      (job) =>
-        job.name === jobName &&
-        job.data.eventId === eventId &&
-        (!persistEventLives || job.data.persistEventLives === true),
-    );
+    const requestedSnapshotPersistence = resolveLiveSnapshotPersistence(jobName, persistEventLives);
+    return jobs.some((job) => {
+      if (job.data.eventId !== eventId) return false;
+      if (requestedSnapshotPersistence === null) return job.name === jobName;
+
+      const pendingSnapshotPersistence = resolveLiveSnapshotPersistence(
+        job.name,
+        job.data.persistEventLives === true,
+      );
+      return (
+        pendingSnapshotPersistence !== null &&
+        (!requestedSnapshotPersistence || pendingSnapshotPersistence)
+      );
+    });
   } catch (error) {
     logError('Failed to check pending live-data jobs', error, { jobName, eventId });
     // If we can't tell, allow enqueue (safer than dropping a tick).
@@ -103,15 +112,21 @@ export const enqueueLiveSnapshot = (
   eventId: number,
   source: LiveDataJobSource = 'cron',
   options: { persistEventLives?: boolean; now?: Date; jobId?: string } = {},
-) =>
-  enqueueLiveDataJob(LIVE_JOBS.LIVE_SNAPSHOT, eventId, source, {
-    persistEventLives: options.persistEventLives ?? false,
+) => {
+  const persistEventLives = options.persistEventLives ?? false;
+  // Keep the queue wire format consumable by both worker generations during
+  // sequential Compose replacement. The new worker resolves these aliases to
+  // the coherent publisher; the old worker has no `live-snapshot` case.
+  const wireJobName = persistEventLives ? LIVE_JOBS.EVENT_LIVES_DB : LIVE_JOBS.EVENT_LIVES_CACHE;
+  return enqueueLiveDataJob(wireJobName, eventId, source, {
+    persistEventLives,
     jobId:
       options.jobId ??
       (source === 'cron'
-        ? `live-snapshot-e${eventId}-${liveSnapshotMinuteBucket(options.now ?? new Date())}`
+        ? `live-snapshot-e${eventId}-${liveSnapshotMinuteBucket(options.now ?? new Date())}-${persistEventLives ? 'persist' : 'cache'}`
         : undefined),
   });
+};
 
 function enqueueLiveSnapshotAlias(
   alias: LiveDataJobName,
@@ -119,12 +134,17 @@ function enqueueLiveSnapshotAlias(
   source: LiveDataJobSource = 'cron',
   persistEventLives = false,
 ) {
-  return enqueueLiveSnapshot(eventId, source, {
+  return enqueueLiveDataJob(alias, eventId, source, {
     persistEventLives,
     // Keep compatibility triggers independently deduplicated. In particular,
     // a cache-only manual trigger must not swallow a following persistence
     // trigger merely because both now use the live-snapshot worker job.
-    jobId: source === 'manual' ? `${alias}-e${eventId}-manual` : undefined,
+    jobId:
+      source === 'manual'
+        ? `${alias}-e${eventId}-manual`
+        : source === 'cron'
+          ? `${alias}-e${eventId}-${liveSnapshotMinuteBucket(new Date())}`
+          : undefined,
   });
 }
 

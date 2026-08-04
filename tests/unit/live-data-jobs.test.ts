@@ -110,7 +110,7 @@ describe('live-data cron duplicate suppression', () => {
     expect(job).not.toBeNull();
     expect(addCalls).toHaveLength(1);
     expect(addCalls[0]).toMatchObject({
-      name: 'live-snapshot',
+      name: 'event-lives-cache',
       data: { eventId: 12, persistEventLives: false },
       opts: { jobId: 'event-lives-cache-e12-manual' },
     });
@@ -123,9 +123,44 @@ describe('live-data cron duplicate suppression', () => {
     expect(job).not.toBeNull();
     expect(addCalls).toHaveLength(1);
     expect(addCalls[0]).toMatchObject({
-      name: 'live-snapshot',
+      name: 'event-lives-db',
       data: { eventId: 12, persistEventLives: true },
       opts: { jobId: 'event-lives-db-e12-manual' },
     });
+  });
+
+  test('canonical producer uses old-worker-compatible queue names during rollout', async () => {
+    await enqueueLiveSnapshot(12, 'cron', {
+      now: new Date('2025-08-15T20:01:00.000Z'),
+    });
+    await enqueueLiveSnapshot(13, 'cron', {
+      persistEventLives: true,
+      now: new Date('2025-08-15T20:10:00.000Z'),
+    });
+
+    expect(addCalls.map((call) => call.name)).toEqual(['event-lives-cache', 'event-lives-db']);
+    expect(addCalls.map((call) => call.opts.jobId)).toEqual([
+      'live-snapshot-e12-202508152001-cache',
+      'live-snapshot-e13-202508152010-persist',
+    ]);
+  });
+
+  test('legacy and canonical names share duplicate suppression semantics', async () => {
+    waitingJobs.push({
+      name: 'event-lives-db',
+      data: { eventId: 12, persistEventLives: true },
+    });
+
+    const cacheJob = await enqueueLiveSnapshot(12, 'cron', {
+      now: new Date('2025-08-15T20:01:00.000Z'),
+    });
+    const persistenceJob = await enqueueLiveSnapshot(12, 'cron', {
+      persistEventLives: true,
+      now: new Date('2025-08-15T20:10:00.000Z'),
+    });
+
+    expect(cacheJob).toBeNull();
+    expect(persistenceJob).toBeNull();
+    expect(addCalls).toHaveLength(0);
   });
 });

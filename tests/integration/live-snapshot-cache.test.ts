@@ -1,7 +1,7 @@
 import { assertIntegrationEnv } from './helpers/env-guard';
 
 assertIntegrationEnv();
-import { afterAll, beforeEach, describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 
 import {
   createLiveSnapshotCache,
@@ -27,6 +27,7 @@ const KEYS = [
   `LiveBonusV2:${SEASON}:${EVENT_ID}`,
   `LiveSnapshotMeta:${SEASON}:${EVENT_ID}`,
 ];
+let previousActiveSeason: string | null = null;
 
 function referenceData(): LiveSnapshotReferenceData {
   return {
@@ -95,8 +96,14 @@ function payload(score: number, checkedAt: Date): LiveSnapshotCachePayload {
 }
 
 describe('coordinated live snapshot Redis integration', () => {
+  beforeAll(async () => {
+    const redis = await redisSingleton.getClient();
+    previousActiveSeason = await redis.get('Season:active');
+  });
+
   beforeEach(async () => {
     const redis = await redisSingleton.getClient();
+    await redis.set('Season:active', SEASON);
     await redis.del(...KEYS);
     const staging = await redis.keys(`*:${SEASON}:${EVENT_ID}:staging:*`);
     if (staging.length > 0) await redis.del(...staging);
@@ -106,6 +113,11 @@ describe('coordinated live snapshot Redis integration', () => {
     const redis = await redisSingleton.getClient();
     const staging = await redis.scan('0', 'MATCH', `*:${SEASON}:${EVENT_ID}:staging:*`);
     await redis.del(...KEYS, ...staging[1]);
+    if (previousActiveSeason === null) {
+      await redis.del('Season:active');
+    } else {
+      await redis.set('Season:active', previousActiveSeason);
+    }
     await redisSingleton.disconnect();
   });
 
@@ -198,5 +210,39 @@ describe('coordinated live snapshot Redis integration', () => {
     expect(fromPrimitive).toMatchObject({ changed: true, stale: false });
     expect((await cache.get(EVENT_ID))?.revision).toBe(fromPrimitive.meta.revision);
     expect(await redis.keys(`*:${SEASON}:${EVENT_ID}:staging:*`)).toEqual([]);
+  });
+
+  test('preserves identical owned bonus but retires a snapshot for a late correction', async () => {
+    const redis = await redisSingleton.getClient();
+    const cache = createLiveSnapshotCache({
+      getRedisClient: async () => redis,
+      getSeason: async () => SEASON,
+      getAuthoritativeSeason: async () => SEASON,
+    });
+    const initial = payload(3, new Date('2025-08-15T20:00:01.000Z'));
+    await cache.publish(initial);
+
+    const unchanged = await cache.refreshLiveBonusV2(EVENT_ID, initial.liveBonusV2);
+    expect(unchanged).toEqual({ eventId: EVENT_ID, owned: true, retired: false });
+    expect(await redis.exists(`LiveSnapshotMeta:${SEASON}:${EVENT_ID}`)).toBe(1);
+    expect(await redis.exists(`Fixtures:${SEASON}:${EVENT_ID}`)).toBe(1);
+
+    const corrected = await cache.refreshLiveBonusV2(EVENT_ID, {
+      '12': { '350': 99 },
+    });
+    expect(corrected).toEqual({ eventId: EVENT_ID, owned: true, retired: true });
+    for (const prefix of [
+      'EventLive',
+      'Fixtures',
+      'LiveFixture',
+      'LiveFixtureV2',
+      'LiveBonus',
+      'LiveSnapshotMeta',
+    ]) {
+      expect(await redis.exists(`${prefix}:${SEASON}:${EVENT_ID}`)).toBe(0);
+    }
+    expect(await redis.hgetall(`LiveBonusV2:${SEASON}:${EVENT_ID}`)).toEqual({
+      '12': JSON.stringify({ '350': 99 }),
+    });
   });
 });

@@ -5,8 +5,9 @@ export const liveDataQueueName = 'live-data';
 
 export const LIVE_JOBS = {
   LIVE_SNAPSHOT: 'live-snapshot',
-  // Retained so jobs already waiting during a rolling deployment remain
-  // processable. New compatibility enqueues route all of these to LIVE_SNAPSHOT.
+  // Legacy names remain the producer wire format during sequential Compose
+  // replacement. New workers route them through LIVE_SNAPSHOT semantics, and
+  // still accept LIVE_SNAPSHOT jobs left by an earlier candidate deployment.
   EVENT_LIVES_CACHE: 'event-lives-cache',
   EVENT_LIVES_DB: 'event-lives-db',
   EVENT_LIVE_SUMMARY: 'event-live-summary',
