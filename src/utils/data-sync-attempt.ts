@@ -43,9 +43,10 @@ export function resolveDataSyncAttempt(
 ): { attempt: number; source: string | undefined } {
   const boundedAttemptsMade = Math.max(0, Math.floor(attemptsMade));
   const boundedRetryCount = Math.max(0, Math.floor(retryCount));
+  const attempt = boundedRetryCount + boundedAttemptsMade + 1;
   return {
-    attempt: Math.max(boundedAttemptsMade + 1, boundedRetryCount + 1),
-    source: boundedRetryCount > 0 ? 'retry' : source,
+    attempt,
+    source: attempt > 1 ? 'retry' : source,
   };
 }
 
@@ -72,6 +73,7 @@ export interface DataSyncAttemptReport {
   jobName: string;
   runId: string;
   source: DataSyncAttemptSource;
+  attempt: number;
   targetEventId?: number;
   outcome: DataSyncAttemptOutcome;
   queueWaitMs: number;
@@ -94,6 +96,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function boundedUnit(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+}
+
+function boundedAttempt(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 1 ? Math.floor(value) : 1;
 }
 
 function firstBoundedUnit(...values: unknown[]): number | undefined {
@@ -163,7 +169,7 @@ export function inferDataSyncWorkSummary(result: unknown): DataSyncWorkSummary {
 }
 
 function normalizeSource(context: DataSyncAttemptContext): DataSyncAttemptSource {
-  if ((context.attempt ?? 1) > 1 || context.source === 'retry') return 'retry';
+  if (boundedAttempt(context.attempt) > 1 || context.source === 'retry') return 'retry';
   if (context.source === 'cron') return 'cron';
   if (context.source === 'api') return 'api';
   if (context.source === 'watchdog') return 'watchdog';
@@ -220,6 +226,7 @@ export async function runDataSyncAttempt<T>(
         jobName: context.jobName,
         runId: context.runId,
         source: normalizeSource(context),
+        attempt: boundedAttempt(context.attempt),
         ...(targetEventId !== undefined ? { targetEventId } : {}),
         outcome,
         queueWaitMs: Math.max(0, Math.floor(context.queueWaitMs ?? 0)),

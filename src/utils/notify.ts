@@ -2,14 +2,16 @@ import type { Job } from 'bullmq';
 import { getConfig } from './config';
 import { logError, logInfo, logWarn } from './logger';
 
-export async function sendTelegramMessage(message: string): Promise<void> {
+export type NotificationDeliveryResult = 'sent' | 'skipped';
+
+export async function sendTelegramMessage(message: string): Promise<NotificationDeliveryResult> {
   const config = getConfig();
   const token = config.TELEGRAM_BOT_TOKEN;
   const chatId = config.TELEGRAM_CHAT_ID;
 
   if (!token || !chatId) {
     logWarn('Telegram not configured — skipping notification', { message });
-    return;
+    return 'skipped';
   }
 
   const url = `https://api.telegram.org/bot${token}/sendMessage`;
@@ -26,6 +28,7 @@ export async function sendTelegramMessage(message: string): Promise<void> {
     }
 
     logInfo('Telegram notification sent', { messageLength: message.length });
+    return 'sent';
   } catch (error) {
     logError('Failed to send Telegram notification', error, { messageLength: message.length });
     throw error;

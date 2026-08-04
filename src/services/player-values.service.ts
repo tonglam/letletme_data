@@ -159,7 +159,7 @@ export function createPlayerValuesSync(dependencies: PlayerValuesSyncDependencie
   return async function syncForDate(
     changeDate: string = formatCronDateKey(),
     options?: { onTargetEventResolved?: (eventId: number) => void },
-  ): Promise<{ count: number; eventId?: number }> {
+  ): Promise<{ count: number; eventId?: number; outcome?: 'noop' }> {
     logInfo('Starting daily player values sync');
 
     if (!/^\d{8}$/.test(changeDate)) {
@@ -172,7 +172,7 @@ export function createPlayerValuesSync(dependencies: PlayerValuesSyncDependencie
         changeDate,
         currentChangeDate,
       });
-      return { count: 0 };
+      return { count: 0, outcome: 'noop' };
     }
 
     const [bootstrapData, syncEvent] = await Promise.all([

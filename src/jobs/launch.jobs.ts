@@ -9,7 +9,7 @@ import { fplClient, type FPLBootstrapResponse } from '../clients/fpl';
 import { runDataSyncAttempt } from '../utils/data-sync-attempt';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { logError, logInfo } from '../utils/logger';
-import { sendTelegramMessage } from '../utils/notify';
+import { sendTelegramMessage, type NotificationDeliveryResult } from '../utils/notify';
 import { CRON_TIMEZONE } from '../utils/timezone';
 
 export const LAUNCH_MONITOR_CRON_PATTERN = '*/5 * * * *';
@@ -26,7 +26,7 @@ type LaunchRedisClient = {
 export interface LaunchMonitorDependencies {
   getBootstrap: () => Promise<FPLBootstrapResponse>;
   getRedis: () => Promise<LaunchRedisClient>;
-  sendNotification: (message: string) => Promise<void>;
+  sendNotification: (message: string) => Promise<NotificationDeliveryResult>;
   now: () => Date;
   createLockToken: () => string;
   wait?: (milliseconds: number) => Promise<void>;
@@ -35,7 +35,7 @@ export interface LaunchMonitorDependencies {
 export interface LaunchMonitorResult {
   outcome: 'ready' | 'noop';
   notification: 'warning' | 'happening' | 'none';
-  delivery: 'sent' | 'already_sent' | 'locked' | 'not_applicable';
+  delivery: 'sent' | 'skipped' | 'already_sent' | 'locked' | 'not_applicable';
   requiredUnits: number;
   reusedUnits: number;
   succeededUnits: number;
@@ -119,13 +119,18 @@ async function sendLaunchNotificationOnce(
 
   let deliveryError: unknown;
   let deliveryAttempted = false;
+  let deliverySkipped = false;
   let notificationDelivered = false;
   let markerPersisted = false;
   try {
     if (await redis.get(doneKey)) return 'already_sent';
     if (!(await persistNotificationLock(redis, lockKey, token))) return 'locked';
     deliveryAttempted = true;
-    await dependencies.sendNotification(message);
+    const delivery = await dependencies.sendNotification(message);
+    if (delivery === 'skipped') {
+      deliverySkipped = true;
+      return 'skipped';
+    }
     notificationDelivered = true;
     await persistNotificationMarker(redis, doneKey, dependencies.now().toISOString(), dependencies);
     markerPersisted = true;
@@ -134,7 +139,7 @@ async function sendLaunchNotificationOnce(
     deliveryError = error;
     throw error;
   } finally {
-    if (deliveryAttempted && !markerPersisted) {
+    if (deliveryAttempted && !deliverySkipped && !markerPersisted) {
       logError(
         notificationDelivered
           ? 'Launch notification was delivered but its marker was not persisted; retaining lock'

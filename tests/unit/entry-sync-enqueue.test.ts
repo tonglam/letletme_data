@@ -89,6 +89,19 @@ describe('entry-sync enqueue runId propagation', () => {
     expect(addCalls).toHaveLength(0);
   });
 
+  test('reuses a legacy manual continuation that predates queue keys', async () => {
+    pendingJobs.push({
+      id: 'entry-picks-manual-chunk-500',
+      name: 'entry-picks',
+      data: { source: 'manual', runId: 'manual' },
+    });
+
+    const job = await enqueueEntryPicksSyncJob('manual', { chunkOffset: 0 });
+
+    expect(job!.id).toBe('entry-picks-manual-chunk-500');
+    expect(addCalls).toHaveLength(0);
+  });
+
   test('logs the stored run id when BullMQ deduplicates an add', async () => {
     const infoSpy = spyOn(logger, 'info').mockImplementation(() => undefined);
     returnedJobData = { runId: 'stored-run' };

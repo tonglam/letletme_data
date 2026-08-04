@@ -67,7 +67,10 @@ async function enqueueEntrySyncJob(
       const pendingJobs = await queue.getJobs(['waiting', 'delayed', 'active', 'paused']);
       const existingManualScan = pendingJobs.find(
         (job) =>
-          job.name === jobName && job.data.source === 'manual' && job.data.queueKey === 'manual',
+          job.name === jobName &&
+          job.data.source === 'manual' &&
+          (job.data.queueKey === 'manual' ||
+            (job.data.queueKey === undefined && job.data.runId === 'manual')),
       );
       if (existingManualScan) {
         logInfo('Entry sync manual scan already active; reusing existing', {

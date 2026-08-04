@@ -55,6 +55,7 @@ function dependencies(options?: {
   events?: Array<{ id: number; deadline_time: string | null }>;
   redis?: FakeRedis;
   send?: (message: string) => Promise<void>;
+  delivery?: 'sent' | 'skipped';
   onBootstrap?: () => void;
 }): LaunchMonitorDependencies {
   return {
@@ -63,7 +64,10 @@ function dependencies(options?: {
       return bootstrap(options?.events ?? []);
     },
     getRedis: async () => options?.redis ?? new FakeRedis(),
-    sendNotification: options?.send ?? (async () => undefined),
+    sendNotification: async (message) => {
+      await options?.send?.(message);
+      return options?.delivery ?? 'sent';
+    },
     now: () => new Date('2026-08-04T00:00:00.000Z'),
     createLockToken: () => 'lock-token',
     wait: async () => undefined,
@@ -114,6 +118,29 @@ describe('launch monitor', () => {
     });
     expect(messages).toEqual(['【NEW SEASON】ITS HAPPENING!!!']);
     expect(redis.values.has('LaunchNotification:happening:2627')).toBe(true);
+  });
+
+  test('does not mark a disabled notification as delivered and can send it later', async () => {
+    const redis = new FakeRedis();
+    const skipped = await evaluateLaunchMonitor(dependencies({ redis, delivery: 'skipped' }));
+
+    expect(skipped).toMatchObject({ outcome: 'noop', delivery: 'skipped', requiredUnits: 0 });
+    expect(redis.values.has('LaunchNotification:warning:2026')).toBe(false);
+    expect(redis.values.has('LaunchNotification:warning:2026:lock')).toBe(false);
+
+    let sends = 0;
+    const delivered = await evaluateLaunchMonitor(
+      dependencies({
+        redis,
+        send: async () => {
+          sends += 1;
+        },
+      }),
+    );
+
+    expect(delivered.delivery).toBe('sent');
+    expect(sends).toBe(1);
+    expect(redis.values.has('LaunchNotification:warning:2026')).toBe(true);
   });
 
   test('reports ordinary monitor no-ops as zero synchronization work', async () => {

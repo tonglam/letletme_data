@@ -95,7 +95,7 @@ describe('player-values synchronization orchestration', () => {
       }),
     );
 
-    expect(await sync(changeDate)).toEqual({ count: 0 });
+    expect(await sync(changeDate)).toEqual({ count: 0, outcome: 'noop' });
     expect(getBootstrap).not.toHaveBeenCalled();
   });
 

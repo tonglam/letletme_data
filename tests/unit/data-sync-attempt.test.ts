@@ -25,6 +25,8 @@ function reportsFrom(spy: { mock: { calls: unknown[][] } }): DataSyncAttemptRepo
 describe('data sync attempt reporting', () => {
   test('accounts for delayed retries that reset BullMQ attemptsMade', () => {
     expect(resolveDataSyncAttempt('cron', 0, 2)).toEqual({ attempt: 3, source: 'retry' });
+    expect(resolveDataSyncAttempt('cron', 2, 2)).toEqual({ attempt: 5, source: 'retry' });
+    expect(resolveDataSyncAttempt('cron', 1)).toEqual({ attempt: 2, source: 'retry' });
     expect(resolveDataSyncAttempt('cron', 0)).toEqual({ attempt: 1, source: 'cron' });
   });
 
@@ -83,6 +85,13 @@ describe('data sync attempt reporting', () => {
       succeededUnits: 12,
       failedUnits: 0,
     });
+    expect(inferDataSyncWorkSummary({ count: 0, outcome: 'noop' })).toEqual({
+      outcome: 'noop',
+      requiredUnits: 0,
+      reusedUnits: 0,
+      succeededUnits: 0,
+      failedUnits: 0,
+    });
     expect(
       inferDataSyncWorkSummary({
         totalEntries: 75,
@@ -133,6 +142,7 @@ describe('data sync attempt reporting', () => {
       jobName: 'entry-picks',
       runId: 'run-1',
       source: 'cron',
+      attempt: 1,
       targetEventId: 7,
       outcome: 'partial',
       queueWaitMs: 15,
@@ -176,6 +186,7 @@ describe('data sync attempt reporting', () => {
     expect(reports[0]).toMatchObject({
       runId: 'run-failed',
       source: 'retry',
+      attempt: 2,
       outcome: 'failed',
       failedUnits: 0,
     });
