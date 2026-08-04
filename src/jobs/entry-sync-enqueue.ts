@@ -57,6 +57,31 @@ async function enqueueEntrySyncJob(
     const concurrency = sanitizePositiveInt(options.concurrency, ENTRY_SYNC_DEFAULT_CONCURRENCY);
     const throttleMs = sanitizePositiveInt(options.throttleMs, ENTRY_SYNC_DEFAULT_THROTTLE_MS);
 
+    const isManualScanRoot =
+      source === 'manual' &&
+      options.entryIds === undefined &&
+      chunkOffset === 0 &&
+      options.runId === undefined &&
+      options.queueKey === undefined;
+    if (isManualScanRoot) {
+      const pendingJobs = await queue.getJobs(['waiting', 'delayed', 'active', 'paused']);
+      const existingManualScan = pendingJobs.find(
+        (job) =>
+          job.name === jobName && job.data.source === 'manual' && job.data.queueKey === 'manual',
+      );
+      if (existingManualScan) {
+        logInfo('Entry sync manual scan already active; reusing existing', {
+          jobId: existingManualScan.id,
+          jobName,
+          source,
+          tier,
+          queue: queue.name,
+          runId: existingManualScan.data.runId,
+        });
+        return existingManualScan;
+      }
+    }
+
     // Stable runId for this chain. Retries and following chunks keep the same
     // runId. Every new manual scan gets a distinct correlation ID; its first
     // chunk still uses a separate stable queue key to dedupe concurrent triggers.
@@ -109,7 +134,7 @@ async function enqueueEntrySyncJob(
       queue: queue.name,
       chunkOffset,
       chunkSize,
-      runId,
+      runId: job.data.runId ?? runId,
     });
     return job;
   } catch (error) {

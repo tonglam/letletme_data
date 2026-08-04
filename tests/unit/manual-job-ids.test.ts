@@ -35,9 +35,10 @@ mock.module('../../src/queues/entry-sync.queue', () => ({
   ENTRY_SYNC_DEFAULT_THROTTLE_MS: 150,
   getEntrySyncQueue: () => ({
     name: 'entry-sync-p2',
+    getJobs: async () => [],
     add: async (name: string, data: Record<string, unknown>, opts: Record<string, unknown>) => {
       entrySyncAddCalls.push({ name, data, opts });
-      return { id: (opts.jobId as string | undefined) ?? 'generated-id' };
+      return { id: (opts.jobId as string | undefined) ?? 'generated-id', name, data };
     },
   }),
 }));
