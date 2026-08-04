@@ -4,6 +4,8 @@ assertIntegrationEnv();
 
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 
+import { resetActiveSeasonMemo } from '../../src/cache/cache-season';
+import { redisSingleton } from '../../src/cache/singleton';
 import type { PlayerValue } from '../../src/domain/player-values';
 import { getDbClient } from '../../src/db/singleton';
 import { createEntryEventTransfersRepository } from '../../src/repositories/entry-event-transfers';
@@ -64,6 +66,9 @@ const TRANSFER: RawFPLEntryTransfer = {
 };
 
 beforeAll(async () => {
+  const redis = await redisSingleton.getClient();
+  await redis.set('Season:active', CHECKPOINT_SEASON);
+  resetActiveSeasonMemo();
   await (
     await db()
   ).begin(async (tx) => {

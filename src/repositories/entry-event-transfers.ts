@@ -1,6 +1,7 @@
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 
+import { acquireActiveSeasonReadFence, getActiveCacheSeasonUncached } from '../cache/cache-season';
 import {
   entryEventTransfers,
   entryInfos,
@@ -188,6 +189,13 @@ export const createEntryEventTransfersRepository = (dbInstance?: DatabaseInstanc
           await tx.execute(
             sql`SELECT pg_advisory_xact_lock(${ENTRY_SEASON_SYNC_LOCK_NAMESPACE}, ${entryId})`,
           );
+          await acquireActiveSeasonReadFence(tx);
+          const canonicalSeason = await getActiveCacheSeasonUncached();
+          if (canonicalSeason !== checkpointSeason) {
+            throw new Error(
+              `Active season changed from ${checkpointSeason} to ${canonicalSeason} during entry transfer sync`,
+            );
+          }
 
           const entryRows = await tx
             .select({

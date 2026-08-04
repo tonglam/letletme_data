@@ -109,7 +109,7 @@ export async function syncTournamentEventResultsForEntryIds(
             eventId,
             transfers,
             pointsByElement,
-            { syncMode: 'latest', checkpointSeason: checkpointSeason! },
+            { syncMode: 'all', checkpointSeason: checkpointSeason! },
           ),
         );
       }

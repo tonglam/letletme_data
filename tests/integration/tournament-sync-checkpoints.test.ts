@@ -16,6 +16,7 @@ import {
   type TournamentCoreSyncPlan,
   type TournamentEnrichmentPlan,
 } from '../../src/services/tournament-backfill.service';
+import { syncTournamentEventResultsForEntryIds } from '../../src/services/tournament-event-results.service';
 import { mockFPLClient, resetMockFPLClient } from './helpers/mock-fpl';
 
 const ENTRY_ID = 99_042_001;
@@ -444,6 +445,51 @@ describe('tournament initialization checkpoints', () => {
     }
   });
 
+  test('season rollover before commit rejects stale transfer history atomically', async () => {
+    const sql = await getDbClient();
+    const redis = await redisSingleton.getClient();
+    await sql`DELETE FROM entry_event_transfers WHERE entry_id = ${ENTRY_ID}`;
+    await sql`
+      UPDATE entry_infos
+      SET entry_transfers_synced_through_event_id = NULL,
+          entry_transfers_synced_season = NULL
+      WHERE id = ${ENTRY_ID}
+    `;
+    await sql`
+      INSERT INTO entry_event_transfers (entry_id, event_id, transfer_time)
+      VALUES (${ENTRY_ID}, 1, '2026-08-01T00:00:00Z')
+    `;
+
+    try {
+      await redis.set('Season:active', '2627');
+      resetActiveSeasonMemo();
+      let rejected: unknown;
+      try {
+        await entryEventTransfersRepository.replaceForEvent(ENTRY_ID, 12, [], undefined, {
+          syncMode: 'all',
+          checkpointSeason: TEST_SEASON,
+        });
+      } catch (error) {
+        rejected = error;
+      }
+
+      expect((rejected as { cause?: Error })?.cause?.message).toContain(
+        'Active season changed from 2526 to 2627 during entry transfer sync',
+      );
+      const rows = await sql<Array<{ count: number }>>`
+        SELECT count(*)::int AS count
+        FROM entry_event_transfers
+        WHERE entry_id = ${ENTRY_ID}
+      `;
+      expect(rows[0]?.count).toBe(1);
+      expect((await checkpointRow())?.transfers).toBeNull();
+      expect((await checkpointRow())?.transfersSeason).toBeNull();
+    } finally {
+      await redis.set('Season:active', TEST_SEASON);
+      resetActiveSeasonMemo();
+    }
+  });
+
   test('pick aggregation reads canonical picks before result enrichment exists', async () => {
     const sql = await getDbClient();
     await sql`DELETE FROM entry_event_results WHERE entry_id = ${ENTRY_ID} AND event_id = 11`;
@@ -826,6 +872,83 @@ describe('tournament initialization checkpoints', () => {
     `;
     await Promise.all([syncEntryInfo(ENTRY_ID, client, 10), syncEntryInfo(ENTRY_ID, client, 12)]);
     expect((await checkpointRow())?.snapshot).toBe(12);
+  });
+
+  test('event result sync preserves every transfer made in the same GW', async () => {
+    const sql = await getDbClient();
+    await sql`DELETE FROM entry_event_transfers WHERE entry_id = ${ENTRY_ID}`;
+    await sql`
+      UPDATE entry_infos
+      SET entry_transfers_synced_through_event_id = NULL,
+          entry_transfers_synced_season = NULL
+      WHERE id = ${ENTRY_ID}
+    `;
+    mockFPLClient({
+      async getEntryEventPicks() {
+        return {
+          active_chip: null,
+          automatic_subs: [],
+          entry_history: {
+            event: 12,
+            points: 50,
+            total_points: 600,
+            rank: 100,
+            overall_rank: 1_000,
+            bank: 5,
+            value: 1_000,
+            event_transfers: 2,
+            event_transfers_cost: 4,
+            points_on_bench: 3,
+          },
+          picks: [],
+        };
+      },
+      async getEntryTransfers() {
+        return [
+          {
+            entry: ENTRY_ID,
+            event: 12,
+            element_in: PICK_PLAYER_ID,
+            element_in_cost: 50,
+            element_out: TRANSFER_PLAYER_ID,
+            element_out_cost: 51,
+            time: '2026-10-08T10:00:00Z',
+          },
+          {
+            entry: ENTRY_ID,
+            event: 12,
+            element_in: TRANSFER_PLAYER_ID,
+            element_in_cost: 51,
+            element_out: PICK_PLAYER_ID,
+            element_out_cost: 50,
+            time: '2026-10-08T11:00:00Z',
+          },
+        ];
+      },
+    });
+
+    try {
+      const result = await syncTournamentEventResultsForEntryIds([ENTRY_ID], 12, {
+        live: {
+          elements: [
+            { id: PICK_PLAYER_ID, stats: { total_points: 2 } },
+            { id: TRANSFER_PLAYER_ID, stats: { total_points: 6 } },
+          ],
+        },
+      });
+      expect(result.synced).toBe(1);
+
+      const rows = await sql<Array<{ elementInId: number; transferTime: Date }>>`
+        SELECT element_in_id AS "elementInId", transfer_time AS "transferTime"
+        FROM entry_event_transfers
+        WHERE entry_id = ${ENTRY_ID} AND event_id = 12
+        ORDER BY transfer_time
+      `;
+      expect(rows.map((row) => row.elementInId)).toEqual([PICK_PLAYER_ID, TRANSFER_PLAYER_ID]);
+      expect((await checkpointRow())?.transfers).toBe(12);
+    } finally {
+      resetMockFPLClient();
+    }
   });
 
   test('range constraint rolls back an invalid checkpoint update', async () => {
