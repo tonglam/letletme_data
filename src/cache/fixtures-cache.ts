@@ -24,6 +24,11 @@ function eventIdFromFixturesKey(key: string, season: string): number | null {
   return Number.isInteger(eventId) && eventId > 0 ? eventId : null;
 }
 
+function isLiveSnapshotStagingKey(key: string, season: string): boolean {
+  const suffix = key.slice(`Fixtures:${season}:`.length);
+  return /^\d+:staging:[^:]+$/.test(suffix);
+}
+
 async function scanKeys(redis: Redis, pattern: string): Promise<string[]> {
   const keys: string[] = [];
   let cursor = '0';
@@ -167,7 +172,10 @@ export const fixturesCache = {
       for (const key of existingKeys) {
         const existingEventId = eventIdFromFixturesKey(key, activeSeason);
         if (existingEventId === null) {
-          nonEventKeys.push(key);
+          // A live publisher can be between stage and atomic swap while this
+          // scan runs if an external lock disappears. Never treat its bounded,
+          // uniquely named staging hash as malformed legacy cache data.
+          if (!isLiveSnapshotStagingKey(key, activeSeason)) nonEventKeys.push(key);
         } else {
           eventIds.add(existingEventId);
         }
@@ -260,7 +268,10 @@ export const fixturesCache = {
         const eventId = eventIdFromFixturesKey(key, season);
         return eventId === null ? [] : [{ eventId, key, fields: {} }];
       });
-      const nonEventKeys = keys.filter((key) => eventIdFromFixturesKey(key, season) === null);
+      const nonEventKeys = keys.filter(
+        (key) =>
+          eventIdFromFixturesKey(key, season) === null && !isLiveSnapshotStagingKey(key, season),
+      );
       const snapshotOwnedEventIds = await replaceHashesUnlessLiveSnapshotOwned(
         redis,
         season,

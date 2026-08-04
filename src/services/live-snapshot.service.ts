@@ -1,6 +1,7 @@
-import { sql } from 'drizzle-orm';
+import { and, eq, isNull, lte, or, sql } from 'drizzle-orm';
 
-import { getDb } from '../db/singleton';
+import { getDb, type DbOrTransaction } from '../db/singleton';
+import { events } from '../db/schemas/index.schema';
 import { fplClient } from '../clients/fpl';
 import { getActiveCacheSeason } from '../cache/cache-season';
 import { liveSnapshotCache, playersCache } from '../cache/operations';
@@ -11,7 +12,7 @@ import {
   type LiveBonusByTeam,
 } from '../domain/live-bonus';
 import type { LiveSnapshotState } from '../domain/live-snapshot';
-import { fixtureRepository } from '../repositories/fixtures';
+import { createFixtureRepository, fixtureRepository } from '../repositories/fixtures';
 import { transformFixtures } from '../transformers/fixtures';
 import type { Fixture, RawFPLEventLiveResponse, RawFPLFixture } from '../types';
 import { logInfo } from '../utils/logger';
@@ -68,9 +69,112 @@ type LiveSnapshotDependencies = {
   getReferenceData: () => Promise<LiveSnapshotReferenceData>;
   serialize: <T>(eventId: number, operation: (checkedAt: Date) => Promise<T>) => Promise<T>;
   publish: typeof liveSnapshotCache.publish;
-  persistFixtures: (fixtures: Fixture[]) => Promise<Fixture[]>;
-  persistEventLives: (prepared: PreparedEventLives) => Promise<readonly unknown[]>;
+  persistDurably: typeof persistLiveSnapshotDurably;
 };
+
+export interface LiveSnapshotDurablePersistenceRequest {
+  eventId: number;
+  checkedAt: Date;
+  prepared: PreparedLiveSnapshot;
+  persistFixtures: boolean;
+  persistEventLives: boolean;
+}
+
+export interface LiveSnapshotDurablePersistenceResult {
+  accepted: boolean;
+  winnerCheckedAt: Date;
+  persistedFixtures: boolean;
+  persistedEventLives: boolean;
+}
+
+export interface LiveSnapshotDurableFenceResult<T> {
+  accepted: boolean;
+  winnerCheckedAt: Date;
+  value?: T;
+}
+
+export async function withLiveSnapshotDurableWriteFence<T>(
+  eventId: number,
+  checkedAt: Date,
+  operation: (tx: DbOrTransaction) => Promise<T>,
+): Promise<LiveSnapshotDurableFenceResult<T>> {
+  const db = await getDb();
+  return db.transaction(async (tx) => {
+    const claimed = await tx
+      .update(events)
+      .set({ liveSnapshotCheckedAt: checkedAt })
+      .where(
+        and(
+          eq(events.id, eventId),
+          or(isNull(events.liveSnapshotCheckedAt), lte(events.liveSnapshotCheckedAt, checkedAt)),
+        ),
+      )
+      .returning({ checkedAt: events.liveSnapshotCheckedAt });
+
+    if (claimed.length === 0) {
+      const [current] = await tx
+        .select({ checkedAt: events.liveSnapshotCheckedAt })
+        .from(events)
+        .where(eq(events.id, eventId))
+        .limit(1);
+      if (!current) {
+        throw new Error(`Cannot fence live snapshot writes for missing event ${eventId}`);
+      }
+      if (!current.checkedAt || current.checkedAt.getTime() <= checkedAt.getTime()) {
+        throw new Error(`Live snapshot durable fence did not advance for event ${eventId}`);
+      }
+      logInfo('Rejected stale durable live snapshot writes', {
+        eventId,
+        incomingCheckedAt: checkedAt.toISOString(),
+        winnerCheckedAt: current.checkedAt.toISOString(),
+      });
+      return { accepted: false, winnerCheckedAt: current.checkedAt };
+    }
+
+    return {
+      accepted: true,
+      winnerCheckedAt: claimed[0].checkedAt ?? checkedAt,
+      value: await operation(tx),
+    };
+  });
+}
+
+/**
+ * Claim the event's durable ordering token and perform every selected write in
+ * the same transaction. Row locking makes competing workers commit in
+ * checkedAt order even if the outer advisory-lock connection disappeared.
+ */
+export async function persistLiveSnapshotDurably({
+  eventId,
+  checkedAt,
+  prepared,
+  persistFixtures,
+  persistEventLives,
+}: LiveSnapshotDurablePersistenceRequest): Promise<LiveSnapshotDurablePersistenceResult> {
+  if (!persistFixtures && !persistEventLives) {
+    return {
+      accepted: true,
+      winnerCheckedAt: checkedAt,
+      persistedFixtures: false,
+      persistedEventLives: false,
+    };
+  }
+
+  const fenced = await withLiveSnapshotDurableWriteFence(eventId, checkedAt, async (tx) => {
+    if (persistFixtures) {
+      await createFixtureRepository(tx).upsertBatch(prepared.fixtures);
+    }
+    if (persistEventLives) {
+      await persistPreparedEventLives(prepared.eventLives, tx);
+    }
+  });
+  return {
+    accepted: fenced.accepted,
+    winnerCheckedAt: fenced.winnerCheckedAt,
+    persistedFixtures: fenced.accepted && persistFixtures,
+    persistedEventLives: fenced.accepted && persistEventLives,
+  };
+}
 
 /**
  * The optional Redis mutation guard is useful for broad cross-job conflicts,
@@ -358,8 +462,7 @@ const defaultDependencies: LiveSnapshotDependencies = {
   getReferenceData: loadLiveSnapshotReferenceData,
   serialize: withLiveSnapshotSerialization,
   publish: (payload, options) => liveSnapshotCache.publish(payload, options),
-  persistFixtures: (fixtures) => fixtureRepository.upsertBatch(fixtures),
-  persistEventLives: persistPreparedEventLives,
+  persistDurably: persistLiveSnapshotDurably,
 };
 
 /**
@@ -397,6 +500,7 @@ export async function syncLiveSnapshot(
     );
 
     let persistedFixtures = false;
+    let persistedEventLives = false;
     const published = await dependencies.publish(
       {
         eventId,
@@ -410,18 +514,20 @@ export async function syncLiveSnapshot(
         checkedAt,
       },
       {
-        beforeCommit: async () => {
-          await dependencies.persistFixtures(prepared.fixtures);
-          persistedFixtures = true;
+        beforeCommit: async (changed) => {
+          const durable = await dependencies.persistDurably({
+            eventId,
+            checkedAt,
+            prepared,
+            persistFixtures: changed,
+            persistEventLives: options.persistEventLives === true,
+          });
+          persistedFixtures = durable.persistedFixtures;
+          persistedEventLives = durable.persistedEventLives;
+          return durable.accepted;
         },
       },
     );
-
-    let persistedEventLives = false;
-    if (options.persistEventLives && !published.stale) {
-      await dependencies.persistEventLives(prepared.eventLives);
-      persistedEventLives = true;
-    }
 
     const result: LiveSnapshotSyncResult = {
       eventId,

@@ -44,8 +44,10 @@ export interface LiveSnapshotPublishOptions {
   /**
    * Complete required durable writes after every view has been staged and
    * verified, but before the atomic Redis swap exposes the new revision.
+   * Returning false means PostgreSQL's durable ordering fence already belongs
+   * to a newer worker, so this cache candidate must not be published.
    */
-  beforeCommit?: () => Promise<void>;
+  beforeCommit?: (changed: boolean) => Promise<boolean | void>;
 }
 
 export interface LiveSnapshotRetireResult {
@@ -274,8 +276,9 @@ async function stalePublishResult(
   incomingCheckedAt: string,
 ): Promise<LiveSnapshotPublishResult> {
   const winner = await readPublishedMeta(redis, metaKey);
-  if (!winner) {
-    throw new Error(`Stale live snapshot ${eventId} has no published winner metadata`);
+  const incomingTime = Date.parse(incomingCheckedAt);
+  if (!winner || Date.parse(winner.checkedAt) <= incomingTime) {
+    throw new Error(`Stale live snapshot ${eventId} is awaiting newer published winner metadata`);
   }
   logInfo('Rejected stale live snapshot publication', {
     eventId,
@@ -432,6 +435,10 @@ export function createLiveSnapshotCache(
       };
 
       if (!changed) {
+        const durableAccepted = (await options.beforeCommit?.(false)) !== false;
+        if (!durableAccepted) {
+          return stalePublishResult(redis, metaKey, payload.eventId, meta.checkedAt);
+        }
         const updated = await redis.eval(
           SET_LIVE_SNAPSHOT_META_IF_FRESH_SCRIPT,
           1,
@@ -476,7 +483,11 @@ export function createLiveSnapshotCache(
         const emptyTargetKeys = views
           .filter((view) => !staged.some((candidate) => candidate.targetKey === view.key))
           .map((view) => view.key);
-        await options.beforeCommit?.();
+        const durableAccepted = (await options.beforeCommit?.(true)) !== false;
+        if (!durableAccepted) {
+          if (stagedKeys.length > 0) await redis.del(...stagedKeys);
+          return stalePublishResult(redis, metaKey, payload.eventId, meta.checkedAt);
+        }
         const result = await redis.eval(
           PUBLISH_LIVE_SNAPSHOT_SCRIPT,
           stagedKeys.length * 2 + emptyTargetKeys.length + 1,

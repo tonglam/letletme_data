@@ -26,6 +26,10 @@ export const events = pgTable('events', {
   transfersMade: integer('transfers_made'),
   mostCaptained: integer('most_captained'),
   mostViceCaptained: integer('most_vice_captained'),
+  // Shared ordering fence for sparse durable live writes. One timestamp per
+  // gameweek prevents an older worker from overwriting newer fixture or
+  // event-live rows after its advisory-lock connection is lost.
+  liveSnapshotCheckedAt: timestamp('live_snapshot_checked_at', { withTimezone: true }),
   ...timestamps,
 });
 

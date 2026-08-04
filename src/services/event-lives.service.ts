@@ -1,6 +1,6 @@
 import { eventLivesCache } from '../cache/operations';
 import { fplClient } from '../clients/fpl';
-import { getDb } from '../db/singleton';
+import { getDb, type DbOrTransaction } from '../db/singleton';
 import type { EventLive } from '../domain/event-lives';
 import type { EventLiveExplain } from '../domain/event-live-explains';
 import { createEventLiveExplainsRepository } from '../repositories/event-live-explains';
@@ -50,10 +50,10 @@ export function prepareEventLives(
  */
 export async function persistPreparedEventLives(
   prepared: PreparedEventLives,
+  dbInstance?: DbOrTransaction,
 ): Promise<EventLive[]> {
   const { eventId, eventLives, explains } = prepared;
-  const db = await getDb();
-  return db.transaction(async (tx) => {
+  const persist = async (tx: DbOrTransaction) => {
     const txEventLiveRepository = createEventLiveRepository(tx);
     const txExplainsRepository = createEventLiveExplainsRepository(tx);
 
@@ -67,7 +67,13 @@ export async function persistPreparedEventLives(
     });
 
     return savedLives;
-  });
+  };
+
+  if (dbInstance) {
+    return persist(dbInstance);
+  }
+  const db = await getDb();
+  return db.transaction(persist);
 }
 
 /**

@@ -21,6 +21,60 @@ import type { Player } from '../types';
 
 const getHashKey = async (season?: string) => `Player:${season ?? (await getActiveCacheSeason())}`;
 
+/**
+ * Validate the complete roster and apply price-only patches in one Redis
+ * command. Redis serializes scripts with MULTI roster replacement, so a price
+ * job can run either before or after a replacement but can never write stale
+ * full player objects across it.
+ */
+const MERGE_PLAYER_PRICES_SCRIPT = `
+local expected_count = tonumber(ARGV[1])
+local update_count = tonumber(ARGV[2])
+
+if redis.call('HLEN', KEYS[1]) ~= expected_count then
+  return -1
+end
+
+for index = 1, expected_count do
+  if redis.call('HEXISTS', KEYS[1], ARGV[2 + index]) ~= 1 then
+    return -1
+  end
+end
+
+local update_offset = 2 + expected_count
+local decoded_updates = {}
+for index = 1, update_count do
+  local argument_offset = update_offset + ((index - 1) * 2)
+  local element_id = ARGV[argument_offset + 1]
+  local price = tonumber(ARGV[argument_offset + 2])
+  local raw = redis.call('HGET', KEYS[1], element_id)
+  if raw == false then
+    return -1
+  end
+  local decoded, player = pcall(cjson.decode, raw)
+  if not decoded
+    or type(player) ~= 'table'
+    or tonumber(player.id) ~= tonumber(element_id)
+    or price == nil
+  then
+    return -2
+  end
+  player.price = price
+  decoded_updates[index] = { element_id, cjson.encode(player) }
+end
+
+for index = 1, update_count do
+  redis.call('HSET', KEYS[1], decoded_updates[index][1], decoded_updates[index][2])
+end
+
+return update_count
+`;
+
+export interface PlayerPriceCacheUpdate {
+  elementId: number;
+  value: number;
+}
+
 const createPlayerHashCache = () => {
   return {
     /**
@@ -155,43 +209,86 @@ const createPlayerHashCache = () => {
     },
 
     /**
-     * Merge only the supplied player fields after verifying the existing hash
-     * is the complete database-backed player view.
+     * Patch only current prices after atomically verifying that Redis still
+     * contains the exact published roster. Identity fields always come from
+     * the current cache value, never from a potentially stale price worker.
      */
-    mergePlayers: async (
-      players: Player[],
+    mergePlayerPrices: async (
+      updates: PlayerPriceCacheUpdate[],
       expectedPlayerIds: number[],
       season?: string,
     ): Promise<void> => {
-      if (players.length === 0) {
+      if (updates.length === 0) {
         return;
       }
 
       try {
         const key = await getHashKey(season);
         const redis = await redisSingleton.getClient();
-        const cachedFields = await redis.hkeys(key);
-        const cachedIds = new Set(cachedFields);
-        const expectedIds = new Set(expectedPlayerIds.map(String));
-        const completeView =
-          cachedIds.size === expectedIds.size &&
-          Array.from(expectedIds).every((elementId) => cachedIds.has(elementId));
-        if (!completeView) {
+        const expectedIds = [...new Set(expectedPlayerIds)]
+          .filter((elementId) => Number.isInteger(elementId) && elementId > 0)
+          .sort((left, right) => left - right);
+        if (expectedIds.length !== expectedPlayerIds.length) {
+          throw new CacheError(
+            `Refusing to merge prices with invalid expected player IDs: ${key}`,
+            'PLAYERS_MERGE_INVALID_EXPECTED_IDS',
+          );
+        }
+        const expectedIdSet = new Set(expectedIds);
+        const normalizedUpdates = updates.map(({ elementId, value }) => ({ elementId, value }));
+        if (
+          normalizedUpdates.some(
+            ({ elementId, value }) =>
+              !Number.isInteger(elementId) ||
+              elementId <= 0 ||
+              !Number.isInteger(value) ||
+              value <= 0 ||
+              !expectedIdSet.has(elementId),
+          ) ||
+          new Set(normalizedUpdates.map(({ elementId }) => elementId)).size !==
+            normalizedUpdates.length
+        ) {
+          throw new CacheError(
+            `Refusing to merge invalid player price updates: ${key}`,
+            'PLAYERS_MERGE_INVALID_UPDATES',
+          );
+        }
+
+        const result = Number(
+          await redis.eval(
+            MERGE_PLAYER_PRICES_SCRIPT,
+            1,
+            key,
+            String(expectedIds.length),
+            String(normalizedUpdates.length),
+            ...expectedIds.map(String),
+            ...normalizedUpdates.flatMap(({ elementId, value }) => [
+              String(elementId),
+              String(value),
+            ]),
+          ),
+        );
+        if (result === -1) {
           throw new CacheError(
             `Refusing to merge prices into incomplete players cache: ${key}`,
             'PLAYERS_MERGE_INCOMPLETE_VIEW',
           );
         }
-
-        const hashEntries: Record<string, string> = {};
-        for (const player of players) {
-          hashEntries[String(player.id)] = JSON.stringify(player);
+        if (result === -2) {
+          throw new CacheError(
+            `Refusing to merge prices into malformed players cache: ${key}`,
+            'PLAYERS_MERGE_INVALID_VIEW',
+          );
         }
-
-        await redis.hset(key, hashEntries);
-        logDebug('Players cache fields merged', { key, count: players.length });
+        if (result !== normalizedUpdates.length) {
+          throw new Error(`Unexpected player price merge result for ${key}: ${String(result)}`);
+        }
+        logDebug('Player cache prices atomically merged', {
+          key,
+          count: normalizedUpdates.length,
+        });
       } catch (error) {
-        logError('Players cache merge error', error, { count: players.length });
+        logError('Players cache merge error', error, { count: updates.length });
         if (error instanceof CacheError) {
           throw error;
         }
@@ -294,8 +391,12 @@ export const playersCache = {
     return playerHashCacheInstance.setAllPlayers(players, season);
   },
 
-  async merge(players: Player[], expectedPlayerIds: number[], season?: string): Promise<void> {
-    return playerHashCacheInstance.mergePlayers(players, expectedPlayerIds, season);
+  async mergePrices(
+    updates: PlayerPriceCacheUpdate[],
+    expectedPlayerIds: number[],
+    season?: string,
+  ): Promise<void> {
+    return playerHashCacheInstance.mergePlayerPrices(updates, expectedPlayerIds, season);
   },
 
   async clear(): Promise<void> {

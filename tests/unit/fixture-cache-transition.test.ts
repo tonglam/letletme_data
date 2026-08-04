@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   findOmittedEventFixtureIds,
+  resolveFixtureCacheLockEventIds,
   resolveFixtureCacheTransitions,
 } from '../../src/domain/fixture-cache-transition';
 
@@ -22,6 +23,19 @@ describe('event-scoped fixture coverage', () => {
 });
 
 describe('fixture cache transitions', () => {
+  test('locks every accepted destination even when ownership is unchanged', () => {
+    expect(
+      resolveFixtureCacheLockEventIds(
+        [
+          { id: 101, event: 10 },
+          { id: 102, event: 11 },
+          { id: 103, event: null },
+        ],
+        new Set([9, 10]),
+      ),
+    ).toEqual([9, 10, 11]);
+  });
+
   test('retires the prior event when a fixture moves to another event', () => {
     const transitions = resolveFixtureCacheTransitions(
       [{ id: 101, event: 11 }],

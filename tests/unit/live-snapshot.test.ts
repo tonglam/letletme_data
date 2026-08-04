@@ -671,6 +671,44 @@ describe('live snapshot cache publication', () => {
     expect(redis.stagingKeys()).toEqual([]);
   });
 
+  test('abandons staged views when the durable fence reports a newer winner', async () => {
+    const redis = new FakeRedis();
+    const cache = cacheWith(redis);
+    await cache.publish(cachePayload(1, new Date('2025-08-15T20:00:00.000Z')).payload);
+
+    const stale = await cache.publish(
+      cachePayload(2, new Date('2025-08-15T20:01:00.000Z')).payload,
+      {
+        beforeCommit: async () => {
+          await cache.publish(cachePayload(3, new Date('2025-08-15T20:02:00.000Z')).payload);
+          return false;
+        },
+      },
+    );
+
+    expect(stale).toMatchObject({ changed: false, stale: true });
+    expect(stale.meta.checkedAt).toBe('2025-08-15T20:02:00.000Z');
+    expect(JSON.parse(redis.hashes.get('Fixtures:2526:1')!.get('1')!)).toMatchObject({
+      teamHScore: 3,
+    });
+    expect(redis.stagingKeys()).toEqual([]);
+  });
+
+  test('runs sparse durable persistence before a metadata-only refresh', async () => {
+    const redis = new FakeRedis();
+    const cache = cacheWith(redis);
+    await cache.publish(cachePayload().payload);
+    const beforeCommit = mock(async () => true);
+
+    const refreshed = await cache.publish(
+      cachePayload(2, new Date('2025-08-15T20:01:00.000Z')).payload,
+      { beforeCommit },
+    );
+
+    expect(refreshed).toMatchObject({ changed: false, stale: false });
+    expect(beforeCommit).toHaveBeenCalledWith(false);
+  });
+
   test('retires metadata and every coordinated live view atomically', async () => {
     const redis = new FakeRedis();
     const cache = cacheWith(redis);
@@ -698,8 +736,9 @@ describe('syncLiveSnapshot', () => {
     const publish = mock(async () => {
       throw new Error('publish must not be called');
     });
-    const persistFixtures = mock(async () => []);
-    const persistEventLives = mock(async () => []);
+    const persistDurably = mock(async () => {
+      throw new Error('persistence must not be called');
+    });
 
     await expect(
       syncLiveSnapshot(1, {
@@ -716,15 +755,13 @@ describe('syncLiveSnapshot', () => {
           getReferenceData: async () => referenceData(),
           serialize: async (_eventId, operation) => operation(new Date('2025-08-15T20:00:00.000Z')),
           publish,
-          persistFixtures,
-          persistEventLives,
+          persistDurably,
         },
       }),
     ).rejects.toThrow('duplicate element IDs for event 1');
 
     expect(publish).not.toHaveBeenCalled();
-    expect(persistFixtures).not.toHaveBeenCalled();
-    expect(persistEventLives).not.toHaveBeenCalled();
+    expect(persistDurably).not.toHaveBeenCalled();
   });
 
   test('fetches independent inputs concurrently and persists changed fixtures before commit', async () => {
@@ -733,7 +770,7 @@ describe('syncLiveSnapshot', () => {
       async (payload: LiveSnapshotCachePayload, options: LiveSnapshotPublishOptions = {}) => {
         calls.push('publish-stage');
         expect(payload.checkedAt).toEqual(new Date('2025-08-15T20:00:00.000Z'));
-        await options.beforeCommit?.();
+        await options.beforeCommit?.(true);
         calls.push('publish-commit');
         return {
           changed: true,
@@ -760,13 +797,14 @@ describe('syncLiveSnapshot', () => {
       started += 1;
       return Promise.resolve(value);
     };
-    const persistFixtures = mock(async () => {
-      calls.push('persist-fixtures');
-      return [];
-    });
-    const persistEventLives = mock(async () => {
-      calls.push('persist-event-lives');
-      return [];
+    const persistDurably = mock(async (request: { checkedAt: Date }) => {
+      calls.push('persist-durable');
+      return {
+        accepted: true,
+        winnerCheckedAt: request.checkedAt,
+        persistedFixtures: true,
+        persistedEventLives: true,
+      };
     });
 
     const result = await syncLiveSnapshot(1, {
@@ -783,8 +821,7 @@ describe('syncLiveSnapshot', () => {
         getExpectedFixtureIds: () => markStart('fetch-expected', [1]),
         getReferenceData: () => markStart('fetch-reference', referenceData()),
         publish,
-        persistFixtures,
-        persistEventLives,
+        persistDurably,
       },
     });
 
@@ -796,9 +833,8 @@ describe('syncLiveSnapshot', () => {
       'fetch-live',
       'fetch-reference',
     ]);
-    expect(calls.indexOf('publish-stage')).toBeLessThan(calls.indexOf('persist-fixtures'));
-    expect(calls.indexOf('persist-fixtures')).toBeLessThan(calls.indexOf('publish-commit'));
-    expect(calls.indexOf('publish-commit')).toBeLessThan(calls.indexOf('persist-event-lives'));
+    expect(calls.indexOf('publish-stage')).toBeLessThan(calls.indexOf('persist-durable'));
+    expect(calls.indexOf('persist-durable')).toBeLessThan(calls.indexOf('publish-commit'));
     expect(calls.at(-1)).toBe('serialize-exit');
     expect(result).toMatchObject({
       changed: true,
@@ -811,8 +847,12 @@ describe('syncLiveSnapshot', () => {
   });
 
   test('skips unchanged fixture upserts while retaining the sparse event-live checkpoint', async () => {
-    const persistFixtures = mock(async () => []);
-    const persistEventLives = mock(async () => []);
+    const persistDurably = mock(async (request: { checkedAt: Date }) => ({
+      accepted: true,
+      winnerCheckedAt: request.checkedAt,
+      persistedFixtures: false,
+      persistedEventLives: true,
+    }));
 
     const result = await syncLiveSnapshot(1, {
       persistEventLives: true,
@@ -822,30 +862,36 @@ describe('syncLiveSnapshot', () => {
         getExpectedFixtureIds: async () => [1],
         getReferenceData: async () => referenceData(),
         serialize: async (_eventId, operation) => operation(new Date('2025-08-15T20:10:00.000Z')),
-        publish: async (payload) => ({
-          changed: false,
-          stale: false,
-          meta: {
-            schemaVersion: 1 as const,
-            season: '2526',
-            eventId: payload.eventId,
-            revision: 'b'.repeat(24),
-            state: payload.state,
-            publishedAt: '2025-08-15T20:00:00.000Z',
-            checkedAt: '2025-08-15T20:10:00.000Z',
-            eventLiveCount: payload.eventLives.length,
-            fixtureCount: payload.fixtures.length,
-            fixtureTeamCount: Object.keys(payload.liveFixturesV2).length,
-            bonusTeamCount: Object.keys(payload.liveBonusV2).length,
-          },
-        }),
-        persistFixtures,
-        persistEventLives,
+        publish: async (payload, publishOptions = {}) => {
+          const accepted = (await publishOptions.beforeCommit?.(false)) !== false;
+          expect(accepted).toBe(true);
+          return {
+            changed: false,
+            stale: false,
+            meta: {
+              schemaVersion: 1 as const,
+              season: '2526',
+              eventId: payload.eventId,
+              revision: 'b'.repeat(24),
+              state: payload.state,
+              publishedAt: '2025-08-15T20:00:00.000Z',
+              checkedAt: '2025-08-15T20:10:00.000Z',
+              eventLiveCount: payload.eventLives.length,
+              fixtureCount: payload.fixtures.length,
+              fixtureTeamCount: Object.keys(payload.liveFixturesV2).length,
+              bonusTeamCount: Object.keys(payload.liveBonusV2).length,
+            },
+          };
+        },
+        persistDurably,
       },
     });
 
-    expect(persistFixtures).not.toHaveBeenCalled();
-    expect(persistEventLives).toHaveBeenCalledTimes(1);
+    expect(persistDurably).toHaveBeenCalledTimes(1);
+    expect(persistDurably.mock.calls[0][0]).toMatchObject({
+      persistFixtures: false,
+      persistEventLives: true,
+    });
     expect(result).toMatchObject({
       changed: false,
       stale: false,
@@ -855,8 +901,9 @@ describe('syncLiveSnapshot', () => {
   });
 
   test('does not persist stale event-live checkpoints', async () => {
-    const persistFixtures = mock(async () => []);
-    const persistEventLives = mock(async () => []);
+    const persistDurably = mock(async () => {
+      throw new Error('persistence must not be called');
+    });
 
     const result = await syncLiveSnapshot(1, {
       persistEventLives: true,
@@ -883,13 +930,11 @@ describe('syncLiveSnapshot', () => {
             bonusTeamCount: Object.keys(payload.liveBonusV2).length,
           },
         }),
-        persistFixtures,
-        persistEventLives,
+        persistDurably,
       },
     });
 
-    expect(persistFixtures).not.toHaveBeenCalled();
-    expect(persistEventLives).not.toHaveBeenCalled();
+    expect(persistDurably).not.toHaveBeenCalled();
     expect(result).toMatchObject({
       changed: false,
       stale: true,

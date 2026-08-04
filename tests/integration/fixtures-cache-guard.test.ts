@@ -127,6 +127,19 @@ describe('FixturesByTeam empty-teams guard (FP-12)', () => {
     expect(JSON.parse(teamThree['10'])).toMatchObject({ againstTeamId: 4 });
   });
 
+  test('full refresh and clear never delete in-flight live snapshot staging hashes', async () => {
+    const redis = await redisSingleton.getClient();
+    const stagingKey = `Fixtures:${SEASON}:10:staging:fixture-race-regression`;
+    await redis.hset(stagingKey, '101', '{"staged":true}');
+    await redis.expire(stagingKey, 900);
+
+    await fixturesCache.set(FIXTURES, SEASON);
+    expect(await redis.hget(stagingKey, '101')).toBe('{"staged":true}');
+
+    await fixturesCache.clear();
+    expect(await redis.hget(stagingKey, '101')).toBe('{"staged":true}');
+  });
+
   test('removing one reassigned fixture preserves other unscheduled fixtures', async () => {
     const redis = await redisSingleton.getClient();
     await redis.set('Season:active', SEASON);

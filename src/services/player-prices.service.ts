@@ -11,7 +11,7 @@ export type PlayerPricesSyncDependencies = {
   findLatestForPlayerIds: typeof playerValuesRepository.findLatestForPlayerIds;
   getBootstrap: typeof fplClient.getBootstrap;
   updatePrices: typeof playerRepository.updatePrices;
-  mergePlayersCache: typeof playersCache.merge;
+  mergePlayerPricesCache: typeof playersCache.mergePrices;
 };
 
 const defaultDependencies: PlayerPricesSyncDependencies = {
@@ -19,7 +19,7 @@ const defaultDependencies: PlayerPricesSyncDependencies = {
   findLatestForPlayerIds: playerValuesRepository.findLatestForPlayerIds,
   getBootstrap: () => fplClient.getBootstrap(),
   updatePrices: playerRepository.updatePrices,
-  mergePlayersCache: playersCache.merge,
+  mergePlayerPricesCache: playersCache.mergePrices,
 };
 
 export function createPlayerPricesSync(dependencies: PlayerPricesSyncDependencies) {
@@ -92,7 +92,7 @@ export function createPlayerPricesSync(dependencies: PlayerPricesSyncDependencie
       throw new Error(`Player rows missing for price update: ${missingPlayers.join(', ')}`);
     }
 
-    await dependencies.mergePlayersCache(updatedPlayers, publishedPlayerIds);
+    await dependencies.mergePlayerPricesCache(priceUpdates, publishedPlayerIds);
     logInfo('Player prices updated in database and cache', {
       changeDate,
       count: updatedPlayers.length,

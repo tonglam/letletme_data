@@ -3,9 +3,13 @@ import { assertIntegrationEnv } from './helpers/env-guard';
 assertIntegrationEnv();
 
 import { describe, expect, test } from 'bun:test';
+import { eq } from 'drizzle-orm';
 
+import { events } from '../../src/db/schemas/index.schema';
+import { getDb } from '../../src/db/singleton';
 import {
   withFixtureSyncSerialization,
+  withLiveSnapshotDurableWriteFence,
   withLiveSnapshotSerialization,
 } from '../../src/services/live-snapshot.service';
 
@@ -84,5 +88,44 @@ describe('live snapshot PostgreSQL serialization', () => {
     await Promise.all([first, second]);
 
     expect(prepareState).toBe('blocked');
+  });
+
+  test('durable writes reject an older checkedAt after a newer winner commits', async () => {
+    const eventId = 2_000_000_021;
+    const db = await getDb();
+    await db.delete(events).where(eq(events.id, eventId));
+    await db.insert(events).values({ id: eventId, name: 'Live snapshot fence integration' });
+    const writes: string[] = [];
+
+    try {
+      const newer = await withLiveSnapshotDurableWriteFence(
+        eventId,
+        new Date('2026-08-04T01:00:02.000Z'),
+        async () => {
+          writes.push('newer');
+        },
+      );
+      const older = await withLiveSnapshotDurableWriteFence(
+        eventId,
+        new Date('2026-08-04T01:00:01.000Z'),
+        async () => {
+          writes.push('older');
+        },
+      );
+
+      expect(newer.accepted).toBe(true);
+      expect(older).toMatchObject({
+        accepted: false,
+        winnerCheckedAt: new Date('2026-08-04T01:00:02.000Z'),
+      });
+      expect(writes).toEqual(['newer']);
+      const [stored] = await db
+        .select({ checkedAt: events.liveSnapshotCheckedAt })
+        .from(events)
+        .where(eq(events.id, eventId));
+      expect(stored.checkedAt).toEqual(new Date('2026-08-04T01:00:02.000Z'));
+    } finally {
+      await db.delete(events).where(eq(events.id, eventId));
+    }
   });
 });

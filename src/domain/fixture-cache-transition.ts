@@ -9,6 +9,23 @@ export interface FixtureCacheTransitions {
 }
 
 /**
+ * Every accepted destination participates in a fixture cache rebuild, even
+ * when ownership itself did not change. Lock those destinations together with
+ * transition invalidations so broad fixture refreshes cannot overlap a live
+ * snapshot staging/swap for any hash they inspect or replace.
+ */
+export function resolveFixtureCacheLockEventIds(
+  fixtures: readonly FixtureEventIdentity[],
+  invalidatedEventIds: ReadonlySet<number>,
+): number[] {
+  const eventIds = new Set(invalidatedEventIds);
+  for (const fixture of fixtures) {
+    if (fixture.event !== null) eventIds.add(fixture.event);
+  }
+  return [...eventIds].sort((left, right) => left - right);
+}
+
+/**
  * Event-filtered FPL responses omit fixtures that have moved to another event
  * (or become unscheduled). Compare against the complete persisted ownership so
  * the caller can promote the operation to one unfiltered recovery sync.

@@ -5,14 +5,11 @@ import {
   type DbEventFixture,
   type DbEventFixtureInsert,
 } from '../db/schemas/index.schema';
-import { getDb } from '../db/singleton';
+import { getDb, type DbOrTransaction } from '../db/singleton';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 
-import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import type { Fixture as DomainFixture } from '../types';
-
-type DatabaseInstance = PostgresJsDatabase<Record<string, never>>;
 
 // Map DbEventFixture to domain Fixture
 function mapDbFixtureToDomain(dbFixture: DbEventFixture): DomainFixture {
@@ -39,7 +36,7 @@ function mapDbFixtureToDomain(dbFixture: DbEventFixture): DomainFixture {
   };
 }
 
-export const createFixtureRepository = (dbInstance?: DatabaseInstance) => {
+export const createFixtureRepository = (dbInstance?: DbOrTransaction) => {
   const getDbInstance = async () => dbInstance || (await getDb());
 
   return {

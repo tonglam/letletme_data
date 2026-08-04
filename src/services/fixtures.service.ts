@@ -3,6 +3,7 @@ import { deriveSeasonFromFixtures } from '../cache/cache-season';
 import { fplClient } from '../clients/fpl';
 import {
   findOmittedEventFixtureIds,
+  resolveFixtureCacheLockEventIds,
   resolveFixtureCacheTransitions,
 } from '../domain/fixture-cache-transition';
 import { fixtureRepository } from '../repositories/fixtures';
@@ -135,7 +136,7 @@ export async function syncFixtures(eventId?: number): Promise<{ count: number; e
         const existingEvents = await fixtureRepository.findEventIdsByFixtureIds(fixtureIds);
         const transitions = resolveFixtureCacheTransitions(fixtures, existingEvents);
         return {
-          eventIds: [...transitions.invalidatedEventIds],
+          eventIds: resolveFixtureCacheLockEventIds(fixtures, transitions.invalidatedEventIds),
           context: transitions,
         };
       },
@@ -258,9 +259,14 @@ export async function syncAllGameweeks(): Promise<{
     // as normal fixture syncs so a later sync cannot be overwritten by this
     // backfill's trailing rebuild.
     await withFixtureSyncSerialization(
-      async () => ({ eventIds: [], context: undefined }),
       async () => {
         const allFixtures = await fixtureRepository.findAll();
+        return {
+          eventIds: resolveFixtureCacheLockEventIds(allFixtures, new Set()),
+          context: allFixtures,
+        };
+      },
+      async (allFixtures) => {
         await fixturesCache.set(allFixtures);
       },
     );
