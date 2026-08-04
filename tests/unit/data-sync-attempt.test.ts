@@ -2,6 +2,7 @@ import { afterEach, describe, expect, mock, spyOn, test } from 'bun:test';
 
 import {
   inferDataSyncWorkSummary,
+  resolveBullMqAttemptQueueWaitMs,
   resolveDataSyncAttempt,
   runDataSyncAttempt,
   type DataSyncAttemptReport,
@@ -24,6 +25,21 @@ describe('data sync attempt reporting', () => {
   test('accounts for delayed retries that reset BullMQ attemptsMade', () => {
     expect(resolveDataSyncAttempt('cron', 0, 2)).toEqual({ attempt: 3, source: 'retry' });
     expect(resolveDataSyncAttempt('cron', 0)).toEqual({ attempt: 1, source: 'cron' });
+  });
+
+  test('does not include earlier attempts in BullMQ retry queue wait', () => {
+    expect(
+      resolveBullMqAttemptQueueWaitMs(
+        { timestamp: 1_000, processedOn: 1_250, attemptsMade: 0 },
+        1_251,
+      ),
+    ).toBe(250);
+    expect(
+      resolveBullMqAttemptQueueWaitMs(
+        { timestamp: 1_000, processedOn: 8_000, attemptsMade: 2 },
+        8_004,
+      ),
+    ).toBe(4);
   });
 
   test('normalizes the result shapes returned by core and entry sync services', () => {
@@ -50,6 +66,28 @@ describe('data sync attempt reporting', () => {
       reusedUnits: 5,
       succeededUnits: 70,
       failedUnits: 0,
+    });
+    expect(inferDataSyncWorkSummary({ enqueued: 12 })).toEqual({
+      requiredUnits: 12,
+      reusedUnits: 0,
+      succeededUnits: 12,
+      failedUnits: 0,
+    });
+    expect(
+      inferDataSyncWorkSummary({
+        totalEntries: 75,
+        updated: 70,
+        skipped: 5,
+        requiredUnits: 75,
+        reusedUnits: 0,
+        succeededUnits: 70,
+        failedUnits: 5,
+      }),
+    ).toEqual({
+      requiredUnits: 75,
+      reusedUnits: 0,
+      succeededUnits: 70,
+      failedUnits: 5,
     });
   });
 

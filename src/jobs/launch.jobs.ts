@@ -14,6 +14,8 @@ import { CRON_TIMEZONE } from '../utils/timezone';
 
 export const LAUNCH_MONITOR_CRON_PATTERN = '*/5 * * * *';
 const NOTIFICATION_LOCK_TTL_MS = 10 * 60_000;
+const NOTIFICATION_MARKER_ATTEMPTS = 3;
+const NOTIFICATION_MARKER_RETRY_MS = 50;
 
 type LaunchRedisClient = {
   get: (key: string) => Promise<string | null>;
@@ -27,6 +29,7 @@ export interface LaunchMonitorDependencies {
   sendNotification: (message: string) => Promise<void>;
   now: () => Date;
   createLockToken: () => string;
+  wait?: (milliseconds: number) => Promise<void>;
 }
 
 export interface LaunchMonitorResult {
@@ -45,6 +48,7 @@ const defaultDependencies: LaunchMonitorDependencies = {
   sendNotification: sendTelegramMessage,
   now: () => new Date(),
   createLockToken: randomUUID,
+  wait: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
 };
 
 const RELEASE_LOCK_SCRIPT = [
@@ -62,6 +66,26 @@ async function releaseNotificationLock(
   await redis.eval(RELEASE_LOCK_SCRIPT, 1, lockKey, token);
 }
 
+async function persistNotificationMarker(
+  redis: LaunchRedisClient,
+  doneKey: string,
+  value: string,
+  dependencies: LaunchMonitorDependencies,
+): Promise<void> {
+  for (let attempt = 1; attempt <= NOTIFICATION_MARKER_ATTEMPTS; attempt += 1) {
+    try {
+      const persisted = await redis.set(doneKey, value);
+      if (persisted !== 'OK') throw new Error('Launch notification marker was not persisted.');
+      return;
+    } catch (error) {
+      if (attempt === NOTIFICATION_MARKER_ATTEMPTS) throw error;
+      await (dependencies.wait ?? defaultDependencies.wait)?.(
+        NOTIFICATION_MARKER_RETRY_MS * attempt,
+      );
+    }
+  }
+}
+
 async function sendLaunchNotificationOnce(
   redis: LaunchRedisClient,
   doneKey: string,
@@ -76,20 +100,31 @@ async function sendLaunchNotificationOnce(
   if (acquired !== 'OK') return 'locked';
 
   let deliveryError: unknown;
+  let notificationDelivered = false;
+  let markerPersisted = false;
   try {
     if (await redis.get(doneKey)) return 'already_sent';
     await dependencies.sendNotification(message);
-    await redis.set(doneKey, dependencies.now().toISOString());
+    notificationDelivered = true;
+    await persistNotificationMarker(redis, doneKey, dependencies.now().toISOString(), dependencies);
+    markerPersisted = true;
     return 'sent';
   } catch (error) {
     deliveryError = error;
     throw error;
   } finally {
-    try {
-      await releaseNotificationLock(redis, lockKey, token);
-    } catch (error) {
-      logError('Failed to release launch notification lock', error);
-      if (deliveryError === undefined) throw error;
+    if (notificationDelivered && !markerPersisted) {
+      logError(
+        'Launch notification was delivered but its marker was not persisted; retaining lock',
+        deliveryError,
+      );
+    } else {
+      try {
+        await releaseNotificationLock(redis, lockKey, token);
+      } catch (error) {
+        logError('Failed to release launch notification lock', error);
+        if (deliveryError === undefined) throw error;
+      }
     }
   }
 }
@@ -103,8 +138,8 @@ function result(
     outcome: sent ? 'ready' : 'noop',
     notification,
     delivery,
-    requiredUnits: 1,
-    reusedUnits: sent ? 0 : 1,
+    requiredUnits: sent ? 1 : 0,
+    reusedUnits: 0,
     succeededUnits: sent ? 1 : 0,
     failedUnits: 0,
   };

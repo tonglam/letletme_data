@@ -14,7 +14,7 @@ import { syncPlayers } from '../services/players.service';
 import { syncPlayerPricesForDate } from '../services/player-prices.service';
 import { syncCurrentPlayerStats, syncPlayerStatsForEvent } from '../services/player-stats.service';
 import { syncCurrentPlayerValues } from '../services/player-values.service';
-import { runDataSyncAttempt } from '../utils/data-sync-attempt';
+import { resolveBullMqAttemptQueueWaitMs, runDataSyncAttempt } from '../utils/data-sync-attempt';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { syncTeams } from '../services/teams.service';
 import { getQueueConnection } from '../utils/queue';
@@ -33,7 +33,7 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
     jobName: job.name,
     source: job.data?.source as string | undefined,
     attempt: job.attemptsMade + 1,
-    queueWaitMs: Math.max(0, Date.now() - job.timestamp),
+    queueWaitMs: resolveBullMqAttemptQueueWaitMs(job),
   };
 
   logJobTriggered(context);

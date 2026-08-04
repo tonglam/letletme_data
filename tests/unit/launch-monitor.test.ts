@@ -9,6 +9,11 @@ import {
 
 class FakeRedis {
   readonly values = new Map<string, string>();
+  private markerFailuresRemaining: number;
+
+  constructor(markerFailures = 0) {
+    this.markerFailuresRemaining = markerFailures;
+  }
 
   async get(key: string): Promise<string | null> {
     return this.values.get(key) ?? null;
@@ -16,6 +21,10 @@ class FakeRedis {
 
   async set(key: string, value: string, ...args: Array<string | number>): Promise<string | null> {
     if (args.includes('NX') && this.values.has(key)) return null;
+    if (!key.endsWith(':lock') && this.markerFailuresRemaining > 0) {
+      this.markerFailuresRemaining -= 1;
+      throw new Error('marker storage unavailable');
+    }
     this.values.set(key, value);
     return 'OK';
   }
@@ -46,6 +55,7 @@ function dependencies(options?: {
     sendNotification: options?.send ?? (async () => undefined),
     now: () => new Date('2026-08-04T00:00:00.000Z'),
     createLockToken: () => 'lock-token',
+    wait: async () => undefined,
   };
 }
 
@@ -93,6 +103,23 @@ describe('launch monitor', () => {
     });
     expect(messages).toEqual(['【NEW SEASON】ITS HAPPENING!!!']);
     expect(redis.values.has('LaunchNotification:happening:2627')).toBe(true);
+  });
+
+  test('reports ordinary monitor no-ops as zero synchronization work', async () => {
+    const result = await evaluateLaunchMonitor(
+      dependencies({
+        events: [{ id: 1, deadline_time: '2025-08-15T10:00:00Z' }],
+      }),
+    );
+
+    expect(result).toMatchObject({
+      outcome: 'noop',
+      delivery: 'not_applicable',
+      requiredUnits: 0,
+      reusedUnits: 0,
+      succeededUnits: 0,
+      failedUnits: 0,
+    });
   });
 
   test('serializes concurrent ticks so only one notification is delivered', async () => {
@@ -144,5 +171,43 @@ describe('launch monitor', () => {
     const retry = await evaluateLaunchMonitor(deps);
     expect(retry.delivery).toBe('sent');
     expect(redis.values.has('LaunchNotification:warning:2026')).toBe(true);
+  });
+
+  test('retries the delivered marker before releasing the notification lock', async () => {
+    const redis = new FakeRedis(1);
+    let sends = 0;
+
+    const result = await evaluateLaunchMonitor(
+      dependencies({
+        redis,
+        send: async () => {
+          sends += 1;
+        },
+      }),
+    );
+
+    expect(result.delivery).toBe('sent');
+    expect(sends).toBe(1);
+    expect(redis.values.has('LaunchNotification:warning:2026')).toBe(true);
+    expect(redis.values.has('LaunchNotification:warning:2026:lock')).toBe(false);
+  });
+
+  test('retains the lock when delivery succeeds but every marker write fails', async () => {
+    const redis = new FakeRedis(3);
+    let sends = 0;
+    const deps = dependencies({
+      redis,
+      send: async () => {
+        sends += 1;
+      },
+    });
+
+    await expect(evaluateLaunchMonitor(deps)).rejects.toThrow('marker storage unavailable');
+    expect(redis.values.has('LaunchNotification:warning:2026')).toBe(false);
+    expect(redis.values.has('LaunchNotification:warning:2026:lock')).toBe(true);
+
+    const nextTick = await evaluateLaunchMonitor(deps);
+    expect(nextTick.delivery).toBe('locked');
+    expect(sends).toBe(1);
   });
 });

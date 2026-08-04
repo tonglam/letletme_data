@@ -43,6 +43,21 @@ export function resolveDataSyncAttempt(
   };
 }
 
+export function resolveBullMqAttemptQueueWaitMs(
+  timing: { timestamp: number; processedOn?: number; attemptsMade: number },
+  now = Date.now(),
+): number {
+  const processedOn = timing.processedOn ?? now;
+  if (timing.attemptsMade === 0) {
+    return Math.max(0, Math.floor(processedOn - timing.timestamp));
+  }
+
+  // BullMQ retains the original job timestamp across automatic retries and
+  // does not expose a new queued-at timestamp. Use this attempt's activation
+  // time so retry reports never include earlier execution and backoff time.
+  return Math.max(0, Math.floor(now - processedOn));
+}
+
 export interface DataSyncAttemptReport {
   event: 'data_sync_attempt';
   schemaVersion: 1;
@@ -101,6 +116,7 @@ export function inferDataSyncWorkSummary(result: unknown): DataSyncWorkSummary {
   );
   const explicitSucceededUnits = firstBoundedUnit(
     result.succeededUnits,
+    result.enqueued,
     result.synced,
     result.updated,
     result.upserted,

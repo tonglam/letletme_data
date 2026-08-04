@@ -12,7 +12,7 @@ import {
   processLeagueEventPicksJob,
   processLeagueEventResultsJob,
 } from '../services/league-sync.service';
-import { runDataSyncAttempt } from '../utils/data-sync-attempt';
+import { resolveBullMqAttemptQueueWaitMs, runDataSyncAttempt } from '../utils/data-sync-attempt';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { getQueueConnection } from '../utils/queue';
 import { logError, logInfo } from '../utils/logger';
@@ -39,7 +39,7 @@ async function processLeagueSyncJob(job: Job<LeagueSyncJobData>) {
     source,
     attempt: job.attemptsMade + 1,
     tournamentId,
-    queueWaitMs: Math.max(0, Date.now() - job.timestamp),
+    queueWaitMs: resolveBullMqAttemptQueueWaitMs(job),
   };
 
   logJobTriggered(context);

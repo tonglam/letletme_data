@@ -298,6 +298,10 @@ export async function syncLeagueEventResultsByTournament(
   totalEntries: number;
   updated: number;
   skipped: number;
+  requiredUnits: number;
+  reusedUnits: number;
+  succeededUnits: number;
+  failedUnits: number;
 }> {
   logInfo('Starting league event results sync for tournament', { tournamentId, eventId });
 
@@ -423,5 +427,15 @@ export async function syncLeagueEventResultsByTournament(
     skipped,
   });
 
-  return { tournamentId, eventId, totalEntries, updated, skipped };
+  return {
+    tournamentId,
+    eventId,
+    totalEntries,
+    updated,
+    skipped,
+    requiredUnits: totalEntries,
+    reusedUnits: 0,
+    succeededUnits: updated,
+    failedUnits: skipped,
+  };
 }
