@@ -193,7 +193,11 @@ describe('FixturesByTeam empty-teams guard (FP-12)', () => {
 
     const refreshedEvent10 = buildFixture(201, 10, 1, 2);
     const refreshedEvent11 = buildFixture(202, 11, 3, 4);
-    await fixturesCache.set([refreshedEvent10, refreshedEvent11], SEASON);
+    const snapshotOwnedEventIds = await fixturesCache.set(
+      [refreshedEvent10, refreshedEvent11],
+      SEASON,
+    );
+    expect([...snapshotOwnedEventIds]).toEqual([10]);
     await eventLivesCache.set(10, [{ eventId: 10, elementId: 1 } as EventLive]);
     await liveFixturesCache.set(10, {
       '1': { Not_Start: [], Playing: [], Finished: [] },

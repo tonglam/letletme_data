@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   findOmittedEventFixtureIds,
   resolveFixtureCacheLockEventIds,
+  resolveFixtureDerivativeReconciliationEventIds,
   resolveFixtureCacheTransitions,
 } from '../../src/domain/fixture-cache-transition';
 
@@ -23,6 +24,16 @@ describe('event-scoped fixture coverage', () => {
 });
 
 describe('fixture cache transitions', () => {
+  test('reconciles historical owned snapshots plus represented compatibility events', () => {
+    expect(
+      resolveFixtureDerivativeReconciliationEventIds(
+        [1, 2, 3, 4],
+        [3, 1, 3, 99],
+        [2, null, undefined, 99],
+      ),
+    ).toEqual([1, 2, 3]);
+  });
+
   test('locks every accepted destination even when ownership is unchanged', () => {
     expect(
       resolveFixtureCacheLockEventIds(

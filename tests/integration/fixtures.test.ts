@@ -9,7 +9,9 @@ import { fplClient } from '../../src/clients/fpl';
 import { eventFixtures } from '../../src/db/schemas/index.schema';
 import { getDb } from '../../src/db/singleton';
 import { fixtureRepository } from '../../src/repositories/fixtures';
+import { getCurrentEvent } from '../../src/services/events.service';
 import { syncAllGameweeks, syncFixtures } from '../../src/services/fixtures.service';
+import { transformFixture } from '../../src/transformers/fixtures';
 import { ensureTeams } from './helpers/reference-data';
 
 // This file calls the real FPL API during setup and recovery verification.
@@ -138,6 +140,79 @@ describe('Fixtures Integration Tests', () => {
       } finally {
         await redis.del(sourceMetaKey, destinationMetaKey);
       }
+    }
+  }, 30000);
+
+  test('full sync reconciles a non-current snapshot-owned event correction', async () => {
+    const originalGetFixtures = fplClient.getFixtures;
+    const fetchFixtures = originalGetFixtures.bind(fplClient);
+    const fullFixtureFeed = await fetchFixtures();
+    const currentEventId = (await getCurrentEvent())?.id;
+    const targetRawFixture = fullFixtureFeed.find(
+      (fixture) => fixture.event !== null && fixture.event !== currentEventId,
+    );
+    if (!targetRawFixture || targetRawFixture.event === null) {
+      throw new Error('FPL fixture feed contains no non-current assigned fixture');
+    }
+    const eventId = targetRawFixture.event;
+    const season = deriveSeasonFromFixtures(fullFixtureFeed);
+    if (!season) throw new Error('Could not derive cache season from the FPL fixture feed');
+
+    const redis = await redisSingleton.getClient();
+    const fixturesKey = `Fixtures:${season}:${eventId}`;
+    const metaKey = `LiveSnapshotMeta:${season}:${eventId}`;
+    const derivedKeys = [
+      `EventLive:${season}:${eventId}`,
+      `LiveFixture:${season}:${eventId}`,
+      `LiveFixtureV2:${season}:${eventId}`,
+      `LiveBonus:${season}:${eventId}`,
+      `LiveBonusV2:${season}:${eventId}`,
+    ];
+    const expectedFixture = transformFixture(targetRawFixture);
+    const cachedRaw = await redis.hget(fixturesKey, String(targetRawFixture.id));
+    if (!cachedRaw) throw new Error(`Missing fixture cache field ${targetRawFixture.id}`);
+    const staleFixture = JSON.parse(cachedRaw) as { teamHScore: number | null };
+    staleFixture.teamHScore = (expectedFixture.teamHScore ?? 0) + 99;
+    const fixtureCount = fullFixtureFeed.filter((fixture) => fixture.event === eventId).length;
+    const snapshotMeta = JSON.stringify({
+      schemaVersion: 1,
+      season,
+      eventId,
+      revision: 'c'.repeat(24),
+      state: 'settled',
+      publishedAt: '2026-08-04T00:00:00.000Z',
+      checkedAt: '2026-08-04T00:00:00.000Z',
+      eventLiveCount: 1,
+      fixtureCount,
+      fixtureTeamCount: 1,
+      bonusTeamCount: 0,
+    });
+
+    try {
+      const seed = redis.multi();
+      seed.set(metaKey, snapshotMeta);
+      seed.hset(fixturesKey, String(targetRawFixture.id), JSON.stringify(staleFixture));
+      for (const key of derivedKeys) seed.hset(key, 'sentinel', 'stale');
+      await seed.exec();
+
+      fplClient.getFixtures = async (requestedEventId?: number) =>
+        requestedEventId === undefined
+          ? fullFixtureFeed
+          : fullFixtureFeed.filter((fixture) => fixture.event === requestedEventId);
+
+      await syncFixtures();
+
+      expect(await redis.exists(metaKey)).toBe(0);
+      for (const key of derivedKeys.slice(0, 4)) {
+        expect(await redis.exists(key)).toBe(0);
+      }
+      const correctedRaw = await redis.hget(fixturesKey, String(targetRawFixture.id));
+      if (!correctedRaw) throw new Error('Corrected fixture source hash was not republished');
+      const correctedFixture = JSON.parse(correctedRaw) as { teamHScore: number | null };
+      expect(correctedFixture.teamHScore).toBe(expectedFixture.teamHScore);
+    } finally {
+      fplClient.getFixtures = originalGetFixtures;
+      await redis.del(metaKey, ...derivedKeys);
     }
   }, 30000);
 

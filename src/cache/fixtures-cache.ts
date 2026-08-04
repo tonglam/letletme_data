@@ -146,7 +146,7 @@ export const fixturesCache = {
     }
   },
 
-  async set(fixtures: Fixture[], season?: string): Promise<void> {
+  async set(fixtures: Fixture[], season?: string): Promise<Set<number>> {
     try {
       const redis = await redisSingleton.getClient();
       const activeSeason = season ?? (await getActiveCacheSeason());
@@ -252,6 +252,7 @@ export const fixturesCache = {
         teams: fixturesByTeamCount,
         season: activeSeason,
       });
+      return snapshotOwnedEventIds;
     } catch (error) {
       logError('Fixtures cache set error', error);
       throw error;

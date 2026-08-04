@@ -9,6 +9,33 @@ export interface FixtureCacheTransitions {
 }
 
 /**
+ * Full fixture feeds reconcile every represented event that still owns a
+ * coherent snapshot. Current/requested events also keep their unowned
+ * compatibility source hashes fresh. Invalid or unrelated IDs are ignored.
+ */
+export function resolveFixtureDerivativeReconciliationEventIds(
+  representedEventIds: readonly number[],
+  ownedEventIds: readonly number[],
+  compatibilityEventIds: readonly (number | null | undefined)[],
+): number[] {
+  const represented = new Set(
+    representedEventIds.filter((eventId) => Number.isInteger(eventId) && eventId > 0),
+  );
+  return [
+    ...new Set(
+      [...ownedEventIds, ...compatibilityEventIds].filter(
+        (eventId): eventId is number =>
+          eventId !== null &&
+          eventId !== undefined &&
+          Number.isInteger(eventId) &&
+          eventId > 0 &&
+          represented.has(eventId),
+      ),
+    ),
+  ].sort((left, right) => left - right);
+}
+
+/**
  * Every accepted destination participates in a fixture cache rebuild, even
  * when ownership itself did not change. Lock those destinations together with
  * transition invalidations so broad fixture refreshes cannot overlap a live

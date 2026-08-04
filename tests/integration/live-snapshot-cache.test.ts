@@ -222,9 +222,14 @@ describe('coordinated live snapshot Redis integration', () => {
     const initial = payload(3, new Date('2025-08-15T20:00:01.000Z'));
     await cache.publish(initial);
 
+    const persistedTimestampShape = initial.fixtures.map((fixture) => ({
+      ...fixture,
+      createdAt: new Date('2025-08-15T20:00:00.000Z'),
+      updatedAt: new Date('2025-08-15T20:01:00.000Z'),
+    }));
     const unchanged = await cache.refreshFixtureDerivatives(
       EVENT_ID,
-      initial.fixtures,
+      persistedTimestampShape,
       initial.liveBonusV2,
     );
     expect(unchanged).toEqual({ eventId: EVENT_ID, owned: true, retired: false });

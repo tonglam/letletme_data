@@ -4,6 +4,7 @@ import { fplClient } from '../clients/fpl';
 import {
   findOmittedEventFixtureIds,
   resolveFixtureCacheLockEventIds,
+  resolveFixtureDerivativeReconciliationEventIds,
   resolveFixtureCacheTransitions,
   type FixtureCacheTransitions,
 } from '../domain/fixture-cache-transition';
@@ -182,6 +183,7 @@ export async function syncFixtures(eventId?: number): Promise<{ count: number; e
         const savedFixtures = durable.value;
         logInfo('Fixtures upserted to database', { count: savedFixtures.length, ...logContext });
 
+        let snapshotOwnedEventIds: ReadonlySet<number> = new Set();
         if (eventId && !recoveredFullFixtureFeed) {
           await fixturesCache.setByEvent(
             eventId,
@@ -189,7 +191,10 @@ export async function syncFixtures(eventId?: number): Promise<{ count: number; e
             activeSeason,
           );
         } else {
-          await fixturesCache.set([...savedFixtures, ...unscheduledFixtures], activeSeason);
+          snapshotOwnedEventIds = await fixturesCache.set(
+            [...savedFixtures, ...unscheduledFixtures],
+            activeSeason,
+          );
         }
 
         if (
@@ -202,17 +207,35 @@ export async function syncFixtures(eventId?: number): Promise<{ count: number; e
           ]);
         }
 
-        // FPL can publish final fixture bonus stats after the live window
-        // closes. Refresh from the rows just persisted rather than waiting
-        // for a live-bonus cron that will no longer run.
-        const bonusEventId =
-          eventId && !recoveredFullFixtureFeed ? eventId : (await getCurrentEvent())?.id;
-        if (bonusEventId) {
-          const bonusFixtures = savedFixtures.filter((fixture) => fixture.event === bonusEventId);
-          if (bonusFixtures.length > 0) {
-            await syncFixtureDerivedSnapshotCache(bonusEventId, bonusFixtures, liveSnapshotCache);
-          }
+        // FPL can correct any prior gameweek in the unfiltered daily feed.
+        // Reuse the ownership result from the atomic fixture-cache replacement,
+        // then reconcile only owned snapshots plus the current and explicitly
+        // requested compatibility events. This avoids both a second Redis
+        // round trip and 38 blind cache rebuilds while ensuring non-expiring
+        // metadata cannot hide a historical correction.
+        const fixturesByEvent = new Map<number, Fixture[]>();
+        for (const fixture of savedFixtures) {
+          if (fixture.event === null) continue;
+          const bucket = fixturesByEvent.get(fixture.event) ?? [];
+          bucket.push(fixture);
+          fixturesByEvent.set(fixture.event, bucket);
         }
+        const representedEventIds = [...fixturesByEvent.keys()];
+        const currentEventId = (await getCurrentEvent())?.id;
+        const reconciliationEventIds = resolveFixtureDerivativeReconciliationEventIds(
+          representedEventIds,
+          [...snapshotOwnedEventIds],
+          [eventId, currentEventId],
+        );
+        await Promise.all(
+          reconciliationEventIds.map((reconciliationEventId) =>
+            syncFixtureDerivedSnapshotCache(
+              reconciliationEventId,
+              fixturesByEvent.get(reconciliationEventId)!,
+              liveSnapshotCache,
+            ),
+          ),
+        );
         logInfo('Fixtures cache updated', logContext);
 
         return {

@@ -317,7 +317,36 @@ function liveBonusToHash(byTeam: LiveBonusByTeam): HashFields {
 }
 
 function fixturesToHash(fixtures: readonly Fixture[]): HashFields {
-  return recordToHash(Object.fromEntries(fixtures.map((fixture) => [String(fixture.id), fixture])));
+  return recordToHash(
+    Object.fromEntries(
+      fixtures.map((fixture) => [
+        String(fixture.id),
+        {
+          id: fixture.id,
+          code: fixture.code,
+          event: fixture.event,
+          finished: fixture.finished,
+          finishedProvisional: fixture.finishedProvisional,
+          kickoffTime: fixture.kickoffTime,
+          minutes: fixture.minutes,
+          provisionalStartTime: fixture.provisionalStartTime,
+          started: fixture.started,
+          teamA: fixture.teamA,
+          teamAScore: fixture.teamAScore,
+          teamH: fixture.teamH,
+          teamHScore: fixture.teamHScore,
+          stats: fixture.stats,
+          teamHDifficulty: fixture.teamHDifficulty,
+          teamADifficulty: fixture.teamADifficulty,
+          pulseId: fixture.pulseId,
+          // Persistence timestamps are not football state. Normalizing them
+          // prevents a routine DB upsert from retiring an unchanged snapshot.
+          createdAt: null,
+          updatedAt: null,
+        } satisfies Fixture,
+      ]),
+    ),
+  );
 }
 
 function snapshotRevision(views: ReadonlyArray<{ name: string; fields: HashFields }>): string {
