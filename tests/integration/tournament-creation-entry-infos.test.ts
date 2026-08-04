@@ -387,9 +387,35 @@ describe('tournament creation vs entry_infos (FP-08)', () => {
 
     await client`
       update tournament_infos
-      set state = 'inactive', roster_sync_status = 'processing'
+      set state = 'inactive',
+          roster_sync_status = 'ready',
+          setup_status = 'ready',
+          setup_phase = 'ready',
+          standings_ready_at = now()
       where id = ${created.id}
     `;
+    await client`REFRESH MATERIALIZED VIEW mv_tournament_snapshot`;
+    await tournamentRosterRepository.markResumeProcessing(created.id);
+
+    const resumeProcessing = await client<
+      Array<{
+        roster_sync_status: string;
+        setup_status: string;
+        setup_phase: string;
+        standings_ready_at: Date | null;
+      }>
+    >`
+      select roster_sync_status, setup_status, setup_phase, standings_ready_at
+      from tournament_infos
+      where id = ${created.id}
+    `;
+    expect(resumeProcessing[0]).toMatchObject({
+      roster_sync_status: 'processing',
+      setup_status: 'pending',
+      setup_phase: 'queued',
+      standings_ready_at: null,
+    });
+
     await tournamentRosterRepository.markReadyAndResume(created.id);
 
     const resumed = await client<Array<{ state: string; roster_sync_status: string }>>`

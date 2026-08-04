@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import type { TournamentManagementRecord } from '../../src/repositories/tournament-management';
+import { eventRepository } from '../../src/repositories/events';
 import {
   createTournamentManagementService,
   requestSnapshotTournamentResume,
@@ -183,6 +184,31 @@ describe('tournament management service', () => {
     await expect(
       service.setRosterMode(42, { adminEntryId: 123, rosterMode: 'official_sync' }),
     ).rejects.toBeInstanceOf(ConflictError);
+  });
+
+  test('does not persist official-sync opt-in during an active gameweek', async () => {
+    const originalFindCurrent = eventRepository.findCurrent;
+    let updates = 0;
+    eventRepository.findCurrent = async () =>
+      ({ dataChecked: false }) as Awaited<ReturnType<typeof originalFindCurrent>>;
+
+    try {
+      const service = createTournamentManagementService(
+        createRepository({
+          updateRosterModeOwned: async (_id, _adminEntryId, rosterMode) => {
+            updates += 1;
+            return { ...tournament, rosterMode };
+          },
+        }),
+      );
+
+      await expect(
+        service.setRosterMode(42, { adminEntryId: 123, rosterMode: 'official_sync' }),
+      ).rejects.toMatchObject({ code: 'TOURNAMENT_ROSTER_FROZEN' });
+      expect(updates).toBe(0);
+    } finally {
+      eventRepository.findCurrent = originalFindCurrent;
+    }
   });
 
   test('re-applies an inactive state so a newer pause can withdraw a pending resume', async () => {

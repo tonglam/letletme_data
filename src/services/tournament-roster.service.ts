@@ -39,6 +39,10 @@ async function assertPreGameweekBoundary(): Promise<void> {
   }
 }
 
+export async function assertTournamentRosterPreGameweekBoundary(): Promise<void> {
+  await assertPreGameweekBoundary();
+}
+
 export type TournamentRosterReconcileResult = {
   tournamentId: number;
   changed: boolean;

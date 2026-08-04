@@ -325,6 +325,7 @@ export async function ensureTournamentCoreResults(
     await syncTournamentEventResultsForEntryIds(missingEntryIds, eventId, {
       concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
       skipTransfers: true,
+      season: checkpointSeason,
     });
     completed += missingEntryIds.length;
     await onProgress?.(completed, total);

@@ -167,20 +167,31 @@ export const tournamentRosterRepository = {
 
   markResumeProcessing: async (tournamentId: number): Promise<void> => {
     const client = await getDbClient();
-    await client`
-      update tournament_infos
-      set roster_sync_status = 'processing',
-          roster_sync_error = null,
-          setup_status = 'pending',
-          setup_phase = 'queued',
-          setup_error = null,
-          setup_warning_count = 0,
-          setup_completed_units = 0,
-          setup_total_units = 0,
-          setup_progress_updated_at = now(),
-          updated_at = now()
-      where id = ${tournamentId} and state = 'inactive'
-    `;
+    await client.begin(async (tx) => {
+      const rows = await tx<{ id: number }[]>`
+        update tournament_infos
+        set roster_sync_status = 'processing',
+            roster_sync_error = null,
+            setup_status = 'pending',
+            setup_phase = 'queued',
+            setup_error = null,
+            setup_warning_count = 0,
+            setup_completed_units = 0,
+            setup_total_units = 0,
+            setup_progress_updated_at = now(),
+            standings_ready_at = null,
+            updated_at = now()
+        where id = ${tournamentId} and state = 'inactive'
+        returning id
+      `;
+      if (rows.length === 0) return;
+
+      // Readiness is cleared before the queue can run. Refresh inside the
+      // same transaction so a delayed or failed resume cannot keep exposing
+      // the previously published standings.
+      await tx`REFRESH MATERIALIZED VIEW public.mv_tournament_event_snapshot`;
+      await tx`REFRESH MATERIALIZED VIEW public.mv_tournament_snapshot`;
+    });
   },
 
   publishAuthoritativeRoster: async (

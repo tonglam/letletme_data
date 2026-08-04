@@ -239,6 +239,14 @@ export function createTournamentManagementService(
         );
       }
       if (current.rosterMode === payload.rosterMode) return current;
+      if (current.state === 'active') {
+        const { assertTournamentRosterPreGameweekBoundary } = await import(
+          './tournament-roster.service'
+        );
+        // Do not persist an opt-in that cannot be reconciled at the current
+        // gameweek boundary. The check happens before the mode mutation.
+        await assertTournamentRosterPreGameweekBoundary();
+      }
       const updated = await repository.updateRosterModeOwned(
         tournamentId,
         payload.adminEntryId,
