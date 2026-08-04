@@ -114,7 +114,10 @@ export function createTournamentManagementService(
       if (current.state === 'finished') {
         throw new ConflictError('Finished tournaments cannot be resumed.', 'TOURNAMENT_FINISHED');
       }
-      if (current.state === payload.state) return current;
+      // An inactive tournament can still carry a processing marker for a queued
+      // resume. Run the pause update again so the owner's newer pause clears
+      // that marker and markReadyAndResume cannot reactivate it later.
+      if (current.state === payload.state && payload.state !== 'inactive') return current;
 
       if (payload.state === 'inactive') {
         const paused = await repository.updateStateOwned(
@@ -216,8 +219,14 @@ export function createTournamentManagementService(
           'TOURNAMENT_ADMIN_REQUIRED',
         );
       }
-      await lifecycle.refreshViews?.();
+      let refreshError: unknown = null;
+      try {
+        await lifecycle.refreshViews?.();
+      } catch (error) {
+        refreshError = error;
+      }
       await invalidateCaches('delete');
+      if (refreshError) throw refreshError;
       return result.tournament;
     },
   };

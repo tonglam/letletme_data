@@ -95,6 +95,27 @@ describe('tournament management service', () => {
     ).rejects.toBeInstanceOf(ConflictError);
   });
 
+  test('re-applies an inactive state so a newer pause can withdraw a pending resume', async () => {
+    let updates = 0;
+    const service = createTournamentManagementService(
+      createRepository({
+        findById: async () => ({ ...tournament, state: 'inactive' }),
+        updateStateOwned: async (_id, _adminEntryId, state) => {
+          updates += 1;
+          return { ...tournament, state };
+        },
+      }),
+    );
+
+    const paused = await service.setTournamentState(42, {
+      adminEntryId: 123,
+      state: 'inactive',
+    });
+
+    expect(paused.state).toBe('inactive');
+    expect(updates).toBe(1);
+  });
+
   test('deletes an owned tournament', async () => {
     const calls: string[] = [];
     const service = createTournamentManagementService(
@@ -125,5 +146,22 @@ describe('tournament management service', () => {
     await expect(service.deleteTournament(42, { adminEntryId: 999 })).rejects.toBeInstanceOf(
       ForbiddenError,
     );
+  });
+
+  test('invalidates deletion caches even when materialized-view refresh fails', async () => {
+    const calls: string[] = [];
+    const refreshError = new Error('refresh failed');
+    const service = createTournamentManagementService(createRepository(), {
+      refreshViews: async () => {
+        calls.push('refresh-views');
+        throw refreshError;
+      },
+      invalidateCaches: async () => {
+        calls.push('invalidate-caches');
+      },
+    });
+
+    await expect(service.deleteTournament(42, { adminEntryId: 123 })).rejects.toBe(refreshError);
+    expect(calls).toEqual(['refresh-views', 'invalidate-caches']);
   });
 });

@@ -2,11 +2,12 @@ import { assertIntegrationEnv } from './helpers/env-guard';
 
 assertIntegrationEnv();
 
-import { afterAll, describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 
 import { planTournamentStructure, type TournamentParticipant } from '../../src/domain/tournament';
 import { getDbClient } from '../../src/db/singleton';
 import { tournamentInfoRepository } from '../../src/repositories/tournament-infos';
+import { tournamentManagementRepository } from '../../src/repositories/tournament-management';
 import { tournamentRosterRepository } from '../../src/repositories/tournament-roster';
 
 /**
@@ -25,6 +26,16 @@ const SYNCED_ENTRY = {
 };
 
 const createdTournamentIds: number[] = [];
+
+beforeAll(async () => {
+  const client = await getDbClient();
+  await client`
+    INSERT INTO events (id, name)
+    SELECT event_id, 'Tournament lifecycle GW' || event_id
+    FROM generate_series(1, 38) AS generated(event_id)
+    ON CONFLICT (id) DO NOTHING
+  `;
+});
 
 afterAll(async () => {
   const client = await getDbClient();
@@ -184,5 +195,43 @@ describe('tournament creation vs entry_infos (FP-08)', () => {
       where id = ${created.id}
     `;
     expect(resumed[0]).toEqual({ state: 'active', roster_sync_status: 'ready' });
+
+    await client`
+      update tournament_infos
+      set state = 'inactive', roster_sync_status = 'processing'
+      where id = ${created.id}
+    `;
+    await tournamentManagementRepository.updateStateOwned(created.id, SYNCED_ENTRY.id, 'inactive');
+    await tournamentRosterRepository.markReadyAndResume(created.id);
+
+    const pauseWins = await client<Array<{ state: string; roster_sync_status: string }>>`
+      select state, roster_sync_status
+      from tournament_infos
+      where id = ${created.id}
+    `;
+    expect(pauseWins[0]).toEqual({ state: 'inactive', roster_sync_status: 'ready' });
+
+    await client`
+      update tournament_infos
+      set state = 'active',
+          setup_status = 'ready',
+          setup_phase = 'ready',
+          standings_ready_at = now()
+      where id = ${created.id}
+    `;
+    await tournamentInfoRepository.markSetupRetryQueued(created.id);
+
+    const retryGate = await client<
+      Array<{ setup_status: string; setup_phase: string; standings_ready_at: Date | null }>
+    >`
+      select setup_status, setup_phase, standings_ready_at
+      from tournament_infos
+      where id = ${created.id}
+    `;
+    expect(retryGate[0]).toEqual({
+      setup_status: 'pending',
+      setup_phase: 'queued',
+      standings_ready_at: null,
+    });
   });
 });

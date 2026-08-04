@@ -3,6 +3,7 @@ import { afterEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import { diffTournamentRoster } from '../../src/domain/tournament';
 import { isTournamentNameConflict } from '../../src/repositories/tournament-infos';
 import { tournamentInfoRepository } from '../../src/repositories/tournament-infos';
+import { tournamentRosterRepository } from '../../src/repositories/tournament-roster';
 import { logger } from '../../src/utils/logger';
 
 afterEach(() => {
@@ -10,6 +11,32 @@ afterEach(() => {
 });
 
 describe('tournament lifecycle invariants', () => {
+  test('resumes before terminalizing a post-publication warning', async () => {
+    process.env.DATABASE_URL ??= 'postgresql://unit:unit@127.0.0.1:5432/unit';
+    process.env.REDIS_HOST ??= '127.0.0.1';
+    process.env.REDIS_PORT ??= '6379';
+    const { finalizePublishedTournamentSetup } = await import(
+      '../../src/services/tournament-setup.service'
+    );
+    const calls: string[] = [];
+    spyOn(tournamentRosterRepository, 'markReadyAndResume').mockImplementation(async () => {
+      calls.push('resume');
+    });
+    spyOn(tournamentInfoRepository, 'markSetupResult').mockImplementation(async () => {
+      calls.push('ready-with-warning');
+    });
+
+    await finalizePublishedTournamentSetup(900_122, 'enrichment failed', 1);
+
+    expect(calls).toEqual(['resume', 'ready-with-warning']);
+    expect(tournamentInfoRepository.markSetupResult).toHaveBeenCalledWith(
+      900_122,
+      'ready',
+      'enrichment failed',
+      1,
+    );
+  });
+
   test('returns exact roster diffs for joins, departures, simultaneous changes, and duplicates', () => {
     expect(diffTournamentRoster([1, 2], [1, 2])).toEqual({
       addedEntryIds: [],

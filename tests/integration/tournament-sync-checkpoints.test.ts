@@ -19,6 +19,8 @@ import { mockFPLClient, resetMockFPLClient } from './helpers/mock-fpl';
 
 const ENTRY_ID = 99_042_001;
 const LATE_ENTRY_ID = 99_042_002;
+const PICK_TEAM_ID = 99_042_101;
+const PICK_PLAYER_ID = 99_042_101;
 const TEST_SEASON = '2526';
 
 const client: EntryInfoClient = {
@@ -82,6 +84,16 @@ beforeAll(async () => {
     ON CONFLICT (id) DO NOTHING
   `;
   await sql`
+    INSERT INTO teams (id, code, name, short_name, pulse_id)
+    VALUES (${PICK_TEAM_ID}, ${PICK_TEAM_ID}, 'Checkpoint Team', 'CHK', ${PICK_TEAM_ID})
+    ON CONFLICT (id) DO NOTHING
+  `;
+  await sql`
+    INSERT INTO players (id, code, type, team_id, web_name)
+    VALUES (${PICK_PLAYER_ID}, ${PICK_PLAYER_ID}, 1, ${PICK_TEAM_ID}, 'Checkpoint Player')
+    ON CONFLICT (id) DO NOTHING
+  `;
+  await sql`
     INSERT INTO entry_infos (id, entry_name, player_name)
     VALUES (${ENTRY_ID}, 'Checkpoint XI', 'Checkpoint Manager')
     ON CONFLICT (id) DO UPDATE SET
@@ -100,6 +112,8 @@ afterAll(async () => {
   await sql`DELETE FROM entry_infos WHERE id = ${ENTRY_ID}`;
   await sql`DELETE FROM entry_event_results WHERE entry_id = ${LATE_ENTRY_ID}`;
   await sql`DELETE FROM entry_infos WHERE id = ${LATE_ENTRY_ID}`;
+  await sql`DELETE FROM players WHERE id = ${PICK_PLAYER_ID}`;
+  await sql`DELETE FROM teams WHERE id = ${PICK_TEAM_ID}`;
   const redis = await redisSingleton.getClient();
   await redis.hdel(`EntryInfo:${TEST_SEASON}`, String(ENTRY_ID));
 });
@@ -288,9 +302,32 @@ describe('tournament initialization checkpoints', () => {
         overall_rank
       )
       VALUES (${ENTRY_ID}, 12, 55, 0, 0, 55, 600, 500)
-      ON CONFLICT (entry_id, event_id) DO UPDATE SET event_points = 55
+      ON CONFLICT (entry_id, event_id) DO UPDATE SET
+        event_points = 55,
+        event_picks = NULL,
+        event_chip = NULL
     `;
-    await sql`DELETE FROM entry_event_picks WHERE entry_id = ${ENTRY_ID} AND event_id = 12`;
+    await sql`
+      INSERT INTO entry_event_picks (
+        entry_id,
+        event_id,
+        chip,
+        picks,
+        transfers,
+        transfers_cost
+      )
+      VALUES (
+        ${ENTRY_ID},
+        12,
+        'n/a',
+        '[{"element":999,"position":1,"multiplier":1}]'::jsonb,
+        0,
+        0
+      )
+      ON CONFLICT (entry_id, event_id) DO UPDATE SET
+        picks = excluded.picks,
+        updated_at = now()
+    `;
     let picksCalls = 0;
     mockFPLClient({
       getEventLive: async () => ({ elements: [] }),
@@ -313,7 +350,7 @@ describe('tournament initialization checkpoints', () => {
           },
           picks: [
             {
-              element: 1,
+              element: PICK_PLAYER_ID,
               position: 1,
               multiplier: 1,
               is_captain: true,
@@ -338,12 +375,27 @@ describe('tournament initialization checkpoints', () => {
 
       expect(picksCalls).toBe(1);
       expect(plans).toEqual([{ totalPairs: 1, missingPairs: 1, reusedPairs: 0 }]);
-      const rows = await sql<{ count: number }[]>`
-        SELECT count(*)::int AS count
-        FROM entry_event_picks
-        WHERE entry_id = ${ENTRY_ID} AND event_id = 12
+      const rows = await sql<{ resultPicks: unknown; pickRows: number }[]>`
+        SELECT
+          result.event_picks AS "resultPicks",
+          (
+            SELECT count(*)::int
+            FROM entry_event_picks picks
+            WHERE picks.entry_id = ${ENTRY_ID} AND picks.event_id = 12
+          ) AS "pickRows"
+        FROM entry_event_results result
+        WHERE result.entry_id = ${ENTRY_ID} AND result.event_id = 12
       `;
-      expect(rows[0]?.count).toBe(1);
+      expect(rows[0]?.pickRows).toBe(1);
+      expect(rows[0]?.resultPicks).toEqual([
+        {
+          element: PICK_PLAYER_ID,
+          position: 1,
+          multiplier: 1,
+          is_captain: true,
+          is_vice_captain: false,
+        },
+      ]);
     } finally {
       resetMockFPLClient();
     }

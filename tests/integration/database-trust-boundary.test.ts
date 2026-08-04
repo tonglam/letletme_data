@@ -163,6 +163,21 @@ describe('Database trust boundary', () => {
     `;
     expect(readFunctions.map((finding) => finding.name)).toEqual([...DATA_FUNCTIONS]);
 
+    const pickerResultTypes = await sql<Array<{ name: string; result: string }>>`
+      SELECT
+        routine.proname AS name,
+        pg_get_function_result(routine.oid) AS result
+      FROM pg_proc routine
+      JOIN pg_namespace namespace ON namespace.oid = routine.pronamespace
+      WHERE namespace.nspname = 'public'
+        AND routine.proname IN ('get_players_for_picker', 'search_players_for_picker')
+      ORDER BY name
+    `;
+    expect(pickerResultTypes).toHaveLength(2);
+    for (const picker of pickerResultTypes) {
+      expect(picker.result).toContain('element_type integer');
+    }
+
     const functionsInaccessibleToServiceRole = await sql<NamedFinding[]>`
       SELECT routine.proname AS name
       FROM pg_proc routine

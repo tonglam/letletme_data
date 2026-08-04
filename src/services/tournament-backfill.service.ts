@@ -175,16 +175,19 @@ async function auditMissingUnits(
     if (eligibleEntryIds.length === 0) continue;
     let present: number[];
     if (kind === 'results') {
-      const resultEntryIds = (
-        await entryEventResultsRepository.findByEventAndEntryIds(eventId, eligibleEntryIds)
-      ).map((row) => row.entryId);
+      const resultRows = await entryEventResultsRepository.findByEventAndEntryIds(
+        eventId,
+        eligibleEntryIds,
+      );
       if (requiredPicksEvents.has(eventId)) {
-        const pickEntryIds = new Set(
-          await entryEventPicksRepository.findEntryIdsByEvent(eventId, eligibleEntryIds),
-        );
-        present = resultEntryIds.filter((entryId) => pickEntryIds.has(entryId));
+        // Knockout scoring consumes entry_event_results.event_picks directly.
+        // A separate entry_event_picks row is not proof that this canonical
+        // scoring row was updated successfully.
+        present = resultRows
+          .filter((row) => Array.isArray(row.eventPicks) && row.eventPicks.length > 0)
+          .map((row) => row.entryId);
       } else {
-        present = resultEntryIds;
+        present = resultRows.map((row) => row.entryId);
       }
     } else {
       present = await entryEventPicksRepository.findEntryIdsByEvent(eventId, eligibleEntryIds);

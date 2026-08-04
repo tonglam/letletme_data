@@ -439,6 +439,35 @@ export const createTournamentInfoRepository = (dbInstance?: DatabaseInstance) =>
       }
     },
 
+    markSetupRetryQueued: async (tournamentId: number): Promise<void> => {
+      try {
+        const db = await getDbInstance();
+        await db
+          .update(tournamentInfos)
+          .set({
+            setupStatus: 'pending',
+            setupError: null,
+            setupPhase: 'queued',
+            setupCompletedUnits: 0,
+            setupTotalUnits: 0,
+            setupProgressUpdatedAt: new Date(),
+            setupWarningCount: 0,
+            setupStartedAt: null,
+            setupFinishedAt: null,
+            standingsReadyAt: null,
+            updatedAt: new Date(),
+          })
+          .where(eq(tournamentInfos.id, tournamentId));
+      } catch (error) {
+        logError('Failed to queue tournament setup retry', error, { tournamentId });
+        throw new DatabaseError(
+          'Failed to queue tournament setup retry',
+          'TOURNAMENT_INFO_MARK_RETRY_QUEUED_ERROR',
+          error as Error,
+        );
+      }
+    },
+
     markSetupProgress: async (
       tournamentId: number,
       phase: TournamentSetupPhase,

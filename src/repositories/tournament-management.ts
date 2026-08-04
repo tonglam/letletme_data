@@ -173,7 +173,17 @@ export const createTournamentManagementRepository = () => ({
       const client = await getDbClient();
       const rows = await client<TournamentManagementDatabaseRow[]>`
         update tournament_infos
-        set state = ${state}, updated_at = now()
+        set state = ${state},
+            roster_sync_status = case
+              when ${state} = 'inactive' and roster_sync_status = 'processing'
+                then 'ready'::tournament_setup_status
+              else roster_sync_status
+            end,
+            roster_sync_error = case
+              when ${state} = 'inactive' and roster_sync_status = 'processing' then null
+              else roster_sync_error
+            end,
+            updated_at = now()
         where id = ${tournamentId}
           and admin_entry_id = ${adminEntryId}
           and state <> 'finished'

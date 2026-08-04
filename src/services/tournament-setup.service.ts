@@ -90,6 +90,23 @@ function elapsedBetween(start: string | null | undefined, end: string | null | u
   return Number.isNaN(startMs) || Number.isNaN(endMs) ? null : Math.max(0, endMs - startMs);
 }
 
+export async function finalizePublishedTournamentSetup(
+  tournamentId: number,
+  warningMessage: string | null,
+  warningCount: number,
+): Promise<void> {
+  // Resume first. If that transition fails, the setup remains processing and
+  // the worker/watchdog can retry instead of leaving an inactive tournament
+  // terminally marked ready.
+  await tournamentRosterRepository.markReadyAndResume(tournamentId);
+  await tournamentInfoRepository.markSetupResult(
+    tournamentId,
+    'ready',
+    warningMessage,
+    warningCount,
+  );
+}
+
 export async function setupTournamentStructure(tournamentId: number): Promise<void> {
   const setupStartedAtMs = performance.now();
   const phaseDurationsMs = {
@@ -374,13 +391,7 @@ export async function setupTournamentStructure(tournamentId: number): Promise<vo
     });
 
     const warningMessage = formatSetupWarning(setupIssues);
-    await tournamentInfoRepository.markSetupResult(
-      tournamentId,
-      'ready',
-      warningMessage,
-      setupIssues.length,
-    );
-    await tournamentRosterRepository.markReadyAndResume(tournamentId);
+    await finalizePublishedTournamentSetup(tournamentId, warningMessage, setupIssues.length);
     await invalidateTournamentGraphQLCaches('setup-terminal');
     outcome = setupIssues.length > 0 ? 'ready_with_warnings' : 'ready';
     logInfo('Tournament setup completed', {
@@ -400,7 +411,7 @@ export async function setupTournamentStructure(tournamentId: number): Promise<vo
       standingsPublished,
     });
     if (standingsPublished) {
-      await tournamentInfoRepository.markSetupResult(tournamentId, 'ready', message, 1);
+      await finalizePublishedTournamentSetup(tournamentId, message, 1);
       await invalidateTournamentGraphQLCaches('setup-warning');
       outcome = 'ready_with_warnings';
       return;
@@ -453,7 +464,16 @@ export async function requeueTournamentSetup(tournamentId: number) {
     throw new NotFoundError('Tournament not found.', 'TOURNAMENT_NOT_FOUND');
   }
 
-  return enqueueTournamentSetup(tournamentId, 'manual', { forceNew: true });
+  await tournamentInfoRepository.markSetupRetryQueued(tournamentId);
+  try {
+    await invalidateTournamentGraphQLCaches('setup-retry-queued');
+    return await enqueueTournamentSetup(tournamentId, 'manual', { forceNew: true });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unable to enqueue setup retry.';
+    await tournamentInfoRepository.markSetupResult(tournamentId, 'failed', message, 0);
+    await invalidateTournamentGraphQLCaches('setup-retry-failed');
+    throw error;
+  }
 }
 
 export async function recoverStuckTournamentSetups(
