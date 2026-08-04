@@ -4,9 +4,9 @@ import { getActiveCacheSeason } from '../cache/cache-season';
 import { fplClient } from '../clients/fpl';
 import { entryEventResultsRepository } from '../repositories/entry-event-results';
 import { entryEventTransfersRepository } from '../repositories/entry-event-transfers';
+import { eventLiveRepository } from '../repositories/event-lives';
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
-import { getEventLivesByEventId } from './event-lives.service';
 import { mapWithConcurrency, uniqueNumbers } from '../utils/async';
 import { logError, logInfo } from '../utils/logger';
 
@@ -44,6 +44,16 @@ export function buildTournamentTransferPointsMap(
   return new Map(eventLives.map((live) => [live.elementId, live.totalPoints]));
 }
 
+export async function loadCanonicalTournamentTransferPointsMap(
+  eventId: number,
+  findCanonicalRows: (
+    eventId: number,
+  ) => Promise<ReadonlyArray<Pick<DbEventLive, 'elementId' | 'totalPoints'>>> = (targetEventId) =>
+    eventLiveRepository.findByEventId(targetEventId),
+): Promise<Map<number, number>> {
+  return buildTournamentTransferPointsMap(eventId, await findCanonicalRows(eventId));
+}
+
 export async function syncTournamentEventTransfersPost(eventId: number): Promise<{
   eventId: number;
   totalEntries: number;
@@ -78,9 +88,9 @@ export async function syncTournamentEventTransfersPost(eventId: number): Promise
     return { eventId, totalEntries: 0, updated: 0, skipped: 0, errors: 0 };
   }
 
-  const [entryResults, eventLives, transfers] = await Promise.all([
+  const [entryResults, pointsMap, transfers] = await Promise.all([
     entryEventResultsRepository.findByEventAndEntryIds(eventId, entryIds),
-    getEventLivesByEventId(eventId),
+    loadCanonicalTournamentTransferPointsMap(eventId),
     entryEventTransfersRepository.findByEventAndEntryIds(eventId, entryIds),
   ]);
 
@@ -96,8 +106,6 @@ export async function syncTournamentEventTransfersPost(eventId: number): Promise
       errors: 0,
     };
   }
-
-  const pointsMap = buildTournamentTransferPointsMap(eventId, eventLives);
 
   if (transfers.length === 0) {
     logError('Entry event transfers missing for tournament transfers', new Error('No transfers'), {

@@ -1,4 +1,4 @@
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { inArray, sql } from 'drizzle-orm';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 
 import {
@@ -33,17 +33,26 @@ export const createEntryEventCupResultsRepository = (dbInstance?: DatabaseInstan
         const persisted = await db.transaction(async (tx) => {
           const entryIds = results.map((result) => result.entryId);
           await acquireEntrySeasonWriteFence(tx, entryIds, checkpointSeason);
-          const eligibleEntries = await tx
-            .select({ id: entryInfos.id })
+          const entrySeasons = await tx
+            .select({
+              id: entryInfos.id,
+              snapshotSeason: entryInfos.entrySnapshotSyncedSeason,
+              transferSeason: entryInfos.entryTransfersSyncedSeason,
+            })
             .from(entryInfos)
-            .where(
-              and(
-                inArray(entryInfos.id, entryIds),
-                eq(entryInfos.entrySnapshotSyncedSeason, checkpointSeason),
-              ),
-            )
+            .where(inArray(entryInfos.id, entryIds))
             .for('share');
-          const eligibleIds = new Set(eligibleEntries.map((entry) => entry.id));
+          const eligibleIds = new Set(
+            entrySeasons
+              .filter((entry) => {
+                const newestSeason = [entry.snapshotSeason, entry.transferSeason]
+                  .filter((season): season is string => season !== null)
+                  .sort()
+                  .at(-1);
+                return !newestSeason || newestSeason === checkpointSeason;
+              })
+              .map((entry) => entry.id),
+          );
           const eligibleResults = results.filter((result) => eligibleIds.has(result.entryId));
           if (eligibleResults.length === 0) {
             return 0;

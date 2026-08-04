@@ -3,7 +3,7 @@ import { describe, expect, test } from 'bun:test';
 import { finalizeTournamentEventLifecycle } from '../../src/domain/tournament-event-finalization';
 
 describe('tournament event finalization', () => {
-  test('finishes and publishes lifecycle state even when the scoring cascade is skipped', async () => {
+  test('delegates skipped-cascade recovery to the canonical finish gate', async () => {
     const calls: string[] = [];
 
     const finished = await finalizeTournamentEventLifecycle(12, {

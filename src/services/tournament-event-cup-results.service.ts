@@ -148,6 +148,11 @@ export async function syncTournamentEventCupResults(
   const { records, skipped, errors } = await collectEntryCupResults(entryIds, eventId, options);
 
   const upserted = await entryEventCupResultsRepository.upsertBatch(records, checkpointSeason);
+  if (upserted !== records.length) {
+    throw new Error(
+      `Tournament event cup results lost season ownership for ${records.length - upserted} entries`,
+    );
+  }
 
   logInfo('Tournament event cup results sync completed', {
     eventId,

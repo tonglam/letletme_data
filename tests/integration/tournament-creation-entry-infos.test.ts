@@ -203,6 +203,68 @@ describe('tournament creation vs entry_infos (FP-08)', () => {
     expect(retryCandidates.some((row) => row.id === created.id)).toBe(true);
   });
 
+  test('finishes only a ready tournament with terminal scoring evidence', async () => {
+    const client = await getDbClient();
+    const participants = buildParticipants();
+    const plan = planTournamentStructure(
+      {
+        tournamentName: `Terminal Evidence ${Date.now()}`,
+        adminId: String(SYNCED_ENTRY.id),
+        creator: 'terminal-evidence-test',
+        participantSource: 'custom',
+        leagueUrl: 'https://fantasy.premierleague.com/leagues/900006/standings/c',
+        groupFormat: 'points',
+        startGameweek: 'GW1',
+        endGameweek: 'GW12',
+        groupNum: '1',
+        qualifiersPerGroup: '',
+        knockoutFormat: 'none',
+      },
+      participants,
+      900006,
+      'classic',
+    );
+    const created = await tournamentInfoRepository.createTournamentWithEntries(plan);
+    createdTournamentIds.push(created.id);
+
+    await client`
+      UPDATE tournament_infos
+      SET state = 'active',
+          setup_status = 'processing',
+          setup_phase = 'calculating_standings',
+          standings_ready_at = NULL
+      WHERE id = ${created.id}
+    `;
+    expect(await tournamentRosterRepository.finishThroughEvent(12)).toBe(0);
+
+    await client`
+      UPDATE tournament_infos
+      SET setup_status = 'ready',
+          setup_phase = 'ready',
+          standings_ready_at = now()
+      WHERE id = ${created.id}
+    `;
+    expect(await tournamentRosterRepository.finishThroughEvent(12)).toBe(0);
+
+    await client`
+      INSERT INTO tournament_points_group_results (
+        tournament_id,
+        group_id,
+        event_id,
+        entry_id,
+        event_points,
+        event_cost,
+        event_net_points
+      )
+      VALUES (${created.id}, 1, 12, ${SYNCED_ENTRY.id}, 50, 0, 50)
+    `;
+    expect(await tournamentRosterRepository.finishThroughEvent(12)).toBe(1);
+    const rows = await client<Array<{ state: string }>>`
+      SELECT state FROM tournament_infos WHERE id = ${created.id}
+    `;
+    expect(rows[0]?.state).toBe('finished');
+  });
+
   test('records the authoritative roster as ready for an official-sync shell', async () => {
     const client = await getDbClient();
     const participants = buildParticipants();

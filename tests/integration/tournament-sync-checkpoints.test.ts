@@ -15,6 +15,7 @@ import {
 import { entryInfoRepository } from '../../src/repositories/entry-infos';
 import { leagueEventResultsRepository } from '../../src/repositories/league-event-results';
 import { syncEntryInfo, type EntryInfoClient } from '../../src/services/entry-info.service';
+import { syncEntryEventPicks, syncEntryEventResults } from '../../src/services/entries.service';
 import {
   ensureTournamentCoreResults,
   enrichTournamentHistory,
@@ -423,13 +424,15 @@ describe('tournament initialization checkpoints', () => {
     }
   });
 
-  test('cup result publication is season-fenced and skips stale ownership', async () => {
+  test('cup result publication accepts legacy ownership and skips a newer season', async () => {
     const sql = await getDbClient();
     await sql`DELETE FROM entry_event_cup_results WHERE entry_id = ${ENTRY_ID}`;
     await sql`
       UPDATE entry_infos
-      SET entry_snapshot_synced_through_event_id = 12,
-          entry_snapshot_synced_season = ${TEST_SEASON}
+      SET entry_snapshot_synced_through_event_id = NULL,
+          entry_snapshot_synced_season = NULL,
+          entry_transfers_synced_through_event_id = NULL,
+          entry_transfers_synced_season = NULL
       WHERE id = ${ENTRY_ID}
     `;
     const record = {
@@ -447,7 +450,10 @@ describe('tournament initialization checkpoints', () => {
 
       await sql`
         UPDATE entry_infos
-        SET entry_snapshot_synced_season = '2627'
+        SET entry_snapshot_synced_through_event_id = 12,
+            entry_snapshot_synced_season = '2627',
+            entry_transfers_synced_through_event_id = 12,
+            entry_transfers_synced_season = '2627'
         WHERE id = ${ENTRY_ID}
       `;
       expect(await entryEventCupResultsRepository.upsertBatch([record], TEST_SEASON)).toBe(0);
@@ -461,9 +467,107 @@ describe('tournament initialization checkpoints', () => {
       await sql`DELETE FROM entry_event_cup_results WHERE entry_id = ${ENTRY_ID}`;
       await sql`
         UPDATE entry_infos
-        SET entry_snapshot_synced_season = ${TEST_SEASON}
+        SET entry_snapshot_synced_through_event_id = 12,
+            entry_snapshot_synced_season = ${TEST_SEASON},
+            entry_transfers_synced_through_event_id = NULL,
+            entry_transfers_synced_season = NULL
         WHERE id = ${ENTRY_ID}
       `;
+    }
+  });
+
+  test('standalone picks reject a payload fetched across season rollover', async () => {
+    const sql = await getDbClient();
+    const redis = await redisSingleton.getClient();
+    await sql`DELETE FROM entry_event_picks WHERE entry_id = ${ENTRY_ID} AND event_id = 12`;
+    await redis.set('Season:active', TEST_SEASON);
+    resetActiveSeasonMemo();
+    mockFPLClient({
+      async getEntryEventPicks() {
+        await redis.set('Season:active', '2627');
+        return {
+          active_chip: null,
+          automatic_subs: [],
+          entry_history: {
+            event: 12,
+            points: 50,
+            total_points: 600,
+            rank: 100,
+            overall_rank: 1_000,
+            bank: 5,
+            value: 1_000,
+            event_transfers: 0,
+            event_transfers_cost: 0,
+            points_on_bench: 3,
+          },
+          picks: [],
+        };
+      },
+    });
+
+    try {
+      await expect(syncEntryEventPicks(ENTRY_ID, 12)).rejects.toThrow(
+        'Active season changed from 2526 to 2627',
+      );
+      const rows = await sql<Array<{ count: number }>>`
+        SELECT count(*)::int AS count
+        FROM entry_event_picks
+        WHERE entry_id = ${ENTRY_ID} AND event_id = 12
+      `;
+      expect(rows[0]?.count).toBe(0);
+    } finally {
+      resetMockFPLClient();
+      await redis.set('Season:active', TEST_SEASON);
+      resetActiveSeasonMemo();
+    }
+  });
+
+  test('standalone results reject a payload fetched across season rollover', async () => {
+    const sql = await getDbClient();
+    const redis = await redisSingleton.getClient();
+    await sql`DELETE FROM entry_event_results WHERE entry_id = ${ENTRY_ID} AND event_id = 12`;
+    await redis.set('Season:active', TEST_SEASON);
+    resetActiveSeasonMemo();
+    mockFPLClient({
+      async getEntryEventPicks() {
+        await redis.set('Season:active', '2627');
+        return {
+          active_chip: null,
+          automatic_subs: [],
+          entry_history: {
+            event: 12,
+            points: 50,
+            total_points: 600,
+            rank: 100,
+            overall_rank: 1_000,
+            bank: 5,
+            value: 1_000,
+            event_transfers: 0,
+            event_transfers_cost: 0,
+            points_on_bench: 3,
+          },
+          picks: [],
+        };
+      },
+      async getEventLive() {
+        return { elements: [] };
+      },
+    });
+
+    try {
+      await expect(syncEntryEventResults(ENTRY_ID, 12)).rejects.toThrow(
+        'Active season changed from 2526 to 2627',
+      );
+      const rows = await sql<Array<{ count: number }>>`
+        SELECT count(*)::int AS count
+        FROM entry_event_results
+        WHERE entry_id = ${ENTRY_ID} AND event_id = 12
+      `;
+      expect(rows[0]?.count).toBe(0);
+    } finally {
+      resetMockFPLClient();
+      await redis.set('Season:active', TEST_SEASON);
+      resetActiveSeasonMemo();
     }
   });
 

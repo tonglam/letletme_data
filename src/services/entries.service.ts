@@ -1,8 +1,11 @@
 import { getActiveCacheSeason } from '../cache/cache-season';
 import { fplClient } from '../clients/fpl';
-import { entryEventPicksRepository } from '../repositories/entry-event-picks';
-import { entryEventTransfersRepository } from '../repositories/entry-event-transfers';
-import { entryEventResultsRepository } from '../repositories/entry-event-results';
+import { createEntryEventPicksRepository } from '../repositories/entry-event-picks';
+import {
+  entryEventTransfersRepository,
+  withEntrySeasonSyncTransaction,
+} from '../repositories/entry-event-transfers';
+import { createEntryEventResultsRepository } from '../repositories/entry-event-results';
 import { logError, logInfo } from '../utils/logger';
 import { getCurrentEvent } from './events.service';
 
@@ -16,8 +19,11 @@ export async function syncEntryEventPicks(entryId: number, eventId?: number) {
       if (!current) throw new Error('No current event found');
       targetEventId = current.id;
     }
+    const checkpointSeason = await getActiveCacheSeason();
     const picks = await fplClient.getEntryEventPicks(entryId, targetEventId);
-    await entryEventPicksRepository.upsertFromPicks(entryId, targetEventId, picks);
+    await withEntrySeasonSyncTransaction(entryId, checkpointSeason, async (tx) => {
+      await createEntryEventPicksRepository(tx).upsertFromPicks(entryId, targetEventId, picks);
+    });
     logInfo('Entry event picks sync completed', { entryId, eventId: targetEventId });
     return { entryId, eventId: targetEventId };
   } catch (error) {
@@ -68,10 +74,8 @@ export async function syncEntryEventTransfers(
       if (!current) throw new Error('No current event found');
       targetEventId = current.id;
     }
-    const [transfers, checkpointSeason] = await Promise.all([
-      fplClient.getEntryTransfers(entryId),
-      getActiveCacheSeason(),
-    ]);
+    const checkpointSeason = await getActiveCacheSeason();
+    const transfers = await fplClient.getEntryTransfers(entryId);
     const pointsByElement = options?.pointsByElement ?? (await getPointsByElement(targetEventId));
     await entryEventTransfersRepository.replaceForEvent(
       entryId,
@@ -98,11 +102,19 @@ export async function syncEntryEventResults(entryId: number, eventId?: number) {
       if (!current) throw new Error('No current event found');
       targetEventId = current.id;
     }
+    const checkpointSeason = await getActiveCacheSeason();
     const [picks, live] = await Promise.all([
       fplClient.getEntryEventPicks(entryId, targetEventId),
       fplClient.getEventLive(targetEventId),
     ]);
-    await entryEventResultsRepository.upsertFromPicksAndLive(entryId, targetEventId, picks, live);
+    await withEntrySeasonSyncTransaction(entryId, checkpointSeason, async (tx) => {
+      await createEntryEventResultsRepository(tx).upsertFromPicksAndLive(
+        entryId,
+        targetEventId,
+        picks,
+        live,
+      );
+    });
     logInfo('Entry event results sync completed', { entryId, eventId: targetEventId });
     return { entryId, eventId: targetEventId };
   } catch (error) {

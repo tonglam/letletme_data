@@ -393,14 +393,57 @@ export const tournamentRosterRepository = {
   finishThroughEvent: async (eventId: number): Promise<number> => {
     const client = await getDbClient();
     const rows = await client<{ id: number }[]>`
-      update tournament_infos
+      update tournament_infos as tournament
       set state = 'finished', updated_at = now()
-      where state <> 'finished'
+      where tournament.state = 'active'
+        and tournament.setup_status = 'ready'
+        and tournament.standings_ready_at is not null
         and greatest(
-          coalesce(group_ended_event_id, 0),
-          coalesce(knockout_ended_event_id, 0)
+          coalesce(tournament.group_ended_event_id, 0),
+          coalesce(tournament.knockout_ended_event_id, 0)
         ) <= ${eventId}
-      returning id
+        and (
+          (
+            tournament.knockout_mode <> 'no_knockout'
+            and coalesce(tournament.knockout_ended_event_id, 0)
+              >= coalesce(tournament.group_ended_event_id, 0)
+            and exists (
+              select 1
+              from tournament_knockout_results result
+              where result.tournament_id = tournament.id
+                and result.event_id = tournament.knockout_ended_event_id
+            )
+          )
+          or (
+            (
+              tournament.knockout_mode = 'no_knockout'
+              or coalesce(tournament.group_ended_event_id, 0)
+                > coalesce(tournament.knockout_ended_event_id, 0)
+            )
+            and tournament.group_mode = 'points_races'
+            and exists (
+              select 1
+              from tournament_points_group_results result
+              where result.tournament_id = tournament.id
+                and result.event_id = tournament.group_ended_event_id
+            )
+          )
+          or (
+            (
+              tournament.knockout_mode = 'no_knockout'
+              or coalesce(tournament.group_ended_event_id, 0)
+                > coalesce(tournament.knockout_ended_event_id, 0)
+            )
+            and tournament.group_mode = 'battle_races'
+            and exists (
+              select 1
+              from tournament_battle_group_results result
+              where result.tournament_id = tournament.id
+                and result.event_id = tournament.group_ended_event_id
+            )
+          )
+        )
+      returning tournament.id
     `;
     logInfo('Marked completed tournaments finished', { eventId, count: rows.length });
     return rows.length;
