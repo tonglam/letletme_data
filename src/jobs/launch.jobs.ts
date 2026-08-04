@@ -171,10 +171,10 @@ export async function evaluateLaunchMonitor(
   dependencies: LaunchMonitorDependencies = defaultDependencies,
 ): Promise<LaunchMonitorResult> {
   const bootstrap = await dependencies.getBootstrap();
-  const redis = await dependencies.getRedis();
   const now = dependencies.now();
 
   if (bootstrap.events.length === 0) {
+    const redis = await dependencies.getRedis();
     const delivery = await sendLaunchNotificationOnce(
       redis,
       `LaunchNotification:warning:${now.getFullYear()}`,
@@ -193,6 +193,7 @@ export async function evaluateLaunchMonitor(
     return result('none', 'not_applicable');
   }
 
+  const redis = await dependencies.getRedis();
   const delivery = await sendLaunchNotificationOnce(
     redis,
     `LaunchNotification:happening:${publishedSeason}`,

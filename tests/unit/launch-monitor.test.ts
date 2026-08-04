@@ -117,11 +117,15 @@ describe('launch monitor', () => {
   });
 
   test('reports ordinary monitor no-ops as zero synchronization work', async () => {
-    const result = await evaluateLaunchMonitor(
-      dependencies({
-        events: [{ id: 1, deadline_time: '2025-08-15T10:00:00Z' }],
-      }),
-    );
+    let redisCalls = 0;
+    const deps = dependencies({
+      events: [{ id: 1, deadline_time: '2025-08-15T10:00:00Z' }],
+    });
+    deps.getRedis = async () => {
+      redisCalls += 1;
+      throw new Error('Redis should not be needed for an ordinary no-op');
+    };
+    const result = await evaluateLaunchMonitor(deps);
 
     expect(result).toMatchObject({
       outcome: 'noop',
@@ -131,6 +135,7 @@ describe('launch monitor', () => {
       succeededUnits: 0,
       failedUnits: 0,
     });
+    expect(redisCalls).toBe(0);
   });
 
   test('serializes concurrent ticks so only one notification is delivered', async () => {

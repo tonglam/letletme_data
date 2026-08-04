@@ -45,4 +45,20 @@ describe('entry-sync enqueue runId propagation', () => {
     expect(job).not.toBeNull();
     expect(job!.id).toBe('entry-picks-chain-abc-chunk-100-event-20');
   });
+
+  test('keeps the manual queue key stable across correlated continuation chunks', async () => {
+    const root = await enqueueEntryPicksSyncJob('manual', { chunkOffset: 0 });
+    const rootData = addCalls[0].data;
+    const continuation = await enqueueEntryPicksSyncJob('manual', {
+      chunkOffset: 100,
+      runId: rootData.runId as string,
+      queueKey: rootData.queueKey as string,
+    });
+
+    expect(root!.id).toBe('entry-picks-manual-chunk-0');
+    expect(rootData.queueKey).toBe('manual');
+    expect(continuation!.id).toBe('entry-picks-manual-chunk-100');
+    expect(addCalls[1].data.runId).toBe(rootData.runId);
+    expect(addCalls[1].data.queueKey).toBe('manual');
+  });
 });

@@ -23,6 +23,8 @@ export interface EntrySyncJobOptions {
   delayMs?: number;
   eventId?: number;
   runId?: string;
+  /** Stable deduplication key for every table-scan chunk in one trigger lane. */
+  queueKey?: string;
 }
 
 function hashEntryListKey(
@@ -59,7 +61,7 @@ async function enqueueEntrySyncJob(
     // runId. Every new manual scan gets a distinct correlation ID; its first
     // chunk still uses a separate stable queue key to dedupe concurrent triggers.
     const runId = options.runId ?? (source === 'cron' ? `${Date.now()}` : randomUUID());
-    const tableScanQueueKey = source === 'manual' && options.runId === undefined ? 'manual' : runId;
+    const tableScanQueueKey = options.queueKey ?? (source === 'manual' ? 'manual' : runId);
 
     const jobData = {
       source,
@@ -72,13 +74,14 @@ async function enqueueEntrySyncJob(
       throttleMs,
       eventId: options.eventId,
       runId,
+      queueKey: tableScanQueueKey,
     };
 
     const chunkKey =
       options.eventId !== undefined ? `${chunkOffset}-event-${options.eventId}` : `${chunkOffset}`;
     // Entry-list jobs (API with explicit IDs) keep their content-based ID.
-    // Table-scan chunks get deterministic IDs keyed by runId + offset so retries
-    // dedupe and cannot fork parallel chains.
+    // Table-scan chunks get deterministic IDs keyed by the trigger lane + offset
+    // so correlation IDs can vary without forking parallel manual chains.
     const isEntryList = options.entryIds !== undefined;
     const defaultJobId = isEntryList
       ? `${jobName}-entry-list-${hashEntryListKey(options.entryIds ?? [], options.eventId, options.retryCount)}`

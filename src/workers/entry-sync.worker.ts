@@ -185,6 +185,7 @@ async function scheduleRetry(
     delayMs,
     eventId: jobData?.eventId,
     runId: jobData?.runId,
+    queueKey: jobData?.queueKey,
   });
 }
 
@@ -227,6 +228,7 @@ async function handleEntryJob(
       throttleMs,
       eventId: jobData?.eventId,
       runId: jobData?.runId,
+      queueKey: jobData?.queueKey,
     });
     logInfo('Entry sync next chunk enqueued', {
       jobName,
