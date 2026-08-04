@@ -69,9 +69,11 @@ async function enqueueEntrySyncJob(
         (job) =>
           job.name === jobName &&
           job.data.source === 'manual' &&
-          // Manual scans are event-scoped when a target GW is supplied. Do
-          // not reuse a prior GW's root job and silently skip this request.
-          (job.data.eventId ?? null) === (options.eventId ?? null) &&
+          // Manual scans are event-scoped when a target GW is supplied. An
+          // unscoped root is resolved by the worker before it creates the
+          // continuation chunks, so it must also reuse those resolved chunks
+          // instead of starting a second full-table chain.
+          (options.eventId === undefined || job.data.eventId === options.eventId) &&
           (job.data.queueKey === 'manual' ||
             (job.data.queueKey === undefined && job.data.runId === 'manual')),
       );

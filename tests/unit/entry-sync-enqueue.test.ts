@@ -103,6 +103,19 @@ describe('entry-sync enqueue runId propagation', () => {
     expect(addCalls[0].data.eventId).toBe(13);
   });
 
+  test('reuses an unscoped root trigger for a resolved continuation', async () => {
+    pendingJobs.push({
+      id: 'entry-picks-manual-chunk-500',
+      name: 'entry-picks',
+      data: { source: 'manual', queueKey: 'manual', eventId: 12, runId: 'existing-run' },
+    });
+
+    const job = await enqueueEntryPicksSyncJob('manual');
+
+    expect(job!.id).toBe('entry-picks-manual-chunk-500');
+    expect(addCalls).toHaveLength(0);
+  });
+
   test('reuses a legacy manual continuation that predates queue keys', async () => {
     pendingJobs.push({
       id: 'entry-picks-manual-chunk-500',
