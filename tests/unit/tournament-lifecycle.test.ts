@@ -58,6 +58,7 @@ describe('tournament lifecycle invariants', () => {
     expect(decideExistingSetupSuccessorAction('active')).toBe('reuse');
     expect(decideExistingSetupSuccessorAction('completed')).toBe('remove');
     expect(decideExistingSetupSuccessorAction('failed')).toBe('remove');
+    expect(decideExistingSetupSuccessorAction('unknown')).toBe('enqueue');
   });
 
   test('treats skipped structure units as a failed cascade slot', async () => {

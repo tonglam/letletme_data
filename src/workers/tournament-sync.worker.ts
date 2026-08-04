@@ -187,9 +187,7 @@ export function assertTournamentStructureSyncComplete(
   jobName: string,
 ): void {
   if (result.skipped > 0) {
-    throw new Error(
-      `${jobName} skipped ${result.skipped} required unit(s) for event ${eventId}`,
-    );
+    throw new Error(`${jobName} skipped ${result.skipped} required unit(s) for event ${eventId}`);
   }
 }
 

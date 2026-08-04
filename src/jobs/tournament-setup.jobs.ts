@@ -38,7 +38,8 @@ export function getTournamentSetupJobIds(tournamentId: number): {
   };
 }
 
-export function decideExistingSetupSuccessorAction(state: string): 'remove' | 'reuse' {
+export function decideExistingSetupSuccessorAction(state: string): 'remove' | 'reuse' | 'enqueue' {
+  if (state === 'unknown') return 'enqueue';
   return state === 'completed' || state === 'failed' ? 'remove' : 'reuse';
 }
 
@@ -114,9 +115,10 @@ export async function enqueueTournamentSetup(
     const existingSuccessor = await queue.getJob(successorJobId);
     if (existingSuccessor) {
       const successorState = await existingSuccessor.getState();
-      if (decideExistingSetupSuccessorAction(successorState) === 'remove') {
+      const successorAction = decideExistingSetupSuccessorAction(successorState);
+      if (successorAction === 'remove') {
         await existingSuccessor.remove();
-      } else {
+      } else if (successorAction === 'reuse') {
         logInfo('Tournament setup successor already pending; reusing existing', {
           tournamentId,
           jobId: successorJobId,
