@@ -197,7 +197,11 @@ function isEligibleForEvent(
 async function seedPreEntryCoreBaselines(
   entryIds: number[],
   window: TournamentBackfillWindow,
+  checkpointSeason: string,
 ): Promise<number> {
+  if (!/^\d{4}$/.test(checkpointSeason)) {
+    throw new Error('A valid four-digit setup season is required');
+  }
   const entryStartEvents = await loadEntryStartEvents(entryIds);
   const units: Array<{ entryId: number; eventId: number }> = [];
   for (const entryId of entryIds) {
@@ -208,7 +212,15 @@ async function seedPreEntryCoreBaselines(
       units.push({ entryId, eventId });
     }
   }
-  const checkpointSeason = await getActiveCacheSeason();
+  // Keep the season captured by the caller. Reading Season:active here after
+  // deriving the units could pair an old started_event with a new-season
+  // checkpoint during the annual rollover.
+  const canonicalSeason = await getActiveCacheSeasonUncached();
+  if (canonicalSeason !== checkpointSeason) {
+    throw new Error(
+      `Active season changed from ${checkpointSeason} to ${canonicalSeason} before baseline seeding`,
+    );
+  }
   const unitsByEntry = new Map<number, Array<{ entryId: number; eventId: number }>>();
   for (const unit of units) {
     const entryUnits = unitsByEntry.get(unit.entryId) ?? [];
@@ -287,10 +299,14 @@ export async function ensureTournamentCoreResults(
   window: TournamentBackfillWindow,
   onProgress?: (completed: number, total: number) => Promise<void>,
   onPlan?: (plan: TournamentCoreSyncPlan) => void | Promise<void>,
-  options?: { requirePicksForEvents?: readonly number[] },
+  options?: {
+    requirePicksForEvents?: readonly number[];
+    setupSeason?: string;
+  },
 ): Promise<void> {
   const requiredPicksEvents = new Set(options?.requirePicksForEvents ?? []);
-  const seededBaselines = await seedPreEntryCoreBaselines(entryIds, window);
+  const checkpointSeason = options?.setupSeason ?? (await getActiveCacheSeason());
+  const seededBaselines = await seedPreEntryCoreBaselines(entryIds, window, checkpointSeason);
   const audit = await auditMissingUnits(entryIds, window, 'results', requiredPicksEvents);
   const missing = audit.missing;
   const total = [...missing.values()].reduce((sum, ids) => sum + ids.length, 0);

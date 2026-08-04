@@ -452,6 +452,9 @@ export const createTournamentInfoRepository = (dbInstance?: DatabaseInstance) =>
           // existing read model from serving the prior published row while a
           // retry is rebuilding canonical data.
           if (updated.length > 0) {
+            await tx.execute(sql`REFRESH MATERIALIZED VIEW public.mv_tournament_event_snapshot`);
+          }
+          if (updated.length > 0) {
             await tx.execute(sql`REFRESH MATERIALIZED VIEW public.mv_tournament_snapshot`);
           }
         });
@@ -487,6 +490,9 @@ export const createTournamentInfoRepository = (dbInstance?: DatabaseInstance) =>
             .where(eq(tournamentInfos.id, tournamentId))
             .returning({ id: tournamentInfos.id });
 
+          if (updated.length > 0) {
+            await tx.execute(sql`REFRESH MATERIALIZED VIEW public.mv_tournament_event_snapshot`);
+          }
           if (updated.length > 0) {
             await tx.execute(sql`REFRESH MATERIALIZED VIEW public.mv_tournament_snapshot`);
           }
@@ -566,9 +572,10 @@ export const createTournamentInfoRepository = (dbInstance?: DatabaseInstance) =>
             throw new Error(`Tournament ${tournamentId} no longer exists`);
           }
 
-          // CONCURRENTLY is not allowed inside a transaction. This bounded
-          // top-level refresh sees the update above, and PostgreSQL exposes
-          // both the readiness gate and its filtered snapshot only at commit.
+          // CONCURRENTLY is not allowed inside a transaction. These bounded
+          // refreshes see the update above, and PostgreSQL exposes the
+          // readiness gate plus both filtered snapshots only at commit.
+          await tx.execute(sql`REFRESH MATERIALIZED VIEW public.mv_tournament_event_snapshot`);
           await tx.execute(sql`REFRESH MATERIALIZED VIEW public.mv_tournament_snapshot`);
         });
       } catch (error) {

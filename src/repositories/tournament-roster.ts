@@ -1,3 +1,8 @@
+import {
+  ACTIVE_SEASON_LOCK_ID,
+  ACTIVE_SEASON_LOCK_NAMESPACE,
+  getActiveCacheSeasonUncached,
+} from '../cache/cache-season';
 import { getDbClient } from '../db/singleton';
 import type {
   LeagueType,
@@ -182,13 +187,32 @@ export const tournamentRosterRepository = {
     tournament: TournamentRosterRecord,
     participants: TournamentParticipant[],
     sourceLeagueName: string | null,
-    options?: { allowInactive?: boolean; resumeAfterSetup?: boolean },
+    options?: {
+      allowInactive?: boolean;
+      resumeAfterSetup?: boolean;
+      expectedSeason?: string;
+    },
   ): Promise<RosterPublicationResult> => {
     try {
       const participantIds = participants.map((participant) => Number(participant.id));
       const sortedParticipantIds = [...participantIds].sort((left, right) => left - right);
       const client = await getDbClient();
       return await client.begin(async (tx) => {
+        if (options?.expectedSeason) {
+          if (!/^\d{4}$/.test(options.expectedSeason)) {
+            throw new Error('A valid four-digit roster season is required');
+          }
+          await tx`SELECT pg_advisory_xact_lock_shared(
+            ${ACTIVE_SEASON_LOCK_NAMESPACE},
+            ${ACTIVE_SEASON_LOCK_ID}
+          )`;
+          const activeSeason = await getActiveCacheSeasonUncached();
+          if (activeSeason !== options.expectedSeason) {
+            throw new Error(
+              `Active season changed from ${options.expectedSeason} to ${activeSeason} before roster publication`,
+            );
+          }
+        }
         const locked = await tx<
           {
             id: number;
@@ -347,6 +371,7 @@ export const tournamentRosterRepository = {
         // Clearing readiness must evict the previously published aggregate
         // before this roster publication commits. The view predicate is only
         // evaluated during refresh, so cache invalidation alone is insufficient.
+        await tx`REFRESH MATERIALIZED VIEW public.mv_tournament_event_snapshot`;
         await tx`REFRESH MATERIALIZED VIEW public.mv_tournament_snapshot`;
 
         return {

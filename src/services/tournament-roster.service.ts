@@ -79,6 +79,10 @@ async function reconcileTournamentRosterUnlocked(
     await tournamentRosterRepository.markSyncProcessing(tournamentId);
   }
   try {
+    // Capture annual authority before the upstream roster read. The same
+    // season is revalidated under the publication transaction's shared fence
+    // so a slow source response cannot publish into a newly active season.
+    const setupSeason = await getActiveCacheSeason();
     const source = await fetchLeagueParticipants(
       officialLeagueUrl(tournament.leagueId, tournament.leagueType),
     );
@@ -89,10 +93,10 @@ async function reconcileTournamentRosterUnlocked(
     const window = getTournamentBackfillWindow(tournament, finalizedEvent?.id ?? null);
 
     if (addedEntryIds.length > 0) {
-      const season = await getActiveCacheSeason();
       const targetEventId = window?.endEventId ?? 0;
       const entryIssues = await syncTournamentEntryDetails(addedEntryIds, {
         targetEventId,
+        season: setupSeason,
       });
       if (entryIssues.length > 0) {
         const failedCount = entryIssues.reduce(
@@ -103,16 +107,18 @@ async function reconcileTournamentRosterUnlocked(
       }
 
       if (window) {
-        await ensureTournamentCoreResults(addedEntryIds, window);
+        await ensureTournamentCoreResults(addedEntryIds, window, undefined, undefined, {
+          setupSeason,
+        });
       }
       const transferEntryIds = await entryEventTransfersRepository.findEntryIdsNeedingSync(
         addedEntryIds,
         targetEventId,
-        season,
+        setupSeason,
       );
       const transfers = await syncEntryTransferHistories(transferEntryIds, targetEventId, {
         concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
-        season,
+        season: setupSeason,
       });
       if (transfers.errors > 0) {
         throw new Error(
@@ -142,6 +148,7 @@ async function reconcileTournamentRosterUnlocked(
           {
             allowInactive: options?.allowInactive,
             resumeAfterSetup: options?.resumeAfterSetup,
+            expectedSeason: setupSeason,
           },
         );
       },
