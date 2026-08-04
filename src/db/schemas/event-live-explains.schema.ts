@@ -36,6 +36,8 @@ export const eventLiveExplains = pgTable(
     redCardsPoints: integer('red_cards_points'),
     saves: integer('saves'),
     savesPoints: integer('saves_points'),
+    defensiveContribution: integer('defensive_contribution'),
+    defensiveContributionPoints: integer('defensive_contribution_points'),
     ...createdAtField,
   },
   (table) => [

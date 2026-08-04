@@ -118,6 +118,8 @@ export function transformSingleEventLiveExplain(
     redCardsPoints: pts('red_cards'),
     saves: val('saves'),
     savesPoints: pts('saves'),
+    defensiveContribution: val('defensive_contribution'),
+    defensiveContributionPoints: pts('defensive_contribution'),
   };
 }
 
