@@ -41,6 +41,11 @@ afterAll(async () => {
   const client = await getDbClient();
   await client.begin(async (tx) => {
     for (const tournamentId of createdTournamentIds) {
+      await tx`DELETE FROM tournament_knockout_results WHERE tournament_id = ${tournamentId}`;
+      await tx`DELETE FROM tournament_knockouts WHERE tournament_id = ${tournamentId}`;
+      await tx`DELETE FROM tournament_points_group_results WHERE tournament_id = ${tournamentId}`;
+      await tx`DELETE FROM tournament_battle_group_results WHERE tournament_id = ${tournamentId}`;
+      await tx`DELETE FROM tournament_groups WHERE tournament_id = ${tournamentId}`;
       await tx`DELETE FROM tournament_entries WHERE tournament_id = ${tournamentId}`;
       await tx`DELETE FROM tournament_infos WHERE id = ${tournamentId}`;
     }
@@ -376,6 +381,14 @@ describe('tournament creation vs entry_infos (FP-08)', () => {
 
     const created = await tournamentInfoRepository.createTournamentWithEntries(plan);
     createdTournamentIds.push(created.id);
+    await client`
+      insert into tournament_knockout_results (
+        tournament_id, event_id, match_id, play_against_id, home_entry_id, away_entry_id
+      ) values (
+        ${created.id}, ${plan.knockoutStartedEventId!}, 1, 1,
+        ${Number(participants[0].id)}, ${Number(participants[1].id)}
+      )
+    `;
     await client`REFRESH MATERIALIZED VIEW mv_tournament_snapshot`;
     const rows = await client<
       Array<{ tournament_id: number; latest_event_id: number | null; total_entries: number }>
@@ -392,5 +405,73 @@ describe('tournament creation vs entry_infos (FP-08)', () => {
         total_entries: participants.length,
       },
     ]);
+  });
+
+  test('keeps the last points snapshot while knockout activity is preseeded or calculated', async () => {
+    const client = await getDbClient();
+    const participants = buildParticipants();
+    const plan = planTournamentStructure(
+      {
+        tournamentName: `Hybrid Snapshot ${Date.now()}`,
+        adminId: String(SYNCED_ENTRY.id),
+        creator: 'hybrid-snapshot-test',
+        participantSource: 'custom',
+        leagueUrl: 'https://fantasy.premierleague.com/leagues/900005/standings/c',
+        groupFormat: 'points',
+        startGameweek: 'GW1',
+        endGameweek: 'GW1',
+        groupNum: '1',
+        qualifiersPerGroup: '4',
+        knockoutFormat: 'single',
+        selectedParticipantIds: participants.map((participant) => participant.id),
+      },
+      participants,
+      900005,
+      'classic',
+    );
+
+    const created = await tournamentInfoRepository.createTournamentWithEntries(plan);
+    createdTournamentIds.push(created.id);
+    await client`
+      insert into tournament_points_group_results (
+        tournament_id, group_id, event_id, entry_id, event_group_rank,
+        event_points, event_cost, event_net_points, event_rank
+      ) values (${created.id}, 1, 1, ${SYNCED_ENTRY.id}, 1, 50, 0, 50, 1)
+    `;
+    await client`
+      insert into tournament_knockout_results (
+        tournament_id, event_id, match_id, play_against_id, home_entry_id, away_entry_id
+      ) values (
+        ${created.id}, ${plan.knockoutEndedEventId!}, 1, 1,
+        ${Number(participants[0].id)}, ${Number(participants[1].id)}
+      )
+    `;
+    await client`REFRESH MATERIALIZED VIEW mv_tournament_event_snapshot`;
+    await client`REFRESH MATERIALIZED VIEW mv_tournament_snapshot`;
+
+    const preseeded = await client<Array<{ latest_event_id: number; top10_entry_count: number }>>`
+      select latest_event_id, top10_entry_count
+      from mv_tournament_snapshot
+      where tournament_id = ${created.id}
+    `;
+    expect(preseeded[0]).toEqual({ latest_event_id: 1, top10_entry_count: 1 });
+
+    await client`
+      update tournament_knockout_results
+      set home_net_points = 52, away_net_points = 49
+      where tournament_id = ${created.id}
+        and event_id = ${plan.knockoutEndedEventId!}
+    `;
+    await client`REFRESH MATERIALIZED VIEW mv_tournament_snapshot`;
+
+    const calculated = await client<Array<{ latest_event_id: number; top10_entry_count: number }>>`
+      select latest_event_id, top10_entry_count
+      from mv_tournament_snapshot
+      where tournament_id = ${created.id}
+    `;
+    expect(calculated[0]).toEqual({
+      latest_event_id: plan.knockoutEndedEventId!,
+      top10_entry_count: 1,
+    });
   });
 });

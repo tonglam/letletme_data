@@ -168,13 +168,10 @@ async function reconcileTournamentRosterUnlocked(
     if (needsSetup && !publication.automaticallyPaused) {
       await enqueueTournamentSetup(tournamentId, options?.resumeAfterSetup ? 'resume' : 'roster', {
         forceNew: true,
-        // The lifecycle lock is held here. An active setup job can only be
-        // waiting behind this reconciliation and will consume the published
-        // roster/resume marker after the lock is released.
-        reuseActive: true,
-        // If a preceding worker has returned but BullMQ still says active,
-        // allow its bounded bookkeeping transition to settle before deciding
-        // whether to replace a terminal job or reuse a lock-blocked one.
+        // The lifecycle lock is held here. If BullMQ still reports an active
+        // predecessor after the settle window, leave a distinct successor;
+        // reusing it would not prove that the newly published marker is read.
+        ensureSuccessorOnActive: true,
         activeSettleTimeoutMs: 2_000,
       });
     }

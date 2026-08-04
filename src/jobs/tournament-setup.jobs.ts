@@ -11,8 +11,12 @@ export type TournamentSetupJobSource = 'create' | 'manual' | 'watchdog' | 'roste
 export interface EnqueueTournamentSetupOptions {
   forceNew?: boolean;
   prepareEnqueue?: () => Promise<void>;
-  /** Reuse an active worker known to be waiting behind the caller's lifecycle lock. */
-  reuseActive?: boolean;
+  /**
+   * Queue a distinct successor when an active job remains ambiguous after the
+   * settle window. Only lifecycle-locked callers may use this: the successor
+   * waits behind the caller and guarantees that newly published state is read.
+   */
+  ensureSuccessorOnActive?: boolean;
   /**
    * Only callers already holding the tournament lifecycle lock may use this.
    * It bridges the short interval between a worker releasing that lock and
@@ -21,16 +25,19 @@ export interface EnqueueTournamentSetupOptions {
   activeSettleTimeoutMs?: number;
 }
 
-export type ExistingSetupJobAction = 'remove' | 'reuse' | 'reject';
+export type ExistingSetupJobAction = 'remove' | 'reuse' | 'reject' | 'enqueue_successor';
 
 export function decideExistingSetupJobAction(
   state: string,
-  options: Pick<EnqueueTournamentSetupOptions, 'forceNew' | 'prepareEnqueue' | 'reuseActive'>,
+  options: Pick<
+    EnqueueTournamentSetupOptions,
+    'forceNew' | 'prepareEnqueue' | 'ensureSuccessorOnActive'
+  >,
 ): ExistingSetupJobAction {
   if (state === 'completed' || state === 'failed') return 'remove';
   if (!options.forceNew) return 'reuse';
   if (state === 'waiting' || state === 'delayed') return 'remove';
-  if (state === 'active' && options.reuseActive) return 'reuse';
+  if (state === 'active' && options.ensureSuccessorOnActive) return 'enqueue_successor';
   return 'reject';
 }
 
@@ -87,12 +94,18 @@ export async function enqueueTournamentSetup(
 
     const baseJobId = `tournament-setup-${tournamentId}`;
     const existing = await queue.getJob(baseJobId);
-    const jobId = baseJobId;
+    let jobId: string | undefined = baseJobId;
     if (existing) {
       const state = await waitForActiveJobToSettle(existing, options.activeSettleTimeoutMs ?? 0);
       const action = decideExistingSetupJobAction(state, options);
       if (action === 'remove') {
         await existing.remove();
+      } else if (action === 'enqueue_successor') {
+        // BullMQ cannot replace an active deterministic job. An automatically
+        // assigned ID permits exactly this reconciliation attempt to leave a
+        // durable successor, whether the active job is finishing bookkeeping
+        // or waiting behind the caller's lifecycle lock.
+        jobId = undefined;
       } else if (action === 'reject') {
         throw new ConflictError(
           'Tournament setup is already running.',
@@ -110,9 +123,11 @@ export async function enqueueTournamentSetup(
     }
 
     await options.prepareEnqueue?.();
-    const job = await queue.add('tournament-setup', jobData, {
-      jobId,
-    });
+    const job = await queue.add(
+      'tournament-setup',
+      jobData,
+      jobId === undefined ? undefined : { jobId },
+    );
 
     logInfo('Tournament setup job enqueued', {
       tournamentId,

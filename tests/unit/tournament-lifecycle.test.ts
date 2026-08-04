@@ -31,9 +31,9 @@ describe('tournament lifecycle invariants', () => {
     expect(
       decideExistingSetupJobAction('active', {
         forceNew: true,
-        reuseActive: true,
+        ensureSuccessorOnActive: true,
       }),
-    ).toBe('reuse');
+    ).toBe('enqueue_successor');
     expect(
       decideExistingSetupJobAction('waiting', {
         forceNew: true,

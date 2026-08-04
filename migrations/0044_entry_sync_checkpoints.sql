@@ -1,3 +1,4 @@
+-- Entry synchronization checkpoints follow the lifecycle read contracts.
 ALTER TABLE public.entry_infos
   ADD COLUMN entry_snapshot_synced_through_event_id integer,
   ADD COLUMN entry_snapshot_synced_season text,

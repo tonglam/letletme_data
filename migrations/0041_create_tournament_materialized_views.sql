@@ -147,10 +147,16 @@ WITH tournament_events AS (
   UNION ALL
   SELECT knockout.tournament_id, knockout.event_id
   FROM public.tournament_knockout_results knockout
+  WHERE knockout.home_net_points IS NOT NULL
+    AND knockout.away_net_points IS NOT NULL
 ), latest_event AS (
   SELECT activity.tournament_id, max(activity.event_id) AS latest_event_id
   FROM tournament_events activity
   GROUP BY activity.tournament_id
+), latest_snapshot_event AS (
+  SELECT snapshot.tournament_id, max(snapshot.event_id) AS latest_event_id
+  FROM public.mv_tournament_event_snapshot snapshot
+  GROUP BY snapshot.tournament_id
 ), current_snapshot AS (
   SELECT
     v.tournament_id, v.event_id, v.entry_id,
@@ -164,7 +170,7 @@ WITH tournament_events AS (
     v.tournament_captain_points_percentage_rank, v.most_selected_captain,
     v.cum_total_gk_points, v.cum_total_def_points, v.cum_total_mid_points, v.cum_total_fwd_points
   FROM public.mv_tournament_event_snapshot v
-  JOIN latest_event le
+  JOIN latest_snapshot_event le
     ON le.tournament_id = v.tournament_id AND le.latest_event_id = v.event_id
 ), top10_snapshot AS (
   SELECT *

@@ -1,3 +1,4 @@
+-- Tournament lifecycle migrations follow the existing 0039 Live write-fence tail.
 CREATE TYPE public.tournament_setup_phase AS ENUM (
   'queued',
   'syncing_entries',
