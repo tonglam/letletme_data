@@ -39,14 +39,21 @@ type EntrySeasonCheckpoint = {
   transferSeason: string | null;
 };
 
-async function lockAndValidateEntrySeason(
+export async function acquireEntrySeasonWriteFence(
   tx: TransactionHandle,
-  entryId: number,
+  entryIds: readonly number[],
   checkpointSeason: string,
-): Promise<EntrySeasonCheckpoint | undefined> {
-  await tx.execute(
-    sql`SELECT pg_advisory_xact_lock(${ENTRY_SEASON_SYNC_LOCK_NAMESPACE}, ${entryId})`,
-  );
+): Promise<void> {
+  if (!/^\d{4}$/.test(checkpointSeason)) {
+    throw new Error('A valid four-digit checkpoint season is required');
+  }
+
+  const uniqueEntryIds = [...new Set(entryIds)].sort((left, right) => left - right);
+  for (const entryId of uniqueEntryIds) {
+    await tx.execute(
+      sql`SELECT pg_advisory_xact_lock(${ENTRY_SEASON_SYNC_LOCK_NAMESPACE}, ${entryId})`,
+    );
+  }
   await acquireActiveSeasonReadFence(tx);
   const canonicalSeason = await getActiveCacheSeasonUncached();
   if (canonicalSeason !== checkpointSeason) {
@@ -54,6 +61,14 @@ async function lockAndValidateEntrySeason(
       `Active season changed from ${checkpointSeason} to ${canonicalSeason} during entry event sync`,
     );
   }
+}
+
+async function lockAndValidateEntrySeason(
+  tx: TransactionHandle,
+  entryId: number,
+  checkpointSeason: string,
+): Promise<EntrySeasonCheckpoint | undefined> {
+  await acquireEntrySeasonWriteFence(tx, [entryId], checkpointSeason);
 
   const entryRows = await tx
     .select({

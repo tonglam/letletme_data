@@ -1,4 +1,5 @@
 import type { DbEntryEventCupResultInsert } from '../db/schemas/index.schema';
+import { getActiveCacheSeason } from '../cache/cache-season';
 import { fplClient } from '../clients/fpl';
 import { entryEventCupResultsRepository } from '../repositories/entry-event-cup-results';
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
@@ -143,9 +144,10 @@ export async function syncTournamentEventCupResults(
     return { eventId, totalEntries: 0, upserted: 0, skipped: 0, errors: 0 };
   }
 
+  const checkpointSeason = await getActiveCacheSeason();
   const { records, skipped, errors } = await collectEntryCupResults(entryIds, eventId, options);
 
-  const upserted = await entryEventCupResultsRepository.upsertBatch(records);
+  const upserted = await entryEventCupResultsRepository.upsertBatch(records, checkpointSeason);
 
   logInfo('Tournament event cup results sync completed', {
     eventId,

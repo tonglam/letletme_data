@@ -1,4 +1,4 @@
-import type { DbEntryEventTransfer } from '../db/schemas/index.schema';
+import type { DbEntryEventTransfer, DbEventLive } from '../db/schemas/index.schema';
 import type { RawFPLEntryEventPickItem } from '../types';
 import { getActiveCacheSeason } from '../cache/cache-season';
 import { fplClient } from '../clients/fpl';
@@ -30,6 +30,18 @@ function pickElements(picks: RawFPLEntryEventPickItem[], chip: string | null): S
     return new Set(picks.map((pick) => pick.element));
   }
   return new Set(picks.filter((pick) => pick.position <= 11).map((pick) => pick.element));
+}
+
+export function buildTournamentTransferPointsMap(
+  eventId: number,
+  eventLives: ReadonlyArray<Pick<DbEventLive, 'elementId' | 'totalPoints'>>,
+): Map<number, number> {
+  if (eventLives.length === 0) {
+    throw new Error(
+      `Event live data is not consolidated for tournament transfer enrichment in event ${eventId}`,
+    );
+  }
+  return new Map(eventLives.map((live) => [live.elementId, live.totalPoints]));
 }
 
 export async function syncTournamentEventTransfersPost(eventId: number): Promise<{
@@ -85,18 +97,7 @@ export async function syncTournamentEventTransfersPost(eventId: number): Promise
     };
   }
 
-  if (eventLives.length === 0) {
-    logError('Event live data missing for tournament transfers', new Error('No event lives'), {
-      eventId,
-    });
-    return {
-      eventId,
-      totalEntries: entryIds.length,
-      updated: 0,
-      skipped: entryIds.length,
-      errors: 0,
-    };
-  }
+  const pointsMap = buildTournamentTransferPointsMap(eventId, eventLives);
 
   if (transfers.length === 0) {
     logError('Entry event transfers missing for tournament transfers', new Error('No transfers'), {
@@ -112,7 +113,6 @@ export async function syncTournamentEventTransfersPost(eventId: number): Promise
   }
 
   const entryResultMap = new Map(entryResults.map((result) => [result.entryId, result]));
-  const pointsMap = new Map(eventLives.map((live) => [live.elementId, live.totalPoints]));
   const transferMap = new Map<number, DbEntryEventTransfer[]>();
   for (const transfer of transfers) {
     const list = transferMap.get(transfer.entryId) ?? [];

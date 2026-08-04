@@ -7,6 +7,7 @@ import {
   type DbLeagueEventResultInsert,
 } from '../db/schemas/index.schema';
 import { getDb } from '../db/singleton';
+import { acquireEntrySeasonWriteFence } from './entry-event-transfers';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 
@@ -30,6 +31,8 @@ export const createLeagueEventResultsRepository = (dbInstance?: DatabaseInstance
         }
         const db = await getDbInstance();
         const persisted = await db.transaction(async (tx) => {
+          const entryIds = results.map((result) => result.entryId);
+          await acquireEntrySeasonWriteFence(tx, entryIds, checkpointSeason);
           // Lock current entry ownership while publishing this batch. If a
           // rollover committed first, stale rows are skipped; if it commits
           // second, its cleanup waits and then removes this old-season batch.
@@ -38,10 +41,7 @@ export const createLeagueEventResultsRepository = (dbInstance?: DatabaseInstance
             .from(entryInfos)
             .where(
               and(
-                inArray(
-                  entryInfos.id,
-                  results.map((result) => result.entryId),
-                ),
+                inArray(entryInfos.id, entryIds),
                 eq(entryInfos.entrySnapshotSyncedSeason, checkpointSeason),
               ),
             )

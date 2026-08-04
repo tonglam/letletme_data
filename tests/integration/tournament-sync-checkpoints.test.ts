@@ -7,7 +7,11 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { redisSingleton } from '../../src/cache/singleton';
 import { resetActiveSeasonMemo } from '../../src/cache/cache-season';
 import { getDbClient } from '../../src/db/singleton';
-import { entryEventTransfersRepository } from '../../src/repositories/entry-event-transfers';
+import { entryEventCupResultsRepository } from '../../src/repositories/entry-event-cup-results';
+import {
+  ENTRY_SEASON_SYNC_LOCK_NAMESPACE,
+  entryEventTransfersRepository,
+} from '../../src/repositories/entry-event-transfers';
 import { entryInfoRepository } from '../../src/repositories/entry-infos';
 import { leagueEventResultsRepository } from '../../src/repositories/league-event-results';
 import { syncEntryInfo, type EntryInfoClient } from '../../src/services/entry-info.service';
@@ -26,6 +30,37 @@ const PICK_TEAM_ID = 99_042_101;
 const PICK_PLAYER_ID = 99_042_101;
 const TRANSFER_PLAYER_ID = 99_042_102;
 const TEST_SEASON = '2526';
+
+async function expectBlockedByEntrySeasonLock<T>(operation: () => Promise<T>): Promise<T> {
+  const sql = await getDbClient();
+  let releaseLock: () => void = () => undefined;
+  let markLockAcquired: () => void = () => undefined;
+  const lockAcquired = new Promise<void>((resolve) => {
+    markLockAcquired = resolve;
+  });
+  const lockRelease = new Promise<void>((resolve) => {
+    releaseLock = resolve;
+  });
+  const blocker = sql.begin(async (tx) => {
+    await tx`SELECT pg_advisory_xact_lock(${ENTRY_SEASON_SYNC_LOCK_NAMESPACE}, ${ENTRY_ID})`;
+    markLockAcquired();
+    await lockRelease;
+  });
+  await lockAcquired;
+
+  let settled = false;
+  const pending = operation().finally(() => {
+    settled = true;
+  });
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(settled).toBe(false);
+  } finally {
+    releaseLock();
+    await blocker;
+  }
+  return pending;
+}
 
 const client: EntryInfoClient = {
   async getEntrySummary() {
@@ -118,8 +153,10 @@ beforeAll(async () => {
 afterAll(async () => {
   const sql = await getDbClient();
   await sql`DELETE FROM entry_event_transfers WHERE entry_id = ${ENTRY_ID}`;
+  await sql`DELETE FROM entry_event_cup_results WHERE entry_id = ${ENTRY_ID}`;
   await sql`DELETE FROM entry_event_picks WHERE entry_id IN (${ENTRY_ID}, ${LATE_ENTRY_ID})`;
   await sql`DELETE FROM entry_event_results WHERE entry_id = ${ENTRY_ID}`;
+  await sql`DELETE FROM league_event_results WHERE entry_id = ${ENTRY_ID}`;
   await sql`DELETE FROM entry_league_infos WHERE entry_id = ${ENTRY_ID}`;
   await sql`DELETE FROM entry_history_infos WHERE entry_id = ${ENTRY_ID}`;
   await sql`DELETE FROM entry_infos WHERE id = ${ENTRY_ID}`;
@@ -354,6 +391,80 @@ describe('tournament initialization checkpoints', () => {
           entry_snapshot_synced_season = ${TEST_SEASON}
       WHERE id = ${ENTRY_ID}
     `;
+  });
+
+  test('league result publication serializes with entry season rollover', async () => {
+    const sql = await getDbClient();
+    await sql`DELETE FROM league_event_results WHERE entry_id = ${ENTRY_ID}`;
+    await sql`
+      UPDATE entry_infos
+      SET entry_snapshot_synced_through_event_id = 12,
+          entry_snapshot_synced_season = ${TEST_SEASON}
+      WHERE id = ${ENTRY_ID}
+    `;
+
+    try {
+      const persisted = await expectBlockedByEntrySeasonLock(() =>
+        leagueEventResultsRepository.upsertBatch(
+          [
+            {
+              leagueId: 99043,
+              leagueType: 'classic',
+              entryId: ENTRY_ID,
+              eventId: 12,
+            },
+          ],
+          TEST_SEASON,
+        ),
+      );
+      expect(persisted).toBe(1);
+    } finally {
+      await sql`DELETE FROM league_event_results WHERE entry_id = ${ENTRY_ID}`;
+    }
+  });
+
+  test('cup result publication is season-fenced and skips stale ownership', async () => {
+    const sql = await getDbClient();
+    await sql`DELETE FROM entry_event_cup_results WHERE entry_id = ${ENTRY_ID}`;
+    await sql`
+      UPDATE entry_infos
+      SET entry_snapshot_synced_through_event_id = 12,
+          entry_snapshot_synced_season = ${TEST_SEASON}
+      WHERE id = ${ENTRY_ID}
+    `;
+    const record = {
+      entryId: ENTRY_ID,
+      eventId: 12,
+      result: 'win',
+    } as const;
+
+    try {
+      expect(
+        await expectBlockedByEntrySeasonLock(() =>
+          entryEventCupResultsRepository.upsertBatch([record], TEST_SEASON),
+        ),
+      ).toBe(1);
+
+      await sql`
+        UPDATE entry_infos
+        SET entry_snapshot_synced_season = '2627'
+        WHERE id = ${ENTRY_ID}
+      `;
+      expect(await entryEventCupResultsRepository.upsertBatch([record], TEST_SEASON)).toBe(0);
+      const rows = await sql<Array<{ count: number }>>`
+        SELECT count(*)::int AS count
+        FROM entry_event_cup_results
+        WHERE entry_id = ${ENTRY_ID}
+      `;
+      expect(rows[0]?.count).toBe(1);
+    } finally {
+      await sql`DELETE FROM entry_event_cup_results WHERE entry_id = ${ENTRY_ID}`;
+      await sql`
+        UPDATE entry_infos
+        SET entry_snapshot_synced_season = ${TEST_SEASON}
+        WHERE id = ${ENTRY_ID}
+      `;
+    }
   });
 
   test('a latest GW1 sync clears unproven transfer rows from the previous season', async () => {
