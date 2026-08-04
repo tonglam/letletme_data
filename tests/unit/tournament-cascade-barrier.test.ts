@@ -7,16 +7,15 @@ const store = new Map<string, string>();
  * Script selection is by KEYS count / shape.
  */
 function evalScript(numKeys: number, args: string[]): number {
-  // noteCascadeStructureComplete: 8 keys + ttl
-  if (numKeys === 8) {
+  // noteCascadeStructureComplete: this slot + pending + role pairs + ttl
+  if (numKeys > 3) {
     const thisSlot = args[0];
     const pendingKey = args[1];
-    const roleSlots = [
-      [args[2], args[3]],
-      [args[4], args[5]],
-      [args[6], args[7]],
-    ];
-    const ttl = args[8];
+    const roleSlots: Array<[string, string]> = [];
+    for (let index = 2; index < numKeys; index += 2) {
+      roleSlots.push([args[index], args[index + 1]]);
+    }
+    const ttl = args[numKeys];
     void ttl;
 
     if (store.has(thisSlot)) {
@@ -30,11 +29,11 @@ function evalScript(numKeys: number, args: string[]): number {
         done += 1;
       }
     }
-    if (done >= 3) {
+    if (done >= roleSlots.length) {
       store.set(pendingKey, '1');
       return 0;
     }
-    return 3 - done;
+    return roleSlots.length - done;
   }
 
   // tryClaimCascadeRefresh: 3 keys + lease ttl
@@ -99,17 +98,24 @@ const {
   tryClaimCascadeRefreshEnqueue,
   markCascadeRefreshEnqueued,
   releaseCascadeRefreshEnqueueClaim,
-  CASCADE_STRUCTURE_BARRIER_JOBS,
+  CASCADE_COMPLETION_BARRIER_JOBS,
 } = await import('../../src/jobs/tournament-sync.jobs');
 
-describe('cascade structure barrier (FP-07)', () => {
+describe('cascade completion barrier (FP-07)', () => {
   afterEach(() => {
     store.clear();
   });
 
-  it('tracks three structure jobs and allows refresh claim only after the last', async () => {
+  it('waits for structure and terminal enrichment before allowing publication', async () => {
     const cascadeId = createCascadeId(33);
-    expect(CASCADE_STRUCTURE_BARRIER_JOBS).toHaveLength(3);
+    expect(CASCADE_COMPLETION_BARRIER_JOBS).toEqual([
+      'tournament-points-race',
+      'tournament-battle-race',
+      'tournament-knockout',
+      'tournament-transfers-post',
+      'tournament-cup-results',
+      'tournament-selection-stats',
+    ]);
 
     await initCascadeStructureBarrier(cascadeId);
 
@@ -120,6 +126,13 @@ describe('cascade structure barrier (FP-07)', () => {
     expect(await tryClaimCascadeRefreshEnqueue(cascadeId)).toBe('not-pending');
 
     await noteCascadeStructureJobComplete(cascadeId, 'tournament-knockout');
+    expect(await tryClaimCascadeRefreshEnqueue(cascadeId)).toBe('not-pending');
+
+    await noteCascadeStructureJobComplete(cascadeId, 'tournament-transfers-post');
+    await noteCascadeStructureJobComplete(cascadeId, 'tournament-cup-results');
+    expect(await tryClaimCascadeRefreshEnqueue(cascadeId)).toBe('not-pending');
+
+    await noteCascadeStructureJobComplete(cascadeId, 'tournament-selection-stats');
     expect(await tryClaimCascadeRefreshEnqueue(cascadeId)).toBe('claimed');
   });
 
@@ -134,6 +147,9 @@ describe('cascade structure barrier (FP-07)', () => {
     expect(await tryClaimCascadeRefreshEnqueue(cascadeId)).toBe('not-pending');
 
     await noteCascadeStructureJobComplete(cascadeId, 'tournament-knockout');
+    await noteCascadeStructureJobComplete(cascadeId, 'tournament-transfers-post');
+    await noteCascadeStructureJobComplete(cascadeId, 'tournament-cup-results');
+    await noteCascadeStructureJobComplete(cascadeId, 'tournament-selection-stats');
     expect(await tryClaimCascadeRefreshEnqueue(cascadeId)).toBe('claimed');
   });
 
@@ -144,6 +160,9 @@ describe('cascade structure barrier (FP-07)', () => {
     await noteCascadeStructureJobComplete(cascadeId, 'enqueue-failed:tournament-points-race');
     await noteCascadeStructureJobComplete(cascadeId, 'tournament-battle-race');
     await noteCascadeStructureJobComplete(cascadeId, 'enqueue-failed:tournament-knockout');
+    await noteCascadeStructureJobComplete(cascadeId, 'tournament-transfers-post');
+    await noteCascadeStructureJobComplete(cascadeId, 'enqueue-failed:tournament-cup-results');
+    await noteCascadeStructureJobComplete(cascadeId, 'tournament-selection-stats');
 
     expect(await tryClaimCascadeRefreshEnqueue(cascadeId)).toBe('claimed');
   });
@@ -154,6 +173,9 @@ describe('cascade structure barrier (FP-07)', () => {
     await noteCascadeStructureJobComplete(cascadeId, 'tournament-points-race');
     await noteCascadeStructureJobComplete(cascadeId, 'tournament-battle-race');
     await noteCascadeStructureJobComplete(cascadeId, 'tournament-knockout');
+    await noteCascadeStructureJobComplete(cascadeId, 'tournament-transfers-post');
+    await noteCascadeStructureJobComplete(cascadeId, 'tournament-cup-results');
+    await noteCascadeStructureJobComplete(cascadeId, 'tournament-selection-stats');
 
     expect(await tryClaimCascadeRefreshEnqueue(cascadeId)).toBe('claimed');
     expect(await tryClaimCascadeRefreshEnqueue(cascadeId)).toBe('lease-busy');
@@ -170,6 +192,9 @@ describe('cascade structure barrier (FP-07)', () => {
     await noteCascadeStructureJobComplete(cascadeId, 'tournament-points-race');
     await noteCascadeStructureJobComplete(cascadeId, 'tournament-battle-race');
     await noteCascadeStructureJobComplete(cascadeId, 'tournament-knockout');
+    await noteCascadeStructureJobComplete(cascadeId, 'tournament-transfers-post');
+    await noteCascadeStructureJobComplete(cascadeId, 'tournament-cup-results');
+    await noteCascadeStructureJobComplete(cascadeId, 'tournament-selection-stats');
     expect(await tryClaimCascadeRefreshEnqueue(cascadeId)).toBe('claimed');
   });
 });

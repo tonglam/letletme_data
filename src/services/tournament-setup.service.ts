@@ -528,7 +528,7 @@ export async function recoverStuckTournamentSetups(
           // worker may publish readiness or advance its heartbeat before this
           // lock is acquired, so compare-and-swap the exact observed heartbeat
           // before changing canonical state.
-          const marked = await tournamentInfoRepository.markStuckSetupFailedIfUnchanged(
+          const marked = await tournamentInfoRepository.markStuckSetupQueuedIfUnchanged(
             row.id,
             row.setupProgressUpdatedAt,
             `Setup stopped progressing at ${row.setupProgressUpdatedAt ?? 'unknown'}; re-enqueued by watchdog.`,

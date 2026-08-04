@@ -179,7 +179,7 @@ describe('tournament creation vs entry_infos (FP-08)', () => {
     const candidates = await tournamentInfoRepository.findStuckProcessing(15);
     expect(candidates.some((row) => row.id === created.id)).toBe(true);
     expect(
-      await tournamentInfoRepository.markStuckSetupFailedIfUnchanged(
+      await tournamentInfoRepository.markStuckSetupQueuedIfUnchanged(
         created.id,
         staleHeartbeat,
         'stale prepared enqueue',
@@ -190,7 +190,17 @@ describe('tournament creation vs entry_infos (FP-08)', () => {
       FROM tournament_infos
       WHERE id = ${created.id}
     `;
-    expect(rows[0]).toEqual({ setup_status: 'failed', setup_phase: 'failed' });
+    expect(rows[0]).toEqual({ setup_status: 'pending', setup_phase: 'queued' });
+
+    // Simulate a watchdog exit or queue.add failure followed by the next
+    // cutoff. The canonical row must remain recoverable without manual input.
+    await client`
+      UPDATE tournament_infos
+      SET setup_progress_updated_at = ${staleHeartbeat}
+      WHERE id = ${created.id}
+    `;
+    const retryCandidates = await tournamentInfoRepository.findStuckProcessing(15);
+    expect(retryCandidates.some((row) => row.id === created.id)).toBe(true);
   });
 
   test('records the authoritative roster as ready for an official-sync shell', async () => {
@@ -399,7 +409,7 @@ describe('tournament creation vs entry_infos (FP-08)', () => {
       set setup_progress_updated_at = '2026-08-01T00:02:00Z'
       where id = ${created.id}
     `;
-    const advancedHeartbeatWrite = await tournamentInfoRepository.markStuckSetupFailedIfUnchanged(
+    const advancedHeartbeatWrite = await tournamentInfoRepository.markStuckSetupQueuedIfUnchanged(
       created.id,
       '2026-08-01T00:01:00Z',
       'stale watchdog observation',
@@ -415,7 +425,7 @@ describe('tournament creation vs entry_infos (FP-08)', () => {
       set setup_status = 'ready', setup_phase = 'ready', setup_progress_updated_at = now()
       where id = ${created.id}
     `;
-    const terminalWrite = await tournamentInfoRepository.markStuckSetupFailedIfUnchanged(
+    const terminalWrite = await tournamentInfoRepository.markStuckSetupQueuedIfUnchanged(
       created.id,
       '2026-08-01T00:01:00Z',
       'stale watchdog observation',

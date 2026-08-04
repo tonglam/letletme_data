@@ -55,9 +55,9 @@ import type { WorkerRuntime } from './worker-runtime';
  * Enqueue cascade jobs after tournament-event-results completes.
  * These jobs depend on fresh tournament event results.
  *
- * MV refresh is NOT delayed-enqueued here: a fixed delay can fire between
- * serialized structure jobs. Instead points/battle/knockout share a cascade
- * barrier and the last successful one enqueues the refresh (FP-07).
+ * MV refresh is NOT delayed-enqueued here: a fixed delay can fire before
+ * terminal enrichment jobs. The existing cascade barrier publishes only when
+ * structure, transfers, cup, and selection statistics have all completed.
  */
 async function enqueueTournamentCascade(eventId: number) {
   logInfo('Enqueueing tournament cascade jobs', { eventId });
@@ -67,13 +67,13 @@ async function enqueueTournamentCascade(eventId: number) {
     await initCascadeStructureBarrier(cascadeId);
     const structureOpts = { cascadeId };
 
-    // Structure jobs carry cascadeId for the MV barrier; cup/transfers do not.
+    // Every terminal cascade job carries the same completion-barrier ID.
     const results = await Promise.allSettled([
       enqueueTournamentPointsRace(eventId, 'cascade', structureOpts),
       enqueueTournamentBattleRace(eventId, 'cascade', structureOpts),
       enqueueTournamentKnockout(eventId, 'cascade', structureOpts),
-      enqueueTournamentTransfersPost(eventId, 'cascade'),
-      enqueueTournamentCupResults(eventId, 'cascade'),
+      enqueueTournamentTransfersPost(eventId, 'cascade', structureOpts),
+      enqueueTournamentCupResults(eventId, 'cascade', structureOpts),
     ]);
 
     const successful = results.filter((r) => r.status === 'fulfilled').length;
@@ -274,15 +274,18 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
 
           case TOURNAMENT_JOBS.TRANSFERS_POST:
             await syncTournamentEventTransfersPost(eventId);
-            await enqueueTournamentSelectionStats(eventId, 'cascade');
+            await enqueueTournamentSelectionStats(eventId, 'cascade', { cascadeId });
+            await afterCascadeStructureJob(eventId, cascadeId, job.name);
             break;
 
           case TOURNAMENT_JOBS.CUP_RESULTS:
             await syncTournamentEventCupResults(eventId);
+            await afterCascadeStructureJob(eventId, cascadeId, job.name);
             break;
 
           case TOURNAMENT_JOBS.SELECTION_STATS:
             await syncTournamentSelectionStats(eventId);
+            await afterCascadeStructureJob(eventId, cascadeId, job.name);
             break;
 
           case TOURNAMENT_JOBS.EVENT_PICKS:

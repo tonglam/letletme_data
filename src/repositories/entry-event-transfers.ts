@@ -209,10 +209,11 @@ export const createEntryEventTransfersRepository = (dbInstance?: DatabaseInstanc
 
           const transferSeasonChanged = entryRows[0]?.transferSeason !== checkpointSeason;
 
-          // Event IDs repeat every season. A latest-mode GW1 sync may be the
-          // first writer after rollover, so clear every unproven prior-season
-          // row before establishing the new season checkpoint. Do not reuse
-          // computed fields from rows whose season ownership is unknown.
+          // Event IDs repeat every season. A latest-mode sync may be the first
+          // writer after rollover, so clear every unproven prior-season row.
+          // A midseason latest sync establishes a season-owned preseason (0)
+          // checkpoint: the earlier range is still incomplete, but subsequent
+          // event syncs can safely retain rows written for this season.
           const existing = transferSeasonChanged
             ? []
             : await tx
@@ -306,7 +307,7 @@ export const createEntryEventTransfersRepository = (dbInstance?: DatabaseInstanc
                       WHEN ${entryInfos.entryTransfersSyncedSeason} = ${checkpointSeason}
                       THEN ${entryInfos.entryTransfersSyncedThroughEventId}
                       WHEN ${eventId} <= 1 THEN ${eventId}
-                      ELSE NULL
+                      ELSE 0
                     END`,
               entryTransfersSyncedSeason:
                 syncMode === 'all'
@@ -318,8 +319,7 @@ export const createEntryEventTransfersRepository = (dbInstance?: DatabaseInstanc
                       THEN ${checkpointSeason}
                       WHEN ${entryInfos.entryTransfersSyncedSeason} = ${checkpointSeason}
                       THEN ${checkpointSeason}
-                      WHEN ${eventId} <= 1 THEN ${checkpointSeason}
-                      ELSE NULL
+                      ELSE ${checkpointSeason}
                     END`,
               updatedAt: new Date(),
             })

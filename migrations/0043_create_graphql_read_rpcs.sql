@@ -127,8 +127,8 @@ SET search_path = pg_catalog, public
 AS $function$
   SELECT
     COALESCE(incoming.element_id, outgoing.element_id) AS element_id,
-    incoming.count AS transfer_in_count,
-    outgoing.count AS transfer_out_count
+    COALESCE(incoming.count, 0) AS transfer_in_count,
+    COALESCE(outgoing.count, 0) AS transfer_out_count
   FROM (
     SELECT transfer.element_in_id AS element_id, COUNT(*) AS count
     FROM public.entry_event_transfers transfer

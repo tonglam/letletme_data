@@ -601,7 +601,7 @@ export const createTournamentInfoRepository = (dbInstance?: DatabaseInstance) =>
       }
     },
 
-    markStuckSetupFailedIfUnchanged: async (
+    markStuckSetupQueuedIfUnchanged: async (
       tournamentId: number,
       expectedProgressUpdatedAt: string | null,
       internalError: string,
@@ -612,12 +612,18 @@ export const createTournamentInfoRepository = (dbInstance?: DatabaseInstance) =>
         const rows = await db
           .update(tournamentInfos)
           .set({
-            setupStatus: 'failed',
-            setupPhase: 'failed',
+            // Keep the durable state watchdog-eligible until queue.add has
+            // actually committed. A crash or non-ambiguous Redis failure
+            // after this compare-and-swap is recovered by a later pass.
+            setupStatus: 'pending',
+            setupPhase: 'queued',
+            setupCompletedUnits: 0,
+            setupTotalUnits: 0,
             setupWarningCount: 0,
             setupError: internalError,
             setupProgressUpdatedAt: now,
-            setupFinishedAt: now,
+            setupStartedAt: null,
+            setupFinishedAt: null,
             updatedAt: now,
           })
           .where(
@@ -633,13 +639,13 @@ export const createTournamentInfoRepository = (dbInstance?: DatabaseInstance) =>
           .returning({ id: tournamentInfos.id });
         return rows.length === 1;
       } catch (error) {
-        logError('Failed to conditionally mark stuck tournament setup', error, {
+        logError('Failed to conditionally queue stuck tournament setup', error, {
           tournamentId,
           expectedProgressUpdatedAt,
         });
         throw new DatabaseError(
           'Failed to conditionally mark stuck tournament setup',
-          'TOURNAMENT_INFO_MARK_STUCK_ERROR',
+          'TOURNAMENT_INFO_QUEUE_STUCK_ERROR',
           error as Error,
         );
       }

@@ -30,9 +30,9 @@ export interface TournamentSyncJobData {
   source: 'cron' | 'manual' | 'cascade';
   triggeredAt: string;
   /**
-   * Shared id for one cascade fan-out. Structure jobs (points/battle/knockout)
-   * that finish under this id decrement a Redis barrier; the last one enqueues
-   * the materialized-views refresh so it cannot interleave mid-cascade.
+   * Shared id for one cascade fan-out. Structure and enrichment jobs that
+   * finish under this id claim Redis barrier slots; the last one enqueues the
+   * materialized-views refresh and terminal lifecycle publication.
    */
   cascadeId?: string;
 }

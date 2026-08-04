@@ -22,6 +22,7 @@ const ENTRY_ID = 99_042_001;
 const LATE_ENTRY_ID = 99_042_002;
 const PICK_TEAM_ID = 99_042_101;
 const PICK_PLAYER_ID = 99_042_101;
+const TRANSFER_PLAYER_ID = 99_042_102;
 const TEST_SEASON = '2526';
 
 const client: EntryInfoClient = {
@@ -96,7 +97,9 @@ beforeAll(async () => {
   `;
   await sql`
     INSERT INTO players (id, code, type, team_id, web_name)
-    VALUES (${PICK_PLAYER_ID}, ${PICK_PLAYER_ID}, 1, ${PICK_TEAM_ID}, 'Checkpoint Player')
+    VALUES
+      (${PICK_PLAYER_ID}, ${PICK_PLAYER_ID}, 1, ${PICK_TEAM_ID}, 'Checkpoint Player'),
+      (${TRANSFER_PLAYER_ID}, ${TRANSFER_PLAYER_ID}, 1, ${PICK_TEAM_ID}, 'Transfer Player')
     ON CONFLICT (id) DO NOTHING
   `;
   await sql`
@@ -120,7 +123,7 @@ afterAll(async () => {
   await sql`DELETE FROM entry_infos WHERE id = ${ENTRY_ID}`;
   await sql`DELETE FROM entry_event_results WHERE entry_id = ${LATE_ENTRY_ID}`;
   await sql`DELETE FROM entry_infos WHERE id = ${LATE_ENTRY_ID}`;
-  await sql`DELETE FROM players WHERE id = ${PICK_PLAYER_ID}`;
+  await sql`DELETE FROM players WHERE id IN (${PICK_PLAYER_ID}, ${TRANSFER_PLAYER_ID})`;
   await sql`DELETE FROM teams WHERE id = ${PICK_TEAM_ID}`;
   const redis = await redisSingleton.getClient();
   await redis.hdel(`EntryInfo:${TEST_SEASON}`, String(ENTRY_ID));
@@ -277,6 +280,71 @@ describe('tournament initialization checkpoints', () => {
     });
   });
 
+  test('a midseason latest rollover retains new-season rows without claiming the missing range', async () => {
+    const sql = await getDbClient();
+    await sql`DELETE FROM entry_event_transfers WHERE entry_id = ${ENTRY_ID}`;
+    await sql`
+      UPDATE entry_infos
+      SET entry_transfers_synced_through_event_id = 38,
+          entry_transfers_synced_season = '2425'
+      WHERE id = ${ENTRY_ID}
+    `;
+    await sql`
+      INSERT INTO entry_event_transfers (entry_id, event_id, transfer_time)
+      VALUES (${ENTRY_ID}, 2, '2025-08-08T00:00:00Z')
+    `;
+
+    await entryEventTransfersRepository.replaceForEvent(
+      ENTRY_ID,
+      11,
+      [
+        {
+          event: 11,
+          entry: ENTRY_ID,
+          element_in: PICK_PLAYER_ID,
+          element_out: PICK_PLAYER_ID,
+          element_in_cost: 50,
+          element_out_cost: 50,
+          time: '2026-10-01T00:00:00Z',
+        },
+      ],
+      undefined,
+      { syncMode: 'latest', checkpointSeason: TEST_SEASON },
+    );
+    await entryEventTransfersRepository.replaceForEvent(
+      ENTRY_ID,
+      12,
+      [
+        {
+          event: 12,
+          entry: ENTRY_ID,
+          element_in: PICK_PLAYER_ID,
+          element_out: PICK_PLAYER_ID,
+          element_in_cost: 51,
+          element_out_cost: 50,
+          time: '2026-10-08T00:00:00Z',
+        },
+      ],
+      undefined,
+      { syncMode: 'latest', checkpointSeason: TEST_SEASON },
+    );
+
+    const rows = await sql<Array<{ eventId: number }>>`
+      SELECT event_id AS "eventId"
+      FROM entry_event_transfers
+      WHERE entry_id = ${ENTRY_ID}
+      ORDER BY event_id
+    `;
+    expect(rows.map((row) => row.eventId)).toEqual([11, 12]);
+    expect(await checkpointRow()).toMatchObject({
+      transfers: 0,
+      transfersSeason: TEST_SEASON,
+    });
+    expect(
+      await entryEventTransfersRepository.findEntryIdsNeedingSync([ENTRY_ID], 12, TEST_SEASON),
+    ).toEqual([ENTRY_ID]);
+  });
+
   test('preseason zero is complete only for a preseason target', async () => {
     const sql = await getDbClient();
     await sql`
@@ -413,6 +481,58 @@ describe('tournament initialization checkpoints', () => {
       expect(Number(rows[0]?.vice_captain_count)).toBe(1);
     } finally {
       await sql`DELETE FROM entry_event_picks WHERE entry_id = ${ENTRY_ID} AND event_id = 11`;
+    }
+  });
+
+  test('transfer aggregation returns zero for a missing direction', async () => {
+    const sql = await getDbClient();
+    await sql`DELETE FROM entry_event_transfers WHERE entry_id = ${ENTRY_ID} AND event_id = 11`;
+    await sql`
+      INSERT INTO entry_event_transfers (
+        entry_id,
+        event_id,
+        element_in_id,
+        element_out_id,
+        transfer_time
+      )
+      VALUES (
+        ${ENTRY_ID},
+        11,
+        ${PICK_PLAYER_ID},
+        ${TRANSFER_PLAYER_ID},
+        '2026-10-01T00:00:00Z'
+      )
+    `;
+
+    try {
+      const rows = await sql<
+        Array<{
+          elementId: number;
+          transferInCount: string;
+          transferOutCount: string;
+        }>
+      >`
+        SELECT
+          element_id AS "elementId",
+          transfer_in_count AS "transferInCount",
+          transfer_out_count AS "transferOutCount"
+        FROM get_transfer_aggregation(11, ARRAY[${ENTRY_ID}]::integer[])
+        ORDER BY element_id
+      `;
+      expect(Array.from(rows)).toEqual([
+        {
+          elementId: PICK_PLAYER_ID,
+          transferInCount: '1',
+          transferOutCount: '0',
+        },
+        {
+          elementId: TRANSFER_PLAYER_ID,
+          transferInCount: '0',
+          transferOutCount: '1',
+        },
+      ]);
+    } finally {
+      await sql`DELETE FROM entry_event_transfers WHERE entry_id = ${ENTRY_ID} AND event_id = 11`;
     }
   });
 
