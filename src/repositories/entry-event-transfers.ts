@@ -468,13 +468,25 @@ export const createEntryEventTransfersRepository = (dbInstance?: DatabaseInstanc
           })),
         );
 
-        await db.transaction(async (tx) => {
+        const updatedCount = await db.transaction(async (tx) => {
           await acquireEntrySeasonWriteFence(
             tx,
             updates.map((update) => update.entryId),
             checkpointSeason,
           );
-          await tx.execute(sql`
+          const expectedIds = [...new Set(updates.map((update) => update.id))];
+          const lockedRows = await tx
+            .select({ id: entryEventTransfers.id })
+            .from(entryEventTransfers)
+            .where(inArray(entryEventTransfers.id, expectedIds))
+            .for('update');
+          if (lockedRows.length !== expectedIds.length) {
+            throw new Error(
+              'Entry event transfer rows changed while waiting for the entry season write fence',
+            );
+          }
+
+          const updatedRows = (await tx.execute(sql`
             update entry_event_transfers as eet
             set element_in_points = data.in_points,
                 element_out_points = data.out_points,
@@ -496,14 +508,20 @@ export const createEntryEventTransfersRepository = (dbInstance?: DatabaseInstanc
               )
             ) as data
             where eet.id = data.id
-          `);
+            returning eet.id
+          `)) as unknown as Array<{ id: number }>;
+          if (updatedRows.length !== expectedIds.length) {
+            throw new Error('Entry event transfer update lost canonical rows');
+          }
+
+          return updatedRows.length;
         });
 
         logInfo('Updated entry event transfers', {
           count: updates.length,
           checkpointSeason,
         });
-        return updates.length;
+        return updatedCount;
       } catch (error) {
         logError('Failed to update entry event transfers', error, { count: updates.length });
         throw new DatabaseError(

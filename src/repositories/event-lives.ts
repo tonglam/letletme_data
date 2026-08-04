@@ -69,6 +69,13 @@ export const createEventLiveRepository = (dbInstance?: DbOrTransaction) => {
               eq(events.finished, true),
               eq(events.dataChecked, true),
               isNotNull(events.deadlineTime),
+              // A finalized event flag alone does not prove that the rows
+              // came from the final durable live consolidation. The explicit
+              // marker is written in that same transaction, after the full
+              // event-live payload is persisted; require every accepted row
+              // to be newer than that marker.
+              isNotNull(events.liveSnapshotFinalizedAt),
+              sql`coalesce(${eventLive.updatedAt}, ${eventLive.createdAt}) >= ${events.liveSnapshotFinalizedAt}`,
               sql`coalesce(${eventLive.updatedAt}, ${eventLive.createdAt}) >= ${events.deadlineTime}`,
               sql`${season} = (
                 select

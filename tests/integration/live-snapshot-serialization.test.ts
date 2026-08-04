@@ -10,6 +10,7 @@ import { redisSingleton } from '../../src/cache/singleton';
 import { events } from '../../src/db/schemas/index.schema';
 import { getDb } from '../../src/db/singleton';
 import {
+  persistLiveSnapshotDurably,
   withFixtureSyncSerialization,
   withLiveSnapshotDurableEventsWriteFence,
   withLiveSnapshotDurableWriteFence,
@@ -235,6 +236,69 @@ describe('live snapshot PostgreSQL serialization', () => {
         .from(events)
         .where(eq(events.id, eventId));
       expect(stored.checkedAt).toEqual(new Date('2026-08-04T01:00:02.000Z'));
+    } finally {
+      await db.delete(events).where(eq(events.id, eventId));
+    }
+  });
+
+  test('only a post-match durable write publishes final live authority', async () => {
+    const eventId = 2_000_000_025;
+    const checkedAt = new Date('2026-08-04T01:00:03.000Z');
+    const db = await getDb();
+    await db.delete(events).where(eq(events.id, eventId));
+    await db.insert(events).values({
+      id: eventId,
+      name: 'Live final authority integration',
+      finished: true,
+      dataChecked: true,
+      deadlineTime: '2026-08-03T18:00:00.000Z',
+    });
+    const prepared = {
+      season: '2526',
+      eventId,
+      eventLives: { eventId, sourceCount: 0, eventLives: [], explains: [], errors: 0 },
+      fixtures: [],
+      fixtureViews: {},
+      liveBonus: {},
+      liveBonusV2: {},
+      state: 'settled',
+    } as never;
+
+    try {
+      const ordinary = await persistLiveSnapshotDurably({
+        eventId,
+        checkedAt,
+        prepared,
+        persistFixtures: false,
+        persistEventLives: true,
+      });
+      expect(ordinary.accepted).toBe(true);
+      expect(
+        (
+          await db
+            .select({ finalizedAt: events.liveSnapshotFinalizedAt })
+            .from(events)
+            .where(eq(events.id, eventId))
+        )[0]?.finalizedAt,
+      ).toBeNull();
+
+      const final = await persistLiveSnapshotDurably({
+        eventId,
+        checkedAt: new Date('2026-08-04T01:00:04.000Z'),
+        prepared,
+        persistFixtures: false,
+        persistEventLives: true,
+        finalizeEvent: true,
+      });
+      expect(final.accepted).toBe(true);
+      expect(
+        (
+          await db
+            .select({ finalizedAt: events.liveSnapshotFinalizedAt })
+            .from(events)
+            .where(eq(events.id, eventId))
+        )[0]?.finalizedAt,
+      ).toEqual(new Date('2026-08-04T01:00:04.000Z'));
     } finally {
       await db.delete(events).where(eq(events.id, eventId));
     }

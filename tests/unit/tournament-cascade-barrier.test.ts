@@ -99,11 +99,16 @@ const {
   markCascadeRefreshEnqueued,
   releaseCascadeRefreshEnqueueClaim,
   CASCADE_COMPLETION_BARRIER_JOBS,
+  CASCADE_BARRIER_TTL_SECONDS,
 } = await import('../../src/jobs/tournament-sync.jobs');
 
 describe('cascade completion barrier (FP-07)', () => {
   afterEach(() => {
     store.clear();
+  });
+
+  it('keeps the barrier beyond the post-match recovery horizon', () => {
+    expect(CASCADE_BARRIER_TTL_SECONDS).toBeGreaterThan(24 * 60 * 60);
   });
 
   it('waits for structure and terminal enrichment before allowing publication', async () => {

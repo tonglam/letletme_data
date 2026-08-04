@@ -31,8 +31,13 @@ export const CASCADE_COMPLETION_BARRIER_JOBS = [
   TOURNAMENT_JOBS.SELECTION_STATS,
 ] as const;
 
-/** Slot TTL: long enough for p0 backlog / setup / worker outage (Codex P2). */
-const CASCADE_BARRIER_TTL_SECONDS = 24 * 60 * 60; // 24h
+/**
+ * Slot TTL: longer than the 24h post-match scheduling window and the 48h
+ * failed-job retention window. Each completed participant refreshes the
+ * role-slot TTL, so a delayed final participant cannot strand the barrier
+ * merely because the first participants finished a day earlier.
+ */
+export const CASCADE_BARRIER_TTL_SECONDS = 7 * 24 * 60 * 60;
 const CASCADE_REFRESH_LEASE_TTL_SECONDS = 120;
 
 function cascadeSlotKey(cascadeId: string, jobKey: string): string {

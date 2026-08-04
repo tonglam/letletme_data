@@ -190,11 +190,15 @@ const createTournamentKnockoutsRepository = mock((_db?: unknown) => ({
 const singletonResultsFindByMatchIds = mock(async () => {
   throw new Error('knockout read escaped the transaction');
 });
+const singletonResultsFindByEvent = mock(
+  async (): Promise<DbTournamentKnockoutResult[]> =>
+    [matchOneResultRow] as unknown as DbTournamentKnockoutResult[],
+);
 
 mock.module('../../src/repositories/tournament-knockout-results', () => ({
   createTournamentKnockoutResultsRepository,
   tournamentKnockoutResultsRepository: {
-    findByTournamentAndEvent: mock(async () => [matchOneResultRow]),
+    findByTournamentAndEvent: singletonResultsFindByEvent,
     findByTournamentAndMatchIds: singletonResultsFindByMatchIds,
   },
 }));
@@ -432,6 +436,7 @@ describe('syncKnockoutForTournament (M6: four dependent upserts in one transacti
     createTournamentKnockoutsRepository.mockClear();
     singletonResultsFindByMatchIds.mockClear();
     txResultsFindByMatchIds.mockClear();
+    singletonResultsFindByEvent.mockClear();
     txKnockoutsFindByEndedEvent.mockClear();
     txKnockoutsFindByRound.mockClear();
     assertKnockoutSeasonCurrent.mockClear();
@@ -480,5 +485,17 @@ describe('syncKnockoutForTournament (M6: four dependent upserts in one transacti
     );
     // First upsert ran, second failed, the two next-round upserts never ran
     expect(knockoutCallLog).toEqual(['results']);
+  });
+
+  it('rejects an unseeded fixture before writing placeholder results', async () => {
+    currentDb = { transaction: mock(async (cb: TxCallback) => cb(defaultTx)) };
+    singletonResultsFindByEvent.mockResolvedValueOnce([
+      { ...matchOneResultRow, homeEntryId: null },
+    ] as unknown as DbTournamentKnockoutResult[]);
+
+    await expect(syncKnockoutForTournament(tournament, 5, seasonGuard)).rejects.toThrow(
+      'Knockout fixtures are not fully seeded for tournament 100 in event 5',
+    );
+    expect(txResultsUpsertBatch).not.toHaveBeenCalled();
   });
 });

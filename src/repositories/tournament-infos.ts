@@ -429,22 +429,32 @@ export const createTournamentInfoRepository = (dbInstance?: DatabaseInstance) =>
     markSetupProcessing: async (tournamentId: number): Promise<void> => {
       try {
         const db = await getDbInstance();
-        await db
-          .update(tournamentInfos)
-          .set({
-            setupStatus: 'processing',
-            setupError: null,
-            setupPhase: 'syncing_entries',
-            setupCompletedUnits: 0,
-            setupTotalUnits: 0,
-            setupProgressUpdatedAt: new Date(),
-            setupWarningCount: 0,
-            setupStartedAt: new Date(),
-            setupFinishedAt: null,
-            standingsReadyAt: null,
-            updatedAt: new Date(),
-          })
-          .where(eq(tournamentInfos.id, tournamentId));
+        await db.transaction(async (tx) => {
+          const updated = await tx
+            .update(tournamentInfos)
+            .set({
+              setupStatus: 'processing',
+              setupError: null,
+              setupPhase: 'syncing_entries',
+              setupCompletedUnits: 0,
+              setupTotalUnits: 0,
+              setupProgressUpdatedAt: new Date(),
+              setupWarningCount: 0,
+              setupStartedAt: new Date(),
+              setupFinishedAt: null,
+              standingsReadyAt: null,
+              updatedAt: new Date(),
+            })
+            .where(eq(tournamentInfos.id, tournamentId))
+            .returning({ id: tournamentInfos.id });
+
+          // The readiness predicate is evaluated only on refresh. Keep the
+          // existing read model from serving the prior published row while a
+          // retry is rebuilding canonical data.
+          if (updated.length > 0) {
+            await tx.execute(sql`REFRESH MATERIALIZED VIEW public.mv_tournament_snapshot`);
+          }
+        });
       } catch (error) {
         logError('Failed to mark tournament setup processing', error, { tournamentId });
         throw new DatabaseError(
@@ -458,22 +468,29 @@ export const createTournamentInfoRepository = (dbInstance?: DatabaseInstance) =>
     markSetupRetryQueued: async (tournamentId: number): Promise<void> => {
       try {
         const db = await getDbInstance();
-        await db
-          .update(tournamentInfos)
-          .set({
-            setupStatus: 'pending',
-            setupError: null,
-            setupPhase: 'queued',
-            setupCompletedUnits: 0,
-            setupTotalUnits: 0,
-            setupProgressUpdatedAt: new Date(),
-            setupWarningCount: 0,
-            setupStartedAt: null,
-            setupFinishedAt: null,
-            standingsReadyAt: null,
-            updatedAt: new Date(),
-          })
-          .where(eq(tournamentInfos.id, tournamentId));
+        await db.transaction(async (tx) => {
+          const updated = await tx
+            .update(tournamentInfos)
+            .set({
+              setupStatus: 'pending',
+              setupError: null,
+              setupPhase: 'queued',
+              setupCompletedUnits: 0,
+              setupTotalUnits: 0,
+              setupProgressUpdatedAt: new Date(),
+              setupWarningCount: 0,
+              setupStartedAt: null,
+              setupFinishedAt: null,
+              standingsReadyAt: null,
+              updatedAt: new Date(),
+            })
+            .where(eq(tournamentInfos.id, tournamentId))
+            .returning({ id: tournamentInfos.id });
+
+          if (updated.length > 0) {
+            await tx.execute(sql`REFRESH MATERIALIZED VIEW public.mv_tournament_snapshot`);
+          }
+        });
       } catch (error) {
         logError('Failed to queue tournament setup retry', error, { tournamentId });
         throw new DatabaseError(

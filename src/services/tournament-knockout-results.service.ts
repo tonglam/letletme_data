@@ -272,6 +272,15 @@ export async function syncKnockoutForTournament(
     return { updatedResults: 0, updatedKnockouts: 0, skipped: entryIds.length };
   }
 
+  const unseededFixture = knockoutResults.find(
+    (result) => result.homeEntryId === null || result.awayEntryId === null,
+  );
+  if (unseededFixture) {
+    throw new Error(
+      `Knockout fixtures are not fully seeded for tournament ${tournament.id} in event ${eventId}`,
+    );
+  }
+
   const participatingEntryIds = uniqueNumbers(
     knockoutResults
       .flatMap((result) => [result.homeEntryId, result.awayEntryId])

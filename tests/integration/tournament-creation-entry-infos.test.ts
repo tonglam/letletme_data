@@ -286,6 +286,11 @@ describe('tournament creation vs entry_infos (FP-08)', () => {
       WHERE id = ${created.id}
     `;
     expect(
+      await tournamentRosterRepository.finishThroughEvent(13, [
+        { tournamentId: created.id, standingsReadyAt: currentRows[0]!.standingsReadyAt },
+      ]),
+    ).toBe(0);
+    expect(
       await tournamentRosterRepository.finishThroughEvent(12, [
         { tournamentId: created.id, standingsReadyAt: currentRows[0]!.standingsReadyAt },
       ]),
@@ -415,6 +420,14 @@ describe('tournament creation vs entry_infos (FP-08)', () => {
           standings_ready_at = now()
       where id = ${created.id}
     `;
+    await client`REFRESH MATERIALIZED VIEW mv_tournament_snapshot`;
+    expect(
+      await client<Array<{ tournament_id: number }>>`
+        select tournament_id
+        from mv_tournament_snapshot
+        where tournament_id = ${created.id}
+      `,
+    ).toHaveLength(1);
     await tournamentInfoRepository.markSetupRetryQueued(created.id);
 
     const retryGate = await client<
@@ -429,6 +442,13 @@ describe('tournament creation vs entry_infos (FP-08)', () => {
       setup_phase: 'queued',
       standings_ready_at: null,
     });
+    expect(
+      await client<Array<{ tournament_id: number }>>`
+        select tournament_id
+        from mv_tournament_snapshot
+        where tournament_id = ${created.id}
+      `,
+    ).toHaveLength(0);
 
     await client`
       update tournament_infos
@@ -437,6 +457,7 @@ describe('tournament creation vs entry_infos (FP-08)', () => {
           standings_ready_at = now()
       where id = ${created.id}
     `;
+    await client`REFRESH MATERIALIZED VIEW mv_tournament_snapshot`;
     await tournamentInfoRepository.markSetupProcessing(created.id);
     const automaticRetryGate = await client<
       Array<{ setup_status: string; setup_phase: string; standings_ready_at: Date | null }>
@@ -450,6 +471,13 @@ describe('tournament creation vs entry_infos (FP-08)', () => {
       setup_phase: 'syncing_entries',
       standings_ready_at: null,
     });
+    expect(
+      await client<Array<{ tournament_id: number }>>`
+        select tournament_id
+        from mv_tournament_snapshot
+        where tournament_id = ${created.id}
+      `,
+    ).toHaveLength(0);
 
     await client`
       update tournament_infos

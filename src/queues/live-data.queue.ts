@@ -26,6 +26,8 @@ export interface LiveDataJobData {
   triggeredAt: string;
   /** Large event-live/explain UPSERTs run every ten minutes and at consolidation. */
   persistEventLives?: boolean;
+  /** Only the post-match consolidation may publish terminal live authority. */
+  finalizeEvent?: boolean;
 }
 
 const tieredQueueSet = createTieredQueueSet<LiveDataJobData>(liveDataQueueName, {

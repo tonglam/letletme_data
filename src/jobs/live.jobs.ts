@@ -82,6 +82,7 @@ export async function runPostMatchConsolidation(): Promise<unknown | null> {
 
   const job = await enqueueLiveSnapshot(currentEvent.id, 'cascade', {
     persistEventLives: true,
+    finalizeEvent: true,
     jobId: `live-snapshot-e${currentEvent.id}-post-${resultSlot}`,
   });
   if (job) {

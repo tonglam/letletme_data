@@ -833,13 +833,19 @@ describe('tournament initialization checkpoints', () => {
         deadlineTime: Date | null;
         finished: boolean;
         dataChecked: boolean;
+        updatedAt: Date;
+        liveSnapshotCheckedAt: Date | null;
+        liveSnapshotFinalizedAt: Date | null;
       }>
     >`
       SELECT
         id,
         deadline_time AS "deadlineTime",
         finished,
-        data_checked AS "dataChecked"
+        data_checked AS "dataChecked",
+        updated_at AS "updatedAt",
+        live_snapshot_checked_at AS "liveSnapshotCheckedAt",
+        live_snapshot_finalized_at AS "liveSnapshotFinalizedAt"
       FROM events
       WHERE id IN (1, 12)
       ORDER BY id
@@ -853,7 +859,10 @@ describe('tournament initialization checkpoints', () => {
               ELSE '2025-11-01T18:30:00Z'::timestamptz
             END,
             finished = true,
-            data_checked = true
+            data_checked = true,
+            updated_at = '2025-11-01T00:00:00Z'::timestamptz,
+            live_snapshot_checked_at = '2025-11-02T00:00:00Z'::timestamptz,
+            live_snapshot_finalized_at = NULL
         WHERE id IN (1, 12)
       `;
       await sql`DELETE FROM event_lives WHERE element_id = ${SOURCE_PLAYER_ID}`;
@@ -870,6 +879,30 @@ describe('tournament initialization checkpoints', () => {
         SET updated_at = '2025-11-02T00:00:00Z'::timestamptz
         WHERE element_id = ${SOURCE_PLAYER_ID}
       `;
+      const staleConsolidation = await eventLiveRepository.findFinalizedByEventIdForSeason(
+        12,
+        TEST_SEASON,
+      );
+      expect(staleConsolidation.some((row) => row.elementId === SOURCE_PLAYER_ID)).toBe(false);
+
+      await sql`
+        UPDATE events
+        SET live_snapshot_finalized_at = '2025-11-03T00:00:00Z'::timestamptz
+        WHERE id IN (1, 12)
+      `;
+      const finalizedBeforeFreshRows = await eventLiveRepository.findFinalizedByEventIdForSeason(
+        12,
+        TEST_SEASON,
+      );
+      expect(finalizedBeforeFreshRows.some((row) => row.elementId === SOURCE_PLAYER_ID)).toBe(
+        false,
+      );
+
+      await sql`
+        UPDATE events
+        SET live_snapshot_finalized_at = '2025-11-01T00:00:00Z'::timestamptz
+        WHERE id IN (1, 12)
+      `;
       const current = await eventLiveRepository.findFinalizedByEventIdForSeason(12, TEST_SEASON);
       expect(current.find((row) => row.elementId === SOURCE_PLAYER_ID)?.totalPoints).toBe(9);
       const wrongSeason = await eventLiveRepository.findFinalizedByEventIdForSeason(12, '2627');
@@ -881,7 +914,10 @@ describe('tournament initialization checkpoints', () => {
           UPDATE events
           SET deadline_time = ${event.deadlineTime},
               finished = ${event.finished},
-              data_checked = ${event.dataChecked}
+              data_checked = ${event.dataChecked},
+              updated_at = ${event.updatedAt},
+              live_snapshot_checked_at = ${event.liveSnapshotCheckedAt},
+              live_snapshot_finalized_at = ${event.liveSnapshotFinalizedAt}
           WHERE id = ${event.id}
         `;
       }
@@ -993,6 +1029,39 @@ describe('tournament initialization checkpoints', () => {
         elementOutPoints: 2,
         elementInPlayed: true,
       });
+
+      await sql`DELETE FROM entry_event_transfers WHERE id = ${update.id}`;
+      let missingRowError: unknown;
+      try {
+        await entryEventTransfersRepository.updateBatchById([update], TEST_SEASON);
+      } catch (error) {
+        missingRowError = error;
+      }
+      expect((missingRowError as { cause?: Error })?.cause?.message).toContain(
+        'Entry event transfer rows changed while waiting for the entry season write fence',
+      );
+      await sql`
+        INSERT INTO entry_event_transfers (
+          id,
+          entry_id,
+          event_id,
+          element_in_id,
+          element_out_id,
+          transfer_time,
+          element_in_points,
+          element_out_points
+        )
+        VALUES (
+          ${update.id},
+          ${ENTRY_ID},
+          12,
+          ${PICK_PLAYER_ID},
+          ${TRANSFER_PLAYER_ID},
+          '2026-01-01T00:00:00Z',
+          8,
+          2
+        )
+      `;
 
       await redis.set('Season:active', '2627');
       resetActiveSeasonMemo();

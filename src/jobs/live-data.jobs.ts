@@ -43,7 +43,12 @@ async function enqueueLiveDataJob(
   jobName: LiveDataJobName,
   eventId: number,
   source: LiveDataJobSource = 'cron',
-  options: { delay?: number; jobId?: string; persistEventLives?: boolean } = {},
+  options: {
+    delay?: number;
+    jobId?: string;
+    persistEventLives?: boolean;
+    finalizeEvent?: boolean;
+  } = {},
 ) {
   try {
     const tier = getLiveDataJobPriority(jobName as LiveDataPriorityJobName);
@@ -67,6 +72,7 @@ async function enqueueLiveDataJob(
       ...(options.persistEventLives !== undefined
         ? { persistEventLives: options.persistEventLives }
         : {}),
+      ...(options.finalizeEvent !== undefined ? { finalizeEvent: options.finalizeEvent } : {}),
     };
 
     // Manual triggers share a deterministic ID per (job, event) so repeat triggers
@@ -111,7 +117,12 @@ export function liveSnapshotMinuteBucket(date: Date): string {
 export const enqueueLiveSnapshot = (
   eventId: number,
   source: LiveDataJobSource = 'cron',
-  options: { persistEventLives?: boolean; now?: Date; jobId?: string } = {},
+  options: {
+    persistEventLives?: boolean;
+    finalizeEvent?: boolean;
+    now?: Date;
+    jobId?: string;
+  } = {},
 ) => {
   const persistEventLives = options.persistEventLives ?? false;
   // Production has one unscaled Compose worker container, replaced in place:
@@ -123,6 +134,7 @@ export const enqueueLiveSnapshot = (
   const wireJobName = persistEventLives ? LIVE_JOBS.EVENT_LIVES_DB : LIVE_JOBS.EVENT_LIVES_CACHE;
   return enqueueLiveDataJob(wireJobName, eventId, source, {
     persistEventLives,
+    finalizeEvent: options.finalizeEvent,
     jobId:
       options.jobId ??
       (source === 'cron'

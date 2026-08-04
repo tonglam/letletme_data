@@ -963,6 +963,10 @@ describe('syncLiveSnapshot', () => {
     expect(calls.indexOf('publish-stage')).toBeLessThan(calls.indexOf('persist-durable'));
     expect(calls.indexOf('persist-durable')).toBeLessThan(calls.indexOf('publish-commit'));
     expect(calls.at(-1)).toBe('serialize-exit');
+    expect(persistDurably.mock.calls[0][0]).toMatchObject({
+      persistEventLives: true,
+      finalizeEvent: false,
+    });
     expect(result).toMatchObject({
       changed: true,
       stale: false,
@@ -1024,6 +1028,54 @@ describe('syncLiveSnapshot', () => {
       stale: false,
       persistedFixtures: false,
       persistedEventLives: true,
+    });
+  });
+
+  test('passes terminal finalization only when explicitly requested', async () => {
+    const persistDurably = mock(async (request: { checkedAt: Date; finalizeEvent?: boolean }) => ({
+      accepted: true,
+      winnerCheckedAt: request.checkedAt,
+      persistedFixtures: true,
+      persistedEventLives: true,
+    }));
+
+    await syncLiveSnapshot(1, {
+      persistEventLives: true,
+      finalizeEvent: true,
+      dependencies: {
+        getEventLive: async () => mockEventLiveResponseFixture,
+        getFixtures: async () => [liveRawFixture()],
+        getExpectedFixtureIds: async () => [1],
+        getReferenceData: async () => referenceData(),
+        serialize: async (_eventId, operation) => operation(new Date('2025-08-15T20:20:00.000Z')),
+        publish: async (payload, publishOptions = {}) => {
+          await publishOptions.beforeCommit?.(true);
+          return {
+            changed: true,
+            stale: false,
+            meta: {
+              schemaVersion: 1 as const,
+              season: '2526',
+              eventId: payload.eventId,
+              revision: 'd'.repeat(24),
+              state: payload.state,
+              publishedAt: '2025-08-15T20:20:00.000Z',
+              checkedAt: '2025-08-15T20:20:00.000Z',
+              eventLiveCount: payload.eventLives.length,
+              fixtureCount: payload.fixtures.length,
+              fixtureTeamCount: Object.keys(payload.liveFixturesV2).length,
+              bonusTeamCount: Object.keys(payload.liveBonusV2).length,
+            },
+          };
+        },
+        persistDurably,
+      },
+    });
+
+    expect(persistDurably).toHaveBeenCalledTimes(1);
+    expect(persistDurably.mock.calls[0][0]).toMatchObject({
+      persistEventLives: true,
+      finalizeEvent: true,
     });
   });
 

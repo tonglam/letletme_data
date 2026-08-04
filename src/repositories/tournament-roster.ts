@@ -343,6 +343,11 @@ export const tournamentRosterRepository = {
           where id = ${tournament.id}
         `;
 
+        // Clearing readiness must evict the previously published aggregate
+        // before this roster publication commits. The view predicate is only
+        // evaluated during refresh, so cache invalidation alone is insufficient.
+        await tx`REFRESH MATERIALIZED VIEW public.mv_tournament_snapshot`;
+
         return {
           changed: true,
           participantCount: participants.length,
@@ -431,7 +436,7 @@ export const tournamentRosterRepository = {
         and greatest(
           coalesce(tournament.group_ended_event_id, 0),
           coalesce(tournament.knockout_ended_event_id, 0)
-        ) <= ${eventId}
+        ) = ${eventId}
         and (
           (
             tournament.knockout_mode <> 'no_knockout'
