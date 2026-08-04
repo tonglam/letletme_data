@@ -1,3 +1,4 @@
+import { getActiveCacheSeason } from '../cache/cache-season';
 import { fplClient } from '../clients/fpl';
 import { entryEventPicksRepository } from '../repositories/entry-event-picks';
 import { entryEventTransfersRepository } from '../repositories/entry-event-transfers';
@@ -67,13 +68,17 @@ export async function syncEntryEventTransfers(
       if (!current) throw new Error('No current event found');
       targetEventId = current.id;
     }
-    const transfers = await fplClient.getEntryTransfers(entryId);
+    const [transfers, checkpointSeason] = await Promise.all([
+      fplClient.getEntryTransfers(entryId),
+      getActiveCacheSeason(),
+    ]);
     const pointsByElement = options?.pointsByElement ?? (await getPointsByElement(targetEventId));
     await entryEventTransfersRepository.replaceForEvent(
       entryId,
       targetEventId,
       transfers,
       pointsByElement,
+      { checkpointSeason },
     );
     logInfo('Entry event transfers sync completed', { entryId, eventId: targetEventId });
     return { entryId, eventId: targetEventId };

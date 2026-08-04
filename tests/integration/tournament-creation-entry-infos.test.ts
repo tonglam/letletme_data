@@ -270,5 +270,18 @@ describe('tournament creation vs entry_infos (FP-08)', () => {
       setup_phase: 'queued',
       standings_ready_at: null,
     });
+
+    await client`
+      update tournament_infos
+      set state = 'finished', roster_sync_status = 'processing'
+      where id = ${created.id}
+    `;
+    await tournamentRosterRepository.markReadyAndResume(created.id);
+    const finishedWins = await client<Array<{ state: string; roster_sync_status: string }>>`
+      select state, roster_sync_status
+      from tournament_infos
+      where id = ${created.id}
+    `;
+    expect(finishedWins[0]).toEqual({ state: 'finished', roster_sync_status: 'ready' });
   });
 });

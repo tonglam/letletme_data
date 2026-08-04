@@ -1,3 +1,4 @@
+import { getActiveCacheSeason } from '../cache/cache-season';
 import { eventLivesCache } from '../cache/operations';
 import { fplClient } from '../clients/fpl';
 import { entryEventPicksRepository } from '../repositories/entry-event-picks';
@@ -74,6 +75,7 @@ export async function syncTournamentEventResultsForEntryIds(
   }
 
   const live = await resolveEventPointsPayload(eventId, options?.live);
+  const checkpointSeason = options?.skipTransfers ? null : await getActiveCacheSeason();
   const pointsByElement = new Map<number, number>();
   for (const element of live.elements) {
     pointsByElement.set(element.id, element.stats.total_points);
@@ -107,7 +109,7 @@ export async function syncTournamentEventResultsForEntryIds(
             eventId,
             transfers,
             pointsByElement,
-            { syncMode: 'latest' },
+            { syncMode: 'latest', checkpointSeason: checkpointSeason! },
           ),
         );
       }
@@ -142,11 +144,12 @@ export async function syncTournamentEventResultsForEntryIds(
 export async function syncEntryTransferHistories(
   entryIds: number[],
   endEventId: number,
-  options?: { concurrency?: number },
+  options?: { concurrency?: number; season?: string },
 ): Promise<{ synced: number; errors: number; failedEntryIds: number[] }> {
   const uniqueEntryIds = uniqueNumbers(entryIds);
   const failedEntryIds: number[] = [];
   const concurrency = options?.concurrency ?? DEFAULT_CONCURRENCY;
+  const checkpointSeason = options?.season ?? (await getActiveCacheSeason());
 
   const outcomes = await mapWithConcurrency(uniqueEntryIds, concurrency, async (entryId) => {
     try {
@@ -158,6 +161,7 @@ export async function syncEntryTransferHistories(
       await withTimeout(
         entryEventTransfersRepository.replaceForEvent(entryId, endEventId, transfers, undefined, {
           syncMode: 'all',
+          checkpointSeason,
         }),
         ENTRY_PERSIST_TIMEOUT_MS,
         `Timed out persisting transfer history for entry ${entryId}`,

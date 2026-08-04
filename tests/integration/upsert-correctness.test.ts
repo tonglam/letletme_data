@@ -27,6 +27,7 @@ const VALUE_PLAYER_A = 990013;
 const VALUE_PLAYER_B = 990014;
 const EVENT_ID = 10;
 const CHANGE_DATE = '20260717';
+const CHECKPOINT_SEASON = '2526';
 
 async function db() {
   return getDbClient();
@@ -118,6 +119,7 @@ describe('entry-event-transfers element_in_played (H5)', () => {
     // Given: a transfer row whose computed played-flag is stored
     await transfersRepository.replaceForEvent(ENTRY_ID, EVENT_ID, [TRANSFER], undefined, {
       elementInPlayed: true,
+      checkpointSeason: CHECKPOINT_SEASON,
     });
     const initial = await (await db())<{ element_in_played: boolean | null }[]>`
       SELECT element_in_played FROM entry_event_transfers
@@ -128,6 +130,7 @@ describe('entry-event-transfers element_in_played (H5)', () => {
     // When: the same event re-syncs without a computed value (null)
     await transfersRepository.replaceForEvent(ENTRY_ID, EVENT_ID, [TRANSFER], undefined, {
       elementInPlayed: null,
+      checkpointSeason: CHECKPOINT_SEASON,
     });
 
     // Then: the stored flag survives
@@ -140,6 +143,7 @@ describe('entry-event-transfers element_in_played (H5)', () => {
     // And: a fresh computed value still overwrites
     await transfersRepository.replaceForEvent(ENTRY_ID, EVENT_ID, [TRANSFER], undefined, {
       elementInPlayed: false,
+      checkpointSeason: CHECKPOINT_SEASON,
     });
     const afterUpdate = await (await db())<{ element_in_played: boolean | null }[]>`
       SELECT element_in_played FROM entry_event_transfers
@@ -165,6 +169,7 @@ describe('entry-event-transfers element_in_played (H5)', () => {
     await transfersRepository.replaceForEvent(ENTRY_ID, EVENT_ID, history, undefined, {
       elementInPlayed: true,
       syncMode: 'all',
+      checkpointSeason: CHECKPOINT_SEASON,
     });
 
     const firstSync = await (await db())<
@@ -184,6 +189,7 @@ describe('entry-event-transfers element_in_played (H5)', () => {
     await transfersRepository.replaceForEvent(ENTRY_ID, EVENT_ID, history, undefined, {
       elementInPlayed: null,
       syncMode: 'all',
+      checkpointSeason: CHECKPOINT_SEASON,
     });
     const secondSync = await (await db())<
       { event_id: number; element_in_played: boolean | null }[]

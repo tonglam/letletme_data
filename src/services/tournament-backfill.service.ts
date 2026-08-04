@@ -1,4 +1,5 @@
 import { tournamentSetupBackfillEventScopes } from '../domain/mutation-scope';
+import { getActiveCacheSeason } from '../cache/cache-season';
 import type { TournamentBackfillWindow, TournamentConfig } from '../domain/tournament';
 import { ENTRY_SYNC_DEFAULT_CONCURRENCY } from '../queues/entry-sync.queue';
 import { entryEventPicksRepository } from '../repositories/entry-event-picks';
@@ -71,9 +72,11 @@ export async function syncTournamentEntryDetails(
   }
 
   const targetEventId = options?.targetEventId ?? 0;
+  const season = await getActiveCacheSeason();
   const requestedEntryIds = await entryInfoRepository.findIdsNeedingSnapshotSync(
     sanitized,
     targetEventId,
+    season,
   );
   const plan = {
     totalEntries: sanitized.length,
@@ -90,7 +93,7 @@ export async function syncTournamentEntryDetails(
     const batch = requestedEntryIds.slice(index, index + progressBatchSize);
     await mapWithConcurrency(batch, ENTRY_SYNC_DEFAULT_CONCURRENCY, async (entryId) => {
       try {
-        await syncEntryInfo(entryId, undefined, targetEventId);
+        await syncEntryInfo(entryId, undefined, targetEventId, season);
       } catch (error) {
         failures.push(entryId);
         logError('Failed to sync detailed tournament entry info', error, { entryId });
@@ -364,6 +367,8 @@ export async function enrichTournamentHistory(
 ): Promise<TournamentSetupIssue[]> {
   const issues: TournamentSetupIssue[] = [];
   const targetEventId = window?.endEventId ?? 0;
+  const transferSeason =
+    options?.includeTransferHistory === false ? null : await getActiveCacheSeason();
   const pickAudit = window
     ? await auditMissingUnits(entryIds, window, 'picks')
     : { missing: new Map<number, number[]>(), totalPairs: 0 };
@@ -372,7 +377,11 @@ export async function enrichTournamentHistory(
   const transferEntryIds =
     options?.includeTransferHistory === false
       ? []
-      : await entryEventTransfersRepository.findEntryIdsNeedingSync(entryIds, targetEventId);
+      : await entryEventTransfersRepository.findEntryIdsNeedingSync(
+          entryIds,
+          targetEventId,
+          transferSeason!,
+        );
   const transferUnits = transferEntryIds.length;
   const totalPickPairs = pickAudit.totalPairs;
   const enrichmentPlan = {
@@ -407,6 +416,7 @@ export async function enrichTournamentHistory(
   if (transferEntryIds.length > 0) {
     const transferResult = await syncEntryTransferHistories(transferEntryIds, targetEventId, {
       concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
+      season: transferSeason!,
     });
     completed += transferEntryIds.length;
     await options?.onProgress?.(completed, total);

@@ -12,6 +12,7 @@ import { ENTRY_SYNC_DEFAULT_CONCURRENCY } from '../queues/entry-sync.queue';
 import { ConflictError, NotFoundError, ValidationError } from '../utils/errors';
 import { mapWithConcurrency } from '../utils/async';
 import { invalidateTournamentGraphQLCaches } from '../cache/tournament-graphql-cache';
+import { getActiveCacheSeason } from '../cache/cache-season';
 import { logError, logInfo } from '../utils/logger';
 import { withMutationConflictGuard } from '../utils/mutation-lock';
 
@@ -82,6 +83,7 @@ async function reconcileTournamentRosterUnlocked(
     const window = getTournamentBackfillWindow(tournament, finalizedEvent?.id ?? null);
 
     if (addedEntryIds.length > 0) {
+      const season = await getActiveCacheSeason();
       const targetEventId = window?.endEventId ?? 0;
       const entryIssues = await syncTournamentEntryDetails(addedEntryIds, {
         targetEventId,
@@ -100,9 +102,11 @@ async function reconcileTournamentRosterUnlocked(
       const transferEntryIds = await entryEventTransfersRepository.findEntryIdsNeedingSync(
         addedEntryIds,
         targetEventId,
+        season,
       );
       const transfers = await syncEntryTransferHistories(transferEntryIds, targetEventId, {
         concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
+        season,
       });
       if (transfers.errors > 0) {
         throw new Error(

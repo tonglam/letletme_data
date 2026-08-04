@@ -5,6 +5,7 @@ assertIntegrationEnv();
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 
 import { redisSingleton } from '../../src/cache/singleton';
+import { resetActiveSeasonMemo } from '../../src/cache/cache-season';
 import { getDbClient } from '../../src/db/singleton';
 import { entryEventTransfersRepository } from '../../src/repositories/entry-event-transfers';
 import { entryInfoRepository } from '../../src/repositories/entry-infos';
@@ -61,12 +62,16 @@ async function checkpointRow() {
   const rows = await sql<
     {
       snapshot: number | null;
+      snapshotSeason: string | null;
       transfers: number | null;
+      transfersSeason: string | null;
     }[]
   >`
     SELECT
       entry_snapshot_synced_through_event_id AS snapshot,
-      entry_transfers_synced_through_event_id AS transfers
+      entry_snapshot_synced_season AS "snapshotSeason",
+      entry_transfers_synced_through_event_id AS transfers,
+      entry_transfers_synced_season AS "transfersSeason"
     FROM entry_infos
     WHERE id = ${ENTRY_ID}
   `;
@@ -76,6 +81,7 @@ async function checkpointRow() {
 beforeAll(async () => {
   const redis = await redisSingleton.getClient();
   await redis.set('Season:active', TEST_SEASON);
+  resetActiveSeasonMemo();
   const sql = await getDbClient();
   await sql`
     INSERT INTO events (id, name)
@@ -98,7 +104,9 @@ beforeAll(async () => {
     VALUES (${ENTRY_ID}, 'Checkpoint XI', 'Checkpoint Manager')
     ON CONFLICT (id) DO UPDATE SET
       entry_snapshot_synced_through_event_id = NULL,
-      entry_transfers_synced_through_event_id = NULL
+      entry_snapshot_synced_season = NULL,
+      entry_transfers_synced_through_event_id = NULL,
+      entry_transfers_synced_season = NULL
   `;
 });
 
@@ -123,11 +131,81 @@ describe('tournament initialization checkpoints', () => {
     await syncEntryInfo(ENTRY_ID, client, 12);
 
     expect((await checkpointRow())?.snapshot).toBe(12);
-    expect(await entryInfoRepository.findIdsNeedingSnapshotSync([ENTRY_ID], 12)).toEqual([]);
-    expect(await entryInfoRepository.findIdsNeedingSnapshotSync([ENTRY_ID], 11)).toEqual([]);
-    expect(await entryInfoRepository.findIdsNeedingSnapshotSync([ENTRY_ID], 13)).toEqual([
-      ENTRY_ID,
-    ]);
+    expect((await checkpointRow())?.snapshotSeason).toBe(TEST_SEASON);
+    expect(
+      await entryInfoRepository.findIdsNeedingSnapshotSync([ENTRY_ID], 12, TEST_SEASON),
+    ).toEqual([]);
+    expect(
+      await entryInfoRepository.findIdsNeedingSnapshotSync([ENTRY_ID], 11, TEST_SEASON),
+    ).toEqual([]);
+    expect(
+      await entryInfoRepository.findIdsNeedingSnapshotSync([ENTRY_ID], 13, TEST_SEASON),
+    ).toEqual([ENTRY_ID]);
+  });
+
+  test('numeric checkpoints from a previous season are stale and reset for the active season', async () => {
+    const sql = await getDbClient();
+    await sql`
+      UPDATE entry_infos
+      SET entry_snapshot_synced_through_event_id = 38,
+          entry_snapshot_synced_season = '2425',
+          entry_transfers_synced_through_event_id = 38,
+          entry_transfers_synced_season = '2425'
+      WHERE id = ${ENTRY_ID}
+    `;
+    await sql`
+      INSERT INTO entry_event_picks (entry_id, event_id, chip, picks, transfers, transfers_cost)
+      VALUES (
+        ${ENTRY_ID},
+        1,
+        'n/a',
+        '[{"element":999,"position":1,"multiplier":1}]'::jsonb,
+        0,
+        0
+      )
+      ON CONFLICT (entry_id, event_id) DO UPDATE SET picks = excluded.picks
+    `;
+    await sql`
+      UPDATE entry_event_results
+      SET event_picks = '[{"element":999,"position":1,"multiplier":1}]'::jsonb
+      WHERE entry_id = ${ENTRY_ID} AND event_id = 1
+    `;
+    await sql`
+      INSERT INTO entry_event_transfers (entry_id, event_id, transfer_time)
+      VALUES (${ENTRY_ID}, 1, '2025-08-01T00:00:00Z')
+      ON CONFLICT DO NOTHING
+    `;
+
+    expect(
+      await entryInfoRepository.findIdsNeedingSnapshotSync([ENTRY_ID], 1, TEST_SEASON),
+    ).toEqual([ENTRY_ID]);
+    expect(
+      await entryEventTransfersRepository.findEntryIdsNeedingSync([ENTRY_ID], 1, TEST_SEASON),
+    ).toEqual([ENTRY_ID]);
+
+    await syncEntryInfo(ENTRY_ID, client, 1, TEST_SEASON);
+    await entryEventTransfersRepository.replaceForEvent(ENTRY_ID, 1, [], undefined, {
+      syncMode: 'all',
+      checkpointSeason: TEST_SEASON,
+    });
+
+    expect(await checkpointRow()).toMatchObject({
+      snapshot: 1,
+      snapshotSeason: TEST_SEASON,
+      transfers: 1,
+      transfersSeason: TEST_SEASON,
+    });
+    const resetRows = await sql<Array<{ picks: number; transfers: number; resultPicks: unknown }>>`
+      SELECT
+        (SELECT count(*)::int FROM entry_event_picks
+         WHERE entry_id = ${ENTRY_ID}) AS picks,
+        (SELECT count(*)::int FROM entry_event_transfers
+         WHERE entry_id = ${ENTRY_ID}) AS transfers,
+        result.event_picks AS "resultPicks"
+      FROM entry_event_results result
+      WHERE result.entry_id = ${ENTRY_ID} AND result.event_id = 1
+    `;
+    expect(resetRows[0]).toEqual({ picks: 0, transfers: 0, resultPicks: null });
   });
 
   test('preseason zero is complete only for a preseason target', async () => {
@@ -135,23 +213,32 @@ describe('tournament initialization checkpoints', () => {
     await sql`
       UPDATE entry_infos
       SET entry_snapshot_synced_through_event_id = 0,
-          entry_transfers_synced_through_event_id = 0
+          entry_snapshot_synced_season = ${TEST_SEASON},
+          entry_transfers_synced_through_event_id = 0,
+          entry_transfers_synced_season = ${TEST_SEASON}
       WHERE id = ${ENTRY_ID}
     `;
 
-    expect(await entryInfoRepository.findIdsNeedingSnapshotSync([ENTRY_ID], 0)).toEqual([]);
-    expect(await entryInfoRepository.findIdsNeedingSnapshotSync([ENTRY_ID], 1)).toEqual([ENTRY_ID]);
-    expect(await entryEventTransfersRepository.findEntryIdsNeedingSync([ENTRY_ID], 0)).toEqual([]);
-    expect(await entryEventTransfersRepository.findEntryIdsNeedingSync([ENTRY_ID], 1)).toEqual([
-      ENTRY_ID,
-    ]);
+    expect(
+      await entryInfoRepository.findIdsNeedingSnapshotSync([ENTRY_ID], 0, TEST_SEASON),
+    ).toEqual([]);
+    expect(
+      await entryInfoRepository.findIdsNeedingSnapshotSync([ENTRY_ID], 1, TEST_SEASON),
+    ).toEqual([ENTRY_ID]);
+    expect(
+      await entryEventTransfersRepository.findEntryIdsNeedingSync([ENTRY_ID], 0, TEST_SEASON),
+    ).toEqual([]);
+    expect(
+      await entryEventTransfersRepository.findEntryIdsNeedingSync([ENTRY_ID], 1, TEST_SEASON),
+    ).toEqual([ENTRY_ID]);
   });
 
   test('preseason enrichment establishes an empty transfer checkpoint without picks calls', async () => {
     const sql = await getDbClient();
     await sql`
       UPDATE entry_infos
-      SET entry_transfers_synced_through_event_id = NULL
+      SET entry_transfers_synced_through_event_id = NULL,
+          entry_transfers_synced_season = NULL
       WHERE id = ${ENTRY_ID}
     `;
     let plan: TournamentEnrichmentPlan | null = null;
@@ -179,7 +266,8 @@ describe('tournament initialization checkpoints', () => {
     const sql = await getDbClient();
     await sql`
       UPDATE entry_infos
-      SET entry_snapshot_synced_through_event_id = NULL
+      SET entry_snapshot_synced_through_event_id = NULL,
+          entry_snapshot_synced_season = NULL
       WHERE id = ${ENTRY_ID}
     `;
     const failingClient: EntryInfoClient = {
@@ -205,7 +293,8 @@ describe('tournament initialization checkpoints', () => {
     `;
     await sql`
       UPDATE entry_infos
-      SET entry_snapshot_synced_through_event_id = NULL
+      SET entry_snapshot_synced_through_event_id = NULL,
+          entry_snapshot_synced_season = NULL
       WHERE id = ${ENTRY_ID}
     `;
     const provisionalClient: EntryInfoClient = {
@@ -405,41 +494,50 @@ describe('tournament initialization checkpoints', () => {
     const sql = await getDbClient();
     await sql`
       UPDATE entry_infos
-      SET entry_transfers_synced_through_event_id = NULL
+      SET entry_transfers_synced_through_event_id = NULL,
+          entry_transfers_synced_season = NULL
       WHERE id = ${ENTRY_ID}
     `;
     await entryEventTransfersRepository.replaceForEvent(ENTRY_ID, 10, [], undefined, {
       syncMode: 'all',
+      checkpointSeason: TEST_SEASON,
     });
 
     expect((await checkpointRow())?.transfers).toBe(10);
-    expect(await entryEventTransfersRepository.findEntryIdsNeedingSync([ENTRY_ID], 10)).toEqual([]);
-    expect(await entryEventTransfersRepository.findEntryIdsNeedingSync([ENTRY_ID], 11)).toEqual([
-      ENTRY_ID,
-    ]);
+    expect(
+      await entryEventTransfersRepository.findEntryIdsNeedingSync([ENTRY_ID], 10, TEST_SEASON),
+    ).toEqual([]);
+    expect(
+      await entryEventTransfersRepository.findEntryIdsNeedingSync([ENTRY_ID], 11, TEST_SEASON),
+    ).toEqual([ENTRY_ID]);
   });
 
   test('per-event sync advances only a contiguous checkpoint', async () => {
     const sql = await getDbClient();
     await sql`
       UPDATE entry_infos
-      SET entry_transfers_synced_through_event_id = 9
+      SET entry_transfers_synced_through_event_id = 9,
+          entry_transfers_synced_season = ${TEST_SEASON}
       WHERE id = ${ENTRY_ID}
     `;
 
     await entryEventTransfersRepository.replaceForEvent(ENTRY_ID, 10, [], undefined, {
       syncMode: 'latest',
+      checkpointSeason: TEST_SEASON,
     });
     await entryEventTransfersRepository.replaceForEvent(ENTRY_ID, 12, [], undefined, {
       syncMode: 'latest',
+      checkpointSeason: TEST_SEASON,
     });
     expect((await checkpointRow())?.transfers).toBe(10);
 
     await entryEventTransfersRepository.replaceForEvent(ENTRY_ID, 11, [], undefined, {
       syncMode: 'latest',
+      checkpointSeason: TEST_SEASON,
     });
     await entryEventTransfersRepository.replaceForEvent(ENTRY_ID, 12, [], undefined, {
       syncMode: 'latest',
+      checkpointSeason: TEST_SEASON,
     });
     expect((await checkpointRow())?.transfers).toBe(12);
   });
@@ -448,15 +546,18 @@ describe('tournament initialization checkpoints', () => {
     const sql = await getDbClient();
     await sql`
       UPDATE entry_infos
-      SET entry_transfers_synced_through_event_id = NULL
+      SET entry_transfers_synced_through_event_id = NULL,
+          entry_transfers_synced_season = NULL
       WHERE id = ${ENTRY_ID}
     `;
     await Promise.all([
       entryEventTransfersRepository.replaceForEvent(ENTRY_ID, 10, [], undefined, {
         syncMode: 'all',
+        checkpointSeason: TEST_SEASON,
       }),
       entryEventTransfersRepository.replaceForEvent(ENTRY_ID, 12, [], undefined, {
         syncMode: 'all',
+        checkpointSeason: TEST_SEASON,
       }),
     ]);
     expect((await checkpointRow())?.transfers).toBe(12);
@@ -466,7 +567,8 @@ describe('tournament initialization checkpoints', () => {
     const sql = await getDbClient();
     await sql`
       UPDATE entry_infos
-      SET entry_snapshot_synced_through_event_id = NULL
+      SET entry_snapshot_synced_through_event_id = NULL,
+          entry_snapshot_synced_season = NULL
       WHERE id = ${ENTRY_ID}
     `;
     await Promise.all([syncEntryInfo(ENTRY_ID, client, 10), syncEntryInfo(ENTRY_ID, client, 12)]);
@@ -478,6 +580,7 @@ describe('tournament initialization checkpoints', () => {
     await expect(
       entryEventTransfersRepository.replaceForEvent(ENTRY_ID, 39, [], undefined, {
         syncMode: 'all',
+        checkpointSeason: TEST_SEASON,
       }),
     ).rejects.toThrow();
     expect((await checkpointRow())?.transfers).toBe(before);

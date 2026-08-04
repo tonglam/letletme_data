@@ -43,6 +43,7 @@ function createRepository(
 describe('tournament management service', () => {
   test('updates only an administrator-owned tournament and trims the name', async () => {
     let updatedName = '';
+    const calls: string[] = [];
     const service = createTournamentManagementService(
       createRepository({
         updateNameOwned: async (_id, _adminEntryId, name) => {
@@ -50,6 +51,14 @@ describe('tournament management service', () => {
           return { ...tournament, name };
         },
       }),
+      {
+        refreshViews: async () => {
+          calls.push('refresh-views');
+        },
+        invalidateCaches: async () => {
+          calls.push('invalidate-caches');
+        },
+      },
     );
 
     const updated = await service.updateTournament(42, {
@@ -59,6 +68,7 @@ describe('tournament management service', () => {
 
     expect(updated.name).toBe('Renamed Cup');
     expect(updatedName).toBe('Renamed Cup');
+    expect(calls).toEqual(['refresh-views', 'invalidate-caches']);
   });
 
   test('rejects updates from a different FPL entry', async () => {
@@ -66,6 +76,26 @@ describe('tournament management service', () => {
     await expect(
       service.updateTournament(42, { name: 'Renamed Cup', adminEntryId: 999 }),
     ).rejects.toBeInstanceOf(ForbiddenError);
+  });
+
+  test('re-publishes a same-name retry after a prior derived-view failure', async () => {
+    const calls: string[] = [];
+    const service = createTournamentManagementService(createRepository(), {
+      refreshViews: async () => {
+        calls.push('refresh-views');
+      },
+      invalidateCaches: async () => {
+        calls.push('invalidate-caches');
+      },
+    });
+
+    const unchanged = await service.updateTournament(42, {
+      name: tournament.name,
+      adminEntryId: tournament.adminEntryId,
+    });
+
+    expect(unchanged).toEqual(tournament);
+    expect(calls).toEqual(['refresh-views', 'invalidate-caches']);
   });
 
   test('rejects a duplicate tournament name', async () => {

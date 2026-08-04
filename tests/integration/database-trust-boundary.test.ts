@@ -64,13 +64,17 @@ describe('Database trust boundary', () => {
       WHERE table_schema = 'public'
         AND table_name = 'entry_infos'
         AND column_name IN (
+          'entry_snapshot_synced_season',
           'entry_snapshot_synced_through_event_id',
+          'entry_transfers_synced_season',
           'entry_transfers_synced_through_event_id'
         )
       ORDER BY name
     `;
     expect(columns.map((finding) => finding.name)).toEqual([
+      'entry_snapshot_synced_season',
       'entry_snapshot_synced_through_event_id',
+      'entry_transfers_synced_season',
       'entry_transfers_synced_through_event_id',
     ]);
 
@@ -81,13 +85,21 @@ describe('Database trust boundary', () => {
         AND table_name = 'entry_infos'
         AND constraint_name IN (
           'entry_snapshot_sync_event_range',
-          'entry_transfers_sync_event_range'
+          'entry_snapshot_sync_season_format',
+          'entry_snapshot_sync_season_pair',
+          'entry_transfers_sync_event_range',
+          'entry_transfers_sync_season_format',
+          'entry_transfers_sync_season_pair'
         )
       ORDER BY name
     `;
     expect(constraints.map((finding) => finding.name)).toEqual([
       'entry_snapshot_sync_event_range',
+      'entry_snapshot_sync_season_format',
+      'entry_snapshot_sync_season_pair',
       'entry_transfers_sync_event_range',
+      'entry_transfers_sync_season_format',
+      'entry_transfers_sync_season_pair',
     ]);
   });
 

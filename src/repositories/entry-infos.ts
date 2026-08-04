@@ -66,7 +66,11 @@ export const createEntryInfoRepository = (dbInstance?: DbOrTransaction) => {
       }
     },
 
-    findIdsNeedingSnapshotSync: async (ids: number[], targetEventId: number): Promise<number[]> => {
+    findIdsNeedingSnapshotSync: async (
+      ids: number[],
+      targetEventId: number,
+      season: string,
+    ): Promise<number[]> => {
       if (ids.length === 0) {
         return [];
       }
@@ -81,14 +85,25 @@ export const createEntryInfoRepository = (dbInstance?: DbOrTransaction) => {
             .select({
               id: entryInfos.id,
               syncedThroughEventId: entryInfos.entrySnapshotSyncedThroughEventId,
+              syncedSeason: entryInfos.entrySnapshotSyncedSeason,
             })
             .from(entryInfos)
             .where(inArray(entryInfos.id, chunk));
-          const checkpoints = new Map(rows.map((row) => [row.id, row.syncedThroughEventId]));
+          const checkpoints = new Map(
+            rows.map((row) => [
+              row.id,
+              { eventId: row.syncedThroughEventId, season: row.syncedSeason },
+            ]),
+          );
           results.push(
             ...chunk.filter((id) => {
               const checkpoint = checkpoints.get(id);
-              return checkpoint === undefined || checkpoint === null || checkpoint < targetEventId;
+              return (
+                checkpoint === undefined ||
+                checkpoint.eventId === null ||
+                checkpoint.season !== season ||
+                checkpoint.eventId < targetEventId
+              );
             }),
           );
         }
@@ -97,6 +112,7 @@ export const createEntryInfoRepository = (dbInstance?: DbOrTransaction) => {
         logError('Failed to find entry snapshot sync gaps', error, {
           count: ids.length,
           targetEventId,
+          season,
         });
         throw new DatabaseError(
           'Failed to find entry snapshot sync gaps',
@@ -110,6 +126,7 @@ export const createEntryInfoRepository = (dbInstance?: DbOrTransaction) => {
       summary: RawFPLEntrySummary,
       lastEventId?: number | null,
       snapshotSyncedThroughEventId?: number | null,
+      snapshotSyncedSeason?: string | null,
     ): Promise<DbEntryInfo> => {
       try {
         const db = await getDbInstance();
@@ -143,6 +160,10 @@ export const createEntryInfoRepository = (dbInstance?: DbOrTransaction) => {
           // instead of materializing 0 and wiping progress (Codex P2).
           lastEventId: lastEventId ?? null,
           entrySnapshotSyncedThroughEventId: snapshotSyncedThroughEventId ?? null,
+          entrySnapshotSyncedSeason:
+            snapshotSyncedThroughEventId === null || snapshotSyncedThroughEventId === undefined
+              ? null
+              : (snapshotSyncedSeason ?? null),
           teamValue: currentTeamValue,
           totalTransfers: summary.last_deadline_total_transfers ?? null,
           lastEntryName: null,
@@ -173,10 +194,20 @@ export const createEntryInfoRepository = (dbInstance?: DbOrTransaction) => {
                 CASE
                   WHEN excluded.entry_snapshot_synced_through_event_id IS NULL
                     THEN ${entryInfos.entrySnapshotSyncedThroughEventId}
+                  WHEN ${entryInfos.entrySnapshotSyncedSeason}
+                    IS DISTINCT FROM excluded.entry_snapshot_synced_season
+                    THEN excluded.entry_snapshot_synced_through_event_id
                   ELSE GREATEST(
                     COALESCE(${entryInfos.entrySnapshotSyncedThroughEventId}, 0),
                     excluded.entry_snapshot_synced_through_event_id
                   )
+                END
+              `,
+              entrySnapshotSyncedSeason: sql`
+                CASE
+                  WHEN excluded.entry_snapshot_synced_through_event_id IS NULL
+                    THEN ${entryInfos.entrySnapshotSyncedSeason}
+                  ELSE excluded.entry_snapshot_synced_season
                 END
               `,
               // Snapshot the pre-update row into last_* (table-qualified

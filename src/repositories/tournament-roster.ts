@@ -365,21 +365,28 @@ export const tournamentRosterRepository = {
     const client = await getDbClient();
     await client`
       update tournament_infos
-      set state = case when total_team_num >= 2 then 'active' else state end,
+      set state = case
+            when state = 'finished' then state
+            when total_team_num >= 2 then 'active'
+            else state
+          end,
           roster_sync_status = case
-            when total_team_num >= 2 then 'ready'::tournament_setup_status
+            when state = 'finished' or total_team_num >= 2
+              then 'ready'::tournament_setup_status
             else 'failed'::tournament_setup_status
           end,
           roster_sync_error = case
-            when total_team_num >= 2 then null
+            when state = 'finished' or total_team_num >= 2 then null
             else 'Tournament requires at least two participants.'
           end,
           roster_last_synced_at = case
-            when total_team_num >= 2 then coalesce(roster_last_synced_at, now())
+            when state = 'finished' or total_team_num >= 2
+              then coalesce(roster_last_synced_at, now())
             else roster_last_synced_at
           end,
           updated_at = now()
-      where id = ${tournamentId} and roster_sync_status = 'processing'
+      where id = ${tournamentId}
+        and roster_sync_status = 'processing'
     `;
   },
 

@@ -76,6 +76,7 @@ export function createTournamentManagementService(
   lifecycle: TournamentManagementLifecycle = {},
 ) {
   const invalidateCaches = lifecycle.invalidateCaches ?? (async () => undefined);
+  const refreshViews = lifecycle.refreshViews ?? (async () => undefined);
 
   const assertOwner = async (tournamentId: number, adminEntryId: number) => {
     const tournament = await repository.findById(tournamentId);
@@ -96,7 +97,14 @@ export function createTournamentManagementService(
       const payload = updateTournamentSchema.parse(input);
       const current = await assertOwner(tournamentId, payload.adminEntryId);
       const name = normalizeTournamentName(payload.name);
-      if (current.name === name) return current;
+      if (current.name === name) {
+        // An earlier idempotent attempt may have committed the canonical name
+        // before its derived-view refresh failed. Re-publish on a same-name
+        // retry so that failure can recover without another mutation.
+        await refreshViews();
+        await invalidateCaches('rename');
+        return current;
+      }
       if (await repository.checkNameExistsExcluding(name, tournamentId)) {
         throw new ConflictError('Tournament name already exists.', 'TOURNAMENT_NAME_EXISTS');
       }
@@ -104,6 +112,10 @@ export function createTournamentManagementService(
       if (!updated) {
         throw new NotFoundError('Tournament not found.', 'TOURNAMENT_NOT_FOUND');
       }
+      // The list/detail GraphQL reads are backed by materialized snapshots.
+      // Publish the renamed canonical row before invalidating derived caches,
+      // otherwise the first cache refill can restore the old name.
+      await refreshViews();
       await invalidateCaches('rename');
       return updated;
     },

@@ -15,7 +15,7 @@ import { logError, logInfo } from '../utils/logger';
 
 type DatabaseInstance = PostgresJsDatabase<Record<string, never>>;
 
-const TRANSFER_LOCK_NAMESPACE = 1_102_204_716;
+export const ENTRY_SEASON_SYNC_LOCK_NAMESPACE = 1_102_204_716;
 
 function transferSignature(transfer: {
   eventId: number;
@@ -109,6 +109,7 @@ export const createEntryEventTransfersRepository = (dbInstance?: DatabaseInstanc
     findEntryIdsNeedingSync: async (
       entryIds: number[],
       targetEventId: number,
+      season: string,
     ): Promise<number[]> => {
       if (entryIds.length === 0) {
         return [];
@@ -124,14 +125,25 @@ export const createEntryEventTransfersRepository = (dbInstance?: DatabaseInstanc
             .select({
               id: entryInfos.id,
               syncedThroughEventId: entryInfos.entryTransfersSyncedThroughEventId,
+              syncedSeason: entryInfos.entryTransfersSyncedSeason,
             })
             .from(entryInfos)
             .where(inArray(entryInfos.id, chunk));
-          const checkpoints = new Map(rows.map((row) => [row.id, row.syncedThroughEventId]));
+          const checkpoints = new Map(
+            rows.map((row) => [
+              row.id,
+              { eventId: row.syncedThroughEventId, season: row.syncedSeason },
+            ]),
+          );
           results.push(
             ...chunk.filter((entryId) => {
               const checkpoint = checkpoints.get(entryId);
-              return checkpoint === undefined || checkpoint === null || checkpoint < targetEventId;
+              return (
+                checkpoint === undefined ||
+                checkpoint.eventId === null ||
+                checkpoint.season !== season ||
+                checkpoint.eventId < targetEventId
+              );
             }),
           );
         }
@@ -140,6 +152,7 @@ export const createEntryEventTransfersRepository = (dbInstance?: DatabaseInstanc
         logError('Failed to find entry transfer sync gaps', error, {
           count: entryIds.length,
           targetEventId,
+          season,
         });
         throw new DatabaseError(
           'Failed to find entry transfer sync gaps',
@@ -158,18 +171,40 @@ export const createEntryEventTransfersRepository = (dbInstance?: DatabaseInstanc
         elementInPlayed?: boolean | null;
         defaultPoints?: number | null;
         syncMode?: 'latest' | 'all';
+        checkpointSeason: string;
       },
     ): Promise<void> => {
       try {
         const db = await getDbInstance();
         const syncMode = options?.syncMode ?? getConfig().TRANSFER_SYNC_MODE;
+        const checkpointSeason = options?.checkpointSeason;
+        if (!checkpointSeason || !/^\d{4}$/.test(checkpointSeason)) {
+          throw new Error('A valid four-digit checkpoint season is required');
+        }
         const fallbackPoints = options?.defaultPoints ?? null;
 
         await db.transaction(async (tx) => {
           // Serialize replacement for one entry without blocking unrelated entries.
           await tx.execute(
-            sql`SELECT pg_advisory_xact_lock(${TRANSFER_LOCK_NAMESPACE}, ${entryId})`,
+            sql`SELECT pg_advisory_xact_lock(${ENTRY_SEASON_SYNC_LOCK_NAMESPACE}, ${entryId})`,
           );
+
+          const entryRows = await tx
+            .select({
+              snapshotSeason: entryInfos.entrySnapshotSyncedSeason,
+              transferSeason: entryInfos.entryTransfersSyncedSeason,
+            })
+            .from(entryInfos)
+            .where(eq(entryInfos.id, entryId));
+          const newestPersistedSeason = [entryRows[0]?.snapshotSeason, entryRows[0]?.transferSeason]
+            .filter((season): season is string => season !== null && season !== undefined)
+            .sort()
+            .at(-1);
+          if (newestPersistedSeason && newestPersistedSeason > checkpointSeason) {
+            throw new Error(
+              `Refusing stale ${checkpointSeason} transfer checkpoint after ${newestPersistedSeason}`,
+            );
+          }
 
           const existing = await tx
             .select()
@@ -243,18 +278,39 @@ export const createEntryEventTransfersRepository = (dbInstance?: DatabaseInstanc
             .set({
               entryTransfersSyncedThroughEventId:
                 syncMode === 'all'
-                  ? sql`GREATEST(
-                      COALESCE(${entryInfos.entryTransfersSyncedThroughEventId}, 0),
-                      ${eventId}
-                    )`
+                  ? sql`CASE
+                      WHEN ${entryInfos.entryTransfersSyncedSeason} = ${checkpointSeason}
+                      THEN GREATEST(
+                        COALESCE(${entryInfos.entryTransfersSyncedThroughEventId}, 0),
+                        ${eventId}
+                      )
+                      ELSE ${eventId}
+                    END`
                   : sql`CASE
-                      WHEN ${entryInfos.entryTransfersSyncedThroughEventId} IS NOT NULL
+                      WHEN ${entryInfos.entryTransfersSyncedSeason} = ${checkpointSeason}
+                        AND ${entryInfos.entryTransfersSyncedThroughEventId} IS NOT NULL
                         AND ${entryInfos.entryTransfersSyncedThroughEventId} >= ${eventId - 1}
                       THEN GREATEST(
                         ${entryInfos.entryTransfersSyncedThroughEventId},
                         ${eventId}
                       )
-                      ELSE ${entryInfos.entryTransfersSyncedThroughEventId}
+                      WHEN ${entryInfos.entryTransfersSyncedSeason} = ${checkpointSeason}
+                      THEN ${entryInfos.entryTransfersSyncedThroughEventId}
+                      WHEN ${eventId} <= 1 THEN ${eventId}
+                      ELSE NULL
+                    END`,
+              entryTransfersSyncedSeason:
+                syncMode === 'all'
+                  ? checkpointSeason
+                  : sql`CASE
+                      WHEN ${entryInfos.entryTransfersSyncedSeason} = ${checkpointSeason}
+                        AND ${entryInfos.entryTransfersSyncedThroughEventId} IS NOT NULL
+                        AND ${entryInfos.entryTransfersSyncedThroughEventId} >= ${eventId - 1}
+                      THEN ${checkpointSeason}
+                      WHEN ${entryInfos.entryTransfersSyncedSeason} = ${checkpointSeason}
+                      THEN ${checkpointSeason}
+                      WHEN ${eventId} <= 1 THEN ${checkpointSeason}
+                      ELSE NULL
                     END`,
               updatedAt: new Date(),
             })

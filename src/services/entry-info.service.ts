@@ -1,4 +1,7 @@
+import { eq, sql } from 'drizzle-orm';
+
 import { entryInfosCache } from '../cache/entry-infos-cache';
+import { getActiveCacheSeason } from '../cache/cache-season';
 import { fplClient } from '../clients/fpl';
 import { getDb } from '../db/singleton';
 import { toEntryInfo } from '../domain/entry-infos';
@@ -7,6 +10,14 @@ import { createEntryHistoryInfoRepository } from '../repositories/entry-history-
 import { createEntryInfoRepository } from '../repositories/entry-infos';
 import { createEntryLeagueInfoRepository } from '../repositories/entry-league-infos';
 import { createEntryEventResultsRepository } from '../repositories/entry-event-results';
+import {
+  entryEventCupResults,
+  entryEventPicks,
+  entryEventResults,
+  entryEventTransfers,
+  entryInfos,
+} from '../db/schemas/index.schema';
+import { ENTRY_SEASON_SYNC_LOCK_NAMESPACE } from '../repositories/entry-event-transfers';
 import { eventRepository } from '../repositories/events';
 import { logInfo } from '../utils/logger';
 
@@ -16,13 +27,15 @@ export async function syncEntryInfo(
   entryId: number,
   client: EntryInfoClient = fplClient,
   targetEventId?: number,
+  snapshotSeason?: string,
 ) {
   logInfo('Starting entry info sync', { entryId });
-  const [summary, history, currentEvent, latestFinalizedEvent] = await Promise.all([
+  const [summary, history, currentEvent, latestFinalizedEvent, activeSeason] = await Promise.all([
     client.getEntrySummary(entryId),
     client.getEntryHistory(entryId),
     getCurrentEvent(),
     eventRepository.findLatestFinalized(),
+    snapshotSeason ? Promise.resolve(snapshotSeason) : getActiveCacheSeason(),
   ]);
   const lastEventId = currentEvent ? currentEvent.id - 1 : null;
   const snapshotSyncedThroughEventId = Math.max(
@@ -32,6 +45,40 @@ export async function syncEntryInfo(
 
   const db = await getDb();
   const saved = await db.transaction(async (tx) => {
+    await tx.execute(
+      sql`SELECT pg_advisory_xact_lock(${ENTRY_SEASON_SYNC_LOCK_NAMESPACE}, ${entryId})`,
+    );
+    const currentRows = await tx
+      .select({
+        snapshotSeason: entryInfos.entrySnapshotSyncedSeason,
+        transferSeason: entryInfos.entryTransfersSyncedSeason,
+      })
+      .from(entryInfos)
+      .where(eq(entryInfos.id, entryId));
+    const current = currentRows[0];
+    const newestPersistedSeason = [current?.snapshotSeason, current?.transferSeason]
+      .filter((season): season is string => season !== null && season !== undefined)
+      .sort()
+      .at(-1);
+    if (newestPersistedSeason && newestPersistedSeason > activeSeason) {
+      throw new Error(
+        `Refusing stale ${activeSeason} entry snapshot after ${newestPersistedSeason}`,
+      );
+    }
+
+    // Once a checkpoint has a proven season, a different active season means
+    // the event-numbered rich rows belong to the prior campaign. Clear them in
+    // the same per-entry transaction before seeding current core history.
+    // Legacy NULL season markers are deliberately adopted without deletion.
+    if (current?.snapshotSeason && current.snapshotSeason !== activeSeason) {
+      await Promise.all([
+        tx.delete(entryEventCupResults).where(eq(entryEventCupResults.entryId, entryId)),
+        tx.delete(entryEventPicks).where(eq(entryEventPicks.entryId, entryId)),
+        tx.delete(entryEventResults).where(eq(entryEventResults.entryId, entryId)),
+        tx.delete(entryEventTransfers).where(eq(entryEventTransfers.entryId, entryId)),
+      ]);
+    }
+
     const entryInfoRepository = createEntryInfoRepository(tx);
     const entryHistoryInfoRepository = createEntryHistoryInfoRepository(tx);
     const entryLeagueInfoRepository = createEntryLeagueInfoRepository(tx);
@@ -44,6 +91,7 @@ export async function syncEntryInfo(
       summary,
       lastEventId,
       snapshotSyncedThroughEventId,
+      activeSeason,
     );
     await Promise.all([
       entryHistoryInfoRepository.upsertFromHistory(entryId, history),

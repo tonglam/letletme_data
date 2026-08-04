@@ -5,6 +5,7 @@ assertIntegrationEnv();
 import { describe, expect, test } from 'bun:test';
 
 import { redisSingleton } from '../../src/cache/singleton';
+import { getActiveCacheSeason, resetActiveSeasonMemo } from '../../src/cache/cache-season';
 import { fplClient } from '../../src/clients/fpl';
 import {
   estimateTournamentSetupRequests,
@@ -191,6 +192,7 @@ async function prepareBenchmarkInfrastructure(eventCount: number): Promise<strin
   const existingSeason = await redis.get('Season:active');
   const season = existingSeason && /^\d{4}$/.test(existingSeason) ? existingSeason : '2526';
   await redis.set('Season:active', season);
+  resetActiveSeasonMemo();
   return season;
 }
 
@@ -250,6 +252,7 @@ async function runBenchmarkCase({
     missingPairs: 0,
     reusedPairs: 0,
   };
+  const season = await getActiveCacheSeason();
 
   try {
     const entryIssues = await syncTournamentEntryDetails(entryIds, {
@@ -275,11 +278,13 @@ async function runBenchmarkCase({
     const transferEntryIds = await entryEventTransfersRepository.findEntryIdsNeedingSync(
       entryIds,
       eventCount,
+      season,
     );
     recorder.milestone('enrichment_started');
 
     const transferResult = await syncEntryTransferHistories(transferEntryIds, eventCount, {
       concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
+      season,
     });
     expect(transferResult.errors).toBe(0);
 
@@ -396,12 +401,14 @@ describe.skipIf(!RUN_BENCHMARK)('tournament setup performance benchmark', () => 
         const sql = await getDbClient();
         await sql`
           UPDATE entry_infos
-          SET entry_snapshot_synced_through_event_id = NULL
+          SET entry_snapshot_synced_through_event_id = NULL,
+              entry_snapshot_synced_season = NULL
           WHERE id = ${mediumEntryIds[0]}
         `;
         await sql`
           UPDATE entry_infos
-          SET entry_transfers_synced_through_event_id = NULL
+          SET entry_transfers_synced_through_event_id = NULL,
+              entry_transfers_synced_season = NULL
           WHERE id = ${mediumEntryIds[1]}
         `;
         await sql`

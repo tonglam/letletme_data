@@ -1,5 +1,6 @@
 import type { DbEntryEventTransfer } from '../db/schemas/index.schema';
 import type { RawFPLEntryEventPickItem } from '../types';
+import { getActiveCacheSeason } from '../cache/cache-season';
 import { fplClient } from '../clients/fpl';
 import { entryEventResultsRepository } from '../repositories/entry-event-results';
 import { entryEventTransfersRepository } from '../repositories/entry-event-transfers';
@@ -249,6 +250,7 @@ export async function syncTournamentEventTransfersPre(
 
   const concurrency = options?.concurrency ?? DEFAULT_CONCURRENCY;
   const client = options?.client ?? fplClient;
+  const checkpointSeason = await getActiveCacheSeason();
   let inserted = 0;
   let errors = 0;
 
@@ -264,6 +266,7 @@ export async function syncTournamentEventTransfersPre(
       await entryEventTransfersRepository.replaceForEvent(entryId, eventId, transfers, undefined, {
         elementInPlayed: false,
         defaultPoints: 0,
+        checkpointSeason,
       });
       inserted += 1;
       return null;

@@ -1,6 +1,7 @@
 import { Worker, Job, QueueEvents } from 'bullmq';
 
 import { MUTATION_PRIORITY_ORDER, type MutationPriorityTier } from '../domain/job-priority';
+import { finalizeTournamentEventLifecycle } from '../domain/tournament-event-finalization';
 import { shouldEnqueueTournamentCascade } from '../domain/tournament-event-results';
 import {
   getTournamentSyncQueueName,
@@ -180,6 +181,12 @@ async function afterCascadeStructureJob(
   await maybeEnqueueCascadeMaterializedRefresh(eventId, cascadeId, jobName);
 }
 
+const tournamentEventFinalizationDependencies = {
+  finish: finishTournamentsThroughEvent,
+  refresh: refreshTournamentMaterializedViews,
+  invalidate: invalidateTournamentGraphQLCaches,
+};
+
 /**
  * Tournament Sync Worker
  *
@@ -220,6 +227,13 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
             const result = await syncTournamentEventResults(eventId);
             if (!shouldEnqueueTournamentCascade(result)) {
               logInfo('Skipping tournament cascade - no active tournament entries', { eventId });
+              await finalizeTournamentEventLifecycle(eventId, {
+                ...tournamentEventFinalizationDependencies,
+                // A prior attempt may already have committed the terminal row
+                // and then failed refreshing the derived snapshots. Refresh on
+                // every skipped-cascade retry so that checkpoint can recover.
+                refreshAlways: true,
+              });
               break;
             }
             await enqueueTournamentCascade(eventId);
@@ -265,11 +279,10 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
             break;
 
           case TOURNAMENT_JOBS.MATERIALIZED_VIEWS_REFRESH:
-            await refreshTournamentMaterializedViews();
-            if (eventId > 0) {
-              const finished = await finishTournamentsThroughEvent(eventId);
-              if (finished > 0) await invalidateTournamentGraphQLCaches('finish');
-            }
+            await finalizeTournamentEventLifecycle(eventId, {
+              ...tournamentEventFinalizationDependencies,
+              refreshAlways: true,
+            });
             break;
 
           case TOURNAMENT_JOBS.INFO:
