@@ -17,7 +17,7 @@ import {
 import { runManualEventCurrentRefresh } from '../jobs/event-current-refresh.job';
 import { runLeagueEventPicksSync } from '../jobs/league-event-picks.jobs';
 import { runLeagueEventResultsSync } from '../jobs/league-event-results.jobs';
-import { runLaunchHappening, runLaunchWarning } from '../jobs/launch.jobs';
+import { runLaunchMonitor } from '../jobs/launch.jobs';
 import {
   enqueueEventLiveExplain,
   enqueueEventLiveSummary,
@@ -248,14 +248,9 @@ const TRIGGERABLE_JOBS: TriggerableJobInfo[] = [
     schedule: '06:00, 08:00, 10:00 UTC+8 inside the 24-hour post-match window',
   },
   {
-    name: 'launch-warning',
-    description: 'Pre-season monitor message when FPL events are absent',
-    schedule: 'Every minute year-round (deduplicated once per year)',
-  },
-  {
-    name: 'launch-happening',
-    description: 'Season-start monitor message when new deadline appears',
-    schedule: 'Every minute year-round (deduplicated once per season)',
+    name: 'launch-monitor',
+    description: 'Detect pre-season and season-start transitions with one bootstrap request',
+    schedule: 'Every five minutes year-round (deduplicated by transition)',
   },
 ];
 
@@ -399,8 +394,7 @@ function buildJobMap(input?: unknown): Record<string, () => Promise<unknown>> {
       return enqueueLiveScoresSync(currentEvent.id, 'manual');
     },
     'post-match-consolidation': runPostMatchConsolidation,
-    'launch-warning': runLaunchWarning,
-    'launch-happening': runLaunchHappening,
+    'launch-monitor': () => runLaunchMonitor({ source: 'manual' }),
   };
 }
 

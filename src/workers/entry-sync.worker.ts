@@ -32,6 +32,7 @@ import {
   markEntryInfoSyncedToday,
   shouldMarkEntryInfoSynced,
 } from '../jobs/entry-info-sync-marker';
+import { runDataSyncAttempt } from '../utils/data-sync-attempt';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { logError, logInfo } from '../utils/logger';
 import { alertOnFinalFailure } from '../utils/notify';
@@ -259,59 +260,72 @@ export function createEntrySyncWorker(): WorkerRuntime {
       source: job.data?.source as string | undefined,
       eventId: job.data?.eventId,
       attempt: job.attemptsMade + 1,
+      queueWaitMs: Math.max(0, Date.now() - job.timestamp),
     };
 
     logJobTriggered(context);
 
-    return withMutationConflictGuard(
+    return runDataSyncAttempt(
       {
-        queueName: job.queueName,
+        queue: job.queueName,
         jobName: job.name,
-        jobId,
-        eventId: job.data?.eventId,
+        runId: job.data?.runId ?? String(jobId),
+        source: job.data?.source,
+        attempt: job.attemptsMade + 1,
+        targetEventId: job.data?.eventId,
+        queueWaitMs: context.queueWaitMs,
       },
       () =>
-        runTrackedJob(context, async () => {
-          switch (job.name) {
-            case 'entry-info': {
-              const result = await handleEntryJob(
-                'entry-info',
-                'entry info sync',
-                syncEntryInfo,
-                job.data,
-              );
-              // Mark only after the final chunk succeeds with zero failures so
-              // mid-chunk crashes and pending retries can still re-run same day.
-              if (shouldMarkEntryInfoSynced(result.hasMore, result.failed)) {
-                await markEntryInfoSyncedToday(new Date(), job.id);
+        withMutationConflictGuard(
+          {
+            queueName: job.queueName,
+            jobName: job.name,
+            jobId,
+            eventId: job.data?.eventId,
+          },
+          () =>
+            runTrackedJob(context, async () => {
+              switch (job.name) {
+                case 'entry-info': {
+                  const result = await handleEntryJob(
+                    'entry-info',
+                    'entry info sync',
+                    syncEntryInfo,
+                    job.data,
+                  );
+                  // Mark only after the final chunk succeeds with zero failures so
+                  // mid-chunk crashes and pending retries can still re-run same day.
+                  if (shouldMarkEntryInfoSynced(result.hasMore, result.failed)) {
+                    await markEntryInfoSyncedToday(new Date(), job.id);
+                  }
+                  return result;
+                }
+                case 'entry-picks':
+                  return handleEntryJob(
+                    'entry-picks',
+                    'entry picks sync',
+                    (entryId) => syncEntryEventPicks(entryId, job.data?.eventId),
+                    job.data,
+                  );
+                case 'entry-transfers':
+                  return handleEntryJob(
+                    'entry-transfers',
+                    'entry transfers sync',
+                    (entryId) => syncEntryEventTransfers(entryId, job.data?.eventId),
+                    job.data,
+                  );
+                case 'entry-results':
+                  return handleEntryJob(
+                    'entry-results',
+                    'entry results sync',
+                    (entryId) => syncEntryEventResults(entryId, job.data?.eventId),
+                    job.data,
+                  );
+                default:
+                  throw new Error(`Unknown entry-sync job: ${job.name}`);
               }
-              return result;
-            }
-            case 'entry-picks':
-              return handleEntryJob(
-                'entry-picks',
-                'entry picks sync',
-                (entryId) => syncEntryEventPicks(entryId, job.data?.eventId),
-                job.data,
-              );
-            case 'entry-transfers':
-              return handleEntryJob(
-                'entry-transfers',
-                'entry transfers sync',
-                (entryId) => syncEntryEventTransfers(entryId, job.data?.eventId),
-                job.data,
-              );
-            case 'entry-results':
-              return handleEntryJob(
-                'entry-results',
-                'entry results sync',
-                (entryId) => syncEntryEventResults(entryId, job.data?.eventId),
-                job.data,
-              );
-            default:
-              throw new Error(`Unknown entry-sync job: ${job.name}`);
-          }
-        }),
+            }),
+        ),
     );
   };
 

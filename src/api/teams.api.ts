@@ -1,6 +1,6 @@
 import { Elysia } from 'elysia';
 
-import { syncTeams } from '../services/teams.service';
+import { enqueueTeamsSyncJob } from '../jobs/data-sync-enqueue';
 
 /**
  * Teams API Routes
@@ -9,7 +9,14 @@ import { syncTeams } from '../services/teams.service';
  * - POST /teams/sync - Trigger teams sync
  */
 
-export const teamsAPI = new Elysia({ prefix: '/teams' }).post('/sync', async () => {
-  const result = await syncTeams();
-  return { success: true, message: 'Teams sync completed', ...result };
+export const teamsAPI = new Elysia({ prefix: '/teams' }).post('/sync', async ({ set }) => {
+  const job = await enqueueTeamsSyncJob('api');
+  if (job.id === undefined) throw new Error('Teams sync queue did not assign a job ID');
+  set.status = 202;
+  return {
+    success: true,
+    status: 'queued' as const,
+    jobId: String(job.id),
+    message: 'Teams sync queued',
+  };
 });

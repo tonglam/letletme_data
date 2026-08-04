@@ -3,7 +3,7 @@ import type { Queue, Worker } from 'bullmq';
 
 import { startStrictPriorityGate } from '../../src/workers/strict-priority-gate';
 
-type MutableCounts = { waiting: number; active: number; delayed: number };
+type MutableCounts = { waiting: number; prioritized: number; active: number; delayed: number };
 
 class FakeQueue {
   constructor(private readonly counts: MutableCounts) {}
@@ -33,10 +33,10 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 describe('strict priority gate', () => {
   it('pauses lower tiers when higher tiers have backlog, then resumes', async () => {
-    const p0Counts: MutableCounts = { waiting: 2, active: 0, delayed: 0 };
-    const p1Counts: MutableCounts = { waiting: 1, active: 0, delayed: 0 };
-    const p2Counts: MutableCounts = { waiting: 1, active: 0, delayed: 0 };
-    const p3Counts: MutableCounts = { waiting: 1, active: 0, delayed: 0 };
+    const p0Counts: MutableCounts = { waiting: 2, prioritized: 0, active: 0, delayed: 0 };
+    const p1Counts: MutableCounts = { waiting: 1, prioritized: 0, active: 0, delayed: 0 };
+    const p2Counts: MutableCounts = { waiting: 1, prioritized: 0, active: 0, delayed: 0 };
+    const p3Counts: MutableCounts = { waiting: 1, prioritized: 0, active: 0, delayed: 0 };
 
     const p0Worker = new FakeWorker();
     const p1Worker = new FakeWorker();
@@ -86,6 +86,58 @@ describe('strict priority gate', () => {
     expect(p2Worker.resumeCount).toBeGreaterThan(0);
     expect(p3Worker.resumeCount).toBeGreaterThan(0);
 
+    gate.stop();
+  });
+
+  it('does not pause lower tiers for a future delayed retry', async () => {
+    const counts = {
+      p0: { waiting: 0, prioritized: 0, active: 0, delayed: 1 },
+      p1: { waiting: 0, prioritized: 0, active: 0, delayed: 0 },
+      p2: { waiting: 0, prioritized: 0, active: 0, delayed: 0 },
+      p3: { waiting: 0, prioritized: 0, active: 0, delayed: 0 },
+    } satisfies Record<string, MutableCounts>;
+    const workers = {
+      p0: new FakeWorker(),
+      p1: new FakeWorker(),
+      p2: new FakeWorker(),
+      p3: new FakeWorker(),
+    };
+
+    const gate = startStrictPriorityGate(
+      'test-domain',
+      {
+        p0: {
+          queue: new FakeQueue(counts.p0) as unknown as Queue<unknown>,
+          worker: workers.p0 as unknown as Worker<unknown>,
+        },
+        p1: {
+          queue: new FakeQueue(counts.p1) as unknown as Queue<unknown>,
+          worker: workers.p1 as unknown as Worker<unknown>,
+        },
+        p2: {
+          queue: new FakeQueue(counts.p2) as unknown as Queue<unknown>,
+          worker: workers.p2 as unknown as Worker<unknown>,
+        },
+        p3: {
+          queue: new FakeQueue(counts.p3) as unknown as Queue<unknown>,
+          worker: workers.p3 as unknown as Worker<unknown>,
+        },
+      },
+      { enabled: true, pollMs: 10 },
+    );
+
+    await sleep(40);
+
+    expect(workers.p1.paused).toBe(false);
+    expect(workers.p2.paused).toBe(false);
+    expect(workers.p3.paused).toBe(false);
+
+    counts.p0.prioritized = 1;
+    await sleep(40);
+
+    expect(workers.p1.paused).toBe(true);
+    expect(workers.p2.paused).toBe(true);
+    expect(workers.p3.paused).toBe(true);
     gate.stop();
   });
 });

@@ -166,6 +166,57 @@ comparable samples exist. Segment materially different participant/event windows
 them. These measurements are operational evidence only; this release does not expose an ETA to
 users.
 
+## Non-live synchronization operations
+
+Data, entry, league, and launch-monitor workers emit one bounded `data_sync_attempt` event for each
+top-level BullMQ or cron attempt. Live workers deliberately do not use this report. The event
+contains a run ID, target GW when relevant, required/reused/succeeded/failed counts, queue wait and
+duration, plus bounded FPL endpoint/outcome counters. It excludes raw URLs, payloads, entry names,
+league URLs, and administrator identity.
+
+Trace one run or one target event:
+
+```bash
+docker compose logs --no-color --no-log-prefix --since 24h worker \
+  | jq -Rc --arg runId "entry-picks-2627-7" --argjson eventId 7 '
+      fromjson?
+      | select(.event == "data_sync_attempt")
+      | select(.runId == $runId or .targetEventId == $eventId)
+    '
+```
+
+Inspect checkpoint reuse without exposing participant details:
+
+```sql
+SELECT
+  count(*) AS total_entries,
+  count(*) FILTER (WHERE entry_snapshot_synced_through_event_id >= 7) AS snapshot_current,
+  count(*) FILTER (WHERE entry_transfers_synced_through_event_id >= 7) AS transfers_current
+FROM public.entry_infos;
+```
+
+Aggregate outcome, upstream pressure, and reuse for a comparable observation window:
+
+```bash
+docker compose logs --no-color --no-log-prefix --since 7d worker \
+  | jq -Rsc '
+      split("\n")
+      | map(fromjson? | select(.event == "data_sync_attempt")) as $rows
+      | {
+          sampleCount: ($rows | length),
+          outcomes: ($rows | group_by(.outcome) | map({outcome: .[0].outcome, count: length})),
+          logicalRequests: ([$rows[] | .fpl.logicalRequests // 0] | add // 0),
+          retries: ([$rows[] | .fpl.retries // 0] | add // 0),
+          rateLimitedAttempts: ([$rows[] | .fpl.attemptsByOutcome["429"] // 0] | add // 0),
+          requiredUnits: ([$rows[] | .requiredUnits // 0] | add // 0),
+          reusedUnits: ([$rows[] | .reusedUnits // 0] | add // 0)
+        }
+    '
+```
+
+Do not infer success from a worker completion line alone: a `partial` outcome or non-zero failed
+unit count remains actionable. Existing final-failure Telegram alerts remain the alerting path.
+
 ## Post-deploy season readiness
 
 `/health` proves API liveness. `/ready` additionally requires PostgreSQL,

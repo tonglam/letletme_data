@@ -12,6 +12,7 @@ import {
   processLeagueEventPicksJob,
   processLeagueEventResultsJob,
 } from '../services/league-sync.service';
+import { runDataSyncAttempt } from '../utils/data-sync-attempt';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { getQueueConnection } from '../utils/queue';
 import { logError, logInfo } from '../utils/logger';
@@ -38,31 +39,44 @@ async function processLeagueSyncJob(job: Job<LeagueSyncJobData>) {
     source,
     attempt: job.attemptsMade + 1,
     tournamentId,
+    queueWaitMs: Math.max(0, Date.now() - job.timestamp),
   };
 
   logJobTriggered(context);
 
-  return withMutationConflictGuard(
+  return runDataSyncAttempt(
     {
-      queueName: job.queueName,
+      queue: job.queueName,
       jobName: job.name,
-      jobId: String(job.id),
-      eventId,
-      tournamentId,
+      runId: String(job.id ?? `${job.name}-${job.timestamp}`),
+      source: tournamentId === undefined ? 'coordinator' : source,
+      attempt: job.attemptsMade + 1,
+      targetEventId: eventId,
+      queueWaitMs: context.queueWaitMs,
     },
     () =>
-      runTrackedJob(context, async () => {
-        switch (job.name) {
-          case LEAGUE_JOBS.LEAGUE_EVENT_PICKS:
-            return processLeagueEventPicksJob(eventId, tournamentId);
+      withMutationConflictGuard(
+        {
+          queueName: job.queueName,
+          jobName: job.name,
+          jobId: String(job.id),
+          eventId,
+          tournamentId,
+        },
+        () =>
+          runTrackedJob(context, async () => {
+            switch (job.name) {
+              case LEAGUE_JOBS.LEAGUE_EVENT_PICKS:
+                return processLeagueEventPicksJob(eventId, tournamentId);
 
-          case LEAGUE_JOBS.LEAGUE_EVENT_RESULTS:
-            return processLeagueEventResultsJob(eventId, tournamentId);
+              case LEAGUE_JOBS.LEAGUE_EVENT_RESULTS:
+                return processLeagueEventResultsJob(eventId, tournamentId);
 
-          default:
-            throw new Error(`Unknown job name: ${job.name}`);
-        }
-      }),
+              default:
+                throw new Error(`Unknown job name: ${job.name}`);
+            }
+          }),
+      ),
   );
 }
 

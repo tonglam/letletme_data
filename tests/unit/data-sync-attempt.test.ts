@@ -1,0 +1,154 @@
+import { afterEach, describe, expect, mock, spyOn, test } from 'bun:test';
+
+import { runDataSyncAttempt, type DataSyncAttemptReport } from '../../src/utils/data-sync-attempt';
+import { beginFplLogicalRequest } from '../../src/utils/fpl-request-metrics';
+import { logger } from '../../src/utils/logger';
+
+afterEach(() => {
+  mock.restore();
+  delete process.env.DATA_SYNC_ATTEMPT_REPORTING_ENABLED;
+});
+
+function reportsFrom(spy: { mock: { calls: unknown[][] } }): DataSyncAttemptReport[] {
+  return spy.mock.calls
+    .map((call) => call[0] as DataSyncAttemptReport)
+    .filter((payload) => payload?.event === 'data_sync_attempt');
+}
+
+describe('data sync attempt reporting', () => {
+  test('emits one bounded report with inferred work and FPL metrics', async () => {
+    const infoSpy = spyOn(logger, 'info').mockImplementation(() => undefined as never);
+
+    await runDataSyncAttempt(
+      {
+        queue: 'entry-sync',
+        jobName: 'entry-picks',
+        runId: 'run-1',
+        source: 'cron',
+        targetEventId: 7,
+        queueWaitMs: 15.9,
+      },
+      async () => {
+        const request = beginFplLogicalRequest(
+          'https://fantasy.premierleague.com/api/entry/123/event/7/picks/',
+        );
+        request.recordAttempt('429');
+        request.recordAttempt('2xx');
+        request.finish();
+        return { total: 2, success: 1, failed: 1, reusedUnits: 3 };
+      },
+    );
+
+    const reports = reportsFrom(infoSpy);
+    expect(reports).toHaveLength(1);
+    expect(reports[0]).toMatchObject({
+      event: 'data_sync_attempt',
+      schemaVersion: 1,
+      queue: 'entry-sync',
+      jobName: 'entry-picks',
+      runId: 'run-1',
+      source: 'cron',
+      targetEventId: 7,
+      outcome: 'partial',
+      queueWaitMs: 15,
+      requiredUnits: 2,
+      reusedUnits: 3,
+      succeededUnits: 1,
+      failedUnits: 1,
+      fpl: {
+        logicalRequests: 1,
+        attempts: 2,
+        retries: 1,
+        byEndpoint: { entry_picks: 1 },
+        attemptsByOutcome: { '429': 1, '2xx': 1 },
+        finalOutcomes: { '2xx': 1 },
+      },
+    });
+    expect(JSON.stringify(reports[0])).not.toContain('fantasy.premierleague.com');
+    expect(JSON.stringify(reports[0])).not.toContain('/entry/123/');
+  });
+
+  test('emits once on failure and rethrows the original error', async () => {
+    const infoSpy = spyOn(logger, 'info').mockImplementation(() => undefined as never);
+
+    await expect(
+      runDataSyncAttempt(
+        {
+          queue: 'data-sync',
+          jobName: 'teams',
+          runId: 'run-failed',
+          source: 'api',
+          attempt: 2,
+        },
+        async () => {
+          throw new Error('upstream payload contained a private name');
+        },
+      ),
+    ).rejects.toThrow('upstream payload contained a private name');
+
+    const reports = reportsFrom(infoSpy);
+    expect(reports).toHaveLength(1);
+    expect(reports[0]).toMatchObject({
+      runId: 'run-failed',
+      source: 'retry',
+      outcome: 'failed',
+      failedUnits: 0,
+    });
+    expect(JSON.stringify(reports[0])).not.toContain('private name');
+  });
+
+  test('isolates concurrent top-level attempt metrics', async () => {
+    const infoSpy = spyOn(logger, 'info').mockImplementation(() => undefined as never);
+
+    await Promise.all([
+      runDataSyncAttempt(
+        { queue: 'data-sync', jobName: 'fixtures', runId: 'fixtures-run', source: 'cron' },
+        async () => {
+          const request = beginFplLogicalRequest('https://fantasy.premierleague.com/api/fixtures/');
+          await Promise.resolve();
+          request.recordAttempt('2xx');
+          request.finish();
+          return { total: 1, success: 1 };
+        },
+      ),
+      runDataSyncAttempt(
+        {
+          queue: 'entry-sync',
+          jobName: 'entry-transfers',
+          runId: 'transfers-run',
+          source: 'manual',
+        },
+        async () => {
+          const request = beginFplLogicalRequest(
+            'https://fantasy.premierleague.com/api/entry/456/transfers/',
+          );
+          request.recordAttempt('5xx');
+          request.finish();
+          return { total: 1, failed: 1 };
+        },
+      ),
+    ]);
+
+    const reports = reportsFrom(infoSpy);
+    expect(reports).toHaveLength(2);
+    const fixtures = reports.find((report) => report.runId === 'fixtures-run');
+    const transfers = reports.find((report) => report.runId === 'transfers-run');
+    expect(fixtures?.fpl.byEndpoint.fixtures).toBe(1);
+    expect(fixtures?.fpl.byEndpoint.entry_transfers).toBe(0);
+    expect(transfers?.fpl.byEndpoint.fixtures).toBe(0);
+    expect(transfers?.fpl.byEndpoint.entry_transfers).toBe(1);
+  });
+
+  test('can be disabled without creating a metrics context or report', async () => {
+    process.env.DATA_SYNC_ATTEMPT_REPORTING_ENABLED = 'false';
+    const infoSpy = spyOn(logger, 'info').mockImplementation(() => undefined as never);
+
+    const value = await runDataSyncAttempt(
+      { queue: 'data-sync', jobName: 'events', runId: 'disabled', source: 'cron' },
+      async () => 'ok',
+    );
+
+    expect(value).toBe('ok');
+    expect(reportsFrom(infoSpy)).toHaveLength(0);
+  });
+});

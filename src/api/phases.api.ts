@@ -1,6 +1,6 @@
 import { Elysia } from 'elysia';
 
-import { syncPhases } from '../services/phases.service';
+import { enqueuePhasesSyncJob } from '../jobs/data-sync-enqueue';
 
 /**
  * Phases API Routes
@@ -9,7 +9,14 @@ import { syncPhases } from '../services/phases.service';
  * - POST /phases/sync - Trigger phases sync
  */
 
-export const phasesAPI = new Elysia({ prefix: '/phases' }).post('/sync', async () => {
-  const result = await syncPhases();
-  return { success: true, message: 'Phases sync completed', ...result };
+export const phasesAPI = new Elysia({ prefix: '/phases' }).post('/sync', async ({ set }) => {
+  const job = await enqueuePhasesSyncJob('api');
+  if (job.id === undefined) throw new Error('Phases sync queue did not assign a job ID');
+  set.status = 202;
+  return {
+    success: true,
+    status: 'queued' as const,
+    jobId: String(job.id),
+    message: 'Phases sync queued',
+  };
 });

@@ -14,6 +14,7 @@ import { syncPlayers } from '../services/players.service';
 import { syncPlayerPricesForDate } from '../services/player-prices.service';
 import { syncCurrentPlayerStats, syncPlayerStatsForEvent } from '../services/player-stats.service';
 import { syncCurrentPlayerValues } from '../services/player-values.service';
+import { runDataSyncAttempt } from '../utils/data-sync-attempt';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { syncTeams } from '../services/teams.service';
 import { getQueueConnection } from '../utils/queue';
@@ -32,49 +33,62 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
     jobName: job.name,
     source: job.data?.source as string | undefined,
     attempt: job.attemptsMade + 1,
+    queueWaitMs: Math.max(0, Date.now() - job.timestamp),
   };
 
   logJobTriggered(context);
 
-  return withMutationConflictGuard(
+  return runDataSyncAttempt(
     {
-      queueName: job.queueName,
+      queue: job.queueName,
       jobName: job.name,
-      jobId: String(job.id),
+      runId: String(job.id ?? `${job.name}-${job.timestamp}`),
+      source: job.data?.source,
+      attempt: job.attemptsMade + 1,
+      targetEventId: job.data?.eventId,
+      queueWaitMs: context.queueWaitMs,
     },
     () =>
-      runTrackedJob(context, async () => {
-        switch (job.name) {
-          case 'events':
-            return syncEvents();
-          case 'fixtures':
-            return syncFixtures(job.data.eventId);
-          case 'fixtures-all-gameweeks':
-            // Per-GW loop with isolated errors — not the same as syncFixtures(undefined).
-            return syncAllGameweeks();
-          case 'teams':
-            return syncTeams();
-          case 'players':
-            return syncPlayers();
-          case 'player-prices':
-            if (!job.data.changeDate) {
-              throw new Error('player-prices job requires changeDate');
+      withMutationConflictGuard(
+        {
+          queueName: job.queueName,
+          jobName: job.name,
+          jobId: String(job.id),
+        },
+        () =>
+          runTrackedJob(context, async () => {
+            switch (job.name) {
+              case 'events':
+                return syncEvents();
+              case 'fixtures':
+                return syncFixtures(job.data.eventId);
+              case 'fixtures-all-gameweeks':
+                // Per-GW loop with isolated errors — not the same as syncFixtures(undefined).
+                return syncAllGameweeks();
+              case 'teams':
+                return syncTeams();
+              case 'players':
+                return syncPlayers();
+              case 'player-prices':
+                if (!job.data.changeDate) {
+                  throw new Error('player-prices job requires changeDate');
+                }
+                return syncPlayerPricesForDate(job.data.changeDate);
+              case 'player-stats':
+                return job.data.eventId !== undefined
+                  ? syncPlayerStatsForEvent(job.data.eventId)
+                  : syncCurrentPlayerStats();
+              case 'phases':
+                return syncPhases();
+              case 'player-values':
+                return syncCurrentPlayerValues(
+                  job.data.changeDate ?? formatCronDateKey(new Date(job.data.triggeredAt)),
+                );
+              default:
+                throw new Error(`Unknown data-sync job: ${job.name}`);
             }
-            return syncPlayerPricesForDate(job.data.changeDate);
-          case 'player-stats':
-            return job.data.eventId !== undefined
-              ? syncPlayerStatsForEvent(job.data.eventId)
-              : syncCurrentPlayerStats();
-          case 'phases':
-            return syncPhases();
-          case 'player-values':
-            return syncCurrentPlayerValues(
-              job.data.changeDate ?? formatCronDateKey(new Date(job.data.triggeredAt)),
-            );
-          default:
-            throw new Error(`Unknown data-sync job: ${job.name}`);
-        }
-      }),
+          }),
+      ),
   );
 };
 
@@ -99,7 +113,7 @@ export function createDataSyncWorker(): WorkerRuntime {
       logInfo('Data sync job completed', { jobId: job.id, name: job.name, tier });
     });
 
-    worker.on('failed', async (job, error) => {
+    worker.on('failed', (job, error) => {
       logError('Data sync job failed', error, {
         jobId: job?.id,
         name: job?.name,
@@ -108,16 +122,6 @@ export function createDataSyncWorker(): WorkerRuntime {
       });
       if (job) {
         void alertOnFinalFailure(job, error);
-      }
-
-      // Same-day player-values ticks should not be blocked by a transient failure.
-      if (job && job.name === 'player-values' && job.attemptsMade < 3) {
-        try {
-          await job.retry();
-          logInfo('Retried failed player-values job', { jobId: job.id, attempt: job.attemptsMade });
-        } catch (retryError) {
-          logError('Failed to retry player-values job', retryError, { jobId: job.id });
-        }
       }
     });
 
