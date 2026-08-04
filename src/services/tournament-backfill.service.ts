@@ -34,6 +34,7 @@ export interface TournamentSetupIssue {
   message: string;
   eventId?: number;
   failedEntries?: number[];
+  blocksStandings?: boolean;
 }
 
 export type TournamentEntrySyncPlan = {
@@ -56,6 +57,32 @@ export type TournamentEnrichmentPlan = {
   requestedTransferEntries: number;
   reusedTransferEntries: number;
 };
+
+export function classifyEntrySnapshotFailures(
+  failedEntryIds: number[],
+  unprovenSeasonEntryIds: ReadonlySet<number>,
+): TournamentSetupIssue[] {
+  const entryLabel = (count: number) => `${count} ${count === 1 ? 'entry' : 'entries'}`;
+  const blockingEntries = failedEntryIds.filter((entryId) => unprovenSeasonEntryIds.has(entryId));
+  const warningEntries = failedEntryIds.filter((entryId) => !unprovenSeasonEntryIds.has(entryId));
+  const issues: TournamentSetupIssue[] = [];
+  if (blockingEntries.length > 0) {
+    issues.push({
+      scope: 'entry-info',
+      message: `Current-season entry snapshot remains unproven for ${entryLabel(blockingEntries.length)}`,
+      failedEntries: blockingEntries,
+      blocksStandings: true,
+    });
+  }
+  if (warningEntries.length > 0) {
+    issues.push({
+      scope: 'entry-info',
+      message: `Failed to refresh detailed entry info for ${entryLabel(warningEntries.length)}`,
+      failedEntries: warningEntries,
+    });
+  }
+  return issues;
+}
 
 export async function syncTournamentEntryDetails(
   entryIds: number[],
@@ -104,20 +131,26 @@ export async function syncTournamentEntryDetails(
   }
 
   if (failures.length > 0) {
-    const message = `Failed to sync detailed entry info for ${failures.length} entries`;
+    // Audit canonical checkpoints after the attempts. This distinguishes an
+    // upstream/transaction failure (no current-season proof) from a derived
+    // cache publication failure after the database commit.
+    const failedEntries = await entryInfoRepository.findByIds(failures);
+    const checkpointSeasonByEntryId = new Map(
+      failedEntries.map((entry) => [entry.id, entry.entrySnapshotSyncedSeason]),
+    );
+    // Missing and legacy-null checkpoints cannot prove ownership of
+    // event-numbered rows, so their failed refresh blocks publication.
+    const unprovenSeasonEntryIds = new Set(
+      failures.filter((entryId) => checkpointSeasonByEntryId.get(entryId) !== season),
+    );
     logWarn('Tournament entry detail sync completed with warnings', {
       totalEntries: sanitized.length,
       requestedEntries: requestedEntryIds.length,
       failedCount: failures.length,
+      blockingCount: failures.filter((entryId) => unprovenSeasonEntryIds.has(entryId)).length,
       failedEntryPreview: failures.slice(0, 10),
     });
-    return [
-      {
-        scope: 'entry-info',
-        message,
-        failedEntries: failures,
-      },
-    ];
+    return classifyEntrySnapshotFailures(failures, unprovenSeasonEntryIds);
   }
 
   return [];

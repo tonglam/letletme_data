@@ -11,6 +11,8 @@ export type TournamentSetupJobSource = 'create' | 'manual' | 'watchdog' | 'roste
 export interface EnqueueTournamentSetupOptions {
   forceNew?: boolean;
   prepareEnqueue?: () => Promise<void>;
+  /** Reuse an active worker known to be waiting behind the caller's lifecycle lock. */
+  reuseActive?: boolean;
   /**
    * Only callers already holding the tournament lifecycle lock may use this.
    * It bridges the short interval between a worker releasing that lock and
@@ -23,11 +25,12 @@ export type ExistingSetupJobAction = 'remove' | 'reuse' | 'reject';
 
 export function decideExistingSetupJobAction(
   state: string,
-  options: Pick<EnqueueTournamentSetupOptions, 'forceNew' | 'prepareEnqueue'>,
+  options: Pick<EnqueueTournamentSetupOptions, 'forceNew' | 'prepareEnqueue' | 'reuseActive'>,
 ): ExistingSetupJobAction {
   if (state === 'completed' || state === 'failed') return 'remove';
   if (!options.forceNew) return 'reuse';
   if (state === 'waiting' || state === 'delayed') return 'remove';
+  if (state === 'active' && options.reuseActive) return 'reuse';
   return 'reject';
 }
 

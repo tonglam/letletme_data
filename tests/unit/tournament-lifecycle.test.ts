@@ -29,11 +29,40 @@ describe('tournament lifecycle invariants', () => {
       }),
     ).toBe('reject');
     expect(
+      decideExistingSetupJobAction('active', {
+        forceNew: true,
+        reuseActive: true,
+      }),
+    ).toBe('reuse');
+    expect(
       decideExistingSetupJobAction('waiting', {
         forceNew: true,
         prepareEnqueue: async () => undefined,
       }),
     ).toBe('remove');
+  });
+
+  test('blocks standings when failed entry snapshots cannot prove the active season', async () => {
+    process.env.DATABASE_URL ??= 'postgresql://unit:unit@127.0.0.1:5432/unit';
+    process.env.REDIS_HOST ??= '127.0.0.1';
+    process.env.REDIS_PORT ??= '6379';
+    const { classifyEntrySnapshotFailures } = await import(
+      '../../src/services/tournament-backfill.service'
+    );
+
+    expect(classifyEntrySnapshotFailures([101, 102, 103], new Set([101, 103]))).toEqual([
+      {
+        scope: 'entry-info',
+        message: 'Current-season entry snapshot remains unproven for 2 entries',
+        failedEntries: [101, 103],
+        blocksStandings: true,
+      },
+      {
+        scope: 'entry-info',
+        message: 'Failed to refresh detailed entry info for 1 entry',
+        failedEntries: [102],
+      },
+    ]);
   });
 
   test('resumes before terminalizing a post-publication warning', async () => {

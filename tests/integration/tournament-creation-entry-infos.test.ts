@@ -352,4 +352,45 @@ describe('tournament creation vs entry_infos (FP-08)', () => {
     expect(terminalWrite).toBe(false);
     expect(state[0]).toEqual({ setup_status: 'ready', setup_phase: 'ready' });
   });
+
+  test('keeps a knockout-only tournament in the aggregate snapshot', async () => {
+    const client = await getDbClient();
+    const participants = buildParticipants();
+    const plan = planTournamentStructure(
+      {
+        tournamentName: `Knockout Snapshot ${Date.now()}`,
+        adminId: String(SYNCED_ENTRY.id),
+        creator: 'knockout-snapshot-test',
+        participantSource: 'custom',
+        leagueUrl: 'https://fantasy.premierleague.com/leagues/900004/standings/c',
+        groupFormat: 'none',
+        startGameweek: 'GW1',
+        endGameweek: 'GW1',
+        knockoutFormat: 'single',
+        selectedParticipantIds: participants.map((participant) => participant.id),
+      },
+      participants,
+      900004,
+      'classic',
+    );
+
+    const created = await tournamentInfoRepository.createTournamentWithEntries(plan);
+    createdTournamentIds.push(created.id);
+    await client`REFRESH MATERIALIZED VIEW mv_tournament_snapshot`;
+    const rows = await client<
+      Array<{ tournament_id: number; latest_event_id: number | null; total_entries: number }>
+    >`
+      select tournament_id, latest_event_id, total_entries
+      from mv_tournament_snapshot
+      where tournament_id = ${created.id}
+    `;
+
+    expect([...rows]).toEqual([
+      {
+        tournament_id: created.id,
+        latest_event_id: null,
+        total_entries: participants.length,
+      },
+    ]);
+  });
 });

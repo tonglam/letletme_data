@@ -207,36 +207,35 @@ export async function setupTournamentStructure(tournamentId: number): Promise<vo
 
     // Entry FPL sync: entry-core only — do NOT hold tournament-structure:global
     // across potentially long external HTTP (FP-07 Codex P1).
-    setupIssues.push(
-      ...(await withMutationConflictGuard(
-        {
-          queueName: 'tournament-setup',
-          jobName: 'tournament-setup',
-          tournamentId,
-          scopes: ['entry-core:all'],
-        },
-        () =>
-          syncTournamentEntryDetails(entryIds, {
-            targetEventId,
-            onPlan: async (plan) => {
-              entryPlan = plan;
-              await tournamentInfoRepository.markSetupProgress(
-                tournamentId,
-                'syncing_entries',
-                0,
-                plan.requestedEntries,
-              );
-            },
-            onProgress: (completed, total) =>
-              tournamentInfoRepository.markSetupProgress(
-                tournamentId,
-                'syncing_entries',
-                completed,
-                total,
-              ),
-          }),
-      )),
+    const entrySyncIssues = await withMutationConflictGuard(
+      {
+        queueName: 'tournament-setup',
+        jobName: 'tournament-setup',
+        tournamentId,
+        scopes: ['entry-core:all'],
+      },
+      () =>
+        syncTournamentEntryDetails(entryIds, {
+          targetEventId,
+          onPlan: async (plan) => {
+            entryPlan = plan;
+            await tournamentInfoRepository.markSetupProgress(
+              tournamentId,
+              'syncing_entries',
+              0,
+              plan.requestedEntries,
+            );
+          },
+          onProgress: (completed, total) =>
+            tournamentInfoRepository.markSetupProgress(
+              tournamentId,
+              'syncing_entries',
+              completed,
+              total,
+            ),
+        }),
     );
+    setupIssues.push(...entrySyncIssues);
     phaseDurationsMs.syncing_entries = Math.round(performance.now() - phaseStartedAtMs);
     logInfo('Tournament setup phase completed', {
       tournamentId,
@@ -247,6 +246,14 @@ export async function setupTournamentStructure(tournamentId: number): Promise<vo
       reusedEntries: entryPlan.reusedEntries,
       warningCount: setupIssues.length,
     });
+    const blockingEntryIssues = entrySyncIssues.filter((issue) => issue.blocksStandings);
+    if (blockingEntryIssues.length > 0) {
+      throw new Error(
+        `Entry snapshot preparation failed: ${blockingEntryIssues
+          .map((issue) => issue.message)
+          .join('; ')}`,
+      );
+    }
 
     phaseStartedAtMs = performance.now();
     await tournamentInfoRepository.markSetupProgress(tournamentId, 'building_structure', 0, 1);

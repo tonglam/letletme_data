@@ -128,10 +128,13 @@ async function reconcileTournamentRosterUnlocked(
         queueName: 'tournament-roster',
         jobName: 'publish-authoritative-roster',
         tournamentId,
-        scopes: tournamentSetupRebuildScopes(tournamentId),
+        // Serialize the final boundary check with the canonical events writer,
+        // then keep membership frozen through the short structure transaction.
+        scopes: [...tournamentSetupRebuildScopes(tournamentId), 'data-core:events'],
       },
-      () =>
-        tournamentRosterRepository.publishAuthoritativeRoster(
+      async () => {
+        await assertPreGameweekBoundary();
+        return tournamentRosterRepository.publishAuthoritativeRoster(
           tournament,
           source.participants,
           source.leagueName,
@@ -139,7 +142,8 @@ async function reconcileTournamentRosterUnlocked(
             allowInactive: options?.allowInactive,
             resumeAfterSetup: options?.resumeAfterSetup,
           },
-        ),
+        );
+      },
     );
     if (publication.skipped) {
       logInfo('Tournament roster publication skipped after lifecycle state changed', {
@@ -164,9 +168,13 @@ async function reconcileTournamentRosterUnlocked(
     if (needsSetup && !publication.automaticallyPaused) {
       await enqueueTournamentSetup(tournamentId, options?.resumeAfterSetup ? 'resume' : 'roster', {
         forceNew: true,
-        // reconcileTournamentRoster holds the lifecycle lock. If the preceding
-        // worker has returned but BullMQ still says active, allow that bounded
-        // bookkeeping boundary to settle so this requested replacement exists.
+        // The lifecycle lock is held here. An active setup job can only be
+        // waiting behind this reconciliation and will consume the published
+        // roster/resume marker after the lock is released.
+        reuseActive: true,
+        // If a preceding worker has returned but BullMQ still says active,
+        // allow its bounded bookkeeping transition to settle before deciding
+        // whether to replace a terminal job or reuse a lock-blocked one.
         activeSettleTimeoutMs: 2_000,
       });
     }

@@ -138,10 +138,19 @@ CREATE INDEX IF NOT EXISTS idx_mv_tes_event_lookup
 -- =============================================================================
 
 CREATE MATERIALIZED VIEW public.mv_tournament_snapshot AS
-WITH latest_event AS (
-  SELECT mv.tournament_id, max(mv.event_id) AS latest_event_id
+WITH tournament_events AS (
+  SELECT mv.tournament_id, mv.event_id
   FROM public.mv_tournament_event_snapshot mv
-  GROUP BY mv.tournament_id
+  UNION ALL
+  SELECT battle.tournament_id, battle.event_id
+  FROM public.tournament_battle_group_results battle
+  UNION ALL
+  SELECT knockout.tournament_id, knockout.event_id
+  FROM public.tournament_knockout_results knockout
+), latest_event AS (
+  SELECT activity.tournament_id, max(activity.event_id) AS latest_event_id
+  FROM tournament_events activity
+  GROUP BY activity.tournament_id
 ), current_snapshot AS (
   SELECT
     v.tournament_id, v.event_id, v.entry_id,
@@ -161,6 +170,10 @@ WITH latest_event AS (
   SELECT *
   FROM current_snapshot
   WHERE tournament_overall_rank IS NOT NULL AND tournament_overall_rank <= 10
+), membership_counts AS (
+  SELECT te.tournament_id, count(*)::integer AS total_entries
+  FROM public.tournament_entries te
+  GROUP BY te.tournament_id
 )
 SELECT
   ti.id AS tournament_id,
@@ -168,7 +181,7 @@ SELECT
   ti.league_id,
   ti.league_type,
   le.latest_event_id,
-  count(cs.entry_id)::integer AS total_entries,
+  COALESCE(mc.total_entries, 0)::integer AS total_entries,
   count(t10.entry_id)::integer AS top10_entry_count,
   round(avg((t10.cum_total_gk_points + t10.cum_total_def_points + t10.cum_total_mid_points + t10.cum_total_fwd_points)::numeric), 2) AS top10_avg_total_points,
   round(avg(t10.cum_total_captain_points::numeric), 2) AS top10_avg_captain_points,
@@ -191,10 +204,11 @@ SELECT
   round(avg(cs.cum_total_mid_points::numeric), 2) AS all_avg_mid_points,
   round(avg(cs.cum_total_fwd_points::numeric), 2) AS all_avg_fwd_points
 FROM public.tournament_infos ti
-JOIN latest_event le ON le.tournament_id = ti.id
-JOIN current_snapshot cs ON cs.tournament_id = ti.id
+LEFT JOIN latest_event le ON le.tournament_id = ti.id
+LEFT JOIN current_snapshot cs ON cs.tournament_id = ti.id
 LEFT JOIN top10_snapshot t10 ON t10.tournament_id = ti.id AND t10.entry_id = cs.entry_id
-GROUP BY ti.id, ti.name, ti.league_id, ti.league_type, le.latest_event_id;
+LEFT JOIN membership_counts mc ON mc.tournament_id = ti.id
+GROUP BY ti.id, ti.name, ti.league_id, ti.league_type, le.latest_event_id, mc.total_entries;
 
 -- Unique index required for REFRESH MATERIALIZED VIEW CONCURRENTLY
 CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_ts_pk
