@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, mock, spyOn, test } from 'bun:test';
 
-import { runDataSyncAttempt, type DataSyncAttemptReport } from '../../src/utils/data-sync-attempt';
+import {
+  inferDataSyncWorkSummary,
+  resolveDataSyncAttempt,
+  runDataSyncAttempt,
+  type DataSyncAttemptReport,
+} from '../../src/utils/data-sync-attempt';
 import { beginFplLogicalRequest } from '../../src/utils/fpl-request-metrics';
 import { logger } from '../../src/utils/logger';
 
@@ -16,6 +21,38 @@ function reportsFrom(spy: { mock: { calls: unknown[][] } }): DataSyncAttemptRepo
 }
 
 describe('data sync attempt reporting', () => {
+  test('accounts for delayed retries that reset BullMQ attemptsMade', () => {
+    expect(resolveDataSyncAttempt('cron', 0, 2)).toEqual({ attempt: 3, source: 'retry' });
+    expect(resolveDataSyncAttempt('cron', 0)).toEqual({ attempt: 1, source: 'cron' });
+  });
+
+  test('normalizes the result shapes returned by core and entry sync services', () => {
+    expect(inferDataSyncWorkSummary({ count: 20, errors: 2 })).toEqual({
+      requiredUnits: 22,
+      reusedUnits: 0,
+      succeededUnits: 20,
+      failedUnits: 2,
+    });
+    expect(inferDataSyncWorkSummary({ totalCount: 38, totalErrors: 2 })).toEqual({
+      requiredUnits: 40,
+      reusedUnits: 0,
+      succeededUnits: 38,
+      failedUnits: 2,
+    });
+    expect(inferDataSyncWorkSummary({ totalEntries: 75, synced: 70, errors: 5 })).toEqual({
+      requiredUnits: 75,
+      reusedUnits: 0,
+      succeededUnits: 70,
+      failedUnits: 5,
+    });
+    expect(inferDataSyncWorkSummary({ totalEntries: 75, updated: 70, skipped: 5 })).toEqual({
+      requiredUnits: 75,
+      reusedUnits: 5,
+      succeededUnits: 70,
+      failedUnits: 0,
+    });
+  });
+
   test('emits one bounded report with inferred work and FPL metrics', async () => {
     const infoSpy = spyOn(logger, 'info').mockImplementation(() => undefined as never);
 

@@ -30,6 +30,19 @@ export interface DataSyncWorkSummary {
   failedUnits?: number;
 }
 
+export function resolveDataSyncAttempt(
+  source: string | undefined,
+  attemptsMade: number,
+  retryCount = 0,
+): { attempt: number; source: string | undefined } {
+  const boundedAttemptsMade = Math.max(0, Math.floor(attemptsMade));
+  const boundedRetryCount = Math.max(0, Math.floor(retryCount));
+  return {
+    attempt: Math.max(boundedAttemptsMade + 1, boundedRetryCount + 1),
+    source: boundedRetryCount > 0 ? 'retry' : source,
+  };
+}
+
 export interface DataSyncAttemptReport {
   event: 'data_sync_attempt';
   schemaVersion: 1;
@@ -61,6 +74,15 @@ function boundedUnit(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
 }
 
+function firstBoundedUnit(...values: unknown[]): number | undefined {
+  for (const value of values) {
+    if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+      return Math.floor(value);
+    }
+  }
+  return undefined;
+}
+
 function readOutcome(value: unknown): DataSyncAttemptOutcome | undefined {
   return typeof value === 'string' &&
     DATA_SYNC_ATTEMPT_OUTCOMES.includes(value as DataSyncAttemptOutcome)
@@ -71,10 +93,41 @@ function readOutcome(value: unknown): DataSyncAttemptOutcome | undefined {
 export function inferDataSyncWorkSummary(result: unknown): DataSyncWorkSummary {
   if (!isRecord(result)) return {};
 
-  const failedUnits = boundedUnit(result.failedUnits ?? result.failed ?? result.errors);
-  const requiredUnits = boundedUnit(result.requiredUnits ?? result.total);
-  const succeededUnits = boundedUnit(result.succeededUnits ?? result.success);
-  const reusedUnits = boundedUnit(result.reusedUnits);
+  const explicitRequiredUnits = firstBoundedUnit(
+    result.requiredUnits,
+    result.totalEntries,
+    result.sourceEntries,
+    result.total,
+  );
+  const explicitSucceededUnits = firstBoundedUnit(
+    result.succeededUnits,
+    result.synced,
+    result.updated,
+    result.upserted,
+    result.inserted,
+    result.success,
+    result.count,
+    result.totalCount,
+  );
+  const explicitFailedUnits = firstBoundedUnit(
+    result.failedUnits,
+    result.failed,
+    result.errors,
+    result.totalErrors,
+  );
+  const reusedUnits = firstBoundedUnit(result.reusedUnits, result.skipped) ?? 0;
+  const failedUnits =
+    explicitFailedUnits ??
+    (explicitRequiredUnits !== undefined && explicitSucceededUnits !== undefined
+      ? Math.max(0, explicitRequiredUnits - explicitSucceededUnits - reusedUnits)
+      : 0);
+  const succeededUnits =
+    explicitSucceededUnits ??
+    (explicitRequiredUnits !== undefined
+      ? Math.max(0, explicitRequiredUnits - reusedUnits - failedUnits)
+      : 0);
+  const requiredUnits =
+    explicitRequiredUnits ?? Math.max(0, succeededUnits + reusedUnits + failedUnits);
   const explicitOutcome = readOutcome(result.outcome);
 
   return {

@@ -32,7 +32,7 @@ import {
   markEntryInfoSyncedToday,
   shouldMarkEntryInfoSynced,
 } from '../jobs/entry-info-sync-marker';
-import { runDataSyncAttempt } from '../utils/data-sync-attempt';
+import { resolveDataSyncAttempt, runDataSyncAttempt } from '../utils/data-sync-attempt';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { logError, logInfo } from '../utils/logger';
 import { alertOnFinalFailure } from '../utils/notify';
@@ -252,14 +252,19 @@ export function createEntrySyncWorker(): WorkerRuntime {
 
   const processor = async (job: Job<EntrySyncJobData>) => {
     const jobId = job.id ?? `${job.name}-${job.timestamp}`;
+    const attempt = resolveDataSyncAttempt(
+      job.data?.source,
+      job.attemptsMade,
+      job.data?.retryCount,
+    );
     const context = {
       jobType: 'queue' as const,
       queueName: job.queueName,
       jobId,
       jobName: job.name,
-      source: job.data?.source as string | undefined,
+      source: attempt.source as string | undefined,
       eventId: job.data?.eventId,
-      attempt: job.attemptsMade + 1,
+      attempt: attempt.attempt,
       queueWaitMs: Math.max(0, Date.now() - job.timestamp),
     };
 
@@ -270,8 +275,8 @@ export function createEntrySyncWorker(): WorkerRuntime {
         queue: job.queueName,
         jobName: job.name,
         runId: job.data?.runId ?? String(jobId),
-        source: job.data?.source,
-        attempt: job.attemptsMade + 1,
+        source: attempt.source,
+        attempt: attempt.attempt,
         targetEventId: job.data?.eventId,
         queueWaitMs: context.queueWaitMs,
       },

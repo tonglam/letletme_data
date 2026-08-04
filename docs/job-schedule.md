@@ -25,12 +25,11 @@ be initialized before the ordinary current-event gate opens.
 
 | Job | Cron | Gate / behavior |
 |---|---|---|
-| `launch-warning` | `* * * * *` | Year-round; sends once per year when bootstrap events are empty |
-| `launch-happening` | `* * * * *` | Year-round; sends once per FPL-derived season when a current-year GW1 deadline appears |
+| `launch-monitor` | `*/5 * * * *` | One bootstrap read detects both an empty-event warning and a published current-year GW1; each notification is sent once |
 | `event-current-refresh` | `* * * * *` | `isFPLSeason`; rebuilds `event:current` and enqueues events sync when the GW changes |
 
-Launch jobs call the FPL bootstrap endpoint directly from the API process. All
-other synchronization work is queue-backed.
+The launch monitor calls the FPL bootstrap endpoint directly from the API
+process. All other synchronization work is queue-backed.
 
 ## Player values
 
