@@ -7,6 +7,7 @@ import { createEntryHistoryInfoRepository } from '../repositories/entry-history-
 import { createEntryInfoRepository } from '../repositories/entry-infos';
 import { createEntryLeagueInfoRepository } from '../repositories/entry-league-infos';
 import { createEntryEventResultsRepository } from '../repositories/entry-event-results';
+import { eventRepository } from '../repositories/events';
 import { logInfo } from '../utils/logger';
 
 export type EntryInfoClient = Pick<typeof fplClient, 'getEntrySummary' | 'getEntryHistory'>;
@@ -17,18 +18,16 @@ export async function syncEntryInfo(
   targetEventId?: number,
 ) {
   logInfo('Starting entry info sync', { entryId });
-  const [summary, history, currentEvent] = await Promise.all([
+  const [summary, history, currentEvent, latestFinalizedEvent] = await Promise.all([
     client.getEntrySummary(entryId),
     client.getEntryHistory(entryId),
     getCurrentEvent(),
+    eventRepository.findLatestFinalized(),
   ]);
   const lastEventId = currentEvent ? currentEvent.id - 1 : null;
   const snapshotSyncedThroughEventId = Math.max(
     0,
-    Math.min(
-      38,
-      targetEventId ?? history.current.reduce((latest, item) => Math.max(latest, item.event), 0),
-    ),
+    Math.min(38, targetEventId ?? latestFinalizedEvent?.id ?? 0),
   );
 
   const db = await getDb();

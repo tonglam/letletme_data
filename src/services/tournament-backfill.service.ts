@@ -122,40 +122,83 @@ export async function syncTournamentEntryDetails(
 
 export type MissingTournamentUnits = Map<number, number[]>;
 
-async function findMissingUnits(
+type MissingTournamentUnitsAudit = {
+  missing: MissingTournamentUnits;
+  totalPairs: number;
+};
+
+async function loadEntryStartEvents(entryIds: number[]): Promise<Map<number, number | null>> {
+  const rows = await entryInfoRepository.findByIds(entryIds);
+  return new Map(rows.map((row) => [row.id, row.startedEvent]));
+}
+
+function isEligibleForEvent(
+  entryId: number,
+  eventId: number,
+  entryStartEvents: ReadonlyMap<number, number | null>,
+): boolean {
+  const startedEvent = entryStartEvents.get(entryId);
+  return startedEvent === undefined || startedEvent === null || eventId >= startedEvent;
+}
+
+async function seedPreEntryCoreBaselines(
+  entryIds: number[],
+  window: TournamentBackfillWindow,
+): Promise<number> {
+  const entryStartEvents = await loadEntryStartEvents(entryIds);
+  const units: Array<{ entryId: number; eventId: number }> = [];
+  for (const entryId of entryIds) {
+    const startedEvent = entryStartEvents.get(entryId);
+    if (startedEvent === undefined || startedEvent === null) continue;
+    const lastPreEntryEvent = Math.min(window.endEventId, startedEvent - 1);
+    for (let eventId = window.startEventId; eventId <= lastPreEntryEvent; eventId += 1) {
+      units.push({ entryId, eventId });
+    }
+  }
+  return entryEventResultsRepository.seedPreEntryBaselines(units);
+}
+
+async function auditMissingUnits(
   entryIds: number[],
   window: TournamentBackfillWindow,
   kind: 'results' | 'picks',
-): Promise<MissingTournamentUnits> {
+): Promise<MissingTournamentUnitsAudit> {
   const missing = new Map<number, number[]>();
+  const entryStartEvents = await loadEntryStartEvents(entryIds);
+  let totalPairs = 0;
   for (let eventId = window.startEventId; eventId <= window.endEventId; eventId += 1) {
+    const eligibleEntryIds = entryIds.filter((entryId) =>
+      isEligibleForEvent(entryId, eventId, entryStartEvents),
+    );
+    totalPairs += eligibleEntryIds.length;
+    if (eligibleEntryIds.length === 0) continue;
     const present =
       kind === 'results'
-        ? (await entryEventResultsRepository.findByEventAndEntryIds(eventId, entryIds)).map(
+        ? (await entryEventResultsRepository.findByEventAndEntryIds(eventId, eligibleEntryIds)).map(
             (row) => row.entryId,
           )
-        : await entryEventPicksRepository.findEntryIdsByEvent(eventId, entryIds);
+        : await entryEventPicksRepository.findEntryIdsByEvent(eventId, eligibleEntryIds);
     const presentSet = new Set(present);
-    const missingEntryIds = entryIds.filter((entryId) => !presentSet.has(entryId));
+    const missingEntryIds = eligibleEntryIds.filter((entryId) => !presentSet.has(entryId));
     if (missingEntryIds.length > 0) {
       missing.set(eventId, missingEntryIds);
     }
   }
-  return missing;
+  return { missing, totalPairs };
 }
 
 export async function findMissingCoreResults(
   entryIds: number[],
   window: TournamentBackfillWindow,
 ): Promise<MissingTournamentUnits> {
-  return findMissingUnits(entryIds, window, 'results');
+  return (await auditMissingUnits(entryIds, window, 'results')).missing;
 }
 
 export async function findMissingHistoricalPicks(
   entryIds: number[],
   window: TournamentBackfillWindow,
 ): Promise<MissingTournamentUnits> {
-  return findMissingUnits(entryIds, window, 'picks');
+  return (await auditMissingUnits(entryIds, window, 'picks')).missing;
 }
 
 export async function ensureTournamentCoreResults(
@@ -164,14 +207,17 @@ export async function ensureTournamentCoreResults(
   onProgress?: (completed: number, total: number) => Promise<void>,
   onPlan?: (plan: TournamentCoreSyncPlan) => void | Promise<void>,
 ): Promise<void> {
-  const missing = await findMissingCoreResults(entryIds, window);
+  const seededBaselines = await seedPreEntryCoreBaselines(entryIds, window);
+  const audit = await auditMissingUnits(entryIds, window, 'results');
+  const missing = audit.missing;
   const total = [...missing.values()].reduce((sum, ids) => sum + ids.length, 0);
-  const totalPairs = entryIds.length * (window.endEventId - window.startEventId + 1);
+  const totalPairs = audit.totalPairs;
   await onPlan?.({ totalPairs, missingPairs: total, reusedPairs: totalPairs - total });
   let completed = 0;
   logInfo('Tournament core result audit planned', {
     entryCount: entryIds.length,
     eventCount: window.endEventId - window.startEventId + 1,
+    seededPreEntryBaselines: seededBaselines,
     missingPairs: total,
     missingEvents: missing.size,
   });
@@ -185,7 +231,7 @@ export async function ensureTournamentCoreResults(
     await onProgress?.(completed, total);
   }
 
-  const remaining = await findMissingCoreResults(entryIds, window);
+  const remaining = (await auditMissingUnits(entryIds, window, 'results')).missing;
   if (remaining.size > 0) {
     const preview = [...remaining]
       .slice(0, 5)
@@ -301,18 +347,17 @@ export async function enrichTournamentHistory(
 ): Promise<TournamentSetupIssue[]> {
   const issues: TournamentSetupIssue[] = [];
   const targetEventId = window?.endEventId ?? 0;
-  const missing = window
-    ? await findMissingHistoricalPicks(entryIds, window)
-    : new Map<number, number[]>();
+  const pickAudit = window
+    ? await auditMissingUnits(entryIds, window, 'picks')
+    : { missing: new Map<number, number[]>(), totalPairs: 0 };
+  const missing = pickAudit.missing;
   const missingCount = [...missing.values()].reduce((sum, ids) => sum + ids.length, 0);
   const transferEntryIds =
     options?.includeTransferHistory === false
       ? []
       : await entryEventTransfersRepository.findEntryIdsNeedingSync(entryIds, targetEventId);
   const transferUnits = transferEntryIds.length;
-  const totalPickPairs = window
-    ? entryIds.length * (window.endEventId - window.startEventId + 1)
-    : 0;
+  const totalPickPairs = pickAudit.totalPairs;
   const enrichmentPlan = {
     totalPickPairs,
     missingPickPairs: missingCount,

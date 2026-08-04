@@ -169,7 +169,10 @@ export async function setupTournamentStructure(tournamentId: number): Promise<vo
     return;
   }
 
-  let standingsPublished = initialStatus.standingsReadyAt !== null;
+  // Historical readiness must not downgrade a failure in this new setup or
+  // resume attempt into a warning. Only publication completed below makes
+  // failures non-critical for this attempt.
+  let standingsPublished = false;
 
   try {
     await tournamentInfoRepository.markSetupProcessing(tournamentId);

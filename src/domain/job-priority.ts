@@ -62,7 +62,8 @@ export type TournamentSyncPriorityJobName =
   | 'tournament-materialized-views-refresh'
   | 'tournament-event-picks'
   | 'tournament-transfers-pre'
-  | 'tournament-info';
+  | 'tournament-info'
+  | 'tournament-roster-sync';
 
 export type TournamentSetupPriorityJobName = 'tournament-setup';
 
@@ -114,6 +115,7 @@ export function getTournamentSyncJobPriority(
     case 'tournament-battle-race':
     case 'tournament-knockout':
     case 'tournament-cup-results':
+    case 'tournament-roster-sync':
       return 'p0';
     case 'tournament-event-results':
     case 'tournament-event-picks':

@@ -9,15 +9,18 @@
 --
 -- Fresh Data installs historically omitted both materialized views even
 -- though runtime refreshes and GraphQL reads depend on them. Existing
--- environments may already have the canonical GraphQL-owned definitions, so
--- this migration only creates missing objects and never replaces populated
--- materialized views.
+-- environments may have the earlier definition without group_mode. Replace
+-- both views in dependency order inside this migration transaction so fresh
+-- and upgraded databases receive the same query shape.
+
+DROP MATERIALIZED VIEW IF EXISTS public.mv_tournament_snapshot;
+DROP MATERIALIZED VIEW IF EXISTS public.mv_tournament_event_snapshot;
 
 -- =============================================================================
 -- 1. mv_tournament_event_snapshot
 -- =============================================================================
 
-CREATE MATERIALIZED VIEW IF NOT EXISTS public.mv_tournament_event_snapshot AS
+CREATE MATERIALIZED VIEW public.mv_tournament_event_snapshot AS
 WITH snapshot_base AS (
   SELECT
     tpr.tournament_id,
@@ -134,7 +137,7 @@ CREATE INDEX IF NOT EXISTS idx_mv_tes_event_lookup
 -- 2. mv_tournament_snapshot
 -- =============================================================================
 
-CREATE MATERIALIZED VIEW IF NOT EXISTS public.mv_tournament_snapshot AS
+CREATE MATERIALIZED VIEW public.mv_tournament_snapshot AS
 WITH latest_event AS (
   SELECT mv.tournament_id, max(mv.event_id) AS latest_event_id
   FROM public.mv_tournament_event_snapshot mv

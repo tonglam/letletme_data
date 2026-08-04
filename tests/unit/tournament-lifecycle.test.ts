@@ -65,4 +65,42 @@ describe('tournament lifecycle invariants', () => {
     });
     expect(JSON.stringify(reports[0])).not.toContain('private database detail');
   });
+
+  test('treats resume failure before this attempt publishes standings as critical', async () => {
+    process.env.DATABASE_URL ??= 'postgresql://unit:unit@127.0.0.1:5432/unit';
+    process.env.REDIS_HOST ??= '127.0.0.1';
+    process.env.REDIS_PORT ??= '6379';
+    const { setupTournamentStructure } = await import(
+      '../../src/services/tournament-setup.service'
+    );
+    const originalDatabaseUrl = process.env.DATABASE_URL;
+    spyOn(tournamentInfoRepository, 'findSetupStatus').mockResolvedValue({
+      tournamentId: 900_124,
+      setupStatus: 'processing',
+      setupPhase: 'syncing_entries',
+      setupCompletedUnits: 0,
+      setupTotalUnits: 1,
+      setupProgressUpdatedAt: null,
+      standingsReadyAt: '2026-01-01T00:00:00.000Z',
+      setupWarningCount: 0,
+      setupStartedAt: '2026-01-01T00:00:00.000Z',
+      setupFinishedAt: null,
+      createdAt: '2026-01-01T00:00:00.000Z',
+    } as never);
+    spyOn(tournamentInfoRepository, 'findSetupConfig').mockResolvedValue({ id: 900_124 } as never);
+    spyOn(tournamentInfoRepository, 'markSetupProcessing').mockRejectedValue(
+      new Error('resume preparation failed'),
+    );
+    const resultSpy = spyOn(tournamentInfoRepository, 'markSetupResult').mockResolvedValue(
+      undefined as never,
+    );
+    process.env.DATABASE_URL = '';
+
+    try {
+      await expect(setupTournamentStructure(900_124)).rejects.toThrow('resume preparation failed');
+      expect(resultSpy).toHaveBeenCalledWith(900_124, 'failed', 'resume preparation failed', 0);
+    } finally {
+      process.env.DATABASE_URL = originalDatabaseUrl;
+    }
+  });
 });

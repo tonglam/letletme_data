@@ -35,6 +35,13 @@ export type EventPointsPayload = {
   }>;
 };
 
+export type PreEntryBaselineUnit = {
+  entryId: number;
+  eventId: number;
+};
+
+const PRE_ENTRY_OVERALL_RANK = 2_147_483_647;
+
 function normalizeAutoSubs(raw: unknown): AutoSubItem[] {
   if (!Array.isArray(raw)) {
     return [];
@@ -90,6 +97,58 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
         throw new DatabaseError(
           'Failed to upsert core entry event results from history',
           'ENTRY_EVENT_RESULTS_HISTORY_UPSERT_ERROR',
+          error as Error,
+        );
+      }
+    },
+
+    seedPreEntryBaselines: async (units: readonly PreEntryBaselineUnit[]): Promise<number> => {
+      const uniqueUnits = [
+        ...new Map(
+          units
+            .filter((unit) => unit.entryId > 0 && unit.eventId > 0)
+            .map((unit) => [`${unit.entryId}:${unit.eventId}`, unit]),
+        ).values(),
+      ];
+      if (uniqueUnits.length === 0) return 0;
+
+      try {
+        const db = await getDbInstance();
+        let inserted = 0;
+        for (let index = 0; index < uniqueUnits.length; index += 250) {
+          const chunk = uniqueUnits.slice(index, index + 250);
+          const rows = await db
+            .insert(entryEventResults)
+            .values(
+              chunk.map((unit) => ({
+                entryId: unit.entryId,
+                eventId: unit.eventId,
+                eventPoints: 0,
+                eventTransfers: 0,
+                eventTransfersCost: 0,
+                eventNetPoints: 0,
+                overallPoints: 0,
+                overallRank: PRE_ENTRY_OVERALL_RANK,
+              })),
+            )
+            .onConflictDoNothing({
+              target: [entryEventResults.entryId, entryEventResults.eventId],
+            })
+            .returning({ id: entryEventResults.id });
+          inserted += rows.length;
+        }
+        logInfo('Seeded pre-entry event result baselines', {
+          requested: uniqueUnits.length,
+          inserted,
+        });
+        return inserted;
+      } catch (error) {
+        logError('Failed to seed pre-entry event result baselines', error, {
+          count: uniqueUnits.length,
+        });
+        throw new DatabaseError(
+          'Failed to seed pre-entry event result baselines',
+          'ENTRY_EVENT_RESULTS_BASELINE_UPSERT_ERROR',
           error as Error,
         );
       }
