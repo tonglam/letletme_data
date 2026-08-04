@@ -316,6 +316,70 @@ describe('tournament initialization checkpoints', () => {
     expect((await checkpointRow())?.snapshot).toBeNull();
   });
 
+  test('season rollover before commit rejects the stale entry snapshot', async () => {
+    const sql = await getDbClient();
+    const redis = await redisSingleton.getClient();
+    await sql`
+      UPDATE entry_infos
+      SET entry_snapshot_synced_through_event_id = NULL,
+          entry_snapshot_synced_season = NULL
+      WHERE id = ${ENTRY_ID}
+    `;
+
+    try {
+      await redis.set('Season:active', '2627');
+      resetActiveSeasonMemo();
+      await expect(syncEntryInfo(ENTRY_ID, client, 12, TEST_SEASON)).rejects.toThrow(
+        'Active season changed from 2526 to 2627',
+      );
+      expect((await checkpointRow())?.snapshot).toBeNull();
+      expect((await checkpointRow())?.snapshotSeason).toBeNull();
+    } finally {
+      await redis.set('Season:active', TEST_SEASON);
+      resetActiveSeasonMemo();
+    }
+  });
+
+  test('pick aggregation reads canonical picks before result enrichment exists', async () => {
+    const sql = await getDbClient();
+    await sql`DELETE FROM entry_event_results WHERE entry_id = ${ENTRY_ID} AND event_id = 11`;
+    await sql`
+      INSERT INTO entry_event_picks (entry_id, event_id, chip, picks, transfers, transfers_cost)
+      VALUES (
+        ${ENTRY_ID},
+        11,
+        'n/a',
+        ${JSON.stringify([
+          {
+            element: PICK_PLAYER_ID,
+            position: 1,
+            multiplier: 1,
+            is_captain: false,
+            is_vice_captain: true,
+          },
+        ])}::jsonb,
+        0,
+        0
+      )
+      ON CONFLICT (entry_id, event_id) DO UPDATE SET picks = excluded.picks
+    `;
+
+    try {
+      const rows = await sql<
+        Array<{ element_id: number; pick_count: string; vice_captain_count: string }>
+      >`
+        SELECT element_id, pick_count, vice_captain_count
+        FROM get_pick_aggregation(11, ARRAY[${ENTRY_ID}]::integer[])
+      `;
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.element_id).toBe(PICK_PLAYER_ID);
+      expect(Number(rows[0]?.pick_count)).toBe(1);
+      expect(Number(rows[0]?.vice_captain_count)).toBe(1);
+    } finally {
+      await sql`DELETE FROM entry_event_picks WHERE entry_id = ${ENTRY_ID} AND event_id = 11`;
+    }
+  });
+
   test('implicit snapshot sync checkpoints only the latest finalized event', async () => {
     const sql = await getDbClient();
     await sql`

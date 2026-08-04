@@ -1,7 +1,11 @@
 import { eq, sql } from 'drizzle-orm';
 
 import { entryInfosCache } from '../cache/entry-infos-cache';
-import { getActiveCacheSeason } from '../cache/cache-season';
+import {
+  acquireActiveSeasonReadFence,
+  getActiveCacheSeason,
+  getActiveCacheSeasonUncached,
+} from '../cache/cache-season';
 import { fplClient } from '../clients/fpl';
 import { getDb } from '../db/singleton';
 import { toEntryInfo } from '../domain/entry-infos';
@@ -48,6 +52,16 @@ export async function syncEntryInfo(
     await tx.execute(
       sql`SELECT pg_advisory_xact_lock(${ENTRY_SEASON_SYNC_LOCK_NAMESPACE}, ${entryId})`,
     );
+    // Pin annual season authority across the canonical commit. FPL reads stay
+    // outside the transaction; one uncached Redis read under the shared fence
+    // rejects a setup that crossed rollover instead of tagging old rows as new.
+    await acquireActiveSeasonReadFence(tx);
+    const canonicalSeason = await getActiveCacheSeasonUncached();
+    if (canonicalSeason !== activeSeason) {
+      throw new Error(
+        `Active season changed from ${activeSeason} to ${canonicalSeason} during entry snapshot sync`,
+      );
+    }
     const currentRows = await tx
       .select({
         snapshotSeason: entryInfos.entrySnapshotSyncedSeason,

@@ -8,6 +8,8 @@ import {
   enqueueTournamentSetup,
   getTournamentSetupJobIds,
 } from '../../src/jobs/tournament-setup.jobs';
+import { getTournamentSetupJobPriority } from '../../src/domain/job-priority';
+import { getTournamentSetupQueue } from '../../src/queues/tournament-setup.queue';
 
 describe('tournament setup enqueue serialization', () => {
   const tournamentId = 980_000 + (Date.now() % 10_000);
@@ -37,5 +39,28 @@ describe('tournament setup enqueue serialization', () => {
     expect(String(second.id)).toBe(String(first.id));
     expect(preparationCount).toBe(2);
     expect(maxActivePreparations).toBe(1);
+  });
+
+  test('reuses a deterministic job when its successful add response is lost', async () => {
+    const queue = getTournamentSetupQueue(getTournamentSetupJobPriority('tournament-setup'));
+    const originalAdd = queue.add;
+    let injected = false;
+    queue.add = (async (...args: Parameters<typeof originalAdd>) => {
+      const added = await originalAdd.apply(queue, args);
+      if (!injected) {
+        injected = true;
+        throw new Error('simulated lost queue add response');
+      }
+      return added;
+    }) as typeof queue.add;
+
+    try {
+      const job = await enqueueTournamentSetup(tournamentId, 'resume', { forceNew: true });
+      expect(injected).toBe(true);
+      expect(job.id).toBe(getTournamentSetupJobIds(tournamentId).baseJobId);
+      expect(await queue.getJob(getTournamentSetupJobIds(tournamentId).baseJobId)).not.toBeNull();
+    } finally {
+      queue.add = originalAdd;
+    }
   });
 });

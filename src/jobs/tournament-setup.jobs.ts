@@ -199,11 +199,26 @@ async function enqueueTournamentSetupUnlocked(
     }
 
     await options.prepareEnqueue?.();
-    const job = await queue.add(
-      'tournament-setup',
-      jobData,
-      jobId === undefined ? undefined : { jobId },
-    );
+    let job;
+    try {
+      job = await queue.add(
+        'tournament-setup',
+        jobData,
+        jobId === undefined ? undefined : { jobId },
+      );
+    } catch (addError) {
+      // A lost Redis response is ambiguous: the deterministic add may already
+      // have committed. Re-read that exact slot before callers replace the
+      // prepared processing marker with a false failed state.
+      const accepted = jobId === undefined ? null : await queue.getJob(jobId).catch(() => null);
+      if (!accepted) throw addError;
+      logWarn('Recovered tournament setup job after ambiguous queue add response', {
+        tournamentId,
+        jobId,
+        source,
+      });
+      job = accepted;
+    }
 
     logInfo('Tournament setup job enqueued', {
       tournamentId,

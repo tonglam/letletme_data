@@ -97,10 +97,15 @@ AS $function$
         (pick ->> 'element_id')::integer
       ) AS element_id,
       pick
-    FROM public.entry_event_results result,
-      LATERAL jsonb_array_elements(COALESCE(result.event_picks, '[]'::jsonb)) AS pick
-    WHERE result.event_id = p_event_id
-      AND result.entry_id = ANY(p_entry_ids)
+    FROM public.entry_event_picks canonical
+    FULL OUTER JOIN public.entry_event_results result
+      ON result.entry_id = canonical.entry_id
+     AND result.event_id = canonical.event_id
+    CROSS JOIN LATERAL jsonb_array_elements(
+      COALESCE(canonical.picks, result.event_picks, '[]'::jsonb)
+    ) AS pick
+    WHERE COALESCE(canonical.event_id, result.event_id) = p_event_id
+      AND COALESCE(canonical.entry_id, result.entry_id) = ANY(p_entry_ids)
   ) expanded
   WHERE expanded.element_id IS NOT NULL
   GROUP BY expanded.element_id;

@@ -144,6 +144,8 @@ WITH tournament_events AS (
   UNION ALL
   SELECT battle.tournament_id, battle.event_id
   FROM public.tournament_battle_group_results battle
+  WHERE battle.home_match_points IS NOT NULL
+    AND battle.away_match_points IS NOT NULL
   UNION ALL
   SELECT knockout.tournament_id, knockout.event_id
   FROM public.tournament_knockout_results knockout

@@ -428,6 +428,52 @@ describe('tournament creation vs entry_infos (FP-08)', () => {
     ]);
   });
 
+  test('ignores pre-created battle fixtures until match points are calculated', async () => {
+    const client = await getDbClient();
+    const participants = buildParticipants();
+    const pointsPlan = planTournamentStructure(
+      {
+        tournamentName: `Battle Snapshot ${Date.now()}`,
+        adminId: String(SYNCED_ENTRY.id),
+        creator: 'battle-snapshot-test',
+        participantSource: 'custom',
+        leagueUrl: 'https://fantasy.premierleague.com/leagues/900006/standings/c',
+        groupFormat: 'points',
+        startGameweek: 'GW1',
+        endGameweek: 'GW38',
+        groupNum: '1',
+        qualifiersPerGroup: '4',
+        knockoutFormat: 'none',
+        selectedParticipantIds: participants.map((participant) => participant.id),
+      },
+      participants,
+      900006,
+      'classic',
+    );
+    const plan = { ...pointsPlan, groupMode: 'battle_races' as const };
+    const created = await tournamentInfoRepository.createTournamentWithEntries(plan);
+    createdTournamentIds.push(created.id);
+    await client`
+      INSERT INTO tournament_battle_group_results (
+        tournament_id, group_id, event_id,
+        home_index, home_entry_id, home_match_points,
+        away_index, away_entry_id, away_match_points
+      ) VALUES
+        (${created.id}, 1, 1, 0, ${Number(participants[0].id)}, 3,
+         1, ${Number(participants[1].id)}, 0),
+        (${created.id}, 1, 38, 0, ${Number(participants[0].id)}, NULL,
+         1, ${Number(participants[1].id)}, NULL)
+    `;
+    await client`REFRESH MATERIALIZED VIEW mv_tournament_snapshot`;
+
+    const rows = await client<Array<{ latest_event_id: number | null }>>`
+      SELECT latest_event_id
+      FROM mv_tournament_snapshot
+      WHERE tournament_id = ${created.id}
+    `;
+    expect(rows[0]?.latest_event_id).toBe(1);
+  });
+
   test('keeps the last points snapshot while knockout activity is preseeded or calculated', async () => {
     const client = await getDbClient();
     const participants = buildParticipants();
