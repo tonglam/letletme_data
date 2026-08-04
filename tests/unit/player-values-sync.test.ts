@@ -123,7 +123,7 @@ describe('player-values synchronization orchestration', () => {
       }),
     );
 
-    expect(await sync(changeDate)).toEqual({ count: 1 });
+    expect(await sync(changeDate)).toEqual({ count: 1, eventId: 1 });
     expect(persisted[0]).toMatchObject({ changeType: 'Start', lastValue: 0 });
     // Start rows seed the DB baseline but must never be published to Redis.
     expect(mergeCachedValues).not.toHaveBeenCalled();
@@ -158,7 +158,7 @@ describe('player-values synchronization orchestration', () => {
       }),
     );
 
-    expect(await sync(changeDate)).toEqual({ count: 0 });
+    expect(await sync(changeDate)).toEqual({ count: 0, eventId: 1 });
     expect(insertBatch).not.toHaveBeenCalled();
     expect(loadTeamsBasicInfo).not.toHaveBeenCalled();
     expect(inspectCachedValues).not.toHaveBeenCalled();
@@ -202,7 +202,7 @@ describe('player-values synchronization orchestration', () => {
       }),
     );
 
-    expect(await sync(changeDate)).toEqual({ count: 1 });
+    expect(await sync(changeDate)).toEqual({ count: 1, eventId: 1 });
     expect(operations).toEqual(['persist', 'cache', 'enqueue', 'notify']);
   });
 
@@ -236,7 +236,7 @@ describe('player-values synchronization orchestration', () => {
       }),
     );
 
-    expect(await sync(changeDate)).toEqual({ count: 0 });
+    expect(await sync(changeDate)).toEqual({ count: 0, eventId: 1 });
     expect(mergeCachedValues).toHaveBeenCalledTimes(1);
     expect(mergeCachedValues).toHaveBeenCalledWith(changeDate, [cachedValue]);
   });
@@ -278,7 +278,7 @@ describe('player-values synchronization orchestration', () => {
       }),
     );
 
-    expect(await sync(changeDate)).toEqual({ count: 0 });
+    expect(await sync(changeDate)).toEqual({ count: 0, eventId: 1 });
     expect(operations).toEqual(['hset', 'hdel']);
   });
 
@@ -316,7 +316,7 @@ describe('player-values synchronization orchestration', () => {
       }),
     );
 
-    expect(await sync(changeDate)).toEqual({ count: 0 });
+    expect(await sync(changeDate)).toEqual({ count: 0, eventId: 1 });
     expect(mergeCachedValues).toHaveBeenCalledTimes(1);
     expect(deleteCachedFields).not.toHaveBeenCalled();
   });
@@ -352,7 +352,7 @@ describe('player-values synchronization orchestration', () => {
       }),
     );
 
-    expect(await sync(changeDate)).toEqual({ count: 0 });
+    expect(await sync(changeDate)).toEqual({ count: 0, eventId: 1 });
     expect(mergeCachedValues).not.toHaveBeenCalled();
     expect(deleteCachedFields).toHaveBeenCalledTimes(1);
   });
@@ -403,7 +403,7 @@ describe('player-values synchronization orchestration', () => {
       }),
     );
 
-    expect(await sync(changeDate)).toEqual({ count: 0 });
+    expect(await sync(changeDate)).toEqual({ count: 0, eventId: 1 });
     expect(findPlayersByIds).toHaveBeenCalledTimes(1);
     expect(mergeCachedValues).toHaveBeenCalledTimes(1);
     expect(enqueuePlayerPrices).toHaveBeenCalledTimes(1);
@@ -426,6 +426,6 @@ describe('player-values synchronization orchestration', () => {
       }),
     );
 
-    expect(await sync(changeDate)).toEqual({ count: 1 });
+    expect(await sync(changeDate)).toEqual({ count: 1, eventId: 1 });
   });
 });

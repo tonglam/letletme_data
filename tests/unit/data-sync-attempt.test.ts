@@ -5,6 +5,7 @@ import {
   resolveBullMqAttemptQueueWaitMs,
   resolveDataSyncAttempt,
   runDataSyncAttempt,
+  type DataSyncAttemptContext,
   type DataSyncAttemptReport,
 } from '../../src/utils/data-sync-attempt';
 import { beginFplLogicalRequest } from '../../src/utils/fpl-request-metrics';
@@ -213,6 +214,29 @@ describe('data sync attempt reporting', () => {
     expect(reportsFrom(infoSpy)[0]).toMatchObject({
       jobName: 'player-stats',
       targetEventId: 12,
+    });
+  });
+
+  test('records a target resolved inside an unscoped attempt, including failures', async () => {
+    const infoSpy = spyOn(logger, 'info').mockImplementation(() => undefined as never);
+    const context: DataSyncAttemptContext = {
+      queue: 'entry-sync',
+      jobName: 'entry-results',
+      runId: 'current-entry-results',
+      source: 'cron' as const,
+    };
+
+    await expect(
+      runDataSyncAttempt(context, async () => {
+        context.targetEventId = 13;
+        throw new Error('entry result failed after event resolution');
+      }),
+    ).rejects.toThrow('entry result failed after event resolution');
+
+    expect(reportsFrom(infoSpy)[0]).toMatchObject({
+      jobName: 'entry-results',
+      targetEventId: 13,
+      outcome: 'failed',
     });
   });
 

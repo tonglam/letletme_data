@@ -199,6 +199,10 @@ export async function runDataSyncAttempt<T>(
 
     try {
       const result = await runner();
+      // Some unscoped workers resolve their canonical event inside the runner
+      // immediately before taking mutation locks. The context is shared by
+      // reference, so adopt that resolution before falling back to the result.
+      targetEventId ??= context.targetEventId;
       if (targetEventId === undefined && isRecord(result)) {
         targetEventId = firstBoundedUnit(result.eventId);
       }
@@ -206,6 +210,9 @@ export async function runDataSyncAttempt<T>(
       outcome = resolveOutcome(summary);
       return result;
     } finally {
+      // Preserve the resolved target even when the runner fails after lookup;
+      // the failure report still needs to identify the bounded event unit.
+      targetEventId ??= context.targetEventId;
       const report: DataSyncAttemptReport = {
         event: 'data_sync_attempt',
         schemaVersion: 1,

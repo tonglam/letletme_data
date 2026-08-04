@@ -158,7 +158,7 @@ function enrichStoredRows(
 export function createPlayerValuesSync(dependencies: PlayerValuesSyncDependencies) {
   return async function syncForDate(
     changeDate: string = formatCronDateKey(),
-  ): Promise<{ count: number }> {
+  ): Promise<{ count: number; eventId?: number }> {
     logInfo('Starting daily player values sync');
 
     if (!/^\d{8}$/.test(changeDate)) {
@@ -206,7 +206,7 @@ export function createPlayerValuesSync(dependencies: PlayerValuesSyncDependencie
 
     if (playersWithChanges.length === 0 && todaysRecords.length === 0) {
       logInfo('No player price changes detected; preserving database and cache', { changeDate });
-      return { count: 0 };
+      return { count: 0, eventId: syncEvent.event.id };
     }
 
     const teams = await dependencies.loadTeamsBasicInfo();
@@ -321,7 +321,7 @@ export function createPlayerValuesSync(dependencies: PlayerValuesSyncDependencie
       recordsInserted: result.count,
     });
 
-    return { count: result.count };
+    return { count: result.count, eventId: syncEvent.event.id };
   };
 }
 
