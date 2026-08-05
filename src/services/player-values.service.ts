@@ -158,7 +158,8 @@ function enrichStoredRows(
 export function createPlayerValuesSync(dependencies: PlayerValuesSyncDependencies) {
   return async function syncForDate(
     changeDate: string = formatCronDateKey(),
-  ): Promise<{ count: number }> {
+    options?: { onTargetEventResolved?: (eventId: number) => void },
+  ): Promise<{ count: number; eventId?: number; outcome?: 'noop' }> {
     logInfo('Starting daily player values sync');
 
     if (!/^\d{8}$/.test(changeDate)) {
@@ -171,16 +172,19 @@ export function createPlayerValuesSync(dependencies: PlayerValuesSyncDependencie
         changeDate,
         currentChangeDate,
       });
-      return { count: 0 };
+      return { count: 0, outcome: 'noop' };
     }
 
-    const [bootstrapData, syncEvent] = await Promise.all([
-      dependencies.getBootstrap(),
-      dependencies.resolvePlayerSyncEvent(),
-    ]);
+    // Resolve and report the target before the fallible bootstrap request. A
+    // bootstrap outage must still leave the attempt correlated to the event
+    // that was selected for this date.
+    const syncEvent = await dependencies.resolvePlayerSyncEvent();
     if (!syncEvent) {
       throw new Error('No current or next event found for player values');
     }
+    options?.onTargetEventResolved?.(syncEvent.event.id);
+
+    const bootstrapData = await dependencies.getBootstrap();
 
     if (!Array.isArray(bootstrapData.elements) || bootstrapData.elements.length === 0) {
       throw new Error('No player values returned from FPL API');
@@ -206,7 +210,7 @@ export function createPlayerValuesSync(dependencies: PlayerValuesSyncDependencie
 
     if (playersWithChanges.length === 0 && todaysRecords.length === 0) {
       logInfo('No player price changes detected; preserving database and cache', { changeDate });
-      return { count: 0 };
+      return { count: 0, eventId: syncEvent.event.id };
     }
 
     const teams = await dependencies.loadTeamsBasicInfo();
@@ -321,7 +325,7 @@ export function createPlayerValuesSync(dependencies: PlayerValuesSyncDependencie
       recordsInserted: result.count,
     });
 
-    return { count: result.count };
+    return { count: result.count, eventId: syncEvent.event.id };
   };
 }
 

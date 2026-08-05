@@ -41,6 +41,7 @@ export interface EntrySyncJobData {
   throttleMs?: number;
   eventId?: number;
   runId?: string;
+  queueKey?: string;
 }
 
 const tieredQueueSet = createTieredQueueSet<EntrySyncJobData>(entrySyncQueueName, {

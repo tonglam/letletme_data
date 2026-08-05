@@ -32,6 +32,40 @@ describe('Fixtures Integration Tests', () => {
     expect(rows.length).toBeGreaterThan(0);
   });
 
+  test('counts fixtures whose existing ownership is successfully cleared', async () => {
+    const originalGetFixtures = fplClient.getFixtures;
+    const fetchFixtures = originalGetFixtures.bind(fplClient);
+    const fullFixtureFeed = await fetchFixtures();
+    const assignedFixture = fullFixtureFeed.find((fixture) => fixture.event !== null);
+    if (!assignedFixture) throw new Error('FPL fixture feed contains no assigned fixture');
+
+    const correctedFeed = fullFixtureFeed.map((fixture) =>
+      fixture.id === assignedFixture.id ? { ...fixture, event: null } : fixture,
+    );
+    const correctedFixtures = correctedFeed.map(transformFixture);
+    const unscheduledIds = correctedFixtures
+      .filter((fixture) => fixture.event === null)
+      .map((fixture) => fixture.id);
+    const persistedUnscheduled = await fixtureRepository.findEventIdsByFixtureIds(unscheduledIds);
+    const expectedCount =
+      correctedFixtures.filter((fixture) => fixture.event !== null).length +
+      persistedUnscheduled.size;
+
+    try {
+      fplClient.getFixtures = async () => correctedFeed;
+
+      const result = await syncFixtures();
+
+      expect(result.count).toBe(expectedCount);
+      expect(result.count).toBeGreaterThan(
+        correctedFixtures.filter((fixture) => fixture.event !== null).length,
+      );
+    } finally {
+      fplClient.getFixtures = originalGetFixtures;
+      await syncFixtures();
+    }
+  }, 30000);
+
   test('should have valid fixture structure', async () => {
     const db = await getDb();
     const fixtures = await db.select().from(eventFixtures).limit(1);

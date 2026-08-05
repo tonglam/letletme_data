@@ -66,6 +66,10 @@ function cloneMetrics(metrics: MutableFplRequestMetrics): FplRequestMetricsSnaps
 }
 
 export async function runWithFplRequestMetrics<T>(runner: () => Promise<T>): Promise<T> {
+  if (requestMetricsStore.getStore()) {
+    return runner();
+  }
+
   const metrics = createEmptyFplRequestMetrics();
   return requestMetricsStore.run(metrics, runner);
 }

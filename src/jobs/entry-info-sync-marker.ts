@@ -8,11 +8,16 @@ export function getEntryInfoSyncDateKey(date: Date) {
 }
 
 /**
- * Only mark the day synced after the final chunk completes with zero failures.
- * Mid-chunk success or pending failed-id retries must not suppress same-day re-enqueue.
+ * Only mark the day synced after the final database-scan chunk completes with
+ * zero failures. Targeted API work, mid-chunk success, and failed-id retries
+ * must not suppress the scheduled full scan.
  */
-export function shouldMarkEntryInfoSynced(hasMore: boolean, failed: number): boolean {
-  return !hasMore && failed === 0;
+export function shouldMarkEntryInfoSynced(
+  fetchedFromDb: boolean,
+  hasMore: boolean,
+  failed: number,
+): boolean {
+  return fetchedFromDb && !hasMore && failed === 0;
 }
 
 function getSecondsUntilNextDay(now: Date) {

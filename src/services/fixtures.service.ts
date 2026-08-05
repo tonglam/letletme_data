@@ -163,8 +163,9 @@ export async function syncFixtures(eventId?: number): Promise<{ count: number; e
               });
             }
             const repository = createFixtureRepository(tx);
+            let markedUnscheduled = 0;
             if (unscheduledFixtures.length > 0) {
-              const markedUnscheduled = await repository.markUnscheduled(
+              markedUnscheduled = await repository.markUnscheduled(
                 unscheduledFixtures.map((fixture) => fixture.id),
               );
               logInfo('Persisted unscheduled fixture ownership', {
@@ -172,7 +173,8 @@ export async function syncFixtures(eventId?: number): Promise<{ count: number; e
                 updated: markedUnscheduled,
               });
             }
-            return repository.upsertBatch(schedulableFixtures);
+            const savedFixtures = await repository.upsertBatch(schedulableFixtures);
+            return { savedFixtures, markedUnscheduled };
           },
         );
         if (!durable.accepted || !durable.value) {
@@ -180,8 +182,13 @@ export async function syncFixtures(eventId?: number): Promise<{ count: number; e
             `Fixture sync for ${eventId ? `event ${eventId}` : 'all events'} was superseded by live snapshot event ${durable.rejectedEventId ?? 'unknown'} at ${durable.winnerCheckedAt.toISOString()}; retry`,
           );
         }
-        const savedFixtures = durable.value;
-        logInfo('Fixtures upserted to database', { count: savedFixtures.length, ...logContext });
+        const { savedFixtures, markedUnscheduled } = durable.value;
+        logInfo('Fixtures persisted to database', {
+          count: savedFixtures.length + markedUnscheduled,
+          scheduledCount: savedFixtures.length,
+          unscheduledCount: markedUnscheduled,
+          ...logContext,
+        });
 
         let snapshotOwnedEventIds: ReadonlySet<number> = new Set();
         if (eventId && !recoveredFullFixtureFeed) {
@@ -239,7 +246,7 @@ export async function syncFixtures(eventId?: number): Promise<{ count: number; e
         logInfo('Fixtures cache updated', logContext);
 
         return {
-          count: savedFixtures.length,
+          count: savedFixtures.length + markedUnscheduled,
           errors: rawFixtures.length - fixtures.length,
         };
       },

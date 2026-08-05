@@ -46,6 +46,8 @@ const enqueueFixturesAllGameweeksSyncJob = mock(async () => ({ id: 'fixtures-all
 const enqueuePlayersSyncJob = mock(async () => ({ id: 'players-job-1' }));
 const enqueuePlayerValuesSyncJob = mock(async () => ({ id: 'player-values-job-1' }));
 const enqueuePlayerStatsSyncJob = mock(async () => ({ id: 'player-stats-job-1' }));
+const enqueueTeamsSyncJob = mock(async () => ({ id: 'teams-job-1' }));
+const enqueuePhasesSyncJob = mock(async () => ({ id: 'phases-job-1' }));
 mock.module('../../src/jobs/data-sync-enqueue', () => ({
   enqueueEventsSyncJob,
   enqueueFixturesSyncJob,
@@ -53,6 +55,8 @@ mock.module('../../src/jobs/data-sync-enqueue', () => ({
   enqueuePlayersSyncJob,
   enqueuePlayerValuesSyncJob,
   enqueuePlayerStatsSyncJob,
+  enqueueTeamsSyncJob,
+  enqueuePhasesSyncJob,
 }));
 
 // Mock the entry-sync queue (not entry-sync-enqueue) so real enqueue helpers run.
@@ -70,9 +74,10 @@ mock.module('../../src/queues/entry-sync.queue', () => ({
   ENTRY_SYNC_DEFAULT_THROTTLE_MS: 150,
   getEntrySyncQueue: () => ({
     name: 'entry-sync-p2',
+    getJobs: async () => [],
     add: async (name: string, data: Record<string, unknown>, opts: Record<string, unknown>) => {
       entrySyncAddCalls.push({ name, data, opts });
-      return { id: (opts.jobId as string | undefined) ?? 'generated-id' };
+      return { id: (opts.jobId as string | undefined) ?? 'generated-id', name, data };
     },
   }),
 }));
@@ -161,11 +166,6 @@ const deleteTournament = spyOn(
   'deleteTournament',
 ).mockImplementation(async () => managedTournament);
 
-const syncEntryInfo = mock(async (entryId: number) => ({ id: entryId, name: 'Test' }));
-mock.module('../../src/services/entry-info.service', () => ({
-  syncEntryInfo,
-}));
-
 const { eventsAPI } = await import('../../src/api/events.api');
 const { jobsAPI } = await import('../../src/api/jobs.api');
 const { entrySyncAPI } = await import('../../src/api/entry-sync.api');
@@ -176,6 +176,8 @@ const { playerStatsAPI } = await import('../../src/api/player-stats.api');
 const { eventLivesAPI } = await import('../../src/api/event-lives.api');
 const { tournamentsAPI } = await import('../../src/api/tournaments.api');
 const { entryInfoAPI } = await import('../../src/api/entry-info.api');
+const { teamsAPI } = await import('../../src/api/teams.api');
+const { phasesAPI } = await import('../../src/api/phases.api');
 
 describe('eventsAPI handlers', () => {
   beforeEach(() => {
@@ -609,18 +611,24 @@ describe('tournamentsAPI handlers', () => {
 
 describe('entryInfoAPI handlers', () => {
   beforeEach(() => {
-    syncEntryInfo.mockClear();
+    entrySyncAddCalls.length = 0;
   });
 
-  test('POST /entry-info/:entryId/sync syncs a numeric entry id', async () => {
+  test('POST /entry-info/:entryId/sync queues a numeric entry id', async () => {
     const response = await entryInfoAPI.handle(
       new Request('http://localhost/entry-info/42/sync', { method: 'POST' }),
     );
-    expect(response.status).toBe(200);
-    const body = (await response.json()) as { success: boolean; data: { id: number } };
-    expect(body.success).toBe(true);
-    expect(body.data.id).toBe(42);
-    expect(syncEntryInfo).toHaveBeenCalledWith(42);
+    expect(response.status).toBe(202);
+    expect(await response.json()).toMatchObject({
+      success: true,
+      status: 'queued',
+      jobId: expect.any(String),
+    });
+    expect(entrySyncAddCalls).toHaveLength(1);
+    expect(entrySyncAddCalls[0]).toMatchObject({
+      name: 'entry-info',
+      data: { source: 'api', entryIds: [42] },
+    });
   });
 
   test('rejects non-numeric entryId params', async () => {
@@ -628,6 +636,41 @@ describe('entryInfoAPI handlers', () => {
       new Request('http://localhost/entry-info/abc/sync', { method: 'POST' }),
     );
     expect(response.status).toBe(422);
-    expect(syncEntryInfo).not.toHaveBeenCalled();
+    expect(entrySyncAddCalls).toHaveLength(0);
+  });
+});
+
+describe('queued core repair APIs', () => {
+  beforeEach(() => {
+    enqueueTeamsSyncJob.mockClear();
+    enqueuePhasesSyncJob.mockClear();
+  });
+
+  test('POST /teams/sync returns the queued job contract', async () => {
+    const response = await teamsAPI.handle(
+      new Request('http://localhost/teams/sync', { method: 'POST' }),
+    );
+    expect(response.status).toBe(202);
+    expect(await response.json()).toEqual({
+      success: true,
+      status: 'queued',
+      jobId: 'teams-job-1',
+      message: 'Teams sync queued',
+    });
+    expect(enqueueTeamsSyncJob).toHaveBeenCalledWith('api');
+  });
+
+  test('POST /phases/sync returns the queued job contract', async () => {
+    const response = await phasesAPI.handle(
+      new Request('http://localhost/phases/sync', { method: 'POST' }),
+    );
+    expect(response.status).toBe(202);
+    expect(await response.json()).toEqual({
+      success: true,
+      status: 'queued',
+      jobId: 'phases-job-1',
+      message: 'Phases sync queued',
+    });
+    expect(enqueuePhasesSyncJob).toHaveBeenCalledWith('api');
   });
 });

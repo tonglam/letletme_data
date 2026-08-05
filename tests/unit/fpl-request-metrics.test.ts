@@ -84,6 +84,30 @@ describe('FPL request metrics', () => {
     expect(transferMetrics.finalOutcomes.network_error).toBe(1);
   });
 
+  test('reuses a parent collector for nested reporting scopes', async () => {
+    const metrics = await runWithFplRequestMetrics(async () => {
+      const outer = beginFplLogicalRequest(
+        'https://fantasy.premierleague.com/api/entry/101/history/',
+      );
+      outer.recordAttempt('2xx');
+      outer.finish();
+
+      await runWithFplRequestMetrics(async () => {
+        const inner = beginFplLogicalRequest(
+          'https://fantasy.premierleague.com/api/entry/101/transfers/',
+        );
+        inner.recordAttempt('2xx');
+        inner.finish();
+      });
+
+      return getFplRequestMetricsSnapshot();
+    });
+
+    expect(metrics.logicalRequests).toBe(2);
+    expect(metrics.byEndpoint.entry_history).toBe(1);
+    expect(metrics.byEndpoint.entry_transfers).toBe(1);
+  });
+
   test('records a repeated 5xx sequence as one failed logical request', async () => {
     process.env.FPL_RETRY_BASE_DELAY_MS = '0';
     process.env.FPL_RETRY_MAX_DELAY_MS = '0';

@@ -16,7 +16,22 @@ import { loadTeamsBasicInfo } from '../utils/teams';
 import { getCurrentEvent, getNextEvent } from './events.service';
 import { resolvePlayerSyncEvent } from './player-sync-event.service';
 
-export async function syncCurrentPlayerStats(): Promise<{
+export type PlayerStatsSyncDependencies = {
+  getBootstrap: () => ReturnType<typeof fplClient.getBootstrap>;
+  resolvePlayerSyncEvent: typeof resolvePlayerSyncEvent;
+};
+
+const defaultDependencies: PlayerStatsSyncDependencies = {
+  getBootstrap: () => fplClient.getBootstrap(),
+  resolvePlayerSyncEvent,
+};
+
+export async function syncCurrentPlayerStats(
+  options?: {
+    onTargetEventResolved?: (eventId: EventId) => void;
+  },
+  dependencies: PlayerStatsSyncDependencies = defaultDependencies,
+): Promise<{
   count: number;
   eventId: EventId;
   errors: number;
@@ -25,15 +40,18 @@ export async function syncCurrentPlayerStats(): Promise<{
 }> {
   logInfo('Starting player stats sync for current gameweek');
 
-  const fplData = await fplClient.getBootstrap();
+  // Resolve and publish the target before the fallible upstream request. This
+  // keeps failed unscoped attempts traceable to the affected gameweek.
+  const syncEvent = await dependencies.resolvePlayerSyncEvent();
+  if (!syncEvent) {
+    throw new Error('No current or next event found for player stats');
+  }
+  options?.onTargetEventResolved?.(syncEvent.event.id);
+
+  const fplData = await dependencies.getBootstrap();
 
   if (!Array.isArray(fplData.elements)) {
     throw new Error('Invalid player elements data from FPL API');
-  }
-
-  const syncEvent = await resolvePlayerSyncEvent();
-  if (!syncEvent) {
-    throw new Error('No current or next event found for player stats');
   }
 
   if (fplData.elements.length === 0) {

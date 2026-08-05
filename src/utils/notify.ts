@@ -2,14 +2,27 @@ import type { Job } from 'bullmq';
 import { getConfig } from './config';
 import { logError, logInfo, logWarn } from './logger';
 
-export async function sendTelegramMessage(message: string): Promise<void> {
+export type NotificationDeliveryResult = 'sent' | 'skipped';
+
+/** The provider answered with a definite rejection; no message was accepted. */
+export class NotificationDeliveryRejectedError extends Error {
+  readonly status: number;
+
+  constructor(status: number, statusText: string) {
+    super(`Telegram API error: ${status} ${statusText}`);
+    this.name = 'NotificationDeliveryRejectedError';
+    this.status = status;
+  }
+}
+
+export async function sendTelegramMessage(message: string): Promise<NotificationDeliveryResult> {
   const config = getConfig();
   const token = config.TELEGRAM_BOT_TOKEN;
   const chatId = config.TELEGRAM_CHAT_ID;
 
   if (!token || !chatId) {
     logWarn('Telegram not configured — skipping notification', { message });
-    return;
+    return 'skipped';
   }
 
   const url = `https://api.telegram.org/bot${token}/sendMessage`;
@@ -22,10 +35,11 @@ export async function sendTelegramMessage(message: string): Promise<void> {
     });
 
     if (!response.ok) {
-      throw new Error(`Telegram API error: ${response.status} ${response.statusText}`);
+      throw new NotificationDeliveryRejectedError(response.status, response.statusText);
     }
 
     logInfo('Telegram notification sent', { messageLength: message.length });
+    return 'sent';
   } catch (error) {
     logError('Failed to send Telegram notification', error, { messageLength: message.length });
     throw error;

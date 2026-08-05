@@ -7,8 +7,8 @@ import { syncLeagueEventResultsByTournament } from './league-event-results.servi
 /**
  * Enqueue per-tournament jobs for league event picks (coordinator fan-out).
  */
-export async function enqueuePicksPerTournament(eventId: number) {
-  logInfo('Enqueueing per-tournament picks jobs', { eventId });
+export async function enqueuePicksPerTournament(eventId: number, runId?: string) {
+  logInfo('Enqueueing per-tournament picks jobs', { eventId, runId });
 
   const tournaments = await tournamentInfoRepository.findActive();
   if (tournaments.length === 0) {
@@ -18,7 +18,7 @@ export async function enqueuePicksPerTournament(eventId: number) {
 
   const results = await Promise.allSettled(
     tournaments.map((tournament) =>
-      enqueueLeagueEventPicks(eventId, 'cascade', { tournamentId: tournament.id }),
+      enqueueLeagueEventPicks(eventId, 'cascade', { tournamentId: tournament.id, runId }),
     ),
   );
 
@@ -57,8 +57,8 @@ export async function enqueuePicksPerTournament(eventId: number) {
 /**
  * Enqueue per-tournament jobs for league event results (coordinator fan-out).
  */
-export async function enqueueResultsPerTournament(eventId: number) {
-  logInfo('Enqueueing per-tournament results jobs', { eventId });
+export async function enqueueResultsPerTournament(eventId: number, runId?: string) {
+  logInfo('Enqueueing per-tournament results jobs', { eventId, runId });
 
   const tournaments = await tournamentInfoRepository.findActive();
   if (tournaments.length === 0) {
@@ -68,7 +68,7 @@ export async function enqueueResultsPerTournament(eventId: number) {
 
   const results = await Promise.allSettled(
     tournaments.map((tournament) =>
-      enqueueLeagueEventResults(eventId, 'cascade', { tournamentId: tournament.id }),
+      enqueueLeagueEventResults(eventId, 'cascade', { tournamentId: tournament.id, runId }),
     ),
   );
 
@@ -104,16 +104,24 @@ export async function enqueueResultsPerTournament(eventId: number) {
   return { enqueued: successful };
 }
 
-export async function processLeagueEventPicksJob(eventId: number, tournamentId?: number) {
+export async function processLeagueEventPicksJob(
+  eventId: number,
+  tournamentId?: number,
+  runId?: string,
+) {
   if (tournamentId) {
     return syncLeagueEventPicksByTournament(tournamentId, eventId);
   }
-  return enqueuePicksPerTournament(eventId);
+  return enqueuePicksPerTournament(eventId, runId);
 }
 
-export async function processLeagueEventResultsJob(eventId: number, tournamentId?: number) {
+export async function processLeagueEventResultsJob(
+  eventId: number,
+  tournamentId?: number,
+  runId?: string,
+) {
   if (tournamentId) {
     return syncLeagueEventResultsByTournament(tournamentId, eventId);
   }
-  return enqueueResultsPerTournament(eventId);
+  return enqueueResultsPerTournament(eventId, runId);
 }

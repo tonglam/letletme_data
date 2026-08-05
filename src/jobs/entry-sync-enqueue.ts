@@ -9,6 +9,7 @@ import {
   ENTRY_SYNC_DEFAULT_THROTTLE_MS,
 } from '../queues/entry-sync.queue';
 import { getEntrySyncJobPriority, type EntrySyncPriorityJobName } from '../domain/job-priority';
+import { getCurrentEvent } from '../services/events.service';
 import { logError, logInfo } from '../utils/logger';
 import { stableHash } from '../utils/stable-hash';
 
@@ -23,6 +24,8 @@ export interface EntrySyncJobOptions {
   delayMs?: number;
   eventId?: number;
   runId?: string;
+  /** Stable deduplication key for every table-scan chunk in one trigger lane. */
+  queueKey?: string;
 }
 
 function hashEntryListKey(
@@ -55,13 +58,63 @@ async function enqueueEntrySyncJob(
     const concurrency = sanitizePositiveInt(options.concurrency, ENTRY_SYNC_DEFAULT_CONCURRENCY);
     const throttleMs = sanitizePositiveInt(options.throttleMs, ENTRY_SYNC_DEFAULT_THROTTLE_MS);
 
-    // Stable runId for this chain. Retries keep the same runId so retried chunks
-    // reuse the same deterministic jobId and cannot fork duplicate chains (FP-14f).
-    // Manual table-scans default to a stable runId so repeat triggers dedupe in the
-    // waiting room; cron ticks use a fresh runId so every cycle queues its own job.
-    const runId =
-      options.runId ??
-      (source === 'cron' ? `${Date.now()}` : source === 'manual' ? 'manual' : randomUUID());
+    const isManualScanRoot =
+      source === 'manual' &&
+      options.entryIds === undefined &&
+      chunkOffset === 0 &&
+      options.runId === undefined &&
+      options.queueKey === undefined;
+    if (isManualScanRoot) {
+      const pendingJobs = await queue.getJobs(['waiting', 'delayed', 'active', 'paused']);
+      const hasEventScopedManualScan = pendingJobs.some(
+        (job) =>
+          job.name === jobName &&
+          job.data.source === 'manual' &&
+          job.data.eventId !== undefined &&
+          (job.data.queueKey === 'manual' ||
+            (job.data.queueKey === undefined && job.data.runId === 'manual')),
+      );
+      // Results/picks/transfers roots historically omitted eventId and let the
+      // worker resolve it. Once a continuation has resolved its target, an
+      // unscoped root must resolve the same current event before deciding
+      // whether it can be reused; otherwise a continuation from the previous
+      // GW can suppress the new scan after the event advances.
+      const resolvedManualEventId =
+        options.eventId ??
+        (jobName !== 'entry-info' && hasEventScopedManualScan
+          ? (await getCurrentEvent())?.id
+          : undefined);
+      const existingManualScan = pendingJobs.find(
+        (job) =>
+          job.name === jobName &&
+          job.data.source === 'manual' &&
+          // Manual scans are event-scoped when a target GW is supplied. An
+          // unscoped root is resolved before this reuse check when a resolved
+          // continuation is present, so it cannot reuse a prior GW's chain.
+          (resolvedManualEventId === undefined
+            ? job.data.eventId === undefined
+            : job.data.eventId === resolvedManualEventId) &&
+          (job.data.queueKey === 'manual' ||
+            (job.data.queueKey === undefined && job.data.runId === 'manual')),
+      );
+      if (existingManualScan) {
+        logInfo('Entry sync manual scan already active; reusing existing', {
+          jobId: existingManualScan.id,
+          jobName,
+          source,
+          tier,
+          queue: queue.name,
+          runId: existingManualScan.data.runId,
+        });
+        return existingManualScan;
+      }
+    }
+
+    // Stable runId for this chain. Retries and following chunks keep the same
+    // runId. Every new manual scan gets a distinct correlation ID; its first
+    // chunk still uses a separate stable queue key to dedupe concurrent triggers.
+    const runId = options.runId ?? (source === 'cron' ? `${Date.now()}` : randomUUID());
+    const tableScanQueueKey = options.queueKey ?? (source === 'manual' ? 'manual' : runId);
 
     const jobData = {
       source,
@@ -74,17 +127,18 @@ async function enqueueEntrySyncJob(
       throttleMs,
       eventId: options.eventId,
       runId,
+      queueKey: tableScanQueueKey,
     };
 
     const chunkKey =
       options.eventId !== undefined ? `${chunkOffset}-event-${options.eventId}` : `${chunkOffset}`;
     // Entry-list jobs (API with explicit IDs) keep their content-based ID.
-    // Table-scan chunks get deterministic IDs keyed by runId + offset so retries
-    // dedupe and cannot fork parallel chains.
+    // Table-scan chunks get deterministic IDs keyed by the trigger lane + offset
+    // so correlation IDs can vary without forking parallel manual chains.
     const isEntryList = options.entryIds !== undefined;
     const defaultJobId = isEntryList
       ? `${jobName}-entry-list-${hashEntryListKey(options.entryIds ?? [], options.eventId, options.retryCount)}`
-      : `${jobName}-${runId}-chunk-${chunkKey}`;
+      : `${jobName}-${tableScanQueueKey}-chunk-${chunkKey}`;
     const jobId = options.jobId ?? defaultJobId;
     // Deterministic IDs must not block re-triggers after settle.
     const removeOnSettle = isEntryList || source === 'manual';
@@ -108,7 +162,7 @@ async function enqueueEntrySyncJob(
       queue: queue.name,
       chunkOffset,
       chunkSize,
-      runId,
+      runId: job.data.runId ?? runId,
     });
     return job;
   } catch (error) {

@@ -12,6 +12,7 @@ import {
   processLeagueEventPicksJob,
   processLeagueEventResultsJob,
 } from '../services/league-sync.service';
+import { resolveBullMqAttemptQueueWaitMs, runDataSyncAttempt } from '../utils/data-sync-attempt';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { getQueueConnection } from '../utils/queue';
 import { logError, logInfo } from '../utils/logger';
@@ -29,6 +30,7 @@ import type { WorkerRuntime } from './worker-runtime';
  */
 async function processLeagueSyncJob(job: Job<LeagueSyncJobData>) {
   const { eventId, tournamentId, source } = job.data;
+  const runId = job.data.runId ?? String(job.id ?? `${job.name}-${job.timestamp}`);
   const context = {
     jobType: 'queue' as const,
     queueName: job.queueName,
@@ -38,31 +40,44 @@ async function processLeagueSyncJob(job: Job<LeagueSyncJobData>) {
     source,
     attempt: job.attemptsMade + 1,
     tournamentId,
+    queueWaitMs: resolveBullMqAttemptQueueWaitMs(job),
   };
 
   logJobTriggered(context);
 
-  return withMutationConflictGuard(
+  return runDataSyncAttempt(
     {
-      queueName: job.queueName,
+      queue: job.queueName,
       jobName: job.name,
-      jobId: String(job.id),
-      eventId,
-      tournamentId,
+      runId,
+      source: tournamentId === undefined ? 'coordinator' : source,
+      attempt: job.attemptsMade + 1,
+      targetEventId: eventId,
+      queueWaitMs: context.queueWaitMs,
     },
     () =>
-      runTrackedJob(context, async () => {
-        switch (job.name) {
-          case LEAGUE_JOBS.LEAGUE_EVENT_PICKS:
-            return processLeagueEventPicksJob(eventId, tournamentId);
+      withMutationConflictGuard(
+        {
+          queueName: job.queueName,
+          jobName: job.name,
+          jobId: String(job.id),
+          eventId,
+          tournamentId,
+        },
+        () =>
+          runTrackedJob(context, async () => {
+            switch (job.name) {
+              case LEAGUE_JOBS.LEAGUE_EVENT_PICKS:
+                return processLeagueEventPicksJob(eventId, tournamentId, runId);
 
-          case LEAGUE_JOBS.LEAGUE_EVENT_RESULTS:
-            return processLeagueEventResultsJob(eventId, tournamentId);
+              case LEAGUE_JOBS.LEAGUE_EVENT_RESULTS:
+                return processLeagueEventResultsJob(eventId, tournamentId, runId);
 
-          default:
-            throw new Error(`Unknown job name: ${job.name}`);
-        }
-      }),
+              default:
+                throw new Error(`Unknown job name: ${job.name}`);
+            }
+          }),
+      ),
   );
 }
 

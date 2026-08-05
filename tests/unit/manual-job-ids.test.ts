@@ -35,9 +35,10 @@ mock.module('../../src/queues/entry-sync.queue', () => ({
   ENTRY_SYNC_DEFAULT_THROTTLE_MS: 150,
   getEntrySyncQueue: () => ({
     name: 'entry-sync-p2',
+    getJobs: async () => [],
     add: async (name: string, data: Record<string, unknown>, opts: Record<string, unknown>) => {
       entrySyncAddCalls.push({ name, data, opts });
-      return { id: (opts.jobId as string | undefined) ?? 'generated-id' };
+      return { id: (opts.jobId as string | undefined) ?? 'generated-id', name, data };
     },
   }),
 }));
@@ -205,6 +206,8 @@ describe('entry-sync entry-list job IDs', () => {
     expect(second).not.toBeNull();
     expect(first!.id).toBe('entry-picks-manual-chunk-0');
     expect(second!.id).toBe(first!.id as string);
+    expect(entrySyncAddCalls[0].data.runId).not.toBe('manual');
+    expect(entrySyncAddCalls[1].data.runId).not.toBe(entrySyncAddCalls[0].data.runId);
     expect(entrySyncAddCalls[0].opts.removeOnComplete).toBe(true);
     expect(entrySyncAddCalls[0].opts.removeOnFail).toBe(true);
   });
@@ -228,6 +231,15 @@ describe('deterministic result job retention', () => {
       expect(call.opts.removeOnComplete).toEqual({ age: 86_400 });
       expect(call.opts.removeOnFail).toBe(true);
     }
+  });
+
+  test('preserves a coordinator correlation ID in league child job data', async () => {
+    await enqueueLeagueEventResults(12, 'cascade', {
+      tournamentId: 42,
+      runId: 'league-run-42',
+    });
+
+    expect(leagueSyncAddCalls[0].data.runId).toBe('league-run-42');
   });
 });
 

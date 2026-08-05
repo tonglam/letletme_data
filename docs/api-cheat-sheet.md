@@ -145,8 +145,7 @@ Supported job names:
 - `event-overall-result-sync`
 - `live-scores` (compatibility alias; cache-only snapshot)
 - `post-match-consolidation`
-- `launch-warning`
-- `launch-happening`
+- `launch-monitor`
 
 `GET /jobs` is the runtime authority for the complete trigger list and current
 descriptions.

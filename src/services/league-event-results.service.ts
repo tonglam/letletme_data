@@ -288,17 +288,41 @@ function buildEntryResultData(
   };
 }
 
-export async function syncLeagueEventResultsByTournament(
-  tournamentId: number,
-  eventId: number,
-  options?: { concurrency?: number; season?: string },
-): Promise<{
+export type LeagueEventResultsSyncSummary = {
   tournamentId: number;
   eventId: number;
   totalEntries: number;
   updated: number;
   skipped: number;
-}> {
+  requiredUnits: number;
+  reusedUnits: number;
+  succeededUnits: number;
+  failedUnits: number;
+};
+
+export function summarizeMissingLeagueEventLiveData(
+  tournamentId: number,
+  eventId: number,
+  entryCount: number,
+): LeagueEventResultsSyncSummary {
+  return {
+    tournamentId,
+    eventId,
+    totalEntries: entryCount,
+    updated: 0,
+    skipped: entryCount,
+    requiredUnits: entryCount,
+    reusedUnits: 0,
+    succeededUnits: 0,
+    failedUnits: entryCount,
+  };
+}
+
+export async function syncLeagueEventResultsByTournament(
+  tournamentId: number,
+  eventId: number,
+  options?: { concurrency?: number; season?: string },
+): Promise<LeagueEventResultsSyncSummary> {
   logInfo('Starting league event results sync for tournament', { tournamentId, eventId });
 
   const tournament = await tournamentInfoRepository.findById(tournamentId);
@@ -316,8 +340,12 @@ export async function syncLeagueEventResultsByTournament(
     checkpointSeason,
   );
   if (eventLives.length === 0) {
+    logInfo('No event live data found for league event results', { eventId, tournamentId });
+    // This is a prerequisite failure, not a successful partial result. Throw
+    // so the BullMQ child remains retryable and final-failure alerting can
+    // surface a missing live snapshot instead of silently losing the run.
     throw new Error(
-      `Finalized event live data is unavailable for league event results: event ${eventId}`,
+      `Event live data unavailable for league event results (tournamentId=${tournamentId}, eventId=${eventId})`,
     );
   }
   const eventLiveMap = new Map(eventLives.map((live) => [live.elementId, live]));
@@ -423,5 +451,21 @@ export async function syncLeagueEventResultsByTournament(
     skipped,
   });
 
-  return { tournamentId, eventId, totalEntries, updated, skipped };
+  // The repository fences rows by the entry's current season. A rollover can
+  // therefore reject rows after we built them; those rows are required units,
+  // not successful no-ops, and must remain visible to the retry/reporting
+  // layer instead of producing a false ready result.
+  const unpersisted = Math.max(0, inserts.length - updated);
+
+  return {
+    tournamentId,
+    eventId,
+    totalEntries,
+    updated,
+    skipped,
+    requiredUnits: totalEntries,
+    reusedUnits: 0,
+    succeededUnits: updated,
+    failedUnits: skipped + unpersisted,
+  };
 }
