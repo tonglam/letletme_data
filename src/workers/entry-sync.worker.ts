@@ -475,6 +475,12 @@ export function createEntrySyncWorker(): WorkerRuntime {
                       if (targetEventId === undefined) {
                         return { requiredEntryIds: entryIds, reusedUnits: 0 };
                       }
+                      // Explicit API/manual entry lists are repair requests,
+                      // so they must refetch even when a warm row exists. Only
+                      // scheduled scans may reuse a complete picks row.
+                      if (effectiveJobData?.entryIds !== undefined) {
+                        return { requiredEntryIds: entryIds, reusedUnits: 0 };
+                      }
                       const existing = new Set(
                         await entryEventPicksRepository.findEntryIdsByEvent(
                           targetEventId,

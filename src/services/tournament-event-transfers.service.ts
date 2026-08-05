@@ -8,7 +8,6 @@ import { entryEventTransfersRepository } from '../repositories/entry-event-trans
 import { eventLiveRepository } from '../repositories/event-lives';
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
-import { getEventLivesByEventId } from './event-lives.service';
 import { mapWithConcurrency, uniqueNumbers } from '../utils/async';
 import { IncompleteDataSyncError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
@@ -184,23 +183,19 @@ export async function syncTournamentEventTransfersPost(eventId: number): Promise
     };
   }
 
-  const [entryResults, eventLives] = await Promise.all([
-    entryEventResultsRepository.findByEventAndEntryIds(eventId, entryIds),
-    getEventLivesByEventId(eventId),
-  ]);
-
-  if (eventLives.length === 0) {
-    throw new IncompleteDataSyncError(
-      'Tournament transfer enrichment requires persisted event data',
-      transfers.length,
-      0,
-      0,
-      transfers.length,
-    );
-  }
+  const entryResults = await entryEventResultsRepository.findByEventAndEntryIds(eventId, entryIds);
+  const requiredElementIds = uniqueNumbers(
+    transfers
+      .flatMap((transfer) => [transfer.elementInId, transfer.elementOutId])
+      .filter((elementId): elementId is number => elementId !== null),
+  );
+  const pointsMap = await loadCanonicalTournamentTransferPointsMap(
+    eventId,
+    checkpointSeason,
+    requiredElementIds,
+  );
 
   const entryResultMap = new Map(entryResults.map((result) => [result.entryId, result]));
-  const pointsMap = new Map(eventLives.map((live) => [live.elementId, live.totalPoints]));
   const transferMap = new Map<number, DbEntryEventTransfer[]>();
   for (const transfer of transfers) {
     const list = transferMap.get(transfer.entryId) ?? [];

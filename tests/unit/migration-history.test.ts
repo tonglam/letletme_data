@@ -53,6 +53,21 @@ describe('migration history inspection', () => {
       '0040_tournament_lifecycle_progress.sql',
     ]);
   });
+
+  test('keeps rich result checkpoints after the current migration tail', () => {
+    const files = readdirSync('migrations')
+      .filter((file) => file.endsWith('.sql'))
+      .sort();
+
+    const applied = files.filter((file) => file <= '0049_core_snapshot_authority.sql');
+    expect(inspectMigrationHistory(files, applied)).toMatchObject({
+      missing: [],
+      backdated: [],
+      latestApplied: '0049_core_snapshot_authority.sql',
+    });
+    expect(files).toContain('0050_entry_event_result_rich_checkpoint.sql');
+    expect(files).toContain('0051_event_data_checked_at.sql');
+  });
 });
 
 describe('public Data API lockdown migration', () => {
@@ -107,7 +122,7 @@ describe('core snapshot authority migration', () => {
 describe('entry result rich checkpoint migration', () => {
   test('follows core authority and preserves the existing table security boundary', () => {
     const migration = readFileSync(
-      'migrations/0046_entry_event_result_rich_checkpoint.sql',
+      'migrations/0050_entry_event_result_rich_checkpoint.sql',
       'utf8',
     );
 
@@ -119,7 +134,7 @@ describe('entry result rich checkpoint migration', () => {
 
 describe('event finalization checkpoint migration', () => {
   test('adds a stable cutoff without changing the existing table security boundary', () => {
-    const migration = readFileSync('migrations/0047_event_data_checked_at.sql', 'utf8');
+    const migration = readFileSync('migrations/0051_event_data_checked_at.sql', 'utf8');
 
     expect(migration).toContain('ADD COLUMN IF NOT EXISTS data_checked_at timestamptz');
     expect(migration).toContain('WHERE data_checked = true');

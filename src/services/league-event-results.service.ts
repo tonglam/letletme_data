@@ -13,6 +13,7 @@ import { entryInfoRepository } from '../repositories/entry-infos';
 import { hasCompleteEntryPickLiveCoverage, isCompleteEntryPicks } from '../domain/entry-picks';
 import { eventLiveRepository } from '../repositories/event-lives';
 import { eventRepository } from '../repositories/events';
+import { getActiveCacheSeason } from '../cache/cache-season';
 import {
   leagueEventResultsRepository,
   type LeagueEventResultEvidenceInsert,
@@ -347,10 +348,9 @@ export async function syncLeagueEventResultsByTournament(
   // A finalized event establishes a canonical evidence boundary. For a
   // triggered refresh, require the stricter of that boundary and the job's
   // requested freshness so complete-but-older entry rows cannot be reused.
-  const requiredRichFreshAfter = latestDate(
-    options?.freshAfter,
-    resolveRichResultFreshnessCutoff(event),
-  );
+  const finalizationCutoff = resolveRichResultFreshnessCutoff(event);
+  const requiredRichFreshAfter = latestDate(options?.freshAfter, finalizationCutoff);
+  const checkpointSeason = options?.season ?? (await getActiveCacheSeason());
 
   const entryIds = await resolveTournamentEntryIds(tournament);
   const reusedEntryIds = requiredRichFreshAfter
@@ -382,7 +382,9 @@ export async function syncLeagueEventResultsByTournament(
   const entryInfos = await entryInfoRepository.findByIds(entriesToBuild);
   const entryInfoMap = new Map(entryInfos.map((info) => [info.id, info]));
 
-  const eventLives = await eventLiveRepository.findByEventId(eventId);
+  const eventLives = finalizationCutoff
+    ? await eventLiveRepository.findFinalizedByEventIdForSeason(eventId, checkpointSeason)
+    : await eventLiveRepository.findByEventId(eventId);
   if (eventLives.length === 0) {
     const summary = summarizeMissingLeagueEventLiveData(
       tournamentId,
@@ -515,7 +517,7 @@ export async function syncLeagueEventResultsByTournament(
 
   for (let index = 0; index < inserts.length; index += batchSize) {
     const batch = inserts.slice(index, index + batchSize);
-    updated += await leagueEventResultsRepository.upsertBatch(batch);
+    updated += await leagueEventResultsRepository.upsertBatch(batch, checkpointSeason);
   }
 
   const auditCutoff = requiredRichFreshAfter ?? sourceCheckedAt;

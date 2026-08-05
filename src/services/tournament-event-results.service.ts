@@ -1,13 +1,21 @@
 import { getActiveCacheSeason } from '../cache/cache-season';
 import { eventLivesCache } from '../cache/operations';
 import { fplClient } from '../clients/fpl';
-import { entryEventPicksRepository } from '../repositories/entry-event-picks';
 import {
+  createEntryEventPicksRepository,
+  entryEventPicksRepository,
+} from '../repositories/entry-event-picks';
+import {
+  createEntryEventResultsRepository,
   entryEventResultsRepository,
   type EventPointsPayload,
 } from '../repositories/entry-event-results';
-import { entryEventTransfersRepository } from '../repositories/entry-event-transfers';
+import {
+  entryEventTransfersRepository,
+  withEntrySeasonSyncTransaction,
+} from '../repositories/entry-event-transfers';
 import { eventLiveRepository } from '../repositories/event-lives';
+import { eventRepository } from '../repositories/events';
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
 import type { RawFPLEntryTransfersResponse } from '../types';
@@ -83,32 +91,51 @@ export function planTournamentEventSync(
 async function resolveEventPointsPayload(
   eventId: number,
   provided?: EventPointsPayload,
+  options?: { season?: string },
 ): Promise<EventPointsPayload> {
   if (provided) return provided;
 
-  // A compatibility cache hit is bounded by its normal Redis TTL and can be
-  // reused for this calculation. Database rows without finalized source
-  // evidence may still be provisional, so do not let them suppress the
-  // authoritative upstream read.
-  const cached = await eventLivesCache.getByEventId(eventId);
-  if (cached && cached.length > 0) {
-    return {
-      elements: cached.map((row) => ({
-        id: row.elementId,
-        stats: { total_points: row.totalPoints },
-      })),
-    };
-  }
+  const season = options?.season ?? (await getActiveCacheSeason());
+  const event = await eventRepository.findById(eventId);
+  const finalizationBoundary = event?.finished && event.dataChecked && event.dataCheckedAt !== null;
 
-  const season = await getActiveCacheSeason();
-  const finalized = await eventLiveRepository.findFinalizedByEventIdForSeason(eventId, season);
-  if (finalized.length > 0) {
-    return {
-      elements: finalized.map((row) => ({
-        id: row.elementId,
-        stats: { total_points: row.totalPoints },
-      })),
-    };
+  if (finalizationBoundary) {
+    // Once data_checked_at exists, the compatibility cache may still contain
+    // an in-match payload. Only a season-owned final snapshot can satisfy a
+    // finalized calculation; otherwise continue to the authoritative source.
+    const finalized = await eventLiveRepository.findFinalizedByEventIdForSeason(eventId, season);
+    if (finalized.length > 0) {
+      return {
+        elements: finalized.map((row) => ({
+          id: row.elementId,
+          stats: { total_points: row.totalPoints },
+        })),
+      };
+    }
+  } else {
+    // A compatibility cache hit is bounded by its normal Redis TTL and can be
+    // reused for active-GW calculations. Database rows without finalized
+    // source evidence may still be provisional, so they do not suppress the
+    // upstream read below.
+    const cached = await eventLivesCache.getByEventId(eventId);
+    if (cached && cached.length > 0) {
+      return {
+        elements: cached.map((row) => ({
+          id: row.elementId,
+          stats: { total_points: row.totalPoints },
+        })),
+      };
+    }
+
+    const finalized = await eventLiveRepository.findFinalizedByEventIdForSeason(eventId, season);
+    if (finalized.length > 0) {
+      return {
+        elements: finalized.map((row) => ({
+          id: row.elementId,
+          stats: { total_points: row.totalPoints },
+        })),
+      };
+    }
   }
 
   const live = await withTimeout(
@@ -152,8 +179,10 @@ export async function syncTournamentEventResultsForEntryIds(
   }
 
   const attemptStartedAt = options?.freshAfter ?? new Date();
-  const live = await resolveEventPointsPayload(eventId, options?.live);
-  const checkpointSeason = options?.skipTransfers ? null : await getActiveCacheSeason();
+  const checkpointSeason = options?.season ?? (await getActiveCacheSeason());
+  const live = await resolveEventPointsPayload(eventId, options?.live, {
+    season: checkpointSeason,
+  });
   const pointsByElement = new Map<number, number>();
   for (const element of live.elements) {
     pointsByElement.set(element.id, element.stats.total_points);
@@ -176,35 +205,37 @@ export async function syncTournamentEventResultsForEntryIds(
         ENTRY_FETCH_TIMEOUT_MS,
         `Timed out fetching entry payloads for entry ${entryId}, event ${eventId} after ${ENTRY_FETCH_TIMEOUT_MS}ms`,
       );
-      const persistence = [
-        entryEventResultsRepository.upsertFromPicksAndLive(
-          entryId,
-          eventId,
-          picks,
-          live,
-          attemptStartedAt,
-        ),
-        entryEventPicksRepository.upsertFromPicks(entryId, eventId, picks, attemptStartedAt),
-      ];
-      if (transfers) {
-        persistence.push(
-          entryEventTransfersRepository.replaceForEvent(
+      await withTimeout(
+        withEntrySeasonSyncTransaction(entryId, checkpointSeason, async (tx) => {
+          await createEntryEventResultsRepository(tx).upsertFromPicksAndLive(
             entryId,
             eventId,
-            transfers,
-            pointsByElement,
-            // The endpoint returned the entrant's complete transfer history.
-            // Persist and checkpoint that same scope so the following audit
-            // cannot reject a successful legacy/backfill repair.
-            { syncMode: 'all', checkpointSeason: checkpointSeason! },
-          ),
-        );
-      }
-      await withTimeout(
-        Promise.all(persistence),
+            picks,
+            live,
+            attemptStartedAt,
+          );
+          await createEntryEventPicksRepository(tx).upsertFromPicks(
+            entryId,
+            eventId,
+            picks,
+            attemptStartedAt,
+          );
+        }),
         ENTRY_PERSIST_TIMEOUT_MS,
         `Timed out persisting entry payloads for entry ${entryId}, event ${eventId} after ${ENTRY_PERSIST_TIMEOUT_MS}ms`,
       );
+      if (transfers) {
+        await entryEventTransfersRepository.replaceForEvent(
+          entryId,
+          eventId,
+          transfers,
+          pointsByElement,
+          // The endpoint returned the entrant's complete transfer history.
+          // Persist and checkpoint that same scope so the following audit
+          // cannot reject a successful legacy/backfill repair.
+          { syncMode: 'all', checkpointSeason },
+        );
+      }
       return { entryId, success: true } satisfies EntrySyncOutcome;
     } catch (error) {
       logError('Failed to sync tournament entry results', error, { eventId, entryId });
@@ -220,7 +251,7 @@ export async function syncTournamentEventResultsForEntryIds(
       : entryEventTransfersRepository.findEntryIdsNeedingSync(
           uniqueEntryIds,
           eventId,
-          checkpointSeason!,
+          checkpointSeason,
         ),
   ]);
   const freshResultEntryIds = findFreshTournamentResultEntryIds(persistedResults, attemptStartedAt);
@@ -408,14 +439,14 @@ export async function syncTournamentEventResults(
     };
   }
 
-  const checkpointSeason = options?.skipTransfers ? null : await getActiveCacheSeason();
+  const checkpointSeason = options?.season ?? (await getActiveCacheSeason());
   const attemptStartedAt = options?.freshAfter ?? new Date();
   const [existingResults, existingPickEntryIds, requiredTransferEntryIds] = await Promise.all([
     entryEventResultsRepository.findByEventAndEntryIds(eventId, entryIds),
     entryEventPicksRepository.findEntryIdsByEvent(eventId, entryIds),
     options?.skipTransfers
       ? Promise.resolve([])
-      : entryEventTransfersRepository.findEntryIdsNeedingSync(entryIds, eventId, checkpointSeason!),
+      : entryEventTransfersRepository.findEntryIdsNeedingSync(entryIds, eventId, checkpointSeason),
   ]);
   const freshResultEntryIds = findFreshTournamentResultEntryIds(existingResults, attemptStartedAt);
   const existingPickSet = new Set(existingPickEntryIds);
@@ -433,12 +464,13 @@ export async function syncTournamentEventResults(
       ? syncTournamentEventResultsForEntryIds(requiredResultEntryIds, eventId, {
           ...options,
           skipTransfers: true,
+          season: checkpointSeason,
         })
       : Promise.resolve(null),
     plan.requiredTransferEntryIds.length > 0
       ? syncEntryTransferHistories(plan.requiredTransferEntryIds, eventId, {
           concurrency: options?.concurrency,
-          season: checkpointSeason!,
+          season: checkpointSeason,
         })
       : Promise.resolve(null),
   ]);
@@ -448,7 +480,7 @@ export async function syncTournamentEventResults(
     entryEventPicksRepository.findEntryIdsByEvent(eventId, entryIds),
     options?.skipTransfers
       ? Promise.resolve([])
-      : entryEventTransfersRepository.findEntryIdsNeedingSync(entryIds, eventId, checkpointSeason!),
+      : entryEventTransfersRepository.findEntryIdsNeedingSync(entryIds, eventId, checkpointSeason),
   ]);
   const auditedFreshResultIds = findFreshTournamentResultEntryIds(auditedResults, attemptStartedAt);
   const auditedPickSet = new Set(auditedPickEntryIds);
