@@ -50,6 +50,7 @@ describe('core fixture derivative reconciliation', () => {
         },
         serializeEvents: async (eventIds, operation) => {
           serializedEventIds.push([...eventIds]);
+          expect(requestedFixtureIds).toHaveLength(0);
           await operation();
         },
       },

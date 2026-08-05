@@ -46,19 +46,22 @@ export async function reconcileCoreFixtureDerivatives(
   sourceCheckedAt: Date,
   dependencies: CoreFixtureDerivativeDependencies = defaultDependencies,
 ): Promise<{ checkedEvents: number; retiredEmptyEvents: number }> {
-  const fixtures = await dependencies.findByIds(fixtureIds);
-  const preserveOwnedCheckedAtOrAfter = sourceCheckedAt.toISOString();
-  const byEvent = new Map<EventId, Fixture[]>();
-  for (const fixture of fixtures) {
-    if (fixture.event === null) continue;
-    const eventFixtures = byEvent.get(fixture.event) ?? [];
-    eventFixtures.push(fixture);
-    byEvent.set(fixture.event, eventFixtures);
-  }
-
   let retiredEmptyEvents = 0;
   const eventIds = Array.from({ length: CORE_SNAPSHOT_EXPECTED_EVENTS }, (_, index) => index + 1);
   await dependencies.serializeEvents(eventIds, async () => {
+    // Read canonical rows only after acquiring the same event fence as Live
+    // writers. A Live commit that won the fence must be the source used to
+    // rebuild fallback derivatives when its Redis publication is delayed.
+    const fixtures = await dependencies.findByIds(fixtureIds);
+    const preserveOwnedCheckedAtOrAfter = sourceCheckedAt.toISOString();
+    const byEvent = new Map<EventId, Fixture[]>();
+    for (const fixture of fixtures) {
+      if (fixture.event === null) continue;
+      const eventFixtures = byEvent.get(fixture.event) ?? [];
+      eventFixtures.push(fixture);
+      byEvent.set(fixture.event, eventFixtures);
+    }
+
     for (const eventId of eventIds) {
       const eventFixtures = byEvent.get(eventId) ?? [];
       if (eventFixtures.length > 0) {

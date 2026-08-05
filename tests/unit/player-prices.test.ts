@@ -80,7 +80,12 @@ describe('player-prices sync', () => {
       sourceCheckedAt,
     );
     expect(getBootstrap).toHaveBeenCalledTimes(1);
-    expect(findLatestForPlayerIds).toHaveBeenCalledWith([2, 3], '20260601', '20270601');
+    expect(findLatestForPlayerIds).toHaveBeenCalledWith(
+      [2, 3],
+      '20260601',
+      '20270601',
+      sourceCheckedAt,
+    );
     expect(mergePlayerPricesCache).toHaveBeenCalledWith(
       [
         { elementId: 2, value: 61 },

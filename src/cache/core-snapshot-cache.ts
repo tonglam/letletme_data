@@ -239,6 +239,7 @@ export function buildCoreSnapshotCachePlan(snapshot: CoreSnapshot): CoreSnapshot
     teamById,
   );
   for (const [teamId, eventMap] of fixturesByTeam) {
+    if (eventMap.size === 0) continue;
     hashes.set(
       `FixturesByTeam:${snapshot.season}:${teamId}`,
       Object.fromEntries(

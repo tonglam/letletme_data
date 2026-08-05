@@ -81,6 +81,7 @@ export function createPlayerPricesSync(dependencies: PlayerPricesSyncDependencie
       currentChangedIds,
       fromChangeDate,
       beforeChangeDate,
+      sourceCheckedAt,
     );
     const latestById = new Map(latestRows.map((row) => [row.elementId, row]));
     const missingLatest = currentChangedIds.filter((elementId) => !latestById.has(elementId));

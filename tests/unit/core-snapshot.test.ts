@@ -118,6 +118,25 @@ describe('core snapshot validation', () => {
       String(snapshot.fixtures[0].id),
     );
   });
+
+  test('omits empty per-team views when every fixture is unassigned', () => {
+    const input = buildCoreSnapshotFixture();
+    input.fixtures = input.fixtures.map((fixture, index) => ({
+      ...fixture,
+      // Keep one GW1 kickoff so fixture-season derivation remains valid while
+      // leaving most team views empty for this cache-plan regression.
+      event: index === 0 ? 1 : null,
+    }));
+
+    const snapshot = prepareCoreSnapshot(input.bootstrap, input.fixtures);
+    const plan = buildCoreSnapshotCachePlan(snapshot);
+
+    const teamHashes = [...plan.hashes.keys()].filter((key) => key.startsWith('FixturesByTeam:'));
+    expect(teamHashes).toHaveLength(2);
+    expect(teamHashes).toEqual(
+      expect.arrayContaining(['FixturesByTeam:2627:1', 'FixturesByTeam:2627:20']),
+    );
+  });
 });
 
 describe('core snapshot synchronization', () => {

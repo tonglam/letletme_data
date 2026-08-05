@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gte, inArray, lt, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, lt, lte, sql } from 'drizzle-orm';
 
 import { playerValues, type DbPlayerValueInsert } from '../db/schemas/index.schema';
 import { getDb } from '../db/singleton';
@@ -96,6 +96,7 @@ export const createPlayerValuesRepository = (dbInstance?: DatabaseInstance) => {
       elementIds: number[],
       fromChangeDate: string,
       beforeChangeDate: string,
+      asOf?: Date,
     ): Promise<StoredPlayerValue[]> => {
       if (elementIds.length === 0) {
         return [];
@@ -120,6 +121,7 @@ export const createPlayerValuesRepository = (dbInstance?: DatabaseInstance) => {
               inArray(playerValues.elementId, uniqueIds),
               gte(playerValues.changeDate, fromChangeDate),
               lt(playerValues.changeDate, beforeChangeDate),
+              ...(asOf ? [lte(playerValues.createdAt, asOf)] : []),
             ),
           )
           .orderBy(
