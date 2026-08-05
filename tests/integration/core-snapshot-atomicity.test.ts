@@ -289,6 +289,54 @@ describeAtomicity('core snapshot atomicity', () => {
     }
   });
 
+  test('retires an omitted fixture before inserting an upstream fixture-id replacement', async () => {
+    const db = await getDb();
+    const originalFixture = snapshot.fixtures.find((fixture) => fixture.event !== null)!;
+    const replacementFixtureId = 999_998;
+    const replacementFixture = {
+      ...originalFixture,
+      id: replacementFixtureId,
+      code: replacementFixtureId,
+      pulseId: replacementFixtureId,
+    };
+    const replacementSnapshot: CoreSnapshot = {
+      ...snapshot,
+      fixtures: [
+        ...snapshot.fixtures.filter((fixture) => fixture.id !== originalFixture.id),
+        replacementFixture,
+      ],
+    };
+
+    await persistCoreSnapshot(snapshot);
+
+    try {
+      await persistCoreSnapshotWithFinalizer(replacementSnapshot, {
+        revision: await allocateCoreSnapshotRevision(),
+        publicationId: randomUUID(),
+        previousActiveSeason: snapshot.season,
+        finalize: async () => ({ published: true }),
+        compensate: async () => undefined,
+        afterCommit: async () => undefined,
+      });
+
+      expect(
+        await db
+          .select({ eventId: eventFixtures.eventId })
+          .from(eventFixtures)
+          .where(eq(eventFixtures.id, originalFixture.id)),
+      ).toEqual([{ eventId: null }]);
+      expect(
+        await db
+          .select({ eventId: eventFixtures.eventId })
+          .from(eventFixtures)
+          .where(eq(eventFixtures.id, replacementFixtureId)),
+      ).toEqual([{ eventId: originalFixture.event }]);
+    } finally {
+      await db.delete(eventFixtures).where(eq(eventFixtures.id, replacementFixtureId));
+      await persistCoreSnapshot(snapshot);
+    }
+  });
+
   test('preserves a newer durable player price in the published core snapshot', async () => {
     const db = await getDb();
     await persistCoreSnapshot(snapshot);

@@ -1,4 +1,4 @@
-import { inArray, sql } from 'drizzle-orm';
+import { and, inArray, sql } from 'drizzle-orm';
 
 import { players, type DbPlayer, type DbPlayerInsert } from '../db/schemas/index.schema';
 import { getDb, type DbOrTransaction } from '../db/singleton';
@@ -92,6 +92,7 @@ export const createPlayerRepository = (dbInstance?: DbOrTransaction) => {
         )} ELSE ${players.price} END`;
 
         const db = await getDbInstance();
+        const sourceCheckedAtIso = sourceCheckedAt.toISOString();
         const updated = await db
           .update(players)
           .set({
@@ -99,7 +100,15 @@ export const createPlayerRepository = (dbInstance?: DbOrTransaction) => {
             priceSourceCheckedAt: sourceCheckedAt,
             updatedAt: sql`NOW()`,
           })
-          .where(inArray(players.id, elementIds))
+          .where(
+            and(
+              inArray(players.id, elementIds),
+              sql`(
+                ${players.priceSourceCheckedAt} IS NULL OR
+                ${players.priceSourceCheckedAt} <= ${sourceCheckedAtIso}::timestamptz
+              )`,
+            ),
+          )
           .returning();
 
         const mappedPlayers = updated.map(mapDbPlayerToDomain);

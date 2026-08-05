@@ -275,4 +275,31 @@ describe('affected-player current price update', () => {
       new Date(String(stored.find((row) => row.id === VALUE_PLAYER_A)?.price_source_checked_at)),
     ).toEqual(sourceCheckedAt);
   });
+
+  test('does not let an older price source overwrite a newer checkpoint', async () => {
+    const client = await db();
+    const newerSourceCheckedAt = new Date('2026-08-05T00:00:00.000Z');
+    const olderSourceCheckedAt = new Date('2026-08-04T00:00:00.000Z');
+    const currentPrice = 111;
+
+    await client`
+      UPDATE players
+      SET price = ${currentPrice}, price_source_checked_at = ${newerSourceCheckedAt}
+      WHERE id = ${VALUE_PLAYER_A}
+    `;
+
+    const updated = await playerRepository.updatePrices(
+      [{ elementId: VALUE_PLAYER_A, value: currentPrice + 1 }],
+      olderSourceCheckedAt,
+    );
+
+    expect(updated).toEqual([]);
+    const stored = await client<{ price: number; price_source_checked_at: Date }[]>`
+      SELECT price, price_source_checked_at
+      FROM players
+      WHERE id = ${VALUE_PLAYER_A}
+    `;
+    expect(stored[0]?.price).toBe(currentPrice);
+    expect(stored[0]?.price_source_checked_at).toEqual(newerSourceCheckedAt);
+  });
 });

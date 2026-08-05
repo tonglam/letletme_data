@@ -115,11 +115,14 @@ async function persistCoreSnapshotRows(
   if (unscheduledFixtureIds.length > 0) {
     await fixtureRepository.markUnscheduled(unscheduledFixtureIds);
   }
-  const savedFixtures = await fixtureRepository.upsertBatch(schedulableFixtures);
+  // Retire rows omitted from the authoritative snapshot before inserting any
+  // replacement fixture. The unique (event, home, away) index otherwise lets
+  // an upstream fixture-id replacement fail before the old row can be cleared.
   await fixtureRepository.markAbsentUnscheduled(
     snapshot.fixtures.map((fixture) => fixture.id),
     sourceCheckedAt,
   );
+  const savedFixtures = await fixtureRepository.upsertBatch(schedulableFixtures);
 
   requirePersistedCount('events', savedEvents.length, snapshot.events.length);
   requirePersistedCount('teams', savedTeams.length, snapshot.teams.length);

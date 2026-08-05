@@ -11,6 +11,18 @@ import {
 
 export type { DataSyncEnqueueOptions, DataSyncJobSource } from './data-sync-job-definition';
 
+export function getCoreSnapshotJobId(
+  source: DataSyncJobSource,
+  options: DataSyncEnqueueOptions = {},
+): string | undefined {
+  if (options.jobId) return options.jobId;
+  if (source === 'cron') return `core-snapshot-${formatCronDateKey()}`;
+  // An event transition must observe the event that caused the trigger. Keep
+  // it distinct from an older repair job that may still be queued or active.
+  if (source === 'event-transition') return undefined;
+  return 'core-snapshot-repair';
+}
+
 async function enqueueDataSyncJob(
   jobName: DataSyncJobName,
   source: DataSyncJobSource = 'cron',
@@ -59,9 +71,7 @@ export const enqueueCoreSnapshotJob = (
 ) =>
   enqueueDataSyncJob('core-snapshot', source, {
     ...options,
-    jobId:
-      options?.jobId ??
-      (source === 'cron' ? `core-snapshot-${formatCronDateKey()}` : 'core-snapshot-repair'),
+    jobId: getCoreSnapshotJobId(source, options),
     removeOnSettle: true,
   });
 
