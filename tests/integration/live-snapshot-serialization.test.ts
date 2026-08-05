@@ -5,7 +5,7 @@ assertIntegrationEnv();
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { eq } from 'drizzle-orm';
 
-import { resetActiveSeasonMemo, setActiveCacheSeason } from '../../src/cache/cache-season';
+import { resetActiveSeasonMemo, withActiveSeasonWriteFence } from '../../src/cache/cache-season';
 import { redisSingleton } from '../../src/cache/singleton';
 import { events } from '../../src/db/schemas/index.schema';
 import { getDb } from '../../src/db/singleton';
@@ -100,7 +100,11 @@ describe('live snapshot PostgreSQL serialization', () => {
     });
     await snapshotEntered.promise;
 
-    const rollover = setActiveCacheSeason('2627');
+    const rollover = withActiveSeasonWriteFence(async () => {
+      await redis.set('Season:active', '2627');
+      resetActiveSeasonMemo();
+      return true;
+    });
     const rolloverState = await Promise.race([
       rollover.then(() => 'advanced' as const),
       new Promise<'blocked'>((resolve) => setTimeout(() => resolve('blocked'), 75)),
@@ -144,7 +148,11 @@ describe('live snapshot PostgreSQL serialization', () => {
     );
     await prepareEntered.promise;
 
-    const rollover = setActiveCacheSeason('2627');
+    const rollover = withActiveSeasonWriteFence(async () => {
+      await redis.set('Season:active', '2627');
+      resetActiveSeasonMemo();
+      return true;
+    });
     const rolloverState = await Promise.race([
       rollover.then(() => 'advanced' as const),
       new Promise<'blocked'>((resolve) => setTimeout(() => resolve('blocked'), 75)),
@@ -310,6 +318,41 @@ describe('live snapshot PostgreSQL serialization', () => {
             .where(eq(events.id, eventId))
         )[0]?.finalizedAt,
       ).toEqual(new Date('2026-08-04T01:00:04.000Z'));
+    } finally {
+      await db.delete(events).where(eq(events.id, eventId));
+    }
+  });
+
+  test('advances the durable ownership checkpoint for metadata-only live checks', async () => {
+    const eventId = 2_000_000_026;
+    const checkedAt = new Date('2026-08-04T01:00:05.000Z');
+    const db = await getDb();
+    await db.delete(events).where(eq(events.id, eventId));
+    await db.insert(events).values({ id: eventId, name: 'Metadata-only live check' });
+
+    try {
+      const result = await persistLiveSnapshotDurably({
+        eventId,
+        checkedAt,
+        prepared: { season: '2526' } as never,
+        persistFixtures: false,
+        persistEventLives: false,
+      });
+
+      expect(result).toMatchObject({
+        accepted: true,
+        winnerCheckedAt: checkedAt,
+        persistedFixtures: false,
+        persistedEventLives: false,
+      });
+      expect(
+        (
+          await db
+            .select({ checkedAt: events.liveSnapshotCheckedAt })
+            .from(events)
+            .where(eq(events.id, eventId))
+        )[0]?.checkedAt,
+      ).toEqual(checkedAt);
     } finally {
       await db.delete(events).where(eq(events.id, eventId));
     }

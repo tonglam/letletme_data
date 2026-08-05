@@ -5,6 +5,7 @@ import { playerRepository } from '../repositories/players';
 import { transformPlayers } from '../transformers/players';
 import { logInfo } from '../utils/logger';
 import { getPlayerValueSeasonBounds } from '../utils/player-value-season';
+import { readCoreSnapshotOrderingTimestamp } from './core-snapshot-persistence.service';
 
 export type PlayerPricesSyncDependencies = {
   findByChangeDate: typeof playerValuesRepository.findByChangeDate;
@@ -12,6 +13,7 @@ export type PlayerPricesSyncDependencies = {
   getBootstrap: typeof fplClient.getBootstrap;
   updatePrices: typeof playerRepository.updatePrices;
   mergePlayerPricesCache: typeof playersCache.mergePrices;
+  readOrderingTimestamp: typeof readCoreSnapshotOrderingTimestamp;
 };
 
 const defaultDependencies: PlayerPricesSyncDependencies = {
@@ -20,6 +22,7 @@ const defaultDependencies: PlayerPricesSyncDependencies = {
   getBootstrap: () => fplClient.getBootstrap(),
   updatePrices: playerRepository.updatePrices,
   mergePlayerPricesCache: playersCache.mergePrices,
+  readOrderingTimestamp: readCoreSnapshotOrderingTimestamp,
 };
 
 export function createPlayerPricesSync(dependencies: PlayerPricesSyncDependencies) {
@@ -43,6 +46,10 @@ export function createPlayerPricesSync(dependencies: PlayerPricesSyncDependencie
       logInfo('No player price changes to apply', { changeDate });
       return { count: 0, changeDate };
     }
+
+    // Use PostgreSQL time captured before price source reads so this evidence
+    // is directly comparable with a core snapshot's pre-fetch ordering marker.
+    const sourceCheckedAt = await dependencies.readOrderingTimestamp();
 
     const bootstrap = await dependencies.getBootstrap();
     if (!Array.isArray(bootstrap.elements) || bootstrap.elements.length === 0) {
@@ -74,6 +81,7 @@ export function createPlayerPricesSync(dependencies: PlayerPricesSyncDependencie
       currentChangedIds,
       fromChangeDate,
       beforeChangeDate,
+      sourceCheckedAt,
     );
     const latestById = new Map(latestRows.map((row) => [row.elementId, row]));
     const missingLatest = currentChangedIds.filter((elementId) => !latestById.has(elementId));
@@ -85,14 +93,20 @@ export function createPlayerPricesSync(dependencies: PlayerPricesSyncDependencie
       elementId,
       value: latestById.get(elementId)!.value,
     }));
-    const updatedPlayers = await dependencies.updatePrices(priceUpdates);
+    const updatedPlayers = await dependencies.updatePrices(priceUpdates, sourceCheckedAt);
     const updatedIds = new Set(updatedPlayers.map((player) => player.id));
-    const missingPlayers = currentChangedIds.filter((elementId) => !updatedIds.has(elementId));
-    if (missingPlayers.length > 0) {
-      throw new Error(`Player rows missing for price update: ${missingPlayers.join(', ')}`);
+    const winningPriceUpdates = priceUpdates.filter((update) => updatedIds.has(update.elementId));
+    const skippedIds = currentChangedIds.filter((elementId) => !updatedIds.has(elementId));
+    if (skippedIds.length > 0) {
+      logInfo('Skipped stale player price updates', {
+        changeDate,
+        count: skippedIds.length,
+      });
     }
 
-    await dependencies.mergePlayerPricesCache(priceUpdates, publishedPlayerIds);
+    if (winningPriceUpdates.length > 0) {
+      await dependencies.mergePlayerPricesCache(winningPriceUpdates, publishedPlayerIds);
+    }
     logInfo('Player prices updated in database and cache', {
       changeDate,
       count: updatedPlayers.length,

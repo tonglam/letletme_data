@@ -240,6 +240,15 @@ describe('coordinated live snapshot Redis integration', () => {
       ...fixture,
       teamHScore: (fixture.teamHScore ?? 0) + 1,
     }));
+    const preservedNewer = await cache.refreshFixtureDerivatives(
+      EVENT_ID,
+      correctedFixtures,
+      initial.liveBonusV2,
+      '2025-08-15T20:00:00.000Z',
+    );
+    expect(preservedNewer).toEqual({ eventId: EVENT_ID, owned: true, retired: false });
+    expect(await redis.exists(`LiveSnapshotMeta:${SEASON}:${EVENT_ID}`)).toBe(1);
+
     const corrected = await cache.refreshFixtureDerivatives(
       EVENT_ID,
       correctedFixtures,

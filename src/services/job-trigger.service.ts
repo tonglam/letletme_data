@@ -1,12 +1,8 @@
 import {
-  enqueueEventsSyncJob,
-  enqueueFixturesSyncJob,
-  enqueuePhasesSyncJob,
+  enqueueCoreSnapshotJob,
   enqueuePlayerPricesSyncJob,
-  enqueuePlayersSyncJob,
   enqueuePlayerStatsSyncJob,
   enqueuePlayerValuesSyncJob,
-  enqueueTeamsSyncJob,
 } from '../jobs/data-sync-enqueue';
 import {
   enqueueEntryInfoSyncJob,
@@ -77,8 +73,8 @@ export type JobTriggerResult =
 
 const TRIGGERABLE_JOBS: TriggerableJobInfo[] = [
   {
-    name: 'events-sync',
-    description: 'Sync events from FPL API',
+    name: 'core-snapshot-sync',
+    description: 'Atomically sync events, teams, players, phases, and fixtures',
     schedule: 'Daily at 06:35 UTC+8 (year-round discovery)',
   },
   {
@@ -86,21 +82,6 @@ const TRIGGERABLE_JOBS: TriggerableJobInfo[] = [
     description:
       'Recompute Redis event:current from Event hash; enqueue events-sync if gameweek id changes',
     schedule: 'Every minute (cron); POST here for immediate run (ignores season window)',
-  },
-  {
-    name: 'fixtures-sync',
-    description: 'Sync fixtures from FPL API',
-    schedule: 'Daily at 06:40 UTC+8 (year-round discovery)',
-  },
-  {
-    name: 'teams-sync',
-    description: 'Sync teams from FPL API',
-    schedule: 'Daily at 06:37 UTC+8 (year-round discovery)',
-  },
-  {
-    name: 'players-sync',
-    description: 'Sync players from FPL API',
-    schedule: 'Daily at 06:43 UTC+8 (year-round discovery)',
   },
   {
     name: 'player-prices',
@@ -111,11 +92,6 @@ const TRIGGERABLE_JOBS: TriggerableJobInfo[] = [
     name: 'player-stats-sync',
     description: 'Sync player stats from FPL API',
     schedule: 'Daily at 09:40 UTC+8 (current event or preseason next event)',
-  },
-  {
-    name: 'phases-sync',
-    description: 'Sync phases from FPL API',
-    schedule: 'Daily at 06:45 UTC+8 (year-round discovery)',
   },
   {
     name: 'player-values-sync',
@@ -271,16 +247,18 @@ function requirePlayerPricesChangeDate(input: unknown): string {
 function buildJobMap(input?: unknown): Record<string, () => Promise<unknown>> {
   return {
     'event-current-refresh': () => runManualEventCurrentRefresh(),
-    'events-sync': () => enqueueEventsSyncJob('manual'),
-    'fixtures-sync': () => enqueueFixturesSyncJob('manual'),
-    'teams-sync': () => enqueueTeamsSyncJob('manual'),
-    'players-sync': () => enqueuePlayersSyncJob('manual'),
+    'core-snapshot-sync': () => enqueueCoreSnapshotJob('manual'),
+    // Backward-compatible manual aliases; each queues the same complete snapshot.
+    'events-sync': () => enqueueCoreSnapshotJob('manual'),
+    'fixtures-sync': () => enqueueCoreSnapshotJob('manual'),
+    'teams-sync': () => enqueueCoreSnapshotJob('manual'),
+    'players-sync': () => enqueueCoreSnapshotJob('manual'),
     'player-prices': () =>
       enqueuePlayerPricesSyncJob('manual', {
         changeDate: requirePlayerPricesChangeDate(input),
       }),
     'player-stats-sync': () => enqueuePlayerStatsSyncJob('manual'),
-    'phases-sync': () => enqueuePhasesSyncJob('manual'),
+    'phases-sync': () => enqueueCoreSnapshotJob('manual'),
     'player-values-sync': () => enqueuePlayerValuesSyncJob('manual'),
     'entry-info-daily': () => enqueueEntryInfoSyncJob('manual'),
     'entry-event-picks-daily': async () => {

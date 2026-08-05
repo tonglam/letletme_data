@@ -6,9 +6,11 @@ import {
   finalizeSeasonCacheWrite,
   getActiveCacheSeason,
   getActiveCacheSeasonUncached,
+  readStoredActiveCacheSeason,
+  rememberCoreSnapshotActiveSeason,
   resetActiveSeasonMemo,
   SEASON_CACHE_PREFIXES,
-  setActiveCacheSeason,
+  withActiveSeasonWriteFence,
 } from '../../src/cache/cache-season';
 import { parseHashEntries, parseHashValues } from '../../src/cache/hash-read';
 import { redisSingleton } from '../../src/cache/singleton';
@@ -165,31 +167,26 @@ describe('getActiveCacheSeason memo', () => {
     expect(redis.get).toHaveBeenCalledTimes(2);
   });
 
-  test('setActiveCacheSeason refreshes the memo on rollover', async () => {
-    const redis = installFakeRedis({ get: async () => '2526' });
-    expect(await setActiveCacheSeason('2627')).toBe(true);
-    expect(redis.set).toHaveBeenCalledWith('Season:active', '2627');
+  test('core snapshot publication refreshes the memo after its Redis transaction', async () => {
+    const redis = installFakeRedis({ get: async () => '2627' });
+    rememberCoreSnapshotActiveSeason('2627');
     expect(await getActiveCacheSeason()).toBe('2627');
-    // Preflight and exclusive-fence recheck hit Redis; the memo served the getter.
-    expect(redis.get).toHaveBeenCalledTimes(2);
+    expect(redis.get).not.toHaveBeenCalled();
   });
 
-  test('skipped update re-arms the memo from Redis truth', async () => {
-    const redis = installFakeRedis({ get: async () => '2627' });
-    expect(await setActiveCacheSeason('2526')).toBe(false);
-    expect(await getActiveCacheSeason()).toBe('2627');
+  test('raw active-season reads return null for missing or malformed values', async () => {
+    const redis = installFakeRedis({ get: async () => 'bad' });
+    expect(await readStoredActiveCacheSeason()).toBeNull();
     expect(redis.get).toHaveBeenCalledTimes(1);
   });
 
-  test('rechecks Redis truth after waiting for the exclusive rollover fence', async () => {
-    let reads = 0;
-    const redis = installFakeRedis({
-      get: async () => (++reads === 1 ? '2526' : '2728'),
-    });
-
-    expect(await setActiveCacheSeason('2627')).toBe(false);
-    expect(redis.set).not.toHaveBeenCalled();
-    expect(await getActiveCacheSeason()).toBe('2728');
+  test('runs active-season authority changes behind the exclusive database fence', async () => {
+    const isolatedDb = {
+      transaction: async (operation: (tx: { execute: typeof seasonFenceExecute }) => unknown) =>
+        operation({ execute: seasonFenceExecute }),
+    } as never;
+    await expect(withActiveSeasonWriteFence(async () => 'done', isolatedDb)).resolves.toBe('done');
+    expect(seasonFenceExecute).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -240,20 +237,17 @@ describe('season rollover cleanup', () => {
     expect(redis.del.mock.calls[0]).not.toContain('PlayerValue:2526');
   });
 
-  test('cleans every family when the first core write advances the season', async () => {
+  test('partial writers can publish only into the already active season', async () => {
     const redis = installFakeRedis({
       get: async () => '2526',
-      scan: async (...args) => {
-        const pattern = String(args[2]);
-        return ['0', pattern === 'EventOverallResult:*' ? ['EventOverallResult:2526'] : []];
-      },
-      del: async (...deletedKeys) => deletedKeys.length,
     });
 
-    await finalizeSeasonCacheWrite('2627', ['Event']);
+    await expect(finalizeSeasonCacheWrite('2627', ['Event'])).rejects.toThrow(
+      'Core snapshot required',
+    );
+    await expect(finalizeSeasonCacheWrite('2526', ['Event'])).resolves.toBeUndefined();
 
-    expect(redis.set).toHaveBeenCalledWith('Season:active', '2627');
-    expect(redis.scan).toHaveBeenCalledTimes(SEASON_CACHE_PREFIXES.length);
-    expect(redis.del).toHaveBeenCalledWith('EventOverallResult:2526');
+    expect(redis.set).not.toHaveBeenCalled();
+    expect(redis.scan).not.toHaveBeenCalled();
   });
 });

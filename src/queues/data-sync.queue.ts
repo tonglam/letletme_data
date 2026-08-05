@@ -4,6 +4,7 @@ import { closeTieredQueues, createTieredQueueSet } from './tiered-queue';
 export const dataSyncQueueName = 'data-sync';
 
 export type DataSyncJobName =
+  | 'core-snapshot'
   | 'events'
   | 'fixtures'
   | 'fixtures-all-gameweeks'

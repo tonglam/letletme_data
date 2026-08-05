@@ -89,3 +89,17 @@ describe('tournament lifecycle progress migration', () => {
     expect(migration).toMatch(/FROM public\.tournament_knockouts/);
   });
 });
+
+describe('core snapshot authority migration', () => {
+  test('installs a singleton revision authority outside the client Data API', () => {
+    const migration = readFileSync('migrations/0049_core_snapshot_authority.sql', 'utf8');
+
+    expect(migration).toContain('core_snapshot_revision_seq');
+    expect(migration).toContain('core_snapshot_authority');
+    expect(migration).toContain('CHECK (singleton_id = 1)');
+    expect(migration).toContain('ENABLE ROW LEVEL SECURITY');
+    expect(migration).toContain('REVOKE ALL ON TABLE');
+    expect(migration).toContain('REVOKE ALL ON SEQUENCE');
+    expect(migration).toContain('price_source_checked_at');
+  });
+});

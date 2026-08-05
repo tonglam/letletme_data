@@ -254,15 +254,16 @@ describe('affected-player current price update', () => {
       { elementId: VALUE_PLAYER_A, value: 51 },
       { elementId: VALUE_PLAYER_B, value: 99 },
     ];
-    const first = await playerRepository.updatePrices(updates);
-    const second = await playerRepository.updatePrices(updates);
+    const sourceCheckedAt = new Date('2026-08-04T00:00:00.000Z');
+    const first = await playerRepository.updatePrices(updates, sourceCheckedAt);
+    const second = await playerRepository.updatePrices(updates, sourceCheckedAt);
 
     expect(first.map((row) => row.id).sort()).toEqual([VALUE_PLAYER_A, VALUE_PLAYER_B]);
     expect(first.every((row) => row.webName.length > 0 && row.teamId === TEAM_ID)).toBe(true);
     expect(second.map((row) => row.price).sort((a, b) => a - b)).toEqual([51, 99]);
 
-    const stored = await client<{ id: number; price: number }[]>`
-      SELECT id, price
+    const stored = await client<{ id: number; price: number; price_source_checked_at: Date }[]>`
+      SELECT id, price, price_source_checked_at
       FROM players
       WHERE id IN (${VALUE_PLAYER_A}, ${VALUE_PLAYER_B}, ${PLAYER_OUT})
       ORDER BY id
@@ -270,5 +271,36 @@ describe('affected-player current price update', () => {
     expect(stored.find((row) => row.id === VALUE_PLAYER_A)?.price).toBe(51);
     expect(stored.find((row) => row.id === VALUE_PLAYER_B)?.price).toBe(99);
     expect(stored.find((row) => row.id === PLAYER_OUT)?.price).toBe(77);
+    expect(
+      new Date(String(stored.find((row) => row.id === VALUE_PLAYER_A)?.price_source_checked_at)),
+    ).toEqual(sourceCheckedAt);
+  });
+
+  test('does not let an older price source overwrite a newer checkpoint', async () => {
+    const client = await db();
+    const newerSourceCheckedAt = new Date('2026-08-05T00:00:00.000Z');
+    const olderSourceCheckedAt = new Date('2026-08-04T00:00:00.000Z');
+    const currentPrice = 111;
+
+    const currentPlayer = (await playerRepository.findByIds([VALUE_PLAYER_A]))[0];
+    if (!currentPlayer) throw new Error('checkpoint player fixture is missing');
+    await playerRepository.upsertBatch(
+      [{ ...currentPlayer, price: currentPrice }],
+      newerSourceCheckedAt,
+    );
+
+    const updated = await playerRepository.updatePrices(
+      [{ elementId: VALUE_PLAYER_A, value: currentPrice + 1 }],
+      olderSourceCheckedAt,
+    );
+
+    expect(updated).toEqual([]);
+    const stored = await client<{ price: number; price_source_checked_at: Date }[]>`
+      SELECT price, price_source_checked_at
+      FROM players
+      WHERE id = ${VALUE_PLAYER_A}
+    `;
+    expect(stored[0]?.price).toBe(currentPrice);
+    expect(new Date(String(stored[0]?.price_source_checked_at))).toEqual(newerSourceCheckedAt);
   });
 });

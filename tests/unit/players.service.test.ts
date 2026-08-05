@@ -1,79 +1,46 @@
 import { describe, expect, mock, test } from 'bun:test';
 
-import {
-  createPlayersSync,
-  type PlayersSyncDependencies,
-} from '../../src/services/players.service';
-import type { Player, RawFPLElement } from '../../src/types';
-import { rawFPLElementsFixture } from '../fixtures/player-stats.fixtures';
+import { createPlayersSync } from '../../src/services/players.service';
+import type { CoreSnapshotSyncResult } from '../../src/services/core-snapshot.service';
 
-function bootstrap(elements: RawFPLElement[]) {
-  return { elements, events: [] } as never;
-}
-
-function createDependencies(
-  elements: RawFPLElement[],
-  overrides: Partial<PlayersSyncDependencies> = {},
-) {
-  const upsertPlayers = mock(async (players: Player[]) => players.map((player) => ({ ...player })));
-  const setPlayersCache = mock(async (_players: Player[], _season?: string) => undefined);
-  const dependencies: PlayersSyncDependencies = {
-    getBootstrap: mock(async () => bootstrap(elements)),
-    upsertPlayers,
-    setPlayersCache,
-    resolvePublishedSeason: mock(async () => '2526'),
+function coreResult(overrides: Partial<CoreSnapshotSyncResult> = {}): CoreSnapshotSyncResult {
+  return {
+    outcome: 'ready',
+    season: '2627',
+    events: 38,
+    teams: 20,
+    players: 220,
+    phases: 1,
+    fixtures: 380,
+    requiredUnits: 659,
+    reusedUnits: 0,
+    succeededUnits: 659,
+    failedUnits: 0,
     ...overrides,
   };
-  return { dependencies, upsertPlayers, setPlayersCache };
 }
 
-describe('players sync publication', () => {
-  test('preserves the published roster when any bootstrap element is invalid', async () => {
-    const partialRoster = [rawFPLElementsFixture[0], { ...rawFPLElementsFixture[1], id: -1 }];
-    const { dependencies, upsertPlayers, setPlayersCache } = createDependencies(partialRoster);
+describe('players sync compatibility', () => {
+  test('routes player refreshes through one complete core snapshot', async () => {
+    const syncCore = mock(async () => coreResult());
 
-    await expect(createPlayersSync(dependencies)()).rejects.toThrow(
-      'Failed to transform player at index 1',
-    );
-
-    expect(upsertPlayers).not.toHaveBeenCalled();
-    expect(setPlayersCache).not.toHaveBeenCalled();
+    await expect(createPlayersSync({ syncCore })()).resolves.toEqual({ count: 220, errors: 0 });
+    expect(syncCore).toHaveBeenCalledTimes(1);
   });
 
-  test('rejects duplicate player identity before database or cache writes', async () => {
-    const duplicateRoster = [rawFPLElementsFixture[0], { ...rawFPLElementsFixture[0] }];
-    const { dependencies, upsertPlayers, setPlayersCache } = createDependencies(duplicateRoster);
-
-    await expect(createPlayersSync(dependencies)()).rejects.toThrow(
-      'FPL player roster contains duplicate player ID 1',
+  test('maps a stale complete snapshot without starting a partial write', async () => {
+    const syncCore = mock(async () =>
+      coreResult({ outcome: 'noop', reusedUnits: 659, succeededUnits: 0 }),
     );
 
-    expect(upsertPlayers).not.toHaveBeenCalled();
-    expect(setPlayersCache).not.toHaveBeenCalled();
+    await expect(createPlayersSync({ syncCore })()).resolves.toEqual({ count: 220, errors: 0 });
   });
 
-  test('refuses cache publication when database persistence is incomplete', async () => {
-    const roster = rawFPLElementsFixture.slice(0, 2);
-    const setPlayersCache = mock(async (_players: Player[], _season?: string) => undefined);
-    const { dependencies } = createDependencies(roster, {
-      upsertPlayers: async (players) => players.slice(0, 1),
-      setPlayersCache,
+  test('propagates canonical publication failures', async () => {
+    const syncCore = mock(async (): Promise<CoreSnapshotSyncResult> => {
+      throw new Error('core publication failed');
     });
 
-    await expect(createPlayersSync(dependencies)()).rejects.toThrow(
-      'Player persistence returned an incomplete roster: 1/2',
-    );
-    expect(setPlayersCache).not.toHaveBeenCalled();
-  });
-
-  test('publishes one complete verified roster with no tolerated errors', async () => {
-    const roster = rawFPLElementsFixture.slice(0, 2);
-    const { dependencies, upsertPlayers, setPlayersCache } = createDependencies(roster);
-
-    await expect(createPlayersSync(dependencies)()).resolves.toEqual({ count: 2, errors: 0 });
-    expect(upsertPlayers).toHaveBeenCalledTimes(1);
-    expect(setPlayersCache).toHaveBeenCalledTimes(1);
-    expect(setPlayersCache.mock.calls[0]?.[0]).toHaveLength(2);
-    expect(setPlayersCache.mock.calls[0]?.[1]).toBe('2526');
+    await expect(createPlayersSync({ syncCore })()).rejects.toThrow('core publication failed');
   });
 });

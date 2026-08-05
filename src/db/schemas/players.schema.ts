@@ -1,4 +1,4 @@
-import { integer, pgTable, text } from 'drizzle-orm/pg-core';
+import { integer, pgTable, text, timestamp } from 'drizzle-orm/pg-core';
 import { timestamps } from './_helpers.schema';
 import { teams } from './teams.schema';
 
@@ -10,6 +10,9 @@ export const players = pgTable('players', {
     .notNull()
     .references(() => teams.id),
   price: integer('price').default(0).notNull(),
+  // Latest source-ordering marker shared by core and price writers. It keeps
+  // an older price replay from clearing or overwriting a newer core snapshot.
+  priceSourceCheckedAt: timestamp('price_source_checked_at', { withTimezone: true }),
   startPrice: integer('start_price').default(0).notNull(),
   firstName: text('first_name'),
   secondName: text('second_name'),

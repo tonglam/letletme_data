@@ -1,16 +1,13 @@
 import { sql } from 'drizzle-orm';
 
 import { phases, type DbPhase, type DbPhaseInsert } from '../db/schemas/index.schema';
-import { getDb } from '../db/singleton';
+import { getDb, type DbOrTransaction } from '../db/singleton';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 
-import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import type { Phase as DomainPhase } from '../types';
 
-type DatabaseInstance = PostgresJsDatabase<Record<string, never>>;
-
-export const createPhaseRepository = (dbInstance?: DatabaseInstance) => {
+export const createPhaseRepository = (dbInstance?: DbOrTransaction) => {
   const getDbInstance = async () => dbInstance || (await getDb());
 
   return {

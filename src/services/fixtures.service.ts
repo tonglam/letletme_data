@@ -1,344 +1,60 @@
-import { fixturesCache, liveSnapshotCache } from '../cache/operations';
-import { deriveSeasonFromFixtures } from '../cache/cache-season';
-import { fplClient } from '../clients/fpl';
-import {
-  findOmittedEventFixtureIds,
-  resolveFixtureCacheLockEventIds,
-  resolveFixtureDerivativeReconciliationEventIds,
-  resolveFixtureCacheTransitions,
-  type FixtureCacheTransitions,
-} from '../domain/fixture-cache-transition';
-import { createFixtureRepository, fixtureRepository } from '../repositories/fixtures';
-import { transformFixtures } from '../transformers/fixtures';
-import type { Fixture, RawFPLFixture } from '../types';
-import { logError, logInfo, logWarn } from '../utils/logger';
-import { getCurrentEvent } from './events.service';
-import { syncFixtureDerivedSnapshotCache } from './live-bonus.service';
-import {
-  syncLiveSnapshot,
-  withFixtureSyncSerialization,
-  withLiveSnapshotDurableEventsWriteFence,
-} from './live-snapshot.service';
+import { fixturesCache } from '../cache/operations';
+import { fixtureRepository } from '../repositories/fixtures';
+import { logError, logInfo } from '../utils/logger';
+import { syncCoreSnapshot } from './core-snapshot.service';
+import { syncLiveSnapshot } from './live-snapshot.service';
 
-/**
- * Fixtures Service - Business Logic Layer
- *
- * Handles fixture operations focused on synchronization and cache management.
- */
-
-// Sync all fixtures from FPL API
-export async function syncFixtures(eventId?: number): Promise<{ count: number; errors: number }> {
-  try {
-    const logContext = eventId ? { eventId } : {};
-    logInfo('Starting fixtures sync from FPL API', logContext);
-
-    type FixtureSyncContext = {
-      rawFixtures: RawFPLFixture[];
-      fixtures: Fixture[];
-      recoveredFullFixtureFeed: boolean;
-      unscheduledFixtures: Fixture[];
-      schedulableFixtures: Fixture[];
-      payloadSeason?: string;
-      transitions: FixtureCacheTransitions;
-    };
-
-    const result = await withFixtureSyncSerialization(
-      async (): Promise<{ eventIds: readonly number[]; context: FixtureSyncContext }> => {
-        // Fetch only after entering the global fixture lane. The PostgreSQL
-        // ordering token is already fixed by withFixtureSyncSerialization, so
-        // a live snapshot that wins an event lock during this fetch makes the
-        // later durable fence reject this payload.
-        let rawFixtures = await fplClient.getFixtures(eventId);
-        if (!Array.isArray(rawFixtures)) {
-          throw new Error('Invalid fixtures data from FPL API');
-        }
-        logInfo('Raw fixtures data fetched', { count: rawFixtures.length, ...logContext });
-
-        let fixtures = transformFixtures(rawFixtures);
-        const eventScopedFixtureIds = new Set(fixtures.map((fixture) => fixture.id));
-        let recoveredFullFixtureFeed = false;
-        if (eventId) {
-          const persistedEventFixtures = await fixtureRepository.findByEvent(eventId);
-          const omittedFixtureIds = findOmittedEventFixtureIds(
-            eventId,
-            persistedEventFixtures,
-            eventScopedFixtureIds,
-          );
-          if (omittedFixtureIds.length > 0) {
-            const fullRawFixtures = await fplClient.getFixtures();
-            if (!Array.isArray(fullRawFixtures) || fullRawFixtures.length === 0) {
-              throw new Error(
-                `Full fixture recovery returned no data for event ${eventId}; omitted fixture IDs: ${omittedFixtureIds.join(', ')}`,
-              );
-            }
-            const fullFixtures = transformFixtures(fullRawFixtures);
-            const fullFixtureIds = new Set(fullFixtures.map((fixture) => fixture.id));
-            const unresolvedFixtureIds = omittedFixtureIds.filter(
-              (fixtureId) => !fullFixtureIds.has(fixtureId),
-            );
-            if (unresolvedFixtureIds.length > 0) {
-              throw new Error(
-                `Full fixture recovery could not resolve omitted fixture IDs for event ${eventId}: ${unresolvedFixtureIds.join(', ')}`,
-              );
-            }
-            rawFixtures = fullRawFixtures;
-            fixtures = fullFixtures;
-            recoveredFullFixtureFeed = true;
-            logWarn('Promoted event-scoped fixture sync to full-feed recovery', {
-              eventId,
-              omittedFixtureIds,
-              recoveredCount: fixtures.length,
-            });
-          }
-        }
-
-        const fixtureIds = fixtures.map((fixture) => fixture.id);
-        const existingEvents = await fixtureRepository.findEventIdsByFixtureIds(fixtureIds);
-        const transitions = resolveFixtureCacheTransitions(fixtures, existingEvents);
-        const unscheduledFixtures = fixtures.filter((fixture) => fixture.event === null);
-        const schedulableFixtures = fixtures.filter((fixture) => fixture.event !== null);
-        logInfo('Fixtures transformed', {
-          total: rawFixtures.length,
-          successful: fixtures.length,
-          errors: rawFixtures.length - fixtures.length,
-          recoveredFullFixtureFeed,
-          ...logContext,
-        });
-
-        return {
-          eventIds: resolveFixtureCacheLockEventIds(fixtures, transitions.invalidatedEventIds),
-          context: {
-            rawFixtures,
-            fixtures,
-            recoveredFullFixtureFeed,
-            unscheduledFixtures,
-            schedulableFixtures,
-            payloadSeason: deriveSeasonFromFixtures(rawFixtures) ?? undefined,
-            transitions,
-          },
-        };
-      },
-      async (context, checkedAt, lockedEventIds, activeSeason) => {
-        const {
-          rawFixtures,
-          fixtures,
-          recoveredFullFixtureFeed,
-          unscheduledFixtures,
-          schedulableFixtures,
-          payloadSeason,
-          transitions,
-        } = context;
-        if (rawFixtures.length === 0) {
-          logWarn('No fixtures returned from FPL API', logContext);
-          return { count: 0, errors: 0 };
-        }
-        if (unscheduledFixtures.length > 0) {
-          logWarn('Persisting only event ownership for unscheduled fixtures', {
-            unscheduledCount: unscheduledFixtures.length,
-            fixtureIds: unscheduledFixtures.map((fixture) => fixture.id),
-          });
-        }
-        if (payloadSeason && payloadSeason !== activeSeason) {
-          throw new Error(
-            `Fixture payload season ${payloadSeason} does not match fenced active season ${activeSeason}; sync events first`,
-          );
-        }
-
-        // Claim every affected event in one transaction. The callback runs only
-        // if all claims win; Redis retirement precedes the fixture mutation so
-        // a Redis failure still rolls back PostgreSQL ownership and checkpoints.
-        const durable = await withLiveSnapshotDurableEventsWriteFence(
-          lockedEventIds,
-          checkedAt,
-          async (tx) => {
-            if (transitions.invalidatedEventIds.size > 0) {
-              await Promise.all(
-                Array.from(transitions.invalidatedEventIds).map((invalidatedEventId) =>
-                  liveSnapshotCache.retire(invalidatedEventId),
-                ),
-              );
-              logInfo('Retired live snapshots before fixture identity changes', {
-                ...(eventId ? { eventId } : {}),
-                invalidatedEventIds: Array.from(transitions.invalidatedEventIds),
-              });
-            }
-            const repository = createFixtureRepository(tx);
-            let markedUnscheduled = 0;
-            if (unscheduledFixtures.length > 0) {
-              markedUnscheduled = await repository.markUnscheduled(
-                unscheduledFixtures.map((fixture) => fixture.id),
-              );
-              logInfo('Persisted unscheduled fixture ownership', {
-                requested: unscheduledFixtures.length,
-                updated: markedUnscheduled,
-              });
-            }
-            const savedFixtures = await repository.upsertBatch(schedulableFixtures);
-            return { savedFixtures, markedUnscheduled };
-          },
-        );
-        if (!durable.accepted || !durable.value) {
-          throw new Error(
-            `Fixture sync for ${eventId ? `event ${eventId}` : 'all events'} was superseded by live snapshot event ${durable.rejectedEventId ?? 'unknown'} at ${durable.winnerCheckedAt.toISOString()}; retry`,
-          );
-        }
-        const { savedFixtures, markedUnscheduled } = durable.value;
-        logInfo('Fixtures persisted to database', {
-          count: savedFixtures.length + markedUnscheduled,
-          scheduledCount: savedFixtures.length,
-          unscheduledCount: markedUnscheduled,
-          ...logContext,
-        });
-
-        let snapshotOwnedEventIds: ReadonlySet<number> = new Set();
-        if (eventId && !recoveredFullFixtureFeed) {
-          await fixturesCache.setByEvent(
-            eventId,
-            savedFixtures.filter((fixture) => fixture.event === eventId),
-            activeSeason,
-          );
-        } else {
-          snapshotOwnedEventIds = await fixturesCache.set(
-            [...savedFixtures, ...unscheduledFixtures],
-            activeSeason,
-          );
-        }
-
-        if (
-          eventId &&
-          !recoveredFullFixtureFeed &&
-          transitions.unscheduledFixtureIdsToRemove.size > 0
-        ) {
-          await fixturesCache.removeUnscheduledFixtureIds([
-            ...transitions.unscheduledFixtureIdsToRemove,
-          ]);
-        }
-
-        // FPL can correct any prior gameweek in the unfiltered daily feed.
-        // Reuse the ownership result from the atomic fixture-cache replacement,
-        // then reconcile only owned snapshots plus the current and explicitly
-        // requested compatibility events. This avoids both a second Redis
-        // round trip and 38 blind cache rebuilds while ensuring non-expiring
-        // metadata cannot hide a historical correction.
-        const fixturesByEvent = new Map<number, Fixture[]>();
-        for (const fixture of savedFixtures) {
-          if (fixture.event === null) continue;
-          const bucket = fixturesByEvent.get(fixture.event) ?? [];
-          bucket.push(fixture);
-          fixturesByEvent.set(fixture.event, bucket);
-        }
-        const representedEventIds = [...fixturesByEvent.keys()];
-        const currentEventId = (await getCurrentEvent())?.id;
-        const reconciliationEventIds = resolveFixtureDerivativeReconciliationEventIds(
-          representedEventIds,
-          [...snapshotOwnedEventIds],
-          [eventId, currentEventId],
-        );
-        await Promise.all(
-          reconciliationEventIds.map((reconciliationEventId) =>
-            syncFixtureDerivedSnapshotCache(
-              reconciliationEventId,
-              fixturesByEvent.get(reconciliationEventId)!,
-              liveSnapshotCache,
-            ),
-          ),
-        );
-        logInfo('Fixtures cache updated', logContext);
-
-        return {
-          count: savedFixtures.length + markedUnscheduled,
-          errors: rawFixtures.length - fixtures.length,
-        };
-      },
-    );
-
-    logInfo('Fixtures sync completed successfully', result);
-    return result;
-  } catch (error) {
-    logError('Fixtures sync failed', error, eventId ? { eventId } : {});
-    throw error;
-  }
+interface FixtureSyncOptions {
+  /** Retained for source compatibility; core publication derives and fences the season itself. */
+  publishedSeason?: string | null;
 }
 
-// Sync all fixtures for all gameweeks (1-38)
+/**
+ * Fixtures share identity and cache views with events and teams. A named or
+ * event-scoped legacy refresh therefore runs the same complete core publisher
+ * instead of maintaining a second partial-write protocol.
+ */
+export async function syncFixtures(
+  eventId?: number,
+  _options: FixtureSyncOptions = {},
+): Promise<{ count: number; errors: number }> {
+  logInfo('Routing fixture refresh through the coherent core snapshot', {
+    requestedEventId: eventId ?? null,
+  });
+  const result = await syncCoreSnapshot();
+  return { count: result.fixtures, errors: result.failedUnits };
+}
+
+/**
+ * Compatibility entry point for the retired 38-request backfill. One complete
+ * fixture feed is authoritative and the summary is derived from the committed
+ * database rows.
+ */
 export async function syncAllGameweeks(): Promise<{
   totalCount: number;
   totalErrors: number;
   perGameweek: Array<{ eventId: number; count: number; errors: number }>;
 }> {
-  try {
-    logInfo('Starting comprehensive fixtures sync for all gameweeks');
-
-    const results: Array<{ eventId: number; count: number; errors: number }> = [];
-    let totalCount = 0;
-    let totalErrors = 0;
-
-    // FPL has 38 gameweeks
-    for (let eventId = 1; eventId <= 38; eventId++) {
-      try {
-        logInfo(`Syncing gameweek ${eventId}/38`);
-
-        const result = await syncFixtures(eventId);
-        results.push({ eventId, count: result.count, errors: result.errors });
-
-        totalCount += result.count;
-        totalErrors += result.errors;
-
-        logInfo(`Gameweek ${eventId} synced`, {
-          count: result.count,
-          errors: result.errors,
-        });
-
-        // Small delay to avoid overwhelming the API
-        await new Promise((resolve) => setTimeout(resolve, 100));
-      } catch (error) {
-        logError(`Failed to sync gameweek ${eventId}`, error);
-        results.push({ eventId, count: 0, errors: 1 });
-        totalErrors += 1;
-      }
+  const result = await syncCoreSnapshot();
+  const fixtures = await fixtureRepository.findAll();
+  const counts = new Map<number, number>();
+  for (const fixture of fixtures) {
+    if (fixture.event !== null) {
+      counts.set(fixture.event, (counts.get(fixture.event) ?? 0) + 1);
     }
-
-    // Final cache update with all fixtures. Keep it in the same mandatory lane
-    // as normal fixture syncs so a later sync cannot be overwritten by this
-    // backfill's trailing rebuild.
-    await withFixtureSyncSerialization(
-      async () => {
-        const allFixtures = await fixtureRepository.findAll();
-        return {
-          eventIds: resolveFixtureCacheLockEventIds(allFixtures, new Set()),
-          context: allFixtures,
-        };
-      },
-      async (allFixtures, _checkedAt, _lockedEventIds, activeSeason) => {
-        const payloadSeason = deriveSeasonFromFixtures(allFixtures);
-        if (payloadSeason && payloadSeason !== activeSeason) {
-          throw new Error(
-            `Fixture payload season ${payloadSeason} does not match fenced active season ${activeSeason}; sync events first`,
-          );
-        }
-        await fixturesCache.set(allFixtures, activeSeason);
-      },
-    );
-
-    logInfo('All gameweeks sync completed', {
-      totalCount,
-      totalErrors,
-      gameweeks: results.length,
-    });
-
-    return {
-      totalCount,
-      totalErrors,
-      perGameweek: results,
-    };
-  } catch (error) {
-    logError('All gameweeks sync failed', error);
-    throw error;
   }
+  return {
+    totalCount: result.fixtures,
+    totalErrors: result.failedUnits,
+    perGameweek: Array.from({ length: 38 }, (_, index) => ({
+      eventId: index + 1,
+      count: counts.get(index + 1) ?? 0,
+      errors: 0,
+    })),
+  };
 }
 
-// Compatibility service retained for callers outside BullMQ. Use the canonical
-// coordinated publisher so no direct fixture upsert can race the six live views.
+// Live publication remains owned by the separately managed Live pipeline.
 export async function syncLiveScores(eventId: number): Promise<{ updated: number }> {
   try {
     const snapshot = await syncLiveSnapshot(eventId, { persistEventLives: false });
@@ -356,7 +72,6 @@ export async function syncLiveScores(eventId: number): Promise<{ updated: number
   }
 }
 
-// Clear fixtures cache
 export async function clearFixturesCache(): Promise<void> {
   try {
     logInfo('Clearing fixtures cache');

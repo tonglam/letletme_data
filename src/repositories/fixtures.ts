@@ -1,7 +1,8 @@
-import { eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, notInArray, sql } from 'drizzle-orm';
 
 import {
   eventFixtures,
+  events,
   type DbEventFixture,
   type DbEventFixtureInsert,
 } from '../db/schemas/index.schema';
@@ -73,6 +74,27 @@ export const createFixtureRepository = (dbInstance?: DbOrTransaction) => {
       }
     },
 
+    findByIds: async (ids: readonly number[]): Promise<DomainFixture[]> => {
+      try {
+        const uniqueIds = [...new Set(ids.filter((id) => Number.isInteger(id) && id > 0))];
+        if (uniqueIds.length === 0) return [];
+        const db = await getDbInstance();
+        const rows = await db
+          .select()
+          .from(eventFixtures)
+          .where(inArray(eventFixtures.id, uniqueIds))
+          .orderBy(eventFixtures.id);
+        return rows.map(mapDbFixtureToDomain);
+      } catch (error) {
+        logError('Failed to find fixtures by ids', error, { count: ids.length });
+        throw new DatabaseError(
+          'Failed to retrieve fixtures by ids',
+          'FIND_BY_IDS_ERROR',
+          error instanceof Error ? error : undefined,
+        );
+      }
+    },
+
     findEventIdsByFixtureIds: async (ids: number[]): Promise<Map<number, number | null>> => {
       try {
         if (ids.length === 0) {
@@ -114,6 +136,68 @@ export const createFixtureRepository = (dbInstance?: DbOrTransaction) => {
         throw new DatabaseError(
           'Failed to mark fixtures as unscheduled',
           'MARK_UNSCHEDULED_ERROR',
+          error instanceof Error ? error : undefined,
+        );
+      }
+    },
+
+    markAbsentUnscheduled: async (
+      acceptedIds: readonly number[],
+      preserveOwnedCheckedAtOrAfter?: Date,
+      acceptedCodes: readonly number[] = [],
+    ): Promise<number> => {
+      try {
+        const uniqueIds = [...new Set(acceptedIds.filter((id) => Number.isInteger(id) && id > 0))];
+        if (uniqueIds.length === 0) return 0;
+        const uniqueCodes = [
+          ...new Set(acceptedCodes.filter((code) => Number.isInteger(code) && code > 0)),
+        ];
+        const preserveOwnedCheckedAtOrAfterIso = preserveOwnedCheckedAtOrAfter?.toISOString();
+
+        const db = await getDbInstance();
+        const ownershipFence = preserveOwnedCheckedAtOrAfterIso
+          ? sql`NOT EXISTS (
+              SELECT 1
+              FROM ${events}
+              WHERE ${events.id} = ${eventFixtures.eventId}
+                AND ${events.liveSnapshotCheckedAt} >= ${preserveOwnedCheckedAtOrAfterIso}::timestamptz
+            )`
+          : undefined;
+        let retiredCodeConflicts = 0;
+        if (uniqueCodes.length > 0) {
+          const removed = await db
+            .delete(eventFixtures)
+            .where(
+              and(
+                notInArray(eventFixtures.id, uniqueIds),
+                inArray(eventFixtures.code, uniqueCodes),
+                ownershipFence,
+              ),
+            )
+            .returning({ id: eventFixtures.id });
+          retiredCodeConflicts = removed.length;
+        }
+        const result = await db
+          .update(eventFixtures)
+          .set({ eventId: null, updatedAt: new Date() })
+          .where(
+            and(
+              isNotNull(eventFixtures.eventId),
+              notInArray(eventFixtures.id, uniqueIds),
+              ownershipFence,
+            ),
+          )
+          .returning({ id: eventFixtures.id });
+        const count = retiredCodeConflicts + result.length;
+        logInfo('Retired fixtures absent from the complete snapshot', { count });
+        return count;
+      } catch (error) {
+        logError('Failed to retire fixtures absent from the complete snapshot', error, {
+          acceptedCount: acceptedIds.length,
+        });
+        throw new DatabaseError(
+          'Failed to retire fixtures absent from the complete snapshot',
+          'MARK_ABSENT_UNSCHEDULED_ERROR',
           error instanceof Error ? error : undefined,
         );
       }

@@ -30,7 +30,7 @@ describe('resolveMutationScopes', () => {
     ]);
   });
 
-  it('serializes the snapshot fixture write with ordinary fixture syncs', () => {
+  it('maps legacy fixture jobs to the complete core snapshot scopes', () => {
     const snapshotScopes = resolveMutationScopes({
       queueName: 'live-data-p0',
       jobName: 'live-snapshot',
@@ -44,18 +44,24 @@ describe('resolveMutationScopes', () => {
 
     expect(snapshotScopes).toContain('data-core:fixtures');
     expect(snapshotScopes).toContain('live-snapshot:event:33');
-    expect(fixtureScopes).toEqual(['data-core:fixtures']);
+    expect(fixtureScopes).toEqual([
+      'data-core:events',
+      'data-core:teams',
+      'data-core:players',
+      'data-core:phases',
+      'data-core:fixtures',
+    ]);
   });
 
-  it('serializes partial price updates with the full players sync', () => {
+  it('keeps partial price updates inside the complete legacy player alias scope', () => {
     const fullSync = resolveMutationScopes({ queueName: 'data-sync-p1', jobName: 'players' });
     const priceSync = resolveMutationScopes({
       queueName: 'data-sync-p1',
       jobName: 'player-prices',
     });
 
-    expect(fullSync).toEqual(['data-core:players']);
-    expect(priceSync).toEqual(fullSync);
+    expect(fullSync).toContain('data-core:players');
+    expect(priceSync).toEqual(['data-core:players']);
   });
 
   it('adds event-scoped conflict groups for league event results', () => {
