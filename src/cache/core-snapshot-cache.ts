@@ -11,7 +11,7 @@ import {
   rememberCoreSnapshotActiveSeason,
   resetActiveSeasonMemo,
 } from './cache-season';
-import { buildFixturesByTeam } from './fixtures-cache';
+import { buildFixturesByTeam, isLiveSnapshotStagingKey } from './fixtures-cache';
 import { liveSnapshotMetaKey } from './live-snapshot-ownership';
 import { redisSingleton } from './singleton';
 
@@ -94,6 +94,7 @@ for _, item in ipairs(payload.staged) do
   local snapshotOwned = item.metaKey and redis.call('EXISTS', item.metaKey) == 1
   if not snapshotOwned then
     redis.call('RENAME', item.stageKey, item.finalKey)
+    redis.call('PERSIST', item.finalKey)
     table.insert(finalKeys, item.finalKey)
   end
 end
@@ -436,7 +437,9 @@ export async function publishCoreSnapshotCache(
     }
 
     const [existingFixtures, existingTeamFixtures] = await Promise.all([
-      scanKeys(redis, `Fixtures:${snapshot.season}:*`),
+      scanKeys(redis, `Fixtures:${snapshot.season}:*`).then((keys) =>
+        keys.filter((key) => !isLiveSnapshotStagingKey(key, snapshot.season)),
+      ),
       scanKeys(redis, `FixturesByTeam:${snapshot.season}:*`),
     ]);
     const targetKeys = [

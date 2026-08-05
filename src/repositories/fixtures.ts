@@ -169,7 +169,6 @@ export const createFixtureRepository = (dbInstance?: DbOrTransaction) => {
             .delete(eventFixtures)
             .where(
               and(
-                isNotNull(eventFixtures.eventId),
                 notInArray(eventFixtures.id, uniqueIds),
                 inArray(eventFixtures.code, uniqueCodes),
                 ownershipFence,

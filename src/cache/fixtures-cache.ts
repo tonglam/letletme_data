@@ -24,7 +24,7 @@ function eventIdFromFixturesKey(key: string, season: string): number | null {
   return Number.isInteger(eventId) && eventId > 0 ? eventId : null;
 }
 
-function isLiveSnapshotStagingKey(key: string, season: string): boolean {
+export function isLiveSnapshotStagingKey(key: string, season: string): boolean {
   const suffix = key.slice(`Fixtures:${season}:`.length);
   return /^\d+:staging:[^:]+$/.test(suffix);
 }

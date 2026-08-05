@@ -8,6 +8,7 @@ import { eq, sql } from 'drizzle-orm';
 import {
   buildCoreSnapshotCachePlan,
   CORE_SNAPSHOT_PENDING_PUBLICATION_KEY,
+  CORE_SNAPSHOT_STAGING_TTL_MS,
   finalizeCoreSnapshotCachePublication,
   publishCoreSnapshotCache,
   readPendingCoreSnapshotCachePublication,
@@ -154,6 +155,38 @@ describeAtomicity('core snapshot atomicity', () => {
     expect(await redis.keys(`Fixtures:${snapshot.season}:*`)).toHaveLength(38);
     expect(await redis.keys(`FixturesByTeam:${snapshot.season}:*`)).toHaveLength(20);
     expect(await redis.exists('EntryInfo:2526:sentinel')).toBe(0);
+  });
+
+  test('persists published hashes and excludes Live staging keys from backups', async () => {
+    const redis = await redisSingleton.getClient();
+    const liveStagingKey = `Fixtures:${snapshot.season}:1:staging:${randomUUID()}`;
+    let publication: Awaited<ReturnType<typeof publishCoreSnapshotCache>> | undefined;
+
+    await redis.hset(liveStagingKey, 'sentinel', 'live-staging-view');
+    await redis.pexpire(liveStagingKey, CORE_SNAPSHOT_STAGING_TTL_MS);
+
+    try {
+      publication = await publishCoreSnapshotCache(snapshot, {
+        publicationId: randomUUID(),
+        redis,
+      });
+      expect(publication.published).toBe(true);
+      if (!publication.receipt) throw new Error('Core publication receipt is missing');
+
+      for (const key of publication.receipt.finalKeys) {
+        expect(await redis.pttl(key)).toBe(-1);
+      }
+      expect(publication.receipt.backups.some((backup) => backup.key === liveStagingKey)).toBe(
+        false,
+      );
+      expect(await redis.hgetall(liveStagingKey)).toEqual({ sentinel: 'live-staging-view' });
+      expect(await redis.pttl(liveStagingKey)).toBeGreaterThan(0);
+
+      await finalizeCoreSnapshotCachePublication(publication.receipt, redis);
+    } finally {
+      const finalKeys = publication?.receipt?.finalKeys ?? [];
+      await redis.del(liveStagingKey, ...finalKeys, 'event:current');
+    }
   });
 
   test('preserves fixture hashes owned by a published Live snapshot', async () => {
@@ -308,6 +341,58 @@ describeAtomicity('core snapshot atomicity', () => {
     };
 
     await persistCoreSnapshot(snapshot);
+
+    try {
+      await persistCoreSnapshotWithFinalizer(replacementSnapshot, {
+        revision: await allocateCoreSnapshotRevision(),
+        publicationId: randomUUID(),
+        previousActiveSeason: snapshot.season,
+        finalize: async () => ({ published: true }),
+        compensate: async () => undefined,
+        afterCommit: async () => undefined,
+      });
+
+      expect(
+        await db
+          .select({ id: eventFixtures.id })
+          .from(eventFixtures)
+          .where(eq(eventFixtures.id, originalFixture.id)),
+      ).toEqual([]);
+      expect(
+        await db
+          .select({ eventId: eventFixtures.eventId })
+          .from(eventFixtures)
+          .where(eq(eventFixtures.id, replacementFixtureId)),
+      ).toEqual([{ eventId: originalFixture.event }]);
+    } finally {
+      await db.delete(eventFixtures).where(eq(eventFixtures.id, replacementFixtureId));
+      await persistCoreSnapshot(snapshot);
+    }
+  });
+
+  test('retires an omitted unscheduled fixture before inserting a code replacement', async () => {
+    const db = await getDb();
+    const originalFixture = snapshot.fixtures.find((fixture) => fixture.event !== null)!;
+    const replacementFixtureId = 999_997;
+    const replacementFixture = {
+      ...originalFixture,
+      id: replacementFixtureId,
+      code: originalFixture.code,
+      pulseId: replacementFixtureId,
+    };
+    const replacementSnapshot: CoreSnapshot = {
+      ...snapshot,
+      fixtures: [
+        ...snapshot.fixtures.filter((fixture) => fixture.id !== originalFixture.id),
+        replacementFixture,
+      ],
+    };
+
+    await persistCoreSnapshot(snapshot);
+    await db
+      .update(eventFixtures)
+      .set({ eventId: null })
+      .where(eq(eventFixtures.id, originalFixture.id));
 
     try {
       await persistCoreSnapshotWithFinalizer(replacementSnapshot, {
