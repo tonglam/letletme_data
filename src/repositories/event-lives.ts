@@ -1,10 +1,11 @@
-import { eq, sql } from 'drizzle-orm';
+import { and, eq, getTableColumns, isNotNull, sql } from 'drizzle-orm';
 
 import {
   eventLive,
   type DbEventLive,
   type DbEventLiveInsert,
 } from '../db/schemas/event-lives.schema';
+import { events } from '../db/schemas/events.schema';
 import { getDb, type DbOrTransaction } from '../db/singleton';
 import type { EventLive } from '../domain/event-lives';
 import { DatabaseError } from '../utils/errors';
@@ -39,6 +40,71 @@ export const createEventLiveRepository = (dbInstance?: DbOrTransaction) => {
         throw new DatabaseError(
           `Failed to retrieve event live data for event: ${eventId}`,
           'FIND_BY_EVENT_ERROR',
+          error instanceof Error ? error : undefined,
+        );
+      }
+    },
+
+    /**
+     * Return only rows whose source write belongs to a finalized event in the
+     * requested season. Event IDs repeat annually, so row presence alone is
+     * not sufficient evidence for post-event tournament calculations.
+     */
+    findFinalizedByEventIdForSeason: async (
+      eventId: number,
+      season: string,
+    ): Promise<DbEventLive[]> => {
+      try {
+        if (!/^\d{4}$/.test(season)) {
+          throw new Error('A valid four-digit season is required');
+        }
+        const db = await getDbInstance();
+        const result = await db
+          .select(getTableColumns(eventLive))
+          .from(eventLive)
+          .innerJoin(events, eq(events.id, eventLive.eventId))
+          .where(
+            and(
+              eq(eventLive.eventId, eventId),
+              eq(events.finished, true),
+              eq(events.dataChecked, true),
+              isNotNull(events.deadlineTime),
+              // A finalized event flag alone does not prove that the rows
+              // came from the final durable live consolidation. The explicit
+              // marker is written in that same transaction, after the full
+              // event-live payload is persisted; require every accepted row
+              // to be newer than that marker.
+              isNotNull(events.liveSnapshotFinalizedAt),
+              sql`coalesce(${eventLive.updatedAt}, ${eventLive.createdAt}) >= ${events.liveSnapshotFinalizedAt}`,
+              sql`coalesce(${eventLive.updatedAt}, ${eventLive.createdAt}) >= ${events.deadlineTime}`,
+              sql`${season} = (
+                select
+                  to_char(season_start.deadline_time at time zone 'UTC', 'YY') ||
+                  to_char(
+                    (season_start.deadline_time at time zone 'UTC') + interval '1 year',
+                    'YY'
+                  )
+                from events as season_start
+                where season_start.id = 1
+                  and season_start.deadline_time is not null
+              )`,
+            ),
+          );
+
+        logInfo('Retrieved season-owned finalized event live data', {
+          eventId,
+          season,
+          count: result.length,
+        });
+        return result;
+      } catch (error) {
+        logError('Failed to find season-owned finalized event live data', error, {
+          eventId,
+          season,
+        });
+        throw new DatabaseError(
+          `Failed to retrieve finalized event live data for event: ${eventId}`,
+          'FIND_FINALIZED_EVENT_LIVE_ERROR',
           error instanceof Error ? error : undefined,
         );
       }

@@ -84,6 +84,7 @@ export interface LiveSnapshotDurablePersistenceRequest {
   prepared: PreparedLiveSnapshot;
   persistFixtures: boolean;
   persistEventLives: boolean;
+  finalizeEvent?: boolean;
 }
 
 export interface LiveSnapshotDurablePersistenceResult {
@@ -239,7 +240,11 @@ export async function persistLiveSnapshotDurably({
   prepared,
   persistFixtures,
   persistEventLives,
+  finalizeEvent = false,
 }: LiveSnapshotDurablePersistenceRequest): Promise<LiveSnapshotDurablePersistenceResult> {
+  if (finalizeEvent && !persistEventLives) {
+    throw new Error('A final live snapshot requires durable event-live persistence');
+  }
   if (!persistFixtures && !persistEventLives) {
     return {
       accepted: true,
@@ -255,6 +260,19 @@ export async function persistLiveSnapshotDurably({
     }
     if (persistEventLives) {
       await persistPreparedEventLives(prepared.eventLives, tx);
+    }
+
+    if (finalizeEvent) {
+      const finalized = await tx
+        .update(events)
+        .set({ liveSnapshotFinalizedAt: checkedAt })
+        .where(and(eq(events.id, eventId), eq(events.finished, true), eq(events.dataChecked, true)))
+        .returning({ id: events.id });
+      if (finalized.length !== 1) {
+        throw new Error(
+          `Cannot mark event ${eventId} as finalized before finished and data-checked state`,
+        );
+      }
     }
 
     // This is the final awaited statement in the durable transaction. The
@@ -600,6 +618,7 @@ export async function syncLiveSnapshot(
   eventId: number,
   options: {
     persistEventLives?: boolean;
+    finalizeEvent?: boolean;
     dependencies?: LiveSnapshotDependencies;
   } = {},
 ): Promise<LiveSnapshotSyncResult> {
@@ -648,6 +667,7 @@ export async function syncLiveSnapshot(
             prepared,
             persistFixtures: changed,
             persistEventLives: options.persistEventLives === true,
+            finalizeEvent: options.finalizeEvent === true,
           });
           persistedFixtures = durable.persistedFixtures;
           persistedEventLives = durable.persistedEventLives;

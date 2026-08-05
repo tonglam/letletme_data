@@ -96,6 +96,26 @@ export const createEventRepository = (dbInstance?: DatabaseInstance) => {
 
     findPrevious: async (): Promise<DbEvent | null> => findNeighbour(-1, 'previous'),
 
+    findLatestFinalized: async (): Promise<DbEvent | null> => {
+      try {
+        const db = await getDbInstance();
+        const result = await db
+          .select()
+          .from(events)
+          .where(and(eq(events.finished, true), eq(events.dataChecked, true)))
+          .orderBy(desc(events.id))
+          .limit(1);
+        return result[0] ?? null;
+      } catch (error) {
+        logError('Failed to find latest finalized event', error);
+        throw new DatabaseError(
+          'Failed to retrieve latest finalized event',
+          'FIND_LATEST_FINALIZED_ERROR',
+          error instanceof Error ? error : undefined,
+        );
+      }
+    },
+
     upsertBatch: async (domainEvents: DomainEvent[]): Promise<DbEvent[]> => {
       try {
         if (domainEvents.length === 0) {
@@ -158,6 +178,17 @@ export const createEventRepository = (dbInstance?: DatabaseInstance) => {
               transfersMade: sql`excluded.transfers_made`,
               mostCaptained: sql`excluded.most_captained`,
               mostViceCaptained: sql`excluded.most_vice_captained`,
+              // A reopened or newly data-checked event invalidates any prior
+              // terminal live authority. The post-match consolidation must
+              // publish a fresh marker before tournament terminal reads resume.
+              liveSnapshotFinalizedAt: sql`
+                CASE
+                  WHEN excluded.finished = false OR excluded.data_checked = false THEN NULL
+                  WHEN events.deadline_time IS DISTINCT FROM excluded.deadline_time THEN NULL
+                  WHEN events.data_checked = false AND excluded.data_checked = true THEN NULL
+                  ELSE events.live_snapshot_finalized_at
+                END
+              `,
               updatedAt: new Date(),
             },
           })

@@ -1,0 +1,534 @@
+import {
+  ACTIVE_SEASON_LOCK_ID,
+  ACTIVE_SEASON_LOCK_NAMESPACE,
+  getActiveCacheSeasonUncached,
+} from '../cache/cache-season';
+import { getDbClient } from '../db/singleton';
+import type {
+  LeagueType,
+  TournamentConfig,
+  TournamentFinalizationTarget,
+  TournamentParticipant,
+  TournamentRosterMode,
+} from '../domain/tournament';
+import { DatabaseError } from '../utils/errors';
+import { logError, logInfo } from '../utils/logger';
+
+export type TournamentRosterRecord = TournamentConfig & {
+  adminEntryId: number;
+  leagueId: number;
+  leagueType: LeagueType;
+  rosterMode: TournamentRosterMode;
+  state: 'active' | 'inactive' | 'finished';
+  standingsReadyAt: string | null;
+};
+
+type RosterRow = {
+  id: number;
+  adminEntryId: number;
+  leagueId: number;
+  leagueType: LeagueType;
+  rosterMode: TournamentRosterMode;
+  state: 'active' | 'inactive' | 'finished';
+  standingsReadyAt: string | null;
+  totalTeamNum: number;
+  groupMode: TournamentConfig['groupMode'];
+  groupNum: number | null;
+  groupStartedEventId: number | null;
+  groupEndedEventId: number | null;
+  groupQualifyNum: number | null;
+  knockoutMode: TournamentConfig['knockoutMode'];
+  knockoutTeamNum: number | null;
+  knockoutEventNum: number | null;
+  knockoutStartedEventId: number | null;
+  knockoutEndedEventId: number | null;
+  knockoutPlayAgainstNum: number | null;
+};
+
+const SELECT_ROSTER_RECORD = `
+  id,
+  admin_entry_id as "adminEntryId",
+  league_id as "leagueId",
+  league_type as "leagueType",
+  roster_mode as "rosterMode",
+  state,
+  standings_ready_at::text as "standingsReadyAt",
+  total_team_num as "totalTeamNum",
+  group_mode as "groupMode",
+  group_num as "groupNum",
+  group_started_event_id as "groupStartedEventId",
+  group_ended_event_id as "groupEndedEventId",
+  group_qualify_num as "groupQualifyNum",
+  knockout_mode as "knockoutMode",
+  knockout_team_num as "knockoutTeamNum",
+  knockout_event_num as "knockoutEventNum",
+  knockout_started_event_id as "knockoutStartedEventId",
+  knockout_ended_event_id as "knockoutEndedEventId",
+  knockout_play_against_num as "knockoutPlayAgainstNum"
+`;
+
+export type RosterPublicationResult = {
+  changed: boolean;
+  participantCount: number;
+  automaticallyPaused: boolean;
+  skipped: boolean;
+};
+
+export const tournamentRosterRepository = {
+  findById: async (tournamentId: number): Promise<TournamentRosterRecord | null> => {
+    try {
+      const client = await getDbClient();
+      const rows = await client.unsafe<RosterRow[]>(
+        `select ${SELECT_ROSTER_RECORD} from tournament_infos where id = $1 limit 1`,
+        [tournamentId],
+      );
+      return rows[0] ?? null;
+    } catch (error) {
+      logError('Failed to load tournament roster record', error, { tournamentId });
+      throw new DatabaseError(
+        'Failed to load tournament roster.',
+        'TOURNAMENT_ROSTER_FIND_ERROR',
+        error as Error,
+      );
+    }
+  },
+
+  findActiveOfficialSync: async (): Promise<TournamentRosterRecord[]> => {
+    try {
+      const client = await getDbClient();
+      return await client.unsafe<RosterRow[]>(
+        `select ${SELECT_ROSTER_RECORD}
+         from tournament_infos
+         where state = 'active' and roster_mode = 'official_sync'
+         order by id`,
+      );
+    } catch (error) {
+      logError('Failed to load official-sync tournaments', error);
+      throw new DatabaseError(
+        'Failed to load official-sync tournaments.',
+        'TOURNAMENT_ROSTER_FIND_ACTIVE_ERROR',
+        error as Error,
+      );
+    }
+  },
+
+  findEntryIds: async (tournamentId: number): Promise<number[]> => {
+    try {
+      const client = await getDbClient();
+      const rows = await client<{ entryId: number }[]>`
+        select entry_id as "entryId"
+        from tournament_entries
+        where tournament_id = ${tournamentId}
+        order by entry_id
+      `;
+      return rows.map((row) => row.entryId);
+    } catch (error) {
+      logError('Failed to load tournament roster entry IDs', error, { tournamentId });
+      throw new DatabaseError(
+        'Failed to load tournament roster entries.',
+        'TOURNAMENT_ROSTER_FIND_ENTRIES_ERROR',
+        error as Error,
+      );
+    }
+  },
+
+  markSyncProcessing: async (tournamentId: number): Promise<void> => {
+    const client = await getDbClient();
+    await client`
+      update tournament_infos
+      set roster_sync_status = 'processing', roster_sync_error = null, updated_at = now()
+      where id = ${tournamentId}
+    `;
+  },
+
+  markSyncFailed: async (tournamentId: number, internalError: string): Promise<void> => {
+    const client = await getDbClient();
+    await client`
+      update tournament_infos
+      set roster_sync_status = 'failed',
+          roster_sync_error = ${internalError},
+          updated_at = now()
+      where id = ${tournamentId}
+    `;
+  },
+
+  markSyncReady: async (tournamentId: number, sourceLeagueName: string | null): Promise<void> => {
+    const client = await getDbClient();
+    await client`
+      update tournament_infos
+      set roster_sync_status = 'ready',
+          roster_sync_error = null,
+          roster_last_synced_at = now(),
+          source_league_name = coalesce(${sourceLeagueName}, source_league_name),
+          updated_at = now()
+      where id = ${tournamentId}
+    `;
+  },
+
+  markResumeProcessing: async (tournamentId: number): Promise<void> => {
+    const client = await getDbClient();
+    await client.begin(async (tx) => {
+      const rows = await tx<{ id: number }[]>`
+        update tournament_infos
+        set roster_sync_status = 'processing',
+            roster_sync_error = null,
+            setup_status = 'pending',
+            setup_phase = 'queued',
+            setup_error = null,
+            setup_warning_count = 0,
+            setup_completed_units = 0,
+            setup_total_units = 0,
+            setup_progress_updated_at = now(),
+            standings_ready_at = null,
+            updated_at = now()
+        where id = ${tournamentId} and state = 'inactive'
+        returning id
+      `;
+      if (rows.length === 0) return;
+
+      // Readiness is cleared before the queue can run. Refresh inside the
+      // same transaction so a delayed or failed resume cannot keep exposing
+      // the previously published standings.
+      await tx`REFRESH MATERIALIZED VIEW public.mv_tournament_event_snapshot`;
+      await tx`REFRESH MATERIALIZED VIEW public.mv_tournament_snapshot`;
+    });
+  },
+
+  publishAuthoritativeRoster: async (
+    tournament: TournamentRosterRecord,
+    participants: TournamentParticipant[],
+    sourceLeagueName: string | null,
+    options?: {
+      allowInactive?: boolean;
+      resumeAfterSetup?: boolean;
+      expectedSeason?: string;
+    },
+  ): Promise<RosterPublicationResult> => {
+    try {
+      const participantIds = participants.map((participant) => Number(participant.id));
+      const sortedParticipantIds = [...participantIds].sort((left, right) => left - right);
+      const client = await getDbClient();
+      return await client.begin(async (tx) => {
+        if (options?.expectedSeason) {
+          if (!/^\d{4}$/.test(options.expectedSeason)) {
+            throw new Error('A valid four-digit roster season is required');
+          }
+          await tx`SELECT pg_advisory_xact_lock_shared(
+            ${ACTIVE_SEASON_LOCK_NAMESPACE},
+            ${ACTIVE_SEASON_LOCK_ID}
+          )`;
+          const activeSeason = await getActiveCacheSeasonUncached();
+          if (activeSeason !== options.expectedSeason) {
+            throw new Error(
+              `Active season changed from ${options.expectedSeason} to ${activeSeason} before roster publication`,
+            );
+          }
+        }
+        const locked = await tx<
+          {
+            id: number;
+            state: 'active' | 'inactive' | 'finished';
+            rosterMode: TournamentRosterMode;
+            rosterSyncStatus: 'pending' | 'processing' | 'ready' | 'failed' | null;
+            totalTeamNum: number;
+          }[]
+        >`
+          select
+            id,
+            state,
+            roster_mode as "rosterMode",
+            roster_sync_status as "rosterSyncStatus",
+            total_team_num as "totalTeamNum"
+          from tournament_infos
+          where id = ${tournament.id}
+          for update
+        `;
+        const current = locked[0];
+        if (!current) {
+          return {
+            changed: false,
+            participantCount: 0,
+            automaticallyPaused: false,
+            skipped: true,
+          };
+        }
+        if (options?.resumeAfterSetup && current.rosterSyncStatus !== 'processing') {
+          return {
+            changed: false,
+            participantCount: current.totalTeamNum,
+            automaticallyPaused: false,
+            skipped: true,
+          };
+        }
+        if (
+          current.rosterMode !== 'official_sync' ||
+          current.state === 'finished' ||
+          (current.state === 'inactive' && !options?.allowInactive)
+        ) {
+          await tx`
+            update tournament_infos
+            set roster_sync_status = case
+                  when roster_mode = 'official_sync' then 'ready'::tournament_setup_status
+                  else null
+                end,
+                roster_sync_error = null,
+                updated_at = now()
+            where id = ${tournament.id}
+          `;
+          return {
+            changed: false,
+            participantCount: current.totalTeamNum,
+            automaticallyPaused: false,
+            skipped: true,
+          };
+        }
+
+        const existingRows = await tx<{ entryId: number }[]>`
+          select entry_id as "entryId"
+          from tournament_entries
+          where tournament_id = ${tournament.id}
+          order by entry_id
+        `;
+        const existingIds = existingRows.map((row) => row.entryId);
+        const changed =
+          existingIds.length !== sortedParticipantIds.length ||
+          existingIds.some((entryId, index) => entryId !== sortedParticipantIds[index]);
+
+        if (!changed) {
+          await tx`
+            update tournament_infos
+            set roster_sync_status = ${options?.resumeAfterSetup ? 'processing' : 'ready'},
+                roster_sync_error = null,
+                roster_last_synced_at = now(),
+                source_league_name = coalesce(${sourceLeagueName}, source_league_name),
+                updated_at = now()
+            where id = ${tournament.id}
+          `;
+          return {
+            changed: false,
+            participantCount: participantIds.length,
+            automaticallyPaused: false,
+            skipped: false,
+          };
+        }
+
+        await tx`
+          insert into entry_infos ${tx(
+            participants.map((participant) => ({
+              id: Number(participant.id),
+              entry_name: participant.team,
+              player_name: participant.manager,
+              overall_rank: participant.overallRank || null,
+              overall_points: participant.totalPoints || 0,
+            })),
+            'id',
+            'entry_name',
+            'player_name',
+            'overall_rank',
+            'overall_points',
+          )}
+          on conflict (id) do nothing
+        `;
+
+        await tx`delete from tournament_selection_stats where tournament_id = ${tournament.id}`;
+        await tx`delete from tournament_knockout_results where tournament_id = ${tournament.id}`;
+        await tx`delete from tournament_knockouts where tournament_id = ${tournament.id}`;
+        await tx`delete from tournament_battle_group_results where tournament_id = ${tournament.id}`;
+        await tx`delete from tournament_points_group_results where tournament_id = ${tournament.id}`;
+        await tx`delete from tournament_groups where tournament_id = ${tournament.id}`;
+        await tx`delete from tournament_entries where tournament_id = ${tournament.id}`;
+
+        if (participants.length > 0) {
+          await tx`
+            insert into tournament_entries ${tx(
+              participantIds.map((entryId) => ({
+                tournament_id: tournament.id,
+                league_id: tournament.leagueId,
+                entry_id: entryId,
+              })),
+              'tournament_id',
+              'league_id',
+              'entry_id',
+            )}
+          `;
+        }
+
+        const automaticallyPaused = participants.length < 2;
+        await tx`
+          update tournament_infos
+          set total_team_num = ${participants.length},
+              group_team_num = ${participants.length},
+              source_league_name = coalesce(${sourceLeagueName}, source_league_name),
+              roster_sync_status = ${
+                automaticallyPaused ? 'failed' : options?.resumeAfterSetup ? 'processing' : 'ready'
+              },
+              roster_sync_error = ${
+                automaticallyPaused ? 'Official league has fewer than two participants.' : null
+              },
+              roster_last_synced_at = now(),
+              state = ${automaticallyPaused ? 'inactive' : current.state},
+              setup_status = ${automaticallyPaused ? 'failed' : 'pending'},
+              setup_phase = ${automaticallyPaused ? 'failed' : 'queued'},
+              setup_error = null,
+              setup_warning_count = 0,
+              setup_completed_units = 0,
+              setup_total_units = 0,
+              setup_progress_updated_at = now(),
+              standings_ready_at = null,
+              updated_at = now()
+          where id = ${tournament.id}
+        `;
+
+        // Clearing readiness must evict the previously published aggregate
+        // before this roster publication commits. The view predicate is only
+        // evaluated during refresh, so cache invalidation alone is insufficient.
+        await tx`REFRESH MATERIALIZED VIEW public.mv_tournament_event_snapshot`;
+        await tx`REFRESH MATERIALIZED VIEW public.mv_tournament_snapshot`;
+
+        return {
+          changed: true,
+          participantCount: participants.length,
+          automaticallyPaused,
+          skipped: false,
+        };
+      });
+    } catch (error) {
+      logError('Failed to publish authoritative tournament roster', error, {
+        tournamentId: tournament.id,
+      });
+      throw new DatabaseError(
+        'Failed to publish tournament roster.',
+        'TOURNAMENT_ROSTER_PUBLISH_ERROR',
+        error as Error,
+      );
+    }
+  },
+
+  markReadyAndResume: async (tournamentId: number): Promise<void> => {
+    const client = await getDbClient();
+    await client`
+      update tournament_infos
+      set state = case
+            when state = 'finished' then state
+            when total_team_num >= 2 then 'active'
+            else state
+          end,
+          roster_sync_status = case
+            when state = 'finished' or total_team_num >= 2
+              then 'ready'::tournament_setup_status
+            else 'failed'::tournament_setup_status
+          end,
+          roster_sync_error = case
+            when state = 'finished' or total_team_num >= 2 then null
+            else 'Tournament requires at least two participants.'
+          end,
+          roster_last_synced_at = case
+            when state = 'finished' or total_team_num >= 2
+              then coalesce(roster_last_synced_at, now())
+            else roster_last_synced_at
+          end,
+          updated_at = now()
+      where id = ${tournamentId}
+        and roster_sync_status = 'processing'
+    `;
+  },
+
+  finishThroughEvent: async (
+    eventId: number,
+    targets: TournamentFinalizationTarget[],
+  ): Promise<number> => {
+    const eligibleTargets = [
+      ...new Map(
+        targets
+          .filter(
+            (target) =>
+              target.tournamentId > 0 && Number.isFinite(Date.parse(target.standingsReadyAt)),
+          )
+          .map((target) => [target.tournamentId, target]),
+      ).values(),
+    ];
+    if (eligibleTargets.length === 0) {
+      logInfo('No cascade-owned tournaments eligible for finish', { eventId });
+      return 0;
+    }
+    const targetPayload = JSON.stringify(
+      eligibleTargets.map((target) => ({
+        tournament_id: target.tournamentId,
+        standings_ready_at: target.standingsReadyAt,
+      })),
+    );
+    const client = await getDbClient();
+    const rows = await client<{ id: number }[]>`
+      update tournament_infos as tournament
+      set state = 'finished', updated_at = now()
+      from jsonb_to_recordset(${targetPayload}::jsonb) as target(
+        tournament_id int,
+        standings_ready_at timestamptz
+      )
+      where tournament.id = target.tournament_id
+        and tournament.standings_ready_at = target.standings_ready_at
+        and tournament.state = 'active'
+        and tournament.setup_status = 'ready'
+        and tournament.standings_ready_at is not null
+        and exists (
+          select 1
+          from events terminal_event
+          where terminal_event.id = ${eventId}
+            and terminal_event.finished = true
+            and terminal_event.data_checked = true
+        )
+        and greatest(
+          coalesce(tournament.group_ended_event_id, 0),
+          coalesce(tournament.knockout_ended_event_id, 0)
+        ) = ${eventId}
+        and (
+          (
+            tournament.knockout_mode <> 'no_knockout'
+            and coalesce(tournament.knockout_ended_event_id, 0)
+              >= coalesce(tournament.group_ended_event_id, 0)
+            and exists (
+              select 1
+              from tournament_knockout_results result
+              where result.tournament_id = tournament.id
+                and result.event_id = tournament.knockout_ended_event_id
+            )
+          )
+          or (
+            (
+              tournament.knockout_mode = 'no_knockout'
+              or coalesce(tournament.group_ended_event_id, 0)
+                > coalesce(tournament.knockout_ended_event_id, 0)
+            )
+            and tournament.group_mode = 'points_races'
+            and exists (
+              select 1
+              from tournament_points_group_results result
+              where result.tournament_id = tournament.id
+                and result.event_id = tournament.group_ended_event_id
+            )
+          )
+          or (
+            (
+              tournament.knockout_mode = 'no_knockout'
+              or coalesce(tournament.group_ended_event_id, 0)
+                > coalesce(tournament.knockout_ended_event_id, 0)
+            )
+            and tournament.group_mode = 'battle_races'
+            and exists (
+              select 1
+              from tournament_battle_group_results result
+              where result.tournament_id = tournament.id
+                and result.event_id = tournament.group_ended_event_id
+            )
+          )
+        )
+      returning tournament.id
+    `;
+    logInfo('Marked cascade-owned completed tournaments finished', {
+      eventId,
+      eligibleTournamentCount: eligibleTargets.length,
+      count: rows.length,
+    });
+    return rows.length;
+  },
+};

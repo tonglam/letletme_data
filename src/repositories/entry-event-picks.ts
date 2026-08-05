@@ -1,13 +1,10 @@
 import { and, eq, inArray } from 'drizzle-orm';
-import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import { entryEventPicks, type DbEntryEventPickInsert } from '../db/schemas/index.schema';
-import { getDb } from '../db/singleton';
+import { getDb, type DbOrTransaction } from '../db/singleton';
 import { toDbChip } from '../domain/chips';
 import type { RawFPLEntryEventPicksResponse } from '../types';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
-
-type DatabaseInstance = PostgresJsDatabase<Record<string, never>>;
 
 function chunkArray<T>(items: T[], size: number): T[][] {
   if (items.length === 0) {
@@ -21,7 +18,7 @@ function chunkArray<T>(items: T[], size: number): T[][] {
   return chunks;
 }
 
-export const createEntryEventPicksRepository = (dbInstance?: DatabaseInstance) => {
+export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) => {
   const getDbInstance = async () => dbInstance || (await getDb());
 
   return {

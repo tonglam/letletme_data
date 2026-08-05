@@ -1,18 +1,20 @@
 import { and, eq, gte, inArray, lte, sql } from 'drizzle-orm';
-import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 
 import {
   entryEventResults,
   type DbEntryEventResult,
   type DbEntryEventResultInsert,
 } from '../db/schemas/index.schema';
-import { getDb } from '../db/singleton';
+import { getDb, type DbOrTransaction } from '../db/singleton';
 import { toNullableDbChip } from '../domain/chips';
-import type { RawFPLEntryEventPicksResponse, RawFPLEventLiveResponse } from '../types';
+import type { RawFPLEntryEventPicksResponse, RawFPLEntryHistoryCurrentItem } from '../types';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
-
-type DatabaseInstance = PostgresJsDatabase<Record<string, never>>;
+import {
+  buildCoreHistoryConflictSet,
+  buildCoreHistoryUpsertPlan,
+  chunkCoreHistoryRows,
+} from './entry-event-results-history';
 
 type AutoSubItem = {
   element_in?: number | null;
@@ -25,6 +27,20 @@ type EntryEventTotalsRow = {
   totalTransfersCost: number;
   totalNetPoints: number;
 };
+
+export type EventPointsPayload = {
+  elements: Array<{
+    id: number;
+    stats: { total_points: number };
+  }>;
+};
+
+export type PreEntryBaselineUnit = {
+  entryId: number;
+  eventId: number;
+};
+
+const PRE_ENTRY_OVERALL_RANK = 2_147_483_647;
 
 function normalizeAutoSubs(raw: unknown): AutoSubItem[] {
   if (!Array.isArray(raw)) {
@@ -45,10 +61,99 @@ function getAutoSubPoints(autoSubs: AutoSubItem[], elementsPoints: Map<number, n
   }, 0);
 }
 
-export const createEntryEventResultsRepository = (dbInstance?: DatabaseInstance) => {
+export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) => {
   const getDbInstance = async () => dbInstance || (await getDb());
 
   return {
+    upsertCoreFromHistory: async (
+      entryId: number,
+      history: readonly RawFPLEntryHistoryCurrentItem[],
+    ): Promise<{ upsertedEventIds: number[]; fallbackEventIds: number[] }> => {
+      const plan = buildCoreHistoryUpsertPlan(entryId, history);
+
+      try {
+        const db = await getDbInstance();
+        for (const rows of chunkCoreHistoryRows(plan.rows)) {
+          await db
+            .insert(entryEventResults)
+            .values(rows)
+            .onConflictDoUpdate({
+              target: [entryEventResults.entryId, entryEventResults.eventId],
+              set: buildCoreHistoryConflictSet(),
+            });
+        }
+
+        logInfo('Upserted core entry event results from history', {
+          entryId,
+          upserted: plan.upsertedEventIds.length,
+          fallback: plan.fallbackEventIds.length,
+        });
+        return {
+          upsertedEventIds: plan.upsertedEventIds,
+          fallbackEventIds: plan.fallbackEventIds,
+        };
+      } catch (error) {
+        logError('Failed to upsert core entry event results from history', error, { entryId });
+        throw new DatabaseError(
+          'Failed to upsert core entry event results from history',
+          'ENTRY_EVENT_RESULTS_HISTORY_UPSERT_ERROR',
+          error as Error,
+        );
+      }
+    },
+
+    seedPreEntryBaselines: async (units: readonly PreEntryBaselineUnit[]): Promise<number> => {
+      const uniqueUnits = [
+        ...new Map(
+          units
+            .filter((unit) => unit.entryId > 0 && unit.eventId > 0)
+            .map((unit) => [`${unit.entryId}:${unit.eventId}`, unit]),
+        ).values(),
+      ];
+      if (uniqueUnits.length === 0) return 0;
+
+      try {
+        const db = await getDbInstance();
+        let inserted = 0;
+        for (let index = 0; index < uniqueUnits.length; index += 250) {
+          const chunk = uniqueUnits.slice(index, index + 250);
+          const rows = await db
+            .insert(entryEventResults)
+            .values(
+              chunk.map((unit) => ({
+                entryId: unit.entryId,
+                eventId: unit.eventId,
+                eventPoints: 0,
+                eventTransfers: 0,
+                eventTransfersCost: 0,
+                eventNetPoints: 0,
+                overallPoints: 0,
+                overallRank: PRE_ENTRY_OVERALL_RANK,
+              })),
+            )
+            .onConflictDoNothing({
+              target: [entryEventResults.entryId, entryEventResults.eventId],
+            })
+            .returning({ id: entryEventResults.id });
+          inserted += rows.length;
+        }
+        logInfo('Seeded pre-entry event result baselines', {
+          requested: uniqueUnits.length,
+          inserted,
+        });
+        return inserted;
+      } catch (error) {
+        logError('Failed to seed pre-entry event result baselines', error, {
+          count: uniqueUnits.length,
+        });
+        throw new DatabaseError(
+          'Failed to seed pre-entry event result baselines',
+          'ENTRY_EVENT_RESULTS_BASELINE_UPSERT_ERROR',
+          error as Error,
+        );
+      }
+    },
+
     aggregateTotalsByEntry: async (
       entryIds: number[],
       startEventId: number,
@@ -146,7 +251,7 @@ export const createEntryEventResultsRepository = (dbInstance?: DatabaseInstance)
       entryId: number,
       eventId: number,
       picks: RawFPLEntryEventPicksResponse,
-      live: RawFPLEventLiveResponse,
+      live: EventPointsPayload,
     ): Promise<void> => {
       try {
         const db = await getDbInstance();

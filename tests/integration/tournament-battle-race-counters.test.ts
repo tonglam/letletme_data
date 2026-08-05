@@ -136,7 +136,12 @@ async function seedTournament(eventId: number): Promise<number> {
   // Force a deterministic single-event group window
   await (await db())`
     UPDATE tournament_infos
-    SET group_started_event_id = ${eventId}, group_ended_event_id = ${eventId}
+    SET group_started_event_id = ${eventId},
+        group_ended_event_id = ${eventId},
+        setup_status = 'ready',
+        setup_phase = 'ready',
+        standings_ready_at = now(),
+        setup_finished_at = now()
     WHERE id = ${created.id}
   `;
 

@@ -1,9 +1,19 @@
+import { getActiveCacheSeason } from '../cache/cache-season';
 import { fplClient } from '../clients/fpl';
-import { entryEventResultsRepository } from '../repositories/entry-event-results';
-import { entryEventPicksRepository } from '../repositories/entry-event-picks';
-import { entryEventTransfersRepository } from '../repositories/entry-event-transfers';
+import type { TransactionHandle } from '../db/singleton';
+import type { TournamentFinalizationTarget } from '../domain/tournament';
+import { createEntryEventPicksRepository } from '../repositories/entry-event-picks';
+import {
+  createEntryEventResultsRepository,
+  type EventPointsPayload,
+} from '../repositories/entry-event-results';
+import {
+  entryEventTransfersRepository,
+  withEntrySeasonSyncTransaction,
+} from '../repositories/entry-event-transfers';
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
+import type { RawFPLEntryTransfersResponse } from '../types';
 import { mapWithConcurrency, uniqueNumbers, withTimeout } from '../utils/async';
 import { logError, logInfo } from '../utils/logger';
 
@@ -17,15 +27,20 @@ type EntrySyncOutcome = {
   success: boolean;
 };
 
-export async function syncTournamentEventResultsForEntryIds(
-  entryIds: number[],
+export type TournamentEventResultsSyncOptions = {
+  concurrency?: number;
+  live?: EventPointsPayload;
+  skipTransfers?: boolean;
+  transfersByEntry?: ReadonlyMap<number, RawFPLEntryTransfersResponse>;
+  /** Season captured before the setup/read-model plan began. */
+  season?: string;
+};
+
+async function resolveEventPointsPayload(
   eventId: number,
-  options?: { concurrency?: number },
-): Promise<{ eventId: number; totalEntries: number; synced: number; errors: number }> {
-  const uniqueEntryIds = uniqueNumbers(entryIds);
-  if (uniqueEntryIds.length === 0) {
-    return { eventId, totalEntries: 0, synced: 0, errors: 0 };
-  }
+  provided?: EventPointsPayload,
+): Promise<EventPointsPayload> {
+  if (provided) return provided;
 
   const live = await withTimeout(
     fplClient.getEventLive(eventId),
@@ -35,6 +50,56 @@ export async function syncTournamentEventResultsForEntryIds(
   if (!live.elements || !Array.isArray(live.elements)) {
     throw new Error('Invalid event live data from FPL API');
   }
+
+  return live;
+}
+
+async function persistEntryEventData(
+  entryId: number,
+  eventId: number,
+  picks: Awaited<ReturnType<typeof fplClient.getEntryEventPicks>>,
+  live: EventPointsPayload,
+  checkpointSeason: string,
+  transfers: RawFPLEntryTransfersResponse | null,
+  pointsByElement: Map<number, number>,
+): Promise<void> {
+  const persistPicksAndResults = async (tx: TransactionHandle) => {
+    const resultsRepository = createEntryEventResultsRepository(tx);
+    const picksRepository = createEntryEventPicksRepository(tx);
+    await resultsRepository.upsertFromPicksAndLive(entryId, eventId, picks, live);
+    await picksRepository.upsertFromPicks(entryId, eventId, picks);
+  };
+
+  if (transfers) {
+    await entryEventTransfersRepository.replaceForEvent(
+      entryId,
+      eventId,
+      transfers,
+      pointsByElement,
+      {
+        syncMode: 'all',
+        checkpointSeason,
+        persistEventData: persistPicksAndResults,
+      },
+    );
+    return;
+  }
+
+  await withEntrySeasonSyncTransaction(entryId, checkpointSeason, persistPicksAndResults);
+}
+
+export async function syncTournamentEventResultsForEntryIds(
+  entryIds: number[],
+  eventId: number,
+  options?: TournamentEventResultsSyncOptions,
+): Promise<{ eventId: number; totalEntries: number; synced: number; errors: number }> {
+  const uniqueEntryIds = uniqueNumbers(entryIds);
+  if (uniqueEntryIds.length === 0) {
+    return { eventId, totalEntries: 0, synced: 0, errors: 0 };
+  }
+
+  const checkpointSeason = options?.season ?? (await getActiveCacheSeason());
+  const live = await resolveEventPointsPayload(eventId, options?.live);
   const pointsByElement = new Map<number, number>();
   for (const element of live.elements) {
     pointsByElement.set(element.id, element.stats.total_points);
@@ -48,22 +113,25 @@ export async function syncTournamentEventResultsForEntryIds(
       const [picks, transfers] = await withTimeout(
         Promise.all([
           fplClient.getEntryEventPicks(entryId, eventId),
-          fplClient.getEntryTransfers(entryId),
+          options?.skipTransfers
+            ? Promise.resolve(null)
+            : options?.transfersByEntry
+              ? Promise.resolve(options.transfersByEntry.get(entryId) ?? [])
+              : fplClient.getEntryTransfers(entryId),
         ]),
         ENTRY_FETCH_TIMEOUT_MS,
         `Timed out fetching entry payloads for entry ${entryId}, event ${eventId} after ${ENTRY_FETCH_TIMEOUT_MS}ms`,
       );
       await withTimeout(
-        Promise.all([
-          entryEventResultsRepository.upsertFromPicksAndLive(entryId, eventId, picks, live),
-          entryEventPicksRepository.upsertFromPicks(entryId, eventId, picks),
-          entryEventTransfersRepository.replaceForEvent(
-            entryId,
-            eventId,
-            transfers,
-            pointsByElement,
-          ),
-        ]),
+        persistEntryEventData(
+          entryId,
+          eventId,
+          picks,
+          live,
+          checkpointSeason,
+          transfers,
+          pointsByElement,
+        ),
         ENTRY_PERSIST_TIMEOUT_MS,
         `Timed out persisting entry payloads for entry ${entryId}, event ${eventId} after ${ENTRY_PERSIST_TIMEOUT_MS}ms`,
       );
@@ -87,6 +155,46 @@ export async function syncTournamentEventResultsForEntryIds(
     totalEntries,
     synced,
     errors,
+  };
+}
+
+export async function syncEntryTransferHistories(
+  entryIds: number[],
+  endEventId: number,
+  options?: { concurrency?: number; season?: string },
+): Promise<{ synced: number; errors: number; failedEntryIds: number[] }> {
+  const uniqueEntryIds = uniqueNumbers(entryIds);
+  const failedEntryIds: number[] = [];
+  const concurrency = options?.concurrency ?? DEFAULT_CONCURRENCY;
+  const checkpointSeason = options?.season ?? (await getActiveCacheSeason());
+
+  const outcomes = await mapWithConcurrency(uniqueEntryIds, concurrency, async (entryId) => {
+    try {
+      const transfers = await withTimeout(
+        fplClient.getEntryTransfers(entryId),
+        ENTRY_FETCH_TIMEOUT_MS,
+        `Timed out fetching transfer history for entry ${entryId}`,
+      );
+      await withTimeout(
+        entryEventTransfersRepository.replaceForEvent(entryId, endEventId, transfers, undefined, {
+          syncMode: 'all',
+          checkpointSeason,
+        }),
+        ENTRY_PERSIST_TIMEOUT_MS,
+        `Timed out persisting transfer history for entry ${entryId}`,
+      );
+      return true;
+    } catch (error) {
+      failedEntryIds.push(entryId);
+      logError('Failed to sync entry transfer history', error, { entryId, endEventId });
+      return false;
+    }
+  });
+
+  return {
+    synced: outcomes.filter(Boolean).length,
+    errors: failedEntryIds.length,
+    failedEntryIds,
   };
 }
 
@@ -115,14 +223,26 @@ export async function syncTournamentEventResultsForTournament(
 export async function syncTournamentEventResults(
   eventId: number,
   options?: { concurrency?: number },
-): Promise<{ eventId: number; totalEntries: number; synced: number; errors: number }> {
+): Promise<{
+  eventId: number;
+  totalEntries: number;
+  synced: number;
+  errors: number;
+  finalizationTargets: TournamentFinalizationTarget[];
+}> {
   logInfo('Starting tournament event results sync', { eventId });
 
   const tournaments = await tournamentInfoRepository.findActive();
   if (tournaments.length === 0) {
     logInfo('No active tournaments found for tournament event results', { eventId });
-    return { eventId, totalEntries: 0, synced: 0, errors: 0 };
+    return { eventId, totalEntries: 0, synced: 0, errors: 0, finalizationTargets: [] };
   }
+
+  const finalizationTargets = tournaments.flatMap((tournament) =>
+    tournament.standingsReadyAt
+      ? [{ tournamentId: tournament.id, standingsReadyAt: tournament.standingsReadyAt }]
+      : [],
+  );
 
   const entryLists = await Promise.all(
     tournaments.map((tournament) =>
@@ -133,7 +253,13 @@ export async function syncTournamentEventResults(
   const entryIds = uniqueNumbers(entryLists.flat());
   if (entryIds.length === 0) {
     logInfo('No tournament entries found for event results', { eventId });
-    return { eventId, totalEntries: 0, synced: 0, errors: 0 };
+    return {
+      eventId,
+      totalEntries: 0,
+      synced: 0,
+      errors: 0,
+      finalizationTargets,
+    };
   }
   const { totalEntries, synced, errors } = await syncTournamentEventResultsForEntryIds(
     entryIds,
@@ -148,5 +274,11 @@ export async function syncTournamentEventResults(
     errors,
   });
 
-  return { eventId, totalEntries, synced, errors };
+  return {
+    eventId,
+    totalEntries,
+    synced,
+    errors,
+    finalizationTargets,
+  };
 }

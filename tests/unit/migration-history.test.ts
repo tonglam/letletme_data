@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 
 import { inspectMigrationHistory } from '../../scripts/migration-history';
 
@@ -37,6 +37,22 @@ describe('migration history inspection', () => {
       latestApplied: null,
     });
   });
+
+  test('places every tournament lifecycle migration after the deployed Live tail', () => {
+    const files = readdirSync('migrations')
+      .filter((file) => file.endsWith('.sql'))
+      .sort();
+    const applied = files.filter((file) => file <= '0039_add_live_snapshot_write_fence.sql');
+
+    expect(inspectMigrationHistory(files, applied)).toMatchObject({
+      missing: [],
+      backdated: [],
+      latestApplied: '0039_add_live_snapshot_write_fence.sql',
+    });
+    expect(files.filter((file) => file.includes('tournament_lifecycle_progress'))).toEqual([
+      '0040_tournament_lifecycle_progress.sql',
+    ]);
+  });
 });
 
 describe('public Data API lockdown migration', () => {
@@ -60,5 +76,16 @@ describe('player market snapshot migration', () => {
     expect(migration).toContain('selected_by_percent BETWEEN 0 AND 100');
     expect(migration).toContain('ENABLE ROW LEVEL SECURITY');
     expect(migration).toContain('REVOKE ALL ON TABLE');
+  });
+});
+
+describe('tournament lifecycle progress migration', () => {
+  test('restores readiness only for legacy tournaments with canonical structure', () => {
+    const migration = readFileSync('migrations/0040_tournament_lifecycle_progress.sql', 'utf8');
+
+    expect(migration).toMatch(/setup_status = 'ready'/);
+    expect(migration).toMatch(/FROM public\.tournament_entries/);
+    expect(migration).toMatch(/FROM public\.tournament_groups/);
+    expect(migration).toMatch(/FROM public\.tournament_knockouts/);
   });
 });

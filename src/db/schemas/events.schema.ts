@@ -30,6 +30,9 @@ export const events = pgTable('events', {
   // gameweek prevents an older worker from overwriting newer fixture or
   // event-live rows after its advisory-lock connection is lost.
   liveSnapshotCheckedAt: timestamp('live_snapshot_checked_at', { withTimezone: true }),
+  // Set only by the post-match durable consolidation. Tournament terminal
+  // calculations must not treat a regular in-match persistence as final.
+  liveSnapshotFinalizedAt: timestamp('live_snapshot_finalized_at', { withTimezone: true }),
   ...timestamps,
 });
 

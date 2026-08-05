@@ -1,4 +1,10 @@
 import { getDbClient } from '../db/singleton';
+import type {
+  GroupMode,
+  KnockoutMode,
+  LeagueType,
+  TournamentRosterMode,
+} from '../domain/tournament';
 import { ConflictError, DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 
@@ -8,6 +14,11 @@ export interface TournamentManagementRecord {
   creator: string;
   adminEntryId: number;
   totalTeamNum: number;
+  leagueType: LeagueType;
+  groupMode: GroupMode;
+  groupNum: number | null;
+  knockoutMode: KnockoutMode;
+  rosterMode: TournamentRosterMode;
   state: 'active' | 'inactive' | 'finished';
   createdAt: string;
   updatedAt: string;
@@ -24,6 +35,11 @@ type TournamentManagementDatabaseRow = {
   creator: string;
   admin_entry_id: number;
   total_team_num: number;
+  league_type: LeagueType;
+  group_mode: GroupMode;
+  group_num: number | null;
+  knockout_mode: KnockoutMode;
+  roster_mode: TournamentRosterMode;
   state: 'active' | 'inactive' | 'finished';
   created_at: string;
   updated_at: string;
@@ -36,6 +52,11 @@ function mapRecord(row: TournamentManagementDatabaseRow): TournamentManagementRe
     creator: row.creator,
     adminEntryId: row.admin_entry_id,
     totalTeamNum: row.total_team_num,
+    leagueType: row.league_type,
+    groupMode: row.group_mode,
+    groupNum: row.group_num,
+    knockoutMode: row.knockout_mode,
+    rosterMode: row.roster_mode,
     state: row.state,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -57,6 +78,11 @@ export const createTournamentManagementRepository = () => ({
           creator,
           admin_entry_id,
           total_team_num,
+          league_type,
+          group_mode,
+          group_num,
+          knockout_mode,
+          roster_mode,
           state,
           created_at::text,
           updated_at::text
@@ -113,6 +139,11 @@ export const createTournamentManagementRepository = () => ({
           creator,
           admin_entry_id,
           total_team_num,
+          league_type,
+          group_mode,
+          group_num,
+          knockout_mode,
+          roster_mode,
           state,
           created_at::text,
           updated_at::text
@@ -133,6 +164,102 @@ export const createTournamentManagementRepository = () => ({
     }
   },
 
+  updateStateOwned: async (
+    tournamentId: number,
+    adminEntryId: number,
+    state: 'active' | 'inactive',
+  ): Promise<TournamentManagementRecord | null> => {
+    try {
+      const client = await getDbClient();
+      const rows = await client<TournamentManagementDatabaseRow[]>`
+        update tournament_infos
+        set state = ${state},
+            roster_sync_status = case
+              when ${state} = 'inactive' and roster_sync_status = 'processing'
+                then 'ready'::tournament_setup_status
+              else roster_sync_status
+            end,
+            roster_sync_error = case
+              when ${state} = 'inactive' and roster_sync_status = 'processing' then null
+              else roster_sync_error
+            end,
+            updated_at = now()
+        where id = ${tournamentId}
+          and admin_entry_id = ${adminEntryId}
+          and state <> 'finished'
+        returning
+          id,
+          name,
+          creator,
+          admin_entry_id,
+          total_team_num,
+          league_type,
+          group_mode,
+          group_num,
+          knockout_mode,
+          roster_mode,
+          state,
+          created_at::text,
+          updated_at::text
+      `;
+      return rows[0] ? mapRecord(rows[0]) : null;
+    } catch (error) {
+      logError('Failed to update tournament state', error, { tournamentId, adminEntryId, state });
+      throw new DatabaseError(
+        'Failed to update tournament state.',
+        'TOURNAMENT_MANAGEMENT_STATE_ERROR',
+        error as Error,
+      );
+    }
+  },
+
+  updateRosterModeOwned: async (
+    tournamentId: number,
+    adminEntryId: number,
+    rosterMode: TournamentRosterMode,
+  ): Promise<TournamentManagementRecord | null> => {
+    try {
+      const client = await getDbClient();
+      const rows = await client<TournamentManagementDatabaseRow[]>`
+        update tournament_infos
+        set roster_mode = ${rosterMode},
+            roster_sync_status = case
+              when ${rosterMode} = 'official_sync' then 'pending'::tournament_setup_status
+              else null
+            end,
+            roster_sync_error = null,
+            updated_at = now()
+        where id = ${tournamentId} and admin_entry_id = ${adminEntryId}
+        returning
+          id,
+          name,
+          creator,
+          admin_entry_id,
+          total_team_num,
+          league_type,
+          group_mode,
+          group_num,
+          knockout_mode,
+          roster_mode,
+          state,
+          created_at::text,
+          updated_at::text
+      `;
+      return rows[0] ? mapRecord(rows[0]) : null;
+    } catch (error) {
+      logError('Failed to update tournament roster mode', error, {
+        tournamentId,
+        adminEntryId,
+        rosterMode,
+      });
+      throw new DatabaseError(
+        'Failed to update tournament roster mode.',
+        'TOURNAMENT_MANAGEMENT_ROSTER_MODE_ERROR',
+        error as Error,
+      );
+    }
+  },
+
   deleteOwned: async (
     tournamentId: number,
     adminEntryId: number,
@@ -147,6 +274,11 @@ export const createTournamentManagementRepository = () => ({
             creator,
             admin_entry_id,
             total_team_num,
+            league_type,
+            group_mode,
+            group_num,
+            knockout_mode,
+            roster_mode,
             state,
             created_at::text,
             updated_at::text

@@ -2,6 +2,8 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   buildKnockoutRows,
+  estimateTournamentSetupRequests,
+  getTournamentBackfillWindow,
   parseLeagueUrl,
   planTournamentStructure,
   seedBracketEntries,
@@ -165,6 +167,85 @@ describe('planTournamentStructure', () => {
     expect(() =>
       planTournamentStructure(basePayload, participants([1, 2, 3]), 1, 'classic'),
     ).toThrow(ValidationError);
+  });
+
+  test('enables official sync only for an authoritative one-group Classic points race', () => {
+    const eligible = planTournamentStructure(
+      {
+        ...basePayload,
+        participantSource: 'official',
+        groupFormat: 'points',
+        groupNum: '1',
+        endGameweek: 'GW38',
+        knockoutFormat: 'none',
+      },
+      participants([1, 2, 3, 4]),
+      1,
+      'classic',
+    );
+    expect(eligible.rosterMode).toBe('official_sync');
+
+    const ineligible = [
+      { participantSource: 'custom' as const },
+      { groupNum: '2' },
+      { leagueType: 'h2h' as const },
+    ];
+    for (const variant of ineligible) {
+      const plan = planTournamentStructure(
+        {
+          ...basePayload,
+          participantSource: variant.participantSource ?? 'official',
+          groupFormat: 'points',
+          groupNum: variant.groupNum ?? '1',
+          endGameweek: 'GW38',
+          knockoutFormat: 'none',
+        },
+        participants([1, 2, 3, 4]),
+        1,
+        variant.leagueType ?? 'classic',
+      );
+      expect(plan.rosterMode).toBe('snapshot');
+    }
+  });
+});
+
+describe('tournament initialization window and request budget', () => {
+  const tournament: TournamentConfig = {
+    id: 7,
+    totalTeamNum: 75,
+    groupMode: 'points_races',
+    groupNum: 1,
+    groupStartedEventId: 1,
+    groupEndedEventId: 38,
+    groupQualifyNum: null,
+    knockoutMode: 'no_knockout',
+    knockoutTeamNum: null,
+    knockoutEventNum: null,
+    knockoutStartedEventId: null,
+    knockoutEndedEventId: null,
+    knockoutPlayAgainstNum: null,
+  };
+
+  test('stops baseline work at the latest finalized event and handles preseason/future starts', () => {
+    expect(getTournamentBackfillWindow(tournament, 12)).toEqual({
+      startEventId: 1,
+      endEventId: 12,
+    });
+    expect(getTournamentBackfillWindow(tournament, null)).toBeNull();
+    expect(getTournamentBackfillWindow({ ...tournament, groupStartedEventId: 20 }, 12)).toBeNull();
+    expect(getTournamentBackfillWindow(tournament, 50)).toEqual({
+      startEventId: 1,
+      endEventId: 38,
+    });
+  });
+
+  test('proves the 75-entry by 38-GW cold-start request gate', () => {
+    expect(estimateTournamentSetupRequests(75, 38)).toEqual({
+      legacyColdStart: 5888,
+      optimizedColdStartUpperBound: 3113,
+      optimizedTransferHistoryRequests: 75,
+      coreStandingsBaseline: 150,
+    });
   });
 });
 

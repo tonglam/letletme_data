@@ -1,4 +1,5 @@
 import type { MutationPriorityTier } from '../domain/job-priority';
+import type { TournamentFinalizationTarget } from '../domain/tournament';
 import { closeTieredQueues, createTieredQueueSet } from './tiered-queue';
 
 export const tournamentSyncQueueName = 'tournament-sync';
@@ -20,6 +21,7 @@ export const TOURNAMENT_JOBS = {
   TRANSFERS_PRE: 'tournament-transfers-pre',
   // Info job (keep separate, low frequency)
   INFO: 'tournament-info',
+  ROSTER_SYNC: 'tournament-roster-sync',
 } as const;
 
 export type TournamentSyncJobName = (typeof TOURNAMENT_JOBS)[keyof typeof TOURNAMENT_JOBS];
@@ -29,11 +31,13 @@ export interface TournamentSyncJobData {
   source: 'cron' | 'manual' | 'cascade';
   triggeredAt: string;
   /**
-   * Shared id for one cascade fan-out. Structure jobs (points/battle/knockout)
-   * that finish under this id decrement a Redis barrier; the last one enqueues
-   * the materialized-views refresh so it cannot interleave mid-cascade.
+   * Shared id for one cascade fan-out. Structure and enrichment jobs that
+   * finish under this id claim Redis barrier slots; the last one enqueues the
+   * materialized-views refresh and terminal lifecycle publication.
    */
   cascadeId?: string;
+  /** Exact standings publications selected by the base event-results job. */
+  finalizationTargets?: TournamentFinalizationTarget[];
 }
 
 const tieredQueueSet = createTieredQueueSet<TournamentSyncJobData>(tournamentSyncQueueName, {

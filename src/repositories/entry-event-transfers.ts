@@ -1,12 +1,14 @@
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 
+import { acquireActiveSeasonReadFence, getActiveCacheSeasonUncached } from '../cache/cache-season';
 import {
   entryEventTransfers,
+  entryInfos,
   type DbEntryEventTransfer,
   type DbEntryEventTransferInsert,
 } from '../db/schemas/index.schema';
-import { getDb, getDbClient } from '../db/singleton';
+import { getDb, type TransactionHandle } from '../db/singleton';
 import type { RawFPLEntryTransfersResponse } from '../types';
 import { getConfig } from '../utils/config';
 import { DatabaseError } from '../utils/errors';
@@ -14,7 +16,7 @@ import { logError, logInfo } from '../utils/logger';
 
 type DatabaseInstance = PostgresJsDatabase<Record<string, never>>;
 
-const TRANSFER_LOCK_NAMESPACE = 1_102_204_716;
+export const ENTRY_SEASON_SYNC_LOCK_NAMESPACE = 1_102_204_716;
 
 function transferSignature(transfer: {
   eventId: number;
@@ -31,6 +33,77 @@ function transferSignature(transfer: {
 }
 
 export type TransferSyncMode = 'latest' | 'all';
+
+type EntrySeasonCheckpoint = {
+  snapshotSeason: string | null;
+  transferSeason: string | null;
+};
+
+export async function acquireEntrySeasonWriteFence(
+  tx: TransactionHandle,
+  entryIds: readonly number[],
+  checkpointSeason: string,
+): Promise<void> {
+  if (!/^\d{4}$/.test(checkpointSeason)) {
+    throw new Error('A valid four-digit checkpoint season is required');
+  }
+
+  const uniqueEntryIds = [...new Set(entryIds)].sort((left, right) => left - right);
+  for (const entryId of uniqueEntryIds) {
+    await tx.execute(
+      sql`SELECT pg_advisory_xact_lock(${ENTRY_SEASON_SYNC_LOCK_NAMESPACE}, ${entryId})`,
+    );
+  }
+  await acquireActiveSeasonReadFence(tx);
+  const canonicalSeason = await getActiveCacheSeasonUncached();
+  if (canonicalSeason !== checkpointSeason) {
+    throw new Error(
+      `Active season changed from ${checkpointSeason} to ${canonicalSeason} during entry event sync`,
+    );
+  }
+}
+
+async function lockAndValidateEntrySeason(
+  tx: TransactionHandle,
+  entryId: number,
+  checkpointSeason: string,
+): Promise<EntrySeasonCheckpoint | undefined> {
+  await acquireEntrySeasonWriteFence(tx, [entryId], checkpointSeason);
+
+  const entryRows = await tx
+    .select({
+      snapshotSeason: entryInfos.entrySnapshotSyncedSeason,
+      transferSeason: entryInfos.entryTransfersSyncedSeason,
+    })
+    .from(entryInfos)
+    .where(eq(entryInfos.id, entryId));
+  const current = entryRows[0];
+  const newestPersistedSeason = [current?.snapshotSeason, current?.transferSeason]
+    .filter((season): season is string => season !== null && season !== undefined)
+    .sort()
+    .at(-1);
+  if (newestPersistedSeason && newestPersistedSeason > checkpointSeason) {
+    throw new Error(
+      `Refusing stale ${checkpointSeason} entry event sync after ${newestPersistedSeason}`,
+    );
+  }
+  return current;
+}
+
+export async function withEntrySeasonSyncTransaction<T>(
+  entryId: number,
+  checkpointSeason: string,
+  operation: (tx: TransactionHandle) => Promise<T>,
+): Promise<T> {
+  if (!/^\d{4}$/.test(checkpointSeason)) {
+    throw new Error('A valid four-digit checkpoint season is required');
+  }
+  const db = await getDb();
+  return db.transaction(async (tx) => {
+    await lockAndValidateEntrySeason(tx, entryId, checkpointSeason);
+    return operation(tx);
+  });
+}
 
 export function buildTransferReplacementRows({
   entryId,
@@ -105,6 +178,62 @@ export const createEntryEventTransfersRepository = (dbInstance?: DatabaseInstanc
   const getDbInstance = async () => dbInstance || (await getDb());
 
   return {
+    findEntryIdsNeedingSync: async (
+      entryIds: number[],
+      targetEventId: number,
+      season: string,
+    ): Promise<number[]> => {
+      if (entryIds.length === 0) {
+        return [];
+      }
+
+      try {
+        const db = await getDbInstance();
+        const uniqueEntryIds = Array.from(new Set(entryIds));
+        const results: number[] = [];
+        for (let index = 0; index < uniqueEntryIds.length; index += 1000) {
+          const chunk = uniqueEntryIds.slice(index, index + 1000);
+          const rows = await db
+            .select({
+              id: entryInfos.id,
+              syncedThroughEventId: entryInfos.entryTransfersSyncedThroughEventId,
+              syncedSeason: entryInfos.entryTransfersSyncedSeason,
+            })
+            .from(entryInfos)
+            .where(inArray(entryInfos.id, chunk));
+          const checkpoints = new Map(
+            rows.map((row) => [
+              row.id,
+              { eventId: row.syncedThroughEventId, season: row.syncedSeason },
+            ]),
+          );
+          results.push(
+            ...chunk.filter((entryId) => {
+              const checkpoint = checkpoints.get(entryId);
+              return (
+                checkpoint === undefined ||
+                checkpoint.eventId === null ||
+                checkpoint.season !== season ||
+                checkpoint.eventId < targetEventId
+              );
+            }),
+          );
+        }
+        return results;
+      } catch (error) {
+        logError('Failed to find entry transfer sync gaps', error, {
+          count: entryIds.length,
+          targetEventId,
+          season,
+        });
+        throw new DatabaseError(
+          'Failed to find entry transfer sync gaps',
+          'ENTRY_EVENT_TRANSFERS_SYNC_GAPS_ERROR',
+          error as Error,
+        );
+      }
+    },
+
     replaceForEvent: async (
       entryId: number,
       eventId: number,
@@ -114,34 +243,47 @@ export const createEntryEventTransfersRepository = (dbInstance?: DatabaseInstanc
         elementInPlayed?: boolean | null;
         defaultPoints?: number | null;
         syncMode?: 'latest' | 'all';
+        checkpointSeason: string;
+        persistEventData?: (tx: TransactionHandle) => Promise<void>;
       },
     ): Promise<void> => {
       try {
         const db = await getDbInstance();
         const syncMode = options?.syncMode ?? getConfig().TRANSFER_SYNC_MODE;
+        const checkpointSeason = options?.checkpointSeason;
+        if (!checkpointSeason || !/^\d{4}$/.test(checkpointSeason)) {
+          throw new Error('A valid four-digit checkpoint season is required');
+        }
         const fallbackPoints = options?.defaultPoints ?? null;
 
         await db.transaction(async (tx) => {
-          // Serialize replacement for one entry without blocking unrelated entries.
-          await tx.execute(
-            sql`SELECT pg_advisory_xact_lock(${TRANSFER_LOCK_NAMESPACE}, ${entryId})`,
-          );
+          const current = await lockAndValidateEntrySeason(tx, entryId, checkpointSeason);
+          await options?.persistEventData?.(tx);
 
-          const existing = await tx
-            .select()
-            .from(entryEventTransfers)
-            .where(
-              syncMode === 'all'
-                ? eq(entryEventTransfers.entryId, entryId)
-                : and(
-                    eq(entryEventTransfers.entryId, entryId),
-                    eq(entryEventTransfers.eventId, eventId),
-                  ),
-            );
+          const transferSeasonChanged = current?.transferSeason !== checkpointSeason;
+
+          // Event IDs repeat every season. A latest-mode sync may be the first
+          // writer after rollover, so clear every unproven prior-season row.
+          // A midseason latest sync establishes a season-owned preseason (0)
+          // checkpoint: the earlier range is still incomplete, but subsequent
+          // event syncs can safely retain rows written for this season.
+          const existing = transferSeasonChanged
+            ? []
+            : await tx
+                .select()
+                .from(entryEventTransfers)
+                .where(
+                  syncMode === 'all'
+                    ? eq(entryEventTransfers.entryId, entryId)
+                    : and(
+                        eq(entryEventTransfers.entryId, entryId),
+                        eq(entryEventTransfers.eventId, eventId),
+                      ),
+                );
           await tx
             .delete(entryEventTransfers)
             .where(
-              syncMode === 'all'
+              syncMode === 'all' || transferSeasonChanged
                 ? eq(entryEventTransfers.entryId, entryId)
                 : and(
                     eq(entryEventTransfers.entryId, entryId),
@@ -193,6 +335,48 @@ export const createEntryEventTransfersRepository = (dbInstance?: DatabaseInstanc
               );
             }
           }
+
+          await tx
+            .update(entryInfos)
+            .set({
+              entryTransfersSyncedThroughEventId:
+                syncMode === 'all'
+                  ? sql`CASE
+                      WHEN ${entryInfos.entryTransfersSyncedSeason} = ${checkpointSeason}
+                      THEN GREATEST(
+                        COALESCE(${entryInfos.entryTransfersSyncedThroughEventId}, 0),
+                        ${eventId}
+                      )
+                      ELSE ${eventId}
+                    END`
+                  : sql`CASE
+                      WHEN ${entryInfos.entryTransfersSyncedSeason} = ${checkpointSeason}
+                        AND ${entryInfos.entryTransfersSyncedThroughEventId} IS NOT NULL
+                        AND ${entryInfos.entryTransfersSyncedThroughEventId} >= ${eventId - 1}
+                      THEN GREATEST(
+                        ${entryInfos.entryTransfersSyncedThroughEventId},
+                        ${eventId}
+                      )
+                      WHEN ${entryInfos.entryTransfersSyncedSeason} = ${checkpointSeason}
+                      THEN ${entryInfos.entryTransfersSyncedThroughEventId}
+                      WHEN ${eventId} <= 1 THEN ${eventId}
+                      ELSE 0
+                    END`,
+              entryTransfersSyncedSeason:
+                syncMode === 'all'
+                  ? checkpointSeason
+                  : sql`CASE
+                      WHEN ${entryInfos.entryTransfersSyncedSeason} = ${checkpointSeason}
+                        AND ${entryInfos.entryTransfersSyncedThroughEventId} IS NOT NULL
+                        AND ${entryInfos.entryTransfersSyncedThroughEventId} >= ${eventId - 1}
+                      THEN ${checkpointSeason}
+                      WHEN ${entryInfos.entryTransfersSyncedSeason} = ${checkpointSeason}
+                      THEN ${checkpointSeason}
+                      ELSE ${checkpointSeason}
+                    END`,
+              updatedAt: new Date(),
+            })
+            .where(eq(entryInfos.id, entryId));
         });
 
         logInfo('Replaced entry event transfers', {
@@ -259,44 +443,85 @@ export const createEntryEventTransfersRepository = (dbInstance?: DatabaseInstanc
     updateBatchById: async (
       updates: Array<{
         id: number;
+        entryId: number;
         elementInPoints: number | null;
         elementOutPoints: number | null;
         elementInPlayed: boolean | null;
       }>,
+      checkpointSeason: string,
     ): Promise<number> => {
       if (updates.length === 0) {
         return 0;
       }
 
       try {
-        const client = await getDbClient();
-        const ids = updates.map((u) => u.id);
-        const inPoints = updates.map((u) => u.elementInPoints);
-        const outPoints = updates.map((u) => u.elementOutPoints);
-        const playedFlags = updates.map((u) =>
-          u.elementInPlayed === null ? null : u.elementInPlayed ? 1 : 0,
+        if (!/^\d{4}$/.test(checkpointSeason)) {
+          throw new Error('A valid four-digit checkpoint season is required');
+        }
+        const db = await getDbInstance();
+        const payload = JSON.stringify(
+          updates.map((update) => ({
+            id: update.id,
+            in_points: update.elementInPoints,
+            out_points: update.elementOutPoints,
+            in_played_flag: update.elementInPlayed === null ? null : update.elementInPlayed ? 1 : 0,
+          })),
         );
 
-        await client`
-          update entry_event_transfers as eet
-          set element_in_points = data.in_points,
-              element_out_points = data.out_points,
-              element_in_played = case
-                when data.in_played_flag is null then null
-                else data.in_played_flag = 1
-              end
-          from (
-            select
-              unnest(${ids}::int[]) as id,
-              unnest(${inPoints}::int[]) as in_points,
-              unnest(${outPoints}::int[]) as out_points,
-              unnest(${playedFlags}::int[]) as in_played_flag
-          ) as data
-          where eet.id = data.id
-        `;
+        const updatedCount = await db.transaction(async (tx) => {
+          await acquireEntrySeasonWriteFence(
+            tx,
+            updates.map((update) => update.entryId),
+            checkpointSeason,
+          );
+          const expectedIds = [...new Set(updates.map((update) => update.id))];
+          const lockedRows = await tx
+            .select({ id: entryEventTransfers.id })
+            .from(entryEventTransfers)
+            .where(inArray(entryEventTransfers.id, expectedIds))
+            .for('update');
+          if (lockedRows.length !== expectedIds.length) {
+            throw new Error(
+              'Entry event transfer rows changed while waiting for the entry season write fence',
+            );
+          }
 
-        logInfo('Updated entry event transfers', { count: updates.length });
-        return updates.length;
+          const updatedRows = (await tx.execute(sql`
+            update entry_event_transfers as eet
+            set element_in_points = data.in_points,
+                element_out_points = data.out_points,
+                element_in_played = case
+                  when data.in_played_flag is null then null
+                  else data.in_played_flag = 1
+                end
+            from (
+              select
+                data.id,
+                data.in_points,
+                data.out_points,
+                data.in_played_flag
+              from jsonb_to_recordset(${payload}::jsonb) as data(
+                id int,
+                in_points int,
+                out_points int,
+                in_played_flag int
+              )
+            ) as data
+            where eet.id = data.id
+            returning eet.id
+          `)) as unknown as Array<{ id: number }>;
+          if (updatedRows.length !== expectedIds.length) {
+            throw new Error('Entry event transfer update lost canonical rows');
+          }
+
+          return updatedRows.length;
+        });
+
+        logInfo('Updated entry event transfers', {
+          count: updates.length,
+          checkpointSeason,
+        });
+        return updatedCount;
       } catch (error) {
         logError('Failed to update entry event transfers', error, { count: updates.length });
         throw new DatabaseError(

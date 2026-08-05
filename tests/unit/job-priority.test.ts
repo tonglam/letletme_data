@@ -33,6 +33,7 @@ describe('job priority mapping', () => {
     expect(getTournamentSetupJobPriority('tournament-setup')).toBe('p0');
     expect(getTournamentSyncJobPriority('tournament-points-race')).toBe('p0');
     expect(getTournamentSyncJobPriority('tournament-battle-race')).toBe('p0');
+    expect(getTournamentSyncJobPriority('tournament-roster-sync')).toBe('p0');
     expect(getTournamentSyncJobPriority('tournament-event-results')).toBe('p2');
     expect(getTournamentSyncJobPriority('tournament-selection-stats')).toBe('p2');
     expect(getTournamentSyncJobPriority('tournament-info')).toBe('p1');

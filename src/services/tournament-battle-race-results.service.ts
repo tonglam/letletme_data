@@ -2,13 +2,11 @@ import { entryEventResultsRepository } from '../repositories/entry-event-results
 import { tournamentBattleGroupResultsRepository } from '../repositories/tournament-battle-group-results';
 import { tournamentGroupRepository } from '../repositories/tournament-groups';
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
-import {
-  tournamentInfoRepository,
-  type TournamentInfoSummary,
-} from '../repositories/tournament-infos';
+import { tournamentInfoRepository } from '../repositories/tournament-infos';
 import { logError, logInfo, logWarn } from '../utils/logger';
 
 import type { DbTournamentGroup, DbTournamentGroupInsert } from '../db/schemas/index.schema';
+import type { TournamentSyncContext } from '../domain/tournament';
 
 function groupRankKey(points: number, overallRank: number | null) {
   return `${points}-${overallRank ?? Number.MAX_SAFE_INTEGER}`;
@@ -38,8 +36,8 @@ function matchPoints(homeNet: number, awayNet: number) {
   return 1;
 }
 
-async function syncBattleRaceForTournament(
-  tournament: TournamentInfoSummary,
+export async function syncTournamentBattleRaceResultsForTournament(
+  tournament: TournamentSyncContext,
   eventId: number,
 ): Promise<{ updatedGroups: number; updatedResults: number; skipped: number }> {
   if (!tournament.groupStartedEventId || !tournament.groupEndedEventId) {
@@ -307,7 +305,7 @@ export async function syncTournamentBattleRaceResults(
   const syncResults = await Promise.all(
     tournaments.map(async (tournament) => {
       try {
-        return await syncBattleRaceForTournament(tournament, eventId);
+        return await syncTournamentBattleRaceResultsForTournament(tournament, eventId);
       } catch (error) {
         logError('Failed to sync battle race results', error, {
           tournamentId: tournament.id,

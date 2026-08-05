@@ -52,13 +52,36 @@ describe('Tournament Sync Jobs Integration', () => {
     });
 
     it('should enqueue cascade jobs', async () => {
+      const cascadeId = `integration-${Date.now()}`;
+      const finalizationTargets = [
+        { tournamentId: 901, standingsReadyAt: '2026-08-04T17:00:00.000Z' },
+        { tournamentId: 902, standingsReadyAt: '2026-08-04T17:01:00.000Z' },
+      ];
       const jobs = await Promise.all([
-        enqueueTournamentPointsRace(TEST_EVENT_ID, 'cascade'),
-        enqueueTournamentBattleRace(TEST_EVENT_ID, 'cascade'),
-        enqueueTournamentKnockout(TEST_EVENT_ID, 'cascade'),
-        enqueueTournamentTransfersPost(TEST_EVENT_ID, 'cascade'),
-        enqueueTournamentCupResults(TEST_EVENT_ID, 'cascade'),
-        enqueueTournamentSelectionStats(TEST_EVENT_ID, 'cascade'),
+        enqueueTournamentPointsRace(TEST_EVENT_ID, 'cascade', {
+          cascadeId,
+          finalizationTargets,
+        }),
+        enqueueTournamentBattleRace(TEST_EVENT_ID, 'cascade', {
+          cascadeId,
+          finalizationTargets,
+        }),
+        enqueueTournamentKnockout(TEST_EVENT_ID, 'cascade', {
+          cascadeId,
+          finalizationTargets,
+        }),
+        enqueueTournamentTransfersPost(TEST_EVENT_ID, 'cascade', {
+          cascadeId,
+          finalizationTargets,
+        }),
+        enqueueTournamentCupResults(TEST_EVENT_ID, 'cascade', {
+          cascadeId,
+          finalizationTargets,
+        }),
+        enqueueTournamentSelectionStats(TEST_EVENT_ID, 'cascade', {
+          cascadeId,
+          finalizationTargets,
+        }),
       ]);
 
       expect(jobs).toHaveLength(6);
@@ -66,6 +89,8 @@ describe('Tournament Sync Jobs Integration', () => {
         expect(job).toBeDefined();
         expect(job.data.source).toBe('cascade');
         expect(job.data.eventId).toBe(TEST_EVENT_ID);
+        expect(job.data.cascadeId).toBe(cascadeId);
+        expect(job.data.finalizationTargets).toEqual(finalizationTargets);
       });
     });
 

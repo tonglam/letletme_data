@@ -33,6 +33,7 @@ describe.skipIf(!resolved.canRun || !resolved.seed?.currentEvent)(
           totalEntries: 0,
           synced: 0,
           errors: 0,
+          finalizationTargets: [],
         } as typeof syncedResult;
       }
       syncDuration = performance.now() - startTime;

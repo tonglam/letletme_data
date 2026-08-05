@@ -27,3 +27,19 @@ export const tournamentSetupStatusEnum = pgEnum('tournament_setup_status', [
   'ready',
   'failed',
 ]);
+
+export const tournamentSetupPhaseEnum = pgEnum('tournament_setup_phase', [
+  'queued',
+  'syncing_entries',
+  'building_structure',
+  'calculating_standings',
+  'enriching_history',
+  'finalizing',
+  'ready',
+  'failed',
+]);
+
+export const tournamentRosterModeEnum = pgEnum('tournament_roster_mode', [
+  'snapshot',
+  'official_sync',
+]);

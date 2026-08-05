@@ -8,6 +8,7 @@ import {
   getTournamentSyncJobPriority,
   type TournamentSyncPriorityJobName,
 } from '../domain/job-priority';
+import type { TournamentFinalizationTarget } from '../domain/tournament';
 import { redisSingleton } from '../cache/singleton';
 import { logError, logInfo } from '../utils/logger';
 
@@ -17,17 +18,26 @@ export type TournamentSyncEnqueueOptions = {
   delay?: number;
   cascadeId?: string;
   jobId?: string;
+  finalizationTargets?: TournamentFinalizationTarget[];
 };
 
-/** Structure cascade jobs that feed tournament MVs and hold tournament-structure:global. */
-export const CASCADE_STRUCTURE_BARRIER_JOBS = [
+/** Cascade jobs that must finish before event publication can finish tournaments. */
+export const CASCADE_COMPLETION_BARRIER_JOBS = [
   TOURNAMENT_JOBS.POINTS_RACE,
   TOURNAMENT_JOBS.BATTLE_RACE,
   TOURNAMENT_JOBS.KNOCKOUT,
+  TOURNAMENT_JOBS.TRANSFERS_POST,
+  TOURNAMENT_JOBS.CUP_RESULTS,
+  TOURNAMENT_JOBS.SELECTION_STATS,
 ] as const;
 
-/** Slot TTL: long enough for p0 backlog / setup / worker outage (Codex P2). */
-const CASCADE_BARRIER_TTL_SECONDS = 24 * 60 * 60; // 24h
+/**
+ * Slot TTL: longer than the 24h post-match scheduling window and the 48h
+ * failed-job retention window. Each completed participant refreshes the
+ * role-slot TTL, so a delayed final participant cannot strand the barrier
+ * merely because the first participants finished a day earlier.
+ */
+export const CASCADE_BARRIER_TTL_SECONDS = 7 * 24 * 60 * 60;
 const CASCADE_REFRESH_LEASE_TTL_SECONDS = 120;
 
 function cascadeSlotKey(cascadeId: string, jobKey: string): string {
@@ -63,7 +73,7 @@ export async function initCascadeStructureBarrier(cascadeId: string): Promise<vo
   const redis = await redisSingleton.getClient();
   await redis.set(
     cascadeMetaKey(cascadeId),
-    String(CASCADE_STRUCTURE_BARRIER_JOBS.length),
+    String(CASCADE_COMPLETION_BARRIER_JOBS.length),
     'EX',
     CASCADE_BARRIER_TTL_SECONDS,
   );
@@ -74,7 +84,7 @@ export async function initCascadeStructureBarrier(cascadeId: string): Promise<vo
  *
  * KEYS[1] = this job's slot
  * KEYS[2] = refresh-pending
- * KEYS[3..8] = for each of 3 roles: success slot, enqueue-failed slot
+ * KEYS[3..] = for each role: success slot, enqueue-failed slot
  * ARGV[1] = TTL seconds
  *
  * A role is done if either its success or enqueue-failed slot exists.
@@ -88,7 +98,7 @@ if not claimed then
   return -2
 end
 local done = 0
-for i = 3, 8, 2 do
+for i = 3, #KEYS, 2 do
   local okKey = KEYS[i]
   local failKey = KEYS[i + 1]
   if redis.call('EXISTS', okKey) == 1 or redis.call('EXISTS', failKey) == 1 then
@@ -101,11 +111,12 @@ for i = 3, 8, 2 do
     end
   end
 end
-if done >= 3 then
+local required = (#KEYS - 2) / 2
+if done >= required then
   redis.call('SET', KEYS[2], '1', 'EX', ARGV[1])
   return 0
 end
-return 3 - done
+return required - done
 `;
 
 /**
@@ -145,18 +156,17 @@ export async function noteCascadeStructureJobComplete(
 ): Promise<void> {
   const redis = await redisSingleton.getClient();
   const ttl = String(CASCADE_BARRIER_TTL_SECONDS);
-  const roles = CASCADE_STRUCTURE_BARRIER_JOBS;
+  const roles = CASCADE_COMPLETION_BARRIER_JOBS;
+  const roleKeys = roles.flatMap((role) => [
+    cascadeSlotKey(cascadeId, role),
+    cascadeSlotKey(cascadeId, `enqueue-failed:${role}`),
+  ]);
   const result = (await redis.eval(
     NOTE_CASCADE_STRUCTURE_COMPLETE_LUA,
-    8,
+    2 + roleKeys.length,
     cascadeSlotKey(cascadeId, jobKey),
     cascadeRefreshPendingKey(cascadeId),
-    cascadeSlotKey(cascadeId, roles[0]),
-    cascadeSlotKey(cascadeId, `enqueue-failed:${roles[0]}`),
-    cascadeSlotKey(cascadeId, roles[1]),
-    cascadeSlotKey(cascadeId, `enqueue-failed:${roles[1]}`),
-    cascadeSlotKey(cascadeId, roles[2]),
-    cascadeSlotKey(cascadeId, `enqueue-failed:${roles[2]}`),
+    ...roleKeys,
     ttl,
   )) as number;
 
@@ -248,6 +258,21 @@ async function enqueueTournamentSyncJob(
       source,
       triggeredAt: new Date().toISOString(),
       ...(options.cascadeId ? { cascadeId: options.cascadeId } : {}),
+      ...(options.finalizationTargets
+        ? {
+            finalizationTargets: [
+              ...new Map(
+                options.finalizationTargets
+                  .filter(
+                    (target) =>
+                      target.tournamentId > 0 &&
+                      Number.isFinite(Date.parse(target.standingsReadyAt)),
+                  )
+                  .map((target) => [target.tournamentId, target]),
+              ).values(),
+            ],
+          }
+        : {}),
     };
 
     // Callers may provide a deterministic ID for bounded recurring slots.
@@ -273,6 +298,7 @@ async function enqueueTournamentSyncJob(
       tier,
       queue: queue.name,
       cascadeId: options.cascadeId,
+      tournamentCount: options.finalizationTargets?.length,
     });
 
     return job;
@@ -314,16 +340,22 @@ export const enqueueTournamentKnockout = (
   options?: TournamentSyncEnqueueOptions,
 ) => enqueueTournamentSyncJob(TOURNAMENT_JOBS.KNOCKOUT, eventId, source, options);
 
-export const enqueueTournamentTransfersPost = (eventId: number, source?: TournamentSyncJobSource) =>
-  enqueueTournamentSyncJob(TOURNAMENT_JOBS.TRANSFERS_POST, eventId, source);
+export const enqueueTournamentTransfersPost = (
+  eventId: number,
+  source?: TournamentSyncJobSource,
+  options?: TournamentSyncEnqueueOptions,
+) => enqueueTournamentSyncJob(TOURNAMENT_JOBS.TRANSFERS_POST, eventId, source, options);
 
-export const enqueueTournamentCupResults = (eventId: number, source?: TournamentSyncJobSource) =>
-  enqueueTournamentSyncJob(TOURNAMENT_JOBS.CUP_RESULTS, eventId, source);
+export const enqueueTournamentCupResults = (
+  eventId: number,
+  source?: TournamentSyncJobSource,
+  options?: TournamentSyncEnqueueOptions,
+) => enqueueTournamentSyncJob(TOURNAMENT_JOBS.CUP_RESULTS, eventId, source, options);
 
 export const enqueueTournamentSelectionStats = (
   eventId: number,
   source?: TournamentSyncJobSource,
-  options?: { delay?: number },
+  options?: TournamentSyncEnqueueOptions,
 ) => enqueueTournamentSyncJob(TOURNAMENT_JOBS.SELECTION_STATS, eventId, source, options);
 
 // Materialized view refresh (after structure cascade barrier completes)
@@ -342,3 +374,8 @@ export const enqueueTournamentTransfersPre = (eventId: number, source?: Tourname
 
 export const enqueueTournamentInfo = (eventId: number, source?: TournamentSyncJobSource) =>
   enqueueTournamentSyncJob(TOURNAMENT_JOBS.INFO, eventId, source);
+
+export const enqueueTournamentRosterSync = (source?: TournamentSyncJobSource) =>
+  enqueueTournamentSyncJob(TOURNAMENT_JOBS.ROSTER_SYNC, 0, source, {
+    jobId: `tournament-roster-sync-${new Date().toISOString().slice(0, 10)}`,
+  });

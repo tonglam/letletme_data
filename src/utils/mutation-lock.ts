@@ -24,6 +24,8 @@ type MutationLockInput = {
    * that write shared structure tables (FP-07 Codex P1).
    */
   scopes?: string[];
+  /** Enforce this correctness lock even when optional conflict guards are disabled. */
+  required?: boolean;
 };
 
 let lockClient: Redis | null = null;
@@ -109,7 +111,7 @@ export async function withMutationConflictGuard<T>(
   input: MutationLockInput,
   operation: () => Promise<T>,
 ): Promise<T> {
-  if (!LOCK_ENABLED) {
+  if (!LOCK_ENABLED && !input.required) {
     return operation();
   }
 

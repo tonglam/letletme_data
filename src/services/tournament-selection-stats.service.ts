@@ -293,7 +293,10 @@ async function upsertSelectionStats(rows: TournamentSelectionStatRow[]): Promise
   return rows.length;
 }
 
-export async function syncTournamentSelectionStats(eventId: number): Promise<{
+export async function syncTournamentSelectionStats(
+  eventId: number,
+  options?: { tournamentIds?: number[] },
+): Promise<{
   eventId: number;
   tournaments: number;
   sourceEntries: number;
@@ -308,8 +311,9 @@ export async function syncTournamentSelectionStats(eventId: number): Promise<{
   try {
     logInfo('Starting tournament selection stats sync', { eventId });
 
-    const tournaments = await tournamentInfoRepository.findActive();
-    const tournamentIds = tournaments.map((tournament) => tournament.id);
+    const tournamentIds = options?.tournamentIds
+      ? [...new Set(options.tournamentIds.filter((id) => Number.isInteger(id) && id > 0))]
+      : (await tournamentInfoRepository.findActive()).map((tournament) => tournament.id);
     if (tournamentIds.length === 0) {
       logInfo('No active tournaments found for selection stats sync', { eventId });
       return { eventId, tournaments: 0, sourceEntries: 0, rows: 0, upserted: 0 };

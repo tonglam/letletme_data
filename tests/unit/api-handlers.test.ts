@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
 
+import type { TournamentSetupStatusRow } from '../../src/repositories/tournament-infos';
+
 const getCurrentEvent = mock(async () => ({ id: 20, name: 'Gameweek 20' }));
 const getNextEvent = mock(async () => ({ id: 21, name: 'Gameweek 21' }));
 
@@ -114,14 +116,20 @@ const clearFixturesCache = spyOn(fixturesService, 'clearFixturesCache').mockImpl
 
 const checkTournamentNameAvailability = mock(async (name: string) => ({
   available: name !== 'taken',
-  name,
+  message: name,
 }));
-const getTournamentSetupStatus = mock(async () => null as null | Record<string, unknown>);
-mock.module('../../src/services/tournament-create.service', () => ({
+const getTournamentSetupStatus = mock(
+  async (_tournamentId: number): Promise<TournamentSetupStatusRow | null> => null,
+);
+// Spy on only the two reads used here. Replacing this whole module leaks into
+// tournament-create.test.ts when Bun executes unit files in one shared registry.
+const tournamentCreateServiceModule = await import('../../src/services/tournament-create.service');
+spyOn(tournamentCreateServiceModule, 'checkTournamentNameAvailability').mockImplementation(
   checkTournamentNameAvailability,
-  createTournament: mock(async () => ({})),
+);
+spyOn(tournamentCreateServiceModule, 'getTournamentSetupStatus').mockImplementation(
   getTournamentSetupStatus,
-}));
+);
 
 const managedTournament = {
   id: 55,
@@ -129,6 +137,11 @@ const managedTournament = {
   creator: 'Manager',
   adminEntryId: 123,
   totalTeamNum: 8,
+  leagueType: 'classic' as const,
+  groupMode: 'points_races' as const,
+  groupNum: 1,
+  knockoutMode: 'no_knockout' as const,
+  rosterMode: 'snapshot' as const,
   state: 'active' as const,
   createdAt: '2026-08-01T00:00:00.000Z',
   updatedAt: '2026-08-02T00:00:00.000Z',
@@ -492,8 +505,8 @@ describe('tournamentsAPI handlers', () => {
       new Request('http://localhost/tournaments/check-name?name=MyCup'),
     );
     expect(response.status).toBe(200);
-    const body = (await response.json()) as { available: boolean; name: string };
-    expect(body).toEqual({ available: true, name: 'MyCup' });
+    const body = (await response.json()) as { available: boolean; message: string };
+    expect(body).toEqual({ available: true, message: 'MyCup' });
     expect(checkTournamentNameAvailability).toHaveBeenCalledWith('MyCup');
   });
 
@@ -507,8 +520,15 @@ describe('tournamentsAPI handlers', () => {
 
   test('GET /tournaments/:id/setup-status omits the internal setupError field', async () => {
     getTournamentSetupStatus.mockImplementation(async () => ({
+      createdAt: '2026-07-17T00:59:00.000Z',
       setupStatus: 'failed',
       setupError: 'Connection terminated unexpectedly at internal-host:5432',
+      setupPhase: 'failed',
+      setupCompletedUnits: 17,
+      setupTotalUnits: 75,
+      setupProgressUpdatedAt: '2026-07-17T01:04:00.000Z',
+      standingsReadyAt: null,
+      setupWarningCount: 0,
       setupStartedAt: '2026-07-17T01:00:00.000Z',
       setupFinishedAt: '2026-07-17T01:05:00.000Z',
     }));
@@ -520,7 +540,11 @@ describe('tournamentsAPI handlers', () => {
     const body = (await response.json()) as Record<string, unknown>;
     expect(body.success).toBe(true);
     expect(body.setupStatus).toBe('failed');
+    expect(body.setupPhase).toBe('failed');
+    expect(body.setupCompletedUnits).toBe(17);
+    expect(body.setupHasWarnings).toBe(false);
     expect('setupError' in body).toBe(false);
+    expect('rosterSyncError' in body).toBe(false);
     expect(JSON.stringify(body)).not.toContain('internal-host');
 
     getTournamentSetupStatus.mockImplementation(async () => null);

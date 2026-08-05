@@ -12,6 +12,8 @@ import {
 } from '../services/tournament-setup.service';
 import { tournamentSetupLifecycleScope } from '../domain/mutation-scope';
 import { logError, logInfo } from '../utils/logger';
+import { runWithFplRequestMetrics } from '../utils/fpl-request-metrics';
+import { runTrackedJob } from '../utils/job-run-logger';
 import { alertOnFinalFailure } from '../utils/notify';
 import { withMutationConflictGuard } from '../utils/mutation-lock';
 import { getQueueConnection } from '../utils/queue';
@@ -42,20 +44,50 @@ export function createTournamentSetupWorker(): WorkerRuntime {
   const worker = new Worker<TournamentSetupJobData>(
     queueName,
     async (job: Job<TournamentSetupJobData>) => {
+      await job.updateProgress('waiting_for_lifecycle');
+      const triggeredAtMs = Date.parse(job.data.triggeredAt);
+      const queueWaitMs = Number.isNaN(triggeredAtMs)
+        ? null
+        : Math.max(0, Date.now() - triggeredAtMs);
+      const context = {
+        jobType: 'queue' as const,
+        jobName: job.name,
+        queueName: job.queueName,
+        jobId: job.id,
+        tournamentId: job.data.tournamentId,
+        source: job.data.source,
+        attempt: job.attemptsMade + 1,
+        queueWaitMs,
+      };
       // Per-tournament lifecycle lock only (not tournament-structure:global):
       // serializes force-requeue / concurrency>1 for the same tournament so
       // markSetupProcessing/Result cannot interleave, without starving cascade
       // structure writers. Structure global is acquired only around rebuild /
       // points/knockout writes inside setup phases (FP-07 Codex P2).
-      await withMutationConflictGuard(
-        {
-          queueName: job.queueName,
-          jobName: job.name,
-          jobId: String(job.id),
-          tournamentId: job.data.tournamentId,
-          scopes: [tournamentSetupLifecycleScope(job.data.tournamentId)],
-        },
-        () => setupTournamentStructure(job.data.tournamentId),
+      await runWithFplRequestMetrics(() =>
+        runTrackedJob(context, () =>
+          withMutationConflictGuard(
+            {
+              queueName: job.queueName,
+              jobName: job.name,
+              jobId: String(job.id),
+              tournamentId: job.data.tournamentId,
+              scopes: [tournamentSetupLifecycleScope(job.data.tournamentId)],
+              required: true,
+            },
+            async () => {
+              await job.updateProgress('running');
+              try {
+                logInfo('Tournament setup worker started job');
+                await setupTournamentStructure(job.data.tournamentId);
+              } finally {
+                // Written before the mandatory lifecycle lock is released, so
+                // an enqueuer that later acquires it can safely alternate slots.
+                await job.updateProgress('settling');
+              }
+            },
+          ),
+        ),
       );
     },
     {

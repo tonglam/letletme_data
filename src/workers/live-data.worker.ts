@@ -78,7 +78,10 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
               return;
             }
           }
-          const snapshot = await syncLiveSnapshot(eventId, { persistEventLives });
+          const snapshot = await syncLiveSnapshot(eventId, {
+            persistEventLives,
+            finalizeEvent: job.data.finalizeEvent === true,
+          });
           if (shouldCascadePersistedLiveSnapshot(snapshot)) {
             await enqueueCascadeJobs(eventId, undefined, { includeLiveDerivatives: false });
             await enqueueFinalLeagueResultsAfterLiveSync(eventId);

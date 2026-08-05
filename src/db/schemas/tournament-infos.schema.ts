@@ -12,6 +12,8 @@ import {
   knockoutModeEnum,
   leagueTypeEnum,
   tournamentModeEnum,
+  tournamentRosterModeEnum,
+  tournamentSetupPhaseEnum,
   tournamentStateEnum,
   tournamentSetupStatusEnum,
 } from './enums.schema';
@@ -27,6 +29,11 @@ export const tournamentInfos = pgTable(
     adminEntryId: integer('admin_entry_id').notNull(),
     leagueId: integer('league_id').notNull(),
     leagueType: leagueTypeEnum('league_type').notNull(),
+    sourceLeagueName: text('source_league_name'),
+    rosterMode: tournamentRosterModeEnum('roster_mode').notNull().default('snapshot'),
+    rosterSyncStatus: tournamentSetupStatusEnum('roster_sync_status'),
+    rosterLastSyncedAt: timestamp('roster_last_synced_at', { withTimezone: true }),
+    rosterSyncError: text('roster_sync_error'),
     totalTeamNum: integer('total_team_num').notNull(),
     tournamentMode: tournamentModeEnum('tournament_mode').notNull(),
     groupMode: groupModeEnum('group_mode').notNull(),
@@ -47,6 +54,12 @@ export const tournamentInfos = pgTable(
     knockoutPlayAgainstNum: integer('knockout_play_against_num'),
     state: tournamentStateEnum('state').notNull(),
     setupStatus: tournamentSetupStatusEnum('setup_status').notNull().default('pending'),
+    setupPhase: tournamentSetupPhaseEnum('setup_phase').notNull().default('queued'),
+    setupCompletedUnits: integer('setup_completed_units').notNull().default(0),
+    setupTotalUnits: integer('setup_total_units').notNull().default(0),
+    setupProgressUpdatedAt: timestamp('setup_progress_updated_at', { withTimezone: true }),
+    standingsReadyAt: timestamp('standings_ready_at', { withTimezone: true }),
+    setupWarningCount: integer('setup_warning_count').notNull().default(0),
     setupError: text('setup_error'),
     setupStartedAt: timestamp('setup_started_at', { withTimezone: true }),
     setupFinishedAt: timestamp('setup_finished_at', { withTimezone: true }),
@@ -55,6 +68,7 @@ export const tournamentInfos = pgTable(
   (table) => [
     uniqueIndex('unique_tournament_name').on(table.name),
     index('idx_tournament_info_league_id').on(table.leagueId),
+    index('idx_tournament_setup_heartbeat').on(table.setupStatus, table.setupProgressUpdatedAt),
   ],
 );
 

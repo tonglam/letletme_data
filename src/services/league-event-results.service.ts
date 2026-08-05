@@ -1,3 +1,4 @@
+import { getActiveCacheSeason } from '../cache/cache-season';
 import { fplClient } from '../clients/fpl';
 import {
   type DbEntryEventResult,
@@ -290,7 +291,7 @@ function buildEntryResultData(
 export async function syncLeagueEventResultsByTournament(
   tournamentId: number,
   eventId: number,
-  options?: { concurrency?: number },
+  options?: { concurrency?: number; season?: string },
 ): Promise<{
   tournamentId: number;
   eventId: number;
@@ -304,15 +305,20 @@ export async function syncLeagueEventResultsByTournament(
   if (!tournament) {
     throw new Error(`Tournament ${tournamentId} not found`);
   }
+  const checkpointSeason = options?.season ?? (await getActiveCacheSeason());
 
   const entryIds = await resolveTournamentEntries(tournament);
   const entryInfos = await entryInfoRepository.findByIds(entryIds);
   const entryInfoMap = new Map(entryInfos.map((info) => [info.id, info]));
 
-  const eventLives = await eventLiveRepository.findByEventId(eventId);
+  const eventLives = await eventLiveRepository.findFinalizedByEventIdForSeason(
+    eventId,
+    checkpointSeason,
+  );
   if (eventLives.length === 0) {
-    logInfo('No event live data found for league event results', { eventId, tournamentId });
-    return { tournamentId, eventId, totalEntries: 0, updated: 0, skipped: 0 };
+    throw new Error(
+      `Finalized event live data is unavailable for league event results: event ${eventId}`,
+    );
   }
   const eventLiveMap = new Map(eventLives.map((live) => [live.elementId, live]));
   const playerIds = uniqueNumbers(eventLives.map((live) => live.elementId));
@@ -406,7 +412,7 @@ export async function syncLeagueEventResultsByTournament(
 
   for (let index = 0; index < inserts.length; index += batchSize) {
     const batch = inserts.slice(index, index + batchSize);
-    updated += await leagueEventResultsRepository.upsertBatch(batch);
+    updated += await leagueEventResultsRepository.upsertBatch(batch, checkpointSeason);
   }
 
   logInfo('League event results sync completed for tournament', {

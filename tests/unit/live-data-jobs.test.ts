@@ -145,6 +145,21 @@ describe('live-data cron duplicate suppression', () => {
     ]);
   });
 
+  test('post-match snapshot carries the terminal finalization intent', async () => {
+    const job = await enqueueLiveSnapshot(12, 'cascade', {
+      persistEventLives: true,
+      finalizeEvent: true,
+      jobId: 'live-snapshot-e12-post-final-1',
+    });
+
+    expect(job).not.toBeNull();
+    expect(addCalls[0]).toMatchObject({
+      name: 'event-lives-db',
+      data: { eventId: 12, persistEventLives: true, finalizeEvent: true },
+      opts: { jobId: 'live-snapshot-e12-post-final-1' },
+    });
+  });
+
   test('legacy and canonical names share duplicate suppression semantics', async () => {
     waitingJobs.push({
       name: 'event-lives-db',

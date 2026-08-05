@@ -22,6 +22,7 @@ export const entryEventCupResults = pgTable(
     againstPlayerName: text('against_player_name'),
     againstEventPoints: integer('against_event_points'),
     result: cupResultEnum('result'),
+    sourceSeason: text('source_season'),
     ...timestamps,
   },
   (table) => [

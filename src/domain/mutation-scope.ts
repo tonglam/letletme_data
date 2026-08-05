@@ -49,6 +49,13 @@ export function tournamentSetupLifecycleScope(tournamentId: number): string {
     : 'tournament-setup:all';
 }
 
+/** Serializes the queue check, canonical preparation, and deterministic add. */
+export function tournamentSetupEnqueueScope(tournamentId: number): string {
+  return Number.isFinite(tournamentId)
+    ? `tournament-setup-enqueue:tournament:${tournamentId}`
+    : 'tournament-setup-enqueue:all';
+}
+
 function baseQueueName(queueName: string): string {
   return queueName.replace(/-p[0-3]$/, '');
 }
