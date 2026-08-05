@@ -82,6 +82,19 @@ describe('public Data API lockdown migration', () => {
   });
 });
 
+describe('GraphQL read RPC migration', () => {
+  test('replaces the legacy player picker row type safely', () => {
+    const migration = readFileSync('migrations/0043_create_graphql_read_rpcs.sql', 'utf8');
+    const drop = migration.indexOf(
+      'DROP FUNCTION IF EXISTS public.get_players_for_picker(integer, integer);',
+    );
+    const create = migration.indexOf('CREATE OR REPLACE FUNCTION public.get_players_for_picker(');
+
+    expect(drop).toBeGreaterThanOrEqual(0);
+    expect(create).toBeGreaterThan(drop);
+  });
+});
+
 describe('player market snapshot migration', () => {
   test('creates a unique complete-day store behind the service trust boundary', () => {
     const migration = readFileSync('migrations/0037_create_player_market_snapshots.sql', 'utf8');

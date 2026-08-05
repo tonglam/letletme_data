@@ -5,6 +5,11 @@
 -- service_role credential. Keep the executable surface explicit: browser JWT
 -- roles cannot invoke these functions and the functions run as the caller.
 
+-- PostgreSQL cannot change the OUT-parameter row type with CREATE OR REPLACE.
+-- Production may already have the legacy function from the pre-RPC schema, so
+-- remove that exact overload before creating the canonical projection.
+DROP FUNCTION IF EXISTS public.get_players_for_picker(integer, integer);
+
 CREATE OR REPLACE FUNCTION public.get_players_for_picker(
   p_limit integer DEFAULT 20,
   p_cursor integer DEFAULT NULL
