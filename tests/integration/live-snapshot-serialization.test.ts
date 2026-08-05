@@ -323,6 +323,41 @@ describe('live snapshot PostgreSQL serialization', () => {
     }
   });
 
+  test('advances the durable ownership checkpoint for metadata-only live checks', async () => {
+    const eventId = 2_000_000_026;
+    const checkedAt = new Date('2026-08-04T01:00:05.000Z');
+    const db = await getDb();
+    await db.delete(events).where(eq(events.id, eventId));
+    await db.insert(events).values({ id: eventId, name: 'Metadata-only live check' });
+
+    try {
+      const result = await persistLiveSnapshotDurably({
+        eventId,
+        checkedAt,
+        prepared: { season: '2526' } as never,
+        persistFixtures: false,
+        persistEventLives: false,
+      });
+
+      expect(result).toMatchObject({
+        accepted: true,
+        winnerCheckedAt: checkedAt,
+        persistedFixtures: false,
+        persistedEventLives: false,
+      });
+      expect(
+        (
+          await db
+            .select({ checkedAt: events.liveSnapshotCheckedAt })
+            .from(events)
+            .where(eq(events.id, eventId))
+        )[0]?.checkedAt,
+      ).toEqual(checkedAt);
+    } finally {
+      await db.delete(events).where(eq(events.id, eventId));
+    }
+  });
+
   test('multi-event fixture fence rolls back every earlier claim when one event is newer', async () => {
     const firstEventId = 2_000_000_031;
     const secondEventId = 2_000_000_032;

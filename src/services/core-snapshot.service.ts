@@ -147,7 +147,12 @@ export async function syncCoreSnapshot(
       return result(snapshot, false);
     }
     dependencies.onMilestone?.('persisted');
-    await dependencies.cleanup(snapshot.season);
+    // The publication can release its lock before a newer season acquires the
+    // authority. Recheck before deleting any season-prefixed cache keys.
+    const cleanupSeason = await dependencies.getActiveSeason();
+    if (cleanupSeason === snapshot.season) {
+      await dependencies.cleanup(snapshot.season);
+    }
     dependencies.onMilestone?.('published');
     return result(snapshot, true);
   });

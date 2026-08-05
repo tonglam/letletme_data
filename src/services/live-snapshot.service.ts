@@ -245,14 +245,6 @@ export async function persistLiveSnapshotDurably({
   if (finalizeEvent && !persistEventLives) {
     throw new Error('A final live snapshot requires durable event-live persistence');
   }
-  if (!persistFixtures && !persistEventLives) {
-    return {
-      accepted: true,
-      winnerCheckedAt: checkedAt,
-      persistedFixtures: false,
-      persistedEventLives: false,
-    };
-  }
 
   const fenced = await withLiveSnapshotDurableWriteFence(eventId, checkedAt, async (tx) => {
     if (persistFixtures) {

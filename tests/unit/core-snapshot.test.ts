@@ -123,6 +123,7 @@ describe('core snapshot validation', () => {
 describe('core snapshot synchronization', () => {
   function dependencies(options?: {
     activeSeason?: string | null;
+    activeSeasons?: (string | null)[];
     persist?: () => Promise<unknown>;
     publish?: () => Promise<{ published: boolean }>;
     cleanup?: () => Promise<void>;
@@ -131,6 +132,7 @@ describe('core snapshot synchronization', () => {
   }): CoreSnapshotDependencies {
     const input = buildCoreSnapshotFixture();
     const calls = options?.calls ?? [];
+    let activeSeasonReads = 0;
     return {
       getBootstrap: async () => {
         calls.push('bootstrap');
@@ -140,7 +142,14 @@ describe('core snapshot synchronization', () => {
         calls.push('fixtures');
         return input.fixtures;
       },
-      getActiveSeason: async () => options?.activeSeason ?? null,
+      getActiveSeason: async () => {
+        const sequence = options?.activeSeasons;
+        if (sequence && activeSeasonReads < sequence.length) {
+          return sequence[activeSeasonReads++];
+        }
+        activeSeasonReads += 1;
+        return options?.activeSeason ?? '2627';
+      },
       readOrderingTimestamp: async () => {
         calls.push('ordering-timestamp');
         return new Date('2026-08-04T00:00:00.000Z');
@@ -217,6 +226,16 @@ describe('core snapshot synchronization', () => {
     expect(result.outcome).toBe('noop');
     expect(calls).not.toContain('persist');
     expect(calls).not.toContain('publish');
+    expect(calls).not.toContain('cleanup');
+  });
+
+  test('skips stale-season cleanup when authority changes after commit', async () => {
+    const calls: string[] = [];
+    const result = await syncCoreSnapshot(
+      dependencies({ calls, activeSeasons: ['2627', '2728'] }),
+    );
+
+    expect(result.outcome).toBe('ready');
     expect(calls).not.toContain('cleanup');
   });
 
