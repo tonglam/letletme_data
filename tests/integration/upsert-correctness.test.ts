@@ -301,6 +301,6 @@ describe('affected-player current price update', () => {
       WHERE id = ${VALUE_PLAYER_A}
     `;
     expect(stored[0]?.price).toBe(currentPrice);
-    expect(stored[0]?.price_source_checked_at).toEqual(newerSourceCheckedAt);
+    expect(new Date(String(stored[0]?.price_source_checked_at))).toEqual(newerSourceCheckedAt);
   });
 });
