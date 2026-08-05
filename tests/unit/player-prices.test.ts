@@ -168,4 +168,26 @@ describe('player-prices sync', () => {
     expect(await sync('20260803')).toEqual({ count: 1, changeDate: '20260803' });
     expect(mergePlayerPricesCache).toHaveBeenCalledWith([{ elementId: 2, value: 61 }], [1, 2]);
   });
+
+  test('merges only price rows that won the durable freshness predicate', async () => {
+    const updatePrices = mock(async () => [player(2, 63)]);
+    const mergePlayerPricesCache = mock(async () => undefined);
+    const sync = createPlayerPricesSync({
+      findByChangeDate: async () => [
+        stored(2, 61, '20260803', 'Rise'),
+        stored(3, 49, '20260803', 'Faller'),
+      ],
+      findLatestForPlayerIds: async () => [
+        stored(2, 63, '20260805', 'Rise'),
+        stored(3, 47, '20260805', 'Faller'),
+      ],
+      getBootstrap: async () => bootstrap([1, 2, 3]),
+      updatePrices,
+      mergePlayerPricesCache,
+      readOrderingTimestamp,
+    });
+
+    await expect(sync('20260803')).resolves.toEqual({ count: 1, changeDate: '20260803' });
+    expect(mergePlayerPricesCache).toHaveBeenCalledWith([{ elementId: 2, value: 63 }], [1, 2, 3]);
+  });
 });

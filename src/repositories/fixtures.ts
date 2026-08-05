@@ -144,13 +144,40 @@ export const createFixtureRepository = (dbInstance?: DbOrTransaction) => {
     markAbsentUnscheduled: async (
       acceptedIds: readonly number[],
       preserveOwnedCheckedAtOrAfter?: Date,
+      acceptedCodes: readonly number[] = [],
     ): Promise<number> => {
       try {
         const uniqueIds = [...new Set(acceptedIds.filter((id) => Number.isInteger(id) && id > 0))];
         if (uniqueIds.length === 0) return 0;
+        const uniqueCodes = [
+          ...new Set(acceptedCodes.filter((code) => Number.isInteger(code) && code > 0)),
+        ];
         const preserveOwnedCheckedAtOrAfterIso = preserveOwnedCheckedAtOrAfter?.toISOString();
 
         const db = await getDbInstance();
+        const ownershipFence = preserveOwnedCheckedAtOrAfterIso
+          ? sql`NOT EXISTS (
+              SELECT 1
+              FROM ${events}
+              WHERE ${events.id} = ${eventFixtures.eventId}
+                AND ${events.liveSnapshotCheckedAt} >= ${preserveOwnedCheckedAtOrAfterIso}::timestamptz
+            )`
+          : undefined;
+        let retiredCodeConflicts = 0;
+        if (uniqueCodes.length > 0) {
+          const removed = await db
+            .delete(eventFixtures)
+            .where(
+              and(
+                isNotNull(eventFixtures.eventId),
+                notInArray(eventFixtures.id, uniqueIds),
+                inArray(eventFixtures.code, uniqueCodes),
+                ownershipFence,
+              ),
+            )
+            .returning({ id: eventFixtures.id });
+          retiredCodeConflicts = removed.length;
+        }
         const result = await db
           .update(eventFixtures)
           .set({ eventId: null, updatedAt: new Date() })
@@ -158,19 +185,13 @@ export const createFixtureRepository = (dbInstance?: DbOrTransaction) => {
             and(
               isNotNull(eventFixtures.eventId),
               notInArray(eventFixtures.id, uniqueIds),
-              preserveOwnedCheckedAtOrAfterIso
-                ? sql`NOT EXISTS (
-                    SELECT 1
-                    FROM ${events}
-                    WHERE ${events.id} = ${eventFixtures.eventId}
-                      AND ${events.liveSnapshotCheckedAt} >= ${preserveOwnedCheckedAtOrAfterIso}::timestamptz
-                  )`
-                : undefined,
+              ownershipFence,
             ),
           )
           .returning({ id: eventFixtures.id });
-        logInfo('Retired fixtures absent from the complete snapshot', { count: result.length });
-        return result.length;
+        const count = retiredCodeConflicts + result.length;
+        logInfo('Retired fixtures absent from the complete snapshot', { count });
+        return count;
       } catch (error) {
         logError('Failed to retire fixtures absent from the complete snapshot', error, {
           acceptedCount: acceptedIds.length,

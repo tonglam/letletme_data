@@ -121,6 +121,7 @@ async function persistCoreSnapshotRows(
   await fixtureRepository.markAbsentUnscheduled(
     snapshot.fixtures.map((fixture) => fixture.id),
     sourceCheckedAt,
+    snapshot.fixtures.map((fixture) => fixture.code),
   );
   const savedFixtures = await fixtureRepository.upsertBatch(schedulableFixtures);
 

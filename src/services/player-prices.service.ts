@@ -94,12 +94,18 @@ export function createPlayerPricesSync(dependencies: PlayerPricesSyncDependencie
     }));
     const updatedPlayers = await dependencies.updatePrices(priceUpdates, sourceCheckedAt);
     const updatedIds = new Set(updatedPlayers.map((player) => player.id));
-    const missingPlayers = currentChangedIds.filter((elementId) => !updatedIds.has(elementId));
-    if (missingPlayers.length > 0) {
-      throw new Error(`Player rows missing for price update: ${missingPlayers.join(', ')}`);
+    const winningPriceUpdates = priceUpdates.filter((update) => updatedIds.has(update.elementId));
+    const skippedIds = currentChangedIds.filter((elementId) => !updatedIds.has(elementId));
+    if (skippedIds.length > 0) {
+      logInfo('Skipped stale player price updates', {
+        changeDate,
+        count: skippedIds.length,
+      });
     }
 
-    await dependencies.mergePlayerPricesCache(priceUpdates, publishedPlayerIds);
+    if (winningPriceUpdates.length > 0) {
+      await dependencies.mergePlayerPricesCache(winningPriceUpdates, publishedPlayerIds);
+    }
     logInfo('Player prices updated in database and cache', {
       changeDate,
       count: updatedPlayers.length,

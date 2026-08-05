@@ -296,7 +296,7 @@ describeAtomicity('core snapshot atomicity', () => {
     const replacementFixture = {
       ...originalFixture,
       id: replacementFixtureId,
-      code: replacementFixtureId,
+      code: originalFixture.code,
       pulseId: replacementFixtureId,
     };
     const replacementSnapshot: CoreSnapshot = {
@@ -321,10 +321,10 @@ describeAtomicity('core snapshot atomicity', () => {
 
       expect(
         await db
-          .select({ eventId: eventFixtures.eventId })
+          .select({ id: eventFixtures.id })
           .from(eventFixtures)
           .where(eq(eventFixtures.id, originalFixture.id)),
-      ).toEqual([{ eventId: null }]);
+      ).toEqual([]);
       expect(
         await db
           .select({ eventId: eventFixtures.eventId })

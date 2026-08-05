@@ -17,8 +17,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS core_snapshot_authority_publication_id_idx
   ON public.core_snapshot_authority (publication_id);
 
 -- Generic players.updated_at is also advanced by complete core upserts. Keep
--- price-writer source evidence separate so an older core job cannot masquerade
--- as a newer partial price update during snapshot reconciliation.
+-- source-ordering evidence separate so an older core or price job cannot
+-- masquerade as a newer partial price update during snapshot reconciliation.
 ALTER TABLE public.players
   ADD COLUMN IF NOT EXISTS price_source_checked_at timestamptz;
 

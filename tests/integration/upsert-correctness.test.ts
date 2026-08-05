@@ -282,12 +282,12 @@ describe('affected-player current price update', () => {
     const olderSourceCheckedAt = new Date('2026-08-04T00:00:00.000Z');
     const currentPrice = 111;
 
-    await client`
-      UPDATE players
-      SET price = ${currentPrice},
-          price_source_checked_at = ${newerSourceCheckedAt.toISOString()}::timestamptz
-      WHERE id = ${VALUE_PLAYER_A}
-    `;
+    const currentPlayer = (await playerRepository.findByIds([VALUE_PLAYER_A]))[0];
+    if (!currentPlayer) throw new Error('checkpoint player fixture is missing');
+    await playerRepository.upsertBatch(
+      [{ ...currentPlayer, price: currentPrice }],
+      newerSourceCheckedAt,
+    );
 
     const updated = await playerRepository.updatePrices(
       [{ elementId: VALUE_PLAYER_A, value: currentPrice + 1 }],

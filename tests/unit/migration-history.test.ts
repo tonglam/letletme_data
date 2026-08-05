@@ -92,7 +92,7 @@ describe('tournament lifecycle progress migration', () => {
 
 describe('core snapshot authority migration', () => {
   test('installs a singleton revision authority outside the client Data API', () => {
-    const migration = readFileSync('migrations/0045_core_snapshot_authority.sql', 'utf8');
+    const migration = readFileSync('migrations/0049_core_snapshot_authority.sql', 'utf8');
 
     expect(migration).toContain('core_snapshot_revision_seq');
     expect(migration).toContain('core_snapshot_authority');

@@ -133,12 +133,16 @@ export const createPlayerRepository = (dbInstance?: DbOrTransaction) => {
           return [];
         }
 
+        const sourceCheckedAtIso = preservePriceSourceCheckedAtOrAfter?.toISOString();
         const newPlayers: DbPlayerInsert[] = domainPlayers.map((player) => ({
           id: player.id,
           code: player.code,
           type: player.type,
           teamId: player.teamId,
           price: player.price,
+          ...(sourceCheckedAtIso
+            ? { priceSourceCheckedAt: preservePriceSourceCheckedAtOrAfter }
+            : {}),
           startPrice: player.startPrice,
           firstName: player.firstName,
           secondName: player.secondName,
@@ -146,8 +150,6 @@ export const createPlayerRepository = (dbInstance?: DbOrTransaction) => {
         }));
 
         const db = await getDbInstance();
-        const preservePriceSourceCheckedAtOrAfterIso =
-          preservePriceSourceCheckedAtOrAfter?.toISOString();
         const result = await db
           .insert(players)
           .values(newPlayers)
@@ -158,12 +160,11 @@ export const createPlayerRepository = (dbInstance?: DbOrTransaction) => {
               type: sql`excluded.type`,
               teamId: sql`excluded.team_id`,
               price: sql`excluded.price`,
-              priceSourceCheckedAt: preservePriceSourceCheckedAtOrAfterIso
+              priceSourceCheckedAt: sourceCheckedAtIso
                 ? sql`CASE
-                    WHEN ${players.priceSourceCheckedAt} >=
-                      ${preservePriceSourceCheckedAtOrAfterIso}::timestamptz
+                    WHEN ${players.priceSourceCheckedAt} >= ${sourceCheckedAtIso}::timestamptz
                     THEN ${players.priceSourceCheckedAt}
-                    ELSE NULL
+                    ELSE ${sourceCheckedAtIso}::timestamptz
                   END`
                 : null,
               startPrice: sql`excluded.start_price`,
