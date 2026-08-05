@@ -1,6 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 
-import { resolveEntrySyncTargetEventId } from '../../src/domain/entry-sync';
+import {
+  resolveEntrySyncTargetEventId,
+  resolveRichResultFreshnessCutoff,
+} from '../../src/domain/entry-sync';
 
 describe('entry sync target event resolution', () => {
   test('preserves explicit event IDs without a lookup', async () => {
@@ -29,5 +32,44 @@ describe('entry sync target event resolution', () => {
     await expect(
       resolveEntrySyncTargetEventId('entry-results', undefined, async () => null),
     ).rejects.toThrow('No current event found');
+  });
+});
+
+describe('rich result finalization cutoff', () => {
+  const checkedAt = new Date('2026-08-04T10:00:00.000Z');
+
+  test('uses only the stable timestamp of a finalized event', () => {
+    expect(
+      resolveRichResultFreshnessCutoff({
+        finished: true,
+        dataChecked: true,
+        dataCheckedAt: checkedAt,
+      }),
+    ).toBe(checkedAt);
+  });
+
+  test('keeps active, unchecked, and uncheckpointed events refreshable', () => {
+    expect(resolveRichResultFreshnessCutoff(null)).toBeNull();
+    expect(
+      resolveRichResultFreshnessCutoff({
+        finished: false,
+        dataChecked: true,
+        dataCheckedAt: checkedAt,
+      }),
+    ).toBeNull();
+    expect(
+      resolveRichResultFreshnessCutoff({
+        finished: true,
+        dataChecked: false,
+        dataCheckedAt: checkedAt,
+      }),
+    ).toBeNull();
+    expect(
+      resolveRichResultFreshnessCutoff({
+        finished: true,
+        dataChecked: true,
+        dataCheckedAt: null,
+      }),
+    ).toBeNull();
   });
 });

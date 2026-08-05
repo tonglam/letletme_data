@@ -13,6 +13,7 @@ describe('league event results prerequisites', () => {
       totalEntries: 75,
       updated: 0,
       skipped: 75,
+      errors: 75,
       requiredUnits: 75,
       reusedUnits: 0,
       succeededUnits: 0,

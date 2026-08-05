@@ -1,5 +1,17 @@
 import type { EntrySyncJobName } from '../queues/entry-sync.queue';
 
+type EventFinalizationState = {
+  finished: boolean;
+  dataChecked: boolean;
+  dataCheckedAt: Date | null;
+};
+
+export function resolveRichResultFreshnessCutoff(
+  event: EventFinalizationState | null,
+): Date | null {
+  return event?.finished && event.dataChecked ? event.dataCheckedAt : null;
+}
+
 export async function resolveEntrySyncTargetEventId(
   jobName: EntrySyncJobName,
   requestedEventId: number | undefined,

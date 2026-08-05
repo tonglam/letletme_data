@@ -20,9 +20,15 @@ export async function syncEntryEventPicks(entryId: number, eventId?: number) {
       targetEventId = current.id;
     }
     const checkpointSeason = await getActiveCacheSeason();
+    const picksSyncStartedAt = new Date();
     const picks = await fplClient.getEntryEventPicks(entryId, targetEventId);
     await withEntrySeasonSyncTransaction(entryId, checkpointSeason, async (tx) => {
-      await createEntryEventPicksRepository(tx).upsertFromPicks(entryId, targetEventId, picks);
+      await createEntryEventPicksRepository(tx).upsertFromPicks(
+        entryId,
+        targetEventId,
+        picks,
+        picksSyncStartedAt,
+      );
     });
     logInfo('Entry event picks sync completed', { entryId, eventId: targetEventId });
     return { entryId, eventId: targetEventId };
@@ -103,6 +109,10 @@ export async function syncEntryEventResults(entryId: number, eventId?: number) {
       targetEventId = current.id;
     }
     const checkpointSeason = await getActiveCacheSeason();
+    // This timestamp describes the evidence window, not database completion.
+    // If the GW finalizes while either request is in flight, the persisted
+    // marker remains before data_checked_at and the finalized scan refetches it.
+    const richSyncStartedAt = new Date();
     const [picks, live] = await Promise.all([
       fplClient.getEntryEventPicks(entryId, targetEventId),
       fplClient.getEventLive(targetEventId),
@@ -113,6 +123,7 @@ export async function syncEntryEventResults(entryId: number, eventId?: number) {
         targetEventId,
         picks,
         live,
+        richSyncStartedAt,
       );
     });
     logInfo('Entry event results sync completed', { entryId, eventId: targetEventId });

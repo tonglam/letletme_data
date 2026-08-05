@@ -1,8 +1,14 @@
 import { QueueEvents, Worker, type Job } from 'bullmq';
-import { asc } from 'drizzle-orm';
+import { asc, gt } from 'drizzle-orm';
 
+import { getActiveCacheSeason } from '../cache/cache-season';
+import { entryInfosCache } from '../cache/entry-infos-cache';
 import { MUTATION_PRIORITY_ORDER, type MutationPriorityTier } from '../domain/job-priority';
-import { resolveEntrySyncTargetEventId } from '../domain/entry-sync';
+import {
+  resolveEntrySyncTargetEventId,
+  resolveRichResultFreshnessCutoff,
+} from '../domain/entry-sync';
+import { decideEntrySyncChain, planEntryInfoSyncWork } from '../domain/entry-sync-chain';
 import { entryInfos } from '../db/schemas/index.schema';
 import { getDb } from '../db/singleton';
 import {
@@ -21,10 +27,16 @@ import {
   enqueueEntryPicksSyncJob,
   enqueueEntryResultsSyncJob,
   enqueueEntryTransfersSyncJob,
+  retainEntrySyncChainOptions,
   type EntrySyncJobOptions,
 } from '../jobs/entry-sync-enqueue';
-import { syncEntryInfo } from '../services/entry-info.service';
+import { republishEntryInfoCache, syncEntryInfo } from '../services/entry-info.service';
 import { getCurrentEvent } from '../services/events.service';
+import { entryEventPicksRepository } from '../repositories/entry-event-picks';
+import { entryEventResultsRepository } from '../repositories/entry-event-results';
+import { entryEventTransfersRepository } from '../repositories/entry-event-transfers';
+import { entryInfoRepository } from '../repositories/entry-infos';
+import { eventRepository } from '../repositories/events';
 import {
   syncEntryEventPicks,
   syncEntryEventResults,
@@ -43,6 +55,7 @@ import {
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { logError, logInfo } from '../utils/logger';
 import { alertOnFinalFailure } from '../utils/notify';
+import { IncompleteDataSyncError } from '../utils/errors';
 import { withMutationConflictGuard } from '../utils/mutation-lock';
 import { getQueueConnection } from '../utils/queue';
 import { startStrictPriorityGate } from './strict-priority-gate';
@@ -55,7 +68,7 @@ const retryMaxDelayMs = 30 * 60_000;
 interface LoadedEntryIds {
   entryIds: number[];
   hasMore: boolean;
-  nextOffset: number;
+  lastEntryId: number | null;
   chunkSize: number;
   chunkOffset: number;
   fetchedFromDb: boolean;
@@ -68,15 +81,16 @@ interface SyncEntriesOptions {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function loadEntryIds(jobData?: EntrySyncJobData): Promise<LoadedEntryIds> {
+export async function loadEntryIdsForSync(jobData?: EntrySyncJobData): Promise<LoadedEntryIds> {
   const chunkSize = jobData?.chunkSize ?? ENTRY_SYNC_DEFAULT_CHUNK_SIZE;
   const chunkOffset = jobData?.chunkOffset ?? 0;
 
   if (jobData?.entryIds && jobData.entryIds.length > 0) {
+    const entryIds = Array.from(new Set(jobData.entryIds));
     return {
-      entryIds: jobData.entryIds,
+      entryIds,
       hasMore: false,
-      nextOffset: chunkOffset + jobData.entryIds.length,
+      lastEntryId: null,
       chunkSize,
       chunkOffset,
       fetchedFromDb: false,
@@ -84,18 +98,26 @@ async function loadEntryIds(jobData?: EntrySyncJobData): Promise<LoadedEntryIds>
   }
 
   const db = await getDb();
-  const rows = await db
-    .select({ id: entryInfos.id })
-    .from(entryInfos)
-    .orderBy(asc(entryInfos.id))
-    .limit(chunkSize)
-    .offset(chunkOffset);
+  const rows =
+    jobData?.afterEntryId !== undefined
+      ? await db
+          .select({ id: entryInfos.id })
+          .from(entryInfos)
+          .where(gt(entryInfos.id, jobData.afterEntryId))
+          .orderBy(asc(entryInfos.id))
+          .limit(chunkSize)
+      : await db
+          .select({ id: entryInfos.id })
+          .from(entryInfos)
+          .orderBy(asc(entryInfos.id))
+          .limit(chunkSize)
+          .offset(chunkOffset);
 
   const ids = rows.map((row) => row.id);
   return {
     entryIds: ids,
     hasMore: ids.length === chunkSize,
-    nextOffset: chunkOffset + ids.length,
+    lastEntryId: ids.at(-1) ?? null,
     chunkSize,
     chunkOffset,
     fetchedFromDb: true,
@@ -170,7 +192,7 @@ async function enqueueEntryJob(
 
 async function scheduleRetry(
   jobName: EntrySyncJobName,
-  jobData: EntrySyncJobData | undefined,
+  jobData: Partial<EntrySyncJobData> | undefined,
   failedIds: number[],
   retryCount: number,
 ) {
@@ -184,9 +206,18 @@ async function scheduleRetry(
     throttleMs: jobData?.throttleMs,
     delayMs,
     eventId: jobData?.eventId,
-    runId: jobData?.runId,
-    queueKey: jobData?.queueKey,
+    ...retainEntrySyncChainOptions(jobData),
+    resumeAfterEntryId: jobData?.resumeAfterEntryId,
   });
+}
+
+type RequiredEntrySelector = (
+  entryIds: number[],
+) => Promise<{ requiredEntryIds: number[]; reusedUnits: number }>;
+
+interface HandleEntryJobOptions {
+  selectRequired?: RequiredEntrySelector;
+  auditRequired?: (entryIds: number[]) => Promise<number[]>;
 }
 
 async function handleEntryJob(
@@ -194,8 +225,9 @@ async function handleEntryJob(
   label: string,
   handler: (entryId: number) => Promise<unknown>,
   jobData?: EntrySyncJobData,
+  options: HandleEntryJobOptions = {},
 ) {
-  const loaded = await loadEntryIds(jobData);
+  const loaded = await loadEntryIdsForSync(jobData);
   if (loaded.entryIds.length === 0) {
     logInfo(`No entries found for ${label}`, {
       jobName,
@@ -208,55 +240,119 @@ async function handleEntryJob(
       failedIds: [] as number[],
       hasMore: false,
       fetchedFromDb: loaded.fetchedFromDb,
+      scanComplete: loaded.fetchedFromDb,
+      requiredUnits: 0,
+      reusedUnits: 0,
+      succeededUnits: 0,
+      failedUnits: 0,
     };
   }
 
   const concurrency = jobData?.concurrency ?? ENTRY_SYNC_DEFAULT_CONCURRENCY;
   const throttleMs = jobData?.throttleMs ?? ENTRY_SYNC_DEFAULT_THROTTLE_MS;
 
-  const result = await syncEntries(label, loaded.entryIds, handler, {
+  const selection = options.selectRequired
+    ? await options.selectRequired(loaded.entryIds)
+    : { requiredEntryIds: loaded.entryIds, reusedUnits: 0 };
+  let result = await syncEntries(label, selection.requiredEntryIds, handler, {
     concurrency,
     throttleMs,
   });
 
-  if (!jobData?.entryIds && loaded.fetchedFromDb && loaded.hasMore) {
-    const nextOffset = loaded.nextOffset;
+  if (options.auditRequired && selection.requiredEntryIds.length > 0) {
+    const missingIds = await options.auditRequired(selection.requiredEntryIds);
+    if (missingIds.length > 0) {
+      const failedIds = [...new Set([...result.failedIds, ...missingIds])];
+      result = {
+        ...result,
+        success: Math.max(0, result.total - failedIds.length),
+        failed: failedIds.length,
+        failedIds,
+      };
+    }
+  }
+
+  const decision = decideEntrySyncChain({
+    failedUnits: result.failed,
+    retryCount: jobData?.retryCount ?? 0,
+    maxRetryCycles,
+    fetchedFromDb: loaded.fetchedFromDb,
+    hasMore: loaded.hasMore,
+    lastEntryId: loaded.lastEntryId,
+    resumeAfterEntryId: jobData?.resumeAfterEntryId,
+  });
+
+  if (decision.action === 'retry_failed') {
+    const retryJob = await scheduleRetry(
+      jobName,
+      { ...jobData, resumeAfterEntryId: decision.resumeAfterEntryId },
+      result.failedIds,
+      decision.retryCount,
+    );
+    logInfo('Entry sync retry enqueued', {
+      jobName,
+      retryCount: decision.retryCount,
+      failed: result.failedIds.length,
+      jobId: retryJob?.id,
+    });
+
+    return {
+      ...result,
+      total: loaded.entryIds.length,
+      hasMore: true,
+      fetchedFromDb: loaded.fetchedFromDb,
+      scanComplete: false,
+      requiredUnits: selection.requiredEntryIds.length,
+      reusedUnits: selection.reusedUnits,
+      succeededUnits: result.success,
+      failedUnits: result.failed,
+    };
+  }
+
+  if (decision.action === 'fail') {
+    const error = new IncompleteDataSyncError(
+      `Entry ${jobName} synchronization exhausted its bounded retries`,
+      selection.requiredEntryIds.length,
+      selection.reusedUnits,
+      result.success,
+      result.failed,
+    );
+    logError('Entry sync retry limit reached', error, {
+      jobName,
+      retryCount: (jobData?.retryCount ?? 0) + 1,
+      failed: result.failedIds.length,
+    });
+    throw error;
+  }
+
+  if (decision.action === 'continue_scan') {
     const nextJob = await enqueueEntryJob(jobName, jobData?.source, {
-      chunkOffset: nextOffset,
+      afterEntryId: decision.afterEntryId,
       chunkSize: loaded.chunkSize,
       concurrency,
       throttleMs,
       eventId: jobData?.eventId,
-      runId: jobData?.runId,
-      queueKey: jobData?.queueKey,
+      ...retainEntrySyncChainOptions(jobData),
     });
-    logInfo('Entry sync next chunk enqueued', {
+    logInfo('Entry sync next keyset chunk enqueued', {
       jobName,
-      nextOffset,
+      afterEntryId: decision.afterEntryId,
       jobId: nextJob?.id,
     });
   }
 
-  if (result.failedIds.length > 0) {
-    const retryCount = (jobData?.retryCount ?? 0) + 1;
-    if (retryCount <= maxRetryCycles) {
-      const retryJob = await scheduleRetry(jobName, jobData, result.failedIds, retryCount);
-      logInfo('Entry sync retry enqueued', {
-        jobName,
-        retryCount,
-        failed: result.failedIds.length,
-        jobId: retryJob?.id,
-      });
-    } else {
-      logError('Entry sync retry limit reached', new Error('Entry sync retries exhausted'), {
-        jobName,
-        retryCount,
-        failed: result.failedIds.length,
-      });
-    }
-  }
-
-  return { ...result, hasMore: loaded.hasMore, fetchedFromDb: loaded.fetchedFromDb };
+  const scanComplete = loaded.fetchedFromDb && decision.action === 'complete';
+  return {
+    ...result,
+    total: loaded.entryIds.length,
+    hasMore: decision.action === 'continue_scan',
+    fetchedFromDb: loaded.fetchedFromDb,
+    scanComplete,
+    requiredUnits: selection.requiredEntryIds.length,
+    reusedUnits: selection.reusedUnits,
+    succeededUnits: result.success,
+    failedUnits: result.failed,
+  };
 }
 
 export function createEntrySyncWorker(): WorkerRuntime {
@@ -306,6 +402,10 @@ export function createEntrySyncWorker(): WorkerRuntime {
         targetEventId !== undefined ? { ...job.data, eventId: targetEventId } : job.data;
       context.eventId = targetEventId;
       attemptContext.targetEventId = targetEventId;
+      const checkpointSeason =
+        job.name === 'entry-info' || job.name === 'entry-transfers'
+          ? await getActiveCacheSeason()
+          : undefined;
 
       return withMutationConflictGuard(
         {
@@ -318,15 +418,46 @@ export function createEntrySyncWorker(): WorkerRuntime {
           runTrackedJob(context, async () => {
             switch (job.name) {
               case 'entry-info': {
+                const cacheOnlyEntryIds = new Set<number>();
                 const result = await handleEntryJob(
                   'entry-info',
                   'entry info sync',
-                  syncEntryInfo,
+                  (entryId) =>
+                    cacheOnlyEntryIds.has(entryId)
+                      ? republishEntryInfoCache(entryId)
+                      : syncEntryInfo(entryId, undefined, targetEventId, checkpointSeason),
                   effectiveJobData,
+                  {
+                    selectRequired: async (entryIds) => {
+                      if (targetEventId === undefined) {
+                        return { requiredEntryIds: entryIds, reusedUnits: 0 };
+                      }
+                      const requiredEntryIds = await entryInfoRepository.findIdsNeedingSnapshotSync(
+                        entryIds,
+                        targetEventId,
+                        checkpointSeason!,
+                      );
+                      const requiredSet = new Set(requiredEntryIds);
+                      const checkpointedEntryIds = entryIds.filter(
+                        (entryId) => !requiredSet.has(entryId),
+                      );
+                      const cachedEntries = await entryInfosCache.getEntries(checkpointedEntryIds);
+                      const plan = planEntryInfoSyncWork(
+                        entryIds,
+                        requiredEntryIds,
+                        new Set(cachedEntries.keys()),
+                      );
+                      for (const entryId of plan.cacheOnlyEntryIds) {
+                        cacheOnlyEntryIds.add(entryId);
+                      }
+                      return plan;
+                    },
+                  },
                 );
-                // Only a complete database scan can satisfy the daily marker;
-                // targeted API and retry jobs must leave the full scan eligible.
+                // Only a complete scheduled database scan can satisfy the
+                // daily marker; targeted API and retry jobs remain eligible.
                 if (
+                  effectiveJobData?.source === 'cron' &&
                   shouldMarkEntryInfoSynced(result.fetchedFromDb, result.hasMore, result.failed)
                 ) {
                   await markEntryInfoSyncedToday(new Date(), job.id);
@@ -339,6 +470,30 @@ export function createEntrySyncWorker(): WorkerRuntime {
                   'entry picks sync',
                   (entryId) => syncEntryEventPicks(entryId, targetEventId),
                   effectiveJobData,
+                  {
+                    selectRequired: async (entryIds) => {
+                      if (targetEventId === undefined) {
+                        return { requiredEntryIds: entryIds, reusedUnits: 0 };
+                      }
+                      const existing = new Set(
+                        await entryEventPicksRepository.findEntryIdsByEvent(
+                          targetEventId,
+                          entryIds,
+                        ),
+                      );
+                      return {
+                        requiredEntryIds: entryIds.filter((entryId) => !existing.has(entryId)),
+                        reusedUnits: existing.size,
+                      };
+                    },
+                    auditRequired: (entryIds) =>
+                      entryEventPicksRepository
+                        .findEntryIdsByEvent(targetEventId!, entryIds)
+                        .then((persisted) => {
+                          const persistedSet = new Set(persisted);
+                          return entryIds.filter((entryId) => !persistedSet.has(entryId));
+                        }),
+                  },
                 );
               case 'entry-transfers':
                 return handleEntryJob(
@@ -346,6 +501,23 @@ export function createEntrySyncWorker(): WorkerRuntime {
                   'entry transfers sync',
                   (entryId) => syncEntryEventTransfers(entryId, targetEventId),
                   effectiveJobData,
+                  {
+                    selectRequired: async (entryIds) => {
+                      if (targetEventId === undefined) {
+                        return { requiredEntryIds: entryIds, reusedUnits: 0 };
+                      }
+                      const requiredEntryIds =
+                        await entryEventTransfersRepository.findEntryIdsNeedingSync(
+                          entryIds,
+                          targetEventId,
+                          checkpointSeason!,
+                        );
+                      return {
+                        requiredEntryIds,
+                        reusedUnits: entryIds.length - requiredEntryIds.length,
+                      };
+                    },
+                  },
                 );
               case 'entry-results':
                 return handleEntryJob(
@@ -353,6 +525,30 @@ export function createEntrySyncWorker(): WorkerRuntime {
                   'entry results sync',
                   (entryId) => syncEntryEventResults(entryId, targetEventId),
                   effectiveJobData,
+                  {
+                    selectRequired: async (entryIds) => {
+                      if (targetEventId === undefined) {
+                        return { requiredEntryIds: entryIds, reusedUnits: 0 };
+                      }
+                      // Active-GW values can still change. Reuse the dedicated
+                      // rich-result checkpoint only after FPL has finalized the GW.
+                      const event = await eventRepository.findById(targetEventId);
+                      const freshAfter = resolveRichResultFreshnessCutoff(event);
+                      if (!freshAfter) {
+                        return { requiredEntryIds: entryIds, reusedUnits: 0 };
+                      }
+                      const requiredEntryIds =
+                        await entryEventResultsRepository.findEntryIdsNeedingRichSync(
+                          entryIds,
+                          targetEventId,
+                          freshAfter,
+                        );
+                      return {
+                        requiredEntryIds,
+                        reusedUnits: entryIds.length - requiredEntryIds.length,
+                      };
+                    },
+                  },
                 );
               default:
                 throw new Error(`Unknown entry-sync job: ${job.name}`);

@@ -60,8 +60,9 @@ before the fixture-derived season window opens. The season code comes from the
 GW1 deadline or kickoff metadata (`2026/27` becomes `2627`); it is never guessed
 from the server calendar.
 
-The first core bootstrap updates five PostgreSQL tables and seven Redis
-families:
+The core snapshot reads FPL bootstrap and fixtures once each, validates the
+complete season together, updates five PostgreSQL tables in one transaction,
+and publishes seven Redis families through staged atomic replacement:
 
 | Domain | PostgreSQL | Redis |
 |---|---|---|
@@ -169,25 +170,19 @@ explicitly unauthenticated local environment.
 
 ## Manual core-season bootstrap
 
-Each mutation returns after enqueueing a job. Keep the worker running and wait
-for each job to complete before moving to the next dependency-sensitive step:
+The mutation returns after enqueueing one atomic core-snapshot job. Keep the
+worker running and inspect the resulting job/report before continuing:
 
 ```bash
 curl -X POST http://localhost:3000/events/sync \
   -H "x-api-key: $DATA_API_KEY"
-curl -X POST http://localhost:3000/teams/sync \
-  -H "x-api-key: $DATA_API_KEY"
-curl -X POST http://localhost:3000/fixtures/sync \
-  -H "x-api-key: $DATA_API_KEY"
-curl -X POST http://localhost:3000/players/sync \
-  -H "x-api-key: $DATA_API_KEY"
-curl -X POST http://localhost:3000/phases/sync \
-  -H "x-api-key: $DATA_API_KEY"
 ```
 
-Teams precede fixtures because the `FixturesByTeam` cache is rebuilt from the
-active team hash. The writer preserves an existing team-fixture view if teams
-are absent, but the ordered bootstrap avoids an incomplete first build.
+`POST /fixtures/sync` without an event and the legacy
+`POST /fixtures/sync-all-gameweeks` route are compatibility aliases for the
+same snapshot. Event-specific fixture repair remains available with
+`POST /fixtures/sync?event=N`; it refuses to publish unless the canonical core
+snapshot is complete.
 
 Use `GET /jobs` to list manual operational triggers. Full request examples are
 in the [API cheat sheet](docs/api-cheat-sheet.md).
@@ -237,6 +232,7 @@ production data audit in the season-readiness runbook.
 - [Redis key contract](docs/redis-contract.md)
 - [Job schedule and gates](docs/job-schedule.md)
 - [Internal API cheat sheet](docs/api-cheat-sheet.md)
+- [Non-live sync evaluation standard](docs/non-live-sync-evaluation.md)
 - [Migration ownership](migrations/README.md)
 - [Test strategy](tests/README.md)
 - [Deployment guide](DEPLOYMENT.md)

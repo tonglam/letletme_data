@@ -71,7 +71,10 @@ async function processLeagueSyncJob(job: Job<LeagueSyncJobData>) {
                 return processLeagueEventPicksJob(eventId, tournamentId, runId);
 
               case LEAGUE_JOBS.LEAGUE_EVENT_RESULTS:
-                return processLeagueEventResultsJob(eventId, tournamentId, runId);
+                return processLeagueEventResultsJob(eventId, tournamentId, {
+                  runId,
+                  triggeredAt: job.data.triggeredAt,
+                });
 
               default:
                 throw new Error(`Unknown job name: ${job.name}`);

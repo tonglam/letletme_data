@@ -3,6 +3,8 @@ import { tournamentBattleGroupResultsRepository } from '../repositories/tourname
 import { tournamentGroupRepository } from '../repositories/tournament-groups';
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
+import { mapWithConcurrency } from '../utils/async';
+import { IncompleteDataSyncError } from '../utils/errors';
 import { logError, logInfo, logWarn } from '../utils/logger';
 
 import type { DbTournamentGroup, DbTournamentGroupInsert } from '../db/schemas/index.schema';
@@ -302,20 +304,18 @@ export async function syncTournamentBattleRaceResults(
   let updatedResults = 0;
   let skipped = 0;
   const failedTournamentIds: number[] = [];
-  const syncResults = await Promise.all(
-    tournaments.map(async (tournament) => {
-      try {
-        return await syncTournamentBattleRaceResultsForTournament(tournament, eventId);
-      } catch (error) {
-        logError('Failed to sync battle race results', error, {
-          tournamentId: tournament.id,
-          eventId,
-        });
-        failedTournamentIds.push(tournament.id);
-        return { updatedGroups: 0, updatedResults: 0, skipped: 0 };
-      }
-    }),
-  );
+  const syncResults = await mapWithConcurrency(tournaments, 10, async (tournament) => {
+    try {
+      return await syncTournamentBattleRaceResultsForTournament(tournament, eventId);
+    } catch (error) {
+      logError('Failed to sync battle race results', error, {
+        tournamentId: tournament.id,
+        eventId,
+      });
+      failedTournamentIds.push(tournament.id);
+      return { updatedGroups: 0, updatedResults: 0, skipped: 0 };
+    }
+  });
   for (const result of syncResults) {
     updatedGroups += result.updatedGroups;
     updatedResults += result.updatedResults;
@@ -330,8 +330,16 @@ export async function syncTournamentBattleRaceResults(
     failedCount: failedTournamentIds.length,
   });
 
-  if (failedTournamentIds.length > 0) {
-    throw new Error(`Battle race sync failed for tournament(s): ${failedTournamentIds.join(', ')}`);
+  const failedUnits = skipped + failedTournamentIds.length;
+  if (failedUnits > 0) {
+    const succeededUnits = Math.max(updatedGroups, updatedResults);
+    throw new IncompleteDataSyncError(
+      'Battle-race results did not converge for every required unit',
+      succeededUnits + failedUnits,
+      0,
+      succeededUnits,
+      failedUnits,
+    );
   }
 
   return { eventId, updatedGroups, updatedResults, skipped };

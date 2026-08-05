@@ -41,6 +41,30 @@ export const createFixtureRepository = (dbInstance?: DbOrTransaction) => {
   const getDbInstance = async () => dbInstance || (await getDb());
 
   return {
+    deleteNotInIds: async (ids: number[]): Promise<number> => {
+      if (ids.length === 0) {
+        throw new DatabaseError(
+          'Refusing to delete fixtures without an authoritative identifier set',
+          'FIXTURE_DELETE_SCOPE_EMPTY',
+        );
+      }
+      try {
+        const db = await getDbInstance();
+        const deleted = await db
+          .delete(eventFixtures)
+          .where(notInArray(eventFixtures.id, [...new Set(ids)]))
+          .returning({ id: eventFixtures.id });
+        return deleted.length;
+      } catch (error) {
+        logError('Failed to delete stale fixtures', error, { retainedCount: ids.length });
+        throw new DatabaseError(
+          'Failed to delete stale fixtures',
+          'DELETE_STALE_FIXTURES_ERROR',
+          error instanceof Error ? error : undefined,
+        );
+      }
+    },
+
     findByEvent: async (eventId: number): Promise<DomainFixture[]> => {
       try {
         const db = await getDbInstance();
@@ -113,6 +137,37 @@ export const createFixtureRepository = (dbInstance?: DbOrTransaction) => {
         throw new DatabaseError(
           'Failed to retrieve fixture event ids',
           'FIND_EVENT_IDS_ERROR',
+          error instanceof Error ? error : undefined,
+        );
+      }
+    },
+
+    findLocationsByFixtureIds: async (
+      ids: number[],
+    ): Promise<Map<number, { eventId: number | null; teamAId: number; teamHId: number }>> => {
+      try {
+        if (ids.length === 0) return new Map();
+        const db = await getDbInstance();
+        const rows = await db
+          .select({
+            id: eventFixtures.id,
+            eventId: eventFixtures.eventId,
+            teamAId: eventFixtures.teamAId,
+            teamHId: eventFixtures.teamHId,
+          })
+          .from(eventFixtures)
+          .where(inArray(eventFixtures.id, ids));
+        return new Map(
+          rows.map((row) => [
+            row.id,
+            { eventId: row.eventId, teamAId: row.teamAId, teamHId: row.teamHId },
+          ]),
+        );
+      } catch (error) {
+        logError('Failed to find fixture locations', error, { count: ids.length });
+        throw new DatabaseError(
+          'Failed to retrieve fixture locations',
+          'FIND_FIXTURE_LOCATIONS_ERROR',
           error instanceof Error ? error : undefined,
         );
       }

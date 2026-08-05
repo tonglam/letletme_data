@@ -8,6 +8,7 @@ import {
   type DataSyncAttemptContext,
   type DataSyncAttemptReport,
 } from '../../src/utils/data-sync-attempt';
+import { IncompleteDataSyncError } from '../../src/utils/errors';
 import { beginFplLogicalRequest } from '../../src/utils/fpl-request-metrics';
 import { logger } from '../../src/utils/logger';
 
@@ -248,6 +249,49 @@ describe('data sync attempt reporting', () => {
       jobName: 'entry-results',
       targetEventId: 13,
       outcome: 'failed',
+    });
+  });
+
+  test('keeps failure outcome while reporting bounded incomplete-unit counts', async () => {
+    const infoSpy = spyOn(logger, 'info').mockImplementation(() => undefined as never);
+
+    await expect(
+      runDataSyncAttempt(
+        {
+          queue: 'league-sync',
+          jobName: 'league-event-picks',
+          runId: 'incomplete-run',
+        },
+        async () => {
+          throw new IncompleteDataSyncError('League picks incomplete', 5, 2, 2, 1);
+        },
+      ),
+    ).rejects.toMatchObject({ code: 'DATA_SYNC_INCOMPLETE' });
+
+    const reports = reportsFrom(infoSpy);
+    expect(reports).toHaveLength(1);
+    expect(reports[0]).toMatchObject({
+      outcome: 'failed',
+      requiredUnits: 5,
+      reusedUnits: 2,
+      succeededUnits: 2,
+      failedUnits: 1,
+    });
+  });
+
+  test('infers common tournament counters without treating valid skips as failures', () => {
+    expect(
+      inferDataSyncWorkSummary({
+        totalEntries: 75,
+        synced: 12,
+        skipped: 63,
+        errors: 0,
+      }),
+    ).toEqual({
+      requiredUnits: 75,
+      reusedUnits: 63,
+      succeededUnits: 12,
+      failedUnits: 0,
     });
   });
 

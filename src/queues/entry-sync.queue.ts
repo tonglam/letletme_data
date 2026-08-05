@@ -35,13 +35,19 @@ export interface EntrySyncJobData {
   triggeredAt: string;
   entryIds?: number[];
   retryCount?: number;
+  /** Legacy in-flight job compatibility; new table scans use afterEntryId. */
   chunkOffset?: number;
+  afterEntryId?: number;
+  /** Continue the table scan here only after an exact failed-ID retry succeeds. */
+  resumeAfterEntryId?: number;
   chunkSize?: number;
   concurrency?: number;
   throttleMs?: number;
   eventId?: number;
   runId?: string;
   queueKey?: string;
+  /** Propagated through continuation/retry chunks for deterministic daily jobs. */
+  removeOnSettle?: boolean;
 }
 
 const tieredQueueSet = createTieredQueueSet<EntrySyncJobData>(entrySyncQueueName, {

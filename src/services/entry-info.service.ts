@@ -11,7 +11,7 @@ import { getDb } from '../db/singleton';
 import { toEntryInfo } from '../domain/entry-infos';
 import { getCurrentEvent } from './events.service';
 import { createEntryHistoryInfoRepository } from '../repositories/entry-history-infos';
-import { createEntryInfoRepository } from '../repositories/entry-infos';
+import { createEntryInfoRepository, entryInfoRepository } from '../repositories/entry-infos';
 import { createEntryLeagueInfoRepository } from '../repositories/entry-league-infos';
 import { createEntryEventResultsRepository } from '../repositories/entry-event-results';
 import {
@@ -24,9 +24,64 @@ import {
 } from '../db/schemas/index.schema';
 import { ENTRY_SEASON_SYNC_LOCK_NAMESPACE } from '../repositories/entry-event-transfers';
 import { eventRepository } from '../repositories/events';
+import type { RawFPLEntryHistoryCurrentItem } from '../types';
+import { ValidationError } from '../utils/errors';
 import { logInfo } from '../utils/logger';
 
 export type EntryInfoClient = Pick<typeof fplClient, 'getEntrySummary' | 'getEntryHistory'>;
+
+export function validateEntryHistoryCoverage(
+  startedEvent: number | null | undefined,
+  targetEventId: number,
+  currentHistory: readonly RawFPLEntryHistoryCurrentItem[],
+): void {
+  if (!Number.isInteger(targetEventId) || targetEventId < 0 || targetEventId > 38) {
+    throw new ValidationError(
+      'Entry snapshot target must be an event from 0 through 38.',
+      'ENTRY_SNAPSHOT_TARGET_INVALID',
+    );
+  }
+
+  const eventIds = currentHistory.map((item) => item.event);
+  if (
+    eventIds.some((eventId) => !Number.isInteger(eventId) || eventId < 1 || eventId > 38) ||
+    new Set(eventIds).size !== eventIds.length
+  ) {
+    throw new ValidationError(
+      'Entry history contains invalid or duplicate event identifiers.',
+      'ENTRY_HISTORY_INVALID',
+    );
+  }
+
+  const firstRequiredEvent = Math.max(1, startedEvent ?? 1);
+  if (targetEventId < firstRequiredEvent) return;
+
+  const available = new Set(eventIds);
+  let missing = 0;
+  for (let eventId = firstRequiredEvent; eventId <= targetEventId; eventId += 1) {
+    if (!available.has(eventId)) missing += 1;
+  }
+  if (missing > 0) {
+    throw new ValidationError(
+      `Entry history is incomplete through the requested event (${missing} missing).`,
+      'ENTRY_HISTORY_INCOMPLETE',
+    );
+  }
+}
+
+export async function republishEntryInfoCache(entryId: number) {
+  const [entry] = await entryInfoRepository.findByIds([entryId]);
+  if (!entry) {
+    throw new ValidationError(
+      'Entry info cache publication requires a canonical entry row.',
+      'ENTRY_INFO_NOT_FOUND',
+    );
+  }
+
+  await entryInfosCache.setEntry(toEntryInfo(entry));
+  logInfo('Entry info cache republished from canonical storage', { entryId });
+  return entry;
+}
 
 export async function syncEntryInfo(
   entryId: number,
@@ -43,13 +98,24 @@ export async function syncEntryInfo(
     client.getEntrySummary(entryId),
     client.getEntryHistory(entryId),
     getCurrentEvent(),
-    eventRepository.findLatestFinalized(),
+    targetEventId === undefined ? eventRepository.findLatestFinalized() : Promise.resolve(null),
   ]);
-  const lastEventId = currentEvent ? currentEvent.id - 1 : null;
-  const snapshotSyncedThroughEventId = Math.max(
-    0,
-    Math.min(38, targetEventId ?? latestFinalizedEvent?.id ?? 0),
+  if (summary.id !== entryId) {
+    throw new ValidationError(
+      'Entry summary identity did not match the request.',
+      'ENTRY_ID_MISMATCH',
+    );
+  }
+  const snapshotSyncedThroughEventId = targetEventId ?? latestFinalizedEvent?.id ?? 0;
+  validateEntryHistoryCoverage(
+    summary.started_event,
+    snapshotSyncedThroughEventId,
+    history.current,
   );
+  const finalizedHistory = history.current.filter(
+    (item) => item.event <= snapshotSyncedThroughEventId,
+  );
+  const lastEventId = currentEvent ? currentEvent.id - 1 : null;
 
   const db = await getDb();
   const saved = await db.transaction(async (tx) => {
@@ -127,7 +193,7 @@ export async function syncEntryInfo(
     await Promise.all([
       entryHistoryInfoRepository.upsertFromHistory(entryId, history),
       entryLeagueInfoRepository.upsertFromLeagues(entryId, summary.leagues),
-      entryEventResultsRepository.upsertCoreFromHistory(entryId, history.current),
+      entryEventResultsRepository.upsertCoreFromHistory(entryId, finalizedHistory),
     ]);
     return entry;
   });

@@ -29,6 +29,8 @@ import {
 import { mockFPLClient, resetMockFPLClient } from './helpers/mock-fpl';
 
 const RUN_BENCHMARK = process.env.RUN_TOURNAMENT_BENCHMARK === '1';
+const BENCHMARK_TEAM_ID = 98_900_000;
+const BENCHMARK_PLAYER_BASE_ID = 98_900_100;
 
 type BenchmarkEndpoint =
   | 'entry_summary'
@@ -134,6 +136,42 @@ function buildHistory(eventCount: number) {
   };
 }
 
+function buildEventLive() {
+  return {
+    elements: Array.from({ length: 15 }, (_, index) => ({
+      id: BENCHMARK_PLAYER_BASE_ID + index,
+      stats: {
+        minutes: 0,
+        goals_scored: 0,
+        assists: 0,
+        clean_sheets: 0,
+        goals_conceded: 0,
+        own_goals: 0,
+        penalties_saved: 0,
+        penalties_missed: 0,
+        yellow_cards: 0,
+        red_cards: 0,
+        saves: 0,
+        bonus: 0,
+        bps: 0,
+        defensive_contribution: 0,
+        influence: '0.0',
+        creativity: '0.0',
+        threat: '0.0',
+        ict_index: '0.0',
+        starts: 0,
+        expected_goals: '0.0',
+        expected_assists: '0.0',
+        expected_goal_involvements: '0.0',
+        expected_goals_conceded: '0.0',
+        total_points: 0,
+        in_dreamteam: false,
+      },
+      explain: [],
+    })),
+  };
+}
+
 function installBenchmarkFplClient(recorder: BenchmarkRequestRecorder, eventCount: number): void {
   mockFPLClient({
     getEntrySummary: (...args: unknown[]) => {
@@ -154,7 +192,7 @@ function installBenchmarkFplClient(recorder: BenchmarkRequestRecorder, eventCoun
     },
     getEntryHistory: () => recorder.request('entry_history', () => buildHistory(eventCount)),
     getEntryTransfers: () => recorder.request('entry_transfers', () => []),
-    getEventLive: () => recorder.request('event_live', () => ({ elements: [] })),
+    getEventLive: () => recorder.request('event_live', buildEventLive),
     getEntryEventPicks: (...args: unknown[]) => {
       const eventId = Number(args[1]);
       return recorder.request('entry_picks', () => ({
@@ -172,7 +210,13 @@ function installBenchmarkFplClient(recorder: BenchmarkRequestRecorder, eventCoun
           event_transfers_cost: 0,
           points_on_bench: 4,
         },
-        picks: [],
+        picks: Array.from({ length: 15 }, (_, index) => ({
+          element: BENCHMARK_PLAYER_BASE_ID + index,
+          position: index + 1,
+          multiplier: index === 0 ? 2 : index < 11 ? 1 : 0,
+          is_captain: index === 0,
+          is_vice_captain: index === 1,
+        })),
       }));
     },
   });
@@ -185,6 +229,20 @@ async function prepareBenchmarkInfrastructure(eventCount: number): Promise<strin
     INSERT INTO events (id, name, finished, data_checked)
     SELECT event_id, 'Benchmark GW' || event_id, true, true
     FROM unnest(${eventIds}::integer[]) AS event_id
+    ON CONFLICT (id) DO NOTHING
+  `;
+  await sql`
+    INSERT INTO teams (id, code, name, short_name, pulse_id)
+    VALUES (
+      ${BENCHMARK_TEAM_ID}, ${BENCHMARK_TEAM_ID}, 'Benchmark Team', 'BEN', ${BENCHMARK_TEAM_ID}
+    )
+    ON CONFLICT (id) DO NOTHING
+  `;
+  const playerIds = Array.from({ length: 15 }, (_, index) => BENCHMARK_PLAYER_BASE_ID + index);
+  await sql`
+    INSERT INTO players (id, code, type, team_id, web_name)
+    SELECT id, id, ((ordinal - 1) % 4) + 1, ${BENCHMARK_TEAM_ID}, 'Benchmark Player ' || ordinal
+    FROM unnest(${playerIds}::integer[]) WITH ORDINALITY AS player(id, ordinal)
     ON CONFLICT (id) DO NOTHING
   `;
 
@@ -208,6 +266,17 @@ async function cleanupBenchmarkEntries(entryIds: number[], season: string): Prom
   });
   const redis = await redisSingleton.getClient();
   await redis.hdel(`EntryInfo:${season}`, ...entryIds.map(String));
+}
+
+async function cleanupBenchmarkReferenceRows(): Promise<void> {
+  const sql = await getDbClient();
+  const playerIds = Array.from({ length: 15 }, (_, index) => BENCHMARK_PLAYER_BASE_ID + index);
+  await sql`DELETE FROM event_lives WHERE element_id = ANY(${playerIds}::integer[])`;
+  await sql`DELETE FROM players WHERE id = ANY(${playerIds}::integer[])`;
+  await sql`DELETE FROM teams WHERE id = ${BENCHMARK_TEAM_ID}`;
+  const redis = await redisSingleton.getClient();
+  const keys = await redis.keys('EventLive:*:1');
+  if (keys.length > 0) await redis.del(...keys);
 }
 
 async function clearEventLiveCheckpoint(eventId: number): Promise<void> {
@@ -456,6 +525,7 @@ describe.skipIf(!RUN_BENCHMARK)('tournament setup performance benchmark', () => 
         await cleanupBenchmarkEntries(oneEntryIds, season);
         await cleanupBenchmarkEntries(mediumEntryIds, season);
         await cleanupBenchmarkEntries(largeEntryIds, season);
+        await cleanupBenchmarkReferenceRows();
       }
     },
     { timeout: 600_000 },

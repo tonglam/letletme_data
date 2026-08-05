@@ -17,6 +17,8 @@ export interface EntrySyncJobOptions {
   entryIds?: number[];
   retryCount?: number;
   chunkOffset?: number;
+  afterEntryId?: number;
+  resumeAfterEntryId?: number;
   chunkSize?: number;
   concurrency?: number;
   throttleMs?: number;
@@ -26,17 +28,32 @@ export interface EntrySyncJobOptions {
   runId?: string;
   /** Stable deduplication key for every table-scan chunk in one trigger lane. */
   queueKey?: string;
+  removeOnSettle?: boolean;
+}
+
+export function retainEntrySyncChainOptions(
+  options: Pick<EntrySyncJobOptions, 'runId' | 'queueKey' | 'removeOnSettle'> | undefined,
+): Pick<EntrySyncJobOptions, 'runId' | 'queueKey' | 'removeOnSettle'> {
+  return {
+    runId: options?.runId,
+    queueKey: options?.queueKey,
+    removeOnSettle: options?.removeOnSettle,
+  };
 }
 
 function hashEntryListKey(
   entryIds: readonly number[],
   eventId?: number,
   retryCount?: number,
+  runId?: string,
 ): string {
   const sorted = [...entryIds].sort((a, b) => a - b).join(',');
   // Include retryCount so delayed full-batch retries do not collide with the
-  // still-active original jobId (BullMQ dedupes identical jobIds).
-  return stableHash(`${sorted}|e${eventId ?? ''}|r${retryCount ?? 0}`);
+  // still-active original jobId (BullMQ dedupes identical jobIds). Internal
+  // retries also include their scan identity so overlapping scans cannot
+  // swallow one another's continuation.
+  const retryScope = (retryCount ?? 0) > 0 ? `|run${runId ?? ''}` : '';
+  return stableHash(`${sorted}|e${eventId ?? ''}|r${retryCount ?? 0}${retryScope}`);
 }
 
 function sanitizePositiveInt(value: number | undefined, fallback: number) {
@@ -115,6 +132,8 @@ async function enqueueEntrySyncJob(
     // chunk still uses a separate stable queue key to dedupe concurrent triggers.
     const runId = options.runId ?? (source === 'cron' ? `${Date.now()}` : randomUUID());
     const tableScanQueueKey = options.queueKey ?? (source === 'manual' ? 'manual' : runId);
+    const isEntryList = options.entryIds !== undefined;
+    const removeOnSettle = options.removeOnSettle === true || isEntryList || source === 'manual';
 
     const jobData = {
       source,
@@ -122,27 +141,28 @@ async function enqueueEntrySyncJob(
       entryIds: options.entryIds,
       retryCount: options.retryCount,
       chunkOffset,
+      afterEntryId: options.afterEntryId,
+      resumeAfterEntryId: options.resumeAfterEntryId,
       chunkSize,
       concurrency,
       throttleMs,
       eventId: options.eventId,
       runId,
       queueKey: tableScanQueueKey,
+      removeOnSettle,
     };
 
+    const cursor = options.afterEntryId ?? chunkOffset;
     const chunkKey =
-      options.eventId !== undefined ? `${chunkOffset}-event-${options.eventId}` : `${chunkOffset}`;
+      options.eventId !== undefined ? `${cursor}-event-${options.eventId}` : `${cursor}`;
     // Entry-list jobs (API with explicit IDs) keep their content-based ID.
     // Table-scan chunks get deterministic IDs keyed by the trigger lane + offset
     // so correlation IDs can vary without forking parallel manual chains.
-    const isEntryList = options.entryIds !== undefined;
     const defaultJobId = isEntryList
-      ? `${jobName}-entry-list-${hashEntryListKey(options.entryIds ?? [], options.eventId, options.retryCount)}`
+      ? `${jobName}-entry-list-${hashEntryListKey(options.entryIds ?? [], options.eventId, options.retryCount, runId)}`
       : `${jobName}-${tableScanQueueKey}-chunk-${chunkKey}`;
     const jobId = options.jobId ?? defaultJobId;
     // Deterministic IDs must not block re-triggers after settle.
-    const removeOnSettle = isEntryList || source === 'manual';
-
     const job = await queue.add(jobName, jobData, {
       attempts: 3,
       backoff: {

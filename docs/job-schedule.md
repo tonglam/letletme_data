@@ -6,16 +6,16 @@ event, fixture-window, and data-availability gates before enqueueing.
 
 ## Core season discovery
 
-These jobs run year-round so a newly published season can be discovered before
+This job runs year-round so a newly published season can be discovered before
 the fixture-derived `isFPLSeason` window opens.
 
 | Job | Cron | Gate |
 |---|---|---|
-| `events-sync` | `35 6 * * *` | None; empty events preserve existing state |
-| `teams-sync` | `37 6 * * *` | None; empty teams preserve existing state |
-| `fixtures-sync` | `40 6 * * *` | None; empty fixtures preserve existing state |
-| `players-sync` | `43 6 * * *` | None; empty players preserve existing state |
-| `phases-sync` | `45 6 * * *` | None; empty phases preserve existing state |
+| `core-snapshot-sync` | `35 6 * * *` | None; both validated upstream payloads are required before atomic publication |
+
+The snapshot uses one bootstrap call and one fixtures call. Events, teams,
+players, phases, and fixtures are committed together; an empty or incomplete
+payload preserves the previously accepted PostgreSQL and Redis state.
 
 `player-stats-sync` runs at `40 9 * * *` but is not a discovery job. Player
 values and stats use the player-specific `current ?? next` resolver so GW1 can
@@ -26,7 +26,7 @@ be initialized before the ordinary current-event gate opens.
 | Job | Cron | Gate / behavior |
 |---|---|---|
 | `launch-monitor` | `*/5 * * * *` | One bootstrap read detects both an empty-event warning and a published current-year GW1; each notification is sent once |
-| `event-current-refresh` | `* * * * *` | `isFPLSeason`; rebuilds `event:current` and enqueues events sync when the GW changes |
+| `event-current-refresh` | `* * * * *` | `isFPLSeason`; rebuilds `event:current` and enqueues the core snapshot when the GW changes |
 
 The launch monitor calls the FPL bootstrap endpoint directly from the API
 process. All other synchronization work is queue-backed.
@@ -53,8 +53,9 @@ tick can enqueue when needed.
 | `entry-event-results-daily` | `45 10 * * *` | `isFPLSeason` and current event |
 
 Entry jobs operate only on known `entry_infos`; core season bootstrap does not
-create entry bindings. Failed entry IDs can be retried by the entry worker's
-bounded retry cycle.
+create entry bindings. Scans use an entry-ID keyset cursor, failed-entry retries
+contain only exact failed IDs, and canonical snapshot/pick/result/transfer
+checkpoints prevent successful units from being fetched again.
 
 ## Match-window live jobs
 
@@ -113,6 +114,11 @@ active tournament entry was processed. The cascade contains:
 - cup results;
 - one materialized-view refresh after the three structure jobs reach their
   Redis-backed completion barrier.
+
+Tournament and league jobs audit canonical rows before returning. Missing
+required units fail the BullMQ attempt; a valid absence such as no transfer or
+no FPL cup match remains a successful no-op. A Bull retry reuses rows written
+since that same job began and fetches only the remaining entry/event units.
 
 ## Tournament metadata
 

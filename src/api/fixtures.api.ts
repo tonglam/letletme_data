@@ -36,6 +36,7 @@ export const fixturesAPI = new Elysia({ prefix: '/fixtures' })
   )
 
   .post('/sync-all-gameweeks', async ({ set }) => {
+    // Keep the compatibility route, but use the validated two-request snapshot.
     const job = await enqueueCoreSnapshotJob('api');
     set.status = 202;
     return {

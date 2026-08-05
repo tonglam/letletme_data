@@ -49,6 +49,7 @@ curl -X POST http://data.internal.example/events/sync -H "x-api-key: $API_KEY"
   - `curl http://data.internal.example/events/next`
 - `POST /events/sync`
   - `curl -X POST http://data.internal.example/events/sync -H "x-api-key: $API_KEY"`
+  - Enqueues the complete atomic core snapshot, not an events-only write.
 
 ## Event Lives
 
@@ -63,10 +64,13 @@ curl -X POST http://data.internal.example/events/sync -H "x-api-key: $API_KEY"
 
 - `POST /fixtures/sync`
   - `curl -X POST http://data.internal.example/fixtures/sync`
+  - Without `event`, this is an alias for the complete atomic core snapshot.
 - `POST /fixtures/sync?event=:eventId`
   - `curl -X POST 'http://data.internal.example/fixtures/sync?event=1'`
 - `POST /fixtures/sync-all-gameweeks`
   - `curl -X POST http://data.internal.example/fixtures/sync-all-gameweeks`
+  - Legacy alias for the same two-request core snapshot; it does not make 38
+    separate fixture requests.
 - `DELETE /fixtures/cache`
   - `curl -X DELETE http://data.internal.example/fixtures/cache`
 
@@ -103,7 +107,7 @@ curl -X POST http://data.internal.example/events/sync -H "x-api-key: $API_KEY"
 - `GET /jobs`
   - `curl http://data.internal.example/jobs`
 - `POST /jobs/:name/trigger`
-  - `curl -X POST http://data.internal.example/jobs/events-sync/trigger`
+  - `curl -X POST http://data.internal.example/jobs/core-snapshot-sync/trigger`
   - `curl -X POST -H 'content-type: application/json' -d '{"changeDate":"20260803"}' http://data.internal.example/jobs/player-prices/trigger`
   - `curl -X POST http://data.internal.example/jobs/live-snapshot/trigger`
   - `curl -X POST http://data.internal.example/jobs/event-lives-db-sync/trigger`
@@ -111,14 +115,10 @@ curl -X POST http://data.internal.example/events/sync -H "x-api-key: $API_KEY"
 
 Supported job names:
 
-- `events-sync`
+- `core-snapshot-sync`
 - `event-current-refresh`
-- `fixtures-sync`
-- `teams-sync`
-- `players-sync`
 - `player-prices` (requires JSON body `{ "changeDate": "YYYYMMDD" }`)
 - `player-stats-sync`
-- `phases-sync`
 - `player-values-sync`
 - `entry-info-daily`
 - `entry-event-picks-daily`
@@ -149,3 +149,7 @@ Supported job names:
 
 `GET /jobs` is the runtime authority for the complete trigger list and current
 descriptions.
+
+The old `events-sync`, `fixtures-sync`, `teams-sync`, `players-sync`, and
+`phases-sync` trigger names remain accepted as compatibility aliases; each
+enqueues `core-snapshot-sync`.

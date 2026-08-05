@@ -209,6 +209,34 @@ describe('entry-event-transfers element_in_played (H5)', () => {
       secondSync.filter((row) => row.event_id === EVENT_ID).every((row) => row.element_in_played),
     ).toBe(true);
   });
+
+  test('batch enrichment returns the number of rows actually updated', async () => {
+    const existing = await (await db())<{ id: number }[]>`
+      SELECT id
+      FROM entry_event_transfers
+      WHERE entry_id = ${ENTRY_ID} AND event_id = ${EVENT_ID}
+      ORDER BY id
+      LIMIT 1
+    `;
+    expect(existing).toHaveLength(1);
+
+    const updated = await transfersRepository.updateBatchById([
+      {
+        id: existing[0].id,
+        elementInPoints: 3,
+        elementOutPoints: 2,
+        elementInPlayed: true,
+      },
+      {
+        id: 2_147_483_647,
+        elementInPoints: 0,
+        elementOutPoints: 0,
+        elementInPlayed: false,
+      },
+    ]);
+
+    expect(updated).toBe(1);
+  });
 });
 
 describe('player-values concurrent insert race (H6)', () => {

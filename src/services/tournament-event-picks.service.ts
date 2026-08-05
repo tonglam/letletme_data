@@ -3,6 +3,7 @@ import { tournamentEntryRepository } from '../repositories/tournament-entries';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
 import { syncEntryEventPicks } from './entries.service';
 import { mapWithConcurrency, uniqueNumbers } from '../utils/async';
+import { IncompleteDataSyncError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 
 const DEFAULT_CONCURRENCY = 5;
@@ -11,6 +12,13 @@ type EntrySyncOutcome = {
   entryId: number;
   success: boolean;
 };
+
+export function findMissingTournamentPickEntryIds(
+  expectedEntryIds: readonly number[],
+  persistedEntryIds: ReadonlySet<number>,
+): number[] {
+  return expectedEntryIds.filter((entryId) => !persistedEntryIds.has(entryId));
+}
 
 export async function syncTournamentEventPicks(
   eventId: number,
@@ -21,47 +29,72 @@ export async function syncTournamentEventPicks(
   synced: number;
   skipped: number;
   errors: number;
+  requiredUnits: number;
+  reusedUnits: number;
+  succeededUnits: number;
+  failedUnits: number;
 }> {
   logInfo('Starting tournament event picks sync', { eventId });
 
   const tournaments = await tournamentInfoRepository.findActive();
   if (tournaments.length === 0) {
     logInfo('No active tournaments found for tournament event picks', { eventId });
-    return { eventId, totalEntries: 0, synced: 0, skipped: 0, errors: 0 };
+    return {
+      eventId,
+      totalEntries: 0,
+      synced: 0,
+      skipped: 0,
+      errors: 0,
+      requiredUnits: 0,
+      reusedUnits: 0,
+      succeededUnits: 0,
+      failedUnits: 0,
+    };
   }
 
   const concurrency = options?.concurrency ?? DEFAULT_CONCURRENCY;
-  let synced = 0;
-  let errors = 0;
-
-  const entryLists = await Promise.all(
-    tournaments.map((tournament) =>
-      tournamentEntryRepository.findEntryIdsByTournamentId(tournament.id),
-    ),
+  const entryLists = await mapWithConcurrency(tournaments, 10, (tournament) =>
+    tournamentEntryRepository.findEntryIdsByTournamentId(tournament.id),
   );
   const entryIds = uniqueNumbers(entryLists.flat()).filter((entryId) => entryId > 0);
   if (entryIds.length === 0) {
     logInfo('No tournament entries found for event picks', { eventId });
-    return { eventId, totalEntries: 0, synced: 0, skipped: 0, errors: 0 };
+    return {
+      eventId,
+      totalEntries: 0,
+      synced: 0,
+      skipped: 0,
+      errors: 0,
+      requiredUnits: 0,
+      reusedUnits: 0,
+      succeededUnits: 0,
+      failedUnits: 0,
+    };
   }
 
   const existing = await entryEventPicksRepository.findEntryIdsByEvent(eventId, entryIds);
   const existingSet = new Set(existing);
   const toSync = entryIds.filter((entryId) => !existingSet.has(entryId));
-  const skipped = existing.length;
+  const skipped = existingSet.size;
 
-  const results = await mapWithConcurrency(toSync, concurrency, async (entryId) => {
+  await mapWithConcurrency(toSync, concurrency, async (entryId) => {
     try {
       await syncEntryEventPicks(entryId, eventId);
       return { entryId, success: true } satisfies EntrySyncOutcome;
     } catch (error) {
-      errors += 1;
       logError('Failed to sync tournament entry picks', error, { eventId, entryId });
       return { entryId, success: false } satisfies EntrySyncOutcome;
     }
   });
 
-  synced += results.filter((result) => result.success).length;
+  // Canonical rows, rather than request outcomes, are the checkpoint. A request
+  // may fail after a concurrent worker has already completed the same unit.
+  const persisted = new Set(await entryEventPicksRepository.findEntryIdsByEvent(eventId, entryIds));
+  const missingEntryIds = findMissingTournamentPickEntryIds(entryIds, persisted);
+  const failedUnits = missingEntryIds.length;
+  const succeededUnits = toSync.length - failedUnits;
+  const synced = succeededUnits;
+  const errors = failedUnits;
 
   logInfo('Tournament event picks sync completed', {
     eventId,
@@ -71,11 +104,25 @@ export async function syncTournamentEventPicks(
     errors,
   });
 
-  if (errors > 0) {
-    throw new Error(
-      `Tournament event picks sync failed for ${errors} entries (eventId=${eventId})`,
+  if (failedUnits > 0) {
+    throw new IncompleteDataSyncError(
+      'Tournament event picks did not converge for every active entry',
+      toSync.length,
+      skipped,
+      succeededUnits,
+      failedUnits,
     );
   }
 
-  return { eventId, totalEntries: entryIds.length, synced, skipped, errors };
+  return {
+    eventId,
+    totalEntries: entryIds.length,
+    synced,
+    skipped,
+    errors,
+    requiredUnits: toSync.length,
+    reusedUnits: skipped,
+    succeededUnits,
+    failedUnits,
+  };
 }

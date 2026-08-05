@@ -68,6 +68,21 @@ export const createEventRepository = (dbInstance?: DbOrTransaction) => {
   };
 
   return {
+    findById: async (eventId: number): Promise<DbEvent | null> => {
+      try {
+        const db = await getDbInstance();
+        const result = await db.select().from(events).where(eq(events.id, eventId)).limit(1);
+        return result[0] ?? null;
+      } catch (error) {
+        logError('Failed to find event by id', error, { eventId });
+        throw new DatabaseError(
+          'Failed to retrieve event by id',
+          'FIND_EVENT_BY_ID_ERROR',
+          error instanceof Error ? error : undefined,
+        );
+      }
+    },
+
     findCurrent: async (): Promise<DbEvent | null> => {
       try {
         const event = await findCurrentInternal();
@@ -126,6 +141,7 @@ export const createEventRepository = (dbInstance?: DbOrTransaction) => {
           averageEntryScore: event.averageEntryScore,
           finished: event.finished,
           dataChecked: event.dataChecked,
+          dataCheckedAt: event.dataChecked ? new Date() : null,
           highestScoringEntry: event.highestScoringEntry,
           deadlineTimeEpoch: event.deadlineTimeEpoch,
           deadlineTimeGameOffset: event.deadlineTimeGameOffset,
@@ -158,6 +174,14 @@ export const createEventRepository = (dbInstance?: DbOrTransaction) => {
               averageEntryScore: sql`excluded.average_entry_score`,
               finished: sql`excluded.finished`,
               dataChecked: sql`excluded.data_checked`,
+              dataCheckedAt: sql`
+                CASE
+                  WHEN excluded.data_checked = true
+                    AND (${events.dataChecked} = false OR ${events.dataCheckedAt} IS NULL)
+                  THEN now()
+                  ELSE ${events.dataCheckedAt}
+                END
+              `,
               highestScoringEntry: sql`excluded.highest_scoring_entry`,
               deadlineTimeEpoch: sql`excluded.deadline_time_epoch`,
               deadlineTimeGameOffset: sql`excluded.deadline_time_game_offset`,

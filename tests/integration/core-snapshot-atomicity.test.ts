@@ -17,7 +17,7 @@ import {
 import { clearStaleSeasonCache, resetActiveSeasonMemo } from '../../src/cache/cache-season';
 import { redisSingleton } from '../../src/cache/singleton';
 import { eventFixtures, events, players } from '../../src/db/schemas/index.schema';
-import { getDb, type DbHandle } from '../../src/db/singleton';
+import { getDb, getDbClient, type DbHandle } from '../../src/db/singleton';
 import { prepareCoreSnapshot, type CoreSnapshot } from '../../src/domain/core-snapshot';
 import { allocateCoreSnapshotRevision } from '../../src/repositories/core-snapshot-authority';
 import { createFixtureRepository } from '../../src/repositories/fixtures';
@@ -117,6 +117,14 @@ describeAtomicity('core snapshot atomicity', () => {
 
   test('publishes all core cache families together after persistence', async () => {
     const input = buildCoreSnapshotFixture({ playerCount: 600 });
+    await persistCoreSnapshot(snapshot);
+    const sqlClient = await getDbClient();
+    const staleFixtureId = 9_900_001;
+    await sqlClient`
+      INSERT INTO event_fixtures (id, code, event_id, team_a_id, team_h_id, pulse_id)
+      VALUES (${staleFixtureId}, ${staleFixtureId}, NULL, 1, 2, ${staleFixtureId})
+      ON CONFLICT (id) DO NOTHING
+    `;
     let bootstrapCalls = 0;
     let fixtureCalls = 0;
     const milestones: CoreSnapshotMilestone[] = [];
@@ -155,6 +163,12 @@ describeAtomicity('core snapshot atomicity', () => {
     expect(await redis.keys(`Fixtures:${snapshot.season}:*`)).toHaveLength(38);
     expect(await redis.keys(`FixturesByTeam:${snapshot.season}:*`)).toHaveLength(20);
     expect(await redis.exists('EntryInfo:2526:sentinel')).toBe(0);
+    const canonicalFixtureRows = await sqlClient<
+      { count: number; stale: number }[]
+    >`SELECT COUNT(*)::int AS count,
+             COUNT(*) FILTER (WHERE id = ${staleFixtureId})::int AS stale
+      FROM event_fixtures`;
+    expect(canonicalFixtureRows[0]).toEqual({ count: 381, stale: 1 });
   });
 
   test('persists published hashes and excludes Live staging keys from backups', async () => {

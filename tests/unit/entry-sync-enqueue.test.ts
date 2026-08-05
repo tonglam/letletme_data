@@ -34,7 +34,9 @@ mock.module('../../src/services/events.service', () => ({
 }));
 
 const { logger } = await import('../../src/utils/logger');
-const { enqueueEntryPicksSyncJob } = await import('../../src/jobs/entry-sync-enqueue');
+const { enqueueEntryPicksSyncJob, retainEntrySyncChainOptions } = await import(
+  '../../src/jobs/entry-sync-enqueue'
+);
 
 describe('entry-sync enqueue runId propagation', () => {
   beforeEach(() => {
@@ -161,5 +163,56 @@ describe('entry-sync enqueue runId propagation', () => {
       'Entry sync job enqueued',
     );
     infoSpy.mockRestore();
+  });
+
+  test('uses a stable keyset cursor and preserves retry continuation', async () => {
+    const job = await enqueueEntryPicksSyncJob('cron', {
+      afterEntryId: 450,
+      resumeAfterEntryId: 450,
+      eventId: 20,
+      runId: 'chain-keyset',
+    });
+
+    expect(job!.id).toBe('entry-picks-chain-keyset-chunk-450-event-20');
+    expect(addCalls[0].data.afterEntryId).toBe(450);
+    expect(addCalls[0].data.resumeAfterEntryId).toBe(450);
+  });
+
+  test('scopes exact failed-ID retries to their originating scan', async () => {
+    const first = await enqueueEntryPicksSyncJob('cron', {
+      entryIds: [10, 20],
+      eventId: 20,
+      retryCount: 1,
+      runId: 'scan-a',
+    });
+    const second = await enqueueEntryPicksSyncJob('cron', {
+      entryIds: [10, 20],
+      eventId: 20,
+      retryCount: 1,
+      runId: 'scan-b',
+    });
+
+    expect(first.id).not.toBe(second.id);
+    expect(addCalls[0].data.runId).toBe('scan-a');
+    expect(addCalls[1].data.runId).toBe('scan-b');
+  });
+
+  test('carries settlement removal through a deterministic cron continuation', async () => {
+    const root = await enqueueEntryPicksSyncJob('cron', {
+      runId: 'daily-scan',
+      removeOnSettle: true,
+    });
+    const rootData = addCalls[0].data;
+    const continuation = await enqueueEntryPicksSyncJob('cron', {
+      afterEntryId: 500,
+      ...retainEntrySyncChainOptions(rootData),
+    });
+
+    expect(root.id).toBe('entry-picks-daily-scan-chunk-0');
+    expect(continuation.id).toBe('entry-picks-daily-scan-chunk-500');
+    expect(rootData.removeOnSettle).toBe(true);
+    expect(addCalls[0].opts).toMatchObject({ removeOnComplete: true, removeOnFail: true });
+    expect(addCalls[1].data.removeOnSettle).toBe(true);
+    expect(addCalls[1].opts).toMatchObject({ removeOnComplete: true, removeOnFail: true });
   });
 });

@@ -443,19 +443,19 @@ export const createEntryEventTransfersRepository = (dbInstance?: DatabaseInstanc
     updateBatchById: async (
       updates: Array<{
         id: number;
-        entryId: number;
+        entryId?: number;
         elementInPoints: number | null;
         elementOutPoints: number | null;
         elementInPlayed: boolean | null;
       }>,
-      checkpointSeason: string,
+      checkpointSeason?: string,
     ): Promise<number> => {
       if (updates.length === 0) {
         return 0;
       }
 
       try {
-        if (!/^\d{4}$/.test(checkpointSeason)) {
+        if (checkpointSeason !== undefined && !/^\d{4}$/.test(checkpointSeason)) {
           throw new Error('A valid four-digit checkpoint season is required');
         }
         const db = await getDbInstance();
@@ -469,21 +469,24 @@ export const createEntryEventTransfersRepository = (dbInstance?: DatabaseInstanc
         );
 
         const updatedCount = await db.transaction(async (tx) => {
-          await acquireEntrySeasonWriteFence(
-            tx,
-            updates.map((update) => update.entryId),
-            checkpointSeason,
-          );
+          const entryIds = updates
+            .map((update) => update.entryId)
+            .filter((entryId): entryId is number => entryId !== undefined);
+          if (checkpointSeason !== undefined && entryIds.length > 0) {
+            await acquireEntrySeasonWriteFence(tx, entryIds, checkpointSeason);
+          }
           const expectedIds = [...new Set(updates.map((update) => update.id))];
-          const lockedRows = await tx
-            .select({ id: entryEventTransfers.id })
-            .from(entryEventTransfers)
-            .where(inArray(entryEventTransfers.id, expectedIds))
-            .for('update');
-          if (lockedRows.length !== expectedIds.length) {
-            throw new Error(
-              'Entry event transfer rows changed while waiting for the entry season write fence',
-            );
+          if (checkpointSeason !== undefined) {
+            const lockedRows = await tx
+              .select({ id: entryEventTransfers.id })
+              .from(entryEventTransfers)
+              .where(inArray(entryEventTransfers.id, expectedIds))
+              .for('update');
+            if (lockedRows.length !== expectedIds.length) {
+              throw new Error(
+                'Entry event transfer rows changed while waiting for the entry season write fence',
+              );
+            }
           }
 
           const updatedRows = (await tx.execute(sql`
@@ -510,7 +513,7 @@ export const createEntryEventTransfersRepository = (dbInstance?: DatabaseInstanc
             where eet.id = data.id
             returning eet.id
           `)) as unknown as Array<{ id: number }>;
-          if (updatedRows.length !== expectedIds.length) {
+          if (checkpointSeason !== undefined && updatedRows.length !== expectedIds.length) {
             throw new Error('Entry event transfer update lost canonical rows');
           }
 

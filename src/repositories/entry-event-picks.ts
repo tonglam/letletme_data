@@ -1,7 +1,8 @@
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import { entryEventPicks, type DbEntryEventPickInsert } from '../db/schemas/index.schema';
 import { getDb, type DbOrTransaction } from '../db/singleton';
 import { toDbChip } from '../domain/chips';
+import { isCompleteEntryPicks } from '../domain/entry-picks';
 import type { RawFPLEntryEventPicksResponse } from '../types';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
@@ -28,10 +29,10 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
 
         if (!entryIds || entryIds.length === 0) {
           const rows = await db
-            .select({ entryId: entryEventPicks.entryId })
+            .select({ entryId: entryEventPicks.entryId, picks: entryEventPicks.picks })
             .from(entryEventPicks)
             .where(eq(entryEventPicks.eventId, eventId));
-          return rows.map((row) => row.entryId);
+          return rows.filter((row) => isCompleteEntryPicks(row.picks)).map((row) => row.entryId);
         }
 
         const uniqueEntryIds = Array.from(new Set(entryIds));
@@ -40,12 +41,14 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
 
         for (const chunk of chunks) {
           const rows = await db
-            .select({ entryId: entryEventPicks.entryId })
+            .select({ entryId: entryEventPicks.entryId, picks: entryEventPicks.picks })
             .from(entryEventPicks)
             .where(
               and(eq(entryEventPicks.eventId, eventId), inArray(entryEventPicks.entryId, chunk)),
             );
-          results.push(...rows.map((row) => row.entryId));
+          results.push(
+            ...rows.filter((row) => isCompleteEntryPicks(row.picks)).map((row) => row.entryId),
+          );
         }
 
         return results;
@@ -63,8 +66,13 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
       entryId: number,
       eventId: number,
       picks: RawFPLEntryEventPicksResponse,
+      syncedAt = new Date(),
     ): Promise<void> => {
       try {
+        if (!isCompleteEntryPicks(picks.picks)) {
+          throw new Error(`Refusing incomplete entry picks for entry ${entryId}, event ${eventId}`);
+        }
+
         const db = await getDbInstance();
         const insert: DbEntryEventPickInsert = {
           entryId,
@@ -73,6 +81,7 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
           picks: picks.picks as unknown,
           transfers: picks.entry_history.event_transfers,
           transfersCost: picks.entry_history.event_transfers_cost,
+          updatedAt: syncedAt,
         };
 
         await db
@@ -80,12 +89,18 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
           .values(insert)
           .onConflictDoUpdate({
             target: [entryEventPicks.entryId, entryEventPicks.eventId],
+            // updated_at is the evidence timestamp for this picks-only row.
+            // A slower result attempt must not replace a newer squad.
+            where: sql`
+              ${entryEventPicks.updatedAt} IS NULL
+              OR ${entryEventPicks.updatedAt} <= ${syncedAt.toISOString()}
+            `,
             set: {
               chip: insert.chip,
               picks: insert.picks,
               transfers: insert.transfers,
               transfersCost: insert.transfersCost,
-              updatedAt: new Date(),
+              updatedAt: syncedAt,
             },
           });
         logInfo('Upserted entry event picks', { entryId, eventId, chip: insert.chip });

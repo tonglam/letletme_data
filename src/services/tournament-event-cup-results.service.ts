@@ -6,6 +6,7 @@ import { tournamentEntryRepository } from '../repositories/tournament-entries';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
 import type { RawFPLEntryCupMatch } from '../types';
 import { mapWithConcurrency, uniqueNumbers } from '../utils/async';
+import { IncompleteDataSyncError } from '../utils/errors';
 import { logDebug, logError, logInfo } from '../utils/logger';
 
 const DEFAULT_CONCURRENCY = 5;
@@ -118,10 +119,24 @@ export async function syncTournamentEventCupResults(
   upserted: number;
   skipped: number;
   errors: number;
+  requiredUnits: number;
+  reusedUnits: number;
+  succeededUnits: number;
+  failedUnits: number;
 }> {
   if (eventId < 17 || eventId > 38) {
     logInfo('Skipping tournament event cup results sync - invalid event', { eventId });
-    return { eventId, totalEntries: 0, upserted: 0, skipped: 0, errors: 0 };
+    return {
+      eventId,
+      totalEntries: 0,
+      upserted: 0,
+      skipped: 0,
+      errors: 0,
+      requiredUnits: 0,
+      reusedUnits: 0,
+      succeededUnits: 0,
+      failedUnits: 0,
+    };
   }
 
   logInfo('Starting tournament event cup results sync', { eventId });
@@ -129,19 +144,37 @@ export async function syncTournamentEventCupResults(
   const tournaments = await tournamentInfoRepository.findActive();
   if (tournaments.length === 0) {
     logInfo('No active tournaments found for cup results', { eventId });
-    return { eventId, totalEntries: 0, upserted: 0, skipped: 0, errors: 0 };
+    return {
+      eventId,
+      totalEntries: 0,
+      upserted: 0,
+      skipped: 0,
+      errors: 0,
+      requiredUnits: 0,
+      reusedUnits: 0,
+      succeededUnits: 0,
+      failedUnits: 0,
+    };
   }
 
-  const entryLists = await Promise.all(
-    tournaments.map((tournament) =>
-      tournamentEntryRepository.findEntryIdsByTournamentId(tournament.id),
-    ),
+  const entryLists = await mapWithConcurrency(tournaments, 10, (tournament) =>
+    tournamentEntryRepository.findEntryIdsByTournamentId(tournament.id),
   );
 
   const entryIds = uniqueNumbers(entryLists.flat()).filter((entryId) => entryId > 0);
   if (entryIds.length === 0) {
     logInfo('No tournament entries found for cup results', { eventId });
-    return { eventId, totalEntries: 0, upserted: 0, skipped: 0, errors: 0 };
+    return {
+      eventId,
+      totalEntries: 0,
+      upserted: 0,
+      skipped: 0,
+      errors: 0,
+      requiredUnits: 0,
+      reusedUnits: 0,
+      succeededUnits: 0,
+      failedUnits: 0,
+    };
   }
 
   const checkpointSeason = await getActiveCacheSeason();
@@ -162,11 +195,28 @@ export async function syncTournamentEventCupResults(
     errors,
   });
 
-  if (errors > 0) {
-    throw new Error(
-      `Tournament event cup results sync failed for ${errors} of ${entryIds.length} entries`,
+  const writeFailures = Math.max(0, records.length - upserted);
+  const failedUnits = errors + writeFailures;
+  const succeededUnits = entryIds.length - failedUnits;
+  if (failedUnits > 0) {
+    throw new IncompleteDataSyncError(
+      'Tournament cup results did not converge for every requested entry',
+      entryIds.length,
+      0,
+      succeededUnits,
+      failedUnits,
     );
   }
 
-  return { eventId, totalEntries: entryIds.length, upserted, skipped, errors };
+  return {
+    eventId,
+    totalEntries: entryIds.length,
+    upserted,
+    skipped,
+    errors,
+    requiredUnits: entryIds.length,
+    reusedUnits: 0,
+    succeededUnits,
+    failedUnits,
+  };
 }

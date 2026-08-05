@@ -103,3 +103,26 @@ describe('core snapshot authority migration', () => {
     expect(migration).toContain('price_source_checked_at');
   });
 });
+
+describe('entry result rich checkpoint migration', () => {
+  test('follows core authority and preserves the existing table security boundary', () => {
+    const migration = readFileSync(
+      'migrations/0046_entry_event_result_rich_checkpoint.sql',
+      'utf8',
+    );
+
+    expect(migration).toContain('ADD COLUMN IF NOT EXISTS rich_synced_at timestamptz');
+    expect(migration).toContain('ADD COLUMN IF NOT EXISTS source_checked_at timestamptz');
+    expect(migration).not.toContain('GRANT');
+  });
+});
+
+describe('event finalization checkpoint migration', () => {
+  test('adds a stable cutoff without changing the existing table security boundary', () => {
+    const migration = readFileSync('migrations/0047_event_data_checked_at.sql', 'utf8');
+
+    expect(migration).toContain('ADD COLUMN IF NOT EXISTS data_checked_at timestamptz');
+    expect(migration).toContain('WHERE data_checked = true');
+    expect(migration).not.toContain('GRANT');
+  });
+});

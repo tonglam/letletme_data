@@ -1,0 +1,151 @@
+import { describe, expect, test } from 'bun:test';
+
+import type { DbEntryEventResult, DbEventLive } from '../../src/db/schemas/index.schema';
+import { validateAutomaticSubs } from '../../src/repositories/entry-event-results';
+import {
+  buildEntryResultData,
+  findMissingLeagueResultEntryIds,
+  isEntryResultRichEnough,
+} from '../../src/services/league-event-results.service';
+import type { RawFPLEntryEventPicksResponse } from '../../src/types';
+
+describe('league event result convergence', () => {
+  test('rejects malformed fallback automatic substitutions', () => {
+    const picks = Array.from({ length: 15 }, (_, index) => ({
+      element: index + 1,
+      position: index + 1,
+      multiplier: index === 0 ? 2 : index < 11 ? 1 : 0,
+      is_captain: index === 0,
+      is_vice_captain: index === 1,
+    }));
+    expect(() =>
+      validateAutomaticSubs(123, 9, {
+        active_chip: null,
+        automatic_subs: [{ entry: 999, event: 9, element_in: 1, element_out: 2 }],
+        entry_history: {
+          event: 9,
+          points: 1,
+          total_points: 1,
+          rank: 1,
+          overall_rank: 1,
+          bank: 0,
+          value: 1000,
+          event_transfers: 0,
+          event_transfers_cost: 0,
+          points_on_bench: 0,
+        },
+        picks,
+      }),
+    ).toThrow('Refusing invalid automatic substitutions');
+  });
+
+  test('requires rich evidence at or after the requested freshness boundary', () => {
+    const cutoff = new Date('2026-08-04T10:00:00.000Z');
+    expect(isEntryResultRichEnough(undefined, cutoff)).toBe(false);
+    expect(
+      isEntryResultRichEnough({ richSyncedAt: new Date('2026-08-04T09:59:59.999Z') }, cutoff),
+    ).toBe(false);
+    expect(isEntryResultRichEnough({ richSyncedAt: cutoff }, cutoff)).toBe(true);
+    expect(isEntryResultRichEnough({ richSyncedAt: null })).toBe(false);
+  });
+
+  test('uses fetched picks when a baseline core row has no rich picks yet', () => {
+    const core = {
+      eventPicks: null,
+      eventAutoSub: null,
+      eventPoints: 55,
+      eventTransfers: 1,
+      eventTransfersCost: 4,
+      eventNetPoints: 51,
+      eventBenchPoints: 3,
+      eventAutoSubPoints: null,
+      eventRank: 10,
+      eventChip: null,
+      overallPoints: 500,
+      overallRank: 1000,
+      teamValue: 1005,
+      bank: 5,
+    } as DbEntryEventResult;
+    const fallback = {
+      active_chip: null,
+      automatic_subs: [],
+      entry_history: {
+        event: 9,
+        points: 55,
+        total_points: 500,
+        rank: 10,
+        overall_rank: 1000,
+        bank: 5,
+        value: 1005,
+        event_transfers: 1,
+        event_transfers_cost: 4,
+        points_on_bench: 3,
+      },
+      picks: Array.from({ length: 15 }, (_, index) => ({
+        element: index + 7,
+        position: index + 1,
+        multiplier: index === 0 ? 2 : index < 11 ? 1 : 0,
+        is_captain: index === 0,
+        is_vice_captain: index === 1,
+      })),
+    } satisfies RawFPLEntryEventPicksResponse;
+    const eventLive = new Map(
+      fallback.picks.map((pick) => [
+        pick.element,
+        {
+          elementId: pick.element,
+          totalPoints: pick.element === 7 ? 8 : 0,
+          minutes: 90,
+        } as DbEventLive,
+      ]),
+    );
+
+    const result = buildEntryResultData(core, fallback, eventLive, new Map([[7, 3]]));
+    expect(result).toMatchObject({
+      eventNetPoints: 51,
+      captainId: 7,
+      captainPoints: 16,
+      highestScoreElementId: 7,
+    });
+  });
+
+  test('rejects a result when event-live omits one required pick', () => {
+    const fallback = {
+      active_chip: null,
+      automatic_subs: [],
+      entry_history: {
+        event: 9,
+        points: 55,
+        total_points: 500,
+        rank: 10,
+        overall_rank: 1000,
+        bank: 5,
+        value: 1005,
+        event_transfers: 1,
+        event_transfers_cost: 4,
+        points_on_bench: 3,
+      },
+      picks: Array.from({ length: 15 }, (_, index) => ({
+        element: index + 1,
+        position: index + 1,
+        multiplier: index === 0 ? 2 : index < 11 ? 1 : 0,
+        is_captain: index === 0,
+        is_vice_captain: index === 1,
+      })),
+    } satisfies RawFPLEntryEventPicksResponse;
+    const partialLive = new Map(
+      fallback.picks
+        .slice(0, 14)
+        .map((pick) => [
+          pick.element,
+          { elementId: pick.element, totalPoints: 0, minutes: 0 } as DbEventLive,
+        ]),
+    );
+
+    expect(buildEntryResultData(undefined, fallback, partialLive, new Map())).toBeNull();
+  });
+
+  test('returns the exact missing canonical result IDs', () => {
+    expect(findMissingLeagueResultEntryIds([1, 2, 3, 4], new Set([1, 3]))).toEqual([2, 4]);
+  });
+});

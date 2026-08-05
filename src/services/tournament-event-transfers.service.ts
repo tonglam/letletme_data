@@ -1,4 +1,5 @@
 import type { DbEntryEventTransfer, DbEventLive } from '../db/schemas/index.schema';
+import { isCompleteEntryPicks } from '../domain/entry-picks';
 import type { RawFPLEntryEventPickItem } from '../types';
 import { getActiveCacheSeason } from '../cache/cache-season';
 import { fplClient } from '../clients/fpl';
@@ -7,7 +8,9 @@ import { entryEventTransfersRepository } from '../repositories/entry-event-trans
 import { eventLiveRepository } from '../repositories/event-lives';
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
+import { getEventLivesByEventId } from './event-lives.service';
 import { mapWithConcurrency, uniqueNumbers } from '../utils/async';
+import { IncompleteDataSyncError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 
 const DEFAULT_CONCURRENCY = 5;
@@ -18,18 +21,15 @@ export type TournamentTransferSyncOptions = {
   client?: EntryTransfersClient;
 };
 
-function normalizePicks(raw: unknown): RawFPLEntryEventPickItem[] {
-  if (!Array.isArray(raw)) {
-    return [];
-  }
-  return raw as RawFPLEntryEventPickItem[];
-}
+type TransferWorkSummary = {
+  requiredUnits: number;
+  reusedUnits: number;
+  succeededUnits: number;
+  failedUnits: number;
+};
 
-function pickElements(picks: RawFPLEntryEventPickItem[], chip: string | null): Set<number> {
-  if (chip === 'bboost') {
-    return new Set(picks.map((pick) => pick.element));
-  }
-  return new Set(picks.filter((pick) => pick.position <= 11).map((pick) => pick.element));
+export function isTournamentTransferCheckpointEvent(eventId: number): boolean {
+  return Number.isInteger(eventId) && eventId >= 1 && eventId <= 38;
 }
 
 export function buildTournamentTransferPointsMap(
@@ -60,7 +60,7 @@ export async function loadCanonicalTournamentTransferPointsMap(
   checkpointSeason: string,
   requiredElementIds: readonly number[] = [],
   findCanonicalRows: (
-    eventId: number,
+    targetEventId: number,
     season: string,
   ) => Promise<ReadonlyArray<Pick<DbEventLive, 'elementId' | 'totalPoints'>>> = (
     targetEventId,
@@ -74,84 +74,133 @@ export async function loadCanonicalTournamentTransferPointsMap(
   );
 }
 
-export async function syncTournamentEventTransfersPost(eventId: number): Promise<{
-  eventId: number;
-  totalEntries: number;
-  updated: number;
-  skipped: number;
-  errors: number;
-}> {
+function normalizePicks(raw: unknown): RawFPLEntryEventPickItem[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  return raw as RawFPLEntryEventPickItem[];
+}
+
+function pickElements(picks: RawFPLEntryEventPickItem[], chip: string | null): Set<number> {
+  if (chip === 'bboost') {
+    return new Set(picks.map((pick) => pick.element));
+  }
+  return new Set(picks.filter((pick) => pick.position <= 11).map((pick) => pick.element));
+}
+
+export async function syncTournamentEventTransfersPost(eventId: number): Promise<
+  {
+    eventId: number;
+    totalEntries: number;
+    updated: number;
+    skipped: number;
+    errors: number;
+  } & TransferWorkSummary
+> {
   if (eventId <= 1 || eventId > 38) {
     logInfo('Skipping tournament event transfers post sync - invalid event', {
       eventId,
     });
-    return { eventId, totalEntries: 0, updated: 0, skipped: 0, errors: 0 };
+    return {
+      eventId,
+      totalEntries: 0,
+      updated: 0,
+      skipped: 0,
+      errors: 0,
+      requiredUnits: 0,
+      reusedUnits: 0,
+      succeededUnits: 0,
+      failedUnits: 0,
+    };
   }
 
   logInfo('Starting tournament event transfers post sync', { eventId });
-  const checkpointSeason = await getActiveCacheSeason();
 
   const tournaments = await tournamentInfoRepository.findActive();
   if (tournaments.length === 0) {
     logInfo('No active tournaments found for tournament event transfers', { eventId });
-    return { eventId, totalEntries: 0, updated: 0, skipped: 0, errors: 0 };
+    return {
+      eventId,
+      totalEntries: 0,
+      updated: 0,
+      skipped: 0,
+      errors: 0,
+      requiredUnits: 0,
+      reusedUnits: 0,
+      succeededUnits: 0,
+      failedUnits: 0,
+    };
   }
 
-  const entryLists = await Promise.all(
-    tournaments.map((tournament) =>
-      tournamentEntryRepository.findEntryIdsByTournamentId(tournament.id),
-    ),
+  const entryLists = await mapWithConcurrency(tournaments, 10, (tournament) =>
+    tournamentEntryRepository.findEntryIdsByTournamentId(tournament.id),
   );
 
   const entryIds = uniqueNumbers(entryLists.flat()).filter((entryId) => entryId > 0);
   if (entryIds.length === 0) {
     logInfo('No tournament entries found for event transfers', { eventId });
-    return { eventId, totalEntries: 0, updated: 0, skipped: 0, errors: 0 };
-  }
-
-  const [entryResults, transfers] = await Promise.all([
-    entryEventResultsRepository.findByEventAndEntryIds(eventId, entryIds),
-    entryEventTransfersRepository.findByEventAndEntryIds(eventId, entryIds),
-  ]);
-
-  if (entryResults.length === 0) {
-    logError('Entry event results missing for tournament transfers', new Error('No results'), {
-      eventId,
-    });
     return {
       eventId,
-      totalEntries: entryIds.length,
+      totalEntries: 0,
       updated: 0,
-      skipped: entryIds.length,
+      skipped: 0,
       errors: 0,
+      requiredUnits: 0,
+      reusedUnits: 0,
+      succeededUnits: 0,
+      failedUnits: 0,
     };
   }
 
-  if (transfers.length === 0) {
-    logError('Entry event transfers missing for tournament transfers', new Error('No transfers'), {
-      eventId,
-    });
-    return {
-      eventId,
-      totalEntries: entryIds.length,
-      updated: 0,
-      skipped: entryIds.length,
-      errors: 0,
-    };
-  }
-
-  const requiredElementIds = uniqueNumbers(
-    transfers
-      .flatMap((transfer) => [transfer.elementInId, transfer.elementOutId])
-      .filter((elementId): elementId is number => elementId !== null && elementId > 0),
-  );
-  const pointsMap = await loadCanonicalTournamentTransferPointsMap(
+  const checkpointSeason = await getActiveCacheSeason();
+  const staleTransferEntryIds = await entryEventTransfersRepository.findEntryIdsNeedingSync(
+    entryIds,
     eventId,
     checkpointSeason,
-    requiredElementIds,
   );
+  if (staleTransferEntryIds.length > 0) {
+    throw new IncompleteDataSyncError(
+      'Tournament transfer enrichment requires complete transfer checkpoints',
+      staleTransferEntryIds.length,
+      entryIds.length - staleTransferEntryIds.length,
+      0,
+      staleTransferEntryIds.length,
+    );
+  }
+
+  const transfers = await entryEventTransfersRepository.findByEventAndEntryIds(eventId, entryIds);
+  if (transfers.length === 0) {
+    logInfo('No tournament transfers require post-event enrichment', { eventId });
+    return {
+      eventId,
+      totalEntries: entryIds.length,
+      updated: 0,
+      skipped: entryIds.length,
+      errors: 0,
+      requiredUnits: 0,
+      reusedUnits: entryIds.length,
+      succeededUnits: 0,
+      failedUnits: 0,
+    };
+  }
+
+  const [entryResults, eventLives] = await Promise.all([
+    entryEventResultsRepository.findByEventAndEntryIds(eventId, entryIds),
+    getEventLivesByEventId(eventId),
+  ]);
+
+  if (eventLives.length === 0) {
+    throw new IncompleteDataSyncError(
+      'Tournament transfer enrichment requires persisted event data',
+      transfers.length,
+      0,
+      0,
+      transfers.length,
+    );
+  }
 
   const entryResultMap = new Map(entryResults.map((result) => [result.entryId, result]));
+  const pointsMap = new Map(eventLives.map((live) => [live.elementId, live.totalPoints]));
   const transferMap = new Map<number, DbEntryEventTransfer[]>();
   for (const transfer of transfers) {
     const list = transferMap.get(transfer.entryId) ?? [];
@@ -166,42 +215,44 @@ export async function syncTournamentEventTransfersPost(eventId: number): Promise
     elementOutPoints: number | null;
     elementInPlayed: boolean | null;
   }> = [];
-  let skipped = 0;
+  let failedUnits = 0;
 
-  for (const entryId of entryIds) {
+  for (const [entryId, entryTransfers] of transferMap) {
     const entryResult = entryResultMap.get(entryId);
     if (!entryResult) {
       logError('Entry event result missing for transfer update', new Error('No result'), {
         eventId,
         entryId,
       });
-      skipped += 1;
+      failedUnits += entryTransfers.length;
       continue;
     }
 
     const picks = normalizePicks(entryResult.eventPicks);
-    if (picks.length === 0) {
+    if (!isCompleteEntryPicks(picks)) {
       logError('Entry picks missing for transfer update', new Error('No picks'), {
         eventId,
         entryId,
       });
-      skipped += 1;
-      continue;
-    }
-
-    const entryTransfers = transferMap.get(entryId);
-    if (!entryTransfers || entryTransfers.length === 0) {
-      logError('Entry event transfers missing for update', new Error('No transfers'), {
-        eventId,
-        entryId,
-      });
-      skipped += 1;
+      failedUnits += entryTransfers.length;
       continue;
     }
 
     const playedElements = pickElements(picks, entryResult.eventChip ?? null);
 
     for (const transfer of entryTransfers) {
+      const missingElementPoints =
+        (transfer.elementInId !== null && !pointsMap.has(transfer.elementInId)) ||
+        (transfer.elementOutId !== null && !pointsMap.has(transfer.elementOutId));
+      if (missingElementPoints) {
+        failedUnits += 1;
+        logError('Event points missing for tournament transfer update', new Error('No points'), {
+          eventId,
+          entryId,
+          transferId: transfer.id,
+        });
+        continue;
+      }
       const elementInPoints = transfer.elementInId
         ? (pointsMap.get(transfer.elementInId) ?? null)
         : null;
@@ -223,31 +274,68 @@ export async function syncTournamentEventTransfersPost(eventId: number): Promise
   }
 
   const updated = await entryEventTransfersRepository.updateBatchById(updates, checkpointSeason);
+  failedUnits += Math.max(0, updates.length - updated);
+  const succeededUnits = transfers.length - failedUnits;
+  const entriesWithTransfers = transferMap.size;
+  const skipped = entryIds.length - entriesWithTransfers;
   logInfo('Tournament event transfers post sync completed', {
     eventId,
     totalEntries: entryIds.length,
     updated,
     skipped,
+    failedUnits,
   });
 
-  return { eventId, totalEntries: entryIds.length, updated, skipped, errors: 0 };
+  if (failedUnits > 0) {
+    throw new IncompleteDataSyncError(
+      'Tournament transfer enrichment did not converge for every transfer',
+      transfers.length,
+      0,
+      succeededUnits,
+      failedUnits,
+    );
+  }
+
+  return {
+    eventId,
+    totalEntries: entryIds.length,
+    updated,
+    skipped,
+    errors: 0,
+    requiredUnits: transfers.length,
+    reusedUnits: 0,
+    succeededUnits,
+    failedUnits: 0,
+  };
 }
 
 export async function syncTournamentEventTransfersPre(
   eventId: number,
   options?: TournamentTransferSyncOptions,
-): Promise<{
-  eventId: number;
-  totalEntries: number;
-  inserted: number;
-  skipped: number;
-  errors: number;
-}> {
-  if (eventId <= 1 || eventId > 38) {
+): Promise<
+  {
+    eventId: number;
+    totalEntries: number;
+    inserted: number;
+    skipped: number;
+    errors: number;
+  } & TransferWorkSummary
+> {
+  if (!isTournamentTransferCheckpointEvent(eventId)) {
     logInfo('Skipping tournament event transfers pre sync - invalid event', {
       eventId,
     });
-    return { eventId, totalEntries: 0, inserted: 0, skipped: 0, errors: 0 };
+    return {
+      eventId,
+      totalEntries: 0,
+      inserted: 0,
+      skipped: 0,
+      errors: 0,
+      requiredUnits: 0,
+      reusedUnits: 0,
+      succeededUnits: 0,
+      failedUnits: 0,
+    };
   }
 
   logInfo('Starting tournament event transfers pre sync', { eventId });
@@ -255,27 +343,45 @@ export async function syncTournamentEventTransfersPre(
   const tournaments = await tournamentInfoRepository.findActive();
   if (tournaments.length === 0) {
     logInfo('No active tournaments found for tournament event transfers', { eventId });
-    return { eventId, totalEntries: 0, inserted: 0, skipped: 0, errors: 0 };
+    return {
+      eventId,
+      totalEntries: 0,
+      inserted: 0,
+      skipped: 0,
+      errors: 0,
+      requiredUnits: 0,
+      reusedUnits: 0,
+      succeededUnits: 0,
+      failedUnits: 0,
+    };
   }
 
-  const entryLists = await Promise.all(
-    tournaments.map((tournament) =>
-      tournamentEntryRepository.findEntryIdsByTournamentId(tournament.id),
-    ),
+  const entryLists = await mapWithConcurrency(tournaments, 10, (tournament) =>
+    tournamentEntryRepository.findEntryIdsByTournamentId(tournament.id),
   );
 
   const entryIds = uniqueNumbers(entryLists.flat()).filter((entryId) => entryId > 0);
   if (entryIds.length === 0) {
     logInfo('No tournament entries found for event transfers', { eventId });
-    return { eventId, totalEntries: 0, inserted: 0, skipped: 0, errors: 0 };
+    return {
+      eventId,
+      totalEntries: 0,
+      inserted: 0,
+      skipped: 0,
+      errors: 0,
+      requiredUnits: 0,
+      reusedUnits: 0,
+      succeededUnits: 0,
+      failedUnits: 0,
+    };
   }
 
-  const existingTransfers = await entryEventTransfersRepository.findByEventAndEntryIds(
-    eventId,
+  const checkpointSeason = await getActiveCacheSeason();
+  const pendingEntryIds = await entryEventTransfersRepository.findEntryIdsNeedingSync(
     entryIds,
+    eventId,
+    checkpointSeason,
   );
-  const existingEntryIds = new Set(existingTransfers.map((transfer) => transfer.entryId));
-  const pendingEntryIds = entryIds.filter((entryId) => !existingEntryIds.has(entryId));
   let skipped = entryIds.length - pendingEntryIds.length;
 
   if (pendingEntryIds.length === 0) {
@@ -286,33 +392,34 @@ export async function syncTournamentEventTransfersPre(
       inserted: 0,
       skipped,
       errors: 0,
+      requiredUnits: 0,
+      reusedUnits: skipped,
+      succeededUnits: 0,
+      failedUnits: 0,
     };
   }
 
   const concurrency = options?.concurrency ?? DEFAULT_CONCURRENCY;
   const client = options?.client ?? fplClient;
-  const checkpointSeason = await getActiveCacheSeason();
   let inserted = 0;
-  let errors = 0;
 
   await mapWithConcurrency(pendingEntryIds, concurrency, async (entryId) => {
     try {
       const transfers = await client.getEntryTransfers(entryId);
       const hasEventTransfers = transfers.some((transfer) => transfer.event === eventId);
-      if (!hasEventTransfers) {
-        skipped += 1;
-        return null;
-      }
-
       await entryEventTransfersRepository.replaceForEvent(entryId, eventId, transfers, undefined, {
         elementInPlayed: false,
         defaultPoints: 0,
         checkpointSeason,
+        syncMode: 'all',
       });
-      inserted += 1;
+      if (hasEventTransfers) {
+        inserted += 1;
+      } else {
+        skipped += 1;
+      }
       return null;
     } catch (error) {
-      errors += 1;
       logError('Failed to sync tournament entry transfers', error, {
         eventId,
         entryId,
@@ -320,6 +427,15 @@ export async function syncTournamentEventTransfersPre(
       return null;
     }
   });
+
+  const stillMissing = await entryEventTransfersRepository.findEntryIdsNeedingSync(
+    pendingEntryIds,
+    eventId,
+    checkpointSeason,
+  );
+  const failedUnits = stillMissing.length;
+  const succeededUnits = pendingEntryIds.length - failedUnits;
+  const errors = failedUnits;
 
   logInfo('Tournament event transfers pre sync completed', {
     eventId,
@@ -329,11 +445,25 @@ export async function syncTournamentEventTransfersPre(
     errors,
   });
 
-  if (errors > 0) {
-    throw new Error(
-      `Tournament event transfers pre sync failed for ${errors} entries (eventId=${eventId})`,
+  if (failedUnits > 0) {
+    throw new IncompleteDataSyncError(
+      'Tournament transfer history did not converge for every active entry',
+      pendingEntryIds.length,
+      entryIds.length - pendingEntryIds.length,
+      succeededUnits,
+      failedUnits,
     );
   }
 
-  return { eventId, totalEntries: entryIds.length, inserted, skipped, errors };
+  return {
+    eventId,
+    totalEntries: entryIds.length,
+    inserted,
+    skipped,
+    errors,
+    requiredUnits: pendingEntryIds.length,
+    reusedUnits: entryIds.length - pendingEntryIds.length,
+    succeededUnits,
+    failedUnits,
+  };
 }

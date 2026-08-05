@@ -1,5 +1,8 @@
 import { enqueueLeagueEventPicks, enqueueLeagueEventResults } from '../jobs/league-sync.jobs';
+import { leagueChildJobId } from '../domain/league-sync';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
+import { mapWithConcurrency } from '../utils/async';
+import { IncompleteDataSyncError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 import { syncLeagueEventPicksByTournament } from './league-event-picks.service';
 import { syncLeagueEventResultsByTournament } from './league-event-results.service';
@@ -7,23 +10,47 @@ import { syncLeagueEventResultsByTournament } from './league-event-results.servi
 /**
  * Enqueue per-tournament jobs for league event picks (coordinator fan-out).
  */
+export const LEAGUE_FANOUT_CONCURRENCY = 10;
+
+type FanoutResult = { success: true } | { success: false; tournamentId: number; reason: unknown };
+
 export async function enqueuePicksPerTournament(eventId: number, runId?: string) {
   logInfo('Enqueueing per-tournament picks jobs', { eventId, runId });
 
   const tournaments = await tournamentInfoRepository.findActive();
   if (tournaments.length === 0) {
     logInfo('No active tournaments for picks sync', { eventId });
-    return { enqueued: 0 };
+    return {
+      enqueued: 0,
+      requiredUnits: 0,
+      reusedUnits: 0,
+      succeededUnits: 0,
+      failedUnits: 0,
+    };
   }
 
-  const results = await Promise.allSettled(
-    tournaments.map((tournament) =>
-      enqueueLeagueEventPicks(eventId, 'cascade', { tournamentId: tournament.id, runId }),
-    ),
+  const results = await mapWithConcurrency(
+    tournaments,
+    LEAGUE_FANOUT_CONCURRENCY,
+    async (tournament): Promise<FanoutResult> => {
+      try {
+        await enqueueLeagueEventPicks(eventId, 'cascade', {
+          tournamentId: tournament.id,
+          jobId: leagueChildJobId('league-event-picks', eventId, tournament.id, runId),
+          runId,
+        });
+        return { success: true };
+      } catch (reason) {
+        return { success: false, tournamentId: tournament.id, reason };
+      }
+    },
   );
 
-  const successful = results.filter((r) => r.status === 'fulfilled').length;
-  const failed = results.filter((r) => r.status === 'rejected').length;
+  const successful = results.filter((result) => result.success).length;
+  const failures = results.filter(
+    (result): result is Extract<FanoutResult, { success: false }> => !result.success,
+  );
+  const failed = failures.length;
 
   logInfo('Per-tournament picks jobs enqueued', {
     eventId,
@@ -33,25 +60,28 @@ export async function enqueuePicksPerTournament(eventId: number, runId?: string)
   });
 
   if (failed > 0) {
-    const failures = results
-      .map((result, index) => ({ result, tournament: tournaments[index] }))
-      .filter(({ result }) => result.status === 'rejected')
-      .map(({ result, tournament }) => ({
-        tournamentId: tournament.id,
-        reason: result.status === 'rejected' ? result.reason : null,
-      }));
     failures.forEach(({ tournamentId, reason }) => {
       logError('Failed to enqueue picks job for tournament', reason, {
         eventId,
         tournamentId,
       });
     });
-    throw new Error(
-      `League picks cascade enqueue failed for ${failed} tournament(s) (eventId=${eventId})`,
+    throw new IncompleteDataSyncError(
+      'League picks cascade did not enqueue every tournament',
+      tournaments.length,
+      0,
+      successful,
+      failed,
     );
   }
 
-  return { enqueued: successful };
+  return {
+    enqueued: successful,
+    requiredUnits: tournaments.length,
+    reusedUnits: 0,
+    succeededUnits: successful,
+    failedUnits: 0,
+  };
 }
 
 /**
@@ -63,17 +93,37 @@ export async function enqueueResultsPerTournament(eventId: number, runId?: strin
   const tournaments = await tournamentInfoRepository.findActive();
   if (tournaments.length === 0) {
     logInfo('No active tournaments for results sync', { eventId });
-    return { enqueued: 0 };
+    return {
+      enqueued: 0,
+      requiredUnits: 0,
+      reusedUnits: 0,
+      succeededUnits: 0,
+      failedUnits: 0,
+    };
   }
 
-  const results = await Promise.allSettled(
-    tournaments.map((tournament) =>
-      enqueueLeagueEventResults(eventId, 'cascade', { tournamentId: tournament.id, runId }),
-    ),
+  const results = await mapWithConcurrency(
+    tournaments,
+    LEAGUE_FANOUT_CONCURRENCY,
+    async (tournament): Promise<FanoutResult> => {
+      try {
+        await enqueueLeagueEventResults(eventId, 'cascade', {
+          tournamentId: tournament.id,
+          jobId: leagueChildJobId('league-event-results', eventId, tournament.id, runId),
+          runId,
+        });
+        return { success: true };
+      } catch (reason) {
+        return { success: false, tournamentId: tournament.id, reason };
+      }
+    },
   );
 
-  const successful = results.filter((r) => r.status === 'fulfilled').length;
-  const failed = results.filter((r) => r.status === 'rejected').length;
+  const successful = results.filter((result) => result.success).length;
+  const failures = results.filter(
+    (result): result is Extract<FanoutResult, { success: false }> => !result.success,
+  );
+  const failed = failures.length;
 
   logInfo('Per-tournament results jobs enqueued', {
     eventId,
@@ -83,25 +133,28 @@ export async function enqueueResultsPerTournament(eventId: number, runId?: strin
   });
 
   if (failed > 0) {
-    const failures = results
-      .map((result, index) => ({ result, tournament: tournaments[index] }))
-      .filter(({ result }) => result.status === 'rejected')
-      .map(({ result, tournament }) => ({
-        tournamentId: tournament.id,
-        reason: result.status === 'rejected' ? result.reason : null,
-      }));
     failures.forEach(({ tournamentId, reason }) => {
       logError('Failed to enqueue results job for tournament', reason, {
         eventId,
         tournamentId,
       });
     });
-    throw new Error(
-      `League results cascade enqueue failed for ${failed} tournament(s) (eventId=${eventId})`,
+    throw new IncompleteDataSyncError(
+      'League results cascade did not enqueue every tournament',
+      tournaments.length,
+      0,
+      successful,
+      failed,
     );
   }
 
-  return { enqueued: successful };
+  return {
+    enqueued: successful,
+    requiredUnits: tournaments.length,
+    reusedUnits: 0,
+    succeededUnits: successful,
+    failedUnits: 0,
+  };
 }
 
 export async function processLeagueEventPicksJob(
@@ -118,10 +171,13 @@ export async function processLeagueEventPicksJob(
 export async function processLeagueEventResultsJob(
   eventId: number,
   tournamentId?: number,
-  runId?: string,
+  context?: { runId?: string; triggeredAt?: string },
 ) {
   if (tournamentId) {
-    return syncLeagueEventResultsByTournament(tournamentId, eventId);
+    const freshAfter = context?.triggeredAt ? new Date(context.triggeredAt) : undefined;
+    return syncLeagueEventResultsByTournament(tournamentId, eventId, {
+      ...(freshAfter && !Number.isNaN(freshAfter.getTime()) ? { freshAfter } : {}),
+    });
   }
-  return enqueueResultsPerTournament(eventId, runId);
+  return enqueueResultsPerTournament(eventId, context?.runId);
 }

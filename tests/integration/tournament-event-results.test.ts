@@ -33,6 +33,10 @@ describe.skipIf(!resolved.canRun || !resolved.seed?.currentEvent)(
           totalEntries: 0,
           synced: 0,
           errors: 0,
+          requiredUnits: 0,
+          reusedUnits: 0,
+          succeededUnits: 0,
+          failedUnits: 0,
           finalizationTargets: [],
         } as typeof syncedResult;
       }
