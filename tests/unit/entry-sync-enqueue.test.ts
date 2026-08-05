@@ -9,6 +9,7 @@ const pendingJobs: Array<{
   data: Record<string, unknown>;
 }> = [];
 let returnedJobData: Record<string, unknown> | undefined;
+let currentEventId = 12;
 
 mock.module('../../src/queues/entry-sync.queue', () => ({
   ENTRY_SYNC_DEFAULT_CHUNK_SIZE: 100,
@@ -28,6 +29,10 @@ mock.module('../../src/queues/entry-sync.queue', () => ({
   }),
 }));
 
+mock.module('../../src/services/events.service', () => ({
+  getCurrentEvent: async () => ({ id: currentEventId }),
+}));
+
 const { logger } = await import('../../src/utils/logger');
 const { enqueueEntryPicksSyncJob } = await import('../../src/jobs/entry-sync-enqueue');
 
@@ -36,6 +41,7 @@ describe('entry-sync enqueue runId propagation', () => {
     addCalls.length = 0;
     pendingJobs.length = 0;
     returnedJobData = undefined;
+    currentEventId = 12;
   });
 
   test('uses provided runId in chunk job ID', async () => {
@@ -114,6 +120,21 @@ describe('entry-sync enqueue runId propagation', () => {
 
     expect(job!.id).toBe('entry-picks-manual-chunk-500');
     expect(addCalls).toHaveLength(0);
+  });
+
+  test('does not reuse a resolved continuation after the current event advances', async () => {
+    pendingJobs.push({
+      id: 'entry-picks-manual-chunk-500-event-12',
+      name: 'entry-picks',
+      data: { source: 'manual', queueKey: 'manual', eventId: 12, runId: 'existing-run' },
+    });
+    currentEventId = 13;
+
+    const job = await enqueueEntryPicksSyncJob('manual');
+
+    expect(job!.id).toBe('entry-picks-manual-chunk-0');
+    expect(addCalls).toHaveLength(1);
+    expect(addCalls[0].data.eventId).toBeUndefined();
   });
 
   test('reuses a legacy manual continuation that predates queue keys', async () => {

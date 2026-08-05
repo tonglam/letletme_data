@@ -341,7 +341,12 @@ export async function syncLeagueEventResultsByTournament(
   );
   if (eventLives.length === 0) {
     logInfo('No event live data found for league event results', { eventId, tournamentId });
-    return summarizeMissingLeagueEventLiveData(tournamentId, eventId, entryIds.length);
+    // This is a prerequisite failure, not a successful partial result. Throw
+    // so the BullMQ child remains retryable and final-failure alerting can
+    // surface a missing live snapshot instead of silently losing the run.
+    throw new Error(
+      `Event live data unavailable for league event results (tournamentId=${tournamentId}, eventId=${eventId})`,
+    );
   }
   const eventLiveMap = new Map(eventLives.map((live) => [live.elementId, live]));
   const playerIds = uniqueNumbers(eventLives.map((live) => live.elementId));

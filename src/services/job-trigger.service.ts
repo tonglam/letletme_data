@@ -297,7 +297,13 @@ function buildJobMap(input?: unknown): Record<string, () => Promise<unknown>> {
       }
       return enqueueEntryTransfersSyncJob('manual', { eventId: currentEvent.id });
     },
-    'entry-event-results-daily': () => enqueueEntryResultsSyncJob('manual'),
+    'entry-event-results-daily': async () => {
+      const currentEvent = await getCurrentEvent();
+      if (!currentEvent) {
+        throw new Error('No current event found');
+      }
+      return enqueueEntryResultsSyncJob('manual', { eventId: currentEvent.id });
+    },
     'league-event-picks-sync': async () => {
       await runLeagueEventPicksSync();
     },

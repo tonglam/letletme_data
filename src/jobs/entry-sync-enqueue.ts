@@ -9,6 +9,7 @@ import {
   ENTRY_SYNC_DEFAULT_THROTTLE_MS,
 } from '../queues/entry-sync.queue';
 import { getEntrySyncJobPriority, type EntrySyncPriorityJobName } from '../domain/job-priority';
+import { getCurrentEvent } from '../services/events.service';
 import { logError, logInfo } from '../utils/logger';
 import { stableHash } from '../utils/stable-hash';
 
@@ -65,15 +66,34 @@ async function enqueueEntrySyncJob(
       options.queueKey === undefined;
     if (isManualScanRoot) {
       const pendingJobs = await queue.getJobs(['waiting', 'delayed', 'active', 'paused']);
+      const hasEventScopedManualScan = pendingJobs.some(
+        (job) =>
+          job.name === jobName &&
+          job.data.source === 'manual' &&
+          job.data.eventId !== undefined &&
+          (job.data.queueKey === 'manual' ||
+            (job.data.queueKey === undefined && job.data.runId === 'manual')),
+      );
+      // Results/picks/transfers roots historically omitted eventId and let the
+      // worker resolve it. Once a continuation has resolved its target, an
+      // unscoped root must resolve the same current event before deciding
+      // whether it can be reused; otherwise a continuation from the previous
+      // GW can suppress the new scan after the event advances.
+      const resolvedManualEventId =
+        options.eventId ??
+        (jobName !== 'entry-info' && hasEventScopedManualScan
+          ? (await getCurrentEvent())?.id
+          : undefined);
       const existingManualScan = pendingJobs.find(
         (job) =>
           job.name === jobName &&
           job.data.source === 'manual' &&
           // Manual scans are event-scoped when a target GW is supplied. An
-          // unscoped root is resolved by the worker before it creates the
-          // continuation chunks, so it must also reuse those resolved chunks
-          // instead of starting a second full-table chain.
-          (options.eventId === undefined || job.data.eventId === options.eventId) &&
+          // unscoped root is resolved before this reuse check when a resolved
+          // continuation is present, so it cannot reuse a prior GW's chain.
+          (resolvedManualEventId === undefined
+            ? job.data.eventId === undefined
+            : job.data.eventId === resolvedManualEventId) &&
           (job.data.queueKey === 'manual' ||
             (job.data.queueKey === undefined && job.data.runId === 'manual')),
       );

@@ -31,8 +31,11 @@ export function registerEntryResultsJobs(app: Elysia) {
               logInfo('Skipping entry results sync - no current event');
               return;
             }
-            const job = await enqueueEntryResultsSyncJob('cron');
-            logInfo('Entry results sync job enqueued via cron', { jobId: job.id });
+            const job = await enqueueEntryResultsSyncJob('cron', { eventId: currentEvent.id });
+            logInfo('Entry results sync job enqueued via cron', {
+              jobId: job.id,
+              eventId: currentEvent.id,
+            });
           });
         } catch {
           // Failure details are already emitted by runTrackedJob.
