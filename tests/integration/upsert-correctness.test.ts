@@ -284,7 +284,8 @@ describe('affected-player current price update', () => {
 
     await client`
       UPDATE players
-      SET price = ${currentPrice}, price_source_checked_at = ${newerSourceCheckedAt}
+      SET price = ${currentPrice},
+          price_source_checked_at = ${newerSourceCheckedAt.toISOString()}::timestamptz
       WHERE id = ${VALUE_PLAYER_A}
     `;
 
