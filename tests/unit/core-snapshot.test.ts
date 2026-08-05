@@ -231,9 +231,7 @@ describe('core snapshot synchronization', () => {
 
   test('skips stale-season cleanup when authority changes after commit', async () => {
     const calls: string[] = [];
-    const result = await syncCoreSnapshot(
-      dependencies({ calls, activeSeasons: ['2627', '2728'] }),
-    );
+    const result = await syncCoreSnapshot(dependencies({ calls, activeSeasons: ['2627', '2728'] }));
 
     expect(result.outcome).toBe('ready');
     expect(calls).not.toContain('cleanup');
