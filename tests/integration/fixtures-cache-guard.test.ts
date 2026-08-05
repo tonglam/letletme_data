@@ -61,6 +61,8 @@ let previousActiveSeason: string | null = null;
 beforeAll(async () => {
   const redis = await redisSingleton.getClient();
   previousActiveSeason = await redis.get('Season:active');
+  await redis.set('Season:active', SEASON);
+  resetActiveSeasonMemo();
 });
 
 afterAll(async () => {

@@ -11,7 +11,7 @@ describe('job-trigger service', () => {
   test('lists known triggerable jobs', () => {
     const jobs = listTriggerableJobs();
     expect(jobs.length).toBeGreaterThan(0);
-    expect(jobs.some((job) => job.name === 'events-sync')).toBe(true);
+    expect(jobs.some((job) => job.name === 'core-snapshot-sync')).toBe(true);
     expect(jobs.some((job) => job.name === 'player-prices')).toBe(true);
     expect(jobs.every((job) => job.name && job.description && job.schedule)).toBe(true);
   });

@@ -1,17 +1,14 @@
 import { and, asc, desc, eq, gt, isNotNull, lte, sql } from 'drizzle-orm';
 
 import { events, type DbEvent, type DbEventInsert } from '../db/schemas/index.schema';
-import { getDb } from '../db/singleton';
+import { getDb, type DbOrTransaction } from '../db/singleton';
 import { neighbourEventId } from '../domain/events';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 
-import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import type { Event as DomainEvent } from '../types';
 
-type DatabaseInstance = PostgresJsDatabase<Record<string, never>>;
-
-export const createEventRepository = (dbInstance?: DatabaseInstance) => {
+export const createEventRepository = (dbInstance?: DbOrTransaction) => {
   const getDbInstance = async () => dbInstance || (await getDb());
 
   const findCurrentInternal = async (): Promise<DbEvent | null> => {

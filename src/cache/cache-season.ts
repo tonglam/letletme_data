@@ -1,7 +1,7 @@
 import type { Redis } from 'ioredis';
 import { sql } from 'drizzle-orm';
 
-import { getDb, type DbOrTransaction } from '../db/singleton';
+import { getDb, type DbHandle, type DbOrTransaction } from '../db/singleton';
 import { logDebug, logError, logInfo } from '../utils/logger';
 import { redisSingleton } from './singleton';
 
@@ -40,6 +40,12 @@ function getActiveSeasonMemoTtlMs(): number {
 
 function memoizeActiveSeason(season: string): void {
   activeSeasonMemo = { season, expiresAt: Date.now() + getActiveSeasonMemoTtlMs() };
+}
+
+/** Called only after the complete core snapshot transaction publishes Season:active. */
+export function rememberCoreSnapshotActiveSeason(season: string): void {
+  if (!isValidSeason(season)) throw new Error(`Invalid active cache season: ${season}`);
+  memoizeActiveSeason(season);
 }
 
 function readActiveSeasonMemo(): string | null {
@@ -163,6 +169,17 @@ export function deriveSeasonFromFixtures(fixtures: readonly FixtureLike[]): stri
   return seasonFromStartYear(Math.min(...gw1Kickoffs));
 }
 
+export function resolveFixtureRepairSeason(
+  fixtures: readonly FixtureLike[],
+  authoritativeSeason?: string | null,
+): string | null {
+  const fixtureSeason = deriveSeasonFromFixtures(fixtures);
+  if (authoritativeSeason === undefined) return fixtureSeason;
+  if (!isValidSeason(authoritativeSeason)) return null;
+  if (fixtureSeason && fixtureSeason !== authoritativeSeason) return null;
+  return authoritativeSeason;
+}
+
 export async function getActiveCacheSeason(): Promise<string> {
   const memoized = readActiveSeasonMemo();
   if (memoized) {
@@ -207,65 +224,35 @@ export async function acquireActiveSeasonReadFence(tx: DbOrTransaction): Promise
   );
 }
 
-async function withActiveSeasonWriteFence<T>(operation: () => Promise<T>): Promise<T> {
-  const db = await getDb();
+export async function acquireActiveSeasonWriteFence(tx: DbOrTransaction): Promise<void> {
+  await tx.execute(
+    sql`SELECT pg_advisory_xact_lock(${ACTIVE_SEASON_LOCK_NAMESPACE}, ${ACTIVE_SEASON_LOCK_ID})`,
+  );
+}
+
+export async function withActiveSeasonWriteFence<T>(
+  operation: () => Promise<T>,
+  dbInstance?: DbHandle,
+): Promise<T> {
+  const db = dbInstance ?? (await getDb());
   return db.transaction(async (tx) => {
-    await tx.execute(
-      sql`SELECT pg_advisory_xact_lock(${ACTIVE_SEASON_LOCK_NAMESPACE}, ${ACTIVE_SEASON_LOCK_ID})`,
-    );
+    await acquireActiveSeasonWriteFence(tx);
     return operation();
   });
 }
 
-async function advanceActiveCacheSeason(
-  season: string,
-  afterAdvance?: () => Promise<void>,
-): Promise<boolean> {
-  if (!isValidSeason(season)) {
-    throw new Error(`Invalid active cache season: ${season}`);
-  }
-
-  const redis = await redisSingleton.getClient();
-  const preflight = await redis.get(ACTIVE_SEASON_KEY);
-  if (!isNewerSeason(season, preflight)) {
-    logDebug('Skipping active cache season update; candidate is not newer', {
-      candidate: season,
-      current: preflight,
-    });
-    if (isValidSeason(preflight)) memoizeActiveSeason(preflight);
-    return false;
-  }
-
-  return withActiveSeasonWriteFence(async () => {
-    // Another season publisher may have won while this process waited for
-    // live snapshot readers. Re-check under the exclusive fence.
-    const current = await redis.get(ACTIVE_SEASON_KEY);
-    if (!isNewerSeason(season, current)) {
-      logDebug('Skipping active cache season update after fenced recheck', {
-        candidate: season,
-        current,
-      });
-      if (isValidSeason(current)) memoizeActiveSeason(current);
-      return false;
-    }
-
-    await redis.set(ACTIVE_SEASON_KEY, season);
-    memoizeActiveSeason(season);
-    await afterAdvance?.();
-    logInfo('Active cache season updated', { season, previous: current });
-    return true;
-  });
-}
-
-export async function setActiveCacheSeason(season: string): Promise<boolean> {
-  return advanceActiveCacheSeason(season);
+export async function readStoredActiveCacheSeason(redisClient?: Redis): Promise<string | null> {
+  const redis = redisClient ?? (await redisSingleton.getClient());
+  const current = await redis.get(ACTIVE_SEASON_KEY);
+  return isValidSeason(current) ? current : null;
 }
 
 export async function clearStaleSeasonCache(
   activeSeason: string,
   prefixes: readonly string[] = SEASON_CACHE_PREFIXES,
+  redisClient?: Redis,
 ): Promise<void> {
-  const redis = await redisSingleton.getClient();
+  const redis = redisClient ?? (await redisSingleton.getClient());
   const staleKeys: string[] = [];
 
   for (const prefix of prefixes) {
@@ -293,8 +280,12 @@ export async function clearStaleSeasonCache(
 
 export async function finalizeSeasonCacheWrite(
   season: string,
-  prefixes: readonly string[],
+  _prefixes: readonly string[],
 ): Promise<void> {
-  const rolloverPrefixes = [...new Set([...SEASON_CACHE_PREFIXES, ...prefixes])];
-  await advanceActiveCacheSeason(season, () => clearStaleSeasonCache(season, rolloverPrefixes));
+  const activeSeason = await readStoredActiveCacheSeason();
+  if (activeSeason !== season) {
+    throw new Error(
+      `Core snapshot required before publishing season cache data (candidate=${season})`,
+    );
+  }
 }

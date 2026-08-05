@@ -271,14 +271,31 @@ entity-key retention rules above.
 
 ## 11. Season rollover
 
-### Automatic today (when `Season:active` advances)
+### Atomic core publication (when `Season:active` advances)
 
-Core entity writers call `finalizeSeasonCacheWrite(season, prefixes)`, which:
+The core-snapshot worker publishes only after complete bootstrap and fixture
+validation. It:
 
-1. Updates `Season:active` only when the validated FPL-derived season is newer.
-2. If (and only if) that value **changed**, expands the cleanup set to the full
-   `SEASON_CACHE_PREFIXES` inventory and deletes keys that are not scoped to the
-   new active season.
+1. reserves a monotonic PostgreSQL revision before fetching;
+2. stages every core hash with a 15-minute TTL;
+3. validates every staging key inside one Redis Lua publication before any key
+   is replaced;
+4. records one `CoreSnapshotPublication:pending` recovery receipt and keeps
+   bounded backups until the matching PostgreSQL authority row commits;
+5. finalizes the backups on commit, or atomically restores them on rollback or
+   the next worker recovery pass;
+6. clears stale keys across the full `SEASON_CACHE_PREFIXES` inventory only
+   after the core DB/cache publication is consistent.
+
+The Redis swap checks `LiveSnapshotMeta:{season}:{eventId}` in the same Lua
+operation. A fixture hash owned by a published Live snapshot is excluded from
+the core receipt, backup, and replacement, while the remaining non-Live core
+families still publish atomically. The separately managed Live pipeline remains
+the only writer allowed to replace that event's coordinated fixture view.
+
+A candidate for a different season stops before mutation with
+`CORE_SNAPSHOT_MANUAL_ROLLOVER_REQUIRED`. Canonical table replacement is
+destructive and remains a separately approved runbook, outside ordinary sync.
 
 The automatic rollover prefixes are:
 

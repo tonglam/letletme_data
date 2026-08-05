@@ -89,7 +89,7 @@ describe('Fixtures Integration Tests', () => {
     expect(assignedFixtures.length).toBeGreaterThan(0);
   });
 
-  test('event-scoped sync recovers a fixture omitted after moving to another event', async () => {
+  test('event-scoped compatibility sync uses the full feed without taking Live ownership', async () => {
     const originalGetFixtures = fplClient.getFixtures;
     const fetchFixtures = originalGetFixtures.bind(fplClient);
     const fullFixtureFeed = await fetchFixtures();
@@ -147,7 +147,7 @@ describe('Fixtures Integration Tests', () => {
 
       const result = await syncFixtures(sourceEventId);
 
-      expect(requestedEvents).toEqual([sourceEventId, undefined]);
+      expect(requestedEvents).toEqual([undefined]);
       expect(result.count).toBe(
         movedFullFixtureFeed.filter((fixture) => fixture.event !== null).length,
       );
@@ -167,17 +167,14 @@ describe('Fixtures Integration Tests', () => {
       ).toBe(1);
     } finally {
       fplClient.getFixtures = originalGetFixtures;
-      // Restore the real upstream ownership for subsequent integration tests
-      // and leave no sentinel snapshot state behind even when an assertion fails.
-      try {
-        await syncFixtures();
-      } finally {
-        await redis.del(sourceMetaKey, destinationMetaKey);
-      }
+      // Release the synthetic Live ownership before restoring the canonical
+      // upstream fixture view for subsequent tests.
+      await redis.del(sourceMetaKey, destinationMetaKey);
+      await syncFixtures();
     }
   }, 30000);
 
-  test('full sync reconciles a non-current snapshot-owned event correction', async () => {
+  test('full sync retires a stale non-current snapshot-owned fixture view', async () => {
     const originalGetFixtures = fplClient.getFixtures;
     const fetchFixtures = originalGetFixtures.bind(fplClient);
     const fullFixtureFeed = await fetchFixtures();
@@ -237,16 +234,17 @@ describe('Fixtures Integration Tests', () => {
       await syncFixtures();
 
       expect(await redis.exists(metaKey)).toBe(0);
-      for (const key of derivedKeys.slice(0, 4)) {
+      for (const key of derivedKeys) {
         expect(await redis.exists(key)).toBe(0);
       }
       const correctedRaw = await redis.hget(fixturesKey, String(targetRawFixture.id));
-      if (!correctedRaw) throw new Error('Corrected fixture source hash was not republished');
+      if (!correctedRaw) throw new Error('Corrected fixture source hash disappeared');
       const correctedFixture = JSON.parse(correctedRaw) as { teamHScore: number | null };
       expect(correctedFixture.teamHScore).toBe(expectedFixture.teamHScore);
     } finally {
       fplClient.getFixtures = originalGetFixtures;
       await redis.del(metaKey, ...derivedKeys);
+      await syncFixtures();
     }
   }, 30000);
 

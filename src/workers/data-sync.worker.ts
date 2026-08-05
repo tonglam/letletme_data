@@ -7,20 +7,16 @@ import {
   getDataSyncQueueName,
   isDataSyncTieredQueueEnabled,
 } from '../queues/data-sync.queue';
-import { syncEvents } from '../services/events.service';
-import { syncAllGameweeks, syncFixtures } from '../services/fixtures.service';
-import { syncPhases } from '../services/phases.service';
-import { syncPlayers } from '../services/players.service';
 import { syncPlayerPricesForDate } from '../services/player-prices.service';
 import { syncCurrentPlayerStats, syncPlayerStatsForEvent } from '../services/player-stats.service';
 import { syncCurrentPlayerValues } from '../services/player-values.service';
+import { syncCoreSnapshot } from '../services/core-snapshot.service';
 import {
   resolveBullMqAttemptQueueWaitMs,
   runDataSyncAttempt,
   type DataSyncAttemptContext,
 } from '../utils/data-sync-attempt';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
-import { syncTeams } from '../services/teams.service';
 import { getQueueConnection } from '../utils/queue';
 import { logError, logInfo } from '../utils/logger';
 import { alertOnFinalFailure } from '../utils/notify';
@@ -28,6 +24,16 @@ import { withMutationConflictGuard } from '../utils/mutation-lock';
 import { formatCronDateKey } from '../utils/timezone';
 import { startStrictPriorityGate } from './strict-priority-gate';
 import type { WorkerRuntime } from './worker-runtime';
+
+const CORE_SNAPSHOT_JOB_NAMES = new Set([
+  'core-snapshot',
+  'events',
+  'fixtures',
+  'fixtures-all-gameweeks',
+  'teams',
+  'players',
+  'phases',
+]);
 
 const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
   const context = {
@@ -54,49 +60,49 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
 
   logJobTriggered(context);
 
-  return runDataSyncAttempt(attemptContext, () =>
-    withMutationConflictGuard(
+  return runDataSyncAttempt(attemptContext, () => {
+    const execute = () =>
+      runTrackedJob(context, async () => {
+        switch (job.name) {
+          case 'core-snapshot':
+          case 'events':
+          case 'fixtures':
+          case 'fixtures-all-gameweeks':
+          case 'teams':
+          case 'players':
+          case 'phases':
+            return syncCoreSnapshot();
+          case 'player-prices':
+            if (!job.data.changeDate) {
+              throw new Error('player-prices job requires changeDate');
+            }
+            return syncPlayerPricesForDate(job.data.changeDate);
+          case 'player-stats':
+            return job.data.eventId !== undefined
+              ? syncPlayerStatsForEvent(job.data.eventId)
+              : syncCurrentPlayerStats({ onTargetEventResolved: recordResolvedTarget });
+          case 'player-values':
+            return syncCurrentPlayerValues(
+              job.data.changeDate ?? formatCronDateKey(new Date(job.data.triggeredAt)),
+              { onTargetEventResolved: recordResolvedTarget },
+            );
+          default:
+            throw new Error(`Unknown data-sync job: ${job.name}`);
+        }
+      });
+
+    // Core aliases perform upstream reads before acquiring their own short
+    // multi-table persistence/publication lock.
+    if (CORE_SNAPSHOT_JOB_NAMES.has(job.name)) return execute();
+    return withMutationConflictGuard(
       {
         queueName: job.queueName,
         jobName: job.name,
         jobId: String(job.id),
       },
-      () =>
-        runTrackedJob(context, async () => {
-          switch (job.name) {
-            case 'events':
-              return syncEvents();
-            case 'fixtures':
-              return syncFixtures(job.data.eventId);
-            case 'fixtures-all-gameweeks':
-              // Per-GW loop with isolated errors — not the same as syncFixtures(undefined).
-              return syncAllGameweeks();
-            case 'teams':
-              return syncTeams();
-            case 'players':
-              return syncPlayers();
-            case 'player-prices':
-              if (!job.data.changeDate) {
-                throw new Error('player-prices job requires changeDate');
-              }
-              return syncPlayerPricesForDate(job.data.changeDate);
-            case 'player-stats':
-              return job.data.eventId !== undefined
-                ? syncPlayerStatsForEvent(job.data.eventId)
-                : syncCurrentPlayerStats({ onTargetEventResolved: recordResolvedTarget });
-            case 'phases':
-              return syncPhases();
-            case 'player-values':
-              return syncCurrentPlayerValues(
-                job.data.changeDate ?? formatCronDateKey(new Date(job.data.triggeredAt)),
-                { onTargetEventResolved: recordResolvedTarget },
-              );
-            default:
-              throw new Error(`Unknown data-sync job: ${job.name}`);
-          }
-        }),
-    ),
-  );
+      execute,
+    );
+  });
 };
 
 export function createDataSyncWorker(): WorkerRuntime {

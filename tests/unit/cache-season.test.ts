@@ -4,6 +4,7 @@ import {
   deriveSeasonFromEvents,
   deriveSeasonFromFixtures,
   isNewerSeason,
+  resolveFixtureRepairSeason,
   seasonFromStartYear,
 } from '../../src/cache/cache-season';
 import { mockRawFPLFixture1 } from '../fixtures/fixtures.fixtures';
@@ -66,6 +67,21 @@ describe('cache season resolver', () => {
         },
       ]),
     ).toBeNull();
+  });
+
+  test('uses an authoritative season for event repairs and rejects mixed sources', () => {
+    const laterEvent = [{ ...mockRawFPLFixture1, event: 12 }];
+    expect(resolveFixtureRepairSeason(laterEvent, '2627')).toBe('2627');
+    expect(resolveFixtureRepairSeason(laterEvent, null)).toBeNull();
+
+    const conflictingGw1 = [
+      {
+        ...mockRawFPLFixture1,
+        event: 1,
+        kickoff_time: '2025-08-14T19:00:00Z',
+      },
+    ];
+    expect(resolveFixtureRepairSeason(conflictingGw1, '2627')).toBeNull();
   });
 
   test('compares season keys numerically', () => {

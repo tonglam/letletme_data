@@ -86,7 +86,7 @@ function toTeamFixture(
 }
 
 // Returns Map<teamId, Map<eventId, TeamFixture>> — unscheduled fixtures (event=null) are excluded
-function buildFixturesByTeam(
+export function buildFixturesByTeam(
   teamIds: number[],
   fixtures: Fixture[],
   teamById: Map<number, TeamInfo>,

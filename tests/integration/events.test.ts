@@ -7,10 +7,12 @@ import { getDbClient } from '../../src/db/singleton';
 import { eventRepository } from '../../src/repositories/events';
 import { getCurrentEvent, getNextEvent, syncEvents } from '../../src/services/events.service';
 import type { Event } from '../../src/types';
+import { ensureCoreSnapshot } from './helpers/reference-data';
 
 describe('Events Integration Tests', () => {
   beforeAll(async () => {
-    // Sync events once for all tests
+    await ensureCoreSnapshot();
+    // Exercise the compatibility entry point after the atomic baseline exists.
     await syncEvents();
   });
 

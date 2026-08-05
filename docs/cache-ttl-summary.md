@@ -37,6 +37,9 @@ it is deliberately outside automatic season rollover.
 |---|---|
 | `Season:active` | No TTL; advances only from validated FPL season metadata |
 | `event:current` | No TTL; overwritten in place from the active Event hash |
+| `CoreSnapshotStage:*` | 15 minutes; crash-safe temporary hashes |
+| `CoreSnapshotPublication:pending` | No TTL; one durable recovery receipt, removed after DB commit reconciliation |
+| `CoreSnapshotBackup:*` | No TTL only while the matching pending receipt exists; removed by finalize/rollback recovery |
 | `LaunchNotification:*` | No TTL; year/season suffix provides re-arming |
 | `letletme:entry-info-sync:daily:*` | Expires at the next UTC midnight, minimum 60 seconds |
 | `mutation-lock:*` | Millisecond TTL from `MUTATION_LOCK_TTL_MS` |
@@ -51,8 +54,9 @@ the same hourly slot can be retried.
 
 - Entity writers replace affected hashes; reads do not extend retention.
 - Empty core upstream arrays preserve the previously accepted cache.
-- The first core write that advances `Season:active` scans all fifteen
-  season-scoped families and deletes prior-season keys.
+- After the separately gated database rollover, the committed core publication
+  that advances `Season:active` scans all fifteen season-scoped families and
+  deletes prior-season keys.
 - Rollover does not delete player-value history, notification markers, locks,
   cascade coordination, BullMQ state, or consumer-owned negative markers.
 - Never use `FLUSHDB` or `FLUSHALL` for cache maintenance.

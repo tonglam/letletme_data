@@ -1,14 +1,11 @@
 import { inArray, sql } from 'drizzle-orm';
 
 import { players, type DbPlayer, type DbPlayerInsert } from '../db/schemas/index.schema';
-import { getDb } from '../db/singleton';
+import { getDb, type DbOrTransaction } from '../db/singleton';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 
-import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import type { Player as DomainPlayer } from '../types';
-
-type DatabaseInstance = PostgresJsDatabase<Record<string, never>>;
 
 function mapDbPlayerToDomain(player: DbPlayer): DomainPlayer {
   return {
@@ -24,10 +21,26 @@ function mapDbPlayerToDomain(player: DbPlayer): DomainPlayer {
   };
 }
 
-export const createPlayerRepository = (dbInstance?: DatabaseInstance) => {
+export const createPlayerRepository = (dbInstance?: DbOrTransaction) => {
   const getDbInstance = async () => dbInstance || (await getDb());
 
   return {
+    findAll: async (options: { lock?: boolean } = {}): Promise<DomainPlayer[]> => {
+      try {
+        const db = await getDbInstance();
+        const query = db.select().from(players);
+        const rows = options.lock ? await query.for('update') : await query;
+        return rows.map(mapDbPlayerToDomain);
+      } catch (error) {
+        logError('Failed to retrieve all players', error);
+        throw new DatabaseError(
+          'Failed to retrieve players',
+          'FIND_ALL_PLAYERS_ERROR',
+          error instanceof Error ? error : undefined,
+        );
+      }
+    },
+
     findByIds: async (ids: number[]): Promise<DomainPlayer[]> => {
       if (ids.length === 0) {
         return [];
@@ -59,6 +72,7 @@ export const createPlayerRepository = (dbInstance?: DatabaseInstance) => {
 
     updatePrices: async (
       priceUpdates: Array<{ elementId: number; value: number }>,
+      sourceCheckedAt: Date,
     ): Promise<DomainPlayer[]> => {
       if (priceUpdates.length === 0) {
         return [];
@@ -80,7 +94,11 @@ export const createPlayerRepository = (dbInstance?: DatabaseInstance) => {
         const db = await getDbInstance();
         const updated = await db
           .update(players)
-          .set({ price: priceExpression, updatedAt: sql`NOW()` })
+          .set({
+            price: priceExpression,
+            priceSourceCheckedAt: sourceCheckedAt,
+            updatedAt: sql`NOW()`,
+          })
           .where(inArray(players.id, elementIds))
           .returning();
 
@@ -97,7 +115,10 @@ export const createPlayerRepository = (dbInstance?: DatabaseInstance) => {
       }
     },
 
-    upsertBatch: async (domainPlayers: DomainPlayer[]): Promise<DomainPlayer[]> => {
+    upsertBatch: async (
+      domainPlayers: DomainPlayer[],
+      preservePriceSourceCheckedAtOrAfter?: Date,
+    ): Promise<DomainPlayer[]> => {
       try {
         if (domainPlayers.length === 0) {
           return [];
@@ -116,6 +137,8 @@ export const createPlayerRepository = (dbInstance?: DatabaseInstance) => {
         }));
 
         const db = await getDbInstance();
+        const preservePriceSourceCheckedAtOrAfterIso =
+          preservePriceSourceCheckedAtOrAfter?.toISOString();
         const result = await db
           .insert(players)
           .values(newPlayers)
@@ -126,6 +149,14 @@ export const createPlayerRepository = (dbInstance?: DatabaseInstance) => {
               type: sql`excluded.type`,
               teamId: sql`excluded.team_id`,
               price: sql`excluded.price`,
+              priceSourceCheckedAt: preservePriceSourceCheckedAtOrAfterIso
+                ? sql`CASE
+                    WHEN ${players.priceSourceCheckedAt} >=
+                      ${preservePriceSourceCheckedAtOrAfterIso}::timestamptz
+                    THEN ${players.priceSourceCheckedAt}
+                    ELSE NULL
+                  END`
+                : null,
               startPrice: sql`excluded.start_price`,
               firstName: sql`excluded.first_name`,
               secondName: sql`excluded.second_name`,

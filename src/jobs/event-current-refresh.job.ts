@@ -5,7 +5,7 @@ import { eventsCache } from '../cache/operations';
 import { isFPLSeason } from '../utils/conditions';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { logInfo } from '../utils/logger';
-import { enqueueEventsSyncJob } from './data-sync-enqueue';
+import { enqueueCoreSnapshotJob } from './data-sync-enqueue';
 import { CRON_TIMEZONE } from '../utils/timezone';
 
 export type ManualEventCurrentRefreshResult = {
@@ -26,7 +26,7 @@ export async function runManualEventCurrentRefresh(): Promise<ManualEventCurrent
 
   logInfo('Manual event-current-refresh: gameweek id changed, enqueuing events sync');
   try {
-    const job = await enqueueEventsSyncJob('manual');
+    const job = await enqueueCoreSnapshotJob('manual');
     logInfo('Events sync job enqueued (manual after event:current refresh)', { jobId: job.id });
     return { refreshed: true, eventsSyncJobId: job.id };
   } catch {
@@ -47,7 +47,7 @@ export async function runEventCurrentRefresh() {
   if (updated) {
     logInfo('Gameweek transition detected - triggering events sync');
     try {
-      const job = await enqueueEventsSyncJob('event-transition');
+      const job = await enqueueCoreSnapshotJob('event-transition');
       logInfo('Events sync job enqueued (transition)', { jobId: job.id });
     } catch {
       logInfo('Events sync job already enqueued or failed (transition)');

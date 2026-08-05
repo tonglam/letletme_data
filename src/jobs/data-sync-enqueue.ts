@@ -53,23 +53,33 @@ async function enqueueDataSyncJob(
   }
 }
 
-export const enqueueEventsSyncJob = (source?: DataSyncJobSource) =>
-  enqueueDataSyncJob('events', source);
+export const enqueueCoreSnapshotJob = (
+  source: DataSyncJobSource = 'cron',
+  options?: DataSyncEnqueueOptions,
+) =>
+  enqueueDataSyncJob('core-snapshot', source, {
+    ...options,
+    jobId:
+      options?.jobId ??
+      (source === 'cron' ? `core-snapshot-${formatCronDateKey()}` : 'core-snapshot-repair'),
+    removeOnSettle: true,
+  });
+
+// Compatibility producers all converge on the one coherent core publisher.
+export const enqueueEventsSyncJob = (source?: DataSyncJobSource) => enqueueCoreSnapshotJob(source);
 
 export const enqueueFixturesSyncJob = (
   source?: DataSyncJobSource,
   options?: DataSyncEnqueueOptions,
-) => enqueueDataSyncJob('fixtures', source, options);
+) => enqueueCoreSnapshotJob(source, options);
 
-/** Full GW1–38 fixtures backfill with per-gameweek error isolation. */
+/** The authoritative fixture endpoint already returns the complete season feed. */
 export const enqueueFixturesAllGameweeksSyncJob = (source?: DataSyncJobSource) =>
-  enqueueDataSyncJob('fixtures-all-gameweeks', source);
+  enqueueCoreSnapshotJob(source);
 
-export const enqueueTeamsSyncJob = (source?: DataSyncJobSource) =>
-  enqueueDataSyncJob('teams', source);
+export const enqueueTeamsSyncJob = (source?: DataSyncJobSource) => enqueueCoreSnapshotJob(source);
 
-export const enqueuePlayersSyncJob = (source?: DataSyncJobSource) =>
-  enqueueDataSyncJob('players', source);
+export const enqueuePlayersSyncJob = (source?: DataSyncJobSource) => enqueueCoreSnapshotJob(source);
 
 export const enqueuePlayerPricesSyncJob = (
   source: DataSyncJobSource,
@@ -81,8 +91,7 @@ export const enqueuePlayerStatsSyncJob = (
   options?: DataSyncEnqueueOptions,
 ) => enqueueDataSyncJob('player-stats', source, options);
 
-export const enqueuePhasesSyncJob = (source?: DataSyncJobSource) =>
-  enqueueDataSyncJob('phases', source);
+export const enqueuePhasesSyncJob = (source?: DataSyncJobSource) => enqueueCoreSnapshotJob(source);
 
 export const enqueuePlayerValuesSyncJob = (
   source?: DataSyncJobSource,

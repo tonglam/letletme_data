@@ -5,7 +5,7 @@ assertIntegrationEnv();
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { eq } from 'drizzle-orm';
 
-import { resetActiveSeasonMemo, setActiveCacheSeason } from '../../src/cache/cache-season';
+import { resetActiveSeasonMemo, withActiveSeasonWriteFence } from '../../src/cache/cache-season';
 import { redisSingleton } from '../../src/cache/singleton';
 import { events } from '../../src/db/schemas/index.schema';
 import { getDb } from '../../src/db/singleton';
@@ -100,7 +100,11 @@ describe('live snapshot PostgreSQL serialization', () => {
     });
     await snapshotEntered.promise;
 
-    const rollover = setActiveCacheSeason('2627');
+    const rollover = withActiveSeasonWriteFence(async () => {
+      await redis.set('Season:active', '2627');
+      resetActiveSeasonMemo();
+      return true;
+    });
     const rolloverState = await Promise.race([
       rollover.then(() => 'advanced' as const),
       new Promise<'blocked'>((resolve) => setTimeout(() => resolve('blocked'), 75)),
@@ -144,7 +148,11 @@ describe('live snapshot PostgreSQL serialization', () => {
     );
     await prepareEntered.promise;
 
-    const rollover = setActiveCacheSeason('2627');
+    const rollover = withActiveSeasonWriteFence(async () => {
+      await redis.set('Season:active', '2627');
+      resetActiveSeasonMemo();
+      return true;
+    });
     const rolloverState = await Promise.race([
       rollover.then(() => 'advanced' as const),
       new Promise<'blocked'>((resolve) => setTimeout(() => resolve('blocked'), 75)),

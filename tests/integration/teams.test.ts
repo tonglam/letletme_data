@@ -6,10 +6,11 @@ import { beforeAll, describe, expect, test } from 'bun:test';
 import { teams } from '../../src/db/schemas/index.schema';
 import { getDb } from '../../src/db/singleton';
 import { syncTeams } from '../../src/services/teams.service';
+import { ensureCoreSnapshot } from './helpers/reference-data';
 
 describe('Teams Integration Tests', () => {
   beforeAll(async () => {
-    // Sync teams once
+    await ensureCoreSnapshot();
     await syncTeams();
   });
 

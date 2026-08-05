@@ -165,6 +165,17 @@ return 1
 `;
 
 const RETIRE_LIVE_SNAPSHOT_SCRIPT = `
+local preserve_after = ARGV[1]
+local meta_raw = redis.pcall('GET', KEYS[#KEYS])
+if preserve_after ~= '' and type(meta_raw) == 'string' then
+  local decoded, meta = pcall(cjson.decode, meta_raw)
+  if decoded and type(meta) == 'table'
+    and type(meta.checkedAt) == 'string'
+    and meta.checkedAt >= preserve_after
+  then
+    return -1
+  end
+end
 local removed = 0
 for index = 1, #KEYS do
   removed = removed + redis.call('DEL', KEYS[index])
@@ -222,6 +233,14 @@ local matches = hash_matches(fixtures_key, expected_fixtures)
 local meta_raw = redis.pcall('GET', meta_key)
 if owned then
   local decoded, meta = pcall(cjson.decode, meta_raw)
+  if decoded
+    and type(meta) == 'table'
+    and ARGV[6] ~= ''
+    and type(meta.checkedAt) == 'string'
+    and meta.checkedAt >= ARGV[6]
+  then
+    return 3
+  end
   if not decoded
     or type(meta) ~= 'table'
     or meta.fixtureCount ~= entry_count(expected_fixtures)
@@ -483,7 +502,10 @@ export function createLiveSnapshotCache(
      * Fixtures. Remove the metadata pointer and all six coordinated views in
      * one command so readers either see the old snapshot or a complete miss.
      */
-    async retire(eventId: number): Promise<LiveSnapshotRetireResult> {
+    async retire(
+      eventId: number,
+      preserveOwnedCheckedAtOrAfter?: string,
+    ): Promise<LiveSnapshotRetireResult> {
       const [redis, season] = await Promise.all([
         dependencies.getRedisClient(),
         dependencies.getAuthoritativeSeason(),
@@ -492,9 +514,15 @@ export function createLiveSnapshotCache(
         ...LIVE_SNAPSHOT_VIEW_PREFIXES.map((prefix) => `${prefix}:${season}:${eventId}`),
         liveSnapshotMetaKey(season, eventId),
       ];
-      const removedKeys = Number(
-        await redis.eval(RETIRE_LIVE_SNAPSHOT_SCRIPT, keys.length, ...keys),
+      const result = Number(
+        await redis.eval(
+          RETIRE_LIVE_SNAPSHOT_SCRIPT,
+          keys.length,
+          ...keys,
+          preserveOwnedCheckedAtOrAfter ?? '',
+        ),
       );
+      const removedKeys = result === -1 ? 0 : result;
       if (!Number.isInteger(removedKeys) || removedKeys < 0) {
         throw new Error(`Unexpected live snapshot retirement result: ${String(removedKeys)}`);
       }
@@ -513,6 +541,7 @@ export function createLiveSnapshotCache(
       eventId: number,
       fixtures: readonly Fixture[],
       byTeam: LiveBonusByTeam,
+      preserveOwnedCheckedAtOrAfter?: string,
     ): Promise<LiveSnapshotFixtureRefreshResult> {
       if (fixtures.length === 0) {
         throw new Error(
@@ -538,6 +567,7 @@ export function createLiveSnapshotCache(
           season,
           String(FIXTURES_KEY_INDEX),
           String(LIVE_BONUS_V2_KEY_INDEX),
+          preserveOwnedCheckedAtOrAfter ?? '',
         ),
       );
       if (result === -2) {
@@ -545,7 +575,7 @@ export function createLiveSnapshotCache(
           `Live fixture-derived season changed from ${season} before coordinated refresh; retry`,
         );
       }
-      if (result !== 0 && result !== 1 && result !== 2) {
+      if (result !== 0 && result !== 1 && result !== 2 && result !== 3) {
         throw new Error(`Unexpected coordinated fixture refresh result: ${String(result)}`);
       }
 

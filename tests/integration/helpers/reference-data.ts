@@ -1,10 +1,6 @@
-import { syncEvents } from '../../../src/services/events.service';
-import { syncPlayers } from '../../../src/services/players.service';
-import { syncTeams } from '../../../src/services/teams.service';
+import { syncCoreSnapshot } from '../../../src/services/core-snapshot.service';
 
-let eventsReady: Promise<void> | undefined;
-let teamsReady: Promise<void> | undefined;
-let playersReady: Promise<void> | undefined;
+let coreReady: Promise<void> | undefined;
 
 function retryable(task: () => Promise<void>, reset: () => void): Promise<void> {
   return task().catch((error) => {
@@ -13,41 +9,27 @@ function retryable(task: () => Promise<void>, reset: () => void): Promise<void> 
   });
 }
 
-/** Seed FPL reference tables once, in foreign-key order, for this test process. */
-export function ensureEvents(): Promise<void> {
-  eventsReady ??= retryable(
+/** Seed the complete FPL core once so no partial writer can publish first. */
+export function ensureCoreSnapshot(): Promise<void> {
+  coreReady ??= retryable(
     async () => {
-      await syncEvents();
+      await syncCoreSnapshot();
     },
     () => {
-      eventsReady = undefined;
+      coreReady = undefined;
     },
   );
-  return eventsReady;
+  return coreReady;
+}
+
+export function ensureEvents(): Promise<void> {
+  return ensureCoreSnapshot();
 }
 
 export function ensureTeams(): Promise<void> {
-  teamsReady ??= retryable(
-    async () => {
-      await ensureEvents();
-      await syncTeams();
-    },
-    () => {
-      teamsReady = undefined;
-    },
-  );
-  return teamsReady;
+  return ensureCoreSnapshot();
 }
 
 export function ensurePlayers(): Promise<void> {
-  playersReady ??= retryable(
-    async () => {
-      await ensureTeams();
-      await syncPlayers();
-    },
-    () => {
-      playersReady = undefined;
-    },
-  );
-  return playersReady;
+  return ensureCoreSnapshot();
 }

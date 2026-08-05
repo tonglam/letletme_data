@@ -1,6 +1,6 @@
 import { Elysia } from 'elysia';
 
-import { enqueuePlayersSyncJob } from '../jobs/data-sync-enqueue';
+import { enqueueCoreSnapshotJob } from '../jobs/data-sync-enqueue';
 
 /**
  * Players API Routes
@@ -10,7 +10,7 @@ import { enqueuePlayersSyncJob } from '../jobs/data-sync-enqueue';
  */
 
 export const playersAPI = new Elysia({ prefix: '/players' }).post('/sync', async ({ set }) => {
-  const job = await enqueuePlayersSyncJob('api');
+  const job = await enqueueCoreSnapshotJob('api');
   set.status = 202;
-  return { success: true, message: 'Players sync job enqueued', jobId: job.id };
+  return { success: true, message: 'Core snapshot job enqueued', jobId: job.id };
 });

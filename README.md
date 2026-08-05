@@ -84,13 +84,22 @@ and staged update matrix in the
 ## Season rollover guarantees
 
 - Empty core arrays preserve existing database and cache state.
-- `Season:active` advances only to a newer, valid four-digit season derived
-  from FPL metadata.
+- Same-season core snapshots reserve a durable database revision before their
+  two upstream reads; an older delayed attempt cannot overwrite a newer one.
+- Legacy event, team, player, phase, and fixture refresh entry points all queue
+  that same complete snapshot; no partial core writer competes with it.
+- `Season:active` changes only with a matching committed
+  `core_snapshot_authority` record. A crash between PostgreSQL and Redis is
+  recovered by finalizing or rolling back the pending publication receipt.
+- Destructive database season rollover remains a separately approved runbook.
+  A newer candidate fails with `CORE_SNAPSHOT_MANUAL_ROLLOVER_REQUIRED` before
+  any canonical row or cache key changes until that runbook has completed.
 - When that key advances through a core write, all documented season-scoped
   Data cache families are scanned and prior-season keys are removed. This does
   not flush Redis, BullMQ state, price history, or consumer-owned keys.
-- PostgreSQL intentionally stores one FPL season at a time. IDs reused by FPL
-  overwrite the prior season's canonical rows.
+- PostgreSQL intentionally stores one FPL season at a time. Identity
+  reassignment is rejected rather than silently repointing historical foreign
+  keys; replacement belongs to the gated rollover procedure.
 - Player stats/values and live/selection jobs require both the fixture-derived
   season window and a current event. Core discovery jobs do not; bounded
   post-match result jobs intentionally remain eligible after the GW38 date.

@@ -22,6 +22,7 @@ export const MUTATION_PRIORITY_TABLES = {
 } as const;
 
 export type DataSyncPriorityJobName =
+  | 'core-snapshot'
   | 'events'
   | 'fixtures'
   | 'fixtures-all-gameweeks'

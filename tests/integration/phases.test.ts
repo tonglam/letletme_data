@@ -6,12 +6,13 @@ import { beforeAll, describe, expect, test } from 'bun:test';
 import { phases } from '../../src/db/schemas/index.schema';
 import { getDb } from '../../src/db/singleton';
 import { syncPhases } from '../../src/services/phases.service';
+import { ensureCoreSnapshot } from './helpers/reference-data';
 
 describe('Phases Integration Tests', () => {
   let syncResult: { count: number };
 
   beforeAll(async () => {
-    // Sync phases once
+    await ensureCoreSnapshot();
     syncResult = await syncPhases();
   });
 

@@ -4,8 +4,8 @@ assertIntegrationEnv();
 
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 
-import { redisSingleton } from '../../src/cache/singleton';
 import { resetActiveSeasonMemo } from '../../src/cache/cache-season';
+import { redisSingleton } from '../../src/cache/singleton';
 import { getDbClient } from '../../src/db/singleton';
 import { entryEventCupResultsRepository } from '../../src/repositories/entry-event-cup-results';
 import {
@@ -34,6 +34,7 @@ const PICK_PLAYER_ID = 99_042_101;
 const TRANSFER_PLAYER_ID = 99_042_102;
 const SOURCE_PLAYER_ID = 99_042_103;
 const TEST_SEASON = '2526';
+let previousActiveSeason: string | null = null;
 
 async function expectBlockedByEntrySeasonLock<T>(
   operation: () => Promise<T>,
@@ -127,6 +128,7 @@ async function checkpointRow() {
 
 beforeAll(async () => {
   const redis = await redisSingleton.getClient();
+  previousActiveSeason = await redis.get('Season:active');
   await redis.set('Season:active', TEST_SEASON);
   resetActiveSeasonMemo();
   const sql = await getDbClient();
@@ -180,6 +182,12 @@ afterAll(async () => {
   await sql`DELETE FROM teams WHERE id = ${PICK_TEAM_ID}`;
   const redis = await redisSingleton.getClient();
   await redis.hdel(`EntryInfo:${TEST_SEASON}`, String(ENTRY_ID));
+  if (previousActiveSeason !== null) {
+    await redis.set('Season:active', previousActiveSeason);
+  } else {
+    await redis.del('Season:active');
+  }
+  resetActiveSeasonMemo();
 });
 
 describe('tournament initialization checkpoints', () => {

@@ -41,17 +41,15 @@ mock.module('../../src/services/job-trigger.service', () => ({
 }));
 
 const enqueueEventsSyncJob = mock(async () => ({ id: 'events-job-1' }));
-const enqueueFixturesSyncJob = mock(async () => ({ id: 'fixtures-job-1' }));
-const enqueueFixturesAllGameweeksSyncJob = mock(async () => ({ id: 'fixtures-all-gw-job-1' }));
+const enqueueCoreSnapshotJob = mock(async () => ({ id: 'core-snapshot-job-1' }));
 const enqueuePlayersSyncJob = mock(async () => ({ id: 'players-job-1' }));
 const enqueuePlayerValuesSyncJob = mock(async () => ({ id: 'player-values-job-1' }));
 const enqueuePlayerStatsSyncJob = mock(async () => ({ id: 'player-stats-job-1' }));
 const enqueueTeamsSyncJob = mock(async () => ({ id: 'teams-job-1' }));
 const enqueuePhasesSyncJob = mock(async () => ({ id: 'phases-job-1' }));
 mock.module('../../src/jobs/data-sync-enqueue', () => ({
+  enqueueCoreSnapshotJob,
   enqueueEventsSyncJob,
-  enqueueFixturesSyncJob,
-  enqueueFixturesAllGameweeksSyncJob,
   enqueuePlayersSyncJob,
   enqueuePlayerValuesSyncJob,
   enqueuePlayerStatsSyncJob,
@@ -183,7 +181,7 @@ describe('eventsAPI handlers', () => {
   beforeEach(() => {
     getCurrentEvent.mockClear();
     getNextEvent.mockClear();
-    enqueueEventsSyncJob.mockClear();
+    enqueueCoreSnapshotJob.mockClear();
   });
 
   test('GET /events/current returns current event payload', async () => {
@@ -197,26 +195,26 @@ describe('eventsAPI handlers', () => {
     expect(getCurrentEvent).toHaveBeenCalledTimes(1);
   });
 
-  test('POST /events/sync enqueues the events sync job and returns 202', async () => {
+  test('POST /events/sync enqueues the complete core snapshot and returns 202', async () => {
     const response = await eventsAPI.handle(
       new Request('http://localhost/events/sync', { method: 'POST' }),
     );
     expect(response.status).toBe(202);
     const body = (await response.json()) as { success: boolean; jobId: string };
     expect(body.success).toBe(true);
-    expect(body.jobId).toBe('events-job-1');
-    expect(enqueueEventsSyncJob).toHaveBeenCalledWith('api');
+    expect(body.jobId).toBe('core-snapshot-job-1');
+    expect(enqueueCoreSnapshotJob).toHaveBeenCalledWith('api');
   });
 });
 
 describe('playersAPI handlers', () => {
-  test('POST /players/sync enqueues the shared-lock players job', async () => {
+  test('POST /players/sync enqueues the complete core snapshot', async () => {
     const response = await playersAPI.handle(
       new Request('http://localhost/players/sync', { method: 'POST' }),
     );
     expect(response.status).toBe(202);
-    expect(await response.json()).toMatchObject({ success: true, jobId: 'players-job-1' });
-    expect(enqueuePlayersSyncJob).toHaveBeenCalledWith('api');
+    expect(await response.json()).toMatchObject({ success: true, jobId: 'core-snapshot-job-1' });
+    expect(enqueueCoreSnapshotJob).toHaveBeenCalledWith('api');
   });
 });
 
@@ -353,20 +351,19 @@ describe('entrySyncAPI handlers', () => {
 
 describe('fixturesAPI handlers', () => {
   beforeEach(() => {
-    enqueueFixturesSyncJob.mockClear();
-    enqueueFixturesAllGameweeksSyncJob.mockClear();
+    enqueueCoreSnapshotJob.mockClear();
     clearFixturesCache.mockClear();
   });
 
-  test('POST /fixtures/sync enqueues the fixtures job and returns 202', async () => {
+  test('POST /fixtures/sync enqueues the complete core snapshot and returns 202', async () => {
     const response = await fixturesAPI.handle(
       new Request('http://localhost/fixtures/sync', { method: 'POST' }),
     );
     expect(response.status).toBe(202);
     const body = (await response.json()) as { success: boolean; jobId: string };
     expect(body.success).toBe(true);
-    expect(body.jobId).toBe('fixtures-job-1');
-    expect(enqueueFixturesSyncJob).toHaveBeenCalledWith('api', {});
+    expect(body.jobId).toBe('core-snapshot-job-1');
+    expect(enqueueCoreSnapshotJob).toHaveBeenCalledWith('api');
   });
 
   test('POST /fixtures/sync?event= coerces a numeric event filter', async () => {
@@ -374,7 +371,7 @@ describe('fixturesAPI handlers', () => {
       new Request('http://localhost/fixtures/sync?event=12', { method: 'POST' }),
     );
     expect(response.status).toBe(202);
-    expect(enqueueFixturesSyncJob).toHaveBeenCalledWith('api', { eventId: 12 });
+    expect(enqueueCoreSnapshotJob).toHaveBeenCalledWith('api', { eventId: 12 });
   });
 
   test('POST /fixtures/sync rejects a non-numeric event filter', async () => {
@@ -382,16 +379,15 @@ describe('fixturesAPI handlers', () => {
       new Request('http://localhost/fixtures/sync?event=abc', { method: 'POST' }),
     );
     expect(response.status).toBe(422);
-    expect(enqueueFixturesSyncJob).not.toHaveBeenCalled();
+    expect(enqueueCoreSnapshotJob).not.toHaveBeenCalled();
   });
 
-  test('POST /fixtures/sync-all-gameweeks enqueues the per-GW backfill and returns 202', async () => {
+  test('POST /fixtures/sync-all-gameweeks enqueues one complete core snapshot', async () => {
     const response = await fixturesAPI.handle(
       new Request('http://localhost/fixtures/sync-all-gameweeks', { method: 'POST' }),
     );
     expect(response.status).toBe(202);
-    expect(enqueueFixturesAllGameweeksSyncJob).toHaveBeenCalledWith('api');
-    expect(enqueueFixturesSyncJob).not.toHaveBeenCalled();
+    expect(enqueueCoreSnapshotJob).toHaveBeenCalledWith('api');
   });
 
   test('DELETE /fixtures/cache clears the cache', async () => {
@@ -640,10 +636,9 @@ describe('entryInfoAPI handlers', () => {
   });
 });
 
-describe('queued core repair APIs', () => {
+describe('queued core snapshot compatibility APIs', () => {
   beforeEach(() => {
-    enqueueTeamsSyncJob.mockClear();
-    enqueuePhasesSyncJob.mockClear();
+    enqueueCoreSnapshotJob.mockClear();
   });
 
   test('POST /teams/sync returns the queued job contract', async () => {
@@ -654,10 +649,10 @@ describe('queued core repair APIs', () => {
     expect(await response.json()).toEqual({
       success: true,
       status: 'queued',
-      jobId: 'teams-job-1',
-      message: 'Teams sync queued',
+      jobId: 'core-snapshot-job-1',
+      message: 'Core snapshot queued',
     });
-    expect(enqueueTeamsSyncJob).toHaveBeenCalledWith('api');
+    expect(enqueueCoreSnapshotJob).toHaveBeenCalledWith('api');
   });
 
   test('POST /phases/sync returns the queued job contract', async () => {
@@ -668,9 +663,9 @@ describe('queued core repair APIs', () => {
     expect(await response.json()).toEqual({
       success: true,
       status: 'queued',
-      jobId: 'phases-job-1',
-      message: 'Phases sync queued',
+      jobId: 'core-snapshot-job-1',
+      message: 'Core snapshot queued',
     });
-    expect(enqueuePhasesSyncJob).toHaveBeenCalledWith('api');
+    expect(enqueueCoreSnapshotJob).toHaveBeenCalledWith('api');
   });
 });
