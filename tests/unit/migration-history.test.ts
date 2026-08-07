@@ -104,6 +104,20 @@ describe('core snapshot authority migration', () => {
   });
 });
 
+describe('GraphQL read RPC migration', () => {
+  test('rebuilds only the legacy picker signatures when their OUT type changes', () => {
+    const migration = readFileSync('migrations/0043_create_graphql_read_rpcs.sql', 'utf8');
+
+    expect(migration).toContain(
+      'DROP FUNCTION IF EXISTS public.get_players_for_picker(integer, integer)',
+    );
+    expect(migration).toContain(
+      'DROP FUNCTION IF EXISTS public.search_players_for_picker(text, integer, integer)',
+    );
+    expect(migration).not.toMatch(/DROP FUNCTION[^;]+CASCADE/);
+  });
+});
+
 describe('Understat provider migrations', () => {
   test('create isolated provider, archive, bridge, and FPL evidence stores behind RLS', () => {
     const names = {
