@@ -27,6 +27,7 @@ import { logWarn } from '../utils/logger';
 import {
   assertNoUnderstatMatchesDisappeared,
   assertUnderstatLeagueSnapshotComplete,
+  assertUnderstatResourceHashes,
   assertUnderstatSyncAllowed,
   changedUnderstatPlayerSeasonIds,
   evaluateUnderstatPlayerSnapshotCompleteness,
@@ -256,6 +257,11 @@ export async function syncUnderstatPlayerTeamDetail(job: UnderstatPlayerJobData)
     );
     return participantsChanged || identityChanges > 0;
   });
+  assertUnderstatResourceHashes(
+    `team participants season=${job.season} team=${teamId}`,
+    transformed.playerTeamSeasons.map((row) => row.sourceHash),
+    await understatPlayerRepository.getTeamParticipantHashes(job.season, teamId),
+  );
   await publishWhenReady(
     job,
     await understatSyncRepository.completeItem(
@@ -298,6 +304,11 @@ export async function syncUnderstatPlayerMatch(job: UnderstatPlayerJobData): Pro
     const matchChanged = await players.replaceMatchStats(matchId, transformed.stats);
     return matchChanged || identityChanges > 0;
   });
+  assertUnderstatResourceHashes(
+    `match roster match=${matchId}`,
+    transformed.stats.map((row) => row.sourceHash),
+    await understatPlayerRepository.getMatchStatHashes(matchId),
+  );
   await publishWhenReady(
     job,
     await understatSyncRepository.completeItem(

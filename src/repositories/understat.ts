@@ -306,6 +306,17 @@ export const createUnderstatTeamRepository = (dbInstance?: DbOrTransaction) => (
     return new Set(rows.map((row) => row.teamId));
   },
 
+  async getSplitHashes(season: string, teamId: number): Promise<string[]> {
+    const db = await getDatabase(dbInstance);
+    const rows = await db
+      .select({ sourceHash: understatTeamStatSplits.sourceHash })
+      .from(understatTeamStatSplits)
+      .where(
+        and(eq(understatTeamStatSplits.season, season), eq(understatTeamStatSplits.teamId, teamId)),
+      );
+    return rows.map((row) => row.sourceHash).sort();
+  },
+
   async replaceSplits(
     season: string,
     teamId: number,
@@ -546,6 +557,20 @@ export const createUnderstatPlayerRepository = (dbInstance?: DbOrTransaction) =>
     return new Set(rows.map((row) => row.teamId));
   },
 
+  async getTeamParticipantHashes(season: string, teamId: number): Promise<string[]> {
+    const db = await getDatabase(dbInstance);
+    const rows = await db
+      .select({ sourceHash: understatPlayerTeamSeasons.sourceHash })
+      .from(understatPlayerTeamSeasons)
+      .where(
+        and(
+          eq(understatPlayerTeamSeasons.season, season),
+          eq(understatPlayerTeamSeasons.teamId, teamId),
+        ),
+      );
+    return rows.map((row) => row.sourceHash).sort();
+  },
+
   async replaceTeamParticipants(
     season: string,
     teamId: number,
@@ -636,6 +661,15 @@ export const createUnderstatPlayerRepository = (dbInstance?: DbOrTransaction) =>
       .where(inArray(understatPlayerMatchStats.matchId, matchIds))
       .groupBy(understatPlayerMatchStats.matchId);
     return new Set(rows.map((row) => row.matchId));
+  },
+
+  async getMatchStatHashes(matchId: number): Promise<string[]> {
+    const db = await getDatabase(dbInstance);
+    const rows = await db
+      .select({ sourceHash: understatPlayerMatchStats.sourceHash })
+      .from(understatPlayerMatchStats)
+      .where(eq(understatPlayerMatchStats.matchId, matchId));
+    return rows.map((row) => row.sourceHash).sort();
   },
 
   async replaceMatchStats(matchId: number, rows: UnderstatPlayerMatchStat[]): Promise<boolean> {

@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 
 import { UNDERSTAT_SPLIT_DIMENSIONS } from '../../src/domain/understat';
 import {
+  assertUnderstatResourceHashes,
   evaluateUnderstatPlayerSnapshotCompleteness,
   evaluateUnderstatTeamSnapshotCompleteness,
 } from '../../src/services/understat-sync.service';
@@ -22,6 +23,15 @@ const completeTeamMatchRows = [
 ];
 
 describe('Understat cache completeness guards', () => {
+  test('rejects a scoped write that did not survive post-commit verification', () => {
+    expect(() => assertUnderstatResourceHashes('team splits', ['a', 'b'], ['a'])).toThrow(
+      'expected=2 persisted=1',
+    );
+    expect(() =>
+      assertUnderstatResourceHashes('team splits', ['b', 'a'], ['a', 'b']),
+    ).not.toThrow();
+  });
+
   test('does not publish a one-team smoke snapshot', () => {
     const result = evaluateUnderstatTeamSnapshotCompleteness('EPL', {
       teams,

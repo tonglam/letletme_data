@@ -18,6 +18,23 @@ export interface UnderstatCompletenessResult {
   reason: string;
 }
 
+export function assertUnderstatResourceHashes(
+  resource: string,
+  expectedHashes: readonly string[],
+  persistedHashes: readonly string[],
+): void {
+  const expected = [...expectedHashes].sort();
+  const persisted = [...persistedHashes].sort();
+  if (
+    expected.length !== persisted.length ||
+    expected.some((sourceHash, index) => sourceHash !== persisted[index])
+  ) {
+    throw new Error(
+      `Understat ${resource} post-commit verification failed: expected=${expected.length} persisted=${persisted.length}`,
+    );
+  }
+}
+
 function incomplete(reason: string): UnderstatCompletenessResult {
   return { complete: false, reason };
 }

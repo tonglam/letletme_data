@@ -20,6 +20,7 @@ import { understatCache } from '../cache/understat-cache';
 import {
   assertNoUnderstatMatchesDisappeared,
   assertUnderstatLeagueSnapshotComplete,
+  assertUnderstatResourceHashes,
   assertUnderstatSyncAllowed,
   changedUnderstatTeamStatIds,
   evaluateUnderstatTeamSnapshotCompleteness,
@@ -183,6 +184,11 @@ export async function syncUnderstatTeamDetail(job: UnderstatTeamJobData): Promis
   const db = await getDb();
   const changed = await db.transaction((tx) =>
     createUnderstatTeamRepository(tx).replaceSplits(job.season, teamId, rows),
+  );
+  assertUnderstatResourceHashes(
+    `team splits season=${job.season} team=${teamId}`,
+    rows.map((row) => row.sourceHash),
+    await understatTeamRepository.getSplitHashes(job.season, teamId),
   );
   await publishWhenReady(
     job,
