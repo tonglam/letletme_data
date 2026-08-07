@@ -9,10 +9,10 @@ import {
 import type { UnderstatPlayerJobData } from '../queues/understat-player.queue';
 import {
   createUnderstatPlayerRepository,
-  createUnderstatReferenceRepository,
   understatPlayerRepository,
   understatReferenceRepository,
 } from '../repositories/understat';
+import { persistUnderstatPlayerDiscovery } from '../repositories/understat-discovery';
 import { understatSyncRepository } from '../repositories/understat-sync';
 import {
   findUnderstatRosterAggregateDifferences,
@@ -128,21 +128,7 @@ export async function discoverUnderstatPlayers(job: UnderstatPlayerJobData): Pro
   const changedTeams = new Set([...participantChangeTeamIds, ...newMatchTeamIds]);
 
   const db = await getDb();
-  const changed = await db.transaction(async (tx) => {
-    const references = createUnderstatReferenceRepository(tx);
-    const players = createUnderstatPlayerRepository(tx);
-    if (discovery.season.state === 'active') {
-      await references.completeOlderSeasons(discovery.season.season);
-    }
-    await references.upsertSeason(discovery.season);
-    const counts = await Promise.all([
-      references.upsertTeams(discovery.teams),
-      references.upsertMatches(discovery.matches),
-      players.upsertPlayers(discovery.players),
-    ]);
-    const seasonsChanged = await players.replacePlayerSeasons(job.season, discovery.playerSeasons);
-    return seasonsChanged || counts.some((count) => count > 0);
-  });
+  const changed = await db.transaction((tx) => persistUnderstatPlayerDiscovery(tx, discovery));
   if (changed) await understatSyncRepository.markDataChanged(job.runId);
 
   const selectedTeamIds = selectTeamDetailIds({

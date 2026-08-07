@@ -4,11 +4,11 @@ import { getDb } from '../db/singleton';
 import type { UnderstatTeamJobData } from '../queues/understat-team.queue';
 import { understatClient } from '../clients/understat';
 import {
-  createUnderstatReferenceRepository,
   createUnderstatTeamRepository,
   understatReferenceRepository,
   understatTeamRepository,
 } from '../repositories/understat';
+import { persistUnderstatTeamDiscovery } from '../repositories/understat-discovery';
 import { understatSyncRepository } from '../repositories/understat-sync';
 import { enqueueUnderstatTeamDetail, enqueueUnderstatTeamPublish } from '../jobs/understat-enqueue';
 import {
@@ -103,21 +103,7 @@ export async function discoverUnderstatTeams(job: UnderstatTeamJobData): Promise
   const changedTeams = changedUnderstatTeamStatIds(discovery.teamMatchStats, previousStatHashes);
 
   const db = await getDb();
-  const changed = await db.transaction(async (tx) => {
-    const references = createUnderstatReferenceRepository(tx);
-    const teams = createUnderstatTeamRepository(tx);
-    if (discovery.season.state === 'active') {
-      await references.completeOlderSeasons(discovery.season.season);
-    }
-    await references.upsertSeason(discovery.season);
-    const counts = await Promise.all([
-      references.upsertTeams(discovery.teams),
-      references.upsertMatches(discovery.matches),
-      teams.upsertMatchStats(discovery.teamMatchStats),
-      teams.upsertTeamSeasons(discovery.teamSeasons),
-    ]);
-    return counts.some((count) => count > 0);
-  });
+  const changed = await db.transaction((tx) => persistUnderstatTeamDiscovery(tx, discovery));
   if (changed) await understatSyncRepository.markDataChanged(job.runId);
 
   const selectedTargetIds = selectTeamDetailIds({

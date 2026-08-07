@@ -41,6 +41,7 @@ import {
   createUnderstatReferenceRepository,
   createUnderstatTeamRepository,
 } from '../../src/repositories/understat';
+import { persistUnderstatTeamDiscovery } from '../../src/repositories/understat-discovery';
 import { createFplPlayerFixtureStatsRepository } from '../../src/repositories/fpl-player-fixture-stats';
 import { understatSyncRepository } from '../../src/repositories/understat-sync';
 import { providerIdentityRepository } from '../../src/repositories/provider-identity';
@@ -203,27 +204,27 @@ afterAll(async () => {
 });
 
 describe('Understat persistence', () => {
-  test('skips unchanged business-row upserts', async () => {
+  test('persists a fresh discovery graph in FK order and skips unchanged rows', async () => {
     const db = await getDb();
-    const references = createUnderstatReferenceRepository(db);
-    const teamRepository = createUnderstatTeamRepository(db);
-    await references.ensureSeason({
+    const seasonRecord = {
       season,
       sourceYear: 2098,
       league,
-      state: 'active',
+      state: 'complete' as const,
       firstSeenAt: now,
       lastSeenAt: now,
-    });
+    };
     const stats = matchStats();
-    expect(await references.upsertTeams(teams())).toBe(2);
-    expect(await references.upsertMatches([match()])).toBe(1);
-    expect(await teamRepository.upsertMatchStats(stats)).toBe(2);
-    expect(await teamRepository.upsertTeamSeasons(teamSeasons(stats))).toBe(2);
-    expect(await references.upsertTeams(teams())).toBe(0);
-    expect(await references.upsertMatches([match()])).toBe(0);
-    expect(await teamRepository.upsertMatchStats(stats)).toBe(0);
-    expect(await teamRepository.upsertTeamSeasons(teamSeasons(stats))).toBe(0);
+    const discovery = {
+      season: seasonRecord,
+      teams: teams(),
+      matches: [match()],
+      teamMatchStats: stats,
+      teamSeasons: teamSeasons(stats),
+    };
+
+    expect(await db.transaction((tx) => persistUnderstatTeamDiscovery(tx, discovery))).toBe(true);
+    expect(await db.transaction((tx) => persistUnderstatTeamDiscovery(tx, discovery))).toBe(false);
   });
 
   test('rolls back a failed scoped split replacement', async () => {
