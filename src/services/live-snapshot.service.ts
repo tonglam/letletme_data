@@ -251,7 +251,7 @@ export async function persistLiveSnapshotDurably({
       await createFixtureRepository(tx).upsertBatch(prepared.fixtures);
     }
     if (persistEventLives) {
-      await persistPreparedEventLives(prepared.eventLives, tx);
+      await persistPreparedEventLives(prepared.eventLives, tx, prepared.season);
     }
 
     if (finalizeEvent) {

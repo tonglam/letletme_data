@@ -59,6 +59,16 @@ const EnvSchema = z.object({
   SUPABASE_URL: z.string().optional(),
   SUPABASE_KEY: z.string().optional(),
   PULSELIVE_COMP_SEASON: z.string().optional(),
+  // Disabled until automated Understat access is explicitly approved.
+  UNDERSTAT_ENABLED: booleanEnv(false),
+  UNDERSTAT_BASE_URL: z.string().url().default('https://understat.com'),
+  UNDERSTAT_LEAGUE: z.string().min(1).default('EPL'),
+  UNDERSTAT_SEASON: z
+    .string()
+    .regex(/^\d{4}$/)
+    .default('2627'),
+  UNDERSTAT_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(60_000).default(10_000),
+  UNDERSTAT_MAX_CONCURRENCY: z.coerce.number().int().min(1).max(4).default(4),
   // Telegram notifications (optional)
   TELEGRAM_BOT_TOKEN: z.string().optional(),
   TELEGRAM_CHAT_ID: z.string().optional(),
@@ -95,6 +105,7 @@ export function getConfig(): AppConfig {
       redisPort: parsed.REDIS_PORT,
       queueRedisHost: parsed.QUEUE_REDIS_HOST || parsed.REDIS_HOST,
       queueRedisPort: parsed.QUEUE_REDIS_PORT || parsed.REDIS_PORT,
+      understatEnabled: parsed.UNDERSTAT_ENABLED,
     });
     return parsed;
   } catch (error) {

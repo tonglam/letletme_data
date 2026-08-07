@@ -15,3 +15,4 @@ export { playerStatsCache } from './player-stats-cache';
 export { playerValuesCache } from './player-values-cache';
 export { playersCache } from './players-cache';
 export { teamsCache } from './teams-cache';
+export { understatCache } from './understat-cache';

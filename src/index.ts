@@ -17,6 +17,7 @@ import { registerMutationRateLimit } from './api/rate-limit';
 import { checkReadiness } from './api/health';
 import { teamsAPI } from './api/teams.api';
 import { tournamentsAPI } from './api/tournaments.api';
+import { understatAPI } from './api/understat.api';
 
 // Import job registration functions
 import { registerDataJobs } from './jobs/data-jobs';
@@ -25,6 +26,7 @@ import { registerLeagueJobs } from './jobs/league-jobs';
 import { registerLaunchJobs } from './jobs/launch.jobs';
 import { registerLiveJobs } from './jobs/live.jobs';
 import { registerTournamentJobs } from './jobs/tournament-jobs';
+import { registerUnderstatJobs } from './jobs/understat.jobs';
 
 // Import utilities
 import { getAuthConfig, getConfig } from './utils/config';
@@ -148,6 +150,7 @@ const app = new Elysia()
   .use(entrySyncAPI)
   .use(jobsAPI)
   .use(tournamentsAPI)
+  .use(understatAPI)
 
   // ================================
   // Cron Job Registration
@@ -159,6 +162,7 @@ const app = new Elysia()
   .use(registerEntryJobs)
   .use(registerLeagueJobs)
   .use(registerTournamentJobs)
+  .use(registerUnderstatJobs)
 
   // ================================
   // Server Startup
@@ -195,6 +199,7 @@ logInfo('🚀 Elysia server started', {
     'phases',
     'jobs',
     'tournaments',
+    'understat',
   ],
   jobs: [
     'data-sync',
@@ -220,6 +225,8 @@ logInfo('🚀 Elysia server started', {
     'tournament-points-race-results',
     'tournament-battle-race-results',
     'tournament-knockout-results',
+    'understat-team',
+    'understat-player',
   ],
 });
 
