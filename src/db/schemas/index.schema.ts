@@ -12,6 +12,7 @@ export * from './event-live-summaries.schema';
 export * from './event-lives.schema';
 export * from './events.schema';
 export * from './fpl-player-fixture-stats.schema';
+export * from './fpl-history.schema';
 export * from './league-event-results.schema';
 export * from './phases.schema';
 export * from './player-stats.schema';

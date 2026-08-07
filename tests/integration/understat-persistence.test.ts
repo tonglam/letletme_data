@@ -89,7 +89,12 @@ function match(): UnderstatMatch {
     forecastDraw: 0.25,
     forecastAwayWin: 0.15,
   };
-  return { ...source, sourceHash: contentHash(source), lastSeenAt: now };
+  return {
+    ...source,
+    sourceHash: contentHash(source),
+    sourceCheckedAt: now,
+    lastSeenAt: now,
+  };
 }
 
 function matchStats(): UnderstatTeamMatchStat[] {
@@ -127,6 +132,8 @@ function teamSeasons(stats: UnderstatTeamMatchStat[]): UnderstatTeamSeason[] {
     const source = {
       season,
       teamId: stat.teamId,
+      sourceTitle: `Integration Team ${stat.teamId}`,
+      sourceShortTitle: null,
       games: 1,
       wins: stat.wins,
       draws: stat.draws,
@@ -266,6 +273,7 @@ describe('Understat persistence', () => {
     const seasonSource = {
       season,
       playerId,
+      sourceName: 'Integration Player',
       sourceTeamTitle: 'Integration Team 0',
       games: 1,
       time: 90,

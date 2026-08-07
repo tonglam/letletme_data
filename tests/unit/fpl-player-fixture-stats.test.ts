@@ -10,12 +10,14 @@ describe('FPL per-fixture evidence transformer', () => {
     expect(rows.find((row) => row.fixtureId === 401)).toMatchObject({
       elementId: 101,
       minutes: 90,
+      starts: null,
       goals: 1,
       assists: 1,
     });
     expect(rows.find((row) => row.fixtureId === 402)).toMatchObject({
       elementId: 101,
       minutes: 0,
+      starts: null,
       goals: 0,
       assists: 0,
     });

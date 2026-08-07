@@ -35,6 +35,7 @@ function match(id: number, ageHours: number, isResult = true): UnderstatMatch {
     forecastDraw: null,
     forecastAwayWin: null,
     sourceHash: String(id),
+    sourceCheckedAt: new Date(),
     lastSeenAt: new Date(),
   };
 }

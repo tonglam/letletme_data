@@ -105,19 +105,17 @@ describe('core snapshot authority migration', () => {
 });
 
 describe('Understat provider migrations', () => {
-  test('create isolated provider, sync, bridge, and FPL evidence stores behind RLS', () => {
-    const migrations = [40, 41, 42, 43].map((number) =>
-      readFileSync(
-        `migrations/00${number}_${
-          {
-            40: 'create_understat_provider_tables',
-            41: 'create_understat_sync_state',
-            42: 'create_provider_identity_bridge',
-            43: 'create_fpl_player_fixture_stats',
-          }[number as 40 | 41 | 42 | 43]
-        }.sql`,
-        'utf8',
-      ),
+  test('create isolated provider, archive, bridge, and FPL evidence stores behind RLS', () => {
+    const names = {
+      50: 'create_understat_provider_tables',
+      51: 'create_understat_sync_state',
+      52: 'create_provider_identity_bridge',
+      53: 'create_fpl_player_fixture_stats',
+      54: 'create_fpl_history_archive',
+      55: 'create_fpl_2627_history_partitions',
+    } as const;
+    const migrations = [50, 51, 52, 53, 54, 55].map((number) =>
+      readFileSync(`migrations/00${number}_${names[number as keyof typeof names]}.sql`, 'utf8'),
     );
     for (const migration of migrations) {
       expect(migration).toContain('ENABLE ROW LEVEL SECURITY');
@@ -128,6 +126,13 @@ describe('Understat provider migrations', () => {
     expect(migrations[1]).toContain('ready_to_publish');
     expect(migrations[2]).toContain('quarantined');
     expect(migrations[3]).toContain('player_code');
+    expect(migrations[3]).toContain('starts integer');
+    expect(migrations[4]).toContain('fpl_season_archives');
+    expect(migrations[4]).toMatch(/'2526',/);
+    expect(migrations[4]).toContain('reject_sealed_fpl_history_mutation');
+    expect(migrations[4]).not.toContain('TRUNCATE');
+    expect(migrations[5]).toContain('event_fixture_2627');
+    expect(migrations[5]).toContain('fpl_player_fixture_stat_2627');
   });
 });
 

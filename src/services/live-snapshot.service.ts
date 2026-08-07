@@ -19,12 +19,13 @@ import type { LiveSnapshotState } from '../domain/live-snapshot';
 import { createFixtureRepository, fixtureRepository } from '../repositories/fixtures';
 import { transformFixtures } from '../transformers/fixtures';
 import type { Fixture, RawFPLEventLiveResponse, RawFPLFixture } from '../types';
-import { logInfo } from '../utils/logger';
+import { logError, logInfo } from '../utils/logger';
 import {
   persistPreparedEventLives,
   prepareEventLives,
   type PreparedEventLives,
 } from './event-lives.service';
+import { enqueueFplSeasonArchiveIfEligible } from './fpl-archive-trigger.service';
 import {
   buildLiveFixtureViews,
   loadLiveFixtureTeamMaps,
@@ -681,6 +682,22 @@ export async function syncLiveSnapshot(
       persistedFixtures,
       persistedEventLives,
     };
+    if (
+      options.finalizeEvent === true &&
+      options.dependencies === undefined &&
+      persistedEventLives
+    ) {
+      try {
+        await enqueueFplSeasonArchiveIfEligible(prepared.season);
+      } catch (error) {
+        // Final live durability has already committed. Archive enqueue failure
+        // must be visible, but cannot roll back or misreport that provider write.
+        logError('Failed to enqueue eligible FPL season archive', error, {
+          season: prepared.season,
+          eventId,
+        });
+      }
+    }
     logInfo('Live snapshot sync completed', {
       ...result,
       durationMs: Date.now() - startedAt,

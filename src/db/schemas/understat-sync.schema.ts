@@ -36,6 +36,7 @@ export const understatSyncRuns = pgTable(
     skippedItems: integer('skipped_items').default(0).notNull(),
     dataChanged: boolean('data_changed').default(false).notNull(),
     cacheRevision: text('cache_revision'),
+    publicationSkipReason: text('publication_skip_reason'),
     errorSummary: text('error_summary'),
     startedAt: timestamp('started_at', { withTimezone: true }).notNull(),
     completedAt: timestamp('completed_at', { withTimezone: true }),

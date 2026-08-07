@@ -5,6 +5,7 @@ export type UnderstatSyncRunStatus =
   | 'pending'
   | 'running'
   | 'failed'
+  | 'completed'
   | 'ready_to_publish'
   | 'published';
 export type UnderstatSyncItemStatus = 'pending' | 'running' | 'failed' | 'completed' | 'skipped';
@@ -63,6 +64,7 @@ export interface UnderstatMatch {
   forecastDraw: number | null;
   forecastAwayWin: number | null;
   sourceHash: string;
+  sourceCheckedAt: Date;
   lastSeenAt: Date;
 }
 
@@ -95,6 +97,8 @@ export interface UnderstatTeamMatchStat {
 export interface UnderstatTeamSeason {
   season: string;
   teamId: number;
+  sourceTitle: string;
+  sourceShortTitle: string | null;
   games: number;
   wins: number;
   draws: number;
@@ -164,6 +168,7 @@ export interface UnderstatPlayerStats {
 export interface UnderstatPlayerSeason extends UnderstatPlayerStats {
   season: string;
   playerId: number;
+  sourceName: string;
   sourceTeamTitle: string;
   sourceHash: string;
 }
@@ -215,6 +220,7 @@ export interface UnderstatSyncRun {
   skippedItems: number;
   dataChanged: boolean;
   cacheRevision: string | null;
+  publicationSkipReason: string | null;
   errorSummary: string | null;
   startedAt: Date;
   completedAt: Date | null;

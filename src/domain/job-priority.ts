@@ -31,7 +31,8 @@ export type DataSyncPriorityJobName =
   | 'player-prices'
   | 'player-stats'
   | 'phases'
-  | 'player-values';
+  | 'player-values'
+  | 'fpl-season-archive';
 
 export type EntrySyncPriorityJobName =
   | 'entry-info'

@@ -56,7 +56,12 @@ function transformMatch(season: string, raw: UnderstatMatchDate, seenAt: Date): 
     forecastDraw: raw.forecast.d,
     forecastAwayWin: raw.forecast.l,
   };
-  return { ...source, sourceHash: hashWithoutSource(source), lastSeenAt: seenAt };
+  return {
+    ...source,
+    sourceHash: hashWithoutSource(source),
+    sourceCheckedAt: seenAt,
+    lastSeenAt: seenAt,
+  };
 }
 
 function shortTitlesByTeamId(dates: UnderstatMatchDate[]): Map<number, string> {
@@ -143,7 +148,7 @@ function transformTeamHistory(
 
 export function aggregateUnderstatTeamSeason(
   season: string,
-  teamId: number,
+  team: Pick<UnderstatTeam, 'id' | 'title' | 'shortTitle'>,
   rows: UnderstatTeamMatchStat[],
   syncedAt: Date,
 ): UnderstatTeamSeason {
@@ -172,7 +177,9 @@ export function aggregateUnderstatTeamSeason(
     }),
     {
       season,
-      teamId,
+      teamId: team.id,
+      sourceTitle: team.title,
+      sourceShortTitle: team.shortTitle,
       games: 0,
       wins: 0,
       draws: 0,
@@ -270,7 +277,7 @@ export function transformUnderstatTeamDiscovery(
   const teamSeasons = teams.map((team) =>
     aggregateUnderstatTeamSeason(
       season,
-      team.id,
+      team,
       teamMatchStats.filter((row) => row.teamId === team.id),
       now,
     ),
@@ -309,6 +316,7 @@ export function transformUnderstatPlayerDiscovery(
       const base = {
         season,
         playerId: raw.id,
+        sourceName: raw.player_name,
         sourceTeamTitle: raw.team_title,
         ...transformPlayerStats(raw),
       };
@@ -383,10 +391,7 @@ export function validateUnderstatTeamDates(
       date.goals.h !== match.homeGoals ||
       date.goals.a !== match.awayGoals ||
       date.xG.h !== match.homeXg ||
-      date.xG.a !== match.awayXg ||
-      date.forecast.w !== match.forecastHomeWin ||
-      date.forecast.d !== match.forecastDraw ||
-      date.forecast.l !== match.forecastAwayWin;
+      date.xG.a !== match.awayXg;
     if (differs) {
       throw new Error(
         `Understat team page match differs from league snapshot: team=${expectedTeamId} match=${date.id}`,
@@ -542,6 +547,12 @@ export function transformUnderstatMatchRoster(
     const playerIds = new Set(sideRows.map(({ stat }) => stat.playerId));
     if (playerIds.size !== sideRows.length) {
       throw new Error(`Understat match ${match.id} contains duplicate ${side} player IDs`);
+    }
+    const starters = sideRows.filter(({ stat }) => stat.started);
+    if (starters.length !== 11) {
+      throw new Error(
+        `Understat match ${match.id} ${side} roster has ${starters.length} starters instead of 11`,
+      );
     }
   }
   const playersById = new Map<number, UnderstatPlayer>();

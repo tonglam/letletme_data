@@ -129,49 +129,6 @@ export const createProviderIdentityRepository = (dbInstance?: DbOrTransaction) =
     return mapEntityLink(row);
   },
 
-  async markNotObserved(input: {
-    rightProvider: string;
-    rightEntityId: string;
-    leftProvider: string;
-    season: string;
-    evidence?: Record<string, unknown>;
-  }): Promise<ProviderEntityLink> {
-    const db = await getDatabase(dbInstance);
-    const [row] = await db
-      .insert(providerEntityLinks)
-      .values({
-        id: randomUUID(),
-        entityType: 'player',
-        leftProvider: input.leftProvider,
-        leftEntityId: null,
-        rightProvider: input.rightProvider,
-        rightEntityId: input.rightEntityId,
-        status: 'not_observed',
-        method: 'no-understat-participation',
-        ruleVersion: 'understat-fpl-v1',
-        evidence: input.evidence ?? {},
-        firstSeenSeason: input.season,
-        lastSeenSeason: input.season,
-      })
-      .onConflictDoUpdate({
-        target: [
-          providerEntityLinks.entityType,
-          providerEntityLinks.rightProvider,
-          providerEntityLinks.rightEntityId,
-          providerEntityLinks.leftProvider,
-        ],
-        targetWhere: sql`${providerEntityLinks.status} = 'not_observed'`,
-        set: {
-          evidence: input.evidence ?? {},
-          firstSeenSeason: sql`LEAST(${providerEntityLinks.firstSeenSeason}, excluded.first_seen_season)`,
-          lastSeenSeason: sql`GREATEST(${providerEntityLinks.lastSeenSeason}, excluded.last_seen_season)`,
-          updatedAt: new Date(),
-        },
-      })
-      .returning();
-    return mapEntityLink(row);
-  },
-
   async upsertMatchLink(input: UpsertMatchLinkInput): Promise<ProviderMatchLink> {
     const db = await getDatabase(dbInstance);
     const reviewed = input.status === 'manual_verified';

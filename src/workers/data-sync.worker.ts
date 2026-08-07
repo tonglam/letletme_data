@@ -11,6 +11,7 @@ import { syncPlayerPricesForDate } from '../services/player-prices.service';
 import { syncCurrentPlayerStats, syncPlayerStatsForEvent } from '../services/player-stats.service';
 import { syncCurrentPlayerValues } from '../services/player-values.service';
 import { syncCoreSnapshot } from '../services/core-snapshot.service';
+import { prepareAndArchiveFplSeason } from '../services/fpl-history.service';
 import {
   resolveBullMqAttemptQueueWaitMs,
   runDataSyncAttempt,
@@ -33,6 +34,7 @@ const CORE_SNAPSHOT_JOB_NAMES = new Set([
   'teams',
   'players',
   'phases',
+  'fpl-season-archive',
 ]);
 
 const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
@@ -86,6 +88,9 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
               job.data.changeDate ?? formatCronDateKey(new Date(job.data.triggeredAt)),
               { onTargetEventResolved: recordResolvedTarget },
             );
+          case 'fpl-season-archive':
+            if (!job.data.season) throw new Error('fpl-season-archive job requires season');
+            return prepareAndArchiveFplSeason(job.data.season);
           default:
             throw new Error(`Unknown data-sync job: ${job.name}`);
         }

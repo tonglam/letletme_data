@@ -34,7 +34,6 @@ describe('Understat client boundary', () => {
     let capturedHeader = '';
     const client = new UnderstatClient({
       enabled: true,
-      maxAttempts: 1,
       fetchFn: async (input, init) => {
         capturedUrl = String(input);
         capturedHeader = new Headers(init?.headers).get('X-Requested-With') ?? '';
@@ -65,9 +64,6 @@ describe('Understat client boundary', () => {
     let calls = 0;
     const client = new UnderstatClient({
       enabled: true,
-      maxAttempts: 3,
-      retryBaseDelayMs: 0,
-      retryMaxDelayMs: 0,
       fetchFn: async () => {
         calls += 1;
         return new Response('not-json');
@@ -80,23 +76,21 @@ describe('Understat client boundary', () => {
     expect(calls).toBe(1);
   });
 
-  test('retries 429 responses and accepts Retry-After', async () => {
+  test('classifies 429 for the queue without retrying inside the client', async () => {
     let calls = 0;
     const client = new UnderstatClient({
       enabled: true,
-      maxAttempts: 2,
-      retryBaseDelayMs: 0,
-      retryMaxDelayMs: 0,
       fetchFn: async () => {
         calls += 1;
-        if (calls === 1) {
-          return new Response('', { status: 429, headers: { 'Retry-After': '0' } });
-        }
-        return new Response(JSON.stringify(UNDERSTAT_LEAGUE_FIXTURE));
+        return new Response('', { status: 429, headers: { 'Retry-After': '2' } });
       },
     });
 
-    await expect(client.getLeagueData('EPL', 2026)).resolves.toBeDefined();
-    expect(calls).toBe(2);
+    await expect(client.getLeagueData('EPL', 2026)).rejects.toMatchObject({
+      code: 'HTTP_ERROR',
+      retryable: true,
+      retryAfterMs: 2_000,
+    });
+    expect(calls).toBe(1);
   });
 });

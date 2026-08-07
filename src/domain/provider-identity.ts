@@ -5,8 +5,7 @@ export type ProviderLinkStatus =
   | 'manual_verified'
   | 'ambiguous'
   | 'quarantined'
-  | 'rejected'
-  | 'not_observed';
+  | 'rejected';
 
 export interface ProviderEntityLink {
   id: string;

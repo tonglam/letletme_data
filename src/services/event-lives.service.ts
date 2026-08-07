@@ -60,7 +60,10 @@ export async function persistPreparedEventLives(
   dbInstance?: DbOrTransaction,
   season?: string,
 ): Promise<EventLive[]> {
-  const { eventId, eventLives, explains, fixtureEvidence } = prepared;
+  const { eventId, eventLives, explains } = prepared;
+  // Keep injected/legacy prepared snapshots compatible while the new
+  // per-fixture evidence field rolls out across workers and tests.
+  const fixtureEvidence = prepared.fixtureEvidence ?? [];
   let evidenceSeason = season ?? null;
   if (fixtureEvidence.length > 0 && !evidenceSeason) {
     try {

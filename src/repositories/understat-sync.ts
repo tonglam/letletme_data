@@ -28,6 +28,7 @@ function mapRun(row: typeof understatSyncRuns.$inferSelect): UnderstatSyncRun {
     skippedItems: row.skippedItems,
     dataChanged: row.dataChanged,
     cacheRevision: row.cacheRevision,
+    publicationSkipReason: row.publicationSkipReason,
     errorSummary: row.errorSummary,
     startedAt: row.startedAt,
     completedAt: row.completedAt,
@@ -213,6 +214,19 @@ export const createUnderstatSyncRepository = (dbInstance?: DbOrTransaction) => (
       .where(eq(understatSyncRuns.runId, runId));
   },
 
+  async markCompletedWithoutPublish(runId: string, reason: string): Promise<void> {
+    const db = await getDatabase(dbInstance);
+    await db
+      .update(understatSyncRuns)
+      .set({
+        status: 'completed',
+        publicationSkipReason: reason,
+        completedAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .where(eq(understatSyncRuns.runId, runId));
+  },
+
   async markDataChanged(runId: string): Promise<void> {
     const db = await getDatabase(dbInstance);
     await db
@@ -228,6 +242,7 @@ export const createUnderstatSyncRepository = (dbInstance?: DbOrTransaction) => (
       .set({
         status: 'published',
         cacheRevision: revision,
+        publicationSkipReason: null,
         completedAt: new Date(),
         updatedAt: new Date(),
       })

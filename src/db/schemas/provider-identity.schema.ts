@@ -49,9 +49,6 @@ export const providerEntityLinks = pgTable(
     uniqueIndex('uq_provider_entity_links_verified_left')
       .on(table.entityType, table.leftProvider, table.leftEntityId, table.rightProvider)
       .where(sql`${table.status} IN ('auto_verified', 'manual_verified')`),
-    uniqueIndex('uq_provider_entity_links_not_observed_right')
-      .on(table.entityType, table.rightProvider, table.rightEntityId, table.leftProvider)
-      .where(sql`${table.status} = 'not_observed'`),
     uniqueIndex('uq_provider_entity_links_verified_right')
       .on(table.entityType, table.rightProvider, table.rightEntityId, table.leftProvider)
       .where(sql`${table.status} IN ('auto_verified', 'manual_verified')`),

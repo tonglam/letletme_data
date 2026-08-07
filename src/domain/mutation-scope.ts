@@ -93,6 +93,18 @@ export function resolveMutationScopes(input: MutationScopeInput): string[] {
       case 'player-stats':
       case 'player-values':
         return [`data-core:${jobName}`];
+      case 'fpl-season-archive':
+        return [
+          'data-core:events',
+          'data-core:teams',
+          'data-core:players',
+          'data-core:phases',
+          'data-core:fixtures',
+          'data-core:player-stats',
+          'data-core:player-values',
+          'live-snapshot:all',
+          'event-live-summary:season',
+        ];
       default:
         return [];
     }

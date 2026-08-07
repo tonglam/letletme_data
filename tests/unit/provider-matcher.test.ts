@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
+  candidatesWithMinimumMatchObservations,
   isAutoMappingProtectedStatus,
   providerTeamConfirmedForSeason,
   resolveUniqueProviderAssignments,
@@ -73,6 +74,22 @@ describe('provider roster matcher', () => {
     expect(rosterEvidenceCompatible(fpl, understat, 3)).toBe(true);
     expect(rosterEvidenceCompatible(fpl, { ...understat, redCards: 1 }, 3)).toBe(false);
     expect(rosterEvidenceCompatible(fpl, understat, 4)).toBe(false);
+    expect(rosterEvidenceCompatible({ ...fpl, starts: null }, understat, 3)).toBe(true);
+    expect(
+      rosterEvidenceCompatible({ ...fpl, starts: null }, { ...understat, started: false }, 3),
+    ).toBe(true);
+  });
+
+  test('requires two independent verified-match observations before auto verification', () => {
+    const candidates = new Map([[200, new Set([400, 401])]]);
+    const eligible = candidatesWithMinimumMatchObservations(
+      candidates,
+      new Map([
+        ['200:400', new Set([300])],
+        ['200:401', new Set([300, 301])],
+      ]),
+    );
+    expect(eligible).toEqual(new Map([[200, new Set([401])]]));
   });
 
   test('leaves indistinguishable zero-event players unresolved', () => {

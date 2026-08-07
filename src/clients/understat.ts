@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 import { getConfig } from '../utils/config';
 import { logDebug, logWarn } from '../utils/logger';
+import { acquireUnderstatRequestPermit } from '../utils/understat-rate-limit';
 
 const NUMERIC_STRING = /^-?(?:\d+\.?\d*|\.\d+)$/;
 
@@ -281,6 +282,8 @@ export class UnderstatClientError extends Error {
     readonly code: string,
     readonly status?: number,
     readonly cause?: Error,
+    readonly retryable = false,
+    readonly retryAfterMs: number | null = null,
   ) {
     super(message);
     this.name = 'UnderstatClientError';
@@ -291,20 +294,16 @@ export interface UnderstatClientOptions {
   baseUrl?: string;
   enabled?: boolean;
   timeoutMs?: number;
-  maxAttempts?: number;
-  retryBaseDelayMs?: number;
-  retryMaxDelayMs?: number;
   maxConcurrency?: number;
+  acquirePermit?: () => Promise<() => Promise<void>>;
   fetchFn?: (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 }
-
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function retryableStatus(status: number): boolean {
   return status === 429 || status >= 500;
 }
 
-function retryAfterMs(response: Response): number | null {
+function parseRetryAfterMs(response: Response): number | null {
   const value = response.headers.get('retry-after');
   if (!value) return null;
   const seconds = Number(value);
@@ -318,10 +317,8 @@ export class UnderstatClient {
   private readonly baseUrl: string;
   private readonly enabled: boolean;
   private readonly timeoutMs: number;
-  private readonly maxAttempts: number;
-  private readonly retryBaseDelayMs: number;
-  private readonly retryMaxDelayMs: number;
   private readonly maxConcurrency: number;
+  private readonly acquirePermit?: () => Promise<() => Promise<void>>;
   private readonly fetchFn: (
     input: string | URL | Request,
     init?: RequestInit,
@@ -334,10 +331,8 @@ export class UnderstatClient {
     this.baseUrl = (options.baseUrl ?? config.UNDERSTAT_BASE_URL).replace(/\/$/, '');
     this.enabled = options.enabled ?? config.UNDERSTAT_ENABLED;
     this.timeoutMs = options.timeoutMs ?? config.UNDERSTAT_TIMEOUT_MS;
-    this.maxAttempts = options.maxAttempts ?? 3;
-    this.retryBaseDelayMs = options.retryBaseDelayMs ?? 500;
-    this.retryMaxDelayMs = options.retryMaxDelayMs ?? 5_000;
     this.maxConcurrency = options.maxConcurrency ?? config.UNDERSTAT_MAX_CONCURRENCY;
+    this.acquirePermit = options.acquirePermit;
     this.fetchFn = options.fetchFn ?? fetch;
   }
 
@@ -355,11 +350,6 @@ export class UnderstatClient {
     else this.activeRequests -= 1;
   }
 
-  private backoff(attempt: number): number {
-    const ceiling = Math.min(this.retryBaseDelayMs * 2 ** attempt, this.retryMaxDelayMs);
-    return Math.floor(Math.random() * (ceiling + 1));
-  }
-
   private async request<Schema extends z.ZodTypeAny>(
     path: string,
     schema: Schema,
@@ -373,97 +363,90 @@ export class UnderstatClient {
     }
 
     await this.acquire();
+    let releasePermit: (() => Promise<void>) | undefined;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
-      let lastError: Error | undefined;
-      for (let attempt = 0; attempt < this.maxAttempts; attempt += 1) {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
-        try {
-          const url = `${this.baseUrl}${path}`;
-          logDebug('Fetching Understat resource', { url, attempt: attempt + 1 });
-          const response = await this.fetchFn(url, {
-            headers: {
-              'X-Requested-With': 'XMLHttpRequest',
-              'User-Agent': 'letletme-data/1.0.0 (+https://github.com/tonglam/letletme_data)',
-              Accept: 'application/json,text/javascript;q=0.9,*/*;q=0.1',
-            },
-            signal: controller.signal,
-          });
+      releasePermit = await this.acquirePermit?.();
+      const url = `${this.baseUrl}${path}`;
+      logDebug('Fetching Understat resource', { url });
+      const response = await this.fetchFn(url, {
+        headers: {
+          'X-Requested-With': 'XMLHttpRequest',
+          'User-Agent': 'letletme-data/1.0.0 (+https://github.com/tonglam/letletme_data)',
+          Accept: 'application/json,text/javascript;q=0.9,*/*;q=0.1',
+        },
+        signal: controller.signal,
+      });
 
-          if (!response.ok) {
-            const error = new UnderstatClientError(
-              `Understat returned HTTP ${response.status}`,
-              'HTTP_ERROR',
-              response.status,
-            );
-            if (retryableStatus(response.status) && attempt + 1 < this.maxAttempts) {
-              await sleep(retryAfterMs(response) ?? this.backoff(attempt));
-              lastError = error;
-              continue;
-            }
-            throw error;
-          }
+      if (!response.ok) {
+        throw new UnderstatClientError(
+          `Understat returned HTTP ${response.status}`,
+          'HTTP_ERROR',
+          response.status,
+          undefined,
+          retryableStatus(response.status),
+          parseRetryAfterMs(response),
+        );
+      }
 
-          const text = await response.text();
-          if (text.trim().length === 0) {
-            throw new UnderstatClientError(
-              'Understat returned an empty response',
-              'EMPTY_RESPONSE',
-            );
-          }
+      const text = await response.text();
+      if (text.trim().length === 0) {
+        throw new UnderstatClientError('Understat returned an empty response', 'EMPTY_RESPONSE');
+      }
 
-          let json: unknown;
-          try {
-            json = JSON.parse(text);
-          } catch (error) {
-            throw new UnderstatClientError(
-              'Understat returned invalid JSON',
-              'INVALID_JSON',
-              response.status,
-              error instanceof Error ? error : undefined,
-            );
-          }
+      let json: unknown;
+      try {
+        json = JSON.parse(text);
+      } catch (error) {
+        throw new UnderstatClientError(
+          'Understat returned invalid JSON',
+          'INVALID_JSON',
+          response.status,
+          error instanceof Error ? error : undefined,
+        );
+      }
 
-          const parsed = schema.safeParse(json);
-          if (!parsed.success) {
-            logWarn('Understat response validation failed', {
-              path,
-              issues: parsed.error.issues.slice(0, 10),
-            });
-            throw new UnderstatClientError(
-              'Understat response failed validation',
-              'VALIDATION_ERROR',
-              response.status,
-              parsed.error,
-            );
-          }
-          if (json && typeof json === 'object' && !Array.isArray(json)) {
-            const unknownKeys = Object.keys(json).filter((key) => !expectedRootKeys.includes(key));
-            if (unknownKeys.length > 0) {
-              logWarn('Understat response contains unknown top-level fields', {
-                path,
-                unknownKeys,
-              });
-            }
-          }
-          return parsed.data;
-        } catch (error) {
-          const normalized =
-            error instanceof Error ? error : new Error(`Unknown Understat error: ${String(error)}`);
-          lastError = normalized;
-          const shouldRetry =
-            !(error instanceof UnderstatClientError) && attempt + 1 < this.maxAttempts;
-          if (shouldRetry) {
-            await sleep(this.backoff(attempt));
-            continue;
-          }
-          throw normalized;
-        } finally {
-          clearTimeout(timeout);
+      const parsed = schema.safeParse(json);
+      if (!parsed.success) {
+        logWarn('Understat response validation failed', {
+          path,
+          issues: parsed.error.issues.slice(0, 10),
+        });
+        throw new UnderstatClientError(
+          'Understat response failed validation',
+          'VALIDATION_ERROR',
+          response.status,
+          parsed.error,
+        );
+      }
+      if (json && typeof json === 'object' && !Array.isArray(json)) {
+        const unknownKeys = Object.keys(json).filter((key) => !expectedRootKeys.includes(key));
+        if (unknownKeys.length > 0) {
+          logWarn('Understat response contains unknown top-level fields', { path, unknownKeys });
         }
       }
-      throw lastError ?? new UnderstatClientError('Understat request failed', 'UNKNOWN_ERROR');
+      return parsed.data;
+    } catch (error) {
+      if (error instanceof UnderstatClientError) throw error;
+      const cause = error instanceof Error ? error : new Error(String(error));
+      const timedOut = cause.name === 'AbortError';
+      throw new UnderstatClientError(
+        timedOut ? 'Understat request timed out' : 'Understat network request failed',
+        timedOut ? 'TIMEOUT' : 'NETWORK_ERROR',
+        undefined,
+        cause,
+        true,
+      );
     } finally {
+      clearTimeout(timeout);
+      if (releasePermit) {
+        await releasePermit().catch((error) =>
+          logWarn('Failed to release Understat request permit; lease will expire', {
+            error: error instanceof Error ? error.message : String(error),
+          }),
+        );
+      }
       this.release();
     }
   }
@@ -505,4 +488,6 @@ export class UnderstatClient {
   }
 }
 
-export const understatClient = new UnderstatClient();
+export const understatClient = new UnderstatClient({
+  acquirePermit: acquireUnderstatRequestPermit,
+});

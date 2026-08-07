@@ -114,6 +114,45 @@ export const UNDERSTAT_TEAM_FIXTURE = {
   },
 };
 
+function syntheticStarters(
+  side: 'h' | 'a',
+  teamId: string,
+  firstRosterId: number,
+  firstPlayerId: number,
+) {
+  return Object.fromEntries(
+    Array.from({ length: 10 }, (_, index) => {
+      const rosterId = String(firstRosterId + index);
+      return [
+        rosterId,
+        {
+          id: rosterId,
+          goals: '0',
+          own_goals: '0',
+          shots: '0',
+          xG: '0',
+          time: '90',
+          player_id: String(firstPlayerId + index),
+          team_id: teamId,
+          position: 'DC',
+          player: `${side === 'h' ? 'Home' : 'Away'} Starter ${index + 2}`,
+          h_a: side,
+          yellow_card: '0',
+          red_card: '0',
+          roster_in: '0',
+          roster_out: '0',
+          key_passes: '0',
+          assists: '0',
+          xA: '0',
+          xGChain: '0',
+          xGBuildup: '0',
+          positionOrder: String(index + 2),
+        },
+      ];
+    }),
+  );
+}
+
 export const UNDERSTAT_MATCH_FIXTURE = {
   rosters: {
     h: {
@@ -140,6 +179,7 @@ export const UNDERSTAT_MATCH_FIXTURE = {
         xGBuildup: '0.1',
         positionOrder: '1',
       },
+      ...syntheticStarters('h', '89', 7002, 2002),
     },
     a: {
       '7101': {
@@ -165,6 +205,7 @@ export const UNDERSTAT_MATCH_FIXTURE = {
         xGBuildup: '0.15',
         positionOrder: '15',
       },
+      ...syntheticStarters('a', '83', 7103, 1003),
       '7102': {
         id: '7102',
         goals: '0',

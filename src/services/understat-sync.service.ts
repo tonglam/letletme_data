@@ -6,12 +6,131 @@ import type {
   UnderstatTeam,
   UnderstatTeamMatchStat,
 } from '../domain/understat';
-import { sourceYearFromSeason } from '../domain/understat';
+import { UNDERSTAT_SPLIT_DIMENSIONS, sourceYearFromSeason } from '../domain/understat';
 import { getConfig } from '../utils/config';
 
 const LEAGUE_CARDINALITY: Readonly<Record<string, { teams: number; matches: number }>> = {
   EPL: { teams: 20, matches: 380 },
 };
+
+export interface UnderstatCompletenessResult {
+  complete: boolean;
+  reason: string;
+}
+
+function incomplete(reason: string): UnderstatCompletenessResult {
+  return { complete: false, reason };
+}
+
+function complete(): UnderstatCompletenessResult {
+  return { complete: true, reason: 'complete' };
+}
+
+export function evaluateUnderstatTeamSnapshotCompleteness(
+  league: string,
+  snapshot: {
+    teams: Array<{ team: { id: number } }>;
+    matches: Array<Pick<UnderstatMatch, 'id' | 'homeTeamId' | 'awayTeamId' | 'isResult'>>;
+    teamMatchRows: Array<{
+      stat: { teamId: number; side: string };
+      match: { id: number };
+    }>;
+    splits: Array<{ teamId: number; dimension: string }>;
+  },
+): UnderstatCompletenessResult {
+  const cardinality = LEAGUE_CARDINALITY[league];
+  if (cardinality && snapshot.teams.length !== cardinality.teams) {
+    return incomplete(`team summaries ${snapshot.teams.length}/${cardinality.teams}`);
+  }
+  if (cardinality && snapshot.matches.length !== cardinality.matches) {
+    return incomplete(`matches ${snapshot.matches.length}/${cardinality.matches}`);
+  }
+
+  const teamIds = new Set(snapshot.teams.map((row) => row.team.id));
+  for (const teamId of teamIds) {
+    const dimensions = new Set(
+      snapshot.splits.filter((row) => row.teamId === teamId).map((row) => row.dimension),
+    );
+    const missing = UNDERSTAT_SPLIT_DIMENSIONS.filter((dimension) => !dimensions.has(dimension));
+    if (missing.length > 0) {
+      return incomplete(`team ${teamId} split dimensions missing: ${missing.join(',')}`);
+    }
+  }
+
+  const rowsByMatch = new Map<number, Array<{ teamId: number; side: string }>>();
+  for (const row of snapshot.teamMatchRows) {
+    const current = rowsByMatch.get(row.match.id) ?? [];
+    current.push(row.stat);
+    rowsByMatch.set(row.match.id, current);
+  }
+  for (const match of snapshot.matches.filter((candidate) => candidate.isResult)) {
+    const rows = rowsByMatch.get(match.id) ?? [];
+    if (
+      rows.length !== 2 ||
+      !rows.some((row) => row.teamId === match.homeTeamId && row.side === 'h') ||
+      !rows.some((row) => row.teamId === match.awayTeamId && row.side === 'a')
+    ) {
+      return incomplete(`completed match ${match.id} does not have both team-stat sides`);
+    }
+  }
+  return complete();
+}
+
+export function evaluateUnderstatPlayerSnapshotCompleteness(
+  league: string,
+  matches: Array<Pick<UnderstatMatch, 'id' | 'homeTeamId' | 'awayTeamId' | 'isResult'>>,
+  snapshot: {
+    players: Array<{ player: { id: number } }>;
+    memberships: Array<{ playerId: number; teamId: number }>;
+    matchStats: Array<{
+      stat: { teamId: number; side: string; started: boolean };
+      match: { id: number };
+    }>;
+  },
+): UnderstatCompletenessResult {
+  if (snapshot.players.length === 0) return incomplete('player summaries are empty');
+
+  const cardinality = LEAGUE_CARDINALITY[league];
+  const membershipTeamIds = new Set(snapshot.memberships.map((row) => row.teamId));
+  if (cardinality && membershipTeamIds.size !== cardinality.teams) {
+    return incomplete(`participant teams ${membershipTeamIds.size}/${cardinality.teams}`);
+  }
+
+  const summaryPlayerIds = new Set(snapshot.players.map((row) => row.player.id));
+  const membershipPlayerIds = new Set(snapshot.memberships.map((row) => row.playerId));
+  const missingMemberships = [...summaryPlayerIds].filter(
+    (playerId) => !membershipPlayerIds.has(playerId),
+  );
+  const orphanMemberships = [...membershipPlayerIds].filter(
+    (playerId) => !summaryPlayerIds.has(playerId),
+  );
+  if (missingMemberships.length > 0 || orphanMemberships.length > 0) {
+    return incomplete(
+      `participant mismatch missing=${missingMemberships.join(',')} orphan=${orphanMemberships.join(',')}`,
+    );
+  }
+
+  const statsByMatch = new Map<number, Array<{ teamId: number; side: string; started: boolean }>>();
+  for (const row of snapshot.matchStats) {
+    const current = statsByMatch.get(row.match.id) ?? [];
+    current.push(row.stat);
+    statsByMatch.set(row.match.id, current);
+  }
+  for (const match of matches.filter((candidate) => candidate.isResult)) {
+    const rows = statsByMatch.get(match.id) ?? [];
+    const home = rows.filter((row) => row.teamId === match.homeTeamId && row.side === 'h');
+    const away = rows.filter((row) => row.teamId === match.awayTeamId && row.side === 'a');
+    if (
+      home.length === 0 ||
+      away.length === 0 ||
+      home.filter((row) => row.started).length !== 11 ||
+      away.filter((row) => row.started).length !== 11
+    ) {
+      return incomplete(`completed match ${match.id} roster is incomplete`);
+    }
+  }
+  return complete();
+}
 
 export function assertUnderstatLeagueSnapshotComplete(
   league: string,
@@ -47,8 +166,11 @@ export function assertUnderstatSyncAllowed(season: string): {
     throw new Error('Understat synchronization is disabled');
   }
   const sourceYear = sourceYearFromSeason(season);
-  if (sourceYear < 2026) {
-    throw new Error(`Understat production persistence starts at 2026/27, received ${season}`);
+  const minimumSourceYear = sourceYearFromSeason(config.UNDERSTAT_MIN_SEASON);
+  if (sourceYear < minimumSourceYear) {
+    throw new Error(
+      `Understat season ${season} is older than configured minimum ${config.UNDERSTAT_MIN_SEASON}`,
+    );
   }
   if (sourceYear > sourceYearFromSeason(config.UNDERSTAT_SEASON)) {
     throw new Error(

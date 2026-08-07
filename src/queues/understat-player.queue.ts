@@ -27,7 +27,7 @@ export const understatPlayerQueue = new Queue<UnderstatPlayerJobData>(understatP
   connection: getQueueConnection(),
   defaultJobOptions: {
     attempts: 3,
-    backoff: { type: 'exponential', delay: 60_000 },
+    backoff: { type: 'understat', delay: 1_000 },
     removeOnComplete: 100,
     removeOnFail: 200,
   },

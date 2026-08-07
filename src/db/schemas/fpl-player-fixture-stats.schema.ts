@@ -17,7 +17,7 @@ export const fplPlayerFixtureStats = pgTable(
     teamCode: integer('team_code').notNull(),
     elementType: integer('element_type').notNull(),
     minutes: integer('minutes').notNull(),
-    starts: integer('starts').notNull(),
+    starts: integer('starts'),
     goals: integer('goals').notNull(),
     assists: integer('assists').notNull(),
     ownGoals: integer('own_goals').notNull(),
@@ -31,7 +31,7 @@ export const fplPlayerFixtureStats = pgTable(
     check('fpl_player_fixture_stats_element_type_check', sql`${table.elementType} BETWEEN 1 AND 4`),
     check(
       'fpl_player_fixture_stats_nonnegative_check',
-      sql`${table.minutes} >= 0 AND ${table.starts} BETWEEN 0 AND 1
+      sql`${table.minutes} >= 0 AND (${table.starts} IS NULL OR ${table.starts} BETWEEN 0 AND 1)
         AND ${table.goals} >= 0 AND ${table.assists} >= 0 AND ${table.ownGoals} >= 0
         AND ${table.yellowCards} >= 0 AND ${table.redCards} >= 0`,
     ),

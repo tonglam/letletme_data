@@ -17,7 +17,7 @@ function tracked(name: string, operation: () => Promise<void>): Promise<void> {
 
 export function registerUnderstatJobs(app: Elysia) {
   const config = getConfig();
-  if (!config.UNDERSTAT_ENABLED) return app;
+  if (!config.UNDERSTAT_ENABLED || !config.UNDERSTAT_SCHEDULES_ENABLED) return app;
   const season = config.UNDERSTAT_SEASON;
   return app
     .use(

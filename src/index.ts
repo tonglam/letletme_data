@@ -8,6 +8,7 @@ import { entrySyncAPI } from './api/entry-sync.api';
 import { eventLivesAPI } from './api/event-lives.api';
 import { eventsAPI } from './api/events.api';
 import { fixturesAPI } from './api/fixtures.api';
+import { fplArchiveAPI } from './api/fpl-archive.api';
 import { jobsAPI } from './api/jobs.api';
 import { phasesAPI } from './api/phases.api';
 import { playerStatsAPI } from './api/player-stats.api';
@@ -141,6 +142,7 @@ const app = new Elysia()
   .use(eventsAPI)
   .use(eventLivesAPI)
   .use(fixturesAPI)
+  .use(fplArchiveAPI)
   .use(teamsAPI)
   .use(playersAPI)
   .use(playerStatsAPI)

@@ -3,7 +3,7 @@ export interface FplPlayerFixtureEvidence {
   fixtureId: number;
   elementId: number;
   minutes: number;
-  starts: number;
+  starts: number | null;
   goals: number;
   assists: number;
   ownGoals: number;

@@ -61,8 +61,15 @@ const EnvSchema = z.object({
   PULSELIVE_COMP_SEASON: z.string().optional(),
   // Disabled until automated Understat access is explicitly approved.
   UNDERSTAT_ENABLED: booleanEnv(false),
+  // Workers/manual API may be enabled for a historical backfill while routine
+  // schedules remain disabled until the active season passes shadow checks.
+  UNDERSTAT_SCHEDULES_ENABLED: booleanEnv(false),
   UNDERSTAT_BASE_URL: z.string().url().default('https://understat.com'),
   UNDERSTAT_LEAGUE: z.string().min(1).default('EPL'),
+  UNDERSTAT_MIN_SEASON: z
+    .string()
+    .regex(/^\d{4}$/)
+    .default('2526'),
   UNDERSTAT_SEASON: z
     .string()
     .regex(/^\d{4}$/)
@@ -93,6 +100,10 @@ export function getConfig(): AppConfig {
   try {
     const parsed = EnvSchema.parse(process.env);
 
+    if (Number(parsed.UNDERSTAT_MIN_SEASON) > Number(parsed.UNDERSTAT_SEASON)) {
+      throw new Error('UNDERSTAT_MIN_SEASON cannot be newer than UNDERSTAT_SEASON');
+    }
+
     // Helpful warnings (non-fatal)
     if (!parsed.SUPABASE_URL || !parsed.SUPABASE_KEY) {
       logWarn('Supabase env not fully set (optional)');
@@ -106,6 +117,7 @@ export function getConfig(): AppConfig {
       queueRedisHost: parsed.QUEUE_REDIS_HOST || parsed.REDIS_HOST,
       queueRedisPort: parsed.QUEUE_REDIS_PORT || parsed.REDIS_PORT,
       understatEnabled: parsed.UNDERSTAT_ENABLED,
+      understatSchedulesEnabled: parsed.UNDERSTAT_SCHEDULES_ENABLED,
     });
     return parsed;
   } catch (error) {

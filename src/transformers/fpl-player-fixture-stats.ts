@@ -19,6 +19,10 @@ function selectedStatValue(stats: Map<string, number>, identifier: string): numb
   return value;
 }
 
+function optionalSelectedStatValue(stats: Map<string, number>, identifier: string): number | null {
+  return stats.has(identifier) ? selectedStatValue(stats, identifier) : null;
+}
+
 export function transformFplPlayerFixtureEvidence(
   eventId: number,
   elements: readonly RawFPLEventLiveElement[],
@@ -45,7 +49,7 @@ export function transformFplPlayerFixtureEvidence(
         fixtureId: fixture.fixture,
         elementId: element.id,
         minutes: selectedStatValue(stats, IDENTIFIERS.minutes),
-        starts: selectedStatValue(stats, IDENTIFIERS.starts),
+        starts: optionalSelectedStatValue(stats, IDENTIFIERS.starts),
         goals: selectedStatValue(stats, IDENTIFIERS.goals),
         assists: selectedStatValue(stats, IDENTIFIERS.assists),
         ownGoals: selectedStatValue(stats, IDENTIFIERS.ownGoals),

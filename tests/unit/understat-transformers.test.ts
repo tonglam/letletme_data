@@ -152,7 +152,7 @@ describe('Understat transformers', () => {
   test('persists starter/substitute and roster link evidence without shots', () => {
     const match = transformUnderstatPlayerDiscovery('2627', 2026, 'EPL', league, now).matches[0];
     const result = transformUnderstatMatchRoster(match, matchData);
-    expect(result.stats).toHaveLength(3);
+    expect(result.stats).toHaveLength(23);
     expect(result.stats.find((row) => row.rosterId === 7101)).toMatchObject({
       started: true,
       rosterInId: 7102,

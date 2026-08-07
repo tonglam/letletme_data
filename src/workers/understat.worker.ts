@@ -1,4 +1,6 @@
-import { QueueEvents, Worker, type Job } from 'bullmq';
+import { QueueEvents, UnrecoverableError, Worker, type Job } from 'bullmq';
+
+import { UnderstatClientError } from '../clients/understat';
 
 import {
   type UnderstatPlayerJobData,
@@ -47,6 +49,26 @@ function lockScopes(
   return [`understat:${lane}:${data.season}:${name}:${resourceId ?? 'unknown'}`];
 }
 
+async function runUnderstatOperation(operation: () => Promise<void>): Promise<void> {
+  try {
+    await operation();
+  } catch (error) {
+    if (error instanceof UnderstatClientError && !error.retryable) {
+      throw new UnrecoverableError(`${error.code}: ${error.message}`);
+    }
+    throw error;
+  }
+}
+
+function understatBackoff(attemptsMade: number, type?: string, error?: Error): number {
+  if (type !== 'understat') return 0;
+  if (error instanceof UnderstatClientError && error.retryAfterMs !== null) {
+    return error.retryAfterMs;
+  }
+  const ceiling = Math.min(1_000 * 2 ** Math.max(attemptsMade - 1, 0), 60_000);
+  return Math.floor(Math.random() * (ceiling + 1));
+}
+
 async function processTeamJob(job: Job<UnderstatTeamJobData>): Promise<void> {
   const context = {
     jobType: 'queue' as const,
@@ -65,18 +87,20 @@ async function processTeamJob(job: Job<UnderstatTeamJobData>): Promise<void> {
       scopes: lockScopes('team', job.name, job.data),
     },
     () =>
-      runTrackedJob(context, async () => {
-        switch (job.name) {
-          case 'understat-team-discover':
-            return discoverUnderstatTeams(job.data);
-          case 'understat-team-detail':
-            return syncUnderstatTeamDetail(job.data);
-          case 'understat-team-publish':
-            return publishUnderstatTeamSnapshot(job.data);
-          default:
-            throw new Error(`Unknown Understat team job: ${job.name}`);
-        }
-      }),
+      runTrackedJob(context, () =>
+        runUnderstatOperation(async () => {
+          switch (job.name) {
+            case 'understat-team-discover':
+              return discoverUnderstatTeams(job.data);
+            case 'understat-team-detail':
+              return syncUnderstatTeamDetail(job.data);
+            case 'understat-team-publish':
+              return publishUnderstatTeamSnapshot(job.data);
+            default:
+              throw new Error(`Unknown Understat team job: ${job.name}`);
+          }
+        }),
+      ),
   );
 }
 
@@ -98,20 +122,22 @@ async function processPlayerJob(job: Job<UnderstatPlayerJobData>): Promise<void>
       scopes: lockScopes('player', job.name, job.data),
     },
     () =>
-      runTrackedJob(context, async () => {
-        switch (job.name) {
-          case 'understat-player-discover':
-            return discoverUnderstatPlayers(job.data);
-          case 'understat-player-team-detail':
-            return syncUnderstatPlayerTeamDetail(job.data);
-          case 'understat-player-match':
-            return syncUnderstatPlayerMatch(job.data);
-          case 'understat-player-publish':
-            return publishUnderstatPlayerSnapshot(job.data);
-          default:
-            throw new Error(`Unknown Understat player job: ${job.name}`);
-        }
-      }),
+      runTrackedJob(context, () =>
+        runUnderstatOperation(async () => {
+          switch (job.name) {
+            case 'understat-player-discover':
+              return discoverUnderstatPlayers(job.data);
+            case 'understat-player-team-detail':
+              return syncUnderstatPlayerTeamDetail(job.data);
+            case 'understat-player-match':
+              return syncUnderstatPlayerMatch(job.data);
+            case 'understat-player-publish':
+              return publishUnderstatPlayerSnapshot(job.data);
+            default:
+              throw new Error(`Unknown Understat player job: ${job.name}`);
+          }
+        }),
+      ),
   );
 }
 
@@ -159,6 +185,7 @@ export function createUnderstatWorker(): WorkerRuntime {
     concurrency: 2,
     lockDuration: 120_000,
     maxStalledCount: 2,
+    settings: { backoffStrategy: understatBackoff },
   });
   const playerWorker = new Worker<UnderstatPlayerJobData>(
     understatPlayerQueueName,
@@ -168,6 +195,7 @@ export function createUnderstatWorker(): WorkerRuntime {
       concurrency: 2,
       lockDuration: 120_000,
       maxStalledCount: 2,
+      settings: { backoffStrategy: understatBackoff },
     },
   );
   const teamEvents = new QueueEvents(understatTeamQueueName, { connection });

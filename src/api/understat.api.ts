@@ -24,7 +24,6 @@ const LinkStatus = t.Union([
   t.Literal('ambiguous'),
   t.Literal('quarantined'),
   t.Literal('rejected'),
-  t.Literal('not_observed'),
 ]);
 
 const ReviewStatus = t.Union([

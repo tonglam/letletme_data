@@ -111,3 +111,10 @@ export const enqueuePlayerValuesSyncJob = (
     ...options,
     changeDate: options?.changeDate ?? formatCronDateKey(),
   });
+
+export const enqueueFplSeasonArchiveJob = (season: string, source: DataSyncJobSource = 'manual') =>
+  enqueueDataSyncJob('fpl-season-archive', source, {
+    season,
+    jobId: `fpl-season-archive-${season}`,
+    removeOnSettle: true,
+  });

@@ -22,6 +22,7 @@ import {
   assertUnderstatLeagueSnapshotComplete,
   assertUnderstatSyncAllowed,
   changedUnderstatTeamStatIds,
+  evaluateUnderstatTeamSnapshotCompleteness,
   plannedUnderstatSeason,
   selectTeamDetailIds,
   teamById,
@@ -82,8 +83,15 @@ export async function discoverUnderstatTeams(job: UnderstatTeamJobData): Promise
   }
   await understatSyncRepository.markItemRunning(job.runId, LEAGUE_RESOURCE_TYPE, league);
 
+  const sourceCheckedAt = new Date();
   const response = await understatClient.getLeagueData(league, sourceYear);
-  const discovery = transformUnderstatTeamDiscovery(job.season, sourceYear, league, response);
+  const discovery = transformUnderstatTeamDiscovery(
+    job.season,
+    sourceYear,
+    league,
+    response,
+    sourceCheckedAt,
+  );
   assertUnderstatLeagueSnapshotComplete(league, discovery.teams.length, discovery.matches.length);
   discovery.season.state = job.season === getConfig().UNDERSTAT_SEASON ? 'active' : 'complete';
   const [previousMatchHashes, previousStatHashes] = await Promise.all([
@@ -210,6 +218,15 @@ export async function publishUnderstatTeamSnapshot(job: UnderstatTeamJobData): P
   if (run.failedItems > 0 || run.status !== 'ready_to_publish') {
     throw new Error(`Understat team run ${job.runId} is not ready to publish (${run.status})`);
   }
+  const snapshot = await understatTeamRepository.readSnapshot(job.season);
+  const completeness = evaluateUnderstatTeamSnapshotCompleteness(
+    getConfig().UNDERSTAT_LEAGUE,
+    snapshot,
+  );
+  if (!completeness.complete) {
+    await understatSyncRepository.markCompletedWithoutPublish(job.runId, completeness.reason);
+    return;
+  }
   const prior = await understatCache.getManifest(job.season, 'team');
   const hasUnpublishedChanges = prior
     ? await understatSyncRepository.hasDataChangesSince(
@@ -221,20 +238,6 @@ export async function publishUnderstatTeamSnapshot(job: UnderstatTeamJobData): P
   if (prior?.revision === job.runId || (!run.dataChanged && prior && !hasUnpublishedChanges)) {
     await understatSyncRepository.markPublished(job.runId, prior.revision);
     return;
-  }
-  const snapshot = await understatTeamRepository.readSnapshot(job.season);
-  if (snapshot.teams.length === 0 || snapshot.matches.length === 0) {
-    throw new Error(`Understat team snapshot ${job.season} is incomplete`);
-  }
-  for (const match of snapshot.matches.filter((candidate) => candidate.isResult)) {
-    const rows = snapshot.teamMatchRows.filter((row) => row.match.id === match.id);
-    if (
-      rows.length !== 2 ||
-      !rows.some((row) => row.stat.teamId === match.homeTeamId && row.stat.side === 'h') ||
-      !rows.some((row) => row.stat.teamId === match.awayTeamId && row.stat.side === 'a')
-    ) {
-      throw new Error(`Understat team snapshot match ${match.id} is missing one side`);
-    }
   }
   const manifest = await understatCache.publishTeam(job.season, job.runId, snapshot);
   await understatSyncRepository.markPublished(job.runId, manifest.revision);

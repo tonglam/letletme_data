@@ -76,6 +76,7 @@ export const understatMatches = pgTable(
     forecastDraw: probability('forecast_draw'),
     forecastAwayWin: probability('forecast_away_win'),
     sourceHash: text('source_hash').notNull(),
+    sourceCheckedAt: timestamp('source_checked_at', { withTimezone: true }).notNull(),
     lastSeenAt: timestamp('last_seen_at', { withTimezone: true }).notNull(),
     ...timestamps,
   },
@@ -145,6 +146,8 @@ export const understatTeamSeasons = pgTable(
     teamId: integer('team_id')
       .notNull()
       .references(() => understatTeams.id),
+    sourceTitle: text('source_title').notNull(),
+    sourceShortTitle: text('source_short_title'),
     games: integer('games').notNull(),
     wins: integer('wins').notNull(),
     draws: integer('draws').notNull(),
@@ -248,6 +251,7 @@ export const understatPlayerSeasons = pgTable(
     playerId: integer('player_id')
       .notNull()
       .references(() => understatPlayers.id),
+    sourceName: text('source_name').notNull(),
     sourceTeamTitle: text('source_team_title').notNull(),
     ...playerSeasonFields(),
     sourceHash: text('source_hash').notNull(),

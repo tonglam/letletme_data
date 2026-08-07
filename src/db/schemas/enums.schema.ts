@@ -64,6 +64,7 @@ export const understatSyncRunStatusEnum = pgEnum('understat_sync_run_status', [
   'pending',
   'running',
   'failed',
+  'completed',
   'ready_to_publish',
   'published',
 ]);
@@ -85,5 +86,12 @@ export const providerLinkStatusEnum = pgEnum('provider_link_status', [
   'ambiguous',
   'quarantined',
   'rejected',
-  'not_observed',
+]);
+
+export const fplSeasonArchiveStatusEnum = pgEnum('fpl_season_archive_status', [
+  'unavailable',
+  'pending',
+  'building',
+  'sealed',
+  'failed',
 ]);

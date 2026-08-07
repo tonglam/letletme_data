@@ -18,6 +18,7 @@ import {
   findCoreSnapshotAuthority,
   recordCoreSnapshotAuthority,
 } from '../repositories/core-snapshot-authority';
+import { createFplHistoryRepository } from '../repositories/fpl-history';
 import { DatabaseError } from '../utils/errors';
 
 import type { CoreSnapshot } from '../domain/core-snapshot';
@@ -224,8 +225,15 @@ async function assertIdentityCompatibility(
 ): Promise<void> {
   const previousSeason = authoritySeason ?? previousActiveSeason;
   if (previousSeason && previousSeason !== snapshot.season) {
+    const archive = await createFplHistoryRepository(db).findArchive(previousSeason);
+    if (archive?.status !== 'sealed') {
+      throw new DatabaseError(
+        `Core snapshot season ${previousSeason} must have a sealed FPL archive before rollover.`,
+        'CORE_SNAPSHOT_MANUAL_ROLLOVER_REQUIRED',
+      );
+    }
     throw new DatabaseError(
-      'Core snapshot season rollover requires the separately approved database rollover runbook.',
+      `FPL archive ${previousSeason} is sealed; the separately approved database rollover runbook is still required.`,
       'CORE_SNAPSHOT_MANUAL_ROLLOVER_REQUIRED',
     );
   }
