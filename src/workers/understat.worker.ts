@@ -155,6 +155,7 @@ async function recordTeamFailure(job: Job<UnderstatTeamJobData>, error: Error): 
       item.resourceId,
       error.message,
     );
+    return;
   }
   await understatSyncRepository.markRunFailed(job.data.runId, error.message);
 }
@@ -169,6 +170,7 @@ async function recordPlayerFailure(job: Job<UnderstatPlayerJobData>, error: Erro
       item.resourceId,
       error.message,
     );
+    return;
   }
   await understatSyncRepository.markRunFailed(job.data.runId, error.message);
 }

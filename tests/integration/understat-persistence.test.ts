@@ -327,6 +327,49 @@ describe('Understat persistence', () => {
     expect(latest.player?.status).toBe('ready_to_publish');
   });
 
+  test('does not terminate a failed run until every item has settled', async () => {
+    const runId = randomUUID();
+    runIds.push(runId);
+    await understatSyncRepository.createRun({
+      runId,
+      lane: 'team',
+      season,
+      mode: 'full',
+      trigger: 'manual',
+    });
+    await understatSyncRepository.addItems(runId, [
+      { resourceType: 'team-detail', resourceId: String(teamIds[0]) },
+      { resourceType: 'team-detail', resourceId: String(teamIds[1]) },
+    ]);
+
+    await understatSyncRepository.failItem(
+      runId,
+      'team-detail',
+      String(teamIds[0]),
+      'first resource failed',
+    );
+    const inProgress = await understatSyncRepository.findRun(runId);
+    expect(inProgress?.status).toBe('running');
+    expect(inProgress?.failedItems).toBe(1);
+    expect(inProgress?.completedAt).toBeNull();
+    expect(inProgress?.errorSummary).toBe('first resource failed');
+
+    expect(
+      await understatSyncRepository.completeItem(
+        runId,
+        'team-detail',
+        String(teamIds[1]),
+        'hash',
+        false,
+      ),
+    ).toBe(false);
+    const settled = await understatSyncRepository.findRun(runId);
+    expect(settled?.status).toBe('failed');
+    expect(settled?.failedItems).toBe(1);
+    expect(settled?.skippedItems).toBe(1);
+    expect(settled?.completedAt).not.toBeNull();
+  });
+
   test('keeps provider-link season bounds monotonic during historical backfills', async () => {
     const identity = `${baseId}`;
     const initial = await providerIdentityRepository.upsertEntityLink({

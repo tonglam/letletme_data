@@ -171,6 +171,10 @@ export const createUnderstatSyncRepository = (dbInstance?: DbOrTransaction) => (
           eq(understatSyncItems.resourceId, resourceId),
         ),
       );
+    await db
+      .update(understatSyncRuns)
+      .set({ errorSummary: error, updatedAt: new Date() })
+      .where(eq(understatSyncRuns.runId, runId));
     await this.refreshRun(runId);
   },
 
@@ -186,6 +190,7 @@ export const createUnderstatSyncRepository = (dbInstance?: DbOrTransaction) => (
     const skippedItems = counts.get('skipped') ?? 0;
     const failedItems = counts.get('failed') ?? 0;
     const pendingItems = (counts.get('pending') ?? 0) + (counts.get('running') ?? 0);
+    const settled = pendingItems === 0;
     const ready = pendingItems === 0 && failedItems === 0;
     await db
       .update(understatSyncRuns)
@@ -193,8 +198,8 @@ export const createUnderstatSyncRepository = (dbInstance?: DbOrTransaction) => (
         completedItems,
         skippedItems,
         failedItems,
-        status: failedItems > 0 ? 'failed' : ready ? 'ready_to_publish' : 'running',
-        ...(failedItems > 0 || ready ? { completedAt: new Date() } : {}),
+        status: !settled ? 'running' : failedItems > 0 ? 'failed' : 'ready_to_publish',
+        completedAt: settled ? new Date() : null,
         updatedAt: new Date(),
       })
       .where(eq(understatSyncRuns.runId, runId));

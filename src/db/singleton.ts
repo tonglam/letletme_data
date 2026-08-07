@@ -3,6 +3,7 @@ import postgres from 'postgres';
 
 import { getConfig } from '../utils/config';
 import { logError, logInfo } from '../utils/logger';
+import { isTransactionPoolerConnection } from './postgres-connection';
 import * as schema from './schemas/index.schema';
 
 /**
@@ -51,11 +52,13 @@ class DatabaseSingleton {
       logInfo('Initializing database connection...');
 
       const connectionString = getConfig().DATABASE_URL;
+      const transactionPooler = isTransactionPoolerConnection(connectionString);
 
       this.client = postgres(connectionString, {
         max: 10,
         idle_timeout: 20,
         connect_timeout: 10,
+        prepare: !transactionPooler,
       });
 
       // Test connection
@@ -64,7 +67,9 @@ class DatabaseSingleton {
       this.db = drizzle(this.client, { schema });
       this.isConnected = true;
 
-      logInfo('✅ Database connection established');
+      logInfo('✅ Database connection established', {
+        preparedStatements: !transactionPooler,
+      });
     } catch (error) {
       logError('❌ Failed to connect to database', error);
       throw error;

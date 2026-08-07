@@ -5,6 +5,8 @@ import { join } from 'node:path';
 
 import postgres from 'postgres';
 
+import { isTransactionPoolerConnection } from '../src/db/postgres-connection';
+
 import { inspectMigrationHistory, selectMigrationFilesForLedger } from './migration-history';
 import {
   getSqlMigrationExecutionContents,
@@ -20,7 +22,10 @@ if (!databaseUrl) {
   process.exit(1);
 }
 
-const sql = postgres(databaseUrl, { max: 1 });
+const sql = postgres(databaseUrl, {
+  max: 1,
+  prepare: !isTransactionPoolerConnection(databaseUrl),
+});
 const advisoryLockKey = 912_883_471;
 
 type LedgerRow = { filename: string; checksum: string | null; applied_at: Date };
