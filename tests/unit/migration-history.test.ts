@@ -1,8 +1,14 @@
 import { describe, expect, test } from 'bun:test';
 import { readdirSync, readFileSync } from 'node:fs';
 
-import { inspectMigrationHistory } from '../../scripts/migration-history';
-import { getSqlMigrationPreconditions } from '../../scripts/sql-migration-compatibility';
+import {
+  inspectMigrationHistory,
+  selectMigrationFilesForLedger,
+} from '../../scripts/migration-history';
+import {
+  getSqlMigrationExecutionContents,
+  getSqlMigrationPreconditions,
+} from '../../scripts/sql-migration-compatibility';
 
 describe('migration history inspection', () => {
   test('accepts unapplied migrations after the applied tail', () => {
@@ -37,6 +43,24 @@ describe('migration history inspection', () => {
       backdated: [],
       latestApplied: null,
     });
+  });
+
+  test('keeps ledgered convergence filenames while suppressing unledgered aliases', () => {
+    const files = [
+      '0050_entry_event_result_rich_checkpoint.sql',
+      '0072_entry_event_result_rich_checkpoint.sql',
+      '0071_drop_tournament_snapshot_materialized_view.sql',
+    ];
+
+    expect(
+      selectMigrationFilesForLedger(files, ['0071_drop_tournament_snapshot_materialized_view.sql']),
+    ).toEqual([
+      '0072_entry_event_result_rich_checkpoint.sql',
+      '0071_drop_tournament_snapshot_materialized_view.sql',
+    ]);
+    expect(
+      selectMigrationFilesForLedger(files, ['0050_entry_event_result_rich_checkpoint.sql']),
+    ).toContain('0050_entry_event_result_rich_checkpoint.sql');
   });
 
   test('places every tournament lifecycle migration after the deployed Live tail', () => {
@@ -126,6 +150,19 @@ describe('GraphQL read RPC migration', () => {
       'DROP FUNCTION IF EXISTS public.get_players_for_picker(integer, integer);',
     ]);
     expect(getSqlMigrationPreconditions('0074_replace_player_picker_rpc.sql')).toEqual([]);
+  });
+});
+
+describe('legacy migration transaction compatibility', () => {
+  test('removes nested transaction control without changing migration source checksums', () => {
+    const source = 'BEGIN;\nUPDATE public.example SET value = 1;\nCOMMIT;\n';
+
+    expect(getSqlMigrationExecutionContents('0066_repair_fpl_team_archive_names.sql', source)).toBe(
+      '\nUPDATE public.example SET value = 1;\n',
+    );
+    expect(
+      getSqlMigrationExecutionContents('0072_entry_event_result_rich_checkpoint.sql', source),
+    ).toBe(source);
   });
 });
 
