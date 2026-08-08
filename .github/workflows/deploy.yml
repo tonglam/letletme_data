@@ -13,6 +13,26 @@ on:
           pass a previous SHA to roll back.
         required: false
         type: string
+      v3_cutover_run_id:
+        description: Required only when the target contains migration 0079.
+        required: false
+        type: string
+      v3_image_ref:
+        description: Prebuilt Data candidate pinned as ghcr.io/...@sha256:...; required for v3.
+        required: false
+        type: string
+      v3_release_manifest_base64:
+        description: Canonical base64 of the approved external v3 release manifest.
+        required: false
+        type: string
+      v3_release_manifest_sha256:
+        description: SHA-256 of the approved v3 release manifest.
+        required: false
+        type: string
+      v3_cutover_approval:
+        description: Exact APPROVE_V3_ACTIVATION phrase for the cutover run.
+        required: false
+        type: string
 
 # Never cancel a deploy mid-flight: the SSH session runs git reset, migrations
 # and compose up as one critical section — interrupting it strands the VPS
@@ -58,9 +78,18 @@ jobs:
             # the image tag and the VPS git reset are unambiguous.
             DEPLOY_SHA="$(git rev-parse HEAD)"
           fi
-          IMAGE_NAME=$(echo "${REGISTRY}/${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')
-          echo "DEPLOY_SHA=${DEPLOY_SHA}" >> $GITHUB_ENV
-          echo "IMAGE_NAME=${IMAGE_NAME}" >> $GITHUB_ENV
+          IMAGE_NAME=$(printf '%s' "${REGISTRY}/${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')
+          echo "DEPLOY_SHA=${DEPLOY_SHA}" >> "$GITHUB_ENV"
+          echo "IMAGE_NAME=${IMAGE_NAME}" >> "$GITHUB_ENV"
+          if [ -f migrations/0079_create_v3_ops_and_roles.sql ]; then
+            if [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
+              echo "::error::V3 deployment is manual-only and requires an approved release manifest"
+              exit 1
+            fi
+            echo "V3_REQUIRED=true" >> "$GITHUB_ENV"
+          else
+            echo "V3_REQUIRED=false" >> "$GITHUB_ENV"
+          fi
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -73,13 +102,26 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push image
+        if: env.V3_REQUIRED != 'true'
         run: |
           docker buildx build \
             --platform linux/amd64 \
-            --tag ${IMAGE_NAME}:${DEPLOY_SHA} \
-            --tag ${IMAGE_NAME}:latest \
+            --tag "${IMAGE_NAME}:${DEPLOY_SHA}" \
+            --tag "${IMAGE_NAME}:latest" \
             --push .
-          echo "IMAGE_REF=${IMAGE_NAME}:${DEPLOY_SHA}" >> $GITHUB_ENV
+          echo "IMAGE_REF=${IMAGE_NAME}:${DEPLOY_SHA}" >> "$GITHUB_ENV"
+
+      - name: Select frozen v3 candidate image
+        if: env.V3_REQUIRED == 'true'
+        env:
+          V3_IMAGE_REF_INPUT: ${{ inputs.v3_image_ref }}
+        run: |
+          if [[ ! "$V3_IMAGE_REF_INPUT" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::v3_image_ref must be a lowercase GHCR reference pinned by sha256 digest"
+            exit 1
+          fi
+          echo "IMAGE_REF=$V3_IMAGE_REF_INPUT" >> "$GITHUB_ENV"
+          echo "DEPLOY_IMAGE_DIGEST=${V3_IMAGE_REF_INPUT##*@}" >> "$GITHUB_ENV"
 
       - name: Deploy on VPS
         uses: appleboy/ssh-action@v1.2.0
@@ -94,12 +136,17 @@ jobs:
           # vars.VPS_WORKDIR=/home/workspace/letletme_data
           # secrets.VPS_SSH_KEY=<private key for deploy>
           VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
+          DEPLOY_IMAGE_DIGEST: ${{ env.DEPLOY_IMAGE_DIGEST }}
+          V3_CUTOVER_RUN_ID: ${{ inputs.v3_cutover_run_id || '' }}
+          V3_RELEASE_MANIFEST_BASE64: ${{ inputs.v3_release_manifest_base64 || '' }}
+          V3_RELEASE_MANIFEST_SHA256: ${{ inputs.v3_release_manifest_sha256 || '' }}
+          V3_CUTOVER_APPROVAL: ${{ inputs.v3_cutover_approval || '' }}
         with:
           host: ${{ vars.VPS_HOST }}
           username: ${{ vars.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           script_stop: true
-          envs: DEPLOY_SHA,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR
+          envs: DEPLOY_SHA,DEPLOY_IMAGE_DIGEST,IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR,V3_CUTOVER_RUN_ID,V3_RELEASE_MANIFEST_BASE64,V3_RELEASE_MANIFEST_SHA256,V3_CUTOVER_APPROVAL
           script: |
             set -euo pipefail
             LOWER_USER=$(echo "$GHCR_USER" | tr '[:upper:]' '[:lower:]')
@@ -110,6 +157,16 @@ jobs:
             git reset --hard "$DEPLOY_SHA"
             APP_IMAGE="$IMAGE_REF" docker compose pull api worker
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun run env:check
+            if [ -f migrations/0079_create_v3_ops_and_roles.sql ]; then
+              APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
+                -e DEPLOY_SHA="$DEPLOY_SHA" \
+                -e DEPLOY_IMAGE_DIGEST="$DEPLOY_IMAGE_DIGEST" \
+                -e V3_CUTOVER_RUN_ID="$V3_CUTOVER_RUN_ID" \
+                -e V3_RELEASE_MANIFEST_BASE64="$V3_RELEASE_MANIFEST_BASE64" \
+                -e V3_RELEASE_MANIFEST_SHA256="$V3_RELEASE_MANIFEST_SHA256" \
+                -e V3_CUTOVER_APPROVAL="$V3_CUTOVER_APPROVAL" \
+                api bun scripts/v3-release-gate.ts
+            fi
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun run db:migrate
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun scripts/apply-sql-migrations.ts
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun run db:migrate:status

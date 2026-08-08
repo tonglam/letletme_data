@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "v3",
+  "planVersion": "3.0.0",
+  "status": "locked",
+  "cutoverRunId": null,
+  "dataSha": null,
+  "graphqlSha": null,
+  "webSha": null,
+  "dataImageDigest": null,
+  "approvedAt": null
+}

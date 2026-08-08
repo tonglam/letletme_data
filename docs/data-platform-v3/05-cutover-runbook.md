@@ -1,0 +1,205 @@
+# Data Platform v3 Cutover and Recovery Runbook
+
+Plan version: 3.0.0
+
+Mode: maintenance-window hard cutover
+
+Prohibited: dual-write, shadow reads, v2 fallback after activation, `FLUSHDB`, `FLUSHALL`, remote
+`db reset`, wildcard table drops, and undocumented manual SQL.
+
+## Operator variables
+
+The operator resolves these values before B0/cutover. Never print connection strings, passwords,
+service keys, or GPG passphrases into logs.
+
+```text
+CUTOVER_RUN_ID=v3-YYYYMMDDTHHMMSSZ-<short-data-sha>
+CUTOVER_BACKUP_ROOT=/Users/tong/Documents/LetLetMe Backups/v3-cutover/<run-id>
+CUTOVER_DATA_SHA=<40-char-sha>
+CUTOVER_GRAPHQL_SHA=<40-char-sha>
+CUTOVER_WEB_SHA=<40-char-sha>
+CUTOVER_DATA_IMAGE_REF=ghcr.io/<owner>/<repo>@sha256:<64-hex-digest>
+CUTOVER_RELEASE_MANIFEST=<backup-root>/release/release-manifest.json
+CUTOVER_RELEASE_MANIFEST_SHA256=<64-hex-digest>
+CUTOVER_DATABASE_URL=<secret-direct-postgres-url>
+CUTOVER_QUEUE_REDIS_URL=<secret>
+CUTOVER_CACHE_REDIS_URL=<secret>
+```
+
+Validation requirements:
+
+- run ID matches `^v3-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{7,12}$`;
+- backup root is exactly beneath `/Users/tong/Documents/LetLetMe Backups/v3-cutover/`;
+- the run directory does not already exist;
+- each SHA exactly matches the reviewed external release manifest;
+- the Data image reference is pinned by digest and matches `dataImageDigest` in that manifest;
+- database is production project `gtwcfjoviibmtkevurjw` and PostgreSQL 15;
+- queue/cache endpoints are distinct and neither value is logged.
+
+The approved release manifest is generated only after candidate SHAs and image digests are frozen.
+It is stored in encrypted cutover evidence and supplied to deployment as canonical base64; it is
+not committed into the candidate commit or embedded in its image. This avoids self-referential Git
+and container digests.
+
+When migration `0079` is present, automatic deployment is blocked. Manual deployment is also
+blocked unless the external manifest hash, Data SHA, candidate image digest, and run ID all match
+and the operator supplies:
+
+```text
+APPROVE_V3_ACTIVATION <CUTOVER_RUN_ID>
+```
+
+This activation token does not authorize legacy deletion.
+
+## B0 backup procedure
+
+1. Create `<backup-root>/b0/{raw,encrypted,manifests,logs,restore}` with restrictive permissions.
+2. Record UTC start time and versions of `pg_dump`, `pg_restore`, `psql`, `redis-cli`, GPG, Data,
+   GraphQL, and Web.
+3. Capture read-only object inventory, exact counts, canonical hashes, grants, policies, functions,
+   triggers, indexes, migration ledgers, and active DB sessions.
+4. Produce logical artifacts:
+
+```text
+pg_dumpall --globals-only --no-role-passwords
+pg_dump --schema-only --no-owner --no-privileges
+pg_dump --format=custom --compress=9 --no-owner
+pg_dump --format=custom --compress=9 --no-owner \
+  --schema=public --schema=bauth --schema=wechat
+```
+
+The selective command's final schema/table include list is generated from the exact P0 inventory;
+the example above is not permission to omit required Data source objects or include secrets.
+
+5. Capture Redis evidence:
+   - persistence configuration and latest successful RDB/AOF snapshot evidence;
+   - BullMQ queue names, paused/active/waiting/delayed/failed counts, and job ID ranges;
+   - key manifest grouped by endpoint, namespace, Redis type, TTL class, count, and memory;
+   - active Data core/live revision manifests and content hashes.
+6. Compute SHA-256 for every raw artifact, encrypt each with GPG AES-256, compute encrypted
+   checksums, and verify decryptability into the isolated restore directory.
+7. Remove unencrypted raw artifacts only after encrypted checksum/decryption verification is
+   recorded. Report exactly what was removed and that recovery remains available from encrypted B0.
+8. Restore full and selective dumps into two isolated PostgreSQL 15 databases. Apply no migrations.
+9. Run the complete B0 reconciliation suite. Archive restore logs and reports.
+
+B0 is invalid if a dump succeeded but either restore was not tested.
+
+## Pre-cutover gate
+
+All fields below must be attached to the run record:
+
+- B0 manifest and both restore reports;
+- two passing rehearsal reports;
+- final candidate SHAs and container image digests;
+- migration filenames/checksums `0079`-`0093`;
+- generated source/target/drop object manifests;
+- migration duration estimate plus 50% contingency;
+- current database/Redis size and free-capacity report;
+- rollback SHAs/images and tested B1 restore procedure;
+- maintenance message and private smoke-test credentials/routes.
+
+If any artifact differs from the latest reviewed commit, stop and repeat the affected rehearsal.
+
+## Production activation: `0079`-`0090`
+
+1. Announce and enable Web maintenance mode.
+2. Stop Data API, Data workers, and GraphQL. Pause queues without deleting jobs.
+3. Verify:
+   - no Data/GraphQL process remains;
+   - no active application database session can write business data;
+   - queue counts are stable;
+   - v2 source counts/hashes equal the pre-cutover snapshot.
+4. Set bounded PostgreSQL timeouts for the migration session. The migration itself uses advisory
+   locking and records each object/season conversion in `ops.migration_objects`.
+5. Run Data migration status. Apply exactly `0079` through `0090` from the release manifest. Save
+   stdout/stderr and exit status without connection secrets.
+6. Run exact target schema checks, counts, hashes, constraints, FKs, join-shape, summary, market,
+   tournament, provider, grant, and advisor checks.
+7. Refresh initial reporting MVs and validate all publication gates.
+8. Build the initial immutable v3 core/live Redis revision and atomically activate its manifest.
+9. Start Data API/workers. Validate health, readiness, sync fencing, DB writes, and Redis manifests.
+10. Start GraphQL with the read-only role. Validate startup contract and private smoke queries.
+11. Run Web private smoke journeys. Disable maintenance only when all pass.
+12. Record the v2 freeze timestamp and hashes. v2 objects remain physically present but read/write
+    inaccessible to the v3 applications.
+
+## Activation rollback
+
+### Failure before `0090`
+
+- Keep maintenance enabled.
+- Stop the migration; preserve logs and partial v3 audit rows.
+- Do not mutate v2. Diagnose on a fresh B0 restore and issue a new plan/migration version if needed.
+- Restart the recorded v2 Data/GraphQL/Web images only after confirming v2 objects were unchanged.
+
+### Failure after `0090`, before `0091`
+
+- Re-enable maintenance and stop v3 Data/GraphQL.
+- Atomically deactivate v3 publications/permissions and restore the frozen v2 writer contract using
+  the rehearsed rollback migration/command.
+- Deploy the recorded v2 SHAs/images, then resume queues.
+- Verify no interval had both v2 and v3 writers.
+
+### Failure after cleanup begins
+
+- Keep maintenance enabled and all writers stopped.
+- Restore B1 selective/full according to the rehearsed procedure.
+- Do not recreate dropped objects from migration memory or ad hoc SQL.
+
+## B1 and deletion approval
+
+After v3 activation passes and v2 remains frozen:
+
+1. Take encrypted B1 full and legacy-selective dumps with the same manifest/checksum rules as B0.
+2. Restore-spot-check representative legacy tables, partitions, views/MVs/functions, ledgers, and
+   grants.
+3. Generate the exact fully qualified object list for `0091`-`0093`. Compare it to the approved
+   manifest and `pg_depend`; any outside dependency blocks cleanup.
+4. Present B1 evidence, v3 acceptance report, v2 frozen-hash report, and exact drop list to the user.
+5. Cleanup is authorized only by the exact phrase:
+
+```text
+APPROVE_V3_LEGACY_DROP <CUTOVER_RUN_ID>
+```
+
+Approval for planning, implementation, activation, or a different run ID is not deletion approval.
+
+## Legacy cleanup: `0091`-`0093`
+
+1. Enable maintenance and stop Data/GraphQL.
+2. Revalidate B1 checksums/restore spot-check, v3 health, v2 frozen hashes, approval phrase, and run
+   ID.
+3. Apply exactly:
+   - `0091`: approved v2 reporting views/MVs/RPCs;
+   - `0092`: approved v2 tables/partitions/triggers/functions;
+   - `0093`: compatibility migration ledger/view and obsolete GraphQL migration state.
+4. Run exact object inventory. Any unexpected remaining v2 object or missing preserved object fails
+   cleanup.
+5. Rebuild reporting MVs/publications and run the full schema/data/security smoke suite.
+6. Delete retired Redis keys only with allowlisted prefixes and cursor-based `SCAN` plus `UNLINK`.
+   Record matched/deleted counts by key type and verify unrelated key counts are unchanged.
+7. Start Data, then GraphQL, then disable maintenance after private Web smoke tests.
+
+## B2 and 24-hour verification
+
+1. Take encrypted B2 after cleanup and restore-spot-check it. Retain for 90 days.
+2. Monitor continuously for the first hour, then at agreed intervals through 24 hours:
+   - Data sync freshness and failed/retried jobs;
+   - publication revisions, orphan staging generations, and cache memory;
+   - GraphQL error rate, missing-relation/permission/mixed-revision errors, p95 latency;
+   - PostgreSQL locks, connections, storage growth, slow queries, and advisor findings;
+   - selections, player, live, market, tournament, login, binding, and profile journeys.
+3. Keep B0 for one year, B1 per the cutover retention record, B2 for 90 days, and Redis RDB for 14
+   days. Retention deletion is a separate, explicitly scoped operation.
+
+## Incident rules
+
+- Stop after two to three repetitions of the same failed approach; preserve evidence and reassess.
+- Never resolve a permission issue by making GraphQL/Data superuser or adding undocumented
+  `SECURITY DEFINER`.
+- Never edit an applied migration checksum. Add a new forward migration and update the plan.
+- Never repair production data manually without first reproducing the issue on a B0/B1 restore and
+  adding a deterministic migration/test.
+- Any discovered data loss, mixed grain, orphan, or unexpected dependency is critical until proven
+  otherwise.
