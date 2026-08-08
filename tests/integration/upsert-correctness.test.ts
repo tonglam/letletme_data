@@ -8,7 +8,10 @@ import { resetActiveSeasonMemo } from '../../src/cache/cache-season';
 import { redisSingleton } from '../../src/cache/singleton';
 import type { PlayerValue } from '../../src/domain/player-values';
 import { getDbClient } from '../../src/db/singleton';
-import { createEntryEventTransfersRepository } from '../../src/repositories/entry-event-transfers';
+import {
+  createEntryEventTransfersRepository,
+  readEntryTransferSourceCheckedAt,
+} from '../../src/repositories/entry-event-transfers';
 import { createPlayerValuesRepository } from '../../src/repositories/player-values';
 import { createPlayerRepository } from '../../src/repositories/players';
 import type { RawFPLEntryTransfer } from '../../src/types';
@@ -30,6 +33,9 @@ const VALUE_PLAYER_B = 990014;
 const EVENT_ID = 10;
 const CHANGE_DATE = '20260717';
 const CHECKPOINT_SEASON = '2526';
+async function nextTransferSourceCheckedAt(): Promise<string> {
+  return readEntryTransferSourceCheckedAt();
+}
 
 async function db() {
   return getDbClient();
@@ -125,7 +131,7 @@ describe('entry-event-transfers element_in_played (H5)', () => {
     await transfersRepository.replaceForEvent(ENTRY_ID, EVENT_ID, [TRANSFER], undefined, {
       elementInPlayed: true,
       checkpointSeason: CHECKPOINT_SEASON,
-      sourceCheckedAt: new Date(),
+      sourceCheckedAt: await nextTransferSourceCheckedAt(),
     });
     const initial = await (await db())<{ element_in_played: boolean | null }[]>`
       SELECT element_in_played FROM entry_event_transfers
@@ -137,7 +143,7 @@ describe('entry-event-transfers element_in_played (H5)', () => {
     await transfersRepository.replaceForEvent(ENTRY_ID, EVENT_ID, [TRANSFER], undefined, {
       elementInPlayed: null,
       checkpointSeason: CHECKPOINT_SEASON,
-      sourceCheckedAt: new Date(),
+      sourceCheckedAt: await nextTransferSourceCheckedAt(),
     });
 
     // Then: the stored flag survives
@@ -151,7 +157,7 @@ describe('entry-event-transfers element_in_played (H5)', () => {
     await transfersRepository.replaceForEvent(ENTRY_ID, EVENT_ID, [TRANSFER], undefined, {
       elementInPlayed: false,
       checkpointSeason: CHECKPOINT_SEASON,
-      sourceCheckedAt: new Date(),
+      sourceCheckedAt: await nextTransferSourceCheckedAt(),
     });
     const afterUpdate = await (await db())<{ element_in_played: boolean | null }[]>`
       SELECT element_in_played FROM entry_event_transfers
@@ -178,7 +184,7 @@ describe('entry-event-transfers element_in_played (H5)', () => {
       elementInPlayed: true,
       syncMode: 'all',
       checkpointSeason: CHECKPOINT_SEASON,
-      sourceCheckedAt: new Date(),
+      sourceCheckedAt: await nextTransferSourceCheckedAt(),
     });
 
     const firstSync = await (await db())<
@@ -199,7 +205,7 @@ describe('entry-event-transfers element_in_played (H5)', () => {
       elementInPlayed: null,
       syncMode: 'all',
       checkpointSeason: CHECKPOINT_SEASON,
-      sourceCheckedAt: new Date(),
+      sourceCheckedAt: await nextTransferSourceCheckedAt(),
     });
     const secondSync = await (await db())<
       { event_id: number; element_in_played: boolean | null }[]

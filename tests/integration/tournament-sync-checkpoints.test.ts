@@ -14,6 +14,7 @@ import { entryEventResultsRepository } from '../../src/repositories/entry-event-
 import {
   ENTRY_SEASON_SYNC_LOCK_NAMESPACE,
   entryEventTransfersRepository,
+  readEntryTransferSourceCheckedAt,
 } from '../../src/repositories/entry-event-transfers';
 import { entryInfoRepository } from '../../src/repositories/entry-infos';
 import { eventLiveRepository } from '../../src/repositories/event-lives';
@@ -42,6 +43,9 @@ const TRANSFER_PLAYER_ID = 99_042_102;
 const SOURCE_PLAYER_ID = 99_042_103;
 const TEST_SEASON = '2526';
 let previousActiveSeason: string | null = null;
+async function nextTransferSourceCheckedAt(): Promise<string> {
+  return readEntryTransferSourceCheckedAt();
+}
 
 async function expectBlockedByEntrySeasonLock<T>(
   operation: () => Promise<T>,
@@ -365,7 +369,7 @@ describe('tournament initialization checkpoints', () => {
     await entryEventTransfersRepository.replaceForEvent(ENTRY_ID, 1, [], undefined, {
       syncMode: 'all',
       checkpointSeason: TEST_SEASON,
-      sourceCheckedAt: new Date(),
+      sourceCheckedAt: await nextTransferSourceCheckedAt(),
     });
 
     expect(await checkpointRow()).toMatchObject({
@@ -785,7 +789,7 @@ describe('tournament initialization checkpoints', () => {
     await entryEventTransfersRepository.replaceForEvent(ENTRY_ID, 1, [], undefined, {
       syncMode: 'latest',
       checkpointSeason: TEST_SEASON,
-      sourceCheckedAt: new Date(),
+      sourceCheckedAt: await nextTransferSourceCheckedAt(),
     });
     await syncEntryInfo(ENTRY_ID, client, 1, TEST_SEASON);
 
@@ -835,7 +839,7 @@ describe('tournament initialization checkpoints', () => {
       {
         syncMode: 'latest',
         checkpointSeason: TEST_SEASON,
-        sourceCheckedAt: new Date(),
+        sourceCheckedAt: await nextTransferSourceCheckedAt(),
       },
     );
     await entryEventTransfersRepository.replaceForEvent(
@@ -856,7 +860,7 @@ describe('tournament initialization checkpoints', () => {
       {
         syncMode: 'latest',
         checkpointSeason: TEST_SEASON,
-        sourceCheckedAt: new Date(),
+        sourceCheckedAt: await nextTransferSourceCheckedAt(),
       },
     );
 
@@ -1499,7 +1503,7 @@ describe('tournament initialization checkpoints', () => {
         await entryEventTransfersRepository.replaceForEvent(ENTRY_ID, 12, [], undefined, {
           syncMode: 'all',
           checkpointSeason: TEST_SEASON,
-          sourceCheckedAt: new Date(),
+          sourceCheckedAt: await nextTransferSourceCheckedAt(),
         });
       } catch (error) {
         rejected = error;
@@ -1944,7 +1948,7 @@ describe('tournament initialization checkpoints', () => {
     await entryEventTransfersRepository.replaceForEvent(ENTRY_ID, 10, [], undefined, {
       syncMode: 'all',
       checkpointSeason: TEST_SEASON,
-      sourceCheckedAt: new Date(),
+      sourceCheckedAt: await nextTransferSourceCheckedAt(),
     });
 
     expect((await checkpointRow())?.transfers).toBe(10);
@@ -2010,24 +2014,24 @@ describe('tournament initialization checkpoints', () => {
     await entryEventTransfersRepository.replaceForEvent(ENTRY_ID, 10, [], undefined, {
       syncMode: 'latest',
       checkpointSeason: TEST_SEASON,
-      sourceCheckedAt: new Date(),
+      sourceCheckedAt: await nextTransferSourceCheckedAt(),
     });
     await entryEventTransfersRepository.replaceForEvent(ENTRY_ID, 12, [], undefined, {
       syncMode: 'latest',
       checkpointSeason: TEST_SEASON,
-      sourceCheckedAt: new Date(),
+      sourceCheckedAt: await nextTransferSourceCheckedAt(),
     });
     expect((await checkpointRow())?.transfers).toBe(10);
 
     await entryEventTransfersRepository.replaceForEvent(ENTRY_ID, 11, [], undefined, {
       syncMode: 'latest',
       checkpointSeason: TEST_SEASON,
-      sourceCheckedAt: new Date(),
+      sourceCheckedAt: await nextTransferSourceCheckedAt(),
     });
     await entryEventTransfersRepository.replaceForEvent(ENTRY_ID, 12, [], undefined, {
       syncMode: 'latest',
       checkpointSeason: TEST_SEASON,
-      sourceCheckedAt: new Date(),
+      sourceCheckedAt: await nextTransferSourceCheckedAt(),
     });
     expect((await checkpointRow())?.transfers).toBe(12);
   });
@@ -2044,12 +2048,12 @@ describe('tournament initialization checkpoints', () => {
       entryEventTransfersRepository.replaceForEvent(ENTRY_ID, 10, [], undefined, {
         syncMode: 'all',
         checkpointSeason: TEST_SEASON,
-        sourceCheckedAt: new Date(),
+        sourceCheckedAt: await nextTransferSourceCheckedAt(),
       }),
       entryEventTransfersRepository.replaceForEvent(ENTRY_ID, 12, [], undefined, {
         syncMode: 'all',
         checkpointSeason: TEST_SEASON,
-        sourceCheckedAt: new Date(),
+        sourceCheckedAt: await nextTransferSourceCheckedAt(),
       }),
     ]);
     expect((await checkpointRow())?.transfers).toBe(12);
@@ -2304,7 +2308,7 @@ describe('tournament initialization checkpoints', () => {
       entryEventTransfersRepository.replaceForEvent(ENTRY_ID, 39, [], undefined, {
         syncMode: 'all',
         checkpointSeason: TEST_SEASON,
-        sourceCheckedAt: new Date(),
+        sourceCheckedAt: await nextTransferSourceCheckedAt(),
       }),
     ).rejects.toThrow();
     expect((await checkpointRow())?.transfers).toBe(before);
@@ -2312,8 +2316,10 @@ describe('tournament initialization checkpoints', () => {
 
   test('a late older transfer source cannot replace a newer complete history', async () => {
     const sql = await getDbClient();
-    const newerSource = new Date(Date.now() + 60_000);
-    const olderSource = new Date(newerSource.getTime() - 30_000);
+    const sameMillisecondPrefix = new Date(Date.now() + 60_000).toISOString().slice(0, -1);
+    const newerSource = `${sameMillisecondPrefix}900+00:00`;
+    const olderSource = `${sameMillisecondPrefix}100+00:00`;
+    expect(new Date(newerSource).getTime()).toBe(new Date(olderSource).getTime());
     const newerTransfer = {
       event: 12,
       entry: ENTRY_ID,
@@ -2342,6 +2348,19 @@ describe('tournament initialization checkpoints', () => {
         },
       ),
     ).toBe(true);
+    expect(
+      await entryEventTransfersRepository.replaceForEvent(
+        ENTRY_ID,
+        12,
+        [olderTransfer],
+        undefined,
+        {
+          syncMode: 'all',
+          checkpointSeason: TEST_SEASON,
+          sourceCheckedAt: newerSource,
+        },
+      ),
+    ).toBe(false);
     expect(
       await entryEventTransfersRepository.replaceForEvent(
         ENTRY_ID,

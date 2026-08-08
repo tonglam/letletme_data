@@ -36,8 +36,24 @@ export type TransferSyncMode = 'latest' | 'all';
 type EntrySeasonCheckpoint = {
   snapshotSeason: string | null;
   transferSeason: string | null;
-  transferSourceCheckedAt: Date | null;
 };
+
+export async function readEntryTransferSourceCheckedAt(
+  dbInstance?: DatabaseInstance,
+): Promise<string> {
+  const db = dbInstance ?? (await getDb());
+  const rows = await db.execute<{ sourceCheckedAt: string }>(
+    sql`SELECT clock_timestamp()::text AS "sourceCheckedAt"`,
+  );
+  const sourceCheckedAt = String(rows[0]?.sourceCheckedAt ?? '');
+  if (!sourceCheckedAt) {
+    throw new DatabaseError(
+      'Entry transfer source checkpoint is invalid.',
+      'ENTRY_TRANSFER_SOURCE_CHECKPOINT_INVALID',
+    );
+  }
+  return sourceCheckedAt;
+}
 
 export async function acquireEntrySeasonWriteFence(
   tx: TransactionHandle,
@@ -74,7 +90,6 @@ async function lockAndValidateEntrySeason(
     .select({
       snapshotSeason: entryInfos.entrySnapshotSyncedSeason,
       transferSeason: entryInfos.entryTransfersSyncedSeason,
-      transferSourceCheckedAt: entryInfos.entryTransfersSourceCheckedAt,
     })
     .from(entryInfos)
     .where(eq(entryInfos.id, entryId));
@@ -245,7 +260,7 @@ export const createEntryEventTransfersRepository = (dbInstance?: DatabaseInstanc
         defaultPoints?: number | null;
         syncMode?: 'latest' | 'all';
         checkpointSeason: string;
-        sourceCheckedAt: Date;
+        sourceCheckedAt: string;
         persistEventData?: (tx: TransactionHandle) => Promise<void>;
       },
     ): Promise<boolean> => {
@@ -258,21 +273,30 @@ export const createEntryEventTransfersRepository = (dbInstance?: DatabaseInstanc
         }
         const fallbackPoints = options?.defaultPoints ?? null;
         const sourceCheckedAt = options?.sourceCheckedAt;
-        if (!(sourceCheckedAt instanceof Date) || !Number.isFinite(sourceCheckedAt.getTime())) {
+        if (!sourceCheckedAt) {
           throw new Error('A valid transfer source checkpoint is required');
         }
 
         const replace = async (tx: TransactionHandle): Promise<boolean> => {
           const current = await lockAndValidateEntrySeason(tx, entryId, checkpointSeason);
-          if (
-            current?.transferSourceCheckedAt &&
-            current.transferSourceCheckedAt.getTime() > sourceCheckedAt.getTime()
-          ) {
+          const [sourceOrder] = await tx
+            .select({
+              isStale: sql<boolean>`COALESCE(
+                ${entryInfos.entryTransfersSourceCheckedAt} >= ${sourceCheckedAt}::timestamptz,
+                false
+              )`,
+              winnerSourceCheckedAt: sql<
+                string | null
+              >`${entryInfos.entryTransfersSourceCheckedAt}::text`,
+            })
+            .from(entryInfos)
+            .where(eq(entryInfos.id, entryId));
+          if (sourceOrder?.isStale) {
             logInfo('Rejected stale entry transfer history replacement', {
               entryId,
               eventId,
-              sourceCheckedAt: sourceCheckedAt.toISOString(),
-              winnerSourceCheckedAt: current.transferSourceCheckedAt.toISOString(),
+              sourceCheckedAt,
+              winnerSourceCheckedAt: sourceOrder.winnerSourceCheckedAt,
             });
             return false;
           }
@@ -392,7 +416,7 @@ export const createEntryEventTransfersRepository = (dbInstance?: DatabaseInstanc
                       THEN ${checkpointSeason}
                       ELSE ${checkpointSeason}
                     END`,
-              entryTransfersSourceCheckedAt: sourceCheckedAt,
+              entryTransfersSourceCheckedAt: sql`${sourceCheckedAt}::timestamptz`,
               updatedAt: new Date(),
             })
             .where(eq(entryInfos.id, entryId));

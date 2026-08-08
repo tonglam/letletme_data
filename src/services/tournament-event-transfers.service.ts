@@ -4,14 +4,16 @@ import type { RawFPLEntryEventPickItem } from '../types';
 import { getActiveCacheSeason } from '../cache/cache-season';
 import { fplClient } from '../clients/fpl';
 import { entryEventResultsRepository } from '../repositories/entry-event-results';
-import { entryEventTransfersRepository } from '../repositories/entry-event-transfers';
+import {
+  entryEventTransfersRepository,
+  readEntryTransferSourceCheckedAt,
+} from '../repositories/entry-event-transfers';
 import { eventLiveRepository } from '../repositories/event-lives';
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
 import { mapWithConcurrency, uniqueNumbers } from '../utils/async';
 import { IncompleteDataSyncError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
-import { readCoreSnapshotOrderingTimestamp } from './core-snapshot-persistence.service';
 
 const DEFAULT_CONCURRENCY = 5;
 
@@ -373,7 +375,7 @@ export async function syncTournamentEventTransfersPre(
   }
 
   const checkpointSeason = await getActiveCacheSeason();
-  const sourceCheckedAt = await readCoreSnapshotOrderingTimestamp();
+  const sourceCheckedAt = await readEntryTransferSourceCheckedAt();
   const pendingEntryIds = await entryEventTransfersRepository.findEntryIdsNeedingSync(
     entryIds,
     eventId,

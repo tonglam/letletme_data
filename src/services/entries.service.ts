@@ -3,6 +3,7 @@ import { fplClient } from '../clients/fpl';
 import { createEntryEventPicksRepository } from '../repositories/entry-event-picks';
 import {
   entryEventTransfersRepository,
+  readEntryTransferSourceCheckedAt,
   withEntrySeasonSyncTransaction,
 } from '../repositories/entry-event-transfers';
 import { createEntryEventResultsRepository } from '../repositories/entry-event-results';
@@ -82,7 +83,7 @@ export async function syncEntryEventTransfers(
       targetEventId = current.id;
     }
     const checkpointSeason = await getActiveCacheSeason();
-    const transferSyncStartedAt = await readCoreSnapshotOrderingTimestamp();
+    const transferSyncStartedAt = await readEntryTransferSourceCheckedAt();
     const transfers = await fplClient.getEntryTransfers(entryId);
     const pointsByElement = options?.pointsByElement ?? (await getPointsByElement(targetEventId));
     await entryEventTransfersRepository.replaceForEvent(

@@ -12,6 +12,7 @@ import {
 } from '../repositories/entry-event-results';
 import {
   entryEventTransfersRepository,
+  readEntryTransferSourceCheckedAt,
   withEntrySeasonSyncTransaction,
 } from '../repositories/entry-event-transfers';
 import { eventLiveRepository } from '../repositories/event-lives';
@@ -40,6 +41,7 @@ export type TournamentEventResultsSyncOptions = {
   live?: EventPointsPayload;
   skipTransfers?: boolean;
   transfersByEntry?: ReadonlyMap<number, RawFPLEntryTransfersResponse>;
+  transferSourceCheckedAt?: string;
   season?: string;
   freshAfter?: Date;
 };
@@ -182,6 +184,9 @@ export async function syncTournamentEventResultsForEntryIds(
 
   const attemptStartedAt = options?.freshAfter ?? (await readCoreSnapshotOrderingTimestamp());
   const checkpointSeason = options?.season ?? (await getActiveCacheSeason());
+  const transferSourceCheckedAt = options?.skipTransfers
+    ? null
+    : (options?.transferSourceCheckedAt ?? (await readEntryTransferSourceCheckedAt()));
   const live = await resolveEventPointsPayload(eventId, options?.live, {
     season: checkpointSeason,
   });
@@ -235,7 +240,7 @@ export async function syncTournamentEventResultsForEntryIds(
           // The endpoint returned the entrant's complete transfer history.
           // Persist and checkpoint that same scope so the following audit
           // cannot reject a successful legacy/backfill repair.
-          { syncMode: 'all', checkpointSeason, sourceCheckedAt: attemptStartedAt },
+          { syncMode: 'all', checkpointSeason, sourceCheckedAt: transferSourceCheckedAt! },
         );
       }
       return { entryId, success: true } satisfies EntrySyncOutcome;
@@ -306,7 +311,7 @@ export async function syncEntryTransferHistories(
   const uniqueEntryIds = uniqueNumbers(entryIds);
   const concurrency = options?.concurrency ?? DEFAULT_CONCURRENCY;
   const checkpointSeason = options?.season ?? (await getActiveCacheSeason());
-  const sourceCheckedAt = await readCoreSnapshotOrderingTimestamp();
+  const sourceCheckedAt = await readEntryTransferSourceCheckedAt();
 
   await mapWithConcurrency(uniqueEntryIds, concurrency, async (entryId) => {
     try {
