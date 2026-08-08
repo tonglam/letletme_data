@@ -30,7 +30,9 @@ import {
   assertUnderstatResourceHashes,
   assertUnderstatSyncAllowed,
   changedUnderstatPlayerSeasonIds,
+  changedUnderstatPlayerTeamIds,
   evaluateUnderstatPlayerSnapshotCompleteness,
+  mergeUnderstatTeamDetailIds,
   plannedUnderstatSeason,
   selectPlayerMatchIds,
   selectTeamDetailIds,
@@ -119,6 +121,11 @@ export async function discoverUnderstatPlayers(job: UnderstatPlayerJobData): Pro
     discovery.playerSeasons,
     previousPlayerHashes,
   );
+  const discoveredPlayerChangeTeamIds = changedUnderstatPlayerTeamIds(
+    discovery.playerSeasons,
+    changedPlayerIds,
+    discovery.teams,
+  );
   const participantChangeTeamIds = await understatPlayerRepository.getTeamIdsForPlayers(
     job.season,
     [...changedPlayerIds],
@@ -126,7 +133,11 @@ export async function discoverUnderstatPlayers(job: UnderstatPlayerJobData): Pro
   const newMatchTeamIds = discovery.matches
     .filter((match) => match.isResult && !syncedMatchIds.has(match.id))
     .flatMap((match) => [match.homeTeamId, match.awayTeamId]);
-  const changedTeams = new Set([...participantChangeTeamIds, ...newMatchTeamIds]);
+  const changedTeams = new Set([
+    ...participantChangeTeamIds,
+    ...discoveredPlayerChangeTeamIds,
+    ...newMatchTeamIds,
+  ]);
 
   const db = await getDb();
   const changed = await db.transaction((tx) => persistUnderstatPlayerDiscovery(tx, discovery));
@@ -151,9 +162,7 @@ export async function discoverUnderstatPlayers(job: UnderstatPlayerJobData): Pro
         )
         .map((item) => Number(item.resourceId))
         .filter(Number.isInteger);
-  const targetTeamIds = [...new Set([...selectedTeamIds, ...priorTeamIds])].sort(
-    (left, right) => left - right,
-  );
+  const targetTeamIds = mergeUnderstatTeamDetailIds(selectedTeamIds, changedTeams, priorTeamIds);
   const selectedMatchIds = job.participantsOnly
     ? []
     : selectPlayerMatchIds({

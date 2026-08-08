@@ -1,6 +1,7 @@
 import { eq, sql } from 'drizzle-orm';
 
 import { acquireActiveSeasonWriteFence } from '../cache/cache-season';
+import { CORE_SNAPSHOT_MUTATION_SCOPES } from '../domain/core-snapshot';
 import { fplSeasonArchiveItems, fplSeasonArchives } from '../db/schemas/index.schema';
 import { getDb, type DbOrTransaction } from '../db/singleton';
 import type { FplSeasonArchiveItem } from '../domain/fpl-history';
@@ -13,6 +14,27 @@ import { syncEventLiveSummary } from './event-live-summaries.service';
 import { syncPlayerStatsForEvent } from './player-stats.service';
 
 const FPL_ARCHIVE_LOCK_KEY = 912_883_473;
+const EVENT_LIVE_SUMMARY_ARCHIVE_COLUMNS = [
+  'id',
+  'element_id',
+  'element_type',
+  'minutes',
+  'goals_scored',
+  'assists',
+  'clean_sheets',
+  'goals_conceded',
+  'own_goals',
+  'penalties_saved',
+  'penalties_missed',
+  'yellow_cards',
+  'red_cards',
+  'saves',
+  'bonus',
+  'bps',
+  'total_points',
+  'created_at',
+  'updated_at',
+] as const;
 const FPL_ARCHIVE_LIVE_SNAPSHOT_SCOPES = Array.from(
   { length: 38 },
   (_, index) => `live-snapshot:event:${index + 1}`,
@@ -23,6 +45,14 @@ type ArchiveTableSpec = {
   archiveTable: string;
   sourceHasSeason: boolean;
 };
+
+export const FPL_ARCHIVE_MUTATION_SCOPES = [
+  ...CORE_SNAPSHOT_MUTATION_SCOPES,
+  'data-core:player-stats',
+  'data-core:player-values',
+  ...FPL_ARCHIVE_LIVE_SNAPSHOT_SCOPES,
+  'event-live-summary:season',
+] as const;
 
 export const FPL_ARCHIVE_TABLES: readonly ArchiveTableSpec[] = [
   { sourceTable: 'events', archiveTable: 'events_history', sourceHasSeason: false },
@@ -88,12 +118,23 @@ async function copyAndVerifyTable(
   season: string,
   spec: ArchiveTableSpec,
 ): Promise<FplSeasonArchiveItem> {
-  const copySql = spec.sourceHasSeason
-    ? `INSERT INTO public.${spec.archiveTable} SELECT source.* FROM public.${spec.sourceTable} source WHERE source.season = '${season}' ON CONFLICT DO NOTHING`
-    : `INSERT INTO public.${spec.archiveTable} SELECT '${season}'::text, source.* FROM public.${spec.sourceTable} source ON CONFLICT DO NOTHING`;
+  const isEventLiveSummary = spec.sourceTable === 'event_live_summaries';
+  const eventLiveSummaryColumns = EVENT_LIVE_SUMMARY_ARCHIVE_COLUMNS.join(', ');
+  const eventLiveSummarySourceColumns = EVENT_LIVE_SUMMARY_ARCHIVE_COLUMNS.map(
+    (column) => `source.${column}`,
+  ).join(', ');
+  const copySql = isEventLiveSummary
+    ? `INSERT INTO public.${spec.archiveTable} (season, ${eventLiveSummaryColumns})
+       SELECT '${season}'::text, ${eventLiveSummarySourceColumns}
+       FROM public.${spec.sourceTable} source ON CONFLICT DO NOTHING`
+    : spec.sourceHasSeason
+      ? `INSERT INTO public.${spec.archiveTable} SELECT source.* FROM public.${spec.sourceTable} source WHERE source.season = '${season}' ON CONFLICT DO NOTHING`
+      : `INSERT INTO public.${spec.archiveTable} SELECT '${season}'::text, source.* FROM public.${spec.sourceTable} source ON CONFLICT DO NOTHING`;
   await tx.execute(sql.raw(copySql));
 
-  const sourceJson = spec.sourceHasSeason ? 'to_jsonb(source)' : 'to_jsonb(source)';
+  const sourceJson = isEventLiveSummary
+    ? String.raw`(to_jsonb(source) - 'event_id' - 'team_id')`
+    : 'to_jsonb(source)';
   const archiveJson = canonicalExpression(spec, 'archive');
   const sourceFilter = sourceWhere(spec, season, 'source');
   const archiveFilter = ` WHERE archive.season = '${season}'`;
@@ -282,10 +323,10 @@ export async function prepareAndArchiveFplSeason(season: string): Promise<FplArc
       // Hold every event's live writer scope from the final refresh through
       // the archive transaction so no newer live facts can be copied after
       // the summary has been prepared.
-      scopes: [...FPL_ARCHIVE_LIVE_SNAPSHOT_SCOPES, 'event-live-summary:season'],
+      scopes: [...FPL_ARCHIVE_MUTATION_SCOPES],
     },
     async () => {
-      const core = await syncCoreSnapshot();
+      const core = await syncCoreSnapshot(undefined, { mutationScopesAlreadyHeld: true });
       if (core.season !== season) {
         throw new DatabaseError(
           `Final core snapshot belongs to ${core.season}, not requested archive ${season}`,

@@ -224,6 +224,19 @@ describe('core snapshot synchronization', () => {
     });
   });
 
+  test('reuses caller-owned mutation scopes without reacquiring core locks', async () => {
+    const calls: string[] = [];
+    const input = dependencies({ calls });
+    input.recoverPendingWithoutLock = async () => {
+      calls.push('recovery-without-lock');
+    };
+
+    await syncCoreSnapshot(input, { mutationScopesAlreadyHeld: true });
+
+    expect(calls).toContain('recovery-without-lock');
+    expect(calls).not.toContain('lock');
+  });
+
   test('never publishes after persistence fails', async () => {
     const calls: string[] = [];
     await expect(

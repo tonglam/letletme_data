@@ -256,6 +256,36 @@ export function changedUnderstatPlayerSeasonIds(
   return ids;
 }
 
+export function changedUnderstatPlayerTeamIds(
+  rows: readonly Pick<UnderstatPlayerSeason, 'playerId' | 'sourceTeamTitle'>[],
+  changedPlayerIds: ReadonlySet<number>,
+  teams: readonly Pick<UnderstatTeam, 'id' | 'title'>[],
+): Set<number> {
+  const teamIdsByTitle = new Map(teams.map((team) => [team.title, team.id]));
+  const ids = new Set<number>();
+  for (const row of rows) {
+    if (!changedPlayerIds.has(row.playerId)) continue;
+    const destinationTitle = row.sourceTeamTitle
+      .split(',')
+      .map((title) => title.trim())
+      .filter((title) => title.length > 0)
+      .at(-1);
+    const destinationId = destinationTitle ? teamIdsByTitle.get(destinationTitle) : undefined;
+    if (destinationId !== undefined) ids.add(destinationId);
+  }
+  return ids;
+}
+
+export function mergeUnderstatTeamDetailIds(
+  selectedTeamIds: readonly number[],
+  changedTeamIds: ReadonlySet<number>,
+  priorTeamIds: readonly number[] = [],
+): number[] {
+  return [...new Set([...selectedTeamIds, ...changedTeamIds, ...priorTeamIds])].sort(
+    (left, right) => left - right,
+  );
+}
+
 export function selectTeamDetailIds(input: {
   mode: UnderstatSyncMode;
   teams: readonly UnderstatTeam[];

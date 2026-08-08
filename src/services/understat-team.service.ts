@@ -24,6 +24,7 @@ import {
   assertUnderstatSyncAllowed,
   changedUnderstatTeamStatIds,
   evaluateUnderstatTeamSnapshotCompleteness,
+  mergeUnderstatTeamDetailIds,
   plannedUnderstatSeason,
   selectTeamDetailIds,
   teamById,
@@ -126,9 +127,7 @@ export async function discoverUnderstatTeams(job: UnderstatTeamJobData): Promise
         )
         .map((item) => Number(item.resourceId))
         .filter(Number.isInteger);
-  const targetIds = [...new Set([...selectedTargetIds, ...priorUnsettledIds])].sort(
-    (left, right) => left - right,
-  );
+  const targetIds = mergeUnderstatTeamDetailIds(selectedTargetIds, changedTeams, priorUnsettledIds);
   const teams = teamById(discovery.teams);
   await understatSyncRepository.addItems(
     job.runId,

@@ -5,7 +5,9 @@ import {
   assertNoUnderstatMatchesDisappeared,
   assertUnderstatLeagueSnapshotComplete,
   changedUnderstatPlayerSeasonIds,
+  changedUnderstatPlayerTeamIds,
   changedUnderstatTeamStatIds,
+  mergeUnderstatTeamDetailIds,
   selectPlayerMatchIds,
   selectTeamDetailIds,
 } from '../../src/services/understat-sync.service';
@@ -76,6 +78,27 @@ describe('Understat incremental selection', () => {
         ]),
       ),
     ).toEqual(new Set([101]));
+  });
+
+  test('adds the destination team for changed player memberships', () => {
+    expect(
+      changedUnderstatPlayerTeamIds(
+        [
+          { playerId: 100, sourceTeamTitle: 'Crystal Palace, Arsenal' },
+          { playerId: 101, sourceTeamTitle: 'Liverpool' },
+        ],
+        new Set([100]),
+        [
+          { id: 10, title: 'Crystal Palace' },
+          { id: 11, title: 'Arsenal' },
+          { id: 12, title: 'Liverpool' },
+        ],
+      ),
+    ).toEqual(new Set([11]));
+  });
+
+  test('unions explicit, changed, and unsettled team detail targets', () => {
+    expect(mergeUnderstatTeamDetailIds([3], new Set([1, 2]), [2, 4])).toEqual([1, 2, 3, 4]);
   });
 
   test('refreshes only changed or missing team pages', () => {

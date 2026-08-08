@@ -27,6 +27,13 @@ describe('mutation auth policy', () => {
     expect(shouldRequireApiKey('OPTIONS', '/tournaments/42/setup-status')).toBe(false);
   });
 
+  test('keeps Understat operational reads behind the service API key', () => {
+    expect(shouldRequireApiKey('GET', '/understat/status/2627')).toBe(true);
+    expect(shouldRequireApiKey('GET', '/understat/status/2627/')).toBe(true);
+    expect(shouldRequireApiKey('GET', '/understat/mappings/2627')).toBe(true);
+    expect(shouldRequireApiKey('GET', '/understat/mappings/2627/')).toBe(true);
+  });
+
   test('requires an API key for every mutation route', () => {
     expect(shouldRequireApiKey('POST', '/jobs/events-sync/trigger')).toBe(true);
     expect(shouldRequireApiKey('DELETE', '/fixtures/cache')).toBe(true);
