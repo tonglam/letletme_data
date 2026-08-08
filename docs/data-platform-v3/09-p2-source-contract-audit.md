@@ -1,6 +1,6 @@
 # P2 Source Contract Audit
 
-Plan version: 3.2.1
+Plan version: 3.2.2
 
 Audit source: accepted B0 full restore, PostgreSQL 15.8, cutover run
 `v3-20260808T160008Z-b9eddc0`.

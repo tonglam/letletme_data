@@ -1,6 +1,6 @@
 # Data Platform v3 Test and Acceptance Matrix
 
-Plan version: 3.2.1
+Plan version: 3.2.2
 
 ## Evidence rules
 
@@ -47,6 +47,8 @@ Required migration cases:
 11. Drizzle export applies cleanly to an empty PG15 database and catalog parity passes against the
     migrated database. SQL owns the two reporting-MV index sets, the partial active-publication
     `NULLS NOT DISTINCT` option, and the stable name of the circular publication foreign key.
+12. `letletme_graphql_reader` can select `ops.dataset_publications`, cannot mutate it, and has no
+    create privilege in any Data-owned schema.
 
 ### GraphQL
 

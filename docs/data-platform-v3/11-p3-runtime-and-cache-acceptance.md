@@ -1,8 +1,13 @@
 # P3 Data Runtime and Cache Acceptance
 
-Plan version: 3.2.1
+Plan version: 3.2.2
 
 Status: **ACCEPTED**
+
+Post-acceptance contract correction: `0090_z_finalize_v3_graphql_reader_contract.sql` grants the
+read-only GraphQL role schema usage required to consume its existing
+`ops.dataset_publications` SELECT grant. The same migration updates existing v3 publication
+manifests to plan version 3.2.2. No write privilege is added.
 
 Substantive D2 commit: `51201b40ec3187ad38a18171a7267836326a6fec`
 

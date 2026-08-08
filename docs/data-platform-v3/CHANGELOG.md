@@ -1,5 +1,16 @@
 # Data Platform v3 Plan Changelog
 
+## 3.2.2 - 2026-08-09
+
+- Corrected the private-schema ACL contract so `letletme_graphql_reader` can actually consume its
+  existing read-only `ops.dataset_publications` grant.
+- Added an explicit integration assertion that the GraphQL role can read publication authority but
+  cannot mutate it or create objects in `reporting`.
+- Updated existing v3 publication manifests to the current plan version without changing dataset
+  revisions or granting any write capability.
+- Advanced the GraphQL implementation baseline from planned `8cf4ddc` to fetched `3cc9951` so the
+  already-merged player-state/data-page contract and bounded tournament-cache fix are preserved.
+
 ## 3.2.1 - 2026-08-09
 
 - Audited every deleted v2 test and added real PG15 write coverage for all 26 active FPL and

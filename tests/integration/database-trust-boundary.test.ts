@@ -189,7 +189,22 @@ describe('v3 database trust boundary', () => {
         has_schema_privilege('letletme_graphql_reader', 'reporting', 'CREATE')
           AS reporting_create
     `;
-    expect(readerBoundary).toEqual({ ops_usage: false, reporting_create: false });
+    expect(readerBoundary).toEqual({ ops_usage: true, reporting_create: false });
+
+    const [publicationBoundary] = await sql<Array<{ readable: boolean; writable: boolean }>>`
+      SELECT
+        has_table_privilege(
+          'letletme_graphql_reader',
+          'ops.dataset_publications',
+          'SELECT'
+        ) AS readable,
+        has_table_privilege(
+          'letletme_graphql_reader',
+          'ops.dataset_publications',
+          'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'
+        ) AS writable
+    `;
+    expect(publicationBoundary).toEqual({ readable: true, writable: false });
   });
 
   test('installs runtime identities, business keys, and one-active enforcement', async () => {
