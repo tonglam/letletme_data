@@ -157,6 +157,10 @@ export function resolveMutationScopes(input: MutationScopeInput): string[] {
     switch (jobName) {
       case 'tournament-event-results':
         return [
+          // Hold the core event publication fence through the finalization
+          // recheck and cascade handoff. Otherwise data-core:events can
+          // finalize the event between those two operations.
+          'data-core:events',
           withEvent('entry-event-picks', eventId),
           withEvent('entry-event-transfers', eventId),
           withEvent('entry-event-results', eventId),
