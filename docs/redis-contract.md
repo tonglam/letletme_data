@@ -449,8 +449,13 @@ that switches the lane manifest. The prior generation then receives a 24-hour
 TTL. A 2526 backfill does not change `Understat:Season:active` when the
 configured active season is 2627.
 
+When a valid preseason generation has no match rows, the corresponding match
+hash contains the reserved `__empty__` field with JSON value `[]`; consumers
+must treat that field as an empty hash rather than a data row.
+
 Understat worker locks use the existing
-`mutation-lock:understat:{lane}:...` family. Queue state is under
+`mutation-lock:understat:{lane}:...` family plus the shared
+`mutation-lock:understat:reference:{season}` discovery/publication scope. Queue state is under
 `bull:understat-team-sync:*` and `bull:understat-player-sync:*`. None of these
 internal keys is a consumer data source. See the
 [Understat pipeline document](understat-pipeline.md) for value shapes,

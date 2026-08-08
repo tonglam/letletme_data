@@ -21,7 +21,7 @@ const RULE_VERSION = 'understat-fpl-v1';
 const VERIFIED_STATUSES = ['auto_verified', 'manual_verified'] as const;
 
 export function isAutoMappingProtectedStatus(status: ProviderLinkStatus): boolean {
-  return isVerifiedProviderLinkStatus(status) || status === 'quarantined';
+  return isVerifiedProviderLinkStatus(status) || status === 'quarantined' || status === 'rejected';
 }
 
 type FplFixturePlayerEvidence = {

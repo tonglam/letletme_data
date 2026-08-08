@@ -22,8 +22,8 @@ The production `sql_migrations` ledger includes the immutable Understat/FPL
 history from `0050_create_understat_provider_tables.sql` through
 `0071_drop_tournament_snapshot_materialized_view.sql`. Keep those files in the
 tree even when the feature branch that introduced them is not otherwise part of
-the current release. The current custom tail is `0078`; new migrations must
-continue at `0079`.
+the current release. The current custom tail is `0079`; new migrations must
+continue at `0080`.
 
 `0034_widen_entry_event_transfers_identity.sql` is a staged cutover. Deploy the
 service with `TRANSFER_SYNC_MODE=latest` first, apply 0034, then change the mode

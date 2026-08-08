@@ -153,12 +153,12 @@ export async function getUnderstatStatus(season: string) {
 export async function hasRecentUnderstatSuccess(
   season: string,
   maxAgeMs = 36 * 60 * 60 * 1000,
-): Promise<boolean | null> {
+): Promise<boolean> {
   const [latest, published] = await Promise.all([
     understatSyncRepository.findLatestRuns(season),
     understatSyncRepository.findLatestPublishedRuns(season),
   ]);
-  if (!latest.team && !latest.player) return null;
+  if (!latest.team && !latest.player) return false;
   const cutoff = Date.now() - maxAgeMs;
   return [published.team, published.player].every(
     (run) => run !== null && run.completedAt !== null && run.completedAt.getTime() >= cutoff,

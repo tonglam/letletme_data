@@ -1,7 +1,11 @@
 import { describe, expect, test } from 'bun:test';
 import type Redis from 'ioredis';
 
-import { createUnderstatCache, UNDERSTAT_ACTIVE_SEASON_KEY } from '../../src/cache/understat-cache';
+import {
+  createUnderstatCache,
+  UNDERSTAT_ACTIVE_SEASON_KEY,
+  UNDERSTAT_EMPTY_HASH_FIELD,
+} from '../../src/cache/understat-cache';
 
 class FakeRedis {
   readonly strings = new Map<string, string>();
@@ -118,6 +122,23 @@ describe('Understat generation cache', () => {
     await cache.publishPlayer('2627', 'player-run', playerSnapshot as never);
     expect((await cache.getManifest('2627', 'team'))?.revision).toBe('team-run');
     expect((await cache.getManifest('2627', 'player'))?.revision).toBe('player-run');
+  });
+
+  test('materializes empty match hashes for a valid preseason generation', async () => {
+    const redis = new FakeRedis();
+    const cache = createUnderstatCache({ getRedisClient: async () => redis as unknown as Redis });
+
+    await cache.publishTeam('2627', 'empty-team', {
+      teams: [{ team: { id: 1 } }],
+      matches: [],
+      teamMatchRows: [],
+      splits: [],
+    } as never);
+
+    expect(
+      redis.hashes.get('Understat:TeamMatches:2627:empty-team')?.get(UNDERSTAT_EMPTY_HASH_FIELD),
+    ).toBe('[]');
+    expect((await cache.getManifest('2627', 'team'))?.revision).toBe('empty-team');
   });
 
   test('keeps the old manifest when the atomic switch fails', async () => {

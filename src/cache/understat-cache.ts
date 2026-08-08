@@ -9,6 +9,7 @@ import { logInfo } from '../utils/logger';
 import { understatRedisSingleton } from './singleton';
 
 export const UNDERSTAT_ACTIVE_SEASON_KEY = 'Understat:Season:active';
+export const UNDERSTAT_EMPTY_HASH_FIELD = '__empty__';
 const STAGING_TTL_SECONDS = 60 * 60;
 const RETIRED_TTL_SECONDS = 24 * 60 * 60;
 const MAX_GENERATION_HSET_BYTES = 512 * 1024;
@@ -91,9 +92,14 @@ async function setGenerationHashes(
   keys: string[],
   hashes: Record<string, string>[],
 ): Promise<void> {
+  const materializedHashes = hashes.map((sourceHash) =>
+    Object.keys(sourceHash).length > 0
+      ? sourceHash
+      : { [UNDERSTAT_EMPTY_HASH_FIELD]: JSON.stringify([]) },
+  );
   for (let index = 0; index < keys.length; index += 1) {
     const key = keys[index];
-    const hash = hashes[index];
+    const hash = materializedHashes[index];
     const clearPipeline = redis.pipeline();
     clearPipeline.del(key);
     let results = await clearPipeline.exec();
@@ -117,9 +123,9 @@ async function setGenerationHashes(
 
   const counts = await Promise.all(keys.map((key) => redis.hlen(key)));
   for (let index = 0; index < keys.length; index += 1) {
-    if (counts[index] !== Object.keys(hashes[index]).length) {
+    if (counts[index] !== Object.keys(materializedHashes[index]).length) {
       throw new Error(
-        `Incomplete Understat generation hash ${keys[index]}: expected=${Object.keys(hashes[index]).length} actual=${counts[index]}`,
+        `Incomplete Understat generation hash ${keys[index]}: expected=${Object.keys(materializedHashes[index]).length} actual=${counts[index]}`,
       );
     }
   }

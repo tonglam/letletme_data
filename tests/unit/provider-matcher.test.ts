@@ -66,6 +66,7 @@ describe('provider roster matcher', () => {
     expect(isAutoMappingProtectedStatus('auto_verified')).toBe(true);
     expect(isAutoMappingProtectedStatus('manual_verified')).toBe(true);
     expect(isAutoMappingProtectedStatus('quarantined')).toBe(true);
+    expect(isAutoMappingProtectedStatus('rejected')).toBe(true);
     expect(isAutoMappingProtectedStatus('ambiguous')).toBe(false);
     expect(isAutoMappingProtectedStatus('pending')).toBe(false);
   });

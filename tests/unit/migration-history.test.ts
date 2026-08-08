@@ -174,6 +174,15 @@ describe('event finalization checkpoint migration', () => {
   });
 });
 
+describe('event history archive alignment migration', () => {
+  test('extends the history parent with the event finalization timestamp', () => {
+    const migration = readFileSync('migrations/0079_align_fpl_event_history.sql', 'utf8');
+
+    expect(migration).toContain('ALTER TABLE public.events_history');
+    expect(migration).toContain('ADD COLUMN IF NOT EXISTS data_checked_at timestamptz');
+  });
+});
+
 describe('event live summary season aggregate migration', () => {
   test('removes event/team dimensions and rebuilds from event-live facts', () => {
     const migration = readFileSync(

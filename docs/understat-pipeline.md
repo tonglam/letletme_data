@@ -459,6 +459,10 @@ Team 和 Player 各自发布不可变 generation：
 | `Understat:TeamParticipants:{season}:{revision}` | hash | `teamId` | membership rows with embedded player identity |
 | `Understat:PlayerMatches:{season}:{revision}` | hash | `playerId` | ordered `{ stat, match }[]` |
 
+当合法的季前 snapshot 没有已完成比赛时，`TeamMatches` 或
+`PlayerMatches` hash 会写入保留字段 `__empty__`，值为 JSON `[]`；consumer
+必须把它当作空 hash，而不是一条业务数据。
+
 Manifest JSON：
 
 ```json
@@ -588,6 +592,13 @@ live 当前状态。审计后已用保留的 FPL team code 修复 `1617`/`1718` 
 `teams_2627` 已从当前 `teams` 表写入 20 支球队，但其他 `2627` history partitions 仍未完成，
 因此 archive status 保持 `building`，没有提前 seal。
 
+Understat `1415`、`1516` 没有对应的 FPL history partition；这两季使用本地保存的官方
+Pulselive ranked stats identity/metrics 和 FPL legacy stats，依靠持久 FPL player code 写入
+bridge evidence。该来源范围、29 条非 exact 记录和置信度均见
+[`docs/understat-fpl-player-mapping-audit.md`](understat-fpl-player-mapping-audit.md)。
+Understat `1415`–`2526` 的 player provider mapping 已完成逐季覆盖、唯一性和数据库审计，
+不应再把 `2526` 描述为“仍需独立运行 matcher”。
+
 ## 12. FPL history tables 与 season resolver
 
 FPL archive 不是 Understat lane 的前置条件，但 bridge 读取历史 FPL 时依赖它。
@@ -680,8 +691,8 @@ Status 返回的 resource counts 包括：`teams`、`matches`、`teamMatchStats`
 - Player full 最大约 1 个 league + 20 个 team + 380 个 match requests。
 - 第二次 full/reconcile 为 hash no-op，并复用旧 Redis revision。
 - 2526 Team/Player manifests 已保留，但没有修改 `Understat:Season:active`。
-- FPL 2526 archive 已 sealed；FPL 2526 provider mappings 仍需独立运行 matcher 后再验收，不能
-  因为 archive sealed 就自动宣称 mapping 完成。
+- FPL 2526 archive 已 sealed；Understat 2526 provider mappings 已独立运行 matcher，并通过
+  player 覆盖、FPL code 唯一性和 evidence 审计。archive sealed 本身仍不能替代 mapping 验收。
 
 ## 15. 2026/27 启用顺序
 
