@@ -234,7 +234,7 @@ export async function discoverUnderstatPlayers(job: UnderstatPlayerJobData): Pro
         .filter(Number.isInteger);
   const targetTeamIds = mergeUnderstatTeamDetailIds(selectedTeamIds, changedTeams, priorTeamIds);
   const selectedMatchIds = job.participantsOnly
-    ? [...changedPlayerMatchIds]
+    ? [...changedPlayerMatchIds].filter((matchId) => completedMatchIds.includes(matchId))
     : selectPlayerMatchIds({
         mode: job.mode,
         matches: discovery.matches,

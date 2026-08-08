@@ -46,6 +46,16 @@ describe('FPL season archive eligibility', () => {
     expect(result.reason).toContain('finalized events=37/38');
   });
 
+  test('allows blank gameweeks when every fixture event ID is valid', () => {
+    const result = evaluateFplArchiveEligibility({
+      ...readyFacts,
+      fixtureEventCount: 37,
+    });
+
+    expect(result.eligible).toBe(true);
+    expect(result.fixtureEventIdsComplete).toBe(true);
+  });
+
   test('archives only the exact completed 38-event, 380-fixture dataset', () => {
     expect(evaluateFplArchiveEligibility(readyFacts)).toMatchObject({
       eligible: true,

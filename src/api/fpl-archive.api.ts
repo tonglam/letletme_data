@@ -15,9 +15,6 @@ export const fplArchiveAPI = new Elysia({ prefix: '/fpl/archive' })
         set.status = 409;
         return { success: false, season: params.season, archive };
       }
-      if (archive.status === 'sealed') {
-        return { success: true, season: params.season, noOp: true, archive };
-      }
       const job = await enqueueFplSeasonArchiveJob(params.season, 'api');
       set.status = 202;
       return { success: true, season: params.season, jobId: job.id, archive };

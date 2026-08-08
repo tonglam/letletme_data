@@ -80,7 +80,7 @@ export const understatAPI = new Elysia({ prefix: '/understat' })
           queueName: 'understat-mappings',
           jobName: 'understat-mappings-team',
           required: true,
-          scopes: [`understat:reference:${body.season}`],
+          scopes: ['understat:reference:all', `understat:reference:${body.season}`],
         },
         () => manualVerifyProviderTeam(body),
       );
@@ -104,7 +104,7 @@ export const understatAPI = new Elysia({ prefix: '/understat' })
           queueName: 'understat-mappings',
           jobName: 'understat-mappings-reconcile',
           required: true,
-          scopes: [`understat:reference:${body.season}`],
+          scopes: ['understat:reference:all', `understat:reference:${body.season}`],
         },
         () => reconcileProviderMappings(body.season),
       );
@@ -148,10 +148,15 @@ export const understatAPI = new Elysia({ prefix: '/understat' })
       if (body.status === 'manual_verified' && !body.reviewedBy) {
         throw new Error('reviewedBy is required for manual verification');
       }
-      const link = await providerIdentityRepository.updateEntityStatus(
-        params.id,
-        body.status,
-        body.reviewedBy,
+      const link = await withMutationConflictGuard(
+        {
+          queueName: 'understat-mappings',
+          jobName: 'understat-mappings-entity-review',
+          required: true,
+          scopes: ['understat:reference:all'],
+        },
+        () =>
+          providerIdentityRepository.updateEntityStatus(params.id, body.status, body.reviewedBy),
       );
       if (!link) {
         set.status = 404;
@@ -173,10 +178,14 @@ export const understatAPI = new Elysia({ prefix: '/understat' })
       if (body.status === 'manual_verified' && !body.reviewedBy) {
         throw new Error('reviewedBy is required for manual verification');
       }
-      const link = await providerIdentityRepository.updateMatchStatus(
-        params.id,
-        body.status,
-        body.reviewedBy,
+      const link = await withMutationConflictGuard(
+        {
+          queueName: 'understat-mappings',
+          jobName: 'understat-mappings-match-review',
+          required: true,
+          scopes: ['understat:reference:all'],
+        },
+        () => providerIdentityRepository.updateMatchStatus(params.id, body.status, body.reviewedBy),
       );
       if (!link) {
         set.status = 404;

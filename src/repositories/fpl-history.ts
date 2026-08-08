@@ -67,13 +67,13 @@ export function evaluateFplArchiveEligibility(
     facts.distinctEventIds === 38 &&
     facts.minEventId === 1 &&
     facts.maxEventId === 38;
-  const fixtureEventIdsComplete = facts.fixtureEventCount === 38 && facts.invalidEventCount === 0;
+  const fixtureEventIdsComplete = facts.invalidEventCount === 0;
   const fixturesFinished = facts.fixtureCount === 380 && facts.finishedCount === facts.fixtureCount;
   const reasons = [
     facts.eventCount === 38 ? null : `events=${facts.eventCount}/38`,
     eventIdsComplete ? null : 'event IDs are not exactly 1..38',
     facts.fixtureCount === 380 ? null : `fixtures=${facts.fixtureCount}/380`,
-    fixtureEventIdsComplete ? null : 'fixture event IDs are not exactly within 1..38',
+    fixtureEventIdsComplete ? null : 'fixture event IDs contain null or out-of-range values',
     fixturesFinished ? null : 'not all 380 fixtures are finished',
     facts.finalizedEventCount === 38 ? null : `finalized events=${facts.finalizedEventCount}/38`,
   ].filter((value): value is string => value !== null);

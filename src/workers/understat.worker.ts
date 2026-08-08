@@ -40,7 +40,7 @@ function lockScopes(
   name: string,
   data: UnderstatTeamJobData | UnderstatPlayerJobData,
 ): string[] {
-  const scopes = [`understat:reference:${data.season}`];
+  const scopes = ['understat:reference:all', `understat:reference:${data.season}`];
   if (name.endsWith('-discover') || name.endsWith('-publish')) return scopes;
   const resourceId =
     lane === 'team'
