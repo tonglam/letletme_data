@@ -7,6 +7,7 @@
 
 import type { Event, Fixture } from '../types';
 import { fixtureRepository } from '../repositories/fixtures';
+import type { FplSeasonRef } from '../domain/fpl-season';
 
 const MATCH_WINDOW_MS = 2 * 60 * 60 * 1000;
 const MATCH_PREWARM_MS = 5 * 60 * 1000;
@@ -14,6 +15,7 @@ const FINISH_FLAG_GRACE_MS = 6 * 60 * 60 * 1000;
 const SEASON_WINDOW_CACHE_TTL_MS = 10 * 60 * 1000;
 
 type SeasonWindow = {
+  seasonId: number;
   startDayMs: number;
   endDayMs: number;
   loadedAtMs: number;
@@ -21,6 +23,7 @@ type SeasonWindow = {
 
 let cachedSeasonWindow: SeasonWindow | null = null;
 let cachedSeasonWindowNullAtMs: number | null = null;
+let cachedSeasonWindowNullSeasonId: number | null = null;
 
 function toUtcDayStartMs(date: Date): number {
   return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), 0, 0, 0, 0);
@@ -36,9 +39,10 @@ function extractKickoffs(fixtures: Fixture[]): Date[] {
     .filter((kickoffTime): kickoffTime is Date => Boolean(kickoffTime));
 }
 
-async function loadSeasonWindow(now: Date): Promise<SeasonWindow | null> {
+async function loadSeasonWindow(season: FplSeasonRef, now: Date): Promise<SeasonWindow | null> {
   if (
     cachedSeasonWindow &&
+    cachedSeasonWindow.seasonId === season.seasonId &&
     now.getTime() - cachedSeasonWindow.loadedAtMs < SEASON_WINDOW_CACHE_TTL_MS
   ) {
     return cachedSeasonWindow;
@@ -46,19 +50,21 @@ async function loadSeasonWindow(now: Date): Promise<SeasonWindow | null> {
 
   if (
     cachedSeasonWindowNullAtMs !== null &&
+    cachedSeasonWindowNullSeasonId === season.seasonId &&
     now.getTime() - cachedSeasonWindowNullAtMs < SEASON_WINDOW_CACHE_TTL_MS
   ) {
     return null;
   }
 
   const [gw1Fixtures, gw38Fixtures] = await Promise.all([
-    fixtureRepository.findByEvent(1),
-    fixtureRepository.findByEvent(38),
+    fixtureRepository.findByEvent(season, 1),
+    fixtureRepository.findByEvent(season, 38),
   ]);
   const gw1Kickoffs = extractKickoffs(gw1Fixtures);
   const gw38Kickoffs = extractKickoffs(gw38Fixtures);
   if (gw1Kickoffs.length === 0 || gw38Kickoffs.length === 0) {
     cachedSeasonWindowNullAtMs = now.getTime();
+    cachedSeasonWindowNullSeasonId = season.seasonId;
     cachedSeasonWindow = null;
     return null;
   }
@@ -69,12 +75,14 @@ async function loadSeasonWindow(now: Date): Promise<SeasonWindow | null> {
   const endDayMs = toUtcDayEndMs(new Date(lastKickoffMs));
 
   const resolved: SeasonWindow = {
+    seasonId: season.seasonId,
     startDayMs,
     endDayMs,
     loadedAtMs: now.getTime(),
   };
   cachedSeasonWindow = resolved;
   cachedSeasonWindowNullAtMs = null;
+  cachedSeasonWindowNullSeasonId = null;
   return resolved;
 }
 
@@ -82,8 +90,8 @@ async function loadSeasonWindow(now: Date): Promise<SeasonWindow | null> {
  * Check if current date is inside active FPL season window:
  * from first day of GW1 to last day of GW38 (UTC day boundaries).
  */
-export async function isFPLSeason(date = new Date()): Promise<boolean> {
-  const seasonWindow = await loadSeasonWindow(date);
+export async function isFPLSeason(season: FplSeasonRef, date = new Date()): Promise<boolean> {
+  const seasonWindow = await loadSeasonWindow(season, date);
   if (!seasonWindow) {
     return false;
   }
@@ -200,46 +208,4 @@ export function isSelectTime(event: Event, fixtures: Fixture[], date = new Date(
 
   const now = date.getTime();
   return now >= windowStart && now <= windowEnd;
-}
-
-/**
- * Get current FPL season in format YYMM (e.g., 2526 for 2025-26 season)
- * Premier League starts in August each year
- */
-export function getCurrentSeason(date = new Date()): string {
-  const month = date.getMonth() + 1; // 1-based month
-  const year = date.getFullYear();
-
-  if (month >= 8) {
-    // August onwards - new season starts (Aug 2025 -> 2526)
-    const currentYearShort = year.toString().slice(-2);
-    const nextYearShort = (year + 1).toString().slice(-2);
-    return `${currentYearShort}${nextYearShort}`;
-  } else {
-    // July or earlier - previous season continues (Jul 2025 -> 2425)
-    const prevYearShort = (year - 1).toString().slice(-2);
-    const currentYearShort = year.toString().slice(-2);
-    return `${prevYearShort}${currentYearShort}`;
-  }
-}
-
-/**
- * Estimate current gameweek (rough calculation)
- */
-export function getCurrentGameweek(date = new Date()): number {
-  const seasonStart = new Date(date.getFullYear(), 7, 1); // August 1st
-  if (date < seasonStart) {
-    // Previous season
-    const prevSeasonStart = new Date(date.getFullYear() - 1, 7, 1);
-    const weeksDiff = Math.floor(
-      (date.getTime() - prevSeasonStart.getTime()) / (7 * 24 * 60 * 60 * 1000),
-    );
-    return Math.min(Math.max(weeksDiff, 1), 38);
-  } else {
-    // Current season
-    const weeksDiff = Math.floor(
-      (date.getTime() - seasonStart.getTime()) / (7 * 24 * 60 * 60 * 1000),
-    );
-    return Math.min(Math.max(weeksDiff + 1, 1), 38);
-  }
 }

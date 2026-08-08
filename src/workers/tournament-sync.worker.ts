@@ -2,6 +2,8 @@ import { Worker, Job, QueueEvents } from 'bullmq';
 
 import { MUTATION_PRIORITY_ORDER, type MutationPriorityTier } from '../domain/job-priority';
 import { finalizeTournamentEventLifecycle } from '../domain/tournament-event-finalization';
+import type { FplSeasonRef } from '../domain/fpl-season';
+import { requireCurrentSeasonForJob } from '../domain/season-scoped-job';
 import { shouldEnqueueTournamentCascade } from '../domain/tournament-event-results';
 import {
   getTournamentSyncQueueName,
@@ -27,7 +29,6 @@ import {
   finishTournamentsThroughEvent,
   reconcileOfficialTournamentRosters,
 } from '../services/tournament-roster.service';
-import { invalidateTournamentGraphQLCaches } from '../cache/tournament-graphql-cache';
 import { resolveBullMqAttemptQueueWaitMs, runDataSyncAttempt } from '../utils/data-sync-attempt';
 import { IncompleteDataSyncError } from '../utils/errors';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
@@ -64,23 +65,24 @@ import type { TournamentFinalizationTarget } from '../domain/tournament';
  * barrier and the last successful one enqueues the refresh (FP-07).
  */
 async function enqueueTournamentCascade(
+  season: FplSeasonRef,
   eventId: number,
   finalizationTargets: TournamentFinalizationTarget[],
 ) {
   logInfo('Enqueueing tournament cascade jobs', { eventId });
 
   try {
-    const cascadeId = createCascadeId(eventId);
+    const cascadeId = createCascadeId(season, eventId);
     await initCascadeStructureBarrier(cascadeId);
     const structureOpts = { cascadeId, finalizationTargets };
 
     // Structure jobs carry cascadeId for the MV barrier; cup/transfers do not.
     const results = await Promise.allSettled([
-      enqueueTournamentPointsRace(eventId, 'cascade', structureOpts),
-      enqueueTournamentBattleRace(eventId, 'cascade', structureOpts),
-      enqueueTournamentKnockout(eventId, 'cascade', structureOpts),
-      enqueueTournamentTransfersPost(eventId, 'cascade', structureOpts),
-      enqueueTournamentCupResults(eventId, 'cascade', structureOpts),
+      enqueueTournamentPointsRace(season, eventId, 'cascade', structureOpts),
+      enqueueTournamentBattleRace(season, eventId, 'cascade', structureOpts),
+      enqueueTournamentKnockout(season, eventId, 'cascade', structureOpts),
+      enqueueTournamentTransfersPost(season, eventId, 'cascade', structureOpts),
+      enqueueTournamentCupResults(season, eventId, 'cascade', structureOpts),
     ]);
 
     const successful = results.filter((r) => r.status === 'fulfilled').length;
@@ -129,6 +131,7 @@ async function enqueueTournamentCascade(
       await noteCascadeStructureJobComplete(cascadeId, `enqueue-failed:${structureJobNames[i]}`);
     }
     await maybeEnqueueCascadeMaterializedRefresh(
+      season,
       eventId,
       cascadeId,
       'structure-enqueue-gaps',
@@ -146,6 +149,7 @@ async function enqueueTournamentCascade(
  * If the lease is held by a dead worker, throw so BullMQ retries (Codex P2).
  */
 async function maybeEnqueueCascadeMaterializedRefresh(
+  season: FplSeasonRef,
   eventId: number,
   cascadeId: string,
   lastJob: string,
@@ -161,7 +165,7 @@ async function maybeEnqueueCascadeMaterializedRefresh(
     throw new Error(`Cascade MV refresh enqueue lease busy for cascadeId=${cascadeId}; will retry`);
   }
   try {
-    await enqueueTournamentMaterializedViewsRefresh(eventId, 'cascade', {
+    await enqueueTournamentMaterializedViewsRefresh(season, eventId, 'cascade', {
       cascadeId,
       finalizationTargets,
     });
@@ -184,6 +188,7 @@ async function maybeEnqueueCascadeMaterializedRefresh(
 
 /** After a structure cascade job succeeds, maybe enqueue MV refresh. */
 async function afterCascadeStructureJob(
+  season: FplSeasonRef,
   eventId: number,
   cascadeId: string | undefined,
   jobName: string,
@@ -195,7 +200,13 @@ async function afterCascadeStructureJob(
   // jobName is the stable barrier slot — retries of the same job no-op for DECR.
   await noteCascadeStructureJobComplete(cascadeId, jobName);
   // Retries still re-attempt enqueue if pending and not yet successfully enqueued.
-  await maybeEnqueueCascadeMaterializedRefresh(eventId, cascadeId, jobName, finalizationTargets);
+  await maybeEnqueueCascadeMaterializedRefresh(
+    season,
+    eventId,
+    cascadeId,
+    jobName,
+    finalizationTargets,
+  );
 }
 
 export function assertTournamentStructureSyncComplete(
@@ -209,12 +220,13 @@ export function assertTournamentStructureSyncComplete(
 }
 
 function tournamentEventFinalizationDependencies(
+  season: FplSeasonRef,
   finalizationTargets: TournamentFinalizationTarget[],
 ) {
   return {
-    finish: (eventId: number) => finishTournamentsThroughEvent(eventId, finalizationTargets),
+    finish: (eventId: number) =>
+      finishTournamentsThroughEvent(season, eventId, finalizationTargets),
     refresh: refreshTournamentMaterializedViews,
-    invalidate: invalidateTournamentGraphQLCaches,
   };
 }
 
@@ -230,6 +242,7 @@ function tournamentEventFinalizationDependencies(
  * event-results (base) → [points-race, battle-race, knockout, transfers-post, cup-results] (parallel)
  */
 async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
+  const season = await requireCurrentSeasonForJob(job.data);
   const { eventId, source, cascadeId } = job.data;
   const finalizationTargets = job.data.finalizationTargets ?? [];
   const context = {
@@ -267,83 +280,121 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
             switch (job.name) {
               case TOURNAMENT_JOBS.EVENT_RESULTS: {
                 const freshAfter = await resolveJobFreshAfter(job);
-                const result = await syncTournamentEventResults(eventId, { freshAfter });
+                const result = await syncTournamentEventResults(season, eventId, {
+                  freshAfter,
+                });
                 if (!shouldEnqueueTournamentCascade(result)) {
                   logInfo('Skipping tournament cascade - no active tournament entries', {
                     eventId,
                   });
                   await finalizeTournamentEventLifecycle(eventId, {
-                    ...tournamentEventFinalizationDependencies([]),
+                    ...tournamentEventFinalizationDependencies(season, []),
                     // Recover a prior terminal write followed by a failed
                     // derived-view refresh or cache invalidation.
                     refreshAlways: true,
                   });
                   return result;
                 }
-                await enqueueTournamentCascade(eventId, result.finalizationTargets);
+                await enqueueTournamentCascade(season, eventId, result.finalizationTargets);
                 return result;
               }
 
               case TOURNAMENT_JOBS.POINTS_RACE: {
-                const result = await syncTournamentPointsRaceResults(eventId);
+                const result = await syncTournamentPointsRaceResults(season, eventId);
                 assertTournamentStructureSyncComplete(result, eventId, job.name);
-                await afterCascadeStructureJob(eventId, cascadeId, job.name, finalizationTargets);
+                await afterCascadeStructureJob(
+                  season,
+                  eventId,
+                  cascadeId,
+                  job.name,
+                  finalizationTargets,
+                );
                 return result;
               }
 
               case TOURNAMENT_JOBS.BATTLE_RACE: {
-                const battleResult = await syncTournamentBattleRaceResults(eventId);
+                const battleResult = await syncTournamentBattleRaceResults(season, eventId);
                 assertTournamentStructureSyncComplete(battleResult, eventId, job.name);
-                await afterCascadeStructureJob(eventId, cascadeId, job.name, finalizationTargets);
+                await afterCascadeStructureJob(
+                  season,
+                  eventId,
+                  cascadeId,
+                  job.name,
+                  finalizationTargets,
+                );
                 return battleResult;
               }
 
               case TOURNAMENT_JOBS.KNOCKOUT: {
-                const result = await syncTournamentKnockoutResults(eventId);
+                const result = await syncTournamentKnockoutResults(season, eventId);
                 assertTournamentStructureSyncComplete(result, eventId, job.name);
-                await afterCascadeStructureJob(eventId, cascadeId, job.name, finalizationTargets);
+                await afterCascadeStructureJob(
+                  season,
+                  eventId,
+                  cascadeId,
+                  job.name,
+                  finalizationTargets,
+                );
                 return result;
               }
 
               case TOURNAMENT_JOBS.TRANSFERS_POST: {
-                const result = await syncTournamentEventTransfersPost(eventId);
-                await enqueueTournamentSelectionStats(eventId, 'cascade', {
+                const result = await syncTournamentEventTransfersPost(season, eventId);
+                await enqueueTournamentSelectionStats(season, eventId, 'cascade', {
                   cascadeId,
                   finalizationTargets,
                 });
-                await afterCascadeStructureJob(eventId, cascadeId, job.name, finalizationTargets);
+                await afterCascadeStructureJob(
+                  season,
+                  eventId,
+                  cascadeId,
+                  job.name,
+                  finalizationTargets,
+                );
                 return result;
               }
 
               case TOURNAMENT_JOBS.CUP_RESULTS: {
-                const result = await syncTournamentEventCupResults(eventId);
-                await afterCascadeStructureJob(eventId, cascadeId, job.name, finalizationTargets);
+                const result = await syncTournamentEventCupResults(season, eventId);
+                await afterCascadeStructureJob(
+                  season,
+                  eventId,
+                  cascadeId,
+                  job.name,
+                  finalizationTargets,
+                );
                 return result;
               }
 
               case TOURNAMENT_JOBS.SELECTION_STATS: {
-                const result = await syncTournamentSelectionStats(eventId);
-                await afterCascadeStructureJob(eventId, cascadeId, job.name, finalizationTargets);
+                const result = await syncTournamentSelectionStats(season, eventId);
+                await afterCascadeStructureJob(
+                  season,
+                  eventId,
+                  cascadeId,
+                  job.name,
+                  finalizationTargets,
+                );
                 return result;
               }
 
               case TOURNAMENT_JOBS.EVENT_PICKS:
-                return syncTournamentEventPicks(eventId);
+                return syncTournamentEventPicks(season, eventId);
 
               case TOURNAMENT_JOBS.TRANSFERS_PRE:
-                return syncTournamentEventTransfersPre(eventId);
+                return syncTournamentEventTransfersPre(season, eventId);
 
               case TOURNAMENT_JOBS.MATERIALIZED_VIEWS_REFRESH:
                 return finalizeTournamentEventLifecycle(eventId, {
-                  ...tournamentEventFinalizationDependencies(finalizationTargets),
+                  ...tournamentEventFinalizationDependencies(season, finalizationTargets),
                   refreshAlways: true,
                 });
 
               case TOURNAMENT_JOBS.INFO:
-                return syncTournamentInfo();
+                return syncTournamentInfo(season);
 
               case TOURNAMENT_JOBS.ROSTER_SYNC: {
-                const result = await reconcileOfficialTournamentRosters();
+                const result = await reconcileOfficialTournamentRosters(season);
                 if (result.errors > 0) {
                   throw new IncompleteDataSyncError(
                     'Official tournament roster synchronization did not converge',

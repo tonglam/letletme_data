@@ -3,6 +3,7 @@ import { Elysia } from 'elysia';
 
 import { getPostMatchResultsSlot } from '../domain/post-match-results';
 import { fixtureRepository } from '../repositories/fixtures';
+import { seasonRepository } from '../repositories/seasons';
 import { getCurrentEvent } from '../services/events.service';
 import { isFPLSeason, isMatchDayTime } from '../utils/conditions';
 import { executeTrackedCron } from '../utils/job-run-logger';
@@ -33,24 +34,25 @@ export async function runLiveSnapshot(
   now = new Date(),
   persistEventLives = false,
 ): Promise<unknown | null> {
-  if (!(await isFPLSeason(now))) {
+  const season = await seasonRepository.findCurrent();
+  if (!(await isFPLSeason(season, now))) {
     logDebug('Skipping live snapshot - not FPL season', { month: now.getMonth() + 1 });
     return null;
   }
 
-  const currentEvent = await getCurrentEvent();
+  const currentEvent = await getCurrentEvent(season);
   if (!currentEvent) {
     logInfo('Skipping live snapshot - no current event');
     return null;
   }
 
-  const fixtures = await fixtureRepository.findByEvent(currentEvent.id);
+  const fixtures = await fixtureRepository.findByEvent(season, currentEvent.id);
   if (!isMatchDayTime(currentEvent, fixtures, now)) {
     logInfo('Skipping live snapshot - not match time', { eventId: currentEvent.id });
     return null;
   }
 
-  const job = await enqueueLiveSnapshot(currentEvent.id, 'cron', {
+  const job = await enqueueLiveSnapshot(season, currentEvent.id, 'cron', {
     persistEventLives,
     now,
   });
@@ -73,14 +75,15 @@ export async function runLiveScores(): Promise<unknown | null> {
 // persistence even after the ordinary live polling window has closed.
 export async function runPostMatchConsolidation(): Promise<unknown | null> {
   const now = new Date();
-  const currentEvent = await getCurrentEvent();
+  const season = await seasonRepository.findCurrent();
+  const currentEvent = await getCurrentEvent(season);
   if (!currentEvent) return null;
 
-  const fixtures = await fixtureRepository.findByEvent(currentEvent.id);
+  const fixtures = await fixtureRepository.findByEvent(season, currentEvent.id);
   const resultSlot = getPostMatchResultsSlot(currentEvent, fixtures, now);
   if (!resultSlot) return null;
 
-  const job = await enqueueLiveSnapshot(currentEvent.id, 'cascade', {
+  const job = await enqueueLiveSnapshot(season, currentEvent.id, 'cascade', {
     persistEventLives: true,
     // Provisional slots are useful for recovery, but the worker must not be
     // asked to publish a final event checkpoint until FPL marks data checked.

@@ -1,127 +1,126 @@
 import {
-  finalizeCoreSnapshotCachePublication,
   publishCoreSnapshotCache,
-  readPendingCoreSnapshotCachePublication,
-  rollbackCoreSnapshotCachePublication,
+  readCoreSnapshotCache,
   type CoreSnapshotCachePublication,
 } from '../cache/core-snapshot-cache';
-import { events } from '../db/schemas/index.schema';
-import { findCoreSnapshotAuthority } from '../repositories/core-snapshot-authority';
-import { createPlayerRepository } from '../repositories/players';
-import { CacheError } from '../utils/errors';
+import { explicitSeasonRef, type FplSeasonRef } from '../domain/fpl-season';
+import { seasonRepository } from '../repositories/seasons';
+import { syncOperationsRepository } from '../repositories/sync-operations';
+import { DatabaseError } from '../utils/errors';
 import { logInfo } from '../utils/logger';
 import {
-  persistCoreSnapshotWithFinalizer,
+  persistCoreSnapshot,
   readCoreSnapshotOrderingTimestamp,
-  type CoreSnapshotCommitResult,
-  withCoreSnapshotAuthorityLock,
+  type CoreSnapshotPersistenceResult,
 } from './core-snapshot-persistence.service';
-import { reconcileCoreFixtureDerivatives } from './core-fixture-derivatives.service';
-
-import type { TransactionHandle } from '../db/singleton';
 
 import type { CoreSnapshot } from '../domain/core-snapshot';
 
 export interface CoreSnapshotPublicationContext {
-  revision: number;
-  publicationId: string;
-  previousActiveSeason: string | null;
-  sourceCheckedAt: Date;
+  readonly revision: number;
+  readonly publicationId: string;
+  readonly sourceRunId: string;
+  readonly sourceCheckedAt: Date;
+}
+
+export interface CoreSnapshotCommitResult {
+  readonly status: 'committed' | 'stale';
+  readonly persistence: CoreSnapshotPersistenceResult;
+  readonly publication: CoreSnapshotCachePublication;
 }
 
 export { readCoreSnapshotOrderingTimestamp };
 
-function requireReceipt(publication: CoreSnapshotCachePublication) {
-  if (!publication.published || !publication.receipt) {
-    throw new CacheError(
-      'Core snapshot cache publication did not produce a recovery receipt',
-      'CORE_SNAPSHOT_PUBLICATION_LOST_AUTHORITY',
-    );
-  }
-  return publication.receipt;
-}
-
-async function finalizeCommittedPublication(
-  receipt: ReturnType<typeof requireReceipt>,
-): Promise<void> {
-  await reconcileCoreFixtureDerivatives(receipt.fixtureIds, new Date(receipt.sourceCheckedAt));
-  await finalizeCoreSnapshotCachePublication(receipt);
-}
-
-async function rollbackWithDurablePartialWinners(
-  receipt: ReturnType<typeof requireReceipt>,
-  transaction: TransactionHandle,
-): Promise<void> {
-  // Match core persistence lock order. A partial writer that completed first
-  // is visible here; one that starts later waits and republishes after recovery.
-  const durablePlayers = await createPlayerRepository(transaction).findAll({ lock: true });
-  await transaction.select({ id: events.id }).from(events).for('update');
-  await rollbackCoreSnapshotCachePublication(receipt, undefined, durablePlayers);
-}
-
 export async function commitCoreSnapshotPublication(
   snapshot: CoreSnapshot,
   context: CoreSnapshotPublicationContext,
-): Promise<CoreSnapshotCommitResult<CoreSnapshotCachePublication>> {
-  return persistCoreSnapshotWithFinalizer(snapshot, {
-    revision: context.revision,
-    publicationId: context.publicationId,
-    previousActiveSeason: context.previousActiveSeason,
-    sourceCheckedAt: context.sourceCheckedAt,
-    finalize: async (reconciledSnapshot) => {
-      const publication = await publishCoreSnapshotCache(reconciledSnapshot, {
-        publicationId: context.publicationId,
-        sourceCheckedAt: context.sourceCheckedAt,
-      });
-      requireReceipt(publication);
-      return publication;
-    },
-    compensate: async (publication) => {
-      await withCoreSnapshotAuthorityLock((transaction) =>
-        rollbackWithDurablePartialWinners(requireReceipt(publication), transaction),
+): Promise<CoreSnapshotCommitResult> {
+  const season = explicitSeasonRef(snapshot.season);
+  const persisted = await persistCoreSnapshot(snapshot, context.sourceCheckedAt);
+  let cachePublished = false;
+  try {
+    const publication = await publishCoreSnapshotCache(persisted.snapshot, {
+      revision: context.revision,
+      publicationId: context.publicationId,
+      sourceCheckedAt: context.sourceCheckedAt,
+      beforeActivate: async () => {
+        const current = await seasonRepository.findCurrent();
+        return current.seasonId === season.seasonId && current.seasonCode === season.seasonCode;
+      },
+    });
+    if (!publication.published) {
+      await syncOperationsRepository.skipPublication(
+        context.publicationId,
+        'A newer core publication already owns the cache scope',
       );
-    },
-    afterCommit: async (publication) => {
-      await finalizeCommittedPublication(requireReceipt(publication));
-    },
-  });
+      await syncOperationsRepository.finishRun(context.sourceRunId, {
+        status: 'skipped',
+        completedItems: 0,
+        skippedItems:
+          persisted.persistence.events +
+          persisted.persistence.teams +
+          persisted.persistence.players +
+          persisted.persistence.phases +
+          persisted.persistence.fixtures,
+        dataChanged: false,
+      });
+      return { status: 'stale', persistence: persisted.persistence, publication };
+    }
+    cachePublished = true;
+    await syncOperationsRepository.activatePublication({
+      publicationId: context.publicationId,
+      dataset: 'fpl:core',
+      season,
+      sourceRunId: context.sourceRunId,
+      manifest: publication.manifest,
+    });
+    return { status: 'committed', persistence: persisted.persistence, publication };
+  } catch (error) {
+    // Once the atomic pointer moved, keep the ops row staging. Startup recovery can safely
+    // activate it from the complete cache manifest; marking it failed would lose that evidence.
+    if (!cachePublished) {
+      await syncOperationsRepository.failPublication(context.publicationId, error);
+    }
+    throw error;
+  }
 }
 
-export async function recoverPendingCoreSnapshotPublication(): Promise<
-  'none' | 'finalized' | 'rolled_back'
-> {
-  const decision = await withCoreSnapshotAuthorityLock(async (transaction) => {
-    // Read the receipt only after acquiring the same database lock used by a
-    // publisher. Recovery can then never mistake an in-flight transaction for
-    // a rolled-back publication, even if the Redis mutation guard is disabled
-    // or its lease is lost.
-    const pending = await readPendingCoreSnapshotCachePublication();
-    if (!pending) return 'none';
+export async function recoverPendingCoreSnapshotPublication(
+  season: FplSeasonRef,
+): Promise<'none' | 'activated'> {
+  const cached = await readCoreSnapshotCache(season.seasonCode);
+  if (!cached) return 'none';
 
-    const authority = await findCoreSnapshotAuthority(transaction, { lock: true });
-    if (authority?.publicationId === pending.publicationId) {
-      return { status: 'committed' as const, pending };
-    }
+  const active = await syncOperationsRepository.findActivePublication('fpl:core', season);
+  if (active?.publicationId === cached.manifest.publicationId) return 'none';
 
-    await rollbackWithDurablePartialWinners(pending, transaction);
-    logInfo('Rolled back uncommitted core snapshot publication recovery', {
-      season: pending.season,
-      publicationId: pending.publicationId,
-    });
-    return { status: 'rolled_back' as const };
+  const pending = await syncOperationsRepository.findPublicationById(cached.manifest.publicationId);
+  if (
+    !pending ||
+    pending.status !== 'staging' ||
+    pending.dataset !== 'fpl:core' ||
+    pending.seasonId !== season.seasonId ||
+    pending.eventId !== null ||
+    pending.revision !== cached.manifest.revision ||
+    !pending.sourceRunId
+  ) {
+    throw new DatabaseError(
+      'Active core cache manifest has no recoverable ops publication',
+      'CORE_PUBLICATION_RECOVERY_CONTRACT_MISMATCH',
+    );
+  }
+
+  await syncOperationsRepository.activatePublication({
+    publicationId: pending.publicationId,
+    dataset: 'fpl:core',
+    season,
+    sourceRunId: pending.sourceRunId,
+    manifest: cached.manifest,
   });
-
-  if (decision === 'none') return 'none';
-  if (decision.status === 'rolled_back') return 'rolled_back';
-
-  // Event serialization takes the shared season fence, so committed recovery
-  // completes after releasing the core authority transaction's write fence.
-  // The Redis receipt remains pending until every derivative is reconciled;
-  // any failure is therefore recoverable by the next attempt.
-  await finalizeCommittedPublication(decision.pending);
-  logInfo('Finalized committed core snapshot publication recovery', {
-    season: decision.pending.season,
-    publicationId: decision.pending.publicationId,
+  logInfo('Recovered ops authority from a complete active core cache manifest', {
+    season: season.seasonCode,
+    revision: pending.revision,
+    publicationId: pending.publicationId,
   });
-  return 'finalized';
+  return 'activated';
 }

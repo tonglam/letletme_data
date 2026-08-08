@@ -1,24 +1,55 @@
-import { sql } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 
-import { phases, type DbPhase, type DbPhaseInsert } from '../db/schemas/index.schema';
+import { phasesInFpl, type DbPhase, type DbPhaseInsert } from '../db/schemas/index.schema';
 import { getDb, type DbOrTransaction } from '../db/singleton';
+import type { FplSeasonRef } from '../domain/fpl-season';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 
 import type { Phase as DomainPhase } from '../types';
 
+function mapDbPhaseToDomain(phase: DbPhase): DomainPhase {
+  return {
+    id: phase.phaseId,
+    name: phase.name,
+    startEvent: phase.startEvent,
+    stopEvent: phase.stopEvent,
+    highestScore: phase.highestScore,
+  };
+}
+
 export const createPhaseRepository = (dbInstance?: DbOrTransaction) => {
   const getDbInstance = async () => dbInstance || (await getDb());
 
   return {
-    upsertBatch: async (domainPhases: DomainPhase[]): Promise<DbPhase[]> => {
+    findAll: async (season: FplSeasonRef): Promise<DomainPhase[]> => {
+      try {
+        const db = await getDbInstance();
+        const rows = await db
+          .select()
+          .from(phasesInFpl)
+          .where(eq(phasesInFpl.seasonId, season.seasonId))
+          .orderBy(phasesInFpl.phaseId);
+        return rows.map(mapDbPhaseToDomain);
+      } catch (error) {
+        logError('Failed to retrieve phasesInFpl', error, { season: season.seasonCode });
+        throw new DatabaseError(
+          'Failed to retrieve phasesInFpl',
+          'FIND_ALL_PHASES_ERROR',
+          error instanceof Error ? error : undefined,
+        );
+      }
+    },
+
+    upsertBatch: async (season: FplSeasonRef, domainPhases: DomainPhase[]): Promise<DbPhase[]> => {
       try {
         if (domainPhases.length === 0) {
           return [];
         }
 
         const newPhases: DbPhaseInsert[] = domainPhases.map((phase) => ({
-          id: phase.id,
+          seasonId: season.seasonId,
+          phaseId: phase.id,
           name: phase.name,
           startEvent: phase.startEvent,
           stopEvent: phase.stopEvent,
@@ -27,10 +58,10 @@ export const createPhaseRepository = (dbInstance?: DbOrTransaction) => {
 
         const db = await getDbInstance();
         const result = await db
-          .insert(phases)
+          .insert(phasesInFpl)
           .values(newPhases)
           .onConflictDoUpdate({
-            target: phases.id,
+            target: [phasesInFpl.seasonId, phasesInFpl.phaseId],
             set: {
               name: sql`excluded.name`,
               startEvent: sql`excluded.start_event`,
@@ -41,12 +72,15 @@ export const createPhaseRepository = (dbInstance?: DbOrTransaction) => {
           })
           .returning();
 
-        logInfo('Batch upserted phases', { count: result.length });
+        logInfo('Batch upserted phasesInFpl', { count: result.length, season: season.seasonCode });
         return result;
       } catch (error) {
-        logError('Failed to batch upsert phases', error, { count: domainPhases.length });
+        logError('Failed to batch upsert phasesInFpl', error, {
+          count: domainPhases.length,
+          season: season.seasonCode,
+        });
         throw new DatabaseError(
-          'Failed to batch upsert phases',
+          'Failed to batch upsert phasesInFpl',
           'BATCH_UPSERT_ERROR',
           error instanceof Error ? error : undefined,
         );

@@ -1,7 +1,7 @@
 import type { DbEntryEventTransfer, DbEventLive } from '../db/schemas/index.schema';
 import { isCompleteEntryPicks } from '../domain/entry-picks';
 import type { RawFPLEntryEventPickItem } from '../types';
-import { getActiveCacheSeason } from '../cache/cache-season';
+import type { FplSeasonRef } from '../domain/fpl-season';
 import { fplClient } from '../clients/fpl';
 import { readDatabaseOrderingTimestamp } from '../db/ordering-timestamp';
 import { entryEventResultsRepository } from '../repositories/entry-event-results';
@@ -57,19 +57,19 @@ export function buildTournamentTransferPointsMap(
 
 export async function loadCanonicalTournamentTransferPointsMap(
   eventId: number,
-  checkpointSeason: string,
+  season: FplSeasonRef,
   requiredElementIds: readonly number[] = [],
   findCanonicalRows: (
     targetEventId: number,
-    season: string,
+    targetSeason: FplSeasonRef,
   ) => Promise<ReadonlyArray<Pick<DbEventLive, 'elementId' | 'totalPoints'>>> = (
     targetEventId,
-    season,
-  ) => eventLiveRepository.findFinalizedByEventIdForSeason(targetEventId, season),
+    targetSeason,
+  ) => eventLiveRepository.findFinalizedByEventId(targetSeason, targetEventId),
 ): Promise<Map<number, number>> {
   return buildTournamentTransferPointsMap(
     eventId,
-    await findCanonicalRows(eventId, checkpointSeason),
+    await findCanonicalRows(eventId, season),
     requiredElementIds,
   );
 }
@@ -88,7 +88,10 @@ function pickElements(picks: RawFPLEntryEventPickItem[], chip: string | null): S
   return new Set(picks.filter((pick) => pick.position <= 11).map((pick) => pick.element));
 }
 
-export async function syncTournamentEventTransfersPost(eventId: number): Promise<
+export async function syncTournamentEventTransfersPost(
+  season: FplSeasonRef,
+  eventId: number,
+): Promise<
   {
     eventId: number;
     totalEntries: number;
@@ -116,7 +119,7 @@ export async function syncTournamentEventTransfersPost(eventId: number): Promise
 
   logInfo('Starting tournament event transfers post sync', { eventId });
 
-  const tournaments = await tournamentInfoRepository.findActive();
+  const tournaments = await tournamentInfoRepository.findActive(season);
   if (tournaments.length === 0) {
     logInfo('No active tournaments found for tournament event transfers', { eventId });
     return {
@@ -133,7 +136,7 @@ export async function syncTournamentEventTransfersPost(eventId: number): Promise
   }
 
   const entryLists = await mapWithConcurrency(tournaments, 10, (tournament) =>
-    tournamentEntryRepository.findEntryIdsByTournamentId(tournament.id),
+    tournamentEntryRepository.findEntryIdsByTournamentId(season, tournament.id),
   );
 
   const entryIds = uniqueNumbers(entryLists.flat()).filter((entryId) => entryId > 0);
@@ -152,11 +155,10 @@ export async function syncTournamentEventTransfersPost(eventId: number): Promise
     };
   }
 
-  const checkpointSeason = await getActiveCacheSeason();
   const staleTransferEntryIds = await entryEventTransfersRepository.findEntryIdsNeedingSync(
+    season,
     entryIds,
     eventId,
-    checkpointSeason,
   );
   if (staleTransferEntryIds.length > 0) {
     throw new IncompleteDataSyncError(
@@ -168,7 +170,11 @@ export async function syncTournamentEventTransfersPost(eventId: number): Promise
     );
   }
 
-  const transfers = await entryEventTransfersRepository.findByEventAndEntryIds(eventId, entryIds);
+  const transfers = await entryEventTransfersRepository.findByEventAndEntryIds(
+    season,
+    eventId,
+    entryIds,
+  );
   if (transfers.length === 0) {
     logInfo('No tournament transfers require post-event enrichment', { eventId });
     return {
@@ -184,7 +190,11 @@ export async function syncTournamentEventTransfersPost(eventId: number): Promise
     };
   }
 
-  const entryResults = await entryEventResultsRepository.findByEventAndEntryIds(eventId, entryIds);
+  const entryResults = await entryEventResultsRepository.findByEventAndEntryIds(
+    season,
+    eventId,
+    entryIds,
+  );
   const requiredElementIds = uniqueNumbers(
     transfers
       .flatMap((transfer) => [transfer.elementInId, transfer.elementOutId])
@@ -192,7 +202,7 @@ export async function syncTournamentEventTransfersPost(eventId: number): Promise
   );
   const pointsMap = await loadCanonicalTournamentTransferPointsMap(
     eventId,
-    checkpointSeason,
+    season,
     requiredElementIds,
   );
 
@@ -269,7 +279,7 @@ export async function syncTournamentEventTransfersPost(eventId: number): Promise
     }
   }
 
-  const updated = await entryEventTransfersRepository.updateBatchById(updates, checkpointSeason);
+  const updated = await entryEventTransfersRepository.updateBatchById(season, updates);
   failedUnits += Math.max(0, updates.length - updated);
   const succeededUnits = transfers.length - failedUnits;
   const entriesWithTransfers = transferMap.size;
@@ -306,6 +316,7 @@ export async function syncTournamentEventTransfersPost(eventId: number): Promise
 }
 
 export async function syncTournamentEventTransfersPre(
+  season: FplSeasonRef,
   eventId: number,
   options?: TournamentTransferSyncOptions,
 ): Promise<
@@ -336,7 +347,7 @@ export async function syncTournamentEventTransfersPre(
 
   logInfo('Starting tournament event transfers pre sync', { eventId });
 
-  const tournaments = await tournamentInfoRepository.findActive();
+  const tournaments = await tournamentInfoRepository.findActive(season);
   if (tournaments.length === 0) {
     logInfo('No active tournaments found for tournament event transfers', { eventId });
     return {
@@ -353,7 +364,7 @@ export async function syncTournamentEventTransfersPre(
   }
 
   const entryLists = await mapWithConcurrency(tournaments, 10, (tournament) =>
-    tournamentEntryRepository.findEntryIdsByTournamentId(tournament.id),
+    tournamentEntryRepository.findEntryIdsByTournamentId(season, tournament.id),
   );
 
   const entryIds = uniqueNumbers(entryLists.flat()).filter((entryId) => entryId > 0);
@@ -372,7 +383,6 @@ export async function syncTournamentEventTransfersPre(
     };
   }
 
-  const checkpointSeason = await getActiveCacheSeason();
   const sourceCheckedAt = (await readDatabaseOrderingTimestamp()).exact;
   // The current event remains mutable until its deadline. Poll every active
   // entry and leave the durable completeness checkpoint at the prior event so
@@ -389,14 +399,20 @@ export async function syncTournamentEventTransfersPre(
     try {
       const transfers = await client.getEntryTransfers(entryId);
       const hasEventTransfers = transfers.some((transfer) => transfer.event === eventId);
-      await entryEventTransfersRepository.replaceForEvent(entryId, eventId, transfers, undefined, {
-        elementInPlayed: false,
-        defaultPoints: 0,
-        checkpointSeason,
-        syncMode: 'all',
-        checkpointThroughEventId: Math.max(0, eventId - 1),
-        sourceCheckedAt,
-      });
+      await entryEventTransfersRepository.replaceForEvent(
+        season,
+        entryId,
+        eventId,
+        transfers,
+        undefined,
+        {
+          elementInPlayed: false,
+          defaultPoints: 0,
+          syncMode: 'all',
+          checkpointThroughEventId: Math.max(0, eventId - 1),
+          sourceCheckedAt,
+        },
+      );
       if (hasEventTransfers) {
         inserted += 1;
       } else {

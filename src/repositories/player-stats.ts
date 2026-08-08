@@ -1,7 +1,8 @@
 import { sql } from 'drizzle-orm';
 
-import { playerStats, type DbPlayerStatInsert } from '../db/schemas/index.schema';
+import { playerEventSnapshotsInFpl, type DbPlayerStatInsert } from '../db/schemas/index.schema';
 import { getDb, type DbOrTransaction } from '../db/singleton';
+import type { FplSeasonRef } from '../domain/fpl-season';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 
@@ -13,26 +14,38 @@ export const createPlayerStatsRepository = (dbInstance?: DbOrTransaction) => {
   const getDbInstance = async () => dbInstance || (await getDb());
 
   return {
-    upsertBatch: async (playerStatsList: PlayerStat[]): Promise<{ count: number }> => {
+    upsertBatch: async (
+      season: FplSeasonRef,
+      playerStatsList: PlayerStat[],
+    ): Promise<{ count: number }> => {
       try {
         if (playerStatsList.length === 0) {
           return { count: 0 };
         }
 
         const rows: DbPlayerStatInsert[] = playerStatsList.map((playerStat) => ({
+          seasonId: season.seasonId,
           eventId: playerStat.eventId,
           elementId: playerStat.elementId,
           elementType: playerStat.elementType,
           totalPoints: playerStat.totalPoints,
-          form: playerStat.form ?? null,
+          form: playerStat.form === null ? null : String(playerStat.form),
           influence: playerStat.influence ?? null,
           creativity: playerStat.creativity ?? null,
           threat: playerStat.threat ?? null,
-          ictIndex: playerStat.ictIndex ?? null,
-          expectedGoals: playerStat.expectedGoals ?? null,
-          expectedAssists: playerStat.expectedAssists ?? null,
-          expectedGoalInvolvements: playerStat.expectedGoalInvolvements ?? null,
-          expectedGoalsConceded: playerStat.expectedGoalsConceded ?? null,
+          ictIndex: playerStat.ictIndex === null ? null : String(playerStat.ictIndex),
+          expectedGoals:
+            playerStat.expectedGoals === null ? null : String(playerStat.expectedGoals),
+          expectedAssists:
+            playerStat.expectedAssists === null ? null : String(playerStat.expectedAssists),
+          expectedGoalInvolvements:
+            playerStat.expectedGoalInvolvements === null
+              ? null
+              : String(playerStat.expectedGoalInvolvements),
+          expectedGoalsConceded:
+            playerStat.expectedGoalsConceded === null
+              ? null
+              : String(playerStat.expectedGoalsConceded),
           minutes: playerStat.minutes ?? null,
           goalsScored: playerStat.goalsScored ?? null,
           assists: playerStat.assists ?? null,
@@ -65,10 +78,14 @@ export const createPlayerStatsRepository = (dbInstance?: DbOrTransaction) => {
 
         const db = await getDbInstance();
         const result = await db
-          .insert(playerStats)
+          .insert(playerEventSnapshotsInFpl)
           .values(rows)
           .onConflictDoUpdate({
-            target: [playerStats.eventId, playerStats.elementId],
+            target: [
+              playerEventSnapshotsInFpl.seasonId,
+              playerEventSnapshotsInFpl.eventId,
+              playerEventSnapshotsInFpl.elementId,
+            ],
             set: {
               totalPoints: sql`excluded.total_points`,
               form: sql`excluded.form`,

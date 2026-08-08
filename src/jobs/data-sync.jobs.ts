@@ -11,6 +11,7 @@ import {
   PLAYER_STATS_CRON_PATTERN,
 } from '../domain/job-schedules';
 import { resolvePlayerSyncEvent } from '../services/player-sync-event.service';
+import { seasonRepository } from '../repositories/seasons';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { logInfo } from '../utils/logger';
 import { CRON_TIMEZONE, formatCronDateKey } from '../utils/timezone';
@@ -30,7 +31,8 @@ export function registerDataSyncJobs(app: Elysia) {
         async run() {
           try {
             await executeTrackedCron('core-snapshot-sync', async () => {
-              const job = await enqueueCoreSnapshotJob('cron');
+              const season = await seasonRepository.findCurrent();
+              const job = await enqueueCoreSnapshotJob(season, 'cron');
               logInfo('Core snapshot job enqueued via cron', { jobId: job.id });
             });
           } catch {
@@ -47,11 +49,12 @@ export function registerDataSyncJobs(app: Elysia) {
         async run() {
           try {
             await executeTrackedCron('player-prices-sync', async () => {
-              if (!(await resolvePlayerSyncEvent())) {
+              const season = await seasonRepository.findCurrent();
+              if (!(await resolvePlayerSyncEvent(season))) {
                 return;
               }
               const changeDate = formatCronDateKey();
-              const job = await enqueuePlayerPricesSyncJob('cron', {
+              const job = await enqueuePlayerPricesSyncJob(season, 'cron', {
                 changeDate,
                 jobId: `player-prices-${changeDate}-replay`,
                 removeOnSettle: true,
@@ -72,10 +75,11 @@ export function registerDataSyncJobs(app: Elysia) {
         async run() {
           try {
             await executeTrackedCron('player-stats-sync', async () => {
-              if (!(await resolvePlayerSyncEvent())) {
+              const season = await seasonRepository.findCurrent();
+              if (!(await resolvePlayerSyncEvent(season))) {
                 return;
               }
-              const job = await enqueuePlayerStatsSyncJob('cron');
+              const job = await enqueuePlayerStatsSyncJob(season, 'cron');
               logInfo('Player stats sync job enqueued via cron', { jobId: job.id });
             });
           } catch {

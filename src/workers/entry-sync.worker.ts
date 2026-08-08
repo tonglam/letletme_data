@@ -1,8 +1,6 @@
 import { QueueEvents, Worker, type Job } from 'bullmq';
-import { asc, gt } from 'drizzle-orm';
+import { and, asc, eq, gt } from 'drizzle-orm';
 
-import { getActiveCacheSeason } from '../cache/cache-season';
-import { entryInfosCache } from '../cache/entry-infos-cache';
 import { MUTATION_PRIORITY_ORDER, type MutationPriorityTier } from '../domain/job-priority';
 import {
   isExplicitEntryRepairRequest,
@@ -12,8 +10,10 @@ import {
   resolveRichResultFreshnessCutoff,
 } from '../domain/entry-sync';
 import { decideEntrySyncChain, planEntryInfoSyncWork } from '../domain/entry-sync-chain';
-import { entryInfos } from '../db/schemas/index.schema';
+import { entriesInCompetition } from '../db/schemas/index.schema';
 import { getDb } from '../db/singleton';
+import type { FplSeasonRef } from '../domain/fpl-season';
+import { requireCurrentSeasonForJob } from '../domain/season-scoped-job';
 import {
   type EntrySyncJobData,
   type EntrySyncJobSource,
@@ -33,7 +33,7 @@ import {
   retainEntrySyncChainOptions,
   type EntrySyncJobOptions,
 } from '../jobs/entry-sync-enqueue';
-import { republishEntryInfoCache, syncEntryInfo } from '../services/entry-info.service';
+import { syncEntryInfo } from '../services/entry-info.service';
 import { getCurrentEvent } from '../services/events.service';
 import { entryEventPicksRepository } from '../repositories/entry-event-picks';
 import { entryEventResultsRepository } from '../repositories/entry-event-results';
@@ -84,7 +84,10 @@ interface SyncEntriesOptions {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-export async function loadEntryIdsForSync(jobData?: EntrySyncJobData): Promise<LoadedEntryIds> {
+export async function loadEntryIdsForSync(
+  season: FplSeasonRef,
+  jobData?: EntrySyncJobData,
+): Promise<LoadedEntryIds> {
   const chunkSize = jobData?.chunkSize ?? ENTRY_SYNC_DEFAULT_CHUNK_SIZE;
   const chunkOffset = jobData?.chunkOffset ?? 0;
 
@@ -104,15 +107,21 @@ export async function loadEntryIdsForSync(jobData?: EntrySyncJobData): Promise<L
   const rows =
     jobData?.afterEntryId !== undefined
       ? await db
-          .select({ id: entryInfos.id })
-          .from(entryInfos)
-          .where(gt(entryInfos.id, jobData.afterEntryId))
-          .orderBy(asc(entryInfos.id))
+          .select({ id: entriesInCompetition.entryId })
+          .from(entriesInCompetition)
+          .where(
+            and(
+              eq(entriesInCompetition.seasonId, season.seasonId),
+              gt(entriesInCompetition.entryId, jobData.afterEntryId),
+            ),
+          )
+          .orderBy(asc(entriesInCompetition.entryId))
           .limit(chunkSize)
       : await db
-          .select({ id: entryInfos.id })
-          .from(entryInfos)
-          .orderBy(asc(entryInfos.id))
+          .select({ id: entriesInCompetition.entryId })
+          .from(entriesInCompetition)
+          .where(eq(entriesInCompetition.seasonId, season.seasonId))
+          .orderBy(asc(entriesInCompetition.entryId))
           .limit(chunkSize)
           .offset(chunkOffset);
 
@@ -177,23 +186,25 @@ async function syncEntries(
 }
 
 async function enqueueEntryJob(
+  season: FplSeasonRef,
   jobName: EntrySyncJobName,
   source: EntrySyncJobSource | undefined,
   options: EntrySyncJobOptions,
 ) {
   switch (jobName) {
     case 'entry-info':
-      return enqueueEntryInfoSyncJob(source, options);
+      return enqueueEntryInfoSyncJob(season, source, options);
     case 'entry-picks':
-      return enqueueEntryPicksSyncJob(source, options);
+      return enqueueEntryPicksSyncJob(season, source, options);
     case 'entry-transfers':
-      return enqueueEntryTransfersSyncJob(source, options);
+      return enqueueEntryTransfersSyncJob(season, source, options);
     case 'entry-results':
-      return enqueueEntryResultsSyncJob(source, options);
+      return enqueueEntryResultsSyncJob(season, source, options);
   }
 }
 
 async function scheduleRetry(
+  season: FplSeasonRef,
   jobName: EntrySyncJobName,
   jobData: Partial<EntrySyncJobData> | undefined,
   failedIds: number[],
@@ -202,7 +213,7 @@ async function scheduleRetry(
   const delayMultiplier = Math.max(retryCount, 1);
   const delayMs = Math.min(retryBaseDelayMs * delayMultiplier, retryMaxDelayMs);
 
-  return enqueueEntryJob(jobName, jobData?.source, {
+  return enqueueEntryJob(season, jobName, jobData?.source, {
     entryIds: failedIds,
     retryCount,
     concurrency: jobData?.concurrency,
@@ -224,13 +235,14 @@ interface HandleEntryJobOptions {
 }
 
 async function handleEntryJob(
+  season: FplSeasonRef,
   jobName: EntrySyncJobName,
   label: string,
   handler: (entryId: number) => Promise<unknown>,
   jobData?: EntrySyncJobData,
   options: HandleEntryJobOptions = {},
 ) {
-  const loaded = await loadEntryIdsForSync(jobData);
+  const loaded = await loadEntryIdsForSync(season, jobData);
   if (loaded.entryIds.length === 0) {
     logInfo(`No entries found for ${label}`, {
       jobName,
@@ -287,6 +299,7 @@ async function handleEntryJob(
 
   if (decision.action === 'retry_failed') {
     const retryJob = await scheduleRetry(
+      season,
       jobName,
       { ...jobData, resumeAfterEntryId: decision.resumeAfterEntryId },
       result.failedIds,
@@ -329,7 +342,7 @@ async function handleEntryJob(
   }
 
   if (decision.action === 'continue_scan') {
-    const nextJob = await enqueueEntryJob(jobName, jobData?.source, {
+    const nextJob = await enqueueEntryJob(season, jobName, jobData?.source, {
       afterEntryId: decision.afterEntryId,
       chunkSize: loaded.chunkSize,
       concurrency,
@@ -366,6 +379,7 @@ export function createEntrySyncWorker(): WorkerRuntime {
   const monitorTargets: WorkerRuntime['monitorTargets'] = [];
 
   const processor = async (job: Job<EntrySyncJobData>) => {
+    const season = await requireCurrentSeasonForJob(job.data);
     const jobId = job.id ?? `${job.name}-${job.timestamp}`;
     const attempt = resolveDataSyncAttempt(
       job.data?.source,
@@ -399,17 +413,12 @@ export function createEntrySyncWorker(): WorkerRuntime {
       const targetEventId = await resolveEntrySyncTargetEventId(
         job.name as EntrySyncJobName,
         job.data?.eventId,
-        async () => (await getCurrentEvent())?.id ?? null,
+        async () => (await getCurrentEvent(season))?.id ?? null,
       );
       const effectiveJobData =
         targetEventId !== undefined ? { ...job.data, eventId: targetEventId } : job.data;
       context.eventId = targetEventId;
       attemptContext.targetEventId = targetEventId;
-      const checkpointSeason =
-        job.name === 'entry-info' || job.name === 'entry-picks' || job.name === 'entry-transfers'
-          ? await getActiveCacheSeason()
-          : undefined;
-
       return withMutationConflictGuard(
         {
           queueName: job.queueName,
@@ -421,14 +430,11 @@ export function createEntrySyncWorker(): WorkerRuntime {
           runTrackedJob(context, async () => {
             switch (job.name) {
               case 'entry-info': {
-                const cacheOnlyEntryIds = new Set<number>();
                 const result = await handleEntryJob(
+                  season,
                   'entry-info',
                   'entry info sync',
-                  (entryId) =>
-                    cacheOnlyEntryIds.has(entryId)
-                      ? republishEntryInfoCache(entryId)
-                      : syncEntryInfo(entryId, undefined, targetEventId, checkpointSeason),
+                  (entryId) => syncEntryInfo(season, entryId, undefined, targetEventId),
                   effectiveJobData,
                   {
                     selectRequired: async (entryIds) => {
@@ -436,25 +442,15 @@ export function createEntrySyncWorker(): WorkerRuntime {
                         return { requiredEntryIds: entryIds, reusedUnits: 0 };
                       }
                       const requiredEntryIds = await entryInfoRepository.findIdsNeedingSnapshotSync(
+                        season,
                         entryIds,
                         targetEventId,
-                        checkpointSeason!,
                       );
-                      const requiredSet = new Set(requiredEntryIds);
-                      const checkpointedEntryIds = entryIds.filter(
-                        (entryId) => !requiredSet.has(entryId),
-                      );
-                      const cachedEntries = await entryInfosCache.getEntries(checkpointedEntryIds);
-                      const plan = planEntryInfoSyncWork(
+                      return planEntryInfoSyncWork(
                         entryIds,
                         requiredEntryIds,
-                        new Set(cachedEntries.keys()),
                         isCronEntryInfoTableScan(effectiveJobData),
                       );
-                      for (const entryId of plan.cacheOnlyEntryIds) {
-                        cacheOnlyEntryIds.add(entryId);
-                      }
-                      return plan;
                     },
                   },
                 );
@@ -470,9 +466,10 @@ export function createEntrySyncWorker(): WorkerRuntime {
               }
               case 'entry-picks':
                 return handleEntryJob(
+                  season,
                   'entry-picks',
                   'entry picks sync',
-                  (entryId) => syncEntryEventPicks(entryId, targetEventId),
+                  (entryId) => syncEntryEventPicks(season, entryId, targetEventId!),
                   effectiveJobData,
                   {
                     selectRequired: async (entryIds) => {
@@ -487,9 +484,9 @@ export function createEntrySyncWorker(): WorkerRuntime {
                       }
                       const existing = new Set(
                         await entryEventPicksRepository.findEntryIdsByEvent(
+                          season,
                           targetEventId,
                           entryIds,
-                          checkpointSeason!,
                         ),
                       );
                       return {
@@ -499,7 +496,7 @@ export function createEntrySyncWorker(): WorkerRuntime {
                     },
                     auditRequired: (entryIds) =>
                       entryEventPicksRepository
-                        .findEntryIdsByEvent(targetEventId!, entryIds, checkpointSeason!)
+                        .findEntryIdsByEvent(season, targetEventId!, entryIds)
                         .then((persisted) => {
                           const persistedSet = new Set(persisted);
                           return entryIds.filter((entryId) => !persistedSet.has(entryId));
@@ -508,9 +505,10 @@ export function createEntrySyncWorker(): WorkerRuntime {
                 );
               case 'entry-transfers':
                 return handleEntryJob(
+                  season,
                   'entry-transfers',
                   'entry transfers sync',
-                  (entryId) => syncEntryEventTransfers(entryId, targetEventId),
+                  (entryId) => syncEntryEventTransfers(season, entryId, targetEventId!),
                   effectiveJobData,
                   {
                     selectRequired: async (entryIds) => {
@@ -522,9 +520,9 @@ export function createEntrySyncWorker(): WorkerRuntime {
                       }
                       const requiredEntryIds =
                         await entryEventTransfersRepository.findEntryIdsNeedingSync(
+                          season,
                           entryIds,
                           targetEventId,
-                          checkpointSeason!,
                         );
                       return {
                         requiredEntryIds,
@@ -533,17 +531,18 @@ export function createEntrySyncWorker(): WorkerRuntime {
                     },
                     auditRequired: (entryIds) =>
                       entryEventTransfersRepository.findEntryIdsNeedingSync(
+                        season,
                         entryIds,
                         targetEventId!,
-                        checkpointSeason!,
                       ),
                   },
                 );
               case 'entry-results':
                 return handleEntryJob(
+                  season,
                   'entry-results',
                   'entry results sync',
-                  (entryId) => syncEntryEventResults(entryId, targetEventId),
+                  (entryId) => syncEntryEventResults(season, entryId, targetEventId!),
                   effectiveJobData,
                   {
                     selectRequired: async (entryIds) => {
@@ -558,16 +557,17 @@ export function createEntrySyncWorker(): WorkerRuntime {
                       }
                       // Active-GW values can still change. Reuse the dedicated
                       // rich-result checkpoint only after FPL has finalized the GW.
-                      const event = await eventRepository.findById(targetEventId);
+                      const event = await eventRepository.findById(season, targetEventId);
                       const finalizationDate = resolveRichResultFreshnessCutoff(event);
                       if (!finalizationDate) {
                         return { requiredEntryIds: entryIds, reusedUnits: 0 };
                       }
                       const freshAfter =
-                        (await eventRepository.findDataCheckedAtExact(targetEventId)) ??
+                        (await eventRepository.findDataCheckedAtExact(season, targetEventId)) ??
                         finalizationDate;
                       const requiredEntryIds =
                         await entryEventResultsRepository.findEntryIdsNeedingRichSync(
+                          season,
                           entryIds,
                           targetEventId,
                           freshAfter,

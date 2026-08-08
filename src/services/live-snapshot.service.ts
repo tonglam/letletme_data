@@ -1,14 +1,20 @@
-import { and, eq, isNull, lte, or, sql } from 'drizzle-orm';
+import { randomUUID } from 'node:crypto';
 
-import { getDb, type DbOrTransaction } from '../db/singleton';
-import { events } from '../db/schemas/index.schema';
-import { fplClient } from '../clients/fpl';
+import { and, eq, isNull, lte, or } from 'drizzle-orm';
+
 import {
-  acquireActiveSeasonReadFence,
-  getActiveCacheSeason,
-  getActiveCacheSeasonUncached,
-} from '../cache/cache-season';
-import { liveSnapshotCache, playersCache } from '../cache/operations';
+  publishLiveSnapshotCache,
+  readLiveSnapshotCache,
+  type LiveSnapshotCacheContents,
+  type LiveSnapshotCachePayload,
+} from '../cache/live-snapshot-cache';
+import { readCoreSnapshotCache } from '../cache/core-snapshot-cache';
+import { fplClient } from '../clients/fpl';
+import { eventsInFpl } from '../db/schemas/index.schema';
+import { readDatabaseOrderingTimestamp } from '../db/ordering-timestamp';
+import type { DbOrTransaction } from '../db/singleton';
+import type { EventLive } from '../domain/event-lives';
+import type { FplSeasonRef } from '../domain/fpl-season';
 import {
   buildPlayingMatches,
   computeFixtureSummedBonusByTeam,
@@ -17,440 +23,164 @@ import {
 } from '../domain/live-bonus';
 import type { LiveSnapshotState } from '../domain/live-snapshot';
 import { createFixtureRepository, fixtureRepository } from '../repositories/fixtures';
+import { createPlayerRepository } from '../repositories/players';
+import { createTeamRepository } from '../repositories/teams';
+import { syncOperationsRepository } from '../repositories/sync-operations';
 import { transformFixtures } from '../transformers/fixtures';
-import type { Fixture, RawFPLEventLiveResponse, RawFPLFixture } from '../types';
+import type { Fixture, Player, RawFPLEventLiveResponse, RawFPLFixture, Team } from '../types';
+import { DatabaseError } from '../utils/errors';
 import { logInfo } from '../utils/logger';
 import {
   persistPreparedEventLives,
   prepareEventLives,
   type PreparedEventLives,
 } from './event-lives.service';
+import { serializeBonusByTeam } from './live-bonus.service';
 import {
   buildLiveFixtureViews,
-  loadLiveFixtureTeamMaps,
+  createLiveFixtureTeamMaps,
   type LiveFixtureTeamMaps,
   type LiveFixtureViews,
 } from './live-fixtures.service';
-import { serializeBonusByTeam } from './live-bonus.service';
-
-// "LLME" as a signed-safe 32-bit advisory-lock namespace. The event ID is
-// the second key, so unrelated events can still prepare in parallel.
-export const LIVE_SNAPSHOT_LOCK_NAMESPACE = 0x4c4c4d45;
-const FIXTURE_SYNC_LOCK_ID = 0;
+import { withCoreSnapshotReadLock } from './core-snapshot-persistence.service';
 
 export interface LiveSnapshotReferenceData extends LiveFixtureTeamMaps {
-  season: string;
-  playerTeamById: Map<number, number>;
+  readonly season: string;
+  readonly playerTeamById: Map<number, number>;
 }
 
 export interface PreparedLiveSnapshot {
-  season: string;
-  eventId: number;
-  eventLives: PreparedEventLives;
-  fixtures: Fixture[];
-  fixtureViews: LiveFixtureViews;
-  liveBonus: LiveBonusByTeam;
-  liveBonusV2: LiveBonusByTeam;
-  state: LiveSnapshotState;
+  readonly season: string;
+  readonly eventId: number;
+  readonly eventLives: PreparedEventLives;
+  readonly fixtures: Fixture[];
+  readonly fixtureViews: LiveFixtureViews;
+  readonly liveBonus: LiveBonusByTeam;
+  readonly liveBonusV2: LiveBonusByTeam;
+  readonly state: LiveSnapshotState;
 }
 
 export interface LiveSnapshotSyncResult {
-  eventId: number;
-  changed: boolean;
-  stale: boolean;
-  revision: string;
-  state: LiveSnapshotState;
-  eventLiveCount: number;
-  fixtureCount: number;
-  fixtureTeamCount: number;
-  bonusTeamCount: number;
-  persistedFixtures: boolean;
-  persistedEventLives: boolean;
+  readonly eventId: number;
+  readonly changed: boolean;
+  readonly stale: boolean;
+  readonly revision: number | null;
+  readonly publicationId: string | null;
+  readonly state: LiveSnapshotState;
+  readonly eventLiveCount: number;
+  readonly fixtureCount: number;
+  readonly fixtureTeamCount: number;
+  readonly bonusTeamCount: number;
+  readonly persistedFixtures: boolean;
+  readonly persistedEventLives: boolean;
 }
 
-type LiveSnapshotDependencies = {
-  getEventLive: (eventId: number) => Promise<RawFPLEventLiveResponse>;
-  getFixtures: (eventId: number) => Promise<RawFPLFixture[]>;
-  getExpectedFixtureIds: (eventId: number) => Promise<readonly number[]>;
-  getReferenceData: () => Promise<LiveSnapshotReferenceData>;
-  serialize: <T>(eventId: number, operation: (checkedAt: Date) => Promise<T>) => Promise<T>;
-  publish: typeof liveSnapshotCache.publish;
-  persistDurably: typeof persistLiveSnapshotDurably;
-};
-
 export interface LiveSnapshotDurablePersistenceRequest {
-  eventId: number;
-  checkedAt: Date;
-  prepared: PreparedLiveSnapshot;
-  persistFixtures: boolean;
-  persistEventLives: boolean;
-  finalizeEvent?: boolean;
+  readonly season: FplSeasonRef;
+  readonly eventId: number;
+  readonly checkedAt: Date;
+  readonly prepared: PreparedLiveSnapshot;
+  readonly persistFixtures: boolean;
+  readonly persistEventLives: boolean;
+  readonly finalizeEvent?: boolean;
 }
 
 export interface LiveSnapshotDurablePersistenceResult {
-  accepted: boolean;
-  winnerCheckedAt: Date;
-  persistedFixtures: boolean;
-  persistedEventLives: boolean;
+  readonly accepted: boolean;
+  readonly winnerCheckedAt: Date;
+  readonly persistedFixtures: boolean;
+  readonly persistedEventLives: boolean;
 }
 
-export interface LiveSnapshotDurableFenceResult<T> {
-  accepted: boolean;
-  winnerCheckedAt: Date;
-  value?: T;
+export interface LiveSnapshotDependencies {
+  readonly getEventLive: (eventId: number) => Promise<RawFPLEventLiveResponse>;
+  readonly getFixtures: (eventId: number) => Promise<RawFPLFixture[]>;
+  readonly getExpectedFixtureIds: (
+    season: FplSeasonRef,
+    eventId: number,
+  ) => Promise<readonly number[]>;
+  readonly getReferenceData: (season: FplSeasonRef) => Promise<LiveSnapshotReferenceData>;
+  readonly readOrderingTimestamp: () => Promise<Date>;
+  readonly persistDurably: (
+    request: LiveSnapshotDurablePersistenceRequest,
+  ) => Promise<LiveSnapshotDurablePersistenceResult>;
+  readonly readPublished: (
+    seasonCode: string,
+    eventId: number,
+  ) => Promise<LiveSnapshotCacheContents | null>;
+  readonly publish: typeof publishLiveSnapshotCache;
 }
 
-export interface LiveSnapshotDurableEventsFenceResult<T> extends LiveSnapshotDurableFenceResult<T> {
-  rejectedEventId?: number;
+export interface LiveSnapshotSyncOptions {
+  readonly persistEventLives?: boolean;
+  readonly finalizeEvent?: boolean;
+  readonly trigger?: 'cron' | 'manual' | 'cascade' | 'queue';
+  readonly dependencies?: LiveSnapshotDependencies;
 }
 
-class DurableEventsFenceRejected extends Error {
-  constructor(
-    readonly eventId: number,
-    readonly winnerCheckedAt: Date,
-  ) {
-    super(`A newer durable live snapshot already owns event ${eventId}`);
-  }
+function fixtureTeamCount(views: LiveFixtureViews): number {
+  return Object.keys(views.v2).length;
 }
 
-export async function withLiveSnapshotDurableWriteFence<T>(
-  eventId: number,
-  checkedAt: Date,
-  operation: (tx: DbOrTransaction) => Promise<T>,
-): Promise<LiveSnapshotDurableFenceResult<T>> {
-  const db = await getDb();
-  return db.transaction(async (tx) => {
-    const claimed = await tx
-      .update(events)
-      .set({ liveSnapshotCheckedAt: checkedAt })
-      .where(
-        and(
-          eq(events.id, eventId),
-          or(isNull(events.liveSnapshotCheckedAt), lte(events.liveSnapshotCheckedAt, checkedAt)),
-        ),
-      )
-      .returning({ checkedAt: events.liveSnapshotCheckedAt });
-
-    if (claimed.length === 0) {
-      const [current] = await tx
-        .select({ checkedAt: events.liveSnapshotCheckedAt })
-        .from(events)
-        .where(eq(events.id, eventId))
-        .limit(1);
-      if (!current) {
-        throw new Error(`Cannot fence live snapshot writes for missing event ${eventId}`);
-      }
-      if (!current.checkedAt || current.checkedAt.getTime() <= checkedAt.getTime()) {
-        throw new Error(`Live snapshot durable fence did not advance for event ${eventId}`);
-      }
-      logInfo('Rejected stale durable live snapshot writes', {
-        eventId,
-        incomingCheckedAt: checkedAt.toISOString(),
-        winnerCheckedAt: current.checkedAt.toISOString(),
-      });
-      return { accepted: false, winnerCheckedAt: current.checkedAt };
-    }
-
-    return {
-      accepted: true,
-      winnerCheckedAt: claimed[0].checkedAt ?? checkedAt,
-      value: await operation(tx),
-    };
-  });
+function bonusTeamCount(bonus: LiveBonusByTeam): number {
+  return Object.keys(bonus).length;
 }
-
-/**
- * Atomically claim one ordering token across every event touched by a broad
- * fixture write. Throwing the private rejection sentinel rolls back claims
- * made for earlier event IDs, so an older payload can never advance a subset
- * of checkpoints or execute its mutation callback.
- */
-export async function withLiveSnapshotDurableEventsWriteFence<T>(
-  eventIds: readonly number[],
-  checkedAt: Date,
-  operation: (tx: DbOrTransaction) => Promise<T>,
-): Promise<LiveSnapshotDurableEventsFenceResult<T>> {
-  const uniqueEventIds = [...new Set(eventIds)].sort((left, right) => left - right);
-  if (uniqueEventIds.some((candidate) => !Number.isInteger(candidate) || candidate <= 0)) {
-    throw new Error(`Invalid durable live snapshot event IDs: ${eventIds.join(', ')}`);
-  }
-  const db = await getDb();
-  try {
-    return await db.transaction(async (tx) => {
-      for (const eventId of uniqueEventIds) {
-        const claimed = await tx
-          .update(events)
-          .set({ liveSnapshotCheckedAt: checkedAt })
-          .where(
-            and(
-              eq(events.id, eventId),
-              or(
-                isNull(events.liveSnapshotCheckedAt),
-                lte(events.liveSnapshotCheckedAt, checkedAt),
-              ),
-            ),
-          )
-          .returning({ checkedAt: events.liveSnapshotCheckedAt });
-        if (claimed.length > 0) continue;
-
-        const [current] = await tx
-          .select({ checkedAt: events.liveSnapshotCheckedAt })
-          .from(events)
-          .where(eq(events.id, eventId))
-          .limit(1);
-        if (!current) {
-          throw new Error(`Cannot fence live snapshot writes for missing event ${eventId}`);
-        }
-        if (!current.checkedAt || current.checkedAt.getTime() <= checkedAt.getTime()) {
-          throw new Error(`Live snapshot durable fence did not advance for event ${eventId}`);
-        }
-        throw new DurableEventsFenceRejected(eventId, current.checkedAt);
-      }
-
-      return {
-        accepted: true,
-        winnerCheckedAt: checkedAt,
-        value: await operation(tx),
-      };
-    });
-  } catch (error) {
-    if (!(error instanceof DurableEventsFenceRejected)) throw error;
-    logInfo('Rejected stale multi-event durable fixture writes', {
-      eventIds: uniqueEventIds,
-      rejectedEventId: error.eventId,
-      incomingCheckedAt: checkedAt.toISOString(),
-      winnerCheckedAt: error.winnerCheckedAt.toISOString(),
-    });
-    return {
-      accepted: false,
-      winnerCheckedAt: error.winnerCheckedAt,
-      rejectedEventId: error.eventId,
-    };
-  }
-}
-
-/**
- * Claim the event's durable ordering token and perform every selected write in
- * the same transaction. Row locking makes competing workers commit in
- * checkedAt order even if the outer advisory-lock connection disappeared.
- */
-export async function persistLiveSnapshotDurably({
-  eventId,
-  checkedAt,
-  prepared,
-  persistFixtures,
-  persistEventLives,
-  finalizeEvent = false,
-}: LiveSnapshotDurablePersistenceRequest): Promise<LiveSnapshotDurablePersistenceResult> {
-  if (finalizeEvent && !persistEventLives) {
-    throw new Error('A final live snapshot requires durable event-live persistence');
-  }
-
-  const fenced = await withLiveSnapshotDurableWriteFence(eventId, checkedAt, async (tx) => {
-    if (persistFixtures) {
-      await createFixtureRepository(tx).upsertBatch(prepared.fixtures);
-    }
-    if (persistEventLives) {
-      await persistPreparedEventLives(prepared.eventLives, tx);
-    }
-
-    if (finalizeEvent) {
-      const finalized = await tx
-        .update(events)
-        .set({ liveSnapshotFinalizedAt: checkedAt })
-        .where(and(eq(events.id, eventId), eq(events.finished, true), eq(events.dataChecked, true)))
-        .returning({ id: events.id });
-      if (finalized.length !== 1) {
-        throw new Error(
-          `Cannot mark event ${eventId} as finalized before finished and data-checked state`,
-        );
-      }
-    }
-
-    // This is the final awaited statement in the durable transaction. The
-    // default serializer also pins the season with a shared PostgreSQL lock;
-    // this uncached check protects direct or injected persistence callers.
-    const activeSeason = await getActiveCacheSeasonUncached();
-    if (activeSeason !== prepared.season) {
-      throw new Error(
-        `Live snapshot season changed from ${prepared.season} to ${activeSeason} before durable commit`,
-      );
-    }
-  });
-  return {
-    accepted: fenced.accepted,
-    winnerCheckedAt: fenced.winnerCheckedAt,
-    persistedFixtures: fenced.accepted && persistFixtures,
-    persistedEventLives: fenced.accepted && persistEventLives,
-  };
-}
-
-/**
- * The optional Redis mutation guard is useful for broad cross-job conflicts,
- * but coherent live publication must never depend on a lease. A PostgreSQL
- * transaction advisory lock serializes the complete fetch/persist/publish flow
- * for one event across every worker process and is released by PostgreSQL if
- * the connection or transaction fails.
- */
-export async function withLiveSnapshotSerialization<T>(
-  eventId: number,
-  operation: (checkedAt: Date) => Promise<T>,
-): Promise<T> {
-  return withLiveSnapshotEventsSerialization([eventId], operation);
-}
-
-/**
- * Fixture reschedules can invalidate more than one event at once. Acquire the
- * same mandatory locks in numeric order so retirement and the ownership write
- * stay serialized with every affected live publisher without deadlocking.
- */
-export async function withLiveSnapshotEventsSerialization<T>(
-  eventIds: readonly number[],
-  operation: (checkedAt: Date) => Promise<T>,
-): Promise<T> {
-  const uniqueEventIds = [...new Set(eventIds)].sort((left, right) => left - right);
-  if (
-    uniqueEventIds.length === 0 ||
-    uniqueEventIds.some((candidate) => !Number.isInteger(candidate) || candidate <= 0)
-  ) {
-    throw new Error(`Invalid live snapshot event IDs: ${eventIds.join(', ') || 'none'}`);
-  }
-  const db = await getDb();
-  return db.transaction(async (tx) => {
-    for (const lockedEventId of uniqueEventIds) {
-      await tx.execute(
-        sql`SELECT pg_advisory_xact_lock(${LIVE_SNAPSHOT_LOCK_NAMESPACE}, ${lockedEventId})`,
-      );
-    }
-    // Event locks come first. Fixture writers that can trigger rollover use
-    // the same order, while shared mode preserves parallel snapshots for
-    // unrelated events.
-    await acquireActiveSeasonReadFence(tx);
-    return operation(await readLiveSnapshotOrderingTimestamp(tx));
-  });
-}
-
-async function readLiveSnapshotOrderingTimestamp(tx: DbOrTransaction): Promise<Date> {
-  const rows = await tx.execute<{ checkedAt: Date | string }>(
-    sql`SELECT clock_timestamp() AS "checkedAt"`,
-  );
-  const checkedAt =
-    rows[0]?.checkedAt instanceof Date
-      ? rows[0].checkedAt
-      : new Date(String(rows[0]?.checkedAt ?? ''));
-  if (!Number.isFinite(checkedAt.getTime())) {
-    throw new Error('PostgreSQL returned an invalid live snapshot ordering timestamp');
-  }
-  return checkedAt;
-}
-
-/**
- * Fixture ownership discovery and mutation use a mandatory global lane before
- * taking affected event locks. This prevents two fixture syncs from observing
- * the same prior owner and leaving the later intermediate event's snapshot
- * behind when the optional Redis mutation guard is disabled.
- */
-export async function withFixtureSyncSerialization<TContext, TResult>(
-  prepare: () => Promise<{ eventIds: readonly number[]; context: TContext }>,
-  operation: (
-    context: TContext,
-    checkedAt: Date,
-    lockedEventIds: readonly number[],
-    activeSeason: string,
-  ) => Promise<TResult>,
-): Promise<TResult> {
-  const db = await getDb();
-  return db.transaction(async (tx) => {
-    await tx.execute(
-      sql`SELECT pg_advisory_xact_lock(${LIVE_SNAPSHOT_LOCK_NAMESPACE}, ${FIXTURE_SYNC_LOCK_ID})`,
-    );
-    // Event ownership is discovered from the upstream response, so the season
-    // fence must precede prepare(). This does not invert a conflicting lock:
-    // fixture/live writers both take the shared form, while the exclusive
-    // rollover path never takes an event lock. The fence pins Redis season
-    // truth across fetch, dynamic event locking, PostgreSQL, and cache writes.
-    await acquireActiveSeasonReadFence(tx);
-    const activeSeason = await getActiveCacheSeasonUncached();
-    // The token precedes upstream fixture I/O in prepare(). If a live snapshot
-    // publishes while this writer is still discovering its affected events,
-    // the durable multi-event fence rejects this older payload after locks are
-    // acquired instead of letting it overwrite PostgreSQL fallback rows.
-    const checkedAt = await readLiveSnapshotOrderingTimestamp(tx);
-    const plan = await prepare();
-    const uniqueEventIds = [...new Set(plan.eventIds)].sort((left, right) => left - right);
-    if (uniqueEventIds.some((candidate) => !Number.isInteger(candidate) || candidate <= 0)) {
-      throw new Error(`Invalid fixture sync event IDs: ${plan.eventIds.join(', ')}`);
-    }
-    for (const lockedEventId of uniqueEventIds) {
-      await tx.execute(
-        sql`SELECT pg_advisory_xact_lock(${LIVE_SNAPSHOT_LOCK_NAMESPACE}, ${lockedEventId})`,
-      );
-    }
-    return operation(plan.context, checkedAt, uniqueEventIds, activeSeason);
-  });
-}
-
-export type LiveSnapshotReferenceDataDependencies = {
-  getSeason: typeof getActiveCacheSeason;
-  getTeamMaps: typeof loadLiveFixtureTeamMaps;
-  getPlayers: typeof playersCache.get;
-};
-
-const defaultReferenceDataDependencies: LiveSnapshotReferenceDataDependencies = {
-  getSeason: getActiveCacheSeason,
-  getTeamMaps: loadLiveFixtureTeamMaps,
-  getPlayers: playersCache.get,
-};
-
-export function createLiveSnapshotReferenceDataLoader(
-  dependencies: LiveSnapshotReferenceDataDependencies,
-) {
-  return async function loadLiveSnapshotReferenceData(): Promise<LiveSnapshotReferenceData> {
-    const season = await dependencies.getSeason();
-    // This runs once per snapshot producer cycle, not once per website read.
-    // Always read the shared Redis roster so every BullMQ process observes a
-    // completed roster replacement without a worker-local invalidation window.
-    const [teamMaps, currentPlayers] = await Promise.all([
-      dependencies.getTeamMaps(),
-      dependencies.getPlayers(season),
-    ]);
-    if (!currentPlayers || currentPlayers.length === 0) {
-      throw new Error(
-        `Current-season Player:${season} roster is missing; refusing to prepare a live snapshot`,
-      );
-    }
-    return {
-      season,
-      ...teamMaps,
-      playerTeamById: buildCurrentSeasonPlayerTeamMap(currentPlayers, season),
-    };
-  };
-}
-
-export const loadLiveSnapshotReferenceData = createLiveSnapshotReferenceDataLoader(
-  defaultReferenceDataDependencies,
-);
 
 export function buildCurrentSeasonPlayerTeamMap(
-  currentPlayers: readonly { id: number; teamId: number }[],
+  players: readonly Pick<Player, 'id' | 'teamId'>[],
   season: string,
 ): Map<number, number> {
   const playerTeamById = new Map<number, number>();
-  for (const player of currentPlayers) {
+  for (const player of players) {
     if (
       !Number.isInteger(player.id) ||
       player.id <= 0 ||
       !Number.isInteger(player.teamId) ||
       player.teamId <= 0
     ) {
-      throw new Error(`Current-season Player:${season} roster contains invalid player identity`);
+      throw new Error(`Current-season player roster ${season} contains invalid identity`);
     }
     if (playerTeamById.has(player.id)) {
-      throw new Error(`Current-season Player:${season} roster contains duplicate player IDs`);
+      throw new Error(`Current-season player roster ${season} contains duplicate player IDs`);
     }
     playerTeamById.set(player.id, player.teamId);
   }
   return playerTeamById;
+}
+
+function referenceDataFromCore(
+  season: FplSeasonRef,
+  teams: readonly Team[],
+  players: readonly Player[],
+): LiveSnapshotReferenceData {
+  if (teams.length === 0 || players.length === 0) {
+    throw new DatabaseError(
+      `Core identity baseline is incomplete for season ${season.seasonCode}`,
+      'LIVE_REFERENCE_DATA_INCOMPLETE',
+    );
+  }
+  return {
+    season: season.seasonCode,
+    ...createLiveFixtureTeamMaps(teams),
+    playerTeamById: buildCurrentSeasonPlayerTeamMap(players, season.seasonCode),
+  };
+}
+
+export async function loadLiveSnapshotReferenceData(
+  season: FplSeasonRef,
+): Promise<LiveSnapshotReferenceData> {
+  const cached = await readCoreSnapshotCache(season.seasonCode);
+  if (cached) {
+    return referenceDataFromCore(season, cached.teams, cached.players);
+  }
+
+  return withCoreSnapshotReadLock(season, async (transaction) => {
+    const [teams, players] = await Promise.all([
+      createTeamRepository(transaction).findAll(season),
+      createPlayerRepository(transaction).findAll(season),
+    ]);
+    return referenceDataFromCore(season, teams, players);
+  });
 }
 
 function resolveSnapshotState(fixtures: readonly Fixture[]): LiveSnapshotState {
@@ -480,31 +210,27 @@ export function prepareLiveSnapshot(
   if (!Array.isArray(liveResponse.elements) || liveResponse.elements.length === 0) {
     throw new Error('FPL event live response contains no elements');
   }
+
   const liveElementIds = liveResponse.elements.map((element) => element.id);
-  if (new Set(liveElementIds).size !== liveElementIds.length) {
-    throw new Error(`FPL event live response contains duplicate element IDs for event ${eventId}`);
-  }
   const expectedLiveElementIds = [...referenceData.playerTeamById.keys()];
-  if (expectedLiveElementIds.length === 0) {
-    throw new Error(
-      `No current-season player identity baseline for live snapshot event ${eventId}`,
-    );
+  if (
+    new Set(liveElementIds).size !== liveElementIds.length ||
+    new Set(expectedLiveElementIds).size !== expectedLiveElementIds.length
+  ) {
+    throw new Error(`Duplicate player identity in live snapshot event ${eventId}`);
   }
-  const liveElementIdSet = new Set(liveElementIds);
-  const expectedLiveElementIdSet = new Set(expectedLiveElementIds);
-  const missingLiveElementIds = expectedLiveElementIds.filter(
-    (elementId) => !liveElementIdSet.has(elementId),
-  );
-  const unexpectedLiveElementIds = liveElementIds.filter(
-    (elementId) => !expectedLiveElementIdSet.has(elementId),
-  );
-  if (missingLiveElementIds.length > 0 || unexpectedLiveElementIds.length > 0) {
+  const actualPlayerIds = new Set(liveElementIds);
+  const expectedPlayerIds = new Set(expectedLiveElementIds);
+  const missingPlayers = expectedLiveElementIds.filter((id) => !actualPlayerIds.has(id));
+  const unexpectedPlayers = liveElementIds.filter((id) => !expectedPlayerIds.has(id));
+  if (missingPlayers.length > 0 || unexpectedPlayers.length > 0) {
     throw new Error(
       `Player identity mismatch for live snapshot event ${eventId}; ` +
-        `missing expected IDs: ${missingLiveElementIds.sort((a, b) => a - b).join(', ') || 'none'}; ` +
-        `unexpected IDs: ${unexpectedLiveElementIds.sort((a, b) => a - b).join(', ') || 'none'}`,
+        `missing=${missingPlayers.sort((a, b) => a - b).join(',') || 'none'}; ` +
+        `unexpected=${unexpectedPlayers.sort((a, b) => a - b).join(',') || 'none'}`,
     );
   }
+
   if (!Array.isArray(rawFixtures) || rawFixtures.length === 0) {
     throw new Error('FPL fixtures response contains no fixtures');
   }
@@ -512,71 +238,56 @@ export function prepareLiveSnapshot(
     (fixture) => fixture.event !== null && fixture.event !== eventId,
   );
   if (wrongEventFixture) {
+    throw new Error(`FPL fixtures response mixed event ${wrongEventFixture.event} into ${eventId}`);
+  }
+  const rawFixtureIds = rawFixtures.map((fixture) => fixture.id);
+  const expectedIds = [...expectedFixtureIds];
+  if (
+    expectedIds.length === 0 ||
+    new Set(rawFixtureIds).size !== rawFixtureIds.length ||
+    new Set(expectedIds).size !== expectedIds.length
+  ) {
+    throw new Error(`Invalid fixture identity baseline for live snapshot event ${eventId}`);
+  }
+  const actualFixtureIds = new Set(rawFixtureIds);
+  const expectedFixtureSet = new Set(expectedIds);
+  const missingFixtures = expectedIds.filter((id) => !actualFixtureIds.has(id));
+  const unexpectedFixtures = rawFixtureIds.filter((id) => !expectedFixtureSet.has(id));
+  if (missingFixtures.length > 0 || unexpectedFixtures.length > 0) {
     throw new Error(
-      `FPL fixtures response mixed event ${wrongEventFixture.event} into event ${eventId}`,
+      `Fixture identity mismatch for live snapshot event ${eventId}; ` +
+        `missing=${missingFixtures.sort((a, b) => a - b).join(',') || 'none'}; ` +
+        `unexpected=${unexpectedFixtures.sort((a, b) => a - b).join(',') || 'none'}`,
     );
   }
 
   const fixtureTeamIds = new Set(
     rawFixtures.flatMap((fixture) => [fixture.team_h, fixture.team_a]),
   );
-  const missingFixtureTeamIds = [...fixtureTeamIds].filter(
+  const missingTeams = [...fixtureTeamIds].filter(
     (teamId) => !referenceData.nameById.has(teamId) || !referenceData.shortNameById.has(teamId),
   );
-  if (missingFixtureTeamIds.length > 0) {
-    throw new Error(
-      `Missing live snapshot team metadata for IDs: ${missingFixtureTeamIds
-        .sort((a, b) => a - b)
-        .join(', ')}`,
-    );
+  if (missingTeams.length > 0) {
+    throw new Error(`Missing live team metadata for IDs ${missingTeams.join(',')}`);
   }
 
   const eventLives = prepareEventLives(eventId, liveResponse.elements);
-  const rawFixtureIds = rawFixtures.map((fixture) => fixture.id);
-  if (new Set(rawFixtureIds).size !== rawFixtureIds.length) {
-    throw new Error(`FPL fixtures response contains duplicate fixture IDs for event ${eventId}`);
-  }
-  const expectedIds = [...expectedFixtureIds];
-  if (expectedIds.length === 0) {
-    throw new Error(`No persisted fixture identity baseline for live snapshot event ${eventId}`);
-  }
-  if (new Set(expectedIds).size !== expectedIds.length) {
-    throw new Error(`Persisted fixture identity baseline contains duplicates for event ${eventId}`);
-  }
-  const rawIdSet = new Set(rawFixtureIds);
-  const expectedIdSet = new Set(expectedIds);
-  const missingExpectedIds = expectedIds.filter((fixtureId) => !rawIdSet.has(fixtureId));
-  const unexpectedIds = rawFixtureIds.filter((fixtureId) => !expectedIdSet.has(fixtureId));
-  if (missingExpectedIds.length > 0 || unexpectedIds.length > 0) {
-    throw new Error(
-      `Fixture identity mismatch for live snapshot event ${eventId}; ` +
-        `missing expected IDs: ${missingExpectedIds.sort((a, b) => a - b).join(', ') || 'none'}; ` +
-        `unexpected IDs: ${unexpectedIds.sort((a, b) => a - b).join(', ') || 'none'}`,
-    );
-  }
-  const transformedFixtures = transformFixtures(rawFixtures);
-  const transformedIds = new Set(transformedFixtures.map((fixture) => fixture.id));
-  const missingFixtureIds = rawFixtureIds.filter((fixtureId) => !transformedIds.has(fixtureId));
-  const wrongTransformedEvent = transformedFixtures.find((fixture) => fixture.event !== eventId);
+  const fixtures = transformFixtures(rawFixtures);
   if (
-    missingFixtureIds.length > 0 ||
-    transformedFixtures.length !== rawFixtures.length ||
-    wrongTransformedEvent
+    fixtures.length !== rawFixtures.length ||
+    fixtures.some((fixture) => fixture.event !== eventId)
   ) {
-    throw new Error(
-      `Incomplete fixture transformation for live snapshot event ${eventId}; ` +
-        `missing IDs: ${missingFixtureIds.join(', ') || 'none'}`,
-    );
+    throw new Error(`Incomplete fixture transformation for live snapshot event ${eventId}`);
   }
-  const fixtures = transformedFixtures;
   const fixtureViews = buildLiveFixtureViews(fixtures, referenceData);
   const liveBonusV2 = serializeBonusByTeam(computeFixtureSummedBonusByTeam(fixtures));
   const livesWithTeam = eventLives.eventLives.map((live) => ({
     ...live,
     teamId: referenceData.playerTeamById.get(live.elementId)!,
   }));
-  const matches = buildPlayingMatches(fixtureViews.legacy);
-  const liveBonus = serializeBonusByTeam(computeLiveBonusByTeam(matches, livesWithTeam));
+  const liveBonus = serializeBonusByTeam(
+    computeLiveBonusByTeam(buildPlayingMatches(fixtureViews.legacy), livesWithTeam),
+  );
 
   return {
     season: referenceData.season,
@@ -590,44 +301,221 @@ export function prepareLiveSnapshot(
   };
 }
 
+async function claimLiveSnapshotFence(
+  transaction: DbOrTransaction,
+  season: FplSeasonRef,
+  eventId: number,
+  checkedAt: Date,
+): Promise<{ accepted: boolean; winnerCheckedAt: Date }> {
+  const claimed = await transaction
+    .update(eventsInFpl)
+    .set({ liveSnapshotCheckedAt: checkedAt })
+    .where(
+      and(
+        eq(eventsInFpl.seasonId, season.seasonId),
+        eq(eventsInFpl.eventId, eventId),
+        or(
+          isNull(eventsInFpl.liveSnapshotCheckedAt),
+          lte(eventsInFpl.liveSnapshotCheckedAt, checkedAt),
+        ),
+      ),
+    )
+    .returning({ checkedAt: eventsInFpl.liveSnapshotCheckedAt });
+  if (claimed[0]) {
+    return { accepted: true, winnerCheckedAt: claimed[0].checkedAt ?? checkedAt };
+  }
+
+  const current = await transaction
+    .select({ checkedAt: eventsInFpl.liveSnapshotCheckedAt })
+    .from(eventsInFpl)
+    .where(and(eq(eventsInFpl.seasonId, season.seasonId), eq(eventsInFpl.eventId, eventId)))
+    .limit(1);
+  if (!current[0]) {
+    throw new DatabaseError(`Cannot persist live data for missing event ${eventId}`);
+  }
+  const winnerCheckedAt = current[0].checkedAt;
+  if (!winnerCheckedAt || winnerCheckedAt.getTime() <= checkedAt.getTime()) {
+    throw new DatabaseError('Live snapshot ordering fence did not advance');
+  }
+  return { accepted: false, winnerCheckedAt };
+}
+
+export async function persistLiveSnapshotDurably(
+  request: LiveSnapshotDurablePersistenceRequest,
+): Promise<LiveSnapshotDurablePersistenceResult> {
+  const { season, eventId, checkedAt, prepared } = request;
+  if (prepared.season !== season.seasonCode || prepared.eventId !== eventId) {
+    throw new DatabaseError('Live snapshot persistence scope does not match its payload');
+  }
+  if (request.finalizeEvent && !request.persistEventLives) {
+    throw new DatabaseError('Final live publication requires durable event-live persistence');
+  }
+
+  return withCoreSnapshotReadLock(season, async (transaction) => {
+    const fence = await claimLiveSnapshotFence(transaction, season, eventId, checkedAt);
+    if (!fence.accepted) {
+      return {
+        ...fence,
+        persistedFixtures: false,
+        persistedEventLives: false,
+      };
+    }
+
+    if (request.persistFixtures) {
+      await createFixtureRepository(transaction).upsertBatch(season, prepared.fixtures);
+    }
+    if (request.persistEventLives) {
+      await persistPreparedEventLives(season, prepared.eventLives, transaction);
+    }
+    if (request.finalizeEvent) {
+      const finalized = await transaction
+        .update(eventsInFpl)
+        .set({ liveSnapshotFinalizedAt: checkedAt })
+        .where(
+          and(
+            eq(eventsInFpl.seasonId, season.seasonId),
+            eq(eventsInFpl.eventId, eventId),
+            eq(eventsInFpl.finished, true),
+            eq(eventsInFpl.dataChecked, true),
+          ),
+        )
+        .returning({ eventId: eventsInFpl.eventId });
+      if (finalized.length !== 1) {
+        throw new DatabaseError(`Event ${eventId} is not ready for final live publication`);
+      }
+    }
+    return {
+      accepted: true,
+      winnerCheckedAt: fence.winnerCheckedAt,
+      persistedFixtures: request.persistFixtures,
+      persistedEventLives: request.persistEventLives,
+    };
+  });
+}
+
+function toCachePayload(prepared: PreparedLiveSnapshot): LiveSnapshotCachePayload {
+  return {
+    season: prepared.season,
+    eventId: prepared.eventId,
+    state: prepared.state,
+    eventLives: prepared.eventLives.eventLives,
+    fixtures: prepared.fixtures,
+    liveFixtures: prepared.fixtureViews.legacy,
+    liveFixturesV2: prepared.fixtureViews.v2,
+    liveBonus: prepared.liveBonus,
+    liveBonusV2: prepared.liveBonusV2,
+  };
+}
+
+function sameJson(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function snapshotContentMatches(
+  active: LiveSnapshotCacheContents | null,
+  candidate: LiveSnapshotCachePayload,
+): boolean {
+  return Boolean(
+    active &&
+      active.state === candidate.state &&
+      sameJson(active.eventLives, candidate.eventLives) &&
+      sameJson(active.fixtures, candidate.fixtures) &&
+      sameJson(active.liveFixtures, candidate.liveFixtures) &&
+      sameJson(active.liveFixturesV2, candidate.liveFixturesV2) &&
+      sameJson(active.liveBonus, candidate.liveBonus) &&
+      sameJson(active.liveBonusV2, candidate.liveBonusV2),
+  );
+}
+
 const defaultDependencies: LiveSnapshotDependencies = {
   getEventLive: (eventId) => fplClient.getEventLive(eventId),
   getFixtures: (eventId) => fplClient.getFixtures(eventId),
-  getExpectedFixtureIds: async (eventId) =>
-    (await fixtureRepository.findByEvent(eventId)).map((fixture) => fixture.id),
+  getExpectedFixtureIds: async (season, eventId) =>
+    (await fixtureRepository.findByEvent(season, eventId)).map((fixture) => fixture.id),
   getReferenceData: loadLiveSnapshotReferenceData,
-  serialize: withLiveSnapshotSerialization,
-  publish: (payload, options) => liveSnapshotCache.publish(payload, options),
+  readOrderingTimestamp: async () => (await readDatabaseOrderingTimestamp()).date,
   persistDurably: persistLiveSnapshotDurably,
+  readPublished: readLiveSnapshotCache,
+  publish: publishLiveSnapshotCache,
 };
 
-/**
- * Fetch, derive and publish a coherent live view from one pair of upstream
- * responses. Changed fixtures are durably persisted after every Redis view is
- * staged, but before the atomic swap exposes that revision to readers.
- */
-export async function syncLiveSnapshot(
+export async function recoverPendingLiveSnapshotPublication(
+  season: FplSeasonRef,
   eventId: number,
-  options: {
-    persistEventLives?: boolean;
-    finalizeEvent?: boolean;
-    dependencies?: LiveSnapshotDependencies;
-  } = {},
+): Promise<'none' | 'activated'> {
+  const cached = await readLiveSnapshotCache(season.seasonCode, eventId);
+  if (!cached) return 'none';
+  const active = await syncOperationsRepository.findActivePublication('fpl:live', season, eventId);
+  if (active?.publicationId === cached.manifest.publicationId) return 'none';
+
+  const pending = await syncOperationsRepository.findPublicationById(cached.manifest.publicationId);
+  if (
+    !pending ||
+    pending.status !== 'staging' ||
+    pending.dataset !== 'fpl:live' ||
+    pending.seasonId !== season.seasonId ||
+    pending.eventId !== eventId ||
+    pending.revision !== cached.manifest.revision ||
+    !pending.sourceRunId
+  ) {
+    throw new DatabaseError(
+      'Active live cache manifest has no recoverable ops publication',
+      'LIVE_PUBLICATION_RECOVERY_CONTRACT_MISMATCH',
+    );
+  }
+  await syncOperationsRepository.activatePublication({
+    publicationId: pending.publicationId,
+    dataset: 'fpl:live',
+    season,
+    eventId,
+    sourceRunId: pending.sourceRunId,
+    manifest: cached.manifest,
+  });
+  return 'activated';
+}
+
+export async function syncLiveSnapshot(
+  season: FplSeasonRef,
+  eventId: number,
+  options: LiveSnapshotSyncOptions = {},
 ): Promise<LiveSnapshotSyncResult> {
-  const dependencies = options.dependencies ?? defaultDependencies;
-  const startedAt = Date.now();
   if (!Number.isInteger(eventId) || eventId <= 0) {
     throw new Error(`Invalid live snapshot event ID: ${eventId}`);
   }
-  return dependencies.serialize(eventId, async (checkedAt) => {
-    // The shared PostgreSQL clock is read after taking the advisory lock and
-    // before either upstream request starts. Redis fences on the same token.
-    const [liveResponse, rawFixtures, expectedFixtureIds, referenceData] = await Promise.all([
-      dependencies.getEventLive(eventId),
-      dependencies.getFixtures(eventId),
-      dependencies.getExpectedFixtureIds(eventId),
-      dependencies.getReferenceData(),
-    ]);
+  const dependencies = options.dependencies ?? defaultDependencies;
+  const startedAt = Date.now();
+  if (!options.dependencies) {
+    await recoverPendingLiveSnapshotPublication(season, eventId);
+  }
+
+  const sourceRunId = randomUUID();
+  await syncOperationsRepository.startRun({
+    runId: sourceRunId,
+    provider: 'fpl',
+    lane: 'live',
+    scope: 'live-snapshot',
+    season,
+    eventId,
+    mode: options.persistEventLives ? 'durable' : 'cache',
+    trigger: options.trigger ?? 'queue',
+    metadata: { schemaVersion: 'v3' },
+  });
+
+  let publicationId: string | null = null;
+  let cachePublished = false;
+  try {
+    const checkedAt = await dependencies.readOrderingTimestamp();
+    const [liveResponse, rawFixtures, expectedFixtureIds, referenceData, active] =
+      await Promise.all([
+        dependencies.getEventLive(eventId),
+        dependencies.getFixtures(eventId),
+        dependencies.getExpectedFixtureIds(season, eventId),
+        dependencies.getReferenceData(season),
+        dependencies.readPublished(season.seasonCode, eventId),
+      ]);
+    if (referenceData.season !== season.seasonCode) {
+      throw new DatabaseError('Live reference data belongs to another FPL season');
+    }
     const prepared = prepareLiveSnapshot(
       eventId,
       liveResponse,
@@ -635,56 +523,146 @@ export async function syncLiveSnapshot(
       referenceData,
       expectedFixtureIds,
     );
+    const payload = toCachePayload(prepared);
+    const changed = !snapshotContentMatches(active, payload);
 
+    if (!changed) {
+      let persistedEventLives = false;
+      if (options.persistEventLives || options.finalizeEvent) {
+        const durable = await dependencies.persistDurably({
+          season,
+          eventId,
+          checkedAt,
+          prepared,
+          persistFixtures: false,
+          persistEventLives: options.persistEventLives === true,
+          finalizeEvent: options.finalizeEvent,
+        });
+        persistedEventLives = durable.persistedEventLives;
+      }
+      await syncOperationsRepository.finishRun(sourceRunId, {
+        status: 'skipped',
+        completedItems: persistedEventLives ? prepared.eventLives.eventLives.length : 0,
+        skippedItems: prepared.eventLives.eventLives.length + prepared.fixtures.length,
+        dataChanged: false,
+      });
+      const result: LiveSnapshotSyncResult = {
+        eventId,
+        changed: false,
+        stale: false,
+        revision: active?.manifest.revision ?? null,
+        publicationId: active?.manifest.publicationId ?? null,
+        state: prepared.state,
+        eventLiveCount: prepared.eventLives.eventLives.length,
+        fixtureCount: prepared.fixtures.length,
+        fixtureTeamCount: fixtureTeamCount(prepared.fixtureViews),
+        bonusTeamCount: bonusTeamCount(prepared.liveBonusV2),
+        persistedFixtures: false,
+        persistedEventLives,
+      };
+      logInfo('Live snapshot content unchanged', { ...result, durationMs: Date.now() - startedAt });
+      return result;
+    }
+
+    publicationId = randomUUID();
+    const staging = await syncOperationsRepository.preparePublication({
+      publicationId,
+      dataset: 'fpl:live',
+      season,
+      eventId,
+      sourceRunId,
+      manifest: {
+        schemaVersion: 'v3',
+        state: 'staging',
+        sourceCheckedAt: checkedAt.toISOString(),
+      },
+    });
     let persistedFixtures = false;
     let persistedEventLives = false;
-    const published = await dependencies.publish(
-      {
-        season: prepared.season,
+    const published = await dependencies.publish(payload, {
+      revision: staging.revision,
+      publicationId: staging.publicationId,
+      sourceCheckedAt: checkedAt,
+      beforeActivate: async () => {
+        const durable = await dependencies.persistDurably({
+          season,
+          eventId,
+          checkedAt,
+          prepared,
+          persistFixtures: true,
+          persistEventLives: options.persistEventLives === true,
+          finalizeEvent: options.finalizeEvent,
+        });
+        persistedFixtures = durable.persistedFixtures;
+        persistedEventLives = durable.persistedEventLives;
+        return durable.accepted;
+      },
+    });
+    if (!published.published) {
+      await syncOperationsRepository.skipPublication(
+        staging.publicationId,
+        'A newer live publication already owns the cache scope',
+      );
+      await syncOperationsRepository.finishRun(sourceRunId, {
+        status: 'skipped',
+        completedItems: persistedEventLives ? prepared.eventLives.eventLives.length : 0,
+        skippedItems: prepared.eventLives.eventLives.length + prepared.fixtures.length,
+        dataChanged: false,
+      });
+      return {
         eventId,
+        changed: false,
+        stale: true,
+        revision: published.previousManifest?.revision ?? null,
+        publicationId: published.previousManifest?.publicationId ?? null,
         state: prepared.state,
-        eventLives: prepared.eventLives.eventLives,
-        fixtures: prepared.fixtures,
-        liveFixtures: prepared.fixtureViews.legacy,
-        liveFixturesV2: prepared.fixtureViews.v2,
-        liveBonus: prepared.liveBonus,
-        liveBonusV2: prepared.liveBonusV2,
-        checkedAt,
-      },
-      {
-        beforeCommit: async (changed) => {
-          const durable = await dependencies.persistDurably({
-            eventId,
-            checkedAt,
-            prepared,
-            persistFixtures: changed,
-            persistEventLives: options.persistEventLives === true,
-            finalizeEvent: options.finalizeEvent === true,
-          });
-          persistedFixtures = durable.persistedFixtures;
-          persistedEventLives = durable.persistedEventLives;
-          return durable.accepted;
-        },
-      },
-    );
+        eventLiveCount: prepared.eventLives.eventLives.length,
+        fixtureCount: prepared.fixtures.length,
+        fixtureTeamCount: fixtureTeamCount(prepared.fixtureViews),
+        bonusTeamCount: bonusTeamCount(prepared.liveBonusV2),
+        persistedFixtures,
+        persistedEventLives,
+      };
+    }
+    cachePublished = true;
+    await syncOperationsRepository.activatePublication({
+      publicationId: staging.publicationId,
+      dataset: 'fpl:live',
+      season,
+      eventId,
+      sourceRunId,
+      manifest: published.manifest,
+    });
 
     const result: LiveSnapshotSyncResult = {
       eventId,
-      changed: published.changed,
-      stale: published.stale,
-      revision: published.meta.revision,
-      state: published.meta.state,
-      eventLiveCount: published.meta.eventLiveCount,
-      fixtureCount: published.meta.fixtureCount,
-      fixtureTeamCount: published.meta.fixtureTeamCount,
-      bonusTeamCount: published.meta.bonusTeamCount,
+      changed: true,
+      stale: false,
+      revision: staging.revision,
+      publicationId: staging.publicationId,
+      state: prepared.state,
+      eventLiveCount: prepared.eventLives.eventLives.length,
+      fixtureCount: prepared.fixtures.length,
+      fixtureTeamCount: fixtureTeamCount(prepared.fixtureViews),
+      bonusTeamCount: bonusTeamCount(prepared.liveBonusV2),
       persistedFixtures,
       persistedEventLives,
     };
-    logInfo('Live snapshot sync completed', {
+    logInfo('Live snapshot publication completed', {
       ...result,
       durationMs: Date.now() - startedAt,
     });
     return result;
-  });
+  } catch (error) {
+    if (publicationId && !cachePublished) {
+      await syncOperationsRepository.failPublication(publicationId, error).catch(() => undefined);
+    } else if (!publicationId) {
+      await syncOperationsRepository.failRun(sourceRunId, error).catch(() => undefined);
+    }
+    throw error;
+  }
+}
+
+export function liveEventRowsFromSnapshot(snapshot: LiveSnapshotCacheContents): EventLive[] {
+  return [...snapshot.eventLives];
 }

@@ -6,6 +6,7 @@ import {
   chunkCoreHistoryRows,
 } from '../../src/repositories/entry-event-results-history';
 import type { RawFPLEntryHistoryCurrentItem } from '../../src/types';
+import { TEST_SEASON } from '../fixtures/seasons.fixtures';
 
 describe('tournament history baseline upsert', () => {
   test('batches core fields, computes net points, and routes missing costs to picks fallback', async () => {
@@ -28,7 +29,7 @@ describe('tournament history baseline upsert', () => {
       event_transfers: 1,
     };
 
-    const result = buildCoreHistoryUpsertPlan(123, [...complete, missingTransferCost]);
+    const result = buildCoreHistoryUpsertPlan(TEST_SEASON, 123, [...complete, missingTransferCost]);
     const batches = chunkCoreHistoryRows(result.rows);
 
     expect(batches.map((batch) => batch.length)).toEqual([250, 1]);

@@ -3,19 +3,11 @@ import { closeTieredQueues, createTieredQueueSet } from './tiered-queue';
 
 export const dataSyncQueueName = 'data-sync';
 
-export type DataSyncJobName =
-  | 'core-snapshot'
-  | 'events'
-  | 'fixtures'
-  | 'fixtures-all-gameweeks'
-  | 'teams'
-  | 'players'
-  | 'player-prices'
-  | 'player-stats'
-  | 'phases'
-  | 'player-values';
+export type DataSyncJobName = 'core-snapshot' | 'player-prices' | 'player-stats' | 'player-values';
 
 export interface DataSyncJobData {
+  seasonId: number;
+  seasonCode: string;
   source?: 'cron' | 'manual' | 'api' | 'event-transition' | 'cascade';
   triggeredAt: string;
   /** Correlates one logical execution across BullMQ retries; independent of queue dedupe ID. */

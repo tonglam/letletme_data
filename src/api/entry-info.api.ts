@@ -1,10 +1,14 @@
 import { Elysia, t } from 'elysia';
 import { enqueueEntryInfoSyncJob } from '../jobs/entry-sync-enqueue';
+import { seasonRepository } from '../repositories/seasons';
 
 export const entryInfoAPI = new Elysia({ prefix: '/entry-info' }).post(
   '/:entryId/sync',
   async ({ params, set }) => {
-    const job = await enqueueEntryInfoSyncJob('api', { entryIds: [params.entryId] });
+    const season = await seasonRepository.findCurrent();
+    const job = await enqueueEntryInfoSyncJob(season, 'api', {
+      entryIds: [params.entryId],
+    });
     if (job.id === undefined) throw new Error('Entry info queue did not assign a job ID');
     set.status = 202;
     return {
@@ -15,6 +19,6 @@ export const entryInfoAPI = new Elysia({ prefix: '/entry-info' }).post(
     };
   },
   {
-    params: t.Object({ entryId: t.Numeric() }),
+    params: t.Object({ entryId: t.Number({ minimum: 1, multipleOf: 1 }) }),
   },
 );

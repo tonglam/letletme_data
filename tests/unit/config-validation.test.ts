@@ -6,7 +6,12 @@ const baseEnv = {
   DATABASE_URL: 'postgresql://localhost:5432/letletme_test',
   ENABLE_AUTH: 'true',
   NODE_ENV: 'production',
-  REDIS_DB: '9',
+  CACHE_REDIS_HOST: '127.0.0.1',
+  CACHE_REDIS_PORT: '6379',
+  CACHE_REDIS_DB: '9',
+  QUEUE_REDIS_HOST: '127.0.0.1',
+  QUEUE_REDIS_PORT: '6379',
+  QUEUE_REDIS_DB: '10',
 };
 
 async function runEnvCheck(dataApiKeyHashes: string): Promise<number> {

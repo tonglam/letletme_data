@@ -2,10 +2,10 @@ import { Worker, Job, QueueEvents } from 'bullmq';
 
 import { MUTATION_PRIORITY_ORDER, type MutationPriorityTier } from '../domain/job-priority';
 import {
-  resolveLiveSnapshotPersistence,
   shouldCascadePersistedLiveSnapshot,
   shouldSkipQueuedLiveSnapshot,
 } from '../domain/live-snapshot';
+import { requireCurrentSeasonForJob } from '../domain/season-scoped-job';
 import {
   LIVE_JOBS,
   type LiveDataJobData,
@@ -14,13 +14,9 @@ import {
   liveDataQueuesByTier,
 } from '../queues/live-data.queue';
 import {
-  enqueueCascadeJobs,
   enqueueFinalLeagueResultsAfterLiveSync,
   isLiveMatchWindowForEvent,
 } from '../services/live-data-cascade.service';
-import { syncEventLiveSummary } from '../services/event-live-summaries.service';
-import { syncEventLiveExplain } from '../services/event-live-explains.service';
-import { syncEventOverallResult } from '../services/event-overall-results.service';
 import { syncLiveSnapshot } from '../services/live-snapshot.service';
 import { logJobTriggered, runTrackedJob } from '../utils/job-run-logger';
 import { getQueueConnection } from '../utils/queue';
@@ -35,12 +31,10 @@ import type { WorkerRuntime } from './worker-runtime';
  *
  * Processes live data sync jobs:
  * - live-snapshot: coherent upstream fetch + atomic Redis publication (1-min)
- * - legacy live view names: compatibility aliases routed through live-snapshot
- * - event-live-summary: Aggregate season totals (cascade)
- * - event-live-explain: Sync explain data (cascade)
- * - event-overall-result: Sync overall results (cascade)
+ * - optional durable event-live persistence and the final-results cascade
  */
 async function processLiveDataJob(job: Job<LiveDataJobData>) {
+  const season = await requireCurrentSeasonForJob(job.data);
   const { eventId, source } = job.data;
   const context = {
     jobType: 'queue' as const,
@@ -63,48 +57,29 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
     },
     () =>
       runTrackedJob(context, async () => {
-        const persistEventLives = resolveLiveSnapshotPersistence(
-          job.name,
-          job.data.persistEventLives ?? false,
-        );
-        if (persistEventLives !== null) {
-          if (source === 'cron') {
-            const windowOpen = await isLiveMatchWindowForEvent(eventId);
-            if (shouldSkipQueuedLiveSnapshot(source, persistEventLives, windowOpen)) {
-              logInfo('Skipping cache-only live snapshot job - not match time', {
-                eventId,
-                requestedJobName: job.name,
-              });
-              return;
-            }
-          }
-          const snapshot = await syncLiveSnapshot(eventId, {
-            persistEventLives,
-            finalizeEvent: job.data.finalizeEvent === true,
-          });
-          if (shouldCascadePersistedLiveSnapshot(snapshot)) {
-            await enqueueCascadeJobs(eventId, undefined, { includeLiveDerivatives: false });
-            await enqueueFinalLeagueResultsAfterLiveSync(eventId);
-          }
-          return;
+        if (job.name !== LIVE_JOBS.LIVE_SNAPSHOT) {
+          throw new Error(`Unknown job name: ${job.name}`);
         }
-
-        switch (job.name) {
-          case LIVE_JOBS.EVENT_LIVE_SUMMARY:
-            await syncEventLiveSummary();
-            break;
-
-          case LIVE_JOBS.EVENT_LIVE_EXPLAIN:
-            await syncEventLiveExplain(eventId);
-            break;
-
-          case LIVE_JOBS.EVENT_OVERALL_RESULT:
-            await syncEventOverallResult();
-            break;
-
-          default:
-            throw new Error(`Unknown job name: ${job.name}`);
+        const persistEventLives = job.data.persistEventLives ?? false;
+        if (source === 'cron') {
+          const windowOpen = await isLiveMatchWindowForEvent(season, eventId);
+          if (shouldSkipQueuedLiveSnapshot(source, persistEventLives, windowOpen)) {
+            logInfo('Skipping cache-only live snapshot job - not match time', {
+              season: season.seasonCode,
+              eventId,
+            });
+            return;
+          }
         }
+        const snapshot = await syncLiveSnapshot(season, eventId, {
+          persistEventLives,
+          finalizeEvent: job.data.finalizeEvent === true,
+          trigger: source,
+        });
+        if (shouldCascadePersistedLiveSnapshot(snapshot)) {
+          await enqueueFinalLeagueResultsAfterLiveSync(season, eventId);
+        }
+        return snapshot;
       }),
   );
 }

@@ -1,22 +1,24 @@
 import { and, eq, inArray, sql } from 'drizzle-orm';
-import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
-
 import {
-  tournamentPointsGroupResults,
+  tournamentPointsGroupResultsInCompetition,
   type DbTournamentPointsGroupResult,
   type DbTournamentPointsGroupResultInsert,
 } from '../db/schemas/index.schema';
-import { getDb } from '../db/singleton';
+import { getDb, type DbOrTransaction } from '../db/singleton';
+import type { FplSeasonRef } from '../domain/fpl-season';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 
-type DatabaseInstance = PostgresJsDatabase<Record<string, never>>;
+const mapResult = (
+  row: typeof tournamentPointsGroupResultsInCompetition.$inferSelect,
+): DbTournamentPointsGroupResult => ({ ...row, id: row.sourceResultId });
 
-export const createTournamentPointsGroupResultsRepository = (dbInstance?: DatabaseInstance) => {
-  const getDbInstance = async () => dbInstance || (await getDb());
+export const createTournamentPointsGroupResultsRepository = (dbInstance?: DbOrTransaction) => {
+  const getDbInstance = async () => dbInstance ?? (await getDb());
 
   return {
     findByTournamentAndEvent: async (
+      season: FplSeasonRef,
       tournamentId: number,
       eventId: number,
       entryIds: number[],
@@ -37,15 +39,16 @@ export const createTournamentPointsGroupResultsRepository = (dbInstance?: Databa
         for (const chunk of chunks) {
           const rows = await db
             .select()
-            .from(tournamentPointsGroupResults)
+            .from(tournamentPointsGroupResultsInCompetition)
             .where(
               and(
-                eq(tournamentPointsGroupResults.tournamentId, tournamentId),
-                eq(tournamentPointsGroupResults.eventId, eventId),
-                inArray(tournamentPointsGroupResults.entryId, chunk),
+                eq(tournamentPointsGroupResultsInCompetition.seasonId, season.seasonId),
+                eq(tournamentPointsGroupResultsInCompetition.tournamentId, tournamentId),
+                eq(tournamentPointsGroupResultsInCompetition.eventId, eventId),
+                inArray(tournamentPointsGroupResultsInCompetition.entryId, chunk),
               ),
             );
-          results.push(...rows);
+          results.push(...rows.map(mapResult));
         }
 
         logInfo('Retrieved tournament points group results', {
@@ -67,12 +70,17 @@ export const createTournamentPointsGroupResultsRepository = (dbInstance?: Databa
       }
     },
 
-    deleteByTournament: async (tournamentId: number): Promise<void> => {
+    deleteByTournament: async (season: FplSeasonRef, tournamentId: number): Promise<void> => {
       try {
         const db = await getDbInstance();
         await db
-          .delete(tournamentPointsGroupResults)
-          .where(eq(tournamentPointsGroupResults.tournamentId, tournamentId));
+          .delete(tournamentPointsGroupResultsInCompetition)
+          .where(
+            and(
+              eq(tournamentPointsGroupResultsInCompetition.seasonId, season.seasonId),
+              eq(tournamentPointsGroupResultsInCompetition.tournamentId, tournamentId),
+            ),
+          );
       } catch (error) {
         logError('Failed to delete tournament points group results', error, { tournamentId });
         throw new DatabaseError(
@@ -83,7 +91,10 @@ export const createTournamentPointsGroupResultsRepository = (dbInstance?: Databa
       }
     },
 
-    upsertBatch: async (results: DbTournamentPointsGroupResultInsert[]): Promise<number> => {
+    upsertBatch: async (
+      season: FplSeasonRef,
+      results: DbTournamentPointsGroupResultInsert[],
+    ): Promise<number> => {
       if (results.length === 0) {
         return 0;
       }
@@ -91,14 +102,13 @@ export const createTournamentPointsGroupResultsRepository = (dbInstance?: Databa
       try {
         const db = await getDbInstance();
         await db
-          .insert(tournamentPointsGroupResults)
-          .values(results)
+          .insert(tournamentPointsGroupResultsInCompetition)
+          .values(results.map((result) => ({ ...result, seasonId: season.seasonId })))
           .onConflictDoUpdate({
             target: [
-              tournamentPointsGroupResults.tournamentId,
-              tournamentPointsGroupResults.groupId,
-              tournamentPointsGroupResults.eventId,
-              tournamentPointsGroupResults.entryId,
+              tournamentPointsGroupResultsInCompetition.tournamentId,
+              tournamentPointsGroupResultsInCompetition.eventId,
+              tournamentPointsGroupResultsInCompetition.entryId,
             ],
             set: {
               eventGroupRank: sql`excluded.event_group_rank`,
@@ -106,6 +116,10 @@ export const createTournamentPointsGroupResultsRepository = (dbInstance?: Databa
               eventCost: sql`excluded.event_cost`,
               eventNetPoints: sql`excluded.event_net_points`,
               eventRank: sql`excluded.event_rank`,
+              cumulativeTransfers: sql`excluded.cumulative_transfers`,
+              cumulativeCosts: sql`excluded.cumulative_costs`,
+              cumulativeBenchPoints: sql`excluded.cumulative_bench_points`,
+              cumulativeAutoSubPoints: sql`excluded.cumulative_auto_sub_points`,
               updatedAt: new Date(),
             },
           });

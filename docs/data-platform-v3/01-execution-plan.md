@@ -1,6 +1,6 @@
 # Data Platform v3 Execution Plan
 
-Plan version: 3.1.1
+Plan version: 3.2.1
 
 Execution strategy: preseason hard cutover
 
@@ -211,6 +211,9 @@ Acceptance:
 - Publication interruption before pointer swap leaves the old revision active; interruption after
   swap leaves one valid active revision and a bounded retired revision.
 - Cache and queue endpoint tests prove no client is cross-wired.
+- CI applies the Drizzle schema declaration to a disposable PG15 database and compares its
+  relations, columns, enums, sequences, view definitions, constraints, and indexes with the
+  migrated catalog. The only permitted differences are explicitly asserted SQL-owned features.
 - Core rebuild completes within five minutes on the B0 dataset.
 
 ## P4 - GraphQL and Web contracts

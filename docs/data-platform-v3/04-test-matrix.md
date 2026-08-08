@@ -1,6 +1,6 @@
 # Data Platform v3 Test and Acceptance Matrix
 
-Plan version: 3.1.1
+Plan version: 3.2.1
 
 ## Evidence rules
 
@@ -23,11 +23,13 @@ Run on PostgreSQL 15 with separate queue/cache Redis instances:
 bun install --frozen-lockfile
 bun run lint
 bun run typecheck
-bun test
+bun run test
 bun run build
+DATABASE_URL=<disposable-export-db> bun run db:export
 RUN_INTEGRATION=1 bun test tests/integration
-LOG_LEVEL=error RUN_INTEGRATION=1 RUN_CORE_SNAPSHOT_INTEGRATION=1 \
-  bun test tests/integration/core-snapshot-atomicity.test.ts
+LOG_LEVEL=error RUN_INTEGRATION=1 bun run test:publication:integration
+LOG_LEVEL=error RUN_INTEGRATION=1 RUN_B0_ACCEPTANCE=1 \
+  bun run test:core-publication-benchmark
 ```
 
 Required migration cases:
@@ -42,6 +44,9 @@ Required migration cases:
 8. `0091`-`0093` fail without the exact approval gate;
 9. `0091`-`0093` affect only the generated allowlist;
 10. GraphQL/Web/system schemas remain byte-for-byte/schema-definition equivalent where expected.
+11. Drizzle export applies cleanly to an empty PG15 database and catalog parity passes against the
+    migrated database. SQL owns the two reporting-MV index sets, the partial active-publication
+    `NULLS NOT DISTINCT` option, and the stable name of the circular publication foreign key.
 
 ### GraphQL
 

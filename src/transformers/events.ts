@@ -61,6 +61,7 @@ export function transformEvent(rawEvent: RawFPLEvent): Event {
       averageEntryScore: validated.average_entry_score ?? null,
       finished: validated.finished,
       dataChecked: validated.data_checked,
+      dataCheckedAt: null,
       highestScoringEntry: validated.highest_scoring_entry ?? null,
       deadlineTimeEpoch: validated.deadline_time_epoch ?? null,
       deadlineTimeGameOffset: validated.deadline_time_game_offset ?? null,

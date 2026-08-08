@@ -1,51 +1,46 @@
-import { playerValuesCache } from '../cache/operations';
-import type { PlayerValueCacheSnapshot } from '../cache/player-values-cache';
 import { fplClient } from '../clients/fpl';
 import type { PlayerValue } from '../domain/player-values';
+import type { FplSeasonRef } from '../domain/fpl-season';
+import type { PlayerMarketSnapshot } from '../domain/player-market-snapshots';
 import { enqueuePlayerPricesSyncJob } from '../jobs/data-sync-enqueue';
+import { playerMarketSnapshotsRepository } from '../repositories/player-market-snapshots';
 import type { StoredPlayerValue } from '../repositories/player-values';
 import { playerValuesRepository } from '../repositories/player-values';
-import { playerRepository } from '../repositories/players';
-import { createTeamsMap, transformPlayerValuesWithChanges } from '../transformers/player-values';
-import type { Player, RawFPLElement } from '../types';
+import { transformPlayerMarketSnapshots } from '../transformers/player-market-snapshots';
+import type { RawFPLElement } from '../types';
 import { ELEMENT_TYPE_MAP } from '../types/base.type';
-import { notifyTwoBots } from '../utils/notify';
 import { logError, logInfo } from '../utils/logger';
-import { getPlayerValueSeasonFloor } from '../utils/player-value-season';
-import { loadTeamsBasicInfo } from '../utils/teams';
+import { notifyTwoBots } from '../utils/notify';
 import { formatCronDateKey } from '../utils/timezone';
 import { resolvePlayerSyncEvent } from './player-sync-event.service';
 
 export type PlayerValuesSyncDependencies = {
   getBootstrap: typeof fplClient.getBootstrap;
   resolvePlayerSyncEvent: typeof resolvePlayerSyncEvent;
-  findLatestForAllPlayers: typeof playerValuesRepository.findLatestForAllPlayers;
-  findByChangeDate: typeof playerValuesRepository.findByChangeDate;
-  findPlayersByIds: typeof playerRepository.findByIds;
-  insertBatch: typeof playerValuesRepository.insertBatch;
-  loadTeamsBasicInfo: typeof loadTeamsBasicInfo;
-  inspectCachedValues: typeof playerValuesCache.inspect;
-  mergeCachedValues: typeof playerValuesCache.merge;
-  deleteCachedFields: typeof playerValuesCache.deleteFields;
+  persistMarketSnapshot: (
+    season: FplSeasonRef,
+    eventId: number,
+    snapshots: readonly PlayerMarketSnapshot[],
+    expectedCount: number,
+  ) => Promise<{ snapshotDate: string; persistedCount: number }>;
+  findByChangeDate: (season: FplSeasonRef, changeDate: string) => Promise<StoredPlayerValue[]>;
   enqueuePlayerPrices: typeof enqueuePlayerPricesSyncJob;
   notify: typeof notifyTwoBots;
   getCurrentChangeDate: () => string;
+  now: () => Date;
 };
 
 const defaultDependencies: PlayerValuesSyncDependencies = {
   getBootstrap: () => fplClient.getBootstrap(),
   resolvePlayerSyncEvent,
-  findLatestForAllPlayers: playerValuesRepository.findLatestForAllPlayers,
-  findByChangeDate: playerValuesRepository.findByChangeDate,
-  findPlayersByIds: playerRepository.findByIds,
-  insertBatch: playerValuesRepository.insertBatch,
-  loadTeamsBasicInfo,
-  inspectCachedValues: playerValuesCache.inspect,
-  mergeCachedValues: playerValuesCache.merge,
-  deleteCachedFields: playerValuesCache.deleteFields,
+  persistMarketSnapshot: (season, eventId, snapshots, expectedCount) =>
+    playerMarketSnapshotsRepository.upsertCompleteDay(season, eventId, snapshots, expectedCount),
+  findByChangeDate: (season, changeDate) =>
+    playerValuesRepository.findByChangeDate(season, changeDate),
   enqueuePlayerPrices: enqueuePlayerPricesSyncJob,
   notify: notifyTwoBots,
   getCurrentChangeDate: () => formatCronDateKey(),
+  now: () => new Date(),
 };
 
 function formatPlayerValuesNotification(
@@ -53,279 +48,124 @@ function formatPlayerValuesNotification(
   playerValues: readonly PlayerValue[],
 ): string {
   const formatPrice = (value: number) => `£${(value / 10).toFixed(1)}m`;
-  const nonStart = playerValues.filter((pv) => pv.changeType !== 'Start');
-  const risers = nonStart
-    .filter((pv) => pv.changeType === 'Rise')
+  const risers = playerValues
+    .filter((value) => value.changeType === 'Rise')
     .slice()
-    .sort((a, b) => b.value - b.lastValue - (a.value - a.lastValue));
-  const fallers = nonStart
-    .filter((pv) => pv.changeType === 'Faller')
+    .sort((left, right) => right.value - right.lastValue - (left.value - left.lastValue));
+  const fallers = playerValues
+    .filter((value) => value.changeType === 'Faller')
     .slice()
-    .sort((a, b) => a.value - a.lastValue - (b.value - b.lastValue));
-
-  const header = `[player-values] ${changeDate}: +${risers.length} -${fallers.length} (total ${nonStart.length})`;
-
-  const formatLine = (pv: PlayerValue) => {
-    return `${pv.webName} (${pv.teamShortName}) ${formatPrice(pv.lastValue)}-> ${formatPrice(pv.value)}`;
-  };
-
-  const top = (items: PlayerValue[]) => items.slice(0, 12).map(formatLine);
-
-  const lines = [header];
-  if (risers.length > 0) lines.push('Risers:', ...top(risers));
-  if (fallers.length > 0) lines.push('Fallers:', ...top(fallers));
-
+    .sort((left, right) => left.value - left.lastValue - (right.value - right.lastValue));
+  const lines = [
+    `[player-values] ${changeDate}: +${risers.length} -${fallers.length} (total ${playerValues.length})`,
+  ];
+  const formatLine = (value: PlayerValue) =>
+    `${value.webName} (${value.teamShortName}) ${formatPrice(value.lastValue)}-> ${formatPrice(value.value)}`;
+  if (risers.length > 0) lines.push('Risers:', ...risers.slice(0, 12).map(formatLine));
+  if (fallers.length > 0) lines.push('Fallers:', ...fallers.slice(0, 12).map(formatLine));
   return lines.join('\n');
 }
 
-/**
- * Sync current player values (checks today's date for price changes)
- *
- * This function:
- * 1. Fetches current bootstrap data from FPL API
- * 2. Compares current prices with last stored values
- * 3. Identifies players with price changes for today
- * 4. Stores new price change records with today's changeDate
- * 5. Updates cache with today's changes
- *
- * Player values are date-based (changeDate in YYYYMMDD format)
- */
-function playerValueMatches(left: PlayerValue, right: PlayerValue): boolean {
-  return (
-    left.elementId === right.elementId &&
-    left.webName === right.webName &&
-    left.eventId === right.eventId &&
-    left.elementType === right.elementType &&
-    left.elementTypeName === right.elementTypeName &&
-    left.teamId === right.teamId &&
-    left.teamName === right.teamName &&
-    left.teamShortName === right.teamShortName &&
-    left.value === right.value &&
-    left.lastValue === right.lastValue &&
-    left.changeDate === right.changeDate &&
-    left.changeType === right.changeType
-  );
-}
-
-export function planPlayerValueCacheRepairs(
-  expected: PlayerValue[],
-  snapshot: PlayerValueCacheSnapshot,
-): { writes: PlayerValue[]; staleFields: string[] } {
-  const expectedFields = new Set(expected.map((row) => String(row.elementId)));
-  const cachedByField = new Map(snapshot.entries);
-  const writes = expected.filter((row) => {
-    const cachedRow = cachedByField.get(String(row.elementId));
-    return !cachedRow || !playerValueMatches(row, cachedRow);
-  });
-  const staleFields = snapshot.fields.filter((field) => !expectedFields.has(field));
-  return { writes, staleFields };
-}
-
-function enrichStoredRows(
-  rows: StoredPlayerValue[],
-  elementsById: Map<number, RawFPLElement>,
-  retainedPlayersById: Map<number, Player>,
-  teamsMap: Map<number, { name: string; shortName: string }>,
+function enrichChangedRows(
+  rows: readonly StoredPlayerValue[],
+  elements: readonly RawFPLElement[],
+  teams: ReadonlyArray<{ id: number; name: string; short_name: string }>,
 ): PlayerValue[] {
-  return rows.map((row) => {
-    const livePlayer = elementsById.get(row.elementId);
-    const retainedPlayer = retainedPlayersById.get(row.elementId);
-    const identity = livePlayer
-      ? { teamId: livePlayer.team, webName: livePlayer.web_name }
-      : retainedPlayer
-        ? { teamId: retainedPlayer.teamId, webName: retainedPlayer.webName }
-        : null;
-    if (!identity) {
-      throw new Error(`Player identity missing for stored value: ${row.elementId}`);
-    }
-    const team = teamsMap.get(identity.teamId);
-    if (!team) {
-      throw new Error(`Team missing for stored player value: ${identity.teamId}`);
-    }
-
-    return {
-      ...row,
-      elementType: row.elementType as 1 | 2 | 3 | 4,
-      elementTypeName: ELEMENT_TYPE_MAP[row.elementType as 1 | 2 | 3 | 4],
-      webName: identity.webName,
-      teamId: identity.teamId,
-      teamName: team.name,
-      teamShortName: team.shortName,
-    };
-  });
+  const elementsById = new Map(elements.map((element) => [element.id, element]));
+  const teamsById = new Map(teams.map((team) => [team.id, team]));
+  return rows
+    .filter((row) => row.changeType === 'Rise' || row.changeType === 'Faller')
+    .map((row) => {
+      const element = elementsById.get(row.elementId);
+      if (!element) throw new Error(`Current player identity missing for ${row.elementId}`);
+      const team = teamsById.get(element.team);
+      if (!team) throw new Error(`Current team identity missing for ${element.team}`);
+      const elementType = row.elementType as 1 | 2 | 3 | 4;
+      return {
+        ...row,
+        webName: element.web_name,
+        elementType,
+        elementTypeName: ELEMENT_TYPE_MAP[elementType],
+        teamId: element.team,
+        teamName: team.name,
+        teamShortName: team.short_name,
+      };
+    });
 }
 
+/**
+ * Capture one complete daily market snapshot. reporting.player_value_changes
+ * derives Start/Rise/Faller rows from these snapshots; there is no second
+ * writable player-values store.
+ */
 export function createPlayerValuesSync(dependencies: PlayerValuesSyncDependencies) {
   return async function syncForDate(
-    changeDate: string = formatCronDateKey(),
+    season: FplSeasonRef,
+    changeDate: string = dependencies.getCurrentChangeDate(),
     options?: { onTargetEventResolved?: (eventId: number) => void },
-  ): Promise<{ count: number; eventId?: number; outcome?: 'noop' }> {
-    logInfo('Starting daily player values sync');
-
+  ): Promise<{
+    count: number;
+    eventId?: number;
+    marketSnapshotCount?: number;
+    outcome?: 'noop';
+  }> {
     if (!/^\d{8}$/.test(changeDate)) {
       throw new Error(`Invalid player value change date: ${changeDate}`);
     }
-
-    const currentChangeDate = dependencies.getCurrentChangeDate();
-    if (changeDate !== currentChangeDate) {
-      logInfo('Skipping player values capture outside its scheduled date', {
-        changeDate,
-        currentChangeDate,
-      });
+    if (changeDate !== dependencies.getCurrentChangeDate()) {
+      logInfo('Skipping market snapshot outside its scheduled date', { changeDate });
       return { count: 0, outcome: 'noop' };
     }
 
-    // Resolve and report the target before the fallible bootstrap request. A
-    // bootstrap outage must still leave the attempt correlated to the event
-    // that was selected for this date.
-    const syncEvent = await dependencies.resolvePlayerSyncEvent();
-    if (!syncEvent) {
-      throw new Error('No current or next event found for player values');
-    }
+    const syncEvent = await dependencies.resolvePlayerSyncEvent(season);
+    if (!syncEvent) throw new Error('No current or next event found for player values');
     options?.onTargetEventResolved?.(syncEvent.event.id);
 
-    const bootstrapData = await dependencies.getBootstrap();
-
-    if (!Array.isArray(bootstrapData.elements) || bootstrapData.elements.length === 0) {
-      throw new Error('No player values returned from FPL API');
+    const bootstrap = await dependencies.getBootstrap();
+    if (!Array.isArray(bootstrap.elements) || bootstrap.elements.length === 0) {
+      throw new Error('No player market data returned from FPL API');
     }
-
-    // Get the last value inside this published season only. Element IDs are
-    // reused by FPL and must not be compared with prior-season players.
-    const seasonFloor = getPlayerValueSeasonFloor(syncEvent.event.deadlineTime);
-    const lastStoredValues = await dependencies.findLatestForAllPlayers(seasonFloor, changeDate);
-    const lastValueMap = new Map<number, number>();
-    lastStoredValues.forEach((pv) => lastValueMap.set(pv.elementId, pv.value));
-
-    // Check if we've already recorded changes for today
-    const todaysRecords = await dependencies.findByChangeDate(changeDate);
-    const todaysPlayerIds = new Set(todaysRecords.map((pv) => pv.elementId));
-
-    // Find players with price changes that haven't been recorded today
-    const playersWithChanges = bootstrapData.elements.filter((player) => {
-      if (todaysPlayerIds.has(player.id)) return false;
-      const lastValue = lastValueMap.get(player.id);
-      return lastValue === undefined || player.now_cost !== lastValue;
-    });
-
-    if (playersWithChanges.length === 0 && todaysRecords.length === 0) {
-      logInfo('No player price changes detected; preserving database and cache', { changeDate });
-      return { count: 0, eventId: syncEvent.event.id };
-    }
-
-    const teams = await dependencies.loadTeamsBasicInfo();
-    const teamsMap = createTeamsMap(teams);
-
-    const playerValues = transformPlayerValuesWithChanges(
-      playersWithChanges,
+    const capturedAt = dependencies.now();
+    const snapshots = transformPlayerMarketSnapshots(bootstrap, capturedAt);
+    const persisted = await dependencies.persistMarketSnapshot(
+      season,
       syncEvent.event.id,
-      teamsMap,
-      lastValueMap,
-      changeDate,
+      snapshots,
+      bootstrap.elements.length,
     );
-
-    const result = await dependencies.insertBatch(playerValues);
-
-    const persistedRows =
-      playersWithChanges.length > 0
-        ? await dependencies.findByChangeDate(changeDate)
-        : todaysRecords;
-    const persistedById = new Map(persistedRows.map((row) => [row.elementId, row]));
-    for (const expected of playerValues) {
-      const persisted = persistedById.get(expected.elementId);
-      if (
-        !persisted ||
-        persisted.value !== expected.value ||
-        persisted.lastValue !== expected.lastValue ||
-        persisted.changeType !== expected.changeType
-      ) {
-        throw new Error(
-          `Player value persistence verification failed for player ${expected.elementId}`,
-        );
-      }
+    if (persisted.snapshotDate.replaceAll('-', '') !== changeDate) {
+      throw new Error(
+        `Market snapshot date ${persisted.snapshotDate} does not match requested date ${changeDate}`,
+      );
     }
 
-    // Start rows seed the season baseline for lastValue computation but are
-    // not price changes; only actual changes are published to the Redis hash.
-    // Filter before enrich: a Start row for a player who left the game must
-    // not fail the whole sync inside enrichStoredRows.
-    const cacheableRows = persistedRows.filter((row) => row.changeType !== 'Start');
-    const elementsById = new Map(bootstrapData.elements.map((element) => [element.id, element]));
-    const missingLivePlayerIds = Array.from(
-      new Set(
-        cacheableRows
-          .map((row) => row.elementId)
-          .filter((elementId) => !elementsById.has(elementId)),
-      ),
-    );
-    const retainedPlayers =
-      missingLivePlayerIds.length > 0
-        ? await dependencies.findPlayersByIds(missingLivePlayerIds)
-        : [];
-    const retainedPlayersById = new Map(retainedPlayers.map((player) => [player.id, player]));
-    const expectedCacheRows = enrichStoredRows(
-      cacheableRows,
-      elementsById,
-      retainedPlayersById,
-      teamsMap,
-    );
-    const cacheSnapshot = await dependencies.inspectCachedValues(changeDate);
-    const cacheRepairs = planPlayerValueCacheRepairs(expectedCacheRows, cacheSnapshot);
-    // When every history field already matches, rewrite one verified positive
-    // field before deleting the negative marker so a retry recovers when a
-    // prior HSET succeeded but its subsequent DEL failed. On Start-only days
-    // there is no positive field: merge() is skipped, any stale fields are
-    // deleted below, and a lingering negative marker expires on its own
-    // (GraphQL sets it with a 10-minute TTL and reads the hash first, so it
-    // can never shadow positive data).
-    const cacheWrites =
-      cacheRepairs.writes.length > 0 ? cacheRepairs.writes : expectedCacheRows.slice(0, 1);
-    if (cacheWrites.length > 0) {
-      await dependencies.mergeCachedValues(changeDate, cacheWrites);
-    }
-    if (cacheRepairs.staleFields.length > 0) {
-      await dependencies.deleteCachedFields(changeDate, cacheRepairs.staleFields);
-    }
-    if (cacheRepairs.writes.length > 0 || cacheRepairs.staleFields.length > 0) {
-      logInfo('Player values cache fields repaired', {
-        changeDate,
-        writes: cacheRepairs.writes.length,
-        deletes: cacheRepairs.staleFields.length,
-      });
-    }
-
-    const hasPersistedPriceChanges = persistedRows.some(
-      (row) => row.changeType === 'Rise' || row.changeType === 'Faller',
-    );
-    if (hasPersistedPriceChanges) {
-      await dependencies.enqueuePlayerPrices('cascade', {
+    const derivedRows = await dependencies.findByChangeDate(season, changeDate);
+    const changedRows = enrichChangedRows(derivedRows, bootstrap.elements, bootstrap.teams);
+    if (changedRows.length > 0) {
+      await dependencies.enqueuePlayerPrices(season, 'cascade', {
         changeDate,
         jobId: `player-prices-${changeDate}-immediate`,
         removeOnSettle: true,
       });
-    }
-
-    const insertedPriceChanges = result.inserted.filter(
-      (row) => row.changeType === 'Rise' || row.changeType === 'Faller',
-    );
-    if (insertedPriceChanges.length > 0) {
       try {
-        const message = formatPlayerValuesNotification(changeDate, result.inserted);
-        await dependencies.notify(message);
+        await dependencies.notify(formatPlayerValuesNotification(changeDate, changedRows));
       } catch (error) {
         logError('Failed to send player values notification', error, { changeDate });
       }
     }
 
-    logInfo('Daily player values sync completed', {
+    logInfo('Daily player market snapshot completed', {
+      season: season.seasonCode,
       eventId: syncEvent.event.id,
       changeDate,
-      totalChecked: bootstrapData.elements.length,
-      changesDetected: playersWithChanges.length,
-      recordsInserted: result.count,
+      marketSnapshotCount: persisted.persistedCount,
+      derivedChanges: changedRows.length,
     });
-
-    return { count: result.count, eventId: syncEvent.event.id };
+    return {
+      count: changedRows.length,
+      eventId: syncEvent.event.id,
+      marketSnapshotCount: persisted.persistedCount,
+    };
   };
 }
 

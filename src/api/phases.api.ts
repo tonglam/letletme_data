@@ -1,6 +1,7 @@
 import { Elysia } from 'elysia';
 
 import { enqueueCoreSnapshotJob } from '../jobs/data-sync-enqueue';
+import { seasonRepository } from '../repositories/seasons';
 
 /**
  * Phases API Routes
@@ -10,7 +11,8 @@ import { enqueueCoreSnapshotJob } from '../jobs/data-sync-enqueue';
  */
 
 export const phasesAPI = new Elysia({ prefix: '/phases' }).post('/sync', async ({ set }) => {
-  const job = await enqueueCoreSnapshotJob('api');
+  const season = await seasonRepository.findCurrent();
+  const job = await enqueueCoreSnapshotJob(season, 'api');
   if (job.id === undefined) throw new Error('Phases sync queue did not assign a job ID');
   set.status = 202;
   return {

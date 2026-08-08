@@ -1,6 +1,7 @@
 import { Worker, Job, QueueEvents } from 'bullmq';
 
 import { MUTATION_PRIORITY_ORDER, type MutationPriorityTier } from '../domain/job-priority';
+import { requireCurrentSeasonForJob } from '../domain/season-scoped-job';
 import {
   getLeagueSyncQueueName,
   isLeagueSyncTieredQueueEnabled,
@@ -30,6 +31,7 @@ import type { WorkerRuntime } from './worker-runtime';
  * - Tournament job (with tournamentId): Processes that specific tournament
  */
 async function processLeagueSyncJob(job: Job<LeagueSyncJobData>) {
+  const season = await requireCurrentSeasonForJob(job.data);
   const { eventId, tournamentId, source } = job.data;
   const runId = job.data.runId ?? String(job.id ?? `${job.name}-${job.timestamp}`);
   const context = {
@@ -69,11 +71,11 @@ async function processLeagueSyncJob(job: Job<LeagueSyncJobData>) {
           runTrackedJob(context, async () => {
             switch (job.name) {
               case LEAGUE_JOBS.LEAGUE_EVENT_PICKS:
-                return processLeagueEventPicksJob(eventId, tournamentId, runId);
+                return processLeagueEventPicksJob(season, eventId, tournamentId, runId);
 
               case LEAGUE_JOBS.LEAGUE_EVENT_RESULTS: {
                 const freshAfter = tournamentId ? await resolveJobFreshAfter(job) : undefined;
-                return processLeagueEventResultsJob(eventId, tournamentId, {
+                return processLeagueEventResultsJob(season, eventId, tournamentId, {
                   runId,
                   freshAfter,
                 });

@@ -5,6 +5,7 @@ import {
   syncLeagueEventPicksByTournament,
   type LeagueEventPicksDependencies,
 } from '../../src/services/league-event-picks.service';
+import { TEST_SEASON } from '../fixtures/seasons.fixtures';
 
 const tournament = {
   id: 77,
@@ -21,9 +22,9 @@ describe('league event picks convergence', () => {
     const dependencies: LeagueEventPicksDependencies = {
       findTournament: async () => tournament,
       resolveEntryIds: async () => [101, 102, 103],
-      findPersistedEntryIds: async (_eventId, entryIds) =>
+      findPersistedEntryIds: async (_season, _eventId, entryIds) =>
         entryIds.filter((entryId) => persisted.has(entryId)),
-      syncEntry: async (entryId) => {
+      syncEntry: async (_season, entryId) => {
         calls.push(entryId);
         if (entryId === 103 && failEntry) throw new Error('injected upstream failure');
         persisted.add(entryId);
@@ -31,10 +32,9 @@ describe('league event picks convergence', () => {
     };
 
     await expect(
-      syncLeagueEventPicksByTournament(77, 9, {
+      syncLeagueEventPicksByTournament(TEST_SEASON, 77, 9, {
         concurrency: 2,
         dependencies,
-        season: '2526',
       }),
     ).rejects.toMatchObject({
       code: 'DATA_SYNC_INCOMPLETE',
@@ -46,10 +46,9 @@ describe('league event picks convergence', () => {
     expect(calls.sort()).toEqual([102, 103]);
 
     failEntry = false;
-    const retry = await syncLeagueEventPicksByTournament(77, 9, {
+    const retry = await syncLeagueEventPicksByTournament(TEST_SEASON, 77, 9, {
       concurrency: 2,
       dependencies,
-      season: '2526',
     });
     expect(calls).toEqual([102, 103, 103]);
     expect(retry).toMatchObject({

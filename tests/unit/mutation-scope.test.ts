@@ -11,7 +11,7 @@ describe('resolveMutationScopes', () => {
   it('normalizes tiered queue names', () => {
     const scopes = resolveMutationScopes({
       queueName: 'live-data-p0',
-      jobName: 'event-lives-db',
+      jobName: 'live-snapshot',
       eventId: 33,
     });
     expect(scopes).toEqual(['data-core:fixtures', 'live-snapshot:event:33']);
@@ -23,14 +23,11 @@ describe('resolveMutationScopes', () => {
     'live-fixture-cache',
     'live-bonus-cache',
     'live-scores',
-  ])('gives legacy live view job %s the complete snapshot scopes', (jobName) => {
-    expect(resolveMutationScopes({ queueName: 'live-data-p0', jobName, eventId: 33 })).toEqual([
-      'data-core:fixtures',
-      'live-snapshot:event:33',
-    ]);
+  ])('does not recognize removed v2 live job %s', (jobName) => {
+    expect(resolveMutationScopes({ queueName: 'live-data-p0', jobName, eventId: 33 })).toEqual([]);
   });
 
-  it('maps legacy fixture jobs to the complete core snapshot scopes', () => {
+  it('maps only the canonical snapshot jobs to complete publication scopes', () => {
     const snapshotScopes = resolveMutationScopes({
       queueName: 'live-data-p0',
       jobName: 'live-snapshot',
@@ -38,7 +35,7 @@ describe('resolveMutationScopes', () => {
     });
     const fixtureScopes = resolveMutationScopes({
       queueName: 'data-sync-p1',
-      jobName: 'fixtures',
+      jobName: 'core-snapshot',
       eventId: 33,
     });
 
@@ -53,8 +50,8 @@ describe('resolveMutationScopes', () => {
     ]);
   });
 
-  it('keeps partial price updates inside the complete legacy player alias scope', () => {
-    const fullSync = resolveMutationScopes({ queueName: 'data-sync-p1', jobName: 'players' });
+  it('keeps partial price updates inside the canonical player publication scope', () => {
+    const fullSync = resolveMutationScopes({ queueName: 'data-sync-p1', jobName: 'core-snapshot' });
     const priceSync = resolveMutationScopes({
       queueName: 'data-sync-p1',
       jobName: 'player-prices',

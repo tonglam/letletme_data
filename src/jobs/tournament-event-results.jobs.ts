@@ -4,6 +4,7 @@ import type { Elysia } from 'elysia';
 import { getPostMatchResultsSlot } from '../domain/post-match-results';
 import { getCurrentEvent } from '../services/events.service';
 import { fixtureRepository } from '../repositories/fixtures';
+import { seasonRepository } from '../repositories/seasons';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { logInfo } from '../utils/logger';
 import { enqueueTournamentEventResults } from './tournament-sync.jobs';
@@ -21,13 +22,14 @@ import { CRON_TIMEZONE } from '../utils/timezone';
 
 export async function runTournamentEventResultsSync() {
   const now = new Date();
-  const currentEvent = await getCurrentEvent();
+  const season = await seasonRepository.findCurrent();
+  const currentEvent = await getCurrentEvent(season);
   if (!currentEvent) {
     logInfo('Skipping tournament event results sync - no current event');
     return;
   }
 
-  const fixtures = await fixtureRepository.findByEvent(currentEvent.id);
+  const fixtures = await fixtureRepository.findByEvent(season, currentEvent.id);
   const resultSlot = getPostMatchResultsSlot(currentEvent, fixtures, now);
   if (!resultSlot) {
     logInfo('Skipping tournament event results sync - conditions not met', {
@@ -37,7 +39,7 @@ export async function runTournamentEventResultsSync() {
   }
 
   // Enqueue base job (will trigger cascade on completion)
-  const job = await enqueueTournamentEventResults(currentEvent.id, 'cron', {
+  const job = await enqueueTournamentEventResults(season, currentEvent.id, 'cron', {
     jobId: `tournament-event-results-e${currentEvent.id}-${resultSlot}`,
   });
   logInfo('Tournament event results job enqueued, will trigger cascade', {

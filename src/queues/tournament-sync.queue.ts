@@ -27,6 +27,8 @@ export const TOURNAMENT_JOBS = {
 export type TournamentSyncJobName = (typeof TOURNAMENT_JOBS)[keyof typeof TOURNAMENT_JOBS];
 
 export interface TournamentSyncJobData {
+  seasonId: number;
+  seasonCode: string;
   eventId: number;
   source: 'cron' | 'manual' | 'cascade';
   triggeredAt: string;

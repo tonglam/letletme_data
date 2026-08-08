@@ -683,7 +683,17 @@ REVOKE CREATE ON SCHEMA public FROM letletme_v2_frozen_owner;
 
 DO $release_v2_frozen_owner$
 BEGIN
-  IF pg_has_role(session_user, 'letletme_v2_frozen_owner', 'MEMBER') THEN
+  -- pg_has_role() is always true for a superuser, even without a membership
+  -- edge. Revoke only a real grant; the postcondition below separately checks
+  -- inherited membership for non-superuser migration logins.
+  IF EXISTS (
+    SELECT 1
+    FROM pg_auth_members membership
+    JOIN pg_roles member_role ON member_role.oid = membership.member
+    JOIN pg_roles granted_role ON granted_role.oid = membership.roleid
+    WHERE member_role.rolname = session_user
+      AND granted_role.rolname = 'letletme_v2_frozen_owner'
+  ) THEN
     EXECUTE format('REVOKE letletme_v2_frozen_owner FROM %I', session_user);
   END IF;
 END
@@ -916,7 +926,18 @@ BEGIN
     RAISE EXCEPTION 'v2 frozen-owner handoff failed for % objects', unexpected_owner_count;
   END IF;
 
-  IF pg_has_role(session_user, 'letletme_v2_frozen_owner', 'MEMBER')
+  IF EXISTS (
+       SELECT 1
+       FROM pg_auth_members membership
+       JOIN pg_roles member_role ON member_role.oid = membership.member
+       JOIN pg_roles granted_role ON granted_role.oid = membership.roleid
+       WHERE member_role.rolname = session_user
+         AND granted_role.rolname = 'letletme_v2_frozen_owner'
+     )
+     OR (
+       NOT (SELECT rolsuper FROM pg_roles WHERE rolname = session_user)
+       AND pg_has_role(session_user, 'letletme_v2_frozen_owner', 'MEMBER')
+     )
      OR has_schema_privilege('letletme_v2_frozen_owner', 'public', 'CREATE') THEN
     RAISE EXCEPTION 'migration login still inherits the v2 frozen owner or owner can create in public';
   END IF;

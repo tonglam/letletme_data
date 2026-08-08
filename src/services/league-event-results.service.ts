@@ -19,7 +19,7 @@ import {
 } from '../domain/entry-picks';
 import { eventLiveRepository } from '../repositories/event-lives';
 import { eventRepository } from '../repositories/events';
-import { getActiveCacheSeason } from '../cache/cache-season';
+import type { FplSeasonRef } from '../domain/fpl-season';
 import {
   leagueEventResultsRepository,
   type LeagueEventResultEvidenceInsert,
@@ -344,9 +344,13 @@ export function summarizeMissingLeagueEventLiveData(
 }
 
 export async function syncLeagueEventResultsByTournament(
+  season: FplSeasonRef,
   tournamentId: number,
   eventId: number,
-  options?: { concurrency?: number; season?: string; freshAfter?: Date | string },
+  options?: {
+    concurrency?: number;
+    freshAfter?: Date | string;
+  },
 ): Promise<LeagueEventResultsSyncSummary> {
   logInfo('Starting league event results sync for tournament', { tournamentId, eventId });
   // Use one database-clock token before any source reads. It is comparable
@@ -354,10 +358,9 @@ export async function syncLeagueEventResultsByTournament(
   // attempt finishes after a newer result-slot run.
   const sourceOrdering = await readDatabaseOrderingTimestamp();
   const freshAfter = options?.freshAfter ?? sourceOrdering.exact;
-
   const [tournament, event] = await Promise.all([
-    tournamentInfoRepository.findById(tournamentId),
-    eventRepository.findById(eventId),
+    tournamentInfoRepository.findById(season, tournamentId),
+    eventRepository.findById(season, eventId),
   ]);
   if (!tournament) {
     throw new Error(`Tournament ${tournamentId} not found`);
@@ -368,13 +371,12 @@ export async function syncLeagueEventResultsByTournament(
   // reuse, write, and post-write audit all share one clock domain.
   const finalizationDate = resolveRichResultFreshnessCutoff(event);
   const finalizationCutoff = finalizationDate
-    ? ((await eventRepository.findDataCheckedAtExact(eventId)) ?? finalizationDate)
+    ? ((await eventRepository.findDataCheckedAtExact(season, eventId)) ?? finalizationDate)
     : null;
   const requiredRichFreshAfter = latestFreshnessTimestamp(freshAfter, finalizationCutoff);
-  const checkpointSeason = options?.season ?? (await getActiveCacheSeason());
 
-  const resolvedEntryIds = await resolveTournamentEntryIds(tournament);
-  const entryInfos = await entryInfoRepository.findByIds(resolvedEntryIds);
+  const resolvedEntryIds = await resolveTournamentEntryIds(season, tournament);
+  const entryInfos = await entryInfoRepository.findByIds(season, resolvedEntryIds);
   const entryInfoMap = new Map(entryInfos.map((info) => [info.id, info]));
   const entryIds = findEventEligibleEntryIds(resolvedEntryIds, entryInfos, eventId);
   if (entryIds.length === 0) {
@@ -393,6 +395,7 @@ export async function syncLeagueEventResultsByTournament(
   }
   const reusedEntryIds = requiredRichFreshAfter
     ? await leagueEventResultsRepository.findEntryIdsByLeagueEvent(
+        season,
         tournament.leagueId,
         tournament.leagueType,
         eventId,
@@ -418,8 +421,8 @@ export async function syncLeagueEventResultsByTournament(
   }
 
   const eventLives = finalizationCutoff
-    ? await eventLiveRepository.findFinalizedByEventIdForSeason(eventId, checkpointSeason)
-    : await eventLiveRepository.findByEventId(eventId);
+    ? await eventLiveRepository.findFinalizedByEventId(season, eventId)
+    : await eventLiveRepository.findByEventId(season, eventId);
   if (eventLives.length === 0) {
     const summary = summarizeMissingLeagueEventLiveData(
       tournamentId,
@@ -437,12 +440,13 @@ export async function syncLeagueEventResultsByTournament(
   }
   const eventLiveMap = new Map(eventLives.map((live) => [live.elementId, live]));
   const playerIds = uniqueNumbers(eventLives.map((live) => live.elementId));
-  const players = await playerRepository.findByIds(playerIds);
+  const players = await playerRepository.findByIds(season, playerIds);
   const elementTypeMap = new Map(players.map((player) => [player.id, player.type]));
 
   const [entryResults, staleRichEntryIds] = await Promise.all([
-    entryEventResultsRepository.findByEventAndEntryIds(eventId, entriesToBuild),
+    entryEventResultsRepository.findByEventAndEntryIds(season, eventId, entriesToBuild),
     entryEventResultsRepository.findEntryIdsNeedingRichSync(
+      season,
       entriesToBuild,
       eventId,
       requiredRichFreshAfter,
@@ -538,13 +542,13 @@ export async function syncLeagueEventResultsByTournament(
       eventAutoSubPoints: data.eventAutoSubPoints,
       eventRank: data.eventRank,
       eventChip: data.eventChip,
-      captainId: data.captainId,
+      captainElementId: data.captainId,
       captainPoints: data.captainPoints,
       captainBlank: data.captainBlank,
-      viceCaptainId: data.viceCaptainId,
+      viceCaptainElementId: data.viceCaptainId,
       viceCaptainPoints: data.viceCaptainPoints,
       viceCaptainBlank: data.viceCaptainBlank,
-      playedCaptainId: data.playedCaptainId,
+      playedCaptainElementId: data.playedCaptainId,
       highestScoreElementId: data.highestScoreElementId,
       highestScorePoints: data.highestScorePoints,
       highestScoreBlank: data.highestScoreBlank,
@@ -557,11 +561,12 @@ export async function syncLeagueEventResultsByTournament(
 
   for (let index = 0; index < inserts.length; index += batchSize) {
     const batch = inserts.slice(index, index + batchSize);
-    updated += await leagueEventResultsRepository.upsertBatch(batch, checkpointSeason);
+    updated += await leagueEventResultsRepository.upsertBatch(season, batch);
   }
 
   const persistedEntryIds = new Set(
     await leagueEventResultsRepository.findEntryIdsByLeagueEvent(
+      season,
       tournament.leagueId,
       tournament.leagueType,
       eventId,

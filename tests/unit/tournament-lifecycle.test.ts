@@ -5,6 +5,7 @@ import { isTournamentNameConflict } from '../../src/repositories/tournament-info
 import { tournamentInfoRepository } from '../../src/repositories/tournament-infos';
 import { tournamentRosterRepository } from '../../src/repositories/tournament-roster';
 import { logger } from '../../src/utils/logger';
+import { TEST_SEASON } from '../fixtures/seasons.fixtures';
 
 afterEach(() => {
   mock.restore();
@@ -66,9 +67,9 @@ describe('tournament lifecycle invariants', () => {
       '../../src/jobs/tournament-setup.jobs'
     );
 
-    expect(getTournamentSetupJobIds(321)).toEqual({
-      baseJobId: 'tournament-setup-321',
-      successorJobId: 'tournament-setup-321-successor',
+    expect(getTournamentSetupJobIds(TEST_SEASON, 321)).toEqual({
+      baseJobId: 'tournament-setup-2627-321',
+      successorJobId: 'tournament-setup-2627-321-successor',
     });
     expect(decideExistingSetupSuccessorAction('waiting')).toBe('reuse');
     expect(decideExistingSetupSuccessorAction('active')).toBe('reuse');
@@ -146,10 +147,11 @@ describe('tournament lifecycle invariants', () => {
       calls.push('ready-with-warning');
     });
 
-    await finalizePublishedTournamentSetup(900_122, 'enrichment failed', 1);
+    await finalizePublishedTournamentSetup(TEST_SEASON, 900_122, 'enrichment failed', 1);
 
     expect(calls).toEqual(['resume', 'ready-with-warning']);
     expect(tournamentInfoRepository.markSetupResult).toHaveBeenCalledWith(
+      TEST_SEASON,
       900_122,
       'ready',
       'enrichment failed',
@@ -177,7 +179,7 @@ describe('tournament lifecycle invariants', () => {
   });
 
   test('maps only the database tournament-name race to a public conflict', () => {
-    expect(isTournamentNameConflict({ code: '23505', constraint: 'unique_tournament_name' })).toBe(
+    expect(isTournamentNameConflict({ code: '23505', constraint: 'tournaments_name_key' })).toBe(
       true,
     );
     expect(isTournamentNameConflict({ code: '23505', constraint: 'another_unique_index' })).toBe(
@@ -199,7 +201,9 @@ describe('tournament lifecycle invariants', () => {
     spyOn(tournamentInfoRepository, 'findSetupConfig').mockResolvedValue(null);
     const infoSpy = spyOn(logger, 'info').mockImplementation(() => undefined as never);
 
-    await expect(setupTournamentStructure(900_123)).rejects.toThrow('private database detail');
+    await expect(setupTournamentStructure(TEST_SEASON, 900_123)).rejects.toThrow(
+      'private database detail',
+    );
 
     const reports = infoSpy.mock.calls
       .map(([payload]) => payload as unknown as Record<string, unknown>)
@@ -244,8 +248,16 @@ describe('tournament lifecycle invariants', () => {
     process.env.DATABASE_URL = '';
 
     try {
-      await expect(setupTournamentStructure(900_124)).rejects.toThrow('resume preparation failed');
-      expect(resultSpy).toHaveBeenCalledWith(900_124, 'failed', 'resume preparation failed', 0);
+      await expect(setupTournamentStructure(TEST_SEASON, 900_124)).rejects.toThrow(
+        'resume preparation failed',
+      );
+      expect(resultSpy).toHaveBeenCalledWith(
+        TEST_SEASON,
+        900_124,
+        'failed',
+        'resume preparation failed',
+        0,
+      );
     } finally {
       process.env.DATABASE_URL = originalDatabaseUrl;
     }

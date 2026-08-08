@@ -8,6 +8,8 @@ This directory contains the test suite for `letletme_data`. Tests are split by s
 |---|---|---|
 | `bun run test` or `bun test tests/unit` | Unit tests only (`tests/unit`) | None |
 | `bun run test:integration` | Integration tests (`tests/integration`) | Postgres + Redis (test instance only) |
+| `bun run test:publication:integration` | Immutable publication + Redis separation | Postgres + Redis (test instance only) |
+| `bun run test:core-publication-benchmark` | Full B0 core publication budget | Restored B0 Postgres + Redis; `RUN_B0_ACCEPTANCE=1` |
 | `RUN_INTEGRATION=1 bun run test:all` | Unit + integration | Postgres + Redis (test instance only) |
 
 Do not use bare `bun test` as a unit-test shortcut. Bun discovers both test
@@ -18,7 +20,7 @@ Integration tests are gated by `tests/integration/helpers/env-guard.ts`. They re
 
 - `RUN_INTEGRATION=1`
 - `DATABASE_URL` points at `localhost`, `127.0.0.1`, or a database name ending in `_test`
-- `REDIS_DB` is non-zero (and `QUEUE_REDIS_DB` when used)
+- `CACHE_REDIS_DB` and `QUEUE_REDIS_DB` are non-zero and distinct
 
 This prevents accidental runs against production infrastructure.
 
@@ -30,7 +32,7 @@ tests/
 │   ├── *.test.ts      # Domain, transformer, repository structure, API handler tests
 │   └── ...
 ├── integration/       # End-to-end tests that write real data
-│   ├── helpers/       # Env guard, tournament seed, DB/Redis helpers
+│   ├── helpers/       # Env guard and recorded FPL client override
 │   └── *.test.ts      # Service + worker + cache + DB tests
 ├── fixtures/          # Static FPL-shaped test data
 │   └── *.fixtures.ts
@@ -65,14 +67,19 @@ They assume a fresh or isolated test database and a non-zero Redis DB. Run migra
 # Example local setup
 createdb letletme_data_test
 DATABASE_URL=postgresql://user:pass@localhost:5432/letletme_data_test \
-  REDIS_DB=9 \
+  CACHE_REDIS_DB=9 QUEUE_REDIS_DB=10 \
   bun run db:migrate
 
 RUN_INTEGRATION=1 \
   DATABASE_URL=postgresql://user:pass@localhost:5432/letletme_data_test \
-  REDIS_HOST=localhost REDIS_PORT=6379 REDIS_DB=9 \
+  CACHE_REDIS_HOST=localhost CACHE_REDIS_PORT=6379 CACHE_REDIS_DB=9 \
+  QUEUE_REDIS_HOST=localhost QUEUE_REDIS_PORT=6379 QUEUE_REDIS_DB=10 \
   bun run test:integration
 ```
+
+The B0 benchmark uses the same guarded variables plus `RUN_B0_ACCEPTANCE=1` and a restored database
+that contains the accepted 2526 season. It publishes only to the configured non-zero cache Redis
+database and must complete within five minutes.
 
 ## Hermetic FPL boundary
 

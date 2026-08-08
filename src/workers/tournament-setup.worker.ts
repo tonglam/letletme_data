@@ -11,6 +11,8 @@ import {
   setupTournamentStructure,
 } from '../services/tournament-setup.service';
 import { tournamentSetupLifecycleScope } from '../domain/mutation-scope';
+import { requireCurrentSeasonForJob } from '../domain/season-scoped-job';
+import { seasonRepository } from '../repositories/seasons';
 import { logError, logInfo } from '../utils/logger';
 import { runWithFplRequestMetrics } from '../utils/fpl-request-metrics';
 import { runTrackedJob } from '../utils/job-run-logger';
@@ -44,6 +46,7 @@ export function createTournamentSetupWorker(): WorkerRuntime {
   const worker = new Worker<TournamentSetupJobData>(
     queueName,
     async (job: Job<TournamentSetupJobData>) => {
+      const season = await requireCurrentSeasonForJob(job.data);
       await job.updateProgress('waiting_for_lifecycle');
       const triggeredAtMs = Date.parse(job.data.triggeredAt);
       const queueWaitMs = Number.isNaN(triggeredAtMs)
@@ -79,7 +82,7 @@ export function createTournamentSetupWorker(): WorkerRuntime {
               await job.updateProgress('running');
               try {
                 logInfo('Tournament setup worker started job');
-                await setupTournamentStructure(job.data.tournamentId);
+                await setupTournamentStructure(season, job.data.tournamentId);
               } finally {
                 // Written before the mandatory lifecycle lock is released, so
                 // an enqueuer that later acquires it can safely alternate slots.
@@ -155,7 +158,9 @@ export function createTournamentSetupWorker(): WorkerRuntime {
 
 async function runStartupWatchdog(): Promise<void> {
   try {
+    const season = await seasonRepository.findCurrent();
     const { recovered, skippedActive } = await recoverStuckTournamentSetups(
+      season,
       STUCK_PROCESSING_CUTOFF_MINUTES,
       hasActiveSetupJob,
     );

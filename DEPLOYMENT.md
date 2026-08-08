@@ -14,7 +14,7 @@ systemd units and `/var/log/letletme` files are not part of the Docker deploymen
 ## Host Bootstrap Checklist
 1. **Install Docker + compose** following https://docs.docker.com/engine/install/ubuntu/ then add the `deploy` user to the `docker` group and re-login.
 2. **Clone the repo** into `/home/workspace/letletme_data` (or another directory referenced by `VPS_WORKDIR`).
-3. **Create `.env.deploy`** by copying `.env.deploy.example` and populate `DATABASE_URL`, `REDIS_*`, `SUPABASE_*`, `ENABLE_AUTH=true`, and `DATA_API_KEY_HASHES`. Keep this file on the server only. In the current production topology, the app and Redis are on the same VPS, and the containers connect to Redis via `43.163.91.9:6379`.
+3. **Create `.env.deploy`** by copying `.env.deploy.example` and populate `DATABASE_URL`, explicit `CACHE_REDIS_*` and `QUEUE_REDIS_*` tuples, optional `SUPABASE_*`, `ENABLE_AUTH=true`, and `DATA_API_KEY_HASHES`. Keep this file on the server only. Cache and queue must not resolve to the same host/port/database tuple.
 4. **First deploy**: run `bash scripts/deploy.sh deploy` to build the image, start services via compose, and run database migrations (`db:migrate` + numbered SQL migrations).
 5. **Bootstrap the internal service key** (one-time): generate a high-entropy plaintext key, store that plaintext only as the trusted Web server's `TOURNAMENT_API_KEY`, and put its lowercase SHA-256 hex digest in Data's `DATA_API_KEY_HASHES`. To rotate without downtime, add the new digest, deploy both services, switch the Web secret, verify mutations, then remove the old digest. Data never stores or prints the plaintext key.
 6. **Proxy + hardening**: terminate TLS in Nginx/Caddy, forward to `127.0.0.1:3000`, restrict Redis access to trusted sources on the VPS/network, and enable ufw.
@@ -60,7 +60,7 @@ This query is read-only. Replace the psql variable value with the tournament bei
 \set tournament_id 123
 
 SELECT
-  id,
+  tournament_id,
   setup_status,
   setup_phase,
   setup_completed_units,
@@ -76,8 +76,8 @@ SELECT
   round(extract(epoch FROM (standings_ready_at - created_at)) * 1000) AS creation_to_standings_ms,
   round(extract(epoch FROM (setup_finished_at - standings_ready_at)) * 1000) AS enrichment_ms,
   round(extract(epoch FROM (setup_finished_at - created_at)) * 1000) AS creation_to_ready_ms
-FROM public.tournament_infos
-WHERE id = :'tournament_id'::integer;
+FROM competition.tournaments
+WHERE tournament_id = :'tournament_id'::integer;
 ```
 
 ### Trace one tournament
@@ -190,9 +190,10 @@ Inspect checkpoint reuse without exposing participant details:
 ```sql
 SELECT
   count(*) AS total_entries,
-  count(*) FILTER (WHERE entry_snapshot_synced_through_event_id >= 7) AS snapshot_current,
-  count(*) FILTER (WHERE entry_transfers_synced_through_event_id >= 7) AS transfers_current
-FROM public.entry_infos;
+  count(*) FILTER (WHERE snapshot_synced_through_event_id >= 7) AS snapshot_current,
+  count(*) FILTER (WHERE transfers_synced_through_event_id >= 7) AS transfers_current
+FROM competition.entries
+WHERE season_id = (SELECT season_id FROM fpl.seasons WHERE is_current);
 ```
 
 Aggregate outcome, upstream pressure, and reuse for a comparable observation window:
@@ -217,7 +218,7 @@ docker compose logs --no-color --no-log-prefix --since 7d api worker \
 Do not infer success from a worker completion line alone: a `partial` outcome or non-zero failed
 unit count remains actionable. Existing final-failure Telegram alerts remain the alerting path.
 
-A retained `LaunchNotification:*:lock` means delivery may have succeeded while the durable marker
+A retained `llm:v3:queue:coordination:launch-notification:*:lock` means delivery may have succeeded while the durable marker
 could not be written. Check the notification destination first. If it was delivered, write the
 corresponding marker before deleting the lock; if delivery definitely failed, delete only that
 exact transition lock so the next monitor tick can retry.
@@ -229,15 +230,13 @@ explicitly outside that claim.
 
 ## Post-deploy season readiness
 
-`/health` proves API liveness. `/ready` additionally requires PostgreSQL,
-Redis, and a valid FPL-derived `Season:active`; a fresh Redis deployment can be
-healthy while readiness remains `503` until events sync completes.
+`/health` proves API liveness. `/ready` additionally requires PostgreSQL, both Redis endpoints,
+and exactly one current row in `fpl.seasons`. Publication integrity is monitored separately.
 
 For a new season, run the staged write and independent PostgreSQL/Redis audit in
-[docs/fpl-season-readiness.md](docs/fpl-season-readiness.md). Do not set
-`Season:active` manually, infer an endpoint's availability from local data, or
-treat a successful container rollout as proof that current-season data is
-complete.
+[docs/fpl-season-readiness.md](docs/fpl-season-readiness.md). Do not manufacture a Redis manifest,
+infer the current season from the wall clock, or treat a successful container rollout as proof
+that current-season data is complete.
 
 ## Legacy Manual Deployment (Break Glass)
 The original bare-metal guide is retained below for emergencies when Docker/CI/CD are unavailable.

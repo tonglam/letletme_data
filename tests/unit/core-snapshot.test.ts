@@ -1,16 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 
-import { buildCoreSnapshotCachePlan } from '../../src/cache/core-snapshot-cache';
 import {
   CORE_SNAPSHOT_MIN_PLAYERS_PER_TEAM,
   prepareCoreSnapshot,
 } from '../../src/domain/core-snapshot';
-import { CacheError } from '../../src/utils/errors';
-import {
-  syncCoreSnapshot,
-  type CoreSnapshotDependencies,
-  type CoreSnapshotMilestone,
-} from '../../src/services/core-snapshot.service';
 import { buildCoreSnapshotFixture } from '../fixtures/core-snapshot.fixtures';
 
 describe('core snapshot validation', () => {
@@ -24,17 +17,6 @@ describe('core snapshot validation', () => {
     expect(snapshot.players).toHaveLength(220);
     expect(snapshot.phases).toHaveLength(1);
     expect(snapshot.fixtures).toHaveLength(380);
-
-    const plan = buildCoreSnapshotCachePlan(snapshot);
-    expect(plan.hashes.get('Event:2627')).toHaveProperty('38');
-    expect(plan.hashes.get('Team:2627')).toHaveProperty('20');
-    expect(plan.hashes.get('Player:2627')).toHaveProperty('220');
-    expect([...plan.hashes.keys()].filter((key) => key.startsWith('Fixtures:2627:'))).toHaveLength(
-      38,
-    );
-    expect(
-      [...plan.hashes.keys()].filter((key) => key.startsWith('FixturesByTeam:2627:')),
-    ).toHaveLength(20);
   });
 
   test('rejects incomplete counts, duplicate identifiers, and broken references', () => {
@@ -106,166 +88,13 @@ describe('core snapshot validation', () => {
     ).not.toThrow();
   });
 
-  test('retains valid unassigned fixtures in the cache snapshot', () => {
+  test('retains valid unassigned fixtures in the canonical snapshot', () => {
     const input = buildCoreSnapshotFixture();
     input.fixtures[0] = { ...input.fixtures[0], event: null };
 
     const snapshot = prepareCoreSnapshot(input.bootstrap, input.fixtures);
-    const plan = buildCoreSnapshotCachePlan(snapshot);
 
     expect(snapshot.fixtures[0].event).toBeNull();
-    expect(plan.hashes.get('Fixtures:2627:unscheduled')).toHaveProperty(
-      String(snapshot.fixtures[0].id),
-    );
-  });
-
-  test('omits empty per-team views when every fixture is unassigned', () => {
-    const input = buildCoreSnapshotFixture();
-    input.fixtures = input.fixtures.map((fixture, index) => ({
-      ...fixture,
-      // Keep one GW1 kickoff so fixture-season derivation remains valid while
-      // leaving most team views empty for this cache-plan regression.
-      event: index === 0 ? 1 : null,
-    }));
-
-    const snapshot = prepareCoreSnapshot(input.bootstrap, input.fixtures);
-    const plan = buildCoreSnapshotCachePlan(snapshot);
-
-    const teamHashes = [...plan.hashes.keys()].filter((key) => key.startsWith('FixturesByTeam:'));
-    expect(teamHashes).toHaveLength(2);
-    expect(teamHashes).toEqual(
-      expect.arrayContaining(['FixturesByTeam:2627:1', 'FixturesByTeam:2627:20']),
-    );
-  });
-});
-
-describe('core snapshot synchronization', () => {
-  function dependencies(options?: {
-    activeSeason?: string | null;
-    activeSeasons?: (string | null)[];
-    persist?: () => Promise<unknown>;
-    publish?: () => Promise<{ published: boolean }>;
-    cleanup?: () => Promise<void>;
-    calls?: string[];
-    milestones?: CoreSnapshotMilestone[];
-  }): CoreSnapshotDependencies {
-    const input = buildCoreSnapshotFixture();
-    const calls = options?.calls ?? [];
-    let activeSeasonReads = 0;
-    return {
-      getBootstrap: async () => {
-        calls.push('bootstrap');
-        return input.bootstrap;
-      },
-      getFixtures: async () => {
-        calls.push('fixtures');
-        return input.fixtures;
-      },
-      getActiveSeason: async () => {
-        const sequence = options?.activeSeasons;
-        if (sequence && activeSeasonReads < sequence.length) {
-          return sequence[activeSeasonReads++];
-        }
-        activeSeasonReads += 1;
-        return options?.activeSeason ?? '2627';
-      },
-      readOrderingTimestamp: async () => {
-        calls.push('ordering-timestamp');
-        return new Date('2026-08-04T00:00:00.000Z');
-      },
-      reserveRevision: async () => 1,
-      createPublicationId: () => '00000000-0000-4000-8000-000000000001',
-      recoverPending: async () => undefined,
-      commit: async () => {
-        calls.push('persist');
-        await options?.persist?.();
-        calls.push('publish');
-        const publication = (await options?.publish?.()) ?? { published: true };
-        if (!publication.published) {
-          throw new CacheError(
-            'Core snapshot publication lost authority during persistence',
-            'CORE_SNAPSHOT_PUBLICATION_LOST_AUTHORITY',
-          );
-        }
-        return { status: 'committed' };
-      },
-      cleanup: async () => {
-        calls.push('cleanup');
-        await options?.cleanup?.();
-      },
-      withPersistenceLock: async (operation) => {
-        calls.push('lock');
-        expect(calls).toContain('bootstrap');
-        expect(calls).toContain('fixtures');
-        return operation();
-      },
-      onMilestone: (milestone) => options?.milestones?.push(milestone),
-    };
-  }
-
-  test('performs exactly two upstream reads before locking and publishes after persistence', async () => {
-    const calls: string[] = [];
-    const milestones: CoreSnapshotMilestone[] = [];
-    const result = await syncCoreSnapshot(dependencies({ calls, milestones }));
-
-    expect(calls.filter((call) => call === 'bootstrap')).toHaveLength(1);
-    expect(calls.filter((call) => call === 'fixtures')).toHaveLength(1);
-    expect(calls.indexOf('ordering-timestamp')).toBeLessThan(calls.indexOf('bootstrap'));
-    expect(calls.indexOf('lock')).toBeGreaterThan(calls.indexOf('fixtures'));
-    expect(calls.indexOf('persist')).toBeLessThan(calls.indexOf('publish'));
-    expect(calls.indexOf('publish')).toBeLessThan(calls.indexOf('cleanup'));
-    expect(milestones).toEqual(['fetched', 'validated', 'locked', 'persisted', 'published']);
-    expect(result).toMatchObject({
-      outcome: 'ready',
-      events: 38,
-      teams: 20,
-      fixtures: 380,
-      failedUnits: 0,
-    });
-  });
-
-  test('never publishes after persistence fails', async () => {
-    const calls: string[] = [];
-    await expect(
-      syncCoreSnapshot(
-        dependencies({
-          calls,
-          persist: async () => {
-            throw new Error('database unavailable');
-          },
-        }),
-      ),
-    ).rejects.toThrow('database unavailable');
-    expect(calls).not.toContain('publish');
-  });
-
-  test('does not persist a snapshot older than the active season', async () => {
-    const calls: string[] = [];
-    const result = await syncCoreSnapshot(dependencies({ calls, activeSeason: '2728' }));
-    expect(result.outcome).toBe('noop');
-    expect(calls).not.toContain('persist');
-    expect(calls).not.toContain('publish');
-    expect(calls).not.toContain('cleanup');
-  });
-
-  test('skips stale-season cleanup when authority changes after commit', async () => {
-    const calls: string[] = [];
-    const result = await syncCoreSnapshot(dependencies({ calls, activeSeasons: ['2627', '2728'] }));
-
-    expect(result.outcome).toBe('ready');
-    expect(calls).not.toContain('cleanup');
-  });
-
-  test('fails the attempt when publication loses authority after persistence', async () => {
-    const calls: string[] = [];
-    await expect(
-      syncCoreSnapshot(
-        dependencies({
-          calls,
-          publish: async () => ({ published: false }),
-        }),
-      ),
-    ).rejects.toMatchObject({ code: 'CORE_SNAPSHOT_PUBLICATION_LOST_AUTHORITY' });
-    expect(calls.indexOf('persist')).toBeLessThan(calls.indexOf('publish'));
+    expect(snapshot.fixtures).toHaveLength(380);
   });
 });

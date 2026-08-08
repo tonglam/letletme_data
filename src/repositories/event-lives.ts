@@ -1,13 +1,14 @@
 import { and, eq, getTableColumns, isNotNull, sql } from 'drizzle-orm';
 
 import {
-  eventLive,
+  playerGameweekStatsInFpl,
   type DbEventLive,
   type DbEventLiveInsert,
-} from '../db/schemas/event-lives.schema';
-import { events } from '../db/schemas/events.schema';
+} from '../db/schemas/index.schema';
+import { eventsInFpl } from '../db/schemas/index.schema';
 import { getDb, type DbOrTransaction } from '../db/singleton';
 import type { EventLive } from '../domain/event-lives';
+import type { FplSeasonRef } from '../domain/fpl-season';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 
@@ -28,10 +29,18 @@ export const createEventLiveRepository = (dbInstance?: DbOrTransaction) => {
     /**
      * Find all event live records for a specific event
      */
-    findByEventId: async (eventId: number): Promise<DbEventLive[]> => {
+    findByEventId: async (season: FplSeasonRef, eventId: number): Promise<DbEventLive[]> => {
       try {
         const db = await getDbInstance();
-        const result = await db.select().from(eventLive).where(eq(eventLive.eventId, eventId));
+        const result = await db
+          .select()
+          .from(playerGameweekStatsInFpl)
+          .where(
+            and(
+              eq(playerGameweekStatsInFpl.seasonId, season.seasonId),
+              eq(playerGameweekStatsInFpl.eventId, eventId),
+            ),
+          );
 
         logInfo('Retrieved event live data by event ID', { eventId, count: result.length });
         return result;
@@ -50,57 +59,50 @@ export const createEventLiveRepository = (dbInstance?: DbOrTransaction) => {
      * requested season. Event IDs repeat annually, so row presence alone is
      * not sufficient evidence for post-event tournament calculations.
      */
-    findFinalizedByEventIdForSeason: async (
+    findFinalizedByEventId: async (
+      season: FplSeasonRef,
       eventId: number,
-      season: string,
     ): Promise<DbEventLive[]> => {
       try {
-        if (!/^\d{4}$/.test(season)) {
-          throw new Error('A valid four-digit season is required');
-        }
         const db = await getDbInstance();
         const result = await db
-          .select(getTableColumns(eventLive))
-          .from(eventLive)
-          .innerJoin(events, eq(events.id, eventLive.eventId))
+          .select(getTableColumns(playerGameweekStatsInFpl))
+          .from(playerGameweekStatsInFpl)
+          .innerJoin(
+            eventsInFpl,
+            and(
+              eq(eventsInFpl.seasonId, playerGameweekStatsInFpl.seasonId),
+              eq(eventsInFpl.eventId, playerGameweekStatsInFpl.eventId),
+            ),
+          )
           .where(
             and(
-              eq(eventLive.eventId, eventId),
-              eq(events.finished, true),
-              eq(events.dataChecked, true),
-              isNotNull(events.deadlineTime),
+              eq(playerGameweekStatsInFpl.seasonId, season.seasonId),
+              eq(playerGameweekStatsInFpl.eventId, eventId),
+              eq(eventsInFpl.finished, true),
+              eq(eventsInFpl.dataChecked, true),
+              isNotNull(eventsInFpl.deadlineTime),
               // A finalized event flag alone does not prove that the rows
               // came from the final durable live consolidation. The explicit
               // marker is written in that same transaction, after the full
               // event-live payload is persisted; require every accepted row
               // to be newer than that marker.
-              isNotNull(events.liveSnapshotFinalizedAt),
-              sql`coalesce(${eventLive.updatedAt}, ${eventLive.createdAt}) >= ${events.liveSnapshotFinalizedAt}`,
-              sql`coalesce(${eventLive.updatedAt}, ${eventLive.createdAt}) >= ${events.deadlineTime}`,
-              sql`${season} = (
-                select
-                  to_char(season_start.deadline_time at time zone 'UTC', 'YY') ||
-                  to_char(
-                    (season_start.deadline_time at time zone 'UTC') + interval '1 year',
-                    'YY'
-                  )
-                from events as season_start
-                where season_start.id = 1
-                  and season_start.deadline_time is not null
-              )`,
+              isNotNull(eventsInFpl.liveSnapshotFinalizedAt),
+              sql`coalesce(${playerGameweekStatsInFpl.updatedAt}, ${playerGameweekStatsInFpl.createdAt}) >= ${eventsInFpl.liveSnapshotFinalizedAt}`,
+              sql`coalesce(${playerGameweekStatsInFpl.updatedAt}, ${playerGameweekStatsInFpl.createdAt}) >= ${eventsInFpl.deadlineTime}`,
             ),
           );
 
         logInfo('Retrieved season-owned finalized event live data', {
           eventId,
-          season,
+          season: season.seasonCode,
           count: result.length,
         });
         return result;
       } catch (error) {
         logError('Failed to find season-owned finalized event live data', error, {
           eventId,
-          season,
+          season: season.seasonCode,
         });
         throw new DatabaseError(
           `Failed to retrieve finalized event live data for event: ${eventId}`,
@@ -113,13 +115,17 @@ export const createEventLiveRepository = (dbInstance?: DbOrTransaction) => {
     /**
      * Batch upsert event live records
      */
-    upsertBatch: async (eventLiveData: EventLive[]): Promise<DbEventLive[]> => {
+    upsertBatch: async (
+      season: FplSeasonRef,
+      eventLiveData: EventLive[],
+    ): Promise<DbEventLive[]> => {
       try {
         if (eventLiveData.length === 0) {
           return [];
         }
 
         const newRecords: DbEventLiveInsert[] = eventLiveData.map((data) => ({
+          seasonId: season.seasonId,
           eventId: data.eventId,
           elementId: data.elementId,
           minutes: data.minutes,
@@ -135,7 +141,7 @@ export const createEventLiveRepository = (dbInstance?: DbOrTransaction) => {
           saves: data.saves,
           bonus: data.bonus,
           bps: data.bps,
-          defensiveContribution: data.defensiveContribution,
+          defensiveContribution: data.defensiveContribution ?? 0,
           starts: data.starts,
           expectedGoals: data.expectedGoals,
           expectedAssists: data.expectedAssists,
@@ -147,10 +153,14 @@ export const createEventLiveRepository = (dbInstance?: DbOrTransaction) => {
 
         const db = await getDbInstance();
         const result = await db
-          .insert(eventLive)
+          .insert(playerGameweekStatsInFpl)
           .values(newRecords)
           .onConflictDoUpdate({
-            target: [eventLive.eventId, eventLive.elementId],
+            target: [
+              playerGameweekStatsInFpl.seasonId,
+              playerGameweekStatsInFpl.eventId,
+              playerGameweekStatsInFpl.elementId,
+            ],
             set: {
               minutes: sql`excluded.minutes`,
               goalsScored: sql`excluded.goals_scored`,

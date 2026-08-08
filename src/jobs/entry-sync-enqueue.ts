@@ -9,6 +9,7 @@ import {
   ENTRY_SYNC_DEFAULT_THROTTLE_MS,
 } from '../queues/entry-sync.queue';
 import { getEntrySyncJobPriority, type EntrySyncPriorityJobName } from '../domain/job-priority';
+import type { FplSeasonRef } from '../domain/fpl-season';
 import { getCurrentEvent } from '../services/events.service';
 import { logError, logInfo } from '../utils/logger';
 import { stableHash } from '../utils/stable-hash';
@@ -64,6 +65,7 @@ function sanitizePositiveInt(value: number | undefined, fallback: number) {
 
 async function enqueueEntrySyncJob(
   jobName: EntrySyncJobName,
+  season: FplSeasonRef,
   source: EntrySyncJobSource = 'cron',
   options: EntrySyncJobOptions = {},
 ) {
@@ -86,10 +88,10 @@ async function enqueueEntrySyncJob(
       const hasEventScopedManualScan = pendingJobs.some(
         (job) =>
           job.name === jobName &&
+          job.data.seasonId === season.seasonId &&
           job.data.source === 'manual' &&
           job.data.eventId !== undefined &&
-          (job.data.queueKey === 'manual' ||
-            (job.data.queueKey === undefined && job.data.runId === 'manual')),
+          job.data.queueKey === 'manual',
       );
       // Results/picks/transfers roots historically omitted eventId and let the
       // worker resolve it. Once a continuation has resolved its target, an
@@ -99,11 +101,12 @@ async function enqueueEntrySyncJob(
       const resolvedManualEventId =
         options.eventId ??
         (jobName !== 'entry-info' && hasEventScopedManualScan
-          ? (await getCurrentEvent())?.id
+          ? (await getCurrentEvent(season))?.id
           : undefined);
       const existingManualScan = pendingJobs.find(
         (job) =>
           job.name === jobName &&
+          job.data.seasonId === season.seasonId &&
           job.data.source === 'manual' &&
           // Manual scans are event-scoped when a target GW is supplied. An
           // unscoped root is resolved before this reuse check when a resolved
@@ -111,8 +114,7 @@ async function enqueueEntrySyncJob(
           (resolvedManualEventId === undefined
             ? job.data.eventId === undefined
             : job.data.eventId === resolvedManualEventId) &&
-          (job.data.queueKey === 'manual' ||
-            (job.data.queueKey === undefined && job.data.runId === 'manual')),
+          job.data.queueKey === 'manual',
       );
       if (existingManualScan) {
         logInfo('Entry sync manual scan already active; reusing existing', {
@@ -136,6 +138,8 @@ async function enqueueEntrySyncJob(
     const removeOnSettle = options.removeOnSettle === true || isEntryList || source === 'manual';
 
     const jobData = {
+      seasonId: season.seasonId,
+      seasonCode: season.seasonCode,
       source,
       triggeredAt: new Date().toISOString(),
       entryIds: options.entryIds,
@@ -159,8 +163,8 @@ async function enqueueEntrySyncJob(
     // Table-scan chunks get deterministic IDs keyed by the trigger lane + offset
     // so correlation IDs can vary without forking parallel manual chains.
     const defaultJobId = isEntryList
-      ? `${jobName}-entry-list-${hashEntryListKey(options.entryIds ?? [], options.eventId, options.retryCount, runId)}`
-      : `${jobName}-${tableScanQueueKey}-chunk-${chunkKey}`;
+      ? `${jobName}-${season.seasonCode}-entry-list-${hashEntryListKey(options.entryIds ?? [], options.eventId, options.retryCount, runId)}`
+      : `${jobName}-${season.seasonCode}-${tableScanQueueKey}-chunk-${chunkKey}`;
     const jobId = options.jobId ?? defaultJobId;
     // Deterministic IDs must not block re-triggers after settle.
     const job = await queue.add(jobName, jobData, {
@@ -193,21 +197,25 @@ async function enqueueEntrySyncJob(
 }
 
 export const enqueueEntryInfoSyncJob = (
+  season: FplSeasonRef,
   source?: EntrySyncJobSource,
   options?: EntrySyncJobOptions,
-) => enqueueEntrySyncJob('entry-info', source, options);
+) => enqueueEntrySyncJob('entry-info', season, source, options);
 
 export const enqueueEntryPicksSyncJob = (
+  season: FplSeasonRef,
   source?: EntrySyncJobSource,
   options?: EntrySyncJobOptions,
-) => enqueueEntrySyncJob('entry-picks', source, options);
+) => enqueueEntrySyncJob('entry-picks', season, source, options);
 
 export const enqueueEntryTransfersSyncJob = (
+  season: FplSeasonRef,
   source?: EntrySyncJobSource,
   options?: EntrySyncJobOptions,
-) => enqueueEntrySyncJob('entry-transfers', source, options);
+) => enqueueEntrySyncJob('entry-transfers', season, source, options);
 
 export const enqueueEntryResultsSyncJob = (
+  season: FplSeasonRef,
   source?: EntrySyncJobSource,
   options?: EntrySyncJobOptions,
-) => enqueueEntrySyncJob('entry-results', source, options);
+) => enqueueEntrySyncJob('entry-results', season, source, options);

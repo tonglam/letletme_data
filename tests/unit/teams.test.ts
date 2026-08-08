@@ -15,6 +15,7 @@ import {
   singleTransformedTeamFixture,
   transformedTeamsFixture,
 } from '../fixtures/teams.fixtures';
+import { TEST_SEASON } from '../fixtures/seasons.fixtures';
 
 describe('Teams Unit Tests', () => {
   describe('transformTeams Function', () => {
@@ -135,7 +136,7 @@ describe('Teams Unit Tests', () => {
     });
 
     test('should handle upsertBatch with empty array', async () => {
-      const result = await repository.upsertBatch([]);
+      const result = await repository.upsertBatch(TEST_SEASON, []);
       expect(result).toEqual([]);
     });
 
@@ -154,7 +155,7 @@ describe('Teams Unit Tests', () => {
       mockDb.insert = mockInsert;
 
       try {
-        const result = await repository.upsertBatch(transformedTeamsFixture);
+        const result = await repository.upsertBatch(TEST_SEASON, transformedTeamsFixture);
         expect(Array.isArray(result)).toBe(true);
         expect(result as unknown).toEqual(transformedTeamsFixture);
       } finally {
@@ -305,7 +306,9 @@ describe('Teams Unit Tests', () => {
       const errorRepository = createTeamRepository(errorDb as any);
 
       // The errors are wrapped in DatabaseError with custom messages
-      await expect(errorRepository.upsertBatch([singleTransformedTeamFixture])).rejects.toThrow();
+      await expect(
+        errorRepository.upsertBatch(TEST_SEASON, [singleTransformedTeamFixture]),
+      ).rejects.toThrow();
     });
   });
 

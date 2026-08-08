@@ -38,40 +38,29 @@ export function decideEntrySyncChain(input: {
 
 export interface EntryInfoSyncWorkPlan {
   requiredEntryIds: number[];
-  cacheOnlyEntryIds: number[];
   reusedUnits: number;
 }
 
 /**
- * Canonical checkpoints avoid repeated upstream reads, but Redis remains
- * derived state. Any checkpointed row missing from the current cache is
- * cache-only work for both ordinary scans and exact-ID retries.
+ * Canonical PostgreSQL checkpoints avoid repeated upstream reads. Entry data
+ * has no Data Redis publication in v3, so checkpointed rows are simply reused.
  */
 export function planEntryInfoSyncWork(
   entryIds: readonly number[],
   snapshotRequiredEntryIds: readonly number[],
-  cachedEntryIds: ReadonlySet<number>,
   refreshAll = false,
 ): EntryInfoSyncWorkPlan {
   if (refreshAll) {
     return {
       requiredEntryIds: [...entryIds],
-      cacheOnlyEntryIds: [],
       reusedUnits: 0,
     };
   }
   const requiredSnapshotSet = new Set(snapshotRequiredEntryIds);
-  const cacheOnlyEntryIds = entryIds.filter(
-    (entryId) => !requiredSnapshotSet.has(entryId) && !cachedEntryIds.has(entryId),
-  );
-  const cacheOnlySet = new Set(cacheOnlyEntryIds);
-  const requiredEntryIds = entryIds.filter(
-    (entryId) => requiredSnapshotSet.has(entryId) || cacheOnlySet.has(entryId),
-  );
+  const requiredEntryIds = entryIds.filter((entryId) => requiredSnapshotSet.has(entryId));
 
   return {
     requiredEntryIds,
-    cacheOnlyEntryIds,
     reusedUnits: entryIds.length - requiredEntryIds.length,
   };
 }

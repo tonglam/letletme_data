@@ -4,33 +4,31 @@ export type MutationPriorityTier = (typeof MUTATION_PRIORITY_ORDER)[number];
 
 export const MUTATION_PRIORITY_TABLES = {
   p0: [
-    'tournament_entries',
-    'tournament_battle_group_results',
-    'tournament_points_race_results',
-    'tournament_groups',
-    'tournament_knockouts',
-    'tournament_knockout_results',
+    'competition.tournament_entries',
+    'competition.tournament_battle_group_results',
+    'competition.tournament_points_group_results',
+    'competition.tournament_groups',
+    'competition.tournament_knockouts',
+    'competition.tournament_knockout_results',
   ],
-  p1: ['entry_infos', 'entry_history_infos', 'entry_league_infos'],
+  p1: [
+    'competition.entries',
+    'competition.entry_season_histories',
+    'competition.entry_league_memberships',
+  ],
   p2: [
-    'entry_event_results',
-    'entry_event_picks',
-    'entry_event_transfers',
-    'tournament_selection_stats',
+    'competition.entry_event_results',
+    'competition.entry_event_picks',
+    'competition.entry_event_transfers',
+    'reporting.tournament_selection_stats',
   ],
-  p3: ['league_event_results'],
+  p3: ['competition.league_event_results'],
 } as const;
 
 export type DataSyncPriorityJobName =
   | 'core-snapshot'
-  | 'events'
-  | 'fixtures'
-  | 'fixtures-all-gameweeks'
-  | 'teams'
-  | 'players'
   | 'player-prices'
   | 'player-stats'
-  | 'phases'
   | 'player-values';
 
 export type EntrySyncPriorityJobName =
@@ -39,16 +37,7 @@ export type EntrySyncPriorityJobName =
   | 'entry-transfers'
   | 'entry-results';
 
-export type LiveDataPriorityJobName =
-  | 'live-snapshot'
-  | 'event-lives-cache'
-  | 'event-lives-db'
-  | 'event-live-summary'
-  | 'event-live-explain'
-  | 'live-fixture-cache'
-  | 'live-bonus-cache'
-  | 'event-overall-result'
-  | 'live-scores';
+export type LiveDataPriorityJobName = 'live-snapshot';
 
 export type LeagueSyncPriorityJobName = 'league-event-picks' | 'league-event-results';
 
@@ -86,16 +75,7 @@ export function getEntrySyncJobPriority(jobName: EntrySyncPriorityJobName): Muta
 export function getLiveDataJobPriority(jobName: LiveDataPriorityJobName): MutationPriorityTier {
   switch (jobName) {
     case 'live-snapshot':
-    case 'event-lives-cache':
-    case 'event-lives-db':
-    case 'event-live-explain':
-    case 'live-fixture-cache':
-    case 'live-bonus-cache':
-    case 'live-scores':
       return 'p0';
-    case 'event-live-summary':
-    case 'event-overall-result':
-      return 'p3';
   }
 }
 

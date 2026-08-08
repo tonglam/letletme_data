@@ -5,22 +5,13 @@ export const liveDataQueueName = 'live-data';
 
 export const LIVE_JOBS = {
   LIVE_SNAPSHOT: 'live-snapshot',
-  // Legacy names remain the producer wire format during sequential Compose
-  // replacement. New workers route them through LIVE_SNAPSHOT semantics, and
-  // still accept LIVE_SNAPSHOT jobs left by an earlier candidate deployment.
-  EVENT_LIVES_CACHE: 'event-lives-cache',
-  EVENT_LIVES_DB: 'event-lives-db',
-  EVENT_LIVE_SUMMARY: 'event-live-summary',
-  EVENT_LIVE_EXPLAIN: 'event-live-explain',
-  LIVE_FIXTURE_CACHE: 'live-fixture-cache',
-  LIVE_BONUS_CACHE: 'live-bonus-cache',
-  EVENT_OVERALL_RESULT: 'event-overall-result',
-  LIVE_SCORES: 'live-scores',
 } as const;
 
 export type LiveDataJobName = (typeof LIVE_JOBS)[keyof typeof LIVE_JOBS];
 
 export interface LiveDataJobData {
+  seasonId: number;
+  seasonCode: string;
   eventId: number;
   source: 'cron' | 'manual' | 'cascade';
   triggeredAt: string;

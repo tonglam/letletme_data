@@ -11,6 +11,7 @@ export const EventSchema = z.object({
   averageEntryScore: z.number().nullable(),
   finished: z.boolean(),
   dataChecked: z.boolean(),
+  dataCheckedAt: z.date().nullable(),
   highestScoringEntry: z.number().nullable(),
   deadlineTimeEpoch: z.number().nullable(),
   deadlineTimeGameOffset: z.number().nullable(),

@@ -5,6 +5,7 @@ import { enqueueEntryTransfersSyncJob } from './entry-sync-enqueue';
 import { getCurrentEvent } from '../services/events.service';
 import { isAfterMatchDay, isFPLSeason } from '../utils/conditions';
 import { fixtureRepository } from '../repositories/fixtures';
+import { seasonRepository } from '../repositories/seasons';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { logDebug, logInfo } from '../utils/logger';
 import { CRON_TIMEZONE } from '../utils/timezone';
@@ -24,20 +25,21 @@ export function registerEntryTransfersJobs(app: Elysia) {
         try {
           await executeTrackedCron('entry-event-transfers-daily', async () => {
             const now = new Date();
-            if (!(await isFPLSeason(now))) {
+            const season = await seasonRepository.findCurrent();
+            if (!(await isFPLSeason(season, now))) {
               logDebug('Skipping entry transfers sync - not FPL season', {
                 month: now.getMonth() + 1,
               });
               return;
             }
 
-            const currentEvent = await getCurrentEvent();
+            const currentEvent = await getCurrentEvent(season);
             if (!currentEvent) {
               logInfo('Skipping entry transfers sync - no current event');
               return;
             }
 
-            const fixtures = await fixtureRepository.findByEvent(currentEvent.id);
+            const fixtures = await fixtureRepository.findByEvent(season, currentEvent.id);
             if (!isAfterMatchDay(currentEvent, fixtures, now)) {
               logInfo('Skipping entry transfers sync - before matchday end', {
                 eventId: currentEvent.id,
@@ -45,7 +47,9 @@ export function registerEntryTransfersJobs(app: Elysia) {
               return;
             }
 
-            const job = await enqueueEntryTransfersSyncJob('cron', { eventId: currentEvent.id });
+            const job = await enqueueEntryTransfersSyncJob(season, 'cron', {
+              eventId: currentEvent.id,
+            });
             logInfo('Entry transfers sync job enqueued via cron', {
               jobId: job.id,
               eventId: currentEvent.id,

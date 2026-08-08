@@ -1,6 +1,6 @@
 # Data Platform v3 Strict Execution Checklist
 
-Plan version: 3.1.1
+Plan version: 3.2.1
 
 Rule: an item is complete only when its checkbox is checked and the Evidence column contains a
 durable path, SHA, query result, run URL, or backup manifest. Verbal confirmation is not evidence.
@@ -14,7 +14,7 @@ durable path, SHA, query result, run URL, or backup manifest. Verbal confirmatio
 | GraphQL baseline | `8cf4ddc` |
 | Web baseline | `c290d91` |
 | Production project | `gtwcfjoviibmtkevurjw` |
-| Plan version | 3.1.1 |
+| Plan version | 3.2.1 |
 | Cutover approver | User |
 
 ## P0 - Freeze and inventory
@@ -87,18 +87,18 @@ P2 exit gate: migrations reproduce the target from fresh and B0 schemas and all 
 
 | Done | ID | Check | Acceptance | Evidence |
 | --- | --- | --- | --- | --- |
-| [ ] | P3-01 | Create D2 from accepted D1 | Exact predecessor SHA recorded | SHA: |
-| [ ] | P3-02 | Replace schema/table definitions | Only target plural schema-qualified objects exported | Tests: |
-| [ ] | P3-03 | Replace repositories/services | Explicit season required; no suffix construction | Search/test: |
-| [ ] | P3-04 | Replace current-season authority | `fpl.seasons.is_current` is sole authority | Tests: |
-| [ ] | P3-05 | Remove physical summary/stat writes | Summary and tournament stats are reporting reads only | Search/test: |
-| [ ] | P3-06 | Consolidate ops run/publication writes | Idempotent run/item/publication state | Tests: |
-| [ ] | P3-07 | Separate queue and cache Redis clients | Cross-wiring fails configuration/tests | Tests: |
-| [ ] | P3-08 | Implement v3 immutable publication | Atomic pointer and TTL behavior pass | Integration tests: |
-| [ ] | P3-09 | Remove Data Understat cache | No writer/key/config remains | Search/memory report: |
-| [ ] | P3-10 | Remove retired summary/value keys | No writer/key/config remains | Search/test: |
-| [ ] | P3-11 | Add scoped Redis cleanup | Only configured v2 namespaces deleted; no FLUSH | Tests: |
-| [ ] | P3-12 | Run lint/typecheck/unit/integration/build | All pass | Logs: |
+| [x] | P3-01 | Create D2 from accepted D1 | Exact predecessor SHA recorded | `e81696dddda7ff51b1c735e8e0d612cc5294ade7` |
+| [x] | P3-02 | Replace schema/table definitions | Only target plural schema-qualified objects exported | PG15 export/catalog parity, 13 assertions |
+| [x] | P3-03 | Replace repositories/services | Explicit season required; no suffix construction | Residual scan + 664 unit tests + 26-table PG15 persistence contract |
+| [x] | P3-04 | Replace current-season authority | `fpl.seasons.is_current` is sole authority | DB trust-boundary + season unit tests |
+| [x] | P3-05 | Remove physical summary/stat writes | Summary and tournament stats are reporting reads only | Reporting relation/physical-copy assertions |
+| [x] | P3-06 | Consolidate ops run/publication writes | Idempotent run/item/publication state | `sync-operations`: 5/5 |
+| [x] | P3-07 | Separate queue and cache Redis clients | Cross-wiring fails configuration/tests | Unit + Redis integration separation |
+| [x] | P3-08 | Implement v3 immutable publication | Atomic pointer and TTL behavior pass | `data-publication`: 8/8 |
+| [x] | P3-09 | Remove Data Understat cache | No writer/key/config remains | Source/config scan; cleanup allowlist only |
+| [x] | P3-10 | Remove retired summary/value keys | No writer/key/config remains | Source scan + publication contract tests |
+| [x] | P3-11 | Add scoped Redis cleanup | Only configured v2 namespaces deleted; no FLUSH | Cleanup unit tests; `SCAN` + `UNLINK` only |
+| [x] | P3-12 | Run lint/typecheck/unit/integration/build | All pass | `11-p3-runtime-and-cache-acceptance.md`; `12-p3-test-retirement-audit.md` |
 | [ ] | P3-13 | Commit D2 | Clean tree; SHA recorded | SHA: |
 
 ## P4 - GraphQL and Web

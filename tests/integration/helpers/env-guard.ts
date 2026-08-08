@@ -21,9 +21,8 @@
  *
  *   1. RUN_INTEGRATION=1 — integration tests only run via `bun run test:integration`.
  *   2. DATABASE_URL points at test infrastructure (matches localhost | 127.0.0.1 | _test).
- *   3. The effective Redis DB indexes for BOTH the cache client (REDIS_DB) and the
- *      BullMQ queues (QUEUE_REDIS_DB ?? REDIS_DB) are non-zero, so cache flushes
- *      and `queue.drain()` can never touch the shared default (production) DB.
+ *   3. CACHE_REDIS_DB and QUEUE_REDIS_DB are non-zero and resolve to distinct
+ *      endpoints, so cache cleanup and `queue.drain()` cannot cross-wire.
  */
 
 const SAFE_DATABASE_URL_PATTERN = /localhost|127\.0\.0\.1|_test/i;
@@ -33,8 +32,8 @@ function fail(reason: string): never {
     [
       `[env-guard] Integration tests refused to start: ${reason}.`,
       '[env-guard] Integration tests open real PostgreSQL/Redis connections and write data.',
-      '[env-guard] Point DATABASE_URL at a local or *_test database, set REDIS_DB (and',
-      '[env-guard] QUEUE_REDIS_DB when used) to a non-zero test index, then run:',
+      '[env-guard] Point DATABASE_URL at a local or *_test database and set distinct',
+      '[env-guard] non-zero CACHE_REDIS_* and QUEUE_REDIS_* endpoints, then run:',
       '[env-guard]   bun run test:integration',
     ].join('\n'),
   );
@@ -58,15 +57,20 @@ export function assertIntegrationEnv(): void {
     fail('DATABASE_URL does not match test infrastructure (localhost | 127.0.0.1 | _test)');
   }
 
-  const cacheDb = redisDbIndex(process.env.REDIS_DB);
+  const cacheDb = redisDbIndex(process.env.CACHE_REDIS_DB);
   if (cacheDb === 0) {
-    fail('REDIS_DB is unset or 0 (the shared default cache DB)');
+    fail('CACHE_REDIS_DB is unset or 0 (the shared default cache DB)');
   }
 
-  const queueDb =
-    process.env.QUEUE_REDIS_DB !== undefined ? redisDbIndex(process.env.QUEUE_REDIS_DB) : cacheDb;
+  const queueDb = redisDbIndex(process.env.QUEUE_REDIS_DB);
   if (queueDb === 0) {
-    fail('QUEUE_REDIS_DB resolves to 0 (BullMQ queues would drain against the shared DB)');
+    fail('QUEUE_REDIS_DB is unset or 0 (BullMQ would drain against a shared DB)');
+  }
+
+  const cacheEndpoint = `${process.env.CACHE_REDIS_HOST ?? ''}:${process.env.CACHE_REDIS_PORT ?? ''}/${cacheDb}`;
+  const queueEndpoint = `${process.env.QUEUE_REDIS_HOST ?? ''}:${process.env.QUEUE_REDIS_PORT ?? ''}/${queueDb}`;
+  if (cacheEndpoint === queueEndpoint) {
+    fail('CACHE_REDIS_* and QUEUE_REDIS_* resolve to the same endpoint');
   }
 }
 

@@ -1,5 +1,6 @@
 import { fplClient } from '../clients/fpl';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
+import type { FplSeasonRef } from '../domain/fpl-season';
 import { mapWithConcurrency } from '../utils/async';
 import { IncompleteDataSyncError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
@@ -14,7 +15,10 @@ async function fetchLeagueName(leagueId: number, leagueType: 'classic' | 'h2h') 
   return standings.league?.name ?? null;
 }
 
-export async function syncTournamentInfo(options?: { concurrency?: number }): Promise<{
+export async function syncTournamentInfo(
+  season: FplSeasonRef,
+  options?: { concurrency?: number },
+): Promise<{
   total: number;
   updated: number;
   skipped: number;
@@ -26,7 +30,7 @@ export async function syncTournamentInfo(options?: { concurrency?: number }): Pr
 }> {
   logInfo('Starting tournament info sync');
 
-  const tournaments = await tournamentInfoRepository.findAllNames();
+  const tournaments = await tournamentInfoRepository.findAllNames(season);
   if (tournaments.length === 0) {
     logInfo('No tournament info records found');
     return {
@@ -84,7 +88,7 @@ export async function syncTournamentInfo(options?: { concurrency?: number }): Pr
     })
     .filter((update): update is { id: number; sourceLeagueName: string } => Boolean(update));
 
-  const updated = await tournamentInfoRepository.updateSourceLeagueNames(updates);
+  const updated = await tournamentInfoRepository.updateSourceLeagueNames(season, updates);
   const skipped = tournaments.length - updated;
 
   logInfo('Tournament info sync completed', {

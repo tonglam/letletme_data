@@ -149,6 +149,6 @@ export async function alertOnFinalFailure(job: Job, error: unknown): Promise<voi
  * This wrapper never throws; it logs per-channel failures.
  */
 export async function notifyTwoBots(text: string): Promise<void> {
-  await sendTelegramBotNotification(text).catch(() => {});
-  await sendWeChatBotNotification(text).catch(() => {});
+  await sendTelegramBotNotification(text).catch(() => undefined);
+  await sendWeChatBotNotification(text).catch(() => undefined);
 }

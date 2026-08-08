@@ -4,6 +4,8 @@ import { closeTieredQueues, createTieredQueueSet } from './tiered-queue';
 export const tournamentSetupQueueName = 'tournament-setup';
 
 export interface TournamentSetupJobData {
+  seasonId: number;
+  seasonCode: string;
   tournamentId: number;
   source: 'create' | 'manual' | 'watchdog' | 'roster' | 'resume';
   triggeredAt: string;

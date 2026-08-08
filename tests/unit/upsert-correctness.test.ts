@@ -1,50 +1,15 @@
 import { describe, expect, it } from 'bun:test';
 
-import { drizzle } from 'drizzle-orm/pg-proxy';
-
-import type { PlayerValue } from '../../src/domain/player-values';
 import { buildTransferReplacementRows } from '../../src/repositories/entry-event-transfers';
-import { createPlayerValuesRepository } from '../../src/repositories/player-values';
 import type { RawFPLEntryTransfer } from '../../src/types';
+import { TEST_SEASON } from '../fixtures/seasons.fixtures';
 
 /**
  * FP-10 (H5, H6): upsert correctness.
- * The generated SQL must (a) never null out a computed
- * entry_event_transfers.element_in_played on re-sync, and (b) make
- * player_values inserts idempotent against the unique
- * (element_id, change_date) index so concurrent/repeated syncs don't
- * blow up the batch.
+ * A repeated transfer refresh must never null out computed enrichment.
+ * Player values are now derived from canonical market snapshots and have no
+ * second writable repository to test here.
  */
-
-type CapturedQuery = { sql: string; method: string; params: unknown[] };
-
-type ProxyDb = Parameters<typeof createPlayerValuesRepository>[0];
-
-function createCapturingDb(rowsForAll: unknown[] = []) {
-  const queries: CapturedQuery[] = [];
-  const db = drizzle(async (query, params, method) => {
-    queries.push({ sql: query, method, params });
-    return { rows: method === 'execute' ? [] : rowsForAll };
-  }) as unknown as NonNullable<ProxyDb>;
-  return { db, queries };
-}
-
-function buildPlayerValue(elementId: number, changeDate = '20260717'): PlayerValue {
-  return {
-    elementId,
-    webName: `Player ${elementId}`,
-    elementType: 1,
-    elementTypeName: 'GKP',
-    eventId: 1,
-    teamId: 1,
-    teamName: 'Team',
-    teamShortName: 'T',
-    value: 50,
-    changeDate,
-    changeType: 'Rise',
-    lastValue: 49,
-  } as PlayerValue;
-}
 
 const TRANSFER: RawFPLEntryTransfer = {
   element_in: 100,
@@ -59,12 +24,15 @@ const TRANSFER: RawFPLEntryTransfer = {
 describe('entry-event-transfers upsert (H5)', () => {
   it('keeps computed fields when an identical transfer is refreshed without them', () => {
     const rows = buildTransferReplacementRows({
+      season: TEST_SEASON,
       entryId: 12345,
       eventId: 10,
       transfers: [TRANSFER],
       existing: [
         {
           id: 1,
+          seasonId: TEST_SEASON.seasonId,
+          transferId: 1,
           entryId: 12345,
           eventId: 10,
           elementInId: 100,
@@ -90,6 +58,7 @@ describe('entry-event-transfers upsert (H5)', () => {
 
   it('keeps only the latest transfer before the schema cutover', () => {
     const rows = buildTransferReplacementRows({
+      season: TEST_SEASON,
       entryId: 12345,
       eventId: 10,
       transfers: [
@@ -111,6 +80,7 @@ describe('entry-event-transfers upsert (H5)', () => {
 
   it('plans the complete ordered history after the schema cutover', () => {
     const rows = buildTransferReplacementRows({
+      season: TEST_SEASON,
       entryId: 12345,
       eventId: 10,
       transfers: [
@@ -125,59 +95,5 @@ describe('entry-event-transfers upsert (H5)', () => {
     expect(rows).toHaveLength(3);
     expect(rows.map((row) => row.eventId)).toEqual([9, 10, 10]);
     expect(rows.map((row) => row.elementInId)).toEqual([100, 100, 101]);
-  });
-});
-
-describe('player-values insertBatch (H6)', () => {
-  it('inserts with ON CONFLICT (element_id, change_date) DO NOTHING', async () => {
-    const { db, queries } = createCapturingDb();
-    const repo = createPlayerValuesRepository(db);
-
-    await repo.insertBatch([buildPlayerValue(1), buildPlayerValue(2)]);
-
-    expect(queries).toHaveLength(1);
-    expect(queries[0].sql).toContain('on conflict ("element_id","change_date") do nothing');
-  });
-
-  it('maps the domain Faller label to the database fall enum', async () => {
-    const { db, queries } = createCapturingDb();
-    const repo = createPlayerValuesRepository(db);
-
-    await repo.insertBatch([{ ...buildPlayerValue(1), changeType: 'Faller' }]);
-
-    expect(queries[0].params).toContain('fall');
-    expect(queries[0].params).not.toContain('faller');
-  });
-
-  it('reports the actually inserted count and only those domain rows', async () => {
-    // Simulate 2 of 3 rows winning the race — the rest hit DO NOTHING.
-    // pg-proxy returning() expects array rows in column order:
-    // id, element_id, element_type, event_id, value, change_date, change_type, last_value, created_at
-    const { db } = createCapturingDb([
-      [1, 1, 1, 1, 50, '20260717', 'rise', 49, new Date()],
-      [2, 2, 1, 1, 50, '20260717', 'rise', 49, new Date()],
-    ]);
-    const repo = createPlayerValuesRepository(db);
-
-    const result = await repo.insertBatch([
-      buildPlayerValue(1),
-      buildPlayerValue(2),
-      buildPlayerValue(3),
-    ]);
-
-    expect(result.count).toBe(2);
-    expect(result.inserted.map((pv) => pv.elementId)).toEqual([1, 2]);
-    expect(result.inserted.some((pv) => pv.elementId === 3)).toBe(false);
-  });
-
-  it('short-circuits empty batches without touching the database', async () => {
-    const { db, queries } = createCapturingDb();
-    const repo = createPlayerValuesRepository(db);
-
-    const result = await repo.insertBatch([]);
-
-    expect(result.count).toBe(0);
-    expect(result.inserted).toEqual([]);
-    expect(queries).toHaveLength(0);
   });
 });

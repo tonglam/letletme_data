@@ -3,16 +3,22 @@ import { describe, expect, test } from 'bun:test';
 import { checkReadiness } from '../../src/api/health';
 
 describe('data API readiness', () => {
-  test('is ready only when PostgreSQL, Redis, and active season respond', async () => {
+  test('is ready only when PostgreSQL, both Redis roles, and active season respond', async () => {
     await expect(
       checkReadiness({
         postgres: async () => true,
-        redis: async () => true,
+        cacheRedis: async () => true,
+        queueRedis: async () => true,
         activeSeason: async () => true,
       }),
     ).resolves.toEqual({
       ready: true,
-      dependencies: { postgres: true, redis: true, activeSeason: true },
+      dependencies: {
+        postgres: true,
+        cacheRedis: true,
+        queueRedis: true,
+        activeSeason: true,
+      },
     });
   });
 
@@ -22,12 +28,18 @@ describe('data API readiness', () => {
         postgres: async () => {
           throw new Error('database unavailable');
         },
-        redis: async () => false,
+        cacheRedis: async () => false,
+        queueRedis: async () => true,
         activeSeason: async () => false,
       }),
     ).resolves.toEqual({
       ready: false,
-      dependencies: { postgres: false, redis: false, activeSeason: false },
+      dependencies: {
+        postgres: false,
+        cacheRedis: false,
+        queueRedis: true,
+        activeSeason: false,
+      },
     });
   });
 });

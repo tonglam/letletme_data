@@ -1,4 +1,5 @@
 import { getDbClient } from '../db/singleton';
+import type { FplSeasonRef } from '../domain/fpl-season';
 import { tournamentSetupRebuildScopes } from '../domain/mutation-scope';
 import {
   buildKnockoutRows,
@@ -35,40 +36,52 @@ function isCriticalAuditIssue(issue: string): boolean {
   );
 }
 
-async function loadPresentEntryInfoIds(entryIds: number[]): Promise<number[]> {
+async function loadPresentEntryInfoIds(
+  season: FplSeasonRef,
+  entryIds: number[],
+): Promise<number[]> {
   if (entryIds.length === 0) {
     return [];
   }
   const client = await getDbClient();
   const rows = await client<{ entryId: number }[]>`
-    select id as "entryId"
-    from entry_infos
-    where id = any(${entryIds})
+    SELECT entry_id AS "entryId"
+    FROM competition.entries
+    WHERE season_id = ${season.seasonId}
+      AND entry_id = ANY(${entryIds}::int[])
   `;
   return rows.map((row) => row.entryId);
 }
 
-async function loadPresentEntryLeagueInfoIds(entryIds: number[]): Promise<number[]> {
+async function loadPresentEntryLeagueInfoIds(
+  season: FplSeasonRef,
+  entryIds: number[],
+): Promise<number[]> {
   if (entryIds.length === 0) {
     return [];
   }
   const client = await getDbClient();
   const rows = await client<{ entryId: number }[]>`
-    select distinct entry_id as "entryId"
-    from entry_league_infos
-    where entry_id = any(${entryIds})
+    SELECT DISTINCT entry_id AS "entryId"
+    FROM competition.entry_leagues
+    WHERE season_id = ${season.seasonId}
+      AND entry_id = ANY(${entryIds}::int[])
   `;
   return rows.map((row) => row.entryId);
 }
 
 export async function auditTournamentSetup(
+  season: FplSeasonRef,
   tournament: TournamentConfig,
   window: TournamentBackfillWindow | null,
 ): Promise<TournamentAuditResult> {
   const issues: string[] = [];
   const rerunEventIds = new Set<number>();
   const client = await getDbClient();
-  const entryIds = await tournamentEntryRepository.findEntryIdsByTournamentId(tournament.id);
+  const entryIds = await tournamentEntryRepository.findEntryIdsByTournamentId(
+    season,
+    tournament.id,
+  );
 
   if (entryIds.length !== tournament.totalTeamNum) {
     issues.push(
@@ -76,13 +89,13 @@ export async function auditTournamentSetup(
     );
   }
 
-  const presentEntryInfoIds = new Set(await loadPresentEntryInfoIds(entryIds));
+  const presentEntryInfoIds = new Set(await loadPresentEntryInfoIds(season, entryIds));
   const missingEntryInfoIds = entryIds.filter((entryId) => !presentEntryInfoIds.has(entryId));
   if (missingEntryInfoIds.length > 0) {
     issues.push(`missing entry_infos for ${missingEntryInfoIds.length} entries`);
   }
 
-  const presentEntryLeagueInfoIds = new Set(await loadPresentEntryLeagueInfoIds(entryIds));
+  const presentEntryLeagueInfoIds = new Set(await loadPresentEntryLeagueInfoIds(season, entryIds));
   const missingEntryLeagueInfoIds = entryIds.filter(
     (entryId) => !presentEntryLeagueInfoIds.has(entryId),
   );
@@ -92,8 +105,8 @@ export async function auditTournamentSetup(
 
   let requiresStructureRebuild = false;
 
-  if (tournament.groupMode === 'points_races') {
-    const groupRows = await tournamentGroupRepository.findGroupSlots(tournament.id);
+  if (tournament.groupMode !== 'no_group') {
+    const groupRows = await tournamentGroupRepository.findGroupSlots(season, tournament.id);
 
     if (groupRows.length !== entryIds.length) {
       issues.push(
@@ -127,8 +140,18 @@ export async function auditTournamentSetup(
 
     const [knockoutCount] = await client<{ matchCount: number; resultCount: number }[]>`
       select
-        (select count(*)::int from tournament_knockouts where tournament_id = ${tournament.id}) as "matchCount",
-        (select count(*)::int from tournament_knockout_results where tournament_id = ${tournament.id}) as "resultCount"
+        (
+          SELECT count(*)::int
+          FROM competition.tournament_knockouts
+          WHERE season_id = ${season.seasonId}
+            AND tournament_id = ${tournament.id}
+        ) AS "matchCount",
+        (
+          SELECT count(*)::int
+          FROM competition.tournament_knockout_results
+          WHERE season_id = ${season.seasonId}
+            AND tournament_id = ${tournament.id}
+        ) AS "resultCount"
     `;
 
     if (
@@ -156,10 +179,11 @@ export async function auditTournamentSetup(
     select
       event_id as "eventId",
       count(distinct entry_id)::int as "rowCount"
-    from entry_event_results
-    where entry_id = any(${entryIds})
-      and event_id between ${window.startEventId} and ${window.endEventId}
-    group by event_id
+    FROM competition.entry_event_results
+    WHERE season_id = ${season.seasonId}
+      AND entry_id = ANY(${entryIds}::int[])
+      AND event_id BETWEEN ${window.startEventId} AND ${window.endEventId}
+    GROUP BY event_id
   `;
   const entryResultCountMap = new Map(entryResultCounts.map((row) => [row.eventId, row.rowCount]));
 
@@ -183,10 +207,11 @@ export async function auditTournamentSetup(
         select
           event_id as "eventId",
           count(*)::int as "rowCount"
-        from tournament_points_group_results
-        where tournament_id = ${tournament.id}
-          and event_id between ${overlapStart} and ${overlapEnd}
-        group by event_id
+        FROM competition.tournament_points_group_results
+        WHERE season_id = ${season.seasonId}
+          AND tournament_id = ${tournament.id}
+          AND event_id BETWEEN ${overlapStart} AND ${overlapEnd}
+        GROUP BY event_id
       `;
       const pointsCountMap = new Map(pointsCounts.map((row) => [row.eventId, row.rowCount]));
 
@@ -222,10 +247,11 @@ export async function auditTournamentSetup(
           count(*) filter (
             where home_entry_id is null or away_entry_id is null or match_winner is null
           )::int as "invalidCount"
-        from tournament_knockout_results
-        where tournament_id = ${tournament.id}
-          and event_id between ${overlapStart} and ${overlapEnd}
-        group by event_id
+        FROM competition.tournament_knockout_results
+        WHERE season_id = ${season.seasonId}
+          AND tournament_id = ${tournament.id}
+          AND event_id BETWEEN ${overlapStart} AND ${overlapEnd}
+        GROUP BY event_id
       `;
       const knockoutCountMap = new Map(knockoutCounts.map((row) => [row.eventId, row]));
 
@@ -250,12 +276,13 @@ export async function auditTournamentSetup(
 }
 
 export async function runTournamentAuditAndFixup(
+  season: FplSeasonRef,
   tournament: TournamentConfig,
   entryIds: number[],
   window: TournamentBackfillWindow | null,
 ): Promise<TournamentSetupIssue[]> {
   const warnings: TournamentSetupIssue[] = [];
-  const audit = await auditTournamentSetup(tournament, window);
+  const audit = await auditTournamentSetup(season, tournament, window);
   if (audit.issues.length === 0) {
     return warnings;
   }
@@ -279,7 +306,7 @@ export async function runTournamentAuditAndFixup(
         scopes: ['entry-core:all'],
       },
       () =>
-        syncTournamentEntryDetails(missingEntryIds, {
+        syncTournamentEntryDetails(season, missingEntryIds, {
           targetEventId: window?.endEventId ?? 0,
         }),
     );
@@ -287,7 +314,10 @@ export async function runTournamentAuditAndFixup(
   }
 
   if (audit.requiresStructureRebuild) {
-    const entrySeeds = await tournamentEntryRepository.findEntrySeedsByTournamentId(tournament.id);
+    const entrySeeds = await tournamentEntryRepository.findEntrySeedsByTournamentId(
+      season,
+      tournament.id,
+    );
     // C4: audit rebuild must hold structure global (setup worker no longer
     // wraps the whole job — FP-07 Codex P1).
     await withMutationConflictGuard(
@@ -297,10 +327,11 @@ export async function runTournamentAuditAndFixup(
         tournamentId: tournament.id,
         scopes: tournamentSetupRebuildScopes(tournament.id),
       },
-      () => rebuildTournamentStructure(tournament, entrySeeds),
+      () => rebuildTournamentStructure(season, tournament, entrySeeds),
     );
     // Per-event structure locks inside backfillTournamentHistory.
     const backfillIssues = await backfillTournamentHistory(
+      season,
       tournament.id,
       tournament,
       entryIds,
@@ -311,6 +342,7 @@ export async function runTournamentAuditAndFixup(
     for (const eventId of audit.rerunEventIds) {
       // Structure locks live inside runTournamentEventBackfill (points/knockout only).
       const rerunIssues = await runTournamentEventBackfill(
+        season,
         tournament.id,
         tournament,
         entryIds,
@@ -320,7 +352,7 @@ export async function runTournamentAuditAndFixup(
     }
   }
 
-  const verifiedAudit = await auditTournamentSetup(tournament, window);
+  const verifiedAudit = await auditTournamentSetup(season, tournament, window);
   const criticalIssues = verifiedAudit.issues.filter(isCriticalAuditIssue);
   if (criticalIssues.length > 0) {
     throw new Error(`Tournament setup audit failed: ${verifiedAudit.issues.join('; ')}`);

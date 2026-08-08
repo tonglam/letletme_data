@@ -200,11 +200,9 @@ logInfo('🚀 Elysia server started', {
     'data-sync',
     'launch-monitor',
     'player-values-window',
-    'live-scores',
+    'live-snapshot',
+    'post-match-consolidation',
     'event-current-refresh',
-    'event-live-summary',
-    'event-live-explain',
-    'event-overall-result',
     'entry-info',
     'entry-picks',
     'entry-transfers',
@@ -220,6 +218,8 @@ logInfo('🚀 Elysia server started', {
     'tournament-points-race-results',
     'tournament-battle-race-results',
     'tournament-knockout-results',
+    'tournament-selection-stats',
+    'tournament-materialized-views-refresh',
   ],
 });
 

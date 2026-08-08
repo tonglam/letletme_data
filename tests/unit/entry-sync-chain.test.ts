@@ -48,18 +48,16 @@ describe('entry sync keyset chain', () => {
     });
   });
 
-  test('retries cache publication after the database checkpoint has advanced', () => {
-    expect(planEntryInfoSyncWork([1, 2, 3], [1], new Set([2]))).toEqual({
+  test('reuses rows that already have a canonical database checkpoint', () => {
+    expect(planEntryInfoSyncWork([1, 2, 3], [1, 3])).toEqual({
       requiredEntryIds: [1, 3],
-      cacheOnlyEntryIds: [3],
       reusedUnits: 1,
     });
   });
 
   test('refreshes every profile in a scheduled daily scan', () => {
-    expect(planEntryInfoSyncWork([1, 2, 3], [], new Set([1, 2, 3]), true)).toEqual({
+    expect(planEntryInfoSyncWork([1, 2, 3], [], true)).toEqual({
       requiredEntryIds: [1, 2, 3],
-      cacheOnlyEntryIds: [],
       reusedUnits: 0,
     });
   });

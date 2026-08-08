@@ -1,62 +1,51 @@
 # Cache retention summary
 
-This page is a quick retention view. The binding key names, shapes, ownership,
-and rollover rules are in [redis-contract.md](redis-contract.md).
+This page is the quick retention view. The binding key names, manifest validation, ownership, and
+cleanup rules are in [redis-contract.md](redis-contract.md).
 
-## Data read models
+## Data publications on cache Redis
 
-Data hashes do not expire by TTL. They are replaced by sync writers and the
-season-scoped families are removed when `Season:active` advances.
+| State | Key pattern | TTL |
+| --- | --- | ---: |
+| Core active manifest | `llm:v3:data:fpl:core:{season}:active` | none |
+| Core active items | `llm:v3:data:fpl:core:{season}:{revision}:*` | none |
+| Live active manifest | `llm:v3:data:fpl:live:{season}:{event}:active` | none |
+| Live active items | `llm:v3:data:fpl:live:{season}:{event}:{revision}:*` | none |
+| Unactivated staging items | Same immutable item pattern | 15 minutes |
+| Items from the replaced revision | Same immutable item pattern | 24 hours |
 
-| Family | Key pattern | TTL |
-|---|---|---:|
-| Events | `Event:{season}` | none |
-| Teams | `Team:{season}` | none |
-| Phases | `Phase:{season}` | none |
-| Players | `Player:{season}` | none |
-| Player stats | `PlayerStat:{season}` | none |
-| Entry info | `EntryInfo:{season}` | none |
-| Fixtures | `Fixtures:{season}:{eventId}` | none |
-| Unscheduled fixtures | `Fixtures:{season}:unscheduled` | none |
-| Team fixtures | `FixturesByTeam:{season}:{teamId}` | none |
-| Event live | `EventLive:{season}:{eventId}` | none |
-| Event live explain (frozen legacy) | `EventLiveExplain:{season}:{eventId}` | none |
-| Event live explain V2 | `EventLiveExplainV2:{season}:{eventId}` | none |
-| Event live summary | `EventLiveSummary:{season}:{eventId}` | none |
-| Overall result | `EventOverallResult:{season}` | none |
-| Live fixtures | `LiveFixture:{season}:{eventId}` | none |
-| Live bonus | `LiveBonus:{season}:{eventId}` | none |
-| Live bonus V2 | `LiveBonusV2:{season}:{eventId}` | none |
+Core items are `events`, `teams`, `players`, `phases`, `fixtures`, and
+`currentEventId`. Live items are `eventLives`, `fixtures`, `liveFixtures`,
+`liveFixturesV2`, `liveBonus`, and `liveBonusV2`.
 
-`PlayerValue:{YYYYMMDD}` is date-scoped historical data, also with no TTL, but
-it is deliberately outside automatic season rollover.
+Reads do not extend TTL. Repeating the same publication ID is idempotent. An older competing
+revision cannot replace the active pointer.
 
-## Control and internal state
+## Queue and coordination Redis
 
 | Key family | Retention |
-|---|---|
-| `Season:active` | No TTL; advances only from validated FPL season metadata |
-| `event:current` | No TTL; overwritten in place from the active Event hash |
-| `CoreSnapshotStage:*` | 15 minutes; crash-safe temporary hashes |
-| `CoreSnapshotPublication:pending` | No TTL; one durable recovery receipt, removed after DB commit reconciliation |
-| `CoreSnapshotBackup:*` | No TTL only while the matching pending receipt exists; removed by finalize/rollback recovery |
-| `LaunchNotification:*` | No TTL; year/season suffix provides re-arming |
-| `letletme:entry-info-sync:daily:*` | Expires at the next UTC midnight, minimum 60 seconds |
-| `mutation-lock:*` | Millisecond TTL from `MUTATION_LOCK_TTL_MS` |
-| `tournament-cascade:*` | 24 hours, except the refresh lease at 120 seconds |
-| `bull:*` | Managed by BullMQ queue/worker retention settings |
+| --- | --- |
+| `bull:{queue}:*` | BullMQ job/queue retention settings |
+| `llm:v3:queue:coordination:mutation-lock:*` | Millisecond TTL from `MUTATION_LOCK_TTL_MS` |
+| `llm:v3:queue:coordination:tournament-cascade:*` | 24 hours; refresh lease 120 seconds |
+| `llm:v3:queue:coordination:entry-info-sync:daily:*` | Through the next UTC midnight, minimum 60 seconds |
+| `llm:v3:queue:coordination:launch-notification:*` | Durable completion marker plus bounded delivery lease |
 
-Post-match jobs with deterministic IDs retain successful BullMQ jobs for 24
-hours to deduplicate repeated ticks. Failed deterministic jobs are removed so
-the same hourly slot can be retried.
+Queue/coordination keys must never be written with the cache client.
 
-## Update and rollover behavior
+## Deliberately uncached in Data
 
-- Entity writers replace affected hashes; reads do not extend retention.
-- Empty core upstream arrays preserve the previously accepted cache.
-- After the separately gated database rollover, the committed core publication
-  that advances `Season:active` scans all fifteen season-scoped families and
-  deletes prior-season keys.
-- Rollover does not delete player-value history, notification markers, locks,
-  cascade coordination, BullMQ state, or consumer-owned negative markers.
-- Never use `FLUSHDB` or `FLUSHALL` for cache maintenance.
+- Understat facts;
+- player market history and value changes;
+- player season summaries;
+- tournament selection and entry-event reporting.
+
+GraphQL may cache resulting queries under revision-keyed `llm:v3:gql:*`; those keys are not
+owned by Data.
+
+## Legacy cleanup
+
+Legacy keys have no normal rollover role. The approval-gated cleanup path inventories only
+code-defined v2 patterns with cursor-based `SCAN`, records an exact key hash, enforces a maximum
+count, and deletes through bounded `UNLINK` batches. Every `llm:v3:*` key and every unknown key
+survives. Never use `KEYS`, `FLUSHDB`, or `FLUSHALL`.

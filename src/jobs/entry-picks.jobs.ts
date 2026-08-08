@@ -6,6 +6,7 @@ import { ENTRY_PICKS_CRON_PATTERN } from '../domain/job-schedules';
 import { getCurrentEvent } from '../services/events.service';
 import { isFPLSeason, isSelectTime } from '../utils/conditions';
 import { fixtureRepository } from '../repositories/fixtures';
+import { seasonRepository } from '../repositories/seasons';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { logDebug, logInfo } from '../utils/logger';
 import { CRON_TIMEZONE } from '../utils/timezone';
@@ -27,20 +28,21 @@ export function registerEntryPicksJobs(app: Elysia) {
         try {
           await executeTrackedCron('entry-event-picks-window', async () => {
             const now = new Date();
-            if (!(await isFPLSeason(now))) {
+            const season = await seasonRepository.findCurrent();
+            if (!(await isFPLSeason(season, now))) {
               logDebug('Skipping entry picks sync - not FPL season', {
                 month: now.getMonth() + 1,
               });
               return;
             }
 
-            const currentEvent = await getCurrentEvent();
+            const currentEvent = await getCurrentEvent(season);
             if (!currentEvent) {
               logInfo('Skipping entry picks sync - no current event');
               return;
             }
 
-            const fixtures = await fixtureRepository.findByEvent(currentEvent.id);
+            const fixtures = await fixtureRepository.findByEvent(season, currentEvent.id);
             if (!isSelectTime(currentEvent, fixtures, now)) {
               logInfo('Skipping entry picks sync - outside pick window', {
                 eventId: currentEvent.id,
@@ -48,7 +50,9 @@ export function registerEntryPicksJobs(app: Elysia) {
               return;
             }
 
-            const job = await enqueueEntryPicksSyncJob('cron', { eventId: currentEvent.id });
+            const job = await enqueueEntryPicksSyncJob(season, 'cron', {
+              eventId: currentEvent.id,
+            });
             logInfo('Entry picks sync job enqueued via cron', {
               jobId: job.id,
               eventId: currentEvent.id,

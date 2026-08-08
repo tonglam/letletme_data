@@ -1,7 +1,6 @@
 import Redis from 'ioredis';
 
-import { CacheConfig } from '../types';
-import { getConfig } from '../utils/config';
+import { getConfig, resolveCacheRedisConfig } from '../utils/config';
 import { logError, logInfo } from '../utils/logger';
 
 // Cache commands must fail fast so services fall back to the database during a
@@ -45,13 +44,7 @@ const createRedisSingleton = (connectionOptions?: RedisConnectionOptions) => {
     if (connectionOptions) {
       return connectionOptions;
     }
-    const config = getConfig();
-    return {
-      host: config.REDIS_HOST,
-      port: config.REDIS_PORT,
-      password: config.REDIS_PASSWORD,
-      db: config.REDIS_DB,
-    };
+    return resolveCacheRedisConfig(getConfig());
   };
 
   const getOrCreateClient = (): Redis => {
@@ -227,13 +220,3 @@ export const redisSingleton = createRedisSingleton();
 
 // Exported for tests that need an isolated client lifecycle (e.g. timeout tests)
 export { createRedisSingleton };
-
-// Default cache configuration. Entity caches write with TTL -1 (refresh on
-// write, never expire); only short-lived coordination keys pass an explicit
-// ttl to cache-operations.set.
-export const DEFAULT_CACHE_CONFIG: CacheConfig = {
-  prefix: 'letletme:',
-};
-
-// Convenience export for backward compatibility
-export const getRedis = () => redisSingleton.getClient();

@@ -1,4 +1,4 @@
-import { deriveSeasonFromEvents, deriveSeasonFromFixtures } from '../cache/cache-season';
+import { deriveFplSeasonFromEvents, deriveFplSeasonFromFixtures } from './fpl-source-season';
 import { transformEvents } from '../transformers/events';
 import { transformFixtures } from '../transformers/fixtures';
 import { transformPhases } from '../transformers/phases';
@@ -211,8 +211,8 @@ export function prepareCoreSnapshot(
   requirePhaseCoverage(phases);
   requireFixtureCoverage(fixtures, teamIds);
 
-  const eventSeason = deriveSeasonFromEvents(bootstrap.events);
-  const fixtureSeason = deriveSeasonFromFixtures(rawFixtures);
+  const eventSeason = deriveFplSeasonFromEvents(bootstrap.events);
+  const fixtureSeason = deriveFplSeasonFromFixtures(rawFixtures);
   if (!eventSeason || !fixtureSeason) reject('season cannot be derived from both sources');
   if (eventSeason !== fixtureSeason) reject('event and fixture seasons disagree');
 

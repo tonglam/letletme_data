@@ -1,33 +1,37 @@
-import { and, eq, getTableColumns, gte, inArray, isNotNull, lt, lte, sql } from 'drizzle-orm';
-import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
+import { and, eq, getTableColumns, gte, inArray, isNotNull, lt, lte, ne, sql } from 'drizzle-orm';
 
-import { acquireActiveSeasonReadFence, getActiveCacheSeasonUncached } from '../cache/cache-season';
-import { tournamentInfos, type DbTournamentInfo } from '../db/schemas/index.schema';
-import { getDb, getDbClient } from '../db/singleton';
+import {
+  entriesInCompetition,
+  tournamentEntriesInCompetition,
+  tournamentsInCompetition,
+} from '../db/schemas/index.schema';
+import { getDb, type DbHandle } from '../db/singleton';
+import type { FplSeasonRef } from '../domain/fpl-season';
 import type {
   GroupMode,
   KnockoutMode,
   LeagueType,
   TournamentConfig,
-  TournamentRosterMode,
   TournamentSetupPhase,
   TournamentSetupStatus,
   TournamentStructurePlan,
 } from '../domain/tournament';
 import { ConflictError, DatabaseError } from '../utils/errors';
-import { logError, logInfo } from '../utils/logger';
+import { logError } from '../utils/logger';
 
-type DatabaseInstance = PostgresJsDatabase<Record<string, never>>;
+type TournamentStorage = typeof tournamentsInCompetition.$inferSelect;
 
 export const isTournamentNameConflict = (error: unknown): boolean => {
   if (!error || typeof error !== 'object') return false;
   const record = error as { code?: unknown; constraint_name?: unknown; constraint?: unknown };
   const constraint = String(record.constraint_name ?? record.constraint ?? '');
-  return record.code === '23505' && constraint === 'unique_tournament_name';
+  return record.code === '23505' && constraint === 'tournaments_name_key';
 };
 
 export interface TournamentInfoSummary {
   id: number;
+  seasonId: number;
+  seasonCode: string;
   leagueId: number;
   leagueType: LeagueType;
   totalTeamNum: number;
@@ -66,6 +70,7 @@ export interface TournamentSetupStatusRow {
 
 export interface TournamentCreatedRow {
   id: number;
+  seasonId: number;
   name: string;
   creator: string;
   adminEntryId: number;
@@ -78,750 +83,545 @@ export interface StuckTournamentRow {
   setupProgressUpdatedAt: string | null;
 }
 
-export interface OfficialSyncTournamentRow {
-  id: number;
-  adminEntryId: number;
-  leagueId: number;
-  leagueType: LeagueType;
-  rosterMode: TournamentRosterMode;
-  state: 'active' | 'inactive' | 'finished';
+function exactTimestamp(value: Date | string | null): string | null {
+  return value instanceof Date ? value.toISOString() : value;
 }
 
 function mapTournamentInfo(
-  row: Omit<DbTournamentInfo, 'standingsReadyAt'> & {
+  row: Omit<TournamentStorage, 'standingsReadyAt'> & {
     standingsReadyAt: Date | string | null;
   },
+  season: FplSeasonRef,
 ): TournamentInfoSummary {
   return {
-    id: row.id,
+    id: row.tournamentId,
+    seasonId: row.seasonId,
+    seasonCode: season.seasonCode,
     leagueId: row.leagueId,
     leagueType: row.leagueType,
     totalTeamNum: row.totalTeamNum,
-    groupMode: row.groupMode,
+    groupMode: row.groupMode ?? 'no_group',
     groupStartedEventId: row.groupStartedEventId,
     groupEndedEventId: row.groupEndedEventId,
     groupQualifyNum: row.groupQualifyNum,
-    knockoutMode: row.knockoutMode,
+    knockoutMode: row.knockoutMode ?? 'no_knockout',
     knockoutStartedEventId: row.knockoutStartedEventId,
     knockoutEndedEventId: row.knockoutEndedEventId,
     state: row.state,
-    standingsReadyAt:
-      row.standingsReadyAt instanceof Date
-        ? row.standingsReadyAt.toISOString()
-        : row.standingsReadyAt,
+    standingsReadyAt: exactTimestamp(row.standingsReadyAt),
   };
 }
 
-export const createTournamentInfoRepository = (dbInstance?: DatabaseInstance) => {
-  const getDbInstance = async () => dbInstance || (await getDb());
+export const createTournamentInfoRepository = (dbInstance?: DbHandle) => {
+  const getDbInstance = async () => dbInstance ?? (await getDb());
+  const tournamentScope = (season: FplSeasonRef, tournamentId: number) =>
+    and(
+      eq(tournamentsInCompetition.seasonId, season.seasonId),
+      eq(tournamentsInCompetition.tournamentId, tournamentId),
+    );
 
   return {
-    findAllNames: async (): Promise<TournamentInfoNameSummary[]> => {
+    findAllNames: async (season: FplSeasonRef): Promise<TournamentInfoNameSummary[]> => {
       try {
         const db = await getDbInstance();
         const rows = await db
           .select({
-            id: tournamentInfos.id,
-            name: tournamentInfos.name,
-            sourceLeagueName: tournamentInfos.sourceLeagueName,
-            leagueId: tournamentInfos.leagueId,
-            leagueType: tournamentInfos.leagueType,
+            id: tournamentsInCompetition.tournamentId,
+            name: tournamentsInCompetition.name,
+            sourceLeagueName: tournamentsInCompetition.sourceLeagueName,
+            leagueId: tournamentsInCompetition.leagueId,
+            leagueType: tournamentsInCompetition.leagueType,
           })
-          .from(tournamentInfos);
-        logInfo('Retrieved tournament info names', { count: rows.length });
-        return rows as TournamentInfoNameSummary[];
+          .from(tournamentsInCompetition)
+          .where(eq(tournamentsInCompetition.seasonId, season.seasonId));
+        return rows;
       } catch (error) {
-        logError('Failed to retrieve tournament info names', error);
+        logError('Failed to retrieve tournament info names', error, {
+          season: season.seasonCode,
+        });
         throw new DatabaseError(
           'Failed to retrieve tournament info names',
           'TOURNAMENT_INFO_FIND_ALL_ERROR',
-          error as Error,
+          error instanceof Error ? error : undefined,
         );
       }
     },
 
     updateSourceLeagueNames: async (
+      season: FplSeasonRef,
       updates: Array<{ id: number; sourceLeagueName: string }>,
     ): Promise<number> => {
-      if (updates.length === 0) {
-        return 0;
-      }
+      if (updates.length === 0) return 0;
 
       try {
-        const client = await getDbClient();
-        const ids = updates.map((u) => u.id);
-        const names = updates.map((u) => u.sourceLeagueName);
-
-        await client`
-          update tournament_infos as ti
-          set source_league_name = data.source_league_name,
-              updated_at = now()
-          from (
-            select unnest(${ids}::int[]) as id,
-                   unnest(${names}::text[]) as source_league_name
-          ) as data
-          where ti.id = data.id
-        `;
-
-        logInfo('Updated tournament source league names', { count: updates.length });
-        return updates.length;
+        const db = await getDbInstance();
+        const payload = JSON.stringify(updates);
+        const rows = (await db.execute(sql`
+          UPDATE ${tournamentsInCompetition} AS tournament
+          SET source_league_name = data.source_league_name,
+              updated_at = clock_timestamp()
+          FROM jsonb_to_recordset(${payload}::jsonb) AS data(
+            id int,
+            source_league_name text
+          )
+          WHERE tournament.season_id = ${season.seasonId}
+            AND tournament.tournament_id = data.id
+          RETURNING tournament.tournament_id
+        `)) as unknown as Array<{ tournamentId: number }>;
+        return rows.length;
       } catch (error) {
         logError('Failed to update tournament source league names', error, {
+          season: season.seasonCode,
           count: updates.length,
         });
         throw new DatabaseError(
           'Failed to update tournament source league names',
           'TOURNAMENT_INFO_UPDATE_ERROR',
-          error as Error,
+          error instanceof Error ? error : undefined,
         );
       }
     },
 
-    findById: async (id: number): Promise<TournamentInfoSummary | null> => {
+    findById: async (
+      season: FplSeasonRef,
+      tournamentId: number,
+    ): Promise<TournamentInfoSummary | null> => {
       try {
         const db = await getDbInstance();
         const rows = await db
           .select()
-          .from(tournamentInfos)
-          .where(eq(tournamentInfos.id, id))
+          .from(tournamentsInCompetition)
+          .where(tournamentScope(season, tournamentId))
           .limit(1);
-
-        if (rows.length === 0) {
-          logInfo('Tournament info not found', { id });
-          return null;
-        }
-
-        return mapTournamentInfo(rows[0]);
+        return rows[0] ? mapTournamentInfo(rows[0], season) : null;
       } catch (error) {
-        logError('Failed to retrieve tournament info by id', error, { id });
+        logError('Failed to retrieve tournament info by id', error, {
+          season: season.seasonCode,
+          tournamentId,
+        });
         throw new DatabaseError(
           'Failed to retrieve tournament info by id',
           'TOURNAMENT_INFO_FIND_BY_ID_ERROR',
-          error as Error,
+          error instanceof Error ? error : undefined,
         );
       }
     },
 
-    findActive: async (): Promise<TournamentInfoSummary[]> => {
+    findActive: async (season: FplSeasonRef): Promise<TournamentInfoSummary[]> => {
       try {
         const db = await getDbInstance();
         const rows = await db
           .select({
-            ...getTableColumns(tournamentInfos),
-            // Preserve PostgreSQL's full timestamp precision for the cascade
-            // generation fence instead of truncating it through JavaScript Date.
-            standingsReadyAt: sql<string>`${tournamentInfos.standingsReadyAt}::text`,
+            ...getTableColumns(tournamentsInCompetition),
+            standingsReadyAt: sql<string>`${tournamentsInCompetition.standingsReadyAt}::text`,
           })
-          .from(tournamentInfos)
+          .from(tournamentsInCompetition)
           .where(
-            and(eq(tournamentInfos.state, 'active'), isNotNull(tournamentInfos.standingsReadyAt)),
+            and(
+              eq(tournamentsInCompetition.seasonId, season.seasonId),
+              eq(tournamentsInCompetition.state, 'active'),
+              isNotNull(tournamentsInCompetition.standingsReadyAt),
+            ),
           );
-        const result = rows.map(mapTournamentInfo);
-        logInfo('Retrieved active tournament infos', { count: result.length });
-        return result;
+        return rows.map((row) => mapTournamentInfo(row, season));
       } catch (error) {
-        logError('Failed to retrieve active tournament infos', error);
+        logError('Failed to retrieve active tournament infos', error, {
+          season: season.seasonCode,
+        });
         throw new DatabaseError(
           'Failed to retrieve active tournament infos',
           'TOURNAMENT_INFO_FIND_ACTIVE_ERROR',
-          error as Error,
+          error instanceof Error ? error : undefined,
         );
       }
     },
 
-    findPointsRaceByEvent: async (eventId: number): Promise<TournamentInfoSummary[]> => {
+    findPointsRaceByEvent: async (
+      season: FplSeasonRef,
+      eventId: number,
+    ): Promise<TournamentInfoSummary[]> => {
+      const db = await getDbInstance();
+      const rows = await db
+        .select()
+        .from(tournamentsInCompetition)
+        .where(
+          and(
+            eq(tournamentsInCompetition.seasonId, season.seasonId),
+            eq(tournamentsInCompetition.state, 'active'),
+            isNotNull(tournamentsInCompetition.standingsReadyAt),
+            eq(tournamentsInCompetition.groupMode, 'points_races'),
+            lte(tournamentsInCompetition.groupStartedEventId, eventId),
+            gte(tournamentsInCompetition.groupEndedEventId, eventId),
+          ),
+        );
+      return rows.map((row) => mapTournamentInfo(row, season));
+    },
+
+    findBattleRaceByEvent: async (
+      season: FplSeasonRef,
+      eventId: number,
+    ): Promise<TournamentInfoSummary[]> => {
+      const db = await getDbInstance();
+      const rows = await db
+        .select()
+        .from(tournamentsInCompetition)
+        .where(
+          and(
+            eq(tournamentsInCompetition.seasonId, season.seasonId),
+            eq(tournamentsInCompetition.state, 'active'),
+            isNotNull(tournamentsInCompetition.standingsReadyAt),
+            eq(tournamentsInCompetition.groupMode, 'battle_races'),
+            lte(tournamentsInCompetition.groupStartedEventId, eventId),
+            gte(tournamentsInCompetition.groupEndedEventId, eventId),
+          ),
+        );
+      return rows.map((row) => mapTournamentInfo(row, season));
+    },
+
+    findKnockoutByEvent: async (
+      season: FplSeasonRef,
+      eventId: number,
+    ): Promise<TournamentInfoSummary[]> => {
+      const db = await getDbInstance();
+      const rows = await db
+        .select()
+        .from(tournamentsInCompetition)
+        .where(
+          and(
+            eq(tournamentsInCompetition.seasonId, season.seasonId),
+            eq(tournamentsInCompetition.state, 'active'),
+            isNotNull(tournamentsInCompetition.standingsReadyAt),
+            ne(tournamentsInCompetition.knockoutMode, 'no_knockout'),
+            lte(tournamentsInCompetition.knockoutStartedEventId, eventId),
+            gte(tournamentsInCompetition.knockoutEndedEventId, eventId),
+          ),
+        );
+      return rows.map((row) => mapTournamentInfo(row, season));
+    },
+
+    checkNameExists: async (season: FplSeasonRef, name: string): Promise<boolean> => {
       try {
         const db = await getDbInstance();
         const rows = await db
-          .select()
-          .from(tournamentInfos)
+          .select({ tournamentId: tournamentsInCompetition.tournamentId })
+          .from(tournamentsInCompetition)
           .where(
             and(
-              eq(tournamentInfos.state, 'active'),
-              isNotNull(tournamentInfos.standingsReadyAt),
-              eq(tournamentInfos.groupMode, 'points_races'),
-              lte(tournamentInfos.groupStartedEventId, eventId),
-              gte(tournamentInfos.groupEndedEventId, eventId),
+              eq(tournamentsInCompetition.seasonId, season.seasonId),
+              eq(tournamentsInCompetition.name, name),
             ),
-          );
-        const result = rows.map(mapTournamentInfo);
-        logInfo('Retrieved points race tournaments', { eventId, count: result.length });
-        return result;
+          )
+          .limit(1);
+        return rows.length === 1;
       } catch (error) {
-        logError('Failed to retrieve points race tournaments', error, { eventId });
-        throw new DatabaseError(
-          'Failed to retrieve points race tournaments',
-          'TOURNAMENT_INFO_POINTS_RACE_ERROR',
-          error as Error,
-        );
-      }
-    },
-
-    findBattleRaceByEvent: async (eventId: number): Promise<TournamentInfoSummary[]> => {
-      try {
-        const db = await getDbInstance();
-        const rows = await db
-          .select()
-          .from(tournamentInfos)
-          .where(
-            and(
-              eq(tournamentInfos.state, 'active'),
-              isNotNull(tournamentInfos.standingsReadyAt),
-              eq(tournamentInfos.groupMode, 'battle_races'),
-              lte(tournamentInfos.groupStartedEventId, eventId),
-              gte(tournamentInfos.groupEndedEventId, eventId),
-            ),
-          );
-        const result = rows.map(mapTournamentInfo);
-        logInfo('Retrieved battle race tournaments', { eventId, count: result.length });
-        return result;
-      } catch (error) {
-        logError('Failed to retrieve battle race tournaments', error, { eventId });
-        throw new DatabaseError(
-          'Failed to retrieve battle race tournaments',
-          'TOURNAMENT_INFO_BATTLE_RACE_ERROR',
-          error as Error,
-        );
-      }
-    },
-
-    findKnockoutByEvent: async (eventId: number): Promise<TournamentInfoSummary[]> => {
-      try {
-        const db = await getDbInstance();
-        const rows = await db
-          .select()
-          .from(tournamentInfos)
-          .where(
-            and(
-              eq(tournamentInfos.state, 'active'),
-              isNotNull(tournamentInfos.standingsReadyAt),
-              sql`${tournamentInfos.knockoutMode} <> 'no_knockout'`,
-              lte(tournamentInfos.knockoutStartedEventId, eventId),
-              gte(tournamentInfos.knockoutEndedEventId, eventId),
-            ),
-          );
-        const result = rows.map(mapTournamentInfo);
-        logInfo('Retrieved knockout tournaments', { eventId, count: result.length });
-        return result;
-      } catch (error) {
-        logError('Failed to retrieve knockout tournaments', error, { eventId });
-        throw new DatabaseError(
-          'Failed to retrieve knockout tournaments',
-          'TOURNAMENT_INFO_KNOCKOUT_ERROR',
-          error as Error,
-        );
-      }
-    },
-
-    checkNameExists: async (name: string): Promise<boolean> => {
-      try {
-        const client = await getDbClient();
-        const rows = await client<{ exists: boolean }[]>`
-          select exists(
-            select 1 from tournament_infos where name = ${name}
-          ) as exists
-        `;
-        return rows[0]?.exists === true;
-      } catch (error) {
-        logError('Failed to check tournament name existence', error, { name });
+        logError('Failed to check tournament name existence', error, {
+          season: season.seasonCode,
+          name,
+        });
         throw new DatabaseError(
           'Failed to check tournament name existence',
           'TOURNAMENT_INFO_NAME_CHECK_ERROR',
-          error as Error,
+          error instanceof Error ? error : undefined,
         );
       }
     },
 
-    findSetupConfig: async (tournamentId: number): Promise<TournamentConfig | null> => {
-      try {
-        const client = await getDbClient();
-        const rows = await client<TournamentConfig[]>`
-          select
-            id,
-            total_team_num as "totalTeamNum",
-            group_mode as "groupMode",
-            group_num as "groupNum",
-            group_started_event_id as "groupStartedEventId",
-            group_ended_event_id as "groupEndedEventId",
-            group_qualify_num as "groupQualifyNum",
-            knockout_mode as "knockoutMode",
-            knockout_team_num as "knockoutTeamNum",
-            knockout_event_num as "knockoutEventNum",
-            knockout_started_event_id as "knockoutStartedEventId",
-            knockout_ended_event_id as "knockoutEndedEventId",
-            knockout_play_against_num as "knockoutPlayAgainstNum"
-          from tournament_infos
-          where id = ${tournamentId}
-          limit 1
-        `;
-        return rows[0] ?? null;
-      } catch (error) {
-        logError('Failed to find tournament setup config', error, { tournamentId });
-        throw new DatabaseError(
-          'Failed to find tournament setup config',
-          'TOURNAMENT_INFO_FIND_CONFIG_ERROR',
-          error as Error,
-        );
-      }
+    findSetupConfig: async (
+      season: FplSeasonRef,
+      tournamentId: number,
+    ): Promise<TournamentConfig | null> => {
+      const db = await getDbInstance();
+      const rows = await db
+        .select({
+          id: tournamentsInCompetition.tournamentId,
+          totalTeamNum: tournamentsInCompetition.totalTeamNum,
+          groupMode: tournamentsInCompetition.groupMode,
+          groupNum: tournamentsInCompetition.groupNum,
+          groupStartedEventId: tournamentsInCompetition.groupStartedEventId,
+          groupEndedEventId: tournamentsInCompetition.groupEndedEventId,
+          groupQualifyNum: tournamentsInCompetition.groupQualifyNum,
+          knockoutMode: tournamentsInCompetition.knockoutMode,
+          knockoutTeamNum: tournamentsInCompetition.knockoutTeamNum,
+          knockoutEventNum: tournamentsInCompetition.knockoutEventNum,
+          knockoutStartedEventId: tournamentsInCompetition.knockoutStartedEventId,
+          knockoutEndedEventId: tournamentsInCompetition.knockoutEndedEventId,
+          knockoutPlayAgainstNum: tournamentsInCompetition.knockoutPlayAgainstNum,
+        })
+        .from(tournamentsInCompetition)
+        .where(tournamentScope(season, tournamentId))
+        .limit(1);
+      const row = rows[0];
+      if (!row) return null;
+      return {
+        ...row,
+        groupMode: row.groupMode ?? 'no_group',
+        knockoutMode: row.knockoutMode ?? 'no_knockout',
+      };
     },
 
-    findSetupStatus: async (tournamentId: number): Promise<TournamentSetupStatusRow | null> => {
-      try {
-        const client = await getDbClient();
-        const rows = await client<
-          {
-            created_at: string;
-            setup_status: TournamentSetupStatus;
-            setup_error: string | null;
-            setup_phase: TournamentSetupPhase;
-            setup_completed_units: number;
-            setup_total_units: number;
-            setup_progress_updated_at: string | null;
-            standings_ready_at: string | null;
-            setup_warning_count: number;
-            setup_started_at: string | null;
-            setup_finished_at: string | null;
-          }[]
-        >`
-          select
-            created_at::text,
-            setup_status,
-            setup_error,
-            setup_phase,
-            setup_completed_units,
-            setup_total_units,
-            setup_progress_updated_at::text,
-            standings_ready_at::text,
-            setup_warning_count,
-            setup_started_at::text,
-            setup_finished_at::text
-          from tournament_infos
-          where id = ${tournamentId}
-          limit 1
-        `;
-
-        if (rows.length === 0) {
-          return null;
-        }
-        return {
-          createdAt: rows[0].created_at,
-          setupStatus: rows[0].setup_status,
-          setupError: rows[0].setup_error,
-          setupPhase: rows[0].setup_phase,
-          setupCompletedUnits: rows[0].setup_completed_units,
-          setupTotalUnits: rows[0].setup_total_units,
-          setupProgressUpdatedAt: rows[0].setup_progress_updated_at,
-          standingsReadyAt: rows[0].standings_ready_at,
-          setupWarningCount: rows[0].setup_warning_count,
-          setupStartedAt: rows[0].setup_started_at,
-          setupFinishedAt: rows[0].setup_finished_at,
-        };
-      } catch (error) {
-        logError('Failed to find tournament setup status', error, { tournamentId });
-        throw new DatabaseError(
-          'Failed to find tournament setup status',
-          'TOURNAMENT_INFO_FIND_STATUS_ERROR',
-          error as Error,
-        );
-      }
+    findSetupStatus: async (
+      season: FplSeasonRef,
+      tournamentId: number,
+    ): Promise<TournamentSetupStatusRow | null> => {
+      const db = await getDbInstance();
+      const rows = await db
+        .select({
+          createdAt: sql<string>`${tournamentsInCompetition.createdAt}::text`,
+          setupStatus: tournamentsInCompetition.setupStatus,
+          setupError: tournamentsInCompetition.setupError,
+          setupPhase: tournamentsInCompetition.setupPhase,
+          setupCompletedUnits: tournamentsInCompetition.setupCompletedUnits,
+          setupTotalUnits: tournamentsInCompetition.setupTotalUnits,
+          setupProgressUpdatedAt: sql<
+            string | null
+          >`${tournamentsInCompetition.setupProgressUpdatedAt}::text`,
+          standingsReadyAt: sql<string | null>`${tournamentsInCompetition.standingsReadyAt}::text`,
+          setupWarningCount: tournamentsInCompetition.setupWarningCount,
+          setupStartedAt: sql<string | null>`${tournamentsInCompetition.setupStartedAt}::text`,
+          setupFinishedAt: sql<string | null>`${tournamentsInCompetition.setupFinishedAt}::text`,
+        })
+        .from(tournamentsInCompetition)
+        .where(tournamentScope(season, tournamentId))
+        .limit(1);
+      return rows[0] ?? null;
     },
 
-    markSetupProcessing: async (tournamentId: number): Promise<void> => {
-      try {
-        const db = await getDbInstance();
-        await db.transaction(async (tx) => {
-          const updated = await tx
-            .update(tournamentInfos)
-            .set({
-              setupStatus: 'processing',
-              setupError: null,
-              setupPhase: 'syncing_entries',
-              setupCompletedUnits: 0,
-              setupTotalUnits: 0,
-              setupProgressUpdatedAt: new Date(),
-              setupWarningCount: 0,
-              setupStartedAt: new Date(),
-              setupFinishedAt: null,
-              standingsReadyAt: null,
-              updatedAt: new Date(),
-            })
-            .where(eq(tournamentInfos.id, tournamentId))
-            .returning({ id: tournamentInfos.id });
-
-          // The readiness predicate is evaluated only on refresh. Keep the
-          // existing read model from serving the prior published row while a
-          // retry is rebuilding canonical data.
-          if (updated.length > 0) {
-            await tx.execute(sql`REFRESH MATERIALIZED VIEW public.mv_tournament_event_snapshot`);
-          }
-          if (updated.length > 0) {
-            await tx.execute(sql`REFRESH MATERIALIZED VIEW public.mv_tournament_snapshot`);
-          }
-        });
-      } catch (error) {
-        logError('Failed to mark tournament setup processing', error, { tournamentId });
-        throw new DatabaseError(
-          'Failed to mark tournament setup processing',
-          'TOURNAMENT_INFO_MARK_PROCESSING_ERROR',
-          error as Error,
-        );
-      }
+    markSetupProcessing: async (season: FplSeasonRef, tournamentId: number): Promise<void> => {
+      const db = await getDbInstance();
+      await db
+        .update(tournamentsInCompetition)
+        .set({
+          setupStatus: 'processing',
+          setupError: null,
+          setupPhase: 'syncing_entries',
+          setupCompletedUnits: 0,
+          setupTotalUnits: 0,
+          setupProgressUpdatedAt: new Date(),
+          setupWarningCount: 0,
+          setupStartedAt: new Date(),
+          setupFinishedAt: null,
+          standingsReadyAt: null,
+          updatedAt: new Date(),
+        })
+        .where(tournamentScope(season, tournamentId));
     },
 
-    markSetupRetryQueued: async (tournamentId: number): Promise<void> => {
-      try {
-        const db = await getDbInstance();
-        await db.transaction(async (tx) => {
-          const updated = await tx
-            .update(tournamentInfos)
-            .set({
-              setupStatus: 'pending',
-              setupError: null,
-              setupPhase: 'queued',
-              setupCompletedUnits: 0,
-              setupTotalUnits: 0,
-              setupProgressUpdatedAt: new Date(),
-              setupWarningCount: 0,
-              setupStartedAt: null,
-              setupFinishedAt: null,
-              standingsReadyAt: null,
-              updatedAt: new Date(),
-            })
-            .where(eq(tournamentInfos.id, tournamentId))
-            .returning({ id: tournamentInfos.id });
-
-          if (updated.length > 0) {
-            await tx.execute(sql`REFRESH MATERIALIZED VIEW public.mv_tournament_event_snapshot`);
-          }
-          if (updated.length > 0) {
-            await tx.execute(sql`REFRESH MATERIALIZED VIEW public.mv_tournament_snapshot`);
-          }
-        });
-      } catch (error) {
-        logError('Failed to queue tournament setup retry', error, { tournamentId });
-        throw new DatabaseError(
-          'Failed to queue tournament setup retry',
-          'TOURNAMENT_INFO_MARK_RETRY_QUEUED_ERROR',
-          error as Error,
-        );
-      }
+    markSetupRetryQueued: async (season: FplSeasonRef, tournamentId: number): Promise<void> => {
+      const db = await getDbInstance();
+      await db
+        .update(tournamentsInCompetition)
+        .set({
+          setupStatus: 'pending',
+          setupError: null,
+          setupPhase: 'queued',
+          setupCompletedUnits: 0,
+          setupTotalUnits: 0,
+          setupProgressUpdatedAt: new Date(),
+          setupWarningCount: 0,
+          setupStartedAt: null,
+          setupFinishedAt: null,
+          standingsReadyAt: null,
+          updatedAt: new Date(),
+        })
+        .where(tournamentScope(season, tournamentId));
     },
 
     markSetupProgress: async (
+      season: FplSeasonRef,
       tournamentId: number,
       phase: TournamentSetupPhase,
       completedUnits: number,
       totalUnits: number,
     ): Promise<void> => {
-      try {
-        const db = await getDbInstance();
-        const safeTotal = Math.max(0, Math.trunc(totalUnits));
-        const safeCompleted = Math.min(safeTotal, Math.max(0, Math.trunc(completedUnits)));
-        await db
-          .update(tournamentInfos)
-          .set({
-            setupPhase: phase,
-            setupCompletedUnits: safeCompleted,
-            setupTotalUnits: safeTotal,
-            setupProgressUpdatedAt: new Date(),
-            updatedAt: new Date(),
-          })
-          .where(eq(tournamentInfos.id, tournamentId));
-      } catch (error) {
-        logError('Failed to update tournament setup progress', error, {
-          tournamentId,
-          phase,
-          completedUnits,
-          totalUnits,
-        });
-        throw new DatabaseError(
-          'Failed to update tournament setup progress',
-          'TOURNAMENT_INFO_MARK_PROGRESS_ERROR',
-          error as Error,
-        );
-      }
+      const safeTotal = Math.max(0, Math.trunc(totalUnits));
+      const safeCompleted = Math.min(safeTotal, Math.max(0, Math.trunc(completedUnits)));
+      const db = await getDbInstance();
+      await db
+        .update(tournamentsInCompetition)
+        .set({
+          setupPhase: phase,
+          setupCompletedUnits: safeCompleted,
+          setupTotalUnits: safeTotal,
+          setupProgressUpdatedAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(tournamentScope(season, tournamentId));
     },
 
-    markStandingsReady: async (tournamentId: number, expectedSeason: string): Promise<void> => {
-      try {
-        if (!/^\d{4}$/.test(expectedSeason)) {
-          throw new Error('A valid four-digit setup season is required');
-        }
-        const db = await getDbInstance();
-        await db.transaction(async (tx) => {
-          // Pin annual authority through the readiness write. A rollover takes
-          // the exclusive form of this lock, so an old plan cannot publish
-          // event-numbered standings after Season:active advances.
-          await acquireActiveSeasonReadFence(tx);
-          const activeSeason = await getActiveCacheSeasonUncached();
-          if (activeSeason !== expectedSeason) {
-            throw new Error(
-              `Active season changed from ${expectedSeason} to ${activeSeason} before standings publication`,
-            );
-          }
-          const published = await tx
-            .update(tournamentInfos)
-            .set({
-              standingsReadyAt: sql`COALESCE(${tournamentInfos.standingsReadyAt}, now())`,
-              setupProgressUpdatedAt: new Date(),
-              updatedAt: new Date(),
-            })
-            .where(eq(tournamentInfos.id, tournamentId))
-            .returning({ id: tournamentInfos.id });
-          if (published.length === 0) {
-            throw new Error(`Tournament ${tournamentId} no longer exists`);
-          }
-
-          // CONCURRENTLY is not allowed inside a transaction. These bounded
-          // refreshes see the update above, and PostgreSQL exposes the
-          // readiness gate plus both filtered snapshots only at commit.
-          await tx.execute(sql`REFRESH MATERIALIZED VIEW public.mv_tournament_event_snapshot`);
-          await tx.execute(sql`REFRESH MATERIALIZED VIEW public.mv_tournament_snapshot`);
-        });
-      } catch (error) {
-        logError('Failed to publish tournament standings readiness', error, { tournamentId });
-        throw new DatabaseError(
-          'Failed to publish tournament standings readiness',
-          'TOURNAMENT_INFO_MARK_STANDINGS_READY_ERROR',
-          error as Error,
-        );
-      }
+    markStandingsReady: async (season: FplSeasonRef, tournamentId: number): Promise<void> => {
+      const db = await getDbInstance();
+      const rows = await db
+        .update(tournamentsInCompetition)
+        .set({
+          standingsReadyAt: sql`COALESCE(${tournamentsInCompetition.standingsReadyAt}, clock_timestamp())`,
+          setupProgressUpdatedAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(tournamentScope(season, tournamentId))
+        .returning({ tournamentId: tournamentsInCompetition.tournamentId });
+      if (rows.length !== 1) throw new Error(`Tournament ${tournamentId} no longer exists`);
     },
 
     markSetupResult: async (
+      season: FplSeasonRef,
       tournamentId: number,
       status: 'ready' | 'failed',
       error?: string | null,
       warningCount = status === 'ready' && error ? 1 : 0,
     ): Promise<void> => {
-      try {
-        const db = await getDbInstance();
-        await db
-          .update(tournamentInfos)
-          .set({
-            setupStatus: status,
-            setupPhase: status,
-            setupWarningCount: status === 'ready' ? Math.max(0, warningCount) : 0,
-            setupError: error ?? null,
-            setupProgressUpdatedAt: new Date(),
-            setupFinishedAt: new Date(),
-            updatedAt: new Date(),
-          })
-          .where(eq(tournamentInfos.id, tournamentId));
-      } catch (err) {
-        logError('Failed to mark tournament setup result', err, { tournamentId, status });
-        throw new DatabaseError(
-          'Failed to mark tournament setup result',
-          'TOURNAMENT_INFO_MARK_RESULT_ERROR',
-          err as Error,
-        );
-      }
+      const db = await getDbInstance();
+      await db
+        .update(tournamentsInCompetition)
+        .set({
+          setupStatus: status,
+          setupPhase: status,
+          setupWarningCount: status === 'ready' ? Math.max(0, warningCount) : 0,
+          setupError: error ?? null,
+          setupProgressUpdatedAt: new Date(),
+          setupFinishedAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(tournamentScope(season, tournamentId));
     },
 
-    findStuckProcessing: async (cutoffMinutes: number): Promise<StuckTournamentRow[]> => {
-      try {
-        const db = await getDbInstance();
-        // This predicate wraps timestamp columns in a raw COALESCE expression,
-        // so Drizzle cannot infer the encoder for a JavaScript Date. Bind a
-        // portable ISO value and let PostgreSQL infer timestamptz from the
-        // comparison instead of handing postgres.js an untyped Date.
-        const cutoff = new Date(Date.now() - cutoffMinutes * 60_000).toISOString();
-        const rows = await db
-          .select({
-            id: tournamentInfos.id,
-            // Keep PostgreSQL's full timestamp precision for the watchdog's
-            // compare-and-swap. Converting through JavaScript Date would trim
-            // microseconds and make a genuinely stale row impossible to match.
-            setupProgressUpdatedAt: sql<string | null>`COALESCE(
-              ${tournamentInfos.setupProgressUpdatedAt},
-              ${tournamentInfos.setupStartedAt}
-            )::text`,
-          })
-          .from(tournamentInfos)
-          .where(
-            and(
-              inArray(tournamentInfos.setupStatus, ['pending', 'processing']),
-              lt(
-                sql`COALESCE(
-                  ${tournamentInfos.setupProgressUpdatedAt},
-                  ${tournamentInfos.setupStartedAt}
-                )`,
-                cutoff,
-              ),
+    findStuckProcessing: async (
+      season: FplSeasonRef,
+      cutoffMinutes: number,
+    ): Promise<StuckTournamentRow[]> => {
+      const db = await getDbInstance();
+      const cutoff = new Date(Date.now() - cutoffMinutes * 60_000).toISOString();
+      const rows = await db
+        .select({
+          id: tournamentsInCompetition.tournamentId,
+          setupProgressUpdatedAt: sql<string | null>`COALESCE(
+            ${tournamentsInCompetition.setupProgressUpdatedAt},
+            ${tournamentsInCompetition.setupStartedAt}
+          )::text`,
+        })
+        .from(tournamentsInCompetition)
+        .where(
+          and(
+            eq(tournamentsInCompetition.seasonId, season.seasonId),
+            inArray(tournamentsInCompetition.setupStatus, ['pending', 'processing']),
+            lt(
+              sql`COALESCE(
+                ${tournamentsInCompetition.setupProgressUpdatedAt},
+                ${tournamentsInCompetition.setupStartedAt}
+              )`,
+              cutoff,
             ),
-          );
-        return rows.map((row) => ({
-          id: row.id,
-          setupProgressUpdatedAt: row.setupProgressUpdatedAt,
-        }));
-      } catch (error) {
-        logError('Failed to find stuck processing tournaments', error, { cutoffMinutes });
-        throw new DatabaseError(
-          'Failed to find stuck processing tournaments',
-          'TOURNAMENT_INFO_FIND_STUCK_ERROR',
-          error as Error,
+          ),
         );
-      }
+      return rows;
     },
 
     markStuckSetupQueuedIfUnchanged: async (
+      season: FplSeasonRef,
       tournamentId: number,
       expectedProgressUpdatedAt: string | null,
       internalError: string,
     ): Promise<boolean> => {
-      try {
-        const db = await getDbInstance();
-        const now = new Date();
-        const rows = await db
-          .update(tournamentInfos)
-          .set({
-            // Keep the durable state watchdog-eligible until queue.add has
-            // actually committed. A crash or non-ambiguous Redis failure
-            // after this compare-and-swap is recovered by a later pass.
-            setupStatus: 'pending',
-            setupPhase: 'queued',
-            setupCompletedUnits: 0,
-            setupTotalUnits: 0,
-            setupWarningCount: 0,
-            setupError: internalError,
-            setupProgressUpdatedAt: now,
-            setupStartedAt: null,
-            setupFinishedAt: null,
-            updatedAt: now,
-          })
-          .where(
-            and(
-              eq(tournamentInfos.id, tournamentId),
-              inArray(tournamentInfos.setupStatus, ['pending', 'processing']),
-              sql`COALESCE(
-                ${tournamentInfos.setupProgressUpdatedAt},
-                ${tournamentInfos.setupStartedAt}
-              ) IS NOT DISTINCT FROM ${expectedProgressUpdatedAt}::timestamptz`,
-            ),
-          )
-          .returning({ id: tournamentInfos.id });
-        return rows.length === 1;
-      } catch (error) {
-        logError('Failed to conditionally queue stuck tournament setup', error, {
-          tournamentId,
-          expectedProgressUpdatedAt,
-        });
-        throw new DatabaseError(
-          'Failed to conditionally mark stuck tournament setup',
-          'TOURNAMENT_INFO_QUEUE_STUCK_ERROR',
-          error as Error,
-        );
-      }
+      const db = await getDbInstance();
+      const now = new Date();
+      const rows = await db
+        .update(tournamentsInCompetition)
+        .set({
+          setupStatus: 'pending',
+          setupPhase: 'queued',
+          setupCompletedUnits: 0,
+          setupTotalUnits: 0,
+          setupWarningCount: 0,
+          setupError: internalError,
+          setupProgressUpdatedAt: now,
+          setupStartedAt: null,
+          setupFinishedAt: null,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            tournamentScope(season, tournamentId),
+            inArray(tournamentsInCompetition.setupStatus, ['pending', 'processing']),
+            sql`COALESCE(
+              ${tournamentsInCompetition.setupProgressUpdatedAt},
+              ${tournamentsInCompetition.setupStartedAt}
+            ) IS NOT DISTINCT FROM ${expectedProgressUpdatedAt}::timestamptz`,
+          ),
+        )
+        .returning({ tournamentId: tournamentsInCompetition.tournamentId });
+      return rows.length === 1;
     },
 
     createTournamentWithEntries: async (
+      season: FplSeasonRef,
       plan: TournamentStructurePlan,
     ): Promise<TournamentCreatedRow> => {
       try {
-        const client = await getDbClient();
-        return await client.begin(async (tx) => {
-          // Insert stub rows for participants we have never synced, but NEVER
-          // overwrite an existing entry: overall_rank/overall_points belong to
-          // the FPL detail sync, and resetting them to league-standings values
-          // (or 0) used to poison knockout seeding and rank displays (C5/FP-08).
-          await tx`
-            insert into entry_infos ${tx(
-              plan.selectedParticipants.map((participant) => ({
-                id: Number(participant.id),
-                entry_name: participant.team,
-                player_name: participant.manager,
-                overall_rank: participant.overallRank || null,
-                overall_points: participant.totalPoints || 0,
-              })),
-              'id',
-              'entry_name',
-              'player_name',
-              'overall_rank',
-              'overall_points',
-            )}
-            on conflict (id) do nothing
-          `;
+        const db = await getDbInstance();
+        return await db.transaction(async (tx) => {
+          if (plan.selectedParticipants.length > 0) {
+            await tx
+              .insert(entriesInCompetition)
+              .values(
+                plan.selectedParticipants.map((participant) => ({
+                  seasonId: season.seasonId,
+                  entryId: Number(participant.id),
+                  entryName: participant.team,
+                  playerName: participant.manager,
+                  overallRank: participant.overallRank || null,
+                  overallPoints: participant.totalPoints || 0,
+                  usedEntryNames: [participant.team],
+                })),
+              )
+              .onConflictDoNothing({
+                target: [entriesInCompetition.seasonId, entriesInCompetition.entryId],
+              });
+          }
 
-          const insertedTournament = await tx<
-            {
-              id: number;
-              name: string;
-              creator: string;
-              admin_entry_id: number;
-              league_id: number;
-              total_team_num: number;
-            }[]
-          >`
-            insert into tournament_infos (
-              name,
-              creator,
-              admin_entry_id,
-              league_id,
-              league_type,
-              source_league_name,
-              roster_mode,
-              roster_sync_status,
-              roster_last_synced_at,
-              total_team_num,
-              tournament_mode,
-              group_mode,
-              group_team_num,
-              group_num,
-              group_started_event_id,
-              group_ended_event_id,
-              group_auto_averages,
-              group_rounds,
-              group_play_against_num,
-              group_qualify_num,
-              knockout_mode,
-              knockout_team_num,
-              knockout_rounds,
-              knockout_event_num,
-              knockout_started_event_id,
-              knockout_ended_event_id,
-              knockout_play_against_num,
-              state,
-              setup_status,
-              setup_phase,
-              setup_progress_updated_at,
-              updated_at
-            ) values (
-              ${plan.tournamentName},
-              ${plan.creator},
-              ${plan.adminEntryId},
-              ${plan.leagueId},
-              ${plan.leagueType},
-              ${plan.sourceLeagueName ?? null},
-              ${plan.rosterMode ?? 'snapshot'},
-              ${plan.rosterMode === 'official_sync' ? 'ready' : null},
-              ${plan.rosterMode === 'official_sync' ? new Date().toISOString() : null},
-              ${plan.selectedParticipants.length},
-              ${'normal'},
-              ${plan.groupMode},
-              ${plan.groupTeamNum},
-              ${plan.groupNum},
-              ${plan.groupStartedEventId},
-              ${plan.groupEndedEventId},
-              ${false},
-              ${plan.groupRounds},
-              ${null},
-              ${plan.groupQualifyNum},
-              ${plan.knockoutMode},
-              ${plan.knockoutTeamNum},
-              ${plan.knockoutRounds},
-              ${plan.knockoutEventNum},
-              ${plan.knockoutStartedEventId},
-              ${plan.knockoutEndedEventId},
-              ${plan.knockoutPlayAgainstNum},
-              ${'active'},
-              ${'pending'},
-              ${'queued'},
-              now(),
-              now()
-            )
-            returning id, name, creator, admin_entry_id, league_id, total_team_num
-          `;
-
+          const insertedTournament = await tx
+            .insert(tournamentsInCompetition)
+            .values({
+              seasonId: season.seasonId,
+              name: plan.tournamentName,
+              creator: plan.creator,
+              adminEntryId: plan.adminEntryId,
+              leagueId: plan.leagueId,
+              leagueType: plan.leagueType,
+              sourceLeagueName: plan.sourceLeagueName ?? null,
+              rosterMode: plan.rosterMode ?? 'snapshot',
+              rosterSyncStatus: plan.rosterMode === 'official_sync' ? 'ready' : null,
+              rosterLastSyncedAt: plan.rosterMode === 'official_sync' ? new Date() : null,
+              totalTeamNum: plan.selectedParticipants.length,
+              tournamentMode: 'normal',
+              groupMode: plan.groupMode,
+              groupTeamNum: plan.groupTeamNum,
+              groupNum: plan.groupNum,
+              groupStartedEventId: plan.groupStartedEventId,
+              groupEndedEventId: plan.groupEndedEventId,
+              groupAutoAverages: false,
+              groupRounds: plan.groupRounds,
+              groupPlayAgainstNum: null,
+              groupQualifyNum: plan.groupQualifyNum,
+              knockoutMode: plan.knockoutMode,
+              knockoutTeamNum: plan.knockoutTeamNum,
+              knockoutRounds: plan.knockoutRounds,
+              knockoutEventNum: plan.knockoutEventNum,
+              knockoutStartedEventId: plan.knockoutStartedEventId,
+              knockoutEndedEventId: plan.knockoutEndedEventId,
+              knockoutPlayAgainstNum: plan.knockoutPlayAgainstNum,
+              state: 'active',
+              setupStatus: 'pending',
+              setupPhase: 'queued',
+              setupProgressUpdatedAt: new Date(),
+            })
+            .returning({
+              id: tournamentsInCompetition.tournamentId,
+              seasonId: tournamentsInCompetition.seasonId,
+              name: tournamentsInCompetition.name,
+              creator: tournamentsInCompetition.creator,
+              adminEntryId: tournamentsInCompetition.adminEntryId,
+              leagueId: tournamentsInCompetition.leagueId,
+              totalTeamNum: tournamentsInCompetition.totalTeamNum,
+            });
           const inserted = insertedTournament[0];
           if (!inserted) {
             throw new DatabaseError(
@@ -830,43 +630,31 @@ export const createTournamentInfoRepository = (dbInstance?: DatabaseInstance) =>
             );
           }
 
-          await tx`
-            insert into tournament_entries ${tx(
+          if (plan.selectedParticipants.length > 0) {
+            await tx.insert(tournamentEntriesInCompetition).values(
               plan.selectedParticipants.map((participant) => ({
-                tournament_id: inserted.id,
-                league_id: plan.leagueId,
-                entry_id: Number(participant.id),
+                tournamentId: inserted.id,
+                seasonId: season.seasonId,
+                leagueId: plan.leagueId,
+                entryId: Number(participant.id),
               })),
-              'tournament_id',
-              'league_id',
-              'entry_id',
-            )}
-            on conflict (tournament_id, league_id, entry_id) do nothing
-          `;
-
-          return {
-            id: inserted.id,
-            name: inserted.name,
-            creator: inserted.creator,
-            adminEntryId: inserted.admin_entry_id,
-            leagueId: inserted.league_id,
-            totalTeamNum: inserted.total_team_num,
-          };
+            );
+          }
+          return inserted;
         });
       } catch (error) {
         if (isTournamentNameConflict(error)) {
           throw new ConflictError('Tournament name already exists.', 'TOURNAMENT_NAME_EXISTS');
         }
-        if (error instanceof DatabaseError) {
-          throw error;
-        }
+        if (error instanceof DatabaseError) throw error;
         logError('Failed to create tournament with entries', error, {
+          season: season.seasonCode,
           name: plan.tournamentName,
         });
         throw new DatabaseError(
           'Failed to create tournament with entries',
           'TOURNAMENT_INFO_CREATE_ERROR',
-          error as Error,
+          error instanceof Error ? error : undefined,
         );
       }
     },

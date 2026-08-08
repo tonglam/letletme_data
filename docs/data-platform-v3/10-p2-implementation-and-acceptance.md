@@ -1,6 +1,6 @@
 # P2 Schema and Migration Implementation Acceptance
 
-Plan version: 3.1.1
+Plan version: 3.2.1
 
 Run ID: `v3-20260808T160008Z-b9eddc0`
 

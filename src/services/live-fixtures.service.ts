@@ -1,12 +1,6 @@
-import { liveFixturesCache } from '../cache/operations';
-import { getDb } from '../db/singleton';
-import { teams } from '../db/schemas/index.schema';
-import type { EventId, TeamId } from '../types/base.type';
-import { fixtureRepository } from '../repositories/fixtures';
-import { logError, logInfo } from '../utils/logger';
-import { getCurrentEvent } from './events.service';
+import type { TeamId } from '../types/base.type';
 
-import type { Fixture } from '../types';
+import type { Fixture, Team } from '../types';
 import type {
   LiveFixtureByStatus,
   LiveFixtureByStatusV2,
@@ -42,25 +36,15 @@ export interface LiveFixtureViews {
   v2: LiveFixturesV2ByTeam;
 }
 
-export async function loadLiveFixtureTeamMaps(): Promise<LiveFixtureTeamMaps> {
-  const db = await getDb();
-  const rows = await db
-    .select({
-      id: teams.id,
-      name: teams.name,
-      shortName: teams.shortName,
-      position: teams.position,
-    })
-    .from(teams);
-
+export function createLiveFixtureTeamMaps(teams: readonly Team[]): LiveFixtureTeamMaps {
   const nameById = new Map<number, string>();
   const shortNameById = new Map<number, string>();
   const positionById = new Map<number, number>();
 
-  for (const row of rows) {
-    nameById.set(row.id, row.name);
-    shortNameById.set(row.id, row.shortName);
-    positionById.set(row.id, row.position ?? 0);
+  for (const team of teams) {
+    nameById.set(team.id, team.name);
+    shortNameById.set(team.id, team.shortName);
+    positionById.set(team.id, team.position ?? 0);
   }
 
   return { nameById, shortNameById, positionById };
@@ -177,36 +161,4 @@ export function buildLiveFixturesByTeam(
   maps: LiveFixtureTeamMaps,
 ): LiveFixturesByTeam {
   return buildLiveFixtureViews(fixtures, maps).legacy;
-}
-
-/**
- * LiveFixture: cache-only sync for current event fixtures, grouped per team and play status.
- *
- * Data source: `event_fixtures` table (already synced elsewhere).
- * Cache: `LiveFixture:{season}:{eventId}` (hash teamId -> LiveFixtureByStatus JSON), delete-first, TTL -1.
- */
-export async function syncLiveFixtureCache(
-  eventId?: EventId,
-): Promise<{ eventId: EventId; teamCount: number }> {
-  try {
-    const resolvedEventId = eventId ?? (await getCurrentEvent())?.id;
-    if (!resolvedEventId) {
-      throw new Error('No current event found for live fixture cache');
-    }
-
-    logInfo('Starting live fixture cache sync', { eventId: resolvedEventId });
-
-    const fixtures = await fixtureRepository.findByEvent(resolvedEventId);
-    const maps = await loadLiveFixtureTeamMaps();
-    const byTeam = buildLiveFixturesByTeam(fixtures, maps);
-
-    await liveFixturesCache.set(resolvedEventId, byTeam);
-
-    const teamCount = Object.keys(byTeam).length;
-    logInfo('Live fixture cache sync completed', { eventId: resolvedEventId, teamCount });
-    return { eventId: resolvedEventId, teamCount };
-  } catch (error) {
-    logError('Live fixture cache sync failed', error, { eventId });
-    throw error;
-  }
 }

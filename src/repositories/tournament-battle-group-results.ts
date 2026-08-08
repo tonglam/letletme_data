@@ -1,22 +1,24 @@
 import { and, eq, gte, isNotNull, lte, max, sql } from 'drizzle-orm';
-import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
-
 import {
-  tournamentBattleGroupResults,
+  tournamentBattleGroupResultsInCompetition,
   type DbTournamentBattleGroupResult,
   type DbTournamentBattleGroupResultInsert,
 } from '../db/schemas/index.schema';
-import { getDb } from '../db/singleton';
+import { getDb, type DbOrTransaction } from '../db/singleton';
+import type { FplSeasonRef } from '../domain/fpl-season';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 
-type DatabaseInstance = PostgresJsDatabase<Record<string, never>>;
+const mapResult = (
+  row: typeof tournamentBattleGroupResultsInCompetition.$inferSelect,
+): DbTournamentBattleGroupResult => ({ ...row, id: row.sourceResultId });
 
-export const createTournamentBattleGroupResultsRepository = (dbInstance?: DatabaseInstance) => {
-  const getDbInstance = async () => dbInstance || (await getDb());
+export const createTournamentBattleGroupResultsRepository = (dbInstance?: DbOrTransaction) => {
+  const getDbInstance = async () => dbInstance ?? (await getDb());
 
   return {
     findByTournamentAndEvent: async (
+      season: FplSeasonRef,
       tournamentId: number,
       eventId: number,
     ): Promise<DbTournamentBattleGroupResult[]> => {
@@ -24,11 +26,12 @@ export const createTournamentBattleGroupResultsRepository = (dbInstance?: Databa
         const db = await getDbInstance();
         const rows = await db
           .select()
-          .from(tournamentBattleGroupResults)
+          .from(tournamentBattleGroupResultsInCompetition)
           .where(
             and(
-              eq(tournamentBattleGroupResults.tournamentId, tournamentId),
-              eq(tournamentBattleGroupResults.eventId, eventId),
+              eq(tournamentBattleGroupResultsInCompetition.seasonId, season.seasonId),
+              eq(tournamentBattleGroupResultsInCompetition.tournamentId, tournamentId),
+              eq(tournamentBattleGroupResultsInCompetition.eventId, eventId),
             ),
           );
         logInfo('Retrieved tournament battle group results', {
@@ -36,7 +39,7 @@ export const createTournamentBattleGroupResultsRepository = (dbInstance?: Databa
           eventId,
           count: rows.length,
         });
-        return rows;
+        return rows.map(mapResult);
       } catch (error) {
         logError('Failed to retrieve tournament battle group results', error, {
           tournamentId,
@@ -51,6 +54,7 @@ export const createTournamentBattleGroupResultsRepository = (dbInstance?: Databa
     },
 
     findByTournamentAndEventRange: async (
+      season: FplSeasonRef,
       tournamentId: number,
       startEventId: number,
       endEventId: number,
@@ -59,12 +63,13 @@ export const createTournamentBattleGroupResultsRepository = (dbInstance?: Databa
         const db = await getDbInstance();
         const rows = await db
           .select()
-          .from(tournamentBattleGroupResults)
+          .from(tournamentBattleGroupResultsInCompetition)
           .where(
             and(
-              eq(tournamentBattleGroupResults.tournamentId, tournamentId),
-              gte(tournamentBattleGroupResults.eventId, startEventId),
-              lte(tournamentBattleGroupResults.eventId, endEventId),
+              eq(tournamentBattleGroupResultsInCompetition.seasonId, season.seasonId),
+              eq(tournamentBattleGroupResultsInCompetition.tournamentId, tournamentId),
+              gte(tournamentBattleGroupResultsInCompetition.eventId, startEventId),
+              lte(tournamentBattleGroupResultsInCompetition.eventId, endEventId),
             ),
           );
         logInfo('Retrieved tournament battle group results for event range', {
@@ -73,7 +78,7 @@ export const createTournamentBattleGroupResultsRepository = (dbInstance?: Databa
           endEventId,
           count: rows.length,
         });
-        return rows;
+        return rows.map(mapResult);
       } catch (error) {
         logError('Failed to retrieve tournament battle group results for event range', error, {
           tournamentId,
@@ -95,6 +100,7 @@ export const createTournamentBattleGroupResultsRepository = (dbInstance?: Databa
      * all group updates (FP-09 Codex P1).
      */
     findMaxEventIdInRange: async (
+      season: FplSeasonRef,
       tournamentId: number,
       startEventId: number,
       endEventId: number,
@@ -102,15 +108,16 @@ export const createTournamentBattleGroupResultsRepository = (dbInstance?: Databa
       try {
         const db = await getDbInstance();
         const rows = await db
-          .select({ maxEventId: max(tournamentBattleGroupResults.eventId) })
-          .from(tournamentBattleGroupResults)
+          .select({ maxEventId: max(tournamentBattleGroupResultsInCompetition.eventId) })
+          .from(tournamentBattleGroupResultsInCompetition)
           .where(
             and(
-              eq(tournamentBattleGroupResults.tournamentId, tournamentId),
-              gte(tournamentBattleGroupResults.eventId, startEventId),
-              lte(tournamentBattleGroupResults.eventId, endEventId),
-              isNotNull(tournamentBattleGroupResults.homeMatchPoints),
-              isNotNull(tournamentBattleGroupResults.awayMatchPoints),
+              eq(tournamentBattleGroupResultsInCompetition.seasonId, season.seasonId),
+              eq(tournamentBattleGroupResultsInCompetition.tournamentId, tournamentId),
+              gte(tournamentBattleGroupResultsInCompetition.eventId, startEventId),
+              lte(tournamentBattleGroupResultsInCompetition.eventId, endEventId),
+              isNotNull(tournamentBattleGroupResultsInCompetition.homeMatchPoints),
+              isNotNull(tournamentBattleGroupResultsInCompetition.awayMatchPoints),
             ),
           );
         const value = rows[0]?.maxEventId;
@@ -129,12 +136,17 @@ export const createTournamentBattleGroupResultsRepository = (dbInstance?: Databa
       }
     },
 
-    deleteByTournament: async (tournamentId: number): Promise<void> => {
+    deleteByTournament: async (season: FplSeasonRef, tournamentId: number): Promise<void> => {
       try {
         const db = await getDbInstance();
         await db
-          .delete(tournamentBattleGroupResults)
-          .where(eq(tournamentBattleGroupResults.tournamentId, tournamentId));
+          .delete(tournamentBattleGroupResultsInCompetition)
+          .where(
+            and(
+              eq(tournamentBattleGroupResultsInCompetition.seasonId, season.seasonId),
+              eq(tournamentBattleGroupResultsInCompetition.tournamentId, tournamentId),
+            ),
+          );
       } catch (error) {
         logError('Failed to delete tournament battle group results', error, { tournamentId });
         throw new DatabaseError(
@@ -145,7 +157,10 @@ export const createTournamentBattleGroupResultsRepository = (dbInstance?: Databa
       }
     },
 
-    upsertBatch: async (results: DbTournamentBattleGroupResultInsert[]): Promise<number> => {
+    upsertBatch: async (
+      season: FplSeasonRef,
+      results: DbTournamentBattleGroupResultInsert[],
+    ): Promise<number> => {
       if (results.length === 0) {
         return 0;
       }
@@ -158,18 +173,18 @@ export const createTournamentBattleGroupResultsRepository = (dbInstance?: Databa
           const { id: _omitId, ...rest } = row as DbTournamentBattleGroupResultInsert & {
             id?: number;
           };
-          return rest;
+          return { ...rest, seasonId: season.seasonId };
         });
         await db
-          .insert(tournamentBattleGroupResults)
+          .insert(tournamentBattleGroupResultsInCompetition)
           .values(rows)
           .onConflictDoUpdate({
             target: [
-              tournamentBattleGroupResults.tournamentId,
-              tournamentBattleGroupResults.groupId,
-              tournamentBattleGroupResults.eventId,
-              tournamentBattleGroupResults.homeIndex,
-              tournamentBattleGroupResults.awayIndex,
+              tournamentBattleGroupResultsInCompetition.tournamentId,
+              tournamentBattleGroupResultsInCompetition.groupId,
+              tournamentBattleGroupResultsInCompetition.eventId,
+              tournamentBattleGroupResultsInCompetition.homeIndex,
+              tournamentBattleGroupResultsInCompetition.awayIndex,
             ],
             set: {
               homeNetPoints: sql`excluded.home_net_points`,

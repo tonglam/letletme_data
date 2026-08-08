@@ -1,4 +1,5 @@
 import { getDataSyncJobPriority, type DataSyncPriorityJobName } from '../domain/job-priority';
+import type { FplSeasonRef } from '../domain/fpl-season';
 import { getDataSyncQueue, type DataSyncJobName } from '../queues/data-sync.queue';
 import { logError, logInfo } from '../utils/logger';
 import { formatCronDateKey } from '../utils/timezone';
@@ -24,6 +25,7 @@ export function getCoreSnapshotJobId(
 }
 
 async function enqueueDataSyncJob(
+  season: FplSeasonRef,
   jobName: DataSyncJobName,
   source: DataSyncJobSource = 'cron',
   options: DataSyncEnqueueOptions = {},
@@ -31,10 +33,12 @@ async function enqueueDataSyncJob(
   try {
     const tier = getDataSyncJobPriority(jobName as DataSyncPriorityJobName);
     const queue = getDataSyncQueue(tier);
-    const jobId = options.jobId ?? defaultDataSyncJobId(jobName, source, options);
+    const jobId = options.jobId
+      ? `${season.seasonCode}-${options.jobId}`
+      : defaultDataSyncJobId(jobName, season, source, options);
     const hasDeterministicId = jobId !== undefined;
     const removeOnSettle = options.removeOnSettle ?? hasDeterministicId;
-    const jobData = createDataSyncJobData(source, options);
+    const jobData = createDataSyncJobData(season, source, options);
     const job = await queue.add(jobName, jobData, {
       attempts: 3,
       backoff: {
@@ -66,48 +70,35 @@ async function enqueueDataSyncJob(
 }
 
 export const enqueueCoreSnapshotJob = (
+  season: FplSeasonRef,
   source: DataSyncJobSource = 'cron',
   options?: DataSyncEnqueueOptions,
 ) =>
-  enqueueDataSyncJob('core-snapshot', source, {
+  enqueueDataSyncJob(season, 'core-snapshot', source, {
     ...options,
     jobId: getCoreSnapshotJobId(source, options),
     removeOnSettle: true,
   });
 
 // Compatibility producers all converge on the one coherent core publisher.
-export const enqueueEventsSyncJob = (source?: DataSyncJobSource) => enqueueCoreSnapshotJob(source);
-
-export const enqueueFixturesSyncJob = (
-  source?: DataSyncJobSource,
-  options?: DataSyncEnqueueOptions,
-) => enqueueCoreSnapshotJob(source, options);
-
-/** The authoritative fixture endpoint already returns the complete season feed. */
-export const enqueueFixturesAllGameweeksSyncJob = (source?: DataSyncJobSource) =>
-  enqueueCoreSnapshotJob(source);
-
-export const enqueueTeamsSyncJob = (source?: DataSyncJobSource) => enqueueCoreSnapshotJob(source);
-
-export const enqueuePlayersSyncJob = (source?: DataSyncJobSource) => enqueueCoreSnapshotJob(source);
-
 export const enqueuePlayerPricesSyncJob = (
+  season: FplSeasonRef,
   source: DataSyncJobSource,
   options: DataSyncEnqueueOptions & { changeDate: string },
-) => enqueueDataSyncJob('player-prices', source, options);
+) => enqueueDataSyncJob(season, 'player-prices', source, options);
 
 export const enqueuePlayerStatsSyncJob = (
+  season: FplSeasonRef,
   source?: DataSyncJobSource,
   options?: DataSyncEnqueueOptions,
-) => enqueueDataSyncJob('player-stats', source, options);
-
-export const enqueuePhasesSyncJob = (source?: DataSyncJobSource) => enqueueCoreSnapshotJob(source);
+) => enqueueDataSyncJob(season, 'player-stats', source, options);
 
 export const enqueuePlayerValuesSyncJob = (
+  season: FplSeasonRef,
   source?: DataSyncJobSource,
   options?: DataSyncEnqueueOptions,
 ) =>
-  enqueueDataSyncJob('player-values', source, {
+  enqueueDataSyncJob(season, 'player-values', source, {
     ...options,
     changeDate: options?.changeDate ?? formatCronDateKey(),
   });

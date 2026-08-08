@@ -1,5 +1,30 @@
 # Data Platform v3 Plan Changelog
 
+## 3.2.1 - 2026-08-09
+
+- Audited every deleted v2 test and added real PG15 write coverage for all 26 active FPL and
+  competition physical-table families instead of treating deletion as equivalent coverage.
+- Restored `fpl.player_fixture_stats` ingestion from fixture-grain FPL live explanations inside the
+  unified live persistence transaction; unresolved incoming references now fail atomically.
+- Recorded the P3 test retirement/replacement matrix and kept the B0-sized tournament setup
+  benchmark as an explicit P5 rehearsal gate.
+- Closed runtime SQL defects exposed by the expanded persistence contract: schema-qualified event
+  conflict expressions, timestamp binding in rich entry-result UPSERTs, and overflow-safe entry
+  advisory lock keys.
+
+## 3.2.0 - 2026-08-09
+
+- Locked the P3 runtime implementation to explicit database season authority, one schema-qualified
+  physical-table contract, and immutable Redis publications with independently configured queue
+  and cache endpoints.
+- Made reporting summaries read-only views/materialized views and removed physical summary writes
+  and retired cache publications from the Data runtime.
+- Added PG15 Drizzle-export catalog parity to CI. SQL migrations explicitly own materialized-view
+  indexes, the active-publication partial `NULLS NOT DISTINCT` index option, and the stable name of
+  the circular publication foreign key.
+- Added positive-integer API boundary validation and made PostgreSQL runtime identities/business
+  uniqueness enforceable for post-migration writes.
+
 ## 3.1.1 - 2026-08-09
 
 - Refined the B0 current value audit: 9 of 573 start rows coincide with a player's first market

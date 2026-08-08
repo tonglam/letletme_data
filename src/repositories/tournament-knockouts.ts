@@ -1,20 +1,25 @@
 import { and, eq, inArray, sql } from 'drizzle-orm';
 
 import {
-  tournamentKnockouts,
+  tournamentKnockoutsInCompetition,
   type DbTournamentKnockout,
   type DbTournamentKnockoutInsert,
 } from '../db/schemas/index.schema';
-import { getDb, getDbClient, type DbOrTransaction } from '../db/singleton';
+import { getDb, type DbOrTransaction } from '../db/singleton';
+import type { FplSeasonRef } from '../domain/fpl-season';
 import type { SeedPair } from '../domain/tournament';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 
 export const createTournamentKnockoutsRepository = (dbInstance?: DbOrTransaction) => {
-  const getDbInstance = async () => dbInstance || (await getDb());
+  const getDbInstance = async () => dbInstance ?? (await getDb());
+  const mapKnockout = (
+    row: typeof tournamentKnockoutsInCompetition.$inferSelect,
+  ): DbTournamentKnockout => ({ ...row, id: row.sourceKnockoutId });
 
   return {
     findByTournamentAndEndedEvent: async (
+      season: FplSeasonRef,
       tournamentId: number,
       eventId: number,
     ): Promise<DbTournamentKnockout[]> => {
@@ -22,20 +27,21 @@ export const createTournamentKnockoutsRepository = (dbInstance?: DbOrTransaction
         const db = await getDbInstance();
         const rows = await db
           .select()
-          .from(tournamentKnockouts)
+          .from(tournamentKnockoutsInCompetition)
           .where(
             and(
-              eq(tournamentKnockouts.tournamentId, tournamentId),
-              eq(tournamentKnockouts.endedEventId, eventId),
+              eq(tournamentKnockoutsInCompetition.seasonId, season.seasonId),
+              eq(tournamentKnockoutsInCompetition.tournamentId, tournamentId),
+              eq(tournamentKnockoutsInCompetition.endedEventId, eventId),
             ),
           )
-          .orderBy(tournamentKnockouts.matchId);
+          .orderBy(tournamentKnockoutsInCompetition.matchId);
         logInfo('Retrieved tournament knockouts for event', {
           tournamentId,
           eventId,
           count: rows.length,
         });
-        return rows;
+        return rows.map(mapKnockout);
       } catch (error) {
         logError('Failed to retrieve tournament knockouts for event', error, {
           tournamentId,
@@ -50,6 +56,7 @@ export const createTournamentKnockoutsRepository = (dbInstance?: DbOrTransaction
     },
 
     findByTournamentAndRound: async (
+      season: FplSeasonRef,
       tournamentId: number,
       round: number,
     ): Promise<DbTournamentKnockout[]> => {
@@ -57,20 +64,21 @@ export const createTournamentKnockoutsRepository = (dbInstance?: DbOrTransaction
         const db = await getDbInstance();
         const rows = await db
           .select()
-          .from(tournamentKnockouts)
+          .from(tournamentKnockoutsInCompetition)
           .where(
             and(
-              eq(tournamentKnockouts.tournamentId, tournamentId),
-              eq(tournamentKnockouts.round, round),
+              eq(tournamentKnockoutsInCompetition.seasonId, season.seasonId),
+              eq(tournamentKnockoutsInCompetition.tournamentId, tournamentId),
+              eq(tournamentKnockoutsInCompetition.round, round),
             ),
           )
-          .orderBy(tournamentKnockouts.matchId);
+          .orderBy(tournamentKnockoutsInCompetition.matchId);
         logInfo('Retrieved tournament knockouts by round', {
           tournamentId,
           round,
           count: rows.length,
         });
-        return rows;
+        return rows.map(mapKnockout);
       } catch (error) {
         logError('Failed to retrieve tournament knockouts by round', error, {
           tournamentId,
@@ -85,6 +93,7 @@ export const createTournamentKnockoutsRepository = (dbInstance?: DbOrTransaction
     },
 
     findByTournamentAndMatchIds: async (
+      season: FplSeasonRef,
       tournamentId: number,
       matchIds: number[],
     ): Promise<DbTournamentKnockout[]> => {
@@ -97,18 +106,19 @@ export const createTournamentKnockoutsRepository = (dbInstance?: DbOrTransaction
         const uniqueIds = Array.from(new Set(matchIds));
         const rows = await db
           .select()
-          .from(tournamentKnockouts)
+          .from(tournamentKnockoutsInCompetition)
           .where(
             and(
-              eq(tournamentKnockouts.tournamentId, tournamentId),
-              inArray(tournamentKnockouts.matchId, uniqueIds),
+              eq(tournamentKnockoutsInCompetition.seasonId, season.seasonId),
+              eq(tournamentKnockoutsInCompetition.tournamentId, tournamentId),
+              inArray(tournamentKnockoutsInCompetition.matchId, uniqueIds),
             ),
           );
         logInfo('Retrieved tournament knockouts by match', {
           tournamentId,
           count: rows.length,
         });
-        return rows;
+        return rows.map(mapKnockout);
       } catch (error) {
         logError('Failed to retrieve tournament knockouts by match', error, {
           tournamentId,
@@ -122,6 +132,7 @@ export const createTournamentKnockoutsRepository = (dbInstance?: DbOrTransaction
     },
 
     findRoundOne: async (
+      season: FplSeasonRef,
       tournamentId: number,
     ): Promise<
       Array<{ matchId: number; homeEntryId: number | null; awayEntryId: number | null }>
@@ -130,18 +141,19 @@ export const createTournamentKnockoutsRepository = (dbInstance?: DbOrTransaction
         const db = await getDbInstance();
         const rows = await db
           .select({
-            matchId: tournamentKnockouts.matchId,
-            homeEntryId: tournamentKnockouts.homeEntryId,
-            awayEntryId: tournamentKnockouts.awayEntryId,
+            matchId: tournamentKnockoutsInCompetition.matchId,
+            homeEntryId: tournamentKnockoutsInCompetition.homeEntryId,
+            awayEntryId: tournamentKnockoutsInCompetition.awayEntryId,
           })
-          .from(tournamentKnockouts)
+          .from(tournamentKnockoutsInCompetition)
           .where(
             and(
-              eq(tournamentKnockouts.tournamentId, tournamentId),
-              eq(tournamentKnockouts.round, 1),
+              eq(tournamentKnockoutsInCompetition.seasonId, season.seasonId),
+              eq(tournamentKnockoutsInCompetition.tournamentId, tournamentId),
+              eq(tournamentKnockoutsInCompetition.round, 1),
             ),
           )
-          .orderBy(tournamentKnockouts.matchId);
+          .orderBy(tournamentKnockoutsInCompetition.matchId);
         return rows;
       } catch (error) {
         logError('Failed to retrieve round one knockouts', error, { tournamentId });
@@ -154,6 +166,7 @@ export const createTournamentKnockoutsRepository = (dbInstance?: DbOrTransaction
     },
 
     seedRoundOneBulk: async (
+      season: FplSeasonRef,
       tournamentId: number,
       pairs: ReadonlyArray<{ matchId: number; pair: SeedPair }>,
     ): Promise<number> => {
@@ -162,25 +175,28 @@ export const createTournamentKnockoutsRepository = (dbInstance?: DbOrTransaction
       }
 
       try {
-        const client = await getDbClient();
-        const matchIds = pairs.map((p) => p.matchId);
-        const homeIds = pairs.map((p) => p.pair.homeEntryId);
-        const awayIds = pairs.map((p) => p.pair.awayEntryId);
-
-        await client`
-          update tournament_knockouts as tk
-          set home_entry_id = data.home_entry_id,
+        const db = await getDbInstance();
+        const payload = JSON.stringify(
+          pairs.map(({ matchId, pair }) => ({
+            match_id: matchId,
+            home_entry_id: pair.homeEntryId,
+            away_entry_id: pair.awayEntryId,
+          })),
+        );
+        await db.execute(sql`
+          UPDATE ${tournamentKnockoutsInCompetition} AS knockout
+          SET home_entry_id = data.home_entry_id,
               away_entry_id = data.away_entry_id,
-              updated_at = now()
-          from (
-            select
-              unnest(${matchIds}::int[]) as match_id,
-              unnest(${homeIds}::int[]) as home_entry_id,
-              unnest(${awayIds}::int[]) as away_entry_id
-          ) as data
-          where tk.tournament_id = ${tournamentId}
-            and tk.match_id = data.match_id
-        `;
+              updated_at = clock_timestamp()
+          FROM jsonb_to_recordset(${payload}::jsonb) AS data(
+            match_id int,
+            home_entry_id int,
+            away_entry_id int
+          )
+          WHERE knockout.season_id = ${season.seasonId}
+            AND knockout.tournament_id = ${tournamentId}
+            AND knockout.match_id = data.match_id
+        `);
 
         logInfo('Seeded knockout round one', { tournamentId, count: pairs.length });
         return pairs.length;
@@ -194,12 +210,17 @@ export const createTournamentKnockoutsRepository = (dbInstance?: DbOrTransaction
       }
     },
 
-    deleteByTournament: async (tournamentId: number): Promise<void> => {
+    deleteByTournament: async (season: FplSeasonRef, tournamentId: number): Promise<void> => {
       try {
         const db = await getDbInstance();
         await db
-          .delete(tournamentKnockouts)
-          .where(eq(tournamentKnockouts.tournamentId, tournamentId));
+          .delete(tournamentKnockoutsInCompetition)
+          .where(
+            and(
+              eq(tournamentKnockoutsInCompetition.seasonId, season.seasonId),
+              eq(tournamentKnockoutsInCompetition.tournamentId, tournamentId),
+            ),
+          );
       } catch (error) {
         logError('Failed to delete tournament knockouts', error, { tournamentId });
         throw new DatabaseError(
@@ -210,7 +231,10 @@ export const createTournamentKnockoutsRepository = (dbInstance?: DbOrTransaction
       }
     },
 
-    upsertBatch: async (records: DbTournamentKnockoutInsert[]): Promise<number> => {
+    upsertBatch: async (
+      season: FplSeasonRef,
+      records: DbTournamentKnockoutInsert[],
+    ): Promise<number> => {
       if (records.length === 0) {
         return 0;
       }
@@ -218,10 +242,20 @@ export const createTournamentKnockoutsRepository = (dbInstance?: DbOrTransaction
       try {
         const db = await getDbInstance();
         await db
-          .insert(tournamentKnockouts)
-          .values(records)
+          .insert(tournamentKnockoutsInCompetition)
+          .values(
+            records.map((record) => {
+              const { id: _id, ...value } = record as DbTournamentKnockoutInsert & {
+                id?: number;
+              };
+              return { ...value, seasonId: season.seasonId };
+            }),
+          )
           .onConflictDoUpdate({
-            target: [tournamentKnockouts.tournamentId, tournamentKnockouts.matchId],
+            target: [
+              tournamentKnockoutsInCompetition.tournamentId,
+              tournamentKnockoutsInCompetition.matchId,
+            ],
             set: {
               homeEntryId: sql`excluded.home_entry_id`,
               homeNetPoints: sql`excluded.home_net_points`,
