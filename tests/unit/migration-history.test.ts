@@ -61,6 +61,17 @@ describe('migration history inspection', () => {
     expect(
       selectMigrationFilesForLedger(files, ['0050_entry_event_result_rich_checkpoint.sql']),
     ).toContain('0050_entry_event_result_rich_checkpoint.sql');
+
+    expect(
+      selectMigrationFilesForLedger(
+        [
+          '0050_create_understat_provider_tables.sql',
+          '0050_entry_event_result_rich_checkpoint.sql',
+          '0072_entry_event_result_rich_checkpoint.sql',
+        ],
+        ['0050_entry_event_result_rich_checkpoint.sql'],
+      ),
+    ).toEqual(['0050_entry_event_result_rich_checkpoint.sql']);
   });
 
   test('places every tournament lifecycle migration after the deployed Live tail', () => {

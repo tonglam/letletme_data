@@ -6,6 +6,9 @@
 -- a new migration: 0071 is already applied in production and must remain
 -- immutable.
 
+DROP VIEW IF EXISTS public.v_tournament_snapshot;
+DROP VIEW IF EXISTS public.v_tournament_event_snapshot;
+DROP VIEW IF EXISTS public.v_tournament_selection_stats;
 DROP MATERIALIZED VIEW IF EXISTS public.mv_tournament_snapshot;
 
 CREATE MATERIALIZED VIEW public.mv_tournament_snapshot AS
