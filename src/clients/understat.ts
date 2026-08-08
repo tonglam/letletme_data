@@ -364,10 +364,12 @@ export class UnderstatClient {
 
     await this.acquire();
     let releasePermit: (() => Promise<void>) | undefined;
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    let controller: AbortController | undefined;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
       releasePermit = await this.acquirePermit?.();
+      controller = new AbortController();
+      timeout = setTimeout(() => controller?.abort(), this.timeoutMs);
       const url = `${this.baseUrl}${path}`;
       logDebug('Fetching Understat resource', { url });
       const response = await this.fetchFn(url, {
@@ -439,7 +441,7 @@ export class UnderstatClient {
         true,
       );
     } finally {
-      clearTimeout(timeout);
+      if (timeout) clearTimeout(timeout);
       if (releasePermit) {
         await releasePermit().catch((error) =>
           logWarn('Failed to release Understat request permit; lease will expire', {

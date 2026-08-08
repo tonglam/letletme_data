@@ -13,6 +13,10 @@ import { syncEventLiveSummary } from './event-live-summaries.service';
 import { syncPlayerStatsForEvent } from './player-stats.service';
 
 const FPL_ARCHIVE_LOCK_KEY = 912_883_473;
+const FPL_ARCHIVE_LIVE_SNAPSHOT_SCOPES = Array.from(
+  { length: 38 },
+  (_, index) => `live-snapshot:event:${index + 1}`,
+);
 
 type ArchiveTableSpec = {
   sourceTable: string;
@@ -267,34 +271,28 @@ export async function getFplArchiveStatus(season: string) {
 export async function prepareAndArchiveFplSeason(season: string): Promise<FplArchiveResult> {
   assertSeason(season);
   const existing = await fplHistoryRepository.findArchive(season);
-  if (existing?.status === 'sealed') return archiveFplSeason(season);
   if (existing?.status === 'unavailable') return archiveFplSeason(season);
-
-  const core = await syncCoreSnapshot();
-  if (core.season !== season) {
-    throw new DatabaseError(
-      `Final core snapshot belongs to ${core.season}, not requested archive ${season}`,
-      'FPL_SEASON_ARCHIVE_AUTHORITY_MISMATCH',
-    );
-  }
 
   return withMutationConflictGuard(
     {
       queueName: 'data-sync',
       jobName: 'fpl-season-archive',
       required: true,
-      scopes: [
-        'data-core:events',
-        'data-core:teams',
-        'data-core:players',
-        'data-core:phases',
-        'data-core:fixtures',
-        'data-core:player-stats',
-        'data-core:player-values',
-        'event-live-summary:season',
-      ],
+      // The worker intentionally does not add an outer guard for this job.
+      // Hold every event's live writer scope from the final refresh through
+      // the archive transaction so no newer live facts can be copied after
+      // the summary has been prepared.
+      scopes: [...FPL_ARCHIVE_LIVE_SNAPSHOT_SCOPES, 'event-live-summary:season'],
     },
     async () => {
+      const core = await syncCoreSnapshot();
+      if (core.season !== season) {
+        throw new DatabaseError(
+          `Final core snapshot belongs to ${core.season}, not requested archive ${season}`,
+          'FPL_SEASON_ARCHIVE_AUTHORITY_MISMATCH',
+        );
+      }
+
       await syncPlayerStatsForEvent(38);
       await syncEventLiveSummary();
       return archiveFplSeason(season);

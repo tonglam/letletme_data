@@ -38,7 +38,7 @@ are `-1` (no expiry) — data is refreshed **on write**, never expired.
 | `EventLive:{season}:{eventId}` | hash | `elementId` | Domain `EventLive` | coordinated live snapshot; legacy manual live-data sync |
 | `EventLiveExplain:{season}:{eventId}` | hash | `elementId` | Frozen legacy explain shape through `savesPoints`; defensive-contribution properties are deliberately omitted | live explain sync |
 | `EventLiveExplainV2:{season}:{eventId}` | hash | `elementId` | Complete Domain `EventLiveExplain`, including `defensiveContribution` and `defensiveContributionPoints` | live explain sync |
-| `EventLiveSummary:{season}` | hash | `elementId` | Season aggregate `EventLiveSummary` | live summary sync |
+| `EventLiveSummary:{season}:{eventId}` | hash | `elementId` | Current-event `EventLiveSummary` | live summary sync |
 | `EventOverallResult:{season}` | hash | `eventId` | Overall-result payload incl. chip data | overall-result sync |
 | `LiveFixture:{season}:{eventId}` | hash | `teamId` | Frozen `LiveFixtureByStatus` JSON | coordinated live snapshot; legacy manual cache job |
 | `LiveFixtureV2:{season}:{eventId}` | hash | `teamId` | `LiveFixtureByStatusV2` JSON; every fixture includes `fixtureId` | coordinated live snapshot |
@@ -390,7 +390,6 @@ redis-cli --scan --pattern "EntryInfo:$OLD"          | xargs -r redis-cli DEL
 redis-cli --scan --pattern "EventLive:$OLD:*"        | xargs -r redis-cli DEL
 redis-cli --scan --pattern "EventLiveExplain:$OLD:*" | xargs -r redis-cli DEL
 redis-cli --scan --pattern "EventLiveExplainV2:$OLD:*" | xargs -r redis-cli DEL
-redis-cli DEL "EventLiveSummary:$OLD"
 redis-cli --scan --pattern "EventLiveSummary:$OLD:*" | xargs -r redis-cli DEL
 redis-cli --scan --pattern "EventOverallResult:$OLD" | xargs -r redis-cli DEL
 redis-cli --scan --pattern "LiveFixture:$OLD:*"      | xargs -r redis-cli DEL

@@ -1,10 +1,12 @@
 import { z } from 'zod';
 
-import type { ElementTypeId, PlayerId } from '../types/base.type';
+import type { ElementTypeId, EventId, PlayerId, TeamId } from '../types/base.type';
 
 export interface EventLiveSummary {
+  readonly eventId: EventId;
   readonly elementId: PlayerId;
   readonly elementType: ElementTypeId;
+  readonly teamId: TeamId;
   readonly minutes: number;
   readonly goalsScored: number;
   readonly assists: number;
@@ -26,8 +28,10 @@ export interface EventLiveSummary {
 export type EventLiveSummaries = readonly EventLiveSummary[];
 
 export const EventLiveSummarySchema = z.object({
+  eventId: z.number().int().positive(),
   elementId: z.number().int().positive(),
   elementType: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4)]),
+  teamId: z.number().int().positive(),
   minutes: z.number().int().min(0),
   goalsScored: z.number().int().min(0),
   assists: z.number().int().min(0),

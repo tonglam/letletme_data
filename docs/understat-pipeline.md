@@ -606,10 +606,12 @@ FPL archive 不是 Understat lane 的前置条件，但 bridge 读取历史 FPL 
 - `player_values_history`
 - `player_market_snapshots_history`
 
-`event_live_summaries` and `event_live_summaries_history` are derived season
-aggregates at `element_id` grain (and `(season, element_id)` in history).
-Their source facts are `event_lives` and `event_lives_history`; they do not
-carry `event_id` or `team_id`.
+`event_live_summaries` is the current-event derived read model at
+`(event_id, element_id)` grain and carries the current player `team_id`.
+`event_live_summaries_history` is the sealed season/player aggregate at
+`(season, element_id)` grain produced by migration 0069 from the historical
+event-live facts; the current and historical tables intentionally have
+different contracts.
 - `fpl_player_fixture_stats_history`
 
 `fpl_season_archives` 保存 `unavailable | pending | building | sealed | failed`；

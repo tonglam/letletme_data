@@ -4,41 +4,42 @@ import { logDebug, logError, logInfo } from '../utils/logger';
 import { redisSingleton } from './singleton';
 
 import type { EventLiveSummary } from '../domain/event-live-summaries';
+import type { EventId } from '../types/base.type';
 
 /**
  * Event Live Summary Cache Operations
- * Pattern: EventLiveSummary:season -> hash of elementId -> season summary data
+ * Pattern: EventLiveSummary:season:eventId -> hash of elementId -> summary data
  */
 export const eventLiveSummaryCache = {
-  async get(): Promise<EventLiveSummary[] | null> {
+  async getByEventId(eventId: EventId): Promise<EventLiveSummary[] | null> {
     try {
       const redis = await redisSingleton.getClient();
-      const key = `EventLiveSummary:${await getActiveCacheSeason()}`;
+      const key = `EventLiveSummary:${await getActiveCacheSeason()}:${eventId}`;
       const hash = await redis.hgetall(key);
 
       if (!hash || Object.keys(hash).length === 0) {
-        logDebug('Event live summary cache miss', { key });
+        logDebug('Event live summary cache miss', { eventId });
         return null;
       }
 
       const summaries = parseHashValues<EventLiveSummary>(hash, { key });
-      logDebug('Event live summary cache hit', { key, count: summaries.length });
+      logDebug('Event live summary cache hit', { eventId, count: summaries.length });
       return summaries;
     } catch (error) {
-      logError('Event live summary cache get error', error);
+      logError('Event live summary cache get error', error, { eventId });
       return null;
     }
   },
 
-  async set(summaries: EventLiveSummary[]): Promise<void> {
+  async set(eventId: EventId, summaries: EventLiveSummary[]): Promise<void> {
     try {
       if (summaries.length === 0) {
-        logInfo('No event live summary data to cache');
+        logInfo('No event live summary data to cache', { eventId });
         return;
       }
 
       const redis = await redisSingleton.getClient();
-      const key = `EventLiveSummary:${await getActiveCacheSeason()}`;
+      const key = `EventLiveSummary:${await getActiveCacheSeason()}:${eventId}`;
 
       const hashData: Record<string, string> = {};
       for (const summary of summaries) {
@@ -48,22 +49,22 @@ export const eventLiveSummaryCache = {
       await redis.del(key);
       await redis.hset(key, hashData);
 
-      logInfo('Event live summaries cached', { key, count: summaries.length });
+      logInfo('Event live summaries cached', { eventId, count: summaries.length });
     } catch (error) {
-      logError('Event live summary cache set error', error, { count: summaries.length });
+      logError('Event live summary cache set error', error, { eventId, count: summaries.length });
       throw error;
     }
   },
 
-  async clear(): Promise<void> {
+  async clearByEventId(eventId: EventId): Promise<void> {
     try {
       const redis = await redisSingleton.getClient();
-      const key = `EventLiveSummary:${await getActiveCacheSeason()}`;
+      const key = `EventLiveSummary:${await getActiveCacheSeason()}:${eventId}`;
       await redis.del(key);
 
-      logInfo('Event live summary cache cleared', { key });
+      logInfo('Event live summary cache cleared', { eventId });
     } catch (error) {
-      logError('Failed to clear event live summary cache', error);
+      logError('Failed to clear event live summary cache', error, { eventId });
       throw error;
     }
   },

@@ -32,6 +32,7 @@ import { logError, logInfo } from '../utils/logger';
 import { withMutationConflictGuard } from '../utils/mutation-lock';
 import { alertOnFinalFailure } from '../utils/notify';
 import { getQueueConnection } from '../utils/queue';
+import { isTerminalJobFailure } from '../utils/worker-failure';
 import type { WorkerRuntime } from './worker-runtime';
 
 function lockScopes(
@@ -141,12 +142,8 @@ async function processPlayerJob(job: Job<UnderstatPlayerJobData>): Promise<void>
   );
 }
 
-function isFinalAttempt(job: Job): boolean {
-  return job.attemptsMade >= (job.opts.attempts ?? 1);
-}
-
 async function recordTeamFailure(job: Job<UnderstatTeamJobData>, error: Error): Promise<void> {
-  if (!isFinalAttempt(job)) return;
+  if (!isTerminalJobFailure(job, error)) return;
   const item = understatTeamItemForJob(job.data, job.name);
   if (item) {
     await understatSyncRepository.failItem(
@@ -161,7 +158,7 @@ async function recordTeamFailure(job: Job<UnderstatTeamJobData>, error: Error): 
 }
 
 async function recordPlayerFailure(job: Job<UnderstatPlayerJobData>, error: Error): Promise<void> {
-  if (!isFinalAttempt(job)) return;
+  if (!isTerminalJobFailure(job, error)) return;
   const item = understatPlayerItemForJob(job.data, job.name);
   if (item) {
     await understatSyncRepository.failItem(

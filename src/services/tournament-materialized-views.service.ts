@@ -29,6 +29,7 @@ export async function refreshTournamentEventSnapshotMaterializedView(): Promise<
  */
 export async function refreshTournamentMaterializedViews(): Promise<{
   eventSnapshot: boolean;
+  tournamentSnapshot: boolean;
 }> {
   const client = await getDbClient();
 
@@ -38,7 +39,10 @@ export async function refreshTournamentMaterializedViews(): Promise<{
     await client`REFRESH MATERIALIZED VIEW CONCURRENTLY mv_tournament_event_snapshot`;
     logInfo('Refreshed mv_tournament_event_snapshot');
 
-    return { eventSnapshot: true };
+    await client`REFRESH MATERIALIZED VIEW CONCURRENTLY mv_tournament_snapshot`;
+    logInfo('Refreshed mv_tournament_snapshot');
+
+    return { eventSnapshot: true, tournamentSnapshot: true };
   } catch (error) {
     logError('Failed to refresh tournament event materialized view', error);
     throw error;

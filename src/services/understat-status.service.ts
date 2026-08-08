@@ -1,6 +1,7 @@
 import { eq, sql } from 'drizzle-orm';
 
 import { understatCache } from '../cache/understat-cache';
+import type { UnderstatSnapshotManifest } from '../cache/understat-cache';
 import {
   understatMatches,
   understatPlayerMatchStats,
@@ -12,18 +13,47 @@ import {
 } from '../db/schemas/index.schema';
 import { getDb } from '../db/singleton';
 import { understatSyncRepository } from '../repositories/understat-sync';
+import { logWarn } from '../utils/logger';
 
 interface CountAndUpdatedAt {
   count: number;
   updatedAt: Date | null;
 }
 
+type UnavailableManifest = {
+  status: 'unavailable';
+  reason: 'redis_unavailable';
+};
+
+type ManifestReader = (
+  season: string,
+  lane: 'team' | 'player',
+) => Promise<UnderstatSnapshotManifest | null>;
+
+export async function readManifest(
+  season: string,
+  lane: 'team' | 'player',
+  getManifest: ManifestReader = (targetSeason, targetLane) =>
+    understatCache.getManifest(targetSeason, targetLane),
+): Promise<UnderstatSnapshotManifest | UnavailableManifest | null> {
+  try {
+    return await getManifest(season, lane);
+  } catch (error) {
+    logWarn('Understat status could not read Redis manifest', {
+      season,
+      lane,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return { status: 'unavailable', reason: 'redis_unavailable' };
+  }
+}
+
 export async function getUnderstatStatus(season: string) {
   const db = await getDb();
   const [runs, teamManifest, playerManifest, resources] = await Promise.all([
     understatSyncRepository.findLatestRuns(season),
-    understatCache.getManifest(season, 'team'),
-    understatCache.getManifest(season, 'player'),
+    readManifest(season, 'team'),
+    readManifest(season, 'player'),
     Promise.all([
       db
         .select({

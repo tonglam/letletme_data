@@ -93,4 +93,37 @@ describe('Understat client boundary', () => {
     });
     expect(calls).toBe(1);
   });
+
+  test('starts the network timeout after the provider permit is acquired', async () => {
+    let signal: AbortSignal | undefined;
+    const client = new UnderstatClient({
+      enabled: true,
+      timeoutMs: 10,
+      acquirePermit: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        return async () => {};
+      },
+      fetchFn: async (_input, init) => {
+        signal = init?.signal ?? undefined;
+        return new Response(
+          JSON.stringify({
+            dates: [],
+            players: [],
+            statistics: {
+              situation: {},
+              formation: {},
+              gameState: {},
+              timing: {},
+              shotZone: {},
+              attackSpeed: {},
+              result: {},
+            },
+          }),
+        );
+      },
+    });
+
+    await client.getTeamData('Manchester United', 2026);
+    expect(signal?.aborted).toBe(false);
+  });
 });
