@@ -14,6 +14,7 @@ import {
   hasCompleteEntryPickLiveCoverage,
   isCompleteEntryPicks,
   isEntryPicksPayloadForEvent,
+  resolveScoringCaptainPick,
 } from '../domain/entry-picks';
 import { eventLiveRepository } from '../repositories/event-lives';
 import { eventRepository } from '../repositories/events';
@@ -240,12 +241,17 @@ export function buildEntryResultData(
 
   const captainPick = picks.find((pick) => pick.is_captain) ?? null;
   const vicePick = picks.find((pick) => pick.is_vice_captain) ?? null;
+  const scoringCaptainPick = resolveScoringCaptainPick(picks);
   const captainId = captainPick?.element ?? null;
   const viceCaptainId = vicePick?.element ?? null;
   const captainLive = captainId ? eventLiveMap.get(captainId) : undefined;
   const viceLive = viceCaptainId ? eventLiveMap.get(viceCaptainId) : undefined;
-  const captainMultiplier = captainPick?.multiplier ?? 1;
-  const captainPoints = captainId ? (captainLive?.totalPoints ?? 0) * captainMultiplier : null;
+  const scoringCaptainLive = scoringCaptainPick
+    ? eventLiveMap.get(scoringCaptainPick.element)
+    : undefined;
+  const captainPoints = scoringCaptainPick
+    ? (scoringCaptainLive?.totalPoints ?? 0) * scoringCaptainPick.multiplier
+    : null;
   const viceCaptainPoints = viceCaptainId ? (viceLive?.totalPoints ?? 0) : null;
   const captainBlank = isBlank(
     captainLive,
@@ -256,14 +262,7 @@ export function buildEntryResultData(
     viceCaptainId ? (elementTypeMap.get(viceCaptainId) ?? null) : null,
   );
 
-  let playedCaptainId = captainId;
-  if (captainId && viceCaptainId) {
-    const captainMinutes = captainLive?.minutes ?? 0;
-    const viceMinutes = viceLive?.minutes ?? 0;
-    if (captainMinutes === 0 && viceMinutes > 0) {
-      playedCaptainId = viceCaptainId;
-    }
-  }
+  const playedCaptainId = scoringCaptainPick?.element ?? null;
 
   const highest = getHighestScoreElement(picks, eventLiveMap);
   const highestScoreBlank = isBlank(

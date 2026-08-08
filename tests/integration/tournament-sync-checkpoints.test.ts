@@ -2219,9 +2219,16 @@ describe('tournament initialization checkpoints', () => {
     mockFPLClient({
       async getEventLive() {
         liveCalls += 1;
-        return completeRawEventLive(7);
+        const live = completeRawEventLive();
+        live.elements[1]!.stats.total_points = 7;
+        return live;
       },
       async getEntryEventPicks() {
+        const picks = completePicks().map((pick) => {
+          if (pick.is_captain) return { ...pick, multiplier: 0 };
+          if (pick.is_vice_captain) return { ...pick, multiplier: 2 };
+          return pick;
+        });
         return {
           active_chip: null,
           automatic_subs: [],
@@ -2237,7 +2244,7 @@ describe('tournament initialization checkpoints', () => {
             event_transfers_cost: 0,
             points_on_bench: 3,
           },
-          picks: completePicks(),
+          picks,
         };
       },
       async getEntryTransfers() {
@@ -2248,13 +2255,24 @@ describe('tournament initialization checkpoints', () => {
     try {
       const result = await syncTournamentEventResultsForEntryIds([ENTRY_ID], 12);
       expect(result.synced).toBe(1);
-      const rows = await sql<Array<{ captainPoints: number | null }>>`
-        SELECT event_captain_points AS "captainPoints"
+      const rows = await sql<
+        Array<{ captainPoints: number | null; playedCaptainId: number | null }>
+      >`
+        SELECT
+          event_captain_points AS "captainPoints",
+          event_played_captain AS "playedCaptainId"
         FROM entry_event_results
         WHERE entry_id = ${ENTRY_ID} AND event_id = 12
       `;
+      const canonicalLive = await sql<Array<{ totalPoints: number }>>`
+        SELECT total_points AS "totalPoints"
+        FROM event_lives
+        WHERE event_id = 12 AND element_id = ${PICK_PLAYER_ID}
+      `;
       expect(liveCalls).toBe(1);
       expect(rows[0]?.captainPoints).toBe(14);
+      expect(rows[0]?.playedCaptainId).toBe(PICK_PLAYER_ID + 1);
+      expect(canonicalLive[0]?.totalPoints).toBe(1);
     } finally {
       resetMockFPLClient();
       await sql`DELETE FROM event_lives WHERE event_id = 12`;

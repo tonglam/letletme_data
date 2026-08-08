@@ -1,6 +1,6 @@
 import { and, asc, desc, eq, gt, isNotNull, lte, sql } from 'drizzle-orm';
 
-import { events, type DbEvent, type DbEventInsert } from '../db/schemas/index.schema';
+import { events, type DbEvent } from '../db/schemas/index.schema';
 import { getDb, type DbOrTransaction } from '../db/singleton';
 import { neighbourEventId } from '../domain/events';
 import { DatabaseError } from '../utils/errors';
@@ -134,14 +134,16 @@ export const createEventRepository = (dbInstance?: DbOrTransaction) => {
           return [];
         }
 
-        const newEvents: DbEventInsert[] = domainEvents.map((event) => ({
+        const newEvents = domainEvents.map((event) => ({
           id: event.id,
           name: event.name,
           deadlineTime: event.deadlineTime,
           averageEntryScore: event.averageEntryScore,
           finished: event.finished,
           dataChecked: event.dataChecked,
-          dataCheckedAt: event.dataChecked ? new Date() : null,
+          // Finalization is compared with other database-authored evidence
+          // timestamps, so worker clock skew must not move this boundary.
+          dataCheckedAt: event.dataChecked ? sql`clock_timestamp()` : null,
           highestScoringEntry: event.highestScoringEntry,
           deadlineTimeEpoch: event.deadlineTimeEpoch,
           deadlineTimeGameOffset: event.deadlineTimeGameOffset,
@@ -178,7 +180,7 @@ export const createEventRepository = (dbInstance?: DbOrTransaction) => {
                 CASE
                   WHEN excluded.data_checked = true
                     AND (${events.dataChecked} = false OR ${events.dataCheckedAt} IS NULL)
-                  THEN now()
+                  THEN clock_timestamp()
                   ELSE ${events.dataCheckedAt}
                 END
               `,

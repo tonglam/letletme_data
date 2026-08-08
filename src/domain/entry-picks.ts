@@ -1,5 +1,12 @@
 type EntryPick = Record<string, unknown>;
 
+type CaptainPick = {
+  element: number;
+  multiplier: number;
+  is_captain: boolean;
+  is_vice_captain: boolean;
+};
+
 function asInteger(value: unknown): number | null {
   const parsed = typeof value === 'number' ? value : Number(value);
   return Number.isInteger(parsed) ? parsed : null;
@@ -73,6 +80,25 @@ export function isCompleteEntryPicks(raw: unknown): boolean {
     picks.filter((pick) => pick.is_vice_captain).length === 1 &&
     !picks.some((pick) => pick.is_captain && pick.is_vice_captain) &&
     scoringBonusPicks.length <= 1
+  );
+}
+
+/**
+ * FPL keeps the originally selected captain flag after automatic substitutions
+ * and transfers the scoring multiplier to the vice-captain. Prefer that final
+ * multiplier evidence, falling back to the selected captain before the event
+ * is resolved.
+ */
+export function resolveScoringCaptainPick<T extends CaptainPick>(picks: readonly T[]): T | null {
+  return (
+    picks.find(
+      (pick) =>
+        (pick.is_captain || pick.is_vice_captain) &&
+        Number.isInteger(pick.multiplier) &&
+        pick.multiplier > 1,
+    ) ??
+    picks.find((pick) => pick.is_captain) ??
+    null
   );
 }
 

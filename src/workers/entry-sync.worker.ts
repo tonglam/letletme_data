@@ -5,6 +5,7 @@ import { getActiveCacheSeason } from '../cache/cache-season';
 import { entryInfosCache } from '../cache/entry-infos-cache';
 import { MUTATION_PRIORITY_ORDER, type MutationPriorityTier } from '../domain/job-priority';
 import {
+  isExplicitEntryRepairRequest,
   resolveEntrySyncTargetEventId,
   resolveRichResultFreshnessCutoff,
 } from '../domain/entry-sync';
@@ -478,7 +479,7 @@ export function createEntrySyncWorker(): WorkerRuntime {
                       // Explicit API/manual entry lists are repair requests,
                       // so they must refetch even when a warm row exists. Only
                       // scheduled scans may reuse a complete picks row.
-                      if (effectiveJobData?.entryIds !== undefined) {
+                      if (isExplicitEntryRepairRequest(effectiveJobData)) {
                         return { requiredEntryIds: entryIds, reusedUnits: 0 };
                       }
                       const existing = new Set(
@@ -535,6 +536,12 @@ export function createEntrySyncWorker(): WorkerRuntime {
                   {
                     selectRequired: async (entryIds) => {
                       if (targetEventId === undefined) {
+                        return { requiredEntryIds: entryIds, reusedUnits: 0 };
+                      }
+                      // Explicit API/manual entry lists are repair requests.
+                      // A finalized checkpoint must not suppress their source
+                      // refresh, matching the adjacent picks repair behavior.
+                      if (isExplicitEntryRepairRequest(effectiveJobData)) {
                         return { requiredEntryIds: entryIds, reusedUnits: 0 };
                       }
                       // Active-GW values can still change. Reuse the dedicated

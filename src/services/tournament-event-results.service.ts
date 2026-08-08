@@ -19,7 +19,6 @@ import { eventRepository } from '../repositories/events';
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
 import type { RawFPLEntryTransfersResponse } from '../types';
-import { transformEventLives } from '../transformers/event-lives';
 import { mapWithConcurrency, uniqueNumbers, withTimeout } from '../utils/async';
 import { IncompleteDataSyncError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
@@ -148,8 +147,10 @@ async function resolveEventPointsPayload(
     throw new Error('Invalid event live data from FPL API');
   }
 
-  const saved = await eventLiveRepository.upsertBatch(transformEventLives(eventId, live.elements));
-  await eventLivesCache.set(eventId, saved);
+  // This is a calculation fallback, not a live-snapshot publisher. Persisting
+  // it here could let a request that started before finalization overwrite the
+  // canonical final rows after the snapshot commits. The regular live pipeline
+  // owns durable/cache publication and its ordering fences.
   return live;
 }
 

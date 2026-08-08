@@ -6,6 +6,12 @@ type EventFinalizationState = {
   dataCheckedAt: Date | null;
 };
 
+export function isExplicitEntryRepairRequest(
+  jobData: { entryIds?: readonly number[] } | undefined,
+): boolean {
+  return jobData?.entryIds !== undefined;
+}
+
 export function resolveRichResultFreshnessCutoff(
   event: EventFinalizationState | null,
 ): Date | null {

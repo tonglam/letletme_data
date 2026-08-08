@@ -1,9 +1,19 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
+  isExplicitEntryRepairRequest,
   resolveEntrySyncTargetEventId,
   resolveRichResultFreshnessCutoff,
 } from '../../src/domain/entry-sync';
+
+describe('explicit entry repair selection', () => {
+  test('distinguishes targeted repair lists from scheduled scans', () => {
+    expect(isExplicitEntryRepairRequest({ entryIds: [1, 2] })).toBe(true);
+    expect(isExplicitEntryRepairRequest({ entryIds: [] })).toBe(true);
+    expect(isExplicitEntryRepairRequest({})).toBe(false);
+    expect(isExplicitEntryRepairRequest(undefined)).toBe(false);
+  });
+});
 
 describe('entry sync target event resolution', () => {
   test('preserves explicit event IDs without a lookup', async () => {

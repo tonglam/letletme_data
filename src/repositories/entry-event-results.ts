@@ -11,6 +11,7 @@ import {
   hasCompleteEntryPickLiveCoverage,
   isCompleteEntryPicks,
   isEntryPicksPayloadForEvent,
+  resolveScoringCaptainPick,
 } from '../domain/entry-picks';
 import type { RawFPLEntryEventPicksResponse, RawFPLEntryHistoryCurrentItem } from '../types';
 import { DatabaseError } from '../utils/errors';
@@ -330,16 +331,14 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
 
         const entryHistory = picks.entry_history;
         const activeChip = picks.active_chip ?? null;
-        const captainPick = picks.picks.find((p) => p.is_captain) || null;
+        const captainPick = resolveScoringCaptainPick(picks.picks);
         const elementsPoints = new Map<number, number>();
         for (const el of live.elements) {
           elementsPoints.set(el.id, el.stats.total_points);
         }
         const autoSubPoints = getAutoSubPoints(autoSubs, elementsPoints);
         const captainPointsBase = captainPick ? (elementsPoints.get(captainPick.element) ?? 0) : 0;
-        const captainPoints = captainPick
-          ? captainPointsBase * (captainPick.multiplier || 1)
-          : null;
+        const captainPoints = captainPick ? captainPointsBase * captainPick.multiplier : null;
         const insert: DbEntryEventResultInsert = {
           entryId,
           eventId,

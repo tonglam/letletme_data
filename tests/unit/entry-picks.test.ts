@@ -1,6 +1,10 @@
 import { describe, expect, test } from 'bun:test';
 
-import { isCompleteEntryPicks, isEntryPicksPayloadForEvent } from '../../src/domain/entry-picks';
+import {
+  isCompleteEntryPicks,
+  isEntryPicksPayloadForEvent,
+  resolveScoringCaptainPick,
+} from '../../src/domain/entry-picks';
 
 describe('entry picks payload identity', () => {
   test('accepts only the requested event', () => {
@@ -31,6 +35,11 @@ describe('entry picks multiplier completeness', () => {
     });
 
     expect(isCompleteEntryPicks(finalized)).toBe(true);
+    expect(resolveScoringCaptainPick(finalized)?.element).toBe(2);
+  });
+
+  test('keeps the selected captain before any promotion is applied', () => {
+    expect(resolveScoringCaptainPick(picks)?.element).toBe(1);
   });
 
   test('rejects scoring bonuses outside the captain roles or on both roles', () => {

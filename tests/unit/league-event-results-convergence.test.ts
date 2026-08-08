@@ -109,6 +109,50 @@ describe('league event result convergence', () => {
     });
   });
 
+  test('uses the promoted vice-captain multiplier for finalized captain aggregates', () => {
+    const fallback = {
+      active_chip: null,
+      automatic_subs: [],
+      entry_history: {
+        event: 9,
+        points: 55,
+        total_points: 500,
+        rank: 10,
+        overall_rank: 1000,
+        bank: 5,
+        value: 1005,
+        event_transfers: 1,
+        event_transfers_cost: 4,
+        points_on_bench: 3,
+      },
+      picks: Array.from({ length: 15 }, (_, index) => ({
+        element: index + 1,
+        position: index + 1,
+        multiplier: index === 0 ? 0 : index === 1 ? 2 : index < 11 ? 1 : 0,
+        is_captain: index === 0,
+        is_vice_captain: index === 1,
+      })),
+    } satisfies RawFPLEntryEventPicksResponse;
+    const eventLive = new Map(
+      fallback.picks.map((pick) => [
+        pick.element,
+        {
+          elementId: pick.element,
+          totalPoints: pick.element === 1 ? 5 : pick.element === 2 ? 7 : 0,
+          minutes: pick.element === 1 ? 0 : 90,
+        } as DbEventLive,
+      ]),
+    );
+
+    expect(buildEntryResultData(undefined, fallback, 9, eventLive, new Map())).toMatchObject({
+      captainId: 1,
+      viceCaptainId: 2,
+      playedCaptainId: 2,
+      captainPoints: 14,
+      viceCaptainPoints: 7,
+    });
+  });
+
   test('rejects a result when event-live omits one required pick', () => {
     const fallback = {
       active_chip: null,
