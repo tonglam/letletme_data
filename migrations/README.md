@@ -18,6 +18,13 @@ running it now would emit a schema-reset migration. Until the freeze is lifted,
 add new migrations as hand-written, idempotent (`IF NOT EXISTS`) `NNNN_name.sql`
 files with the next sequential number, so already-migrated environments are no-ops.
 
+The production `sql_migrations` ledger includes the immutable Understat/FPL
+history from `0050_create_understat_provider_tables.sql` through
+`0071_drop_tournament_snapshot_materialized_view.sql`. Keep those files in the
+tree even when the feature branch that introduced them is not otherwise part of
+the current release. The current custom tail is `0077`; new migrations must
+continue at `0078`.
+
 `0034_widen_entry_event_transfers_identity.sql` is a staged cutover. Deploy the
 service with `TRANSFER_SYNC_MODE=latest` first, apply 0034, then change the mode
 to `all` and trigger the existing entry-transfers sync job to backfill history.
