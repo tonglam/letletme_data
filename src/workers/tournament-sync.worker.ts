@@ -315,15 +315,17 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
                 return result;
               }
 
-              case TOURNAMENT_JOBS.CUP_RESULTS:
-                await syncTournamentEventCupResults(eventId);
+              case TOURNAMENT_JOBS.CUP_RESULTS: {
+                const result = await syncTournamentEventCupResults(eventId);
                 await afterCascadeStructureJob(eventId, cascadeId, job.name, finalizationTargets);
-                return null;
+                return result;
+              }
 
-              case TOURNAMENT_JOBS.SELECTION_STATS:
-                await syncTournamentSelectionStats(eventId);
+              case TOURNAMENT_JOBS.SELECTION_STATS: {
+                const result = await syncTournamentSelectionStats(eventId);
                 await afterCascadeStructureJob(eventId, cascadeId, job.name, finalizationTargets);
-                return null;
+                return result;
+              }
 
               case TOURNAMENT_JOBS.EVENT_PICKS:
                 return syncTournamentEventPicks(eventId);

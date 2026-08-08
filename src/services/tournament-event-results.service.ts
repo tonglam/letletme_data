@@ -24,7 +24,7 @@ import { mapWithConcurrency, uniqueNumbers, withTimeout } from '../utils/async';
 import { IncompleteDataSyncError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 import type { TournamentFinalizationTarget } from '../domain/tournament';
-import { latestFreshnessTimestamp } from '../domain/freshness';
+import { isFreshnessBoundaryNewer, latestFreshnessTimestamp } from '../domain/freshness';
 
 const DEFAULT_CONCURRENCY = 5;
 const EVENT_LIVE_FETCH_TIMEOUT_MS = Number(process.env.TOURNAMENT_EVENT_LIVE_TIMEOUT_MS ?? 45_000);
@@ -561,6 +561,18 @@ export async function syncTournamentEventResults(
       reusedUnits,
       succeededUnits,
       failedUnits,
+    );
+  }
+
+  const postWorkFinalizationCutoff = await eventRepository.findDataCheckedAtExact(eventId);
+  if (isFreshnessBoundaryNewer(freshAfter, postWorkFinalizationCutoff)) {
+    const retryUnits = Math.max(entryIds.length, requiredUnits);
+    throw new IncompleteDataSyncError(
+      'Tournament event finalized during result sync; retrying with final evidence',
+      retryUnits,
+      0,
+      0,
+      retryUnits,
     );
   }
 

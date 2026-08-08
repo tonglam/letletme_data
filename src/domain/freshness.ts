@@ -30,3 +30,14 @@ export function latestFreshnessTimestamp(
     ? finalizationCutoff
     : sourceFreshAfter;
 }
+
+export function isFreshnessBoundaryNewer(
+  sourceFreshAfter: Date | string,
+  candidateFinalization: Date | string | null | undefined,
+): boolean {
+  return (
+    candidateFinalization !== null &&
+    candidateFinalization !== undefined &&
+    latestFreshnessTimestamp(sourceFreshAfter, candidateFinalization) !== sourceFreshAfter
+  );
+}
