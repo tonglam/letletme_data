@@ -79,7 +79,7 @@ P1 exit gate: both restore drills pass. A backup that has not been restored does
 | [x] | P2-16 | Fresh migration replay twice on PG15 | Both runs pass; second run is a no-op/status-clean | External `p2/logs/p2-fresh-final-4-*` |
 | [x] | P2-17 | Production-B0 upgrade replay twice on PG15 | Both runs pass; no manual correction | External `p2/logs/p2-b0-final-5-*` |
 | [x] | P2-18 | Run Supabase advisors | No unaccepted v3 security/performance finding | `10-p2-implementation-and-acceptance.md`; local v3 lint 0 |
-| [ ] | P2-19 | Commit D1 | Clean tree; SHA recorded | SHA: |
+| [x] | P2-19 | Commit D1 | Clean tree; SHA recorded | Substantive D1 `aad7225654d2cacf353bb00e441804cf2bc2dce3` |
 
 P2 exit gate: migrations reproduce the target from fresh and B0 schemas and all data gates pass.
 

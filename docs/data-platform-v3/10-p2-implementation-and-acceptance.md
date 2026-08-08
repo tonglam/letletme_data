@@ -6,6 +6,8 @@ Run ID: `v3-20260808T160008Z-b9eddc0`
 
 Status: **ACCEPTED**
 
+Substantive D1 commit: `aad7225654d2cacf353bb00e441804cf2bc2dce3`
+
 Accepted scope: Data D1 schema, deterministic conversion, activation/freeze boundary, and
 approval-gated cleanup migrations. This acceptance does not authorize production activation or
 legacy deletion.
