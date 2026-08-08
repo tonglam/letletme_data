@@ -33,7 +33,7 @@ durable path, SHA, query result, run URL, or backup manifest. Verbal confirmatio
 | [x] | P0-10 | Inventory Web DB/cache/GraphQL contracts | Every direct DB use has an owner | `06-p0-baseline.md`; Web auth preserved, Data writes prohibited |
 | [x] | P0-11 | Record Redis queue/cache topology, key types, TTLs, memory | Endpoints and namespaces are explicit; secrets excluded | `06-p0-baseline.md`; same endpoint/DB0, 177.35 MB |
 | [x] | P0-12 | Add v3 deploy lock | External manifest + exact SHA/digest/token required; automatic v3 deploy blocked | `07-p0-verification.md`; 12/12 gate tests; actionlint/shellcheck pass |
-| [ ] | P0-13 | Commit D0 | Clean tree; checks pass; SHA recorded | SHA: |
+| [x] | P0-13 | Commit D0 | Clean tree; checks pass; SHA recorded | `7622ce9b318d4b020eaac02abcbf1d86ec56ffd0` |
 
 P0 exit gate: P0-01 through P0-13 complete and no object/reference remains unclassified.
 
