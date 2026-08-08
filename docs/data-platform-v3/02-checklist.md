@@ -91,7 +91,7 @@ P2 exit gate: migrations reproduce the target from fresh and B0 schemas and all 
 | [x] | P3-02 | Replace schema/table definitions | Only target plural schema-qualified objects exported | PG15 export/catalog parity, 13 assertions |
 | [x] | P3-03 | Replace repositories/services | Explicit season required; no suffix construction | Residual scan + 664 unit tests + 26-table PG15 persistence contract |
 | [x] | P3-04 | Replace current-season authority | `fpl.seasons.is_current` is sole authority | DB trust-boundary + season unit tests |
-| [x] | P3-05 | Remove physical summary/stat writes | Summary and tournament stats are reporting reads only | Reporting relation/physical-copy assertions |
+| [x] | P3-05 | Remove physical reporting writes | Player summaries and tournament selection stats are reporting reads only | Reporting relation/physical-copy assertions |
 | [x] | P3-06 | Consolidate ops run/publication writes | Idempotent run/item/publication state | `sync-operations`: 5/5 |
 | [x] | P3-07 | Separate queue and cache Redis clients | Cross-wiring fails configuration/tests | Unit + Redis integration separation |
 | [x] | P3-08 | Implement v3 immutable publication | Atomic pointer and TTL behavior pass | `data-publication`: 8/8 |
@@ -99,7 +99,7 @@ P2 exit gate: migrations reproduce the target from fresh and B0 schemas and all 
 | [x] | P3-10 | Remove retired summary/value keys | No writer/key/config remains | Source scan + publication contract tests |
 | [x] | P3-11 | Add scoped Redis cleanup | Only configured v2 namespaces deleted; no FLUSH | Cleanup unit tests; `SCAN` + `UNLINK` only |
 | [x] | P3-12 | Run lint/typecheck/unit/integration/build | All pass | `11-p3-runtime-and-cache-acceptance.md`; `12-p3-test-retirement-audit.md` |
-| [ ] | P3-13 | Commit D2 | Clean tree; SHA recorded | SHA: |
+| [x] | P3-13 | Commit D2 | Clean tree; SHA recorded | Substantive SHA: `51201b40ec3187ad38a18171a7267836326a6fec` |
 
 ## P4 - GraphQL and Web
 

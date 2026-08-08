@@ -2,9 +2,9 @@
 
 Plan version: 3.2.1
 
-Status: **READY FOR D2 COMMIT**
+Status: **ACCEPTED**
 
-Substantive D2 commit: `PENDING`
+Substantive D2 commit: `51201b40ec3187ad38a18171a7267836326a6fec`
 
 Accepted scope: Data runtime ownership, schema-qualified repositories, explicit season authority,
 runtime database constraints, reporting reads, immutable Redis publication, queue/cache isolation,

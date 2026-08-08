@@ -2,7 +2,7 @@
 
 Plan version: 3.2.1
 
-Status: **READY FOR FINAL P3 GATES**
+Status: **ACCEPTED**
 
 This audit covers every test file removed while replacing the v2 Data runtime. Removing a test is
 acceptable only when the tested behavior is deliberately retired or when an identified v3 test
