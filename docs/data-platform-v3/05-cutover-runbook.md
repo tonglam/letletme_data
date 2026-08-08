@@ -1,6 +1,6 @@
 # Data Platform v3 Cutover and Recovery Runbook
 
-Plan version: 3.1.0
+Plan version: 3.1.1
 
 Mode: maintenance-window hard cutover
 
@@ -34,6 +34,10 @@ Validation requirements:
 - each SHA exactly matches the reviewed external release manifest;
 - the Data image reference is pinned by digest and matches `dataImageDigest` in that manifest;
 - database is production project `gtwcfjoviibmtkevurjw` and PostgreSQL 15;
+- the hosted PostgreSQL security-patch advisor warning is resolved, or an explicit, dated exception
+  is attached to the run and accepted before activation;
+- every P0-approved `public` relation, sequence, function, and enum is owned by the migration login;
+  an ownership difference stops before `0090` mutates anything;
 - queue/cache endpoints are distinct and neither value is logged.
 
 The approved release manifest is generated only after candidate SHAs and image digests are frozen.
@@ -98,6 +102,8 @@ All fields below must be attached to the run record:
 - current database/Redis size and free-capacity report;
 - rollback SHAs/images and tested B1 restore procedure;
 - maintenance message and private smoke-test credentials/routes.
+- dedicated Data writer and GraphQL reader logins mapped to the v3 group roles; the migration login
+  must not be used by either runtime.
 
 If any artifact differs from the latest reviewed commit, stop and repeat the affected rehearsal.
 

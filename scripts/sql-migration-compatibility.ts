@@ -8,6 +8,35 @@ const LEGACY_TRANSACTION_CONTROL_MIGRATIONS = new Set([
   '0067_repair_fpl_1718_stoke_name.sql',
 ]);
 
+const LOCAL_TIMEOUT_PATTERN =
+  /^\s*SET\s+LOCAL\s+(statement_timeout|lock_timeout)\s*=\s*'([^']+)'\s*;\s*$/gim;
+
+export type SqlMigrationLocalTimeouts = {
+  lockTimeout?: string;
+  statementTimeout?: string;
+};
+
+/**
+ * A migration file is sent to Postgres as one extended-protocol query. A SET
+ * LOCAL inside that same query cannot arm the timeout for the query that is
+ * already running, so extract the declared budgets and apply them in a prior
+ * protocol round trip inside the same transaction.
+ */
+export function getSqlMigrationLocalTimeouts(contents: string): SqlMigrationLocalTimeouts {
+  const timeouts: SqlMigrationLocalTimeouts = {};
+
+  for (const match of contents.matchAll(LOCAL_TIMEOUT_PATTERN)) {
+    const [, setting, value] = match;
+    if (setting.toLowerCase() === 'statement_timeout') {
+      timeouts.statementTimeout = value;
+    } else {
+      timeouts.lockTimeout = value;
+    }
+  }
+
+  return timeouts;
+}
+
 /**
  * Preconditions run in the same transaction as a still-pending historical
  * migration. This keeps the historical file immutable while allowing a

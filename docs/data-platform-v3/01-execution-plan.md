@@ -1,6 +1,6 @@
 # Data Platform v3 Execution Plan
 
-Plan version: 3.1.0
+Plan version: 3.1.1
 
 Execution strategy: preseason hard cutover
 
@@ -155,10 +155,10 @@ Conversion rules:
 - `event_live_summaries*` rows are never copied; the new view must reproduce season totals from
   gameweek facts.
 - `player_values*` rows are not copied when market snapshots reproduce them. The B0 audit proved
-  all historical rows reconstruct exactly, but the 573 current-season start rows predate the first
-  market capture. `0085` therefore creates one provenance-marked `legacy_value_seed` market
-  snapshot per missing start row, then requires the reporting view to reproduce both historical
-  and current value rows exactly. Any remaining mismatch stops P2.
+  all historical rows reconstruct exactly. Of 573 current-season start rows, 9 coincide with the
+  first market capture and 564 predate it. `0085` therefore creates one provenance-marked
+  `legacy_value_seed` market snapshot per missing start row, then requires the reporting view to
+  reproduce both historical and current value rows exactly. Any remaining mismatch stops P2.
 - `entry_history_infos` is season-summary history, not event history. It migrates to
   `competition.entry_season_histories` at `(season_id, entry_id)` grain. Reference-only season rows
   preserve 2011/12 through 2015/16 without creating fake FPL core facts.
@@ -283,8 +283,9 @@ Purpose: activate v3 without concurrent v2/v3 writers.
 
 Implementation:
 
-1. Verify B0, rehearsal reports, exact candidate SHAs, image digests, migration checksums, maintenance
-   messaging, and operator roles.
+1. Verify B0, rehearsal reports, exact candidate SHAs, image digests, migration checksums,
+   maintenance messaging, operator/runtime roles, and resolution or explicit acceptance of the
+   hosted PostgreSQL security-patch advisor warning.
 2. Enable maintenance mode and stop Data API/workers plus GraphQL. Web serves maintenance UX.
 3. Confirm no active application sessions or queued jobs can write business data.
 4. Apply `0079`-`0090` with statement/lock timeouts and durable command logging.

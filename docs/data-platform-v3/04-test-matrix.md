@@ -1,6 +1,6 @@
 # Data Platform v3 Test and Acceptance Matrix
 
-Plan version: 3.1.0
+Plan version: 3.1.1
 
 ## Evidence rules
 
@@ -147,9 +147,9 @@ For every v2 `player_values*` row:
 3. report unmatched source rows, unmatched derived rows, and differing values.
 
 Pass condition: zero mismatch after the versioned B0 exception is applied. Historical rows must
-derive directly. The 573 B0 current-season start rows must map one-to-one to
-`snapshot_source='legacy_value_seed'` facts, and no other source value row may create a seed fact.
-Any remaining mismatch blocks dropping `player_values*`.
+derive directly. Nine B0 current-season start rows derive from same-day first captures; the other
+564 must map one-to-one to `snapshot_source='legacy_value_seed'` facts. No other source value row
+may create a seed fact. Any remaining mismatch blocks dropping `player_values*`.
 
 ### Competition and tournament
 

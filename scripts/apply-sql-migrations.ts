@@ -5,15 +5,23 @@ import { join } from 'node:path';
 
 import postgres from 'postgres';
 
-import { inspectMigrationHistory, selectMigrationFilesForLedger } from './migration-history';
 import {
+  inspectMigrationHistory,
+  selectMigrationFilesForLedger,
+  selectSqlMigrationLedger,
+  type SqlMigrationLedger,
+} from './migration-history';
+import {
+  getSqlMigrationLocalTimeouts,
   getSqlMigrationExecutionContents,
   getSqlMigrationPreconditions,
 } from './sql-migration-compatibility';
+import { isV3LegacyDropMigration, selectV3LegacyDropMigrations } from './v3-legacy-drop-gate';
 
 const migrationsDir = process.env.MIGRATIONS_DIR ?? 'migrations';
 const databaseUrl = process.env.DATABASE_URL;
 const statusOnly = process.argv.includes('--status');
+const legacyDropApproval = process.env.V3_LEGACY_DROP_APPROVAL;
 
 if (!databaseUrl) {
   console.error('DATABASE_URL is required');
@@ -24,19 +32,40 @@ const sql = postgres(databaseUrl, { max: 1 });
 const advisoryLockKey = 912_883_471;
 
 type LedgerRow = { filename: string; checksum: string | null; applied_at: Date };
+type LedgerProbe = { public_relation_kind: string | null; has_ops_ledger: boolean };
 
 const checksum = (contents: string): string =>
   createHash('sha256').update(contents, 'utf8').digest('hex');
 
-async function ensureLedger(): Promise<void> {
+async function probeLedger(): Promise<SqlMigrationLedger> {
+  const [probe] = await sql<LedgerProbe[]>`
+    SELECT
+      (
+        SELECT relation_row.relkind::text
+        FROM pg_class relation_row
+        JOIN pg_namespace namespace_row ON namespace_row.oid = relation_row.relnamespace
+        WHERE namespace_row.nspname = 'public'
+          AND relation_row.relname = 'sql_migrations'
+      ) AS public_relation_kind,
+      to_regclass('ops.schema_migrations') IS NOT NULL AS has_ops_ledger
+  `;
+
+  return selectSqlMigrationLedger(probe.public_relation_kind, probe.has_ops_ledger);
+}
+
+async function ensureLedger(): Promise<SqlMigrationLedger> {
+  const ledger = await probeLedger();
+  if (ledger === 'ops') return ledger;
+
   await sql`
-    CREATE TABLE IF NOT EXISTS sql_migrations (
+    CREATE TABLE IF NOT EXISTS public.sql_migrations (
       filename text PRIMARY KEY,
       checksum text,
       applied_at timestamptz NOT NULL DEFAULT now()
     )
   `;
-  await sql`ALTER TABLE sql_migrations ADD COLUMN IF NOT EXISTS checksum text`;
+  await sql`ALTER TABLE public.sql_migrations ADD COLUMN IF NOT EXISTS checksum text`;
+  return ledger;
 }
 
 function listJournaledMigrationFiles(): Set<string> {
@@ -72,12 +101,19 @@ function readMigration(filename: string): { contents: string; checksum: string }
   return { contents, checksum: checksum(contents) };
 }
 
-async function loadLedger(): Promise<Map<string, LedgerRow>> {
-  const rows = await sql<LedgerRow[]>`
-    SELECT filename, checksum, applied_at
-    FROM sql_migrations
-    ORDER BY filename
-  `;
+async function loadLedger(ledger: SqlMigrationLedger): Promise<Map<string, LedgerRow>> {
+  const rows =
+    ledger === 'ops'
+      ? await sql<LedgerRow[]>`
+          SELECT filename, checksum, applied_at
+          FROM ops.schema_migrations
+          ORDER BY filename
+        `
+      : await sql<LedgerRow[]>`
+          SELECT filename, checksum, applied_at
+          FROM public.sql_migrations
+          ORDER BY filename
+        `;
   return new Map(rows.map((row) => [row.filename, row]));
 }
 
@@ -85,13 +121,22 @@ async function adoptOrVerifyApplied(
   filename: string,
   expectedChecksum: string,
   row: LedgerRow,
+  ledger: SqlMigrationLedger,
 ): Promise<void> {
   if (row.checksum === null) {
-    await sql`
-      UPDATE sql_migrations
-      SET checksum = ${expectedChecksum}
-      WHERE filename = ${filename} AND checksum IS NULL
-    `;
+    if (ledger === 'ops') {
+      await sql`
+        UPDATE ops.schema_migrations
+        SET checksum = ${expectedChecksum}
+        WHERE filename = ${filename} AND checksum IS NULL
+      `;
+    } else {
+      await sql`
+        UPDATE public.sql_migrations
+        SET checksum = ${expectedChecksum}
+        WHERE filename = ${filename} AND checksum IS NULL
+      `;
+    }
     console.log(`[sql-migrate] adopted checksum ${filename}`);
     return;
   }
@@ -102,17 +147,58 @@ async function adoptOrVerifyApplied(
   }
 }
 
-async function applyFile(filename: string, contents: string, digest: string): Promise<void> {
+async function applyFile(
+  filename: string,
+  contents: string,
+  digest: string,
+  approval: string | undefined,
+): Promise<void> {
   await sql.begin(async (tx) => {
+    const localTimeouts = getSqlMigrationLocalTimeouts(contents);
+    if (localTimeouts.lockTimeout) {
+      await tx`SELECT set_config('lock_timeout', ${localTimeouts.lockTimeout}, true)`;
+    }
+    if (localTimeouts.statementTimeout) {
+      await tx`SELECT set_config('statement_timeout', ${localTimeouts.statementTimeout}, true)`;
+    }
+
+    if (isV3LegacyDropMigration(filename)) {
+      if (!approval) {
+        throw new Error(`legacy cleanup migration ${filename} reached execution without approval`);
+      }
+      await tx`SELECT set_config('letletme.v3_legacy_drop_approval', ${approval}, true)`;
+    }
+
     for (const statement of getSqlMigrationPreconditions(filename)) {
       await tx.unsafe(statement);
     }
     await tx.unsafe(getSqlMigrationExecutionContents(filename, contents));
-    await tx`
-      INSERT INTO sql_migrations (filename, checksum)
-      VALUES (${filename}, ${digest})
-      ON CONFLICT (filename) DO NOTHING
+
+    // Re-probe after the migration: 0090 atomically changes ledger authority.
+    const [probe] = await tx<LedgerProbe[]>`
+      SELECT
+        (
+          SELECT relation_row.relkind::text
+          FROM pg_class relation_row
+          JOIN pg_namespace namespace_row ON namespace_row.oid = relation_row.relnamespace
+          WHERE namespace_row.nspname = 'public'
+            AND relation_row.relname = 'sql_migrations'
+        ) AS public_relation_kind,
+        to_regclass('ops.schema_migrations') IS NOT NULL AS has_ops_ledger
     `;
+    const ledger = selectSqlMigrationLedger(probe.public_relation_kind, probe.has_ops_ledger);
+
+    if (ledger === 'ops') {
+      await tx`
+        INSERT INTO ops.schema_migrations (filename, checksum)
+        VALUES (${filename}, ${digest})
+      `;
+    } else {
+      await tx`
+        INSERT INTO public.sql_migrations (filename, checksum)
+        VALUES (${filename}, ${digest})
+      `;
+    }
   });
   console.log(`[sql-migrate] applied ${filename}`);
 }
@@ -154,10 +240,14 @@ async function printStatus(files: string[], ledger: Map<string, LedgerRow>): Pro
   if (invalid) process.exitCode = 1;
 }
 
-async function applyMigrations(files: string[]): Promise<void> {
+async function applyMigrations(
+  files: string[],
+  initialLedger: SqlMigrationLedger,
+  ledger: Map<string, LedgerRow>,
+  approval: string | undefined,
+): Promise<void> {
   await sql`SELECT pg_advisory_lock(${advisoryLockKey})`;
   try {
-    const ledger = await loadLedger();
     const effectiveFiles = selectMigrationFilesForLedger(files, ledger.keys());
     const { missing, backdated, latestApplied } = inspectMigrationHistory(
       effectiveFiles,
@@ -176,11 +266,11 @@ async function applyMigrations(files: string[]): Promise<void> {
       const migration = readMigration(filename);
       const applied = ledger.get(filename);
       if (applied) {
-        await adoptOrVerifyApplied(filename, migration.checksum, applied);
+        await adoptOrVerifyApplied(filename, migration.checksum, applied, initialLedger);
         console.log(`[sql-migrate] skip ${filename}`);
         continue;
       }
-      await applyFile(filename, migration.contents, migration.checksum);
+      await applyFile(filename, migration.contents, migration.checksum, approval);
     }
     console.log('[sql-migrate] up to date');
   } finally {
@@ -191,13 +281,23 @@ async function applyMigrations(files: string[]): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  await ensureLedger();
-  const files = listSqlMigrationFiles();
+  const ledger = await ensureLedger();
+  const ledgerRows = await loadLedger(ledger);
+  const selection = selectV3LegacyDropMigrations(
+    listSqlMigrationFiles(),
+    ledgerRows.keys(),
+    legacyDropApproval,
+  );
+
+  for (const filename of selection.gatedFiles) {
+    console.log(`gated   ${filename} (requires V3_LEGACY_DROP_APPROVAL)`);
+  }
+
   if (statusOnly) {
-    await printStatus(files, await loadLedger());
+    await printStatus(selection.files, ledgerRows);
     return;
   }
-  await applyMigrations(files);
+  await applyMigrations(selection.files, ledger, ledgerRows, selection.approval);
 }
 
 main()

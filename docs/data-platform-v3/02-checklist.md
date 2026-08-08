@@ -1,6 +1,6 @@
 # Data Platform v3 Strict Execution Checklist
 
-Plan version: 3.1.0
+Plan version: 3.1.1
 
 Rule: an item is complete only when its checkbox is checked and the Evidence column contains a
 durable path, SHA, query result, run URL, or backup manifest. Verbal confirmation is not evidence.
@@ -14,7 +14,7 @@ durable path, SHA, query result, run URL, or backup manifest. Verbal confirmatio
 | GraphQL baseline | `8cf4ddc` |
 | Web baseline | `c290d91` |
 | Production project | `gtwcfjoviibmtkevurjw` |
-| Plan version | 3.1.0 |
+| Plan version | 3.1.1 |
 | Cutover approver | User |
 
 ## P0 - Freeze and inventory
@@ -62,23 +62,23 @@ P1 exit gate: both restore drills pass. A backup that has not been restored does
 | Done | ID | Check | Acceptance | Evidence |
 | --- | --- | --- | --- | --- |
 | [x] | P2-01 | Create D1 from accepted D0 | Exact predecessor SHA recorded | D0 predecessor `6f66095b162160c1c0b55076b6960f92d7754881`; isolated schema worktree |
-| [ ] | P2-02 | Implement `0079` ops/roles/schemas | Private schemas and least-privilege roles pass | Migration/test: |
-| [ ] | P2-03 | Implement `0080` FPL dimensions | Keys, constraints, FK indexes pass | Migration/test: |
-| [ ] | P2-04 | Implement `0081` FPL facts | Grain and numeric/timestamp types pass | Migration/test: |
-| [ ] | P2-05 | Implement `0082` competition facts | Season-aware keys and tournament facts pass | Migration/test: |
-| [ ] | P2-06 | Implement `0083` Understat/bridge | Provider isolation and verified-link rules pass | Migration/test: |
-| [ ] | P2-07 | Implement `0084` reporting | View security and MV unique indexes pass | Migration/test: |
-| [ ] | P2-08 | Implement `0085` FPL conversion | Every season/object reconciles | Report: |
-| [ ] | P2-09 | Audit PlayerValue reconstructability | Zero mismatches, or execution stops for plan revision | Report: |
-| [ ] | P2-10 | Implement `0086` competition conversion | Counts/hashes/business invariants pass | Report: |
-| [ ] | P2-11 | Implement `0087` Understat/ops conversion | Counts/hashes/provider boundaries pass | Report: |
-| [ ] | P2-12 | Implement `0088` constraint validation | All deferred constraints validated | Query output: |
-| [ ] | P2-13 | Implement `0089` publication preparation | Complete inactive initial revision exists | Test: |
-| [ ] | P2-14 | Implement `0090` activation/freeze | One active revision; v2 writes denied | Test: |
-| [ ] | P2-15 | Implement approval-gated `0091`-`0093` | Exact manifest only; blocked without approval env/token | Tests: |
-| [ ] | P2-16 | Fresh migration replay twice on PG15 | Both runs pass; second run is a no-op/status-clean | Logs: |
-| [ ] | P2-17 | Production-B0 upgrade replay twice on PG15 | Both runs pass; no manual correction | Logs: |
-| [ ] | P2-18 | Run Supabase advisors | No unaccepted v3 security/performance finding | Advisor report: |
+| [x] | P2-02 | Implement `0079` ops/roles/schemas | Private schemas and least-privilege roles pass | `0079`; `10-p2-implementation-and-acceptance.md` |
+| [x] | P2-03 | Implement `0080` FPL dimensions | Keys, constraints, FK indexes pass | `0080`; accepted fresh/B0 replay report |
+| [x] | P2-04 | Implement `0081` FPL facts | Grain and numeric/timestamp types pass | `0081`; 51/51 B0 audit checks |
+| [x] | P2-05 | Implement `0082` competition facts | Season-aware keys and tournament facts pass | `0082`; accepted B0 hashes |
+| [x] | P2-06 | Implement `0083` Understat/bridge | Provider isolation and verified-link rules pass | `0083`; 4,560/129,576/1,909 reconciled rows |
+| [x] | P2-07 | Implement `0084` reporting | View security and MV unique indexes pass | `0084`; 3/3 secure views; 2/2 populated/indexed MVs |
+| [x] | P2-08 | Implement `0085` FPL conversion | Every season/object reconciles | P2 report; final B0 hash diffs 0 bytes |
+| [x] | P2-09 | Audit PlayerValue reconstructability | Zero mismatches, or execution stops for plan revision | `09-p2-source-contract-audit.md`; P2 report |
+| [x] | P2-10 | Implement `0086` competition conversion | Counts/hashes/business invariants pass | P2 report; `ops.migration_objects` passed |
+| [x] | P2-11 | Implement `0087` Understat/ops conversion | Counts/hashes/provider boundaries pass | P2 report; `ops.migration_objects` passed |
+| [x] | P2-12 | Implement `0088` constraint validation | All deferred constraints validated | 125 FKs; missing indexes 0; unvalidated 0 |
+| [x] | P2-13 | Implement `0089` publication preparation | Complete inactive initial revision exists | Fresh/B0 replay and publication contract passed |
+| [x] | P2-14 | Implement `0090` activation/freeze | One active revision; v2 writes denied | Validation: 192 frozen relations/fences; 1 active publication |
+| [x] | P2-15 | Implement approval-gated `0091`-`0093` | Exact manifest only; blocked without approval env/token | Cleanup rehearsal report; v3 hash diff 0 bytes |
+| [x] | P2-16 | Fresh migration replay twice on PG15 | Both runs pass; second run is a no-op/status-clean | External `p2/logs/p2-fresh-final-4-*` |
+| [x] | P2-17 | Production-B0 upgrade replay twice on PG15 | Both runs pass; no manual correction | External `p2/logs/p2-b0-final-5-*` |
+| [x] | P2-18 | Run Supabase advisors | No unaccepted v3 security/performance finding | `10-p2-implementation-and-acceptance.md`; local v3 lint 0 |
 | [ ] | P2-19 | Commit D1 | Clean tree; SHA recorded | SHA: |
 
 P2 exit gate: migrations reproduce the target from fresh and B0 schemas and all data gates pass.
@@ -142,7 +142,7 @@ P2 exit gate: migrations reproduce the target from fresh and B0 schemas and all 
 
 | Done | ID | Check | Acceptance | Evidence |
 | --- | --- | --- | --- | --- |
-| [ ] | P6-01 | Confirm B0 and rehearsal gates | Every prior gate green | Approval record: |
+| [ ] | P6-01 | Confirm B0, rehearsal, role, and platform gates | Every prior gate green; PG patch warning resolved/accepted; runtime logins are not the migration login | Approval record: |
 | [ ] | P6-02 | Enable maintenance | Web serves maintenance state | Screenshot/check: |
 | [ ] | P6-03 | Stop Data/GraphQL writers/readers | No application DB writer session; queues paused | Evidence: |
 | [ ] | P6-04 | Apply `0079`-`0090` | Checksums and durations recorded; exit 0 | Migration log: |

@@ -1,5 +1,14 @@
 # Data Platform v3 Plan Changelog
 
+## 3.1.1 - 2026-08-09
+
+- Refined the B0 current value audit: 9 of 573 start rows coincide with a player's first market
+  capture and reconstruct directly; exactly 564 require provenance-marked seed snapshots.
+- Made current tables authoritative when a 2627 history partition overlaps the same business key;
+  B0 currently has this overlap for all 20 teams.
+- Added the hosted PostgreSQL patch warning and dedicated non-migration runtime credentials as
+  explicit production activation preflight gates.
+
 ## 3.1.0 - 2026-08-09
 
 - Corrected `entry_history_infos` from an event-grain assumption to its actual season-summary

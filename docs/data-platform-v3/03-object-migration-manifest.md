@@ -1,6 +1,6 @@
 # Data Platform v3 Object Migration Manifest
 
-Plan version: 3.1.0
+Plan version: 3.1.1
 
 Naming notation: `{season}` means each of `1617`, `1718`, `1819`, `1920`, `2021`, `2122`,
 `2223`, `2324`, `2425`, `2526`, and `2627` where present.

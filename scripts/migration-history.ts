@@ -4,6 +4,24 @@ export type MigrationHistoryInspection = {
   latestApplied: string | null;
 };
 
+export type SqlMigrationLedger = 'ops' | 'public';
+
+/**
+ * The v3 ledger becomes authoritative only when the public compatibility name
+ * is a view (0090-0092) or has been removed (0093+). Merely creating the ops
+ * table in 0079 must not switch a partially applied migration run away from the
+ * still-authoritative public ledger.
+ */
+export function selectSqlMigrationLedger(
+  publicRelationKind: string | null,
+  hasOpsLedger: boolean,
+): SqlMigrationLedger {
+  if (hasOpsLedger && (publicRelationKind === null || publicRelationKind === 'v')) {
+    return 'ops';
+  }
+  return 'public';
+}
+
 const legacyConvergenceMigrations = new Map<string, string>([
   ['0050_entry_event_result_rich_checkpoint.sql', '0072_entry_event_result_rich_checkpoint.sql'],
   ['0051_event_data_checked_at.sql', '0073_event_data_checked_at.sql'],

@@ -6,13 +6,23 @@ import { readdirSync, readFileSync } from 'node:fs';
 import {
   inspectMigrationHistory,
   selectMigrationFilesForLedger,
+  selectSqlMigrationLedger,
 } from '../../scripts/migration-history';
 import {
   getSqlMigrationExecutionContents,
+  getSqlMigrationLocalTimeouts,
   getSqlMigrationPreconditions,
 } from '../../scripts/sql-migration-compatibility';
 
 describe('migration history inspection', () => {
+  test('switches ledger authority only at the 0090 compatibility boundary', () => {
+    expect(selectSqlMigrationLedger('r', false)).toBe('public');
+    expect(selectSqlMigrationLedger('r', true)).toBe('public');
+    expect(selectSqlMigrationLedger('v', true)).toBe('ops');
+    expect(selectSqlMigrationLedger(null, true)).toBe('ops');
+    expect(selectSqlMigrationLedger(null, false)).toBe('public');
+  });
+
   test('accepts unapplied migrations after the applied tail', () => {
     expect(
       inspectMigrationHistory(
@@ -199,6 +209,16 @@ describe('legacy migration transaction compatibility', () => {
     expect(
       getSqlMigrationExecutionContents('0072_entry_event_result_rich_checkpoint.sql', source),
     ).toBe(source);
+  });
+
+  test('extracts local timeout budgets for a prior protocol round trip', () => {
+    expect(
+      getSqlMigrationLocalTimeouts(`
+        SET LOCAL lock_timeout = '5s';
+        SET LOCAL statement_timeout = '10min';
+      `),
+    ).toEqual({ lockTimeout: '5s', statementTimeout: '10min' });
+    expect(getSqlMigrationLocalTimeouts('SELECT 1;')).toEqual({});
   });
 });
 
