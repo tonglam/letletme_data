@@ -171,10 +171,12 @@ export async function processLeagueEventPicksJob(
 export async function processLeagueEventResultsJob(
   eventId: number,
   tournamentId?: number,
-  context?: { runId?: string },
+  context?: { runId?: string; freshAfter?: string },
 ) {
   if (tournamentId) {
-    return syncLeagueEventResultsByTournament(tournamentId, eventId);
+    return syncLeagueEventResultsByTournament(tournamentId, eventId, {
+      freshAfter: context?.freshAfter,
+    });
   }
   return enqueueResultsPerTournament(eventId, context?.runId);
 }

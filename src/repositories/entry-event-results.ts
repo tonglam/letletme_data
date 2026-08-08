@@ -1,10 +1,6 @@
 import { and, eq, gte, inArray, isNotNull, lte, sql } from 'drizzle-orm';
 
-import {
-  entryEventResults,
-  type DbEntryEventResult,
-  type DbEntryEventResultInsert,
-} from '../db/schemas/index.schema';
+import { entryEventResults, type DbEntryEventResult } from '../db/schemas/index.schema';
 import { getDb, type DbOrTransaction } from '../db/singleton';
 import { toNullableDbChip } from '../domain/chips';
 import {
@@ -316,7 +312,7 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
       eventId: number,
       picks: RawFPLEntryEventPicksResponse,
       live: EventPointsPayload,
-      richSyncedAt: Date,
+      richSyncedAt: Date | string,
     ): Promise<void> => {
       if (!isEntryPicksPayloadForEvent(picks, eventId)) {
         throw new Error(
@@ -341,6 +337,9 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
         const db = await getDbInstance();
 
         const entryHistory = picks.entry_history;
+        const exactRichSyncedAt =
+          richSyncedAt instanceof Date ? richSyncedAt.toISOString() : richSyncedAt;
+        const richSyncedAtSql = sql`${exactRichSyncedAt}::timestamptz`;
         const activeChip = picks.active_chip ?? null;
         const captainPick = resolveScoringCaptainPick(picks.picks);
         const elementsPoints = new Map<number, number>();
@@ -350,7 +349,7 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
         const autoSubPoints = getAutoSubPoints(autoSubs, elementsPoints);
         const captainPointsBase = captainPick ? (elementsPoints.get(captainPick.element) ?? 0) : 0;
         const captainPoints = captainPick ? captainPointsBase * captainPick.multiplier : null;
-        const insert: DbEntryEventResultInsert = {
+        const insert = {
           entryId,
           eventId,
           eventPoints: entryHistory.points,
@@ -369,7 +368,7 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
           overallRank: entryHistory.overall_rank ?? 0,
           teamValue: entryHistory.value ?? null,
           bank: entryHistory.bank ?? null,
-          richSyncedAt,
+          richSyncedAt: richSyncedAtSql,
         };
 
         await db
@@ -382,7 +381,7 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
             // replace a newer corrected result or move its checkpoint back.
             where: sql`
               ${entryEventResults.richSyncedAt} IS NULL
-              OR ${entryEventResults.richSyncedAt} <= ${richSyncedAt.toISOString()}
+              OR ${entryEventResults.richSyncedAt} < ${richSyncedAtSql}
             `,
             set: {
               eventPoints: insert.eventPoints,
@@ -401,7 +400,7 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
               overallRank: insert.overallRank,
               teamValue: insert.teamValue,
               bank: insert.bank,
-              richSyncedAt,
+              richSyncedAt: richSyncedAtSql,
               updatedAt: new Date(),
             },
           });

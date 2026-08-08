@@ -38,23 +38,6 @@ type EntrySeasonCheckpoint = {
   transferSeason: string | null;
 };
 
-export async function readEntryTransferSourceCheckedAt(
-  dbInstance?: DatabaseInstance,
-): Promise<string> {
-  const db = dbInstance ?? (await getDb());
-  const rows = await db.execute<{ sourceCheckedAt: string }>(
-    sql`SELECT clock_timestamp()::text AS "sourceCheckedAt"`,
-  );
-  const sourceCheckedAt = String(rows[0]?.sourceCheckedAt ?? '');
-  if (!sourceCheckedAt) {
-    throw new DatabaseError(
-      'Entry transfer source checkpoint is invalid.',
-      'ENTRY_TRANSFER_SOURCE_CHECKPOINT_INVALID',
-    );
-  }
-  return sourceCheckedAt;
-}
-
 export async function acquireEntrySeasonWriteFence(
   tx: TransactionHandle,
   entryIds: readonly number[],

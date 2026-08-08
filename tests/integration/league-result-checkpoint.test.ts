@@ -67,7 +67,9 @@ describe('league result attempt checkpoint', () => {
       ),
     ).toEqual([]);
 
-    const currentRun = new Date('2026-08-04T11:00:00.000Z');
+    const currentRun = '2026-08-04T11:00:00.000900Z';
+    const olderSameMillisecond = '2026-08-04T11:00:00.000100Z';
+    expect(new Date(currentRun).getTime()).toBe(new Date(olderSameMillisecond).getTime());
     await leagueEventResultsRepository.upsertBatch([
       { ...row, eventPoints: 55, sourceCheckedAt: currentRun },
     ]);
@@ -77,17 +79,20 @@ describe('league result attempt checkpoint', () => {
         'classic',
         EVENT_ID,
         [ENTRY_ID],
-        currentRun,
+        new Date(currentRun),
       ),
     ).toEqual([ENTRY_ID]);
 
     await leagueEventResultsRepository.upsertBatch([
-      { ...row, eventPoints: 1, sourceCheckedAt: new Date('2026-08-04T10:30:00.000Z') },
+      { ...row, eventPoints: 1, sourceCheckedAt: olderSameMillisecond },
+    ]);
+    await leagueEventResultsRepository.upsertBatch([
+      { ...row, eventPoints: 2, sourceCheckedAt: currentRun },
     ]);
     const preserved = await sql<{ eventPoints: number; sourceMatches: boolean }[]>`
       SELECT
         event_points AS "eventPoints",
-        source_checked_at = '2026-08-04T11:00:00.000Z'::timestamptz AS "sourceMatches"
+        source_checked_at = ${currentRun}::timestamptz AS "sourceMatches"
       FROM league_event_results
       WHERE entry_id = ${ENTRY_ID}
     `;

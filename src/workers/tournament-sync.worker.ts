@@ -35,6 +35,7 @@ import { getQueueConnection } from '../utils/queue';
 import { logError, logInfo } from '../utils/logger';
 import { alertOnFinalFailure } from '../utils/notify';
 import { withMutationConflictGuard } from '../utils/mutation-lock';
+import { resolveJobFreshAfter } from '../utils/job-freshness';
 import {
   createCascadeId,
   initCascadeStructureBarrier,
@@ -265,7 +266,8 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
           runTrackedJob(context, async () => {
             switch (job.name) {
               case TOURNAMENT_JOBS.EVENT_RESULTS: {
-                const result = await syncTournamentEventResults(eventId);
+                const freshAfter = await resolveJobFreshAfter(job);
+                const result = await syncTournamentEventResults(eventId, { freshAfter });
                 if (!shouldEnqueueTournamentCascade(result)) {
                   logInfo('Skipping tournament cascade - no active tournament entries', {
                     eventId,

@@ -12,8 +12,8 @@ import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 
 type DatabaseInstance = PostgresJsDatabase<Record<string, never>>;
-export type LeagueEventResultEvidenceInsert = DbLeagueEventResultInsert & {
-  sourceCheckedAt: Date;
+export type LeagueEventResultEvidenceInsert = Omit<DbLeagueEventResultInsert, 'sourceCheckedAt'> & {
+  sourceCheckedAt: Date | string;
 };
 
 export const createLeagueEventResultsRepository = (dbInstance?: DatabaseInstance) => {
@@ -79,9 +79,17 @@ export const createLeagueEventResultsRepository = (dbInstance?: DatabaseInstance
 
         const persist = async (db: DbOrTransaction, values: LeagueEventResultEvidenceInsert[]) => {
           if (values.length === 0) return 0;
+          const inserts = values.map((value) => ({
+            ...value,
+            sourceCheckedAt: sql`${
+              value.sourceCheckedAt instanceof Date
+                ? value.sourceCheckedAt.toISOString()
+                : value.sourceCheckedAt
+            }::timestamptz`,
+          }));
           await db
             .insert(leagueEventResults)
-            .values(values)
+            .values(inserts)
             .onConflictDoUpdate({
               target: [
                 leagueEventResults.leagueId,
@@ -94,7 +102,7 @@ export const createLeagueEventResultsRepository = (dbInstance?: DatabaseInstance
               // the newer canonical row or advance its checkpoint backwards.
               where: sql`
                 ${leagueEventResults.sourceCheckedAt} IS NULL
-                OR ${leagueEventResults.sourceCheckedAt} <= excluded.source_checked_at
+                OR ${leagueEventResults.sourceCheckedAt} < excluded.source_checked_at
               `,
               set: {
                 entryName: sql`excluded.entry_name`,

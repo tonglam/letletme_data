@@ -3,11 +3,9 @@ import { isCompleteEntryPicks } from '../domain/entry-picks';
 import type { RawFPLEntryEventPickItem } from '../types';
 import { getActiveCacheSeason } from '../cache/cache-season';
 import { fplClient } from '../clients/fpl';
+import { readDatabaseOrderingTimestamp } from '../db/ordering-timestamp';
 import { entryEventResultsRepository } from '../repositories/entry-event-results';
-import {
-  entryEventTransfersRepository,
-  readEntryTransferSourceCheckedAt,
-} from '../repositories/entry-event-transfers';
+import { entryEventTransfersRepository } from '../repositories/entry-event-transfers';
 import { eventLiveRepository } from '../repositories/event-lives';
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
@@ -375,7 +373,7 @@ export async function syncTournamentEventTransfersPre(
   }
 
   const checkpointSeason = await getActiveCacheSeason();
-  const sourceCheckedAt = await readEntryTransferSourceCheckedAt();
+  const sourceCheckedAt = (await readDatabaseOrderingTimestamp()).exact;
   const pendingEntryIds = await entryEventTransfersRepository.findEntryIdsNeedingSync(
     entryIds,
     eventId,

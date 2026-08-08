@@ -8,13 +8,13 @@ import { resetActiveSeasonMemo } from '../../src/cache/cache-season';
 import { entryInfosCache } from '../../src/cache/entry-infos-cache';
 import { redisSingleton } from '../../src/cache/singleton';
 import { getDbClient } from '../../src/db/singleton';
+import { readDatabaseOrderingTimestamp } from '../../src/db/ordering-timestamp';
 import { entryEventCupResultsRepository } from '../../src/repositories/entry-event-cup-results';
 import { entryEventPicksRepository } from '../../src/repositories/entry-event-picks';
 import { entryEventResultsRepository } from '../../src/repositories/entry-event-results';
 import {
   ENTRY_SEASON_SYNC_LOCK_NAMESPACE,
   entryEventTransfersRepository,
-  readEntryTransferSourceCheckedAt,
 } from '../../src/repositories/entry-event-transfers';
 import { entryInfoRepository } from '../../src/repositories/entry-infos';
 import { eventLiveRepository } from '../../src/repositories/event-lives';
@@ -44,7 +44,7 @@ const SOURCE_PLAYER_ID = 99_042_103;
 const TEST_SEASON = '2526';
 let previousActiveSeason: string | null = null;
 async function nextTransferSourceCheckedAt(): Promise<string> {
-  return readEntryTransferSourceCheckedAt();
+  return (await readDatabaseOrderingTimestamp()).exact;
 }
 
 async function expectBlockedByEntrySeasonLock<T>(
@@ -945,8 +945,9 @@ describe('tournament initialization checkpoints', () => {
   });
 
   test('late older rich evidence cannot overwrite a newer result', async () => {
-    const newerEvidenceAt = new Date('2026-08-04T12:00:00.000Z');
-    const olderEvidenceAt = new Date('2026-08-04T11:00:00.000Z');
+    const newerEvidenceAt = '2026-08-04T12:00:00.000900Z';
+    const olderEvidenceAt = '2026-08-04T12:00:00.000100Z';
+    expect(new Date(newerEvidenceAt).getTime()).toBe(new Date(olderEvidenceAt).getTime());
     const live = completeEventLive();
     const picks = {
       active_chip: null,
@@ -983,21 +984,36 @@ describe('tournament initialization checkpoints', () => {
       live,
       olderEvidenceAt,
     );
+    await entryEventResultsRepository.upsertFromPicksAndLive(
+      ENTRY_ID,
+      1,
+      {
+        ...picks,
+        entry_history: { ...picks.entry_history, points: 22, total_points: 522 },
+      },
+      live,
+      newerEvidenceAt,
+    );
 
     const sql = await getDbClient();
     const rows = await sql<{ eventPoints: number; richSyncedAt: string | null }[]>`
-      SELECT event_points AS "eventPoints", rich_synced_at AS "richSyncedAt"
+      SELECT
+        event_points AS "eventPoints",
+        to_char(
+          rich_synced_at AT TIME ZONE 'UTC',
+          'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+        ) AS "richSyncedAt"
       FROM entry_event_results
       WHERE entry_id = ${ENTRY_ID} AND event_id = 1
     `;
     expect(rows[0]?.eventPoints).toBe(88);
-    expect(rows[0]?.richSyncedAt).not.toBeNull();
-    expect(new Date(rows[0]?.richSyncedAt ?? '')).toEqual(newerEvidenceAt);
+    expect(rows[0]?.richSyncedAt).toBe(newerEvidenceAt);
   });
 
   test('late older picks evidence cannot overwrite a newer squad', async () => {
-    const newerEvidenceAt = new Date('2026-08-04T12:30:00.000Z');
-    const olderEvidenceAt = new Date('2026-08-04T11:30:00.000Z');
+    const newerEvidenceAt = '2026-08-04T12:30:00.000900Z';
+    const olderEvidenceAt = '2026-08-04T12:30:00.000100Z';
+    expect(new Date(newerEvidenceAt).getTime()).toBe(new Date(olderEvidenceAt).getTime());
     const newerPicks = completePicks();
     const olderPicks = newerPicks.map((pick, index) =>
       index === 0 ? { ...pick, element: pick.element + 1000 } : pick,
@@ -1030,15 +1046,26 @@ describe('tournament initialization checkpoints', () => {
       { ...base, picks: olderPicks },
       olderEvidenceAt,
     );
+    await entryEventPicksRepository.upsertFromPicks(
+      ENTRY_ID,
+      1,
+      { ...base, picks: olderPicks },
+      newerEvidenceAt,
+    );
 
     const sql = await getDbClient();
     const rows = await sql<{ picks: unknown; updatedAt: string | null }[]>`
-      SELECT picks, updated_at AS "updatedAt"
+      SELECT
+        picks,
+        to_char(
+          updated_at AT TIME ZONE 'UTC',
+          'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+        ) AS "updatedAt"
       FROM entry_event_picks
       WHERE entry_id = ${ENTRY_ID} AND event_id = 1
     `;
     expect(rows[0]?.picks).toEqual(newerPicks);
-    expect(new Date(rows[0]?.updatedAt ?? '')).toEqual(newerEvidenceAt);
+    expect(rows[0]?.updatedAt).toBe(newerEvidenceAt);
   });
 
   test('incomplete picks never advance the rich-result checkpoint', async () => {

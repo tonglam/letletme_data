@@ -1,14 +1,13 @@
 import { getActiveCacheSeason } from '../cache/cache-season';
 import { fplClient } from '../clients/fpl';
+import { readDatabaseOrderingTimestamp } from '../db/ordering-timestamp';
 import { createEntryEventPicksRepository } from '../repositories/entry-event-picks';
 import {
   entryEventTransfersRepository,
-  readEntryTransferSourceCheckedAt,
   withEntrySeasonSyncTransaction,
 } from '../repositories/entry-event-transfers';
 import { createEntryEventResultsRepository } from '../repositories/entry-event-results';
 import { logError, logInfo } from '../utils/logger';
-import { readCoreSnapshotOrderingTimestamp } from './core-snapshot-persistence.service';
 import { getCurrentEvent } from './events.service';
 
 export async function syncEntryEventPicks(entryId: number, eventId?: number) {
@@ -22,14 +21,14 @@ export async function syncEntryEventPicks(entryId: number, eventId?: number) {
       targetEventId = current.id;
     }
     const checkpointSeason = await getActiveCacheSeason();
-    const picksSyncStartedAt = await readCoreSnapshotOrderingTimestamp();
+    const picksSyncStartedAt = await readDatabaseOrderingTimestamp();
     const picks = await fplClient.getEntryEventPicks(entryId, targetEventId);
     await withEntrySeasonSyncTransaction(entryId, checkpointSeason, async (tx) => {
       await createEntryEventPicksRepository(tx).upsertFromPicks(
         entryId,
         targetEventId,
         picks,
-        picksSyncStartedAt,
+        picksSyncStartedAt.exact,
       );
     });
     logInfo('Entry event picks sync completed', { entryId, eventId: targetEventId });
@@ -83,7 +82,7 @@ export async function syncEntryEventTransfers(
       targetEventId = current.id;
     }
     const checkpointSeason = await getActiveCacheSeason();
-    const transferSyncStartedAt = await readEntryTransferSourceCheckedAt();
+    const transferSyncStartedAt = await readDatabaseOrderingTimestamp();
     const transfers = await fplClient.getEntryTransfers(entryId);
     const pointsByElement = options?.pointsByElement ?? (await getPointsByElement(targetEventId));
     await entryEventTransfersRepository.replaceForEvent(
@@ -91,7 +90,7 @@ export async function syncEntryEventTransfers(
       targetEventId,
       transfers,
       pointsByElement,
-      { checkpointSeason, sourceCheckedAt: transferSyncStartedAt },
+      { checkpointSeason, sourceCheckedAt: transferSyncStartedAt.exact },
     );
     logInfo('Entry event transfers sync completed', { entryId, eventId: targetEventId });
     return { entryId, eventId: targetEventId };
@@ -115,7 +114,7 @@ export async function syncEntryEventResults(entryId: number, eventId?: number) {
     // This timestamp describes the evidence window, not database completion.
     // If the GW finalizes while either request is in flight, the persisted
     // marker remains before data_checked_at and the finalized scan refetches it.
-    const richSyncStartedAt = await readCoreSnapshotOrderingTimestamp();
+    const richSyncStartedAt = await readDatabaseOrderingTimestamp();
     const [picks, live] = await Promise.all([
       fplClient.getEntryEventPicks(entryId, targetEventId),
       fplClient.getEventLive(targetEventId),
@@ -126,7 +125,7 @@ export async function syncEntryEventResults(entryId: number, eventId?: number) {
         targetEventId,
         picks,
         live,
-        richSyncStartedAt,
+        richSyncStartedAt.exact,
       );
     });
     logInfo('Entry event results sync completed', { entryId, eventId: targetEventId });

@@ -30,6 +30,8 @@ export interface TournamentSyncJobData {
   eventId: number;
   source: 'cron' | 'manual' | 'cascade';
   triggeredAt: string;
+  /** Stable database-clock reuse cutoff retained across BullMQ attempts. */
+  freshAfter?: string;
   /**
    * Shared id for one cascade fan-out. Structure and enrichment jobs that
    * finish under this id claim Redis barrier slots; the last one enqueues the

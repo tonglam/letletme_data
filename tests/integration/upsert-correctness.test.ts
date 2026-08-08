@@ -7,11 +7,9 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { resetActiveSeasonMemo } from '../../src/cache/cache-season';
 import { redisSingleton } from '../../src/cache/singleton';
 import type { PlayerValue } from '../../src/domain/player-values';
+import { readDatabaseOrderingTimestamp } from '../../src/db/ordering-timestamp';
 import { getDbClient } from '../../src/db/singleton';
-import {
-  createEntryEventTransfersRepository,
-  readEntryTransferSourceCheckedAt,
-} from '../../src/repositories/entry-event-transfers';
+import { createEntryEventTransfersRepository } from '../../src/repositories/entry-event-transfers';
 import { createPlayerValuesRepository } from '../../src/repositories/player-values';
 import { createPlayerRepository } from '../../src/repositories/players';
 import type { RawFPLEntryTransfer } from '../../src/types';
@@ -34,7 +32,7 @@ const EVENT_ID = 10;
 const CHANGE_DATE = '20260717';
 const CHECKPOINT_SEASON = '2526';
 async function nextTransferSourceCheckedAt(): Promise<string> {
-  return readEntryTransferSourceCheckedAt();
+  return (await readDatabaseOrderingTimestamp()).exact;
 }
 
 async function db() {

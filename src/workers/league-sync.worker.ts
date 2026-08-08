@@ -18,6 +18,7 @@ import { getQueueConnection } from '../utils/queue';
 import { logError, logInfo } from '../utils/logger';
 import { alertOnFinalFailure } from '../utils/notify';
 import { withMutationConflictGuard } from '../utils/mutation-lock';
+import { resolveJobFreshAfter } from '../utils/job-freshness';
 import { startStrictPriorityGate } from './strict-priority-gate';
 import type { WorkerRuntime } from './worker-runtime';
 
@@ -70,10 +71,13 @@ async function processLeagueSyncJob(job: Job<LeagueSyncJobData>) {
               case LEAGUE_JOBS.LEAGUE_EVENT_PICKS:
                 return processLeagueEventPicksJob(eventId, tournamentId, runId);
 
-              case LEAGUE_JOBS.LEAGUE_EVENT_RESULTS:
+              case LEAGUE_JOBS.LEAGUE_EVENT_RESULTS: {
+                const freshAfter = tournamentId ? await resolveJobFreshAfter(job) : undefined;
                 return processLeagueEventResultsJob(eventId, tournamentId, {
                   runId,
+                  freshAfter,
                 });
+              }
 
               default:
                 throw new Error(`Unknown job name: ${job.name}`);

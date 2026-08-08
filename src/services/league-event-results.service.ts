@@ -4,6 +4,7 @@ import {
   type DbEventLive,
   type DbLeagueEventResultInsert,
 } from '../db/schemas/index.schema';
+import { readDatabaseOrderingTimestamp } from '../db/ordering-timestamp';
 import { toNullableDbChip } from '../domain/chips';
 import {
   entryEventResultsRepository,
@@ -25,7 +26,6 @@ import {
 } from '../repositories/league-event-results';
 import { playerRepository } from '../repositories/players';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
-import { readCoreSnapshotOrderingTimestamp } from './core-snapshot-persistence.service';
 import type { RawFPLEntryEventPickItem, RawFPLEntryEventPicksResponse } from '../types';
 import { mapWithConcurrency, uniqueNumbers } from '../utils/async';
 import { IncompleteDataSyncError } from '../utils/errors';
@@ -351,13 +351,21 @@ export function summarizeMissingLeagueEventLiveData(
 export async function syncLeagueEventResultsByTournament(
   tournamentId: number,
   eventId: number,
-  options?: { concurrency?: number; season?: string },
+  options?: { concurrency?: number; season?: string; freshAfter?: Date | string },
 ): Promise<LeagueEventResultsSyncSummary> {
   logInfo('Starting league event results sync for tournament', { tournamentId, eventId });
   // Use one database-clock token before any source reads. It is comparable
   // across workers and remains the evidence timestamp even when a slower
   // attempt finishes after a newer result-slot run.
-  const sourceCheckedAt = await readCoreSnapshotOrderingTimestamp();
+  const sourceOrdering = await readDatabaseOrderingTimestamp();
+  const freshAfter = options?.freshAfter
+    ? options.freshAfter instanceof Date
+      ? options.freshAfter
+      : new Date(options.freshAfter)
+    : sourceOrdering.date;
+  if (Number.isNaN(freshAfter.getTime())) {
+    throw new Error('A valid league result freshness timestamp is required');
+  }
 
   const [tournament, event] = await Promise.all([
     tournamentInfoRepository.findById(tournamentId),
@@ -371,7 +379,7 @@ export async function syncLeagueEventResultsByTournament(
   // stricter of that boundary and this attempt's database-clock token so the
   // reuse, write, and post-write audit all share one clock domain.
   const finalizationCutoff = resolveRichResultFreshnessCutoff(event);
-  const requiredRichFreshAfter = latestDate(sourceCheckedAt, finalizationCutoff);
+  const requiredRichFreshAfter = latestDate(freshAfter, finalizationCutoff);
   const checkpointSeason = options?.season ?? (await getActiveCacheSeason());
 
   const resolvedEntryIds = await resolveTournamentEntryIds(tournament);
@@ -550,7 +558,7 @@ export async function syncLeagueEventResultsByTournament(
       highestScoreElementId: data.highestScoreElementId,
       highestScorePoints: data.highestScorePoints,
       highestScoreBlank: data.highestScoreBlank,
-      sourceCheckedAt,
+      sourceCheckedAt: sourceOrdering.exact,
     });
   }
 
@@ -562,7 +570,7 @@ export async function syncLeagueEventResultsByTournament(
     updated += await leagueEventResultsRepository.upsertBatch(batch, checkpointSeason);
   }
 
-  const auditCutoff = requiredRichFreshAfter ?? sourceCheckedAt;
+  const auditCutoff = requiredRichFreshAfter ?? freshAfter;
   const persistedEntryIds = new Set(
     await leagueEventResultsRepository.findEntryIdsByLeagueEvent(
       tournament.leagueId,

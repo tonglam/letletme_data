@@ -2,6 +2,7 @@ import { inArray, sql } from 'drizzle-orm';
 
 import { acquireActiveSeasonWriteFence } from '../cache/cache-season';
 import { events, players, teams } from '../db/schemas/index.schema';
+import { readDatabaseOrderingTimestamp } from '../db/ordering-timestamp';
 import {
   getDb,
   type DbHandle,
@@ -66,21 +67,7 @@ export interface CoreSnapshotPublicationOptions<T> {
 }
 
 export async function readCoreSnapshotOrderingTimestamp(dbInstance?: DbHandle): Promise<Date> {
-  const db = dbInstance ?? (await getDb());
-  const rows = await db.execute<{ checkedAt: Date | string }>(
-    sql`SELECT clock_timestamp() AS "checkedAt"`,
-  );
-  const checkedAt =
-    rows[0]?.checkedAt instanceof Date
-      ? rows[0].checkedAt
-      : new Date(String(rows[0]?.checkedAt ?? ''));
-  if (Number.isNaN(checkedAt.getTime())) {
-    throw new DatabaseError(
-      'Core snapshot ordering timestamp is invalid.',
-      'CORE_SNAPSHOT_ORDERING_TIMESTAMP_INVALID',
-    );
-  }
-  return checkedAt;
+  return (await readDatabaseOrderingTimestamp(dbInstance)).date;
 }
 
 function requirePersistedCount(label: string, actual: number, expected: number): void {

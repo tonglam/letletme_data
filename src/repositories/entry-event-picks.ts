@@ -1,9 +1,5 @@
 import { and, eq, inArray, sql } from 'drizzle-orm';
-import {
-  entryEventPicks,
-  entryInfos,
-  type DbEntryEventPickInsert,
-} from '../db/schemas/index.schema';
+import { entryEventPicks, entryInfos } from '../db/schemas/index.schema';
 import { getDb, type DbOrTransaction } from '../db/singleton';
 import { toDbChip } from '../domain/chips';
 import { isCompleteEntryPicks, isEntryPicksPayloadForEvent } from '../domain/entry-picks';
@@ -88,7 +84,7 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
       entryId: number,
       eventId: number,
       picks: RawFPLEntryEventPicksResponse,
-      syncedAt = new Date(),
+      syncedAt: Date | string = new Date(),
     ): Promise<void> => {
       try {
         if (!isEntryPicksPayloadForEvent(picks, eventId)) {
@@ -101,14 +97,16 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
         }
 
         const db = await getDbInstance();
-        const insert: DbEntryEventPickInsert = {
+        const exactSyncedAt = syncedAt instanceof Date ? syncedAt.toISOString() : syncedAt;
+        const syncedAtSql = sql`${exactSyncedAt}::timestamptz`;
+        const insert = {
           entryId,
           eventId,
           chip: toDbChip(picks.active_chip),
           picks: picks.picks as unknown,
           transfers: picks.entry_history.event_transfers,
           transfersCost: picks.entry_history.event_transfers_cost,
-          updatedAt: syncedAt,
+          updatedAt: syncedAtSql,
         };
 
         await db
@@ -120,14 +118,14 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
             // A slower result attempt must not replace a newer squad.
             where: sql`
               ${entryEventPicks.updatedAt} IS NULL
-              OR ${entryEventPicks.updatedAt} <= ${syncedAt.toISOString()}
+              OR ${entryEventPicks.updatedAt} < ${syncedAtSql}
             `,
             set: {
               chip: insert.chip,
               picks: insert.picks,
               transfers: insert.transfers,
               transfersCost: insert.transfersCost,
-              updatedAt: syncedAt,
+              updatedAt: syncedAtSql,
             },
           });
         logInfo('Upserted entry event picks', { entryId, eventId, chip: insert.chip });

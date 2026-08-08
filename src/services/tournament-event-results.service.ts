@@ -1,6 +1,7 @@
 import { getActiveCacheSeason } from '../cache/cache-season';
 import { eventLivesCache } from '../cache/operations';
 import { fplClient } from '../clients/fpl';
+import { readDatabaseOrderingTimestamp } from '../db/ordering-timestamp';
 import {
   createEntryEventPicksRepository,
   entryEventPicksRepository,
@@ -12,7 +13,6 @@ import {
 } from '../repositories/entry-event-results';
 import {
   entryEventTransfersRepository,
-  readEntryTransferSourceCheckedAt,
   withEntrySeasonSyncTransaction,
 } from '../repositories/entry-event-transfers';
 import { eventLiveRepository } from '../repositories/event-lives';
@@ -24,7 +24,6 @@ import { mapWithConcurrency, uniqueNumbers, withTimeout } from '../utils/async';
 import { IncompleteDataSyncError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 import type { TournamentFinalizationTarget } from '../domain/tournament';
-import { readCoreSnapshotOrderingTimestamp } from './core-snapshot-persistence.service';
 
 const DEFAULT_CONCURRENCY = 5;
 const EVENT_LIVE_FETCH_TIMEOUT_MS = Number(process.env.TOURNAMENT_EVENT_LIVE_TIMEOUT_MS ?? 45_000);
@@ -42,8 +41,9 @@ export type TournamentEventResultsSyncOptions = {
   skipTransfers?: boolean;
   transfersByEntry?: ReadonlyMap<number, RawFPLEntryTransfersResponse>;
   transferSourceCheckedAt?: string;
+  sourceCheckedAt?: string;
   season?: string;
-  freshAfter?: Date;
+  freshAfter?: Date | string;
 };
 
 type TournamentResultWorkSummary = {
@@ -52,6 +52,14 @@ type TournamentResultWorkSummary = {
   succeededUnits: number;
   failedUnits: number;
 };
+
+function orderingTimestampDate(value: Date | string): Date {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    throw new Error('A valid result freshness timestamp is required');
+  }
+  return date;
+}
 
 export function findFreshTournamentResultEntryIds(
   rows: ReadonlyArray<{ entryId: number; richSyncedAt: Date | null }>,
@@ -182,11 +190,19 @@ export async function syncTournamentEventResultsForEntryIds(
     };
   }
 
-  const attemptStartedAt = options?.freshAfter ?? (await readCoreSnapshotOrderingTimestamp());
+  const sourceOrdering = options?.sourceCheckedAt
+    ? {
+        date: orderingTimestampDate(options.sourceCheckedAt),
+        exact: options.sourceCheckedAt,
+      }
+    : await readDatabaseOrderingTimestamp();
+  const freshAfter = options?.freshAfter
+    ? orderingTimestampDate(options.freshAfter)
+    : sourceOrdering.date;
   const checkpointSeason = options?.season ?? (await getActiveCacheSeason());
   const transferSourceCheckedAt = options?.skipTransfers
     ? null
-    : (options?.transferSourceCheckedAt ?? (await readEntryTransferSourceCheckedAt()));
+    : (options?.transferSourceCheckedAt ?? sourceOrdering.exact);
   const live = await resolveEventPointsPayload(eventId, options?.live, {
     season: checkpointSeason,
   });
@@ -219,13 +235,13 @@ export async function syncTournamentEventResultsForEntryIds(
             eventId,
             picks,
             live,
-            attemptStartedAt,
+            sourceOrdering.exact,
           );
           await createEntryEventPicksRepository(tx).upsertFromPicks(
             entryId,
             eventId,
             picks,
-            attemptStartedAt,
+            sourceOrdering.exact,
           );
         }),
         ENTRY_PERSIST_TIMEOUT_MS,
@@ -261,7 +277,7 @@ export async function syncTournamentEventResultsForEntryIds(
           checkpointSeason,
         ),
   ]);
-  const freshResultEntryIds = findFreshTournamentResultEntryIds(persistedResults, attemptStartedAt);
+  const freshResultEntryIds = findFreshTournamentResultEntryIds(persistedResults, freshAfter);
   const persistedPickSet = new Set(persistedPickEntryIds);
   const missingTransferSet = new Set(missingTransferEntryIds);
   const failedEntryIds = uniqueEntryIds.filter(
@@ -311,7 +327,7 @@ export async function syncEntryTransferHistories(
   const uniqueEntryIds = uniqueNumbers(entryIds);
   const concurrency = options?.concurrency ?? DEFAULT_CONCURRENCY;
   const checkpointSeason = options?.season ?? (await getActiveCacheSeason());
-  const sourceCheckedAt = await readEntryTransferSourceCheckedAt();
+  const sourceCheckedAt = (await readDatabaseOrderingTimestamp()).exact;
 
   await mapWithConcurrency(uniqueEntryIds, concurrency, async (entryId) => {
     try {
@@ -449,7 +465,15 @@ export async function syncTournamentEventResults(
   }
 
   const checkpointSeason = options?.season ?? (await getActiveCacheSeason());
-  const attemptStartedAt = options?.freshAfter ?? (await readCoreSnapshotOrderingTimestamp());
+  const sourceOrdering = options?.sourceCheckedAt
+    ? {
+        date: orderingTimestampDate(options.sourceCheckedAt),
+        exact: options.sourceCheckedAt,
+      }
+    : await readDatabaseOrderingTimestamp();
+  const freshAfter = options?.freshAfter
+    ? orderingTimestampDate(options.freshAfter)
+    : sourceOrdering.date;
   const [existingResults, existingPickEntryIds, requiredTransferEntryIds] = await Promise.all([
     entryEventResultsRepository.findByEventAndEntryIds(eventId, entryIds),
     entryEventPicksRepository.findEntryIdsByEvent(eventId, entryIds, checkpointSeason),
@@ -457,7 +481,7 @@ export async function syncTournamentEventResults(
       ? Promise.resolve([])
       : entryEventTransfersRepository.findEntryIdsNeedingSync(entryIds, eventId, checkpointSeason),
   ]);
-  const freshResultEntryIds = findFreshTournamentResultEntryIds(existingResults, attemptStartedAt);
+  const freshResultEntryIds = findFreshTournamentResultEntryIds(existingResults, freshAfter);
   const existingPickSet = new Set(existingPickEntryIds);
   const plan = planTournamentEventSync(
     entryIds,
@@ -474,7 +498,8 @@ export async function syncTournamentEventResults(
           ...options,
           skipTransfers: true,
           season: checkpointSeason,
-          freshAfter: attemptStartedAt,
+          freshAfter,
+          sourceCheckedAt: sourceOrdering.exact,
         })
       : Promise.resolve(null),
     plan.requiredTransferEntryIds.length > 0
@@ -492,7 +517,7 @@ export async function syncTournamentEventResults(
       ? Promise.resolve([])
       : entryEventTransfersRepository.findEntryIdsNeedingSync(entryIds, eventId, checkpointSeason),
   ]);
-  const auditedFreshResultIds = findFreshTournamentResultEntryIds(auditedResults, attemptStartedAt);
+  const auditedFreshResultIds = findFreshTournamentResultEntryIds(auditedResults, freshAfter);
   const auditedPickSet = new Set(auditedPickEntryIds);
   const audit = planTournamentEventSync(
     entryIds,
