@@ -1,3 +1,4 @@
+import { understatCache, understatTeamReferenceRevision } from '../cache/understat-cache';
 import { contentHash } from '../utils/content-hash';
 import { getConfig } from '../utils/config';
 import { getDb } from '../db/singleton';
@@ -16,7 +17,6 @@ import {
   transformUnderstatTeamSplits,
   validateUnderstatTeamDates,
 } from '../transformers/understat';
-import { understatCache } from '../cache/understat-cache';
 import {
   assertNoUnderstatMatchesDisappeared,
   assertUnderstatLeagueSnapshotComplete,
@@ -56,6 +56,47 @@ async function publishWhenReady(job: UnderstatTeamJobData, ready: boolean): Prom
     mode: job.mode,
     trigger: job.trigger,
   });
+}
+
+async function enqueueTeamDetailJobs(
+  job: UnderstatTeamJobData,
+  targetIds: number[],
+  teams: Map<number, { title: string }>,
+): Promise<void> {
+  const results = await Promise.allSettled(
+    targetIds.map(async (teamId) => {
+      const team = teams.get(teamId);
+      if (!team) throw new Error(`Understat team ${teamId} disappeared during discovery`);
+      await enqueueUnderstatTeamDetail({
+        runId: job.runId,
+        season: job.season,
+        mode: job.mode,
+        trigger: job.trigger,
+        teamId,
+        teamTitle: team.title,
+      });
+    }),
+  );
+  const failures: Array<{ teamId: number; message: string }> = [];
+  for (const [index, result] of results.entries()) {
+    if (result.status === 'fulfilled') continue;
+    const teamId = targetIds[index]!;
+    const message = result.reason instanceof Error ? result.reason.message : String(result.reason);
+    failures.push({ teamId, message });
+    await understatSyncRepository.failItem(
+      job.runId,
+      TEAM_RESOURCE_TYPE,
+      String(teamId),
+      `Failed to enqueue Understat team detail: ${message}`,
+    );
+  }
+  if (failures.length > 0) {
+    throw new Error(
+      `Failed to enqueue ${failures.length} Understat team detail job(s): ${failures
+        .map(({ teamId, message }) => `${teamId}: ${message}`)
+        .join('; ')}`,
+    );
+  }
 }
 
 export async function discoverUnderstatTeams(job: UnderstatTeamJobData): Promise<void> {
@@ -147,20 +188,7 @@ export async function discoverUnderstatTeams(job: UnderstatTeamJobData): Promise
     job.runId,
     targetIds.map((teamId) => ({ resourceType: TEAM_RESOURCE_TYPE, resourceId: String(teamId) })),
   );
-  await Promise.all(
-    targetIds.map((teamId) => {
-      const team = teams.get(teamId);
-      if (!team) throw new Error(`Understat team ${teamId} disappeared during discovery`);
-      return enqueueUnderstatTeamDetail({
-        runId: job.runId,
-        season: job.season,
-        mode: job.mode,
-        trigger: job.trigger,
-        teamId,
-        teamTitle: team.title,
-      });
-    }),
-  );
+  await enqueueTeamDetailJobs(job, targetIds, teams);
   const sourceHash = contentHash({
     matches: discovery.matches.map((match) => match.sourceHash),
     teams: discovery.teams.map((team) => team.sourceHash),
@@ -233,6 +261,7 @@ export async function publishUnderstatTeamSnapshot(job: UnderstatTeamJobData): P
     return;
   }
   const prior = await understatCache.getManifest(job.season, 'team');
+  const referenceRevision = understatTeamReferenceRevision(snapshot);
   const hasUnpublishedChanges = prior
     ? await understatSyncRepository.hasDataChangesSince(
         job.season,
@@ -240,7 +269,11 @@ export async function publishUnderstatTeamSnapshot(job: UnderstatTeamJobData): P
         new Date(prior.publishedAt),
       )
     : true;
-  if (prior?.revision === job.runId || (!run.dataChanged && prior && !hasUnpublishedChanges)) {
+  const referenceChanged = prior?.referenceRevision !== referenceRevision;
+  if (
+    prior?.revision === job.runId ||
+    (!run.dataChanged && prior && !hasUnpublishedChanges && !referenceChanged)
+  ) {
     await understatSyncRepository.markPublished(job.runId, prior.revision);
     return;
   }

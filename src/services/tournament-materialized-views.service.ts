@@ -64,6 +64,11 @@ export async function repairDeletedTournamentMaterializedViews(
         SELECT 1
         FROM mv_tournament_event_snapshot
         WHERE tournament_id = ${tournamentId}
+      )
+      OR EXISTS (
+        SELECT 1
+        FROM mv_tournament_snapshot
+        WHERE tournament_id = ${tournamentId}
       ) AS exists
   `;
   if (rows[0]?.exists !== true) return false;

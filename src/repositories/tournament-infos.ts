@@ -453,6 +453,7 @@ export const createTournamentInfoRepository = (dbInstance?: DatabaseInstance) =>
           // retry is rebuilding canonical data.
           if (updated.length > 0) {
             await tx.execute(sql`REFRESH MATERIALIZED VIEW public.mv_tournament_event_snapshot`);
+            await tx.execute(sql`REFRESH MATERIALIZED VIEW public.mv_tournament_snapshot`);
           }
         });
       } catch (error) {
@@ -489,6 +490,7 @@ export const createTournamentInfoRepository = (dbInstance?: DatabaseInstance) =>
 
           if (updated.length > 0) {
             await tx.execute(sql`REFRESH MATERIALIZED VIEW public.mv_tournament_event_snapshot`);
+            await tx.execute(sql`REFRESH MATERIALIZED VIEW public.mv_tournament_snapshot`);
           }
         });
       } catch (error) {
@@ -570,6 +572,7 @@ export const createTournamentInfoRepository = (dbInstance?: DatabaseInstance) =>
           // refreshes see the update above, and PostgreSQL exposes the
           // readiness gate plus the filtered snapshot only at commit.
           await tx.execute(sql`REFRESH MATERIALIZED VIEW public.mv_tournament_event_snapshot`);
+          await tx.execute(sql`REFRESH MATERIALIZED VIEW public.mv_tournament_snapshot`);
         });
       } catch (error) {
         logError('Failed to publish tournament standings readiness', error, { tournamentId });

@@ -38,6 +38,13 @@ export function understatPlayerReferenceRevision(snapshot: PlayerSnapshot): stri
   );
 }
 
+export function understatTeamReferenceRevision(snapshot: TeamSnapshot): string {
+  return contentHash({
+    teams: snapshot.teams.map(({ team }) => ({ id: team.id, sourceHash: team.sourceHash })),
+    matches: snapshot.matches.map(({ id, sourceHash }) => ({ id, sourceHash })),
+  });
+}
+
 function manifestKey(season: string, lane: 'team' | 'player'): string {
   return `Understat:Snapshot:${season}:${lane}`;
 }
@@ -203,6 +210,7 @@ export function createUnderstatCache(dependencies: UnderstatCacheDependencies) {
       const keys = teamKeys(season, revision);
       const teamMatches = groupById(snapshot.teamMatchRows, (row) => row.stat.teamId);
       const splits = groupById(snapshot.splits, (row) => row.teamId);
+      const referenceRevision = understatTeamReferenceRevision(snapshot);
       const hashes = [
         hashFromEntries(snapshot.teams.map((row) => [String(row.team.id), row])),
         hashFromEntries(snapshot.matches.map((row) => [String(row.id), row])),
@@ -215,6 +223,7 @@ export function createUnderstatCache(dependencies: UnderstatCacheDependencies) {
         season,
         lane: 'team',
         revision,
+        referenceRevision,
         publishedAt: new Date().toISOString(),
         counts: {
           teams: snapshot.teams.length,

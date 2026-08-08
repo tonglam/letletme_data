@@ -6,6 +6,7 @@ import {
   UNDERSTAT_ACTIVE_SEASON_KEY,
   UNDERSTAT_EMPTY_HASH_FIELD,
   understatPlayerReferenceRevision,
+  understatTeamReferenceRevision,
 } from '../../src/cache/understat-cache';
 
 class FakeRedis {
@@ -144,6 +145,25 @@ describe('Understat generation cache', () => {
     );
     expect((await cache.getManifest('2627', 'player'))?.referenceRevision).not.toBe(
       understatPlayerReferenceRevision(playerSnapshot as never),
+    );
+  });
+
+  test('changes the team reference revision when shared match metadata changes', async () => {
+    const redis = new FakeRedis();
+    const cache = createUnderstatCache({ getRedisClient: async () => redis as unknown as Redis });
+    await cache.publishTeam('2627', 'team-run-1', teamSnapshot as never);
+    const changedSnapshot = {
+      ...teamSnapshot,
+      matches: [{ id: 10, sourceHash: 'match-v2' }],
+    };
+
+    await cache.publishTeam('2627', 'team-run-2', changedSnapshot as never);
+
+    expect((await cache.getManifest('2627', 'team'))?.referenceRevision).toBe(
+      understatTeamReferenceRevision(changedSnapshot as never),
+    );
+    expect((await cache.getManifest('2627', 'team'))?.referenceRevision).not.toBe(
+      understatTeamReferenceRevision(teamSnapshot as never),
     );
   });
 

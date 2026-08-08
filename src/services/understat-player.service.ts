@@ -68,6 +68,66 @@ async function publishWhenReady(job: UnderstatPlayerJobData, ready: boolean): Pr
   });
 }
 
+async function enqueuePlayerDetailJobs(
+  job: UnderstatPlayerJobData,
+  targetTeamIds: number[],
+  targetMatchIds: number[],
+  teams: Map<number, { title: string }>,
+): Promise<void> {
+  const jobs = [
+    ...targetTeamIds.map((teamId) => ({
+      resourceType: TEAM_RESOURCE_TYPE,
+      resourceId: String(teamId),
+      enqueue: async () => {
+        const team = teams.get(teamId);
+        if (!team) throw new Error(`Understat team ${teamId} disappeared during discovery`);
+        await enqueueUnderstatPlayerTeamDetail({
+          runId: job.runId,
+          season: job.season,
+          mode: job.mode,
+          trigger: job.trigger,
+          resourceId: teamId,
+          teamTitle: team.title,
+        });
+      },
+    })),
+    ...targetMatchIds.map((matchId) => ({
+      resourceType: MATCH_RESOURCE_TYPE,
+      resourceId: String(matchId),
+      enqueue: async () => {
+        await enqueueUnderstatPlayerMatch({
+          runId: job.runId,
+          season: job.season,
+          mode: job.mode,
+          trigger: job.trigger,
+          resourceId: matchId,
+        });
+      },
+    })),
+  ];
+  const results = await Promise.allSettled(jobs.map(({ enqueue }) => enqueue()));
+  const failures: Array<{ resourceType: string; resourceId: string; message: string }> = [];
+  for (const [index, result] of results.entries()) {
+    if (result.status === 'fulfilled') continue;
+    const target = jobs[index]!;
+    const message = result.reason instanceof Error ? result.reason.message : String(result.reason);
+    failures.push({ ...target, message });
+    await understatSyncRepository.failItem(
+      job.runId,
+      target.resourceType,
+      target.resourceId,
+      `Failed to enqueue Understat player detail: ${message}`,
+    );
+  }
+  if (failures.length > 0) {
+    throw new Error(
+      `Failed to enqueue ${failures.length} Understat player detail job(s): ${failures
+        .map(({ resourceType, resourceId, message }) => `${resourceType}:${resourceId}: ${message}`)
+        .join('; ')}`,
+    );
+  }
+}
+
 export async function discoverUnderstatPlayers(job: UnderstatPlayerJobData): Promise<void> {
   const { league, sourceYear } = assertUnderstatSyncAllowed(job.season);
   const priorRun = (await understatSyncRepository.findLatestRuns(job.season)).player;
@@ -209,29 +269,7 @@ export async function discoverUnderstatPlayers(job: UnderstatPlayerJobData): Pro
     })),
   ]);
 
-  await Promise.all([
-    ...targetTeamIds.map((teamId) => {
-      const team = teams.get(teamId);
-      if (!team) throw new Error(`Understat team ${teamId} disappeared during discovery`);
-      return enqueueUnderstatPlayerTeamDetail({
-        runId: job.runId,
-        season: job.season,
-        mode: job.mode,
-        trigger: job.trigger,
-        resourceId: teamId,
-        teamTitle: team.title,
-      });
-    }),
-    ...targetMatchIds.map((matchId) =>
-      enqueueUnderstatPlayerMatch({
-        runId: job.runId,
-        season: job.season,
-        mode: job.mode,
-        trigger: job.trigger,
-        resourceId: matchId,
-      }),
-    ),
-  ]);
+  await enqueuePlayerDetailJobs(job, targetTeamIds, targetMatchIds, teams);
 
   const sourceHash = contentHash({
     matches: discovery.matches.map((match) => match.sourceHash),
