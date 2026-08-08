@@ -328,25 +328,32 @@ export function selectPlayerMatchIds(input: {
   matches: readonly UnderstatMatch[];
   syncedMatchIds: ReadonlySet<number>;
   explicitMatchIds?: readonly number[];
+  requiredMatchIds?: Iterable<number>;
   now?: Date;
   reconcileLimit?: number;
 }): number[] {
   const completed = input.matches.filter((match) => match.isResult);
   const knownIds = new Set(completed.map((match) => match.id));
   const explicit = validateExplicitIds(input.explicitMatchIds, knownIds, 'completed match');
-  if (explicit) return explicit;
+  if (explicit) {
+    const selected = new Set(explicit);
+    for (const matchId of input.requiredMatchIds ?? []) {
+      if (knownIds.has(matchId)) selected.add(matchId);
+    }
+    return [...selected].sort((left, right) => left - right);
+  }
   if (input.mode === 'full') return completed.map((match) => match.id).sort((a, b) => a - b);
 
   const now = input.now ?? new Date();
   const correctionCutoff = now.getTime() - 72 * 60 * 60 * 1000;
   const required = new Set(
-    completed
-      .filter(
-        (match) =>
-          !input.syncedMatchIds.has(match.id) || match.kickoffAt.getTime() >= correctionCutoff,
-      )
-      .map((match) => match.id),
+    [...(input.requiredMatchIds ?? [])].filter((matchId) => knownIds.has(matchId)),
   );
+  for (const match of completed) {
+    if (!input.syncedMatchIds.has(match.id) || match.kickoffAt.getTime() >= correctionCutoff) {
+      required.add(match.id);
+    }
+  }
 
   if (input.mode === 'reconcile') {
     const older = completed

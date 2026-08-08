@@ -142,4 +142,17 @@ describe('Understat incremental selection', () => {
       }),
     ).toEqual([1]);
   });
+
+  test('always includes old roster matches required by changed player totals', () => {
+    const now = new Date(Date.UTC(2026, 7, 10));
+    expect(
+      selectPlayerMatchIds({
+        mode: 'incremental',
+        matches: [match(10, 100), match(11, 100)],
+        syncedMatchIds: new Set([10, 11]),
+        requiredMatchIds: new Set([11]),
+        now,
+      }),
+    ).toEqual([11]);
+  });
 });

@@ -107,7 +107,14 @@ export async function discoverUnderstatTeams(job: UnderstatTeamJobData): Promise
   );
   const withdrawnMatchIds = withdrawnUnderstatMatchIds(previousMatches, discovery.matches);
   const splitTeamIds = await understatTeamRepository.getTeamIdsWithSplits(job.season);
-  const changedTeams = changedUnderstatTeamStatIds(discovery.teamMatchStats, previousStatHashes);
+  const withdrawnMatchIdSet = new Set(withdrawnMatchIds);
+  const withdrawnTeamIds = previousMatches
+    .filter((match) => withdrawnMatchIdSet.has(match.id))
+    .flatMap((match) => [match.homeTeamId, match.awayTeamId]);
+  const changedTeams = new Set([
+    ...changedUnderstatTeamStatIds(discovery.teamMatchStats, previousStatHashes),
+    ...withdrawnTeamIds,
+  ]);
 
   const db = await getDb();
   const changed = await db.transaction((tx) =>

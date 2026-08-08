@@ -151,6 +151,10 @@ async function copyAndVerifyTable(
   const sourceFrom = isEventLiveSummary
     ? `( ${EVENT_LIVE_SUMMARY_AGGREGATE_QUERY} ) AS source`
     : `public.${spec.sourceTable} source`;
+  // A building archive may contain a preseason seed (notably teams_2627).
+  // Rebuild the season slice transactionally before verifying the canonical
+  // source set; sealed seasons return before reaching this function.
+  await tx.execute(sql.raw(`DELETE FROM public.${spec.archiveTable} WHERE season = '${season}'`));
   const copySql = isEventLiveSummary
     ? `INSERT INTO public.${spec.archiveTable} (season, ${eventLiveSummaryColumns})
        SELECT '${season}'::text, ${eventLiveSummarySourceColumns}

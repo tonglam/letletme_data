@@ -135,6 +135,9 @@ export async function discoverUnderstatPlayers(job: UnderstatPlayerJobData): Pro
     job.season,
     [...changedPlayerIds],
   );
+  const changedPlayerMatchIds = await understatPlayerRepository.getMatchIdsForPlayers(job.season, [
+    ...changedPlayerIds,
+  ]);
   const newMatchTeamIds = discovery.matches
     .filter((match) => match.isResult && !syncedMatchIds.has(match.id))
     .flatMap((match) => [match.homeTeamId, match.awayTeamId]);
@@ -177,6 +180,7 @@ export async function discoverUnderstatPlayers(job: UnderstatPlayerJobData): Pro
         matches: discovery.matches,
         syncedMatchIds,
         explicitMatchIds: job.matchIds,
+        requiredMatchIds: changedPlayerMatchIds,
       });
   const priorMatchIds =
     job.matchIds || job.participantsOnly
