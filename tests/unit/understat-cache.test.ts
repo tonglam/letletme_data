@@ -5,6 +5,7 @@ import {
   createUnderstatCache,
   UNDERSTAT_ACTIVE_SEASON_KEY,
   UNDERSTAT_EMPTY_HASH_FIELD,
+  understatPlayerReferenceRevision,
 } from '../../src/cache/understat-cache';
 
 class FakeRedis {
@@ -111,7 +112,7 @@ const teamSnapshot = {
 const playerSnapshot = {
   players: [{ player: { id: 100 }, season: { season: '2627', playerId: 100 } }],
   memberships: [{ playerId: 100, teamId: 1 }],
-  matchStats: [{ stat: { playerId: 100 }, match: { id: 10 } }],
+  matchStats: [{ stat: { playerId: 100 }, match: { id: 10, sourceHash: 'match-v1' } }],
 };
 
 describe('Understat generation cache', () => {
@@ -122,6 +123,28 @@ describe('Understat generation cache', () => {
     await cache.publishPlayer('2627', 'player-run', playerSnapshot as never);
     expect((await cache.getManifest('2627', 'team'))?.revision).toBe('team-run');
     expect((await cache.getManifest('2627', 'player'))?.revision).toBe('player-run');
+    expect((await cache.getManifest('2627', 'player'))?.referenceRevision).toBe(
+      understatPlayerReferenceRevision(playerSnapshot as never),
+    );
+  });
+
+  test('changes the player reference revision when shared match metadata changes', async () => {
+    const redis = new FakeRedis();
+    const cache = createUnderstatCache({ getRedisClient: async () => redis as unknown as Redis });
+    await cache.publishPlayer('2627', 'player-run-1', playerSnapshot as never);
+    const changedSnapshot = {
+      ...playerSnapshot,
+      matchStats: [{ stat: { playerId: 100 }, match: { id: 10, sourceHash: 'match-v2' } }],
+    };
+
+    await cache.publishPlayer('2627', 'player-run-2', changedSnapshot as never);
+
+    expect((await cache.getManifest('2627', 'player'))?.referenceRevision).toBe(
+      understatPlayerReferenceRevision(changedSnapshot as never),
+    );
+    expect((await cache.getManifest('2627', 'player'))?.referenceRevision).not.toBe(
+      understatPlayerReferenceRevision(playerSnapshot as never),
+    );
   });
 
   test('materializes empty match hashes for a valid preseason generation', async () => {

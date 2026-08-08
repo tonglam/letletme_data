@@ -35,6 +35,31 @@ const EVENT_LIVE_SUMMARY_ARCHIVE_COLUMNS = [
   'created_at',
   'updated_at',
 ] as const;
+const EVENT_LIVE_SUMMARY_AGGREGATE_QUERY = `
+  SELECT
+    live.element_id AS id,
+    live.element_id AS element_id,
+    player.type AS element_type,
+    COALESCE(SUM(live.minutes), 0)::integer AS minutes,
+    COALESCE(SUM(live.goals_scored), 0)::integer AS goals_scored,
+    COALESCE(SUM(live.assists), 0)::integer AS assists,
+    COALESCE(SUM(live.clean_sheets), 0)::integer AS clean_sheets,
+    COALESCE(SUM(live.goals_conceded), 0)::integer AS goals_conceded,
+    COALESCE(SUM(live.own_goals), 0)::integer AS own_goals,
+    COALESCE(SUM(live.penalties_saved), 0)::integer AS penalties_saved,
+    COALESCE(SUM(live.penalties_missed), 0)::integer AS penalties_missed,
+    COALESCE(SUM(live.yellow_cards), 0)::integer AS yellow_cards,
+    COALESCE(SUM(live.red_cards), 0)::integer AS red_cards,
+    COALESCE(SUM(live.saves), 0)::integer AS saves,
+    COALESCE(SUM(live.bonus), 0)::integer AS bonus,
+    COALESCE(SUM(live.bps), 0)::integer AS bps,
+    COALESCE(SUM(live.total_points), 0)::integer AS total_points,
+    now() AS created_at,
+    now() AS updated_at
+  FROM public.event_lives AS live
+  INNER JOIN public.players AS player ON player.id = live.element_id
+  GROUP BY live.element_id, player.type
+`;
 const FPL_ARCHIVE_LIVE_SNAPSHOT_SCOPES = Array.from(
   { length: 38 },
   (_, index) => `live-snapshot:event:${index + 1}`,
@@ -123,28 +148,33 @@ async function copyAndVerifyTable(
   const eventLiveSummarySourceColumns = EVENT_LIVE_SUMMARY_ARCHIVE_COLUMNS.map(
     (column) => `source.${column}`,
   ).join(', ');
+  const sourceFrom = isEventLiveSummary
+    ? `( ${EVENT_LIVE_SUMMARY_AGGREGATE_QUERY} ) AS source`
+    : `public.${spec.sourceTable} source`;
   const copySql = isEventLiveSummary
     ? `INSERT INTO public.${spec.archiveTable} (season, ${eventLiveSummaryColumns})
        SELECT '${season}'::text, ${eventLiveSummarySourceColumns}
-       FROM public.${spec.sourceTable} source ON CONFLICT DO NOTHING`
+       FROM ${sourceFrom} ON CONFLICT DO NOTHING`
     : spec.sourceHasSeason
       ? `INSERT INTO public.${spec.archiveTable} SELECT source.* FROM public.${spec.sourceTable} source WHERE source.season = '${season}' ON CONFLICT DO NOTHING`
       : `INSERT INTO public.${spec.archiveTable} SELECT '${season}'::text, source.* FROM public.${spec.sourceTable} source ON CONFLICT DO NOTHING`;
   await tx.execute(sql.raw(copySql));
 
   const sourceJson = isEventLiveSummary
-    ? String.raw`(to_jsonb(source) - 'event_id' - 'team_id')`
+    ? String.raw`(to_jsonb(source) - 'created_at' - 'updated_at')`
     : 'to_jsonb(source)';
-  const archiveJson = canonicalExpression(spec, 'archive');
-  const sourceFilter = sourceWhere(spec, season, 'source');
+  const archiveJson = isEventLiveSummary
+    ? String.raw`(to_jsonb(archive) - 'season' - 'created_at' - 'updated_at')`
+    : canonicalExpression(spec, 'archive');
+  const sourceFilter = isEventLiveSummary ? '' : sourceWhere(spec, season, 'source');
   const archiveFilter = ` WHERE archive.season = '${season}'`;
   const rows = await tx.execute<{ sourceCount: number; archiveCount: number; checksum: string }>(
     sql.raw(`
       SELECT
-        (SELECT count(*)::int FROM public.${spec.sourceTable} source${sourceFilter}) AS "sourceCount",
+        (SELECT count(*)::int FROM ${sourceFrom}${sourceFilter}) AS "sourceCount",
         (SELECT count(*)::int FROM public.${spec.archiveTable} archive${archiveFilter}) AS "archiveCount",
         (SELECT md5(COALESCE(string_agg(${sourceJson}::text, '' ORDER BY source.id), ''))
-           FROM public.${spec.sourceTable} source${sourceFilter}) AS checksum
+           FROM ${sourceFrom}${sourceFilter}) AS checksum
     `),
   );
   const counts = rows[0];
@@ -157,14 +187,14 @@ async function copyAndVerifyTable(
     sql.raw(`
       SELECT
         NOT EXISTS (
-          (SELECT ${sourceJson} FROM public.${spec.sourceTable} source${sourceFilter})
+          (SELECT ${sourceJson} FROM ${sourceFrom}${sourceFilter})
           EXCEPT
           (SELECT ${archiveJson} FROM public.${spec.archiveTable} archive${archiveFilter})
         )
         AND NOT EXISTS (
           (SELECT ${archiveJson} FROM public.${spec.archiveTable} archive${archiveFilter})
           EXCEPT
-          (SELECT ${sourceJson} FROM public.${spec.sourceTable} source${sourceFilter})
+          (SELECT ${sourceJson} FROM ${sourceFrom}${sourceFilter})
         ) AS identical
     `),
   );

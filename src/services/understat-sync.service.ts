@@ -174,6 +174,19 @@ export function assertNoUnderstatMatchesDisappeared(
   }
 }
 
+export function withdrawnUnderstatMatchIds(
+  previousMatches: readonly Pick<UnderstatMatch, 'id' | 'isResult'>[],
+  incomingMatches: readonly Pick<UnderstatMatch, 'id' | 'isResult'>[],
+): number[] {
+  const incomingResults = new Set(
+    incomingMatches.filter((match) => match.isResult).map((match) => match.id),
+  );
+  return previousMatches
+    .filter((match) => match.isResult && !incomingResults.has(match.id))
+    .map((match) => match.id)
+    .sort((left, right) => left - right);
+}
+
 export function assertUnderstatSyncAllowed(season: string): {
   league: string;
   sourceYear: number;

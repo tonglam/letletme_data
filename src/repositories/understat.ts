@@ -192,6 +192,16 @@ export const createUnderstatReferenceRepository = (dbInstance?: DbOrTransaction)
 });
 
 export const createUnderstatTeamRepository = (dbInstance?: DbOrTransaction) => ({
+  async deleteMatchStats(matchIds: readonly number[]): Promise<number> {
+    if (matchIds.length === 0) return 0;
+    const db = await getDatabase(dbInstance);
+    const result = await db
+      .delete(understatTeamMatchStats)
+      .where(inArray(understatTeamMatchStats.matchId, [...matchIds]))
+      .returning({ matchId: understatTeamMatchStats.matchId });
+    return result.length;
+  },
+
   async getMatchStatHashes(season: string): Promise<Map<string, string>> {
     const db = await getDatabase(dbInstance);
     const rows = await db
@@ -377,7 +387,7 @@ export const createUnderstatTeamRepository = (dbInstance?: DbOrTransaction) => (
         .select({ stat: understatTeamMatchStats, match: understatMatches })
         .from(understatTeamMatchStats)
         .innerJoin(understatMatches, eq(understatTeamMatchStats.matchId, understatMatches.id))
-        .where(eq(understatMatches.season, season))
+        .where(and(eq(understatMatches.season, season), eq(understatMatches.isResult, true)))
         .orderBy(
           asc(understatTeamMatchStats.teamId),
           asc(understatMatches.kickoffAt),
@@ -663,6 +673,16 @@ export const createUnderstatPlayerRepository = (dbInstance?: DbOrTransaction) =>
     return new Set(rows.map((row) => row.matchId));
   },
 
+  async deleteMatchStats(matchIds: readonly number[]): Promise<number> {
+    if (matchIds.length === 0) return 0;
+    const db = await getDatabase(dbInstance);
+    const result = await db
+      .delete(understatPlayerMatchStats)
+      .where(inArray(understatPlayerMatchStats.matchId, [...matchIds]))
+      .returning({ matchId: understatPlayerMatchStats.matchId });
+    return result.length;
+  },
+
   async getMatchStatHashes(matchId: number): Promise<string[]> {
     const db = await getDatabase(dbInstance);
     const rows = await db
@@ -711,7 +731,7 @@ export const createUnderstatPlayerRepository = (dbInstance?: DbOrTransaction) =>
         .select({ stat: understatPlayerMatchStats, match: understatMatches })
         .from(understatPlayerMatchStats)
         .innerJoin(understatMatches, eq(understatPlayerMatchStats.matchId, understatMatches.id))
-        .where(eq(understatMatches.season, season))
+        .where(and(eq(understatMatches.season, season), eq(understatMatches.isResult, true)))
         .orderBy(
           asc(understatPlayerMatchStats.playerId),
           asc(understatMatches.kickoffAt),

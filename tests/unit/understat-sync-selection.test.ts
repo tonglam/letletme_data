@@ -10,6 +10,7 @@ import {
   mergeUnderstatTeamDetailIds,
   selectPlayerMatchIds,
   selectTeamDetailIds,
+  withdrawnUnderstatMatchIds,
 } from '../../src/services/understat-sync.service';
 
 const teams: UnderstatTeam[] = [1, 2, 3].map((id) => ({
@@ -54,6 +55,15 @@ describe('Understat incremental selection', () => {
     expect(() => assertNoUnderstatMatchesDisappeared([1, 2], [match(1, 100)])).toThrow(
       'dropped known match IDs: 2',
     );
+  });
+
+  test('identifies completed matches withdrawn by a new discovery', () => {
+    expect(
+      withdrawnUnderstatMatchIds(
+        [match(1, 100, true), match(2, 100, false)],
+        [match(1, 100, false), match(2, 100, false)],
+      ),
+    ).toEqual([1]);
   });
 
   test('detects lane-owned team and player changes independently', () => {

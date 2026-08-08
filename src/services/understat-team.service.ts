@@ -28,6 +28,7 @@ import {
   plannedUnderstatSeason,
   selectTeamDetailIds,
   teamById,
+  withdrawnUnderstatMatchIds,
 } from './understat-sync.service';
 
 const LEAGUE_RESOURCE_TYPE = 'league';
@@ -96,16 +97,22 @@ export async function discoverUnderstatTeams(job: UnderstatTeamJobData): Promise
   );
   assertUnderstatLeagueSnapshotComplete(league, discovery.teams.length, discovery.matches.length);
   discovery.season.state = job.season === getConfig().UNDERSTAT_SEASON ? 'active' : 'complete';
-  const [previousMatchHashes, previousStatHashes] = await Promise.all([
-    understatReferenceRepository.getMatchHashes(job.season),
+  const [previousMatches, previousStatHashes] = await Promise.all([
+    understatReferenceRepository.findMatchesBySeason(job.season),
     understatTeamRepository.getMatchStatHashes(job.season),
   ]);
-  assertNoUnderstatMatchesDisappeared(previousMatchHashes.keys(), discovery.matches);
+  assertNoUnderstatMatchesDisappeared(
+    previousMatches.map((match) => match.id),
+    discovery.matches,
+  );
+  const withdrawnMatchIds = withdrawnUnderstatMatchIds(previousMatches, discovery.matches);
   const splitTeamIds = await understatTeamRepository.getTeamIdsWithSplits(job.season);
   const changedTeams = changedUnderstatTeamStatIds(discovery.teamMatchStats, previousStatHashes);
 
   const db = await getDb();
-  const changed = await db.transaction((tx) => persistUnderstatTeamDiscovery(tx, discovery));
+  const changed = await db.transaction((tx) =>
+    persistUnderstatTeamDiscovery(tx, discovery, withdrawnMatchIds),
+  );
   if (changed) await understatSyncRepository.markDataChanged(job.runId);
 
   const selectedTargetIds = selectTeamDetailIds({

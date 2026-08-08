@@ -5,6 +5,7 @@ import type {
   createUnderstatTeamRepository,
 } from '../repositories/understat';
 import { getConfig } from '../utils/config';
+import { contentHash } from '../utils/content-hash';
 import { logInfo } from '../utils/logger';
 import { understatRedisSingleton } from './singleton';
 
@@ -26,8 +27,15 @@ export interface UnderstatSnapshotManifest {
   season: string;
   lane: 'team' | 'player';
   revision: string;
+  referenceRevision?: string;
   publishedAt: string;
   counts: Record<string, number>;
+}
+
+export function understatPlayerReferenceRevision(snapshot: PlayerSnapshot): string {
+  return contentHash(
+    snapshot.matchStats.map(({ match }) => ({ id: match.id, sourceHash: match.sourceHash })),
+  );
 }
 
 function manifestKey(season: string, lane: 'team' | 'player'): string {
@@ -257,11 +265,13 @@ export function createUnderstatCache(dependencies: UnderstatCacheDependencies) {
         ),
       ];
       await setGenerationHashes(redis, keys, hashes);
+      const referenceRevision = understatPlayerReferenceRevision(snapshot);
       const manifest: UnderstatSnapshotManifest = {
         schemaVersion: 1,
         season,
         lane: 'player',
         revision,
+        referenceRevision,
         publishedAt: new Date().toISOString(),
         counts: {
           players: snapshot.players.length,

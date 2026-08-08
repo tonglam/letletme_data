@@ -1,4 +1,4 @@
-import { understatCache } from '../cache/understat-cache';
+import { understatCache, understatPlayerReferenceRevision } from '../cache/understat-cache';
 import { understatClient } from '../clients/understat';
 import { getDb } from '../db/singleton';
 import {
@@ -37,6 +37,7 @@ import {
   selectPlayerMatchIds,
   selectTeamDetailIds,
   teamById,
+  withdrawnUnderstatMatchIds,
 } from './understat-sync.service';
 
 const LEAGUE_RESOURCE_TYPE = 'league';
@@ -109,14 +110,18 @@ export async function discoverUnderstatPlayers(job: UnderstatPlayerJobData): Pro
   const completedMatchIds = discovery.matches
     .filter((match) => match.isResult)
     .map((match) => match.id);
-  const [previousMatchHashes, previousPlayerHashes, existingParticipantTeams, syncedMatchIds] =
+  const [previousMatches, previousPlayerHashes, existingParticipantTeams, syncedMatchIds] =
     await Promise.all([
-      understatReferenceRepository.getMatchHashes(job.season),
+      understatReferenceRepository.findMatchesBySeason(job.season),
       understatPlayerRepository.getPlayerSeasonHashes(job.season),
       understatPlayerRepository.getTeamIdsWithParticipants(job.season),
       understatPlayerRepository.getSyncedMatchIds(completedMatchIds),
     ]);
-  assertNoUnderstatMatchesDisappeared(previousMatchHashes.keys(), discovery.matches);
+  assertNoUnderstatMatchesDisappeared(
+    previousMatches.map((match) => match.id),
+    discovery.matches,
+  );
+  const withdrawnMatchIds = withdrawnUnderstatMatchIds(previousMatches, discovery.matches);
   const changedPlayerIds = changedUnderstatPlayerSeasonIds(
     discovery.playerSeasons,
     previousPlayerHashes,
@@ -140,7 +145,9 @@ export async function discoverUnderstatPlayers(job: UnderstatPlayerJobData): Pro
   ]);
 
   const db = await getDb();
-  const changed = await db.transaction((tx) => persistUnderstatPlayerDiscovery(tx, discovery));
+  const changed = await db.transaction((tx) =>
+    persistUnderstatPlayerDiscovery(tx, discovery, withdrawnMatchIds),
+  );
   if (changed) await understatSyncRepository.markDataChanged(job.runId);
 
   const selectedTeamIds = selectTeamDetailIds({
@@ -352,6 +359,7 @@ export async function publishUnderstatPlayerSnapshot(job: UnderstatPlayerJobData
     return;
   }
   const prior = await understatCache.getManifest(job.season, 'player');
+  const referenceRevision = understatPlayerReferenceRevision(snapshot);
   const hasUnpublishedChanges = prior
     ? await understatSyncRepository.hasDataChangesSince(
         job.season,
@@ -359,7 +367,11 @@ export async function publishUnderstatPlayerSnapshot(job: UnderstatPlayerJobData
         new Date(prior.publishedAt),
       )
     : true;
-  if (prior?.revision === job.runId || (!run.dataChanged && prior && !hasUnpublishedChanges)) {
+  const referenceChanged = prior?.referenceRevision !== referenceRevision;
+  if (
+    prior?.revision === job.runId ||
+    (!run.dataChanged && prior && !hasUnpublishedChanges && !referenceChanged)
+  ) {
     await understatSyncRepository.markPublished(job.runId, prior.revision);
     return;
   }
