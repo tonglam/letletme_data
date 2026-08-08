@@ -83,6 +83,30 @@ export const createEventRepository = (dbInstance?: DbOrTransaction) => {
       }
     },
 
+    findDataCheckedAtExact: async (eventId: number): Promise<string | null> => {
+      try {
+        const db = await getDbInstance();
+        const rows = await db.execute<{ exactDataCheckedAt: string | null }>(sql`
+          SELECT to_char(
+            ${events.dataCheckedAt} AT TIME ZONE 'UTC',
+            'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+          ) AS "exactDataCheckedAt"
+          FROM ${events}
+          WHERE ${events.id} = ${eventId}
+            AND ${events.finished} = true
+            AND ${events.dataChecked} = true
+        `);
+        return rows[0]?.exactDataCheckedAt ? String(rows[0].exactDataCheckedAt) : null;
+      } catch (error) {
+        logError('Failed to find exact event finalization timestamp', error, { eventId });
+        throw new DatabaseError(
+          'Failed to retrieve exact event finalization timestamp',
+          'FIND_EVENT_FINALIZATION_TIMESTAMP_ERROR',
+          error instanceof Error ? error : undefined,
+        );
+      }
+    },
+
     findCurrent: async (): Promise<DbEvent | null> => {
       try {
         const event = await findCurrentInternal();

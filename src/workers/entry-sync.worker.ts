@@ -447,6 +447,7 @@ export function createEntrySyncWorker(): WorkerRuntime {
                         entryIds,
                         requiredEntryIds,
                         new Set(cachedEntries.keys()),
+                        effectiveJobData?.source === 'cron',
                       );
                       for (const entryId of plan.cacheOnlyEntryIds) {
                         cacheOnlyEntryIds.add(entryId);

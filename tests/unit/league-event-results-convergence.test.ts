@@ -7,6 +7,7 @@ import {
   findEventEligibleEntryIds,
   findMissingLeagueResultEntryIds,
   isEntryResultRichEnough,
+  latestFreshnessTimestamp,
 } from '../../src/services/league-event-results.service';
 import type { RawFPLEntryEventPicksResponse } from '../../src/types';
 
@@ -93,6 +94,14 @@ describe('league event result convergence', () => {
     ).toBe(false);
     expect(isEntryResultRichEnough({ richSyncedAt: cutoff }, cutoff)).toBe(true);
     expect(isEntryResultRichEnough({ richSyncedAt: null })).toBe(false);
+  });
+
+  test('chooses the later exact timestamp inside one JavaScript millisecond', () => {
+    const earlier = '2026-08-04T10:00:00.000100Z';
+    const later = '2026-08-04T10:00:00.000900Z';
+    expect(new Date(earlier).getTime()).toBe(new Date(later).getTime());
+    expect(latestFreshnessTimestamp(earlier, later)).toBe(later);
+    expect(latestFreshnessTimestamp(later, earlier)).toBe(later);
   });
 
   test('uses fetched picks when a baseline core row has no rich picks yet', () => {

@@ -122,21 +122,37 @@ function resolveEventNetPoints(eventPoints: number, transfersCost: number): numb
   return eventPoints - transfersCost;
 }
 
-function latestFreshnessTimestamp(
+function fractionalMicroseconds(value: Date | string): number {
+  if (value instanceof Date) return value.getUTCMilliseconds() * 1_000;
+  const match = value.match(/\.(\d{1,6})(?:Z|[+-]\d{2}:?\d{2})$/i);
+  return match ? Number(match[1].padEnd(6, '0')) : new Date(value).getUTCMilliseconds() * 1_000;
+}
+
+export function latestFreshnessTimestamp(
   sourceFreshAfter: Date | string,
-  finalizationCutoff: Date | null | undefined,
+  finalizationCutoff: Date | string | null | undefined,
 ): Date | string {
   const sourceDate =
     sourceFreshAfter instanceof Date ? sourceFreshAfter : new Date(sourceFreshAfter);
   if (Number.isNaN(sourceDate.getTime())) {
     throw new Error('A valid league result freshness timestamp is required');
   }
-  if (!finalizationCutoff || finalizationCutoff.getTime() <= sourceDate.getTime()) {
-    // Preserve the exact database token when both timestamps occupy the same
-    // JavaScript millisecond. PostgreSQL still distinguishes their microseconds.
+  if (!finalizationCutoff) {
     return sourceFreshAfter;
   }
-  return finalizationCutoff;
+  const finalizationDate =
+    finalizationCutoff instanceof Date ? finalizationCutoff : new Date(finalizationCutoff);
+  if (Number.isNaN(finalizationDate.getTime())) {
+    throw new Error('A valid event finalization timestamp is required');
+  }
+  if (finalizationDate.getTime() !== sourceDate.getTime()) {
+    return finalizationDate.getTime() > sourceDate.getTime()
+      ? finalizationCutoff
+      : sourceFreshAfter;
+  }
+  return fractionalMicroseconds(finalizationCutoff) > fractionalMicroseconds(sourceFreshAfter)
+    ? finalizationCutoff
+    : sourceFreshAfter;
 }
 
 export function isEntryResultRichEnough(
@@ -380,7 +396,10 @@ export async function syncLeagueEventResultsByTournament(
   // A finalized event establishes a canonical evidence boundary. Require the
   // stricter of that boundary and this attempt's database-clock token so the
   // reuse, write, and post-write audit all share one clock domain.
-  const finalizationCutoff = resolveRichResultFreshnessCutoff(event);
+  const finalizationDate = resolveRichResultFreshnessCutoff(event);
+  const finalizationCutoff = finalizationDate
+    ? ((await eventRepository.findDataCheckedAtExact(eventId)) ?? finalizationDate)
+    : null;
   const requiredRichFreshAfter = latestFreshnessTimestamp(freshAfter, finalizationCutoff);
   const checkpointSeason = options?.season ?? (await getActiveCacheSeason());
 

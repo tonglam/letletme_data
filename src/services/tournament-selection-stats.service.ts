@@ -204,7 +204,11 @@ async function loadTournamentEntries(tournamentIds: number[]): Promise<Tournamen
   }));
 }
 
-async function loadPickRows(eventId: number, entryIds: number[]): Promise<PickSourceRow[]> {
+async function loadPickRows(
+  eventId: number,
+  entryIds: number[],
+  checkpointSeason: string,
+): Promise<PickSourceRow[]> {
   if (entryIds.length === 0) return [];
   const client = await getDbClient();
   const rows = await client<{ entry_id: number; stored_picks: unknown; result_picks: unknown }[]>`
@@ -216,6 +220,9 @@ async function loadPickRows(eventId: number, entryIds: number[]): Promise<PickSo
       entry_event_picks.picks as stored_picks,
       entry_event_results.event_picks as result_picks
     from source_entries
+    join entry_infos
+      on entry_infos.id = source_entries.entry_id
+     and entry_infos.entry_snapshot_synced_season = ${checkpointSeason}
     left join entry_event_picks
       on entry_event_picks.entry_id = source_entries.entry_id
      and entry_event_picks.event_id = ${eventId}
@@ -377,7 +384,7 @@ export async function syncTournamentSelectionStats(
     const entryIds = [...new Set(eligibleTournamentEntries.map((row) => row.entryId))];
     const checkpointSeason = await getActiveCacheSeason();
     const [pickRows, transferRows, staleTransferEntryIds] = await Promise.all([
-      loadPickRows(eventId, entryIds),
+      loadPickRows(eventId, entryIds, checkpointSeason),
       loadTransferRows(eventId, entryIds),
       entryEventTransfersRepository.findEntryIdsNeedingSync(entryIds, eventId, checkpointSeason),
     ]);

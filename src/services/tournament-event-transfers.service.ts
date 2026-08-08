@@ -374,27 +374,12 @@ export async function syncTournamentEventTransfersPre(
 
   const checkpointSeason = await getActiveCacheSeason();
   const sourceCheckedAt = (await readDatabaseOrderingTimestamp()).exact;
-  const pendingEntryIds = await entryEventTransfersRepository.findEntryIdsNeedingSync(
-    entryIds,
-    eventId,
-    checkpointSeason,
-  );
-  let skipped = entryIds.length - pendingEntryIds.length;
-
-  if (pendingEntryIds.length === 0) {
-    logInfo('No tournament entries pending transfer insert', { eventId });
-    return {
-      eventId,
-      totalEntries: entryIds.length,
-      inserted: 0,
-      skipped,
-      errors: 0,
-      requiredUnits: 0,
-      reusedUnits: skipped,
-      succeededUnits: 0,
-      failedUnits: 0,
-    };
-  }
+  // The current event remains mutable until its deadline. Poll every active
+  // entry and leave the durable completeness checkpoint at the prior event so
+  // the post-deadline path still performs one authoritative full-history read.
+  const pendingEntryIds = entryIds;
+  let skipped = 0;
+  const failedEntryIds: number[] = [];
 
   const concurrency = options?.concurrency ?? DEFAULT_CONCURRENCY;
   const client = options?.client ?? fplClient;
@@ -409,6 +394,7 @@ export async function syncTournamentEventTransfersPre(
         defaultPoints: 0,
         checkpointSeason,
         syncMode: 'all',
+        checkpointThroughEventId: Math.max(0, eventId - 1),
         sourceCheckedAt,
       });
       if (hasEventTransfers) {
@@ -418,6 +404,7 @@ export async function syncTournamentEventTransfersPre(
       }
       return null;
     } catch (error) {
+      failedEntryIds.push(entryId);
       logError('Failed to sync tournament entry transfers', error, {
         eventId,
         entryId,
@@ -426,12 +413,7 @@ export async function syncTournamentEventTransfersPre(
     }
   });
 
-  const stillMissing = await entryEventTransfersRepository.findEntryIdsNeedingSync(
-    pendingEntryIds,
-    eventId,
-    checkpointSeason,
-  );
-  const failedUnits = stillMissing.length;
+  const failedUnits = failedEntryIds.length;
   const succeededUnits = pendingEntryIds.length - failedUnits;
   const errors = failedUnits;
 
@@ -447,7 +429,7 @@ export async function syncTournamentEventTransfersPre(
     throw new IncompleteDataSyncError(
       'Tournament transfer history did not converge for every active entry',
       pendingEntryIds.length,
-      entryIds.length - pendingEntryIds.length,
+      0,
       succeededUnits,
       failedUnits,
     );
@@ -460,7 +442,7 @@ export async function syncTournamentEventTransfersPre(
     skipped,
     errors,
     requiredUnits: pendingEntryIds.length,
-    reusedUnits: entryIds.length - pendingEntryIds.length,
+    reusedUnits: 0,
     succeededUnits,
     failedUnits,
   };

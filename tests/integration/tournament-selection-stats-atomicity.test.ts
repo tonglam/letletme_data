@@ -4,9 +4,11 @@ assertIntegrationEnv();
 
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 
+import { getActiveCacheSeason } from '../../src/cache/cache-season';
 import { getDbClient } from '../../src/db/singleton';
 import {
   replaceSelectionStats,
+  syncTournamentSelectionStats,
   type TournamentSelectionStatRow,
 } from '../../src/services/tournament-selection-stats.service';
 
@@ -15,6 +17,7 @@ const TEAM_ID = 99_044_001;
 const PLAYER_ONE = 99_044_011;
 const PLAYER_TWO = 99_044_012;
 const INVALID_PLAYER = 99_044_099;
+const ENTRY_ID = 99_044_001;
 const TOURNAMENT_NAME = 'Selection Stats Atomicity 99044001';
 let tournamentId = 0;
 
@@ -62,6 +65,11 @@ beforeAll(async () => {
     ON CONFLICT (id) DO NOTHING
   `;
   await sql`DELETE FROM tournament_infos WHERE name = ${TOURNAMENT_NAME}`;
+  await sql`
+    INSERT INTO entry_infos (id, entry_name, player_name)
+    VALUES (${ENTRY_ID}, 'Selection entry', 'Selection manager')
+    ON CONFLICT (id) DO NOTHING
+  `;
   const created = await sql<{ id: number }[]>`
     INSERT INTO tournament_infos (
       name, creator, admin_entry_id, league_id, league_type, total_team_num,
@@ -73,13 +81,20 @@ beforeAll(async () => {
     RETURNING id
   `;
   tournamentId = created[0].id;
+  await sql`
+    INSERT INTO tournament_entries (tournament_id, league_id, entry_id)
+    VALUES (${tournamentId}, ${ENTRY_ID}, ${ENTRY_ID})
+  `;
 });
 
 afterAll(async () => {
   const sql = await getDbClient();
   if (tournamentId > 0) {
+    await sql`DELETE FROM tournament_entries WHERE tournament_id = ${tournamentId}`;
     await sql`DELETE FROM tournament_infos WHERE id = ${tournamentId}`;
   }
+  await sql`DELETE FROM entry_event_picks WHERE entry_id = ${ENTRY_ID}`;
+  await sql`DELETE FROM entry_infos WHERE id = ${ENTRY_ID}`;
   await sql`DELETE FROM players WHERE id IN (${PLAYER_ONE}, ${PLAYER_TWO})`;
   await sql`DELETE FROM teams WHERE id = ${TEAM_ID}`;
 });
@@ -98,6 +113,36 @@ describe('tournament selection-stat publication', () => {
     expect(await storedRows()).toEqual([{ element_id: PLAYER_ONE, pick_count: 2 }]);
 
     expect(await replaceSelectionStats([tournamentId], EVENT_ID, [stat(PLAYER_TWO, 2)])).toBe(1);
+    expect(await storedRows()).toEqual([{ element_id: PLAYER_TWO, pick_count: 2 }]);
+  });
+
+  test('does not publish previous-season picks after transfer ownership advances', async () => {
+    const sql = await getDbClient();
+    const checkpointSeason = await getActiveCacheSeason();
+    const stalePicks = Array.from({ length: 15 }, (_, index) => ({
+      element: PLAYER_ONE + index,
+      position: index + 1,
+      multiplier: index === 0 ? 2 : index < 11 ? 1 : 0,
+      is_captain: index === 0,
+      is_vice_captain: index === 1,
+    }));
+    await sql`
+      UPDATE entry_infos
+      SET entry_snapshot_synced_through_event_id = ${EVENT_ID},
+          entry_snapshot_synced_season = '2425',
+          entry_transfers_synced_through_event_id = ${EVENT_ID},
+          entry_transfers_synced_season = ${checkpointSeason}
+      WHERE id = ${ENTRY_ID}
+    `;
+    await sql`
+      INSERT INTO entry_event_picks (entry_id, event_id, chip, picks)
+      VALUES (${ENTRY_ID}, ${EVENT_ID}, 'n/a', ${JSON.stringify(stalePicks)}::jsonb)
+      ON CONFLICT (entry_id, event_id) DO UPDATE SET picks = excluded.picks
+    `;
+
+    await expect(
+      syncTournamentSelectionStats(EVENT_ID, { tournamentIds: [tournamentId] }),
+    ).rejects.toThrow('require complete picks and transfer checkpoints');
     expect(await storedRows()).toEqual([{ element_id: PLAYER_TWO, pick_count: 2 }]);
   });
 });

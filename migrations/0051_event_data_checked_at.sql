@@ -3,10 +3,14 @@ ALTER TABLE public.events
   ADD COLUMN IF NOT EXISTS data_checked_at timestamptz;
 
 -- Existing finalized events must refresh rich entry results once after this
--- migration. Their current updated_at is the safest available lower bound;
+-- migration. Clamp the legacy application-authored updated_at to this
+-- database statement's clock so worker skew cannot create a future cutoff;
 -- subsequent event upserts preserve data_checked_at across routine refreshes.
 UPDATE public.events
-SET data_checked_at = updated_at
+SET data_checked_at = LEAST(
+  COALESCE(updated_at, statement_timestamp()),
+  statement_timestamp()
+)
 WHERE data_checked = true
   AND data_checked_at IS NULL;
 

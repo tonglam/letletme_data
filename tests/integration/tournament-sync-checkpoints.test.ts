@@ -2063,6 +2063,29 @@ describe('tournament initialization checkpoints', () => {
     expect((await checkpointRow())?.transfers).toBe(12);
   });
 
+  test('pre-deadline history refresh leaves the current event pending', async () => {
+    const sql = await getDbClient();
+    await sql`
+      UPDATE entry_infos
+      SET entry_transfers_synced_through_event_id = 10,
+          entry_transfers_synced_season = ${TEST_SEASON},
+          entry_transfers_source_checked_at = NULL
+      WHERE id = ${ENTRY_ID}
+    `;
+
+    await entryEventTransfersRepository.replaceForEvent(ENTRY_ID, 12, [], undefined, {
+      syncMode: 'all',
+      checkpointThroughEventId: 11,
+      checkpointSeason: TEST_SEASON,
+      sourceCheckedAt: await nextTransferSourceCheckedAt(),
+    });
+
+    expect((await checkpointRow())?.transfers).toBe(11);
+    expect(
+      await entryEventTransfersRepository.findEntryIdsNeedingSync([ENTRY_ID], 12, TEST_SEASON),
+    ).toEqual([ENTRY_ID]);
+  });
+
   test('concurrent full syncs preserve the highest checkpoint', async () => {
     const sql = await getDbClient();
     await sql`

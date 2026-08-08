@@ -164,6 +164,7 @@ describe('event finalization checkpoint migration', () => {
 
     expect(migration).toContain('ADD COLUMN IF NOT EXISTS data_checked_at timestamptz');
     expect(migration).toContain('WHERE data_checked = true');
+    expect(migration).toContain('statement_timestamp()');
     expect(migration).not.toContain('GRANT');
   });
 });

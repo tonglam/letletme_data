@@ -542,11 +542,12 @@ export async function enrichTournamentHistory(
         concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
         season: setupSeason,
       });
-      if (leagueResult.updated < entryIds.length || leagueResult.skipped > 0) {
+      if (leagueResult.failedUnits > 0 || leagueResult.skipped > 0) {
+        const convergedEntries = leagueResult.reusedUnits + leagueResult.succeededUnits;
         issues.push({
           scope: 'league-event-results',
           eventId,
-          message: `League insights incomplete for event ${eventId}: ${leagueResult.updated}/${entryIds.length}`,
+          message: `League insights incomplete for event ${eventId}: ${convergedEntries}/${leagueResult.totalEntries}`,
         });
       }
 

@@ -51,7 +51,15 @@ export function planEntryInfoSyncWork(
   entryIds: readonly number[],
   snapshotRequiredEntryIds: readonly number[],
   cachedEntryIds: ReadonlySet<number>,
+  refreshAll = false,
 ): EntryInfoSyncWorkPlan {
+  if (refreshAll) {
+    return {
+      requiredEntryIds: [...entryIds],
+      cacheOnlyEntryIds: [],
+      reusedUnits: 0,
+    };
+  }
   const requiredSnapshotSet = new Set(snapshotRequiredEntryIds);
   const cacheOnlyEntryIds = entryIds.filter(
     (entryId) => !requiredSnapshotSet.has(entryId) && !cachedEntryIds.has(entryId),

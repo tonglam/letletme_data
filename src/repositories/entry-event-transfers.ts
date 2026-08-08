@@ -242,6 +242,7 @@ export const createEntryEventTransfersRepository = (dbInstance?: DatabaseInstanc
         elementInPlayed?: boolean | null;
         defaultPoints?: number | null;
         syncMode?: 'latest' | 'all';
+        checkpointThroughEventId?: number;
         checkpointSeason: string;
         sourceCheckedAt: string;
         persistEventData?: (tx: TransactionHandle) => Promise<void>;
@@ -250,6 +251,14 @@ export const createEntryEventTransfersRepository = (dbInstance?: DatabaseInstanc
       try {
         const db = await getDbInstance();
         const syncMode = options?.syncMode ?? getConfig().TRANSFER_SYNC_MODE;
+        const checkpointThroughEventId = options?.checkpointThroughEventId ?? eventId;
+        if (
+          !Number.isInteger(checkpointThroughEventId) ||
+          checkpointThroughEventId < 0 ||
+          checkpointThroughEventId > eventId
+        ) {
+          throw new Error('Transfer checkpoint event must be between zero and the synced event');
+        }
         const checkpointSeason = options?.checkpointSeason;
         if (!checkpointSeason || !/^\d{4}$/.test(checkpointSeason)) {
           throw new Error('A valid four-digit checkpoint season is required');
@@ -370,9 +379,9 @@ export const createEntryEventTransfersRepository = (dbInstance?: DatabaseInstanc
                       WHEN ${entryInfos.entryTransfersSyncedSeason} = ${checkpointSeason}
                       THEN GREATEST(
                         COALESCE(${entryInfos.entryTransfersSyncedThroughEventId}, 0),
-                        ${eventId}
+                        ${checkpointThroughEventId}
                       )
-                      ELSE ${eventId}
+                      ELSE ${checkpointThroughEventId}
                     END`
                   : sql`CASE
                       WHEN ${entryInfos.entryTransfersSyncedSeason} = ${checkpointSeason}

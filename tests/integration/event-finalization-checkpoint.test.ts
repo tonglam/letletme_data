@@ -34,8 +34,11 @@ describe('event finalization checkpoint', () => {
           sql`SELECT clock_timestamp() AS now`,
         );
         const finalizedAt = (await repository.findById(candidate.id))?.dataCheckedAt;
+        const exactFinalizedAt = await repository.findDataCheckedAtExact(candidate.id);
 
         expect(finalizedAt).toBeInstanceOf(Date);
+        expect(exactFinalizedAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/);
+        expect(new Date(exactFinalizedAt!).getTime()).toBe(finalizedAt!.getTime());
         expect(finalizedAt!.getTime()).toBeGreaterThanOrEqual(new Date(before[0]!.now).getTime());
         expect(finalizedAt!.getTime()).toBeLessThanOrEqual(new Date(after[0]!.now).getTime());
 

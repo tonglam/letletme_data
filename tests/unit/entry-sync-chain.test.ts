@@ -55,4 +55,12 @@ describe('entry sync keyset chain', () => {
       reusedUnits: 1,
     });
   });
+
+  test('refreshes every profile in a scheduled daily scan', () => {
+    expect(planEntryInfoSyncWork([1, 2, 3], [], new Set([1, 2, 3]), true)).toEqual({
+      requiredEntryIds: [1, 2, 3],
+      cacheOnlyEntryIds: [],
+      reusedUnits: 0,
+    });
+  });
 });
