@@ -4,14 +4,11 @@ assertIntegrationEnv();
 
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 
-import { resetActiveSeasonMemo } from '../../src/cache/cache-season';
-import { redisSingleton } from '../../src/cache/singleton';
 import { planTournamentStructure, type TournamentParticipant } from '../../src/domain/tournament';
 import { getDbClient } from '../../src/db/singleton';
 import { tournamentInfoRepository } from '../../src/repositories/tournament-infos';
 import { tournamentManagementRepository } from '../../src/repositories/tournament-management';
 import { tournamentRosterRepository } from '../../src/repositories/tournament-roster';
-import { repairDeletedTournamentMaterializedViews } from '../../src/services/tournament-materialized-views.service';
 
 /**
  * FP-08 (C5): tournament creation must not poison entry_infos.
@@ -411,7 +408,6 @@ describe('tournament creation vs entry_infos (FP-08)', () => {
           standings_ready_at = now()
       where id = ${created.id}
     `;
-    await client`REFRESH MATERIALIZED VIEW mv_tournament_snapshot`;
     await tournamentRosterRepository.markResumeProcessing(created.id);
 
     const resumeProcessing = await client<
@@ -502,14 +498,6 @@ describe('tournament creation vs entry_infos (FP-08)', () => {
           standings_ready_at = now()
       where id = ${created.id}
     `;
-    await client`REFRESH MATERIALIZED VIEW mv_tournament_snapshot`;
-    expect(
-      await client<Array<{ tournament_id: number }>>`
-        select tournament_id
-        from mv_tournament_snapshot
-        where tournament_id = ${created.id}
-      `,
-    ).toHaveLength(1);
     await tournamentInfoRepository.markSetupRetryQueued(created.id);
 
     const retryGate = await client<
@@ -524,14 +512,6 @@ describe('tournament creation vs entry_infos (FP-08)', () => {
       setup_phase: 'queued',
       standings_ready_at: null,
     });
-    expect(
-      await client<Array<{ tournament_id: number }>>`
-        select tournament_id
-        from mv_tournament_snapshot
-        where tournament_id = ${created.id}
-      `,
-    ).toHaveLength(0);
-
     await client`
       update tournament_infos
       set setup_status = 'ready',
@@ -539,7 +519,6 @@ describe('tournament creation vs entry_infos (FP-08)', () => {
           standings_ready_at = now()
       where id = ${created.id}
     `;
-    await client`REFRESH MATERIALIZED VIEW mv_tournament_snapshot`;
     await tournamentInfoRepository.markSetupProcessing(created.id);
     const automaticRetryGate = await client<
       Array<{ setup_status: string; setup_phase: string; standings_ready_at: Date | null }>
@@ -553,14 +532,6 @@ describe('tournament creation vs entry_infos (FP-08)', () => {
       setup_phase: 'syncing_entries',
       standings_ready_at: null,
     });
-    expect(
-      await client<Array<{ tournament_id: number }>>`
-        select tournament_id
-        from mv_tournament_snapshot
-        where tournament_id = ${created.id}
-      `,
-    ).toHaveLength(0);
-
     await client`
       update tournament_infos
       set state = 'finished', roster_sync_status = 'processing'
@@ -641,251 +612,5 @@ describe('tournament creation vs entry_infos (FP-08)', () => {
 
     expect(terminalWrite).toBe(false);
     expect(state[0]).toEqual({ setup_status: 'ready', setup_phase: 'ready' });
-  });
-
-  test('omits a pending shell and publishes a ready knockout-only snapshot', async () => {
-    const client = await getDbClient();
-    const participants = buildParticipants();
-    const plan = planTournamentStructure(
-      {
-        tournamentName: `Knockout Snapshot ${Date.now()}`,
-        adminId: String(SYNCED_ENTRY.id),
-        creator: 'knockout-snapshot-test',
-        participantSource: 'custom',
-        leagueUrl: 'https://fantasy.premierleague.com/leagues/900004/standings/c',
-        groupFormat: 'none',
-        startGameweek: 'GW1',
-        endGameweek: 'GW1',
-        knockoutFormat: 'single',
-        selectedParticipantIds: participants.map((participant) => participant.id),
-      },
-      participants,
-      900004,
-      'classic',
-    );
-
-    const created = await tournamentInfoRepository.createTournamentWithEntries(plan);
-    createdTournamentIds.push(created.id);
-    await client`
-      insert into tournament_knockout_results (
-        tournament_id, event_id, match_id, play_against_id, home_entry_id, away_entry_id
-      ) values (
-        ${created.id}, ${plan.knockoutStartedEventId!}, 1, 1,
-        ${Number(participants[0].id)}, ${Number(participants[1].id)}
-      )
-    `;
-    await client`REFRESH MATERIALIZED VIEW mv_tournament_snapshot`;
-    const pendingRows = await client<Array<{ tournament_id: number }>>`
-      select tournament_id
-      from mv_tournament_snapshot
-      where tournament_id = ${created.id}
-    `;
-    expect(pendingRows).toHaveLength(0);
-
-    const redis = await redisSingleton.getClient();
-    const previousSeason = await redis.get('Season:active');
-    const publicationSeason = /^\d{4}$/.test(previousSeason ?? '') ? previousSeason! : '2526';
-    if (publicationSeason !== previousSeason) {
-      await redis.set('Season:active', publicationSeason);
-      resetActiveSeasonMemo();
-    }
-    try {
-      await tournamentInfoRepository.markStandingsReady(created.id, publicationSeason);
-    } finally {
-      if (publicationSeason !== previousSeason) {
-        if (previousSeason === null) await redis.del('Season:active');
-        else await redis.set('Season:active', previousSeason);
-        resetActiveSeasonMemo();
-      }
-    }
-    const rows = await client<
-      Array<{ tournament_id: number; latest_event_id: number | null; total_entries: number }>
-    >`
-      select tournament_id, latest_event_id, total_entries
-      from mv_tournament_snapshot
-      where tournament_id = ${created.id}
-    `;
-
-    expect([...rows]).toEqual([
-      {
-        tournament_id: created.id,
-        latest_event_id: null,
-        total_entries: participants.length,
-      },
-    ]);
-  });
-
-  test('repairs a materialized snapshot left stale after canonical deletion', async () => {
-    const client = await getDbClient();
-    const participants = buildParticipants();
-    const plan = planTournamentStructure(
-      {
-        tournamentName: `Delete Publication ${Date.now()}`,
-        adminId: String(SYNCED_ENTRY.id),
-        creator: 'delete-publication-test',
-        participantSource: 'custom',
-        leagueUrl: 'https://fantasy.premierleague.com/leagues/900007/standings/c',
-        groupFormat: 'points',
-        startGameweek: 'GW1',
-        endGameweek: 'GW38',
-        groupNum: '1',
-        qualifiersPerGroup: '',
-        knockoutFormat: 'none',
-      },
-      participants,
-      900007,
-      'classic',
-    );
-    const created = await tournamentInfoRepository.createTournamentWithEntries(plan);
-    createdTournamentIds.push(created.id);
-    await client`
-      update tournament_infos
-      set standings_ready_at = now()
-      where id = ${created.id}
-    `;
-    await client`REFRESH MATERIALIZED VIEW mv_tournament_snapshot`;
-
-    expect(
-      await tournamentManagementRepository.deleteOwned(created.id, created.adminEntryId),
-    ).toMatchObject({ status: 'deleted' });
-    const staleRows = await client<Array<{ tournament_id: number }>>`
-      SELECT tournament_id
-      FROM mv_tournament_snapshot
-      WHERE tournament_id = ${created.id}
-    `;
-    expect(staleRows).toHaveLength(1);
-
-    expect(await repairDeletedTournamentMaterializedViews(created.id)).toBe(true);
-    const repairedRows = await client<Array<{ tournament_id: number }>>`
-      SELECT tournament_id
-      FROM mv_tournament_snapshot
-      WHERE tournament_id = ${created.id}
-    `;
-    expect(repairedRows).toHaveLength(0);
-    expect(await repairDeletedTournamentMaterializedViews(created.id)).toBe(false);
-  });
-
-  test('ignores pre-created battle fixtures until match points are calculated', async () => {
-    const client = await getDbClient();
-    const participants = buildParticipants();
-    const pointsPlan = planTournamentStructure(
-      {
-        tournamentName: `Battle Snapshot ${Date.now()}`,
-        adminId: String(SYNCED_ENTRY.id),
-        creator: 'battle-snapshot-test',
-        participantSource: 'custom',
-        leagueUrl: 'https://fantasy.premierleague.com/leagues/900006/standings/c',
-        groupFormat: 'points',
-        startGameweek: 'GW1',
-        endGameweek: 'GW38',
-        groupNum: '1',
-        qualifiersPerGroup: '4',
-        knockoutFormat: 'none',
-        selectedParticipantIds: participants.map((participant) => participant.id),
-      },
-      participants,
-      900006,
-      'classic',
-    );
-    const plan = { ...pointsPlan, groupMode: 'battle_races' as const };
-    const created = await tournamentInfoRepository.createTournamentWithEntries(plan);
-    createdTournamentIds.push(created.id);
-    await client`
-      update tournament_infos
-      set standings_ready_at = now()
-      where id = ${created.id}
-    `;
-    await client`
-      INSERT INTO tournament_battle_group_results (
-        tournament_id, group_id, event_id,
-        home_index, home_entry_id, home_match_points,
-        away_index, away_entry_id, away_match_points
-      ) VALUES
-        (${created.id}, 1, 1, 0, ${Number(participants[0].id)}, 3,
-         1, ${Number(participants[1].id)}, 0),
-        (${created.id}, 1, 38, 0, ${Number(participants[0].id)}, NULL,
-         1, ${Number(participants[1].id)}, NULL)
-    `;
-    await client`REFRESH MATERIALIZED VIEW mv_tournament_snapshot`;
-
-    const rows = await client<Array<{ latest_event_id: number | null }>>`
-      SELECT latest_event_id
-      FROM mv_tournament_snapshot
-      WHERE tournament_id = ${created.id}
-    `;
-    expect(rows[0]?.latest_event_id).toBe(1);
-  });
-
-  test('keeps the last points snapshot while knockout activity is preseeded or calculated', async () => {
-    const client = await getDbClient();
-    const participants = buildParticipants();
-    const plan = planTournamentStructure(
-      {
-        tournamentName: `Hybrid Snapshot ${Date.now()}`,
-        adminId: String(SYNCED_ENTRY.id),
-        creator: 'hybrid-snapshot-test',
-        participantSource: 'custom',
-        leagueUrl: 'https://fantasy.premierleague.com/leagues/900005/standings/c',
-        groupFormat: 'points',
-        startGameweek: 'GW1',
-        endGameweek: 'GW1',
-        groupNum: '1',
-        qualifiersPerGroup: '4',
-        knockoutFormat: 'single',
-        selectedParticipantIds: participants.map((participant) => participant.id),
-      },
-      participants,
-      900005,
-      'classic',
-    );
-
-    const created = await tournamentInfoRepository.createTournamentWithEntries(plan);
-    createdTournamentIds.push(created.id);
-    await client`
-      update tournament_infos
-      set standings_ready_at = now()
-      where id = ${created.id}
-    `;
-    await client`
-      insert into tournament_points_group_results (
-        tournament_id, group_id, event_id, entry_id, event_group_rank,
-        event_points, event_cost, event_net_points, event_rank
-      ) values (${created.id}, 1, 1, ${SYNCED_ENTRY.id}, 1, 50, 0, 50, 1)
-    `;
-    await client`
-      insert into tournament_knockout_results (
-        tournament_id, event_id, match_id, play_against_id, home_entry_id, away_entry_id
-      ) values (
-        ${created.id}, ${plan.knockoutEndedEventId!}, 1, 1,
-        ${Number(participants[0].id)}, ${Number(participants[1].id)}
-      )
-    `;
-    await client`REFRESH MATERIALIZED VIEW mv_tournament_event_snapshot`;
-    await client`REFRESH MATERIALIZED VIEW mv_tournament_snapshot`;
-
-    const preseeded = await client<Array<{ latest_event_id: number; top10_entry_count: number }>>`
-      select latest_event_id, top10_entry_count
-      from mv_tournament_snapshot
-      where tournament_id = ${created.id}
-    `;
-    expect(preseeded[0]).toEqual({ latest_event_id: 1, top10_entry_count: 1 });
-
-    await client`
-      update tournament_knockout_results
-      set home_net_points = 52, away_net_points = 49
-      where tournament_id = ${created.id}
-        and event_id = ${plan.knockoutEndedEventId!}
-    `;
-    await client`REFRESH MATERIALIZED VIEW mv_tournament_snapshot`;
-
-    const calculated = await client<Array<{ latest_event_id: number; top10_entry_count: number }>>`
-      select latest_event_id, top10_entry_count
-      from mv_tournament_snapshot
-      where tournament_id = ${created.id}
-    `;
-    expect(calculated[0]).toEqual({
-      latest_event_id: plan.knockoutEndedEventId!,
-      top10_entry_count: 1,
-    });
   });
 });

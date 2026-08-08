@@ -173,3 +173,18 @@ describe('event finalization checkpoint migration', () => {
     expect(migration).not.toContain('GRANT');
   });
 });
+
+describe('event live summary season aggregate migration', () => {
+  test('removes event/team dimensions and rebuilds from event-live facts', () => {
+    const migration = readFileSync(
+      'migrations/0069_standardize_event_live_summaries_to_season_aggregate.sql',
+      'utf8',
+    );
+
+    expect(migration).toContain('DROP COLUMN IF EXISTS event_id CASCADE');
+    expect(migration).toContain('DROP COLUMN IF EXISTS team_id CASCADE');
+    expect(migration).toContain('FROM public.event_lives AS live');
+    expect(migration).toContain('FROM public.event_lives_history AS live');
+    expect(migration).toContain('GROUP BY live.season, live.element_id, player.type');
+  });
+});

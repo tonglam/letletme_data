@@ -131,7 +131,7 @@ Assumption: background jobs are the only source of trust.
 
 ### event-live-summary-sync
 - Location: `src/jobs/live.jobs.ts`, `src/services/event-live-summaries.service.ts`.
-- Aim: snapshot aggregated live summary data on matchdays.
+- Aim: rebuild the current-season, element-level aggregate from all persisted event-live rows on matchdays.
 - Main logic: cron at 06:05/08:05/10:05; checks `isMatchDay`; runs `syncEventLiveSummary()`.
 - Potential issues: depends on event live data being fresh; no lock or retry beyond cron.
 - Improvements: add dependency check on event-lives sync; move to queue with retries.

@@ -181,4 +181,7 @@ $RECYCLE.BIN/
 *.swp
 *.swo
 *~
+
+# Raw provider captures are local audit inputs, not source-controlled fixtures.
+data/raw/understat/
 .admin-api-key

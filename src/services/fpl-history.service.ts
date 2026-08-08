@@ -9,6 +9,7 @@ import { createFplHistoryRepository, fplHistoryRepository } from '../repositorie
 import { DatabaseError } from '../utils/errors';
 import { withMutationConflictGuard } from '../utils/mutation-lock';
 import { syncCoreSnapshot } from './core-snapshot.service';
+import { syncEventLiveSummary } from './event-live-summaries.service';
 import { syncPlayerStatsForEvent } from './player-stats.service';
 
 const FPL_ARCHIVE_LOCK_KEY = 912_883_473;
@@ -20,48 +21,48 @@ type ArchiveTableSpec = {
 };
 
 export const FPL_ARCHIVE_TABLES: readonly ArchiveTableSpec[] = [
-  { sourceTable: 'events', archiveTable: 'fpl_event_history', sourceHasSeason: false },
-  { sourceTable: 'teams', archiveTable: 'fpl_team_history', sourceHasSeason: false },
-  { sourceTable: 'players', archiveTable: 'fpl_player_history', sourceHasSeason: false },
-  { sourceTable: 'phases', archiveTable: 'fpl_phase_history', sourceHasSeason: false },
+  { sourceTable: 'events', archiveTable: 'events_history', sourceHasSeason: false },
+  { sourceTable: 'teams', archiveTable: 'teams_history', sourceHasSeason: false },
+  { sourceTable: 'players', archiveTable: 'players_history', sourceHasSeason: false },
+  { sourceTable: 'phases', archiveTable: 'phases_history', sourceHasSeason: false },
   {
     sourceTable: 'event_fixtures',
-    archiveTable: 'fpl_event_fixture_history',
+    archiveTable: 'event_fixtures_history',
     sourceHasSeason: false,
   },
   {
     sourceTable: 'player_stats',
-    archiveTable: 'fpl_player_stat_history',
+    archiveTable: 'player_stats_history',
     sourceHasSeason: false,
   },
   {
     sourceTable: 'event_lives',
-    archiveTable: 'fpl_event_live_history',
+    archiveTable: 'event_lives_history',
     sourceHasSeason: false,
   },
   {
     sourceTable: 'event_live_explains',
-    archiveTable: 'fpl_event_live_explain_history',
+    archiveTable: 'event_live_explains_history',
     sourceHasSeason: false,
   },
   {
     sourceTable: 'event_live_summaries',
-    archiveTable: 'fpl_event_live_summary_history',
+    archiveTable: 'event_live_summaries_history',
     sourceHasSeason: false,
   },
   {
     sourceTable: 'player_values',
-    archiveTable: 'fpl_player_value_history',
+    archiveTable: 'player_values_history',
     sourceHasSeason: false,
   },
   {
     sourceTable: 'player_market_snapshots',
-    archiveTable: 'fpl_player_market_snapshot_history',
+    archiveTable: 'player_market_snapshots_history',
     sourceHasSeason: false,
   },
   {
     sourceTable: 'fpl_player_fixture_stats',
-    archiveTable: 'fpl_player_fixture_stat_history',
+    archiveTable: 'fpl_player_fixture_stats_history',
     sourceHasSeason: true,
   },
 ] as const;
@@ -295,6 +296,7 @@ export async function prepareAndArchiveFplSeason(season: string): Promise<FplArc
     },
     async () => {
       await syncPlayerStatsForEvent(38);
+      await syncEventLiveSummary();
       return archiveFplSeason(season);
     },
   );

@@ -6,11 +6,12 @@ import type {
 } from '../repositories/understat';
 import { getConfig } from '../utils/config';
 import { logInfo } from '../utils/logger';
-import { redisSingleton } from './singleton';
+import { understatRedisSingleton } from './singleton';
 
 export const UNDERSTAT_ACTIVE_SEASON_KEY = 'Understat:Season:active';
 const STAGING_TTL_SECONDS = 60 * 60;
 const RETIRED_TTL_SECONDS = 24 * 60 * 60;
+const MAX_GENERATION_HSET_BYTES = 512 * 1024;
 
 type TeamSnapshot = Awaited<
   ReturnType<ReturnType<typeof createUnderstatTeamRepository>['readSnapshot']>
@@ -53,6 +54,27 @@ function hashFromEntries(entries: Array<[string, unknown]>): Record<string, stri
   return Object.fromEntries(entries.map(([field, value]) => [field, JSON.stringify(value)]));
 }
 
+function splitHash(hash: Record<string, string>): Record<string, string>[] {
+  const encoder = new TextEncoder();
+  const batches: Record<string, string>[] = [];
+  let current: Array<[string, string]> = [];
+  let currentBytes = 0;
+
+  for (const entry of Object.entries(hash)) {
+    const entryBytes = encoder.encode(entry[0]).byteLength + encoder.encode(entry[1]).byteLength;
+    if (current.length > 0 && currentBytes + entryBytes > MAX_GENERATION_HSET_BYTES) {
+      batches.push(Object.fromEntries(current));
+      current = [];
+      currentBytes = 0;
+    }
+    current.push(entry);
+    currentBytes += entryBytes;
+  }
+
+  if (current.length > 0) batches.push(Object.fromEntries(current));
+  return batches;
+}
+
 function groupById<T>(rows: T[], id: (row: T) => number): Map<number, T[]> {
   const grouped = new Map<number, T[]>();
   for (const row of rows) {
@@ -69,17 +91,29 @@ async function setGenerationHashes(
   keys: string[],
   hashes: Record<string, string>[],
 ): Promise<void> {
-  const pipeline = redis.pipeline();
   for (let index = 0; index < keys.length; index += 1) {
     const key = keys[index];
     const hash = hashes[index];
-    pipeline.del(key);
-    if (Object.keys(hash).length > 0) pipeline.hset(key, hash);
-    pipeline.expire(key, STAGING_TTL_SECONDS);
+    const clearPipeline = redis.pipeline();
+    clearPipeline.del(key);
+    let results = await clearPipeline.exec();
+    let error = results?.find(([candidate]) => candidate !== null)?.[0];
+    if (error) throw error;
+
+    for (const batch of splitHash(hash)) {
+      const writePipeline = redis.pipeline();
+      writePipeline.hset(key, batch);
+      results = await writePipeline.exec();
+      error = results?.find(([candidate]) => candidate !== null)?.[0];
+      if (error) throw error;
+    }
+
+    const ttlPipeline = redis.pipeline();
+    ttlPipeline.expire(key, STAGING_TTL_SECONDS);
+    results = await ttlPipeline.exec();
+    error = results?.find(([candidate]) => candidate !== null)?.[0];
+    if (error) throw error;
   }
-  const results = await pipeline.exec();
-  const error = results?.find(([candidate]) => candidate !== null)?.[0];
-  if (error) throw error;
 
   const counts = await Promise.all(keys.map((key) => redis.hlen(key)));
   for (let index = 0; index < keys.length; index += 1) {
@@ -243,6 +277,6 @@ export function createUnderstatCache(dependencies: UnderstatCacheDependencies) {
 }
 
 export const understatCache = createUnderstatCache({
-  getRedisClient: () => redisSingleton.getClient(),
+  getRedisClient: () => understatRedisSingleton.getClient(),
   getActiveSeason: () => getConfig().UNDERSTAT_SEASON,
 });

@@ -71,7 +71,7 @@ export const createFplSeasonDataRepository = (dbInstance?: DbOrTransaction) => (
           `)
         : await db.execute<FplSeasonTeamRow>(sql`
             SELECT id, code, name
-            FROM public.fpl_team_history
+            FROM public.teams_history
             WHERE season = ${season} AND code = ${teamCode}
             LIMIT 1
           `);
@@ -107,10 +107,10 @@ export const createFplSeasonDataRepository = (dbInstance?: DbOrTransaction) => (
         away.code AS "awayTeamCode",
         fixture.team_h_score AS "homeGoals",
         fixture.team_a_score AS "awayGoals"
-      FROM public.fpl_event_fixture_history fixture
-      JOIN public.fpl_team_history home
+      FROM public.event_fixtures_history fixture
+      JOIN public.teams_history home
         ON home.season = fixture.season AND home.id = fixture.team_h_id
-      JOIN public.fpl_team_history away
+      JOIN public.teams_history away
         ON away.season = fixture.season AND away.id = fixture.team_a_id
       WHERE fixture.season = ${season}
     `);
@@ -157,8 +157,8 @@ export const createFplSeasonDataRepository = (dbInstance?: DbOrTransaction) => (
         player.first_name AS "firstName",
         player.second_name AS "secondName",
         player.web_name AS "webName"
-      FROM public.fpl_player_fixture_stat_history evidence
-      LEFT JOIN public.fpl_player_history player
+        FROM public.fpl_player_fixture_stats_history evidence
+        LEFT JOIN public.players_history player
         ON player.season = evidence.season AND player.code = evidence.player_code
       WHERE evidence.season = ${season}
     `);
@@ -183,7 +183,7 @@ export const createFplSeasonDataRepository = (dbInstance?: DbOrTransaction) => (
         first_name AS "firstName",
         second_name AS "secondName",
         web_name AS "webName"
-      FROM public.fpl_player_history
+      FROM public.players_history
       WHERE season = ${season}
     `);
   },

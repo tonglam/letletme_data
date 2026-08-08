@@ -1,6 +1,6 @@
 # Redis Key Contract — letletme_data
 
-**Status:** authoritative inventory of every Redis key this system writes, as of 2026-08-04.
+**Status:** authoritative inventory of every Redis key this system writes, as of 2026-08-08.
 **Audience:** anyone changing cache code, and every external system that reads this Redis.
 
 ## Ground rules (binding)
@@ -38,7 +38,7 @@ are `-1` (no expiry) — data is refreshed **on write**, never expired.
 | `EventLive:{season}:{eventId}` | hash | `elementId` | Domain `EventLive` | coordinated live snapshot; legacy manual live-data sync |
 | `EventLiveExplain:{season}:{eventId}` | hash | `elementId` | Frozen legacy explain shape through `savesPoints`; defensive-contribution properties are deliberately omitted | live explain sync |
 | `EventLiveExplainV2:{season}:{eventId}` | hash | `elementId` | Complete Domain `EventLiveExplain`, including `defensiveContribution` and `defensiveContributionPoints` | live explain sync |
-| `EventLiveSummary:{season}:{eventId}` | hash | `elementId` | Domain `EventLiveSummary` | live summary sync |
+| `EventLiveSummary:{season}` | hash | `elementId` | Season aggregate `EventLiveSummary` | live summary sync |
 | `EventOverallResult:{season}` | hash | `eventId` | Overall-result payload incl. chip data | overall-result sync |
 | `LiveFixture:{season}:{eventId}` | hash | `teamId` | Frozen `LiveFixtureByStatus` JSON | coordinated live snapshot; legacy manual cache job |
 | `LiveFixtureV2:{season}:{eventId}` | hash | `teamId` | `LiveFixtureByStatusV2` JSON; every fixture includes `fixtureId` | coordinated live snapshot |
@@ -252,9 +252,11 @@ automatically and must not be included in season cleanup.
 BullMQ stores queue state under `bull:{queueName}:*` on the **queue Redis**
 (`QUEUE_REDIS_*`, falling back to `REDIS_*`). Queue names: `data-sync`,
 `entry-sync`, `live-data`, `league-sync`, `tournament-sync`,
-`tournament-setup`. When `ENABLE_TIERED_MUTATION_QUEUES` is on (default off),
-each base queue is replaced by `…-p0` / `…-p1` / `…-p2` / `…-p3` tier queues.
-Internal to the worker fleet — do not consume directly.
+`tournament-setup`, `understat-team-sync`, and `understat-player-sync`. When
+`ENABLE_TIERED_MUTATION_QUEUES` is on (default off), each of the first six FPL
+base queues is replaced by `…-p0` / `…-p1` / `…-p2` / `…-p3` tier queues.
+Understat's two queues remain lane-specific and are not tiered. All BullMQ
+keys are internal to the worker fleet — do not consume them directly.
 
 Post-match league and tournament schedulers use deterministic hourly job IDs.
 Successful deterministic jobs remain for 24 hours to deduplicate repeated cron
@@ -388,6 +390,7 @@ redis-cli --scan --pattern "EntryInfo:$OLD"          | xargs -r redis-cli DEL
 redis-cli --scan --pattern "EventLive:$OLD:*"        | xargs -r redis-cli DEL
 redis-cli --scan --pattern "EventLiveExplain:$OLD:*" | xargs -r redis-cli DEL
 redis-cli --scan --pattern "EventLiveExplainV2:$OLD:*" | xargs -r redis-cli DEL
+redis-cli DEL "EventLiveSummary:$OLD"
 redis-cli --scan --pattern "EventLiveSummary:$OLD:*" | xargs -r redis-cli DEL
 redis-cli --scan --pattern "EventOverallResult:$OLD" | xargs -r redis-cli DEL
 redis-cli --scan --pattern "LiveFixture:$OLD:*"      | xargs -r redis-cli DEL
@@ -419,24 +422,87 @@ automatic prefix pass. Delete only the explicit leftovers reported by Step 2.)
   `tournament-cascade:*` — expire via TTL.
 - `bull:*` — managed by BullMQ (§9).
 
-## 12. Database single-season semantics (FP-21)
+## 12. Understat isolated read models
 
-The PostgreSQL database stores **one FPL season at a time**:
+Understat is a separate provider and never writes the FPL `Season:active`,
+`Team:*`, `Player:*`, or Live families. PostgreSQL is authoritative; these
+Redis hashes are rebuildable snapshots.
 
-- `events.id` restarts at 1 each season; a new season's syncs overwrite the
-  prior season's rows. There is no `season` column on event or player tables.
+| Key pattern | Type | Hash field / value | Retention |
+|---|---|---|---|
+| `Understat:Season:active` | string | Configured active Understat season | No TTL |
+| `Understat:Snapshot:{season}:team` | string | Team manifest JSON | No TTL |
+| `Understat:Snapshot:{season}:player` | string | Player manifest JSON | No TTL |
+| `Understat:Team:{season}:{revision}` | hash | `teamId` → `{ team, season }` JSON | Active revision no TTL; retired 24h |
+| `Understat:Match:{season}:{revision}` | hash | `matchId` → match JSON | Active revision no TTL; retired 24h |
+| `Understat:TeamMatches:{season}:{revision}` | hash | `teamId` → `{ stat, match }[]` JSON | Active revision no TTL; retired 24h |
+| `Understat:TeamSplits:{season}:{revision}` | hash | `teamId` → split rows JSON | Active revision no TTL; retired 24h |
+| `Understat:Player:{season}:{revision}` | hash | `playerId` → summary and memberships JSON | Active revision no TTL; retired 24h |
+| `Understat:TeamParticipants:{season}:{revision}` | hash | `teamId` → participant rows JSON | Active revision no TTL; retired 24h |
+| `Understat:PlayerMatches:{season}:{revision}` | hash | `playerId` → `{ stat, match }[]` JSON | Active revision no TTL; retired 24h |
+| `Understat:RateLimit:leases` | sorted set | Cross-replica request permits | Lease TTL only |
+
+Consumers first read `Understat:Snapshot:{season}:{lane}`, then use exactly
+the revision named by that manifest. Team and Player manifests are independent
+and may point to different revisions. New generation hashes are staged with a
+one-hour TTL, cardinality-checked, and made durable in the same transaction
+that switches the lane manifest. The prior generation then receives a 24-hour
+TTL. A 2526 backfill does not change `Understat:Season:active` when the
+configured active season is 2627.
+
+Understat worker locks use the existing
+`mutation-lock:understat:{lane}:...` family. Queue state is under
+`bull:understat-team-sync:*` and `bull:understat-player-sync:*`. None of these
+internal keys is a consumer data source. See the
+[Understat pipeline document](understat-pipeline.md) for value shapes,
+publication gates, and recovery.
+
+## 13. FPL current and historical database semantics (FP-21)
+
+The unsuffixed PostgreSQL provider tables store **one current FPL season at a
+time**. Before a new season may replace them, the outgoing season must be
+copied and sealed in the season-partitioned history tables:
+
+- `events.id` restarts at 1 each season. Current event, team, player, phase,
+  fixture, stats, live, value, market-snapshot, and fixture-evidence datasets
+  retain their established unsuffixed names.
+- `fpl_season_archives` and `fpl_season_archive_items` record archive status,
+  row counts, checksums, and verification. A sealed season is read from the
+  twelve `<core_table>_history` parents; PostgreSQL partition pruning selects its
+  physical season partition.
+- The resolver reads unsuffixed tables only when the requested season equals
+  `core_snapshot_authority.season`. A sealed older season reads history. An
+  unavailable or unsealed season returns unavailable and never falls back to
+  current rows.
+- FPL history is sealed for `1617`, `1718`, `1819`, `1920`, `2021`, `2122`,
+  `2223`, `2324`, `2425`, and `2526`; `2627` remains the current unsuffixed
+  season. `2526` was backfilled from preserved raw `event live`,
+  `element-summary`, fixture-stat, and core snapshots. `1617`–`2425` use the
+  preserved Vaastav per-gameweek transformed fallback where raw
+  `element-summary` JSON was not available. Every sealed season has archive
+  item row-count/checksum and historical-FK validation. Source-unavailable
+  fields such as historical status/news/chance, ownership percentages, or
+  old fixture identifiers remain explicitly unknown/proxied in the archive
+  reason; they are never presented as current Redis state. The `1617` and
+  `1718` team names were repaired from their preserved FPL team codes. The
+  `2627` team dimension is also seeded into `teams_2627`, but the season remains
+  `building` until the other historical partitions are backfilled and sealed.
+- A blank gameweek does not reduce the season fixture total: for example,
+  `2223` keeps all 38 event rows and 380 fixtures, with GW7 containing zero
+  fixtures and later double/multiple gameweeks absorbing the postponed
+  matches. Player-event/live row counts must not be read as fixture counts.
 - `player_stats` is keyed by `(event_id, element_id)`. Old-event rows remain
-  until the same `(event_id, element_id)` pair is overwritten by the new
-  season, at which point they naturally become new-season data.
+  current-season data until the separately approved rollover; its sealed copy
+  is keyed by season as well.
 - `PlayerStat:{season}` in Redis is a **latest-event-wins view** (§5). Only
   syncs for the current gameweek write it; older-event backfills persist to
   DB only.
-- `player_market_snapshots` is the deliberate season-long exception: it keeps
-  one complete daily roster from the first capture through the end of the
-  current season. Include it in the read-only rollover inventory. After the
-  outgoing season is backed up and the new upstream roster is confirmed,
-  remove the outgoing rows before the new season's first 09:40 UTC+8 capture;
-  never mix seasons to manufacture a comparison window.
+- `player_market_snapshots` keeps one complete daily roster through the
+  current season and is included in the sealed archive. The current table is
+  changed only by the separately approved rollover; never mix two seasons to
+  manufacture a comparison window.
+- Entry, league, and tournament tables are outside this provider archive and
+  are not modified by the archive job.
 
 Read-only inventory before the season reset:
 
@@ -448,5 +514,5 @@ SELECT min(snapshot_date) AS first_date,
 FROM player_market_snapshots;
 ```
 
-This is an accepted design decision, not a temporary limitation. Multi-season
-history would require additive schema changes and explicit consumer demand.
+The archive job never clears or renames current tables. Cross-domain cleanup
+after sealing remains a separately approved manual rollover.

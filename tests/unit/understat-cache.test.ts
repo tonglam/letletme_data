@@ -7,6 +7,7 @@ class FakeRedis {
   readonly strings = new Map<string, string>();
   readonly hashes = new Map<string, Map<string, string>>();
   readonly ttls = new Map<string, number>();
+  readonly hsetCalls: number[] = [];
   failNextTransaction = false;
 
   async get(key: string): Promise<string | null> {
@@ -24,6 +25,7 @@ class FakeRedis {
   }
 
   private async hset(key: string, values: Record<string, string>): Promise<number> {
+    this.hsetCalls.push(Object.keys(values).length);
     const hash = this.hashes.get(key) ?? new Map<string, string>();
     for (const [field, value] of Object.entries(values)) hash.set(field, value);
     this.hashes.set(key, hash);
@@ -150,5 +152,30 @@ describe('Understat generation cache', () => {
 
     expect(redis.strings.get(UNDERSTAT_ACTIVE_SEASON_KEY)).toBe('2728');
     expect((await cache.getManifest('2627', 'team'))?.revision).toBe('historical-team-run');
+  });
+
+  test('chunks large generation hashes into bounded Redis writes', async () => {
+    const redis = new FakeRedis();
+    const cache = createUnderstatCache({ getRedisClient: async () => redis as unknown as Redis });
+    const players = Array.from({ length: 80 }, (_, index) => ({
+      player: { id: index + 1 },
+      season: { season: '2627', playerId: index + 1 },
+    }));
+    const memberships = players.map((row) => ({ playerId: row.player.id, teamId: 1 }));
+    const matchStats = players.flatMap((row) =>
+      Array.from({ length: 100 }, (_, index) => ({
+        stat: { playerId: row.player.id, payload: 'x'.repeat(250) },
+        match: { id: index + 1 },
+      })),
+    );
+
+    await cache.publishPlayer('2627', 'large-player-run', {
+      players,
+      memberships,
+      matchStats,
+    } as never);
+
+    expect(redis.hsetCalls.length).toBeGreaterThan(3);
+    expect((await cache.getManifest('2627', 'player'))?.revision).toBe('large-player-run');
   });
 });

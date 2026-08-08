@@ -17,7 +17,6 @@ const EVENT_LIVE_SUMMARIES_LOCK_KEY = 872341;
 export type EventLiveSummaryAggregateRow = {
   elementId: number;
   elementType: number;
-  teamId: number;
   minutes: number;
   goalsScored: number;
   assists: number;
@@ -42,14 +41,13 @@ export const createEventLiveSummariesRepository = (dbInstance?: DatabaseInstance
   const getDbInstance = async () => dbInstance || (await getDb());
 
   return {
-    aggregateSummaries: async (eventId: number): Promise<EventLiveSummaryAggregateRow[]> => {
+    aggregateSummaries: async (): Promise<EventLiveSummaryAggregateRow[]> => {
       try {
         const db = await getDbInstance();
         const result = await db.execute(sql`
         SELECT
           el.element_id as "elementId",
           p.type as "elementType",
-          p.team_id as "teamId",
           COALESCE(SUM(el.minutes), 0)::int as "minutes",
           COALESCE(SUM(el.goals_scored), 0)::int as "goalsScored",
           COALESCE(SUM(el.assists), 0)::int as "assists",
@@ -66,13 +64,12 @@ export const createEventLiveSummariesRepository = (dbInstance?: DatabaseInstance
           COALESCE(SUM(el.total_points), 0)::int as "totalPoints"
         FROM event_lives el
         INNER JOIN players p ON p.id = el.element_id
-        WHERE el.event_id = ${eventId}
-        GROUP BY el.element_id, p.type, p.team_id
+        GROUP BY el.element_id, p.type
         ORDER BY el.element_id
       `);
 
         const rows = mapRowList<EventLiveSummaryAggregateRow>(result);
-        logInfo('Aggregated event live summaries', { count: rows.length });
+        logInfo('Aggregated season event live summaries', { count: rows.length });
         return rows;
       } catch (error) {
         logError('Failed to aggregate event live summaries', error);
@@ -97,10 +94,8 @@ export const createEventLiveSummariesRepository = (dbInstance?: DatabaseInstance
           }
 
           const inserts: DbEventLiveSummaryInsert[] = summaries.map((summary) => ({
-            eventId: summary.eventId,
             elementId: summary.elementId,
             elementType: summary.elementType,
-            teamId: summary.teamId,
             minutes: summary.minutes,
             goalsScored: summary.goalsScored,
             assists: summary.assists,

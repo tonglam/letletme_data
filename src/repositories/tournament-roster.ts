@@ -190,7 +190,6 @@ export const tournamentRosterRepository = {
       // same transaction so a delayed or failed resume cannot keep exposing
       // the previously published standings.
       await tx`REFRESH MATERIALIZED VIEW public.mv_tournament_event_snapshot`;
-      await tx`REFRESH MATERIALIZED VIEW public.mv_tournament_snapshot`;
     });
   },
 
@@ -383,7 +382,6 @@ export const tournamentRosterRepository = {
         // before this roster publication commits. The view predicate is only
         // evaluated during refresh, so cache invalidation alone is insufficient.
         await tx`REFRESH MATERIALIZED VIEW public.mv_tournament_event_snapshot`;
-        await tx`REFRESH MATERIALIZED VIEW public.mv_tournament_snapshot`;
 
         return {
           changed: true,

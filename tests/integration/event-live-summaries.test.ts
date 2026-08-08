@@ -23,7 +23,7 @@ describe.skipIf(!currentEvent)('Event Live Summaries Integration Tests', () => {
     await syncEventLives(testEventId);
 
     // Clear cache before tests
-    await eventLiveSummaryCache.clearByEventId(testEventId);
+    await eventLiveSummaryCache.clear();
 
     // Sync event live summary data - aggregates from event_lives table
     const result = await syncEventLiveSummary();
@@ -36,14 +36,13 @@ describe.skipIf(!currentEvent)('Event Live Summaries Integration Tests', () => {
       const dbSummaries = await db.select().from(eventLiveSummaries);
 
       expect(dbSummaries.length).toBeGreaterThan(0);
-      expect(dbSummaries[0].eventId).toBe(testEventId);
       expect(dbSummaries[0].elementId).toBeTypeOf('number');
       expect(dbSummaries[0].totalPoints).toBeTypeOf('number');
     });
 
     test('should populate cache after sync', async () => {
       // Verify cache is populated (from beforeAll sync)
-      const cachedData = await eventLiveSummaryCache.getByEventId(testEventId);
+      const cachedData = await eventLiveSummaryCache.get();
       expect(cachedData).toBeDefined();
       expect(cachedData).not.toBeNull();
       expect(cachedData?.length).toBeGreaterThan(0);
@@ -53,7 +52,7 @@ describe.skipIf(!currentEvent)('Event Live Summaries Integration Tests', () => {
       const db = await getDb();
       const dbSummaries = await db.select().from(eventLiveSummaries);
 
-      const cachedSummaries = await eventLiveSummaryCache.getByEventId(testEventId);
+      const cachedSummaries = await eventLiveSummaryCache.get();
 
       expect(cachedSummaries).not.toBeNull();
       expect(cachedSummaries?.length).toBe(dbSummaries.length);
@@ -87,7 +86,6 @@ describe.skipIf(!currentEvent)('Event Live Summaries Integration Tests', () => {
         expect(second.count).toBeGreaterThan(0);
         expect(summaries.length).toBe(first.count);
         expect(new Set(elementIds).size).toBe(summaries.length);
-        expect(summaries.every((summary) => summary.eventId === testEventId)).toBe(true);
       },
       { timeout: 15000 },
     );
@@ -133,10 +131,6 @@ describe.skipIf(!currentEvent)('Event Live Summaries Integration Tests', () => {
       // Should have element type (1=GK, 2=DEF, 3=MID, 4=FWD)
       expect(summary.elementType).toBeGreaterThanOrEqual(1);
       expect(summary.elementType).toBeLessThanOrEqual(4);
-
-      // Should have team ID
-      expect(summary.teamId).toBeGreaterThan(0);
-      expect(summary.teamId).toBeLessThanOrEqual(20); // Premier League teams
     });
   });
 
@@ -150,10 +144,8 @@ describe.skipIf(!currentEvent)('Event Live Summaries Integration Tests', () => {
       const summary = summaries[0];
 
       // Required fields
-      expect(typeof summary.eventId).toBe('number');
       expect(typeof summary.elementId).toBe('number');
       expect(typeof summary.elementType).toBe('number');
-      expect(typeof summary.teamId).toBe('number');
       expect(typeof summary.totalPoints).toBe('number');
     });
 
@@ -178,22 +170,22 @@ describe.skipIf(!currentEvent)('Event Live Summaries Integration Tests', () => {
 
   describe('Cache Operations', () => {
     test('should cache data after sync', async () => {
-      const cachedData = await eventLiveSummaryCache.getByEventId(testEventId);
+      const cachedData = await eventLiveSummaryCache.get();
 
       expect(cachedData).not.toBeNull();
       expect(cachedData?.length).toBeGreaterThan(0);
     });
 
-    test('should clear cache for specific event', async () => {
+    test('should clear the season summary cache', async () => {
       // Cache should be populated from beforeAll
-      let cachedData = await eventLiveSummaryCache.getByEventId(testEventId);
+      let cachedData = await eventLiveSummaryCache.get();
       expect(cachedData).not.toBeNull();
 
       // Clear cache
-      await eventLiveSummaryCache.clearByEventId(testEventId);
+      await eventLiveSummaryCache.clear();
 
       // Verify cache is cleared
-      cachedData = await eventLiveSummaryCache.getByEventId(testEventId);
+      cachedData = await eventLiveSummaryCache.get();
       expect(cachedData).toBeNull();
     });
 
@@ -204,7 +196,7 @@ describe.skipIf(!currentEvent)('Event Live Summaries Integration Tests', () => {
         const result = await syncEventLiveSummary();
 
         // Get from cache
-        const cachedData = await eventLiveSummaryCache.getByEventId(testEventId);
+        const cachedData = await eventLiveSummaryCache.get();
 
         expect(cachedData).not.toBeNull();
         expect(Array.isArray(cachedData)).toBe(true);
@@ -213,7 +205,6 @@ describe.skipIf(!currentEvent)('Event Live Summaries Integration Tests', () => {
         // Verify data structure
         if (cachedData && cachedData.length > 0) {
           const firstSummary = cachedData[0];
-          expect(firstSummary.eventId).toBe(testEventId);
           expect(typeof firstSummary.elementId).toBe('number');
           expect(typeof firstSummary.totalPoints).toBe('number');
         }
@@ -235,7 +226,7 @@ describe.skipIf(!currentEvent)('Event Live Summaries Integration Tests', () => {
 
     test('should retrieve from cache', async () => {
       const startTime = performance.now();
-      const cachedData = await eventLiveSummaryCache.getByEventId(testEventId);
+      const cachedData = await eventLiveSummaryCache.get();
       const endTime = performance.now();
 
       expect(cachedData).not.toBeNull();
@@ -260,7 +251,7 @@ describe.skipIf(!currentEvent)('Event Live Summaries Integration Tests', () => {
       const db = await getDb();
       const dbSummaries = await db.select().from(eventLiveSummaries);
 
-      const cachedSummaries = await eventLiveSummaryCache.getByEventId(testEventId);
+      const cachedSummaries = await eventLiveSummaryCache.get();
 
       expect(cachedSummaries).not.toBeNull();
 
@@ -307,16 +298,15 @@ describe.skipIf(!currentEvent)('Event Live Summaries Integration Tests', () => {
   describe('Error Handling', () => {
     test('should handle sync when current event exists', async () => {
       // Verify sync result from beforeAll
-      const cachedData = await eventLiveSummaryCache.getByEventId(testEventId);
+      const cachedData = await eventLiveSummaryCache.get();
       expect(cachedData).toBeDefined();
       expect(cachedData).not.toBeNull();
       expect(testEventId).toBeTypeOf('number');
     });
 
-    test('should return null for non-existent event in cache', async () => {
-      const nonExistentEventId = 99999;
-      const cachedData = await eventLiveSummaryCache.getByEventId(nonExistentEventId);
-
+    test('should return null after the season cache is cleared', async () => {
+      await eventLiveSummaryCache.clear();
+      const cachedData = await eventLiveSummaryCache.get();
       expect(cachedData).toBeNull();
     });
   });
