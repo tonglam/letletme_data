@@ -12,6 +12,18 @@ export function isExplicitEntryRepairRequest(
   return jobData?.entryIds !== undefined;
 }
 
+export function isCronEntryInfoTableScan(
+  jobData: { source?: string; entryIds?: readonly number[] } | undefined,
+): boolean {
+  return jobData?.source === 'cron' && jobData.entryIds === undefined;
+}
+
+export function shouldRefreshEntryPicks(
+  jobData: { source?: string; entryIds?: readonly number[] } | undefined,
+): boolean {
+  return jobData?.source === 'cron' || isExplicitEntryRepairRequest(jobData);
+}
+
 export function resolveRichResultFreshnessCutoff(
   event: EventFinalizationState | null,
 ): Date | null {

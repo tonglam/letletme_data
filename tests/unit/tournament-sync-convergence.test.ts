@@ -6,6 +6,7 @@ import {
   planTournamentEventSync,
 } from '../../src/services/tournament-event-results.service';
 import { isTournamentTransferCheckpointEvent } from '../../src/services/tournament-event-transfers.service';
+import { latestFreshnessTimestamp } from '../../src/domain/freshness';
 
 describe('tournament sync convergence planning', () => {
   test('returns exact missing pick IDs', () => {
@@ -31,6 +32,12 @@ describe('tournament sync convergence planning', () => {
       { entryId: 4, richSyncedAt: null, updatedAt: new Date('2026-08-04T10:00:01Z') },
     ];
     expect(findFreshTournamentResultEntryIds(rows, cutoff)).toEqual(new Set([2, 3]));
+  });
+
+  test('raises a retry cutoff to the exact finalization boundary', () => {
+    const retryCutoff = '2026-08-04T10:00:00.000100Z';
+    const finalizationCutoff = '2026-08-04T10:00:00.000900Z';
+    expect(latestFreshnessTimestamp(retryCutoff, finalizationCutoff)).toBe(finalizationCutoff);
   });
 
   test('cold, warm, and partial retries select only canonical gaps', () => {

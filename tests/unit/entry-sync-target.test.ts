@@ -1,9 +1,11 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
+  isCronEntryInfoTableScan,
   isExplicitEntryRepairRequest,
   resolveEntrySyncTargetEventId,
   resolveRichResultFreshnessCutoff,
+  shouldRefreshEntryPicks,
 } from '../../src/domain/entry-sync';
 
 describe('explicit entry repair selection', () => {
@@ -12,6 +14,19 @@ describe('explicit entry repair selection', () => {
     expect(isExplicitEntryRepairRequest({ entryIds: [] })).toBe(true);
     expect(isExplicitEntryRepairRequest({})).toBe(false);
     expect(isExplicitEntryRepairRequest(undefined)).toBe(false);
+  });
+
+  test('only treats cron jobs without an entry list as profile table scans', () => {
+    expect(isCronEntryInfoTableScan({ source: 'cron' })).toBe(true);
+    expect(isCronEntryInfoTableScan({ source: 'cron', entryIds: [42] })).toBe(false);
+    expect(isCronEntryInfoTableScan({ source: 'manual' })).toBe(false);
+  });
+
+  test('refreshes picks for every cron run and explicit repair', () => {
+    expect(shouldRefreshEntryPicks({ source: 'cron' })).toBe(true);
+    expect(shouldRefreshEntryPicks({ source: 'cron', entryIds: [42] })).toBe(true);
+    expect(shouldRefreshEntryPicks({ source: 'api', entryIds: [42] })).toBe(true);
+    expect(shouldRefreshEntryPicks({ source: 'manual' })).toBe(false);
   });
 });
 

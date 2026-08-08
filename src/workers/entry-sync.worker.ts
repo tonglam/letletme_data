@@ -6,6 +6,8 @@ import { entryInfosCache } from '../cache/entry-infos-cache';
 import { MUTATION_PRIORITY_ORDER, type MutationPriorityTier } from '../domain/job-priority';
 import {
   isExplicitEntryRepairRequest,
+  isCronEntryInfoTableScan,
+  shouldRefreshEntryPicks,
   resolveEntrySyncTargetEventId,
   resolveRichResultFreshnessCutoff,
 } from '../domain/entry-sync';
@@ -447,7 +449,7 @@ export function createEntrySyncWorker(): WorkerRuntime {
                         entryIds,
                         requiredEntryIds,
                         new Set(cachedEntries.keys()),
-                        effectiveJobData?.source === 'cron',
+                        isCronEntryInfoTableScan(effectiveJobData),
                       );
                       for (const entryId of plan.cacheOnlyEntryIds) {
                         cacheOnlyEntryIds.add(entryId);
@@ -480,7 +482,7 @@ export function createEntrySyncWorker(): WorkerRuntime {
                       // Explicit API/manual entry lists are repair requests,
                       // so they must refetch even when a warm row exists. Only
                       // scheduled scans may reuse a complete picks row.
-                      if (isExplicitEntryRepairRequest(effectiveJobData)) {
+                      if (shouldRefreshEntryPicks(effectiveJobData)) {
                         return { requiredEntryIds: entryIds, reusedUnits: 0 };
                       }
                       const existing = new Set(

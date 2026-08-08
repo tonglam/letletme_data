@@ -24,6 +24,7 @@ import { mapWithConcurrency, uniqueNumbers, withTimeout } from '../utils/async';
 import { IncompleteDataSyncError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 import type { TournamentFinalizationTarget } from '../domain/tournament';
+import { latestFreshnessTimestamp } from '../domain/freshness';
 
 const DEFAULT_CONCURRENCY = 5;
 const EVENT_LIVE_FETCH_TIMEOUT_MS = Number(process.env.TOURNAMENT_EVENT_LIVE_TIMEOUT_MS ?? 45_000);
@@ -201,9 +202,15 @@ export async function syncTournamentEventResultsForEntryIds(
   const sourceOrdering = options?.sourceCheckedAt
     ? { exact: validateOrderingTimestamp(options.sourceCheckedAt) }
     : await readDatabaseOrderingTimestamp();
-  const freshAfter = options?.freshAfter
+  const sourceFreshAfter = options?.freshAfter
     ? validateOrderingTimestamp(options.freshAfter)
     : sourceOrdering.exact;
+  const event = await eventRepository.findById(eventId);
+  const finalizationDate = event?.finished && event.dataChecked ? event.dataCheckedAt : null;
+  const finalizationCutoff = finalizationDate
+    ? ((await eventRepository.findDataCheckedAtExact(eventId)) ?? finalizationDate)
+    : null;
+  const freshAfter = latestFreshnessTimestamp(sourceFreshAfter, finalizationCutoff);
   const checkpointSeason = options?.season ?? (await getActiveCacheSeason());
   const transferSourceCheckedAt = options?.skipTransfers
     ? null
@@ -473,9 +480,15 @@ export async function syncTournamentEventResults(
   const sourceOrdering = options?.sourceCheckedAt
     ? { exact: validateOrderingTimestamp(options.sourceCheckedAt) }
     : await readDatabaseOrderingTimestamp();
-  const freshAfter = options?.freshAfter
+  const sourceFreshAfter = options?.freshAfter
     ? validateOrderingTimestamp(options.freshAfter)
     : sourceOrdering.exact;
+  const event = await eventRepository.findById(eventId);
+  const finalizationDate = event?.finished && event.dataChecked ? event.dataCheckedAt : null;
+  const finalizationCutoff = finalizationDate
+    ? ((await eventRepository.findDataCheckedAtExact(eventId)) ?? finalizationDate)
+    : null;
+  const freshAfter = latestFreshnessTimestamp(sourceFreshAfter, finalizationCutoff);
   const [staleResultEntryIds, existingPickEntryIds, requiredTransferEntryIds] = await Promise.all([
     entryEventResultsRepository.findEntryIdsNeedingRichSync(entryIds, eventId, freshAfter),
     entryEventPicksRepository.findEntryIdsByEvent(eventId, entryIds, checkpointSeason),
