@@ -5,6 +5,13 @@
 -- service_role credential. Keep the executable surface explicit: browser JWT
 -- roles cannot invoke these functions and the functions run as the caller.
 
+-- These picker RPCs existed before the SQL migration ledger and returned the
+-- legacy smallint player type. PostgreSQL cannot change a TABLE OUT column
+-- type through CREATE OR REPLACE, so rebuild only these exact signatures.
+-- Neither function owns dependent objects; do not use CASCADE here.
+DROP FUNCTION IF EXISTS public.get_players_for_picker(integer, integer);
+DROP FUNCTION IF EXISTS public.search_players_for_picker(text, integer, integer);
+
 CREATE OR REPLACE FUNCTION public.get_players_for_picker(
   p_limit integer DEFAULT 20,
   p_cursor integer DEFAULT NULL

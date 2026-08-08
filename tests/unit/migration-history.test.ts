@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import { describe, expect, test } from 'bun:test';
 import { readdirSync, readFileSync } from 'node:fs';
 
@@ -169,8 +171,11 @@ describe('GraphQL read RPC migration', () => {
     );
     const create = replacement.indexOf('CREATE FUNCTION public.get_players_for_picker(');
 
-    expect(applied).not.toContain(
+    expect(applied).toContain(
       'DROP FUNCTION IF EXISTS public.get_players_for_picker(integer, integer);',
+    );
+    expect(createHash('sha256').update(applied, 'utf8').digest('hex')).toBe(
+      '2b9044286ce634077c01be9168ca907b3ecba05c25fe092a619d2065d4f80701',
     );
     expect(drop).toBeGreaterThanOrEqual(0);
     expect(create).toBeGreaterThan(drop);
