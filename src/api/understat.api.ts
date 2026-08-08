@@ -9,6 +9,7 @@ import {
 } from '../services/provider-matcher.service';
 import { getUnderstatStatus } from '../services/understat-status.service';
 import { assertUnderstatSyncAllowed } from '../services/understat-sync.service';
+import { withMutationConflictGuard } from '../utils/mutation-lock';
 
 const SyncBody = t.Object({
   season: t.String({ pattern: '^\\d{4}$' }),
@@ -74,7 +75,15 @@ export const understatAPI = new Elysia({ prefix: '/understat' })
     '/mappings/team',
     async ({ body }) => {
       assertUnderstatSyncAllowed(body.season);
-      const link = await manualVerifyProviderTeam(body);
+      const link = await withMutationConflictGuard(
+        {
+          queueName: 'understat-mappings',
+          jobName: 'understat-mappings-team',
+          required: true,
+          scopes: [`understat:reference:${body.season}`],
+        },
+        () => manualVerifyProviderTeam(body),
+      );
       return { success: true, link };
     },
     {
@@ -90,7 +99,16 @@ export const understatAPI = new Elysia({ prefix: '/understat' })
     '/mappings/reconcile',
     async ({ body }) => {
       assertUnderstatSyncAllowed(body.season);
-      return { success: true, ...(await reconcileProviderMappings(body.season)) };
+      const mappings = await withMutationConflictGuard(
+        {
+          queueName: 'understat-mappings',
+          jobName: 'understat-mappings-reconcile',
+          required: true,
+          scopes: [`understat:reference:${body.season}`],
+        },
+        () => reconcileProviderMappings(body.season),
+      );
+      return { success: true, ...mappings };
     },
     { body: t.Object({ season: t.String({ pattern: '^\\d{4}$' }) }) },
   )

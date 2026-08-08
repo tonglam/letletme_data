@@ -231,6 +231,43 @@ async function copyAndVerifyTable(
   return item;
 }
 
+async function sealedArchiveIsCurrent(tx: DbOrTransaction, season: string): Promise<boolean> {
+  const items = await createFplHistoryRepository(tx).findItems(season);
+  if (items.length !== FPL_ARCHIVE_TABLES.length) return false;
+  const itemBySourceTable = new Map(items.map((item) => [item.sourceTable, item]));
+
+  for (const spec of FPL_ARCHIVE_TABLES) {
+    const item = itemBySourceTable.get(spec.sourceTable);
+    if (!item) return false;
+    const isEventLiveSummary = spec.sourceTable === 'event_live_summaries';
+    const sourceFrom = isEventLiveSummary
+      ? `( ${EVENT_LIVE_SUMMARY_AGGREGATE_QUERY} ) AS source`
+      : `public.${spec.sourceTable} source`;
+    const sourceJson = isEventLiveSummary
+      ? String.raw`(to_jsonb(source) - 'created_at' - 'updated_at')`
+      : 'to_jsonb(source)';
+    const sourceFilter =
+      isEventLiveSummary || !spec.sourceHasSeason ? '' : ` WHERE source.season = '${season}'`;
+    const rows = await tx.execute<{ rowCount: number; checksum: string }>(
+      sql.raw(`
+        SELECT
+          count(*)::int AS "rowCount",
+          md5(COALESCE(string_agg(${sourceJson}::text, '' ORDER BY source.id), '')) AS checksum
+        FROM ${sourceFrom}${sourceFilter}
+      `),
+    );
+    const current = rows[0];
+    if (
+      !current ||
+      Number(current.rowCount) !== item.rowCount ||
+      current.checksum !== item.canonicalChecksum
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
 export interface FplArchiveResult {
   season: string;
   status: 'sealed';
@@ -241,14 +278,6 @@ export interface FplArchiveResult {
 export async function archiveFplSeason(season: string): Promise<FplArchiveResult> {
   assertSeason(season);
   const existing = await fplHistoryRepository.findArchive(season);
-  if (existing?.status === 'sealed') {
-    return {
-      season,
-      status: 'sealed',
-      noOp: true,
-      items: await fplHistoryRepository.findItems(season),
-    };
-  }
   if (existing?.status === 'unavailable') {
     throw new DatabaseError(
       existing.reason ?? 'FPL season data is unavailable',
@@ -284,12 +313,14 @@ export async function archiveFplSeason(season: string): Promise<FplArchiveResult
           .for('update')
           .limit(1);
         if (locked?.status === 'sealed') {
-          return {
-            season,
-            status: 'sealed',
-            noOp: true,
-            items: await createFplHistoryRepository(tx).findItems(season),
-          };
+          if (await sealedArchiveIsCurrent(tx, season)) {
+            return {
+              season,
+              status: 'sealed',
+              noOp: true,
+              items: await createFplHistoryRepository(tx).findItems(season),
+            };
+          }
         }
         if (locked?.status === 'unavailable') {
           throw new DatabaseError(

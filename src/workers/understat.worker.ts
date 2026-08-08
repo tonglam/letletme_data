@@ -40,18 +40,17 @@ function lockScopes(
   name: string,
   data: UnderstatTeamJobData | UnderstatPlayerJobData,
 ): string[] {
-  if (name.endsWith('-discover') || name.endsWith('-publish')) {
-    return [`understat:reference:${data.season}`];
-  }
+  const scopes = [`understat:reference:${data.season}`];
+  if (name.endsWith('-discover') || name.endsWith('-publish')) return scopes;
   const resourceId =
     lane === 'team'
       ? (data as UnderstatTeamJobData).teamId
       : (data as UnderstatPlayerJobData).resourceId;
-  return [`understat:${lane}:${data.season}:${name}:${resourceId ?? 'unknown'}`];
+  return [...scopes, `understat:${lane}:${data.season}:${name}:${resourceId ?? 'unknown'}`];
 }
 
-function requiresUnderstatSerialization(name: string): boolean {
-  return name.endsWith('-discover') || name.endsWith('-publish');
+function requiresUnderstatSerialization(_name: string): boolean {
+  return true;
 }
 
 async function runUnderstatOperation(operation: () => Promise<void>): Promise<void> {
