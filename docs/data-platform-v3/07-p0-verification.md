@@ -39,6 +39,11 @@ The production workflow behavior is:
 | Formatting/diff | Prettier + `git diff --check` | passed |
 | Pre-0079 compatibility | `bun scripts/v3-release-gate.ts` | gate skipped as designed |
 
+The B0 restore audit then extended the original relation-only inventory to include 22 public
+sequences, 20 public enum types, and effective schema/relation/sequence/function/default ACLs. The
+updated inventory SQL classifies all of them and the full/selective restore evidence compares
+sequence values, schema definitions, and 1,571 ACL rows exactly.
+
 Running the raw Bun binary command `bun test` also demonstrated that integration tests fail closed
 without `RUN_INTEGRATION=1` and isolated test PostgreSQL/Redis. The accepted unit command is
 `bun run test`; integration tests are executed later against the isolated migration environment,

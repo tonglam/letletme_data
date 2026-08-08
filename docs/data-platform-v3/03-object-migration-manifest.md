@@ -30,6 +30,29 @@ group.
 `fpl.seasons` has no v2 physical source. `0080` seeds one row per manifest season with explicit
 `season_code`, start/end years, source metadata, lifecycle state, and exactly one `is_current=true`.
 
+## Sequences and enum types
+
+The 22 public sequences are first-class source objects, not implicit omissions:
+
+- 21 table-owned `*_id_seq` sequences migrate into the identity/sequence contract of their mapped
+  target tables and are dropped only with those v2 tables in `0092`;
+- `core_snapshot_revision_seq` migrates into the `ops.dataset_publications` revision contract and
+  is dropped in `0092` after publication reconciliation;
+- B0 and every conversion rehearsal compare each sequence's `last_value` and `is_called` state.
+
+The 20 public enum types map as follows:
+
+| v2 type family | Count | v3 owner/action |
+| --- | ---: | --- |
+| `chip`, `cup_result`, `group_mode`, `knockout_mode`, `league_type`, `tournament_*` | 10 | recreate under `competition` with exact labels/order |
+| `fpl_season_archive_status` | 1 | replace with the `ops.season_imports` status contract |
+| `provider_entity_type`, `provider_link_status` | 2 | recreate under `bridge` |
+| `understat_*` | 6 | recreate under `understat`; never shared with FPL |
+| `value_change_type` | 1 | retire after `reporting.player_value_changes` reconstructability passes |
+
+No v2 enum or sequence is dropped independently of its mapped target and the exact `0092` drop
+manifest.
+
 ## Competition source facts
 
 | v2 source | v3 target | Target grain/key | Conversion | Final action |

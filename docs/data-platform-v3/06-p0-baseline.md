@@ -31,6 +31,8 @@ inspection time.
 | Public partitioned parents | 12 |
 | Public materialized views | 2 |
 | Public ordinary views | 4 |
+| Public sequences | 22 |
+| Public enum types | 20 |
 | Public relation bytes | 442,368,000 |
 | Data SQL migration rows | 75 |
 | Data migration tail | `0078_restore_event_live_summary_runtime_columns.sql` |
@@ -47,6 +49,13 @@ Public relation classification produced zero unmatched objects:
 | Ops/migration | table | 5 |
 | Reporting | MV | 2 |
 | Reporting | view | 4 |
+| FPL | sequence | 7 |
+| Competition | sequence | 14 |
+| Ops | sequence | 1 |
+
+The 20 public enums are also fully classified: FPL 1, Competition 10, Understat 6, Bridge 2, and
+Ops 1. The reproducible inventory fails P0 if either a public relation/sequence or enum/domain has
+a null classification.
 
 Executable/security inventory:
 
@@ -57,6 +66,8 @@ Executable/security inventory:
 - 144 `reject_sealed_mutation` triggers across the historical parent/season relations;
 - one RLS policy, on `sql_migrations`;
 - 606 public-schema foreign keys, 564 valid indexes, and zero invalid indexes;
+- 1,571 effective non-owner ACL records across the public schema, relations, sequences, functions,
+  and default privileges; B0 full and selective restore comparison reproduces them exactly;
 - `anon` and `authenticated` currently have all table privileges on both `sql_migrations` and
   `graphql_schema_migrations`. This is a high-severity v2 security defect; `0079` must revoke it
   before creating the private v3 migration model.

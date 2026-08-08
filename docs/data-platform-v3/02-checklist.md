@@ -23,17 +23,17 @@ durable path, SHA, query result, run URL, or backup manifest. Verbal confirmatio
 | --- | --- | --- | --- | --- |
 | [x] | P0-01 | Fetch Data remote and create clean D0 worktree | D0 tracks `origin/main`; original Understat worktree untouched | Data `62f134a`; `/Users/tong/CursorProjects/letletme_data-data-platform-v3` |
 | [x] | P0-02 | Record production PostgreSQL baseline | Version, size, timestamp recorded | PG 15.8; 445 MB; captured 2026-08-08 15:27:47 UTC |
-| [x] | P0-03 | Record production relation summary | Counts by schema/kind recorded | public: 180 tables, 12 partitioned parents, 2 MVs, 4 views; 442,368,000 bytes |
+| [x] | P0-03 | Record production relation summary | Counts by schema/kind recorded | public: 180 tables, 12 partitioned parents, 22 sequences, 2 MVs, 4 views; 442,368,000 table/view bytes |
 | [x] | P0-04 | Record migration tail and ledgers | Data tail and managed duplicate entries identified | Data tail `0078`; live ledger query captured in task output |
 | [x] | P0-05 | Save approved plan set | All seven documents exist on D0 | `docs/data-platform-v3/` |
-| [x] | P0-06 | Inventory all production relations | Every non-system object classified | `03-object-migration-manifest.md`; `06-p0-baseline.md`; zero unmatched |
-| [x] | P0-07 | Inventory functions, triggers, policies, grants, FKs, indexes | No unclassified executable/security object | `06-p0-baseline.md`; reproducible SQL in `sql/v3/p0-object-inventory.sql` |
+| [x] | P0-06 | Inventory all production relations | Every non-system object classified | `03-object-migration-manifest.md`; 198 table/view/MV objects + 22 sequences + 20 enums; zero unmatched |
+| [x] | P0-07 | Inventory functions, triggers, policies, grants, FKs, indexes | No unclassified executable/security object | `06-p0-baseline.md`; 1,571 effective ACL rows; reproducible `sql/v3/p0-object-inventory.sql` |
 | [x] | P0-08 | Inventory Data SQL and Redis references | Every reference mapped or retired | `06-p0-baseline.md`; `03-object-migration-manifest.md` |
 | [x] | P0-09 | Inventory GraphQL SQL/Data API/RPC/cache references | Every reference mapped or retired | `06-p0-baseline.md`; 123 reads, 5 RPCs classified |
 | [x] | P0-10 | Inventory Web DB/cache/GraphQL contracts | Every direct DB use has an owner | `06-p0-baseline.md`; Web auth preserved, Data writes prohibited |
 | [x] | P0-11 | Record Redis queue/cache topology, key types, TTLs, memory | Endpoints and namespaces are explicit; secrets excluded | `06-p0-baseline.md`; same endpoint/DB0, 177.35 MB |
 | [x] | P0-12 | Add v3 deploy lock | External manifest + exact SHA/digest/token required; automatic v3 deploy blocked | `07-p0-verification.md`; 12/12 gate tests; actionlint/shellcheck pass |
-| [x] | P0-13 | Commit D0 | Clean tree; checks pass; SHA recorded | `7622ce9b318d4b020eaac02abcbf1d86ec56ffd0` |
+| [x] | P0-13 | Commit D0 | Clean tree; checks pass; SHA recorded | substantive `7622ce9b318d4b020eaac02abcbf1d86ec56ffd0`; evidence closure `b9eddc0` + follow-up inventory commit |
 
 P0 exit gate: P0-01 through P0-13 complete and no object/reference remains unclassified.
 

@@ -19,7 +19,7 @@ FROM (
   FROM pg_class c
   JOIN pg_namespace n ON n.oid = c.relnamespace
   WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
-    AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+    AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')
   GROUP BY n.nspname, c.relkind
 ) AS row_data;
 
@@ -30,6 +30,12 @@ WITH public_objects AS (
     c.relkind,
     pg_total_relation_size(c.oid)::bigint AS total_bytes,
     CASE
+      WHEN c.relkind = 'S' AND c.relname = 'core_snapshot_revision_seq'
+        THEN 'ops'
+      WHEN c.relkind = 'S' AND c.relname ~ '^(entry_|league_|tournament_).+_id_seq$'
+        THEN 'competition'
+      WHEN c.relkind = 'S' AND c.relname ~ '^(event_|fpl_|player_).+_id_seq$'
+        THEN 'fpl'
       WHEN c.relname ~ '^(events|teams|players|phases|event_fixtures|player_stats|event_lives|event_live_explains|fpl_player_fixture_stats|player_market_snapshots|event_live_summaries|player_values)(_history|_[0-9]{4})?$'
         THEN 'fpl'
       WHEN c.relname = ANY (ARRAY[
@@ -58,7 +64,7 @@ WITH public_objects AS (
   FROM pg_class c
   JOIN pg_namespace n ON n.oid = c.relnamespace
   WHERE n.nspname = 'public'
-    AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+    AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')
 )
 SELECT jsonb_build_object(
   'objects', (
@@ -85,6 +91,56 @@ SELECT jsonb_build_object(
     WHERE classification IS NULL
   )
 ) AS public_object_inventory;
+
+WITH public_types AS (
+  SELECT
+    t.typname AS type_name,
+    t.typtype,
+    coalesce((
+      SELECT jsonb_agg(e.enumlabel ORDER BY e.enumsortorder)
+      FROM pg_enum e
+      WHERE e.enumtypid = t.oid
+    ), '[]'::jsonb) AS enum_values,
+    CASE
+      WHEN t.typname = 'value_change_type' THEN 'fpl'
+      WHEN t.typname = ANY (ARRAY[
+        'chip', 'cup_result', 'group_mode', 'knockout_mode', 'league_type',
+        'tournament_mode', 'tournament_roster_mode', 'tournament_setup_phase',
+        'tournament_setup_status', 'tournament_state'
+      ]) THEN 'competition'
+      WHEN t.typname = 'fpl_season_archive_status' THEN 'ops'
+      WHEN t.typname = ANY (ARRAY['provider_entity_type', 'provider_link_status']) THEN 'bridge'
+      WHEN t.typname ~ '^understat_' THEN 'understat'
+      ELSE NULL
+    END AS classification
+  FROM pg_type t
+  JOIN pg_namespace n ON n.oid = t.typnamespace
+  WHERE n.nspname = 'public'
+    AND t.typtype IN ('e', 'd')
+)
+SELECT jsonb_build_object(
+  'types', coalesce(jsonb_agg(jsonb_build_object(
+    'name', type_name,
+    'kind', typtype,
+    'classification', classification,
+    'enum_values', enum_values
+  ) ORDER BY type_name), '[]'::jsonb),
+  'classification_counts', (
+    SELECT coalesce(jsonb_object_agg(classification, object_count), '{}'::jsonb)
+    FROM (
+      SELECT coalesce(classification, 'unclassified') AS classification,
+        count(*)::integer AS object_count
+      FROM public_types
+      GROUP BY classification
+    ) AS counts
+  ),
+  'unclassified', (
+    SELECT coalesce(jsonb_agg(type_name ORDER BY type_name), '[]'::jsonb)
+    FROM public_types
+    WHERE classification IS NULL
+  )
+) AS public_type_inventory
+FROM public_types;
 
 SELECT jsonb_agg(function_data ORDER BY function_name, identity_arguments) AS public_functions
 FROM (
@@ -121,17 +177,80 @@ SELECT jsonb_build_object(
       WHERE schemaname = 'public'
     ) AS policy_data
   ),
-  'non_owner_grants', (
-    SELECT coalesce(jsonb_agg(grant_data ORDER BY table_name, grantee, privilege_type), '[]'::jsonb)
+  'effective_non_owner_acl', (
+    SELECT coalesce(jsonb_agg(acl_data ORDER BY object_type, object_name, grantee, privilege_type), '[]'::jsonb)
     FROM (
       SELECT
-        table_schema || '.' || table_name AS table_name,
-        grantee,
-        privilege_type
-      FROM information_schema.role_table_grants
-      WHERE table_schema = 'public'
-        AND grantee <> 'postgres'
-    ) AS grant_data
+        'schema'::text AS object_type,
+        namespace.nspname::text AS object_name,
+        coalesce(grantee.rolname, 'PUBLIC')::text AS grantee,
+        acl.privilege_type::text,
+        acl.is_grantable
+      FROM pg_namespace AS namespace
+      CROSS JOIN LATERAL aclexplode(
+        coalesce(namespace.nspacl, acldefault('n', namespace.nspowner))
+      ) AS acl
+      LEFT JOIN pg_roles AS grantee ON grantee.oid = acl.grantee
+      WHERE namespace.nspname = 'public'
+        AND acl.grantee <> namespace.nspowner
+
+      UNION ALL
+
+      SELECT
+        CASE WHEN class.relkind = 'S' THEN 'sequence' ELSE 'relation' END,
+        namespace.nspname || '.' || class.relname,
+        coalesce(grantee.rolname, 'PUBLIC'),
+        acl.privilege_type,
+        acl.is_grantable
+      FROM pg_class AS class
+      JOIN pg_namespace AS namespace ON namespace.oid = class.relnamespace
+      CROSS JOIN LATERAL aclexplode(
+        coalesce(
+          class.relacl,
+          acldefault(
+            CASE WHEN class.relkind = 'S' THEN 'S'::"char" ELSE 'r'::"char" END,
+            class.relowner
+          )
+        )
+      ) AS acl
+      LEFT JOIN pg_roles AS grantee ON grantee.oid = acl.grantee
+      WHERE namespace.nspname = 'public'
+        AND class.relkind IN ('r', 'p', 'v', 'm', 'S')
+        AND acl.grantee <> class.relowner
+
+      UNION ALL
+
+      SELECT
+        'function',
+        namespace.nspname || '.' || procedure.proname || '(' || pg_get_function_identity_arguments(procedure.oid) || ')',
+        coalesce(grantee.rolname, 'PUBLIC'),
+        acl.privilege_type,
+        acl.is_grantable
+      FROM pg_proc AS procedure
+      JOIN pg_namespace AS namespace ON namespace.oid = procedure.pronamespace
+      CROSS JOIN LATERAL aclexplode(
+        coalesce(procedure.proacl, acldefault('f', procedure.proowner))
+      ) AS acl
+      LEFT JOIN pg_roles AS grantee ON grantee.oid = acl.grantee
+      WHERE namespace.nspname = 'public'
+        AND acl.grantee <> procedure.proowner
+
+      UNION ALL
+
+      SELECT
+        'default-' || default_acl.defaclobjtype::text,
+        role.rolname || '@' || namespace.nspname,
+        coalesce(grantee.rolname, 'PUBLIC'),
+        acl.privilege_type,
+        acl.is_grantable
+      FROM pg_default_acl AS default_acl
+      JOIN pg_roles AS role ON role.oid = default_acl.defaclrole
+      JOIN pg_namespace AS namespace ON namespace.oid = default_acl.defaclnamespace
+      CROSS JOIN LATERAL aclexplode(default_acl.defaclacl) AS acl
+      LEFT JOIN pg_roles AS grantee ON grantee.oid = acl.grantee
+      WHERE namespace.nspname = 'public'
+        AND acl.grantee <> default_acl.defaclrole
+    ) AS acl_data
   )
 ) AS public_security_inventory;
 
