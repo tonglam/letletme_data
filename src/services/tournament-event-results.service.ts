@@ -24,6 +24,7 @@ import { mapWithConcurrency, uniqueNumbers, withTimeout } from '../utils/async';
 import { IncompleteDataSyncError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 import type { TournamentFinalizationTarget } from '../domain/tournament';
+import { readCoreSnapshotOrderingTimestamp } from './core-snapshot-persistence.service';
 
 const DEFAULT_CONCURRENCY = 5;
 const EVENT_LIVE_FETCH_TIMEOUT_MS = Number(process.env.TOURNAMENT_EVENT_LIVE_TIMEOUT_MS ?? 45_000);
@@ -178,7 +179,7 @@ export async function syncTournamentEventResultsForEntryIds(
     };
   }
 
-  const attemptStartedAt = options?.freshAfter ?? new Date();
+  const attemptStartedAt = options?.freshAfter ?? (await readCoreSnapshotOrderingTimestamp());
   const checkpointSeason = options?.season ?? (await getActiveCacheSeason());
   const live = await resolveEventPointsPayload(eventId, options?.live, {
     season: checkpointSeason,
@@ -440,7 +441,7 @@ export async function syncTournamentEventResults(
   }
 
   const checkpointSeason = options?.season ?? (await getActiveCacheSeason());
-  const attemptStartedAt = options?.freshAfter ?? new Date();
+  const attemptStartedAt = options?.freshAfter ?? (await readCoreSnapshotOrderingTimestamp());
   const [existingResults, existingPickEntryIds, requiredTransferEntryIds] = await Promise.all([
     entryEventResultsRepository.findByEventAndEntryIds(eventId, entryIds),
     entryEventPicksRepository.findEntryIdsByEvent(eventId, entryIds, checkpointSeason),
@@ -465,6 +466,7 @@ export async function syncTournamentEventResults(
           ...options,
           skipTransfers: true,
           season: checkpointSeason,
+          freshAfter: attemptStartedAt,
         })
       : Promise.resolve(null),
     plan.requiredTransferEntryIds.length > 0

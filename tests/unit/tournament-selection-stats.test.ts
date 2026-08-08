@@ -20,11 +20,14 @@ describe('aggregateTournamentSelectionStatsRows', () => {
     expect(hasCompleteTournamentPicks([...complete.slice(0, 14), { element: 1 }])).toBe(false);
     expect(hasCompleteTournamentPicks([...complete.slice(0, 14), {}])).toBe(false);
     expect(hasCompleteTournamentPicks([...complete.slice(0, 14), { element: 15.5 }])).toBe(false);
-    expect(
-      hasCompleteTournamentPicks(
-        complete.map((pick) => (pick.is_captain ? { ...pick, multiplier: 0 } : pick)),
-      ),
-    ).toBe(false);
+    const finalizedAutoSubPicks = complete.map((pick) => {
+      if (pick.is_captain) return { ...pick, multiplier: 0 };
+      if (pick.is_vice_captain) return { ...pick, multiplier: 2 };
+      if (pick.position === 3) return { ...pick, multiplier: 0 };
+      if (pick.position === 12) return { ...pick, multiplier: 1 };
+      return pick;
+    });
+    expect(hasCompleteTournamentPicks(finalizedAutoSubPicks)).toBe(true);
     expect(
       hasCompleteTournamentPicks(
         complete.map((pick) => (pick.position === 12 ? { ...pick, multiplier: 2 } : pick)),

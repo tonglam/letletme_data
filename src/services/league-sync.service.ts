@@ -171,13 +171,10 @@ export async function processLeagueEventPicksJob(
 export async function processLeagueEventResultsJob(
   eventId: number,
   tournamentId?: number,
-  context?: { runId?: string; triggeredAt?: string },
+  context?: { runId?: string },
 ) {
   if (tournamentId) {
-    const freshAfter = context?.triggeredAt ? new Date(context.triggeredAt) : undefined;
-    return syncLeagueEventResultsByTournament(tournamentId, eventId, {
-      ...(freshAfter && !Number.isNaN(freshAfter.getTime()) ? { freshAfter } : {}),
-    });
+    return syncLeagueEventResultsByTournament(tournamentId, eventId);
   }
   return enqueueResultsPerTournament(eventId, context?.runId);
 }

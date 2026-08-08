@@ -340,7 +340,7 @@ export function summarizeMissingLeagueEventLiveData(
 export async function syncLeagueEventResultsByTournament(
   tournamentId: number,
   eventId: number,
-  options?: { concurrency?: number; freshAfter?: Date; season?: string },
+  options?: { concurrency?: number; season?: string },
 ): Promise<LeagueEventResultsSyncSummary> {
   logInfo('Starting league event results sync for tournament', { tournamentId, eventId });
   // Use one database-clock token before any source reads. It is comparable
@@ -356,11 +356,11 @@ export async function syncLeagueEventResultsByTournament(
     throw new Error(`Tournament ${tournamentId} not found`);
   }
 
-  // A finalized event establishes a canonical evidence boundary. For a
-  // triggered refresh, require the stricter of that boundary and the job's
-  // requested freshness so complete-but-older entry rows cannot be reused.
+  // A finalized event establishes a canonical evidence boundary. Require the
+  // stricter of that boundary and this attempt's database-clock token so the
+  // reuse, write, and post-write audit all share one clock domain.
   const finalizationCutoff = resolveRichResultFreshnessCutoff(event);
-  const requiredRichFreshAfter = latestDate(options?.freshAfter, finalizationCutoff);
+  const requiredRichFreshAfter = latestDate(sourceCheckedAt, finalizationCutoff);
   const checkpointSeason = options?.season ?? (await getActiveCacheSeason());
 
   const entryIds = await resolveTournamentEntryIds(tournament);

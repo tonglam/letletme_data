@@ -265,9 +265,7 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
           runTrackedJob(context, async () => {
             switch (job.name) {
               case TOURNAMENT_JOBS.EVENT_RESULTS: {
-                const result = await syncTournamentEventResults(eventId, {
-                  freshAfter: new Date(job.data.triggeredAt),
-                });
+                const result = await syncTournamentEventResults(eventId);
                 if (!shouldEnqueueTournamentCascade(result)) {
                   logInfo('Skipping tournament cascade - no active tournament entries', {
                     eventId,

@@ -55,23 +55,24 @@ export function isCompleteEntryPicks(raw: unknown): boolean {
         return true;
       }
 
-      // FPL uses 2 (or 3 for Triple Captain) for the captain and 1 for the
-      // vice-captain. Other starters score once; bench multipliers are 0,
-      // except 1 during Bench Boost. Rejecting all other combinations keeps
-      // malformed payloads from becoming reusable scoring checkpoints.
-      if (pick.is_captain) return position > 11 || multiplier === 0 || multiplier === 1;
-      if (pick.is_vice_captain) return position > 11 || multiplier !== 1;
-      if (position <= 11) return multiplier !== 1;
-      return multiplier !== 0 && multiplier !== 1;
+      // Finalized FPL picks apply automatic substitutions to multipliers: an
+      // outgoing starter/captain can become 0, an incoming bench player 1,
+      // and the vice-captain 2 (or 3 for Triple Captain). Only the two marked
+      // captain roles may ever receive a scoring bonus.
+      if ((pick.is_captain || pick.is_vice_captain) && position > 11) return true;
+      if (pick.is_captain && multiplier === 1) return true;
+      return multiplier > 1 && !pick.is_captain && !pick.is_vice_captain;
     })
   ) {
     return false;
   }
 
+  const scoringBonusPicks = picks.filter((pick) => Number(pick.multiplier) > 1);
   return (
     picks.filter((pick) => pick.is_captain).length === 1 &&
     picks.filter((pick) => pick.is_vice_captain).length === 1 &&
-    !picks.some((pick) => pick.is_captain && pick.is_vice_captain)
+    !picks.some((pick) => pick.is_captain && pick.is_vice_captain) &&
+    scoringBonusPicks.length <= 1
   );
 }
 

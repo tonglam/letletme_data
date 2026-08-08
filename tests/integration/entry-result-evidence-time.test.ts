@@ -9,6 +9,7 @@ import { redisSingleton } from '../../src/cache/singleton';
 import { fplClient } from '../../src/clients/fpl';
 import { getDbClient } from '../../src/db/singleton';
 import { syncEntryEventResults } from '../../src/services/entries.service';
+import { syncTournamentEventResultsForEntryIds } from '../../src/services/tournament-event-results.service';
 
 const ENTRY_ID = 99_042_003;
 const EVENT_ID = 99_042_012;
@@ -98,15 +99,24 @@ beforeAll(async () => {
     ON CONFLICT (id) DO NOTHING
   `;
   await sql`
-    INSERT INTO entry_infos (id, entry_name, player_name)
-    VALUES (${ENTRY_ID}, 'Evidence XI', 'Evidence Manager')
-    ON CONFLICT (id) DO NOTHING
+    INSERT INTO entry_infos (
+      id,
+      entry_name,
+      player_name,
+      entry_snapshot_synced_through_event_id,
+      entry_snapshot_synced_season
+    )
+    VALUES (${ENTRY_ID}, 'Evidence XI', 'Evidence Manager', 38, ${TEST_SEASON})
+    ON CONFLICT (id) DO UPDATE
+    SET entry_snapshot_synced_through_event_id = 38,
+        entry_snapshot_synced_season = excluded.entry_snapshot_synced_season
   `;
 });
 
 afterAll(async () => {
   const sql = await getDbClient();
   await sql`DELETE FROM entry_event_results WHERE entry_id = ${ENTRY_ID}`;
+  await sql`DELETE FROM entry_event_picks WHERE entry_id = ${ENTRY_ID}`;
   await sql`DELETE FROM entry_infos WHERE id = ${ENTRY_ID}`;
   await sql`DELETE FROM players WHERE id BETWEEN ${PICK_PLAYER_ID} AND ${PICK_PLAYER_ID + 14}`;
   await sql`DELETE FROM teams WHERE id = ${TEAM_ID}`;
@@ -183,6 +193,60 @@ describe('entry result evidence checkpoint', () => {
       WHERE entry_id = ${ENTRY_ID} AND event_id = ${EVENT_ID}
     `;
     expect(rows[0]?.richSyncedAt).not.toBeNull();
+    expect(rows[0]!.evidenceBeforeFinalization).toBe(true);
+  });
+
+  test('timestamps tournament evidence with PostgreSQL before its picks request', async () => {
+    let releaseRequest!: () => void;
+    let signalRequestStarted!: () => void;
+    const requestStarted = new Promise<void>((resolve) => {
+      signalRequestStarted = resolve;
+    });
+    const requestReleased = new Promise<void>((resolve) => {
+      releaseRequest = resolve;
+    });
+
+    fplClient.getEntryEventPicks = async () => {
+      signalRequestStarted();
+      await requestReleased;
+      return {
+        active_chip: null,
+        automatic_subs: [],
+        picks: completePicks(),
+        entry_history: {
+          event: EVENT_ID,
+          points: 50,
+          total_points: 600,
+          rank: 100,
+          overall_rank: 1_000,
+          bank: 0,
+          value: 1_000,
+          event_transfers: 0,
+          event_transfers_cost: 0,
+          points_on_bench: 0,
+        },
+      };
+    };
+
+    const sync = syncTournamentEventResultsForEntryIds([ENTRY_ID], EVENT_ID, {
+      live: completeEventLive(),
+      season: TEST_SEASON,
+      skipTransfers: true,
+    });
+    await requestStarted;
+    const sql = await getDbClient();
+    const finalizationRows = await sql<{ finalizedAt: string }[]>`
+      SELECT clock_timestamp()::text AS "finalizedAt"
+    `;
+    releaseRequest();
+    await sync;
+
+    const rows = await sql<{ evidenceBeforeFinalization: boolean }[]>`
+      SELECT rich_synced_at < ${finalizationRows[0]!.finalizedAt}::timestamptz
+        AS "evidenceBeforeFinalization"
+      FROM entry_event_results
+      WHERE entry_id = ${ENTRY_ID} AND event_id = ${EVENT_ID}
+    `;
     expect(rows[0]!.evidenceBeforeFinalization).toBe(true);
   });
 });
