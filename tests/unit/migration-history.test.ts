@@ -1,8 +1,14 @@
 import { describe, expect, test } from 'bun:test';
 import { readdirSync, readFileSync } from 'node:fs';
 
-import { inspectMigrationHistory } from '../../scripts/migration-history';
-import { getSqlMigrationPreconditions } from '../../scripts/sql-migration-compatibility';
+import {
+  inspectMigrationHistory,
+  selectMigrationFilesForLedger,
+} from '../../scripts/migration-history';
+import {
+  getSqlMigrationExecutionContents,
+  getSqlMigrationPreconditions,
+} from '../../scripts/sql-migration-compatibility';
 
 describe('migration history inspection', () => {
   test('accepts unapplied migrations after the applied tail', () => {
@@ -39,6 +45,35 @@ describe('migration history inspection', () => {
     });
   });
 
+  test('keeps ledgered convergence filenames while suppressing unledgered aliases', () => {
+    const files = [
+      '0050_entry_event_result_rich_checkpoint.sql',
+      '0072_entry_event_result_rich_checkpoint.sql',
+      '0071_drop_tournament_snapshot_materialized_view.sql',
+    ];
+
+    expect(
+      selectMigrationFilesForLedger(files, ['0071_drop_tournament_snapshot_materialized_view.sql']),
+    ).toEqual([
+      '0072_entry_event_result_rich_checkpoint.sql',
+      '0071_drop_tournament_snapshot_materialized_view.sql',
+    ]);
+    expect(
+      selectMigrationFilesForLedger(files, ['0050_entry_event_result_rich_checkpoint.sql']),
+    ).toContain('0050_entry_event_result_rich_checkpoint.sql');
+
+    expect(
+      selectMigrationFilesForLedger(
+        [
+          '0050_create_understat_provider_tables.sql',
+          '0050_entry_event_result_rich_checkpoint.sql',
+          '0072_entry_event_result_rich_checkpoint.sql',
+        ],
+        ['0050_entry_event_result_rich_checkpoint.sql'],
+      ),
+    ).toEqual(['0050_entry_event_result_rich_checkpoint.sql']);
+  });
+
   test('places every tournament lifecycle migration after the deployed Live tail', () => {
     const files = readdirSync('migrations')
       .filter((file) => file.endsWith('.sql'))
@@ -66,9 +101,50 @@ describe('migration history inspection', () => {
       backdated: [],
       latestApplied: '0049_core_snapshot_authority.sql',
     });
-    expect(files).toContain('0050_entry_event_result_rich_checkpoint.sql');
-    expect(files).toContain('0051_event_data_checked_at.sql');
-    expect(files).toContain('0052_replace_player_picker_rpc.sql');
+    expect(files).toContain('0072_entry_event_result_rich_checkpoint.sql');
+    expect(files).toContain('0073_event_data_checked_at.sql');
+    expect(files).toContain('0074_replace_player_picker_rpc.sql');
+  });
+
+  test('preserves the historical production tail before new convergence migrations', () => {
+    const files = readdirSync('migrations')
+      .filter((file) => file.endsWith('.sql'))
+      .sort();
+    const applied = files.filter(
+      (file) => file <= '0071_drop_tournament_snapshot_materialized_view.sql',
+    );
+
+    expect(inspectMigrationHistory(files, applied)).toEqual({
+      missing: [],
+      backdated: [],
+      latestApplied: '0071_drop_tournament_snapshot_materialized_view.sql',
+    });
+    expect(files).toContain('0050_create_understat_provider_tables.sql');
+    expect(files).toContain('0069_standardize_event_live_summaries_to_season_aggregate.sql');
+    expect(files).toContain('0072_entry_event_result_rich_checkpoint.sql');
+    expect(files).toContain('0075_entry_transfer_source_checkpoint.sql');
+    expect(files).toContain('0076_restore_tournament_snapshot_materialized_view.sql');
+    expect(files).toContain('0077_restore_tournament_compatibility_views.sql');
+    expect(files).toContain('0078_restore_event_live_summary_runtime_columns.sql');
+  });
+});
+
+describe('runtime compatibility migrations', () => {
+  test('gates restored selection stats and clears incompatible season aggregates', () => {
+    const selectionView = readFileSync(
+      'migrations/0077_restore_tournament_compatibility_views.sql',
+      'utf8',
+    );
+    const summaryMigration = readFileSync(
+      'migrations/0078_restore_event_live_summary_runtime_columns.sql',
+      'utf8',
+    );
+
+    expect(selectionView).toContain('ready_tournament.standings_ready_at IS NOT NULL');
+    expect(summaryMigration).toContain(
+      'TRUNCATE TABLE public.event_live_summaries RESTART IDENTITY',
+    );
+    expect(summaryMigration).not.toContain('MAX(live.event_id)');
   });
 });
 
@@ -87,7 +163,7 @@ describe('public Data API lockdown migration', () => {
 describe('GraphQL read RPC migration', () => {
   test('keeps the applied migration immutable and replaces the RPC at the tail', () => {
     const applied = readFileSync('migrations/0043_create_graphql_read_rpcs.sql', 'utf8');
-    const replacement = readFileSync('migrations/0052_replace_player_picker_rpc.sql', 'utf8');
+    const replacement = readFileSync('migrations/0074_replace_player_picker_rpc.sql', 'utf8');
     const drop = replacement.indexOf(
       'DROP FUNCTION IF EXISTS public.get_players_for_picker(integer, integer);',
     );
@@ -104,7 +180,20 @@ describe('GraphQL read RPC migration', () => {
     expect(getSqlMigrationPreconditions('0043_create_graphql_read_rpcs.sql')).toEqual([
       'DROP FUNCTION IF EXISTS public.get_players_for_picker(integer, integer);',
     ]);
-    expect(getSqlMigrationPreconditions('0052_replace_player_picker_rpc.sql')).toEqual([]);
+    expect(getSqlMigrationPreconditions('0074_replace_player_picker_rpc.sql')).toEqual([]);
+  });
+});
+
+describe('legacy migration transaction compatibility', () => {
+  test('removes nested transaction control without changing migration source checksums', () => {
+    const source = 'BEGIN;\nUPDATE public.example SET value = 1;\nCOMMIT;\n';
+
+    expect(getSqlMigrationExecutionContents('0066_repair_fpl_team_archive_names.sql', source)).toBe(
+      '\nUPDATE public.example SET value = 1;\n',
+    );
+    expect(
+      getSqlMigrationExecutionContents('0072_entry_event_result_rich_checkpoint.sql', source),
+    ).toBe(source);
   });
 });
 
@@ -148,7 +237,7 @@ describe('core snapshot authority migration', () => {
 describe('entry result rich checkpoint migration', () => {
   test('follows core authority and preserves the existing table security boundary', () => {
     const migration = readFileSync(
-      'migrations/0050_entry_event_result_rich_checkpoint.sql',
+      'migrations/0072_entry_event_result_rich_checkpoint.sql',
       'utf8',
     );
 
@@ -160,7 +249,7 @@ describe('entry result rich checkpoint migration', () => {
 
 describe('event finalization checkpoint migration', () => {
   test('adds a stable cutoff without changing the existing table security boundary', () => {
-    const migration = readFileSync('migrations/0051_event_data_checked_at.sql', 'utf8');
+    const migration = readFileSync('migrations/0073_event_data_checked_at.sql', 'utf8');
 
     expect(migration).toContain('ADD COLUMN IF NOT EXISTS data_checked_at timestamptz');
     expect(migration).toContain('WHERE data_checked = true');

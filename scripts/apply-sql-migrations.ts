@@ -5,8 +5,11 @@ import { join } from 'node:path';
 
 import postgres from 'postgres';
 
-import { inspectMigrationHistory } from './migration-history';
-import { getSqlMigrationPreconditions } from './sql-migration-compatibility';
+import { inspectMigrationHistory, selectMigrationFilesForLedger } from './migration-history';
+import {
+  getSqlMigrationExecutionContents,
+  getSqlMigrationPreconditions,
+} from './sql-migration-compatibility';
 
 const migrationsDir = process.env.MIGRATIONS_DIR ?? 'migrations';
 const databaseUrl = process.env.DATABASE_URL;
@@ -104,7 +107,7 @@ async function applyFile(filename: string, contents: string, digest: string): Pr
     for (const statement of getSqlMigrationPreconditions(filename)) {
       await tx.unsafe(statement);
     }
-    await tx.unsafe(contents);
+    await tx.unsafe(getSqlMigrationExecutionContents(filename, contents));
     await tx`
       INSERT INTO sql_migrations (filename, checksum)
       VALUES (${filename}, ${digest})
@@ -116,10 +119,14 @@ async function applyFile(filename: string, contents: string, digest: string): Pr
 
 async function printStatus(files: string[], ledger: Map<string, LedgerRow>): Promise<void> {
   let invalid = false;
-  const { missing, backdated, latestApplied } = inspectMigrationHistory(files, ledger.keys());
+  const effectiveFiles = selectMigrationFilesForLedger(files, ledger.keys());
+  const { missing, backdated, latestApplied } = inspectMigrationHistory(
+    effectiveFiles,
+    ledger.keys(),
+  );
   const backdatedSet = new Set(backdated);
 
-  for (const filename of files) {
+  for (const filename of effectiveFiles) {
     const migration = readMigration(filename);
     const row = ledger.get(filename);
     if (backdatedSet.has(filename)) {
@@ -151,7 +158,11 @@ async function applyMigrations(files: string[]): Promise<void> {
   await sql`SELECT pg_advisory_lock(${advisoryLockKey})`;
   try {
     const ledger = await loadLedger();
-    const { missing, backdated, latestApplied } = inspectMigrationHistory(files, ledger.keys());
+    const effectiveFiles = selectMigrationFilesForLedger(files, ledger.keys());
+    const { missing, backdated, latestApplied } = inspectMigrationHistory(
+      effectiveFiles,
+      ledger.keys(),
+    );
     if (missing.length > 0) {
       throw new Error(`ledgered migration files are missing: ${missing.join(', ')}`);
     }
@@ -161,7 +172,7 @@ async function applyMigrations(files: string[]): Promise<void> {
       );
     }
 
-    for (const filename of files) {
+    for (const filename of effectiveFiles) {
       const migration = readMigration(filename);
       const applied = ledger.get(filename);
       if (applied) {
