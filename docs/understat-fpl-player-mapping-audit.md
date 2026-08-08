@@ -1,6 +1,6 @@
 # Understat–FPL 球员映射审计日志
 
-- 生成时间：2026-08-08T15:03:48.251Z
+- 生成时间：2026-08-09T00:40:05.664Z
 - 规则版本：`understat-fpl-player-name-v3`
 - 处理顺序：2526 → 2425 → 2324 → 2223 → 2122 → 2021 → 1920 → 1819 → 1718 → 1617 → 1516 → 1415
 - exact normalized full name 不单独记录；所有非 exact 决策均在本文记录。
@@ -17,20 +17,20 @@
 
 | 赛季 | FPL 球员 | Understat 球员 | exact | 向下继承 | high 非 exact | manual | low（不含 unmatched） | unmatched | 状态 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| 2526 | 841 | 537 | 422 | 0 | 115 | 0 | 0 | 0 | candidate-audit |
-| 2425 | 804 | 562 | 176 | 343 | 43 | 0 | 0 | 0 | candidate-audit |
-| 2324 | 865 | 570 | 160 | 383 | 27 | 0 | 0 | 0 | candidate-audit |
-| 2223 | 778 | 554 | 130 | 401 | 23 | 0 | 0 | 0 | candidate-audit |
-| 2122 | 737 | 537 | 135 | 386 | 16 | 0 | 0 | 0 | candidate-audit |
-| 2021 | 713 | 524 | 111 | 396 | 17 | 0 | 0 | 0 | candidate-audit |
-| 1920 | 666 | 515 | 100 | 402 | 13 | 0 | 0 | 0 | candidate-audit |
-| 1819 | 624 | 505 | 120 | 373 | 12 | 0 | 0 | 0 | candidate-audit |
-| 1718 | 647 | 515 | 128 | 378 | 9 | 0 | 0 | 0 | candidate-audit |
-| 1617 | 683 | 524 | 135 | 372 | 17 | 0 | 0 | 0 | candidate-audit |
-| 1516 | 0 | 550 | - | - | - | - | - | - | fpl-history-unavailable |
-| 1415 | 0 | 531 | - | - | - | - | - | - | fpl-history-unavailable |
+| 2526 | 841 | 537 | 422 | 0 | 115 | 0 | 0 | 0 | database-verified |
+| 2425 | 804 | 562 | 176 | 343 | 43 | 0 | 0 | 0 | database-verified |
+| 2324 | 865 | 570 | 160 | 383 | 27 | 0 | 0 | 0 | database-verified |
+| 2223 | 778 | 554 | 130 | 401 | 23 | 0 | 0 | 0 | database-verified |
+| 2122 | 737 | 537 | 135 | 386 | 16 | 0 | 0 | 0 | database-verified |
+| 2021 | 713 | 524 | 111 | 396 | 17 | 0 | 0 | 0 | database-verified |
+| 1920 | 666 | 515 | 100 | 402 | 13 | 0 | 0 | 0 | database-verified |
+| 1819 | 624 | 505 | 120 | 373 | 12 | 0 | 0 | 0 | database-verified |
+| 1718 | 647 | 515 | 128 | 378 | 9 | 0 | 0 | 0 | database-verified |
+| 1617 | 683 | 524 | 135 | 372 | 17 | 0 | 0 | 0 | database-verified |
+| 1516 | 550 | 550 | 535 | 0 | 15 | 0 | 0 | 0 | database-verified |
+| 1415 | 531 | 531 | 517 | 0 | 14 | 0 | 0 | 0 | database-verified |
 
-合计：3726 条非 exact 决策，其中自动 high 3726 条、manual 0 条、low 0 条。
+合计：3755 条非 exact 决策，其中自动 high 3755 条、manual 0 条、low 0 条；12 个赛季均已写入 verified link。
 
 ## High 非 exact 全量日志
 
@@ -3790,6 +3790,47 @@
 | 1617 | Loris Karius (37) | Loris Karius (104542) | Liverpool | Liverpool | 1 |
 | 1617 | Håvard Nordtveit (202) | Håvard Nordtveit (43626) | West Ham | West Ham | 3 |
 
+## 1415、1516 历史源非 exact 全量日志
+
+1415、1516 按 `1516 → 1415` 倒序核验；使用本地保存的 Pulselive ranked stats identity/season metrics，并用 FPL legacy stats 作为历史球队和统计交叉证据。以下 29 条全部为 high；没有 low 队列，因此不需要人工逐条确认。
+
+| 赛季 | Understat id | Understat 名称 | Understat 球队 | FPL code | FPL 名称 | 官方 stats 名称 | 置信度 | 分数 | 规则 |
+| --- | ---: | --- | --- | ---: | --- | --- | --- | ---: | --- |
+| 1415 | 493 | Gabriel | Arsenal | 158074 | Gabriel Armando de Abreu | Gabriel Paulista | high | 1 | legacy-persistent-code-override |
+| 1415 | 696 | Falcao | Manchester United | 48847 | Radamel Falcao | Radamel Falcao | high | 1.09 | legacy-short-name-position-stats |
+| 1415 | 752 | Daniel Drinkwater | Leicester | 61603 | Danny Drinkwater | Danny Drinkwater | high | 1.21 | legacy-name-variant-position-stats |
+| 1415 | 789 | Robbie Brady | Hull | 90517 | Robert Brady | Robert Brady | high | 1.21 | legacy-name-variant-position-stats |
+| 1415 | 850 | Papiss Demba Cissé | Newcastle United | 42758 | Papiss Cissé | Papiss Cissé | high | 1.21 | legacy-name-variant-position-stats |
+| 1415 | 860 | Marc Muniesa | Stoke | 61595 | Muniesa | Muniesa | high | 1.21 | legacy-name-variant-position-stats |
+| 1415 | 868 | Mame Biram Diouf | Stoke | 61858 | Mame Diouf | Mame Diouf | high | 1.21 | legacy-name-variant-position-stats |
+| 1415 | 918 | Joey O&#039;Brien | West Ham | 19575 | Joseph O'Brien | Joseph O'Brien | high | 1.21 | legacy-name-variant-position-stats |
+| 1415 | 965 | Santiago Cazorla | Arsenal | 19524 | Santi Cazorla | Santi Cazorla | high | 1.21 | legacy-name-variant-position-stats |
+| 1415 | 977 | Tyias Browning | Everton | 149468 | Tyias Browning | Jiang Guangtai | high | 1 | legacy-persistent-code-override |
+| 1415 | 1060 | Jonathan Williams | Crystal Palace | 103100 | Jonny Williams | Jonny Williams | high | 1.128 | legacy-name-variant-position-stats |
+| 1415 | 1688 | Andrew Robertson | Hull | 122798 | Andy Robertson | Andy Robertson | high | 1.21 | legacy-name-variant-position-stats |
+| 1415 | 4441 | Matthew James | Leicester | 61604 | Matty James | Matty James | high | 1.21 | legacy-name-variant-position-stats |
+| 1415 | 4460 | Brad Jones | Liverpool | 9631 | Bradley Jones | Bradley Jones | high | 1.21 | legacy-name-variant-position-stats |
+| 1516 | 493 | Gabriel | Arsenal | 158074 | Gabriel Armando de Abreu | Gabriel Paulista | high | 1 | legacy-persistent-code-override |
+| 1516 | 565 | Nyom | Watford | 67527 | Allan Nyom | Allan Nyom | high | 1.09 | legacy-short-name-position-stats |
+| 1516 | 582 | Jurado | Watford | 17441 | José Manuel Jurado | José Manuel Jurado | high | 1.09 | legacy-short-name-position-stats |
+| 1516 | 684 | Abdul Rahman Baba | Chelsea | 118335 | Abdul Baba | Abdul Baba | high | 1.21 | legacy-name-variant-position-stats |
+| 1516 | 696 | Falcao | Chelsea | 48847 | Radamel Falcao | Radamel Falcao | high | 1.089 | legacy-short-name-position-stats |
+| 1516 | 752 | Daniel Drinkwater | Leicester | 61603 | Danny Drinkwater | Danny Drinkwater | high | 1.21 | legacy-name-variant-position-stats |
+| 1516 | 789 | Robbie Brady | Norwich | 90517 | Robert Brady | Robert Brady | high | 1.21 | legacy-name-variant-position-stats |
+| 1516 | 850 | Papiss Demba Cissé | Newcastle United | 42758 | Papiss Cissé | Papiss Cissé | high | 1.21 | legacy-name-variant-position-stats |
+| 1516 | 860 | Marc Muniesa | Stoke | 61595 | Muniesa | Muniesa | high | 1.21 | legacy-name-variant-position-stats |
+| 1516 | 868 | Mame Biram Diouf | Stoke | 61858 | Mame Diouf | Mame Diouf | high | 1.21 | legacy-name-variant-position-stats |
+| 1516 | 962 | José Ángel Crespo | Aston Villa | 28386 | José Crespo | José Crespo | high | 1.21 | legacy-name-variant-position-stats |
+| 1516 | 965 | Santiago Cazorla | Arsenal | 19524 | Santi Cazorla | Santi Cazorla | high | 1.21 | legacy-name-variant-position-stats |
+| 1516 | 977 | Tyias Browning | Everton | 149468 | Tyias Browning | Jiang Guangtai | high | 1 | legacy-persistent-code-override |
+| 1516 | 987 | Joseph Gomez | Liverpool | 171287 | Joe Gomez | Joe Gomez | high | 1.21 | legacy-name-variant-position-stats |
+| 1516 | 1060 | Jonathan Williams | Crystal Palace | 103100 | Jonny Williams | Jonny Williams | high | 1.128 | legacy-name-variant-position-stats |
+
+原始文件：
+
+- `data/raw/fpl/legacy/pulselive/{1415,1516}-{appearances,mins_played,goals,goal_assist}.json`
+- `data/raw/fpl/legacy/fplanalytics/{201415,201516}.json`
+
 ## Manual 已确认日志
 
 以下记录由人工逐条确认，写入 `manual_verified`，并作为后续赛季倒序继承依据。
@@ -3806,5 +3847,7 @@
 
 ## 数据范围说明
 
-- Understat 1415、1516 各有完整 Understat player-season 数据，但当前 repo 的 FPL history archive 没有这两个赛季；因此不是“未匹配”，而是 `fpl-history-unavailable`，不能凭空创建关联。
+- 1617–2526 使用数据库中的 FPL history；1415、1516 使用本地保存的官方 Pulselive ranked stats identity/metrics 与 FPL legacy stats。旧两季没有新增 `players_history` 分区，但 provider bridge 已使用持久 FPL code 写入 verified link，并在 evidence 中保留原始文件来源。
+- exact normalized full name 不进入非 exact 日志；历史源的 29 条非 exact 已完整列出并全部是 high。
 - 该日志只记录身份映射，不改变 Understat canonical tables，也不把映射写入 FPL current tables。
+
