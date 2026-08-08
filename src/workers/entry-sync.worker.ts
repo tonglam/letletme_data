@@ -557,10 +557,13 @@ export function createEntrySyncWorker(): WorkerRuntime {
                       // Active-GW values can still change. Reuse the dedicated
                       // rich-result checkpoint only after FPL has finalized the GW.
                       const event = await eventRepository.findById(targetEventId);
-                      const freshAfter = resolveRichResultFreshnessCutoff(event);
-                      if (!freshAfter) {
+                      const finalizationDate = resolveRichResultFreshnessCutoff(event);
+                      if (!finalizationDate) {
                         return { requiredEntryIds: entryIds, reusedUnits: 0 };
                       }
+                      const freshAfter =
+                        (await eventRepository.findDataCheckedAtExact(targetEventId)) ??
+                        finalizationDate;
                       const requiredEntryIds =
                         await entryEventResultsRepository.findEntryIdsNeedingRichSync(
                           entryIds,
