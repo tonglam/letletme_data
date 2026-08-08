@@ -54,15 +54,14 @@ const DATA_TABLES = [
   'understat_teams',
 ] as const;
 
-const DATA_VIEWS = ['mv_tournament_event_snapshot', 'v_tournament_event_result'] as const;
-
-const REMOVED_DATA_VIEWS = [
+const DATA_VIEWS = [
+  'mv_tournament_event_snapshot',
+  'mv_tournament_snapshot',
+  'v_tournament_event_result',
   'v_tournament_event_snapshot',
   'v_tournament_selection_stats',
   'v_tournament_snapshot',
 ] as const;
-
-const REMOVED_MATERIALIZED_VIEWS = ['mv_tournament_snapshot'] as const;
 
 const DATA_FUNCTIONS = [
   'get_captain_counts',
@@ -134,28 +133,6 @@ describe('Database trust boundary', () => {
     `;
     expect(readModels.map((finding) => finding.name)).toEqual([...DATA_VIEWS]);
 
-    const removedReadModels = await sql<NamedFinding[]>`
-      SELECT relation.relname AS name
-      FROM pg_class relation
-      JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
-      WHERE namespace.nspname = 'public'
-        AND relation.relkind = 'v'
-        AND relation.relname = ANY(${REMOVED_DATA_VIEWS}::text[])
-      ORDER BY name
-    `;
-    expect(removedReadModels.map((finding) => finding.name)).toEqual([]);
-
-    const removedMaterializedViews = await sql<NamedFinding[]>`
-      SELECT relation.relname AS name
-      FROM pg_class relation
-      JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
-      WHERE namespace.nspname = 'public'
-        AND relation.relkind = 'm'
-        AND relation.relname = ANY(${REMOVED_MATERIALIZED_VIEWS}::text[])
-      ORDER BY name
-    `;
-    expect(removedMaterializedViews.map((finding) => finding.name)).toEqual([]);
-
     const materializedViews = await sql<NamedFinding[]>`
       SELECT relation.relname AS name
       FROM pg_class relation
@@ -167,6 +144,7 @@ describe('Database trust boundary', () => {
     `;
     expect(materializedViews.map((finding) => finding.name)).toEqual([
       'mv_tournament_event_snapshot',
+      'mv_tournament_snapshot',
     ]);
 
     const refreshIndexes = await sql<NamedFinding[]>`
