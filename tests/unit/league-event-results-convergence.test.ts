@@ -4,6 +4,7 @@ import type { DbEntryEventResult, DbEventLive } from '../../src/db/schemas/index
 import { validateAutomaticSubs } from '../../src/repositories/entry-event-results';
 import {
   buildEntryResultData,
+  findEventEligibleEntryIds,
   findMissingLeagueResultEntryIds,
   isEntryResultRichEnough,
 } from '../../src/services/league-event-results.service';
@@ -35,6 +36,51 @@ describe('league event result convergence', () => {
           points_on_bench: 0,
         },
         picks,
+      }),
+    ).toThrow('Refusing invalid automatic substitutions');
+  });
+
+  test('rejects repeated or conflicting automatic-substitution elements', () => {
+    const picks = Array.from({ length: 15 }, (_, index) => ({
+      element: index + 1,
+      position: index + 1,
+      multiplier: index === 0 ? 2 : index < 11 ? 1 : 0,
+      is_captain: index === 0,
+      is_vice_captain: index === 1,
+    }));
+    const payload = {
+      active_chip: null,
+      entry_history: {
+        event: 9,
+        points: 1,
+        total_points: 1,
+        rank: 1,
+        overall_rank: 1,
+        bank: 0,
+        value: 1000,
+        event_transfers: 0,
+        event_transfers_cost: 0,
+        points_on_bench: 0,
+      },
+      picks,
+    };
+
+    expect(() =>
+      validateAutomaticSubs(123, 9, {
+        ...payload,
+        automatic_subs: [
+          { entry: 123, event: 9, element_in: 12, element_out: 3 },
+          { entry: 123, event: 9, element_in: 12, element_out: 4 },
+        ],
+      }),
+    ).toThrow('Refusing invalid automatic substitutions');
+    expect(() =>
+      validateAutomaticSubs(123, 9, {
+        ...payload,
+        automatic_subs: [
+          { entry: 123, event: 9, element_in: 12, element_out: 3 },
+          { entry: 123, event: 9, element_in: 3, element_out: 4 },
+        ],
       }),
     ).toThrow('Refusing invalid automatic substitutions');
   });
@@ -225,5 +271,19 @@ describe('league event result convergence', () => {
 
   test('returns the exact missing canonical result IDs', () => {
     expect(findMissingLeagueResultEntryIds([1, 2, 3, 4], new Set([1, 3]))).toEqual([2, 4]);
+  });
+
+  test('excludes managers from gameweeks before their first entry event', () => {
+    expect(
+      findEventEligibleEntryIds(
+        [1, 2, 3, 4],
+        [
+          { id: 1, startedEvent: 1 },
+          { id: 2, startedEvent: 10 },
+          { id: 3, startedEvent: null },
+        ],
+        9,
+      ),
+    ).toEqual([1, 3, 4]);
   });
 });

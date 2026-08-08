@@ -1,4 +1,4 @@
-import { integer, pgTable, text } from 'drizzle-orm/pg-core';
+import { integer, pgTable, text, timestamp } from 'drizzle-orm/pg-core';
 import { timestamps } from './_helpers.schema';
 import { events } from './events.schema';
 
@@ -17,6 +17,9 @@ export const entryInfos = pgTable('entry_infos', {
   entrySnapshotSyncedSeason: text('entry_snapshot_synced_season'),
   entryTransfersSyncedThroughEventId: integer('entry_transfers_synced_through_event_id'),
   entryTransfersSyncedSeason: text('entry_transfers_synced_season'),
+  entryTransfersSourceCheckedAt: timestamp('entry_transfers_source_checked_at', {
+    withTimezone: true,
+  }),
   teamValue: integer('team_value'),
   totalTransfers: integer('total_transfers'),
   lastEntryName: text('last_entry_name'),

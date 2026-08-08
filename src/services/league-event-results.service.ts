@@ -303,6 +303,18 @@ export function findMissingLeagueResultEntryIds(
   return expectedEntryIds.filter((entryId) => !persistedEntryIds.has(entryId));
 }
 
+export function findEventEligibleEntryIds(
+  entryIds: readonly number[],
+  entryInfos: ReadonlyArray<{ id: number; startedEvent: number | null }>,
+  eventId: number,
+): number[] {
+  const startsByEntryId = new Map(entryInfos.map((entry) => [entry.id, entry.startedEvent]));
+  return entryIds.filter((entryId) => {
+    const startedEvent = startsByEntryId.get(entryId);
+    return startedEvent === undefined || startedEvent === null || eventId >= startedEvent;
+  });
+}
+
 export type LeagueEventResultsSyncSummary = {
   tournamentId: number;
   eventId: number;
@@ -362,7 +374,24 @@ export async function syncLeagueEventResultsByTournament(
   const requiredRichFreshAfter = latestDate(sourceCheckedAt, finalizationCutoff);
   const checkpointSeason = options?.season ?? (await getActiveCacheSeason());
 
-  const entryIds = await resolveTournamentEntryIds(tournament);
+  const resolvedEntryIds = await resolveTournamentEntryIds(tournament);
+  const entryInfos = await entryInfoRepository.findByIds(resolvedEntryIds);
+  const entryInfoMap = new Map(entryInfos.map((info) => [info.id, info]));
+  const entryIds = findEventEligibleEntryIds(resolvedEntryIds, entryInfos, eventId);
+  if (entryIds.length === 0) {
+    return {
+      tournamentId,
+      eventId,
+      totalEntries: 0,
+      updated: 0,
+      skipped: 0,
+      errors: 0,
+      requiredUnits: 0,
+      reusedUnits: 0,
+      succeededUnits: 0,
+      failedUnits: 0,
+    };
+  }
   const reusedEntryIds = requiredRichFreshAfter
     ? await leagueEventResultsRepository.findEntryIdsByLeagueEvent(
         tournament.leagueId,
@@ -388,9 +417,6 @@ export async function syncLeagueEventResultsByTournament(
       failedUnits: 0,
     };
   }
-
-  const entryInfos = await entryInfoRepository.findByIds(entriesToBuild);
-  const entryInfoMap = new Map(entryInfos.map((info) => [info.id, info]));
 
   const eventLives = finalizationCutoff
     ? await eventLiveRepository.findFinalizedByEventIdForSeason(eventId, checkpointSeason)

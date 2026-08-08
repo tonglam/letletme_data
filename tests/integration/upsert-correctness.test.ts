@@ -125,6 +125,7 @@ describe('entry-event-transfers element_in_played (H5)', () => {
     await transfersRepository.replaceForEvent(ENTRY_ID, EVENT_ID, [TRANSFER], undefined, {
       elementInPlayed: true,
       checkpointSeason: CHECKPOINT_SEASON,
+      sourceCheckedAt: new Date(),
     });
     const initial = await (await db())<{ element_in_played: boolean | null }[]>`
       SELECT element_in_played FROM entry_event_transfers
@@ -136,6 +137,7 @@ describe('entry-event-transfers element_in_played (H5)', () => {
     await transfersRepository.replaceForEvent(ENTRY_ID, EVENT_ID, [TRANSFER], undefined, {
       elementInPlayed: null,
       checkpointSeason: CHECKPOINT_SEASON,
+      sourceCheckedAt: new Date(),
     });
 
     // Then: the stored flag survives
@@ -149,6 +151,7 @@ describe('entry-event-transfers element_in_played (H5)', () => {
     await transfersRepository.replaceForEvent(ENTRY_ID, EVENT_ID, [TRANSFER], undefined, {
       elementInPlayed: false,
       checkpointSeason: CHECKPOINT_SEASON,
+      sourceCheckedAt: new Date(),
     });
     const afterUpdate = await (await db())<{ element_in_played: boolean | null }[]>`
       SELECT element_in_played FROM entry_event_transfers
@@ -175,6 +178,7 @@ describe('entry-event-transfers element_in_played (H5)', () => {
       elementInPlayed: true,
       syncMode: 'all',
       checkpointSeason: CHECKPOINT_SEASON,
+      sourceCheckedAt: new Date(),
     });
 
     const firstSync = await (await db())<
@@ -195,6 +199,7 @@ describe('entry-event-transfers element_in_played (H5)', () => {
       elementInPlayed: null,
       syncMode: 'all',
       checkpointSeason: CHECKPOINT_SEASON,
+      sourceCheckedAt: new Date(),
     });
     const secondSync = await (await db())<
       { event_id: number; element_in_played: boolean | null }[]

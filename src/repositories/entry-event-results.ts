@@ -57,18 +57,29 @@ export function validateAutomaticSubs(
   picks: RawFPLEntryEventPicksResponse,
 ): AutoSubItem[] {
   const selectedElements = new Set(picks.picks.map((pick) => pick.element));
+  const incomingElements = new Set<number>();
+  const outgoingElements = new Set<number>();
   for (const substitution of picks.automatic_subs) {
     if (
       substitution.entry !== entryId ||
       substitution.event !== eventId ||
       substitution.element_in === substitution.element_out ||
       !selectedElements.has(substitution.element_in) ||
-      !selectedElements.has(substitution.element_out)
+      !selectedElements.has(substitution.element_out) ||
+      incomingElements.has(substitution.element_in) ||
+      outgoingElements.has(substitution.element_out)
     ) {
       throw new Error(
         `Refusing invalid automatic substitutions for entry ${entryId}, event ${eventId}`,
       );
     }
+    incomingElements.add(substitution.element_in);
+    outgoingElements.add(substitution.element_out);
+  }
+  if ([...incomingElements].some((elementId) => outgoingElements.has(elementId))) {
+    throw new Error(
+      `Refusing invalid automatic substitutions for entry ${entryId}, event ${eventId}`,
+    );
   }
   return picks.automatic_subs;
 }

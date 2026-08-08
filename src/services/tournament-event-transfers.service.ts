@@ -11,6 +11,7 @@ import { tournamentInfoRepository } from '../repositories/tournament-infos';
 import { mapWithConcurrency, uniqueNumbers } from '../utils/async';
 import { IncompleteDataSyncError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
+import { readCoreSnapshotOrderingTimestamp } from './core-snapshot-persistence.service';
 
 const DEFAULT_CONCURRENCY = 5;
 
@@ -372,6 +373,7 @@ export async function syncTournamentEventTransfersPre(
   }
 
   const checkpointSeason = await getActiveCacheSeason();
+  const sourceCheckedAt = await readCoreSnapshotOrderingTimestamp();
   const pendingEntryIds = await entryEventTransfersRepository.findEntryIdsNeedingSync(
     entryIds,
     eventId,
@@ -407,6 +409,7 @@ export async function syncTournamentEventTransfersPre(
         defaultPoints: 0,
         checkpointSeason,
         syncMode: 'all',
+        sourceCheckedAt,
       });
       if (hasEventTransfers) {
         inserted += 1;

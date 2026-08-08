@@ -82,6 +82,7 @@ export async function syncEntryEventTransfers(
       targetEventId = current.id;
     }
     const checkpointSeason = await getActiveCacheSeason();
+    const transferSyncStartedAt = await readCoreSnapshotOrderingTimestamp();
     const transfers = await fplClient.getEntryTransfers(entryId);
     const pointsByElement = options?.pointsByElement ?? (await getPointsByElement(targetEventId));
     await entryEventTransfersRepository.replaceForEvent(
@@ -89,7 +90,7 @@ export async function syncEntryEventTransfers(
       targetEventId,
       transfers,
       pointsByElement,
-      { checkpointSeason },
+      { checkpointSeason, sourceCheckedAt: transferSyncStartedAt },
     );
     logInfo('Entry event transfers sync completed', { entryId, eventId: targetEventId });
     return { entryId, eventId: targetEventId };

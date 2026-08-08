@@ -514,6 +514,9 @@ export function createEntrySyncWorker(): WorkerRuntime {
                       if (targetEventId === undefined) {
                         return { requiredEntryIds: entryIds, reusedUnits: 0 };
                       }
+                      if (isExplicitEntryRepairRequest(effectiveJobData)) {
+                        return { requiredEntryIds: entryIds, reusedUnits: 0 };
+                      }
                       const requiredEntryIds =
                         await entryEventTransfersRepository.findEntryIdsNeedingSync(
                           entryIds,
@@ -525,6 +528,12 @@ export function createEntrySyncWorker(): WorkerRuntime {
                         reusedUnits: entryIds.length - requiredEntryIds.length,
                       };
                     },
+                    auditRequired: (entryIds) =>
+                      entryEventTransfersRepository.findEntryIdsNeedingSync(
+                        entryIds,
+                        targetEventId!,
+                        checkpointSeason!,
+                      ),
                   },
                 );
               case 'entry-results':

@@ -235,7 +235,7 @@ export async function syncTournamentEventResultsForEntryIds(
           // The endpoint returned the entrant's complete transfer history.
           // Persist and checkpoint that same scope so the following audit
           // cannot reject a successful legacy/backfill repair.
-          { syncMode: 'all', checkpointSeason },
+          { syncMode: 'all', checkpointSeason, sourceCheckedAt: attemptStartedAt },
         );
       }
       return { entryId, success: true } satisfies EntrySyncOutcome;
@@ -306,6 +306,7 @@ export async function syncEntryTransferHistories(
   const uniqueEntryIds = uniqueNumbers(entryIds);
   const concurrency = options?.concurrency ?? DEFAULT_CONCURRENCY;
   const checkpointSeason = options?.season ?? (await getActiveCacheSeason());
+  const sourceCheckedAt = await readCoreSnapshotOrderingTimestamp();
 
   await mapWithConcurrency(uniqueEntryIds, concurrency, async (entryId) => {
     try {
@@ -318,6 +319,7 @@ export async function syncEntryTransferHistories(
         entryEventTransfersRepository.replaceForEvent(entryId, endEventId, transfers, undefined, {
           syncMode: 'all',
           checkpointSeason,
+          sourceCheckedAt,
         }),
         ENTRY_PERSIST_TIMEOUT_MS,
         `Timed out persisting transfer history for entry ${entryId}`,
