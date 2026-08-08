@@ -9,7 +9,7 @@ durable path, SHA, query result, run URL, or backup manifest. Verbal confirmatio
 
 | Field | Value |
 | --- | --- |
-| Run ID | Not assigned until B0 |
+| Run ID | `v3-20260808T160008Z-b9eddc0` |
 | Data baseline | `62f134a` |
 | GraphQL baseline | `8cf4ddc` |
 | Web baseline | `c290d91` |
@@ -33,7 +33,7 @@ durable path, SHA, query result, run URL, or backup manifest. Verbal confirmatio
 | [x] | P0-10 | Inventory Web DB/cache/GraphQL contracts | Every direct DB use has an owner | `06-p0-baseline.md`; Web auth preserved, Data writes prohibited |
 | [x] | P0-11 | Record Redis queue/cache topology, key types, TTLs, memory | Endpoints and namespaces are explicit; secrets excluded | `06-p0-baseline.md`; same endpoint/DB0, 177.35 MB |
 | [x] | P0-12 | Add v3 deploy lock | External manifest + exact SHA/digest/token required; automatic v3 deploy blocked | `07-p0-verification.md`; 12/12 gate tests; actionlint/shellcheck pass |
-| [x] | P0-13 | Commit D0 | Clean tree; checks pass; SHA recorded | substantive `7622ce9b318d4b020eaac02abcbf1d86ec56ffd0`; evidence closure `b9eddc0` + follow-up inventory commit |
+| [x] | P0-13 | Commit D0 | Clean tree; checks pass; SHA recorded | substantive `7622ce9b318d4b020eaac02abcbf1d86ec56ffd0`; evidence closure `b9eddc0`; complete inventory `2844b83f1d57896cf6cdce324a9b189a4f8a3be6` |
 
 P0 exit gate: P0-01 through P0-13 complete and no object/reference remains unclassified.
 
@@ -41,19 +41,19 @@ P0 exit gate: P0-01 through P0-13 complete and no object/reference remains uncla
 
 | Done | ID | Check | Acceptance | Evidence |
 | --- | --- | --- | --- | --- |
-| [ ] | P1-01 | Assign and validate run ID | Matches documented format; directory is explicit and new | Run ID/path: |
-| [ ] | P1-02 | Record source and tool versions | pg_dump/pg_restore/psql/redis/GPG versions present | Manifest: |
-| [ ] | P1-03 | Dump roles/globals | Exit 0; encrypted; checksum verified | File/hash: |
-| [ ] | P1-04 | Dump schema-only | Exit 0; encrypted; checksum verified | File/hash: |
-| [ ] | P1-05 | Dump full custom-format database | Exit 0; encrypted; checksum verified | File/hash: |
-| [ ] | P1-06 | Dump Data-owned objects selectively | Exit 0; encrypted; checksum verified | File/hash: |
-| [ ] | P1-07 | Export migration ledgers and object definitions | Exact ledgers/views/functions/grants retained | Files: |
-| [ ] | P1-08 | Capture exact row-count/hash baseline | Every manifest source object covered | Report: |
-| [ ] | P1-09 | Snapshot Redis and BullMQ inventory | RDB/snapshot evidence plus key/type/TTL/count manifest | Manifest: |
-| [ ] | P1-10 | Restore full B0 on PostgreSQL 15 | No ignored errors; server version recorded | Restore log: |
-| [ ] | P1-11 | Restore selective B0 on PostgreSQL 15 | No ignored errors | Restore log: |
-| [ ] | P1-12 | Reconcile restored full/selective databases | Counts/hashes/FKs/views/grants pass | Report: |
-| [ ] | P1-13 | Record retention and recovery owner | B0 one year; Redis RDB 14 days | Manifest: |
+| [x] | P1-01 | Assign and validate run ID | Matches documented format; directory is explicit and new | `v3-20260808T160008Z-b9eddc0`; `08-b0-backup-restore.md` |
+| [x] | P1-02 | Record source and tool versions | pg_dump/pg_restore/psql/redis/GPG versions present | External `b0/manifests/b0-manifest.json` |
+| [x] | P1-03 | Dump roles/globals | Exit 0; encrypted; checksum verified | `globals.sql.gpg`; manifest decryption verification `true` |
+| [x] | P1-04 | Dump schema-only | Exit 0; encrypted; checksum verified | `schema.sql.gpg`; manifest decryption verification `true` |
+| [x] | P1-05 | Dump full custom-format database | Exit 0; encrypted; checksum verified | `full.dump.gpg`; catalog parsed; manifest decryption verification `true` |
+| [x] | P1-06 | Dump Data-owned objects selectively | Exit 0; encrypted; checksum verified | `data-public.dump.gpg`; catalog parsed; manifest decryption verification `true` |
+| [x] | P1-07 | Export migration ledgers and object definitions | Exact ledgers/views/functions/grants retained | 75 Data + 3 GraphQL + 17 managed ledger rows; complete object inventory encrypted |
+| [x] | P1-08 | Capture exact row-count/hash baseline | Every manifest source object covered | 198 canonical relation hashes + 22 sequence states; `08-b0-backup-restore.md` |
+| [x] | P1-09 | Snapshot Redis and BullMQ inventory | RDB/snapshot evidence plus key/type/TTL/count manifest | RDB 493 keys; 14 encrypted artifacts; canonical reconciliation accepted |
+| [x] | P1-10 | Restore full B0 on PostgreSQL 15 | No ignored errors; server version recorded | Final PG 15.8 restore exit 0; external `b0/logs/full-restore.log` |
+| [x] | P1-11 | Restore selective B0 on PostgreSQL 15 | No ignored errors | Final restore exit 0; external `b0/logs/selective-restore.log` |
+| [x] | P1-12 | Reconcile restored full/selective databases | Counts/hashes/FKs/views/grants pass | External `b0/manifests/b0-restore-report.md`; every accepted diff 0 |
+| [x] | P1-13 | Record retention and recovery owner | B0 one year; Redis RDB 14 days | External manifest; recovery owner Tong; Keychain passphrase reference |
 
 P1 exit gate: both restore drills pass. A backup that has not been restored does not satisfy P1.
 
