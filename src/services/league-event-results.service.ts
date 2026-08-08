@@ -122,12 +122,21 @@ function resolveEventNetPoints(eventPoints: number, transfersCost: number): numb
   return eventPoints - transfersCost;
 }
 
-function latestDate(...dates: Array<Date | null | undefined>): Date | undefined {
-  const validDates = dates.filter(
-    (date): date is Date => date instanceof Date && !Number.isNaN(date.getTime()),
-  );
-  if (validDates.length === 0) return undefined;
-  return new Date(Math.max(...validDates.map((date) => date.getTime())));
+function latestFreshnessTimestamp(
+  sourceFreshAfter: Date | string,
+  finalizationCutoff: Date | null | undefined,
+): Date | string {
+  const sourceDate =
+    sourceFreshAfter instanceof Date ? sourceFreshAfter : new Date(sourceFreshAfter);
+  if (Number.isNaN(sourceDate.getTime())) {
+    throw new Error('A valid league result freshness timestamp is required');
+  }
+  if (!finalizationCutoff || finalizationCutoff.getTime() <= sourceDate.getTime()) {
+    // Preserve the exact database token when both timestamps occupy the same
+    // JavaScript millisecond. PostgreSQL still distinguishes their microseconds.
+    return sourceFreshAfter;
+  }
+  return finalizationCutoff;
 }
 
 export function isEntryResultRichEnough(
@@ -358,14 +367,7 @@ export async function syncLeagueEventResultsByTournament(
   // across workers and remains the evidence timestamp even when a slower
   // attempt finishes after a newer result-slot run.
   const sourceOrdering = await readDatabaseOrderingTimestamp();
-  const freshAfter = options?.freshAfter
-    ? options.freshAfter instanceof Date
-      ? options.freshAfter
-      : new Date(options.freshAfter)
-    : sourceOrdering.date;
-  if (Number.isNaN(freshAfter.getTime())) {
-    throw new Error('A valid league result freshness timestamp is required');
-  }
+  const freshAfter = options?.freshAfter ?? sourceOrdering.exact;
 
   const [tournament, event] = await Promise.all([
     tournamentInfoRepository.findById(tournamentId),
@@ -379,7 +381,7 @@ export async function syncLeagueEventResultsByTournament(
   // stricter of that boundary and this attempt's database-clock token so the
   // reuse, write, and post-write audit all share one clock domain.
   const finalizationCutoff = resolveRichResultFreshnessCutoff(event);
-  const requiredRichFreshAfter = latestDate(freshAfter, finalizationCutoff);
+  const requiredRichFreshAfter = latestFreshnessTimestamp(freshAfter, finalizationCutoff);
   const checkpointSeason = options?.season ?? (await getActiveCacheSeason());
 
   const resolvedEntryIds = await resolveTournamentEntryIds(tournament);
@@ -449,19 +451,20 @@ export async function syncLeagueEventResultsByTournament(
   const players = await playerRepository.findByIds(playerIds);
   const elementTypeMap = new Map(players.map((player) => [player.id, player.type]));
 
-  const entryResults = await entryEventResultsRepository.findByEventAndEntryIds(
-    eventId,
-    entriesToBuild,
-  );
+  const [entryResults, staleRichEntryIds] = await Promise.all([
+    entryEventResultsRepository.findByEventAndEntryIds(eventId, entriesToBuild),
+    entryEventResultsRepository.findEntryIdsNeedingRichSync(
+      entriesToBuild,
+      eventId,
+      requiredRichFreshAfter,
+    ),
+  ]);
   const entryResultsMap = new Map(entryResults.map((result) => [result.entryId, result]));
+  const staleRichEntryIdSet = new Set(staleRichEntryIds);
 
   const missingEntryIds = entriesToBuild.filter((entryId) => {
     const result = entryResultsMap.get(entryId);
-    return (
-      !result ||
-      !isCompleteEntryPicks(result.eventPicks) ||
-      !isEntryResultRichEnough(result, requiredRichFreshAfter)
-    );
+    return !result || !isCompleteEntryPicks(result.eventPicks) || staleRichEntryIdSet.has(entryId);
   });
   const concurrency = options?.concurrency ?? DEFAULT_CONCURRENCY;
   const missingPicksMap = new Map<number, RawFPLEntryEventPicksResponse>();
@@ -493,9 +496,7 @@ export async function syncLeagueEventResultsByTournament(
     }
 
     const persistedEntryResult = entryResultsMap.get(entryId);
-    const entryResult = isEntryResultRichEnough(persistedEntryResult, requiredRichFreshAfter)
-      ? persistedEntryResult
-      : undefined;
+    const entryResult = !staleRichEntryIdSet.has(entryId) ? persistedEntryResult : undefined;
     const fallbackPicks = missingPicksMap.get(entryId) ?? null;
     if (fallbackPicks) {
       try {
@@ -570,14 +571,13 @@ export async function syncLeagueEventResultsByTournament(
     updated += await leagueEventResultsRepository.upsertBatch(batch, checkpointSeason);
   }
 
-  const auditCutoff = requiredRichFreshAfter ?? freshAfter;
   const persistedEntryIds = new Set(
     await leagueEventResultsRepository.findEntryIdsByLeagueEvent(
       tournament.leagueId,
       tournament.leagueType,
       eventId,
       entriesToBuild,
-      auditCutoff,
+      requiredRichFreshAfter,
     ),
   );
   const missingPersistedEntryIds = findMissingLeagueResultEntryIds(

@@ -1,4 +1,4 @@
-import { and, eq, gte, inArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 
 import {
@@ -25,7 +25,7 @@ export const createLeagueEventResultsRepository = (dbInstance?: DatabaseInstance
       leagueType: DbLeagueEventResultInsert['leagueType'],
       eventId: number,
       entryIds: number[],
-      freshAfter?: Date,
+      freshAfter?: Date | string,
     ): Promise<number[]> => {
       if (entryIds.length === 0) return [];
 
@@ -41,7 +41,13 @@ export const createLeagueEventResultsRepository = (dbInstance?: DatabaseInstance
             eq(leagueEventResults.eventId, eventId),
             inArray(leagueEventResults.entryId, chunk),
           ];
-          if (freshAfter) conditions.push(gte(leagueEventResults.sourceCheckedAt, freshAfter));
+          if (freshAfter) {
+            const exactFreshAfter =
+              freshAfter instanceof Date ? freshAfter.toISOString() : freshAfter;
+            conditions.push(
+              sql`${leagueEventResults.sourceCheckedAt} >= ${exactFreshAfter}::timestamptz`,
+            );
+          }
           const rows = await db
             .select({ entryId: leagueEventResults.entryId })
             .from(leagueEventResults)

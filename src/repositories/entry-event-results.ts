@@ -269,7 +269,7 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
     findEntryIdsNeedingRichSync: async (
       entryIds: number[],
       eventId: number,
-      freshAfter?: Date,
+      freshAfter?: Date | string,
     ): Promise<number[]> => {
       const uniqueEntryIds = Array.from(new Set(entryIds));
       if (uniqueEntryIds.length === 0) return [];
@@ -287,7 +287,9 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
                 eq(entryEventResults.eventId, eventId),
                 inArray(entryEventResults.entryId, chunk),
                 freshAfter
-                  ? gte(entryEventResults.richSyncedAt, freshAfter)
+                  ? sql`${entryEventResults.richSyncedAt} >= ${
+                      freshAfter instanceof Date ? freshAfter.toISOString() : freshAfter
+                    }::timestamptz`
                   : isNotNull(entryEventResults.richSyncedAt),
               ),
             );
@@ -297,7 +299,7 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
       } catch (error) {
         logError('Failed to audit rich entry event results', error, {
           eventId,
-          freshAfter: freshAfter?.toISOString(),
+          freshAfter: freshAfter instanceof Date ? freshAfter.toISOString() : freshAfter,
         });
         throw new DatabaseError(
           'Failed to audit rich entry event results',

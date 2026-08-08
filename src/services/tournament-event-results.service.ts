@@ -53,12 +53,20 @@ type TournamentResultWorkSummary = {
   failedUnits: number;
 };
 
-function orderingTimestampDate(value: Date | string): Date {
+function validateOrderingTimestamp(value: string): string;
+function validateOrderingTimestamp(value: Date): Date;
+function validateOrderingTimestamp(value: Date | string): Date | string;
+function validateOrderingTimestamp(value: Date | string): Date | string {
   const date = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(date.getTime())) {
     throw new Error('A valid result freshness timestamp is required');
   }
-  return date;
+  return value;
+}
+
+function freshEntryIds(entryIds: number[], staleEntryIds: number[]): Set<number> {
+  const staleEntryIdSet = new Set(staleEntryIds);
+  return new Set(entryIds.filter((entryId) => !staleEntryIdSet.has(entryId)));
 }
 
 export function findFreshTournamentResultEntryIds(
@@ -191,14 +199,11 @@ export async function syncTournamentEventResultsForEntryIds(
   }
 
   const sourceOrdering = options?.sourceCheckedAt
-    ? {
-        date: orderingTimestampDate(options.sourceCheckedAt),
-        exact: options.sourceCheckedAt,
-      }
+    ? { exact: validateOrderingTimestamp(options.sourceCheckedAt) }
     : await readDatabaseOrderingTimestamp();
   const freshAfter = options?.freshAfter
-    ? orderingTimestampDate(options.freshAfter)
-    : sourceOrdering.date;
+    ? validateOrderingTimestamp(options.freshAfter)
+    : sourceOrdering.exact;
   const checkpointSeason = options?.season ?? (await getActiveCacheSeason());
   const transferSourceCheckedAt = options?.skipTransfers
     ? null
@@ -266,8 +271,8 @@ export async function syncTournamentEventResultsForEntryIds(
     }
   });
 
-  const [persistedResults, persistedPickEntryIds, missingTransferEntryIds] = await Promise.all([
-    entryEventResultsRepository.findByEventAndEntryIds(eventId, uniqueEntryIds),
+  const [staleResultEntryIds, persistedPickEntryIds, missingTransferEntryIds] = await Promise.all([
+    entryEventResultsRepository.findEntryIdsNeedingRichSync(uniqueEntryIds, eventId, freshAfter),
     entryEventPicksRepository.findEntryIdsByEvent(eventId, uniqueEntryIds, checkpointSeason),
     options?.skipTransfers
       ? Promise.resolve([])
@@ -277,7 +282,7 @@ export async function syncTournamentEventResultsForEntryIds(
           checkpointSeason,
         ),
   ]);
-  const freshResultEntryIds = findFreshTournamentResultEntryIds(persistedResults, freshAfter);
+  const freshResultEntryIds = freshEntryIds(uniqueEntryIds, staleResultEntryIds);
   const persistedPickSet = new Set(persistedPickEntryIds);
   const missingTransferSet = new Set(missingTransferEntryIds);
   const failedEntryIds = uniqueEntryIds.filter(
@@ -466,22 +471,19 @@ export async function syncTournamentEventResults(
 
   const checkpointSeason = options?.season ?? (await getActiveCacheSeason());
   const sourceOrdering = options?.sourceCheckedAt
-    ? {
-        date: orderingTimestampDate(options.sourceCheckedAt),
-        exact: options.sourceCheckedAt,
-      }
+    ? { exact: validateOrderingTimestamp(options.sourceCheckedAt) }
     : await readDatabaseOrderingTimestamp();
   const freshAfter = options?.freshAfter
-    ? orderingTimestampDate(options.freshAfter)
-    : sourceOrdering.date;
-  const [existingResults, existingPickEntryIds, requiredTransferEntryIds] = await Promise.all([
-    entryEventResultsRepository.findByEventAndEntryIds(eventId, entryIds),
+    ? validateOrderingTimestamp(options.freshAfter)
+    : sourceOrdering.exact;
+  const [staleResultEntryIds, existingPickEntryIds, requiredTransferEntryIds] = await Promise.all([
+    entryEventResultsRepository.findEntryIdsNeedingRichSync(entryIds, eventId, freshAfter),
     entryEventPicksRepository.findEntryIdsByEvent(eventId, entryIds, checkpointSeason),
     options?.skipTransfers
       ? Promise.resolve([])
       : entryEventTransfersRepository.findEntryIdsNeedingSync(entryIds, eventId, checkpointSeason),
   ]);
-  const freshResultEntryIds = findFreshTournamentResultEntryIds(existingResults, freshAfter);
+  const freshResultEntryIds = freshEntryIds(entryIds, staleResultEntryIds);
   const existingPickSet = new Set(existingPickEntryIds);
   const plan = planTournamentEventSync(
     entryIds,
@@ -510,14 +512,19 @@ export async function syncTournamentEventResults(
       : Promise.resolve(null),
   ]);
 
-  const [auditedResults, auditedPickEntryIds, missingTransferEntryIds] = await Promise.all([
-    entryEventResultsRepository.findByEventAndEntryIds(eventId, entryIds),
-    entryEventPicksRepository.findEntryIdsByEvent(eventId, entryIds, checkpointSeason),
-    options?.skipTransfers
-      ? Promise.resolve([])
-      : entryEventTransfersRepository.findEntryIdsNeedingSync(entryIds, eventId, checkpointSeason),
-  ]);
-  const auditedFreshResultIds = findFreshTournamentResultEntryIds(auditedResults, freshAfter);
+  const [auditedStaleResultEntryIds, auditedPickEntryIds, missingTransferEntryIds] =
+    await Promise.all([
+      entryEventResultsRepository.findEntryIdsNeedingRichSync(entryIds, eventId, freshAfter),
+      entryEventPicksRepository.findEntryIdsByEvent(eventId, entryIds, checkpointSeason),
+      options?.skipTransfers
+        ? Promise.resolve([])
+        : entryEventTransfersRepository.findEntryIdsNeedingSync(
+            entryIds,
+            eventId,
+            checkpointSeason,
+          ),
+    ]);
+  const auditedFreshResultIds = freshEntryIds(entryIds, auditedStaleResultEntryIds);
   const auditedPickSet = new Set(auditedPickEntryIds);
   const audit = planTournamentEventSync(
     entryIds,
