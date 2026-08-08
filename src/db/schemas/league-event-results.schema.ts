@@ -1,4 +1,12 @@
-import { boolean, index, integer, pgTable, text, uniqueIndex } from 'drizzle-orm/pg-core';
+import {
+  boolean,
+  index,
+  integer,
+  pgTable,
+  text,
+  timestamp,
+  uniqueIndex,
+} from 'drizzle-orm/pg-core';
 import { autoIncrementId, timestamps } from './_helpers.schema';
 import { chipEnum, leagueTypeEnum } from './enums.schema';
 import { entryInfos } from './entry-infos.schema';
@@ -41,6 +49,7 @@ export const leagueEventResults = pgTable(
     highestScoreElementId: integer('highest_score_element_id').references(() => players.id),
     highestScorePoints: integer('highest_score_points'),
     highestScoreBlank: boolean('highest_score_blank'),
+    sourceCheckedAt: timestamp('source_checked_at', { withTimezone: true }),
     ...timestamps,
   },
   (table) => [

@@ -1,6 +1,34 @@
 import { describe, expect, test } from 'bun:test';
 
-import { resolveEntrySyncTargetEventId } from '../../src/domain/entry-sync';
+import {
+  isCronEntryInfoTableScan,
+  isExplicitEntryRepairRequest,
+  resolveEntrySyncTargetEventId,
+  resolveRichResultFreshnessCutoff,
+  shouldRefreshEntryPicks,
+} from '../../src/domain/entry-sync';
+
+describe('explicit entry repair selection', () => {
+  test('distinguishes targeted repair lists from scheduled scans', () => {
+    expect(isExplicitEntryRepairRequest({ entryIds: [1, 2] })).toBe(true);
+    expect(isExplicitEntryRepairRequest({ entryIds: [] })).toBe(true);
+    expect(isExplicitEntryRepairRequest({})).toBe(false);
+    expect(isExplicitEntryRepairRequest(undefined)).toBe(false);
+  });
+
+  test('only treats cron jobs without an entry list as profile table scans', () => {
+    expect(isCronEntryInfoTableScan({ source: 'cron' })).toBe(true);
+    expect(isCronEntryInfoTableScan({ source: 'cron', entryIds: [42] })).toBe(false);
+    expect(isCronEntryInfoTableScan({ source: 'manual' })).toBe(false);
+  });
+
+  test('refreshes picks for every cron run and explicit repair', () => {
+    expect(shouldRefreshEntryPicks({ source: 'cron' })).toBe(true);
+    expect(shouldRefreshEntryPicks({ source: 'cron', entryIds: [42] })).toBe(true);
+    expect(shouldRefreshEntryPicks({ source: 'api', entryIds: [42] })).toBe(true);
+    expect(shouldRefreshEntryPicks({ source: 'manual' })).toBe(false);
+  });
+});
 
 describe('entry sync target event resolution', () => {
   test('preserves explicit event IDs without a lookup', async () => {
@@ -29,5 +57,44 @@ describe('entry sync target event resolution', () => {
     await expect(
       resolveEntrySyncTargetEventId('entry-results', undefined, async () => null),
     ).rejects.toThrow('No current event found');
+  });
+});
+
+describe('rich result finalization cutoff', () => {
+  const checkedAt = new Date('2026-08-04T10:00:00.000Z');
+
+  test('uses only the stable timestamp of a finalized event', () => {
+    expect(
+      resolveRichResultFreshnessCutoff({
+        finished: true,
+        dataChecked: true,
+        dataCheckedAt: checkedAt,
+      }),
+    ).toBe(checkedAt);
+  });
+
+  test('keeps active, unchecked, and uncheckpointed events refreshable', () => {
+    expect(resolveRichResultFreshnessCutoff(null)).toBeNull();
+    expect(
+      resolveRichResultFreshnessCutoff({
+        finished: false,
+        dataChecked: true,
+        dataCheckedAt: checkedAt,
+      }),
+    ).toBeNull();
+    expect(
+      resolveRichResultFreshnessCutoff({
+        finished: true,
+        dataChecked: false,
+        dataCheckedAt: checkedAt,
+      }),
+    ).toBeNull();
+    expect(
+      resolveRichResultFreshnessCutoff({
+        finished: true,
+        dataChecked: true,
+        dataCheckedAt: null,
+      }),
+    ).toBeNull();
   });
 });

@@ -1,6 +1,6 @@
 import { and, asc, desc, eq, gt, isNotNull, lte, sql } from 'drizzle-orm';
 
-import { events, type DbEvent, type DbEventInsert } from '../db/schemas/index.schema';
+import { events, type DbEvent } from '../db/schemas/index.schema';
 import { getDb, type DbOrTransaction } from '../db/singleton';
 import { neighbourEventId } from '../domain/events';
 import { DatabaseError } from '../utils/errors';
@@ -68,6 +68,45 @@ export const createEventRepository = (dbInstance?: DbOrTransaction) => {
   };
 
   return {
+    findById: async (eventId: number): Promise<DbEvent | null> => {
+      try {
+        const db = await getDbInstance();
+        const result = await db.select().from(events).where(eq(events.id, eventId)).limit(1);
+        return result[0] ?? null;
+      } catch (error) {
+        logError('Failed to find event by id', error, { eventId });
+        throw new DatabaseError(
+          'Failed to retrieve event by id',
+          'FIND_EVENT_BY_ID_ERROR',
+          error instanceof Error ? error : undefined,
+        );
+      }
+    },
+
+    findDataCheckedAtExact: async (eventId: number): Promise<string | null> => {
+      try {
+        const db = await getDbInstance();
+        const rows = await db.execute<{ exactDataCheckedAt: string | null }>(sql`
+          SELECT to_char(
+            ${events.dataCheckedAt} AT TIME ZONE 'UTC',
+            'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+          ) AS "exactDataCheckedAt"
+          FROM ${events}
+          WHERE ${events.id} = ${eventId}
+            AND ${events.finished} = true
+            AND ${events.dataChecked} = true
+        `);
+        return rows[0]?.exactDataCheckedAt ? String(rows[0].exactDataCheckedAt) : null;
+      } catch (error) {
+        logError('Failed to find exact event finalization timestamp', error, { eventId });
+        throw new DatabaseError(
+          'Failed to retrieve exact event finalization timestamp',
+          'FIND_EVENT_FINALIZATION_TIMESTAMP_ERROR',
+          error instanceof Error ? error : undefined,
+        );
+      }
+    },
+
     findCurrent: async (): Promise<DbEvent | null> => {
       try {
         const event = await findCurrentInternal();
@@ -119,13 +158,16 @@ export const createEventRepository = (dbInstance?: DbOrTransaction) => {
           return [];
         }
 
-        const newEvents: DbEventInsert[] = domainEvents.map((event) => ({
+        const newEvents = domainEvents.map((event) => ({
           id: event.id,
           name: event.name,
           deadlineTime: event.deadlineTime,
           averageEntryScore: event.averageEntryScore,
           finished: event.finished,
           dataChecked: event.dataChecked,
+          // Finalization is compared with other database-authored evidence
+          // timestamps, so worker clock skew must not move this boundary.
+          dataCheckedAt: event.dataChecked ? sql`clock_timestamp()` : null,
           highestScoringEntry: event.highestScoringEntry,
           deadlineTimeEpoch: event.deadlineTimeEpoch,
           deadlineTimeGameOffset: event.deadlineTimeGameOffset,
@@ -158,6 +200,14 @@ export const createEventRepository = (dbInstance?: DbOrTransaction) => {
               averageEntryScore: sql`excluded.average_entry_score`,
               finished: sql`excluded.finished`,
               dataChecked: sql`excluded.data_checked`,
+              dataCheckedAt: sql`
+                CASE
+                  WHEN excluded.data_checked = true
+                    AND (${events.dataChecked} = false OR ${events.dataCheckedAt} IS NULL)
+                  THEN clock_timestamp()
+                  ELSE ${events.dataCheckedAt}
+                END
+              `,
               highestScoringEntry: sql`excluded.highest_scoring_entry`,
               deadlineTimeEpoch: sql`excluded.deadline_time_epoch`,
               deadlineTimeGameOffset: sql`excluded.deadline_time_game_offset`,

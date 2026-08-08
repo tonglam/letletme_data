@@ -157,6 +157,10 @@ export function resolveMutationScopes(input: MutationScopeInput): string[] {
     switch (jobName) {
       case 'tournament-event-results':
         return [
+          // Hold the core event publication fence through the finalization
+          // recheck and cascade handoff. Otherwise data-core:events can
+          // finalize the event between those two operations.
+          'data-core:events',
           withEvent('entry-event-picks', eventId),
           withEvent('entry-event-transfers', eventId),
           withEvent('entry-event-results', eventId),
@@ -189,10 +193,10 @@ export function resolveMutationScopes(input: MutationScopeInput): string[] {
       case 'tournament-cup-results':
         return [withEvent('tournament-cup-results', eventId)];
       // Cascade enqueues refresh only after points/battle/knockout complete
-      // (barrier). Still take the global scope so a concurrent setup rebuild
-      // cannot race the REFRESH itself.
+      // (barrier). The event scope also fences terminal publication against
+      // a core finalization arriving after the base job.
       case 'tournament-materialized-views-refresh':
-        return [TOURNAMENT_STRUCTURE_GLOBAL_SCOPE];
+        return [TOURNAMENT_STRUCTURE_GLOBAL_SCOPE, 'data-core:events'];
       case 'tournament-info':
         return ['tournament-info:all'];
       default:

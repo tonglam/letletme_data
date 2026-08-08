@@ -125,6 +125,86 @@ describe('tournament league membership import', () => {
     expect(calls).toBe(100);
   });
 
+  test('allows a duplicate-only page when its cursor content still advances', async () => {
+    let calls = 0;
+    globalThis.fetch = mock(async () => {
+      calls += 1;
+      const standingsEntry = calls === 1 ? 100 : calls === 2 ? 200 : 300;
+      return new Response(
+        JSON.stringify({
+          league: { id: 8863, name: 'Overlapping League', start_event: 1, scoring: 'c' },
+          standings: {
+            page: calls,
+            has_next: calls < 3,
+            results: [
+              {
+                entry: standingsEntry,
+                entry_name: `Ranked Team ${standingsEntry}`,
+                player_name: `Ranked Manager ${standingsEntry}`,
+                rank: calls,
+                total: 0,
+              },
+            ],
+          },
+          new_entries: {
+            page: calls,
+            has_next: false,
+            results:
+              calls === 1
+                ? [
+                    {
+                      entry: 200,
+                      entry_name: 'New Team 200',
+                      player_first_name: 'New',
+                      player_last_name: 'Manager',
+                    },
+                  ]
+                : [],
+          },
+        }),
+        { status: 200 },
+      );
+    }) as unknown as typeof fetch;
+
+    const result = await fetchLeagueParticipants(
+      'https://fantasy.premierleague.com/leagues/8863/standings/c',
+    );
+
+    expect(result.participants.map((participant) => participant.id)).toEqual(['100', '200', '300']);
+    expect(calls).toBe(3);
+  });
+
+  test('rejects a has-next cursor that repeats without adding membership', async () => {
+    let calls = 0;
+    globalThis.fetch = mock(async () => {
+      calls += 1;
+      return new Response(
+        JSON.stringify({
+          league: { id: 8863, name: 'Stalled League', start_event: 1, scoring: 'c' },
+          standings: {
+            has_next: true,
+            results: [
+              {
+                entry: 100,
+                entry_name: 'Repeated Team',
+                player_name: 'Repeated Manager',
+                rank: 1,
+                total: 0,
+              },
+            ],
+          },
+          new_entries: { has_next: false, results: [] },
+        }),
+        { status: 200 },
+      );
+    }) as unknown as typeof fetch;
+
+    await expect(
+      fetchLeagueParticipants('https://fantasy.premierleague.com/leagues/8863/standings/c'),
+    ).rejects.toMatchObject({ code: 'TOURNAMENT_LEAGUE_PAGINATION_STALLED' });
+    expect(calls).toBe(2);
+  });
+
   test('emits one privacy-bounded creation report for a rejected attempt', async () => {
     const infoSpy = spyOn(logger, 'info').mockImplementation(() => undefined as never);
     const privateMarker = 'Private Manager Marker';

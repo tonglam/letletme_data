@@ -354,12 +354,21 @@ export const PicksEntryHistorySchema = z.object({
   points_on_bench: z.number(),
 });
 
+export const AutomaticSubSchema = z
+  .object({
+    entry: z.number().int().positive(),
+    element_in: z.number().int().positive(),
+    element_out: z.number().int().positive(),
+    event: z.number().int().min(1).max(38),
+  })
+  .passthrough();
+
 export const PicksResponseSchema = z.object({
   // Accept any chip string at the boundary — FPL adds chip types faster
   // than downstream enums track (e.g. 'manager'). Mapping happens in
   // src/domain/chips.ts.
   active_chip: z.string().nullable(),
-  automatic_subs: z.array(z.unknown()),
+  automatic_subs: z.array(AutomaticSubSchema),
   entry_history: PicksEntryHistorySchema,
   picks: z.array(PickItemSchema),
 });

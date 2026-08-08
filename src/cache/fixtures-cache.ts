@@ -1,5 +1,6 @@
 import type { Redis } from 'ioredis';
 
+import { CacheError } from '../utils/errors';
 import { logDebug, logError, logWarn } from '../utils/logger';
 import { finalizeSeasonCacheWrite, getActiveCacheSeason } from './cache-season';
 import { parseHashValues } from './hash-read';
@@ -10,6 +11,11 @@ import type { TeamFixture } from '../domain/fixtures';
 import type { Fixture } from '../types';
 
 type TeamInfo = { name: string; shortName: string };
+export type FixtureEventCacheKey = number | 'unscheduled';
+
+export interface FixtureRepairCachePlan {
+  hashes: Map<string, Record<string, string>>;
+}
 
 function fixturesToHash(fixtures: readonly Fixture[]): Record<string, string> {
   return Object.fromEntries(
@@ -116,7 +122,89 @@ export function buildFixturesByTeam(
   return result;
 }
 
+export function buildFixtureRepairCachePlan(
+  season: string,
+  fixtures: Fixture[],
+  eventIds: readonly FixtureEventCacheKey[],
+  teamIds: readonly number[],
+  teamById: Map<number, TeamInfo>,
+): FixtureRepairCachePlan {
+  const hashes = new Map<string, Record<string, string>>();
+  for (const eventId of new Set(eventIds)) {
+    const matching = fixtures.filter((fixture) => (fixture.event ?? 'unscheduled') === eventId);
+    hashes.set(
+      `Fixtures:${season}:${eventId}`,
+      Object.fromEntries(matching.map((fixture) => [String(fixture.id), JSON.stringify(fixture)])),
+    );
+  }
+
+  const byTeam = buildFixturesByTeam([...new Set(teamIds)], fixtures, teamById);
+  for (const [teamId, eventMap] of byTeam) {
+    hashes.set(
+      `FixturesByTeam:${season}:${teamId}`,
+      Object.fromEntries(
+        [...eventMap].map(([eventId, fixture]) => [String(eventId), JSON.stringify(fixture)]),
+      ),
+    );
+  }
+
+  return { hashes };
+}
+
+async function execFixtureRepair(transaction: ReturnType<Redis['multi']>): Promise<void> {
+  const result = await transaction.exec();
+  if (!result || result.some(([error]) => error !== null)) {
+    throw new CacheError('Fixture repair cache transaction failed', 'FIXTURE_REPAIR_CACHE_FAILED');
+  }
+}
+
 export const fixturesCache = {
+  async getUnscheduled(season?: string): Promise<Fixture[]> {
+    const redis = await redisSingleton.getClient();
+    const activeSeason = season ?? (await getActiveCacheSeason());
+    const key = `Fixtures:${activeSeason}:unscheduled`;
+    return parseHashValues<Fixture>(await redis.hgetall(key), { key });
+  },
+
+  async repair(
+    fixtures: Fixture[],
+    eventIds: readonly FixtureEventCacheKey[],
+    teamIds: readonly number[],
+    season?: string,
+  ): Promise<void> {
+    const redis = await redisSingleton.getClient();
+    const activeSeason = season ?? (await getActiveCacheSeason());
+    await finalizeSeasonCacheWrite(activeSeason, ['Fixtures', 'FixturesByTeam']);
+
+    const teamRaw = await redis.hgetall(`Team:${activeSeason}`);
+    const teamById = new Map<number, TeamInfo>();
+    for (const [id, json] of Object.entries(teamRaw)) {
+      const team = JSON.parse(json) as TeamInfo;
+      teamById.set(Number(id), { name: team.name, shortName: team.shortName });
+    }
+    const missingTeams = [...new Set(teamIds)].filter((teamId) => !teamById.has(teamId));
+    if (missingTeams.length > 0) {
+      throw new CacheError(
+        'Fixture repair requires complete active team metadata',
+        'FIXTURE_REPAIR_TEAM_CACHE_INCOMPLETE',
+      );
+    }
+
+    const plan = buildFixtureRepairCachePlan(activeSeason, fixtures, eventIds, teamIds, teamById);
+    const transaction = redis.multi();
+    for (const [key, fields] of plan.hashes) {
+      transaction.del(key);
+      if (Object.keys(fields).length > 0) transaction.hset(key, fields);
+    }
+    await execFixtureRepair(transaction);
+    logDebug('Fixture event/team cache repair published', {
+      season: activeSeason,
+      events: new Set(eventIds).size,
+      teams: new Set(teamIds).size,
+      hashes: plan.hashes.size,
+    });
+  },
+
   async setByEvent(eventId: number, fixtures: Fixture[], season?: string): Promise<void> {
     try {
       const redis = await redisSingleton.getClient();

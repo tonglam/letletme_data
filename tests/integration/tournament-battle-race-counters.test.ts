@@ -7,7 +7,10 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { planTournamentStructure, type TournamentParticipant } from '../../src/domain/tournament';
 import { getDbClient } from '../../src/db/singleton';
 import { tournamentInfoRepository } from '../../src/repositories/tournament-infos';
-import { syncTournamentBattleRaceResults } from '../../src/services/tournament-battle-race-results.service';
+import {
+  syncTournamentBattleRaceResults,
+  syncTournamentBattleRaceResultsForTournament,
+} from '../../src/services/tournament-battle-race-results.service';
 
 /**
  * FP-09 (C6): battle-race must not award wins against phantom zeros.
@@ -208,7 +211,10 @@ describe('Battle-race phantom-zero guard (FP-09)', () => {
       await insertEntryResult(ENTRY_C, eventId);
 
       // When: the battle-race sync runs
-      const firstRun = await syncTournamentBattleRaceResults(eventId);
+      await expect(syncTournamentBattleRaceResults(eventId)).rejects.toMatchObject({
+        code: 'DATA_SYNC_INCOMPLETE',
+        failedUnits: expect.any(Number),
+      });
 
       // Then: the A-B matchup is scored from real nets (50 vs 40 → 3/0)
       const battleRows = await fetchBattleRows();
@@ -231,8 +237,6 @@ describe('Battle-race phantom-zero guard (FP-09)', () => {
         away_net_points: null,
         away_match_points: null,
       });
-      expect(firstRun.skipped).toBeGreaterThanOrEqual(1);
-
       // And: group counters reflect only the scored matchup — C gets NO win
       const groupsAfterFirst = await fetchGroupRows();
       expect(groupsAfterFirst.get(ENTRY_A)).toMatchObject({
@@ -261,7 +265,9 @@ describe('Battle-race phantom-zero guard (FP-09)', () => {
 
       // When: D's result is backfilled and the sync re-runs for the same event
       await insertEntryResult(ENTRY_D, eventId);
-      const secondRun = await syncTournamentBattleRaceResults(eventId);
+      const tournament = await tournamentInfoRepository.findById(tournamentId);
+      expect(tournament).not.toBeNull();
+      const secondRun = await syncTournamentBattleRaceResultsForTournament(tournament!, eventId);
 
       // Then: the C-D matchup is now scored from real nets (60 vs 55 → 3/0)
       const battleRowsAfter = await fetchBattleRows();
@@ -273,10 +279,7 @@ describe('Battle-race phantom-zero guard (FP-09)', () => {
         away_net_points: 55,
         away_match_points: 0,
       });
-      // The service result aggregates every active battle tournament. Other
-      // fixture tournaments may legitimately report skips; the rows below are
-      // the scoped convergence proof for this tournament.
-      expect(secondRun.skipped).toBeGreaterThanOrEqual(0);
+      expect(secondRun.skipped).toBe(0);
 
       // And: counters converge — A is NOT double-counted on the re-run
       const groupsAfterSecond = await fetchGroupRows();

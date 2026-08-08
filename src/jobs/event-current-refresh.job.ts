@@ -16,7 +16,7 @@ export type ManualEventCurrentRefreshResult = {
 /**
  * HTTP / ops trigger: recomputes `event:current` from the `Event:{season}` hash immediately.
  * Does not check isFPLSeason (cron still does). If the derived gameweek id changes, enqueues
- * `events-sync` like the automatic path.
+ * the atomic core snapshot like the automatic path.
  */
 export async function runManualEventCurrentRefresh(): Promise<ManualEventCurrentRefreshResult> {
   const updated = await eventsCache.refreshCurrent();
@@ -24,13 +24,13 @@ export async function runManualEventCurrentRefresh(): Promise<ManualEventCurrent
     return { refreshed: false };
   }
 
-  logInfo('Manual event-current-refresh: gameweek id changed, enqueuing events sync');
+  logInfo('Manual event-current-refresh: gameweek id changed, enqueuing core snapshot');
   try {
     const job = await enqueueCoreSnapshotJob('manual');
-    logInfo('Events sync job enqueued (manual after event:current refresh)', { jobId: job.id });
+    logInfo('Core snapshot job enqueued (manual after event:current refresh)', { jobId: job.id });
     return { refreshed: true, eventsSyncJobId: job.id };
   } catch {
-    logInfo('Events sync job already enqueued or failed (manual after event:current refresh)');
+    logInfo('Core snapshot job already enqueued or failed (manual after event:current refresh)');
     return { refreshed: true };
   }
 }
@@ -45,12 +45,12 @@ export async function runEventCurrentRefresh() {
   // gate compared local calendar dates to the next GW and could skip real transitions.
   const updated = await eventsCache.refreshCurrent();
   if (updated) {
-    logInfo('Gameweek transition detected - triggering events sync');
+    logInfo('Gameweek transition detected - triggering core snapshot');
     try {
       const job = await enqueueCoreSnapshotJob('event-transition');
-      logInfo('Events sync job enqueued (transition)', { jobId: job.id });
+      logInfo('Core snapshot job enqueued (transition)', { jobId: job.id });
     } catch {
-      logInfo('Events sync job already enqueued or failed (transition)');
+      logInfo('Core snapshot job already enqueued or failed (transition)');
     }
   }
 }

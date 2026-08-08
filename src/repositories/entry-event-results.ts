@@ -1,12 +1,14 @@
-import { and, eq, gte, inArray, lte, sql } from 'drizzle-orm';
+import { and, eq, gte, inArray, isNotNull, lte, sql } from 'drizzle-orm';
 
-import {
-  entryEventResults,
-  type DbEntryEventResult,
-  type DbEntryEventResultInsert,
-} from '../db/schemas/index.schema';
+import { entryEventResults, type DbEntryEventResult } from '../db/schemas/index.schema';
 import { getDb, type DbOrTransaction } from '../db/singleton';
 import { toNullableDbChip } from '../domain/chips';
+import {
+  hasCompleteEntryPickLiveCoverage,
+  isCompleteEntryPicks,
+  isEntryPicksPayloadForEvent,
+  resolveScoringCaptainPick,
+} from '../domain/entry-picks';
 import type { RawFPLEntryEventPicksResponse, RawFPLEntryHistoryCurrentItem } from '../types';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
@@ -16,10 +18,7 @@ import {
   chunkCoreHistoryRows,
 } from './entry-event-results-history';
 
-type AutoSubItem = {
-  element_in?: number | null;
-  elementIn?: number | null;
-};
+type AutoSubItem = RawFPLEntryEventPicksResponse['automatic_subs'][number];
 
 type EntryEventTotalsRow = {
   entryId: number;
@@ -42,23 +41,43 @@ export type PreEntryBaselineUnit = {
 
 const PRE_ENTRY_OVERALL_RANK = 2_147_483_647;
 
-function normalizeAutoSubs(raw: unknown): AutoSubItem[] {
-  if (!Array.isArray(raw)) {
-    return [];
-  }
-
-  return raw as AutoSubItem[];
-}
-
 function getAutoSubPoints(autoSubs: AutoSubItem[], elementsPoints: Map<number, number>): number {
   return autoSubs.reduce((total, sub) => {
-    const elementId = sub.element_in ?? sub.elementIn;
-    if (!elementId) {
-      return total;
-    }
-
-    return total + (elementsPoints.get(elementId) ?? 0);
+    return total + (elementsPoints.get(sub.element_in) ?? 0);
   }, 0);
+}
+
+export function validateAutomaticSubs(
+  entryId: number,
+  eventId: number,
+  picks: RawFPLEntryEventPicksResponse,
+): AutoSubItem[] {
+  const selectedElements = new Set(picks.picks.map((pick) => pick.element));
+  const incomingElements = new Set<number>();
+  const outgoingElements = new Set<number>();
+  for (const substitution of picks.automatic_subs) {
+    if (
+      substitution.entry !== entryId ||
+      substitution.event !== eventId ||
+      substitution.element_in === substitution.element_out ||
+      !selectedElements.has(substitution.element_in) ||
+      !selectedElements.has(substitution.element_out) ||
+      incomingElements.has(substitution.element_in) ||
+      outgoingElements.has(substitution.element_out)
+    ) {
+      throw new Error(
+        `Refusing invalid automatic substitutions for entry ${entryId}, event ${eventId}`,
+      );
+    }
+    incomingElements.add(substitution.element_in);
+    outgoingElements.add(substitution.element_out);
+  }
+  if ([...incomingElements].some((elementId) => outgoingElements.has(elementId))) {
+    throw new Error(
+      `Refusing invalid automatic substitutions for entry ${entryId}, event ${eventId}`,
+    );
+  }
+  return picks.automatic_subs;
 }
 
 export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) => {
@@ -247,30 +266,92 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
       }
     },
 
+    findEntryIdsNeedingRichSync: async (
+      entryIds: number[],
+      eventId: number,
+      freshAfter?: Date | string,
+    ): Promise<number[]> => {
+      const uniqueEntryIds = Array.from(new Set(entryIds));
+      if (uniqueEntryIds.length === 0) return [];
+
+      try {
+        const db = await getDbInstance();
+        const syncedEntryIds = new Set<number>();
+        for (let index = 0; index < uniqueEntryIds.length; index += 1000) {
+          const chunk = uniqueEntryIds.slice(index, index + 1000);
+          const rows = await db
+            .select({ entryId: entryEventResults.entryId })
+            .from(entryEventResults)
+            .where(
+              and(
+                eq(entryEventResults.eventId, eventId),
+                inArray(entryEventResults.entryId, chunk),
+                freshAfter
+                  ? sql`${entryEventResults.richSyncedAt} >= ${
+                      freshAfter instanceof Date ? freshAfter.toISOString() : freshAfter
+                    }::timestamptz`
+                  : isNotNull(entryEventResults.richSyncedAt),
+              ),
+            );
+          for (const row of rows) syncedEntryIds.add(row.entryId);
+        }
+        return uniqueEntryIds.filter((entryId) => !syncedEntryIds.has(entryId));
+      } catch (error) {
+        logError('Failed to audit rich entry event results', error, {
+          eventId,
+          freshAfter: freshAfter instanceof Date ? freshAfter.toISOString() : freshAfter,
+        });
+        throw new DatabaseError(
+          'Failed to audit rich entry event results',
+          'ENTRY_EVENT_RESULTS_RICH_AUDIT_ERROR',
+          error as Error,
+        );
+      }
+    },
+
     upsertFromPicksAndLive: async (
       entryId: number,
       eventId: number,
       picks: RawFPLEntryEventPicksResponse,
       live: EventPointsPayload,
+      richSyncedAt: Date | string,
     ): Promise<void> => {
+      if (!isEntryPicksPayloadForEvent(picks, eventId)) {
+        throw new Error(
+          `Refusing rich picks for an unexpected event for entry ${entryId}, event ${eventId}`,
+        );
+      }
+      if (!isCompleteEntryPicks(picks.picks)) {
+        throw new Error(`Refusing incomplete rich picks for entry ${entryId}, event ${eventId}`);
+      }
+      if (
+        !hasCompleteEntryPickLiveCoverage(
+          picks.picks,
+          live.elements.map((element) => element.id),
+        )
+      ) {
+        throw new Error(
+          `Refusing incomplete event-live coverage for entry ${entryId}, event ${eventId}`,
+        );
+      }
+      const autoSubs = validateAutomaticSubs(entryId, eventId, picks);
       try {
         const db = await getDbInstance();
 
         const entryHistory = picks.entry_history;
+        const exactRichSyncedAt =
+          richSyncedAt instanceof Date ? richSyncedAt.toISOString() : richSyncedAt;
+        const richSyncedAtSql = sql`${exactRichSyncedAt}::timestamptz`;
         const activeChip = picks.active_chip ?? null;
-        const captainPick = picks.picks.find((p) => p.is_captain) || null;
+        const captainPick = resolveScoringCaptainPick(picks.picks);
         const elementsPoints = new Map<number, number>();
         for (const el of live.elements) {
           elementsPoints.set(el.id, el.stats.total_points);
         }
-        const autoSubs = normalizeAutoSubs(picks.automatic_subs);
         const autoSubPoints = getAutoSubPoints(autoSubs, elementsPoints);
         const captainPointsBase = captainPick ? (elementsPoints.get(captainPick.element) ?? 0) : 0;
-        const captainPoints = captainPick
-          ? captainPointsBase * (captainPick.multiplier || 1)
-          : null;
-
-        const insert: DbEntryEventResultInsert = {
+        const captainPoints = captainPick ? captainPointsBase * captainPick.multiplier : null;
+        const insert = {
           entryId,
           eventId,
           eventPoints: entryHistory.points,
@@ -284,11 +365,12 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
           eventPlayedCaptain: captainPick ? captainPick.element : null,
           eventCaptainPoints: captainPoints,
           eventPicks: picks.picks as unknown,
-          eventAutoSub: picks.automatic_subs as unknown,
+          eventAutoSub: autoSubs as unknown,
           overallPoints: entryHistory.total_points,
           overallRank: entryHistory.overall_rank ?? 0,
           teamValue: entryHistory.value ?? null,
           bank: entryHistory.bank ?? null,
+          richSyncedAt: richSyncedAtSql,
         };
 
         await db
@@ -296,6 +378,13 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
           .values(insert)
           .onConflictDoUpdate({
             target: [entryEventResults.entryId, entryEventResults.eventId],
+            // Rich picks/live evidence is ordered by the timestamp captured
+            // before the upstream reads. A slower, older attempt must not
+            // replace a newer corrected result or move its checkpoint back.
+            where: sql`
+              ${entryEventResults.richSyncedAt} IS NULL
+              OR ${entryEventResults.richSyncedAt} < ${richSyncedAtSql}
+            `,
             set: {
               eventPoints: insert.eventPoints,
               eventTransfers: insert.eventTransfers,
@@ -313,6 +402,7 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
               overallRank: insert.overallRank,
               teamValue: insert.teamValue,
               bank: insert.bank,
+              richSyncedAt: richSyncedAtSql,
               updatedAt: new Date(),
             },
           });

@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { readdirSync, readFileSync } from 'node:fs';
 
 import { inspectMigrationHistory } from '../../scripts/migration-history';
+import { getSqlMigrationPreconditions } from '../../scripts/sql-migration-compatibility';
 
 describe('migration history inspection', () => {
   test('accepts unapplied migrations after the applied tail', () => {
@@ -53,6 +54,22 @@ describe('migration history inspection', () => {
       '0040_tournament_lifecycle_progress.sql',
     ]);
   });
+
+  test('keeps rich result checkpoints after the current migration tail', () => {
+    const files = readdirSync('migrations')
+      .filter((file) => file.endsWith('.sql'))
+      .sort();
+
+    const applied = files.filter((file) => file <= '0049_core_snapshot_authority.sql');
+    expect(inspectMigrationHistory(files, applied)).toMatchObject({
+      missing: [],
+      backdated: [],
+      latestApplied: '0049_core_snapshot_authority.sql',
+    });
+    expect(files).toContain('0050_entry_event_result_rich_checkpoint.sql');
+    expect(files).toContain('0051_event_data_checked_at.sql');
+    expect(files).toContain('0052_replace_player_picker_rpc.sql');
+  });
 });
 
 describe('public Data API lockdown migration', () => {
@@ -64,6 +81,30 @@ describe('public Data API lockdown migration', () => {
     expect(migration).toMatch(/'tournament_infos'/);
     expect(migration).not.toContain('ON ALL TABLES IN SCHEMA public');
     expect(migration).not.toContain('ALTER DEFAULT PRIVILEGES');
+  });
+});
+
+describe('GraphQL read RPC migration', () => {
+  test('keeps the applied migration immutable and replaces the RPC at the tail', () => {
+    const applied = readFileSync('migrations/0043_create_graphql_read_rpcs.sql', 'utf8');
+    const replacement = readFileSync('migrations/0052_replace_player_picker_rpc.sql', 'utf8');
+    const drop = replacement.indexOf(
+      'DROP FUNCTION IF EXISTS public.get_players_for_picker(integer, integer);',
+    );
+    const create = replacement.indexOf('CREATE FUNCTION public.get_players_for_picker(');
+
+    expect(applied).not.toContain(
+      'DROP FUNCTION IF EXISTS public.get_players_for_picker(integer, integer);',
+    );
+    expect(drop).toBeGreaterThanOrEqual(0);
+    expect(create).toBeGreaterThan(drop);
+  });
+
+  test('prepares only a still-pending 0043 for the legacy overload', () => {
+    expect(getSqlMigrationPreconditions('0043_create_graphql_read_rpcs.sql')).toEqual([
+      'DROP FUNCTION IF EXISTS public.get_players_for_picker(integer, integer);',
+    ]);
+    expect(getSqlMigrationPreconditions('0052_replace_player_picker_rpc.sql')).toEqual([]);
   });
 });
 
@@ -101,5 +142,29 @@ describe('core snapshot authority migration', () => {
     expect(migration).toContain('REVOKE ALL ON TABLE');
     expect(migration).toContain('REVOKE ALL ON SEQUENCE');
     expect(migration).toContain('price_source_checked_at');
+  });
+});
+
+describe('entry result rich checkpoint migration', () => {
+  test('follows core authority and preserves the existing table security boundary', () => {
+    const migration = readFileSync(
+      'migrations/0050_entry_event_result_rich_checkpoint.sql',
+      'utf8',
+    );
+
+    expect(migration).toContain('ADD COLUMN IF NOT EXISTS rich_synced_at timestamptz');
+    expect(migration).toContain('ADD COLUMN IF NOT EXISTS source_checked_at timestamptz');
+    expect(migration).not.toContain('GRANT');
+  });
+});
+
+describe('event finalization checkpoint migration', () => {
+  test('adds a stable cutoff without changing the existing table security boundary', () => {
+    const migration = readFileSync('migrations/0051_event_data_checked_at.sql', 'utf8');
+
+    expect(migration).toContain('ADD COLUMN IF NOT EXISTS data_checked_at timestamptz');
+    expect(migration).toContain('WHERE data_checked = true');
+    expect(migration).toContain('statement_timestamp()');
+    expect(migration).not.toContain('GRANT');
   });
 });

@@ -254,6 +254,7 @@ describe('tournament creation vs entry_infos (FP-08)', () => {
     const capturedTarget = {
       tournamentId: created.id,
       standingsReadyAt: capturedRows[0]!.standingsReadyAt,
+      resultsFreshAfter: '2026-08-04T17:00:00.000Z',
     };
     const activeTournament = (await tournamentInfoRepository.findActive()).find(
       (tournament) => tournament.id === created.id,
@@ -282,7 +283,8 @@ describe('tournament creation vs entry_infos (FP-08)', () => {
     await client`
       UPDATE events
       SET finished = true,
-          data_checked = true
+          data_checked = true,
+          data_checked_at = '2026-08-04T16:00:00.000Z'
       WHERE id = 12
     `;
     expect(await tournamentRosterRepository.finishThroughEvent(12, [capturedTarget])).toBe(0);
@@ -291,14 +293,29 @@ describe('tournament creation vs entry_infos (FP-08)', () => {
       FROM tournament_infos
       WHERE id = ${created.id}
     `;
+    const currentTarget = {
+      tournamentId: created.id,
+      standingsReadyAt: currentRows[0]!.standingsReadyAt,
+    };
+    expect(
+      await tournamentRosterRepository.finishThroughEvent(12, [
+        { ...currentTarget, resultsFreshAfter: '2026-08-04T15:00:00.000Z' },
+      ]),
+    ).toBe(0);
     expect(
       await tournamentRosterRepository.finishThroughEvent(13, [
-        { tournamentId: created.id, standingsReadyAt: currentRows[0]!.standingsReadyAt },
+        {
+          ...currentTarget,
+          resultsFreshAfter: capturedTarget.resultsFreshAfter,
+        },
       ]),
     ).toBe(0);
     expect(
       await tournamentRosterRepository.finishThroughEvent(12, [
-        { tournamentId: created.id, standingsReadyAt: currentRows[0]!.standingsReadyAt },
+        {
+          ...currentTarget,
+          resultsFreshAfter: capturedTarget.resultsFreshAfter,
+        },
       ]),
     ).toBe(1);
     const rows = await client<Array<{ state: string }>>`

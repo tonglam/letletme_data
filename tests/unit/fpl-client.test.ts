@@ -162,6 +162,20 @@ describe('FPL boundary schemas (FP-04)', () => {
     expect(result.active_chip).toBeNull();
   });
 
+  test('getEntryEventPicks rejects malformed automatic substitutions', async () => {
+    const payload = {
+      active_chip: null,
+      automatic_subs: [{ entry: 123, element_out: 101, event: 1 }],
+      entry_history: picksEntryHistory,
+      picks: picksItems,
+    };
+    globalThis.fetch = mock(
+      async () => new Response(JSON.stringify(payload), { status: 200 }),
+    ) as unknown as typeof fetch;
+
+    await expect(fplClient.getEntryEventPicks(123, 1)).rejects.toThrow();
+  });
+
   test('classic standings retain preseason new entries and both pagination cursors', async () => {
     let requestedUrl = '';
     const payload = {

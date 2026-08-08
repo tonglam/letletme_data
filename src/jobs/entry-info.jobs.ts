@@ -3,6 +3,7 @@ import type { Elysia } from 'elysia';
 
 import { enqueueEntryInfoSyncJob } from './entry-sync-enqueue';
 import { getEntryInfoSyncDateKey, hasEntryInfoSyncedToday } from './entry-info-sync-marker';
+import { eventRepository } from '../repositories/events';
 import { isFPLSeason } from '../utils/conditions';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { logDebug, logInfo } from '../utils/logger';
@@ -31,8 +32,18 @@ export function registerEntryInfoJobs(app: Elysia) {
               return;
             }
 
-            const job = await enqueueEntryInfoSyncJob('cron');
-            logInfo('Entry info sync job enqueued via cron', { jobId: job.id });
+            const dateKey = getEntryInfoSyncDateKey(now);
+            const targetEventId = (await eventRepository.findLatestFinalized())?.id ?? 0;
+            const job = await enqueueEntryInfoSyncJob('cron', {
+              eventId: targetEventId,
+              runId: `daily-${dateKey}`,
+              jobId: `entry-info-daily-${dateKey}`,
+              removeOnSettle: true,
+            });
+            logInfo('Entry info sync job enqueued via cron', {
+              jobId: job.id,
+              targetEventId,
+            });
           });
         } catch {
           // Failure details are already emitted by runTrackedJob.

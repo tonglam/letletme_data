@@ -1,8 +1,59 @@
 import { describe, expect, it } from 'bun:test';
 
-import { aggregateTournamentSelectionStatsRows } from '../../src/services/tournament-selection-stats.service';
+import {
+  aggregateTournamentSelectionStatsRows,
+  filterTournamentEntriesForEvent,
+  hasCompleteTournamentPicks,
+} from '../../src/services/tournament-selection-stats.service';
 
 describe('aggregateTournamentSelectionStatsRows', () => {
+  it('accepts exactly 15 unique valid picks as a complete source row', () => {
+    const complete = Array.from({ length: 15 }, (_, index) => ({
+      element: index + 1,
+      position: index + 1,
+      multiplier: index === 0 ? 2 : index < 11 ? 1 : 0,
+      is_captain: index === 0,
+      is_vice_captain: index === 1,
+    }));
+    expect(hasCompleteTournamentPicks(complete)).toBe(true);
+    expect(hasCompleteTournamentPicks(complete.slice(0, 14))).toBe(false);
+    expect(hasCompleteTournamentPicks([...complete.slice(0, 14), { element: 1 }])).toBe(false);
+    expect(hasCompleteTournamentPicks([...complete.slice(0, 14), {}])).toBe(false);
+    expect(hasCompleteTournamentPicks([...complete.slice(0, 14), { element: 15.5 }])).toBe(false);
+    const finalizedAutoSubPicks = complete.map((pick) => {
+      if (pick.is_captain) return { ...pick, multiplier: 0 };
+      if (pick.is_vice_captain) return { ...pick, multiplier: 2 };
+      if (pick.position === 3) return { ...pick, multiplier: 0 };
+      if (pick.position === 12) return { ...pick, multiplier: 1 };
+      return pick;
+    });
+    expect(hasCompleteTournamentPicks(finalizedAutoSubPicks)).toBe(true);
+    expect(
+      hasCompleteTournamentPicks(
+        complete.map((pick) => (pick.position === 12 ? { ...pick, multiplier: 2 } : pick)),
+      ),
+    ).toBe(false);
+    expect(
+      hasCompleteTournamentPicks([...complete.slice(0, 14), { ...complete[14], position: 14 }]),
+    ).toBe(false);
+  });
+
+  it('excludes managers who had not entered yet from an event audit', () => {
+    expect(
+      filterTournamentEntriesForEvent(
+        [
+          { tournamentId: 1, entryId: 100 },
+          { tournamentId: 1, entryId: 101 },
+        ],
+        new Map([
+          [100, 1],
+          [101, 20],
+        ]),
+        10,
+      ),
+    ).toEqual([{ tournamentId: 1, entryId: 100 }]);
+  });
+
   it('aggregates picks, captaincy, vice-captaincy, and transfers per tournament', () => {
     const rows = aggregateTournamentSelectionStatsRows({
       eventId: 35,

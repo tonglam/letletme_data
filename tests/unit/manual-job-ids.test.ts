@@ -83,7 +83,9 @@ mock.module('../../src/queues/league-sync.queue', () => ({
 const { enqueueEventLivesDbSync, enqueueEventLivesCacheUpdate } = await import(
   '../../src/jobs/live-data.jobs'
 );
-const { enqueueEntryPicksSyncJob } = await import('../../src/jobs/entry-sync-enqueue');
+const { enqueueEntryInfoSyncJob, enqueueEntryPicksSyncJob } = await import(
+  '../../src/jobs/entry-sync-enqueue'
+);
 const { enqueueTournamentEventResults } = await import('../../src/jobs/tournament-sync.jobs');
 const { enqueueLeagueEventResults } = await import('../../src/jobs/league-sync.jobs');
 const { stableHash } = await import('../../src/utils/stable-hash');
@@ -208,6 +210,19 @@ describe('entry-sync entry-list job IDs', () => {
     expect(second!.id).toBe(first!.id as string);
     expect(entrySyncAddCalls[0].data.runId).not.toBe('manual');
     expect(entrySyncAddCalls[1].data.runId).not.toBe(entrySyncAddCalls[0].data.runId);
+    expect(entrySyncAddCalls[0].opts.removeOnComplete).toBe(true);
+    expect(entrySyncAddCalls[0].opts.removeOnFail).toBe(true);
+  });
+
+  test('an explicit daily root ID is removable so an incomplete chain can restart', async () => {
+    const job = await enqueueEntryInfoSyncJob('cron', {
+      eventId: 10,
+      runId: 'daily-20260804',
+      jobId: 'entry-info-daily-20260804',
+      removeOnSettle: true,
+    });
+
+    expect(job.id).toBe('entry-info-daily-20260804');
     expect(entrySyncAddCalls[0].opts.removeOnComplete).toBe(true);
     expect(entrySyncAddCalls[0].opts.removeOnFail).toBe(true);
   });

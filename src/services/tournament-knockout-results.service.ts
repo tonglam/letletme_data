@@ -17,7 +17,8 @@ import {
 } from '../repositories/tournament-knockout-results';
 import { createTournamentKnockoutsRepository } from '../repositories/tournament-knockouts';
 import { ensureKnockoutRoundOneSeeded } from './tournament-seed.service';
-import { uniqueNumbers } from '../utils/async';
+import { mapWithConcurrency, uniqueNumbers } from '../utils/async';
+import { IncompleteDataSyncError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 
 type KnockoutRoundSummary = {
@@ -530,20 +531,18 @@ export async function syncTournamentKnockoutResults(
   let updatedKnockouts = 0;
   let skipped = 0;
   const failedTournamentIds: number[] = [];
-  const syncResults = await Promise.all(
-    tournaments.map(async (tournament) => {
-      try {
-        return await syncKnockoutForTournament(tournament, eventId);
-      } catch (error) {
-        logError('Failed to sync knockout results', error, {
-          tournamentId: tournament.id,
-          eventId,
-        });
-        failedTournamentIds.push(tournament.id);
-        return { updatedResults: 0, updatedKnockouts: 0, skipped: 0 };
-      }
-    }),
-  );
+  const syncResults = await mapWithConcurrency(tournaments, 10, async (tournament) => {
+    try {
+      return await syncKnockoutForTournament(tournament, eventId);
+    } catch (error) {
+      logError('Failed to sync knockout results', error, {
+        tournamentId: tournament.id,
+        eventId,
+      });
+      failedTournamentIds.push(tournament.id);
+      return { updatedResults: 0, updatedKnockouts: 0, skipped: 0 };
+    }
+  });
   for (const result of syncResults) {
     updatedResults += result.updatedResults;
     updatedKnockouts += result.updatedKnockouts;
@@ -558,8 +557,16 @@ export async function syncTournamentKnockoutResults(
     failedCount: failedTournamentIds.length,
   });
 
-  if (failedTournamentIds.length > 0) {
-    throw new Error(`Knockout sync failed for tournament(s): ${failedTournamentIds.join(', ')}`);
+  const failedUnits = skipped + failedTournamentIds.length;
+  if (failedUnits > 0) {
+    const succeededUnits = Math.max(updatedResults, updatedKnockouts);
+    throw new IncompleteDataSyncError(
+      'Knockout results did not converge for every required unit',
+      succeededUnits + failedUnits,
+      0,
+      succeededUnits,
+      failedUnits,
+    );
   }
 
   return { eventId, updatedResults, updatedKnockouts, skipped };

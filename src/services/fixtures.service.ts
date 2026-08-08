@@ -9,11 +9,7 @@ interface FixtureSyncOptions {
   publishedSeason?: string | null;
 }
 
-/**
- * Fixtures share identity and cache views with events and teams. A named or
- * event-scoped legacy refresh therefore runs the same complete core publisher
- * instead of maintaining a second partial-write protocol.
- */
+/** Route every non-Live fixture refresh through the complete core publisher. */
 export async function syncFixtures(
   eventId?: number,
   _options: FixtureSyncOptions = {},
@@ -25,11 +21,7 @@ export async function syncFixtures(
   return { count: result.fixtures, errors: result.failedUnits };
 }
 
-/**
- * Compatibility entry point for the retired 38-request backfill. One complete
- * fixture feed is authoritative and the summary is derived from the committed
- * database rows.
- */
+/** Compatibility alias for the retired per-gameweek backfill loop. */
 export async function syncAllGameweeks(): Promise<{
   totalCount: number;
   totalErrors: number;

@@ -1,5 +1,35 @@
 import type { EntrySyncJobName } from '../queues/entry-sync.queue';
 
+type EventFinalizationState = {
+  finished: boolean;
+  dataChecked: boolean;
+  dataCheckedAt: Date | null;
+};
+
+export function isExplicitEntryRepairRequest(
+  jobData: { entryIds?: readonly number[] } | undefined,
+): boolean {
+  return jobData?.entryIds !== undefined;
+}
+
+export function isCronEntryInfoTableScan(
+  jobData: { source?: string; entryIds?: readonly number[] } | undefined,
+): boolean {
+  return jobData?.source === 'cron' && jobData.entryIds === undefined;
+}
+
+export function shouldRefreshEntryPicks(
+  jobData: { source?: string; entryIds?: readonly number[] } | undefined,
+): boolean {
+  return jobData?.source === 'cron' || isExplicitEntryRepairRequest(jobData);
+}
+
+export function resolveRichResultFreshnessCutoff(
+  event: EventFinalizationState | null,
+): Date | null {
+  return event?.finished && event.dataChecked ? event.dataCheckedAt : null;
+}
+
 export async function resolveEntrySyncTargetEventId(
   jobName: EntrySyncJobName,
   requestedEventId: number | undefined,

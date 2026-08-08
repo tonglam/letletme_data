@@ -36,6 +36,7 @@ import { runTournamentInfoSync } from '../jobs/tournament-info.jobs';
 import { runTournamentKnockoutResultsSync } from '../jobs/tournament-knockout-results.jobs';
 import { runTournamentPointsRaceResultsSync } from '../jobs/tournament-points-race-results.jobs';
 import { getCurrentEvent } from './events.service';
+import { eventRepository } from '../repositories/events';
 import { refreshTournamentMaterializedViews } from './tournament-materialized-views.service';
 import { syncTournamentSelectionStats } from './tournament-selection-stats.service';
 import { logInfo } from '../utils/logger';
@@ -260,7 +261,10 @@ function buildJobMap(input?: unknown): Record<string, () => Promise<unknown>> {
     'player-stats-sync': () => enqueuePlayerStatsSyncJob('manual'),
     'phases-sync': () => enqueueCoreSnapshotJob('manual'),
     'player-values-sync': () => enqueuePlayerValuesSyncJob('manual'),
-    'entry-info-daily': () => enqueueEntryInfoSyncJob('manual'),
+    'entry-info-daily': async () => {
+      const targetEventId = (await eventRepository.findLatestFinalized())?.id ?? 0;
+      return enqueueEntryInfoSyncJob('manual', { eventId: targetEventId });
+    },
     'entry-event-picks-daily': async () => {
       const currentEvent = await getCurrentEvent();
       if (!currentEvent) {

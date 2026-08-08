@@ -1,4 +1,4 @@
-import { index, integer, jsonb, pgTable, uniqueIndex } from 'drizzle-orm/pg-core';
+import { index, integer, jsonb, pgTable, timestamp, uniqueIndex } from 'drizzle-orm/pg-core';
 import { chipEnum } from './enums.schema';
 import { autoIncrementId, timestamps } from './_helpers.schema';
 import { entryInfos } from './entry-infos.schema';
@@ -31,6 +31,7 @@ export const entryEventResults = pgTable(
     overallRank: integer('overall_rank').default(0).notNull(),
     teamValue: integer('team_value'),
     bank: integer('bank'),
+    richSyncedAt: timestamp('rich_synced_at', { withTimezone: true }),
     ...timestamps,
   },
   (table) => [

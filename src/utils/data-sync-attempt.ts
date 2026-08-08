@@ -215,6 +215,11 @@ export async function runDataSyncAttempt<T>(
       summary = options.summarize?.(result) ?? inferDataSyncWorkSummary(result);
       outcome = resolveOutcome(summary);
       return result;
+    } catch (error) {
+      // Bounded operational errors may carry useful unit counters even though
+      // a thrown attempt always remains failed.
+      summary = inferDataSyncWorkSummary(error);
+      throw error;
     } finally {
       // Preserve the resolved target even when the runner fails after lookup;
       // the failure report still needs to identify the bounded event unit.

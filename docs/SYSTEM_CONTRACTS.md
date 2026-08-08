@@ -76,9 +76,12 @@ for deployments that have not completed the migration.
   authenticated `events-sync` job from the trusted network. It derives the
   season from FPL GW1 metadata and establishes the key; do not set a guessed
   calendar value merely to make `/ready` green.
-- Core discovery jobs (events, teams, fixtures, players, phases) run year-round
-  so new-season metadata can be accepted before the fixture-derived season
-  window opens. Empty core arrays are no-ops that preserve accepted state.
+- One core discovery snapshot (events, teams, fixtures, players, phases) runs
+  year-round so new-season metadata can be accepted before the fixture-derived
+  season window opens. It validates one bootstrap response and one fixtures
+  response, commits all five PostgreSQL domains together, then atomically
+  replaces the complete Redis view. Empty or incomplete core payloads preserve
+  accepted state.
 - Valid pre-season placeholders remain explicit: team `strength=null`, team
   `position=0`, and fixture `pulseId=0`. They mean unknown, unranked, and not
   assigned respectively; downstream code must not infer stronger values.

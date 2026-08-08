@@ -9,6 +9,7 @@ export const events = pgTable('events', {
   averageEntryScore: integer('average_entry_score'),
   finished: boolean('finished').default(false).notNull(),
   dataChecked: boolean('data_checked').default(false).notNull(),
+  dataCheckedAt: timestamp('data_checked_at', { withTimezone: true }),
   highestScoringEntry: integer('highest_scoring_entry'),
   deadlineTimeEpoch: integer('deadline_time_epoch'),
   deadlineTimeGameOffset: integer('deadline_time_game_offset'),

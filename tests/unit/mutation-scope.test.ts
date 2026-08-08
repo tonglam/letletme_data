@@ -125,6 +125,7 @@ describe('resolveMutationScopes', () => {
       jobName: 'tournament-event-results',
       eventId: 35,
     });
+    expect(scopes).toContain('data-core:events');
     expect(scopes).toContain('entry-event-picks:event:35');
     expect(scopes).toContain('entry-event-transfers:event:35');
     expect(scopes).toContain('entry-event-results:event:35');
@@ -165,6 +166,7 @@ describe('resolveMutationScopes', () => {
       eventId: 33,
     });
     expect(refreshScopes).toContain('tournament-structure:global');
+    expect(refreshScopes).toContain('data-core:events');
 
     for (const jobName of [
       'tournament-points-race',

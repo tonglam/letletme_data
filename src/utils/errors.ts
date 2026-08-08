@@ -34,6 +34,26 @@ export class CacheError extends Error implements APIError {
   }
 }
 
+/**
+ * A bounded synchronization attempt persisted some work but did not converge.
+ * Only scalar counters belong here; messages must not contain entry IDs,
+ * upstream payloads, names, or raw URLs.
+ */
+export class IncompleteDataSyncError extends Error implements APIError {
+  public readonly code = 'DATA_SYNC_INCOMPLETE';
+
+  constructor(
+    message: string,
+    public readonly requiredUnits: number,
+    public readonly reusedUnits: number,
+    public readonly succeededUnits: number,
+    public readonly failedUnits: number,
+  ) {
+    super(message);
+    this.name = 'IncompleteDataSyncError';
+  }
+}
+
 export class ValidationError extends Error implements APIError {
   public readonly status = 400;
   constructor(

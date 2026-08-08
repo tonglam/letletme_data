@@ -168,8 +168,8 @@ users.
 
 ## Non-live synchronization operations
 
-Data, entry, league, and launch-monitor workers emit one bounded `data_sync_attempt` event for each
-top-level BullMQ or cron attempt. Live workers deliberately do not use this report. The event
+Data, entry, league, tournament, and launch-monitor workers emit one bounded `data_sync_attempt`
+event for each top-level BullMQ or cron attempt. Live workers deliberately do not use this report. The event
 contains a run ID, target GW when relevant, required/reused/succeeded/failed counts, queue wait and
 duration, plus bounded FPL endpoint/outcome counters. It excludes raw URLs, payloads, entry names,
 league URLs, and administrator identity.
@@ -221,6 +221,11 @@ A retained `LaunchNotification:*:lock` means delivery may have succeeded while t
 could not be written. Check the notification destination first. If it was delivered, write the
 corresponding marker before deleting the lock; if delivery definitely failed, delete only that
 exact transition lock so the next monitor tick can retry.
+
+The release definition, deterministic failure-injection cases, and the exact evidence required
+before calling this non-live upgrade fixed are in
+[docs/non-live-sync-evaluation.md](docs/non-live-sync-evaluation.md). Live ingestion and scoring are
+explicitly outside that claim.
 
 ## Post-deploy season readiness
 

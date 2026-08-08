@@ -442,7 +442,9 @@ export const tournamentRosterRepository = {
         targets
           .filter(
             (target) =>
-              target.tournamentId > 0 && Number.isFinite(Date.parse(target.standingsReadyAt)),
+              target.tournamentId > 0 &&
+              Number.isFinite(Date.parse(target.standingsReadyAt)) &&
+              Number.isFinite(Date.parse(target.resultsFreshAfter ?? '')),
           )
           .map((target) => [target.tournamentId, target]),
       ).values(),
@@ -455,6 +457,7 @@ export const tournamentRosterRepository = {
       eligibleTargets.map((target) => ({
         tournament_id: target.tournamentId,
         standings_ready_at: target.standingsReadyAt,
+        results_fresh_after: target.resultsFreshAfter,
       })),
     );
     const client = await getDbClient();
@@ -463,7 +466,8 @@ export const tournamentRosterRepository = {
       set state = 'finished', updated_at = now()
       from jsonb_to_recordset(${targetPayload}::jsonb) as target(
         tournament_id int,
-        standings_ready_at timestamptz
+        standings_ready_at timestamptz,
+        results_fresh_after timestamptz
       )
       where tournament.id = target.tournament_id
         and tournament.standings_ready_at = target.standings_ready_at
@@ -476,6 +480,7 @@ export const tournamentRosterRepository = {
           where terminal_event.id = ${eventId}
             and terminal_event.finished = true
             and terminal_event.data_checked = true
+            and terminal_event.data_checked_at <= target.results_fresh_after
         )
         and greatest(
           coalesce(tournament.group_ended_event_id, 0),

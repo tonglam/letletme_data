@@ -1,24 +1,40 @@
-import { getActiveCacheSeason } from '../cache/cache-season';
 import { fplClient } from '../clients/fpl';
 import {
   type DbEntryEventResult,
   type DbEventLive,
   type DbLeagueEventResultInsert,
 } from '../db/schemas/index.schema';
+import { readDatabaseOrderingTimestamp } from '../db/ordering-timestamp';
 import { toNullableDbChip } from '../domain/chips';
-import { entryEventResultsRepository } from '../repositories/entry-event-results';
-import { entryInfoRepository } from '../repositories/entry-infos';
-import { eventLiveRepository } from '../repositories/event-lives';
-import { leagueEventResultsRepository } from '../repositories/league-event-results';
-import { playerRepository } from '../repositories/players';
-import { tournamentEntryRepository } from '../repositories/tournament-entries';
 import {
-  tournamentInfoRepository,
-  type TournamentInfoSummary,
-} from '../repositories/tournament-infos';
+  entryEventResultsRepository,
+  validateAutomaticSubs,
+} from '../repositories/entry-event-results';
+import { entryInfoRepository } from '../repositories/entry-infos';
+import {
+  hasCompleteEntryPickLiveCoverage,
+  isCompleteEntryPicks,
+  isEntryPicksPayloadForEvent,
+  resolveScoringCaptainPick,
+} from '../domain/entry-picks';
+import { eventLiveRepository } from '../repositories/event-lives';
+import { eventRepository } from '../repositories/events';
+import { getActiveCacheSeason } from '../cache/cache-season';
+import {
+  leagueEventResultsRepository,
+  type LeagueEventResultEvidenceInsert,
+} from '../repositories/league-event-results';
+import { playerRepository } from '../repositories/players';
+import { tournamentInfoRepository } from '../repositories/tournament-infos';
 import type { RawFPLEntryEventPickItem, RawFPLEntryEventPicksResponse } from '../types';
 import { mapWithConcurrency, uniqueNumbers } from '../utils/async';
+import { IncompleteDataSyncError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
+import { resolveTournamentEntryIds } from './tournament-entry-resolver.service';
+import { resolveRichResultFreshnessCutoff } from '../domain/entry-sync';
+import { latestFreshnessTimestamp } from '../domain/freshness';
+
+export { latestFreshnessTimestamp } from '../domain/freshness';
 
 const DEFAULT_CONCURRENCY = 5;
 
@@ -109,44 +125,15 @@ function resolveEventNetPoints(eventPoints: number, transfersCost: number): numb
   return eventPoints - transfersCost;
 }
 
-async function fetchLeagueEntryIds(tournament: TournamentInfoSummary): Promise<number[]> {
-  const maxEntries = tournament.totalTeamNum > 0 ? tournament.totalTeamNum : undefined;
-  const entryIds: number[] = [];
-  let page = 1;
-  let hasNext = true;
-
-  while (hasNext) {
-    const response =
-      tournament.leagueType === 'classic'
-        ? await fplClient.getLeagueClassicStandings(tournament.leagueId, page)
-        : await fplClient.getLeagueH2HStandings(tournament.leagueId, page);
-
-    const pageEntries = response.standings.results.map((result) => result.entry).filter(Boolean);
-    entryIds.push(...pageEntries);
-
-    if (maxEntries && entryIds.length >= maxEntries) {
-      break;
-    }
-
-    hasNext = response.standings.has_next;
-    page += 1;
-  }
-
-  const uniqueEntryIds = uniqueNumbers(entryIds);
-  if (maxEntries) {
-    return uniqueEntryIds.slice(0, maxEntries);
-  }
-
-  return uniqueEntryIds;
-}
-
-async function resolveTournamentEntries(tournament: TournamentInfoSummary): Promise<number[]> {
-  const storedEntries = await tournamentEntryRepository.findEntryIdsByTournamentId(tournament.id);
-  if (storedEntries.length > 0) {
-    return uniqueNumbers(storedEntries);
-  }
-
-  return fetchLeagueEntryIds(tournament);
+export function isEntryResultRichEnough(
+  entryResult: Pick<DbEntryEventResult, 'richSyncedAt'> | undefined,
+  freshAfter?: Date,
+): boolean {
+  if (!entryResult) return false;
+  if (!freshAfter) return entryResult.richSyncedAt !== null;
+  return (
+    entryResult.richSyncedAt !== null && entryResult.richSyncedAt.getTime() >= freshAfter.getTime()
+  );
 }
 
 async function fetchMissingEntryPicks(
@@ -158,6 +145,9 @@ async function fetchMissingEntryPicks(
   const results = await mapWithConcurrency(entryIds, concurrency, async (entryId) => {
     try {
       const picks = await fplClient.getEntryEventPicks(entryId, eventId);
+      if (!isEntryPicksPayloadForEvent(picks, eventId)) {
+        throw new Error(`Entry ${entryId} returned picks for an unexpected event`);
+      }
       return { entryId, picks } satisfies MissingPickResult;
     } catch (error) {
       errors += 1;
@@ -172,9 +162,10 @@ async function fetchMissingEntryPicks(
   return { results, errors };
 }
 
-function buildEntryResultData(
+export function buildEntryResultData(
   entryResult: DbEntryEventResult | undefined,
   fallbackPicks: RawFPLEntryEventPicksResponse | null,
+  eventId: number,
   eventLiveMap: Map<number, DbEventLive>,
   elementTypeMap: Map<number, number>,
 ): {
@@ -201,14 +192,28 @@ function buildEntryResultData(
   highestScorePoints: number | null;
   highestScoreBlank: boolean;
 } | null {
-  const picks = entryResult ? normalizePicks(entryResult.eventPicks) : (fallbackPicks?.picks ?? []);
+  if (fallbackPicks && !isEntryPicksPayloadForEvent(fallbackPicks, eventId)) {
+    return null;
+  }
+  const storedPicks = entryResult ? normalizePicks(entryResult.eventPicks) : [];
+  const fallbackPickRows = fallbackPicks?.picks ?? [];
+  const picks = isCompleteEntryPicks(storedPicks)
+    ? storedPicks
+    : isCompleteEntryPicks(fallbackPickRows)
+      ? fallbackPickRows
+      : [];
   if (picks.length === 0) {
     return null;
   }
+  if (!hasCompleteEntryPickLiveCoverage(picks, [...eventLiveMap.keys()])) {
+    return null;
+  }
 
-  const autoSubs = entryResult
-    ? normalizeAutoSubs(entryResult.eventAutoSub)
-    : normalizeAutoSubs(fallbackPicks?.automatic_subs ?? []);
+  const storedAutoSubs = entryResult ? normalizeAutoSubs(entryResult.eventAutoSub) : [];
+  const autoSubs =
+    storedAutoSubs.length > 0
+      ? storedAutoSubs
+      : normalizeAutoSubs(fallbackPicks?.automatic_subs ?? []);
 
   const eventPoints = entryResult?.eventPoints ?? fallbackPicks?.entry_history.points ?? 0;
   const eventTransfers =
@@ -231,12 +236,17 @@ function buildEntryResultData(
 
   const captainPick = picks.find((pick) => pick.is_captain) ?? null;
   const vicePick = picks.find((pick) => pick.is_vice_captain) ?? null;
+  const scoringCaptainPick = resolveScoringCaptainPick(picks);
   const captainId = captainPick?.element ?? null;
   const viceCaptainId = vicePick?.element ?? null;
   const captainLive = captainId ? eventLiveMap.get(captainId) : undefined;
   const viceLive = viceCaptainId ? eventLiveMap.get(viceCaptainId) : undefined;
-  const captainMultiplier = captainPick?.multiplier ?? 1;
-  const captainPoints = captainId ? (captainLive?.totalPoints ?? 0) * captainMultiplier : null;
+  const scoringCaptainLive = scoringCaptainPick
+    ? eventLiveMap.get(scoringCaptainPick.element)
+    : undefined;
+  const captainPoints = scoringCaptainPick
+    ? (scoringCaptainLive?.totalPoints ?? 0) * scoringCaptainPick.multiplier
+    : null;
   const viceCaptainPoints = viceCaptainId ? (viceLive?.totalPoints ?? 0) : null;
   const captainBlank = isBlank(
     captainLive,
@@ -247,14 +257,7 @@ function buildEntryResultData(
     viceCaptainId ? (elementTypeMap.get(viceCaptainId) ?? null) : null,
   );
 
-  let playedCaptainId = captainId;
-  if (captainId && viceCaptainId) {
-    const captainMinutes = captainLive?.minutes ?? 0;
-    const viceMinutes = viceLive?.minutes ?? 0;
-    if (captainMinutes === 0 && viceMinutes > 0) {
-      playedCaptainId = viceCaptainId;
-    }
-  }
+  const playedCaptainId = scoringCaptainPick?.element ?? null;
 
   const highest = getHighestScoreElement(picks, eventLiveMap);
   const highestScoreBlank = isBlank(
@@ -288,12 +291,32 @@ function buildEntryResultData(
   };
 }
 
+export function findMissingLeagueResultEntryIds(
+  expectedEntryIds: readonly number[],
+  persistedEntryIds: ReadonlySet<number>,
+): number[] {
+  return expectedEntryIds.filter((entryId) => !persistedEntryIds.has(entryId));
+}
+
+export function findEventEligibleEntryIds(
+  entryIds: readonly number[],
+  entryInfos: ReadonlyArray<{ id: number; startedEvent: number | null }>,
+  eventId: number,
+): number[] {
+  const startsByEntryId = new Map(entryInfos.map((entry) => [entry.id, entry.startedEvent]));
+  return entryIds.filter((entryId) => {
+    const startedEvent = startsByEntryId.get(entryId);
+    return startedEvent === undefined || startedEvent === null || eventId >= startedEvent;
+  });
+}
+
 export type LeagueEventResultsSyncSummary = {
   tournamentId: number;
   eventId: number;
   totalEntries: number;
   updated: number;
   skipped: number;
+  errors: number;
   requiredUnits: number;
   reusedUnits: number;
   succeededUnits: number;
@@ -303,49 +326,113 @@ export type LeagueEventResultsSyncSummary = {
 export function summarizeMissingLeagueEventLiveData(
   tournamentId: number,
   eventId: number,
-  entryCount: number,
+  requiredEntryCount: number,
+  reusedUnits = 0,
 ): LeagueEventResultsSyncSummary {
   return {
     tournamentId,
     eventId,
-    totalEntries: entryCount,
+    totalEntries: requiredEntryCount + reusedUnits,
     updated: 0,
-    skipped: entryCount,
-    requiredUnits: entryCount,
-    reusedUnits: 0,
+    skipped: requiredEntryCount,
+    errors: requiredEntryCount,
+    requiredUnits: requiredEntryCount,
+    reusedUnits,
     succeededUnits: 0,
-    failedUnits: entryCount,
+    failedUnits: requiredEntryCount,
   };
 }
 
 export async function syncLeagueEventResultsByTournament(
   tournamentId: number,
   eventId: number,
-  options?: { concurrency?: number; season?: string },
+  options?: { concurrency?: number; season?: string; freshAfter?: Date | string },
 ): Promise<LeagueEventResultsSyncSummary> {
   logInfo('Starting league event results sync for tournament', { tournamentId, eventId });
+  // Use one database-clock token before any source reads. It is comparable
+  // across workers and remains the evidence timestamp even when a slower
+  // attempt finishes after a newer result-slot run.
+  const sourceOrdering = await readDatabaseOrderingTimestamp();
+  const freshAfter = options?.freshAfter ?? sourceOrdering.exact;
 
-  const tournament = await tournamentInfoRepository.findById(tournamentId);
+  const [tournament, event] = await Promise.all([
+    tournamentInfoRepository.findById(tournamentId),
+    eventRepository.findById(eventId),
+  ]);
   if (!tournament) {
     throw new Error(`Tournament ${tournamentId} not found`);
   }
+
+  // A finalized event establishes a canonical evidence boundary. Require the
+  // stricter of that boundary and this attempt's database-clock token so the
+  // reuse, write, and post-write audit all share one clock domain.
+  const finalizationDate = resolveRichResultFreshnessCutoff(event);
+  const finalizationCutoff = finalizationDate
+    ? ((await eventRepository.findDataCheckedAtExact(eventId)) ?? finalizationDate)
+    : null;
+  const requiredRichFreshAfter = latestFreshnessTimestamp(freshAfter, finalizationCutoff);
   const checkpointSeason = options?.season ?? (await getActiveCacheSeason());
 
-  const entryIds = await resolveTournamentEntries(tournament);
-  const entryInfos = await entryInfoRepository.findByIds(entryIds);
+  const resolvedEntryIds = await resolveTournamentEntryIds(tournament);
+  const entryInfos = await entryInfoRepository.findByIds(resolvedEntryIds);
   const entryInfoMap = new Map(entryInfos.map((info) => [info.id, info]));
+  const entryIds = findEventEligibleEntryIds(resolvedEntryIds, entryInfos, eventId);
+  if (entryIds.length === 0) {
+    return {
+      tournamentId,
+      eventId,
+      totalEntries: 0,
+      updated: 0,
+      skipped: 0,
+      errors: 0,
+      requiredUnits: 0,
+      reusedUnits: 0,
+      succeededUnits: 0,
+      failedUnits: 0,
+    };
+  }
+  const reusedEntryIds = requiredRichFreshAfter
+    ? await leagueEventResultsRepository.findEntryIdsByLeagueEvent(
+        tournament.leagueId,
+        tournament.leagueType,
+        eventId,
+        entryIds,
+        requiredRichFreshAfter,
+      )
+    : [];
+  const reusedSet = new Set(reusedEntryIds);
+  const entriesToBuild = entryIds.filter((entryId) => !reusedSet.has(entryId));
+  if (entriesToBuild.length === 0) {
+    return {
+      tournamentId,
+      eventId,
+      totalEntries: entryIds.length,
+      updated: 0,
+      skipped: 0,
+      errors: 0,
+      requiredUnits: 0,
+      reusedUnits: reusedEntryIds.length,
+      succeededUnits: 0,
+      failedUnits: 0,
+    };
+  }
 
-  const eventLives = await eventLiveRepository.findFinalizedByEventIdForSeason(
-    eventId,
-    checkpointSeason,
-  );
+  const eventLives = finalizationCutoff
+    ? await eventLiveRepository.findFinalizedByEventIdForSeason(eventId, checkpointSeason)
+    : await eventLiveRepository.findByEventId(eventId);
   if (eventLives.length === 0) {
-    logInfo('No event live data found for league event results', { eventId, tournamentId });
-    // This is a prerequisite failure, not a successful partial result. Throw
-    // so the BullMQ child remains retryable and final-failure alerting can
-    // surface a missing live snapshot instead of silently losing the run.
-    throw new Error(
-      `Event live data unavailable for league event results (tournamentId=${tournamentId}, eventId=${eventId})`,
+    const summary = summarizeMissingLeagueEventLiveData(
+      tournamentId,
+      eventId,
+      entriesToBuild.length,
+      reusedEntryIds.length,
+    );
+    throw new IncompleteDataSyncError(
+      'League event results require persisted event data',
+      summary.requiredUnits,
+      summary.reusedUnits,
+      summary.succeededUnits,
+      summary.failedUnits,
     );
   }
   const eventLiveMap = new Map(eventLives.map((live) => [live.elementId, live]));
@@ -353,10 +440,21 @@ export async function syncLeagueEventResultsByTournament(
   const players = await playerRepository.findByIds(playerIds);
   const elementTypeMap = new Map(players.map((player) => [player.id, player.type]));
 
-  const entryResults = await entryEventResultsRepository.findByEventAndEntryIds(eventId, entryIds);
+  const [entryResults, staleRichEntryIds] = await Promise.all([
+    entryEventResultsRepository.findByEventAndEntryIds(eventId, entriesToBuild),
+    entryEventResultsRepository.findEntryIdsNeedingRichSync(
+      entriesToBuild,
+      eventId,
+      requiredRichFreshAfter,
+    ),
+  ]);
   const entryResultsMap = new Map(entryResults.map((result) => [result.entryId, result]));
+  const staleRichEntryIdSet = new Set(staleRichEntryIds);
 
-  const missingEntryIds = entryIds.filter((entryId) => !entryResultsMap.has(entryId));
+  const missingEntryIds = entriesToBuild.filter((entryId) => {
+    const result = entryResultsMap.get(entryId);
+    return !result || !isCompleteEntryPicks(result.eventPicks) || staleRichEntryIdSet.has(entryId);
+  });
   const concurrency = options?.concurrency ?? DEFAULT_CONCURRENCY;
   const missingPicksMap = new Map<number, RawFPLEntryEventPicksResponse>();
   let skipped = 0;
@@ -370,11 +468,9 @@ export async function syncLeagueEventResultsByTournament(
     }
   }
 
-  const inserts: DbLeagueEventResultInsert[] = [];
-  let totalEntries = 0;
+  const inserts: LeagueEventResultEvidenceInsert[] = [];
 
-  for (const entryId of entryIds) {
-    totalEntries += 1;
+  for (const entryId of entriesToBuild) {
     const entryInfo = entryInfoMap.get(entryId);
     if (!entryInfo) {
       skipped += 1;
@@ -388,12 +484,32 @@ export async function syncLeagueEventResultsByTournament(
       continue;
     }
 
-    const entryResult = entryResultsMap.get(entryId);
+    const persistedEntryResult = entryResultsMap.get(entryId);
+    const entryResult = !staleRichEntryIdSet.has(entryId) ? persistedEntryResult : undefined;
     const fallbackPicks = missingPicksMap.get(entryId) ?? null;
-    const data = buildEntryResultData(entryResult, fallbackPicks, eventLiveMap, elementTypeMap);
+    if (fallbackPicks) {
+      try {
+        validateAutomaticSubs(entryId, eventId, fallbackPicks);
+      } catch (error) {
+        skipped += 1;
+        logError('Skipping league entry with invalid fallback automatic substitutions', error, {
+          eventId,
+          entryId,
+          tournamentId,
+        });
+        continue;
+      }
+    }
+    const data = buildEntryResultData(
+      entryResult,
+      fallbackPicks,
+      eventId,
+      eventLiveMap,
+      elementTypeMap,
+    );
     if (!data) {
       skipped += 1;
-      logInfo('Skipping league entry without picks data', {
+      logInfo('Skipping league entry without complete picks and event-live data', {
         eventId,
         entryId,
         tournamentId,
@@ -432,6 +548,7 @@ export async function syncLeagueEventResultsByTournament(
       highestScoreElementId: data.highestScoreElementId,
       highestScorePoints: data.highestScorePoints,
       highestScoreBlank: data.highestScoreBlank,
+      sourceCheckedAt: sourceOrdering.exact,
     });
   }
 
@@ -443,29 +560,55 @@ export async function syncLeagueEventResultsByTournament(
     updated += await leagueEventResultsRepository.upsertBatch(batch, checkpointSeason);
   }
 
+  const persistedEntryIds = new Set(
+    await leagueEventResultsRepository.findEntryIdsByLeagueEvent(
+      tournament.leagueId,
+      tournament.leagueType,
+      eventId,
+      entriesToBuild,
+      requiredRichFreshAfter,
+    ),
+  );
+  const missingPersistedEntryIds = findMissingLeagueResultEntryIds(
+    entriesToBuild,
+    persistedEntryIds,
+  );
+  const succeeded = entriesToBuild.length - missingPersistedEntryIds.length;
+  const errors = missingPersistedEntryIds.length;
+
   logInfo('League event results sync completed for tournament', {
     eventId,
     tournamentId,
-    totalEntries,
+    totalEntries: entryIds.length,
     updated,
     skipped,
+    reused: reusedEntryIds.length,
+    errors,
   });
 
-  // The repository fences rows by the entry's current season. A rollover can
-  // therefore reject rows after we built them; those rows are required units,
-  // not successful no-ops, and must remain visible to the retry/reporting
-  // layer instead of producing a false ready result.
-  const unpersisted = Math.max(0, inserts.length - updated);
+  // A guarded upsert may legitimately affect zero rows when a newer
+  // overlapping attempt already published the canonical result. The
+  // post-write checkpoint audit is authoritative for convergence.
+  if (errors > 0) {
+    throw new IncompleteDataSyncError(
+      'League event results did not converge for every tournament entry',
+      entriesToBuild.length,
+      reusedEntryIds.length,
+      succeeded,
+      errors,
+    );
+  }
 
   return {
     tournamentId,
     eventId,
-    totalEntries,
+    totalEntries: entryIds.length,
     updated,
     skipped,
-    requiredUnits: totalEntries,
-    reusedUnits: 0,
-    succeededUnits: updated,
-    failedUnits: skipped + unpersisted,
+    errors,
+    requiredUnits: entriesToBuild.length,
+    reusedUnits: reusedEntryIds.length,
+    succeededUnits: succeeded,
+    failedUnits: errors,
   };
 }

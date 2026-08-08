@@ -242,9 +242,12 @@ async function auditMissingUnits(
   window: TournamentBackfillWindow,
   kind: 'results' | 'picks',
   requiredPicksEvents: ReadonlySet<number> = new Set(),
+  checkpointSeason?: string,
 ): Promise<MissingTournamentUnitsAudit> {
   const missing = new Map<number, number[]>();
   const entryStartEvents = await loadEntryStartEvents(entryIds);
+  const picksSeason =
+    kind === 'picks' ? (checkpointSeason ?? (await getActiveCacheSeason())) : null;
   let totalPairs = 0;
   for (let eventId = window.startEventId; eventId <= window.endEventId; eventId += 1) {
     const eligibleEntryIds = entryIds.filter((entryId) =>
@@ -269,7 +272,11 @@ async function auditMissingUnits(
         present = resultRows.map((row) => row.entryId);
       }
     } else {
-      present = await entryEventPicksRepository.findEntryIdsByEvent(eventId, eligibleEntryIds);
+      present = await entryEventPicksRepository.findEntryIdsByEvent(
+        eventId,
+        eligibleEntryIds,
+        picksSeason!,
+      );
     }
     const presentSet = new Set(present);
     const missingEntryIds = eligibleEntryIds.filter((entryId) => !presentSet.has(entryId));
@@ -290,8 +297,9 @@ export async function findMissingCoreResults(
 export async function findMissingHistoricalPicks(
   entryIds: number[],
   window: TournamentBackfillWindow,
+  checkpointSeason?: string,
 ): Promise<MissingTournamentUnits> {
-  return (await auditMissingUnits(entryIds, window, 'picks')).missing;
+  return (await auditMissingUnits(entryIds, window, 'picks', new Set(), checkpointSeason)).missing;
 }
 
 export async function ensureTournamentCoreResults(
@@ -461,7 +469,7 @@ export async function enrichTournamentHistory(
   }
   const transferSeason = options?.includeTransferHistory === false ? null : setupSeason;
   const pickAudit = window
-    ? await auditMissingUnits(entryIds, window, 'picks')
+    ? await auditMissingUnits(entryIds, window, 'picks', new Set(), setupSeason)
     : { missing: new Map<number, number[]>(), totalPairs: 0 };
   const missing = pickAudit.missing;
   const missingCount = [...missing.values()].reduce((sum, ids) => sum + ids.length, 0);
@@ -534,11 +542,12 @@ export async function enrichTournamentHistory(
         concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
         season: setupSeason,
       });
-      if (leagueResult.updated < entryIds.length || leagueResult.skipped > 0) {
+      if (leagueResult.failedUnits > 0 || leagueResult.skipped > 0) {
+        const convergedEntries = leagueResult.reusedUnits + leagueResult.succeededUnits;
         issues.push({
           scope: 'league-event-results',
           eventId,
-          message: `League insights incomplete for event ${eventId}: ${leagueResult.updated}/${entryIds.length}`,
+          message: `League insights incomplete for event ${eventId}: ${convergedEntries}/${leagueResult.totalEntries}`,
         });
       }
 

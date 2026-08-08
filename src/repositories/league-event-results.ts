@@ -6,55 +6,96 @@ import {
   leagueEventResults,
   type DbLeagueEventResultInsert,
 } from '../db/schemas/index.schema';
-import { getDb } from '../db/singleton';
+import { getDb, type DbOrTransaction } from '../db/singleton';
 import { acquireEntrySeasonWriteFence } from './entry-event-transfers';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 
 type DatabaseInstance = PostgresJsDatabase<Record<string, never>>;
+export type LeagueEventResultEvidenceInsert = Omit<DbLeagueEventResultInsert, 'sourceCheckedAt'> & {
+  sourceCheckedAt: Date | string;
+};
 
 export const createLeagueEventResultsRepository = (dbInstance?: DatabaseInstance) => {
   const getDbInstance = async () => dbInstance || (await getDb());
 
   return {
+    findEntryIdsByLeagueEvent: async (
+      leagueId: number,
+      leagueType: DbLeagueEventResultInsert['leagueType'],
+      eventId: number,
+      entryIds: number[],
+      freshAfter?: Date | string,
+    ): Promise<number[]> => {
+      if (entryIds.length === 0) return [];
+
+      try {
+        const db = await getDbInstance();
+        const uniqueIds = Array.from(new Set(entryIds));
+        const results: number[] = [];
+        for (let index = 0; index < uniqueIds.length; index += 1000) {
+          const chunk = uniqueIds.slice(index, index + 1000);
+          const conditions = [
+            eq(leagueEventResults.leagueId, leagueId),
+            eq(leagueEventResults.leagueType, leagueType),
+            eq(leagueEventResults.eventId, eventId),
+            inArray(leagueEventResults.entryId, chunk),
+          ];
+          if (freshAfter) {
+            const exactFreshAfter =
+              freshAfter instanceof Date ? freshAfter.toISOString() : freshAfter;
+            conditions.push(
+              sql`${leagueEventResults.sourceCheckedAt} >= ${exactFreshAfter}::timestamptz`,
+            );
+          }
+          const rows = await db
+            .select({ entryId: leagueEventResults.entryId })
+            .from(leagueEventResults)
+            .where(and(...conditions));
+          results.push(...rows.map((row) => row.entryId));
+        }
+        return results;
+      } catch (error) {
+        logError('Failed to find league event result checkpoints', error, {
+          leagueId,
+          leagueType,
+          eventId,
+          count: entryIds.length,
+        });
+        throw new DatabaseError(
+          'Failed to find league event result checkpoints',
+          'LEAGUE_EVENT_RESULTS_FIND_ERROR',
+          error as Error,
+        );
+      }
+    },
+
     upsertBatch: async (
-      results: DbLeagueEventResultInsert[],
-      checkpointSeason: string,
+      results: LeagueEventResultEvidenceInsert[],
+      checkpointSeason?: string,
     ): Promise<number> => {
       if (results.length === 0) {
         return 0;
       }
 
       try {
-        if (!/^\d{4}$/.test(checkpointSeason)) {
+        if (checkpointSeason !== undefined && !/^\d{4}$/.test(checkpointSeason)) {
           throw new Error('A valid four-digit checkpoint season is required');
         }
-        const db = await getDbInstance();
-        const persisted = await db.transaction(async (tx) => {
-          const entryIds = results.map((result) => result.entryId);
-          await acquireEntrySeasonWriteFence(tx, entryIds, checkpointSeason);
-          // Lock current entry ownership while publishing this batch. If a
-          // rollover committed first, stale rows are skipped; if it commits
-          // second, its cleanup waits and then removes this old-season batch.
-          const eligibleEntries = await tx
-            .select({ id: entryInfos.id })
-            .from(entryInfos)
-            .where(
-              and(
-                inArray(entryInfos.id, entryIds),
-                eq(entryInfos.entrySnapshotSyncedSeason, checkpointSeason),
-              ),
-            )
-            .for('share');
-          const eligibleIds = new Set(eligibleEntries.map((entry) => entry.id));
-          const eligibleResults = results.filter((result) => eligibleIds.has(result.entryId));
-          if (eligibleResults.length === 0) {
-            return 0;
-          }
 
-          await tx
+        const persist = async (db: DbOrTransaction, values: LeagueEventResultEvidenceInsert[]) => {
+          if (values.length === 0) return 0;
+          const inserts = values.map((value) => ({
+            ...value,
+            sourceCheckedAt: sql`${
+              value.sourceCheckedAt instanceof Date
+                ? value.sourceCheckedAt.toISOString()
+                : value.sourceCheckedAt
+            }::timestamptz`,
+          }));
+          await db
             .insert(leagueEventResults)
-            .values(eligibleResults)
+            .values(inserts)
             .onConflictDoUpdate({
               target: [
                 leagueEventResults.leagueId,
@@ -62,6 +103,13 @@ export const createLeagueEventResultsRepository = (dbInstance?: DatabaseInstance
                 leagueEventResults.eventId,
                 leagueEventResults.entryId,
               ],
+              // A slower run may finish after a newer run has already written
+              // corrected source data. Never let that older evidence overwrite
+              // the newer canonical row or advance its checkpoint backwards.
+              where: sql`
+                ${leagueEventResults.sourceCheckedAt} IS NULL
+                OR ${leagueEventResults.sourceCheckedAt} < excluded.source_checked_at
+              `,
               set: {
                 entryName: sql`excluded.entry_name`,
                 playerName: sql`excluded.player_name`,
@@ -87,17 +135,40 @@ export const createLeagueEventResultsRepository = (dbInstance?: DatabaseInstance
                 highestScoreElementId: sql`excluded.highest_score_element_id`,
                 highestScorePoints: sql`excluded.highest_score_points`,
                 highestScoreBlank: sql`excluded.highest_score_blank`,
+                sourceCheckedAt: sql`excluded.source_checked_at`,
                 updatedAt: new Date(),
               },
             });
-          return eligibleResults.length;
-        });
+          return values.length;
+        };
 
-        logInfo('Upserted league event results', {
-          requested: results.length,
-          persisted,
-          checkpointSeason,
-        });
+        const db = await getDbInstance();
+        let persisted = results.length;
+        if (checkpointSeason !== undefined) {
+          persisted = await db.transaction(async (tx) => {
+            const entryIds = [...new Set(results.map((result) => result.entryId))];
+            await acquireEntrySeasonWriteFence(tx, entryIds, checkpointSeason);
+            const eligibleEntries = await tx
+              .select({ id: entryInfos.id })
+              .from(entryInfos)
+              .where(
+                and(
+                  inArray(entryInfos.id, entryIds),
+                  eq(entryInfos.entrySnapshotSyncedSeason, checkpointSeason),
+                ),
+              )
+              .for('share');
+            const eligibleIds = new Set(eligibleEntries.map((entry) => entry.id));
+            return persist(
+              tx,
+              results.filter((result) => eligibleIds.has(result.entryId)),
+            );
+          });
+        } else {
+          persisted = await persist(db as DbOrTransaction, results);
+        }
+
+        logInfo('Upserted league event results', { count: persisted });
         return persisted;
       } catch (error) {
         logError('Failed to upsert league event results', error, { count: results.length });

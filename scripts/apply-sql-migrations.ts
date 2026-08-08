@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import postgres from 'postgres';
 
 import { inspectMigrationHistory } from './migration-history';
+import { getSqlMigrationPreconditions } from './sql-migration-compatibility';
 
 const migrationsDir = process.env.MIGRATIONS_DIR ?? 'migrations';
 const databaseUrl = process.env.DATABASE_URL;
@@ -100,6 +101,9 @@ async function adoptOrVerifyApplied(
 
 async function applyFile(filename: string, contents: string, digest: string): Promise<void> {
   await sql.begin(async (tx) => {
+    for (const statement of getSqlMigrationPreconditions(filename)) {
+      await tx.unsafe(statement);
+    }
     await tx.unsafe(contents);
     await tx`
       INSERT INTO sql_migrations (filename, checksum)

@@ -7,6 +7,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { resetActiveSeasonMemo } from '../../src/cache/cache-season';
 import { redisSingleton } from '../../src/cache/singleton';
 import type { PlayerValue } from '../../src/domain/player-values';
+import { readDatabaseOrderingTimestamp } from '../../src/db/ordering-timestamp';
 import { getDbClient } from '../../src/db/singleton';
 import { createEntryEventTransfersRepository } from '../../src/repositories/entry-event-transfers';
 import { createPlayerValuesRepository } from '../../src/repositories/player-values';
@@ -30,6 +31,9 @@ const VALUE_PLAYER_B = 990014;
 const EVENT_ID = 10;
 const CHANGE_DATE = '20260717';
 const CHECKPOINT_SEASON = '2526';
+async function nextTransferSourceCheckedAt(): Promise<string> {
+  return (await readDatabaseOrderingTimestamp()).exact;
+}
 
 async function db() {
   return getDbClient();
@@ -125,6 +129,7 @@ describe('entry-event-transfers element_in_played (H5)', () => {
     await transfersRepository.replaceForEvent(ENTRY_ID, EVENT_ID, [TRANSFER], undefined, {
       elementInPlayed: true,
       checkpointSeason: CHECKPOINT_SEASON,
+      sourceCheckedAt: await nextTransferSourceCheckedAt(),
     });
     const initial = await (await db())<{ element_in_played: boolean | null }[]>`
       SELECT element_in_played FROM entry_event_transfers
@@ -136,6 +141,7 @@ describe('entry-event-transfers element_in_played (H5)', () => {
     await transfersRepository.replaceForEvent(ENTRY_ID, EVENT_ID, [TRANSFER], undefined, {
       elementInPlayed: null,
       checkpointSeason: CHECKPOINT_SEASON,
+      sourceCheckedAt: await nextTransferSourceCheckedAt(),
     });
 
     // Then: the stored flag survives
@@ -149,6 +155,7 @@ describe('entry-event-transfers element_in_played (H5)', () => {
     await transfersRepository.replaceForEvent(ENTRY_ID, EVENT_ID, [TRANSFER], undefined, {
       elementInPlayed: false,
       checkpointSeason: CHECKPOINT_SEASON,
+      sourceCheckedAt: await nextTransferSourceCheckedAt(),
     });
     const afterUpdate = await (await db())<{ element_in_played: boolean | null }[]>`
       SELECT element_in_played FROM entry_event_transfers
@@ -175,6 +182,7 @@ describe('entry-event-transfers element_in_played (H5)', () => {
       elementInPlayed: true,
       syncMode: 'all',
       checkpointSeason: CHECKPOINT_SEASON,
+      sourceCheckedAt: await nextTransferSourceCheckedAt(),
     });
 
     const firstSync = await (await db())<
@@ -195,6 +203,7 @@ describe('entry-event-transfers element_in_played (H5)', () => {
       elementInPlayed: null,
       syncMode: 'all',
       checkpointSeason: CHECKPOINT_SEASON,
+      sourceCheckedAt: await nextTransferSourceCheckedAt(),
     });
     const secondSync = await (await db())<
       { event_id: number; element_in_played: boolean | null }[]
@@ -208,6 +217,34 @@ describe('entry-event-transfers element_in_played (H5)', () => {
     expect(
       secondSync.filter((row) => row.event_id === EVENT_ID).every((row) => row.element_in_played),
     ).toBe(true);
+  });
+
+  test('batch enrichment returns the number of rows actually updated', async () => {
+    const existing = await (await db())<{ id: number }[]>`
+      SELECT id
+      FROM entry_event_transfers
+      WHERE entry_id = ${ENTRY_ID} AND event_id = ${EVENT_ID}
+      ORDER BY id
+      LIMIT 1
+    `;
+    expect(existing).toHaveLength(1);
+
+    const updated = await transfersRepository.updateBatchById([
+      {
+        id: existing[0].id,
+        elementInPoints: 3,
+        elementOutPoints: 2,
+        elementInPlayed: true,
+      },
+      {
+        id: 2_147_483_647,
+        elementInPoints: 0,
+        elementOutPoints: 0,
+        elementInPlayed: false,
+      },
+    ]);
+
+    expect(updated).toBe(1);
   });
 });
 
