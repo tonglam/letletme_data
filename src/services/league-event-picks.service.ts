@@ -1,3 +1,4 @@
+import { getActiveCacheSeason } from '../cache/cache-season';
 import { entryEventPicksRepository } from '../repositories/entry-event-picks';
 import {
   tournamentInfoRepository,
@@ -19,22 +20,30 @@ type EntrySyncOutcome = {
 export interface LeagueEventPicksDependencies {
   findTournament: (tournamentId: number) => Promise<TournamentInfoSummary | null>;
   resolveEntryIds: (tournament: TournamentInfoSummary) => Promise<number[]>;
-  findPersistedEntryIds: (eventId: number, entryIds: number[]) => Promise<number[]>;
+  findPersistedEntryIds: (
+    eventId: number,
+    entryIds: number[],
+    checkpointSeason: string,
+  ) => Promise<number[]>;
   syncEntry: (entryId: number, eventId: number) => Promise<unknown>;
 }
 
 const defaultDependencies: LeagueEventPicksDependencies = {
   findTournament: (tournamentId) => tournamentInfoRepository.findById(tournamentId),
   resolveEntryIds: resolveTournamentEntryIds,
-  findPersistedEntryIds: (eventId, entryIds) =>
-    entryEventPicksRepository.findEntryIdsByEvent(eventId, entryIds),
+  findPersistedEntryIds: (eventId, entryIds, checkpointSeason) =>
+    entryEventPicksRepository.findEntryIdsByEvent(eventId, entryIds, checkpointSeason),
   syncEntry: syncEntryEventPicks,
 };
 
 export async function syncLeagueEventPicksByTournament(
   tournamentId: number,
   eventId: number,
-  options?: { concurrency?: number; dependencies?: LeagueEventPicksDependencies },
+  options?: {
+    concurrency?: number;
+    dependencies?: LeagueEventPicksDependencies;
+    season?: string;
+  },
 ): Promise<{
   tournamentId: number;
   eventId: number;
@@ -49,6 +58,7 @@ export async function syncLeagueEventPicksByTournament(
 }> {
   logInfo('Starting league event picks sync for tournament', { tournamentId, eventId });
   const dependencies = options?.dependencies ?? defaultDependencies;
+  const checkpointSeason = options?.season ?? (await getActiveCacheSeason());
 
   const tournament = await dependencies.findTournament(tournamentId);
   if (!tournament) {
@@ -64,7 +74,11 @@ export async function syncLeagueEventPicksByTournament(
     entries: entryIds.length,
   });
 
-  const existingEntryIds = await dependencies.findPersistedEntryIds(eventId, entryIds);
+  const existingEntryIds = await dependencies.findPersistedEntryIds(
+    eventId,
+    entryIds,
+    checkpointSeason,
+  );
   const existingSet = new Set(existingEntryIds);
   const entriesToSync = entryIds.filter((entryId) => !existingSet.has(entryId));
   const concurrency = options?.concurrency ?? DEFAULT_CONCURRENCY;
@@ -102,7 +116,7 @@ export async function syncLeagueEventPicksByTournament(
 
   const attemptedSuccess = results.filter((result) => result.success).length;
   const persistedEntryIds = new Set(
-    await dependencies.findPersistedEntryIds(eventId, entriesToSync),
+    await dependencies.findPersistedEntryIds(eventId, entriesToSync, checkpointSeason),
   );
   const synced = entriesToSync.filter((entryId) => persistedEntryIds.has(entryId)).length;
   const errors = entriesToSync.length - synced;

@@ -245,7 +245,7 @@ export async function syncTournamentEventResultsForEntryIds(
 
   const [persistedResults, persistedPickEntryIds, missingTransferEntryIds] = await Promise.all([
     entryEventResultsRepository.findByEventAndEntryIds(eventId, uniqueEntryIds),
-    entryEventPicksRepository.findEntryIdsByEvent(eventId, uniqueEntryIds),
+    entryEventPicksRepository.findEntryIdsByEvent(eventId, uniqueEntryIds, checkpointSeason),
     options?.skipTransfers
       ? Promise.resolve([])
       : entryEventTransfersRepository.findEntryIdsNeedingSync(
@@ -443,7 +443,7 @@ export async function syncTournamentEventResults(
   const attemptStartedAt = options?.freshAfter ?? new Date();
   const [existingResults, existingPickEntryIds, requiredTransferEntryIds] = await Promise.all([
     entryEventResultsRepository.findByEventAndEntryIds(eventId, entryIds),
-    entryEventPicksRepository.findEntryIdsByEvent(eventId, entryIds),
+    entryEventPicksRepository.findEntryIdsByEvent(eventId, entryIds, checkpointSeason),
     options?.skipTransfers
       ? Promise.resolve([])
       : entryEventTransfersRepository.findEntryIdsNeedingSync(entryIds, eventId, checkpointSeason),
@@ -477,7 +477,7 @@ export async function syncTournamentEventResults(
 
   const [auditedResults, auditedPickEntryIds, missingTransferEntryIds] = await Promise.all([
     entryEventResultsRepository.findByEventAndEntryIds(eventId, entryIds),
-    entryEventPicksRepository.findEntryIdsByEvent(eventId, entryIds),
+    entryEventPicksRepository.findEntryIdsByEvent(eventId, entryIds, checkpointSeason),
     options?.skipTransfers
       ? Promise.resolve([])
       : entryEventTransfersRepository.findEntryIdsNeedingSync(entryIds, eventId, checkpointSeason),

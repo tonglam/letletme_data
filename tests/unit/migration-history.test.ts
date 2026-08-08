@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { readdirSync, readFileSync } from 'node:fs';
 
 import { inspectMigrationHistory } from '../../scripts/migration-history';
+import { getSqlMigrationPreconditions } from '../../scripts/sql-migration-compatibility';
 
 describe('migration history inspection', () => {
   test('accepts unapplied migrations after the applied tail', () => {
@@ -67,6 +68,7 @@ describe('migration history inspection', () => {
     });
     expect(files).toContain('0050_entry_event_result_rich_checkpoint.sql');
     expect(files).toContain('0051_event_data_checked_at.sql');
+    expect(files).toContain('0052_replace_player_picker_rpc.sql');
   });
 });
 
@@ -83,15 +85,26 @@ describe('public Data API lockdown migration', () => {
 });
 
 describe('GraphQL read RPC migration', () => {
-  test('replaces the legacy player picker row type safely', () => {
-    const migration = readFileSync('migrations/0043_create_graphql_read_rpcs.sql', 'utf8');
-    const drop = migration.indexOf(
+  test('keeps the applied migration immutable and replaces the RPC at the tail', () => {
+    const applied = readFileSync('migrations/0043_create_graphql_read_rpcs.sql', 'utf8');
+    const replacement = readFileSync('migrations/0052_replace_player_picker_rpc.sql', 'utf8');
+    const drop = replacement.indexOf(
       'DROP FUNCTION IF EXISTS public.get_players_for_picker(integer, integer);',
     );
-    const create = migration.indexOf('CREATE OR REPLACE FUNCTION public.get_players_for_picker(');
+    const create = replacement.indexOf('CREATE FUNCTION public.get_players_for_picker(');
 
+    expect(applied).not.toContain(
+      'DROP FUNCTION IF EXISTS public.get_players_for_picker(integer, integer);',
+    );
     expect(drop).toBeGreaterThanOrEqual(0);
     expect(create).toBeGreaterThan(drop);
+  });
+
+  test('prepares only a still-pending 0043 for the legacy overload', () => {
+    expect(getSqlMigrationPreconditions('0043_create_graphql_read_rpcs.sql')).toEqual([
+      'DROP FUNCTION IF EXISTS public.get_players_for_picker(integer, integer);',
+    ]);
+    expect(getSqlMigrationPreconditions('0052_replace_player_picker_rpc.sql')).toEqual([]);
   });
 });
 

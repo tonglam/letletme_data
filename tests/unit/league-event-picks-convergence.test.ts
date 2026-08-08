@@ -31,7 +31,11 @@ describe('league event picks convergence', () => {
     };
 
     await expect(
-      syncLeagueEventPicksByTournament(77, 9, { concurrency: 2, dependencies }),
+      syncLeagueEventPicksByTournament(77, 9, {
+        concurrency: 2,
+        dependencies,
+        season: '2526',
+      }),
     ).rejects.toMatchObject({
       code: 'DATA_SYNC_INCOMPLETE',
       requiredUnits: 2,
@@ -45,6 +49,7 @@ describe('league event picks convergence', () => {
     const retry = await syncLeagueEventPicksByTournament(77, 9, {
       concurrency: 2,
       dependencies,
+      season: '2526',
     });
     expect(calls).toEqual([102, 103, 103]);
     expect(retry).toMatchObject({

@@ -7,7 +7,11 @@ import {
 } from '../db/schemas/index.schema';
 import { getDb, type DbOrTransaction } from '../db/singleton';
 import { toNullableDbChip } from '../domain/chips';
-import { hasCompleteEntryPickLiveCoverage, isCompleteEntryPicks } from '../domain/entry-picks';
+import {
+  hasCompleteEntryPickLiveCoverage,
+  isCompleteEntryPicks,
+  isEntryPicksPayloadForEvent,
+} from '../domain/entry-picks';
 import type { RawFPLEntryEventPicksResponse, RawFPLEntryHistoryCurrentItem } from '../types';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
@@ -302,6 +306,11 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
       live: EventPointsPayload,
       richSyncedAt: Date,
     ): Promise<void> => {
+      if (!isEntryPicksPayloadForEvent(picks, eventId)) {
+        throw new Error(
+          `Refusing rich picks for an unexpected event for entry ${entryId}, event ${eventId}`,
+        );
+      }
       if (!isCompleteEntryPicks(picks.picks)) {
         throw new Error(`Refusing incomplete rich picks for entry ${entryId}, event ${eventId}`);
       }

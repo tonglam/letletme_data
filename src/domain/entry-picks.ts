@@ -9,6 +9,15 @@ function isBoolean(value: unknown): value is boolean {
   return value === true || value === false;
 }
 
+/** A picks payload may only checkpoint the gameweek it identifies itself as. */
+export function isEntryPicksPayloadForEvent(raw: unknown, eventId: number): boolean {
+  if (!Number.isInteger(eventId)) return false;
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return false;
+  const history = (raw as Record<string, unknown>).entry_history;
+  if (history === null || typeof history !== 'object' || Array.isArray(history)) return false;
+  return asInteger((history as Record<string, unknown>).event) === eventId;
+}
+
 /**
  * A stored picks row is a reusable checkpoint only when it can support every
  * downstream non-live calculation without inventing missing data.

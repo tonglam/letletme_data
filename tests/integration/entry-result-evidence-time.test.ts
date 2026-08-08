@@ -167,18 +167,22 @@ describe('entry result evidence checkpoint', () => {
 
     const sync = syncEntryEventResults(ENTRY_ID, EVENT_ID);
     await requestsStarted;
-    await new Promise((resolve) => setTimeout(resolve, 5));
-    const finalizedAt = new Date();
+    const sql = await getDbClient();
+    const finalizationRows = await sql<{ finalizedAt: string }[]>`
+      SELECT clock_timestamp()::text AS "finalizedAt"
+    `;
+    const finalizedAt = finalizationRows[0]!.finalizedAt;
     releaseRequests();
     await sync;
 
-    const sql = await getDbClient();
-    const rows = await sql<{ richSyncedAt: string | null }[]>`
-      SELECT rich_synced_at AS "richSyncedAt"
+    const rows = await sql<{ richSyncedAt: string | null; evidenceBeforeFinalization: boolean }[]>`
+      SELECT
+        rich_synced_at AS "richSyncedAt",
+        rich_synced_at < ${finalizedAt}::timestamptz AS "evidenceBeforeFinalization"
       FROM entry_event_results
       WHERE entry_id = ${ENTRY_ID} AND event_id = ${EVENT_ID}
     `;
     expect(rows[0]?.richSyncedAt).not.toBeNull();
-    expect(new Date(rows[0]!.richSyncedAt!).getTime()).toBeLessThan(finalizedAt.getTime());
+    expect(rows[0]!.evidenceBeforeFinalization).toBe(true);
   });
 });

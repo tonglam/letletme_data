@@ -100,7 +100,7 @@ describe('league event result convergence', () => {
       ]),
     );
 
-    const result = buildEntryResultData(core, fallback, eventLive, new Map([[7, 3]]));
+    const result = buildEntryResultData(core, fallback, 9, eventLive, new Map([[7, 3]]));
     expect(result).toMatchObject({
       eventNetPoints: 51,
       captainId: 7,
@@ -142,7 +142,41 @@ describe('league event result convergence', () => {
         ]),
     );
 
-    expect(buildEntryResultData(undefined, fallback, partialLive, new Map())).toBeNull();
+    expect(buildEntryResultData(undefined, fallback, 9, partialLive, new Map())).toBeNull();
+  });
+
+  test('rejects fallback picks from a different event', () => {
+    const fallback = {
+      active_chip: null,
+      automatic_subs: [],
+      entry_history: {
+        event: 8,
+        points: 55,
+        total_points: 500,
+        rank: 10,
+        overall_rank: 1000,
+        bank: 5,
+        value: 1005,
+        event_transfers: 1,
+        event_transfers_cost: 4,
+        points_on_bench: 3,
+      },
+      picks: Array.from({ length: 15 }, (_, index) => ({
+        element: index + 1,
+        position: index + 1,
+        multiplier: index === 0 ? 2 : index < 11 ? 1 : 0,
+        is_captain: index === 0,
+        is_vice_captain: index === 1,
+      })),
+    } satisfies RawFPLEntryEventPicksResponse;
+    const eventLive = new Map(
+      fallback.picks.map((pick) => [
+        pick.element,
+        { elementId: pick.element, totalPoints: 0, minutes: 0 } as DbEventLive,
+      ]),
+    );
+
+    expect(buildEntryResultData(undefined, fallback, 9, eventLive, new Map())).toBeNull();
   });
 
   test('returns the exact missing canonical result IDs', () => {

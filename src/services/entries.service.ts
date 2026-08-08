@@ -7,6 +7,7 @@ import {
 } from '../repositories/entry-event-transfers';
 import { createEntryEventResultsRepository } from '../repositories/entry-event-results';
 import { logError, logInfo } from '../utils/logger';
+import { readCoreSnapshotOrderingTimestamp } from './core-snapshot-persistence.service';
 import { getCurrentEvent } from './events.service';
 
 export async function syncEntryEventPicks(entryId: number, eventId?: number) {
@@ -20,7 +21,7 @@ export async function syncEntryEventPicks(entryId: number, eventId?: number) {
       targetEventId = current.id;
     }
     const checkpointSeason = await getActiveCacheSeason();
-    const picksSyncStartedAt = new Date();
+    const picksSyncStartedAt = await readCoreSnapshotOrderingTimestamp();
     const picks = await fplClient.getEntryEventPicks(entryId, targetEventId);
     await withEntrySeasonSyncTransaction(entryId, checkpointSeason, async (tx) => {
       await createEntryEventPicksRepository(tx).upsertFromPicks(
@@ -112,7 +113,7 @@ export async function syncEntryEventResults(entryId: number, eventId?: number) {
     // This timestamp describes the evidence window, not database completion.
     // If the GW finalizes while either request is in flight, the persisted
     // marker remains before data_checked_at and the finalized scan refetches it.
-    const richSyncStartedAt = new Date();
+    const richSyncStartedAt = await readCoreSnapshotOrderingTimestamp();
     const [picks, live] = await Promise.all([
       fplClient.getEntryEventPicks(entryId, targetEventId),
       fplClient.getEventLive(targetEventId),

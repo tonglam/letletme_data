@@ -403,7 +403,7 @@ export function createEntrySyncWorker(): WorkerRuntime {
       context.eventId = targetEventId;
       attemptContext.targetEventId = targetEventId;
       const checkpointSeason =
-        job.name === 'entry-info' || job.name === 'entry-transfers'
+        job.name === 'entry-info' || job.name === 'entry-picks' || job.name === 'entry-transfers'
           ? await getActiveCacheSeason()
           : undefined;
 
@@ -485,6 +485,7 @@ export function createEntrySyncWorker(): WorkerRuntime {
                         await entryEventPicksRepository.findEntryIdsByEvent(
                           targetEventId,
                           entryIds,
+                          checkpointSeason!,
                         ),
                       );
                       return {
@@ -494,7 +495,7 @@ export function createEntrySyncWorker(): WorkerRuntime {
                     },
                     auditRequired: (entryIds) =>
                       entryEventPicksRepository
-                        .findEntryIdsByEvent(targetEventId!, entryIds)
+                        .findEntryIdsByEvent(targetEventId!, entryIds, checkpointSeason!)
                         .then((persisted) => {
                           const persistedSet = new Set(persisted);
                           return entryIds.filter((entryId) => !persistedSet.has(entryId));

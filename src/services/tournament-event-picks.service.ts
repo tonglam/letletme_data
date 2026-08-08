@@ -1,3 +1,4 @@
+import { getActiveCacheSeason } from '../cache/cache-season';
 import { entryEventPicksRepository } from '../repositories/entry-event-picks';
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
@@ -53,6 +54,7 @@ export async function syncTournamentEventPicks(
   }
 
   const concurrency = options?.concurrency ?? DEFAULT_CONCURRENCY;
+  const checkpointSeason = await getActiveCacheSeason();
   const entryLists = await mapWithConcurrency(tournaments, 10, (tournament) =>
     tournamentEntryRepository.findEntryIdsByTournamentId(tournament.id),
   );
@@ -72,7 +74,11 @@ export async function syncTournamentEventPicks(
     };
   }
 
-  const existing = await entryEventPicksRepository.findEntryIdsByEvent(eventId, entryIds);
+  const existing = await entryEventPicksRepository.findEntryIdsByEvent(
+    eventId,
+    entryIds,
+    checkpointSeason,
+  );
   const existingSet = new Set(existing);
   const toSync = entryIds.filter((entryId) => !existingSet.has(entryId));
   const skipped = existingSet.size;
@@ -89,7 +95,9 @@ export async function syncTournamentEventPicks(
 
   // Canonical rows, rather than request outcomes, are the checkpoint. A request
   // may fail after a concurrent worker has already completed the same unit.
-  const persisted = new Set(await entryEventPicksRepository.findEntryIdsByEvent(eventId, entryIds));
+  const persisted = new Set(
+    await entryEventPicksRepository.findEntryIdsByEvent(eventId, entryIds, checkpointSeason),
+  );
   const missingEntryIds = findMissingTournamentPickEntryIds(entryIds, persisted);
   const failedUnits = missingEntryIds.length;
   const succeededUnits = toSync.length - failedUnits;

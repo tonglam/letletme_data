@@ -492,6 +492,45 @@ describe('tournament initialization checkpoints', () => {
     });
   });
 
+  test('pick checkpoints require current-season entry ownership before reuse', async () => {
+    const sql = await getDbClient();
+    await sql`
+      UPDATE entry_infos
+      SET entry_snapshot_synced_through_event_id = 38,
+          entry_snapshot_synced_season = '2425'
+      WHERE id = ${ENTRY_ID}
+    `;
+    await sql`
+      INSERT INTO entry_event_picks (entry_id, event_id, chip, picks, transfers, transfers_cost)
+      VALUES (${ENTRY_ID}, 1, 'n/a', ${JSON.stringify(completePicks())}::jsonb, 0, 0)
+      ON CONFLICT (entry_id, event_id) DO UPDATE SET picks = excluded.picks
+    `;
+
+    try {
+      expect(
+        await entryEventPicksRepository.findEntryIdsByEvent(1, [ENTRY_ID], TEST_SEASON),
+      ).toEqual([]);
+
+      await sql`
+        UPDATE entry_infos
+        SET entry_snapshot_synced_through_event_id = 1,
+            entry_snapshot_synced_season = ${TEST_SEASON}
+        WHERE id = ${ENTRY_ID}
+      `;
+      expect(
+        await entryEventPicksRepository.findEntryIdsByEvent(1, [ENTRY_ID], TEST_SEASON),
+      ).toEqual([ENTRY_ID]);
+    } finally {
+      await sql`DELETE FROM entry_event_picks WHERE entry_id = ${ENTRY_ID} AND event_id = 1`;
+      await sql`
+        UPDATE entry_infos
+        SET entry_snapshot_synced_through_event_id = 12,
+            entry_snapshot_synced_season = ${TEST_SEASON}
+        WHERE id = ${ENTRY_ID}
+      `;
+    }
+  });
+
   test('league result publication rejects entries no longer owned by the checkpoint season', async () => {
     const sql = await getDbClient();
     await sql`DELETE FROM league_event_results WHERE entry_id = ${ENTRY_ID}`;
@@ -1029,6 +1068,57 @@ describe('tournament initialization checkpoints', () => {
       WHERE entry_id = ${ENTRY_ID} AND event_id = 1
     `;
     expect(after[0]?.richSyncedAt ?? null).toBe(beforeMarker);
+  });
+
+  test('event-mismatched picks never advance standalone or rich checkpoints', async () => {
+    const sql = await getDbClient();
+    await sql`DELETE FROM entry_event_picks WHERE entry_id = ${ENTRY_ID} AND event_id = 1`;
+    const picks = {
+      active_chip: null,
+      automatic_subs: [],
+      picks: completePicks(),
+      entry_history: {
+        event: 2,
+        points: 60,
+        total_points: 60,
+        rank: 90,
+        overall_rank: 90,
+        bank: 0,
+        value: 1000,
+        event_transfers: 0,
+        event_transfers_cost: 0,
+        points_on_bench: 0,
+      },
+    };
+    const before = await sql<{ richSyncedAt: string | null }[]>`
+      SELECT rich_synced_at AS "richSyncedAt"
+      FROM entry_event_results
+      WHERE entry_id = ${ENTRY_ID} AND event_id = 1
+    `;
+
+    await expect(
+      entryEventPicksRepository.upsertFromPicks(ENTRY_ID, 1, picks, new Date()),
+    ).rejects.toThrow();
+    await expect(
+      entryEventResultsRepository.upsertFromPicksAndLive(
+        ENTRY_ID,
+        1,
+        picks,
+        completeEventLive(),
+        new Date(),
+      ),
+    ).rejects.toThrow('Refusing rich picks for an unexpected event');
+
+    const rows = await sql<{ picks: number; richSyncedAt: string | null }[]>`
+      SELECT
+        (SELECT count(*)::int FROM entry_event_picks
+         WHERE entry_id = ${ENTRY_ID} AND event_id = 1) AS picks,
+        result.rich_synced_at AS "richSyncedAt"
+      FROM entry_event_results result
+      WHERE result.entry_id = ${ENTRY_ID} AND result.event_id = 1
+    `;
+    expect(rows[0]?.picks).toBe(0);
+    expect(rows[0]?.richSyncedAt ?? null).toBe(before[0]?.richSyncedAt ?? null);
   });
 
   test('partial event-live coverage never advances the rich-result checkpoint', async () => {

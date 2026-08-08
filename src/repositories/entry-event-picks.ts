@@ -1,8 +1,12 @@
 import { and, eq, inArray, sql } from 'drizzle-orm';
-import { entryEventPicks, type DbEntryEventPickInsert } from '../db/schemas/index.schema';
+import {
+  entryEventPicks,
+  entryInfos,
+  type DbEntryEventPickInsert,
+} from '../db/schemas/index.schema';
 import { getDb, type DbOrTransaction } from '../db/singleton';
 import { toDbChip } from '../domain/chips';
-import { isCompleteEntryPicks } from '../domain/entry-picks';
+import { isCompleteEntryPicks, isEntryPicksPayloadForEvent } from '../domain/entry-picks';
 import type { RawFPLEntryEventPicksResponse } from '../types';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
@@ -23,15 +27,28 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
   const getDbInstance = async () => dbInstance || (await getDb());
 
   return {
-    findEntryIdsByEvent: async (eventId: number, entryIds?: number[]): Promise<number[]> => {
+    findEntryIdsByEvent: async (
+      eventId: number,
+      entryIds: number[] | undefined,
+      checkpointSeason: string,
+    ): Promise<number[]> => {
       try {
+        if (!/^\d{4}$/.test(checkpointSeason)) {
+          throw new Error('A valid four-digit checkpoint season is required');
+        }
         const db = await getDbInstance();
 
         if (!entryIds || entryIds.length === 0) {
           const rows = await db
             .select({ entryId: entryEventPicks.entryId, picks: entryEventPicks.picks })
             .from(entryEventPicks)
-            .where(eq(entryEventPicks.eventId, eventId));
+            .innerJoin(entryInfos, eq(entryInfos.id, entryEventPicks.entryId))
+            .where(
+              and(
+                eq(entryEventPicks.eventId, eventId),
+                eq(entryInfos.entrySnapshotSyncedSeason, checkpointSeason),
+              ),
+            );
           return rows.filter((row) => isCompleteEntryPicks(row.picks)).map((row) => row.entryId);
         }
 
@@ -43,8 +60,13 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
           const rows = await db
             .select({ entryId: entryEventPicks.entryId, picks: entryEventPicks.picks })
             .from(entryEventPicks)
+            .innerJoin(entryInfos, eq(entryInfos.id, entryEventPicks.entryId))
             .where(
-              and(eq(entryEventPicks.eventId, eventId), inArray(entryEventPicks.entryId, chunk)),
+              and(
+                eq(entryEventPicks.eventId, eventId),
+                inArray(entryEventPicks.entryId, chunk),
+                eq(entryInfos.entrySnapshotSyncedSeason, checkpointSeason),
+              ),
             );
           results.push(
             ...rows.filter((row) => isCompleteEntryPicks(row.picks)).map((row) => row.entryId),
@@ -69,6 +91,11 @@ export const createEntryEventPicksRepository = (dbInstance?: DbOrTransaction) =>
       syncedAt = new Date(),
     ): Promise<void> => {
       try {
+        if (!isEntryPicksPayloadForEvent(picks, eventId)) {
+          throw new Error(
+            `Refusing entry picks for an unexpected event for entry ${entryId}, event ${eventId}`,
+          );
+        }
         if (!isCompleteEntryPicks(picks.picks)) {
           throw new Error(`Refusing incomplete entry picks for entry ${entryId}, event ${eventId}`);
         }

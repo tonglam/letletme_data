@@ -10,7 +10,11 @@ import {
   validateAutomaticSubs,
 } from '../repositories/entry-event-results';
 import { entryInfoRepository } from '../repositories/entry-infos';
-import { hasCompleteEntryPickLiveCoverage, isCompleteEntryPicks } from '../domain/entry-picks';
+import {
+  hasCompleteEntryPickLiveCoverage,
+  isCompleteEntryPicks,
+  isEntryPicksPayloadForEvent,
+} from '../domain/entry-picks';
 import { eventLiveRepository } from '../repositories/event-lives';
 import { eventRepository } from '../repositories/events';
 import { getActiveCacheSeason } from '../cache/cache-season';
@@ -145,6 +149,9 @@ async function fetchMissingEntryPicks(
   const results = await mapWithConcurrency(entryIds, concurrency, async (entryId) => {
     try {
       const picks = await fplClient.getEntryEventPicks(entryId, eventId);
+      if (!isEntryPicksPayloadForEvent(picks, eventId)) {
+        throw new Error(`Entry ${entryId} returned picks for an unexpected event`);
+      }
       return { entryId, picks } satisfies MissingPickResult;
     } catch (error) {
       errors += 1;
@@ -162,6 +169,7 @@ async function fetchMissingEntryPicks(
 export function buildEntryResultData(
   entryResult: DbEntryEventResult | undefined,
   fallbackPicks: RawFPLEntryEventPicksResponse | null,
+  eventId: number,
   eventLiveMap: Map<number, DbEventLive>,
   elementTypeMap: Map<number, number>,
 ): {
@@ -188,6 +196,9 @@ export function buildEntryResultData(
   highestScorePoints: number | null;
   highestScoreBlank: boolean;
 } | null {
+  if (fallbackPicks && !isEntryPicksPayloadForEvent(fallbackPicks, eventId)) {
+    return null;
+  }
   const storedPicks = entryResult ? normalizePicks(entryResult.eventPicks) : [];
   const fallbackPickRows = fallbackPicks?.picks ?? [];
   const picks = isCompleteEntryPicks(storedPicks)
@@ -466,7 +477,13 @@ export async function syncLeagueEventResultsByTournament(
         continue;
       }
     }
-    const data = buildEntryResultData(entryResult, fallbackPicks, eventLiveMap, elementTypeMap);
+    const data = buildEntryResultData(
+      entryResult,
+      fallbackPicks,
+      eventId,
+      eventLiveMap,
+      elementTypeMap,
+    );
     if (!data) {
       skipped += 1;
       logInfo('Skipping league entry without complete picks and event-live data', {
