@@ -166,6 +166,7 @@ describe('resolveMutationScopes', () => {
       eventId: 33,
     });
     expect(refreshScopes).toContain('tournament-structure:global');
+    expect(refreshScopes).toContain('data-core:events');
 
     for (const jobName of [
       'tournament-points-race',

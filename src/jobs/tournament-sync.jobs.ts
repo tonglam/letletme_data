@@ -266,7 +266,9 @@ async function enqueueTournamentSyncJob(
                   .filter(
                     (target) =>
                       target.tournamentId > 0 &&
-                      Number.isFinite(Date.parse(target.standingsReadyAt)),
+                      Number.isFinite(Date.parse(target.standingsReadyAt)) &&
+                      (!target.resultsFreshAfter ||
+                        Number.isFinite(Date.parse(target.resultsFreshAfter))),
                   )
                   .map((target) => [target.tournamentId, target]),
               ).values(),

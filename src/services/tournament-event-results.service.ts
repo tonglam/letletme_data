@@ -450,7 +450,7 @@ export async function syncTournamentEventResults(
     };
   }
 
-  const finalizationTargets = tournaments.flatMap((tournament) =>
+  const finalizationTargetSeeds = tournaments.flatMap((tournament) =>
     tournament.standingsReadyAt
       ? [{ tournamentId: tournament.id, standingsReadyAt: tournament.standingsReadyAt }]
       : [],
@@ -472,7 +472,7 @@ export async function syncTournamentEventResults(
       reusedUnits: 0,
       succeededUnits: 0,
       failedUnits: 0,
-      finalizationTargets,
+      finalizationTargets: [],
     };
   }
 
@@ -489,6 +489,11 @@ export async function syncTournamentEventResults(
     ? ((await eventRepository.findDataCheckedAtExact(eventId)) ?? finalizationDate)
     : null;
   const freshAfter = latestFreshnessTimestamp(sourceFreshAfter, finalizationCutoff);
+  const resultsFreshAfter = freshAfter instanceof Date ? freshAfter.toISOString() : freshAfter;
+  const finalizationTargets = finalizationTargetSeeds.map((target) => ({
+    ...target,
+    resultsFreshAfter,
+  }));
   const [staleResultEntryIds, existingPickEntryIds, requiredTransferEntryIds] = await Promise.all([
     entryEventResultsRepository.findEntryIdsNeedingRichSync(entryIds, eventId, freshAfter),
     entryEventPicksRepository.findEntryIdsByEvent(eventId, entryIds, checkpointSeason),

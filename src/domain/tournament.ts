@@ -155,6 +155,8 @@ export type TournamentSyncContext = {
 export type TournamentFinalizationTarget = {
   tournamentId: number;
   standingsReadyAt: string;
+  /** Result evidence must be at least this fresh before terminal publication. */
+  resultsFreshAfter?: string;
 };
 
 export type EntrySeed = {
