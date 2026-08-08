@@ -1,6 +1,6 @@
 # Data Platform v3 Strict Execution Checklist
 
-Plan version: 3.0.0
+Plan version: 3.1.0
 
 Rule: an item is complete only when its checkbox is checked and the Evidence column contains a
 durable path, SHA, query result, run URL, or backup manifest. Verbal confirmation is not evidence.
@@ -14,7 +14,7 @@ durable path, SHA, query result, run URL, or backup manifest. Verbal confirmatio
 | GraphQL baseline | `8cf4ddc` |
 | Web baseline | `c290d91` |
 | Production project | `gtwcfjoviibmtkevurjw` |
-| Plan version | 3.0.0 |
+| Plan version | 3.1.0 |
 | Cutover approver | User |
 
 ## P0 - Freeze and inventory
@@ -61,7 +61,7 @@ P1 exit gate: both restore drills pass. A backup that has not been restored does
 
 | Done | ID | Check | Acceptance | Evidence |
 | --- | --- | --- | --- | --- |
-| [ ] | P2-01 | Create D1 from accepted D0 | Exact predecessor SHA recorded | SHA: |
+| [x] | P2-01 | Create D1 from accepted D0 | Exact predecessor SHA recorded | D0 predecessor `6f66095b162160c1c0b55076b6960f92d7754881`; isolated schema worktree |
 | [ ] | P2-02 | Implement `0079` ops/roles/schemas | Private schemas and least-privilege roles pass | Migration/test: |
 | [ ] | P2-03 | Implement `0080` FPL dimensions | Keys, constraints, FK indexes pass | Migration/test: |
 | [ ] | P2-04 | Implement `0081` FPL facts | Grain and numeric/timestamp types pass | Migration/test: |

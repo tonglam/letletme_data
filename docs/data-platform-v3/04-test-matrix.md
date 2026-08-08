@@ -1,6 +1,6 @@
 # Data Platform v3 Test and Acceptance Matrix
 
-Plan version: 3.0.0
+Plan version: 3.1.0
 
 ## Evidence rules
 
@@ -129,8 +129,8 @@ For current preseason `2627`:
 - `fpl.player_event_snapshots`: unique `(season_id, event_id, element_id)` and no event/team/player
   orphan.
 - `fpl.player_gameweek_stats`: one row per available season/event/player upstream live result.
-- `fpl.player_gameweek_scoring`: scoring rows roll up exactly to the corresponding official explain
-  totals where the upstream exposes a breakdown.
+- `fpl.player_gameweek_scoring_items`: scoring rows roll up exactly to the corresponding official
+  explain totals where the upstream exposes a breakdown.
 - `fpl.player_fixture_stats`: fixture/player rows use the correct fixture event and team; no join
   expansion when linked to fixtures.
 - `reporting.player_season_summaries`: one row per season/player and each additive measure equals
@@ -146,8 +146,10 @@ For every v2 `player_values*` row:
 2. compare player, effective date/event, current price, prior price, and change;
 3. report unmatched source rows, unmatched derived rows, and differing values.
 
-Pass condition: zero mismatch. Any mismatch blocks dropping `player_values*` and requires a
-versioned decision about whether missing facts must be persisted.
+Pass condition: zero mismatch after the versioned B0 exception is applied. Historical rows must
+derive directly. The 573 B0 current-season start rows must map one-to-one to
+`snapshot_source='legacy_value_seed'` facts, and no other source value row may create a seed fact.
+Any remaining mismatch blocks dropping `player_values*`.
 
 ### Competition and tournament
 
@@ -172,7 +174,7 @@ versioned decision about whether missing facts must be persisted.
 
 ### Understat and bridge
 
-- B0 exact counts are authoritative. Current inventory sanity values are 4,560 matches and 129,520
+- B0 exact counts are authoritative. Current inventory sanity values are 4,560 matches and 129,576
   player-match rows; differences at B0 must be explained by legitimate ingestion before migration.
 - Provider table PKs are unique and parent links have zero orphans.
 - Match/player/team season relationships do not multiply source rows.

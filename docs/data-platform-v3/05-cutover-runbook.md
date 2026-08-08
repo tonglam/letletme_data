@@ -1,6 +1,6 @@
 # Data Platform v3 Cutover and Recovery Runbook
 
-Plan version: 3.0.0
+Plan version: 3.1.0
 
 Mode: maintenance-window hard cutover
 

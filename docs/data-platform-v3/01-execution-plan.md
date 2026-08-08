@@ -1,6 +1,6 @@
 # Data Platform v3 Execution Plan
 
-Plan version: 3.0.0
+Plan version: 3.1.0
 
 Execution strategy: preseason hard cutover
 
@@ -48,7 +48,8 @@ Purpose: establish a reproducible baseline before any implementation or producti
 Implementation:
 
 1. Create D0 from fetched Data `origin/main`; leave all existing dirty worktrees untouched.
-2. Save this plan set and mark plan version 3.0.0.
+2. Save the initial plan set at 3.0.0; every later source-contract correction is versioned in
+   `CHANGELOG.md` before implementation.
 3. Capture exact SHAs, open PRs, CI/deploy workflows, migration tails, runtime versions, and current
    production database/Redis topology.
 4. Enumerate production relations, functions, triggers, policies, grants, foreign keys, indexes,
@@ -153,8 +154,16 @@ Conversion rules:
 - Current tables and all season-suffixed/history partitions feed the same target tables.
 - `event_live_summaries*` rows are never copied; the new view must reproduce season totals from
   gameweek facts.
-- `player_values*` rows are never copied unless the value reconstruction audit proves a source row
-  cannot be derived from market snapshots. Any mismatch stops P2 and requires a plan revision.
+- `player_values*` rows are not copied when market snapshots reproduce them. The B0 audit proved
+  all historical rows reconstruct exactly, but the 573 current-season start rows predate the first
+  market capture. `0085` therefore creates one provenance-marked `legacy_value_seed` market
+  snapshot per missing start row, then requires the reporting view to reproduce both historical
+  and current value rows exactly. Any remaining mismatch stops P2.
+- `entry_history_infos` is season-summary history, not event history. It migrates to
+  `competition.entry_season_histories` at `(season_id, entry_id)` grain. Reference-only season rows
+  preserve 2011/12 through 2015/16 without creating fake FPL core facts.
+- `entry_event_cup_results` has no source `match_id`; its stable source row ID is preserved in the
+  target key instead of inventing a match identity.
 - `tournament_selection_stats` rows are never copied; the MV is rebuilt from complete picks.
 - `mv_tournament_snapshot` and compatibility views have no target.
 - Understat names are removed only at the schema boundary: for example

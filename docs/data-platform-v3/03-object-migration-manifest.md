@@ -1,6 +1,6 @@
 # Data Platform v3 Object Migration Manifest
 
-Plan version: 3.0.0
+Plan version: 3.1.0
 
 Naming notation: `{season}` means each of `1617`, `1718`, `1819`, `1920`, `2021`, `2122`,
 `2223`, `2324`, `2425`, `2526`, and `2627` where present.
@@ -21,14 +21,16 @@ group.
 | `event_fixtures`, `event_fixtures_history`, `event_fixtures_{season}` | table/partition family | `fpl.fixtures` | `(season_id, fixture_id)` | union; `event_id` remains nullable for postponed/unscheduled fixtures | drop in `0092` |
 | `player_stats`, `player_stats_history`, `player_stats_{season}` | table/partition family | `fpl.player_event_snapshots` | `(season_id, event_id, element_id)` | union; preserve snapshot/business columns | drop in `0092` |
 | `event_lives`, `event_lives_history`, `event_lives_{season}` | table/partition family | `fpl.player_gameweek_stats` | `(season_id, event_id, element_id)` | union official live totals | drop in `0092` |
-| `event_live_explains`, `event_live_explains_history`, `event_live_explains_{season}` | table/partition family | `fpl.player_gameweek_scoring` | `(season_id, event_id, element_id, scoring_identifier)` | normalize explain rows; preserve scoring value/points | drop in `0092` |
+| `event_live_explains`, `event_live_explains_history`, `event_live_explains_{season}` | table/partition family | `fpl.player_gameweek_scoring_items` | `(season_id, event_id, element_id, scoring_identifier)` | normalize explain rows; preserve scoring value/points | drop in `0092` |
 | `fpl_player_fixture_stats`, `fpl_player_fixture_stats_history`, `fpl_player_fixture_stats_{season}` | table/partition family | `fpl.player_fixture_stats` | `(season_id, fixture_id, element_id)` | union; preserve fixture attribution | drop in `0092` |
 | `player_market_snapshots`, `player_market_snapshots_history`, `player_market_snapshots_{season}` | table/partition family | `fpl.player_market_snapshots` | `(season_id, snapshot_date, element_id)` | union complete daily/event snapshot facts | drop in `0092` |
 | `event_live_summaries`, `event_live_summaries_history`, `event_live_summaries_{season}` | table/partition family | `reporting.player_season_summaries` | `(season_id, element_id)` | do not copy; reconcile against derived view | drop in `0092` |
-| `player_values`, `player_values_history`, `player_values_{season}` | table/partition family | `reporting.player_value_changes` | `(season_id, snapshot_date, element_id)` | do not copy after exact reconstructability audit | drop in `0092` only if audit has zero mismatches |
+| `player_values`, `player_values_history`, `player_values_{season}` | table/partition family | `reporting.player_value_changes` | `(season_id, snapshot_date, element_id)` | historical rows derive exactly; create provenance-marked market seed facts only for B0 current-season starts that predate all market captures, then require zero view mismatch | drop in `0092` only if final audit has zero mismatches |
 
-`fpl.seasons` has no v2 physical source. `0080` seeds one row per manifest season with explicit
+`fpl.seasons` has no v2 physical source. `0080` seeds one row per core manifest season with explicit
 `season_code`, start/end years, source metadata, lifecycle state, and exactly one `is_current=true`.
+It also seeds reference-only 2011/12 through 2015/16 rows required by preserved entry-season
+history; those rows must not acquire fabricated core facts.
 
 ## Sequences and enum types
 
@@ -58,12 +60,12 @@ manifest.
 | v2 source | v3 target | Target grain/key | Conversion | Final action |
 | --- | --- | --- | --- | --- |
 | `entry_infos` | `competition.entries` | `(season_id, entry_id)` | preserve manager/team metadata and sync checkpoints | drop in `0092` |
-| `entry_history_infos` | `competition.entry_history` | `(season_id, entry_id, event_id)` | preserve event and season history records | drop in `0092` |
+| `entry_history_infos` | `competition.entry_season_histories` | `(season_id, entry_id)` | preserve season-total points/rank rows, including reference-only 2011/12-2015/16 seasons | drop in `0092` |
 | `entry_league_infos` | `competition.entry_leagues` | `(season_id, entry_id, league_id, league_type)` | preserve membership/standing data | drop in `0092` |
 | `entry_event_picks` | `competition.entry_event_picks` | `(season_id, entry_id, event_id, position)` | preserve exactly 15 valid positions for complete squads | drop in `0092` |
 | `entry_event_results` | `competition.entry_event_results` | `(season_id, entry_id, event_id)` | preserve canonical event result/checkpoint fields | drop in `0092` |
 | `entry_event_transfers` | `competition.entry_event_transfers` | source transfer identity under season/entry/event | preserve source identity and transfer order/time | drop in `0092` |
-| `entry_event_cup_results` | `competition.entry_event_cup_results` | `(season_id, entry_id, event_id, match_id)` | preserve cup opponent/result metadata | drop in `0092` |
+| `entry_event_cup_results` | `competition.entry_event_cup_results` | `(season_id, source_result_id)` plus entry/event indexes | preserve the stable source row ID and cup opponent/result metadata; do not invent a missing match ID | drop in `0092` |
 | `league_event_results` | `competition.league_event_results` | `(season_id, league_id, entry_id, event_id)` | preserve standings/results | drop in `0092` |
 | `tournament_infos` | `competition.tournaments` | `(tournament_id)` plus explicit `season_id` | preserve lifecycle/setup/checkpoints | drop in `0092` |
 | `tournament_entries` | `competition.tournament_entries` | `(tournament_id, entry_id)` | preserve membership/seed/admin state | drop in `0092` |

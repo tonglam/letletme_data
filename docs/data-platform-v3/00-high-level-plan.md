@@ -2,7 +2,7 @@
 
 Status: approved for execution
 
-Plan version: 3.0.0
+Plan version: 3.1.0
 
 Baseline date: 2026-08-08
 
@@ -80,14 +80,14 @@ GraphQL receives schema-qualified `SELECT` access only; Web receives no Data-sch
 - `fpl.fixtures`
 - `fpl.player_event_snapshots`
 - `fpl.player_gameweek_stats`
-- `fpl.player_gameweek_scoring`
+- `fpl.player_gameweek_scoring_items`
 - `fpl.player_fixture_stats`
 - `fpl.player_market_snapshots`
 
 ### Competition
 
 - `competition.entries`
-- `competition.entry_history`
+- `competition.entry_season_histories`
 - `competition.entry_leagues`
 - `competition.entry_event_picks`
 - `competition.entry_event_results`
@@ -118,6 +118,10 @@ GraphQL receives schema-qualified `SELECT` access only; Web receives no Data-sch
 - `ops.sync_runs`, `ops.sync_items`
 - `ops.migration_runs`, `ops.migration_objects`
 - `ops.season_imports`
+
+`fpl.seasons` also contains reference-only rows for a season required by preserved competition
+history even when no FPL core archive exists for that season. This keeps `season_id` authoritative
+without fabricating teams, players, events, or fixtures.
 
 ## Target reporting model
 
