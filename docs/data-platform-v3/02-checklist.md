@@ -74,7 +74,7 @@ P1 exit gate: both restore drills pass. A backup that has not been restored does
 | [x] | P2-11 | Implement `0087` Understat/ops conversion | Counts/hashes/provider boundaries pass | P2 report; `ops.migration_objects` passed |
 | [x] | P2-12 | Implement `0088` constraint validation | All deferred constraints validated | 125 FKs; missing indexes 0; unvalidated 0 |
 | [x] | P2-13 | Implement `0089` publication preparation | Complete inactive initial revision exists | Fresh/B0 replay and publication contract passed |
-| [x] | P2-14 | Implement `0090` activation/freeze and final reader ACL | One active revision; v2 writes denied; publication authority readable only by the read role | Validation: 192 frozen relations/fences; 1 active publication; `0090_z_finalize_v3_graphql_reader_contract.sql` |
+| [x] | P2-14 | Implement `0090` activation/freeze and final reader ACL | One active revision; v2 writes denied; publication authority readable only by the read role | Validation: 192 frozen relations/fences; 1 active publication; correction `175ac00` |
 | [x] | P2-15 | Implement approval-gated `0091`-`0093` | Exact manifest only; blocked without approval env/token | Cleanup rehearsal report; v3 hash diff 0 bytes |
 | [x] | P2-16 | Fresh migration replay twice on PG15 | Both runs pass; second run is a no-op/status-clean | External `p2/logs/p2-fresh-final-4-*` |
 | [x] | P2-17 | Production-B0 upgrade replay twice on PG15 | Both runs pass; no manual correction | External `p2/logs/p2-b0-final-5-*` |
