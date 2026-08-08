@@ -38,16 +38,19 @@ FROM public.mv_tournament_event_snapshot;
 
 CREATE VIEW public.v_tournament_selection_stats AS
 SELECT
-  tournament_id,
-  event_id,
-  total_entries,
-  element_id,
-  pick_count,
-  captain_count,
-  vice_captain_count,
-  transfer_in_count,
-  transfer_out_count
-FROM public.tournament_selection_stats;
+  stats.tournament_id,
+  stats.event_id,
+  stats.total_entries,
+  stats.element_id,
+  stats.pick_count,
+  stats.captain_count,
+  stats.vice_captain_count,
+  stats.transfer_in_count,
+  stats.transfer_out_count
+FROM public.tournament_selection_stats AS stats
+JOIN public.tournament_infos AS ready_tournament
+  ON ready_tournament.id = stats.tournament_id
+  AND ready_tournament.standings_ready_at IS NOT NULL;
 
 CREATE VIEW public.v_tournament_snapshot AS
 SELECT *

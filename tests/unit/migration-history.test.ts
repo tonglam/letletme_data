@@ -125,6 +125,26 @@ describe('migration history inspection', () => {
     expect(files).toContain('0075_entry_transfer_source_checkpoint.sql');
     expect(files).toContain('0076_restore_tournament_snapshot_materialized_view.sql');
     expect(files).toContain('0077_restore_tournament_compatibility_views.sql');
+    expect(files).toContain('0078_restore_event_live_summary_runtime_columns.sql');
+  });
+});
+
+describe('runtime compatibility migrations', () => {
+  test('gates restored selection stats and clears incompatible season aggregates', () => {
+    const selectionView = readFileSync(
+      'migrations/0077_restore_tournament_compatibility_views.sql',
+      'utf8',
+    );
+    const summaryMigration = readFileSync(
+      'migrations/0078_restore_event_live_summary_runtime_columns.sql',
+      'utf8',
+    );
+
+    expect(selectionView).toContain('ready_tournament.standings_ready_at IS NOT NULL');
+    expect(summaryMigration).toContain(
+      'TRUNCATE TABLE public.event_live_summaries RESTART IDENTITY',
+    );
+    expect(summaryMigration).not.toContain('MAX(live.event_id)');
   });
 });
 

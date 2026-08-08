@@ -4,30 +4,28 @@
 -- production ledger already contains 0069. Keep 0069 immutable and restore
 -- the active runtime contract in a tail migration.
 
-ALTER TABLE public.event_live_summaries
-  ADD COLUMN IF NOT EXISTS event_id integer,
-  ADD COLUMN IF NOT EXISTS team_id integer;
+DO $$
+DECLARE
+  missing_runtime_columns boolean;
+BEGIN
+  SELECT count(*) < 2
+  INTO missing_runtime_columns
+  FROM information_schema.columns
+  WHERE table_schema = 'public'
+    AND table_name = 'event_live_summaries'
+    AND column_name IN ('event_id', 'team_id');
 
--- Existing aggregate rows came from event_lives, so use their latest event and
--- the current player dimension to make the restored required columns valid.
-UPDATE public.event_live_summaries AS summary
-SET
-  event_id = source.event_id,
-  team_id = source.team_id
-FROM (
-  SELECT
-    summary_row.id,
-    MAX(live.event_id) AS event_id,
-    player.team_id
-  FROM public.event_live_summaries AS summary_row
-  JOIN public.event_lives AS live
-    ON live.element_id = summary_row.element_id
-  JOIN public.players AS player
-    ON player.id = summary_row.element_id
-  GROUP BY summary_row.id, player.team_id
-) AS source
-WHERE summary.id = source.id
-  AND (summary.event_id IS NULL OR summary.team_id IS NULL);
+  ALTER TABLE public.event_live_summaries
+    ADD COLUMN IF NOT EXISTS event_id integer,
+    ADD COLUMN IF NOT EXISTS team_id integer;
+
+  IF missing_runtime_columns THEN
+    -- Migration 0069 left season/player totals in this table. They cannot be
+    -- truthfully assigned to one event, so clear the derived checkpoint and
+    -- let the next event-live sync repopulate the event-grain rows.
+    TRUNCATE TABLE public.event_live_summaries RESTART IDENTITY;
+  END IF;
+END $$;
 
 ALTER TABLE public.event_live_summaries
   ALTER COLUMN event_id SET NOT NULL,
@@ -37,8 +35,22 @@ DO $$
 BEGIN
   IF NOT EXISTS (
     SELECT 1
-    FROM pg_constraint
-    WHERE conname = 'event_live_summaries_event_id_events_id_fk'
+    FROM pg_constraint AS constraint_row
+    WHERE constraint_row.conrelid = 'public.event_live_summaries'::regclass
+      AND constraint_row.confrelid = 'public.events'::regclass
+      AND constraint_row.contype = 'f'
+      AND constraint_row.conkey = ARRAY[
+        (SELECT attribute.attnum
+         FROM pg_attribute AS attribute
+         WHERE attribute.attrelid = 'public.event_live_summaries'::regclass
+           AND attribute.attname = 'event_id')
+      ]::smallint[]
+      AND constraint_row.confkey = ARRAY[
+        (SELECT attribute.attnum
+         FROM pg_attribute AS attribute
+         WHERE attribute.attrelid = 'public.events'::regclass
+           AND attribute.attname = 'id')
+      ]::smallint[]
   ) THEN
     ALTER TABLE public.event_live_summaries
       ADD CONSTRAINT event_live_summaries_event_id_events_id_fk
@@ -47,8 +59,22 @@ BEGIN
 
   IF NOT EXISTS (
     SELECT 1
-    FROM pg_constraint
-    WHERE conname = 'event_live_summaries_team_id_teams_id_fk'
+    FROM pg_constraint AS constraint_row
+    WHERE constraint_row.conrelid = 'public.event_live_summaries'::regclass
+      AND constraint_row.confrelid = 'public.teams'::regclass
+      AND constraint_row.contype = 'f'
+      AND constraint_row.conkey = ARRAY[
+        (SELECT attribute.attnum
+         FROM pg_attribute AS attribute
+         WHERE attribute.attrelid = 'public.event_live_summaries'::regclass
+           AND attribute.attname = 'team_id')
+      ]::smallint[]
+      AND constraint_row.confkey = ARRAY[
+        (SELECT attribute.attnum
+         FROM pg_attribute AS attribute
+         WHERE attribute.attrelid = 'public.teams'::regclass
+           AND attribute.attname = 'id')
+      ]::smallint[]
   ) THEN
     ALTER TABLE public.event_live_summaries
       ADD CONSTRAINT event_live_summaries_team_id_teams_id_fk
