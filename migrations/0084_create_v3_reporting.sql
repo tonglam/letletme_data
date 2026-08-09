@@ -595,6 +595,13 @@ GRANT SELECT ON
   reporting.tournament_entry_event_summaries
 TO letletme_graphql_reader;
 
+-- Data refreshes and validates only the two materialized operational read
+-- models. Ordinary reporting views remain GraphQL-only.
+GRANT SELECT ON
+  reporting.tournament_selection_stats,
+  reporting.tournament_entry_event_summaries
+TO letletme_data_writer;
+
 GRANT EXECUTE ON FUNCTION reporting.refresh_tournament_selection_stats()
 TO letletme_data_writer;
 GRANT EXECUTE ON FUNCTION reporting.refresh_tournament_entry_event_summaries()

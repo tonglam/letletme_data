@@ -1,6 +1,6 @@
 # Data Platform v3 Test and Acceptance Matrix
 
-Plan version: 3.2.4
+Plan version: 3.2.5
 
 ## Evidence rules
 
@@ -58,6 +58,11 @@ Required migration cases:
     the exact B1 public dump, then runs the generated post capsule to restore exact ops state; and
 17. missing/wrong recovery approval, run ID, dump hash, cleanup phase, public catalog, or ops hash
     fails before the corresponding recovery mutation.
+18. the Data writer can execute and read back only the two tournament reporting MVs, cannot read
+    the ordinary reporting views, cannot mutate reporting objects, and cannot create in the
+    schema.
+19. the Data writer can read exactly `migration_runs(run_id,status,metadata)` for core-cache
+    preflight and cannot read other provenance columns or perform any migration-run mutation.
 
 ### GraphQL
 

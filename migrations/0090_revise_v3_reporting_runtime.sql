@@ -203,5 +203,6 @@ ANALYZE reporting.tournament_selection_stats;
 
 REVOKE ALL ON reporting.tournament_selection_stats FROM PUBLIC;
 GRANT SELECT ON reporting.tournament_selection_stats TO letletme_graphql_reader;
+GRANT SELECT ON reporting.tournament_selection_stats TO letletme_data_writer;
 
 RESET ROLE;

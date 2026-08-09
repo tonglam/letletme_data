@@ -1,5 +1,20 @@
 # Data Platform v3 Plan Changelog
 
+## 3.2.5 - 2026-08-09
+
+- Rejected rehearsal 4 after the real Data writer correctly failed the core-cache preflight on
+  `ops.migration_runs`; no v3 Redis key was written and the restored DB0 remained at 473 keys.
+- Kept cache publication on the dedicated Data runtime identity and granted only column-level
+  `SELECT` on `run_id`, `status`, and `metadata`. The writer still has no table-level read, no
+  access to the remaining migration provenance, and no mutation privilege on migration runs.
+- Added exact positive/negative grant validation to activation, P5, and PostgreSQL integration
+  contracts, advanced Data/GraphQL publication parsing to plan 3.2.5, and required two new clean
+  B0 replays before P5 can close.
+- The focused writer regression then proved that Data's existing tournament refresh services could
+  not enter `reporting`. Added schema usage plus `SELECT` only on the two tournament MVs; the three
+  ordinary views remain GraphQL-only, reporting DML/DDL stays denied, and refresh remains limited
+  to the two allowlisted `SECURITY DEFINER` functions.
+
 ## 2026-08-09 - Fresh-cluster migration and runtime identity correction
 
 - Split the one-shot direct Supabase `postgres` migration identity from the Data API/worker

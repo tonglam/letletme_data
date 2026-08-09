@@ -223,6 +223,108 @@ BEGIN
      OR has_table_privilege('letletme_graphql_reader', 'fpl.events', 'INSERT') THEN
     RAISE EXCEPTION 'v3 runtime role grants are invalid';
   END IF;
+
+  IF has_table_privilege('letletme_data_writer', 'ops.migration_runs', 'SELECT')
+     OR NOT has_column_privilege(
+       'letletme_data_writer', 'ops.migration_runs', 'run_id', 'SELECT'
+     )
+     OR NOT has_column_privilege(
+       'letletme_data_writer', 'ops.migration_runs', 'status', 'SELECT'
+     )
+     OR NOT has_column_privilege(
+       'letletme_data_writer', 'ops.migration_runs', 'metadata', 'SELECT'
+     )
+     OR has_table_privilege('letletme_data_writer', 'ops.migration_runs', 'INSERT')
+     OR has_table_privilege('letletme_data_writer', 'ops.migration_runs', 'UPDATE')
+     OR has_table_privilege('letletme_data_writer', 'ops.migration_runs', 'DELETE')
+     OR has_table_privilege('letletme_data_writer', 'ops.migration_runs', 'TRUNCATE')
+     OR has_table_privilege('letletme_data_writer', 'ops.migration_runs', 'REFERENCES')
+     OR has_table_privilege('letletme_data_writer', 'ops.migration_runs', 'TRIGGER')
+     OR EXISTS (
+       SELECT 1
+       FROM pg_attribute attribute_row
+       WHERE attribute_row.attrelid = 'ops.migration_runs'::regclass
+         AND attribute_row.attnum > 0
+         AND NOT attribute_row.attisdropped
+         AND (
+           (
+             attribute_row.attname <> ALL (ARRAY['run_id', 'status', 'metadata'])
+             AND has_column_privilege(
+               'letletme_data_writer',
+               attribute_row.attrelid,
+               attribute_row.attnum,
+               'SELECT'
+             )
+           )
+           OR has_column_privilege(
+             'letletme_data_writer',
+             attribute_row.attrelid,
+             attribute_row.attnum,
+             'INSERT'
+           )
+           OR has_column_privilege(
+             'letletme_data_writer',
+             attribute_row.attrelid,
+             attribute_row.attnum,
+             'UPDATE'
+           )
+           OR has_column_privilege(
+             'letletme_data_writer',
+             attribute_row.attrelid,
+             attribute_row.attnum,
+             'REFERENCES'
+           )
+         )
+     ) THEN
+    RAISE EXCEPTION 'Data writer migration-run preflight privilege boundary failed';
+  END IF;
+
+  IF NOT has_schema_privilege('letletme_data_writer', 'reporting', 'USAGE')
+     OR has_schema_privilege('letletme_data_writer', 'reporting', 'CREATE')
+     OR NOT has_table_privilege(
+       'letletme_data_writer',
+       'reporting.tournament_selection_stats',
+       'SELECT'
+     )
+     OR NOT has_table_privilege(
+       'letletme_data_writer',
+       'reporting.tournament_entry_event_summaries',
+       'SELECT'
+     )
+     OR NOT has_function_privilege(
+       'letletme_data_writer',
+       'reporting.refresh_tournament_selection_stats()',
+       'EXECUTE'
+     )
+     OR NOT has_function_privilege(
+       'letletme_data_writer',
+       'reporting.refresh_tournament_entry_event_summaries()',
+       'EXECUTE'
+     )
+     OR EXISTS (
+       SELECT 1
+       FROM pg_class relation_row
+       WHERE relation_row.relnamespace = 'reporting'::regnamespace
+         AND relation_row.relkind IN ('v', 'm')
+         AND (
+           (
+             relation_row.relname NOT IN (
+               'tournament_selection_stats',
+               'tournament_entry_event_summaries'
+             )
+             AND has_table_privilege(
+               'letletme_data_writer', relation_row.oid, 'SELECT'
+             )
+           )
+           OR has_table_privilege(
+             'letletme_data_writer',
+             relation_row.oid,
+             'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'
+           )
+         )
+     ) THEN
+    RAISE EXCEPTION 'Data writer reporting refresh/read-model privilege boundary failed';
+  END IF;
 END
 $catalog_contract$;
 

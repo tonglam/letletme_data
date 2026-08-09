@@ -2,7 +2,7 @@
 
 Status: approved for execution
 
-Plan version: 3.2.4
+Plan version: 3.2.5
 
 Baseline date: 2026-08-08
 
@@ -33,24 +33,30 @@ explicit final deletion approval.
    constructs season-suffixed table names.
 3. Historical and current FPL data share the same physical tables, keyed by `season_id`.
    PostgreSQL partitioning is not used at the current volume.
-4. Provider data remains isolated. FPL and Understat have separate clients, ingestion, write
+4. The Data runtime owns operational sync/publication state, but cutover provenance remains
+   migration-operator-owned. The initial core-cache publisher may read only
+   `ops.migration_runs(run_id, status, metadata)` to prove the exact activated pre-cleanup run; it
+   cannot read the remaining provenance columns or mutate that table. In `reporting`, Data can
+   read only the two tournament MVs it refreshes and can execute only their two hardened refresh
+   functions; ordinary reporting views remain GraphQL-only.
+5. Provider data remains isolated. FPL and Understat have separate clients, ingestion, write
    paths, and tables. Consumers join them only through verified rows in `bridge`.
-5. Stable source facts are physical tables. Reconstructable calculations are ordinary views.
+6. Stable source facts are physical tables. Reconstructable calculations are ordinary views.
    Expensive, repeatedly consumed reporting results are materialized views.
-6. `event_live_summaries` is not migrated as a table. It becomes
+7. `event_live_summaries` is not migrated as a table. It becomes
    `reporting.player_season_summaries`, one row per `(season_id, element_id)`.
-7. `tournament_selection_stats` becomes a materialized view refreshed only after a complete
+8. `tournament_selection_stats` becomes a materialized view refreshed only after a complete
    event-picks publication. It precomputes selection, captain, vice-captain, percentage, and
    effective-ownership measures.
-8. Understat is low-frequency. Data does not publish Understat to Redis. The future GraphQL
+9. Understat is low-frequency. Data does not publish Understat to Redis. The future GraphQL
    player-state query reads indexed PostgreSQL and uses a bounded GraphQL cache only.
-9. Data owns all business schema migrations. GraphQL no longer runs business DDL at startup or
+10. Data owns all business schema migrations. GraphQL no longer runs business DDL at startup or
    deploy time. Web remains the sole owner of `bauth`.
-10. Queue Redis and cache Redis use separate logical deployments/configuration. No new paid
+11. Queue Redis and cache Redis use separate logical deployments/configuration. No new paid
     service is introduced; the existing infrastructure is separated operationally.
-11. Production activation is a maintenance-window hard cutover. There is no v2/v3 double-write,
+12. Production activation is a maintenance-window hard cutover. There is no v2/v3 double-write,
     shadow traffic, row-by-row fallback, or simultaneous writer set.
-12. No broad Redis flush and no unscoped destructive SQL are permitted.
+13. No broad Redis flush and no unscoped destructive SQL are permitted.
 
 ## Target ownership model
 

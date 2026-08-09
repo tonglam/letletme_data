@@ -103,6 +103,16 @@ describe('P5 rehearsal contracts', () => {
     expect(sql).toContain('P5 dedicated Web auth capability role is missing');
     expect(sql).toContain('P5 dedicated Web auth runtime LOGIN is missing');
     expect(sql).toContain('P5 Web auth role % has Data/public relation privileges');
+    expect(sql).toContain('P5 Data writer migration-run preflight privilege boundary failed');
+    expect(sql).toContain('P5 Data writer reporting refresh/read-model privilege boundary failed');
+  });
+
+  test('grants the core-cache preflight only its three migration-run columns', () => {
+    const sql = read('migrations/0079_create_v3_ops_and_roles.sql');
+
+    expect(sql).toContain('GRANT SELECT (run_id, status, metadata)');
+    expect(sql).toContain('ON ops.migration_runs');
+    expect(sql).not.toContain('GRANT SELECT ON ops.migration_runs TO letletme_data_writer');
   });
 
   test('uses the exact 500 by 38 by 15 tournament benchmark workload', () => {

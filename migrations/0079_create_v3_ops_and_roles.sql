@@ -159,7 +159,8 @@ BEGIN
 END
 $revoke_data_api$;
 
-GRANT USAGE ON SCHEMA fpl, competition, understat, bridge, ops TO letletme_data_writer;
+GRANT USAGE ON SCHEMA fpl, competition, understat, bridge, reporting, ops
+TO letletme_data_writer;
 GRANT USAGE ON SCHEMA fpl, competition, understat, bridge, reporting TO letletme_graphql_reader;
 
 -- The NOLOGIN owner is also the conversion role. Runtime roles receive no v2 grant.
@@ -411,6 +412,13 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON
   ops.sync_runs,
   ops.sync_items,
   ops.season_imports
+TO letletme_data_writer;
+-- The initial immutable-core cache publisher must prove that the exact cutover
+-- run is activated and that legacy cleanup has not started. Expose only the
+-- three columns used by that preflight; migration provenance and mutation stay
+-- migration-operator-only.
+GRANT SELECT (run_id, status, metadata)
+ON ops.migration_runs
 TO letletme_data_writer;
 GRANT USAGE, SELECT ON SEQUENCE ops.dataset_publication_revisions TO letletme_data_writer;
 GRANT SELECT ON ops.dataset_publications TO letletme_graphql_reader;

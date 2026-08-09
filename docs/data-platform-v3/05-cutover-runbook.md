@@ -1,6 +1,6 @@
 # Data Platform v3 Cutover and Recovery Runbook
 
-Plan version: 3.2.4
+Plan version: 3.2.5
 
 Mode: maintenance-window hard cutover
 
@@ -137,7 +137,9 @@ All fields below must be attached to the run record:
   migration login. Data production startup and `cache:publish-core` must pass the Data runtime-role
   contract; GraphQL must pass `contract:check`. Web `DATABASE_URL` must pass
   `db:runtime-contract`, while its administrator connection is supplied only as
-  `DIRECT_DATABASE_URL` to migration commands.
+  `DIRECT_DATABASE_URL` to migration commands. The Data role must additionally prove exact
+  column-only cutover preflight access and exact read/refresh access to the two tournament MVs;
+  broad `migration_runs` or ordinary reporting-view access fails the gate.
 - Web migration `0008_web_auth_runtime_role.sql` is applied and its dedicated LOGIN is provisioned
   before maintenance starts. This migration changes only the Better Auth security boundary; it
   does not create or mutate any FPL/competition/provider fact. The accepted pre-cutover Web build
@@ -195,7 +197,8 @@ canonical equality contract for restored hashes.
 10. Dry-run `bun run cache:publish-core`, verify its exact run/publication/revision/count contract,
    then execute it with `V3_CORE_CACHE_APPROVAL="APPROVE_V3_CORE_CACHE <CUTOVER_RUN_ID>"` and
    `--execute`, using the candidate Data writer `DATABASE_URL` rather than the migration URL. The
-   command rejects admin/migration/GraphQL logins, reads the activated database publication,
+   command rejects admin/migration/GraphQL logins, reads the activated database publication and
+   only `ops.migration_runs(run_id, status, metadata)` for its pre-cleanup cutover gate,
    writes only immutable v3 Redis revision keys, atomically activates the pointer, and performs an
    exact read-back. Build the initial live revision only when a current event exists; preseason
    legitimately has none.

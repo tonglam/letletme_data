@@ -1,6 +1,6 @@
 # Data Platform v3 Strict Execution Checklist
 
-Plan version: 3.2.4
+Plan version: 3.2.5
 
 Rule: an item is complete only when its checkbox is checked and the Evidence column contains a
 durable path, SHA, query result, run URL, or backup manifest. Verbal confirmation is not evidence.
@@ -14,9 +14,9 @@ durable path, SHA, query result, run URL, or backup manifest. Verbal confirmatio
 | GraphQL baseline | `3cc9951` (fetched `origin/main`; supersedes planned `8cf4ddc`) |
 | Web baseline | `c290d91` |
 | Production project | `gtwcfjoviibmtkevurjw` |
-| Plan version | 3.2.4 |
+| Plan version | 3.2.5 |
 | Cutover approver | User |
-| Current phase | P5 in progress; rehearsal-3 rejected on template-owned empty `fpl` schema; fail-fast gate corrected and fresh exact-order rehearsal-4 required |
+| Current phase | Plan 3.2.5 code/focused writer gates pass; candidate commits plus fresh/fresh-B0 migration gates and two full B0 replays required |
 
 ## P0 - Freeze and inventory
 
@@ -77,14 +77,17 @@ P1 exit gate: both restore drills pass. A backup that has not been restored does
 | [x] | P2-13 | Implement `0089` publication preparation | Complete inactive initial revision exists | Fresh/B0 replay and publication contract passed |
 | [x] | P2-14 | Implement `0090` activation/freeze and final reader contracts | One active revision; v2 writes denied; publication authority and public-league catalog have one Data owner and read-only GraphQL access | Validation: 192 frozen relations/fences; 1 active publication; ACL correction `175ac00`; public-league contract `e91a355c9d2253c2ebff07256c3793a57c7f49b9` |
 | [x] | P2-15 | Implement approval-gated `0091`-`0093` | Exact manifest only; blocked without approval env/token | Cleanup rehearsal report; v3 hash diff 0 bytes |
-| [x] | P2-16 | Fresh migration replay twice on PG15 | Both runs pass; second run is a no-op/status-clean | External `p2/logs/p2-fresh-final-4-*` |
-| [x] | P2-17 | Production-B0 upgrade replay twice on PG15 | Both runs pass; no manual correction | External `p2/logs/p2-b0-final-5-*` |
+| [ ] | P2-16 | Fresh migration replay twice on PG15 | Both runs pass; second run is a no-op/status-clean | 3.2.4 evidence retained at external `p2/logs/p2-fresh-final-4-*`; 3.2.5 replay pending |
+| [ ] | P2-17 | Production-B0 upgrade replay twice on PG15 | Both runs pass; no manual correction | 3.2.4 evidence retained at external `p2/logs/p2-b0-final-5-*`; 3.2.5 replay pending |
 | [x] | P2-18 | Run Supabase advisors | No unaccepted v3 security/performance finding | `10-p2-implementation-and-acceptance.md`; local v3 lint 0 |
 | [x] | P2-19 | Commit D1 | Clean tree; SHA recorded | Substantive D1 `aad7225654d2cacf353bb00e441804cf2bc2dce3` |
-| [x] | P2-20 | Enforce publication identity/plan contract | Every publication ID is an RFC UUID; every v3 manifest is plan 3.2.4; sync-run references survive normalization | `0090_zzz_enforce_v3_publication_identity.sql`; B0 result `1f08ab2f-732b-449f-868c-4a2038c5f1ba`; referenced-run fixture preserved; validated CHECK |
-| [x] | P2-21 | Replay publication correction on fresh and B0 PG15 twice | Both paths pass; second runs are no-op/status-clean; legacy cleanup remains gated | PG15 databases `g2_publication_contract_20260809` and `p3_b0_replay_fixed`; 0 invalid IDs; 0 stale plans |
+| [ ] | P2-20 | Enforce publication identity/plan contract | Every publication ID is an RFC UUID; every v3 manifest is plan 3.2.5; sync-run references survive normalization | `0090_zzz_enforce_v3_publication_identity.sql`; 3.2.5 replay pending |
+| [ ] | P2-21 | Replay publication correction on fresh and B0 PG15 twice | Both paths pass; second runs are no-op/status-clean; legacy cleanup remains gated | 3.2.4 evidence retained; 3.2.5 replay pending |
+| [ ] | P2-22 | Enforce core-cache cutover preflight privilege | Writer reads exactly `migration_runs(run_id,status,metadata)`; no broad/provenance/write privilege | Source validators added after `24-p5-rehearsal-run-4-rejected.md`; PG15 positive/negative replay pending |
+| [ ] | P2-23 | Enforce Data reporting operational privilege | Writer reads/refreshes only two tournament MVs; ordinary views, DML, and schema CREATE denied | Focused rejected-run probe identified missing schema usage; corrected migrations/validators pending clean replay |
 
-P2 exit gate: migrations reproduce the target from fresh and B0 schemas and all data gates pass.
+P2 exit gate: P2-01 through P2-23 complete; migrations reproduce the target from fresh and B0
+schemas and all data gates pass.
 
 ## P3 - Data runtime and cache
 
@@ -101,8 +104,10 @@ P2 exit gate: migrations reproduce the target from fresh and B0 schemas and all 
 | [x] | P3-09 | Remove Data Understat cache | No writer/key/config remains | Source/config scan; cleanup allowlist only |
 | [x] | P3-10 | Remove retired summary/value keys | No writer/key/config remains | Source scan + publication contract tests |
 | [x] | P3-11 | Add scoped Redis cleanup | Only configured v2 namespaces deleted; no FLUSH | `6fc38cc`; formal manifest-gated queue copy/verify and `SCAN` + `UNLINK`; `20-p5-redis-cutover-rehearsal.md` |
-| [x] | P3-12 | Run lint/typecheck/unit/integration/build | All pass | `11-p3-runtime-and-cache-acceptance.md`; `12-p3-test-retirement-audit.md` |
+| [x] | P3-12 | Run lint/typecheck/unit/integration/build | All pass | Plan-3.2.5: 680 unit + 31 integration pass, 0 fail; lint/typecheck/build/format pass; external `p5/plan-3.2.5-correction/` |
 | [x] | P3-13 | Commit D2 | Clean tree; SHA recorded | Substantive SHA: `51201b40ec3187ad38a18171a7267836326a6fec` |
+| [x] | P3-14 | Advance immutable publication contract to plan 3.2.5 | Data rejects stale plans; corrected writer dry-run and execute/readback pass | Rejected-run focused probe: exact 38/20/573/11/380; seven keys; six-item 3.2.5 manifest; current event null |
+| [x] | P3-15 | Run Data with exact reporting capability | Tournament refresh/readback succeeds; no access to ordinary views | Real writer refreshed/read both MVs; ordinary-view SELECT, MV DML, schema DDL all denied; trust-boundary 5/5 |
 
 ## P4 - GraphQL and Web
 
@@ -114,7 +119,7 @@ P2 exit gate: migrations reproduce the target from fresh and B0 schemas and all 
 | [x] | P4-04 | Remove GraphQL business migration runner/deploy step | Deploy cannot mutate business schema | CI/deploy boundary scan; no migration directory/command |
 | [x] | P4-05 | Commit G1 | Clean tree; SHA recorded | `886351b1c26d86f5e8010cb57e8d5f33469423c8` |
 | [x] | P4-06 | Create G2 from accepted G1 | Exact predecessor SHA | `/Users/tong/CursorProjects/letletme-graphql-data-platform-v3-reporting-cache`; predecessor `886351b1c26d86f5e8010cb57e8d5f33469423c8` |
-| [x] | P4-07 | Implement reporting readers and v3 query cache | Dataset revision in every key | `14-p4-g2-acceptance.md`; 306 tests; real Redis/HTTP and pointer-loss fallback |
+| [x] | P4-07 | Implement reporting readers and v3 query cache | Dataset revision in every key; plan 3.2.5 authority required | Plan-3.2.5 GraphQL suite 312 pass/0 fail; lint/format/typecheck pass |
 | [x] | P4-08 | Remove v2 views/MVs/RPC fallbacks | Zero references | Exact runtime scans; only G3-owned history-parent paths remain |
 | [x] | P4-09 | Commit G2 | Clean tree; SHA recorded | `e2612ad2db91db5a9841ed03812403e0082a4906` |
 | [x] | P4-10 | Create G3 from accepted G2 | Exact predecessor SHA | `/Users/tong/CursorProjects/letletme-graphql-data-platform-v3-player-state`; predecessor `e2612ad2db91db5a9841ed03812403e0082a4906` |
@@ -125,20 +130,21 @@ P2 exit gate: migrations reproduce the target from fresh and B0 schemas and all 
 | [x] | P4-15 | Implement maintenance UX | All v3-dependent pages fail coherently | `16-p4-w1-acceptance.md`; true 503; English/Chinese desktop/mobile; Data API and Auth boundaries pass |
 | [x] | P4-16 | Verify Better Auth ownership unchanged | Web-only writes; auth journeys pass | `16-p4-w1-acceptance.md`; direct `.from(` count 13 -> 13; owned paths unchanged; unit/E2E pass |
 | [x] | P4-17 | Commit W1 | Clean tree; SHA recorded | `7c7a2bcf4d355f0539f4e0ea7679d78d8253beb2` |
+| [x] | P4-18 | Advance GraphQL startup/cache contract to plan 3.2.5 | Stale DB/Redis plans fail closed; exact 3.2.5 candidate passes | Unit stale-plan negative passes; real `p5_graphql_run4` contract reports 3.2.5; postgres admin exits 1 |
 
 ## P5 - Rehearsal and quality gates
 
 | Done | ID | Check | Acceptance | Evidence |
 | --- | --- | --- | --- | --- |
-| [ ] | P5-01 | Rehearsal run 1 | Complete runbook, no undocumented intervention | `19-p5-rehearsal-run-1.md`; `22-p5-rehearsal-run-2-rejected.md`; `23-p5-rehearsal-run-3-rejected.md`; fresh corrected replay required |
+| [ ] | P5-01 | Rehearsal run 1 | Complete runbook, no undocumented intervention | `19-p5-rehearsal-run-1.md`; rejected runs `22`, `23`, `24`; first clean plan-3.2.5 replay required |
 | [x] | P5-02 | Rollback before activation | v2 remains unchanged | `17-p5-rollback-drills.md`; full public data/sequence/security diffs 0 bytes; old Data SHA status and readiness pass |
 | [x] | P5-03 | Rollback after activation/pre-cleanup | Old SHAs and v2 writer restore without overlap | `17-p5-rollback-drills.md`; full B0 public/sequence/security/bauth diffs 0 bytes; old Data/GraphQL/Web stack all probes 200 |
 | [x] | P5-04 | Simulated post-cleanup B1 restore | Selective/full recovery works | `21-p5-postcleanup-b1-restore.md`; external `p5/postcleanup-b1/manifests/b1-rehearsal-manifest.json` SHA-256 `beb2ce3403ece550b80c655751827ebc52b7a040cceb90b3b8220c1ddebbe2be`; all full/selective data/security/ops diffs 0 |
-| [ ] | P5-05 | Rehearsal run 2 | Same target hashes; timing within budget | `22-p5-rehearsal-run-2-rejected.md`; `23-p5-rehearsal-run-3-rejected.md`; two accepted corrected replays still required |
+| [ ] | P5-05 | Rehearsal run 2 | Same target hashes; timing within budget | `22-p5-rehearsal-run-2-rejected.md`; `23-p5-rehearsal-run-3-rejected.md`; `24-p5-rehearsal-run-4-rejected.md`; two clean plan-3.2.5 replays required |
 | [x] | P5-06 | Data quality matrix | All critical/high checks pass | `19-p5-rehearsal-run-1.md`; 51 passed, 0 failed; B0/v3 hash diffs 0 |
 | [x] | P5-07 | Performance budgets | Every budget passes or has accepted plan revision | `19-p5-rehearsal-run-1.md`; `20-p5-redis-cutover-rehearsal.md`; `21-p5-postcleanup-b1-restore.md`; cleaned DB 391,545,347 bytes vs 512,218,885-byte ceiling |
-| [ ] | P5-08 | Security/grant tests | Least privilege and private schemas pass | Data migration/runtime split `1ac2833`; exact GraphQL recursive role contract `a90a05f`; run-3 preactivation schema guard added after rejected attempt; fresh Data/GraphQL live role gates pending |
-| [ ] | P5-09 | End-to-end journeys | Selections/player/live/market/tournament/auth pass | Rehearsal-3 maintenance/Auth preactivation probes passed but rejected run cannot close this gate; all journeys must repeat after a clean activation using the dedicated Data writer |
+| [ ] | P5-08 | Security/grant tests | Least privilege and private schemas pass | Focused real-writer grants pass exact positive/negative matrix and GraphQL 3.2.5 role gate; clean migration replay still required |
+| [ ] | P5-09 | End-to-end journeys | Selections/player/live/market/tournament/auth pass | Run 4 stopped before service start/cache publication; all journeys must repeat after a clean activation using the corrected dedicated Data writer |
 | [ ] | P5-10 | Freeze candidate SHAs/digests/checksums | External release manifest immutable; no self-reference | Manifest: |
 
 ## P6 - Production activation

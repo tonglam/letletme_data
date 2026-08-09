@@ -15,7 +15,7 @@ const payload = JSON.stringify([{ id: 1 }]);
 function validManifest(): DataPublicationManifest {
   return {
     schemaVersion: 'v3',
-    planVersion: '3.2.4',
+    planVersion: '3.2.5',
     dataset: 'fpl:core',
     seasonCode: '2627',
     eventId: null,

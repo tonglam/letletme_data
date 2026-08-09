@@ -7,7 +7,6 @@ import { describe, expect, test } from 'bun:test';
 import { getDbClient } from '../../src/db/singleton';
 import { eventRepository } from '../../src/repositories/events';
 import { fixtureRepository } from '../../src/repositories/fixtures';
-import { playerSeasonSummaryRepository } from '../../src/repositories/player-season-summaries';
 import { playerRepository } from '../../src/repositories/players';
 import { seasonRepository } from '../../src/repositories/seasons';
 import { teamRepository } from '../../src/repositories/teams';
@@ -93,7 +92,7 @@ describe('v3 database trust boundary', () => {
         '^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
          OR (
            manifest ->> 'schemaVersion' = 'v3'
-           AND manifest ->> 'planVersion' IS DISTINCT FROM '3.2.4'
+           AND manifest ->> 'planVersion' IS DISTINCT FROM '3.2.5'
          )
     `;
     expect(invalidPublicationIdentities).toHaveLength(0);
@@ -115,11 +114,15 @@ describe('v3 database trust boundary', () => {
     ).toBe(true);
 
     const columns = await sql<NamedFinding[]>`
-      SELECT column_name AS name
-      FROM information_schema.columns
-      WHERE table_schema = 'reporting'
-        AND table_name = 'player_season_summaries'
-      ORDER BY ordinal_position
+      SELECT attribute_row.attname AS name
+      FROM pg_class relation_row
+      JOIN pg_namespace namespace_row ON namespace_row.oid = relation_row.relnamespace
+      JOIN pg_attribute attribute_row ON attribute_row.attrelid = relation_row.oid
+      WHERE namespace_row.nspname = 'reporting'
+        AND relation_row.relname = 'player_season_summaries'
+        AND attribute_row.attnum > 0
+        AND NOT attribute_row.attisdropped
+      ORDER BY attribute_row.attnum
     `;
     expect(columns.map((column) => column.name)).toEqual([...PLAYER_SEASON_SUMMARY_COLUMNS]);
     expect(columns.some((column) => column.name === 'event_id')).toBe(false);
@@ -217,6 +220,131 @@ describe('v3 database trust boundary', () => {
         ) AS writable
     `;
     expect(publicationBoundary).toEqual({ readable: true, writable: false });
+
+    const [cachePreflightBoundary] = await sql<
+      Array<{
+        broadSelect: boolean;
+        exactColumnSelect: boolean;
+        columnWritable: boolean;
+        tableWritable: boolean;
+      }>
+    >`
+      SELECT
+        has_table_privilege(
+          'letletme_data_writer',
+          'ops.migration_runs',
+          'SELECT'
+        ) AS "broadSelect",
+        bool_and(
+          has_column_privilege(
+            'letletme_data_writer',
+            attribute_row.attrelid,
+            attribute_row.attnum,
+            'SELECT'
+          ) = (attribute_row.attname = ANY (ARRAY['run_id', 'status', 'metadata']))
+        ) AS "exactColumnSelect",
+        bool_or(
+          has_column_privilege(
+            'letletme_data_writer',
+            attribute_row.attrelid,
+            attribute_row.attnum,
+            'INSERT'
+          )
+          OR has_column_privilege(
+            'letletme_data_writer',
+            attribute_row.attrelid,
+            attribute_row.attnum,
+            'UPDATE'
+          )
+          OR has_column_privilege(
+            'letletme_data_writer',
+            attribute_row.attrelid,
+            attribute_row.attnum,
+            'REFERENCES'
+          )
+        ) AS "columnWritable",
+        has_table_privilege(
+          'letletme_data_writer',
+          'ops.migration_runs',
+          'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'
+        ) AS "tableWritable"
+      FROM pg_attribute attribute_row
+      WHERE attribute_row.attrelid = 'ops.migration_runs'::regclass
+        AND attribute_row.attnum > 0
+        AND NOT attribute_row.attisdropped
+      GROUP BY 1, 4
+    `;
+    expect(cachePreflightBoundary).toEqual({
+      broadSelect: false,
+      exactColumnSelect: true,
+      columnWritable: false,
+      tableWritable: false,
+    });
+
+    const [writerReportingBoundary] = await sql<
+      Array<{
+        schemaUsage: boolean;
+        schemaCreate: boolean;
+        readableRelations: string[] | null;
+        writableRelations: string[] | null;
+        refreshSelection: boolean;
+        refreshEntryEvents: boolean;
+      }>
+    >`
+      SELECT
+        has_schema_privilege(
+          'letletme_data_writer',
+          'reporting',
+          'USAGE'
+        ) AS "schemaUsage",
+        has_schema_privilege(
+          'letletme_data_writer',
+          'reporting',
+          'CREATE'
+        ) AS "schemaCreate",
+        ARRAY(
+          SELECT relation_row.relname
+          FROM pg_class relation_row
+          WHERE relation_row.relnamespace = 'reporting'::regnamespace
+            AND relation_row.relkind IN ('v', 'm')
+            AND has_table_privilege(
+              'letletme_data_writer',
+              relation_row.oid,
+              'SELECT'
+            )
+          ORDER BY relation_row.relname
+        ) AS "readableRelations",
+        ARRAY(
+          SELECT relation_row.relname
+          FROM pg_class relation_row
+          WHERE relation_row.relnamespace = 'reporting'::regnamespace
+            AND relation_row.relkind IN ('v', 'm')
+            AND has_table_privilege(
+              'letletme_data_writer',
+              relation_row.oid,
+              'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'
+            )
+          ORDER BY relation_row.relname
+        ) AS "writableRelations",
+        has_function_privilege(
+          'letletme_data_writer',
+          'reporting.refresh_tournament_selection_stats()',
+          'EXECUTE'
+        ) AS "refreshSelection",
+        has_function_privilege(
+          'letletme_data_writer',
+          'reporting.refresh_tournament_entry_event_summaries()',
+          'EXECUTE'
+        ) AS "refreshEntryEvents"
+    `;
+    expect(writerReportingBoundary).toEqual({
+      schemaUsage: true,
+      schemaCreate: false,
+      readableRelations: ['tournament_entry_event_summaries', 'tournament_selection_stats'],
+      writableRelations: [],
+      refreshSelection: true,
+      refreshEntryEvents: true,
+    });
 
     const [publicLeagueBoundary] = await sql<
       Array<{ readable: boolean; writer_writable: boolean; reader_writable: boolean }>
@@ -358,12 +486,11 @@ describe('B0 historical repository acceptance', () => {
     const season = await seasonRepository.requireByCode('2526');
     expect(season).toMatchObject({ seasonId: 2025, seasonCode: '2526', isCurrent: false });
 
-    const [events, teams, fixtures, players, summaries] = await Promise.all([
+    const [events, teams, fixtures, players] = await Promise.all([
       eventRepository.findAll(season),
       teamRepository.findAll(season),
       fixtureRepository.findAll(season),
       playerRepository.findAll(season),
-      playerSeasonSummaryRepository.findAll(season),
     ]);
 
     expect(events).toHaveLength(38);
@@ -372,7 +499,5 @@ describe('B0 historical repository acceptance', () => {
     expect(teams).toHaveLength(20);
     expect(fixtures).toHaveLength(380);
     expect(players).toHaveLength(841);
-    expect(summaries).toHaveLength(841);
-    expect(new Set(summaries.map((summary) => summary.elementId)).size).toBe(841);
   });
 });

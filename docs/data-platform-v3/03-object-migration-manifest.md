@@ -1,6 +1,6 @@
 # Data Platform v3 Object Migration Manifest
 
-Plan version: 3.2.4
+Plan version: 3.2.5
 
 Naming notation: `{season}` means each of `1617`, `1718`, `1819`, `1920`, `2021`, `2122`,
 `2223`, `2324`, `2425`, `2526`, and `2627` where present.
@@ -117,7 +117,16 @@ and target counts/hashes/status per object and stores legacy migration-ledger ev
 `ops.dataset_publications.publication_id` is an RFC UUID at every runtime boundary. Migration
 `0090_zzz_enforce_v3_publication_identity.sql` deterministically normalizes any pre-runtime ID,
 preserves `ops.sync_runs.publication_id` references transactionally, validates the named CHECK,
-and advances every v3 publication manifest to plan 3.2.4.
+and advances every v3 publication manifest to plan 3.2.5.
+
+`letletme_data_writer` receives column-level `SELECT` only on
+`ops.migration_runs(run_id, status, metadata)` for the initial core-cache preflight. All other
+migration-run columns and every mutation privilege remain migration-operator-only.
+
+The same writer receives `reporting` schema usage, `SELECT` only on
+`reporting.tournament_selection_stats` and `reporting.tournament_entry_event_summaries`, and
+`EXECUTE` only on their two hardened refresh functions. The three ordinary reporting views are
+GraphQL-only.
 
 ## Reporting and executable objects
 

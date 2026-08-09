@@ -69,10 +69,10 @@ ALTER TABLE ops.dataset_publications
 
 UPDATE ops.dataset_publications
 SET
-  manifest = jsonb_set(manifest, '{planVersion}', '"3.2.4"'::jsonb, true),
+  manifest = jsonb_set(manifest, '{planVersion}', '"3.2.5"'::jsonb, true),
   updated_at = now()
 WHERE manifest ->> 'schemaVersion' = 'v3'
-  AND manifest ->> 'planVersion' IS DISTINCT FROM '3.2.4';
+  AND manifest ->> 'planVersion' IS DISTINCT FROM '3.2.5';
 
 DO $publication_identity_contract$
 BEGIN
@@ -89,7 +89,7 @@ BEGIN
     SELECT 1
     FROM ops.dataset_publications publication
     WHERE publication.manifest ->> 'schemaVersion' = 'v3'
-      AND publication.manifest ->> 'planVersion' IS DISTINCT FROM '3.2.4'
+      AND publication.manifest ->> 'planVersion' IS DISTINCT FROM '3.2.5'
   ) THEN
     RAISE EXCEPTION 'v3 publication plan version normalization failed';
   END IF;

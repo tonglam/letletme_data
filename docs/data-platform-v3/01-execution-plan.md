@@ -1,6 +1,6 @@
 # Data Platform v3 Execution Plan
 
-Plan version: 3.2.4
+Plan version: 3.2.5
 
 Execution strategy: preseason hard cutover
 
@@ -114,12 +114,12 @@ Migration sequence:
 
 | Migration | Responsibility |
 | --- | --- |
-| `0079_create_v3_ops_and_roles.sql` | Schemas, roles, grants, ops audit/publication foundation |
+| `0079_create_v3_ops_and_roles.sql` | Schemas, roles, grants, ops audit/publication foundation; exact three-column core-cache preflight read |
 | `0080_create_v3_fpl_dimensions.sql` | Seasons, events, teams, players, phases |
 | `0081_create_v3_fpl_facts.sql` | Fixtures, snapshots, GW facts/scoring, fixture facts, market snapshots |
 | `0082_create_v3_competition.sql` | Entry, league, and tournament physical facts |
 | `0083_create_v3_understat_bridge.sql` | Provider tables, bridge links, provider sync audit mapping |
-| `0084_create_v3_reporting.sql` | Views, materialized views, refresh functions and unique indexes |
+| `0084_create_v3_reporting.sql` | Views, materialized views, refresh functions, unique indexes, and exact Data refresh/read grants |
 | `0085_migrate_v3_fpl_data.sql` | Multi-season FPL conversion and source metadata |
 | `0086_migrate_v3_competition_data.sql` | Entry/league/tournament conversion |
 | `0087_migrate_v3_understat_ops_data.sql` | Understat, bridge, publications, imports, audit conversion |
@@ -128,7 +128,7 @@ Migration sequence:
 | `0090_activate_v3_and_freeze_v2.sql` | Revoke v2 writes, activate v3 revision, establish cutover fence |
 | `0090_z_finalize_v3_graphql_reader_contract.sql` | Make publication authority readable by the read-only GraphQL role and stamp plan 3.2.2 |
 | `0090_zz_add_public_league_trends.sql` | Move the GraphQL-mainline public-league allowlist contract under Data-owned `competition` and stamp plan 3.2.3 |
-| `0090_zzz_enforce_v3_publication_identity.sql` | Normalize pre-runtime publication IDs, enforce RFC UUID identities, preserve sync-run references, and stamp plan 3.2.4 |
+| `0090_zzz_enforce_v3_publication_identity.sql` | Normalize pre-runtime publication IDs, enforce RFC UUID identities, preserve sync-run references, and stamp plan 3.2.5 |
 | `0091_drop_v2_reporting_and_rpcs.sql` | Approval-gated legacy views/MVs/RPC removal |
 | `0092_drop_v2_tables_partitions_triggers.sql` | Approval-gated legacy physical-object removal |
 | `0093_finalize_v3_migration_ownership.sql` | Remove compatibility ledger/view and obsolete GraphQL DDL state |

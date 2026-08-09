@@ -7,7 +7,7 @@ import { redisSingleton } from './singleton';
 
 export const DATA_CACHE_NAMESPACE = 'llm:v3:data';
 export const DATA_PUBLICATION_SCHEMA_VERSION = 'v3';
-export const DATA_PLATFORM_PLAN_VERSION = '3.2.4';
+export const DATA_PLATFORM_PLAN_VERSION = '3.2.5';
 export const DATA_PUBLICATION_STAGING_TTL_MS = 15 * 60 * 1_000;
 export const DATA_PUBLICATION_RETIRED_TTL_MS = 24 * 60 * 60 * 1_000;
 

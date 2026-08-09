@@ -19,6 +19,12 @@ Migration `0093` removes that compatibility object after the separately approved
 - The `0090_*` files activate/freeze v2, add runtime identities/business keys, and install the final
   reporting/publication definitions. `0090_zzz` is the final non-destructive publication identity
   and plan-version fence. These files are ordered lexically and each has an independent checksum.
+- `letletme_data_writer` has column-level `SELECT` only on
+  `ops.migration_runs(run_id, status, metadata)` so `cache:publish-core` can verify the exact
+  activated pre-cleanup run without receiving broad migration provenance or mutation access.
+- In `reporting`, the writer has schema usage and reads only the two tournament MVs that its
+  allowlisted refresh functions rebuild. Ordinary reporting views and all reporting DML/DDL remain
+  outside the Data runtime capability.
 - `0091`-`0093` are legacy-drop migrations. The runner excludes them unless
   `V3_LEGACY_DROP_APPROVAL` exactly matches the approved run ID contract.
 - Production deployment also requires the external release manifest, exact candidate SHA/image
