@@ -1,5 +1,16 @@
 # Data Platform v3 Plan Changelog
 
+## 2026-08-09 - Fresh-cluster migration and runtime identity correction
+
+- Split the one-shot direct Supabase `postgres` migration identity from the Data API/worker
+  `letletme_data_writer` LOGIN and made production startup fail before listening on an owner/admin
+  or extra-membership connection.
+- Required the GraphQL runtime to use its direct LOGIN identity and recursively inherit exactly
+  `letletme_graphql_reader`, closing the extra-read-role and `SET ROLE` paths.
+- Made isolated B0 ownership normalization transactional and faithful to production for the 220
+  public relations plus the template-owned `bauth` and `wechat` application schemas, before Web
+  or Data migrations run.
+
 ## 2026-08-09 - Post-cleanup B1 recovery and final performance gate
 
 - Added generated, approval/run/dump-bound pre/post recovery capsules so selective rollback after

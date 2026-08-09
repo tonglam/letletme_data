@@ -5,9 +5,12 @@
 \quit 3
 \endif
 
--- pg_restore --no-owner assigns B0 objects to the local restore login. P5
--- normalizes only an isolated p5_* database so 0090 sees the same one-owner
--- contract required at production preflight.
+-- pg_restore --no-owner assigns B0 objects to the local restore login, while a
+-- Supabase image can retain supabase_admin ownership for application schemas
+-- already present in its template. P5 normalizes only an isolated p5_* database
+-- to the exact production B0 owner before Web or Data migrations run.
+
+BEGIN;
 
 SET statement_timeout = '5min';
 SET lock_timeout = '5s';
@@ -18,6 +21,8 @@ DECLARE
   public_enum_count bigint;
   public_function_count bigint;
   public_relation_count bigint;
+  bauth_relation_count bigint;
+  wechat_relation_count bigint;
   target_owner_name text := current_setting('letletme.p5_target_owner', true);
 BEGIN
   IF current_database() !~ '^p5_' THEN
@@ -51,8 +56,105 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = target_owner_name) THEN
     RAISE EXCEPTION 'P5 target owner role % does not exist', target_owner_name;
   END IF;
+
+  IF target_owner_name <> 'postgres' THEN
+    RAISE EXCEPTION 'P5 B0 target owner must be the direct Supabase postgres role';
+  END IF;
+
+  IF to_regnamespace('bauth') IS NULL OR to_regnamespace('wechat') IS NULL THEN
+    RAISE EXCEPTION 'P5 B0 Web application schemas are incomplete';
+  END IF;
+
+  SELECT count(*) INTO bauth_relation_count
+  FROM pg_class relation_row
+  WHERE relation_row.relnamespace = 'bauth'::regnamespace
+    AND relation_row.relkind IN ('r', 'p', 'm', 'v', 'S');
+
+  SELECT count(*) INTO wechat_relation_count
+  FROM pg_class relation_row
+  WHERE relation_row.relnamespace = 'wechat'::regnamespace
+    AND relation_row.relkind IN ('r', 'p', 'm', 'v', 'S');
+
+  IF bauth_relation_count <> 13 OR wechat_relation_count <> 4 THEN
+    RAISE EXCEPTION
+      'P5 B0 Web scope mismatch: bauth relations=%, wechat relations=%',
+      bauth_relation_count,
+      wechat_relation_count;
+  END IF;
 END
 $safety_contract$;
+
+DO $normalize_application_schemas$
+DECLARE
+  schema_name text;
+  target_owner_name text := current_setting('letletme.p5_target_owner', true);
+BEGIN
+  FOREACH schema_name IN ARRAY ARRAY['bauth', 'wechat']
+  LOOP
+    IF (SELECT nspowner FROM pg_namespace WHERE nspname = schema_name)
+       <> (SELECT oid FROM pg_roles WHERE rolname = target_owner_name) THEN
+      EXECUTE format('ALTER SCHEMA %I OWNER TO %I', schema_name, target_owner_name);
+    END IF;
+  END LOOP;
+END
+$normalize_application_schemas$;
+
+DO $normalize_application_relations$
+DECLARE
+  relation_record record;
+  alter_kind text;
+  target_owner_name text := current_setting('letletme.p5_target_owner', true);
+BEGIN
+  FOR relation_record IN
+    SELECT namespace_row.nspname, relation_row.relname, relation_row.relkind
+    FROM pg_class relation_row
+    JOIN pg_namespace namespace_row ON namespace_row.oid = relation_row.relnamespace
+    WHERE namespace_row.nspname IN ('bauth', 'wechat')
+      AND relation_row.relkind IN ('r', 'p', 'm', 'v')
+      AND relation_row.relowner <> (SELECT oid FROM pg_roles WHERE rolname = target_owner_name)
+    ORDER BY namespace_row.nspname, relation_row.relkind, relation_row.relname
+  LOOP
+    alter_kind := CASE relation_record.relkind
+      WHEN 'm' THEN 'MATERIALIZED VIEW'
+      WHEN 'v' THEN 'VIEW'
+      ELSE 'TABLE'
+    END;
+    EXECUTE format(
+      'ALTER %s %I.%I OWNER TO %I',
+      alter_kind,
+      relation_record.nspname,
+      relation_record.relname,
+      target_owner_name
+    );
+  END LOOP;
+END
+$normalize_application_relations$;
+
+-- Owned identity/serial sequences follow their table owner automatically.
+-- Re-query after table ownership changes and alter only independent leftovers.
+DO $normalize_application_sequences$
+DECLARE
+  sequence_record record;
+  target_owner_name text := current_setting('letletme.p5_target_owner', true);
+BEGIN
+  FOR sequence_record IN
+    SELECT namespace_row.nspname, relation_row.relname
+    FROM pg_class relation_row
+    JOIN pg_namespace namespace_row ON namespace_row.oid = relation_row.relnamespace
+    WHERE namespace_row.nspname IN ('bauth', 'wechat')
+      AND relation_row.relkind = 'S'
+      AND relation_row.relowner <> (SELECT oid FROM pg_roles WHERE rolname = target_owner_name)
+    ORDER BY namespace_row.nspname, relation_row.relname
+  LOOP
+    EXECUTE format(
+      'ALTER SEQUENCE %I.%I OWNER TO %I',
+      sequence_record.nspname,
+      sequence_record.relname,
+      target_owner_name
+    );
+  END LOOP;
+END
+$normalize_application_sequences$;
 
 DO $normalize_public_relations$
 DECLARE
@@ -167,11 +269,25 @@ BEGIN
     WHERE type_row.typnamespace = 'public'::regnamespace
       AND type_row.typtype = 'e'
       AND type_row.typowner <> (SELECT oid FROM pg_roles WHERE rolname = target_owner_name)
+  ) OR EXISTS (
+    SELECT 1
+    FROM pg_namespace namespace_row
+    WHERE namespace_row.nspname IN ('bauth', 'wechat')
+      AND namespace_row.nspowner <> (SELECT oid FROM pg_roles WHERE rolname = target_owner_name)
+  ) OR EXISTS (
+    SELECT 1
+    FROM pg_class relation_row
+    JOIN pg_namespace namespace_row ON namespace_row.oid = relation_row.relnamespace
+    WHERE namespace_row.nspname IN ('bauth', 'wechat')
+      AND relation_row.relkind IN ('r', 'p', 'm', 'v', 'S')
+      AND relation_row.relowner <> (SELECT oid FROM pg_roles WHERE rolname = target_owner_name)
   ) THEN
     RAISE EXCEPTION 'P5 B0 ownership normalization is incomplete';
   END IF;
 END
 $postcondition$;
+
+COMMIT;
 
 SELECT
   'p5_b0_ownership_normalized' AS status,

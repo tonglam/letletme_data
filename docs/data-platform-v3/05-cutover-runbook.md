@@ -100,7 +100,14 @@ the example above is not permission to omit required Data source objects or incl
    elsewhere is rejected even if every non-`pg_cron` object restored. After both restores and their
    reconciliation are accepted, set `cron.database_name` back to the neutral `postgres` database,
    restart, verify the setting, and only then clone or prepare a rehearsal/cutover target.
-9. Run the complete B0 reconciliation suite. Archive restore logs and reports.
+9. On an isolated Supabase-image `p5_*` rehearsal database, run the committed
+   `sql/v3/p5-normalize-b0-ownership.sql` as the local image administrator before any Web/Data
+   migration. It must assign all 220 public relations, six functions, 20 enums, both application
+   schemas, 13 `bauth` relations, and four `wechat` relations to the direct `postgres` migration
+   LOGIN. This compensates only for `--no-owner` plus template-owned schemas; the script refuses a
+   non-`p5_*` database and must never run against production. Compare the resulting owner manifest
+   to the live B0 source owner manifest.
+10. Run the complete B0 reconciliation suite. Archive restore logs and reports.
 
 B0 is invalid if a dump succeeded but either restore was not tested.
 
