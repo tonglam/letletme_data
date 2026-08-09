@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
+  assertExactV3LegacyDropApproval,
   isV3LegacyDropMigration,
   selectV3LegacyDropMigrations,
 } from '../../scripts/v3-legacy-drop-gate';
@@ -48,5 +49,14 @@ describe('v3 legacy drop gate', () => {
     expect(() => selectV3LegacyDropMigrations(files, files.slice(0, 2), undefined)).toThrow(
       'partially applied',
     );
+  });
+
+  test('binds destructive Redis cleanup to the exact approved run ID', () => {
+    expect(assertExactV3LegacyDropApproval(approval, runId)).toBe(approval);
+    expect(() => assertExactV3LegacyDropApproval(undefined, runId)).toThrow('must equal');
+    expect(() =>
+      assertExactV3LegacyDropApproval('APPROVE_V3_LEGACY_DROP v3-20260808T160009Z-b9eddc0', runId),
+    ).toThrow('must equal');
+    expect(() => assertExactV3LegacyDropApproval(approval, 'not-a-run')).toThrow('CUTOVER_RUN_ID');
   });
 });

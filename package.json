@@ -29,7 +29,8 @@
     "db:check": "bunx drizzle-kit check",
     "db:studio": "bunx drizzle-kit studio",
     "db:apply-sql": "bun scripts/apply-sql-migrations.ts",
-    "db:migrate:status": "bun scripts/apply-sql-migrations.ts --status"
+    "db:migrate:status": "bun scripts/apply-sql-migrations.ts --status",
+    "redis:cutover": "bun scripts/v3-redis-cutover.ts"
   },
   "repository": {
     "type": "git",

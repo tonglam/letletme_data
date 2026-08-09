@@ -13,6 +13,20 @@ export function isV3LegacyDropMigration(filename: string): boolean {
   return V3_LEGACY_DROP_MIGRATION_PATTERN.test(filename);
 }
 
+export function assertExactV3LegacyDropApproval(
+  approval: string | undefined,
+  runId: string | undefined,
+): string {
+  if (!runId || !V3_CUTOVER_RUN_ID_PATTERN.test(runId)) {
+    throw new Error('CUTOVER_RUN_ID must be an exact v3 cutover run ID');
+  }
+  const expected = `${V3_LEGACY_DROP_APPROVAL_PREFIX}${runId}`;
+  if (approval !== expected) {
+    throw new Error(`V3_LEGACY_DROP_APPROVAL must equal ${expected}`);
+  }
+  return approval;
+}
+
 export function selectV3LegacyDropMigrations(
   files: readonly string[],
   appliedFilenames: Iterable<string>,
