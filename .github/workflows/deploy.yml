@@ -427,12 +427,13 @@ jobs:
           V3_RELEASE_MANIFEST_BASE64: ${{ inputs.v3_release_manifest_base64 }}
           V3_RELEASE_MANIFEST_SHA256: ${{ inputs.v3_release_manifest_sha256 }}
           V3_CUTOVER_APPROVAL: ${{ inputs.v3_cutover_approval }}
+          V3_MIGRATION_ENV: ${{ secrets.V3_MIGRATION_ENV }}
         with:
           host: ${{ vars.VPS_HOST }}
           username: ${{ vars.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           script_stop: false
-          envs: DEPLOY_SHA,IMAGE_REF,DEPLOY_IMAGE_DIGEST,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR,V3_CUTOVER_RUN_ID,V3_RELEASE_MANIFEST_BASE64,V3_RELEASE_MANIFEST_SHA256,V3_CUTOVER_APPROVAL
+          envs: DEPLOY_SHA,IMAGE_REF,DEPLOY_IMAGE_DIGEST,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR,V3_CUTOVER_RUN_ID,V3_RELEASE_MANIFEST_BASE64,V3_RELEASE_MANIFEST_SHA256,V3_CUTOVER_APPROVAL,V3_MIGRATION_ENV
           script: |
             set -euo pipefail
             LOWER_USER=$(printf '%s' "$GHCR_USER" | tr '[:upper:]' '[:lower:]')
@@ -444,11 +445,32 @@ jobs:
             git diff --quiet || { echo "Data VPS checkout has tracked modifications"; exit 1; }
             git diff --cached --quiet || { echo "Data VPS index has staged modifications"; exit 1; }
             test -f .env.deploy || { echo "Missing .env.deploy"; exit 1; }
-            test -f .env.migrate || { echo "Missing isolated .env.migrate"; exit 1; }
+            test -n "$V3_MIGRATION_ENV" || { echo "Missing V3_MIGRATION_ENV secret"; exit 1; }
             if docker ps --format '{{.Ports}}' | grep -q '127.0.0.1:4000->'; then
               echo "GraphQL is still running on port 4000; stop it before database activation"
               exit 1
             fi
+            docker pull "$IMAGE_REF"
+            docker run --rm \
+              -e DEPLOY_SHA="$DEPLOY_SHA" \
+              -e DEPLOY_IMAGE_DIGEST="$DEPLOY_IMAGE_DIGEST" \
+              -e V3_CUTOVER_RUN_ID="$V3_CUTOVER_RUN_ID" \
+              -e V3_RELEASE_MANIFEST_BASE64="$V3_RELEASE_MANIFEST_BASE64" \
+              -e V3_RELEASE_MANIFEST_SHA256="$V3_RELEASE_MANIFEST_SHA256" \
+              -e V3_CUTOVER_APPROVAL="$V3_CUTOVER_APPROVAL" \
+              "$IMAGE_REF" bun scripts/v3-release-gate.ts
+            config_backup_dir="$(dirname "$VPS_WORKDIR")/v3-cutover/$V3_CUTOVER_RUN_ID/data"
+            install -d -m 700 "$config_backup_dir"
+            install -m 600 .env.deploy "$config_backup_dir/env.deploy.before-v3"
+            sha256sum "$config_backup_dir/env.deploy.before-v3" > "$config_backup_dir/env.deploy.before-v3.sha256"
+            if [ -f .env.migrate ]; then
+              install -m 600 .env.migrate "$config_backup_dir/env.migrate.before-v3"
+              sha256sum "$config_backup_dir/env.migrate.before-v3" > "$config_backup_dir/env.migrate.before-v3.sha256"
+            fi
+            migration_tmp=$(mktemp "$VPS_WORKDIR/.env.migrate.v3.XXXXXX")
+            printf '%s\n' "$V3_MIGRATION_ENV" > "$migration_tmp"
+            chmod 600 "$migration_tmp"
+            mv "$migration_tmp" .env.migrate
             git fetch --all
             untracked_file=$(mktemp)
             target_file=$(mktemp)
@@ -464,18 +486,6 @@ jobs:
             git checkout --force main
             git reset --hard "$DEPLOY_SHA"
             APP_IMAGE="$IMAGE_REF" docker compose pull api worker migration
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
-              -e DEPLOY_SHA="$DEPLOY_SHA" \
-              -e DEPLOY_IMAGE_DIGEST="$DEPLOY_IMAGE_DIGEST" \
-              -e V3_CUTOVER_RUN_ID="$V3_CUTOVER_RUN_ID" \
-              -e V3_RELEASE_MANIFEST_BASE64="$V3_RELEASE_MANIFEST_BASE64" \
-              -e V3_RELEASE_MANIFEST_SHA256="$V3_RELEASE_MANIFEST_SHA256" \
-              -e V3_CUTOVER_APPROVAL="$V3_CUTOVER_APPROVAL" \
-              migration bun scripts/v3-release-gate.ts
-            config_backup_dir="$(dirname "$VPS_WORKDIR")/v3-cutover/$V3_CUTOVER_RUN_ID/data"
-            install -d -m 700 "$config_backup_dir"
-            install -m 600 .env.deploy "$config_backup_dir/env.deploy.before-v3"
-            sha256sum "$config_backup_dir/env.deploy.before-v3" > "$config_backup_dir/env.deploy.before-v3.sha256"
             command -v python3 >/dev/null
             env_tmp=$(mktemp "$VPS_WORKDIR/.env.deploy.v3.XXXXXX")
             python3 - .env.deploy "$env_tmp" <<'PY'

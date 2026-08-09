@@ -74,8 +74,13 @@ describe('v3 production hard-cut workflow', () => {
     const untrackedInventory = activation.indexOf('git ls-files --others --exclude-standard');
     const conflictGuard = activation.indexOf('comm -12');
     const reset = activation.indexOf('git reset --hard');
+    const releaseGate = activation.indexOf('bun scripts/v3-release-gate.ts');
+    const migrationEnvWrite = activation.indexOf('mv "$migration_tmp" .env.migrate');
 
     expect(trackedGuard).toBeGreaterThan(0);
+    expect(activation).toContain('V3_MIGRATION_ENV: ${{ secrets.V3_MIGRATION_ENV }}');
+    expect(releaseGate).toBeGreaterThan(trackedGuard);
+    expect(migrationEnvWrite).toBeGreaterThan(releaseGate);
     expect(untrackedInventory).toBeGreaterThan(trackedGuard);
     expect(conflictGuard).toBeGreaterThan(untrackedInventory);
     expect(reset).toBeGreaterThan(conflictGuard);
