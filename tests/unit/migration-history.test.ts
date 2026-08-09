@@ -153,6 +153,25 @@ describe('migration history inspection', () => {
     expect(files).toContain('0077_restore_tournament_compatibility_views.sql');
     expect(files).toContain('0078_restore_event_live_summary_runtime_columns.sql');
   });
+
+  test('preserves the deployed 0079 history tail before v3 activation', () => {
+    const files = [
+      '0079_align_fpl_event_history.sql',
+      '0079_create_v3_ops_and_roles.sql',
+      '0080_create_v3_fpl_dimensions.sql',
+    ];
+    const productionTail = ['0079_align_fpl_event_history.sql'];
+    const migration = readFileSync('migrations/0079_align_fpl_event_history.sql', 'utf8');
+
+    expect(inspectMigrationHistory(files, productionTail)).toEqual({
+      missing: [],
+      backdated: [],
+      latestApplied: '0079_align_fpl_event_history.sql',
+    });
+    expect(createHash('sha256').update(migration, 'utf8').digest('hex')).toBe(
+      '4c96e8c932248b17d0aaef3449d99f765389eb951ac2e03dac5dafbc64630ec3',
+    );
+  });
 });
 
 describe('runtime compatibility migrations', () => {
