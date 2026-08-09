@@ -19,6 +19,10 @@ const preactivation: MigrationLoginSnapshot = {
   publicFunctionCount: 6,
   publicEnumCount: 20,
   wrongPublicOwnerCount: 0,
+  publicLeagueTrendsCatalogState: 'absent',
+  publicLeagueTrendsCatalogRows: 0,
+  publicLeagueTrendsCatalogOrphans: 0,
+  graphqlMainlineFunctionsValid: false,
   invalidPreactivationSchemaCount: 0,
   preactivationSchemaObjectCount: 0,
   inheritedRoles: [],
@@ -28,6 +32,54 @@ const preactivation: MigrationLoginSnapshot = {
 describe('v3 migration LOGIN gate', () => {
   test('accepts the exact pre-activation Supabase postgres contract', () => {
     expect(() => assertV3MigrationLoginSnapshot(preactivation)).not.toThrow();
+  });
+
+  test('accepts only the exact later GraphQL catalog baseline', () => {
+    expect(() =>
+      assertV3MigrationLoginSnapshot({
+        ...preactivation,
+        publicRelationCount: 221,
+        publicFunctionCount: 8,
+        publicLeagueTrendsCatalogState: 'valid',
+        graphqlMainlineFunctionsValid: true,
+      }),
+    ).not.toThrow();
+
+    expect(() =>
+      assertV3MigrationLoginSnapshot({
+        ...preactivation,
+        publicRelationCount: 221,
+        publicFunctionCount: 8,
+      }),
+    ).toThrow('exact B0 object scope');
+    expect(() =>
+      assertV3MigrationLoginSnapshot({
+        ...preactivation,
+        publicRelationCount: 221,
+        publicFunctionCount: 8,
+        publicLeagueTrendsCatalogState: 'invalid',
+        graphqlMainlineFunctionsValid: true,
+      }),
+    ).toThrow('exact B0 object scope');
+    expect(() =>
+      assertV3MigrationLoginSnapshot({
+        ...preactivation,
+        publicRelationCount: 221,
+        publicFunctionCount: 8,
+        publicLeagueTrendsCatalogState: 'valid',
+        publicLeagueTrendsCatalogRows: 1,
+        publicLeagueTrendsCatalogOrphans: 1,
+        graphqlMainlineFunctionsValid: true,
+      }),
+    ).toThrow('exact B0 object scope');
+    expect(() =>
+      assertV3MigrationLoginSnapshot({
+        ...preactivation,
+        publicRelationCount: 221,
+        publicFunctionCount: 8,
+        publicLeagueTrendsCatalogState: 'valid',
+      }),
+    ).toThrow('exact B0 object scope');
   });
 
   test('rejects a generic CREATEROLE operator', () => {

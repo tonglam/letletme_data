@@ -12,6 +12,10 @@ export type MigrationLoginSnapshot = {
   readonly publicFunctionCount: number;
   readonly publicEnumCount: number;
   readonly wrongPublicOwnerCount: number;
+  readonly publicLeagueTrendsCatalogState: 'absent' | 'valid' | 'invalid';
+  readonly publicLeagueTrendsCatalogRows: number;
+  readonly publicLeagueTrendsCatalogOrphans: number;
+  readonly graphqlMainlineFunctionsValid: boolean;
   readonly invalidPreactivationSchemaCount: number;
   readonly preactivationSchemaObjectCount: number;
   readonly inheritedRoles: readonly string[];
@@ -33,9 +37,21 @@ export function assertV3MigrationLoginSnapshot(snapshot: MigrationLoginSnapshot)
   }
 
   if (snapshot.migrationState !== 'activated') {
+    const acceptedPublicBaseline =
+      (snapshot.publicRelationCount === 220 &&
+        snapshot.publicFunctionCount === 6 &&
+        snapshot.publicLeagueTrendsCatalogState === 'absent' &&
+        snapshot.publicLeagueTrendsCatalogRows === 0 &&
+        snapshot.publicLeagueTrendsCatalogOrphans === 0 &&
+        !snapshot.graphqlMainlineFunctionsValid) ||
+      (snapshot.publicRelationCount === 221 &&
+        snapshot.publicFunctionCount === 8 &&
+        snapshot.publicLeagueTrendsCatalogState === 'valid' &&
+        snapshot.publicLeagueTrendsCatalogOrphans === 0 &&
+        snapshot.graphqlMainlineFunctionsValid);
+
     if (
-      snapshot.publicRelationCount !== 220 ||
-      snapshot.publicFunctionCount !== 6 ||
+      !acceptedPublicBaseline ||
       snapshot.publicEnumCount !== 20 ||
       snapshot.wrongPublicOwnerCount !== 0
     ) {

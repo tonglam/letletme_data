@@ -34,6 +34,10 @@
   not enter `reporting`. Added schema usage plus `SELECT` only on the two tournament MVs; the three
   ordinary views remain GraphQL-only, reporting DML/DDL stays denied, and refresh remains limited
   to the two allowlisted `SECURITY DEFINER` functions.
+- Corrected the production preactivation gate after the fresh cutover backup proved that the
+  already-deployed GraphQL mainline added one catalog relation and two functions after the accepted
+  B0. The gate now accepts only the exact old 220/6 baseline or the exact 221/8 baseline with the
+  expected catalog shape, owner, function signatures, and zero tournament orphans.
 
 ## 2026-08-09 - Fresh-cluster migration and runtime identity correction
 

@@ -20,6 +20,8 @@ type BaseContractRow = {
   public_function_count: number;
   public_enum_count: number;
   wrong_public_owner_count: number;
+  has_public_league_trends_catalog: boolean;
+  graphql_mainline_functions_valid: boolean;
   invalid_preactivation_schema_count: number;
   preactivation_schema_object_count: number;
 };
@@ -74,6 +76,24 @@ async function main(): Promise<void> {
           ) owned_objects
           WHERE owned_objects.owner_oid <> role_row.oid
         ) AS wrong_public_owner_count,
+        to_regclass('public.public_league_trends_catalog') IS NOT NULL
+          AS has_public_league_trends_catalog,
+        (
+          SELECT count(*) = 2 AND bool_and(function_row.proowner = role_row.oid)
+          FROM pg_proc function_row
+          WHERE function_row.pronamespace = 'public'::regnamespace
+            AND (
+              (
+                function_row.proname = 'search_players_for_picker'
+                AND oidvectortypes(function_row.proargtypes) =
+                  'text, integer, integer, integer, integer, integer, integer'
+              )
+              OR (
+                function_row.proname = 'touch_public_league_trends_catalog_updated_at'
+                AND oidvectortypes(function_row.proargtypes) = ''
+              )
+            )
+        ) AS graphql_mainline_functions_valid,
         (
           SELECT count(*)::integer
           FROM pg_namespace namespace_row
@@ -121,6 +141,74 @@ async function main(): Promise<void> {
     `;
     const base = baseRows[0];
     if (!base) throw new Error('Migration LOGIN role is unavailable');
+
+    let publicLeagueTrendsCatalogState: MigrationLoginSnapshot['publicLeagueTrendsCatalogState'] =
+      'absent';
+    let publicLeagueTrendsCatalogRows = 0;
+    let publicLeagueTrendsCatalogOrphans = 0;
+    if (base.has_public_league_trends_catalog) {
+      const catalogRows = await sql<
+        Array<{
+          shape_valid: boolean;
+          row_count: number;
+          orphan_count: number;
+        }>
+      >`
+        SELECT
+          catalog_relation.relkind = 'r'
+            AND catalog_relation.relowner = role_row.oid
+            AND (
+              SELECT jsonb_agg(
+                jsonb_build_object(
+                  'name', attribute_row.attname,
+                  'type', format_type(attribute_row.atttypid, attribute_row.atttypmod),
+                  'notNull', attribute_row.attnotnull
+                )
+                ORDER BY attribute_row.attnum
+              )
+              FROM pg_attribute attribute_row
+              WHERE attribute_row.attrelid = catalog_relation.oid
+                AND attribute_row.attnum > 0
+                AND NOT attribute_row.attisdropped
+            ) = jsonb_build_array(
+              jsonb_build_object('name', 'tournament_id', 'type', 'integer', 'notNull', true),
+              jsonb_build_object('name', 'display_name', 'type', 'text', 'notNull', true),
+              jsonb_build_object('name', 'sort_order', 'type', 'integer', 'notNull', true),
+              jsonb_build_object('name', 'enabled', 'type', 'boolean', 'notNull', true),
+              jsonb_build_object(
+                'name',
+                'published_at',
+                'type',
+                'timestamp with time zone',
+                'notNull',
+                true
+              ),
+              jsonb_build_object(
+                'name',
+                'updated_at',
+                'type',
+                'timestamp with time zone',
+                'notNull',
+                true
+              )
+            ) AS shape_valid,
+          (SELECT count(*)::integer FROM public.public_league_trends_catalog) AS row_count,
+          (
+            SELECT count(*)::integer
+            FROM public.public_league_trends_catalog source_catalog
+            LEFT JOIN public.tournament_infos tournament
+              ON tournament.id = source_catalog.tournament_id
+            WHERE tournament.id IS NULL
+          ) AS orphan_count
+        FROM pg_class catalog_relation
+        JOIN pg_roles role_row ON role_row.rolname = current_user
+        WHERE catalog_relation.oid = 'public.public_league_trends_catalog'::regclass
+      `;
+      const catalog = catalogRows[0];
+      publicLeagueTrendsCatalogState = catalog?.shape_valid ? 'valid' : 'invalid';
+      publicLeagueTrendsCatalogRows = catalog?.row_count ?? 0;
+      publicLeagueTrendsCatalogOrphans = catalog?.orphan_count ?? 0;
+    }
 
     const inheritedRows = await sql<Array<{ role_name: string }>>`
       WITH RECURSIVE inherited(role_oid, role_name, path) AS (
@@ -174,6 +262,10 @@ async function main(): Promise<void> {
       publicFunctionCount: base.public_function_count,
       publicEnumCount: base.public_enum_count,
       wrongPublicOwnerCount: base.wrong_public_owner_count,
+      publicLeagueTrendsCatalogState,
+      publicLeagueTrendsCatalogRows,
+      publicLeagueTrendsCatalogOrphans,
+      graphqlMainlineFunctionsValid: base.graphql_mainline_functions_valid,
       invalidPreactivationSchemaCount: base.invalid_preactivation_schema_count,
       preactivationSchemaObjectCount: base.preactivation_schema_object_count,
       inheritedRoles: inheritedRows.map((row) => row.role_name),
@@ -193,6 +285,12 @@ async function main(): Promise<void> {
             functions: snapshot.publicFunctionCount,
             enums: snapshot.publicEnumCount,
             wrongOwners: snapshot.wrongPublicOwnerCount,
+            publicLeagueTrendsCatalog: {
+              state: snapshot.publicLeagueTrendsCatalogState,
+              rows: snapshot.publicLeagueTrendsCatalogRows,
+              orphans: snapshot.publicLeagueTrendsCatalogOrphans,
+            },
+            graphqlMainlineFunctionsValid: snapshot.graphqlMainlineFunctionsValid,
           },
           preactivationTargetSchemas: {
             invalidSchemas: snapshot.invalidPreactivationSchemaCount,
