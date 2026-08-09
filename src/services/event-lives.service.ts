@@ -5,9 +5,13 @@ import type { EventLive } from '../domain/event-lives';
 import type { EventLiveExplain } from '../domain/event-live-explains';
 import { createEventLiveExplainsRepository } from '../repositories/event-live-explains';
 import { createEventLiveRepository, eventLiveRepository } from '../repositories/event-lives';
+import { createFplPlayerFixtureStatsRepository } from '../repositories/fpl-player-fixture-stats';
+import type { FplPlayerFixtureEvidence } from '../domain/fpl-player-fixture-stats';
+import { getActiveCacheSeasonUncached } from '../cache/cache-season';
+import { transformFplPlayerFixtureEvidence } from '../transformers/fpl-player-fixture-stats';
 import { transformEventLiveExplains } from '../transformers/event-live-explains';
 import { transformEventLives } from '../transformers/event-lives';
-import { logDebug, logError, logInfo } from '../utils/logger';
+import { logDebug, logError, logInfo, logWarn } from '../utils/logger';
 
 import type { RawFPLEventLiveElement } from '../types';
 
@@ -26,6 +30,7 @@ export interface PreparedEventLives {
   sourceCount: number;
   eventLives: EventLive[];
   explains: EventLiveExplain[];
+  fixtureEvidence: FplPlayerFixtureEvidence[];
   errors: number;
 }
 
@@ -35,11 +40,13 @@ export function prepareEventLives(
 ): PreparedEventLives {
   const eventLives = transformEventLives(eventId, elements);
   const explains = transformEventLiveExplains(eventId, elements);
+  const fixtureEvidence = transformFplPlayerFixtureEvidence(eventId, elements);
   return {
     eventId,
     sourceCount: elements.length,
     eventLives,
     explains,
+    fixtureEvidence,
     errors: elements.length - eventLives.length,
   };
 }
@@ -51,11 +58,27 @@ export function prepareEventLives(
 export async function persistPreparedEventLives(
   prepared: PreparedEventLives,
   dbInstance?: DbOrTransaction,
+  season?: string,
 ): Promise<EventLive[]> {
   const { eventId, eventLives, explains } = prepared;
+  // Keep injected/legacy prepared snapshots compatible while the new
+  // per-fixture evidence field rolls out across workers and tests.
+  const fixtureEvidence = prepared.fixtureEvidence ?? [];
+  let evidenceSeason = season ?? null;
+  if (fixtureEvidence.length > 0 && !evidenceSeason) {
+    try {
+      evidenceSeason = await getActiveCacheSeasonUncached();
+    } catch (error) {
+      logWarn('Skipping FPL fixture evidence because active season is unavailable', {
+        eventId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
   const persist = async (tx: DbOrTransaction) => {
     const txEventLiveRepository = createEventLiveRepository(tx);
     const txExplainsRepository = createEventLiveExplainsRepository(tx);
+    const txFixtureStatsRepository = createFplPlayerFixtureStatsRepository(tx);
 
     const savedLives = await txEventLiveRepository.upsertBatch(eventLives);
     logInfo('Event lives upserted to database', { eventId, count: savedLives.length });
@@ -65,6 +88,10 @@ export async function persistPreparedEventLives(
       eventId,
       count: savedExplains.length,
     });
+
+    if (evidenceSeason) {
+      await txFixtureStatsRepository.upsertEvidence(evidenceSeason, fixtureEvidence);
+    }
 
     return savedLives;
   };

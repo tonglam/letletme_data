@@ -27,6 +27,10 @@ const DATA_TABLES = [
   'player_market_snapshots',
   'player_values',
   'players',
+  'fpl_player_fixture_stats',
+  'provider_entity_aliases',
+  'provider_entity_links',
+  'provider_match_links',
   'teams',
   'tournament_battle_group_results',
   'tournament_entries',
@@ -36,6 +40,18 @@ const DATA_TABLES = [
   'tournament_knockouts',
   'tournament_points_group_results',
   'tournament_selection_stats',
+  'understat_matches',
+  'understat_player_match_stats',
+  'understat_player_seasons',
+  'understat_player_team_seasons',
+  'understat_players',
+  'understat_seasons',
+  'understat_sync_items',
+  'understat_sync_runs',
+  'understat_team_match_stats',
+  'understat_team_seasons',
+  'understat_team_stat_splits',
+  'understat_teams',
 ] as const;
 
 const DATA_VIEWS = [
@@ -139,22 +155,17 @@ describe('Database trust boundary', () => {
       JOIN pg_namespace namespace ON namespace.oid = owner_relation.relnamespace
       WHERE namespace.nspname = 'public'
         AND owner_relation.relname IN (
-          'mv_tournament_event_snapshot',
-          'mv_tournament_snapshot'
+          'mv_tournament_event_snapshot'
         )
         AND index_definition.indisunique
       ORDER BY name
     `;
-    expect(refreshIndexes.map((finding) => finding.name)).toEqual([
-      'idx_mv_tes_pk',
-      'idx_mv_ts_pk',
-    ]);
+    expect(refreshIndexes.map((finding) => finding.name)).toEqual(['idx_mv_tes_pk']);
 
     const inaccessibleToServiceRole = await sql<NamedFinding[]>`
       SELECT expected.name
       FROM (VALUES
-        ('mv_tournament_event_snapshot'),
-        ('mv_tournament_snapshot')
+        ('mv_tournament_event_snapshot')
       ) expected(name)
       WHERE NOT has_table_privilege(
         'service_role',

@@ -13,7 +13,8 @@ export type DataSyncJobName =
   | 'player-prices'
   | 'player-stats'
   | 'phases'
-  | 'player-values';
+  | 'player-values'
+  | 'fpl-season-archive';
 
 export interface DataSyncJobData {
   source?: 'cron' | 'manual' | 'api' | 'event-transition' | 'cascade';
@@ -24,6 +25,8 @@ export interface DataSyncJobData {
   eventId?: number;
   /** Price-history date in the configured cron timezone (YYYYMMDD). */
   changeDate?: string;
+  /** Canonical four-digit season for archive jobs (for example 2627). */
+  season?: string;
 }
 
 const defaultJobOptions = {

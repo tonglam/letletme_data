@@ -8,6 +8,7 @@ export interface DataSyncEnqueueOptions {
   jobId?: string;
   eventId?: number;
   changeDate?: string;
+  season?: string;
   /** When true (default for explicit jobId), remove job on settle so re-triggers work. */
   removeOnSettle?: boolean;
 }
@@ -23,7 +24,8 @@ export function defaultDataSyncJobId(
   }
   const eventPart = options.eventId !== undefined ? `-e${options.eventId}` : '';
   const datePart = options.changeDate !== undefined ? `-${options.changeDate}` : '';
-  return `${jobName}${eventPart}${datePart}-${source}`;
+  const seasonPart = options.season !== undefined ? `-${options.season}` : '';
+  return `${jobName}${eventPart}${datePart}${seasonPart}-${source}`;
 }
 
 export function createDataSyncJobData(source: DataSyncJobSource, options: DataSyncEnqueueOptions) {
@@ -33,5 +35,6 @@ export function createDataSyncJobData(source: DataSyncJobSource, options: DataSy
     runId: randomUUID(),
     ...(options.eventId !== undefined ? { eventId: options.eventId } : {}),
     ...(options.changeDate !== undefined ? { changeDate: options.changeDate } : {}),
+    ...(options.season !== undefined ? { season: options.season } : {}),
   };
 }

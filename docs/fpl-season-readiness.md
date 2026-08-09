@@ -12,7 +12,7 @@ table does not prove the upstream endpoint is unavailable.
 
 ## External endpoint inventory
 
-The FPL client has ten logical endpoint patterns. Test them read-only with real,
+The FPL client and history backfill use eleven logical endpoint patterns. Test them read-only with real,
 current IDs where required; do not treat an expected pre-publication `404` as a
 schema failure.
 
@@ -21,6 +21,7 @@ schema failure.
 | `/bootstrap-static/` | `getBootstrap()` | FPL publishes events, teams, players, and phases |
 | `/fixtures/` or `/fixtures/?event={eventId}` | `getFixtures()` | The fixture list or requested GW exists |
 | `/event/{eventId}/live/` | `getEventLive()` | The gameweek live feed is published |
+| `/element-summary/{elementId}/` | history backfill source (`fixtures`, `history`, `history_past`) | The player element exists; use the preserved per-player history for historical fixture and market fields |
 | `/entry/{entryId}/` | `getEntrySummary()` | The entry exists in the new season |
 | `/entry/{entryId}/event/{eventId}/picks/` | `getEntryEventPicks()` | Picks for that GW are published |
 | `/entry/{entryId}/transfers/` | `getEntryTransfers()` | The entry has a current-season transfer feed |
@@ -28,6 +29,13 @@ schema failure.
 | `/entry/{entryId}/cup/` | `getEntryCup()` | Cup data exists; `404` is handled as unavailable |
 | `/leagues-classic/{leagueId}/standings/` | `getLeagueClassicStandings()` | A current classic league ID exists |
 | `/leagues-h2h/{leagueId}/standings/` | `getLeagueH2HStandings()` | A current H2H league ID exists |
+
+`/element-summary/{elementId}/` is an upstream historical-data endpoint, not a
+separate live feed. It supplies per-player `fixtures`, `history`, and
+`history_past`; the `2526` importer consumes a preserved raw mirror of this
+shape. The routine runtime `FPLClient` does not call it for every player on
+each sync, and the older transformed-source fallbacks (`1617`–`2425`) do not
+claim that raw endpoint coverage.
 
 Record the HTTP result, validation result, tested IDs, response counts, and
 timestamp for each live audit. Endpoint counts are observations, not durable

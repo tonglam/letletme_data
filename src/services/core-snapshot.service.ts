@@ -45,6 +45,7 @@ export interface CoreSnapshotDependencies {
   reserveRevision: () => Promise<number>;
   createPublicationId: () => string;
   recoverPending: () => Promise<unknown>;
+  recoverPendingWithoutLock?: () => Promise<unknown>;
   commit: (
     snapshot: CoreSnapshot,
     context: CoreSnapshotPublicationContext,
@@ -72,6 +73,7 @@ const defaultDependencies: CoreSnapshotDependencies = {
       recoverPendingCoreSnapshotPublication,
     );
   },
+  recoverPendingWithoutLock: recoverPendingCoreSnapshotPublication,
   commit: commitCoreSnapshotPublication,
   cleanup: (season) => clearStaleSeasonCache(season),
   withPersistenceLock: async (operation) => {
@@ -116,8 +118,16 @@ function result(snapshot: CoreSnapshot, published: boolean): CoreSnapshotSyncRes
 
 export async function syncCoreSnapshot(
   dependencies: CoreSnapshotDependencies = defaultDependencies,
+  options: { mutationScopesAlreadyHeld?: boolean } = {},
 ): Promise<CoreSnapshotSyncResult> {
-  await dependencies.recoverPending();
+  // Season archival holds the canonical core scopes across the final refresh,
+  // so the nested recovery/persistence guards must reuse that caller-owned
+  // lock instead of trying to acquire the same Redis keys again.
+  const mutationScopesAlreadyHeld = options.mutationScopesAlreadyHeld === true;
+  const recoverPending = mutationScopesAlreadyHeld
+    ? (dependencies.recoverPendingWithoutLock ?? dependencies.recoverPending)
+    : dependencies.recoverPending;
+  await recoverPending();
   const revision = await dependencies.reserveRevision();
   const publicationId = dependencies.createPublicationId();
   const sourceCheckedAt = await dependencies.readOrderingTimestamp();
@@ -130,7 +140,11 @@ export async function syncCoreSnapshot(
   const snapshot = prepareCoreSnapshot(bootstrap, fixtures);
   dependencies.onMilestone?.('validated');
 
-  return dependencies.withPersistenceLock(async () => {
+  const persist = mutationScopesAlreadyHeld
+    ? (operation: () => Promise<CoreSnapshotSyncResult>) => operation()
+    : dependencies.withPersistenceLock;
+
+  return persist(async () => {
     dependencies.onMilestone?.('locked');
     const activeSeason = await dependencies.getActiveSeason();
     if (activeSeason && isNewerSeason(activeSeason, snapshot.season)) {

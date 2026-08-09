@@ -9,6 +9,8 @@ operations surface; product clients read through `letletme-graphql`.
 ## What this service owns
 
 - Official FPL API access, retries, timeouts, and boundary validation.
+- Independent Understat Team and Player ingestion, durable history, and
+  rebuildable read models.
 - Core season data: events, teams, fixtures, players, and phases.
 - Current-gameweek, entry, league, tournament, live, and price-change jobs.
 - Canonical FPL and tournament rows in PostgreSQL.
@@ -98,9 +100,11 @@ and staged update matrix in the
 - When that key advances through a core write, all documented season-scoped
   Data cache families are scanned and prior-season keys are removed. This does
   not flush Redis, BullMQ state, price history, or consumer-owned keys.
-- PostgreSQL intentionally stores one FPL season at a time. Identity
-  reassignment is rejected rather than silently repointing historical foreign
-  keys; replacement belongs to the gated rollover procedure.
+- Unsuffixed PostgreSQL FPL tables intentionally store one current season at a
+  time. From 2026/27, a completed season is copied and verified in sealed
+  history partitions before the gated rollover can replace current rows.
+  Identity reassignment is rejected rather than silently repointing historical
+  foreign keys.
 - Player stats/values and live/selection jobs require both the fixture-derived
   season window and a current event. Core discovery jobs do not; bounded
   post-match result jobs intentionally remain eligible after the GW38 date.
@@ -227,6 +231,7 @@ production data audit in the season-readiness runbook.
 
 ## Documentation
 
+- [Understat sync, storage, and consumer architecture](docs/understat-pipeline.md)
 - [FPL season readiness runbook](docs/fpl-season-readiness.md)
 - [System contracts](docs/SYSTEM_CONTRACTS.md)
 - [Redis key contract](docs/redis-contract.md)

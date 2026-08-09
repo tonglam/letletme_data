@@ -8,6 +8,7 @@ import { logError, logInfo } from '../utils/logger';
 // Redis outage (FP-03). BullMQ connections live elsewhere and intentionally do
 // NOT use these timeouts (blocking commands must not time out).
 const COMMAND_TIMEOUT_MS = 5000;
+const UNDERSTAT_COMMAND_TIMEOUT_MS = 60_000;
 const CONNECT_TIMEOUT_MS = 5000;
 const INITIAL_PING_TIMEOUT_MS = 5000;
 
@@ -36,7 +37,14 @@ type RedisConnectionOptions = {
   db: number;
 };
 
-const createRedisSingleton = (connectionOptions?: RedisConnectionOptions) => {
+type RedisSingletonOptions = {
+  commandTimeoutMs?: number;
+};
+
+const createRedisSingleton = (
+  connectionOptions?: RedisConnectionOptions,
+  options: RedisSingletonOptions = {},
+) => {
   let client: Redis | null = null;
   let isConnected = false;
   let connectPromise: Promise<void> | null = null;
@@ -70,7 +78,7 @@ const createRedisSingleton = (connectionOptions?: RedisConnectionOptions) => {
       retryDelayOnFailover: 100,
       enableReadyCheck: false,
       maxRetriesPerRequest: null,
-      commandTimeout: COMMAND_TIMEOUT_MS,
+      commandTimeout: options.commandTimeoutMs ?? COMMAND_TIMEOUT_MS,
       connectTimeout: CONNECT_TIMEOUT_MS,
       lazyConnect: true,
     };
@@ -224,6 +232,13 @@ const createRedisSingleton = (connectionOptions?: RedisConnectionOptions) => {
 
 // Export singleton instance
 export const redisSingleton = createRedisSingleton();
+
+// Historical Understat snapshots contain megabytes of JSON in a generation.
+// Keep the general cache client fail-fast, but give this provider's publication
+// path enough time to write bounded generation chunks over remote Redis.
+export const understatRedisSingleton = createRedisSingleton(undefined, {
+  commandTimeoutMs: UNDERSTAT_COMMAND_TIMEOUT_MS,
+});
 
 // Exported for tests that need an isolated client lifecycle (e.g. timeout tests)
 export { createRedisSingleton };

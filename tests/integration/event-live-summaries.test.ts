@@ -86,8 +86,8 @@ describe.skipIf(!currentEvent)('Event Live Summaries Integration Tests', () => {
         expect(first.count).toBeGreaterThan(0);
         expect(second.count).toBeGreaterThan(0);
         expect(summaries.length).toBe(first.count);
-        expect(new Set(elementIds).size).toBe(summaries.length);
         expect(summaries.every((summary) => summary.eventId === testEventId)).toBe(true);
+        expect(new Set(elementIds).size).toBe(summaries.length);
       },
       { timeout: 15000 },
     );
@@ -316,7 +316,6 @@ describe.skipIf(!currentEvent)('Event Live Summaries Integration Tests', () => {
     test('should return null for non-existent event in cache', async () => {
       const nonExistentEventId = 99999;
       const cachedData = await eventLiveSummaryCache.getByEventId(nonExistentEventId);
-
       expect(cachedData).toBeNull();
     });
   });

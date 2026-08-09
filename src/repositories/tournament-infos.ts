@@ -453,8 +453,6 @@ export const createTournamentInfoRepository = (dbInstance?: DatabaseInstance) =>
           // retry is rebuilding canonical data.
           if (updated.length > 0) {
             await tx.execute(sql`REFRESH MATERIALIZED VIEW public.mv_tournament_event_snapshot`);
-          }
-          if (updated.length > 0) {
             await tx.execute(sql`REFRESH MATERIALIZED VIEW public.mv_tournament_snapshot`);
           }
         });
@@ -492,8 +490,6 @@ export const createTournamentInfoRepository = (dbInstance?: DatabaseInstance) =>
 
           if (updated.length > 0) {
             await tx.execute(sql`REFRESH MATERIALIZED VIEW public.mv_tournament_event_snapshot`);
-          }
-          if (updated.length > 0) {
             await tx.execute(sql`REFRESH MATERIALIZED VIEW public.mv_tournament_snapshot`);
           }
         });
@@ -574,7 +570,7 @@ export const createTournamentInfoRepository = (dbInstance?: DatabaseInstance) =>
 
           // CONCURRENTLY is not allowed inside a transaction. These bounded
           // refreshes see the update above, and PostgreSQL exposes the
-          // readiness gate plus both filtered snapshots only at commit.
+          // readiness gate plus the filtered snapshot only at commit.
           await tx.execute(sql`REFRESH MATERIALIZED VIEW public.mv_tournament_event_snapshot`);
           await tx.execute(sql`REFRESH MATERIALIZED VIEW public.mv_tournament_snapshot`);
         });

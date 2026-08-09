@@ -43,3 +43,55 @@ export const tournamentRosterModeEnum = pgEnum('tournament_roster_mode', [
   'snapshot',
   'official_sync',
 ]);
+
+export const understatSeasonStateEnum = pgEnum('understat_season_state', [
+  'planned',
+  'active',
+  'complete',
+]);
+
+export const understatLaneEnum = pgEnum('understat_lane', ['team', 'player']);
+
+export const understatSyncModeEnum = pgEnum('understat_sync_mode', [
+  'incremental',
+  'full',
+  'reconcile',
+]);
+
+export const understatSyncTriggerEnum = pgEnum('understat_sync_trigger', ['cron', 'manual', 'api']);
+
+export const understatSyncRunStatusEnum = pgEnum('understat_sync_run_status', [
+  'pending',
+  'running',
+  'failed',
+  'completed',
+  'ready_to_publish',
+  'published',
+]);
+
+export const understatSyncItemStatusEnum = pgEnum('understat_sync_item_status', [
+  'pending',
+  'running',
+  'failed',
+  'completed',
+  'skipped',
+]);
+
+export const providerEntityTypeEnum = pgEnum('provider_entity_type', ['team', 'player']);
+
+export const providerLinkStatusEnum = pgEnum('provider_link_status', [
+  'pending',
+  'auto_verified',
+  'manual_verified',
+  'ambiguous',
+  'quarantined',
+  'rejected',
+]);
+
+export const fplSeasonArchiveStatusEnum = pgEnum('fpl_season_archive_status', [
+  'unavailable',
+  'pending',
+  'building',
+  'sealed',
+  'failed',
+]);

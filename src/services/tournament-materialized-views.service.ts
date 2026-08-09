@@ -3,8 +3,7 @@ import { logError, logInfo } from '../utils/logger';
 
 /**
  * Refresh the event-level source before an atomic standings publication.
- * The tournament-level view is refreshed in the readiness transaction so a
- * filtered row and its readiness timestamp become visible together.
+ * A filtered row and its readiness timestamp become visible together.
  */
 export async function refreshTournamentEventSnapshotMaterializedView(): Promise<void> {
   const client = await getDbClient();
@@ -18,15 +17,15 @@ export async function refreshTournamentEventSnapshotMaterializedView(): Promise<
 }
 
 /**
- * Refresh tournament materialized views.
+ * Refresh the tournament event materialized read model.
  *
- * These views power the GraphQL tournament APIs (tournamentEntryRankingSummary
- * and tournamentEventResults). They must be refreshed after the underlying
- * tables (tournament_points_group_results, league_event_results, entry_infos)
- * are updated.
+ * The event-level snapshot powers the GraphQL tournament APIs
+ * (tournamentEntryRankingSummary and tournamentEventResults). It must be
+ * refreshed after the underlying tables (tournament_points_group_results,
+ * league_event_results, entry_infos) are updated.
  *
  * Uses REFRESH MATERIALIZED VIEW CONCURRENTLY so reads are not blocked.
- * The unique indexes on the views enable concurrent refresh.
+ * The unique index on the view enables concurrent refresh.
  */
 export async function refreshTournamentMaterializedViews(): Promise<{
   eventSnapshot: boolean;
@@ -35,19 +34,17 @@ export async function refreshTournamentMaterializedViews(): Promise<{
   const client = await getDbClient();
 
   try {
-    logInfo('Refreshing tournament materialized views...');
+    logInfo('Refreshing tournament event materialized view...');
 
-    // Refresh event-level snapshot first (parent of tournament snapshot)
     await client`REFRESH MATERIALIZED VIEW CONCURRENTLY mv_tournament_event_snapshot`;
     logInfo('Refreshed mv_tournament_event_snapshot');
 
-    // Refresh tournament-level snapshot (depends on event snapshot)
     await client`REFRESH MATERIALIZED VIEW CONCURRENTLY mv_tournament_snapshot`;
     logInfo('Refreshed mv_tournament_snapshot');
 
     return { eventSnapshot: true, tournamentSnapshot: true };
   } catch (error) {
-    logError('Failed to refresh tournament materialized views', error);
+    logError('Failed to refresh tournament event materialized view', error);
     throw error;
   }
 }
@@ -65,11 +62,12 @@ export async function repairDeletedTournamentMaterializedViews(
     SELECT
       EXISTS (
         SELECT 1
-        FROM mv_tournament_snapshot
-        WHERE tournament_id = ${tournamentId}
-      ) OR EXISTS (
-        SELECT 1
         FROM mv_tournament_event_snapshot
+        WHERE tournament_id = ${tournamentId}
+      )
+      OR EXISTS (
+        SELECT 1
+        FROM mv_tournament_snapshot
         WHERE tournament_id = ${tournamentId}
       ) AS exists
   `;

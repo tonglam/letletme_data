@@ -22,7 +22,7 @@ export const eventLiveSummaryCache = {
         return null;
       }
 
-      const summaries = parseHashValues<EventLiveSummary>(hash, { key, eventId });
+      const summaries = parseHashValues<EventLiveSummary>(hash, { key });
       logDebug('Event live summary cache hit', { eventId, count: summaries.length });
       return summaries;
     } catch (error) {
