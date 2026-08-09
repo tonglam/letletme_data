@@ -32,6 +32,8 @@ describe('v3 production hard-cut workflow', () => {
     const activation = job('v3_activate_database', 'v3_redis_queues');
     const graphqlStopped = activation.indexOf('GraphQL is still running on port 4000');
     const releaseGate = activation.indexOf('bun scripts/v3-release-gate.ts');
+    const configBackup = activation.indexOf('env.deploy.before-v3');
+    const runtimeEnvCheck = activation.indexOf('bun run env:check');
     const migrationContract = activation.indexOf('bun run db:migration-contract');
     const stopWorker = activation.indexOf('docker compose stop -t 30 worker');
     const stopApi = activation.indexOf('docker compose stop -t 30 api');
@@ -39,11 +41,28 @@ describe('v3 production hard-cut workflow', () => {
 
     expect(graphqlStopped).toBeGreaterThan(0);
     expect(releaseGate).toBeGreaterThan(graphqlStopped);
-    expect(migrationContract).toBeGreaterThan(releaseGate);
+    expect(configBackup).toBeGreaterThan(releaseGate);
+    expect(runtimeEnvCheck).toBeGreaterThan(configBackup);
+    expect(migrationContract).toBeGreaterThan(runtimeEnvCheck);
     expect(stopWorker).toBeGreaterThan(migrationContract);
     expect(stopApi).toBeGreaterThan(stopWorker);
     expect(migrate).toBeGreaterThan(stopApi);
     expect(activation).not.toContain('docker compose up');
+  });
+
+  test('preserves production-local files and backs up runtime configuration', () => {
+    const activation = job('v3_activate_database', 'v3_redis_queues');
+    const trackedGuard = activation.indexOf('git diff --quiet');
+    const untrackedInventory = activation.indexOf('git ls-files --others --exclude-standard');
+    const conflictGuard = activation.indexOf('comm -12');
+    const reset = activation.indexOf('git reset --hard');
+
+    expect(trackedGuard).toBeGreaterThan(0);
+    expect(untrackedInventory).toBeGreaterThan(trackedGuard);
+    expect(conflictGuard).toBeGreaterThan(untrackedInventory);
+    expect(reset).toBeGreaterThan(conflictGuard);
+    expect(activation).toContain('env.deploy.before-v3.sha256');
+    expect(activation).not.toContain('git clean');
   });
 
   test('keeps queue copy and cache publication separately manifest-gated', () => {

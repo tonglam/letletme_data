@@ -338,12 +338,13 @@ jobs:
             echo "V3_PREFLIGHT_HOST=$(hostname)"
             echo "V3_PREFLIGHT_COMMIT=$(git rev-parse HEAD)"
             echo "V3_PREFLIGHT_BRANCH=$(git symbolic-ref --short -q HEAD || echo detached)"
-            if [ -n "$(git status --porcelain)" ]; then
-              echo "V3_PREFLIGHT_WORKTREE=dirty"
-              git status --short
+            if ! git diff --quiet || ! git diff --cached --quiet; then
+              echo "V3_PREFLIGHT_TRACKED_WORKTREE=dirty"
             else
-              echo "V3_PREFLIGHT_WORKTREE=clean"
+              echo "V3_PREFLIGHT_TRACKED_WORKTREE=clean"
             fi
+            echo "V3_PREFLIGHT_UNTRACKED"
+            git ls-files --others --exclude-standard
             echo "V3_PREFLIGHT_DISK"
             df -h "$VPS_WORKDIR"
             echo "V3_PREFLIGHT_DOCKER=$(docker version --format '{{.Server.Version}}')"
@@ -363,9 +364,15 @@ jobs:
             done
             for env_file in .env.deploy .env.migrate; do
               if [ -f "$env_file" ]; then
-                mode=$(stat -c '%a' "$env_file")
+                mode=$(stat -c '%a' "$env_file" 2>/dev/null || echo unknown)
                 echo "V3_PREFLIGHT_ENV_FILE=$env_file present mode=$mode"
-                awk -F= '/^(DATABASE_URL|CACHE_REDIS_HOST|CACHE_REDIS_PORT|CACHE_REDIS_DB|QUEUE_REDIS_HOST|QUEUE_REDIS_PORT|QUEUE_REDIS_DB|REDIS_HOST|REDIS_PORT|REDIS_DB)=/{print "V3_PREFLIGHT_ENV_KEY=" $1}' "$env_file" | sort -u
+                while IFS='=' read -r key _; do
+                  case "$key" in
+                    DATABASE_URL|CACHE_REDIS_HOST|CACHE_REDIS_PORT|CACHE_REDIS_PASSWORD|CACHE_REDIS_DB|QUEUE_REDIS_HOST|QUEUE_REDIS_PORT|QUEUE_REDIS_PASSWORD|QUEUE_REDIS_DB|REDIS_HOST|REDIS_PORT|REDIS_PASSWORD|REDIS_DB)
+                      echo "V3_PREFLIGHT_ENV_KEY=$key"
+                      ;;
+                  esac
+                done < "$env_file"
               else
                 echo "V3_PREFLIGHT_ENV_FILE=$env_file missing"
               fi
@@ -432,7 +439,10 @@ jobs:
             printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$LOWER_USER" --password-stdin
             test -d "$VPS_WORKDIR/.git"
             cd "$VPS_WORKDIR"
-            test -z "$(git status --porcelain)" || { echo "Data VPS checkout is dirty"; exit 1; }
+            [[ "$V3_CUTOVER_RUN_ID" =~ ^v3-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{7,12}$ ]]
+            test "$V3_CUTOVER_APPROVAL" = "APPROVE_V3_ACTIVATION $V3_CUTOVER_RUN_ID"
+            git diff --quiet || { echo "Data VPS checkout has tracked modifications"; exit 1; }
+            git diff --cached --quiet || { echo "Data VPS index has staged modifications"; exit 1; }
             test -f .env.deploy || { echo "Missing .env.deploy"; exit 1; }
             test -f .env.migrate || { echo "Missing isolated .env.migrate"; exit 1; }
             if docker ps --format '{{.Ports}}' | grep -q '127.0.0.1:4000->'; then
@@ -440,10 +450,20 @@ jobs:
               exit 1
             fi
             git fetch --all
+            untracked_file=$(mktemp)
+            target_file=$(mktemp)
+            conflict_file=$(mktemp)
+            git ls-files --others --exclude-standard | sort -u > "$untracked_file"
+            git ls-tree -r --name-only "$DEPLOY_SHA" | sort -u > "$target_file"
+            comm -12 "$untracked_file" "$target_file" > "$conflict_file"
+            if [ -s "$conflict_file" ]; then
+              echo "Untracked production files conflict with the frozen candidate:"
+              cat "$conflict_file"
+              exit 1
+            fi
             git checkout --force main
             git reset --hard "$DEPLOY_SHA"
             APP_IMAGE="$IMAGE_REF" docker compose pull api worker migration
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun run env:check
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
               -e DEPLOY_SHA="$DEPLOY_SHA" \
               -e DEPLOY_IMAGE_DIGEST="$DEPLOY_IMAGE_DIGEST" \
@@ -452,6 +472,62 @@ jobs:
               -e V3_RELEASE_MANIFEST_SHA256="$V3_RELEASE_MANIFEST_SHA256" \
               -e V3_CUTOVER_APPROVAL="$V3_CUTOVER_APPROVAL" \
               migration bun scripts/v3-release-gate.ts
+            config_backup_dir="$(dirname "$VPS_WORKDIR")/v3-cutover/$V3_CUTOVER_RUN_ID/data"
+            install -d -m 700 "$config_backup_dir"
+            install -m 600 .env.deploy "$config_backup_dir/env.deploy.before-v3"
+            sha256sum "$config_backup_dir/env.deploy.before-v3" > "$config_backup_dir/env.deploy.before-v3.sha256"
+            command -v python3 >/dev/null
+            env_tmp=$(mktemp "$VPS_WORKDIR/.env.deploy.v3.XXXXXX")
+            python3 - .env.deploy "$env_tmp" <<'PY'
+            import os
+            import sys
+
+            source_path, target_path = sys.argv[1:]
+            with open(source_path, encoding='utf-8') as source:
+                lines = source.read().splitlines()
+
+            values = {}
+            for line in lines:
+                if not line or line.lstrip().startswith('#') or '=' not in line:
+                    continue
+                key, value = line.split('=', 1)
+                values[key] = value
+
+            required = ('REDIS_HOST', 'REDIS_PORT', 'QUEUE_REDIS_HOST', 'QUEUE_REDIS_PORT')
+            missing = [key for key in required if not values.get(key)]
+            if missing:
+                raise SystemExit(f"Missing legacy Redis settings: {', '.join(missing)}")
+
+            replaced = {
+                'CACHE_REDIS_HOST',
+                'CACHE_REDIS_PORT',
+                'CACHE_REDIS_PASSWORD',
+                'CACHE_REDIS_DB',
+                'QUEUE_REDIS_DB',
+            }
+            output = [
+                line
+                for line in lines
+                if not ('=' in line and line.split('=', 1)[0] in replaced)
+            ]
+            output.extend(
+                [
+                    f"CACHE_REDIS_HOST={values['REDIS_HOST']}",
+                    f"CACHE_REDIS_PORT={values['REDIS_PORT']}",
+                    'CACHE_REDIS_DB=0',
+                    'QUEUE_REDIS_DB=1',
+                ]
+            )
+            if values.get('REDIS_PASSWORD'):
+                output.append(f"CACHE_REDIS_PASSWORD={values['REDIS_PASSWORD']}")
+
+            descriptor = os.open(target_path, os.O_WRONLY | os.O_TRUNC, 0o600)
+            with os.fdopen(descriptor, 'w', encoding='utf-8') as target:
+                target.write('\n'.join(output) + '\n')
+            PY
+            chmod 600 "$env_tmp"
+            mv "$env_tmp" .env.deploy
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun run env:check
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun run db:migration-contract
             APP_IMAGE="$IMAGE_REF" docker compose stop -t 30 worker
             APP_IMAGE="$IMAGE_REF" docker compose stop -t 30 api
