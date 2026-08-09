@@ -7,6 +7,7 @@
 - Preserved explicit operator enablement and display ordering while keeping GraphQL read-only and
   removing any need for GraphQL-owned business DDL.
 - Added a guarded rehearsal copy for the unshipped public source and explicit role/grain tests.
+- Substantive contract commit: `e91a355c9d2253c2ebff07256c3793a57c7f49b9`.
 
 ## 3.2.2 - 2026-08-09
 

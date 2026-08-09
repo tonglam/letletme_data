@@ -10,7 +10,9 @@ read-only GraphQL role schema usage required to consume its existing
 manifests to plan version 3.2.2. No write privilege is added. Substantive correction commit:
 `175ac00`. The subsequent 3.2.3 contract absorbs the new GraphQL-mainline public-league catalog
 into `competition.public_league_trends`; GraphQL remains read-only and publication manifests are
-stamped 3.2.3.
+stamped 3.2.3. Its substantive commit is
+`e91a355c9d2253c2ebff07256c3793a57c7f49b9`; Drizzle/catalog parity, both disposable migration
+paths, role boundaries, typecheck, lint, and all 664 unit tests passed.
 
 Substantive D2 commit: `51201b40ec3187ad38a18171a7267836326a6fec`
 

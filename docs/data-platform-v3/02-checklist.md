@@ -74,7 +74,7 @@ P1 exit gate: both restore drills pass. A backup that has not been restored does
 | [x] | P2-11 | Implement `0087` Understat/ops conversion | Counts/hashes/provider boundaries pass | P2 report; `ops.migration_objects` passed |
 | [x] | P2-12 | Implement `0088` constraint validation | All deferred constraints validated | 125 FKs; missing indexes 0; unvalidated 0 |
 | [x] | P2-13 | Implement `0089` publication preparation | Complete inactive initial revision exists | Fresh/B0 replay and publication contract passed |
-| [x] | P2-14 | Implement `0090` activation/freeze and final reader contracts | One active revision; v2 writes denied; publication authority and public-league catalog have one Data owner and read-only GraphQL access | Validation: 192 frozen relations/fences; 1 active publication; ACL correction `175ac00`; `0090_zz_add_public_league_trends.sql` |
+| [x] | P2-14 | Implement `0090` activation/freeze and final reader contracts | One active revision; v2 writes denied; publication authority and public-league catalog have one Data owner and read-only GraphQL access | Validation: 192 frozen relations/fences; 1 active publication; ACL correction `175ac00`; public-league contract `e91a355c9d2253c2ebff07256c3793a57c7f49b9` |
 | [x] | P2-15 | Implement approval-gated `0091`-`0093` | Exact manifest only; blocked without approval env/token | Cleanup rehearsal report; v3 hash diff 0 bytes |
 | [x] | P2-16 | Fresh migration replay twice on PG15 | Both runs pass; second run is a no-op/status-clean | External `p2/logs/p2-fresh-final-4-*` |
 | [x] | P2-17 | Production-B0 upgrade replay twice on PG15 | Both runs pass; no manual correction | External `p2/logs/p2-b0-final-5-*` |
@@ -105,7 +105,7 @@ P2 exit gate: migrations reproduce the target from fresh and B0 schemas and all 
 
 | Done | ID | Check | Acceptance | Evidence |
 | --- | --- | --- | --- | --- |
-| [ ] | P4-01 | Create G1 from GraphQL `origin/main` | Existing dirty worktree untouched | Path/SHA: |
+| [x] | P4-01 | Create G1 from GraphQL `origin/main` | Existing dirty worktree untouched | `/Users/tong/CursorProjects/letletme-graphql-data-platform-v3-pg-readers`; baseline `3cc9951450ac5c631ea8930b0eb8c7a71a572fb6` |
 | [ ] | P4-02 | Implement direct schema-qualified PG readers | No Supabase business reads | Search/tests: |
 | [ ] | P4-03 | Implement read-only role/startup schema check | Missing contract fails closed; no DDL | Tests: |
 | [ ] | P4-04 | Remove GraphQL business migration runner/deploy step | Deploy cannot mutate business schema | Workflow test: |
