@@ -16,6 +16,15 @@ paths, role boundaries, typecheck, lint, and all 664 unit tests passed.
 
 Substantive D2 commit: `51201b40ec3187ad38a18171a7267836326a6fec`
 
+Post-acceptance canonical-live correction: commit
+`b91363196695e6f127b34f1e7c0486bc77db4c15` removes the temporary dual live representation.
+The live publication now contains exactly four siblings: `eventLives`, `fixtures`,
+`liveFixtures`, and `liveBonus`. Every `liveFixtures` row requires `fixtureId`; `liveBonus` is
+derived only from fixture-scoped FPL stats, supports summed double-gameweek awards above three,
+and never infers fixture awards from event-aggregated player live rows. The old V2 siblings,
+aggregate fallback algorithm, and shadow path no longer exist. The correction passed 651 unit
+tests, 10 isolated Redis integration tests, TypeScript, ESLint, build, and whitespace checks.
+
 Accepted scope: Data runtime ownership, schema-qualified repositories, explicit season authority,
 runtime database constraints, reporting reads, immutable Redis publication, queue/cache isolation,
 and bounded legacy-cache cleanup. This acceptance does not authorize production activation or
@@ -74,6 +83,8 @@ legacy deletion.
 - Core/live Redis data uses immutable `llm:v3:data:*` revisions. A complete staged revision is
   validated before one atomic active-manifest swap; active items are persistent and staged/retired
   items have bounded TTLs.
+- Each live revision has one exact four-item contract. Fixture identity and fixture-scoped bonus
+  are canonical fields, not parallel legacy/V2 representations.
 - Queue and cache connections have independent configuration and runtime clients. Identical
   endpoints fail configuration validation.
 - Data publishes no Understat cache, `EventLiveSummary:*`, or `PlayerValue:*` keys. Understat facts

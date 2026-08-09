@@ -2,6 +2,11 @@
 
 ## 3.2.3 - 2026-08-09
 
+- Collapsed the live Redis publication to one canonical four-item contract. `liveFixtures`
+  requires `fixtureId`, `liveBonus` is computed only from fixture-scoped stats and supports
+  summed DGW awards, and all dual/shadow live representations were removed. Substantive commit:
+  `b91363196695e6f127b34f1e7c0486bc77db4c15`.
+
 - Accepted GraphQL G1 at `886351b1c26d86f5e8010cb57e8d5f33469423c8`: schema-qualified PostgreSQL
   readers, SELECT-only fail-closed startup contract, no GraphQL business migrations, and direct
   multiplier-aware reporting-MV percentages. See `13-p4-g1-acceptance.md`.
