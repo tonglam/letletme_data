@@ -1,5 +1,18 @@
 # Data Platform v3 Plan Changelog
 
+## 3.2.4 - 2026-08-09
+
+- Corrected the deterministic initial publication identity produced before runtime: a new
+  non-destructive `0090_zzz` migration normalizes non-RFC UUID version/variant bits while
+  transactionally preserving `ops.sync_runs` references, then installs and validates a named RFC
+  UUID CHECK.
+- Made `planVersion` mandatory in every immutable Redis publication manifest and in every staged
+  database publication. Data and GraphQL now reject missing, stale-plan, or non-RFC authorities
+  before serving a mixed contract.
+- Replayed the correction twice on both the accepted B0 PostgreSQL 15 restore and a fresh
+  PostgreSQL 15 database. Both second runs were no-ops; invalid IDs and stale v3 plan manifests
+  were zero, while `0091`-`0093` remained approval-gated.
+
 ## 3.2.3 - 2026-08-09
 
 - Collapsed the live Redis publication to one canonical four-item contract. `liveFixtures`

@@ -1,6 +1,6 @@
 # Data Platform v3 Object Migration Manifest
 
-Plan version: 3.2.3
+Plan version: 3.2.4
 
 Naming notation: `{season}` means each of `1617`, `1718`, `1819`, `1920`, `2021`, `2122`,
 `2223`, `2324`, `2425`, `2526`, and `2627` where present.
@@ -113,6 +113,11 @@ No Understat row is inserted into an `fpl` table. No FPL row is inserted into an
 
 `ops.migration_runs` records each v3 rehearsal/cutover run. `ops.migration_objects` records source
 and target counts/hashes/status per object and stores legacy migration-ledger evidence.
+
+`ops.dataset_publications.publication_id` is an RFC UUID at every runtime boundary. Migration
+`0090_zzz_enforce_v3_publication_identity.sql` deterministically normalizes any pre-runtime ID,
+preserves `ops.sync_runs.publication_id` references transactionally, validates the named CHECK,
+and advances every v3 publication manifest to plan 3.2.4.
 
 ## Reporting and executable objects
 

@@ -85,6 +85,18 @@ describe('v3 database trust boundary', () => {
       HAVING count(*) > 1
     `;
     expect(duplicateActiveScopes).toHaveLength(0);
+
+    const invalidPublicationIdentities = await sql<NamedFinding[]>`
+      SELECT publication_id::text AS name
+      FROM ops.dataset_publications
+      WHERE publication_id::text !~
+        '^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+         OR (
+           manifest ->> 'schemaVersion' = 'v3'
+           AND manifest ->> 'planVersion' IS DISTINCT FROM '3.2.4'
+         )
+    `;
+    expect(invalidPublicationIdentities).toHaveLength(0);
   });
 
   test('exposes exactly the approved reporting views and materialized views', async () => {

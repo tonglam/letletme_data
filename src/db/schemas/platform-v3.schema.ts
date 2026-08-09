@@ -341,6 +341,10 @@ export const datasetPublicationsInOps = ops.table(
       .on(table.dataset, table.seasonId, table.eventId, table.revision)
       .nullsNotDistinct(),
     check('dataset_publications_dataset_nonempty', sql`btrim(dataset) <> ''::text`),
+    check(
+      'dataset_publications_publication_id_rfc_uuid',
+      sql`${table.publicationId}::text ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'::text`,
+    ),
     check('dataset_publications_revision_positive', sql`revision > 0`),
     check('dataset_publications_event_positive', sql`(event_id IS NULL) OR (event_id > 0)`),
     check(

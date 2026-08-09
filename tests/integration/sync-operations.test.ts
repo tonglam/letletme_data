@@ -66,6 +66,7 @@ function publicationManifest(
   const payload = '[]';
   return {
     schemaVersion: 'v3',
+    planVersion: '3.2.4',
     dataset: 'fpl:core',
     seasonCode: season.seasonCode,
     eventId: null,
@@ -109,6 +110,20 @@ beforeEach(cleanup);
 afterAll(cleanup);
 
 describe('ops sync state machine', () => {
+  test('rejects a non-RFC publication identity before writing', async () => {
+    const season = await seasonRepository.requireByCode('2526');
+    await startRun(RUN_IDS[0], season);
+    await expectDatabaseErrorCode(
+      syncOperationsRepository.preparePublication({
+        publicationId: '20000000-0000-4000-6000-000000000001',
+        dataset: 'fpl:core',
+        season,
+        sourceRunId: RUN_IDS[0],
+      }),
+      'DATASET_PUBLICATION_ID_INVALID',
+    );
+  });
+
   test('makes run identity idempotent and rejects an immutable-identity conflict', async () => {
     const season = await seasonRepository.requireByCode('2526');
     expect(await startRun(RUN_IDS[0], season)).toBe(RUN_IDS[0]);

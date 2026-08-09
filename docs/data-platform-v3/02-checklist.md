@@ -1,6 +1,6 @@
 # Data Platform v3 Strict Execution Checklist
 
-Plan version: 3.2.3
+Plan version: 3.2.4
 
 Rule: an item is complete only when its checkbox is checked and the Evidence column contains a
 durable path, SHA, query result, run URL, or backup manifest. Verbal confirmation is not evidence.
@@ -14,7 +14,7 @@ durable path, SHA, query result, run URL, or backup manifest. Verbal confirmatio
 | GraphQL baseline | `3cc9951` (fetched `origin/main`; supersedes planned `8cf4ddc`) |
 | Web baseline | `c290d91` |
 | Production project | `gtwcfjoviibmtkevurjw` |
-| Plan version | 3.2.3 |
+| Plan version | 3.2.4 |
 | Cutover approver | User |
 
 ## P0 - Freeze and inventory
@@ -80,6 +80,8 @@ P1 exit gate: both restore drills pass. A backup that has not been restored does
 | [x] | P2-17 | Production-B0 upgrade replay twice on PG15 | Both runs pass; no manual correction | External `p2/logs/p2-b0-final-5-*` |
 | [x] | P2-18 | Run Supabase advisors | No unaccepted v3 security/performance finding | `10-p2-implementation-and-acceptance.md`; local v3 lint 0 |
 | [x] | P2-19 | Commit D1 | Clean tree; SHA recorded | Substantive D1 `aad7225654d2cacf353bb00e441804cf2bc2dce3` |
+| [x] | P2-20 | Enforce publication identity/plan contract | Every publication ID is an RFC UUID; every v3 manifest is plan 3.2.4; sync-run references survive normalization | `0090_zzz_enforce_v3_publication_identity.sql`; B0 result `1f08ab2f-732b-449f-868c-4a2038c5f1ba`; referenced-run fixture preserved; validated CHECK |
+| [x] | P2-21 | Replay publication correction on fresh and B0 PG15 twice | Both paths pass; second runs are no-op/status-clean; legacy cleanup remains gated | PG15 databases `g2_publication_contract_20260809` and `p3_b0_replay_fixed`; 0 invalid IDs; 0 stale plans |
 
 P2 exit gate: migrations reproduce the target from fresh and B0 schemas and all data gates pass.
 
@@ -110,7 +112,7 @@ P2 exit gate: migrations reproduce the target from fresh and B0 schemas and all 
 | [x] | P4-03 | Implement read-only role/startup schema check | Missing contract fails closed; no DDL | 17 focused cases; fresh/B0 PG15 contract checks |
 | [x] | P4-04 | Remove GraphQL business migration runner/deploy step | Deploy cannot mutate business schema | CI/deploy boundary scan; no migration directory/command |
 | [x] | P4-05 | Commit G1 | Clean tree; SHA recorded | `886351b1c26d86f5e8010cb57e8d5f33469423c8` |
-| [ ] | P4-06 | Create G2 from accepted G1 | Exact predecessor SHA | SHA: |
+| [x] | P4-06 | Create G2 from accepted G1 | Exact predecessor SHA | `/Users/tong/CursorProjects/letletme-graphql-data-platform-v3-reporting-cache`; predecessor `886351b1c26d86f5e8010cb57e8d5f33469423c8` |
 | [ ] | P4-07 | Implement reporting readers and v3 query cache | Dataset revision in every key | Tests: |
 | [ ] | P4-08 | Remove v2 views/MVs/RPC fallbacks | Zero references | Search/tests: |
 | [ ] | P4-09 | Commit G2 | Clean tree; SHA recorded | SHA: |
@@ -145,7 +147,7 @@ P2 exit gate: migrations reproduce the target from fresh and B0 schemas and all 
 | [ ] | P6-01 | Confirm B0, rehearsal, role, and platform gates | Every prior gate green; PG patch warning resolved/accepted; runtime logins are not the migration login | Approval record: |
 | [ ] | P6-02 | Enable maintenance | Web serves maintenance state | Screenshot/check: |
 | [ ] | P6-03 | Stop Data/GraphQL writers/readers | No application DB writer session; queues paused | Evidence: |
-| [ ] | P6-04 | Apply `0079`-`0090` | Checksums and durations recorded; exit 0 | Migration log: |
+| [ ] | P6-04 | Apply `0079`-`0090_zzz` | Checksums and durations recorded; exit 0 | Migration log: |
 | [ ] | P6-05 | Run production data gates | All critical/high gates pass | Report: |
 | [ ] | P6-06 | Build/validate first v3 Redis revision | One coherent active manifest | Report: |
 | [ ] | P6-07 | Start Data then GraphQL | Health/readiness pass | Deployment runs: |

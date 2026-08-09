@@ -7,8 +7,16 @@ import { redisSingleton } from './singleton';
 
 export const DATA_CACHE_NAMESPACE = 'llm:v3:data';
 export const DATA_PUBLICATION_SCHEMA_VERSION = 'v3';
+export const DATA_PLATFORM_PLAN_VERSION = '3.2.4';
 export const DATA_PUBLICATION_STAGING_TTL_MS = 15 * 60 * 1_000;
 export const DATA_PUBLICATION_RETIRED_TTL_MS = 24 * 60 * 60 * 1_000;
+
+export function isDataPublicationId(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
+  );
+}
 
 export type DataPublicationDataset = 'fpl:core' | 'fpl:live';
 export type DataPublicationItemType = 'string';
@@ -35,6 +43,7 @@ export interface DataPublicationManifestItem {
 
 export interface DataPublicationManifest {
   readonly schemaVersion: typeof DATA_PUBLICATION_SCHEMA_VERSION;
+  readonly planVersion: typeof DATA_PLATFORM_PLAN_VERSION;
   readonly dataset: DataPublicationDataset;
   readonly seasonCode: string;
   readonly eventId: number | null;
@@ -274,15 +283,12 @@ function createManifest(
     );
   }
   const sourceCheckedAt = input.sourceCheckedAt.toISOString();
-  if (
-    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-      input.publicationId,
-    )
-  ) {
+  if (!isDataPublicationId(input.publicationId)) {
     throw new CacheError('Invalid publication ID', 'DATA_PUBLICATION_ID_INVALID');
   }
   return {
     schemaVersion: DATA_PUBLICATION_SCHEMA_VERSION,
+    planVersion: DATA_PLATFORM_PLAN_VERSION,
     dataset: input.dataset,
     seasonCode: input.seasonCode,
     eventId: input.eventId ?? null,
@@ -301,15 +307,13 @@ export function parseDataPublicationManifest(raw: string | null): DataPublicatio
     const value = JSON.parse(raw) as Partial<DataPublicationManifest>;
     if (
       value.schemaVersion !== DATA_PUBLICATION_SCHEMA_VERSION ||
+      value.planVersion !== DATA_PLATFORM_PLAN_VERSION ||
       (value.dataset !== 'fpl:core' && value.dataset !== 'fpl:live') ||
       typeof value.seasonCode !== 'string' ||
       !/^\d{4}$/.test(value.seasonCode) ||
       !Number.isSafeInteger(value.revision) ||
       (value.revision ?? 0) <= 0 ||
-      typeof value.publicationId !== 'string' ||
-      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-        value.publicationId,
-      ) ||
+      !isDataPublicationId(value.publicationId) ||
       typeof value.sourceCheckedAt !== 'string' ||
       !Number.isFinite(new Date(value.sourceCheckedAt).getTime()) ||
       typeof value.publishedAt !== 'string' ||

@@ -1,6 +1,6 @@
 # Data Platform v3 Test and Acceptance Matrix
 
-Plan version: 3.2.3
+Plan version: 3.2.4
 
 ## Evidence rules
 
@@ -34,9 +34,9 @@ LOG_LEVEL=error RUN_INTEGRATION=1 RUN_B0_ACCEPTANCE=1 \
 
 Required migration cases:
 
-1. fresh bootstrap through `0090`;
+1. fresh bootstrap through `0090_zzz`;
 2. fresh bootstrap run a second time/status clean;
-3. exact B0 upgrade through `0090`;
+3. exact B0 upgrade through `0090_zzz`;
 4. B0 upgrade run a second time/status clean;
 5. interrupted conversion resumes without duplicate or partial target rows;
 6. wrong PostgreSQL major fails before DDL;
@@ -51,6 +51,8 @@ Required migration cases:
     create privilege in any Data-owned schema.
 13. `competition.public_league_trends` exists at season/tournament grain; only the Data writer can
     mutate it and GraphQL can only select it.
+14. every `ops.dataset_publications.publication_id` satisfies the RFC UUID contract, v3 manifests
+    carry the exact plan version, and normalization preserves any `ops.sync_runs` reference.
 
 ### GraphQL
 
@@ -63,10 +65,11 @@ bun test
 
 Required cases:
 
-- startup succeeds with the exact v3 schema version and read-only role;
+- startup succeeds with the exact v3 schema/plan version, RFC publication ID, and read-only role;
 - startup fails closed for missing relation/column, wrong schema version, or write-capable role;
 - no business DDL executes during startup/deploy;
-- core/live reader accepts one complete revision and rejects missing/mixed revisions;
+- core/live reader accepts one complete matching-plan revision and rejects missing, stale-plan, or
+  mixed revisions;
 - PostgreSQL fallback reads one coherent dataset revision;
 - cache keys include GraphQL schema version and Data dataset revision;
 - authorization uses direct competition reads and cannot mutate rows;

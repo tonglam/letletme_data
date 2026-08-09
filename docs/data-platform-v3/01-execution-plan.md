@@ -1,6 +1,6 @@
 # Data Platform v3 Execution Plan
 
-Plan version: 3.2.3
+Plan version: 3.2.4
 
 Execution strategy: preseason hard cutover
 
@@ -128,6 +128,7 @@ Migration sequence:
 | `0090_activate_v3_and_freeze_v2.sql` | Revoke v2 writes, activate v3 revision, establish cutover fence |
 | `0090_z_finalize_v3_graphql_reader_contract.sql` | Make publication authority readable by the read-only GraphQL role and stamp plan 3.2.2 |
 | `0090_zz_add_public_league_trends.sql` | Move the GraphQL-mainline public-league allowlist contract under Data-owned `competition` and stamp plan 3.2.3 |
+| `0090_zzz_enforce_v3_publication_identity.sql` | Normalize pre-runtime publication IDs, enforce RFC UUID identities, preserve sync-run references, and stamp plan 3.2.4 |
 | `0091_drop_v2_reporting_and_rpcs.sql` | Approval-gated legacy views/MVs/RPC removal |
 | `0092_drop_v2_tables_partitions_triggers.sql` | Approval-gated legacy physical-object removal |
 | `0093_finalize_v3_migration_ownership.sql` | Remove compatibility ledger/view and obsolete GraphQL DDL state |
@@ -176,7 +177,8 @@ Conversion rules:
 
 Acceptance:
 
-- Fresh install and upgrade from the exact production B0 schema both apply `0079`-`0090` twice
+- Fresh install and upgrade from the exact production B0 schema both apply
+  `0079`-`0090_zzz` twice
   safely in PostgreSQL 15.
 - All intended PK/FK/check/unique constraints validate and all FK columns have supporting indexes.
 - Source and target counts/hashes pass `04-test-matrix.md` for every season and object.
@@ -263,7 +265,8 @@ Implementation:
 2. Deploy the exact candidate Data/GraphQL/Web builds in maintenance mode.
    Freeze the candidate Data image by digest, then generate the external release manifest from
    `release-manifest.template.json`; store it in the encrypted cutover evidence, not in Git.
-3. Run `0079`-`0090`, migrate all data, build publications/MVs, and run the complete test matrix.
+3. Run `0079`-`0090_zzz`, migrate all data, build publications/MVs, and run the complete test
+   matrix.
 4. Record per-migration duration, lock waits, database growth, Redis memory, query p95, and cache
    hit/miss behavior.
 5. Exercise rollback before `0090`, after `0090` but before `0091`, and after a simulated `0091`
@@ -293,7 +296,7 @@ Implementation:
    hosted PostgreSQL security-patch advisor warning.
 2. Enable maintenance mode and stop Data API/workers plus GraphQL. Web serves maintenance UX.
 3. Confirm no active application sessions or queued jobs can write business data.
-4. Apply `0079`-`0090` with statement/lock timeouts and durable command logging.
+4. Apply `0079`-`0090_zzz` with statement/lock timeouts and durable command logging.
 5. Run all data gates, refresh reporting MVs, build the first v3 Redis revision, and validate the
    active manifest.
 6. Start Data, then GraphQL, run private smoke tests, then disable maintenance mode.

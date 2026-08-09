@@ -17,7 +17,8 @@ Migration `0093` removes that compatibility object after the separately approved
 
 - `0079`-`0089` create, migrate, validate, and prepare the six private Data schemas.
 - The `0090_*` files activate/freeze v2, add runtime identities/business keys, and install the final
-  reporting definitions. They are ordered lexically and each has an independent checksum.
+  reporting/publication definitions. `0090_zzz` is the final non-destructive publication identity
+  and plan-version fence. These files are ordered lexically and each has an independent checksum.
 - `0091`-`0093` are legacy-drop migrations. The runner excludes them unless
   `V3_LEGACY_DROP_APPROVAL` exactly matches the approved run ID contract.
 - Production deployment also requires the external release manifest, exact candidate SHA/image

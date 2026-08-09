@@ -8,7 +8,13 @@ import {
   syncRunsInOps,
 } from '../db/schemas/index.schema';
 import { getDb, type DbOrTransaction } from '../db/singleton';
-import type { DataPublicationDataset, DataPublicationManifest } from '../cache/data-publication';
+import {
+  DATA_PLATFORM_PLAN_VERSION,
+  DATA_PUBLICATION_SCHEMA_VERSION,
+  isDataPublicationId,
+  type DataPublicationDataset,
+  type DataPublicationManifest,
+} from '../cache/data-publication';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { DatabaseError } from '../utils/errors';
 
@@ -84,6 +90,8 @@ function assertPublicationManifest(
   },
 ): void {
   if (
+    manifest.schemaVersion !== DATA_PUBLICATION_SCHEMA_VERSION ||
+    manifest.planVersion !== DATA_PLATFORM_PLAN_VERSION ||
     manifest.publicationId !== input.publicationId ||
     manifest.dataset !== input.dataset ||
     manifest.seasonCode !== input.season.seasonCode ||
@@ -339,6 +347,12 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
     ): Promise<PreparedDatasetPublication> => {
       const db = await getDbInstance();
       const publicationId = input.publicationId ?? randomUUID();
+      if (!isDataPublicationId(publicationId)) {
+        throw new DatabaseError(
+          'Publication ID must be an RFC UUID',
+          'DATASET_PUBLICATION_ID_INVALID',
+        );
+      }
       const inserted = await db
         .insert(datasetPublicationsInOps)
         .values({
@@ -347,7 +361,11 @@ export const createSyncOperationsRepository = (dbInstance?: DbOrTransaction) => 
           seasonId: input.season.seasonId,
           eventId: input.eventId,
           status: 'staging',
-          manifest: input.manifest ?? {},
+          manifest: {
+            ...(input.manifest ?? {}),
+            schemaVersion: DATA_PUBLICATION_SCHEMA_VERSION,
+            planVersion: DATA_PLATFORM_PLAN_VERSION,
+          },
           sourceRunId: input.sourceRunId,
           expiresAt: new Date(Date.now() + 15 * 60 * 1_000),
         })

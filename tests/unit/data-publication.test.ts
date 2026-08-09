@@ -15,6 +15,7 @@ const payload = JSON.stringify([{ id: 1 }]);
 function validManifest(): DataPublicationManifest {
   return {
     schemaVersion: 'v3',
+    planVersion: '3.2.4',
     dataset: 'fpl:core',
     seasonCode: '2627',
     eventId: null,
@@ -80,6 +81,13 @@ describe('v3 data publication contract', () => {
           items: [{ ...manifest.items[0], key: `${manifest.items[0].key}:foreign` }],
         }),
       ),
+    ).toBeNull();
+  });
+
+  test('rejects a manifest from another Data Platform plan version', () => {
+    const manifest = validManifest();
+    expect(
+      parseDataPublicationManifest(JSON.stringify({ ...manifest, planVersion: '3.2.3' })),
     ).toBeNull();
   });
 

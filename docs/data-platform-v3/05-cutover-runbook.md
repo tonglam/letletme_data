@@ -1,6 +1,6 @@
 # Data Platform v3 Cutover and Recovery Runbook
 
-Plan version: 3.2.3
+Plan version: 3.2.4
 
 Mode: maintenance-window hard cutover
 
@@ -96,7 +96,7 @@ All fields below must be attached to the run record:
 - B0 manifest and both restore reports;
 - two passing rehearsal reports;
 - final candidate SHAs and container image digests;
-- migration filenames/checksums `0079`-`0093`;
+- migration filenames/checksums `0079`-`0090_zzz` and approval-gated `0091`-`0093`;
 - generated source/target/drop object manifests;
 - migration duration estimate plus 50% contingency;
 - current database/Redis size and free-capacity report;
@@ -107,7 +107,7 @@ All fields below must be attached to the run record:
 
 If any artifact differs from the latest reviewed commit, stop and repeat the affected rehearsal.
 
-## Production activation: `0079`-`0090`
+## Production activation: `0079`-`0090_zzz`
 
 1. Announce and enable Web maintenance mode.
 2. Stop Data API, Data workers, and GraphQL. Pause queues without deleting jobs.
@@ -118,7 +118,7 @@ If any artifact differs from the latest reviewed commit, stop and repeat the aff
    - v2 source counts/hashes equal the pre-cutover snapshot.
 4. Set bounded PostgreSQL timeouts for the migration session. The migration itself uses advisory
    locking and records each object/season conversion in `ops.migration_objects`.
-5. Run Data migration status. Apply exactly `0079` through `0090` from the release manifest. Save
+5. Run Data migration status. Apply exactly `0079` through `0090_zzz` from the release manifest. Save
    stdout/stderr and exit status without connection secrets.
 6. Run exact target schema checks, counts, hashes, constraints, FKs, join-shape, summary, market,
    tournament, provider, grant, and advisor checks.

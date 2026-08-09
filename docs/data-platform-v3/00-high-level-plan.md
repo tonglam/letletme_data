@@ -2,7 +2,7 @@
 
 Status: approved for execution
 
-Plan version: 3.2.3
+Plan version: 3.2.4
 
 Baseline date: 2026-08-08
 
@@ -170,8 +170,8 @@ cleanup uses namespace-scoped `SCAN` plus `UNLINK`; `FLUSHDB` and `FLUSHALL` are
 
 The implementation is split into reviewable Data, GraphQL, and Web branches, but production has
 one maintenance-window cutover. B0 backup and restore rehearsal precede any production mutation.
-Migrations `0079` through `0090` create, populate, validate, and activate v3. Old objects remain
-frozen until B1 backup and explicit approval. Migrations `0091` through `0093` then remove legacy
+Migrations `0079` through `0090_zzz` create, populate, validate, and activate v3. Old objects
+remain frozen until B1 backup and explicit approval. Migrations `0091` through `0093` then remove legacy
 reporting objects, physical tables, triggers, and obsolete migration ownership.
 
 The authoritative phase checklist, acceptance gates, object mapping, tests, and operator commands
