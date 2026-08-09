@@ -8,6 +8,7 @@ DECLARE
   active_publication_count bigint;
   legacy_physical_count bigint;
   legacy_trigger_count bigint;
+  migration_login_inherits_frozen_owner boolean;
   nonowner_column_acl_count bigint;
   nonowner_relation_acl_count bigint;
   nonowner_sequence_acl_count bigint;
@@ -101,13 +102,31 @@ BEGIN
          AND type_row.typtype = 'e'
          AND type_row.typowner <> 'letletme_v2_frozen_owner'::regrole);
 
+  -- pg_has_role() reports every superuser as a member of every role even when
+  -- pg_auth_members has no grant edge. The cutover login is privileged, while
+  -- runtime logins are tested separately. Match 0090's postcondition: reject a
+  -- real grant for any login and inherited membership for non-superusers.
+  SELECT
+    EXISTS (
+      SELECT 1
+      FROM pg_auth_members membership
+      JOIN pg_roles member_role ON member_role.oid = membership.member
+      JOIN pg_roles granted_role ON granted_role.oid = membership.roleid
+      WHERE member_role.rolname = session_user
+        AND granted_role.rolname = 'letletme_v2_frozen_owner'
+    ) OR (
+      NOT (SELECT rolsuper FROM pg_roles WHERE rolname = session_user)
+      AND pg_has_role(session_user, 'letletme_v2_frozen_owner', 'MEMBER')
+    )
+  INTO migration_login_inherits_frozen_owner;
+
   IF unexpected_frozen_owner_count <> 0
-     OR pg_has_role(session_user, 'letletme_v2_frozen_owner', 'MEMBER')
+     OR migration_login_inherits_frozen_owner
      OR has_schema_privilege('letletme_v2_frozen_owner', 'public', 'CREATE') THEN
     RAISE EXCEPTION
       'v2 frozen-owner boundary failed: wrong owners=%, login member=%, create=%',
       unexpected_frozen_owner_count,
-      pg_has_role(session_user, 'letletme_v2_frozen_owner', 'MEMBER'),
+      migration_login_inherits_frozen_owner,
       has_schema_privilege('letletme_v2_frozen_owner', 'public', 'CREATE');
   END IF;
 

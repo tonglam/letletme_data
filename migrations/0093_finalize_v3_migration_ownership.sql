@@ -135,6 +135,8 @@ END
 $release_v2_frozen_owner$;
 
 DO $legacy_ledger_postcondition$
+DECLARE
+  migration_login_inherits_frozen_owner boolean;
 BEGIN
   IF EXISTS (
     SELECT 1
@@ -156,6 +158,23 @@ BEGIN
   -- locked NOLOGIN role as an empty quarantine role instead of attempting a
   -- cross-database DROP ROLE, but prove it owns nothing in this database and
   -- the migration login cannot inherit it.
+  -- pg_has_role() reports superusers as members of every role without a
+  -- pg_auth_members edge, so use the same real-grant/non-superuser contract as
+  -- the activation migration.
+  SELECT
+    EXISTS (
+      SELECT 1
+      FROM pg_auth_members membership
+      JOIN pg_roles member_role ON member_role.oid = membership.member
+      JOIN pg_roles granted_role ON granted_role.oid = membership.roleid
+      WHERE member_role.rolname = session_user
+        AND granted_role.rolname = 'letletme_v2_frozen_owner'
+    ) OR (
+      NOT (SELECT rolsuper FROM pg_roles WHERE rolname = session_user)
+      AND pg_has_role(session_user, 'letletme_v2_frozen_owner', 'MEMBER')
+    )
+  INTO migration_login_inherits_frozen_owner;
+
   IF NOT EXISTS (
     SELECT 1 FROM pg_roles role_row
     WHERE role_row.rolname = 'letletme_v2_frozen_owner'
@@ -165,7 +184,7 @@ BEGIN
       AND NOT role_row.rolcanlogin
       AND NOT role_row.rolinherit
       AND NOT role_row.rolbypassrls
-  ) OR pg_has_role(session_user, 'letletme_v2_frozen_owner', 'MEMBER')
+  ) OR migration_login_inherits_frozen_owner
      OR EXISTS (SELECT 1 FROM pg_class WHERE relowner = 'letletme_v2_frozen_owner'::regrole)
      OR EXISTS (SELECT 1 FROM pg_proc WHERE proowner = 'letletme_v2_frozen_owner'::regrole)
      OR EXISTS (SELECT 1 FROM pg_type WHERE typowner = 'letletme_v2_frozen_owner'::regrole)

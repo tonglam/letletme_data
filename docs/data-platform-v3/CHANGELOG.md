@@ -1,5 +1,15 @@
 # Data Platform v3 Plan Changelog
 
+## 2026-08-09 - P5 rollback acceptance
+
+- Added a generated, exact, approval-gated preactivation rollback capsule that restores the v2
+  public ledger and staging ACL contract without dropping private v3 staging schemas.
+- Accepted both preactivation and postactivation/pre-cleanup rollback drills against selective and
+  full B0 restores, including exact old Data, GraphQL, and Web SHA startup probes.
+- Corrected full-Supabase-PG15 validation to distinguish a real frozen-owner membership edge from
+  PostgreSQL's superuser `pg_has_role()` semantics; applied the same rule to the pending `0093`
+  cleanup postcondition.
+
 ## 3.2.4 - 2026-08-09
 
 - Corrected the deterministic initial publication identity produced before runtime: a new

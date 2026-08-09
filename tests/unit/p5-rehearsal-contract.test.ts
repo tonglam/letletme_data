@@ -27,6 +27,22 @@ describe('P5 rehearsal contracts', () => {
     expect(sql).toContain('DO $rollback_postcondition$');
   });
 
+  test('generates an exact non-destructive preactivation rollback capsule', () => {
+    const sql = read('sql/v3/generate-preactivation-rollback.sql');
+
+    expect(sql).toStartWith(
+      '\\set ON_ERROR_STOP on\n\\o /dev/null\n\\set QUIET 1\n\\pset tuples_only on',
+    );
+    expect(sql).toContain('APPROVE_V3_PREACTIVATION_ROLLBACK ');
+    expect(sql).toContain('preactivation rollback baseline v2 ledger changed');
+    expect(sql).toContain('DELETE FROM public.sql_migrations WHERE filename NOT IN');
+    expect(sql).toContain('REVOKE USAGE ON SCHEMA public FROM letletme_data_owner');
+    expect(sql).toContain('preactivationRollbackMode');
+    expect(sql).toContain('DO $preactivation_rollback_postcondition$');
+    expect(sql).not.toContain('DROP SCHEMA');
+    expect(sql).not.toContain('DROP TABLE');
+  });
+
   test('limits B0 owner normalization to the approved isolated source scope', () => {
     const sql = read('sql/v3/p5-normalize-b0-ownership.sql');
 
@@ -67,5 +83,16 @@ describe('P5 rehearsal contracts', () => {
     expect(source).toContain('expect(refreshMs).toBeLessThanOrEqual(30_000)');
     expect(source).toContain('expect(selectionP95Ms).toBeLessThanOrEqual(100)');
     expect(source).toContain('expect(playerSummaryP95Ms).toBeLessThanOrEqual(150)');
+  });
+
+  test('distinguishes real frozen-owner grants from superuser pg_has_role semantics', () => {
+    const activationValidation = read('sql/v3/validate-0090-activation.sql');
+    const cleanupMigration = read('migrations/0093_finalize_v3_migration_ownership.sql');
+
+    for (const sql of [activationValidation, cleanupMigration]) {
+      expect(sql).toContain('FROM pg_auth_members membership');
+      expect(sql).toContain('NOT (SELECT rolsuper FROM pg_roles WHERE rolname = session_user)');
+      expect(sql).toContain('migration_login_inherits_frozen_owner');
+    }
   });
 });
