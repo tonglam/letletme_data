@@ -645,17 +645,28 @@ jobs:
             LOWER_USER=$(printf '%s' "$GHCR_USER" | tr '[:upper:]' '[:lower:]')
             printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$LOWER_USER" --password-stdin
             APP_IMAGE="$IMAGE_REF" docker compose pull api
+            run_redis_cutover() {
+              APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
+                -e V3_REDIS_QUEUE_MANIFEST_SHA256="$QUEUE_MANIFEST_SHA256" \
+                api sh -eu -c '
+                  export CACHE_REDIS_HOST="${CACHE_REDIS_HOST:-${REDIS_HOST:-}}"
+                  export CACHE_REDIS_PORT="${CACHE_REDIS_PORT:-${REDIS_PORT:-6379}}"
+                  export CACHE_REDIS_PASSWORD="${CACHE_REDIS_PASSWORD:-${REDIS_PASSWORD:-}}"
+                  export CACHE_REDIS_DB="${CACHE_REDIS_DB:-${REDIS_DB:-0}}"
+                  export QUEUE_REDIS_HOST="${QUEUE_REDIS_HOST:-${REDIS_HOST:-}}"
+                  export QUEUE_REDIS_PORT="${QUEUE_REDIS_PORT:-${REDIS_PORT:-6379}}"
+                  export QUEUE_REDIS_PASSWORD="${QUEUE_REDIS_PASSWORD:-${REDIS_PASSWORD:-}}"
+                  export QUEUE_REDIS_DB="${QUEUE_REDIS_DB:-1}"
+                  exec bun run redis:cutover "$@"
+                ' sh "$@"
+            }
             if [ "$OPERATION" = "v3-copy-queues-dry-run" ]; then
-              APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun run redis:cutover copy-queues
+              run_redis_cutover copy-queues
               exit 0
             fi
             [[ "$QUEUE_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]]
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
-              -e V3_REDIS_QUEUE_MANIFEST_SHA256="$QUEUE_MANIFEST_SHA256" \
-              api bun run redis:cutover copy-queues --execute
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
-              -e V3_REDIS_QUEUE_MANIFEST_SHA256="$QUEUE_MANIFEST_SHA256" \
-              api bun run redis:cutover verify-queues
+            run_redis_cutover copy-queues --execute
+            run_redis_cutover verify-queues
 
   v3_core_cache:
     if: >-

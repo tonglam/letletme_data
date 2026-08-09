@@ -177,8 +177,12 @@ describe('v3 production hard-cut workflow', () => {
     const cache = job('v3_core_cache', 'v3_start_api');
 
     expect(queues).toContain('V3_REDIS_QUEUE_MANIFEST_SHA256');
-    expect(queues).toContain('redis:cutover copy-queues --execute');
-    expect(queues).toContain('redis:cutover verify-queues');
+    expect(queues).toContain('run_redis_cutover copy-queues --execute');
+    expect(queues).toContain('run_redis_cutover verify-queues');
+    expect(queues).toContain('CACHE_REDIS_HOST="${CACHE_REDIS_HOST:-${REDIS_HOST:-}}"');
+    expect(queues).toContain('CACHE_REDIS_DB="${CACHE_REDIS_DB:-${REDIS_DB:-0}}"');
+    expect(queues).toContain('QUEUE_REDIS_DB="${QUEUE_REDIS_DB:-1}"');
+    expect(queues).not.toContain('mv "$env_tmp" .env.deploy');
     expect(cache).toContain('V3_CORE_CACHE_APPROVAL');
     expect(cache).toContain('cache:publish-core --execute');
   });
