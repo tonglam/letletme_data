@@ -116,7 +116,7 @@ P2 exit gate: migrations reproduce the target from fresh and B0 schemas and all 
 | [x] | P4-07 | Implement reporting readers and v3 query cache | Dataset revision in every key | `14-p4-g2-acceptance.md`; 306 tests; real Redis/HTTP and pointer-loss fallback |
 | [x] | P4-08 | Remove v2 views/MVs/RPC fallbacks | Zero references | Exact runtime scans; only G3-owned history-parent paths remain |
 | [x] | P4-09 | Commit G2 | Clean tree; SHA recorded | `e2612ad2db91db5a9841ed03812403e0082a4906` |
-| [ ] | P4-10 | Create G3 from accepted G2 | Exact predecessor SHA | SHA: |
+| [x] | P4-10 | Create G3 from accepted G2 | Exact predecessor SHA | `/Users/tong/CursorProjects/letletme-graphql-data-platform-v3-player-state`; predecessor `e2612ad2db91db5a9841ed03812403e0082a4906` |
 | [ ] | P4-11 | Implement limited `playerStateProfile` | Indexed PG path; 900/60 TTL | Tests/benchmark: |
 | [ ] | P4-12 | Commit G3 | Clean tree; SHA recorded | SHA: |
 | [ ] | P4-13 | Create W1 from Web `origin/main` | Existing dirty worktree untouched | Path/SHA: |
