@@ -165,4 +165,9 @@ jobs:
           QUEUE_REDIS_HOST: 127.0.0.1
           QUEUE_REDIS_PORT: '6379'
           QUEUE_REDIS_DB: '10'
+          # Finalizer integration fixtures use future seasons and never call the provider.
+          UNDERSTAT_ENABLED: 'true'
+          UNDERSTAT_LEAGUE: EPL
+          UNDERSTAT_MIN_SEASON: '9798'
+          UNDERSTAT_SEASON: '9899'
         run: bun run test:integration
