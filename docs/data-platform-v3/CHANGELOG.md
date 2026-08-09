@@ -1,5 +1,14 @@
 # Data Platform v3 Plan Changelog
 
+## 2026-08-09 - Clean B0 cross-service rehearsal evidence
+
+- Replayed the committed Data and Web migrations from a clean full B0 clone without SQL or
+  migration-ledger correction and recorded every migration duration and deterministic hash gate.
+- Accepted the P5 data-quality, cross-service least-privilege, and representative Data/GraphQL/Web
+  journey gates, including authenticated selections and real maintenance-mode behavior.
+- Kept the overall run-1 and performance gates open for representative Redis restoration, scoped
+  memory cleanup, post-cleanup database sizing, and an exact-order intervention-free rerun.
+
 ## 2026-08-09 - Web runtime database boundary hardening
 
 - Replaced Web's administrator runtime connection with a dedicated LOGIN inheriting only the
