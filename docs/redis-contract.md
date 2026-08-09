@@ -95,16 +95,19 @@ validated manifest; it never manufactures or regresses a revision.
 
 BullMQ keys remain `bull:{queue}:*`, but exist only on `QUEUE_REDIS_*`. Owned queues are
 `data-sync`, `entry-sync`, `live-data`, `league-sync`, `tournament-sync`, and
-`tournament-setup`, including optional `-p0` through `-p3` tier suffixes.
+`tournament-setup`, including optional `-p0` through `-p3` tier suffixes. When Understat is
+enabled, `understat-team-sync` and `understat-player-sync` are also owned queues. Their clients are
+created lazily, so the default disabled Understat runtime opens no provider queue connection.
 
 Non-BullMQ worker state begins with `llm:v3:queue:coordination:*`, including mutation locks,
-tournament cascade barriers, daily entry-sync markers, and launch-notification dedupe. It must not
-be written with the cache client.
+Understat request-permit leases, tournament cascade barriers, daily entry-sync markers, and
+launch-notification dedupe. It must not be written with the cache client.
 
 ## Deliberately uncached data
 
-- Understat ingestion writes PostgreSQL and ops evidence only; Data publishes no Understat Redis
-  keys.
+- Understat ingestion writes business data and staged evidence only to PostgreSQL. Data publishes
+  no Understat Redis read-model/cache keys; its short-lived request permits are queue-coordination
+  state under `llm:v3:queue:coordination:*`.
 - Player market history is read from PostgreSQL; `PlayerValue:*` is retired.
 - Player season summaries are reporting reads; `EventLiveSummary:*` is retired.
 - Tournament selection statistics and tournament entry-event summaries are reporting MVs, not

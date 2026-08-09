@@ -16,7 +16,7 @@ durable path, SHA, query result, run URL, or backup manifest. Verbal confirmatio
 | Production project | `gtwcfjoviibmtkevurjw` |
 | Plan version | 3.2.5 |
 | Cutover approver | User |
-| Current phase | Run 6 correction/discovery replay is complete but ineligible as a clean rehearsal because candidates changed mid-run. Its corrected three-repository candidate is recorded in external `p5/rehearsal-6/manifests/run6-candidate-manifest.json`; reconcile the separately owned Understat pipeline before freezing the final candidate, then execute clean Run 7 and identical Run 8. |
+| Current phase | Run 6 correction/discovery replay remains ineligible as a clean rehearsal. The Understat/mainline reconciliation and P5-10 candidate freeze are complete. Execute clean Run 7 and an identical Run 8 from the external frozen manifest; production activation remains blocked. |
 
 ## P0 - Freeze and inventory
 
@@ -85,8 +85,9 @@ P1 exit gate: both restore drills pass. A backup that has not been restored does
 | [x] | P2-21 | Replay publication correction on fresh and B0 PG15 twice | Both paths pass; second runs are no-op/status-clean; legacy cleanup remains gated | Fresh path: external `p5/plan-3.2.5-correction/fresh-pg15-final/`; B0 path: external `p5/rehearsal-6/manifests/postactivation-migration-gate.txt`; both second passes no-op/status-clean and all three cleanup migrations remain gated |
 | [x] | P2-22 | Enforce core-cache cutover preflight privilege | Writer reads exactly `migration_runs(run_id,status,metadata)`; no broad/provenance/write privilege | Run 6 external `p5/rehearsal-6/manifests/data-writer-privilege-gate.txt`: exact three-column positive read; provenance read and migration write both denied |
 | [x] | P2-23 | Enforce Data reporting operational privilege | Writer reads/refreshes only two tournament MVs; ordinary views, DML, and schema CREATE denied | Run 6 external `p5/rehearsal-6/manifests/data-writer-privilege-gate.txt`: both MVs and two refresh functions pass; ordinary view, MV DML/reporting DDL probes denied |
+| [x] | P2-24 | Integrate v3 Understat runtime constraints | Bridge provider pairs are idempotent; Player-lane season/team FKs are independent; fresh and B0 PG15 replays pass twice | `27-p3-understat-integration-acceptance.md`: migration SHA-256 `7074c184...2638`; fresh first apply 22.78 ms/second no-op; B0 all 18 migrations applied once/second no-op; duplicate pairs 0; constraints 3/3 validated; only used Understat enum remains |
 
-P2 exit gate: P2-01 through P2-23 complete; migrations reproduce the target from fresh and B0
+P2 exit gate: P2-01 through P2-24 complete; migrations reproduce the target from fresh and B0
 schemas and all data gates pass.
 
 ## P3 - Data runtime and cache
@@ -108,6 +109,9 @@ schemas and all data gates pass.
 | [x] | P3-13 | Commit D2 | Clean tree; SHA recorded | Substantive SHA: `51201b40ec3187ad38a18171a7267836326a6fec` |
 | [x] | P3-14 | Advance immutable publication contract to plan 3.2.5 | Data rejects stale plans; corrected writer dry-run and execute/readback pass | Rejected-run focused probe: exact 38/20/573/11/380; seven keys; six-item 3.2.5 manifest; current event null |
 | [x] | P3-15 | Run Data with exact reporting capability | Tournament refresh/readback succeeds; no access to ordinary views | Real writer refreshed/read both MVs; ordinary-view SELECT, MV DML, schema DDL all denied; trust-boundary 5/5 |
+| [x] | P3-16 | Reconcile merged Understat pipeline with v3 ownership | Keep provider client, queues, workers, and normalized staging evidence while using only `understat`, `bridge`, and `ops`; no legacy FPL archive or duplicate schema returns | `27-p3-understat-integration-acceptance.md`; branch `codex/data-platform-v3-understat-integration`; source PR #52 merge `6aee880cfdfc30dd6bd2b2702dba8a6ec740fb87` |
+| [x] | P3-17 | Revalidate PostgreSQL-only Understat ingestion | No Data Understat Redis read-model/cache writer, key, or config; only queue coordination is allowed; normalized evidence is staged in `ops.sync_items`; incomplete snapshots cannot replace complete facts | `27-p3-understat-integration-acceptance.md`: cache/publication scan 0; disabled queue clients remain lazy; 13 focused PG tests; transactional completeness/rollback and terminal-replay gates pass |
+| [x] | P3-18 | Accept integrated Data candidate | Lint, format, typecheck, unit/integration/build, fresh PG15 and B0 persistence/status/worker gates all pass | `27-p3-understat-integration-acceptance.md`: 729 unit; fresh 42 integration; B0 44 integration with B0 gates enabled; 2 schema/persistence gates; build/static/HTTP smoke pass |
 
 ## P4 - GraphQL and Web
 
@@ -147,7 +151,7 @@ schemas and all data gates pass.
 | [x] | P5-07 | Performance budgets | Every budget passes or has accepted plan revision | `19-p5-rehearsal-run-1.md`; `20-p5-redis-cutover-rehearsal.md`; `21-p5-postcleanup-b1-restore.md`; cleaned DB 391,545,347 bytes vs 512,218,885-byte ceiling |
 | [x] | P5-08 | Security/grant tests | Least privilege and private schemas pass | Run 6 external `p5/rehearsal-6/manifests/data-writer-privilege-gate.txt` and `runtime-role-gate.txt`: exact Data positive/negative matrix; dedicated Data/GraphQL runtime roles pass; admin identities fail closed |
 | [x] | P5-09 | End-to-end journeys | Selections/player/live/market/tournament/auth pass | Run 6 external `logs/`: Data B0 integration 31 pass/4 planned skips; preseason live returns/renders 10 GW1 fixtures; `e2e-auth-tournament-selections-valid.json` passes login/list/GW1 selections/live 2-of-2/sign-out with rate use 77/120 and no browser failures; `e2e-selection-contract-valid.json` proves 2/5/5/3, 15 players, and exact 100% ownership |
-| [ ] | P5-10 | Freeze candidate SHAs/digests/checksums | External release manifest immutable; no self-reference | Run 6 provisional manifest: external `p5/rehearsal-6/manifests/run6-candidate-manifest.json`; final manifest remains open until the separately owned Understat pipeline is reconciled |
+| [x] | P5-10 | Freeze candidate SHAs/digests/checksums | External release manifest immutable; no self-reference | External `p5/rehearsal-6/manifests/run6-candidate-manifest.json`; deploy-target `linux/amd64` Data/GraphQL image IDs `6c80c3d3...`/`13ce251f...`; 21-file checksum list SHA-256 `8a458172...` |
 
 ## P6 - Production activation
 
@@ -156,7 +160,7 @@ schemas and all data gates pass.
 | [ ] | P6-01 | Confirm B0, rehearsal, role, and platform gates | Every prior gate green; PG patch warning resolved/accepted; runtime logins are not the migration login | Approval record: |
 | [ ] | P6-02 | Enable maintenance | Web serves maintenance state | Screenshot/check: |
 | [ ] | P6-03 | Stop Data/GraphQL writers/readers | No application DB writer session; queues paused | Evidence: |
-| [ ] | P6-04 | Apply `0079`-`0090_zzz` | Checksums and durations recorded; exit 0 | Migration log: |
+| [ ] | P6-04 | Apply `0079`-`0090_zzzz` | Checksums and durations recorded; exit 0 | Migration log: |
 | [ ] | P6-05 | Run production data gates | All critical/high gates pass | Report: |
 | [ ] | P6-06 | Build/validate first v3 Redis revision | One coherent active manifest | Report: |
 | [ ] | P6-07 | Start Data then GraphQL | Health/readiness pass | Deployment runs: |

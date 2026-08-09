@@ -20,6 +20,7 @@ required; an expected pre-publication `404` is not a schema failure.
 | `/bootstrap-static/` | `getBootstrap()` | FPL publishes events, teams, players, phases |
 | `/fixtures/` or `/fixtures/?event={eventId}` | `getFixtures()` | The fixture list/requested GW exists |
 | `/event/{eventId}/live/` | `getEventLive()` | The gameweek live feed is published |
+| `/element-summary/{elementId}/` | history backfill source (`fixtures`, `history`, `history_past`) | The player element exists; use the preserved per-player history for historical fixture and market fields |
 | `/entry/{entryId}/` | `getEntrySummary()` | The entry exists in the new season |
 | `/entry/{entryId}/event/{eventId}/picks/` | `getEntryEventPicks()` | Picks are published |
 | `/entry/{entryId}/transfers/` | `getEntryTransfers()` | The entry transfer feed exists |

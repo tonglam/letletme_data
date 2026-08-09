@@ -1,6 +1,7 @@
 import type { Job } from 'bullmq';
 import { getConfig } from './config';
 import { logError, logInfo, logWarn } from './logger';
+import { isTerminalJobFailure } from './worker-failure';
 
 export type NotificationDeliveryResult = 'sent' | 'skipped';
 
@@ -108,10 +109,10 @@ export async function sendWeChatBotNotification(
  * Telegram is not configured (plan FP-14d: alerting requires prod envs).
  */
 export async function alertOnFinalFailure(job: Job, error: unknown): Promise<void> {
-  const attempts = job.opts.attempts ?? 1;
-  if (job.attemptsMade < attempts) {
+  if (!isTerminalJobFailure(job, error)) {
     return;
   }
+  const attempts = job.opts.attempts ?? 1;
 
   const config = getConfig();
   if (!config.TELEGRAM_BOT_TOKEN || !config.TELEGRAM_CHAT_ID) {

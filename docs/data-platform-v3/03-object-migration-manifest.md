@@ -119,6 +119,13 @@ and target counts/hashes/status per object and stores legacy migration-ledger ev
 preserves `ops.sync_runs.publication_id` references transactionally, validates the named CHECK,
 and advances every v3 publication manifest to plan 3.2.5.
 
+`0090_zzzz_integrate_understat_runtime.sql` adds the null-safe provider-pair uniqueness contract
+used by `bridge.entity_links` upserts and replaces the cross-lane
+`understat.player_team_seasons -> understat.team_seasons` dependency with independent season and
+team references. It also drops the five unused provider-local sync enum types after sync control
+moves to constrained fields in `ops`; only `understat.season_state` remains in use. It creates no
+second provider or FPL fact table.
+
 `letletme_data_writer` receives column-level `SELECT` only on
 `ops.migration_runs(run_id, status, metadata)` for the initial core-cache preflight. All other
 migration-run columns and every mutation privilege remain migration-operator-only.

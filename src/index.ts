@@ -17,6 +17,7 @@ import { registerMutationRateLimit } from './api/rate-limit';
 import { checkReadiness } from './api/health';
 import { teamsAPI } from './api/teams.api';
 import { tournamentsAPI } from './api/tournaments.api';
+import { understatAPI } from './api/understat.api';
 import { databaseSingleton } from './db/singleton';
 
 // Import job registration functions
@@ -153,6 +154,7 @@ const app = new Elysia()
   .use(entrySyncAPI)
   .use(jobsAPI)
   .use(tournamentsAPI)
+  .use(understatAPI)
 
   // ================================
   // Cron Job Registration
@@ -200,6 +202,7 @@ logInfo('🚀 Elysia server started', {
     'phases',
     'jobs',
     'tournaments',
+    'understat',
   ],
   jobs: [
     'data-sync',

@@ -59,6 +59,20 @@ const EnvSchema = z.object({
   SUPABASE_URL: z.string().optional(),
   SUPABASE_KEY: z.string().optional(),
   PULSELIVE_COMP_SEASON: z.string().optional(),
+  // Disabled until automated Understat access is explicitly approved.
+  UNDERSTAT_ENABLED: booleanEnv(false),
+  UNDERSTAT_BASE_URL: z.string().url().default('https://understat.com'),
+  UNDERSTAT_LEAGUE: z.string().min(1).default('EPL'),
+  UNDERSTAT_MIN_SEASON: z
+    .string()
+    .regex(/^\d{4}$/)
+    .default('2526'),
+  UNDERSTAT_SEASON: z
+    .string()
+    .regex(/^\d{4}$/)
+    .default('2627'),
+  UNDERSTAT_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(60_000).default(10_000),
+  UNDERSTAT_MAX_CONCURRENCY: z.coerce.number().int().min(1).max(4).default(4),
   // Telegram notifications (optional)
   TELEGRAM_BOT_TOKEN: z.string().optional(),
   TELEGRAM_CHAT_ID: z.string().optional(),
@@ -137,6 +151,10 @@ export function getConfig(): AppConfig {
   try {
     const parsed = EnvSchema.parse(process.env);
     assertRedisEndpointsSeparated(parsed);
+
+    if (Number(parsed.UNDERSTAT_MIN_SEASON) > Number(parsed.UNDERSTAT_SEASON)) {
+      throw new Error('UNDERSTAT_MIN_SEASON cannot be newer than UNDERSTAT_SEASON');
+    }
 
     // Helpful warnings (non-fatal)
     if (!parsed.SUPABASE_URL || !parsed.SUPABASE_KEY) {

@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
 
 import {
   assertRedisEndpointsSeparated,
@@ -6,6 +7,7 @@ import {
   resolveQueueRedisConfig,
   type AppConfig,
 } from '../../src/utils/config';
+import { resolveUnderstatPermitRedisConfig } from '../../src/utils/understat-rate-limit';
 
 function config(overrides: Partial<AppConfig> = {}): AppConfig {
   return {
@@ -28,6 +30,13 @@ function config(overrides: Partial<AppConfig> = {}): AppConfig {
     MUTATION_LOCK_WAIT_TIMEOUT_MS: 120_000,
     MUTATION_LOCK_RETRY_DELAY_MS: 250,
     MUTATION_LOCK_HEARTBEAT_MS: 10_000,
+    UNDERSTAT_ENABLED: false,
+    UNDERSTAT_BASE_URL: 'https://understat.com',
+    UNDERSTAT_LEAGUE: 'EPL',
+    UNDERSTAT_MIN_SEASON: '2526',
+    UNDERSTAT_SEASON: '2627',
+    UNDERSTAT_TIMEOUT_MS: 10_000,
+    UNDERSTAT_MAX_CONCURRENCY: 4,
     ...overrides,
   };
 }
@@ -46,6 +55,12 @@ describe('Redis endpoint separation', () => {
       db: 0,
     });
     expect(resolveQueueRedisConfig(value)).toEqual({
+      host: 'queue.internal',
+      port: 6379,
+      password: 'queue-secret',
+      db: 0,
+    });
+    expect(resolveUnderstatPermitRedisConfig(value)).toEqual({
       host: 'queue.internal',
       port: 6379,
       password: 'queue-secret',
@@ -77,5 +92,23 @@ describe('Redis endpoint separation', () => {
         }),
       ),
     ).not.toThrow();
+  });
+
+  test('keeps disabled Understat queue clients lazy', () => {
+    const teamQueue = readFileSync('src/queues/understat-team.queue.ts', 'utf8');
+    const playerQueue = readFileSync('src/queues/understat-player.queue.ts', 'utf8');
+    const worker = readFileSync('src/workers/understat.worker.ts', 'utf8');
+
+    expect(teamQueue).not.toMatch(/export const understatTeamQueue\s*=\s*new Queue/);
+    expect(playerQueue).not.toMatch(/export const understatPlayerQueue\s*=\s*new Queue/);
+    expect(teamQueue).toContain('understatTeamQueue ??= new Queue');
+    expect(playerQueue).toContain('understatPlayerQueue ??= new Queue');
+
+    const disabledGuard = worker.indexOf('if (!getConfig().UNDERSTAT_ENABLED)');
+    expect(disabledGuard).toBeGreaterThanOrEqual(0);
+    expect(worker.indexOf('getUnderstatTeamQueue()', disabledGuard)).toBeGreaterThan(disabledGuard);
+    expect(worker.indexOf('getUnderstatPlayerQueue()', disabledGuard)).toBeGreaterThan(
+      disabledGuard,
+    );
   });
 });

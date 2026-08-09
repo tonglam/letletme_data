@@ -34,9 +34,9 @@ LOG_LEVEL=error RUN_INTEGRATION=1 RUN_B0_ACCEPTANCE=1 \
 
 Required migration cases:
 
-1. fresh bootstrap through `0090_zzz`;
+1. fresh bootstrap through `0090_zzzz`;
 2. fresh bootstrap run a second time/status clean;
-3. exact B0 upgrade through `0090_zzz`;
+3. exact B0 upgrade through `0090_zzzz`;
 4. B0 upgrade run a second time/status clean;
 5. interrupted conversion resumes without duplicate or partial target rows;
 6. wrong PostgreSQL major fails before DDL;
@@ -63,6 +63,12 @@ Required migration cases:
     schema.
 19. the Data writer can read exactly `migration_runs(run_id,status,metadata)` for core-cache
     preflight and cannot read other provenance columns or perform any migration-run mutation.
+20. the Understat integration migration is idempotent, bridge provider-pair upserts cannot
+    duplicate, and Player-lane participant rows do not depend on Team-lane season aggregates.
+21. complete Team and Player staged runs write zero new facts before finalization, commit exactly
+    once after completeness checks, and preserve prior facts when finalization is incomplete.
+22. disabled Understat API/worker imports create no BullMQ queue client; accepted explicit syncs and
+    enabled workers initialize only the two queues on `QUEUE_REDIS_*`.
 
 ### GraphQL
 

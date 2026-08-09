@@ -125,7 +125,7 @@ All fields below must be attached to the run record:
 - B0 manifest and both restore reports;
 - two passing rehearsal reports;
 - final candidate SHAs and container image digests;
-- migration filenames/checksums `0079`-`0090_zzz` and approval-gated `0091`-`0093`;
+- migration filenames/checksums `0079`-`0090_zzzz` and approval-gated `0091`-`0093`;
 - generated source/target/drop object manifests;
 - migration duration estimate plus 50% contingency;
 - current database/Redis size and free-capacity report;
@@ -135,7 +135,7 @@ All fields below must be attached to the run record:
   reader LOGIN names, generated credentials, and reviewed provisioning commands are staged but
   are not granted an owner/admin fallback before activation: their capability roles
   `letletme_data_writer` and `letletme_graphql_reader` are created by `0079`. Immediately after
-  `0090_zzz`, provision those two LOGINs with `INHERIT`, all elevated attributes disabled, and
+  `0090_zzzz`, provision those two LOGINs with `INHERIT`, all elevated attributes disabled, and
   exactly one capability membership each. No runtime may inherit an owner role or use the
   migration login. Data production startup and `cache:publish-core` must pass the Data runtime-role
   contract; GraphQL must pass `contract:check`. Web `DATABASE_URL` must pass
@@ -168,7 +168,7 @@ The command is idempotent for identical target keys and fails closed for a confl
 unexpected target key. It uses type-aware logical hashes because raw Redis `DUMP` bytes are not a
 canonical equality contract for restored hashes.
 
-## Production activation: `0079`-`0090_zzz`
+## Production activation: `0079`-`0090_zzzz`
 
 1. Announce and enable maintenance on the accepted pre-cutover Web build.
 2. Stop Data API, Data workers, and GraphQL. Pause queues without deleting jobs.
@@ -180,7 +180,7 @@ canonical equality contract for restored hashes.
 4. Run `bun run db:migration-contract` from the one-shot migration container, then set bounded
    PostgreSQL timeouts for that direct Supabase `postgres` session. The migration itself uses
    advisory locking and records each object/season conversion in `ops.migration_objects`.
-5. Run Data migration status. Apply exactly `0079` through `0090_zzz` from the release manifest. Save
+5. Run Data migration status. Apply exactly `0079` through `0090_zzzz` from the release manifest. Save
    stdout/stderr and exit status without connection secrets. Both commands use the isolated
    migration environment; API/worker `DATABASE_URL` is never substituted for it.
 6. Re-run Web migration status (the pre-cutover `0008` application must be a no-op), revalidate the

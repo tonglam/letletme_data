@@ -2,6 +2,22 @@
 
 ## 3.2.5 - 2026-08-09
 
+- Reconciled the merged Understat runtime into the v3 `understat`, `bridge`, and `ops` ownership
+  model. Discovery/detail jobs now stage hash-bound normalized evidence and Team/Player finalizers
+  apply complete snapshots in one PostgreSQL transaction.
+- Added `0090_zzzz_integrate_understat_runtime.sql` for null-safe provider-pair idempotency and
+  independent Player-lane season/team references, and removed five dependency-free Understat sync
+  enum types after sync ownership moved to `ops`. The correction does not change table grain,
+  cutover approvals, data-loss policy, or rollback policy, so plan version remains 3.2.5.
+- Removed the merged Understat Data cache/publication path and routine cron schedules. Understat is
+  explicit/API queued; its only Redis use is BullMQ, locks, and request permits on
+  `QUEUE_REDIS_*` under the v3 coordination namespace. Its two BullMQ queue clients are lazy, so
+  the default disabled runtime opens no Understat Redis connections.
+- Accepted the integrated runtime on fresh and restored-B0 PostgreSQL 15 paths, including
+  immutable run identity/terminal replay guards, complete-snapshot rollback tests, schema parity,
+  least-privilege HTTP smoke, 729 unit tests, and the full P5 quality transaction. See
+  `27-p3-understat-integration-acceptance.md`.
+
 - Rejected rehearsal 5 at the encrypted full-B0 restore gate because `pg_restore --no-owner` was
   invoked with the direct `postgres` migration owner instead of the Supabase image administrator;
   the restore stopped before public business tables, Redis never started, and production was not

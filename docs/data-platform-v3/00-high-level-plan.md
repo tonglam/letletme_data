@@ -179,7 +179,7 @@ cleanup uses namespace-scoped `SCAN` plus `UNLINK`; `FLUSHDB` and `FLUSHALL` are
 
 The implementation is split into reviewable Data, GraphQL, and Web branches, but production has
 one maintenance-window cutover. B0 backup and restore rehearsal precede any production mutation.
-Migrations `0079` through `0090_zzz` create, populate, validate, and activate v3. Old objects
+Migrations `0079` through `0090_zzzz` create, populate, validate, and activate v3. Old objects
 remain frozen until B1 backup and explicit approval. Migrations `0091` through `0093` then remove legacy
 reporting objects, physical tables, triggers, and obsolete migration ownership.
 

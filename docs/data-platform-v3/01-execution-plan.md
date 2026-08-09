@@ -129,6 +129,7 @@ Migration sequence:
 | `0090_z_finalize_v3_graphql_reader_contract.sql` | Make publication authority readable by the read-only GraphQL role and stamp plan 3.2.2 |
 | `0090_zz_add_public_league_trends.sql` | Move the GraphQL-mainline public-league allowlist contract under Data-owned `competition` and stamp plan 3.2.3 |
 | `0090_zzz_enforce_v3_publication_identity.sql` | Normalize pre-runtime publication IDs, enforce RFC UUID identities, preserve sync-run references, and stamp plan 3.2.5 |
+| `0090_zzzz_integrate_understat_runtime.sql` | Add bridge pair idempotency and independent Player-lane season/team references, then remove unused provider-local sync types after control moves to `ops` |
 | `0091_drop_v2_reporting_and_rpcs.sql` | Approval-gated legacy views/MVs/RPC removal |
 | `0092_drop_v2_tables_partitions_triggers.sql` | Approval-gated legacy physical-object removal |
 | `0093_finalize_v3_migration_ownership.sql` | Remove compatibility ledger/view and obsolete GraphQL DDL state |
@@ -178,7 +179,7 @@ Conversion rules:
 Acceptance:
 
 - Fresh install and upgrade from the exact production B0 schema both apply
-  `0079`-`0090_zzz` twice
+  `0079`-`0090_zzzz` twice
   safely in PostgreSQL 15.
 - All intended PK/FK/check/unique constraints validate and all FK columns have supporting indexes.
 - Source and target counts/hashes pass `04-test-matrix.md` for every season and object.
@@ -204,14 +205,16 @@ Implementation:
    cache code cannot receive the queue client.
 6. Adopt the `llm:v3:data:*` namespace, type metadata, revision manifest, and TTL contract. Add
    bounded namespace cleanup using `SCAN` + `UNLINK`.
-7. Remove Data Understat cache code and scheduling. Understat ingestion writes PostgreSQL only and
-   stages normalized payload/evidence in `ops.sync_items` before a transactional finalizer.
+7. Remove Data Understat cache code and routine scheduling. Explicit Understat jobs write business
+   data only to PostgreSQL and stage normalized payload/evidence in `ops.sync_items` before a
+   transactional finalizer. Request permits and locks are queue-coordination state only.
 8. Remove EventLiveSummary and PlayerValue publication keys. Readers use the v3 facts/views.
 
 Acceptance:
 
 - No Data runtime SQL references `public` business tables, `_history`, or season-suffixed names.
-- No Data source contains an Understat Redis writer or retired key builder.
+- No Data source contains an Understat Redis read-model/cache writer or retired key builder;
+  queue-only locks and request permits use `llm:v3:queue:coordination:*`.
 - Publication interruption before pointer swap leaves the old revision active; interruption after
   swap leaves one valid active revision and a bounded retired revision.
 - Cache and queue endpoint tests prove no client is cross-wired.
@@ -268,7 +271,7 @@ Implementation:
 2. Deploy the exact candidate Data/GraphQL/Web builds in maintenance mode.
    Freeze the candidate Data image by digest, then generate the external release manifest from
    `release-manifest.template.json`; store it in the encrypted cutover evidence, not in Git.
-3. Run `0079`-`0090_zzz`, migrate all data, build publications/MVs, and run the complete test
+3. Run `0079`-`0090_zzzz`, migrate all data, build publications/MVs, and run the complete test
    matrix.
 4. Record per-migration duration, lock waits, database growth, Redis memory, query p95, and cache
    hit/miss behavior.
@@ -299,7 +302,7 @@ Implementation:
    hosted PostgreSQL security-patch advisor warning.
 2. Enable maintenance mode and stop Data API/workers plus GraphQL. Web serves maintenance UX.
 3. Confirm no active application sessions or queued jobs can write business data.
-4. Apply `0079`-`0090_zzz` with statement/lock timeouts and durable command logging.
+4. Apply `0079`-`0090_zzzz` with statement/lock timeouts and durable command logging.
 5. Run all data gates, refresh reporting MVs, build the first v3 Redis revision, and validate the
    active manifest.
 6. Start Data, then GraphQL, run private smoke tests, then disable maintenance mode.

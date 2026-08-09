@@ -9,6 +9,8 @@ operations surface; product clients read through `letletme-graphql`.
 ## What this service owns
 
 - Official FPL API access, retries, timeouts, and boundary validation.
+- Independent Understat Team and Player ingestion with canonical PostgreSQL facts and durable
+  normalized staging evidence; no Data-owned Understat Redis read model.
 - Core season data: events, teams, fixtures, players, and phases.
 - Current-gameweek, entry, league, tournament, live, and price-change jobs.
 - Canonical FPL and tournament rows in PostgreSQL.
@@ -37,12 +39,15 @@ flowchart LR
 
 The API process owns HTTP routes and cron registration. The worker process
 consumes the data, entry, live, league, tournament, and tournament-setup queue
-families. Run both processes; an API-only deployment can enqueue work but
-cannot complete it.
+families, plus independent Understat Team and Player queues when enabled. Run both processes; an
+API-only deployment can enqueue work but cannot complete it.
 
 PostgreSQL is authoritative. Redis is disposable acceleration state. A failed
 FPL request or validation error fails the sync without replacing the last
 accepted canonical state.
+
+Understat is deliberately PostgreSQL-only at the business-data layer. Its workers use the queue
+Redis endpoint only for BullMQ, mutation locks, and short-lived request permits.
 
 ## Multi-season and 2026/27 compatibility
 
@@ -230,6 +235,7 @@ production data audit in the season-readiness runbook.
 
 ## Documentation
 
+- [Understat sync, storage, and consumer architecture](docs/understat-pipeline.md)
 - [FPL season readiness runbook](docs/fpl-season-readiness.md)
 - [System contracts](docs/SYSTEM_CONTRACTS.md)
 - [Redis key contract](docs/redis-contract.md)

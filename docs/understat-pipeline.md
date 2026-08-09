@@ -1,0 +1,250 @@
+# Understat Pipeline — Data Platform v3
+
+Status: authoritative candidate contract for the hard cut to Data Platform v3.
+
+This document describes the code on the integrated v3 branch. It replaces the former design that
+published Understat generations and manifests to Redis.
+
+## 1. Locked boundaries
+
+1. PostgreSQL is the only source of truth for Understat business data and sync evidence.
+2. Team and Player are independent ingestion lanes with separate BullMQ queues, jobs, workers, and
+   `ops.sync_runs` rows.
+3. Understat and FPL never share provider tables, clients, queues, or sync state.
+4. Cross-provider analysis is allowed only through verified rows in the `bridge` schema.
+5. Data publishes no Understat Redis read model and has no Understat cache manifest, revision, TTL,
+   or cache fallback.
+6. Redis is used only for BullMQ and short-lived worker coordination on `QUEUE_REDIS_*`.
+7. A detail/discovery job stages normalized evidence; only a lane finalizer may mutate Understat
+   business facts.
+8. A finalizer commits one complete snapshot transaction or no business changes at all.
+
+The staged JSON in `ops.sync_items.normalized_payload` is normalized evidence, not a byte-for-byte
+HTTP raw-response archive. Immutable raw capture, if required, belongs to the separate Understat
+pipeline task and must not introduce a second business-data authority.
+
+## 2. Upstream client
+
+The client validates parsed payloads from these provider routes:
+
+| Resource | Route |
+| --- | --- |
+| League discovery | `/getLeagueData/{league}/{sourceYear}` |
+| Team detail | `/getTeamData/{teamTitle}/{sourceYear}` |
+| Match roster | `/getMatchData/{matchId}` |
+
+The client applies schema validation, timeout handling, retry classification, and concurrency
+permits. Provider permits use the queue-coordination key
+`llm:v3:queue:coordination:understat-request-permits`; they never use the Data cache endpoint.
+
+## 3. Runtime controls
+
+| Variable | Purpose |
+| --- | --- |
+| `UNDERSTAT_ENABLED` | Enables API validation and Understat workers. Default `false`. |
+| `UNDERSTAT_BASE_URL` | Provider base URL. |
+| `UNDERSTAT_LEAGUE` | Provider league, currently `EPL`. |
+| `UNDERSTAT_MIN_SEASON` | Oldest accepted four-digit season code. |
+| `UNDERSTAT_SEASON` | Newest/active accepted season code. |
+| `UNDERSTAT_TIMEOUT_MS` | Provider request timeout. |
+| `UNDERSTAT_MAX_CONCURRENCY` | Provider-wide request-permit limit. |
+
+Season acceptance comes from these explicit Understat settings. It is independent of
+`fpl.seasons.is_current`; neither wall-clock inference nor a Redis key decides the Understat season.
+The two BullMQ clients are created only after an accepted explicit sync or after the enabled worker
+passes its feature-flag gate. With the default `UNDERSTAT_ENABLED=false`, importing either process
+does not open an Understat queue connection.
+
+## 4. Queues and jobs
+
+| Lane | Queue | Jobs |
+| --- | --- | --- |
+| Team | `understat-team-sync` | `understat-team-discover`, `understat-team-detail`, `understat-team-finalize` |
+| Player | `understat-player-sync` | `understat-player-discover`, `understat-player-team-detail`, `understat-player-match`, `understat-player-finalize` |
+
+All Understat jobs take the provider-reference mutation scope. This serializes shared season/team/
+match mutations across both lanes and replicas. Detail jobs also take a resource-specific scope.
+
+There are no routine Understat cron schedules in Data v3. The dataset is low-frequency and is
+refreshed through explicit internal API/manual queue commands. This avoids ongoing provider,
+compute, and storage cost for pages that are rarely read.
+
+## 5. Durable run and staging state
+
+Understat uses the shared v3 operations tables:
+
+### `ops.sync_runs`
+
+- `provider = 'understat'`
+- `lane = 'team' | 'player'`
+- `scope = 'understat.team' | 'understat.player'`
+- explicit `season_code`, mode, trigger, counters, timestamps, error, and metadata
+
+### `ops.sync_items`
+
+The primary key is `(run_id, resource_type, resource_id)`. A completed item stores:
+
+- `source_hash`: SHA-256 of the normalized staging envelope;
+- `normalized_payload`: the complete normalized envelope needed by the finalizer;
+- attempts, status, error, and completion timestamps.
+
+Resource types are:
+
+| Lane | Resource types |
+| --- | --- |
+| Team | `league`, `team-detail` |
+| Player | `league`, `team-participants`, `match-roster` |
+
+The shared ops status `ready_to_publish` means “all required staging items settled and ready for the
+Understat finalizer.” It does not mean Redis publication. A successful Understat finalizer moves the
+run to `completed`; an incomplete but internally valid snapshot moves it to `skipped`.
+
+## 6. Staging envelope contract
+
+Every staged payload contains:
+
+```json
+{
+  "version": 1,
+  "kind": "team-league",
+  "season": "2526",
+  "capturedAt": "2026-08-09T00:00:00.000Z",
+  "data": {}
+}
+```
+
+Before finalization, the reader verifies:
+
+- payload exists and is an object;
+- SHA-256 equals `source_hash`;
+- version, kind, and season match the sync item;
+- arrays and required object fields have the expected shape;
+- serialized dates rehydrate as valid timestamps;
+- team/match identity inside each detail payload matches its resource key.
+
+A mismatch is a hard failure before any business fact is written.
+
+## 7. Team lane
+
+1. Discovery fetches and validates the full league payload.
+2. It computes changed/missing team-detail targets from PostgreSQL evidence.
+3. It creates every `ops.sync_items` row before marking league discovery complete.
+4. Discovery stages normalized season, teams, matches, team match stats, and team-season summaries.
+5. Each detail job reads the staged league item, validates provider dates, and stages one team's
+   seven split dimensions.
+6. When all items settle, one finalizer job is enqueued.
+7. The finalizer hash-verifies every item and opens one PostgreSQL transaction.
+8. Inside that transaction it writes reference facts, team facts, and detail splits, then reads the
+   resulting season snapshot and applies completeness checks.
+9. Only a complete snapshot commits. Otherwise the transaction rolls back and the run is `skipped`.
+
+For EPL, completeness requires exactly 20 team-season summaries, 380 matches, all seven split
+dimensions for every team, and both home/away team-stat rows for every completed match.
+
+## 8. Player lane
+
+1. Discovery fetches the league payload and stages player-season summaries plus shared references.
+2. Team detail jobs stage participant identities and per-team player-season rows.
+3. Match jobs stage complete rosters for selected completed matches.
+4. The finalizer verifies every envelope, then writes all selected player facts in one transaction.
+5. It reads the final snapshot before commit and rejects incomplete participant or roster coverage.
+
+For EPL, completeness requires non-empty player summaries, participant coverage across 20 teams,
+an exact summary-to-membership identity set, and 11 starters on both sides of every completed match.
+Preseason matches are retained but require no roster until `is_result = true`.
+
+## 9. PostgreSQL business model
+
+### `understat`
+
+| Table | Grain |
+| --- | --- |
+| `seasons` | one provider season |
+| `teams` | one durable provider team identity |
+| `players` | one durable provider player identity |
+| `matches` | one provider match |
+| `team_seasons` | season + team |
+| `team_match_stats` | match + team |
+| `team_stat_splits` | season + team + dimension + split key |
+| `player_seasons` | season + player |
+| `player_team_seasons` | season + player + team |
+| `player_match_stats` | match + roster row |
+
+The 0090 Understat runtime integration migration adds provider-pair idempotency and makes
+`player_team_seasons` reference season and team independently. This lets the Player lane ingest its
+own participant facts without depending on a Team-lane aggregate row.
+
+### `bridge`
+
+| Table | Purpose |
+| --- | --- |
+| `entity_links` | Team/player provider identity links and review evidence |
+| `match_links` | Season-scoped Understat match to FPL fixture links |
+| `entity_aliases` | Observed provider aliases used by matching rules |
+
+Verified links are unique on both provider sides. Pending, ambiguous, quarantined, rejected, and
+manual-review states remain explicit; no name-only join is silently promoted to verified.
+
+## 10. Idempotency and correction rules
+
+- Provider rows carry deterministic source hashes.
+- Unchanged hashes do not rewrite business rows.
+- Run and item identities are stable across retries.
+- A completed/skipped item is not fetched again on the same run retry.
+- Match disappearance is rejected; a result-to-non-result correction removes lane-owned detail rows
+  only inside the final transaction.
+- Team and Player runs may complete at different times. Consumers must not claim cross-lane atomicity.
+- A failed or incomplete run cannot partially replace the previous complete PostgreSQL snapshot.
+
+## 11. Redis contract
+
+There are no Understat business/cache keys, manifests, generations, active-season pointers, or
+publication TTLs in Data v3.
+
+Allowed Redis state is limited to `QUEUE_REDIS_*`:
+
+- BullMQ keys for the two Understat queues;
+- `llm:v3:queue:coordination:mutation-lock:understat:*`;
+- `llm:v3:queue:coordination:understat-request-permits`.
+
+Legacy `Understat:*` cache keys are retirement-only patterns in the manifest-gated cleanup tool.
+GraphQL may later add a bounded, revision-aware query cache for the few Understat pages, but that
+cache is GraphQL-owned and cannot become a Data ingestion dependency.
+
+## 12. Internal HTTP API
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| POST | `/understat/team/sync` | Enqueue Team lane sync |
+| POST | `/understat/player/sync` | Enqueue Player lane sync |
+| GET | `/understat/status/:season` | PostgreSQL run/resource status |
+| POST | `/understat/mappings/team` | Manually verify a team link |
+| POST | `/understat/mappings/reconcile` | Re-run provider matching |
+| GET | `/understat/mappings/:season` | Review links for a season |
+| PATCH | `/understat/mappings/entity/:id` | Review entity-link status |
+| PATCH | `/understat/mappings/match/:id` | Review match-link status |
+
+The status response declares `storage: 'postgresql'` and `dataCache: 'disabled'`. It reports Team
+and Player runs independently and counts facts directly from the provider tables.
+
+## 13. Failure and recovery
+
+- Provider/schema/hash/identity failures leave facts untouched and follow BullMQ retry policy.
+- A terminal detail failure marks that item failed; the run does not finalize.
+- A finalizer infrastructure or constraint error marks the run failed after terminal retry.
+- A completeness failure rolls back facts and marks the run skipped with a durable reason.
+- Recovery retries or starts a new scoped run. It does not truncate provider tables or clear Redis.
+- PostgreSQL backup/restore is the recovery path for durable Understat data; Redis restoration is not.
+
+## 14. Acceptance gates
+
+- Typecheck, lint, format, unit tests, integration tests, and build pass.
+- Staging round-trip, timestamp hydration, hash tampering, season mismatch, and resource identity
+  tests pass.
+- Fresh PG15 migration applies once and is a no-op on the second execution.
+- Before a complete finalizer, staged runs produce zero business facts for a new season.
+- Complete Team and Player snapshots commit with expected counts.
+- Incomplete Team and Player snapshots preserve the prior complete facts byte-for-byte.
+- Runtime source contains no Understat Data cache client/key/manifest/publication path.
+- Permit and mutation-lock clients resolve only to `QUEUE_REDIS_*`.
+- No legacy FPL archive service, schema, job, API, or table-name routing is reintroduced.

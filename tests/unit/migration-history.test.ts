@@ -296,3 +296,40 @@ describe('event finalization checkpoint migration', () => {
     expect(migration).not.toContain('GRANT');
   });
 });
+
+describe('event live summary season aggregate migration', () => {
+  test('removes event/team dimensions and rebuilds from event-live facts', () => {
+    const migration = readFileSync(
+      'migrations/0069_standardize_event_live_summaries_to_season_aggregate.sql',
+      'utf8',
+    );
+
+    expect(migration).toContain('DROP COLUMN IF EXISTS event_id CASCADE');
+    expect(migration).toContain('DROP COLUMN IF EXISTS team_id CASCADE');
+    expect(migration).toContain('FROM public.event_lives AS live');
+    expect(migration).toContain('FROM public.event_lives_history AS live');
+    expect(migration).toContain('GROUP BY live.season, live.element_id, player.type');
+  });
+});
+
+describe('Understat v3 runtime integration migration', () => {
+  test('adds bridge idempotency, independent player references, and one sync contract', () => {
+    const migration = readFileSync('migrations/0090_zzzz_integrate_understat_runtime.sql', 'utf8');
+
+    expect(migration).toContain('ADD CONSTRAINT bridge_entity_links_pair_unique');
+    expect(migration).toContain('UNIQUE NULLS NOT DISTINCT');
+    expect(migration).toContain('DROP CONSTRAINT IF EXISTS understat_player_team_team_season_fk');
+    expect(migration).toContain('ADD CONSTRAINT understat_player_team_season_fk');
+    expect(migration).toContain('REFERENCES understat.seasons(season_code)');
+    expect(migration).toContain('ADD CONSTRAINT understat_player_team_team_fk');
+    expect(migration).toContain('REFERENCES understat.teams(team_id)');
+    expect(migration).toContain('DROP TYPE IF EXISTS understat.lane');
+    expect(migration).toContain('DROP TYPE IF EXISTS understat.sync_item_status');
+    expect(migration).toContain('DROP TYPE IF EXISTS understat.sync_mode');
+    expect(migration).toContain('DROP TYPE IF EXISTS understat.sync_run_status');
+    expect(migration).toContain('DROP TYPE IF EXISTS understat.sync_trigger');
+    expect(migration).not.toContain('CASCADE');
+    expect(migration).not.toMatch(/redis/i);
+    expect(migration).not.toContain('public.understat');
+  });
+});

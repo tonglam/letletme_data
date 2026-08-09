@@ -6,10 +6,10 @@ Run ID: `v3-20260808T160008Z-b9eddc0`
 
 Status: **complete correction/discovery replay; not eligible for P5-01 or P5-05**
 
-Run 6 started from fresh PostgreSQL 15.8 and Redis 7 containers and is being completed as a
-full correction/discovery replay. It cannot be promoted to a clean rehearsal because the Data,
-GraphQL, and Web candidates changed after activation. Its purpose is now to close every remaining defect,
-prove the corrected candidate against restored B0, and make Runs 7 and 8 mechanical replays.
+Run 6 started from fresh PostgreSQL 15.8 and Redis 7 containers and completed as a full
+correction/discovery replay. It cannot be promoted to a clean rehearsal because the Data, GraphQL,
+and Web candidates changed after activation. It closed the discovered defects, proved the
+corrected candidate against restored B0, and made Runs 7 and 8 mechanical replays.
 
 ## Accepted component gates
 
@@ -117,8 +117,9 @@ from the clean-rehearsal slots.
   `p5/rehearsal-6/manifests/run6-candidate-manifest.json` to avoid commit self-reference.
 
 Run 6 closes as a successful correction/discovery replay, not as either required clean rehearsal.
-The separately owned Understat pipeline must be reconciled before the final candidate is frozen;
-any resulting candidate change must be present in both clean Runs 7 and 8.
+The separately owned Understat pipeline is now reconciled through
+`27-p3-understat-integration-acceptance.md`. Its resulting Data candidate change must be present in
+both clean Runs 7 and 8.
 
 After those gates pass, start Run 7 from new PostgreSQL and Redis resources. Run 8 must replay the
 same frozen candidates and procedure with matching target hashes and no candidate or runbook edit.
