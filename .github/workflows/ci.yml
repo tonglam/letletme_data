@@ -11,6 +11,20 @@ jobs:
       fail-fast: false
       matrix:
         bun-version: ['1.3.3']
+    services:
+      # A small subset of the unit-labelled tests exercises the real Redis
+      # coordination primitives (for example, cascade completion barriers).
+      # Keep the service scoped to CI; production code still has no mock or
+      # in-memory fallback.
+      redis:
+        image: redis:7
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
     steps:
       - name: Checkout
         uses: actions/checkout@v4
