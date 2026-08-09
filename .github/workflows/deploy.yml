@@ -7,6 +7,23 @@ on:
     branches: ['main']
   workflow_dispatch:
     inputs:
+      operation:
+        description: Deployment or one explicit Data Platform v3 production operation.
+        required: true
+        default: deploy
+        type: choice
+        options:
+          - deploy
+          - v3-publish-image
+          - v3-preflight
+          - v3-activate-database
+          - v3-copy-queues-dry-run
+          - v3-copy-queues-execute
+          - v3-publish-core-dry-run
+          - v3-publish-core-execute
+          - v3-start-api
+          - v3-start-worker
+          - v3-status
       sha:
         description: >-
           Commit SHA or ref to deploy. Leave empty for current main HEAD;
@@ -33,6 +50,14 @@ on:
         description: Exact APPROVE_V3_ACTIVATION phrase for the cutover run.
         required: false
         type: string
+      v3_queue_manifest_sha256:
+        description: Exact queue dry-run payload manifest required for queue copy/verification.
+        required: false
+        type: string
+      v3_core_cache_approval:
+        description: Exact APPROVE_V3_CORE_CACHE phrase for core-cache publication.
+        required: false
+        type: string
 
 # Never cancel a deploy mid-flight: the SSH session runs git reset, migrations
 # and compose up as one critical section — interrupting it strands the VPS
@@ -44,7 +69,7 @@ concurrency:
 jobs:
   deploy:
     if: |
-      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_dispatch' && inputs.operation == 'deploy') ||
       (
         github.event_name == 'workflow_run' &&
         github.event.workflow_run.conclusion == 'success' &&
@@ -226,3 +251,430 @@ jobs:
               docker rmi "$OLD_REF" >/dev/null 2>&1 || true
             done
             docker image prune --force
+
+  v3_publish_image:
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'v3-publish-image'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      REGISTRY: ghcr.io
+    steps:
+      - name: Checkout frozen Data candidate
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.sha }}
+
+      - name: Resolve immutable image metadata
+        run: |
+          set -euo pipefail
+          DEPLOY_SHA=$(git rev-parse HEAD)
+          if [[ ! "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Unable to resolve an exact Data candidate commit"
+            exit 1
+          fi
+          IMAGE_NAME=$(printf '%s' "${REGISTRY}/${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')
+          echo "DEPLOY_SHA=$DEPLOY_SHA" >> "$GITHUB_ENV"
+          echo "IMAGE_NAME=$IMAGE_NAME" >> "$GITHUB_ENV"
+          echo "IMAGE_TAG=${IMAGE_NAME}:v3-${DEPLOY_SHA}" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish exact amd64 candidate
+        run: |
+          set -euo pipefail
+          metadata_file=$(mktemp)
+          docker buildx build \
+            --platform linux/amd64 \
+            --tag "$IMAGE_TAG" \
+            --provenance=false \
+            --push \
+            --metadata-file "$metadata_file" \
+            .
+          digest=$(jq -r '."containerimage.digest"' "$metadata_file")
+          if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Build did not return an immutable registry digest"
+            exit 1
+          fi
+          docker buildx imagetools inspect "${IMAGE_NAME}@${digest}"
+          {
+            echo "### Frozen Data image"
+            echo
+            echo "- Commit: \`$DEPLOY_SHA\`"
+            echo "- Tag: \`$IMAGE_TAG\`"
+            echo "- Immutable ref: \`${IMAGE_NAME}@${digest}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  v3_preflight:
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'v3-preflight'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Inspect production VPS without changing checkout or services
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
+        with:
+          host: ${{ vars.VPS_HOST }}
+          username: ${{ vars.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script_stop: true
+          envs: VPS_WORKDIR
+          script: |
+            set -euo pipefail
+            test -d "$VPS_WORKDIR/.git"
+            cd "$VPS_WORKDIR"
+            echo "V3_PREFLIGHT_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "V3_PREFLIGHT_HOST=$(hostname)"
+            echo "V3_PREFLIGHT_COMMIT=$(git rev-parse HEAD)"
+            echo "V3_PREFLIGHT_BRANCH=$(git symbolic-ref --short -q HEAD || echo detached)"
+            if [ -n "$(git status --porcelain)" ]; then
+              echo "V3_PREFLIGHT_WORKTREE=dirty"
+              git status --short
+            else
+              echo "V3_PREFLIGHT_WORKTREE=clean"
+            fi
+            echo "V3_PREFLIGHT_DISK"
+            df -h "$VPS_WORKDIR"
+            echo "V3_PREFLIGHT_DOCKER=$(docker version --format '{{.Server.Version}}')"
+            echo "V3_PREFLIGHT_COMPOSE=$(docker compose version --short)"
+            echo "V3_PREFLIGHT_SERVICES"
+            docker compose config --services
+            docker compose ps --all
+            for service in api worker; do
+              cid=$(docker compose ps -q --all "$service")
+              if [ -z "$cid" ]; then
+                echo "V3_PREFLIGHT_${service}=absent"
+                continue
+              fi
+              docker inspect --format \
+                'V3_PREFLIGHT_CONTAINER={{.Name}} image={{.Config.Image}} image_id={{.Image}} status={{.State.Status}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
+                "$cid"
+            done
+            for env_file in .env.deploy .env.migrate; do
+              if [ -f "$env_file" ]; then
+                mode=$(stat -c '%a' "$env_file")
+                echo "V3_PREFLIGHT_ENV_FILE=$env_file present mode=$mode"
+                awk -F= '/^(DATABASE_URL|CACHE_REDIS_HOST|CACHE_REDIS_PORT|CACHE_REDIS_DB|QUEUE_REDIS_HOST|QUEUE_REDIS_PORT|QUEUE_REDIS_DB|REDIS_HOST|REDIS_PORT|REDIS_DB)=/{print "V3_PREFLIGHT_ENV_KEY=" $1}' "$env_file" | sort -u
+              else
+                echo "V3_PREFLIGHT_ENV_FILE=$env_file missing"
+              fi
+            done
+            data_http=$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:3000/health || true)
+            graphql_http=$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:4000/health || true)
+            echo "V3_PREFLIGHT_DATA_HEALTH_HTTP=$data_http"
+            echo "V3_PREFLIGHT_GRAPHQL_HEALTH_HTTP=$graphql_http"
+            echo "V3_PREFLIGHT_PORTS"
+            docker ps --format '{{.Names}}|{{.Image}}|{{.Ports}}'
+
+  v3_activate_database:
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'v3-activate-database'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Checkout frozen Data candidate
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.sha }}
+
+      - name: Resolve exact candidate commit and image
+        env:
+          V3_IMAGE_REF_INPUT: ${{ inputs.v3_image_ref }}
+        run: |
+          set -euo pipefail
+          DEPLOY_SHA=$(git rev-parse HEAD)
+          if [[ ! "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Unable to resolve an exact Data candidate commit"
+            exit 1
+          fi
+          if [[ ! "$V3_IMAGE_REF_INPUT" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::v3_image_ref must be an immutable lowercase GHCR digest reference"
+            exit 1
+          fi
+          echo "DEPLOY_SHA=$DEPLOY_SHA" >> "$GITHUB_ENV"
+          echo "IMAGE_REF=$V3_IMAGE_REF_INPUT" >> "$GITHUB_ENV"
+          echo "DEPLOY_IMAGE_DIGEST=${V3_IMAGE_REF_INPUT##*@}" >> "$GITHUB_ENV"
+
+      - name: Stop Data and activate database only
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          DEPLOY_SHA: ${{ env.DEPLOY_SHA }}
+          IMAGE_REF: ${{ env.IMAGE_REF }}
+          DEPLOY_IMAGE_DIGEST: ${{ env.DEPLOY_IMAGE_DIGEST }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
+          V3_CUTOVER_RUN_ID: ${{ inputs.v3_cutover_run_id }}
+          V3_RELEASE_MANIFEST_BASE64: ${{ inputs.v3_release_manifest_base64 }}
+          V3_RELEASE_MANIFEST_SHA256: ${{ inputs.v3_release_manifest_sha256 }}
+          V3_CUTOVER_APPROVAL: ${{ inputs.v3_cutover_approval }}
+        with:
+          host: ${{ vars.VPS_HOST }}
+          username: ${{ vars.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script_stop: true
+          envs: DEPLOY_SHA,IMAGE_REF,DEPLOY_IMAGE_DIGEST,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR,V3_CUTOVER_RUN_ID,V3_RELEASE_MANIFEST_BASE64,V3_RELEASE_MANIFEST_SHA256,V3_CUTOVER_APPROVAL
+          script: |
+            set -euo pipefail
+            LOWER_USER=$(printf '%s' "$GHCR_USER" | tr '[:upper:]' '[:lower:]')
+            printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$LOWER_USER" --password-stdin
+            test -d "$VPS_WORKDIR/.git"
+            cd "$VPS_WORKDIR"
+            test -z "$(git status --porcelain)" || { echo "Data VPS checkout is dirty"; exit 1; }
+            test -f .env.deploy || { echo "Missing .env.deploy"; exit 1; }
+            test -f .env.migrate || { echo "Missing isolated .env.migrate"; exit 1; }
+            if docker ps --format '{{.Ports}}' | grep -q '127.0.0.1:4000->'; then
+              echo "GraphQL is still running on port 4000; stop it before database activation"
+              exit 1
+            fi
+            git fetch --all
+            git checkout --force main
+            git reset --hard "$DEPLOY_SHA"
+            APP_IMAGE="$IMAGE_REF" docker compose pull api worker migration
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun run env:check
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
+              -e DEPLOY_SHA="$DEPLOY_SHA" \
+              -e DEPLOY_IMAGE_DIGEST="$DEPLOY_IMAGE_DIGEST" \
+              -e V3_CUTOVER_RUN_ID="$V3_CUTOVER_RUN_ID" \
+              -e V3_RELEASE_MANIFEST_BASE64="$V3_RELEASE_MANIFEST_BASE64" \
+              -e V3_RELEASE_MANIFEST_SHA256="$V3_RELEASE_MANIFEST_SHA256" \
+              -e V3_CUTOVER_APPROVAL="$V3_CUTOVER_APPROVAL" \
+              migration bun scripts/v3-release-gate.ts
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun run db:migration-contract
+            APP_IMAGE="$IMAGE_REF" docker compose stop -t 30 worker
+            APP_IMAGE="$IMAGE_REF" docker compose stop -t 30 api
+            test -z "$(APP_IMAGE="$IMAGE_REF" docker compose ps -q worker)"
+            test -z "$(APP_IMAGE="$IMAGE_REF" docker compose ps -q api)"
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun run db:migrate
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun scripts/apply-sql-migrations.ts
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun run db:migrate:status
+            test -z "$(APP_IMAGE="$IMAGE_REF" docker compose ps -q worker)"
+            test -z "$(APP_IMAGE="$IMAGE_REF" docker compose ps -q api)"
+            echo "V3_DATABASE_ACTIVATED=$V3_CUTOVER_RUN_ID"
+            echo "V3_DATA_SERVICES=stopped"
+
+  v3_redis_queues:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      (inputs.operation == 'v3-copy-queues-dry-run' || inputs.operation == 'v3-copy-queues-execute')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Copy or inspect legacy queues with exact manifest gating
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          OPERATION: ${{ inputs.operation }}
+          IMAGE_REF: ${{ inputs.v3_image_ref }}
+          QUEUE_MANIFEST_SHA256: ${{ inputs.v3_queue_manifest_sha256 }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
+        with:
+          host: ${{ vars.VPS_HOST }}
+          username: ${{ vars.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script_stop: true
+          envs: OPERATION,IMAGE_REF,QUEUE_MANIFEST_SHA256,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR
+          script: |
+            set -euo pipefail
+            [[ "$IMAGE_REF" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]]
+            cd "$VPS_WORKDIR"
+            test -z "$(APP_IMAGE="$IMAGE_REF" docker compose ps -q worker)" || { echo "Worker must remain stopped"; exit 1; }
+            LOWER_USER=$(printf '%s' "$GHCR_USER" | tr '[:upper:]' '[:lower:]')
+            printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$LOWER_USER" --password-stdin
+            APP_IMAGE="$IMAGE_REF" docker compose pull api
+            if [ "$OPERATION" = "v3-copy-queues-dry-run" ]; then
+              APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun run redis:cutover copy-queues
+              exit 0
+            fi
+            [[ "$QUEUE_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]]
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
+              -e V3_REDIS_QUEUE_MANIFEST_SHA256="$QUEUE_MANIFEST_SHA256" \
+              api bun run redis:cutover copy-queues --execute
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
+              -e V3_REDIS_QUEUE_MANIFEST_SHA256="$QUEUE_MANIFEST_SHA256" \
+              api bun run redis:cutover verify-queues
+
+  v3_core_cache:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      (inputs.operation == 'v3-publish-core-dry-run' || inputs.operation == 'v3-publish-core-execute')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Inspect or publish immutable core cache
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          OPERATION: ${{ inputs.operation }}
+          IMAGE_REF: ${{ inputs.v3_image_ref }}
+          CUTOVER_RUN_ID: ${{ inputs.v3_cutover_run_id }}
+          CORE_CACHE_APPROVAL: ${{ inputs.v3_core_cache_approval }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
+        with:
+          host: ${{ vars.VPS_HOST }}
+          username: ${{ vars.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script_stop: true
+          envs: OPERATION,IMAGE_REF,CUTOVER_RUN_ID,CORE_CACHE_APPROVAL,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR
+          script: |
+            set -euo pipefail
+            [[ "$IMAGE_REF" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]]
+            cd "$VPS_WORKDIR"
+            test -z "$(APP_IMAGE="$IMAGE_REF" docker compose ps -q worker)" || { echo "Worker must remain stopped"; exit 1; }
+            LOWER_USER=$(printf '%s' "$GHCR_USER" | tr '[:upper:]' '[:lower:]')
+            printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$LOWER_USER" --password-stdin
+            APP_IMAGE="$IMAGE_REF" docker compose pull api
+            if [ "$OPERATION" = "v3-publish-core-dry-run" ]; then
+              APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
+                -e CUTOVER_RUN_ID="$CUTOVER_RUN_ID" \
+                api bun run cache:publish-core
+              exit 0
+            fi
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
+              -e CUTOVER_RUN_ID="$CUTOVER_RUN_ID" \
+              -e V3_CORE_CACHE_APPROVAL="$CORE_CACHE_APPROVAL" \
+              api bun run cache:publish-core --execute
+
+  v3_start_api:
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'v3-start-api'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Start Data API while keeping worker stopped
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          IMAGE_REF: ${{ inputs.v3_image_ref }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
+        with:
+          host: ${{ vars.VPS_HOST }}
+          username: ${{ vars.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script_stop: true
+          envs: IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR
+          script: |
+            set -euo pipefail
+            [[ "$IMAGE_REF" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]]
+            cd "$VPS_WORKDIR"
+            test -z "$(APP_IMAGE="$IMAGE_REF" docker compose ps -q worker)" || { echo "Worker started before API gate"; exit 1; }
+            LOWER_USER=$(printf '%s' "$GHCR_USER" | tr '[:upper:]' '[:lower:]')
+            printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$LOWER_USER" --password-stdin
+            APP_IMAGE="$IMAGE_REF" docker compose pull api
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun run env:check
+            APP_IMAGE="$IMAGE_REF" docker compose up -d --no-deps --no-build api
+            for attempt in $(seq 1 30); do
+              if curl --fail --silent http://127.0.0.1:3000/health >/dev/null; then
+                break
+              fi
+              if [ "$attempt" -eq 30 ]; then
+                APP_IMAGE="$IMAGE_REF" docker compose logs --tail 100 api || true
+                exit 1
+              fi
+              sleep 2
+            done
+            test -z "$(APP_IMAGE="$IMAGE_REF" docker compose ps -q worker)"
+            APP_IMAGE="$IMAGE_REF" docker compose ps api worker
+
+  v3_start_worker:
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'v3-start-worker'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Start Data worker last
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          IMAGE_REF: ${{ inputs.v3_image_ref }}
+          QUEUE_MANIFEST_SHA256: ${{ inputs.v3_queue_manifest_sha256 }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
+        with:
+          host: ${{ vars.VPS_HOST }}
+          username: ${{ vars.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script_stop: true
+          envs: IMAGE_REF,QUEUE_MANIFEST_SHA256,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR
+          script: |
+            set -euo pipefail
+            [[ "$IMAGE_REF" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]]
+            [[ "$QUEUE_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]]
+            cd "$VPS_WORKDIR"
+            curl --fail --silent http://127.0.0.1:3000/health >/dev/null
+            curl --fail --silent http://127.0.0.1:4000/health >/dev/null
+            LOWER_USER=$(printf '%s' "$GHCR_USER" | tr '[:upper:]' '[:lower:]')
+            printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$LOWER_USER" --password-stdin
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
+              -e V3_REDIS_QUEUE_MANIFEST_SHA256="$QUEUE_MANIFEST_SHA256" \
+              api bun run redis:cutover verify-queues
+            APP_IMAGE="$IMAGE_REF" docker compose pull worker
+            APP_IMAGE="$IMAGE_REF" docker compose up -d --no-deps --no-build worker
+            worker_cid=$(APP_IMAGE="$IMAGE_REF" docker compose ps -q worker)
+            test -n "$worker_cid"
+            for attempt in $(seq 1 30); do
+              status=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$worker_cid" 2>/dev/null || echo unknown)
+              if [ "$status" = "healthy" ]; then
+                break
+              fi
+              if [ "$attempt" -eq 30 ]; then
+                docker logs --tail 100 "$worker_cid" || true
+                exit 1
+              fi
+              sleep 2
+            done
+            APP_IMAGE="$IMAGE_REF" docker compose ps api worker
+
+  v3_status:
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'v3-status'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Read production migration and service status
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          IMAGE_REF: ${{ inputs.v3_image_ref }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
+        with:
+          host: ${{ vars.VPS_HOST }}
+          username: ${{ vars.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script_stop: true
+          envs: IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR
+          script: |
+            set -euo pipefail
+            [[ "$IMAGE_REF" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]]
+            cd "$VPS_WORKDIR"
+            LOWER_USER=$(printf '%s' "$GHCR_USER" | tr '[:upper:]' '[:lower:]')
+            printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$LOWER_USER" --password-stdin
+            APP_IMAGE="$IMAGE_REF" docker compose pull migration
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun run db:migrate:status
+            echo "V3_STATUS_COMMIT=$(git rev-parse HEAD)"
+            APP_IMAGE="$IMAGE_REF" docker compose ps --all
+            echo "V3_STATUS_DATA_HTTP=$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:3000/health || true)"
+            echo "V3_STATUS_GRAPHQL_HTTP=$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:4000/health || true)"
