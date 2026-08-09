@@ -45,7 +45,8 @@ describe('v3 production hard-cut workflow', () => {
       expect(contents).toContain('script_stop: false');
       expect(contents).toContain('set -euo pipefail');
     }
-    expect(job('v3_status')).toContain('script_stop: false');
+    expect(job('v3_status', 'v3_stop')).toContain('script_stop: false');
+    expect(job('v3_stop')).toContain('script_stop: false');
   });
 
   test('keeps the VPS preflight read-only', () => {
@@ -62,6 +63,19 @@ describe('v3 production hard-cut workflow', () => {
       expect(preflight).not.toContain(mutation);
     }
     expect(preflight).toContain('docker compose ps --all');
+  });
+
+  test('stops Data API and worker behind the exact activation gate', () => {
+    const stop = job('v3_stop');
+
+    expect(stop).toContain("inputs.operation == 'v3-stop'");
+    expect(stop).toContain('APPROVE_V3_ACTIVATION $V3_CUTOVER_RUN_ID');
+    expect(stop).toContain('docker compose stop -t 30 worker');
+    expect(stop).toContain('docker compose stop -t 30 api');
+    expect(stop).toContain('test "$data_http" = "000"');
+    expect(stop).not.toContain('git fetch');
+    expect(stop).not.toContain('git reset');
+    expect(stop).not.toContain('docker compose up');
   });
 
   test('requires GraphQL down and gates the exact release before stopping Data', () => {

@@ -385,39 +385,6 @@ jobs:
             echo "V3_PREFLIGHT_PORTS"
             docker ps --format '{{.Names}}|{{.Image}}|{{.Ports}}'
 
-  v3_stop:
-    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'v3-stop'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - name: Stop only Data API and worker for the approved hard cut
-        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
-        env:
-          VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
-          V3_CUTOVER_RUN_ID: ${{ inputs.v3_cutover_run_id }}
-          V3_CUTOVER_APPROVAL: ${{ inputs.v3_cutover_approval }}
-        with:
-          host: ${{ vars.VPS_HOST }}
-          username: ${{ vars.VPS_USER }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          script_stop: false
-          envs: VPS_WORKDIR,V3_CUTOVER_RUN_ID,V3_CUTOVER_APPROVAL
-          script: |
-            set -euo pipefail
-            [[ "$V3_CUTOVER_RUN_ID" =~ ^v3-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{7,12}$ ]]
-            test "$V3_CUTOVER_APPROVAL" = "APPROVE_V3_ACTIVATION $V3_CUTOVER_RUN_ID"
-            test -d "$VPS_WORKDIR/.git"
-            cd "$VPS_WORKDIR"
-            docker compose stop -t 30 worker
-            docker compose stop -t 30 api
-            test -z "$(docker compose ps -q worker)"
-            test -z "$(docker compose ps -q api)"
-            data_http=$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:3000/health || true)
-            test "$data_http" = "000"
-            echo "V3_DATA_API=stopped"
-            echo "V3_DATA_WORKER=stopped"
-
   v3_activate_database:
     if: github.event_name == 'workflow_dispatch' && inputs.operation == 'v3-activate-database'
     runs-on: ubuntu-latest
@@ -859,3 +826,36 @@ jobs:
             APP_IMAGE="$IMAGE_REF" docker compose ps --all
             echo "V3_STATUS_DATA_HTTP=$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:3000/health || true)"
             echo "V3_STATUS_GRAPHQL_HTTP=$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:4000/health || true)"
+
+  v3_stop:
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'v3-stop'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Stop only Data API and worker for the approved hard cut
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+        env:
+          VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
+          V3_CUTOVER_RUN_ID: ${{ inputs.v3_cutover_run_id }}
+          V3_CUTOVER_APPROVAL: ${{ inputs.v3_cutover_approval }}
+        with:
+          host: ${{ vars.VPS_HOST }}
+          username: ${{ vars.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script_stop: false
+          envs: VPS_WORKDIR,V3_CUTOVER_RUN_ID,V3_CUTOVER_APPROVAL
+          script: |
+            set -euo pipefail
+            [[ "$V3_CUTOVER_RUN_ID" =~ ^v3-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{7,12}$ ]]
+            test "$V3_CUTOVER_APPROVAL" = "APPROVE_V3_ACTIVATION $V3_CUTOVER_RUN_ID"
+            test -d "$VPS_WORKDIR/.git"
+            cd "$VPS_WORKDIR"
+            docker compose stop -t 30 worker
+            docker compose stop -t 30 api
+            test -z "$(docker compose ps -q worker)"
+            test -z "$(docker compose ps -q api)"
+            data_http=$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:3000/health || true)
+            test "$data_http" = "000"
+            echo "V3_DATA_API=stopped"
+            echo "V3_DATA_WORKER=stopped"
