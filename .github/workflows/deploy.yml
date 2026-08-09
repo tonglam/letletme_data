@@ -470,9 +470,9 @@ jobs:
             printf '%s\n' "$V3_MIGRATION_ENV" > "$migration_status_env"
             chmod 600 "$migration_status_env"
             set +e
-            migration_status_output=$(docker run --rm \
-              --env-file "$migration_status_env" \
-              "$IMAGE_REF" bun run db:migrate:status 2>&1)
+            migration_status_output=$(MIGRATION_ENV_FILE="$migration_status_env" \
+              APP_IMAGE="$IMAGE_REF" \
+              docker compose run --rm -T migration bun run db:migrate:status 2>&1)
             migration_status_exit=$?
             set -e
             printf '%s\n' "$migration_status_output"

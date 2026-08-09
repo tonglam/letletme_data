@@ -108,6 +108,7 @@ describe('v3 production hard-cut workflow', () => {
   test('rejects unsafe production migration history before writing VPS configuration', () => {
     const activation = job('v3_activate_database', 'v3_redis_queues');
     const status = activation.indexOf('bun run db:migrate:status');
+    const composeEnvFile = activation.indexOf('MIGRATION_ENV_FILE="$migration_status_env"');
     const unsafeHistory = activation.indexOf('missing|backdated|mismatch|legacy');
     const requiredHistoryTail = activation.indexOf('0079_align_fpl_event_history.sql');
     const firstActivation = activation.indexOf('0079_create_v3_ops_and_roles.sql');
@@ -116,6 +117,9 @@ describe('v3 production hard-cut workflow', () => {
     const migrationEnvWrite = activation.indexOf('mv "$migration_tmp" .env.migrate');
 
     expect(status).toBeGreaterThan(0);
+    expect(composeEnvFile).toBeGreaterThan(0);
+    expect(composeEnvFile).toBeLessThan(status);
+    expect(activation).not.toContain('--env-file "$migration_status_env"');
     expect(unsafeHistory).toBeGreaterThan(status);
     expect(requiredHistoryTail).toBeGreaterThan(unsafeHistory);
     expect(firstActivation).toBeGreaterThan(requiredHistoryTail);
