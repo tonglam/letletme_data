@@ -6,6 +6,22 @@ x-logging: &default-logging
     max-file: '5'
 
 services:
+  migration:
+    image: *app-image
+    build:
+      context: .
+      target: runner
+    profiles: ['migration']
+    env_file:
+      - path: ${MIGRATION_ENV_FILE:-.env.migrate}
+        required: true
+    environment:
+      - NODE_ENV=production
+      - TZ=Asia/Shanghai
+    command: bun scripts/v3-migration-login-contract.ts
+    logging: *default-logging
+    restart: 'no'
+
   api:
     image: *app-image
     build:

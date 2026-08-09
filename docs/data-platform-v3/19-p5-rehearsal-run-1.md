@@ -4,10 +4,13 @@ Date: 2026-08-09
 
 Run ID: `v3-20260808T160008Z-b9eddc0`
 
-Status: data-quality, cross-service security, and representative application journeys accepted.
-This run originally left the Redis, post-cleanup B1, and database-size gates open; the former were
-subsequently accepted in `20-p5-redis-cutover-rehearsal.md` and
-`21-p5-postcleanup-b1-restore.md`. P5-01, P5-05, and P5-10 remain open.
+Status: data-quality and representative application behavior accepted. The fresh-cluster follow-up
+found that the Data application LOGIN in this run inherited `letletme_data_owner` instead of the
+least-privilege `letletme_data_writer`; P5-08 and P5-09 are therefore reopened until every journey
+is repeated with the writer LOGIN. This run originally left the Redis, post-cleanup B1, and
+database-size gates open; those were subsequently accepted in
+`20-p5-redis-cutover-rehearsal.md` and `21-p5-postcleanup-b1-restore.md`. P5-01, P5-05, P5-08,
+P5-09, and P5-10 remain open.
 
 ## Frozen candidates
 
@@ -144,7 +147,8 @@ The consolidated live privilege probe returned:
 
 The GraphQL startup contract passed using `p5_graphql_run1`. The Web runtime contract passed using
 `p5_web_run1`, while an administrator connection exited with status 1. Data readiness passed using
-`p5_data_run1`. This closes P5-08.
+`p5_data_run1`, but that LOGIN inherited the owner role and was over-privileged. This evidence does
+not close P5-08; the fresh-cluster rerun must use `letletme_data_writer`.
 
 ## End-to-end journeys
 
@@ -187,7 +191,8 @@ The exact Web candidate was then restarted with `MAINTENANCE_MODE=true`:
 | Better Auth session endpoint | 200 and remained available |
 | Cache policy | `private, no-store, no-transform` and `Retry-After: 300` |
 
-These journeys close P5-09.
+These journeys establish functional behavior, but do not close P5-09 after the Data runtime-role
+finding. The complete journey set must be repeated with the dedicated writer LOGIN.
 
 ## Redis state observed in this partial run
 

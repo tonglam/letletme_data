@@ -155,7 +155,8 @@ jobs:
             git fetch --all
             git checkout --force main
             git reset --hard "$DEPLOY_SHA"
-            APP_IMAGE="$IMAGE_REF" docker compose pull api worker
+            test -f .env.migrate || { echo "Missing isolated .env.migrate"; exit 1; }
+            APP_IMAGE="$IMAGE_REF" docker compose pull api worker migration
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun run env:check
             if [ -f migrations/0079_create_v3_ops_and_roles.sql ]; then
               APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
@@ -165,11 +166,13 @@ jobs:
                 -e V3_RELEASE_MANIFEST_BASE64="$V3_RELEASE_MANIFEST_BASE64" \
                 -e V3_RELEASE_MANIFEST_SHA256="$V3_RELEASE_MANIFEST_SHA256" \
                 -e V3_CUTOVER_APPROVAL="$V3_CUTOVER_APPROVAL" \
-                api bun scripts/v3-release-gate.ts
+                migration bun scripts/v3-release-gate.ts
+              APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
+                migration bun run db:migration-contract
             fi
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun run db:migrate
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun scripts/apply-sql-migrations.ts
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun run db:migrate:status
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun run db:migrate
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun scripts/apply-sql-migrations.ts
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun run db:migrate:status
             APP_IMAGE="$IMAGE_REF" docker compose up -d --remove-orphans --no-build
             for attempt in $(seq 1 30); do
               if curl --fail --silent http://127.0.0.1/health >/dev/null; then

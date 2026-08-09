@@ -17,6 +17,7 @@ import { registerMutationRateLimit } from './api/rate-limit';
 import { checkReadiness } from './api/health';
 import { teamsAPI } from './api/teams.api';
 import { tournamentsAPI } from './api/tournaments.api';
+import { databaseSingleton } from './db/singleton';
 
 // Import job registration functions
 import { registerDataJobs } from './jobs/data-jobs';
@@ -43,7 +44,11 @@ import { logDebug, logError, logInfo, logWarn } from './utils/logger';
  */
 
 // Validate environment and resolve config
-const { PORT: port } = getConfig();
+const config = getConfig();
+if (config.NODE_ENV === 'production') {
+  await databaseSingleton.connect();
+}
+const { PORT: port } = config;
 const { CORS_ORIGINS, ENABLE_AUTH } = getAuthConfig();
 
 const app = new Elysia()

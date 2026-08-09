@@ -11,7 +11,9 @@ NC='\033[0m'
 COMPOSE_BIN=${COMPOSE_BIN:-"docker compose"}
 COMPOSE_FILE=${COMPOSE_FILE:-docker-compose.yml}
 ENV_FILE=${ENV_FILE:-.env.deploy}
+MIGRATION_ENV_FILE=${MIGRATION_ENV_FILE:-.env.migrate}
 PROJECT_DIR=${PROJECT_DIR:-$(pwd)}
+export MIGRATION_ENV_FILE
 
 IFS=' ' read -r -a COMPOSE_CMD <<<"${COMPOSE_BIN}"
 
@@ -35,6 +37,10 @@ require_files() {
     log_error "${ENV_FILE} not found. Copy .env.deploy.example -> ${ENV_FILE} and fill secrets."
     exit 1
   fi
+  if [[ ! -f "${MIGRATION_ENV_FILE}" ]]; then
+    log_error "${MIGRATION_ENV_FILE} not found. Copy .env.migrate.example and add the direct Supabase postgres URL."
+    exit 1
+  fi
 }
 
 compose() {
@@ -52,7 +58,7 @@ deploy() {
     export APP_IMAGE
     export DEPLOY_IMAGE_DIGEST="${APP_IMAGE##*@}"
     log_info "Pulling the frozen v3 candidate image"
-    compose pull api worker
+    compose pull api worker migration
   else
     log_info "Building containers"
     compose build --pull
@@ -69,21 +75,26 @@ deploy() {
       -e V3_RELEASE_MANIFEST_BASE64 \
       -e V3_RELEASE_MANIFEST_SHA256 \
       -e V3_CUTOVER_APPROVAL \
-      api bun scripts/v3-release-gate.ts; then
+      migration bun scripts/v3-release-gate.ts; then
       log_error "V3 release gate failed; aborting before migrations."
       exit 1
     fi
+    log_info "Validating isolated Supabase migration LOGIN"
+    if ! compose run --rm -T migration bun run db:migration-contract; then
+      log_error "V3 migration LOGIN contract failed; aborting before migrations."
+      exit 1
+    fi
   fi
-  if ! compose run --rm -T api bun run db:migrate; then
+  if ! compose run --rm -T migration bun run db:migrate; then
     log_error "Drizzle migrations failed; aborting deploy before services start."
     exit 1
   fi
   log_info "Applying numbered SQL migrations (0006+)"
-  if ! compose run --rm -T api bun scripts/apply-sql-migrations.ts; then
+  if ! compose run --rm -T migration bun scripts/apply-sql-migrations.ts; then
     log_error "SQL migrations failed; aborting deploy before services start."
     exit 1
   fi
-  compose run --rm -T api bun run db:migrate:status
+  compose run --rm -T migration bun run db:migrate:status
   log_info "Starting services"
   compose up -d --remove-orphans
   log_info "Current service status"
@@ -126,6 +137,7 @@ Environment:
   COMPOSE_BIN   Command used for Compose (default: "docker compose")
   COMPOSE_FILE  Compose file to use (default: docker-compose.yml)
   ENV_FILE      Env file that must exist (default: .env.deploy)
+  MIGRATION_ENV_FILE  One-shot migration env file (default: .env.migrate)
   PROJECT_DIR   Directory passed to compose (default: pwd)
 USAGE
 }

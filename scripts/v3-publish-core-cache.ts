@@ -9,6 +9,7 @@ import { publishCoreSnapshotCache, readCoreSnapshotCache } from '../src/cache/co
 import { redisSingleton } from '../src/cache/singleton';
 import { datasetPublicationsInOps, migrationRunsInOps } from '../src/db/schemas/index.schema';
 import { databaseSingleton, getDb, getDbClient } from '../src/db/singleton';
+import { assertDataRuntimeRole } from '../src/db/runtime-role-contract';
 import { eventRepository } from '../src/repositories/events';
 import { fixtureRepository } from '../src/repositories/fixtures';
 import { phaseRepository } from '../src/repositories/phases';
@@ -68,59 +69,6 @@ function assertCoreCounts(manifest: PublicationManifest, counts: CoreCounts): vo
   }
 }
 
-async function assertDataRuntimeLogin(): Promise<void> {
-  const client = await getDbClient();
-  const roles = await client<
-    Array<{
-      role_name: string;
-      rolcanlogin: boolean;
-      rolsuper: boolean;
-      rolcreatedb: boolean;
-      rolcreaterole: boolean;
-      rolinherit: boolean;
-      rolreplication: boolean;
-      rolbypassrls: boolean;
-    }>
-  >`
-    SELECT
-      rolname AS role_name,
-      rolcanlogin,
-      rolsuper,
-      rolcreatedb,
-      rolcreaterole,
-      rolinherit,
-      rolreplication,
-      rolbypassrls
-    FROM pg_roles
-    WHERE rolname = current_user
-  `;
-  const role = roles[0];
-  if (
-    roles.length !== 1 ||
-    !role?.rolcanlogin ||
-    !role.rolinherit ||
-    role.rolsuper ||
-    role.rolcreatedb ||
-    role.rolcreaterole ||
-    role.rolreplication ||
-    role.rolbypassrls
-  ) {
-    throw new Error('Core cache publication requires a dedicated non-admin Data runtime LOGIN');
-  }
-
-  const memberships = await client<Array<{ role_name: string }>>`
-    SELECT granted_role.rolname AS role_name
-    FROM pg_auth_members membership
-    JOIN pg_roles member_role ON member_role.oid = membership.member
-    JOIN pg_roles granted_role ON granted_role.oid = membership.roleid
-    WHERE member_role.rolname = current_user
-    ORDER BY granted_role.rolname
-  `;
-  if (memberships.length !== 1 || memberships[0]?.role_name !== 'letletme_data_owner') {
-    throw new Error('Core cache publication LOGIN must inherit only letletme_data_owner');
-  }
-}
-
 async function main(): Promise<void> {
   const execute = assertArguments(process.argv.slice(2));
   const runId = process.env.CUTOVER_RUN_ID?.trim();
@@ -128,7 +76,7 @@ async function main(): Promise<void> {
 
   const config = getConfig();
   const db = await getDb();
-  await assertDataRuntimeLogin();
+  await assertDataRuntimeRole(await getDbClient());
   const season = await seasonRepository.findCurrent();
   const migrationRows = await db
     .select({

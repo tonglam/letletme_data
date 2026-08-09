@@ -21,7 +21,8 @@ CUTOVER_WEB_SHA=<40-char-sha>
 CUTOVER_DATA_IMAGE_REF=ghcr.io/<owner>/<repo>@sha256:<64-hex-digest>
 CUTOVER_RELEASE_MANIFEST=<backup-root>/release/release-manifest.json
 CUTOVER_RELEASE_MANIFEST_SHA256=<64-hex-digest>
-CUTOVER_DATABASE_URL=<secret-direct-postgres-url>
+CUTOVER_MIGRATION_DATABASE_URL=<secret-direct-Supabase-postgres-url>
+CUTOVER_DATA_RUNTIME_DATABASE_URL=<secret-dedicated-data-writer-login-url>
 CUTOVER_WEB_RUNTIME_DATABASE_URL=<secret-dedicated-web-login-url>
 CUTOVER_WEB_MIGRATION_DATABASE_URL=<secret-direct-postgres-url>
 CUTOVER_QUEUE_REDIS_URL=<secret>
@@ -38,8 +39,14 @@ Validation requirements:
 - database is production project `gtwcfjoviibmtkevurjw` and PostgreSQL 15;
 - the hosted PostgreSQL security-patch advisor warning is resolved, or an explicit, dated exception
   is attached to the run and accepted before activation;
-- every P0-approved `public` relation, sequence, function, and enum is owned by the migration login;
-  an ownership difference stops before `0090` mutates anything;
+- the one-shot migration container alone receives `CUTOVER_MIGRATION_DATABASE_URL`; API and worker
+  containers receive only `CUTOVER_DATA_RUNTIME_DATABASE_URL`, and neither runtime environment
+  contains the migration secret;
+- `bun run db:migration-contract` passes for the direct Supabase `postgres` LOGIN before downtime;
+  a generic `CREATEROLE` login is insufficient because `0079` temporarily creates a conversion
+  owner with `BYPASSRLS`;
+- every P0-approved `public` relation, sequence, function, and enum is owned by that migration
+  login; an ownership difference stops before `0079` mutates anything;
 - queue/cache endpoints are distinct and neither value is logged.
 
 The approved release manifest is generated only after candidate SHAs and image digests are frozen.
@@ -104,9 +111,12 @@ All fields below must be attached to the run record:
 - current database/Redis size and free-capacity report;
 - rollback SHAs/images and tested B1 restore procedure;
 - maintenance message and private smoke-test credentials/routes.
-- dedicated Data writer, GraphQL reader, and Web auth logins mapped only to their capability roles;
-  no runtime may use the migration login. Web `DATABASE_URL` must pass `db:runtime-contract`, while
-  its administrator connection is supplied only as `DIRECT_DATABASE_URL` to migration commands.
+- dedicated Data writer, GraphQL reader, and Web auth logins mapped only to
+  `letletme_data_writer`, `letletme_graphql_reader`, and `letletme_web_auth`, respectively; no
+  runtime may inherit an owner role or use the migration login. Data production startup and
+  `cache:publish-core` must pass the Data runtime-role contract. Web `DATABASE_URL` must pass
+  `db:runtime-contract`, while its administrator connection is supplied only as
+  `DIRECT_DATABASE_URL` to migration commands.
 - Web migration `0008_web_auth_runtime_role.sql` is applied and its dedicated LOGIN is provisioned
   before maintenance starts. This migration changes only the Better Auth security boundary; it
   does not create or mutate any FPL/competition/provider fact. The accepted pre-cutover Web build
@@ -141,10 +151,12 @@ canonical equality contract for restored hashes.
    - no active application database session can write business data;
    - queue counts are stable;
    - v2 source counts/hashes equal the pre-cutover snapshot.
-4. Set bounded PostgreSQL timeouts for the migration session. The migration itself uses advisory
-   locking and records each object/season conversion in `ops.migration_objects`.
+4. Run `bun run db:migration-contract` from the one-shot migration container, then set bounded
+   PostgreSQL timeouts for that direct Supabase `postgres` session. The migration itself uses
+   advisory locking and records each object/season conversion in `ops.migration_objects`.
 5. Run Data migration status. Apply exactly `0079` through `0090_zzz` from the release manifest. Save
-   stdout/stderr and exit status without connection secrets.
+   stdout/stderr and exit status without connection secrets. Both commands use the isolated
+   migration environment; API/worker `DATABASE_URL` is never substituted for it.
 6. Re-run Web migration status (the pre-cutover `0008` application must be a no-op), revalidate the
    dedicated LOGIN, and switch from the accepted maintenance build to the candidate Web build
    while keeping maintenance enabled. `db:runtime-contract` and a private auth-session probe must
@@ -154,7 +166,7 @@ canonical equality contract for restored hashes.
 8. Refresh initial reporting MVs and validate all publication gates.
 9. Dry-run `bun run cache:publish-core`, verify its exact run/publication/revision/count contract,
    then execute it with `V3_CORE_CACHE_APPROVAL="APPROVE_V3_CORE_CACHE <CUTOVER_RUN_ID>"` and
-   `--execute`, using the candidate Data runtime `DATABASE_URL` rather than the migration URL. The
+   `--execute`, using the candidate Data writer `DATABASE_URL` rather than the migration URL. The
    command rejects admin/migration/GraphQL logins, reads the activated database publication,
    writes only immutable v3 Redis revision keys, atomically activates the pointer, and performs an
    exact read-back. Build the initial live revision only when a current event exists; preseason

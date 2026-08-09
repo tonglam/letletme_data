@@ -28,6 +28,7 @@
     "db:migrate": "bunx drizzle-kit migrate",
     "db:check": "bunx drizzle-kit check",
     "db:studio": "bunx drizzle-kit studio",
+    "db:migration-contract": "bun scripts/v3-migration-login-contract.ts",
     "db:apply-sql": "bun scripts/apply-sql-migrations.ts",
     "db:migrate:status": "bun scripts/apply-sql-migrations.ts --status",
     "redis:cutover": "bun scripts/v3-redis-cutover.ts",
