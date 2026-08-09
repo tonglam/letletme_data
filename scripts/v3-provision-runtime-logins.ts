@@ -217,16 +217,20 @@ async function formattedStatement(
       ? await client<Array<{ statement: string }>>`
           SELECT format(
             'CREATE ROLE %I LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD %L',
-            ${login},
-            ${value}
+            ${login}::text,
+            ${value}::text
           ) AS statement
         `
       : operation === 'password'
         ? await client<Array<{ statement: string }>>`
-            SELECT format('ALTER ROLE %I PASSWORD %L', ${login}, ${value}) AS statement
+            SELECT format(
+              'ALTER ROLE %I PASSWORD %L',
+              ${login}::text,
+              ${value}::text
+            ) AS statement
           `
         : await client<Array<{ statement: string }>>`
-            SELECT format('GRANT %I TO %I', ${value}, ${login}) AS statement
+            SELECT format('GRANT %I TO %I', ${value}::text, ${login}::text) AS statement
           `;
   if (!row?.statement) throw new Error(`Unable to format runtime ${operation} statement`);
   return row.statement;
