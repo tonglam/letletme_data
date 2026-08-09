@@ -16,7 +16,7 @@ durable path, SHA, query result, run URL, or backup manifest. Verbal confirmatio
 | Production project | `gtwcfjoviibmtkevurjw` |
 | Plan version | 3.2.5 |
 | Cutover approver | User |
-| Current phase | Run 6 correction/discovery replay remains ineligible as a clean rehearsal. The Understat/mainline reconciliation and P5-10 candidate freeze are complete. Execute clean Run 7 and an identical Run 8 from the external frozen manifest; production activation remains blocked. |
+| Current phase | Run 7 closed as an ineligible discovery attempt after runtime-credential intervention and a real Player Picker candidate defect. The corrected replacement candidates are frozen externally. Execute `rehearsal-7-clean` and then an identical Run 8; production activation remains blocked. |
 
 ## P0 - Freeze and inventory
 
@@ -123,7 +123,7 @@ schemas and all data gates pass.
 | [x] | P4-04 | Remove GraphQL business migration runner/deploy step | Deploy cannot mutate business schema | CI/deploy boundary scan; no migration directory/command |
 | [x] | P4-05 | Commit G1 | Clean tree; SHA recorded | `886351b1c26d86f5e8010cb57e8d5f33469423c8` |
 | [x] | P4-06 | Create G2 from accepted G1 | Exact predecessor SHA | `/Users/tong/CursorProjects/letletme-graphql-data-platform-v3-reporting-cache`; predecessor `886351b1c26d86f5e8010cb57e8d5f33469423c8` |
-| [x] | P4-07 | Implement reporting readers and v3 query cache | Dataset revision in every key; plan 3.2.5 authority required | Corrected GraphQL `fa4a01243e5fcdc35b173f7b7fdfbc0c14a559f6`: 315 pass/4 planned Understat skips/0 fail; lint/format/typecheck/build pass; external `p5/rehearsal-6/logs/graphql-preseason-live-*.log` |
+| [x] | P4-07 | Implement reporting readers and v3 query cache | Dataset revision in every key; plan 3.2.5 authority required | Corrected GraphQL `c1fbf895195aa199924d040cecc5c87e00dffb7d`: 316 pass/4 planned B0-only skips/0 fail; lint/format/typecheck and deploy-image build pass; `28-p5-rehearsal-run-7-discovery.md` |
 | [x] | P4-08 | Remove v2 views/MVs/RPC fallbacks | Zero references | Exact runtime scans; only G3-owned history-parent paths remain |
 | [x] | P4-09 | Commit G2 | Clean tree; SHA recorded | `e2612ad2db91db5a9841ed03812403e0082a4906` |
 | [x] | P4-10 | Create G3 from accepted G2 | Exact predecessor SHA | `/Users/tong/CursorProjects/letletme-graphql-data-platform-v3-player-state`; predecessor `e2612ad2db91db5a9841ed03812403e0082a4906` |
@@ -137,12 +137,13 @@ schemas and all data gates pass.
 | [x] | P4-18 | Advance GraphQL startup/cache contract to plan 3.2.5 | Stale DB/Redis plans fail closed; exact 3.2.5 candidate passes | Unit stale-plan negative passes; real `p5_graphql_run4` contract reports 3.2.5; postgres admin exits 1 |
 | [x] | P4-19 | Remove unrevisioned Web core-authority cache | Current/next event reads never outlive the GraphQL dataset revision; affected routes are explicitly dynamic | Run 6 external `logs/web-final-{lint,tests,typecheck,build}.log`: 215 tests/4 planned skips/0 fail; clean production build; `e2e-auth-tournament-selections-valid.json` renders current GW1 after revision change |
 | [x] | P4-20 | Preserve safe returning-user auth navigation | Verified bindings skip onboarding; unsafe `next` values and redirect loops are rejected | Corrected Web `e5ebac921635b0350fba1a62410d9416095bc562`; redirect unit tests plus `e2e-auth-tournament-selections-valid.json`: HTTP 200 sign-in lands directly on `/tournament/list`, sign-out clears the session, protected route returns to login |
+| [x] | P4-21 | Bound interactive player-directory reads | Picker never downloads a roster; server filtering and complexity guard pass | GraphQL `c1fbf895195aa199924d040cecc5c87e00dffb7d`; Web `b8ab6134bbf30b0212581600f5643a08107ec648`; 316 GraphQL and 212 Web tests pass; real mobile Gabriel search uses one 25 ms GraphQL request with no new console error; `28-p5-rehearsal-run-7-discovery.md` |
 
 ## P5 - Rehearsal and quality gates
 
 | Done | ID | Check | Acceptance | Evidence |
 | --- | --- | --- | --- | --- |
-| [ ] | P5-01 | Rehearsal run 1 | Complete runbook, no undocumented intervention | `19-p5-rehearsal-run-1.md`; rejected runs `22`-`25`; Run 6 is a documented correction/discovery replay and is not eligible because Data, GraphQL, and Web candidates changed mid-run; clean Run 7 required |
+| [ ] | P5-01 | Rehearsal run 1 | Complete runbook, no undocumented intervention | `19-p5-rehearsal-run-1.md`; rejected runs `22`-`25`; Run 6 and `28-p5-rehearsal-run-7-discovery.md` are correction/discovery evidence only; `rehearsal-7-clean` required |
 | [x] | P5-02 | Rollback before activation | v2 remains unchanged | `17-p5-rollback-drills.md`; full public data/sequence/security diffs 0 bytes; old Data SHA status and readiness pass |
 | [x] | P5-03 | Rollback after activation/pre-cleanup | Old SHAs and v2 writer restore without overlap | `17-p5-rollback-drills.md`; full B0 public/sequence/security/bauth diffs 0 bytes; old Data/GraphQL/Web stack all probes 200 |
 | [x] | P5-04 | Simulated post-cleanup B1 restore | Selective/full recovery works | `21-p5-postcleanup-b1-restore.md`; external `p5/postcleanup-b1/manifests/b1-rehearsal-manifest.json` SHA-256 `beb2ce3403ece550b80c655751827ebc52b7a040cceb90b3b8220c1ddebbe2be`; all full/selective data/security/ops diffs 0 |
@@ -150,8 +151,8 @@ schemas and all data gates pass.
 | [x] | P5-06 | Data quality matrix | All critical/high checks pass | `19-p5-rehearsal-run-1.md`; 51 passed, 0 failed; B0/v3 hash diffs 0 |
 | [x] | P5-07 | Performance budgets | Every budget passes or has accepted plan revision | `19-p5-rehearsal-run-1.md`; `20-p5-redis-cutover-rehearsal.md`; `21-p5-postcleanup-b1-restore.md`; cleaned DB 391,545,347 bytes vs 512,218,885-byte ceiling |
 | [x] | P5-08 | Security/grant tests | Least privilege and private schemas pass | Run 6 external `p5/rehearsal-6/manifests/data-writer-privilege-gate.txt` and `runtime-role-gate.txt`: exact Data positive/negative matrix; dedicated Data/GraphQL runtime roles pass; admin identities fail closed |
-| [x] | P5-09 | End-to-end journeys | Selections/player/live/market/tournament/auth pass | Run 6 external `logs/`: Data B0 integration 31 pass/4 planned skips; preseason live returns/renders 10 GW1 fixtures; `e2e-auth-tournament-selections-valid.json` passes login/list/GW1 selections/live 2-of-2/sign-out with rate use 77/120 and no browser failures; `e2e-selection-contract-valid.json` proves 2/5/5/3, 15 players, and exact 100% ownership |
-| [x] | P5-10 | Freeze candidate SHAs/digests/checksums | External release manifest immutable; no self-reference | External `p5/rehearsal-6/manifests/run6-candidate-manifest.json`; deploy-target `linux/amd64` Data/GraphQL image IDs `6c80c3d3...`/`13ce251f...`; 21-file checksum list SHA-256 `8a458172...` |
+| [x] | P5-09 | End-to-end journeys | Selections/player/live/market/tournament/auth pass | Run 6 external `logs/` covers auth, selections, live, market, and tournament; Run 7 correction adds real mobile Player Picker/detail/state validation with one bounded GraphQL request and no new browser error; `28-p5-rehearsal-run-7-discovery.md` |
+| [x] | P5-10 | Freeze candidate SHAs/digests/checksums | External release manifest immutable; no self-reference | Replacement external `p5/frozen-candidate-2/manifests/v3-candidate-manifest.json`; corrected GraphQL/Web SHAs in `28-p5-rehearsal-run-7-discovery.md`; unchanged 21-file checksum-list SHA-256 `8a458172...` |
 
 ## P6 - Production activation
 
