@@ -16,7 +16,7 @@ durable path, SHA, query result, run URL, or backup manifest. Verbal confirmatio
 | Production project | `gtwcfjoviibmtkevurjw` |
 | Plan version | 3.2.4 |
 | Cutover approver | User |
-| Current phase | P5 in progress; P5-02 and P5-03 accepted |
+| Current phase | P5 in progress; P5-02/P5-03 accepted; full-B0 run 1 and Web auth-role hardening in progress |
 
 ## P0 - Freeze and inventory
 
@@ -130,14 +130,14 @@ P2 exit gate: migrations reproduce the target from fresh and B0 schemas and all 
 
 | Done | ID | Check | Acceptance | Evidence |
 | --- | --- | --- | --- | --- |
-| [ ] | P5-01 | Rehearsal run 1 | Complete runbook, no undocumented intervention | Run report: |
+| [ ] | P5-01 | Rehearsal run 1 | Complete runbook, no undocumented intervention | `18-p5-web-runtime-boundary.md`; correction accepted, clean consolidated replay pending |
 | [x] | P5-02 | Rollback before activation | v2 remains unchanged | `17-p5-rollback-drills.md`; full public data/sequence/security diffs 0 bytes; old Data SHA status and readiness pass |
 | [x] | P5-03 | Rollback after activation/pre-cleanup | Old SHAs and v2 writer restore without overlap | `17-p5-rollback-drills.md`; full B0 public/sequence/security/bauth diffs 0 bytes; old Data/GraphQL/Web stack all probes 200 |
 | [ ] | P5-04 | Simulated post-cleanup B1 restore | Selective/full recovery works | Report: |
 | [ ] | P5-05 | Rehearsal run 2 | Same target hashes; timing within budget | Run report: |
 | [ ] | P5-06 | Data quality matrix | All critical/high checks pass | Report: |
 | [ ] | P5-07 | Performance budgets | Every budget passes or has accepted plan revision | Benchmark: |
-| [ ] | P5-08 | Security/grant tests | Least privilege and private schemas pass | Report: |
+| [ ] | P5-08 | Security/grant tests | Least privilege and private schemas pass | `18-p5-web-runtime-boundary.md`; Web boundary accepted, complete cross-service report pending |
 | [ ] | P5-09 | End-to-end journeys | Selections/player/live/market/tournament/auth pass | Report: |
 | [ ] | P5-10 | Freeze candidate SHAs/digests/checksums | External release manifest immutable; no self-reference | Manifest: |
 

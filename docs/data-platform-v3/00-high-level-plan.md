@@ -66,7 +66,10 @@ explicit final deletion approval.
 | Supabase system schemas | Supabase | `auth`, `storage`, `realtime`, `vault`, managed ledgers |
 
 All six Data schemas are private and excluded from the Supabase Data API. Data has write access;
-GraphQL receives schema-qualified `SELECT` access only; Web receives no Data-schema write access.
+GraphQL receives schema-qualified `SELECT` access only. Web uses a dedicated non-admin LOGIN that
+inherits only `letletme_web_auth`: it can access the explicit current `bauth` runtime-table
+allowlist, but cannot read or mutate Data schemas, frozen `public` business objects, historical
+`bauth.apikey`, or the Web migration ledger. Web migrations use a separate administrator URL.
 
 ## Target physical data model
 

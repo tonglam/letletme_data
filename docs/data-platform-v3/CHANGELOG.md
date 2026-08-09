@@ -1,5 +1,25 @@
 # Data Platform v3 Plan Changelog
 
+## 2026-08-09 - Web runtime database boundary hardening
+
+- Replaced Web's administrator runtime connection with a dedicated LOGIN inheriting only the
+  NOLOGIN `letletme_web_auth` capability role; the direct administrator URL is migration-only.
+- Added a fail-closed Next instrumentation contract for exact role attributes/membership, an
+  explicit ten-table Better Auth allowlist, RLS policies, and zero Data/public/ledger access.
+- Preserved but denied the three historical `bauth.apikey` rows discovered in full B0 because the
+  current Web application has no API-key plugin or schema declaration.
+- Added full-B0 PostgreSQL 15 tests proving allowed Auth CRUD, denied Data/API-key/ledger access,
+  administrator rejection, and non-zero Web startup on an unsafe connection.
+
+## 2026-08-09 - P5 performance evidence hardening
+
+- Made the 500 x 38 x 15 reporting benchmark deterministic after its one-transaction fixture load
+  by analyzing the four source relations before measurement; this models production planner
+  statistics without racing autovacuum.
+- Expanded the reporting read evidence from p95-only output to p50, p95, and maximum latency.
+- Retained the observed stale-statistics execution plan as rehearsal evidence instead of counting
+  it as the production-like performance result.
+
 ## 2026-08-09 - P5 rollback acceptance
 
 - Added a generated, exact, approval-gated preactivation rollback capsule that restores the v2

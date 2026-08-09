@@ -17,9 +17,17 @@ const PICKS_PER_ENTRY = 15;
 
 setDefaultTimeout(180_000);
 
-function percentile95(samples: number[]): number {
+function percentile(samples: number[], fraction: number): number {
   const sorted = [...samples].sort((left, right) => left - right);
-  return sorted[Math.ceil(sorted.length * 0.95) - 1] ?? Number.POSITIVE_INFINITY;
+  return sorted[Math.ceil(sorted.length * fraction) - 1] ?? Number.POSITIVE_INFINITY;
+}
+
+function summarize(samples: number[]): { p50Ms: number; p95Ms: number; maxMs: number } {
+  return {
+    p50Ms: percentile(samples, 0.5),
+    p95Ms: percentile(samples, 0.95),
+    maxMs: Math.max(...samples),
+  };
 }
 
 async function refreshSelectionView(): Promise<number> {
@@ -230,6 +238,14 @@ async function seed(): Promise<void> {
         WITH ORDINALITY AS player(element_id, position)
     `;
   });
+
+  // The fixture is loaded in one transaction, unlike the gradual production sync. Make the
+  // planner state production-like before measuring the MV refresh so a race with autovacuum
+  // cannot turn the same workload into a false pass or false failure.
+  await sql`ANALYZE competition.entries`;
+  await sql`ANALYZE competition.tournament_entries`;
+  await sql`ANALYZE competition.entry_event_picks`;
+  await sql`ANALYZE competition.entry_event_transfers`;
 }
 
 describe.skipIf(!enabled)('P5 reporting performance budgets', () => {
@@ -287,6 +303,7 @@ describe.skipIf(!enabled)('P5 reporting performance budgets', () => {
         sourceRows: ENTRY_COUNT * EVENT_COUNT * PICKS_PER_ENTRY,
         refreshMs: Number(refreshMs.toFixed(2)),
         outputRows: result?.rows,
+        plannerStatistics: 'explicitly-analyzed-after-bulk-fixture-load',
       })}\n`,
     );
 
@@ -346,18 +363,26 @@ describe.skipIf(!enabled)('P5 reporting performance budgets', () => {
       summarySamples.push(performance.now() - startedAt);
     }
 
-    const selectionP95Ms = percentile95(selectionSamples);
-    const playerSummaryP95Ms = percentile95(summarySamples);
+    const selection = summarize(selectionSamples);
+    const playerSummary = summarize(summarySamples);
     process.stdout.write(
       `${JSON.stringify({
         benchmark: 'reporting-db-reads',
         samples: 30,
-        selectionP95Ms: Number(selectionP95Ms.toFixed(3)),
-        playerSummaryP95Ms: Number(playerSummaryP95Ms.toFixed(3)),
+        selection: {
+          p50Ms: Number(selection.p50Ms.toFixed(3)),
+          p95Ms: Number(selection.p95Ms.toFixed(3)),
+          maxMs: Number(selection.maxMs.toFixed(3)),
+        },
+        playerSummary: {
+          p50Ms: Number(playerSummary.p50Ms.toFixed(3)),
+          p95Ms: Number(playerSummary.p95Ms.toFixed(3)),
+          maxMs: Number(playerSummary.maxMs.toFixed(3)),
+        },
       })}\n`,
     );
 
-    expect(selectionP95Ms).toBeLessThanOrEqual(100);
-    expect(playerSummaryP95Ms).toBeLessThanOrEqual(150);
+    expect(selection.p95Ms).toBeLessThanOrEqual(100);
+    expect(playerSummary.p95Ms).toBeLessThanOrEqual(150);
   }, 60_000);
 });

@@ -243,7 +243,9 @@ GraphQL implementation:
 Web implementation:
 
 1. Update GraphQL operations/types for v3 reporting and player-state contracts.
-2. Preserve Better Auth ownership and direct `bauth` access only where already required.
+2. Preserve Better Auth ownership behind a dedicated non-admin LOGIN inheriting only
+   `letletme_web_auth`; allowlist current runtime tables and deny Data schemas, frozen `public`,
+   historical `bauth.apikey`, and the Web migration ledger.
 3. Add a maintenance state for the hard-cutover window; do not present stale v2 data as current.
 4. Verify selections, player detail, live points, market, tournament, profile, and binding journeys.
 
@@ -252,7 +254,8 @@ Acceptance:
 - GraphQL has zero `.from()` business-table calls and zero v2 reporting/RPC references.
 - GraphQL starts with `SELECT` only and fails closed when the v3 schema contract is absent.
 - The GraphQL database role cannot insert/update/delete Data tables.
-- Web has no new direct access to Data-owned schemas.
+- Web cannot read or mutate Data-owned schemas or frozen `public` business objects, and startup
+  fails if `DATABASE_URL` is an administrator/migration login.
 - Contract tests and representative end-to-end journeys pass against the migrated B0 dataset.
 
 ## P5 - Full rehearsal

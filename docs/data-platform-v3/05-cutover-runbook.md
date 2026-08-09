@@ -22,6 +22,8 @@ CUTOVER_DATA_IMAGE_REF=ghcr.io/<owner>/<repo>@sha256:<64-hex-digest>
 CUTOVER_RELEASE_MANIFEST=<backup-root>/release/release-manifest.json
 CUTOVER_RELEASE_MANIFEST_SHA256=<64-hex-digest>
 CUTOVER_DATABASE_URL=<secret-direct-postgres-url>
+CUTOVER_WEB_RUNTIME_DATABASE_URL=<secret-dedicated-web-login-url>
+CUTOVER_WEB_MIGRATION_DATABASE_URL=<secret-direct-postgres-url>
 CUTOVER_QUEUE_REDIS_URL=<secret>
 CUTOVER_CACHE_REDIS_URL=<secret>
 ```
@@ -102,14 +104,15 @@ All fields below must be attached to the run record:
 - current database/Redis size and free-capacity report;
 - rollback SHAs/images and tested B1 restore procedure;
 - maintenance message and private smoke-test credentials/routes.
-- dedicated Data writer and GraphQL reader logins mapped to the v3 group roles; the migration login
-  must not be used by either runtime.
+- dedicated Data writer, GraphQL reader, and Web auth logins mapped only to their capability roles;
+  no runtime may use the migration login. Web `DATABASE_URL` must pass `db:runtime-contract`, while
+  its administrator connection is supplied only as `DIRECT_DATABASE_URL` to migration commands.
 
 If any artifact differs from the latest reviewed commit, stop and repeat the affected rehearsal.
 
 ## Production activation: `0079`-`0090_zzz`
 
-1. Announce and enable Web maintenance mode.
+1. Announce and enable maintenance on the accepted pre-cutover Web build.
 2. Stop Data API, Data workers, and GraphQL. Pause queues without deleting jobs.
 3. Verify:
    - no Data/GraphQL process remains;
@@ -120,14 +123,19 @@ If any artifact differs from the latest reviewed commit, stop and repeat the aff
    locking and records each object/season conversion in `ops.migration_objects`.
 5. Run Data migration status. Apply exactly `0079` through `0090_zzz` from the release manifest. Save
    stdout/stderr and exit status without connection secrets.
-6. Run exact target schema checks, counts, hashes, constraints, FKs, join-shape, summary, market,
+6. Apply Web migration `0008_web_auth_runtime_role.sql` with
+   `CUTOVER_WEB_MIGRATION_DATABASE_URL`, provision a separate LOGIN inheriting only
+   `letletme_web_auth`, switch Web `DATABASE_URL` to that login, and start the candidate Web build
+   in maintenance mode. `db:runtime-contract` and a private auth-session probe must pass; an admin
+   URL must exit non-zero.
+7. Run exact target schema checks, counts, hashes, constraints, FKs, join-shape, summary, market,
    tournament, provider, grant, and advisor checks.
-7. Refresh initial reporting MVs and validate all publication gates.
-8. Build the initial immutable v3 core/live Redis revision and atomically activate its manifest.
-9. Start Data API/workers. Validate health, readiness, sync fencing, DB writes, and Redis manifests.
-10. Start GraphQL with the read-only role. Validate startup contract and private smoke queries.
-11. Run Web private smoke journeys. Disable maintenance only when all pass.
-12. Record the v2 freeze timestamp and hashes. v2 objects remain physically present but read/write
+8. Refresh initial reporting MVs and validate all publication gates.
+9. Build the initial immutable v3 core/live Redis revision and atomically activate its manifest.
+10. Start Data API/workers. Validate health, readiness, sync fencing, DB writes, and Redis manifests.
+11. Start GraphQL with the read-only role. Validate startup contract and private smoke queries.
+12. Run Web private smoke journeys. Disable maintenance only when all pass.
+13. Record the v2 freeze timestamp and hashes. v2 objects remain physically present but read/write
     inaccessible to the v3 applications.
 
 ## Activation rollback

@@ -464,6 +464,70 @@ DECLARE
   role_name text;
   schema_name text;
 BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'letletme_web_auth') THEN
+    RAISE EXCEPTION 'P5 dedicated Web auth capability role is missing';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM pg_roles role_row
+    WHERE role_row.rolname = 'letletme_web_auth'
+      AND (
+        role_row.rolcanlogin
+        OR role_row.rolsuper
+        OR role_row.rolcreatedb
+        OR role_row.rolcreaterole
+        OR role_row.rolinherit
+        OR role_row.rolreplication
+        OR role_row.rolbypassrls
+      )
+  ) THEN
+    RAISE EXCEPTION 'P5 letletme_web_auth capability role attributes are unsafe';
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_auth_members membership
+    JOIN pg_roles capability_role ON capability_role.oid = membership.roleid
+    JOIN pg_roles login_role ON login_role.oid = membership.member
+    WHERE capability_role.rolname = 'letletme_web_auth'
+      AND login_role.rolcanlogin
+      AND login_role.rolinherit
+      AND NOT login_role.rolsuper
+      AND NOT login_role.rolcreatedb
+      AND NOT login_role.rolcreaterole
+      AND NOT login_role.rolreplication
+      AND NOT login_role.rolbypassrls
+  ) THEN
+    RAISE EXCEPTION 'P5 dedicated Web auth runtime LOGIN is missing';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM pg_auth_members membership
+    JOIN pg_roles capability_role ON capability_role.oid = membership.roleid
+    JOIN pg_roles member_role ON member_role.oid = membership.member
+    WHERE capability_role.rolname = 'letletme_web_auth'
+      AND (
+        NOT member_role.rolcanlogin
+        OR NOT member_role.rolinherit
+        OR member_role.rolsuper
+        OR member_role.rolcreatedb
+        OR member_role.rolcreaterole
+        OR member_role.rolreplication
+        OR member_role.rolbypassrls
+      )
+  ) OR EXISTS (
+    SELECT 1
+    FROM pg_auth_members web_membership
+    JOIN pg_roles web_capability ON web_capability.oid = web_membership.roleid
+    JOIN pg_auth_members extra_membership ON extra_membership.member = web_membership.member
+    WHERE web_capability.rolname = 'letletme_web_auth'
+      AND extra_membership.roleid <> web_membership.roleid
+  ) THEN
+    RAISE EXCEPTION 'P5 Web auth runtime LOGIN membership/attribute boundary failed';
+  END IF;
+
   FOREACH schema_name IN ARRAY ARRAY['fpl', 'competition', 'understat', 'bridge', 'reporting', 'ops']
   LOOP
     IF EXISTS (
@@ -508,6 +572,105 @@ BEGIN
   IF failure_count <> 0 THEN
     RAISE EXCEPTION 'P5 GraphQL reader write-capable relations: %', failure_count;
   END IF;
+
+  FOR role_name IN
+    SELECT 'letletme_web_auth'
+    UNION ALL
+    SELECT login_role.rolname
+    FROM pg_auth_members membership
+    JOIN pg_roles capability_role ON capability_role.oid = membership.roleid
+    JOIN pg_roles login_role ON login_role.oid = membership.member
+    WHERE capability_role.rolname = 'letletme_web_auth'
+    ORDER BY 1
+  LOOP
+    FOREACH schema_name IN ARRAY ARRAY[
+      'fpl',
+      'competition',
+      'understat',
+      'bridge',
+      'reporting',
+      'ops'
+    ]
+    LOOP
+      IF has_schema_privilege(role_name, schema_name, 'USAGE')
+        OR has_schema_privilege(role_name, schema_name, 'CREATE') THEN
+        RAISE EXCEPTION 'P5 Web auth role % can access Data schema %', role_name, schema_name;
+      END IF;
+    END LOOP;
+
+    SELECT count(*) INTO failure_count
+    FROM pg_class relation_row
+    JOIN pg_namespace namespace_row ON namespace_row.oid = relation_row.relnamespace
+    WHERE namespace_row.nspname IN (
+      'fpl',
+      'competition',
+      'understat',
+      'bridge',
+      'reporting',
+      'ops',
+      'public'
+    )
+      AND relation_row.relkind IN ('r', 'p', 'v', 'm', 'f')
+      AND (
+        has_table_privilege(role_name, relation_row.oid, 'SELECT')
+        OR has_table_privilege(role_name, relation_row.oid, 'INSERT')
+        OR has_table_privilege(role_name, relation_row.oid, 'UPDATE')
+        OR has_table_privilege(role_name, relation_row.oid, 'DELETE')
+        OR has_table_privilege(role_name, relation_row.oid, 'TRUNCATE')
+        OR has_table_privilege(role_name, relation_row.oid, 'REFERENCES')
+        OR has_table_privilege(role_name, relation_row.oid, 'TRIGGER')
+      );
+
+    IF failure_count <> 0 THEN
+      RAISE EXCEPTION 'P5 Web auth role % has Data/public relation privileges: %',
+        role_name,
+        failure_count;
+    END IF;
+
+    SELECT count(*) INTO failure_count
+    FROM pg_class relation_row
+    JOIN pg_namespace namespace_row ON namespace_row.oid = relation_row.relnamespace
+    WHERE namespace_row.nspname IN (
+      'fpl',
+      'competition',
+      'understat',
+      'bridge',
+      'reporting',
+      'ops',
+      'public'
+    )
+      AND relation_row.relkind = 'S'
+      AND (
+        has_sequence_privilege(role_name, relation_row.oid, 'USAGE')
+        OR has_sequence_privilege(role_name, relation_row.oid, 'SELECT')
+        OR has_sequence_privilege(role_name, relation_row.oid, 'UPDATE')
+      );
+
+    IF failure_count <> 0 THEN
+      RAISE EXCEPTION 'P5 Web auth role % has Data/public sequence privileges: %',
+        role_name,
+        failure_count;
+    END IF;
+
+    SELECT count(*) INTO failure_count
+    FROM pg_proc function_row
+    JOIN pg_namespace namespace_row ON namespace_row.oid = function_row.pronamespace
+    WHERE namespace_row.nspname IN (
+      'fpl',
+      'competition',
+      'understat',
+      'bridge',
+      'reporting',
+      'ops'
+    )
+      AND has_function_privilege(role_name, function_row.oid, 'EXECUTE');
+
+    IF failure_count <> 0 THEN
+      RAISE EXCEPTION 'P5 Web auth role % can execute Data functions: %',
+        role_name,
+        failure_count;
+    END IF;
+  END LOOP;
 
   SELECT count(*) INTO failure_count
   FROM pg_class relation_row
@@ -601,6 +764,13 @@ SELECT jsonb_build_object(
     FROM ops.migration_objects
     WHERE run_id = 'v3-20260808T160008Z-b9eddc0'
       AND status = 'passed'
+  ),
+  'webRuntimeLogins', (
+    SELECT jsonb_agg(login_role.rolname ORDER BY login_role.rolname)
+    FROM pg_auth_members membership
+    JOIN pg_roles capability_role ON capability_role.oid = membership.roleid
+    JOIN pg_roles login_role ON login_role.oid = membership.member
+    WHERE capability_role.rolname = 'letletme_web_auth'
   )
 ) AS p5_quality_summary;
 

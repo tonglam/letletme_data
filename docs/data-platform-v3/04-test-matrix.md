@@ -238,7 +238,10 @@ hardware/container limits, cold/warm state, p50/p95/max, and timestamp.
 - GraphQL role can use required schemas and select required objects only.
 - GraphQL role cannot create schemas/tables/functions or write Data/competition rows.
 - Data role cannot mutate `bauth` or Supabase system schemas.
-- Web role cannot mutate Data schemas.
+- Web runtime LOGIN inherits only `letletme_web_auth`, can use the explicit current `bauth`
+  runtime-table allowlist, and cannot read or mutate Data schemas, frozen `public` business
+  objects, historical `bauth.apikey`, or Web migration state.
+- Web startup exits non-zero when `DATABASE_URL` is the administrator/migration connection.
 - Reporting views are `security_invoker`; public MVs/RPCs do not exist.
 - No new `SECURITY DEFINER` function exists unless explicitly documented, private, search-path
   hardened, execute-revoked from `PUBLIC`, and advisor-clean.

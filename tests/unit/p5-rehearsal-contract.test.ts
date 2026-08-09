@@ -72,6 +72,9 @@ describe('P5 rehearsal contracts', () => {
     expect(sql).toContain('(SELECT count(*) FROM bridge.entity_links) <> 1909');
     expect(sql).toContain('P5 exact duplicate index contracts');
     expect(sql).toContain('P5 SECURITY DEFINER allowlist/search_path/execute contract failed');
+    expect(sql).toContain('P5 dedicated Web auth capability role is missing');
+    expect(sql).toContain('P5 dedicated Web auth runtime LOGIN is missing');
+    expect(sql).toContain('P5 Web auth role % has Data/public relation privileges');
   });
 
   test('uses the exact 500 by 38 by 15 tournament benchmark workload', () => {
@@ -80,9 +83,25 @@ describe('P5 rehearsal contracts', () => {
     expect(source).toContain('const ENTRY_COUNT = 500;');
     expect(source).toContain('const EVENT_COUNT = 38;');
     expect(source).toContain('const PICKS_PER_ENTRY = 15;');
+    expect(source).toContain('ANALYZE competition.entry_event_picks');
+    expect(source).toContain(
+      `plannerStatistics: ${quote}explicitly-analyzed-after-bulk-fixture-load${quote}`,
+    );
     expect(source).toContain('expect(refreshMs).toBeLessThanOrEqual(30_000)');
-    expect(source).toContain('expect(selectionP95Ms).toBeLessThanOrEqual(100)');
-    expect(source).toContain('expect(playerSummaryP95Ms).toBeLessThanOrEqual(150)');
+    expect(source).toContain('expect(selection.p95Ms).toBeLessThanOrEqual(100)');
+    expect(source).toContain('expect(playerSummary.p95Ms).toBeLessThanOrEqual(150)');
+    expect(source).toContain('maxMs: Number(selection.maxMs.toFixed(3))');
+  });
+
+  test('keeps reproducible P5 query-plan evidence for each reporting budget', () => {
+    const sql = read('sql/v3/p5-performance-plans.sql');
+
+    expect(sql).toContain('EXPLAIN (ANALYZE, BUFFERS, VERBOSE, FORMAT JSON)');
+    expect(sql).toContain('p5-query:tournament-selection-read');
+    expect(sql).toContain('p5-query:player-season-summary-read');
+    expect(sql).toContain('p5-query:player-state-fpl-history');
+    expect(sql).toContain('p5-query:player-state-understat-cohorts');
+    expect(sql).toContain('pg_stat_user_indexes');
   });
 
   test('distinguishes real frozen-owner grants from superuser pg_has_role semantics', () => {
