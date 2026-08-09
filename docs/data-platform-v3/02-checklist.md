@@ -16,7 +16,7 @@ durable path, SHA, query result, run URL, or backup manifest. Verbal confirmatio
 | Production project | `gtwcfjoviibmtkevurjw` |
 | Plan version | 3.2.5 |
 | Cutover approver | User |
-| Current phase | Plan 3.2.5 code/focused writer gates pass; candidate commits plus fresh/fresh-B0 migration gates and two full B0 replays required |
+| Current phase | Plan 3.2.5 fresh PG15 migration gate passed; first clean full B0 replay (Run 5) in progress, followed by one identical replay |
 
 ## P0 - Freeze and inventory
 
@@ -77,7 +77,7 @@ P1 exit gate: both restore drills pass. A backup that has not been restored does
 | [x] | P2-13 | Implement `0089` publication preparation | Complete inactive initial revision exists | Fresh/B0 replay and publication contract passed |
 | [x] | P2-14 | Implement `0090` activation/freeze and final reader contracts | One active revision; v2 writes denied; publication authority and public-league catalog have one Data owner and read-only GraphQL access | Validation: 192 frozen relations/fences; 1 active publication; ACL correction `175ac00`; public-league contract `e91a355c9d2253c2ebff07256c3793a57c7f49b9` |
 | [x] | P2-15 | Implement approval-gated `0091`-`0093` | Exact manifest only; blocked without approval env/token | Cleanup rehearsal report; v3 hash diff 0 bytes |
-| [ ] | P2-16 | Fresh migration replay twice on PG15 | Both runs pass; second run is a no-op/status-clean | 3.2.4 evidence retained at external `p2/logs/p2-fresh-final-4-*`; 3.2.5 replay pending |
+| [x] | P2-16 | Fresh migration replay twice on PG15 | Both runs pass; second run is a no-op/status-clean | Plan 3.2.5 independent PG 15.8 target `p2_fresh_325_final`; external `p5/plan-3.2.5-correction/fresh-pg15-final/` (48/48 audit checks; second SQL pass skipped every migration; status clean) |
 | [ ] | P2-17 | Production-B0 upgrade replay twice on PG15 | Both runs pass; no manual correction | 3.2.4 evidence retained at external `p2/logs/p2-b0-final-5-*`; 3.2.5 replay pending |
 | [x] | P2-18 | Run Supabase advisors | No unaccepted v3 security/performance finding | `10-p2-implementation-and-acceptance.md`; local v3 lint 0 |
 | [x] | P2-19 | Commit D1 | Clean tree; SHA recorded | Substantive D1 `aad7225654d2cacf353bb00e441804cf2bc2dce3` |
