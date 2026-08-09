@@ -428,12 +428,14 @@ jobs:
           V3_RELEASE_MANIFEST_SHA256: ${{ inputs.v3_release_manifest_sha256 }}
           V3_CUTOVER_APPROVAL: ${{ inputs.v3_cutover_approval }}
           V3_MIGRATION_ENV: ${{ secrets.V3_MIGRATION_ENV }}
+          V3_DATA_DB_PASSWORD: ${{ secrets.V3_DATA_DB_PASSWORD }}
+          V3_GRAPHQL_DB_PASSWORD: ${{ secrets.V3_GRAPHQL_DB_PASSWORD }}
         with:
           host: ${{ vars.VPS_HOST }}
           username: ${{ vars.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           script_stop: false
-          envs: DEPLOY_SHA,IMAGE_REF,DEPLOY_IMAGE_DIGEST,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR,V3_CUTOVER_RUN_ID,V3_RELEASE_MANIFEST_BASE64,V3_RELEASE_MANIFEST_SHA256,V3_CUTOVER_APPROVAL,V3_MIGRATION_ENV
+          envs: DEPLOY_SHA,IMAGE_REF,DEPLOY_IMAGE_DIGEST,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR,V3_CUTOVER_RUN_ID,V3_RELEASE_MANIFEST_BASE64,V3_RELEASE_MANIFEST_SHA256,V3_CUTOVER_APPROVAL,V3_MIGRATION_ENV,V3_DATA_DB_PASSWORD,V3_GRAPHQL_DB_PASSWORD
           script: |
             set -euo pipefail
             LOWER_USER=$(printf '%s' "$GHCR_USER" | tr '[:upper:]' '[:lower:]')
@@ -446,6 +448,9 @@ jobs:
             git diff --cached --quiet || { echo "Data VPS index has staged modifications"; exit 1; }
             test -f .env.deploy || { echo "Missing .env.deploy"; exit 1; }
             test -n "$V3_MIGRATION_ENV" || { echo "Missing V3_MIGRATION_ENV secret"; exit 1; }
+            [[ "$V3_DATA_DB_PASSWORD" =~ ^[A-Za-z0-9_-]{64}$ ]]
+            [[ "$V3_GRAPHQL_DB_PASSWORD" =~ ^[A-Za-z0-9_-]{64}$ ]]
+            test "$V3_DATA_DB_PASSWORD" != "$V3_GRAPHQL_DB_PASSWORD"
             if docker ps --format '{{.Ports}}' | grep -q '127.0.0.1:4000->'; then
               echo "GraphQL is still running on port 4000; stop it before database activation"
               exit 1
@@ -490,7 +495,9 @@ jobs:
             env_tmp=$(mktemp "$VPS_WORKDIR/.env.deploy.v3.XXXXXX")
             python3 - .env.deploy "$env_tmp" <<'PY'
             import os
+            import re
             import sys
+            from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
             source_path, target_path = sys.argv[1:]
             with open(source_path, encoding='utf-8') as source:
@@ -503,12 +510,56 @@ jobs:
                 key, value = line.split('=', 1)
                 values[key] = value
 
-            required = ('REDIS_HOST', 'REDIS_PORT', 'QUEUE_REDIS_HOST', 'QUEUE_REDIS_PORT')
+            required = (
+                'DATABASE_URL',
+                'REDIS_HOST',
+                'REDIS_PORT',
+                'QUEUE_REDIS_HOST',
+                'QUEUE_REDIS_PORT',
+            )
             missing = [key for key in required if not values.get(key)]
             if missing:
-                raise SystemExit(f"Missing legacy Redis settings: {', '.join(missing)}")
+                raise SystemExit(f"Missing production runtime settings: {', '.join(missing)}")
+
+            password = os.environ.get('V3_DATA_DB_PASSWORD', '')
+            if not re.fullmatch(r'[A-Za-z0-9_-]{64}', password):
+                raise SystemExit('Invalid V3_DATA_DB_PASSWORD')
+
+            source_database_url = values['DATABASE_URL']
+            if (
+                len(source_database_url) >= 2
+                and source_database_url[0] == source_database_url[-1]
+                and source_database_url[0] in ('"', "'")
+            ):
+                source_database_url = source_database_url[1:-1]
+            parsed = urlsplit(source_database_url)
+            current_user = unquote(parsed.username or '')
+            match = re.fullmatch(r'postgres\.([a-z0-9]{8,64})', current_user)
+            if (
+                parsed.scheme not in ('postgres', 'postgresql')
+                or not parsed.hostname
+                or not match
+            ):
+                raise SystemExit('DATABASE_URL is not the expected Supabase pooler URL')
+            project_ref = match.group(1)
+            runtime_user = f'letletme_data_runtime.{project_ref}'
+            host = parsed.hostname
+            if ':' in host:
+                host = f'[{host}]'
+            if parsed.port is not None:
+                host = f'{host}:{parsed.port}'
+            runtime_url = urlunsplit(
+                (
+                    parsed.scheme,
+                    f'{quote(runtime_user, safe="")}:{quote(password, safe="")}@{host}',
+                    parsed.path,
+                    parsed.query,
+                    parsed.fragment,
+                )
+            )
 
             replaced = {
+                'DATABASE_URL',
                 'CACHE_REDIS_HOST',
                 'CACHE_REDIS_PORT',
                 'CACHE_REDIS_PASSWORD',
@@ -522,6 +573,7 @@ jobs:
             ]
             output.extend(
                 [
+                    f'DATABASE_URL={runtime_url}',
                     f"CACHE_REDIS_HOST={values['REDIS_HOST']}",
                     f"CACHE_REDIS_PORT={values['REDIS_PORT']}",
                     'CACHE_REDIS_DB=0',
@@ -545,6 +597,12 @@ jobs:
             test -z "$(APP_IMAGE="$IMAGE_REF" docker compose ps -q api)"
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun run db:migrate
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun scripts/apply-sql-migrations.ts
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
+              -e CUTOVER_RUN_ID="$V3_CUTOVER_RUN_ID" \
+              -e V3_CUTOVER_APPROVAL="$V3_CUTOVER_APPROVAL" \
+              -e V3_DATA_DB_PASSWORD="$V3_DATA_DB_PASSWORD" \
+              -e V3_GRAPHQL_DB_PASSWORD="$V3_GRAPHQL_DB_PASSWORD" \
+              migration bun run db:provision-runtime-logins
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun run db:migrate:status
             test -z "$(APP_IMAGE="$IMAGE_REF" docker compose ps -q worker)"
             test -z "$(APP_IMAGE="$IMAGE_REF" docker compose ps -q api)"

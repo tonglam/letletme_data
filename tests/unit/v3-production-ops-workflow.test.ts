@@ -1,5 +1,8 @@
 import { describe, expect, test } from 'bun:test';
-import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const workflow = readFileSync('.github/workflows/deploy.yml', 'utf8');
 
@@ -9,6 +12,21 @@ function job(name: string, nextName?: string): string {
   const end = nextName ? workflow.indexOf(`\n  ${nextName}:`, start + 1) : workflow.length;
   if (end < 0) throw new Error(`Missing workflow job ${nextName}`);
   return workflow.slice(start, end);
+}
+
+function runtimeEnvPython(): string {
+  const quote = String.fromCharCode(39);
+  const marker = '            python3 - .env.deploy "$env_tmp" <<' + quote + 'PY' + quote + '\n';
+  const start = workflow.indexOf(marker);
+  if (start < 0) throw new Error('Missing runtime env Python start marker');
+  const bodyStart = start + marker.length;
+  const end = workflow.indexOf('\n            PY', bodyStart);
+  if (end < 0) throw new Error('Missing runtime env Python end marker');
+  return workflow
+    .slice(bodyStart, end)
+    .split('\n')
+    .map((line) => (line.startsWith('            ') ? line.slice(12) : line))
+    .join('\n');
 }
 
 describe('v3 production hard-cut workflow', () => {
@@ -56,6 +74,7 @@ describe('v3 production hard-cut workflow', () => {
     const stopWorker = activation.indexOf('docker compose stop -t 30 worker');
     const stopApi = activation.indexOf('docker compose stop -t 30 api');
     const migrate = activation.indexOf('bun run db:migrate');
+    const provisionLogins = activation.indexOf('bun run db:provision-runtime-logins');
 
     expect(graphqlStopped).toBeGreaterThan(0);
     expect(releaseGate).toBeGreaterThan(graphqlStopped);
@@ -65,6 +84,7 @@ describe('v3 production hard-cut workflow', () => {
     expect(stopWorker).toBeGreaterThan(migrationContract);
     expect(stopApi).toBeGreaterThan(stopWorker);
     expect(migrate).toBeGreaterThan(stopApi);
+    expect(provisionLogins).toBeGreaterThan(migrate);
     expect(activation).not.toContain('docker compose up');
   });
 
@@ -79,13 +99,60 @@ describe('v3 production hard-cut workflow', () => {
 
     expect(trackedGuard).toBeGreaterThan(0);
     expect(activation).toContain('V3_MIGRATION_ENV: ${{ secrets.V3_MIGRATION_ENV }}');
+    expect(activation).toContain('V3_DATA_DB_PASSWORD: ${{ secrets.V3_DATA_DB_PASSWORD }}');
+    expect(activation).toContain('V3_GRAPHQL_DB_PASSWORD: ${{ secrets.V3_GRAPHQL_DB_PASSWORD }}');
     expect(releaseGate).toBeGreaterThan(trackedGuard);
     expect(migrationEnvWrite).toBeGreaterThan(releaseGate);
     expect(untrackedInventory).toBeGreaterThan(trackedGuard);
     expect(conflictGuard).toBeGreaterThan(untrackedInventory);
     expect(reset).toBeGreaterThan(conflictGuard);
     expect(activation).toContain('env.deploy.before-v3.sha256');
+    expect(activation).toContain('runtime_user = f');
+    expect(activation).toContain('letletme_data_runtime.{project_ref}');
+    expect(activation).toContain('DATABASE_URL');
     expect(activation).not.toContain('git clean');
+  });
+
+  test('rewrites a quoted Supabase pooler URL to the dedicated Data login', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'letletme-v3-runtime-env-'));
+    try {
+      const source = join(directory, '.env.deploy');
+      const target = join(directory, '.env.deploy.next');
+      const projectRef = 'abcdefghijklmnopqrst';
+      const password = 'd'.repeat(64);
+      writeFileSync(
+        source,
+        [
+          `DATABASE_URL="postgresql://postgres.${projectRef}:old@pooler.example.com:6543/postgres?pgbouncer=true"`,
+          'REDIS_HOST=cache.example.com',
+          'REDIS_PORT=6379',
+          'REDIS_PASSWORD=cache-password',
+          'QUEUE_REDIS_HOST=queue.example.com',
+          'QUEUE_REDIS_PORT=6380',
+          'UNRELATED_SETTING=preserved',
+        ].join('\n'),
+      );
+      writeFileSync(target, '');
+
+      execFileSync('python3', ['-', source, target], {
+        input: runtimeEnvPython(),
+        env: { ...process.env, V3_DATA_DB_PASSWORD: password },
+        encoding: 'utf8',
+      });
+
+      const output = readFileSync(target, 'utf8');
+      expect(output).toContain(
+        `DATABASE_URL=postgresql://letletme_data_runtime.${projectRef}:${password}@pooler.example.com:6543/postgres?pgbouncer=true`,
+      );
+      expect(output).toContain('CACHE_REDIS_HOST=cache.example.com');
+      expect(output).toContain('CACHE_REDIS_DB=0');
+      expect(output).toContain('QUEUE_REDIS_DB=1');
+      expect(output).toContain('UNRELATED_SETTING=preserved');
+      expect(output).not.toContain('postgres.abcdefghijklmnopqrst');
+      expect(output.match(/^DATABASE_URL=/gm)).toHaveLength(1);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   test('keeps queue copy and cache publication separately manifest-gated', () => {
