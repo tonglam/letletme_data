@@ -12,6 +12,8 @@ export type MigrationLoginSnapshot = {
   readonly publicFunctionCount: number;
   readonly publicEnumCount: number;
   readonly wrongPublicOwnerCount: number;
+  readonly invalidPreactivationSchemaCount: number;
+  readonly preactivationSchemaObjectCount: number;
   readonly inheritedRoles: readonly string[];
   readonly canWriteMigrationLedger: boolean;
 };
@@ -42,6 +44,12 @@ export function assertV3MigrationLoginSnapshot(snapshot: MigrationLoginSnapshot)
   }
 
   if (snapshot.migrationState === 'preactivation') {
+    if (
+      snapshot.invalidPreactivationSchemaCount !== 0 ||
+      snapshot.preactivationSchemaObjectCount !== 0
+    ) {
+      throw new Error('Pre-activation v3 schema scope or ownership is invalid');
+    }
     if (snapshot.inheritedRoles.includes('letletme_data_owner')) {
       throw new Error('Pre-activation migration LOGIN unexpectedly inherits the v3 owner');
     }

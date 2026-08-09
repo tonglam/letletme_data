@@ -20,6 +20,8 @@ type BaseContractRow = {
   public_function_count: number;
   public_enum_count: number;
   wrong_public_owner_count: number;
+  invalid_preactivation_schema_count: number;
+  preactivation_schema_object_count: number;
 };
 
 async function main(): Promise<void> {
@@ -71,7 +73,49 @@ async function main(): Promise<void> {
               AND type_row.typtype = 'e'
           ) owned_objects
           WHERE owned_objects.owner_oid <> role_row.oid
-        ) AS wrong_public_owner_count
+        ) AS wrong_public_owner_count,
+        (
+          SELECT count(*)::integer
+          FROM pg_namespace namespace_row
+          WHERE namespace_row.nspname IN (
+            'fpl', 'competition', 'understat', 'bridge', 'reporting', 'ops'
+          )
+            AND (
+              namespace_row.nspname <> 'fpl'
+              OR namespace_row.nspowner <> role_row.oid
+            )
+        ) AS invalid_preactivation_schema_count,
+        (
+          SELECT count(*)::integer
+          FROM (
+            SELECT relation_row.oid
+            FROM pg_class relation_row
+            JOIN pg_namespace namespace_row ON namespace_row.oid = relation_row.relnamespace
+            WHERE namespace_row.nspname IN (
+              'fpl', 'competition', 'understat', 'bridge', 'reporting', 'ops'
+            )
+              AND relation_row.relkind IN ('r', 'p', 'm', 'v', 'S')
+
+            UNION ALL
+
+            SELECT function_row.oid
+            FROM pg_proc function_row
+            JOIN pg_namespace namespace_row ON namespace_row.oid = function_row.pronamespace
+            WHERE namespace_row.nspname IN (
+              'fpl', 'competition', 'understat', 'bridge', 'reporting', 'ops'
+            )
+
+            UNION ALL
+
+            SELECT type_row.oid
+            FROM pg_type type_row
+            JOIN pg_namespace namespace_row ON namespace_row.oid = type_row.typnamespace
+            WHERE namespace_row.nspname IN (
+              'fpl', 'competition', 'understat', 'bridge', 'reporting', 'ops'
+            )
+              AND type_row.typtype IN ('d', 'e')
+          ) preactivation_objects
+        ) AS preactivation_schema_object_count
       FROM pg_roles role_row
       WHERE role_row.rolname = current_user
     `;
@@ -130,6 +174,8 @@ async function main(): Promise<void> {
       publicFunctionCount: base.public_function_count,
       publicEnumCount: base.public_enum_count,
       wrongPublicOwnerCount: base.wrong_public_owner_count,
+      invalidPreactivationSchemaCount: base.invalid_preactivation_schema_count,
+      preactivationSchemaObjectCount: base.preactivation_schema_object_count,
       inheritedRoles: inheritedRows.map((row) => row.role_name),
       canWriteMigrationLedger,
     };
@@ -147,6 +193,10 @@ async function main(): Promise<void> {
             functions: snapshot.publicFunctionCount,
             enums: snapshot.publicEnumCount,
             wrongOwners: snapshot.wrongPublicOwnerCount,
+          },
+          preactivationTargetSchemas: {
+            invalidSchemas: snapshot.invalidPreactivationSchemaCount,
+            objects: snapshot.preactivationSchemaObjectCount,
           },
           inheritedRoles: snapshot.inheritedRoles,
         },

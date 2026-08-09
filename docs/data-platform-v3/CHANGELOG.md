@@ -10,6 +10,8 @@
 - Made isolated B0 ownership normalization transactional and faithful to production for the 220
   public relations plus the template-owned `bauth` and `wechat` application schemas, before Web
   or Data migrations run.
+- Added a pre-DDL contract for the production-B0 empty `fpl` placeholder after rehearsal 3 proved
+  that `pg_restore --no-owner` can retain the Supabase image template's different schema owner.
 
 ## 2026-08-09 - Post-cleanup B1 recovery and final performance gate
 

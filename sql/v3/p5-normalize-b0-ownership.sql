@@ -22,6 +22,7 @@ DECLARE
   public_function_count bigint;
   public_relation_count bigint;
   bauth_relation_count bigint;
+  fpl_relation_count bigint;
   wechat_relation_count bigint;
   target_owner_name text := current_setting('letletme.p5_target_owner', true);
 BEGIN
@@ -61,8 +62,10 @@ BEGIN
     RAISE EXCEPTION 'P5 B0 target owner must be the direct Supabase postgres role';
   END IF;
 
-  IF to_regnamespace('bauth') IS NULL OR to_regnamespace('wechat') IS NULL THEN
-    RAISE EXCEPTION 'P5 B0 Web application schemas are incomplete';
+  IF to_regnamespace('bauth') IS NULL
+     OR to_regnamespace('fpl') IS NULL
+     OR to_regnamespace('wechat') IS NULL THEN
+    RAISE EXCEPTION 'P5 B0 source application schemas are incomplete';
   END IF;
 
   SELECT count(*) INTO bauth_relation_count
@@ -75,10 +78,16 @@ BEGIN
   WHERE relation_row.relnamespace = 'wechat'::regnamespace
     AND relation_row.relkind IN ('r', 'p', 'm', 'v', 'S');
 
-  IF bauth_relation_count <> 13 OR wechat_relation_count <> 4 THEN
+  SELECT count(*) INTO fpl_relation_count
+  FROM pg_class relation_row
+  WHERE relation_row.relnamespace = 'fpl'::regnamespace
+    AND relation_row.relkind IN ('r', 'p', 'm', 'v', 'S');
+
+  IF bauth_relation_count <> 13 OR fpl_relation_count <> 0 OR wechat_relation_count <> 4 THEN
     RAISE EXCEPTION
-      'P5 B0 Web scope mismatch: bauth relations=%, wechat relations=%',
+      'P5 B0 source scope mismatch: bauth relations=%, fpl relations=%, wechat relations=%',
       bauth_relation_count,
+      fpl_relation_count,
       wechat_relation_count;
   END IF;
 END
@@ -89,7 +98,7 @@ DECLARE
   schema_name text;
   target_owner_name text := current_setting('letletme.p5_target_owner', true);
 BEGIN
-  FOREACH schema_name IN ARRAY ARRAY['bauth', 'wechat']
+  FOREACH schema_name IN ARRAY ARRAY['bauth', 'fpl', 'wechat']
   LOOP
     IF (SELECT nspowner FROM pg_namespace WHERE nspname = schema_name)
        <> (SELECT oid FROM pg_roles WHERE rolname = target_owner_name) THEN
@@ -109,7 +118,7 @@ BEGIN
     SELECT namespace_row.nspname, relation_row.relname, relation_row.relkind
     FROM pg_class relation_row
     JOIN pg_namespace namespace_row ON namespace_row.oid = relation_row.relnamespace
-    WHERE namespace_row.nspname IN ('bauth', 'wechat')
+    WHERE namespace_row.nspname IN ('bauth', 'fpl', 'wechat')
       AND relation_row.relkind IN ('r', 'p', 'm', 'v')
       AND relation_row.relowner <> (SELECT oid FROM pg_roles WHERE rolname = target_owner_name)
     ORDER BY namespace_row.nspname, relation_row.relkind, relation_row.relname
@@ -141,7 +150,7 @@ BEGIN
     SELECT namespace_row.nspname, relation_row.relname
     FROM pg_class relation_row
     JOIN pg_namespace namespace_row ON namespace_row.oid = relation_row.relnamespace
-    WHERE namespace_row.nspname IN ('bauth', 'wechat')
+    WHERE namespace_row.nspname IN ('bauth', 'fpl', 'wechat')
       AND relation_row.relkind = 'S'
       AND relation_row.relowner <> (SELECT oid FROM pg_roles WHERE rolname = target_owner_name)
     ORDER BY namespace_row.nspname, relation_row.relname
@@ -272,13 +281,13 @@ BEGIN
   ) OR EXISTS (
     SELECT 1
     FROM pg_namespace namespace_row
-    WHERE namespace_row.nspname IN ('bauth', 'wechat')
+    WHERE namespace_row.nspname IN ('bauth', 'fpl', 'wechat')
       AND namespace_row.nspowner <> (SELECT oid FROM pg_roles WHERE rolname = target_owner_name)
   ) OR EXISTS (
     SELECT 1
     FROM pg_class relation_row
     JOIN pg_namespace namespace_row ON namespace_row.oid = relation_row.relnamespace
-    WHERE namespace_row.nspname IN ('bauth', 'wechat')
+    WHERE namespace_row.nspname IN ('bauth', 'fpl', 'wechat')
       AND relation_row.relkind IN ('r', 'p', 'm', 'v', 'S')
       AND relation_row.relowner <> (SELECT oid FROM pg_roles WHERE rolname = target_owner_name)
   ) THEN

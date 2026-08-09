@@ -19,6 +19,8 @@ const preactivation: MigrationLoginSnapshot = {
   publicFunctionCount: 6,
   publicEnumCount: 20,
   wrongPublicOwnerCount: 0,
+  invalidPreactivationSchemaCount: 0,
+  preactivationSchemaObjectCount: 0,
   inheritedRoles: [],
   canWriteMigrationLedger: false,
 };
@@ -37,6 +39,21 @@ describe('v3 migration LOGIN gate', () => {
         bypassRls: false,
       }),
     ).toThrow('Supabase postgres');
+  });
+
+  test('rejects a contaminated or wrongly owned pre-activation target schema', () => {
+    expect(() =>
+      assertV3MigrationLoginSnapshot({
+        ...preactivation,
+        invalidPreactivationSchemaCount: 1,
+      }),
+    ).toThrow('schema scope or ownership');
+    expect(() =>
+      assertV3MigrationLoginSnapshot({
+        ...preactivation,
+        preactivationSchemaObjectCount: 1,
+      }),
+    ).toThrow('schema scope or ownership');
   });
 
   test('accepts an activated migration login with owner membership and ledger access', () => {

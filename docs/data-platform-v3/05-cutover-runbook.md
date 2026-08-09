@@ -47,6 +47,9 @@ Validation requirements:
   owner with `BYPASSRLS`;
 - every P0-approved `public` relation, sequence, function, and enum is owned by that migration
   login; an ownership difference stops before `0079` mutates anything;
+- before `0079`, only the production-B0 empty `fpl` placeholder may exist among the six v3 target
+  schemas; it must be owned by the direct `postgres` LOGIN and contain zero relations, functions,
+  enums, and domains. Any other target schema/object or owner fails the migration contract;
 - queue/cache endpoints are distinct and neither value is logged.
 
 The approved release manifest is generated only after candidate SHAs and image digests are frozen.
@@ -102,11 +105,12 @@ the example above is not permission to omit required Data source objects or incl
    restart, verify the setting, and only then clone or prepare a rehearsal/cutover target.
 9. On an isolated Supabase-image `p5_*` rehearsal database, run the committed
    `sql/v3/p5-normalize-b0-ownership.sql` as the local image administrator before any Web/Data
-   migration. It must assign all 220 public relations, six functions, 20 enums, both application
-   schemas, 13 `bauth` relations, and four `wechat` relations to the direct `postgres` migration
-   LOGIN. This compensates only for `--no-owner` plus template-owned schemas; the script refuses a
-   non-`p5_*` database and must never run against production. Compare the resulting owner manifest
-   to the live B0 source owner manifest.
+   migration. It must assign all 220 public relations, six functions, 20 enums, the `bauth` and
+   `wechat` application schemas, and the empty pre-v3 `fpl` placeholder schema to the direct
+   `postgres` migration LOGIN; the exact private relation counts are 13, four, and zero,
+   respectively. This compensates only for `--no-owner` plus template-owned schemas; the script
+   refuses a non-`p5_*` database and must never run against production. Compare the resulting owner
+   manifest to the live B0 source owner manifest.
 10. Run the complete B0 reconciliation suite. Archive restore logs and reports.
 
 B0 is invalid if a dump succeeded but either restore was not tested.

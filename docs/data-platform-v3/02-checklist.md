@@ -16,7 +16,7 @@ durable path, SHA, query result, run URL, or backup manifest. Verbal confirmatio
 | Production project | `gtwcfjoviibmtkevurjw` |
 | Plan version | 3.2.4 |
 | Cutover approver | User |
-| Current phase | P5 in progress; rehearsal-3 B0 ownership and Web pre-cutover maintenance/auth gates accepted; exact-order Data activation, runtime-role journeys, and candidate freeze pending |
+| Current phase | P5 in progress; rehearsal-3 rejected on template-owned empty `fpl` schema; fail-fast gate corrected and fresh exact-order rehearsal-4 required |
 
 ## P0 - Freeze and inventory
 
@@ -130,15 +130,15 @@ P2 exit gate: migrations reproduce the target from fresh and B0 schemas and all 
 
 | Done | ID | Check | Acceptance | Evidence |
 | --- | --- | --- | --- | --- |
-| [ ] | P5-01 | Rehearsal run 1 | Complete runbook, no undocumented intervention | `19-p5-rehearsal-run-1.md`; `22-p5-rehearsal-run-2-rejected.md`; external `p5/rehearsal-3/` has fresh B0/Redis, exact production-owner normalization, and accepted Web pre-cutover; activation pending |
+| [ ] | P5-01 | Rehearsal run 1 | Complete runbook, no undocumented intervention | `19-p5-rehearsal-run-1.md`; `22-p5-rehearsal-run-2-rejected.md`; `23-p5-rehearsal-run-3-rejected.md`; fresh corrected replay required |
 | [x] | P5-02 | Rollback before activation | v2 remains unchanged | `17-p5-rollback-drills.md`; full public data/sequence/security diffs 0 bytes; old Data SHA status and readiness pass |
 | [x] | P5-03 | Rollback after activation/pre-cleanup | Old SHAs and v2 writer restore without overlap | `17-p5-rollback-drills.md`; full B0 public/sequence/security/bauth diffs 0 bytes; old Data/GraphQL/Web stack all probes 200 |
 | [x] | P5-04 | Simulated post-cleanup B1 restore | Selective/full recovery works | `21-p5-postcleanup-b1-restore.md`; external `p5/postcleanup-b1/manifests/b1-rehearsal-manifest.json` SHA-256 `beb2ce3403ece550b80c655751827ebc52b7a040cceb90b3b8220c1ddebbe2be`; all full/selective data/security/ops diffs 0 |
-| [ ] | P5-05 | Rehearsal run 2 | Same target hashes; timing within budget | `22-p5-rehearsal-run-2-rejected.md`; replacement rehearsal-3 environment restored from B0 with public relation/sequence/security diffs 0; activation replay pending |
+| [ ] | P5-05 | Rehearsal run 2 | Same target hashes; timing within budget | `22-p5-rehearsal-run-2-rejected.md`; `23-p5-rehearsal-run-3-rejected.md`; two accepted corrected replays still required |
 | [x] | P5-06 | Data quality matrix | All critical/high checks pass | `19-p5-rehearsal-run-1.md`; 51 passed, 0 failed; B0/v3 hash diffs 0 |
 | [x] | P5-07 | Performance budgets | Every budget passes or has accepted plan revision | `19-p5-rehearsal-run-1.md`; `20-p5-redis-cutover-rehearsal.md`; `21-p5-postcleanup-b1-restore.md`; cleaned DB 391,545,347 bytes vs 512,218,885-byte ceiling |
-| [ ] | P5-08 | Security/grant tests | Least privilege and private schemas pass | Data migration/runtime split `1ac2833`; exact GraphQL recursive role contract `a90a05f`; rehearsal-3 Web LOGIN/sole membership and admin-negative contract pass; Data/GraphQL live role gates pending |
-| [ ] | P5-09 | End-to-end journeys | Selections/player/live/market/tournament/auth pass | Rehearsal-3 English/Chinese maintenance 503, GraphQL proxy 503, Auth session 200; postactivation journeys with dedicated Data writer remain pending |
+| [ ] | P5-08 | Security/grant tests | Least privilege and private schemas pass | Data migration/runtime split `1ac2833`; exact GraphQL recursive role contract `a90a05f`; run-3 preactivation schema guard added after rejected attempt; fresh Data/GraphQL live role gates pending |
+| [ ] | P5-09 | End-to-end journeys | Selections/player/live/market/tournament/auth pass | Rehearsal-3 maintenance/Auth preactivation probes passed but rejected run cannot close this gate; all journeys must repeat after a clean activation using the dedicated Data writer |
 | [ ] | P5-10 | Freeze candidate SHAs/digests/checksums | External release manifest immutable; no self-reference | Manifest: |
 
 ## P6 - Production activation
