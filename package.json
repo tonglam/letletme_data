@@ -30,7 +30,8 @@
     "db:studio": "bunx drizzle-kit studio",
     "db:apply-sql": "bun scripts/apply-sql-migrations.ts",
     "db:migrate:status": "bun scripts/apply-sql-migrations.ts --status",
-    "redis:cutover": "bun scripts/v3-redis-cutover.ts"
+    "redis:cutover": "bun scripts/v3-redis-cutover.ts",
+    "cache:publish-core": "bun scripts/v3-publish-core-cache.ts"
   },
   "repository": {
     "type": "git",

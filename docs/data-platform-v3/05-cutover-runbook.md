@@ -107,6 +107,10 @@ All fields below must be attached to the run record:
 - dedicated Data writer, GraphQL reader, and Web auth logins mapped only to their capability roles;
   no runtime may use the migration login. Web `DATABASE_URL` must pass `db:runtime-contract`, while
   its administrator connection is supplied only as `DIRECT_DATABASE_URL` to migration commands.
+- Web migration `0008_web_auth_runtime_role.sql` is applied and its dedicated LOGIN is provisioned
+  before maintenance starts. This migration changes only the Better Auth security boundary; it
+  does not create or mutate any FPL/competition/provider fact. The accepted pre-cutover Web build
+  must pass `db:runtime-contract` with that LOGIN before it can serve maintenance.
 
 If any artifact differs from the latest reviewed commit, stop and repeat the affected rehearsal.
 
@@ -141,15 +145,20 @@ canonical equality contract for restored hashes.
    locking and records each object/season conversion in `ops.migration_objects`.
 5. Run Data migration status. Apply exactly `0079` through `0090_zzz` from the release manifest. Save
    stdout/stderr and exit status without connection secrets.
-6. Apply Web migration `0008_web_auth_runtime_role.sql` with
-   `CUTOVER_WEB_MIGRATION_DATABASE_URL`, provision a separate LOGIN inheriting only
-   `letletme_web_auth`, switch Web `DATABASE_URL` to that login, and start the candidate Web build
-   in maintenance mode. `db:runtime-contract` and a private auth-session probe must pass; an admin
-   URL must exit non-zero.
+6. Re-run Web migration status (the pre-cutover `0008` application must be a no-op), revalidate the
+   dedicated LOGIN, and switch from the accepted maintenance build to the candidate Web build
+   while keeping maintenance enabled. `db:runtime-contract` and a private auth-session probe must
+   pass; an admin URL must exit non-zero.
 7. Run exact target schema checks, counts, hashes, constraints, FKs, join-shape, summary, market,
    tournament, provider, grant, and advisor checks.
 8. Refresh initial reporting MVs and validate all publication gates.
-9. Build the initial immutable v3 core/live Redis revision and atomically activate its manifest.
+9. Dry-run `bun run cache:publish-core`, verify its exact run/publication/revision/count contract,
+   then execute it with `V3_CORE_CACHE_APPROVAL="APPROVE_V3_CORE_CACHE <CUTOVER_RUN_ID>"` and
+   `--execute`, using the candidate Data runtime `DATABASE_URL` rather than the migration URL. The
+   command rejects admin/migration/GraphQL logins, reads the activated database publication,
+   writes only immutable v3 Redis revision keys, atomically activates the pointer, and performs an
+   exact read-back. Build the initial live revision only when a current event exists; preseason
+   legitimately has none.
 10. Start Data API/workers. Validate health, readiness, sync fencing, DB writes, and Redis manifests.
 11. Start GraphQL with the read-only role. Validate startup contract and private smoke queries.
 12. Run Web private smoke journeys. Disable maintenance only when all pass.
