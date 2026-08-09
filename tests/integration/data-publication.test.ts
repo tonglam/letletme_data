@@ -15,6 +15,10 @@ import {
   retireActiveDataPublication,
   type PublishDataRevisionInput,
 } from '../../src/cache/data-publication';
+import {
+  publishLiveSnapshotCache,
+  readLiveSnapshotCache,
+} from '../../src/cache/live-snapshot-cache';
 
 const CORE_SCOPE = { dataset: 'fpl:core' as const, seasonCode: '9899' };
 const LIVE_SCOPE = {
@@ -110,6 +114,64 @@ describe('immutable v3 Redis publication', () => {
     });
     await expectPermanent(redis, activeDataPublicationKey(CORE_SCOPE));
     for (const item of result.manifest.items) await expectPermanent(redis, item.key);
+  });
+
+  test('publishes exactly one canonical four-item live contract', async () => {
+    const result = await publishLiveSnapshotCache(
+      {
+        season: LIVE_SCOPE.seasonCode,
+        eventId: LIVE_SCOPE.eventId,
+        state: 'live',
+        eventLives: [],
+        fixtures: [],
+        liveFixtures: {
+          '1': {
+            Playing: [
+              {
+                fixtureId: 101,
+                teamId: 1,
+                teamName: 'One',
+                teamShortName: 'ONE',
+                teamScore: 1,
+                teamPosition: 1,
+                againstId: 2,
+                againstName: 'Two',
+                againstShortName: 'TWO',
+                againstTeamScore: 0,
+                againstTeamPosition: 2,
+                kickoffTime: '2026-08-09T01:00:00.000Z',
+                score: '1-0',
+                wasHome: true,
+                started: true,
+                finished: false,
+              },
+            ],
+            Not_Start: [],
+            Finished: [],
+          },
+        },
+        liveBonus: { '1': { '10': 5 } },
+      },
+      {
+        redis,
+        revision: 5,
+        publicationId: PUBLICATION_IDS.four,
+        sourceCheckedAt: new Date('2026-08-09T04:00:00.000Z'),
+      },
+    );
+
+    expect(result.manifest.items.map((item) => item.name)).toEqual([
+      'eventLives',
+      'fixtures',
+      'liveFixtures',
+      'liveBonus',
+    ]);
+    expect(
+      await readLiveSnapshotCache(LIVE_SCOPE.seasonCode, LIVE_SCOPE.eventId, redis),
+    ).toMatchObject({
+      liveFixtures: { '1': { Playing: [{ fixtureId: 101 }] } },
+      liveBonus: { '1': { '10': 5 } },
+    });
   });
 
   test('a crash after staging leaves the prior revision active and the stage bounded', async () => {

@@ -3,11 +3,8 @@ import type { TeamId } from '../types/base.type';
 import type { Fixture, Team } from '../types';
 import type {
   LiveFixtureByStatus,
-  LiveFixtureByStatusV2,
   LiveFixtureData,
-  LiveFixtureDataV2,
   LiveFixturesByTeam,
-  LiveFixturesV2ByTeam,
   MatchPlayStatus,
 } from '../domain/live-fixtures';
 
@@ -21,19 +18,10 @@ function initTeamBucket(): LiveFixtureByStatus {
   return { Playing: [], Not_Start: [], Finished: [] };
 }
 
-function initTeamBucketV2(): LiveFixtureByStatusV2 {
-  return { Playing: [], Not_Start: [], Finished: [] };
-}
-
 export interface LiveFixtureTeamMaps {
   nameById: Map<number, string>;
   shortNameById: Map<number, string>;
   positionById: Map<number, number>;
-}
-
-export interface LiveFixtureViews {
-  legacy: LiveFixturesByTeam;
-  v2: LiveFixturesV2ByTeam;
 }
 
 export function createLiveFixtureTeamMaps(teams: readonly Team[]): LiveFixtureTeamMaps {
@@ -50,7 +38,7 @@ export function createLiveFixtureTeamMaps(teams: readonly Team[]): LiveFixtureTe
   return { nameById, shortNameById, positionById };
 }
 
-function toLiveFixtureViews(
+function toLiveFixture(
   fixture: Fixture,
   teamId: TeamId,
   againstId: TeamId,
@@ -60,14 +48,15 @@ function toLiveFixtureViews(
   nameById: Map<number, string>,
   shortNameById: Map<number, string>,
   positionById: Map<number, number>,
-): { legacy: LiveFixtureData; v2: LiveFixtureDataV2 } {
+): LiveFixtureData {
   const kickoffTime = fixture.kickoffTime ? fixture.kickoffTime.toISOString() : null;
   const started = fixture.started ?? false;
   const finished = Boolean(fixture.finishedProvisional || fixture.finished);
   const safeTeamScore = teamScore ?? 0;
   const safeAgainstScore = againstScore ?? 0;
 
-  const legacy: LiveFixtureData = {
+  return {
+    fixtureId: fixture.id,
     teamId,
     teamName: nameById.get(teamId) ?? '',
     teamShortName: shortNameById.get(teamId) ?? '',
@@ -84,19 +73,13 @@ function toLiveFixtureViews(
     started,
     finished,
   };
-
-  return {
-    legacy,
-    v2: { fixtureId: fixture.id, ...legacy },
-  };
 }
 
-export function buildLiveFixtureViews(
+export function buildLiveFixturesByTeam(
   fixtures: Fixture[],
   maps: LiveFixtureTeamMaps,
-): LiveFixtureViews {
-  const legacyByTeam = new Map<number, LiveFixtureByStatus>();
-  const v2ByTeam = new Map<number, LiveFixtureByStatusV2>();
+): LiveFixturesByTeam {
+  const byTeam = new Map<number, LiveFixtureByStatus>();
   const { nameById, shortNameById, positionById } = maps;
 
   for (const fixture of [...fixtures].sort((a, b) => a.id - b.id)) {
@@ -107,7 +90,7 @@ export function buildLiveFixtureViews(
     const homeId = fixture.teamH as TeamId;
     const awayId = fixture.teamA as TeamId;
 
-    const homeFixture = toLiveFixtureViews(
+    const homeFixture = toLiveFixture(
       fixture,
       homeId,
       awayId,
@@ -118,14 +101,11 @@ export function buildLiveFixtureViews(
       shortNameById,
       positionById,
     );
-    const homeLegacyBucket = legacyByTeam.get(homeId) ?? initTeamBucket();
-    homeLegacyBucket[status].push(homeFixture.legacy);
-    legacyByTeam.set(homeId, homeLegacyBucket);
-    const homeV2Bucket = v2ByTeam.get(homeId) ?? initTeamBucketV2();
-    homeV2Bucket[status].push(homeFixture.v2);
-    v2ByTeam.set(homeId, homeV2Bucket);
+    const homeBucket = byTeam.get(homeId) ?? initTeamBucket();
+    homeBucket[status].push(homeFixture);
+    byTeam.set(homeId, homeBucket);
 
-    const awayFixture = toLiveFixtureViews(
+    const awayFixture = toLiveFixture(
       fixture,
       awayId,
       homeId,
@@ -136,29 +116,14 @@ export function buildLiveFixtureViews(
       shortNameById,
       positionById,
     );
-    const awayLegacyBucket = legacyByTeam.get(awayId) ?? initTeamBucket();
-    awayLegacyBucket[status].push(awayFixture.legacy);
-    legacyByTeam.set(awayId, awayLegacyBucket);
-    const awayV2Bucket = v2ByTeam.get(awayId) ?? initTeamBucketV2();
-    awayV2Bucket[status].push(awayFixture.v2);
-    v2ByTeam.set(awayId, awayV2Bucket);
+    const awayBucket = byTeam.get(awayId) ?? initTeamBucket();
+    awayBucket[status].push(awayFixture);
+    byTeam.set(awayId, awayBucket);
   }
 
-  const legacy: Record<string, LiveFixtureByStatus> = {};
-  for (const [teamId, bucket] of legacyByTeam.entries()) {
-    legacy[String(teamId)] = bucket;
+  const result: Record<string, LiveFixtureByStatus> = {};
+  for (const [teamId, bucket] of byTeam.entries()) {
+    result[String(teamId)] = bucket;
   }
-  const v2: Record<string, LiveFixtureByStatusV2> = {};
-  for (const [teamId, bucket] of v2ByTeam.entries()) {
-    v2[String(teamId)] = bucket;
-  }
-
-  return { legacy, v2 };
-}
-
-export function buildLiveFixturesByTeam(
-  fixtures: Fixture[],
-  maps: LiveFixtureTeamMaps,
-): LiveFixturesByTeam {
-  return buildLiveFixtureViews(fixtures, maps).legacy;
+  return result;
 }

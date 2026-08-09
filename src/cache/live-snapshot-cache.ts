@@ -2,7 +2,7 @@ import type Redis from 'ioredis';
 
 import type { EventLive } from '../domain/event-lives';
 import type { LiveBonusByTeam } from '../domain/live-bonus';
-import type { LiveFixturesByTeam, LiveFixturesV2ByTeam } from '../domain/live-fixtures';
+import type { LiveFixturesByTeam } from '../domain/live-fixtures';
 import type { LiveSnapshotState } from '../domain/live-snapshot';
 import type { Fixture } from '../types';
 import {
@@ -20,9 +20,7 @@ export interface LiveSnapshotCachePayload {
   readonly eventLives: readonly EventLive[];
   readonly fixtures: readonly Fixture[];
   readonly liveFixtures: LiveFixturesByTeam;
-  readonly liveFixturesV2: LiveFixturesV2ByTeam;
   readonly liveBonus: LiveBonusByTeam;
-  readonly liveBonusV2: LiveBonusByTeam;
 }
 
 export interface LiveSnapshotCacheContents extends LiveSnapshotCachePayload {
@@ -61,9 +59,7 @@ export async function publishLiveSnapshotCache(
         { name: 'eventLives', value: payload.eventLives },
         { name: 'fixtures', value: payload.fixtures },
         { name: 'liveFixtures', value: payload.liveFixtures },
-        { name: 'liveFixturesV2', value: payload.liveFixturesV2 },
         { name: 'liveBonus', value: payload.liveBonus },
-        { name: 'liveBonusV2', value: payload.liveBonusV2 },
       ],
     },
     options,
@@ -93,12 +89,8 @@ export async function readLiveSnapshotCache(
     !Array.isArray(items.fixtures) ||
     !items.liveFixtures ||
     typeof items.liveFixtures !== 'object' ||
-    !items.liveFixturesV2 ||
-    typeof items.liveFixturesV2 !== 'object' ||
     !items.liveBonus ||
     typeof items.liveBonus !== 'object' ||
-    !items.liveBonusV2 ||
-    typeof items.liveBonusV2 !== 'object' ||
     (manifest.state !== 'scheduled' && manifest.state !== 'live' && manifest.state !== 'settled')
   ) {
     return null;
@@ -112,9 +104,7 @@ export async function readLiveSnapshotCache(
     eventLives: items.eventLives as EventLive[],
     fixtures: items.fixtures as Fixture[],
     liveFixtures: items.liveFixtures as LiveFixturesByTeam,
-    liveFixturesV2: items.liveFixturesV2 as LiveFixturesV2ByTeam,
     liveBonus: items.liveBonus as LiveBonusByTeam,
-    liveBonusV2: items.liveBonusV2 as LiveBonusByTeam,
   };
 }
 

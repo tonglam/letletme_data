@@ -15,12 +15,8 @@ import { readDatabaseOrderingTimestamp } from '../db/ordering-timestamp';
 import type { DbOrTransaction } from '../db/singleton';
 import type { EventLive } from '../domain/event-lives';
 import type { FplSeasonRef } from '../domain/fpl-season';
-import {
-  buildPlayingMatches,
-  computeFixtureSummedBonusByTeam,
-  computeLiveBonusByTeam,
-  type LiveBonusByTeam,
-} from '../domain/live-bonus';
+import { computeFixtureSummedBonusByTeam, type LiveBonusByTeam } from '../domain/live-bonus';
+import type { LiveFixturesByTeam } from '../domain/live-fixtures';
 import type { LiveSnapshotState } from '../domain/live-snapshot';
 import { createFixtureRepository, fixtureRepository } from '../repositories/fixtures';
 import { createPlayerRepository } from '../repositories/players';
@@ -37,10 +33,9 @@ import {
 } from './event-lives.service';
 import { serializeBonusByTeam } from './live-bonus.service';
 import {
-  buildLiveFixtureViews,
+  buildLiveFixturesByTeam,
   createLiveFixtureTeamMaps,
   type LiveFixtureTeamMaps,
-  type LiveFixtureViews,
 } from './live-fixtures.service';
 import { withCoreSnapshotReadLock } from './core-snapshot-persistence.service';
 
@@ -54,9 +49,8 @@ export interface PreparedLiveSnapshot {
   readonly eventId: number;
   readonly eventLives: PreparedEventLives;
   readonly fixtures: Fixture[];
-  readonly fixtureViews: LiveFixtureViews;
+  readonly liveFixtures: LiveFixturesByTeam;
   readonly liveBonus: LiveBonusByTeam;
-  readonly liveBonusV2: LiveBonusByTeam;
   readonly state: LiveSnapshotState;
 }
 
@@ -118,8 +112,8 @@ export interface LiveSnapshotSyncOptions {
   readonly dependencies?: LiveSnapshotDependencies;
 }
 
-function fixtureTeamCount(views: LiveFixtureViews): number {
-  return Object.keys(views.v2).length;
+function fixtureTeamCount(fixtures: LiveFixturesByTeam): number {
+  return Object.keys(fixtures).length;
 }
 
 function bonusTeamCount(bonus: LiveBonusByTeam): number {
@@ -279,24 +273,16 @@ export function prepareLiveSnapshot(
   ) {
     throw new Error(`Incomplete fixture transformation for live snapshot event ${eventId}`);
   }
-  const fixtureViews = buildLiveFixtureViews(fixtures, referenceData);
-  const liveBonusV2 = serializeBonusByTeam(computeFixtureSummedBonusByTeam(fixtures));
-  const livesWithTeam = eventLives.eventLives.map((live) => ({
-    ...live,
-    teamId: referenceData.playerTeamById.get(live.elementId)!,
-  }));
-  const liveBonus = serializeBonusByTeam(
-    computeLiveBonusByTeam(buildPlayingMatches(fixtureViews.legacy), livesWithTeam),
-  );
+  const liveFixtures = buildLiveFixturesByTeam(fixtures, referenceData);
+  const liveBonus = serializeBonusByTeam(computeFixtureSummedBonusByTeam(fixtures));
 
   return {
     season: referenceData.season,
     eventId,
     eventLives,
     fixtures,
-    fixtureViews,
+    liveFixtures,
     liveBonus,
-    liveBonusV2,
     state: resolveSnapshotState(fixtures),
   };
 }
@@ -400,10 +386,8 @@ function toCachePayload(prepared: PreparedLiveSnapshot): LiveSnapshotCachePayloa
     state: prepared.state,
     eventLives: prepared.eventLives.eventLives,
     fixtures: prepared.fixtures,
-    liveFixtures: prepared.fixtureViews.legacy,
-    liveFixturesV2: prepared.fixtureViews.v2,
+    liveFixtures: prepared.liveFixtures,
     liveBonus: prepared.liveBonus,
-    liveBonusV2: prepared.liveBonusV2,
   };
 }
 
@@ -421,9 +405,7 @@ function snapshotContentMatches(
       sameJson(active.eventLives, candidate.eventLives) &&
       sameJson(active.fixtures, candidate.fixtures) &&
       sameJson(active.liveFixtures, candidate.liveFixtures) &&
-      sameJson(active.liveFixturesV2, candidate.liveFixturesV2) &&
-      sameJson(active.liveBonus, candidate.liveBonus) &&
-      sameJson(active.liveBonusV2, candidate.liveBonusV2),
+      sameJson(active.liveBonus, candidate.liveBonus),
   );
 }
 
@@ -555,8 +537,8 @@ export async function syncLiveSnapshot(
         state: prepared.state,
         eventLiveCount: prepared.eventLives.eventLives.length,
         fixtureCount: prepared.fixtures.length,
-        fixtureTeamCount: fixtureTeamCount(prepared.fixtureViews),
-        bonusTeamCount: bonusTeamCount(prepared.liveBonusV2),
+        fixtureTeamCount: fixtureTeamCount(prepared.liveFixtures),
+        bonusTeamCount: bonusTeamCount(prepared.liveBonus),
         persistedFixtures: false,
         persistedEventLives,
       };
@@ -618,8 +600,8 @@ export async function syncLiveSnapshot(
         state: prepared.state,
         eventLiveCount: prepared.eventLives.eventLives.length,
         fixtureCount: prepared.fixtures.length,
-        fixtureTeamCount: fixtureTeamCount(prepared.fixtureViews),
-        bonusTeamCount: bonusTeamCount(prepared.liveBonusV2),
+        fixtureTeamCount: fixtureTeamCount(prepared.liveFixtures),
+        bonusTeamCount: bonusTeamCount(prepared.liveBonus),
         persistedFixtures,
         persistedEventLives,
       };
@@ -643,8 +625,8 @@ export async function syncLiveSnapshot(
       state: prepared.state,
       eventLiveCount: prepared.eventLives.eventLives.length,
       fixtureCount: prepared.fixtures.length,
-      fixtureTeamCount: fixtureTeamCount(prepared.fixtureViews),
-      bonusTeamCount: bonusTeamCount(prepared.liveBonusV2),
+      fixtureTeamCount: fixtureTeamCount(prepared.liveFixtures),
+      bonusTeamCount: bonusTeamCount(prepared.liveBonus),
       persistedFixtures,
       persistedEventLives,
     };

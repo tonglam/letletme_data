@@ -5,6 +5,7 @@ import type { EventId, TeamId } from '../types/base.type';
 export type MatchPlayStatus = 'Playing' | 'Not_Start' | 'Finished';
 
 export interface LiveFixtureData {
+  readonly fixtureId: number;
   readonly teamId: TeamId;
   readonly teamName: string;
   readonly teamShortName: string;
@@ -22,15 +23,6 @@ export interface LiveFixtureData {
   readonly finished: boolean;
 }
 
-/**
- * Additive fixture-scoped contract used by new consumers. The legacy
- * `LiveFixture` payload is frozen, so fixture identity lives under the
- * `LiveFixtureV2` key instead of changing existing values in place.
- */
-export interface LiveFixtureDataV2 extends LiveFixtureData {
-  readonly fixtureId: number;
-}
-
 export interface LiveFixtureByStatus {
   readonly Playing: LiveFixtureData[];
   readonly Not_Start: LiveFixtureData[];
@@ -39,20 +31,13 @@ export interface LiveFixtureByStatus {
 
 export type LiveFixturesByTeam = Readonly<Record<string, LiveFixtureByStatus>>;
 
-export interface LiveFixtureByStatusV2 {
-  readonly Playing: LiveFixtureDataV2[];
-  readonly Not_Start: LiveFixtureDataV2[];
-  readonly Finished: LiveFixtureDataV2[];
-}
-
-export type LiveFixturesV2ByTeam = Readonly<Record<string, LiveFixtureByStatusV2>>;
-
 export interface LiveFixturesCachePayload {
   readonly eventId: EventId;
   readonly byTeam: LiveFixturesByTeam;
 }
 
 export const LiveFixtureDataSchema = z.object({
+  fixtureId: z.number().int().positive(),
   teamId: z.number().int().positive(),
   teamName: z.string().min(1),
   teamShortName: z.string().min(1),
@@ -68,10 +53,6 @@ export const LiveFixtureDataSchema = z.object({
   wasHome: z.boolean(),
   started: z.boolean(),
   finished: z.boolean(),
-});
-
-export const LiveFixtureDataV2Schema = LiveFixtureDataSchema.extend({
-  fixtureId: z.number().int().positive(),
 });
 
 export const LiveFixturesCachePayloadSchema = z.object({

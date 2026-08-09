@@ -104,10 +104,9 @@ describe('live snapshot preparation', () => {
     expect(prepared.eventId).toBe(1);
     expect(prepared.state).toBe('live');
     expect(prepared.eventLives.eventLives).toHaveLength(3);
-    expect(prepared.fixtureViews.legacy['12'].Playing[0]).not.toHaveProperty('fixtureId');
-    expect(prepared.fixtureViews.v2['12'].Playing[0].fixtureId).toBe(1);
-    expect(prepared.fixtureViews.v2['4'].Playing[0].againstId).toBe(12);
-    expect(prepared.liveBonusV2).toEqual({
+    expect(prepared.liveFixtures['12'].Playing[0].fixtureId).toBe(1);
+    expect(prepared.liveFixtures['4'].Playing[0].againstId).toBe(12);
+    expect(prepared.liveBonus).toEqual({
       '4': { '234': 2 },
       '12': { '350': 3, '567': 1 },
     });
