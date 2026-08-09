@@ -106,10 +106,10 @@ P2 exit gate: migrations reproduce the target from fresh and B0 schemas and all 
 | Done | ID | Check | Acceptance | Evidence |
 | --- | --- | --- | --- | --- |
 | [x] | P4-01 | Create G1 from GraphQL `origin/main` | Existing dirty worktree untouched | `/Users/tong/CursorProjects/letletme-graphql-data-platform-v3-pg-readers`; baseline `3cc9951450ac5c631ea8930b0eb8c7a71a572fb6` |
-| [ ] | P4-02 | Implement direct schema-qualified PG readers | No Supabase business reads | Search/tests: |
-| [ ] | P4-03 | Implement read-only role/startup schema check | Missing contract fails closed; no DDL | Tests: |
-| [ ] | P4-04 | Remove GraphQL business migration runner/deploy step | Deploy cannot mutate business schema | Workflow test: |
-| [ ] | P4-05 | Commit G1 | Clean tree; SHA recorded | SHA: |
+| [x] | P4-02 | Implement direct schema-qualified PG readers | No Supabase business reads | `13-p4-g1-acceptance.md`; 348 tests; B0 HTTP smoke |
+| [x] | P4-03 | Implement read-only role/startup schema check | Missing contract fails closed; no DDL | 17 focused cases; fresh/B0 PG15 contract checks |
+| [x] | P4-04 | Remove GraphQL business migration runner/deploy step | Deploy cannot mutate business schema | CI/deploy boundary scan; no migration directory/command |
+| [x] | P4-05 | Commit G1 | Clean tree; SHA recorded | `886351b1c26d86f5e8010cb57e8d5f33469423c8` |
 | [ ] | P4-06 | Create G2 from accepted G1 | Exact predecessor SHA | SHA: |
 | [ ] | P4-07 | Implement reporting readers and v3 query cache | Dataset revision in every key | Tests: |
 | [ ] | P4-08 | Remove v2 views/MVs/RPC fallbacks | Zero references | Search/tests: |

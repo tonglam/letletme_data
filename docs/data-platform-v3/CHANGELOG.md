@@ -2,6 +2,10 @@
 
 ## 3.2.3 - 2026-08-09
 
+- Accepted GraphQL G1 at `886351b1c26d86f5e8010cb57e8d5f33469423c8`: schema-qualified PostgreSQL
+  readers, SELECT-only fail-closed startup contract, no GraphQL business migrations, and direct
+  multiplier-aware reporting-MV percentages. See `13-p4-g1-acceptance.md`.
+
 - Absorbed the newly merged GraphQL `public_league_trends_catalog` contract into the sole
   Data-owned physical source `competition.public_league_trends`.
 - Preserved explicit operator enablement and display ordering while keeping GraphQL read-only and
