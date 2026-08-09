@@ -6,6 +6,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import {
   inspectMigrationHistory,
   selectMigrationFilesForLedger,
+  selectMigrationFilesThrough,
   selectSqlMigrationLedger,
 } from '../../scripts/migration-history';
 import {
@@ -15,6 +16,19 @@ import {
 } from '../../scripts/sql-migration-compatibility';
 
 describe('migration history inspection', () => {
+  test('supports an exact rehearsal boundary without silently accepting a typo', () => {
+    const files = ['0088_validate.sql', '0089_prepare.sql', '0090_activate.sql'];
+
+    expect(selectMigrationFilesThrough(files, undefined)).toEqual(files);
+    expect(selectMigrationFilesThrough(files, '0089_prepare.sql')).toEqual([
+      '0088_validate.sql',
+      '0089_prepare.sql',
+    ]);
+    expect(() => selectMigrationFilesThrough(files, '0089_missing.sql')).toThrow(
+      'unknown --through migration: 0089_missing.sql',
+    );
+  });
+
   test('switches ledger authority only at the 0090 compatibility boundary', () => {
     expect(selectSqlMigrationLedger('r', false)).toBe('public');
     expect(selectSqlMigrationLedger('r', true)).toBe('public');

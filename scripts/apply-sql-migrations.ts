@@ -8,6 +8,7 @@ import postgres from 'postgres';
 import {
   inspectMigrationHistory,
   selectMigrationFilesForLedger,
+  selectMigrationFilesThrough,
   selectSqlMigrationLedger,
   type SqlMigrationLedger,
 } from './migration-history';
@@ -22,6 +23,14 @@ const migrationsDir = process.env.MIGRATIONS_DIR ?? 'migrations';
 const databaseUrl = process.env.DATABASE_URL;
 const statusOnly = process.argv.includes('--status');
 const legacyDropApproval = process.env.V3_LEGACY_DROP_APPROVAL;
+const throughArgumentIndex = process.argv.indexOf('--through');
+const throughMigration =
+  throughArgumentIndex === -1 ? undefined : process.argv[throughArgumentIndex + 1];
+
+if (throughArgumentIndex !== -1 && !throughMigration) {
+  console.error('--through requires an exact migration filename');
+  process.exit(1);
+}
 
 if (!databaseUrl) {
   console.error('DATABASE_URL is required');
@@ -153,6 +162,7 @@ async function applyFile(
   digest: string,
   approval: string | undefined,
 ): Promise<void> {
+  const startedAt = performance.now();
   await sql.begin(async (tx) => {
     const localTimeouts = getSqlMigrationLocalTimeouts(contents);
     if (localTimeouts.lockTimeout) {
@@ -200,19 +210,16 @@ async function applyFile(
       `;
     }
   });
-  console.log(`[sql-migrate] applied ${filename}`);
+  const durationMs = performance.now() - startedAt;
+  console.log(`[sql-migrate] applied ${filename} duration_ms=${durationMs.toFixed(2)}`);
 }
 
 async function printStatus(files: string[], ledger: Map<string, LedgerRow>): Promise<void> {
   let invalid = false;
-  const effectiveFiles = selectMigrationFilesForLedger(files, ledger.keys());
-  const { missing, backdated, latestApplied } = inspectMigrationHistory(
-    effectiveFiles,
-    ledger.keys(),
-  );
+  const { missing, backdated, latestApplied } = inspectMigrationHistory(files, ledger.keys());
   const backdatedSet = new Set(backdated);
 
-  for (const filename of effectiveFiles) {
+  for (const filename of files) {
     const migration = readMigration(filename);
     const row = ledger.get(filename);
     if (backdatedSet.has(filename)) {
@@ -248,11 +255,7 @@ async function applyMigrations(
 ): Promise<void> {
   await sql`SELECT pg_advisory_lock(${advisoryLockKey})`;
   try {
-    const effectiveFiles = selectMigrationFilesForLedger(files, ledger.keys());
-    const { missing, backdated, latestApplied } = inspectMigrationHistory(
-      effectiveFiles,
-      ledger.keys(),
-    );
+    const { missing, backdated, latestApplied } = inspectMigrationHistory(files, ledger.keys());
     if (missing.length > 0) {
       throw new Error(`ledgered migration files are missing: ${missing.join(', ')}`);
     }
@@ -262,7 +265,7 @@ async function applyMigrations(
       );
     }
 
-    for (const filename of effectiveFiles) {
+    for (const filename of files) {
       const migration = readMigration(filename);
       const applied = ledger.get(filename);
       if (applied) {
@@ -283,8 +286,10 @@ async function applyMigrations(
 async function main(): Promise<void> {
   const ledger = await ensureLedger();
   const ledgerRows = await loadLedger(ledger);
+  const compatibleFiles = selectMigrationFilesForLedger(listSqlMigrationFiles(), ledgerRows.keys());
+  const boundedFiles = selectMigrationFilesThrough(compatibleFiles, throughMigration);
   const selection = selectV3LegacyDropMigrations(
-    listSqlMigrationFiles(),
+    boundedFiles,
     ledgerRows.keys(),
     legacyDropApproval,
   );

@@ -6,6 +6,18 @@ export type MigrationHistoryInspection = {
 
 export type SqlMigrationLedger = 'ops' | 'public';
 
+export function selectMigrationFilesThrough(
+  files: readonly string[],
+  throughFilename: string | undefined,
+): string[] {
+  if (!throughFilename) return [...files];
+  const throughIndex = files.indexOf(throughFilename);
+  if (throughIndex === -1) {
+    throw new Error(`unknown --through migration: ${throughFilename}`);
+  }
+  return files.slice(0, throughIndex + 1);
+}
+
 /**
  * The v3 ledger becomes authoritative only when the public compatibility name
  * is a view (0090-0092) or has been removed (0093+). Merely creating the ops
