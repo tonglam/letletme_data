@@ -94,6 +94,12 @@ the example above is not permission to omit required Data source objects or incl
 7. Remove unencrypted raw artifacts only after encrypted checksum/decryption verification is
    recorded. Report exactly what was removed and that recovery remains available from encrypted B0.
 8. Restore full and selective dumps into two isolated PostgreSQL 15 databases. Apply no migrations.
+   For each restore target containing `pg_cron` objects, set `cron.database_name` to that exact
+   target database in the PostgreSQL server configuration, restart PostgreSQL, and verify the
+   effective setting before `pg_restore`. A restore attempted with `cron.database_name` pointing
+   elsewhere is rejected even if every non-`pg_cron` object restored. After both restores and their
+   reconciliation are accepted, set `cron.database_name` back to the neutral `postgres` database,
+   restart, verify the setting, and only then clone or prepare a rehearsal/cutover target.
 9. Run the complete B0 reconciliation suite. Archive restore logs and reports.
 
 B0 is invalid if a dump succeeded but either restore was not tested.
@@ -111,10 +117,14 @@ All fields below must be attached to the run record:
 - current database/Redis size and free-capacity report;
 - rollback SHAs/images and tested B1 restore procedure;
 - maintenance message and private smoke-test credentials/routes.
-- dedicated Data writer, GraphQL reader, and Web auth logins mapped only to
-  `letletme_data_writer`, `letletme_graphql_reader`, and `letletme_web_auth`, respectively; no
-  runtime may inherit an owner role or use the migration login. Data production startup and
-  `cache:publish-core` must pass the Data runtime-role contract. Web `DATABASE_URL` must pass
+- the dedicated Web auth LOGIN is mapped only to `letletme_web_auth`. The Data writer and GraphQL
+  reader LOGIN names, generated credentials, and reviewed provisioning commands are staged but
+  are not granted an owner/admin fallback before activation: their capability roles
+  `letletme_data_writer` and `letletme_graphql_reader` are created by `0079`. Immediately after
+  `0090_zzz`, provision those two LOGINs with `INHERIT`, all elevated attributes disabled, and
+  exactly one capability membership each. No runtime may inherit an owner role or use the
+  migration login. Data production startup and `cache:publish-core` must pass the Data runtime-role
+  contract; GraphQL must pass `contract:check`. Web `DATABASE_URL` must pass
   `db:runtime-contract`, while its administrator connection is supplied only as
   `DIRECT_DATABASE_URL` to migration commands.
 - Web migration `0008_web_auth_runtime_role.sql` is applied and its dedicated LOGIN is provisioned
@@ -161,20 +171,27 @@ canonical equality contract for restored hashes.
    dedicated LOGIN, and switch from the accepted maintenance build to the candidate Web build
    while keeping maintenance enabled. `db:runtime-contract` and a private auth-session probe must
    pass; an admin URL must exit non-zero.
-7. Run exact target schema checks, counts, hashes, constraints, FKs, join-shape, summary, market,
+7. While every Data/GraphQL service remains stopped, use the isolated migration session to create
+   the staged Data and GraphQL LOGINs and grant exactly `letletme_data_writer` and
+   `letletme_graphql_reader`, respectively. Verify `LOGIN INHERIT NOSUPERUSER NOCREATEDB
+   NOCREATEROLE NOREPLICATION NOBYPASSRLS`, exactly one recursive membership, no owner/admin
+   membership, and `session_user = current_user`. Then run the Data runtime-role contract and
+   GraphQL `contract:check` through their own URLs; each migration/admin URL must fail the
+   corresponding runtime contract. Do not start an application or publish cache before this gate.
+8. Run exact target schema checks, counts, hashes, constraints, FKs, join-shape, summary, market,
    tournament, provider, grant, and advisor checks.
-8. Refresh initial reporting MVs and validate all publication gates.
-9. Dry-run `bun run cache:publish-core`, verify its exact run/publication/revision/count contract,
+9. Refresh initial reporting MVs and validate all publication gates.
+10. Dry-run `bun run cache:publish-core`, verify its exact run/publication/revision/count contract,
    then execute it with `V3_CORE_CACHE_APPROVAL="APPROVE_V3_CORE_CACHE <CUTOVER_RUN_ID>"` and
    `--execute`, using the candidate Data writer `DATABASE_URL` rather than the migration URL. The
    command rejects admin/migration/GraphQL logins, reads the activated database publication,
    writes only immutable v3 Redis revision keys, atomically activates the pointer, and performs an
    exact read-back. Build the initial live revision only when a current event exists; preseason
    legitimately has none.
-10. Start Data API/workers. Validate health, readiness, sync fencing, DB writes, and Redis manifests.
-11. Start GraphQL with the read-only role. Validate startup contract and private smoke queries.
-12. Run Web private smoke journeys. Disable maintenance only when all pass.
-13. Record the v2 freeze timestamp and hashes. v2 objects remain physically present but read/write
+11. Start Data API/workers. Validate health, readiness, sync fencing, DB writes, and Redis manifests.
+12. Start GraphQL with the read-only role. Validate startup contract and private smoke queries.
+13. Run Web private smoke journeys. Disable maintenance only when all pass.
+14. Record the v2 freeze timestamp and hashes. v2 objects remain physically present but read/write
     inaccessible to the v3 applications.
 
 ## Activation rollback
