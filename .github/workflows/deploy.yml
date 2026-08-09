@@ -465,6 +465,49 @@ jobs:
               -e V3_RELEASE_MANIFEST_SHA256="$V3_RELEASE_MANIFEST_SHA256" \
               -e V3_CUTOVER_APPROVAL="$V3_CUTOVER_APPROVAL" \
               "$IMAGE_REF" bun scripts/v3-release-gate.ts
+            migration_status_env=$(mktemp)
+            trap 'rm -f "$migration_status_env"' EXIT
+            printf '%s\n' "$V3_MIGRATION_ENV" > "$migration_status_env"
+            chmod 600 "$migration_status_env"
+            set +e
+            migration_status_output=$(docker run --rm \
+              --env-file "$migration_status_env" \
+              "$IMAGE_REF" bun run db:migrate:status 2>&1)
+            migration_status_exit=$?
+            set -e
+            printf '%s\n' "$migration_status_output"
+            rm -f "$migration_status_env"
+            trap - EXIT
+            if [ "$migration_status_exit" -ne 0 ] && [ "$migration_status_exit" -ne 1 ]; then
+              echo "Unexpected preactivation migration status exit: $migration_status_exit"
+              exit 1
+            fi
+            if printf '%s\n' "$migration_status_output" \
+              | grep -Eq '^(missing|backdated|mismatch|legacy)[[:space:]]+'; then
+              echo "Production migration history is unsafe for v3 activation"
+              exit 1
+            fi
+            for required_migration in \
+              0079_align_fpl_event_history.sql \
+              0079_create_v3_ops_and_roles.sql \
+              0090_zzzz_integrate_understat_runtime.sql; do
+              if ! printf '%s\n' "$migration_status_output" \
+                | grep -Eq "^(applied|pending)[[:space:]]+$required_migration$"; then
+                echo "Required migration is absent from the candidate status: $required_migration"
+                exit 1
+              fi
+            done
+            for gated_migration in \
+              0091_drop_v2_reporting_and_rpcs.sql \
+              0092_drop_v2_tables_partitions_triggers.sql \
+              0093_finalize_v3_migration_ownership.sql; do
+              if ! printf '%s\n' "$migration_status_output" \
+                | grep -Eq "^gated[[:space:]]+$gated_migration "; then
+                echo "Legacy cleanup migration is not gated: $gated_migration"
+                exit 1
+              fi
+            done
+            echo "V3_PREACTIVATION_MIGRATION_HISTORY=compatible"
             config_backup_dir="$(dirname "$VPS_WORKDIR")/v3-cutover/$V3_CUTOVER_RUN_ID/data"
             install -d -m 700 "$config_backup_dir"
             install -m 600 .env.deploy "$config_backup_dir/env.deploy.before-v3"

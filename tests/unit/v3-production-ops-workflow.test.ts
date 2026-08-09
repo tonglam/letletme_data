@@ -83,17 +83,19 @@ describe('v3 production hard-cut workflow', () => {
     const activation = job('v3_activate_database', 'v3_redis_queues');
     const graphqlStopped = activation.indexOf('GraphQL is still running on port 4000');
     const releaseGate = activation.indexOf('bun scripts/v3-release-gate.ts');
+    const migrationHistoryGate = activation.indexOf('V3_PREACTIVATION_MIGRATION_HISTORY');
     const configBackup = activation.indexOf('env.deploy.before-v3');
     const runtimeEnvCheck = activation.indexOf('bun run env:check');
     const migrationContract = activation.indexOf('bun run db:migration-contract');
     const stopWorker = activation.indexOf('docker compose stop -t 30 worker');
     const stopApi = activation.indexOf('docker compose stop -t 30 api');
-    const migrate = activation.indexOf('bun run db:migrate');
+    const migrate = activation.indexOf('bun run db:migrate', stopApi);
     const provisionLogins = activation.indexOf('bun run db:provision-runtime-logins');
 
     expect(graphqlStopped).toBeGreaterThan(0);
     expect(releaseGate).toBeGreaterThan(graphqlStopped);
-    expect(configBackup).toBeGreaterThan(releaseGate);
+    expect(migrationHistoryGate).toBeGreaterThan(releaseGate);
+    expect(configBackup).toBeGreaterThan(migrationHistoryGate);
     expect(runtimeEnvCheck).toBeGreaterThan(configBackup);
     expect(migrationContract).toBeGreaterThan(runtimeEnvCheck);
     expect(stopWorker).toBeGreaterThan(migrationContract);
@@ -101,6 +103,25 @@ describe('v3 production hard-cut workflow', () => {
     expect(migrate).toBeGreaterThan(stopApi);
     expect(provisionLogins).toBeGreaterThan(migrate);
     expect(activation).not.toContain('docker compose up');
+  });
+
+  test('rejects unsafe production migration history before writing VPS configuration', () => {
+    const activation = job('v3_activate_database', 'v3_redis_queues');
+    const status = activation.indexOf('bun run db:migrate:status');
+    const unsafeHistory = activation.indexOf('missing|backdated|mismatch|legacy');
+    const requiredHistoryTail = activation.indexOf('0079_align_fpl_event_history.sql');
+    const firstActivation = activation.indexOf('0079_create_v3_ops_and_roles.sql');
+    const finalActivation = activation.indexOf('0090_zzzz_integrate_understat_runtime.sql');
+    const gatedCleanup = activation.indexOf('0091_drop_v2_reporting_and_rpcs.sql');
+    const migrationEnvWrite = activation.indexOf('mv "$migration_tmp" .env.migrate');
+
+    expect(status).toBeGreaterThan(0);
+    expect(unsafeHistory).toBeGreaterThan(status);
+    expect(requiredHistoryTail).toBeGreaterThan(unsafeHistory);
+    expect(firstActivation).toBeGreaterThan(requiredHistoryTail);
+    expect(finalActivation).toBeGreaterThan(firstActivation);
+    expect(gatedCleanup).toBeGreaterThan(finalActivation);
+    expect(migrationEnvWrite).toBeGreaterThan(gatedCleanup);
   });
 
   test('preserves production-local files and backs up runtime configuration', () => {
