@@ -144,6 +144,17 @@ jobs:
           bun run db:apply-sql
           bun run db:migrate:status
 
+      - name: Provision and retry disposable production-shaped runtime logins
+        env:
+          DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
+          CUTOVER_RUN_ID: v3-20260808T160008Z-b9eddc0
+          V3_CUTOVER_APPROVAL: APPROVE_V3_ACTIVATION v3-20260808T160008Z-b9eddc0
+          V3_DATA_DB_PASSWORD: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+          V3_GRAPHQL_DB_PASSWORD: gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg
+        run: |
+          bun run db:provision-runtime-logins
+          bun run db:provision-runtime-logins
+
       - name: Build disposable Drizzle schema export
         env:
           DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
