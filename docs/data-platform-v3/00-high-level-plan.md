@@ -2,7 +2,7 @@
 
 Status: approved for execution
 
-Plan version: 3.2.2
+Plan version: 3.2.3
 
 Baseline date: 2026-08-08
 

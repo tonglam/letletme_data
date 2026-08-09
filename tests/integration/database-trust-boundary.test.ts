@@ -205,6 +205,32 @@ describe('v3 database trust boundary', () => {
         ) AS writable
     `;
     expect(publicationBoundary).toEqual({ readable: true, writable: false });
+
+    const [publicLeagueBoundary] = await sql<
+      Array<{ readable: boolean; writer_writable: boolean; reader_writable: boolean }>
+    >`
+      SELECT
+        has_table_privilege(
+          'letletme_graphql_reader',
+          'competition.public_league_trends',
+          'SELECT'
+        ) AS readable,
+        has_table_privilege(
+          'letletme_data_writer',
+          'competition.public_league_trends',
+          'INSERT,UPDATE,DELETE'
+        ) AS writer_writable,
+        has_table_privilege(
+          'letletme_graphql_reader',
+          'competition.public_league_trends',
+          'INSERT,UPDATE,DELETE'
+        ) AS reader_writable
+    `;
+    expect(publicLeagueBoundary).toEqual({
+      readable: true,
+      writer_writable: true,
+      reader_writable: false,
+    });
   });
 
   test('installs runtime identities, business keys, and one-active enforcement', async () => {

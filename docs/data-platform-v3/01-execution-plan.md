@@ -1,6 +1,6 @@
 # Data Platform v3 Execution Plan
 
-Plan version: 3.2.2
+Plan version: 3.2.3
 
 Execution strategy: preseason hard cutover
 
@@ -127,6 +127,7 @@ Migration sequence:
 | `0089_prepare_v3_publications.sql` | Create initial publication records without activating readers |
 | `0090_activate_v3_and_freeze_v2.sql` | Revoke v2 writes, activate v3 revision, establish cutover fence |
 | `0090_z_finalize_v3_graphql_reader_contract.sql` | Make publication authority readable by the read-only GraphQL role and stamp plan 3.2.2 |
+| `0090_zz_add_public_league_trends.sql` | Move the GraphQL-mainline public-league allowlist contract under Data-owned `competition` and stamp plan 3.2.3 |
 | `0091_drop_v2_reporting_and_rpcs.sql` | Approval-gated legacy views/MVs/RPC removal |
 | `0092_drop_v2_tables_partitions_triggers.sql` | Approval-gated legacy physical-object removal |
 | `0093_finalize_v3_migration_ownership.sql` | Remove compatibility ledger/view and obsolete GraphQL DDL state |

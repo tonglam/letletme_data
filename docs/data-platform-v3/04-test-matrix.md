@@ -1,6 +1,6 @@
 # Data Platform v3 Test and Acceptance Matrix
 
-Plan version: 3.2.2
+Plan version: 3.2.3
 
 ## Evidence rules
 
@@ -49,6 +49,8 @@ Required migration cases:
     `NULLS NOT DISTINCT` option, and the stable name of the circular publication foreign key.
 12. `letletme_graphql_reader` can select `ops.dataset_publications`, cannot mutate it, and has no
     create privilege in any Data-owned schema.
+13. `competition.public_league_trends` exists at season/tournament grain; only the Data writer can
+    mutate it and GraphQL can only select it.
 
 ### GraphQL
 

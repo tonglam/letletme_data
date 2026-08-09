@@ -1,6 +1,6 @@
 # Data Platform v3 Object Migration Manifest
 
-Plan version: 3.2.2
+Plan version: 3.2.3
 
 Naming notation: `{season}` means each of `1617`, `1718`, `1819`, `1920`, `2021`, `2122`,
 `2223`, `2324`, `2425`, `2526`, and `2627` where present.
@@ -68,6 +68,7 @@ manifest.
 | `entry_event_cup_results` | `competition.entry_event_cup_results` | `(season_id, source_result_id)` plus entry/event indexes | preserve the stable source row ID and cup opponent/result metadata; do not invent a missing match ID | drop in `0092` |
 | `league_event_results` | `competition.league_event_results` | `(season_id, league_id, entry_id, event_id)` | preserve standings/results | drop in `0092` |
 | `tournament_infos` | `competition.tournaments` | `(tournament_id)` plus explicit `season_id` | preserve lifecycle/setup/checkpoints | drop in `0092` |
+| GraphQL mainline `public_league_trends_catalog` (not present in accepted B0) | `competition.public_league_trends` | `(season_id, tournament_id)` | Data-owned operator allowlist; guarded copy if the source appears during rehearsal | retire the GraphQL migration; legacy source requires a separately approved cleanup entry if production preflight finds it |
 | `tournament_entries` | `competition.tournament_entries` | `(tournament_id, entry_id)` | preserve membership/seed/admin state | drop in `0092` |
 | `tournament_groups` | `competition.tournament_groups` | source group identity | preserve tournament/group identity | drop in `0092` |
 | `tournament_knockouts` | `competition.tournament_knockouts` | source knockout identity | preserve bracket identity/state | drop in `0092` |

@@ -1,5 +1,13 @@
 # Data Platform v3 Plan Changelog
 
+## 3.2.3 - 2026-08-09
+
+- Absorbed the newly merged GraphQL `public_league_trends_catalog` contract into the sole
+  Data-owned physical source `competition.public_league_trends`.
+- Preserved explicit operator enablement and display ordering while keeping GraphQL read-only and
+  removing any need for GraphQL-owned business DDL.
+- Added a guarded rehearsal copy for the unshipped public source and explicit role/grain tests.
+
 ## 3.2.2 - 2026-08-09
 
 - Corrected the private-schema ACL contract so `letletme_graphql_reader` can actually consume its

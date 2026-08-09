@@ -1,6 +1,6 @@
 # Data Platform v3 Strict Execution Checklist
 
-Plan version: 3.2.2
+Plan version: 3.2.3
 
 Rule: an item is complete only when its checkbox is checked and the Evidence column contains a
 durable path, SHA, query result, run URL, or backup manifest. Verbal confirmation is not evidence.
@@ -14,7 +14,7 @@ durable path, SHA, query result, run URL, or backup manifest. Verbal confirmatio
 | GraphQL baseline | `3cc9951` (fetched `origin/main`; supersedes planned `8cf4ddc`) |
 | Web baseline | `c290d91` |
 | Production project | `gtwcfjoviibmtkevurjw` |
-| Plan version | 3.2.2 |
+| Plan version | 3.2.3 |
 | Cutover approver | User |
 
 ## P0 - Freeze and inventory
@@ -74,7 +74,7 @@ P1 exit gate: both restore drills pass. A backup that has not been restored does
 | [x] | P2-11 | Implement `0087` Understat/ops conversion | Counts/hashes/provider boundaries pass | P2 report; `ops.migration_objects` passed |
 | [x] | P2-12 | Implement `0088` constraint validation | All deferred constraints validated | 125 FKs; missing indexes 0; unvalidated 0 |
 | [x] | P2-13 | Implement `0089` publication preparation | Complete inactive initial revision exists | Fresh/B0 replay and publication contract passed |
-| [x] | P2-14 | Implement `0090` activation/freeze and final reader ACL | One active revision; v2 writes denied; publication authority readable only by the read role | Validation: 192 frozen relations/fences; 1 active publication; correction `175ac00` |
+| [x] | P2-14 | Implement `0090` activation/freeze and final reader contracts | One active revision; v2 writes denied; publication authority and public-league catalog have one Data owner and read-only GraphQL access | Validation: 192 frozen relations/fences; 1 active publication; ACL correction `175ac00`; `0090_zz_add_public_league_trends.sql` |
 | [x] | P2-15 | Implement approval-gated `0091`-`0093` | Exact manifest only; blocked without approval env/token | Cleanup rehearsal report; v3 hash diff 0 bytes |
 | [x] | P2-16 | Fresh migration replay twice on PG15 | Both runs pass; second run is a no-op/status-clean | External `p2/logs/p2-fresh-final-4-*` |
 | [x] | P2-17 | Production-B0 upgrade replay twice on PG15 | Both runs pass; no manual correction | External `p2/logs/p2-b0-final-5-*` |

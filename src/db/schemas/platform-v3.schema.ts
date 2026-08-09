@@ -565,6 +565,43 @@ export const tournamentsInCompetition = competition.table(
   ],
 );
 
+export const publicLeagueTrendsInCompetition = competition.table(
+  'public_league_trends',
+  {
+    seasonId: smallint('season_id').notNull(),
+    tournamentId: integer('tournament_id').notNull(),
+    displayName: text('display_name').notNull(),
+    sortOrder: integer('sort_order').default(0).notNull(),
+    enabled: boolean().default(false).notNull(),
+    publishedAt: timestamp('published_at', { withTimezone: true, mode: 'date' })
+      .defaultNow()
+      .notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('public_league_trends_listing_idx').using(
+      'btree',
+      table.seasonId.asc().nullsLast(),
+      table.enabled.asc().nullsLast(),
+      table.sortOrder.asc().nullsLast(),
+      table.tournamentId.asc().nullsLast(),
+    ),
+    foreignKey({
+      columns: [table.seasonId, table.tournamentId],
+      foreignColumns: [tournamentsInCompetition.seasonId, tournamentsInCompetition.tournamentId],
+      name: 'public_league_trends_tournament_fk',
+    }).onDelete('cascade'),
+    primaryKey({
+      columns: [table.seasonId, table.tournamentId],
+      name: 'public_league_trends_pkey',
+    }),
+    check('public_league_trends_tournament_id_positive', sql`tournament_id > 0`),
+    check('public_league_trends_display_name_nonempty', sql`btrim(display_name) <> ''::text`),
+    check('public_league_trends_sort_order_nonnegative', sql`sort_order >= 0`),
+  ],
+);
+
 export const entityLinksInBridge = bridge.table(
   'entity_links',
   {

@@ -15,6 +15,7 @@ import {
   playerGameweekStatsInFpl,
   playerMarketSnapshotsInFpl,
   playersInFpl,
+  publicLeagueTrendsInCompetition,
   teamsInFpl,
   tournamentBattleGroupResultsInCompetition,
   tournamentGroupsInCompetition,
@@ -84,6 +85,10 @@ export type DbPlayerMarketSnapshotInsert = Readonly<typeof playerMarketSnapshots
 export type DbPlayerFixtureStat = Readonly<typeof playerFixtureStatsInFpl.$inferSelect>;
 export type DbPlayerFixtureStatInsert = Readonly<typeof playerFixtureStatsInFpl.$inferInsert>;
 export type DbPlayerStatInsert = Readonly<typeof playerEventSnapshotsInFpl.$inferInsert>;
+export type DbPublicLeagueTrend = Readonly<typeof publicLeagueTrendsInCompetition.$inferSelect>;
+export type DbPublicLeagueTrendInsert = Readonly<
+  typeof publicLeagueTrendsInCompetition.$inferInsert
+>;
 export type DbTeam = Readonly<typeof teamsInFpl.$inferSelect>;
 export type DbTeamInsert = Readonly<typeof teamsInFpl.$inferInsert>;
 type DbTournamentBattleGroupResultStorage = Readonly<

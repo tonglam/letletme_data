@@ -1,6 +1,6 @@
 # P3 Test Retirement and Replacement Audit
 
-Plan version: 3.2.2
+Plan version: 3.2.3
 
 Status: **ACCEPTED**
 
