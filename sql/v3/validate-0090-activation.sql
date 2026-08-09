@@ -28,7 +28,11 @@ BEGIN
     AND trigger_row.tgfoid = 'ops.reject_v2_mutation()'::regprocedure
     AND NOT trigger_row.tgisinternal;
 
-  IF legacy_physical_count <> 192 OR legacy_trigger_count <> legacy_physical_count THEN
+  IF legacy_physical_count <> 192 + CASE
+       WHEN to_regclass('public.public_league_trends_catalog') IS NULL THEN 0
+       ELSE 1
+     END
+     OR legacy_trigger_count <> legacy_physical_count THEN
     RAISE EXCEPTION 'v2 physical/fence count mismatch: physical=%, fences=%',
       legacy_physical_count,
       legacy_trigger_count;

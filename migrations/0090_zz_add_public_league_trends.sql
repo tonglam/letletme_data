@@ -32,6 +32,30 @@ CREATE INDEX public_league_trends_listing_idx
     tournament_id
   );
 
+RESET ROLE;
+
+-- 0090 freezes every v2 relation under a NOLOGIN owner and removes all ACLs.
+-- Temporarily inherit that owner only while copying this optional source, then
+-- remove the exact membership again in the same transaction.
+DO $assume_optional_catalog_owner$
+BEGIN
+  IF to_regclass('public.public_league_trends_catalog') IS NOT NULL THEN
+    IF EXISTS (
+      SELECT 1
+      FROM pg_auth_members membership
+      JOIN pg_roles member_role ON member_role.oid = membership.member
+      JOIN pg_roles granted_role ON granted_role.oid = membership.roleid
+      WHERE member_role.rolname = session_user
+        AND granted_role.rolname = 'letletme_v2_frozen_owner'
+    ) THEN
+      RAISE EXCEPTION 'migration login unexpectedly retains the v2 frozen owner';
+    END IF;
+
+    EXECUTE format('GRANT letletme_v2_frozen_owner TO %I', session_user);
+  END IF;
+END
+$assume_optional_catalog_owner$;
+
 -- The accepted B0 baseline has no source relation. This guarded copy keeps a
 -- later rehearsal fail-safe if the unshipped GraphQL migration appears before cutover.
 DO $copy_graphql_catalog$
@@ -70,6 +94,23 @@ BEGIN
   END IF;
 END
 $copy_graphql_catalog$;
+
+DO $release_optional_catalog_owner$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM pg_auth_members membership
+    JOIN pg_roles member_role ON member_role.oid = membership.member
+    JOIN pg_roles granted_role ON granted_role.oid = membership.roleid
+    WHERE member_role.rolname = session_user
+      AND granted_role.rolname = 'letletme_v2_frozen_owner'
+  ) THEN
+    EXECUTE format('REVOKE letletme_v2_frozen_owner FROM %I', session_user);
+  END IF;
+END
+$release_optional_catalog_owner$;
+
+SET LOCAL ROLE letletme_data_owner;
 
 REVOKE ALL ON competition.public_league_trends FROM PUBLIC;
 GRANT SELECT, INSERT, UPDATE, DELETE ON competition.public_league_trends

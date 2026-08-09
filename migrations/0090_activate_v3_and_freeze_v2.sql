@@ -126,6 +126,17 @@ VALUES
   ('understat_team_stat_splits'),
   ('understat_teams');
 
+-- GraphQL mainline may have introduced this catalog after the original P0
+-- inventory was captured. Treat it as an optional v2 source and freeze it
+-- with the rest of public when present; 0090_zz copies it into competition.
+INSERT INTO v3_legacy_physical_relations (relation_name)
+SELECT 'public_league_trends_catalog'::name
+WHERE to_regclass('public.public_league_trends_catalog') IS NOT NULL;
+
+-- Later evidence writes run as the data owner. Permit that role to read this
+-- transaction-local manifest without broadening access to any public object.
+GRANT SELECT ON v3_legacy_physical_relations TO letletme_data_owner;
+
 CREATE TEMPORARY TABLE v3_legacy_read_relations (
   relation_name name PRIMARY KEY,
   relation_kind "char" NOT NULL
@@ -337,7 +348,8 @@ BEGIN
       );
   END IF;
 
-  IF (SELECT count(*) FROM v3_legacy_physical_relations) <> 192
+  IF (SELECT count(*) FROM v3_legacy_physical_relations) < 192
+     OR (SELECT count(*) FROM v3_legacy_physical_relations) > 193
      OR (SELECT count(*) FROM v3_legacy_read_relations) <> 6
      OR (SELECT count(*) FROM v3_legacy_sequences) <> 22 THEN
     RAISE EXCEPTION 'internal v2 freeze manifest count mismatch';
@@ -776,7 +788,7 @@ SET
   updated_at = now(),
   metadata = metadata || jsonb_build_object(
     'activatedPlanVersion', '3.1.1',
-    'v2PhysicalRelationCount', 192,
+    'v2PhysicalRelationCount', (SELECT count(*) FROM v3_legacy_physical_relations),
     'v2ReadRelationCount', 6,
     'v2SequenceCount', 22,
     'v2FreezeState', 'trigger_and_acl_fenced'
@@ -803,8 +815,8 @@ SELECT
   '0090_activate_v3_and_freeze_v2',
   'public v2 physical relations',
   'ops.dataset_publications + v2 mutation fences',
-  encode(sha256(convert_to('0090_activate_v3_and_freeze_v2_v1', 'UTF8')), 'hex'),
-  192,
+  encode(sha256(convert_to('0090_activate_v3_and_freeze_v2_v2', 'UTF8')), 'hex'),
+  (SELECT count(*) FROM v3_legacy_physical_relations),
   (
     SELECT count(*)
     FROM pg_trigger trigger_row
@@ -848,8 +860,9 @@ BEGIN
     AND trigger_row.tgname = 'v3_reject_v2_mutation'
     AND NOT trigger_row.tgisinternal;
 
-  IF trigger_count <> 192 THEN
-    RAISE EXCEPTION 'expected 192 v2 mutation fences, found %', trigger_count;
+  IF trigger_count <> (SELECT count(*) FROM v3_legacy_physical_relations) THEN
+    RAISE EXCEPTION 'expected one v2 mutation fence per physical relation, found %',
+      trigger_count;
   END IF;
 
   SELECT count(*) INTO nonowner_relation_acl_count

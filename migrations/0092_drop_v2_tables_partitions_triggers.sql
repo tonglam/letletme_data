@@ -133,6 +133,12 @@ VALUES
   ('understat_team_stat_splits'),
   ('understat_teams');
 
+INSERT INTO v3_legacy_physical_relations (relation_name)
+SELECT 'public_league_trends_catalog'::name
+WHERE to_regclass('public.public_league_trends_catalog') IS NOT NULL;
+
+GRANT SELECT ON v3_legacy_physical_relations TO letletme_data_owner;
+
 INSERT INTO v3_legacy_drop_roots (relation_name)
 VALUES
   ('core_snapshot_authority'),
@@ -169,6 +175,10 @@ VALUES
   ('understat_team_seasons'),
   ('understat_team_stat_splits'),
   ('understat_teams');
+
+INSERT INTO v3_legacy_drop_roots (relation_name)
+SELECT 'public_league_trends_catalog'::name
+WHERE to_regclass('public.public_league_trends_catalog') IS NOT NULL;
 
 CREATE TEMPORARY TABLE v3_legacy_sequences (
   relation_name name PRIMARY KEY
@@ -281,8 +291,10 @@ BEGIN
       COALESCE(uncovered_relations, '');
   END IF;
 
-  IF (SELECT count(*) FROM v3_legacy_physical_relations) <> 192
-     OR (SELECT count(*) FROM v3_legacy_drop_roots) <> 58 THEN
+  IF (SELECT count(*) FROM v3_legacy_physical_relations) < 192
+     OR (SELECT count(*) FROM v3_legacy_physical_relations) > 193
+     OR (SELECT count(*) FROM v3_legacy_drop_roots)
+       <> (SELECT count(*) FROM v3_legacy_physical_relations) - 134 THEN
     RAISE EXCEPTION '0092 internal physical/root manifest count mismatch';
   END IF;
 
@@ -444,7 +456,11 @@ SELECT
   'passed'
 FROM ops.migration_runs run
 CROSS JOIN (VALUES
-  ('0092_drop_v2_physical_relations', 'public v2 physical relations', 190::bigint),
+  (
+    '0092_drop_v2_physical_relations',
+    'public v2 physical relations',
+    (SELECT count(*) FROM v3_legacy_physical_relations) - 2
+  ),
   ('0092_drop_v2_sequences', 'public v2 sequences', 22::bigint),
   ('0092_drop_v2_enum_types', 'public v2 enum types', 20::bigint),
   ('0092_drop_v2_public_fence_function', 'public v2 fence function', 1::bigint)
@@ -461,7 +477,8 @@ UPDATE ops.migration_runs run
 SET
   metadata = run.metadata || jsonb_build_object(
     'legacyDropPhase', 'physical_objects_removed',
-    'legacyDroppedPhysicalRelations', 190,
+    'legacyDroppedPhysicalRelations',
+      (SELECT count(*) FROM v3_legacy_physical_relations) - 2,
     'legacyDroppedSequences', 22,
     'legacyDroppedEnumTypes', 20
   ),

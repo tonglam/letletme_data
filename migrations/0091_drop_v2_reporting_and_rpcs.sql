@@ -39,6 +39,20 @@ DECLARE
   actual_functions text[];
   actual_materialized_views text[];
   actual_views text[];
+  catalog_present boolean := to_regclass('public.public_league_trends_catalog') IS NOT NULL;
+  expected_functions text[] := ARRAY[
+    'get_captain_counts(integer,text,integer)',
+    'get_pick_aggregation(integer,integer[])',
+    'get_players_for_picker(integer,integer)',
+    'get_transfer_aggregation(integer,integer[])',
+    'reject_sealed_fpl_history_mutation()',
+    'search_players_for_picker(text,integer,integer)'
+  ]::text[];
+  graphql_search_function_present boolean := to_regprocedure(
+    'public.search_players_for_picker(text,integer,integer,integer,integer,integer,integer)'
+  ) IS NOT NULL;
+  touch_function_present boolean :=
+    to_regprocedure('public.touch_public_league_trends_catalog_updated_at()') IS NOT NULL;
 BEGIN
   SELECT array_agg(relation_row.relname::text ORDER BY relation_row.relname)
   INTO actual_materialized_views
@@ -74,14 +88,35 @@ BEGIN
   FROM pg_proc function_row
   WHERE function_row.pronamespace = 'public'::regnamespace;
 
-  IF actual_functions IS DISTINCT FROM ARRAY[
-    'get_captain_counts(integer,text,integer)',
-    'get_pick_aggregation(integer,integer[])',
-    'get_players_for_picker(integer,integer)',
-    'get_transfer_aggregation(integer,integer[])',
-    'reject_sealed_fpl_history_mutation()',
-    'search_players_for_picker(text,integer,integer)'
-  ]::text[] THEN
+  IF catalog_present IS DISTINCT FROM touch_function_present
+     OR catalog_present IS DISTINCT FROM graphql_search_function_present THEN
+    RAISE EXCEPTION '0091 optional GraphQL mainline catalog/function pairing mismatch';
+  END IF;
+
+  IF catalog_present AND NOT EXISTS (
+    SELECT 1
+    FROM pg_trigger trigger_row
+    WHERE trigger_row.tgrelid = 'public.public_league_trends_catalog'::regclass
+      AND trigger_row.tgname = 'public_league_trends_catalog_touch_updated_at'
+      AND trigger_row.tgfoid =
+        'public.touch_public_league_trends_catalog_updated_at()'::regprocedure
+      AND NOT trigger_row.tgisinternal
+  ) THEN
+    RAISE EXCEPTION '0091 optional public-league catalog trigger is missing or invalid';
+  END IF;
+
+  IF touch_function_present THEN
+    expected_functions := array_append(
+      expected_functions,
+      'search_players_for_picker(text,integer,integer,integer,integer,integer,integer)'
+    );
+    expected_functions := array_append(
+      expected_functions,
+      'touch_public_league_trends_catalog_updated_at()'
+    );
+  END IF;
+
+  IF actual_functions IS DISTINCT FROM expected_functions THEN
     RAISE EXCEPTION '0091 public function scope mismatch: %', actual_functions;
   END IF;
 END
@@ -100,6 +135,28 @@ DROP FUNCTION public.get_pick_aggregation(integer, integer[]);
 DROP FUNCTION public.get_players_for_picker(integer, integer);
 DROP FUNCTION public.get_transfer_aggregation(integer, integer[]);
 DROP FUNCTION public.search_players_for_picker(text, integer, integer);
+
+DO $drop_optional_catalog_touch_function$
+BEGIN
+  IF to_regclass('public.public_league_trends_catalog') IS NOT NULL THEN
+    EXECUTE
+      'DROP TRIGGER public_league_trends_catalog_touch_updated_at '
+      'ON public.public_league_trends_catalog';
+  END IF;
+
+  IF to_regprocedure('public.touch_public_league_trends_catalog_updated_at()') IS NOT NULL THEN
+    EXECUTE 'DROP FUNCTION public.touch_public_league_trends_catalog_updated_at()';
+  END IF;
+
+  IF to_regprocedure(
+    'public.search_players_for_picker(text,integer,integer,integer,integer,integer,integer)'
+  ) IS NOT NULL THEN
+    EXECUTE
+      'DROP FUNCTION public.search_players_for_picker('
+      'text, integer, integer, integer, integer, integer, integer)';
+  END IF;
+END
+$drop_optional_catalog_touch_function$;
 
 DO $legacy_reporting_postcondition$
 BEGIN
@@ -154,8 +211,11 @@ SELECT
   '0091_drop_v2_reporting_and_rpcs',
   'public legacy views, materialized views, and read RPCs',
   'approved drop manifest',
-  encode(sha256(convert_to('0091_drop_v2_reporting_and_rpcs_v1', 'UTF8')), 'hex'),
-  11,
+  encode(sha256(convert_to('0091_drop_v2_reporting_and_rpcs_v2', 'UTF8')), 'hex'),
+  11 + CASE
+    WHEN to_regclass('public.public_league_trends_catalog') IS NULL THEN 0
+    ELSE 2
+  END,
   0,
   NULL,
   NULL,
