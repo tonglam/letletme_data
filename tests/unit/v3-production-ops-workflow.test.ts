@@ -12,6 +12,24 @@ function job(name: string, nextName?: string): string {
 }
 
 describe('v3 production hard-cut workflow', () => {
+  test('lets strict shell mode evaluate compound conditions as one script', () => {
+    const jobNames = [
+      ['v3_preflight', 'v3_activate_database'],
+      ['v3_activate_database', 'v3_redis_queues'],
+      ['v3_redis_queues', 'v3_core_cache'],
+      ['v3_core_cache', 'v3_start_api'],
+      ['v3_start_api', 'v3_start_worker'],
+      ['v3_start_worker', 'v3_status'],
+    ] as const;
+
+    for (const [name, nextName] of jobNames) {
+      const contents = job(name, nextName);
+      expect(contents).toContain('script_stop: false');
+      expect(contents).toContain('set -euo pipefail');
+    }
+    expect(job('v3_status')).toContain('script_stop: false');
+  });
+
   test('keeps the VPS preflight read-only', () => {
     const preflight = job('v3_preflight', 'v3_activate_database');
 
