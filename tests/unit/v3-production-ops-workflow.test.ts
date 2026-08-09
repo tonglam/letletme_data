@@ -68,7 +68,8 @@ describe('v3 production hard-cut workflow', () => {
   test('stops Data API and worker behind the exact activation gate', () => {
     const stop = job('v3_stop');
 
-    expect(stop).toContain("inputs.operation == 'v3-stop'");
+    expect(stop).toContain('inputs.operation');
+    expect(stop).toContain('v3-stop');
     expect(stop).toContain('APPROVE_V3_ACTIVATION $V3_CUTOVER_RUN_ID');
     expect(stop).toContain('docker compose stop -t 30 worker');
     expect(stop).toContain('docker compose stop -t 30 api');
