@@ -534,7 +534,10 @@ jobs:
                 source_database_url = source_database_url[1:-1]
             parsed = urlsplit(source_database_url)
             current_user = unquote(parsed.username or '')
-            match = re.fullmatch(r'postgres\.([a-z0-9]{8,64})', current_user)
+            match = re.fullmatch(
+                r'(?:postgres|letletme_data_runtime)\.([a-z0-9]{8,64})',
+                current_user,
+            )
             if (
                 parsed.scheme not in ('postgres', 'postgresql')
                 or not parsed.hostname

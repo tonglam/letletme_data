@@ -113,47 +113,49 @@ describe('v3 production hard-cut workflow', () => {
     expect(activation).not.toContain('git clean');
   });
 
-  test('rewrites a quoted Supabase pooler URL to the dedicated Data login', () => {
-    const directory = mkdtempSync(join(tmpdir(), 'letletme-v3-runtime-env-'));
-    try {
-      const source = join(directory, '.env.deploy');
-      const target = join(directory, '.env.deploy.next');
-      const projectRef = 'abcdefghijklmnopqrst';
-      const password = 'd'.repeat(64);
-      writeFileSync(
-        source,
-        [
-          `DATABASE_URL="postgresql://postgres.${projectRef}:old@pooler.example.com:6543/postgres?pgbouncer=true"`,
-          'REDIS_HOST=cache.example.com',
-          'REDIS_PORT=6379',
-          'REDIS_PASSWORD=cache-password',
-          'QUEUE_REDIS_HOST=queue.example.com',
-          'QUEUE_REDIS_PORT=6380',
-          'UNRELATED_SETTING=preserved',
-        ].join('\n'),
-      );
-      writeFileSync(target, '');
+  test.each(['postgres', 'letletme_data_runtime'])(
+    'rewrites a quoted %s Supabase pooler URL idempotently',
+    (sourceRole) => {
+      const directory = mkdtempSync(join(tmpdir(), 'letletme-v3-runtime-env-'));
+      try {
+        const source = join(directory, '.env.deploy');
+        const target = join(directory, '.env.deploy.next');
+        const projectRef = 'abcdefghijklmnopqrst';
+        const password = 'd'.repeat(64);
+        writeFileSync(
+          source,
+          [
+            `DATABASE_URL="postgresql://${sourceRole}.${projectRef}:old@pooler.example.com:6543/postgres?pgbouncer=true"`,
+            'REDIS_HOST=cache.example.com',
+            'REDIS_PORT=6379',
+            'REDIS_PASSWORD=cache-password',
+            'QUEUE_REDIS_HOST=queue.example.com',
+            'QUEUE_REDIS_PORT=6380',
+            'UNRELATED_SETTING=preserved',
+          ].join('\n'),
+        );
+        writeFileSync(target, '');
 
-      execFileSync('python3', ['-', source, target], {
-        input: runtimeEnvPython(),
-        env: { ...process.env, V3_DATA_DB_PASSWORD: password },
-        encoding: 'utf8',
-      });
+        execFileSync('python3', ['-', source, target], {
+          input: runtimeEnvPython(),
+          env: { ...process.env, V3_DATA_DB_PASSWORD: password },
+          encoding: 'utf8',
+        });
 
-      const output = readFileSync(target, 'utf8');
-      expect(output).toContain(
-        `DATABASE_URL=postgresql://letletme_data_runtime.${projectRef}:${password}@pooler.example.com:6543/postgres?pgbouncer=true`,
-      );
-      expect(output).toContain('CACHE_REDIS_HOST=cache.example.com');
-      expect(output).toContain('CACHE_REDIS_DB=0');
-      expect(output).toContain('QUEUE_REDIS_DB=1');
-      expect(output).toContain('UNRELATED_SETTING=preserved');
-      expect(output).not.toContain('postgres.abcdefghijklmnopqrst');
-      expect(output.match(/^DATABASE_URL=/gm)).toHaveLength(1);
-    } finally {
-      rmSync(directory, { recursive: true, force: true });
-    }
-  });
+        const output = readFileSync(target, 'utf8');
+        expect(output).toContain(
+          `DATABASE_URL=postgresql://letletme_data_runtime.${projectRef}:${password}@pooler.example.com:6543/postgres?pgbouncer=true`,
+        );
+        expect(output).toContain('CACHE_REDIS_HOST=cache.example.com');
+        expect(output).toContain('CACHE_REDIS_DB=0');
+        expect(output).toContain('QUEUE_REDIS_DB=1');
+        expect(output).toContain('UNRELATED_SETTING=preserved');
+        expect(output.match(/^DATABASE_URL=/gm)).toHaveLength(1);
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  );
 
   test('keeps queue copy and cache publication separately manifest-gated', () => {
     const queues = job('v3_redis_queues', 'v3_core_cache');
