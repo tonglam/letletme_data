@@ -1,5 +1,14 @@
 # Data Platform v3 Plan Changelog
 
+## 2026-08-09 - Executable Redis cutover and representative memory gate
+
+- Added a formal dry-run-first operator command for canonical BullMQ DB0-to-DB1 copy, independent
+  target verification, and exact-manifest legacy cleanup.
+- Bound Redis deletion to the same exact run-specific legacy-drop approval as PostgreSQL cleanup;
+  retained bounded `SCAN` plus `UNLINK` and no `DEL`/`FLUSH` path.
+- Restored the accepted Redis 7.0.15 B0 RDB and measured a 177,093,288-byte `used_memory`
+  reduction while preserving all 296 queue keys and v3/unrelated sentinels.
+
 ## 2026-08-09 - Clean B0 cross-service rehearsal evidence
 
 - Replayed the committed Data and Web migrations from a clean full B0 clone without SQL or

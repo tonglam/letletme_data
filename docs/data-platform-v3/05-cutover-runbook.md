@@ -110,6 +110,24 @@ All fields below must be attached to the run record:
 
 If any artifact differs from the latest reviewed commit, stop and repeat the affected rehearsal.
 
+## Redis queue separation procedure
+
+Run with all `CACHE_REDIS_*` and `QUEUE_REDIS_*` values explicit. The cache and queue endpoint
+identities must differ. Stop Data workers and confirm no active queue job before this procedure.
+
+1. Run `bun run redis:cutover copy-queues` and save its exact
+   `payloadManifestSha256`.
+2. Set `V3_REDIS_QUEUE_MANIFEST_SHA256` to that digest and run
+   `bun run redis:cutover copy-queues --execute`.
+3. Run `bun run redis:cutover verify-queues` with the same manifest digest. It must reproduce the
+   exact key count, key manifest, and canonical payload manifest from the queue endpoint.
+4. Do not remove the DB0 queue copy until the B1/legacy-drop approval gate. Starting a worker
+   before the exact DB1 verification invalidates the copy and requires a new dry-run.
+
+The command is idempotent for identical target keys and fails closed for a conflicting or
+unexpected target key. It uses type-aware logical hashes because raw Redis `DUMP` bytes are not a
+canonical equality contract for restored hashes.
+
 ## Production activation: `0079`-`0090_zzz`
 
 1. Announce and enable maintenance on the accepted pre-cutover Web build.
@@ -191,8 +209,13 @@ Approval for planning, implementation, activation, or a different run ID is not 
 4. Run exact object inventory. Any unexpected remaining v2 object or missing preserved object fails
    cleanup.
 5. Rebuild reporting MVs/publications and run the full schema/data/security smoke suite.
-6. Delete retired Redis keys only with allowlisted prefixes and cursor-based `SCAN` plus `UNLINK`.
-   Record matched/deleted counts by key type and verify unrelated key counts are unchanged.
+6. Dry-run `bun run redis:cutover cleanup
+   --groups=dataCache,dataCoordination,graphqlCache,legacyQueueDb0`, save its exact key manifest,
+   and compare the explicit key list with the approved cleanup scope. Execute the same command
+   with `--execute` only when `CUTOVER_RUN_ID`, `V3_LEGACY_DROP_APPROVAL`, and
+   `V3_REDIS_CLEANUP_MANIFEST_SHA256` exactly match the approved run and dry-run. Record
+   matched/unlinked counts, run `verify-queues` again, and verify unrelated/v3 keys are unchanged.
+   The command uses bounded `SCAN` plus `UNLINK`; it has no `DEL` or Redis `FLUSH` path.
 7. Start Data, then GraphQL, then disable maintenance after private Web smoke tests.
 
 ## B2 and 24-hour verification

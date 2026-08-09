@@ -16,7 +16,7 @@ durable path, SHA, query result, run URL, or backup manifest. Verbal confirmatio
 | Production project | `gtwcfjoviibmtkevurjw` |
 | Plan version | 3.2.4 |
 | Cutover approver | User |
-| Current phase | P5 in progress; P5-02/P5-03/P5-06/P5-08/P5-09 accepted; Redis/B1/run 2 pending |
+| Current phase | P5 in progress; Redis budget accepted; post-cleanup DB/B1/run 2 pending |
 
 ## P0 - Freeze and inventory
 
@@ -100,7 +100,7 @@ P2 exit gate: migrations reproduce the target from fresh and B0 schemas and all 
 | [x] | P3-08 | Implement v3 immutable publication | Atomic pointer and TTL behavior pass | `data-publication`: 8/8 |
 | [x] | P3-09 | Remove Data Understat cache | No writer/key/config remains | Source/config scan; cleanup allowlist only |
 | [x] | P3-10 | Remove retired summary/value keys | No writer/key/config remains | Source scan + publication contract tests |
-| [x] | P3-11 | Add scoped Redis cleanup | Only configured v2 namespaces deleted; no FLUSH | Cleanup unit tests; `SCAN` + `UNLINK` only |
+| [x] | P3-11 | Add scoped Redis cleanup | Only configured v2 namespaces deleted; no FLUSH | `6fc38cc`; formal manifest-gated queue copy/verify and `SCAN` + `UNLINK`; `20-p5-redis-cutover-rehearsal.md` |
 | [x] | P3-12 | Run lint/typecheck/unit/integration/build | All pass | `11-p3-runtime-and-cache-acceptance.md`; `12-p3-test-retirement-audit.md` |
 | [x] | P3-13 | Commit D2 | Clean tree; SHA recorded | Substantive SHA: `51201b40ec3187ad38a18171a7267836326a6fec` |
 
@@ -130,13 +130,13 @@ P2 exit gate: migrations reproduce the target from fresh and B0 schemas and all 
 
 | Done | ID | Check | Acceptance | Evidence |
 | --- | --- | --- | --- | --- |
-| [ ] | P5-01 | Rehearsal run 1 | Complete runbook, no undocumented intervention | `19-p5-rehearsal-run-1.md`; clean DB replay passed, representative Redis/exact-order rerun pending |
+| [ ] | P5-01 | Rehearsal run 1 | Complete runbook, no undocumented intervention | `19-p5-rehearsal-run-1.md`; `20-p5-redis-cutover-rehearsal.md`; exact-order rerun pending |
 | [x] | P5-02 | Rollback before activation | v2 remains unchanged | `17-p5-rollback-drills.md`; full public data/sequence/security diffs 0 bytes; old Data SHA status and readiness pass |
 | [x] | P5-03 | Rollback after activation/pre-cleanup | Old SHAs and v2 writer restore without overlap | `17-p5-rollback-drills.md`; full B0 public/sequence/security/bauth diffs 0 bytes; old Data/GraphQL/Web stack all probes 200 |
 | [ ] | P5-04 | Simulated post-cleanup B1 restore | Selective/full recovery works | Report: |
 | [ ] | P5-05 | Rehearsal run 2 | Same target hashes; timing within budget | Run report: |
 | [x] | P5-06 | Data quality matrix | All critical/high checks pass | `19-p5-rehearsal-run-1.md`; 51 passed, 0 failed; B0/v3 hash diffs 0 |
-| [ ] | P5-07 | Performance budgets | Every budget passes or has accepted plan revision | `19-p5-rehearsal-run-1.md`; query budgets pass, post-cleanup DB/representative Redis gates pending |
+| [ ] | P5-07 | Performance budgets | Every budget passes or has accepted plan revision | `19-p5-rehearsal-run-1.md`; `20-p5-redis-cutover-rehearsal.md`; Redis/query budgets pass, post-cleanup DB size pending |
 | [x] | P5-08 | Security/grant tests | Least privilege and private schemas pass | `18-p5-web-runtime-boundary.md`; `19-p5-rehearsal-run-1.md`; all three runtime roles pass |
 | [x] | P5-09 | End-to-end journeys | Selections/player/live/market/tournament/auth pass | `19-p5-rehearsal-run-1.md`; Data/GraphQL/Web/auth/maintenance journeys pass |
 | [ ] | P5-10 | Freeze candidate SHAs/digests/checksums | External release manifest immutable; no self-reference | Manifest: |

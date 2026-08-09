@@ -211,6 +211,9 @@ may create a seed fact. Any remaining mismatch blocks dropping `player_values*`.
 | GraphQL cache stale after Data revision | key changes because dataset revision changes |
 | Understat query has valid no-result | 60-second negative result, not a persistent sentinel |
 | Redis cleanup | only allowlisted v2 prefixes removed via `SCAN`/`UNLINK` |
+| Redis queue relocation | exact canonical payload manifest copied from DB0 to DB1; conflict or unexpected target fails closed |
+| Redis destructive gate | missing approval, wrong run, or wrong cleanup manifest performs zero unlink |
+| Redis cleanup replay | second run is a zero-key no-op; v3/unrelated keys and relocated queues survive |
 
 ## Performance budgets
 
