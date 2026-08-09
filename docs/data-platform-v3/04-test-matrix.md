@@ -53,6 +53,11 @@ Required migration cases:
     mutate it and GraphQL can only select it.
 14. every `ops.dataset_publications.publication_id` satisfies the RFC UUID contract, v3 manifests
     carry the exact plan version, and normalization preserves any `ops.sync_runs` reference.
+15. encrypted B1 full and legacy-public custom dumps decrypt, hash, parse, and restore on PG15;
+16. post-cleanup selective recovery runs the generated dump-bound pre capsule, restores only from
+    the exact B1 public dump, then runs the generated post capsule to restore exact ops state; and
+17. missing/wrong recovery approval, run ID, dump hash, cleanup phase, public catalog, or ops hash
+    fails before the corresponding recovery mutation.
 
 ### GraphQL
 
@@ -163,6 +168,11 @@ derive directly. Nine B0 current-season start rows derive from same-day first ca
 564 must map one-to-one to `snapshot_source='legacy_value_seed'` facts. No other source value row
 may create a seed fact. Any remaining mismatch blocks dropping `player_values*`.
 
+After physical legacy cleanup, the validator cannot query deleted source rows. It must instead
+require the retained passed `0085_reporting_player_value_changes_rows` evidence and reproduce its
+exact target row count/hash from `reporting.player_value_changes`; an absent, failed, or stale
+evidence row blocks acceptance.
+
 ### Competition and tournament
 
 - Every competition fact has a valid season, entry, and event where applicable.
@@ -214,6 +224,10 @@ may create a seed fact. Any remaining mismatch blocks dropping `player_values*`.
 | Redis queue relocation | exact canonical payload manifest copied from DB0 to DB1; conflict or unexpected target fails closed |
 | Redis destructive gate | missing approval, wrong run, or wrong cleanup manifest performs zero unlink |
 | Redis cleanup replay | second run is a zero-key no-op; v3/unrelated keys and relocated queues survive |
+| Post-cleanup B1 pre capsule | only exact completed 0091/0092/0093 states accepted; fence dependency restored |
+| B1 selective public restore | `--clean --if-exists --exit-on-error`; all data/catalog/security/sequence hashes exact |
+| Post-cleanup B1 post capsule | exact public fingerprint required before cleanup ledgers/run metadata are restored |
+| B1 recovery wrong approval/hash | zero ops rollback; no acceptance of a different dump or run |
 
 ## Performance budgets
 

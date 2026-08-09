@@ -176,14 +176,39 @@ canonical equality contract for restored hashes.
 ### Failure after cleanup begins
 
 - Keep maintenance enabled and all writers stopped.
-- Restore B1 selective/full according to the rehearsed procedure.
+- Verify the encrypted B1 full/legacy-public dump and generated capsule checksums.
+- For selective recovery, run the B1 pre capsule with the exact recovery approval and raw
+  legacy-public dump SHA-256, restore that dump using
+  `pg_restore --clean --if-exists --exit-on-error`, then run the paired post capsule with the same
+  approval/hash. The post capsule must pass the public catalog/security and ops-state hashes.
+- For full recovery, restore the full B1 custom dump into a clean PG15 database and reconcile all
+  public, v3, Auth/Web, ops, sequence, and security manifests before replacing the failed database.
 - Do not recreate dropped objects from migration memory or ad hoc SQL.
+
+The recovery capsules are generated before cleanup from the activated B1 database:
+
+```text
+psql -v cutover_run_id=<CUTOVER_RUN_ID> -v legacy_dump_sha256=<RAW_SHA256> \
+  -v capsule_phase=pre -f sql/v3/generate-postcleanup-rollback.sql
+psql -v cutover_run_id=<CUTOVER_RUN_ID> -v legacy_dump_sha256=<RAW_SHA256> \
+  -v capsule_phase=post -f sql/v3/generate-postcleanup-rollback.sql
+```
+
+Encrypt the generated output immediately. Recovery execution requires exactly:
+
+```text
+APPROVE_V3_POSTCLEANUP_ROLLBACK <CUTOVER_RUN_ID>
+```
+
+This recovery phrase does not authorize activation or deletion.
 
 ## B1 and deletion approval
 
 After v3 activation passes and v2 remains frozen:
 
 1. Take encrypted B1 full and legacy-selective dumps with the same manifest/checksum rules as B0.
+   Compute the raw selective-dump SHA-256 and generate/encrypt both post-cleanup rollback capsules
+   from this same frozen B1 state.
 2. Restore-spot-check representative legacy tables, partitions, views/MVs/functions, ledgers, and
    grants.
 3. Generate the exact fully qualified object list for `0091`-`0093`. Compare it to the approved

@@ -43,6 +43,30 @@ describe('P5 rehearsal contracts', () => {
     expect(sql).not.toContain('DROP TABLE');
   });
 
+  test('generates exact two-phase post-cleanup B1 rollback capsules', () => {
+    const sql = read('sql/v3/generate-postcleanup-rollback.sql');
+
+    expect(sql).toStartWith(
+      '\\set ON_ERROR_STOP on\n\\o /dev/null\n\\set QUIET 1\n\\pset tuples_only on',
+    );
+    expect(sql).toContain(`capsule_phase NOT IN (${quote}pre${quote}, ${quote}post${quote})`);
+    expect(sql).toContain('APPROVE_V3_POSTCLEANUP_ROLLBACK ');
+    expect(sql).toContain('legacy dump SHA-256 does not match this capsule');
+    expect(sql).toContain('completed 0091, 0092, or 0093 boundary');
+    expect(sql).toContain('cleanup_phase IS NULL OR cleanup_phase NOT IN');
+    expect(sql).toContain('pg_restore --clean --if-exists');
+    expect(sql).toContain(
+      `pg_get_functiondef(${quote}ops.reject_v2_mutation()${quote}::regprocedure)`,
+    );
+    expect(sql).toContain('DO $postcleanup_public_restore_postcondition$');
+    expect(sql).toContain('DO $normalize_public_schema_acl$');
+    expect(sql).toContain('DO $postcleanup_ops_precondition$');
+    expect(sql).toContain('DO $postcleanup_ops_postcondition$');
+    expect(sql).toContain('DELETE FROM ops.schema_migrations');
+    expect(sql).toContain('DELETE FROM ops.migration_objects');
+    expect(sql).not.toContain('DROP SCHEMA');
+  });
+
   test('limits B0 owner normalization to the approved isolated source scope', () => {
     const sql = read('sql/v3/p5-normalize-b0-ownership.sql');
 
@@ -67,6 +91,10 @@ describe('P5 rehearsal contracts', () => {
     );
     expect(sql).toContain(`column_name IN (${quote}event_id${quote}, ${quote}team_id${quote})`);
     expect(sql).toContain('P5 player value reconstruction mismatches');
+    expect(sql).toContain('P5 post-cleanup player value evidence/current target mismatch');
+    expect(sql).toContain(
+      `legacy_drop_phase IN (${quote}physical_objects_removed${quote}, ${quote}complete${quote})`,
+    );
     expect(sql).toContain('(SELECT count(*) FROM understat.matches) <> 4560');
     expect(sql).toContain('(SELECT count(*) FROM understat.player_match_stats) <> 129576');
     expect(sql).toContain('(SELECT count(*) FROM bridge.entity_links) <> 1909');
@@ -102,6 +130,28 @@ describe('P5 rehearsal contracts', () => {
     expect(sql).toContain('p5-query:player-state-fpl-history');
     expect(sql).toContain('p5-query:player-state-understat-cohorts');
     expect(sql).toContain('pg_stat_user_indexes');
+  });
+
+  test('hashes every preserved B1 application/control schema outside public', () => {
+    const sql = read('sql/v3/capture-b1-preserved-relation-hashes.sql');
+
+    for (const schema of [
+      'auth',
+      'bauth',
+      'drizzle',
+      'ops',
+      'storage',
+      'supabase_functions',
+      'supabase_migrations',
+      'vault',
+    ]) {
+      expect(sql).toContain(`${quote}${schema}${quote}`);
+    }
+    expect(sql).not.toContain(`${quote}cron${quote}`);
+    expect(sql).toContain(
+      `relation_row.relkind IN (${quote}r${quote}, ${quote}p${quote}, ` +
+        `${quote}m${quote}, ${quote}v${quote})`,
+    );
   });
 
   test('distinguishes real frozen-owner grants from superuser pg_has_role semantics', () => {

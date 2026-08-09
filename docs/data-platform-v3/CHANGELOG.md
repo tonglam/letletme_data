@@ -1,5 +1,15 @@
 # Data Platform v3 Plan Changelog
 
+## 2026-08-09 - Post-cleanup B1 recovery and final performance gate
+
+- Added generated, approval/run/dump-bound pre/post recovery capsules so selective rollback after
+  `0091`, `0092`, or `0093` restores public data only from B1 and exact non-public cleanup state
+  from its captured ops contract.
+- Corrected PG15 public-schema ACL restoration and made the P5 quality validator valid both before
+  and after physical v2 cleanup without reconstructing deleted source rows.
+- Accepted encrypted B1-equivalent full and selective restores with zero data/security/ops diffs;
+  the cleaned database measured 391,545,347 bytes versus the 512,218,885-byte budget ceiling.
+
 ## 2026-08-09 - Executable Redis cutover and representative memory gate
 
 - Added a formal dry-run-first operator command for canonical BullMQ DB0-to-DB1 copy, independent

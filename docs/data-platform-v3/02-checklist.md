@@ -16,7 +16,7 @@ durable path, SHA, query result, run URL, or backup manifest. Verbal confirmatio
 | Production project | `gtwcfjoviibmtkevurjw` |
 | Plan version | 3.2.4 |
 | Cutover approver | User |
-| Current phase | P5 in progress; Redis budget accepted; post-cleanup DB/B1/run 2 pending |
+| Current phase | P5 in progress; B1 recovery and all performance budgets accepted; exact-order run 2 and candidate freeze pending |
 
 ## P0 - Freeze and inventory
 
@@ -133,10 +133,10 @@ P2 exit gate: migrations reproduce the target from fresh and B0 schemas and all 
 | [ ] | P5-01 | Rehearsal run 1 | Complete runbook, no undocumented intervention | `19-p5-rehearsal-run-1.md`; `20-p5-redis-cutover-rehearsal.md`; exact-order rerun pending |
 | [x] | P5-02 | Rollback before activation | v2 remains unchanged | `17-p5-rollback-drills.md`; full public data/sequence/security diffs 0 bytes; old Data SHA status and readiness pass |
 | [x] | P5-03 | Rollback after activation/pre-cleanup | Old SHAs and v2 writer restore without overlap | `17-p5-rollback-drills.md`; full B0 public/sequence/security/bauth diffs 0 bytes; old Data/GraphQL/Web stack all probes 200 |
-| [ ] | P5-04 | Simulated post-cleanup B1 restore | Selective/full recovery works | Report: |
+| [x] | P5-04 | Simulated post-cleanup B1 restore | Selective/full recovery works | `21-p5-postcleanup-b1-restore.md`; external `p5/postcleanup-b1/manifests/b1-rehearsal-manifest.json` SHA-256 `beb2ce3403ece550b80c655751827ebc52b7a040cceb90b3b8220c1ddebbe2be`; all full/selective data/security/ops diffs 0 |
 | [ ] | P5-05 | Rehearsal run 2 | Same target hashes; timing within budget | Run report: |
 | [x] | P5-06 | Data quality matrix | All critical/high checks pass | `19-p5-rehearsal-run-1.md`; 51 passed, 0 failed; B0/v3 hash diffs 0 |
-| [ ] | P5-07 | Performance budgets | Every budget passes or has accepted plan revision | `19-p5-rehearsal-run-1.md`; `20-p5-redis-cutover-rehearsal.md`; Redis/query budgets pass, post-cleanup DB size pending |
+| [x] | P5-07 | Performance budgets | Every budget passes or has accepted plan revision | `19-p5-rehearsal-run-1.md`; `20-p5-redis-cutover-rehearsal.md`; `21-p5-postcleanup-b1-restore.md`; cleaned DB 391,545,347 bytes vs 512,218,885-byte ceiling |
 | [x] | P5-08 | Security/grant tests | Least privilege and private schemas pass | `18-p5-web-runtime-boundary.md`; `19-p5-rehearsal-run-1.md`; all three runtime roles pass |
 | [x] | P5-09 | End-to-end journeys | Selections/player/live/market/tournament/auth pass | `19-p5-rehearsal-run-1.md`; Data/GraphQL/Web/auth/maintenance journeys pass |
 | [ ] | P5-10 | Freeze candidate SHAs/digests/checksums | External release manifest immutable; no self-reference | Manifest: |

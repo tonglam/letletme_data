@@ -197,53 +197,117 @@ $player_summary_contract$;
 
 DO $market_reconstruction_contract$
 DECLARE
+  evidence_hash text;
+  evidence_row_count bigint;
+  legacy_drop_phase text;
   mismatch_count bigint;
+  target_hash text;
+  target_row_count bigint;
 BEGIN
-  WITH source_values AS (
-    SELECT
-      history.season AS season_code,
-      history.element_id,
-      history.element_type,
-      history.event_id,
-      history.value,
-      btrim(history.change_date) AS change_date,
-      history.last_value,
-      history.change_type::text AS change_type
-    FROM public.player_values_history history
-    WHERE history.season <> '2627'
+  SELECT metadata ->> 'legacyDropPhase'
+  INTO legacy_drop_phase
+  FROM ops.migration_runs
+  WHERE run_id = 'v3-20260808T160008Z-b9eddc0';
 
-    UNION ALL
+  IF to_regclass('public.player_values_history') IS NOT NULL
+     AND to_regclass('public.player_values') IS NOT NULL THEN
+    WITH source_values AS (
+      SELECT
+        history.season AS season_code,
+        history.element_id,
+        history.element_type,
+        history.event_id,
+        history.value,
+        btrim(history.change_date) AS change_date,
+        history.last_value,
+        history.change_type::text AS change_type
+      FROM public.player_values_history history
+      WHERE history.season <> '2627'
+
+      UNION ALL
+
+      SELECT
+        '2627',
+        current.element_id,
+        current.element_type,
+        current.event_id,
+        current.value,
+        btrim(current.change_date),
+        current.last_value,
+        current.change_type::text
+      FROM public.player_values current
+    ), target_values AS (
+      SELECT
+        target.season_code,
+        target.element_id,
+        target.element_type,
+        target.event_id,
+        target.value,
+        to_char(target.snapshot_date, 'YYYYMMDD') AS change_date,
+        target.last_value,
+        target.change_type::text AS change_type
+      FROM reporting.player_value_changes target
+    ), differences AS (
+      (SELECT * FROM source_values EXCEPT SELECT * FROM target_values)
+      UNION ALL
+      (SELECT * FROM target_values EXCEPT SELECT * FROM source_values)
+    )
+    SELECT count(*) INTO mismatch_count FROM differences;
+
+    IF mismatch_count <> 0 THEN
+      RAISE EXCEPTION 'P5 player value reconstruction mismatches: %', mismatch_count;
+    END IF;
+  ELSIF to_regclass('public.player_values_history') IS NULL
+        AND to_regclass('public.player_values') IS NULL
+        AND legacy_drop_phase IN ('physical_objects_removed', 'complete') THEN
+    SELECT evidence.target_row_count, evidence.target_hash
+    INTO evidence_row_count, evidence_hash
+    FROM ops.migration_objects evidence
+    WHERE evidence.run_id = 'v3-20260808T160008Z-b9eddc0'
+      AND evidence.check_name = '0085_reporting_player_value_changes_rows'
+      AND evidence.source_object = 'public.player_values_history + public.player_values'
+      AND evidence.target_object = 'reporting.player_value_changes'
+      AND evidence.source_row_count = evidence.target_row_count
+      AND evidence.source_hash = evidence.target_hash
+      AND evidence.failed_count = 0
+      AND evidence.status = 'passed';
 
     SELECT
-      '2627',
-      current.element_id,
-      current.element_type,
-      current.event_id,
-      current.value,
-      btrim(current.change_date),
-      current.last_value,
-      current.change_type::text
-    FROM public.player_values current
-  ), target_values AS (
-    SELECT
-      target.season_code,
-      target.element_id,
-      target.element_type,
-      target.event_id,
-      target.value,
-      to_char(target.snapshot_date, 'YYYYMMDD') AS change_date,
-      target.last_value,
-      target.change_type::text AS change_type
-    FROM reporting.player_value_changes target
-  ), differences AS (
-    (SELECT * FROM source_values EXCEPT SELECT * FROM target_values)
-    UNION ALL
-    (SELECT * FROM target_values EXCEPT SELECT * FROM source_values)
-  )
-  SELECT count(*) INTO mismatch_count FROM differences;
+      count(*)::bigint,
+      encode(
+        sha256(convert_to(
+          coalesce(string_agg(canonical_row, E'\n' ORDER BY canonical_row), ''),
+          'UTF8'
+        )),
+        'hex'
+      )
+    INTO target_row_count, target_hash
+    FROM (
+      SELECT jsonb_build_array(
+        target.season_code,
+        target.element_id,
+        target.element_type,
+        target.event_id,
+        target.value,
+        to_char(target.snapshot_date, 'YYYYMMDD'),
+        target.last_value,
+        target.change_type::text
+      )::text AS canonical_row
+      FROM reporting.player_value_changes target
+    ) target_rows;
 
-  IF mismatch_count <> 0 THEN
-    RAISE EXCEPTION 'P5 player value reconstruction mismatches: %', mismatch_count;
+    IF evidence_row_count IS NULL
+       OR target_row_count <> evidence_row_count
+       OR target_hash IS DISTINCT FROM evidence_hash THEN
+      RAISE EXCEPTION
+        'P5 post-cleanup player value evidence/current target mismatch: evidence %/%, target %/%',
+        evidence_row_count,
+        evidence_hash,
+        target_row_count,
+        target_hash;
+    END IF;
+  ELSE
+    RAISE EXCEPTION 'P5 player value source/cleanup boundary is incomplete or ambiguous';
   END IF;
 
   IF (SELECT count(*) FROM fpl.player_market_snapshots

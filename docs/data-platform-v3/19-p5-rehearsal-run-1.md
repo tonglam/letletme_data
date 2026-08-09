@@ -5,8 +5,9 @@ Date: 2026-08-09
 Run ID: `v3-20260808T160008Z-b9eddc0`
 
 Status: data-quality, cross-service security, and representative application journeys accepted.
-P5-01 remains open until representative B0 Redis state is restored and the complete runbook is
-repeated in its exact production order. P5-04, P5-05, P5-07, and P5-10 also remain open.
+This run originally left the Redis, post-cleanup B1, and database-size gates open; the former were
+subsequently accepted in `20-p5-redis-cutover-rehearsal.md` and
+`21-p5-postcleanup-b1-restore.md`. P5-01, P5-05, and P5-10 remain open.
 
 ## Frozen candidates
 
@@ -114,10 +115,10 @@ Database plans used `player_gameweek_stats_player_idx` for player summaries. The
 history path completed in 33.780 ms, and the verified-bridge Understat cohort path completed in
 8.033 ms using `understat_player_seasons_player_idx`.
 
-P5-07 remains open. The activated pre-cleanup database is 824,103,727 bytes versus B0 at
-426,849,071 bytes because v2 and v3 coexist before `0091`-`0093`; the <=20% gate must be measured
-after local cleanup. The dedicated empty Redis used for HTTP E2E is not a representative B0 memory
-baseline, so the >=100 MB cleanup gate is not yet claimed.
+This run alone did not close P5-07. The activated pre-cleanup database is 824,103,727 bytes versus
+B0 at 426,849,071 bytes because v2 and v3 coexist before `0091`-`0093`. The subsequent cleanup
+rehearsal measured 391,545,347 bytes, while the representative Redis rehearsal removed
+177,093,288 bytes; `21-p5-postcleanup-b1-restore.md` therefore closes the combined budget gate.
 
 ## Cross-service security gate
 
@@ -221,8 +222,6 @@ warning and must be rechecked in rehearsal run 2; it is not hidden as a clean-lo
 
 Remaining blockers are:
 
-1. restore the representative encrypted B0 Redis snapshot and measure scoped cleanup;
-2. run the exact complete sequence in maintenance mode without the probe retries above;
-3. apply approval-gated cleanup only to a disposable clone and complete B1 full/selective restore;
-4. repeat the full rehearsal with identical target hashes and accepted timing/size budgets; and
-5. integrate the separately owned Understat branch before freezing P5-10 candidates.
+1. run the exact complete sequence in maintenance mode without the probe retries above;
+2. repeat the full rehearsal with identical target hashes and accepted timing/size budgets; and
+3. integrate the separately owned Understat branch before freezing P5-10 candidates.

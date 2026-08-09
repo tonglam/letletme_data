@@ -5,7 +5,8 @@ Date: 2026-08-09
 Run ID: `v3-20260808T160008Z-b9eddc0`
 
 Status: representative Redis restore, BullMQ relocation, scoped cleanup, and memory budget
-accepted. P5-07 remains open only for the post-`0091`-`0093` PostgreSQL size measurement.
+accepted. The remaining PostgreSQL-size portion of P5-07 was subsequently accepted in
+`21-p5-postcleanup-b1-restore.md`.
 
 Accepted Data tooling commit: `6fc38cc0ec1df68612eafba31a0a195ecafac795`
 
