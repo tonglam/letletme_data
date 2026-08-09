@@ -119,7 +119,7 @@ P2 exit gate: migrations reproduce the target from fresh and B0 schemas and all 
 | [x] | P4-10 | Create G3 from accepted G2 | Exact predecessor SHA | `/Users/tong/CursorProjects/letletme-graphql-data-platform-v3-player-state`; predecessor `e2612ad2db91db5a9841ed03812403e0082a4906` |
 | [x] | P4-11 | Implement limited `playerStateProfile` | Indexed PG path; 900/60 TTL | `15-p4-g3-acceptance.md`; 311 tests + 4 B0; p95 61.028/0.039 ms |
 | [x] | P4-12 | Commit G3 | Clean tree; SHA recorded | `3b426383a13ddc4b2d1d22452216bfe77826e420` |
-| [ ] | P4-13 | Create W1 from Web `origin/main` | Existing dirty worktree untouched | Path/SHA: |
+| [x] | P4-13 | Create W1 from Web `origin/main` | Existing dirty worktree untouched | `/Users/tong/CursorProjects/letletme-web-data-platform-v3-contract`; baseline `c290d912dfc3756237d65794c47e78f2193771e8` |
 | [ ] | P4-14 | Update GraphQL operations/types | Schema validation passes | Tests: |
 | [ ] | P4-15 | Implement maintenance UX | All v3-dependent pages fail coherently | E2E: |
 | [ ] | P4-16 | Verify Better Auth ownership unchanged | Web-only writes; auth journeys pass | Tests: |
