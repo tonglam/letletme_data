@@ -16,7 +16,7 @@ durable path, SHA, query result, run URL, or backup manifest. Verbal confirmatio
 | Production project | `gtwcfjoviibmtkevurjw` |
 | Plan version | 3.2.5 |
 | Cutover approver | User |
-| Current phase | Plan 3.2.5 fresh PG15 migration gate passed; first clean full B0 replay (Run 5) in progress, followed by one identical replay |
+| Current phase | Plan 3.2.5 fresh PG15 migration gate passed; Run 5 rejected at full-restore identity gate; first clean full B0 replay is Run 6, followed by one identical replay |
 
 ## P0 - Freeze and inventory
 
@@ -136,11 +136,11 @@ schemas and all data gates pass.
 
 | Done | ID | Check | Acceptance | Evidence |
 | --- | --- | --- | --- | --- |
-| [ ] | P5-01 | Rehearsal run 1 | Complete runbook, no undocumented intervention | `19-p5-rehearsal-run-1.md`; rejected runs `22`, `23`, `24`; first clean plan-3.2.5 replay required |
+| [ ] | P5-01 | Rehearsal run 1 | Complete runbook, no undocumented intervention | `19-p5-rehearsal-run-1.md`; rejected runs `22`, `23`, `24`, `25`; first clean plan-3.2.5 replay required |
 | [x] | P5-02 | Rollback before activation | v2 remains unchanged | `17-p5-rollback-drills.md`; full public data/sequence/security diffs 0 bytes; old Data SHA status and readiness pass |
 | [x] | P5-03 | Rollback after activation/pre-cleanup | Old SHAs and v2 writer restore without overlap | `17-p5-rollback-drills.md`; full B0 public/sequence/security/bauth diffs 0 bytes; old Data/GraphQL/Web stack all probes 200 |
 | [x] | P5-04 | Simulated post-cleanup B1 restore | Selective/full recovery works | `21-p5-postcleanup-b1-restore.md`; external `p5/postcleanup-b1/manifests/b1-rehearsal-manifest.json` SHA-256 `beb2ce3403ece550b80c655751827ebc52b7a040cceb90b3b8220c1ddebbe2be`; all full/selective data/security/ops diffs 0 |
-| [ ] | P5-05 | Rehearsal run 2 | Same target hashes; timing within budget | `22-p5-rehearsal-run-2-rejected.md`; `23-p5-rehearsal-run-3-rejected.md`; `24-p5-rehearsal-run-4-rejected.md`; two clean plan-3.2.5 replays required |
+| [ ] | P5-05 | Rehearsal run 2 | Same target hashes; timing within budget | Rejected reports `22`-`25`; two clean plan-3.2.5 replays required |
 | [x] | P5-06 | Data quality matrix | All critical/high checks pass | `19-p5-rehearsal-run-1.md`; 51 passed, 0 failed; B0/v3 hash diffs 0 |
 | [x] | P5-07 | Performance budgets | Every budget passes or has accepted plan revision | `19-p5-rehearsal-run-1.md`; `20-p5-redis-cutover-rehearsal.md`; `21-p5-postcleanup-b1-restore.md`; cleaned DB 391,545,347 bytes vs 512,218,885-byte ceiling |
 | [ ] | P5-08 | Security/grant tests | Least privilege and private schemas pass | Focused real-writer grants pass exact positive/negative matrix and GraphQL 3.2.5 role gate; clean migration replay still required |

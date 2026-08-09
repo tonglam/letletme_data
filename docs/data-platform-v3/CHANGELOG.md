@@ -2,6 +2,10 @@
 
 ## 3.2.5 - 2026-08-09
 
+- Rejected rehearsal 5 at the encrypted full-B0 restore gate because `pg_restore --no-owner` was
+  invoked with the direct `postgres` migration owner instead of the Supabase image administrator;
+  the restore stopped before public business tables, Redis never started, and production was not
+  touched. The runbook now makes the two local restore identities explicit.
 - Rejected rehearsal 4 after the real Data writer correctly failed the core-cache preflight on
   `ops.migration_runs`; no v3 Redis key was written and the restored DB0 remained at 473 keys.
 - Kept cache publication on the dedicated Data runtime identity and granted only column-level

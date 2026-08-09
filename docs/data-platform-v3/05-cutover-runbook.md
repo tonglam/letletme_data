@@ -97,9 +97,12 @@ the example above is not permission to omit required Data source objects or incl
 7. Remove unencrypted raw artifacts only after encrypted checksum/decryption verification is
    recorded. Report exactly what was removed and that recovery remains available from encrypted B0.
 8. Restore full and selective dumps into two isolated PostgreSQL 15 databases. Apply no migrations.
-   For each restore target containing `pg_cron` objects, set `cron.database_name` to that exact
-   target database in the PostgreSQL server configuration, restart PostgreSQL, and verify the
-   effective setting before `pg_restore`. A restore attempted with `cron.database_name` pointing
+   On the local Supabase image, both `ALTER SYSTEM` and full-dump `pg_restore --no-owner` must run
+   as the image administrator (`supabase_admin`), never as the direct `postgres` migration owner;
+   the restored application ownership is normalized explicitly in step 9. For each restore target
+   containing `pg_cron` objects, set `cron.database_name` to that exact target database in the
+   PostgreSQL server configuration, restart PostgreSQL, and verify the effective setting before
+   `pg_restore`. A restore attempted with the wrong identity or with `cron.database_name` pointing
    elsewhere is rejected even if every non-`pg_cron` object restored. After both restores and their
    reconciliation are accepted, set `cron.database_name` back to the neutral `postgres` database,
    restart, verify the setting, and only then clone or prepare a rehearsal/cutover target.
