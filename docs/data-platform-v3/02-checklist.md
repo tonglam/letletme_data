@@ -120,10 +120,10 @@ P2 exit gate: migrations reproduce the target from fresh and B0 schemas and all 
 | [x] | P4-11 | Implement limited `playerStateProfile` | Indexed PG path; 900/60 TTL | `15-p4-g3-acceptance.md`; 311 tests + 4 B0; p95 61.028/0.039 ms |
 | [x] | P4-12 | Commit G3 | Clean tree; SHA recorded | `3b426383a13ddc4b2d1d22452216bfe77826e420` |
 | [x] | P4-13 | Create W1 from Web `origin/main` | Existing dirty worktree untouched | `/Users/tong/CursorProjects/letletme-web-data-platform-v3-contract`; baseline `c290d912dfc3756237d65794c47e78f2193771e8` |
-| [ ] | P4-14 | Update GraphQL operations/types | Schema validation passes | Tests: |
-| [ ] | P4-15 | Implement maintenance UX | All v3-dependent pages fail coherently | E2E: |
-| [ ] | P4-16 | Verify Better Auth ownership unchanged | Web-only writes; auth journeys pass | Tests: |
-| [ ] | P4-17 | Commit W1 | Clean tree; SHA recorded | SHA: |
+| [x] | P4-14 | Update GraphQL operations/types | Schema validation passes | `16-p4-w1-acceptance.md`; 32/32 operations; one root and <200 AST nodes |
+| [x] | P4-15 | Implement maintenance UX | All v3-dependent pages fail coherently | `16-p4-w1-acceptance.md`; true 503; English/Chinese desktop/mobile; Data API and Auth boundaries pass |
+| [x] | P4-16 | Verify Better Auth ownership unchanged | Web-only writes; auth journeys pass | `16-p4-w1-acceptance.md`; direct `.from(` count 13 -> 13; owned paths unchanged; unit/E2E pass |
+| [x] | P4-17 | Commit W1 | Clean tree; SHA recorded | `7c7a2bcf4d355f0539f4e0ea7679d78d8253beb2` |
 
 ## P5 - Rehearsal and quality gates
 
