@@ -1041,8 +1041,9 @@ jobs:
             done
 
             # The stable payload manifest is captured and verified while every queue producer is
-            # stopped. Only BullMQ's expiring stalled-check leases are excluded; the exact
-            # pre-activation cutover manifest remains a separate immutable acceptance artifact.
+            # stopped. Only positively expiring BullMQ stalled-check and per-job lock leases are
+            # excluded; persistent leases and active jobs fail closed. The exact pre-activation
+            # cutover manifest remains a separate immutable acceptance artifact.
             api_cid=$(APP_IMAGE="$IMAGE_REF" docker compose ps -q api)
             test -n "$api_cid"
             test "$(docker inspect --format '{{.Config.Image}}' "$api_cid")" = "$IMAGE_REF"
