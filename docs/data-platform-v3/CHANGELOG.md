@@ -1,5 +1,14 @@
 # Data Platform v3 Plan Changelog
 
+## 2026-08-10 - Stable queue gate for runtime redeploys
+
+- Kept the immutable DB0-to-DB1 cutover manifest exact while adding a separate runtime-stable
+  queue manifest that excludes only positively expiring BullMQ leases, rejects active jobs and
+  persistent leases, and anchors redeploys to the configured queue topology plus durable job state.
+- Moved runtime queue capture and verification into the interval where both Data API and worker
+  are stopped, before either producer can enqueue work, then retained API/GraphQL probes and
+  worker-last startup ordering.
+
 ## 3.2.5 - 2026-08-09
 
 - Reconciled the merged Understat runtime into the v3 `understat`, `bridge`, and `ops` ownership

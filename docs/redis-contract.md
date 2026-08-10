@@ -95,9 +95,18 @@ validated manifest; it never manufactures or regresses a revision.
 
 BullMQ keys remain `bull:{queue}:*`, but exist only on `QUEUE_REDIS_*`. Owned queues are
 `data-sync`, `entry-sync`, `live-data`, `league-sync`, `tournament-sync`, and
-`tournament-setup`, including optional `-p0` through `-p3` tier suffixes. When Understat is
-enabled, `understat-team-sync` and `understat-player-sync` are also owned queues. Their clients are
-created lazily, so the default disabled Understat runtime opens no provider queue connection.
+`tournament-setup`, including optional `-p0` through `-p3` tier suffixes. The migrated v3 queue
+topology also retains `understat-team-sync` and `understat-player-sync` metadata as durable DB
+identity anchors. Their clients are created lazily, so the default disabled Understat runtime opens
+no provider queue connection even though those metadata keys remain present.
+
+Runtime redeploy acceptance stops API and worker, then compares two consecutive type-aware queue
+manifests before restarting either producer. It excludes only BullMQ `stalled-check` and per-job
+lock leases that still have a positive TTL (or disappear during inspection). Persistent leases and
+non-empty `active` lists fail closed. The manifest also requires the exact configured queue-name
+set, every queue's durable `meta` key, and at least one durable job-state key, so an
+empty/flushed/wrong Redis database cannot self-approve. The exact DB0-to-DB1 migration manifest
+still includes every key and remains the immutable cutover artifact.
 
 Non-BullMQ worker state begins with `llm:v3:queue:coordination:*`, including mutation locks,
 Understat request-permit leases, tournament cascade barriers, daily entry-sync markers, and

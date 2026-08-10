@@ -3,7 +3,9 @@ import Redis from 'ioredis';
 
 import {
   cleanupLegacyRedisKeys,
+  expectedRuntimeQueueNames,
   inspectLegacyRedisQueues,
+  inspectRuntimeRedisQueues,
   LEGACY_REDIS_CLEANUP_GROUPS,
   relocateLegacyRedisQueues,
   type LegacyRedisCleanupGroup,
@@ -63,6 +65,13 @@ function positiveOption(args: readonly string[], name: string, fallback: number)
   return value === undefined ? fallback : integerValue(value, name, 1, 1_000_000);
 }
 
+function booleanEnvironment(name: string, fallback: boolean): boolean {
+  const value = process.env[name]?.trim().toLowerCase();
+  return value === undefined || value === ''
+    ? fallback
+    : ['true', '1', 'yes', 'on'].includes(value);
+}
+
 function cleanupGroups(args: readonly string[]): LegacyRedisCleanupGroup[] {
   const value = optionValue(args, '--groups');
   if (!value) throw new Error('--groups requires an explicit comma-separated cleanup group list');
@@ -77,17 +86,24 @@ function cleanupGroups(args: readonly string[]): LegacyRedisCleanupGroup[] {
 }
 
 function assertArguments(command: string | undefined, args: readonly string[]): void {
-  if (command !== 'copy-queues' && command !== 'verify-queues' && command !== 'cleanup') {
+  if (
+    command !== 'copy-queues' &&
+    command !== 'inspect-queues' &&
+    command !== 'verify-queues' &&
+    command !== 'cleanup'
+  ) {
     throw new Error(
-      'Usage: bun run redis:cutover <copy-queues|verify-queues|cleanup> [--execute] [options]',
+      'Usage: bun run redis:cutover <copy-queues|inspect-queues|verify-queues|cleanup> [--execute] [options]',
     );
   }
   const allowedPrefixes =
     command === 'copy-queues'
       ? ['--execute', '--max-keys=']
-      : command === 'verify-queues'
-        ? ['--max-keys=']
-        : ['--execute', '--groups=', '--max-keys=', '--unlink-batch-size='];
+      : command === 'inspect-queues'
+        ? ['--digest-only', '--runtime-stable', '--max-keys=']
+        : command === 'verify-queues'
+          ? ['--runtime-stable', '--max-keys=']
+          : ['--execute', '--groups=', '--max-keys=', '--unlink-batch-size='];
   const unknown = args.find(
     (argument) =>
       !allowedPrefixes.some(
@@ -117,6 +133,12 @@ async function main(): Promise<void> {
   const maxKeys = positiveOption(args, '--max-keys', 10_000);
   const cacheEndpoint = endpoint('CACHE');
   const queueEndpoint = endpoint('QUEUE');
+  const runtimeQueueOptions = {
+    maxKeys,
+    expectedQueueNames: expectedRuntimeQueueNames(
+      booleanEnvironment('ENABLE_TIERED_MUTATION_QUEUES', false),
+    ),
+  };
   if (endpointIdentity(cacheEndpoint) === endpointIdentity(queueEndpoint)) {
     throw new Error('Cache source and queue target Redis endpoints must be different');
   }
@@ -127,8 +149,32 @@ async function main(): Promise<void> {
     await Promise.all([cacheRedis.connect(), queueRedis.connect()]);
     await Promise.all([cacheRedis.ping(), queueRedis.ping()]);
 
+    if (command === 'inspect-queues') {
+      const manifest = args.includes('--runtime-stable')
+        ? await inspectRuntimeRedisQueues(queueRedis, runtimeQueueOptions)
+        : await inspectLegacyRedisQueues(queueRedis, { maxKeys });
+      if (args.includes('--digest-only')) {
+        console.log(manifest.payloadManifestSha256);
+      } else {
+        console.log(
+          JSON.stringify(
+            {
+              operation: command,
+              target: publicEndpoint(queueEndpoint),
+              manifest,
+            },
+            null,
+            2,
+          ),
+        );
+      }
+      return;
+    }
+
     if (command === 'verify-queues') {
-      const manifest = await inspectLegacyRedisQueues(queueRedis, { maxKeys });
+      const manifest = args.includes('--runtime-stable')
+        ? await inspectRuntimeRedisQueues(queueRedis, runtimeQueueOptions)
+        : await inspectLegacyRedisQueues(queueRedis, { maxKeys });
       const expectedManifest = requiredEnvironment('V3_REDIS_QUEUE_MANIFEST_SHA256');
       if (manifest.payloadManifestSha256 !== expectedManifest) {
         throw new Error('Queue target does not match V3_REDIS_QUEUE_MANIFEST_SHA256');

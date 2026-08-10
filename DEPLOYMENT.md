@@ -45,13 +45,15 @@ After v3 activation, release Data runtime code in two manual workflow dispatches
 
 1. Run `v3-publish-image` with the exact merged `main` commit and retain the emitted immutable
    `ghcr.io/...@sha256:...` reference.
-2. Run `v3-redeploy` with that same commit, image reference, and the accepted queue-manifest
-   SHA-256.
+2. Run `v3-redeploy` with that same commit and image reference.
 
 `v3-redeploy` requires the requested commit to equal `origin/main`, preserves untracked production
-files, never invokes database migration/activation/cleanup commands, verifies the queue manifest,
-starts and probes Data API, requires GraphQL health, and starts the worker last. Finish every release
-with `v3-terminal-acceptance` using the exact deployed Data and GraphQL image digests.
+files, and never invokes database migration/activation/cleanup commands. It stops every Data queue
+producer, captures and immediately verifies a stable runtime queue manifest, then starts and probes
+Data API, requires GraphQL health, and starts the worker last. The runtime manifest excludes only
+BullMQ's expiring `stalled-check` leases; it does not replace or modify the immutable cutover
+manifest. Finish every release with `v3-terminal-acceptance` using the exact deployed Data and
+GraphQL image digests.
 
 ## Helpful Commands
 - `scripts/deploy.sh deploy` – build locally and run the compose stack with migrations.
