@@ -110,6 +110,26 @@ describe('P5 rehearsal contracts', () => {
     expect(sql).toContain('P5 Data writer reporting refresh/read-model privilege boundary failed');
   });
 
+  test('validates the exact post-cleanup catalog, evidence, and quarantine boundary', () => {
+    const sql = read('sql/v3/validate-postcleanup.sql');
+
+    expect(sql).toContain('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    expect(sql).toContain(
+      `metadata ->> ${quote}legacyDropPhase${quote} = ${quote}complete${quote}`,
+    );
+    expect(sql).toContain(`${quote}0091_drop_v2_reporting_and_rpcs.sql${quote}`);
+    expect(sql).toContain(`${quote}0092_drop_v2_tables_partitions_triggers.sql${quote}`);
+    expect(sql).toContain(`${quote}0093_finalize_v3_migration_ownership.sql${quote}`);
+    expect(sql).toContain(`check_name LIKE ${quote}legacy_graphql_migration:%${quote}`);
+    expect(sql).toContain(`relation_row.relnamespace = ${quote}public${quote}::regnamespace`);
+    expect(sql).toContain(`to_regprocedure(${quote}ops.reject_v2_mutation()${quote}) IS NOT NULL`);
+    expect(sql).toContain('login_inherits_frozen_owner');
+    expect(sql).toContain(
+      `has_schema_privilege(role_row.rolname, ${quote}public${quote}, ${quote}CREATE${quote})`,
+    );
+    expect(sql).toContain(`${quote}v3_postcleanup_validation_passed${quote}`);
+  });
+
   test('grants the core-cache preflight only its three migration-run columns', () => {
     const sql = read('migrations/0079_create_v3_ops_and_roles.sql');
 

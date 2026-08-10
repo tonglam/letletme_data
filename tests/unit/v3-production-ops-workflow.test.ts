@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const workflow = readFileSync('.github/workflows/deploy.yml', 'utf8');
+const quote = String.fromCharCode(39);
 
 function job(name: string, nextName?: string): string {
   const start = workflow.indexOf(`\n  ${name}:`);
@@ -357,12 +358,16 @@ describe('v3 production hard-cut workflow', () => {
     expect(terminal).toMatch(/client_payload\.operation == 'v3-terminal-acceptance'/);
     expect(terminal).toContain('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
     expect(terminal).toContain('inspectLegacyRedisQueues(cacheRedis');
-    expect(terminal).toContain('Frozen DB0 queue source no longer matches');
+    expect(terminal).toContain('inspectLegacyRedisQueues(queueRedis');
+    expect(terminal).toContain('Legacy DB0 queue source was not fully cleaned');
+    expect(terminal).toContain('Active DB1 queues no longer match');
     expect(terminal).toContain('GraphQL query-cache type/TTL contract failed');
+    expect(terminal).toContain('validate-postcleanup.sql');
+    expect(terminal).toContain('v3_postcleanup_validation_passed');
     expect(terminal).toContain('v3_terminal_database_acceptance_passed');
     expect(terminal).toContain('v3_terminal_redis_acceptance_passed');
     expect(terminal).toContain('V3_TERMINAL_ACCEPTANCE=passed');
-    expect(terminal).toContain('be0adcb28347b1688cb6f07552faa5cf53e81d2c3de5e49d7ec5068428a361e2');
+    expect(terminal).toContain('00209e2cc1c6d9a60b580c3b1e4ca4cd9e30696a4fba6c5fb75548481d02d349');
     expect(terminal).toContain('4d10062af6a9d187078d31bb1c0d885f9e7ffca9fc63957c24eb3073a5300bd5');
     expect(terminal).not.toContain('docker compose up');
     expect(terminal).not.toContain('bun run db:migrate');
@@ -375,6 +380,7 @@ describe('v3 production hard-cut workflow', () => {
     expect(validation).toMatch(/client_payload\.operation == 'v3-validate-database'/);
     expect(validation).toContain('V3_REPEAT_MIGRATIONS_APPLIED=0');
     expect(validation).toContain('validate-0090-activation.sql');
+    expect(validation).toContain('validate-postcleanup.sql');
     expect(validation).toContain('validate-p5-quality.sql');
     expect(validation).toContain('capture-public-relation-hashes.sql');
     expect(validation).toContain('capture-v3-business-relation-hashes.sql');
@@ -383,13 +389,11 @@ describe('v3 production hard-cut workflow', () => {
     expect(validation).toContain('database_url="${database_url#\\"}"');
     expect(validation).toContain('database_url="${database_url%\\"}"');
     expect(validation).toContain(
-      '0443c71728e07a24e397dbbad39d1b016623f05333265b1abb208e62fdd15756',
+      `coalesce(metadata ->> ${quote}legacyDropPhase${quote}, ${quote}${quote})`,
     );
-    expect(validation).toContain('V3_R3_VALIDATOR_PATCH=case-expression-parenthesized');
-    expect(validation).toContain(
-      '709123d52eab4db0849961590f4fcbe397ed4584042a420391b699cb78b07a91',
-    );
-    expect(validation).toContain('V3_FINAL_B0_ENTITY_LINKS=2192');
+    expect(validation).toContain('complete) run_psql_file validate-postcleanup.sql');
+    expect(validation).toContain('Unsupported partial legacy-drop phase');
+    expect(validation).not.toContain('V3_R3_VALIDATOR_PATCH');
     expect(validation).toContain('--volume "$VALIDATION_DIR:/validation:ro"');
     expect(validation).toContain('docker compose ps -q api');
     expect(validation).toContain('docker compose ps -q worker');
