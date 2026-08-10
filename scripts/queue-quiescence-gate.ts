@@ -4,14 +4,14 @@ export type QueueQuiescenceSnapshot = {
   readonly nonTerminalSyncRuns: number;
   readonly stagingPublications: number;
   readonly runnableQueues: Readonly<Record<string, RunnableQueueCounts>>;
-  readonly unsettledRetiredCascadeIds: readonly string[];
+  readonly unsettledCascadeIds: readonly string[];
 };
 
 export function runnableJobCount(counts: RunnableQueueCounts): number {
   return Object.values(counts).reduce((total, count) => total + count, 0);
 }
 
-export function retiredCascadeId(key: string): { id: string; settled: boolean } | null {
+export function cascadeId(key: string): { id: string; settled: boolean } | null {
   const marker = ':tournament-cascade:';
   const markerIndex = key.indexOf(marker);
   if (markerIndex < 0) return null;
@@ -28,10 +28,10 @@ export function retiredCascadeId(key: string): { id: string; settled: boolean } 
   return { id, settled: kind === 'refresh-enqueued' };
 }
 
-export function findUnsettledRetiredCascades(keys: readonly string[]): string[] {
+export function findUnsettledCascades(keys: readonly string[]): string[] {
   const state = new Map<string, boolean>();
   for (const key of keys) {
-    const parsed = retiredCascadeId(key);
+    const parsed = cascadeId(key);
     if (!parsed) continue;
     state.set(parsed.id, (state.get(parsed.id) ?? false) || parsed.settled);
   }
@@ -53,14 +53,12 @@ export function assertQueueQuiescence(snapshot: QueueQuiescenceSnapshot): void {
     .filter(([, counts]) => runnableJobCount(counts) !== 0)
     .map(([queueName, counts]) => `${queueName}=${JSON.stringify(counts)}`);
   if (runnable.length > 0) {
-    throw new Error(
-      `Retired or incompatible queues still have runnable jobs: ${runnable.join(', ')}`,
-    );
+    throw new Error(`Queues still have runnable jobs: ${runnable.join(', ')}`);
   }
 
-  if (snapshot.unsettledRetiredCascadeIds.length > 0) {
+  if (snapshot.unsettledCascadeIds.length > 0) {
     throw new Error(
-      `Retired tournament cascades are incomplete: ${snapshot.unsettledRetiredCascadeIds.join(', ')}`,
+      `Tournament cascades are incomplete: ${snapshot.unsettledCascadeIds.join(', ')}`,
     );
   }
 }

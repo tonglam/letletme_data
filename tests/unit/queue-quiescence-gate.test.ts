@@ -2,15 +2,16 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   assertQueueQuiescence,
-  findUnsettledRetiredCascades,
-  retiredCascadeId,
+  cascadeId,
+  findUnsettledCascades,
 } from '../../scripts/queue-quiescence-gate';
+import { queueNames } from '../../src/queues/names';
 
 const accepted = () => ({
   nonTerminalSyncRuns: 0,
   stagingPublications: 0,
   runnableQueues: {
-    'data-sync-p0': {
+    'data-sync': {
       waiting: 0,
       active: 0,
       delayed: 0,
@@ -18,10 +19,24 @@ const accepted = () => ({
       'waiting-children': 0,
     },
   },
-  unsettledRetiredCascadeIds: [] as string[],
+  unsettledCascadeIds: [] as string[],
 });
 
 describe('queue quiescence gate', () => {
+  test('covers every canonical BullMQ queue exactly once', () => {
+    expect(queueNames).toEqual([
+      'data-sync',
+      'entry-sync',
+      'league-sync',
+      'live-data',
+      'tournament-sync',
+      'tournament-setup',
+      'understat-player-sync',
+      'understat-team-sync',
+    ]);
+    expect(new Set(queueNames).size).toBe(8);
+  });
+
   test('accepts a fully settled hard-cut boundary', () => {
     expect(() => assertQueueQuiescence(accepted())).not.toThrow();
   });
@@ -33,22 +48,22 @@ describe('queue quiescence gate', () => {
     expect(() =>
       assertQueueQuiescence({
         ...accepted(),
-        runnableQueues: { 'data-sync-p0': { waiting: 1 } },
+        runnableQueues: { 'data-sync': { waiting: 1 } },
       }),
     ).toThrow('runnable jobs');
     expect(() =>
-      assertQueueQuiescence({ ...accepted(), unsettledRetiredCascadeIds: ['2627-1-123'] }),
+      assertQueueQuiescence({ ...accepted(), unsettledCascadeIds: ['2627-1-123'] }),
     ).toThrow('incomplete');
   });
 
-  test('recognizes only a retired cascade with a terminal enqueue marker as settled', () => {
-    const prefix = 'llm:retired:queue:coordination:tournament-cascade';
-    expect(retiredCascadeId(`${prefix}:meta:2627-1-123`)).toEqual({
+  test('recognizes only a cascade with a terminal enqueue marker as settled', () => {
+    const prefix = 'llm:queue:coordination:tournament-cascade';
+    expect(cascadeId(`${prefix}:meta:2627-1-123`)).toEqual({
       id: '2627-1-123',
       settled: false,
     });
     expect(
-      findUnsettledRetiredCascades([
+      findUnsettledCascades([
         `${prefix}:meta:2627-1-123`,
         `${prefix}:structure-done:2627-1-123:tournament-points-race`,
         `${prefix}:refresh-enqueued:2627-1-123`,

@@ -5,21 +5,12 @@ import postgres from 'postgres';
 
 import {
   assertQueueQuiescence,
-  findUnsettledRetiredCascades,
+  findUnsettledCascades,
   type RunnableQueueCounts,
 } from './queue-quiescence-gate';
+import { queueNames } from '../src/queues/names';
 import { getConfig, resolveQueueRedisConfig } from '../src/utils/config';
 
-const TIERED_QUEUE_BASE_NAMES = [
-  'data-sync',
-  'entry-sync',
-  'league-sync',
-  'live-data',
-  'tournament-sync',
-  'tournament-setup',
-] as const;
-const QUEUE_TIERS = ['p0', 'p1', 'p2', 'p3'] as const;
-const UNDERSTAT_QUEUE_NAMES = ['understat-player-sync', 'understat-team-sync'] as const;
 const RUNNABLE_JOB_TYPES = [
   'waiting',
   'active',
@@ -27,7 +18,7 @@ const RUNNABLE_JOB_TYPES = [
   'prioritized',
   'waiting-children',
 ] as const satisfies readonly JobType[];
-const RETIRED_CASCADE_PATTERN = 'llm:*:queue:coordination:tournament-cascade:*';
+const CASCADE_PATTERN = 'llm:queue:coordination:tournament-cascade:*';
 
 async function scan(redis: Redis, pattern: string): Promise<string[]> {
   const keys: string[] = [];
@@ -52,15 +43,11 @@ async function main(): Promise<void> {
     enableReadyCheck: true,
     maxRetriesPerRequest: null,
   });
-  const queueNames = [
-    ...TIERED_QUEUE_BASE_NAMES.flatMap((base) => QUEUE_TIERS.map((tier) => `${base}-${tier}`)),
-    ...UNDERSTAT_QUEUE_NAMES,
-  ];
   const queues = queueNames.map((name) => new Queue(name, { connection: queueConnection }));
 
   try {
     if (redis.status === 'wait' || redis.status === 'end') await redis.connect();
-    const [databaseRows, retiredCascadeKeys, queueCountRows] = await Promise.all([
+    const [databaseRows, cascadeKeys, queueCountRows] = await Promise.all([
       database<Array<{ non_terminal_sync_runs: number; staging_publications: number }>>`
         SELECT
           count(*) FILTER (
@@ -73,7 +60,7 @@ async function main(): Promise<void> {
           ) AS staging_publications
         FROM ops.sync_runs
       `,
-      scan(redis, RETIRED_CASCADE_PATTERN),
+      scan(redis, CASCADE_PATTERN),
       Promise.all(
         queues.map(
           async (queue) => [queue.name, await queue.getJobCounts(...RUNNABLE_JOB_TYPES)] as const,
@@ -87,7 +74,7 @@ async function main(): Promise<void> {
       nonTerminalSyncRuns: databaseState.non_terminal_sync_runs,
       stagingPublications: databaseState.staging_publications,
       runnableQueues: Object.fromEntries(queueCountRows) as Record<string, RunnableQueueCounts>,
-      unsettledRetiredCascadeIds: findUnsettledRetiredCascades(retiredCascadeKeys),
+      unsettledCascadeIds: findUnsettledCascades(cascadeKeys),
     };
     assertQueueQuiescence(snapshot);
     console.log(JSON.stringify({ status: 'queue_quiescence_passed', ...snapshot }, null, 2));

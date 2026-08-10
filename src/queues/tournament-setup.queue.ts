@@ -1,8 +1,9 @@
 import { Queue } from 'bullmq';
 
 import { getQueueConnection } from '../utils/queue';
+import { tournamentSetupQueueName } from './names';
 
-export const tournamentSetupQueueName = 'tournament-setup';
+export { tournamentSetupQueueName } from './names';
 
 export interface TournamentSetupJobData {
   seasonId: number;

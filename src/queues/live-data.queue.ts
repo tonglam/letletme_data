@@ -1,8 +1,9 @@
 import { Queue } from 'bullmq';
 
 import { getQueueConnection } from '../utils/queue';
+import { liveDataQueueName } from './names';
 
-export const liveDataQueueName = 'live-data';
+export { liveDataQueueName } from './names';
 
 export const LIVE_JOBS = {
   LIVE_SNAPSHOT: 'live-snapshot',

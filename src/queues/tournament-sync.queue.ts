@@ -2,8 +2,9 @@ import { Queue } from 'bullmq';
 
 import type { TournamentFinalizationTarget } from '../domain/tournament';
 import { getQueueConnection } from '../utils/queue';
+import { tournamentSyncQueueName } from './names';
 
-export const tournamentSyncQueueName = 'tournament-sync';
+export { tournamentSyncQueueName } from './names';
 
 export const TOURNAMENT_JOBS = {
   // Base job (triggers cascade)

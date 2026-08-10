@@ -1,8 +1,9 @@
 import { Queue } from 'bullmq';
 
 import { getQueueConnection } from '../utils/queue';
+import { dataSyncQueueName } from './names';
 
-export const dataSyncQueueName = 'data-sync';
+export { dataSyncQueueName } from './names';
 
 export type DataSyncJobName = 'core-snapshot' | 'player-prices' | 'player-stats' | 'player-values';
 

@@ -1,8 +1,9 @@
 import { Queue } from 'bullmq';
 
 import { getQueueConnection } from '../utils/queue';
+import { entrySyncQueueName } from './names';
 
-export const entrySyncQueueName = 'entry-sync';
+export { entrySyncQueueName } from './names';
 
 export type EntrySyncJobName = 'entry-info' | 'entry-picks' | 'entry-transfers' | 'entry-results';
 

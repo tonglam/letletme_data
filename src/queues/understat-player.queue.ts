@@ -2,8 +2,9 @@ import { Queue } from 'bullmq';
 
 import type { UnderstatSyncMode, UnderstatSyncTrigger } from '../domain/understat';
 import { getQueueConnection } from '../utils/queue';
+import { understatPlayerQueueName } from './names';
 
-export const understatPlayerQueueName = 'understat-player-sync';
+export { understatPlayerQueueName } from './names';
 
 export type UnderstatPlayerJobName =
   | 'understat-player-discover'

@@ -1,8 +1,9 @@
 import { Queue } from 'bullmq';
 
 import { getQueueConnection } from '../utils/queue';
+import { leagueSyncQueueName } from './names';
 
-export const leagueSyncQueueName = 'league-sync';
+export { leagueSyncQueueName } from './names';
 
 export const LEAGUE_JOBS = {
   LEAGUE_EVENT_PICKS: 'league-event-picks',

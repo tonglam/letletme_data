@@ -12,18 +12,8 @@ import 'dotenv/config';
 
 import { Queue } from 'bullmq';
 
+import { queueNames } from '../src/queues/names';
 import { getQueueConnection } from '../src/utils/queue';
-
-const QUEUE_BASES = [
-  'data-sync',
-  'live-data',
-  'entry-sync',
-  'league-sync',
-  'tournament-sync',
-  'tournament-setup',
-  'understat-team-sync',
-  'understat-player-sync',
-] as const;
 
 async function main(): Promise<void> {
   const jobIdArg = process.argv[2];
@@ -43,9 +33,7 @@ async function main(): Promise<void> {
     ),
   );
 
-  const names = [...QUEUE_BASES];
-
-  for (const name of names) {
+  for (const name of queueNames) {
     const queue = new Queue(name, { connection });
     const counts = await queue.getJobCounts(
       'waiting',
