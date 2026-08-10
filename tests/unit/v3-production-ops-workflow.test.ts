@@ -359,7 +359,9 @@ describe('v3 production hard-cut workflow', () => {
     expect(terminal).toContain('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
     expect(terminal).toContain('inspectLegacyRedisQueues(cacheRedis');
     expect(terminal).toContain('inspectRuntimeRedisQueues(queueRedis');
-    expect(terminal).toContain('docker compose stop -t 30 worker api');
+    expect(terminal).toContain('docker compose stop -t 30 api');
+    expect(terminal).toContain('Active BullMQ jobs did not drain before terminal acceptance');
+    expect(terminal).toContain('docker compose stop -t 60 worker');
     expect(terminal).toContain('docker compose run --rm --no-deps -T');
     expect(terminal).toContain('docker compose up -d --no-deps --no-build api worker');
     expect(terminal).toContain('V3_TERMINAL_RUNTIME=quiesced');

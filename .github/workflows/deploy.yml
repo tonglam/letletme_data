@@ -1156,9 +1156,44 @@ jobs:
               fi
             }
             trap restore_runtime EXIT
-            APP_IMAGE="$DATA_IMAGE_REF" docker compose stop -t 30 worker api
-            test -z "$(APP_IMAGE="$DATA_IMAGE_REF" docker compose ps -q worker)"
+            # Stop API producers first. Let the already-running worker finish
+            # active jobs before asking BullMQ to close, otherwise Compose's
+            # shutdown timeout can force the worker out with an active lease.
+            APP_IMAGE="$DATA_IMAGE_REF" docker compose stop -t 30 api
             test -z "$(APP_IMAGE="$DATA_IMAGE_REF" docker compose ps -q api)"
+            active_jobs=1
+            for attempt in $(seq 1 60); do
+              active_jobs=$(APP_IMAGE="$DATA_IMAGE_REF" docker compose run --rm --no-deps -T \
+                api bun --eval '
+                import Redis from "ioredis";
+                import { getConfig, resolveQueueRedisConfig } from "./src/utils/config";
+                const redis = new Redis({ ...resolveQueueRedisConfig(getConfig()), lazyConnect: true });
+                try {
+                  await redis.connect();
+                  let cursor = "0";
+                  let active = 0;
+                  do {
+                    const [next, keys] = await redis.scan(cursor, "MATCH", "bull:*:active", "COUNT", 500);
+                    cursor = next;
+                    for (const key of keys) active += await redis.llen(key);
+                  } while (cursor !== "0");
+                  console.log(active);
+                } finally {
+                  await redis.quit();
+                }
+              ' | tail -n 1)
+              if [ "$active_jobs" = "0" ]; then
+                break
+              fi
+              if [ "$attempt" -eq 60 ]; then
+                echo "Active BullMQ jobs did not drain before terminal acceptance"
+                exit 1
+              fi
+              sleep 2
+            done
+            test "$active_jobs" = "0"
+            APP_IMAGE="$DATA_IMAGE_REF" docker compose stop -t 60 worker
+            test -z "$(APP_IMAGE="$DATA_IMAGE_REF" docker compose ps -q worker)"
             echo 'V3_TERMINAL_RUNTIME=quiesced'
 
             APP_IMAGE="$DATA_IMAGE_REF" docker compose run --rm --no-deps -T \
