@@ -1036,9 +1036,10 @@ jobs:
               sleep 2
             done
 
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
-              -e V3_REDIS_QUEUE_MANIFEST_SHA256="$QUEUE_MANIFEST_SHA256" \
-              api bun run redis:cutover verify-queues
+            # The exact payload manifest is intentionally checked only while the worker is
+            # stopped above. BullMQ mutates lock, heartbeat, metrics, and job-state payloads as
+            # soon as the worker starts, so requiring the frozen cutover digest here would turn a
+            # healthy worker startup into a deterministic redeploy failure.
             api_cid=$(APP_IMAGE="$IMAGE_REF" docker compose ps -q api)
             test -n "$api_cid"
             test "$(docker inspect --format '{{.Config.Image}}' "$api_cid")" = "$IMAGE_REF"

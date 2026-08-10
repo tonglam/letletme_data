@@ -275,7 +275,7 @@ describe('v3 production hard-cut workflow', () => {
     const startApi = redeploy.indexOf('docker compose up -d --no-deps --no-build api');
     const graphqlHealth = redeploy.indexOf('http://127.0.0.1:4000/health');
     const startWorker = redeploy.indexOf('docker compose up -d --no-deps --no-build worker');
-    const secondQueueVerification = redeploy.lastIndexOf('redis:cutover verify-queues');
+    const queueVerificationCount = redeploy.match(/redis:cutover verify-queues/g)?.length ?? 0;
 
     expect(redeploy).toMatch(/client_payload\.operation == 'v3-redeploy'/);
     expect(redeploy).toContain('EXPECTED_IMAGE_NAME: ghcr.io/tonglam/letletme_data');
@@ -291,7 +291,7 @@ describe('v3 production hard-cut workflow', () => {
     expect(startApi).toBeGreaterThan(firstQueueVerification);
     expect(graphqlHealth).toBeGreaterThan(startApi);
     expect(startWorker).toBeGreaterThan(graphqlHealth);
-    expect(secondQueueVerification).toBeGreaterThan(startWorker);
+    expect(queueVerificationCount).toBe(1);
     expect(redeploy).toContain('V3_DATA_REDEPLOY=passed');
     expect(redeploy).not.toContain('git clean');
 
