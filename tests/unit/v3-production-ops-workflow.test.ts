@@ -229,6 +229,35 @@ describe('v3 production hard-cut workflow', () => {
     expect(startWorker).toBeGreaterThan(queueVerification);
   });
 
+  test('starts the API with HTTP contracts and an unchanged queue manifest', () => {
+    const api = job('v3_start_api', 'v3_start_worker');
+    const firstQueueVerification = api.indexOf('redis:cutover verify-queues');
+    const startApi = api.indexOf('docker compose up -d --no-deps --no-build api');
+    const health = api.indexOf('assert_status 200 GET http://127.0.0.1:3000/health');
+    const ready = api.indexOf('assert_status 200 GET http://127.0.0.1:3000/ready');
+    const current = api.indexOf('http://127.0.0.1:3000/events/current');
+    const next = api.indexOf('http://127.0.0.1:3000/events/next');
+    const unauthorized = api.indexOf(
+      'assert_status 401 POST http://127.0.0.1:3000/jobs/events-sync/trigger',
+    );
+    const malformed = api.indexOf(
+      'assert_status 400 GET http://127.0.0.1:3000/tournaments/check-name',
+    );
+    const lastQueueVerification = api.lastIndexOf('redis:cutover verify-queues');
+
+    expect(api).toContain('QUEUE_MANIFEST_SHA256');
+    expect(firstQueueVerification).toBeGreaterThan(0);
+    expect(startApi).toBeGreaterThan(firstQueueVerification);
+    expect(health).toBeGreaterThan(startApi);
+    expect(ready).toBeGreaterThan(health);
+    expect(current).toBeGreaterThan(ready);
+    expect(next).toBeGreaterThan(current);
+    expect(unauthorized).toBeGreaterThan(next);
+    expect(malformed).toBeGreaterThan(unauthorized);
+    expect(lastQueueVerification).toBeGreaterThan(malformed);
+    expect(api).toContain('V3_DATA_HTTP_CONTRACT=');
+  });
+
   test('does not expose legacy cleanup as a production operation', () => {
     const operations = workflow.slice(
       workflow.indexOf('      operation:'),

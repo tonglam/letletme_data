@@ -823,6 +823,7 @@ jobs:
         uses: appleboy/ssh-action@v1.2.0
         env:
           IMAGE_REF: ${{ inputs.v3_image_ref }}
+          QUEUE_MANIFEST_SHA256: ${{ inputs.v3_queue_manifest_sha256 }}
           GHCR_USER: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
@@ -831,16 +832,20 @@ jobs:
           username: ${{ vars.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           script_stop: false
-          envs: IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR
+          envs: IMAGE_REF,QUEUE_MANIFEST_SHA256,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR
           script: |
             set -euo pipefail
             [[ "$IMAGE_REF" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]]
+            [[ "$QUEUE_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]]
             cd "$VPS_WORKDIR"
             test -z "$(APP_IMAGE="$IMAGE_REF" docker compose ps -q worker)" || { echo "Worker started before API gate"; exit 1; }
             LOWER_USER=$(printf '%s' "$GHCR_USER" | tr '[:upper:]' '[:lower:]')
             printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$LOWER_USER" --password-stdin
             APP_IMAGE="$IMAGE_REF" docker compose pull api
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun run env:check
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
+              -e V3_REDIS_QUEUE_MANIFEST_SHA256="$QUEUE_MANIFEST_SHA256" \
+              api bun run redis:cutover verify-queues
             APP_IMAGE="$IMAGE_REF" docker compose up -d --no-deps --no-build api
             for attempt in $(seq 1 30); do
               if curl --fail --silent http://127.0.0.1:3000/health >/dev/null; then
@@ -853,6 +858,31 @@ jobs:
               sleep 2
             done
             test -z "$(APP_IMAGE="$IMAGE_REF" docker compose ps -q worker)"
+
+            assert_status() {
+              expected="$1"
+              method="$2"
+              url="$3"
+              actual=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+                --request "$method" "$url")
+              if [ "$actual" != "$expected" ]; then
+                echo "Unexpected HTTP status for $method $url: expected $expected, got $actual"
+                exit 1
+              fi
+            }
+
+            assert_status 200 GET http://127.0.0.1:3000/health
+            assert_status 200 GET http://127.0.0.1:3000/ready
+            curl --fail --silent http://127.0.0.1:3000/ready | grep -q '"status":"ready"'
+            curl --fail --silent http://127.0.0.1:3000/events/current | grep -q '"success":true'
+            curl --fail --silent http://127.0.0.1:3000/events/next | grep -q '"success":true'
+            assert_status 401 POST http://127.0.0.1:3000/jobs/events-sync/trigger
+            assert_status 400 GET http://127.0.0.1:3000/tournaments/check-name
+
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
+              -e V3_REDIS_QUEUE_MANIFEST_SHA256="$QUEUE_MANIFEST_SHA256" \
+              api bun run redis:cutover verify-queues
+            echo 'V3_DATA_HTTP_CONTRACT=health:200,ready:200,current:200,next:200,unauthorized:401,malformed:400,queue:exact'
             APP_IMAGE="$IMAGE_REF" docker compose ps api worker
 
   v3_start_worker:
