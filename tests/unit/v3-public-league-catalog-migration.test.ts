@@ -77,6 +77,8 @@ describe('optional GraphQL public-league catalog cutover', () => {
       `to_regclass(${quote}public.public_league_trends_catalog${quote}) IS NULL`,
     );
     expect(rollback.match(/public\.public_league_trends_catalog/g)).toHaveLength(7);
-    expect(rollback).toContain('public_physical_count = 192 + CASE');
+    expect(activationValidation).not.toMatch(/\+\s+CASE\b/);
+    expect(activationValidation).toContain('legacy_physical_count <> 192 + (CASE');
+    expect(rollback).toContain('public_physical_count = 192 + (CASE');
   });
 });

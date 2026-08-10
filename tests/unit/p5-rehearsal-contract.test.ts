@@ -65,6 +65,9 @@ describe('P5 rehearsal contracts', () => {
     expect(sql).toContain('DELETE FROM ops.schema_migrations');
     expect(sql).toContain('DELETE FROM ops.migration_objects');
     expect(sql).not.toContain('DROP SCHEMA');
+    expect(sql).not.toMatch(/\+\s+CASE\b/);
+    expect(sql).toContain('221 + (CASE');
+    expect(sql).toContain('192 + (CASE');
   });
 
   test('limits B0 owner normalization to the approved isolated source scope', () => {

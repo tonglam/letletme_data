@@ -65,16 +65,16 @@ BEGIN
   IF (SELECT count(*) FROM pg_class relation_row
       WHERE relation_row.relnamespace = 'public'::regnamespace
         AND relation_row.relkind IN ('r', 'p', 'm', 'v', 'S'))
-      <> 221 + CASE
+      <> 221 + (CASE
         WHEN to_regclass('public.public_league_trends_catalog') IS NULL THEN 0
         ELSE 1
-      END
+      END)
      OR (SELECT count(*) FROM pg_proc function_row
          WHERE function_row.pronamespace = 'public'::regnamespace)
-      <> 6 + CASE
+      <> 6 + (CASE
         WHEN to_regclass('public.public_league_trends_catalog') IS NULL THEN 0
         ELSE 2
-      END
+      END)
      OR (SELECT count(*) FROM pg_type type_row
          WHERE type_row.typnamespace = 'public'::regnamespace
            AND type_row.typtype = 'e') <> 20
@@ -83,10 +83,10 @@ BEGIN
          WHERE relation_row.relnamespace = 'public'::regnamespace
            AND trigger_row.tgname = 'v3_reject_v2_mutation'
            AND NOT trigger_row.tgisinternal)
-      <> 192 + CASE
+      <> 192 + (CASE
         WHEN to_regclass('public.public_league_trends_catalog') IS NULL THEN 0
         ELSE 1
-      END
+      END)
      OR to_regprocedure('ops.reject_v2_mutation()') IS NULL THEN
     RAISE EXCEPTION 'capsule source differs from the accepted activated B1 object contract';
   END IF;
@@ -220,10 +220,10 @@ BEGIN
   IF cleanup_phase = 'reporting_and_rpcs_removed' AND NOT (
     cleanup_migration_count = 1
     AND cleanup_object_count = 1
-    AND public_physical_count = 192 + CASE
+    AND public_physical_count = 192 + (CASE
       WHEN to_regclass('public.public_league_trends_catalog') IS NULL THEN 0
       ELSE 1
-    END
+    END)
     AND public_view_count = 1
     AND public_mv_count = 0
     AND public_sequence_count = 22
@@ -696,16 +696,16 @@ BEGIN
   IF (SELECT count(*) FROM pg_class relation_row
       WHERE relation_row.relnamespace = 'public'::regnamespace
         AND relation_row.relkind IN ('r', 'p', 'm', 'v', 'S'))
-      <> 221 + CASE
+      <> 221 + (CASE
         WHEN to_regclass('public.public_league_trends_catalog') IS NULL THEN 0
         ELSE 1
-      END
+      END)
      OR (SELECT count(*) FROM pg_proc function_row
          WHERE function_row.pronamespace = 'public'::regnamespace)
-      <> 6 + CASE
+      <> 6 + (CASE
         WHEN to_regclass('public.public_league_trends_catalog') IS NULL THEN 0
         ELSE 2
-      END
+      END)
      OR (SELECT count(*) FROM pg_type type_row
          WHERE type_row.typnamespace = 'public'::regnamespace
            AND type_row.typtype = 'e') <> 20
@@ -714,10 +714,10 @@ BEGIN
          WHERE relation_row.relnamespace = 'public'::regnamespace
            AND trigger_row.tgname = 'v3_reject_v2_mutation'
            AND NOT trigger_row.tgisinternal)
-      <> 192 + CASE
+      <> 192 + (CASE
         WHEN to_regclass('public.public_league_trends_catalog') IS NULL THEN 0
         ELSE 1
-      END THEN
+      END) THEN
     RAISE EXCEPTION 'B1 public restore has an unexpected object cardinality';
   END IF;
 END
