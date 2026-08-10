@@ -44,6 +44,8 @@ DECLARE
   actual_physical text[];
   actual_views text[];
   graphql_difference_count bigint;
+  graphql_source_count bigint;
+  graphql_target_count bigint;
   ledger_difference_count bigint;
 BEGIN
   SELECT array_agg(relation_row.relname::text ORDER BY relation_row.relname)
@@ -115,10 +117,23 @@ BEGIN
    AND target.status = 'passed'
   WHERE target.check_name IS NULL;
 
-  IF (SELECT count(*) FROM public.graphql_schema_migrations) <> 3
+  SELECT count(*) INTO graphql_source_count
+  FROM public.graphql_schema_migrations;
+
+  SELECT count(*) INTO graphql_target_count
+  FROM ops.migration_objects target
+  WHERE target.check_name LIKE 'legacy_graphql_migration:%'
+    AND target.source_object = 'public.graphql_schema_migrations'
+    AND target.target_object = 'ops.migration_objects'
+    AND target.status = 'passed';
+
+  IF graphql_source_count = 0
+     OR graphql_target_count <> graphql_source_count
      OR graphql_difference_count <> 0 THEN
-    RAISE EXCEPTION '0093 GraphQL ledger preservation mismatch: rows=%, differences=%',
-      (SELECT count(*) FROM public.graphql_schema_migrations),
+    RAISE EXCEPTION
+      '0093 GraphQL ledger preservation mismatch: source=%, target=%, differences=%',
+      graphql_source_count,
+      graphql_target_count,
       graphql_difference_count;
   END IF;
 END
