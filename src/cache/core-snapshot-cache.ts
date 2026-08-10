@@ -35,9 +35,10 @@ export interface CoreSnapshotCachePublishOptions
   readonly redis?: Redis;
 }
 
-function selectCurrentEventId(events: readonly Event[], sourceCheckedAt: Date): number | null {
-  const current = events.find((event) => event.isCurrent);
-  if (current) return current.id;
+export function selectCurrentEventIdByDeadline(
+  events: readonly Event[],
+  sourceCheckedAt: Date,
+): number | null {
   const now = sourceCheckedAt.getTime();
   const deadline = (event: Event): number =>
     event.deadlineTime ? new Date(event.deadlineTime).getTime() : Number.POSITIVE_INFINITY;
@@ -67,7 +68,7 @@ export async function publishCoreSnapshotCache(
         { name: 'fixtures', value: snapshot.fixtures },
         {
           name: 'currentEventId',
-          value: selectCurrentEventId(snapshot.events, options.sourceCheckedAt),
+          value: selectCurrentEventIdByDeadline(snapshot.events, options.sourceCheckedAt),
         },
       ],
     },
