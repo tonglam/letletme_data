@@ -308,7 +308,6 @@ jobs:
           host: ${{ vars.VPS_HOST }}
           username: ${{ vars.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          script_stop: false
           envs: VPS_WORKDIR
           script: |
             set -euo pipefail
@@ -414,7 +413,6 @@ jobs:
           host: ${{ vars.VPS_HOST }}
           username: ${{ vars.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          script_stop: false
           envs: DEPLOY_SHA,IMAGE_REF,DEPLOY_IMAGE_DIGEST,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR,V3_CUTOVER_RUN_ID,V3_RELEASE_MANIFEST_BASE64,V3_RELEASE_MANIFEST_SHA256,V3_CUTOVER_APPROVAL,V3_MIGRATION_ENV,V3_DATA_DB_PASSWORD,V3_GRAPHQL_DB_PASSWORD
           script: |
             set -euo pipefail
@@ -657,7 +655,6 @@ jobs:
           host: ${{ vars.VPS_HOST }}
           username: ${{ vars.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          script_stop: false
           envs: OPERATION,IMAGE_REF,QUEUE_MANIFEST_SHA256,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR
           script: |
             set -euo pipefail
@@ -713,7 +710,6 @@ jobs:
           host: ${{ vars.VPS_HOST }}
           username: ${{ vars.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          script_stop: false
           envs: OPERATION,IMAGE_REF,CUTOVER_RUN_ID,CORE_CACHE_APPROVAL,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR
           script: |
             set -euo pipefail
@@ -809,7 +805,6 @@ jobs:
           host: ${{ vars.VPS_HOST }}
           username: ${{ vars.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          script_stop: false
           envs: IMAGE_REF,QUEUE_MANIFEST_SHA256,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR
           script: |
             set -euo pipefail
@@ -882,7 +877,6 @@ jobs:
           host: ${{ vars.VPS_HOST }}
           username: ${{ vars.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          script_stop: false
           envs: IMAGE_REF,QUEUE_MANIFEST_SHA256,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR
           script: |
             set -euo pipefail
@@ -933,7 +927,6 @@ jobs:
           host: ${{ vars.VPS_HOST }}
           username: ${{ vars.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          script_stop: false
           envs: EXPECTED_SHA,IMAGE_REF,EXPECTED_IMAGE_NAME,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR
           command_timeout: 15m
           script: |
@@ -1069,7 +1062,6 @@ jobs:
           host: ${{ vars.VPS_HOST }}
           username: ${{ vars.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          script_stop: false
           envs: IMAGE_REF,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR
           script: |
             set -euo pipefail
@@ -1104,7 +1096,6 @@ jobs:
           host: ${{ vars.VPS_HOST }}
           username: ${{ vars.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          script_stop: false
           envs: EXPECTED_SHA,DATA_IMAGE_REF,GRAPHQL_IMAGE_REF,CUTOVER_RUN_ID,EXPECTED_QUEUE_SOURCE_MANIFEST,VPS_WORKDIR
           command_timeout: 20m
           script: |
@@ -1592,7 +1583,6 @@ jobs:
           host: ${{ vars.VPS_HOST }}
           username: ${{ vars.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          script_stop: false
           envs: VPS_WORKDIR,V3_CUTOVER_RUN_ID,V3_CUTOVER_APPROVAL
           script: |
             set -euo pipefail
@@ -1629,7 +1619,6 @@ jobs:
           host: ${{ vars.VPS_HOST }}
           username: ${{ vars.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          script_stop: false
           envs: EXPECTED_SHA,IMAGE_REF,CUTOVER_RUN_ID,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR
           script: |
             set -euo pipefail

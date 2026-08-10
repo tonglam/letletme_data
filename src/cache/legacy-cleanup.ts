@@ -136,6 +136,7 @@ export interface LegacyQueueRelocationOptions {
   readonly scanCount?: number;
   readonly maxKeys?: number;
   readonly ttlToleranceMs?: number;
+  readonly logicalHashConcurrency?: number;
 }
 
 export interface LegacyQueueRelocationResult {
@@ -165,7 +166,7 @@ export interface RuntimeQueueManifest extends LegacyQueueManifest {
 }
 
 export interface RuntimeQueueInspectionOptions
-  extends Pick<LegacyQueueRelocationOptions, 'scanCount' | 'maxKeys'> {
+  extends Pick<LegacyQueueRelocationOptions, 'scanCount' | 'maxKeys' | 'logicalHashConcurrency'> {
   readonly expectedQueueNames: readonly string[];
 }
 
@@ -390,18 +391,43 @@ async function logicalPayloadDigest(
     .digest('hex');
 }
 
+async function logicalPayloadRows(
+  redis: LegacyQueueRelocationRedis,
+  keys: readonly string[],
+  concurrency: number,
+): Promise<string[]> {
+  const rows = new Array<string>(keys.length);
+  let nextIndex = 0;
+  const workerCount = Math.min(concurrency, keys.length);
+
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (nextIndex < keys.length) {
+        const index = nextIndex;
+        nextIndex += 1;
+        const key = keys[index];
+        if (!key) continue;
+        rows[index] = `${key}\u0000${await logicalPayloadDigest(redis, key)}`;
+      }
+    }),
+  );
+
+  return rows;
+}
+
 export async function inspectLegacyRedisQueues(
   redis: LegacyQueueRelocationRedis,
-  options: Pick<LegacyQueueRelocationOptions, 'scanCount' | 'maxKeys'> = {},
+  options: Pick<
+    LegacyQueueRelocationOptions,
+    'scanCount' | 'maxKeys' | 'logicalHashConcurrency'
+  > = {},
 ): Promise<LegacyQueueManifest> {
   const scanCount = boundedInteger(options.scanCount, 500, 10, 10_000);
   const maxKeys = boundedInteger(options.maxKeys, 10_000, 1, 1_000_000);
+  const logicalHashConcurrency = boundedInteger(options.logicalHashConcurrency, 16, 1, 64);
   const patterns = resolveLegacyRedisCleanupPatterns(['legacyQueueDb0']);
   const keys = await scanPatterns(redis, patterns, scanCount, maxKeys);
-  const payloadRows: string[] = [];
-  for (const key of keys) {
-    payloadRows.push(`${key}\u0000${await logicalPayloadDigest(redis, key)}`);
-  }
+  const payloadRows = await logicalPayloadRows(redis, keys, logicalHashConcurrency);
   return {
     keyCount: keys.length,
     keyManifestSha256: keyManifestSha256(keys),
@@ -424,6 +450,7 @@ export async function inspectRuntimeRedisQueues(
 ): Promise<RuntimeQueueManifest> {
   const scanCount = boundedInteger(options.scanCount, 500, 10, 10_000);
   const maxKeys = boundedInteger(options.maxKeys, 10_000, 1, 1_000_000);
+  const logicalHashConcurrency = boundedInteger(options.logicalHashConcurrency, 16, 1, 64);
   const patterns = resolveLegacyRedisCleanupPatterns(['legacyQueueDb0']);
   const scannedKeys = await scanPatterns(redis, patterns, scanCount, maxKeys);
   const ignoredEphemeralKeys: string[] = [];
@@ -463,10 +490,7 @@ export async function inspectRuntimeRedisQueues(
   }
 
   const topology = validateRuntimeQueueTopology(keys, options.expectedQueueNames);
-  const payloadRows: string[] = [];
-  for (const key of keys) {
-    payloadRows.push(`${key}\u0000${await logicalPayloadDigest(redis, key)}`);
-  }
+  const payloadRows = await logicalPayloadRows(redis, keys, logicalHashConcurrency);
   return {
     keyCount: keys.length,
     keyManifestSha256: keyManifestSha256(keys),

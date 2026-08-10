@@ -112,6 +112,25 @@ class ExpiringStalledCheckRedis extends FakeRedis {
   }
 }
 
+class DelayedFakeRedis extends FakeRedis {
+  activeReads = 0;
+  maxActiveReads = 0;
+
+  override async callBuffer(
+    command: string,
+    ...args: (string | number | Buffer)[]
+  ): Promise<unknown> {
+    this.activeReads += 1;
+    this.maxActiveReads = Math.max(this.maxActiveReads, this.activeReads);
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    try {
+      return await super.callBuffer(command, ...args);
+    } finally {
+      this.activeReads -= 1;
+    }
+  }
+}
+
 const SOURCE_VALUES = {
   'bull:data-sync:meta': { value: 'data-meta' },
   'bull:data-sync:completed': { value: 'completed', ttl: 20_000 },
@@ -201,6 +220,28 @@ describe('legacy Redis queue relocation', () => {
       'bull:data-sync:stalled-check',
     ]);
     expect(firstRuntime.keys).not.toContain('bull:data-sync:stalled-check');
+  });
+
+  test('hashes queue payloads concurrently without changing manifest order', async () => {
+    const values = Object.fromEntries(
+      Array.from({ length: 24 }, (_, index) => [
+        `bull:data-sync:job-${String(index).padStart(2, '0')}`,
+        { value: `payload-${index}` },
+      ]),
+    );
+    const serial = await inspectLegacyRedisQueues(new FakeRedis(values), {
+      logicalHashConcurrency: 1,
+    });
+    const concurrentRedis = new DelayedFakeRedis(values);
+    const concurrent = await inspectLegacyRedisQueues(concurrentRedis, {
+      logicalHashConcurrency: 4,
+    });
+
+    expect(concurrent).toEqual(serial);
+    expect(concurrentRedis.maxActiveReads).toBe(4);
+    await expect(
+      inspectLegacyRedisQueues(concurrentRedis, { logicalHashConcurrency: 65 }),
+    ).rejects.toThrow('Invalid legacy Redis cleanup bound');
   });
 
   test('runtime inspection tolerates a stalled-check lease expiring after scan', async () => {
