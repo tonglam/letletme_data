@@ -982,10 +982,13 @@ jobs:
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun run env:check
             LIVE_QUEUE_MANIFEST_SHA256=$(
               APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api \
-                bun scripts/v3-redis-cutover.ts inspect-queues --digest-only
+                bun scripts/v3-redis-cutover.ts inspect-queues --runtime-stable --digest-only
             )
             [[ "$LIVE_QUEUE_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]]
             echo "Captured quiesced queue manifest: $LIVE_QUEUE_MANIFEST_SHA256"
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
+              -e V3_REDIS_QUEUE_MANIFEST_SHA256="$LIVE_QUEUE_MANIFEST_SHA256" \
+              api bun run redis:cutover verify-queues --runtime-stable
 
             APP_IMAGE="$IMAGE_REF" docker compose up -d --no-deps --no-build api
             for attempt in $(seq 1 30); do
@@ -1020,9 +1023,6 @@ jobs:
             assert_status 400 GET http://127.0.0.1:3000/tournaments/check-name
             curl --fail --silent http://127.0.0.1:4000/health >/dev/null
 
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
-              -e V3_REDIS_QUEUE_MANIFEST_SHA256="$LIVE_QUEUE_MANIFEST_SHA256" \
-              api bun run redis:cutover verify-queues
             APP_IMAGE="$IMAGE_REF" docker compose up -d --no-deps --no-build worker
             worker_cid=$(APP_IMAGE="$IMAGE_REF" docker compose ps -q worker)
             test -n "$worker_cid"
@@ -1040,9 +1040,9 @@ jobs:
               sleep 2
             done
 
-            # The payload manifest is captured after both services stop and verified immediately
-            # before worker startup. It protects the quiesced deployment window without comparing
-            # normal live BullMQ state to the obsolete pre-activation cutover digest.
+            # The stable payload manifest is captured and verified while every queue producer is
+            # stopped. Only BullMQ's expiring stalled-check leases are excluded; the exact
+            # pre-activation cutover manifest remains a separate immutable acceptance artifact.
             api_cid=$(APP_IMAGE="$IMAGE_REF" docker compose ps -q api)
             test -n "$api_cid"
             test "$(docker inspect --format '{{.Config.Image}}' "$api_cid")" = "$IMAGE_REF"

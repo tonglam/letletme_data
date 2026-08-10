@@ -99,6 +99,11 @@ BullMQ keys remain `bull:{queue}:*`, but exist only on `QUEUE_REDIS_*`. Owned qu
 enabled, `understat-team-sync` and `understat-player-sync` are also owned queues. Their clients are
 created lazily, so the default disabled Understat runtime opens no provider queue connection.
 
+Runtime redeploy acceptance stops API and worker, then compares two consecutive type-aware queue
+manifests before restarting either producer. It excludes only BullMQ's expiring
+`bull:{queue}:stalled-check` lease; the exact DB0-to-DB1 migration manifest still includes every
+key and remains the immutable cutover artifact.
+
 Non-BullMQ worker state begins with `llm:v3:queue:coordination:*`, including mutation locks,
 Understat request-permit leases, tournament cascade barriers, daily entry-sync markers, and
 launch-notification dedupe. It must not be written with the cache client.

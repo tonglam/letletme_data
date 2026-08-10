@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   inspectLegacyRedisQueues,
+  inspectRuntimeRedisQueues,
   relocateLegacyRedisQueues,
   type LegacyQueueRelocationRedis,
 } from '../../src/cache/legacy-cleanup';
@@ -80,6 +81,22 @@ class FakeRedis implements LegacyQueueRelocationRedis {
   }
 }
 
+class ExpiringStalledCheckRedis extends FakeRedis {
+  override async scan(
+    cursor: string,
+    matchToken: 'MATCH',
+    pattern: string,
+    countToken: 'COUNT',
+    count: number,
+  ): Promise<[string, string[]]> {
+    const result = await super.scan(cursor, matchToken, pattern, countToken, count);
+    for (const key of result[1]) {
+      if (key.endsWith(':stalled-check')) this.values.delete(key);
+    }
+    return result;
+  }
+}
+
 const SOURCE_VALUES = {
   'bull:data-sync:meta': { value: 'data-meta' },
   'bull:understat-player-sync:completed': { value: 'completed', ttl: 20_000 },
@@ -122,6 +139,40 @@ describe('legacy Redis queue relocation', () => {
     expect(target.values.get('bull:data-sync:meta')?.ttl).toBe(-1);
     expect(target.values.get('bull:understat-player-sync:completed')?.ttl).toBe(20_000);
     expect(target.values.has('llm:v3:data:fpl:core:2627:active')).toBe(false);
+  });
+
+  test('runtime manifests ignore only expiring BullMQ stalled-check leases', async () => {
+    const first = new FakeRedis({
+      ...SOURCE_VALUES,
+      'bull:data-sync:stalled-check': { value: 'first-lease', ttl: 5_000 },
+    });
+    const second = new FakeRedis({
+      ...SOURCE_VALUES,
+      'bull:data-sync:stalled-check': { value: 'second-lease', ttl: 1_000 },
+    });
+
+    const firstExact = await inspectLegacyRedisQueues(first);
+    const secondExact = await inspectLegacyRedisQueues(second);
+    const firstRuntime = await inspectRuntimeRedisQueues(first);
+    const secondRuntime = await inspectRuntimeRedisQueues(second);
+
+    expect(firstExact.payloadManifestSha256).not.toBe(secondExact.payloadManifestSha256);
+    expect(firstRuntime.payloadManifestSha256).toBe(secondRuntime.payloadManifestSha256);
+    expect(firstRuntime.keyManifestSha256).toBe(secondRuntime.keyManifestSha256);
+    expect(firstRuntime.ignoredEphemeralKeys).toEqual(['bull:data-sync:stalled-check']);
+    expect(firstRuntime.keys).not.toContain('bull:data-sync:stalled-check');
+  });
+
+  test('runtime inspection tolerates a stalled-check lease expiring after scan', async () => {
+    const redis = new ExpiringStalledCheckRedis({
+      ...SOURCE_VALUES,
+      'bull:data-sync:stalled-check': { value: 'expiring-lease', ttl: 1 },
+    });
+
+    const manifest = await inspectRuntimeRedisQueues(redis);
+
+    expect(manifest.keyCount).toBe(2);
+    expect(manifest.ignoredEphemeralKeys).toEqual(['bull:data-sync:stalled-check']);
   });
 
   test('fails closed on a conflicting target payload', async () => {

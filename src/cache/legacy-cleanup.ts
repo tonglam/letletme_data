@@ -137,6 +137,11 @@ export interface LegacyQueueManifest {
   readonly keys: readonly string[];
 }
 
+export interface RuntimeQueueManifest extends LegacyQueueManifest {
+  readonly ignoredEphemeralKeyCount: number;
+  readonly ignoredEphemeralKeys: readonly string[];
+}
+
 function boundedInteger(value: number | undefined, fallback: number, min: number, max: number) {
   const resolved = value ?? fallback;
   if (!Number.isSafeInteger(resolved) || resolved < min || resolved > max) {
@@ -310,6 +315,37 @@ export async function inspectLegacyRedisQueues(
     keyManifestSha256: keyManifestSha256(keys),
     payloadManifestSha256: createHash('sha256').update(payloadRows.join('\n')).digest('hex'),
     keys,
+  };
+}
+
+/**
+ * Produces a stable runtime queue manifest while API and workers are stopped.
+ * BullMQ's stalled checker writes one short-lived lease per queue. That lease
+ * can expire after SCAN and is not durable job state, so it is the only key
+ * excluded from this redeploy-time comparison. The exact cutover manifest
+ * above remains unchanged and continues to include every copied key.
+ */
+export async function inspectRuntimeRedisQueues(
+  redis: LegacyQueueRelocationRedis,
+  options: Pick<LegacyQueueRelocationOptions, 'scanCount' | 'maxKeys'> = {},
+): Promise<RuntimeQueueManifest> {
+  const scanCount = boundedInteger(options.scanCount, 500, 10, 10_000);
+  const maxKeys = boundedInteger(options.maxKeys, 10_000, 1, 1_000_000);
+  const patterns = resolveLegacyRedisCleanupPatterns(['legacyQueueDb0']);
+  const scannedKeys = await scanPatterns(redis, patterns, scanCount, maxKeys);
+  const ignoredEphemeralKeys = scannedKeys.filter((key) => key.endsWith(':stalled-check'));
+  const keys = scannedKeys.filter((key) => !key.endsWith(':stalled-check'));
+  const payloadRows: string[] = [];
+  for (const key of keys) {
+    payloadRows.push(`${key}\u0000${await logicalPayloadDigest(redis, key)}`);
+  }
+  return {
+    keyCount: keys.length,
+    keyManifestSha256: keyManifestSha256(keys),
+    payloadManifestSha256: createHash('sha256').update(payloadRows.join('\n')).digest('hex'),
+    keys,
+    ignoredEphemeralKeyCount: ignoredEphemeralKeys.length,
+    ignoredEphemeralKeys,
   };
 }
 

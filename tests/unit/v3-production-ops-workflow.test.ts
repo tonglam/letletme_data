@@ -271,10 +271,10 @@ describe('v3 production hard-cut workflow', () => {
     const stopWorker = redeploy.indexOf('docker compose stop -t 30 worker');
     const stopApi = redeploy.indexOf('docker compose stop -t 30 api');
     const reset = redeploy.indexOf('git reset --hard "$EXPECTED_SHA"');
-    const captureQueueManifest = redeploy.indexOf('inspect-queues --digest-only');
+    const captureQueueManifest = redeploy.indexOf('inspect-queues --runtime-stable --digest-only');
+    const queueVerification = redeploy.indexOf('verify-queues --runtime-stable');
     const startApi = redeploy.indexOf('docker compose up -d --no-deps --no-build api');
     const graphqlHealth = redeploy.indexOf('http://127.0.0.1:4000/health');
-    const queueVerification = redeploy.indexOf('redis:cutover verify-queues');
     const startWorker = redeploy.indexOf('docker compose up -d --no-deps --no-build worker');
     const queueVerificationCount = redeploy.match(/redis:cutover verify-queues/g)?.length ?? 0;
 
@@ -289,10 +289,10 @@ describe('v3 production hard-cut workflow', () => {
     expect(stopApi).toBeGreaterThan(stopWorker);
     expect(reset).toBeGreaterThan(stopApi);
     expect(captureQueueManifest).toBeGreaterThan(reset);
-    expect(startApi).toBeGreaterThan(captureQueueManifest);
+    expect(queueVerification).toBeGreaterThan(captureQueueManifest);
+    expect(startApi).toBeGreaterThan(queueVerification);
     expect(graphqlHealth).toBeGreaterThan(startApi);
-    expect(queueVerification).toBeGreaterThan(graphqlHealth);
-    expect(startWorker).toBeGreaterThan(queueVerification);
+    expect(startWorker).toBeGreaterThan(graphqlHealth);
     expect(queueVerificationCount).toBe(1);
     expect(redeploy).toContain('V3_REDIS_QUEUE_MANIFEST_SHA256="$LIVE_QUEUE_MANIFEST_SHA256"');
     expect(redeploy).not.toContain('client_payload.v3_queue_manifest_sha256');

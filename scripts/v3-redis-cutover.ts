@@ -4,6 +4,7 @@ import Redis from 'ioredis';
 import {
   cleanupLegacyRedisKeys,
   inspectLegacyRedisQueues,
+  inspectRuntimeRedisQueues,
   LEGACY_REDIS_CLEANUP_GROUPS,
   relocateLegacyRedisQueues,
   type LegacyRedisCleanupGroup,
@@ -91,9 +92,9 @@ function assertArguments(command: string | undefined, args: readonly string[]): 
     command === 'copy-queues'
       ? ['--execute', '--max-keys=']
       : command === 'inspect-queues'
-        ? ['--digest-only', '--max-keys=']
+        ? ['--digest-only', '--runtime-stable', '--max-keys=']
         : command === 'verify-queues'
-          ? ['--max-keys=']
+          ? ['--runtime-stable', '--max-keys=']
           : ['--execute', '--groups=', '--max-keys=', '--unlink-batch-size='];
   const unknown = args.find(
     (argument) =>
@@ -135,7 +136,9 @@ async function main(): Promise<void> {
     await Promise.all([cacheRedis.ping(), queueRedis.ping()]);
 
     if (command === 'inspect-queues') {
-      const manifest = await inspectLegacyRedisQueues(queueRedis, { maxKeys });
+      const manifest = args.includes('--runtime-stable')
+        ? await inspectRuntimeRedisQueues(queueRedis, { maxKeys })
+        : await inspectLegacyRedisQueues(queueRedis, { maxKeys });
       if (args.includes('--digest-only')) {
         console.log(manifest.payloadManifestSha256);
       } else {
@@ -155,7 +158,9 @@ async function main(): Promise<void> {
     }
 
     if (command === 'verify-queues') {
-      const manifest = await inspectLegacyRedisQueues(queueRedis, { maxKeys });
+      const manifest = args.includes('--runtime-stable')
+        ? await inspectRuntimeRedisQueues(queueRedis, { maxKeys })
+        : await inspectLegacyRedisQueues(queueRedis, { maxKeys });
       const expectedManifest = requiredEnvironment('V3_REDIS_QUEUE_MANIFEST_SHA256');
       if (manifest.payloadManifestSha256 !== expectedManifest) {
         throw new Error('Queue target does not match V3_REDIS_QUEUE_MANIFEST_SHA256');

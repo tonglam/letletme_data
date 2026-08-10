@@ -188,6 +188,12 @@ The command is idempotent for identical target keys and fails closed for a confl
 unexpected target key. It uses type-aware logical hashes because raw Redis `DUMP` bytes are not a
 canonical equality contract for restored hashes.
 
+Later `v3-redeploy` operations do not compare live queues with this frozen cutover digest. After
+both Data API and worker stop, the workflow captures and immediately re-verifies a runtime-stable
+type-aware manifest before restarting either producer. That manifest excludes only BullMQ's
+short-lived `*:stalled-check` lease keys; every durable queue key and payload remains digest-bound.
+API health probes occur after this gate, and the worker starts last.
+
 ## Production activation: `0079`-`0090_zzzz`
 
 1. Announce and enable maintenance on the accepted pre-cutover Web build.
