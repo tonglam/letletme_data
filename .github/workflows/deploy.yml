@@ -1148,7 +1148,11 @@ jobs:
               api bun --eval '
               import { createHash } from "node:crypto";
               import Redis from "ioredis";
-              import { inspectLegacyRedisQueues } from "./src/cache/legacy-cleanup";
+              import {
+                expectedRuntimeQueueNames,
+                inspectLegacyRedisQueues,
+                inspectRuntimeRedisQueues,
+              } from "./src/cache/legacy-cleanup";
               import {
                 getConfig,
                 resolveCacheRedisConfig,
@@ -1175,6 +1179,9 @@ jobs:
               const config = getConfig();
               const cacheEndpoint = resolveCacheRedisConfig(config);
               const queueEndpoint = resolveQueueRedisConfig(config);
+              const tieredMutationQueues = ["1", "true", "yes", "on"].includes(
+                (process.env.ENABLE_TIERED_MUTATION_QUEUES ?? "false").toLowerCase(),
+              );
               const cacheIdentity = `${cacheEndpoint.host.toLowerCase()}:${cacheEndpoint.port}/${cacheEndpoint.db}`;
               const queueIdentity = `${queueEndpoint.host.toLowerCase()}:${queueEndpoint.port}/${queueEndpoint.db}`;
               if (cacheIdentity === queueIdentity) throw new Error("Redis endpoints are not separated");
@@ -1187,7 +1194,6 @@ jobs:
                 if (pings.some((value) => value !== "PONG")) throw new Error("Redis ping failed");
 
                 const sourceManifest = await inspectLegacyRedisQueues(cacheRedis, { maxKeys: 10000 });
-                const targetManifest = await inspectLegacyRedisQueues(queueRedis, { maxKeys: 10000 });
                 if (
                   sourceManifest.keyCount !== 0 ||
                   sourceManifest.keyManifestSha256 !==
@@ -1197,13 +1203,15 @@ jobs:
                 ) {
                   throw new Error("Legacy DB0 queue source was not fully cleaned");
                 }
-                if (
-                  targetManifest.keyCount !== 297 ||
-                  targetManifest.keyManifestSha256 !==
-                    "f6796a4895a0699814464e8edff9e5d6a0fd80722bb8154623b98b255e72dfda" ||
-                  targetManifest.payloadManifestSha256 !==
-                    process.env.EXPECTED_QUEUE_SOURCE_MANIFEST
-                ) {
+                const targetManifest = await inspectRuntimeRedisQueues(queueRedis, {
+                  maxKeys: 10000,
+                  expectedQueueNames: expectedRuntimeQueueNames(tieredMutationQueues),
+                });
+                if (targetManifest.keyCount !== 297 ||
+                    targetManifest.keyManifestSha256 !==
+                      "f6796a4895a0699814464e8edff9e5d6a0fd80722bb8154623b98b255e72dfda" ||
+                    targetManifest.payloadManifestSha256 !==
+                      process.env.EXPECTED_QUEUE_SOURCE_MANIFEST) {
                   throw new Error("Active DB1 queues no longer match the approved frozen manifest");
                 }
 

@@ -358,7 +358,7 @@ describe('v3 production hard-cut workflow', () => {
     expect(terminal).toMatch(/client_payload\.operation == 'v3-terminal-acceptance'/);
     expect(terminal).toContain('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
     expect(terminal).toContain('inspectLegacyRedisQueues(cacheRedis');
-    expect(terminal).toContain('inspectLegacyRedisQueues(queueRedis');
+    expect(terminal).toContain('inspectRuntimeRedisQueues(queueRedis');
     expect(terminal).toContain('Legacy DB0 queue source was not fully cleaned');
     expect(terminal).toContain('Active DB1 queues no longer match');
     expect(terminal).toContain('GraphQL query-cache type/TTL contract failed');
