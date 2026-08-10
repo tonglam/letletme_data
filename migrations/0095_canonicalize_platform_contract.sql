@@ -11,6 +11,7 @@ DECLARE
   active_publication_count bigint;
   retired_singleton_count bigint;
   player_link_count bigint;
+  value_seed_count bigint;
 BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM information_schema.columns
@@ -48,7 +49,11 @@ BEGIN
     RAISE EXCEPTION 'unexpected bridge.match_links rows require an explicit rule migration';
   END IF;
 
-  IF EXISTS (
+  SELECT count(*) INTO value_seed_count
+  FROM fpl.player_market_snapshots
+  WHERE snapshot_source = 'legacy_value_seed';
+
+  IF value_seed_count NOT IN (0, 564) OR EXISTS (
     SELECT 1 FROM fpl.player_market_snapshots
     WHERE snapshot_source NOT IN ('upstream', 'legacy_value_seed')
   ) THEN
@@ -90,6 +95,21 @@ BEGIN
     )
   THEN
     RAISE EXCEPTION 'unexpected dataset publication population';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM ops.dataset_publications publication
+    CROSS JOIN LATERAL jsonb_array_elements(
+      CASE
+        WHEN jsonb_typeof(publication.manifest -> 'items') = 'array'
+          THEN publication.manifest -> 'items'
+        ELSE '[]'::jsonb
+      END
+    ) item
+    WHERE coalesce(item ->> 'key', '') !~ '^llm:v[0-9]+:data:'
+  ) THEN
+    RAISE EXCEPTION 'unexpected pre-canonical publication item key';
   END IF;
 END
 $canonical_contract_precondition$;
@@ -168,7 +188,7 @@ SET
               'name', item.value -> 'name',
               'key', regexp_replace(
                 item.value ->> 'key',
-                '^llm:[^:]+:',
+                '^llm:v[0-9]+:data:',
                 'llm:data:'
               ),
               'type', item.value -> 'type',
@@ -226,6 +246,15 @@ BEGIN
     ] <> '{}'::jsonb
   ) THEN
     RAISE EXCEPTION 'publication manifest canonicalization failed';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM ops.dataset_publications publication
+    CROSS JOIN LATERAL jsonb_array_elements(publication.manifest -> 'items') item
+    WHERE coalesce(item ->> 'key', '') !~ '^llm:data:'
+  ) THEN
+    RAISE EXCEPTION 'publication item key canonicalization failed';
   END IF;
 
   IF EXISTS (
