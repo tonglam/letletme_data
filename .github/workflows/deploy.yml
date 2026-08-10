@@ -1031,7 +1031,7 @@ jobs:
 
             web_probe=$(curl --fail --silent --show-error \
               --header 'Content-Type: application/json' \
-              --data '{"query":"query TerminalCacheProbe { players(search: \"Gabriel\", limit: 1) { id webName } marketPulse(days: 13) { requestedDays observedDays stale } }"}' \
+              --data '{"query":"query TerminalCacheProbe { playersForPicker(search: \"Gabriel\", limit: 1) { items { id webName } totalCount } marketPulse(days: 13) { coverage { requestedDays observedDays stale } } }"}' \
               https://letletme.top/api/graphql)
             printf '%s' "$web_probe" | grep -q '"webName":"Gabriel"'
             printf '%s' "$web_probe" | grep -q '"requestedDays":13'
