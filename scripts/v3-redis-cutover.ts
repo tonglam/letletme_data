@@ -77,17 +77,24 @@ function cleanupGroups(args: readonly string[]): LegacyRedisCleanupGroup[] {
 }
 
 function assertArguments(command: string | undefined, args: readonly string[]): void {
-  if (command !== 'copy-queues' && command !== 'verify-queues' && command !== 'cleanup') {
+  if (
+    command !== 'copy-queues' &&
+    command !== 'inspect-queues' &&
+    command !== 'verify-queues' &&
+    command !== 'cleanup'
+  ) {
     throw new Error(
-      'Usage: bun run redis:cutover <copy-queues|verify-queues|cleanup> [--execute] [options]',
+      'Usage: bun run redis:cutover <copy-queues|inspect-queues|verify-queues|cleanup> [--execute] [options]',
     );
   }
   const allowedPrefixes =
     command === 'copy-queues'
       ? ['--execute', '--max-keys=']
-      : command === 'verify-queues'
-        ? ['--max-keys=']
-        : ['--execute', '--groups=', '--max-keys=', '--unlink-batch-size='];
+      : command === 'inspect-queues'
+        ? ['--digest-only', '--max-keys=']
+        : command === 'verify-queues'
+          ? ['--max-keys=']
+          : ['--execute', '--groups=', '--max-keys=', '--unlink-batch-size='];
   const unknown = args.find(
     (argument) =>
       !allowedPrefixes.some(
@@ -126,6 +133,26 @@ async function main(): Promise<void> {
   try {
     await Promise.all([cacheRedis.connect(), queueRedis.connect()]);
     await Promise.all([cacheRedis.ping(), queueRedis.ping()]);
+
+    if (command === 'inspect-queues') {
+      const manifest = await inspectLegacyRedisQueues(queueRedis, { maxKeys });
+      if (args.includes('--digest-only')) {
+        console.log(manifest.payloadManifestSha256);
+      } else {
+        console.log(
+          JSON.stringify(
+            {
+              operation: command,
+              target: publicEndpoint(queueEndpoint),
+              manifest,
+            },
+            null,
+            2,
+          ),
+        );
+      }
+      return;
+    }
 
     if (command === 'verify-queues') {
       const manifest = await inspectLegacyRedisQueues(queueRedis, { maxKeys });

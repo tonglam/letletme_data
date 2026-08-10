@@ -926,7 +926,6 @@ jobs:
           EXPECTED_SHA: ${{ github.event.client_payload.sha }}
           IMAGE_REF: ${{ github.event.client_payload.v3_image_ref }}
           EXPECTED_IMAGE_NAME: ghcr.io/tonglam/letletme_data
-          QUEUE_MANIFEST_SHA256: ${{ github.event.client_payload.v3_queue_manifest_sha256 }}
           GHCR_USER: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
@@ -935,14 +934,13 @@ jobs:
           username: ${{ vars.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           script_stop: false
-          envs: EXPECTED_SHA,IMAGE_REF,EXPECTED_IMAGE_NAME,QUEUE_MANIFEST_SHA256,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR
+          envs: EXPECTED_SHA,IMAGE_REF,EXPECTED_IMAGE_NAME,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR
           command_timeout: 15m
           script: |
             set -euo pipefail
             [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
             [[ "$IMAGE_REF" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]]
             test "${IMAGE_REF%@*}" = "$EXPECTED_IMAGE_NAME"
-            [[ "$QUEUE_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]]
             test -d "$VPS_WORKDIR/.git"
             cd "$VPS_WORKDIR"
             test -f .env.deploy
@@ -982,9 +980,12 @@ jobs:
             test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
             APP_IMAGE="$IMAGE_REF" docker compose pull api worker
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun run env:check
-            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
-              -e V3_REDIS_QUEUE_MANIFEST_SHA256="$QUEUE_MANIFEST_SHA256" \
-              api bun run redis:cutover verify-queues
+            LIVE_QUEUE_MANIFEST_SHA256=$(
+              APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api \
+                bun scripts/v3-redis-cutover.ts inspect-queues --digest-only
+            )
+            [[ "$LIVE_QUEUE_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]]
+            echo "Captured quiesced queue manifest: $LIVE_QUEUE_MANIFEST_SHA256"
 
             APP_IMAGE="$IMAGE_REF" docker compose up -d --no-deps --no-build api
             for attempt in $(seq 1 30); do
@@ -1019,6 +1020,9 @@ jobs:
             assert_status 400 GET http://127.0.0.1:3000/tournaments/check-name
             curl --fail --silent http://127.0.0.1:4000/health >/dev/null
 
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
+              -e V3_REDIS_QUEUE_MANIFEST_SHA256="$LIVE_QUEUE_MANIFEST_SHA256" \
+              api bun run redis:cutover verify-queues
             APP_IMAGE="$IMAGE_REF" docker compose up -d --no-deps --no-build worker
             worker_cid=$(APP_IMAGE="$IMAGE_REF" docker compose ps -q worker)
             test -n "$worker_cid"
@@ -1036,10 +1040,9 @@ jobs:
               sleep 2
             done
 
-            # The exact payload manifest is intentionally checked only while the worker is
-            # stopped above. BullMQ mutates lock, heartbeat, metrics, and job-state payloads as
-            # soon as the worker starts, so requiring the frozen cutover digest here would turn a
-            # healthy worker startup into a deterministic redeploy failure.
+            # The payload manifest is captured after both services stop and verified immediately
+            # before worker startup. It protects the quiesced deployment window without comparing
+            # normal live BullMQ state to the obsolete pre-activation cutover digest.
             api_cid=$(APP_IMAGE="$IMAGE_REF" docker compose ps -q api)
             test -n "$api_cid"
             test "$(docker inspect --format '{{.Config.Image}}' "$api_cid")" = "$IMAGE_REF"
