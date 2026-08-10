@@ -30,6 +30,13 @@ function runtimeEnvPython(): string {
 }
 
 describe('v3 production hard-cut workflow', () => {
+  test('resolves manual production operations only from protected main', () => {
+    expect(workflow).toContain('repository_dispatch:');
+    expect(workflow).toContain('- v3-data-production-operation');
+    expect(workflow).not.toContain('workflow_dispatch:');
+    expect(workflow).not.toContain('inputs.');
+  });
+
   test('lets strict shell mode evaluate compound conditions as one script', () => {
     const jobNames = [
       ['v3_preflight', 'v3_activate_database'],
@@ -68,25 +75,30 @@ describe('v3 production hard-cut workflow', () => {
   });
 
   test('publishes only protected main before registry login or candidate execution', () => {
+    const deploy = job('deploy', 'v3_publish_image');
     const publish = job('v3_publish_image', 'v3_preflight');
-    const checkout = publish.indexOf('actions/checkout@');
-    const trustedMain = publish.indexOf('gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main"');
-    const registryLogin = publish.indexOf('docker/login-action@');
-    const candidateBuild = publish.indexOf('docker buildx build');
 
-    expect(checkout).toBeGreaterThan(0);
-    expect(trustedMain).toBeGreaterThan(checkout);
-    expect(registryLogin).toBeGreaterThan(trustedMain);
-    expect(candidateBuild).toBeGreaterThan(registryLogin);
+    for (const contents of [deploy, publish]) {
+      const checkout = contents.indexOf('actions/checkout@');
+      const trustedMain = contents.indexOf('gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main"');
+      const registryLogin = contents.indexOf('docker/login-action@');
+      const candidateBuild = contents.indexOf('docker buildx build');
+
+      expect(checkout).toBeGreaterThan(0);
+      expect(trustedMain).toBeGreaterThan(checkout);
+      expect(registryLogin).toBeGreaterThan(trustedMain);
+      expect(candidateBuild).toBeGreaterThan(registryLogin);
+      expect(contents).toContain('test "$TARGET_SHA" = "$main_sha"');
+      expect(contents).toContain('test "$(git rev-parse HEAD)" = "$main_sha"');
+    }
+
     expect(publish).toContain('persist-credentials: false');
-    expect(publish).toContain('test "$TARGET_SHA" = "$main_sha"');
-    expect(publish).toContain('test "$(git rev-parse HEAD)" = "$main_sha"');
   });
 
   test('stops Data API and worker behind the exact activation gate', () => {
     const stop = job('v3_stop');
 
-    expect(stop).toContain('inputs.operation');
+    expect(stop).toContain('github.event.client_payload.operation');
     expect(stop).toContain('v3-stop');
     expect(stop).toContain('APPROVE_V3_ACTIVATION $V3_CUTOVER_RUN_ID');
     expect(stop).toContain('docker compose stop -t 30 worker');
@@ -260,7 +272,7 @@ describe('v3 production hard-cut workflow', () => {
     const startWorker = redeploy.indexOf('docker compose up -d --no-deps --no-build worker');
     const secondQueueVerification = redeploy.lastIndexOf('redis:cutover verify-queues');
 
-    expect(redeploy).toMatch(/inputs\.operation == 'v3-redeploy'/);
+    expect(redeploy).toMatch(/client_payload\.operation == 'v3-redeploy'/);
     expect(exactMain).toBeGreaterThan(0);
     expect(pullImage).toBeGreaterThan(exactMain);
     expect(stopWorker).toBeGreaterThan(pullImage);
@@ -316,20 +328,20 @@ describe('v3 production hard-cut workflow', () => {
   });
 
   test('does not expose legacy cleanup as a production operation', () => {
-    const operations = workflow.slice(
-      workflow.indexOf('      operation:'),
-      workflow.indexOf('      sha:'),
+    const operations = Array.from(
+      workflow.matchAll(/client_payload\.operation == '([^']+)'/g),
+      (match) => match[1],
     );
 
-    expect(operations).not.toContain('cleanup');
-    expect(operations).not.toContain('legacy-drop');
+    expect(operations.some((operation) => operation.includes('cleanup'))).toBe(false);
+    expect(operations.some((operation) => operation.includes('legacy-drop'))).toBe(false);
     expect(workflow).not.toContain('APPROVE_V3_LEGACY_DROP');
   });
 
   test('runs terminal acceptance as read-only evidence collection', () => {
     const terminal = job('v3_terminal_acceptance', 'v3_stop');
 
-    expect(terminal).toMatch(/inputs\.operation == 'v3-terminal-acceptance'/);
+    expect(terminal).toMatch(/client_payload\.operation == 'v3-terminal-acceptance'/);
     expect(terminal).toContain('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
     expect(terminal).toContain('inspectLegacyRedisQueues(cacheRedis');
     expect(terminal).toContain('Frozen DB0 queue source no longer matches');
@@ -347,7 +359,7 @@ describe('v3 production hard-cut workflow', () => {
   test('validates the activated database with a zero-change repeat and frozen services', () => {
     const validation = job('v3_validate_database');
 
-    expect(validation).toMatch(/inputs\.operation == 'v3-validate-database'/);
+    expect(validation).toMatch(/client_payload\.operation == 'v3-validate-database'/);
     expect(validation).toContain('V3_REPEAT_MIGRATIONS_APPLIED=0');
     expect(validation).toContain('validate-0090-activation.sql');
     expect(validation).toContain('validate-p5-quality.sql');

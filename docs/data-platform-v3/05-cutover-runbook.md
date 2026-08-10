@@ -67,6 +67,26 @@ APPROVE_V3_ACTIVATION <CUTOVER_RUN_ID>
 
 This activation token does not authorize legacy deletion.
 
+## Trusted GitHub operator dispatch
+
+Secret-bearing production workflows are triggered only with GitHub
+`repository_dispatch`. GitHub resolves that event from the latest protected default-branch commit;
+`workflow_dispatch --ref` is prohibited because it can select a branch-defined workflow. Send a
+JSON body to `POST /repos/<owner>/<repo>/dispatches` with the event type below and all operation
+arguments inside `client_payload`:
+
+| Repository | Event type | Allowed `client_payload.operation` values |
+| --- | --- | --- |
+| Data | `v3-data-production-operation` | `deploy`, `v3-publish-image`, `v3-preflight`, `v3-stop`, `v3-activate-database`, `v3-validate-database`, `v3-copy-queues-dry-run`, `v3-copy-queues-execute`, `v3-publish-core-dry-run`, `v3-publish-core-execute`, `v3-start-api`, `v3-start-worker`, `v3-redeploy`, `v3-status`, `v3-terminal-acceptance` |
+| GraphQL | `v3-graphql-production-operation` | `deploy`, `v3-publish-image`, `v3-preflight`, `v3-stop`, `v3-start`, `v3-status` |
+| Web | `v3-web-production-cutover` | `v3-preflight`, `v3-activate-database`, `v3-status` |
+
+Every mutating payload still carries the exact protected-main `sha` plus the operation-specific
+run ID, immutable image reference, manifest digest/content, approval token, or queue manifest. The
+workflow independently compares the requested SHA with the live `main` ref before installing or
+executing candidate code. A dispatch returning HTTP 204 means only that GitHub accepted the event;
+the resulting Actions run and its terminal gate must still pass.
+
 ## B0 backup procedure
 
 1. Create `<backup-root>/b0/{raw,encrypted,manifests,logs,restore}` with restrictive permissions.

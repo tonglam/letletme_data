@@ -5,67 +5,10 @@ on:
     workflows: ['CI']
     types: [completed]
     branches: ['main']
-  workflow_dispatch:
-    inputs:
-      operation:
-        description: Deployment or one explicit Data Platform v3 production operation.
-        required: true
-        default: deploy
-        type: choice
-        options:
-          - deploy
-          - v3-publish-image
-          - v3-preflight
-          - v3-stop
-          - v3-activate-database
-          - v3-validate-database
-          - v3-copy-queues-dry-run
-          - v3-copy-queues-execute
-          - v3-publish-core-dry-run
-          - v3-publish-core-execute
-          - v3-start-api
-          - v3-start-worker
-          - v3-redeploy
-          - v3-status
-          - v3-terminal-acceptance
-      sha:
-        description: >-
-          Commit SHA or ref to deploy. Leave empty for current main HEAD;
-          pass a previous SHA to roll back.
-        required: false
-        type: string
-      v3_cutover_run_id:
-        description: Required only when the target contains migration 0079.
-        required: false
-        type: string
-      v3_image_ref:
-        description: Prebuilt Data candidate pinned as ghcr.io/...@sha256:...; required for v3.
-        required: false
-        type: string
-      v3_release_manifest_base64:
-        description: Canonical base64 of the approved external v3 release manifest.
-        required: false
-        type: string
-      v3_release_manifest_sha256:
-        description: SHA-256 of the approved v3 release manifest.
-        required: false
-        type: string
-      v3_cutover_approval:
-        description: Exact APPROVE_V3_ACTIVATION phrase for the cutover run.
-        required: false
-        type: string
-      v3_queue_manifest_sha256:
-        description: Exact queue dry-run payload manifest required for queue copy/verification.
-        required: false
-        type: string
-      v3_core_cache_approval:
-        description: Exact APPROVE_V3_CORE_CACHE phrase for core-cache publication.
-        required: false
-        type: string
-      v3_graphql_image_ref:
-        description: Immutable lowercase GHCR GraphQL image reference for terminal acceptance.
-        required: false
-        type: string
+  # repository_dispatch resolves the workflow and GITHUB_SHA from protected main.
+  repository_dispatch:
+    types:
+      - v3-data-production-operation
 
 # Never cancel a deploy mid-flight: the SSH session runs git reset, migrations
 # and compose up as one critical section — interrupting it strands the VPS
@@ -77,7 +20,7 @@ concurrency:
 jobs:
   deploy:
     if: |
-      (github.event_name == 'workflow_dispatch' && inputs.operation == 'deploy') ||
+      (github.event_name == 'repository_dispatch' && github.event.client_payload.operation == 'deploy') ||
       (
         github.event_name == 'workflow_run' &&
         github.event.workflow_run.conclusion == 'success' &&
@@ -97,10 +40,25 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: Checkout manual dispatch ref
-        if: github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'repository_dispatch'
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.sha || github.sha }}
+          ref: ${{ github.event.client_payload.sha || github.sha }}
+
+      - name: Require exact protected main commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_SHA: >-
+            ${{ github.event_name == 'workflow_run' &&
+                github.event.workflow_run.head_sha || github.event.client_payload.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+          main_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')
+          [[ "$main_sha" =~ ^[0-9a-f]{40}$ ]]
+          test "$TARGET_SHA" = "$main_sha"
+          test "$(git rev-parse HEAD)" = "$main_sha"
+          echo "DATA_TRUSTED_MAIN_SHA=$main_sha"
 
       - name: Set deployment metadata
         run: |
@@ -115,7 +73,7 @@ jobs:
           echo "DEPLOY_SHA=${DEPLOY_SHA}" >> "$GITHUB_ENV"
           echo "IMAGE_NAME=${IMAGE_NAME}" >> "$GITHUB_ENV"
           if [ -f migrations/0079_create_v3_ops_and_roles.sql ]; then
-            if [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
+            if [ "${{ github.event_name }}" != "repository_dispatch" ]; then
               echo "::error::V3 deployment is manual-only and requires an approved release manifest"
               exit 1
             fi
@@ -147,7 +105,7 @@ jobs:
       - name: Select frozen v3 candidate image
         if: env.V3_REQUIRED == 'true'
         env:
-          V3_IMAGE_REF_INPUT: ${{ inputs.v3_image_ref }}
+          V3_IMAGE_REF_INPUT: ${{ github.event.client_payload.v3_image_ref }}
         run: |
           if [[ ! "$V3_IMAGE_REF_INPUT" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]]; then
             echo "::error::v3_image_ref must be a lowercase GHCR reference pinned by sha256 digest"
@@ -170,10 +128,10 @@ jobs:
           # secrets.VPS_SSH_KEY=<private key for deploy>
           VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
           DEPLOY_IMAGE_DIGEST: ${{ env.DEPLOY_IMAGE_DIGEST }}
-          V3_CUTOVER_RUN_ID: ${{ inputs.v3_cutover_run_id || '' }}
-          V3_RELEASE_MANIFEST_BASE64: ${{ inputs.v3_release_manifest_base64 || '' }}
-          V3_RELEASE_MANIFEST_SHA256: ${{ inputs.v3_release_manifest_sha256 || '' }}
-          V3_CUTOVER_APPROVAL: ${{ inputs.v3_cutover_approval || '' }}
+          V3_CUTOVER_RUN_ID: ${{ github.event.client_payload.v3_cutover_run_id || '' }}
+          V3_RELEASE_MANIFEST_BASE64: ${{ github.event.client_payload.v3_release_manifest_base64 || '' }}
+          V3_RELEASE_MANIFEST_SHA256: ${{ github.event.client_payload.v3_release_manifest_sha256 || '' }}
+          V3_CUTOVER_APPROVAL: ${{ github.event.client_payload.v3_cutover_approval || '' }}
         with:
           host: ${{ vars.VPS_HOST }}
           username: ${{ vars.VPS_USER }}
@@ -261,7 +219,7 @@ jobs:
             docker image prune --force
 
   v3_publish_image:
-    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'v3-publish-image'
+    if: github.event_name == 'repository_dispatch' && github.event.client_payload.operation == 'v3-publish-image'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -272,13 +230,13 @@ jobs:
       - name: Checkout frozen Data candidate
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.sha }}
+          ref: ${{ github.event.client_payload.sha }}
           persist-credentials: false
 
       - name: Require exact protected main commit
         env:
           GH_TOKEN: ${{ github.token }}
-          TARGET_SHA: ${{ inputs.sha }}
+          TARGET_SHA: ${{ github.event.client_payload.sha }}
         run: |
           set -euo pipefail
           [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
@@ -337,7 +295,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   v3_preflight:
-    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'v3-preflight'
+    if: github.event_name == 'repository_dispatch' && github.event.client_payload.operation == 'v3-preflight'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -407,7 +365,7 @@ jobs:
             docker ps --format '{{.Names}}|{{.Image}}|{{.Ports}}'
 
   v3_activate_database:
-    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'v3-activate-database'
+    if: github.event_name == 'repository_dispatch' && github.event.client_payload.operation == 'v3-activate-database'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -416,11 +374,11 @@ jobs:
       - name: Checkout frozen Data candidate
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.sha }}
+          ref: ${{ github.event.client_payload.sha }}
 
       - name: Resolve exact candidate commit and image
         env:
-          V3_IMAGE_REF_INPUT: ${{ inputs.v3_image_ref }}
+          V3_IMAGE_REF_INPUT: ${{ github.event.client_payload.v3_image_ref }}
         run: |
           set -euo pipefail
           DEPLOY_SHA=$(git rev-parse HEAD)
@@ -445,10 +403,10 @@ jobs:
           GHCR_USER: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
-          V3_CUTOVER_RUN_ID: ${{ inputs.v3_cutover_run_id }}
-          V3_RELEASE_MANIFEST_BASE64: ${{ inputs.v3_release_manifest_base64 }}
-          V3_RELEASE_MANIFEST_SHA256: ${{ inputs.v3_release_manifest_sha256 }}
-          V3_CUTOVER_APPROVAL: ${{ inputs.v3_cutover_approval }}
+          V3_CUTOVER_RUN_ID: ${{ github.event.client_payload.v3_cutover_run_id }}
+          V3_RELEASE_MANIFEST_BASE64: ${{ github.event.client_payload.v3_release_manifest_base64 }}
+          V3_RELEASE_MANIFEST_SHA256: ${{ github.event.client_payload.v3_release_manifest_sha256 }}
+          V3_CUTOVER_APPROVAL: ${{ github.event.client_payload.v3_cutover_approval }}
           V3_MIGRATION_ENV: ${{ secrets.V3_MIGRATION_ENV }}
           V3_DATA_DB_PASSWORD: ${{ secrets.V3_DATA_DB_PASSWORD }}
           V3_GRAPHQL_DB_PASSWORD: ${{ secrets.V3_GRAPHQL_DB_PASSWORD }}
@@ -679,8 +637,8 @@ jobs:
 
   v3_redis_queues:
     if: >-
-      github.event_name == 'workflow_dispatch' &&
-      (inputs.operation == 'v3-copy-queues-dry-run' || inputs.operation == 'v3-copy-queues-execute')
+      github.event_name == 'repository_dispatch' &&
+      (github.event.client_payload.operation == 'v3-copy-queues-dry-run' || github.event.client_payload.operation == 'v3-copy-queues-execute')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -689,9 +647,9 @@ jobs:
       - name: Copy or inspect legacy queues with exact manifest gating
         uses: appleboy/ssh-action@v1.2.0
         env:
-          OPERATION: ${{ inputs.operation }}
-          IMAGE_REF: ${{ inputs.v3_image_ref }}
-          QUEUE_MANIFEST_SHA256: ${{ inputs.v3_queue_manifest_sha256 }}
+          OPERATION: ${{ github.event.client_payload.operation }}
+          IMAGE_REF: ${{ github.event.client_payload.v3_image_ref }}
+          QUEUE_MANIFEST_SHA256: ${{ github.event.client_payload.v3_queue_manifest_sha256 }}
           GHCR_USER: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
@@ -734,8 +692,8 @@ jobs:
 
   v3_core_cache:
     if: >-
-      github.event_name == 'workflow_dispatch' &&
-      (inputs.operation == 'v3-publish-core-dry-run' || inputs.operation == 'v3-publish-core-execute')
+      github.event_name == 'repository_dispatch' &&
+      (github.event.client_payload.operation == 'v3-publish-core-dry-run' || github.event.client_payload.operation == 'v3-publish-core-execute')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -744,10 +702,10 @@ jobs:
       - name: Inspect or publish immutable core cache
         uses: appleboy/ssh-action@v1.2.0
         env:
-          OPERATION: ${{ inputs.operation }}
-          IMAGE_REF: ${{ inputs.v3_image_ref }}
-          CUTOVER_RUN_ID: ${{ inputs.v3_cutover_run_id }}
-          CORE_CACHE_APPROVAL: ${{ inputs.v3_core_cache_approval }}
+          OPERATION: ${{ github.event.client_payload.operation }}
+          IMAGE_REF: ${{ github.event.client_payload.v3_image_ref }}
+          CUTOVER_RUN_ID: ${{ github.event.client_payload.v3_cutover_run_id }}
+          CORE_CACHE_APPROVAL: ${{ github.event.client_payload.v3_core_cache_approval }}
           GHCR_USER: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
@@ -833,7 +791,7 @@ jobs:
             '
 
   v3_start_api:
-    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'v3-start-api'
+    if: github.event_name == 'repository_dispatch' && github.event.client_payload.operation == 'v3-start-api'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -842,8 +800,8 @@ jobs:
       - name: Start Data API while keeping worker stopped
         uses: appleboy/ssh-action@v1.2.0
         env:
-          IMAGE_REF: ${{ inputs.v3_image_ref }}
-          QUEUE_MANIFEST_SHA256: ${{ inputs.v3_queue_manifest_sha256 }}
+          IMAGE_REF: ${{ github.event.client_payload.v3_image_ref }}
+          QUEUE_MANIFEST_SHA256: ${{ github.event.client_payload.v3_queue_manifest_sha256 }}
           GHCR_USER: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
@@ -906,7 +864,7 @@ jobs:
             APP_IMAGE="$IMAGE_REF" docker compose ps api worker
 
   v3_start_worker:
-    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'v3-start-worker'
+    if: github.event_name == 'repository_dispatch' && github.event.client_payload.operation == 'v3-start-worker'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -915,8 +873,8 @@ jobs:
       - name: Start Data worker last
         uses: appleboy/ssh-action@v1.2.0
         env:
-          IMAGE_REF: ${{ inputs.v3_image_ref }}
-          QUEUE_MANIFEST_SHA256: ${{ inputs.v3_queue_manifest_sha256 }}
+          IMAGE_REF: ${{ github.event.client_payload.v3_image_ref }}
+          QUEUE_MANIFEST_SHA256: ${{ github.event.client_payload.v3_queue_manifest_sha256 }}
           GHCR_USER: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
@@ -956,7 +914,7 @@ jobs:
             APP_IMAGE="$IMAGE_REF" docker compose ps api worker
 
   v3_redeploy:
-    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'v3-redeploy'
+    if: github.event_name == 'repository_dispatch' && github.event.client_payload.operation == 'v3-redeploy'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -965,9 +923,9 @@ jobs:
       - name: Redeploy activated v3 runtime without database migration
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
         env:
-          EXPECTED_SHA: ${{ inputs.sha }}
-          IMAGE_REF: ${{ inputs.v3_image_ref }}
-          QUEUE_MANIFEST_SHA256: ${{ inputs.v3_queue_manifest_sha256 }}
+          EXPECTED_SHA: ${{ github.event.client_payload.sha }}
+          IMAGE_REF: ${{ github.event.client_payload.v3_image_ref }}
+          QUEUE_MANIFEST_SHA256: ${{ github.event.client_payload.v3_queue_manifest_sha256 }}
           GHCR_USER: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
@@ -1083,7 +1041,7 @@ jobs:
             APP_IMAGE="$IMAGE_REF" docker compose ps api worker
 
   v3_status:
-    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'v3-status'
+    if: github.event_name == 'repository_dispatch' && github.event.client_payload.operation == 'v3-status'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1092,7 +1050,7 @@ jobs:
       - name: Read production migration and service status
         uses: appleboy/ssh-action@v1.2.0
         env:
-          IMAGE_REF: ${{ inputs.v3_image_ref }}
+          IMAGE_REF: ${{ github.event.client_payload.v3_image_ref }}
           GHCR_USER: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
@@ -1116,7 +1074,7 @@ jobs:
             echo "V3_STATUS_GRAPHQL_HTTP=$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:4000/health || true)"
 
   v3_terminal_acceptance:
-    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'v3-terminal-acceptance'
+    if: github.event_name == 'repository_dispatch' && github.event.client_payload.operation == 'v3-terminal-acceptance'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1125,11 +1083,11 @@ jobs:
       - name: Run read-only production terminal acceptance
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
         env:
-          EXPECTED_SHA: ${{ inputs.sha }}
-          DATA_IMAGE_REF: ${{ inputs.v3_image_ref }}
-          GRAPHQL_IMAGE_REF: ${{ inputs.v3_graphql_image_ref }}
-          CUTOVER_RUN_ID: ${{ inputs.v3_cutover_run_id }}
-          EXPECTED_QUEUE_SOURCE_MANIFEST: ${{ inputs.v3_queue_manifest_sha256 }}
+          EXPECTED_SHA: ${{ github.event.client_payload.sha }}
+          DATA_IMAGE_REF: ${{ github.event.client_payload.v3_image_ref }}
+          GRAPHQL_IMAGE_REF: ${{ github.event.client_payload.v3_graphql_image_ref }}
+          CUTOVER_RUN_ID: ${{ github.event.client_payload.v3_cutover_run_id }}
+          EXPECTED_QUEUE_SOURCE_MANIFEST: ${{ github.event.client_payload.v3_queue_manifest_sha256 }}
           VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
         with:
           host: ${{ vars.VPS_HOST }}
@@ -1608,7 +1566,7 @@ jobs:
             echo 'V3_TERMINAL_ACCEPTANCE=passed'
 
   v3_stop:
-    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'v3-stop'
+    if: github.event_name == 'repository_dispatch' && github.event.client_payload.operation == 'v3-stop'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1617,8 +1575,8 @@ jobs:
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
         env:
           VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
-          V3_CUTOVER_RUN_ID: ${{ inputs.v3_cutover_run_id }}
-          V3_CUTOVER_APPROVAL: ${{ inputs.v3_cutover_approval }}
+          V3_CUTOVER_RUN_ID: ${{ github.event.client_payload.v3_cutover_run_id }}
+          V3_CUTOVER_APPROVAL: ${{ github.event.client_payload.v3_cutover_approval }}
         with:
           host: ${{ vars.VPS_HOST }}
           username: ${{ vars.VPS_USER }}
@@ -1641,7 +1599,7 @@ jobs:
             echo "V3_DATA_WORKER=stopped"
 
   v3_validate_database:
-    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'v3-validate-database'
+    if: github.event_name == 'repository_dispatch' && github.event.client_payload.operation == 'v3-validate-database'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1650,9 +1608,9 @@ jobs:
       - name: Validate activated production database with services stopped
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
         env:
-          EXPECTED_SHA: ${{ inputs.sha }}
-          IMAGE_REF: ${{ inputs.v3_image_ref }}
-          CUTOVER_RUN_ID: ${{ inputs.v3_cutover_run_id }}
+          EXPECTED_SHA: ${{ github.event.client_payload.sha }}
+          IMAGE_REF: ${{ github.event.client_payload.v3_image_ref }}
+          CUTOVER_RUN_ID: ${{ github.event.client_payload.v3_cutover_run_id }}
           GHCR_USER: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
