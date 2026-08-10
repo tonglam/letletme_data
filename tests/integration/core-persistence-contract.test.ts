@@ -342,6 +342,15 @@ persistenceTest(
         })),
       );
 
+      const intervalStartingAtLaterSnapshot = await valuesRepository.findLatestForPlayerIds(
+        season,
+        laterMarketSnapshots.map((snapshot) => snapshot.elementId),
+        '20260810',
+        '20270601',
+        laterCapturedAt,
+      );
+      expect(intervalStartingAtLaterSnapshot).toEqual(afterLaterCapture);
+
       const basePreparedLive = prepareEventLives(1, rawExplainElementsFixture);
       const fixtureEvidence = rawExplainElementsFixture.map((element, index) => {
         const player = snapshot.players.find((candidate) => candidate.id === element.id);

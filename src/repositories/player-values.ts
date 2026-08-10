@@ -215,14 +215,16 @@ export const createPlayerValuesRepository = (dbInstance?: DbOrTransaction) => {
             FROM fpl.player_market_snapshots snapshot
             WHERE snapshot.season_id = ${season.seasonId}
               AND snapshot.element_id IN (${elementIdList})
-              AND snapshot.snapshot_date >= ${databaseDate(fromChangeDate)}::date
               AND snapshot.snapshot_date < ${databaseDate(beforeChangeDate)}::date
               ${capturedAtCutoff}
           ), changed_snapshots AS (
             SELECT ordered.*
             FROM ordered_snapshots ordered
-            WHERE ordered.snapshot_number = 1
-               OR ordered.price IS DISTINCT FROM ordered.previous_price
+            WHERE ordered.snapshot_date >= ${databaseDate(fromChangeDate)}::date
+              AND (
+                ordered.snapshot_number = 1
+                OR ordered.price IS DISTINCT FROM ordered.previous_price
+              )
           )
           SELECT DISTINCT ON (changed.element_id)
             changed.element_id AS "elementId",
