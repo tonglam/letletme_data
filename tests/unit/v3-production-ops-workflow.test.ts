@@ -67,6 +67,22 @@ describe('v3 production hard-cut workflow', () => {
     expect(preflight).toContain('docker compose ps --all');
   });
 
+  test('publishes only protected main before registry login or candidate execution', () => {
+    const publish = job('v3_publish_image', 'v3_preflight');
+    const checkout = publish.indexOf('actions/checkout@');
+    const trustedMain = publish.indexOf('gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main"');
+    const registryLogin = publish.indexOf('docker/login-action@');
+    const candidateBuild = publish.indexOf('docker buildx build');
+
+    expect(checkout).toBeGreaterThan(0);
+    expect(trustedMain).toBeGreaterThan(checkout);
+    expect(registryLogin).toBeGreaterThan(trustedMain);
+    expect(candidateBuild).toBeGreaterThan(registryLogin);
+    expect(publish).toContain('persist-credentials: false');
+    expect(publish).toContain('test "$TARGET_SHA" = "$main_sha"');
+    expect(publish).toContain('test "$(git rev-parse HEAD)" = "$main_sha"');
+  });
+
   test('stops Data API and worker behind the exact activation gate', () => {
     const stop = job('v3_stop');
 
