@@ -144,7 +144,6 @@ export async function setupTournamentStructure(
     failureCode = safeErrorCode(error);
     logInfo('Tournament setup attempt report', {
       event: 'tournament_setup_attempt',
-      schemaVersion: 1,
       outcome,
       tournamentId,
       source: context?.source ?? 'unknown',
@@ -172,7 +171,6 @@ export async function setupTournamentStructure(
     const context = getJobLogContext();
     logInfo('Tournament setup attempt report', {
       event: 'tournament_setup_attempt',
-      schemaVersion: 1,
       outcome: 'deleted_noop' satisfies TournamentSetupAttemptOutcome,
       tournamentId,
       source: context?.source ?? 'unknown',
@@ -489,7 +487,6 @@ export async function setupTournamentStructure(
     const ready = terminalStatus?.setupStatus === 'ready';
     logInfo('Tournament setup attempt report', {
       event: 'tournament_setup_attempt',
-      schemaVersion: 1,
       outcome,
       tournamentId,
       source: context?.source ?? 'unknown',
@@ -563,7 +560,6 @@ export async function recoverStuckTournamentSetups(
           jobName: 'recover-stuck-setup',
           tournamentId: row.id,
           scopes: [tournamentSetupLifecycleScope(row.id)],
-          required: true,
         },
         async () => {
           // The initial stale query and BullMQ probe are only candidates. A

@@ -175,7 +175,7 @@ class DatabaseSingleton {
 // Export singleton instance
 export const databaseSingleton = DatabaseSingleton.getInstance();
 
-// Convenience exports for backward compatibility
+// Convenience exports for repository and service callers.
 export const getDb = () => databaseSingleton.getDb();
 export const getDbClient = () => databaseSingleton.getClient();
 

@@ -500,7 +500,6 @@ persistenceTest(
             noTransfers,
             undefined,
             {
-              syncMode: 'all',
               checkpointThroughEventId: 1,
               sourceCheckedAt: new Date(`2026-08-09T12:3${index}:00.000Z`),
             },

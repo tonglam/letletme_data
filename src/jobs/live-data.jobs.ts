@@ -1,12 +1,11 @@
-import { getLiveDataJobPriority, type LiveDataPriorityJobName } from '../domain/job-priority';
 import type { FplSeasonRef } from '../domain/fpl-season';
-import { getLiveDataQueue, LIVE_JOBS, type LiveDataJobData } from '../queues/live-data.queue';
+import { liveDataQueue, LIVE_JOBS, type LiveDataJobData } from '../queues/live-data.queue';
 import { logError, logInfo } from '../utils/logger';
 
 export type LiveDataJobSource = 'cron' | 'manual' | 'cascade';
 
 async function hasSupersedingPendingJob(
-  queue: ReturnType<typeof getLiveDataQueue>,
+  queue: typeof liveDataQueue,
   season: FplSeasonRef,
   eventId: number,
   persistEventLives: boolean,
@@ -47,8 +46,7 @@ export async function enqueueLiveSnapshot(
   const persistEventLives = options.persistEventLives ?? false;
   const jobName = LIVE_JOBS.LIVE_SNAPSHOT;
   try {
-    const tier = getLiveDataJobPriority(jobName as LiveDataPriorityJobName);
-    const queue = getLiveDataQueue(tier);
+    const queue = liveDataQueue;
     if (
       source === 'cron' &&
       (await hasSupersedingPendingJob(queue, season, eventId, persistEventLives))
@@ -86,17 +84,14 @@ export async function enqueueLiveSnapshot(
       eventId,
       source,
       persistEventLives,
-      tier,
       queue: queue.name,
     });
     return job;
   } catch (error) {
-    const tier = getLiveDataJobPriority(jobName as LiveDataPriorityJobName);
     logError('Failed to enqueue live snapshot job', error, {
       season: season.seasonCode,
       eventId,
       source,
-      tier,
     });
     throw error;
   }

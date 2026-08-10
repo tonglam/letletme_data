@@ -1,6 +1,5 @@
-import { getDataSyncJobPriority, type DataSyncPriorityJobName } from '../domain/job-priority';
 import type { FplSeasonRef } from '../domain/fpl-season';
-import { getDataSyncQueue, type DataSyncJobName } from '../queues/data-sync.queue';
+import { dataSyncQueue, type DataSyncJobName } from '../queues/data-sync.queue';
 import { logError, logInfo } from '../utils/logger';
 import { formatCronDateKey } from '../utils/timezone';
 import {
@@ -31,8 +30,7 @@ async function enqueueDataSyncJob(
   options: DataSyncEnqueueOptions = {},
 ) {
   try {
-    const tier = getDataSyncJobPriority(jobName as DataSyncPriorityJobName);
-    const queue = getDataSyncQueue(tier);
+    const queue = dataSyncQueue;
     const jobId = options.jobId
       ? `${season.seasonCode}-${options.jobId}`
       : defaultDataSyncJobId(jobName, season, source, options);
@@ -57,14 +55,12 @@ async function enqueueDataSyncJob(
       runId: job.data?.runId ?? jobData.runId,
       jobName,
       source,
-      tier,
       queue: queue.name,
     });
 
     return job;
   } catch (error) {
-    const tier = getDataSyncJobPriority(jobName as DataSyncPriorityJobName);
-    logError('Failed to enqueue data sync job', error, { jobName, source, tier });
+    logError('Failed to enqueue data sync job', error, { jobName, source });
     throw error;
   }
 }
@@ -80,7 +76,7 @@ export const enqueueCoreSnapshotJob = (
     removeOnSettle: true,
   });
 
-// Compatibility producers all converge on the one coherent core publisher.
+// Scoped producers converge on the one coherent core publisher.
 export const enqueuePlayerPricesSyncJob = (
   season: FplSeasonRef,
   source: DataSyncJobSource,

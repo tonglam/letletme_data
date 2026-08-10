@@ -18,7 +18,7 @@ services:
     environment:
       - NODE_ENV=production
       - TZ=Asia/Shanghai
-    command: bun scripts/v3-migration-login-contract.ts
+    command: bun scripts/migration-login-contract.ts
     logging: *default-logging
     restart: 'no'
 

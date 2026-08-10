@@ -4,16 +4,14 @@ assertIntegrationEnv();
 import type { Queue, Worker } from 'bullmq';
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 
-import { dataSyncQueuesByTier, type DataSyncJobData } from '../../../src/queues/data-sync.queue';
+import { dataSyncQueue, type DataSyncJobData } from '../../../src/queues/data-sync.queue';
 import { createDataSyncWorker } from '../../../src/workers/data-sync.worker';
 import type { WorkerRuntime } from '../../../src/workers/worker-runtime';
 
 describe('Data Sync Worker Integration Tests', () => {
   let dataSyncRuntime: WorkerRuntime;
   let dataSyncWorker: Worker;
-  const dataSyncQueues = Array.from(
-    new Map(Object.values(dataSyncQueuesByTier).map((queue) => [queue.name, queue])).values(),
-  );
+  const dataSyncQueues = [dataSyncQueue];
 
   async function cleanDataSyncQueues() {
     await Promise.all(

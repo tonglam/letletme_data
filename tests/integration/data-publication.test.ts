@@ -65,8 +65,13 @@ function input(
     revision,
     publicationId,
     sourceCheckedAt: new Date(sourceCheckedAt),
+    state: 'active',
     items: [
       { name: 'events', value },
+      { name: 'teams', value: [] },
+      { name: 'players', value: [] },
+      { name: 'phases', value: [] },
+      { name: 'fixtures', value: [] },
       { name: 'currentEventId', value: null },
     ],
   };
@@ -82,7 +87,7 @@ async function expectBoundedTtl(redis: Redis, key: string, maximum: number): Pro
   expect(ttl).toBeLessThanOrEqual(maximum);
 }
 
-describe('immutable v3 Redis publication', () => {
+describe('immutable Redis publication', () => {
   const redis = redisClient();
 
   beforeAll(async () => {
@@ -90,13 +95,13 @@ describe('immutable v3 Redis publication', () => {
   });
 
   beforeEach(async () => {
-    await unlinkPattern(redis, 'llm:v3:data:fpl:core:9899:*');
-    await unlinkPattern(redis, 'llm:v3:data:fpl:live:9899:*');
+    await unlinkPattern(redis, 'llm:data:fpl:core:9899:*');
+    await unlinkPattern(redis, 'llm:data:fpl:live:9899:*');
   });
 
   afterAll(async () => {
-    await unlinkPattern(redis, 'llm:v3:data:fpl:core:9899:*');
-    await unlinkPattern(redis, 'llm:v3:data:fpl:live:9899:*');
+    await unlinkPattern(redis, 'llm:data:fpl:core:9899:*');
+    await unlinkPattern(redis, 'llm:data:fpl:live:9899:*');
     await redis.quit();
   });
 
@@ -263,7 +268,7 @@ describe('immutable v3 Redis publication', () => {
     await redis.set(eventKey, JSON.stringify([{ id: 9 }]));
     expect(await readActiveDataPublication(CORE_SCOPE, redis)).toBeNull();
 
-    await unlinkPattern(redis, 'llm:v3:data:fpl:core:9899:*');
+    await unlinkPattern(redis, 'llm:data:fpl:core:9899:*');
     await redis.hset(activeDataPublicationKey(CORE_SCOPE), 'manifest', 'wrong-type');
     expect(await readActiveDataPublication(CORE_SCOPE, redis)).toBeNull();
   });
@@ -276,7 +281,12 @@ describe('immutable v3 Redis publication', () => {
         publicationId: PUBLICATION_IDS.one,
         sourceCheckedAt: new Date('2026-08-09T01:00:00.000Z'),
         state: 'settled',
-        items: [{ name: 'eventLives', value: [{ elementId: 1 }] }],
+        items: [
+          { name: 'eventLives', value: [{ elementId: 1 }] },
+          { name: 'fixtures', value: [] },
+          { name: 'liveFixtures', value: [] },
+          { name: 'liveBonus', value: [] },
+        ],
       },
       { redis },
     );

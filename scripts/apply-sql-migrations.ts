@@ -19,12 +19,10 @@ import {
   getSqlMigrationExecutionContents,
   getSqlMigrationPreconditions,
 } from './sql-migration-compatibility';
-import { isV3LegacyDropMigration, selectV3LegacyDropMigrations } from './v3-legacy-drop-gate';
 
 const migrationsDir = process.env.MIGRATIONS_DIR ?? 'migrations';
 const databaseUrl = process.env.DATABASE_URL;
 const statusOnly = process.argv.includes('--status');
-const legacyDropApproval = process.env.V3_LEGACY_DROP_APPROVAL;
 const throughArgumentIndex = process.argv.indexOf('--through');
 const throughMigration =
   throughArgumentIndex === -1 ? undefined : process.argv[throughArgumentIndex + 1];
@@ -161,12 +159,7 @@ async function adoptOrVerifyApplied(
   }
 }
 
-async function applyFile(
-  filename: string,
-  contents: string,
-  digest: string,
-  approval: string | undefined,
-): Promise<void> {
+async function applyFile(filename: string, contents: string, digest: string): Promise<void> {
   const startedAt = performance.now();
   await sql.begin(async (tx) => {
     const localTimeouts = getSqlMigrationLocalTimeouts(contents);
@@ -175,13 +168,6 @@ async function applyFile(
     }
     if (localTimeouts.statementTimeout) {
       await tx`SELECT set_config('statement_timeout', ${localTimeouts.statementTimeout}, true)`;
-    }
-
-    if (isV3LegacyDropMigration(filename)) {
-      if (!approval) {
-        throw new Error(`legacy cleanup migration ${filename} reached execution without approval`);
-      }
-      await tx`SELECT set_config('letletme.v3_legacy_drop_approval', ${approval}, true)`;
     }
 
     for (const statement of getSqlMigrationPreconditions(filename)) {
@@ -256,7 +242,6 @@ async function applyMigrations(
   files: string[],
   initialLedger: SqlMigrationLedger,
   ledger: Map<string, LedgerRow>,
-  approval: string | undefined,
 ): Promise<void> {
   await sql`SELECT pg_advisory_lock(${advisoryLockKey})`;
   try {
@@ -278,7 +263,7 @@ async function applyMigrations(
         console.log(`[sql-migrate] skip ${filename}`);
         continue;
       }
-      await applyFile(filename, migration.contents, migration.checksum, approval);
+      await applyFile(filename, migration.contents, migration.checksum);
     }
     console.log('[sql-migrate] up to date');
   } finally {
@@ -293,21 +278,12 @@ async function main(): Promise<void> {
   const ledgerRows = await loadLedger(ledger);
   const compatibleFiles = selectMigrationFilesForLedger(listSqlMigrationFiles(), ledgerRows.keys());
   const boundedFiles = selectMigrationFilesThrough(compatibleFiles, throughMigration);
-  const selection = selectV3LegacyDropMigrations(
-    boundedFiles,
-    ledgerRows.keys(),
-    legacyDropApproval,
-  );
-
-  for (const filename of selection.gatedFiles) {
-    console.log(`gated   ${filename} (requires V3_LEGACY_DROP_APPROVAL)`);
-  }
 
   if (statusOnly) {
-    await printStatus(selection.files, ledgerRows);
+    await printStatus(boundedFiles, ledgerRows);
     return;
   }
-  await applyMigrations(selection.files, ledger, ledgerRows, selection.approval);
+  await applyMigrations(boundedFiles, ledger, ledgerRows);
 }
 
 main()

@@ -9,7 +9,6 @@ import {
 import { getDb, type DbHandle, type TransactionHandle } from '../db/singleton';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import type { RawFPLEntryTransfersResponse } from '../types';
-import { getConfig } from '../utils/config';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 
@@ -34,8 +33,6 @@ function mapTransfer(
 ): DbEntryEventTransfer {
   return { ...row, id: row.transferId };
 }
-
-export type TransferSyncMode = 'latest' | 'all';
 
 export async function acquireEntrySeasonWriteFence(
   tx: TransactionHandle,
@@ -95,7 +92,6 @@ export function buildTransferReplacementRows({
   pointsByElement,
   elementInPlayed,
   defaultPoints = null,
-  syncMode,
 }: {
   season: FplSeasonRef;
   entryId: number;
@@ -105,22 +101,10 @@ export function buildTransferReplacementRows({
   pointsByElement?: Map<number, number>;
   elementInPlayed?: boolean | null;
   defaultPoints?: number | null;
-  syncMode: TransferSyncMode;
 }): DbEntryEventTransferInsert[] {
-  const byEvent = transfers.filter((transfer) => transfer.event === eventId);
-  const selected =
-    syncMode === 'all'
-      ? transfers
-      : byEvent.length === 0
-        ? []
-        : [
-            byEvent.reduce((latest, candidate) =>
-              new Date(candidate.time) > new Date(latest.time) ? candidate : latest,
-            ),
-          ];
   const existingBySignature = new Map(existing.map((row) => [transferSignature(row), row]));
 
-  return selected
+  return transfers
     .map((transfer): DbEntryEventTransferInsert => {
       const transferTime = new Date(transfer.time);
       if (!Number.isFinite(transferTime.getTime())) {
@@ -230,7 +214,6 @@ export const createEntryEventTransfersRepository = (dbInstance?: DbHandle) => {
       options?: {
         elementInPlayed?: boolean | null;
         defaultPoints?: number | null;
-        syncMode?: TransferSyncMode;
         checkpointThroughEventId?: number;
         sourceCheckedAt: string | Date;
         persistEventData?: (tx: TransactionHandle) => Promise<void>;
@@ -238,7 +221,6 @@ export const createEntryEventTransfersRepository = (dbInstance?: DbHandle) => {
     ): Promise<boolean> => {
       try {
         const db = await getDbInstance();
-        const syncMode = options?.syncMode ?? getConfig().TRANSFER_SYNC_MODE;
         const checkpointThroughEventId = options?.checkpointThroughEventId ?? eventId;
         if (
           !Number.isInteger(checkpointThroughEventId) ||
@@ -280,17 +262,10 @@ export const createEntryEventTransfersRepository = (dbInstance?: DbHandle) => {
           }
 
           await options?.persistEventData?.(tx);
-          const transferScope =
-            syncMode === 'all'
-              ? and(
-                  eq(entryEventTransfersInCompetition.seasonId, season.seasonId),
-                  eq(entryEventTransfersInCompetition.entryId, entryId),
-                )
-              : and(
-                  eq(entryEventTransfersInCompetition.seasonId, season.seasonId),
-                  eq(entryEventTransfersInCompetition.entryId, entryId),
-                  eq(entryEventTransfersInCompetition.eventId, eventId),
-                );
+          const transferScope = and(
+            eq(entryEventTransfersInCompetition.seasonId, season.seasonId),
+            eq(entryEventTransfersInCompetition.entryId, entryId),
+          );
           const existingRows = await tx
             .select()
             .from(entryEventTransfersInCompetition)
@@ -307,62 +282,42 @@ export const createEntryEventTransfersRepository = (dbInstance?: DbHandle) => {
             pointsByElement,
             elementInPlayed: options?.elementInPlayed,
             defaultPoints: options?.defaultPoints ?? null,
-            syncMode,
           });
           if (rows.length > 0) {
             await tx.insert(entryEventTransfersInCompetition).values(rows);
           }
 
-          if (syncMode === 'all') {
-            const persisted = await tx
-              .select({
-                eventId: entryEventTransfersInCompetition.eventId,
-                elementInId: entryEventTransfersInCompetition.elementInId,
-                elementOutId: entryEventTransfersInCompetition.elementOutId,
-                transferTime: entryEventTransfersInCompetition.transferTime,
-              })
-              .from(entryEventTransfersInCompetition)
-              .where(
-                and(
-                  eq(entryEventTransfersInCompetition.seasonId, season.seasonId),
-                  eq(entryEventTransfersInCompetition.entryId, entryId),
-                ),
-              );
-            const expected = new Set(
-              rows.map((row) =>
-                transferSignature({
-                  eventId: row.eventId,
-                  elementInId: row.elementInId ?? null,
-                  elementOutId: row.elementOutId ?? null,
-                  transferTime: row.transferTime as Date,
-                }),
-              ),
-            );
-            const actual = new Set(persisted.map(transferSignature));
-            if (actual.size !== expected.size || [...expected].some((key) => !actual.has(key))) {
-              throw new Error('Full transfer history failed canonical replacement verification');
-            }
+          const persisted = await tx
+            .select({
+              eventId: entryEventTransfersInCompetition.eventId,
+              elementInId: entryEventTransfersInCompetition.elementInId,
+              elementOutId: entryEventTransfersInCompetition.elementOutId,
+              transferTime: entryEventTransfersInCompetition.transferTime,
+            })
+            .from(entryEventTransfersInCompetition)
+            .where(transferScope);
+          const expected = new Set(
+            rows.map((row) =>
+              transferSignature({
+                eventId: row.eventId,
+                elementInId: row.elementInId ?? null,
+                elementOutId: row.elementOutId ?? null,
+                transferTime: row.transferTime as Date,
+              }),
+            ),
+          );
+          const actual = new Set(persisted.map(transferSignature));
+          if (actual.size !== expected.size || [...expected].some((key) => !actual.has(key))) {
+            throw new Error('Full transfer history failed canonical replacement verification');
           }
 
           await tx
             .update(entriesInCompetition)
             .set({
-              transfersSyncedThroughEventId:
-                syncMode === 'all'
-                  ? sql`GREATEST(
-                      COALESCE(${entriesInCompetition.transfersSyncedThroughEventId}, 0),
-                      ${checkpointThroughEventId}
-                    )`
-                  : sql`CASE
-                      WHEN ${entriesInCompetition.transfersSyncedThroughEventId} IS NOT NULL
-                        AND ${entriesInCompetition.transfersSyncedThroughEventId} >= ${eventId - 1}
-                      THEN GREATEST(
-                        ${entriesInCompetition.transfersSyncedThroughEventId},
-                        ${eventId}
-                      )
-                      WHEN ${eventId} <= 1 THEN ${eventId}
-                      ELSE COALESCE(${entriesInCompetition.transfersSyncedThroughEventId}, 0)
-                    END`,
+              transfersSyncedThroughEventId: sql`GREATEST(
+                  COALESCE(${entriesInCompetition.transfersSyncedThroughEventId}, 0),
+                  ${checkpointThroughEventId}
+                )`,
               transfersSourceCheckedAt: sourceCheckedAt,
               updatedAt: new Date(),
             })
@@ -379,7 +334,6 @@ export const createEntryEventTransfersRepository = (dbInstance?: DbHandle) => {
           season: season.seasonCode,
           entryId,
           eventId,
-          syncMode,
           accepted,
         });
         return accepted;

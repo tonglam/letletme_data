@@ -47,7 +47,6 @@ describe('entry-event-transfers upsert (H5)', () => {
           updatedAt: new Date(),
         },
       ],
-      syncMode: 'latest',
     });
 
     expect(rows).toHaveLength(1);
@@ -56,29 +55,7 @@ describe('entry-event-transfers upsert (H5)', () => {
     expect(rows[0]?.elementOutPoints).toBe(2);
   });
 
-  it('keeps only the latest transfer before the schema cutover', () => {
-    const rows = buildTransferReplacementRows({
-      season: TEST_SEASON,
-      entryId: 12345,
-      eventId: 10,
-      transfers: [
-        TRANSFER,
-        {
-          ...TRANSFER,
-          element_in: 101,
-          element_out: 201,
-          time: '2026-07-17T11:00:00Z',
-        },
-      ],
-      existing: [],
-      syncMode: 'latest',
-    });
-
-    expect(rows).toHaveLength(1);
-    expect(rows[0]?.elementInId).toBe(101);
-  });
-
-  it('plans the complete ordered history after the schema cutover', () => {
+  it('plans the complete ordered transfer history', () => {
     const rows = buildTransferReplacementRows({
       season: TEST_SEASON,
       entryId: 12345,
@@ -89,7 +66,6 @@ describe('entry-event-transfers upsert (H5)', () => {
         { ...TRANSFER, element_in: 101, element_out: 201, time: '2026-07-17T11:00:00Z' },
       ],
       existing: [],
-      syncMode: 'all',
     });
 
     expect(rows).toHaveLength(3);

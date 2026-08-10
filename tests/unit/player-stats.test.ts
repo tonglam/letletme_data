@@ -7,11 +7,7 @@ import {
   filterPlayerStatsByTeam,
   getAttackingReturns,
   getDefensiveReturns,
-  getExpectedAssistsAsNumber,
-  getExpectedGoalsAsNumber,
-  getFormAsNumber,
   getFormRating,
-  getIctIndexAsNumber,
   getPointsPerMillion,
   hasGoodValue,
   isDifferentialPick,
@@ -139,36 +135,12 @@ describe('Player Stats Unit Tests', () => {
         expect(ppm).toBeNull();
       });
 
-      test('should return form number', () => {
-        expect(getFormAsNumber(generatePlayerStat({ form: 5.2 }))).toBe(5.2);
-        expect(getFormAsNumber(generatePlayerStat({ form: null }))).toBeNull();
-      });
-
       test('should rate form correctly', () => {
         expect(getFormRating(generatePlayerStat({ form: 5.5 }))).toBe('excellent');
         expect(getFormRating(generatePlayerStat({ form: 4.0 }))).toBe('good');
         expect(getFormRating(generatePlayerStat({ form: 2.5 }))).toBe('average');
         expect(getFormRating(generatePlayerStat({ form: 1.0 }))).toBe('poor');
         expect(getFormRating(generatePlayerStat({ form: null }))).toBe('unknown');
-      });
-
-      test('should return expected goals number', () => {
-        expect(getExpectedGoalsAsNumber(generatePlayerStat({ expectedGoals: 2.45 }))).toBe(2.45);
-        expect(getExpectedGoalsAsNumber(generatePlayerStat({ expectedGoals: null }))).toBeNull();
-      });
-
-      test('should return expected assists number', () => {
-        expect(getExpectedAssistsAsNumber(generatePlayerStat({ expectedAssists: 1.75 }))).toBe(
-          1.75,
-        );
-        expect(
-          getExpectedAssistsAsNumber(generatePlayerStat({ expectedAssists: null })),
-        ).toBeNull();
-      });
-
-      test('should return ICT index number', () => {
-        expect(getIctIndexAsNumber(generatePlayerStat({ ictIndex: 45.6 }))).toBe(45.6);
-        expect(getIctIndexAsNumber(generatePlayerStat({ ictIndex: null }))).toBeNull();
       });
 
       test('should identify regular starter', () => {

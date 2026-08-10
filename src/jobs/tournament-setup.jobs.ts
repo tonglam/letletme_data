@@ -1,9 +1,7 @@
 import {
-  getTournamentSetupQueue,
-  tournamentSetupQueuesByTier,
+  tournamentSetupQueue,
   type TournamentSetupJobData,
 } from '../queues/tournament-setup.queue';
-import { getTournamentSetupJobPriority } from '../domain/job-priority';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { tournamentSetupEnqueueScope } from '../domain/mutation-scope';
 import { ConflictError } from '../utils/errors';
@@ -97,22 +95,19 @@ async function waitForActiveJobToSettle(
 }
 
 export async function cancelWaitingTournamentSetupJobs(tournamentId: number): Promise<number> {
-  const queues = [...new Set(Object.values(tournamentSetupQueuesByTier))];
   let removed = 0;
-  for (const queue of queues) {
-    const jobs = await queue.getJobs(['waiting', 'delayed', 'paused']);
-    for (const job of jobs) {
-      if (job.data.tournamentId !== tournamentId) continue;
-      try {
-        await job.remove();
-        removed += 1;
-      } catch (error) {
-        logWarn('Unable to remove waiting tournament setup job', {
-          tournamentId,
-          jobId: job.id,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
+  const jobs = await tournamentSetupQueue.getJobs(['waiting', 'delayed', 'paused']);
+  for (const job of jobs) {
+    if (job.data.tournamentId !== tournamentId) continue;
+    try {
+      await job.remove();
+      removed += 1;
+    } catch (error) {
+      logWarn('Unable to remove waiting tournament setup job', {
+        tournamentId,
+        jobId: job.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   }
   return removed;
@@ -125,8 +120,7 @@ async function enqueueTournamentSetupUnlocked(
   options: EnqueueTournamentSetupOptions = {},
 ) {
   try {
-    const tier = getTournamentSetupJobPriority('tournament-setup');
-    const queue = getTournamentSetupQueue(tier);
+    const queue = tournamentSetupQueue;
     const jobData: TournamentSetupJobData = {
       seasonId: season.seasonId,
       seasonCode: season.seasonCode,
@@ -231,7 +225,6 @@ async function enqueueTournamentSetupUnlocked(
       tournamentId,
       jobId: job.id,
       source,
-      tier,
       queue: queue.name,
     });
 
@@ -240,7 +233,6 @@ async function enqueueTournamentSetupUnlocked(
     logError('Failed to enqueue tournament setup job', error, {
       tournamentId,
       source,
-      tier: getTournamentSetupJobPriority('tournament-setup'),
     });
     throw error;
   }
@@ -258,7 +250,6 @@ export function enqueueTournamentSetup(
       jobName: 'tournament-setup-enqueue',
       tournamentId,
       scopes: [tournamentSetupEnqueueScope(tournamentId)],
-      required: true,
     },
     () => enqueueTournamentSetupUnlocked(season, tournamentId, source, options),
   );

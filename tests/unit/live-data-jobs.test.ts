@@ -16,18 +16,14 @@ const waitingJobs: Array<{
 
 mock.module('../../src/queues/live-data.queue', () => ({
   LIVE_JOBS: { LIVE_SNAPSHOT: 'live-snapshot' },
-  getLiveDataQueue: () => ({
-    name: 'live-data-p0',
+  liveDataQueue: {
+    name: 'live-data',
     add: async (name: string, data: Record<string, unknown>, opts: Record<string, unknown>) => {
       addCalls.push({ name, data, opts });
       return { id: (opts.jobId as string | undefined) ?? 'generated-id', name, data };
     },
     getJobs: async () => waitingJobs,
-  }),
-}));
-
-mock.module('../../src/domain/job-priority', () => ({
-  getLiveDataJobPriority: () => 'p0',
+  },
 }));
 
 const { enqueueLiveSnapshot, liveSnapshotMinuteBucket } = await import(

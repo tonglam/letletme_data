@@ -13,28 +13,28 @@ mock.module('../../src/queues/live-data.queue', () => ({
   LIVE_JOBS: {
     LIVE_SNAPSHOT: 'live-snapshot',
   },
-  getLiveDataQueue: () => ({
-    name: 'live-data-p1',
+  liveDataQueue: {
+    name: 'live-data',
     getJobs: async () => [],
     add: async (name: string, data: Record<string, unknown>, opts: Record<string, unknown>) => {
       liveDataAddCalls.push({ name, data, opts });
       return { id: (opts.jobId as string | undefined) ?? 'generated-id' };
     },
-  }),
+  },
 }));
 
 mock.module('../../src/queues/entry-sync.queue', () => ({
   ENTRY_SYNC_DEFAULT_CHUNK_SIZE: 100,
   ENTRY_SYNC_DEFAULT_CONCURRENCY: 5,
   ENTRY_SYNC_DEFAULT_THROTTLE_MS: 150,
-  getEntrySyncQueue: () => ({
-    name: 'entry-sync-p2',
+  entrySyncQueue: {
+    name: 'entry-sync',
     getJobs: async () => [],
     add: async (name: string, data: Record<string, unknown>, opts: Record<string, unknown>) => {
       entrySyncAddCalls.push({ name, data, opts });
       return { id: (opts.jobId as string | undefined) ?? 'generated-id', name, data };
     },
-  }),
+  },
 }));
 
 mock.module('../../src/queues/tournament-sync.queue', () => ({
@@ -51,13 +51,13 @@ mock.module('../../src/queues/tournament-sync.queue', () => ({
     TRANSFERS_PRE: 'tournament-transfers-pre',
     INFO: 'tournament-info',
   },
-  getTournamentSyncQueue: () => ({
-    name: 'tournament-sync-p2',
+  tournamentSyncQueue: {
+    name: 'tournament-sync',
     add: async (name: string, data: Record<string, unknown>, opts: Record<string, unknown>) => {
       tournamentSyncAddCalls.push({ name, data, opts });
       return { id: (opts.jobId as string | undefined) ?? 'generated-id' };
     },
-  }),
+  },
 }));
 
 mock.module('../../src/queues/league-sync.queue', () => ({
@@ -65,13 +65,13 @@ mock.module('../../src/queues/league-sync.queue', () => ({
     LEAGUE_EVENT_PICKS: 'league-event-picks',
     LEAGUE_EVENT_RESULTS: 'league-event-results',
   },
-  getLeagueSyncQueue: () => ({
-    name: 'league-sync-p3',
+  leagueSyncQueue: {
+    name: 'league-sync',
     add: async (name: string, data: Record<string, unknown>, opts: Record<string, unknown>) => {
       leagueSyncAddCalls.push({ name, data, opts });
       return { id: (opts.jobId as string | undefined) ?? 'generated-id' };
     },
-  }),
+  },
 }));
 
 const { enqueueLiveSnapshot } = await import('../../src/jobs/live-data.jobs');
@@ -210,15 +210,15 @@ describe('entry-sync entry-list job IDs', () => {
   });
 
   test('cron chunk jobs keep time-based per-cycle IDs', async () => {
-    const job = await enqueueEntryPicksSyncJob(TEST_SEASON, 'cron', { chunkOffset: 0 });
+    const job = await enqueueEntryPicksSyncJob(TEST_SEASON, 'cron', { afterEntryId: 0 });
 
     expect(job).not.toBeNull();
     expect(job!.id).toMatch(/^entry-picks-2627-\d+-chunk-0$/);
   });
 
   test('manual table-scan chunk jobs get a deterministic ID with settle cleanup', async () => {
-    const first = await enqueueEntryPicksSyncJob(TEST_SEASON, 'manual', { chunkOffset: 0 });
-    const second = await enqueueEntryPicksSyncJob(TEST_SEASON, 'manual', { chunkOffset: 0 });
+    const first = await enqueueEntryPicksSyncJob(TEST_SEASON, 'manual', { afterEntryId: 0 });
+    const second = await enqueueEntryPicksSyncJob(TEST_SEASON, 'manual', { afterEntryId: 0 });
 
     expect(first).not.toBeNull();
     expect(second).not.toBeNull();

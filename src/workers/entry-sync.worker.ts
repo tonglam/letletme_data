@@ -1,7 +1,6 @@
 import { QueueEvents, Worker, type Job } from 'bullmq';
 import { and, asc, eq, gt } from 'drizzle-orm';
 
-import { MUTATION_PRIORITY_ORDER, type MutationPriorityTier } from '../domain/job-priority';
 import {
   isExplicitEntryRepairRequest,
   isCronEntryInfoTableScan,
@@ -21,9 +20,8 @@ import {
   ENTRY_SYNC_DEFAULT_CHUNK_SIZE,
   ENTRY_SYNC_DEFAULT_CONCURRENCY,
   ENTRY_SYNC_DEFAULT_THROTTLE_MS,
-  entrySyncQueuesByTier,
-  getEntrySyncQueueName,
-  isEntrySyncTieredQueueEnabled,
+  entrySyncQueue,
+  entrySyncQueueName,
 } from '../queues/entry-sync.queue';
 import {
   enqueueEntryInfoSyncJob,
@@ -61,7 +59,6 @@ import { alertOnFinalFailure } from '../utils/notify';
 import { IncompleteDataSyncError } from '../utils/errors';
 import { withMutationConflictGuard } from '../utils/mutation-lock';
 import { getQueueConnection } from '../utils/queue';
-import { startStrictPriorityGate } from './strict-priority-gate';
 import type { WorkerRuntime } from './worker-runtime';
 
 const maxRetryCycles = 2;
@@ -73,7 +70,7 @@ interface LoadedEntryIds {
   hasMore: boolean;
   lastEntryId: number | null;
   chunkSize: number;
-  chunkOffset: number;
+  afterEntryId: number;
   fetchedFromDb: boolean;
 }
 
@@ -89,7 +86,7 @@ export async function loadEntryIdsForSync(
   jobData?: EntrySyncJobData,
 ): Promise<LoadedEntryIds> {
   const chunkSize = jobData?.chunkSize ?? ENTRY_SYNC_DEFAULT_CHUNK_SIZE;
-  const chunkOffset = jobData?.chunkOffset ?? 0;
+  const afterEntryId = jobData?.afterEntryId ?? 0;
 
   if (jobData?.entryIds && jobData.entryIds.length > 0) {
     const entryIds = Array.from(new Set(jobData.entryIds));
@@ -98,32 +95,23 @@ export async function loadEntryIdsForSync(
       hasMore: false,
       lastEntryId: null,
       chunkSize,
-      chunkOffset,
+      afterEntryId,
       fetchedFromDb: false,
     };
   }
 
   const db = await getDb();
-  const rows =
-    jobData?.afterEntryId !== undefined
-      ? await db
-          .select({ id: entriesInCompetition.entryId })
-          .from(entriesInCompetition)
-          .where(
-            and(
-              eq(entriesInCompetition.seasonId, season.seasonId),
-              gt(entriesInCompetition.entryId, jobData.afterEntryId),
-            ),
-          )
-          .orderBy(asc(entriesInCompetition.entryId))
-          .limit(chunkSize)
-      : await db
-          .select({ id: entriesInCompetition.entryId })
-          .from(entriesInCompetition)
-          .where(eq(entriesInCompetition.seasonId, season.seasonId))
-          .orderBy(asc(entriesInCompetition.entryId))
-          .limit(chunkSize)
-          .offset(chunkOffset);
+  const rows = await db
+    .select({ id: entriesInCompetition.entryId })
+    .from(entriesInCompetition)
+    .where(
+      and(
+        eq(entriesInCompetition.seasonId, season.seasonId),
+        gt(entriesInCompetition.entryId, afterEntryId),
+      ),
+    )
+    .orderBy(asc(entriesInCompetition.entryId))
+    .limit(chunkSize);
 
   const ids = rows.map((row) => row.id);
   return {
@@ -131,7 +119,7 @@ export async function loadEntryIdsForSync(
     hasMore: ids.length === chunkSize,
     lastEntryId: ids.at(-1) ?? null,
     chunkSize,
-    chunkOffset,
+    afterEntryId,
     fetchedFromDb: true,
   };
 }
@@ -246,7 +234,7 @@ async function handleEntryJob(
   if (loaded.entryIds.length === 0) {
     logInfo(`No entries found for ${label}`, {
       jobName,
-      chunkOffset: loaded.chunkOffset,
+      afterEntryId: loaded.afterEntryId,
     });
     return {
       total: 0,
@@ -373,10 +361,6 @@ async function handleEntryJob(
 
 export function createEntrySyncWorker(): WorkerRuntime {
   const connection = getQueueConnection();
-  const activeTiers = isEntrySyncTieredQueueEnabled ? MUTATION_PRIORITY_ORDER : (['p2'] as const);
-  const workers: Worker<EntrySyncJobData>[] = [];
-  const queueEvents: QueueEvents[] = [];
-  const monitorTargets: WorkerRuntime['monitorTargets'] = [];
 
   const processor = async (job: Job<EntrySyncJobData>) => {
     const season = await requireCurrentSeasonForJob(job.data);
@@ -587,66 +571,29 @@ export function createEntrySyncWorker(): WorkerRuntime {
     });
   };
 
-  for (const tier of activeTiers) {
-    const queueName = getEntrySyncQueueName(tier);
-    const worker = new Worker<EntrySyncJobData>(queueName, processor, {
-      connection,
-      lockDuration: 120_000,
-      maxStalledCount: 2,
-      stalledInterval: 15_000,
+  const worker = new Worker<EntrySyncJobData>(entrySyncQueueName, processor, {
+    connection,
+    lockDuration: 120_000,
+    maxStalledCount: 2,
+    stalledInterval: 15_000,
+  });
+  const queueEvents = new QueueEvents(entrySyncQueueName, { connection });
+
+  worker.on('completed', (job) => {
+    logInfo('Entry sync job completed', { jobId: job.id, name: job.name });
+  });
+  worker.on('failed', (job, error) => {
+    logError('Entry sync job failed', error, {
+      jobId: job?.id,
+      name: job?.name,
+      attemptsMade: job?.attemptsMade,
     });
-    const events = new QueueEvents(queueName, { connection });
+    if (job) void alertOnFinalFailure(job, error);
+  });
 
-    worker.on('completed', (job) => {
-      logInfo('Entry sync job completed', { jobId: job.id, name: job.name, tier });
-    });
-
-    worker.on('failed', (job, error) => {
-      logError('Entry sync job failed', error, {
-        jobId: job?.id,
-        name: job?.name,
-        attemptsMade: job?.attemptsMade,
-        tier,
-      });
-      if (job) {
-        void alertOnFinalFailure(job, error);
-      }
-    });
-
-    workers.push(worker);
-    queueEvents.push(events);
-    monitorTargets.push({
-      queue: entrySyncQueuesByTier[tier],
-      queueEvents: events,
-      queueName,
-      tier,
-    });
-  }
-
-  const workerByTier = buildWorkerTierMap(workers, activeTiers);
-  const gate = startStrictPriorityGate(
-    'entry-sync',
-    {
-      p0: { queue: entrySyncQueuesByTier.p0, worker: workerByTier.p0 },
-      p1: { queue: entrySyncQueuesByTier.p1, worker: workerByTier.p1 },
-      p2: { queue: entrySyncQueuesByTier.p2, worker: workerByTier.p2 },
-      p3: { queue: entrySyncQueuesByTier.p3, worker: workerByTier.p3 },
-    },
-    { enabled: isEntrySyncTieredQueueEnabled },
-  );
-
-  return { workers, queueEvents, monitorTargets, stop: gate.stop };
-}
-
-function buildWorkerTierMap(
-  workers: Worker<EntrySyncJobData>[],
-  activeTiers: readonly MutationPriorityTier[],
-): Record<MutationPriorityTier, Worker<EntrySyncJobData>> {
-  const fallback = workers[0];
-  const workerByTier = {} as Record<MutationPriorityTier, Worker<EntrySyncJobData>>;
-  for (const tier of MUTATION_PRIORITY_ORDER) {
-    const index = activeTiers.indexOf(tier);
-    workerByTier[tier] = index >= 0 ? workers[index] : fallback;
-  }
-  return workerByTier;
+  return {
+    workers: [worker],
+    queueEvents: [queueEvents],
+    monitorTargets: [{ queue: entrySyncQueue, queueEvents, queueName: entrySyncQueueName }],
+  };
 }

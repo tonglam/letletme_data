@@ -56,10 +56,6 @@ export function tournamentSetupEnqueueScope(tournamentId: number): string {
     : 'tournament-setup-enqueue:all';
 }
 
-function baseQueueName(queueName: string): string {
-  return queueName.replace(/-p[0-3]$/, '');
-}
-
 function withEvent(scope: string, eventId?: number): string {
   return Number.isFinite(eventId) ? `${scope}:event:${eventId}` : `${scope}:all`;
 }
@@ -69,7 +65,7 @@ function withTournament(scope: string, tournamentId?: number): string {
 }
 
 export function resolveMutationScopes(input: MutationScopeInput): string[] {
-  const queue = baseQueueName(input.queueName);
+  const queue = input.queueName;
   const { jobName, eventId, tournamentId } = input;
 
   if (queue === 'data-sync') {

@@ -237,6 +237,15 @@ describe('Understat PostgreSQL staging envelopes', () => {
     );
   });
 
+  test('rejects extra envelope fields even when the content hash is valid', () => {
+    const staged = stageUnderstatTeamLeague(season, teamDiscovery());
+    const withExtraField = { ...staged, extraField: true };
+
+    expect(() =>
+      readStagedUnderstatTeamLeague(withExtraField, understatStagingHash(withExtraField), season),
+    ).toThrow('Unexpected Understat staging envelope fields');
+  });
+
   test('rejects resource identities that do not match the envelope key', () => {
     const mismatchedSplit = { ...split, teamId: team.id + 1 };
     const stagedTeam = stageUnderstatTeamDetail(season, team.id, [mismatchedSplit]);

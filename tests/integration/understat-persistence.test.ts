@@ -888,7 +888,7 @@ describe('Understat persistence', () => {
       trigger: 'manual',
     });
     await understatSyncRepository.addItems(runId, [{ resourceType: 'league', resourceId: league }]);
-    const originalPayload = { version: 1, value: 'accepted' };
+    const originalPayload = { attempt: 1, value: 'accepted' };
     expect(
       await understatSyncRepository.completeItem(
         runId,
@@ -909,7 +909,7 @@ describe('Understat persistence', () => {
     ).toBe(1);
     await understatSyncRepository.markRunFailed(runId, 'late run failure');
     await understatSyncRepository.markRunSkipped(runId, 'late skip');
-    const delayedPayload = { version: 1, value: 'late' };
+    const delayedPayload = { attempt: 1, value: 'late' };
     expect(
       await understatSyncRepository.completeItem(
         runId,
@@ -989,7 +989,7 @@ describe('Understat persistence', () => {
       rightEntityId: identity,
       status: 'pending',
       method: 'integration-test',
-      ruleVersion: 'test-v1',
+      ruleId: 'test-rule',
       season: '2728',
     });
     providerLinkIds.push(initial.id);
@@ -1001,7 +1001,7 @@ describe('Understat persistence', () => {
       rightEntityId: identity,
       status: 'pending',
       method: 'integration-test',
-      ruleVersion: 'test-v1',
+      ruleId: 'test-rule',
       season: '2627',
     });
     const latest = await providerIdentityRepository.upsertEntityLink({
@@ -1012,7 +1012,7 @@ describe('Understat persistence', () => {
       rightEntityId: identity,
       status: 'pending',
       method: 'integration-test',
-      ruleVersion: 'test-v1',
+      ruleId: 'test-rule',
       season: '2829',
     });
 

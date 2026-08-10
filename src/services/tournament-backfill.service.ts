@@ -144,7 +144,7 @@ export async function syncTournamentEntryDetails(
     const checkpointSeasonByEntryId = new Map(
       failedEntries.map((entry) => [entry.id, entry.entrySnapshotSyncedSeason]),
     );
-    // Missing and legacy-null checkpoints cannot prove ownership of
+    // Missing or null checkpoints cannot prove ownership of
     // event-numbered rows, so their failed refresh blocks publication.
     const unprovenSeasonEntryIds = new Set(
       failures.filter((entryId) => checkpointSeasonByEntryId.get(entryId) !== season.seasonCode),

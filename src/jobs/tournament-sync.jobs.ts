@@ -1,13 +1,9 @@
 import {
-  getTournamentSyncQueue,
+  tournamentSyncQueue,
   TOURNAMENT_JOBS,
   type TournamentSyncJobName,
   type TournamentSyncJobData,
 } from '../queues/tournament-sync.queue';
-import {
-  getTournamentSyncJobPriority,
-  type TournamentSyncPriorityJobName,
-} from '../domain/job-priority';
 import type { TournamentFinalizationTarget } from '../domain/tournament';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { queueRedisSingleton } from '../queues/redis';
@@ -42,23 +38,23 @@ export const CASCADE_BARRIER_TTL_SECONDS = 7 * 24 * 60 * 60;
 const CASCADE_REFRESH_LEASE_TTL_SECONDS = 120;
 
 function cascadeSlotKey(cascadeId: string, jobKey: string): string {
-  return `llm:v3:queue:coordination:tournament-cascade:structure-done:${cascadeId}:${jobKey}`;
+  return `llm:queue:coordination:tournament-cascade:structure-done:${cascadeId}:${jobKey}`;
 }
 
 function cascadeRefreshPendingKey(cascadeId: string): string {
-  return `llm:v3:queue:coordination:tournament-cascade:refresh-pending:${cascadeId}`;
+  return `llm:queue:coordination:tournament-cascade:refresh-pending:${cascadeId}`;
 }
 
 function cascadeRefreshDoneKey(cascadeId: string): string {
-  return `llm:v3:queue:coordination:tournament-cascade:refresh-enqueued:${cascadeId}`;
+  return `llm:queue:coordination:tournament-cascade:refresh-enqueued:${cascadeId}`;
 }
 
 function cascadeRefreshLeaseKey(cascadeId: string): string {
-  return `llm:v3:queue:coordination:tournament-cascade:refresh-lease:${cascadeId}`;
+  return `llm:queue:coordination:tournament-cascade:refresh-lease:${cascadeId}`;
 }
 
 function cascadeMetaKey(cascadeId: string): string {
-  return `llm:v3:queue:coordination:tournament-cascade:meta:${cascadeId}`;
+  return `llm:queue:coordination:tournament-cascade:meta:${cascadeId}`;
 }
 
 export function createCascadeId(season: FplSeasonRef, eventId: number): string {
@@ -253,8 +249,7 @@ async function enqueueTournamentSyncJob(
   options: TournamentSyncEnqueueOptions = {},
 ) {
   try {
-    const tier = getTournamentSyncJobPriority(jobName as TournamentSyncPriorityJobName);
-    const queue = getTournamentSyncQueue(tier);
+    const queue = tournamentSyncQueue;
     const jobData: TournamentSyncJobData = {
       seasonId: season.seasonId,
       seasonCode: season.seasonCode,
@@ -303,7 +298,6 @@ async function enqueueTournamentSyncJob(
       jobName,
       eventId,
       source,
-      tier,
       queue: queue.name,
       cascadeId: options.cascadeId,
       tournamentCount: options.finalizationTargets?.length,
@@ -311,12 +305,10 @@ async function enqueueTournamentSyncJob(
 
     return job;
   } catch (error) {
-    const tier = getTournamentSyncJobPriority(jobName as TournamentSyncPriorityJobName);
     logError('Failed to enqueue tournament sync job', error, {
       jobName,
       eventId,
       source,
-      tier,
     });
     throw error;
   }

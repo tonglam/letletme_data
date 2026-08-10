@@ -28,12 +28,11 @@
     "db:migrate": "bunx drizzle-kit migrate",
     "db:check": "bunx drizzle-kit check",
     "db:studio": "bunx drizzle-kit studio",
-    "db:migration-contract": "bun scripts/v3-migration-login-contract.ts",
-    "db:provision-runtime-logins": "bun scripts/v3-provision-runtime-logins.ts",
+    "db:migration-contract": "bun scripts/migration-login-contract.ts",
+    "db:provision-runtime-logins": "bun scripts/provision-runtime-logins.ts",
     "db:apply-sql": "bun scripts/apply-sql-migrations.ts",
     "db:migrate:status": "bun scripts/apply-sql-migrations.ts --status",
-    "redis:cutover": "bun scripts/v3-redis-cutover.ts",
-    "cache:publish-core": "bun scripts/v3-publish-core-cache.ts"
+    "cache:publish-core": "bun scripts/publish-core-cache.ts"
   },
   "repository": {
     "type": "git",

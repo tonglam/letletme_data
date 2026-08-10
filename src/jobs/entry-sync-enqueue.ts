@@ -1,14 +1,13 @@
 import { randomUUID } from 'crypto';
 
 import {
-  getEntrySyncQueue,
+  entrySyncQueue,
   type EntrySyncJobName,
   type EntrySyncJobSource,
   ENTRY_SYNC_DEFAULT_CHUNK_SIZE,
   ENTRY_SYNC_DEFAULT_CONCURRENCY,
   ENTRY_SYNC_DEFAULT_THROTTLE_MS,
 } from '../queues/entry-sync.queue';
-import { getEntrySyncJobPriority, type EntrySyncPriorityJobName } from '../domain/job-priority';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { getCurrentEvent } from '../services/events.service';
 import { logError, logInfo } from '../utils/logger';
@@ -17,7 +16,6 @@ import { stableHash } from '../utils/stable-hash';
 export interface EntrySyncJobOptions {
   entryIds?: number[];
   retryCount?: number;
-  chunkOffset?: number;
   afterEntryId?: number;
   resumeAfterEntryId?: number;
   chunkSize?: number;
@@ -63,6 +61,11 @@ function sanitizePositiveInt(value: number | undefined, fallback: number) {
   return Math.floor(value);
 }
 
+function sanitizeCursor(value: number | undefined): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return 0;
+  return Math.floor(value);
+}
+
 async function enqueueEntrySyncJob(
   jobName: EntrySyncJobName,
   season: FplSeasonRef,
@@ -70,17 +73,16 @@ async function enqueueEntrySyncJob(
   options: EntrySyncJobOptions = {},
 ) {
   try {
-    const tier = getEntrySyncJobPriority(jobName as EntrySyncPriorityJobName);
-    const queue = getEntrySyncQueue(tier);
+    const queue = entrySyncQueue;
     const chunkSize = sanitizePositiveInt(options.chunkSize, ENTRY_SYNC_DEFAULT_CHUNK_SIZE);
-    const chunkOffset = Math.max(0, options.chunkOffset ?? 0);
+    const afterEntryId = sanitizeCursor(options.afterEntryId);
     const concurrency = sanitizePositiveInt(options.concurrency, ENTRY_SYNC_DEFAULT_CONCURRENCY);
     const throttleMs = sanitizePositiveInt(options.throttleMs, ENTRY_SYNC_DEFAULT_THROTTLE_MS);
 
     const isManualScanRoot =
       source === 'manual' &&
       options.entryIds === undefined &&
-      chunkOffset === 0 &&
+      afterEntryId === 0 &&
       options.runId === undefined &&
       options.queueKey === undefined;
     if (isManualScanRoot) {
@@ -121,7 +123,6 @@ async function enqueueEntrySyncJob(
           jobId: existingManualScan.id,
           jobName,
           source,
-          tier,
           queue: queue.name,
           runId: existingManualScan.data.runId,
         });
@@ -144,8 +145,7 @@ async function enqueueEntrySyncJob(
       triggeredAt: new Date().toISOString(),
       entryIds: options.entryIds,
       retryCount: options.retryCount,
-      chunkOffset,
-      afterEntryId: options.afterEntryId,
+      afterEntryId,
       resumeAfterEntryId: options.resumeAfterEntryId,
       chunkSize,
       concurrency,
@@ -156,11 +156,12 @@ async function enqueueEntrySyncJob(
       removeOnSettle,
     };
 
-    const cursor = options.afterEntryId ?? chunkOffset;
     const chunkKey =
-      options.eventId !== undefined ? `${cursor}-event-${options.eventId}` : `${cursor}`;
+      options.eventId !== undefined
+        ? `${afterEntryId}-event-${options.eventId}`
+        : `${afterEntryId}`;
     // Entry-list jobs (API with explicit IDs) keep their content-based ID.
-    // Table-scan chunks get deterministic IDs keyed by the trigger lane + offset
+    // Table-scan chunks get deterministic IDs keyed by the trigger lane + cursor
     // so correlation IDs can vary without forking parallel manual chains.
     const defaultJobId = isEntryList
       ? `${jobName}-${season.seasonCode}-entry-list-${hashEntryListKey(options.entryIds ?? [], options.eventId, options.retryCount, runId)}`
@@ -182,16 +183,14 @@ async function enqueueEntrySyncJob(
       jobId: job.id,
       jobName,
       source,
-      tier,
       queue: queue.name,
-      chunkOffset,
+      afterEntryId,
       chunkSize,
       runId: job.data.runId ?? runId,
     });
     return job;
   } catch (error) {
-    const tier = getEntrySyncJobPriority(jobName as EntrySyncPriorityJobName);
-    logError('Failed to enqueue entry sync job', error, { jobName, source, tier });
+    logError('Failed to enqueue entry sync job', error, { jobName, source });
     throw error;
   }
 }

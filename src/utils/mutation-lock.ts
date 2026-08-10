@@ -10,7 +10,6 @@ const DEFAULT_LOCK_TTL_MS = config.MUTATION_LOCK_TTL_MS;
 const DEFAULT_WAIT_TIMEOUT_MS = config.MUTATION_LOCK_WAIT_TIMEOUT_MS;
 const DEFAULT_RETRY_DELAY_MS = config.MUTATION_LOCK_RETRY_DELAY_MS;
 const DEFAULT_HEARTBEAT_MS = config.MUTATION_LOCK_HEARTBEAT_MS;
-const LOCK_ENABLED = config.ENABLE_MUTATION_CONFLICT_GUARD;
 
 type MutationLockInput = {
   queueName: string;
@@ -24,8 +23,6 @@ type MutationLockInput = {
    * that write shared structure tables (FP-07 Codex P1).
    */
   scopes?: string[];
-  /** Enforce this correctness lock even when optional conflict guards are disabled. */
-  required?: boolean;
 };
 
 let lockClient: Redis | null = null;
@@ -111,10 +108,6 @@ export async function withMutationConflictGuard<T>(
   input: MutationLockInput,
   operation: () => Promise<T>,
 ): Promise<T> {
-  if (!LOCK_ENABLED && !input.required) {
-    return operation();
-  }
-
   const scopes =
     input.scopes && input.scopes.length > 0 ? input.scopes : resolveMutationScopes(input);
   if (scopes.length === 0) {
@@ -122,7 +115,7 @@ export async function withMutationConflictGuard<T>(
   }
 
   const lockKeys = [
-    ...new Set(scopes.map((scope) => `llm:v3:queue:coordination:mutation-lock:${scope}`)),
+    ...new Set(scopes.map((scope) => `llm:queue:coordination:mutation-lock:${scope}`)),
   ].sort();
   const client = getLockClient();
   const token = randomToken();

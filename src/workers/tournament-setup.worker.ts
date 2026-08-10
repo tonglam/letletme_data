@@ -1,9 +1,8 @@
 import { Job, QueueEvents, Worker } from 'bullmq';
 
 import {
-  getTournamentSetupQueueName,
   tournamentSetupQueue,
-  tournamentSetupQueuesByTier,
+  tournamentSetupQueueName,
   type TournamentSetupJobData,
 } from '../queues/tournament-setup.queue';
 import {
@@ -39,12 +38,11 @@ async function hasActiveSetupJob(tournamentId: number): Promise<boolean> {
 
 export function createTournamentSetupWorker(): WorkerRuntime {
   const connection = getQueueConnection();
-  const queueName = getTournamentSetupQueueName('p0');
-  const queueEvents = new QueueEvents(queueName, { connection });
+  const queueEvents = new QueueEvents(tournamentSetupQueueName, { connection });
   let watchdogInterval: ReturnType<typeof setInterval> | null = null;
 
   const worker = new Worker<TournamentSetupJobData>(
-    queueName,
+    tournamentSetupQueueName,
     async (job: Job<TournamentSetupJobData>) => {
       const season = await requireCurrentSeasonForJob(job.data);
       await job.updateProgress('waiting_for_lifecycle');
@@ -76,7 +74,6 @@ export function createTournamentSetupWorker(): WorkerRuntime {
               jobId: String(job.id),
               tournamentId: job.data.tournamentId,
               scopes: [tournamentSetupLifecycleScope(job.data.tournamentId)],
-              required: true,
             },
             async () => {
               await job.updateProgress('running');
@@ -147,10 +144,9 @@ export function createTournamentSetupWorker(): WorkerRuntime {
     queueEvents: [queueEvents],
     monitorTargets: [
       {
-        queue: tournamentSetupQueuesByTier.p0,
+        queue: tournamentSetupQueue,
         queueEvents,
-        queueName,
-        tier: 'p0',
+        queueName: tournamentSetupQueueName,
       },
     ],
   };

@@ -5,7 +5,7 @@ import {
   isAutoMappingProtectedStatus,
   providerTeamConfirmedForSeason,
   resolveUniqueProviderAssignments,
-  rosterEvidenceCompatible,
+  rosterEvidenceAligns,
 } from '../../src/services/provider-matcher.service';
 
 const fpl = {
@@ -51,7 +51,7 @@ describe('provider roster matcher', () => {
       rightEntityId: '3',
       status: 'manual_verified' as const,
       method: 'manual',
-      ruleVersion: 'v1',
+      ruleId: 'test-team-confirmation',
       evidence: { confirmedSeasons: ['2627', '2829'] },
       firstSeenSeason: '2627',
       lastSeenSeason: '2829',
@@ -72,12 +72,12 @@ describe('provider roster matcher', () => {
   });
 
   test('uses provider evidence rather than names, with assists only auxiliary', () => {
-    expect(rosterEvidenceCompatible(fpl, understat, 3)).toBe(true);
-    expect(rosterEvidenceCompatible(fpl, { ...understat, redCards: 1 }, 3)).toBe(false);
-    expect(rosterEvidenceCompatible(fpl, understat, 4)).toBe(false);
-    expect(rosterEvidenceCompatible({ ...fpl, starts: null }, understat, 3)).toBe(true);
+    expect(rosterEvidenceAligns(fpl, understat, 3)).toBe(true);
+    expect(rosterEvidenceAligns(fpl, { ...understat, redCards: 1 }, 3)).toBe(false);
+    expect(rosterEvidenceAligns(fpl, understat, 4)).toBe(false);
+    expect(rosterEvidenceAligns({ ...fpl, starts: null }, understat, 3)).toBe(true);
     expect(
-      rosterEvidenceCompatible({ ...fpl, starts: null }, { ...understat, started: false }, 3),
+      rosterEvidenceAligns({ ...fpl, starts: null }, { ...understat, started: false }, 3),
     ).toBe(true);
   });
 

@@ -7,8 +7,8 @@ import { afterAll, describe, expect, test } from 'bun:test';
 import { redisSingleton } from '../../src/cache/singleton';
 import { queueRedisSingleton } from '../../src/queues/redis';
 
-const CACHE_PROBE = 'llm:v3:data:test:cache-client-probe';
-const QUEUE_PROBE = 'llm:v3:queue:test:queue-client-probe';
+const CACHE_PROBE = 'llm:data:test:cache-client-probe';
+const QUEUE_PROBE = 'llm:queue:coordination:test:queue-client-probe';
 
 afterAll(async () => {
   const cache = await redisSingleton.getClient();

@@ -14,20 +14,6 @@ import { Queue } from 'bullmq';
 
 import { getQueueConnection } from '../src/utils/queue';
 
-const TIER_SUFFIXES = ['p0', 'p1', 'p2', 'p3'] as const;
-
-function tieredQueuesEnabled(): boolean {
-  const v = (process.env.ENABLE_TIERED_MUTATION_QUEUES ?? '').trim().toLowerCase();
-  return ['1', 'true', 'yes', 'on'].includes(v);
-}
-
-function expandQueueBase(base: string): string[] {
-  if (!tieredQueuesEnabled()) {
-    return [base];
-  }
-  return TIER_SUFFIXES.map((t) => `${base}-${t}`);
-}
-
 const QUEUE_BASES = [
   'data-sync',
   'live-data',
@@ -35,6 +21,8 @@ const QUEUE_BASES = [
   'league-sync',
   'tournament-sync',
   'tournament-setup',
+  'understat-team-sync',
+  'understat-player-sync',
 ] as const;
 
 async function main(): Promise<void> {
@@ -44,7 +32,6 @@ async function main(): Promise<void> {
   console.log(
     JSON.stringify(
       {
-        tieredQueues: tieredQueuesEnabled(),
         redis: {
           host: connection.host,
           port: connection.port,
@@ -56,7 +43,7 @@ async function main(): Promise<void> {
     ),
   );
 
-  const names = QUEUE_BASES.flatMap((b) => expandQueueBase(b));
+  const names = [...QUEUE_BASES];
 
   for (const name of names) {
     const queue = new Queue(name, { connection });
@@ -101,7 +88,7 @@ async function main(): Promise<void> {
 
   if (jobIdArg) {
     console.log(
-      '(If job not printed above, it was not found in these queues — wrong id, tier flag mismatch vs prod, or removed by removeOnComplete/removeOnFail.)',
+      '(If the job was not printed above, it was not found in these queues or was removed by its retention policy.)',
     );
   }
 }

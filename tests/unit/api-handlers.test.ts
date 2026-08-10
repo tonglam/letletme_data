@@ -74,14 +74,14 @@ mock.module('../../src/queues/entry-sync.queue', () => ({
   ENTRY_SYNC_DEFAULT_CHUNK_SIZE: 100,
   ENTRY_SYNC_DEFAULT_CONCURRENCY: 5,
   ENTRY_SYNC_DEFAULT_THROTTLE_MS: 150,
-  getEntrySyncQueue: () => ({
-    name: 'entry-sync-p2',
+  entrySyncQueue: {
+    name: 'entry-sync',
     getJobs: async () => [],
     add: async (name: string, data: Record<string, unknown>, opts: Record<string, unknown>) => {
       entrySyncAddCalls.push({ name, data, opts });
       return { id: (opts.jobId as string | undefined) ?? 'generated-id', name, data };
     },
-  }),
+  },
 }));
 
 // Mock the live-data queue (not live-data.jobs) so real enqueue helpers run and
@@ -91,12 +91,12 @@ mock.module('../../src/queues/live-data.queue', () => ({
   LIVE_JOBS: {
     LIVE_SNAPSHOT: 'live-snapshot',
   },
-  getLiveDataQueue: () => ({
-    name: 'live-data-p1',
+  liveDataQueue: {
+    name: 'live-data',
     add: async (_name: string, _data: unknown, opts: { jobId?: string }) => ({
       id: opts.jobId ?? 'generated-live-id',
     }),
-  }),
+  },
 }));
 
 // spyOn the real service (do not mock.module the whole file — that strips
@@ -624,7 +624,7 @@ describe('entryInfoAPI handlers', () => {
   });
 });
 
-describe('queued core snapshot compatibility APIs', () => {
+describe('queued core snapshot APIs', () => {
   beforeEach(() => {
     enqueueCoreSnapshotJob.mockClear();
   });

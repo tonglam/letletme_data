@@ -218,7 +218,7 @@ async function reconcileDurableWinners(
   };
 }
 
-async function assertIdentityCompatibility(
+async function assertIdentityAlignment(
   season: FplSeasonRef,
   snapshot: CoreSnapshot,
   db: DbOrTransaction,
@@ -277,7 +277,7 @@ export async function persistCoreSnapshot(
   return withCoreSnapshotWriteLock(
     season,
     async (transaction) => {
-      await assertIdentityCompatibility(season, snapshot, transaction);
+      await assertIdentityAlignment(season, snapshot, transaction);
       const reconciled = await reconcileDurableWinners(
         season,
         snapshot,

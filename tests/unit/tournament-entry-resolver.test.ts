@@ -12,24 +12,17 @@ const tournament = {
 } as TournamentInfoSummary;
 
 describe('tournament entry resolver', () => {
-  test('uses canonical stored membership without calling FPL', async () => {
-    let fallbackCalls = 0;
+  test('uses canonical stored membership', async () => {
     const result = await resolveTournamentEntryIds(TEST_SEASON, tournament, {
       findStoredEntryIds: async () => [3, 2, 3],
-      fetchAuthoritativeEntryIds: async () => {
-        fallbackCalls += 1;
-        return [9];
-      },
     });
     expect(result).toEqual([3, 2]);
-    expect(fallbackCalls).toBe(0);
   });
 
-  test('uses the bounded authoritative fallback only for a legacy empty roster', async () => {
+  test('returns an empty roster when no canonical memberships exist', async () => {
     const result = await resolveTournamentEntryIds(TEST_SEASON, tournament, {
       findStoredEntryIds: async () => [],
-      fetchAuthoritativeEntryIds: async () => [11, 12, 12, 13],
     });
-    expect(result).toEqual([11, 12]);
+    expect(result).toEqual([]);
   });
 });

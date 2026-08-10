@@ -23,7 +23,7 @@ import {
   tournamentKnockoutsInCompetition,
   tournamentPointsGroupResultsInCompetition,
   tournamentsInCompetition,
-} from './platform-v3.schema';
+} from './platform.schema';
 
 export type DbEntryEventCupResultInsert = Readonly<
   typeof entryEventCupResultsInCompetition.$inferInsert
@@ -33,7 +33,7 @@ type DbEntryEventResultStorage = Readonly<typeof entryEventResultsInCompetition.
 /**
  * Application read model for an entry/gameweek result.
  *
- * Picks are normalized in competition.entry_event_picks in v3. Repositories hydrate them into
+ * Picks are normalized in competition.entry_event_picks. Repositories hydrate them into
  * this read model so scoring services do not issue their own partially coherent joins.
  */
 export type DbEntryEventResult = DbEntryEventResultStorage &

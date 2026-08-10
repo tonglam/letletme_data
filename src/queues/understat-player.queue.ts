@@ -30,8 +30,8 @@ export function getUnderstatPlayerQueue(): Queue<UnderstatPlayerJobData> {
     defaultJobOptions: {
       attempts: 3,
       backoff: { type: 'understat', delay: 1_000 },
-      removeOnComplete: 100,
-      removeOnFail: 200,
+      removeOnComplete: { count: 20, age: 7 * 24 * 60 * 60 },
+      removeOnFail: { count: 50, age: 14 * 24 * 60 * 60 },
     },
   });
   return understatPlayerQueue;

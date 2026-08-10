@@ -85,7 +85,6 @@ export const understatAPI = new Elysia({ prefix: '/understat' })
         {
           queueName: 'understat-mappings',
           jobName: 'understat-mappings-team',
-          required: true,
           scopes: ['understat:reference:all', `understat:reference:${body.season}`],
         },
         () => manualVerifyProviderTeam(body),
@@ -109,7 +108,6 @@ export const understatAPI = new Elysia({ prefix: '/understat' })
         {
           queueName: 'understat-mappings',
           jobName: 'understat-mappings-reconcile',
-          required: true,
           scopes: ['understat:reference:all', `understat:reference:${body.season}`],
         },
         () => reconcileProviderMappings(body.season),
@@ -158,7 +156,6 @@ export const understatAPI = new Elysia({ prefix: '/understat' })
         {
           queueName: 'understat-mappings',
           jobName: 'understat-mappings-entity-review',
-          required: true,
           scopes: ['understat:reference:all'],
         },
         () =>
@@ -188,7 +185,6 @@ export const understatAPI = new Elysia({ prefix: '/understat' })
         {
           queueName: 'understat-mappings',
           jobName: 'understat-mappings-match-review',
-          required: true,
           scopes: ['understat:reference:all'],
         },
         () => providerIdentityRepository.updateMatchStatus(params.id, body.status, body.reviewedBy),

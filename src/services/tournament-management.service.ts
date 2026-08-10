@@ -340,7 +340,6 @@ export const tournamentManagementService = createTournamentManagementService(
           jobName: 'tournament-delete',
           tournamentId,
           scopes: [tournamentSetupLifecycleScope(tournamentId)],
-          required: true,
         },
         () => tournamentManagementRepository.deleteOwned(season, tournamentId, adminEntryId),
       );

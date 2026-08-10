@@ -1,6 +1,5 @@
 import { Worker, Job, QueueEvents } from 'bullmq';
 
-import { MUTATION_PRIORITY_ORDER, type MutationPriorityTier } from '../domain/job-priority';
 import {
   shouldCascadePersistedLiveSnapshot,
   shouldSkipQueuedLiveSnapshot,
@@ -9,9 +8,8 @@ import { requireCurrentSeasonForJob } from '../domain/season-scoped-job';
 import {
   LIVE_JOBS,
   type LiveDataJobData,
-  getLiveDataQueueName,
-  isLiveDataTieredQueueEnabled,
-  liveDataQueuesByTier,
+  liveDataQueue,
+  liveDataQueueName,
 } from '../queues/live-data.queue';
 import {
   enqueueFinalLeagueResultsAfterLiveSync,
@@ -23,7 +21,6 @@ import { getQueueConnection } from '../utils/queue';
 import { logError, logInfo } from '../utils/logger';
 import { alertOnFinalFailure } from '../utils/notify';
 import { withMutationConflictGuard } from '../utils/mutation-lock';
-import { startStrictPriorityGate } from './strict-priority-gate';
 import type { WorkerRuntime } from './worker-runtime';
 
 /**
@@ -86,83 +83,37 @@ async function processLiveDataJob(job: Job<LiveDataJobData>) {
 
 export function createLiveDataWorker(): WorkerRuntime {
   const connection = getQueueConnection();
-  const activeTiers = isLiveDataTieredQueueEnabled ? MUTATION_PRIORITY_ORDER : (['p3'] as const);
-  const workers: Worker<LiveDataJobData>[] = [];
-  const queueEvents: QueueEvents[] = [];
-  const monitorTargets: WorkerRuntime['monitorTargets'] = [];
+  const worker = new Worker<LiveDataJobData>(liveDataQueueName, processLiveDataJob, {
+    connection,
+    concurrency: 5,
+    removeOnComplete: { count: 100 },
+    removeOnFail: { count: 50 },
+    lockDuration: 120_000,
+    maxStalledCount: 2,
+    stalledInterval: 15_000,
+  });
+  const queueEvents = new QueueEvents(liveDataQueueName, { connection });
 
-  for (const tier of activeTiers) {
-    const queueName = getLiveDataQueueName(tier);
-    const worker = new Worker<LiveDataJobData>(queueName, processLiveDataJob, {
-      connection,
-      concurrency: 5,
-      removeOnComplete: { count: 100 },
-      removeOnFail: { count: 50 },
-      lockDuration: 120_000,
-      maxStalledCount: 2,
-      stalledInterval: 15_000,
+  worker.on('completed', (job) => {
+    logInfo('Live data worker completed job', {
+      jobId: job.id,
+      jobName: job.name,
+      eventId: job.data.eventId,
     });
-    const events = new QueueEvents(queueName, { connection });
-
-    worker.on('completed', (job) => {
-      logInfo('Live data worker completed job', {
-        jobId: job.id,
-        jobName: job.name,
-        eventId: job.data.eventId,
-        tier,
-      });
+  });
+  worker.on('failed', (job, err) => {
+    logError('Live data worker failed job', err, {
+      jobId: job?.id,
+      jobName: job?.name,
+      eventId: job?.data.eventId,
     });
+    if (job) void alertOnFinalFailure(job, err);
+  });
+  worker.on('error', (err) => logError('Live data worker error', err));
 
-    worker.on('failed', (job, err) => {
-      logError('Live data worker failed job', err, {
-        jobId: job?.id,
-        jobName: job?.name,
-        eventId: job?.data.eventId,
-        tier,
-      });
-      if (job) {
-        void alertOnFinalFailure(job, err);
-      }
-    });
-
-    worker.on('error', (err) => {
-      logError('Live data worker error', err, { tier });
-    });
-
-    workers.push(worker);
-    queueEvents.push(events);
-    monitorTargets.push({
-      queue: liveDataQueuesByTier[tier],
-      queueEvents: events,
-      queueName,
-      tier,
-    });
-  }
-
-  const workerByTier = buildWorkerTierMap(workers, activeTiers);
-  const gate = startStrictPriorityGate(
-    'live-data',
-    {
-      p0: { queue: liveDataQueuesByTier.p0, worker: workerByTier.p0 },
-      p1: { queue: liveDataQueuesByTier.p1, worker: workerByTier.p1 },
-      p2: { queue: liveDataQueuesByTier.p2, worker: workerByTier.p2 },
-      p3: { queue: liveDataQueuesByTier.p3, worker: workerByTier.p3 },
-    },
-    { enabled: isLiveDataTieredQueueEnabled },
-  );
-
-  return { workers, queueEvents, monitorTargets, stop: gate.stop };
-}
-
-function buildWorkerTierMap(
-  workers: Worker<LiveDataJobData>[],
-  activeTiers: readonly MutationPriorityTier[],
-): Record<MutationPriorityTier, Worker<LiveDataJobData>> {
-  const fallback = workers[0];
-  const workerByTier = {} as Record<MutationPriorityTier, Worker<LiveDataJobData>>;
-  for (const tier of MUTATION_PRIORITY_ORDER) {
-    const index = activeTiers.indexOf(tier);
-    workerByTier[tier] = index >= 0 ? workers[index] : fallback;
-  }
-  return workerByTier;
+  return {
+    workers: [worker],
+    queueEvents: [queueEvents],
+    monitorTargets: [{ queue: liveDataQueue, queueEvents, queueName: liveDataQueueName }],
+  };
 }

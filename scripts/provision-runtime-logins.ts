@@ -1,10 +1,10 @@
 /* eslint-disable no-console */
 import postgres from 'postgres';
 
-export const V3_DATA_RUNTIME_LOGIN = 'letletme_data_runtime';
-export const V3_GRAPHQL_RUNTIME_LOGIN = 'letletme_graphql_runtime';
-export const V3_DATA_RUNTIME_CAPABILITY = 'letletme_data_writer';
-export const V3_GRAPHQL_RUNTIME_CAPABILITY = 'letletme_graphql_reader';
+export const DATA_RUNTIME_LOGIN = 'letletme_data_runtime';
+export const GRAPHQL_RUNTIME_LOGIN = 'letletme_graphql_runtime';
+export const DATA_RUNTIME_CAPABILITY = 'letletme_data_writer';
+export const GRAPHQL_RUNTIME_CAPABILITY = 'letletme_graphql_reader';
 
 type RoleAttributes = {
   readonly roleName: string;
@@ -42,8 +42,8 @@ type RoleRow = {
 type QueryClient = postgres.Sql | postgres.TransactionSql;
 
 const expectedCapabilities = new Map([
-  [V3_DATA_RUNTIME_LOGIN, V3_DATA_RUNTIME_CAPABILITY],
-  [V3_GRAPHQL_RUNTIME_LOGIN, V3_GRAPHQL_RUNTIME_CAPABILITY],
+  [DATA_RUNTIME_LOGIN, DATA_RUNTIME_CAPABILITY],
+  [GRAPHQL_RUNTIME_LOGIN, GRAPHQL_RUNTIME_CAPABILITY],
 ] as const);
 
 function requiredEnvironment(name: string): string {
@@ -58,12 +58,6 @@ function requiredPassword(name: string): string {
     throw new Error(`${name} must be an exact 64-character base64url secret`);
   }
   return value;
-}
-
-function hasOwn(value: unknown, key: string): boolean {
-  return (
-    typeof value === 'object' && value !== null && Object.prototype.hasOwnProperty.call(value, key)
-  );
 }
 
 function roleAttributes(row: RoleRow): RoleAttributes {
@@ -110,10 +104,10 @@ export function assertRuntimeLoginProvisioningSnapshot(
   snapshot: RuntimeLoginProvisioningSnapshot,
 ): void {
   const expectedRoles = new Set([
-    V3_DATA_RUNTIME_LOGIN,
-    V3_GRAPHQL_RUNTIME_LOGIN,
-    V3_DATA_RUNTIME_CAPABILITY,
-    V3_GRAPHQL_RUNTIME_CAPABILITY,
+    DATA_RUNTIME_LOGIN,
+    GRAPHQL_RUNTIME_LOGIN,
+    DATA_RUNTIME_CAPABILITY,
+    GRAPHQL_RUNTIME_CAPABILITY,
   ]);
   if (
     snapshot.roles.length !== expectedRoles.size ||
@@ -122,7 +116,7 @@ export function assertRuntimeLoginProvisioningSnapshot(
     throw new Error('Runtime provisioning returned an unexpected role set');
   }
 
-  for (const capability of [V3_DATA_RUNTIME_CAPABILITY, V3_GRAPHQL_RUNTIME_CAPABILITY]) {
+  for (const capability of [DATA_RUNTIME_CAPABILITY, GRAPHQL_RUNTIME_CAPABILITY]) {
     const role = snapshot.roles.find((candidate) => candidate.roleName === capability);
     if (!role || !isLockedCapability(role)) {
       throw new Error(`Runtime capability role ${capability} is missing or unsafe`);
@@ -143,10 +137,10 @@ export function assertRuntimeLoginProvisioningSnapshot(
 
 async function inspectRoles(client: QueryClient): Promise<RuntimeLoginProvisioningSnapshot> {
   const roleNames = [
-    V3_DATA_RUNTIME_LOGIN,
-    V3_GRAPHQL_RUNTIME_LOGIN,
-    V3_DATA_RUNTIME_CAPABILITY,
-    V3_GRAPHQL_RUNTIME_CAPABILITY,
+    DATA_RUNTIME_LOGIN,
+    GRAPHQL_RUNTIME_LOGIN,
+    DATA_RUNTIME_CAPABILITY,
+    GRAPHQL_RUNTIME_CAPABILITY,
   ];
   const roleRows = await client<RoleRow[]>`
       SELECT
@@ -176,7 +170,7 @@ async function inspectRoles(client: QueryClient): Promise<RuntimeLoginProvisioni
         FROM pg_auth_members membership
         JOIN pg_roles member_role ON member_role.oid = membership.member
         JOIN pg_roles granted_role ON granted_role.oid = membership.roleid
-        WHERE member_role.rolname = ANY(${[V3_DATA_RUNTIME_LOGIN, V3_GRAPHQL_RUNTIME_LOGIN]}::text[])
+        WHERE member_role.rolname = ANY(${[DATA_RUNTIME_LOGIN, GRAPHQL_RUNTIME_LOGIN]}::text[])
 
         UNION ALL
 
@@ -270,53 +264,27 @@ async function provisionLogin(
 
 async function main(): Promise<void> {
   const databaseUrl = requiredEnvironment('DATABASE_URL');
-  const runId = requiredEnvironment('CUTOVER_RUN_ID');
-  if (!/^v3-\d{8}T\d{6}Z-[0-9a-f]{7,12}$/.test(runId)) {
-    throw new Error('CUTOVER_RUN_ID is invalid');
-  }
-  if (process.env.V3_CUTOVER_APPROVAL !== `APPROVE_V3_ACTIVATION ${runId}`) {
-    throw new Error('Exact v3 activation approval is required for runtime LOGIN provisioning');
-  }
-  const dataPassword = requiredPassword('V3_DATA_DB_PASSWORD');
-  const graphqlPassword = requiredPassword('V3_GRAPHQL_DB_PASSWORD');
+  const dataPassword = requiredPassword('DATA_RUNTIME_DB_PASSWORD');
+  const graphqlPassword = requiredPassword('GRAPHQL_RUNTIME_DB_PASSWORD');
   if (dataPassword === graphqlPassword) {
     throw new Error('Data and GraphQL runtime passwords must be unique');
   }
 
   const client = postgres(databaseUrl, { max: 1, prepare: false });
   try {
-    const runRows = await client<Array<{ status: string; metadata: unknown }>>`
-      SELECT status, metadata
-      FROM ops.migration_runs
-      WHERE run_id = ${runId}
-    `;
-    const run = runRows[0];
-    if (
-      runRows.length !== 1 ||
-      run?.status !== 'activated' ||
-      hasOwn(run.metadata, 'legacyDropPhase')
-    ) {
-      throw new Error('Runtime LOGIN provisioning requires the exact activated pre-cleanup run');
-    }
-
     await client.begin(async (transaction) => {
       const before = await inspectRoles(transaction);
-      for (const capability of [V3_DATA_RUNTIME_CAPABILITY, V3_GRAPHQL_RUNTIME_CAPABILITY]) {
+      for (const capability of [DATA_RUNTIME_CAPABILITY, GRAPHQL_RUNTIME_CAPABILITY]) {
         const role = before.roles.find((candidate) => candidate.roleName === capability);
         if (!role || !isLockedCapability(role)) {
           throw new Error(`Runtime capability role ${capability} is missing or unsafe`);
         }
       }
+      await provisionLogin(transaction, DATA_RUNTIME_LOGIN, DATA_RUNTIME_CAPABILITY, dataPassword);
       await provisionLogin(
         transaction,
-        V3_DATA_RUNTIME_LOGIN,
-        V3_DATA_RUNTIME_CAPABILITY,
-        dataPassword,
-      );
-      await provisionLogin(
-        transaction,
-        V3_GRAPHQL_RUNTIME_LOGIN,
-        V3_GRAPHQL_RUNTIME_CAPABILITY,
+        GRAPHQL_RUNTIME_LOGIN,
+        GRAPHQL_RUNTIME_CAPABILITY,
         graphqlPassword,
       );
       assertRuntimeLoginProvisioningSnapshot(await inspectRoles(transaction));
@@ -327,8 +295,7 @@ async function main(): Promise<void> {
     console.log(
       JSON.stringify(
         {
-          operation: 'provision-v3-runtime-logins',
-          runId,
+          operation: 'provision-runtime-logins',
           roles: verified.roles,
           memberships: verified.memberships,
         },
@@ -343,7 +310,7 @@ async function main(): Promise<void> {
 
 if (import.meta.main) {
   main().catch((error) => {
-    console.error('[v3-provision-runtime-logins] failed', error);
+    console.error('[provision-runtime-logins] failed', error);
     process.exitCode = 1;
   });
 }

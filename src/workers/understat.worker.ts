@@ -49,10 +49,6 @@ function lockScopes(
   return [...scopes, `understat:${lane}:${data.season}:${name}:${resourceId ?? 'unknown'}`];
 }
 
-function requiresUnderstatSerialization(_name: string): boolean {
-  return true;
-}
-
 async function runUnderstatOperation(operation: () => Promise<void>): Promise<void> {
   try {
     await operation();
@@ -88,7 +84,6 @@ async function processTeamJob(job: Job<UnderstatTeamJobData>): Promise<void> {
       queueName: job.queueName,
       jobName: job.name,
       jobId: String(job.id),
-      required: requiresUnderstatSerialization(job.name),
       scopes: lockScopes('team', job.name, job.data),
     },
     () =>
@@ -124,7 +119,6 @@ async function processPlayerJob(job: Job<UnderstatPlayerJobData>): Promise<void>
       queueName: job.queueName,
       jobName: job.name,
       jobId: String(job.id),
-      required: requiresUnderstatSerialization(job.name),
       scopes: lockScopes('player', job.name, job.data),
     },
     () =>

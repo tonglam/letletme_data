@@ -1,7 +1,7 @@
 import { queueRedisSingleton } from '../queues/redis';
 import { logError } from '../utils/logger';
 
-const ENTRY_INFO_SYNC_MARKER_PREFIX = 'llm:v3:queue:coordination:entry-info-sync:daily';
+const ENTRY_INFO_SYNC_MARKER_PREFIX = 'llm:queue:coordination:entry-info-sync:daily';
 
 export function getEntryInfoSyncDateKey(date: Date) {
   return date.toISOString().split('T')[0];

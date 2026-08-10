@@ -111,7 +111,6 @@ export async function syncCoreSnapshot(
     season: currentSeason,
     mode: 'full',
     trigger,
-    metadata: { schemaVersion: 'v3' },
   });
 
   let preparedPublicationId: string | null = null;
@@ -139,7 +138,6 @@ export async function syncCoreSnapshot(
       season: currentSeason,
       sourceRunId,
       manifest: {
-        schemaVersion: 'v3',
         state: 'staging',
         sourceCheckedAt: sourceCheckedAt.toISOString(),
       },

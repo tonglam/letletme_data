@@ -2,12 +2,11 @@ import { randomUUID } from 'node:crypto';
 import type { FplSeasonRef } from '../domain/fpl-season';
 
 import {
-  getLeagueSyncQueue,
+  leagueSyncQueue,
   LEAGUE_JOBS,
   type LeagueSyncJobName,
   type LeagueSyncJobData,
 } from '../queues/league-sync.queue';
-import { getLeagueSyncJobPriority, type LeagueSyncPriorityJobName } from '../domain/job-priority';
 import { logError, logInfo } from '../utils/logger';
 
 export type LeagueSyncJobSource = 'cron' | 'manual' | 'cascade';
@@ -27,8 +26,7 @@ async function enqueueLeagueSyncJob(
   options: LeagueSyncEnqueueOptions = {},
 ) {
   try {
-    const tier = getLeagueSyncJobPriority(jobName as LeagueSyncPriorityJobName);
-    const queue = getLeagueSyncQueue(tier);
+    const queue = leagueSyncQueue;
     const runId = options.runId ?? randomUUID();
     const jobData: LeagueSyncJobData = {
       seasonId: season.seasonId,
@@ -66,19 +64,16 @@ async function enqueueLeagueSyncJob(
       eventId,
       tournamentId: options.tournamentId,
       source,
-      tier,
       queue: queue.name,
     });
 
     return job;
   } catch (error) {
-    const tier = getLeagueSyncJobPriority(jobName as LeagueSyncPriorityJobName);
     logError('Failed to enqueue league sync job', error, {
       jobName,
       eventId,
       tournamentId: options.tournamentId,
       source,
-      tier,
     });
     throw error;
   }

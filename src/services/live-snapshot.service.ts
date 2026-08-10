@@ -480,7 +480,6 @@ export async function syncLiveSnapshot(
     eventId,
     mode: options.persistEventLives ? 'durable' : 'cache',
     trigger: options.trigger ?? 'queue',
-    metadata: { schemaVersion: 'v3' },
   });
 
   let publicationId: string | null = null;
@@ -554,7 +553,6 @@ export async function syncLiveSnapshot(
       eventId,
       sourceRunId,
       manifest: {
-        schemaVersion: 'v3',
         state: 'staging',
         sourceCheckedAt: checkedAt.toISOString(),
       },

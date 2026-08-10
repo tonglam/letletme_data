@@ -70,7 +70,6 @@ jobs:
       fail-fast: false
       matrix:
         bun-version: ['1.3.3']
-        catalog-mode: ['absent', 'present']
     services:
       postgres:
         image: postgres:15
@@ -133,15 +132,31 @@ jobs:
           EOF
           bun /tmp/stub-auth.mjs
 
-      - name: Apply SQL migrations through the validated preactivation boundary
+      - name: Apply SQL migrations through the GraphQL ledger boundary
+        env:
+          DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
+        run: >-
+          bun scripts/apply-sql-migrations.ts
+          --through 0079_create_v3_ops_and_roles.sql
+
+      - name: Install the historical GraphQL ledger fixture
+        env:
+          DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
+        run: >-
+          bun -e 'import postgres from "postgres";
+          const sql = postgres(process.env.DATABASE_URL, { max: 1 });
+          const ddl = await Bun.file("tests/fixtures/graphql-migration-ledger.sql").text();
+          await sql.unsafe(ddl);
+          await sql.end();'
+
+      - name: Apply SQL migrations through the production import boundary
         env:
           DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
         run: >-
           bun scripts/apply-sql-migrations.ts
           --through 0089_prepare_v3_publications.sql
 
-      - name: Install optional GraphQL public-league catalog fixture
-        if: matrix.catalog-mode == 'present'
+      - name: Install the optional public-league source fixture
         env:
           DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
         run: >-
@@ -151,7 +166,19 @@ jobs:
           await sql.unsafe(ddl);
           await sql.end();'
 
-      - name: Apply SQL migrations
+      - name: Apply SQL migrations through the historical cutover boundary
+        env:
+          DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
+        run: >-
+          bun scripts/apply-sql-migrations.ts
+          --through 0090_zzzz_integrate_understat_runtime.sql
+
+      - name: Apply the historical approval-gated tail fixture
+        env:
+          DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
+        run: bun tests/helpers/apply-historical-cutover-tail.ts
+
+      - name: Apply canonical SQL migrations
         env:
           DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
         run: bun run db:apply-sql
@@ -163,40 +190,11 @@ jobs:
           bun run db:apply-sql
           bun run db:migrate:status
 
-      - name: Verify optional GraphQL catalog was absorbed and frozen
-        if: matrix.catalog-mode == 'present'
-        env:
-          DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
-        run: >-
-          bun -e 'import postgres from "postgres";
-          const sql = postgres(process.env.DATABASE_URL, { max: 1 });
-          const [row] = await sql`SELECT
-            (SELECT count(*)::integer FROM competition.public_league_trends
-              WHERE tournament_id = 900001 AND display_name = ${"CI public league"}
-                AND sort_order = 7 AND enabled) AS copied_rows,
-            pg_get_userbyid(source.relowner) AS source_owner,
-            EXISTS (SELECT 1 FROM pg_trigger trigger_row
-              WHERE trigger_row.tgrelid = source.oid
-                AND trigger_row.tgname = ${"v3_reject_v2_mutation"}
-                AND NOT trigger_row.tgisinternal) AS source_frozen,
-            EXISTS (SELECT 1 FROM pg_auth_members membership
-              JOIN pg_roles member_role ON member_role.oid = membership.member
-              JOIN pg_roles granted_role ON granted_role.oid = membership.roleid
-              WHERE member_role.rolname = session_user
-                AND granted_role.rolname = ${"letletme_v2_frozen_owner"}) AS leaked_membership
-          FROM pg_class source
-          WHERE source.oid = ${"public.public_league_trends_catalog"}::regclass`;
-          await sql.end();
-          if (!row || row.copied_rows !== 1 || row.source_owner !== "letletme_v2_frozen_owner"
-            || !row.source_frozen || row.leaked_membership) throw new Error(JSON.stringify(row));'
-
       - name: Provision and retry disposable production-shaped runtime logins
         env:
           DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
-          CUTOVER_RUN_ID: v3-20260808T160008Z-b9eddc0
-          V3_CUTOVER_APPROVAL: APPROVE_V3_ACTIVATION v3-20260808T160008Z-b9eddc0
-          V3_DATA_DB_PASSWORD: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
-          V3_GRAPHQL_DB_PASSWORD: gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg
+          DATA_RUNTIME_DB_PASSWORD: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+          GRAPHQL_RUNTIME_DB_PASSWORD: gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg
         run: |
           bun run db:provision-runtime-logins
           bun run db:provision-runtime-logins
@@ -207,8 +205,8 @@ jobs:
           SCHEMA_EXPORT_DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/schema_export_test
         run: |
           bun -e 'import postgres from "postgres"; const db = postgres(process.env.DATABASE_URL, { max: 1 }); await db.unsafe("CREATE DATABASE schema_export_test"); await db.end();'
-          DATABASE_URL="$SCHEMA_EXPORT_DATABASE_URL" bun run db:export > /tmp/v3-schema-export.sql
-          bun -e 'import postgres from "postgres"; const db = postgres(process.env.SCHEMA_EXPORT_DATABASE_URL, { max: 1 }); const ddl = await Bun.file("/tmp/v3-schema-export.sql").text(); await db.unsafe(ddl); await db.end();'
+          DATABASE_URL="$SCHEMA_EXPORT_DATABASE_URL" bun run db:export > /tmp/schema-export.sql
+          bun -e 'import postgres from "postgres"; const db = postgres(process.env.SCHEMA_EXPORT_DATABASE_URL, { max: 1 }); const ddl = await Bun.file("/tmp/schema-export.sql").text(); await db.unsafe(ddl); await db.end();'
 
       - name: Fresh-database integration tests
         env:

@@ -20,8 +20,6 @@ const config = getConfig();
 if (config.NODE_ENV === 'production') {
   await databaseSingleton.connect();
 }
-const mutationConflictGuardEnabled = config.ENABLE_MUTATION_CONFLICT_GUARD;
-const tieredMutationQueuesEnabled = config.ENABLE_TIERED_MUTATION_QUEUES;
 const mutationLockConfig = {
   ttlMs: config.MUTATION_LOCK_TTL_MS,
   waitTimeoutMs: config.MUTATION_LOCK_WAIT_TIMEOUT_MS,
@@ -45,7 +43,6 @@ const queueMonitors = runtimes.flatMap((runtime) =>
       queue: target.queue,
       queueEvents: target.queueEvents,
       queueName: target.queueName,
-      tier: target.tier,
     }),
   ),
 );
@@ -89,7 +86,5 @@ process.on('SIGINT', () => void shutdown('SIGINT'));
 process.on('SIGTERM', () => void shutdown('SIGTERM'));
 
 logInfo('Background worker started', {
-  mutationConflictGuardEnabled,
-  tieredMutationQueuesEnabled,
   mutationLockConfig,
 });

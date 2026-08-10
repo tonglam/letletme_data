@@ -8,8 +8,8 @@ import {
 } from '../../src/jobs/launch.jobs';
 import { NotificationDeliveryRejectedError } from '../../src/utils/notify';
 
-const WARNING_KEY = 'llm:v3:queue:coordination:launch-notification:warning:2026';
-const HAPPENING_KEY = 'llm:v3:queue:coordination:launch-notification:happening:2627';
+const WARNING_KEY = 'llm:queue:coordination:launch-notification:warning:2026';
+const HAPPENING_KEY = 'llm:queue:coordination:launch-notification:happening:2627';
 
 class FakeRedis {
   readonly values = new Map<string, string>();

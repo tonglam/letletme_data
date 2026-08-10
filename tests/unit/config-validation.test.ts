@@ -42,7 +42,7 @@ describe('production environment preflight', () => {
 
     expect(preflight).toBeGreaterThan(0);
     expect(migrationContract).toBeGreaterThan(preflight);
-    expect(migrationContract).toBeLessThan(migrate);
+    expect(migrationContract).toBeGreaterThan(migrate);
     expect(preflight).toBeLessThan(migrate);
     expect(preflight).toBeLessThan(replaceServices);
   });

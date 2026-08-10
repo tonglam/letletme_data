@@ -43,7 +43,7 @@ export interface EntryInfoSyncWorkPlan {
 
 /**
  * Canonical PostgreSQL checkpoints avoid repeated upstream reads. Entry data
- * has no Data Redis publication in v3, so checkpointed rows are simply reused.
+ * has no Data Redis publication, so checkpointed rows are simply reused.
  */
 export function planEntryInfoSyncWork(
   entryIds: readonly number[],

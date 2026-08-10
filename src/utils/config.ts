@@ -46,11 +46,8 @@ const EnvSchema = z.object({
   CORS_ORIGINS: z.string().optional(),
   // HTTP mutation rate limit (fixed window per client IP; 0 disables)
   RATE_LIMIT_MUTATIONS_PER_MINUTE: z.coerce.number().int().min(0).default(60),
-  // Mutation conflict guard + tiered mutation queues (feature flags)
-  ENABLE_TIERED_MUTATION_QUEUES: booleanEnv(false),
-  ENABLE_MUTATION_CONFLICT_GUARD: booleanEnv(true),
+  // Mutation conflict guard timing
   TOURNAMENT_OFFICIAL_SYNC_DEFAULT_ENABLED: booleanEnv(false),
-  TRANSFER_SYNC_MODE: z.enum(['latest', 'all']).default('all'),
   MUTATION_LOCK_TTL_MS: integerEnv(30_000),
   MUTATION_LOCK_WAIT_TIMEOUT_MS: integerEnv(120_000),
   MUTATION_LOCK_RETRY_DELAY_MS: integerEnv(250),

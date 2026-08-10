@@ -2,12 +2,12 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   assertRuntimeLoginProvisioningSnapshot,
-  V3_DATA_RUNTIME_CAPABILITY,
-  V3_DATA_RUNTIME_LOGIN,
-  V3_GRAPHQL_RUNTIME_CAPABILITY,
-  V3_GRAPHQL_RUNTIME_LOGIN,
+  DATA_RUNTIME_CAPABILITY,
+  DATA_RUNTIME_LOGIN,
+  GRAPHQL_RUNTIME_CAPABILITY,
+  GRAPHQL_RUNTIME_LOGIN,
   type RuntimeLoginProvisioningSnapshot,
-} from '../../scripts/v3-provision-runtime-logins';
+} from '../../scripts/provision-runtime-logins';
 
 const capability = (roleName: string) => ({
   roleName,
@@ -35,26 +35,26 @@ const login = (roleName: string) => ({
 
 const accepted = (): RuntimeLoginProvisioningSnapshot => ({
   roles: [
-    login(V3_DATA_RUNTIME_LOGIN),
-    capability(V3_DATA_RUNTIME_CAPABILITY),
-    login(V3_GRAPHQL_RUNTIME_LOGIN),
-    capability(V3_GRAPHQL_RUNTIME_CAPABILITY),
+    login(DATA_RUNTIME_LOGIN),
+    capability(DATA_RUNTIME_CAPABILITY),
+    login(GRAPHQL_RUNTIME_LOGIN),
+    capability(GRAPHQL_RUNTIME_CAPABILITY),
   ],
   memberships: [
     {
-      loginRole: V3_DATA_RUNTIME_LOGIN,
-      grantedRole: V3_DATA_RUNTIME_CAPABILITY,
+      loginRole: DATA_RUNTIME_LOGIN,
+      grantedRole: DATA_RUNTIME_CAPABILITY,
       adminOption: false,
     },
     {
-      loginRole: V3_GRAPHQL_RUNTIME_LOGIN,
-      grantedRole: V3_GRAPHQL_RUNTIME_CAPABILITY,
+      loginRole: GRAPHQL_RUNTIME_LOGIN,
+      grantedRole: GRAPHQL_RUNTIME_CAPABILITY,
       adminOption: false,
     },
   ],
 });
 
-describe('v3 production runtime LOGIN provisioning contract', () => {
+describe('production runtime LOGIN provisioning contract', () => {
   test('accepts two non-admin logins with exactly one locked capability each', () => {
     expect(() => assertRuntimeLoginProvisioningSnapshot(accepted())).not.toThrow();
   });
@@ -64,14 +64,14 @@ describe('v3 production runtime LOGIN provisioning contract', () => {
     const elevated = {
       ...base,
       roles: base.roles.map((role) =>
-        role.roleName === V3_DATA_RUNTIME_LOGIN ? { ...role, superuser: true } : role,
+        role.roleName === DATA_RUNTIME_LOGIN ? { ...role, superuser: true } : role,
       ),
     };
     expect(() => assertRuntimeLoginProvisioningSnapshot(elevated)).toThrow('missing or unsafe');
 
     const missing = {
       ...base,
-      roles: base.roles.filter((role) => role.roleName !== V3_GRAPHQL_RUNTIME_LOGIN),
+      roles: base.roles.filter((role) => role.roleName !== GRAPHQL_RUNTIME_LOGIN),
     };
     expect(() => assertRuntimeLoginProvisioningSnapshot(missing)).toThrow('unexpected role set');
 
@@ -80,32 +80,32 @@ describe('v3 production runtime LOGIN provisioning contract', () => {
       memberships: [
         ...base.memberships,
         {
-          loginRole: V3_GRAPHQL_RUNTIME_LOGIN,
+          loginRole: GRAPHQL_RUNTIME_LOGIN,
           grantedRole: 'unexpected_reader',
           adminOption: false,
         },
       ],
     };
     expect(() => assertRuntimeLoginProvisioningSnapshot(inherited)).toThrow(
-      `must inherit only ${V3_GRAPHQL_RUNTIME_CAPABILITY}`,
+      `must inherit only ${GRAPHQL_RUNTIME_CAPABILITY}`,
     );
 
     const delegated = {
       ...base,
       memberships: base.memberships.map((membership) =>
-        membership.loginRole === V3_DATA_RUNTIME_LOGIN
+        membership.loginRole === DATA_RUNTIME_LOGIN
           ? { ...membership, adminOption: true }
           : membership,
       ),
     };
     expect(() => assertRuntimeLoginProvisioningSnapshot(delegated)).toThrow(
-      `must inherit only ${V3_DATA_RUNTIME_CAPABILITY}`,
+      `must inherit only ${DATA_RUNTIME_CAPABILITY}`,
     );
 
     const configured = {
       ...base,
       roles: base.roles.map((role) =>
-        role.roleName === V3_GRAPHQL_RUNTIME_LOGIN
+        role.roleName === GRAPHQL_RUNTIME_LOGIN
           ? { ...role, settings: ['search_path=public'] }
           : role,
       ),

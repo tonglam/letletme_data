@@ -8,7 +8,6 @@ interface QueueMonitorOptions {
   queue: Queue;
   queueEvents: QueueEvents;
   queueName?: string;
-  tier?: 'p0' | 'p1' | 'p2' | 'p3';
   pollIntervalMs?: number;
 }
 
@@ -48,7 +47,6 @@ function summarizeCounts(counts: QueueCounts, previous?: QueueCounts) {
 export function startQueueMonitor(options: QueueMonitorOptions) {
   const { queue, queueEvents } = options;
   const queueName = options.queueName ?? queue.name;
-  const tier = options.tier;
   const pollIntervalMs = options.pollIntervalMs ?? defaultPollIntervalMs;
   let pollInterval: NodeJS.Timeout | null = null;
   let lastCounts: QueueCounts | null = null;
@@ -66,7 +64,6 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
 
       logDebug('Queue job counts', {
         queue: queueName,
-        tier,
         context,
         counts,
         ...deltas,
@@ -75,7 +72,6 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
       if (lastCounts && (deltas.failedDelta ?? 0) > 0) {
         logWarn('Queue failed jobs increased', {
           queue: queueName,
-          tier,
           failedDelta: deltas.failedDelta,
           failedCount: counts.failed,
         });
@@ -91,7 +87,6 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
     void resolveJobName(queue, jobId).then((jobName) => {
       logError('Queue event failed', toError(failedReason), {
         queue: queueName,
-        tier,
         jobId,
         jobName,
         previous: prev,
@@ -104,7 +99,6 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
     void resolveJobName(queue, jobId).then((jobName) => {
       logDebug('Queue event completed', {
         queue: queueName,
-        tier,
         jobId,
         jobName,
         previous: prev,
@@ -114,24 +108,24 @@ export function startQueueMonitor(options: QueueMonitorOptions) {
 
   queueEvents.on('stalled', ({ jobId }) => {
     void resolveJobName(queue, jobId).then((jobName) => {
-      logError('Queue event stalled', undefined, { queue: queueName, tier, jobId, jobName });
+      logError('Queue event stalled', undefined, { queue: queueName, jobId, jobName });
     });
   });
 
   queueEvents.on('error', (error) => {
-    logError('Queue events error', error, { queue: queueName, tier });
+    logError('Queue events error', error, { queue: queueName });
   });
 
   queueEvents
     .waitUntilReady()
     .then(() => {
-      logInfo('Queue events ready', { queue: queueName, tier });
+      logInfo('Queue events ready', { queue: queueName });
       void logCounts('startup');
       pollInterval = setInterval(() => {
         void logCounts('interval');
       }, pollIntervalMs);
     })
-    .catch((error) => logError('Queue events init failed', error, { queue: queueName, tier }));
+    .catch((error) => logError('Queue events init failed', error, { queue: queueName }));
 
   return {
     stop() {

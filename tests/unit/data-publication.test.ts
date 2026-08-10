@@ -14,8 +14,6 @@ const payload = JSON.stringify([{ id: 1 }]);
 
 function validManifest(): DataPublicationManifest {
   return {
-    schemaVersion: 'v3',
-    planVersion: '3.2.5',
     dataset: 'fpl:core',
     seasonCode: '2627',
     eventId: null,
@@ -23,27 +21,26 @@ function validManifest(): DataPublicationManifest {
     publicationId: '00000000-0000-4000-8000-000000000007',
     sourceCheckedAt: '2026-08-09T01:00:00.000Z',
     publishedAt: '2026-08-09T01:00:01.000Z',
-    items: [
-      {
-        name: 'events',
-        key: dataPublicationItemKey(scope, 7, 'events'),
-        type: 'string',
-        count: 1,
-        bytes: Buffer.byteLength(payload, 'utf8'),
-        sha256: createHash('sha256').update(payload).digest('hex'),
-      },
-    ],
+    state: 'active',
+    items: ['events', 'teams', 'players', 'phases', 'fixtures', 'currentEventId'].map((name) => ({
+      name,
+      key: dataPublicationItemKey(scope, 7, name),
+      type: 'string',
+      count: 1,
+      bytes: Buffer.byteLength(payload, 'utf8'),
+      sha256: createHash('sha256').update(payload).digest('hex'),
+    })),
   };
 }
 
-describe('v3 data publication contract', () => {
+describe('data publication contract', () => {
   test('builds only canonical core and live keys', () => {
-    expect(activeDataPublicationKey(scope)).toBe('llm:v3:data:fpl:core:2627:active');
+    expect(activeDataPublicationKey(scope)).toBe('llm:data:fpl:core:2627:active');
     expect(dataPublicationItemKey(scope, 7, 'currentEventId')).toBe(
-      'llm:v3:data:fpl:core:2627:7:currentEventId',
+      'llm:data:fpl:core:2627:7:currentEventId',
     );
     expect(activeDataPublicationKey({ dataset: 'fpl:live', seasonCode: '2627', eventId: 12 })).toBe(
-      'llm:v3:data:fpl:live:2627:12:active',
+      'llm:data:fpl:live:2627:12:active',
     );
   });
 
@@ -51,7 +48,7 @@ describe('v3 data publication contract', () => {
     expect(() => activeDataPublicationKey({ dataset: 'fpl:core', seasonCode: '26/27' })).toThrow();
     expect(() => activeDataPublicationKey({ dataset: 'fpl:live', seasonCode: '2627' })).toThrow();
     expect(() => dataPublicationItemKey(scope, 0, 'events')).toThrow();
-    expect(() => dataPublicationItemKey(scope, 1, 'events:v2')).toThrow();
+    expect(() => dataPublicationItemKey(scope, 1, 'events:old')).toThrow();
   });
 
   test('accepts an exact canonical manifest', () => {
@@ -84,10 +81,10 @@ describe('v3 data publication contract', () => {
     ).toBeNull();
   });
 
-  test('rejects a manifest from another Data Platform plan version', () => {
+  test('rejects additional manifest fields', () => {
     const manifest = validManifest();
     expect(
-      parseDataPublicationManifest(JSON.stringify({ ...manifest, planVersion: '3.2.3' })),
+      parseDataPublicationManifest(JSON.stringify({ ...manifest, extraField: true })),
     ).toBeNull();
   });
 

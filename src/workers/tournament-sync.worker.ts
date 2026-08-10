@@ -1,14 +1,12 @@
 import { Worker, Job, QueueEvents } from 'bullmq';
 
-import { MUTATION_PRIORITY_ORDER, type MutationPriorityTier } from '../domain/job-priority';
 import { finalizeTournamentEventLifecycle } from '../domain/tournament-event-finalization';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { requireCurrentSeasonForJob } from '../domain/season-scoped-job';
 import { shouldEnqueueTournamentCascade } from '../domain/tournament-event-results';
 import {
-  getTournamentSyncQueueName,
-  isTournamentSyncTieredQueueEnabled,
-  tournamentSyncQueuesByTier,
+  tournamentSyncQueue,
+  tournamentSyncQueueName,
   TOURNAMENT_JOBS,
   type TournamentSyncJobData,
 } from '../queues/tournament-sync.queue';
@@ -52,7 +50,6 @@ import {
   enqueueTournamentMaterializedViewsRefresh,
   enqueueTournamentSelectionStats,
 } from '../jobs/tournament-sync.jobs';
-import { startStrictPriorityGate } from './strict-priority-gate';
 import type { WorkerRuntime } from './worker-runtime';
 import type { TournamentFinalizationTarget } from '../domain/tournament';
 
@@ -417,16 +414,10 @@ async function processTournamentSyncJob(job: Job<TournamentSyncJobData>) {
 
 export function createTournamentSyncWorker(): WorkerRuntime {
   const connection = getQueueConnection();
-  const activeTiers = isTournamentSyncTieredQueueEnabled
-    ? MUTATION_PRIORITY_ORDER
-    : (['p2'] as const);
-  const workers: Worker<TournamentSyncJobData>[] = [];
-  const queueEvents: QueueEvents[] = [];
-  const monitorTargets: WorkerRuntime['monitorTargets'] = [];
-
-  for (const tier of activeTiers) {
-    const queueName = getTournamentSyncQueueName(tier);
-    const worker = new Worker<TournamentSyncJobData>(queueName, processTournamentSyncJob, {
+  const worker = new Worker<TournamentSyncJobData>(
+    tournamentSyncQueueName,
+    processTournamentSyncJob,
+    {
       connection,
       concurrency: 10,
       removeOnComplete: { count: 100 },
@@ -434,68 +425,32 @@ export function createTournamentSyncWorker(): WorkerRuntime {
       lockDuration: 120_000,
       maxStalledCount: 2,
       stalledInterval: 15_000,
-    });
-    const events = new QueueEvents(queueName, { connection });
-
-    worker.on('completed', (job) => {
-      logInfo('Tournament sync worker completed job', {
-        jobId: job.id,
-        jobName: job.name,
-        eventId: job.data.eventId,
-        tier,
-      });
-    });
-
-    worker.on('failed', (job, err) => {
-      logError('Tournament sync worker failed job', err, {
-        jobId: job?.id,
-        jobName: job?.name,
-        eventId: job?.data.eventId,
-        tier,
-      });
-      if (job) {
-        void alertOnFinalFailure(job, err);
-      }
-    });
-
-    worker.on('error', (err) => {
-      logError('Tournament sync worker error', err, { tier });
-    });
-
-    workers.push(worker);
-    queueEvents.push(events);
-    monitorTargets.push({
-      queue: tournamentSyncQueuesByTier[tier],
-      queueEvents: events,
-      queueName,
-      tier,
-    });
-  }
-
-  const workerByTier = buildWorkerTierMap(workers, activeTiers);
-  const gate = startStrictPriorityGate(
-    'tournament-sync',
-    {
-      p0: { queue: tournamentSyncQueuesByTier.p0, worker: workerByTier.p0 },
-      p1: { queue: tournamentSyncQueuesByTier.p1, worker: workerByTier.p1 },
-      p2: { queue: tournamentSyncQueuesByTier.p2, worker: workerByTier.p2 },
-      p3: { queue: tournamentSyncQueuesByTier.p3, worker: workerByTier.p3 },
     },
-    { enabled: isTournamentSyncTieredQueueEnabled },
   );
+  const queueEvents = new QueueEvents(tournamentSyncQueueName, { connection });
 
-  return { workers, queueEvents, monitorTargets, stop: gate.stop };
-}
+  worker.on('completed', (job) => {
+    logInfo('Tournament sync worker completed job', {
+      jobId: job.id,
+      jobName: job.name,
+      eventId: job.data.eventId,
+    });
+  });
+  worker.on('failed', (job, err) => {
+    logError('Tournament sync worker failed job', err, {
+      jobId: job?.id,
+      jobName: job?.name,
+      eventId: job?.data.eventId,
+    });
+    if (job) void alertOnFinalFailure(job, err);
+  });
+  worker.on('error', (err) => logError('Tournament sync worker error', err));
 
-function buildWorkerTierMap(
-  workers: Worker<TournamentSyncJobData>[],
-  activeTiers: readonly MutationPriorityTier[],
-): Record<MutationPriorityTier, Worker<TournamentSyncJobData>> {
-  const fallback = workers[0];
-  const workerByTier = {} as Record<MutationPriorityTier, Worker<TournamentSyncJobData>>;
-  for (const tier of MUTATION_PRIORITY_ORDER) {
-    const index = activeTiers.indexOf(tier);
-    workerByTier[tier] = index >= 0 ? workers[index] : fallback;
-  }
-  return workerByTier;
+  return {
+    workers: [worker],
+    queueEvents: [queueEvents],
+    monitorTargets: [
+      { queue: tournamentSyncQueue, queueEvents, queueName: tournamentSyncQueueName },
+    ],
+  };
 }
