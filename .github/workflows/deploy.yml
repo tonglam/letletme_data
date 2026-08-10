@@ -1187,14 +1187,24 @@ jobs:
                 if (pings.some((value) => value !== "PONG")) throw new Error("Redis ping failed");
 
                 const sourceManifest = await inspectLegacyRedisQueues(cacheRedis, { maxKeys: 10000 });
+                const targetManifest = await inspectLegacyRedisQueues(queueRedis, { maxKeys: 10000 });
                 if (
-                  sourceManifest.keyCount !== 297 ||
+                  sourceManifest.keyCount !== 0 ||
                   sourceManifest.keyManifestSha256 !==
-                    "f6796a4895a0699814464e8edff9e5d6a0fd80722bb8154623b98b255e72dfda" ||
+                    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" ||
                   sourceManifest.payloadManifestSha256 !==
+                    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                ) {
+                  throw new Error("Legacy DB0 queue source was not fully cleaned");
+                }
+                if (
+                  targetManifest.keyCount !== 297 ||
+                  targetManifest.keyManifestSha256 !==
+                    "f6796a4895a0699814464e8edff9e5d6a0fd80722bb8154623b98b255e72dfda" ||
+                  targetManifest.payloadManifestSha256 !==
                     process.env.EXPECTED_QUEUE_SOURCE_MANIFEST
                 ) {
-                  throw new Error("Frozen DB0 queue source no longer matches the approved manifest");
+                  throw new Error("Active DB1 queues no longer match the approved frozen manifest");
                 }
 
                 const dataKeys = await scanKeys(cacheRedis, "llm:v3:data:*");
@@ -1296,12 +1306,15 @@ jobs:
                     cache: { hostRecorded: false, port: cacheEndpoint.port, db: cacheEndpoint.db },
                     queue: { hostRecorded: false, port: queueEndpoint.port, db: queueEndpoint.db },
                   },
-                  frozenQueueSource: {
+                  cleanedLegacyQueueSource: {
                     keyCount: sourceManifest.keyCount,
                     keyManifestSha256: sourceManifest.keyManifestSha256,
                     payloadManifestSha256: sourceManifest.payloadManifestSha256,
                   },
                   activeQueueTarget: {
+                    keyCount: targetManifest.keyCount,
+                    keyManifestSha256: targetManifest.keyManifestSha256,
+                    payloadManifestSha256: targetManifest.payloadManifestSha256,
                     bullKeyCount: targetBullKeys.length,
                     coordinationKeyCount: targetCoordinationKeys.length,
                   },
@@ -1349,6 +1362,8 @@ jobs:
             run_capture capture-v3-business-relation-hashes.sql
             run_capture capture-public-sequence-state.sql
             run_capture capture-public-security-contract.sql
+            run_capture validate-postcleanup.sql
+            run_capture validate-p5-quality.sql
 
             grep -E '^(relation,row_count,sha256|public\.[^,]+,[0-9]+,[0-9a-f]{64})$' \
               "$acceptance_dir/capture-public-relation-hashes.sql.raw" \
@@ -1363,19 +1378,21 @@ jobs:
               "$acceptance_dir/capture-public-security-contract.sql.raw" \
               > "$acceptance_dir/public-security.csv"
 
-            test "$(wc -l < "$acceptance_dir/public-relations.csv" | tr -d ' ')" -eq 201
+            test "$(wc -l < "$acceptance_dir/public-relations.csv" | tr -d ' ')" -eq 1
             test "$(wc -l < "$acceptance_dir/v3-business.csv" | tr -d ' ')" -eq 46
-            test "$(wc -l < "$acceptance_dir/public-sequences.csv" | tr -d ' ')" -eq 23
-            test "$(wc -l < "$acceptance_dir/public-security.csv" | tr -d ' ')" -eq 390
+            test "$(wc -l < "$acceptance_dir/public-sequences.csv" | tr -d ' ')" -eq 1
+            grep -q 'v3_postcleanup_validation_passed' \
+              "$acceptance_dir/validate-postcleanup.sql.raw"
+            grep -q 'p5_quality_validation_passed' \
+              "$acceptance_dir/validate-p5-quality.sql.raw"
 
             public_hash=$(sha256sum "$acceptance_dir/public-relations.csv" | awk '{print $1}')
             v3_hash=$(sha256sum "$acceptance_dir/v3-business.csv" | awk '{print $1}')
             sequence_hash=$(sha256sum "$acceptance_dir/public-sequences.csv" | awk '{print $1}')
             security_hash=$(sha256sum "$acceptance_dir/public-security.csv" | awk '{print $1}')
-            test "$public_hash" = 'be0adcb28347b1688cb6f07552faa5cf53e81d2c3de5e49d7ec5068428a361e2'
+            test "$public_hash" = '00209e2cc1c6d9a60b580c3b1e4ca4cd9e30696a4fba6c5fb75548481d02d349'
             test "$v3_hash" = '4d10062af6a9d187078d31bb1c0d885f9e7ffca9fc63957c24eb3073a5300bd5'
-            test "$sequence_hash" = '4b33a696be0cf5aaabfd0dd0899395dc98639e19c47861f494c2892d87ddab2d'
-            test "$security_hash" = '70158adcebd6284d0b02d67a9df06183481c1b77316d6e79315ae7854c95f52c'
+            test "$sequence_hash" = 'a5179301f903e804d98af10e982d46fa228fa307d1569e1528fc5f6fae89bb8d'
             echo "V3_TERMINAL_DATABASE_HASHES={\"public\":\"$public_hash\",\"v3Business\":\"$v3_hash\",\"publicSequences\":\"$sequence_hash\",\"publicSecurity\":\"$security_hash\"}"
 
             docker run --rm -i \
@@ -1384,131 +1401,6 @@ jobs:
               sh -eu -c \
               'database_url="$DATABASE_URL"; database_url="${database_url#\"}"; database_url="${database_url%\"}"; exec psql "$database_url" --no-psqlrc --set ON_ERROR_STOP=on --tuples-only --no-align' <<SQL
             BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;
-            DO \$terminal_acceptance\$
-            DECLARE
-              failed_checks bigint;
-              physical_relations bigint;
-              mutation_fences bigint;
-            BEGIN
-              IF (SELECT count(*) FROM ops.migration_runs
-                  WHERE run_id = '$CUTOVER_RUN_ID' AND status = 'activated') <> 1 THEN
-                RAISE EXCEPTION 'terminal migration run is not activated';
-              END IF;
-              IF (SELECT count(*) FROM ops.migration_objects
-                  WHERE run_id = '$CUTOVER_RUN_ID'
-                    AND status = 'passed' AND failed_count = 0) <> 53
-                 OR EXISTS (
-                   SELECT 1 FROM ops.migration_objects
-                   WHERE run_id = '$CUTOVER_RUN_ID'
-                     AND (status <> 'passed' OR failed_count <> 0)
-                 ) THEN
-                RAISE EXCEPTION 'terminal migration reconciliation is not 53/53';
-              END IF;
-              IF (SELECT count(*) FROM pg_class
-                  WHERE relnamespace = 'public'::regnamespace
-                    AND relkind IN ('r', 'p', 'm', 'v')) <> 200 THEN
-                RAISE EXCEPTION 'terminal public relation count is not 200';
-              END IF;
-              IF (SELECT count(*) FROM pg_class relation_row
-                  JOIN pg_namespace namespace_row ON namespace_row.oid = relation_row.relnamespace
-                  WHERE namespace_row.nspname IN ('fpl','competition','understat','bridge','reporting')
-                    AND relation_row.relkind IN ('r','m','v')) <> 45 THEN
-                RAISE EXCEPTION 'terminal v3 business relation count is not 45';
-              END IF;
-              IF (SELECT count(*) FROM pg_class
-                  WHERE relnamespace = 'public'::regnamespace AND relkind = 'S') <> 22 THEN
-                RAISE EXCEPTION 'terminal public sequence count is not 22';
-              END IF;
-              IF EXISTS (
-                SELECT 1 FROM pg_constraint constraint_row
-                JOIN pg_namespace namespace_row ON namespace_row.oid = constraint_row.connamespace
-                WHERE namespace_row.nspname IN ('ops','fpl','competition','understat','bridge','reporting')
-                  AND NOT constraint_row.convalidated
-              ) OR EXISTS (
-                SELECT 1 FROM pg_index index_row
-                JOIN pg_class relation_row ON relation_row.oid = index_row.indexrelid
-                JOIN pg_namespace namespace_row ON namespace_row.oid = relation_row.relnamespace
-                WHERE namespace_row.nspname IN ('ops','fpl','competition','understat','bridge','reporting')
-                  AND (NOT index_row.indisvalid OR NOT index_row.indisready)
-              ) THEN
-                RAISE EXCEPTION 'terminal invalid constraint or index found';
-              END IF;
-              IF (SELECT count(*) FROM ops.dataset_publications publication
-                  JOIN fpl.seasons season ON season.season_id = publication.season_id
-                  WHERE season.is_current
-                    AND publication.dataset = 'fpl:core'
-                    AND publication.event_id IS NULL
-                    AND publication.status = 'active'
-                    AND publication.publication_id = '1f08ab2f-732b-449f-868c-4a2038c5f1ba'
-                    AND publication.revision = 2
-                    AND publication.manifest ->> 'state' = 'active') <> 1 THEN
-                RAISE EXCEPTION 'terminal active core publication identity mismatch';
-              END IF;
-              IF EXISTS (
-                SELECT 1 FROM ops.dataset_publications
-                WHERE status = 'staging'
-              ) OR EXISTS (
-                SELECT 1 FROM ops.dataset_publications
-                WHERE status = 'active'
-                GROUP BY season_id, dataset, coalesce(event_id, -1)
-                HAVING count(*) > 1
-              ) THEN
-                RAISE EXCEPTION 'terminal orphan staging or mixed active revision found';
-              END IF;
-              IF (SELECT count(*) FROM ops.schema_migrations
-                  WHERE filename ~ '^009[123]_') <> 0 THEN
-                RAISE EXCEPTION 'legacy cleanup migration was applied';
-              END IF;
-
-              SELECT count(*) INTO physical_relations
-              FROM pg_class
-              WHERE relnamespace = 'public'::regnamespace AND relkind IN ('r','p');
-              SELECT count(*) INTO mutation_fences
-              FROM pg_class relation_row
-              JOIN pg_trigger trigger_row ON trigger_row.tgrelid = relation_row.oid
-              WHERE relation_row.relnamespace = 'public'::regnamespace
-                AND relation_row.relkind IN ('r','p')
-                AND trigger_row.tgname = 'v3_reject_v2_mutation'
-                AND trigger_row.tgfoid = 'ops.reject_v2_mutation()'::regprocedure
-                AND NOT trigger_row.tgisinternal;
-              IF physical_relations <> 193 OR mutation_fences <> physical_relations THEN
-                RAISE EXCEPTION 'terminal v2 physical/fence contract mismatch';
-              END IF;
-              IF EXISTS (
-                SELECT 1 FROM pg_class relation_row
-                WHERE relation_row.relnamespace = 'public'::regnamespace
-                  AND relation_row.relkind IN ('r','p','m','v','S')
-                  AND NOT (relation_row.relkind = 'v' AND relation_row.relname = 'sql_migrations')
-                  AND relation_row.relowner <> 'letletme_v2_frozen_owner'::regrole
-              ) THEN
-                RAISE EXCEPTION 'terminal v2 owner contract mismatch';
-              END IF;
-              IF EXISTS (
-                SELECT 1 FROM pg_roles role_row
-                WHERE role_row.rolname IN ('letletme_data_runtime','letletme_graphql_runtime')
-                  AND (NOT role_row.rolcanlogin OR NOT role_row.rolinherit OR role_row.rolsuper
-                    OR role_row.rolcreatedb OR role_row.rolcreaterole OR role_row.rolreplication
-                    OR role_row.rolbypassrls)
-              ) THEN
-                RAISE EXCEPTION 'terminal runtime login attributes are invalid';
-              END IF;
-              SELECT count(*) INTO failed_checks
-              FROM pg_auth_members membership
-              JOIN pg_roles member_role ON member_role.oid = membership.member
-              JOIN pg_roles granted_role ON granted_role.oid = membership.roleid
-              WHERE member_role.rolname IN ('letletme_data_runtime','letletme_graphql_runtime')
-                AND (member_role.rolname, granted_role.rolname) NOT IN (
-                  ('letletme_data_runtime','letletme_data_writer'),
-                  ('letletme_graphql_runtime','letletme_graphql_reader')
-                );
-              IF failed_checks <> 0 OR
-                 (SELECT count(*) FROM pg_auth_members membership
-                  JOIN pg_roles member_role ON member_role.oid = membership.member
-                  WHERE member_role.rolname IN ('letletme_data_runtime','letletme_graphql_runtime')) <> 2 THEN
-                RAISE EXCEPTION 'terminal runtime role memberships are invalid';
-              END IF;
-            END
-            \$terminal_acceptance\$;
             SELECT jsonb_build_object(
               'status', 'v3_terminal_database_acceptance_passed',
               'runId', '$CUTOVER_RUN_ID',
@@ -1630,6 +1522,7 @@ jobs:
             test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
             test -f .env.migrate
             test -f sql/v3/validate-0090-activation.sql
+            test -f sql/v3/validate-postcleanup.sql
             test -f sql/v3/validate-p5-quality.sql
             test -z "$(APP_IMAGE="$IMAGE_REF" docker compose ps -q api)"
             test -z "$(APP_IMAGE="$IMAGE_REF" docker compose ps -q worker)"
@@ -1660,6 +1553,7 @@ jobs:
             trap 'rm -rf "$VALIDATION_DIR"' EXIT
             cp \
               sql/v3/validate-0090-activation.sql \
+              sql/v3/validate-postcleanup.sql \
               sql/v3/validate-p5-quality.sql \
               sql/v3/capture-public-relation-hashes.sql \
               sql/v3/capture-v3-business-relation-hashes.sql \
@@ -1667,28 +1561,6 @@ jobs:
               sql/v3/capture-public-security-contract.sql \
               "$VALIDATION_DIR/"
 
-            # Keep the approved R3 runtime candidate immutable. Its validator has
-            # one PL/pgSQL CASE-expression parser ambiguity, so patch only the
-            # SHA-guarded temporary validation copy and leave the checkout intact.
-            validator_sha=$(sha256sum "$VALIDATION_DIR/validate-0090-activation.sql" | awk '{print $1}')
-            test "$validator_sha" = '0443c71728e07a24e397dbbad39d1b016623f05333265b1abb208e62fdd15756'
-            sed -i \
-              '31s/+ CASE/+ (/;32s/^       WHEN/       CASE\n         WHEN/;33s/^       ELSE/         ELSE/;34s/^     END$/       END\n     )/' \
-              "$VALIDATION_DIR/validate-0090-activation.sql"
-            grep -Fq 'legacy_physical_count <> 192 + (' \
-              "$VALIDATION_DIR/validate-0090-activation.sql"
-            echo 'V3_R3_VALIDATOR_PATCH=case-expression-parenthesized'
-
-            # The final production B0 backup supersedes the earlier rehearsal
-            # snapshot: 283 verified provider links were added before hard cut.
-            # Migration-object row/hash parity independently proves all 2,192
-            # frozen source rows reached bridge.entity_links.
-            quality_sha=$(sha256sum "$VALIDATION_DIR/validate-p5-quality.sql" | awk '{print $1}')
-            test "$quality_sha" = '709123d52eab4db0849961590f4fcbe397ed4584042a420391b699cb78b07a91'
-            sed -i '324s/<> 1909/<> 2192/' "$VALIDATION_DIR/validate-p5-quality.sql"
-            grep -Fq '(SELECT count(*) FROM bridge.entity_links) <> 2192' \
-              "$VALIDATION_DIR/validate-p5-quality.sql"
-            echo 'V3_FINAL_B0_ENTITY_LINKS=2192'
             run_psql_file() {
               sql_file="$1"
               docker run --rm \
@@ -1700,7 +1572,17 @@ jobs:
                 sh "$sql_file"
             }
 
-            run_psql_file validate-0090-activation.sql
+            legacy_drop_phase=$(docker run --rm \
+              --env-file .env.migrate \
+              "$PSQL_IMAGE" \
+              sh -eu -c \
+              'database_url="$DATABASE_URL"; database_url="${database_url#\"}"; database_url="${database_url%\"}"; exec psql "$database_url" --no-psqlrc --set ON_ERROR_STOP=on --tuples-only --no-align --command "$1"' \
+              sh "SELECT coalesce(metadata ->> 'legacyDropPhase', '') FROM ops.migration_runs WHERE run_id = '$CUTOVER_RUN_ID'")
+            case "$legacy_drop_phase" in
+              '') run_psql_file validate-0090-activation.sql ;;
+              complete) run_psql_file validate-postcleanup.sql ;;
+              *) echo "Unsupported partial legacy-drop phase: $legacy_drop_phase"; exit 1 ;;
+            esac
             run_psql_file validate-p5-quality.sql
             run_psql_file capture-public-relation-hashes.sql
             run_psql_file capture-v3-business-relation-hashes.sql
