@@ -253,6 +253,10 @@ describe('v3 production hard-cut workflow', () => {
       '0443c71728e07a24e397dbbad39d1b016623f05333265b1abb208e62fdd15756',
     );
     expect(validation).toContain('V3_R3_VALIDATOR_PATCH=case-expression-parenthesized');
+    expect(validation).toContain(
+      '709123d52eab4db0849961590f4fcbe397ed4584042a420391b699cb78b07a91',
+    );
+    expect(validation).toContain('V3_FINAL_B0_ENTITY_LINKS=2192');
     expect(validation).toContain('--volume "$VALIDATION_DIR:/validation:ro"');
     expect(validation).toContain('docker compose ps -q api');
     expect(validation).toContain('docker compose ps -q worker');

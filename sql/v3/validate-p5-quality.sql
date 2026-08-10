@@ -321,7 +321,7 @@ DO $provider_contract$
 BEGIN
   IF (SELECT count(*) FROM understat.matches) <> 4560
      OR (SELECT count(*) FROM understat.player_match_stats) <> 129576
-     OR (SELECT count(*) FROM bridge.entity_links) <> 1909 THEN
+     OR (SELECT count(*) FROM bridge.entity_links) <> 2192 THEN
     RAISE EXCEPTION 'P5 Understat/bridge B0 count contract failed';
   END IF;
 

@@ -97,7 +97,7 @@ describe('P5 rehearsal contracts', () => {
     );
     expect(sql).toContain('(SELECT count(*) FROM understat.matches) <> 4560');
     expect(sql).toContain('(SELECT count(*) FROM understat.player_match_stats) <> 129576');
-    expect(sql).toContain('(SELECT count(*) FROM bridge.entity_links) <> 1909');
+    expect(sql).toContain('(SELECT count(*) FROM bridge.entity_links) <> 2192');
     expect(sql).toContain('P5 exact duplicate index contracts');
     expect(sql).toContain('P5 SECURITY DEFINER allowlist/search_path/execute contract failed');
     expect(sql).toContain('P5 dedicated Web auth capability role is missing');

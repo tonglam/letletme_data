@@ -995,6 +995,17 @@ jobs:
             grep -Fq 'legacy_physical_count <> 192 + (' \
               "$VALIDATION_DIR/validate-0090-activation.sql"
             echo 'V3_R3_VALIDATOR_PATCH=case-expression-parenthesized'
+
+            # The final production B0 backup supersedes the earlier rehearsal
+            # snapshot: 283 verified provider links were added before hard cut.
+            # Migration-object row/hash parity independently proves all 2,192
+            # frozen source rows reached bridge.entity_links.
+            quality_sha=$(sha256sum "$VALIDATION_DIR/validate-p5-quality.sql" | awk '{print $1}')
+            test "$quality_sha" = '709123d52eab4db0849961590f4fcbe397ed4584042a420391b699cb78b07a91'
+            sed -i '324s/<> 1909/<> 2192/' "$VALIDATION_DIR/validate-p5-quality.sql"
+            grep -Fq '(SELECT count(*) FROM bridge.entity_links) <> 2192' \
+              "$VALIDATION_DIR/validate-p5-quality.sql"
+            echo 'V3_FINAL_B0_ENTITY_LINKS=2192'
             run_psql_file() {
               sql_file="$1"
               docker run --rm \
