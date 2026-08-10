@@ -52,10 +52,10 @@ describe('v3 production hard-cut workflow', () => {
 
     for (const [name, nextName] of jobNames) {
       const contents = job(name, nextName);
-      expect(contents).toContain('script_stop: false');
+      expect(contents).not.toContain('script_stop:');
       expect(contents).toContain('set -euo pipefail');
     }
-    expect(job('v3_stop')).toContain('script_stop: false');
+    expect(job('v3_stop')).not.toContain('script_stop:');
   });
 
   test('keeps the VPS preflight read-only', () => {
