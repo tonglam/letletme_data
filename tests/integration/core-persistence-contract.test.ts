@@ -19,6 +19,7 @@ import { createEntryLeagueInfoRepository } from '../../src/repositories/entry-le
 import { createLeagueEventResultsRepository } from '../../src/repositories/league-event-results';
 import { createPlayerMarketSnapshotsRepository } from '../../src/repositories/player-market-snapshots';
 import { createPlayerStatsRepository } from '../../src/repositories/player-stats';
+import { createPlayerValuesRepository } from '../../src/repositories/player-values';
 import { createTournamentBattleGroupResultsRepository } from '../../src/repositories/tournament-battle-group-results';
 import { createTournamentGroupRepository } from '../../src/repositories/tournament-groups';
 import { createTournamentInfoRepository } from '../../src/repositories/tournament-infos';
@@ -254,7 +255,7 @@ persistenceTest(
       expect(await marketRepository.upsertCompleteDay(season, 1, marketSnapshots, 2)).toMatchObject(
         { persistedCount: 2 },
       );
-      expect(await marketRepository.upsertCompleteDay(season, 1, marketSnapshots, 2)).toMatchObject(
+      expect(await marketRepository.upsertCompleteDay(season, 2, marketSnapshots, 2)).toMatchObject(
         { persistedCount: 2 },
       );
 
@@ -283,6 +284,63 @@ persistenceTest(
         event_rows: 2,
         value_change_rows: 2,
       });
+
+      const sourceEvents = await client<Array<{ source_event_id: number }>>`
+        SELECT source_event_id
+        FROM fpl.player_market_snapshots
+        WHERE season_id = 2026 AND snapshot_date = ${marketSnapshots[0].snapshotDate}
+        ORDER BY element_id
+      `;
+      expect(sourceEvents.map((row) => row.source_event_id)).toEqual([2, 2]);
+
+      const laterCapturedAt = new Date('2026-08-10T12:05:00.000Z');
+      const laterMarketSnapshots = marketSnapshots.map((snapshot) => ({
+        ...snapshot,
+        snapshotDate: '2026-08-10',
+        capturedAt: laterCapturedAt,
+        price: snapshot.price + 1,
+      }));
+      await marketRepository.upsertCompleteDay(season, 3, laterMarketSnapshots, 2);
+
+      const valuesRepository = createPlayerValuesRepository(db);
+      const beforeLaterCapture = await valuesRepository.findLatestForPlayerIds(
+        season,
+        laterMarketSnapshots.map((snapshot) => snapshot.elementId),
+        '20260601',
+        '20270601',
+        new Date('2026-08-10T12:04:59.999Z'),
+      );
+      expect(beforeLaterCapture).toHaveLength(2);
+      expect(beforeLaterCapture).toEqual(
+        marketSnapshots.map((snapshot) => ({
+          elementId: snapshot.elementId,
+          value: snapshot.price,
+          changeDate: snapshot.snapshotDate.replaceAll('-', ''),
+          eventId: 2,
+          elementType: snapshot.elementType,
+          changeType: 'Start',
+          lastValue: 0,
+        })),
+      );
+
+      const afterLaterCapture = await valuesRepository.findLatestForPlayerIds(
+        season,
+        laterMarketSnapshots.map((snapshot) => snapshot.elementId),
+        '20260601',
+        '20270601',
+        laterCapturedAt,
+      );
+      expect(afterLaterCapture).toEqual(
+        laterMarketSnapshots.map((snapshot) => ({
+          elementId: snapshot.elementId,
+          value: snapshot.price,
+          changeDate: '20260810',
+          eventId: 3,
+          elementType: snapshot.elementType,
+          changeType: 'Rise',
+          lastValue: snapshot.price - 1,
+        })),
+      );
 
       const basePreparedLive = prepareEventLives(1, rawExplainElementsFixture);
       const fixtureEvidence = rawExplainElementsFixture.map((element, index) => {

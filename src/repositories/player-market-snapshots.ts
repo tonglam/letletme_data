@@ -66,6 +66,7 @@ export const createPlayerMarketSnapshotsRepository = (dbInstance?: DbOrTransacti
               playerMarketSnapshotsInFpl.elementId,
             ],
             set: {
+              sourceEventId: sql`excluded.source_event_id`,
               capturedAt: sql`excluded.captured_at`,
               playerCode: sql`excluded.player_code`,
               webName: sql`excluded.web_name`,
