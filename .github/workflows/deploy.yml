@@ -755,6 +755,62 @@ jobs:
               -e CUTOVER_RUN_ID="$CUTOVER_RUN_ID" \
               -e V3_CORE_CACHE_APPROVAL="$CORE_CACHE_APPROVAL" \
               api bun run cache:publish-core --execute
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun --eval '
+              import { createHash } from "node:crypto";
+              import { redisSingleton } from "./src/cache/singleton";
+
+              const activeKey = "llm:v3:data:fpl:core:2627:active";
+              const redis = await redisSingleton.getClient();
+              try {
+                const activePayload = await redis.get(activeKey);
+                if (!activePayload) throw new Error("Active core publication pointer is missing");
+                const manifest = JSON.parse(activePayload);
+                if (
+                  manifest.schemaVersion !== "v3" ||
+                  manifest.planVersion !== "3.2.5" ||
+                  manifest.dataset !== "fpl:core" ||
+                  manifest.seasonCode !== "2627" ||
+                  manifest.eventId !== null ||
+                  manifest.revision !== 2 ||
+                  !Array.isArray(manifest.items) ||
+                  manifest.items.length !== 6
+                ) {
+                  throw new Error("Active core publication manifest is invalid");
+                }
+
+                const rows = [];
+                for (const key of [activeKey, ...manifest.items.map((item) => item.key)]) {
+                  const [type, pttl, payload] = await Promise.all([
+                    redis.type(key),
+                    redis.pttl(key),
+                    redis.get(key),
+                  ]);
+                  if (type !== "string" || pttl !== -1 || payload === null) {
+                    throw new Error("Core cache key type/TTL contract failed for " + key);
+                  }
+                  const item = manifest.items.find((candidate) => candidate.key === key);
+                  if (
+                    item &&
+                    (Buffer.byteLength(payload, "utf8") !== item.bytes ||
+                      createHash("sha256").update(payload, "utf8").digest("hex") !== item.sha256)
+                  ) {
+                    throw new Error("Core cache payload contract failed for " + key);
+                  }
+                  rows.push({ key, type, pttl, bytes: Buffer.byteLength(payload, "utf8") });
+                }
+                console.log(
+                  JSON.stringify({
+                    status: "v3_core_cache_contract_passed",
+                    publicationId: manifest.publicationId,
+                    revision: manifest.revision,
+                    keyCount: rows.length,
+                    rows,
+                  }),
+                );
+              } finally {
+                await redisSingleton.disconnect();
+              }
+            '
 
   v3_start_api:
     if: github.event_name == 'workflow_dispatch' && inputs.operation == 'v3-start-api'

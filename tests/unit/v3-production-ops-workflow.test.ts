@@ -210,6 +210,10 @@ describe('v3 production hard-cut workflow', () => {
     expect(queues).not.toContain('mv "$env_tmp" .env.deploy');
     expect(cache).toContain('V3_CORE_CACHE_APPROVAL');
     expect(cache).toContain('cache:publish-core --execute');
+    expect(cache).toContain('v3_core_cache_contract_passed');
+    expect(cache).toContain('manifest.items.length !== 6');
+    expect(cache).toContain('pttl !== -1');
+    expect(cache).toContain('keyCount: rows.length');
   });
 
   test('starts the worker only after Data API, GraphQL, and queue verification pass', () => {
