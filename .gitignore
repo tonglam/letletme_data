@@ -185,4 +185,5 @@ $RECYCLE.BIN/
 
 # Raw provider captures are local audit inputs, not source-controlled fixtures.
 data/raw/understat/
+data/raw/fpl/
 .admin-api-key
