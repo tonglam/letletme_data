@@ -38,6 +38,8 @@ describe('v3 production hard-cut workflow', () => {
       ['v3_core_cache', 'v3_start_api'],
       ['v3_start_api', 'v3_start_worker'],
       ['v3_start_worker', 'v3_status'],
+      ['v3_status', 'v3_terminal_acceptance'],
+      ['v3_terminal_acceptance', 'v3_stop'],
     ] as const;
 
     for (const [name, nextName] of jobNames) {
@@ -45,7 +47,6 @@ describe('v3 production hard-cut workflow', () => {
       expect(contents).toContain('script_stop: false');
       expect(contents).toContain('set -euo pipefail');
     }
-    expect(job('v3_status', 'v3_stop')).toContain('script_stop: false');
     expect(job('v3_stop')).toContain('script_stop: false');
   });
 
@@ -267,6 +268,24 @@ describe('v3 production hard-cut workflow', () => {
     expect(operations).not.toContain('cleanup');
     expect(operations).not.toContain('legacy-drop');
     expect(workflow).not.toContain('APPROVE_V3_LEGACY_DROP');
+  });
+
+  test('runs terminal acceptance as read-only evidence collection', () => {
+    const terminal = job('v3_terminal_acceptance', 'v3_stop');
+
+    expect(terminal).toMatch(/inputs\.operation == 'v3-terminal-acceptance'/);
+    expect(terminal).toContain('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    expect(terminal).toContain('inspectLegacyRedisQueues(cacheRedis');
+    expect(terminal).toContain('Frozen DB0 queue source no longer matches');
+    expect(terminal).toContain('GraphQL query-cache type/TTL contract failed');
+    expect(terminal).toContain('v3_terminal_database_acceptance_passed');
+    expect(terminal).toContain('v3_terminal_redis_acceptance_passed');
+    expect(terminal).toContain('V3_TERMINAL_ACCEPTANCE=passed');
+    expect(terminal).toContain('be0adcb28347b1688cb6f07552faa5cf53e81d2c3de5e49d7ec5068428a361e2');
+    expect(terminal).toContain('4d10062af6a9d187078d31bb1c0d885f9e7ffca9fc63957c24eb3073a5300bd5');
+    expect(terminal).not.toContain('docker compose up');
+    expect(terminal).not.toContain('bun run db:migrate');
+    expect(terminal).not.toContain('redis:cutover cleanup');
   });
 
   test('validates the activated database with a zero-change repeat and frozen services', () => {

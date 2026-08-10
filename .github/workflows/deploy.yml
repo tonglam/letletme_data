@@ -26,6 +26,7 @@ on:
           - v3-start-api
           - v3-start-worker
           - v3-status
+          - v3-terminal-acceptance
       sha:
         description: >-
           Commit SHA or ref to deploy. Leave empty for current main HEAD;
@@ -58,6 +59,10 @@ on:
         type: string
       v3_core_cache_approval:
         description: Exact APPROVE_V3_CORE_CACHE phrase for core-cache publication.
+        required: false
+        type: string
+      v3_graphql_image_ref:
+        description: Immutable lowercase GHCR GraphQL image reference for terminal acceptance.
         required: false
         type: string
 
@@ -967,6 +972,498 @@ jobs:
             APP_IMAGE="$IMAGE_REF" docker compose ps --all
             echo "V3_STATUS_DATA_HTTP=$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:3000/health || true)"
             echo "V3_STATUS_GRAPHQL_HTTP=$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:4000/health || true)"
+
+  v3_terminal_acceptance:
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'v3-terminal-acceptance'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Run read-only production terminal acceptance
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+        env:
+          EXPECTED_SHA: ${{ inputs.sha }}
+          DATA_IMAGE_REF: ${{ inputs.v3_image_ref }}
+          GRAPHQL_IMAGE_REF: ${{ inputs.v3_graphql_image_ref }}
+          CUTOVER_RUN_ID: ${{ inputs.v3_cutover_run_id }}
+          EXPECTED_QUEUE_SOURCE_MANIFEST: ${{ inputs.v3_queue_manifest_sha256 }}
+          VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
+        with:
+          host: ${{ vars.VPS_HOST }}
+          username: ${{ vars.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script_stop: false
+          envs: EXPECTED_SHA,DATA_IMAGE_REF,GRAPHQL_IMAGE_REF,CUTOVER_RUN_ID,EXPECTED_QUEUE_SOURCE_MANIFEST,VPS_WORKDIR
+          command_timeout: 20m
+          script: |
+            set -euo pipefail
+            [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+            [[ "$DATA_IMAGE_REF" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]]
+            [[ "$GRAPHQL_IMAGE_REF" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]]
+            [[ "$CUTOVER_RUN_ID" =~ ^v3-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{7,12}$ ]]
+            [[ "$EXPECTED_QUEUE_SOURCE_MANIFEST" =~ ^[0-9a-f]{64}$ ]]
+            test -d "$VPS_WORKDIR/.git"
+            cd "$VPS_WORKDIR"
+            test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+            test -f .env.migrate
+
+            api_cid=$(APP_IMAGE="$DATA_IMAGE_REF" docker compose ps -q api)
+            worker_cid=$(APP_IMAGE="$DATA_IMAGE_REF" docker compose ps -q worker)
+            test -n "$api_cid"
+            test -n "$worker_cid"
+            test "$(docker inspect --format '{{.Config.Image}}' "$api_cid")" = "$DATA_IMAGE_REF"
+            test "$(docker inspect --format '{{.Config.Image}}' "$worker_cid")" = "$DATA_IMAGE_REF"
+            test "$(docker inspect --format '{{.State.Health.Status}}' "$api_cid")" = 'healthy'
+            test "$(docker inspect --format '{{.State.Health.Status}}' "$worker_cid")" = 'healthy'
+
+            graphql_count=$(docker ps \
+              --filter label=com.docker.compose.service=graphql \
+              --format '{{.ID}}' | wc -l | tr -d ' ')
+            test "$graphql_count" -eq 1
+            graphql_cid=$(docker ps \
+              --filter label=com.docker.compose.service=graphql \
+              --format '{{.ID}}')
+            test "$(docker inspect --format '{{.Config.Image}}' "$graphql_cid")" = "$GRAPHQL_IMAGE_REF"
+            test "$(docker inspect --format '{{.State.Health.Status}}' "$graphql_cid")" = 'healthy'
+            curl --fail --silent http://127.0.0.1:3000/health >/dev/null
+            curl --fail --silent http://127.0.0.1:4000/health >/dev/null
+
+            web_probe=$(curl --fail --silent --show-error \
+              --header 'Content-Type: application/json' \
+              --data '{"query":"query TerminalCacheProbe { players(search: \"Gabriel\", limit: 1) { id webName } marketPulse(days: 13) { requestedDays observedDays stale } }"}' \
+              https://letletme.top/api/graphql)
+            printf '%s' "$web_probe" | grep -q '"webName":"Gabriel"'
+            printf '%s' "$web_probe" | grep -q '"requestedDays":13'
+            if printf '%s' "$web_probe" | grep -q '"errors"'; then
+              echo 'Terminal Web GraphQL cache probe returned errors'
+              exit 1
+            fi
+            echo 'V3_TERMINAL_WEB_PROXY=passed'
+
+            APP_IMAGE="$DATA_IMAGE_REF" docker compose exec -T \
+              -e EXPECTED_QUEUE_SOURCE_MANIFEST="$EXPECTED_QUEUE_SOURCE_MANIFEST" \
+              api bun --eval '
+              import { createHash } from "node:crypto";
+              import Redis from "ioredis";
+              import { inspectLegacyRedisQueues } from "./src/cache/legacy-cleanup";
+              import {
+                getConfig,
+                resolveCacheRedisConfig,
+                resolveQueueRedisConfig,
+              } from "./src/utils/config";
+
+              const scanKeys = async (redis, pattern) => {
+                let cursor = "0";
+                const keys = new Set();
+                do {
+                  const [next, batch] = await redis.scan(
+                    cursor,
+                    "MATCH",
+                    pattern,
+                    "COUNT",
+                    500,
+                  );
+                  cursor = next;
+                  batch.forEach((key) => keys.add(key));
+                } while (cursor !== "0");
+                return [...keys].sort();
+              };
+
+              const config = getConfig();
+              const cacheEndpoint = resolveCacheRedisConfig(config);
+              const queueEndpoint = resolveQueueRedisConfig(config);
+              const cacheIdentity = `${cacheEndpoint.host.toLowerCase()}:${cacheEndpoint.port}/${cacheEndpoint.db}`;
+              const queueIdentity = `${queueEndpoint.host.toLowerCase()}:${queueEndpoint.port}/${queueEndpoint.db}`;
+              if (cacheIdentity === queueIdentity) throw new Error("Redis endpoints are not separated");
+
+              const cacheRedis = new Redis({ ...cacheEndpoint, lazyConnect: true });
+              const queueRedis = new Redis({ ...queueEndpoint, lazyConnect: true });
+              try {
+                await Promise.all([cacheRedis.connect(), queueRedis.connect()]);
+                const pings = await Promise.all([cacheRedis.ping(), queueRedis.ping()]);
+                if (pings.some((value) => value !== "PONG")) throw new Error("Redis ping failed");
+
+                const sourceManifest = await inspectLegacyRedisQueues(cacheRedis, { maxKeys: 10000 });
+                if (
+                  sourceManifest.keyCount !== 297 ||
+                  sourceManifest.keyManifestSha256 !==
+                    "f6796a4895a0699814464e8edff9e5d6a0fd80722bb8154623b98b255e72dfda" ||
+                  sourceManifest.payloadManifestSha256 !==
+                    process.env.EXPECTED_QUEUE_SOURCE_MANIFEST
+                ) {
+                  throw new Error("Frozen DB0 queue source no longer matches the approved manifest");
+                }
+
+                const dataKeys = await scanKeys(cacheRedis, "llm:v3:data:*");
+                const activeManifestKeys = dataKeys.filter((key) => key.endsWith(":active"));
+                if (activeManifestKeys.length < 1) throw new Error("No active Data publication exists");
+                const permanentKeys = new Set();
+                const activePublications = [];
+                for (const activeKey of activeManifestKeys) {
+                  const payload = await cacheRedis.get(activeKey);
+                  if (!payload) throw new Error("Active Data publication payload is missing");
+                  const manifest = JSON.parse(payload);
+                  if (!Array.isArray(manifest.items) || manifest.items.length === 0) {
+                    throw new Error("Active Data publication item manifest is invalid");
+                  }
+                  permanentKeys.add(activeKey);
+                  for (const item of manifest.items) {
+                    const [type, pttl, value] = await Promise.all([
+                      cacheRedis.type(item.key),
+                      cacheRedis.pttl(item.key),
+                      cacheRedis.get(item.key),
+                    ]);
+                    if (type !== "string" || pttl !== -1 || value === null) {
+                      throw new Error("Active Data item type/TTL contract failed");
+                    }
+                    if (
+                      Buffer.byteLength(value, "utf8") !== item.bytes ||
+                      createHash("sha256").update(value, "utf8").digest("hex") !== item.sha256
+                    ) {
+                      throw new Error("Active Data item payload contract failed");
+                    }
+                    permanentKeys.add(item.key);
+                  }
+                  activePublications.push({
+                    key: activeKey,
+                    dataset: manifest.dataset,
+                    publicationId: manifest.publicationId,
+                    revision: manifest.revision,
+                    itemCount: manifest.items.length,
+                  });
+                }
+
+                const core = activePublications.find(
+                  (publication) => publication.key === "llm:v3:data:fpl:core:2627:active",
+                );
+                if (
+                  !core ||
+                  core.publicationId !== "1f08ab2f-732b-449f-868c-4a2038c5f1ba" ||
+                  core.revision !== 2 ||
+                  core.itemCount !== 6
+                ) {
+                  throw new Error("Terminal core publication identity is invalid");
+                }
+
+                let expiringDataKeys = 0;
+                for (const key of dataKeys) {
+                  const pttl = await cacheRedis.pttl(key);
+                  if (permanentKeys.has(key)) {
+                    if (pttl !== -1) throw new Error("Active Data key unexpectedly expires");
+                  } else {
+                    if (pttl <= 0 || pttl > 86_400_000) {
+                      throw new Error("Orphan or unbounded Data staging/retired key found");
+                    }
+                    expiringDataKeys += 1;
+                  }
+                }
+
+                const queryKeys = await scanKeys(cacheRedis, "llm:v3:gql:*");
+                let expiredDuringScan = 0;
+                const queryTtls = [];
+                for (const key of queryKeys) {
+                  const [type, ttl] = await Promise.all([cacheRedis.type(key), cacheRedis.ttl(key)]);
+                  if (type === "none" && ttl === -2) {
+                    expiredDuringScan += 1;
+                    continue;
+                  }
+                  if (type !== "string" || ttl <= 0 || ttl > 3600) {
+                    throw new Error("GraphQL query-cache type/TTL contract failed");
+                  }
+                  queryTtls.push(ttl);
+                }
+                if (queryTtls.length < 1) throw new Error("Fresh GraphQL query cache was not observed");
+
+                const targetBullKeys = await scanKeys(queueRedis, "bull:*");
+                const targetCoordinationKeys = await scanKeys(
+                  queueRedis,
+                  "llm:v3:queue:coordination:*",
+                );
+                const queueDataKeys = await scanKeys(queueRedis, "llm:v3:data:*");
+                const queueGraphqlKeys = await scanKeys(queueRedis, "llm:v3:gql:*");
+                if (targetBullKeys.length < 1) throw new Error("Active queue DB has no BullMQ state");
+                if (queueDataKeys.length !== 0 || queueGraphqlKeys.length !== 0) {
+                  throw new Error("Cache data leaked into the queue Redis endpoint");
+                }
+
+                console.log(JSON.stringify({
+                  status: "v3_terminal_redis_acceptance_passed",
+                  endpoints: {
+                    separated: true,
+                    cache: { hostRecorded: false, port: cacheEndpoint.port, db: cacheEndpoint.db },
+                    queue: { hostRecorded: false, port: queueEndpoint.port, db: queueEndpoint.db },
+                  },
+                  frozenQueueSource: {
+                    keyCount: sourceManifest.keyCount,
+                    keyManifestSha256: sourceManifest.keyManifestSha256,
+                    payloadManifestSha256: sourceManifest.payloadManifestSha256,
+                  },
+                  activeQueueTarget: {
+                    bullKeyCount: targetBullKeys.length,
+                    coordinationKeyCount: targetCoordinationKeys.length,
+                  },
+                  dataCache: {
+                    keyCount: dataKeys.length,
+                    activePublicationCount: activePublications.length,
+                    expiringRetiredOrStagingKeyCount: expiringDataKeys,
+                    activePublications,
+                  },
+                  graphqlQueryCache: {
+                    observedKeyCount: queryKeys.length,
+                    validatedKeyCount: queryTtls.length,
+                    expiredDuringScan,
+                    minTtlSeconds: Math.min(...queryTtls),
+                    maxTtlSeconds: Math.max(...queryTtls),
+                  },
+                }));
+              } finally {
+                await Promise.allSettled([cacheRedis.quit(), queueRedis.quit()]);
+              }
+            '
+
+            PSQL_IMAGE='docker.io/library/postgres:15.8-alpine@sha256:68c8f729caca8638396647002948c0ab753fda787cbee9e887f7166169c6b87e'
+            docker pull "$PSQL_IMAGE"
+            acceptance_dir=$(mktemp -d)
+            cleanup_acceptance_dir() {
+              saved_status=$?
+              rm -rf "$acceptance_dir"
+              exit "$saved_status"
+            }
+            trap cleanup_acceptance_dir EXIT
+
+            run_capture() {
+              sql_file="$1"
+              docker run --rm \
+                --env-file .env.migrate \
+                --volume "$VPS_WORKDIR/sql/v3:/validation:ro" \
+                "$PSQL_IMAGE" \
+                sh -eu -c \
+                'database_url="$DATABASE_URL"; database_url="${database_url#\"}"; database_url="${database_url%\"}"; exec psql "$database_url" --no-psqlrc --set ON_ERROR_STOP=on --file "/validation/$1"' \
+                sh "$sql_file" > "$acceptance_dir/$sql_file.raw"
+            }
+
+            run_capture capture-public-relation-hashes.sql
+            run_capture capture-v3-business-relation-hashes.sql
+            run_capture capture-public-sequence-state.sql
+            run_capture capture-public-security-contract.sql
+
+            grep -E '^(relation,row_count,sha256|public\.[^,]+,[0-9]+,[0-9a-f]{64})$' \
+              "$acceptance_dir/capture-public-relation-hashes.sql.raw" \
+              > "$acceptance_dir/public-relations.csv"
+            grep -E '^(relation,row_count,sha256|(bridge|competition|fpl|understat|reporting)\.[^,]+,[0-9]+,[0-9a-f]{64})$' \
+              "$acceptance_dir/capture-v3-business-relation-hashes.sql.raw" \
+              > "$acceptance_dir/v3-business.csv"
+            grep -E '^(sequence,last_value,is_called,start_value,min_value,max_value,increment_by,cycle,cache_size|public\.[^,]+,-?[0-9]+,[tf],-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+,[tf],[0-9]+)$' \
+              "$acceptance_dir/capture-public-sequence-state.sql.raw" \
+              > "$acceptance_dir/public-sequences.csv"
+            grep -E '^(record_type,object_type,object_name,owner_or_grantee,privilege,is_grantable|"?(owner|acl)"?,)' \
+              "$acceptance_dir/capture-public-security-contract.sql.raw" \
+              > "$acceptance_dir/public-security.csv"
+
+            test "$(wc -l < "$acceptance_dir/public-relations.csv" | tr -d ' ')" -eq 201
+            test "$(wc -l < "$acceptance_dir/v3-business.csv" | tr -d ' ')" -eq 46
+            test "$(wc -l < "$acceptance_dir/public-sequences.csv" | tr -d ' ')" -eq 23
+            test "$(wc -l < "$acceptance_dir/public-security.csv" | tr -d ' ')" -eq 390
+
+            public_hash=$(sha256sum "$acceptance_dir/public-relations.csv" | awk '{print $1}')
+            v3_hash=$(sha256sum "$acceptance_dir/v3-business.csv" | awk '{print $1}')
+            sequence_hash=$(sha256sum "$acceptance_dir/public-sequences.csv" | awk '{print $1}')
+            security_hash=$(sha256sum "$acceptance_dir/public-security.csv" | awk '{print $1}')
+            test "$public_hash" = 'be0adcb28347b1688cb6f07552faa5cf53e81d2c3de5e49d7ec5068428a361e2'
+            test "$v3_hash" = '4d10062af6a9d187078d31bb1c0d885f9e7ffca9fc63957c24eb3073a5300bd5'
+            test "$sequence_hash" = '4b33a696be0cf5aaabfd0dd0899395dc98639e19c47861f494c2892d87ddab2d'
+            test "$security_hash" = '70158adcebd6284d0b02d67a9df06183481c1b77316d6e79315ae7854c95f52c'
+            echo "V3_TERMINAL_DATABASE_HASHES={\"public\":\"$public_hash\",\"v3Business\":\"$v3_hash\",\"publicSequences\":\"$sequence_hash\",\"publicSecurity\":\"$security_hash\"}"
+
+            docker run --rm -i \
+              --env-file .env.migrate \
+              "$PSQL_IMAGE" \
+              sh -eu -c \
+              'database_url="$DATABASE_URL"; database_url="${database_url#\"}"; database_url="${database_url%\"}"; exec psql "$database_url" --no-psqlrc --set ON_ERROR_STOP=on --tuples-only --no-align' <<SQL
+            BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;
+            DO \$terminal_acceptance\$
+            DECLARE
+              failed_checks bigint;
+              physical_relations bigint;
+              mutation_fences bigint;
+            BEGIN
+              IF (SELECT count(*) FROM ops.migration_runs
+                  WHERE run_id = '$CUTOVER_RUN_ID' AND status = 'activated') <> 1 THEN
+                RAISE EXCEPTION 'terminal migration run is not activated';
+              END IF;
+              IF (SELECT count(*) FROM ops.migration_objects
+                  WHERE run_id = '$CUTOVER_RUN_ID'
+                    AND status = 'passed' AND failed_count = 0) <> 53
+                 OR EXISTS (
+                   SELECT 1 FROM ops.migration_objects
+                   WHERE run_id = '$CUTOVER_RUN_ID'
+                     AND (status <> 'passed' OR failed_count <> 0)
+                 ) THEN
+                RAISE EXCEPTION 'terminal migration reconciliation is not 53/53';
+              END IF;
+              IF (SELECT count(*) FROM pg_class
+                  WHERE relnamespace = 'public'::regnamespace
+                    AND relkind IN ('r', 'p', 'm', 'v')) <> 200 THEN
+                RAISE EXCEPTION 'terminal public relation count is not 200';
+              END IF;
+              IF (SELECT count(*) FROM pg_class relation_row
+                  JOIN pg_namespace namespace_row ON namespace_row.oid = relation_row.relnamespace
+                  WHERE namespace_row.nspname IN ('fpl','competition','understat','bridge','reporting')
+                    AND relation_row.relkind IN ('r','m','v')) <> 45 THEN
+                RAISE EXCEPTION 'terminal v3 business relation count is not 45';
+              END IF;
+              IF (SELECT count(*) FROM pg_class
+                  WHERE relnamespace = 'public'::regnamespace AND relkind = 'S') <> 22 THEN
+                RAISE EXCEPTION 'terminal public sequence count is not 22';
+              END IF;
+              IF EXISTS (
+                SELECT 1 FROM pg_constraint constraint_row
+                JOIN pg_namespace namespace_row ON namespace_row.oid = constraint_row.connamespace
+                WHERE namespace_row.nspname IN ('ops','fpl','competition','understat','bridge','reporting')
+                  AND NOT constraint_row.convalidated
+              ) OR EXISTS (
+                SELECT 1 FROM pg_index index_row
+                JOIN pg_class relation_row ON relation_row.oid = index_row.indexrelid
+                JOIN pg_namespace namespace_row ON namespace_row.oid = relation_row.relnamespace
+                WHERE namespace_row.nspname IN ('ops','fpl','competition','understat','bridge','reporting')
+                  AND (NOT index_row.indisvalid OR NOT index_row.indisready)
+              ) THEN
+                RAISE EXCEPTION 'terminal invalid constraint or index found';
+              END IF;
+              IF (SELECT count(*) FROM ops.dataset_publications publication
+                  JOIN fpl.seasons season ON season.season_id = publication.season_id
+                  WHERE season.is_current
+                    AND publication.dataset = 'fpl:core'
+                    AND publication.event_id IS NULL
+                    AND publication.status = 'active'
+                    AND publication.publication_id = '1f08ab2f-732b-449f-868c-4a2038c5f1ba'
+                    AND publication.revision = 2
+                    AND publication.manifest ->> 'state' = 'active') <> 1 THEN
+                RAISE EXCEPTION 'terminal active core publication identity mismatch';
+              END IF;
+              IF EXISTS (
+                SELECT 1 FROM ops.dataset_publications
+                WHERE status = 'staging'
+              ) OR EXISTS (
+                SELECT 1 FROM ops.dataset_publications
+                WHERE status = 'active'
+                GROUP BY season_id, dataset, coalesce(event_id, -1)
+                HAVING count(*) > 1
+              ) THEN
+                RAISE EXCEPTION 'terminal orphan staging or mixed active revision found';
+              END IF;
+              IF (SELECT count(*) FROM ops.schema_migrations
+                  WHERE filename ~ '^009[123]_') <> 0 THEN
+                RAISE EXCEPTION 'legacy cleanup migration was applied';
+              END IF;
+
+              SELECT count(*) INTO physical_relations
+              FROM pg_class
+              WHERE relnamespace = 'public'::regnamespace AND relkind IN ('r','p');
+              SELECT count(*) INTO mutation_fences
+              FROM pg_class relation_row
+              JOIN pg_trigger trigger_row ON trigger_row.tgrelid = relation_row.oid
+              WHERE relation_row.relnamespace = 'public'::regnamespace
+                AND relation_row.relkind IN ('r','p')
+                AND trigger_row.tgname = 'v3_reject_v2_mutation'
+                AND trigger_row.tgfoid = 'ops.reject_v2_mutation()'::regprocedure
+                AND NOT trigger_row.tgisinternal;
+              IF physical_relations <> 193 OR mutation_fences <> physical_relations THEN
+                RAISE EXCEPTION 'terminal v2 physical/fence contract mismatch';
+              END IF;
+              IF EXISTS (
+                SELECT 1 FROM pg_class relation_row
+                WHERE relation_row.relnamespace = 'public'::regnamespace
+                  AND relation_row.relkind IN ('r','p','m','v','S')
+                  AND NOT (relation_row.relkind = 'v' AND relation_row.relname = 'sql_migrations')
+                  AND relation_row.relowner <> 'letletme_v2_frozen_owner'::regrole
+              ) THEN
+                RAISE EXCEPTION 'terminal v2 owner contract mismatch';
+              END IF;
+              IF EXISTS (
+                SELECT 1 FROM pg_roles role_row
+                WHERE role_row.rolname IN ('letletme_data_runtime','letletme_graphql_runtime')
+                  AND (NOT role_row.rolcanlogin OR NOT role_row.rolinherit OR role_row.rolsuper
+                    OR role_row.rolcreatedb OR role_row.rolcreaterole OR role_row.rolreplication
+                    OR role_row.rolbypassrls)
+              ) THEN
+                RAISE EXCEPTION 'terminal runtime login attributes are invalid';
+              END IF;
+              SELECT count(*) INTO failed_checks
+              FROM pg_auth_members membership
+              JOIN pg_roles member_role ON member_role.oid = membership.member
+              JOIN pg_roles granted_role ON granted_role.oid = membership.roleid
+              WHERE member_role.rolname IN ('letletme_data_runtime','letletme_graphql_runtime')
+                AND (member_role.rolname, granted_role.rolname) NOT IN (
+                  ('letletme_data_runtime','letletme_data_writer'),
+                  ('letletme_graphql_runtime','letletme_graphql_reader')
+                );
+              IF failed_checks <> 0 OR
+                 (SELECT count(*) FROM pg_auth_members membership
+                  JOIN pg_roles member_role ON member_role.oid = membership.member
+                  WHERE member_role.rolname IN ('letletme_data_runtime','letletme_graphql_runtime')) <> 2 THEN
+                RAISE EXCEPTION 'terminal runtime role memberships are invalid';
+              END IF;
+            END
+            \$terminal_acceptance\$;
+            SELECT jsonb_build_object(
+              'status', 'v3_terminal_database_acceptance_passed',
+              'runId', '$CUTOVER_RUN_ID',
+              'migrationChecks', (SELECT count(*) FROM ops.migration_objects
+                WHERE run_id = '$CUTOVER_RUN_ID' AND status = 'passed' AND failed_count = 0),
+              'publicRelations', (SELECT count(*) FROM pg_class
+                WHERE relnamespace = 'public'::regnamespace AND relkind IN ('r','p','m','v')),
+              'v3BusinessRelations', (SELECT count(*) FROM pg_class relation_row
+                JOIN pg_namespace namespace_row ON namespace_row.oid = relation_row.relnamespace
+                WHERE namespace_row.nspname IN ('fpl','competition','understat','bridge','reporting')
+                  AND relation_row.relkind IN ('r','m','v')),
+              'publicSequences', (SELECT count(*) FROM pg_class
+                WHERE relnamespace = 'public'::regnamespace AND relkind = 'S'),
+              'frozenPhysicalRelations', (SELECT count(*) FROM pg_class
+                WHERE relnamespace = 'public'::regnamespace AND relkind IN ('r','p')),
+              'activePublications', (SELECT count(*) FROM ops.dataset_publications WHERE status = 'active'),
+              'stagingPublications', (SELECT count(*) FROM ops.dataset_publications WHERE status = 'staging'),
+              'cleanupMigrationsApplied', (SELECT count(*) FROM ops.schema_migrations WHERE filename ~ '^009[123]_')
+            );
+            COMMIT;
+            SQL
+
+            scan_logs() {
+              service_name="$1"
+              container_id="$2"
+              log_file="$acceptance_dir/$service_name.log"
+              docker logs "$container_id" > "$log_file" 2>&1
+              if grep -Eaiq '(postgres(ql)?|redis(s)?)://[^[:space:]"]+:[^[:space:]"]+@|Authorization:[[:space:]]*Bearer[[:space:]]+[^[:space:]]+|DATABASE_URL=.*://|REDIS_PASSWORD=|GRAPHQL_SERVICE_TOKEN=|DATA_API_KEY=|SUPABASE_KEY=' "$log_file"; then
+                echo "Secret-shaped value found in $service_name logs"
+                exit 1
+              fi
+              if grep -Eaiq 'relation .* does not exist|column .* does not exist|undefined_table' "$log_file"; then
+                echo "Missing-relation error found in $service_name logs"
+                exit 1
+              fi
+              if grep -Eaiq 'permission denied|insufficient_privilege' "$log_file"; then
+                echo "Permission error found in $service_name logs"
+                exit 1
+              fi
+              if grep -Eaiq 'WRONGTYPE' "$log_file"; then
+                echo "Redis WRONGTYPE error found in $service_name logs"
+                exit 1
+              fi
+              if grep -Eaiq 'mixed[- _]?revision|publication.*revision.*mismatch' "$log_file"; then
+                echo "Mixed-revision error found in $service_name logs"
+                exit 1
+              fi
+              log_sha=$(sha256sum "$log_file" | awk '{print $1}')
+              log_lines=$(wc -l < "$log_file" | tr -d ' ')
+              echo "V3_TERMINAL_LOG_$service_name={\"lines\":$log_lines,\"sha256\":\"$log_sha\",\"forbiddenMatches\":0}"
+            }
+
+            scan_logs data_api "$api_cid"
+            scan_logs data_worker "$worker_cid"
+            scan_logs graphql "$graphql_cid"
+            echo "V3_TERMINAL_SERVICES={\"dataImage\":\"$DATA_IMAGE_REF\",\"graphqlImage\":\"$GRAPHQL_IMAGE_REF\",\"dataApi\":\"healthy\",\"dataWorker\":\"healthy\",\"graphql\":\"healthy\"}"
+            echo 'V3_TERMINAL_ACCEPTANCE=passed'
 
   v3_stop:
     if: github.event_name == 'workflow_dispatch' && inputs.operation == 'v3-stop'
