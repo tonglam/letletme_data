@@ -4,6 +4,28 @@ import { logError, logInfo } from '../utils/logger';
 import { getQueueConnection } from '../utils/queue';
 
 let client: Redis | null = null;
+export const QUEUE_REDIS_HEALTH_TIMEOUT_MS = 5000;
+
+export async function pingQueueRedisWithTimeout(
+  redis: Pick<Redis, 'ping'>,
+  timeoutMs = QUEUE_REDIS_HEALTH_TIMEOUT_MS,
+): Promise<boolean> {
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  try {
+    const result = await Promise.race([
+      redis.ping(),
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error(`Queue Redis health ping timed out after ${timeoutMs}ms`)),
+          timeoutMs,
+        );
+      }),
+    ]);
+    return result === 'PONG';
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
 
 function getOrCreateClient(): Redis {
   if (client) return client;
@@ -35,7 +57,7 @@ export const queueRedisSingleton = {
   healthCheck: async (): Promise<boolean> => {
     try {
       const redis = await queueRedisSingleton.getClient();
-      return (await redis.ping()) === 'PONG';
+      return await pingQueueRedisWithTimeout(redis);
     } catch (error) {
       logError('Queue Redis health check failed', error);
       return false;
