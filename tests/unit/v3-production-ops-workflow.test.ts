@@ -262,6 +262,11 @@ describe('v3 production hard-cut workflow', () => {
   test('redeploys merged main without database or activation mutations', () => {
     const redeploy = job('v3_redeploy', 'v3_status');
     const exactMain = redeploy.indexOf('test "$(git rev-parse origin/main)" = "$EXPECTED_SHA"');
+    const exactRepository = redeploy.indexOf('test "${IMAGE_REF%@*}" = "$EXPECTED_IMAGE_NAME"');
+    const expectedTag = redeploy.indexOf(
+      'EXPECTED_TAG="${EXPECTED_IMAGE_NAME}:v3-${EXPECTED_SHA}"',
+    );
+    const digestBinding = redeploy.indexOf('grep -Fx "$IMAGE_REF"');
     const pullImage = redeploy.indexOf('docker pull "$IMAGE_REF"');
     const stopWorker = redeploy.indexOf('docker compose stop -t 30 worker');
     const stopApi = redeploy.indexOf('docker compose stop -t 30 api');
@@ -273,8 +278,12 @@ describe('v3 production hard-cut workflow', () => {
     const secondQueueVerification = redeploy.lastIndexOf('redis:cutover verify-queues');
 
     expect(redeploy).toMatch(/client_payload\.operation == 'v3-redeploy'/);
-    expect(exactMain).toBeGreaterThan(0);
-    expect(pullImage).toBeGreaterThan(exactMain);
+    expect(redeploy).toContain('EXPECTED_IMAGE_NAME: ghcr.io/tonglam/letletme_data');
+    expect(exactRepository).toBeGreaterThan(0);
+    expect(exactMain).toBeGreaterThan(exactRepository);
+    expect(expectedTag).toBeGreaterThan(exactMain);
+    expect(digestBinding).toBeGreaterThan(expectedTag);
+    expect(pullImage).toBeGreaterThan(digestBinding);
     expect(stopWorker).toBeGreaterThan(pullImage);
     expect(stopApi).toBeGreaterThan(stopWorker);
     expect(reset).toBeGreaterThan(stopApi);

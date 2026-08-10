@@ -925,6 +925,7 @@ jobs:
         env:
           EXPECTED_SHA: ${{ github.event.client_payload.sha }}
           IMAGE_REF: ${{ github.event.client_payload.v3_image_ref }}
+          EXPECTED_IMAGE_NAME: ghcr.io/tonglam/letletme_data
           QUEUE_MANIFEST_SHA256: ${{ github.event.client_payload.v3_queue_manifest_sha256 }}
           GHCR_USER: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -934,12 +935,13 @@ jobs:
           username: ${{ vars.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           script_stop: false
-          envs: EXPECTED_SHA,IMAGE_REF,QUEUE_MANIFEST_SHA256,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR
+          envs: EXPECTED_SHA,IMAGE_REF,EXPECTED_IMAGE_NAME,QUEUE_MANIFEST_SHA256,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR
           command_timeout: 15m
           script: |
             set -euo pipefail
             [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
             [[ "$IMAGE_REF" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]]
+            test "${IMAGE_REF%@*}" = "$EXPECTED_IMAGE_NAME"
             [[ "$QUEUE_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]]
             test -d "$VPS_WORKDIR/.git"
             cd "$VPS_WORKDIR"
@@ -964,6 +966,10 @@ jobs:
 
             LOWER_USER=$(printf '%s' "$GHCR_USER" | tr '[:upper:]' '[:lower:]')
             printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$LOWER_USER" --password-stdin
+            EXPECTED_TAG="${EXPECTED_IMAGE_NAME}:v3-${EXPECTED_SHA}"
+            docker pull "$EXPECTED_TAG"
+            docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' \
+              "$EXPECTED_TAG" | grep -Fx "$IMAGE_REF"
             docker pull "$IMAGE_REF"
 
             docker compose stop -t 30 worker
