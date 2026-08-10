@@ -3,7 +3,7 @@ import { describe, expect, test } from 'bun:test';
 const migration = await Bun.file('migrations/0095_canonicalize_platform_contract.sql').text();
 
 describe('canonical platform contract migration', () => {
-  test('rewrites the complete versioned Data namespace exactly once', () => {
+  test('rewrites the complete retired Data namespace exactly once', () => {
     expect(migration).toMatch(/\^llm:v\[0-9\]\+:data:/);
     expect(migration).toContain('llm:data:');
     expect(migration).not.toContain('^llm:[^:]+:');

@@ -115,7 +115,7 @@ Before finalization, the reader verifies:
 
 - payload exists and is an object;
 - SHA-256 equals `source_hash`;
-- version, kind, and season match the sync item;
+- kind and season match the sync item;
 - arrays and required object fields have the expected shape;
 - serialized dates rehydrate as valid timestamps;
 - team/match identity inside each detail payload matches its resource key.
