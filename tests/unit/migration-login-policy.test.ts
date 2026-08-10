@@ -3,7 +3,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   assertMigrationLoginSnapshot,
   type MigrationLoginSnapshot,
-} from '../../scripts/migration-login-gate';
+} from '../../scripts/migration-login-policy';
 
 const accepted = (): MigrationLoginSnapshot => ({
   roleName: 'postgres',
@@ -17,8 +17,6 @@ const accepted = (): MigrationLoginSnapshot => ({
   canWriteMigrationLedger: true,
   canonicalSchemaOwnerCount: 6,
   publicApplicationObjectCount: 0,
-  cutoverTableCount: 0,
-  frozenOwnerExists: false,
   inheritedRoles: ['letletme_data_owner'],
 });
 
@@ -43,30 +41,12 @@ describe('migration LOGIN contract', () => {
     ).toThrow('public schema');
   });
 
-  test('rejects cutover state and missing ledger access', () => {
-    expect(() => assertMigrationLoginSnapshot({ ...accepted(), cutoverTableCount: 1 })).toThrow(
-      'cutover state',
-    );
-    expect(() => assertMigrationLoginSnapshot({ ...accepted(), frozenOwnerExists: true })).toThrow(
-      'cutover state',
-    );
+  test('rejects missing ledger access or owner inheritance', () => {
     expect(() =>
       assertMigrationLoginSnapshot({ ...accepted(), canWriteMigrationLedger: false }),
     ).toThrow('authoritative ledger');
-  });
-
-  test('can validate login identity before canonical-state migrations', () => {
-    expect(() =>
-      assertMigrationLoginSnapshot(
-        { ...accepted(), cutoverTableCount: 2, frozenOwnerExists: true },
-        { requireCanonicalState: false },
-      ),
-    ).not.toThrow();
-    expect(() =>
-      assertMigrationLoginSnapshot(
-        { ...accepted(), inheritedRoles: ['letletme_data_owner', 'letletme_v2_frozen_owner'] },
-        { requireCanonicalState: false },
-      ),
-    ).toThrow('retired frozen owner');
+    expect(() => assertMigrationLoginSnapshot({ ...accepted(), inheritedRoles: [] })).toThrow(
+      'Data owner',
+    );
   });
 });

@@ -233,14 +233,20 @@ describe('database trust boundary', () => {
     `;
     expect(publicationBoundary).toEqual({ readable: true, writable: false });
 
-    const cutoverTables = await sql<NamedFinding[]>`
+    const opsTables = await sql<NamedFinding[]>`
       SELECT relation.relname AS name
       FROM pg_class relation
       WHERE relation.relnamespace = 'ops'::regnamespace
         AND relation.relkind IN ('r', 'p')
-        AND relation.relname IN ('migration_runs', 'migration_objects')
+      ORDER BY relation.relname
     `;
-    expect(cutoverTables).toHaveLength(0);
+    expect(opsTables.map((table) => table.name)).toEqual([
+      'dataset_publications',
+      'schema_migrations',
+      'season_imports',
+      'sync_items',
+      'sync_runs',
+    ]);
 
     const [writerReportingBoundary] = await sql<
       Array<{

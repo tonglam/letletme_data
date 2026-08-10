@@ -64,9 +64,8 @@ checkpoints prevent successful units from being fetched again.
 | `live-snapshot-trigger` | `* * * * *` | `isFPLSeason`, current event, `isMatchDayTime`; one job concurrently fetches event-live + fixtures, atomically publishes every live Redis view, and persists fixture rows only when football content changes. Every UTC ten-minute boundary also persists event-live/explain rows and runs the dependent cascade. Deterministic event/minute IDs dedupe scheduler replicas, while a waiting/delayed/active check prevents a slow prior minute from stacking. |
 | `post-match-consolidation` | `0 6,8,10 * * *` | Current event and bounded post-match result slot; forces a persistent snapshot with a deterministic result-slot ID. |
 
-The snapshot derives the v3 `eventLives`, `fixtures`, `liveFixtures`,
-`liveFixturesV2`, `liveBonus`, and `liveBonusV2` items from the same accepted
-upstream pair. Every changed item publishes under one immutable revision;
+The snapshot derives `eventLives`, `fixtures`, `liveFixtures`, and `liveBonus` items from the same
+accepted upstream pair. Every changed item publishes under one immutable revision;
 content-identical minutes are a no-op. This replaces the former independent
 cache, score, fixture, and bonus writers, which could race or derive from
 different minutes.
@@ -87,8 +86,7 @@ The following poll every five minutes:
 
 They require `isFPLSeason`, a current event, and `isSelectTime`. Selection time
 is the UTC match date from 30 through 90 minutes after the FPL deadline. It is
-the post-deadline publication window for immutable picks, despite the legacy
-"pre" name on tournament transfer tracking.
+the post-deadline publication window for immutable picks and pre-event transfer tracking.
 
 ## Post-match league and tournament results
 

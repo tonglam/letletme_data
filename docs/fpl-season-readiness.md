@@ -32,7 +32,7 @@ required; an expected pre-publication `404` is not a schema failure.
 For every probe record HTTP status, schema validation, identifiers, response counts, and timestamp.
 Endpoint counts are observations, not configuration.
 
-## Boundary compatibility
+## Provider boundary placeholders
 
 Pre-season payloads may contain these valid placeholders:
 
@@ -42,7 +42,7 @@ Pre-season payloads may contain these valid placeholders:
 | Team `position` | `0` | Unranked; sort after ranked teams |
 | Fixture `pulse_id` | `0` | Identifier not assigned |
 
-The current v3 schema stores them directly in `fpl.teams` and `fpl.fixtures`.
+The canonical schema stores them directly in `fpl.teams` and `fpl.fixtures`.
 
 ## Current-season authority
 
@@ -153,13 +153,13 @@ Use cache Redis and `SCAN`, never `KEYS`:
 
 ```bash
 SEASON=2627
-MANIFEST_KEY="llm:v3:data:fpl:core:$SEASON:active"
+MANIFEST_KEY="llm:data:fpl:core:$SEASON:active"
 
 redis-cli GET "$MANIFEST_KEY" | jq .
-redis-cli --scan --pattern "llm:v3:data:fpl:core:$SEASON:*"
+redis-cli --scan --pattern "llm:data:fpl:core:$SEASON:*"
 ```
 
-Verify the manifest scope, `schemaVersion=v3`, publication ID, revision, six exact item names, key
+Verify the exact manifest fields and scope, publication ID, revision, six exact item names, key
 types, counts, byte lengths, and SHA-256 evidence. Then confirm every item key belongs to that same
 revision. A missing or invalid item rejects the whole publication.
 
@@ -184,5 +184,5 @@ Report these independently:
 - **Deferred:** every dataset waiting for event, entry, league, or publication evidence.
 - **Decision:** ready/not ready per stage with explicit blockers.
 
-Use the scoped cleanup contract in [redis-contract.md](redis-contract.md). Never use `FLUSHDB` or
+Use the bounded key-removal rules in [redis-contract.md](redis-contract.md). Never use `FLUSHDB` or
 `FLUSHALL` for season rollover.

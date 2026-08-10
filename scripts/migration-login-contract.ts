@@ -1,7 +1,10 @@
 /* eslint-disable no-console */
 import postgres from 'postgres';
 
-import { assertMigrationLoginSnapshot, type MigrationLoginSnapshot } from './migration-login-gate';
+import {
+  assertMigrationLoginSnapshot,
+  type MigrationLoginSnapshot,
+} from './migration-login-policy';
 
 type ContractRow = {
   role_name: string;
@@ -15,21 +18,14 @@ type ContractRow = {
   can_write_migration_ledger: boolean;
   canonical_schema_owner_count: number;
   public_application_object_count: number;
-  cutover_table_count: number;
-  frozen_owner_exists: boolean;
 };
 
-function parseArguments(args: readonly string[]): { readonly requireCanonicalState: boolean } {
-  const unknown = args.find((argument) => argument !== '--identity-only');
-  if (unknown) throw new Error(`Unknown migration contract argument: ${unknown}`);
-  if (args.filter((argument) => argument === '--identity-only').length > 1) {
-    throw new Error('--identity-only must not be repeated');
-  }
-  return { requireCanonicalState: !args.includes('--identity-only') };
-}
-
 async function main(): Promise<void> {
-  const options = parseArguments(process.argv.slice(2));
+  if (process.argv.length > 2) {
+    throw new Error(
+      `Migration contract does not accept arguments: ${process.argv.slice(2).join(' ')}`,
+    );
+  }
   const databaseUrl = process.env.DATABASE_URL?.trim();
   if (!databaseUrl) throw new Error('DATABASE_URL is required');
 
@@ -72,13 +68,7 @@ async function main(): Promise<void> {
           FROM pg_type type_row
           WHERE type_row.typnamespace = 'public'::regnamespace
             AND type_row.typtype IN ('d', 'e')
-        ) AS public_application_object_count,
-        (to_regclass('ops.migration_runs') IS NOT NULL)::integer
-          + (to_regclass('ops.migration_objects') IS NOT NULL)::integer
-          AS cutover_table_count,
-        EXISTS (
-          SELECT 1 FROM pg_roles WHERE rolname = 'letletme_v2_frozen_owner'
-        ) AS frozen_owner_exists
+        ) AS public_application_object_count
       FROM pg_roles role_row
       WHERE role_row.rolname = current_user
     `;
@@ -116,16 +106,13 @@ async function main(): Promise<void> {
       canWriteMigrationLedger: base.can_write_migration_ledger,
       canonicalSchemaOwnerCount: base.canonical_schema_owner_count,
       publicApplicationObjectCount: base.public_application_object_count,
-      cutoverTableCount: base.cutover_table_count,
-      frozenOwnerExists: base.frozen_owner_exists,
       inheritedRoles: inheritedRows.map((row) => row.role_name),
     };
-    assertMigrationLoginSnapshot(snapshot, options);
+    assertMigrationLoginSnapshot(snapshot);
     console.log(
       JSON.stringify(
         {
           status: 'migration_login_contract_passed',
-          canonicalStateRequired: options.requireCanonicalState,
           ...snapshot,
         },
         null,

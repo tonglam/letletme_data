@@ -14,7 +14,7 @@ operations surface; product clients read through `letletme-graphql`.
 - Core season data: events, teams, fixtures, players, and phases.
 - Current-gameweek, entry, league, tournament, live, and price-change jobs.
 - Canonical FPL and tournament rows in PostgreSQL.
-- Immutable `llm:v3:data:*` Redis publications and BullMQ/coordination jobs.
+- Immutable `llm:data:*` Redis publications and BullMQ/coordination jobs.
 - Protected operational endpoints for manual synchronization and recovery.
 
 It does not own browser authentication or the public product schema. See
@@ -49,7 +49,7 @@ accepted canonical state.
 Understat is deliberately PostgreSQL-only at the business-data layer. Its workers use the queue
 Redis endpoint only for BullMQ, mutation locks, and short-lived request permits.
 
-## Multi-season and 2026/27 compatibility
+## Multi-season and preseason provider boundaries
 
 The current code accepts the official pre-season placeholders observed for
 2026/27 without inventing substitute values:
@@ -77,7 +77,7 @@ transaction, and publishes one immutable Redis revision:
 | Players | `fpl.players` | Core item `players` |
 | Phases | `fpl.phases` | Core item `phases` |
 
-The active manifest is `llm:v3:data:fpl:core:{season}:active`; all six items,
+The active manifest is `llm:data:fpl:core:{season}:active`; all six items,
 including `currentEventId`, belong to the revision named by that manifest.
 Readers either accept the complete revision or use one coherent PostgreSQL
 fallback.
@@ -227,11 +227,11 @@ cp .env.deploy.example .env.deploy
 bash scripts/deploy.sh deploy
 ```
 
-The v3 production cutover is manual-only and additionally requires the frozen
-release manifest, exact image digest, run ID, and activation approval. See
-[DEPLOYMENT.md](DEPLOYMENT.md) for host bootstrap, GitHub configuration,
-rollback, and troubleshooting. Merging is not permission to bypass the
-production data audit in the season-readiness runbook.
+After `main` CI succeeds, the deployment workflow builds one image digest, stops writers, applies
+migrations, republishes core data from PostgreSQL, and verifies API/worker health. See
+[DEPLOYMENT.md](DEPLOYMENT.md) for host bootstrap, GitHub configuration, recovery boundaries, and
+troubleshooting. A successful image rollout does not replace the data audit in the season-readiness
+runbook.
 
 ## Documentation
 

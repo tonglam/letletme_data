@@ -24,7 +24,7 @@ rows remains the separately approved procedure in `docs/fpl-season-readiness.md`
    the separate picks/live-derived result checkpoint.
 4. League coordinators fan out with a maximum concurrency of 10 and stable child IDs for one run.
    Each child uses stored tournament membership first and a bounded authoritative fallback only for
-   legacy empty membership.
+   an empty upstream membership response.
 5. Tournament post-match work audits fresh results, picks, and transfer checkpoints before starting
    standings/insight derivatives. Partially persisted work remains a checkpoint for the retry.
 6. Fixture event repairs use the existing snapshot-aware event publication path, then rebuild affected

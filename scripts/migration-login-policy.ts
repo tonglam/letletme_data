@@ -10,20 +10,10 @@ export type MigrationLoginSnapshot = {
   readonly canWriteMigrationLedger: boolean;
   readonly canonicalSchemaOwnerCount: number;
   readonly publicApplicationObjectCount: number;
-  readonly cutoverTableCount: number;
-  readonly frozenOwnerExists: boolean;
   readonly inheritedRoles: readonly string[];
 };
 
-export type MigrationLoginContractOptions = {
-  readonly requireCanonicalState?: boolean;
-};
-
-export function assertMigrationLoginSnapshot(
-  snapshot: MigrationLoginSnapshot,
-  options: MigrationLoginContractOptions = {},
-): void {
-  const requireCanonicalState = options.requireCanonicalState ?? true;
+export function assertMigrationLoginSnapshot(snapshot: MigrationLoginSnapshot): void {
   if (snapshot.serverMajor !== 15) {
     throw new Error('Platform migration requires PostgreSQL 15');
   }
@@ -42,13 +32,7 @@ export function assertMigrationLoginSnapshot(
   if (snapshot.publicApplicationObjectCount !== 0) {
     throw new Error('The public schema still contains application objects');
   }
-  if (requireCanonicalState && (snapshot.cutoverTableCount !== 0 || snapshot.frozenOwnerExists)) {
-    throw new Error('Completed cutover state is still present');
-  }
   if (!snapshot.inheritedRoles.includes('letletme_data_owner')) {
     throw new Error('Migration LOGIN cannot SET ROLE to the Data owner');
-  }
-  if (snapshot.inheritedRoles.includes('letletme_v2_frozen_owner')) {
-    throw new Error('Migration LOGIN still inherits the retired frozen owner');
   }
 }

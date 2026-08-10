@@ -127,4 +127,4 @@ curl -X POST "$DATA_URL/jobs/player-prices/trigger" \
   `tournament-materialized-views-refresh`;
 - `live-snapshot`, `post-match-consolidation`, and `launch-monitor`.
 
-Removed v2 live-summary/explain/result trigger aliases are intentionally not accepted.
+Only names returned by `GET /jobs` are accepted; removed trigger aliases are not recognized.

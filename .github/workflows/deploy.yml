@@ -103,7 +103,7 @@ jobs:
             APP_IMAGE="$IMAGE_REF" docker compose --profile migration pull api worker migration
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun run env:check
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration \
-              bun run db:migration-contract -- --identity-only
+              bun run db:migration-contract
 
             migration_started=false
             restore_before_migration() {
