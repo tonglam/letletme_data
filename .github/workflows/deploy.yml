@@ -973,11 +973,33 @@ jobs:
 
             PSQL_IMAGE='docker.io/library/postgres:15.8-alpine@sha256:68c8f729caca8638396647002948c0ab753fda787cbee9e887f7166169c6b87e'
             docker pull "$PSQL_IMAGE"
+            VALIDATION_DIR=$(mktemp -d)
+            trap 'rm -rf "$VALIDATION_DIR"' EXIT
+            cp \
+              sql/v3/validate-0090-activation.sql \
+              sql/v3/validate-p5-quality.sql \
+              sql/v3/capture-public-relation-hashes.sql \
+              sql/v3/capture-v3-business-relation-hashes.sql \
+              sql/v3/capture-public-sequence-state.sql \
+              sql/v3/capture-public-security-contract.sql \
+              "$VALIDATION_DIR/"
+
+            # Keep the approved R3 runtime candidate immutable. Its validator has
+            # one PL/pgSQL CASE-expression parser ambiguity, so patch only the
+            # SHA-guarded temporary validation copy and leave the checkout intact.
+            validator_sha=$(sha256sum "$VALIDATION_DIR/validate-0090-activation.sql" | awk '{print $1}')
+            test "$validator_sha" = '0443c71728e07a24e397dbbad39d1b016623f05333265b1abb208e62fdd15756'
+            sed -i \
+              '31s/+ CASE/+ (/;32s/^       WHEN/       CASE\n         WHEN/;33s/^       ELSE/         ELSE/;34s/^     END$/       END\n     )/' \
+              "$VALIDATION_DIR/validate-0090-activation.sql"
+            grep -Fq 'legacy_physical_count <> 192 + (' \
+              "$VALIDATION_DIR/validate-0090-activation.sql"
+            echo 'V3_R3_VALIDATOR_PATCH=case-expression-parenthesized'
             run_psql_file() {
               sql_file="$1"
               docker run --rm \
                 --env-file .env.migrate \
-                --volume "$VPS_WORKDIR/sql/v3:/validation:ro" \
+                --volume "$VALIDATION_DIR:/validation:ro" \
                 "$PSQL_IMAGE" \
                 sh -eu -c \
                 'database_url="$DATABASE_URL"; database_url="${database_url#\"}"; database_url="${database_url%\"}"; exec psql "$database_url" --no-psqlrc --set ON_ERROR_STOP=on --file "/validation/$1"' \

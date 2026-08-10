@@ -249,6 +249,11 @@ describe('v3 production hard-cut workflow', () => {
     expect(validation).toContain('capture-public-security-contract.sql');
     expect(validation).toContain('database_url="${database_url#\\"}"');
     expect(validation).toContain('database_url="${database_url%\\"}"');
+    expect(validation).toContain(
+      '0443c71728e07a24e397dbbad39d1b016623f05333265b1abb208e62fdd15756',
+    );
+    expect(validation).toContain('V3_R3_VALIDATOR_PATCH=case-expression-parenthesized');
+    expect(validation).toContain('--volume "$VALIDATION_DIR:/validation:ro"');
     expect(validation).toContain('docker compose ps -q api');
     expect(validation).toContain('docker compose ps -q worker');
     expect(validation).not.toContain('docker compose up');
