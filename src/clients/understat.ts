@@ -224,53 +224,9 @@ export const UnderstatMatchResponseSchema = z
   })
   .passthrough();
 
-const UnderstatPlayerMatchSchema = z
-  .object({
-    id: UnderstatIdSchema,
-    roster_id: UnderstatIdSchema,
-    date: z.string().min(1),
-    season: UnderstatIntegerSchema,
-    h_team: z.string().min(1),
-    a_team: z.string().min(1),
-    h_goals: UnderstatIntegerSchema,
-    a_goals: UnderstatIntegerSchema,
-    goals: UnderstatIntegerSchema,
-    assists: UnderstatIntegerSchema,
-    shots: UnderstatIntegerSchema,
-    key_passes: UnderstatIntegerSchema,
-    xG: UnderstatNumberSchema,
-    npxG: UnderstatNumberSchema,
-    xA: UnderstatNumberSchema,
-    xGChain: UnderstatNumberSchema,
-    xGBuildup: UnderstatNumberSchema,
-    time: UnderstatIntegerSchema,
-    position: z.string(),
-    npg: UnderstatIntegerSchema,
-  })
-  .passthrough();
-
-export const UnderstatPlayerResponseSchema = z
-  .object({
-    player: z
-      .object({
-        id: UnderstatIdSchema,
-        name: z.string().min(1),
-        favorite_position: z.string().nullable(),
-      })
-      .passthrough(),
-    matches: z.array(UnderstatPlayerMatchSchema),
-    groups: z.record(z.unknown()),
-    positionsList: z.array(z.unknown()),
-    minMaxPlayerStats: z.unknown(),
-    shots: z.array(UnderstatShotSchema),
-    lastMatch: z.unknown(),
-  })
-  .passthrough();
-
 export type UnderstatLeagueResponse = z.infer<typeof UnderstatLeagueResponseSchema>;
 export type UnderstatTeamResponse = z.infer<typeof UnderstatTeamResponseSchema>;
 export type UnderstatMatchResponse = z.infer<typeof UnderstatMatchResponseSchema>;
-export type UnderstatPlayerResponse = z.infer<typeof UnderstatPlayerResponseSchema>;
 export type UnderstatMatchDate = z.infer<typeof UnderstatMatchDateSchema>;
 export type UnderstatTeamHistory = z.infer<typeof UnderstatTeamHistorySchema>;
 export type UnderstatPlayerSummary = z.infer<typeof UnderstatPlayerSummarySchema>;
@@ -474,18 +430,6 @@ export class UnderstatClient {
       'rosters',
       'shots',
       'tmpl',
-    ]);
-  }
-
-  getPlayerData(playerId: number): Promise<UnderstatPlayerResponse> {
-    return this.request(`/getPlayerData/${playerId}`, UnderstatPlayerResponseSchema, [
-      'player',
-      'matches',
-      'groups',
-      'positionsList',
-      'minMaxPlayerStats',
-      'shots',
-      'lastMatch',
     ]);
   }
 }

@@ -1,5 +1,4 @@
-import { getActiveCacheSeason } from '../cache/cache-season';
-import { eventLivesCache } from '../cache/operations';
+import { readLiveSnapshotCache } from '../cache/live-snapshot-cache';
 import { fplClient } from '../clients/fpl';
 import { readDatabaseOrderingTimestamp } from '../db/ordering-timestamp';
 import {
@@ -25,6 +24,7 @@ import { IncompleteDataSyncError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 import type { TournamentFinalizationTarget } from '../domain/tournament';
 import { isFreshnessBoundaryNewer, latestFreshnessTimestamp } from '../domain/freshness';
+import type { FplSeasonRef } from '../domain/fpl-season';
 
 const DEFAULT_CONCURRENCY = 5;
 const EVENT_LIVE_FETCH_TIMEOUT_MS = Number(process.env.TOURNAMENT_EVENT_LIVE_TIMEOUT_MS ?? 45_000);
@@ -43,7 +43,6 @@ export type TournamentEventResultsSyncOptions = {
   transfersByEntry?: ReadonlyMap<number, RawFPLEntryTransfersResponse>;
   transferSourceCheckedAt?: string;
   sourceCheckedAt?: string;
-  season?: string;
   freshAfter?: Date | string;
 };
 
@@ -108,21 +107,19 @@ export function planTournamentEventSync(
 }
 
 async function resolveEventPointsPayload(
+  season: FplSeasonRef,
   eventId: number,
   provided?: EventPointsPayload,
-  options?: { season?: string },
 ): Promise<EventPointsPayload> {
   if (provided) return provided;
 
-  const season = options?.season ?? (await getActiveCacheSeason());
-  const event = await eventRepository.findById(eventId);
+  const event = await eventRepository.findById(season, eventId);
   const finalizationBoundary = event?.finished && event.dataChecked && event.dataCheckedAt !== null;
 
   if (finalizationBoundary) {
-    // Once data_checked_at exists, the compatibility cache may still contain
-    // an in-match payload. Only a season-owned final snapshot can satisfy a
-    // finalized calculation; otherwise continue to the authoritative source.
-    const finalized = await eventLiveRepository.findFinalizedByEventIdForSeason(eventId, season);
+    // Once data_checked_at exists, only a season-owned final database snapshot
+    // can satisfy the finalized calculation.
+    const finalized = await eventLiveRepository.findFinalizedByEventId(season, eventId);
     if (finalized.length > 0) {
       return {
         elements: finalized.map((row) => ({
@@ -132,21 +129,17 @@ async function resolveEventPointsPayload(
       };
     }
   } else {
-    // A compatibility cache hit is bounded by its normal Redis TTL and can be
-    // reused for active-GW calculations. Database rows without finalized
-    // source evidence may still be provisional, so they do not suppress the
-    // upstream read below.
-    const cached = await eventLivesCache.getByEventId(eventId);
-    if (cached && cached.length > 0) {
+    const cached = await readLiveSnapshotCache(season.seasonCode, eventId);
+    if (cached && cached.eventLives.length > 0) {
       return {
-        elements: cached.map((row) => ({
+        elements: cached.eventLives.map((row) => ({
           id: row.elementId,
           stats: { total_points: row.totalPoints },
         })),
       };
     }
 
-    const finalized = await eventLiveRepository.findFinalizedByEventIdForSeason(eventId, season);
+    const finalized = await eventLiveRepository.findFinalizedByEventId(season, eventId);
     if (finalized.length > 0) {
       return {
         elements: finalized.map((row) => ({
@@ -174,6 +167,7 @@ async function resolveEventPointsPayload(
 }
 
 export async function syncTournamentEventResultsForEntryIds(
+  season: FplSeasonRef,
   entryIds: number[],
   eventId: number,
   options?: TournamentEventResultsSyncOptions,
@@ -205,19 +199,16 @@ export async function syncTournamentEventResultsForEntryIds(
   const sourceFreshAfter = options?.freshAfter
     ? validateOrderingTimestamp(options.freshAfter)
     : sourceOrdering.exact;
-  const event = await eventRepository.findById(eventId);
+  const event = await eventRepository.findById(season, eventId);
   const finalizationDate = event?.finished && event.dataChecked ? event.dataCheckedAt : null;
   const finalizationCutoff = finalizationDate
-    ? ((await eventRepository.findDataCheckedAtExact(eventId)) ?? finalizationDate)
+    ? ((await eventRepository.findDataCheckedAtExact(season, eventId)) ?? finalizationDate)
     : null;
   const freshAfter = latestFreshnessTimestamp(sourceFreshAfter, finalizationCutoff);
-  const checkpointSeason = options?.season ?? (await getActiveCacheSeason());
   const transferSourceCheckedAt = options?.skipTransfers
     ? null
     : (options?.transferSourceCheckedAt ?? sourceOrdering.exact);
-  const live = await resolveEventPointsPayload(eventId, options?.live, {
-    season: checkpointSeason,
-  });
+  const live = await resolveEventPointsPayload(season, eventId, options?.live);
   const pointsByElement = new Map<number, number>();
   for (const element of live.elements) {
     pointsByElement.set(element.id, element.stats.total_points);
@@ -241,8 +232,9 @@ export async function syncTournamentEventResultsForEntryIds(
         `Timed out fetching entry payloads for entry ${entryId}, event ${eventId} after ${ENTRY_FETCH_TIMEOUT_MS}ms`,
       );
       await withTimeout(
-        withEntrySeasonSyncTransaction(entryId, checkpointSeason, async (tx) => {
+        withEntrySeasonSyncTransaction(season, entryId, async (tx) => {
           await createEntryEventResultsRepository(tx).upsertFromPicksAndLive(
+            season,
             entryId,
             eventId,
             picks,
@@ -250,6 +242,7 @@ export async function syncTournamentEventResultsForEntryIds(
             sourceOrdering.exact,
           );
           await createEntryEventPicksRepository(tx).upsertFromPicks(
+            season,
             entryId,
             eventId,
             picks,
@@ -261,6 +254,7 @@ export async function syncTournamentEventResultsForEntryIds(
       );
       if (transfers) {
         await entryEventTransfersRepository.replaceForEvent(
+          season,
           entryId,
           eventId,
           transfers,
@@ -268,7 +262,7 @@ export async function syncTournamentEventResultsForEntryIds(
           // The endpoint returned the entrant's complete transfer history.
           // Persist and checkpoint that same scope so the following audit
           // cannot reject a successful legacy/backfill repair.
-          { syncMode: 'all', checkpointSeason, sourceCheckedAt: transferSourceCheckedAt! },
+          { syncMode: 'all', sourceCheckedAt: transferSourceCheckedAt! },
         );
       }
       return { entryId, success: true } satisfies EntrySyncOutcome;
@@ -279,15 +273,16 @@ export async function syncTournamentEventResultsForEntryIds(
   });
 
   const [staleResultEntryIds, persistedPickEntryIds, missingTransferEntryIds] = await Promise.all([
-    entryEventResultsRepository.findEntryIdsNeedingRichSync(uniqueEntryIds, eventId, freshAfter),
-    entryEventPicksRepository.findEntryIdsByEvent(eventId, uniqueEntryIds, checkpointSeason),
+    entryEventResultsRepository.findEntryIdsNeedingRichSync(
+      season,
+      uniqueEntryIds,
+      eventId,
+      freshAfter,
+    ),
+    entryEventPicksRepository.findEntryIdsByEvent(season, eventId, uniqueEntryIds),
     options?.skipTransfers
       ? Promise.resolve([])
-      : entryEventTransfersRepository.findEntryIdsNeedingSync(
-          uniqueEntryIds,
-          eventId,
-          checkpointSeason,
-        ),
+      : entryEventTransfersRepository.findEntryIdsNeedingSync(season, uniqueEntryIds, eventId),
   ]);
   const freshResultEntryIds = freshEntryIds(uniqueEntryIds, staleResultEntryIds);
   const persistedPickSet = new Set(persistedPickEntryIds);
@@ -324,9 +319,10 @@ export async function syncTournamentEventResultsForEntryIds(
 }
 
 export async function syncEntryTransferHistories(
+  season: FplSeasonRef,
   entryIds: number[],
   endEventId: number,
-  options?: { concurrency?: number; season?: string },
+  options?: { concurrency?: number },
 ): Promise<{
   synced: number;
   errors: number;
@@ -338,7 +334,6 @@ export async function syncEntryTransferHistories(
 }> {
   const uniqueEntryIds = uniqueNumbers(entryIds);
   const concurrency = options?.concurrency ?? DEFAULT_CONCURRENCY;
-  const checkpointSeason = options?.season ?? (await getActiveCacheSeason());
   const sourceCheckedAt = (await readDatabaseOrderingTimestamp()).exact;
 
   await mapWithConcurrency(uniqueEntryIds, concurrency, async (entryId) => {
@@ -349,11 +344,17 @@ export async function syncEntryTransferHistories(
         `Timed out fetching transfer history for entry ${entryId}`,
       );
       await withTimeout(
-        entryEventTransfersRepository.replaceForEvent(entryId, endEventId, transfers, undefined, {
-          syncMode: 'all',
-          checkpointSeason,
-          sourceCheckedAt,
-        }),
+        entryEventTransfersRepository.replaceForEvent(
+          season,
+          entryId,
+          endEventId,
+          transfers,
+          undefined,
+          {
+            syncMode: 'all',
+            sourceCheckedAt,
+          },
+        ),
         ENTRY_PERSIST_TIMEOUT_MS,
         `Timed out persisting transfer history for entry ${entryId}`,
       );
@@ -365,9 +366,9 @@ export async function syncEntryTransferHistories(
   });
 
   const failedEntryIds = await entryEventTransfersRepository.findEntryIdsNeedingSync(
+    season,
     uniqueEntryIds,
     endEventId,
-    checkpointSeason,
   );
   const synced = uniqueEntryIds.length - failedEntryIds.length;
 
@@ -383,6 +384,7 @@ export async function syncEntryTransferHistories(
 }
 
 export async function syncTournamentEventResultsForTournament(
+  season: FplSeasonRef,
   tournamentId: number,
   eventId: number,
   options?: TournamentEventResultsSyncOptions,
@@ -394,7 +396,7 @@ export async function syncTournamentEventResultsForTournament(
     errors: number;
   } & TournamentResultWorkSummary
 > {
-  const entryIds = await tournamentEntryRepository.findEntryIdsByTournamentId(tournamentId);
+  const entryIds = await tournamentEntryRepository.findEntryIdsByTournamentId(season, tournamentId);
   if (entryIds.length === 0) {
     logInfo('No tournament entries found for event results', { tournamentId, eventId });
     return {
@@ -409,7 +411,7 @@ export async function syncTournamentEventResultsForTournament(
     };
   }
 
-  const result = await syncTournamentEventResultsForEntryIds(entryIds, eventId, options);
+  const result = await syncTournamentEventResultsForEntryIds(season, entryIds, eventId, options);
   logInfo('Tournament event results sync completed for tournament', {
     tournamentId,
     eventId,
@@ -421,6 +423,7 @@ export async function syncTournamentEventResultsForTournament(
 }
 
 export async function syncTournamentEventResults(
+  season: FplSeasonRef,
   eventId: number,
   options?: TournamentEventResultsSyncOptions,
 ): Promise<
@@ -434,7 +437,7 @@ export async function syncTournamentEventResults(
 > {
   logInfo('Starting tournament event results sync', { eventId });
 
-  const tournaments = await tournamentInfoRepository.findActive();
+  const tournaments = await tournamentInfoRepository.findActive(season);
   if (tournaments.length === 0) {
     logInfo('No active tournaments found for tournament event results', { eventId });
     return {
@@ -457,7 +460,7 @@ export async function syncTournamentEventResults(
   );
 
   const entryLists = await mapWithConcurrency(tournaments, 10, (tournament) =>
-    tournamentEntryRepository.findEntryIdsByTournamentId(tournament.id),
+    tournamentEntryRepository.findEntryIdsByTournamentId(season, tournament.id),
   );
 
   const entryIds = uniqueNumbers(entryLists.flat());
@@ -476,17 +479,16 @@ export async function syncTournamentEventResults(
     };
   }
 
-  const checkpointSeason = options?.season ?? (await getActiveCacheSeason());
   const sourceOrdering = options?.sourceCheckedAt
     ? { exact: validateOrderingTimestamp(options.sourceCheckedAt) }
     : await readDatabaseOrderingTimestamp();
   const sourceFreshAfter = options?.freshAfter
     ? validateOrderingTimestamp(options.freshAfter)
     : sourceOrdering.exact;
-  const event = await eventRepository.findById(eventId);
+  const event = await eventRepository.findById(season, eventId);
   const finalizationDate = event?.finished && event.dataChecked ? event.dataCheckedAt : null;
   const finalizationCutoff = finalizationDate
-    ? ((await eventRepository.findDataCheckedAtExact(eventId)) ?? finalizationDate)
+    ? ((await eventRepository.findDataCheckedAtExact(season, eventId)) ?? finalizationDate)
     : null;
   const freshAfter = latestFreshnessTimestamp(sourceFreshAfter, finalizationCutoff);
   const resultsFreshAfter = freshAfter instanceof Date ? freshAfter.toISOString() : freshAfter;
@@ -495,11 +497,11 @@ export async function syncTournamentEventResults(
     resultsFreshAfter,
   }));
   const [staleResultEntryIds, existingPickEntryIds, requiredTransferEntryIds] = await Promise.all([
-    entryEventResultsRepository.findEntryIdsNeedingRichSync(entryIds, eventId, freshAfter),
-    entryEventPicksRepository.findEntryIdsByEvent(eventId, entryIds, checkpointSeason),
+    entryEventResultsRepository.findEntryIdsNeedingRichSync(season, entryIds, eventId, freshAfter),
+    entryEventPicksRepository.findEntryIdsByEvent(season, eventId, entryIds),
     options?.skipTransfers
       ? Promise.resolve([])
-      : entryEventTransfersRepository.findEntryIdsNeedingSync(entryIds, eventId, checkpointSeason),
+      : entryEventTransfersRepository.findEntryIdsNeedingSync(season, entryIds, eventId),
   ]);
   const freshResultEntryIds = freshEntryIds(entryIds, staleResultEntryIds);
   const existingPickSet = new Set(existingPickEntryIds);
@@ -514,33 +516,32 @@ export async function syncTournamentEventResults(
 
   await Promise.allSettled([
     requiredResultEntryIds.length > 0
-      ? syncTournamentEventResultsForEntryIds(requiredResultEntryIds, eventId, {
+      ? syncTournamentEventResultsForEntryIds(season, requiredResultEntryIds, eventId, {
           ...options,
           skipTransfers: true,
-          season: checkpointSeason,
           freshAfter,
           sourceCheckedAt: sourceOrdering.exact,
         })
       : Promise.resolve(null),
     plan.requiredTransferEntryIds.length > 0
-      ? syncEntryTransferHistories(plan.requiredTransferEntryIds, eventId, {
+      ? syncEntryTransferHistories(season, plan.requiredTransferEntryIds, eventId, {
           concurrency: options?.concurrency,
-          season: checkpointSeason,
         })
       : Promise.resolve(null),
   ]);
 
   const [auditedStaleResultEntryIds, auditedPickEntryIds, missingTransferEntryIds] =
     await Promise.all([
-      entryEventResultsRepository.findEntryIdsNeedingRichSync(entryIds, eventId, freshAfter),
-      entryEventPicksRepository.findEntryIdsByEvent(eventId, entryIds, checkpointSeason),
+      entryEventResultsRepository.findEntryIdsNeedingRichSync(
+        season,
+        entryIds,
+        eventId,
+        freshAfter,
+      ),
+      entryEventPicksRepository.findEntryIdsByEvent(season, eventId, entryIds),
       options?.skipTransfers
         ? Promise.resolve([])
-        : entryEventTransfersRepository.findEntryIdsNeedingSync(
-            entryIds,
-            eventId,
-            checkpointSeason,
-          ),
+        : entryEventTransfersRepository.findEntryIdsNeedingSync(season, entryIds, eventId),
     ]);
   const auditedFreshResultIds = freshEntryIds(entryIds, auditedStaleResultEntryIds);
   const auditedPickSet = new Set(auditedPickEntryIds);
@@ -569,7 +570,7 @@ export async function syncTournamentEventResults(
     );
   }
 
-  const postWorkFinalizationCutoff = await eventRepository.findDataCheckedAtExact(eventId);
+  const postWorkFinalizationCutoff = await eventRepository.findDataCheckedAtExact(season, eventId);
   if (isFreshnessBoundaryNewer(freshAfter, postWorkFinalizationCutoff)) {
     const retryUnits = Math.max(entryIds.length, requiredUnits);
     throw new IncompleteDataSyncError(

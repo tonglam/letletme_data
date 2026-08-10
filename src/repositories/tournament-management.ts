@@ -1,4 +1,5 @@
 import { getDbClient } from '../db/singleton';
+import type { FplSeasonRef } from '../domain/fpl-season';
 import type {
   GroupMode,
   KnockoutMode,
@@ -29,38 +30,15 @@ export type TournamentDeleteResult =
   | { status: 'not_found' }
   | { status: 'forbidden' };
 
-type TournamentManagementDatabaseRow = {
-  id: number;
-  name: string;
-  creator: string;
-  admin_entry_id: number;
-  total_team_num: number;
-  league_type: LeagueType;
-  group_mode: GroupMode;
-  group_num: number | null;
-  knockout_mode: KnockoutMode;
-  roster_mode: TournamentRosterMode;
-  state: 'active' | 'inactive' | 'finished';
-  created_at: string;
-  updated_at: string;
-};
+type TournamentManagementDatabaseRow = TournamentManagementRecord;
 
-function mapRecord(row: TournamentManagementDatabaseRow): TournamentManagementRecord {
+function normalize(row: TournamentManagementDatabaseRow | undefined) {
+  if (!row) return null;
   return {
-    id: row.id,
-    name: row.name,
-    creator: row.creator,
-    adminEntryId: row.admin_entry_id,
-    totalTeamNum: row.total_team_num,
-    leagueType: row.league_type,
-    groupMode: row.group_mode,
-    groupNum: row.group_num,
-    knockoutMode: row.knockout_mode,
-    rosterMode: row.roster_mode,
-    state: row.state,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  };
+    ...row,
+    groupMode: row.groupMode ?? 'no_group',
+    knockoutMode: row.knockoutMode ?? 'no_knockout',
+  } satisfies TournamentManagementRecord;
 }
 
 function isUniqueViolation(error: unknown): boolean {
@@ -68,48 +46,58 @@ function isUniqueViolation(error: unknown): boolean {
 }
 
 export const createTournamentManagementRepository = () => ({
-  findById: async (tournamentId: number): Promise<TournamentManagementRecord | null> => {
+  findById: async (
+    season: FplSeasonRef,
+    tournamentId: number,
+  ): Promise<TournamentManagementRecord | null> => {
     try {
       const client = await getDbClient();
       const rows = await client<TournamentManagementDatabaseRow[]>`
-        select
-          id,
+        SELECT
+          tournament_id AS id,
           name,
           creator,
-          admin_entry_id,
-          total_team_num,
-          league_type,
-          group_mode,
-          group_num,
-          knockout_mode,
-          roster_mode,
+          admin_entry_id AS "adminEntryId",
+          total_team_num AS "totalTeamNum",
+          league_type AS "leagueType",
+          group_mode AS "groupMode",
+          group_num AS "groupNum",
+          knockout_mode AS "knockoutMode",
+          roster_mode AS "rosterMode",
           state,
-          created_at::text,
-          updated_at::text
-        from tournament_infos
-        where id = ${tournamentId}
-        limit 1
+          created_at::text AS "createdAt",
+          updated_at::text AS "updatedAt"
+        FROM competition.tournaments
+        WHERE season_id = ${season.seasonId}
+          AND tournament_id = ${tournamentId}
+        LIMIT 1
       `;
-      return rows[0] ? mapRecord(rows[0]) : null;
+      return normalize(rows[0]);
     } catch (error) {
       logError('Failed to retrieve tournament management record', error, { tournamentId });
       throw new DatabaseError(
         'Failed to retrieve tournament.',
         'TOURNAMENT_MANAGEMENT_FIND_ERROR',
-        error as Error,
+        error instanceof Error ? error : undefined,
       );
     }
   },
 
-  checkNameExistsExcluding: async (name: string, tournamentId: number): Promise<boolean> => {
+  checkNameExistsExcluding: async (
+    season: FplSeasonRef,
+    name: string,
+    tournamentId: number,
+  ): Promise<boolean> => {
     try {
       const client = await getDbClient();
-      const rows = await client<{ exists: boolean }[]>`
-        select exists(
-          select 1
-          from tournament_infos
-          where name = ${name} and id <> ${tournamentId}
-        ) as exists
+      const rows = await client<Array<{ exists: boolean }>>`
+        SELECT EXISTS(
+          SELECT 1
+          FROM competition.tournaments
+          WHERE season_id = ${season.seasonId}
+            AND name = ${name}
+            AND tournament_id <> ${tournamentId}
+        ) AS exists
       `;
       return rows[0]?.exists === true;
     } catch (error) {
@@ -117,12 +105,13 @@ export const createTournamentManagementRepository = () => ({
       throw new DatabaseError(
         'Failed to check tournament name.',
         'TOURNAMENT_MANAGEMENT_NAME_CHECK_ERROR',
-        error as Error,
+        error instanceof Error ? error : undefined,
       );
     }
   },
 
   updateNameOwned: async (
+    season: FplSeasonRef,
     tournamentId: number,
     adminEntryId: number,
     name: string,
@@ -130,27 +119,29 @@ export const createTournamentManagementRepository = () => ({
     try {
       const client = await getDbClient();
       const rows = await client<TournamentManagementDatabaseRow[]>`
-        update tournament_infos
-        set name = ${name}, updated_at = now()
-        where id = ${tournamentId} and admin_entry_id = ${adminEntryId}
-        returning
-          id,
+        UPDATE competition.tournaments
+        SET name = ${name}, updated_at = now()
+        WHERE season_id = ${season.seasonId}
+          AND tournament_id = ${tournamentId}
+          AND admin_entry_id = ${adminEntryId}
+        RETURNING
+          tournament_id AS id,
           name,
           creator,
-          admin_entry_id,
-          total_team_num,
-          league_type,
-          group_mode,
-          group_num,
-          knockout_mode,
-          roster_mode,
+          admin_entry_id AS "adminEntryId",
+          total_team_num AS "totalTeamNum",
+          league_type AS "leagueType",
+          group_mode AS "groupMode",
+          group_num AS "groupNum",
+          knockout_mode AS "knockoutMode",
+          roster_mode AS "rosterMode",
           state,
-          created_at::text,
-          updated_at::text
+          created_at::text AS "createdAt",
+          updated_at::text AS "updatedAt"
       `;
-      if (!rows[0]) return null;
-      logInfo('Updated tournament name', { tournamentId, adminEntryId });
-      return mapRecord(rows[0]);
+      const record = normalize(rows[0]);
+      if (record) logInfo('Updated tournament name', { tournamentId, adminEntryId });
+      return record;
     } catch (error) {
       if (isUniqueViolation(error)) {
         throw new ConflictError('Tournament name already exists.', 'TOURNAMENT_NAME_EXISTS');
@@ -159,12 +150,13 @@ export const createTournamentManagementRepository = () => ({
       throw new DatabaseError(
         'Failed to update tournament.',
         'TOURNAMENT_MANAGEMENT_UPDATE_ERROR',
-        error as Error,
+        error instanceof Error ? error : undefined,
       );
     }
   },
 
   updateStateOwned: async (
+    season: FplSeasonRef,
     tournamentId: number,
     adminEntryId: number,
     state: 'active' | 'inactive',
@@ -172,48 +164,50 @@ export const createTournamentManagementRepository = () => ({
     try {
       const client = await getDbClient();
       const rows = await client<TournamentManagementDatabaseRow[]>`
-        update tournament_infos
-        set state = ${state},
-            roster_sync_status = case
-              when ${state} = 'inactive' and roster_sync_status = 'processing'
-                then 'ready'::tournament_setup_status
-              else roster_sync_status
-            end,
-            roster_sync_error = case
-              when ${state} = 'inactive' and roster_sync_status = 'processing' then null
-              else roster_sync_error
-            end,
+        UPDATE competition.tournaments
+        SET state = ${state},
+            roster_sync_status = CASE
+              WHEN ${state} = 'inactive' AND roster_sync_status = 'processing'
+                THEN 'ready'::competition.tournament_setup_status
+              ELSE roster_sync_status
+            END,
+            roster_sync_error = CASE
+              WHEN ${state} = 'inactive' AND roster_sync_status = 'processing' THEN NULL
+              ELSE roster_sync_error
+            END,
             updated_at = now()
-        where id = ${tournamentId}
-          and admin_entry_id = ${adminEntryId}
-          and state <> 'finished'
-        returning
-          id,
+        WHERE season_id = ${season.seasonId}
+          AND tournament_id = ${tournamentId}
+          AND admin_entry_id = ${adminEntryId}
+          AND state <> 'finished'
+        RETURNING
+          tournament_id AS id,
           name,
           creator,
-          admin_entry_id,
-          total_team_num,
-          league_type,
-          group_mode,
-          group_num,
-          knockout_mode,
-          roster_mode,
+          admin_entry_id AS "adminEntryId",
+          total_team_num AS "totalTeamNum",
+          league_type AS "leagueType",
+          group_mode AS "groupMode",
+          group_num AS "groupNum",
+          knockout_mode AS "knockoutMode",
+          roster_mode AS "rosterMode",
           state,
-          created_at::text,
-          updated_at::text
+          created_at::text AS "createdAt",
+          updated_at::text AS "updatedAt"
       `;
-      return rows[0] ? mapRecord(rows[0]) : null;
+      return normalize(rows[0]);
     } catch (error) {
       logError('Failed to update tournament state', error, { tournamentId, adminEntryId, state });
       throw new DatabaseError(
         'Failed to update tournament state.',
         'TOURNAMENT_MANAGEMENT_STATE_ERROR',
-        error as Error,
+        error instanceof Error ? error : undefined,
       );
     }
   },
 
   updateRosterModeOwned: async (
+    season: FplSeasonRef,
     tournamentId: number,
     adminEntryId: number,
     rosterMode: TournamentRosterMode,
@@ -221,31 +215,34 @@ export const createTournamentManagementRepository = () => ({
     try {
       const client = await getDbClient();
       const rows = await client<TournamentManagementDatabaseRow[]>`
-        update tournament_infos
-        set roster_mode = ${rosterMode},
-            roster_sync_status = case
-              when ${rosterMode} = 'official_sync' then 'pending'::tournament_setup_status
-              else null
-            end,
-            roster_sync_error = null,
+        UPDATE competition.tournaments
+        SET roster_mode = ${rosterMode},
+            roster_sync_status = CASE
+              WHEN ${rosterMode} = 'official_sync'
+                THEN 'pending'::competition.tournament_setup_status
+              ELSE NULL
+            END,
+            roster_sync_error = NULL,
             updated_at = now()
-        where id = ${tournamentId} and admin_entry_id = ${adminEntryId}
-        returning
-          id,
+        WHERE season_id = ${season.seasonId}
+          AND tournament_id = ${tournamentId}
+          AND admin_entry_id = ${adminEntryId}
+        RETURNING
+          tournament_id AS id,
           name,
           creator,
-          admin_entry_id,
-          total_team_num,
-          league_type,
-          group_mode,
-          group_num,
-          knockout_mode,
-          roster_mode,
+          admin_entry_id AS "adminEntryId",
+          total_team_num AS "totalTeamNum",
+          league_type AS "leagueType",
+          group_mode AS "groupMode",
+          group_num AS "groupNum",
+          knockout_mode AS "knockoutMode",
+          roster_mode AS "rosterMode",
           state,
-          created_at::text,
-          updated_at::text
+          created_at::text AS "createdAt",
+          updated_at::text AS "updatedAt"
       `;
-      return rows[0] ? mapRecord(rows[0]) : null;
+      return normalize(rows[0]);
     } catch (error) {
       logError('Failed to update tournament roster mode', error, {
         tournamentId,
@@ -255,12 +252,13 @@ export const createTournamentManagementRepository = () => ({
       throw new DatabaseError(
         'Failed to update tournament roster mode.',
         'TOURNAMENT_MANAGEMENT_ROSTER_MODE_ERROR',
-        error as Error,
+        error instanceof Error ? error : undefined,
       );
     }
   },
 
   deleteOwned: async (
+    season: FplSeasonRef,
     tournamentId: number,
     adminEntryId: number,
   ): Promise<TournamentDeleteResult> => {
@@ -268,38 +266,59 @@ export const createTournamentManagementRepository = () => ({
       const client = await getDbClient();
       const result = await client.begin(async (tx) => {
         const rows = await tx<TournamentManagementDatabaseRow[]>`
-          select
-            id,
+          SELECT
+            tournament_id AS id,
             name,
             creator,
-            admin_entry_id,
-            total_team_num,
-            league_type,
-            group_mode,
-            group_num,
-            knockout_mode,
-            roster_mode,
+            admin_entry_id AS "adminEntryId",
+            total_team_num AS "totalTeamNum",
+            league_type AS "leagueType",
+            group_mode AS "groupMode",
+            group_num AS "groupNum",
+            knockout_mode AS "knockoutMode",
+            roster_mode AS "rosterMode",
             state,
-            created_at::text,
-            updated_at::text
-          from tournament_infos
-          where id = ${tournamentId}
-          for update
+            created_at::text AS "createdAt",
+            updated_at::text AS "updatedAt"
+          FROM competition.tournaments
+          WHERE season_id = ${season.seasonId}
+            AND tournament_id = ${tournamentId}
+          FOR UPDATE
         `;
-        const row = rows[0];
+        const row = normalize(rows[0]);
         if (!row) return { status: 'not_found' } as const;
-        if (row.admin_entry_id !== adminEntryId) return { status: 'forbidden' } as const;
+        if (row.adminEntryId !== adminEntryId) return { status: 'forbidden' } as const;
 
-        await tx`delete from tournament_selection_stats where tournament_id = ${tournamentId}`;
-        await tx`delete from tournament_knockout_results where tournament_id = ${tournamentId}`;
-        await tx`delete from tournament_knockouts where tournament_id = ${tournamentId}`;
-        await tx`delete from tournament_battle_group_results where tournament_id = ${tournamentId}`;
-        await tx`delete from tournament_points_group_results where tournament_id = ${tournamentId}`;
-        await tx`delete from tournament_groups where tournament_id = ${tournamentId}`;
-        await tx`delete from tournament_entries where tournament_id = ${tournamentId}`;
-        await tx`delete from tournament_infos where id = ${tournamentId}`;
+        await tx`
+          DELETE FROM competition.tournament_knockout_results
+          WHERE season_id = ${season.seasonId} AND tournament_id = ${tournamentId}
+        `;
+        await tx`
+          DELETE FROM competition.tournament_knockouts
+          WHERE season_id = ${season.seasonId} AND tournament_id = ${tournamentId}
+        `;
+        await tx`
+          DELETE FROM competition.tournament_battle_group_results
+          WHERE season_id = ${season.seasonId} AND tournament_id = ${tournamentId}
+        `;
+        await tx`
+          DELETE FROM competition.tournament_points_group_results
+          WHERE season_id = ${season.seasonId} AND tournament_id = ${tournamentId}
+        `;
+        await tx`
+          DELETE FROM competition.tournament_groups
+          WHERE season_id = ${season.seasonId} AND tournament_id = ${tournamentId}
+        `;
+        await tx`
+          DELETE FROM competition.tournament_entries
+          WHERE season_id = ${season.seasonId} AND tournament_id = ${tournamentId}
+        `;
+        await tx`
+          DELETE FROM competition.tournaments
+          WHERE season_id = ${season.seasonId} AND tournament_id = ${tournamentId}
+        `;
 
-        return { status: 'deleted', tournament: mapRecord(row) } as const;
+        return { status: 'deleted', tournament: row } as const;
       });
       if (result.status === 'deleted') {
         logInfo('Deleted tournament and related data', { tournamentId, adminEntryId });
@@ -310,7 +329,7 @@ export const createTournamentManagementRepository = () => ({
       throw new DatabaseError(
         'Failed to delete tournament.',
         'TOURNAMENT_MANAGEMENT_DELETE_ERROR',
-        error as Error,
+        error instanceof Error ? error : undefined,
       );
     }
   },

@@ -1,10 +1,7 @@
 import { Elysia, t } from 'elysia';
 
-import {
-  enqueueEventLiveSummary,
-  enqueueEventLivesCacheUpdate,
-  enqueueEventLivesDbSync,
-} from '../jobs/live-data.jobs';
+import { enqueueLiveSnapshot } from '../jobs/live-data.jobs';
+import { seasonRepository } from '../repositories/seasons';
 import { getEventLivesByEventId } from '../services/event-lives.service';
 
 // Positive integer only — t.Numeric() accepts decimals like 1.5
@@ -14,7 +11,8 @@ export const eventLivesAPI = new Elysia({ prefix: '/event-lives' })
   .get(
     '/:eventId',
     async ({ params }) => {
-      const data = await getEventLivesByEventId(params.eventId);
+      const season = await seasonRepository.findCurrent();
+      const data = await getEventLivesByEventId(season, params.eventId);
       return { success: true, data, eventId: params.eventId };
     },
     { params: eventIdParams },
@@ -22,7 +20,10 @@ export const eventLivesAPI = new Elysia({ prefix: '/event-lives' })
   .post(
     '/sync/:eventId',
     async ({ params, set }) => {
-      const job = await enqueueEventLivesDbSync(params.eventId, 'manual');
+      const season = await seasonRepository.findCurrent();
+      const job = await enqueueLiveSnapshot(season, params.eventId, 'manual', {
+        persistEventLives: true,
+      });
       if (!job) {
         throw new Error('Failed to enqueue event live DB sync job');
       }
@@ -39,7 +40,8 @@ export const eventLivesAPI = new Elysia({ prefix: '/event-lives' })
   .post(
     '/cache/:eventId',
     async ({ params, set }) => {
-      const job = await enqueueEventLivesCacheUpdate(params.eventId, 'manual');
+      const season = await seasonRepository.findCurrent();
+      const job = await enqueueLiveSnapshot(season, params.eventId, 'manual');
       if (!job) {
         throw new Error('Failed to enqueue event live cache update job');
       }
@@ -47,23 +49,6 @@ export const eventLivesAPI = new Elysia({ prefix: '/event-lives' })
       return {
         success: true,
         message: `Coherent live snapshot job enqueued for event ${params.eventId}`,
-        jobId: job.id,
-        eventId: params.eventId,
-      };
-    },
-    { params: eventIdParams },
-  )
-  .post(
-    '/summary/:eventId',
-    async ({ params, set }) => {
-      const job = await enqueueEventLiveSummary(params.eventId, 'manual');
-      if (!job) {
-        throw new Error('Failed to enqueue event live summary job');
-      }
-      set.status = 202;
-      return {
-        success: true,
-        message: `Event live summary job enqueued for event ${params.eventId}`,
         jobId: job.id,
         eventId: params.eventId,
       };

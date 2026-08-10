@@ -1,64 +1,115 @@
 import { and, asc, desc, eq, gt, isNotNull, lte, sql } from 'drizzle-orm';
 
-import { events, type DbEvent } from '../db/schemas/index.schema';
+import { eventsInFpl, type DbEvent } from '../db/schemas/index.schema';
 import { getDb, type DbOrTransaction } from '../db/singleton';
 import { neighbourEventId } from '../domain/events';
+import type { FplSeasonRef } from '../domain/fpl-season';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 
-import type { Event as DomainEvent } from '../types';
+import type { Event as DomainEvent, EventChipData, EventTopElementData } from '../types';
+
+function mapDbEventToDomain(event: DbEvent): DomainEvent {
+  return {
+    id: event.eventId,
+    name: event.name,
+    deadlineTime: event.deadlineTime,
+    averageEntryScore: event.averageEntryScore,
+    finished: event.finished,
+    dataChecked: event.dataChecked,
+    dataCheckedAt: event.dataCheckedAt,
+    highestScoringEntry: event.highestScoringEntry,
+    deadlineTimeEpoch: event.deadlineTimeEpoch,
+    deadlineTimeGameOffset: event.deadlineTimeGameOffset,
+    highestScore: event.highestScore,
+    isPrevious: event.isPrevious,
+    isCurrent: event.isCurrent,
+    isNext: event.isNext,
+    cupLeagueCreate: event.cupLeagueCreate,
+    h2hKoMatchesCreated: event.h2HKoMatchesCreated,
+    chipPlays: event.chipPlays as EventChipData[] | null,
+    mostSelected: event.mostSelected,
+    mostTransferredIn: event.mostTransferredIn,
+    topElement: event.topElement,
+    topElementInfo: event.topElementInfo as EventTopElementData | null,
+    transfersMade: event.transfersMade,
+    mostCaptained: event.mostCaptained,
+    mostViceCaptained: event.mostViceCaptained,
+    createdAt: event.createdAt,
+    updatedAt: event.updatedAt,
+  };
+}
 
 export const createEventRepository = (dbInstance?: DbOrTransaction) => {
-  const getDbInstance = async () => dbInstance || (await getDb());
+  const getDbInstance = async () => dbInstance ?? (await getDb());
 
-  const findCurrentInternal = async (): Promise<DbEvent | null> => {
+  const findCurrentInternal = async (season: FplSeasonRef): Promise<DomainEvent | null> => {
     const db = await getDbInstance();
     const nowEpoch = Math.floor(Date.now() / 1000);
-    const result = await db
+    const rows = await db
       .select()
-      .from(events)
-      .where(and(isNotNull(events.deadlineTimeEpoch), lte(events.deadlineTimeEpoch, nowEpoch)))
-      .orderBy(desc(events.deadlineTimeEpoch))
+      .from(eventsInFpl)
+      .where(
+        and(
+          eq(eventsInFpl.seasonId, season.seasonId),
+          isNotNull(eventsInFpl.deadlineTimeEpoch),
+          lte(eventsInFpl.deadlineTimeEpoch, nowEpoch),
+        ),
+      )
+      .orderBy(desc(eventsInFpl.deadlineTimeEpoch))
       .limit(1);
-    return result[0] || null;
+    return rows[0] ? mapDbEventToDomain(rows[0]) : null;
   };
 
-  const findNeighbour = async (offset: number, label: string): Promise<DbEvent | null> => {
+  const findNeighbour = async (
+    season: FplSeasonRef,
+    offset: number,
+    label: string,
+  ): Promise<DomainEvent | null> => {
     try {
-      const current = await findCurrentInternal();
+      const current = await findCurrentInternal(season);
       if (!current) {
         if (offset === 1) {
           const db = await getDbInstance();
           const nowEpoch = Math.floor(Date.now() / 1000);
-          const result = await db
+          const rows = await db
             .select()
-            .from(events)
-            .where(and(isNotNull(events.deadlineTimeEpoch), gt(events.deadlineTimeEpoch, nowEpoch)))
-            .orderBy(asc(events.deadlineTimeEpoch))
+            .from(eventsInFpl)
+            .where(
+              and(
+                eq(eventsInFpl.seasonId, season.seasonId),
+                isNotNull(eventsInFpl.deadlineTimeEpoch),
+                gt(eventsInFpl.deadlineTimeEpoch, nowEpoch),
+              ),
+            )
+            .orderBy(asc(eventsInFpl.deadlineTimeEpoch))
             .limit(1);
-          return result[0] || null;
+          return rows[0] ? mapDbEventToDomain(rows[0]) : null;
         }
-        logInfo(`No current event - ${label} event unavailable`);
+        logInfo(`No current event - ${label} event unavailable`, { season: season.seasonCode });
         return null;
       }
+
       const targetId = neighbourEventId(current.id, offset);
       if (targetId === null) {
         logInfo(`${label} event out of range`, { currentId: current.id, offset });
         return null;
       }
+
       const db = await getDbInstance();
-      const result = await db.select().from(events).where(eq(events.id, targetId)).limit(1);
-      const event = result[0] || null;
-
-      if (event) {
-        logInfo(`Retrieved ${label} event`, { id: event.id });
-      } else {
-        logInfo(`No ${label} event found`, { targetId });
-      }
-
+      const rows = await db
+        .select()
+        .from(eventsInFpl)
+        .where(and(eq(eventsInFpl.seasonId, season.seasonId), eq(eventsInFpl.eventId, targetId)))
+        .limit(1);
+      const event = rows[0] ? mapDbEventToDomain(rows[0]) : null;
+      logInfo(event ? `Retrieved ${label} event` : `No ${label} event found`, {
+        season: season.seasonCode,
+        targetId,
+      });
       return event;
     } catch (error) {
-      logError(`Failed to find ${label} event`, error);
+      logError(`Failed to find ${label} event`, error, { season: season.seasonCode });
       throw new DatabaseError(
         `Failed to retrieve ${label} event`,
         `FIND_${label.toUpperCase()}_ERROR`,
@@ -68,13 +119,36 @@ export const createEventRepository = (dbInstance?: DbOrTransaction) => {
   };
 
   return {
-    findById: async (eventId: number): Promise<DbEvent | null> => {
+    findAll: async (season: FplSeasonRef): Promise<DomainEvent[]> => {
       try {
         const db = await getDbInstance();
-        const result = await db.select().from(events).where(eq(events.id, eventId)).limit(1);
-        return result[0] ?? null;
+        const rows = await db
+          .select()
+          .from(eventsInFpl)
+          .where(eq(eventsInFpl.seasonId, season.seasonId))
+          .orderBy(eventsInFpl.eventId);
+        return rows.map(mapDbEventToDomain);
       } catch (error) {
-        logError('Failed to find event by id', error, { eventId });
+        logError('Failed to find all events', error, { season: season.seasonCode });
+        throw new DatabaseError(
+          'Failed to retrieve all events',
+          'FIND_ALL_EVENTS_ERROR',
+          error instanceof Error ? error : undefined,
+        );
+      }
+    },
+
+    findById: async (season: FplSeasonRef, eventId: number): Promise<DomainEvent | null> => {
+      try {
+        const db = await getDbInstance();
+        const rows = await db
+          .select()
+          .from(eventsInFpl)
+          .where(and(eq(eventsInFpl.seasonId, season.seasonId), eq(eventsInFpl.eventId, eventId)))
+          .limit(1);
+        return rows[0] ? mapDbEventToDomain(rows[0]) : null;
+      } catch (error) {
+        logError('Failed to find event by id', error, { season: season.seasonCode, eventId });
         throw new DatabaseError(
           'Failed to retrieve event by id',
           'FIND_EVENT_BY_ID_ERROR',
@@ -83,22 +157,29 @@ export const createEventRepository = (dbInstance?: DbOrTransaction) => {
       }
     },
 
-    findDataCheckedAtExact: async (eventId: number): Promise<string | null> => {
+    findDataCheckedAtExact: async (
+      season: FplSeasonRef,
+      eventId: number,
+    ): Promise<string | null> => {
       try {
         const db = await getDbInstance();
         const rows = await db.execute<{ exactDataCheckedAt: string | null }>(sql`
           SELECT to_char(
-            ${events.dataCheckedAt} AT TIME ZONE 'UTC',
+            ${eventsInFpl.dataCheckedAt} AT TIME ZONE 'UTC',
             'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
           ) AS "exactDataCheckedAt"
-          FROM ${events}
-          WHERE ${events.id} = ${eventId}
-            AND ${events.finished} = true
-            AND ${events.dataChecked} = true
+          FROM ${eventsInFpl}
+          WHERE ${eventsInFpl.seasonId} = ${season.seasonId}
+            AND ${eventsInFpl.eventId} = ${eventId}
+            AND ${eventsInFpl.finished} = true
+            AND ${eventsInFpl.dataChecked} = true
         `);
         return rows[0]?.exactDataCheckedAt ? String(rows[0].exactDataCheckedAt) : null;
       } catch (error) {
-        logError('Failed to find exact event finalization timestamp', error, { eventId });
+        logError('Failed to find exact event finalization timestamp', error, {
+          season: season.seasonCode,
+          eventId,
+        });
         throw new DatabaseError(
           'Failed to retrieve exact event finalization timestamp',
           'FIND_EVENT_FINALIZATION_TIMESTAMP_ERROR',
@@ -107,19 +188,11 @@ export const createEventRepository = (dbInstance?: DbOrTransaction) => {
       }
     },
 
-    findCurrent: async (): Promise<DbEvent | null> => {
+    findCurrent: async (season: FplSeasonRef): Promise<DomainEvent | null> => {
       try {
-        const event = await findCurrentInternal();
-
-        if (event) {
-          logInfo('Retrieved current event', { id: event.id });
-        } else {
-          logInfo('No current event found');
-        }
-
-        return event;
+        return await findCurrentInternal(season);
       } catch (error) {
-        logError('Failed to find current event', error);
+        logError('Failed to find current event', error, { season: season.seasonCode });
         throw new DatabaseError(
           'Failed to retrieve current event',
           'FIND_CURRENT_ERROR',
@@ -128,22 +201,30 @@ export const createEventRepository = (dbInstance?: DbOrTransaction) => {
       }
     },
 
-    findNext: async (): Promise<DbEvent | null> => findNeighbour(1, 'next'),
+    findNext: async (season: FplSeasonRef): Promise<DomainEvent | null> =>
+      findNeighbour(season, 1, 'next'),
 
-    findPrevious: async (): Promise<DbEvent | null> => findNeighbour(-1, 'previous'),
+    findPrevious: async (season: FplSeasonRef): Promise<DomainEvent | null> =>
+      findNeighbour(season, -1, 'previous'),
 
-    findLatestFinalized: async (): Promise<DbEvent | null> => {
+    findLatestFinalized: async (season: FplSeasonRef): Promise<DomainEvent | null> => {
       try {
         const db = await getDbInstance();
-        const result = await db
+        const rows = await db
           .select()
-          .from(events)
-          .where(and(eq(events.finished, true), eq(events.dataChecked, true)))
-          .orderBy(desc(events.id))
+          .from(eventsInFpl)
+          .where(
+            and(
+              eq(eventsInFpl.seasonId, season.seasonId),
+              eq(eventsInFpl.finished, true),
+              eq(eventsInFpl.dataChecked, true),
+            ),
+          )
+          .orderBy(desc(eventsInFpl.eventId))
           .limit(1);
-        return result[0] ?? null;
+        return rows[0] ? mapDbEventToDomain(rows[0]) : null;
       } catch (error) {
-        logError('Failed to find latest finalized event', error);
+        logError('Failed to find latest finalized event', error, { season: season.seasonCode });
         throw new DatabaseError(
           'Failed to retrieve latest finalized event',
           'FIND_LATEST_FINALIZED_ERROR',
@@ -152,21 +233,23 @@ export const createEventRepository = (dbInstance?: DbOrTransaction) => {
       }
     },
 
-    upsertBatch: async (domainEvents: DomainEvent[]): Promise<DbEvent[]> => {
+    upsertBatch: async (
+      season: FplSeasonRef,
+      domainEvents: DomainEvent[],
+    ): Promise<DomainEvent[]> => {
       try {
         if (domainEvents.length === 0) {
           return [];
         }
 
         const newEvents = domainEvents.map((event) => ({
-          id: event.id,
+          seasonId: season.seasonId,
+          eventId: event.id,
           name: event.name,
           deadlineTime: event.deadlineTime,
           averageEntryScore: event.averageEntryScore,
           finished: event.finished,
           dataChecked: event.dataChecked,
-          // Finalization is compared with other database-authored evidence
-          // timestamps, so worker clock skew must not move this boundary.
           dataCheckedAt: event.dataChecked ? sql`clock_timestamp()` : null,
           highestScoringEntry: event.highestScoringEntry,
           deadlineTimeEpoch: event.deadlineTimeEpoch,
@@ -176,7 +259,7 @@ export const createEventRepository = (dbInstance?: DbOrTransaction) => {
           isCurrent: event.isCurrent,
           isNext: event.isNext,
           cupLeagueCreate: event.cupLeagueCreate,
-          h2hKoMatchesCreated: event.h2hKoMatchesCreated,
+          h2HKoMatchesCreated: event.h2hKoMatchesCreated,
           chipPlays: event.chipPlays,
           mostSelected: event.mostSelected,
           mostTransferredIn: event.mostTransferredIn,
@@ -189,11 +272,11 @@ export const createEventRepository = (dbInstance?: DbOrTransaction) => {
         }));
 
         const db = await getDbInstance();
-        const result = await db
-          .insert(events)
+        const rows = await db
+          .insert(eventsInFpl)
           .values(newEvents)
           .onConflictDoUpdate({
-            target: events.id,
+            target: [eventsInFpl.seasonId, eventsInFpl.eventId],
             set: {
               name: sql`excluded.name`,
               deadlineTime: sql`excluded.deadline_time`,
@@ -203,9 +286,9 @@ export const createEventRepository = (dbInstance?: DbOrTransaction) => {
               dataCheckedAt: sql`
                 CASE
                   WHEN excluded.data_checked = true
-                    AND (${events.dataChecked} = false OR ${events.dataCheckedAt} IS NULL)
+                    AND (${eventsInFpl.dataChecked} = false OR ${eventsInFpl.dataCheckedAt} IS NULL)
                   THEN clock_timestamp()
-                  ELSE ${events.dataCheckedAt}
+                  ELSE ${eventsInFpl.dataCheckedAt}
                 END
               `,
               highestScoringEntry: sql`excluded.highest_scoring_entry`,
@@ -216,7 +299,7 @@ export const createEventRepository = (dbInstance?: DbOrTransaction) => {
               isCurrent: sql`excluded.is_current`,
               isNext: sql`excluded.is_next`,
               cupLeagueCreate: sql`excluded.cup_league_create`,
-              h2hKoMatchesCreated: sql`excluded.h2h_ko_matches_created`,
+              h2HKoMatchesCreated: sql`excluded.h2h_ko_matches_created`,
               chipPlays: sql`excluded.chip_plays`,
               mostSelected: sql`excluded.most_selected`,
               mostTransferredIn: sql`excluded.most_transferred_in`,
@@ -225,15 +308,12 @@ export const createEventRepository = (dbInstance?: DbOrTransaction) => {
               transfersMade: sql`excluded.transfers_made`,
               mostCaptained: sql`excluded.most_captained`,
               mostViceCaptained: sql`excluded.most_vice_captained`,
-              // A reopened or newly data-checked event invalidates any prior
-              // terminal live authority. The post-match consolidation must
-              // publish a fresh marker before tournament terminal reads resume.
               liveSnapshotFinalizedAt: sql`
                 CASE
                   WHEN excluded.finished = false OR excluded.data_checked = false THEN NULL
-                  WHEN events.deadline_time IS DISTINCT FROM excluded.deadline_time THEN NULL
-                  WHEN events.data_checked = false AND excluded.data_checked = true THEN NULL
-                  ELSE events.live_snapshot_finalized_at
+                  WHEN ${eventsInFpl.deadlineTime} IS DISTINCT FROM excluded.deadline_time THEN NULL
+                  WHEN ${eventsInFpl.dataChecked} = false AND excluded.data_checked = true THEN NULL
+                  ELSE ${eventsInFpl.liveSnapshotFinalizedAt}
                 END
               `,
               updatedAt: new Date(),
@@ -241,12 +321,15 @@ export const createEventRepository = (dbInstance?: DbOrTransaction) => {
           })
           .returning();
 
-        logInfo('Batch upserted events', { count: result.length });
-        return result;
+        logInfo('Batch upserted eventsInFpl', { count: rows.length, season: season.seasonCode });
+        return rows.map(mapDbEventToDomain);
       } catch (error) {
-        logError('Failed to batch upsert events', error, { count: domainEvents.length });
+        logError('Failed to batch upsert eventsInFpl', error, {
+          count: domainEvents.length,
+          season: season.seasonCode,
+        });
         throw new DatabaseError(
-          'Failed to batch upsert events',
+          'Failed to batch upsert eventsInFpl',
           'BATCH_UPSERT_ERROR',
           error instanceof Error ? error : undefined,
         );
@@ -255,5 +338,4 @@ export const createEventRepository = (dbInstance?: DbOrTransaction) => {
   };
 };
 
-// Export singleton instance
 export const eventRepository = createEventRepository();

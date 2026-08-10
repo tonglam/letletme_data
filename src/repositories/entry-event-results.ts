@@ -1,6 +1,10 @@
-import { and, eq, gte, inArray, isNotNull, lte, sql } from 'drizzle-orm';
+import { and, asc, eq, gte, inArray, isNotNull, lte, sql } from 'drizzle-orm';
 
-import { entryEventResults, type DbEntryEventResult } from '../db/schemas/index.schema';
+import {
+  entryEventPicksInCompetition,
+  entryEventResultsInCompetition,
+  type DbEntryEventResult,
+} from '../db/schemas/index.schema';
 import { getDb, type DbOrTransaction } from '../db/singleton';
 import { toNullableDbChip } from '../domain/chips';
 import {
@@ -9,6 +13,7 @@ import {
   isEntryPicksPayloadForEvent,
   resolveScoringCaptainPick,
 } from '../domain/entry-picks';
+import type { FplSeasonRef } from '../domain/fpl-season';
 import type { RawFPLEntryEventPicksResponse, RawFPLEntryHistoryCurrentItem } from '../types';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
@@ -19,6 +24,8 @@ import {
 } from './entry-event-results-history';
 
 type AutoSubItem = RawFPLEntryEventPicksResponse['automatic_subs'][number];
+type ResultStorage = typeof entryEventResultsInCompetition.$inferSelect;
+type PickStorage = typeof entryEventPicksInCompetition.$inferSelect;
 
 type EntryEventTotalsRow = {
   entryId: number;
@@ -42,9 +49,24 @@ export type PreEntryBaselineUnit = {
 const PRE_ENTRY_OVERALL_RANK = 2_147_483_647;
 
 function getAutoSubPoints(autoSubs: AutoSubItem[], elementsPoints: Map<number, number>): number {
-  return autoSubs.reduce((total, sub) => {
-    return total + (elementsPoints.get(sub.element_in) ?? 0);
-  }, 0);
+  return autoSubs.reduce((total, sub) => total + (elementsPoints.get(sub.element_in) ?? 0), 0);
+}
+
+function hydrateResult(row: ResultStorage, picks: readonly PickStorage[]): DbEntryEventResult {
+  return {
+    ...row,
+    id: row.sourceResultId,
+    eventPlayedCaptain: row.playedCaptainElementId,
+    eventCaptainPoints: row.captainPoints,
+    eventPicks: picks.map((pick) => ({
+      element: pick.elementId,
+      position: pick.position,
+      multiplier: pick.multiplier,
+      is_captain: pick.isCaptain,
+      is_vice_captain: pick.isViceCaptain,
+    })),
+    eventAutoSub: row.automaticSubstitutions,
+  };
 }
 
 export function validateAutomaticSubs(
@@ -81,28 +103,34 @@ export function validateAutomaticSubs(
 }
 
 export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) => {
-  const getDbInstance = async () => dbInstance || (await getDb());
+  const getDbInstance = async () => dbInstance ?? (await getDb());
 
   return {
     upsertCoreFromHistory: async (
+      season: FplSeasonRef,
       entryId: number,
       history: readonly RawFPLEntryHistoryCurrentItem[],
     ): Promise<{ upsertedEventIds: number[]; fallbackEventIds: number[] }> => {
-      const plan = buildCoreHistoryUpsertPlan(entryId, history);
+      const plan = buildCoreHistoryUpsertPlan(season, entryId, history);
 
       try {
         const db = await getDbInstance();
         for (const rows of chunkCoreHistoryRows(plan.rows)) {
           await db
-            .insert(entryEventResults)
+            .insert(entryEventResultsInCompetition)
             .values(rows)
             .onConflictDoUpdate({
-              target: [entryEventResults.entryId, entryEventResults.eventId],
+              target: [
+                entryEventResultsInCompetition.seasonId,
+                entryEventResultsInCompetition.entryId,
+                entryEventResultsInCompetition.eventId,
+              ],
               set: buildCoreHistoryConflictSet(),
             });
         }
 
         logInfo('Upserted core entry event results from history', {
+          season: season.seasonCode,
           entryId,
           upserted: plan.upsertedEventIds.length,
           fallback: plan.fallbackEventIds.length,
@@ -112,16 +140,22 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
           fallbackEventIds: plan.fallbackEventIds,
         };
       } catch (error) {
-        logError('Failed to upsert core entry event results from history', error, { entryId });
+        logError('Failed to upsert core entry event results from history', error, {
+          season: season.seasonCode,
+          entryId,
+        });
         throw new DatabaseError(
           'Failed to upsert core entry event results from history',
           'ENTRY_EVENT_RESULTS_HISTORY_UPSERT_ERROR',
-          error as Error,
+          error instanceof Error ? error : undefined,
         );
       }
     },
 
-    seedPreEntryBaselines: async (units: readonly PreEntryBaselineUnit[]): Promise<number> => {
+    seedPreEntryBaselines: async (
+      season: FplSeasonRef,
+      units: readonly PreEntryBaselineUnit[],
+    ): Promise<number> => {
       const uniqueUnits = [
         ...new Map(
           units
@@ -137,9 +171,10 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
         for (let index = 0; index < uniqueUnits.length; index += 250) {
           const chunk = uniqueUnits.slice(index, index + 250);
           const rows = await db
-            .insert(entryEventResults)
+            .insert(entryEventResultsInCompetition)
             .values(
               chunk.map((unit) => ({
+                seasonId: season.seasonId,
                 entryId: unit.entryId,
                 eventId: unit.eventId,
                 eventPoints: 0,
@@ -151,122 +186,145 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
               })),
             )
             .onConflictDoNothing({
-              target: [entryEventResults.entryId, entryEventResults.eventId],
+              target: [
+                entryEventResultsInCompetition.seasonId,
+                entryEventResultsInCompetition.entryId,
+                entryEventResultsInCompetition.eventId,
+              ],
             })
-            .returning({ id: entryEventResults.id });
+            .returning({ sourceResultId: entryEventResultsInCompetition.sourceResultId });
           inserted += rows.length;
         }
         logInfo('Seeded pre-entry event result baselines', {
+          season: season.seasonCode,
           requested: uniqueUnits.length,
           inserted,
         });
         return inserted;
       } catch (error) {
         logError('Failed to seed pre-entry event result baselines', error, {
+          season: season.seasonCode,
           count: uniqueUnits.length,
         });
         throw new DatabaseError(
           'Failed to seed pre-entry event result baselines',
           'ENTRY_EVENT_RESULTS_BASELINE_UPSERT_ERROR',
-          error as Error,
+          error instanceof Error ? error : undefined,
         );
       }
     },
 
     aggregateTotalsByEntry: async (
+      season: FplSeasonRef,
       entryIds: number[],
       startEventId: number,
       endEventId: number,
     ): Promise<EntryEventTotalsRow[]> => {
-      if (entryIds.length === 0) {
-        return [];
-      }
+      if (entryIds.length === 0) return [];
 
       try {
         const db = await getDbInstance();
         const uniqueEntryIds = Array.from(new Set(entryIds));
-        const chunks: number[][] = [];
-        for (let index = 0; index < uniqueEntryIds.length; index += 1000) {
-          chunks.push(uniqueEntryIds.slice(index, index + 1000));
-        }
-
         const rows: EntryEventTotalsRow[] = [];
-        for (const chunk of chunks) {
+        for (let index = 0; index < uniqueEntryIds.length; index += 1000) {
+          const chunk = uniqueEntryIds.slice(index, index + 1000);
           const chunkRows = await db
             .select({
-              entryId: entryEventResults.entryId,
-              totalPoints: sql<number>`COALESCE(SUM(${entryEventResults.eventPoints}), 0)::int`,
-              totalTransfersCost: sql<number>`COALESCE(SUM(${entryEventResults.eventTransfersCost}), 0)::int`,
-              totalNetPoints: sql<number>`COALESCE(SUM(${entryEventResults.eventNetPoints}), 0)::int`,
+              entryId: entryEventResultsInCompetition.entryId,
+              totalPoints: sql<number>`COALESCE(SUM(${entryEventResultsInCompetition.eventPoints}), 0)::int`,
+              totalTransfersCost: sql<number>`COALESCE(SUM(${entryEventResultsInCompetition.eventTransfersCost}), 0)::int`,
+              totalNetPoints: sql<number>`COALESCE(SUM(${entryEventResultsInCompetition.eventNetPoints}), 0)::int`,
             })
-            .from(entryEventResults)
+            .from(entryEventResultsInCompetition)
             .where(
               and(
-                inArray(entryEventResults.entryId, chunk),
-                gte(entryEventResults.eventId, startEventId),
-                lte(entryEventResults.eventId, endEventId),
+                eq(entryEventResultsInCompetition.seasonId, season.seasonId),
+                inArray(entryEventResultsInCompetition.entryId, chunk),
+                gte(entryEventResultsInCompetition.eventId, startEventId),
+                lte(entryEventResultsInCompetition.eventId, endEventId),
               ),
             )
-            .groupBy(entryEventResults.entryId);
-
+            .groupBy(entryEventResultsInCompetition.entryId);
           rows.push(...chunkRows);
         }
-
-        logInfo('Aggregated entry event results totals', { count: rows.length });
         return rows;
       } catch (error) {
-        logError('Failed to aggregate entry event results totals', error);
+        logError('Failed to aggregate entry event results totals', error, {
+          season: season.seasonCode,
+        });
         throw new DatabaseError(
           'Failed to aggregate entry event results totals',
           'ENTRY_EVENT_RESULTS_AGGREGATE_ERROR',
-          error as Error,
+          error instanceof Error ? error : undefined,
         );
       }
     },
 
     findByEventAndEntryIds: async (
+      season: FplSeasonRef,
       eventId: number,
       entryIds: number[],
     ): Promise<DbEntryEventResult[]> => {
-      if (entryIds.length === 0) {
-        return [];
-      }
+      if (entryIds.length === 0) return [];
 
       try {
         const db = await getDbInstance();
         const uniqueEntryIds = Array.from(new Set(entryIds));
-        const chunks: number[][] = [];
-        for (let index = 0; index < uniqueEntryIds.length; index += 1000) {
-          chunks.push(uniqueEntryIds.slice(index, index + 1000));
-        }
-
         const results: DbEntryEventResult[] = [];
-        for (const chunk of chunks) {
-          const rows = await db
-            .select()
-            .from(entryEventResults)
-            .where(
-              and(
-                eq(entryEventResults.eventId, eventId),
-                inArray(entryEventResults.entryId, chunk),
+        for (let index = 0; index < uniqueEntryIds.length; index += 1000) {
+          const chunk = uniqueEntryIds.slice(index, index + 1000);
+          const [resultRows, pickRows] = await Promise.all([
+            db
+              .select()
+              .from(entryEventResultsInCompetition)
+              .where(
+                and(
+                  eq(entryEventResultsInCompetition.seasonId, season.seasonId),
+                  eq(entryEventResultsInCompetition.eventId, eventId),
+                  inArray(entryEventResultsInCompetition.entryId, chunk),
+                ),
               ),
-            );
-          results.push(...rows);
+            db
+              .select()
+              .from(entryEventPicksInCompetition)
+              .where(
+                and(
+                  eq(entryEventPicksInCompetition.seasonId, season.seasonId),
+                  eq(entryEventPicksInCompetition.eventId, eventId),
+                  inArray(entryEventPicksInCompetition.entryId, chunk),
+                ),
+              )
+              .orderBy(
+                asc(entryEventPicksInCompetition.entryId),
+                asc(entryEventPicksInCompetition.position),
+              ),
+          ]);
+          const picksByEntry = new Map<number, PickStorage[]>();
+          for (const pick of pickRows) {
+            const entryPicks = picksByEntry.get(pick.entryId) ?? [];
+            entryPicks.push(pick);
+            picksByEntry.set(pick.entryId, entryPicks);
+          }
+          results.push(
+            ...resultRows.map((row) => hydrateResult(row, picksByEntry.get(row.entryId) ?? [])),
+          );
         }
-
-        logInfo('Retrieved entry event results', { eventId, count: results.length });
         return results;
       } catch (error) {
-        logError('Failed to retrieve entry event results', error, { eventId });
+        logError('Failed to retrieve entry event results', error, {
+          season: season.seasonCode,
+          eventId,
+        });
         throw new DatabaseError(
           'Failed to retrieve entry event results',
           'ENTRY_EVENT_RESULTS_FIND_ERROR',
-          error as Error,
+          error instanceof Error ? error : undefined,
         );
       }
     },
 
     findEntryIdsNeedingRichSync: async (
+      season: FplSeasonRef,
       entryIds: number[],
       eventId: number,
       freshAfter?: Date | string,
@@ -277,20 +335,24 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
       try {
         const db = await getDbInstance();
         const syncedEntryIds = new Set<number>();
+        const threshold =
+          freshAfter instanceof Date ? freshAfter : freshAfter ? new Date(freshAfter) : undefined;
+        if (threshold && !Number.isFinite(threshold.getTime())) {
+          throw new Error('A valid rich-sync freshness timestamp is required');
+        }
         for (let index = 0; index < uniqueEntryIds.length; index += 1000) {
           const chunk = uniqueEntryIds.slice(index, index + 1000);
           const rows = await db
-            .select({ entryId: entryEventResults.entryId })
-            .from(entryEventResults)
+            .select({ entryId: entryEventResultsInCompetition.entryId })
+            .from(entryEventResultsInCompetition)
             .where(
               and(
-                eq(entryEventResults.eventId, eventId),
-                inArray(entryEventResults.entryId, chunk),
-                freshAfter
-                  ? sql`${entryEventResults.richSyncedAt} >= ${
-                      freshAfter instanceof Date ? freshAfter.toISOString() : freshAfter
-                    }::timestamptz`
-                  : isNotNull(entryEventResults.richSyncedAt),
+                eq(entryEventResultsInCompetition.seasonId, season.seasonId),
+                eq(entryEventResultsInCompetition.eventId, eventId),
+                inArray(entryEventResultsInCompetition.entryId, chunk),
+                threshold
+                  ? gte(entryEventResultsInCompetition.richSyncedAt, threshold)
+                  : isNotNull(entryEventResultsInCompetition.richSyncedAt),
               ),
             );
           for (const row of rows) syncedEntryIds.add(row.entryId);
@@ -298,18 +360,20 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
         return uniqueEntryIds.filter((entryId) => !syncedEntryIds.has(entryId));
       } catch (error) {
         logError('Failed to audit rich entry event results', error, {
+          season: season.seasonCode,
           eventId,
           freshAfter: freshAfter instanceof Date ? freshAfter.toISOString() : freshAfter,
         });
         throw new DatabaseError(
           'Failed to audit rich entry event results',
           'ENTRY_EVENT_RESULTS_RICH_AUDIT_ERROR',
-          error as Error,
+          error instanceof Error ? error : undefined,
         );
       }
     },
 
     upsertFromPicksAndLive: async (
+      season: FplSeasonRef,
       entryId: number,
       eventId: number,
       picks: RawFPLEntryEventPicksResponse,
@@ -334,24 +398,26 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
           `Refusing incomplete event-live coverage for entry ${entryId}, event ${eventId}`,
         );
       }
+
       const autoSubs = validateAutomaticSubs(entryId, eventId, picks);
       try {
         const db = await getDbInstance();
+        const exactRichSyncedAt =
+          richSyncedAt instanceof Date ? richSyncedAt : new Date(richSyncedAt);
+        if (!Number.isFinite(exactRichSyncedAt.getTime())) {
+          throw new Error('A valid rich-sync source timestamp is required');
+        }
+        const richSyncedAtIso = exactRichSyncedAt.toISOString();
 
         const entryHistory = picks.entry_history;
-        const exactRichSyncedAt =
-          richSyncedAt instanceof Date ? richSyncedAt.toISOString() : richSyncedAt;
-        const richSyncedAtSql = sql`${exactRichSyncedAt}::timestamptz`;
-        const activeChip = picks.active_chip ?? null;
         const captainPick = resolveScoringCaptainPick(picks.picks);
         const elementsPoints = new Map<number, number>();
-        for (const el of live.elements) {
-          elementsPoints.set(el.id, el.stats.total_points);
+        for (const element of live.elements) {
+          elementsPoints.set(element.id, element.stats.total_points);
         }
-        const autoSubPoints = getAutoSubPoints(autoSubs, elementsPoints);
         const captainPointsBase = captainPick ? (elementsPoints.get(captainPick.element) ?? 0) : 0;
-        const captainPoints = captainPick ? captainPointsBase * captainPick.multiplier : null;
         const insert = {
+          seasonId: season.seasonId,
           entryId,
           eventId,
           eventPoints: entryHistory.points,
@@ -359,31 +425,31 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
           eventTransfersCost: entryHistory.event_transfers_cost,
           eventNetPoints: entryHistory.points - entryHistory.event_transfers_cost,
           eventBenchPoints: entryHistory.points_on_bench ?? null,
-          eventAutoSubPoints: autoSubPoints,
+          eventAutoSubPoints: getAutoSubPoints(autoSubs, elementsPoints),
           eventRank: entryHistory.rank ?? null,
-          eventChip: toNullableDbChip(activeChip),
-          eventPlayedCaptain: captainPick ? captainPick.element : null,
-          eventCaptainPoints: captainPoints,
-          eventPicks: picks.picks as unknown,
-          eventAutoSub: autoSubs as unknown,
+          eventChip: toNullableDbChip(picks.active_chip),
+          playedCaptainElementId: captainPick ? captainPick.element : null,
+          captainPoints: captainPick ? captainPointsBase * captainPick.multiplier : null,
+          automaticSubstitutions: autoSubs,
           overallPoints: entryHistory.total_points,
           overallRank: entryHistory.overall_rank ?? 0,
           teamValue: entryHistory.value ?? null,
           bank: entryHistory.bank ?? null,
-          richSyncedAt: richSyncedAtSql,
+          richSyncedAt: exactRichSyncedAt,
         };
 
         await db
-          .insert(entryEventResults)
+          .insert(entryEventResultsInCompetition)
           .values(insert)
           .onConflictDoUpdate({
-            target: [entryEventResults.entryId, entryEventResults.eventId],
-            // Rich picks/live evidence is ordered by the timestamp captured
-            // before the upstream reads. A slower, older attempt must not
-            // replace a newer corrected result or move its checkpoint back.
+            target: [
+              entryEventResultsInCompetition.seasonId,
+              entryEventResultsInCompetition.entryId,
+              entryEventResultsInCompetition.eventId,
+            ],
             where: sql`
-              ${entryEventResults.richSyncedAt} IS NULL
-              OR ${entryEventResults.richSyncedAt} < ${richSyncedAtSql}
+              ${entryEventResultsInCompetition.richSyncedAt} IS NULL
+              OR ${entryEventResultsInCompetition.richSyncedAt} < ${richSyncedAtIso}::timestamptz
             `,
             set: {
               eventPoints: insert.eventPoints,
@@ -394,26 +460,32 @@ export const createEntryEventResultsRepository = (dbInstance?: DbOrTransaction) 
               eventAutoSubPoints: insert.eventAutoSubPoints,
               eventRank: insert.eventRank,
               eventChip: insert.eventChip,
-              eventPlayedCaptain: insert.eventPlayedCaptain,
-              eventCaptainPoints: insert.eventCaptainPoints,
-              eventPicks: insert.eventPicks,
-              eventAutoSub: insert.eventAutoSub,
+              playedCaptainElementId: insert.playedCaptainElementId,
+              captainPoints: insert.captainPoints,
+              automaticSubstitutions: insert.automaticSubstitutions,
               overallPoints: insert.overallPoints,
               overallRank: insert.overallRank,
               teamValue: insert.teamValue,
               bank: insert.bank,
-              richSyncedAt: richSyncedAtSql,
+              richSyncedAt: exactRichSyncedAt,
               updatedAt: new Date(),
             },
           });
-
-        logInfo('Upserted entry event results', { entryId, eventId });
+        logInfo('Upserted entry event results', {
+          season: season.seasonCode,
+          entryId,
+          eventId,
+        });
       } catch (error) {
-        logError('Failed to upsert entry event results', error, { entryId, eventId });
+        logError('Failed to upsert entry event results', error, {
+          season: season.seasonCode,
+          entryId,
+          eventId,
+        });
         throw new DatabaseError(
           'Failed to upsert entry event results',
           'ENTRY_EVENT_RESULTS_UPSERT_ERROR',
-          error as Error,
+          error instanceof Error ? error : undefined,
         );
       }
     },

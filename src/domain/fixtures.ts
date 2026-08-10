@@ -89,7 +89,7 @@ export const RawFPLFixtureSchema = z.object({
 });
 
 // ================================
-// Team-perspective fixture (stored in FixturesByTeam cache)
+// Team-perspective fixture used by the live publication's team-keyed view.
 // ================================
 
 export interface TeamFixture {

@@ -2,29 +2,46 @@
 
 Two migrators share this directory:
 
-- `bun run db:migrate` (drizzle-kit) applies exactly the files journaled in
-  `meta/_journal.json` (currently `0000`–`0005`).
-- `bun run db:apply-sql` (`scripts/apply-sql-migrations.ts`) applies every other
-  `NNNN_name.sql` file here, in lexical order, and records applied files in the
-  `sql_migrations` ledger table. Journal-listed files are always excluded. Each
-  file and ledger insert share one transaction; the ledger stores a SHA-256
-  checksum and refuses edited or missing applied files.
-- `bun run db:migrate:status` is read-only apart from bootstrapping the ledger
-  shape and exits non-zero for pending, legacy-unchecksummed, mismatched, or
-  missing migrations.
+- `bun run db:migrate` applies only files journaled in `meta/_journal.json` (the immutable
+  Drizzle baseline).
+- `bun run db:apply-sql` applies every other numbered `NNNN_name.sql` file in lexical order.
+  It stores SHA-256 checksums and refuses edited, missing, or backdated applied files.
+- `bun run db:migrate:status` verifies both histories and exits non-zero for any pending,
+  unchecksummed, mismatched, missing, or backdated migration.
 
-**`bun run db:generate` is frozen** (see `docs/fix-plan-2026-07-17.md`, FP-01):
-running it now would emit a schema-reset migration. Until the freeze is lifted,
-add new migrations as hand-written, idempotent (`IF NOT EXISTS`) `NNNN_name.sql`
-files with the next sequential number, so already-migrated environments are no-ops.
+Before v3 activation, the numbered ledger is `public.sql_migrations`. Migration `0090` atomically
+moves authority to `ops.schema_migrations` and leaves only its temporary compatibility boundary.
+Migration `0093` removes that compatibility object after the separately approved legacy cleanup.
 
-The production `sql_migrations` ledger includes the immutable Understat/FPL
-history from `0050_create_understat_provider_tables.sql` through
-`0071_drop_tournament_snapshot_materialized_view.sql`. Keep those files in the
-tree even when the feature branch that introduced them is not otherwise part of
-the current release. The current custom tail is `0079`; new migrations must
-continue at `0080`.
+## v3 ordering and gates
 
-`0034_widen_entry_event_transfers_identity.sql` is a staged cutover. Deploy the
-service with `TRANSFER_SYNC_MODE=latest` first, apply 0034, then change the mode
-to `all` and trigger the existing entry-transfers sync job to backfill history.
+- `0079`-`0089` create, migrate, validate, and prepare the six private Data schemas.
+- The `0090_*` files activate/freeze v2, add runtime identities/business keys, and install the final
+  reporting/publication definitions. `0090_zzz` is the final non-destructive publication identity
+  and plan-version fence. These files are ordered lexically and each has an independent checksum.
+- `letletme_data_writer` has column-level `SELECT` only on
+  `ops.migration_runs(run_id, status, metadata)` so `cache:publish-core` can verify the exact
+  activated pre-cleanup run without receiving broad migration provenance or mutation access.
+- In `reporting`, the writer has schema usage and reads only the two tournament MVs that its
+  allowlisted refresh functions rebuild. Ordinary reporting views and all reporting DML/DDL remain
+  outside the Data runtime capability.
+- `0091`-`0093` are legacy-drop migrations. The runner excludes them unless
+  `V3_LEGACY_DROP_APPROVAL` exactly matches the approved run ID contract.
+- Production deployment also requires the external release manifest, exact candidate SHA/image
+  digest, cutover run ID, and activation approval before any v3 migration runs.
+
+Never renumber, edit, or remove an applied migration. A correction is a new lexically later file,
+unless the changed migration has only been exercised in disposable rehearsal databases and the
+versioned acceptance report explicitly supersedes its earlier checksum.
+
+## Schema declarations
+
+`src/db/schemas/platform-v3.schema.ts` is the TypeScript declaration used by runtime repositories
+and `bun run db:check`. Hand-written SQL remains authoritative for PostgreSQL features that Drizzle
+ORM 0.43 cannot express, including the partial unique
+`ops.dataset_publications_one_active_scope_idx ... NULLS NOT DISTINCT`, role/grant boundaries,
+security-invoker views, reporting refresh functions, and approval gates.
+
+Do not run `bun run db:generate` as a production migration shortcut. Update the declaration and add
+a reviewed, idempotent numbered SQL migration with explicit lock/statement timeouts, then replay
+fresh and B0 PostgreSQL 15 paths twice.

@@ -1,24 +1,72 @@
-import { sql } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 
-import { teams, type DbTeam, type DbTeamInsert } from '../db/schemas/index.schema';
+import { teamsInFpl, type DbTeam, type DbTeamInsert } from '../db/schemas/index.schema';
 import { getDb, type DbOrTransaction } from '../db/singleton';
+import type { FplSeasonRef } from '../domain/fpl-season';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 
 import type { Team as DomainTeam } from '../types';
 
+function mapDbTeamToDomain(team: DbTeam): DomainTeam {
+  return {
+    id: team.teamId,
+    name: team.name,
+    shortName: team.shortName,
+    code: team.code,
+    draw: team.draw,
+    form: team.form,
+    loss: team.loss,
+    played: team.played,
+    points: team.points,
+    position: team.position,
+    strength: team.strength,
+    teamDivision: team.teamDivision,
+    unavailable: team.unavailable,
+    win: team.win,
+    strengthOverallHome: team.strengthOverallHome,
+    strengthOverallAway: team.strengthOverallAway,
+    strengthAttackHome: team.strengthAttackHome,
+    strengthAttackAway: team.strengthAttackAway,
+    strengthDefenceHome: team.strengthDefenceHome,
+    strengthDefenceAway: team.strengthDefenceAway,
+    pulseId: team.pulseId,
+    createdAt: team.createdAt,
+    updatedAt: team.updatedAt,
+  };
+}
+
 export const createTeamRepository = (dbInstance?: DbOrTransaction) => {
   const getDbInstance = async () => dbInstance || (await getDb());
 
   return {
-    upsertBatch: async (domainTeams: DomainTeam[]): Promise<DbTeam[]> => {
+    findAll: async (season: FplSeasonRef): Promise<DomainTeam[]> => {
+      try {
+        const db = await getDbInstance();
+        const rows = await db
+          .select()
+          .from(teamsInFpl)
+          .where(eq(teamsInFpl.seasonId, season.seasonId));
+        return rows.map(mapDbTeamToDomain);
+      } catch (error) {
+        logError('Failed to retrieve teamsInFpl', error, { season: season.seasonCode });
+        throw new DatabaseError(
+          'Failed to retrieve teamsInFpl',
+          'FIND_ALL_TEAMS_ERROR',
+          error instanceof Error ? error : undefined,
+        );
+      }
+    },
+
+    upsertBatch: async (season: FplSeasonRef, domainTeams: DomainTeam[]): Promise<DbTeam[]> => {
       try {
         if (domainTeams.length === 0) {
           return [];
         }
 
         const newTeams: DbTeamInsert[] = domainTeams.map((team) => ({
-          id: team.id,
+          seasonId: season.seasonId,
+          teamId: team.id,
           name: team.name,
           shortName: team.shortName,
           code: team.code,
@@ -43,10 +91,10 @@ export const createTeamRepository = (dbInstance?: DbOrTransaction) => {
 
         const db = await getDbInstance();
         const result = await db
-          .insert(teams)
+          .insert(teamsInFpl)
           .values(newTeams)
           .onConflictDoUpdate({
-            target: teams.id,
+            target: [teamsInFpl.seasonId, teamsInFpl.teamId],
             set: {
               name: sql`excluded.name`,
               shortName: sql`excluded.short_name`,
@@ -73,12 +121,15 @@ export const createTeamRepository = (dbInstance?: DbOrTransaction) => {
           })
           .returning();
 
-        logInfo('Batch upserted teams', { count: result.length });
+        logInfo('Batch upserted teamsInFpl', { count: result.length, season: season.seasonCode });
         return result;
       } catch (error) {
-        logError('Failed to batch upsert teams', error, { count: domainTeams.length });
+        logError('Failed to batch upsert teamsInFpl', error, {
+          count: domainTeams.length,
+          season: season.seasonCode,
+        });
         throw new DatabaseError(
-          'Failed to batch upsert teams',
+          'Failed to batch upsert teamsInFpl',
           'BATCH_UPSERT_ERROR',
           error instanceof Error ? error : undefined,
         );

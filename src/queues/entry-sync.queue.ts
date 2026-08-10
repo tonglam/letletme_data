@@ -31,6 +31,8 @@ export const ENTRY_SYNC_DEFAULT_THROTTLE_MS = parsePositiveInt(
 );
 
 export interface EntrySyncJobData {
+  seasonId: number;
+  seasonCode: string;
   source?: EntrySyncJobSource;
   triggeredAt: string;
   entryIds?: number[];

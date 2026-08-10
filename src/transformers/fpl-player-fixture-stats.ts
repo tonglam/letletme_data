@@ -1,5 +1,7 @@
-import { EventExplainFixtureSchema, type RawFPLEventLiveElement } from '../clients/fpl';
+import { EventExplainFixtureSchema } from '../clients/fpl';
 import type { FplPlayerFixtureEvidence } from '../domain/fpl-player-fixture-stats';
+
+import type { RawFPLEventLiveElement } from '../types';
 
 const IDENTIFIERS = {
   minutes: 'minutes',
@@ -29,8 +31,10 @@ export function transformFplPlayerFixtureEvidence(
 ): FplPlayerFixtureEvidence[] {
   const rows: FplPlayerFixtureEvidence[] = [];
   const identities = new Set<string>();
+
   for (const element of elements) {
     if (!Array.isArray(element.explain)) continue;
+
     for (const candidate of element.explain) {
       const fixture = EventExplainFixtureSchema.parse(candidate);
       const identity = `${fixture.fixture}:${element.id}`;
@@ -40,6 +44,7 @@ export function transformFplPlayerFixtureEvidence(
         );
       }
       identities.add(identity);
+
       const stats = new Map<string, number>();
       for (const stat of fixture.stats) {
         stats.set(stat.identifier, (stats.get(stat.identifier) ?? 0) + stat.value);
@@ -58,6 +63,7 @@ export function transformFplPlayerFixtureEvidence(
       });
     }
   }
+
   return rows.sort(
     (left, right) => left.fixtureId - right.fixtureId || left.elementId - right.elementId,
   );

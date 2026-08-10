@@ -1,10 +1,15 @@
 # Understat–FPL 球员映射审计日志
 
+> Historical evidence snapshot generated before the Data Platform v3 hard cut. Runtime names are
+> now `bridge.entity_links` and unified season-keyed `fpl.*` tables. The decisions and counts below
+> are preserved as audit evidence; this file is not the current schema or ingestion contract. See
+> `docs/understat-pipeline.md` for the authoritative runtime design.
+
 - 生成时间：2026-08-09T00:40:05.664Z
 - 规则版本：`understat-fpl-player-name-v3`
 - 处理顺序：2526 → 2425 → 2324 → 2223 → 2122 → 2021 → 1920 → 1819 → 1718 → 1617 → 1516 → 1415
 - exact normalized full name 不单独记录；所有非 exact 决策均在本文记录。
-- consumer 只应读取 `provider_entity_links.status IN (auto_verified, manual_verified)`。
+- consumer 只应读取 `bridge.entity_links.status IN (auto_verified, manual_verified)`。
 
 ## 判定规则
 
@@ -3847,7 +3852,8 @@
 
 ## 数据范围说明
 
-- 1617–2526 使用数据库中的 FPL history；1415、1516 使用本地保存的官方 Pulselive ranked stats identity/metrics 与 FPL legacy stats。旧两季没有新增 `players_history` 分区，但 provider bridge 已使用持久 FPL code 写入 verified link，并在 evidence 中保留原始文件来源。
+- 1617–2526 的审计当时使用旧 FPL history 数据；v3 迁移后这些事实位于统一、显式
+  `season_id` 的 `fpl.*` 表。1415、1516 使用本地保存的官方 Pulselive ranked stats
+  identity/metrics 与 FPL legacy stats；这些来源只作为 bridge evidence，不创建 history 分区。
 - exact normalized full name 不进入非 exact 日志；历史源的 29 条非 exact 已完整列出并全部是 high。
 - 该日志只记录身份映射，不改变 Understat canonical tables，也不把映射写入 FPL current tables。
-

@@ -28,6 +28,7 @@ import {
   singleTransformedEventLiveFixture,
   transformedEventLivesFixture,
 } from '../fixtures/event-lives.fixtures';
+import { TEST_SEASON } from '../fixtures/seasons.fixtures';
 
 describe('Event Lives Unit Tests', () => {
   describe('transformEventLives Function', () => {
@@ -315,7 +316,7 @@ describe('Event Lives Unit Tests', () => {
     });
 
     test('should handle upsertBatch with empty array', async () => {
-      const result = await repository.upsertBatch([]);
+      const result = await repository.upsertBatch(TEST_SEASON, []);
       expect(result).toBeDefined();
     });
   });

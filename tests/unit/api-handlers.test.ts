@@ -1,6 +1,10 @@
 import { beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
 
 import type { TournamentSetupStatusRow } from '../../src/repositories/tournament-infos';
+import { seasonRepository } from '../../src/repositories/seasons';
+import { TEST_SEASON } from '../fixtures/seasons.fixtures';
+
+spyOn(seasonRepository, 'findCurrent').mockImplementation(async () => TEST_SEASON as never);
 
 const getCurrentEvent = mock(async () => ({ id: 20, name: 'Gameweek 20' }));
 const getNextEvent = mock(async () => ({ id: 21, name: 'Gameweek 21' }));
@@ -86,14 +90,6 @@ mock.module('../../src/queues/entry-sync.queue', () => ({
 mock.module('../../src/queues/live-data.queue', () => ({
   LIVE_JOBS: {
     LIVE_SNAPSHOT: 'live-snapshot',
-    EVENT_LIVES_CACHE: 'event-lives-cache',
-    EVENT_LIVES_DB: 'event-lives-db',
-    EVENT_LIVE_SUMMARY: 'event-live-summary',
-    EVENT_LIVE_EXPLAIN: 'event-live-explain',
-    LIVE_FIXTURE_CACHE: 'live-fixture-cache',
-    LIVE_BONUS_CACHE: 'live-bonus-cache',
-    EVENT_OVERALL_RESULT: 'event-overall-result',
-    LIVE_SCORES: 'live-scores',
   },
   getLiveDataQueue: () => ({
     name: 'live-data-p1',
@@ -110,12 +106,7 @@ const eventLivesService = await import('../../src/services/event-lives.service')
 const getEventLivesByEventId = spyOn(
   eventLivesService,
   'getEventLivesByEventId',
-).mockImplementation(async (eventId: number) => [{ elementId: 1, eventId }] as never);
-
-const fixturesService = await import('../../src/services/fixtures.service');
-const clearFixturesCache = spyOn(fixturesService, 'clearFixturesCache').mockImplementation(
-  async () => undefined,
-);
+).mockImplementation(async (_season, eventId: number) => [{ elementId: 1, eventId }] as never);
 
 const checkTournamentNameAvailability = mock(async (name: string) => ({
   available: name !== 'taken',
@@ -203,7 +194,7 @@ describe('eventsAPI handlers', () => {
     const body = (await response.json()) as { success: boolean; jobId: string };
     expect(body.success).toBe(true);
     expect(body.jobId).toBe('core-snapshot-job-1');
-    expect(enqueueCoreSnapshotJob).toHaveBeenCalledWith('api');
+    expect(enqueueCoreSnapshotJob).toHaveBeenCalledWith(TEST_SEASON, 'api');
   });
 });
 
@@ -214,7 +205,7 @@ describe('playersAPI handlers', () => {
     );
     expect(response.status).toBe(202);
     expect(await response.json()).toMatchObject({ success: true, jobId: 'core-snapshot-job-1' });
-    expect(enqueueCoreSnapshotJob).toHaveBeenCalledWith('api');
+    expect(enqueueCoreSnapshotJob).toHaveBeenCalledWith(TEST_SEASON, 'api');
   });
 });
 
@@ -225,7 +216,7 @@ describe('playerValuesAPI handlers', () => {
     );
     expect(response.status).toBe(202);
     expect(await response.json()).toMatchObject({ success: true, jobId: 'player-values-job-1' });
-    expect(enqueuePlayerValuesSyncJob).toHaveBeenCalledWith('api');
+    expect(enqueuePlayerValuesSyncJob).toHaveBeenCalledWith(TEST_SEASON, 'api');
   });
 });
 
@@ -299,7 +290,7 @@ describe('entrySyncAPI handlers', () => {
     expect(response.status).toBe(202);
     const body = (await response.json()) as { success: boolean; jobId: string };
     expect(body.success).toBe(true);
-    expect(body.jobId).toMatch(/^entry-picks-entry-list-/);
+    expect(body.jobId).toMatch(/^entry-picks-2627-entry-list-/);
     expect(entrySyncAddCalls).toHaveLength(1);
     expect(entrySyncAddCalls[0].name).toBe('entry-picks');
     expect(entrySyncAddCalls[0].data).toMatchObject({
@@ -323,9 +314,9 @@ describe('entrySyncAPI handlers', () => {
       jobIds: { picks: string; transfers: string; results: string };
     };
     expect(body.success).toBe(true);
-    expect(body.jobIds.picks).toMatch(/^entry-picks-entry-list-/);
-    expect(body.jobIds.transfers).toMatch(/^entry-transfers-entry-list-/);
-    expect(body.jobIds.results).toMatch(/^entry-results-entry-list-/);
+    expect(body.jobIds.picks).toMatch(/^entry-picks-2627-entry-list-/);
+    expect(body.jobIds.transfers).toMatch(/^entry-transfers-2627-entry-list-/);
+    expect(body.jobIds.results).toMatch(/^entry-results-2627-entry-list-/);
     expect(entrySyncAddCalls.map((c) => c.name).sort()).toEqual([
       'entry-picks',
       'entry-results',
@@ -347,12 +338,30 @@ describe('entrySyncAPI handlers', () => {
     expect(response.status).toBe(422);
     expect(entrySyncAddCalls).toHaveLength(0);
   });
+
+  test('rejects non-positive or fractional entry/event identifiers before enqueueing', async () => {
+    for (const body of [
+      { entryIds: [0] },
+      { entryIds: [1.5] },
+      { entryIds: [1], eventId: 0 },
+      { entryIds: [1], eventId: 2.5 },
+    ]) {
+      const response = await entrySyncAPI.handle(
+        new Request('http://localhost/entry-sync/picks', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+        }),
+      );
+      expect(response.status).toBe(422);
+    }
+    expect(entrySyncAddCalls).toHaveLength(0);
+  });
 });
 
 describe('fixturesAPI handlers', () => {
   beforeEach(() => {
     enqueueCoreSnapshotJob.mockClear();
-    clearFixturesCache.mockClear();
   });
 
   test('POST /fixtures/sync enqueues the complete core snapshot and returns 202', async () => {
@@ -363,41 +372,7 @@ describe('fixturesAPI handlers', () => {
     const body = (await response.json()) as { success: boolean; jobId: string };
     expect(body.success).toBe(true);
     expect(body.jobId).toBe('core-snapshot-job-1');
-    expect(enqueueCoreSnapshotJob).toHaveBeenCalledWith('api');
-  });
-
-  test('POST /fixtures/sync?event= coerces a numeric event filter', async () => {
-    const response = await fixturesAPI.handle(
-      new Request('http://localhost/fixtures/sync?event=12', { method: 'POST' }),
-    );
-    expect(response.status).toBe(202);
-    expect(enqueueCoreSnapshotJob).toHaveBeenCalledWith('api', { eventId: 12 });
-  });
-
-  test('POST /fixtures/sync rejects a non-numeric event filter', async () => {
-    const response = await fixturesAPI.handle(
-      new Request('http://localhost/fixtures/sync?event=abc', { method: 'POST' }),
-    );
-    expect(response.status).toBe(422);
-    expect(enqueueCoreSnapshotJob).not.toHaveBeenCalled();
-  });
-
-  test('POST /fixtures/sync-all-gameweeks enqueues one complete core snapshot', async () => {
-    const response = await fixturesAPI.handle(
-      new Request('http://localhost/fixtures/sync-all-gameweeks', { method: 'POST' }),
-    );
-    expect(response.status).toBe(202);
-    expect(enqueueCoreSnapshotJob).toHaveBeenCalledWith('api');
-  });
-
-  test('DELETE /fixtures/cache clears the cache', async () => {
-    const response = await fixturesAPI.handle(
-      new Request('http://localhost/fixtures/cache', { method: 'DELETE' }),
-    );
-    expect(response.status).toBe(200);
-    const body = (await response.json()) as { success: boolean };
-    expect(body.success).toBe(true);
-    expect(clearFixturesCache).toHaveBeenCalledTimes(1);
+    expect(enqueueCoreSnapshotJob).toHaveBeenCalledWith(TEST_SEASON, 'api');
   });
 });
 
@@ -411,7 +386,7 @@ describe('playerStatsAPI handlers', () => {
       new Request('http://localhost/player-stats/sync', { method: 'POST' }),
     );
     expect(response.status).toBe(202);
-    expect(enqueuePlayerStatsSyncJob).toHaveBeenCalledWith('api');
+    expect(enqueuePlayerStatsSyncJob).toHaveBeenCalledWith(TEST_SEASON, 'api');
   });
 
   test('POST /player-stats/sync/:eventId enqueues with a numeric event id', async () => {
@@ -419,7 +394,9 @@ describe('playerStatsAPI handlers', () => {
       new Request('http://localhost/player-stats/sync/15', { method: 'POST' }),
     );
     expect(response.status).toBe(202);
-    expect(enqueuePlayerStatsSyncJob).toHaveBeenCalledWith('api', { eventId: 15 });
+    expect(enqueuePlayerStatsSyncJob).toHaveBeenCalledWith(TEST_SEASON, 'api', {
+      eventId: 15,
+    });
   });
 
   test('POST /player-stats/sync/:eventId rejects non-numeric ids', async () => {
@@ -450,7 +427,7 @@ describe('eventLivesAPI handlers', () => {
     const body = (await response.json()) as { success: boolean; eventId: number };
     expect(body.success).toBe(true);
     expect(body.eventId).toBe(12);
-    expect(getEventLivesByEventId).toHaveBeenCalledWith(12);
+    expect(getEventLivesByEventId).toHaveBeenCalledWith(TEST_SEASON, 12);
   });
 
   test('GET /event-lives/:eventId rejects non-numeric ids', async () => {
@@ -466,7 +443,7 @@ describe('eventLivesAPI handlers', () => {
     expect(response.status).toBe(202);
     const body = (await response.json()) as { success: boolean; jobId: string };
     expect(body.success).toBe(true);
-    expect(body.jobId).toBe('event-lives-db-e12-manual');
+    expect(body.jobId).toBe('live-snapshot-2627-e12-manual-persist');
   });
 
   test('POST /event-lives/cache/:eventId enqueues a coherent snapshot and returns 202', async () => {
@@ -475,16 +452,7 @@ describe('eventLivesAPI handlers', () => {
     );
     expect(response.status).toBe(202);
     const body = (await response.json()) as { jobId: string };
-    expect(body.jobId).toBe('event-lives-cache-e12-manual');
-  });
-
-  test('POST /event-lives/summary/:eventId enqueues the summary job and returns 202', async () => {
-    const response = await eventLivesAPI.handle(
-      new Request('http://localhost/event-lives/summary/12', { method: 'POST' }),
-    );
-    expect(response.status).toBe(202);
-    const body = (await response.json()) as { jobId: string };
-    expect(body.jobId).toBe('event-live-summary-e12-manual');
+    expect(body.jobId).toBe('live-snapshot-2627-e12-manual-cache');
   });
 });
 
@@ -546,6 +514,16 @@ describe('tournamentsAPI handlers', () => {
     expect(JSON.stringify(body)).not.toContain('internal-host');
 
     getTournamentSetupStatus.mockImplementation(async () => null);
+  });
+
+  test('rejects non-positive and fractional tournament IDs before service access', async () => {
+    for (const tournamentId of ['0', '1.5']) {
+      const response = await tournamentsAPI.handle(
+        new Request(`http://localhost/tournaments/${tournamentId}/setup-status`),
+      );
+      expect(response.status).toBe(422);
+    }
+    expect(getTournamentSetupStatus).not.toHaveBeenCalled();
   });
 
   test('PATCH /tournaments/:id forwards a validated management command', async () => {
@@ -634,6 +612,16 @@ describe('entryInfoAPI handlers', () => {
     expect(response.status).toBe(422);
     expect(entrySyncAddCalls).toHaveLength(0);
   });
+
+  test('rejects non-positive and fractional entryId params', async () => {
+    for (const entryId of ['0', '1.5']) {
+      const response = await entryInfoAPI.handle(
+        new Request(`http://localhost/entry-info/${entryId}/sync`, { method: 'POST' }),
+      );
+      expect(response.status).toBe(422);
+    }
+    expect(entrySyncAddCalls).toHaveLength(0);
+  });
 });
 
 describe('queued core snapshot compatibility APIs', () => {
@@ -652,7 +640,7 @@ describe('queued core snapshot compatibility APIs', () => {
       jobId: 'core-snapshot-job-1',
       message: 'Core snapshot queued',
     });
-    expect(enqueueCoreSnapshotJob).toHaveBeenCalledWith('api');
+    expect(enqueueCoreSnapshotJob).toHaveBeenCalledWith(TEST_SEASON, 'api');
   });
 
   test('POST /phases/sync returns the queued job contract', async () => {
@@ -666,6 +654,6 @@ describe('queued core snapshot compatibility APIs', () => {
       jobId: 'core-snapshot-job-1',
       message: 'Core snapshot queued',
     });
-    expect(enqueueCoreSnapshotJob).toHaveBeenCalledWith('api');
+    expect(enqueueCoreSnapshotJob).toHaveBeenCalledWith(TEST_SEASON, 'api');
   });
 });

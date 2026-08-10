@@ -11,14 +11,14 @@ import {
 } from '../domain/tournament';
 import { enqueueTournamentSetup } from '../jobs/tournament-setup.jobs';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
-import { ConflictError, getHttpStatusFromError } from '../utils/errors';
+import { seasonRepository } from '../repositories/seasons';
+import { ConflictError, getHttpStatusFromError, ValidationError } from '../utils/errors';
 import {
   getFplRequestMetricsSnapshot,
   runWithFplRequestMetrics,
 } from '../utils/fpl-request-metrics';
 import { getConfig } from '../utils/config';
 import { logInfo } from '../utils/logger';
-import { invalidateTournamentGraphQLCaches } from '../cache/tournament-graphql-cache';
 import { fetchLeagueParticipants } from './tournament-league-members.service';
 
 export { tournamentCreateInputSchema, validateTournamentCreateInput };
@@ -33,7 +33,8 @@ export async function checkTournamentNameAvailability(name: string) {
     };
   }
 
-  const exists = await tournamentInfoRepository.checkNameExists(normalizedName);
+  const season = await seasonRepository.findCurrent();
+  const exists = await tournamentInfoRepository.checkNameExists(season, normalizedName);
 
   return {
     available: !exists,
@@ -42,7 +43,8 @@ export async function checkTournamentNameAvailability(name: string) {
 }
 
 export async function getTournamentSetupStatus(tournamentId: number) {
-  return tournamentInfoRepository.findSetupStatus(tournamentId);
+  const season = await seasonRepository.findCurrent();
+  return tournamentInfoRepository.findSetupStatus(season, tournamentId);
 }
 
 export async function createTournament(payload: TournamentCreateInput): Promise<{
@@ -72,9 +74,7 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
     let rosterMode: 'snapshot' | 'official_sync' | null = null;
     let leagueType: 'classic' | 'h2h' | null = null;
     let reportEmitted = false;
-    const startEventId = parseGameweek(payload.startGameweek);
-    const endEventId = parseGameweek(payload.endGameweek);
-    const eventCount = startEventId && endEventId ? Math.max(0, endEventId - startEventId + 1) : 0;
+    let eventCount = 0;
 
     const report = (
       outcome: 'queued' | 'enqueue_failed' | 'rejected' | 'failed',
@@ -102,6 +102,21 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
     };
 
     try {
+      // The API also validates this boundary, but this service has direct
+      // callers. Reject malformed requests before database or upstream work.
+      try {
+        payload = validateTournamentCreateInput(payload);
+      } catch (error) {
+        throw new ValidationError(
+          'Invalid tournament creation request.',
+          'TOURNAMENT_CREATE_INVALID',
+          error,
+        );
+      }
+      const startEventId = parseGameweek(payload.startGameweek);
+      const endEventId = parseGameweek(payload.endGameweek);
+      eventCount = startEventId && endEventId ? Math.max(0, endEventId - startEventId + 1) : 0;
+      const season = await seasonRepository.findCurrent();
       const source = await fetchLeagueParticipants(payload.leagueUrl);
       phaseDurationsMs.authoritative_roster = Math.round(performance.now() - phaseStartedAtMs);
       leagueType = source.leagueType;
@@ -128,21 +143,16 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
           : planned;
       participantCount = plan.selectedParticipants.length;
       rosterMode = plan.rosterMode ?? 'snapshot';
-      if (await tournamentInfoRepository.checkNameExists(plan.tournamentName)) {
+      if (await tournamentInfoRepository.checkNameExists(season, plan.tournamentName)) {
         throw new ConflictError('Tournament name already exists.', 'TOURNAMENT_NAME_EXISTS');
       }
       phaseDurationsMs.planning = Math.round(performance.now() - phaseStartedAtMs);
 
       failedPhase = 'persistence';
       phaseStartedAtMs = performance.now();
-      const tournament = await tournamentInfoRepository.createTournamentWithEntries(plan);
+      const tournament = await tournamentInfoRepository.createTournamentWithEntries(season, plan);
       tournamentId = tournament.id;
       phaseDurationsMs.persistence = Math.round(performance.now() - phaseStartedAtMs);
-
-      failedPhase = 'cache_invalidation';
-      phaseStartedAtMs = performance.now();
-      await invalidateTournamentGraphQLCaches('create');
-      phaseDurationsMs.cache_invalidation = Math.round(performance.now() - phaseStartedAtMs);
 
       const resultFor = (setupStatus: TournamentSetupStatus) => ({
         tournament: {
@@ -159,7 +169,7 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
       failedPhase = 'enqueue';
       phaseStartedAtMs = performance.now();
       try {
-        await enqueueTournamentSetup(tournament.id, 'create');
+        await enqueueTournamentSetup(season, tournament.id, 'create');
         phaseDurationsMs.enqueue = Math.round(performance.now() - phaseStartedAtMs);
         failedPhase = null;
         report('queued', 'pending', null);
@@ -170,7 +180,7 @@ export async function createTournament(payload: TournamentCreateInput): Promise<
           error instanceof Error ? error.message : 'Failed to enqueue tournament setup.';
         const failureCode = safeCreationErrorCode(error);
         try {
-          await tournamentInfoRepository.markSetupResult(tournament.id, 'failed', message);
+          await tournamentInfoRepository.markSetupResult(season, tournament.id, 'failed', message);
         } catch (statusError) {
           report('enqueue_failed', 'failed', failureCode);
           throw statusError;

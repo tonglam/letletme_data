@@ -1,4 +1,5 @@
 import { getCurrentEvent, getNextEvent } from './events.service';
+import type { FplSeasonRef } from '../domain/fpl-season';
 import type { Event } from '../types';
 import { isFPLSeason } from '../utils/conditions';
 
@@ -8,9 +9,9 @@ export type PlayerSyncEvent = {
 };
 
 export type PlayerSyncEventDependencies = {
-  getCurrentEvent: () => Promise<Event | null>;
-  getNextEvent: () => Promise<Event | null>;
-  isFPLSeason: (date: Date) => Promise<boolean>;
+  getCurrentEvent: (season: FplSeasonRef) => Promise<Event | null>;
+  getNextEvent: (season: FplSeasonRef) => Promise<Event | null>;
+  isFPLSeason: (season: FplSeasonRef, date: Date) => Promise<boolean>;
 };
 
 const defaultDependencies: PlayerSyncEventDependencies = {
@@ -24,13 +25,14 @@ const defaultDependencies: PlayerSyncEventDependencies = {
  * Other current-event jobs intentionally continue using shouldRunCurrentEventJob.
  */
 export async function resolvePlayerSyncEvent(
+  season: FplSeasonRef,
   date: Date = new Date(),
   dependencies: PlayerSyncEventDependencies = defaultDependencies,
 ): Promise<PlayerSyncEvent | null> {
   const [currentEvent, nextEvent, seasonActive] = await Promise.all([
-    dependencies.getCurrentEvent(),
-    dependencies.getNextEvent(),
-    dependencies.isFPLSeason(date),
+    dependencies.getCurrentEvent(season),
+    dependencies.getNextEvent(season),
+    dependencies.isFPLSeason(season, date),
   ]);
 
   if (currentEvent && seasonActive) {

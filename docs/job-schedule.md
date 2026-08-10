@@ -26,7 +26,7 @@ be initialized before the ordinary current-event gate opens.
 | Job | Cron | Gate / behavior |
 |---|---|---|
 | `launch-monitor` | `*/5 * * * *` | One bootstrap read detects both an empty-event warning and a published current-year GW1; each notification is sent once |
-| `event-current-refresh` | `* * * * *` | `isFPLSeason`; rebuilds `event:current` and enqueues the core snapshot when the GW changes |
+| `event-current-refresh` | `* * * * *` | `isFPLSeason`; compares PostgreSQL's current event with the active core revision and enqueues a complete rebuild on mismatch |
 
 The launch monitor calls the FPL bootstrap endpoint directly from the API
 process. All other synchronization work is queue-backed.
@@ -52,7 +52,7 @@ tick can enqueue when needed.
 | `entry-event-transfers-daily` | `40 10 * * *` | `isFPLSeason`, current event, `isAfterMatchDay` |
 | `entry-event-results-daily` | `45 10 * * *` | `isFPLSeason` and current event |
 
-Entry jobs operate only on known `entry_infos`; core season bootstrap does not
+Entry jobs operate only on known `competition.entries`; core season bootstrap does not
 create entry bindings. Scans use an entry-ID keyset cursor, failed-entry retries
 contain only exact failed IDs, and canonical snapshot/pick/result/transfer
 checkpoints prevent successful units from being fetched again.
@@ -64,17 +64,18 @@ checkpoints prevent successful units from being fetched again.
 | `live-snapshot-trigger` | `* * * * *` | `isFPLSeason`, current event, `isMatchDayTime`; one job concurrently fetches event-live + fixtures, atomically publishes every live Redis view, and persists fixture rows only when football content changes. Every UTC ten-minute boundary also persists event-live/explain rows and runs the dependent cascade. Deterministic event/minute IDs dedupe scheduler replicas, while a waiting/delayed/active check prevents a slow prior minute from stacking. |
 | `post-match-consolidation` | `0 6,8,10 * * *` | Current event and bounded post-match result slot; forces a persistent snapshot with a deterministic result-slot ID. |
 
-The snapshot derives `EventLive`, `Fixtures`, legacy/V2 live-fixture, and
-legacy/V2 bonus hashes from the same accepted upstream pair. Changed views are
-published together; content-identical minutes update only freshness metadata.
-This replaces the former independent cache, score, fixture, and bonus cron
-paths, which could race or derive from different minutes.
+The snapshot derives the v3 `eventLives`, `fixtures`, `liveFixtures`,
+`liveFixturesV2`, `liveBonus`, and `liveBonusV2` items from the same accepted
+upstream pair. Every changed item publishes under one immutable revision;
+content-identical minutes are a no-op. This replaces the former independent
+cache, score, fixture, and bonus writers, which could race or derive from
+different minutes.
 
-After a persistent snapshot succeeds, the worker enqueues summary, explain,
-and overall-result jobs. Fixture and bonus derivatives are already in the
-snapshot, so they are not re-enqueued. If the event is data-checked inside the
-post-match window, the worker also enqueues a distinct final league-results
-correction after the fresh `event_lives` rows are persisted.
+A persistent snapshot writes `fpl.player_gameweek_stats` and
+`fpl.player_gameweek_scoring_items` in the same season/event scope. Player
+season summaries derive from those facts; there is no separate summary writer.
+If the event is data-checked inside the post-match window, the worker enqueues
+a distinct final league-results correction after the durable rows commit.
 
 ## Selection publication window
 
@@ -110,7 +111,7 @@ The tournament event-results job starts its cascade only when at least one
 active tournament entry was processed. The cascade contains:
 
 - points-race, battle-race, and knockout structure jobs;
-- post-event transfer calculation and selection stats;
+- post-event transfer calculation and a completeness-gated selection-stats MV refresh;
 - cup results;
 - one materialized-view refresh after the three structure jobs reach their
   Redis-backed completion barrier.

@@ -8,6 +8,7 @@ import {
 import { createPlayerMarketSnapshotsRepository } from '../../src/repositories/player-market-snapshots';
 import { transformPlayerMarketSnapshots } from '../../src/transformers/player-market-snapshots';
 import { rawFPLElementsFixture } from '../fixtures/player-stats.fixtures';
+import { TEST_SEASON } from '../fixtures/seasons.fixtures';
 
 const teams = [
   { id: 1, name: 'Arsenal', short_name: 'ARS' },
@@ -161,14 +162,16 @@ describe('complete daily market snapshot repository', () => {
       selectedByPercent: 18.4,
     });
 
-    await repository.upsertCompleteDay([first], 1);
-    const result = await repository.upsertCompleteDay([retry], 1);
+    await repository.upsertCompleteDay(TEST_SEASON, 1, [first], 1);
+    const result = await repository.upsertCompleteDay(TEST_SEASON, 1, [retry], 1);
 
     expect(result).toEqual({ snapshotDate: '2026-08-03', persistedCount: 1 });
     expect(memory.rows.size).toBe(1);
     expect(memory.rows.get('2026-08-03:1')).toMatchObject({
+      seasonId: TEST_SEASON.seasonId,
+      sourceEventId: 1,
       capturedAt: retry.capturedAt,
-      selectedByPercent: 18.4,
+      selectedByPercent: '18.4',
     });
   });
 
@@ -179,7 +182,7 @@ describe('complete daily market snapshot repository', () => {
     const memory = createMemoryDb({ dropLastReturn: true });
     const repository = createPlayerMarketSnapshotsRepository(memory.db as never);
 
-    await expect(repository.upsertCompleteDay([first, second], 2)).rejects.toThrow(
+    await expect(repository.upsertCompleteDay(TEST_SEASON, 1, [first, second], 2)).rejects.toThrow(
       'Failed to persist complete player market snapshot',
     );
   });

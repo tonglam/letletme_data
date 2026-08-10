@@ -1,101 +1,126 @@
-import { inArray, sql } from 'drizzle-orm';
-import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
+import { and, eq, inArray, or } from 'drizzle-orm';
 
 import {
-  entryEventCupResults,
-  entryInfos,
-  type DbEntryEventCupResultInsert,
+  entriesInCompetition,
+  entryEventCupResultsInCompetition,
 } from '../db/schemas/index.schema';
-import { getDb } from '../db/singleton';
-import { acquireEntrySeasonWriteFence } from './entry-event-transfers';
+import { getDb, type DbHandle } from '../db/singleton';
+import type { FplSeasonRef } from '../domain/fpl-season';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
+import { acquireEntrySeasonWriteFence } from './entry-event-transfers';
 
-type DatabaseInstance = PostgresJsDatabase<Record<string, never>>;
+export interface EntryEventCupResultInput {
+  readonly entryId: number;
+  readonly eventId: number;
+  readonly opponentEntryId: number | null;
+  readonly opponentName: string | null;
+  readonly result: 'win' | 'loss';
+  readonly entryPoints: number;
+  readonly opponentPoints: number;
+  readonly entryName: string | null;
+  readonly playerName: string | null;
+  readonly againstEntryName: string | null;
+  readonly againstPlayerName: string | null;
+  readonly eventPoints: number | null;
+  readonly againstEntryId: number | null;
+  readonly againstEventPoints: number | null;
+}
 
-export const createEntryEventCupResultsRepository = (dbInstance?: DatabaseInstance) => {
-  const getDbInstance = async () => dbInstance || (await getDb());
+export const createEntryEventCupResultsRepository = (dbInstance?: DbHandle) => {
+  const getDbInstance = async () => dbInstance ?? (await getDb());
 
   return {
-    upsertBatch: async (
-      results: DbEntryEventCupResultInsert[],
-      checkpointSeason: string,
+    replaceBatch: async (
+      season: FplSeasonRef,
+      results: readonly EntryEventCupResultInput[],
     ): Promise<number> => {
-      if (results.length === 0) {
-        return 0;
-      }
+      if (results.length === 0) return 0;
 
       try {
-        if (!/^\d{4}$/.test(checkpointSeason)) {
-          throw new Error('A valid four-digit checkpoint season is required');
-        }
         const db = await getDbInstance();
         const persisted = await db.transaction(async (tx) => {
-          const entryIds = results.map((result) => result.entryId);
-          await acquireEntrySeasonWriteFence(tx, entryIds, checkpointSeason);
-          const entrySeasons = await tx
-            .select({
-              id: entryInfos.id,
-              snapshotSeason: entryInfos.entrySnapshotSyncedSeason,
-              transferSeason: entryInfos.entryTransfersSyncedSeason,
-            })
-            .from(entryInfos)
-            .where(inArray(entryInfos.id, entryIds))
+          const entryIds = [...new Set(results.map((result) => result.entryId))];
+          await acquireEntrySeasonWriteFence(tx, season, entryIds);
+          const existingEntries = await tx
+            .select({ entryId: entriesInCompetition.entryId })
+            .from(entriesInCompetition)
+            .where(
+              and(
+                eq(entriesInCompetition.seasonId, season.seasonId),
+                inArray(entriesInCompetition.entryId, entryIds),
+              ),
+            )
             .for('share');
-          const eligibleIds = new Set(
-            entrySeasons
-              .filter((entry) => {
-                const newestSeason = [entry.snapshotSeason, entry.transferSeason]
-                  .filter((season): season is string => season !== null)
-                  .sort()
-                  .at(-1);
-                return !newestSeason || newestSeason === checkpointSeason;
-              })
-              .map((entry) => entry.id),
-          );
-          const eligibleResults = results.filter((result) => eligibleIds.has(result.entryId));
-          if (eligibleResults.length === 0) {
-            return 0;
+          if (new Set(existingEntries.map((entry) => entry.entryId)).size !== entryIds.length) {
+            throw new Error('Cup results contain entries outside the explicit season roster');
           }
 
+          const uniqueScopes = [
+            ...new Map(
+              results.map((result) => [`${result.entryId}:${result.eventId}`, result] as const),
+            ).values(),
+          ];
+          if (uniqueScopes.length !== results.length) {
+            throw new Error('Cup results contain duplicate entry/event scopes');
+          }
           await tx
-            .insert(entryEventCupResults)
+            .delete(entryEventCupResultsInCompetition)
+            .where(
+              and(
+                eq(entryEventCupResultsInCompetition.seasonId, season.seasonId),
+                or(
+                  ...uniqueScopes.map((result) =>
+                    and(
+                      eq(entryEventCupResultsInCompetition.entryId, result.entryId),
+                      eq(entryEventCupResultsInCompetition.eventId, result.eventId),
+                    ),
+                  ),
+                ),
+              ),
+            );
+
+          const rows = await tx
+            .insert(entryEventCupResultsInCompetition)
             .values(
-              eligibleResults.map((result) => ({
-                ...result,
-                sourceSeason: checkpointSeason,
+              results.map((result) => ({
+                seasonId: season.seasonId,
+                entryId: result.entryId,
+                eventId: result.eventId,
+                opponentEntryId: result.opponentEntryId,
+                opponentName: result.opponentName,
+                result: result.result,
+                entryPoints: result.entryPoints,
+                opponentPoints: result.opponentPoints,
+                entryName: result.entryName,
+                playerName: result.playerName,
+                againstEntryName: result.againstEntryName,
+                againstPlayerName: result.againstPlayerName,
+                eventPoints: result.eventPoints,
+                againstEntryId: result.againstEntryId,
+                againstEventPoints: result.againstEventPoints,
+                sourceSeasonCode: season.seasonCode,
               })),
             )
-            .onConflictDoUpdate({
-              target: [entryEventCupResults.entryId, entryEventCupResults.eventId],
-              set: {
-                entryName: sql`excluded.entry_name`,
-                playerName: sql`excluded.player_name`,
-                eventPoints: sql`excluded.event_points`,
-                againstEntryId: sql`excluded.against_entry_id`,
-                againstEntryName: sql`excluded.against_entry_name`,
-                againstPlayerName: sql`excluded.against_player_name`,
-                againstEventPoints: sql`excluded.against_event_points`,
-                result: sql`excluded.result`,
-                sourceSeason: sql`excluded.source_season`,
-                updatedAt: new Date(),
-              },
-            });
-          return eligibleResults.length;
+            .returning({ sourceResultId: entryEventCupResultsInCompetition.sourceResultId });
+          return rows.length;
         });
 
-        logInfo('Upserted entry event cup results', {
+        logInfo('Replaced entry event cup results', {
+          season: season.seasonCode,
           requested: results.length,
           persisted,
-          checkpointSeason,
         });
         return persisted;
       } catch (error) {
-        logError('Failed to upsert entry event cup results', error, { count: results.length });
+        logError('Failed to replace entry event cup results', error, {
+          season: season.seasonCode,
+          count: results.length,
+        });
         throw new DatabaseError(
-          'Failed to upsert entry event cup results',
-          'ENTRY_EVENT_CUP_RESULTS_UPSERT_ERROR',
-          error as Error,
+          'Failed to replace entry event cup results',
+          'ENTRY_EVENT_CUP_RESULTS_REPLACE_ERROR',
+          error instanceof Error ? error : undefined,
         );
       }
     },

@@ -1,4 +1,3 @@
-import { getActiveCacheSeason } from '../cache/cache-season';
 import { fplClient } from '../clients/fpl';
 import { readDatabaseOrderingTimestamp } from '../db/ordering-timestamp';
 import { createEntryEventPicksRepository } from '../repositories/entry-event-picks';
@@ -7,32 +6,25 @@ import {
   withEntrySeasonSyncTransaction,
 } from '../repositories/entry-event-transfers';
 import { createEntryEventResultsRepository } from '../repositories/entry-event-results';
+import type { FplSeasonRef } from '../domain/fpl-season';
 import { logError, logInfo } from '../utils/logger';
-import { getCurrentEvent } from './events.service';
 
-export async function syncEntryEventPicks(entryId: number, eventId?: number) {
+export async function syncEntryEventPicks(season: FplSeasonRef, entryId: number, eventId: number) {
   try {
     logInfo('Starting entry event picks sync', { entryId, eventId });
-    // Determine event id if not provided (use current event)
-    let targetEventId = eventId;
-    if (!targetEventId) {
-      const current = await getCurrentEvent();
-      if (!current) throw new Error('No current event found');
-      targetEventId = current.id;
-    }
-    const checkpointSeason = await getActiveCacheSeason();
     const picksSyncStartedAt = await readDatabaseOrderingTimestamp();
-    const picks = await fplClient.getEntryEventPicks(entryId, targetEventId);
-    await withEntrySeasonSyncTransaction(entryId, checkpointSeason, async (tx) => {
+    const picks = await fplClient.getEntryEventPicks(entryId, eventId);
+    await withEntrySeasonSyncTransaction(season, entryId, async (tx) => {
       await createEntryEventPicksRepository(tx).upsertFromPicks(
+        season,
         entryId,
-        targetEventId,
+        eventId,
         picks,
         picksSyncStartedAt.exact,
       );
     });
-    logInfo('Entry event picks sync completed', { entryId, eventId: targetEventId });
-    return { entryId, eventId: targetEventId };
+    logInfo('Entry event picks sync completed', { entryId, eventId });
+    return { entryId, eventId };
   } catch (error) {
     logError('Sync entry event picks failed', error, { entryId, eventId });
     throw error;
@@ -40,10 +32,14 @@ export async function syncEntryEventPicks(entryId: number, eventId?: number) {
 }
 
 const EVENT_LIVE_POINTS_CACHE_TTL_MS = 5 * 60_000;
-const eventLivePointsCache = new Map<number, { expiresAt: number; points: Map<number, number> }>();
+const eventLivePointsCache = new Map<string, { expiresAt: number; points: Map<number, number> }>();
 
-async function getPointsByElement(eventId: number): Promise<Map<number, number>> {
-  const cached = eventLivePointsCache.get(eventId);
+async function getPointsByElement(
+  seasonCode: string,
+  eventId: number,
+): Promise<Map<number, number>> {
+  const key = `${seasonCode}:${eventId}`;
+  const cached = eventLivePointsCache.get(key);
   const now = Date.now();
   if (cached && cached.expiresAt > now) {
     return cached.points;
@@ -55,7 +51,7 @@ async function getPointsByElement(eventId: number): Promise<Map<number, number>>
     pointsByElement.set(el.id, el.stats.total_points);
   }
 
-  eventLivePointsCache.set(eventId, {
+  eventLivePointsCache.set(key, {
     points: pointsByElement,
     expiresAt: now + EVENT_LIVE_POINTS_CACHE_TTL_MS,
   });
@@ -68,68 +64,60 @@ interface EntryTransferSyncOptions {
 }
 
 export async function syncEntryEventTransfers(
+  season: FplSeasonRef,
   entryId: number,
-  eventId?: number,
+  eventId: number,
   options?: EntryTransferSyncOptions,
 ) {
   try {
     logInfo('Starting entry event transfers sync', { entryId, eventId });
-    // Determine event id if not provided (use current event)
-    let targetEventId = eventId;
-    if (!targetEventId) {
-      const current = await getCurrentEvent();
-      if (!current) throw new Error('No current event found');
-      targetEventId = current.id;
-    }
-    const checkpointSeason = await getActiveCacheSeason();
     const transferSyncStartedAt = await readDatabaseOrderingTimestamp();
     const transfers = await fplClient.getEntryTransfers(entryId);
-    const pointsByElement = options?.pointsByElement ?? (await getPointsByElement(targetEventId));
+    const pointsByElement =
+      options?.pointsByElement ?? (await getPointsByElement(season.seasonCode, eventId));
     await entryEventTransfersRepository.replaceForEvent(
+      season,
       entryId,
-      targetEventId,
+      eventId,
       transfers,
       pointsByElement,
-      { checkpointSeason, sourceCheckedAt: transferSyncStartedAt.exact },
+      { sourceCheckedAt: transferSyncStartedAt.exact },
     );
-    logInfo('Entry event transfers sync completed', { entryId, eventId: targetEventId });
-    return { entryId, eventId: targetEventId };
+    logInfo('Entry event transfers sync completed', { entryId, eventId });
+    return { entryId, eventId };
   } catch (error) {
     logError('Sync entry event transfers failed', error, { entryId, eventId });
     throw error;
   }
 }
 
-export async function syncEntryEventResults(entryId: number, eventId?: number) {
+export async function syncEntryEventResults(
+  season: FplSeasonRef,
+  entryId: number,
+  eventId: number,
+) {
   try {
     logInfo('Starting entry event results sync', { entryId, eventId });
-    // Determine event id if not provided (use current event)
-    let targetEventId = eventId;
-    if (!targetEventId) {
-      const current = await getCurrentEvent();
-      if (!current) throw new Error('No current event found');
-      targetEventId = current.id;
-    }
-    const checkpointSeason = await getActiveCacheSeason();
     // This timestamp describes the evidence window, not database completion.
     // If the GW finalizes while either request is in flight, the persisted
     // marker remains before data_checked_at and the finalized scan refetches it.
     const richSyncStartedAt = await readDatabaseOrderingTimestamp();
     const [picks, live] = await Promise.all([
-      fplClient.getEntryEventPicks(entryId, targetEventId),
-      fplClient.getEventLive(targetEventId),
+      fplClient.getEntryEventPicks(entryId, eventId),
+      fplClient.getEventLive(eventId),
     ]);
-    await withEntrySeasonSyncTransaction(entryId, checkpointSeason, async (tx) => {
+    await withEntrySeasonSyncTransaction(season, entryId, async (tx) => {
       await createEntryEventResultsRepository(tx).upsertFromPicksAndLive(
+        season,
         entryId,
-        targetEventId,
+        eventId,
         picks,
         live,
         richSyncStartedAt.exact,
       );
     });
-    logInfo('Entry event results sync completed', { entryId, eventId: targetEventId });
-    return { entryId, eventId: targetEventId };
+    logInfo('Entry event results sync completed', { entryId, eventId });
+    return { entryId, eventId };
   } catch (error) {
     logError('Sync entry event results failed', error, { entryId, eventId });
     throw error;

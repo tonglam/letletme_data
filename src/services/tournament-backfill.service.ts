@@ -1,5 +1,5 @@
 import { tournamentSetupBackfillEventScopes } from '../domain/mutation-scope';
-import { getActiveCacheSeason, getActiveCacheSeasonUncached } from '../cache/cache-season';
+import type { FplSeasonRef } from '../domain/fpl-season';
 import type { TournamentBackfillWindow, TournamentConfig } from '../domain/tournament';
 import { ENTRY_SYNC_DEFAULT_CONCURRENCY } from '../queues/entry-sync.queue';
 import { entryEventPicksRepository } from '../repositories/entry-event-picks';
@@ -91,10 +91,10 @@ export function classifyEntrySnapshotFailures(
 }
 
 export async function syncTournamentEntryDetails(
+  season: FplSeasonRef,
   entryIds: number[],
   options?: {
     targetEventId?: number;
-    season?: string;
     onPlan?: (plan: TournamentEntrySyncPlan) => void | Promise<void>;
     onProgress?: (completed: number, total: number) => Promise<void>;
   },
@@ -106,11 +106,10 @@ export async function syncTournamentEntryDetails(
   }
 
   const targetEventId = options?.targetEventId ?? 0;
-  const season = options?.season ?? (await getActiveCacheSeason());
   const requestedEntryIds = await entryInfoRepository.findIdsNeedingSnapshotSync(
+    season,
     sanitized,
     targetEventId,
-    season,
   );
   const plan = {
     totalEntries: sanitized.length,
@@ -127,7 +126,7 @@ export async function syncTournamentEntryDetails(
     const batch = requestedEntryIds.slice(index, index + progressBatchSize);
     await mapWithConcurrency(batch, ENTRY_SYNC_DEFAULT_CONCURRENCY, async (entryId) => {
       try {
-        await syncEntryInfo(entryId, undefined, targetEventId, season);
+        await syncEntryInfo(season, entryId, undefined, targetEventId);
       } catch (error) {
         failures.push(entryId);
         logError('Failed to sync detailed tournament entry info', error, { entryId });
@@ -137,28 +136,18 @@ export async function syncTournamentEntryDetails(
     await options?.onProgress?.(completed, requestedEntryIds.length);
   }
 
-  // Reused entries make no downstream FPL call, so the caller cannot rely on
-  // per-entry commit fences alone. Abort the whole plan if annual authority
-  // changed while snapshots were selected or fetched.
-  const canonicalSeason = await getActiveCacheSeasonUncached();
-  if (canonicalSeason !== season) {
-    throw new Error(
-      `Active season changed from ${season} to ${canonicalSeason} during tournament entry sync`,
-    );
-  }
-
   if (failures.length > 0) {
     // Audit canonical checkpoints after the attempts. This distinguishes an
     // upstream/transaction failure (no current-season proof) from a derived
     // cache publication failure after the database commit.
-    const failedEntries = await entryInfoRepository.findByIds(failures);
+    const failedEntries = await entryInfoRepository.findByIds(season, failures);
     const checkpointSeasonByEntryId = new Map(
       failedEntries.map((entry) => [entry.id, entry.entrySnapshotSyncedSeason]),
     );
     // Missing and legacy-null checkpoints cannot prove ownership of
     // event-numbered rows, so their failed refresh blocks publication.
     const unprovenSeasonEntryIds = new Set(
-      failures.filter((entryId) => checkpointSeasonByEntryId.get(entryId) !== season),
+      failures.filter((entryId) => checkpointSeasonByEntryId.get(entryId) !== season.seasonCode),
     );
     logWarn('Tournament entry detail sync completed with warnings', {
       totalEntries: sanitized.length,
@@ -180,8 +169,11 @@ type MissingTournamentUnitsAudit = {
   totalPairs: number;
 };
 
-async function loadEntryStartEvents(entryIds: number[]): Promise<Map<number, number | null>> {
-  const rows = await entryInfoRepository.findByIds(entryIds);
+async function loadEntryStartEvents(
+  season: FplSeasonRef,
+  entryIds: number[],
+): Promise<Map<number, number | null>> {
+  const rows = await entryInfoRepository.findByIds(season, entryIds);
   return new Map(rows.map((row) => [row.id, row.startedEvent]));
 }
 
@@ -195,14 +187,11 @@ function isEligibleForEvent(
 }
 
 async function seedPreEntryCoreBaselines(
+  season: FplSeasonRef,
   entryIds: number[],
   window: TournamentBackfillWindow,
-  checkpointSeason: string,
 ): Promise<number> {
-  if (!/^\d{4}$/.test(checkpointSeason)) {
-    throw new Error('A valid four-digit setup season is required');
-  }
-  const entryStartEvents = await loadEntryStartEvents(entryIds);
+  const entryStartEvents = await loadEntryStartEvents(season, entryIds);
   const units: Array<{ entryId: number; eventId: number }> = [];
   for (const entryId of entryIds) {
     const startedEvent = entryStartEvents.get(entryId);
@@ -211,15 +200,6 @@ async function seedPreEntryCoreBaselines(
     for (let eventId = window.startEventId; eventId <= lastPreEntryEvent; eventId += 1) {
       units.push({ entryId, eventId });
     }
-  }
-  // Keep the season captured by the caller. Reading Season:active here after
-  // deriving the units could pair an old started_event with a new-season
-  // checkpoint during the annual rollover.
-  const canonicalSeason = await getActiveCacheSeasonUncached();
-  if (canonicalSeason !== checkpointSeason) {
-    throw new Error(
-      `Active season changed from ${checkpointSeason} to ${canonicalSeason} before baseline seeding`,
-    );
   }
   const unitsByEntry = new Map<number, Array<{ entryId: number; eventId: number }>>();
   for (const unit of units) {
@@ -230,24 +210,22 @@ async function seedPreEntryCoreBaselines(
 
   let inserted = 0;
   for (const [entryId, entryUnits] of unitsByEntry) {
-    inserted += await withEntrySeasonSyncTransaction(entryId, checkpointSeason, async (tx) =>
-      createEntryEventResultsRepository(tx).seedPreEntryBaselines(entryUnits),
+    inserted += await withEntrySeasonSyncTransaction(season, entryId, async (tx) =>
+      createEntryEventResultsRepository(tx).seedPreEntryBaselines(season, entryUnits),
     );
   }
   return inserted;
 }
 
 async function auditMissingUnits(
+  season: FplSeasonRef,
   entryIds: number[],
   window: TournamentBackfillWindow,
   kind: 'results' | 'picks',
   requiredPicksEvents: ReadonlySet<number> = new Set(),
-  checkpointSeason?: string,
 ): Promise<MissingTournamentUnitsAudit> {
   const missing = new Map<number, number[]>();
-  const entryStartEvents = await loadEntryStartEvents(entryIds);
-  const picksSeason =
-    kind === 'picks' ? (checkpointSeason ?? (await getActiveCacheSeason())) : null;
+  const entryStartEvents = await loadEntryStartEvents(season, entryIds);
   let totalPairs = 0;
   for (let eventId = window.startEventId; eventId <= window.endEventId; eventId += 1) {
     const eligibleEntryIds = entryIds.filter((entryId) =>
@@ -258,6 +236,7 @@ async function auditMissingUnits(
     let present: number[];
     if (kind === 'results') {
       const resultRows = await entryEventResultsRepository.findByEventAndEntryIds(
+        season,
         eventId,
         eligibleEntryIds,
       );
@@ -273,9 +252,9 @@ async function auditMissingUnits(
       }
     } else {
       present = await entryEventPicksRepository.findEntryIdsByEvent(
+        season,
         eventId,
         eligibleEntryIds,
-        picksSeason!,
       );
     }
     const presentSet = new Set(present);
@@ -288,34 +267,34 @@ async function auditMissingUnits(
 }
 
 export async function findMissingCoreResults(
+  season: FplSeasonRef,
   entryIds: number[],
   window: TournamentBackfillWindow,
 ): Promise<MissingTournamentUnits> {
-  return (await auditMissingUnits(entryIds, window, 'results')).missing;
+  return (await auditMissingUnits(season, entryIds, window, 'results')).missing;
 }
 
 export async function findMissingHistoricalPicks(
+  season: FplSeasonRef,
   entryIds: number[],
   window: TournamentBackfillWindow,
-  checkpointSeason?: string,
 ): Promise<MissingTournamentUnits> {
-  return (await auditMissingUnits(entryIds, window, 'picks', new Set(), checkpointSeason)).missing;
+  return (await auditMissingUnits(season, entryIds, window, 'picks', new Set())).missing;
 }
 
 export async function ensureTournamentCoreResults(
+  season: FplSeasonRef,
   entryIds: number[],
   window: TournamentBackfillWindow,
   onProgress?: (completed: number, total: number) => Promise<void>,
   onPlan?: (plan: TournamentCoreSyncPlan) => void | Promise<void>,
   options?: {
     requirePicksForEvents?: readonly number[];
-    setupSeason?: string;
   },
 ): Promise<void> {
   const requiredPicksEvents = new Set(options?.requirePicksForEvents ?? []);
-  const checkpointSeason = options?.setupSeason ?? (await getActiveCacheSeason());
-  const seededBaselines = await seedPreEntryCoreBaselines(entryIds, window, checkpointSeason);
-  const audit = await auditMissingUnits(entryIds, window, 'results', requiredPicksEvents);
+  const seededBaselines = await seedPreEntryCoreBaselines(season, entryIds, window);
+  const audit = await auditMissingUnits(season, entryIds, window, 'results', requiredPicksEvents);
   const missing = audit.missing;
   const total = [...missing.values()].reduce((sum, ids) => sum + ids.length, 0);
   const totalPairs = audit.totalPairs;
@@ -330,17 +309,17 @@ export async function ensureTournamentCoreResults(
   });
 
   for (const [eventId, missingEntryIds] of missing) {
-    await syncTournamentEventResultsForEntryIds(missingEntryIds, eventId, {
+    await syncTournamentEventResultsForEntryIds(season, missingEntryIds, eventId, {
       concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
       skipTransfers: true,
-      season: checkpointSeason,
     });
     completed += missingEntryIds.length;
     await onProgress?.(completed, total);
   }
 
-  const remaining = (await auditMissingUnits(entryIds, window, 'results', requiredPicksEvents))
-    .missing;
+  const remaining = (
+    await auditMissingUnits(season, entryIds, window, 'results', requiredPicksEvents)
+  ).missing;
   if (remaining.size > 0) {
     const preview = [...remaining]
       .slice(0, 5)
@@ -355,6 +334,7 @@ export async function ensureTournamentCoreResults(
 }
 
 export async function calculateTournamentHistoryFromStoredResults(
+  season: FplSeasonRef,
   tournamentId: number,
   tournament: TournamentConfig,
   window: TournamentBackfillWindow | null,
@@ -381,7 +361,7 @@ export async function calculateTournamentHistoryFromStoredResults(
           eventId,
           scopes: structureScopes,
         },
-        () => syncTournamentPointsRaceResultsForTournament(tournament, eventId),
+        () => syncTournamentPointsRaceResultsForTournament(season, tournament, eventId),
       );
       if (result.skipped > 0) {
         throw new Error(
@@ -405,7 +385,7 @@ export async function calculateTournamentHistoryFromStoredResults(
           eventId,
           scopes: structureScopes,
         },
-        () => syncTournamentBattleRaceResultsForTournament(tournament, eventId),
+        () => syncTournamentBattleRaceResultsForTournament(season, tournament, eventId),
       );
       if (result.skipped > 0) {
         throw new Error(
@@ -430,7 +410,7 @@ export async function calculateTournamentHistoryFromStoredResults(
           eventId,
           scopes: structureScopes,
         },
-        () => syncKnockoutForTournament(tournament, eventId),
+        () => syncKnockoutForTournament(season, tournament, eventId),
       );
       if (result.skipped > 0) {
         throw new Error(
@@ -445,31 +425,20 @@ export async function calculateTournamentHistoryFromStoredResults(
 }
 
 export async function enrichTournamentHistory(
+  season: FplSeasonRef,
   tournamentId: number,
   entryIds: number[],
   window: TournamentBackfillWindow | null,
   options?: {
     includeTransferHistory?: boolean;
-    /** Keep every enrichment writer fenced to the setup's captured season. */
-    setupSeason?: string;
     onPlan?: (plan: TournamentEnrichmentPlan) => void | Promise<void>;
     onProgress?: (completed: number, total: number) => Promise<void>;
   },
 ): Promise<TournamentSetupIssue[]> {
   const issues: TournamentSetupIssue[] = [];
   const targetEventId = window?.endEventId ?? 0;
-  // Capture once and reuse it for every enrichment writer. Disabling transfer
-  // history must not disable the season fence for picks/results/league rows.
-  const setupSeason = options?.setupSeason ?? (await getActiveCacheSeason());
-  const canonicalSeason = await getActiveCacheSeasonUncached();
-  if (canonicalSeason !== setupSeason) {
-    throw new Error(
-      `Active season changed from ${setupSeason} to ${canonicalSeason} before tournament enrichment`,
-    );
-  }
-  const transferSeason = options?.includeTransferHistory === false ? null : setupSeason;
   const pickAudit = window
-    ? await auditMissingUnits(entryIds, window, 'picks', new Set(), setupSeason)
+    ? await auditMissingUnits(season, entryIds, window, 'picks', new Set())
     : { missing: new Map<number, number[]>(), totalPairs: 0 };
   const missing = pickAudit.missing;
   const missingCount = [...missing.values()].reduce((sum, ids) => sum + ids.length, 0);
@@ -477,9 +446,9 @@ export async function enrichTournamentHistory(
     options?.includeTransferHistory === false
       ? []
       : await entryEventTransfersRepository.findEntryIdsNeedingSync(
+          season,
           entryIds,
           targetEventId,
-          transferSeason!,
         );
   const transferUnits = transferEntryIds.length;
   const totalPickPairs = pickAudit.totalPairs;
@@ -513,10 +482,14 @@ export async function enrichTournamentHistory(
   });
 
   if (transferEntryIds.length > 0) {
-    const transferResult = await syncEntryTransferHistories(transferEntryIds, targetEventId, {
-      concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
-      season: transferSeason!,
-    });
+    const transferResult = await syncEntryTransferHistories(
+      season,
+      transferEntryIds,
+      targetEventId,
+      {
+        concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
+      },
+    );
     completed += transferEntryIds.length;
     await options?.onProgress?.(completed, total);
     if (transferResult.errors > 0) {
@@ -532,15 +505,13 @@ export async function enrichTournamentHistory(
     const missingEntryIds = missing.get(eventId) ?? [];
     try {
       if (missingEntryIds.length > 0) {
-        await syncTournamentEventResultsForEntryIds(missingEntryIds, eventId, {
+        await syncTournamentEventResultsForEntryIds(season, missingEntryIds, eventId, {
           concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
           skipTransfers: true,
-          season: setupSeason,
         });
       }
-      const leagueResult = await syncLeagueEventResultsByTournament(tournamentId, eventId, {
+      const leagueResult = await syncLeagueEventResultsByTournament(season, tournamentId, eventId, {
         concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
-        season: setupSeason,
       });
       if (leagueResult.failedUnits > 0 || leagueResult.skipped > 0) {
         const convergedEntries = leagueResult.reusedUnits + leagueResult.succeededUnits;
@@ -551,10 +522,10 @@ export async function enrichTournamentHistory(
         });
       }
 
-      const selectionResult = await syncTournamentSelectionStats(eventId, {
+      const selectionResult = await syncTournamentSelectionStats(season, eventId, {
         tournamentIds: [tournamentId],
       });
-      if (entryIds.length > 0 && selectionResult.upserted === 0) {
+      if (entryIds.length > 0 && selectionResult.rows === 0) {
         issues.push({
           scope: 'event-results',
           eventId,
@@ -590,13 +561,14 @@ export async function enrichTournamentHistory(
 }
 
 export async function runTournamentEventBackfill(
+  season: FplSeasonRef,
   tournamentId: number,
   tournament: TournamentConfig,
   entryIds: number[],
   eventId: number,
 ): Promise<TournamentSetupIssue[]> {
   const issues: TournamentSetupIssue[] = [];
-  const eventResults = await syncTournamentEventResultsForEntryIds(entryIds, eventId, {
+  const eventResults = await syncTournamentEventResultsForEntryIds(season, entryIds, eventId, {
     concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
   });
   logInfo('Tournament event results sync completed for tournament', {
@@ -622,9 +594,12 @@ export async function runTournamentEventBackfill(
     });
   }
 
-  const leagueEventResults = await syncLeagueEventResultsByTournament(tournamentId, eventId, {
-    concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY,
-  });
+  const leagueEventResults = await syncLeagueEventResultsByTournament(
+    season,
+    tournamentId,
+    eventId,
+    { concurrency: ENTRY_SYNC_DEFAULT_CONCURRENCY },
+  );
   if (
     leagueEventResults.skipped > 0 ||
     leagueEventResults.updated < leagueEventResults.totalEntries
@@ -663,7 +638,7 @@ export async function runTournamentEventBackfill(
         eventId,
         scopes: structureScopes,
       },
-      () => syncTournamentPointsRaceResultsForTournament(tournament, eventId),
+      () => syncTournamentPointsRaceResultsForTournament(season, tournament, eventId),
     );
     if (pointsRaceResult.skipped > 0) {
       issues.push({
@@ -694,7 +669,7 @@ export async function runTournamentEventBackfill(
         eventId,
         scopes: structureScopes,
       },
-      () => syncTournamentBattleRaceResultsForTournament(tournament, eventId),
+      () => syncTournamentBattleRaceResultsForTournament(season, tournament, eventId),
     );
     if (battleRaceResult.skipped > 0) {
       issues.push({
@@ -726,7 +701,7 @@ export async function runTournamentEventBackfill(
         eventId,
         scopes: structureScopes,
       },
-      () => syncKnockoutForTournament(tournament, eventId),
+      () => syncKnockoutForTournament(season, tournament, eventId),
     );
     if (knockoutResult.skipped > 0) {
       issues.push({
@@ -746,6 +721,7 @@ export async function runTournamentEventBackfill(
 }
 
 export async function backfillTournamentHistory(
+  season: FplSeasonRef,
   tournamentId: number,
   tournament: TournamentConfig,
   entryIds: number[],
@@ -760,6 +736,7 @@ export async function backfillTournamentHistory(
     // Structure locks are acquired only around points/knockout writes inside
     // runTournamentEventBackfill — not around FPL fetch for the whole event.
     const eventIssues = await runTournamentEventBackfill(
+      season,
       tournamentId,
       tournament,
       entryIds,

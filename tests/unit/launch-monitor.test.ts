@@ -8,6 +8,9 @@ import {
 } from '../../src/jobs/launch.jobs';
 import { NotificationDeliveryRejectedError } from '../../src/utils/notify';
 
+const WARNING_KEY = 'llm:v3:queue:coordination:launch-notification:warning:2026';
+const HAPPENING_KEY = 'llm:v3:queue:coordination:launch-notification:happening:2627';
+
 class FakeRedis {
   readonly values = new Map<string, string>();
   readonly setCalls: Array<{ key: string; args: Array<string | number> }> = [];
@@ -118,7 +121,7 @@ describe('launch monitor', () => {
       delivery: 'sent',
     });
     expect(messages).toEqual(['【NEW SEASON】ITS HAPPENING!!!']);
-    expect(redis.values.has('LaunchNotification:happening:2627')).toBe(true);
+    expect(redis.values.has(HAPPENING_KEY)).toBe(true);
   });
 
   test('does not mark a disabled notification as delivered and can send it later', async () => {
@@ -126,12 +129,11 @@ describe('launch monitor', () => {
     const skipped = await evaluateLaunchMonitor(dependencies({ redis, delivery: 'skipped' }));
 
     expect(skipped).toMatchObject({ outcome: 'noop', delivery: 'skipped', requiredUnits: 0 });
-    expect(redis.values.has('LaunchNotification:warning:2026')).toBe(false);
-    expect(redis.values.has('LaunchNotification:warning:2026:lock')).toBe(false);
+    expect(redis.values.has(WARNING_KEY)).toBe(false);
+    expect(redis.values.has(`${WARNING_KEY}:lock`)).toBe(false);
     expect(
-      redis.setCalls.find(
-        (call) => call.key === 'LaunchNotification:warning:2026:lock' && call.args.includes('XX'),
-      )?.args,
+      redis.setCalls.find((call) => call.key === `${WARNING_KEY}:lock` && call.args.includes('XX'))
+        ?.args,
     ).toEqual(['PX', 60_000, 'XX']);
 
     let sends = 0;
@@ -146,7 +148,7 @@ describe('launch monitor', () => {
 
     expect(delivered.delivery).toBe('sent');
     expect(sends).toBe(1);
-    expect(redis.values.has('LaunchNotification:warning:2026')).toBe(true);
+    expect(redis.values.has(WARNING_KEY)).toBe(true);
   });
 
   test('reports ordinary monitor no-ops as zero synchronization work', async () => {
@@ -217,9 +219,11 @@ describe('launch monitor', () => {
 
     expect(result.delivery).toBe('locked');
     expect(sends).toBe(0);
-    expect(
-      redis.setCalls.find((call) => call.key === 'LaunchNotification:warning:2026:lock')?.args,
-    ).toEqual(['PX', 60_000, 'NX']);
+    expect(redis.setCalls.find((call) => call.key === `${WARNING_KEY}:lock`)?.args).toEqual([
+      'PX',
+      60_000,
+      'NX',
+    ]);
   });
 
   test('retains the lock after an ambiguous delivery failure', async () => {
@@ -234,8 +238,8 @@ describe('launch monitor', () => {
     });
 
     await expect(evaluateLaunchMonitor(deps)).rejects.toThrow('notification response lost');
-    expect(redis.values.has('LaunchNotification:warning:2026:lock')).toBe(true);
-    expect(redis.values.has('LaunchNotification:warning:2026')).toBe(false);
+    expect(redis.values.has(`${WARNING_KEY}:lock`)).toBe(true);
+    expect(redis.values.has(WARNING_KEY)).toBe(false);
 
     const retry = await evaluateLaunchMonitor(deps);
     expect(retry.delivery).toBe('locked');
@@ -254,7 +258,7 @@ describe('launch monitor', () => {
     });
 
     await expect(evaluateLaunchMonitor(deps)).rejects.toThrow('Telegram API error: 429');
-    expect(redis.values.has('LaunchNotification:warning:2026:lock')).toBe(false);
+    expect(redis.values.has(`${WARNING_KEY}:lock`)).toBe(false);
 
     const retry = await evaluateLaunchMonitor(
       dependencies({
@@ -284,8 +288,8 @@ describe('launch monitor', () => {
 
     expect(result.delivery).toBe('sent');
     expect(sends).toBe(1);
-    expect(redis.values.has('LaunchNotification:warning:2026')).toBe(true);
-    expect(redis.values.has('LaunchNotification:warning:2026:lock')).toBe(false);
+    expect(redis.values.has(WARNING_KEY)).toBe(true);
+    expect(redis.values.has(`${WARNING_KEY}:lock`)).toBe(false);
   });
 
   test('reports sent after marker persistence even when lock cleanup fails', async () => {
@@ -303,7 +307,7 @@ describe('launch monitor', () => {
 
     expect(result.delivery).toBe('sent');
     expect(sends).toBe(1);
-    expect(redis.values.has('LaunchNotification:warning:2026')).toBe(true);
+    expect(redis.values.has(WARNING_KEY)).toBe(true);
   });
 
   test('retains the lock when delivery succeeds but every marker write fails', async () => {
@@ -317,11 +321,13 @@ describe('launch monitor', () => {
     });
 
     await expect(evaluateLaunchMonitor(deps)).rejects.toThrow('marker storage unavailable');
-    expect(redis.values.has('LaunchNotification:warning:2026')).toBe(false);
-    expect(redis.values.has('LaunchNotification:warning:2026:lock')).toBe(true);
-    expect(
-      redis.setCalls.find((call) => call.key === 'LaunchNotification:warning:2026:lock')?.args,
-    ).toEqual(['PX', 60_000, 'NX']);
+    expect(redis.values.has(WARNING_KEY)).toBe(false);
+    expect(redis.values.has(`${WARNING_KEY}:lock`)).toBe(true);
+    expect(redis.setCalls.find((call) => call.key === `${WARNING_KEY}:lock`)?.args).toEqual([
+      'PX',
+      60_000,
+      'NX',
+    ]);
 
     const nextTick = await evaluateLaunchMonitor(deps);
     expect(nextTick.delivery).toBe('locked');

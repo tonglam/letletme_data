@@ -8,6 +8,7 @@ import { IncompleteDataSyncError } from '../utils/errors';
 import { logError, logInfo, logWarn } from '../utils/logger';
 
 import type { DbTournamentGroup, DbTournamentGroupInsert } from '../db/schemas/index.schema';
+import type { FplSeasonRef } from '../domain/fpl-season';
 import type { TournamentSyncContext } from '../domain/tournament';
 
 function groupRankKey(points: number, overallRank: number | null) {
@@ -39,6 +40,7 @@ function matchPoints(homeNet: number, awayNet: number) {
 }
 
 export async function syncTournamentBattleRaceResultsForTournament(
+  season: FplSeasonRef,
   tournament: TournamentSyncContext,
   eventId: number,
 ): Promise<{ updatedGroups: number; updatedResults: number; skipped: number }> {
@@ -51,13 +53,20 @@ export async function syncTournamentBattleRaceResultsForTournament(
   const groupStartedEventId = tournament.groupStartedEventId;
   const groupEndedEventId = tournament.groupEndedEventId;
 
-  const entryIds = await tournamentEntryRepository.findEntryIdsByTournamentId(tournament.id);
+  const entryIds = await tournamentEntryRepository.findEntryIdsByTournamentId(
+    season,
+    tournament.id,
+  );
   if (entryIds.length === 0) {
     logInfo('No tournament entries found for battle race results', { tournamentId: tournament.id });
     return { updatedGroups: 0, updatedResults: 0, skipped: 0 };
   }
 
-  const eventResults = await entryEventResultsRepository.findByEventAndEntryIds(eventId, entryIds);
+  const eventResults = await entryEventResultsRepository.findByEventAndEntryIds(
+    season,
+    eventId,
+    entryIds,
+  );
   if (eventResults.length === 0) {
     logInfo('Entry event results missing for battle race', {
       tournamentId: tournament.id,
@@ -68,6 +77,7 @@ export async function syncTournamentBattleRaceResultsForTournament(
   const eventResultMap = new Map(eventResults.map((result) => [result.entryId, result]));
 
   const battleResults = await tournamentBattleGroupResultsRepository.findByTournamentAndEvent(
+    season,
     tournament.id,
     eventId,
   );
@@ -128,14 +138,17 @@ export async function syncTournamentBattleRaceResultsForTournament(
 
   // Upsert scored matchups BEFORE reading the history so the recompute below
   // sees this event's points.
-  const updatedResultsCount =
-    await tournamentBattleGroupResultsRepository.upsertBatch(scoredBattleResults);
+  const updatedResultsCount = await tournamentBattleGroupResultsRepository.upsertBatch(
+    season,
+    scoredBattleResults,
+  );
 
   // Recompute through the latest event that has battle rows in the group
   // window — not only through this job's eventId. A delayed/retried backfill
   // of an older GW must not overwrite standings with a prefix total and drop
   // later GWs (FP-09 Codex P1).
   const maxStoredEventId = await tournamentBattleGroupResultsRepository.findMaxEventIdInRange(
+    season,
     tournament.id,
     groupStartedEventId,
     groupEndedEventId,
@@ -150,6 +163,7 @@ export async function syncTournamentBattleRaceResultsForTournament(
   // one-way increment guard (played >= expected → skip) locked wrong counters
   // in place forever (FP-09 / C6).
   const history = await tournamentBattleGroupResultsRepository.findByTournamentAndEventRange(
+    season,
     tournament.id,
     groupStartedEventId,
     recomputeThroughEventId,
@@ -158,6 +172,7 @@ export async function syncTournamentBattleRaceResultsForTournament(
   const totalsMap = new Map(
     (
       await entryEventResultsRepository.aggregateTotalsByEntry(
+        season,
         entryIds,
         groupStartedEventId,
         recomputeThroughEventId,
@@ -172,6 +187,7 @@ export async function syncTournamentBattleRaceResultsForTournament(
       : new Map(
           (
             await entryEventResultsRepository.findByEventAndEntryIds(
+              season,
               recomputeThroughEventId,
               entryIds,
             )
@@ -214,6 +230,7 @@ export async function syncTournamentBattleRaceResultsForTournament(
   // query and bucket by groupId in memory, instead of one query per group (FP-17).
   const groupEntriesByGroupId = new Map<number, DbTournamentGroup[]>();
   const allGroupEntries = await tournamentGroupRepository.findByTournamentAndEntries(
+    season,
     tournament.id,
     entryIds,
   );
@@ -284,17 +301,18 @@ export async function syncTournamentBattleRaceResultsForTournament(
     });
   }
 
-  const updatedGroupsCount = await tournamentGroupRepository.upsertBatch(updatedGroups);
+  const updatedGroupsCount = await tournamentGroupRepository.upsertBatch(season, updatedGroups);
 
   return { updatedGroups: updatedGroupsCount, updatedResults: updatedResultsCount, skipped };
 }
 
 export async function syncTournamentBattleRaceResults(
+  season: FplSeasonRef,
   eventId: number,
 ): Promise<{ eventId: number; updatedGroups: number; updatedResults: number; skipped: number }> {
   logInfo('Starting tournament battle race results sync', { eventId });
 
-  const tournaments = await tournamentInfoRepository.findBattleRaceByEvent(eventId);
+  const tournaments = await tournamentInfoRepository.findBattleRaceByEvent(season, eventId);
   if (tournaments.length === 0) {
     logInfo('No battle race tournaments found', { eventId });
     return { eventId, updatedGroups: 0, updatedResults: 0, skipped: 0 };
@@ -306,7 +324,7 @@ export async function syncTournamentBattleRaceResults(
   const failedTournamentIds: number[] = [];
   const syncResults = await mapWithConcurrency(tournaments, 10, async (tournament) => {
     try {
-      return await syncTournamentBattleRaceResultsForTournament(tournament, eventId);
+      return await syncTournamentBattleRaceResultsForTournament(season, tournament, eventId);
     } catch (error) {
       logError('Failed to sync battle race results', error, {
         tournamentId: tournament.id,

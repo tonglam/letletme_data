@@ -22,7 +22,7 @@ const completeTeamMatchRows = [
   { match: { id: 1 }, stat: { teamId: 2, side: 'a' } },
 ];
 
-describe('Understat cache completeness guards', () => {
+describe('Understat PostgreSQL snapshot completeness guards', () => {
   test('rejects a scoped write that did not survive post-commit verification', () => {
     expect(() => assertUnderstatResourceHashes('team splits', ['a', 'b'], ['a'])).toThrow(
       'expected=2 persisted=1',

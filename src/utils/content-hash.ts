@@ -21,7 +21,7 @@ function canonicalize(value: unknown): unknown {
   return value;
 }
 
-/** Cryptographic hash for normalized provider payloads and persistence fences. */
+/** Cryptographic hash for normalized source payloads and persistence fences. */
 export function contentHash(value: unknown): string {
   return createHash('sha256')
     .update(JSON.stringify(canonicalize(value)))

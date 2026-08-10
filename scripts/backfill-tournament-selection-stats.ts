@@ -2,6 +2,7 @@
 
 import { databaseSingleton } from '../src/db/singleton';
 import { syncTournamentSelectionStats } from '../src/services/tournament-selection-stats.service';
+import { seasonRepository } from '../src/repositories/seasons';
 
 function parseEventIds(args: string[]): number[] {
   const eventIds = new Set<number>();
@@ -44,7 +45,10 @@ async function main() {
   }
 
   for (const eventId of eventIds) {
-    const result = await syncTournamentSelectionStats(eventId);
+    const season = await seasonRepository.findCurrent();
+    const result = await syncTournamentSelectionStats(season, eventId);
+    // Operator-facing JSONL output is the script's result contract.
+    // eslint-disable-next-line no-console
     console.log(JSON.stringify(result));
   }
 }

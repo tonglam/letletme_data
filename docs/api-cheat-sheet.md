@@ -1,155 +1,130 @@
-# API Cheat Sheet
+# Data API cheat sheet
 
-Examples use this placeholder internal base URL; substitute the actual trusted
-environment endpoint:
+Examples use `http://data.internal.example`; substitute the trusted environment URL.
 
-- `http://data.internal.example`
-
-Important:
-
-- `GET` endpoints are operational reads, not the public product API. Network
-  policy should restrict this service to trusted callers; clients use GraphQL.
-- `/health` is process liveness and remains usable during first-deploy recovery.
-  `/ready` returns 503 until PostgreSQL, Redis, and the FPL-derived
-  `Season:active` key are ready. On a fresh Redis restore, use the authenticated
-  `events-sync` trigger to establish the key, then confirm `/ready`.
-- `POST`, `PUT`, `PATCH`, and `DELETE` require an API key in the `x-api-key` header when `ENABLE_AUTH=true`.
-- Mutation examples below omit the repeated auth header for readability unless
-  it is the focus of the example. Add `-H "x-api-key: $API_KEY"` to every
-  mutation in an authenticated environment.
-- Generate a random key outside the service, store its SHA-256 digest in
-  `DATA_API_KEY_HASHES`, and store the plaintext only in the trusted caller's
-  secret manager. Comma-separated digests allow overlap during rotation.
-- Sync responses normally confirm enqueueing, not completion. Keep the worker
-  running and verify the BullMQ job result before auditing database/cache data.
-- For new-season order, readiness stages, and read-only verification, use the
-  [FPL season readiness runbook](fpl-season-readiness.md).
-
-## Auth header for mutations
+- This is an ingestion/operations API, not the public product API.
+- `/health` is process liveness. `/ready` requires PostgreSQL, cache Redis, queue Redis, and
+  exactly one current row in `fpl.seasons`.
+- Every `POST`, `PATCH`, and `DELETE` requires `x-api-key` when `ENABLE_AUTH=true`.
+- A `202` normally proves enqueueing only. Verify the BullMQ result and PostgreSQL/publication
+  state separately.
+- Every route resolves the current season from PostgreSQL; callers cannot select it via Redis or
+  wall-clock inference.
 
 ```bash
-export API_KEY='<secret from your secret manager>'
-curl -X POST http://data.internal.example/events/sync -H "x-api-key: $API_KEY"
+export DATA_URL='http://data.internal.example'
+export DATA_API_KEY='<secret from the trusted secret manager>'
+export DATA_AUTH_HEADER="x-api-key: $DATA_API_KEY"
 ```
 
-## Base
+## Base and readiness
 
-- `GET /`
-  - `curl http://data.internal.example/`
-- `GET /health`
-  - `curl http://data.internal.example/health`
-- `GET /ready`
-  - `curl http://data.internal.example/ready`
+```bash
+curl "$DATA_URL/"
+curl "$DATA_URL/health"
+curl "$DATA_URL/ready"
+```
 
-## Events
+## Core and FPL facts
 
-- `GET /events/current`
-  - `curl http://data.internal.example/events/current`
-- `GET /events/next`
-  - `curl http://data.internal.example/events/next`
-- `POST /events/sync`
-  - `curl -X POST http://data.internal.example/events/sync -H "x-api-key: $API_KEY"`
-  - Enqueues the complete atomic core snapshot, not an events-only write.
+```bash
+curl "$DATA_URL/events/current"
+curl "$DATA_URL/events/next"
 
-## Event Lives
+curl -X POST "$DATA_URL/events/sync" -H "$DATA_AUTH_HEADER"
+curl -X POST "$DATA_URL/teams/sync" -H "$DATA_AUTH_HEADER"
+curl -X POST "$DATA_URL/players/sync" -H "$DATA_AUTH_HEADER"
+curl -X POST "$DATA_URL/phases/sync" -H "$DATA_AUTH_HEADER"
+curl -X POST "$DATA_URL/fixtures/sync" -H "$DATA_AUTH_HEADER"
+```
 
-- `GET /event-lives/:eventId`
-  - `curl http://data.internal.example/event-lives/1`
-- `POST /event-lives/sync/:eventId`
-  - `curl -X POST http://data.internal.example/event-lives/sync/1`
-- `POST /event-lives/cache/:eventId`
-  - `curl -X POST http://data.internal.example/event-lives/cache/1`
+All five mutation routes enqueue the same complete core snapshot. There is no events-only writer,
+event-specific fixture writer, cache-delete endpoint, or 38-request fixture route.
 
-## Fixtures
+```bash
+curl -X POST "$DATA_URL/player-stats/sync" -H "$DATA_AUTH_HEADER"
+curl -X POST "$DATA_URL/player-stats/sync/1" -H "$DATA_AUTH_HEADER"
+curl -X POST "$DATA_URL/player-values/sync" -H "$DATA_AUTH_HEADER"
+```
 
-- `POST /fixtures/sync`
-  - `curl -X POST http://data.internal.example/fixtures/sync`
-  - Without `event`, this is an alias for the complete atomic core snapshot.
-- `POST /fixtures/sync?event=:eventId`
-  - `curl -X POST 'http://data.internal.example/fixtures/sync?event=1'`
-- `POST /fixtures/sync-all-gameweeks`
-  - `curl -X POST http://data.internal.example/fixtures/sync-all-gameweeks`
-  - Legacy alias for the same two-request core snapshot; it does not make 38
-    separate fixture requests.
-- `DELETE /fixtures/cache`
-  - `curl -X DELETE http://data.internal.example/fixtures/cache`
+Player value changes persist in PostgreSQL/reporting; Data does not publish a PlayerValue cache.
 
-## Teams / Players / Stats / Values / Phases
+## Live event
 
-- `POST /teams/sync`
-  - `curl -X POST http://data.internal.example/teams/sync`
-- `POST /players/sync`
-  - `curl -X POST http://data.internal.example/players/sync`
-- `POST /player-stats/sync`
-  - `curl -X POST http://data.internal.example/player-stats/sync`
-- `POST /player-stats/sync/:eventId`
-  - `curl -X POST http://data.internal.example/player-stats/sync/1`
-- `POST /player-values/sync`
-  - `curl -X POST http://data.internal.example/player-values/sync`
-- `POST /phases/sync`
-  - `curl -X POST http://data.internal.example/phases/sync`
+```bash
+curl "$DATA_URL/event-lives/1"
+curl -X POST "$DATA_URL/event-lives/cache/1" -H "$DATA_AUTH_HEADER"
+curl -X POST "$DATA_URL/event-lives/sync/1" -H "$DATA_AUTH_HEADER"
+```
 
-## Entry
+`cache` publishes one coherent live revision. `sync` also persists event-live and explain facts.
+Both validate the complete current-season player and fixture identity baseline.
 
-- `POST /entry-info/:entryId/sync`
-  - `curl -X POST http://data.internal.example/entry-info/12345/sync`
-- `POST /entry-sync/picks`
-  - `curl -X POST http://data.internal.example/entry-sync/picks -H 'Content-Type: application/json' -d '{"entryIds":[12345,67890],"eventId":1}'`
-- `POST /entry-sync/transfers`
-  - `curl -X POST http://data.internal.example/entry-sync/transfers -H 'Content-Type: application/json' -d '{"entryIds":[12345,67890],"eventId":1}'`
-- `POST /entry-sync/results`
-  - `curl -X POST http://data.internal.example/entry-sync/results -H 'Content-Type: application/json' -d '{"entryIds":[12345,67890],"eventId":1}'`
-- `POST /entry-sync/all`
-  - `curl -X POST http://data.internal.example/entry-sync/all -H 'Content-Type: application/json' -d '{"entryIds":[12345,67890],"eventId":1}'`
+## Entries
 
-## Jobs
+```bash
+curl -X POST "$DATA_URL/entry-info/12345/sync" -H "$DATA_AUTH_HEADER"
 
-- `GET /jobs`
-  - `curl http://data.internal.example/jobs`
-- `POST /jobs/:name/trigger`
-  - `curl -X POST http://data.internal.example/jobs/core-snapshot-sync/trigger`
-  - `curl -X POST -H 'content-type: application/json' -d '{"changeDate":"20260803"}' http://data.internal.example/jobs/player-prices/trigger`
-  - `curl -X POST http://data.internal.example/jobs/live-snapshot/trigger`
-  - `curl -X POST http://data.internal.example/jobs/event-lives-db-sync/trigger`
-  - `curl -X POST http://data.internal.example/jobs/live-scores/trigger`
+curl -X POST "$DATA_URL/entry-sync/picks" \
+  -H "$DATA_AUTH_HEADER" -H 'content-type: application/json' \
+  -d '{"entryIds":[12345,67890],"eventId":1}'
 
-Supported job names:
+curl -X POST "$DATA_URL/entry-sync/transfers" \
+  -H "$DATA_AUTH_HEADER" -H 'content-type: application/json' \
+  -d '{"entryIds":[12345,67890],"eventId":1}'
 
-- `core-snapshot-sync`
-- `event-current-refresh`
-- `player-prices` (requires JSON body `{ "changeDate": "YYYYMMDD" }`)
-- `player-stats-sync`
-- `player-values-sync`
-- `entry-info-daily`
-- `entry-event-picks-daily`
-- `entry-event-transfers-daily`
-- `entry-event-results-daily`
-- `league-event-picks-sync`
-- `league-event-results-sync`
-- `tournament-event-picks-sync`
-- `tournament-event-results-sync`
-- `tournament-event-transfers-pre-sync`
-- `tournament-event-transfers-post-sync`
-- `tournament-event-cup-results-sync`
-- `tournament-selection-stats-sync`
-- `tournament-info-sync`
-- `tournament-points-race-results-sync`
-- `tournament-battle-race-results-sync`
-- `tournament-knockout-results-sync`
-- `tournament-materialized-views-refresh`
-- `live-snapshot` (preferred; atomically publishes all live views, cache-only persistence mode)
-- `event-lives-cache-update`
-- `event-lives-db-sync` (compatibility alias; persistent snapshot)
-- `event-live-summary-sync`
-- `event-live-explain-sync`
-- `event-overall-result-sync`
-- `live-scores` (compatibility alias; cache-only snapshot)
-- `post-match-consolidation`
-- `launch-monitor`
+curl -X POST "$DATA_URL/entry-sync/results" \
+  -H "$DATA_AUTH_HEADER" -H 'content-type: application/json' \
+  -d '{"entryIds":[12345,67890],"eventId":1}'
 
-`GET /jobs` is the runtime authority for the complete trigger list and current
-descriptions.
+curl -X POST "$DATA_URL/entry-sync/all" \
+  -H "$DATA_AUTH_HEADER" -H 'content-type: application/json' \
+  -d '{"entryIds":[12345,67890],"eventId":1}'
+```
 
-The old `events-sync`, `fixtures-sync`, `teams-sync`, `players-sync`, and
-`phases-sync` trigger names remain accepted as compatibility aliases; each
-enqueues `core-snapshot-sync`.
+`entryIds` accepts 1-100 positive IDs. `eventId` is optional; the worker resolves its bounded
+season-scoped target when omitted.
+
+## Tournaments
+
+| Method | Route | Purpose |
+| --- | --- | --- |
+| `GET` | `/tournaments/check-name?name=...` | Check current-season name availability |
+| `GET` | `/tournaments/:id/setup-status` | Read bounded setup progress |
+| `POST` | `/tournaments` | Create and enqueue setup |
+| `POST` | `/tournaments/:id/setup` | Retry setup |
+| `POST` | `/tournaments/:id/roster-sync` | Retry official roster sync |
+| `PATCH` | `/tournaments/:id/roster-mode` | Enable official roster sync |
+| `PATCH` | `/tournaments/:id/state` | Activate/deactivate |
+| `PATCH` | `/tournaments/:id` | Rename |
+| `DELETE` | `/tournaments/:id` | Delete after admin verification |
+
+Mutation bodies include the verified `adminEntryId` contract documented by the Web proxy.
+
+## Manual jobs
+
+```bash
+curl "$DATA_URL/jobs"
+curl -X POST "$DATA_URL/jobs/core-snapshot-sync/trigger" -H "$DATA_AUTH_HEADER"
+curl -X POST "$DATA_URL/jobs/live-snapshot/trigger" -H "$DATA_AUTH_HEADER"
+curl -X POST "$DATA_URL/jobs/player-prices/trigger" \
+  -H "$DATA_AUTH_HEADER" -H 'content-type: application/json' \
+  -d '{"changeDate":"20260803"}'
+```
+
+`GET /jobs` is the runtime authority. The current trigger names are:
+
+- `core-snapshot-sync`, `event-current-refresh`, `player-prices`,
+  `player-stats-sync`, `player-values-sync`;
+- `entry-info-daily`, `entry-event-picks-daily`,
+  `entry-event-transfers-daily`, `entry-event-results-daily`;
+- `league-event-picks-sync`, `league-event-results-sync`;
+- `tournament-event-picks-sync`, `tournament-event-results-sync`,
+  `tournament-event-transfers-pre-sync`, `tournament-event-transfers-post-sync`,
+  `tournament-event-cup-results-sync`, `tournament-selection-stats-sync`,
+  `tournament-info-sync`, `tournament-points-race-results-sync`,
+  `tournament-battle-race-results-sync`, `tournament-knockout-results-sync`,
+  `tournament-materialized-views-refresh`;
+- `live-snapshot`, `post-match-consolidation`, and `launch-monitor`.
+
+Removed v2 live-summary/explain/result trigger aliases are intentionally not accepted.

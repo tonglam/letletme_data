@@ -1,59 +1,26 @@
 import { eq, sql } from 'drizzle-orm';
 
-import { understatCache } from '../cache/understat-cache';
-import type { UnderstatSnapshotManifest } from '../cache/understat-cache';
 import {
-  understatMatches,
-  understatPlayerMatchStats,
-  understatPlayerSeasons,
-  understatPlayerTeamSeasons,
-  understatTeamMatchStats,
-  understatTeamSeasons,
-  understatTeamStatSplits,
+  matchesInUnderstat as understatMatches,
+  playerMatchStatsInUnderstat as understatPlayerMatchStats,
+  playerSeasonsInUnderstat as understatPlayerSeasons,
+  playerTeamSeasonsInUnderstat as understatPlayerTeamSeasons,
+  teamMatchStatsInUnderstat as understatTeamMatchStats,
+  teamSeasonsInUnderstat as understatTeamSeasons,
+  teamStatSplitsInUnderstat as understatTeamStatSplits,
 } from '../db/schemas/index.schema';
 import { getDb } from '../db/singleton';
 import { understatSyncRepository } from '../repositories/understat-sync';
-import { logWarn } from '../utils/logger';
 
 interface CountAndUpdatedAt {
   count: number;
   updatedAt: Date | null;
 }
 
-type UnavailableManifest = {
-  status: 'unavailable';
-  reason: 'redis_unavailable';
-};
-
-type ManifestReader = (
-  season: string,
-  lane: 'team' | 'player',
-) => Promise<UnderstatSnapshotManifest | null>;
-
-export async function readManifest(
-  season: string,
-  lane: 'team' | 'player',
-  getManifest: ManifestReader = (targetSeason, targetLane) =>
-    understatCache.getManifest(targetSeason, targetLane),
-): Promise<UnderstatSnapshotManifest | UnavailableManifest | null> {
-  try {
-    return await getManifest(season, lane);
-  } catch (error) {
-    logWarn('Understat status could not read Redis manifest', {
-      season,
-      lane,
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return { status: 'unavailable', reason: 'redis_unavailable' };
-  }
-}
-
 export async function getUnderstatStatus(season: string) {
   const db = await getDb();
-  const [runs, teamManifest, playerManifest, resources] = await Promise.all([
+  const [runs, resources] = await Promise.all([
     understatSyncRepository.findLatestRuns(season),
-    readManifest(season, 'team'),
-    readManifest(season, 'player'),
     Promise.all([
       db
         .select({
@@ -61,51 +28,54 @@ export async function getUnderstatStatus(season: string) {
           updatedAt: sql<Date | null>`max(COALESCE(${understatTeamSeasons.updatedAt}, ${understatTeamSeasons.createdAt}))`,
         })
         .from(understatTeamSeasons)
-        .where(eq(understatTeamSeasons.season, season)),
+        .where(eq(understatTeamSeasons.seasonCode, season)),
       db
         .select({
           count: sql<number>`count(*)::int`,
           updatedAt: sql<Date | null>`max(COALESCE(${understatMatches.updatedAt}, ${understatMatches.createdAt}))`,
         })
         .from(understatMatches)
-        .where(eq(understatMatches.season, season)),
+        .where(eq(understatMatches.seasonCode, season)),
       db
         .select({
           count: sql<number>`count(*)::int`,
           updatedAt: sql<Date | null>`max(COALESCE(${understatTeamMatchStats.updatedAt}, ${understatTeamMatchStats.createdAt}))`,
         })
         .from(understatTeamMatchStats)
-        .innerJoin(understatMatches, eq(understatTeamMatchStats.matchId, understatMatches.id))
-        .where(eq(understatMatches.season, season)),
+        .innerJoin(understatMatches, eq(understatTeamMatchStats.matchId, understatMatches.matchId))
+        .where(eq(understatMatches.seasonCode, season)),
       db
         .select({
           count: sql<number>`count(*)::int`,
           updatedAt: sql<Date | null>`max(COALESCE(${understatTeamStatSplits.updatedAt}, ${understatTeamStatSplits.createdAt}))`,
         })
         .from(understatTeamStatSplits)
-        .where(eq(understatTeamStatSplits.season, season)),
+        .where(eq(understatTeamStatSplits.seasonCode, season)),
       db
         .select({
           count: sql<number>`count(*)::int`,
           updatedAt: sql<Date | null>`max(COALESCE(${understatPlayerSeasons.updatedAt}, ${understatPlayerSeasons.createdAt}))`,
         })
         .from(understatPlayerSeasons)
-        .where(eq(understatPlayerSeasons.season, season)),
+        .where(eq(understatPlayerSeasons.seasonCode, season)),
       db
         .select({
           count: sql<number>`count(*)::int`,
           updatedAt: sql<Date | null>`max(COALESCE(${understatPlayerTeamSeasons.updatedAt}, ${understatPlayerTeamSeasons.createdAt}))`,
         })
         .from(understatPlayerTeamSeasons)
-        .where(eq(understatPlayerTeamSeasons.season, season)),
+        .where(eq(understatPlayerTeamSeasons.seasonCode, season)),
       db
         .select({
           count: sql<number>`count(*)::int`,
           updatedAt: sql<Date | null>`max(COALESCE(${understatPlayerMatchStats.updatedAt}, ${understatPlayerMatchStats.createdAt}))`,
         })
         .from(understatPlayerMatchStats)
-        .innerJoin(understatMatches, eq(understatPlayerMatchStats.matchId, understatMatches.id))
-        .where(eq(understatMatches.season, season)),
+        .innerJoin(
+          understatMatches,
+          eq(understatPlayerMatchStats.matchId, understatMatches.matchId),
+        )
+        .where(eq(understatMatches.seasonCode, season)),
     ]),
   ]);
   const names = [
@@ -138,29 +108,15 @@ export async function getUnderstatStatus(season: string) {
 
   return {
     season,
+    storage: 'postgresql' as const,
+    dataCache: 'disabled' as const,
     lanes: {
-      team: { latestRun: runs.team, failedItems: failedItems.team, manifest: teamManifest },
+      team: { latestRun: runs.team, failedItems: failedItems.team },
       player: {
         latestRun: runs.player,
         failedItems: failedItems.player,
-        manifest: playerManifest,
       },
     },
     resources: resourceCounts,
   };
-}
-
-export async function hasRecentUnderstatSuccess(
-  season: string,
-  maxAgeMs = 36 * 60 * 60 * 1000,
-): Promise<boolean> {
-  const [latest, published] = await Promise.all([
-    understatSyncRepository.findLatestRuns(season),
-    understatSyncRepository.findLatestPublishedRuns(season),
-  ]);
-  if (!latest.team && !latest.player) return false;
-  const cutoff = Date.now() - maxAgeMs;
-  return [published.team, published.player].every(
-    (run) => run !== null && run.completedAt !== null && run.completedAt.getTime() >= cutoff,
-  );
 }

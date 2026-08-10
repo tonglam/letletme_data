@@ -7,35 +7,38 @@ import { randomUUID } from 'node:crypto';
 import { and, eq, inArray } from 'drizzle-orm';
 
 import {
-  eventFixtures,
-  events,
-  fplPlayerFixtureStats,
-  players as fplPlayers,
-  providerEntityLinks,
-  teams as fplTeams,
-  understatMatches,
-  understatPlayerMatchStats,
-  understatPlayerSeasons,
-  understatPlayerTeamSeasons,
-  understatPlayers,
-  understatSeasons,
-  understatSyncItems,
-  understatSyncRuns,
-  understatTeamMatchStats,
-  understatTeams,
-  understatTeamSeasons,
-  understatTeamStatSplits,
+  fixturesInFpl as eventFixtures,
+  eventsInFpl as events,
+  playerFixtureStatsInFpl as fplPlayerFixtureStats,
+  playersInFpl as fplPlayers,
+  entityLinksInBridge as providerEntityLinks,
+  seasonsInFpl as fplSeasons,
+  teamsInFpl as fplTeams,
+  matchesInUnderstat as understatMatches,
+  playerMatchStatsInUnderstat as understatPlayerMatchStats,
+  playerSeasonsInUnderstat as understatPlayerSeasons,
+  playerTeamSeasonsInUnderstat as understatPlayerTeamSeasons,
+  playersInUnderstat as understatPlayers,
+  seasonsInUnderstat as understatSeasons,
+  syncItemsInOps as understatSyncItems,
+  syncRunsInOps as understatSyncRuns,
+  teamMatchStatsInUnderstat as understatTeamMatchStats,
+  teamsInUnderstat as understatTeams,
+  teamSeasonsInUnderstat as understatTeamSeasons,
+  teamStatSplitsInUnderstat as understatTeamStatSplits,
 } from '../../src/db/schemas/index.schema';
 import { getDb } from '../../src/db/singleton';
 import type {
   UnderstatMatch,
   UnderstatPlayer,
   UnderstatPlayerSeason,
+  UnderstatPlayerTeamSeason,
   UnderstatTeam,
   UnderstatTeamMatchStat,
   UnderstatTeamSeason,
   UnderstatTeamStatSplit,
 } from '../../src/domain/understat';
+import { UNDERSTAT_SPLIT_DIMENSIONS } from '../../src/domain/understat';
 import {
   createUnderstatPlayerRepository,
   createUnderstatReferenceRepository,
@@ -45,6 +48,18 @@ import { persistUnderstatTeamDiscovery } from '../../src/repositories/understat-
 import { createFplPlayerFixtureStatsRepository } from '../../src/repositories/fpl-player-fixture-stats';
 import { understatSyncRepository } from '../../src/repositories/understat-sync';
 import { providerIdentityRepository } from '../../src/repositories/provider-identity';
+import { closeUnderstatPlayerQueue } from '../../src/queues/understat-player.queue';
+import { closeUnderstatTeamQueue } from '../../src/queues/understat-team.queue';
+import { finalizeUnderstatPlayerRun } from '../../src/services/understat-player.service';
+import { getUnderstatStatus } from '../../src/services/understat-status.service';
+import { finalizeUnderstatTeamRun } from '../../src/services/understat-team.service';
+import {
+  stageUnderstatPlayerLeague,
+  stageUnderstatPlayerTeamDetail,
+  stageUnderstatTeamDetail,
+  stageUnderstatTeamLeague,
+  understatStagingHash,
+} from '../../src/services/understat-staging';
 import { contentHash } from '../../src/utils/content-hash';
 
 const baseId = 900_000_000 + Math.floor(Math.random() * 1_000_000);
@@ -56,7 +71,12 @@ const fplTeamIds = [baseId + 11, baseId + 12];
 const fplPlayerIds = [baseId + 13, baseId + 14];
 const fplFixtureId = baseId + 15;
 const season = '9899';
+const seasonRef = { seasonId: 2098, seasonCode: season } as const;
 const league = `TEST_${baseId}`;
+const completeSeason = '9798';
+const completeTeamIds = Array.from({ length: 20 }, (_, index) => baseId + 1_000 + index);
+const completeMatchIds = Array.from({ length: 380 }, (_, index) => baseId + 2_000 + index);
+const completePlayerIds = Array.from({ length: 20 }, (_, index) => baseId + 3_000 + index);
 const runIds: string[] = [];
 const providerLinkIds: string[] = [];
 const now = new Date('2098-08-08T12:00:00.000Z');
@@ -177,30 +197,238 @@ function split(xgFor: number): UnderstatTeamStatSplit {
   return { ...source, sourceHash: contentHash(source) };
 }
 
+function completePreseasonDiscovery() {
+  const completeTeams = completeTeamIds.map((id, index) => {
+    const source = {
+      id,
+      title: `Complete Team ${index + 1}`,
+      shortTitle: `C${String(index + 1).padStart(2, '0')}`,
+      firstSeenSeason: completeSeason,
+      lastSeenSeason: completeSeason,
+    };
+    return { ...source, sourceHash: contentHash(source) };
+  });
+  const completeMatches = completeMatchIds.map((id, index): UnderstatMatch => {
+    const source = {
+      id,
+      season: completeSeason,
+      homeTeamId: completeTeamIds[index % completeTeamIds.length]!,
+      awayTeamId: completeTeamIds[(index + 1 + Math.floor(index / 20)) % 20]!,
+      kickoffAt: new Date(Date.UTC(2097, 7, 1 + Math.floor(index / 10))),
+      isResult: false,
+      homeGoals: null,
+      awayGoals: null,
+      homeXg: null,
+      awayXg: null,
+      forecastHomeWin: null,
+      forecastDraw: null,
+      forecastAwayWin: null,
+    };
+    return {
+      ...source,
+      sourceHash: contentHash(source),
+      sourceCheckedAt: now,
+      lastSeenAt: now,
+    };
+  });
+  return {
+    season: {
+      season: completeSeason,
+      sourceYear: 2097,
+      league: 'EPL',
+      state: 'planned' as const,
+      firstSeenAt: now,
+      lastSeenAt: now,
+    },
+    teams: completeTeams,
+    matches: completeMatches,
+    teamMatchStats: [],
+    teamSeasons: completeTeams.map((team) => {
+      const source = {
+        season: completeSeason,
+        teamId: team.id,
+        sourceTitle: team.title,
+        sourceShortTitle: team.shortTitle,
+        games: 0,
+        wins: 0,
+        draws: 0,
+        losses: 0,
+        goalsFor: 0,
+        goalsAgainst: 0,
+        points: 0,
+        xg: 0,
+        xga: 0,
+        npxg: 0,
+        npxga: 0,
+        npxgd: 0,
+        xpoints: 0,
+        deep: 0,
+        deepAllowed: 0,
+        ppdaAtt: 0,
+        ppdaDef: 0,
+        ppdaAllowedAtt: 0,
+        ppdaAllowedDef: 0,
+      };
+      return { ...source, sourceHash: contentHash(source), lastSyncedAt: now };
+    }),
+  };
+}
+
+function completeTeamSplits(teamId: number): UnderstatTeamStatSplit[] {
+  return UNDERSTAT_SPLIT_DIMENSIONS.map((dimension) => {
+    const source = {
+      season: completeSeason,
+      teamId,
+      dimension,
+      splitKey: 'all',
+      label: 'All',
+      timeMinutes: 0,
+      shotsFor: 0,
+      goalsFor: 0,
+      xgFor: 0,
+      shotsAgainst: 0,
+      goalsAgainst: 0,
+      xgAgainst: 0,
+    };
+    return { ...source, sourceHash: contentHash(source) };
+  });
+}
+
+function zeroPlayerStats() {
+  return {
+    games: 0,
+    time: 0,
+    goals: 0,
+    npg: 0,
+    assists: 0,
+    shots: 0,
+    keyPasses: 0,
+    yellowCards: 0,
+    redCards: 0,
+    xg: 0,
+    npxg: 0,
+    xa: 0,
+    xgChain: 0,
+    xgBuildup: 0,
+    position: 'NA',
+  };
+}
+
+function completePlayerDiscovery() {
+  const reference = completePreseasonDiscovery();
+  const players = completePlayerIds.map((id, index) => {
+    const source = {
+      id,
+      name: `Complete Player ${index + 1}`,
+      favoritePosition: null,
+      firstSeenSeason: completeSeason,
+      lastSeenSeason: completeSeason,
+    };
+    return { ...source, sourceHash: contentHash(source) };
+  });
+  return {
+    season: reference.season,
+    teams: reference.teams,
+    matches: reference.matches,
+    players,
+    playerSeasons: players.map((player, index) => {
+      const source = {
+        season: completeSeason,
+        playerId: player.id,
+        sourceName: player.name,
+        sourceTeamTitle: reference.teams[index]!.title,
+        ...zeroPlayerStats(),
+      };
+      return { ...source, sourceHash: contentHash(source) };
+    }),
+  };
+}
+
+function completePlayerMembership(index: number): UnderstatPlayerTeamSeason {
+  const source = {
+    season: completeSeason,
+    playerId: completePlayerIds[index]!,
+    teamId: completeTeamIds[index]!,
+    ...zeroPlayerStats(),
+  };
+  return { ...source, sourceHash: contentHash(source) };
+}
+
 afterAll(async () => {
   const db = await getDb();
-  await db.delete(fplPlayerFixtureStats).where(eq(fplPlayerFixtureStats.fixtureId, fplFixtureId));
-  await db.delete(eventFixtures).where(eq(eventFixtures.id, fplFixtureId));
-  await db.delete(fplPlayers).where(inArray(fplPlayers.id, fplPlayerIds));
-  await db.delete(fplTeams).where(inArray(fplTeams.id, fplTeamIds));
-  await db.delete(events).where(eq(events.id, fplEventId));
+  await db
+    .delete(fplPlayerFixtureStats)
+    .where(
+      and(
+        eq(fplPlayerFixtureStats.seasonId, seasonRef.seasonId),
+        eq(fplPlayerFixtureStats.fixtureId, fplFixtureId),
+      ),
+    );
+  await db
+    .delete(eventFixtures)
+    .where(
+      and(
+        eq(eventFixtures.seasonId, seasonRef.seasonId),
+        eq(eventFixtures.fixtureId, fplFixtureId),
+      ),
+    );
+  await db
+    .delete(fplPlayers)
+    .where(
+      and(eq(fplPlayers.seasonId, seasonRef.seasonId), inArray(fplPlayers.elementId, fplPlayerIds)),
+    );
+  await db
+    .delete(fplTeams)
+    .where(and(eq(fplTeams.seasonId, seasonRef.seasonId), inArray(fplTeams.teamId, fplTeamIds)));
+  await db
+    .delete(events)
+    .where(and(eq(events.seasonId, seasonRef.seasonId), eq(events.eventId, fplEventId)));
   if (providerLinkIds.length > 0) {
-    await db.delete(providerEntityLinks).where(inArray(providerEntityLinks.id, providerLinkIds));
+    await db
+      .delete(providerEntityLinks)
+      .where(inArray(providerEntityLinks.linkId, providerLinkIds));
   }
   if (runIds.length > 0) {
     await db.delete(understatSyncItems).where(inArray(understatSyncItems.runId, runIds));
     await db.delete(understatSyncRuns).where(inArray(understatSyncRuns.runId, runIds));
   }
+  await db
+    .delete(understatPlayerMatchStats)
+    .where(inArray(understatPlayerMatchStats.matchId, completeMatchIds));
+  await db
+    .delete(understatPlayerTeamSeasons)
+    .where(eq(understatPlayerTeamSeasons.seasonCode, completeSeason));
+  await db
+    .delete(understatPlayerSeasons)
+    .where(eq(understatPlayerSeasons.seasonCode, completeSeason));
+  await db.delete(understatPlayers).where(inArray(understatPlayers.playerId, completePlayerIds));
+  await db
+    .delete(understatTeamStatSplits)
+    .where(eq(understatTeamStatSplits.seasonCode, completeSeason));
+  await db.delete(understatTeamSeasons).where(eq(understatTeamSeasons.seasonCode, completeSeason));
+  await db
+    .delete(understatTeamMatchStats)
+    .where(inArray(understatTeamMatchStats.matchId, completeMatchIds));
+  await db.delete(understatMatches).where(eq(understatMatches.seasonCode, completeSeason));
+  await db.delete(understatTeams).where(inArray(understatTeams.teamId, completeTeamIds));
+  await db.delete(understatSeasons).where(eq(understatSeasons.seasonCode, completeSeason));
   await db.delete(understatPlayerMatchStats).where(eq(understatPlayerMatchStats.matchId, matchId));
-  await db.delete(understatPlayerTeamSeasons).where(eq(understatPlayerTeamSeasons.season, season));
-  await db.delete(understatPlayerSeasons).where(eq(understatPlayerSeasons.season, season));
-  await db.delete(understatPlayers).where(inArray(understatPlayers.id, [...teamIds, playerId]));
-  await db.delete(understatTeamStatSplits).where(eq(understatTeamStatSplits.season, season));
-  await db.delete(understatTeamSeasons).where(eq(understatTeamSeasons.season, season));
+  await db
+    .delete(understatPlayerTeamSeasons)
+    .where(eq(understatPlayerTeamSeasons.seasonCode, season));
+  await db.delete(understatPlayerSeasons).where(eq(understatPlayerSeasons.seasonCode, season));
+  await db
+    .delete(understatPlayers)
+    .where(inArray(understatPlayers.playerId, [...teamIds, playerId]));
+  await db.delete(understatTeamStatSplits).where(eq(understatTeamStatSplits.seasonCode, season));
+  await db.delete(understatTeamSeasons).where(eq(understatTeamSeasons.seasonCode, season));
   await db.delete(understatTeamMatchStats).where(eq(understatTeamMatchStats.matchId, matchId));
-  await db.delete(understatMatches).where(eq(understatMatches.id, matchId));
-  await db.delete(understatTeams).where(inArray(understatTeams.id, teamIds));
-  await db.delete(understatSeasons).where(eq(understatSeasons.season, season));
+  await db.delete(understatMatches).where(eq(understatMatches.matchId, matchId));
+  await db.delete(understatTeams).where(inArray(understatTeams.teamId, teamIds));
+  await db.delete(understatSeasons).where(eq(understatSeasons.seasonCode, season));
+  await db.delete(fplSeasons).where(eq(fplSeasons.seasonId, seasonRef.seasonId));
+  await closeUnderstatPlayerQueue();
+  await closeUnderstatTeamQueue();
 });
 
 describe('Understat persistence', () => {
@@ -225,6 +453,300 @@ describe('Understat persistence', () => {
 
     expect(await db.transaction((tx) => persistUnderstatTeamDiscovery(tx, discovery))).toBe(true);
     expect(await db.transaction((tx) => persistUnderstatTeamDiscovery(tx, discovery))).toBe(false);
+  });
+
+  test('rolls back every fact when a staged finalizer snapshot is incomplete', async () => {
+    const runId = randomUUID();
+    runIds.push(runId);
+    const stats = matchStats();
+    const originalTeams = teams();
+    const changedTeamSource = {
+      id: originalTeams[0]!.id,
+      title: 'This title must roll back',
+      shortTitle: originalTeams[0]!.shortTitle,
+      firstSeenSeason: season,
+      lastSeenSeason: season,
+    };
+    const staged = stageUnderstatTeamLeague(season, {
+      season: {
+        season,
+        sourceYear: 2098,
+        league,
+        state: 'complete',
+        firstSeenAt: now,
+        lastSeenAt: now,
+      },
+      teams: [
+        { ...changedTeamSource, sourceHash: contentHash(changedTeamSource) },
+        originalTeams[1]!,
+      ],
+      matches: [match()],
+      teamMatchStats: stats,
+      teamSeasons: teamSeasons(stats),
+    });
+
+    await understatSyncRepository.createRun({
+      runId,
+      lane: 'team',
+      season,
+      mode: 'full',
+      trigger: 'manual',
+    });
+    await understatSyncRepository.addItems(runId, [{ resourceType: 'league', resourceId: 'EPL' }]);
+    await understatSyncRepository.completeItem(
+      runId,
+      'league',
+      'EPL',
+      understatStagingHash(staged),
+      staged,
+    );
+
+    await finalizeUnderstatTeamRun({
+      runId,
+      season,
+      mode: 'full',
+      trigger: 'manual',
+    });
+
+    const db = await getDb();
+    const [persistedTeam] = await db
+      .select({ title: understatTeams.title })
+      .from(understatTeams)
+      .where(eq(understatTeams.teamId, originalTeams[0]!.id))
+      .limit(1);
+    const run = await understatSyncRepository.findRun(runId);
+    expect(persistedTeam?.title).toBe(originalTeams[0]!.title);
+    expect(run?.status).toBe('skipped');
+    expect(run?.dataChanged).toBe(false);
+    expect(run?.metadata.reason).toBe('team summaries 2/20');
+  });
+
+  test('keeps a complete staged snapshot out of facts until one atomic finalizer commit', async () => {
+    const runId = randomUUID();
+    runIds.push(runId);
+    const discovery = completePreseasonDiscovery();
+    const leaguePayload = stageUnderstatTeamLeague(completeSeason, discovery);
+
+    await understatSyncRepository.createRun({
+      runId,
+      lane: 'team',
+      season: completeSeason,
+      mode: 'full',
+      trigger: 'manual',
+    });
+    await understatSyncRepository.addItems(runId, [
+      { resourceType: 'league', resourceId: 'EPL' },
+      ...completeTeamIds.map((teamId) => ({
+        resourceType: 'team-detail',
+        resourceId: String(teamId),
+      })),
+    ]);
+    await understatSyncRepository.completeItem(
+      runId,
+      'league',
+      'EPL',
+      understatStagingHash(leaguePayload),
+      leaguePayload,
+    );
+    for (const teamId of completeTeamIds) {
+      const detail = stageUnderstatTeamDetail(completeSeason, teamId, completeTeamSplits(teamId));
+      await understatSyncRepository.completeItem(
+        runId,
+        'team-detail',
+        String(teamId),
+        understatStagingHash(detail),
+        detail,
+      );
+    }
+
+    const db = await getDb();
+    const factsBeforeFinalize = await db
+      .select({ season: understatSeasons.seasonCode })
+      .from(understatSeasons)
+      .where(eq(understatSeasons.seasonCode, completeSeason));
+    expect(factsBeforeFinalize).toHaveLength(0);
+
+    await finalizeUnderstatTeamRun({
+      runId,
+      season: completeSeason,
+      mode: 'full',
+      trigger: 'manual',
+    });
+
+    const snapshot = await createUnderstatTeamRepository(db).readSnapshot(completeSeason);
+    const run = await understatSyncRepository.findRun(runId);
+    expect(snapshot.teams).toHaveLength(20);
+    expect(snapshot.matches).toHaveLength(380);
+    expect(snapshot.splits).toHaveLength(20 * UNDERSTAT_SPLIT_DIMENSIONS.length);
+    expect(run?.status).toBe('completed');
+    expect(run?.metadata).toEqual({
+      finalized: true,
+      storage: 'postgresql',
+      counts: { teams: 20, matches: 380, teamMatchStats: 0, teamSplits: 140 },
+    });
+  });
+
+  test('atomically finalizes a complete staged player snapshot', async () => {
+    const runId = randomUUID();
+    runIds.push(runId);
+    const discovery = completePlayerDiscovery();
+    const leaguePayload = stageUnderstatPlayerLeague(completeSeason, discovery);
+
+    await understatSyncRepository.createRun({
+      runId,
+      lane: 'player',
+      season: completeSeason,
+      mode: 'full',
+      trigger: 'manual',
+    });
+    await understatSyncRepository.addItems(runId, [
+      { resourceType: 'league', resourceId: 'EPL' },
+      ...completeTeamIds.map((teamId) => ({
+        resourceType: 'team-participants',
+        resourceId: String(teamId),
+      })),
+    ]);
+    await understatSyncRepository.completeItem(
+      runId,
+      'league',
+      'EPL',
+      understatStagingHash(leaguePayload),
+      leaguePayload,
+    );
+    for (const [index, teamId] of completeTeamIds.entries()) {
+      const player = discovery.players[index]!;
+      const detail = stageUnderstatPlayerTeamDetail(
+        completeSeason,
+        teamId,
+        [player],
+        [completePlayerMembership(index)],
+      );
+      await understatSyncRepository.completeItem(
+        runId,
+        'team-participants',
+        String(teamId),
+        understatStagingHash(detail),
+        detail,
+      );
+    }
+
+    const db = await getDb();
+    const factsBeforeFinalize = await db
+      .select({ playerId: understatPlayerSeasons.playerId })
+      .from(understatPlayerSeasons)
+      .where(eq(understatPlayerSeasons.seasonCode, completeSeason));
+    expect(factsBeforeFinalize).toHaveLength(0);
+
+    await finalizeUnderstatPlayerRun({
+      runId,
+      season: completeSeason,
+      mode: 'full',
+      trigger: 'manual',
+    });
+
+    const snapshot = await createUnderstatPlayerRepository(db).readSnapshot(completeSeason);
+    const run = await understatSyncRepository.findRun(runId);
+    expect(snapshot.players).toHaveLength(20);
+    expect(snapshot.memberships).toHaveLength(20);
+    expect(snapshot.matchStats).toHaveLength(0);
+    expect(run?.status).toBe('completed');
+    expect(run?.metadata).toEqual({
+      finalized: true,
+      storage: 'postgresql',
+      counts: { players: 20, memberships: 20, playerMatchStats: 0 },
+    });
+  });
+
+  test('rolls back an incomplete player finalizer over a complete snapshot', async () => {
+    const runId = randomUUID();
+    runIds.push(runId);
+    const complete = completePlayerDiscovery();
+    const originalPlayer = complete.players[0]!;
+    const changedSource = {
+      id: originalPlayer.id,
+      name: 'This player name must roll back',
+      favoritePosition: originalPlayer.favoritePosition,
+      firstSeenSeason: completeSeason,
+      lastSeenSeason: completeSeason,
+    };
+    const changedPlayer = { ...changedSource, sourceHash: contentHash(changedSource) };
+    const changedSeasonSource = {
+      ...complete.playerSeasons[0]!,
+      sourceName: changedPlayer.name,
+    };
+    const extraPlayerSource = {
+      id: baseId + 4_000,
+      name: 'Unlinked staged player',
+      favoritePosition: null,
+      firstSeenSeason: completeSeason,
+      lastSeenSeason: completeSeason,
+    };
+    const extraPlayer = {
+      ...extraPlayerSource,
+      sourceHash: contentHash(extraPlayerSource),
+    };
+    const extraSeasonSource = {
+      season: completeSeason,
+      playerId: extraPlayer.id,
+      sourceName: extraPlayer.name,
+      sourceTeamTitle: 'Unknown staged team',
+      ...zeroPlayerStats(),
+    };
+    const discovery = {
+      ...complete,
+      players: [changedPlayer, ...complete.players.slice(1), extraPlayer],
+      playerSeasons: [
+        { ...changedSeasonSource, sourceHash: contentHash(changedSeasonSource) },
+        ...complete.playerSeasons.slice(1),
+        { ...extraSeasonSource, sourceHash: contentHash(extraSeasonSource) },
+      ],
+    };
+    const staged = stageUnderstatPlayerLeague(completeSeason, discovery);
+
+    await understatSyncRepository.createRun({
+      runId,
+      lane: 'player',
+      season: completeSeason,
+      mode: 'full',
+      trigger: 'manual',
+    });
+    await understatSyncRepository.addItems(runId, [{ resourceType: 'league', resourceId: 'EPL' }]);
+    await understatSyncRepository.completeItem(
+      runId,
+      'league',
+      'EPL',
+      understatStagingHash(staged),
+      staged,
+    );
+
+    await finalizeUnderstatPlayerRun({
+      runId,
+      season: completeSeason,
+      mode: 'full',
+      trigger: 'manual',
+    });
+
+    const db = await getDb();
+    const snapshot = await createUnderstatPlayerRepository(db).readSnapshot(completeSeason);
+    const run = await understatSyncRepository.findRun(runId);
+    expect(snapshot.players).toHaveLength(20);
+    expect(snapshot.players.find((row) => row.player.id === originalPlayer.id)?.player.name).toBe(
+      originalPlayer.name,
+    );
+    expect(snapshot.players.some((row) => row.player.id === extraPlayer.id)).toBe(false);
+    expect(run?.status).toBe('skipped');
+    expect(run?.dataChanged).toBe(false);
+    expect(String(run?.metadata.reason)).toContain('participant mismatch');
+
+    const status = await getUnderstatStatus(completeSeason);
+    expect(status.storage).toBe('postgresql');
+    expect(status.dataCache).toBe('disabled');
+    expect(status.resources.teams.count).toBe(20);
+    expect(status.resources.matches.count).toBe(380);
+    expect(status.resources.players.count).toBe(20);
+    expect(status.resources.teamParticipants.count).toBe(20);
+    expect(status.lanes.team.latestRun?.status).toBe('completed');
+    expect(status.lanes.player.latestRun?.status).toBe('skipped');
   });
 
   test('rolls back a failed scoped split replacement', async () => {
@@ -317,14 +839,99 @@ describe('Understat persistence', () => {
       await understatSyncRepository.addItems(runId, [
         { resourceType: 'league', resourceId: league },
       ]);
+      const staged = { test: true, lane };
       expect(
-        await understatSyncRepository.completeItem(runId, 'league', league, 'hash', false),
+        await understatSyncRepository.completeItem(
+          runId,
+          'league',
+          league,
+          contentHash(staged),
+          staged,
+        ),
       ).toBe(true);
     }
     const latest = await understatSyncRepository.findLatestRuns(season);
     expect(latest.team?.runId).not.toBe(latest.player?.runId);
     expect(latest.team?.status).toBe('ready_to_publish');
     expect(latest.player?.status).toBe('ready_to_publish');
+  });
+
+  test('keeps the complete Understat run identity immutable across retries', async () => {
+    const runId = randomUUID();
+    runIds.push(runId);
+    const identity = {
+      runId,
+      lane: 'team' as const,
+      season,
+      mode: 'incremental' as const,
+      trigger: 'manual' as const,
+    };
+
+    expect(await understatSyncRepository.createRun(identity)).toMatchObject(identity);
+    expect(await understatSyncRepository.createRun(identity)).toMatchObject(identity);
+    await expect(understatSyncRepository.createRun({ ...identity, mode: 'full' })).rejects.toThrow(
+      `Understat sync run identity conflict: ${runId}`,
+    );
+    await expect(
+      understatSyncRepository.createRun({ ...identity, trigger: 'api' }),
+    ).rejects.toThrow(`Understat sync run identity conflict: ${runId}`);
+  });
+
+  test('does not reopen terminal runs or overwrite settled items on delayed replay', async () => {
+    const runId = randomUUID();
+    runIds.push(runId);
+    await understatSyncRepository.createRun({
+      runId,
+      lane: 'team',
+      season,
+      mode: 'incremental',
+      trigger: 'manual',
+    });
+    await understatSyncRepository.addItems(runId, [{ resourceType: 'league', resourceId: league }]);
+    const originalPayload = { version: 1, value: 'accepted' };
+    expect(
+      await understatSyncRepository.completeItem(
+        runId,
+        'league',
+        league,
+        contentHash(originalPayload),
+        originalPayload,
+      ),
+    ).toBe(true);
+    await understatSyncRepository.markRunCompleted(runId, { finalized: true }, true);
+
+    await understatSyncRepository.markItemRunning(runId, 'league', league);
+    await understatSyncRepository.failItem(runId, 'league', league, 'late failure');
+    expect(
+      await understatSyncRepository.addItems(runId, [
+        { resourceType: 'team-detail', resourceId: String(teamIds[0]) },
+      ]),
+    ).toBe(1);
+    await understatSyncRepository.markRunFailed(runId, 'late run failure');
+    await understatSyncRepository.markRunSkipped(runId, 'late skip');
+    const delayedPayload = { version: 1, value: 'late' };
+    expect(
+      await understatSyncRepository.completeItem(
+        runId,
+        'league',
+        league,
+        contentHash(delayedPayload),
+        delayedPayload,
+      ),
+    ).toBe(false);
+
+    const [run, item] = await Promise.all([
+      understatSyncRepository.findRun(runId),
+      understatSyncRepository.findItem(runId, 'league', league),
+    ]);
+    expect(run?.status).toBe('completed');
+    expect(run?.errorSummary).toBeNull();
+    expect(item).toMatchObject({
+      status: 'completed',
+      sourceHash: contentHash(originalPayload),
+      normalizedPayload: originalPayload,
+    });
+    expect(await understatSyncRepository.findItems(runId)).toHaveLength(1);
   });
 
   test('does not terminate a failed run until every item has settled', async () => {
@@ -354,19 +961,21 @@ describe('Understat persistence', () => {
     expect(inProgress?.completedAt).toBeNull();
     expect(inProgress?.errorSummary).toBe('first resource failed');
 
+    const staged = { test: true, teamId: teamIds[1] };
     expect(
       await understatSyncRepository.completeItem(
         runId,
         'team-detail',
         String(teamIds[1]),
-        'hash',
-        false,
+        contentHash(staged),
+        staged,
       ),
     ).toBe(false);
     const settled = await understatSyncRepository.findRun(runId);
     expect(settled?.status).toBe('failed');
     expect(settled?.failedItems).toBe(1);
-    expect(settled?.skippedItems).toBe(1);
+    expect(settled?.completedItems).toBe(1);
+    expect(settled?.skippedItems).toBe(0);
     expect(settled?.completedAt).not.toBeNull();
   });
 
@@ -413,27 +1022,41 @@ describe('Understat persistence', () => {
 
   test('reconciles only stale evidence from a completed FPL fixture', async () => {
     const db = await getDb();
-    await db.insert(events).values({ id: fplEventId, name: 'Integration Event' });
+    await db.insert(fplSeasons).values({
+      seasonId: seasonRef.seasonId,
+      seasonCode: seasonRef.seasonCode,
+      displayName: '2098/99',
+      startYear: 2098,
+      endYear: 2099,
+      lifecycleState: 'completed',
+      isCurrent: false,
+    });
+    await db
+      .insert(events)
+      .values({ seasonId: seasonRef.seasonId, eventId: fplEventId, name: 'Integration Event' });
     await db.insert(fplTeams).values(
-      fplTeamIds.map((id, index) => ({
-        id,
-        code: id + 100,
+      fplTeamIds.map((teamId, index) => ({
+        seasonId: seasonRef.seasonId,
+        teamId,
+        code: teamId + 100,
         name: `FPL Integration Team ${index}`,
         shortName: `FI${index}`,
-        pulseId: id + 200,
+        pulseId: teamId + 200,
       })),
     );
     await db.insert(fplPlayers).values(
-      fplPlayerIds.map((id, index) => ({
-        id,
-        code: id + 300,
-        type: 3,
+      fplPlayerIds.map((elementId, index) => ({
+        seasonId: seasonRef.seasonId,
+        elementId,
+        code: elementId + 300,
+        elementType: 3,
         teamId: fplTeamIds[0],
         webName: `FPL Integration Player ${index}`,
       })),
     );
     await db.insert(eventFixtures).values({
-      id: fplFixtureId,
+      seasonId: seasonRef.seasonId,
+      fixtureId: fplFixtureId,
       code: fplFixtureId + 400,
       eventId: fplEventId,
       finished: true,
@@ -455,15 +1078,15 @@ describe('Understat persistence', () => {
       redCards: 0,
     }));
 
-    expect(await repository.upsertEvidence(season, evidence)).toBe(2);
-    expect(await repository.upsertEvidence(season, [evidence[0]])).toBe(1);
-    expect(await repository.upsertEvidence(season, [])).toBe(0);
+    expect(await repository.upsertEvidence(seasonRef, evidence)).toBe(2);
+    expect(await repository.upsertEvidence(seasonRef, [evidence[0]])).toBe(1);
+    expect(await repository.upsertEvidence(seasonRef, [])).toBe(0);
     const rows = await db
       .select()
       .from(fplPlayerFixtureStats)
       .where(
         and(
-          eq(fplPlayerFixtureStats.season, season),
+          eq(fplPlayerFixtureStats.seasonId, seasonRef.seasonId),
           eq(fplPlayerFixtureStats.fixtureId, fplFixtureId),
         ),
       );

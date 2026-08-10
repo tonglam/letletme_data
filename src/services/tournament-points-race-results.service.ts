@@ -1,3 +1,4 @@
+import type { FplSeasonRef } from '../domain/fpl-season';
 import type { TournamentSyncContext } from '../domain/tournament';
 import { entryEventResultsRepository } from '../repositories/entry-event-results';
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
@@ -39,11 +40,13 @@ function rankGroups(
 }
 
 async function loadTournamentEntryTotals(
+  season: FplSeasonRef,
   entryIds: number[],
   startEventId: number,
   endEventId: number,
 ): Promise<Map<number, EntryTotals>> {
   const totals = await entryEventResultsRepository.aggregateTotalsByEntry(
+    season,
     entryIds,
     startEventId,
     endEventId,
@@ -61,6 +64,7 @@ async function loadTournamentEntryTotals(
 }
 
 export async function syncTournamentPointsRaceResultsForTournament(
+  season: FplSeasonRef,
   tournament: TournamentSyncContext,
   eventId: number,
 ): Promise<{ updatedGroups: number; updatedResults: number; skipped: number }> {
@@ -71,13 +75,20 @@ export async function syncTournamentPointsRaceResultsForTournament(
     return { updatedGroups: 0, updatedResults: 0, skipped: 0 };
   }
 
-  const entryIds = await tournamentEntryRepository.findEntryIdsByTournamentId(tournament.id);
+  const entryIds = await tournamentEntryRepository.findEntryIdsByTournamentId(
+    season,
+    tournament.id,
+  );
   if (entryIds.length === 0) {
     logInfo('No tournament entries found for points race results', { tournamentId: tournament.id });
     return { updatedGroups: 0, updatedResults: 0, skipped: 0 };
   }
 
-  const eventResults = await entryEventResultsRepository.findByEventAndEntryIds(eventId, entryIds);
+  const eventResults = await entryEventResultsRepository.findByEventAndEntryIds(
+    season,
+    eventId,
+    entryIds,
+  );
   if (eventResults.length === 0) {
     logInfo('Entry event results missing for points race', {
       tournamentId: tournament.id,
@@ -88,6 +99,7 @@ export async function syncTournamentPointsRaceResultsForTournament(
   const eventResultMap = new Map(eventResults.map((result) => [result.entryId, result]));
 
   const tournamentGroups = await tournamentGroupRepository.findByTournamentAndEntries(
+    season,
     tournament.id,
     entryIds,
   );
@@ -97,12 +109,14 @@ export async function syncTournamentPointsRaceResultsForTournament(
   }
 
   const totalsMap = await loadTournamentEntryTotals(
+    season,
     entryIds,
     tournament.groupStartedEventId,
     Math.min(eventId, tournament.groupEndedEventId),
   );
 
   const pointsGroupResults = await tournamentPointsGroupResultsRepository.findByTournamentAndEvent(
+    season,
     tournament.id,
     eventId,
     entryIds,
@@ -214,18 +228,21 @@ export async function syncTournamentPointsRaceResultsForTournament(
     result.eventGroupRank = groupRankMap.get(rankKey) ?? result.eventGroupRank ?? 0;
   }
 
-  const updatedGroupsCount = await tournamentGroupRepository.upsertBatch(updatedGroups);
-  const updatedResultsCount =
-    await tournamentPointsGroupResultsRepository.upsertBatch(updatedResults);
+  const updatedGroupsCount = await tournamentGroupRepository.upsertBatch(season, updatedGroups);
+  const updatedResultsCount = await tournamentPointsGroupResultsRepository.upsertBatch(
+    season,
+    updatedResults,
+  );
 
   return { updatedGroups: updatedGroupsCount, updatedResults: updatedResultsCount, skipped };
 }
 
 export async function syncTournamentPointsRaceResultsForTournamentId(
+  season: FplSeasonRef,
   tournamentId: number,
   eventId: number,
 ): Promise<{ updatedGroups: number; updatedResults: number; skipped: number }> {
-  const tournament = await tournamentInfoRepository.findById(tournamentId);
+  const tournament = await tournamentInfoRepository.findById(season, tournamentId);
   if (!tournament) {
     logInfo('Tournament not found for points race sync', { tournamentId, eventId });
     return { updatedGroups: 0, updatedResults: 0, skipped: 0 };
@@ -245,15 +262,16 @@ export async function syncTournamentPointsRaceResultsForTournamentId(
     return { updatedGroups: 0, updatedResults: 0, skipped: 0 };
   }
 
-  return syncTournamentPointsRaceResultsForTournament(tournament, eventId);
+  return syncTournamentPointsRaceResultsForTournament(season, tournament, eventId);
 }
 
 export async function syncTournamentPointsRaceResults(
+  season: FplSeasonRef,
   eventId: number,
 ): Promise<{ eventId: number; updatedGroups: number; updatedResults: number; skipped: number }> {
   logInfo('Starting tournament points race results sync', { eventId });
 
-  const tournaments = await tournamentInfoRepository.findPointsRaceByEvent(eventId);
+  const tournaments = await tournamentInfoRepository.findPointsRaceByEvent(season, eventId);
   if (tournaments.length === 0) {
     logInfo('No points race tournaments found', { eventId });
     return { eventId, updatedGroups: 0, updatedResults: 0, skipped: 0 };
@@ -265,7 +283,7 @@ export async function syncTournamentPointsRaceResults(
   const failedTournamentIds: number[] = [];
   const syncResults = await mapWithConcurrency(tournaments, 10, async (tournament) => {
     try {
-      return await syncTournamentPointsRaceResultsForTournament(tournament, eventId);
+      return await syncTournamentPointsRaceResultsForTournament(season, tournament, eventId);
     } catch (error) {
       logError('Failed to sync points race results', error, {
         tournamentId: tournament.id,

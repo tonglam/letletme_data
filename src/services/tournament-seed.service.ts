@@ -4,12 +4,14 @@ import {
   sortQualifiedEntries,
   type SeedPair,
 } from '../domain/tournament';
+import type { FplSeasonRef } from '../domain/fpl-season';
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
 import { tournamentKnockoutsRepository } from '../repositories/tournament-knockouts';
 import { tournamentKnockoutResultsRepository } from '../repositories/tournament-knockout-results';
 
 export async function seedRoundOne(
+  season: FplSeasonRef,
   tournamentId: number,
   seededPairs: ReadonlyArray<SeedPair>,
   playAgainstNum: number,
@@ -18,7 +20,7 @@ export async function seedRoundOne(
     return;
   }
 
-  const roundOneMatches = await tournamentKnockoutsRepository.findRoundOne(tournamentId);
+  const roundOneMatches = await tournamentKnockoutsRepository.findRoundOne(season, tournamentId);
   if (roundOneMatches.length === 0) {
     return;
   }
@@ -51,12 +53,19 @@ export async function seedRoundOne(
     }
   }
 
-  await tournamentKnockoutsRepository.seedRoundOneBulk(tournamentId, matchUpdates);
-  await tournamentKnockoutResultsRepository.seedRoundOneResultsBulk(tournamentId, resultUpdates);
+  await tournamentKnockoutsRepository.seedRoundOneBulk(season, tournamentId, matchUpdates);
+  await tournamentKnockoutResultsRepository.seedRoundOneResultsBulk(
+    season,
+    tournamentId,
+    resultUpdates,
+  );
 }
 
-export async function ensureKnockoutRoundOneSeeded(tournamentId: number): Promise<void> {
-  const tournament = await tournamentInfoRepository.findSetupConfig(tournamentId);
+export async function ensureKnockoutRoundOneSeeded(
+  season: FplSeasonRef,
+  tournamentId: number,
+): Promise<void> {
+  const tournament = await tournamentInfoRepository.findSetupConfig(season, tournamentId);
   if (
     !tournament ||
     tournament.knockoutMode === 'no_knockout' ||
@@ -66,7 +75,7 @@ export async function ensureKnockoutRoundOneSeeded(tournamentId: number): Promis
     return;
   }
 
-  const roundOne = await tournamentKnockoutsRepository.findRoundOne(tournamentId);
+  const roundOne = await tournamentKnockoutsRepository.findRoundOne(season, tournamentId);
   if (roundOne.length === 0) {
     return;
   }
@@ -81,13 +90,18 @@ export async function ensureKnockoutRoundOneSeeded(tournamentId: number): Promis
   let seededEntryIds: number[] = [];
 
   if (tournament.groupMode === 'no_group') {
-    const entrySeeds = await tournamentEntryRepository.findEntrySeedsByTournamentId(tournamentId);
+    const entrySeeds = await tournamentEntryRepository.findEntrySeedsByTournamentId(
+      season,
+      tournamentId,
+    );
     seededEntryIds = sortEntrySeeds(entrySeeds)
       .slice(0, tournament.knockoutTeamNum)
       .map((entry) => entry.entryId);
   } else {
-    const qualifiedEntries =
-      await tournamentEntryRepository.findQualifiedEntriesByTournamentId(tournamentId);
+    const qualifiedEntries = await tournamentEntryRepository.findQualifiedEntriesByTournamentId(
+      season,
+      tournamentId,
+    );
     if (qualifiedEntries.length < tournament.knockoutTeamNum) {
       return;
     }
@@ -101,6 +115,7 @@ export async function ensureKnockoutRoundOneSeeded(tournamentId: number): Promis
   }
 
   await seedRoundOne(
+    season,
     tournamentId,
     seedBracketEntries(seededEntryIds, tournament.knockoutTeamNum),
     tournament.knockoutPlayAgainstNum,

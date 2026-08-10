@@ -1,6 +1,7 @@
 import { Elysia, t } from 'elysia';
 
 import { enqueuePlayerStatsSyncJob } from '../jobs/data-sync-enqueue';
+import { seasonRepository } from '../repositories/seasons';
 
 /**
  * Player Stats API Routes
@@ -15,7 +16,8 @@ const positiveEventId = t.Number({ minimum: 1, multipleOf: 1 });
 
 export const playerStatsAPI = new Elysia({ prefix: '/player-stats' })
   .post('/sync', async ({ set }) => {
-    const job = await enqueuePlayerStatsSyncJob('api');
+    const season = await seasonRepository.findCurrent();
+    const job = await enqueuePlayerStatsSyncJob(season, 'api');
     set.status = 202;
     return { success: true, message: 'Player stats sync job enqueued', jobId: job.id };
   })
@@ -23,7 +25,8 @@ export const playerStatsAPI = new Elysia({ prefix: '/player-stats' })
   .post(
     '/sync/:eventId',
     async ({ params, set }) => {
-      const job = await enqueuePlayerStatsSyncJob('api', { eventId: params.eventId });
+      const season = await seasonRepository.findCurrent();
+      const job = await enqueuePlayerStatsSyncJob(season, 'api', { eventId: params.eventId });
       set.status = 202;
       return {
         success: true,

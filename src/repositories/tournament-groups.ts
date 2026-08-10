@@ -1,22 +1,25 @@
 import { and, eq, inArray, sql } from 'drizzle-orm';
-import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
-
 import {
-  tournamentGroups,
+  tournamentGroupsInCompetition,
   type DbTournamentGroup,
   type DbTournamentGroupInsert,
 } from '../db/schemas/index.schema';
-import { getDb } from '../db/singleton';
+import { getDb, type DbOrTransaction } from '../db/singleton';
+import type { FplSeasonRef } from '../domain/fpl-season';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 
-type DatabaseInstance = PostgresJsDatabase<Record<string, never>>;
+const mapGroup = (row: typeof tournamentGroupsInCompetition.$inferSelect): DbTournamentGroup => ({
+  ...row,
+  id: row.sourceGroupRowId,
+});
 
-export const createTournamentGroupRepository = (dbInstance?: DatabaseInstance) => {
-  const getDbInstance = async () => dbInstance || (await getDb());
+export const createTournamentGroupRepository = (dbInstance?: DbOrTransaction) => {
+  const getDbInstance = async () => dbInstance ?? (await getDb());
 
   return {
     findByTournamentAndEntries: async (
+      season: FplSeasonRef,
       tournamentId: number,
       entryIds: number[],
     ): Promise<DbTournamentGroup[]> => {
@@ -36,14 +39,15 @@ export const createTournamentGroupRepository = (dbInstance?: DatabaseInstance) =
         for (const chunk of chunks) {
           const rows = await db
             .select()
-            .from(tournamentGroups)
+            .from(tournamentGroupsInCompetition)
             .where(
               and(
-                eq(tournamentGroups.tournamentId, tournamentId),
-                inArray(tournamentGroups.entryId, chunk),
+                eq(tournamentGroupsInCompetition.seasonId, season.seasonId),
+                eq(tournamentGroupsInCompetition.tournamentId, tournamentId),
+                inArray(tournamentGroupsInCompetition.entryId, chunk),
               ),
             );
-          results.push(...rows);
+          results.push(...rows.map(mapGroup));
         }
 
         logInfo('Retrieved tournament groups', { tournamentId, count: results.length });
@@ -59,6 +63,7 @@ export const createTournamentGroupRepository = (dbInstance?: DatabaseInstance) =
     },
 
     findByTournamentAndGroup: async (
+      season: FplSeasonRef,
       tournamentId: number,
       groupId: number | string,
     ): Promise<DbTournamentGroup[]> => {
@@ -66,11 +71,12 @@ export const createTournamentGroupRepository = (dbInstance?: DatabaseInstance) =
         const db = await getDbInstance();
         const rows = await db
           .select()
-          .from(tournamentGroups)
+          .from(tournamentGroupsInCompetition)
           .where(
             and(
-              eq(tournamentGroups.tournamentId, tournamentId),
-              eq(tournamentGroups.groupId, Number(groupId)),
+              eq(tournamentGroupsInCompetition.seasonId, season.seasonId),
+              eq(tournamentGroupsInCompetition.tournamentId, tournamentId),
+              eq(tournamentGroupsInCompetition.groupId, Number(groupId)),
             ),
           );
         logInfo('Retrieved tournament group entries', {
@@ -78,7 +84,7 @@ export const createTournamentGroupRepository = (dbInstance?: DatabaseInstance) =
           groupId,
           count: rows.length,
         });
-        return rows;
+        return rows.map(mapGroup);
       } catch (error) {
         logError('Failed to retrieve tournament group entries', error, { tournamentId, groupId });
         throw new DatabaseError(
@@ -89,10 +95,17 @@ export const createTournamentGroupRepository = (dbInstance?: DatabaseInstance) =
       }
     },
 
-    deleteByTournament: async (tournamentId: number): Promise<void> => {
+    deleteByTournament: async (season: FplSeasonRef, tournamentId: number): Promise<void> => {
       try {
         const db = await getDbInstance();
-        await db.delete(tournamentGroups).where(eq(tournamentGroups.tournamentId, tournamentId));
+        await db
+          .delete(tournamentGroupsInCompetition)
+          .where(
+            and(
+              eq(tournamentGroupsInCompetition.seasonId, season.seasonId),
+              eq(tournamentGroupsInCompetition.tournamentId, tournamentId),
+            ),
+          );
       } catch (error) {
         logError('Failed to delete tournament groups', error, { tournamentId });
         throw new DatabaseError(
@@ -104,18 +117,24 @@ export const createTournamentGroupRepository = (dbInstance?: DatabaseInstance) =
     },
 
     findGroupSlots: async (
+      season: FplSeasonRef,
       tournamentId: number,
     ): Promise<Array<{ groupId: number; groupIndex: number }>> => {
       try {
         const db = await getDbInstance();
         const rows = await db
           .select({
-            groupId: tournamentGroups.groupId,
-            groupIndex: tournamentGroups.groupIndex,
+            groupId: tournamentGroupsInCompetition.groupId,
+            groupIndex: tournamentGroupsInCompetition.groupIndex,
           })
-          .from(tournamentGroups)
-          .where(eq(tournamentGroups.tournamentId, tournamentId))
-          .orderBy(tournamentGroups.groupId, tournamentGroups.groupIndex);
+          .from(tournamentGroupsInCompetition)
+          .where(
+            and(
+              eq(tournamentGroupsInCompetition.seasonId, season.seasonId),
+              eq(tournamentGroupsInCompetition.tournamentId, tournamentId),
+            ),
+          )
+          .orderBy(tournamentGroupsInCompetition.groupId, tournamentGroupsInCompetition.groupIndex);
         return rows;
       } catch (error) {
         logError('Failed to find tournament group slots', error, { tournamentId });
@@ -127,7 +146,10 @@ export const createTournamentGroupRepository = (dbInstance?: DatabaseInstance) =
       }
     },
 
-    upsertBatch: async (groups: DbTournamentGroupInsert[]): Promise<number> => {
+    upsertBatch: async (
+      season: FplSeasonRef,
+      groups: DbTournamentGroupInsert[],
+    ): Promise<number> => {
       if (groups.length === 0) {
         return 0;
       }
@@ -135,13 +157,13 @@ export const createTournamentGroupRepository = (dbInstance?: DatabaseInstance) =
       try {
         const db = await getDbInstance();
         await db
-          .insert(tournamentGroups)
-          .values(groups)
+          .insert(tournamentGroupsInCompetition)
+          .values(groups.map((group) => ({ ...group, seasonId: season.seasonId })))
           .onConflictDoUpdate({
             target: [
-              tournamentGroups.tournamentId,
-              tournamentGroups.groupId,
-              tournamentGroups.entryId,
+              tournamentGroupsInCompetition.tournamentId,
+              tournamentGroupsInCompetition.groupId,
+              tournamentGroupsInCompetition.entryId,
             ],
             set: {
               groupName: sql`excluded.group_name`,
@@ -159,7 +181,7 @@ export const createTournamentGroupRepository = (dbInstance?: DatabaseInstance) =
               totalNetPoints: sql`excluded.total_net_points`,
               qualified: sql`excluded.qualified`,
               overallRank: sql`excluded.overall_rank`,
-              createdAt: sql`excluded.created_at`,
+              updatedAt: new Date(),
             },
           });
 

@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
 
 import type { UnderstatSyncMode, UnderstatSyncTrigger } from '../domain/understat';
-import { understatPlayerQueue } from '../queues/understat-player.queue';
-import { understatTeamQueue } from '../queues/understat-team.queue';
+import { getUnderstatPlayerQueue } from '../queues/understat-player.queue';
+import { getUnderstatTeamQueue } from '../queues/understat-team.queue';
 
 export interface UnderstatSyncRequest {
   season: string;
@@ -10,13 +10,12 @@ export interface UnderstatSyncRequest {
   trigger: UnderstatSyncTrigger;
   teamIds?: number[];
   matchIds?: number[];
-  participantsOnly?: boolean;
   runId?: string;
 }
 
 export async function enqueueUnderstatTeamSync(request: UnderstatSyncRequest) {
   const runId = request.runId ?? randomUUID();
-  const job = await understatTeamQueue.add(
+  const job = await getUnderstatTeamQueue().add(
     'understat-team-discover',
     {
       runId,
@@ -32,7 +31,7 @@ export async function enqueueUnderstatTeamSync(request: UnderstatSyncRequest) {
 
 export async function enqueueUnderstatPlayerSync(request: UnderstatSyncRequest) {
   const runId = request.runId ?? randomUUID();
-  const job = await understatPlayerQueue.add(
+  const job = await getUnderstatPlayerQueue().add(
     'understat-player-discover',
     {
       runId,
@@ -41,7 +40,6 @@ export async function enqueueUnderstatPlayerSync(request: UnderstatSyncRequest) 
       trigger: request.trigger,
       teamIds: request.teamIds,
       matchIds: request.matchIds,
-      participantsOnly: request.participantsOnly,
     },
     { jobId: `understat-player-discover-${runId}` },
   );
@@ -56,19 +54,19 @@ export async function enqueueUnderstatTeamDetail(input: {
   teamId: number;
   teamTitle: string;
 }) {
-  return understatTeamQueue.add('understat-team-detail', input, {
+  return getUnderstatTeamQueue().add('understat-team-detail', input, {
     jobId: `understat-team-detail-${input.runId}-${input.teamId}`,
   });
 }
 
-export async function enqueueUnderstatTeamPublish(input: {
+export async function enqueueUnderstatTeamFinalize(input: {
   runId: string;
   season: string;
   mode: UnderstatSyncMode;
   trigger: UnderstatSyncTrigger;
 }) {
-  return understatTeamQueue.add('understat-team-publish', input, {
-    jobId: `understat-team-publish-${input.runId}`,
+  return getUnderstatTeamQueue().add('understat-team-finalize', input, {
+    jobId: `understat-team-finalize-${input.runId}`,
   });
 }
 
@@ -80,7 +78,7 @@ export async function enqueueUnderstatPlayerTeamDetail(input: {
   resourceId: number;
   teamTitle: string;
 }) {
-  return understatPlayerQueue.add('understat-player-team-detail', input, {
+  return getUnderstatPlayerQueue().add('understat-player-team-detail', input, {
     jobId: `understat-player-team-${input.runId}-${input.resourceId}`,
   });
 }
@@ -92,18 +90,18 @@ export async function enqueueUnderstatPlayerMatch(input: {
   trigger: UnderstatSyncTrigger;
   resourceId: number;
 }) {
-  return understatPlayerQueue.add('understat-player-match', input, {
+  return getUnderstatPlayerQueue().add('understat-player-match', input, {
     jobId: `understat-player-match-${input.runId}-${input.resourceId}`,
   });
 }
 
-export async function enqueueUnderstatPlayerPublish(input: {
+export async function enqueueUnderstatPlayerFinalize(input: {
   runId: string;
   season: string;
   mode: UnderstatSyncMode;
   trigger: UnderstatSyncTrigger;
 }) {
-  return understatPlayerQueue.add('understat-player-publish', input, {
-    jobId: `understat-player-publish-${input.runId}`,
+  return getUnderstatPlayerQueue().add('understat-player-finalize', input, {
+    jobId: `understat-player-finalize-${input.runId}`,
   });
 }

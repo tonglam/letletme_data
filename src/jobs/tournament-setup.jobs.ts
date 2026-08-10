@@ -4,6 +4,7 @@ import {
   type TournamentSetupJobData,
 } from '../queues/tournament-setup.queue';
 import { getTournamentSetupJobPriority } from '../domain/job-priority';
+import type { FplSeasonRef } from '../domain/fpl-season';
 import { tournamentSetupEnqueueScope } from '../domain/mutation-scope';
 import { ConflictError } from '../utils/errors';
 import { logError, logInfo, logWarn } from '../utils/logger';
@@ -34,11 +35,14 @@ export type ExistingSetupJobAction =
   | 'enqueue_base'
   | 'enqueue_successor';
 
-export function getTournamentSetupJobIds(tournamentId: number): {
+export function getTournamentSetupJobIds(
+  season: FplSeasonRef,
+  tournamentId: number,
+): {
   baseJobId: string;
   successorJobId: string;
 } {
-  const baseJobId = `tournament-setup-${tournamentId}`;
+  const baseJobId = `tournament-setup-${season.seasonCode}-${tournamentId}`;
   return {
     baseJobId,
     successorJobId: `${baseJobId}-successor`,
@@ -115,6 +119,7 @@ export async function cancelWaitingTournamentSetupJobs(tournamentId: number): Pr
 }
 
 async function enqueueTournamentSetupUnlocked(
+  season: FplSeasonRef,
   tournamentId: number,
   source: TournamentSetupJobSource = 'create',
   options: EnqueueTournamentSetupOptions = {},
@@ -123,12 +128,14 @@ async function enqueueTournamentSetupUnlocked(
     const tier = getTournamentSetupJobPriority('tournament-setup');
     const queue = getTournamentSetupQueue(tier);
     const jobData: TournamentSetupJobData = {
+      seasonId: season.seasonId,
+      seasonCode: season.seasonCode,
       tournamentId,
       source,
       triggeredAt: new Date().toISOString(),
     };
 
-    const { baseJobId, successorJobId } = getTournamentSetupJobIds(tournamentId);
+    const { baseJobId, successorJobId } = getTournamentSetupJobIds(season, tournamentId);
     // A lifecycle-locked caller can leave one durable successor behind an
     // active base job. Always inspect that stable slot first: otherwise later
     // reconciliations only see the base ID and can queue duplicate rebuilds.
@@ -240,6 +247,7 @@ async function enqueueTournamentSetupUnlocked(
 }
 
 export function enqueueTournamentSetup(
+  season: FplSeasonRef,
   tournamentId: number,
   source: TournamentSetupJobSource = 'create',
   options: EnqueueTournamentSetupOptions = {},
@@ -252,6 +260,6 @@ export function enqueueTournamentSetup(
       scopes: [tournamentSetupEnqueueScope(tournamentId)],
       required: true,
     },
-    () => enqueueTournamentSetupUnlocked(tournamentId, source, options),
+    () => enqueueTournamentSetupUnlocked(season, tournamentId, source, options),
   );
 }

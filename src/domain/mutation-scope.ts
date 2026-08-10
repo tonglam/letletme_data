@@ -75,12 +75,6 @@ export function resolveMutationScopes(input: MutationScopeInput): string[] {
   if (queue === 'data-sync') {
     switch (jobName) {
       case 'core-snapshot':
-      case 'events':
-      case 'fixtures':
-      case 'fixtures-all-gameweeks':
-      case 'teams':
-      case 'players':
-      case 'phases':
         return [
           'data-core:events',
           'data-core:teams',
@@ -93,18 +87,6 @@ export function resolveMutationScopes(input: MutationScopeInput): string[] {
       case 'player-stats':
       case 'player-values':
         return [`data-core:${jobName}`];
-      case 'fpl-season-archive':
-        return [
-          'data-core:events',
-          'data-core:teams',
-          'data-core:players',
-          'data-core:phases',
-          'data-core:fixtures',
-          'data-core:player-stats',
-          'data-core:player-values',
-          'live-snapshot:all',
-          'event-live-summary:season',
-        ];
       default:
         return [];
     }
@@ -128,20 +110,7 @@ export function resolveMutationScopes(input: MutationScopeInput): string[] {
   if (queue === 'live-data') {
     switch (jobName) {
       case 'live-snapshot':
-      case 'event-lives-cache':
-      case 'event-lives-db':
-      case 'live-fixture-cache':
-      case 'live-bonus-cache':
-      case 'live-scores':
-        // New enqueues use live-snapshot directly; the legacy names remain for
-        // rolling-deploy queue entries and execute the same coordinated writer.
         return ['data-core:fixtures', withEvent('live-snapshot', eventId)];
-      case 'event-live-explain':
-        return [withEvent('live-snapshot', eventId), withEvent('event-live-explain', eventId)];
-      case 'event-live-summary':
-        return ['event-live-summary:season'];
-      case 'event-overall-result':
-        return ['event-overall-result:season'];
       default:
         return [];
     }
@@ -190,8 +159,8 @@ export function resolveMutationScopes(input: MutationScopeInput): string[] {
           withEvent('tournament-event-mutations', eventId),
         ];
       case 'tournament-selection-stats':
-        // Reads entry_event_picks/transfers but only writes tournament_selection_stats;
-        // tournament-event-mutations covers its write target.
+        // Reads canonical picks/transfers and refreshes the reporting MV;
+        // tournament-event-mutations serializes that reporting publication.
         return [withEvent('tournament-event-mutations', eventId)];
       // Structure-table writers (groups / battle / knockout). Share global with
       // setup rebuilds so C4 cannot tear down structure mid-write.

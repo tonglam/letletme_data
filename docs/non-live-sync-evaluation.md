@@ -102,9 +102,8 @@ bun run typecheck
 bun run lint
 bun run test
 bun run test:integration
-bun run test:core-snapshot
-bun run test:core-snapshot-benchmark
-bun run test:tournament-benchmark
+bun run test:publication:integration
+bun run test:core-publication-benchmark
 bun run build
 bun run db:check
 bun run db:apply-sql

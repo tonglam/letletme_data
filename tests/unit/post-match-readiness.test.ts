@@ -5,7 +5,6 @@ import {
   POST_MATCH_RESULTS_WINDOW_MS,
 } from '../../src/domain/post-match-results';
 import { shouldEnqueueTournamentCascade } from '../../src/domain/tournament-event-results';
-import { shouldRunCurrentEventJob } from '../../src/jobs/current-event-gate';
 import { shouldRunPlayerValuesSync } from '../../src/jobs/player-values-window.jobs';
 import type { Event, Fixture } from '../../src/types';
 
@@ -122,39 +121,6 @@ describe('bounded post-match result slots', () => {
     expect(
       getPostMatchResultsSlot({ dataChecked: false }, [buildFixture('invalid', 3)], new Date()),
     ).toBeNull();
-  });
-});
-
-describe('current-event job gate', () => {
-  test('does not look up a current event outside the season window', async () => {
-    const isFPLSeason = mock(async () => false);
-    const getCurrentEvent = mock(async () => null);
-
-    expect(
-      await shouldRunCurrentEventJob('player-stats-sync', new Date(), {
-        isFPLSeason,
-        getCurrentEvent,
-      }),
-    ).toBe(false);
-    expect(getCurrentEvent).not.toHaveBeenCalled();
-  });
-
-  test('skips jobs until a current event exists', async () => {
-    expect(
-      await shouldRunCurrentEventJob('player-stats-sync', new Date(), {
-        isFPLSeason: async () => true,
-        getCurrentEvent: async () => null,
-      }),
-    ).toBe(false);
-  });
-
-  test('allows jobs once the season and current event are both active', async () => {
-    expect(
-      await shouldRunCurrentEventJob('player-stats-sync', new Date(), {
-        isFPLSeason: async () => true,
-        getCurrentEvent: async () => ({ id: 1 }) as Event,
-      }),
-    ).toBe(true);
   });
 });
 

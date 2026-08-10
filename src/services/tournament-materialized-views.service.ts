@@ -1,78 +1,55 @@
 import { getDbClient } from '../db/singleton';
 import { logError, logInfo } from '../utils/logger';
 
-/**
- * Refresh the event-level source before an atomic standings publication.
- * A filtered row and its readiness timestamp become visible together.
- */
-export async function refreshTournamentEventSnapshotMaterializedView(): Promise<void> {
+import { refreshTournamentSelectionStatsMaterializedView } from './tournament-selection-stats.service';
+
+/** Refresh the reporting snapshot used by tournament ranking/event-result reads. */
+export async function refreshTournamentEntryEventSummariesMaterializedView(): Promise<void> {
   const client = await getDbClient();
   try {
-    await client`REFRESH MATERIALIZED VIEW CONCURRENTLY mv_tournament_event_snapshot`;
-    logInfo('Refreshed mv_tournament_event_snapshot');
+    await client`SELECT reporting.refresh_tournament_entry_event_summaries()`;
+    logInfo('Refreshed reporting.tournament_entry_event_summaries');
   } catch (error) {
-    logError('Failed to refresh tournament event snapshot materialized view', error);
+    logError('Failed to refresh tournament entry-event summaries', error);
     throw error;
   }
 }
 
 /**
- * Refresh the tournament event materialized read model.
- *
- * The event-level snapshot powers the GraphQL tournament APIs
- * (tournamentEntryRankingSummary and tournamentEventResults). It must be
- * refreshed after the underlying tables (tournament_points_group_results,
- * league_event_results, entry_infos) are updated.
- *
- * Uses REFRESH MATERIALIZED VIEW CONCURRENTLY so reads are not blocked.
- * The unique index on the view enables concurrent refresh.
+ * Finalization refresh. Selection statistics are refreshed by the dedicated
+ * post-transfer job, so this path only refreshes the remaining reporting MV.
  */
 export async function refreshTournamentMaterializedViews(): Promise<{
-  eventSnapshot: boolean;
-  tournamentSnapshot: boolean;
+  selectionStats: boolean;
+  entryEventSummaries: boolean;
 }> {
-  const client = await getDbClient();
-
-  try {
-    logInfo('Refreshing tournament event materialized view...');
-
-    await client`REFRESH MATERIALIZED VIEW CONCURRENTLY mv_tournament_event_snapshot`;
-    logInfo('Refreshed mv_tournament_event_snapshot');
-
-    await client`REFRESH MATERIALIZED VIEW CONCURRENTLY mv_tournament_snapshot`;
-    logInfo('Refreshed mv_tournament_snapshot');
-
-    return { eventSnapshot: true, tournamentSnapshot: true };
-  } catch (error) {
-    logError('Failed to refresh tournament event materialized view', error);
-    throw error;
-  }
+  await refreshTournamentEntryEventSummariesMaterializedView();
+  return { selectionStats: false, entryEventSummaries: true };
 }
 
 /**
- * Repair only a deletion that is still present in the published snapshot.
- * This keeps a retry idempotent after the canonical row has gone without
- * allowing arbitrary missing IDs to trigger an expensive global refresh.
+ * A deleted tournament can remain in either MV until the next refresh. Only
+ * pay the two global refresh costs when stale rows are actually present.
  */
 export async function repairDeletedTournamentMaterializedViews(
   tournamentId: number,
 ): Promise<boolean> {
   const client = await getDbClient();
-  const rows = await client<{ exists: boolean }[]>`
+  const rows = await client<Array<{ exists: boolean }>>`
     SELECT
       EXISTS (
         SELECT 1
-        FROM mv_tournament_event_snapshot
+        FROM reporting.tournament_selection_stats
         WHERE tournament_id = ${tournamentId}
-      )
-      OR EXISTS (
+      ) OR EXISTS (
         SELECT 1
-        FROM mv_tournament_snapshot
+        FROM reporting.tournament_entry_event_summaries
         WHERE tournament_id = ${tournamentId}
       ) AS exists
   `;
   if (rows[0]?.exists !== true) return false;
 
-  await refreshTournamentMaterializedViews();
+  await refreshTournamentSelectionStatsMaterializedView();
+  await refreshTournamentEntryEventSummariesMaterializedView();
   return true;
 }

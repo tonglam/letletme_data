@@ -1,5 +1,5 @@
-import { getActiveCacheSeason } from '../cache/cache-season';
 import { entryEventPicksRepository } from '../repositories/entry-event-picks';
+import type { FplSeasonRef } from '../domain/fpl-season';
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
 import { syncEntryEventPicks } from './entries.service';
@@ -22,6 +22,7 @@ export function findMissingTournamentPickEntryIds(
 }
 
 export async function syncTournamentEventPicks(
+  season: FplSeasonRef,
   eventId: number,
   options?: { concurrency?: number },
 ): Promise<{
@@ -37,7 +38,7 @@ export async function syncTournamentEventPicks(
 }> {
   logInfo('Starting tournament event picks sync', { eventId });
 
-  const tournaments = await tournamentInfoRepository.findActive();
+  const tournaments = await tournamentInfoRepository.findActive(season);
   if (tournaments.length === 0) {
     logInfo('No active tournaments found for tournament event picks', { eventId });
     return {
@@ -54,9 +55,8 @@ export async function syncTournamentEventPicks(
   }
 
   const concurrency = options?.concurrency ?? DEFAULT_CONCURRENCY;
-  const checkpointSeason = await getActiveCacheSeason();
   const entryLists = await mapWithConcurrency(tournaments, 10, (tournament) =>
-    tournamentEntryRepository.findEntryIdsByTournamentId(tournament.id),
+    tournamentEntryRepository.findEntryIdsByTournamentId(season, tournament.id),
   );
   const entryIds = uniqueNumbers(entryLists.flat()).filter((entryId) => entryId > 0);
   if (entryIds.length === 0) {
@@ -74,18 +74,14 @@ export async function syncTournamentEventPicks(
     };
   }
 
-  const existing = await entryEventPicksRepository.findEntryIdsByEvent(
-    eventId,
-    entryIds,
-    checkpointSeason,
-  );
+  const existing = await entryEventPicksRepository.findEntryIdsByEvent(season, eventId, entryIds);
   const existingSet = new Set(existing);
   const toSync = entryIds.filter((entryId) => !existingSet.has(entryId));
   const skipped = existingSet.size;
 
   await mapWithConcurrency(toSync, concurrency, async (entryId) => {
     try {
-      await syncEntryEventPicks(entryId, eventId);
+      await syncEntryEventPicks(season, entryId, eventId);
       return { entryId, success: true } satisfies EntrySyncOutcome;
     } catch (error) {
       logError('Failed to sync tournament entry picks', error, { eventId, entryId });
@@ -96,7 +92,7 @@ export async function syncTournamentEventPicks(
   // Canonical rows, rather than request outcomes, are the checkpoint. A request
   // may fail after a concurrent worker has already completed the same unit.
   const persisted = new Set(
-    await entryEventPicksRepository.findEntryIdsByEvent(eventId, entryIds, checkpointSeason),
+    await entryEventPicksRepository.findEntryIdsByEvent(season, eventId, entryIds),
   );
   const missingEntryIds = findMissingTournamentPickEntryIds(entryIds, persisted);
   const failedUnits = missingEntryIds.length;

@@ -1,9 +1,5 @@
-import {
-  ACTIVE_SEASON_LOCK_ID,
-  ACTIVE_SEASON_LOCK_NAMESPACE,
-  getActiveCacheSeasonUncached,
-} from '../cache/cache-season';
 import { getDbClient } from '../db/singleton';
+import type { FplSeasonRef } from '../domain/fpl-season';
 import type {
   LeagueType,
   TournamentConfig,
@@ -23,49 +19,7 @@ export type TournamentRosterRecord = TournamentConfig & {
   standingsReadyAt: string | null;
 };
 
-type RosterRow = {
-  id: number;
-  adminEntryId: number;
-  leagueId: number;
-  leagueType: LeagueType;
-  rosterMode: TournamentRosterMode;
-  state: 'active' | 'inactive' | 'finished';
-  standingsReadyAt: string | null;
-  totalTeamNum: number;
-  groupMode: TournamentConfig['groupMode'];
-  groupNum: number | null;
-  groupStartedEventId: number | null;
-  groupEndedEventId: number | null;
-  groupQualifyNum: number | null;
-  knockoutMode: TournamentConfig['knockoutMode'];
-  knockoutTeamNum: number | null;
-  knockoutEventNum: number | null;
-  knockoutStartedEventId: number | null;
-  knockoutEndedEventId: number | null;
-  knockoutPlayAgainstNum: number | null;
-};
-
-const SELECT_ROSTER_RECORD = `
-  id,
-  admin_entry_id as "adminEntryId",
-  league_id as "leagueId",
-  league_type as "leagueType",
-  roster_mode as "rosterMode",
-  state,
-  standings_ready_at::text as "standingsReadyAt",
-  total_team_num as "totalTeamNum",
-  group_mode as "groupMode",
-  group_num as "groupNum",
-  group_started_event_id as "groupStartedEventId",
-  group_ended_event_id as "groupEndedEventId",
-  group_qualify_num as "groupQualifyNum",
-  knockout_mode as "knockoutMode",
-  knockout_team_num as "knockoutTeamNum",
-  knockout_event_num as "knockoutEventNum",
-  knockout_started_event_id as "knockoutStartedEventId",
-  knockout_ended_event_id as "knockoutEndedEventId",
-  knockout_play_against_num as "knockoutPlayAgainstNum"
-`;
+type RosterRow = TournamentRosterRecord;
 
 export type RosterPublicationResult = {
   changed: boolean;
@@ -74,183 +28,241 @@ export type RosterPublicationResult = {
   skipped: boolean;
 };
 
+function normalizeRoster(row: RosterRow | undefined): TournamentRosterRecord | null {
+  if (!row) return null;
+  return {
+    ...row,
+    groupMode: row.groupMode ?? 'no_group',
+    knockoutMode: row.knockoutMode ?? 'no_knockout',
+  };
+}
+
+function uniqueParticipantIds(participants: TournamentParticipant[]): number[] {
+  const ids = participants.map((participant) => Number(participant.id));
+  if (ids.some((id) => !Number.isInteger(id) || id <= 0) || new Set(ids).size !== ids.length) {
+    throw new Error('Authoritative tournament roster contains invalid or duplicate entry IDs');
+  }
+  return ids;
+}
+
 export const tournamentRosterRepository = {
-  findById: async (tournamentId: number): Promise<TournamentRosterRecord | null> => {
+  findById: async (
+    season: FplSeasonRef,
+    tournamentId: number,
+  ): Promise<TournamentRosterRecord | null> => {
     try {
       const client = await getDbClient();
-      const rows = await client.unsafe<RosterRow[]>(
-        `select ${SELECT_ROSTER_RECORD} from tournament_infos where id = $1 limit 1`,
-        [tournamentId],
-      );
-      return rows[0] ?? null;
+      const rows = await client<RosterRow[]>`
+        SELECT
+          tournament_id AS id,
+          admin_entry_id AS "adminEntryId",
+          league_id AS "leagueId",
+          league_type AS "leagueType",
+          roster_mode AS "rosterMode",
+          state,
+          standings_ready_at::text AS "standingsReadyAt",
+          total_team_num AS "totalTeamNum",
+          group_mode AS "groupMode",
+          group_num AS "groupNum",
+          group_started_event_id AS "groupStartedEventId",
+          group_ended_event_id AS "groupEndedEventId",
+          group_qualify_num AS "groupQualifyNum",
+          knockout_mode AS "knockoutMode",
+          knockout_team_num AS "knockoutTeamNum",
+          knockout_event_num AS "knockoutEventNum",
+          knockout_started_event_id AS "knockoutStartedEventId",
+          knockout_ended_event_id AS "knockoutEndedEventId",
+          knockout_play_against_num AS "knockoutPlayAgainstNum"
+        FROM competition.tournaments
+        WHERE season_id = ${season.seasonId}
+          AND tournament_id = ${tournamentId}
+        LIMIT 1
+      `;
+      return normalizeRoster(rows[0]);
     } catch (error) {
-      logError('Failed to load tournament roster record', error, { tournamentId });
+      logError('Failed to load tournament roster record', error, {
+        season: season.seasonCode,
+        tournamentId,
+      });
       throw new DatabaseError(
         'Failed to load tournament roster.',
         'TOURNAMENT_ROSTER_FIND_ERROR',
-        error as Error,
+        error instanceof Error ? error : undefined,
       );
     }
   },
 
-  findActiveOfficialSync: async (): Promise<TournamentRosterRecord[]> => {
+  findActiveOfficialSync: async (season: FplSeasonRef): Promise<TournamentRosterRecord[]> => {
     try {
       const client = await getDbClient();
-      return await client.unsafe<RosterRow[]>(
-        `select ${SELECT_ROSTER_RECORD}
-         from tournament_infos
-         where state = 'active' and roster_mode = 'official_sync'
-         order by id`,
-      );
+      const rows = await client<RosterRow[]>`
+        SELECT
+          tournament_id AS id,
+          admin_entry_id AS "adminEntryId",
+          league_id AS "leagueId",
+          league_type AS "leagueType",
+          roster_mode AS "rosterMode",
+          state,
+          standings_ready_at::text AS "standingsReadyAt",
+          total_team_num AS "totalTeamNum",
+          group_mode AS "groupMode",
+          group_num AS "groupNum",
+          group_started_event_id AS "groupStartedEventId",
+          group_ended_event_id AS "groupEndedEventId",
+          group_qualify_num AS "groupQualifyNum",
+          knockout_mode AS "knockoutMode",
+          knockout_team_num AS "knockoutTeamNum",
+          knockout_event_num AS "knockoutEventNum",
+          knockout_started_event_id AS "knockoutStartedEventId",
+          knockout_ended_event_id AS "knockoutEndedEventId",
+          knockout_play_against_num AS "knockoutPlayAgainstNum"
+        FROM competition.tournaments
+        WHERE season_id = ${season.seasonId}
+          AND state = 'active'
+          AND roster_mode = 'official_sync'
+        ORDER BY tournament_id
+      `;
+      return rows.map((row) => normalizeRoster(row)!);
     } catch (error) {
-      logError('Failed to load official-sync tournaments', error);
+      logError('Failed to load official-sync tournaments', error, {
+        season: season.seasonCode,
+      });
       throw new DatabaseError(
         'Failed to load official-sync tournaments.',
         'TOURNAMENT_ROSTER_FIND_ACTIVE_ERROR',
-        error as Error,
+        error instanceof Error ? error : undefined,
       );
     }
   },
 
-  findEntryIds: async (tournamentId: number): Promise<number[]> => {
+  findEntryIds: async (season: FplSeasonRef, tournamentId: number): Promise<number[]> => {
     try {
       const client = await getDbClient();
-      const rows = await client<{ entryId: number }[]>`
-        select entry_id as "entryId"
-        from tournament_entries
-        where tournament_id = ${tournamentId}
-        order by entry_id
+      const rows = await client<Array<{ entryId: number }>>`
+        SELECT entry_id AS "entryId"
+        FROM competition.tournament_entries
+        WHERE season_id = ${season.seasonId}
+          AND tournament_id = ${tournamentId}
+        ORDER BY entry_id
       `;
-      return rows.map((row) => row.entryId);
+      return rows.map((row) => Number(row.entryId));
     } catch (error) {
       logError('Failed to load tournament roster entry IDs', error, { tournamentId });
       throw new DatabaseError(
         'Failed to load tournament roster entries.',
         'TOURNAMENT_ROSTER_FIND_ENTRIES_ERROR',
-        error as Error,
+        error instanceof Error ? error : undefined,
       );
     }
   },
 
-  markSyncProcessing: async (tournamentId: number): Promise<void> => {
+  markSyncProcessing: async (season: FplSeasonRef, tournamentId: number): Promise<void> => {
     const client = await getDbClient();
     await client`
-      update tournament_infos
-      set roster_sync_status = 'processing', roster_sync_error = null, updated_at = now()
-      where id = ${tournamentId}
+      UPDATE competition.tournaments
+      SET roster_sync_status = 'processing', roster_sync_error = NULL, updated_at = now()
+      WHERE season_id = ${season.seasonId} AND tournament_id = ${tournamentId}
     `;
   },
 
-  markSyncFailed: async (tournamentId: number, internalError: string): Promise<void> => {
+  markSyncFailed: async (
+    season: FplSeasonRef,
+    tournamentId: number,
+    internalError: string,
+  ): Promise<void> => {
     const client = await getDbClient();
     await client`
-      update tournament_infos
-      set roster_sync_status = 'failed',
+      UPDATE competition.tournaments
+      SET roster_sync_status = 'failed',
           roster_sync_error = ${internalError},
           updated_at = now()
-      where id = ${tournamentId}
+      WHERE season_id = ${season.seasonId} AND tournament_id = ${tournamentId}
     `;
   },
 
-  markSyncReady: async (tournamentId: number, sourceLeagueName: string | null): Promise<void> => {
+  markSyncReady: async (
+    season: FplSeasonRef,
+    tournamentId: number,
+    sourceLeagueName: string | null,
+  ): Promise<void> => {
     const client = await getDbClient();
     await client`
-      update tournament_infos
-      set roster_sync_status = 'ready',
-          roster_sync_error = null,
+      UPDATE competition.tournaments
+      SET roster_sync_status = 'ready',
+          roster_sync_error = NULL,
           roster_last_synced_at = now(),
           source_league_name = coalesce(${sourceLeagueName}, source_league_name),
           updated_at = now()
-      where id = ${tournamentId}
+      WHERE season_id = ${season.seasonId} AND tournament_id = ${tournamentId}
     `;
   },
 
-  markResumeProcessing: async (tournamentId: number): Promise<void> => {
+  markResumeProcessing: async (season: FplSeasonRef, tournamentId: number): Promise<void> => {
     const client = await getDbClient();
-    await client.begin(async (tx) => {
-      const rows = await tx<{ id: number }[]>`
-        update tournament_infos
-        set roster_sync_status = 'processing',
-            roster_sync_error = null,
-            setup_status = 'pending',
-            setup_phase = 'queued',
-            setup_error = null,
-            setup_warning_count = 0,
-            setup_completed_units = 0,
-            setup_total_units = 0,
-            setup_progress_updated_at = now(),
-            standings_ready_at = null,
-            updated_at = now()
-        where id = ${tournamentId} and state = 'inactive'
-        returning id
-      `;
-      if (rows.length === 0) return;
-
-      // Readiness is cleared before the queue can run. Refresh inside the
-      // same transaction so a delayed or failed resume cannot keep exposing
-      // the previously published standings.
-      await tx`REFRESH MATERIALIZED VIEW public.mv_tournament_event_snapshot`;
-      await tx`REFRESH MATERIALIZED VIEW public.mv_tournament_snapshot`;
-    });
+    await client`
+      UPDATE competition.tournaments
+      SET roster_sync_status = 'processing',
+          roster_sync_error = NULL,
+          setup_status = 'pending',
+          setup_phase = 'queued',
+          setup_error = NULL,
+          setup_warning_count = 0,
+          setup_completed_units = 0,
+          setup_total_units = 0,
+          setup_progress_updated_at = now(),
+          standings_ready_at = NULL,
+          updated_at = now()
+      WHERE season_id = ${season.seasonId}
+        AND tournament_id = ${tournamentId}
+        AND state = 'inactive'
+    `;
   },
 
   publishAuthoritativeRoster: async (
+    season: FplSeasonRef,
     tournament: TournamentRosterRecord,
     participants: TournamentParticipant[],
     sourceLeagueName: string | null,
-    options?: {
-      allowInactive?: boolean;
-      resumeAfterSetup?: boolean;
-      expectedSeason?: string;
-    },
+    options?: { allowInactive?: boolean; resumeAfterSetup?: boolean },
   ): Promise<RosterPublicationResult> => {
     try {
-      const participantIds = participants.map((participant) => Number(participant.id));
+      const participantIds = uniqueParticipantIds(participants);
       const sortedParticipantIds = [...participantIds].sort((left, right) => left - right);
       const client = await getDbClient();
       return await client.begin(async (tx) => {
-        if (options?.expectedSeason) {
-          if (!/^\d{4}$/.test(options.expectedSeason)) {
-            throw new Error('A valid four-digit roster season is required');
-          }
-          await tx`SELECT pg_advisory_xact_lock_shared(
-            ${ACTIVE_SEASON_LOCK_NAMESPACE},
-            ${ACTIVE_SEASON_LOCK_ID}
-          )`;
-          const activeSeason = await getActiveCacheSeasonUncached();
-          if (activeSeason !== options.expectedSeason) {
-            throw new Error(
-              `Active season changed from ${options.expectedSeason} to ${activeSeason} before roster publication`,
-            );
-          }
+        const seasonRows = await tx<Array<{ isCurrent: boolean }>>`
+          SELECT is_current AS "isCurrent"
+          FROM fpl.seasons
+          WHERE season_id = ${season.seasonId}
+          FOR KEY SHARE
+        `;
+        if (seasonRows[0]?.isCurrent !== true) {
+          throw new Error(`FPL season ${season.seasonCode} is no longer current`);
         }
+
         const locked = await tx<
-          {
+          Array<{
             id: number;
             state: 'active' | 'inactive' | 'finished';
             rosterMode: TournamentRosterMode;
             rosterSyncStatus: 'pending' | 'processing' | 'ready' | 'failed' | null;
             totalTeamNum: number;
-          }[]
+          }>
         >`
-          select
-            id,
+          SELECT
+            tournament_id AS id,
             state,
-            roster_mode as "rosterMode",
-            roster_sync_status as "rosterSyncStatus",
-            total_team_num as "totalTeamNum"
-          from tournament_infos
-          where id = ${tournament.id}
-          for update
+            roster_mode AS "rosterMode",
+            roster_sync_status AS "rosterSyncStatus",
+            total_team_num AS "totalTeamNum"
+          FROM competition.tournaments
+          WHERE season_id = ${season.seasonId}
+            AND tournament_id = ${tournament.id}
+          FOR UPDATE
         `;
         const current = locked[0];
         if (!current) {
-          return {
-            changed: false,
-            participantCount: 0,
-            automaticallyPaused: false,
-            skipped: true,
-          };
+          return { changed: false, participantCount: 0, automaticallyPaused: false, skipped: true };
         }
         if (options?.resumeAfterSetup && current.rosterSyncStatus !== 'processing') {
           return {
@@ -266,14 +278,16 @@ export const tournamentRosterRepository = {
           (current.state === 'inactive' && !options?.allowInactive)
         ) {
           await tx`
-            update tournament_infos
-            set roster_sync_status = case
-                  when roster_mode = 'official_sync' then 'ready'::tournament_setup_status
-                  else null
-                end,
-                roster_sync_error = null,
+            UPDATE competition.tournaments
+            SET roster_sync_status = CASE
+                  WHEN roster_mode = 'official_sync'
+                    THEN 'ready'::competition.tournament_setup_status
+                  ELSE NULL
+                END,
+                roster_sync_error = NULL,
                 updated_at = now()
-            where id = ${tournament.id}
+            WHERE season_id = ${season.seasonId}
+              AND tournament_id = ${tournament.id}
           `;
           return {
             changed: false,
@@ -283,26 +297,28 @@ export const tournamentRosterRepository = {
           };
         }
 
-        const existingRows = await tx<{ entryId: number }[]>`
-          select entry_id as "entryId"
-          from tournament_entries
-          where tournament_id = ${tournament.id}
-          order by entry_id
+        const existingRows = await tx<Array<{ entryId: number }>>`
+          SELECT entry_id AS "entryId"
+          FROM competition.tournament_entries
+          WHERE season_id = ${season.seasonId}
+            AND tournament_id = ${tournament.id}
+          ORDER BY entry_id
         `;
-        const existingIds = existingRows.map((row) => row.entryId);
+        const existingIds = existingRows.map((row) => Number(row.entryId));
         const changed =
           existingIds.length !== sortedParticipantIds.length ||
           existingIds.some((entryId, index) => entryId !== sortedParticipantIds[index]);
 
         if (!changed) {
           await tx`
-            update tournament_infos
-            set roster_sync_status = ${options?.resumeAfterSetup ? 'processing' : 'ready'},
-                roster_sync_error = null,
+            UPDATE competition.tournaments
+            SET roster_sync_status = ${options?.resumeAfterSetup ? 'processing' : 'ready'},
+                roster_sync_error = NULL,
                 roster_last_synced_at = now(),
                 source_league_name = coalesce(${sourceLeagueName}, source_league_name),
                 updated_at = now()
-            where id = ${tournament.id}
+            WHERE season_id = ${season.seasonId}
+              AND tournament_id = ${tournament.id}
           `;
           return {
             changed: false,
@@ -312,51 +328,73 @@ export const tournamentRosterRepository = {
           };
         }
 
-        await tx`
-          insert into entry_infos ${tx(
+        if (participants.length > 0) {
+          const participantPayload = JSON.stringify(
             participants.map((participant) => ({
-              id: Number(participant.id),
+              entry_id: Number(participant.id),
               entry_name: participant.team,
               player_name: participant.manager,
               overall_rank: participant.overallRank || null,
               overall_points: participant.totalPoints || 0,
             })),
-            'id',
-            'entry_name',
-            'player_name',
-            'overall_rank',
-            'overall_points',
-          )}
-          on conflict (id) do nothing
+          );
+          await tx`
+            INSERT INTO competition.entries (
+              season_id, entry_id, entry_name, player_name, overall_rank, overall_points
+            )
+            SELECT
+              ${season.seasonId}, source.entry_id, source.entry_name, source.player_name,
+              source.overall_rank, source.overall_points
+            FROM jsonb_to_recordset(${participantPayload}::jsonb) AS source(
+              entry_id int,
+              entry_name text,
+              player_name text,
+              overall_rank int,
+              overall_points int
+            )
+            ON CONFLICT (season_id, entry_id) DO NOTHING
+          `;
+        }
+
+        await tx`
+          DELETE FROM competition.tournament_knockout_results
+          WHERE season_id = ${season.seasonId} AND tournament_id = ${tournament.id}
+        `;
+        await tx`
+          DELETE FROM competition.tournament_knockouts
+          WHERE season_id = ${season.seasonId} AND tournament_id = ${tournament.id}
+        `;
+        await tx`
+          DELETE FROM competition.tournament_battle_group_results
+          WHERE season_id = ${season.seasonId} AND tournament_id = ${tournament.id}
+        `;
+        await tx`
+          DELETE FROM competition.tournament_points_group_results
+          WHERE season_id = ${season.seasonId} AND tournament_id = ${tournament.id}
+        `;
+        await tx`
+          DELETE FROM competition.tournament_groups
+          WHERE season_id = ${season.seasonId} AND tournament_id = ${tournament.id}
+        `;
+        await tx`
+          DELETE FROM competition.tournament_entries
+          WHERE season_id = ${season.seasonId} AND tournament_id = ${tournament.id}
         `;
 
-        await tx`delete from tournament_selection_stats where tournament_id = ${tournament.id}`;
-        await tx`delete from tournament_knockout_results where tournament_id = ${tournament.id}`;
-        await tx`delete from tournament_knockouts where tournament_id = ${tournament.id}`;
-        await tx`delete from tournament_battle_group_results where tournament_id = ${tournament.id}`;
-        await tx`delete from tournament_points_group_results where tournament_id = ${tournament.id}`;
-        await tx`delete from tournament_groups where tournament_id = ${tournament.id}`;
-        await tx`delete from tournament_entries where tournament_id = ${tournament.id}`;
-
-        if (participants.length > 0) {
+        if (participantIds.length > 0) {
           await tx`
-            insert into tournament_entries ${tx(
-              participantIds.map((entryId) => ({
-                tournament_id: tournament.id,
-                league_id: tournament.leagueId,
-                entry_id: entryId,
-              })),
-              'tournament_id',
-              'league_id',
-              'entry_id',
-            )}
+            INSERT INTO competition.tournament_entries (
+              tournament_id, season_id, league_id, entry_id
+            )
+            SELECT ${tournament.id}, ${season.seasonId}, ${tournament.leagueId}, entry_id
+            FROM unnest(${participantIds}::int[]) AS entry_id
           `;
         }
 
         const automaticallyPaused = participants.length < 2;
         await tx`
-          update tournament_infos
-          set total_team_num = ${participants.length},
+          UPDATE competition.tournaments
+          SET total_team_num = ${participants.length},
               group_team_num = ${participants.length},
               source_league_name = coalesce(${sourceLeagueName}, source_league_name),
               roster_sync_status = ${
@@ -369,21 +407,16 @@ export const tournamentRosterRepository = {
               state = ${automaticallyPaused ? 'inactive' : current.state},
               setup_status = ${automaticallyPaused ? 'failed' : 'pending'},
               setup_phase = ${automaticallyPaused ? 'failed' : 'queued'},
-              setup_error = null,
+              setup_error = NULL,
               setup_warning_count = 0,
               setup_completed_units = 0,
               setup_total_units = 0,
               setup_progress_updated_at = now(),
-              standings_ready_at = null,
+              standings_ready_at = NULL,
               updated_at = now()
-          where id = ${tournament.id}
+          WHERE season_id = ${season.seasonId}
+            AND tournament_id = ${tournament.id}
         `;
-
-        // Clearing readiness must evict the previously published aggregate
-        // before this roster publication commits. The view predicate is only
-        // evaluated during refresh, so cache invalidation alone is insufficient.
-        await tx`REFRESH MATERIALIZED VIEW public.mv_tournament_event_snapshot`;
-        await tx`REFRESH MATERIALIZED VIEW public.mv_tournament_snapshot`;
 
         return {
           changed: true,
@@ -394,46 +427,49 @@ export const tournamentRosterRepository = {
       });
     } catch (error) {
       logError('Failed to publish authoritative tournament roster', error, {
+        season: season.seasonCode,
         tournamentId: tournament.id,
       });
       throw new DatabaseError(
         'Failed to publish tournament roster.',
         'TOURNAMENT_ROSTER_PUBLISH_ERROR',
-        error as Error,
+        error instanceof Error ? error : undefined,
       );
     }
   },
 
-  markReadyAndResume: async (tournamentId: number): Promise<void> => {
+  markReadyAndResume: async (season: FplSeasonRef, tournamentId: number): Promise<void> => {
     const client = await getDbClient();
     await client`
-      update tournament_infos
-      set state = case
-            when state = 'finished' then state
-            when total_team_num >= 2 then 'active'
-            else state
-          end,
-          roster_sync_status = case
-            when state = 'finished' or total_team_num >= 2
-              then 'ready'::tournament_setup_status
-            else 'failed'::tournament_setup_status
-          end,
-          roster_sync_error = case
-            when state = 'finished' or total_team_num >= 2 then null
-            else 'Tournament requires at least two participants.'
-          end,
-          roster_last_synced_at = case
-            when state = 'finished' or total_team_num >= 2
-              then coalesce(roster_last_synced_at, now())
-            else roster_last_synced_at
-          end,
+      UPDATE competition.tournaments
+      SET state = CASE
+            WHEN state = 'finished' THEN state
+            WHEN total_team_num >= 2 THEN 'active'::competition.tournament_state
+            ELSE state
+          END,
+          roster_sync_status = CASE
+            WHEN state = 'finished' OR total_team_num >= 2
+              THEN 'ready'::competition.tournament_setup_status
+            ELSE 'failed'::competition.tournament_setup_status
+          END,
+          roster_sync_error = CASE
+            WHEN state = 'finished' OR total_team_num >= 2 THEN NULL
+            ELSE 'Tournament requires at least two participants.'
+          END,
+          roster_last_synced_at = CASE
+            WHEN state = 'finished' OR total_team_num >= 2
+              THEN coalesce(roster_last_synced_at, now())
+            ELSE roster_last_synced_at
+          END,
           updated_at = now()
-      where id = ${tournamentId}
-        and roster_sync_status = 'processing'
+      WHERE season_id = ${season.seasonId}
+        AND tournament_id = ${tournamentId}
+        AND roster_sync_status = 'processing'
     `;
   },
 
   finishThroughEvent: async (
+    season: FplSeasonRef,
     eventId: number,
     targets: TournamentFinalizationTarget[],
   ): Promise<number> => {
@@ -461,75 +497,78 @@ export const tournamentRosterRepository = {
       })),
     );
     const client = await getDbClient();
-    const rows = await client<{ id: number }[]>`
-      update tournament_infos as tournament
-      set state = 'finished', updated_at = now()
-      from jsonb_to_recordset(${targetPayload}::jsonb) as target(
+    const rows = await client<Array<{ id: number }>>`
+      UPDATE competition.tournaments AS tournament
+      SET state = 'finished', updated_at = now()
+      FROM jsonb_to_recordset(${targetPayload}::jsonb) AS target(
         tournament_id int,
         standings_ready_at timestamptz,
         results_fresh_after timestamptz
       )
-      where tournament.id = target.tournament_id
-        and tournament.standings_ready_at = target.standings_ready_at
-        and tournament.state = 'active'
-        and tournament.setup_status = 'ready'
-        and tournament.standings_ready_at is not null
-        and exists (
-          select 1
-          from events terminal_event
-          where terminal_event.id = ${eventId}
-            and terminal_event.finished = true
-            and terminal_event.data_checked = true
-            and terminal_event.data_checked_at <= target.results_fresh_after
+      WHERE tournament.season_id = ${season.seasonId}
+        AND tournament.tournament_id = target.tournament_id
+        AND tournament.standings_ready_at = target.standings_ready_at
+        AND tournament.state = 'active'
+        AND tournament.setup_status = 'ready'
+        AND EXISTS (
+          SELECT 1
+          FROM fpl.events terminal_event
+          WHERE terminal_event.season_id = tournament.season_id
+            AND terminal_event.event_id = ${eventId}
+            AND terminal_event.finished = true
+            AND terminal_event.data_checked = true
+            AND terminal_event.data_checked_at <= target.results_fresh_after
         )
-        and greatest(
+        AND greatest(
           coalesce(tournament.group_ended_event_id, 0),
           coalesce(tournament.knockout_ended_event_id, 0)
         ) = ${eventId}
-        and (
+        AND (
           (
             tournament.knockout_mode <> 'no_knockout'
-            and coalesce(tournament.knockout_ended_event_id, 0)
+            AND coalesce(tournament.knockout_ended_event_id, 0)
               >= coalesce(tournament.group_ended_event_id, 0)
-            and exists (
-              select 1
-              from tournament_knockout_results result
-              where result.tournament_id = tournament.id
-                and result.event_id = tournament.knockout_ended_event_id
+            AND EXISTS (
+              SELECT 1
+              FROM competition.tournament_knockout_results result
+              WHERE result.season_id = tournament.season_id
+                AND result.tournament_id = tournament.tournament_id
+                AND result.event_id = tournament.knockout_ended_event_id
             )
-          )
-          or (
+          ) OR (
             (
               tournament.knockout_mode = 'no_knockout'
-              or coalesce(tournament.group_ended_event_id, 0)
+              OR coalesce(tournament.group_ended_event_id, 0)
                 > coalesce(tournament.knockout_ended_event_id, 0)
             )
-            and tournament.group_mode = 'points_races'
-            and exists (
-              select 1
-              from tournament_points_group_results result
-              where result.tournament_id = tournament.id
-                and result.event_id = tournament.group_ended_event_id
+            AND tournament.group_mode = 'points_races'
+            AND EXISTS (
+              SELECT 1
+              FROM competition.tournament_points_group_results result
+              WHERE result.season_id = tournament.season_id
+                AND result.tournament_id = tournament.tournament_id
+                AND result.event_id = tournament.group_ended_event_id
             )
-          )
-          or (
+          ) OR (
             (
               tournament.knockout_mode = 'no_knockout'
-              or coalesce(tournament.group_ended_event_id, 0)
+              OR coalesce(tournament.group_ended_event_id, 0)
                 > coalesce(tournament.knockout_ended_event_id, 0)
             )
-            and tournament.group_mode = 'battle_races'
-            and exists (
-              select 1
-              from tournament_battle_group_results result
-              where result.tournament_id = tournament.id
-                and result.event_id = tournament.group_ended_event_id
+            AND tournament.group_mode = 'battle_races'
+            AND EXISTS (
+              SELECT 1
+              FROM competition.tournament_battle_group_results result
+              WHERE result.season_id = tournament.season_id
+                AND result.tournament_id = tournament.tournament_id
+                AND result.event_id = tournament.group_ended_event_id
             )
           )
         )
-      returning tournament.id
+      RETURNING tournament.tournament_id AS id
     `;
     logInfo('Marked cascade-owned completed tournaments finished', {
+      season: season.seasonCode,
       eventId,
       eligibleTournamentCount: eligibleTargets.length,
       count: rows.length,

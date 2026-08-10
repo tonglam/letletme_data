@@ -4,6 +4,7 @@ import type { Elysia } from 'elysia';
 import { getPostMatchResultsSlot } from '../domain/post-match-results';
 import { getCurrentEvent } from '../services/events.service';
 import { fixtureRepository } from '../repositories/fixtures';
+import { seasonRepository } from '../repositories/seasons';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { logInfo } from '../utils/logger';
 import { enqueueLeagueEventResults } from './league-sync.jobs';
@@ -27,13 +28,14 @@ export async function runLeagueEventResultsSync(options?: {
   const source = options?.source ?? 'cron';
   const skipMatchWindowCheck = options?.skipMatchWindowCheck ?? false;
   const now = new Date();
-  const currentEvent = await getCurrentEvent();
+  const season = await seasonRepository.findCurrent();
+  const currentEvent = await getCurrentEvent(season);
   if (!currentEvent) {
     logInfo('Skipping league event results sync - no current event');
     return;
   }
 
-  const fixtures = await fixtureRepository.findByEvent(currentEvent.id);
+  const fixtures = await fixtureRepository.findByEvent(season, currentEvent.id);
   const resultSlot = skipMatchWindowCheck
     ? null
     : getPostMatchResultsSlot(currentEvent, fixtures, now);
@@ -45,7 +47,7 @@ export async function runLeagueEventResultsSync(options?: {
   }
 
   // Enqueue coordinator job (will fan out to per-tournament jobs)
-  const job = await enqueueLeagueEventResults(currentEvent.id, source, {
+  const job = await enqueueLeagueEventResults(season, currentEvent.id, source, {
     ...(resultSlot
       ? { jobId: `league-event-results-e${currentEvent.id}-coordinator-${resultSlot}` }
       : {}),

@@ -4,6 +4,7 @@ import { Elysia } from 'elysia';
 import { enqueuePlayerValuesSyncJob } from './data-sync-enqueue';
 import { PLAYER_VALUES_CRON_PATTERN } from '../domain/job-schedules';
 import { playerValuesRepository } from '../repositories/player-values';
+import { seasonRepository } from '../repositories/seasons';
 import {
   resolvePlayerSyncEvent,
   type PlayerSyncEvent,
@@ -18,8 +19,14 @@ export type PlayerValuesWindowDependencies = {
 };
 
 const defaultDependencies: PlayerValuesWindowDependencies = {
-  resolvePlayerSyncEvent,
-  hasChangesForDate: (changeDate) => playerValuesRepository.hasChangesForDate(changeDate),
+  resolvePlayerSyncEvent: async (date) => {
+    const season = await seasonRepository.findCurrent();
+    return resolvePlayerSyncEvent(season, date);
+  },
+  hasChangesForDate: async (changeDate) => {
+    const season = await seasonRepository.findCurrent();
+    return playerValuesRepository.hasChangesForDate(season, changeDate);
+  },
 };
 
 export async function shouldRunPlayerValuesSync(
@@ -70,7 +77,8 @@ export function registerPlayerValuesWindowJobs(app: Elysia) {
             }
 
             const changeDate = formatCronDateKey(now);
-            const job = await enqueuePlayerValuesSyncJob('cron', {
+            const season = await seasonRepository.findCurrent();
+            const job = await enqueuePlayerValuesSyncJob(season, 'cron', {
               // Stable id prevents stacking duplicate jobs during the 09:25-09:35 window.
               jobId: `player-values-${changeDate}`,
               changeDate,

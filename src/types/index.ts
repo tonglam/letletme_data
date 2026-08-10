@@ -22,6 +22,7 @@ export interface Event {
   averageEntryScore: number | null;
   finished: boolean;
   dataChecked: boolean;
+  dataCheckedAt: Date | null;
   highestScoringEntry: number | null;
   deadlineTimeEpoch: number | null;
   deadlineTimeGameOffset: number | null;
@@ -158,9 +159,4 @@ export type {
 export interface APIError extends Error {
   status?: number;
   code?: string;
-}
-
-// Cache types
-export interface CacheConfig {
-  prefix: string;
 }

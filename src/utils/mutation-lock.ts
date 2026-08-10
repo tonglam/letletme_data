@@ -121,7 +121,9 @@ export async function withMutationConflictGuard<T>(
     return operation();
   }
 
-  const lockKeys = [...new Set(scopes.map((scope) => `mutation-lock:${scope}`))].sort();
+  const lockKeys = [
+    ...new Set(scopes.map((scope) => `llm:v3:queue:coordination:mutation-lock:${scope}`)),
+  ].sort();
   const client = getLockClient();
   const token = randomToken();
   const acquiredKeys: string[] = [];

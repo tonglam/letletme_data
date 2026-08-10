@@ -1,21 +1,28 @@
 import { and, eq, inArray, isNotNull, notInArray, sql } from 'drizzle-orm';
 
 import {
-  eventFixtures,
-  events,
+  fixturesInFpl,
+  eventsInFpl,
   type DbEventFixture,
   type DbEventFixtureInsert,
 } from '../db/schemas/index.schema';
 import { getDb, type DbOrTransaction } from '../db/singleton';
+import type { FplSeasonRef } from '../domain/fpl-season';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 
-import type { Fixture as DomainFixture } from '../types';
+import type { Fixture as DomainFixture, FixtureStat } from '../types';
 
 // Map DbEventFixture to domain Fixture
 function mapDbFixtureToDomain(dbFixture: DbEventFixture): DomainFixture {
+  if (dbFixture.teamAId === null || dbFixture.teamHId === null) {
+    throw new DatabaseError(
+      `Fixture ${dbFixture.fixtureId} is missing a team`,
+      'FIXTURE_TEAM_MISSING',
+    );
+  }
   return {
-    id: dbFixture.id,
+    id: dbFixture.fixtureId,
     code: dbFixture.code,
     event: dbFixture.eventId,
     finished: dbFixture.finished,
@@ -28,7 +35,7 @@ function mapDbFixtureToDomain(dbFixture: DbEventFixture): DomainFixture {
     teamAScore: dbFixture.teamAScore,
     teamH: dbFixture.teamHId,
     teamHScore: dbFixture.teamHScore,
-    stats: dbFixture.stats,
+    stats: dbFixture.stats as FixtureStat[],
     teamHDifficulty: dbFixture.teamHDifficulty,
     teamADifficulty: dbFixture.teamADifficulty,
     pulseId: dbFixture.pulseId,
@@ -41,7 +48,7 @@ export const createFixtureRepository = (dbInstance?: DbOrTransaction) => {
   const getDbInstance = async () => dbInstance || (await getDb());
 
   return {
-    deleteNotInIds: async (ids: number[]): Promise<number> => {
+    deleteNotInIds: async (season: FplSeasonRef, ids: number[]): Promise<number> => {
       if (ids.length === 0) {
         throw new DatabaseError(
           'Refusing to delete fixtures without an authoritative identifier set',
@@ -51,9 +58,14 @@ export const createFixtureRepository = (dbInstance?: DbOrTransaction) => {
       try {
         const db = await getDbInstance();
         const deleted = await db
-          .delete(eventFixtures)
-          .where(notInArray(eventFixtures.id, [...new Set(ids)]))
-          .returning({ id: eventFixtures.id });
+          .delete(fixturesInFpl)
+          .where(
+            and(
+              eq(fixturesInFpl.seasonId, season.seasonId),
+              notInArray(fixturesInFpl.fixtureId, [...new Set(ids)]),
+            ),
+          )
+          .returning({ id: fixturesInFpl.fixtureId });
         return deleted.length;
       } catch (error) {
         logError('Failed to delete stale fixtures', error, { retainedCount: ids.length });
@@ -65,13 +77,15 @@ export const createFixtureRepository = (dbInstance?: DbOrTransaction) => {
       }
     },
 
-    findByEvent: async (eventId: number): Promise<DomainFixture[]> => {
+    findByEvent: async (season: FplSeasonRef, eventId: number): Promise<DomainFixture[]> => {
       try {
         const db = await getDbInstance();
         const rows = await db
           .select()
-          .from(eventFixtures)
-          .where(eq(eventFixtures.eventId, eventId));
+          .from(fixturesInFpl)
+          .where(
+            and(eq(fixturesInFpl.seasonId, season.seasonId), eq(fixturesInFpl.eventId, eventId)),
+          );
         return rows.map(mapDbFixtureToDomain);
       } catch (error) {
         logError('Failed to find fixtures by event', error, { eventId });
@@ -83,10 +97,14 @@ export const createFixtureRepository = (dbInstance?: DbOrTransaction) => {
       }
     },
 
-    findAll: async (): Promise<DomainFixture[]> => {
+    findAll: async (season: FplSeasonRef): Promise<DomainFixture[]> => {
       try {
         const db = await getDbInstance();
-        const rows = await db.select().from(eventFixtures).orderBy(eventFixtures.id);
+        const rows = await db
+          .select()
+          .from(fixturesInFpl)
+          .where(eq(fixturesInFpl.seasonId, season.seasonId))
+          .orderBy(fixturesInFpl.fixtureId);
         return rows.map(mapDbFixtureToDomain);
       } catch (error) {
         logError('Failed to find all fixtures', error);
@@ -98,16 +116,21 @@ export const createFixtureRepository = (dbInstance?: DbOrTransaction) => {
       }
     },
 
-    findByIds: async (ids: readonly number[]): Promise<DomainFixture[]> => {
+    findByIds: async (season: FplSeasonRef, ids: readonly number[]): Promise<DomainFixture[]> => {
       try {
         const uniqueIds = [...new Set(ids.filter((id) => Number.isInteger(id) && id > 0))];
         if (uniqueIds.length === 0) return [];
         const db = await getDbInstance();
         const rows = await db
           .select()
-          .from(eventFixtures)
-          .where(inArray(eventFixtures.id, uniqueIds))
-          .orderBy(eventFixtures.id);
+          .from(fixturesInFpl)
+          .where(
+            and(
+              eq(fixturesInFpl.seasonId, season.seasonId),
+              inArray(fixturesInFpl.fixtureId, uniqueIds),
+            ),
+          )
+          .orderBy(fixturesInFpl.fixtureId);
         return rows.map(mapDbFixtureToDomain);
       } catch (error) {
         logError('Failed to find fixtures by ids', error, { count: ids.length });
@@ -119,7 +142,10 @@ export const createFixtureRepository = (dbInstance?: DbOrTransaction) => {
       }
     },
 
-    findEventIdsByFixtureIds: async (ids: number[]): Promise<Map<number, number | null>> => {
+    findEventIdsByFixtureIds: async (
+      season: FplSeasonRef,
+      ids: number[],
+    ): Promise<Map<number, number | null>> => {
       try {
         if (ids.length === 0) {
           return new Map();
@@ -127,9 +153,11 @@ export const createFixtureRepository = (dbInstance?: DbOrTransaction) => {
 
         const db = await getDbInstance();
         const result = await db
-          .select({ id: eventFixtures.id, eventId: eventFixtures.eventId })
-          .from(eventFixtures)
-          .where(inArray(eventFixtures.id, ids));
+          .select({ id: fixturesInFpl.fixtureId, eventId: fixturesInFpl.eventId })
+          .from(fixturesInFpl)
+          .where(
+            and(eq(fixturesInFpl.seasonId, season.seasonId), inArray(fixturesInFpl.fixtureId, ids)),
+          );
 
         return new Map(result.map((row) => [row.id, row.eventId]));
       } catch (error) {
@@ -143,6 +171,7 @@ export const createFixtureRepository = (dbInstance?: DbOrTransaction) => {
     },
 
     findLocationsByFixtureIds: async (
+      season: FplSeasonRef,
       ids: number[],
     ): Promise<Map<number, { eventId: number | null; teamAId: number; teamHId: number }>> => {
       try {
@@ -150,18 +179,25 @@ export const createFixtureRepository = (dbInstance?: DbOrTransaction) => {
         const db = await getDbInstance();
         const rows = await db
           .select({
-            id: eventFixtures.id,
-            eventId: eventFixtures.eventId,
-            teamAId: eventFixtures.teamAId,
-            teamHId: eventFixtures.teamHId,
+            id: fixturesInFpl.fixtureId,
+            eventId: fixturesInFpl.eventId,
+            teamAId: fixturesInFpl.teamAId,
+            teamHId: fixturesInFpl.teamHId,
           })
-          .from(eventFixtures)
-          .where(inArray(eventFixtures.id, ids));
+          .from(fixturesInFpl)
+          .where(
+            and(eq(fixturesInFpl.seasonId, season.seasonId), inArray(fixturesInFpl.fixtureId, ids)),
+          );
         return new Map(
-          rows.map((row) => [
-            row.id,
-            { eventId: row.eventId, teamAId: row.teamAId, teamHId: row.teamHId },
-          ]),
+          rows.map((row) => {
+            if (row.teamAId === null || row.teamHId === null) {
+              throw new DatabaseError(
+                `Fixture ${row.id} is missing a team`,
+                'FIXTURE_TEAM_MISSING',
+              );
+            }
+            return [row.id, { eventId: row.eventId, teamAId: row.teamAId, teamHId: row.teamHId }];
+          }),
         );
       } catch (error) {
         logError('Failed to find fixture locations', error, { count: ids.length });
@@ -173,17 +209,22 @@ export const createFixtureRepository = (dbInstance?: DbOrTransaction) => {
       }
     },
 
-    markUnscheduled: async (ids: number[]): Promise<number> => {
+    markUnscheduled: async (season: FplSeasonRef, ids: number[]): Promise<number> => {
       try {
         const uniqueIds = [...new Set(ids.filter((id) => Number.isInteger(id) && id > 0))];
         if (uniqueIds.length === 0) return 0;
 
         const db = await getDbInstance();
         const result = await db
-          .update(eventFixtures)
+          .update(fixturesInFpl)
           .set({ eventId: null, updatedAt: new Date() })
-          .where(inArray(eventFixtures.id, uniqueIds))
-          .returning({ id: eventFixtures.id });
+          .where(
+            and(
+              eq(fixturesInFpl.seasonId, season.seasonId),
+              inArray(fixturesInFpl.fixtureId, uniqueIds),
+            ),
+          )
+          .returning({ id: fixturesInFpl.fixtureId });
         logInfo('Marked fixtures as unscheduled', { count: result.length });
         return result.length;
       } catch (error) {
@@ -197,6 +238,7 @@ export const createFixtureRepository = (dbInstance?: DbOrTransaction) => {
     },
 
     markAbsentUnscheduled: async (
+      season: FplSeasonRef,
       acceptedIds: readonly number[],
       preserveOwnedCheckedAtOrAfter?: Date,
       acceptedCodes: readonly number[] = [],
@@ -213,36 +255,39 @@ export const createFixtureRepository = (dbInstance?: DbOrTransaction) => {
         const ownershipFence = preserveOwnedCheckedAtOrAfterIso
           ? sql`NOT EXISTS (
               SELECT 1
-              FROM ${events}
-              WHERE ${events.id} = ${eventFixtures.eventId}
-                AND ${events.liveSnapshotCheckedAt} >= ${preserveOwnedCheckedAtOrAfterIso}::timestamptz
+              FROM ${eventsInFpl}
+              WHERE ${eventsInFpl.seasonId} = ${season.seasonId}
+                AND ${eventsInFpl.eventId} = ${fixturesInFpl.eventId}
+                AND ${eventsInFpl.liveSnapshotCheckedAt} >= ${preserveOwnedCheckedAtOrAfterIso}::timestamptz
             )`
           : undefined;
         let retiredCodeConflicts = 0;
         if (uniqueCodes.length > 0) {
           const removed = await db
-            .delete(eventFixtures)
+            .delete(fixturesInFpl)
             .where(
               and(
-                notInArray(eventFixtures.id, uniqueIds),
-                inArray(eventFixtures.code, uniqueCodes),
+                notInArray(fixturesInFpl.fixtureId, uniqueIds),
+                eq(fixturesInFpl.seasonId, season.seasonId),
+                inArray(fixturesInFpl.code, uniqueCodes),
                 ownershipFence,
               ),
             )
-            .returning({ id: eventFixtures.id });
+            .returning({ id: fixturesInFpl.fixtureId });
           retiredCodeConflicts = removed.length;
         }
         const result = await db
-          .update(eventFixtures)
+          .update(fixturesInFpl)
           .set({ eventId: null, updatedAt: new Date() })
           .where(
             and(
-              isNotNull(eventFixtures.eventId),
-              notInArray(eventFixtures.id, uniqueIds),
+              isNotNull(fixturesInFpl.eventId),
+              eq(fixturesInFpl.seasonId, season.seasonId),
+              notInArray(fixturesInFpl.fixtureId, uniqueIds),
               ownershipFence,
             ),
           )
-          .returning({ id: eventFixtures.id });
+          .returning({ id: fixturesInFpl.fixtureId });
         const count = retiredCodeConflicts + result.length;
         logInfo('Retired fixtures absent from the complete snapshot', { count });
         return count;
@@ -258,7 +303,10 @@ export const createFixtureRepository = (dbInstance?: DbOrTransaction) => {
       }
     },
 
-    upsertBatch: async (domainFixtures: DomainFixture[]): Promise<DomainFixture[]> => {
+    upsertBatch: async (
+      season: FplSeasonRef,
+      domainFixtures: DomainFixture[],
+    ): Promise<DomainFixture[]> => {
       try {
         if (domainFixtures.length === 0) {
           return [];
@@ -270,7 +318,8 @@ export const createFixtureRepository = (dbInstance?: DbOrTransaction) => {
         for (let index = 0; index < domainFixtures.length; index += batchSize) {
           const batch = domainFixtures.slice(index, index + batchSize);
           const newFixtures: DbEventFixtureInsert[] = batch.map((fixture) => ({
-            id: fixture.id,
+            seasonId: season.seasonId,
+            fixtureId: fixture.id,
             code: fixture.code,
             eventId: fixture.event,
             finished: fixture.finished,
@@ -278,7 +327,7 @@ export const createFixtureRepository = (dbInstance?: DbOrTransaction) => {
             kickoffTime: fixture.kickoffTime,
             minutes: fixture.minutes,
             provisionalStartTime: fixture.provisionalStartTime,
-            started: fixture.started,
+            started: fixture.started ?? false,
             teamAId: fixture.teamA,
             teamAScore: fixture.teamAScore,
             teamHId: fixture.teamH,
@@ -291,10 +340,10 @@ export const createFixtureRepository = (dbInstance?: DbOrTransaction) => {
           }));
 
           const result = await db
-            .insert(eventFixtures)
+            .insert(fixturesInFpl)
             .values(newFixtures)
             .onConflictDoUpdate({
-              target: eventFixtures.id,
+              target: [fixturesInFpl.seasonId, fixturesInFpl.fixtureId],
               set: {
                 code: sql`excluded.code`,
                 eventId: sql`excluded.event_id`,

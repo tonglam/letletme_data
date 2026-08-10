@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import type { FplSeasonRef } from '../domain/fpl-season';
 
 import {
   getLeagueSyncQueue,
@@ -20,6 +21,7 @@ export type LeagueSyncEnqueueOptions = {
 
 async function enqueueLeagueSyncJob(
   jobName: LeagueSyncJobName,
+  season: FplSeasonRef,
   eventId: number,
   source: LeagueSyncJobSource = 'cron',
   options: LeagueSyncEnqueueOptions = {},
@@ -29,6 +31,8 @@ async function enqueueLeagueSyncJob(
     const queue = getLeagueSyncQueue(tier);
     const runId = options.runId ?? randomUUID();
     const jobData: LeagueSyncJobData = {
+      seasonId: season.seasonId,
+      seasonCode: season.seasonCode,
       eventId,
       tournamentId: options.tournamentId,
       source,
@@ -40,9 +44,9 @@ async function enqueueLeagueSyncJob(
     // Other cron, manual, and cascade runs retain unique IDs.
     const jobNonce = Date.now();
     const generatedJobId = options.tournamentId
-      ? `${jobName}-e${eventId}-t${options.tournamentId}-${jobNonce}`
-      : `${jobName}-e${eventId}-coordinator-${jobNonce}`;
-    const jobId = options.jobId ?? generatedJobId;
+      ? `${jobName}-${season.seasonCode}-e${eventId}-t${options.tournamentId}-${jobNonce}`
+      : `${jobName}-${season.seasonCode}-e${eventId}-coordinator-${jobNonce}`;
+    const jobId = options.jobId ? `${season.seasonCode}-${options.jobId}` : generatedJobId;
 
     const job = await queue.add(jobName, jobData, {
       jobId,
@@ -81,13 +85,15 @@ async function enqueueLeagueSyncJob(
 }
 
 export const enqueueLeagueEventPicks = (
+  season: FplSeasonRef,
   eventId: number,
   source?: LeagueSyncJobSource,
   options?: LeagueSyncEnqueueOptions,
-) => enqueueLeagueSyncJob(LEAGUE_JOBS.LEAGUE_EVENT_PICKS, eventId, source, options);
+) => enqueueLeagueSyncJob(LEAGUE_JOBS.LEAGUE_EVENT_PICKS, season, eventId, source, options);
 
 export const enqueueLeagueEventResults = (
+  season: FplSeasonRef,
   eventId: number,
   source?: LeagueSyncJobSource,
   options?: LeagueSyncEnqueueOptions,
-) => enqueueLeagueSyncJob(LEAGUE_JOBS.LEAGUE_EVENT_RESULTS, eventId, source, options);
+) => enqueueLeagueSyncJob(LEAGUE_JOBS.LEAGUE_EVENT_RESULTS, season, eventId, source, options);

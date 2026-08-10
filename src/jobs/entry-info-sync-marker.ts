@@ -1,7 +1,7 @@
-import { cache } from '../cache/cache-operations';
+import { queueRedisSingleton } from '../queues/redis';
 import { logError } from '../utils/logger';
 
-const ENTRY_INFO_SYNC_CACHE_PREFIX = 'entry-info-sync:daily';
+const ENTRY_INFO_SYNC_MARKER_PREFIX = 'llm:v3:queue:coordination:entry-info-sync:daily';
 
 export function getEntryInfoSyncDateKey(date: Date) {
   return date.toISOString().split('T')[0];
@@ -30,7 +30,10 @@ function getSecondsUntilNextDay(now: Date) {
 
 export async function hasEntryInfoSyncedToday(now: Date) {
   try {
-    return await cache.exists(`${ENTRY_INFO_SYNC_CACHE_PREFIX}:${getEntryInfoSyncDateKey(now)}`);
+    const redis = await queueRedisSingleton.getClient();
+    return (
+      (await redis.exists(`${ENTRY_INFO_SYNC_MARKER_PREFIX}:${getEntryInfoSyncDateKey(now)}`)) === 1
+    );
   } catch (error) {
     logError('Failed to check entry info sync cache', error);
     return false;
@@ -39,9 +42,11 @@ export async function hasEntryInfoSyncedToday(now: Date) {
 
 export async function markEntryInfoSyncedToday(now: Date, jobId?: string | number) {
   try {
-    await cache.set(
-      `${ENTRY_INFO_SYNC_CACHE_PREFIX}:${getEntryInfoSyncDateKey(now)}`,
-      { ranAt: now.toISOString(), jobId },
+    const redis = await queueRedisSingleton.getClient();
+    await redis.set(
+      `${ENTRY_INFO_SYNC_MARKER_PREFIX}:${getEntryInfoSyncDateKey(now)}`,
+      JSON.stringify({ ranAt: now.toISOString(), jobId }),
+      'EX',
       getSecondsUntilNextDay(now),
     );
   } catch (error) {

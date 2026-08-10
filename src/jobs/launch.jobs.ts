@@ -3,9 +3,9 @@ import { randomUUID } from 'node:crypto';
 import { cron } from '@elysiajs/cron';
 import { Elysia } from 'elysia';
 
-import { deriveSeasonFromEvents } from '../cache/cache-season';
-import { redisSingleton } from '../cache/singleton';
 import { fplClient, type FPLBootstrapResponse } from '../clients/fpl';
+import { deriveFplSeasonFromEvents } from '../domain/fpl-source-season';
+import { queueRedisSingleton } from '../queues/redis';
 import { runDataSyncAttempt } from '../utils/data-sync-attempt';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { logError, logInfo } from '../utils/logger';
@@ -48,7 +48,7 @@ export interface LaunchMonitorResult {
 
 const defaultDependencies: LaunchMonitorDependencies = {
   getBootstrap: () => fplClient.getBootstrap(),
-  getRedis: async () => (await redisSingleton.getClient()) as unknown as LaunchRedisClient,
+  getRedis: async () => (await queueRedisSingleton.getClient()) as unknown as LaunchRedisClient,
   sendNotification: sendTelegramMessage,
   now: () => new Date(),
   createLockToken: randomUUID,
@@ -212,7 +212,7 @@ export async function evaluateLaunchMonitor(
     const redis = await dependencies.getRedis();
     const delivery = await sendLaunchNotificationOnce(
       redis,
-      `LaunchNotification:warning:${now.getFullYear()}`,
+      `llm:v3:queue:coordination:launch-notification:warning:${now.getFullYear()}`,
       '【NEW SEASON】WARNING! WARNING! WARNING!',
       dependencies,
     );
@@ -223,7 +223,7 @@ export async function evaluateLaunchMonitor(
   }
 
   const firstEvent = bootstrap.events[0];
-  const publishedSeason = deriveSeasonFromEvents(bootstrap.events);
+  const publishedSeason = deriveFplSeasonFromEvents(bootstrap.events);
   if (!publishedSeason || !firstEvent.deadline_time?.startsWith(now.getFullYear().toString())) {
     return result('none', 'not_applicable');
   }
@@ -231,7 +231,7 @@ export async function evaluateLaunchMonitor(
   const redis = await dependencies.getRedis();
   const delivery = await sendLaunchNotificationOnce(
     redis,
-    `LaunchNotification:happening:${publishedSeason}`,
+    `llm:v3:queue:coordination:launch-notification:happening:${publishedSeason}`,
     '【NEW SEASON】ITS HAPPENING!!!',
     dependencies,
   );

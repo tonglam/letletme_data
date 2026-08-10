@@ -1,6 +1,7 @@
 import { QueueEvents, Worker, type Job } from 'bullmq';
 
 import { MUTATION_PRIORITY_ORDER } from '../domain/job-priority';
+import { requireCurrentSeasonForJob } from '../domain/season-scoped-job';
 import {
   type DataSyncJobData,
   dataSyncQueuesByTier,
@@ -11,7 +12,6 @@ import { syncPlayerPricesForDate } from '../services/player-prices.service';
 import { syncCurrentPlayerStats, syncPlayerStatsForEvent } from '../services/player-stats.service';
 import { syncCurrentPlayerValues } from '../services/player-values.service';
 import { syncCoreSnapshot } from '../services/core-snapshot.service';
-import { prepareAndArchiveFplSeason } from '../services/fpl-history.service';
 import {
   resolveBullMqAttemptQueueWaitMs,
   runDataSyncAttempt,
@@ -26,18 +26,8 @@ import { formatCronDateKey } from '../utils/timezone';
 import { startStrictPriorityGate } from './strict-priority-gate';
 import type { WorkerRuntime } from './worker-runtime';
 
-const CORE_SNAPSHOT_JOB_NAMES = new Set([
-  'core-snapshot',
-  'events',
-  'fixtures',
-  'fixtures-all-gameweeks',
-  'teams',
-  'players',
-  'phases',
-  'fpl-season-archive',
-]);
-
 const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
+  const season = await requireCurrentSeasonForJob(job.data);
   const context = {
     jobType: 'queue' as const,
     queueName: job.queueName,
@@ -67,30 +57,22 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
       runTrackedJob(context, async () => {
         switch (job.name) {
           case 'core-snapshot':
-          case 'events':
-          case 'fixtures':
-          case 'fixtures-all-gameweeks':
-          case 'teams':
-          case 'players':
-          case 'phases':
-            return syncCoreSnapshot();
+            return syncCoreSnapshot(season);
           case 'player-prices':
             if (!job.data.changeDate) {
               throw new Error('player-prices job requires changeDate');
             }
-            return syncPlayerPricesForDate(job.data.changeDate);
+            return syncPlayerPricesForDate(season, job.data.changeDate);
           case 'player-stats':
             return job.data.eventId !== undefined
-              ? syncPlayerStatsForEvent(job.data.eventId)
-              : syncCurrentPlayerStats({ onTargetEventResolved: recordResolvedTarget });
+              ? syncPlayerStatsForEvent(season, job.data.eventId)
+              : syncCurrentPlayerStats(season, { onTargetEventResolved: recordResolvedTarget });
           case 'player-values':
             return syncCurrentPlayerValues(
+              season,
               job.data.changeDate ?? formatCronDateKey(new Date(job.data.triggeredAt)),
               { onTargetEventResolved: recordResolvedTarget },
             );
-          case 'fpl-season-archive':
-            if (!job.data.season) throw new Error('fpl-season-archive job requires season');
-            return prepareAndArchiveFplSeason(job.data.season);
           default:
             throw new Error(`Unknown data-sync job: ${job.name}`);
         }
@@ -98,7 +80,7 @@ const processDataSyncJob = async (job: Job<DataSyncJobData>) => {
 
     // Core aliases perform upstream reads before acquiring their own short
     // multi-table persistence/publication lock.
-    if (CORE_SNAPSHOT_JOB_NAMES.has(job.name)) return execute();
+    if (job.name === 'core-snapshot') return execute();
     return withMutationConflictGuard(
       {
         queueName: job.queueName,

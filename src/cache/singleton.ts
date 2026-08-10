@@ -1,14 +1,12 @@
 import Redis from 'ioredis';
 
-import { CacheConfig } from '../types';
-import { getConfig } from '../utils/config';
+import { getConfig, resolveCacheRedisConfig } from '../utils/config';
 import { logError, logInfo } from '../utils/logger';
 
 // Cache commands must fail fast so services fall back to the database during a
 // Redis outage (FP-03). BullMQ connections live elsewhere and intentionally do
 // NOT use these timeouts (blocking commands must not time out).
 const COMMAND_TIMEOUT_MS = 5000;
-const UNDERSTAT_COMMAND_TIMEOUT_MS = 60_000;
 const CONNECT_TIMEOUT_MS = 5000;
 const INITIAL_PING_TIMEOUT_MS = 5000;
 
@@ -37,14 +35,7 @@ type RedisConnectionOptions = {
   db: number;
 };
 
-type RedisSingletonOptions = {
-  commandTimeoutMs?: number;
-};
-
-const createRedisSingleton = (
-  connectionOptions?: RedisConnectionOptions,
-  options: RedisSingletonOptions = {},
-) => {
+const createRedisSingleton = (connectionOptions?: RedisConnectionOptions) => {
   let client: Redis | null = null;
   let isConnected = false;
   let connectPromise: Promise<void> | null = null;
@@ -53,13 +44,7 @@ const createRedisSingleton = (
     if (connectionOptions) {
       return connectionOptions;
     }
-    const config = getConfig();
-    return {
-      host: config.REDIS_HOST,
-      port: config.REDIS_PORT,
-      password: config.REDIS_PASSWORD,
-      db: config.REDIS_DB,
-    };
+    return resolveCacheRedisConfig(getConfig());
   };
 
   const getOrCreateClient = (): Redis => {
@@ -78,7 +63,7 @@ const createRedisSingleton = (
       retryDelayOnFailover: 100,
       enableReadyCheck: false,
       maxRetriesPerRequest: null,
-      commandTimeout: options.commandTimeoutMs ?? COMMAND_TIMEOUT_MS,
+      commandTimeout: COMMAND_TIMEOUT_MS,
       connectTimeout: CONNECT_TIMEOUT_MS,
       lazyConnect: true,
     };
@@ -233,22 +218,5 @@ const createRedisSingleton = (
 // Export singleton instance
 export const redisSingleton = createRedisSingleton();
 
-// Historical Understat snapshots contain megabytes of JSON in a generation.
-// Keep the general cache client fail-fast, but give this provider's publication
-// path enough time to write bounded generation chunks over remote Redis.
-export const understatRedisSingleton = createRedisSingleton(undefined, {
-  commandTimeoutMs: UNDERSTAT_COMMAND_TIMEOUT_MS,
-});
-
 // Exported for tests that need an isolated client lifecycle (e.g. timeout tests)
 export { createRedisSingleton };
-
-// Default cache configuration. Entity caches write with TTL -1 (refresh on
-// write, never expire); only short-lived coordination keys pass an explicit
-// ttl to cache-operations.set.
-export const DEFAULT_CACHE_CONFIG: CacheConfig = {
-  prefix: 'letletme:',
-};
-
-// Convenience export for backward compatibility
-export const getRedis = () => redisSingleton.getClient();

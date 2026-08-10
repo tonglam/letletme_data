@@ -1,22 +1,22 @@
 export interface FplPlayerFixtureEvidence {
-  eventId: number;
-  fixtureId: number;
-  elementId: number;
-  minutes: number;
-  starts: number | null;
-  goals: number;
-  assists: number;
-  ownGoals: number;
-  yellowCards: number;
-  redCards: number;
+  readonly eventId: number;
+  readonly fixtureId: number;
+  readonly elementId: number;
+  readonly minutes: number;
+  readonly starts: number | null;
+  readonly goals: number;
+  readonly assists: number;
+  readonly ownGoals: number;
+  readonly yellowCards: number;
+  readonly redCards: number;
 }
 
 export interface FplPlayerFixtureStat extends FplPlayerFixtureEvidence {
-  season: string;
-  fixtureCode: number;
-  playerCode: number;
-  teamId: number;
-  teamCode: number;
-  elementType: number;
-  sourceHash: string;
+  readonly seasonId: number;
+  readonly fixtureCode: number;
+  readonly playerCode: number;
+  readonly teamId: number;
+  readonly teamCode: number;
+  readonly elementType: number;
+  readonly sourceHash: string;
 }

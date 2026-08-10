@@ -11,7 +11,13 @@ import { getUnderstatStatus } from '../services/understat-status.service';
 import { assertUnderstatSyncAllowed } from '../services/understat-sync.service';
 import { withMutationConflictGuard } from '../utils/mutation-lock';
 
-const SyncBody = t.Object({
+const TeamSyncBody = t.Object({
+  season: t.String({ pattern: '^\\d{4}$' }),
+  mode: t.Union([t.Literal('incremental'), t.Literal('full'), t.Literal('reconcile')]),
+  teamIds: t.Optional(t.Array(t.Integer({ minimum: 1 }), { minItems: 1, uniqueItems: true })),
+});
+
+const PlayerSyncBody = t.Object({
   season: t.String({ pattern: '^\\d{4}$' }),
   mode: t.Union([t.Literal('incremental'), t.Literal('full'), t.Literal('reconcile')]),
   teamIds: t.Optional(t.Array(t.Integer({ minimum: 1 }), { minItems: 1, uniqueItems: true })),
@@ -48,7 +54,7 @@ export const understatAPI = new Elysia({ prefix: '/understat' })
       set.status = 202;
       return { success: true, lane: 'team', runId, jobId: job.id };
     },
-    { body: SyncBody },
+    { body: TeamSyncBody },
   )
   .post(
     '/player/sync',
@@ -64,7 +70,7 @@ export const understatAPI = new Elysia({ prefix: '/understat' })
       set.status = 202;
       return { success: true, lane: 'player', runId, jobId: job.id };
     },
-    { body: SyncBody },
+    { body: PlayerSyncBody },
   )
   .get(
     '/status/:season',

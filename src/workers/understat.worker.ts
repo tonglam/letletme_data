@@ -3,25 +3,25 @@ import { QueueEvents, UnrecoverableError, Worker, type Job } from 'bullmq';
 import { UnderstatClientError } from '../clients/understat';
 
 import {
+  getUnderstatPlayerQueue,
   type UnderstatPlayerJobData,
-  understatPlayerQueue,
   understatPlayerQueueName,
 } from '../queues/understat-player.queue';
 import {
+  getUnderstatTeamQueue,
   type UnderstatTeamJobData,
-  understatTeamQueue,
   understatTeamQueueName,
 } from '../queues/understat-team.queue';
 import {
   discoverUnderstatPlayers,
-  publishUnderstatPlayerSnapshot,
+  finalizeUnderstatPlayerRun,
   syncUnderstatPlayerMatch,
   syncUnderstatPlayerTeamDetail,
   understatPlayerItemForJob,
 } from '../services/understat-player.service';
 import {
   discoverUnderstatTeams,
-  publishUnderstatTeamSnapshot,
+  finalizeUnderstatTeamRun,
   syncUnderstatTeamDetail,
   understatTeamItemForJob,
 } from '../services/understat-team.service';
@@ -41,7 +41,7 @@ function lockScopes(
   data: UnderstatTeamJobData | UnderstatPlayerJobData,
 ): string[] {
   const scopes = ['understat:reference:all', `understat:reference:${data.season}`];
-  if (name.endsWith('-discover') || name.endsWith('-publish')) return scopes;
+  if (name.endsWith('-discover') || name.endsWith('-finalize')) return scopes;
   const resourceId =
     lane === 'team'
       ? (data as UnderstatTeamJobData).teamId
@@ -99,8 +99,8 @@ async function processTeamJob(job: Job<UnderstatTeamJobData>): Promise<void> {
               return discoverUnderstatTeams(job.data);
             case 'understat-team-detail':
               return syncUnderstatTeamDetail(job.data);
-            case 'understat-team-publish':
-              return publishUnderstatTeamSnapshot(job.data);
+            case 'understat-team-finalize':
+              return finalizeUnderstatTeamRun(job.data);
             default:
               throw new Error(`Unknown Understat team job: ${job.name}`);
           }
@@ -137,8 +137,8 @@ async function processPlayerJob(job: Job<UnderstatPlayerJobData>): Promise<void>
               return syncUnderstatPlayerTeamDetail(job.data);
             case 'understat-player-match':
               return syncUnderstatPlayerMatch(job.data);
-            case 'understat-player-publish':
-              return publishUnderstatPlayerSnapshot(job.data);
+            case 'understat-player-finalize':
+              return finalizeUnderstatPlayerRun(job.data);
             default:
               throw new Error(`Unknown Understat player job: ${job.name}`);
           }
@@ -151,6 +151,15 @@ async function recordTeamFailure(job: Job<UnderstatTeamJobData>, error: Error): 
   if (!isTerminalJobFailure(job, error)) return;
   const item = understatTeamItemForJob(job.data, job.name);
   if (item) {
+    const persisted = await understatSyncRepository.findItem(
+      job.data.runId,
+      item.resourceType,
+      item.resourceId,
+    );
+    if (persisted?.status === 'completed' || persisted?.status === 'skipped') {
+      await understatSyncRepository.markRunFailed(job.data.runId, error.message);
+      return;
+    }
     await understatSyncRepository.failItem(
       job.data.runId,
       item.resourceType,
@@ -166,6 +175,15 @@ async function recordPlayerFailure(job: Job<UnderstatPlayerJobData>, error: Erro
   if (!isTerminalJobFailure(job, error)) return;
   const item = understatPlayerItemForJob(job.data, job.name);
   if (item) {
+    const persisted = await understatSyncRepository.findItem(
+      job.data.runId,
+      item.resourceType,
+      item.resourceId,
+    );
+    if (persisted?.status === 'completed' || persisted?.status === 'skipped') {
+      await understatSyncRepository.markRunFailed(job.data.runId, error.message);
+      return;
+    }
     await understatSyncRepository.failItem(
       job.data.runId,
       item.resourceType,
@@ -184,6 +202,8 @@ export function createUnderstatWorker(): WorkerRuntime {
   }
 
   const connection = getQueueConnection();
+  const understatTeamQueue = getUnderstatTeamQueue();
+  const understatPlayerQueue = getUnderstatPlayerQueue();
   const teamWorker = new Worker<UnderstatTeamJobData>(understatTeamQueueName, processTeamJob, {
     connection,
     concurrency: 2,

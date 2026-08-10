@@ -22,16 +22,16 @@ function integerEnv(defaultValue: number) {
 
 const EnvSchema = z.object({
   DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),
-  // Redis
-  REDIS_HOST: z.string().default('localhost'),
-  REDIS_PORT: z.coerce.number().default(6379),
-  REDIS_PASSWORD: z.string().optional(),
-  REDIS_DB: z.coerce.number().optional().default(0),
-  // Queue Redis (falls back to cache Redis)
-  QUEUE_REDIS_HOST: z.string().optional(),
-  QUEUE_REDIS_PORT: z.coerce.number().optional(),
+  // Rebuildable Data publications only. Queue/coordination state must never use this client.
+  CACHE_REDIS_HOST: z.string().default('localhost'),
+  CACHE_REDIS_PORT: z.coerce.number().int().min(1).max(65535).default(6379),
+  CACHE_REDIS_PASSWORD: z.string().optional(),
+  CACHE_REDIS_DB: z.coerce.number().int().min(0).default(0),
+  // BullMQ and all worker coordination. Defaults remain isolated for local development/tests.
+  QUEUE_REDIS_HOST: z.string().default('localhost'),
+  QUEUE_REDIS_PORT: z.coerce.number().int().min(1).max(65535).default(6379),
   QUEUE_REDIS_PASSWORD: z.string().optional(),
-  QUEUE_REDIS_DB: z.coerce.number().optional(),
+  QUEUE_REDIS_DB: z.coerce.number().int().min(0).default(1),
   // Server
   PORT: z.coerce.number().default(3000),
   NODE_ENV: z.enum(['production', 'development', 'test']).optional(),
@@ -61,9 +61,6 @@ const EnvSchema = z.object({
   PULSELIVE_COMP_SEASON: z.string().optional(),
   // Disabled until automated Understat access is explicitly approved.
   UNDERSTAT_ENABLED: booleanEnv(false),
-  // Workers/manual API may be enabled for a historical backfill while routine
-  // schedules remain disabled until the active season passes shadow checks.
-  UNDERSTAT_SCHEDULES_ENABLED: booleanEnv(false),
   UNDERSTAT_BASE_URL: z.string().url().default('https://understat.com'),
   UNDERSTAT_LEAGUE: z.string().min(1).default('EPL'),
   UNDERSTAT_MIN_SEASON: z
@@ -86,6 +83,13 @@ const EnvSchema = z.object({
 
 export type AppConfig = z.infer<typeof EnvSchema>;
 
+export type RedisEndpointConfig = {
+  readonly host: string;
+  readonly port: number;
+  readonly password?: string;
+  readonly db: number;
+};
+
 export type AuthConfig = {
   ENABLE_AUTH: boolean;
   DATA_API_KEY_HASHES: readonly string[];
@@ -94,11 +98,59 @@ export type AuthConfig = {
 
 let cachedConfig: AppConfig | null = null;
 
+function endpointIdentity(endpoint: RedisEndpointConfig): string {
+  return `${endpoint.host.trim().toLowerCase()}:${endpoint.port}/${endpoint.db}`;
+}
+
+export function resolveCacheRedisConfig(config: AppConfig): RedisEndpointConfig {
+  return {
+    host: config.CACHE_REDIS_HOST,
+    port: config.CACHE_REDIS_PORT,
+    password: config.CACHE_REDIS_PASSWORD,
+    db: config.CACHE_REDIS_DB,
+  };
+}
+
+export function resolveQueueRedisConfig(config: AppConfig): RedisEndpointConfig {
+  return {
+    host: config.QUEUE_REDIS_HOST,
+    port: config.QUEUE_REDIS_PORT,
+    password: config.QUEUE_REDIS_PASSWORD,
+    db: config.QUEUE_REDIS_DB,
+  };
+}
+
+export function assertRedisEndpointsSeparated(config: AppConfig): void {
+  const cache = resolveCacheRedisConfig(config);
+  const queue = resolveQueueRedisConfig(config);
+  if (endpointIdentity(cache) === endpointIdentity(queue)) {
+    throw new Error(
+      'CACHE_REDIS_* and QUEUE_REDIS_* must resolve to different host/port/database endpoints',
+    );
+  }
+
+  if (config.NODE_ENV === 'production') {
+    const required = [
+      'CACHE_REDIS_HOST',
+      'CACHE_REDIS_PORT',
+      'CACHE_REDIS_DB',
+      'QUEUE_REDIS_HOST',
+      'QUEUE_REDIS_PORT',
+      'QUEUE_REDIS_DB',
+    ] as const;
+    const missing = required.filter((key) => !process.env[key]?.trim());
+    if (missing.length > 0) {
+      throw new Error(`Production Redis configuration must be explicit: ${missing.join(', ')}`);
+    }
+  }
+}
+
 export function getConfig(): AppConfig {
   if (cachedConfig) return cachedConfig;
 
   try {
     const parsed = EnvSchema.parse(process.env);
+    assertRedisEndpointsSeparated(parsed);
 
     if (Number(parsed.UNDERSTAT_MIN_SEASON) > Number(parsed.UNDERSTAT_SEASON)) {
       throw new Error('UNDERSTAT_MIN_SEASON cannot be newer than UNDERSTAT_SEASON');
@@ -112,12 +164,12 @@ export function getConfig(): AppConfig {
     cachedConfig = parsed;
     logInfo('Environment validated', {
       port: parsed.PORT,
-      redisHost: parsed.REDIS_HOST,
-      redisPort: parsed.REDIS_PORT,
-      queueRedisHost: parsed.QUEUE_REDIS_HOST || parsed.REDIS_HOST,
-      queueRedisPort: parsed.QUEUE_REDIS_PORT || parsed.REDIS_PORT,
-      understatEnabled: parsed.UNDERSTAT_ENABLED,
-      understatSchedulesEnabled: parsed.UNDERSTAT_SCHEDULES_ENABLED,
+      cacheRedisHost: parsed.CACHE_REDIS_HOST,
+      cacheRedisPort: parsed.CACHE_REDIS_PORT,
+      cacheRedisDb: parsed.CACHE_REDIS_DB,
+      queueRedisHost: parsed.QUEUE_REDIS_HOST,
+      queueRedisPort: parsed.QUEUE_REDIS_PORT,
+      queueRedisDb: parsed.QUEUE_REDIS_DB,
     });
     return parsed;
   } catch (error) {
@@ -138,7 +190,8 @@ export function validateEnvForCli(): { ok: boolean; errors?: unknown } {
     logInfo('[env] OK', {
       PORT: conf.PORT,
       DATABASE_URL: conf.DATABASE_URL ? 'set' : 'missing',
-      REDIS: `${conf.REDIS_HOST}:${conf.REDIS_PORT}`,
+      CACHE_REDIS: `${conf.CACHE_REDIS_HOST}:${conf.CACHE_REDIS_PORT}/${conf.CACHE_REDIS_DB}`,
+      QUEUE_REDIS: `${conf.QUEUE_REDIS_HOST}:${conf.QUEUE_REDIS_PORT}/${conf.QUEUE_REDIS_DB}`,
     });
     return { ok: true };
   } catch (error) {

@@ -1,5 +1,7 @@
 import { describe, expect, mock, test } from 'bun:test';
 
+import { TEST_SEASON } from '../fixtures/seasons.fixtures';
+
 const { syncCurrentPlayerStats } = await import('../../src/services/player-stats.service');
 
 describe('player stats synchronization reporting', () => {
@@ -11,6 +13,7 @@ describe('player stats synchronization reporting', () => {
 
     await expect(
       syncCurrentPlayerStats(
+        TEST_SEASON,
         {
           onTargetEventResolved: (eventId) => resolvedEvents.push(eventId),
         },

@@ -8,7 +8,6 @@ import { entrySyncAPI } from './api/entry-sync.api';
 import { eventLivesAPI } from './api/event-lives.api';
 import { eventsAPI } from './api/events.api';
 import { fixturesAPI } from './api/fixtures.api';
-import { fplArchiveAPI } from './api/fpl-archive.api';
 import { jobsAPI } from './api/jobs.api';
 import { phasesAPI } from './api/phases.api';
 import { playerStatsAPI } from './api/player-stats.api';
@@ -19,6 +18,7 @@ import { checkReadiness } from './api/health';
 import { teamsAPI } from './api/teams.api';
 import { tournamentsAPI } from './api/tournaments.api';
 import { understatAPI } from './api/understat.api';
+import { databaseSingleton } from './db/singleton';
 
 // Import job registration functions
 import { registerDataJobs } from './jobs/data-jobs';
@@ -27,7 +27,6 @@ import { registerLeagueJobs } from './jobs/league-jobs';
 import { registerLaunchJobs } from './jobs/launch.jobs';
 import { registerLiveJobs } from './jobs/live.jobs';
 import { registerTournamentJobs } from './jobs/tournament-jobs';
-import { registerUnderstatJobs } from './jobs/understat.jobs';
 
 // Import utilities
 import { getAuthConfig, getConfig } from './utils/config';
@@ -46,7 +45,11 @@ import { logDebug, logError, logInfo, logWarn } from './utils/logger';
  */
 
 // Validate environment and resolve config
-const { PORT: port } = getConfig();
+const config = getConfig();
+if (config.NODE_ENV === 'production') {
+  await databaseSingleton.connect();
+}
+const { PORT: port } = config;
 const { CORS_ORIGINS, ENABLE_AUTH } = getAuthConfig();
 
 const app = new Elysia()
@@ -142,7 +145,6 @@ const app = new Elysia()
   .use(eventsAPI)
   .use(eventLivesAPI)
   .use(fixturesAPI)
-  .use(fplArchiveAPI)
   .use(teamsAPI)
   .use(playersAPI)
   .use(playerStatsAPI)
@@ -164,7 +166,6 @@ const app = new Elysia()
   .use(registerEntryJobs)
   .use(registerLeagueJobs)
   .use(registerTournamentJobs)
-  .use(registerUnderstatJobs)
 
   // ================================
   // Server Startup
@@ -207,11 +208,9 @@ logInfo('🚀 Elysia server started', {
     'data-sync',
     'launch-monitor',
     'player-values-window',
-    'live-scores',
+    'live-snapshot',
+    'post-match-consolidation',
     'event-current-refresh',
-    'event-live-summary',
-    'event-live-explain',
-    'event-overall-result',
     'entry-info',
     'entry-picks',
     'entry-transfers',
@@ -227,8 +226,8 @@ logInfo('🚀 Elysia server started', {
     'tournament-points-race-results',
     'tournament-battle-race-results',
     'tournament-knockout-results',
-    'understat-team',
-    'understat-player',
+    'tournament-selection-stats',
+    'tournament-materialized-views-refresh',
   ],
 });
 

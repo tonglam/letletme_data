@@ -1,6 +1,9 @@
-import { and, desc, eq, gt, inArray, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, notInArray, sql } from 'drizzle-orm';
 
-import { understatSyncItems, understatSyncRuns } from '../db/schemas/index.schema';
+import {
+  syncItemsInOps as understatSyncItems,
+  syncRunsInOps as understatSyncRuns,
+} from '../db/schemas/index.schema';
 import { getDb, type DbOrTransaction } from '../db/singleton';
 import type {
   UnderstatLane,
@@ -14,21 +17,58 @@ async function getDatabase(dbInstance?: DbOrTransaction): Promise<DbOrTransactio
   return dbInstance ?? (await getDb());
 }
 
+const ACTIVE_RUN_STATUSES = ['pending', 'running', 'ready_to_publish'] as const;
+
+function runIsActive(runId: string) {
+  return sql<boolean>`exists (
+    select 1
+    from ${understatSyncRuns}
+    where ${understatSyncRuns.runId} = ${runId}
+      and ${understatSyncRuns.status} in ('pending', 'running', 'ready_to_publish')
+  )`;
+}
+
 function mapRun(row: typeof understatSyncRuns.$inferSelect): UnderstatSyncRun {
+  if (row.provider !== 'understat') {
+    throw new Error(`Expected Understat sync run, received provider ${row.provider}`);
+  }
+  if (row.lane !== 'team' && row.lane !== 'player') {
+    throw new Error(`Invalid Understat lane: ${row.lane}`);
+  }
+  if (!row.seasonCode) throw new Error(`Understat sync run ${row.runId} has no season code`);
+  if (!['incremental', 'full', 'reconcile'].includes(row.mode)) {
+    throw new Error(`Invalid Understat sync mode: ${row.mode}`);
+  }
+  if (!['cron', 'manual', 'api'].includes(row.trigger)) {
+    throw new Error(`Invalid Understat sync trigger: ${row.trigger}`);
+  }
+  if (
+    ![
+      'pending',
+      'running',
+      'failed',
+      'completed',
+      'ready_to_publish',
+      'published',
+      'skipped',
+    ].includes(row.status)
+  ) {
+    throw new Error(`Invalid Understat sync status: ${row.status}`);
+  }
   return {
     runId: row.runId,
     lane: row.lane,
-    season: row.season,
-    mode: row.mode,
-    trigger: row.trigger,
-    status: row.status,
+    season: row.seasonCode,
+    mode: row.mode as UnderstatSyncMode,
+    trigger: row.trigger as UnderstatSyncTrigger,
+    status: row.status as UnderstatSyncRun['status'],
     expectedItems: row.expectedItems,
     completedItems: row.completedItems,
     failedItems: row.failedItems,
     skippedItems: row.skippedItems,
     dataChanged: row.dataChanged,
-    cacheRevision: row.cacheRevision,
-    publicationSkipReason: row.publicationSkipReason,
+    publicationId: row.publicationId,
+    metadata: row.metadata as Record<string, unknown>,
     errorSummary: row.errorSummary,
     startedAt: row.startedAt,
     completedAt: row.completedAt,
@@ -36,13 +76,17 @@ function mapRun(row: typeof understatSyncRuns.$inferSelect): UnderstatSyncRun {
 }
 
 function mapItem(row: typeof understatSyncItems.$inferSelect): UnderstatSyncItem {
+  if (!['pending', 'running', 'failed', 'completed', 'skipped'].includes(row.status)) {
+    throw new Error(`Invalid Understat sync item status: ${row.status}`);
+  }
   return {
     runId: row.runId,
     resourceType: row.resourceType,
     resourceId: row.resourceId,
-    status: row.status,
+    status: row.status as UnderstatSyncItem['status'],
     attempts: row.attempts,
     sourceHash: row.sourceHash,
+    normalizedPayload: row.normalizedPayload as Record<string, unknown> | null,
     lastError: row.lastError,
     completedAt: row.completedAt,
   };
@@ -68,9 +112,16 @@ export const createUnderstatSyncRepository = (dbInstance?: DbOrTransaction) => (
     await db
       .insert(understatSyncRuns)
       .values({
-        ...input,
+        runId: input.runId,
+        provider: 'understat',
+        lane: input.lane,
+        scope: `understat.${input.lane}`,
+        seasonCode: input.season,
+        mode: input.mode,
+        trigger: input.trigger,
         status: 'running',
         dataChanged: input.dataChanged ?? false,
+        metadata: {},
         startedAt: new Date(),
       })
       .onConflictDoNothing({ target: understatSyncRuns.runId });
@@ -80,7 +131,16 @@ export const createUnderstatSyncRepository = (dbInstance?: DbOrTransaction) => (
       .where(eq(understatSyncRuns.runId, input.runId))
       .limit(1);
     if (!row) throw new Error(`Failed to create Understat sync run ${input.runId}`);
-    if (row.lane !== input.lane || row.season !== input.season) {
+    if (
+      row.provider !== 'understat' ||
+      row.lane !== input.lane ||
+      row.scope !== `understat.${input.lane}` ||
+      row.seasonId !== null ||
+      row.seasonCode !== input.season ||
+      row.eventId !== null ||
+      row.mode !== input.mode ||
+      row.trigger !== input.trigger
+    ) {
       throw new Error(`Understat sync run identity conflict: ${input.runId}`);
     }
     return mapRun(row);
@@ -91,6 +151,19 @@ export const createUnderstatSyncRepository = (dbInstance?: DbOrTransaction) => (
       ...new Map(items.map((item) => [`${item.resourceType}:${item.resourceId}`, item])).values(),
     ];
     const db = await getDatabase(dbInstance);
+    const [run] = await db
+      .select({ status: understatSyncRuns.status })
+      .from(understatSyncRuns)
+      .where(eq(understatSyncRuns.runId, runId))
+      .limit(1);
+    if (!run) throw new Error(`Understat sync run not found: ${runId}`);
+    if (!ACTIVE_RUN_STATUSES.includes(run.status as (typeof ACTIVE_RUN_STATUSES)[number])) {
+      const [countRow] = await db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(understatSyncItems)
+        .where(eq(understatSyncItems.runId, runId));
+      return countRow?.count ?? 0;
+    }
     if (unique.length > 0) {
       await db
         .insert(understatSyncItems)
@@ -105,7 +178,12 @@ export const createUnderstatSyncRepository = (dbInstance?: DbOrTransaction) => (
     await db
       .update(understatSyncRuns)
       .set({ expectedItems, updatedAt: new Date() })
-      .where(eq(understatSyncRuns.runId, runId));
+      .where(
+        and(
+          eq(understatSyncRuns.runId, runId),
+          inArray(understatSyncRuns.status, ACTIVE_RUN_STATUSES),
+        ),
+      );
     return expectedItems;
   },
 
@@ -123,6 +201,8 @@ export const createUnderstatSyncRepository = (dbInstance?: DbOrTransaction) => (
           eq(understatSyncItems.runId, runId),
           eq(understatSyncItems.resourceType, resourceType),
           eq(understatSyncItems.resourceId, resourceId),
+          notInArray(understatSyncItems.status, ['completed', 'skipped']),
+          runIsActive(runId),
         ),
       );
   },
@@ -131,26 +211,30 @@ export const createUnderstatSyncRepository = (dbInstance?: DbOrTransaction) => (
     runId: string,
     resourceType: string,
     resourceId: string,
-    sourceHash: string | null,
-    changed: boolean,
+    sourceHash: string,
+    normalizedPayload: Record<string, unknown>,
   ): Promise<boolean> {
     const db = await getDatabase(dbInstance);
-    await db
+    const updated = await db
       .update(understatSyncItems)
-      .set({ status: changed ? 'completed' : 'skipped', sourceHash, completedAt: new Date() })
+      .set({
+        status: 'completed',
+        sourceHash,
+        normalizedPayload,
+        completedAt: new Date(),
+        updatedAt: new Date(),
+      })
       .where(
         and(
           eq(understatSyncItems.runId, runId),
           eq(understatSyncItems.resourceType, resourceType),
           eq(understatSyncItems.resourceId, resourceId),
+          notInArray(understatSyncItems.status, ['completed', 'skipped']),
+          runIsActive(runId),
         ),
-      );
-    if (changed) {
-      await db
-        .update(understatSyncRuns)
-        .set({ dataChanged: true, updatedAt: new Date() })
-        .where(eq(understatSyncRuns.runId, runId));
-    }
+      )
+      .returning({ runId: understatSyncItems.runId });
+    if (updated.length === 0) return false;
     return this.refreshRun(runId);
   },
 
@@ -161,7 +245,7 @@ export const createUnderstatSyncRepository = (dbInstance?: DbOrTransaction) => (
     error: string,
   ): Promise<void> {
     const db = await getDatabase(dbInstance);
-    await db
+    const updatedItem = await db
       .update(understatSyncItems)
       .set({ status: 'failed', lastError: error, completedAt: new Date() })
       .where(
@@ -169,12 +253,21 @@ export const createUnderstatSyncRepository = (dbInstance?: DbOrTransaction) => (
           eq(understatSyncItems.runId, runId),
           eq(understatSyncItems.resourceType, resourceType),
           eq(understatSyncItems.resourceId, resourceId),
+          notInArray(understatSyncItems.status, ['completed', 'skipped']),
+          runIsActive(runId),
         ),
-      );
+      )
+      .returning({ runId: understatSyncItems.runId });
+    if (updatedItem.length === 0) return;
     await db
       .update(understatSyncRuns)
       .set({ errorSummary: error, updatedAt: new Date() })
-      .where(eq(understatSyncRuns.runId, runId));
+      .where(
+        and(
+          eq(understatSyncRuns.runId, runId),
+          inArray(understatSyncRuns.status, ACTIVE_RUN_STATUSES),
+        ),
+      );
     await this.refreshRun(runId);
   },
 
@@ -192,7 +285,7 @@ export const createUnderstatSyncRepository = (dbInstance?: DbOrTransaction) => (
     const pendingItems = (counts.get('pending') ?? 0) + (counts.get('running') ?? 0);
     const settled = pendingItems === 0;
     const ready = pendingItems === 0 && failedItems === 0;
-    await db
+    const updated = await db
       .update(understatSyncRuns)
       .set({
         completedItems,
@@ -202,8 +295,14 @@ export const createUnderstatSyncRepository = (dbInstance?: DbOrTransaction) => (
         completedAt: settled ? new Date() : null,
         updatedAt: new Date(),
       })
-      .where(eq(understatSyncRuns.runId, runId));
-    return ready;
+      .where(
+        and(
+          eq(understatSyncRuns.runId, runId),
+          inArray(understatSyncRuns.status, ACTIVE_RUN_STATUSES),
+        ),
+      )
+      .returning({ runId: understatSyncRuns.runId });
+    return updated.length > 0 && ready;
   },
 
   async markRunFailed(runId: string, error: string): Promise<void> {
@@ -216,42 +315,54 @@ export const createUnderstatSyncRepository = (dbInstance?: DbOrTransaction) => (
         completedAt: new Date(),
         updatedAt: new Date(),
       })
-      .where(eq(understatSyncRuns.runId, runId));
+      .where(
+        and(
+          eq(understatSyncRuns.runId, runId),
+          inArray(understatSyncRuns.status, ACTIVE_RUN_STATUSES),
+        ),
+      );
   },
 
-  async markCompletedWithoutPublish(runId: string, reason: string): Promise<void> {
+  async markRunCompleted(
+    runId: string,
+    metadata: Record<string, unknown> = {},
+    dataChanged?: boolean,
+  ): Promise<void> {
     const db = await getDatabase(dbInstance);
     await db
       .update(understatSyncRuns)
       .set({
         status: 'completed',
-        publicationSkipReason: reason,
+        metadata,
+        ...(dataChanged === undefined ? {} : { dataChanged }),
         completedAt: new Date(),
         updatedAt: new Date(),
       })
-      .where(eq(understatSyncRuns.runId, runId));
+      .where(
+        and(
+          eq(understatSyncRuns.runId, runId),
+          inArray(understatSyncRuns.status, ACTIVE_RUN_STATUSES),
+        ),
+      );
   },
 
-  async markDataChanged(runId: string): Promise<void> {
-    const db = await getDatabase(dbInstance);
-    await db
-      .update(understatSyncRuns)
-      .set({ dataChanged: true, updatedAt: new Date() })
-      .where(eq(understatSyncRuns.runId, runId));
-  },
-
-  async markPublished(runId: string, revision: string): Promise<void> {
+  async markRunSkipped(runId: string, reason: string): Promise<void> {
     const db = await getDatabase(dbInstance);
     await db
       .update(understatSyncRuns)
       .set({
-        status: 'published',
-        cacheRevision: revision,
-        publicationSkipReason: null,
+        status: 'skipped',
+        metadata: { finalized: false, reason },
+        dataChanged: false,
         completedAt: new Date(),
         updatedAt: new Date(),
       })
-      .where(eq(understatSyncRuns.runId, runId));
+      .where(
+        and(
+          eq(understatSyncRuns.runId, runId),
+          inArray(understatSyncRuns.status, ACTIVE_RUN_STATUSES),
+        ),
+      );
   },
 
   async findRun(runId: string): Promise<UnderstatSyncRun | null> {
@@ -271,7 +382,8 @@ export const createUnderstatSyncRepository = (dbInstance?: DbOrTransaction) => (
   ): Promise<UnderstatSyncRun | null> {
     const db = await getDatabase(dbInstance);
     const conditions = [
-      eq(understatSyncRuns.season, season),
+      eq(understatSyncRuns.provider, 'understat'),
+      eq(understatSyncRuns.seasonCode, season),
       eq(understatSyncRuns.lane, lane),
       inArray(understatSyncRuns.status, ['pending', 'running', 'ready_to_publish']),
     ];
@@ -321,7 +433,8 @@ export const createUnderstatSyncRepository = (dbInstance?: DbOrTransaction) => (
       .from(understatSyncRuns)
       .where(
         and(
-          eq(understatSyncRuns.season, season),
+          eq(understatSyncRuns.provider, 'understat'),
+          eq(understatSyncRuns.seasonCode, season),
           inArray(understatSyncRuns.lane, ['team', 'player']),
         ),
       )
@@ -334,46 +447,6 @@ export const createUnderstatSyncRepository = (dbInstance?: DbOrTransaction) => (
         ? mapRun(rows.find((row) => row.lane === 'player')!)
         : null,
     };
-  },
-
-  async findLatestPublishedRuns(
-    season: string,
-  ): Promise<Record<UnderstatLane, UnderstatSyncRun | null>> {
-    const db = await getDatabase(dbInstance);
-    const rows = await db
-      .select()
-      .from(understatSyncRuns)
-      .where(
-        and(
-          eq(understatSyncRuns.season, season),
-          eq(understatSyncRuns.status, 'published'),
-          inArray(understatSyncRuns.lane, ['team', 'player']),
-        ),
-      )
-      .orderBy(desc(understatSyncRuns.completedAt));
-    const team = rows.find((row) => row.lane === 'team');
-    const player = rows.find((row) => row.lane === 'player');
-    return { team: team ? mapRun(team) : null, player: player ? mapRun(player) : null };
-  },
-
-  async hasDataChangesSince(
-    season: string,
-    lane: UnderstatLane,
-    publishedAt: Date,
-  ): Promise<boolean> {
-    const db = await getDatabase(dbInstance);
-    const [row] = await db
-      .select({ count: sql<number>`count(*)::int` })
-      .from(understatSyncRuns)
-      .where(
-        and(
-          eq(understatSyncRuns.season, season),
-          eq(understatSyncRuns.lane, lane),
-          eq(understatSyncRuns.dataChanged, true),
-          gt(understatSyncRuns.startedAt, publishedAt),
-        ),
-      );
-    return (row?.count ?? 0) > 0;
   },
 });
 

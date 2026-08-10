@@ -1,6 +1,10 @@
 import { sql } from 'drizzle-orm';
 
-import { entryEventResults, type DbEntryEventResultInsert } from '../db/schemas/index.schema';
+import {
+  entryEventResultsInCompetition,
+  type DbEntryEventResultInsert,
+} from '../db/schemas/index.schema';
+import type { FplSeasonRef } from '../domain/fpl-season';
 import type { RawFPLEntryHistoryCurrentItem } from '../types';
 
 export const CORE_HISTORY_BATCH_SIZE = 250;
@@ -12,6 +16,7 @@ export type CoreHistoryUpsertPlan = {
 };
 
 export function buildCoreHistoryUpsertPlan(
+  season: FplSeasonRef,
   entryId: number,
   history: readonly RawFPLEntryHistoryCurrentItem[],
 ): CoreHistoryUpsertPlan {
@@ -26,6 +31,7 @@ export function buildCoreHistoryUpsertPlan(
 
   return {
     rows: upsertable.map((item) => ({
+      seasonId: season.seasonId,
       entryId,
       eventId: item.event,
       eventPoints: item.points,
@@ -62,16 +68,16 @@ export function buildCoreHistoryConflictSet() {
     eventNetPoints: sql`excluded.event_net_points`,
     eventBenchPoints: sql`COALESCE(
       excluded.event_bench_points,
-      ${entryEventResults.eventBenchPoints}
+      ${entryEventResultsInCompetition.eventBenchPoints}
     )`,
-    eventRank: sql`COALESCE(excluded.event_rank, ${entryEventResults.eventRank})`,
+    eventRank: sql`COALESCE(excluded.event_rank, ${entryEventResultsInCompetition.eventRank})`,
     overallPoints: sql`excluded.overall_points`,
     overallRank: sql`CASE
-      WHEN excluded.overall_rank = 0 THEN ${entryEventResults.overallRank}
+      WHEN excluded.overall_rank = 0 THEN ${entryEventResultsInCompetition.overallRank}
       ELSE excluded.overall_rank
     END`,
-    teamValue: sql`COALESCE(excluded.team_value, ${entryEventResults.teamValue})`,
-    bank: sql`COALESCE(excluded.bank, ${entryEventResults.bank})`,
+    teamValue: sql`COALESCE(excluded.team_value, ${entryEventResultsInCompetition.teamValue})`,
+    bank: sql`COALESCE(excluded.bank, ${entryEventResultsInCompetition.bank})`,
     updatedAt: new Date(),
   };
 }

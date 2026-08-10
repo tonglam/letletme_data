@@ -32,6 +32,7 @@ function buildEvent(overrides: Partial<Event> = {}): Event {
     createdAt: null,
     updatedAt: null,
     ...overrides,
+    dataCheckedAt: overrides.dataCheckedAt ?? null,
   };
 }
 

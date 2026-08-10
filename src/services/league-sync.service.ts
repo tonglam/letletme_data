@@ -1,5 +1,6 @@
 import { enqueueLeagueEventPicks, enqueueLeagueEventResults } from '../jobs/league-sync.jobs';
 import { leagueChildJobId } from '../domain/league-sync';
+import type { FplSeasonRef } from '../domain/fpl-season';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
 import { mapWithConcurrency } from '../utils/async';
 import { IncompleteDataSyncError } from '../utils/errors';
@@ -14,10 +15,14 @@ export const LEAGUE_FANOUT_CONCURRENCY = 10;
 
 type FanoutResult = { success: true } | { success: false; tournamentId: number; reason: unknown };
 
-export async function enqueuePicksPerTournament(eventId: number, runId?: string) {
+export async function enqueuePicksPerTournament(
+  season: FplSeasonRef,
+  eventId: number,
+  runId?: string,
+) {
   logInfo('Enqueueing per-tournament picks jobs', { eventId, runId });
 
-  const tournaments = await tournamentInfoRepository.findActive();
+  const tournaments = await tournamentInfoRepository.findActive(season);
   if (tournaments.length === 0) {
     logInfo('No active tournaments for picks sync', { eventId });
     return {
@@ -34,7 +39,7 @@ export async function enqueuePicksPerTournament(eventId: number, runId?: string)
     LEAGUE_FANOUT_CONCURRENCY,
     async (tournament): Promise<FanoutResult> => {
       try {
-        await enqueueLeagueEventPicks(eventId, 'cascade', {
+        await enqueueLeagueEventPicks(season, eventId, 'cascade', {
           tournamentId: tournament.id,
           jobId: leagueChildJobId('league-event-picks', eventId, tournament.id, runId),
           runId,
@@ -87,10 +92,14 @@ export async function enqueuePicksPerTournament(eventId: number, runId?: string)
 /**
  * Enqueue per-tournament jobs for league event results (coordinator fan-out).
  */
-export async function enqueueResultsPerTournament(eventId: number, runId?: string) {
+export async function enqueueResultsPerTournament(
+  season: FplSeasonRef,
+  eventId: number,
+  runId?: string,
+) {
   logInfo('Enqueueing per-tournament results jobs', { eventId, runId });
 
-  const tournaments = await tournamentInfoRepository.findActive();
+  const tournaments = await tournamentInfoRepository.findActive(season);
   if (tournaments.length === 0) {
     logInfo('No active tournaments for results sync', { eventId });
     return {
@@ -107,7 +116,7 @@ export async function enqueueResultsPerTournament(eventId: number, runId?: strin
     LEAGUE_FANOUT_CONCURRENCY,
     async (tournament): Promise<FanoutResult> => {
       try {
-        await enqueueLeagueEventResults(eventId, 'cascade', {
+        await enqueueLeagueEventResults(season, eventId, 'cascade', {
           tournamentId: tournament.id,
           jobId: leagueChildJobId('league-event-results', eventId, tournament.id, runId),
           runId,
@@ -158,25 +167,27 @@ export async function enqueueResultsPerTournament(eventId: number, runId?: strin
 }
 
 export async function processLeagueEventPicksJob(
+  season: FplSeasonRef,
   eventId: number,
   tournamentId?: number,
   runId?: string,
 ) {
   if (tournamentId) {
-    return syncLeagueEventPicksByTournament(tournamentId, eventId);
+    return syncLeagueEventPicksByTournament(season, tournamentId, eventId);
   }
-  return enqueuePicksPerTournament(eventId, runId);
+  return enqueuePicksPerTournament(season, eventId, runId);
 }
 
 export async function processLeagueEventResultsJob(
+  season: FplSeasonRef,
   eventId: number,
   tournamentId?: number,
   context?: { runId?: string; freshAfter?: string },
 ) {
   if (tournamentId) {
-    return syncLeagueEventResultsByTournament(tournamentId, eventId, {
+    return syncLeagueEventResultsByTournament(season, tournamentId, eventId, {
       freshAfter: context?.freshAfter,
     });
   }
-  return enqueueResultsPerTournament(eventId, context?.runId);
+  return enqueueResultsPerTournament(season, eventId, context?.runId);
 }

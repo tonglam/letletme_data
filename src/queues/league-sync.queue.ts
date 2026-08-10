@@ -11,6 +11,8 @@ export const LEAGUE_JOBS = {
 export type LeagueSyncJobName = (typeof LEAGUE_JOBS)[keyof typeof LEAGUE_JOBS];
 
 export interface LeagueSyncJobData {
+  seasonId: number;
+  seasonCode: string;
   eventId: number;
   tournamentId?: number; // If specified, process only this tournament; if not, coordinator job
   source: 'cron' | 'manual' | 'cascade';

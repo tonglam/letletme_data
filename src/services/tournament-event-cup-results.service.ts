@@ -1,7 +1,9 @@
-import type { DbEntryEventCupResultInsert } from '../db/schemas/index.schema';
-import { getActiveCacheSeason } from '../cache/cache-season';
 import { fplClient } from '../clients/fpl';
-import { entryEventCupResultsRepository } from '../repositories/entry-event-cup-results';
+import type { FplSeasonRef } from '../domain/fpl-season';
+import {
+  entryEventCupResultsRepository,
+  type EntryEventCupResultInput,
+} from '../repositories/entry-event-cup-results';
 import { tournamentEntryRepository } from '../repositories/tournament-entries';
 import { tournamentInfoRepository } from '../repositories/tournament-infos';
 import type { RawFPLEntryCupMatch } from '../types';
@@ -15,7 +17,7 @@ type GetEntryCup = typeof fplClient.getEntryCup;
 
 type EntryCupOutcome = {
   entryId: number;
-  record: DbEntryEventCupResultInsert | null;
+  record: EntryEventCupResultInput | null;
   error?: Error;
 };
 
@@ -45,20 +47,24 @@ function resolveMatch(entryId: number, matches: RawFPLEntryCupMatch[], eventId: 
   return {
     entryName: entryName ?? null,
     playerName: playerName ?? null,
+    opponentEntryId: againstEntryId ?? null,
+    opponentName: againstEntryName ?? null,
+    entryPoints: entryScore,
+    opponentPoints: againstScore,
     eventPoints: eventPoints ?? null,
     againstEntryId: againstEntryId ?? null,
     againstEntryName: againstEntryName ?? null,
     againstPlayerName: againstPlayerName ?? null,
     againstEventPoints: againstEventPoints ?? null,
     result: result ? 'win' : 'loss',
-  } satisfies Omit<DbEntryEventCupResultInsert, 'eventId' | 'entryId'>;
+  } satisfies Omit<EntryEventCupResultInput, 'eventId' | 'entryId'>;
 }
 
 async function buildEntryCupResult(
   entryId: number,
   eventId: number,
   getEntryCup: GetEntryCup,
-): Promise<DbEntryEventCupResultInsert | null> {
+): Promise<EntryEventCupResultInput | null> {
   const cup = await getEntryCup(entryId);
   if (!cup) {
     return null;
@@ -104,13 +110,14 @@ export async function collectEntryCupResults(
   return {
     records: outcomes
       .map((outcome) => outcome.record)
-      .filter((record): record is DbEntryEventCupResultInsert => Boolean(record)),
+      .filter((record): record is EntryEventCupResultInput => Boolean(record)),
     skipped,
     errors,
   };
 }
 
 export async function syncTournamentEventCupResults(
+  season: FplSeasonRef,
   eventId: number,
   options?: { concurrency?: number },
 ): Promise<{
@@ -141,7 +148,7 @@ export async function syncTournamentEventCupResults(
 
   logInfo('Starting tournament event cup results sync', { eventId });
 
-  const tournaments = await tournamentInfoRepository.findActive();
+  const tournaments = await tournamentInfoRepository.findActive(season);
   if (tournaments.length === 0) {
     logInfo('No active tournaments found for cup results', { eventId });
     return {
@@ -158,7 +165,7 @@ export async function syncTournamentEventCupResults(
   }
 
   const entryLists = await mapWithConcurrency(tournaments, 10, (tournament) =>
-    tournamentEntryRepository.findEntryIdsByTournamentId(tournament.id),
+    tournamentEntryRepository.findEntryIdsByTournamentId(season, tournament.id),
   );
 
   const entryIds = uniqueNumbers(entryLists.flat()).filter((entryId) => entryId > 0);
@@ -177,10 +184,9 @@ export async function syncTournamentEventCupResults(
     };
   }
 
-  const checkpointSeason = await getActiveCacheSeason();
   const { records, skipped, errors } = await collectEntryCupResults(entryIds, eventId, options);
 
-  const upserted = await entryEventCupResultsRepository.upsertBatch(records, checkpointSeason);
+  const upserted = await entryEventCupResultsRepository.replaceBatch(season, records);
   if (upserted !== records.length) {
     throw new Error(
       `Tournament event cup results lost season ownership for ${records.length - upserted} entries`,

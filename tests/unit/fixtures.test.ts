@@ -20,6 +20,7 @@ import {
   mockRawFPLFixtures,
   preseasonRawFPLFixture,
 } from '../fixtures/fixtures.fixtures';
+import { TEST_SEASON } from '../fixtures/seasons.fixtures';
 
 describe('Fixtures Unit Tests', () => {
   describe('Fixture Domain Validation', () => {
@@ -209,12 +210,12 @@ describe('Fixtures Unit Tests', () => {
     });
 
     test('should handle upsertBatch with empty array', async () => {
-      const result = await repository.upsertBatch([]);
+      const result = await repository.upsertBatch(TEST_SEASON, []);
       expect(result).toEqual([]);
     });
 
     test('should skip an empty unscheduled ownership update', async () => {
-      expect(await repository.markUnscheduled([])).toBe(0);
+      expect(await repository.markUnscheduled(TEST_SEASON, [])).toBe(0);
     });
 
     test('should persist only nullable ownership for valid unscheduled fixture IDs', async () => {
@@ -233,7 +234,7 @@ describe('Fixtures Unit Tests', () => {
       };
       const injectedRepository = createFixtureRepository(fakeDb as never);
 
-      const count = await injectedRepository.markUnscheduled([3, 3, -1, 9, 1.5]);
+      const count = await injectedRepository.markUnscheduled(TEST_SEASON, [3, 3, -1, 9, 1.5]);
 
       expect(count).toBe(2);
       expect(updates).toHaveLength(1);

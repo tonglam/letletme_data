@@ -1,74 +1,92 @@
-import { inArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 
-import { acquireActiveSeasonWriteFence } from '../cache/cache-season';
-import { events, players, teams } from '../db/schemas/index.schema';
+import { eventsInFpl, playersInFpl, seasonsInFpl, teamsInFpl } from '../db/schemas/index.schema';
 import { readDatabaseOrderingTimestamp } from '../db/ordering-timestamp';
-import {
-  getDb,
-  type DbHandle,
-  type DbOrTransaction,
-  type TransactionHandle,
-} from '../db/singleton';
+import { getDb, type DbHandle, type DbOrTransaction } from '../db/singleton';
+import { explicitSeasonRef, type FplSeasonRef } from '../domain/fpl-season';
 import { createEventRepository } from '../repositories/events';
 import { createFixtureRepository } from '../repositories/fixtures';
 import { createPhaseRepository } from '../repositories/phases';
 import { createPlayerRepository } from '../repositories/players';
 import { createTeamRepository } from '../repositories/teams';
-import {
-  findCoreSnapshotAuthority,
-  recordCoreSnapshotAuthority,
-} from '../repositories/core-snapshot-authority';
-import { createFplHistoryRepository } from '../repositories/fpl-history';
 import { DatabaseError } from '../utils/errors';
 
 import type { CoreSnapshot } from '../domain/core-snapshot';
 
-const CORE_SNAPSHOT_AUTHORITY_LOCK_KEY = 912_883_472;
-
-export async function withCoreSnapshotAuthorityLock<T>(
-  operation: (transaction: TransactionHandle) => Promise<T>,
-  dbInstance?: DbHandle,
-): Promise<T> {
-  const db = dbInstance ?? (await getDb());
-  return db.transaction(async (transaction) => {
-    // Season authority is always acquired before core authority. Partial
-    // repairs use the same order with a shared season fence, so a complete
-    // publication can neither race a repair nor deadlock with fixture writers.
-    await acquireActiveSeasonWriteFence(transaction);
-    await transaction.execute(
-      sql`SELECT pg_advisory_xact_lock(${CORE_SNAPSHOT_AUTHORITY_LOCK_KEY})`,
-    );
-    return operation(transaction);
-  });
-}
+export const CORE_SNAPSHOT_WRITE_LOCK_KEY = 912_883_472;
 
 export interface CoreSnapshotPersistenceResult {
-  events: number;
-  teams: number;
-  players: number;
-  phases: number;
-  fixtures: number;
-}
-
-export interface CoreSnapshotCommitResult<T> {
-  status: 'committed' | 'stale';
-  persistence: CoreSnapshotPersistenceResult | null;
-  finalization: T | null;
-}
-
-export interface CoreSnapshotPublicationOptions<T> {
-  revision: number;
-  publicationId: string;
-  previousActiveSeason: string | null;
-  /** PostgreSQL ordering evidence captured before the upstream reads began. */
-  sourceCheckedAt?: Date;
-  finalize: (snapshot: CoreSnapshot) => Promise<T>;
-  compensate: (finalization: T) => Promise<void>;
-  afterCommit: (finalization: T) => Promise<void>;
+  readonly events: number;
+  readonly teams: number;
+  readonly players: number;
+  readonly phases: number;
+  readonly fixtures: number;
 }
 
 export async function readCoreSnapshotOrderingTimestamp(dbInstance?: DbHandle): Promise<Date> {
   return (await readDatabaseOrderingTimestamp(dbInstance)).date;
+}
+
+export async function withCoreSnapshotWriteLock<T>(
+  season: FplSeasonRef,
+  operation: (transaction: DbOrTransaction) => Promise<T>,
+  dbInstance?: DbHandle,
+): Promise<T> {
+  const db = dbInstance ?? (await getDb());
+  return db.transaction(async (transaction) => {
+    await transaction.execute(sql`SELECT pg_advisory_xact_lock(${CORE_SNAPSHOT_WRITE_LOCK_KEY})`);
+    const current = await transaction
+      .select({
+        seasonId: seasonsInFpl.seasonId,
+        seasonCode: seasonsInFpl.seasonCode,
+      })
+      .from(seasonsInFpl)
+      .where(eq(seasonsInFpl.isCurrent, true))
+      .for('update');
+    if (
+      current.length !== 1 ||
+      current[0].seasonId !== season.seasonId ||
+      current[0].seasonCode !== season.seasonCode
+    ) {
+      throw new DatabaseError(
+        `Core snapshot ${season.seasonCode} is not the sole current database season`,
+        'CORE_SNAPSHOT_CURRENT_SEASON_MISMATCH',
+      );
+    }
+    return operation(transaction);
+  });
+}
+
+export async function withCoreSnapshotReadLock<T>(
+  season: FplSeasonRef,
+  operation: (transaction: DbOrTransaction) => Promise<T>,
+  dbInstance?: DbHandle,
+): Promise<T> {
+  const db = dbInstance ?? (await getDb());
+  return db.transaction(async (transaction) => {
+    await transaction.execute(
+      sql`SELECT pg_advisory_xact_lock_shared(${CORE_SNAPSHOT_WRITE_LOCK_KEY})`,
+    );
+    const current = await transaction
+      .select({
+        seasonId: seasonsInFpl.seasonId,
+        seasonCode: seasonsInFpl.seasonCode,
+      })
+      .from(seasonsInFpl)
+      .where(eq(seasonsInFpl.isCurrent, true))
+      .for('share');
+    if (
+      current.length !== 1 ||
+      current[0].seasonId !== season.seasonId ||
+      current[0].seasonCode !== season.seasonCode
+    ) {
+      throw new DatabaseError(
+        `FPL season ${season.seasonCode} is not the sole current database season`,
+        'CURRENT_SEASON_MISMATCH',
+      );
+    }
+    return operation(transaction);
+  });
 }
 
 function requirePersistedCount(label: string, actual: number, expected: number): void {
@@ -81,43 +99,33 @@ function requirePersistedCount(label: string, actual: number, expected: number):
 }
 
 async function persistCoreSnapshotRows(
+  season: FplSeasonRef,
   snapshot: CoreSnapshot,
   db: DbOrTransaction,
   sourceCheckedAt?: Date,
 ): Promise<CoreSnapshotPersistenceResult> {
-  // The cache can represent fixtures that FPL has not assigned to a gameweek,
-  // while older deployed database schemas still require event_id. Keep those
-  // fixtures in the cache snapshot and persist only schedulable rows.
-  const schedulableFixtures = snapshot.fixtures.filter((fixture) => fixture.event !== null);
-  const savedEvents = await createEventRepository(db).upsertBatch(snapshot.events);
-  const savedTeams = await createTeamRepository(db).upsertBatch(snapshot.teams);
+  const savedEvents = await createEventRepository(db).upsertBatch(season, snapshot.events);
+  const savedTeams = await createTeamRepository(db).upsertBatch(season, snapshot.teams);
   const savedPlayers = await createPlayerRepository(db).upsertBatch(
+    season,
     snapshot.players,
     sourceCheckedAt,
   );
-  const savedPhases = await createPhaseRepository(db).upsertBatch(snapshot.phases);
+  const savedPhases = await createPhaseRepository(db).upsertBatch(season, snapshot.phases);
   const fixtureRepository = createFixtureRepository(db);
-  const unscheduledFixtureIds = snapshot.fixtures
-    .filter((fixture) => fixture.event === null)
-    .map((fixture) => fixture.id);
-  if (unscheduledFixtureIds.length > 0) {
-    await fixtureRepository.markUnscheduled(unscheduledFixtureIds);
-  }
-  // Retire rows omitted from the authoritative snapshot before inserting any
-  // replacement fixture. The unique (event, home, away) index otherwise lets
-  // an upstream fixture-id replacement fail before the old row can be cleared.
   await fixtureRepository.markAbsentUnscheduled(
+    season,
     snapshot.fixtures.map((fixture) => fixture.id),
     sourceCheckedAt,
     snapshot.fixtures.map((fixture) => fixture.code),
   );
-  const savedFixtures = await fixtureRepository.upsertBatch(schedulableFixtures);
+  const savedFixtures = await fixtureRepository.upsertBatch(season, snapshot.fixtures);
 
   requirePersistedCount('events', savedEvents.length, snapshot.events.length);
   requirePersistedCount('teams', savedTeams.length, snapshot.teams.length);
   requirePersistedCount('players', savedPlayers.length, snapshot.players.length);
   requirePersistedCount('phases', savedPhases.length, snapshot.phases.length);
-  requirePersistedCount('fixtures', savedFixtures.length, schedulableFixtures.length);
+  requirePersistedCount('fixtures', savedFixtures.length, snapshot.fixtures.length);
 
   return {
     events: savedEvents.length,
@@ -128,32 +136,28 @@ async function persistCoreSnapshotRows(
   };
 }
 
-/**
- * Retain fields owned by durable writers that completed after this core
- * snapshot started fetching. The returned snapshot is used for both database
- * persistence and cache publication, so neither surface can regress.
- */
 async function reconcileDurableWinners(
+  season: FplSeasonRef,
   snapshot: CoreSnapshot,
   sourceCheckedAt: Date | undefined,
   db: DbOrTransaction,
 ): Promise<CoreSnapshot> {
   if (!sourceCheckedAt) return snapshot;
 
-  // Lock the same canonical rows the later upserts will replace. A partial
-  // writer that committed first is visible below; one that starts later waits
-  // and becomes the final winner after this short transaction commits.
   const storedPlayers = await db
     .select({
-      id: players.id,
-      price: players.price,
-      priceSourceCheckedAt: players.priceSourceCheckedAt,
+      elementId: playersInFpl.elementId,
+      price: playersInFpl.price,
+      priceSourceCheckedAt: playersInFpl.priceSourceCheckedAt,
     })
-    .from(players)
+    .from(playersInFpl)
     .where(
-      inArray(
-        players.id,
-        snapshot.players.map((player) => player.id),
+      and(
+        eq(playersInFpl.seasonId, season.seasonId),
+        inArray(
+          playersInFpl.elementId,
+          snapshot.players.map((player) => player.id),
+        ),
       ),
     )
     .for('update');
@@ -164,48 +168,25 @@ async function reconcileDurableWinners(
           row.priceSourceCheckedAt &&
           row.priceSourceCheckedAt.getTime() >= sourceCheckedAt.getTime(),
       )
-      .map((row) => [row.id, row.price]),
+      .map((row) => [row.elementId, row.price]),
   );
 
-  // The event rows are the durable Live ownership fence. Lock all 38 before
-  // reading their markers so a Live write can neither slip between this audit
-  // and the fixture upsert nor deadlock on a changing event subset.
   const storedEvents = await db
-    .select({ id: events.id, checkedAt: events.liveSnapshotCheckedAt })
-    .from(events)
+    .select({
+      eventId: eventsInFpl.eventId,
+      checkedAt: eventsInFpl.liveSnapshotCheckedAt,
+    })
+    .from(eventsInFpl)
+    .where(eq(eventsInFpl.seasonId, season.seasonId))
     .for('update');
   const liveOwnedEventIds = new Set(
     storedEvents
       .filter((row) => row.checkedAt && row.checkedAt.getTime() >= sourceCheckedAt.getTime())
-      .map((row) => row.id),
+      .map((row) => row.eventId),
   );
   const storedFixtures =
-    liveOwnedEventIds.size > 0 ? await createFixtureRepository(db).findAll() : [];
+    liveOwnedEventIds.size > 0 ? await createFixtureRepository(db).findAll(season) : [];
   const storedFixturesById = new Map(storedFixtures.map((fixture) => [fixture.id, fixture]));
-  const fixtures = snapshot.fixtures.map((fixture) => {
-    const stored = storedFixturesById.get(fixture.id);
-    const storedEventId = stored?.event;
-    const isLiveOwned =
-      (fixture.event !== null && liveOwnedEventIds.has(fixture.event)) ||
-      (storedEventId !== null &&
-        storedEventId !== undefined &&
-        liveOwnedEventIds.has(storedEventId));
-    if (!isLiveOwned) return fixture;
-    if (!stored) {
-      throw new DatabaseError(
-        'A Live-owned fixture is missing from canonical storage.',
-        'CORE_SNAPSHOT_LIVE_FIXTURE_MISSING',
-      );
-    }
-    // Repository timestamps are storage metadata and are not part of the FPL
-    // cache contract. Keep the candidate representation while retaining every
-    // newer upstream-owned fixture field.
-    return {
-      ...stored,
-      createdAt: fixture.createdAt,
-      updatedAt: fixture.updatedAt,
-    };
-  });
 
   return {
     ...snapshot,
@@ -213,34 +194,48 @@ async function reconcileDurableWinners(
       const price = newerPriceById.get(player.id);
       return price === undefined ? player : { ...player, price };
     }),
-    fixtures,
+    fixtures: snapshot.fixtures.map((fixture) => {
+      const stored = storedFixturesById.get(fixture.id);
+      const storedEventId = stored?.event;
+      const isLiveOwned =
+        (fixture.event !== null && liveOwnedEventIds.has(fixture.event)) ||
+        (storedEventId !== null &&
+          storedEventId !== undefined &&
+          liveOwnedEventIds.has(storedEventId));
+      if (!isLiveOwned) return fixture;
+      if (!stored) {
+        throw new DatabaseError(
+          'A Live-owned fixture is missing from canonical storage',
+          'CORE_SNAPSHOT_LIVE_FIXTURE_MISSING',
+        );
+      }
+      return {
+        ...stored,
+        createdAt: fixture.createdAt,
+        updatedAt: fixture.updatedAt,
+      };
+    }),
   };
 }
 
 async function assertIdentityCompatibility(
+  season: FplSeasonRef,
   snapshot: CoreSnapshot,
-  previousActiveSeason: string | null,
-  authoritySeason: string | null,
   db: DbOrTransaction,
 ): Promise<void> {
-  const previousSeason = authoritySeason ?? previousActiveSeason;
-  if (previousSeason && previousSeason !== snapshot.season) {
-    const archive = await createFplHistoryRepository(db).findArchive(previousSeason);
-    if (archive?.status !== 'sealed') {
-      throw new DatabaseError(
-        `Core snapshot season ${previousSeason} must have a sealed FPL archive before rollover.`,
-        'CORE_SNAPSHOT_MANUAL_ROLLOVER_REQUIRED',
-      );
-    }
-    throw new DatabaseError(
-      `FPL archive ${previousSeason} is sealed; the separately approved database rollover runbook is still required.`,
-      'CORE_SNAPSHOT_MANUAL_ROLLOVER_REQUIRED',
-    );
-  }
-
   const [storedTeams, storedPlayers] = await Promise.all([
-    db.select({ id: teams.id, code: teams.code, pulseId: teams.pulseId }).from(teams),
-    db.select({ id: players.id, code: players.code }).from(players),
+    db
+      .select({
+        teamId: teamsInFpl.teamId,
+        code: teamsInFpl.code,
+        pulseId: teamsInFpl.pulseId,
+      })
+      .from(teamsInFpl)
+      .where(eq(teamsInFpl.seasonId, season.seasonId)),
+    db
+      .select({ elementId: playersInFpl.elementId, code: playersInFpl.code })
+      .from(playersInFpl)
+      .where(eq(playersInFpl.seasonId, season.seasonId)),
   ]);
   const candidateTeamsById = new Map(snapshot.teams.map((team) => [team.id, team]));
   const candidateTeamIdsByCode = new Map(snapshot.teams.map((team) => [team.code, team.id]));
@@ -251,24 +246,23 @@ async function assertIdentityCompatibility(
   );
 
   const teamConflict = storedTeams.some((stored) => {
-    const candidate = candidateTeamsById.get(stored.id);
+    const candidate = candidateTeamsById.get(stored.teamId);
     return (
       (candidate && (candidate.code !== stored.code || candidate.pulseId !== stored.pulseId)) ||
-      (candidateTeamIdsByCode.get(stored.code) ?? stored.id) !== stored.id ||
-      (candidateTeamIdsByPulse.get(stored.pulseId) ?? stored.id) !== stored.id
+      (candidateTeamIdsByCode.get(stored.code) ?? stored.teamId) !== stored.teamId ||
+      (candidateTeamIdsByPulse.get(stored.pulseId) ?? stored.teamId) !== stored.teamId
     );
   });
   const playerConflict = storedPlayers.some((stored) => {
-    const candidate = candidatePlayersById.get(stored.id);
+    const candidate = candidatePlayersById.get(stored.elementId);
     return (
       (candidate && candidate.code !== stored.code) ||
-      (candidatePlayerIdsByCode.get(stored.code) ?? stored.id) !== stored.id
+      (candidatePlayerIdsByCode.get(stored.code) ?? stored.elementId) !== stored.elementId
     );
   });
-
   if (teamConflict || playerConflict) {
     throw new DatabaseError(
-      'Core snapshot identities conflict with canonical rows.',
+      'Core snapshot identities conflict with canonical rows',
       'CORE_SNAPSHOT_IDENTITY_CONFLICT',
     );
   }
@@ -276,109 +270,28 @@ async function assertIdentityCompatibility(
 
 export async function persistCoreSnapshot(
   snapshot: CoreSnapshot,
+  sourceCheckedAt?: Date,
   dbInstance?: DbHandle,
-): Promise<CoreSnapshotPersistenceResult> {
-  const db = dbInstance ?? (await getDb());
-  return db.transaction((transaction) => persistCoreSnapshotRows(snapshot, transaction));
-}
-
-export async function persistCoreSnapshotWithFinalizer<T>(
-  snapshot: CoreSnapshot,
-  options: CoreSnapshotPublicationOptions<T>,
-  dbInstance?: DbHandle,
-): Promise<CoreSnapshotCommitResult<T>> {
-  const db = dbInstance ?? (await getDb());
-  let persistence: CoreSnapshotPersistenceResult | null = null;
-  let finalization: T | null = null;
-  let finalized = false;
-  let transactionCommitted = false;
-
-  try {
-    const result = await withCoreSnapshotAuthorityLock(async (transaction) => {
-      const authority = await findCoreSnapshotAuthority(transaction, { lock: true });
-      if (authority && authority.revision >= options.revision) {
-        return {
-          status: 'stale',
-          persistence: null,
-          finalization: null,
-        } satisfies CoreSnapshotCommitResult<T>;
-      }
-
-      await assertIdentityCompatibility(
+): Promise<{ snapshot: CoreSnapshot; persistence: CoreSnapshotPersistenceResult }> {
+  const season = explicitSeasonRef(snapshot.season);
+  return withCoreSnapshotWriteLock(
+    season,
+    async (transaction) => {
+      await assertIdentityCompatibility(season, snapshot, transaction);
+      const reconciled = await reconcileDurableWinners(
+        season,
         snapshot,
-        options.previousActiveSeason,
-        authority?.season ?? null,
+        sourceCheckedAt,
         transaction,
       );
-      const reconciledSnapshot = await reconcileDurableWinners(
-        snapshot,
-        options.sourceCheckedAt,
+      const persistence = await persistCoreSnapshotRows(
+        season,
+        reconciled,
         transaction,
+        sourceCheckedAt,
       );
-      persistence = await persistCoreSnapshotRows(
-        reconciledSnapshot,
-        transaction,
-        options.sourceCheckedAt,
-      );
-      finalization = await options.finalize(reconciledSnapshot);
-      finalized = true;
-      await recordCoreSnapshotAuthority(
-        {
-          season: snapshot.season,
-          revision: options.revision,
-          publicationId: options.publicationId,
-        },
-        transaction,
-      );
-      return {
-        status: 'committed',
-        persistence,
-        finalization,
-      } satisfies CoreSnapshotCommitResult<T>;
-    }, db);
-    transactionCommitted = result.status === 'committed';
-    if (result.status === 'committed' && result.finalization !== null) {
-      await options.afterCommit(result.finalization);
-    }
-    return result;
-  } catch (error) {
-    if (finalized && !transactionCommitted && finalization !== null) {
-      let committedPublication = false;
-      try {
-        committedPublication = await withCoreSnapshotAuthorityLock(async (transaction) => {
-          const authority = await findCoreSnapshotAuthority(transaction, { lock: true });
-          return authority?.publicationId === options.publicationId;
-        }, db);
-      } catch (reconciliationError) {
-        // The transaction result is ambiguous and durable authority cannot be
-        // read. Preserve the pending Redis receipt so a later recovery attempt
-        // can decide whether to finalize or compensate safely.
-        throw new DatabaseError(
-          'Core snapshot commit outcome could not be reconciled.',
-          'CORE_SNAPSHOT_COMMIT_OUTCOME_UNKNOWN',
-          reconciliationError instanceof Error ? reconciliationError : undefined,
-        );
-      }
-
-      if (committedPublication) {
-        await options.afterCommit(finalization);
-        return {
-          status: 'committed',
-          persistence,
-          finalization,
-        };
-      }
-
-      try {
-        await options.compensate(finalization);
-      } catch (compensationError) {
-        throw new DatabaseError(
-          'Core snapshot database commit and cache compensation both failed.',
-          'CORE_SNAPSHOT_COMPENSATION_FAILED',
-          compensationError instanceof Error ? compensationError : undefined,
-        );
-      }
-    }
-    throw error;
-  }
+      return { snapshot: reconciled, persistence };
+    },
+    dbInstance,
+  );
 }

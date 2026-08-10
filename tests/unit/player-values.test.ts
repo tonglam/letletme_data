@@ -331,8 +331,9 @@ describe('Player Values Unit Tests', () => {
       expect(repository).toBeDefined();
       expect(typeof repository.findLatestForAllPlayers).toBe('function');
       expect(typeof repository.findByChangeDate).toBe('function');
+      expect(typeof repository.findLatestForPlayerIds).toBe('function');
       expect(typeof repository.hasChangesForDate).toBe('function');
-      expect(typeof repository.insertBatch).toBe('function');
+      expect(repository).not.toHaveProperty('insertBatch');
     });
   });
 

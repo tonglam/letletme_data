@@ -9,7 +9,7 @@ export type UnderstatPlayerJobName =
   | 'understat-player-discover'
   | 'understat-player-team-detail'
   | 'understat-player-match'
-  | 'understat-player-publish';
+  | 'understat-player-finalize';
 
 export interface UnderstatPlayerJobData {
   runId: string;
@@ -20,19 +20,25 @@ export interface UnderstatPlayerJobData {
   teamTitle?: string;
   teamIds?: number[];
   matchIds?: number[];
-  participantsOnly?: boolean;
 }
 
-export const understatPlayerQueue = new Queue<UnderstatPlayerJobData>(understatPlayerQueueName, {
-  connection: getQueueConnection(),
-  defaultJobOptions: {
-    attempts: 3,
-    backoff: { type: 'understat', delay: 1_000 },
-    removeOnComplete: 100,
-    removeOnFail: 200,
-  },
-});
+let understatPlayerQueue: Queue<UnderstatPlayerJobData> | null = null;
+
+export function getUnderstatPlayerQueue(): Queue<UnderstatPlayerJobData> {
+  understatPlayerQueue ??= new Queue<UnderstatPlayerJobData>(understatPlayerQueueName, {
+    connection: getQueueConnection(),
+    defaultJobOptions: {
+      attempts: 3,
+      backoff: { type: 'understat', delay: 1_000 },
+      removeOnComplete: 100,
+      removeOnFail: 200,
+    },
+  });
+  return understatPlayerQueue;
+}
 
 export async function closeUnderstatPlayerQueue(): Promise<void> {
-  await understatPlayerQueue.close();
+  const queue = understatPlayerQueue;
+  understatPlayerQueue = null;
+  await queue?.close();
 }

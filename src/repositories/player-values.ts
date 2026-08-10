@@ -1,13 +1,11 @@
-import { and, asc, desc, eq, gte, inArray, lt, lte, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, lte, ne, sql } from 'drizzle-orm';
 
-import { playerValues, type DbPlayerValueInsert } from '../db/schemas/index.schema';
-import { getDb } from '../db/singleton';
-import { DatabaseError } from '../utils/errors';
-import { logError, logInfo } from '../utils/logger';
-
-import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
-import type { PlayerValue } from '../domain/player-values';
+import { playerValueChangesInReporting } from '../db/schemas/index.schema';
+import { getDb, type DbOrTransaction } from '../db/singleton';
+import type { FplSeasonRef } from '../domain/fpl-season';
 import type { ValueChangeType } from '../types/base.type';
+import { DatabaseError } from '../utils/errors';
+import { logError } from '../utils/logger';
 
 interface ValueRecord {
   elementId: number;
@@ -22,77 +20,162 @@ export interface StoredPlayerValue extends ValueRecord {
   lastValue: number;
 }
 
-function mapStoredPlayerValue(row: {
-  elementId: number;
-  value: number;
-  changeDate: string;
-  eventId: number;
-  elementType: number;
-  changeType: 'start' | 'rise' | 'fall';
-  lastValue: number;
-}): StoredPlayerValue {
-  const changeType: ValueChangeType =
-    row.changeType === 'start' ? 'Start' : row.changeType === 'rise' ? 'Rise' : 'Faller';
-  return { ...row, changeType };
+function databaseDate(changeDate: string): string {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(changeDate)) {
+    return changeDate;
+  }
+  if (!/^\d{8}$/.test(changeDate)) {
+    throw new Error(`Invalid player value date: ${changeDate}`);
+  }
+  return `${changeDate.slice(0, 4)}-${changeDate.slice(4, 6)}-${changeDate.slice(6)}`;
 }
 
-type DatabaseInstance = PostgresJsDatabase<Record<string, never>>;
+function apiDate(snapshotDate: string): string {
+  return snapshotDate.replaceAll('-', '');
+}
+
+type PlayerValueViewRow = typeof playerValueChangesInReporting.$inferSelect;
+
+interface PlayerValueAsOfRow extends Record<string, unknown> {
+  elementId: number;
+  value: number;
+  snapshotDate: string;
+  eventId: number | null;
+  elementType: number;
+  lastValue: number;
+  changeType: ValueChangeType;
+}
+
+function mapPlayerValueAsOf(row: PlayerValueAsOfRow): StoredPlayerValue {
+  if (row.eventId === null) {
+    throw new Error('Player market snapshot returned without an event');
+  }
+  return {
+    elementId: row.elementId,
+    value: row.value,
+    changeDate: apiDate(row.snapshotDate),
+    eventId: row.eventId,
+    elementType: row.elementType,
+    changeType: row.changeType,
+    lastValue: row.lastValue,
+  };
+}
+
+function mapStoredPlayerValue(row: PlayerValueViewRow): StoredPlayerValue {
+  if (
+    row.elementId === null ||
+    row.value === null ||
+    row.snapshotDate === null ||
+    row.eventId === null ||
+    row.elementType === null ||
+    row.lastValue === null
+  ) {
+    throw new Error('Player value view returned an incomplete row');
+  }
+
+  const changeType: ValueChangeType =
+    row.changeType === 'start'
+      ? 'Start'
+      : row.changeType === 'rise'
+        ? 'Rise'
+        : row.changeType === 'fall'
+          ? 'Faller'
+          : (() => {
+              throw new Error(`Unexpected player value change type: ${String(row.changeType)}`);
+            })();
+
+  return {
+    elementId: row.elementId,
+    value: row.value,
+    changeDate: apiDate(row.snapshotDate),
+    eventId: row.eventId,
+    elementType: row.elementType,
+    changeType,
+    lastValue: row.lastValue,
+  };
+}
 
 export type PlayerValuesRepository = ReturnType<typeof createPlayerValuesRepository>;
 
-export const createPlayerValuesRepository = (dbInstance?: DatabaseInstance) => {
-  const getDbInstance = async () => dbInstance || (await getDb());
+export const createPlayerValuesRepository = (dbInstance?: DbOrTransaction) => {
+  const getDbInstance = async () => dbInstance ?? (await getDb());
 
   return {
     findLatestForAllPlayers: async (
+      season: FplSeasonRef,
       fromChangeDate: string,
       throughChangeDate: string,
     ): Promise<ValueRecord[]> => {
       try {
         const db = await getDbInstance();
-        const rows = await db.execute(sql`
-        SELECT DISTINCT ON (element_id)
-          element_id as "elementId",
-          value,
-          change_date as "changeDate"
-        FROM player_values
-        WHERE change_date >= ${fromChangeDate}
-          AND change_date <= ${throughChangeDate}
-        ORDER BY element_id, change_date DESC, created_at DESC
-      `);
-        return rows as unknown as ValueRecord[];
+        const rows = await db
+          .select()
+          .from(playerValueChangesInReporting)
+          .where(
+            and(
+              eq(playerValueChangesInReporting.seasonId, season.seasonId),
+              gte(playerValueChangesInReporting.snapshotDate, databaseDate(fromChangeDate)),
+              lte(playerValueChangesInReporting.snapshotDate, databaseDate(throughChangeDate)),
+            ),
+          )
+          .orderBy(
+            asc(playerValueChangesInReporting.elementId),
+            desc(playerValueChangesInReporting.snapshotDate),
+          );
+
+        const latest = new Map<number, ValueRecord>();
+        for (const row of rows) {
+          const mapped = mapStoredPlayerValue(row);
+          if (!latest.has(mapped.elementId)) {
+            latest.set(mapped.elementId, mapped);
+          }
+        }
+        return [...latest.values()];
       } catch (error) {
         logError('Failed to get latest player values', error, {
+          season: season.seasonCode,
           fromChangeDate,
           throughChangeDate,
         });
-        throw new DatabaseError('Failed to get latest player values', 'LATEST_VALUES_ERROR');
+        throw new DatabaseError(
+          'Failed to get latest player values',
+          'LATEST_VALUES_ERROR',
+          error instanceof Error ? error : undefined,
+        );
       }
     },
 
-    findByChangeDate: async (changeDate: string): Promise<StoredPlayerValue[]> => {
+    findByChangeDate: async (
+      season: FplSeasonRef,
+      changeDate: string,
+    ): Promise<StoredPlayerValue[]> => {
       try {
         const db = await getDbInstance();
         const rows = await db
-          .select({
-            elementId: playerValues.elementId,
-            value: playerValues.value,
-            changeDate: playerValues.changeDate,
-            eventId: playerValues.eventId,
-            elementType: playerValues.elementType,
-            changeType: playerValues.changeType,
-            lastValue: playerValues.lastValue,
-          })
-          .from(playerValues)
-          .where(eq(playerValues.changeDate, changeDate));
+          .select()
+          .from(playerValueChangesInReporting)
+          .where(
+            and(
+              eq(playerValueChangesInReporting.seasonId, season.seasonId),
+              eq(playerValueChangesInReporting.snapshotDate, databaseDate(changeDate)),
+            ),
+          );
         return rows.map(mapStoredPlayerValue);
       } catch (error) {
-        logError('Failed to get player values by date', error, { changeDate });
-        throw new DatabaseError('Failed to get player values by date', 'FIND_BY_DATE_ERROR');
+        logError('Failed to get player values by date', error, {
+          season: season.seasonCode,
+          changeDate,
+        });
+        throw new DatabaseError(
+          'Failed to get player values by date',
+          'FIND_BY_DATE_ERROR',
+          error instanceof Error ? error : undefined,
+        );
       }
     },
 
     findLatestForPlayerIds: async (
+      season: FplSeasonRef,
       elementIds: number[],
       fromChangeDate: string,
       beforeChangeDate: string,
@@ -104,119 +187,108 @@ export const createPlayerValuesRepository = (dbInstance?: DatabaseInstance) => {
 
       try {
         const db = await getDbInstance();
-        const uniqueIds = Array.from(new Set(elementIds));
-        const rows = await db
-          .select({
-            elementId: playerValues.elementId,
-            value: playerValues.value,
-            changeDate: playerValues.changeDate,
-            eventId: playerValues.eventId,
-            elementType: playerValues.elementType,
-            changeType: playerValues.changeType,
-            lastValue: playerValues.lastValue,
-          })
-          .from(playerValues)
-          .where(
-            and(
-              inArray(playerValues.elementId, uniqueIds),
-              gte(playerValues.changeDate, fromChangeDate),
-              lt(playerValues.changeDate, beforeChangeDate),
-              ...(asOf ? [lte(playerValues.createdAt, asOf)] : []),
-            ),
+        const uniqueElementIds = [...new Set(elementIds)];
+        const elementIdList = sql.join(
+          uniqueElementIds.map((elementId) => sql`${elementId}`),
+          sql.raw(', '),
+        );
+        const capturedAtCutoff = asOf
+          ? sql`AND snapshot.captured_at <= ${asOf.toISOString()}::timestamptz`
+          : sql``;
+        const rows = await db.execute<PlayerValueAsOfRow>(sql`
+          WITH ordered_snapshots AS (
+            SELECT
+              snapshot.season_id,
+              snapshot.snapshot_date,
+              snapshot.element_id,
+              snapshot.element_type,
+              snapshot.price,
+              snapshot.source_event_id,
+              lag(snapshot.price) OVER (
+                PARTITION BY snapshot.season_id, snapshot.element_id
+                ORDER BY snapshot.snapshot_date
+              ) AS previous_price,
+              row_number() OVER (
+                PARTITION BY snapshot.season_id, snapshot.element_id
+                ORDER BY snapshot.snapshot_date
+              ) AS snapshot_number
+            FROM fpl.player_market_snapshots snapshot
+            WHERE snapshot.season_id = ${season.seasonId}
+              AND snapshot.element_id IN (${elementIdList})
+              AND snapshot.snapshot_date < ${databaseDate(beforeChangeDate)}::date
+              ${capturedAtCutoff}
+          ), changed_snapshots AS (
+            SELECT ordered.*
+            FROM ordered_snapshots ordered
+            WHERE ordered.snapshot_date >= ${databaseDate(fromChangeDate)}::date
+              AND (
+                ordered.snapshot_number = 1
+                OR ordered.price IS DISTINCT FROM ordered.previous_price
+              )
           )
-          .orderBy(
-            asc(playerValues.elementId),
-            desc(playerValues.changeDate),
-            desc(playerValues.createdAt),
-          );
-
-        const seen = new Set<number>();
-        const latest: StoredPlayerValue[] = [];
-        for (const row of rows) {
-          if (!seen.has(row.elementId)) {
-            seen.add(row.elementId);
-            latest.push(mapStoredPlayerValue(row));
-          }
-        }
-        return latest;
+          SELECT DISTINCT ON (changed.element_id)
+            changed.element_id AS "elementId",
+            changed.price AS value,
+            changed.snapshot_date AS "snapshotDate",
+            coalesce(changed.source_event_id, event.event_id) AS "eventId",
+            changed.element_type AS "elementType",
+            CASE
+              WHEN changed.snapshot_number = 1 THEN 0
+              ELSE changed.previous_price
+            END AS "lastValue",
+            CASE
+              WHEN changed.snapshot_number = 1 THEN 'Start'
+              WHEN changed.price > changed.previous_price THEN 'Rise'
+              ELSE 'Faller'
+            END AS "changeType"
+          FROM changed_snapshots changed
+          LEFT JOIN fpl.events event
+            ON event.season_id = changed.season_id
+           AND event.deadline_time::date = changed.snapshot_date
+          ORDER BY changed.element_id, changed.snapshot_date DESC
+        `);
+        return rows.map(mapPlayerValueAsOf);
       } catch (error) {
         logError('Failed to get latest player values by player IDs', error, {
+          season: season.seasonCode,
           count: elementIds.length,
           fromChangeDate,
           beforeChangeDate,
+          asOf: asOf?.toISOString(),
         });
         throw new DatabaseError(
           'Failed to get latest player values by player IDs',
           'LATEST_VALUES_BY_IDS_ERROR',
+          error instanceof Error ? error : undefined,
         );
       }
     },
 
-    /** True when at least one rise/fall row exists for the date (ignores `start` seed rows). */
-    hasChangesForDate: async (changeDate: string): Promise<boolean> => {
+    hasChangesForDate: async (season: FplSeasonRef, changeDate: string): Promise<boolean> => {
       try {
         const db = await getDbInstance();
-        const rows = await db.execute(sql`
-        SELECT 1
-        FROM player_values
-        WHERE change_date = ${changeDate}
-          AND change_type <> 'start'
-        LIMIT 1
-      `);
+        const rows = await db
+          .select({ elementId: playerValueChangesInReporting.elementId })
+          .from(playerValueChangesInReporting)
+          .where(
+            and(
+              eq(playerValueChangesInReporting.seasonId, season.seasonId),
+              eq(playerValueChangesInReporting.snapshotDate, databaseDate(changeDate)),
+              ne(playerValueChangesInReporting.changeType, 'start'),
+            ),
+          )
+          .limit(1);
         return rows.length > 0;
       } catch (error) {
-        logError('Failed to check player values by date', error, { changeDate });
-        throw new DatabaseError('Failed to check player values by date', 'CHECK_DATE_ERROR');
-      }
-    },
-
-    insertBatch: async (
-      playerValuesList: PlayerValue[],
-    ): Promise<{ count: number; inserted: PlayerValue[] }> => {
-      try {
-        if (playerValuesList.length === 0) {
-          return { count: 0, inserted: [] };
-        }
-
-        const rows: DbPlayerValueInsert[] = playerValuesList.map((playerValue) => ({
-          eventId: playerValue.eventId,
-          elementId: playerValue.elementId,
-          elementType: playerValue.elementType,
-          value: playerValue.value,
-          changeDate: playerValue.changeDate,
-          changeType:
-            playerValue.changeType === 'Faller'
-              ? 'fall'
-              : (playerValue.changeType.toLowerCase() as 'start' | 'rise'),
-          lastValue: playerValue.lastValue,
-        }));
-
-        const db = await getDbInstance();
-        // H6: (element_id, change_date) is unique — a concurrent or repeated
-        // sync of the same day must not blow up the whole batch. returning()
-        // yields only rows actually inserted so callers can cache/notify
-        // without republishing conflict-skipped values (FP-10 Codex P2).
-        const insertedRows = await db
-          .insert(playerValues)
-          .values(rows)
-          .onConflictDoNothing({
-            target: [playerValues.elementId, playerValues.changeDate],
-          })
-          .returning();
-        const insertedKeys = new Set(
-          insertedRows.map((row) => `${row.elementId}|${row.changeDate}`),
-        );
-        const inserted = playerValuesList.filter((pv) =>
-          insertedKeys.has(`${pv.elementId}|${pv.changeDate}`),
-        );
-        logInfo('Inserted player values', {
-          count: inserted.length,
-          skipped: rows.length - inserted.length,
+        logError('Failed to check player values by date', error, {
+          season: season.seasonCode,
+          changeDate,
         });
-        return { count: inserted.length, inserted };
-      } catch (error) {
-        logError('Failed to insert player values', error, { count: playerValuesList.length });
-        throw new DatabaseError('Failed to insert player values', 'INSERT_ERROR');
+        throw new DatabaseError(
+          'Failed to check player values by date',
+          'CHECK_DATE_ERROR',
+          error instanceof Error ? error : undefined,
+        );
       }
     },
   };

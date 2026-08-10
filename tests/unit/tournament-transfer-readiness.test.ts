@@ -4,6 +4,7 @@ import {
   buildTournamentTransferPointsMap,
   loadCanonicalTournamentTransferPointsMap,
 } from '../../src/services/tournament-event-transfers.service';
+import { HISTORICAL_TEST_SEASON } from '../fixtures/seasons.fixtures';
 
 describe('tournament transfer enrichment readiness', () => {
   test('remains retryable until canonical event-live rows are available', () => {
@@ -42,7 +43,7 @@ describe('tournament transfer enrichment readiness', () => {
 
     const result = await loadCanonicalTournamentTransferPointsMap(
       12,
-      '2526',
+      HISTORICAL_TEST_SEASON,
       [201, 202],
       canonicalRead,
     );
@@ -53,6 +54,6 @@ describe('tournament transfer enrichment readiness', () => {
         [202, 3],
       ]),
     );
-    expect(canonicalRead).toHaveBeenCalledWith(12, '2526');
+    expect(canonicalRead).toHaveBeenCalledWith(12, HISTORICAL_TEST_SEASON);
   });
 });

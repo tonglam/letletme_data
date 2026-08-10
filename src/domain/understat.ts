@@ -7,7 +7,8 @@ export type UnderstatSyncRunStatus =
   | 'failed'
   | 'completed'
   | 'ready_to_publish'
-  | 'published';
+  | 'published'
+  | 'skipped';
 export type UnderstatSyncItemStatus = 'pending' | 'running' | 'failed' | 'completed' | 'skipped';
 export type UnderstatTeamSide = 'h' | 'a';
 export type UnderstatTeamResult = 'w' | 'd' | 'l';
@@ -219,8 +220,8 @@ export interface UnderstatSyncRun {
   failedItems: number;
   skippedItems: number;
   dataChanged: boolean;
-  cacheRevision: string | null;
-  publicationSkipReason: string | null;
+  publicationId: string | null;
+  metadata: Record<string, unknown>;
   errorSummary: string | null;
   startedAt: Date;
   completedAt: Date | null;
@@ -233,6 +234,7 @@ export interface UnderstatSyncItem {
   status: UnderstatSyncItemStatus;
   attempts: number;
   sourceHash: string | null;
+  normalizedPayload: Record<string, unknown> | null;
   lastError: string | null;
   completedAt: Date | null;
 }

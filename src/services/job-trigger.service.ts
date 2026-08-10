@@ -14,15 +14,7 @@ import { runManualEventCurrentRefresh } from '../jobs/event-current-refresh.job'
 import { runLeagueEventPicksSync } from '../jobs/league-event-picks.jobs';
 import { runLeagueEventResultsSync } from '../jobs/league-event-results.jobs';
 import { runLaunchMonitor } from '../jobs/launch.jobs';
-import {
-  enqueueEventLiveExplain,
-  enqueueEventLiveSummary,
-  enqueueEventLivesCacheUpdate,
-  enqueueEventLivesDbSync,
-  enqueueEventOverallResult,
-  enqueueLiveSnapshot,
-  enqueueLiveScoresSync,
-} from '../jobs/live-data.jobs';
+import { enqueueLiveSnapshot } from '../jobs/live-data.jobs';
 import { runPostMatchConsolidation } from '../jobs/live.jobs';
 import { runTournamentBattleRaceResultsSync } from '../jobs/tournament-battle-race-results.jobs';
 import { runTournamentEventCupResultsSync } from '../jobs/tournament-event-cup-results.jobs';
@@ -37,6 +29,7 @@ import { runTournamentKnockoutResultsSync } from '../jobs/tournament-knockout-re
 import { runTournamentPointsRaceResultsSync } from '../jobs/tournament-points-race-results.jobs';
 import { getCurrentEvent } from './events.service';
 import { eventRepository } from '../repositories/events';
+import { seasonRepository } from '../repositories/seasons';
 import { refreshTournamentMaterializedViews } from './tournament-materialized-views.service';
 import { syncTournamentSelectionStats } from './tournament-selection-stats.service';
 import { logInfo } from '../utils/logger';
@@ -80,8 +73,7 @@ const TRIGGERABLE_JOBS: TriggerableJobInfo[] = [
   },
   {
     name: 'event-current-refresh',
-    description:
-      'Recompute Redis event:current from Event hash; enqueue events-sync if gameweek id changes',
+    description: 'Refresh the coherent core publication when the current event changes',
     schedule: 'Every minute (cron); POST here for immediate run (ignores season window)',
   },
   {
@@ -190,36 +182,6 @@ const TRIGGERABLE_JOBS: TriggerableJobInfo[] = [
     schedule: 'Every 1 minute during match hours; persists full live rows every 10 minutes',
   },
   {
-    name: 'event-lives-cache-update',
-    description: 'Compatibility alias for a cache-only live snapshot',
-    schedule: 'Manual compatibility alias',
-  },
-  {
-    name: 'event-lives-db-sync',
-    description: 'Compatibility alias for a persistent live snapshot',
-    schedule: 'Manual compatibility alias',
-  },
-  {
-    name: 'event-live-summary-sync',
-    description: 'Aggregate season totals (cascaded from DB sync)',
-    schedule: 'Cascade after DB sync',
-  },
-  {
-    name: 'event-live-explain-sync',
-    description: 'Sync event live explain data (cascaded from DB sync)',
-    schedule: 'Cascade after DB sync',
-  },
-  {
-    name: 'event-overall-result-sync',
-    description: 'Sync event overall results (cascaded from DB sync)',
-    schedule: 'Cascade after DB sync',
-  },
-  {
-    name: 'live-scores',
-    description: 'Compatibility alias for a cache-only live snapshot',
-    schedule: 'Manual compatibility alias',
-  },
-  {
     name: 'post-match-consolidation',
     description: 'Catch FPL overnight data finalization (bonus, corrected scores)',
     schedule: '06:00, 08:00, 10:00 UTC+8 inside the 24-hour post-match window',
@@ -248,43 +210,52 @@ function requirePlayerPricesChangeDate(input: unknown): string {
 function buildJobMap(input?: unknown): Record<string, () => Promise<unknown>> {
   return {
     'event-current-refresh': () => runManualEventCurrentRefresh(),
-    'core-snapshot-sync': () => enqueueCoreSnapshotJob('manual'),
-    // Backward-compatible manual aliases; each queues the same complete snapshot.
-    'events-sync': () => enqueueCoreSnapshotJob('manual'),
-    'fixtures-sync': () => enqueueCoreSnapshotJob('manual'),
-    'teams-sync': () => enqueueCoreSnapshotJob('manual'),
-    'players-sync': () => enqueueCoreSnapshotJob('manual'),
-    'player-prices': () =>
-      enqueuePlayerPricesSyncJob('manual', {
+    'core-snapshot-sync': async () => {
+      const season = await seasonRepository.findCurrent();
+      return enqueueCoreSnapshotJob(season, 'manual');
+    },
+    'player-prices': async () => {
+      const season = await seasonRepository.findCurrent();
+      return enqueuePlayerPricesSyncJob(season, 'manual', {
         changeDate: requirePlayerPricesChangeDate(input),
-      }),
-    'player-stats-sync': () => enqueuePlayerStatsSyncJob('manual'),
-    'phases-sync': () => enqueueCoreSnapshotJob('manual'),
-    'player-values-sync': () => enqueuePlayerValuesSyncJob('manual'),
+      });
+    },
+    'player-stats-sync': async () => {
+      const season = await seasonRepository.findCurrent();
+      return enqueuePlayerStatsSyncJob(season, 'manual');
+    },
+    'player-values-sync': async () => {
+      const season = await seasonRepository.findCurrent();
+      return enqueuePlayerValuesSyncJob(season, 'manual');
+    },
     'entry-info-daily': async () => {
-      const targetEventId = (await eventRepository.findLatestFinalized())?.id ?? 0;
-      return enqueueEntryInfoSyncJob('manual', { eventId: targetEventId });
+      const season = await seasonRepository.findCurrent();
+      const targetEventId = (await eventRepository.findLatestFinalized(season))?.id ?? 0;
+      return enqueueEntryInfoSyncJob(season, 'manual', { eventId: targetEventId });
     },
     'entry-event-picks-daily': async () => {
-      const currentEvent = await getCurrentEvent();
+      const season = await seasonRepository.findCurrent();
+      const currentEvent = await getCurrentEvent(season);
       if (!currentEvent) {
         throw new Error('No current event found');
       }
-      return enqueueEntryPicksSyncJob('manual', { eventId: currentEvent.id });
+      return enqueueEntryPicksSyncJob(season, 'manual', { eventId: currentEvent.id });
     },
     'entry-event-transfers-daily': async () => {
-      const currentEvent = await getCurrentEvent();
+      const season = await seasonRepository.findCurrent();
+      const currentEvent = await getCurrentEvent(season);
       if (!currentEvent) {
         throw new Error('No current event found');
       }
-      return enqueueEntryTransfersSyncJob('manual', { eventId: currentEvent.id });
+      return enqueueEntryTransfersSyncJob(season, 'manual', { eventId: currentEvent.id });
     },
     'entry-event-results-daily': async () => {
-      const currentEvent = await getCurrentEvent();
+      const season = await seasonRepository.findCurrent();
+      const currentEvent = await getCurrentEvent(season);
       if (!currentEvent) {
         throw new Error('No current event found');
       }
-      return enqueueEntryResultsSyncJob('manual', { eventId: currentEvent.id });
+      return enqueueEntryResultsSyncJob(season, 'manual', { eventId: currentEvent.id });
     },
     'league-event-picks-sync': async () => {
       await runLeagueEventPicksSync();
@@ -311,11 +282,12 @@ function buildJobMap(input?: unknown): Record<string, () => Promise<unknown>> {
       await runTournamentEventCupResultsSync();
     },
     'tournament-selection-stats-sync': async () => {
-      const currentEvent = await getCurrentEvent();
+      const season = await seasonRepository.findCurrent();
+      const currentEvent = await getCurrentEvent(season);
       if (!currentEvent) {
         throw new Error('No current event found');
       }
-      await syncTournamentSelectionStats(currentEvent.id);
+      await syncTournamentSelectionStats(season, currentEvent.id);
     },
     'tournament-info-sync': async () => {
       await runTournamentInfoSync();
@@ -333,53 +305,14 @@ function buildJobMap(input?: unknown): Record<string, () => Promise<unknown>> {
       await refreshTournamentMaterializedViews();
     },
     'live-snapshot': async () => {
-      const currentEvent = await getCurrentEvent();
+      const season = await seasonRepository.findCurrent();
+      const currentEvent = await getCurrentEvent(season);
       if (!currentEvent) {
         throw new Error('No current event found');
       }
-      return enqueueLiveSnapshot(currentEvent.id, 'manual', { persistEventLives: false });
-    },
-    'event-lives-cache-update': async () => {
-      const currentEvent = await getCurrentEvent();
-      if (!currentEvent) {
-        throw new Error('No current event found');
-      }
-      return enqueueEventLivesCacheUpdate(currentEvent.id, 'manual');
-    },
-    'event-lives-db-sync': async () => {
-      const currentEvent = await getCurrentEvent();
-      if (!currentEvent) {
-        throw new Error('No current event found');
-      }
-      return enqueueEventLivesDbSync(currentEvent.id, 'manual');
-    },
-    'event-live-summary-sync': async () => {
-      const currentEvent = await getCurrentEvent();
-      if (!currentEvent) {
-        throw new Error('No current event found');
-      }
-      await enqueueEventLiveSummary(currentEvent.id, 'manual');
-    },
-    'event-live-explain-sync': async () => {
-      const currentEvent = await getCurrentEvent();
-      if (!currentEvent) {
-        throw new Error('No current event found');
-      }
-      await enqueueEventLiveExplain(currentEvent.id, 'manual');
-    },
-    'event-overall-result-sync': async () => {
-      const currentEvent = await getCurrentEvent();
-      if (!currentEvent) {
-        throw new Error('No current event found');
-      }
-      await enqueueEventOverallResult(currentEvent.id, 'manual');
-    },
-    'live-scores': async () => {
-      const currentEvent = await getCurrentEvent();
-      if (!currentEvent) {
-        throw new Error('No current event found');
-      }
-      return enqueueLiveScoresSync(currentEvent.id, 'manual');
+      return enqueueLiveSnapshot(season, currentEvent.id, 'manual', {
+        persistEventLives: false,
+      });
     },
     'post-match-consolidation': runPostMatchConsolidation,
     'launch-monitor': () => runLaunchMonitor({ source: 'manual' }),
@@ -391,6 +324,12 @@ export function listTriggerableJobs(): TriggerableJobInfo[] {
 }
 
 export async function triggerJob(name: string, input?: unknown): Promise<JobTriggerResult> {
+  // Validate request-owned input before resolving mutable platform state. A
+  // malformed manual request must fail as a 4xx even when the database is
+  // unavailable.
+  if (name === 'player-prices') {
+    requirePlayerPricesChangeDate(input);
+  }
   const jobMap = buildJobMap(input);
   const job = jobMap[name];
   if (!job) {
@@ -411,8 +350,8 @@ export async function triggerJob(name: string, input?: unknown): Promise<JobTrig
       refreshed: typed.refreshed,
       ...(typed.eventsSyncJobId !== undefined ? { eventsSyncJobId: typed.eventsSyncJobId } : {}),
       message: typed.refreshed
-        ? 'event:current updated; events-sync job enqueued'
-        : 'event:current unchanged (derived gameweek id already in Redis)',
+        ? 'current-event mismatch found; core-snapshot job enqueued'
+        : 'active core publication already matches the database current event',
     };
   }
 

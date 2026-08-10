@@ -1,6 +1,7 @@
 import { Elysia } from 'elysia';
 
 import { enqueuePlayerValuesSyncJob } from '../jobs/data-sync-enqueue';
+import { seasonRepository } from '../repositories/seasons';
 
 /**
  * Player Values API Routes
@@ -15,7 +16,8 @@ import { enqueuePlayerValuesSyncJob } from '../jobs/data-sync-enqueue';
 export const playerValuesAPI = new Elysia({ prefix: '/player-values' }).post(
   '/sync',
   async ({ set }) => {
-    const job = await enqueuePlayerValuesSyncJob('api');
+    const season = await seasonRepository.findCurrent();
+    const job = await enqueuePlayerValuesSyncJob(season, 'api');
     set.status = 202;
     return {
       success: true,

@@ -1,9 +1,14 @@
 import { randomUUID } from 'node:crypto';
+import Redis from 'ioredis';
 
-import { redisSingleton } from '../cache/singleton';
-import { getConfig } from './config';
+import {
+  getConfig,
+  resolveQueueRedisConfig,
+  type AppConfig,
+  type RedisEndpointConfig,
+} from './config';
 
-const PERMIT_KEY = 'Understat:RateLimit:leases';
+const PERMIT_KEY = 'llm:v3:queue:coordination:understat-request-permits';
 const PERMIT_LEASE_PADDING_MS = 5_000;
 const PERMIT_WAIT_TIMEOUT_MS = 120_000;
 const PERMIT_POLL_MS = 100;
@@ -31,6 +36,32 @@ return redis.call('ZREM', KEYS[1], ARGV[1])
 const sleep = (milliseconds: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
 
+let permitClient: Redis | null = null;
+
+export function resolveUnderstatPermitRedisConfig(config: AppConfig): RedisEndpointConfig {
+  return resolveQueueRedisConfig(config);
+}
+
+function getPermitClient(): Redis {
+  if (permitClient) return permitClient;
+  const connection = resolveUnderstatPermitRedisConfig(getConfig());
+  permitClient = new Redis({
+    host: connection.host,
+    port: connection.port,
+    password: connection.password,
+    db: connection.db,
+    enableReadyCheck: false,
+    maxRetriesPerRequest: null,
+  });
+  return permitClient;
+}
+
+export async function closeUnderstatPermitClient(): Promise<void> {
+  if (!permitClient) return;
+  permitClient.disconnect();
+  permitClient = null;
+}
+
 /**
  * Acquire one provider-wide request permit. The sorted-set lease makes the
  * concurrency limit apply across both lanes and across horizontally scaled
@@ -38,7 +69,7 @@ const sleep = (milliseconds: number): Promise<void> =>
  */
 export async function acquireUnderstatRequestPermit(): Promise<() => Promise<void>> {
   const config = getConfig();
-  const redis = await redisSingleton.getClient();
+  const redis = getPermitClient();
   const token = randomUUID();
   const leaseMs = config.UNDERSTAT_TIMEOUT_MS + PERMIT_LEASE_PADDING_MS;
   const deadline = Date.now() + PERMIT_WAIT_TIMEOUT_MS;

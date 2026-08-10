@@ -14,8 +14,8 @@ import {
 describe('job priority mapping', () => {
   it('keeps canonical table order and groups', () => {
     expect(MUTATION_PRIORITY_ORDER).toEqual(['p0', 'p1', 'p2', 'p3']);
-    expect(MUTATION_PRIORITY_TABLES.p0).toContain('tournament_entries');
-    expect(MUTATION_PRIORITY_TABLES.p3).toEqual(['league_event_results']);
+    expect(MUTATION_PRIORITY_TABLES.p0).toContain('competition.tournament_entries');
+    expect(MUTATION_PRIORITY_TABLES.p3).toEqual(['competition.league_event_results']);
   });
 
   it('maps entry sync jobs to expected tiers', () => {
@@ -42,13 +42,6 @@ describe('job priority mapping', () => {
   });
 
   it('maps live data jobs to expected tiers', () => {
-    expect(getLiveDataJobPriority('event-lives-cache')).toBe('p0');
-    expect(getLiveDataJobPriority('event-lives-db')).toBe('p0');
-    expect(getLiveDataJobPriority('event-live-explain')).toBe('p0');
-    expect(getLiveDataJobPriority('live-fixture-cache')).toBe('p0');
-    expect(getLiveDataJobPriority('live-bonus-cache')).toBe('p0');
-    expect(getLiveDataJobPriority('live-scores')).toBe('p0');
-    expect(getLiveDataJobPriority('event-live-summary')).toBe('p3');
-    expect(getLiveDataJobPriority('event-overall-result')).toBe('p3');
+    expect(getLiveDataJobPriority('live-snapshot')).toBe('p0');
   });
 });

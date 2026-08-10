@@ -3,9 +3,9 @@ import { randomUUID } from 'node:crypto';
 import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 
 import {
-  providerEntityAliases,
-  providerEntityLinks,
-  providerMatchLinks,
+  entityAliasesInBridge as providerEntityAliases,
+  entityLinksInBridge as providerEntityLinks,
+  matchLinksInBridge as providerMatchLinks,
 } from '../db/schemas/index.schema';
 import { getDb, type DbOrTransaction } from '../db/singleton';
 import type {
@@ -21,7 +21,7 @@ async function getDatabase(dbInstance?: DbOrTransaction): Promise<DbOrTransactio
 
 function mapEntityLink(row: typeof providerEntityLinks.$inferSelect): ProviderEntityLink {
   return {
-    id: row.id,
+    id: row.linkId,
     entityType: row.entityType,
     leftProvider: row.leftProvider,
     leftEntityId: row.leftEntityId,
@@ -30,7 +30,7 @@ function mapEntityLink(row: typeof providerEntityLinks.$inferSelect): ProviderEn
     status: row.status,
     method: row.method,
     ruleVersion: row.ruleVersion,
-    evidence: row.evidence,
+    evidence: row.evidence as Record<string, unknown>,
     firstSeenSeason: row.firstSeenSeason,
     lastSeenSeason: row.lastSeenSeason,
     reviewedBy: row.reviewedBy,
@@ -40,8 +40,8 @@ function mapEntityLink(row: typeof providerEntityLinks.$inferSelect): ProviderEn
 
 function mapMatchLink(row: typeof providerMatchLinks.$inferSelect): ProviderMatchLink {
   return {
-    id: row.id,
-    season: row.season,
+    id: row.linkId,
+    season: row.seasonCode,
     leftProvider: row.leftProvider,
     leftMatchId: row.leftMatchId,
     rightProvider: row.rightProvider,
@@ -49,7 +49,7 @@ function mapMatchLink(row: typeof providerMatchLinks.$inferSelect): ProviderMatc
     status: row.status,
     method: row.method,
     ruleVersion: row.ruleVersion,
-    evidence: row.evidence,
+    evidence: row.evidence as Record<string, unknown>,
     reviewedBy: row.reviewedBy,
     reviewedAt: row.reviewedAt,
   };
@@ -86,15 +86,16 @@ export const createProviderIdentityRepository = (dbInstance?: DbOrTransaction) =
   async upsertEntityLink(input: UpsertEntityLinkInput): Promise<ProviderEntityLink> {
     const db = await getDatabase(dbInstance);
     const reviewed = input.status === 'manual_verified';
+    const { season, evidence, reviewedBy, ...identity } = input;
     const [row] = await db
       .insert(providerEntityLinks)
       .values({
-        id: randomUUID(),
-        ...input,
-        evidence: input.evidence ?? {},
-        firstSeenSeason: input.season,
-        lastSeenSeason: input.season,
-        reviewedBy: reviewed ? input.reviewedBy : null,
+        linkId: randomUUID(),
+        ...identity,
+        evidence: evidence ?? {},
+        firstSeenSeason: season,
+        lastSeenSeason: season,
+        reviewedBy: reviewed ? reviewedBy : null,
         reviewedAt: reviewed ? new Date() : null,
       })
       .onConflictDoUpdate({
@@ -132,18 +133,20 @@ export const createProviderIdentityRepository = (dbInstance?: DbOrTransaction) =
   async upsertMatchLink(input: UpsertMatchLinkInput): Promise<ProviderMatchLink> {
     const db = await getDatabase(dbInstance);
     const reviewed = input.status === 'manual_verified';
+    const { season, evidence, reviewedBy, ...identity } = input;
     const [row] = await db
       .insert(providerMatchLinks)
       .values({
-        id: randomUUID(),
-        ...input,
-        evidence: input.evidence ?? {},
-        reviewedBy: reviewed ? input.reviewedBy : null,
+        linkId: randomUUID(),
+        ...identity,
+        seasonCode: season,
+        evidence: evidence ?? {},
+        reviewedBy: reviewed ? reviewedBy : null,
         reviewedAt: reviewed ? new Date() : null,
       })
       .onConflictDoUpdate({
         target: [
-          providerMatchLinks.season,
+          providerMatchLinks.seasonCode,
           providerMatchLinks.leftProvider,
           providerMatchLinks.leftMatchId,
           providerMatchLinks.rightProvider,
@@ -177,7 +180,7 @@ export const createProviderIdentityRepository = (dbInstance?: DbOrTransaction) =
         reviewedAt: reviewedBy ? new Date() : null,
         updatedAt: new Date(),
       })
-      .where(eq(providerEntityLinks.id, id))
+      .where(eq(providerEntityLinks.linkId, id))
       .returning();
     return row ? mapEntityLink(row) : null;
   },
@@ -196,7 +199,7 @@ export const createProviderIdentityRepository = (dbInstance?: DbOrTransaction) =
         reviewedAt: reviewedBy ? new Date() : null,
         updatedAt: new Date(),
       })
-      .where(eq(providerMatchLinks.id, id))
+      .where(eq(providerMatchLinks.linkId, id))
       .returning();
     return row ? mapMatchLink(row) : null;
   },
@@ -228,13 +231,13 @@ export const createProviderIdentityRepository = (dbInstance?: DbOrTransaction) =
   ): Promise<ProviderMatchLink[]> {
     const db = await getDatabase(dbInstance);
     const conditions = [];
-    if (input.season) conditions.push(eq(providerMatchLinks.season, input.season));
+    if (input.season) conditions.push(eq(providerMatchLinks.seasonCode, input.season));
     if (input.statuses?.length) conditions.push(inArray(providerMatchLinks.status, input.statuses));
     const rows = await db
       .select()
       .from(providerMatchLinks)
       .where(conditions.length > 0 ? and(...conditions) : undefined)
-      .orderBy(asc(providerMatchLinks.season), asc(providerMatchLinks.createdAt));
+      .orderBy(asc(providerMatchLinks.seasonCode), asc(providerMatchLinks.createdAt));
     return rows.map(mapMatchLink);
   },
 
@@ -248,11 +251,12 @@ export const createProviderIdentityRepository = (dbInstance?: DbOrTransaction) =
   }): Promise<void> {
     const db = await getDatabase(dbInstance);
     const observedAt = input.observedAt ?? new Date();
+    const { observedAt: _observedAt, ...alias } = input;
     await db
       .insert(providerEntityAliases)
       .values({
-        id: randomUUID(),
-        ...input,
+        aliasId: randomUUID(),
+        ...alias,
         firstObservedAt: observedAt,
         lastObservedAt: observedAt,
       })

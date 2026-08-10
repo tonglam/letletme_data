@@ -3,20 +3,11 @@ import { closeTieredQueues, createTieredQueueSet } from './tiered-queue';
 
 export const dataSyncQueueName = 'data-sync';
 
-export type DataSyncJobName =
-  | 'core-snapshot'
-  | 'events'
-  | 'fixtures'
-  | 'fixtures-all-gameweeks'
-  | 'teams'
-  | 'players'
-  | 'player-prices'
-  | 'player-stats'
-  | 'phases'
-  | 'player-values'
-  | 'fpl-season-archive';
+export type DataSyncJobName = 'core-snapshot' | 'player-prices' | 'player-stats' | 'player-values';
 
 export interface DataSyncJobData {
+  seasonId: number;
+  seasonCode: string;
   source?: 'cron' | 'manual' | 'api' | 'event-transition' | 'cascade';
   triggeredAt: string;
   /** Correlates one logical execution across BullMQ retries; independent of queue dedupe ID. */
@@ -25,8 +16,6 @@ export interface DataSyncJobData {
   eventId?: number;
   /** Price-history date in the configured cron timezone (YYYYMMDD). */
   changeDate?: string;
-  /** Canonical four-digit season for archive jobs (for example 2627). */
-  season?: string;
 }
 
 const defaultJobOptions = {

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, mock } from 'bun:test';
+import { TEST_SEASON } from '../fixtures/seasons.fixtures';
 
 const store = new Map<string, string>();
 
@@ -112,7 +113,7 @@ describe('cascade completion barrier (FP-07)', () => {
   });
 
   it('waits for structure and terminal enrichment before allowing publication', async () => {
-    const cascadeId = createCascadeId(33);
+    const cascadeId = createCascadeId(TEST_SEASON, 33);
     expect(CASCADE_COMPLETION_BARRIER_JOBS).toEqual([
       'tournament-points-race',
       'tournament-battle-race',
@@ -142,7 +143,7 @@ describe('cascade completion barrier (FP-07)', () => {
   });
 
   it('is idempotent for the same jobKey', async () => {
-    const cascadeId = createCascadeId(34);
+    const cascadeId = createCascadeId(TEST_SEASON, 34);
     await initCascadeStructureBarrier(cascadeId);
 
     await noteCascadeStructureJobComplete(cascadeId, 'tournament-points-race');
@@ -159,7 +160,7 @@ describe('cascade completion barrier (FP-07)', () => {
   });
 
   it('counts enqueue-failed slots toward role completion', async () => {
-    const cascadeId = createCascadeId(37);
+    const cascadeId = createCascadeId(TEST_SEASON, 37);
     await initCascadeStructureBarrier(cascadeId);
 
     await noteCascadeStructureJobComplete(cascadeId, 'enqueue-failed:tournament-points-race');
@@ -173,7 +174,7 @@ describe('cascade completion barrier (FP-07)', () => {
   });
 
   it('reports lease-busy and already-enqueued atomically', async () => {
-    const cascadeId = createCascadeId(35);
+    const cascadeId = createCascadeId(TEST_SEASON, 35);
     await initCascadeStructureBarrier(cascadeId);
     await noteCascadeStructureJobComplete(cascadeId, 'tournament-points-race');
     await noteCascadeStructureJobComplete(cascadeId, 'tournament-battle-race');
@@ -192,7 +193,7 @@ describe('cascade completion barrier (FP-07)', () => {
   });
 
   it('does not rely on a shared DECR counter (role slots only)', async () => {
-    const cascadeId = createCascadeId(36);
+    const cascadeId = createCascadeId(TEST_SEASON, 36);
     // No init — still works because completion counts slot keys only
     await noteCascadeStructureJobComplete(cascadeId, 'tournament-points-race');
     await noteCascadeStructureJobComplete(cascadeId, 'tournament-battle-race');

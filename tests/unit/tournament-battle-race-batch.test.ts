@@ -6,6 +6,7 @@ import { tournamentEntryRepository } from '../../src/repositories/tournament-ent
 import { tournamentGroupRepository } from '../../src/repositories/tournament-groups';
 import { tournamentInfoRepository } from '../../src/repositories/tournament-infos';
 import { syncTournamentBattleRaceResults } from '../../src/services/tournament-battle-race-results.service';
+import { TEST_SEASON } from '../fixtures/seasons.fixtures';
 
 // Direct method mutation + restore: bun's mock.module overwrites exports of
 // already-loaded modules globally, leaking into other test files.
@@ -120,35 +121,40 @@ describe('battle race results batching', () => {
       },
     ]) as never;
 
-    const findByEntries = mock(async (_tournamentId: number, _entryIds: number[]) => [
-      makeGroupRow({ id: 1, groupId: 1, entryId: 101 }),
-      makeGroupRow({ id: 2, groupId: 1, entryId: 102 }),
-      makeGroupRow({ id: 3, groupId: 2, entryId: 103 }),
-      makeGroupRow({ id: 4, groupId: 2, entryId: 104 }),
-    ]);
+    const findByEntries = mock(
+      async (_season: typeof TEST_SEASON, _tournamentId: number, _entryIds: number[]) => [
+        makeGroupRow({ id: 1, groupId: 1, entryId: 101 }),
+        makeGroupRow({ id: 2, groupId: 1, entryId: 102 }),
+        makeGroupRow({ id: 3, groupId: 2, entryId: 103 }),
+        makeGroupRow({ id: 4, groupId: 2, entryId: 104 }),
+      ],
+    );
     const findByGroup = mock(async () => []);
     tournamentGroupRepository.findByTournamentAndEntries = findByEntries as never;
     tournamentGroupRepository.findByTournamentAndGroup = findByGroup as never;
 
     const upsertedGroups: Array<Array<Record<string, unknown>>> = [];
-    tournamentGroupRepository.upsertBatch = mock(async (rows: Array<Record<string, unknown>>) => {
-      upsertedGroups.push(rows);
-      return rows.length;
-    }) as never;
+    tournamentGroupRepository.upsertBatch = mock(
+      async (_season, rows: Array<Record<string, unknown>>) => {
+        upsertedGroups.push(rows);
+        return rows.length;
+      },
+    ) as never;
     const upsertedResults: Array<Array<Record<string, unknown>>> = [];
     tournamentBattleGroupResultsRepository.upsertBatch = mock(
-      async (rows: Array<Record<string, unknown>>) => {
+      async (_season, rows: Array<Record<string, unknown>>) => {
         upsertedResults.push(rows);
         return rows.length;
       },
     ) as never;
 
-    const result = await syncTournamentBattleRaceResults(1);
+    const result = await syncTournamentBattleRaceResults(TEST_SEASON, 1);
 
     // One batched query for every group row; the per-group query is gone.
     expect(findByEntries).toHaveBeenCalledTimes(1);
-    expect(findByEntries.mock.calls[0][0]).toBe(7);
-    expect(findByEntries.mock.calls[0][1]).toEqual(entryIds);
+    expect(findByEntries.mock.calls[0][0]).toEqual(TEST_SEASON);
+    expect(findByEntries.mock.calls[0][1]).toBe(7);
+    expect(findByEntries.mock.calls[0][2]).toEqual(entryIds);
     expect(findByGroup).not.toHaveBeenCalled();
 
     expect(result).toEqual({ eventId: 1, updatedGroups: 4, updatedResults: 2, skipped: 0 });

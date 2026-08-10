@@ -1,7 +1,8 @@
-import { and, inArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 
-import { players, type DbPlayer, type DbPlayerInsert } from '../db/schemas/index.schema';
+import { playersInFpl, type DbPlayer, type DbPlayerInsert } from '../db/schemas/index.schema';
 import { getDb, type DbOrTransaction } from '../db/singleton';
+import type { FplSeasonRef } from '../domain/fpl-season';
 import { DatabaseError } from '../utils/errors';
 import { logError, logInfo } from '../utils/logger';
 
@@ -9,9 +10,9 @@ import type { Player as DomainPlayer } from '../types';
 
 function mapDbPlayerToDomain(player: DbPlayer): DomainPlayer {
   return {
-    id: player.id,
+    id: player.elementId,
     code: player.code,
-    type: player.type,
+    type: player.elementType,
     teamId: player.teamId,
     price: player.price,
     startPrice: player.startPrice,
@@ -25,23 +26,29 @@ export const createPlayerRepository = (dbInstance?: DbOrTransaction) => {
   const getDbInstance = async () => dbInstance || (await getDb());
 
   return {
-    findAll: async (options: { lock?: boolean } = {}): Promise<DomainPlayer[]> => {
+    findAll: async (
+      season: FplSeasonRef,
+      options: { lock?: boolean } = {},
+    ): Promise<DomainPlayer[]> => {
       try {
         const db = await getDbInstance();
-        const query = db.select().from(players);
+        const query = db
+          .select()
+          .from(playersInFpl)
+          .where(eq(playersInFpl.seasonId, season.seasonId));
         const rows = options.lock ? await query.for('update') : await query;
         return rows.map(mapDbPlayerToDomain);
       } catch (error) {
-        logError('Failed to retrieve all players', error);
+        logError('Failed to retrieve all playersInFpl', error);
         throw new DatabaseError(
-          'Failed to retrieve players',
+          'Failed to retrieve playersInFpl',
           'FIND_ALL_PLAYERS_ERROR',
           error instanceof Error ? error : undefined,
         );
       }
     },
 
-    findByIds: async (ids: number[]): Promise<DomainPlayer[]> => {
+    findByIds: async (season: FplSeasonRef, ids: number[]): Promise<DomainPlayer[]> => {
       if (ids.length === 0) {
         return [];
       }
@@ -57,20 +64,33 @@ export const createPlayerRepository = (dbInstance?: DbOrTransaction) => {
 
         const results: DbPlayer[] = [];
         for (const chunk of chunks) {
-          const rows = await db.select().from(players).where(inArray(players.id, chunk));
+          const rows = await db
+            .select()
+            .from(playersInFpl)
+            .where(
+              and(
+                eq(playersInFpl.seasonId, season.seasonId),
+                inArray(playersInFpl.elementId, chunk),
+              ),
+            );
           results.push(...rows);
         }
 
         const domainPlayers = results.map(mapDbPlayerToDomain);
-        logInfo('Retrieved players by ids', { count: domainPlayers.length });
+        logInfo('Retrieved playersInFpl by ids', { count: domainPlayers.length });
         return domainPlayers;
       } catch (error) {
-        logError('Failed to retrieve players by ids', error);
-        throw new DatabaseError('Failed to retrieve players', 'FIND_BY_IDS_ERROR', error as Error);
+        logError('Failed to retrieve playersInFpl by ids', error);
+        throw new DatabaseError(
+          'Failed to retrieve playersInFpl',
+          'FIND_BY_IDS_ERROR',
+          error as Error,
+        );
       }
     },
 
     updatePrices: async (
+      season: FplSeasonRef,
       priceUpdates: Array<{ elementId: number; value: number }>,
       sourceCheckedAt: Date,
     ): Promise<DomainPlayer[]> => {
@@ -86,15 +106,15 @@ export const createPlayerRepository = (dbInstance?: DbOrTransaction) => {
         const priceCases = deduplicated.map(
           (update) => sql`WHEN ${update.elementId} THEN ${update.value}`,
         );
-        const priceExpression = sql`CASE ${players.id} ${sql.join(
+        const priceExpression = sql`CASE ${playersInFpl.elementId} ${sql.join(
           priceCases,
           sql.raw(' '),
-        )} ELSE ${players.price} END`;
+        )} ELSE ${playersInFpl.price} END`;
 
         const db = await getDbInstance();
         const sourceCheckedAtIso = sourceCheckedAt.toISOString();
         const updated = await db
-          .update(players)
+          .update(playersInFpl)
           .set({
             price: priceExpression,
             priceSourceCheckedAt: sourceCheckedAt,
@@ -102,10 +122,11 @@ export const createPlayerRepository = (dbInstance?: DbOrTransaction) => {
           })
           .where(
             and(
-              inArray(players.id, elementIds),
+              inArray(playersInFpl.elementId, elementIds),
+              eq(playersInFpl.seasonId, season.seasonId),
               sql`(
-                ${players.priceSourceCheckedAt} IS NULL OR
-                ${players.priceSourceCheckedAt} <= ${sourceCheckedAtIso}::timestamptz
+                ${playersInFpl.priceSourceCheckedAt} IS NULL OR
+                ${playersInFpl.priceSourceCheckedAt} <= ${sourceCheckedAtIso}::timestamptz
               )`,
             ),
           )
@@ -125,6 +146,7 @@ export const createPlayerRepository = (dbInstance?: DbOrTransaction) => {
     },
 
     upsertBatch: async (
+      season: FplSeasonRef,
       domainPlayers: DomainPlayer[],
       preservePriceSourceCheckedAtOrAfter?: Date,
     ): Promise<DomainPlayer[]> => {
@@ -135,9 +157,10 @@ export const createPlayerRepository = (dbInstance?: DbOrTransaction) => {
 
         const sourceCheckedAtIso = preservePriceSourceCheckedAtOrAfter?.toISOString();
         const newPlayers: DbPlayerInsert[] = domainPlayers.map((player) => ({
-          id: player.id,
+          seasonId: season.seasonId,
+          elementId: player.id,
           code: player.code,
-          type: player.type,
+          elementType: player.type,
           teamId: player.teamId,
           price: player.price,
           ...(sourceCheckedAtIso
@@ -151,22 +174,22 @@ export const createPlayerRepository = (dbInstance?: DbOrTransaction) => {
 
         const db = await getDbInstance();
         const result = await db
-          .insert(players)
+          .insert(playersInFpl)
           .values(newPlayers)
           .onConflictDoUpdate({
-            target: players.id,
+            target: [playersInFpl.seasonId, playersInFpl.elementId],
             set: {
               code: sql`excluded.code`,
-              type: sql`excluded.type`,
+              elementType: sql`excluded.element_type`,
               teamId: sql`excluded.team_id`,
               price: sql`excluded.price`,
               priceSourceCheckedAt: sourceCheckedAtIso
                 ? sql`CASE
-                    WHEN ${players.priceSourceCheckedAt} >= ${sourceCheckedAtIso}::timestamptz
-                    THEN ${players.priceSourceCheckedAt}
+                    WHEN ${playersInFpl.priceSourceCheckedAt} >= ${sourceCheckedAtIso}::timestamptz
+                    THEN ${playersInFpl.priceSourceCheckedAt}
                     ELSE ${sourceCheckedAtIso}::timestamptz
                   END`
-                : null,
+                : sql`${playersInFpl.priceSourceCheckedAt}`,
               startPrice: sql`excluded.start_price`,
               firstName: sql`excluded.first_name`,
               secondName: sql`excluded.second_name`,
@@ -177,12 +200,12 @@ export const createPlayerRepository = (dbInstance?: DbOrTransaction) => {
           .returning();
 
         const mappedPlayers = result.map(mapDbPlayerToDomain);
-        logInfo('Batch upserted players', { count: mappedPlayers.length });
+        logInfo('Batch upserted playersInFpl', { count: mappedPlayers.length });
         return mappedPlayers;
       } catch (error) {
-        logError('Failed to batch upsert players', error, { count: domainPlayers.length });
+        logError('Failed to batch upsert playersInFpl', error, { count: domainPlayers.length });
         throw new DatabaseError(
-          'Failed to batch upsert players',
+          'Failed to batch upsert playersInFpl',
           'BATCH_UPSERT_ERROR',
           error instanceof Error ? error : undefined,
         );

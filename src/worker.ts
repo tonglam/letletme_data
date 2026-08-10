@@ -5,16 +5,21 @@ import { createLeagueSyncWorker } from './workers/league-sync.worker';
 import { createTournamentSyncWorker } from './workers/tournament-sync.worker';
 import { createTournamentSetupWorker } from './workers/tournament-setup.worker';
 import { createUnderstatWorker } from './workers/understat.worker';
+import { databaseSingleton } from './db/singleton';
 import { getConfig } from './utils/config';
 import { startQueueMonitor } from './utils/queue-monitor';
 import { logError, logInfo } from './utils/logger';
 import { startWorkerHeartbeat } from './utils/worker-heartbeat';
 import { closeLockClient } from './utils/mutation-lock';
+import { closeUnderstatPermitClient } from './utils/understat-rate-limit';
 import type { WorkerRuntime } from './workers/worker-runtime';
 
 getConfig();
 
 const config = getConfig();
+if (config.NODE_ENV === 'production') {
+  await databaseSingleton.connect();
+}
 const mutationConflictGuardEnabled = config.ENABLE_MUTATION_CONFLICT_GUARD;
 const tieredMutationQueuesEnabled = config.ENABLE_TIERED_MUTATION_QUEUES;
 const mutationLockConfig = {
@@ -63,6 +68,7 @@ async function shutdown(signal: string) {
     ...allWorkers.map((worker) => worker.close()),
     ...allQueueEvents.map((events) => events.close()),
     closeLockClient(),
+    closeUnderstatPermitClient(),
   ]);
 
   const timeout = new Promise<void>((_, reject) => {

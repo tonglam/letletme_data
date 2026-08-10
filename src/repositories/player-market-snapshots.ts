@@ -1,10 +1,11 @@
 import { and, count, eq, notInArray, sql } from 'drizzle-orm';
 
 import {
-  playerMarketSnapshots,
+  playerMarketSnapshotsInFpl,
   type DbPlayerMarketSnapshotInsert,
-} from '../db/schemas/player-market-snapshots.schema';
+} from '../db/schemas/index.schema';
 import { getDb, type DbOrTransaction } from '../db/singleton';
+import type { FplSeasonRef } from '../domain/fpl-season';
 import {
   validateCompleteMarketSnapshotBatch,
   type PlayerMarketSnapshot,
@@ -17,6 +18,8 @@ export const createPlayerMarketSnapshotsRepository = (dbInstance?: DbOrTransacti
 
   return {
     upsertCompleteDay: async (
+      season: FplSeasonRef,
+      sourceEventId: number,
       snapshots: readonly PlayerMarketSnapshot[],
       expectedCount: number,
     ): Promise<{ snapshotDate: string; persistedCount: number }> => {
@@ -25,6 +28,8 @@ export const createPlayerMarketSnapshotsRepository = (dbInstance?: DbOrTransacti
 
         const snapshotDate = snapshots[0].snapshotDate;
         const rows: DbPlayerMarketSnapshotInsert[] = snapshots.map((snapshot) => ({
+          seasonId: season.seasonId,
+          sourceEventId,
           snapshotDate: snapshot.snapshotDate,
           capturedAt: snapshot.capturedAt,
           elementId: snapshot.elementId,
@@ -38,7 +43,7 @@ export const createPlayerMarketSnapshotsRepository = (dbInstance?: DbOrTransacti
           elementType: snapshot.elementType,
           position: snapshot.position,
           price: snapshot.price,
-          selectedByPercent: snapshot.selectedByPercent,
+          selectedByPercent: String(snapshot.selectedByPercent),
           transfersIn: snapshot.transfersIn,
           transfersOut: snapshot.transfersOut,
           transfersInEvent: snapshot.transfersInEvent,
@@ -52,11 +57,16 @@ export const createPlayerMarketSnapshotsRepository = (dbInstance?: DbOrTransacti
 
         const db = await getDbInstance();
         const persisted = await db
-          .insert(playerMarketSnapshots)
+          .insert(playerMarketSnapshotsInFpl)
           .values(rows)
           .onConflictDoUpdate({
-            target: [playerMarketSnapshots.snapshotDate, playerMarketSnapshots.elementId],
+            target: [
+              playerMarketSnapshotsInFpl.seasonId,
+              playerMarketSnapshotsInFpl.snapshotDate,
+              playerMarketSnapshotsInFpl.elementId,
+            ],
             set: {
+              sourceEventId: sql`excluded.source_event_id`,
               capturedAt: sql`excluded.captured_at`,
               playerCode: sql`excluded.player_code`,
               webName: sql`excluded.web_name`,
@@ -80,7 +90,7 @@ export const createPlayerMarketSnapshotsRepository = (dbInstance?: DbOrTransacti
               chanceOfPlayingNextRound: sql`excluded.chance_of_playing_next_round`,
             },
           })
-          .returning({ elementId: playerMarketSnapshots.elementId });
+          .returning({ elementId: playerMarketSnapshotsInFpl.elementId });
 
         if (persisted.length !== expectedCount) {
           throw new Error(
@@ -90,18 +100,24 @@ export const createPlayerMarketSnapshotsRepository = (dbInstance?: DbOrTransacti
 
         const elementIds = snapshots.map((snapshot) => snapshot.elementId);
         await db
-          .delete(playerMarketSnapshots)
+          .delete(playerMarketSnapshotsInFpl)
           .where(
             and(
-              eq(playerMarketSnapshots.snapshotDate, snapshotDate),
-              notInArray(playerMarketSnapshots.elementId, elementIds),
+              eq(playerMarketSnapshotsInFpl.snapshotDate, snapshotDate),
+              eq(playerMarketSnapshotsInFpl.seasonId, season.seasonId),
+              notInArray(playerMarketSnapshotsInFpl.elementId, elementIds),
             ),
           );
 
         const [verification] = await db
           .select({ count: count() })
-          .from(playerMarketSnapshots)
-          .where(eq(playerMarketSnapshots.snapshotDate, snapshotDate));
+          .from(playerMarketSnapshotsInFpl)
+          .where(
+            and(
+              eq(playerMarketSnapshotsInFpl.seasonId, season.seasonId),
+              eq(playerMarketSnapshotsInFpl.snapshotDate, snapshotDate),
+            ),
+          );
         const persistedCount = verification?.count ?? 0;
 
         if (persistedCount !== expectedCount) {

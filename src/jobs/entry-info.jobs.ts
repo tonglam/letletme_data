@@ -4,6 +4,7 @@ import type { Elysia } from 'elysia';
 import { enqueueEntryInfoSyncJob } from './entry-sync-enqueue';
 import { getEntryInfoSyncDateKey, hasEntryInfoSyncedToday } from './entry-info-sync-marker';
 import { eventRepository } from '../repositories/events';
+import { seasonRepository } from '../repositories/seasons';
 import { isFPLSeason } from '../utils/conditions';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { logDebug, logInfo } from '../utils/logger';
@@ -19,7 +20,8 @@ export function registerEntryInfoJobs(app: Elysia) {
         try {
           await executeTrackedCron('entry-info-daily', async () => {
             const now = new Date();
-            if (!(await isFPLSeason(now))) {
+            const season = await seasonRepository.findCurrent();
+            if (!(await isFPLSeason(season, now))) {
               logDebug('Skipping entry info sync - not FPL season', {
                 month: now.getMonth() + 1,
               });
@@ -33,8 +35,8 @@ export function registerEntryInfoJobs(app: Elysia) {
             }
 
             const dateKey = getEntryInfoSyncDateKey(now);
-            const targetEventId = (await eventRepository.findLatestFinalized())?.id ?? 0;
-            const job = await enqueueEntryInfoSyncJob('cron', {
+            const targetEventId = (await eventRepository.findLatestFinalized(season))?.id ?? 0;
+            const job = await enqueueEntryInfoSyncJob(season, 'cron', {
               eventId: targetEventId,
               runId: `daily-${dateKey}`,
               jobId: `entry-info-daily-${dateKey}`,

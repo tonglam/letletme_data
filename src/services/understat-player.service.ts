@@ -1,14 +1,14 @@
-import { understatCache, understatPlayerReferenceRevision } from '../cache/understat-cache';
 import { understatClient } from '../clients/understat';
 import { getDb } from '../db/singleton';
 import {
   enqueueUnderstatPlayerMatch,
-  enqueueUnderstatPlayerPublish,
+  enqueueUnderstatPlayerFinalize,
   enqueueUnderstatPlayerTeamDetail,
 } from '../jobs/understat-enqueue';
 import type { UnderstatPlayerJobData } from '../queues/understat-player.queue';
 import {
   createUnderstatPlayerRepository,
+  createUnderstatReferenceRepository,
   understatPlayerRepository,
   understatReferenceRepository,
 } from '../repositories/understat';
@@ -22,7 +22,6 @@ import {
   validateUnderstatTeamDates,
 } from '../transformers/understat';
 import { getConfig } from '../utils/config';
-import { contentHash } from '../utils/content-hash';
 import { logWarn } from '../utils/logger';
 import {
   assertNoUnderstatMatchesDisappeared,
@@ -33,12 +32,21 @@ import {
   changedUnderstatPlayerTeamIds,
   evaluateUnderstatPlayerSnapshotCompleteness,
   mergeUnderstatTeamDetailIds,
-  plannedUnderstatSeason,
   selectPlayerMatchIds,
   selectTeamDetailIds,
   teamById,
   withdrawnUnderstatMatchIds,
 } from './understat-sync.service';
+import {
+  readStagedUnderstatPlayerLeague,
+  readStagedUnderstatPlayerMatchDetail,
+  readStagedUnderstatPlayerTeamDetail,
+  stageUnderstatPlayerLeague,
+  stageUnderstatPlayerMatchDetail,
+  stageUnderstatPlayerTeamDetail,
+  understatStagingHash,
+} from './understat-staging';
+import { enqueueUnderstatFanout, selectUnsettledUnderstatFanoutIds } from './understat-fanout';
 
 const LEAGUE_RESOURCE_TYPE = 'league';
 const TEAM_RESOURCE_TYPE = 'team-participants';
@@ -58,9 +66,9 @@ async function alreadySettled(
   return item?.status === 'completed' || item?.status === 'skipped';
 }
 
-async function publishWhenReady(job: UnderstatPlayerJobData, ready: boolean): Promise<void> {
+async function finalizeWhenReady(job: UnderstatPlayerJobData, ready: boolean): Promise<void> {
   if (!ready) return;
-  await enqueueUnderstatPlayerPublish({
+  await enqueueUnderstatPlayerFinalize({
     runId: job.runId,
     season: job.season,
     mode: job.mode,
@@ -105,27 +113,7 @@ async function enqueuePlayerDetailJobs(
       },
     })),
   ];
-  const results = await Promise.allSettled(jobs.map(({ enqueue }) => enqueue()));
-  const failures: Array<{ resourceType: string; resourceId: string; message: string }> = [];
-  for (const [index, result] of results.entries()) {
-    if (result.status === 'fulfilled') continue;
-    const target = jobs[index]!;
-    const message = result.reason instanceof Error ? result.reason.message : String(result.reason);
-    failures.push({ ...target, message });
-    await understatSyncRepository.failItem(
-      job.runId,
-      target.resourceType,
-      target.resourceId,
-      `Failed to enqueue Understat player detail: ${message}`,
-    );
-  }
-  if (failures.length > 0) {
-    throw new Error(
-      `Failed to enqueue ${failures.length} Understat player detail job(s): ${failures
-        .map(({ resourceType, resourceId, message }) => `${resourceType}:${resourceId}: ${message}`)
-        .join('; ')}`,
-    );
-  }
+  await enqueueUnderstatFanout('Understat player detail', jobs);
 }
 
 export async function discoverUnderstatPlayers(job: UnderstatPlayerJobData): Promise<void> {
@@ -137,9 +125,6 @@ export async function discoverUnderstatPlayers(job: UnderstatPlayerJobData): Pro
   if (active) {
     throw new Error(`Understat player run ${active.runId} is already active for ${job.season}`);
   }
-  await understatReferenceRepository.ensureSeason(
-    plannedUnderstatSeason(job.season, sourceYear, league),
-  );
   await understatSyncRepository.createRun({
     runId: job.runId,
     lane: 'player',
@@ -150,8 +135,29 @@ export async function discoverUnderstatPlayers(job: UnderstatPlayerJobData): Pro
   await understatSyncRepository.addItems(job.runId, [
     { resourceType: LEAGUE_RESOURCE_TYPE, resourceId: league },
   ]);
-  if (await alreadySettled(job.runId, LEAGUE_RESOURCE_TYPE, league)) {
-    await publishWhenReady(job, await understatSyncRepository.refreshRun(job.runId));
+  const leagueItem = await understatSyncRepository.findItem(
+    job.runId,
+    LEAGUE_RESOURCE_TYPE,
+    league,
+  );
+  if (leagueItem?.status === 'completed') {
+    const discovery = readStagedUnderstatPlayerLeague(
+      leagueItem.normalizedPayload,
+      leagueItem.sourceHash,
+      job.season,
+    );
+    const items = await understatSyncRepository.findItems(job.runId);
+    await enqueuePlayerDetailJobs(
+      job,
+      selectUnsettledUnderstatFanoutIds(items, TEAM_RESOURCE_TYPE),
+      selectUnsettledUnderstatFanoutIds(items, MATCH_RESOURCE_TYPE),
+      teamById(discovery.teams),
+    );
+    await finalizeWhenReady(job, await understatSyncRepository.refreshRun(job.runId));
+    return;
+  }
+  if (leagueItem?.status === 'skipped') {
+    await finalizeWhenReady(job, await understatSyncRepository.refreshRun(job.runId));
     return;
   }
   await understatSyncRepository.markItemRunning(job.runId, LEAGUE_RESOURCE_TYPE, league);
@@ -181,7 +187,6 @@ export async function discoverUnderstatPlayers(job: UnderstatPlayerJobData): Pro
     previousMatches.map((match) => match.id),
     discovery.matches,
   );
-  const withdrawnMatchIds = withdrawnUnderstatMatchIds(previousMatches, discovery.matches);
   const changedPlayerIds = changedUnderstatPlayerSeasonIds(
     discovery.playerSeasons,
     previousPlayerHashes,
@@ -207,12 +212,6 @@ export async function discoverUnderstatPlayers(job: UnderstatPlayerJobData): Pro
     ...newMatchTeamIds,
   ]);
 
-  const db = await getDb();
-  const changed = await db.transaction((tx) =>
-    persistUnderstatPlayerDiscovery(tx, discovery, withdrawnMatchIds),
-  );
-  if (changed) await understatSyncRepository.markDataChanged(job.runId);
-
   const selectedTeamIds = selectTeamDetailIds({
     mode: job.mode,
     teams: discovery.teams,
@@ -233,27 +232,24 @@ export async function discoverUnderstatPlayers(job: UnderstatPlayerJobData): Pro
         .map((item) => Number(item.resourceId))
         .filter(Number.isInteger);
   const targetTeamIds = mergeUnderstatTeamDetailIds(selectedTeamIds, changedTeams, priorTeamIds);
-  const selectedMatchIds = job.participantsOnly
-    ? [...changedPlayerMatchIds].filter((matchId) => completedMatchIds.includes(matchId))
-    : selectPlayerMatchIds({
-        mode: job.mode,
-        matches: discovery.matches,
-        syncedMatchIds,
-        explicitMatchIds: job.matchIds,
-        requiredMatchIds: changedPlayerMatchIds,
-      });
-  const priorMatchIds =
-    job.matchIds || job.participantsOnly
-      ? []
-      : priorItems
-          .filter(
-            (item) =>
-              item.resourceType === MATCH_RESOURCE_TYPE &&
-              item.status !== 'completed' &&
-              item.status !== 'skipped',
-          )
-          .map((item) => Number(item.resourceId))
-          .filter(Number.isInteger);
+  const selectedMatchIds = selectPlayerMatchIds({
+    mode: job.mode,
+    matches: discovery.matches,
+    syncedMatchIds,
+    explicitMatchIds: job.matchIds,
+    requiredMatchIds: changedPlayerMatchIds,
+  });
+  const priorMatchIds = job.matchIds
+    ? []
+    : priorItems
+        .filter(
+          (item) =>
+            item.resourceType === MATCH_RESOURCE_TYPE &&
+            item.status !== 'completed' &&
+            item.status !== 'skipped',
+        )
+        .map((item) => Number(item.resourceId))
+        .filter(Number.isInteger);
   const targetMatchIds = [...new Set([...selectedMatchIds, ...priorMatchIds])].sort(
     (left, right) => left - right,
   );
@@ -268,24 +264,16 @@ export async function discoverUnderstatPlayers(job: UnderstatPlayerJobData): Pro
       resourceId: String(matchId),
     })),
   ]);
-
-  await enqueuePlayerDetailJobs(job, targetTeamIds, targetMatchIds, teams);
-
-  const sourceHash = contentHash({
-    matches: discovery.matches.map((match) => match.sourceHash),
-    players: discovery.players.map((player) => player.sourceHash),
-    seasons: discovery.playerSeasons.map((season) => season.sourceHash),
-  });
-  await publishWhenReady(
-    job,
-    await understatSyncRepository.completeItem(
-      job.runId,
-      LEAGUE_RESOURCE_TYPE,
-      league,
-      sourceHash,
-      changed,
-    ),
+  const staged = stageUnderstatPlayerLeague(job.season, discovery);
+  const ready = await understatSyncRepository.completeItem(
+    job.runId,
+    LEAGUE_RESOURCE_TYPE,
+    league,
+    understatStagingHash(staged),
+    staged,
   );
+  await enqueuePlayerDetailJobs(job, targetTeamIds, targetMatchIds, teams);
+  await finalizeWhenReady(job, ready);
 }
 
 export async function syncUnderstatPlayerTeamDetail(job: UnderstatPlayerJobData): Promise<void> {
@@ -294,40 +282,36 @@ export async function syncUnderstatPlayerTeamDetail(job: UnderstatPlayerJobData)
   const teamTitle = requireJobValue(job.teamTitle, 'teamTitle');
   const resourceId = String(teamId);
   if (await alreadySettled(job.runId, TEAM_RESOURCE_TYPE, resourceId)) {
-    await publishWhenReady(job, await understatSyncRepository.refreshRun(job.runId));
+    await finalizeWhenReady(job, await understatSyncRepository.refreshRun(job.runId));
     return;
   }
   await understatSyncRepository.markItemRunning(job.runId, TEAM_RESOURCE_TYPE, resourceId);
-  const [response, matches] = await Promise.all([
+  const [response, leagueItem] = await Promise.all([
     understatClient.getTeamData(teamTitle, sourceYear),
-    understatReferenceRepository.findMatchesBySeason(job.season),
+    understatSyncRepository.findItem(job.runId, LEAGUE_RESOURCE_TYPE, getConfig().UNDERSTAT_LEAGUE),
   ]);
+  if (!leagueItem) throw new Error(`Understat player run ${job.runId} has no staged league item`);
+  const matches = readStagedUnderstatPlayerLeague(
+    leagueItem.normalizedPayload,
+    leagueItem.sourceHash,
+    job.season,
+  ).matches;
   validateUnderstatTeamDates(response, teamId, matches);
   const transformed = transformUnderstatTeamParticipants(job.season, teamId, response);
-  const db = await getDb();
-  const changed = await db.transaction(async (tx) => {
-    const players = createUnderstatPlayerRepository(tx);
-    const identityChanges = await players.upsertPlayers(transformed.players);
-    const participantsChanged = await players.replaceTeamParticipants(
-      job.season,
-      teamId,
-      transformed.playerTeamSeasons,
-    );
-    return participantsChanged || identityChanges > 0;
-  });
-  assertUnderstatResourceHashes(
-    `team participants season=${job.season} team=${teamId}`,
-    transformed.playerTeamSeasons.map((row) => row.sourceHash),
-    await understatPlayerRepository.getTeamParticipantHashes(job.season, teamId),
+  const staged = stageUnderstatPlayerTeamDetail(
+    job.season,
+    teamId,
+    transformed.players,
+    transformed.playerTeamSeasons,
   );
-  await publishWhenReady(
+  await finalizeWhenReady(
     job,
     await understatSyncRepository.completeItem(
       job.runId,
       TEAM_RESOURCE_TYPE,
       resourceId,
-      contentHash(transformed.playerTeamSeasons.map((row) => row.sourceHash)),
-      changed,
+      understatStagingHash(staged),
+      staged,
     ),
   );
 }
@@ -337,11 +321,21 @@ export async function syncUnderstatPlayerMatch(job: UnderstatPlayerJobData): Pro
   const matchId = requireJobValue(job.resourceId, 'resourceId');
   const resourceId = String(matchId);
   if (await alreadySettled(job.runId, MATCH_RESOURCE_TYPE, resourceId)) {
-    await publishWhenReady(job, await understatSyncRepository.refreshRun(job.runId));
+    await finalizeWhenReady(job, await understatSyncRepository.refreshRun(job.runId));
     return;
   }
   await understatSyncRepository.markItemRunning(job.runId, MATCH_RESOURCE_TYPE, resourceId);
-  const match = await understatReferenceRepository.findMatch(matchId);
+  const leagueItem = await understatSyncRepository.findItem(
+    job.runId,
+    LEAGUE_RESOURCE_TYPE,
+    getConfig().UNDERSTAT_LEAGUE,
+  );
+  if (!leagueItem) throw new Error(`Understat player run ${job.runId} has no staged league item`);
+  const match = readStagedUnderstatPlayerLeague(
+    leagueItem.normalizedPayload,
+    leagueItem.sourceHash,
+    job.season,
+  ).matches.find((candidate) => candidate.id === matchId);
   if (!match || match.season !== job.season || !match.isResult) {
     throw new Error(`Understat completed match ${matchId} is unavailable for ${job.season}`);
   }
@@ -355,70 +349,127 @@ export async function syncUnderstatPlayerMatch(job: UnderstatPlayerJobData): Pro
       differences: aggregateDifferences,
     });
   }
-  const db = await getDb();
-  const changed = await db.transaction(async (tx) => {
-    const players = createUnderstatPlayerRepository(tx);
-    const identityChanges = await players.upsertPlayers(transformed.players);
-    const matchChanged = await players.replaceMatchStats(matchId, transformed.stats);
-    return matchChanged || identityChanges > 0;
-  });
-  assertUnderstatResourceHashes(
-    `match roster match=${matchId}`,
-    transformed.stats.map((row) => row.sourceHash),
-    await understatPlayerRepository.getMatchStatHashes(matchId),
+  const staged = stageUnderstatPlayerMatchDetail(
+    job.season,
+    matchId,
+    transformed.players,
+    transformed.stats,
   );
-  await publishWhenReady(
+  await finalizeWhenReady(
     job,
     await understatSyncRepository.completeItem(
       job.runId,
       MATCH_RESOURCE_TYPE,
       resourceId,
-      contentHash(transformed.stats.map((row) => row.sourceHash)),
-      changed,
+      understatStagingHash(staged),
+      staged,
     ),
   );
 }
 
-export async function publishUnderstatPlayerSnapshot(job: UnderstatPlayerJobData): Promise<void> {
+class IncompleteUnderstatPlayerSnapshotError extends Error {}
+
+export async function finalizeUnderstatPlayerRun(job: UnderstatPlayerJobData): Promise<void> {
   assertUnderstatSyncAllowed(job.season);
   const run = await understatSyncRepository.findRun(job.runId);
   if (!run || run.lane !== 'player') throw new Error(`Unknown Understat player run ${job.runId}`);
-  if (run.status === 'published') return;
+  if (run.status === 'completed' || run.status === 'skipped') return;
   if (run.failedItems > 0 || run.status !== 'ready_to_publish') {
-    throw new Error(`Understat player run ${job.runId} is not ready to publish (${run.status})`);
+    throw new Error(`Understat player run ${job.runId} is not ready to finalize (${run.status})`);
   }
-  const [snapshot, matches] = await Promise.all([
-    understatPlayerRepository.readSnapshot(job.season),
-    understatReferenceRepository.findMatchesBySeason(job.season),
-  ]);
-  const completeness = evaluateUnderstatPlayerSnapshotCompleteness(
-    getConfig().UNDERSTAT_LEAGUE,
-    matches,
-    snapshot,
+  const items = await understatSyncRepository.findItems(job.runId);
+  if (items.length !== run.expectedItems || items.some((item) => item.status !== 'completed')) {
+    throw new Error(`Understat player run ${job.runId} has unsettled staging items`);
+  }
+  const leagueItem = items.find((item) => item.resourceType === LEAGUE_RESOURCE_TYPE);
+  if (!leagueItem) throw new Error(`Understat player run ${job.runId} has no league staging item`);
+  const discovery = readStagedUnderstatPlayerLeague(
+    leagueItem.normalizedPayload,
+    leagueItem.sourceHash,
+    job.season,
   );
-  if (!completeness.complete) {
-    await understatSyncRepository.markCompletedWithoutPublish(job.runId, completeness.reason);
-    return;
+  const teamDetails = items
+    .filter((item) => item.resourceType === TEAM_RESOURCE_TYPE)
+    .map((item) =>
+      readStagedUnderstatPlayerTeamDetail(item.normalizedPayload, item.sourceHash, job.season),
+    )
+    .sort((left, right) => left.teamId - right.teamId);
+  const matchDetails = items
+    .filter((item) => item.resourceType === MATCH_RESOURCE_TYPE)
+    .map((item) =>
+      readStagedUnderstatPlayerMatchDetail(item.normalizedPayload, item.sourceHash, job.season),
+    )
+    .sort((left, right) => left.matchId - right.matchId);
+
+  try {
+    const db = await getDb();
+    const result = await db.transaction(async (tx) => {
+      const references = createUnderstatReferenceRepository(tx);
+      const players = createUnderstatPlayerRepository(tx);
+      const previousMatches = await references.findMatchesBySeason(job.season);
+      assertNoUnderstatMatchesDisappeared(
+        previousMatches.map((match) => match.id),
+        discovery.matches,
+      );
+      const withdrawnMatchIds = withdrawnUnderstatMatchIds(previousMatches, discovery.matches);
+      let changed = await persistUnderstatPlayerDiscovery(tx, discovery, withdrawnMatchIds);
+      for (const detail of teamDetails) {
+        const identityChanges = await players.upsertPlayers(detail.players);
+        const participantsChanged = await players.replaceTeamParticipants(
+          job.season,
+          detail.teamId,
+          detail.rows,
+        );
+        changed = identityChanges > 0 || participantsChanged || changed;
+        assertUnderstatResourceHashes(
+          `team participants season=${job.season} team=${detail.teamId}`,
+          detail.rows.map((row) => row.sourceHash),
+          await players.getTeamParticipantHashes(job.season, detail.teamId),
+        );
+      }
+      for (const detail of matchDetails) {
+        const identityChanges = await players.upsertPlayers(detail.players);
+        const matchChanged = await players.replaceMatchStats(detail.matchId, detail.rows);
+        changed = identityChanges > 0 || matchChanged || changed;
+        assertUnderstatResourceHashes(
+          `match roster match=${detail.matchId}`,
+          detail.rows.map((row) => row.sourceHash),
+          await players.getMatchStatHashes(detail.matchId),
+        );
+      }
+      const [snapshot, matches] = await Promise.all([
+        players.readSnapshot(job.season),
+        references.findMatchesBySeason(job.season),
+      ]);
+      const completeness = evaluateUnderstatPlayerSnapshotCompleteness(
+        getConfig().UNDERSTAT_LEAGUE,
+        matches,
+        snapshot,
+      );
+      if (!completeness.complete) {
+        throw new IncompleteUnderstatPlayerSnapshotError(completeness.reason);
+      }
+      return {
+        changed,
+        counts: {
+          players: snapshot.players.length,
+          memberships: snapshot.memberships.length,
+          playerMatchStats: snapshot.matchStats.length,
+        },
+      };
+    });
+    await understatSyncRepository.markRunCompleted(
+      job.runId,
+      { finalized: true, storage: 'postgresql', counts: result.counts },
+      result.changed,
+    );
+  } catch (error) {
+    if (error instanceof IncompleteUnderstatPlayerSnapshotError) {
+      await understatSyncRepository.markRunSkipped(job.runId, error.message);
+      return;
+    }
+    throw error;
   }
-  const prior = await understatCache.getManifest(job.season, 'player');
-  const referenceRevision = understatPlayerReferenceRevision(snapshot);
-  const hasUnpublishedChanges = prior
-    ? await understatSyncRepository.hasDataChangesSince(
-        job.season,
-        'player',
-        new Date(prior.publishedAt),
-      )
-    : true;
-  const referenceChanged = prior?.referenceRevision !== referenceRevision;
-  if (
-    prior?.revision === job.runId ||
-    (!run.dataChanged && prior && !hasUnpublishedChanges && !referenceChanged)
-  ) {
-    await understatSyncRepository.markPublished(job.runId, prior.revision);
-    return;
-  }
-  const manifest = await understatCache.publishPlayer(job.season, job.runId, snapshot);
-  await understatSyncRepository.markPublished(job.runId, manifest.revision);
 }
 
 export function understatPlayerItemForJob(job: UnderstatPlayerJobData, name: string) {

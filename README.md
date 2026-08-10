@@ -9,12 +9,12 @@ operations surface; product clients read through `letletme-graphql`.
 ## What this service owns
 
 - Official FPL API access, retries, timeouts, and boundary validation.
-- Independent Understat Team and Player ingestion, durable history, and
-  rebuildable read models.
+- Independent Understat Team and Player ingestion with canonical PostgreSQL facts and durable
+  normalized staging evidence; no Data-owned Understat Redis read model.
 - Core season data: events, teams, fixtures, players, and phases.
 - Current-gameweek, entry, league, tournament, live, and price-change jobs.
 - Canonical FPL and tournament rows in PostgreSQL.
-- Data-owned Redis hashes, the `Season:active` authority key, and BullMQ jobs.
+- Immutable `llm:v3:data:*` Redis publications and BullMQ/coordination jobs.
 - Protected operational endpoints for manual synchronization and recovery.
 
 It does not own browser authentication or the public product schema. See
@@ -39,14 +39,17 @@ flowchart LR
 
 The API process owns HTTP routes and cron registration. The worker process
 consumes the data, entry, live, league, tournament, and tournament-setup queue
-families. Run both processes; an API-only deployment can enqueue work but
-cannot complete it.
+families, plus independent Understat Team and Player queues when enabled. Run both processes; an
+API-only deployment can enqueue work but cannot complete it.
 
 PostgreSQL is authoritative. Redis is disposable acceleration state. A failed
 FPL request or validation error fails the sync without replacing the last
 accepted canonical state.
 
-## 2026/27 season compatibility
+Understat is deliberately PostgreSQL-only at the business-data layer. Its workers use the queue
+Redis endpoint only for BullMQ, mutation locks, and short-lived request permits.
+
+## Multi-season and 2026/27 compatibility
 
 The current code accepts the official pre-season placeholders observed for
 2026/27 without inventing substitute values:
@@ -57,22 +60,27 @@ The current code accepts the official pre-season placeholders observed for
 | Team `position` | `0` | Team is not ranked yet; it sorts after ranked teams |
 | Fixture `pulse_id` | `0` | Pulse identifier has not been assigned |
 
-Core discovery jobs run year-round so a newly published season is detected
-before the fixture-derived season window opens. The season code comes from the
-GW1 deadline or kickoff metadata (`2026/27` becomes `2627`); it is never guessed
-from the server calendar.
+`fpl.seasons.is_current` is the only current-season authority. Wall-clock
+inference and Redis are never allowed to select a season. A core job receives
+that explicit season, derives the upstream season from GW1 metadata, and fails
+before persistence if the two do not match.
 
 The core snapshot reads FPL bootstrap and fixtures once each, validates the
-complete season together, updates five PostgreSQL tables in one transaction,
-and publishes seven Redis families through staged atomic replacement:
+complete season together, updates five season-keyed PostgreSQL tables in one
+transaction, and publishes one immutable Redis revision:
 
 | Domain | PostgreSQL | Redis |
 |---|---|---|
-| Events | `events` | `Season:active`, `Event:{season}` |
-| Teams | `teams` | `Team:{season}` |
-| Fixtures | `event_fixtures` | `Fixtures:{season}:*`, `FixturesByTeam:{season}:*` |
-| Players | `players` | `Player:{season}` |
-| Phases | `phases` | `Phase:{season}` |
+| Events | `fpl.events` | Core item `events` |
+| Teams | `fpl.teams` | Core item `teams` |
+| Fixtures | `fpl.fixtures` | Core item `fixtures` |
+| Players | `fpl.players` | Core item `players` |
+| Phases | `fpl.phases` | Core item `phases` |
+
+The active manifest is `llm:v3:data:fpl:core:{season}:active`; all six items,
+including `currentEventId`, belong to the revision named by that manifest.
+Readers either accept the complete revision or use one coherent PostgreSQL
+fallback.
 
 Entry records, player statistics and values, picks, event-live data, results,
 and tournament derivatives require their own upstream data and job gates. They
@@ -84,34 +92,30 @@ Endpoint availability changes throughout pre-season. Do not copy a one-time
 and staged update matrix in the
 [FPL season readiness runbook](docs/fpl-season-readiness.md).
 
-## Season rollover guarantees
+## Season and publication guarantees
 
-- Empty core arrays preserve existing database and cache state.
+- Historical and current seasons coexist in the same plural physical tables,
+  keyed by `season_id`; no table-name suffix or history-parent routing exists.
+- Empty or identity-incomplete core arrays preserve existing database and cache state.
 - Same-season core snapshots reserve a durable database revision before their
   two upstream reads; an older delayed attempt cannot overwrite a newer one.
-- Legacy event, team, player, phase, and fixture refresh entry points all queue
-  that same complete snapshot; no partial core writer competes with it.
-- `Season:active` changes only with a matching committed
-  `core_snapshot_authority` record. A crash between PostgreSQL and Redis is
-  recovered by finalizing or rolling back the pending publication receipt.
-- Destructive database season rollover remains a separately approved runbook.
-  A newer candidate fails with `CORE_SNAPSHOT_MANUAL_ROLLOVER_REQUIRED` before
-  any canonical row or cache key changes until that runbook has completed.
-- When that key advances through a core write, all documented season-scoped
-  Data cache families are scanned and prior-season keys are removed. This does
-  not flush Redis, BullMQ state, price history, or consumer-owned keys.
-- Unsuffixed PostgreSQL FPL tables intentionally store one current season at a
-  time. From 2026/27, a completed season is copied and verified in sealed
-  history partitions before the gated rollover can replace current rows.
-  Identity reassignment is rejected rather than silently repointing historical
-  foreign keys.
+- Events, teams, players, phases, and season-wide fixtures have one writer: the
+  complete core snapshot. Their REST sync routes all enqueue that job.
+- PostgreSQL commits before the Redis pointer moves. Staged keys expire after
+  15 minutes, active items do not expire, and retired revision items expire
+  after 24 hours. Recovery reconciles an active manifest only with its exact
+  `ops.dataset_publications` row.
+- Switching `fpl.seasons.is_current` is an explicit season-readiness operation;
+  an ordinary sync cannot discover and activate a different season.
+- Player market history and player season summaries remain PostgreSQL/reporting
+  reads. Data publishes neither `PlayerValue:*` nor `EventLiveSummary:*` keys.
 - Player stats/values and live/selection jobs require both the fixture-derived
   season window and a current event. Core discovery jobs do not; bounded
   post-match result jobs intentionally remain eligible after the GW38 date.
 - League and tournament results poll only during the bounded 24-hour window
   after the final fixture's expected end. Hourly provisional/final job IDs
   deduplicate repeated ticks, failed deterministic jobs remain retryable, and
-  a final league correction runs after fresh `event_lives` persistence.
+  a final league correction runs after fresh `fpl.player_gameweek_stats` persistence.
 
 ## Local setup
 
@@ -119,7 +123,7 @@ Prerequisites:
 
 - Bun `1.3.3` (the version pinned in `package.json`)
 - PostgreSQL
-- Redis for cache and BullMQ; queue Redis may use a separate database
+- Redis with distinct cache-publication and BullMQ/coordination endpoints or databases
 
 Install and configure:
 
@@ -132,10 +136,11 @@ bun run db:apply-sql
 bun run db:migrate:status
 ```
 
-At minimum, configure `DATABASE_URL` and `REDIS_*`. `QUEUE_REDIS_*` defaults to
-the cache Redis connection. Supabase and notification variables are optional
-runtime integrations. Production must use `ENABLE_AUTH=true` with at least one
-SHA-256 digest in `DATA_API_KEY_HASHES`.
+At minimum, configure `DATABASE_URL`, `CACHE_REDIS_*`, and `QUEUE_REDIS_*`.
+Cache and queue settings must not resolve to the same host/port/database tuple;
+production requires both sets explicitly. Supabase and notification variables
+are optional runtime integrations. Production must use `ENABLE_AUTH=true` with
+at least one SHA-256 digest in `DATA_API_KEY_HASHES`.
 
 Start the two processes in separate terminals:
 
@@ -157,12 +162,12 @@ curl http://localhost:3000/ready
 ```
 
 - `/health` checks API process liveness.
-- `/ready` requires PostgreSQL, Redis, and a valid FPL-derived
-  `Season:active`. A fresh Redis instance is expected to return `503` until a
-  successful events sync establishes the active season.
+- `/ready` requires PostgreSQL, both Redis endpoints, and exactly one valid
+  `fpl.seasons.is_current` row. Cache publication completeness is monitored
+  separately and does not become season authority.
 
-Do not write `Season:active` manually to make readiness green. Trigger events
-sync and let the validated GW1 metadata establish it:
+To rebuild a missing core publication, trigger the complete core snapshot. Do
+not create Redis manifests manually:
 
 ```bash
 curl -X POST http://localhost:3000/events/sync \
@@ -182,11 +187,9 @@ curl -X POST http://localhost:3000/events/sync \
   -H "x-api-key: $DATA_API_KEY"
 ```
 
-`POST /fixtures/sync` without an event and the legacy
-`POST /fixtures/sync-all-gameweeks` route are compatibility aliases for the
-same snapshot. Event-specific fixture repair remains available with
-`POST /fixtures/sync?event=N`; it refuses to publish unless the canonical core
-snapshot is complete.
+`POST /events/sync`, `/teams/sync`, `/players/sync`, `/phases/sync`, and
+`/fixtures/sync` all enqueue the same complete snapshot. There is no
+event-specific or 38-request fixture mutation route.
 
 Use `GET /jobs` to list manual operational triggers. Full request examples are
 in the [API cheat sheet](docs/api-cheat-sheet.md).
@@ -224,7 +227,8 @@ cp .env.deploy.example .env.deploy
 bash scripts/deploy.sh deploy
 ```
 
-Merges to `main` deploy only after the CI workflow succeeds. See
+The v3 production cutover is manual-only and additionally requires the frozen
+release manifest, exact image digest, run ID, and activation approval. See
 [DEPLOYMENT.md](DEPLOYMENT.md) for host bootstrap, GitHub configuration,
 rollback, and troubleshooting. Merging is not permission to bypass the
 production data audit in the season-readiness runbook.

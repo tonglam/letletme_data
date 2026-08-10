@@ -4,6 +4,7 @@ import postgres from 'postgres';
 import { getConfig } from '../utils/config';
 import { logError, logInfo } from '../utils/logger';
 import { isTransactionPoolerConnection } from './postgres-connection';
+import { assertDataRuntimeRole } from './runtime-role-contract';
 import * as schema from './schemas/index.schema';
 
 /**
@@ -61,8 +62,13 @@ class DatabaseSingleton {
         prepare: !transactionPooler,
       });
 
-      // Test connection
+      // Test the connection before exposing it. Production must use the
+      // dedicated least-privilege writer LOGIN, never the migration or owner
+      // role. CLI and test connections validate their own narrower contracts.
       await this.client`SELECT 1`;
+      if (getConfig().NODE_ENV === 'production') {
+        await assertDataRuntimeRole(this.client);
+      }
 
       this.db = drizzle(this.client, { schema });
       this.isConnected = true;
@@ -71,6 +77,10 @@ class DatabaseSingleton {
         preparedStatements: !transactionPooler,
       });
     } catch (error) {
+      await this.client?.end().catch(() => undefined);
+      this.client = null;
+      this.db = null;
+      this.isConnected = false;
       logError('❌ Failed to connect to database', error);
       throw error;
     } finally {

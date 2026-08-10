@@ -15,16 +15,13 @@ describe('tournament event finalization', () => {
       refresh: async () => {
         calls.push('refresh');
       },
-      invalidate: async (reason) => {
-        calls.push(`invalidate:${reason}`);
-      },
     });
 
     expect(finished).toBe(2);
-    expect(calls).toEqual(['finish:12', 'refresh', 'invalidate:finish']);
+    expect(calls).toEqual(['finish:12', 'refresh']);
   });
 
-  test('invalidates after a recovery refresh when finish was already committed', async () => {
+  test('refreshes after recovery when finish was already committed', async () => {
     const calls: string[] = [];
 
     await finalizeTournamentEventLifecycle(12, {
@@ -36,11 +33,8 @@ describe('tournament event finalization', () => {
       refresh: async () => {
         calls.push('refresh');
       },
-      invalidate: async (reason) => {
-        calls.push(`invalidate:${reason}`);
-      },
     });
 
-    expect(calls).toEqual(['finish', 'refresh', 'invalidate:event-publication']);
+    expect(calls).toEqual(['finish', 'refresh']);
   });
 });

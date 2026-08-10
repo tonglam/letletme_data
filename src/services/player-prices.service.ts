@@ -1,7 +1,8 @@
-import { playersCache } from '../cache/operations';
 import { fplClient } from '../clients/fpl';
+import { enqueueCoreSnapshotJob } from '../jobs/data-sync-enqueue';
 import { playerValuesRepository } from '../repositories/player-values';
 import { playerRepository } from '../repositories/players';
+import type { FplSeasonRef } from '../domain/fpl-season';
 import { transformPlayers } from '../transformers/players';
 import { logInfo } from '../utils/logger';
 import { getPlayerValueSeasonBounds } from '../utils/player-value-season';
@@ -12,7 +13,7 @@ export type PlayerPricesSyncDependencies = {
   findLatestForPlayerIds: typeof playerValuesRepository.findLatestForPlayerIds;
   getBootstrap: typeof fplClient.getBootstrap;
   updatePrices: typeof playerRepository.updatePrices;
-  mergePlayerPricesCache: typeof playersCache.mergePrices;
+  enqueueCoreSnapshot: typeof enqueueCoreSnapshotJob;
   readOrderingTimestamp: typeof readCoreSnapshotOrderingTimestamp;
 };
 
@@ -21,19 +22,20 @@ const defaultDependencies: PlayerPricesSyncDependencies = {
   findLatestForPlayerIds: playerValuesRepository.findLatestForPlayerIds,
   getBootstrap: () => fplClient.getBootstrap(),
   updatePrices: playerRepository.updatePrices,
-  mergePlayerPricesCache: playersCache.mergePrices,
+  enqueueCoreSnapshot: enqueueCoreSnapshotJob,
   readOrderingTimestamp: readCoreSnapshotOrderingTimestamp,
 };
 
 export function createPlayerPricesSync(dependencies: PlayerPricesSyncDependencies) {
   return async function syncForDate(
+    season: FplSeasonRef,
     changeDate: string,
   ): Promise<{ count: number; changeDate: string }> {
     if (!/^\d{8}$/.test(changeDate)) {
       throw new Error(`Invalid player price change date: ${changeDate}`);
     }
 
-    const rowsForDate = await dependencies.findByChangeDate(changeDate);
+    const rowsForDate = await dependencies.findByChangeDate(season, changeDate);
     const changedIds = Array.from(
       new Set(
         rowsForDate
@@ -78,6 +80,7 @@ export function createPlayerPricesSync(dependencies: PlayerPricesSyncDependencie
     // player who has changed again since that date. The published-season
     // bounds prevent a reused FPL element ID from reading prior-season history.
     const latestRows = await dependencies.findLatestForPlayerIds(
+      season,
       currentChangedIds,
       fromChangeDate,
       beforeChangeDate,
@@ -93,7 +96,7 @@ export function createPlayerPricesSync(dependencies: PlayerPricesSyncDependencie
       elementId,
       value: latestById.get(elementId)!.value,
     }));
-    const updatedPlayers = await dependencies.updatePrices(priceUpdates, sourceCheckedAt);
+    const updatedPlayers = await dependencies.updatePrices(season, priceUpdates, sourceCheckedAt);
     const updatedIds = new Set(updatedPlayers.map((player) => player.id));
     const winningPriceUpdates = priceUpdates.filter((update) => updatedIds.has(update.elementId));
     const skippedIds = currentChangedIds.filter((elementId) => !updatedIds.has(elementId));
@@ -105,9 +108,12 @@ export function createPlayerPricesSync(dependencies: PlayerPricesSyncDependencie
     }
 
     if (winningPriceUpdates.length > 0) {
-      await dependencies.mergePlayerPricesCache(winningPriceUpdates, publishedPlayerIds);
+      await dependencies.enqueueCoreSnapshot(season, 'cascade', {
+        jobId: `core-after-price-${changeDate}`,
+        removeOnSettle: true,
+      });
     }
-    logInfo('Player prices updated in database and cache', {
+    logInfo('Player prices updated; coherent core rebuild queued', {
       changeDate,
       count: updatedPlayers.length,
     });

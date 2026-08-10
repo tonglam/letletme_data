@@ -20,6 +20,8 @@ function mapErrorToResponse(error: unknown): { status: number; message: string }
   return { status: getHttpStatusFromError(error), message: getErrorMessage(error) };
 }
 
+const positiveInteger = t.Number({ minimum: 1, multipleOf: 1 });
+
 export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
   .get('/check-name', async ({ query }) => checkTournamentNameAvailability(query.name), {
     query: t.Object({ name: t.String({ minLength: 1 }) }),
@@ -51,7 +53,7 @@ export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
       };
     },
     {
-      params: t.Object({ tournamentId: t.Numeric() }),
+      params: t.Object({ tournamentId: positiveInteger }),
     },
   )
   .post(
@@ -73,8 +75,8 @@ export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
       }
     },
     {
-      params: t.Object({ tournamentId: t.Numeric() }),
-      body: t.Object({ adminEntryId: t.Numeric() }),
+      params: t.Object({ tournamentId: positiveInteger }),
+      body: t.Object({ adminEntryId: positiveInteger }),
     },
   )
   .post(
@@ -91,8 +93,8 @@ export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
       }
     },
     {
-      params: t.Object({ tournamentId: t.Numeric() }),
-      body: t.Object({ adminEntryId: t.Numeric() }),
+      params: t.Object({ tournamentId: positiveInteger }),
+      body: t.Object({ adminEntryId: positiveInteger }),
     },
   )
   .patch(
@@ -112,9 +114,9 @@ export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
       }
     },
     {
-      params: t.Object({ tournamentId: t.Numeric() }),
+      params: t.Object({ tournamentId: positiveInteger }),
       body: t.Object({
-        adminEntryId: t.Numeric(),
+        adminEntryId: positiveInteger,
         rosterMode: t.Literal('official_sync'),
       }),
     },
@@ -136,9 +138,9 @@ export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
       }
     },
     {
-      params: t.Object({ tournamentId: t.Numeric() }),
+      params: t.Object({ tournamentId: positiveInteger }),
       body: t.Object({
-        adminEntryId: t.Numeric(),
+        adminEntryId: positiveInteger,
         state: t.Union([t.Literal('active'), t.Literal('inactive')]),
       }),
     },
@@ -195,10 +197,10 @@ export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
       }
     },
     {
-      params: t.Object({ tournamentId: t.Numeric() }),
+      params: t.Object({ tournamentId: positiveInteger }),
       body: t.Object({
         name: t.String({ minLength: 3, maxLength: 80 }),
-        adminEntryId: t.Numeric(),
+        adminEntryId: positiveInteger,
       }),
     },
   )
@@ -222,7 +224,7 @@ export const tournamentsAPI = new Elysia({ prefix: '/tournaments' })
       }
     },
     {
-      params: t.Object({ tournamentId: t.Numeric() }),
-      body: t.Object({ adminEntryId: t.Numeric() }),
+      params: t.Object({ tournamentId: positiveInteger }),
+      body: t.Object({ adminEntryId: positiveInteger }),
     },
   );

@@ -1,22 +1,19 @@
 import { randomUUID } from 'node:crypto';
 
-import {
-  clearStaleSeasonCache,
-  isNewerSeason,
-  readStoredActiveCacheSeason,
-} from '../cache/cache-season';
 import { fplClient, type FPLBootstrapResponse } from '../clients/fpl';
 import {
   CORE_SNAPSHOT_MUTATION_SCOPES,
   prepareCoreSnapshot,
   type CoreSnapshot,
 } from '../domain/core-snapshot';
-import { allocateCoreSnapshotRevision } from '../repositories/core-snapshot-authority';
+import { seasonRepository } from '../repositories/seasons';
+import type { FplSeasonRef } from '../domain/fpl-season';
+import { syncOperationsRepository } from '../repositories/sync-operations';
+import { withMutationConflictGuard } from '../utils/mutation-lock';
 import {
   commitCoreSnapshotPublication,
   readCoreSnapshotOrderingTimestamp,
   recoverPendingCoreSnapshotPublication,
-  type CoreSnapshotPublicationContext,
 } from './core-snapshot-publication.service';
 
 import type { RawFPLFixture } from '../types';
@@ -24,69 +21,39 @@ import type { RawFPLFixture } from '../types';
 export type CoreSnapshotMilestone = 'fetched' | 'validated' | 'locked' | 'persisted' | 'published';
 
 export interface CoreSnapshotSyncResult {
-  outcome: 'ready' | 'noop';
-  season: string;
-  events: number;
-  teams: number;
-  players: number;
-  phases: number;
-  fixtures: number;
-  requiredUnits: number;
-  reusedUnits: number;
-  succeededUnits: number;
-  failedUnits: number;
+  readonly outcome: 'ready' | 'noop';
+  readonly season: string;
+  readonly events: number;
+  readonly teams: number;
+  readonly players: number;
+  readonly phases: number;
+  readonly fixtures: number;
+  readonly requiredUnits: number;
+  readonly reusedUnits: number;
+  readonly succeededUnits: number;
+  readonly failedUnits: number;
+  readonly publicationId?: string;
+  readonly revision?: number;
 }
 
 export interface CoreSnapshotDependencies {
-  getBootstrap: () => Promise<FPLBootstrapResponse>;
-  getFixtures: () => Promise<RawFPLFixture[]>;
-  getActiveSeason: () => Promise<string | null>;
-  readOrderingTimestamp: () => Promise<Date>;
-  reserveRevision: () => Promise<number>;
-  createPublicationId: () => string;
-  recoverPending: () => Promise<unknown>;
-  recoverPendingWithoutLock?: () => Promise<unknown>;
-  commit: (
-    snapshot: CoreSnapshot,
-    context: CoreSnapshotPublicationContext,
-  ) => Promise<{ status: 'committed' | 'stale' }>;
-  cleanup: (season: string) => Promise<void>;
-  withPersistenceLock: <T>(operation: () => Promise<T>) => Promise<T>;
-  onMilestone?: (milestone: CoreSnapshotMilestone) => void;
+  readonly getBootstrap: () => Promise<FPLBootstrapResponse>;
+  readonly getFixtures: () => Promise<RawFPLFixture[]>;
+  readonly readOrderingTimestamp: () => Promise<Date>;
+  readonly recoverPending: (season: FplSeasonRef) => Promise<unknown>;
+  readonly onMilestone?: (milestone: CoreSnapshotMilestone) => void;
+}
+
+export interface CoreSnapshotSyncOptions {
+  readonly trigger?: 'cron' | 'manual' | 'queue' | 'event-transition';
+  readonly dependencies?: CoreSnapshotDependencies;
 }
 
 const defaultDependencies: CoreSnapshotDependencies = {
   getBootstrap: () => fplClient.getBootstrap(),
   getFixtures: () => fplClient.getFixtures(),
-  getActiveSeason: readStoredActiveCacheSeason,
   readOrderingTimestamp: readCoreSnapshotOrderingTimestamp,
-  reserveRevision: allocateCoreSnapshotRevision,
-  createPublicationId: randomUUID,
-  recoverPending: async () => {
-    const { withMutationConflictGuard } = await import('../utils/mutation-lock');
-    return withMutationConflictGuard(
-      {
-        queueName: 'data-sync',
-        jobName: 'core-snapshot-recovery',
-        scopes: [...CORE_SNAPSHOT_MUTATION_SCOPES],
-      },
-      recoverPendingCoreSnapshotPublication,
-    );
-  },
-  recoverPendingWithoutLock: recoverPendingCoreSnapshotPublication,
-  commit: commitCoreSnapshotPublication,
-  cleanup: (season) => clearStaleSeasonCache(season),
-  withPersistenceLock: async (operation) => {
-    const { withMutationConflictGuard } = await import('../utils/mutation-lock');
-    return withMutationConflictGuard(
-      {
-        queueName: 'data-sync',
-        jobName: 'core-snapshot',
-        scopes: [...CORE_SNAPSHOT_MUTATION_SCOPES],
-      },
-      operation,
-    );
-  },
+  recoverPending: (season) => recoverPendingCoreSnapshotPublication(season),
 };
 
 function workUnits(snapshot: CoreSnapshot): number {
@@ -99,7 +66,11 @@ function workUnits(snapshot: CoreSnapshot): number {
   );
 }
 
-function result(snapshot: CoreSnapshot, published: boolean): CoreSnapshotSyncResult {
+function result(
+  snapshot: CoreSnapshot,
+  published: boolean,
+  publication?: { publicationId: string; revision: number },
+): CoreSnapshotSyncResult {
   const requiredUnits = workUnits(snapshot);
   return {
     outcome: published ? 'ready' : 'noop',
@@ -113,61 +84,99 @@ function result(snapshot: CoreSnapshot, published: boolean): CoreSnapshotSyncRes
     reusedUnits: published ? 0 : requiredUnits,
     succeededUnits: published ? requiredUnits : 0,
     failedUnits: 0,
+    ...(publication ?? {}),
   };
 }
 
 export async function syncCoreSnapshot(
-  dependencies: CoreSnapshotDependencies = defaultDependencies,
-  options: { mutationScopesAlreadyHeld?: boolean } = {},
+  currentSeason: FplSeasonRef,
+  options: CoreSnapshotSyncOptions = {},
 ): Promise<CoreSnapshotSyncResult> {
-  // Season archival holds the canonical core scopes across the final refresh,
-  // so the nested recovery/persistence guards must reuse that caller-owned
-  // lock instead of trying to acquire the same Redis keys again.
-  const mutationScopesAlreadyHeld = options.mutationScopesAlreadyHeld === true;
-  const recoverPending = mutationScopesAlreadyHeld
-    ? (dependencies.recoverPendingWithoutLock ?? dependencies.recoverPending)
-    : dependencies.recoverPending;
-  await recoverPending();
-  const revision = await dependencies.reserveRevision();
-  const publicationId = dependencies.createPublicationId();
-  const sourceCheckedAt = await dependencies.readOrderingTimestamp();
-  const [bootstrap, fixtures] = await Promise.all([
-    dependencies.getBootstrap(),
-    dependencies.getFixtures(),
-  ]);
-  dependencies.onMilestone?.('fetched');
-
-  const snapshot = prepareCoreSnapshot(bootstrap, fixtures);
-  dependencies.onMilestone?.('validated');
-
-  const persist = mutationScopesAlreadyHeld
-    ? (operation: () => Promise<CoreSnapshotSyncResult>) => operation()
-    : dependencies.withPersistenceLock;
-
-  return persist(async () => {
-    dependencies.onMilestone?.('locked');
-    const activeSeason = await dependencies.getActiveSeason();
-    if (activeSeason && isNewerSeason(activeSeason, snapshot.season)) {
-      return result(snapshot, false);
-    }
-
-    const publication = await dependencies.commit(snapshot, {
-      revision,
-      publicationId,
-      previousActiveSeason: activeSeason,
-      sourceCheckedAt,
-    });
-    if (publication.status === 'stale') {
-      return result(snapshot, false);
-    }
-    dependencies.onMilestone?.('persisted');
-    // The publication can release its lock before a newer season acquires the
-    // authority. Recheck before deleting any season-prefixed cache keys.
-    const cleanupSeason = await dependencies.getActiveSeason();
-    if (cleanupSeason === snapshot.season) {
-      await dependencies.cleanup(snapshot.season);
-    }
-    dependencies.onMilestone?.('published');
-    return result(snapshot, true);
+  const dependencies = options.dependencies ?? defaultDependencies;
+  const trigger = options.trigger ?? 'queue';
+  await dependencies.recoverPending(currentSeason);
+  const authoritativeSeason = await seasonRepository.findCurrent();
+  if (
+    authoritativeSeason.seasonId !== currentSeason.seasonId ||
+    authoritativeSeason.seasonCode !== currentSeason.seasonCode
+  ) {
+    throw new Error(`FPL season ${currentSeason.seasonCode} is no longer current`);
+  }
+  const sourceRunId = randomUUID();
+  await syncOperationsRepository.startRun({
+    runId: sourceRunId,
+    provider: 'fpl',
+    lane: 'core',
+    scope: 'core-snapshot',
+    season: currentSeason,
+    mode: 'full',
+    trigger,
+    metadata: { schemaVersion: 'v3' },
   });
+
+  let preparedPublicationId: string | null = null;
+  let commitInvoked = false;
+  try {
+    const sourceCheckedAt = await dependencies.readOrderingTimestamp();
+    const [bootstrap, fixtures] = await Promise.all([
+      dependencies.getBootstrap(),
+      dependencies.getFixtures(),
+    ]);
+    dependencies.onMilestone?.('fetched');
+
+    const snapshot = prepareCoreSnapshot(bootstrap, fixtures);
+    if (snapshot.season !== currentSeason.seasonCode) {
+      throw new Error(
+        `Upstream core season ${snapshot.season} does not match current database season ${currentSeason.seasonCode}`,
+      );
+    }
+    dependencies.onMilestone?.('validated');
+    const publicationId = randomUUID();
+    preparedPublicationId = publicationId;
+    const prepared = await syncOperationsRepository.preparePublication({
+      publicationId,
+      dataset: 'fpl:core',
+      season: currentSeason,
+      sourceRunId,
+      manifest: {
+        schemaVersion: 'v3',
+        state: 'staging',
+        sourceCheckedAt: sourceCheckedAt.toISOString(),
+      },
+    });
+
+    return await withMutationConflictGuard(
+      {
+        queueName: 'data-sync',
+        jobName: 'core-snapshot',
+        scopes: [...CORE_SNAPSHOT_MUTATION_SCOPES],
+      },
+      async () => {
+        dependencies.onMilestone?.('locked');
+        commitInvoked = true;
+        const committed = await commitCoreSnapshotPublication(snapshot, {
+          revision: prepared.revision,
+          publicationId: prepared.publicationId,
+          sourceRunId,
+          sourceCheckedAt,
+        });
+        dependencies.onMilestone?.('persisted');
+        if (committed.status === 'stale') return result(snapshot, false);
+        dependencies.onMilestone?.('published');
+        return result(snapshot, true, {
+          publicationId: prepared.publicationId,
+          revision: prepared.revision,
+        });
+      },
+    );
+  } catch (error) {
+    if (preparedPublicationId && !commitInvoked) {
+      await syncOperationsRepository
+        .failPublication(preparedPublicationId, error)
+        .catch(() => undefined);
+    } else if (!preparedPublicationId) {
+      await syncOperationsRepository.failRun(sourceRunId, error).catch(() => undefined);
+    }
+    throw error;
+  }
 }

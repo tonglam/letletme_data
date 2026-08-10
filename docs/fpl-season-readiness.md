@@ -1,211 +1,188 @@
 # FPL season readiness and rollover runbook
 
-Use this runbook when official FPL starts publishing a new season or when
-deciding which data can be synchronized safely. It deliberately separates two
-questions:
+Use this runbook when FPL starts publishing a new season or when deciding which datasets can be
+synchronized safely. Keep these questions separate:
 
-1. Does the official upstream endpoint return a usable response now?
-2. Has this environment validated, persisted, and cached that data?
+1. Does the official upstream endpoint return a valid response now?
+2. Which row is authoritative in `fpl.seasons`?
+3. Has this environment persisted and published the accepted dataset?
 
-An upstream `200` does not prove PostgreSQL or Redis is current. A local empty
-table does not prove the upstream endpoint is unavailable.
+An upstream `200` proves neither PostgreSQL freshness nor Redis publication. Redis never chooses
+the season.
 
 ## External endpoint inventory
 
-The FPL client and history backfill use eleven logical endpoint patterns. Test them read-only with real,
-current IDs where required; do not treat an expected pre-publication `404` as a
-schema failure.
+The FPL client has ten logical endpoint patterns. Test them read-only with real current IDs where
+required; an expected pre-publication `404` is not a schema failure.
 
 | Endpoint pattern | Client method | Becomes useful when |
-|---|---|---|
-| `/bootstrap-static/` | `getBootstrap()` | FPL publishes events, teams, players, and phases |
-| `/fixtures/` or `/fixtures/?event={eventId}` | `getFixtures()` | The fixture list or requested GW exists |
+| --- | --- | --- |
+| `/bootstrap-static/` | `getBootstrap()` | FPL publishes events, teams, players, phases |
+| `/fixtures/` or `/fixtures/?event={eventId}` | `getFixtures()` | The fixture list/requested GW exists |
 | `/event/{eventId}/live/` | `getEventLive()` | The gameweek live feed is published |
 | `/element-summary/{elementId}/` | history backfill source (`fixtures`, `history`, `history_past`) | The player element exists; use the preserved per-player history for historical fixture and market fields |
 | `/entry/{entryId}/` | `getEntrySummary()` | The entry exists in the new season |
-| `/entry/{entryId}/event/{eventId}/picks/` | `getEntryEventPicks()` | Picks for that GW are published |
-| `/entry/{entryId}/transfers/` | `getEntryTransfers()` | The entry has a current-season transfer feed |
-| `/entry/{entryId}/history/` | `getEntryHistory()` | The entry has current/past history data |
-| `/entry/{entryId}/cup/` | `getEntryCup()` | Cup data exists; `404` is handled as unavailable |
-| `/leagues-classic/{leagueId}/standings/` | `getLeagueClassicStandings()` | A current classic league ID exists |
-| `/leagues-h2h/{leagueId}/standings/` | `getLeagueH2HStandings()` | A current H2H league ID exists |
+| `/entry/{entryId}/event/{eventId}/picks/` | `getEntryEventPicks()` | Picks are published |
+| `/entry/{entryId}/transfers/` | `getEntryTransfers()` | The entry transfer feed exists |
+| `/entry/{entryId}/history/` | `getEntryHistory()` | Current/past history exists |
+| `/entry/{entryId}/cup/` | `getEntryCup()` | Cup data exists; `404` is a valid absence |
+| `/leagues-classic/{leagueId}/standings/` | `getLeagueClassicStandings()` | A current classic league exists |
+| `/leagues-h2h/{leagueId}/standings/` | `getLeagueH2HStandings()` | A current H2H league exists |
 
-`/element-summary/{elementId}/` is an upstream historical-data endpoint, not a
-separate live feed. It supplies per-player `fixtures`, `history`, and
-`history_past`; the `2526` importer consumes a preserved raw mirror of this
-shape. The routine runtime `FPLClient` does not call it for every player on
-each sync, and the older transformed-source fallbacks (`1617`–`2425`) do not
-claim that raw endpoint coverage.
-
-Record the HTTP result, validation result, tested IDs, response counts, and
-timestamp for each live audit. Endpoint counts are observations, not durable
-configuration.
+For every probe record HTTP status, schema validation, identifiers, response counts, and timestamp.
+Endpoint counts are observations, not configuration.
 
 ## Boundary compatibility
 
-Pre-season payloads can contain valid placeholders that would be invalid once
-the competition is ranked. Preserve them exactly:
+Pre-season payloads may contain these valid placeholders:
 
-| Domain field | Accepted placeholder | Downstream behavior |
-|---|---:|---|
-| `Team.strength` | `null` | Unknown; never treated as a strong team or included in a strength range |
-| `Team.position` | `0` | Unranked; sorts after ranked teams when points are tied |
-| `Fixture.pulseId` | `0` | Not assigned; remains a non-null integer in PostgreSQL |
+| Field | Accepted value | Meaning |
+| --- | ---: | --- |
+| Team `strength` | `null` | Rating not published; never substitute a number |
+| Team `position` | `0` | Unranked; sort after ranked teams |
+| Fixture `pulse_id` | `0` | Identifier not assigned |
 
-Migration `0035_allow_preseason_team_strength.sql` makes
-`public.teams.strength` nullable. Migration
-`0036_align_fpl_runtime_types.sql` aligns the remaining live runtime types.
-Apply and verify both migration ledgers before any write.
+The current v3 schema stores them directly in `fpl.teams` and `fpl.fixtures`.
 
-## Staged synchronization matrix
+## Current-season authority
 
-### Stage 1: core season metadata
+Exactly one row must satisfy `fpl.seasons.is_current=true`. Read it before any write:
 
-This stage is safe once bootstrap and fixtures validate with non-empty core
-arrays. It does not require a current gameweek.
-
-| Sync | PostgreSQL target | Redis target | Minimum upstream evidence |
-|---|---|---|---|
-| Events | `events` | `Season:active`, `Event:{season}` | GW1 has a valid deadline |
-| Teams | `teams` | `Team:{season}` | Non-empty teams array validates |
-| Fixtures | `event_fixtures` | `Fixtures:{season}:*`, `FixturesByTeam:{season}:*` | Non-empty fixtures array validates |
-| Players | `players` | `Player:{season}` | Non-empty elements array validates |
-| Phases | `phases` | `Phase:{season}` | Non-empty phases array validates |
-
-Run in this order: events, teams, fixtures, players, phases. Wait for each
-BullMQ job to complete. An HTTP `202` means only that the command was queued.
-
-### Stage 2: bound entries and metadata
-
-`entry_infos`, `entry_history_infos`, and `entry_league_infos` depend on known,
-current entry IDs. Seed or sync only explicitly bound entries. They are not part
-of automatic core-season bootstrap.
-
-### Stage 3: current-event and match data
-
-Wait until a current event exists and the relevant endpoint is published before
-enabling or manually triggering:
-
-- player statistics and player values;
-- picks, transfers, and per-entry results;
-- event-live rows, explanations, summaries, live fixtures, and bonus views;
-- league and tournament results or their derived materialized views.
-
-The ordinary cron gates perform these checks, but a manual trigger may bypass a
-time window. Manual execution is an operations decision, not proof that
-upstream data is ready.
-
-## Write procedure
-
-1. Confirm the target environment and take a read-only count/key inventory.
-2. Apply migrations and require `bun run db:migrate:status` to pass.
-3. Start both the API and worker processes.
-4. Trigger the five Stage 1 syncs in order.
-5. Audit job completion and error counts; do not rely only on enqueue responses.
-6. Verify PostgreSQL and Redis independently.
-7. Sample records, including nullable/zero placeholder fields.
-8. Report missing fields or rejected records before advancing to Stage 2 or 3.
-
-Example authenticated triggers:
-
-```bash
-export DATA_URL='http://localhost:3000'
-export DATA_API_KEY='<plaintext internal key>'
-
-curl -X POST "$DATA_URL/events/sync" -H "x-api-key: $DATA_API_KEY"
-curl -X POST "$DATA_URL/teams/sync" -H "x-api-key: $DATA_API_KEY"
-curl -X POST "$DATA_URL/fixtures/sync" -H "x-api-key: $DATA_API_KEY"
-curl -X POST "$DATA_URL/players/sync" -H "x-api-key: $DATA_API_KEY"
-curl -X POST "$DATA_URL/phases/sync" -H "x-api-key: $DATA_API_KEY"
+```sql
+SELECT season_id, season_code, display_name, lifecycle_state, is_current, starts_at, ends_at
+FROM fpl.seasons
+ORDER BY season_id;
 ```
 
-## Read-only verification
+A core sync derives the upstream code from GW1 metadata and requires it to equal that current row.
+It cannot insert or activate a different season. If upstream has moved ahead:
+
+1. stop ordinary Data writers;
+2. capture the outgoing season counts/publication evidence;
+3. add or activate the new `fpl.seasons` row through a reviewed Data-owned migration/runbook;
+4. prove the transaction leaves exactly one current row;
+5. restart Data and run one complete core snapshot.
+
+Do not infer the row from the server date and do not create a Redis manifest manually.
+
+## Staged synchronization
+
+### Stage 1: complete core
+
+One job owns all five physical targets and one immutable Redis revision:
+
+| PostgreSQL target | Core publication item | Required evidence |
+| --- | --- | --- |
+| `fpl.events` | `events` | 38 unique GW identities; GW1 deadline identifies the expected season |
+| `fpl.teams` | `teams` | non-empty, unique team identities |
+| `fpl.fixtures` | `fixtures` | complete season feed; normally 380 matches for a 20-team league |
+| `fpl.players` | `players` | non-empty, unique player identities linked to teams |
+| `fpl.phases` | `phases` | non-empty, unique phase identities |
+| — | `currentEventId` | derived from the same accepted events revision |
+
+Trigger any one core alias; all enqueue `core-snapshot-sync`:
+
+```bash
+curl -X POST "$DATA_URL/events/sync" -H "x-api-key: $DATA_API_KEY"
+```
+
+Wait for the BullMQ result. An HTTP `202` is not completion.
+
+### Stage 2: entries and competition metadata
+
+Entry profiles, season histories, leagues, and tournament rosters use known entry IDs. They are not
+part of core bootstrap and must remain scoped to the explicit current season.
+
+### Stage 3: event and reporting facts
+
+Wait for a valid event/upstream publication before triggering:
+
+- player event snapshots and market changes;
+- picks, transfers, entry/league/tournament results;
+- live gameweek stats, scoring items, and fixture-grain player evidence;
+- `reporting.player_season_summaries`;
+- tournament materialized views.
+
+`reporting.tournament_selection_stats` refreshes only when every eligible tournament entry has
+exactly 15 valid picks and its transfer checkpoint covers the event.
+
+## Independent verification
 
 ### PostgreSQL
 
-Run against the intended database using a read-only session or role:
+Replace `2627` with the observed authoritative season code:
 
 ```sql
-SELECT 'events' AS table_name, count(*) AS row_count FROM public.events
+WITH target AS (
+  SELECT season_id
+  FROM fpl.seasons
+  WHERE season_code = '2627'
+)
+SELECT 'events' AS relation, count(*) AS rows FROM fpl.events WHERE season_id = (SELECT season_id FROM target)
 UNION ALL
-SELECT 'teams', count(*) FROM public.teams
+SELECT 'teams', count(*) FROM fpl.teams WHERE season_id = (SELECT season_id FROM target)
 UNION ALL
-SELECT 'event_fixtures', count(*) FROM public.event_fixtures
+SELECT 'fixtures', count(*) FROM fpl.fixtures WHERE season_id = (SELECT season_id FROM target)
 UNION ALL
-SELECT 'players', count(*) FROM public.players
+SELECT 'players', count(*) FROM fpl.players WHERE season_id = (SELECT season_id FROM target)
 UNION ALL
-SELECT 'phases', count(*) FROM public.phases
-ORDER BY table_name;
+SELECT 'phases', count(*) FROM fpl.phases WHERE season_id = (SELECT season_id FROM target)
+ORDER BY relation;
 ```
 
-Check placeholder preservation:
+Check placeholders without treating them as errors:
 
 ```sql
-SELECT id, name, position, strength
-FROM public.teams
-WHERE position = 0 OR strength IS NULL
-ORDER BY id;
+SELECT team_id, name, position, strength
+FROM fpl.teams
+WHERE season_id = (SELECT season_id FROM fpl.seasons WHERE is_current)
+  AND (position = 0 OR strength IS NULL)
+ORDER BY team_id;
 
-SELECT id, event_id, pulse_id
-FROM public.event_fixtures
-WHERE pulse_id = 0
-ORDER BY id
+SELECT fixture_id, event_id, pulse_id
+FROM fpl.fixtures
+WHERE season_id = (SELECT season_id FROM fpl.seasons WHERE is_current)
+  AND pulse_id = 0
+ORDER BY fixture_id
 LIMIT 20;
 ```
 
-### Redis
+### Redis publication
 
-Use `SCAN`, not `KEYS`, in production:
+Use cache Redis and `SCAN`, never `KEYS`:
 
 ```bash
-redis-cli GET Season:active
-redis-cli HLEN Event:2627
-redis-cli HLEN Team:2627
-redis-cli HLEN Player:2627
-redis-cli HLEN Phase:2627
-redis-cli --scan --pattern 'Fixtures:2627:*' | wc -l
-redis-cli --scan --pattern 'FixturesByTeam:2627:*' | wc -l
+SEASON=2627
+MANIFEST_KEY="llm:v3:data:fpl:core:$SEASON:active"
+
+redis-cli GET "$MANIFEST_KEY" | jq .
+redis-cli --scan --pattern "llm:v3:data:fpl:core:$SEASON:*"
 ```
 
-The expected season must come from the accepted GW1 metadata. Replace `2627`
-with the observed value; never use the example as an instruction to overwrite
-`Season:active`.
+Verify the manifest scope, `schemaVersion=v3`, publication ID, revision, six exact item names, key
+types, counts, byte lengths, and SHA-256 evidence. Then confirm every item key belongs to that same
+revision. A missing or invalid item rejects the whole publication.
 
-## Post-match result readiness
+## Post-match readiness
 
-League and tournament result schedulers poll every ten minutes but enqueue only
-inside the 24-hour period after the last fixture's expected end
-(`kickoff + 2 hours`). Each hour has a deterministic slot:
+League and tournament result schedulers poll inside the 24 hours after the final fixture's expected
+end (`kickoff + 2 hours`). Deterministic hourly `provisional-N`/`final-N` IDs deduplicate successful
+ticks while failed jobs remain retryable. The window intentionally remains valid after GW38.
 
-- `provisional-N` while FPL has not marked event data checked;
-- `final-N` after `data_checked=true`.
+A durable live snapshot persists gameweek stats, scoring items, and fixture evidence and may
+enqueue the final league correction after `data_checked=true`. Player season summaries derive from
+all persisted gameweeks; there is no physical per-event summary table.
 
-Successful deterministic jobs are retained for 24 hours to deduplicate repeated
-ticks. Failed deterministic jobs are removed so a later tick can retry the same
-slot. After an `event_lives` database sync succeeds, the worker enqueues a
-distinct final league correction when the event is checked. This keeps league
-snapshots aligned with freshly persisted live totals, including the day after
-GW38.
+## Audit report
 
-Tournament result completion starts its cascade only when active tournament
-entries were actually processed. An empty result does not fan out no-op
-derivative jobs.
+Report these independently:
 
-## Audit report template
+- **Upstream:** endpoint, identifiers, HTTP/schema result, count, observed time.
+- **Authority:** all `fpl.seasons` rows and the one current season.
+- **PostgreSQL:** target counts, rejected records, sampled placeholders, source checked time.
+- **Redis:** active manifest/revision, item validation, staging/retired leftovers.
+- **Deferred:** every dataset waiting for event, entry, league, or publication evidence.
+- **Decision:** ready/not ready per stage with explicit blockers.
 
-Report these sections separately:
-
-- **Upstream:** endpoint, tested identifiers, HTTP status, validation status,
-  response count, and observation time.
-- **PostgreSQL:** target, before/after count, rejected records, and sampled
-  placeholder values.
-- **Redis:** `Season:active`, hash/key counts by family, stale-season inventory,
-  and BullMQ keys kept separate from data caches.
-- **Deferred:** every dataset still waiting for a current event, published GW
-  data, or explicit entry/league identifiers.
-- **Decision:** ready/not ready for each stage, with missing fields listed
-  explicitly.
-
-For deletion and stale-season recovery, follow the sign-off rules in the
-[Redis contract](redis-contract.md). Never use `FLUSHDB` or `FLUSHALL` as a
-season rollover procedure.
+Use the scoped cleanup contract in [redis-contract.md](redis-contract.md). Never use `FLUSHDB` or
+`FLUSHALL` for season rollover.

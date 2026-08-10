@@ -16,7 +16,6 @@ import {
   hasGoodValue,
   isDifferentialPick,
   isRegularStarter,
-  shouldWritePlayerStatsView,
   sortPlayerStatsByPoints,
   sortPlayerStatsByPointsPerMillion,
   sortPlayerStatsByValue,
@@ -51,6 +50,7 @@ import {
   singleRawElementFixture,
   transformedPlayerStatsFixture,
 } from '../fixtures/player-stats.fixtures';
+import { TEST_SEASON } from '../fixtures/seasons.fixtures';
 
 describe('Player Stats Unit Tests', () => {
   describe('Domain Logic Tests', () => {
@@ -468,7 +468,7 @@ describe('Player Stats Unit Tests', () => {
     });
 
     test('should handle upsertBatch with empty array', async () => {
-      const result = await repository.upsertBatch([]);
+      const result = await repository.upsertBatch(TEST_SEASON, []);
       expect(result).toEqual({ count: 0 });
     });
   });
@@ -720,20 +720,5 @@ describe('Player Stats Unit Tests', () => {
       expect(getPointsPerMillion(premiumMid)).toBeCloseTo(12.5, 1);
       expect(hasGoodValue(premiumMid, 10)).toBe(true);
     });
-  });
-});
-
-describe('shouldWritePlayerStatsView (FP-12 / H9)', () => {
-  test('prefers the current event for the latest-event-wins view', () => {
-    expect(shouldWritePlayerStatsView(10, 10)).toBe(true);
-    expect(shouldWritePlayerStatsView(9, 10)).toBe(false);
-    expect(shouldWritePlayerStatsView(11, 10)).toBe(false);
-    expect(shouldWritePlayerStatsView(11, 10, 11)).toBe(false);
-  });
-
-  test('allows the next event only when no current event exists', () => {
-    expect(shouldWritePlayerStatsView(1, null, 1)).toBe(true);
-    expect(shouldWritePlayerStatsView(2, null, 1)).toBe(false);
-    expect(shouldWritePlayerStatsView(1, null, null)).toBe(false);
   });
 });

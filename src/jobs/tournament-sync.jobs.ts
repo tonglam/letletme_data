@@ -9,7 +9,8 @@ import {
   type TournamentSyncPriorityJobName,
 } from '../domain/job-priority';
 import type { TournamentFinalizationTarget } from '../domain/tournament';
-import { redisSingleton } from '../cache/singleton';
+import type { FplSeasonRef } from '../domain/fpl-season';
+import { queueRedisSingleton } from '../queues/redis';
 import { logError, logInfo } from '../utils/logger';
 
 export type TournamentSyncJobSource = 'cron' | 'manual' | 'cascade';
@@ -41,27 +42,27 @@ export const CASCADE_BARRIER_TTL_SECONDS = 7 * 24 * 60 * 60;
 const CASCADE_REFRESH_LEASE_TTL_SECONDS = 120;
 
 function cascadeSlotKey(cascadeId: string, jobKey: string): string {
-  return `tournament-cascade:structure-done:${cascadeId}:${jobKey}`;
+  return `llm:v3:queue:coordination:tournament-cascade:structure-done:${cascadeId}:${jobKey}`;
 }
 
 function cascadeRefreshPendingKey(cascadeId: string): string {
-  return `tournament-cascade:refresh-pending:${cascadeId}`;
+  return `llm:v3:queue:coordination:tournament-cascade:refresh-pending:${cascadeId}`;
 }
 
 function cascadeRefreshDoneKey(cascadeId: string): string {
-  return `tournament-cascade:refresh-enqueued:${cascadeId}`;
+  return `llm:v3:queue:coordination:tournament-cascade:refresh-enqueued:${cascadeId}`;
 }
 
 function cascadeRefreshLeaseKey(cascadeId: string): string {
-  return `tournament-cascade:refresh-lease:${cascadeId}`;
+  return `llm:v3:queue:coordination:tournament-cascade:refresh-lease:${cascadeId}`;
 }
 
 function cascadeMetaKey(cascadeId: string): string {
-  return `tournament-cascade:meta:${cascadeId}`;
+  return `llm:v3:queue:coordination:tournament-cascade:meta:${cascadeId}`;
 }
 
-export function createCascadeId(eventId: number): string {
-  return `${eventId}-${Date.now()}`;
+export function createCascadeId(season: FplSeasonRef, eventId: number): string {
+  return `${season.seasonCode}-${eventId}-${Date.now()}`;
 }
 
 /**
@@ -70,7 +71,7 @@ export function createCascadeId(eventId: number): string {
  * so an expired counter cannot strand the barrier.
  */
 export async function initCascadeStructureBarrier(cascadeId: string): Promise<void> {
-  const redis = await redisSingleton.getClient();
+  const redis = await queueRedisSingleton.getClient();
   await redis.set(
     cascadeMetaKey(cascadeId),
     String(CASCADE_COMPLETION_BARRIER_JOBS.length),
@@ -154,7 +155,7 @@ export async function noteCascadeStructureJobComplete(
   cascadeId: string,
   jobKey: string,
 ): Promise<void> {
-  const redis = await redisSingleton.getClient();
+  const redis = await queueRedisSingleton.getClient();
   const ttl = String(CASCADE_BARRIER_TTL_SECONDS);
   const roles = CASCADE_COMPLETION_BARRIER_JOBS;
   const roleKeys = roles.flatMap((role) => [
@@ -205,7 +206,7 @@ export type CascadeRefreshClaimResult =
 export async function tryClaimCascadeRefreshEnqueue(
   cascadeId: string,
 ): Promise<CascadeRefreshClaimResult> {
-  const redis = await redisSingleton.getClient();
+  const redis = await queueRedisSingleton.getClient();
   const code = (await redis.eval(
     TRY_CLAIM_CASCADE_REFRESH_LUA,
     3,
@@ -232,7 +233,7 @@ export async function tryClaimCascadeRefreshEnqueue(
 
 /** Mark MV refresh as successfully enqueued (durable; retries will no-op). */
 export async function markCascadeRefreshEnqueued(cascadeId: string): Promise<void> {
-  const redis = await redisSingleton.getClient();
+  const redis = await queueRedisSingleton.getClient();
   await redis.set(cascadeRefreshDoneKey(cascadeId), '1', 'EX', CASCADE_BARRIER_TTL_SECONDS);
   await redis.del(cascadeRefreshPendingKey(cascadeId));
   await redis.del(cascadeRefreshLeaseKey(cascadeId));
@@ -240,12 +241,13 @@ export async function markCascadeRefreshEnqueued(cascadeId: string): Promise<voi
 
 /** Release enqueue lease after a failed queue.add so BullMQ retries can try again. */
 export async function releaseCascadeRefreshEnqueueClaim(cascadeId: string): Promise<void> {
-  const redis = await redisSingleton.getClient();
+  const redis = await queueRedisSingleton.getClient();
   await redis.del(cascadeRefreshLeaseKey(cascadeId));
 }
 
 async function enqueueTournamentSyncJob(
   jobName: TournamentSyncJobName,
+  season: FplSeasonRef,
   eventId: number,
   source: TournamentSyncJobSource = 'cron',
   options: TournamentSyncEnqueueOptions = {},
@@ -254,6 +256,8 @@ async function enqueueTournamentSyncJob(
     const tier = getTournamentSyncJobPriority(jobName as TournamentSyncPriorityJobName);
     const queue = getTournamentSyncQueue(tier);
     const jobData: TournamentSyncJobData = {
+      seasonId: season.seasonId,
+      seasonCode: season.seasonCode,
       eventId,
       source,
       triggeredAt: new Date().toISOString(),
@@ -279,7 +283,9 @@ async function enqueueTournamentSyncJob(
 
     // Callers may provide a deterministic ID for bounded recurring slots.
     // Other cron, manual, and cascade runs retain unique IDs.
-    const jobId = options.jobId ?? `${jobName}-e${eventId}-${Date.now()}`;
+    const jobId = options.jobId
+      ? `${season.seasonCode}-${options.jobId}`
+      : `${jobName}-${season.seasonCode}-e${eventId}-${Date.now()}`;
 
     const job = await queue.add(jobName, jobData, {
       jobId,
@@ -318,66 +324,93 @@ async function enqueueTournamentSyncJob(
 
 // Base job (triggers cascade)
 export const enqueueTournamentEventResults = (
+  season: FplSeasonRef,
   eventId: number,
   source?: TournamentSyncJobSource,
   options?: TournamentSyncEnqueueOptions,
-) => enqueueTournamentSyncJob(TOURNAMENT_JOBS.EVENT_RESULTS, eventId, source, options);
+) => enqueueTournamentSyncJob(TOURNAMENT_JOBS.EVENT_RESULTS, season, eventId, source, options);
 
 // Cascade jobs
 export const enqueueTournamentPointsRace = (
+  season: FplSeasonRef,
   eventId: number,
   source?: TournamentSyncJobSource,
   options?: TournamentSyncEnqueueOptions,
-) => enqueueTournamentSyncJob(TOURNAMENT_JOBS.POINTS_RACE, eventId, source, options);
+) => enqueueTournamentSyncJob(TOURNAMENT_JOBS.POINTS_RACE, season, eventId, source, options);
 
 export const enqueueTournamentBattleRace = (
+  season: FplSeasonRef,
   eventId: number,
   source?: TournamentSyncJobSource,
   options?: TournamentSyncEnqueueOptions,
-) => enqueueTournamentSyncJob(TOURNAMENT_JOBS.BATTLE_RACE, eventId, source, options);
+) => enqueueTournamentSyncJob(TOURNAMENT_JOBS.BATTLE_RACE, season, eventId, source, options);
 
 export const enqueueTournamentKnockout = (
+  season: FplSeasonRef,
   eventId: number,
   source?: TournamentSyncJobSource,
   options?: TournamentSyncEnqueueOptions,
-) => enqueueTournamentSyncJob(TOURNAMENT_JOBS.KNOCKOUT, eventId, source, options);
+) => enqueueTournamentSyncJob(TOURNAMENT_JOBS.KNOCKOUT, season, eventId, source, options);
 
 export const enqueueTournamentTransfersPost = (
+  season: FplSeasonRef,
   eventId: number,
   source?: TournamentSyncJobSource,
   options?: TournamentSyncEnqueueOptions,
-) => enqueueTournamentSyncJob(TOURNAMENT_JOBS.TRANSFERS_POST, eventId, source, options);
+) => enqueueTournamentSyncJob(TOURNAMENT_JOBS.TRANSFERS_POST, season, eventId, source, options);
 
 export const enqueueTournamentCupResults = (
+  season: FplSeasonRef,
   eventId: number,
   source?: TournamentSyncJobSource,
   options?: TournamentSyncEnqueueOptions,
-) => enqueueTournamentSyncJob(TOURNAMENT_JOBS.CUP_RESULTS, eventId, source, options);
+) => enqueueTournamentSyncJob(TOURNAMENT_JOBS.CUP_RESULTS, season, eventId, source, options);
 
 export const enqueueTournamentSelectionStats = (
+  season: FplSeasonRef,
   eventId: number,
   source?: TournamentSyncJobSource,
   options?: TournamentSyncEnqueueOptions,
-) => enqueueTournamentSyncJob(TOURNAMENT_JOBS.SELECTION_STATS, eventId, source, options);
+) => enqueueTournamentSyncJob(TOURNAMENT_JOBS.SELECTION_STATS, season, eventId, source, options);
 
 // Materialized view refresh (after structure cascade barrier completes)
 export const enqueueTournamentMaterializedViewsRefresh = (
+  season: FplSeasonRef,
   eventId: number,
   source?: TournamentSyncJobSource,
   options?: TournamentSyncEnqueueOptions,
-) => enqueueTournamentSyncJob(TOURNAMENT_JOBS.MATERIALIZED_VIEWS_REFRESH, eventId, source, options);
+) =>
+  enqueueTournamentSyncJob(
+    TOURNAMENT_JOBS.MATERIALIZED_VIEWS_REFRESH,
+    season,
+    eventId,
+    source,
+    options,
+  );
 
 // Independent jobs
-export const enqueueTournamentEventPicks = (eventId: number, source?: TournamentSyncJobSource) =>
-  enqueueTournamentSyncJob(TOURNAMENT_JOBS.EVENT_PICKS, eventId, source);
+export const enqueueTournamentEventPicks = (
+  season: FplSeasonRef,
+  eventId: number,
+  source?: TournamentSyncJobSource,
+) => enqueueTournamentSyncJob(TOURNAMENT_JOBS.EVENT_PICKS, season, eventId, source);
 
-export const enqueueTournamentTransfersPre = (eventId: number, source?: TournamentSyncJobSource) =>
-  enqueueTournamentSyncJob(TOURNAMENT_JOBS.TRANSFERS_PRE, eventId, source);
+export const enqueueTournamentTransfersPre = (
+  season: FplSeasonRef,
+  eventId: number,
+  source?: TournamentSyncJobSource,
+) => enqueueTournamentSyncJob(TOURNAMENT_JOBS.TRANSFERS_PRE, season, eventId, source);
 
-export const enqueueTournamentInfo = (eventId: number, source?: TournamentSyncJobSource) =>
-  enqueueTournamentSyncJob(TOURNAMENT_JOBS.INFO, eventId, source);
+export const enqueueTournamentInfo = (
+  season: FplSeasonRef,
+  eventId: number,
+  source?: TournamentSyncJobSource,
+) => enqueueTournamentSyncJob(TOURNAMENT_JOBS.INFO, season, eventId, source);
 
-export const enqueueTournamentRosterSync = (source?: TournamentSyncJobSource) =>
-  enqueueTournamentSyncJob(TOURNAMENT_JOBS.ROSTER_SYNC, 0, source, {
+export const enqueueTournamentRosterSync = (
+  season: FplSeasonRef,
+  source?: TournamentSyncJobSource,
+) =>
+  enqueueTournamentSyncJob(TOURNAMENT_JOBS.ROSTER_SYNC, season, 0, source, {
     jobId: `tournament-roster-sync-${new Date().toISOString().slice(0, 10)}`,
   });

@@ -1,7 +1,9 @@
 import { cron } from '@elysiajs/cron';
 import { Elysia } from 'elysia';
 
-import { eventsCache } from '../cache/operations';
+import { readCoreSnapshotCache } from '../cache/core-snapshot-cache';
+import { eventRepository } from '../repositories/events';
+import { seasonRepository } from '../repositories/seasons';
 import { isFPLSeason } from '../utils/conditions';
 import { executeTrackedCron } from '../utils/job-run-logger';
 import { logInfo } from '../utils/logger';
@@ -14,40 +16,45 @@ export type ManualEventCurrentRefreshResult = {
 };
 
 /**
- * HTTP / ops trigger: recomputes `event:current` from the `Event:{season}` hash immediately.
- * Does not check isFPLSeason (cron still does). If the derived gameweek id changes, enqueues
- * the atomic core snapshot like the automatic path.
+ * HTTP / ops trigger: compares the database-derived current event with the active
+ * immutable core publication. A mismatch enqueues a complete core rebuild.
  */
 export async function runManualEventCurrentRefresh(): Promise<ManualEventCurrentRefreshResult> {
-  const updated = await eventsCache.refreshCurrent();
-  if (!updated) {
+  const season = await seasonRepository.findCurrent();
+  const [current, publication] = await Promise.all([
+    eventRepository.findCurrent(season),
+    readCoreSnapshotCache(season.seasonCode),
+  ]);
+  if (publication?.currentEventId === (current?.id ?? null)) {
     return { refreshed: false };
   }
 
   logInfo('Manual event-current-refresh: gameweek id changed, enqueuing core snapshot');
   try {
-    const job = await enqueueCoreSnapshotJob('manual');
-    logInfo('Core snapshot job enqueued (manual after event:current refresh)', { jobId: job.id });
+    const job = await enqueueCoreSnapshotJob(season, 'manual');
+    logInfo('Core snapshot job enqueued after current-event publication check', { jobId: job.id });
     return { refreshed: true, eventsSyncJobId: job.id };
   } catch {
-    logInfo('Core snapshot job already enqueued or failed (manual after event:current refresh)');
+    logInfo('Core snapshot job already enqueued or failed after current-event publication check');
     return { refreshed: true };
   }
 }
 
 export async function runEventCurrentRefresh() {
   const now = new Date();
-  if (!(await isFPLSeason(now))) {
+  const season = await seasonRepository.findCurrent();
+  if (!(await isFPLSeason(season, now))) {
     return;
   }
 
-  // Derive current GW from Event:{season} via deadlines every tick. A former isDeadlineDay()
-  // gate compared local calendar dates to the next GW and could skip real transitions.
-  const updated = await eventsCache.refreshCurrent();
-  if (updated) {
+  const [current, publication] = await Promise.all([
+    eventRepository.findCurrent(season),
+    readCoreSnapshotCache(season.seasonCode),
+  ]);
+  if (publication?.currentEventId !== (current?.id ?? null)) {
     logInfo('Gameweek transition detected - triggering core snapshot');
     try {
-      const job = await enqueueCoreSnapshotJob('event-transition');
+      const job = await enqueueCoreSnapshotJob(season, 'event-transition');
       logInfo('Core snapshot job enqueued (transition)', { jobId: job.id });
     } catch {
       logInfo('Core snapshot job already enqueued or failed (transition)');

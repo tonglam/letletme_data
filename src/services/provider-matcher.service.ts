@@ -1,12 +1,12 @@
 import { and, eq, sql } from 'drizzle-orm';
 
 import {
-  understatMatches,
-  understatPlayers,
-  understatPlayerMatchStats,
-  understatPlayerSeasons,
-  understatTeams,
-  understatTeamSeasons,
+  matchesInUnderstat as understatMatches,
+  playersInUnderstat as understatPlayers,
+  playerMatchStatsInUnderstat as understatPlayerMatchStats,
+  playerSeasonsInUnderstat as understatPlayerSeasons,
+  teamsInUnderstat as understatTeams,
+  teamSeasonsInUnderstat as understatTeamSeasons,
 } from '../db/schemas/index.schema';
 import { getDb } from '../db/singleton';
 import {
@@ -177,14 +177,14 @@ export async function manualVerifyProviderTeam(input: {
   const [understatTeam, fplTeam] = await Promise.all([
     db
       .select({
-        id: understatTeams.id,
+        id: understatTeams.teamId,
         title: understatTeamSeasons.sourceTitle,
       })
       .from(understatTeamSeasons)
-      .innerJoin(understatTeams, eq(understatTeamSeasons.teamId, understatTeams.id))
+      .innerJoin(understatTeams, eq(understatTeamSeasons.teamId, understatTeams.teamId))
       .where(
         and(
-          eq(understatTeamSeasons.season, input.season),
+          eq(understatTeamSeasons.seasonCode, input.season),
           eq(understatTeamSeasons.teamId, input.understatTeamId),
         ),
       )
@@ -264,7 +264,7 @@ export async function reconcileProviderMatches(season: string) {
       statuses: [...VERIFIED_STATUSES],
     }),
     providerIdentityRepository.findMatchLinks({ season }),
-    db.select().from(understatMatches).where(eq(understatMatches.season, season)),
+    db.select().from(understatMatches).where(eq(understatMatches.seasonCode, season)),
     fplSeasonDataRepository.findFixtures(season),
   ]);
   const existingLinks = allExistingLinks.filter(
@@ -279,7 +279,7 @@ export async function reconcileProviderMatches(season: string) {
   for (const link of existingLinks.filter((candidate) =>
     isVerifiedProviderLinkStatus(candidate.status),
   )) {
-    const understat = understatRows.find((row) => String(row.id) === link.leftMatchId);
+    const understat = understatRows.find((row) => String(row.matchId) === link.leftMatchId);
     const fpl = fplByCode.get(link.rightMatchId);
     if (!understat || !fpl) continue;
     const valid =
@@ -299,7 +299,7 @@ export async function reconcileProviderMatches(season: string) {
   let verified = 0;
   let ambiguous = 0;
   for (const match of understatRows.filter((row) => row.isResult)) {
-    if (protectedLeftMatchIds.has(String(match.id))) continue;
+    if (protectedLeftMatchIds.has(String(match.matchId))) continue;
     const homeTeamCode = teamMap.get(match.homeTeamId);
     const awayTeamCode = teamMap.get(match.awayTeamId);
     if (!homeTeamCode || !awayTeamCode) continue;
@@ -319,7 +319,7 @@ export async function reconcileProviderMatches(season: string) {
       await providerIdentityRepository.upsertMatchLink({
         season,
         leftProvider: 'understat',
-        leftMatchId: String(match.id),
+        leftMatchId: String(match.matchId),
         rightProvider: 'fpl',
         rightMatchId: String(candidate.fixtureCode),
         status,
@@ -368,16 +368,19 @@ export async function reconcileProviderPlayers(season: string) {
         name: sql<string>`COALESCE(${understatPlayerSeasons.sourceName}, ${understatPlayers.name})`,
       })
       .from(understatPlayerMatchStats)
-      .innerJoin(understatPlayers, eq(understatPlayerMatchStats.playerId, understatPlayers.id))
-      .innerJoin(understatMatches, eq(understatPlayerMatchStats.matchId, understatMatches.id))
+      .innerJoin(
+        understatPlayers,
+        eq(understatPlayerMatchStats.playerId, understatPlayers.playerId),
+      )
+      .innerJoin(understatMatches, eq(understatPlayerMatchStats.matchId, understatMatches.matchId))
       .leftJoin(
         understatPlayerSeasons,
         and(
           eq(understatPlayerSeasons.playerId, understatPlayerMatchStats.playerId),
-          eq(understatPlayerSeasons.season, season),
+          eq(understatPlayerSeasons.seasonCode, season),
         ),
       )
-      .where(eq(understatMatches.season, season)),
+      .where(eq(understatMatches.seasonCode, season)),
     fplSeasonDataRepository.findPlayers(season),
   ]);
   const teamMap = verifiedTeamMap(entityLinks, season);

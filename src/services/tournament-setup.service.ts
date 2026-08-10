@@ -2,8 +2,7 @@ import {
   tournamentSetupLifecycleScope,
   tournamentSetupRebuildScopes,
 } from '../domain/mutation-scope';
-import { invalidateTournamentGraphQLCaches } from '../cache/tournament-graphql-cache';
-import { getActiveCacheSeason } from '../cache/cache-season';
+import type { FplSeasonRef } from '../domain/fpl-season';
 import { estimateTournamentSetupRequests, getTournamentBackfillWindow } from '../domain/tournament';
 import { enqueueTournamentSetup } from '../jobs/tournament-setup.jobs';
 import { eventRepository } from '../repositories/events';
@@ -95,6 +94,7 @@ function elapsedBetween(start: string | null | undefined, end: string | null | u
 }
 
 export async function finalizePublishedTournamentSetup(
+  season: FplSeasonRef,
   tournamentId: number,
   warningMessage: string | null,
   warningCount: number,
@@ -102,8 +102,9 @@ export async function finalizePublishedTournamentSetup(
   // Resume first. If that transition fails, the setup remains processing and
   // the worker/watchdog can retry instead of leaving an inactive tournament
   // terminally marked ready.
-  await tournamentRosterRepository.markReadyAndResume(tournamentId);
+  await tournamentRosterRepository.markReadyAndResume(season, tournamentId);
   await tournamentInfoRepository.markSetupResult(
+    season,
     tournamentId,
     'ready',
     warningMessage,
@@ -111,7 +112,10 @@ export async function finalizePublishedTournamentSetup(
   );
 }
 
-export async function setupTournamentStructure(tournamentId: number): Promise<void> {
+export async function setupTournamentStructure(
+  season: FplSeasonRef,
+  tournamentId: number,
+): Promise<void> {
   const setupStartedAtMs = performance.now();
   const phaseDurationsMs = {
     syncing_entries: 0,
@@ -132,8 +136,8 @@ export async function setupTournamentStructure(tournamentId: number): Promise<vo
   let tournament: Awaited<ReturnType<typeof tournamentInfoRepository.findSetupConfig>>;
   try {
     [initialStatus, tournament] = await Promise.all([
-      tournamentInfoRepository.findSetupStatus(tournamentId),
-      tournamentInfoRepository.findSetupConfig(tournamentId),
+      tournamentInfoRepository.findSetupStatus(season, tournamentId),
+      tournamentInfoRepository.findSetupConfig(season, tournamentId),
     ]);
   } catch (error) {
     const context = getJobLogContext();
@@ -196,15 +200,17 @@ export async function setupTournamentStructure(tournamentId: number): Promise<vo
   let standingsPublished = false;
 
   try {
-    await tournamentInfoRepository.markSetupProcessing(tournamentId);
+    await tournamentInfoRepository.markSetupProcessing(season, tournamentId);
     const setupIssues: TournamentSetupIssue[] = [];
-    const entryIds = await tournamentEntryRepository.findEntryIdsByTournamentId(tournamentId);
+    const entryIds = await tournamentEntryRepository.findEntryIdsByTournamentId(
+      season,
+      tournamentId,
+    );
     entryCount = entryIds.length;
-    const finalizedEvent = await eventRepository.findLatestFinalized();
+    const finalizedEvent = await eventRepository.findLatestFinalized(season);
     const window = getTournamentBackfillWindow(tournament, finalizedEvent?.id ?? null);
     eventCount = window ? window.endEventId - window.startEventId + 1 : 0;
     const targetEventId = window?.endEventId ?? 0;
-    const setupSeason = await getActiveCacheSeason();
     let phaseStartedAtMs = performance.now();
 
     // Entry FPL sync: entry-core only — do NOT hold tournament-structure:global
@@ -217,12 +223,12 @@ export async function setupTournamentStructure(tournamentId: number): Promise<vo
         scopes: ['entry-core:all'],
       },
       () =>
-        syncTournamentEntryDetails(entryIds, {
+        syncTournamentEntryDetails(season, entryIds, {
           targetEventId,
-          season: setupSeason,
           onPlan: async (plan) => {
             entryPlan = plan;
             await tournamentInfoRepository.markSetupProgress(
+              season,
               tournamentId,
               'syncing_entries',
               0,
@@ -231,6 +237,7 @@ export async function setupTournamentStructure(tournamentId: number): Promise<vo
           },
           onProgress: (completed, total) =>
             tournamentInfoRepository.markSetupProgress(
+              season,
               tournamentId,
               'syncing_entries',
               completed,
@@ -259,8 +266,17 @@ export async function setupTournamentStructure(tournamentId: number): Promise<vo
     }
 
     phaseStartedAtMs = performance.now();
-    await tournamentInfoRepository.markSetupProgress(tournamentId, 'building_structure', 0, 1);
-    const entrySeeds = await tournamentEntryRepository.findEntrySeedsByTournamentId(tournamentId);
+    await tournamentInfoRepository.markSetupProgress(
+      season,
+      tournamentId,
+      'building_structure',
+      0,
+      1,
+    );
+    const entrySeeds = await tournamentEntryRepository.findEntrySeedsByTournamentId(
+      season,
+      tournamentId,
+    );
 
     // Structure rebuild: per-tournament + global (C4 mutual exclusion with results).
     await withMutationConflictGuard(
@@ -270,9 +286,15 @@ export async function setupTournamentStructure(tournamentId: number): Promise<vo
         tournamentId,
         scopes: tournamentSetupRebuildScopes(tournamentId),
       },
-      () => rebuildTournamentStructure(tournament, entrySeeds),
+      () => rebuildTournamentStructure(season, tournament, entrySeeds),
     );
-    await tournamentInfoRepository.markSetupProgress(tournamentId, 'building_structure', 1, 1);
+    await tournamentInfoRepository.markSetupProgress(
+      season,
+      tournamentId,
+      'building_structure',
+      1,
+      1,
+    );
     phaseDurationsMs.building_structure = Math.round(performance.now() - phaseStartedAtMs);
     logInfo('Tournament setup phase completed', {
       tournamentId,
@@ -288,13 +310,21 @@ export async function setupTournamentStructure(tournamentId: number): Promise<vo
       eventCount,
       ...estimateTournamentSetupRequests(entryIds.length, eventCount),
     });
-    await tournamentInfoRepository.markSetupProgress(tournamentId, 'calculating_standings', 0, 0);
+    await tournamentInfoRepository.markSetupProgress(
+      season,
+      tournamentId,
+      'calculating_standings',
+      0,
+      0,
+    );
     if (window) {
       await ensureTournamentCoreResults(
+        season,
         entryIds,
         window,
         (completed) =>
           tournamentInfoRepository.markSetupProgress(
+            season,
             tournamentId,
             'calculating_standings',
             completed,
@@ -303,6 +333,7 @@ export async function setupTournamentStructure(tournamentId: number): Promise<vo
         async (plan) => {
           corePlan = plan;
           await tournamentInfoRepository.markSetupProgress(
+            season,
             tournamentId,
             'calculating_standings',
             0,
@@ -310,7 +341,6 @@ export async function setupTournamentStructure(tournamentId: number): Promise<vo
           );
         },
         {
-          setupSeason,
           requirePicksForEvents:
             tournament.knockoutMode !== 'no_knockout' &&
             tournament.knockoutStartedEventId &&
@@ -332,25 +362,26 @@ export async function setupTournamentStructure(tournamentId: number): Promise<vo
       );
     }
     await calculateTournamentHistoryFromStoredResults(
+      season,
       tournamentId,
       tournament,
       window,
       (completed) =>
         tournamentInfoRepository.markSetupProgress(
+          season,
           tournamentId,
           'calculating_standings',
           corePlan.missingPairs + completed,
           corePlan.missingPairs + eventCount,
         ),
     );
-    const coreAudit = await auditTournamentSetup(tournament, window);
+    const coreAudit = await auditTournamentSetup(season, tournament, window);
     const blockingCoreIssues = coreAudit.issues.filter(isBlockingCoreAuditIssue);
     if (blockingCoreIssues.length > 0) {
       throw new Error(`Core tournament audit failed: ${blockingCoreIssues.join('; ')}`);
     }
-    await tournamentInfoRepository.markStandingsReady(tournamentId, setupSeason);
+    await tournamentInfoRepository.markStandingsReady(season, tournamentId);
     standingsPublished = true;
-    await invalidateTournamentGraphQLCaches('standings-publication');
     phaseDurationsMs.calculating_standings = Math.round(performance.now() - phaseStartedAtMs);
     logInfo('Tournament setup phase completed', {
       tournamentId,
@@ -361,15 +392,21 @@ export async function setupTournamentStructure(tournamentId: number): Promise<vo
     });
 
     phaseStartedAtMs = performance.now();
-    await tournamentInfoRepository.markSetupProgress(tournamentId, 'enriching_history', 0, 0);
+    await tournamentInfoRepository.markSetupProgress(
+      season,
+      tournamentId,
+      'enriching_history',
+      0,
+      0,
+    );
     setupIssues.push(
-      ...(await enrichTournamentHistory(tournamentId, entryIds, window, {
-        setupSeason,
+      ...(await enrichTournamentHistory(season, tournamentId, entryIds, window, {
         onPlan: (plan) => {
           enrichmentPlan = plan;
         },
         onProgress: (completed, total) =>
           tournamentInfoRepository.markSetupProgress(
+            season,
             tournamentId,
             'enriching_history',
             completed,
@@ -386,8 +423,8 @@ export async function setupTournamentStructure(tournamentId: number): Promise<vo
     });
 
     phaseStartedAtMs = performance.now();
-    await tournamentInfoRepository.markSetupProgress(tournamentId, 'finalizing', 0, 1);
-    const audit = await auditTournamentSetup(tournament, window);
+    await tournamentInfoRepository.markSetupProgress(season, tournamentId, 'finalizing', 0, 1);
+    const audit = await auditTournamentSetup(season, tournament, window);
     setupIssues.push(
       ...audit.issues.map((message) => ({
         scope: 'event-results' as const,
@@ -395,7 +432,7 @@ export async function setupTournamentStructure(tournamentId: number): Promise<vo
       })),
     );
     await refreshTournamentMaterializedViews();
-    await tournamentInfoRepository.markSetupProgress(tournamentId, 'finalizing', 1, 1);
+    await tournamentInfoRepository.markSetupProgress(season, tournamentId, 'finalizing', 1, 1);
     phaseDurationsMs.finalizing = Math.round(performance.now() - phaseStartedAtMs);
     logInfo('Tournament setup phase completed', {
       tournamentId,
@@ -405,8 +442,12 @@ export async function setupTournamentStructure(tournamentId: number): Promise<vo
     });
 
     const warningMessage = formatSetupWarning(setupIssues);
-    await finalizePublishedTournamentSetup(tournamentId, warningMessage, setupIssues.length);
-    await invalidateTournamentGraphQLCaches('setup-terminal');
+    await finalizePublishedTournamentSetup(
+      season,
+      tournamentId,
+      warningMessage,
+      setupIssues.length,
+    );
     outcome = setupIssues.length > 0 ? 'ready_with_warnings' : 'ready';
     logInfo('Tournament setup completed', {
       tournamentId,
@@ -425,19 +466,17 @@ export async function setupTournamentStructure(tournamentId: number): Promise<vo
       standingsPublished,
     });
     if (standingsPublished) {
-      await finalizePublishedTournamentSetup(tournamentId, message, 1);
-      await invalidateTournamentGraphQLCaches('setup-warning');
+      await finalizePublishedTournamentSetup(season, tournamentId, message, 1);
       outcome = 'ready_with_warnings';
       return;
     }
     outcome = 'failed_before_standings';
-    await tournamentInfoRepository.markSetupResult(tournamentId, 'failed', message, 0);
-    await invalidateTournamentGraphQLCaches('setup-failed');
+    await tournamentInfoRepository.markSetupResult(season, tournamentId, 'failed', message, 0);
     throw error;
   } finally {
     let terminalStatus = null;
     try {
-      terminalStatus = await tournamentInfoRepository.findSetupStatus(tournamentId);
+      terminalStatus = await tournamentInfoRepository.findSetupStatus(season, tournamentId);
     } catch (error) {
       logError('Unable to read terminal tournament setup status for reporting', error, {
         tournamentId,
@@ -472,36 +511,35 @@ export async function setupTournamentStructure(tournamentId: number): Promise<vo
   }
 }
 
-export async function requeueTournamentSetup(tournamentId: number) {
-  const tournament = await tournamentInfoRepository.findSetupConfig(tournamentId);
+export async function requeueTournamentSetup(season: FplSeasonRef, tournamentId: number) {
+  const tournament = await tournamentInfoRepository.findSetupConfig(season, tournamentId);
   if (!tournament) {
     throw new NotFoundError('Tournament not found.', 'TOURNAMENT_NOT_FOUND');
   }
 
   let retryStatePrepared = false;
   try {
-    return await enqueueTournamentSetup(tournamentId, 'manual', {
+    return await enqueueTournamentSetup(season, tournamentId, 'manual', {
       forceNew: true,
       prepareEnqueue: async () => {
-        await tournamentInfoRepository.markSetupRetryQueued(tournamentId);
+        await tournamentInfoRepository.markSetupRetryQueued(season, tournamentId);
         retryStatePrepared = true;
-        await invalidateTournamentGraphQLCaches('setup-retry-queued');
       },
     });
   } catch (error) {
     if (!retryStatePrepared) throw error;
     const message = error instanceof Error ? error.message : 'Unable to enqueue setup retry.';
-    await tournamentInfoRepository.markSetupResult(tournamentId, 'failed', message, 0);
-    await invalidateTournamentGraphQLCaches('setup-retry-failed');
+    await tournamentInfoRepository.markSetupResult(season, tournamentId, 'failed', message, 0);
     throw error;
   }
 }
 
 export async function recoverStuckTournamentSetups(
+  season: FplSeasonRef,
   cutoffMinutes: number,
   isActive?: (tournamentId: number) => Promise<boolean>,
 ): Promise<{ recovered: number[]; skippedActive: number[] }> {
-  const stuck = await tournamentInfoRepository.findStuckProcessing(cutoffMinutes);
+  const stuck = await tournamentInfoRepository.findStuckProcessing(season, cutoffMinutes);
   if (stuck.length === 0) {
     return { recovered: [], skippedActive: [] };
   }
@@ -533,6 +571,7 @@ export async function recoverStuckTournamentSetups(
           // lock is acquired, so compare-and-swap the exact observed heartbeat
           // before changing canonical state.
           const marked = await tournamentInfoRepository.markStuckSetupQueuedIfUnchanged(
+            season,
             row.id,
             row.setupProgressUpdatedAt,
             `Setup stopped progressing at ${row.setupProgressUpdatedAt ?? 'unknown'}; re-enqueued by watchdog.`,
@@ -544,7 +583,7 @@ export async function recoverStuckTournamentSetups(
             });
             return;
           }
-          await enqueueTournamentSetup(row.id, 'watchdog', {
+          await enqueueTournamentSetup(season, row.id, 'watchdog', {
             forceNew: true,
             activeSettleTimeoutMs: 2_000,
           });

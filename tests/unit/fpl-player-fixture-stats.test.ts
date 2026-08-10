@@ -4,7 +4,7 @@ import { transformFplPlayerFixtureEvidence } from '../../src/transformers/fpl-pl
 import { rawExplainElementsFixture } from '../fixtures/event-live-explains.fixtures';
 
 describe('FPL per-fixture evidence transformer', () => {
-  test('keeps DGW fixtures separate before event aggregation', () => {
+  test('keeps double-gameweek fixtures separate before event aggregation', () => {
     const rows = transformFplPlayerFixtureEvidence(99, rawExplainElementsFixture);
     expect(rows).toHaveLength(3);
     expect(rows.find((row) => row.fixtureId === 401)).toMatchObject({
