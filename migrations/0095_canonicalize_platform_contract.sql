@@ -1,5 +1,5 @@
--- Canonicalize the bridge and publication contracts without rewriting any
--- unrelated business row.
+-- Canonicalize bridge, publication, and operational control metadata without
+-- rewriting any unrelated business row.
 
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '2min';
@@ -12,6 +12,8 @@ DECLARE
   retired_singleton_count bigint;
   player_link_count bigint;
   value_seed_count bigint;
+  cache_metadata_count bigint;
+  publication_skip_metadata_count bigint;
 BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM information_schema.columns
@@ -41,12 +43,35 @@ BEGIN
   IF player_link_count NOT IN (0, 2192) OR EXISTS (
     SELECT 1 FROM bridge.entity_links
     WHERE rule_version <> 'understat-fpl-player-name-v3'
+      OR evidence IS NULL
+      OR jsonb_typeof(evidence) <> 'object'
+      OR evidence ->> 'ruleVersion' IS DISTINCT FROM 'understat-fpl-player-name-v3'
+      OR evidence ? 'ruleId'
   ) THEN
-    RAISE EXCEPTION 'unexpected bridge.entity_links rule population';
+    RAISE EXCEPTION 'unexpected bridge.entity_links rule or evidence population';
   END IF;
 
   IF EXISTS (SELECT 1 FROM bridge.match_links) THEN
     RAISE EXCEPTION 'unexpected bridge.match_links rows require an explicit rule migration';
+  END IF;
+
+  SELECT
+    count(*) FILTER (WHERE metadata ? 'legacy_cache_revision'),
+    count(*) FILTER (WHERE metadata ? 'legacy_publication_skip_reason')
+  INTO cache_metadata_count, publication_skip_metadata_count
+  FROM ops.sync_runs;
+
+  IF cache_metadata_count NOT IN (0, 27)
+    OR publication_skip_metadata_count NOT IN (0, 4)
+  THEN
+    RAISE EXCEPTION 'unexpected retired sync-run metadata population';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1 FROM ops.sync_items
+    WHERE normalized_payload ?| ARRAY['version', 'schemaVersion', 'planVersion', 'engineVersion']
+  ) THEN
+    RAISE EXCEPTION 'stored sync-item payloads still require explicit canonicalization';
   END IF;
 
   SELECT count(*) INTO value_seed_count
@@ -126,8 +151,21 @@ ALTER TABLE bridge.match_links
   TO bridge_match_links_required_fields_nonempty;
 
 UPDATE bridge.entity_links
-SET rule_id = 'understat-fpl-player-name'
+SET
+  rule_id = 'understat-fpl-player-name',
+  evidence = (evidence - 'ruleVersion')
+    || jsonb_build_object('ruleId', 'understat-fpl-player-name')
 WHERE rule_id = 'understat-fpl-player-name-v3';
+
+UPDATE ops.sync_runs
+SET metadata = metadata - ARRAY[
+  'legacy_cache_revision',
+  'legacy_publication_skip_reason'
+]
+WHERE metadata ?| ARRAY[
+  'legacy_cache_revision',
+  'legacy_publication_skip_reason'
+];
 
 ALTER TABLE fpl.player_market_snapshots
   DROP CONSTRAINT player_market_snapshots_source_valid;
@@ -229,10 +267,26 @@ BEGIN
   IF EXISTS (
     SELECT 1 FROM bridge.entity_links
     WHERE rule_id <> 'understat-fpl-player-name'
+      OR evidence ? 'ruleVersion'
+      OR evidence ->> 'ruleId' IS DISTINCT FROM rule_id
   ) OR EXISTS (
-    SELECT 1 FROM bridge.match_links WHERE btrim(rule_id) = ''
+    SELECT 1 FROM bridge.match_links
+    WHERE btrim(rule_id) = '' OR evidence ? 'ruleVersion'
   ) THEN
     RAISE EXCEPTION 'bridge rule identifiers are not canonical';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1 FROM ops.sync_runs
+    WHERE metadata ?| ARRAY[
+      'legacy_cache_revision',
+      'legacy_publication_skip_reason'
+    ]
+  ) OR EXISTS (
+    SELECT 1 FROM ops.sync_items
+    WHERE normalized_payload ?| ARRAY['version', 'schemaVersion', 'planVersion', 'engineVersion']
+  ) THEN
+    RAISE EXCEPTION 'operational control metadata is not canonical';
   END IF;
 
   IF EXISTS (
