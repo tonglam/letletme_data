@@ -1,5 +1,8 @@
-import { readCoreSnapshotCache } from '../cache/core-snapshot-cache';
-import { normalizeEventDeadline } from '../domain/events';
+import {
+  readCoreSnapshotCache,
+  type CoreSnapshotCacheContents,
+} from '../cache/core-snapshot-cache';
+import { neighbourEventId, normalizeEventDeadline } from '../domain/events';
 import type { FplSeasonRef } from '../domain/fpl-season';
 import { eventRepository } from '../repositories/events';
 import type { Event } from '../types';
@@ -15,13 +18,38 @@ import { logDebug, logError } from '../utils/logger';
  */
 
 // Get current event (cache-first strategy: Redis → DB fallback)
+export function selectCachedCurrentEvent(
+  publication: Pick<CoreSnapshotCacheContents, 'currentEventId' | 'events'>,
+): Event | null {
+  if (publication.currentEventId === null) return null;
+  return publication.events.find((event) => event.id === publication.currentEventId) ?? null;
+}
+
+export function selectCachedEventNeighbour(
+  publication: Pick<CoreSnapshotCacheContents, 'currentEventId' | 'events' | 'manifest'>,
+  offset: -1 | 1,
+): Event | null {
+  if (publication.currentEventId === null) {
+    if (offset === -1) return null;
+    const checkedAt = new Date(publication.manifest.sourceCheckedAt).getTime();
+    const deadline = (event: Event): number =>
+      event.deadlineTime ? new Date(event.deadlineTime).getTime() : Number.POSITIVE_INFINITY;
+    return (
+      publication.events
+        .filter((event) => deadline(event) > checkedAt)
+        .sort((left, right) => deadline(left) - deadline(right))[0] ?? null
+    );
+  }
+
+  const targetId = neighbourEventId(publication.currentEventId, offset);
+  if (targetId === null) return null;
+  return publication.events.find((event) => event.id === targetId) ?? null;
+}
+
 export async function getCurrentEvent(season: FplSeasonRef): Promise<Event | null> {
   try {
     const publication = await readCoreSnapshotCache(season.seasonCode);
-    const cached = publication
-      ? (publication.events.find((event) => event.id === publication.currentEventId) ??
-        publication.events.find((event) => event.isCurrent))
-      : null;
+    const cached = publication ? selectCachedCurrentEvent(publication) : null;
     if (cached) {
       logDebug('Current event retrieved from cache', { id: cached.id });
       return normalizeEventDeadline(cached);
@@ -41,7 +69,7 @@ export async function getCurrentEvent(season: FplSeasonRef): Promise<Event | nul
 export async function getNextEvent(season: FplSeasonRef): Promise<Event | null> {
   try {
     const publication = await readCoreSnapshotCache(season.seasonCode);
-    const cached = publication?.events.find((event) => event.isNext) ?? null;
+    const cached = publication ? selectCachedEventNeighbour(publication, 1) : null;
     if (cached) {
       logDebug('Next event retrieved from cache', { id: cached.id });
       return normalizeEventDeadline(cached);
@@ -61,7 +89,7 @@ export async function getNextEvent(season: FplSeasonRef): Promise<Event | null> 
 export async function getPreviousEvent(season: FplSeasonRef): Promise<Event | null> {
   try {
     const publication = await readCoreSnapshotCache(season.seasonCode);
-    const cached = publication?.events.find((event) => event.isPrevious) ?? null;
+    const cached = publication ? selectCachedEventNeighbour(publication, -1) : null;
     if (cached) {
       logDebug('Previous event retrieved from cache', { id: cached.id });
       return normalizeEventDeadline(cached);
