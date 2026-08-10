@@ -235,4 +235,21 @@ describe('v3 production hard-cut workflow', () => {
     expect(operations).not.toContain('legacy-drop');
     expect(workflow).not.toContain('APPROVE_V3_LEGACY_DROP');
   });
+
+  test('validates the activated database with a zero-change repeat and frozen services', () => {
+    const validation = job('v3_validate_database');
+
+    expect(validation).toMatch(/inputs\.operation == 'v3-validate-database'/);
+    expect(validation).toContain('V3_REPEAT_MIGRATIONS_APPLIED=0');
+    expect(validation).toContain('validate-0090-activation.sql');
+    expect(validation).toContain('validate-p5-quality.sql');
+    expect(validation).toContain('capture-public-relation-hashes.sql');
+    expect(validation).toContain('capture-v3-business-relation-hashes.sql');
+    expect(validation).toContain('capture-public-sequence-state.sql');
+    expect(validation).toContain('capture-public-security-contract.sql');
+    expect(validation).toContain('docker compose ps -q api');
+    expect(validation).toContain('docker compose ps -q worker');
+    expect(validation).not.toContain('docker compose up');
+    expect(validation).not.toContain('V3_LEGACY_DROP_APPROVAL');
+  });
 });

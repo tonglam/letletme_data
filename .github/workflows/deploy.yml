@@ -18,6 +18,7 @@ on:
           - v3-preflight
           - v3-stop
           - v3-activate-database
+          - v3-validate-database
           - v3-copy-queues-dry-run
           - v3-copy-queues-execute
           - v3-publish-core-dry-run
@@ -913,3 +914,124 @@ jobs:
             test "$data_http" = "000"
             echo "V3_DATA_API=stopped"
             echo "V3_DATA_WORKER=stopped"
+
+  v3_validate_database:
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'v3-validate-database'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Validate activated production database with services stopped
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+        env:
+          EXPECTED_SHA: ${{ inputs.sha }}
+          IMAGE_REF: ${{ inputs.v3_image_ref }}
+          CUTOVER_RUN_ID: ${{ inputs.v3_cutover_run_id }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
+        with:
+          host: ${{ vars.VPS_HOST }}
+          username: ${{ vars.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script_stop: false
+          envs: EXPECTED_SHA,IMAGE_REF,CUTOVER_RUN_ID,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR
+          script: |
+            set -euo pipefail
+            [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+            [[ "$IMAGE_REF" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]]
+            [[ "$CUTOVER_RUN_ID" =~ ^v3-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{7,12}$ ]]
+            test -d "$VPS_WORKDIR/.git"
+            cd "$VPS_WORKDIR"
+            test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+            test -f .env.migrate
+            test -f sql/v3/validate-0090-activation.sql
+            test -f sql/v3/validate-p5-quality.sql
+            test -z "$(APP_IMAGE="$IMAGE_REF" docker compose ps -q api)"
+            test -z "$(APP_IMAGE="$IMAGE_REF" docker compose ps -q worker)"
+            test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:4000/health || true)" = '000'
+
+            LOWER_USER=$(printf '%s' "$GHCR_USER" | tr '[:upper:]' '[:lower:]')
+            printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$LOWER_USER" --password-stdin
+            APP_IMAGE="$IMAGE_REF" docker compose pull migration
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun run db:migration-contract
+
+            set +e
+            repeat_output=$(APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
+              migration bun run db:apply-sql 2>&1)
+            repeat_status=$?
+            set -e
+            printf '%s\n' "$repeat_output"
+            test "$repeat_status" -eq 0
+            if printf '%s\n' "$repeat_output" | grep -Fq '[sql-migrate] applied '; then
+              echo 'Repeat migration command unexpectedly applied a migration'
+              exit 1
+            fi
+            echo 'V3_REPEAT_MIGRATIONS_APPLIED=0'
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun run db:migrate:status
+
+            PSQL_IMAGE='docker.io/library/postgres:15.8-alpine@sha256:68c8f729caca8638396647002948c0ab753fda787cbee9e887f7166169c6b87e'
+            docker pull "$PSQL_IMAGE"
+            run_psql_file() {
+              sql_file="$1"
+              docker run --rm \
+                --env-file .env.migrate \
+                --volume "$VPS_WORKDIR/sql/v3:/validation:ro" \
+                "$PSQL_IMAGE" \
+                sh -eu -c \
+                'exec psql "$DATABASE_URL" --no-psqlrc --set ON_ERROR_STOP=on --file "/validation/$1"' \
+                sh "$sql_file"
+            }
+
+            run_psql_file validate-0090-activation.sql
+            run_psql_file validate-p5-quality.sql
+            run_psql_file capture-public-relation-hashes.sql
+            run_psql_file capture-v3-business-relation-hashes.sql
+            run_psql_file capture-public-sequence-state.sql
+            run_psql_file capture-public-security-contract.sql
+
+            validation_summary_sql="
+              SELECT jsonb_build_object(
+                'status', 'v3_production_database_validation_passed',
+                'runId', run_id,
+                'runStatus', status,
+                'migrationChecks', (
+                  SELECT count(*) FROM ops.migration_objects
+                  WHERE run_id = '$CUTOVER_RUN_ID'
+                    AND status = 'passed' AND failed_count = 0
+                ),
+                'publicRelations', (
+                  SELECT count(*) FROM pg_class
+                  WHERE relnamespace = 'public'::regnamespace
+                    AND relkind IN ('r', 'p', 'm', 'v')
+                ),
+                'v3BusinessRelations', (
+                  SELECT count(*) FROM pg_class relation_row
+                  JOIN pg_namespace namespace_row
+                    ON namespace_row.oid = relation_row.relnamespace
+                  WHERE namespace_row.nspname IN (
+                    'fpl', 'competition', 'understat', 'bridge', 'reporting'
+                  ) AND relation_row.relkind IN ('r', 'm', 'v')
+                ),
+                'publicSequences', (
+                  SELECT count(*) FROM pg_class
+                  WHERE relnamespace = 'public'::regnamespace AND relkind = 'S'
+                ),
+                'cleanupMigrationsApplied', (
+                  SELECT count(*) FROM ops.schema_migrations
+                  WHERE filename ~ '^009[123]_'
+                )
+              )
+              FROM ops.migration_runs
+              WHERE run_id = '$CUTOVER_RUN_ID';
+            "
+            docker run --rm \
+              --env-file .env.migrate \
+              "$PSQL_IMAGE" \
+              sh -eu -c \
+              'exec psql "$DATABASE_URL" --no-psqlrc --set ON_ERROR_STOP=on --tuples-only --no-align --command "$1"' \
+              sh "$validation_summary_sql"
+            test -z "$(APP_IMAGE="$IMAGE_REF" docker compose ps -q api)"
+            test -z "$(APP_IMAGE="$IMAGE_REF" docker compose ps -q worker)"
+            echo 'V3_DATABASE_VALIDATION_SERVICES=stopped'
