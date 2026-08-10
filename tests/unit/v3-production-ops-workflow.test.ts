@@ -37,7 +37,8 @@ describe('v3 production hard-cut workflow', () => {
       ['v3_redis_queues', 'v3_core_cache'],
       ['v3_core_cache', 'v3_start_api'],
       ['v3_start_api', 'v3_start_worker'],
-      ['v3_start_worker', 'v3_status'],
+      ['v3_start_worker', 'v3_redeploy'],
+      ['v3_redeploy', 'v3_status'],
       ['v3_status', 'v3_terminal_acceptance'],
       ['v3_terminal_acceptance', 'v3_stop'],
     ] as const;
@@ -218,7 +219,7 @@ describe('v3 production hard-cut workflow', () => {
   });
 
   test('starts the worker only after Data API, GraphQL, and queue verification pass', () => {
-    const worker = job('v3_start_worker', 'v3_status');
+    const worker = job('v3_start_worker', 'v3_redeploy');
     const dataHealth = worker.indexOf('http://127.0.0.1:3000/health');
     const graphqlHealth = worker.indexOf('http://127.0.0.1:4000/health');
     const queueVerification = worker.indexOf('redis:cutover verify-queues');
@@ -228,6 +229,45 @@ describe('v3 production hard-cut workflow', () => {
     expect(graphqlHealth).toBeGreaterThan(dataHealth);
     expect(queueVerification).toBeGreaterThan(graphqlHealth);
     expect(startWorker).toBeGreaterThan(queueVerification);
+  });
+
+  test('redeploys merged main without database or activation mutations', () => {
+    const redeploy = job('v3_redeploy', 'v3_status');
+    const exactMain = redeploy.indexOf('test "$(git rev-parse origin/main)" = "$EXPECTED_SHA"');
+    const pullImage = redeploy.indexOf('docker pull "$IMAGE_REF"');
+    const stopWorker = redeploy.indexOf('docker compose stop -t 30 worker');
+    const stopApi = redeploy.indexOf('docker compose stop -t 30 api');
+    const reset = redeploy.indexOf('git reset --hard "$EXPECTED_SHA"');
+    const firstQueueVerification = redeploy.indexOf('redis:cutover verify-queues');
+    const startApi = redeploy.indexOf('docker compose up -d --no-deps --no-build api');
+    const graphqlHealth = redeploy.indexOf('http://127.0.0.1:4000/health');
+    const startWorker = redeploy.indexOf('docker compose up -d --no-deps --no-build worker');
+    const secondQueueVerification = redeploy.lastIndexOf('redis:cutover verify-queues');
+
+    expect(redeploy).toMatch(/inputs\.operation == 'v3-redeploy'/);
+    expect(exactMain).toBeGreaterThan(0);
+    expect(pullImage).toBeGreaterThan(exactMain);
+    expect(stopWorker).toBeGreaterThan(pullImage);
+    expect(stopApi).toBeGreaterThan(stopWorker);
+    expect(reset).toBeGreaterThan(stopApi);
+    expect(firstQueueVerification).toBeGreaterThan(reset);
+    expect(startApi).toBeGreaterThan(firstQueueVerification);
+    expect(graphqlHealth).toBeGreaterThan(startApi);
+    expect(startWorker).toBeGreaterThan(graphqlHealth);
+    expect(secondQueueVerification).toBeGreaterThan(startWorker);
+    expect(redeploy).toContain('V3_DATA_REDEPLOY=passed');
+    expect(redeploy).not.toContain('git clean');
+
+    for (const forbiddenMutation of [
+      'bun run db:migrate',
+      'bun run db:apply-sql',
+      'v3-release-gate',
+      'APPROVE_V3_ACTIVATION',
+      'redis:cutover cleanup',
+      '0091_drop_v2',
+    ]) {
+      expect(redeploy).not.toContain(forbiddenMutation);
+    }
   });
 
   test('starts the API with HTTP contracts and an unchanged queue manifest', () => {

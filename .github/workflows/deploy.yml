@@ -25,6 +25,7 @@ on:
           - v3-publish-core-execute
           - v3-start-api
           - v3-start-worker
+          - v3-redeploy
           - v3-status
           - v3-terminal-acceptance
       sha:
@@ -938,6 +939,133 @@ jobs:
               fi
               sleep 2
             done
+            APP_IMAGE="$IMAGE_REF" docker compose ps api worker
+
+  v3_redeploy:
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'v3-redeploy'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Redeploy activated v3 runtime without database migration
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+        env:
+          EXPECTED_SHA: ${{ inputs.sha }}
+          IMAGE_REF: ${{ inputs.v3_image_ref }}
+          QUEUE_MANIFEST_SHA256: ${{ inputs.v3_queue_manifest_sha256 }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
+        with:
+          host: ${{ vars.VPS_HOST }}
+          username: ${{ vars.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script_stop: false
+          envs: EXPECTED_SHA,IMAGE_REF,QUEUE_MANIFEST_SHA256,GHCR_USER,GHCR_TOKEN,VPS_WORKDIR
+          command_timeout: 15m
+          script: |
+            set -euo pipefail
+            [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+            [[ "$IMAGE_REF" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]]
+            [[ "$QUEUE_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]]
+            test -d "$VPS_WORKDIR/.git"
+            cd "$VPS_WORKDIR"
+            test -f .env.deploy
+            git diff --quiet || { echo "Data VPS checkout has tracked modifications"; exit 1; }
+            git diff --cached --quiet || { echo "Data VPS index has staged modifications"; exit 1; }
+
+            git fetch origin main
+            test "$(git rev-parse origin/main)" = "$EXPECTED_SHA"
+            untracked_file=$(mktemp)
+            target_file=$(mktemp)
+            conflict_file=$(mktemp)
+            trap 'rm -f "$untracked_file" "$target_file" "$conflict_file"' EXIT
+            git ls-files --others --exclude-standard | sort -u > "$untracked_file"
+            git ls-tree -r --name-only "$EXPECTED_SHA" | sort -u > "$target_file"
+            comm -12 "$untracked_file" "$target_file" > "$conflict_file"
+            if [ -s "$conflict_file" ]; then
+              echo "Untracked production files conflict with the merged main target:"
+              cat "$conflict_file"
+              exit 1
+            fi
+
+            LOWER_USER=$(printf '%s' "$GHCR_USER" | tr '[:upper:]' '[:lower:]')
+            printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$LOWER_USER" --password-stdin
+            docker pull "$IMAGE_REF"
+
+            docker compose stop -t 30 worker
+            docker compose stop -t 30 api
+            test -z "$(docker compose ps -q worker)"
+            test -z "$(docker compose ps -q api)"
+
+            git checkout --force main
+            git reset --hard "$EXPECTED_SHA"
+            test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+            APP_IMAGE="$IMAGE_REF" docker compose pull api worker
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun run env:check
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
+              -e V3_REDIS_QUEUE_MANIFEST_SHA256="$QUEUE_MANIFEST_SHA256" \
+              api bun run redis:cutover verify-queues
+
+            APP_IMAGE="$IMAGE_REF" docker compose up -d --no-deps --no-build api
+            for attempt in $(seq 1 30); do
+              if curl --fail --silent http://127.0.0.1:3000/health >/dev/null; then
+                break
+              fi
+              if [ "$attempt" -eq 30 ]; then
+                APP_IMAGE="$IMAGE_REF" docker compose logs --tail 100 api || true
+                exit 1
+              fi
+              sleep 2
+            done
+
+            assert_status() {
+              expected="$1"
+              method="$2"
+              url="$3"
+              actual=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+                --request "$method" "$url")
+              if [ "$actual" != "$expected" ]; then
+                echo "Unexpected HTTP status for $method $url: expected $expected, got $actual"
+                exit 1
+              fi
+            }
+
+            assert_status 200 GET http://127.0.0.1:3000/health
+            assert_status 200 GET http://127.0.0.1:3000/ready
+            curl --fail --silent http://127.0.0.1:3000/ready | grep -q '"status":"ready"'
+            curl --fail --silent http://127.0.0.1:3000/events/current | grep -q '"success":true'
+            curl --fail --silent http://127.0.0.1:3000/events/next | grep -q '"success":true'
+            assert_status 401 POST http://127.0.0.1:3000/jobs/events-sync/trigger
+            assert_status 400 GET http://127.0.0.1:3000/tournaments/check-name
+            curl --fail --silent http://127.0.0.1:4000/health >/dev/null
+
+            APP_IMAGE="$IMAGE_REF" docker compose up -d --no-deps --no-build worker
+            worker_cid=$(APP_IMAGE="$IMAGE_REF" docker compose ps -q worker)
+            test -n "$worker_cid"
+            for attempt in $(seq 1 30); do
+              status=$(docker inspect \
+                --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
+                "$worker_cid" 2>/dev/null || echo unknown)
+              if [ "$status" = "healthy" ]; then
+                break
+              fi
+              if [ "$attempt" -eq 30 ]; then
+                docker logs --tail 100 "$worker_cid" || true
+                exit 1
+              fi
+              sleep 2
+            done
+
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T \
+              -e V3_REDIS_QUEUE_MANIFEST_SHA256="$QUEUE_MANIFEST_SHA256" \
+              api bun run redis:cutover verify-queues
+            api_cid=$(APP_IMAGE="$IMAGE_REF" docker compose ps -q api)
+            test -n "$api_cid"
+            test "$(docker inspect --format '{{.Config.Image}}' "$api_cid")" = "$IMAGE_REF"
+            test "$(docker inspect --format '{{.Config.Image}}' "$worker_cid")" = "$IMAGE_REF"
+            echo "V3_DATA_REDEPLOY=passed sha=$EXPECTED_SHA image=$IMAGE_REF"
             APP_IMAGE="$IMAGE_REF" docker compose ps api worker
 
   v3_status:

@@ -1,10 +1,12 @@
 # Deployment Guide
 
 ## Modern Flow (Docker + GitHub Actions)
-The production stack now runs inside Docker containers orchestrated by `docker compose` and refreshed automatically from GitHub Actions:
+The production stack now runs inside Docker containers orchestrated by `docker compose` and refreshed through GitHub Actions:
 
 1. `.github/workflows/ci.yml` runs linting, tests, and builds on every push/PR.
-2. `.github/workflows/deploy.yml` builds a Bun image on merges to `main`, pushes it to GHCR, and SSHes into the VPS to pull the image, restart the compose stack, and execute database migrations from within the API container.
+2. `.github/workflows/deploy.yml` builds and deploys the legacy path on merges to `main`. The
+   activated v3 path publishes an immutable image and uses the explicit `v3-redeploy` operation so
+   a normal runtime release cannot run migrations or legacy cleanup.
 3. The VPS only needs Docker, the compose file, and a `.env.deploy` containing secrets—no manual Bun builds or systemd restarts.
 
 Production logs are structured JSON on container stdout. Docker retains at most five 20 MB
@@ -36,6 +38,20 @@ repository variables and secret for the SSH deployment:
 | Secret | `VPS_SSH_KEY` | Private key that grants access to `VPS_USER` |
 
 The workflow exports `APP_IMAGE=$IMAGE_REF` before running `docker compose pull/up`, ensuring the compose stack always references the freshly pushed GHCR tag.
+
+### Activated v3 runtime release
+
+After v3 activation, release Data runtime code in two manual workflow dispatches from `main`:
+
+1. Run `v3-publish-image` with the exact merged `main` commit and retain the emitted immutable
+   `ghcr.io/...@sha256:...` reference.
+2. Run `v3-redeploy` with that same commit, image reference, and the accepted queue-manifest
+   SHA-256.
+
+`v3-redeploy` requires the requested commit to equal `origin/main`, preserves untracked production
+files, never invokes database migration/activation/cleanup commands, verifies the queue manifest,
+starts and probes Data API, requires GraphQL health, and starts the worker last. Finish every release
+with `v3-terminal-acceptance` using the exact deployed Data and GraphQL image digests.
 
 ## Helpful Commands
 - `scripts/deploy.sh deploy` – build locally and run the compose stack with migrations.
