@@ -38,6 +38,7 @@ import {
   stageUnderstatTeamLeague,
   understatStagingHash,
 } from './understat-staging';
+import { enqueueUnderstatFanout, selectUnsettledUnderstatFanoutIds } from './understat-fanout';
 
 const LEAGUE_RESOURCE_TYPE = 'league';
 const TEAM_RESOURCE_TYPE = 'team-detail';
@@ -71,40 +72,25 @@ async function enqueueTeamDetailJobs(
   targetIds: number[],
   teams: Map<number, { title: string }>,
 ): Promise<void> {
-  const results = await Promise.allSettled(
-    targetIds.map(async (teamId) => {
-      const team = teams.get(teamId);
-      if (!team) throw new Error(`Understat team ${teamId} disappeared during discovery`);
-      await enqueueUnderstatTeamDetail({
-        runId: job.runId,
-        season: job.season,
-        mode: job.mode,
-        trigger: job.trigger,
-        teamId,
-        teamTitle: team.title,
-      });
-    }),
+  await enqueueUnderstatFanout(
+    'Understat team detail',
+    targetIds.map((teamId) => ({
+      resourceType: TEAM_RESOURCE_TYPE,
+      resourceId: String(teamId),
+      enqueue: async () => {
+        const team = teams.get(teamId);
+        if (!team) throw new Error(`Understat team ${teamId} disappeared during discovery`);
+        await enqueueUnderstatTeamDetail({
+          runId: job.runId,
+          season: job.season,
+          mode: job.mode,
+          trigger: job.trigger,
+          teamId,
+          teamTitle: team.title,
+        });
+      },
+    })),
   );
-  const failures: Array<{ teamId: number; message: string }> = [];
-  for (const [index, result] of results.entries()) {
-    if (result.status === 'fulfilled') continue;
-    const teamId = targetIds[index]!;
-    const message = result.reason instanceof Error ? result.reason.message : String(result.reason);
-    failures.push({ teamId, message });
-    await understatSyncRepository.failItem(
-      job.runId,
-      TEAM_RESOURCE_TYPE,
-      String(teamId),
-      `Failed to enqueue Understat team detail: ${message}`,
-    );
-  }
-  if (failures.length > 0) {
-    throw new Error(
-      `Failed to enqueue ${failures.length} Understat team detail job(s): ${failures
-        .map(({ teamId, message }) => `${teamId}: ${message}`)
-        .join('; ')}`,
-    );
-  }
 }
 
 export async function discoverUnderstatTeams(job: UnderstatTeamJobData): Promise<void> {
@@ -126,7 +112,27 @@ export async function discoverUnderstatTeams(job: UnderstatTeamJobData): Promise
   await understatSyncRepository.addItems(job.runId, [
     { resourceType: LEAGUE_RESOURCE_TYPE, resourceId: league },
   ]);
-  if (await alreadySettled(job.runId, LEAGUE_RESOURCE_TYPE, league)) {
+  const leagueItem = await understatSyncRepository.findItem(
+    job.runId,
+    LEAGUE_RESOURCE_TYPE,
+    league,
+  );
+  if (leagueItem?.status === 'completed') {
+    const discovery = readStagedUnderstatTeamLeague(
+      leagueItem.normalizedPayload,
+      leagueItem.sourceHash,
+      job.season,
+    );
+    const items = await understatSyncRepository.findItems(job.runId);
+    await enqueueTeamDetailJobs(
+      job,
+      selectUnsettledUnderstatFanoutIds(items, TEAM_RESOURCE_TYPE),
+      teamById(discovery.teams),
+    );
+    await finalizeWhenReady(job, await understatSyncRepository.refreshRun(job.runId));
+    return;
+  }
+  if (leagueItem?.status === 'skipped') {
     await finalizeWhenReady(job, await understatSyncRepository.refreshRun(job.runId));
     return;
   }

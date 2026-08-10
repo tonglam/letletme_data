@@ -46,6 +46,7 @@ import {
   stageUnderstatPlayerTeamDetail,
   understatStagingHash,
 } from './understat-staging';
+import { enqueueUnderstatFanout, selectUnsettledUnderstatFanoutIds } from './understat-fanout';
 
 const LEAGUE_RESOURCE_TYPE = 'league';
 const TEAM_RESOURCE_TYPE = 'team-participants';
@@ -112,27 +113,7 @@ async function enqueuePlayerDetailJobs(
       },
     })),
   ];
-  const results = await Promise.allSettled(jobs.map(({ enqueue }) => enqueue()));
-  const failures: Array<{ resourceType: string; resourceId: string; message: string }> = [];
-  for (const [index, result] of results.entries()) {
-    if (result.status === 'fulfilled') continue;
-    const target = jobs[index]!;
-    const message = result.reason instanceof Error ? result.reason.message : String(result.reason);
-    failures.push({ ...target, message });
-    await understatSyncRepository.failItem(
-      job.runId,
-      target.resourceType,
-      target.resourceId,
-      `Failed to enqueue Understat player detail: ${message}`,
-    );
-  }
-  if (failures.length > 0) {
-    throw new Error(
-      `Failed to enqueue ${failures.length} Understat player detail job(s): ${failures
-        .map(({ resourceType, resourceId, message }) => `${resourceType}:${resourceId}: ${message}`)
-        .join('; ')}`,
-    );
-  }
+  await enqueueUnderstatFanout('Understat player detail', jobs);
 }
 
 export async function discoverUnderstatPlayers(job: UnderstatPlayerJobData): Promise<void> {
@@ -154,7 +135,28 @@ export async function discoverUnderstatPlayers(job: UnderstatPlayerJobData): Pro
   await understatSyncRepository.addItems(job.runId, [
     { resourceType: LEAGUE_RESOURCE_TYPE, resourceId: league },
   ]);
-  if (await alreadySettled(job.runId, LEAGUE_RESOURCE_TYPE, league)) {
+  const leagueItem = await understatSyncRepository.findItem(
+    job.runId,
+    LEAGUE_RESOURCE_TYPE,
+    league,
+  );
+  if (leagueItem?.status === 'completed') {
+    const discovery = readStagedUnderstatPlayerLeague(
+      leagueItem.normalizedPayload,
+      leagueItem.sourceHash,
+      job.season,
+    );
+    const items = await understatSyncRepository.findItems(job.runId);
+    await enqueuePlayerDetailJobs(
+      job,
+      selectUnsettledUnderstatFanoutIds(items, TEAM_RESOURCE_TYPE),
+      selectUnsettledUnderstatFanoutIds(items, MATCH_RESOURCE_TYPE),
+      teamById(discovery.teams),
+    );
+    await finalizeWhenReady(job, await understatSyncRepository.refreshRun(job.runId));
+    return;
+  }
+  if (leagueItem?.status === 'skipped') {
     await finalizeWhenReady(job, await understatSyncRepository.refreshRun(job.runId));
     return;
   }

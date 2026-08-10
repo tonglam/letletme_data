@@ -151,6 +151,15 @@ async function recordTeamFailure(job: Job<UnderstatTeamJobData>, error: Error): 
   if (!isTerminalJobFailure(job, error)) return;
   const item = understatTeamItemForJob(job.data, job.name);
   if (item) {
+    const persisted = await understatSyncRepository.findItem(
+      job.data.runId,
+      item.resourceType,
+      item.resourceId,
+    );
+    if (persisted?.status === 'completed' || persisted?.status === 'skipped') {
+      await understatSyncRepository.markRunFailed(job.data.runId, error.message);
+      return;
+    }
     await understatSyncRepository.failItem(
       job.data.runId,
       item.resourceType,
@@ -166,6 +175,15 @@ async function recordPlayerFailure(job: Job<UnderstatPlayerJobData>, error: Erro
   if (!isTerminalJobFailure(job, error)) return;
   const item = understatPlayerItemForJob(job.data, job.name);
   if (item) {
+    const persisted = await understatSyncRepository.findItem(
+      job.data.runId,
+      item.resourceType,
+      item.resourceId,
+    );
+    if (persisted?.status === 'completed' || persisted?.status === 'skipped') {
+      await understatSyncRepository.markRunFailed(job.data.runId, error.message);
+      return;
+    }
     await understatSyncRepository.failItem(
       job.data.runId,
       item.resourceType,
