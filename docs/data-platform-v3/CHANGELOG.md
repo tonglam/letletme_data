@@ -3,7 +3,8 @@
 ## 2026-08-10 - Stable queue gate for runtime redeploys
 
 - Kept the immutable DB0-to-DB1 cutover manifest exact while adding a separate runtime-stable
-  queue manifest that excludes only BullMQ's expiring `stalled-check` leases.
+  queue manifest that excludes only positively expiring BullMQ leases, rejects active jobs and
+  persistent leases, and anchors redeploys to the configured queue topology plus durable job state.
 - Moved runtime queue capture and verification into the interval where both Data API and worker
   are stopped, before either producer can enqueue work, then retained API/GraphQL probes and
   worker-last startup ordering.

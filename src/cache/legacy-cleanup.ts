@@ -1,6 +1,25 @@
 import { createHash } from 'node:crypto';
 
+import { MUTATION_PRIORITY_ORDER } from '../domain/job-priority';
 import { CacheError } from '../utils/errors';
+
+const TIERABLE_RUNTIME_QUEUE_NAMES = [
+  'data-sync',
+  'entry-sync',
+  'league-sync',
+  'live-data',
+  'tournament-sync',
+  'tournament-setup',
+] as const;
+const FIXED_RUNTIME_QUEUE_NAMES = ['understat-player-sync', 'understat-team-sync'] as const;
+const KNOWN_RUNTIME_QUEUE_NAMES = [
+  ...TIERABLE_RUNTIME_QUEUE_NAMES,
+  ...TIERABLE_RUNTIME_QUEUE_NAMES.flatMap((queueName) =>
+    MUTATION_PRIORITY_ORDER.map((tier) => `${queueName}-${tier}`),
+  ),
+  ...FIXED_RUNTIME_QUEUE_NAMES,
+].sort((left, right) => right.length - left.length);
+const NON_DURABLE_BULLMQ_SUFFIXES = new Set(['meta', 'events', 'id', 'stalled-check']);
 
 export const LEGACY_REDIS_CLEANUP_GROUPS = {
   dataCache: [
@@ -140,6 +159,14 @@ export interface LegacyQueueManifest {
 export interface RuntimeQueueManifest extends LegacyQueueManifest {
   readonly ignoredEphemeralKeyCount: number;
   readonly ignoredEphemeralKeys: readonly string[];
+  readonly queueNames: readonly string[];
+  readonly expectedQueueNames: readonly string[];
+  readonly durableStateKeyCount: number;
+}
+
+export interface RuntimeQueueInspectionOptions
+  extends Pick<LegacyQueueRelocationOptions, 'scanCount' | 'maxKeys'> {
+  readonly expectedQueueNames: readonly string[];
 }
 
 function boundedInteger(value: number | undefined, fallback: number, min: number, max: number) {
@@ -213,6 +240,71 @@ async function scanPatterns(
 
 function keyManifestSha256(keys: readonly string[]): string {
   return createHash('sha256').update(keys.join('\n')).digest('hex');
+}
+
+export function expectedRuntimeQueueNames(tieredMutationQueues: boolean): string[] {
+  return [
+    ...(tieredMutationQueues
+      ? TIERABLE_RUNTIME_QUEUE_NAMES.flatMap((queueName) =>
+          MUTATION_PRIORITY_ORDER.map((tier) => `${queueName}-${tier}`),
+        )
+      : TIERABLE_RUNTIME_QUEUE_NAMES),
+    ...FIXED_RUNTIME_QUEUE_NAMES,
+  ].sort();
+}
+
+function runtimeQueueName(key: string): string | null {
+  return (
+    KNOWN_RUNTIME_QUEUE_NAMES.find((queueName) => key.startsWith(`bull:${queueName}:`)) ?? null
+  );
+}
+
+function isEphemeralRuntimeKey(key: string): boolean {
+  return key.endsWith(':stalled-check') || key.endsWith(':lock');
+}
+
+function isDurableRuntimeStateKey(key: string): boolean {
+  const queueName = runtimeQueueName(key);
+  if (!queueName) return false;
+  const suffix = key.slice(`bull:${queueName}:`.length);
+  return !NON_DURABLE_BULLMQ_SUFFIXES.has(suffix) && !suffix.endsWith(':lock');
+}
+
+function validateRuntimeQueueTopology(
+  keys: readonly string[],
+  expectedQueueNames: readonly string[],
+): Readonly<{ queueNames: string[]; durableStateKeyCount: number }> {
+  const uniqueExpectedQueueNames = [...new Set(expectedQueueNames)].sort();
+  if (
+    uniqueExpectedQueueNames.length === 0 ||
+    uniqueExpectedQueueNames.length !== expectedQueueNames.length ||
+    uniqueExpectedQueueNames.some((queueName) => !KNOWN_RUNTIME_QUEUE_NAMES.includes(queueName))
+  ) {
+    throw new CacheError(
+      'Runtime queue expectations are empty, duplicated, or unknown',
+      'RUNTIME_QUEUE_EXPECTATION_INVALID',
+    );
+  }
+
+  const queueNames = [
+    ...new Set(keys.map(runtimeQueueName).filter((queueName): queueName is string => !!queueName)),
+  ].sort();
+  const unexpectedQueueNames = queueNames.filter(
+    (queueName) => !uniqueExpectedQueueNames.includes(queueName),
+  );
+  const keySet = new Set(keys);
+  const missingMetaKeys = uniqueExpectedQueueNames
+    .map((queueName) => `bull:${queueName}:meta`)
+    .filter((key) => !keySet.has(key));
+  const durableStateKeyCount = keys.filter(isDurableRuntimeStateKey).length;
+  if (unexpectedQueueNames.length > 0 || missingMetaKeys.length > 0 || durableStateKeyCount === 0) {
+    throw new CacheError(
+      `Runtime queue topology is incomplete or unexpected (unexpected=${unexpectedQueueNames.join(',') || 'none'}, missingMeta=${missingMetaKeys.join(',') || 'none'}, durableStateKeys=${durableStateKeyCount})`,
+      'RUNTIME_QUEUE_TOPOLOGY_INVALID',
+    );
+  }
+
+  return { queueNames, durableStateKeyCount };
 }
 
 function ttlMatches(sourceTtl: number, targetTtl: number, toleranceMs: number): boolean {
@@ -320,21 +412,57 @@ export async function inspectLegacyRedisQueues(
 
 /**
  * Produces a stable runtime queue manifest while API and workers are stopped.
- * BullMQ's stalled checker writes one short-lived lease per queue. That lease
- * can expire after SCAN and is not durable job state, so it is the only key
- * excluded from this redeploy-time comparison. The exact cutover manifest
- * above remains unchanged and continues to include every copied key.
+ * BullMQ writes short-lived stalled-check and per-job lock leases. Only leases
+ * with a positive TTL (or ones that disappear while inspected) are excluded.
+ * Persistent leases and active jobs fail closed. Expected queue metadata plus
+ * at least one durable job-state key anchor the inspection to the configured
+ * queue topology. The exact cutover manifest above remains unchanged.
  */
 export async function inspectRuntimeRedisQueues(
   redis: LegacyQueueRelocationRedis,
-  options: Pick<LegacyQueueRelocationOptions, 'scanCount' | 'maxKeys'> = {},
+  options: RuntimeQueueInspectionOptions,
 ): Promise<RuntimeQueueManifest> {
   const scanCount = boundedInteger(options.scanCount, 500, 10, 10_000);
   const maxKeys = boundedInteger(options.maxKeys, 10_000, 1, 1_000_000);
   const patterns = resolveLegacyRedisCleanupPatterns(['legacyQueueDb0']);
   const scannedKeys = await scanPatterns(redis, patterns, scanCount, maxKeys);
-  const ignoredEphemeralKeys = scannedKeys.filter((key) => key.endsWith(':stalled-check'));
-  const keys = scannedKeys.filter((key) => !key.endsWith(':stalled-check'));
+  const ignoredEphemeralKeys: string[] = [];
+  const keys: string[] = [];
+  for (const key of scannedKeys) {
+    if (!isEphemeralRuntimeKey(key)) {
+      keys.push(key);
+      continue;
+    }
+    const ttl = await redis.pttl(key);
+    if (ttl > 0 || ttl === -2) {
+      ignoredEphemeralKeys.push(key);
+      continue;
+    }
+    throw new CacheError(
+      `BullMQ runtime lease is not expiring: ${key}`,
+      'RUNTIME_QUEUE_LEASE_NOT_EXPIRING',
+    );
+  }
+
+  for (const key of keys.filter((candidate) => candidate.endsWith(':active'))) {
+    const type = await redis.type(key);
+    if (type === 'none') continue;
+    if (type !== 'list') {
+      throw new CacheError(
+        `BullMQ active state has unexpected type ${type}: ${key}`,
+        'RUNTIME_QUEUE_ACTIVE_STATE_INVALID',
+      );
+    }
+    const activeJobs = bufferArray(await redis.callBuffer('LRANGE', key, 0, -1), 'LRANGE');
+    if (activeJobs.length > 0) {
+      throw new CacheError(
+        `BullMQ jobs remain active after worker shutdown: ${key}`,
+        'RUNTIME_QUEUE_ACTIVE_JOBS_PRESENT',
+      );
+    }
+  }
+
+  const topology = validateRuntimeQueueTopology(keys, options.expectedQueueNames);
   const payloadRows: string[] = [];
   for (const key of keys) {
     payloadRows.push(`${key}\u0000${await logicalPayloadDigest(redis, key)}`);
@@ -346,6 +474,9 @@ export async function inspectRuntimeRedisQueues(
     keys,
     ignoredEphemeralKeyCount: ignoredEphemeralKeys.length,
     ignoredEphemeralKeys,
+    queueNames: topology.queueNames,
+    expectedQueueNames: [...new Set(options.expectedQueueNames)].sort(),
+    durableStateKeyCount: topology.durableStateKeyCount,
   };
 }
 

@@ -190,9 +190,10 @@ canonical equality contract for restored hashes.
 
 Later `v3-redeploy` operations do not compare live queues with this frozen cutover digest. After
 both Data API and worker stop, the workflow captures and immediately re-verifies a runtime-stable
-type-aware manifest before restarting either producer. That manifest excludes only BullMQ's
-short-lived `*:stalled-check` lease keys; every durable queue key and payload remains digest-bound.
-API health probes occur after this gate, and the worker starts last.
+type-aware manifest before restarting either producer. That manifest excludes only positively
+expiring BullMQ `*:stalled-check` and `*:lock` leases, rejects persistent leases and active jobs,
+requires the configured queue topology plus durable job state, and keeps every other queue key and
+payload digest-bound. API health probes occur after this gate, and the worker starts last.
 
 ## Production activation: `0079`-`0090_zzzz`
 

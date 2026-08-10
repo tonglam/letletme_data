@@ -3,6 +3,7 @@ import Redis from 'ioredis';
 
 import {
   cleanupLegacyRedisKeys,
+  expectedRuntimeQueueNames,
   inspectLegacyRedisQueues,
   inspectRuntimeRedisQueues,
   LEGACY_REDIS_CLEANUP_GROUPS,
@@ -62,6 +63,13 @@ function optionValue(args: readonly string[], name: string): string | undefined 
 function positiveOption(args: readonly string[], name: string, fallback: number): number {
   const value = optionValue(args, name);
   return value === undefined ? fallback : integerValue(value, name, 1, 1_000_000);
+}
+
+function booleanEnvironment(name: string, fallback: boolean): boolean {
+  const value = process.env[name]?.trim().toLowerCase();
+  return value === undefined || value === ''
+    ? fallback
+    : ['true', '1', 'yes', 'on'].includes(value);
 }
 
 function cleanupGroups(args: readonly string[]): LegacyRedisCleanupGroup[] {
@@ -125,6 +133,12 @@ async function main(): Promise<void> {
   const maxKeys = positiveOption(args, '--max-keys', 10_000);
   const cacheEndpoint = endpoint('CACHE');
   const queueEndpoint = endpoint('QUEUE');
+  const runtimeQueueOptions = {
+    maxKeys,
+    expectedQueueNames: expectedRuntimeQueueNames(
+      booleanEnvironment('ENABLE_TIERED_MUTATION_QUEUES', false),
+    ),
+  };
   if (endpointIdentity(cacheEndpoint) === endpointIdentity(queueEndpoint)) {
     throw new Error('Cache source and queue target Redis endpoints must be different');
   }
@@ -137,7 +151,7 @@ async function main(): Promise<void> {
 
     if (command === 'inspect-queues') {
       const manifest = args.includes('--runtime-stable')
-        ? await inspectRuntimeRedisQueues(queueRedis, { maxKeys })
+        ? await inspectRuntimeRedisQueues(queueRedis, runtimeQueueOptions)
         : await inspectLegacyRedisQueues(queueRedis, { maxKeys });
       if (args.includes('--digest-only')) {
         console.log(manifest.payloadManifestSha256);
@@ -159,7 +173,7 @@ async function main(): Promise<void> {
 
     if (command === 'verify-queues') {
       const manifest = args.includes('--runtime-stable')
-        ? await inspectRuntimeRedisQueues(queueRedis, { maxKeys })
+        ? await inspectRuntimeRedisQueues(queueRedis, runtimeQueueOptions)
         : await inspectLegacyRedisQueues(queueRedis, { maxKeys });
       const expectedManifest = requiredEnvironment('V3_REDIS_QUEUE_MANIFEST_SHA256');
       if (manifest.payloadManifestSha256 !== expectedManifest) {
