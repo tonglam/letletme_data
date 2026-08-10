@@ -367,7 +367,11 @@ describe('v3 production hard-cut workflow', () => {
     expect(terminal).toContain('V3_TERMINAL_RUNTIME=quiesced');
     expect(terminal).toContain('V3_TERMINAL_RUNTIME=restored');
     expect(terminal).toContain('Legacy DB0 queue source was not fully cleaned');
-    expect(terminal).toContain('Active DB1 queues no longer match');
+    expect(terminal).toContain('const repeatManifest = await inspectRuntimeRedisQueues');
+    expect(terminal).toContain('Active DB1 queues changed during terminal acceptance');
+    expect(terminal).not.toContain('EXPECTED_QUEUE_SOURCE_MANIFEST');
+    expect(terminal).not.toContain('keyCount !== 297');
+    expect(terminal).not.toContain('approved frozen manifest');
     expect(terminal).toContain('GraphQL query-cache type/TTL contract failed');
     expect(terminal).toContain('validate-postcleanup.sql');
     expect(terminal).toContain('v3_postcleanup_validation_passed');

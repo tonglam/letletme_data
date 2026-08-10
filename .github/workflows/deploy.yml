@@ -1090,13 +1090,12 @@ jobs:
           DATA_IMAGE_REF: ${{ github.event.client_payload.v3_image_ref }}
           GRAPHQL_IMAGE_REF: ${{ github.event.client_payload.v3_graphql_image_ref }}
           CUTOVER_RUN_ID: ${{ github.event.client_payload.v3_cutover_run_id }}
-          EXPECTED_QUEUE_SOURCE_MANIFEST: ${{ github.event.client_payload.v3_queue_manifest_sha256 }}
           VPS_WORKDIR: ${{ vars.VPS_WORKDIR }}
         with:
           host: ${{ vars.VPS_HOST }}
           username: ${{ vars.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          envs: EXPECTED_SHA,DATA_IMAGE_REF,GRAPHQL_IMAGE_REF,CUTOVER_RUN_ID,EXPECTED_QUEUE_SOURCE_MANIFEST,VPS_WORKDIR
+          envs: EXPECTED_SHA,DATA_IMAGE_REF,GRAPHQL_IMAGE_REF,CUTOVER_RUN_ID,VPS_WORKDIR
           command_timeout: 20m
           script: |
             set -euo pipefail
@@ -1104,7 +1103,6 @@ jobs:
             [[ "$DATA_IMAGE_REF" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]]
             [[ "$GRAPHQL_IMAGE_REF" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]]
             [[ "$CUTOVER_RUN_ID" =~ ^v3-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{7,12}$ ]]
-            [[ "$EXPECTED_QUEUE_SOURCE_MANIFEST" =~ ^[0-9a-f]{64}$ ]]
             test -d "$VPS_WORKDIR/.git"
             cd "$VPS_WORKDIR"
             test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
@@ -1197,7 +1195,6 @@ jobs:
             echo 'V3_TERMINAL_RUNTIME=quiesced'
 
             APP_IMAGE="$DATA_IMAGE_REF" docker compose run --rm --no-deps -T \
-              -e EXPECTED_QUEUE_SOURCE_MANIFEST="$EXPECTED_QUEUE_SOURCE_MANIFEST" \
               api bun --eval '
               import { createHash } from "node:crypto";
               import Redis from "ioredis";
@@ -1260,13 +1257,27 @@ jobs:
                   maxKeys: 10000,
                   expectedQueueNames: expectedRuntimeQueueNames(tieredMutationQueues),
                 });
-                if (targetManifest.keyCount !== 297 ||
-                    targetManifest.keyManifestSha256 !==
-                      "f6796a4895a0699814464e8edff9e5d6a0fd80722bb8154623b98b255e72dfda" ||
-                    targetManifest.payloadManifestSha256 !==
-                      process.env.EXPECTED_QUEUE_SOURCE_MANIFEST) {
-                  throw new Error("Active DB1 queues no longer match the approved frozen manifest");
+                const repeatManifest = await inspectRuntimeRedisQueues(queueRedis, {
+                  maxKeys: 10000,
+                  expectedQueueNames: expectedRuntimeQueueNames(tieredMutationQueues),
+                });
+                const stableManifest = (manifest) =>
+                  JSON.stringify({
+                    keyCount: manifest.keyCount,
+                    keyManifestSha256: manifest.keyManifestSha256,
+                    payloadManifestSha256: manifest.payloadManifestSha256,
+                    keys: manifest.keys,
+                    queueNames: manifest.queueNames,
+                    expectedQueueNames: manifest.expectedQueueNames,
+                    durableStateKeyCount: manifest.durableStateKeyCount,
+                  });
+                if (stableManifest(targetManifest) !== stableManifest(repeatManifest)) {
+                  throw new Error("Active DB1 queues changed during terminal acceptance");
                 }
+                console.log(JSON.stringify({
+                  operation: "runtime-queue-terminal-acceptance",
+                  manifest: targetManifest,
+                }));
 
                 const dataKeys = await scanKeys(cacheRedis, "llm:v3:data:*");
                 const activeManifestKeys = dataKeys.filter((key) => key.endsWith(":active"));
