@@ -1143,7 +1143,25 @@ jobs:
             fi
             echo 'V3_TERMINAL_WEB_PROXY=passed'
 
-            APP_IMAGE="$DATA_IMAGE_REF" docker compose exec -T \
+            # BullMQ's runtime manifest is only deterministic while every queue
+            # producer and worker is quiesced. Keep the normal health/proxy
+            # probes above, then briefly stop Data API + worker for the exact
+            # Redis inspection and restore both services before database/log
+            # evidence is collected. The EXIT trap also restores them if the
+            # read-only inspection fails.
+            runtime_quiesced=1
+            restore_runtime() {
+              if [ "$runtime_quiesced" -eq 1 ]; then
+                APP_IMAGE="$DATA_IMAGE_REF" docker compose up -d --no-deps --no-build api worker || true
+              fi
+            }
+            trap restore_runtime EXIT
+            APP_IMAGE="$DATA_IMAGE_REF" docker compose stop -t 30 worker api
+            test -z "$(APP_IMAGE="$DATA_IMAGE_REF" docker compose ps -q worker)"
+            test -z "$(APP_IMAGE="$DATA_IMAGE_REF" docker compose ps -q api)"
+            echo 'V3_TERMINAL_RUNTIME=quiesced'
+
+            APP_IMAGE="$DATA_IMAGE_REF" docker compose run --rm --no-deps -T \
               -e EXPECTED_QUEUE_SOURCE_MANIFEST="$EXPECTED_QUEUE_SOURCE_MANIFEST" \
               api bun --eval '
               import { createHash } from "node:crypto";
@@ -1344,6 +1362,29 @@ jobs:
                 await Promise.allSettled([cacheRedis.quit(), queueRedis.quit()]);
               }
             '
+
+            APP_IMAGE="$DATA_IMAGE_REF" docker compose up -d --no-deps --no-build api worker
+            for service in api worker; do
+              service_cid=$(APP_IMAGE="$DATA_IMAGE_REF" docker compose ps -q "$service")
+              test -n "$service_cid"
+              for attempt in $(seq 1 30); do
+                status=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$service_cid" 2>/dev/null || echo unknown)
+                if [ "$status" = "healthy" ]; then
+                  break
+                fi
+                if [ "$attempt" -eq 30 ]; then
+                  docker logs --tail 100 "$service_cid" || true
+                  exit 1
+                fi
+                sleep 2
+              done
+            done
+            curl --fail --silent http://127.0.0.1:3000/health >/dev/null
+            runtime_quiesced=0
+            trap - EXIT
+            api_cid=$(APP_IMAGE="$DATA_IMAGE_REF" docker compose ps -q api)
+            worker_cid=$(APP_IMAGE="$DATA_IMAGE_REF" docker compose ps -q worker)
+            echo 'V3_TERMINAL_RUNTIME=restored'
 
             PSQL_IMAGE='docker.io/library/postgres:15.8-alpine@sha256:68c8f729caca8638396647002948c0ab753fda787cbee9e887f7166169c6b87e'
             docker pull "$PSQL_IMAGE"

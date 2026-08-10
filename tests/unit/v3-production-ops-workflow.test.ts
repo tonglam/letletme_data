@@ -352,13 +352,18 @@ describe('v3 production hard-cut workflow', () => {
     expect(workflow).not.toContain('APPROVE_V3_LEGACY_DROP');
   });
 
-  test('runs terminal acceptance as read-only evidence collection', () => {
+  test('quiesces producers for deterministic terminal evidence and restores them', () => {
     const terminal = job('v3_terminal_acceptance', 'v3_stop');
 
     expect(terminal).toMatch(/client_payload\.operation == 'v3-terminal-acceptance'/);
     expect(terminal).toContain('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
     expect(terminal).toContain('inspectLegacyRedisQueues(cacheRedis');
     expect(terminal).toContain('inspectRuntimeRedisQueues(queueRedis');
+    expect(terminal).toContain('docker compose stop -t 30 worker api');
+    expect(terminal).toContain('docker compose run --rm --no-deps -T');
+    expect(terminal).toContain('docker compose up -d --no-deps --no-build api worker');
+    expect(terminal).toContain('V3_TERMINAL_RUNTIME=quiesced');
+    expect(terminal).toContain('V3_TERMINAL_RUNTIME=restored');
     expect(terminal).toContain('Legacy DB0 queue source was not fully cleaned');
     expect(terminal).toContain('Active DB1 queues no longer match');
     expect(terminal).toContain('GraphQL query-cache type/TTL contract failed');
@@ -369,7 +374,6 @@ describe('v3 production hard-cut workflow', () => {
     expect(terminal).toContain('V3_TERMINAL_ACCEPTANCE=passed');
     expect(terminal).toContain('00209e2cc1c6d9a60b580c3b1e4ca4cd9e30696a4fba6c5fb75548481d02d349');
     expect(terminal).toContain('4d10062af6a9d187078d31bb1c0d885f9e7ffca9fc63957c24eb3073a5300bd5');
-    expect(terminal).not.toContain('docker compose up');
     expect(terminal).not.toContain('bun run db:migrate');
     expect(terminal).not.toContain('redis:cutover cleanup');
   });
