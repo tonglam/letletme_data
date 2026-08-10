@@ -177,4 +177,16 @@ describe('P5 rehearsal contracts', () => {
       expect(sql).toContain('migration_login_inherits_frozen_owner');
     }
   });
+
+  test('preserves the complete GraphQL migration ledger without a stale row constant', () => {
+    const cleanupMigration = read('migrations/0093_finalize_v3_migration_ownership.sql');
+
+    expect(cleanupMigration).toContain('graphql_source_count = 0');
+    expect(cleanupMigration).toContain('graphql_target_count <> graphql_source_count');
+    expect(cleanupMigration).toContain(
+      'target.check_name LIKE ' + quote + 'legacy_graphql_migration:%' + quote,
+    );
+    expect(cleanupMigration).toContain('graphql_difference_count <> 0');
+    expect(cleanupMigration).not.toContain('count(*) FROM public.graphql_schema_migrations) <> 3');
+  });
 });
