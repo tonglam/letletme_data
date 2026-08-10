@@ -980,7 +980,7 @@ jobs:
                 --volume "$VPS_WORKDIR/sql/v3:/validation:ro" \
                 "$PSQL_IMAGE" \
                 sh -eu -c \
-                'exec psql "$DATABASE_URL" --no-psqlrc --set ON_ERROR_STOP=on --file "/validation/$1"' \
+                'database_url="$DATABASE_URL"; database_url="${database_url#\"}"; database_url="${database_url%\"}"; exec psql "$database_url" --no-psqlrc --set ON_ERROR_STOP=on --file "/validation/$1"' \
                 sh "$sql_file"
             }
 
@@ -1030,7 +1030,7 @@ jobs:
               --env-file .env.migrate \
               "$PSQL_IMAGE" \
               sh -eu -c \
-              'exec psql "$DATABASE_URL" --no-psqlrc --set ON_ERROR_STOP=on --tuples-only --no-align --command "$1"' \
+              'database_url="$DATABASE_URL"; database_url="${database_url#\"}"; database_url="${database_url%\"}"; exec psql "$database_url" --no-psqlrc --set ON_ERROR_STOP=on --tuples-only --no-align --command "$1"' \
               sh "$validation_summary_sql"
             test -z "$(APP_IMAGE="$IMAGE_REF" docker compose ps -q api)"
             test -z "$(APP_IMAGE="$IMAGE_REF" docker compose ps -q worker)"

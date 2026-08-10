@@ -247,6 +247,8 @@ describe('v3 production hard-cut workflow', () => {
     expect(validation).toContain('capture-v3-business-relation-hashes.sql');
     expect(validation).toContain('capture-public-sequence-state.sql');
     expect(validation).toContain('capture-public-security-contract.sql');
+    expect(validation).toContain('database_url="${database_url#\\"}"');
+    expect(validation).toContain('database_url="${database_url%\\"}"');
     expect(validation).toContain('docker compose ps -q api');
     expect(validation).toContain('docker compose ps -q worker');
     expect(validation).not.toContain('docker compose up');
