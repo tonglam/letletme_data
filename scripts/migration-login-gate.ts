@@ -15,7 +15,15 @@ export type MigrationLoginSnapshot = {
   readonly inheritedRoles: readonly string[];
 };
 
-export function assertMigrationLoginSnapshot(snapshot: MigrationLoginSnapshot): void {
+export type MigrationLoginContractOptions = {
+  readonly requireCanonicalState?: boolean;
+};
+
+export function assertMigrationLoginSnapshot(
+  snapshot: MigrationLoginSnapshot,
+  options: MigrationLoginContractOptions = {},
+): void {
+  const requireCanonicalState = options.requireCanonicalState ?? true;
   if (snapshot.serverMajor !== 15) {
     throw new Error('Platform migration requires PostgreSQL 15');
   }
@@ -34,7 +42,7 @@ export function assertMigrationLoginSnapshot(snapshot: MigrationLoginSnapshot): 
   if (snapshot.publicApplicationObjectCount !== 0) {
     throw new Error('The public schema still contains application objects');
   }
-  if (snapshot.cutoverTableCount !== 0 || snapshot.frozenOwnerExists) {
+  if (requireCanonicalState && (snapshot.cutoverTableCount !== 0 || snapshot.frozenOwnerExists)) {
     throw new Error('Completed cutover state is still present');
   }
   if (!snapshot.inheritedRoles.includes('letletme_data_owner')) {

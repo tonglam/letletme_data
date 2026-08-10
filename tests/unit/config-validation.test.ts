@@ -33,18 +33,25 @@ describe('production environment preflight', () => {
     expect(await runEnvCheck('a'.repeat(64))).toBe(0);
   });
 
-  test('runs before production migrations and service replacement', () => {
+  test('validates identity and quiescence before migration, then publishes before restart', () => {
     const workflow = readFileSync('.github/workflows/deploy.yml', 'utf8');
     const preflight = workflow.indexOf('bun run env:check');
-    const migrationContract = workflow.indexOf('bun run db:migration-contract');
+    const identityContract = workflow.indexOf('bun run db:migration-contract -- --identity-only');
+    const stopServices = workflow.indexOf('docker compose stop -t 45 api worker');
+    const quiescence = workflow.indexOf('bun run ops:assert-queue-quiescence');
     const migrate = workflow.indexOf('bun run db:migrate');
-    const replaceServices = workflow.indexOf('docker compose up -d');
+    const canonicalContract = workflow.indexOf('bun run db:migration-contract', migrate);
+    const publishCore = workflow.indexOf('bun run cache:publish-core -- --execute');
+    const replaceServices = workflow.indexOf('docker compose up -d', publishCore);
 
     expect(preflight).toBeGreaterThan(0);
-    expect(migrationContract).toBeGreaterThan(preflight);
-    expect(migrationContract).toBeGreaterThan(migrate);
-    expect(preflight).toBeLessThan(migrate);
-    expect(preflight).toBeLessThan(replaceServices);
+    expect(identityContract).toBeGreaterThan(preflight);
+    expect(stopServices).toBeGreaterThan(identityContract);
+    expect(quiescence).toBeGreaterThan(stopServices);
+    expect(migrate).toBeGreaterThan(quiescence);
+    expect(canonicalContract).toBeGreaterThan(migrate);
+    expect(publishCore).toBeGreaterThan(canonicalContract);
+    expect(replaceServices).toBeGreaterThan(publishCore);
   });
 
   test('keeps migration credentials out of API and worker services', () => {

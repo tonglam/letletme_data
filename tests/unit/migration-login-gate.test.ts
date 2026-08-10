@@ -54,4 +54,19 @@ describe('migration LOGIN contract', () => {
       assertMigrationLoginSnapshot({ ...accepted(), canWriteMigrationLedger: false }),
     ).toThrow('authoritative ledger');
   });
+
+  test('can validate login identity before canonical-state migrations', () => {
+    expect(() =>
+      assertMigrationLoginSnapshot(
+        { ...accepted(), cutoverTableCount: 2, frozenOwnerExists: true },
+        { requireCanonicalState: false },
+      ),
+    ).not.toThrow();
+    expect(() =>
+      assertMigrationLoginSnapshot(
+        { ...accepted(), inheritedRoles: ['letletme_data_owner', 'letletme_v2_frozen_owner'] },
+        { requireCanonicalState: false },
+      ),
+    ).toThrow('retired frozen owner');
+  });
 });

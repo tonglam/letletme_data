@@ -9,7 +9,10 @@ SELECT pg_advisory_xact_lock(912883474);
 DO $cutover_state_precondition$
 DECLARE
   run_count bigint;
-  evidence_count bigint;
+  total_evidence_count bigint;
+  fixed_evidence_count bigint;
+  graphql_evidence_count bigint;
+  fixed_evidence_hash text;
 BEGIN
   IF to_regclass('ops.migration_runs') IS NULL
     OR to_regclass('ops.migration_objects') IS NULL THEN
@@ -26,14 +29,62 @@ BEGIN
     RAISE EXCEPTION 'unexpected cutover run state';
   END IF;
 
-  SELECT count(*) INTO evidence_count
+  SELECT count(*) INTO total_evidence_count
   FROM ops.migration_objects
   WHERE run_id = 'v3-20260808T160008Z-b9eddc0'
     AND status = 'passed'
     AND failed_count = 0;
 
-  IF evidence_count <> 61 OR (SELECT count(*) FROM ops.migration_objects) <> 61 THEN
+  IF total_evidence_count <> (SELECT count(*) FROM ops.migration_objects) THEN
     RAISE EXCEPTION 'unexpected cutover evidence state';
+  END IF;
+
+  SELECT
+    count(*),
+    encode(
+      sha256(
+        convert_to(
+          coalesce(
+            string_agg(
+              concat_ws(E'\t', check_name, source_object, target_object),
+              E'\n'
+              ORDER BY check_name, source_object, target_object
+            ),
+            ''
+          ),
+          'UTF8'
+        )
+      ),
+      'hex'
+    )
+  INTO fixed_evidence_count, fixed_evidence_hash
+  FROM ops.migration_objects
+  WHERE run_id = 'v3-20260808T160008Z-b9eddc0'
+    AND check_name NOT LIKE 'legacy_graphql_migration:%';
+
+  IF fixed_evidence_count <> 56
+    OR fixed_evidence_hash <> '3703b54083ff4329685a2b7776e14aa4b6683786603760c326af59dde85d4c66'
+  THEN
+    RAISE EXCEPTION 'fixed cutover evidence identity does not match the accepted set';
+  END IF;
+
+  SELECT count(*) INTO graphql_evidence_count
+  FROM ops.migration_objects
+  WHERE run_id = 'v3-20260808T160008Z-b9eddc0'
+    AND check_name LIKE 'legacy_graphql_migration:%'
+    AND source_object = 'public.graphql_schema_migrations'
+    AND target_object = 'ops.migration_objects'
+    AND source_row_count = 1
+    AND target_row_count = 1
+    AND source_hash IS NOT NULL
+    AND source_hash = target_hash
+    AND status = 'passed'
+    AND failed_count = 0;
+
+  IF graphql_evidence_count = 0
+    OR total_evidence_count <> fixed_evidence_count + graphql_evidence_count
+  THEN
+    RAISE EXCEPTION 'dynamic GraphQL migration evidence is incomplete or contains unexpected rows';
   END IF;
 
   IF NOT EXISTS (

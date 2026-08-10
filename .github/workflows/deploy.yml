@@ -102,6 +102,8 @@ jobs:
 
             APP_IMAGE="$IMAGE_REF" docker compose --profile migration pull api worker migration
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api bun run env:check
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration \
+              bun run db:migration-contract -- --identity-only
 
             migration_started=false
             restore_before_migration() {
@@ -111,12 +113,16 @@ jobs:
             }
             trap restore_before_migration ERR
 
-            APP_IMAGE="$IMAGE_REF" docker compose stop api worker
+            APP_IMAGE="$IMAGE_REF" docker compose stop -t 45 api worker
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api \
+              bun run ops:assert-queue-quiescence
             migration_started=true
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun run db:migrate
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun run db:apply-sql
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun run db:migrate:status
             APP_IMAGE="$IMAGE_REF" docker compose run --rm -T migration bun run db:migration-contract
+            APP_IMAGE="$IMAGE_REF" docker compose run --rm -T api \
+              bun run cache:publish-core -- --execute
             APP_IMAGE="$IMAGE_REF" docker compose up -d --remove-orphans --no-build api worker
 
             for attempt in $(seq 1 30); do

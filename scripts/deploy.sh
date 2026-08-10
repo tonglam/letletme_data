@@ -58,8 +58,17 @@ deploy() {
     log_info "Building containers"
     compose build --pull
   fi
-  # Migrate BEFORE starting services: the API must never boot against an
-  # unmigrated schema. Any migration failure aborts the deploy (non-zero exit).
+  log_info "Validating the migration LOGIN before service shutdown"
+  if ! compose run --rm -T migration bun run db:migration-contract -- --identity-only; then
+    log_error "Migration LOGIN identity contract failed; services were not stopped."
+    exit 1
+  fi
+  log_info "Stopping services and waiting for workers to settle"
+  compose stop -t 45 api worker
+  if ! compose run --rm -T api bun run ops:assert-queue-quiescence; then
+    log_error "Queue/database work is not quiescent; migration was not started."
+    exit 1
+  fi
   log_info "Running migrations"
   if ! compose run --rm -T migration bun run db:migrate; then
     log_error "Drizzle migrations failed; aborting deploy before services start."
@@ -73,6 +82,11 @@ deploy() {
   compose run --rm -T migration bun run db:migrate:status
   if ! compose run --rm -T migration bun run db:migration-contract; then
     log_error "Migration LOGIN contract failed after migrations."
+    exit 1
+  fi
+  log_info "Publishing and verifying the canonical core cache"
+  if ! compose run --rm -T api bun run cache:publish-core -- --execute; then
+    log_error "Core cache publication failed; services remain stopped for a forward fix."
     exit 1
   fi
   log_info "Starting services"

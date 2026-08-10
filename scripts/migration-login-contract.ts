@@ -19,7 +19,17 @@ type ContractRow = {
   frozen_owner_exists: boolean;
 };
 
+function parseArguments(args: readonly string[]): { readonly requireCanonicalState: boolean } {
+  const unknown = args.find((argument) => argument !== '--identity-only');
+  if (unknown) throw new Error(`Unknown migration contract argument: ${unknown}`);
+  if (args.filter((argument) => argument === '--identity-only').length > 1) {
+    throw new Error('--identity-only must not be repeated');
+  }
+  return { requireCanonicalState: !args.includes('--identity-only') };
+}
+
 async function main(): Promise<void> {
+  const options = parseArguments(process.argv.slice(2));
   const databaseUrl = process.env.DATABASE_URL?.trim();
   if (!databaseUrl) throw new Error('DATABASE_URL is required');
 
@@ -110,9 +120,17 @@ async function main(): Promise<void> {
       frozenOwnerExists: base.frozen_owner_exists,
       inheritedRoles: inheritedRows.map((row) => row.role_name),
     };
-    assertMigrationLoginSnapshot(snapshot);
+    assertMigrationLoginSnapshot(snapshot, options);
     console.log(
-      JSON.stringify({ status: 'migration_login_contract_passed', ...snapshot }, null, 2),
+      JSON.stringify(
+        {
+          status: 'migration_login_contract_passed',
+          canonicalStateRequired: options.requireCanonicalState,
+          ...snapshot,
+        },
+        null,
+        2,
+      ),
     );
   } finally {
     await sql.end();

@@ -11,7 +11,6 @@ DECLARE
   active_publication_count bigint;
   retired_singleton_count bigint;
   player_link_count bigint;
-  versioned_manifest_count bigint;
 BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM information_schema.columns
@@ -58,27 +57,22 @@ BEGIN
 
   IF EXISTS (
     SELECT 1 FROM ops.dataset_publications
-    WHERE (manifest ? 'schemaVersion' AND manifest ->> 'schemaVersion' <> 'v3')
-       OR (manifest ? 'planVersion' AND manifest ->> 'planVersion' <> '3.2.5')
+    WHERE jsonb_typeof(manifest) <> 'object'
+      OR dataset NOT IN ('fpl:core', 'fpl:live')
+      OR season_id IS NULL
+      OR (dataset = 'fpl:core' AND event_id IS NOT NULL)
+      OR (dataset = 'fpl:live' AND event_id IS NULL)
   ) THEN
-    RAISE EXCEPTION 'unexpected publication version metadata';
-  END IF;
-
-  SELECT count(*) INTO versioned_manifest_count
-  FROM ops.dataset_publications
-  WHERE manifest ? 'schemaVersion' OR manifest ? 'planVersion';
-
-  IF versioned_manifest_count NOT IN (0, 1) THEN
-    RAISE EXCEPTION 'unexpected number of versioned publication manifests: %',
-      versioned_manifest_count;
+    RAISE EXCEPTION 'dataset publication history contains an invalid scope or manifest';
   END IF;
 
   SELECT count(*) INTO active_publication_count
-  FROM ops.dataset_publications
-  WHERE dataset = 'fpl:core'
-    AND event_id IS NULL
-    AND status = 'active'
-    AND source_run_id IS NULL;
+  FROM ops.dataset_publications publication
+  JOIN fpl.seasons season ON season.season_id = publication.season_id
+  WHERE publication.dataset = 'fpl:core'
+    AND publication.event_id IS NULL
+    AND publication.status = 'active'
+    AND season.is_current;
 
   SELECT count(*) INTO retired_singleton_count
   FROM ops.dataset_publications
@@ -88,8 +82,7 @@ BEGIN
 
   IF active_publication_count <> 1
     OR retired_singleton_count NOT IN (0, 1)
-    OR (SELECT count(*) FROM ops.dataset_publications)
-      <> active_publication_count + retired_singleton_count
+    OR (SELECT count(*) FROM ops.dataset_publications WHERE status = 'active') <> 1
     OR EXISTS (
       SELECT 1 FROM ops.dataset_publications
       WHERE manifest ? 'legacy_singleton_id'
@@ -150,15 +143,52 @@ SET
     'eventId', publication.event_id,
     'revision', publication.revision,
     'publicationId', publication.publication_id::text,
-    'sourceCheckedAt', coalesce(publication.activated_at, publication.created_at),
-    'publishedAt', coalesce(publication.activated_at, publication.created_at),
-    'state', 'active',
-    'items', jsonb_build_array()
+    'sourceCheckedAt', coalesce(
+      publication.activated_at,
+      publication.retired_at,
+      publication.created_at
+    ),
+    'publishedAt', coalesce(
+      publication.activated_at,
+      publication.retired_at,
+      publication.created_at
+    ),
+    'state', CASE
+      WHEN publication.dataset = 'fpl:core' THEN 'active'
+      WHEN publication.manifest ->> 'state' IN ('scheduled', 'live', 'settled')
+        THEN publication.manifest ->> 'state'
+      WHEN publication.status = 'active' THEN 'live'
+      ELSE 'settled'
+    END,
+    'items', CASE
+      WHEN jsonb_typeof(publication.manifest -> 'items') = 'array' THEN (
+        SELECT coalesce(
+          jsonb_agg(
+            jsonb_build_object(
+              'name', item.value -> 'name',
+              'key', regexp_replace(
+                item.value ->> 'key',
+                '^llm:[^:]+:',
+                'llm:data:'
+              ),
+              'type', item.value -> 'type',
+              'count', item.value -> 'count',
+              'bytes', item.value -> 'bytes',
+              'sha256', item.value -> 'sha256'
+            )
+            ORDER BY item.ordinality
+          ),
+          '[]'::jsonb
+        )
+        FROM jsonb_array_elements(publication.manifest -> 'items')
+          WITH ORDINALITY AS item(value, ordinality)
+      )
+      ELSE '[]'::jsonb
+    END
   ),
   updated_at = now()
 FROM fpl.seasons season
-WHERE season.season_id = publication.season_id
-  AND publication.status = 'active';
+WHERE season.season_id = publication.season_id;
 
 RESET ROLE;
 
@@ -195,7 +225,7 @@ BEGIN
       'sourceCheckedAt', 'publishedAt', 'state', 'items'
     ] <> '{}'::jsonb
   ) THEN
-    RAISE EXCEPTION 'publication manifests are not canonical';
+    RAISE EXCEPTION 'publication manifest canonicalization failed';
   END IF;
 
   IF EXISTS (
