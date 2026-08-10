@@ -4,6 +4,8 @@ import { readFileSync } from 'node:fs';
 
 import postgres from 'postgres';
 
+import { getSqlMigrationExecutionContents } from '../../scripts/sql-migration-compatibility';
+
 const databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) throw new Error('DATABASE_URL is required');
 
@@ -19,11 +21,12 @@ try {
   for (const filename of files) {
     const contents = readFileSync(`migrations/${filename}`, 'utf8');
     const checksum = createHash('sha256').update(contents, 'utf8').digest('hex');
+    const executionContents = getSqlMigrationExecutionContents(filename, contents);
     await sql.begin(async (transaction) => {
       await transaction`SELECT set_config('lock_timeout', '5s', true)`;
       await transaction`SELECT set_config('statement_timeout', '5min', true)`;
       await transaction`SELECT set_config('letletme.v3_legacy_drop_approval', ${approval}, true)`;
-      await transaction.unsafe(contents);
+      await transaction.unsafe(executionContents);
       await transaction`
         INSERT INTO ops.schema_migrations (filename, checksum)
         VALUES (${filename}, ${checksum})

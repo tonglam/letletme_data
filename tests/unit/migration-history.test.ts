@@ -244,6 +244,24 @@ describe('legacy migration transaction compatibility', () => {
     ).toBe(source);
   });
 
+  test('uses nullable OID lookups for the optional historical catalog', () => {
+    const source = readFileSync('migrations/0091_drop_v2_reporting_and_rpcs.sql', 'utf8');
+    const executable = getSqlMigrationExecutionContents(
+      '0091_drop_v2_reporting_and_rpcs.sql',
+      source,
+    );
+
+    expect(source).toMatch(/'public\.public_league_trends_catalog'::regclass/);
+    expect(source).toMatch(
+      /'public\.touch_public_league_trends_catalog_updated_at\(\)'::regprocedure/,
+    );
+    expect(executable).toMatch(/to_regclass\('public\.public_league_trends_catalog'\)/);
+    expect(executable).toMatch(
+      /to_regprocedure\('public\.touch_public_league_trends_catalog_updated_at\(\)'\)/,
+    );
+    expect(executable).not.toMatch(/public_league_trends_catalog'::regclass/);
+  });
+
   test('extracts local timeout budgets for a prior protocol round trip', () => {
     expect(
       getSqlMigrationLocalTimeouts(`
