@@ -81,8 +81,13 @@ deploy() {
     restore_stopped_services
     exit 1
   fi
-  if ! compose run --rm -T api bun run ops:assert-queue-quiescence; then
-    log_error "Queue/database work is not quiescent; migration was not started."
+  if ! compose run --rm -T migration bun scripts/assert-queue-quiescence.ts --database-only; then
+    log_error "Database work is not quiescent; migration was not started."
+    restore_stopped_services
+    exit 1
+  fi
+  if ! compose run --rm -T api bun scripts/assert-queue-quiescence.ts --redis-only; then
+    log_error "Queue work is not quiescent; migration was not started."
     restore_stopped_services
     exit 1
   fi
@@ -92,6 +97,10 @@ deploy() {
     exit 1
   fi
   compose run --rm -T migration bun run db:migrate:status
+  if ! compose run --rm -T migration bun run db:provision-runtime-logins; then
+    log_error "Runtime LOGIN provisioning failed; services remain stopped for a forward fix."
+    exit 1
+  fi
   if ! compose run --rm -T migration bun run db:migration-contract; then
     log_error "Migration LOGIN contract failed after migrations."
     exit 1

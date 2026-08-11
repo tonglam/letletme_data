@@ -19,10 +19,10 @@ const EXPECTED_LEDGER_FINGERPRINT =
   '7e73ca4d98ecf3dbdf595eaa214c6ec609a7d538d57157f82f2fffed84842e27';
 
 export const EXPECTED_PLATFORM_SCHEMA_FINGERPRINT =
-  'b1b07b0cd9d788568ee7a11bf3ab6e2370eb4f8f8ec6d254460bd997c0db929a';
+  'c2c62563ff0634f681e20a3d334154e47fe36a22e31d7bd8c41d225f5df9f2b0';
 
 const EXPECTED_PRE_ADOPTION_PLATFORM_SCHEMA_FINGERPRINT =
-  '478f58ba04797aa429c96e30a9cd157eac4683e43c30787bf047c9db0cda266b';
+  '2506130c6f307d9c7d8aeee6e80f0a90ab8d0f5fc68e3b412135ff91bc3a03c4';
 
 export const EXPECTED_PRODUCTION_DATA_FINGERPRINT = [
   '69f4cdb2748dd486',
@@ -42,6 +42,18 @@ type CapabilityMembershipRow = {
   granted_role: string;
   member_role: string;
   admin_option: boolean;
+};
+
+type RuntimeRoleRow = {
+  role_name: string;
+  can_login: boolean;
+  superuser: boolean;
+  create_database: boolean;
+  create_role: boolean;
+  inherit: boolean;
+  replication: boolean;
+  bypass_rls: boolean;
+  role_settings: string[];
 };
 
 export type BaselineAdoptionExpectations = {
@@ -155,6 +167,52 @@ async function assertCapabilityRoleMemberships(client: QueryClient): Promise<voi
           ? unexpected.map((row) => `${row.granted_role}->${row.member_role}`).join(', ')
           : 'none'
       }${missing.length > 0 ? `; missing: ${missing.join(', ')}` : ''}`,
+    );
+  }
+
+  const runtimeRoles = await client<RuntimeRoleRow[]>`
+    SELECT
+      rolname AS role_name,
+      rolcanlogin AS can_login,
+      rolsuper AS superuser,
+      rolcreatedb AS create_database,
+      rolcreaterole AS create_role,
+      rolinherit AS inherit,
+      rolreplication AS replication,
+      rolbypassrls AS bypass_rls,
+      COALESCE(rolconfig, ARRAY[]::text[]) AS role_settings
+    FROM pg_roles
+    WHERE rolname = ANY(${[
+      'letletme_data_runtime',
+      'letletme_graphql_runtime',
+      'letletme_web_runtime',
+    ]}::text[])
+  `;
+  const expectedRuntimeRoles = new Set([
+    'letletme_data_runtime',
+    'letletme_graphql_runtime',
+    'letletme_web_runtime',
+  ]);
+  const unsafeRuntimeRoles = runtimeRoles.filter(
+    (role) =>
+      !role.can_login ||
+      role.superuser ||
+      role.create_database ||
+      role.create_role ||
+      !role.inherit ||
+      role.replication ||
+      role.bypass_rls ||
+      role.role_settings.length > 0,
+  );
+  const missingRuntimeRoles = [...expectedRuntimeRoles].filter(
+    (roleName) => !runtimeRoles.some((role) => role.role_name === roleName),
+  );
+  if (unsafeRuntimeRoles.length > 0 || missingRuntimeRoles.length > 0) {
+    throw new Error(
+      `Required runtime LOGIN roles are missing or unsafe: ${[
+        ...missingRuntimeRoles,
+        ...unsafeRuntimeRoles.map((role) => role.role_name),
+      ].join(', ')}`,
     );
   }
 }

@@ -502,6 +502,27 @@ WITH contract_rows AS (
 
   SELECT
     'boundary'::text,
+    'non_extension_public_types'::text,
+    COALESCE(jsonb_agg(
+      jsonb_build_object('kind', public_type.typtype, 'name', public_type.typname)
+      ORDER BY public_type.typtype, public_type.typname
+    ), '[]'::jsonb)::text
+  FROM pg_type public_type
+  JOIN pg_namespace public_namespace ON public_namespace.oid = public_type.typnamespace
+  WHERE public_namespace.nspname = 'public'
+    AND public_type.typtype IN ('d', 'e')
+    AND NOT EXISTS (
+      SELECT 1
+      FROM pg_depend dependency
+      WHERE dependency.classid = 'pg_type'::regclass
+        AND dependency.objid = public_type.oid
+        AND dependency.deptype = 'e'
+    )
+
+  UNION ALL
+
+  SELECT
+    'boundary'::text,
     'retired_objects'::text,
     jsonb_build_object(
       'drizzleSchema', to_regnamespace('drizzle') IS NOT NULL

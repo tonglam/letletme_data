@@ -70,24 +70,37 @@ async function readDatabaseQuiescenceState(
 }
 
 async function main(): Promise<void> {
-  if (process.argv.length !== 2) throw new Error('Queue quiescence check takes no arguments');
-  const config = getConfig();
-  const databaseUrl = config.DATABASE_URL.trim();
-  const queueConnection = resolveQueueRedisConfig(config);
-  const database = postgres(databaseUrl, { max: 1, prepare: false });
-  const redis = new Redis({
-    ...queueConnection,
-    lazyConnect: true,
-    enableReadyCheck: true,
-    maxRetriesPerRequest: null,
-  });
-  const queues = queueNames.map((name) => new Queue(name, { connection: queueConnection }));
+  const args = process.argv.slice(2);
+  const databaseOnly = args.length === 1 && args[0] === '--database-only';
+  const redisOnly = args.length === 1 && args[0] === '--redis-only';
+  if (args.length > 0 && !databaseOnly && !redisOnly) {
+    throw new Error(`Queue quiescence check does not accept arguments: ${args.join(' ')}`);
+  }
+
+  const databaseUrl = process.env.DATABASE_URL?.trim();
+  if (!redisOnly && !databaseUrl) throw new Error('DATABASE_URL is required');
+  const config = databaseOnly ? null : getConfig();
+  const queueConnection = config ? resolveQueueRedisConfig(config) : null;
+  const database = redisOnly ? null : postgres(databaseUrl as string, { max: 1, prepare: false });
+  const redis = queueConnection
+    ? new Redis({
+        ...queueConnection,
+        lazyConnect: true,
+        enableReadyCheck: true,
+        maxRetriesPerRequest: null,
+      })
+    : null;
+  const queues = queueConnection
+    ? queueNames.map((name) => new Queue(name, { connection: queueConnection }))
+    : [];
 
   try {
-    if (redis.status === 'wait' || redis.status === 'end') await redis.connect();
+    if (redis && (redis.status === 'wait' || redis.status === 'end')) await redis.connect();
     const [databaseState, cascadeKeys, queueCountRows] = await Promise.all([
-      readDatabaseQuiescenceState(database),
-      scan(redis, CASCADE_PATTERN),
+      database
+        ? readDatabaseQuiescenceState(database)
+        : Promise.resolve({ nonTerminalSyncRuns: 0, stagingPublications: 0 }),
+      redis ? scan(redis, CASCADE_PATTERN) : Promise.resolve([]),
       Promise.all(
         queues.map(
           async (queue) => [queue.name, await queue.getJobCounts(...RUNNABLE_JOB_TYPES)] as const,
@@ -104,8 +117,8 @@ async function main(): Promise<void> {
     console.log(JSON.stringify({ status: 'queue_quiescence_passed', ...snapshot }, null, 2));
   } finally {
     await Promise.allSettled(queues.map((queue) => queue.close()));
-    redis.disconnect();
-    await database.end();
+    redis?.disconnect();
+    await database?.end();
   }
 }
 

@@ -40,8 +40,12 @@ describe('production environment preflight', () => {
       'bun scripts/migration-login-contract.ts --preflight',
     );
     const stopServices = workflow.indexOf('docker compose stop -t 45 api worker');
-    const quiescence = workflow.indexOf('bun run ops:assert-queue-quiescence');
+    const databaseQuiescence = workflow.indexOf(
+      'bun scripts/assert-queue-quiescence.ts --database-only',
+    );
+    const redisQuiescence = workflow.indexOf('bun scripts/assert-queue-quiescence.ts --redis-only');
     const migrate = workflow.indexOf('bun run db:migrate');
+    const provision = workflow.indexOf('bun run db:provision-runtime-logins');
     const canonicalContract = workflow.indexOf('bun run db:migration-contract', migrate);
     const publishCore = workflow.indexOf('bun run cache:publish-core -- --execute');
     const replaceServices = workflow.indexOf('docker compose up -d', publishCore);
@@ -49,9 +53,11 @@ describe('production environment preflight', () => {
     expect(preflight).toBeGreaterThan(0);
     expect(identityContract).toBeGreaterThan(preflight);
     expect(stopServices).toBeGreaterThan(identityContract);
-    expect(quiescence).toBeGreaterThan(stopServices);
-    expect(migrate).toBeGreaterThan(quiescence);
-    expect(canonicalContract).toBeGreaterThan(migrate);
+    expect(databaseQuiescence).toBeGreaterThan(stopServices);
+    expect(redisQuiescence).toBeGreaterThan(databaseQuiescence);
+    expect(migrate).toBeGreaterThan(redisQuiescence);
+    expect(provision).toBeGreaterThan(migrate);
+    expect(canonicalContract).toBeGreaterThan(provision);
     expect(publishCore).toBeGreaterThan(canonicalContract);
     expect(replaceServices).toBeGreaterThan(publishCore);
     expect(workflow).toContain('> "$HOME/.letletme-data-previous-image"');
@@ -64,7 +70,10 @@ describe('production environment preflight', () => {
       /if ! compose stop -t 45 api worker; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
     );
     expect(deployScript).toMatch(
-      /if ! compose run --rm -T api bun run ops:assert-queue-quiescence; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
+      /if ! compose run --rm -T migration bun scripts\/assert-queue-quiescence\.ts --database-only; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
+    );
+    expect(deployScript).toMatch(
+      /if ! compose run --rm -T api bun scripts\/assert-queue-quiescence\.ts --redis-only; then[\s\S]*?restore_stopped_services[\s\S]*?exit 1[\s\S]*?fi/,
     );
     expect(deployScript).toMatch(/restore_stopped_services\(\)[\s\S]*?compose start api worker/);
   });
